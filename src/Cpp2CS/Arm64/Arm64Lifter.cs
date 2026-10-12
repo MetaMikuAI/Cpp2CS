@@ -1,0 +1,283 @@
+using System.Buffers.Binary;
+using Cpp2CS.Ir;
+
+namespace Cpp2CS.Arm64;
+
+public static partial class Arm64Lifter
+{
+    public static LiftResult Lift(InstructionOrigin origin)
+    {
+        if (origin.Bytes.Length != 4 || (origin.Address & 3) != 0)
+            return LiftResult.Unsupported("word", "ARM64 instruction requires four bytes and aligned address");
+        var w = BinaryPrimitives.ReadUInt32LittleEndian(origin.Bytes.Span);
+        if ((w & 0x1F000000) == 0x10000000) return PcRelative(new(origin, w, "adr"));
+        if ((w & 0x1F800000) == 0x11000000) return AddImmediate(new(origin, w, "addsub.immediate"));
+        if ((w & 0x1F800000) == 0x12000000) return LogicalImmediate(new(origin, w, "logical.immediate"));
+        if ((w & 0x1F800000) == 0x12800000) return MoveWide(new(origin, w, "move.wide"));
+        if ((w & 0x1F800000) == 0x13000000) return Bitfield(new(origin, w, "bitfield"));
+        if ((w & 0x7FA00000) == 0x13800000) return ExtractRegister(new(origin, w, "extract"));
+        if ((w & 0x1F000000) == 0x0A000000) return LogicalRegister(new(origin, w, "logical.register"));
+        if ((w & 0x1F200000) == 0x0B000000) return AddRegister(new(origin, w, "addsub.shifted"), false);
+        if ((w & 0x1FE00000) == 0x0B200000) return AddRegister(new(origin, w, "addsub.extended"), true);
+        if ((w & 0x1FE0FC00) == 0x1A000000) return AddCarry(new(origin, w, "addsub.carry"));
+        if ((w & 0x3FE00800) == 0x1A800000) return ConditionalSelect(new(origin, w, "conditional.select"));
+        if ((w & 0x3FE00410) == 0x3A400000) return ConditionalCompare(new(origin, w, "conditional.compare"));
+        if ((w & 0x7FE00000) == 0x1AC00000) return VariableShift(new(origin, w, "shift.variable"));
+        if ((w & 0x7FE00000) == 0x5AC00000) return UnaryInteger(new(origin, w, "integer.unary"));
+        if ((w & 0x7FE00000) == 0x1B000000) return MultiplyAdd(new(origin, w, "multiply.add"));
+        if ((w & 0x7C000000) == 0x14000000) return DirectBranch(new(origin, w, "branch.direct"));
+        if ((w & 0xFF000010) == 0x54000000) return ConditionalBranch(new(origin, w, "branch.condition"));
+        if ((w & 0x7E000000) == 0x34000000) return CompareBranch(new(origin, w, "branch.zero"));
+        if ((w & 0x7E000000) == 0x36000000) return TestBranch(new(origin, w, "branch.bit"));
+        if ((w & 0xFFFFFC1F) is 0xD61F0000 or 0xD63F0000 or 0xD65F0000)
+            return RegisterBranch(new(origin, w, "branch.register"));
+        if ((w & 0x3B000000) == 0x39000000) return SingleMemory(new(origin, w, "memory.unsigned"), 0);
+        if ((w & 0x3B200000) == 0x38000000) return SingleMemory(new(origin, w, "memory.unscaled"), 1);
+        if ((w & 0x3B200C00) == 0x38200800) return SingleMemory(new(origin, w, "memory.register"), 2);
+        if ((w & 0x3A000000) == 0x28000000) return PairMemory(new(origin, w, "memory.pair"));
+        if ((w & 0x3B000000) == 0x18000000) return LiteralMemory(new(origin, w, "memory.literal"));
+        if ((w & 0xFFFFFFE0) is 0xD53B4200 or 0xD51B4200) return NzcvTransfer(new(origin, w, "nzcv.transfer"));
+        if (w == 0xD503201F) return new Context(origin, w, "nop").Done();
+        return LiftResult.Unsupported($"word.{w:x8}", "Encoding has no implemented semantic rule");
+    }
+
+    private sealed class Context(InstructionOrigin origin, uint word, string form)
+    {
+        public readonly InstructionOrigin Origin = origin;
+        public readonly uint Word = word;
+        public readonly string Form = form;
+        public readonly MirBuilder B = new(Architecture.Arm64, origin, "arm64." + form);
+        public int Width => (Word & 0x80000000) != 0 ? 64 : 32;
+        public int Rd => Field(0, 5);
+        public int Rn => Field(5, 5);
+        public int Rm => Field(16, 5);
+        public int Field(int low, int bits) => (int)((Word >> low) & ((1u << bits) - 1));
+        public bool Bit(int bit) => ((Word >> bit) & 1) != 0;
+        public Value C(int width, ulong value) => B.Const(width, value);
+        public Value Read(int register, int width, bool sp = false)
+        {
+            if (register == 31 && !sp) return C(width, 0);
+            var value = B.Read(register == 31 ? "sp" : $"x{register}", 64);
+            return width == 64 ? value : B.Trunc(value, width);
+        }
+        public void Write(int register, Value value, bool sp = false)
+        {
+            if (register == 31 && !sp) return;
+            B.Write(register == 31 ? "sp" : $"x{register}", value.Width == 64 ? value : B.Zext(value, 64));
+        }
+        public Value ReadVector(int register, int width)
+        {
+            var value = B.Read($"v{register}", 128);
+            return width == 128 ? value : B.Trunc(value, width);
+        }
+        public void WriteVector(int register, Value value) => B.Write($"v{register}", value.Width == 128 ? value : B.Zext(value, 128));
+        public Value Flag(string flag) => B.Read(flag, 1);
+        public Value Address(long delta) => C(64, unchecked(Origin.Address + (ulong)delta));
+        public LiftResult Done() => LiftResult.Supported(B.Finish(MirExit.Next(unchecked(Origin.Address + 4))));
+        public LiftResult End(MirExit exit) => LiftResult.Supported(B.Finish(exit));
+        public LiftResult Reject(string reason) => LiftResult.Unsupported(Form, reason);
+        public void Nz(Value value)
+        {
+            B.Write("n", B.Extract(value, value.Width - 1, 1));
+            B.Write("z", B.Eq(value, C(value.Width, 0)));
+        }
+        public Value Add(Value left, Value right, bool subtract, Value carry, bool flags)
+        {
+            var sum = Arithmetic.AddWithCarry(B, left, subtract ? B.Not(right) : right, carry);
+            if (flags)
+            {
+                Nz(sum.Result);
+                B.Write("c", sum.Carry);
+                B.Write("v", sum.Overflow);
+            }
+            return sum.Result;
+        }
+        public Value Condition(int condition)
+        {
+            if (condition >= 14) return C(1, 1);
+            Value value = (condition >> 1) switch
+            {
+                0 => Flag("z"),
+                1 => Flag("c"),
+                2 => Flag("n"),
+                3 => Flag("v"),
+                4 => B.And(Flag("c"), B.BoolNot(Flag("z"))),
+                5 => B.Eq(Flag("n"), Flag("v")),
+                6 => B.And(B.BoolNot(Flag("z")), B.Eq(Flag("n"), Flag("v"))),
+                _ => throw new InvalidOperationException("Condition code out of range")
+            };
+            return (condition & 1) != 0 ? B.BoolNot(value) : value;
+        }
+        public Value Shift(Value value, int kind, int amount)
+        {
+            if (amount == 0) return value;
+            var count = C(value.Width, (ulong)amount);
+            return kind switch
+            {
+                0 => B.Shl(value, count),
+                1 => B.Shr(value, count),
+                2 => B.Sar(value, count),
+                3 => B.Or(B.Shr(value, count), B.Shl(value, C(value.Width, (ulong)(value.Width - amount)))),
+                _ => throw new InvalidOperationException("Shift kind out of range")
+            };
+        }
+    }
+
+    private static long SignExtend(ulong value, int bits) => (long)(value << (64 - bits)) >> (64 - bits);
+    private static ulong Mask(int bits) => bits == 64 ? ulong.MaxValue : (1UL << bits) - 1;
+
+    private static LiftResult PcRelative(Context c)
+    {
+        var immediate = SignExtend(((ulong)c.Field(5, 19) << 2) | (uint)c.Field(29, 2), 21);
+        var address = c.Bit(31)
+            ? unchecked((c.Origin.Address & ~0xFFFUL) + (ulong)(immediate << 12))
+            : unchecked(c.Origin.Address + (ulong)immediate);
+        c.Write(c.Rd, c.C(64, address));
+        return c.Done();
+    }
+
+    private static LiftResult AddImmediate(Context c)
+    {
+        var left = c.Read(c.Rn, c.Width, true);
+        var right = c.C(c.Width, (ulong)c.Field(10, 12) << (c.Bit(22) ? 12 : 0));
+        var result = c.Add(left, right, c.Bit(30), c.C(1, c.Bit(30) ? 1UL : 0UL), c.Bit(29));
+        c.Write(c.Rd, result, !c.Bit(29));
+        return c.Done();
+    }
+
+    private static LiftResult AddRegister(Context c, bool extended)
+    {
+        var shift = c.Field(10, extended ? 3 : 6);
+        var kind = c.Field(22, 2);
+        if (extended && (shift > 4 || (c.Width == 32 && (c.Field(13, 3) & 3) == 3)))
+            return c.Reject("Unsupported or reserved extended-register form");
+        if (!extended && (kind == 3 || shift >= c.Width)) return c.Reject("Reserved shifted-register encoding");
+        var left = c.Read(c.Rn, c.Width, extended);
+        Value right;
+        if (extended)
+        {
+            var option = c.Field(13, 3);
+            var sourceWidth = 8 << (option & 3);
+            right = c.Read(c.Rm, sourceWidth);
+            right = sourceWidth == c.Width ? right : ((option & 4) != 0 ? c.B.Sext(right, c.Width) : c.B.Zext(right, c.Width));
+            right = c.Shift(right, 0, shift);
+        }
+        else right = c.Shift(c.Read(c.Rm, c.Width), kind, shift);
+        var result = c.Add(left, right, c.Bit(30), c.C(1, c.Bit(30) ? 1UL : 0UL), c.Bit(29));
+        c.Write(c.Rd, result, extended && !c.Bit(29));
+        return c.Done();
+    }
+
+    private static LiftResult AddCarry(Context c)
+    {
+        var left = c.Read(c.Rn, c.Width);
+        var right = c.Read(c.Rm, c.Width);
+        var carry = c.Flag("c");
+        c.Write(c.Rd, c.Add(left, right, c.Bit(30), carry, c.Bit(29)));
+        return c.Done();
+    }
+
+    private static LiftResult MoveWide(Context c)
+    {
+        var opcode = c.Field(29, 2);
+        var shift = c.Field(21, 2) * 16;
+        if (opcode == 1 || shift >= c.Width) return c.Reject("Reserved move-wide encoding");
+        var immediate = (ulong)c.Field(5, 16) << shift;
+        Value result;
+        if (opcode == 0) result = c.C(c.Width, ~immediate & Mask(c.Width));
+        else if (opcode == 2) result = c.C(c.Width, immediate);
+        else result = c.B.Or(c.B.And(c.Read(c.Rd, c.Width), c.C(c.Width, ~(0xFFFFUL << shift) & Mask(c.Width))), c.C(c.Width, immediate));
+        c.Write(c.Rd, result);
+        return c.Done();
+    }
+
+    private static LiftResult LogicalRegister(Context c)
+    {
+        var amount = c.Field(10, 6);
+        if (amount >= c.Width) return c.Reject("Reserved 32-bit shift amount");
+        var left = c.Read(c.Rn, c.Width);
+        var right = c.Shift(c.Read(c.Rm, c.Width), c.Field(22, 2), amount);
+        if (c.Bit(21)) right = c.B.Not(right);
+        return Logical(c, left, right);
+    }
+
+    private static LiftResult LogicalImmediate(Context c)
+    {
+        if (!DecodeMasks(c, true, out var writeMask, out _)) return c.Reject("Reserved logical immediate bitmask");
+        return Logical(c, c.Read(c.Rn, c.Width), c.C(c.Width, writeMask));
+    }
+
+    private static LiftResult Logical(Context c, Value left, Value right)
+    {
+        var opcode = c.Field(29, 2);
+        var result = opcode switch { 0 or 3 => c.B.And(left, right), 1 => c.B.Or(left, right), 2 => c.B.Xor(left, right), _ => throw new InvalidOperationException() };
+        c.Write(c.Rd, result, c.Form == "logical.immediate" && opcode != 3);
+        if (opcode == 3)
+        {
+            c.Nz(result);
+            c.B.Write("c", c.C(1, 0));
+            c.B.Write("v", c.C(1, 0));
+        }
+        return c.Done();
+    }
+
+    private static bool DecodeMasks(Context c, bool immediate, out ulong writeMask, out ulong topMask)
+    {
+        writeMask = topMask = 0;
+        var n = c.Field(22, 1);
+        var s = c.Field(10, 6);
+        var r = c.Field(16, 6);
+        if (c.Width == 32 && n != 0) return false;
+        var pattern = (n << 6) | ((~s) & 63);
+        var length = 6;
+        while (length >= 0 && (pattern & (1 << length)) == 0) length--;
+        if (length < 1) return false;
+        var levels = (1 << length) - 1;
+        if (immediate && (s & levels) == levels) return false;
+        s &= levels;
+        r &= levels;
+        var size = 1 << length;
+        var element = Mask(s + 1);
+        var rotated = r == 0 ? element : ((element >> r) | (element << (size - r))) & Mask(size);
+        var top = Mask(((s - r) & levels) + 1);
+        for (var offset = 0; offset < c.Width; offset += size)
+        {
+            writeMask |= rotated << offset;
+            topMask |= top << offset;
+        }
+        return true;
+    }
+
+    private static LiftResult Bitfield(Context c)
+    {
+        var opcode = c.Field(29, 2);
+        if (opcode == 3 || c.Field(22, 1) != (c.Width == 64 ? 1 : 0) || c.Field(10, 6) >= c.Width || c.Field(16, 6) >= c.Width)
+            return c.Reject("Reserved bitfield encoding");
+        if (!DecodeMasks(c, false, out var writeMask, out var topMask)) return c.Reject("Invalid bitfield masks");
+        var source = c.Read(c.Rn, c.Width);
+        var rotated = c.Shift(source, 3, c.Field(16, 6));
+        var bottom = c.B.And(rotated, c.C(c.Width, writeMask));
+        Value top;
+        if (opcode == 1)
+        {
+            var old = c.Read(c.Rd, c.Width);
+            bottom = c.B.Or(c.B.And(old, c.C(c.Width, ~writeMask & Mask(c.Width))), bottom);
+            top = old;
+        }
+        else if (opcode == 0) top = c.B.Sext(c.B.Extract(source, c.Field(10, 6), 1), c.Width);
+        else top = c.C(c.Width, 0);
+        c.Write(c.Rd, c.B.Or(c.B.And(top, c.C(c.Width, ~topMask & Mask(c.Width))), c.B.And(bottom, c.C(c.Width, topMask))));
+        return c.Done();
+    }
+
+    private static LiftResult ExtractRegister(Context c)
+    {
+        var amount = c.Field(10, 6);
+        if (c.Field(22, 1) != (c.Width == 64 ? 1 : 0) || amount >= c.Width) return c.Reject("Reserved extract encoding");
+        var low = c.Read(c.Rm, c.Width);
+        var high = c.Read(c.Rn, c.Width);
+        var result = amount == 0 ? low : c.B.Or(c.B.Shr(low, c.C(c.Width, (ulong)amount)), c.B.Shl(high, c.C(c.Width, (ulong)(c.Width - amount))));
+        c.Write(c.Rd, result);
+        return c.Done();
+    }
+}

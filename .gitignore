@@ -1,0 +1,6 @@
+**/bin/
+**/obj/
+artifacts/
+__pycache__/
+research/decoder-fixtures/
+research/entry-fixtures/
