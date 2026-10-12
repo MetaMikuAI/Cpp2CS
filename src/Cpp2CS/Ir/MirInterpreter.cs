@@ -10,7 +10,8 @@ public sealed class MachineState
     public BigInteger ReadSlot(string slot) => Slots[slot];
 }
 
-public sealed record ExecutionResult(string Outcome, ulong? NextAddress, int? FaultOperation, int Choices);
+public sealed record ExecutionResult(string Outcome, ulong? NextAddress, int? FaultOperation, int Choices,
+    string? Event = null, ulong? ResumeAddress = null);
 
 // 用于具体验证；Undefined 在本次执行取零，不能据此作静态常量传播。
 public static class MirInterpreter
@@ -56,6 +57,17 @@ public static class MirInterpreter
                 case OpCode.Slt: value = Signed(a, op.Inputs[0].Width) < Signed(b, op.Inputs[1].Width) ? 1 : 0; break;
                 case OpCode.Select: value = a != 0 ? b : values[op.Inputs[2].Id]; break;
                 case OpCode.Undefined: choices++; break;
+                case OpCode.Float:
+                {
+                    var f = op.Floating!;
+                    var floating = FloatEvaluator.Evaluate(ir.Architecture, f, a, b, (uint)values[op.Inputs[2].Id]);
+                    value = floating.Bits | (new BigInteger(floating.Flags) << f.ResultWidth) |
+                        (new BigInteger(floating.TrapFlags) << (f.ResultWidth + 6));
+                    break;
+                }
+                case OpCode.Guard:
+                    if (a.IsZero) return new("UnmodeledFaultStop", null, index, choices, op.Detail);
+                    break;
                 case OpCode.Load:
                 case OpCode.Store:
                 {
@@ -84,6 +96,7 @@ public static class MirInterpreter
             ExitKind.Branch => (ulong)values[(values[exit.Condition!.Value.Id] != 0 ? exit.Target : exit.Alternative)!.Value.Id],
             _ => (ulong?)null
         };
-        return new(exit.Kind == ExitKind.Trap ? "Trap" : "Normal", next, null, choices);
+        return new(exit.Kind == ExitKind.Trap ? "Trap" : "Normal", next, null, choices,
+            exit.Reason, exit.ResumeAddress);
     }
 }

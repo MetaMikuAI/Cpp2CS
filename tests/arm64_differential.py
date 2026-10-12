@@ -123,6 +123,145 @@ def corpus(rng):
         word = base | (rng.getrandbits(32) & variable_mask)
         yield form, word, False
     yield from simd_corpus()
+    yield from integer_simd_corpus()
+    yield from floating_corpus()
+
+
+def integer_simd_corpus():
+    for q, size in itertools.product(range(2), range(4)):
+        prefix = (q << 30) | (size << 22) | (1 << 5)
+        if size < 3:
+            for rd in (0, 1):
+                yield "simd.narrow", 0x0E212800 | prefix | rd, False
+        for base, max_size in ((0x0E200800, 3), (0x2E200800, 2), (0x0E201800, 1)):
+            if size < max_size:
+                yield "simd.reverse", base | prefix, False
+        if size == 3 and not q:
+            continue
+        for base, rd in itertools.product((0x0E001800, 0x0E005800, 0x0E002800, 0x0E006800, 0x0E003800, 0x0E007800), (0, 1, 2)):
+            yield "simd.permute", base | prefix | (2 << 16) | rd, False
+        for base, unsigned, rd in itertools.product((0x0E203400, 0x0E203C00, 0x0E208C00, 0x0E204400, 0x0E206400, 0x0E206C00), range(2), (0, 1, 2)):
+            if size == 3 and base in (0x0E206400, 0x0E206C00):
+                continue
+            yield "simd.integer-binary", base | prefix | (unsigned << 29) | (2 << 16) | rd, False
+        if size < 3:
+            yield "simd.integer-binary", 0x0E209C00 | prefix | (2 << 16), False
+        for base, rd in itertools.product((0x0E208800, 0x2E208800, 0x0E209800, 0x2E209800, 0x0E20A800, 0x0E20B800, 0x2E20B800), (0, 1)):
+            yield "simd.integer-unary", base | prefix | rd, False
+        yield "simd.add-reduce", 0x0E20BC00 | prefix | (2 << 16), False
+        if size < 2 or size == 2 and q:
+            yield "simd.add-reduce", 0x0E31B800 | prefix, False
+    for base in (0x5EE03400, 0x7EE03400, 0x5EE03C00, 0x7EE03C00, 0x5EE08C00, 0x7EE08C00, 0x5EE04400, 0x7EE04400):
+        yield "simd.integer-binary", base | (2 << 16) | (1 << 5), False
+    for base in (0x5EE08800, 0x7EE08800, 0x5EE09800, 0x7EE09800, 0x5EE0A800, 0x5EE0B800, 0x7EE0B800):
+        yield "simd.integer-unary", base | (1 << 5), False
+    yield "simd.add-reduce", 0x5EF1B820, False
+    for q, size in itertools.product(range(2), range(4)):
+        width = 8 << size
+        if q or size < 3:
+            for shift in (0, 1, width - 1):
+                yield "simd.shift-immediate", 0x0F005420 | (q << 30) | ((width + shift) << 16), False
+            for base, shift in itertools.product((0x0F000420, 0x2F000420), (1, width)):
+                yield "simd.shift-immediate", base | (q << 30) | ((width * 2 - shift) << 16), False
+        if size < 3:
+            for base, shift in itertools.product((0x0F00A420, 0x2F00A420), (0, width - 1)):
+                yield "simd.shift-immediate", base | (q << 30) | ((width + shift) << 16), False
+            for shift in (1, width):
+                yield "simd.shift-immediate", 0x0F008420 | (q << 30) | ((width * 2 - shift) << 16), False
+    for base, immediate in itertools.product((0x5F005420, 0x5F000420, 0x7F000420), (64, 65, 127)):
+        yield "simd.shift-immediate", base | (immediate << 16), False
+    for q, size, unsigned, subtract, rd in itertools.product(range(2), range(3), range(2), range(2), (0, 1, 2)):
+        yield "simd.add-wide", 0x0E221020 | (q << 30) | (unsigned << 29) | (size << 22) | (subtract << 13) | rd, False
+    for q, size in itertools.product(range(2), (1, 2)):
+        for index, rm in itertools.product(range(8 if size == 1 else 4), (0, 15) if size == 1 else (0, 15, 16, 31)):
+            selector = (((index >> 2) & 1) << 11) | (((index >> 1) & 1) << 21) | ((index & 1) << 20) if size == 1 else (((index >> 1) & 1) << 11) | ((index & 1) << 21)
+            yield "simd.multiply-element", 0x0F008021 | (q << 30) | (size << 22) | (rm << 16) | selector, False
+
+
+def floating_corpus():
+    for encoding in (0xD53B4400, 0xD51B4400, 0xD53B4420, 0xD51B4420, 0xD53BD040, 0xD51BD040):
+        for register in (0, 1, 31):
+            yield "system.register", encoding | register, False
+    for double in (0, 1):
+        prefix = 0x1E200000 | (double << 22) | (1 << 5)
+        for opcode in (1, 2, 3, 4 if double else 5, 8, 9, 10, 11, 12, 14, 15):
+            for rd in (0, 1, 31):
+                yield "fp.unary", prefix | (opcode << 15) | 0x4000 | rd, False
+        for opcode in range(9):
+            for rd in (0, 1, 2, 31):
+                yield "fp.binary", prefix | (2 << 16) | (opcode << 12) | 0x800 | rd, False
+        for condition in range(16):
+            for rd in (0, 1, 2):
+                yield "fp.select", prefix | (2 << 16) | (condition << 12) | 0xC00 | rd, False
+            for signal in (0, 1):
+                for fallback in (0, 6, 8, 15):
+                    yield "fp.conditional-compare", prefix | (2 << 16) | (condition << 12) | 0x400 | (signal << 4) | fallback, False
+        for signal, zero, rm in itertools.product(range(2), range(2), (2, 31)):
+            yield "fp.compare", prefix | (rm << 16) | 0x2000 | (signal << 4) | (zero << 3), False
+        for sf in (0, 1):
+            for opcode in (0, 1, 2, 3, 4, 5, 8, 9, 16, 17, 24, 25):
+                for rd in (0, 1, 31):
+                    yield "fp.integer-convert", prefix | (sf << 31) | (opcode << 16) | rd, False
+    for q, double, negate in itertools.product(range(2), range(2), range(2)):
+        if double and not q:
+            continue
+        for rd in (0, 1, 31):
+            yield "fp.vector-sign", 0x0EA0F820 | (q << 30) | (double << 22) | (negate << 29) | rd, False
+    for scalar, q, double, unsigned in itertools.product(range(2), range(2), range(2), range(2)):
+        if (scalar or double) and not q:
+            continue
+        for base in (0x0E21D800, 0x0E21A800, 0x0E21B800, 0x0EA1A800, 0x0EA1B800, 0x0E21C800):
+            for rd in (0, 1, 31):
+                yield "fp.vector-convert", base | (q << 30) | (unsigned << 29) | (scalar << 28) | (double << 22) | (1 << 5) | rd, False
+    for q, double in itertools.product(range(2), range(2)):
+        if double and not q:
+            continue
+        for base in (0x0E20D400, 0x0EA0D400, 0x2E20DC00, 0x2E20FC00, 0x0E20F400, 0x0EA0F400, 0x0E20C400, 0x0EA0C400, 0x2EA0D400, 0x2E20D400):
+            for rd in (0, 1, 2):
+                yield "fp.vector-binary", base | (q << 30) | (double << 22) | (2 << 16) | (1 << 5) | rd, False
+    for double in (0, 1):
+        for rd in (0, 1, 2):
+            yield "fp.vector-binary", 0x7EA0D420 | (double << 22) | (2 << 16) | rd, False
+            yield "fp.vector-binary", 0x7E30D820 | (double << 22) | rd, False
+    for scalar, q, double in itertools.product(range(2), range(2), range(2)):
+        if (scalar or double) and not q:
+            continue
+        for base in (0x0E20E400, 0x2E20E400, 0x2EA0E400):
+            for rd in (0, 1, 2):
+                yield "fp.vector-compare", base | (q << 30) | (scalar << 28) | (double << 22) | (2 << 16) | (1 << 5) | rd, False
+        for base in (0x0EA0D800, 0x2EA0C800, 0x0EA0C800, 0x2EA0D800, 0x0EA0E800):
+            for rd in (0, 1, 2):
+                yield "fp.vector-compare-zero", base | (q << 30) | (scalar << 28) | (double << 22) | (1 << 5) | rd, False
+    for q, base, rd in itertools.product(range(2), (0x0E617800, 0x0E616800), (0, 1, 31)):
+        yield "fp.vector-precision", base | (q << 30) | (1 << 5) | rd, False
+    for scalar, q, double in itertools.product(range(2), range(2), range(2)):
+        if (scalar or double) and not q:
+            continue
+        for index, rm, rd in itertools.product(range(2 if double else 4), (0, 1, 16, 31), (0, 1)):
+            selector = ((index & 1) << 11) if double else (((index >> 1) & 1) << 11) | ((index & 1) << 21)
+            yield "fp.multiply-element", 0x0F809020 | (q << 30) | (scalar << 28) | (double << 22) | (rm << 16) | selector | rd, False
+    for q, double in itertools.product(range(2), range(2)):
+        if double and not q:
+            continue
+        for base, rd in itertools.product((0x2EA1F800, 0x0E218800, 0x0EA18800, 0x0E219800, 0x0EA19800, 0x2E218800, 0x2E219800, 0x2EA19800), (0, 1, 31)):
+            yield "fp.vector-unary", base | (q << 30) | (double << 22) | (1 << 5) | rd, False
+
+
+def floating_edges(width):
+    if width == 32:
+        return (0, 0x80000000, 0x3F800000, 0xBF800000, 0x3FC00000, 0xBFC00000,
+                1, 0x80000001, 0x007FFFFF, 0x00800000, 0x7F7FFFFF, 0xFF7FFFFF,
+                0x7F800000, 0xFF800000, 0x7FC12345, 0x7F812345, 0xFFC12345,
+                0x4F000000, 0xCF000000, 0x5F000000, 0xDF000000, 0x3F000001,
+                0x33800000, 0x3F7FFFFF, 0x3F800001, 0x00800001, 0x40000000)
+    return (0, 0x8000000000000000, 0x3FF0000000000000, 0xBFF0000000000000,
+            0x3FF8000000000000, 0xBFF8000000000000, 1, 0x8000000000000001,
+            0x000FFFFFFFFFFFFF, 0x0010000000000000, 0x7FEFFFFFFFFFFFFF, 0xFFEFFFFFFFFFFFFF,
+            0x7FF0000000000000, 0xFFF0000000000000, 0x7FF8123456789ABC, 0x7FF0123456789ABC,
+            0xFFF8123456789ABC, 0x41E0000000000000, 0xC1E0000000000000,
+            0x43E0000000000000, 0xC3E0000000000000, 0x3FE0000000000001,
+            0x3CA0000000000000, 0x3FEFFFFFFFFFFFFF, 0x3FF0000000000001,
+            0x0010000000000001, 0x4000000000000000)
 
 
 def simd_corpus():
@@ -208,9 +347,21 @@ def classification_boundaries():
         yield "simd-immediate-fields", 0x0F050540 | (q << 30) | (op << 29) | (o2 << 11) | (cmode << 12)
     for sf, op, ra, subtract in itertools.product(range(2), range(8), range(32), range(2)):
         yield "multiply-fields", 0x1B020020 | (sf << 31) | (op << 21) | (ra << 10) | (subtract << 15)
+    for ftype, opcode in itertools.product(range(4), range(64)):
+        yield "floating-unary-fields", 0x1E204020 | (ftype << 22) | (opcode << 15)
+    for ftype, opcode, extra in itertools.product(range(4), range(16), range(4)):
+        yield "floating-binary-fields", 0x1E220020 | (ftype << 22) | (opcode << 12) | (extra << 10)
+    for ftype, zero, signal, rm in itertools.product(range(4), range(2), range(2), range(32)):
+        yield "floating-compare-fields", 0x1E202020 | (ftype << 22) | (rm << 16) | (zero << 3) | (signal << 4)
+    for q, scalar, u, size, h, l, m, rm, opcode in itertools.product(range(2), range(2), range(2), range(4), range(2), range(2), range(2), range(16), (8, 9)):
+        yield "simd-indexed-fields", 0x0F000020 | (q << 30) | (u << 29) | (scalar << 28) | (size << 22) | (l << 21) | (m << 20) | (rm << 16) | (opcode << 12) | (h << 11)
+    for q, scalar, u, size, rm, opcode in itertools.product(range(2), range(2), range(2), range(4), (0, 1, 17), range(64)):
+        yield "simd-unary-fields", 0x0E200020 | (q << 30) | (u << 29) | (scalar << 28) | (size << 22) | (rm << 16) | (opcode << 10)
+    for q, scalar, u, imm, opcode in itertools.product(range(2), range(2), range(2), range(128), (0, 10, 16, 20)):
+        yield "simd-shift-fields", 0x0F000420 | (q << 30) | (u << 29) | (scalar << 28) | (imm << 16) | (opcode << 11)
     seeds = set()
     seed_counts = collections.Counter()
-    for family, word, _ in simd_corpus():
+    for family, word, _ in itertools.chain(simd_corpus(), integer_simd_corpus(), floating_corpus()):
         if seed_counts[family] < 8:
             seeds.add(word)
             seed_counts[family] += 1
@@ -265,13 +416,13 @@ def main():
         decoded = list(decoder.disasm(code, CODE))
         require(len(decoded) == 1, f"Generated fixture is not decoded: {family} {word:08x}")
         instruction = decoded[0]
-        condition_family = family in ("conditional.select", "conditional.compare", "branch.condition", "nzcv.transfer")
-        variations = range(16) if condition_family else range(10 if family.startswith("multiply.") or family == "integer.divide" else 8 if family == "addsub.carry" else 1 if family in ("simd.immediate", "fmov.immediate") else 4 if not memory_case else 2)
+        condition_family = family in ("conditional.select", "conditional.compare", "branch.condition", "nzcv.transfer", "fp.select", "fp.conditional-compare")
+        variations = range(64) if family.startswith("fp.") and family not in ("fp.select", "fp.vector-sign") else range(16) if condition_family else range(12) if family == "simd.integer-binary" else range(10 if family.startswith("multiply.") or family == "integer.divide" else 8 if family == "addsub.carry" else 1 if family in ("simd.immediate", "fmov.immediate") else 4 if not memory_case else 2)
         for variation in variations:
             slots = registers()
             slots["x1"] = edges[(case_index + variation) % len(edges)]
             slots["x2"] = edges[(case_index * 3 + variation * 5) % len(edges)]
-            nzcv = variation if condition_family else (0 if variation % 2 == 0 else 15)
+            nzcv = variation & 15 if condition_family else (0 if variation % 2 == 0 else 15)
             if family == "addsub.carry":
                 width = 64 if word >> 31 else 32
                 carry_edges = ((0, 0, 0), (0, (1 << width) - 1, 0), (1 << (width - 1), (1 << (width - 1)) - 1, 0), ((1 << width) - 1, 0, 1), ((1 << (width - 1)) - 1, 0, 1), (1 << (width - 1), 0, 0))
@@ -296,6 +447,35 @@ def main():
                     slots["v2"] = 0x01010101010101010101010101010101
                 slots["fpcr"] = 0x03400000
                 slots["fpsr"] = 0x0800009F
+            if family == "simd.integer-binary" and (word >> 10) & 63 == 17:
+                width = 8 << ((word >> 22) & 3)
+                shifts = (0, 1, -1, width - 1, width, -width, -width - 1, 127, -128, 1, -1, 0)
+                count = (rng.getrandbits(width) & ~255) | (shifts[variation] & 255)
+                value = 1 << (width - 1) if variation & 1 else (1 << width) - 1
+                slots["v1"] = sum(value << offset for offset in range(0, 128, width))
+                slots["v2"] = sum(count << offset for offset in range(0, 128, width))
+            if family == "simd.integer-unary" and variation >= 2:
+                width = 8 << ((word >> 22) & 3)
+                slots["v1"] = 0 if variation == 2 else sum((1 << (width - 1)) << offset for offset in range(0, 128, width))
+            if family.startswith("fp."):
+                width = 64 if word & (1 << 22) else 32
+                if family == "fp.vector-precision" and word & (1 << 12):
+                    width = 32
+                fp_edges = floating_edges(width)
+                a = fp_edges[variation % len(fp_edges)] if variation < 54 else rng.getrandbits(width)
+                b = fp_edges[(variation * 7 + 2) % len(fp_edges)] if variation < 54 else rng.getrandbits(width)
+                mask = (1 << width) - 1
+                slots["v1"] = (slots["v1"] & ~mask) | a
+                slots["v2"] = (slots["v2"] & ~mask) | b
+                slots["fpcr"] = ((variation & 3) << 22) | (((variation >> 2) & 1) << 24) | (((variation >> 3) & 1) << 25)
+                slots["fpsr"] = (0, 0x08000000, 0x0800009F, 0)[variation & 3]
+            if family == "system.register":
+                slots["fpcr"] = (0, 0x03400000, 0x07C00000, 0x00400000)[variation]
+                slots["fpsr"] = (0, 0x08000000, 0x0800009F, 0x00000081)[variation]
+                system = word & 0xFFDFFFE0
+                value = slots["fpcr"] if system == 0xD51B4400 else slots["fpsr"] if system == 0xD51B4420 else 0x8765432112345678
+                if word & 31 != 31:
+                    slots[f"x{word & 31}"] = value
             for i, flag in enumerate(("n", "z", "c", "v")):
                 slots[flag] = (nzcv >> (3 - i)) & 1
             if family == "branch.register":
@@ -315,6 +495,7 @@ def main():
                 machine.reg_write(getattr(arm, f"UC_ARM64_REG_X{i}"), slots[f"x{i}"])
             for i in range(32):
                 machine.reg_write(getattr(arm, f"UC_ARM64_REG_Q{i}"), slots[f"v{i}"])
+            machine.reg_write(arm.UC_ARM64_REG_TPIDR_EL0, slots["tpidr_el0"])
             machine.reg_write(arm.UC_ARM64_REG_SP, slots["sp"])
             machine.reg_write(arm.UC_ARM64_REG_NZCV, nzcv << 28)
             machine.reg_write(arm.UC_ARM64_REG_FPCR, slots["fpcr"])
@@ -337,6 +518,7 @@ def main():
             expected["sp"] = machine.reg_read(arm.UC_ARM64_REG_SP)
             expected["fpcr"] = machine.reg_read(arm.UC_ARM64_REG_FPCR)
             expected["fpsr"] = machine.reg_read(arm.UC_ARM64_REG_FPSR)
+            expected["tpidr_el0"] = machine.reg_read(arm.UC_ARM64_REG_TPIDR_EL0)
             flags = machine.reg_read(arm.UC_ARM64_REG_NZCV) >> 28
             for i, flag in enumerate(("n", "z", "c", "v")):
                 expected[flag] = (flags >> (3 - i)) & 1
@@ -359,6 +541,46 @@ def main():
             if roundtrip:
                 roundtrips.add(family)
 
+    contract_cases = 0
+    # Unicorn does not implement the selected profile's FP trap enables and RES0 masks.
+    for word, slot, mask in ((0xD51B4400, "fpcr", 0x07C09F00), (0xD51B4420, "fpsr", 0x0800009F)):
+        slots = registers()
+        slots["x0"] = (1 << 64) - 1
+        result = request({"arch": "arm64", "bytes": word.to_bytes(4, "little").hex(), "address": hex(CODE), "slots": {key: hex(value) for key, value in slots.items()}, "roundtrip": True})
+        require(result["Outcome"] == "Normal" and int(result["slots"][slot], 16) == mask, f"System register profile mask failed: {slot}")
+        contract_cases += 1
+    for word, a, b, control in (
+        (0x1E221820, 0x3F800000, 0, 1 << 9),  # divide by zero
+        (0x1E220820, 0x7F7FFFFF, 0x7F7FFFFF, 1 << 10),  # overflow
+        (0x1E221820, 0x3F800000, 0x40400000, 1 << 12),  # inexact
+        (0x1E222820, 1, 0x3F800000, (1 << 24) | (1 << 15)),  # flushed input
+        (0x1E222820, 0x7F800001, 0x3F800000, 1 << 8),  # signaling NaN
+        (0x0E22D420, (0x7F800001 << 32) | 0x3F800000, (0x3F800000 << 32) | 0x3F800000, 1 << 8),
+    ):
+        slots = registers()
+        slots.update(v1=a, v2=b, fpcr=control, fpsr=0x08000000)
+        result = request({"arch": "arm64", "bytes": word.to_bytes(4, "little").hex(), "address": hex(CODE), "slots": {key: hex(value) for key, value in slots.items()}, "roundtrip": True})
+        require(result["Outcome"] == "UnmodeledFaultStop", f"Enabled FP exception did not stop: {word:x}")
+        require({key: int(value, 16) for key, value in result["slots"].items()} == slots, f"FP exception changed state before stop: {word:x}")
+        contract_cases += 1
+    slots = registers()
+    slots.update(v1=0x00800000, v2=0x3F000000, fpcr=(1 << 24) | (1 << 11), fpsr=0)
+    result = request({"arch": "arm64", "bytes": (0x1E220820).to_bytes(4, "little").hex(), "address": hex(CODE), "slots": {key: hex(value) for key, value in slots.items()}, "roundtrip": True})
+    require(result["Outcome"] == "Normal" and int(result["slots"]["v0"], 16) == 0 and int(result["slots"]["fpsr"], 16) == 8, "ARM FZ underflow must accumulate UFC without UFE trap")
+    contract_cases += 1
+    slots = registers()
+    slots.update(v1=0x7F800001, v2=0x7F800001, fpcr=1 << 8, fpsr=0x08000000, z=0)
+    result = request({"arch": "arm64", "bytes": (0x1E22043A).to_bytes(4, "little").hex(), "address": hex(CODE), "slots": {key: hex(value) for key, value in slots.items()}, "roundtrip": True})
+    require(result["Outcome"] == "Normal" and int(result["slots"]["fpsr"], 16) == slots["fpsr"], "False FCCMPE must suppress exceptions")
+    require([int(result["slots"][flag], 16) for flag in ("n", "z", "c", "v")] == [1, 0, 1, 0], "False FCCMPE fallback flags mismatch")
+    contract_cases += 1
+    for immediate in (0, 1, 0xFFFF):
+        word = 0xD4200000 | (immediate << 5)
+        result = request({"arch": "arm64", "bytes": word.to_bytes(4, "little").hex(), "address": hex(CODE), "slots": {}, "roundtrip": True})
+        require(result["Outcome"] == "Trap" and result["support"] == "ExceptionBoundaryOnly" and int(result["resumeAddress"], 16) == CODE, "BRK exception boundary mismatch")
+        require(result["Event"] == f"arm64.BRK.0x{immediate:04X}", "BRK immediate lost")
+        contract_cases += 1
+
     rejected = [
         0x12400000,  # 32-bit logical immediate N=1
         0x12C00000,  # 32-bit move-wide hw=2
@@ -367,7 +589,7 @@ def main():
         0xF8408463,  # ldr x3,[x3],#8: constrained writeback overlap
         0xA9400060,  # ldp x0,x0,[x3]: constrained duplicate destination
         0xD53BD060,  # unmodeled system register
-        0x1E202000,  # FP compare is explicitly unsupported
+        0x1EA02000,  # reserved floating compare ftype
         0xC85F7C20,  # exclusive load is explicitly unsupported
         0x0E000400,  # SIMD duplicate imm5=0
         0x0E080400,  # Q=0 duplicate D lane is reserved
@@ -380,6 +602,9 @@ def main():
         0x1EE04000,  # FP16 is not part of this implementation profile
         0x1E660000,  # mismatched 32-bit GPR and double FMOV
         0x9B400000,  # SMULH Ra reserved bits are not all ones
+        0x0EE0F800,  # Q=0 double vector absolute value is reserved
+        0x1E224000,  # FCVT S,S has equal source/destination widths
+        0x1EA0C000,  # reserved scalar FABS ftype
         0xFFFFFFFF,
     ]
     for word in rejected:
@@ -424,7 +649,7 @@ def main():
     classification_path.write_text(json.dumps(classification, indent=2) + "\n", encoding="utf-8")
     child.stdin.close()
     require(child.wait() == 0, "Product CLI failed")
-    summary = {"seed": SEED, "cases": sum(counts.values()), "families": dict(sorted(counts.items())), "rules": sorted(forms), "roundtrip_families": sorted(roundtrips), "rejected_cases": len(rejected), "classification_words": classification_words, "classification_disagreements": len(counterexamples), "capstone": capstone.__version__, "unicorn": unicorn.__version__, "scope": "Product MIR interpreter versus independent emulator; synthetic single instructions, mapped memory and normal outcomes; not hardware, game, fault, weak-memory or whole-program proof"}
+    summary = {"seed": SEED, "cases": sum(counts.values()), "families": dict(sorted(counts.items())), "rules": sorted(forms), "roundtrip_families": sorted(roundtrips), "rejected_cases": len(rejected), "architecture_contract_cases": contract_cases, "classification_words": classification_words, "classification_disagreements": len(counterexamples), "capstone": capstone.__version__, "unicorn": unicorn.__version__, "scope": "Product MIR interpreter versus independent emulator; synthetic single instructions, mapped memory and normal outcomes; FP trap/RES0 and BRK contracts separately checked without claiming Unicorn/hardware proof; not game, fault-delivery, weak-memory or whole-program proof"}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2, ensure_ascii=False))

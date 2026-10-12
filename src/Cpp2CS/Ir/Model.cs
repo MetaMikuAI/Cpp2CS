@@ -18,12 +18,27 @@ public sealed record InstructionOrigin
     }
 }
 public readonly record struct Value(int Id, int Width);
-public enum SupportClass { Exact, NormalPathOnly }
+public enum SupportClass { Exact, NormalPathOnly, ExceptionBoundaryOnly }
 public enum OpCode
 {
     Constant, ReadSlot, WriteSlot, Extract, Concat, Zext, Sext,
     Add, Sub, Mul, And, Or, Xor, Not, Shl, Shr, Sar, Eq, Ult, Slt, Select,
-    Load, Store, Undefined, UDiv, SDiv
+    Load, Store, Undefined, UDiv, SDiv, Float, Guard
+}
+public enum FloatKind
+{
+    Add, Sub, Mul, Div, Sqrt, NegMul, AbsDiff,
+    Min, Max, MinNumber, MaxNumber, Compare, CompareSignal,
+    Convert, FromSigned, FromUnsigned, ToSigned, ToUnsigned,
+    RoundIntegral, RoundIntegralExact
+}
+public enum FloatRounding { Current, TiesEven, PlusInfinity, MinusInfinity, TowardZero, TiesAway }
+public sealed record FloatOperation(FloatKind Kind, int OperandWidth, int ResultWidth,
+    FloatRounding Rounding = FloatRounding.Current);
+// Flags 位 0..5：invalid、divide-by-zero、overflow、underflow、inexact、input-denormal。
+public readonly record struct FloatResult(BigInteger Bits, uint Flags, uint TrapFlags)
+{
+    public FloatResult(BigInteger bits, uint flags) : this(bits, flags, flags) { }
 }
 public enum ExitKind { Next, Jump, Branch, Trap }
 public enum FaultPolicy { None, StopUnmodeled }
@@ -31,16 +46,18 @@ public enum FaultPolicy { None, StopUnmodeled }
 public sealed record Operation(
     OpCode Code, Value? Result, Value[] Inputs, BigInteger Immediate = default,
     string? Slot = null, string? Detail = null, int WorldIn = -1, int WorldOut = -1,
-    FaultPolicy Fault = FaultPolicy.None);
+    FaultPolicy Fault = FaultPolicy.None, FloatOperation? Floating = null);
 
 public sealed record MirExit(ExitKind Kind, ulong Address = 0, Value? Target = null,
-    Value? Condition = null, Value? Alternative = null, string? Reason = null)
+    Value? Condition = null, Value? Alternative = null, string? Reason = null,
+    ulong? ResumeAddress = null)
 {
     public static MirExit Next(ulong address) => new(ExitKind.Next, Address: address);
     public static MirExit Jump(Value target) => new(ExitKind.Jump, Target: target);
     public static MirExit Branch(Value condition, Value taken, Value notTaken) =>
         new(ExitKind.Branch, Target: taken, Condition: condition, Alternative: notTaken);
-    public static MirExit Trap(string reason) => new(ExitKind.Trap, Reason: reason);
+    public static MirExit Trap(string reason, ulong? resumeAddress = null) =>
+        new(ExitKind.Trap, Reason: reason, ResumeAddress: resumeAddress);
 }
 
 public sealed record MirInstruction(Architecture Architecture, InstructionOrigin Origin, string Rule,

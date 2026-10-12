@@ -31,7 +31,8 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     assembly_hash = sha(DLL)
     sources = {str(path.relative_to(ROOT)): sha(path) for path in sorted((ROOT / "src/Cpp2CS").rglob("*.cs")) if "obj" not in path.parts and "bin" not in path.parts}
-    tests = {str(path.relative_to(ROOT)): sha(path) for path in sorted(TESTS.glob("*.py"))}
+    tests = {str(path.relative_to(ROOT)): sha(path) for path in sorted(TESTS.rglob("*"))
+             if path.suffix in {".py", ".cs", ".csproj"} and "bin" not in path.parts and "obj" not in path.parts}
     (output / "manifest.json").write_text(json.dumps({"status": "running", "utc": datetime.now(timezone.utc).isoformat(), "assemblySha256": assembly_hash}, indent=2) + "\n", encoding="utf-8")
     commands = []
 
@@ -50,6 +51,10 @@ def main():
     execute("core", ["dotnet", DLL, "selftest"])
     execute("contracts", [sys.executable, TESTS / "contract_checks.py", DLL])
     execute("coverage-contracts", [sys.executable, TESTS / "coverage_contracts.py"])
+    execute("trap-boundaries", [sys.executable, TESTS / "trap_boundary_checks.py", DLL])
+    execute("float-core-build", ["dotnet", "build", TESTS / "FloatCoreHarness/FloatCoreHarness.csproj", "-c", "Release",
+                                 "--source", TESTS / "FloatCoreHarness", "-p:MSBuildEnableWorkloadResolver=false"])
+    execute("float-core-differential", [sys.executable, TESTS / "float_core_differential.py", "--output", output / "float-core-differential.json"])
     execute("arm64-differential", [sys.executable, TESTS / "arm64_differential.py", "--dll", DLL, "--output", output / "arm64-differential.json", "--fuzz-words", args.fuzz_words])
     x64 = execute("x64-differential", [sys.executable, TESTS / "x64_differential.py", DLL])
     (output / "x64-differential.json").write_text(json.dumps(json.loads(x64), indent=2) + "\n", encoding="utf-8")

@@ -49,6 +49,8 @@ public static partial class X64Lifter
                 if (name.StartsWith("Set", StringComparison.Ordinal))
                     return SetCondition();
             }
+            if (IsStringMemory(instruction.Op0Kind) || IsStringMemory(instruction.Op1Kind))
+                return StringInstruction();
 
             return instruction.Mnemonic switch
             {
@@ -70,6 +72,30 @@ public static partial class X64Lifter
                 Mnemonic.Psrldq or Mnemonic.Pslldq => PackedByteShift(),
                 Mnemonic.Movmskps or Mnemonic.Movmskpd or Mnemonic.Pmovmskb => PackedMask(),
                 Mnemonic.Pextrw => ExtractWord(),
+                Mnemonic.Paddb or Mnemonic.Paddw or Mnemonic.Paddd or Mnemonic.Paddq
+                    or Mnemonic.Psubb or Mnemonic.Psubw or Mnemonic.Psubd or Mnemonic.Psubq
+                    or Mnemonic.Paddsb or Mnemonic.Paddsw or Mnemonic.Paddusb or Mnemonic.Paddusw
+                    or Mnemonic.Psubsb or Mnemonic.Psubsw or Mnemonic.Psubusb or Mnemonic.Psubusw
+                    or Mnemonic.Pcmpeqb or Mnemonic.Pcmpeqw or Mnemonic.Pcmpeqd
+                    or Mnemonic.Pcmpgtb or Mnemonic.Pcmpgtw or Mnemonic.Pcmpgtd
+                    or Mnemonic.Pminub or Mnemonic.Pmaxub or Mnemonic.Pminsw or Mnemonic.Pmaxsw
+                    or Mnemonic.Pmullw or Mnemonic.Pmulhw or Mnemonic.Pmulhuw => PackedInteger(),
+                Mnemonic.Psllw or Mnemonic.Pslld or Mnemonic.Psllq or Mnemonic.Psrlw or Mnemonic.Psrld or Mnemonic.Psrlq
+                    or Mnemonic.Psraw or Mnemonic.Psrad => PackedLaneShift(),
+                Mnemonic.Addss or Mnemonic.Addsd or Mnemonic.Addps or Mnemonic.Addpd
+                    or Mnemonic.Subss or Mnemonic.Subsd or Mnemonic.Subps or Mnemonic.Subpd
+                    or Mnemonic.Mulss or Mnemonic.Mulsd or Mnemonic.Mulps or Mnemonic.Mulpd
+                    or Mnemonic.Divss or Mnemonic.Divsd or Mnemonic.Divps or Mnemonic.Divpd
+                    or Mnemonic.Sqrtss or Mnemonic.Sqrtsd or Mnemonic.Sqrtps or Mnemonic.Sqrtpd
+                    or Mnemonic.Minss or Mnemonic.Minsd or Mnemonic.Minps or Mnemonic.Minpd
+                    or Mnemonic.Maxss or Mnemonic.Maxsd or Mnemonic.Maxps or Mnemonic.Maxpd => FloatArithmetic(),
+                Mnemonic.Comiss or Mnemonic.Comisd or Mnemonic.Ucomiss or Mnemonic.Ucomisd => FloatFlagsCompare(),
+                Mnemonic.Cmpss or Mnemonic.Cmpsd or Mnemonic.Cmpps or Mnemonic.Cmppd => FloatMaskCompare(),
+                Mnemonic.Cvtsi2ss or Mnemonic.Cvtsi2sd or Mnemonic.Cvtss2si or Mnemonic.Cvtsd2si
+                    or Mnemonic.Cvttss2si or Mnemonic.Cvttsd2si or Mnemonic.Cvtss2sd or Mnemonic.Cvtsd2ss => FloatScalarConvert(),
+                Mnemonic.Cvtdq2ps or Mnemonic.Cvtdq2pd or Mnemonic.Cvtps2pd or Mnemonic.Cvtpd2ps
+                    or Mnemonic.Cvtps2dq or Mnemonic.Cvttps2dq or Mnemonic.Cvtpd2dq or Mnemonic.Cvttpd2dq => FloatPackedConvert(),
+                Mnemonic.Ldmxcsr or Mnemonic.Stmxcsr => MoveMxcsr(),
                 Mnemonic.Movzx => ExtendMove(false),
                 Mnemonic.Movsx or Mnemonic.Movsxd => ExtendMove(true),
                 Mnemonic.Lea => Lea(),
@@ -77,20 +103,28 @@ public static partial class X64Lifter
                 Mnemonic.And or Mnemonic.Or or Mnemonic.Xor or Mnemonic.Test => LogicalBinary(),
                 Mnemonic.Inc or Mnemonic.Dec or Mnemonic.Neg or Mnemonic.Not => Unary(),
                 Mnemonic.Shl or Mnemonic.Shr or Mnemonic.Sar or Mnemonic.Rol or Mnemonic.Ror => Shift(),
+                Mnemonic.Rcl or Mnemonic.Rcr => RotateCarry(),
                 Mnemonic.Mul or Mnemonic.Imul => Multiply(),
+                Mnemonic.Div or Mnemonic.Idiv => Divide(),
                 Mnemonic.Xchg => Exchange(),
                 Mnemonic.Bswap => ByteSwap(),
                 Mnemonic.Bt or Mnemonic.Bts or Mnemonic.Btr or Mnemonic.Btc => BitTest(),
                 Mnemonic.Bsf or Mnemonic.Bsr => BitScan(),
+                Mnemonic.Tzcnt => CountTrailingZeros(),
                 Mnemonic.Cbw or Mnemonic.Cwde or Mnemonic.Cdqe or Mnemonic.Cwd or Mnemonic.Cdq or Mnemonic.Cqo => ExtendAccumulator(),
                 Mnemonic.Clc or Mnemonic.Stc or Mnemonic.Cmc or Mnemonic.Cld or Mnemonic.Std => SimpleFlag(),
+                Mnemonic.Lahf or Mnemonic.Sahf => ByteFlags(),
+                Mnemonic.Loop or Mnemonic.Loope or Mnemonic.Loopne => LoopBranch(),
                 Mnemonic.Jmp => Jump(),
                 Mnemonic.Jrcxz or Mnemonic.Jecxz => CountBranch(),
                 Mnemonic.Call => Call(),
                 Mnemonic.Ret => Return(),
                 Mnemonic.Push => Push(),
                 Mnemonic.Pop => Pop(),
-                Mnemonic.Ud2 => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#UD"))),
+                Mnemonic.Leave => Leave(),
+                Mnemonic.Xlatb => TranslateByte(),
+                Mnemonic.Ud2 => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#UD", instruction.IP))),
+                Mnemonic.Int3 => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#BP", instruction.NextIP))),
                 _ => Unsupported("尚无该指令形式的语义规则")
             };
         }
@@ -437,9 +471,9 @@ public static partial class X64Lifter
             if (!BinaryOperands() || instruction.Op0Kind != OpKind.Register || !IsScalar(1, false))
                 return Unsupported("位扫描操作数形式未支持");
             int width = Width(0);
-            if (width == 32)
-                return Unsupported("32 位 BSF/BSR 的零输入完整寄存器未定义边界尚未确定");
             Value source = ReadOperand(1, width), result = b.Const(width, 0);
+            if (width == 32)
+                b.Guard(b.BoolNot(b.Eq(source, b.Const(width, 0))), "32-bit BSF/BSR zero-source full-register outcome is unmodeled");
             bool forward = instruction.Mnemonic == Mnemonic.Bsf;
             for (int step = 0; step < width; step++)
             {
@@ -525,8 +559,9 @@ public static partial class X64Lifter
         {
             if (instruction.Op0Kind != OpKind.NearBranch64)
                 return Unsupported("仅支持近 x64 条件转移");
-            CheckStaticTargets();
-            return LiftResult.Supported(b.Finish(MirExit.Branch(Condition(), b.Const(64, instruction.NearBranchTarget), b.Const(64, instruction.NextIP))));
+            Value condition = Condition();
+            CheckStaticTargets(condition);
+            return LiftResult.Supported(b.Finish(MirExit.Branch(condition, b.Const(64, instruction.NearBranchTarget), b.Const(64, instruction.NextIP))));
         }
 
         private LiftResult CountBranch()
@@ -534,18 +569,22 @@ public static partial class X64Lifter
             if (instruction.Op0Kind != OpKind.NearBranch64)
                 return Unsupported("计数分支形式未支持");
             Value count = ReadRegister(instruction.Mnemonic == Mnemonic.Jecxz ? Register.ECX : Register.RCX);
-            CheckStaticTargets();
-            return LiftResult.Supported(b.Finish(MirExit.Branch(b.Eq(count, b.Const(count.Width, 0)),
+            Value condition = b.Eq(count, b.Const(count.Width, 0));
+            CheckStaticTargets(condition);
+            return LiftResult.Supported(b.Finish(MirExit.Branch(condition,
                 b.Const(64, instruction.NearBranchTarget), b.Const(64, instruction.NextIP))));
         }
 
         private static bool Canonical48(ulong address) => ((long)address << 16 >> 16) == (long)address;
 
-        private void CheckStaticTargets()
+        private void CheckStaticTargets(Value? condition = null)
         {
-            if (!Canonical48(instruction.NearBranchTarget) || !Canonical48(instruction.NextIP))
-                b.MarkNormalPathOnly("非规范目标地址的条件故障尚未建模");
+            if (!Canonical48(instruction.NearBranchTarget))
+                b.Guard(condition is { } taken ? b.BoolNot(taken) : b.Const(1, 0), "noncanonical taken target is an unmodeled fault stop; next fetch is excluded");
         }
+
+        private void CheckDynamicTarget(Value target) =>
+            b.Guard(b.Eq(target, b.Sext(b.Trunc(target, 48), 64)), "noncanonical indirect target is an unmodeled fault stop; fault priority and delivery are unmodeled");
 
         private bool IsNearTarget() => instruction.Op0Kind == OpKind.NearBranch64 ||
             (IsScalar(0, false) && Width(0) == 64);
@@ -557,8 +596,9 @@ public static partial class X64Lifter
                 CheckStaticTargets();
                 return b.Const(64, instruction.NearBranchTarget);
             }
-            b.MarkNormalPathOnly("间接转移的目标规范性故障尚未建模；配置要求 CET 关闭");
-            return ReadOperand(0, 64);
+            Value target = ReadOperand(0, 64);
+            CheckDynamicTarget(target);
+            return target;
         }
 
         private LiftResult Jump()
@@ -585,6 +625,7 @@ public static partial class X64Lifter
             if (instruction.Code is not (Code.Retnq or Code.Retnq_imm16))
                 return Unsupported("仅支持近 64 位 RET");
             Value stack = b.Read("rsp", 64), target = b.Load(stack, 64);
+            CheckDynamicTarget(target);
             ulong adjustment = 8 + (instruction.OpCount == 0 ? 0UL : instruction.GetImmediate(0));
             b.Write("rsp", b.Add(stack, b.Const(64, adjustment)));
             b.MarkNormalPathOnly("RET 目标检查与栈提交的故障顺序未建模；配置要求 CET 关闭");

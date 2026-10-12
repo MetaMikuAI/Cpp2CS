@@ -68,7 +68,8 @@ if (args.Length == 1 && args[0] == "serve")
             supported = true, length = bytes.Length, decoded, lift.Form, support = lift.Ir.Support.ToString(), operations = lift.Ir.Operations.Count,
             slots = state.Slots.ToDictionary(k => k.Key, v => "0x" + v.Value.ToString("X")),
             memory = state.Memory.ToDictionary(k => $"0x{k.Key:X}", v => (int)v.Value), state.Accesses,
-            execution.Outcome, next = execution.NextAddress is { } pc ? $"0x{pc:X}" : null, execution.Choices
+            execution.Outcome, next = execution.NextAddress is { } pc ? $"0x{pc:X}" : null, execution.Choices,
+            execution.Event, resumeAddress = execution.ResumeAddress is { } resume ? $"0x{resume:X}" : null
         }));
     }
     return 0;

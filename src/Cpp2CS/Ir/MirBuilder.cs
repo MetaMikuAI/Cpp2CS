@@ -44,6 +44,18 @@ public sealed class MirBuilder(Architecture architecture, InstructionOrigin orig
     public Value Select(Value condition, Value yes, Value no) => Emit(OpCode.Select, yes.Width, [condition, yes, no]);
     public Value BoolNot(Value value) => Xor(value, Const(1, 1UL));
     public Value Undefined(int width, string reason) => Emit(OpCode.Undefined, width, [], detail: reason);
+    public Value Float(FloatOperation operation, Value a, Value b, Value control)
+    {
+        var value = new Value(nextValue++, operation.ResultWidth + 12);
+        operations.Add(new(OpCode.Float, value, [a, b, control], Floating: operation));
+        return value;
+    }
+    public void Guard(Value condition, string reason)
+    {
+        operations.Add(new(OpCode.Guard, null, [condition], Detail: reason,
+            WorldIn: world, WorldOut: ++world, Fault: FaultPolicy.StopUnmodeled));
+        MarkNormalPathOnly(reason);
+    }
     public void MarkNormalPathOnly(string reason)
     {
         if (!limitations.Contains(reason)) limitations.Add(reason);
@@ -63,8 +75,16 @@ public sealed class MirBuilder(Architecture architecture, InstructionOrigin orig
         MarkNormalPathOnly("memory fault outcome is an explicit unmodeled stop");
     }
 
-    public MirInstruction Finish(MirExit exit) => new(architecture, origin, rule, operations.ToArray(), exit,
-        limitations.Count == 0 ? SupportClass.Exact : SupportClass.NormalPathOnly, limitations.ToArray());
+    public MirInstruction Finish(MirExit exit)
+    {
+        if (exit.Kind == ExitKind.Trap)
+        {
+            MarkNormalPathOnly("exception event and resume address are represented; delivery and handler state are unmodeled");
+            return new(architecture, origin, rule, operations.ToArray(), exit, SupportClass.ExceptionBoundaryOnly, limitations.ToArray());
+        }
+        return new(architecture, origin, rule, operations.ToArray(), exit,
+            limitations.Count == 0 ? SupportClass.Exact : SupportClass.NormalPathOnly, limitations.ToArray());
+    }
 }
 
 public static class Arithmetic

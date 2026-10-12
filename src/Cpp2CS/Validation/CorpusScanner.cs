@@ -11,11 +11,11 @@ using Decoder = Iced.Intel.Decoder;
 
 namespace Cpp2CS.Validation;
 
-public sealed record CorpusScanResult(string ReportPath, string IssueIndexPath, long Candidates, long Validated, long Unsupported, long Invalid, long ValidationErrors, ulong UnrepresentedBytes, long NormalPathOnlyCount)
+public sealed record CorpusScanResult(string ReportPath, string IssueIndexPath, long Candidates, long Validated, long Unsupported, long Invalid, long ValidationErrors, ulong UnrepresentedBytes, long NormalPathOnlyCount, long ExceptionBoundaryOnlyCount)
 {
     public bool StructuralChecksPassed => ValidationErrors == 0;
     public bool AllCandidatesRepresented => Unsupported == 0 && Invalid == 0 && ValidationErrors == 0 && UnrepresentedBytes == 0;
-    public bool FullyLifted => AllCandidatesRepresented && NormalPathOnlyCount == 0;
+    public bool FullyLifted => AllCandidatesRepresented && NormalPathOnlyCount == 0 && ExceptionBoundaryOnlyCount == 0;
 }
 
 public static class CorpusScanner
@@ -75,8 +75,9 @@ public static class CorpusScanner
             validation = "Every supported MIR candidate passed through MirValidator; structural checking is not semantic equivalence.",
             passedStructuralValidation = counts.ValidationErrors == 0,
             allCandidatesRepresented = counts.Unsupported == 0 && counts.Invalid == 0 && counts.ValidationErrors == 0 && counts.BoundaryBytes == 0 && counts.ZeroFillBytes == 0,
-            fullyLifted = counts.Unsupported == 0 && counts.Invalid == 0 && counts.ValidationErrors == 0 && counts.BoundaryBytes == 0 && counts.ZeroFillBytes == 0 && counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.NormalPathOnly)) == 0,
+            fullyLifted = counts.Unsupported == 0 && counts.Invalid == 0 && counts.ValidationErrors == 0 && counts.BoundaryBytes == 0 && counts.ZeroFillBytes == 0 && counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.Exact)) == counts.Validated,
             normalPathOnlyCount = counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.NormalPathOnly)),
+            exceptionBoundaryOnlyCount = counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.ExceptionBoundaryOnly)),
             executableFileBytes = counts.ExecutableFileBytes,
             executableMemoryBytes = counts.ExecutableMemoryBytes,
             bytesCovered = counts.BytesCovered,
@@ -104,7 +105,7 @@ public static class CorpusScanner
             boundaryIndexSha256 = FileHash(boundaryPath)
         };
         File.WriteAllText(reportPath, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
-        return new(reportPath, indexPath, counts.Candidates, counts.Validated, counts.Unsupported, counts.Invalid, counts.ValidationErrors, counts.BoundaryBytes + counts.ZeroFillBytes, counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.NormalPathOnly)));
+        return new(reportPath, indexPath, counts.Candidates, counts.Validated, counts.Unsupported, counts.Invalid, counts.ValidationErrors, counts.BoundaryBytes + counts.ZeroFillBytes, counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.NormalPathOnly)), counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.ExceptionBoundaryOnly)));
     }
 
     private static void ScanArm64(ImageDocument image, ImageRange range, StreamWriter writer, ScanCounts counts)

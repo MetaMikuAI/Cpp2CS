@@ -23,7 +23,7 @@ public static partial class X64Lifter
         private void SimdAlignment()
         {
             if (instruction.Op0Kind == OpKind.Memory || instruction.Op1Kind == OpKind.Memory)
-                b.MarkNormalPathOnly("legacy SSE 16-byte alignment fault is an explicit unmodeled stop");
+                b.Guard(b.Eq(b.And(Address(), b.Const(64, 15)), b.Const(64, 0)), "legacy SSE 16-byte alignment #GP is an unmodeled fault stop");
         }
 
         private LiftResult PackedMove()
@@ -185,13 +185,14 @@ public static partial class X64Lifter
 
         private LiftResult PackedMask()
         {
-            if (instruction.OpCount != 2 || instruction.Op0Kind != OpKind.Register || !instruction.Op0Register.IsGPR32() || !IsXmm(1))
-                return Unsupported("符号位提取需要 r32 与 XMM");
+            if (instruction.OpCount != 2 || instruction.Op0Kind != OpKind.Register ||
+                !(instruction.Op0Register.IsGPR32() || instruction.Mnemonic == Mnemonic.Pmovmskb && instruction.Op0Register.IsGPR64()) || !IsXmm(1))
+                return Unsupported("符号位提取需要 r32（PMOVMSKB 也支持 r64）与 XMM");
             int width = instruction.Mnemonic == Mnemonic.Pmovmskb ? 8 : instruction.Mnemonic == Mnemonic.Movmskps ? 32 : 64;
             Value source = ReadXmm(1);
             List<Value> bits = [];
             for (int offset = width - 1; offset < 128; offset += width) bits.Add(b.Extract(source, offset, 1));
-            WriteRegister(instruction.Op0Register, b.Zext(PackLanes(bits), 32));
+            WriteRegister(instruction.Op0Register, b.Zext(PackLanes(bits), Width(0)));
             return Next();
         }
 

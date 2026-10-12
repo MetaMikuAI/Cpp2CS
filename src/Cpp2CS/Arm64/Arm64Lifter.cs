@@ -40,6 +40,48 @@ public static partial class Arm64Lifter
             return FloatMoveGeneral(new(origin, w, "fmov.general"));
         if ((w & 0xFF3FFC00) == 0x1E204000) return FloatMoveRegister(new(origin, w, "fmov.register"));
         if ((w & 0xFF201FE0) == 0x1E201000) return FloatMoveImmediate(new(origin, w, "fmov.immediate"));
+        if ((w & 0xFF207C00) == 0x1E204000) return FloatUnary(new(origin, w, "fp.unary"));
+        if ((w & 0x9FBFFC00) == 0x0EA0F800) return FloatVectorSign(new(origin, w, "fp.vector-sign"));
+        if ((w & 0xFF200C00) == 0x1E200C00) return FloatConditionalSelect(new(origin, w, "fp.select"));
+        if ((w & 0xFF200C00) == 0x1E200800) return FloatBinary(new(origin, w, "fp.binary"));
+        if ((w & 0xFF20FC07) == 0x1E202000) return FloatCompare(new(origin, w, "fp.compare"), false);
+        if ((w & 0xFF200C00) == 0x1E200400) return FloatCompare(new(origin, w, "fp.conditional-compare"), true);
+        if ((w & 0x7F20FC00) == 0x1E200000) return FloatIntegerConvert(new(origin, w, "fp.integer-convert"));
+        if ((w & 0x8FBFFC00) is 0x0E21D800 or 0x0E21A800 or 0x0E21B800 or 0x0EA1A800 or 0x0EA1B800 or 0x0E21C800)
+            return FloatVectorConvert(new(origin, w, "fp.vector-convert"));
+        if ((w & 0xBFA0FC00) is 0x0E20D400 or 0x0EA0D400 or 0x2E20DC00 or 0x2E20FC00 or 0x0E20F400 or 0x0EA0F400 or 0x0E20C400 or 0x0EA0C400 or 0x2EA0D400 or 0x2E20D400 ||
+            (w & 0xFFA0FC00) == 0x7EA0D400 || (w & 0xFFBFFC00) == 0x7E30D800)
+            return FloatVectorBinary(new(origin, w, "fp.vector-binary"));
+        if ((w & 0xBFA0FC00) is 0x0E20E400 or 0x2E20E400 or 0x2EA0E400 ||
+            (w & 0xFFA0FC00) is 0x5E20E400 or 0x7E20E400 or 0x7EA0E400)
+            return FloatVectorCompare(new(origin, w, "fp.vector-compare"), false);
+        if ((w & 0xBFBFFC00) is 0x0EA0D800 or 0x2EA0C800 or 0x0EA0C800 or 0x2EA0D800 or 0x0EA0E800 ||
+            (w & 0xFFBFFC00) is 0x5EA0D800 or 0x7EA0C800 or 0x5EA0C800 or 0x7EA0D800 or 0x5EA0E800)
+            return FloatVectorCompare(new(origin, w, "fp.vector-compare-zero"), true);
+        if ((w & 0xBFFFFC00) is 0x0E617800 or 0x0E616800)
+            return FloatVectorPrecision(new(origin, w, "fp.vector-precision"));
+        if ((w & 0xBF00F400) == 0x0F009000 || (w & 0xFF00F400) == 0x5F009000)
+            return FloatMultiplyElement(new(origin, w, "fp.multiply-element"));
+        if ((w & 0xBFBFFC00) is 0x2EA1F800 or 0x0E218800 or 0x0EA18800 or 0x0E219800 or 0x0EA19800 or 0x2E218800 or 0x2E219800 or 0x2EA19800)
+            return FloatVectorUnary(new(origin, w, "fp.vector-unary"));
+        if ((w & 0xBF3FFC00) == 0x0E212800) return SimdNarrow(new(origin, w, "simd.narrow"));
+        if ((w & 0xBF3FFC00) is 0x0E200800 or 0x2E200800 or 0x0E201800)
+            return SimdReverse(new(origin, w, "simd.reverse"));
+        if ((w & 0xBF20FC00) is 0x0E001800 or 0x0E005800 or 0x0E002800 or 0x0E006800 or 0x0E003800 or 0x0E007800)
+            return SimdPermute(new(origin, w, "simd.permute"));
+        if ((w & 0x9F20FC00) is 0x0E203400 or 0x0E203C00 or 0x0E208C00 or 0x0E204400 or 0x0E206400 or 0x0E206C00 ||
+            (w & 0xDFE0FC00) is 0x5EE03400 or 0x5EE03C00 or 0x5EE08C00 or 0x5EE04400 || (w & 0xBF20FC00) == 0x0E209C00)
+            return SimdIntegerBinary(new(origin, w, "simd.integer-binary"));
+        if ((w & 0x9F3FFC00) is 0x0E208800 or 0x0E209800 or 0x0E20B800 || (w & 0xBF3FFC00) == 0x0E20A800 ||
+            (w & 0xDFFFFC00) is 0x5EE08800 or 0x5EE09800 or 0x5EE0B800 || (w & 0xFFFFFC00) == 0x5EE0A800)
+            return SimdIntegerUnary(new(origin, w, "simd.integer-unary"));
+        if ((w & 0xBF3FFC00) == 0x0E31B800 || (w & 0xFFFFFC00) == 0x5EF1B800 || (w & 0xBF20FC00) == 0x0E20BC00)
+            return SimdAddReduce(new(origin, w, "simd.add-reduce"));
+        if ((w & 0xBF80FC00) is 0x0F005400 or 0x0F000400 or 0x2F000400 or 0x0F00A400 or 0x2F00A400 or 0x0F008400 ||
+            (w & 0xFF80FC00) is 0x5F005400 or 0x5F000400 or 0x7F000400)
+            return SimdShiftImmediate(new(origin, w, "simd.shift-immediate"));
+        if ((w & 0xBF00F400) == 0x0F008000) return SimdMultiplyElement(new(origin, w, "simd.multiply-element"));
+        if ((w & 0x9F20FC00) is 0x0E201000 or 0x0E203000) return SimdAddWide(new(origin, w, "simd.add-wide"));
         if ((w & 0x7C000000) == 0x14000000) return DirectBranch(new(origin, w, "branch.direct"));
         if ((w & 0xFF000010) == 0x54000000) return ConditionalBranch(new(origin, w, "branch.condition"));
         if ((w & 0x7E000000) == 0x34000000) return CompareBranch(new(origin, w, "branch.zero"));
@@ -52,6 +94,10 @@ public static partial class Arm64Lifter
         if ((w & 0x3A000000) == 0x28000000) return PairMemory(new(origin, w, "memory.pair"));
         if ((w & 0x3B000000) == 0x18000000) return LiteralMemory(new(origin, w, "memory.literal"));
         if ((w & 0xFFFFFFE0) is 0xD53B4200 or 0xD51B4200) return NzcvTransfer(new(origin, w, "nzcv.transfer"));
+        if ((w & 0xFFDFFFE0) is 0xD51B4400 or 0xD51B4420 or 0xD51BD040)
+            return SystemRegister(new(origin, w, "system.register"));
+        if ((w & 0xFFE0001F) == 0xD4200000)
+            return new Context(origin, w, "brk").End(MirExit.Trap($"arm64.BRK.0x{(w >> 5) & 0xFFFF:X4}", origin.Address));
         if (w == 0xD503201F) return new Context(origin, w, "nop").Done();
         return LiftResult.Unsupported($"word.{w:x8}", "Encoding has no implemented semantic rule");
     }
