@@ -3,8 +3,8 @@ using Iced.Intel;
 
 namespace Cpp2CS.X64;
 
-/// <summary>在 64 位、CET 关闭的映像地址配置下提升整数指令。</summary>
-public static class X64Lifter
+/// <summary>在 64 位、CET 关闭的映像地址配置下提升整数及 legacy SSE 指令。</summary>
+public static partial class X64Lifter
 {
     public static LiftResult Lift(InstructionOrigin origin, in Instruction instruction)
     {
@@ -12,6 +12,8 @@ public static class X64Lifter
             return LiftResult.Unsupported(instruction.Code.ToString(), "解码地址或长度与原始字节不一致");
         if (instruction.IsInvalid || instruction.CodeSize != CodeSize.Code64)
             return LiftResult.Unsupported(instruction.Code.ToString(), "不是有效的 x64 指令");
+        if (instruction.Encoding != EncodingKind.Legacy)
+            return LiftResult.Unsupported(instruction.Code.ToString(), "仅支持 legacy 编码，VEX/EVEX 等状态尚未建模");
         if (instruction.HasLockPrefix || instruction.HasXacquirePrefix || instruction.HasXreleasePrefix)
             return LiftResult.Unsupported(instruction.Code.ToString(), "原子性与事务前缀尚未建模");
         if (instruction.HasRepPrefix || instruction.HasRepnePrefix)
@@ -21,7 +23,7 @@ public static class X64Lifter
         return new Lifting(origin, instruction).Run();
     }
 
-    private sealed class Lifting
+    private sealed partial class Lifting
     {
         private static readonly string[] ArithmeticFlags = ["cf", "pf", "af", "zf", "sf", "of"];
         private readonly Instruction instruction;
@@ -52,6 +54,22 @@ public static class X64Lifter
             {
                 Mnemonic.Nop => Next(),
                 Mnemonic.Mov => Move(),
+                Mnemonic.Movss or Mnemonic.Movsd => ScalarSimdMove(),
+                Mnemonic.Movaps or Mnemonic.Movups or Mnemonic.Movapd or Mnemonic.Movupd
+                    or Mnemonic.Movdqa or Mnemonic.Movdqu => PackedMove(),
+                Mnemonic.Movd or Mnemonic.Movq => IntegerSimdMove(),
+                Mnemonic.Movlps or Mnemonic.Movhps or Mnemonic.Movlpd or Mnemonic.Movhpd
+                    or Mnemonic.Movhlps or Mnemonic.Movlhps => HalfSimdMove(),
+                Mnemonic.Andps or Mnemonic.Andpd or Mnemonic.Andnps or Mnemonic.Andnpd
+                    or Mnemonic.Orps or Mnemonic.Orpd or Mnemonic.Xorps or Mnemonic.Xorpd
+                    or Mnemonic.Pand or Mnemonic.Pandn or Mnemonic.Por or Mnemonic.Pxor => PackedLogical(),
+                Mnemonic.Shufps or Mnemonic.Shufpd or Mnemonic.Pshufd or Mnemonic.Pshuflw or Mnemonic.Pshufhw => PackedShuffle(),
+                Mnemonic.Unpcklps or Mnemonic.Unpckhps or Mnemonic.Unpcklpd or Mnemonic.Unpckhpd
+                    or Mnemonic.Punpcklbw or Mnemonic.Punpckhbw or Mnemonic.Punpcklwd or Mnemonic.Punpckhwd
+                    or Mnemonic.Punpckldq or Mnemonic.Punpckhdq or Mnemonic.Punpcklqdq or Mnemonic.Punpckhqdq => PackedUnpack(),
+                Mnemonic.Psrldq or Mnemonic.Pslldq => PackedByteShift(),
+                Mnemonic.Movmskps or Mnemonic.Movmskpd or Mnemonic.Pmovmskb => PackedMask(),
+                Mnemonic.Pextrw => ExtractWord(),
                 Mnemonic.Movzx => ExtendMove(false),
                 Mnemonic.Movsx or Mnemonic.Movsxd => ExtendMove(true),
                 Mnemonic.Lea => Lea(),

@@ -31,7 +31,14 @@ public static partial class Arm64Lifter
     private static LiftResult VariableShift(Context c)
     {
         var opcode = c.Field(10, 6);
-        if (opcode is < 8 or > 11) return c.Reject("Division, CRC and other two-source operations are not implemented");
+        if (opcode is 2 or 3)
+        {
+            var dividend = c.Read(c.Rn, c.Width);
+            var divisor = c.Read(c.Rm, c.Width);
+            c.Write(c.Rd, opcode == 2 ? c.B.UDiv(dividend, divisor) : c.B.SDiv(dividend, divisor));
+            return c.Done();
+        }
+        if (opcode is < 8 or > 11) return c.Reject("CRC and other two-source operations are not implemented");
         var value = c.Read(c.Rn, c.Width);
         var amount = c.B.And(c.Read(c.Rm, c.Width), c.C(c.Width, (ulong)(c.Width - 1)));
         Value result = opcode switch

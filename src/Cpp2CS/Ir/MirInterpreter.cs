@@ -42,6 +42,8 @@ public static class MirInterpreter
                 case OpCode.Add: value = a + b; break;
                 case OpCode.Sub: value = a - b; break;
                 case OpCode.Mul: value = a * b; break;
+                case OpCode.UDiv: value = b.IsZero ? 0 : a / b; break;
+                case OpCode.SDiv: value = b.IsZero ? 0 : Signed(a, width) / Signed(b, width); break;
                 case OpCode.And: value = a & b; break;
                 case OpCode.Or: value = a | b; break;
                 case OpCode.Xor: value = a ^ b; break;

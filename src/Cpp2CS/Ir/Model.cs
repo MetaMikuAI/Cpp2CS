@@ -23,7 +23,7 @@ public enum OpCode
 {
     Constant, ReadSlot, WriteSlot, Extract, Concat, Zext, Sext,
     Add, Sub, Mul, And, Or, Xor, Not, Shl, Shr, Sar, Eq, Ult, Slt, Select,
-    Load, Store, Undefined
+    Load, Store, Undefined, UDiv, SDiv
 }
 public enum ExitKind { Next, Jump, Branch, Trap }
 public enum FaultPolicy { None, StopUnmodeled }

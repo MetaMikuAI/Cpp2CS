@@ -22,9 +22,24 @@ public static partial class Arm64Lifter
         if ((w & 0x1FE0FC00) == 0x1A000000) return AddCarry(new(origin, w, "addsub.carry"));
         if ((w & 0x3FE00800) == 0x1A800000) return ConditionalSelect(new(origin, w, "conditional.select"));
         if ((w & 0x3FE00410) == 0x3A400000) return ConditionalCompare(new(origin, w, "conditional.compare"));
-        if ((w & 0x7FE00000) == 0x1AC00000) return VariableShift(new(origin, w, "shift.variable"));
+        if ((w & 0x7FE00000) == 0x1AC00000) return VariableShift(new(origin, w, ((w >> 10) & 63) is 2 or 3 ? "integer.divide" : "shift.variable"));
         if ((w & 0x7FE00000) == 0x5AC00000) return UnaryInteger(new(origin, w, "integer.unary"));
         if ((w & 0x7FE00000) == 0x1B000000) return MultiplyAdd(new(origin, w, "multiply.add"));
+        if ((w & 0xFFE00000) is 0x9B200000 or 0x9BA00000) return MultiplyLong(new(origin, w, "multiply.long"));
+        if ((w & 0xFFE0FC00) is 0x9B407C00 or 0x9BC07C00) return MultiplyHigh(new(origin, w, "multiply.high"));
+        if ((w & 0xBFE0FC00) is 0x0E000400 or 0x0E000C00 or 0x0E002C00 or 0x0E003C00 ||
+            (w & 0xFFE0FC00) is 0x5E000400 or 0x4E001C00 || (w & 0xFFE08400) == 0x6E000400)
+            return SimdCopy(new(origin, w, "simd.copy"));
+        if ((w & 0x9F20FC00) == 0x0E201C00) return SimdLogic(new(origin, w, "simd.logical"));
+        if ((w & 0xBFFFFC00) == 0x2E205800) return SimdNot(new(origin, w, "simd.not"));
+        if ((w & 0xBFE08400) == 0x2E000000) return SimdExtract(new(origin, w, "simd.extract"));
+        if ((w & 0x9F20FC00) == 0x0E208400 || (w & 0xDFE0FC00) == 0x5EE08400)
+            return SimdAddSubtract(new(origin, w, "simd.addsub"));
+        if ((w & 0x9FF80C00) == 0x0F000400) return SimdImmediate(new(origin, w, "simd.immediate"));
+        if ((w & 0xFFFFFC00) is 0x1E260000 or 0x1E270000 or 0x9E660000 or 0x9E670000 or 0x9EAE0000 or 0x9EAF0000)
+            return FloatMoveGeneral(new(origin, w, "fmov.general"));
+        if ((w & 0xFF3FFC00) == 0x1E204000) return FloatMoveRegister(new(origin, w, "fmov.register"));
+        if ((w & 0xFF201FE0) == 0x1E201000) return FloatMoveImmediate(new(origin, w, "fmov.immediate"));
         if ((w & 0x7C000000) == 0x14000000) return DirectBranch(new(origin, w, "branch.direct"));
         if ((w & 0xFF000010) == 0x54000000) return ConditionalBranch(new(origin, w, "branch.condition"));
         if ((w & 0x7E000000) == 0x34000000) return CompareBranch(new(origin, w, "branch.zero"));

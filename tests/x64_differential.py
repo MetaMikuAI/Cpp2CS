@@ -15,6 +15,7 @@ CODE, DATA, STACK = 0x10000, 0x30000, 0x40000
 GPRS = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"] + [f"r{i}" for i in range(8, 16)]
 REGISTERS = {name: getattr(xc, "UC_X86_REG_" + name.upper()) for name in GPRS}
 REGISTERS.update(fsbase=xc.UC_X86_REG_FS_BASE, gsbase=xc.UC_X86_REG_GS_BASE)
+XMM_REGISTERS = {f"xmm{i}": getattr(xc, f"UC_X86_REG_XMM{i}") for i in range(16)}
 FLAGS = {"cf": 0, "pf": 2, "af": 4, "zf": 6, "sf": 7, "df": 10, "of": 11}
 FLAG_MASK = sum(1 << bit for bit in FLAGS.values())
 RNG = random.Random(0xC2208)
@@ -24,12 +25,13 @@ class Harness:
     def __init__(self, server):
         self.server = server
         self.machine = Uc(UC_ARCH_X86, UC_MODE_64)
-        self.machine.mem_map(CODE, 0x10000)
+        self.machine.mem_map(CODE, DATA - CODE)
         self.machine.mem_map(DATA, 0x1000)
         self.machine.mem_map(STACK, 0x1000)
         self.forms = {}
         self.checks = 0
         self.rejected = 0
+        self.fault_stops = 0
         self.accesses = []
         self.machine.hook_add(UC_HOOK_MEM_READ, lambda _uc, _access, address, size, _value, _user: self.accesses.append(("Load", address, size)))
         self.machine.hook_add(UC_HOOK_MEM_WRITE, lambda _uc, _access, address, size, _value, _user: self.accesses.append(("Store", address, size)))
@@ -45,7 +47,7 @@ class Harness:
         assert line, ("production CLI exited", self.server.poll(), code.hex())
         return json.loads(line)
 
-    def run(self, code_hex, *, width=64, family="plain", values=None, count=None, old_flags=None, memory=False, setup=None, zero_source=False):
+    def run(self, code_hex, *, width=64, family="plain", values=None, count=None, old_flags=None, memory=False, setup=None, zero_source=False, simd=False):
         if code_hex not in self.forms:
             self.forms[code_hex] = CODE + len(self.forms) * 32
             code = bytes.fromhex(code_hex)
@@ -54,6 +56,9 @@ class Harness:
         code = bytes.fromhex(code_hex)
         slots = {name: RNG.getrandbits(64) for name in GPRS}
         slots.update(rsp=STACK + 64, fsbase=DATA, gsbase=DATA)
+        if simd:
+            slots.update({name: RNG.getrandbits(128) for name in XMM_REGISTERS})
+            slots["mxcsr"] = RNG.getrandbits(16)
         if values is not None:
             mask = (1 << width) - 1
             slots["rax"] = (slots["rax"] & ~mask) | (values[0] & mask)
@@ -71,6 +76,10 @@ class Harness:
             setup(slots, regions, address)
         for name, register in REGISTERS.items():
             self.machine.reg_write(register, slots[name])
+        if simd:
+            for name, register in XMM_REGISTERS.items():
+                self.machine.reg_write(register, slots[name])
+            self.machine.reg_write(xc.UC_X86_REG_MXCSR, slots["mxcsr"])
         self.machine.reg_write(xc.UC_X86_REG_EFLAGS, 2 | old_flags)
         for start, data in regions:
             self.machine.mem_write(start, bytes(data))
@@ -80,6 +89,11 @@ class Harness:
         assert response["supported"], (code_hex, response)
         assert response["Outcome"] == "Normal", (code_hex, response)
         actual_slots = {name: int(value, 16) for name, value in response["slots"].items()}
+        if simd:
+            for name, register in XMM_REGISTERS.items():
+                expected = self.machine.reg_read(register)
+                assert actual_slots[name] == expected, (code_hex, name, hex(actual_slots[name]), hex(expected), slots)
+            assert actual_slots["mxcsr"] == self.machine.reg_read(xc.UC_X86_REG_MXCSR), (code_hex, "mxcsr")
         for name, register in REGISTERS.items():
             mask = (1 << 64) - 1
             if zero_source and name == "rax":
@@ -113,7 +127,17 @@ class Harness:
             actual = bytes(response["memory"][hex(start + i).upper().replace("0X", "0x")] for i in range(len(data)))
             assert actual == expected, (code_hex, "memory", hex(start))
         expected_accesses = [f"{kind}:0x{where:X}:{size}" for kind, where, size in self.accesses]
-        assert response["Accesses"] == expected_accesses, (code_hex, "access order", response["Accesses"], expected_accesses)
+        if simd:
+            # Unicorn 将 128 位访存拆成两个 64 位 hook；按有序字节访问比较，不声称原子性。
+            def access_bytes(accesses):
+                result = []
+                for access in accesses:
+                    kind, where, size = access.split(":")
+                    result.extend((kind, int(where, 16) + i) for i in range(int(size)))
+                return result
+            assert access_bytes(response["Accesses"]) == access_bytes(expected_accesses), (code_hex, "access order", response["Accesses"], expected_accesses)
+        else:
+            assert response["Accesses"] == expected_accesses, (code_hex, "access order", response["Accesses"], expected_accesses)
         if memory:
             assert response["support"] == "NormalPathOnly", (code_hex, response["support"])
         self.checks += 1
@@ -122,6 +146,17 @@ class Harness:
         response = self.request(bytes.fromhex(code_hex), CODE, {}, [])
         assert not response["supported"], ("unsupported form accepted", code_hex, response)
         self.rejected += 1
+
+    def fault(self, code_hex, byte_count):
+        slots = {name: RNG.getrandbits(128) for name in XMM_REGISTERS}
+        slots["rbx"] = DATA
+        data = RNG.randbytes(byte_count)
+        response = self.request(bytes.fromhex(code_hex), CODE, slots, [(DATA, data)])
+        assert response["supported"] and response["support"] == "NormalPathOnly", (code_hex, response)
+        assert response["Outcome"] == "UnmodeledFaultStop" and response["next"] is None, (code_hex, response)
+        assert {name: int(value, 16) for name, value in response["slots"].items()} == slots, (code_hex, "fault committed register")
+        assert bytes(response["memory"][f"0x{DATA+i:X}"] for i in range(byte_count)) == data, (code_hex, "fault committed memory")
+        self.fault_stops += 1
 
 
 def arithmetic(h):
@@ -245,6 +280,71 @@ def memory_and_control(h):
     h.run(code, memory=True)
 
 
+def simd_registers(h):
+    moves = [prefix + opcode + modrm
+             for prefix, opcodes in (("", ("0f10", "0f11", "0f28", "0f29")),
+                                     ("66", ("0f10", "0f11", "0f28", "0f29", "0f6f", "0f7f")),
+                                     ("f3", ("0f10", "0f11", "0f6f", "0f7f", "0f7e")),
+                                     ("f2", ("0f10", "0f11")))
+             for opcode in opcodes for modrm in ("c1", "c0")]
+    moves += [prefix + opcode + "c3" for prefix in ("66", "6648") for opcode in ("0f6e", "0f7e")]
+    moves += ["660fd6c1", "660fd6c0", "0f12c1", "0f16c1", "0f12c0", "0f16c0",
+              "450f10f9", "f3450f10f9", "f2450f11f9", "66450f6efa", "664d0f7efa"]
+    logical = [prefix + f"0f{opcode:02x}" + modrm for prefix, opcodes in
+               (("", (0x54, 0x55, 0x56, 0x57)), ("66", (0x54, 0x55, 0x56, 0x57, 0xdb, 0xdf, 0xeb, 0xef)))
+               for opcode in opcodes for modrm in ("c1", "c0")]
+    unpack = [prefix + f"0f{opcode:02x}" + modrm for prefix, opcodes in
+              (("", (0x14, 0x15)), ("66", (0x14, 0x15, 0x60, 0x61, 0x62, 0x68, 0x69, 0x6a, 0x6c, 0x6d)))
+              for opcode in opcodes for modrm in ("c1", "c0")]
+    for code in moves + logical + unpack + ["0f50c1", "660f50c1", "660fd7c1", "66450fd7f9"]:
+        for index in range(12):
+            def setup(slots, _regions, _address):
+                if index == 0:
+                    slots.update(xmm0=0, xmm1=(1 << 128) - 1)
+                elif index == 1:
+                    slots.update(xmm0=(1 << 128) - 1, xmm1=0)
+                elif index == 2:
+                    slots.update(xmm0=int.from_bytes(bytes(range(16)), "little"),
+                                 xmm1=int.from_bytes(bytes(range(16, 32)), "little"))
+            h.run(code, simd=True, setup=setup)
+    for opcode in ("0fc6", "660fc6", "660f70", "f20f70", "f30f70", "660fc5"):
+        for control in range(256):
+            for modrm in ("c1", "c0"):
+                h.run(opcode + modrm + f"{control:02x}", simd=True)
+    for modrm in ("d8", "f8"):
+        for count in (0, 1, 7, 8, 15, 16, 17, 31, 127, 128, 255):
+            for _ in range(8):
+                h.run("660f73" + modrm + f"{count:02x}", simd=True)
+
+
+def simd_memory(h):
+    aligned = [prefix + opcode + "03" for prefix, opcodes in
+               (("", ("0f28", "0f29", "0f54", "0f55", "0f56", "0f57", "0f14", "0f15")),
+                ("66", ("0f28", "0f29", "0f6f", "0f7f", "0f54", "0f55", "0f56", "0f57",
+                        "0fdb", "0fdf", "0feb", "0fef", "0f14", "0f15", "0f60", "0f61", "0f62", "0f68", "0f69", "0f6a", "0f6c", "0f6d")))
+               for opcode in opcodes]
+    aligned += [opcode + "03e4" for opcode in ("0fc6", "660fc6", "660f70", "f20f70", "f30f70")]
+    unaligned = [prefix + opcode + "03" for prefix, opcodes in
+                 (("", ("0f10", "0f11", "0f12", "0f13", "0f16", "0f17")),
+                  ("66", ("0f10", "0f11", "0f12", "0f13", "0f16", "0f17", "0f6e", "0f7e", "0fd6")),
+                  ("6648", ("0f6e", "0f7e")), ("f3", ("0f10", "0f11", "0f6f", "0f7f", "0f7e")),
+                  ("f2", ("0f10", "0f11"))) for opcode in opcodes]
+    for code in aligned + unaligned:
+        for offset in ((32,) if code in aligned else (32, 33, 39, 47)):
+            for _ in range(4):
+                h.run(code, simd=True, memory=True, setup=lambda s, r, a: s.update(rbx=DATA + offset))
+    for code in ("64450f10f9", "65450f10f9"):
+        # 段覆盖对寄存器形式没有作用。
+        h.run(code, simd=True)
+    for code in ("64440f100b", "65440f100b", "67440f100b", "67440f110b"):
+        def setup(slots, _regions, _address):
+            slots["rbx"] = 33 if code[:2] in ("64", "65") else 0xF00DCAFE00000000 | (DATA + 33)
+        h.run(code, simd=True, memory=True, setup=setup)
+    for code, size in (("0f1003", 16), ("0f1103", 16), ("f30f1003", 4), ("f30f1103", 4),
+                       ("f20f1003", 8), ("f20f1103", 8), ("660f6e03", 4), ("660f7e03", 4)):
+        h.fault(code, size - 1)
+
+
 def main():
     command = ["dotnet", str(Path(sys.argv[1]) if len(sys.argv) > 1 else DLL), "serve"]
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1) as server:
@@ -254,12 +354,15 @@ def main():
         conditions(h)
         other_registers(h)
         memory_and_control(h)
-        for code in ("f0480103", "f3a4", "d3d0", "d3d8", "48f7f3", "0f58c0", "e005", "e105", "e205", "9d", "0fae2b", "0fbcc3", "0fbdc3"):
+        simd_registers(h)
+        simd_memory(h)
+        for code in ("f0480103", "f3a4", "d3d0", "d3d8", "48f7f3", "0f58c0", "e005", "e105", "e205", "9d", "0fae2b", "0fbcc3", "0fbdc3",
+                     "0f6fc1", "0fefc1", "0f6ec3", "c5f810c1", "c5fa10c1", "c5f857c1", "a5", "f30f58c1", "660f3a15c101"):
             h.reject(code)
         server.stdin.close()
         server.wait()
         assert server.returncode == 0, server.returncode
-        print(json.dumps({"x64_differential": h.checks, "forms": len(h.forms), "unsupported_rejected": h.rejected,
+        print(json.dumps({"x64_differential": h.checks, "forms": len(h.forms), "unsupported_rejected": h.rejected, "fault_stops": h.fault_stops,
                           "scope": "production MIR + JSON roundtrip vs Unicorn; synthetic normal paths, not hardware/game/fault proof"}, indent=2))
 
 

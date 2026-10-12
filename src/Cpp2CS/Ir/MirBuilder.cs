@@ -28,6 +28,9 @@ public sealed class MirBuilder(Architecture architecture, InstructionOrigin orig
     public Value Add(Value a, Value b) => Emit(OpCode.Add, a.Width, [a, b]);
     public Value Sub(Value a, Value b) => Emit(OpCode.Sub, a.Width, [a, b]);
     public Value Mul(Value a, Value b) => Emit(OpCode.Mul, a.Width, [a, b]);
+    // 总函数：除零取零；有符号最小值除以 -1 保留原位模式。
+    public Value UDiv(Value a, Value b) => Emit(OpCode.UDiv, a.Width, [a, b]);
+    public Value SDiv(Value a, Value b) => Emit(OpCode.SDiv, a.Width, [a, b]);
     public Value And(Value a, Value b) => Emit(OpCode.And, a.Width, [a, b]);
     public Value Or(Value a, Value b) => Emit(OpCode.Or, a.Width, [a, b]);
     public Value Xor(Value a, Value b) => Emit(OpCode.Xor, a.Width, [a, b]);

@@ -289,7 +289,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
     parser.add_argument("binary", type=Path)
-    parser.add_argument("--dll", type=Path, default=ROOT / "src/Cpp2CS/bin/Debug/net10.0/Cpp2CS.dll")
+    parser.add_argument("--dll", type=Path, default=ROOT / "src/Cpp2CS/bin/Release/net10.0/Cpp2CS.dll")
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/verified")
     args = parser.parse_args()
     sys.exit(run(args.report, args.binary, args.dll, args.output))

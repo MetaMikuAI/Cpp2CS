@@ -57,6 +57,7 @@ public static class MirValidator
                 OpCode.Eq or OpCode.Ult or OpCode.Slt => a == b && width == 1,
                 OpCode.Select => a == 1 && b == op.Inputs[2].Width && width == b,
                 OpCode.Shl or OpCode.Shr or OpCode.Sar => width == a,
+                OpCode.UDiv or OpCode.SDiv => width == a && a == b,
                 OpCode.Load => a == 64 && width % 8 == 0,
                 OpCode.Store => a == 64 && b % 8 == 0,
                 OpCode.Undefined => !string.IsNullOrWhiteSpace(op.Detail),

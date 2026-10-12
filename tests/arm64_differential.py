@@ -2,6 +2,7 @@
 
 import argparse
 import collections
+import itertools
 import json
 import pathlib
 import random
@@ -121,6 +122,71 @@ def corpus(rng):
         form, base, variable_mask = rng.choice(templates)
         word = base | (rng.getrandbits(32) & variable_mask)
         yield form, word, False
+    yield from simd_corpus()
+
+
+def simd_corpus():
+    for imm5 in range(1, 32):
+        if not imm5 & 15:
+            continue
+        size = (imm5 & -imm5).bit_length() - 1
+        for q in (0, 1):
+            for rd, rn in ((0, 1), (1, 1), (31, 31)):
+                prefix = (q << 30) | (imm5 << 16) | (rn << 5) | rd
+                if size < 3 or q:
+                    yield "simd.dup.element", 0x0E000400 | prefix, False
+                    yield "simd.dup.general", 0x0E000C00 | prefix, False
+                if (q and size == 3) or (not q and size < 3):
+                    yield "simd.umov", 0x0E003C00 | prefix, False
+                if size < (3 if q else 2):
+                    yield "simd.smov", 0x0E002C00 | prefix, False
+        for rd, rn in ((0, 1), (1, 1), (31, 31)):
+            prefix = (imm5 << 16) | (rn << 5) | rd
+            yield "simd.dup.scalar", 0x5E000400 | prefix, False
+            yield "simd.ins.general", 0x4E001C00 | prefix, False
+            for imm4 in (0, 15):
+                yield "simd.ins.element", 0x6E000400 | (imm4 << 11) | prefix, False
+    for q in (0, 1):
+        for opcode in range(8):
+            for rd, rn, rm in ((0, 1, 2), (1, 1, 2), (2, 1, 2), (0, 1, 1), (31, 31, 31)):
+                yield "simd.logical", 0x0E201C00 | (q << 30) | ((opcode >> 2) << 29) | ((opcode & 3) << 22) | (rm << 16) | (rn << 5) | rd, False
+        for rd, rn in ((0, 1), (1, 1)):
+            yield "simd.not", 0x2E205800 | (q << 30) | (rn << 5) | rd, False
+        for offset in range(8 << q):
+            yield "simd.extract", 0x2E000000 | (q << 30) | (2 << 16) | (offset << 11) | (1 << 5), False
+            yield "simd.extract", 0x2E000000 | (q << 30) | (1 << 16) | (offset << 11) | (1 << 5) | 1, False
+        for size in range(4):
+            if size == 3 and not q:
+                continue
+            for subtract in (0, 1):
+                for rd in (0, 1, 2):
+                    yield "simd.addsub", 0x0E208400 | (q << 30) | (subtract << 29) | (size << 22) | (2 << 16) | (1 << 5) | rd, False
+        for subtract in (0, 1):
+            yield "simd.addsub.scalar", 0x5EE08400 | (subtract << 29) | (2 << 16) | (1 << 5) | 1, False
+        for op in (0, 1):
+            for cmode in range(16):
+                if cmode == 15 and op and not q:
+                    continue
+                for immediate in range(256):
+                    yield "simd.immediate", 0x0F000400 | (q << 30) | (op << 29) | ((immediate >> 5) << 16) | (cmode << 12) | ((immediate & 31) << 5), False
+    for prefix in (0x1E260000, 0x1E270000, 0x9E660000, 0x9E670000, 0x9EAE0000, 0x9EAF0000):
+        for rd, rn in ((0, 1), (1, 1), (31, 31)):
+            yield "fmov.general", prefix | (rn << 5) | rd, False
+    for double in (0, 1):
+        for rd, rn in ((0, 1), (1, 1), (31, 31)):
+            yield "fmov.register", 0x1E204000 | (double << 22) | (rn << 5) | rd, False
+        for immediate in range(256):
+            yield "fmov.immediate", 0x1E201000 | (double << 22) | (immediate << 13), False
+    for unsigned in (0, 1):
+        for subtract in (0, 1):
+            for rd, rn, rm, ra in ((0, 1, 2, 3), (1, 1, 2, 1), (2, 1, 2, 2), (0, 1, 2, 31), (31, 31, 31, 31)):
+                yield "multiply.long", 0x9B200000 | (unsigned << 23) | (rm << 16) | (subtract << 15) | (ra << 10) | (rn << 5) | rd, False
+        for rd, rn, rm in ((0, 1, 2), (1, 1, 2), (2, 1, 2), (31, 31, 31)):
+            yield "multiply.high", 0x9B407C00 | (unsigned << 23) | (rm << 16) | (rn << 5) | rd, False
+    for sf in (0, 1):
+        for signed in (0, 1):
+            for rd, rn, rm in ((0, 1, 2), (1, 1, 2), (2, 1, 2), (0, 1, 31), (31, 31, 31)):
+                yield "integer.divide", 0x1AC00800 | (sf << 31) | (signed << 10) | (rm << 16) | (rn << 5) | rd, False
 
 
 def corpus_random_templates():
@@ -129,6 +195,29 @@ def corpus_random_templates():
     yield "random.logical", 0x8A000000, 0x60FFFFFF
     yield "random.bitfield", 0xD3400000, 0x003FFFFF
     yield "random.move", 0xD2800000, 0x007FFFFF
+
+
+def classification_boundaries():
+    for q, op, scalar, imm5, opcode in itertools.product(range(2), range(2), range(2), range(32), range(32)):
+        yield "simd-copy-fields", 0x0E000420 | (q << 30) | (op << 29) | (scalar << 28) | (imm5 << 16) | (opcode << 11)
+    for q, op, scalar, size, opcode in itertools.product(range(2), range(2), range(2), range(4), range(64)):
+        yield "simd-three-fields", 0x0E220020 | (q << 30) | (op << 29) | (scalar << 28) | (size << 22) | (opcode << 10)
+    for sf, s, ftype, rmode, opcode in itertools.product(range(2), range(2), range(4), range(4), range(8)):
+        yield "fmov-general-fields", 0x1E200020 | (sf << 31) | (s << 29) | (ftype << 22) | (rmode << 19) | (opcode << 16)
+    for q, op, o2, cmode in itertools.product(range(2), range(2), range(2), range(16)):
+        yield "simd-immediate-fields", 0x0F050540 | (q << 30) | (op << 29) | (o2 << 11) | (cmode << 12)
+    for sf, op, ra, subtract in itertools.product(range(2), range(8), range(32), range(2)):
+        yield "multiply-fields", 0x1B020020 | (sf << 31) | (op << 21) | (ra << 10) | (subtract << 15)
+    seeds = set()
+    seed_counts = collections.Counter()
+    for family, word, _ in simd_corpus():
+        if seed_counts[family] < 8:
+            seeds.add(word)
+            seed_counts[family] += 1
+    for word in sorted(seeds):
+        for bit in range(32):
+            if bit >= 10:
+                yield "new-rule-single-bit-neighbors", word ^ (1 << bit)
 
 
 def main():
@@ -177,7 +266,7 @@ def main():
         require(len(decoded) == 1, f"Generated fixture is not decoded: {family} {word:08x}")
         instruction = decoded[0]
         condition_family = family in ("conditional.select", "conditional.compare", "branch.condition", "nzcv.transfer")
-        variations = range(16) if condition_family else range(8 if family == "addsub.carry" else 4 if not memory_case else 2)
+        variations = range(16) if condition_family else range(10 if family.startswith("multiply.") or family == "integer.divide" else 8 if family == "addsub.carry" else 1 if family in ("simd.immediate", "fmov.immediate") else 4 if not memory_case else 2)
         for variation in variations:
             slots = registers()
             slots["x1"] = edges[(case_index + variation) % len(edges)]
@@ -191,6 +280,22 @@ def main():
                     nzcv = (nzcv & ~2) | (old_carry << 1)
             if family == "nzcv.transfer":
                 slots["x1"] = (variation << 28) | 0xABCD000F0000000F
+            if family.startswith("multiply.") or family == "integer.divide":
+                wide = word >> 31
+                width = 64 if wide else 32
+                mask = (1 << width) - 1
+                arithmetic_edges = ((0, 0), (1, 0), (mask, 1), (mask, mask), (1 << (width - 1), mask), (1 << (width - 1), 1), ((1 << (width - 1)) - 1, 2), (0x80000000, 0xFFFFFFFF), (0xFFFFFFFF00000001, 0x80000000), (0x12345678, 7))
+                slots["x1"], slots["x2"] = arithmetic_edges[variation]
+            if family.startswith("simd.") or family.startswith("fmov."):
+                if variation == 0:
+                    slots["v0"] = (1 << 128) - 1
+                    slots["v1"] = 0x7FC000007F800001FF80000000000001
+                    slots["v2"] = (1 << 128) - 1
+                elif variation == 1:
+                    slots["v1"] = (1 << 128) - 1
+                    slots["v2"] = 0x01010101010101010101010101010101
+                slots["fpcr"] = 0x03400000
+                slots["fpsr"] = 0x0800009F
             for i, flag in enumerate(("n", "z", "c", "v")):
                 slots[flag] = (nzcv >> (3 - i)) & 1
             if family == "branch.register":
@@ -212,8 +317,8 @@ def main():
                 machine.reg_write(getattr(arm, f"UC_ARM64_REG_Q{i}"), slots[f"v{i}"])
             machine.reg_write(arm.UC_ARM64_REG_SP, slots["sp"])
             machine.reg_write(arm.UC_ARM64_REG_NZCV, nzcv << 28)
-            machine.reg_write(arm.UC_ARM64_REG_FPCR, 0)
-            machine.reg_write(arm.UC_ARM64_REG_FPSR, 0)
+            machine.reg_write(arm.UC_ARM64_REG_FPCR, slots["fpcr"])
+            machine.reg_write(arm.UC_ARM64_REG_FPSR, slots["fpsr"])
             machine.mem_write(CODE, code)
             machine.ctl_remove_cache(CODE, CODE + 4)
             reads_writes.clear()
@@ -230,6 +335,8 @@ def main():
             for i in range(32):
                 expected[f"v{i}"] = machine.reg_read(getattr(arm, f"UC_ARM64_REG_Q{i}"))
             expected["sp"] = machine.reg_read(arm.UC_ARM64_REG_SP)
+            expected["fpcr"] = machine.reg_read(arm.UC_ARM64_REG_FPCR)
+            expected["fpsr"] = machine.reg_read(arm.UC_ARM64_REG_FPSR)
             flags = machine.reg_read(arm.UC_ARM64_REG_NZCV) >> 28
             for i, flag in enumerate(("n", "z", "c", "v")):
                 expected[flag] = (flags >> (3 - i)) & 1
@@ -262,6 +369,17 @@ def main():
         0xD53BD060,  # unmodeled system register
         0x1E202000,  # FP compare is explicitly unsupported
         0xC85F7C20,  # exclusive load is explicitly unsupported
+        0x0E000400,  # SIMD duplicate imm5=0
+        0x0E080400,  # Q=0 duplicate D lane is reserved
+        0x0E042C00,  # SMOV Wd,Sn has no sign extension
+        0x4E013C00,  # UMOV Xd,Bn is reserved
+        0x0EE08400,  # Q=0 vector ADD D is reserved
+        0x2E004000,  # Q=0 EXT offset=8 is reserved
+        0x2F00F400,  # Q=0 vector double FMOV immediate is reserved
+        0x1EA04000,  # reserved FMOV register ftype
+        0x1EE04000,  # FP16 is not part of this implementation profile
+        0x1E660000,  # mismatched 32-bit GPR and double FMOV
+        0x9B400000,  # SMULH Ra reserved bits are not all ones
         0xFFFFFFFF,
     ]
     for word in rejected:
@@ -276,12 +394,21 @@ def main():
         ("extended-addsub", 0x0B200000, 0xE0DFFFFF),
         ("multiply", 0x1B000000, 0xE0FFFFFF),
         ("carry-addsub", 0x1A000000, 0xE0FFFFFF),
+        ("simd-copy", 0x0E000400, 0x71FFFFFF),
+        ("simd-immediate", 0x0F000400, 0x70FFFFFF),
+        ("simd-three-registers", 0x0E200400, 0x71FFFFFF),
+        ("fmov", 0x1E200000, 0x80FFFFFF),
+        ("multiply-long-high", 0x9B000000, 0x00FFFFFF),
     )
     fuzz_counts = collections.Counter()
     counterexamples = []
-    for index in range(args.fuzz_words):
-        group, base, variable_mask = fuzz_groups[index % len(fuzz_groups)]
-        word = base | (fuzz_rng.getrandbits(32) & variable_mask)
+    def random_classification_words():
+        for index in range(args.fuzz_words):
+            group, base, variable_mask = fuzz_groups[index % len(fuzz_groups)]
+            yield group, base | (fuzz_rng.getrandbits(32) & variable_mask)
+
+    random_words = random_classification_words()
+    for group, word in itertools.chain(random_words, classification_boundaries()):
         raw = word.to_bytes(4, "little")
         result = request({"arch": "arm64", "bytes": raw.hex(), "address": hex(CODE), "evaluate": False})
         fuzz_counts[group] += 1
@@ -290,13 +417,14 @@ def main():
             decoded = list(decoder.disasm(raw, CODE))
             if len(decoded) != 1:
                 counterexamples.append({"word": f"0x{word:08X}", "bytes": raw.hex(), "group": group, "product": result})
-    classification = {"seed": SEED ^ 0xBAD, "words": args.fuzz_words, "counts": dict(fuzz_counts), "supported_but_capstone_invalid": counterexamples, "scope": "Decoder disagreement inventory; any counterexample requires ISA review before attributing an error to the lifter or decoder", "capstone": capstone.__version__}
+    classification_words = sum(value for key, value in fuzz_counts.items() if key != "product_supported")
+    classification = {"seed": SEED ^ 0xBAD, "words": classification_words, "random_words": args.fuzz_words, "counts": dict(fuzz_counts), "supported_but_capstone_invalid": counterexamples, "scope": "Decoder disagreement inventory; any counterexample requires ISA review before attributing an error to the lifter or decoder", "capstone": capstone.__version__}
     classification_path = args.output.with_name(args.output.stem + "-classification.json")
     classification_path.parent.mkdir(parents=True, exist_ok=True)
     classification_path.write_text(json.dumps(classification, indent=2) + "\n", encoding="utf-8")
     child.stdin.close()
     require(child.wait() == 0, "Product CLI failed")
-    summary = {"seed": SEED, "cases": sum(counts.values()), "families": dict(sorted(counts.items())), "rules": sorted(forms), "roundtrip_families": sorted(roundtrips), "rejected_cases": len(rejected), "classification_words": args.fuzz_words, "classification_disagreements": len(counterexamples), "capstone": capstone.__version__, "unicorn": unicorn.__version__, "scope": "Product MIR interpreter versus independent emulator; synthetic single instructions, mapped memory and normal outcomes; not hardware, game, fault, weak-memory or whole-program proof"}
+    summary = {"seed": SEED, "cases": sum(counts.values()), "families": dict(sorted(counts.items())), "rules": sorted(forms), "roundtrip_families": sorted(roundtrips), "rejected_cases": len(rejected), "classification_words": classification_words, "classification_disagreements": len(counterexamples), "capstone": capstone.__version__, "unicorn": unicorn.__version__, "scope": "Product MIR interpreter versus independent emulator; synthetic single instructions, mapped memory and normal outcomes; not hardware, game, fault, weak-memory or whole-program proof"}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2, ensure_ascii=False))

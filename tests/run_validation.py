@@ -23,8 +23,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/verified")
     parser.add_argument("--fuzz-words", type=int, default=200000)
+    parser.add_argument("--baseline", type=Path, help="旧全量报告目录；按全部候选核对覆盖回退")
     args = parser.parse_args()
     output = args.output.resolve()
+    if args.baseline is not None and args.baseline.resolve() == output:
+        parser.error("基线目录必须与输出目录不同，禁止覆盖后自比较")
     output.mkdir(parents=True, exist_ok=True)
     assembly_hash = sha(DLL)
     sources = {str(path.relative_to(ROOT)): sha(path) for path in sorted((ROOT / "src/Cpp2CS").rglob("*.cs")) if "obj" not in path.parts and "bin" not in path.parts}
@@ -46,6 +49,7 @@ def main():
 
     execute("core", ["dotnet", DLL, "selftest"])
     execute("contracts", [sys.executable, TESTS / "contract_checks.py", DLL])
+    execute("coverage-contracts", [sys.executable, TESTS / "coverage_contracts.py"])
     execute("arm64-differential", [sys.executable, TESTS / "arm64_differential.py", "--dll", DLL, "--output", output / "arm64-differential.json", "--fuzz-words", args.fuzz_words])
     x64 = execute("x64-differential", [sys.executable, TESTS / "x64_differential.py", DLL])
     (output / "x64-differential.json").write_text(json.dumps(json.loads(x64), indent=2) + "\n", encoding="utf-8")
@@ -54,6 +58,7 @@ def main():
     fully_lifted = True
     decoder_checks = True
     known_entries_covered = True
+    coverage_regression_free = None if args.baseline is None else True
     for architecture, relative in TARGETS:
         binary = WORKSPACE / relative
         execute(f"{architecture}-scan", ["dotnet", DLL, "scan", binary, output], (0, 2))
@@ -72,11 +77,15 @@ def main():
             assert entries["sameAssemblyAsPrimary"], "入口补充与主扫描程序集不同"
             known_entries_covered &= entries["allKnownEntriesHaveCandidate"] and entries["allSupplementaryPathsJoinedOrEnded"]
         reports.append(str(report_path))
+        if args.baseline is not None:
+            execute(f"{architecture}-coverage-comparison", [sys.executable, TESTS / "compare_coverage.py", args.baseline.resolve() / report_path.name, report_path, "--output", output])
+            comparison = json.loads((output / report_path.name.replace(".report.json", ".coverage-comparison.json")).read_text(encoding="utf-8"))
+            coverage_regression_free &= comparison["passed"]
     artifacts = {str(path.relative_to(output)): sha(path) for path in sorted(output.iterdir()) if path.is_file() and path.name != "manifest.json"}
     assert all(sha(ROOT / path) == digest for path, digest in sources.items()), "验证过程中源代码发生变化"
     assert all(sha(ROOT / path) == digest for path, digest in tests.items()), "验证过程中测试脚本发生变化"
     arm = json.loads((output / "arm64-differential.json").read_text(encoding="utf-8"))
-    checks = {"semanticFixturesPassed": True, "decoderChecksPassed": decoder_checks, "allKnownEntriesCovered": known_entries_covered, "armClassificationDisagreements": arm["classification_disagreements"], "allCandidatesRepresented": all_represented, "fullyLifted": fully_lifted}
+    checks = {"semanticFixturesPassed": True, "decoderChecksPassed": decoder_checks, "allKnownEntriesCovered": known_entries_covered, "coverageRegressionFree": coverage_regression_free, "armClassificationDisagreements": arm["classification_disagreements"], "allCandidatesRepresented": all_represented, "fullyLifted": fully_lifted}
     manifest = {"status": "completed", "utc": datetime.now(timezone.utc).isoformat(), "assemblySha256": assembly_hash, "commands": commands, "scannerReports": reports, "checks": checks, "sources": sources, "testSources": tests, "artifacts": artifacts,
                 "meaning": "Full executable candidate census and structural validation, plus independent decoder checks and finite semantic fixtures. Completeness must be read from each report; this manifest does not certify native or game equivalence."}
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

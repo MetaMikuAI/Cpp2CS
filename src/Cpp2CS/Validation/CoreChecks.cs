@@ -9,7 +9,7 @@ public static class CoreChecks
 
     public static int Run()
     {
-        var checks = Images.ImageSelfTests.Run();
+        var checks = Images.ImageSelfTests.Run() + DivisionChecks.Run();
         var originalBytes = Convert.FromHexString("1F2003D5");
         var immutableOrigin = new InstructionOrigin("fixture:immutable", 0x1000, 0, originalBytes);
         originalBytes[0] = 0;

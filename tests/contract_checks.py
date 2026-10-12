@@ -7,7 +7,7 @@ from pathlib import Path
 
 DLL = Path(sys.argv[1])
 BASE = {
-    "Schema": "cpp2cs.mir/0.1", "Semantics": "attempt08-integer-1", "Profile": "aarch64-le-el0-v1",
+    "Schema": "cpp2cs.mir/0.1", "Semantics": "attempt08-bitvector-2", "Profile": "aarch64-le-el0-v1",
     "Instruction": {
         "Architecture": "Arm64", "Origin": {"ImageId": "fixture:contract", "Address": "0x1000", "FileOffset": 0, "Bytes": "HyAD1Q=="},
         "Rule": "fixture.contract", "Operations": [{"Code": "Constant", "Result": {"Id": 0, "Width": 64}, "Inputs": [], "Immediate": "0x1", "WorldIn": -1, "WorldOut": -1, "Fault": "None"}],
@@ -22,6 +22,9 @@ def run(command, payload):
 
 assert run("validate-ir", BASE).returncode == 0
 cases = []
+bad = copy.deepcopy(BASE)
+bad["Semantics"] = "attempt08-integer-1"
+cases.append(("old-semantics-version", bad))
 for name, value in (("Support", 999), ("Architecture", 999)):
     bad = copy.deepcopy(BASE)
     bad["Instruction"][name] = value
