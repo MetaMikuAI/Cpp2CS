@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../Cpp2CS.Core/Cpp2CS.Core.csproj" /><ProjectReference Include="../Cpp2CS.Input/Cpp2CS.Input.csproj" /></ItemGroup>
+</Project>

@@ -1,0 +1,8 @@
+**/bin/
+**/obj/
+artifacts/
+native.local.json
+tests/AsyncOutputFixture/Recovered.cs
+**/__pycache__/
+
+.cpp2cs/

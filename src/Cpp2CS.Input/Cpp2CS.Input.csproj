@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/**/*.cs"
+             Exclude="../../third_party/Il2CppDumper/Il2CppDumper/Program.cs;../../third_party/Il2CppDumper/Il2CppDumper/Resource1.Designer.cs;../../third_party/Il2CppDumper/Il2CppDumper/obj/**;../../third_party/Il2CppDumper/Il2CppDumper/bin/**" />
+    <Compile Include="RawImport.cs" />
+    <EmbeddedResource Include="../../third_party/Il2CppDumper/Il2CppDumper/Libraries/Il2CppDummyDll.dll" LogicalName="Il2CppDummyDll" />
+    <PackageReference Include="Mono.Cecil" Version="0.11.4" />
+  </ItemGroup>
+</Project>

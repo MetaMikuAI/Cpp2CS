@@ -1,0 +1,78 @@
+{
+  "selection": "12 evenly spaced by address among Sekai.Api OnCallBack methods with symbol span <=384",
+  "eligible": 102,
+  "methods": [
+    {
+      "Address": 85948276,
+      "Name": "Sekai.Api.GetSuiteUserPartsApi$$OnCallBack",
+      "Signature": "void Sekai_Api_GetSuiteUserPartsApi__OnCallBack (Sekai_Api_GetSuiteUserPartsApi_o* __this, Sekai_APICore_EmptyRequest__SuiteUser__o* apiCore, const MethodInfo* method);",
+      "TypeSignature": "viii"
+    },
+    {
+      "Address": 85954140,
+      "Name": "Sekai.Api.GetUserEventRankingRewardConditionApi$$OnCallBack",
+      "Signature": "void Sekai_Api_GetUserEventRankingRewardConditionApi__OnCallBack (Sekai_Api_GetUserEventRankingRewardConditionApi_o* __this, Sekai_APICore_EmptyRequest__UserEventRankingRewardConditionResponse__o* apiCore, const MethodInfo* method);",
+      "TypeSignature": "viii"
+    },
+    {
+      "Address": 85959736,
+      "Name": "Sekai.Api.PostUserAdRewardApi$$OnCallBack",
+      "Signature": "void Sekai_Api_PostUserAdRewardApi__OnCallBack (Sekai_Api_PostUserAdRewardApi_o* __this, Sekai_APICore_UserAdRewardPostRequest__UserAdReward__o* apiCore, const MethodInfo* method);",
+      "TypeSignature": "viii"
+    },
+    {
+      "Address": 85965360,
+      "Name": "Sekai.Api.PostUserMysekaiBulkHarvestApi$$OnCallBack",
+      "Signature": "void Sekai_Api_PostUserMysekaiBulkHarvestApi__OnCallBack (Sekai_Api_PostUserMysekaiBulkHarvestApi_o* __this, Sekai_APICore_UserMysekaiSiteBulkHarvestRequest__UserMysekaiSiteBulkHarvestResponse__o* apiCore, const MethodInfo* method);",
+      "TypeSignature": "viii"
+    },
+    {
+      "Address": 85971252,
+      "Name": "Sekai.Api.PostUserMysekaiGateReserveCancelApi$$OnCallBack",
+      "Signature": "void Sekai_Api_PostUserMysekaiGateReserveCancelApi__OnCallBack (Sekai_Api_PostUserMysekaiGateReserveCancelApi_o* __this, Sekai_APICore_EmptyRequest__SuiteUser__o* apiCore, const MethodInfo* method);",
+      "TypeSignature": "viii"
+    },
+    {
+      "Address": 85977228,
+      "Name": "Sekai.Api.PostUserMysekaiHousingExhibitionEntryForRandomVisitApi$$OnCallBack",
+      "Signature": "void Sekai_Api_PostUserMysekaiHousingExhibitionEntryForRandomVisitApi__OnCallBack (Sekai_Api_PostUserMysekaiHousingExhibitionEntryForRandomVisitApi_o* __this, Sekai_APICore_EmptyRequest__UserMysekaiHousingExhibitionEntryResponse__o* apiCore, const MethodInfo* method);",
+      "TypeSignature": "viii"
+    },
+    {
+      "Address": 85988180,
+      "Name": "Sekai.Api.PostUserMysekaiReleaseApi$$OnCallBack",
+      "Signature": "void Sekai_Api_PostUserMysekaiReleaseApi__OnCallBack (Sekai_Api_PostUserMysekaiReleaseApi_o* __this, Sekai_APICore_EmptyRequest__SuiteUser__o* apiCore, const MethodInfo* method);",
+      "TypeSignature": "viii"
+    },
+    {
+      "Address": 85993660,
+      "Name": "Sekai.Api.PostUserMysekaiTutorialCraftApi$$OnCallBack",
+      "Signature": "void Sekai_Api_PostUserMysekaiTutorialCraftApi__OnCallBack (Sekai_Api_PostUserMysekaiTutorialCraftApi_o* __this, Sekai_APICore_UserMysekaiCraftRequest__SuiteUser__o* apiCore, const MethodInfo* method);",
+      "TypeSignature": "viii"
+    },
+    {
+      "Address": 85999360,
+      "Name": "Sekai.Api.PostUserReportMysekaiHousingApi$$OnCallBack",
+      "Signature": "void Sekai_Api_PostUserReportMysekaiHousingApi__OnCallBack (Sekai_Api_PostUserReportMysekaiHousingApi_o* __this, Sekai_APICore_UserReportMysekaiHousingRequest__EmptyResponse__o* apiCore, const MethodInfo* method);",
+      "TypeSignature": "viii"
+    },
+    {
+      "Address": 86004972,
+      "Name": "Sekai.Api.PutUserMysekaiHousingCompetitionApi$$OnCallBack",
+      "Signature": "void Sekai_Api_PutUserMysekaiHousingCompetitionApi__OnCallBack (Sekai_Api_PutUserMysekaiHousingCompetitionApi_o* __this, Sekai_APICore_UserMysekaiHousingCompetitionSubmitRequest__SuiteUser__o* apiCore, const MethodInfo* method);",
+      "TypeSignature": "viii"
+    },
+    {
+      "Address": 86011036,
+      "Name": "Sekai.Api.GetUserTargetOfflineEventApi$$OnCallBack",
+      "Signature": "void Sekai_Api_GetUserTargetOfflineEventApi__OnCallBack (Sekai_Api_GetUserTargetOfflineEventApi_o* __this, Sekai_APICore_EmptyRequest__UserOfflineEventResponse__o* apiCore, const MethodInfo* method);",
+      "TypeSignature": "viii"
+    },
+    {
+      "Address": 86019480,
+      "Name": "Sekai.Api.PostUserMysekaiRoomApi$$OnCallBack",
+      "Signature": "void Sekai_Api_PostUserMysekaiRoomApi__OnCallBack (Sekai_Api_PostUserMysekaiRoomApi_o* __this, Sekai_APICore_EmptyRequest__UserMysekaiRoomEntryResponse__o* apiCore, const MethodInfo* method);",
+      "TypeSignature": "viii"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "Binary": "input/libil2cpp.so",
+  "Symbols": "input/script.json",
+  "Header": "input/il2cpp.h",
+  "ManagedAssembly": "input/DummyDll/Assembly-CSharp.dll",
+  "Capstone": "capstone",
+  "Clang": "clang"
+}

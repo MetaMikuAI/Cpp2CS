@@ -1,0 +1,44 @@
+[
+  {
+    "Address": 89985972,
+    "Name": "Sekai.Mysekai.DebugModelRoomFixtureListDialog.<>c__DisplayClass10_0$$<OnClickCell>b__0",
+    "Signature": "bool Sekai_Mysekai_DebugModelRoomFixtureListDialog___c__DisplayClass10_0___OnClickCell_b__0 (Sekai_Mysekai_DebugModelRoomFixtureListDialog___c__DisplayClass10_0_o* __this, Sekai_ApiData_MasterMysekaiFixture_o* fixture, const MethodInfo* method);",
+    "TypeSignature": "iiii"
+  },
+  {
+    "Address": 89986016,
+    "Name": "Sekai.Mysekai.DebugModelRoomFixtureListDialog.<>c__DisplayClass10_0$$<OnClickCell>b__1",
+    "Signature": "bool Sekai_Mysekai_DebugModelRoomFixtureListDialog___c__DisplayClass10_0___OnClickCell_b__1 (Sekai_Mysekai_DebugModelRoomFixtureListDialog___c__DisplayClass10_0_o* __this, Sekai_Mysekai_DebugFixtureCell_o* cell, const MethodInfo* method);",
+    "TypeSignature": "iiii"
+  },
+  {
+    "Address": 89986052,
+    "Name": "Sekai.Mysekai.DebugModelRoomFixtureListDialog.<>c__DisplayClass11_0$$<SetupFilterContent>b__1",
+    "Signature": "bool Sekai_Mysekai_DebugModelRoomFixtureListDialog___c__DisplayClass11_0___SetupFilterContent_b__1 (Sekai_Mysekai_DebugModelRoomFixtureListDialog___c__DisplayClass11_0_o* __this, Sekai_ApiData_MasterMysekaiFixture_o* fixture, const MethodInfo* method);",
+    "TypeSignature": "iiii"
+  },
+  {
+    "Address": 90775888,
+    "Name": "Sekai.Mysekai.AvatarDataStore.<FindNPCs>d__16$$MoveNext",
+    "Signature": "bool Sekai_Mysekai_AvatarDataStore__FindNPCs_d__16__MoveNext (Sekai_Mysekai_AvatarDataStore__FindNPCs_d__16_o* __this, const MethodInfo* method);",
+    "TypeSignature": "iii"
+  },
+  {
+    "Address": 91261136,
+    "Name": "Sekai.Mysekai.MysekaiBlueprint3DPreview.<WaitEndOfFrame>d__78$$MoveNext",
+    "Signature": "bool Sekai_Mysekai_MysekaiBlueprint3DPreview__WaitEndOfFrame_d__78__MoveNext (Sekai_Mysekai_MysekaiBlueprint3DPreview__WaitEndOfFrame_d__78_o* __this, const MethodInfo* method);",
+    "TypeSignature": "iii"
+  },
+  {
+    "Address": 89995388,
+    "Name": "Sekai.Mysekai.MysekaiBGMManager$$PlayBGMAsync",
+    "Signature": "Cysharp_Threading_Tasks_UniTask_o Sekai_Mysekai_MysekaiBGMManager__PlayBGMAsync (Sekai_Mysekai_MysekaiBGMManager_o* __this, int32_t mysekaiSiteId, Sekai_Mysekai_MysekaiMusicRecordModel_o* musicRecordModel, System_Threading_CancellationToken_o ct, const MethodInfo* method);",
+    "TypeSignature": "iiiiii"
+  },
+  {
+    "Address": 90019408,
+    "Name": "Sekai.Mysekai.AvatarFactory.<CreatePlayerAvatar>d__1$$MoveNext",
+    "Signature": "void Sekai_Mysekai_AvatarFactory__CreatePlayerAvatar_d__1__MoveNext (Sekai_Mysekai_AvatarFactory__CreatePlayerAvatar_d__1_o __this, const MethodInfo* method);",
+    "TypeSignature": "vii"
+  }
+]
