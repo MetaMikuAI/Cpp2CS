@@ -124,6 +124,7 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         foreach (var key in states.SelectMany(s => s.Registers.Keys).Distinct())
         {
             var values = states.Select(s => Read(s, key)).ToArray();
+            values = NativeValues.JoinReferences(values) ?? values;
             if (values.All(v => v == values[0])) output.Registers[key] = values[0];
             else if (values[0].Type is "float" or "double" && values.All(v => v.Type == values[0].Type && v.Expression == values[0].Expression))
                 output.Registers[key] = values[0] with { Bits = BitOps.Phi($"{address:x}:{key}", values.Select(v => v.Bits)) };
@@ -166,6 +167,8 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         if (layout is null || layout.Return.Indirect) return new UnknownExpression("return-abi");
         var pieces = layout.Return.Pieces.Select(p => NativeValues.Slice(Read(state, ((RegisterLocation)p.Location).Name.ToLowerInvariant()), 0, p.Size * 8)).ToArray();
         var value = pieces.Length == 1 ? pieces[0] : NativeValues.Compose(pieces, method.ReturnType);
+        if (NativeValues.ReferenceAs(value, method.ReturnType) is { } reference) return reference.Expression;
+        if (NativeValues.IsManagedReference(method.ReturnType) && value.Type == "native-bits") return new UnknownExpression("引用返回的位表示尚未恢复");
         if (layout.Return.Shape.Kind is ShapeKind.Composite or ShapeKind.HomogeneousFloat)
             return new AggregateExpression(symbols.Display(method.ReturnType), value.Expression);
         if (IntegerProjection.Width(method.ReturnType) > 0)
@@ -206,7 +209,7 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         if (receiver.Expression is MetadataExpression { IsSlot: true } slot && offset == 0 && size == 8)
         {
             result.Proofs.Add(new(pc, "MetadataSlotLoad", slot.Reference.Name));
-            return new(new InputBits($"metadata:{slot.Reference.Slot:x}", 64), slot.Reference.Type.Length > 0 ? slot.Reference.Type : "MethodInfo*", slot with { IsSlot = false });
+            return new(new InputBits($"metadata:{slot.Reference.Slot:x}", 64), slot.Reference.ValueType, slot with { IsSlot = false });
         }
         var field = layouts.Field(receiver.Type, offset, size);
         if (field is not null)

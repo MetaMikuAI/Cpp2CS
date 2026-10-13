@@ -6,13 +6,23 @@ namespace Cpp2CS.Native;
 public static class NativeValues
 {
     public static bool IsManagedReference(string type) => type.EndsWith("_o*") || type.EndsWith("_array*") || type == "Il2CppObject*";
+    public static NativeValue? ReferenceAs(NativeValue value, string type)
+    {
+        if (!IsManagedReference(type) || value.Bits.Width != 64) return null;
+        if (value.Bits is ConstantBits { Value.IsZero: true }) return value with { Type = type, Expression = new NameExpression("null") };
+        return value.Type == type || type == "Il2CppObject*" && IsManagedReference(value.Type) ? value with { Type = type } : null;
+    }
+    public static NativeValue[]? JoinReferences(NativeValue[] values)
+    {
+        var types = values.Select(v => v.Type).Where(IsManagedReference).Distinct().ToArray();
+        var type = types.Length == 1 ? types[0] : types.Contains("Il2CppObject*") ? "Il2CppObject*" : null;
+        if (type is null) return null;
+        var converted = values.Select(v => ReferenceAs(v, type)).ToArray();
+        return converted.All(v => v is not null) ? converted.Select(v => v!).ToArray() : null;
+    }
     public static (string Type, Expression Left, Expression Right)? ReferenceSelection(NativeValue left, NativeValue right)
     {
-        var type = IsManagedReference(left.Type) ? left.Type : right.Type;
-        if (!IsManagedReference(type) || left.Bits.Width != 64 || right.Bits.Width != 64) return null;
-        Expression? Arm(NativeValue value) => value.Type == type ? value.Expression :
-            value.Bits is ConstantBits { Value.IsZero: true } ? new NameExpression("null") : null;
-        return Arm(left) is { } l && Arm(right) is { } r ? (type, l, r) : null;
+        return JoinReferences([left, right]) is { } joined ? (joined[0].Type, joined[0].Expression, joined[1].Expression) : null;
     }
     public static void StoreStack(NativeState state, RegionId region, long offset, NativeValue value, string identity)
     {
@@ -31,6 +41,7 @@ public static class NativeValues
     public static NativeValue Slice(NativeValue value, int offset, int width, string? type = null)
     {
         var bits = BitOps.Slice(value.Bits, offset, width);
+        if (IsManagedReference(value.Type) && (offset != 0 || width != 64)) type = "native-bits";
         if (offset == 0 && width == value.Bits.Width) return value with { Type = type ?? value.Type };
         if (value.Expression is ConstantExpression && bits is ConstantBits constant && constant.Value <= long.MaxValue)
         {

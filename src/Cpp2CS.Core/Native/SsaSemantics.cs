@@ -221,7 +221,7 @@ public sealed class SsaSemantics(NativeSsaProgram program, NativeMethod method, 
         {
             var pointer = image.ReadResolvedPointer(unchecked((ulong)address.Offset));
             if (pointer is { } slot && symbols.Metadata.TryGetValue(slot, out var metadata))
-                return Term("metadata-slot", 64, metadata.Name, (long)slot, metadata.Type);
+                return Term("metadata-slot", 64, metadata.Name, (long)slot, metadata.ValueType);
         }
         if (address.Kind == "metadata-slot" && width == 64) return MetadataContent(address);
         if (address.Kind == "constant" && image.ReadImmutableScalar(unchecked((ulong)address.Offset), width / 8) is { } constant)

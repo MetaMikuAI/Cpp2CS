@@ -98,8 +98,9 @@ public sealed partial class FunctionLifter
         {
             var name = ((NameExpression)variable.Value.Expression).Name;
             result.Blocks[graph.Entry].Statements.Insert(0, new DeclareStatement(graph.Entry, name, symbols.Display(variable.Value.Type)));
-            foreach (var (predecessor, value) in variable.Entry.Concat(variable.Loop.Latches.Select(l => (l, Read(outgoing[l], variable.Register)))))
+            foreach (var (predecessor, incomingValue) in variable.Entry.Concat(variable.Loop.Latches.Select(l => (l, Read(outgoing[l], variable.Register)))))
             {
+                var value = NativeValues.ReferenceAs(incomingValue, variable.Value.Type) ?? incomingValue;
                 if (value.Type != variable.Value.Type) result.Problems.Add($"循环回边类型不一致：{name}: {value.Type} / {variable.Value.Type}");
                 var edge = (predecessor, variable.Loop.Header);
                 if (!assignments.TryGetValue(edge, out var list)) assignments[edge] = list = [];

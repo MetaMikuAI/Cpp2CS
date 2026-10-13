@@ -162,6 +162,7 @@ NativeChecks.Run(Check);
 MachineEffectsChecks.Run(Check);
 ArithmeticArrayChecks.Run(Check);
 IntegerProjectionChecks.Run(Check);
+RuntimeTypeChecks.Run(Check);
 DelegateCacheChecks.Run(Check);
 LambdaChecks.Run(Check);
 AsyncChecks.Run(Check);

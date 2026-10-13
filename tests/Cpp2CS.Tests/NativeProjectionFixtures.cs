@@ -41,7 +41,7 @@ public static class NativeProjectionFixtures
         Console.WriteLine($"PASS: {cases.Length} synthetic native functions recovered or explicitly rejected");
         string Display(string type) => layouts.ArrayElements(type) is { } elements ? Display(elements.Type) + "[]" : type switch
         {
-            "void" => "void", "Il2CppObject*" => "object", "int8_t" => "sbyte", "uint8_t" => "byte", "int16_t" => "short", "uint16_t" => "ushort",
+            "void" => "void", "Il2CppObject*" => "object", "System_String_o*" => "string", "int8_t" => "sbyte", "uint8_t" => "byte", "int16_t" => "short", "uint16_t" => "ushort",
             "int32_t" => "int", "uint32_t" => "uint", "int64_t" => "long", "uint64_t" => "ulong", _ => throw new InvalidOperationException(type)
         };
     }

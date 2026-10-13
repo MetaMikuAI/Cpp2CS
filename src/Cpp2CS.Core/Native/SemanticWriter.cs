@@ -40,7 +40,7 @@ public sealed class SemanticWriter(Symbols symbols)
     };
     public static string Statement(Statement s) => s switch
     {
-        AssignStatement a => $"{(a.Value is LambdaExpression ? a.Type : "var")} {a.Name} = {Expression(a.Value)};",
+        AssignStatement a => $"{(a.Value is LambdaExpression or NameExpression { Name: "null" } ? a.Type : "var")} {a.Name} = {Expression(a.Value)};",
         EvaluateStatement e => Expression(e.Value) + ";",
         DeclareStatement d => $"{(d.Type is "int32_t" ? "int" : d.Type is "int64_t" ? "long" : d.Type)} {d.Name};",
         SetLocalStatement local => local.Name + " = " + Expression(local.Value) + ";",
@@ -173,7 +173,7 @@ public sealed class SemanticWriter(Symbols symbols)
         string E(Expression e) => Expression(Rename(e));
         string S(Statement s) => Statement(s switch
         {
-            AssignStatement a => a with { Name = names[a.Name], Value = Rename(a.Value) },
+            AssignStatement a => a with { Name = names[a.Name], Value = Rename(a.Value), Type = symbols?.Display(a.Type) ?? a.Type },
             EvaluateStatement e => e with { Value = Rename(e.Value) },
             CallStatement c => c with { Result = c.Result is null ? null : names[c.Result], Receiver = c.Receiver is null ? null : Rename(c.Receiver), Arguments = c.Arguments.Select(Rename).ToArray() },
             StoreStatement w => w with { Target = Rename(w.Target), Value = Rename(w.Value) },

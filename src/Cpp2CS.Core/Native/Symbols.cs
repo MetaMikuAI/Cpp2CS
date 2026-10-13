@@ -5,7 +5,12 @@ namespace Cpp2CS.Native;
 
 public sealed record NativeParameter(string Type, string Name);
 public sealed record NativeMethod(ulong Address, string Name, string ReturnType, NativeParameter[] Parameters, string Signature);
-public sealed record MetadataReference(ulong Slot, string Kind, string Name, string Type, ulong MethodAddress);
+public sealed record MetadataReference(ulong Slot, string Kind, string Name, string Type, ulong MethodAddress)
+{
+    // ScriptString 与 ScriptMetadataMethod 的导出格式没有 Signature；槽内容类型由元数据类别确定。
+    public string ValueType => Kind == "ScriptString" ? "System_String_o*" : Type.Length != 0 ? Type :
+        Kind == "ScriptMetadataMethod" ? "MethodInfo*" : "unknown";
+}
 public sealed class Symbols
 {
     public Dictionary<ulong, NativeMethod[]> Methods { get; }
