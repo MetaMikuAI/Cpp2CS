@@ -15,6 +15,19 @@ public static class AsyncChecks
             struct Nested { Pair pair; float z; };
             union Ambiguous { float x; int y; };
             struct RecordArray { Pair pairs[2]; };
+            struct Overlay {
+                union {
+                    #pragma pack(push, 1)
+                    int32_t word;
+                    uint8_t first;
+                    struct { uint8_t padding[3]; uint8_t last; };
+                    #pragma pack(pop)
+                };
+            };
+            struct Container { uint8_t prefix; Overlay payload; int32_t suffix; };
+            struct Context;
+            typedef void (*Callback)(const Context*, void**);
+            struct WithCallback { uint8_t flag; Callback invoke; Overlay payload; };
             """);
         var layout = new HeaderLayout(path, compiler);
         check(layout.Shape("Task") is { Kind: Cpp2CS.Abi.ShapeKind.Composite, Size: 16, Alignment: 8 }, "Clang 实际布局保留 source/token 尾部 padding");
@@ -23,6 +36,15 @@ public static class AsyncChecks
         check(layout.Shape("Nested") is { Kind: Cpp2CS.Abi.ShapeKind.HomogeneousFloat, ElementCount: 3 }, "嵌套结构体的浮点成员参与 HFA 分类");
         check(layout.Shape("Ambiguous").Kind == Cpp2CS.Abi.ShapeKind.Unknown, "union 未确认 ABI 不猜测寄存器类别");
         check(layout.Shape("RecordArray").Kind == Cpp2CS.Abi.ShapeKind.Unknown, "未展开的结构体数组 ABI 保持未知");
+        check(layout.Size("Overlay") == 4 && layout.Size("Container") == 12, "匿名重叠聚合保留完整声明并由 Clang 计算实际布局");
+        check(layout.ContainingField("Container", 8, 4) is { Name: "suffix", Type: "int32_t" }, "匿名聚合不阻断外层后续字段的偏移恢复");
+        check(layout.Members("Overlay").Length == 0 && layout.ContainingField("Container", 4, 1) is null,
+            "重叠存储不按声明顺序猜测活动字段");
+        check(layout.Shape("Overlay").Kind == Cpp2CS.Abi.ShapeKind.Unknown && layout.Shape("Container").Kind == Cpp2CS.Abi.ShapeKind.Unknown,
+            "匿名重叠聚合的 ABI 分类保持未确认");
+        check(layout.Size("Callback") == 8 && layout.Size("WithCallback") == 24 &&
+            layout.ContainingField("WithCallback", 8, 8) is { Name: "invoke", Type: "Callback" },
+            "函数指针别名参与布局，参数所指的不完整类型不要求值布局");
     }
     public static void Run(Action<bool, string> check)
     {

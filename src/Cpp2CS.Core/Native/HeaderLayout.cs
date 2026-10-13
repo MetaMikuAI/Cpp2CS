@@ -8,7 +8,8 @@ public sealed record HeaderField(string Name, string Type, int Offset, int Size,
 {
     public string[] Path { get; init; } = [];
 }
-public sealed record HeaderRecord(string Name, string? Base, string Source, string Kind, (string Name, string Type, int Count)[] Fields);
+public sealed record HeaderRecord(string Name, string? Base, string Source, string Kind, (string Name, string Type, int Count)[] Fields,
+    bool Opaque = false, string? Unsupported = null);
 public sealed class HeaderLayout
 {
     private readonly Dictionary<string, HeaderRecord> records = [];
@@ -28,13 +29,34 @@ public sealed class HeaderLayout
                 Scalars.Add(alias.Groups[2].Value, size); aliases.Add(alias.Value);
                 if (floatingScalars.Contains(alias.Groups[1].Value)) floatingScalars.Add(alias.Groups[2].Value);
             }
+        foreach (Match alias in Regex.Matches(text, @"typedef\s+[^;{}]+\(\s*\*\s*(\w+)\s*\)\s*\([^;{}]*\)\s*;"))
+        {
+            var name = alias.Groups[1].Value;
+            if (!Scalars.TryAdd(name, 8)) continue;
+            // 布局查询只使用 AArch64 函数指针的大小和对齐，不推断调用签名。
+            aliases.Add($"typedef void (*{name})();");
+        }
         scalarAliases = string.Join('\n', aliases) + "\n";
         var directives = Regex.Matches(text, @"#\s*pragma\s+pack\s*\(([^)]*)\)").Cast<Match>().ToArray();
         var directiveIndex = 0;
         string? pack = null;
         var packStack = new Stack<string?>();
-        foreach (Match m in Regex.Matches(text, @"\b(struct|union)\s+(\w+)\s*(?::\s*(\w+)\s*)?\{([^{}]*)\}\s*;"))
+        var startPattern = new Regex(@"\b(struct|union)\s+(\w+)\s*(?::\s*(\w+)\s*)?\{");
+        for (var m = startPattern.Match(text); m.Success;)
         {
+            var bodyStart = m.Index + m.Length;
+            var end = bodyStart;
+            var depth = 1;
+            while (end < text.Length && depth != 0)
+            {
+                if (text[end] == '{') depth++;
+                if (text[end] == '}') depth--;
+                end++;
+            }
+            if (depth != 0) throw new InvalidDataException("记录大括号未闭合：" + m.Groups[2].Value);
+            var semicolon = end;
+            while (semicolon < text.Length && char.IsWhiteSpace(text[semicolon])) semicolon++;
+            if (semicolon == text.Length || text[semicolon] != ';') throw new InvalidDataException("记录声明未终止：" + m.Groups[2].Value);
             while (directiveIndex < directives.Length && directives[directiveIndex].Index < m.Index)
             {
                 var args = directives[directiveIndex++].Groups[1].Value.Split(',', StringSplitOptions.TrimEntries);
@@ -44,13 +66,31 @@ public sealed class HeaderLayout
             }
             if (pack is not null) rejectedPacking.Add(m.Groups[2].Value);
             var fields = new List<(string, string, int)>();
-            foreach (var decl in m.Groups[4].Value.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+            string? unsupported = null;
+            var body = text[bodyStart..(end - 1)];
+            ReadFields(Regex.Replace(body, @"^\s*#\s*pragma[^\r\n]*", "", RegexOptions.Multiline));
+            records.TryAdd(m.Groups[2].Value, new(m.Groups[2].Value, m.Groups[3].Success ? m.Groups[3].Value : null,
+                text[m.Index..(semicolon + 1)], m.Groups[1].Value, fields.ToArray(), body.Contains('{'), unsupported));
+            m = startPattern.Match(text, semicolon + 1);
+
+            // 匿名聚合的字段只用于收集编译依赖；重叠成员不参与字段身份推断。
+            void ReadFields(string source)
             {
-                var f = Regex.Match(decl, @"^(.+?[\s*])(\w+)\s*(?:\[\s*(\d+)\s*\])?$");
-                if (!f.Success) { fields.Clear(); break; }
-                fields.Add((f.Groups[2].Value, Symbols.Clean(f.Groups[1].Value), f.Groups[3].Success ? int.Parse(f.Groups[3].Value) : 1));
+                var begin = 0; var nesting = 0;
+                for (var i = 0; i < source.Length; i++)
+                {
+                    if (source[i] == '{') nesting++;
+                    if (source[i] == '}') nesting--;
+                    if (source[i] != ';' || nesting != 0) continue;
+                    var decl = source[begin..i].Trim(); begin = i + 1;
+                    var anonymous = Regex.Match(decl, @"^(?:struct|union)\s*\{([\s\S]*)\}$");
+                    if (anonymous.Success) { ReadFields(anonymous.Groups[1].Value); continue; }
+                    var f = Regex.Match(decl, @"^(.+?[\s*])(\w+)\s*(?:\[\s*(\d+)\s*\])?$");
+                    if (!f.Success) { unsupported = "字段声明尚未支持：" + decl; continue; }
+                    fields.Add((f.Groups[2].Value, Symbols.Clean(f.Groups[1].Value), f.Groups[3].Success ? int.Parse(f.Groups[3].Value) : 1));
+                }
+                if (!string.IsNullOrWhiteSpace(source[begin..])) unsupported = "字段声明未终止：" + source[begin..].Trim();
             }
-            records.TryAdd(m.Groups[2].Value, new(m.Groups[2].Value, m.Groups[3].Success ? m.Groups[3].Value : null, m.Value, m.Groups[1].Value, fields.ToArray()));
         }
     }
     private const string Prelude = "typedef signed char int8_t; typedef unsigned char uint8_t; typedef short int16_t; typedef unsigned short uint16_t; typedef int int32_t; typedef unsigned int uint32_t; typedef long long int64_t; typedef unsigned long long uint64_t; typedef unsigned long size_t; typedef long intptr_t; typedef unsigned long uintptr_t; typedef void(*Il2CppMethodPointer)();\n";
@@ -72,7 +112,7 @@ public sealed class HeaderLayout
         if (type.EndsWith('*')) return AbiShape.Integer();
         if (floatingScalars.Contains(type)) return AbiShape.Float(Size(type));
         if (Scalars.TryGetValue(type, out var scalar)) return AbiShape.Integer(scalar);
-        if (!records.TryGetValue(type, out var record) || record.Kind == "union") return AbiShape.Unknown;
+        if (!records.TryGetValue(type, out var record) || record.Kind == "union" || record.Opaque || record.Unsupported is not null) return AbiShape.Unknown;
         Ensure(type);
         var fields = Flatten(type, 0).ToArray();
         if (fields.Any(f => records.ContainsKey(f.Type))) return AbiShape.Unknown;
@@ -107,7 +147,7 @@ public sealed class HeaderLayout
     public HeaderField[] Members(string type)
     {
         type = type.TrimEnd('*');
-        if (!records.TryGetValue(type, out var record)) return [];
+        if (!records.TryGetValue(type, out var record) || record.Opaque || record.Kind == "union") return [];
         Ensure(type);
         return record.Fields.Select(f => new HeaderField(f.Name, f.Type, layouts[type].Offsets[f.Name], Size(f.Type) * f.Count, type) { Path = [f.Name] }).ToArray();
     }
@@ -130,13 +170,13 @@ public sealed class HeaderLayout
         Ensure(name);
         var record = records[name];
         var layout = layouts[name];
-        if (record.Kind == "union") yield break;
+        if (record.Kind == "union" || record.Opaque) yield break;
         if (record.Base is not null)
             foreach (var field in Flatten(record.Base, origin + layout.Base)) yield return field;
         foreach (var field in record.Fields)
         {
             var offset = origin + layout.Offsets[field.Name];
-            if (records.ContainsKey(field.Type) && field.Count == 1 && records[field.Type].Kind != "union")
+            if (records.TryGetValue(field.Type, out var nestedRecord) && field.Count == 1 && nestedRecord.Kind != "union" && !nestedRecord.Opaque)
                 foreach (var nested in Flatten(field.Type, offset)) yield return nested;
             else yield return new(field.Name, field.Type, offset, checked(Size(field.Type) * field.Count), name);
         }
@@ -153,6 +193,7 @@ public sealed class HeaderLayout
             if (active.Contains(n)) throw new InvalidDataException("递归值类型布局");
             if (!seen.Add(n)) return;
             if (!records.TryGetValue(n, out var record)) throw new InvalidDataException("缺少布局：" + n);
+            if (record.Unsupported is not null) throw new InvalidDataException(n + ": " + record.Unsupported);
             if (rejectedPacking.Contains(n)) throw new InvalidDataException("不支持该记录的 pack 布局：" + n);
             active.Add(n);
             if (record.Base is not null) Visit(record.Base);
