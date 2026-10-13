@@ -6,7 +6,15 @@ namespace Cpp2CS.Native;
 // 面向复查的单向导出；不作为可重新导入的 NativeIR 持久化协议。
 public static class NativeReport
 {
-    public const string Schema = "cpp2cs.native-inspection/0.1";
+    public const string Schema = "cpp2cs.native-inspection/0.2";
+    public static object Summary(NativeNormalizationResult result) => new
+    {
+        schema = Schema, revision = result.Revision, inputRevision = result.Original.Source.Revision,
+        rules = result.RuleVersion, result.ReachedFixedPoint, result.MaxRounds, result.Statistics,
+        rulesApplied = result.Rewrites.GroupBy(r => r.Rule).OrderBy(g => g.Key).ToDictionary(g => g.Key, g => g.Count()),
+        graph = Summary(result.Region),
+        meaning = "Pure bitvector reduction and redundant Bits parameters; effect stages, entry inputs, World and open boundaries retained"
+    };
     public static object Summary(NativeRegion region) => new
     {
         schema = Schema, revision = region.Source.Revision, imageId = region.Source.ImageId,
@@ -24,13 +32,36 @@ public static class NativeReport
             .OfType<RegionBoundary>().GroupBy(b => b.Kind).ToDictionary(g => g.Key.ToString(), g => g.Count()),
         support = region.Blocks.Where(b => b.Capabilities is not null).GroupBy(b => b.Capabilities!.Support)
             .ToDictionary(g => g.Key.ToString(), g => g.Count()),
-        meaning = "Validated open CFG and mechanical full-state SSA; no ABI summaries, native normalization, complete reachability or game-runtime proof"
+        meaning = "Open CFG with full state maps; counts alone do not prove complete reachability or game-runtime equivalence"
     };
 
     public static void Write(NativeRegion region, string path)
     {
         var errors = NativeValidator.Validate(region);
         if (errors.Count != 0) throw new InvalidDataException(string.Join("; ", errors));
+        WriteCore(region, Summary(region), null, path);
+    }
+
+    public static void Write(NativeNormalizationResult result, string path)
+    {
+        var errors = NativeNormalizationValidator.Validate(result);
+        if (errors.Count != 0) throw new InvalidDataException(string.Join("; ", errors));
+        WriteCore(result.Region, Summary(result), result.Rewrites.Select(r => new
+        {
+            r.Round, block = r.Block.Id, r.Rule, value = r.Value.Id.Id, alias = r.Alias?.Id.Id,
+            source = r.Before?.Source, before = Expression(r.Before), after = Expression(r.After)
+        }), path);
+    }
+
+    private static object? Expression(NativeNode? node) => node is null ? null : new
+    {
+        node.Code, result = node.Result?.Id.Id, width = (node.Result?.Type as BitsType)?.Width,
+        inputs = node.Inputs.Select(v => new { id = v.Id.Id, width = (v.Type as BitsType)?.Width }),
+        node.Payload, node.Source
+    };
+
+    private static void WriteCore(NativeRegion region, object summary, object? rewrites, string path)
+    {
         object Value(NativeValue value) => new { id = value.Id.Id, type = value.Type is BitsType bits ? $"bits{bits.Width}" : "world" };
         object State(StateMap state) => new
         {
@@ -45,7 +76,7 @@ public static class NativeReport
         };
         var report = new
         {
-            summary = Summary(region),
+            summary, rewrites,
             entries = region.Source.Entries.Select(e => new { address = $"0x{e.Seed.Address:X}", e.Seed.Evidence, block = e.Block.Id }),
             blocks = region.Blocks.Select(block => new
             {

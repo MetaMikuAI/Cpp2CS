@@ -142,21 +142,31 @@ public static class NativeExecutionChecks
     public static int Compare(RegionRevision graph, ulong entry, MachineState initial, int budget)
     {
         var native = StateSsaConverter.Convert(graph);
+        var normalized = NativeNormalizer.Normalize(native);
         CoreChecks.Require(native.Blocks.SelectMany(b => b.Nodes).All(n => n.Code is not (OpCode.ReadSlot or OpCode.WriteSlot)), "SSA removes all machine-slot operations");
         var expectedState = Clone(initial);
         var actualState = Clone(initial);
+        var reducedState = Clone(initial);
         var expectedTrace = new List<string>();
         var actualTrace = new List<string>();
+        var reducedTrace = new List<string>();
         var expected = MirRegionExecutor.Execute(graph, entry, expectedState, budget,
             (ir, result, state) => expectedTrace.Add(Witness(ir, result, state)));
         var actual = NativeExecutor.Execute(native, entry, actualState, budget,
             (ir, result, state) => actualTrace.Add(Witness(ir, result, state)));
+        var reduced = NativeExecutor.Execute(normalized, entry, reducedState, budget,
+            (ir, result, state) => reducedTrace.Add(Witness(ir, result, state)));
         CoreChecks.Require(expectedTrace.SequenceEqual(actualTrace), $"MIR/SSA instruction-boundary state mismatch at 0x{entry:X}");
         CoreChecks.Require(expected.Outcome == actual.Outcome && expected.Address == actual.Address && expected.NextAddress == actual.NextAddress &&
             expected.Boundary == actual.Boundary && expected.Instructions == actual.Instructions && expected.LastInstruction == actual.LastInstruction &&
             expected.TraversedEdges.SequenceEqual(actual.TraversedEdges), "MIR/SSA final boundary and parallel edge identity");
         CoreChecks.Require(Snapshot(expectedState) == Snapshot(actualState), "MIR/SSA final external state");
-        return 4 + expectedTrace.Count;
+        CoreChecks.Require(expectedTrace.SequenceEqual(reducedTrace), $"MIR/N2 instruction-boundary state mismatch at 0x{entry:X}");
+        CoreChecks.Require(expected.Outcome == reduced.Outcome && expected.Address == reduced.Address && expected.NextAddress == reduced.NextAddress &&
+            expected.Boundary == reduced.Boundary && expected.Instructions == reduced.Instructions && expected.LastInstruction == reduced.LastInstruction &&
+            expected.TraversedEdges.SequenceEqual(reduced.TraversedEdges), "MIR/N2 final boundary and parallel edge identity");
+        CoreChecks.Require(Snapshot(expectedState) == Snapshot(reducedState), "MIR/N2 final external state");
+        return 7 + expectedTrace.Count * 2;
     }
 
     public static MachineState State(Architecture architecture)

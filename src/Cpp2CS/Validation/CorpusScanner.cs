@@ -82,7 +82,7 @@ public static class CorpusScanner
             preferredBase = $"0x{image.PreferredBase:X}",
             scanKind = image.Architecture == Architecture.Arm64 ? "Every aligned 4-byte word in executable file mappings" : "Iced 64-bit linear sweep of executable file mappings; invalid input continues at consumed byte boundary",
             scope = "Candidate bytes only: not reachable CFG, all legal x86 entry points, complete instruction semantics, native equivalence, or game runtime validation. Unsupported and invalid candidates remain in the index.",
-            validation = "Every supported MIR candidate passed through MirValidator; structural checking is not semantic equivalence.",
+            validation = "Every supported MIR candidate passed through MirValidator and the shared Native pure-value pass with a separate structural/effect check; details and scope are in nativeCandidatePureChecks. Structural checking is not semantic equivalence.",
             passedStructuralValidation = result.StructuralChecksPassed,
             allCandidatesRepresented = result.AllCandidatesRepresented,
             fullyLifted = result.FullyLifted,
@@ -101,6 +101,7 @@ public static class CorpusScanner
             truncatedOrUnalignedBytes = counts.BoundaryBytes,
             validationErrors = counts.ValidationErrors,
             mirOperations = counts.Operations,
+            nativeCandidatePureChecks = counts.NativeChecks.Summary(),
             forms = Sorted(counts.Forms),
             supportClasses = Sorted(counts.SupportClasses),
             unsupportedReasons = Sorted(counts.UnsupportedReasons),
@@ -197,6 +198,7 @@ public static class CorpusScanner
         }
         counts.Validated++;
         counts.Operations += ir.Operations.Length;
+        counts.NativeChecks.Check(ir);
         Increment(counts.SupportClasses, ir.Support.ToString());
         var obligations = ir.Obligations;
         foreach (var reason in obligations.Select(item => item.Reason).Distinct()) Increment(counts.Limitations, reason);
@@ -280,5 +282,6 @@ public static class CorpusScanner
         public readonly Dictionary<string, long> UnsupportedReasons = new(StringComparer.Ordinal);
         public readonly Dictionary<string, long> Limitations = new(StringComparer.Ordinal);
         public readonly Dictionary<string, long> Obligations = new(StringComparer.Ordinal);
+        public readonly NativeCorpusChecks NativeChecks = new();
     }
 }

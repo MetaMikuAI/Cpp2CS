@@ -16,6 +16,20 @@ public static class NativeExecutor
     {
         var errors = NativeValidator.Validate(region);
         if (errors.Count != 0) throw new InvalidDataException(string.Join("; ", errors));
+        return ExecuteCore(region, entryAddress, state, instructionBudget, observe);
+    }
+
+    public static RegionExecutionResult Execute(NativeNormalizationResult normalized, ulong entryAddress, MachineState state,
+        int instructionBudget, Action<MirInstruction, ExecutionResult, MachineState>? observe = null)
+    {
+        var errors = NativeNormalizationValidator.Validate(normalized);
+        if (errors.Count != 0) throw new InvalidDataException(string.Join("; ", errors));
+        return ExecuteCore(normalized.Region, entryAddress, state, instructionBudget, observe);
+    }
+
+    private static RegionExecutionResult ExecuteCore(NativeRegion region, ulong entryAddress, MachineState state,
+        int instructionBudget, Action<MirInstruction, ExecutionResult, MachineState>? observe)
+    {
         if (instructionBudget < 1) throw new ArgumentOutOfRangeException(nameof(instructionBudget));
         var entry = region.Source.Entries.FirstOrDefault(e => e.Seed.Address == entryAddress)
             ?? throw new ArgumentException("Execution must start at an explicit region entry", nameof(entryAddress));
@@ -70,9 +84,8 @@ public static class NativeExecutor
                 }
                 else if (original.Code == OpCode.WriteSlot)
                     state.Slots[original.Slot!] = Read(step.After.Slots[original.Slot!]);
-                else
+                else if (step.NodeIndex is { } nodeIndex)
                 {
-                    var nodeIndex = step.NodeIndex!.Value;
                     var node = block.Nodes[nodeIndex];
                     for (var i = 0; i < node.Inputs.Length; i++) arguments[i] = Read(node.Inputs[i]);
                     var evaluated = MirOperationEvaluator.Evaluate(region.Source.Architecture, prepared[block.Id][nodeIndex],

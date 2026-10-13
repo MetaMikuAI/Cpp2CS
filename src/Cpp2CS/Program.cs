@@ -21,7 +21,7 @@ if (args.Length == 5 && args[0] == "native")
     var image = ImageDocument.Load(args[1]);
     var entries = args[2].Split(',').Select(a => new EntrySeed(ParseAddress(a), "explicit CLI entry; not a proved function boundary"));
     var region = RegionBuilder.Build(image, entries, int.Parse(args[3], CultureInfo.InvariantCulture));
-    var native = StateSsaConverter.Convert(region);
+    var native = NativeNormalizer.Normalize(StateSsaConverter.Convert(region));
     NativeReport.Write(native, args[4]);
     Console.WriteLine(JsonSerializer.Serialize(new { report = Path.GetFullPath(args[4]), summary = NativeReport.Summary(native) }));
     return 0;

@@ -101,6 +101,7 @@ def main():
     known_entries_covered = True
     coverage_regression_free = None if args.baseline is None else True
     contract_comparisons = []
+    native_candidate_checks = []
     for architecture, relative in TARGETS:
         binary = WORKSPACE / relative
         execute(f"{architecture}-scan", ["dotnet", DLL, "scan", binary, output], (0, 2))
@@ -108,6 +109,10 @@ def main():
         report = json.loads(report_path.read_text(encoding="utf-8-sig"))
         assert report["implementationAssemblySha256"] == assembly_hash
         assert report["inputSha256"] == sha(binary)
+        native_candidates = report["nativeCandidatePureChecks"]
+        assert native_candidates["enabled"] and native_candidates["passed"]
+        assert native_candidates["checkedCandidates"] == report["validated"], "共享纯值 pass 未覆盖全部已支持候选"
+        native_candidate_checks.append({"architecture": architecture, **native_candidates})
         execute(f"{architecture}-decoder", [sys.executable, TESTS / "decoder_corpus.py", report_path, binary, "--output-directory", output], (0, 1))
         independent = json.loads((output / report_path.name.replace(".report.json", ".decoder.report.json")).read_text(encoding="utf-8"))
         all_represented &= report["allCandidatesRepresented"]
@@ -130,12 +135,12 @@ def main():
     assert test_identity() == tests, "验证过程中测试脚本的内容、文件集合发生变化"
     arm = json.loads((output / "arm64-differential.json").read_text(encoding="utf-8"))
     contract_regression_free = False if False in contract_comparisons else None if not contract_comparisons or None in contract_comparisons else True
-    checks = {"validationRunCompleted": True, "semanticFixturesPassed": True, "nativeFixturesPassed": True, "decoderChecksPassed": decoder_checks, "allKnownEntriesCovered": known_entries_covered,
+    checks = {"validationRunCompleted": True, "semanticFixturesPassed": True, "nativeFixturesPassed": True, "nativeCandidatePureChecksPassed": True, "decoderChecksPassed": decoder_checks, "allKnownEntriesCovered": known_entries_covered,
               "coverageRegressionFree": coverage_regression_free, "semanticContractRegressionFree": contract_regression_free,
               "armClassificationDisagreements": arm["classification_disagreements"], "allCandidatesRepresented": all_represented, "fullyLifted": fully_lifted}
-    manifest = {"status": "completed", "utc": datetime.now(timezone.utc).isoformat(), "assemblySha256": assembly_hash, "commands": commands, "scannerReports": reports, "checks": checks, "sources": sources, "testSources": tests, "artifacts": artifacts,
+    manifest = {"status": "completed", "utc": datetime.now(timezone.utc).isoformat(), "assemblySha256": assembly_hash, "commands": commands, "scannerReports": reports, "checks": checks, "nativeCandidatePureChecks": native_candidate_checks, "sources": sources, "testSources": tests, "artifacts": artifacts,
                 "optionalChecks": {"qarmaIndependentReference": "passed" if args.qarma_source is not None else "notRequested"},
-                "meaning": "Full executable candidate census and structural validation, plus independent decoder checks and finite semantic fixtures. A null semanticContractRegressionFree means no comparable contract index; structural preservation does not prove semantic equivalence. Completeness must be read from each report; this manifest does not certify native or game equivalence."}
+                "meaning": "Full executable candidate census, MIR structural validation, and one shared Native pure-value pass on every supported candidate with its actual constants. Slot reads remain explicit in that per-candidate check; complete N1/N2 region conversion and block-parameter elimination are separately checked on fixtures and sampled real open regions, not all-program SSA. Independent decoder checks and finite semantic fixtures do not certify game or native equivalence. A null semanticContractRegressionFree means no comparable contract index; completeness must be read from each report."}
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(output / "manifest.json")
     return 0 if fully_lifted and decoder_checks and known_entries_covered and coverage_regression_free is not False and contract_regression_free is not False and arm["classification_disagreements"] == 0 else 2

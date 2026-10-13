@@ -9,7 +9,6 @@ public static class MirValidator
         var state = 0;
         if (ir.Origin is null) return ["missing instruction origin"];
         if (!Enum.IsDefined(ir.Architecture)) return ["unknown architecture"];
-        var slots = StateLayout.For(ir.Architecture);
         if (ir.ProfileId != MachineProfile.For(ir.Architecture).Id) errors.Add("profile does not match architecture");
         if (ir.Operations.IsDefault || ir.Annotations.IsDefault) return ["missing instruction collections"];
         if (ir.Architecture == Architecture.Arm64 && (ir.Origin.Address & 3) != 0) errors.Add("unaligned ARM64 instruction address");
@@ -19,12 +18,7 @@ public static class MirValidator
         if (string.IsNullOrWhiteSpace(ir.Origin.ImageId) || string.IsNullOrWhiteSpace(ir.Rule)) errors.Add("missing origin or semantic rule");
         foreach (var op in ir.Operations)
         {
-            if (op is null) { errors.Add("null operation"); continue; }
-            if (!OperationSpecs.TryGet(op.Code, out var spec) || op.Inputs.IsDefault || op.Inputs.Length != spec.Arity)
-            { errors.Add($"invalid opcode or arity: {op.Code}"); continue; }
-            var arity = spec.Arity;
-            if (op.Payload is null || op.Payload.GetType() != spec.PayloadType)
-            { errors.Add($"payload contract: {op.Code}"); continue; }
+            if (!ValidateHeader(op, errors, out var spec)) continue;
             if (spec.HasStateFlow)
             {
                 if (op.Flow is not { } flow || flow.Input.Id != state || flow.Output.Id != state + 1)
@@ -49,46 +43,7 @@ public static class MirValidator
                 widths.Add(width);
             }
             if (inputError) continue;
-            var a = arity > 0 ? op.Inputs[0].Width : 0;
-            var b = arity > 1 ? op.Inputs[1].Width : 0;
-            var valid = op.Code switch
-            {
-                OpCode.Constant => op.Immediate >= 0 && op.Immediate < (System.Numerics.BigInteger.One << width),
-                OpCode.ReadSlot => op.Slot is not null && slots.TryGetValue(op.Slot, out var sw) && sw == width,
-                OpCode.WriteSlot => op.Slot is not null && slots.TryGetValue(op.Slot, out var sw) && sw == a,
-                OpCode.Extract => op.Immediate >= 0 && op.Immediate + width <= a,
-                OpCode.Concat => width == a + b,
-                OpCode.Zext or OpCode.Sext => width > a,
-                OpCode.Not => width == a,
-                OpCode.Eq or OpCode.Ult or OpCode.Slt => a == b && width == 1,
-                OpCode.Select => a == 1 && b == op.Inputs[2].Width && width == b,
-                OpCode.Shl or OpCode.Shr or OpCode.Sar => width == a,
-                OpCode.UDiv or OpCode.SDiv => width == a && a == b,
-                OpCode.Load => a == 64 && width % 8 == 0,
-                OpCode.Store => a == 64 && b % 8 == 0,
-                OpCode.LoadIf => a == 1 && b == 64 && width % 8 == 0 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
-                OpCode.StoreIf => a == 1 && b == 64 && op.Inputs[2].Width % 8 == 0 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
-                OpCode.AtomicRmw => ir.Architecture == Architecture.X64 && a == 64 && b is 8 or 16 or 32 or 64 or 128 &&
-                    width == b && op.Inputs[2].Width == b && op.Atomic is not null && Enum.IsDefined(op.Atomic.Kind) &&
-                    op.Atomic.Order == MemoryOrder.X64Locked && (b != 128 || op.Atomic.Kind == AtomicKind.CompareExchange) &&
-                    op.Immediate == 0 && op.Slot is null && op.Detail is null,
-                OpCode.LoadExclusive => ir.Architecture == Architecture.Arm64 && a == 64 && width is 8 or 16 or 32 or 64 or 128 && op.Memory is not null,
-                OpCode.StoreExclusive => ir.Architecture == Architecture.Arm64 && a == 64 && b is 8 or 16 or 32 or 64 or 128 && width == 32 && op.Memory is not null,
-                OpCode.ClearExclusive => ir.Architecture == Architecture.Arm64 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
-                OpCode.Barrier => ValidBarrier(ir.Architecture, op.Barrier) && op.Immediate == 0 && op.Slot is null && op.Detail is null,
-                OpCode.Prefetch => a == 64 && op.Immediate >= 0 && (ir.Architecture == Architecture.Arm64 ? op.Immediate < 32 : op.Immediate <= 3 || op.Immediate == 8) && op.Slot is null && op.Detail is null,
-                OpCode.WriteProbe => ir.Architecture == Architecture.X64 && a == 64 && op.Immediate > 0 && op.Immediate <= 4096 && op.Slot is null && op.Detail is null,
-                OpCode.Qarma5 => ir.Architecture == Architecture.Arm64 && a == 64 && b == 64 && op.Inputs[2].Width == 128 && width == 64 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
-                OpCode.CodeGuarded => ir.Architecture == Architecture.Arm64 && a == 64 && width == 1 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
-                OpCode.Undefined => !string.IsNullOrWhiteSpace(op.Detail),
-                OpCode.Guard => a == 1 && !string.IsNullOrWhiteSpace(op.Detail) && op.StopKind is { } stop && Enum.IsDefined(stop),
-                OpCode.Float => ValidFloat(ir.Architecture, op, a, b, width),
-                OpCode.FloatFused => ValidFusedFloat(ir.Architecture, op, a, b, width),
-                OpCode.Add or OpCode.Sub or OpCode.Mul or OpCode.And or OpCode.Or or OpCode.Xor => width == a && a == b,
-                _ => false
-            };
-            if (!valid) errors.Add($"type rule: {op.Code}");
-            if (op.Payload is MemoryPayload && (op.Memory is null || !ValidMemory(ir.Architecture, op))) errors.Add("invalid memory specification");
+            ValidateOperation(ir.Architecture, op, errors);
         }
         bool ValidValue(Value? value, int width) => value is { } v && v.Width == width && v.Id >= 0 && v.Id < widths.Count && widths[v.Id] == width;
         var exitValid = ir.Exit switch
@@ -108,6 +63,85 @@ public static class MirValidator
                 annotation.OperationIndex is { } index && (index < 0 || index >= ir.Operations.Length))
                 errors.Add("invalid semantic obligation");
         return errors;
+    }
+
+    // 操作自身的形状与类型；值的定义位置和状态链由所在 IR 层验证。
+    public static IReadOnlyList<string> ValidateOperation(Architecture architecture, Operation op)
+    {
+        List<string> errors = [];
+        if (!Enum.IsDefined(architecture)) return ["unknown architecture"];
+        if (!ValidateHeader(op, errors, out var spec)) return errors;
+        if (spec.HasResult != op.Result.HasValue) errors.Add($"result contract: {op.Code}");
+        var invalidWidth = false;
+        if (op.Result is { Width: < 1 or > 4096 } result)
+        {
+            errors.Add($"invalid result v{result.Id}:{result.Width}");
+            invalidWidth = true;
+        }
+        foreach (var input in op.Inputs)
+            if (input.Width is < 1 or > 4096)
+            {
+                errors.Add($"invalid input width: {input.Width}");
+                invalidWidth = true;
+            }
+        if (!invalidWidth) ValidateOperation(architecture, op, errors);
+        return errors;
+    }
+
+    private static bool ValidateHeader(Operation op, List<string> errors, out OperationSpec specification)
+    {
+        specification = null!;
+        if (op is null) { errors.Add("null operation"); return false; }
+        if (!OperationSpecs.TryGet(op.Code, out specification) || op.Inputs.IsDefault || op.Inputs.Length != specification.Arity)
+        { errors.Add($"invalid opcode or arity: {op.Code}"); return false; }
+        if (op.Payload is null || op.Payload.GetType() != specification.PayloadType)
+        { errors.Add($"payload contract: {op.Code}"); return false; }
+        return true;
+    }
+
+    private static void ValidateOperation(Architecture architecture, Operation op, List<string> errors)
+    {
+        var width = op.Result?.Width ?? 0;
+        var a = op.Inputs.Length > 0 ? op.Inputs[0].Width : 0;
+        var b = op.Inputs.Length > 1 ? op.Inputs[1].Width : 0;
+        var valid = op.Code switch
+        {
+            OpCode.Constant => op.Immediate >= 0 && op.Immediate < (System.Numerics.BigInteger.One << width),
+            OpCode.ReadSlot => op.Slot is not null && StateLayout.For(architecture).TryGetValue(op.Slot, out var sw) && sw == width,
+            OpCode.WriteSlot => op.Slot is not null && StateLayout.For(architecture).TryGetValue(op.Slot, out var sw) && sw == a,
+            OpCode.Extract => op.Immediate >= 0 && op.Immediate + width <= a,
+            OpCode.Concat => width == a + b,
+            OpCode.Zext or OpCode.Sext => width > a,
+            OpCode.Not => width == a,
+            OpCode.Eq or OpCode.Ult or OpCode.Slt => a == b && width == 1,
+            OpCode.Select => a == 1 && b == op.Inputs[2].Width && width == b,
+            OpCode.Shl or OpCode.Shr or OpCode.Sar => width == a,
+            OpCode.UDiv or OpCode.SDiv => width == a && a == b,
+            OpCode.Load => a == 64 && width % 8 == 0,
+            OpCode.Store => a == 64 && b % 8 == 0,
+            OpCode.LoadIf => a == 1 && b == 64 && width % 8 == 0 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
+            OpCode.StoreIf => a == 1 && b == 64 && op.Inputs[2].Width % 8 == 0 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
+            OpCode.AtomicRmw => architecture == Architecture.X64 && a == 64 && b is 8 or 16 or 32 or 64 or 128 &&
+                width == b && op.Inputs[2].Width == b && op.Atomic is not null && Enum.IsDefined(op.Atomic.Kind) &&
+                op.Atomic.Order == MemoryOrder.X64Locked && (b != 128 || op.Atomic.Kind == AtomicKind.CompareExchange) &&
+                op.Immediate == 0 && op.Slot is null && op.Detail is null,
+            OpCode.LoadExclusive => architecture == Architecture.Arm64 && a == 64 && width is 8 or 16 or 32 or 64 or 128 && op.Memory is not null,
+            OpCode.StoreExclusive => architecture == Architecture.Arm64 && a == 64 && b is 8 or 16 or 32 or 64 or 128 && width == 32 && op.Memory is not null,
+            OpCode.ClearExclusive => architecture == Architecture.Arm64 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
+            OpCode.Barrier => ValidBarrier(architecture, op.Barrier) && op.Immediate == 0 && op.Slot is null && op.Detail is null,
+            OpCode.Prefetch => a == 64 && op.Immediate >= 0 && (architecture == Architecture.Arm64 ? op.Immediate < 32 : op.Immediate <= 3 || op.Immediate == 8) && op.Slot is null && op.Detail is null,
+            OpCode.WriteProbe => architecture == Architecture.X64 && a == 64 && op.Immediate > 0 && op.Immediate <= 4096 && op.Slot is null && op.Detail is null,
+            OpCode.Qarma5 => architecture == Architecture.Arm64 && a == 64 && b == 64 && op.Inputs[2].Width == 128 && width == 64 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
+            OpCode.CodeGuarded => architecture == Architecture.Arm64 && a == 64 && width == 1 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
+            OpCode.Undefined => !string.IsNullOrWhiteSpace(op.Detail),
+            OpCode.Guard => a == 1 && !string.IsNullOrWhiteSpace(op.Detail) && op.StopKind is { } stop && Enum.IsDefined(stop),
+            OpCode.Float => ValidFloat(architecture, op, a, b, width),
+            OpCode.FloatFused => ValidFusedFloat(architecture, op, a, b, width),
+            OpCode.Add or OpCode.Sub or OpCode.Mul or OpCode.And or OpCode.Or or OpCode.Xor => width == a && a == b,
+            _ => false
+        };
+        if (!valid) errors.Add($"type rule: {op.Code}");
+        if (op.Payload is MemoryPayload && (op.Memory is null || !ValidMemory(architecture, op))) errors.Add("invalid memory specification");
     }
 
     private static bool ValidException(MirInstruction ir, ExceptionBoundary? boundary)
