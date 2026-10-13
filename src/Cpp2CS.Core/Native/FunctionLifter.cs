@@ -8,10 +8,12 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
 {
     private readonly Dictionary<(string Type, int Offset, int Width), string?> getters = [];
     private readonly RegionId stackRegion = new("frame", RegionKind.Stack);
+    private SsaSemantics? sharedSemantics;
     public LiftResult Lift(ulong address) => Lift(new Arm64MethodReader(image, decoder, symbols).Read(address));
     public LiftResult Lift(DecodedMethod machine, SsaSemantics? sharedSemantics = null)
     {
         var address = machine.Address;
+        this.sharedSemantics = sharedSemantics;
         getters.Clear();
         aggregateValues.Clear();
         mutableStack.Clear();
@@ -172,7 +174,7 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
                 : new UnknownExpression("整数返回的位宽或高位未确定");
         return method.ReturnType == "bool" && value.Type != "bool" ? BooleanValue(value.Expression) : value.Expression;
     }
-    private NativeValue Load(ulong pc, NativeValue receiver, int offset, int size, List<Statement> statements, LiftResult result)
+    private NativeValue Load(ulong pc, NativeValue receiver, int offset, int size, List<Statement> statements, LiftResult result, string identity)
     {
         if (receiver.Expression is IndexedArrayAddress indexed && offset == indexed.Elements.Offset && size == layouts.Size(indexed.Elements.Type))
             return Capture(pc, size, indexed.Elements.Type, new OperationExpression(ValueOperation.ArrayElement, indexed.Elements.Type, [indexed.Array, indexed.Index]), statements);
@@ -206,6 +208,12 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         var field = layouts.Field(receiver.Type, offset, size);
         if (field is not null)
         {
+            if (field is { Name: "rgctx_data", Type: "Il2CppRGCTXData*" } &&
+                sharedSemantics?.Resolve(identity) is { Kind: "runtime-context", Type: { } contextType })
+            {
+                field = field with { Type = contextType };
+                result.Proofs.Add(new(pc, "SharedSsaRuntimeType", $"{identity}: bound generic context {contextType}; same machine load and declared field"));
+            }
             if (field.Name == "klass" && field.DeclaringRecord == "Il2CppObject")
                 return Capture(pc, size, field.Type, new InvocationExpression("Runtime.ClassOf", null, [receiver.Expression], false), statements);
             if (field.Name == "element_class" && field.DeclaringRecord == "Il2CppClass_1")

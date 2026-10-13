@@ -106,7 +106,7 @@ public sealed partial class FunctionLifter
                 var address = value.Inputs[0];
                 var receiver = Evaluate(address.Inputs[0]);
                 var offset = checked((int)address.Immediate);
-                if (receiver.Expression is not StackAddressExpression stack) return Load(pc, receiver, offset, width / 8, statements, result);
+                if (receiver.Expression is not StackAddressExpression stack) return Load(pc, receiver, offset, width / 8, statements, result, value.Id!);
                 var slot = stack.Offset + offset;
                 var loaded = NativeValues.LoadStack(before, stackRegion, slot, width / 8);
                 if (mutableStack.Any(p => slot >= p.Key && slot + width / 8 <= p.Key + layouts.Size(p.Value.Type)))

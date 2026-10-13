@@ -1,15 +1,19 @@
 """真实 ARM64 与生成 C# 的测试输入。外部调用使用显式桩，保留原生指令及 LSDA。"""
+import argparse
 import hashlib
 import itertools
 import json
 import struct
-import sys
 from pathlib import Path
 from elftools.elf.elffile import ELFFile
 from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE, UC_HOOK_MEM_UNMAPPED
 from unicorn.arm64_const import *
 
 ROOT = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--ssa', action='store_true')
+parser.add_argument('--diagnostics', type=Path, default=ROOT / 'artifacts/recovered')
+args = parser.parse_args()
 CFG = json.loads((ROOT / 'native.local.json').read_text())
 DATA = Path(CFG['Binary']).read_bytes()
 with open(CFG['Binary'], 'rb') as stream:
@@ -54,10 +58,10 @@ def regions(entry, lsda):
     return result
 
 ENTRIES = {'branch': 0x55d684c, 'generic': 0x55d4ad8, 'virtual': 0x5bea518}
-REPORTS = {k: json.loads((ROOT / f'artifacts/recovered/0x{a:x}.json').read_text()) for k, a in ENTRIES.items()}
+REPORTS = {k: json.loads((args.diagnostics / f'0x{a:x}.json').read_text()) for k, a in ENTRIES.items()}
 CODE = {k: read(a, REPORTS[k]['exceptionTable']['End'] - a) for k, a in ENTRIES.items()}
 REGIONS = {k: regions(a, REPORTS[k]['exceptionTable']['Lsda']) for k, a in ENTRIES.items()}
-SSA = {k: json.loads((ROOT/f'artifacts/recovered/0x{a:x}.ssa.json').read_text()) for k,a in ENTRIES.items()} if '--ssa' in sys.argv else {}
+SSA = {k: json.loads((args.diagnostics / f'0x{a:x}.ssa.json').read_text()) for k,a in ENTRIES.items()} if args.ssa else {}
 THIS, STACK, SOURCE, CLASS, RUNNER = 0x200000, 0x210000, 0x220000, 0x230000, 0x240000
 ITF, GENERIC_ITF, RUNNER_ITF = 0x250000, 0x250400, 0x250800
 OBJ, MODEL, MASTER, RECORD, PHENOMENA = 0x280000, 0x281000, 0x282000, 0x283000, 0x284000

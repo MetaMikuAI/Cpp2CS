@@ -170,6 +170,7 @@ FinallyChecks.Run(Check);
 SharedBodyChecks.Run(Check);
 NamespaceCorpusChecks.Run(Check);
 if (args is ["native-layout", var compiler]) AsyncChecks.Layouts(Check, compiler);
+if (args is ["runtime-types-native", var runtimeTypesConfig]) RuntimeTypeChecks.Native(Check, runtimeTypesConfig);
 if (args is ["async-native", var config]) SsaRecoveryChecks.Run(Check, config);
 if (args is ["multi-await-native", var multiConfig]) AwaitSiteChecks.Native(Check, multiConfig);
 if (args is ["async-body-native", var bodyConfig]) AsyncBodyChecks.Run(Check, bodyConfig);
