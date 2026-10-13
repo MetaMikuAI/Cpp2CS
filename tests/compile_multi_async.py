@@ -2,14 +2,16 @@
 import json
 import hashlib
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+SOURCE = Path(sys.argv[1]) if len(sys.argv) == 2 else ROOT / 'artifacts/recovered'
 parts = []
 for address in ['0x55d684c','0x55d4ad8','0x5bea518']:
-    body = json.loads((ROOT/f'artifacts/recovered/{address}.async-body.json').read_text())
+    body = json.loads((SOURCE/f'{address}.async-body.json').read_text())
     assert body['CSharp'] and not body['Problems']
-    generated = (ROOT/f'artifacts/recovered/{address}.cs.txt').read_bytes().decode('utf-8')
+    generated = (SOURCE/f'{address}.cs.txt').read_bytes().decode('utf-8')
     assert generated == body['CSharp']
     namespace, owner = body['Source']['Owner'].rsplit('.',1)
     parts.append(f'namespace {namespace} {{ public partial class {owner} {{\n' + generated + '\n} }')

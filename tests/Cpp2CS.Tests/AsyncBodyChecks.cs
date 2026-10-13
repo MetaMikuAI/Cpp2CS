@@ -39,6 +39,10 @@ public static class AsyncBodyChecks
             var baseline = Recover(program)!;
             check(baseline is { CSharp: not null, Problems.Length: 0 }, $"0x{address:x}: 完整 async 输出：{string.Join("; ", baseline.Problems)}");
             var semantics = Semantics(program);
+            var reads = program.Values.Where(v => v.Operation == "load").ToDictionary(v => v.Id);
+            var snapshots = baseline.Projection!.Blocks.Values.SelectMany(b => b.Statements).OfType<AssignStatement>().Where(s => reads.ContainsKey(s.Name)).ToArray();
+            if (address != 0x5bea518) check(snapshots.Length > 0, "含业务字段的真实 async 方法生成读取快照");
+            check(snapshots.All(s => s.Address == reads[s.Name].Address), "async 业务字段快照保留原生读取位置");
             var sites = AwaitSites.Recover(semantics, symbols, layouts).Sites;
             check(semantics.Calls().All(c => c.Kind != "indirect"), "接口和虚调用全部解析");
             void Reject(string name, NativeSsaProgram candidate)
@@ -50,6 +54,8 @@ public static class AsyncBodyChecks
             NativeSsaProgram Change(Func<SsaValue, SsaValue> transform, params SsaValue[] extra) => program with { Values = program.Values.Select(transform).Concat(extra).ToArray() };
             NativeSsaProgram Edges(ulong at, Func<NativeEdge, NativeEdge> transform) => program with
             { Flow = program.Flow with { Nodes = program.Flow.Nodes.Select(n => n.Instruction.Address == at ? n with { Edges = n.Edges.Select(transform).ToArray() } : n).ToArray() } };
+            if (snapshots.FirstOrDefault() is { } snapshot)
+                Reject("仍被使用的业务读取落入已收缩协议区时拒绝", Change(v => v.Id == snapshot.Name ? v with { Address = sites[0].Schedule } : v));
             Reject("不支持的 SSA 操作不会被协议遮蔽", program with { Problems = ["unsupported test operation"] });
             IEnumerable<SemanticTerm> Terms(SemanticTerm term) => new[] { term }.Concat(term.Inputs.SelectMany(Terms));
             var stateBranch = program.Instructions.First(i => i.Condition is { } c && Terms(semantics.Resolve(c)).Any(t =>

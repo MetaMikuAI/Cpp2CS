@@ -2,6 +2,53 @@ namespace Cpp2CS.Native;
 
 public static class SemanticValidation
 {
+    // 路径收缩后，快照仍须在所有到达使用点的路径上先完成读取。
+    public static void CheckReadSnapshots(LiftResult result, IReadOnlySet<string> names)
+    {
+        if (names.Count == 0) return;
+        var reachable = new HashSet<ulong>(); var pending = new Stack<ulong>(); pending.Push(result.Method.Address);
+        while (pending.TryPop(out var pc))
+            if (reachable.Add(pc)) foreach (var next in result.Blocks[pc].Successors) pending.Push(next);
+        var predecessors = reachable.ToDictionary(pc => pc, pc => reachable.Where(p => result.Blocks[p].Successors.Contains(pc)).ToArray());
+        var assigned = reachable.ToDictionary(pc => pc, pc => result.Blocks[pc].Statements.OfType<AssignStatement>().Select(s => s.Name).Where(names.Contains).ToHashSet());
+        var available = reachable.ToDictionary(pc => pc, _ => names.ToHashSet());
+        HashSet<string> Incoming(ulong pc)
+        {
+            if (pc == result.Method.Address || predecessors[pc].Length == 0) return [];
+            var known = available[predecessors[pc][0]].ToHashSet();
+            foreach (var predecessor in predecessors[pc].Skip(1)) known.IntersectWith(available[predecessor]);
+            return known;
+        }
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+            foreach (var pc in reachable)
+            {
+                var next = Incoming(pc); next.UnionWith(assigned[pc]);
+                if (!next.SetEquals(available[pc])) { available[pc] = next; changed = true; }
+            }
+        }
+        foreach (var pc in reachable)
+        {
+            var known = Incoming(pc);
+            Expression Inspect(Expression value)
+            {
+                if (value is NameExpression name && names.Contains(name.Name) && !known.Contains(name.Name))
+                {
+                    var problem = $"0x{pc:x}: 字段快照未在所有路径定义：{name.Name}";
+                    if (!result.Problems.Contains(problem)) result.Problems.Add(problem);
+                }
+                return value;
+            }
+            foreach (var statement in result.Blocks[pc].Statements)
+            {
+                SourceTree.Map(statement, Inspect);
+                if (statement is AssignStatement assignment && names.Contains(assignment.Name)) known.Add(assignment.Name);
+            }
+            if (result.Blocks[pc].Condition is { } condition) SourceTree.Map(condition, Inspect);
+        }
+    }
     public static void Check(LiftResult result)
     {
         foreach (var block in result.Blocks.Values)

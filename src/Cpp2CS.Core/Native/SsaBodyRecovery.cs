@@ -78,6 +78,7 @@ public static class SsaBodyRecovery
             proofs.Select(p => new Proof(analysis.Method.Address, "SsaBody", p)).ToList(), new NativeGraph(analysis.Machine.Instructions, _ => false))
         { RecoveryPath = "ssa" };
         SemanticValidation.Check(body);
+        SemanticValidation.CheckReadSnapshots(body, expressions.ReadNames);
         return new(problems.Count == 0 ? body : null, problems.Distinct().ToArray());
 
         SourceMemberExpression? Field(SemanticTerm address, int bytes)

@@ -39,7 +39,7 @@ public static class SharedBodyChecks
               <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
             </Project>
             """);
-        File.WriteAllText("artifacts/conditional-fixture/Program.cs", """
+        var fixture = """
             static class Program
             {
                 static int second, joined;
@@ -57,10 +57,20 @@ public static class SharedBodyChecks
                     }
                     var item = new object();
                     if (!ReferenceEquals(Select(true, item), item) || Select(false, item) is not null) throw new Exception("reference identity changed");
-                    Console.WriteLine("PASS: generated branch and reference selection compile and execute; 6 numeric inputs including NaN and both reference alternatives");
+                    var snapshot = new SnapshotFixture();
+                    snapshot.Run().GetAwaiter().GetResult();
+                    if (snapshot.Observed != 7 || snapshot.Field != 9) throw new Exception("field read moved across mutation or await");
+                    Console.WriteLine("PASS: generated branches, reference identity and field snapshot across mutation and suspension");
                 }
             }
-            """.Replace("/* BODY */", invertedText).Replace("/* SELECT */", selectText));
+            sealed class SnapshotFixture
+            {
+                public int Field = 7, Observed;
+                void Mutate() => Field = 9;
+                async Task Use(int value) { await Task.Yield(); Observed = value; }
+                public async Task Run() /* SNAPSHOT */
+            }
+            """.Replace("/* BODY */", invertedText).Replace("/* SELECT */", selectText);
 
         var read = new AssignStatement(0x100, "snapshot", new SourceMemberExpression(new NameExpression("this"), "Field", "int"), "int");
         var sequence = diamond with { Blocks = new()
@@ -71,8 +81,24 @@ public static class SharedBodyChecks
         }};
         var normalized = ViewNormalizer.Normalize(sequence);
         var text = writer.Structured(normalized, true);
+        File.WriteAllText("artifacts/conditional-fixture/Program.cs", fixture.Replace("/* SNAPSHOT */", text));
         check(normalized.Blocks[0x100].Statements[0] == read && text.IndexOf("this.Field", StringComparison.Ordinal) < text.IndexOf("Mutate()", StringComparison.Ordinal) &&
             text.Contains("await Use(snapshot);"), "字段快照不越过有副作用调用移入 await 参数");
+        SemanticValidation.CheckReadSnapshots(sequence, new HashSet<string> { "snapshot" });
+        check(sequence.Problems.Count == 0, "字段快照在副作用和 await 之前定义");
+        var missingRead = sequence with { Problems = [], Blocks = new() { [0x100] = sequence.Blocks[0x100] with { Statements = [.. sequence.Blocks[0x100].Statements.Skip(1)] } } };
+        SemanticValidation.CheckReadSnapshots(missingRead, new HashSet<string> { "snapshot" });
+        check(missingRead.Problems.Any(p => p.Contains("字段快照未在所有路径定义")), "协议路径收缩不能丢失仍被使用的字段读取");
+        var lateRead = sequence with { Problems = [], Blocks = new() { [0x100] = sequence.Blocks[0x100] with { Statements = [.. sequence.Blocks[0x100].Statements.Skip(1), read] } } };
+        SemanticValidation.CheckReadSnapshots(lateRead, new HashSet<string> { "snapshot" });
+        check(lateRead.Problems.Count > 0, "同一块中在使用之后读取不能证明快照有效");
+        var conditionalRead = diamond with { Problems = [], Blocks = new(diamond.Blocks)
+        {
+            [0x104] = diamond.Blocks[0x104] with { Statements = [read] },
+            [0x10c] = diamond.Blocks[0x10c] with { Statements = [new ReturnStatement(0x10c, new NameExpression("snapshot"))] }
+        }};
+        SemanticValidation.CheckReadSnapshots(conditionalRead, new HashSet<string> { "snapshot" });
+        check(conditionalRead.Problems.Count > 0, "只有一个前驱读取的字段不能在共同后继直接使用");
         var renamed = SourceTree.Map(sequence, value => value is NameExpression { Name: "snapshot" } ? new NameExpression("captured") : value);
         check(JsonSerializer.Serialize(SemanticData.Function(renamed)).Contains("captured"), "await 子树参与语义遍历及序列化");
         var unknown = SourceTree.Map(sequence, value => value is NameExpression { Name: "snapshot" } ? new UnknownExpression("unbound") : value);

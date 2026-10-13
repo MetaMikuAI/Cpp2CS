@@ -89,6 +89,8 @@ public sealed class AsyncBodyRecovery(SsaSemantics semantics, NativeMethod metho
         ProveExceptionExit(fail!);
         ProveStateAndEffects(fail!);
         if (problems.Count != 0) return Finish(null);
+        expressions.CaptureFieldReads(value => !This(value.Inputs[0]) && value.Inputs[0].Type is { } type &&
+            managed.SourceMember(symbols.Display(type), value.FieldPath.FirstOrDefault(p => p != "fields") ?? value.Name) is not null);
         var entry = Project(semantics.Program.Flow.Entry);
         Need(calls.Where(c => c.Kind is "managed" or "virtual" && !AwaitSites.IsSchedule(c)).All(c => body.ContainsKey(c.Address)), "业务调用未被完整投影");
         Need(businessStores.Keys.All(body.ContainsKey), "业务字段写入未被完整投影");
@@ -102,6 +104,7 @@ public sealed class AsyncBodyRecovery(SsaSemantics semantics, NativeMethod metho
         projection = new(sourceMethod, instructions, blocks, [], [], new NativeGraph(instructions, noReturn.Contains))
         { SourceDeclaration = declaration, IsSourceProjection = true, RecoveryPath = "ssa-async" };
         SemanticValidation.Check(projection);
+        SemanticValidation.CheckReadSnapshots(projection, expressions.ReadNames);
         problems.AddRange(projection.Problems);
         var text = problems.Count == 0 ? new SemanticWriter(symbols).Structured(projection) : null;
         proofs.Add("all projected business branches and calls retained; only verified await protocol paths contracted");
@@ -308,6 +311,11 @@ public sealed class AsyncBodyRecovery(SsaSemantics semantics, NativeMethod metho
             AddBlock(pc, "return", [new ReturnStatement(pc, expression)], null, []);
         }
         else if (call?.Name == "ThrowNullReference") { result = pc; AddBlock(pc, "throw", [new ThrowStatement(pc, "System.NullReferenceException")], null, []); }
+        else if (expressions.ReadStatements(pc) is { Count: > 0 } reads)
+        {
+            result = pc;
+            AddBlock(pc, "read", reads, null, [Project(Next(pc).Single())]);
+        }
         else if (businessStores.TryGetValue(pc, out var writes))
         {
             result = pc;

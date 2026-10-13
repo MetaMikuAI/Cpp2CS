@@ -8,6 +8,7 @@ public sealed class ManagedExpressionBuilder(SsaSemantics semantics, ManagedName
     public HashSet<string> BooleanResults { get; } = [];
     public Func<SemanticTerm, Expression?>? Bind { get; set; }
     private readonly Dictionary<string, (ulong Address, SemanticTerm Value)> reads = [];
+    public IReadOnlySet<string> ReadNames => reads.Keys.ToHashSet();
 
     public void CaptureFieldReads(Func<SemanticTerm, bool> include)
     {
