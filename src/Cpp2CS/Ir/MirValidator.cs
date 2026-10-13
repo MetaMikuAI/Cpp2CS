@@ -21,7 +21,7 @@ public static class MirValidator
             {
                 OpCode.Constant or OpCode.ReadSlot or OpCode.Undefined or OpCode.ClearExclusive or OpCode.Barrier => 0,
                 OpCode.WriteSlot or OpCode.Extract or OpCode.Zext or OpCode.Sext or OpCode.Not or OpCode.Load or OpCode.Guard or OpCode.LoadExclusive or OpCode.Prefetch or OpCode.WriteProbe or OpCode.CodeGuarded => 1,
-                OpCode.Select or OpCode.Float or OpCode.Qarma5 or OpCode.StoreIf => 3,
+                OpCode.Select or OpCode.Float or OpCode.Qarma5 or OpCode.StoreIf or OpCode.AtomicRmw => 3,
                 OpCode.FloatFused => 4,
                 _ => 2
             };
@@ -63,6 +63,10 @@ public static class MirValidator
                 OpCode.Store => a == 64 && b % 8 == 0,
                 OpCode.LoadIf => a == 1 && b == 64 && width % 8 == 0 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
                 OpCode.StoreIf => a == 1 && b == 64 && op.Inputs[2].Width % 8 == 0 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
+                OpCode.AtomicRmw => ir.Architecture == Architecture.X64 && a == 64 && b is 8 or 16 or 32 or 64 or 128 &&
+                    width == b && op.Inputs[2].Width == b && op.Atomic is not null && Enum.IsDefined(op.Atomic.Kind) &&
+                    op.Atomic.Order == MemoryOrder.X64Locked && (b != 128 || op.Atomic.Kind == AtomicKind.CompareExchange) &&
+                    op.Immediate == 0 && op.Slot is null && op.Detail is null,
                 OpCode.LoadExclusive => ir.Architecture == Architecture.Arm64 && a == 64 && width is 8 or 16 or 32 or 64 or 128 && op.Memory is not null,
                 OpCode.StoreExclusive => ir.Architecture == Architecture.Arm64 && a == 64 && b is 8 or 16 or 32 or 64 or 128 && width == 32 && op.Memory is not null,
                 OpCode.ClearExclusive => ir.Architecture == Architecture.Arm64 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
@@ -81,7 +85,8 @@ public static class MirValidator
             if (op.Code is not (OpCode.Float or OpCode.FloatFused) && op.Floating is not null) errors.Add("non-float operation has floating specification");
             if (op.Memory is not null && !ValidMemory(ir.Architecture, op)) errors.Add("invalid memory specification");
             if (op.Code != OpCode.Barrier && op.Barrier is not null) errors.Add("non-barrier operation has barrier specification");
-            if (op.Code is OpCode.Load or OpCode.Store or OpCode.LoadIf or OpCode.StoreIf or OpCode.Guard or OpCode.LoadExclusive or OpCode.StoreExclusive or OpCode.WriteProbe or OpCode.ClearExclusive or OpCode.Barrier or OpCode.Prefetch or OpCode.CodeGuarded)
+            if (op.Code != OpCode.AtomicRmw && op.Atomic is not null) errors.Add("non-atomic operation has atomic specification");
+            if (op.Code is OpCode.Load or OpCode.Store or OpCode.LoadIf or OpCode.StoreIf or OpCode.Guard or OpCode.LoadExclusive or OpCode.StoreExclusive or OpCode.WriteProbe or OpCode.ClearExclusive or OpCode.Barrier or OpCode.Prefetch or OpCode.CodeGuarded or OpCode.AtomicRmw)
             {
                 var fault = op.Code is OpCode.ClearExclusive or OpCode.Barrier or OpCode.Prefetch ? FaultPolicy.None : FaultPolicy.StopUnmodeled;
                 if (op.WorldIn != world || op.WorldOut != world + 1 || op.Fault != fault)
@@ -112,7 +117,7 @@ public static class MirValidator
     {
         var m = op.Memory!;
         if (op.Code is not (OpCode.Load or OpCode.Store or OpCode.LoadExclusive or OpCode.StoreExclusive) ||
-            !Enum.IsDefined(m.Order) || op.Immediate != 0 || op.Slot is not null || op.Detail is not null) return false;
+            m.Order is not (MemoryOrder.Relaxed or MemoryOrder.Acquire or MemoryOrder.Release) || op.Immediate != 0 || op.Slot is not null || op.Detail is not null) return false;
         var load = op.Code is OpCode.Load or OpCode.LoadExclusive;
         var width = load ? op.Result?.Width ?? 0 : op.Inputs[1].Width;
         if (m.ElementWidth is not (8 or 16 or 32 or 64 or 128 or 256 or 512) || width % m.ElementWidth != 0 ||

@@ -764,7 +764,7 @@ def main():
         integer_remaining(h)
         memory_pop_and_bits(h)
         simd_sse41(h)
-        for code in ("f0480103", "f3a4", "9d", "d3f0",
+        for code in ("c7f800000000", "f3a4", "9d", "d3f0",
                      "0f6fc1", "0fefc1", "0f6ec3", "660f3a15c101"):
             h.reject(code)
         server.stdin.close()

@@ -17,16 +17,19 @@ public sealed record MachineProfile(string Id, Architecture Architecture, string
              "atomic width, memory order and barriers are retained; the concrete interpreter does not enumerate weak-memory executions",
              "next-instruction fetch is outside this instruction transition; fault delivery and handler state are unmodeled",
              "the binary does not establish these runtime configuration assumptions"])
-        : new("x64-le-user-v5", architecture, "little", 64, 0, "64-bit long mode; CPL3; CET disabled; SSE through SSE4.2, AVX/AVX2/FMA enabled; outside RTM",
+        : new("x64-le-user-v6", architecture, "little", 64, 0, "64-bit long mode; CPL3; CET disabled; SSE through SSE4.2, AVX/AVX2/FMA enabled; outside RTM and SGX enclaves",
             "explicit ordered byte-addressed events; one concrete execution witness", "unmodeled memory/target fault stops",
             ["preferred image addresses are execution addresses", "48-bit canonical addresses; LA57 disabled", "FS/GS bases are explicit inputs",
              "SSE through SSE4.2, AVX/AVX2/FMA and DAZ available; CR0.EM=0; CR0.TS=0; CR4.OSFXSR=1; CR4.OSXSAVE=1; XCR0.x87/SSE/AVX=1",
              "LAHF/SAHF available in 64-bit mode; BMI1 available (TZCNT does not fall back to BSF)",
              "PREFETCHW available; prefetch hints are NTA=0, T0=1, T1=2, T2=3, W=8",
-             "XMM and YMM upper halves are represented separately; legacy SSE preserves upper halves; VEX.128 clears them; AVX-512 absent",
+             "XMM and YMM upper halves are represented separately; legacy SSE preserves upper halves; VEX.128 clears them; AVX-512 and AVX10 absent",
+             "CS/ES/SS/DS/FS/GS selectors are explicit 16-bit inputs, independent of FS/GS bases; segment loading is unmodeled",
              "MXCSR controls and exception flags are represented; enabled exception delivery stops explicitly",
              "non-temporal stores and fences retain event metadata; write probes require explicit permissions",
              "next-instruction fetch is outside this instruction transition; permissions/alignment/page-fault delivery is unmodeled",
              "exception exits describe the event and saved instruction pointer, not IDT checks, delivery or handlers",
-             "locked/transactional instructions remain unsupported"]);
+             "HLE disabled; CX16 available; locked operations use ordinary WB memory and explicit write permissions",
+             "locked RMW/CAS is one indivisible event; memory order is retained without a concurrent-execution solver",
+             "split-lock, alignment and bus-lock exception delivery is unmodeled; RTM instructions remain unsupported"]);
 }

@@ -75,6 +75,12 @@ def main():
     (output / "x64-differential.json").write_text(json.dumps(json.loads(x64), indent=2) + "\n", encoding="utf-8")
     avx = execute("x64-avx-differential", [sys.executable, TESTS / "x64_avx_differential.py", DLL])
     (output / "x64-avx-differential.json").write_text(json.dumps(json.loads(avx), indent=2) + "\n", encoding="utf-8")
+    execute("x64-atomic-differential", [sys.executable, TESTS / "x64_atomic_differential.py", "--dll", DLL,
+                                         "--output", output / "x64-atomic-differential.json"])
+    execute("x64-profile-checks", [sys.executable, TESTS / "x64_profile_checks.py", "--dll", DLL,
+                                   "--output", output / "x64-profile-checks.json"])
+    stack = execute("x64-stack-differential", [sys.executable, TESTS / "x64_stack_differential.py", DLL])
+    (output / "x64-stack-differential.json").write_text(json.dumps(json.loads(stack), indent=2) + "\n", encoding="utf-8")
     reports = []
     all_represented = True
     fully_lifted = True

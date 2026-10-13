@@ -25,7 +25,7 @@ public enum OpCode
     Add, Sub, Mul, And, Or, Xor, Not, Shl, Shr, Sar, Eq, Ult, Slt, Select,
     Load, Store, Undefined, UDiv, SDiv, Float, Guard,
     LoadExclusive, StoreExclusive, ClearExclusive, Barrier, Prefetch, WriteProbe, Qarma5, CodeGuarded, FloatFused,
-    LoadIf, StoreIf
+    LoadIf, StoreIf, AtomicRmw
 }
 public enum FloatKind
 {
@@ -49,7 +49,7 @@ public sealed record Operation(
     OpCode Code, Value? Result, Value[] Inputs, BigInteger Immediate = default,
     string? Slot = null, string? Detail = null, int WorldIn = -1, int WorldOut = -1,
     FaultPolicy Fault = FaultPolicy.None, FloatOperation? Floating = null,
-    MemoryOperation? Memory = null, BarrierOperation? Barrier = null);
+    MemoryOperation? Memory = null, BarrierOperation? Barrier = null, AtomicOperation? Atomic = null);
 
 public sealed record MirExit(ExitKind Kind, ulong Address = 0, Value? Target = null,
     Value? Condition = null, Value? Alternative = null, string? Reason = null,
@@ -100,6 +100,7 @@ public static class StateLayout
         var slots = new Dictionary<string, int>();
         foreach (var name in new[] { "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "fsbase", "gsbase" }) slots.Add(name, 64);
         foreach (var name in new[] { "cf", "pf", "af", "zf", "sf", "of", "df" }) slots.Add(name, 1);
+        foreach (var name in new[] { "cs", "es", "ss", "ds", "fs", "gs" }) slots.Add(name, 16);
         for (var i = 0; i < 16; i++) slots.Add($"xmm{i}", 128);
         for (var i = 0; i < 16; i++) slots.Add($"ymm{i}_hi", 128);
         slots.Add("mxcsr", 32);

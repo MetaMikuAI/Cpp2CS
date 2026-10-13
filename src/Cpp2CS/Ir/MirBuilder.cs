@@ -89,6 +89,15 @@ public sealed class MirBuilder(Architecture architecture, InstructionOrigin orig
         MarkNormalPathOnly("memory fault outcome is an explicit unmodeled stop");
     }
 
+    public Value AtomicRmw(Value address, Value operand, Value expected, AtomicKind kind)
+    {
+        var value = new Value(nextValue++, operand.Width);
+        operations.Add(new(OpCode.AtomicRmw, value, [address, operand, expected],
+            WorldIn: world, WorldOut: ++world, Fault: FaultPolicy.StopUnmodeled, Atomic: new(kind)));
+        MarkNormalPathOnly("one indivisible x64 locked RMW event; explicit write permissions required; fault delivery and complete concurrent executions are unmodeled");
+        return value;
+    }
+
     public Value LoadIf(Value condition, Value address, int width)
     {
         var value = new Value(nextValue++, width);

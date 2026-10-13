@@ -14,10 +14,14 @@ public static partial class X64Lifter
             return LiftResult.Unsupported(instruction.Code.ToString(), "不是有效的 x64 指令");
         if (instruction.Encoding == EncodingKind.VEX)
             return new Lifting(origin, instruction).Avx();
+        if (instruction.Encoding == EncodingKind.EVEX && instruction.Code is
+            Code.EVEX_Vpmullq_xmm_k1z_xmm_xmmm128b64 or Code.EVEX_Vpmaxuq_xmm_k1z_xmm_xmmm128b64)
+            return new Lifting(origin, instruction).DisabledAvx512();
         if (instruction.Encoding != EncodingKind.Legacy)
             return LiftResult.Unsupported(instruction.Code.ToString(), "EVEX/XOP 等状态尚未建模");
-        if (instruction.HasLockPrefix || instruction.HasXacquirePrefix || instruction.HasXreleasePrefix)
-            return LiftResult.Unsupported(instruction.Code.ToString(), "原子性与事务前缀尚未建模");
+        if (instruction.HasLockPrefix || instruction.HasXacquirePrefix || instruction.HasXreleasePrefix ||
+            instruction.Mnemonic == Mnemonic.Xchg && instruction.Op0Kind == OpKind.Memory)
+            return new Lifting(origin, instruction).Atomic();
         if (instruction.HasRepPrefix || instruction.HasRepnePrefix)
             return LiftResult.Unsupported(instruction.Code.ToString(), "重复或额外前缀尚未建模");
         if (instruction.IsPrivileged && instruction.Mnemonic != Mnemonic.Hlt)
@@ -131,11 +135,13 @@ public static partial class X64Lifter
                 Mnemonic.Push => Push(),
                 Mnemonic.Pop => Pop(),
                 Mnemonic.Leave => Leave(),
+                Mnemonic.Enter => Enter(),
                 Mnemonic.Xlatb => TranslateByte(),
                 Mnemonic.Prefetchnta or Mnemonic.Prefetcht0 or Mnemonic.Prefetcht1 or Mnemonic.Prefetcht2 or Mnemonic.Prefetchw => Prefetch(),
                 Mnemonic.Sfence or Mnemonic.Lfence or Mnemonic.Mfence => Fence(),
                 Mnemonic.Ud2 => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#UD", instruction.IP))),
                 Mnemonic.Int3 => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#BP", instruction.NextIP))),
+                Mnemonic.Int1 => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#DB", instruction.NextIP))),
                 Mnemonic.Hlt => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#GP(0)", instruction.IP))),
                 _ => Unsupported("尚无该指令形式的语义规则")
             };
@@ -272,6 +278,9 @@ public static partial class X64Lifter
 
         private LiftResult Move()
         {
+            if (instruction.Op1Kind == OpKind.Register && instruction.Op1Register is
+                Register.CS or Register.ES or Register.SS or Register.DS or Register.FS or Register.GS)
+                return ReadSegment();
             if (!BinaryOperands())
                 return Unsupported("MOV 仅支持通用寄存器、普通整数内存与立即数");
             WriteOperand(0, ReadOperand(1, Width(0)));

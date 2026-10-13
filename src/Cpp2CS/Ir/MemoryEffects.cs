@@ -5,7 +5,7 @@ namespace Cpp2CS.Ir;
 internal readonly record struct MemoryEffectResult(BigInteger Value = default, string? Outcome = null, string? Reason = null);
 
 // Executes one concrete event schedule. Ordering metadata is retained, not a weak-memory solver.
-internal static class MemoryEffects
+internal static partial class MemoryEffects
 {
     public static MemoryEffectResult Execute(Operation op, MachineState state, BigInteger addressBits, BigInteger data)
     {

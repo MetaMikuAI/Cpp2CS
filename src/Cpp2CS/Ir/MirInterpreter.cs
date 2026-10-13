@@ -88,6 +88,13 @@ public static class MirInterpreter
                 case OpCode.Guard:
                     if (a.IsZero) return new("UnmodeledFaultStop", null, index, choices, op.Detail);
                     break;
+                case OpCode.AtomicRmw:
+                {
+                    var effect = MemoryEffects.Atomic(op, state, (ulong)a, b, values[op.Inputs[2].Id]);
+                    if (effect.Outcome is not null) return new(effect.Outcome, null, index, choices, effect.Reason);
+                    value = effect.Value;
+                    break;
+                }
                 case OpCode.Load:
                 case OpCode.Store:
                 case OpCode.LoadIf:
