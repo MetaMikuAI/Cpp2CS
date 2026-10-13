@@ -62,3 +62,5 @@ dotnet run --project tests/Cpp2CS.Tests -c Release --no-build
 模型约定见 [核心模型](docs/核心模型.md)。
 
 方法恢复顺序、async 与普通业务体的公共部分、兼容回退和回归入口见 [方法恢复流水线](docs/方法恢复流水线.md)。
+
+完整命名空间清单、逐方法扫描和结果边界见 [命名空间全量回归](docs/命名空间全量回归.md)。

@@ -6,6 +6,16 @@ using Cpp2CS.IR;
 using Cpp2CS.Model;
 
 var passed = 0;
+if (args is ["namespace-inventory", var inventoryConfig, var inventoryOutput, .. var namespaces])
+{
+    NamespaceCorpus.Inventory(inventoryConfig, inventoryOutput, namespaces);
+    return;
+}
+if (args is ["namespace-worker", var workerConfig, var workerAssembly, var workerOutput])
+{
+    NamespaceCorpus.Work(workerConfig, workerAssembly, workerOutput);
+    return;
+}
 if (args is ["machine-effects", var effectsConfig, var effectsBinary, var effectsOutput])
 {
     MachineEffectsChecks.Export(effectsConfig, effectsBinary, effectsOutput);
@@ -152,6 +162,7 @@ AsyncChecks.Run(Check);
 AwaitSiteChecks.Run(Check);
 FinallyChecks.Run(Check);
 SharedBodyChecks.Run(Check);
+NamespaceCorpusChecks.Run(Check);
 if (args is ["native-layout", var compiler]) AsyncChecks.Layouts(Check, compiler);
 if (args is ["async-native", var config]) SsaRecoveryChecks.Run(Check, config);
 if (args is ["multi-await-native", var multiConfig]) AwaitSiteChecks.Native(Check, multiConfig);
