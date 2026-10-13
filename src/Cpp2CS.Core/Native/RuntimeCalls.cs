@@ -74,7 +74,7 @@ public sealed partial class FunctionLifter
                 var length = Read(state, "w1");
                 var arrayValue = Capture(pc, 8, arrayType.Native, new OperationExpression(ValueOperation.NewArray, arrayType.Display[..^2], [length.Expression]), statements);
                 Clobber(state, pc);
-                Set(state, "x0", arrayValue);
+                BindAbiValue(state, "x0", arrayValue);
                 result.Proofs.Add(new(pc, "RuntimeHelper", helper.Evidence));
                 return;
             case "Allocate":
@@ -103,7 +103,7 @@ public sealed partial class FunctionLifter
         if (name is not null) statements.Add(new CallStatement(pc, name, arguments, variable, returnType, false, null, NoReturn: helper.NoReturn));
         result.Proofs.Add(new(pc, "RuntimeHelper", helper.Evidence));
         Clobber(state, pc);
-        if (variable is not null) Set(state, "x0", new(new InputBits(variable, 64), returnType!, new NameExpression(variable)));
+        if (variable is not null) BindAbiValue(state, "x0", new(new InputBits(variable, 64), returnType!, new NameExpression(variable)));
         void Reject(string reason)
         {
             result.Problems.Add($"0x{pc:x}: {reason}");

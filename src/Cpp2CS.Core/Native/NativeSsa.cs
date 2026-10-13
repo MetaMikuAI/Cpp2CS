@@ -13,6 +13,7 @@ public sealed class NativeSsa(NativeControlFlow flow, NativeMethod method, Nativ
 {
     // call 输入依次为目标、内存、X0..X8、V0..V7、SP。
     public const int CallStackPointerIndex = 19;
+    private readonly Dictionary<ulong, MachineEffects> effects = flow.Nodes.ToDictionary(n => n.Instruction.Address, n => Arm64Effects.Lower(n.Instruction));
     private readonly Dictionary<string, SsaValue> values = [];
     private readonly Dictionary<(ulong, string), string> inputs = [];
     private readonly Dictionary<(ulong, string), string> outputs = [];
@@ -44,23 +45,14 @@ public sealed class NativeSsa(NativeControlFlow flow, NativeMethod method, Nativ
         var instructions = new List<SsaInstruction>();
         foreach (var node in flow.Nodes.Where(n => n.Reachable))
         {
-            var instruction = node.Instruction;
-            var pc = instruction.Address;
-            var effects = new List<string>();
-            foreach (var register in Writes(instruction)) effects.Add(Out(pc, register));
-            string? condition = null;
-            if (NativeGraph.IsConditional(instruction))
-            {
-                var operands = instruction.Operands;
-                if (instruction.Mnemonic is "cbz" or "cbnz") condition = Define($"condition_{pc:x}", instruction.Mnemonic == "cbz" ? "zero" : "nonzero", 1, [Operand(pc, operands[0])]);
-                else if (instruction.Mnemonic is "tbz" or "tbnz")
-                    condition = Define($"condition_{pc:x}", instruction.Mnemonic == "tbz" ? "zero" : "nonzero", 1,
-                        [Slice(Operand(pc, operands[0]), checked((int)operands[1].Immediate), 1)]);
-                else condition = Define($"condition_{pc:x}", instruction.Mnemonic, 1, [In(pc, "nzcv")]);
-            }
-            var call = instruction.Mnemonic is "bl" or "blr" ? Call(pc) : null;
-            if (instruction.Mnemonic == "ret") effects.Add(Define($"return_{pc:x}", "return", 0, method.ReturnType == "void" ? [] : [In(pc, "x0"), In(pc, "x1")]));
-            instructions.Add(new(pc, effects.Distinct().ToArray(), condition, call));
+            var effect = effects[node.Instruction.Address];
+            var pc = effect.Source.Address;
+            if (effect.Unsupported is not null) problems.Add($"0x{pc:x}: {effect.Unsupported}");
+            var outputs = effect.Writes.Select(register => Out(pc, register)).ToList();
+            var condition = effect.Condition is null ? null : Value(pc, effect.Condition);
+            var call = effect.Call is null ? null : Call(pc);
+            if (effect.Returns) outputs.Add(Define($"return_{pc:x}", "return", 0, method.ReturnType == "void" ? [] : [In(pc, "x0"), In(pc, "x1")]));
+            instructions.Add(new(pc, outputs.Distinct().ToArray(), condition, call));
         }
         SimplifyPhis();
         return new(flow, values.Values.OrderBy(v => v.Id).ToArray(), instructions.ToArray(), problems.Distinct().ToArray());
@@ -71,12 +63,8 @@ public sealed class NativeSsa(NativeControlFlow flow, NativeMethod method, Nativ
         values[id] = new(id, operation, width, arguments, type, immediate, incoming, address == 0 ? previous?.Address ?? 0 : address, register ?? previous?.Register);
         return id;
     }
-    private static string Canonical(string register) => register switch
-    {
-        "fp" => "x29", "lr" => "x30", "sp" or "wsp" => "sp", _ when register[0] == 'w' => "x" + register[1..],
-        _ when register[0] is 's' or 'd' or 'q' && int.TryParse(register.AsSpan(1), out _) => "v" + register[1..], _ => register
-    };
-    private static int Width(string register) => register is "memory" ? 0 : register is "nzcv" ? 4 : register is "sp" ? 64 : register[0] is 'w' or 's' ? 32 : register[0] is 'v' or 'q' ? 128 : 64;
+    private static string Canonical(string register) => Arm64Registers.Canonical(register);
+    private static int Width(string register) => Arm64Registers.Width(register);
     private string Constant(long number, int width = 64) => Define($"constant_{width}_{number:x}", "constant", width, [], immediate: number);
     private string Slice(string value, int offset, int width) => offset == 0 && values[value].Width == width ? value :
         Define($"slice_{value}_{offset}_{width}", "slice", width, [value], immediate: offset);
@@ -112,131 +100,72 @@ public sealed class NativeSsa(NativeControlFlow flow, NativeMethod method, Nativ
         if (register == "x0") return Define($"exception_{pc:x}", "exception-object", 64, [Call(pc)], "unwind-object*");
         if (register == "x1") return Define($"selector_{pc:x}", "exception-selector", 64, [Call(pc)], "intptr_t");
         if (register == "memory") return Define($"exception_memory_{pc:x}", "exception-memory", 0, [In(pc, "memory"), Call(pc)]);
-        if (register.StartsWith('v') && int.Parse(register.AsSpan(1)) is >= 8 and <= 15)
+        if (Arm64Registers.PreservedByCall(register) is > 0 and < 128 && Width(register) == 128)
             return Define($"exception_{pc:x}_{register}", "partial-clobber", 128, [In(pc, register), Call(pc)], immediate: 64, address: pc, register: register);
         return IsClobbered(register) ? Define($"exception_{pc:x}_{register}", "clobber", Width(register), [Call(pc)], address: pc, register: register) : In(pc, register);
     }
-    private static bool IsClobbered(string register) => register == "nzcv" || register == "x30" ||
-        register.StartsWith('x') && int.TryParse(register.AsSpan(1), out var x) && x <= 18 || register.StartsWith('v');
-    private static IEnumerable<string> Writes(Instruction i)
+    private static bool IsClobbered(string register) => Arm64Registers.PreservedByCall(register) < Width(register);
+    private string Value(ulong pc, MachineValue value)
     {
-        if (i.Mnemonic is "bl" or "blr") return Enumerable.Range(0, 19).Append(30).Select(n => $"x{n}")
-            .Concat(Enumerable.Range(0, 32).Select(n => $"v{n}")).Concat(["nzcv", "memory"]);
-        if (i.Mnemonic is "cmp" or "cmn") return ["nzcv"];
-        if (i.Mnemonic.StartsWith("st")) return i.Writeback ? ["memory", Canonical(i.Operands.First(o => o.Kind == 3).Base!)] : ["memory"];
-        if (i.Mnemonic is "ret" or "nop" or "b" or "br" || NativeGraph.IsConditional(i)) return [];
-        var result = new List<string> { Canonical(i.Operands[0].Register!) };
-        if (i.Mnemonic == "ldp") result.Add(Canonical(i.Operands[1].Register!));
-        if (i.Mnemonic == "subs") result.Add("nzcv");
-        if (i.Writeback) result.Add(Canonical(i.Operands.First(o => o.Kind == 3).Base!));
-        return result;
-    }
-    private string Operand(ulong pc, Operand operand)
-    {
-        if (operand.Kind == 2) return Constant(operand.Immediate);
-        if (operand.Kind != 1) throw new InvalidDataException("SSA 需要寄存器或立即数操作数");
-        var register = operand.Register!;
-        var value = register is "xzr" or "wzr" ? Constant(0, Width(register)) : Slice(In(pc, register), 0, Width(register));
-        if (operand.Extend != 0)
-        {
-            var width = operand.Extend switch { 1 or 5 => 8, 2 or 6 => 16, 3 or 7 => 32, 4 or 8 => 64, _ => 0 };
-            if (width == 0) throw new InvalidDataException("未知 ARM64 扩展操作");
-            value = Extend(Slice(value, 0, width), 64, operand.Extend >= 5);
-        }
-        if (operand.Shift != 0)
-        {
-            if (operand.ShiftKind is not (0 or 1)) problems.Add($"0x{pc:x}: 尚未支持的移位类别 {operand.ShiftKind}");
-            value = Define($"shift_{pc:x}_{register}_{operand.Shift}", "shift-left", values[value].Width, [value], immediate: operand.Shift);
-        }
-        return value;
-    }
-    private string Address(Instruction instruction, Operand memory, int displacement = 0)
-    {
-        var value = In(instruction.Address, memory.Base!);
-        if (memory.Index is not null)
-        {
-            var index = Operand(instruction.Address, memory with { Kind = 1, Register = memory.Index });
-            value = Define($"index_{instruction.Address:x}", "add", 64, [value, index]);
-        }
-        var offset = displacement + (instruction.PostIndex ? 0 : memory.Displacement);
-        return offset == 0 ? value : Define($"address_{instruction.Address:x}_{offset}", "add", 64, [value, Constant(offset)]);
+        if (value.Operation == "read") return In(pc, value.Register!);
+        if (value.Operation == "constant") return Constant(value.Immediate, value.Width);
+        var arguments = value.Inputs.Select(v => Value(pc, v)).ToArray();
+        if (value.Operation == "slice") return Slice(arguments[0], checked((int)value.Immediate), value.Width);
+        if (value.Operation is "zero-extend" or "sign-extend") return Extend(arguments[0], value.Width, value.Operation == "sign-extend");
+        if (value.Operation == "reinterpret") return arguments[0];
+        if (value.Operation == "address") return value.Immediate == 0 ? arguments[0] :
+            Define(value.Id!, "add", 64, [arguments[0], Constant(value.Immediate)]);
+        if (value.Operation == "load") return Define(value.Id!, "load", value.Width, [In(pc, "memory"), arguments[0]], address: pc);
+        return Define(value.Id ?? $"machine_{pc:x}_{value.Operation}_{value.Width}_{value.Immediate}_{string.Join('_', arguments)}", value.Operation, value.Width, arguments,
+            value.Type, value.Immediate, address: pc);
     }
     private string Call(ulong pc)
     {
         var id = $"call_{pc:x}";
         if (values.ContainsKey(id)) return id;
         Define(id, "call", 0, [], address: pc);
-        var instruction = nodes[pc].Instruction;
-        var method = instruction.Mnemonic == "bl" ? symbols.Unique(NativeGraph.Target(instruction)) : null;
+        var targetValue = effects[pc].Call!.Target;
+        var method = targetValue.Operation == "constant" ? symbols.Unique(unchecked((ulong)targetValue.Immediate)) : null;
         var layout = method is null ? null : abi.Classify(method);
-        var target = instruction.Mnemonic == "bl" ? Constant((long)NativeGraph.Target(instruction)) : Operand(pc, instruction.Operands[0]);
+        var target = Value(pc, targetValue);
         // 未知调用也保留调用前寄存器，不能使用调用后的返回寄存器补参数。
-        var registers = Enumerable.Range(0, 9).Select(n => In(pc, $"x{n}"))
-            .Concat(Enumerable.Range(0, 8).Select(n => In(pc, $"v{n}"))).ToArray();
-        return Define(id, "call", layout is null ? 0 : layout.Return.Shape.Size * 8, [target, In(pc, "memory"), .. registers, In(pc, "sp")], method?.ReturnType);
+        var registers = Arm64Registers.CallInputs.Select(r => In(pc, r)).ToArray();
+        return Define(id, "call", layout is null ? 0 : layout.Return.Shape.Size * 8, [target, In(pc, "memory"), .. registers], method?.ReturnType);
     }
     private string Out(ulong pc, string register)
     {
         register = Canonical(register);
         if (outputs.TryGetValue((pc, register), out var existing)) return existing;
-        var instruction = nodes[pc].Instruction;
-        if (!Writes(instruction).Contains(register)) return In(pc, register);
+        var effect = effects[pc];
+        if (!effect.Writes.Contains(register)) return In(pc, register);
         var id = $"out_{pc:x}_{register}";
         outputs[(pc, register)] = id;
         Define(id, "pending", Width(register), [], address: pc, register: register);
-        var op = instruction.Mnemonic;
-        var operands = instruction.Operands;
-        if (op is "bl" or "blr")
+        if (effect.Call is { } invocation)
         {
             var call = Call(pc);
             if (register == "memory") return Define(id, "call-memory", 0, [In(pc, "memory"), call]);
-            var candidate = op == "bl" ? symbols.Unique(NativeGraph.Target(instruction)) : null;
+            var candidate = invocation.Target.Operation == "constant" ? symbols.Unique(unchecked((ulong)invocation.Target.Immediate)) : null;
             var layout = candidate is null ? null : abi.Classify(candidate);
             var piece = layout?.Return.Indirect == false ? layout.Return.Pieces.FirstOrDefault(p => p.Location is RegisterLocation r && r.Name.Equals(register, StringComparison.OrdinalIgnoreCase)) : null;
             if (piece is not null) return Define(id, "alias", Width(register), [Extend(Slice(call, piece.ValueOffset * 8, piece.Size * 8), Width(register), false, true)]);
-            if (register.StartsWith('v') && int.Parse(register.AsSpan(1)) is >= 8 and <= 15)
-                return Define(id, "partial-clobber", 128, [In(pc, register), call], immediate: 64);
-            Define(id, "clobber", Width(register), [call]);
-            values[id] = values[id] with { Address = pc, Register = register };
-            return id;
+            var preserved = Arm64Registers.PreservedByCall(register);
+            return preserved > 0 ? Define(id, "partial-clobber", Width(register), [In(pc, register), call], immediate: preserved) :
+                Define(id, "clobber", Width(register), [call]);
         }
-        if (op.StartsWith("st") || op.StartsWith("ld"))
+        if (register == "memory" && effect.Stores.Length > 0)
         {
-            var pair = op is "stp" or "ldp";
-            var memory = operands[pair ? 2 : 1];
-            if (instruction.Writeback && register == Canonical(memory.Base!))
-                return Define(id, "add", 64, [In(pc, memory.Base!), Constant(instruction.PostIndex ? operands[^1].Immediate : memory.Displacement)]);
-            var size = op.EndsWith('b') ? 8 : op.EndsWith('h') ? 16 : op == "ldrsw" ? 32 : Width(operands[0].Register!);
-            if (op.StartsWith("st"))
-            {
-                var before = In(pc, "memory");
-                for (var n = 0; n < (pair ? 2 : 1); n++) before = Define($"store_{pc:x}_{n}", "store", 0,
-                    [before, Address(instruction, memory, n * size / 8), Slice(Operand(pc, operands[n]), 0, size)], address: pc);
-                return Define(id, "alias", 0, [before]);
-            }
-            var index = pair && register == Canonical(operands[1].Register!) ? 1 : 0;
-            var load = Define($"load_{pc:x}_{index}", "load", size, [In(pc, "memory"), Address(instruction, memory, index * size / 8)], address: pc);
-            return Define(id, "alias", Width(register), [Extend(load, Width(register), op == "ldrsw")]);
+            var memory = In(pc, "memory");
+            foreach (var store in effect.Stores)
+                memory = Define(store.Id, "store", 0, [memory, Value(pc, store.Address), Value(pc, store.Value)], address: pc);
+            return Define(id, "alias", 0, [memory]);
         }
-        if ((op is "cmp" or "cmn" or "subs") && register == "nzcv")
-        {
-            var start = op == "subs" ? 1 : 0;
-            var left = Operand(pc, operands[start]); var right = Operand(pc, operands[start + 1]);
-            return Define(id, op == "cmn" ? "compare-add" : "compare", 4, [left, Slice(right, 0, values[left].Width)]);
-        }
-        string value;
-        if (op is "adr" or "adrp") value = Constant(operands[1].Immediate);
-        else if (op == "movi" && operands[1].Kind == 2 && operands[1].Immediate == 0) value = Constant(0, Width(operands[0].Register!));
-        else if (op == "mov") value = Operand(pc, operands[1]);
-        else if (op == "fmov" && operands.Length == 2 && operands[0].Register?[0] is 's' or 'd' && operands[1].FloatingPoint is { } number)
-            value = Constant(operands[0].Register![0] == 's' ? BitConverter.SingleToInt32Bits((float)number) : BitConverter.DoubleToInt64Bits(number), Width(operands[0].Register!));
-        else if (op == "fmov" && operands.Length == 2 && operands.All(o => o.Kind == 1 && o.Register?[0] is 's' or 'd' or 'w' or 'x') && Width(operands[0].Register!) == Width(operands[1].Register!))
-            value = Operand(pc, operands[1]);
-        else if (op == "cset" && instruction.ConditionCode is >= 1 and <= 14) value = Define($"value_{pc:x}", "condition-value", Width(operands[0].Register!), [In(pc, "nzcv")], immediate: instruction.ConditionCode, address: pc);
-        else if (op is "add" or "sub" or "subs" or "orr" or "and") value = Define($"value_{pc:x}", op is "subs" ? "sub" : op, Width(operands[0].Register!), [Operand(pc, operands[1]), Operand(pc, operands[2])], address: pc);
-        else { problems.Add($"0x{pc:x}: SSA 不支持 {op}"); return Define(id, "unknown", Width(register), []); }
-        if (operands[0].Register!.StartsWith('w')) value = Extend(Slice(value, 0, 32), 64, false);
-        return Define(id, "alias", Width(register), [Extend(value, Width(register), false)]);
+        var assignment = effect.Assignments.Single(w => w.Register == register);
+        var value = assignment.Value;
+        // 保持标志定义在寄存器输出节点上，便于追踪条件的来源。
+        if (value.Operation == "unknown") return Define(id, "unknown", Width(register), []);
+        if (register == "nzcv") return Define(id, value.Operation, 4, value.Inputs.Select(v => Value(pc, v)).ToArray());
+        return Define(id, "alias", Width(register), [Value(pc, value)]);
     }
     private void SimplifyPhis()
     {

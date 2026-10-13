@@ -30,15 +30,13 @@ public sealed class RegisterState
     public RegisterState AfterCall(string call)
     {
         var result = new RegisterState(call, values);
-        // 基础 AAPCS64：X18 为平台寄存器，未知平台策略下保守失效。
-        foreach (var n in Enumerable.Range(0, 19).Append(30))
-            result = result.Set($"X{n}", new UnknownBits($"{call}:X{n}", "调用破坏", 64));
-        for (var n = 0; n < 32; n++)
+        foreach (var register in Arm64Registers.CallWrites.Where(r => r[0] is 'x' or 'v'))
         {
-            Bits value = new UnknownBits($"{call}:V{n}", "调用破坏", 128);
-            if (n is >= 8 and <= 15)
-                value = BitOps.Concat([BitOps.Slice(Read($"V{n}"), 0, 64), new UnknownBits($"{call}:V{n}:hi", "调用破坏", 64)]);
-            result = result.Set($"V{n}", value);
+            var name = register.ToUpperInvariant();
+            var preserved = Arm64Registers.PreservedByCall(register);
+            Bits value = new UnknownBits($"{call}:{name}", "调用破坏", Width(name));
+            if (preserved > 0) value = BitOps.Concat([BitOps.Slice(Read(name), 0, preserved), new UnknownBits($"{call}:{name}:hi", "调用破坏", Width(name) - preserved)]);
+            result = result.Set(name, value);
         }
         return result;
     }

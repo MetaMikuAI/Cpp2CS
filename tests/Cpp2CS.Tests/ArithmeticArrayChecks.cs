@@ -33,6 +33,9 @@ public static class ArithmeticArrayChecks
         check(result.Problems.Count == 0, "真实浮点与数组方法无未知语义");
         var text = new SemanticWriter(session.Symbols).Structured(session.View(result));
         check(!text.Contains("UNKNOWN") && !text.Contains("UNRESOLVED") && !text.Contains("Runtime.Bits"), "结构体参数和数值结果不保留未解析位片段");
+        check(!text.Contains(".m_Items") && result.Blocks.Values.SelectMany(b => b.Statements).OfType<CallStatement>()
+            .Any(c => c.Name == "Runtime.GCWriteBarrier" && c.Arguments is [AddressOfExpression { Target: OperationExpression { Operation: ValueOperation.ArrayElement } }]),
+            "数组访存写回后的写屏障指向元素地址");
         check(text.Contains("staminaData.boost") && result.Blocks.Values.SelectMany(b => b.Statements).OfType<AssignStatement>()
             .Any(a => a.Value is OperationExpression { Operation: ValueOperation.Add }), "结构体字段来源与累计 boost 加法保留");
         var assignments = result.Blocks.Values.SelectMany(b => b.Statements).OfType<AssignStatement>().ToArray();

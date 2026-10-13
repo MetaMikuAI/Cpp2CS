@@ -69,10 +69,12 @@ public sealed class NativeState
     public MemoryState Stack { get; set; } = new("entry");
     public Dictionary<long, NativeValue> StackViews { get; } = [];
     public long StackOffset { get; set; }
+    public bool StackPointerKnown { get; set; } = true;
     public (NativeValue Left, NativeValue Right)? Comparison { get; set; }
+    public string ComparisonKind { get; set; } = "compare";
     public NativeState Copy()
     {
-        var copy = new NativeState { Stack = Stack, StackOffset = StackOffset, Comparison = Comparison };
+        var copy = new NativeState { Stack = Stack, StackOffset = StackOffset, StackPointerKnown = StackPointerKnown, Comparison = Comparison, ComparisonKind = ComparisonKind };
         foreach (var item in Registers) copy.Registers.Add(item.Key, item.Value);
         foreach (var item in StackViews) copy.StackViews.Add(item.Key, item.Value);
         return copy;

@@ -6,6 +6,11 @@ using Cpp2CS.IR;
 using Cpp2CS.Model;
 
 var passed = 0;
+if (args is ["machine-effects", var effectsConfig, var effectsBinary, var effectsOutput])
+{
+    MachineEffectsChecks.Export(effectsConfig, effectsBinary, effectsOutput);
+    return;
+}
 if (args is ["method-snapshot" or "method-pipeline", var snapshotConfig, var snapshotDirectory])
 {
     MethodPipelineChecks.Record(snapshotConfig, snapshotDirectory, args[0] == "method-pipeline");
@@ -139,6 +144,7 @@ using var json = new MemoryStream(Encoding.UTF8.GetBytes("""
 var imported = DumperSymbols.Read(json, build);
 Check(imported.Methods.Count == 2 && imported.Methods[0].Address == imported.Methods[1].Address, "Dumper 导入保留同地址候选");
 NativeChecks.Run(Check);
+MachineEffectsChecks.Run(Check);
 ArithmeticArrayChecks.Run(Check);
 DelegateCacheChecks.Run(Check);
 LambdaChecks.Run(Check);

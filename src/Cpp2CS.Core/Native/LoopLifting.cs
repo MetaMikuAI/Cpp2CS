@@ -9,7 +9,7 @@ public sealed partial class FunctionLifter
     {
         var graph = result.Graph; var regions = new NaturalLoops(graph);
         if (!regions.Reducible || regions.Loops.Any(l => l.Header == graph.Entry || l.Nodes.Any(n => graph.Blocks[n].Instructions.Any(i =>
-            i.Operands.Any(o => o.Base == "sp") && (i.Mnemonic.StartsWith("st") || i.Writeback)))))
+            Arm64Effects.Lower(i) is var e && (e.Writes.Contains("sp") || e.Stores.Any(s => AddressUsesStack(s.Address)))))))
         { result.Problems.Add("循环需要可归约区域及不变的栈布局"); return result; }
         var uses = new Dictionary<ulong, HashSet<string>>(); var definitions = new Dictionary<ulong, HashSet<string>>();
         foreach (var block in graph.Blocks.Values)
@@ -17,19 +17,19 @@ public sealed partial class FunctionLifter
             var use = new HashSet<string>(); var define = new HashSet<string>();
             foreach (var instruction in block.Instructions)
             {
-                var reads = instruction.Reads.Select(Canonical).Where(Register).ToHashSet();
-                var writes = instruction.Writes.Select(Canonical).Where(Register).ToHashSet();
-                if (instruction.Mnemonic == "bl")
+                var effect = Arm64Effects.Lower(instruction);
+                var reads = effect.Reads.Where(Register).ToHashSet();
+                var writes = effect.Writes.Where(Register).ToHashSet();
+                var transfer = effect.Call ?? (effect.Branch is { } target && (target.Operation != "constant" ||
+                    unchecked((ulong)target.Immediate) < result.Method.Address || unchecked((ulong)target.Immediate) > result.Instructions[^1].Address) ? new MachineCall(target) : null);
+                if (transfer is { } call)
                 {
-                    var target = NativeGraph.Target(instruction);
-                    if (runtime.Helpers.TryGetValue(target, out var helper))
-                        reads.UnionWith(Enumerable.Range(0, helper.Kind is "Box" or "AllocateArray" or "IsInstance" ? 2 : helper.NoReturn ? 0 : 1).Select(n => "x" + n));
-                    else
-                        foreach (var method in symbols.Methods.GetValueOrDefault(target, []))
-                            if (Classify(method) is { } abi) reads.UnionWith(abi.Arguments.SelectMany(a => a.Pieces).Select(p => p.Location).OfType<RegisterLocation>().Select(r => Canonical(r.Name.ToLowerInvariant())));
-                    writes.UnionWith(Enumerable.Range(0, 19).Select(n => "x" + n));
-                    writes.UnionWith(Enumerable.Range(0, 32).Where(n => n < 8 || n >= 16).Select(n => "v" + n));
+                    reads.UnionWith(Arm64Calls.Inputs(call, symbols, new NativeAbi(layouts, managed), runtime).Where(Register));
+                    // 循环投影目前只支持有类型的标量；V8..V15 的低 64 位保留。
+                    writes.RemoveWhere(r => Arm64Registers.PreservedByCall(r) > 0);
                 }
+                if (effect.Returns && Classify(result.Method) is { } returning)
+                    reads.UnionWith(returning.Return.Pieces.Select(p => p.Location).OfType<RegisterLocation>().Select(r => Canonical(r.Name)).Where(Register));
                 use.UnionWith(reads.Except(define)); define.UnionWith(writes);
             }
             uses[block.Address] = use; definitions[block.Address] = define;
@@ -121,6 +121,7 @@ public sealed partial class FunctionLifter
         SemanticValidation.Check(result);
         result.Proofs.Add(new(graph.Entry, "LoopRegisterPhi", "dominator-checked natural loops; live modified registers have stable typed identities; all entry/backedge values checked; parallel copies preserve swaps; loop stack writes rejected"));
         return result;
-        static bool Register(string r) => r.Length > 1 && r[0] is 'x' or 'v' && int.TryParse(r.AsSpan(1), out var n) && n < (r[0] == 'x' ? 29 : 32);
+        static bool AddressUsesStack(MachineValue value) => value.Register == "sp" || value.Inputs.Any(AddressUsesStack);
+        static bool Register(string r) => r.Length > 1 && r[0] is 'x' or 'v' && int.TryParse(r.AsSpan(1), out var n) && n < (r[0] == 'x' ? 31 : 32);
     }
 }

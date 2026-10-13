@@ -282,7 +282,7 @@ public sealed class SsaSemantics(NativeSsaProgram program, NativeMethod method, 
                 return result;
             }
             var helper = Helper(call);
-            var pureStack = helper is "WriteBarrier" or "InitializeMetadata" or "InitializeClass" or "EnsureClassMetadata" or "ResolveMetadata" or "ResolveInterface" or "IsAssignable" or "Allocate" or "CxxBeginCatch" or "CxxEndCatch";
+            var pureStack = Arm64Calls.PreservesCallerStack(helper);
             var target = TargetMethod(call);
             if (!pureStack && target is not null)
             {
@@ -346,14 +346,7 @@ public sealed class SsaSemantics(NativeSsaProgram program, NativeMethod method, 
             {
                 arguments.Add(AbiArgument(id, argument));
             }
-        else arguments.AddRange(Enumerable.Range(0, helper switch
-        {
-            "ResolveInterface" or "CxxThrow" => 3,
-            "IsAssignable" or "Box" or "IsInstance" => 2,
-            "InitializeMetadata" or "InitializeClass" or "EnsureClassMetadata" or "ResolveMetadata" or "Allocate" or "WriteBarrier" or "CxxBeginCatch" or "CxxAllocateException" or "UnwindResume" or "RethrowException" => 1,
-            "ThrowNullReference" or "CxxEndCatch" or "CxxCatchTerminate" => 0,
-            _ => 9
-        }).Select(n => Argument(id, n)));
+        else arguments.AddRange(Enumerable.Range(0, Arm64Calls.HelperArgumentCount(helper) ?? 9).Select(n => Argument(id, n)));
         return new SsaManagedCall(i.Address, helper is null ? target is null ? "indirect" : VirtualMethods.ContainsKey(id) ? "virtual" : "managed" : "runtime", helper ?? target?.Name ?? "indirect", target?.ReturnType, arguments.ToArray(), id);
     }).ToArray();
     public SsaManagedStore[] Stores() => program.Instructions.SelectMany(i => i.Effects.SelectMany(id => StoreValues(id).Select(v =>

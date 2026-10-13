@@ -60,7 +60,7 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
             if (abi.Arguments[p].Indirect || abi.Arguments[p].Pieces.Any(piece => piece.Location is not RegisterLocation))
             { result.Problems.Add("入口间接/栈参数尚未接通"); return result; }
             foreach (var piece in abi.Arguments[p].Pieces)
-                Set(entry, ((RegisterLocation)piece.Location).Name.ToLowerInvariant(), NativeValues.Slice(value, piece.ValueOffset * 8, piece.Size * 8));
+                BindAbiValue(entry, ((RegisterLocation)piece.Location).Name.ToLowerInvariant(), NativeValues.Slice(value, piece.ValueOffset * 8, piece.Size * 8));
         }
         if (order is null) return LiftLoops(result, entry);
         foreach (var blockAddress in order)
@@ -86,13 +86,14 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         SemanticValidation.Check(result);
         return result;
     }
-    private static string Canonical(string name) => name switch { "fp" => "x29", "lr" => "x30", _ when name.StartsWith('w') => "x" + name[1..],
-        _ when name[0] is 'q' or 'd' or 's' => "v" + name[1..], _ => name };
-    private static int RegisterWidth(string name) => name.StartsWith('w') || name.StartsWith('s') ? 32 : name.StartsWith('q') || name.StartsWith('v') ? 128 : 64;
+    private static string Canonical(string name) => Arm64Registers.Canonical(name);
+    private static int RegisterWidth(string name) => Arm64Registers.Width(name);
     private NativeValue Read(NativeState state, string name)
     {
         if (name is "xzr" or "wzr") return Constant(0, RegisterWidth(name));
-        if (name == "sp") return new(new InputBits($"stack-address:{state.StackOffset}", 64), "stack-address", new StackAddressExpression(state.StackOffset));
+        if (Canonical(name) == "sp") return state.StackPointerKnown
+            ? new(new InputBits($"stack-address:{state.StackOffset}", 64), "stack-address", new StackAddressExpression(state.StackOffset))
+            : new(new UnknownBits("sp", "栈指针未确定", 64), "unknown", new UnknownExpression("sp"));
         var key = Canonical(name);
         var value = state.Registers.GetValueOrDefault(key) ?? new(new UnknownBits(key, "寄存器没有到达定义", RegisterWidth(key)), "unknown", new UnknownExpression(key));
         value = RegisterWidth(name) < value.Bits.Width ? NativeValues.Slice(value, 0, RegisterWidth(name), value.Type) : value;
@@ -101,29 +102,23 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
             value = value with { Type = field.Type, Expression = new MemberExpression(aggregate.Bits, field, field.Name, null) };
         return Project(value);
     }
-    private void Set(NativeState state, string name, NativeValue value)
+    private static void BindAbiValue(NativeState state, string name, NativeValue value)
     {
-        if (name is "xzr" or "wzr") return;
-        if (name.StartsWith('w') && value.Expression is ConstantExpression) value = value with { Type = "int32_t" };
-        if (RegisterWidth(name) == 32 && value.Bits.Width > 32) value = value with { Bits = BitOps.Slice(value.Bits, 0, 32) };
-        if (RegisterWidth(name) == 32 && value.Bits.Width < 32) value = value with { Bits = BitOps.Concat([value.Bits, BitOps.Constant(0, 32 - value.Bits.Width)]) };
-        if (RegisterWidth(name) == 32 && value.Bits.Width == 32) value = value with { Bits = BitOps.Concat([value.Bits, BitOps.Constant(0, 32)]) };
-        var physicalWidth = Canonical(name).StartsWith('v') ? 128 : 64;
-        if (value.Bits.Width < physicalWidth)
-            value = value with { Bits = BitOps.Concat([value.Bits, new UnknownBits("unused-register-bits", "ABI 未定义的高位", physicalWidth - value.Bits.Width)]) };
-        state.Registers[Canonical(name)] = value;
+        var register = Canonical(name);
+        var width = RegisterWidth(register);
+        if (value.Bits.Width > width) throw new InvalidOperationException("ABI 分片超过寄存器宽度");
+        if (value.Bits.Width < width)
+            value = value with { Bits = BitOps.Concat([value.Bits, new UnknownBits("unused-register-bits", "ABI 未定义的高位", width - value.Bits.Width)]) };
+        state.Registers[register] = value;
     }
     private static NativeValue Constant(long value, int width = 64) => new(BitOps.Constant(value, width), width == 32 ? "int32_t" : "int64_t", new ConstantExpression(value));
-    private NativeValue OperandValue(NativeState state, Operand operand) => operand.Kind switch
-    {
-        1 => Read(state, operand.Register!), 2 => Constant(operand.Immediate), _ => new(new UnknownBits("operand", "未知操作数", 64), "unknown", new UnknownExpression("operand"))
-    };
     private static Expression Unwrap(Expression expression) => expression is CapturedExpression c ? Unwrap(c.Value) : expression;
     private NativeState Merge(ulong address, List<(ulong Predecessor, NativeState State)> incoming)
     {
         var states = incoming.Select(i => i.State).ToArray();
         if (states.Length == 1) return states[0].Copy();
         var output = states[0].Copy();
+        output.StackPointerKnown = states.All(s => s.StackPointerKnown && s.StackOffset == states[0].StackOffset);
         foreach (var key in states.SelectMany(s => s.Registers.Keys).Distinct())
         {
             var values = states.Select(s => Read(s, key)).ToArray();
@@ -140,255 +135,27 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         output.Stack = MemoryState.Merge($"{address:x}", states.Select(s => s.Stack).ToArray());
         foreach (var key in output.StackViews.Keys.ToArray())
             if (states.Any(s => s.StackViews.GetValueOrDefault(key) != output.StackViews[key])) output.StackViews.Remove(key);
-        output.Comparison = states.All(s => s.Comparison == states[0].Comparison) ? states[0].Comparison : null;
+        output.Comparison = states.All(s => s.Comparison == states[0].Comparison && s.ComparisonKind == states[0].ComparisonKind) ? states[0].Comparison : null;
         return output;
     }
-    private Expression? Step(Instruction i, NativeState s, List<Statement> statements, LiftResult result)
+    private Expression Compare(LiftResult result, string operation, NativeValue left, NativeValue right)
     {
-        var o = i.Operands;
-        if (i.Mnemonic == "add" && o.Length == 3 && o[2] is { Kind: 1, Extend: 7, ShiftKind: 1 } &&
-            layouts.ArrayElements(OperandValue(s, o[1]).Type) is { } elements && (1L << (int)o[2].Shift) == layouts.Size(elements.Type))
+        string? EnumType(Expression expression)
         {
-            var array = OperandValue(s, o[1]); var index = OperandValue(s, o[2]);
-            if (index.Type != "int32_t") { Unsupported("数组索引类型未确定"); return null; }
-            Set(s, o[0].Register!, new(new InputBits($"indexed:{i.Address:x}", 64), array.Type, new IndexedArrayAddress(array.Expression, index.Expression, elements)));
-            return null;
+            expression = Unwrap(expression);
+            if (expression is MemberExpression m) return managed.BaseTypeOf(m.ManagedType ?? "") == "System.Enum" ? m.ManagedType : null;
+            var parameters = result.Method.Parameters.Where(p => p.Name != "__this" && p.Name != "method").ToArray();
+            var signature = managed.SignatureOf(result.Method.Name.Split("$$")[0], result.Method.Name.Split("$$")[1]);
+            var index = expression is NameExpression n ? Array.FindIndex(parameters, p => p.Name == n.Name) : -1;
+            var type = index >= 0 && signature is { } sig && index < sig.ParameterTypes.Length ? sig.ParameterTypes[index] : null;
+            return type is not null && managed.BaseTypeOf(type) == "System.Enum" ? type : null;
         }
-        if (o.Any(p => p.Shift != 0 || p.Extend != 0)) { Unsupported("带移位或扩展的操作数"); return null; }
-        switch (i.Mnemonic)
-        {
-            case "nop": break;
-            case "adrp": case "adr":
-                Set(s, o[0].Register!, new(BitOps.Constant(o[1].Immediate, 64), "address", new AddressExpression((ulong)o[1].Immediate))); break;
-            case "mov": Set(s, o[0].Register!, OperandValue(s, o[1])); break;
-            case "and":
-            {
-                var left = OperandValue(s, o[1]); var width = RegisterWidth(o[0].Register!);
-                if (o[2].Kind != 2) { Unsupported("寄存器按位与尚未接通"); break; }
-                var mask = unchecked((ulong)o[2].Immediate);
-                if (left.Type == "bool" && mask == 1)
-                {
-                    var boolean = left.Expression;
-                    while (boolean is SliceExpression { BitOffset: 0, BitWidth: >= 8 } slice) boolean = slice.Value;
-                    Set(s, o[0].Register!, new(BitOps.Concat([BitOps.Slice(left.Bits, 0, 1), BitOps.Constant(0, width - 1)]), "bool", boolean)); break;
-                }
-                var bits = System.Numerics.BitOperations.PopCount(mask);
-                if (bits == 0 || bits > width || (mask & (mask + 1)) != 0) { Unsupported("非连续低位掩码尚未接通"); break; }
-                var low = Project(NativeValues.Slice(left, 0, bits));
-                Set(s, o[0].Register!, low with { Bits = bits == width ? low.Bits : BitOps.Concat([low.Bits, BitOps.Constant(0, width - bits)]) });
-                break;
-            }
-            case "lsr":
-            {
-                var width = RegisterWidth(o[0].Register!); var shift = checked((int)o[2].Immediate);
-                if (o[2].Kind != 2 || shift < 0 || shift >= width) { Unsupported("逻辑右移的位数未确认"); break; }
-                var low = Project(NativeValues.Slice(OperandValue(s, o[1]), shift, width - shift));
-                Set(s, o[0].Register!, low with { Bits = shift == 0 ? low.Bits : BitOps.Concat([low.Bits, BitOps.Constant(0, shift)]) });
-                break;
-            }
-            case "cset":
-                if (s.Comparison is not { } compared || i.ConditionCode is not (1 or 2 or 11 or 12 or 13 or 14)) { Unsupported("条件置位的标志或条件码未支持"); break; }
-                if (!(compared.Left.Type == "int32_t" && compared.Left.Bits.Width == 32 || compared.Left.Type == "int64_t" && compared.Left.Bits.Width == 64) ||
-                    !(compared.Right.Expression is ConstantExpression || compared.Right.Type == compared.Left.Type && compared.Right.Bits.Width == compared.Left.Bits.Width))
-                { Unsupported("条件置位需要匹配位宽的有符号整数比较"); break; }
-                var op = i.ConditionCode switch { 1 => "==", 2 => "!=", 11 => ">=", 12 => "<", 13 => ">", _ => "<=" };
-                Numeric(ValueOperation.Select, "int32_t", Compare(op, compared.Left, compared.Right), new ConstantExpression(1), new ConstantExpression(0));
-                break;
-            case "add": case "sub":
-            {
-                var left = OperandValue(s, o[1]); var right = OperandValue(s, o[2]);
-                if (o[0].Register == "sp" && o[1].Register == "sp" && right.Expression is ConstantExpression sp)
-                    s.StackOffset = checked(s.StackOffset + (i.Mnemonic == "add" ? sp.Value : -sp.Value));
-                else if (left.Expression is StackAddressExpression stack && right.Expression is ConstantExpression delta)
-                {
-                    var offset = checked(stack.Offset + (i.Mnemonic == "add" ? delta.Value : -delta.Value));
-                    Set(s, o[0].Register!, new(new InputBits($"stack-address:{offset}", 64), "stack-address", new StackAddressExpression(offset)));
-                }
-                else if (left.Expression is AddressExpression a && right.Expression is ConstantExpression c)
-                {
-                    var sum = checked((ulong)((long)a.Address + (i.Mnemonic == "add" ? c.Value : -c.Value)));
-                    Set(s, o[0].Register!, new(BitOps.Constant(sum, 64), "address", new AddressExpression(sum)));
-                }
-                else if (i.Mnemonic == "add" && right.Expression is ConstantExpression displacement &&
-                    layouts.FieldAt(left.Type, checked((int)displacement.Value)) is { } field && Location(left, field.Offset, field.Size) is { } location)
-                    Set(s, o[0].Register!, new(new InputBits($"field-address:{i.Address:x}", 64), field.Type + "*", new AddressOfExpression(location) { RootType = (left.Expression as AddressOfExpression)?.RootType ?? left.Type }));
-                else if (o[0].Register is { } destination && destination[0] is 'w' or 'x' && left.Type is "int32_t" or "int64_t" or "uint32_t" or "uint64_t" &&
-                    (RegisterWidth(destination) == 32 || left.Type is "int64_t" or "uint64_t"))
-                    Numeric(i.Mnemonic == "add" ? ValueOperation.Add : ValueOperation.Subtract, RegisterWidth(destination) == 32 ? "int32_t" : "int64_t", left.Expression, right.Expression);
-                else Unsupported("算术操作数类型未确定");
-                break;
-            }
-            case "scvtf":
-            {
-                if (o.Length != 2 || o[0].Register?[0] is not ('s' or 'd') || o[1].Register?[0] is not ('w' or 'x')) { Unsupported("不支持的 SCVTF 变体"); break; }
-                var input = OperandValue(s, o[1]);
-                if (input.Type is not ("int32_t" or "int64_t" or "uint32_t" or "uint64_t")) { Unsupported("整数转浮点的输入类型未确定"); break; }
-                var expression = input.Expression;
-                if (o[1].Register![0] == 'x' && input.Type is "int32_t" or "uint32_t")
-                {
-                    if (BitOps.Slice(input.Bits, 32, 32) is not ConstantBits { Value.IsZero: true }) { Unsupported("64 位整数转换的高位未确定"); break; }
-                    expression = new OperationExpression(ValueOperation.ZeroExtendWord, "int64_t", [expression]);
-                }
-                Numeric(ValueOperation.SignedToFloat, o[0].Register![0] == 's' ? "float" : "double", expression, new ConstantExpression(RegisterWidth(o[1].Register!))); break;
-            }
-            case "fdiv":
-                if (o.Length != 3 || o[0].Register?[0] is not ('s' or 'd') || o.Skip(1).Any(p => p.Register?[0] != o[0].Register![0])) { Unsupported("不支持的 FDIV 变体"); break; }
-                if (!o.Skip(1).All(FloatOperand)) { Unsupported("浮点除法的输入类型未确定"); break; }
-                Numeric(ValueOperation.FloatDivide, o[0].Register![0] == 's' ? "float" : "double", OperandValue(s, o[1]).Expression, OperandValue(s, o[2]).Expression); break;
-            case "frintp":
-                if (o.Length != 2 || o[0].Register?[0] is not ('s' or 'd') || o[1].Register?[0] != o[0].Register![0]) { Unsupported("不支持的 FRINTP 变体"); break; }
-                if (!FloatOperand(o[1])) { Unsupported("浮点取整的输入类型未确定"); break; }
-                Numeric(ValueOperation.Ceiling, o[0].Register![0] == 's' ? "float" : "double", OperandValue(s, o[1]).Expression); break;
-            case "fcvtps":
-                if (o.Length != 2 || o[0].Register?[0] is not ('w' or 'x') || o[1].Register?[0] is not ('s' or 'd')) { Unsupported("不支持的 FCVTPS 变体"); break; }
-                if (!FloatOperand(o[1])) { Unsupported("浮点转整数的输入类型未确定"); break; }
-                Numeric(ValueOperation.FloatToSignedCeiling, o[0].Register![0] == 'w' ? "int32_t" : "int64_t", OperandValue(s, o[1]).Expression); break;
-            case "fmov":
-                if (o.Length != 2 || o[1].Kind != 1 || RegisterWidth(o[0].Register!) != RegisterWidth(o[1].Register!)) { Unsupported("不支持的 FMOV 变体"); break; }
-                if (RegisterWidth(o[0].Register!) == 64 && o[0].Register![0] != o[1].Register![0]) { Unsupported("64 位跨寄存器组 FMOV 尚未接通"); break; }
-                if (o[1].Register![0] is 's' or 'd' && !FloatOperand(o[1])) { Unsupported("FMOV 浮点源的位解释未确定"); break; }
-                if (o[0].Register![0] == o[1].Register![0]) Set(s, o[0].Register!, OperandValue(s, o[1]));
-                else Numeric(ValueOperation.BitCast, o[0].Register![0] switch { 's' => "float", 'd' => "double", 'w' => "int32_t", _ => "int64_t" }, OperandValue(s, o[1]).Expression);
-                break;
-            case "fcmp":
-                if (o.Length != 2 || !o.All(FloatOperand)) { Unsupported("浮点比较的输入类型未确定"); s.Comparison = null; break; }
-                s.Comparison = (OperandValue(s, o[0]), OperandValue(s, o[1])); break;
-            case "csel":
-                if (s.Comparison is not { } comparison || i.ConditionCode is not (1 or 2)) { Unsupported("条件选择的标志或条件码未支持"); break; }
-                if (o.Skip(1).Any(p => OperandValue(s, p).Type is not ("int32_t" or "int64_t" or "uint32_t" or "uint64_t"))) { Unsupported("条件选择的操作数不是已知整数"); break; }
-                Numeric(ValueOperation.Select, RegisterWidth(o[0].Register!) == 32 ? "int32_t" : "int64_t",
-                    new BinaryExpression(i.ConditionCode == 1 ? "==" : "!=", comparison.Left.Expression, comparison.Right.Expression), OperandValue(s, o[1]).Expression, OperandValue(s, o[2]).Expression);
-                break;
-            case "stp": case "ldp": case "str": case "strb": case "strh": case "ldr": case "ldrb": case "ldrh": case "ldur": case "stur":
-            {
-                var pair = i.Mnemonic is "stp" or "ldp";
-                var mem = o[pair ? 2 : 1];
-                if (mem.Kind != 3 || mem.Index is not null) { Unsupported("索引内存寻址"); break; }
-                var load = i.Mnemonic.StartsWith("ld");
-                var size = i.Mnemonic.EndsWith('b') ? 1 : i.Mnemonic.EndsWith('h') ? 2 : RegisterWidth(o[0].Register!) / 8;
-                var baseValue = Read(s, mem.Base!);
-                var offset = mem.Displacement;
-                if (mem.Base == "sp" && i.Writeback && !i.PostIndex) { s.StackOffset += offset; offset = 0; }
-                for (var n = 0; n < (pair ? 2 : 1); n++)
-                {
-                    var at = offset + n * size;
-                    if (mem.Base == "sp")
-                    {
-                        var slot = new StorageAddress(stackRegion, s.StackOffset + at);
-                        if (load)
-                        {
-                            var loaded = NativeValues.LoadStack(s, stackRegion, slot.Offset, size);
-                            if (mutableStack.Any(p => slot.Offset >= p.Key && slot.Offset + size <= p.Key + layouts.Size(p.Value.Type)))
-                            {
-                                loaded = Project(loaded);
-                                loaded = Capture(i.Address, size, loaded.Type, loaded.Expression, statements);
-                            }
-                            Set(s, o[n].Register!, loaded);
-                        }
-                        else
-                        {
-                            var value = Read(s, o[n].Register!);
-                            NativeValues.StoreStack(s, stackRegion, slot.Offset, NativeValues.Slice(value, 0, size * 8, value.Type), $"store_{i.Address:x}_{n}");
-                        }
-                    }
-                    else if (load) Set(s, o[n].Register!, Load(i.Address, baseValue, at, size, statements, result));
-                    else
-                    {
-                        if (baseValue.Expression is AddressExpression address)
-                            statements.Add(new StoreStatement(i.Address, new AddressExpression(checked(address.Address + (ulong)at)), Read(s, o[n].Register!).Expression));
-                        else if (Location(baseValue, at, size) is { } location)
-                        {
-                            var value = Read(s, o[n].Register!).Expression;
-                            if (location is MemberExpression member && member.Field.Type.EndsWith("_o*") && value is ConstantExpression { Value: 0 }) value = new NameExpression("null");
-                            statements.Add(new StoreStatement(i.Address, location, value));
-                            result.Proofs.Add(new(i.Address, "FieldStore", "typed field address from Clang layout; store and GC barrier remain separate operations"));
-                        }
-                        else Unsupported("存储地址未解析");
-                    }
-                }
-                if (mem.Base == "sp" && i.Writeback && i.PostIndex) s.StackOffset += o[^1].Immediate;
-                if (mem.Base != "sp" && i.Writeback)
-                {
-                    var displacement = i.PostIndex ? checked((int)o[^1].Immediate) : mem.Displacement;
-                    if (Location(baseValue, displacement, size) is { } location)
-                        Set(s, mem.Base!, new(new InputBits($"field-address:{i.Address:x}", 64), "field-address", new AddressOfExpression(location) { RootType = (baseValue.Expression as AddressOfExpression)?.RootType ?? baseValue.Type }));
-                    else Unsupported("写回地址未解析");
-                }
-                break;
-            }
-            case "cmp": s.Comparison = (OperandValue(s, o[0]), OperandValue(s, o[1])); break;
-            case "cbz": case "cbnz":
-            {
-                var value = Read(s, o[0].Register!);
-                var reference = value.Type.EndsWith("_o*") || value.Type.EndsWith("_array*") || value.Type == "Il2CppObject*";
-                return new BinaryExpression(reference ? (i.Mnemonic == "cbz" ? "is" : "is not") : (i.Mnemonic == "cbz" ? "==" : "!="),
-                    value.Expression, reference ? new NameExpression("null") : new ConstantExpression(0));
-            }
-            case "tbz": case "tbnz":
-                var bitValue = Read(s, o[0].Register!);
-                if (bitValue.Type == "bool" && o[1].Immediate == 0)
-                {
-                    var expression = bitValue.Expression;
-                    while (expression is SliceExpression { BitOffset: 0 } slice) expression = slice.Value;
-                    return new BinaryExpression(i.Mnemonic == "tbz" ? "==" : "!=", expression, new NameExpression("false"));
-                }
-                return new BinaryExpression(i.Mnemonic == "tbz" ? "==" : "!=", new BinaryExpression("&", Read(s, o[0].Register!).Expression, new ConstantExpression(1L << (int)o[1].Immediate)), new ConstantExpression(0));
-            case "b.eq": case "b.ne":
-                if (s.Comparison is { } compare) return Compare(i.Mnemonic == "b.eq" ? "==" : "!=", compare.Left, compare.Right);
-                Unsupported("条件标志来源未确定"); break;
-            case "b.ge": case "b.gt": case "b.lt": case "b.le": case "b.hs": case "b.lo": case "b.hi": case "b.ls":
-                if (s.Comparison is not { } integer || integer.Left.Type is not ("int32_t" or "uint32_t" or "int64_t" or "uint64_t") ||
-                    !(integer.Right.Expression is ConstantExpression || integer.Right.Type == integer.Left.Type && integer.Right.Bits.Width == integer.Left.Bits.Width))
-                { Unsupported("整数分支的类型或位宽未确定"); break; }
-                var unsigned = i.Mnemonic is "b.hs" or "b.lo" or "b.hi" or "b.ls";
-                Expression Cast(NativeValue v) => unsigned ? new OperationExpression(ValueOperation.Unsigned, integer.Left.Bits.Width == 32 ? "uint32_t" : "uint64_t", [v.Expression]) : v.Expression;
-                return new BinaryExpression(i.Mnemonic switch { "b.ge" or "b.hs" => ">=", "b.gt" or "b.hi" => ">", "b.lt" or "b.lo" => "<", _ => "<=" }, Cast(integer.Left), Cast(integer.Right));
-            case "bl": DirectCall(i, s, statements, result); break;
-            case "br": DelegateCall(i, s, statements, result); break;
-            case "b":
-                if (NativeGraph.Target(i) < result.Method.Address || NativeGraph.Target(i) > result.Instructions[^1].Address)
-                {
-                    DirectCall(i, s, statements, result);
-                    statements.Add(new ReturnStatement(i.Address, ReturnValue(result.Method, s)));
-                    result.Proofs.Add(new(i.Address, "DirectTailCall", "external branch to a known method or runtime helper; existing call semantics retained; no fallthrough"));
-                }
-                break;
-            case "ret": statements.Add(new ReturnStatement(i.Address, ReturnValue(result.Method, s))); break;
-            default: Unsupported("指令尚未支持：" + i.Mnemonic); break;
-        }
-        return null;
-        Expression Compare(string operation, NativeValue left, NativeValue right)
-        {
-            string? EnumType(Expression expression)
-            {
-                expression = Unwrap(expression);
-                if (expression is MemberExpression m) return managed.BaseTypeOf(m.ManagedType ?? "") == "System.Enum" ? m.ManagedType : null;
-                var parameters = result.Method.Parameters.Where(p => p.Name != "__this" && p.Name != "method").ToArray();
-                var signature = managed.SignatureOf(result.Method.Name.Split("$$")[0], result.Method.Name.Split("$$")[1]);
-                var index = expression is NameExpression n ? Array.FindIndex(parameters, p => p.Name == n.Name) : -1;
-                var type = index >= 0 && signature is { } sig && index < sig.ParameterTypes.Length ? sig.ParameterTypes[index] : null;
-                return type is not null && managed.BaseTypeOf(type) == "System.Enum" ? type : null;
-            }
-            var leftEnum = EnumType(left.Expression); var rightEnum = EnumType(right.Expression);
-            if (operation is "==" or "!=" && leftEnum is not null && right.Expression is ConstantExpression number)
-                return new BinaryExpression(operation, left.Expression, number with { EnumType = leftEnum, EnumMember = managed.EnumNames.GetValueOrDefault((leftEnum, number.Value)) });
-            if (leftEnum is null && rightEnum is null) return new BinaryExpression(operation, left.Expression, EnumConstant(left, right));
-            Expression Cast(NativeValue v, string? type) => type is null ? v.Expression : new OperationExpression(ValueOperation.IntegerCast, v.Bits.Width == 32 ? "int32_t" : "int64_t", [v.Expression]);
-            return new BinaryExpression(operation, Cast(left, leftEnum), Cast(right, rightEnum));
-        }
-        bool FloatOperand(Operand operand) => operand.Register?[0] is 's' or 'd' &&
-            OperandValue(s, operand).Type == (operand.Register[0] == 's' ? "float" : "double");
-        void Numeric(ValueOperation operation, string type, params Expression[] arguments)
-        {
-            var expression = new OperationExpression(operation, type, arguments);
-            var value = Capture(i.Address, RegisterWidth(o[0].Register!) / 8, type, expression, statements);
-            Set(s, o[0].Register!, value);
-        }
-        void Unsupported(string reason)
-        {
-            result.Problems.Add($"0x{i.Address:x}: {reason}");
-            statements.Add(new UnresolvedStatement(i.Address, reason));
-        }
+        var leftEnum = EnumType(left.Expression); var rightEnum = EnumType(right.Expression);
+        if (operation is "==" or "!=" && leftEnum is not null && right.Expression is ConstantExpression number)
+            return new BinaryExpression(operation, left.Expression, number with { EnumType = leftEnum, EnumMember = managed.EnumNames.GetValueOrDefault((leftEnum, number.Value)) });
+        if (leftEnum is null && rightEnum is null) return new BinaryExpression(operation, left.Expression, EnumConstant(left, right));
+        Expression Cast(NativeValue v, string? type) => type is null ? v.Expression : new OperationExpression(ValueOperation.IntegerCast, v.Bits.Width == 32 ? "int32_t" : "int64_t", [v.Expression]);
+        return new BinaryExpression(operation, Cast(left, leftEnum), Cast(right, rightEnum));
     }
     private Expression? ReturnValue(NativeMethod method, NativeState state)
     {
@@ -490,13 +257,12 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         foreach (var pair in state.Registers.Where(p => p.Key.StartsWith('x') && p.Value.Bits.Width == 64)) registers = registers.Set(pair.Key.ToUpperInvariant(), pair.Value.Bits);
         foreach (var pair in state.Registers.Where(p => p.Key.StartsWith('v') && p.Value.Bits.Width == 128)) registers = registers.Set(pair.Key.ToUpperInvariant(), pair.Value.Bits);
         registers = registers.AfterCall($"call:{pc:x}");
-        for (var i = 0; i <= 18; i++) state.Registers[$"x{i}"] = new(registers.Read($"X{i}"), "unknown", new UnknownExpression($"clobber_{pc:x}_x{i}"));
-        state.Registers["x30"] = new(registers.Read("X30"), "unknown", new UnknownExpression("link-register"));
-        for (var i = 0; i < 32; i++)
+        foreach (var register in Arm64Registers.CallWrites.Where(r => r[0] is 'x' or 'v'))
         {
-            var old = state.Registers.GetValueOrDefault($"v{i}");
-            state.Registers[$"v{i}"] = i is >= 8 and <= 15 && old?.Type is "float" or "double" ?
-                old with { Bits = registers.Read($"V{i}") } : new(registers.Read($"V{i}"), "unknown", new UnknownExpression($"clobber_{pc:x}_v{i}"));
+            var old = state.Registers.GetValueOrDefault(register);
+            var bits = registers.Read(register.ToUpperInvariant());
+            state.Registers[register] = Arm64Registers.PreservedByCall(register) >= 64 && old?.Type is "float" or "double" ?
+                old with { Bits = bits } : new(bits, "unknown", new UnknownExpression($"clobber_{pc:x}_{register}"));
         }
         state.Comparison = null;
     }
@@ -513,7 +279,12 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         if (method is null || layout is null)
         {
             result.Problems.Add($"0x{instruction.Address:x}: 调用 0x{target:x} 的 ABI 未确认");
-            statements.Add(new UnresolvedStatement(instruction.Address, $"raw_call 0x{target:x}; 原始操作数保留于机器码")); Clobber(state, instruction.Address); return;
+            statements.Add(new UnresolvedStatement(instruction.Address, $"raw_call 0x{target:x}; 原始操作数保留于机器码")); InvalidateCallMemory(state, instruction.Address); Clobber(state, instruction.Address); return;
+        }
+        if (!state.StackPointerKnown && layout.Arguments.Any(a => a.Pieces.Any(p => p.Location is StackLocation)))
+        {
+            result.Problems.Add($"0x{instruction.Address:x}: 调用栈参数的地址未确定");
+            InvalidateCallMemory(state, instruction.Address); Clobber(state, instruction.Address); return;
         }
         var arguments = new List<NativeValue>();
         foreach (var value in layout.Arguments)
@@ -618,7 +389,7 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
                 if (layout.Return.Shape.Kind is ShapeKind.Composite or ShapeKind.HomogeneousFloat)
                     aggregateValues[returned.Bits] = (returnType, returned.Expression);
                 foreach (var piece in layout.Return.Pieces)
-                    Set(state, ((RegisterLocation)piece.Location).Name.ToLowerInvariant(), Project(NativeValues.Slice(returned, piece.ValueOffset * 8, piece.Size * 8, layout.Return.Pieces.Count == 1 ? returnType : "native-bits")));
+                    BindAbiValue(state, ((RegisterLocation)piece.Location).Name.ToLowerInvariant(), Project(NativeValues.Slice(returned, piece.ValueOffset * 8, piece.Size * 8, layout.Return.Pieces.Count == 1 ? returnType : "native-bits")));
             }
         }
         result.Proofs.Add(new(instruction.Address, "CallArguments", $"{method.Name}; {arguments.Count} native arguments incl. MethodInfo; return pieces={layout.Return.Pieces.Count}"));
