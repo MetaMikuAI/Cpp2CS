@@ -8,7 +8,7 @@ public sealed record HeaderField(string Name, string Type, int Offset, int Size,
 {
     public string[] Path { get; init; } = [];
 }
-public sealed record HeaderRecord(string Name, string? Base, string Source, string Kind, (string Name, string Type, int Count)[] Fields,
+public sealed record HeaderRecord(string Name, string? Base, string Source, string Kind, (string Name, string Type, int Count, bool Direct)[] Fields,
     bool Opaque = false, string? Unsupported = null);
 public sealed class HeaderLayout
 {
@@ -65,7 +65,7 @@ public sealed class HeaderLayout
                 else pack = args[0].Length == 0 ? null : args[0];
             }
             if (pack is not null) rejectedPacking.Add(m.Groups[2].Value);
-            var fields = new List<(string, string, int)>();
+            var fields = new List<(string, string, int, bool)>();
             string? unsupported = null;
             var body = text[bodyStart..(end - 1)];
             ReadFields(Regex.Replace(body, @"^\s*#\s*pragma[^\r\n]*", "", RegexOptions.Multiline));
@@ -74,7 +74,7 @@ public sealed class HeaderLayout
             m = startPattern.Match(text, semicolon + 1);
 
             // 匿名聚合的字段只用于收集编译依赖；重叠成员不参与字段身份推断。
-            void ReadFields(string source)
+            void ReadFields(string source, bool direct = true)
             {
                 var begin = 0; var nesting = 0;
                 for (var i = 0; i < source.Length; i++)
@@ -84,10 +84,10 @@ public sealed class HeaderLayout
                     if (source[i] != ';' || nesting != 0) continue;
                     var decl = source[begin..i].Trim(); begin = i + 1;
                     var anonymous = Regex.Match(decl, @"^(?:struct|union)\s*\{([\s\S]*)\}$");
-                    if (anonymous.Success) { ReadFields(anonymous.Groups[1].Value); continue; }
+                    if (anonymous.Success) { ReadFields(anonymous.Groups[1].Value, false); continue; }
                     var f = Regex.Match(decl, @"^(.+?[\s*])(\w+)\s*(?:\[\s*(\d+)\s*\])?$");
                     if (!f.Success) { unsupported = "字段声明尚未支持：" + decl; continue; }
-                    fields.Add((f.Groups[2].Value, Symbols.Clean(f.Groups[1].Value), f.Groups[3].Success ? int.Parse(f.Groups[3].Value) : 1));
+                    fields.Add((f.Groups[2].Value, Symbols.Clean(f.Groups[1].Value), f.Groups[3].Success ? int.Parse(f.Groups[3].Value) : 1, direct));
                 }
                 if (!string.IsNullOrWhiteSpace(source[begin..])) unsupported = "字段声明未终止：" + source[begin..].Trim();
             }
@@ -147,9 +147,9 @@ public sealed class HeaderLayout
     public HeaderField[] Members(string type)
     {
         type = type.TrimEnd('*');
-        if (!records.TryGetValue(type, out var record) || record.Opaque || record.Kind == "union") return [];
+        if (!records.TryGetValue(type, out var record) || record.Kind == "union") return [];
         Ensure(type);
-        return record.Fields.Select(f => new HeaderField(f.Name, f.Type, layouts[type].Offsets[f.Name], Size(f.Type) * f.Count, type) { Path = [f.Name] }).ToArray();
+        return record.Fields.Where(f => f.Direct).Select(f => new HeaderField(f.Name, f.Type, layouts[type].Offsets[f.Name], Size(f.Type) * f.Count, type) { Path = [f.Name] }).ToArray();
     }
     public string? ArrayType(string elementType) => records.Values.FirstOrDefault(r => r.Name.EndsWith("_array") &&
         r.Fields.Any(f => f.Name == "m_Items" && f.Type == elementType) && r.Fields.Any(f => f.Name == "max_length"))?.Name;
@@ -170,10 +170,10 @@ public sealed class HeaderLayout
         Ensure(name);
         var record = records[name];
         var layout = layouts[name];
-        if (record.Kind == "union" || record.Opaque) yield break;
+        if (record.Kind == "union") yield break;
         if (record.Base is not null)
             foreach (var field in Flatten(record.Base, origin + layout.Base)) yield return field;
-        foreach (var field in record.Fields)
+        foreach (var field in record.Fields.Where(f => f.Direct))
         {
             var offset = origin + layout.Offsets[field.Name];
             if (records.TryGetValue(field.Type, out var nestedRecord) && field.Count == 1 && nestedRecord.Kind != "union" && !nestedRecord.Opaque)

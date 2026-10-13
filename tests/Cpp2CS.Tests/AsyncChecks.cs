@@ -28,6 +28,12 @@ public static class AsyncChecks
             struct Context;
             typedef void (*Callback)(const Context*, void**);
             struct WithCallback { uint8_t flag; Callback invoke; Overlay payload; };
+            struct Mixed {
+                Callback invoke;
+                Context* owner;
+                union { Context* context; const void* handle; };
+                uint32_t token;
+            };
             """);
         var layout = new HeaderLayout(path, compiler);
         check(layout.Shape("Task") is { Kind: Cpp2CS.Abi.ShapeKind.Composite, Size: 16, Alignment: 8 }, "Clang 实际布局保留 source/token 尾部 padding");
@@ -45,6 +51,13 @@ public static class AsyncChecks
         check(layout.Size("Callback") == 8 && layout.Size("WithCallback") == 24 &&
             layout.ContainingField("WithCallback", 8, 8) is { Name: "invoke", Type: "Callback" },
             "函数指针别名参与布局，参数所指的不完整类型不要求值布局");
+        check(layout.Size("Mixed") == 32 && layout.Field("Mixed*", 8, 8) is { Name: "owner", Type: "Context*" } &&
+            layout.Field("Mixed*", 24, 4) is { Name: "token", Type: "uint32_t" },
+            "匿名 union 不隐藏同一结构体中独立字段的身份及真实偏移");
+        check(layout.Members("Mixed").Select(f => f.Name).SequenceEqual(["invoke", "owner", "token"]) &&
+            layout.Field("Mixed*", 16, 8) is null && layout.ContainingField("Mixed", 16, 8) is null &&
+            layout.Shape("Mixed").Kind == Cpp2CS.Abi.ShapeKind.Unknown,
+            "外层字段恢复后，重叠成员和整个聚合的 ABI 仍保持未确认");
     }
     public static void Run(Action<bool, string> check)
     {
