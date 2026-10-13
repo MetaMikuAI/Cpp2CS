@@ -78,16 +78,20 @@ internal sealed class RecoveryMachineSsa
             var parameter = Fresh(type.Width);
             LogicalArguments.Add(parameter);
             Entry.Parameters.Insert(index, new(parameter, null));
-            switch (Interface.Arguments[index])
+            foreach (var part in MachineAbi.Pieces(Interface.Arguments[index]))
             {
+                var value = Slice(Entry, parameter, part.ValueBitOffset, part.Location.Width);
+                switch (part.Location)
+                {
                 case SlotArgumentLocation location:
-                    Entry.Outputs[location.Slot] = Insert(Entry, Entry.Outputs[location.Slot], parameter, location.Offset);
+                    Entry.Outputs[location.Slot] = Insert(Entry, Entry.Outputs[location.Slot], value, location.Offset);
                     break;
                 case StackArgumentLocation location:
-                    for (var offset = 0; offset < (type.Width + 7) / 8; offset++)
-                        EntryBytes.Add(location.EntrySpOffset + offset, new(parameter, offset, Math.Min(8, type.Width - offset * 8)));
+                    for (var offset = 0; offset < (location.Width + 7) / 8; offset++)
+                        EntryBytes.Add(location.EntrySpOffset + offset, new(value, offset, Math.Min(8, location.Width - offset * 8)));
                     break;
                 default: throw new InvalidOperationException("Unknown argument location");
+                }
             }
         }
         Entry.Edges.Add((graph.Entry.Id, null));
@@ -186,7 +190,7 @@ internal sealed class RecoveryMachineSsa
         var callEdge = block.Source.Edges.SingleOrDefault(edge => edge.Kind is DerivedEdgeKind.Call or DerivedEdgeKind.TailCall);
         if (callEdge?.Call is { } summary) ApplySummary(block, summary, callEdge.Kind == DerivedEdgeKind.TailCall);
         if (block.Source.Edges.Any(edge => edge.Kind == DerivedEdgeKind.Return) && Interface.Result is { } resultLocation)
-            block.ReturnValue = Slice(block, state[resultLocation.Slot], resultLocation.Offset, resultLocation.Width);
+            block.ReturnValue = ReadLocation(block, state, resultLocation);
         foreach (var edge in block.Source.Edges)
             if (edge.TargetBlock is { } successor) block.Edges.Add((successor, edge));
     }
@@ -196,25 +200,7 @@ internal sealed class RecoveryMachineSsa
         var before = new Dictionary<string, NativeValue>(block.Outputs);
         var stack = before[summary.Interface.StackPointer];
         var arguments = ImmutableArray.CreateBuilder<NativeValue>();
-        foreach (var location in summary.Interface.Arguments)
-        {
-            if (location is SlotArgumentLocation slot) arguments.Add(Slice(block, before[slot.Slot], slot.Offset, slot.Width));
-            else if (location is StackArgumentLocation saved)
-            {
-                var address = saved.EntrySpOffset == 0 ? stack : Pure(block, OpCode.Add, 64, stack, Constant(64, saved.EntrySpOffset));
-                var loadWidth = (saved.Width + 7) / 8 * 8;
-                var loaded = Fresh(loadWidth);
-                var next = FreshWorld();
-                var index = block.SyntheticIndex++;
-                var operation = new Operation(OpCode.Load, new(0, loadWidth), [new(0, 64)],
-                    new MemoryPayload(new(MemoryOrder.Relaxed, 8, 0)));
-                block.Nodes.Add(new(OpCode.Load, loaded, [address], operation.Payload, new(block.World, next), new(block.Source!.Instruction!.Origin, index)));
-                block.Information.Add(index, new(RecoveryValueRole.Ordinary, "ABI stack argument", operation));
-                block.World = next;
-                arguments.Add(Slice(block, loaded, 0, saved.Width));
-            }
-            else throw new InvalidOperationException("Unknown argument location");
-        }
+        foreach (var location in summary.Interface.Arguments) arguments.Add(ReadLocation(block, before, location, stack));
         var callIndex = block.SyntheticIndex++;
         var result = summary.Callee.Signature.Result is { } type ? Fresh(type.Width) : (NativeValue?)null;
         var world = FreshWorld();
@@ -233,7 +219,7 @@ internal sealed class RecoveryMachineSsa
                 {
                     SlotRelationKind.Preserve => Slice(block, before[segment.InputSlot ?? relation.Slot], segment.InputOffset, segment.Width),
                     SlotRelationKind.Havoc => Unknown(block, segment.Width, RecoveryValueRole.CallClobber, $"call {summary.Callee.Name}: {relation.Slot}[{segment.Offset}:{segment.Width}]"),
-                    SlotRelationKind.Result => result ?? throw new InvalidOperationException("Call result mapping lacks a result"),
+                    SlotRelationKind.Result => Slice(block, result ?? throw new InvalidOperationException("Call result mapping lacks a result"), segment.ResultOffset, segment.Width),
                     SlotRelationKind.AddConstant => Pure(block, OpCode.Add, segment.Width,
                         Slice(block, before[segment.InputSlot ?? relation.Slot], segment.InputOffset, segment.Width), Constant(segment.Width, segment.Constant)),
                     SlotRelationKind.Constant => Constant(segment.Width, segment.Constant),
@@ -244,6 +230,37 @@ internal sealed class RecoveryMachineSsa
             block.Outputs[relation.Slot] = assembled ?? throw new InvalidOperationException("Empty slot relation");
         }
         Evidence.Add(new("call.summary", block.Source.Address, null, string.Join("; ", summary.Prerequisites)));
+    }
+
+    private NativeValue ReadLocation(RecoverySsaBlock block, Dictionary<string, NativeValue> state,
+        MachineArgumentLocation location, NativeValue? stack = null)
+    {
+        NativeValue? assembled = null;
+        foreach (var part in MachineAbi.Pieces(location).OrderBy(part => part.ValueBitOffset))
+        {
+            NativeValue value;
+            if (part.Location is SlotArgumentLocation slot) value = Slice(block, state[slot.Slot], slot.Offset, slot.Width);
+            else if (part.Location is StackArgumentLocation saved && stack is { } baseAddress)
+            {
+                var address = saved.EntrySpOffset == 0 ? baseAddress : Pure(block, OpCode.Add, 64, baseAddress, Constant(64, saved.EntrySpOffset));
+                var loadWidth = (saved.Width + 7) / 8 * 8;
+                var loaded = Fresh(loadWidth);
+                var next = FreshWorld();
+                var index = block.SyntheticIndex++;
+                var operation = new Operation(OpCode.Load, new(0, loadWidth), [new(0, 64)],
+                    new MemoryPayload(new(MemoryOrder.Relaxed, 8, 0)));
+                block.Nodes.Add(new(OpCode.Load, loaded, [address], operation.Payload, new(block.World, next), new(block.Source!.Instruction!.Origin, index)));
+                block.Information.Add(index, new(RecoveryValueRole.Ordinary, "ABI stack argument", operation));
+                block.World = next;
+                value = Slice(block, loaded, 0, saved.Width);
+            }
+            else throw new InvalidOperationException("Unknown argument or result location");
+            if (part.ValueBitOffset != (assembled is { } previous ? Width(previous) : 0))
+                throw new InvalidOperationException("ABI location does not cover contiguous logical bits");
+            assembled = assembled is { } low ? Pure(block, OpCode.Concat, Width(low) + Width(value), value, low) : value;
+        }
+        return assembled is { } result && Width(result) == location.Width ? result
+            : throw new InvalidOperationException("ABI location does not cover the logical value");
     }
 
     public Dictionary<ValueId, NativeNode> Definitions() => Blocks.SelectMany(block => block.Nodes)
@@ -257,7 +274,9 @@ internal sealed class RecoveryMachineSsa
             var definitions = Definitions();
             foreach (var block in Blocks)
             {
-                var result = NativePurePass.Run(block.Nodes.ToImmutableArray(), definitions);
+                var result = NativePurePass.Run(block.Nodes.ToImmutableArray(), definitions,
+                    (source, value, width) => new(OpCode.Extract, Fresh(width), [value], new ImmediatePayload(0), null,
+                        new(source.Source.Origin, block.SyntheticIndex++)));
                 block.Nodes = result.Nodes.ToList();
                 foreach (var (id, value) in result.Aliases) Aliases.Add(id, Resolve(value));
                 changed |= !result.Rewrites.IsEmpty;

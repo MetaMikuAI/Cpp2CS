@@ -33,6 +33,16 @@ if (args.Length == 4 && args[0] == "nir-check")
     NirBinaryChecks.Run(args[1], args[2], args[3]);
     return 0;
 }
+if (args.Length == 5 && args[0] == "nir-aggregate-check")
+{
+    NirAggregateBinaryChecks.Run(args[1], args[2], args[3], args[4]);
+    return 0;
+}
+if (args.Length == 4 && args[0] == "nir-low-bits-check")
+{
+    Console.WriteLine($"NIR real low-bit checks passed: {NirLowBitsRecoveryChecks.RunBinary(args[1], args[2], args[3])}");
+    return 0;
+}
 if (args.Length == 4 && args[0] == "nir")
 {
     var image = ImageDocument.Load(args[1]);
@@ -269,7 +279,7 @@ if (args.Length == 3 && args[0] == "lift")
     Console.WriteLine(lift.Ir is { } ir ? MirJson.Serialize(ir) : JsonSerializer.Serialize(lift));
     return lift.IsSupported ? 0 : 2;
 }
-Console.Error.WriteLine("Cpp2CS: selftest | serve | validate-ir (stdin) | validate-nir (stdin) | scan <binary> <output-directory> | lift <binary> <image-va-hex> | native <binary> <entry-va-hex[,entry...]> <instruction-budget> <report.json> | native-check <arm64-binary> <x64-binary> <output-directory> | nir <binary> <contracts.json> <output-directory> | nir-check <arm64-binary> <x64-binary> <output-directory> | nir-corpus <binary> <inventory.json> <output-directory> [instruction-budget] [diagnostic-budget] [normalization-rounds]");
+Console.Error.WriteLine("Cpp2CS: selftest | serve | validate-ir (stdin) | validate-nir (stdin) | scan <binary> <output-directory> | lift <binary> <image-va-hex> | native <binary> <entry-va-hex[,entry...]> <instruction-budget> <report.json> | native-check <arm64-binary> <x64-binary> <output-directory> | nir <binary> <contracts.json> <output-directory> | nir-check <arm64-binary> <x64-binary> <output-directory> | nir-aggregate-check <arm64-binary> <x64-binary> <inventory-directory> <output-directory> | nir-low-bits-check <x64-binary> <inventory-directory> <report.json> | nir-corpus <binary> <inventory.json> <output-directory> [instruction-budget] [diagnostic-budget] [normalization-rounds]");
 return 1;
 
 static LiftResult Lift(Architecture architecture, InstructionOrigin origin)

@@ -63,10 +63,43 @@ public static class NirTailRecoveryChecks
                 "tail.proof-return-preserved", "automatic tail does not adopt a nonvolatile clobber");
             Reject(Tail(architecture), caller with { Signature = caller.Signature with { Arguments = [new(64)] } }, callee,
                 "tail.arguments", "unbound register inputs cannot become invented logical arguments");
-            Reject(Tail(architecture), caller, callee with { Signature = callee.Signature with { Result = new(32) } },
-                "graph.UnsupportedInterface", "tail result interface must match exactly");
+            var narrowCallee = callee with { Signature = callee.Signature with { Result = new(32) } };
+            var explicitMismatch = FunctionGraphBuilder.Build(Tail(architecture), caller, [caller, narrowCallee],
+                new(TailCallEvidence: ImmutableDictionary<ulong, string>.Empty.Add(0x1000, "fixture: explicit tail relation"),
+                    InferTailCallCandidates: true));
+            Check(explicitMismatch.Gaps.Any(gap => gap.Kind == RecoveryGapKind.UnsupportedInterface),
+                "an explicitly adopted tail relation still requires the exact logical result interface");
             Reject(Tail(architecture), caller, callee with { Abi = arm ? MachineAbiKind.WindowsX64 : MachineAbiKind.Aapcs64 },
                 "graph.UnsupportedInterface", "tail transfer cannot silently adapt a different ABI");
+
+            var addressResult = new RecoveryScalarType(64, RecoveryScalarKind.Address);
+            foreach (var addressOwner in new[] { false, true })
+            {
+                var expandedOwner = caller with { Signature = caller.Signature with { Result = addressOwner ? addressResult : new(64) } };
+                var expandedTarget = callee with { Signature = callee.Signature with { Result = addressOwner ? new(64) : addressResult } };
+                var expanded = RecoverOne(source, expandedOwner, expandedTarget);
+                Check(expanded.Complete, "incompatible logical result is recovered from the actual machine body: " + NirRecoveryChecks.Explain(expanded));
+                Check(expanded.Functions.Single().Graph.Entry.Edges.Single().Kind == DerivedEdgeKind.Direct &&
+                    expanded.Module.Functions.Single().Blocks.All(block => block.Terminator is not NirTailCall) &&
+                    !expanded.Functions.Single().Graph.Dependencies.Contains(FunctionGraphBuilder.ContractDependency(expandedTarget)),
+                    "machine expansion neither adopts the incompatible callee summary nor invents a logical tail adapter");
+                checks += NirRecoveryChecks.Compare(source, expanded.Module, caller.Name, caller.EntryAddress, [7, 11], 18);
+            }
+            var expandedCallee = callee with { Signature = callee.Signature with { Result = addressResult } };
+            Reject(Tail(architecture), caller, expandedCallee, "graph.Decode",
+                "an incompatible known interface does not invent an unavailable target body");
+            var unknownInput = Tail(architecture);
+            unknownInput.Add(0x1100, arm ? ["E00302AA", "C0035FD6"] : ["4C89C0", "C3"]);
+            Reject(unknownInput, caller, expandedCallee, "contract.machine-input",
+                "expanded body still requires every logical result input to be available at the original entry");
+            var badPreserved = Tail(architecture);
+            badPreserved.Add(0x1100, arm ? ["130080D2", "C0035FD6"] : ["31DB", "4889C8", "C3"]);
+            Reject(badPreserved, caller, expandedCallee, "contract.return-preserved",
+                "expanded body must preserve the original function return protocol");
+            var boundedExpansion = FunctionGraphBuilder.Build(source, caller, [caller, expandedCallee],
+                new(MaxInstructions: 1, InferTailCallCandidates: true));
+            Check(boundedExpansion.Gaps.Any(gap => gap.Kind == RecoveryGapKind.Budget),
+                "body expansion remains bounded by the ordinary machine instruction budget");
 
             var arity = arm ? 9 : 5;
             var stackCaller = NirRecoveryChecks.Contract(architecture, "tail_owner", 0x1000, arity);

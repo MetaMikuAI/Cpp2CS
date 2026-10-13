@@ -110,7 +110,7 @@ public static class NirRecovery
 
     internal static NirType Type(RecoveryScalarType type) => type.Kind switch
     {
-        RecoveryScalarKind.Integer or RecoveryScalarKind.Float => new NirBitsType(type.Width),
+        RecoveryScalarKind.Integer or RecoveryScalarKind.Float or RecoveryScalarKind.Aggregate => new NirBitsType(type.Width),
         RecoveryScalarKind.Address => new NirAddressType("memory", type.Width),
         _ => throw new ArgumentOutOfRangeException(nameof(type))
     };

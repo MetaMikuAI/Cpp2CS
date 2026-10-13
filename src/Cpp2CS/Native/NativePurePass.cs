@@ -12,7 +12,8 @@ public static class NativePurePass
 {
     public const string Version = "native-pure-pass/1:" + NativePureRules.Version;
     public static NativePurePassResult Run(ImmutableArray<NativeNode> nodes,
-        IReadOnlyDictionary<ValueId, NativeNode>? externalDefinitions = null)
+        IReadOnlyDictionary<ValueId, NativeNode>? externalDefinitions = null,
+        Func<NativeNode, NativeValue, int, NativeNode>? createLowExtract = null)
     {
         var definitions = new DefinitionOverlay(externalDefinitions);
         var aliases = new Dictionary<ValueId, NativeValue>();
@@ -27,7 +28,7 @@ public static class NativePurePass
         foreach (var original in nodes)
         {
             var node = original with { Inputs = original.Inputs.Select(Resolve).ToImmutableArray() };
-            var reduction = NativePureRules.TryReduce(node, definitions);
+            var reduction = NativePureRules.TryReduce(node, definitions, createLowExtract is null ? null : LowBits);
             if (reduction?.Alias is { } alias)
             {
                 alias = Resolve(alias);
@@ -57,6 +58,18 @@ public static class NativePurePass
             }
             output.Add(node);
             if (node.Result is { } definition) definitions[definition.Id] = node;
+
+            NativeValue LowBits(NativeValue value, int width)
+            {
+                var extract = createLowExtract!(node, value, width);
+                if (extract.Code != OpCode.Extract || extract.Result is not { } narrowed || narrowed.Type != new BitsType(width) ||
+                    extract.Inputs.Length != 1 || extract.Inputs[0] != value || extract.Flow is not null ||
+                    extract.Payload is not ImmediatePayload { Value.IsZero: true } || definitions.ContainsKey(narrowed.Id))
+                    throw new InvalidOperationException("Low-bit materialization must define a fresh pure extract");
+                output.Add(extract);
+                definitions[narrowed.Id] = extract;
+                return narrowed;
+            }
         }
         return new(output.ToImmutable(), aliases.ToImmutableDictionary(p => p.Key, p => Resolve(p.Value)), rewrites.ToImmutable());
     }

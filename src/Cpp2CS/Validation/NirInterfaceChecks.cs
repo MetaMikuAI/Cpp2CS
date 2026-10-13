@@ -36,7 +36,7 @@ public static class NirInterfaceChecks
             Check(!MachineAbi.TryDescribe(contract with { Signature = new([new(16, RecoveryScalarKind.Float)], floating) }, out _, out _), "unsupported floating ABI widths remain explicit");
             var summary = MachineAbi.CreateSummary(contract);
             Check(DerivedGraphValidator.ValidateSummary(summary).Count == 0, "floating summary preserves all unrelated ABI state");
-            var relation = summary.NormalOutputs.Single(item => item.Slot == mapping.Result!.Slot);
+            var relation = summary.NormalOutputs.Single(item => item.Slot == ((SlotArgumentLocation)mapping.Result!).Slot);
             Check(relation.Segments is [{ Width: 64, Kind: SlotRelationKind.Result }, { Width: 64, Kind: SlotRelationKind.Havoc }], "upper floating result bits remain unspecified");
             var index = new FunctionContractIndex([contract]);
             Check(ReferenceEquals(index.Summary(contract), index.Summary(contract)), "shared index reuses a single authoritative summary");

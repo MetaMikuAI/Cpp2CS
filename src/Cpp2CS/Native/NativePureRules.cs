@@ -9,10 +9,11 @@ public sealed record NativePureReduction(string Rule, NativeValue? Alias, Native
 // 规则仅处理全定义的整数位向量；浮点、choice 与状态操作保留原节点。
 public static class NativePureRules
 {
-    public const string Version = "native-integer-rules/1";
+    public const string Version = "native-integer-rules/2";
     private static readonly MachineState FoldState = new();
 
-    public static NativePureReduction? TryReduce(NativeNode node, IReadOnlyDictionary<ValueId, NativeNode> definitions)
+    public static NativePureReduction? TryReduce(NativeNode node, IReadOnlyDictionary<ValueId, NativeNode> definitions,
+        Func<NativeValue, int, NativeValue>? lowBits = null)
     {
         if (!IntegerShape(node) || node.Code == OpCode.Constant) return null;
         var result = node.Result!.Value;
@@ -148,6 +149,12 @@ public static class NativePureRules
                 var source = Definition(a, definitions);
                 if (source is { Code: OpCode.Extract, Payload: ImmediatePayload innerOffset })
                     return Slice("extract.nested", source.Inputs[0], offset + (int)innerOffset.Value);
+                // 加减法的低位构成模 2^width 运算；非零起点仍受低位进借位影响。
+                if (offset == 0 && lowBits is not null && source is { Code: OpCode.Add or OpCode.Sub })
+                    return Replace("extract.low-arithmetic", source.Code,
+                        [lowBits(source.Inputs[0], width), lowBits(source.Inputs[1], width)]);
+                if (offset == 0 && lowBits is not null && source is { Code: OpCode.Not })
+                    return Replace("extract.low-not", OpCode.Not, [lowBits(source.Inputs[0], width)]);
                 if (source is { Code: OpCode.Concat })
                 {
                     var lowWidth = Width(source.Inputs[1]);

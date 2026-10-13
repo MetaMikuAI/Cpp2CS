@@ -4,8 +4,13 @@ using Cpp2CS.Ir;
 namespace Cpp2CS.Recovery;
 
 public enum MachineAbiKind { Aapcs64, WindowsX64 }
-public enum RecoveryScalarKind { Integer, Address, Float }
-public sealed record RecoveryScalarType(int Width, RecoveryScalarKind Kind = RecoveryScalarKind.Integer);
+public enum RecoveryScalarKind { Integer, Address, Float, Aggregate }
+// Width 是完整存储位宽；聚合布局须来自已核对的本机类型合同。
+public sealed record RecoveryScalarType(int Width, RecoveryScalarKind Kind = RecoveryScalarKind.Integer,
+    RecoveryAggregateLayout? Aggregate = null);
+public sealed record RecoveryAggregateField(int ByteOffset, RecoveryScalarType Type);
+// 当前仅接受无对齐修饰的自然布局；不将整体对齐当作 ABI 自然对齐。
+public sealed record RecoveryAggregateLayout(int AlignmentBytes, ImmutableArray<RecoveryAggregateField> Fields);
 public sealed record FunctionSignature(ImmutableArray<RecoveryScalarType> Arguments, RecoveryScalarType? Result);
 
 // 这些是采用的逻辑调用合同，不能由函数名称或机器调用提示推断。
@@ -22,12 +27,14 @@ public abstract record MachineArgumentLocation(int Width);
 public sealed record SlotArgumentLocation(string Slot, int Offset, int BitWidth) : MachineArgumentLocation(BitWidth);
 // 偏移以机器调用准备完成后的被调入口 SP 为基准。
 public sealed record StackArgumentLocation(long EntrySpOffset, int BitWidth) : MachineArgumentLocation(BitWidth);
+public sealed record MachineValuePart(int ValueBitOffset, MachineArgumentLocation Location);
+public sealed record CompositeArgumentLocation(int BitWidth, ImmutableArray<MachineValuePart> Parts) : MachineArgumentLocation(BitWidth);
 public sealed record MachineInterface(ImmutableArray<MachineArgumentLocation> Arguments,
-    SlotArgumentLocation? Result, string StackPointer, int StackAlignment, int NormalReturnSpAdjustment);
+    MachineArgumentLocation? Result, string StackPointer, int StackAlignment, int NormalReturnSpAdjustment);
 
 public enum SlotRelationKind { Preserve, Havoc, Result, AddConstant, Constant }
 public sealed record MachineSlotSegment(int Offset, int Width, SlotRelationKind Kind,
-    string? InputSlot = null, int InputOffset = 0, long Constant = 0);
+    string? InputSlot = null, int InputOffset = 0, long Constant = 0, int ResultOffset = 0);
 public sealed record MachineSlotRelation(string Slot, int Width, ImmutableArray<MachineSlotSegment> Segments);
 public sealed record MachineSlotRead(string Slot, int Offset, int Width);
 // 即使逻辑合同是纯函数，被调体仍可修改自己的栈、入栈实参及 Windows shadow space。

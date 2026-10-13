@@ -221,7 +221,7 @@ public static class NirFloatingRecoveryChecks
         foreach (var pair in Environment(source.Architecture, control, status)) context.Environment.Add(pair.Key, pair.Value);
         var nir = NirInterpreter.Execute(module, contract.Name, arguments.Select((argument, index) =>
             NirRuntimeValue.Integer(contract.Signature.Arguments[index].Width, argument)).ToImmutableArray(), context);
-        var expected = state.Slots[abi.Result!.Slot] & ((BigInteger.One << abi.Result.Width) - 1);
+        var expected = state.Slots[((SlotArgumentLocation)abi.Result!).Slot] & ((BigInteger.One << abi.Result.Width) - 1);
         var statusBits = (uint)state.Slots[arm ? "fpsr" : "mxcsr"];
         var expectedStatus = arm ? (statusBits & 31) | (statusBits >> 2 & 32) : CanonicalFlags(statusBits);
         CoreChecks.Require(nir.Status == NirExecutionStatus.Returned && nir.Values.Single().Bits == expected,

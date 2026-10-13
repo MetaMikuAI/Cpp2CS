@@ -38,7 +38,7 @@ public static class RecoveryGraphChecks
             Check(DerivedGraphValidator.ValidateSummary(summary).Count == 0, "complete scalar machine summary validates");
             Check(summary.NormalOutputs.Length == StateLayout.For(architecture).Count && summary.Reads.Length == summary.NormalOutputs.Length,
                 "summary covers every machine slot and conservative input dependency");
-            var result = summary.NormalOutputs.Single(output => output.Slot == mapping.Result!.Slot);
+            var result = summary.NormalOutputs.Single(output => output.Slot == ((SlotArgumentLocation)mapping.Result!).Slot);
             Check(result.Segments is [{ Offset: 0, Width: 32, Kind: SlotRelationKind.Result },
                 { Offset: 32, Width: 32, Kind: SlotRelationKind.Havoc }], "unused high return bits are not assumed zero or preserved");
             var vector = summary.NormalOutputs.Single(output => output.Slot == (arm ? "v8" : "xmm6"));

@@ -34,7 +34,41 @@ def file_identity():
     return {str(path.relative_to(ROOT)): sha(path) for path in sorted(paths)}
 
 
-def inspect_report(directory, inventory, assembly_sha, inventory_path):
+def compare_baseline(directory, baseline, addresses, complete, binary_sha):
+    summary = json.loads((baseline / "summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["status"] == "completed" and summary["allKnownEntriesClassified"]
+    assert summary["identity"]["binarySha256"] == binary_sha
+    entries_path = baseline / "entries.jsonl"
+    assert sha(entries_path) == summary["artifacts"]["entries.jsonl"]
+    previous_addresses, previous_complete = set(), set()
+    with entries_path.open(encoding="utf-8-sig") as stream:
+        for line in stream:
+            entry = json.loads(line)
+            assert entry["address"] not in previous_addresses
+            previous_addresses.add(entry["address"])
+            if entry["status"] == "complete":
+                previous_complete.add(entry["address"])
+    assert len(previous_addresses) == summary["denominator"]["knownEntryAddresses"]
+    assert len(previous_complete) == summary["completeEntries"]
+    assert previous_addresses <= addresses, "新入口清单不能静默丢弃基线入口"
+    regressed = previous_complete - complete
+    details = []
+    if regressed:
+        with (directory / "entries.jsonl").open(encoding="utf-8-sig") as stream:
+            for line in stream:
+                entry = json.loads(line)
+                if entry["address"] in regressed:
+                    details.append({"entry": entry["entry"], "status": entry["status"],
+                                    "diagnostics": entry["diagnostics"]})
+    result = {"baseline": str(baseline.resolve()), "previousComplete": len(previous_complete),
+              "retainedComplete": len(previous_complete & complete), "newComplete": len(complete - previous_complete),
+              "regressedComplete": len(regressed), "newEntryAddresses": len(addresses - previous_addresses),
+              "regressions": details}
+    write_json(directory / "baseline-comparison.json", result)
+    return result
+
+
+def inspect_report(directory, inventory, assembly_sha, inventory_path, baseline=None):
     summary = json.loads((directory / "summary.json").read_text(encoding="utf-8-sig"))
     assert summary["format"] == "cpp2cs.nir-corpus/1" and summary["status"] == "completed"
     assert summary["identity"]["implementationAssemblySha256"] == assembly_sha
@@ -89,11 +123,14 @@ def inspect_report(directory, inventory, assembly_sha, inventory_path):
     assert modules == complete
     for name, digest in summary["artifacts"].items():
         assert sha(directory / name) == digest
-    return {"knownEntryAddresses": expected, "adoptedContractEntries": summary["denominator"]["adoptedContractEntries"],
+    result = {"knownEntryAddresses": expected, "adoptedContractEntries": summary["denominator"]["adoptedContractEntries"],
             "statusCounts": dict(counts), "gapCounts": dict(gaps), "boundaryCounts": dict(boundaries),
             "completeEntries": len(complete), "completeRate": len(complete) / expected,
             "allKnownEntriesClassified": True, "allKnownEntriesNirComplete": len(complete) == expected,
             "summary": str((directory / "summary.json").resolve())}
+    if baseline is not None:
+        result["baselineComparison"] = compare_baseline(directory, baseline, addresses, complete, inventory["binary"]["sha256"])
+    return result
 
 
 def main():
@@ -102,6 +139,7 @@ def main():
     parser.add_argument("--dll", type=Path, default=DLL)
     parser.add_argument("--inventory-directory", type=Path,
                         help="复用已生成的 arm64.inventory.json / x64.inventory.json；仍核对输入身份")
+    parser.add_argument("--baseline", type=Path, help="先前全量输出目录；核对入口不减少并列出完整结果的新增和退化")
     parser.add_argument("--skip-fixtures", action="store_true", help="只执行全入口验证；明确记录未在本运行重复自测和有限输入对照")
     parser.add_argument("--max-instructions", type=int, default=512)
     parser.add_argument("--machine-budget", type=int, default=32)
@@ -121,7 +159,8 @@ def main():
     commands = []
     write_json(manifest_path, {"status": "running", "started": started, "assemblySha256": assembly_sha,
                                "sourcesAndTests": sources, "options": vars(args) | {"output": str(output),
-                                   "dll": str(assembly), "inventory_directory": str(args.inventory_directory) if args.inventory_directory else None}})
+                                   "dll": str(assembly), "inventory_directory": str(args.inventory_directory) if args.inventory_directory else None,
+                                   "baseline": str(args.baseline.resolve()) if args.baseline else None}})
 
     def execute(name, command, accepted=(0,)):
         print(name, flush=True)
@@ -159,16 +198,32 @@ def main():
         assert not inventory.get("pilot"), "全量运行不能采用 pilot 子清单"
         assert inventory["binary"]["sha256"] == inputs[name]["binary"]["sha256"]
         assert inventory["metadata"]["sha256"] == inputs[name]["metadata"]["sha256"]
-        assert inventory["entriesSha256"] == sha(inventory_path.parent / inventory["entriesFile"])
-        assert inventory["methodsSha256"] == sha(inventory_path.parent / inventory["methodsFile"])
+        inputs[name]["inventory"] = {"path": str(inventory_path), "sha256": sha(inventory_path)}
+        for kind in ("entries", "methods", "genericMethods"):
+            if kind + "File" not in inventory:
+                continue
+            companion = inventory_path.parent / inventory[kind + "File"]
+            digest = sha(companion)
+            assert inventory[kind + "Sha256"] == digest
+            inputs[name][kind] = {"path": str(companion), "sha256": digest}
+        for index, provider in enumerate([inventory["provider"], *inventory.get("providerSources", [])]):
+            assert sha(Path(provider["path"])) == provider["sha256"], "接口清单生成器已变化，须重新生成清单"
+            inputs[name][f"provider{index}"] = provider
         directory = output / name
         execute(f"{name}-corpus", ["dotnet", assembly, "nir-corpus", binary, inventory_path, directory,
                                    args.max_instructions, args.machine_budget, args.normalization_rounds], (0, 2))
-        reports[name] = inspect_report(directory, inventory, assembly_sha, inventory_path)
+        reports[name] = inspect_report(directory, inventory, assembly_sha, inventory_path,
+                                       args.baseline.resolve() / name if args.baseline else None)
 
     with ThreadPoolExecutor(max_workers=len(TARGETS)) as pool:
         for result in pool.map(validate_target, TARGETS):
             pass
+    if not args.skip_fixtures:
+        execute("nir-aggregate-binary-fixtures", ["dotnet", assembly, "nir-aggregate-check",
+                WORKSPACE / TARGETS[0][1], WORKSPACE / TARGETS[1][1],
+                args.inventory_directory.resolve() if args.inventory_directory else output, output / "aggregate-fixtures"])
+        execute("nir-low-bits-binary-fixture", ["dotnet", assembly, "nir-low-bits-check", WORKSPACE / TARGETS[1][1],
+                args.inventory_directory.resolve() if args.inventory_directory else output, output / "low-bits-fixture.json"])
     assert file_identity() == sources, "验证过程中源代码或测试文件发生变化"
     for item in inputs.values():
         for identity in item.values():
@@ -182,7 +237,9 @@ def main():
                 "checks": {"allKnownEntriesClassified": True, "allKnownEntriesNirComplete": all_complete,
                            "selftest": "not-repeated" if args.skip_fixtures else "passed",
                            "jsonInputValidation": "not-repeated" if args.skip_fixtures else "passed",
-                           "finiteBinaryDifferential": "not-repeated" if args.skip_fixtures else "passed"},
+                           "finiteBinaryDifferential": "not-repeated" if args.skip_fixtures else "passed",
+                           "aggregateBinaryDifferential": "not-repeated" if args.skip_fixtures else "passed",
+                           "lowBitsBinaryDifferential": "not-repeated" if args.skip_fixtures else "passed"},
                 "reports": reports,
                 "meaning": "Full inventory denominator for each binary; unknown and unsupported signatures are not successful NIR. Completeness is conditional on recorded signatures, ABI and recovery domains. Machine graph budget stops remain gaps. Finite fixture comparisons are distinct from all-entry structural recovery and do not prove game runtime equivalence."}
     write_json(manifest_path, manifest)

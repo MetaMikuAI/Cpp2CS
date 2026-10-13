@@ -132,7 +132,7 @@ public static class DerivedGraphValidator
                     : graph.Dependencies.Any(value => value.StartsWith($"adopted-tail-call:0x{instruction.Origin.Address:X}:", StringComparison.Ordinal));
                 if (edge.Source.TransferHint != TransferHint.None || edge.Source.Kind != SuccessorKind.Jump ||
                     edge.TargetBlock is not null || edge.Continuation is not null ||
-                    summary.Callee.Signature.Result != graph.Contract.Signature.Result || !evidence)
+                    !MachineAbi.TypeEquals(summary.Callee.Signature.Result, graph.Contract.Signature.Result) || !evidence)
                     errors.Add("tail call lacks a compatible adopted relation or a direct candidate awaiting protocol proof");
                 return;
 
@@ -161,10 +161,11 @@ public static class DerivedGraphValidator
     {
         List<string> errors = [];
         if (!MachineAbi.TryDescribe(summary.Callee, out var mapping, out var reason)) return [reason!];
-        if (summary.Interface.Result != mapping!.Result || summary.Interface.StackPointer != mapping.StackPointer ||
+        if (!SameLocation(summary.Interface.Result, mapping!.Result) || summary.Interface.StackPointer != mapping.StackPointer ||
             summary.Interface.StackAlignment != mapping.StackAlignment || summary.Interface.NormalReturnSpAdjustment != mapping.NormalReturnSpAdjustment ||
-            summary.Interface.Arguments.IsDefault || !summary.Interface.Arguments.SequenceEqual(mapping.Arguments))
-            errors.Add("call interface differs from the adopted scalar ABI");
+            summary.Interface.Arguments.IsDefault || summary.Interface.Arguments.Length != mapping.Arguments.Length ||
+            !summary.Interface.Arguments.Zip(mapping.Arguments).All(pair => SameLocation(pair.First, pair.Second)))
+            errors.Add("call interface differs from the adopted ABI");
         var layout = StateLayout.For(MachineAbi.ArchitectureFor(summary.Callee.Abi));
         if (summary.Reads.IsDefault || summary.Reads.Length != layout.Count ||
             summary.Reads.Select(read => read.Slot).Distinct(StringComparer.Ordinal).Count() != layout.Count ||
@@ -221,8 +222,10 @@ public static class DerivedGraphValidator
                             errors.Add("summary relation reads an invalid machine bit range");
                     }
                     else if (segment.InputSlot is not null) errors.Add("summary result or havoc invents a machine input");
-                    if (segment.Kind == SlotRelationKind.Result && (mapping.Result is null || output.Slot != mapping.Result.Slot ||
-                        segment.Offset != mapping.Result.Offset || segment.Width != mapping.Result.Width))
+                    if (segment.Kind == SlotRelationKind.Result && (mapping.Result is null ||
+                        !MachineAbi.Pieces(mapping.Result).Any(part => part.ValueBitOffset == segment.ResultOffset &&
+                            part.Location is SlotArgumentLocation slot && output.Slot == slot.Slot &&
+                            segment.Offset == slot.Offset && segment.Width == slot.Width)))
                         errors.Add("logical result is bound to the wrong machine bits");
                 }
                 if (covered != width) errors.Add("summary leaves machine output bits uncovered");
@@ -234,6 +237,23 @@ public static class DerivedGraphValidator
         System.Collections.Immutable.ImmutableArray<MachineSlotRelation> b) => !a.IsDefault && a.Length == b.Length &&
         a.Zip(b).All(pair => pair.First.Slot == pair.Second.Slot && pair.First.Width == pair.Second.Width &&
             !pair.First.Segments.IsDefault && pair.First.Segments.SequenceEqual(pair.Second.Segments));
+
+    private static bool SameLocation(MachineArgumentLocation? actual, MachineArgumentLocation? expected, int depth = 0)
+    {
+        if (depth > 64) return false;
+        if (actual is null || expected is null) return actual is null && expected is null;
+        if (actual.Width != expected.Width) return false;
+        return (actual, expected) switch
+        {
+            (SlotArgumentLocation a, SlotArgumentLocation b) => a == b,
+            (StackArgumentLocation a, StackArgumentLocation b) => a == b,
+            (CompositeArgumentLocation a, CompositeArgumentLocation b) => !a.Parts.IsDefault && !b.Parts.IsDefault &&
+                a.Parts.Length == b.Parts.Length && a.Parts.Zip(b.Parts).All(pair =>
+                    pair.First is not null && pair.Second is not null && pair.First.ValueBitOffset == pair.Second.ValueBitOffset &&
+                    SameLocation(pair.First.Location, pair.Second.Location, depth + 1)),
+            _ => false
+        };
+    }
 
     private static string GapKey(RecoveryGap gap) => $"{gap.Address:X16}:{gap.Kind}:{gap.Reason}";
 }

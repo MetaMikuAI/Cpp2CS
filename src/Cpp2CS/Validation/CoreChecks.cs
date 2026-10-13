@@ -26,13 +26,17 @@ public static class CoreChecks
         var nirInputChecks = NirInputChecks.Run();
         var nirTailRecoveryChecks = NirTailRecoveryChecks.Run();
         var nirExceptionChecks = NirExceptionChecks.Run();
+        var nirAggregateChecks = NirAggregateChecks.Run();
+        var nirLowBitsChecks = NirLowBitsRecoveryChecks.Run();
         var checks = Images.ImageSelfTests.Run() + DivisionChecks.Run() + FloatChecks.Run() + EffectBoundaryChecks.Run() + MemoryEffectChecks.Run() + AtomicMemoryChecks.Run()
             + ExecutionContractChecks.Run() + MirStructureChecks.Run() + MirInspectionChecks.Run()
             + regionChecks + ssaChecks + nativeChecks + normalizationChecks + nirCoreChecks + recoveryGraphChecks + nirRecoveryChecks + nirInterfaceChecks + nirNumericChecks
-            + nirAtomicChecks + nirEnvironmentChecks + nirCorpusChecks + nirFloatingRecoveryChecks + nirInputChecks + nirTailRecoveryChecks + nirExceptionChecks;
+            + nirAtomicChecks + nirEnvironmentChecks + nirCorpusChecks + nirFloatingRecoveryChecks + nirInputChecks + nirTailRecoveryChecks + nirExceptionChecks + nirAggregateChecks + nirLowBitsChecks;
         Console.WriteLine($"native core checks passed: region={regionChecks}, ssa={ssaChecks}, execution={nativeChecks}, normalization={normalizationChecks}");
         Console.WriteLine($"NIR checks passed: core={nirCoreChecks}, graph={recoveryGraphChecks}, recovery={nirRecoveryChecks}, interfaces={nirInterfaceChecks}, numeric={nirNumericChecks}");
         Console.WriteLine($"NIR extended checks passed: atomic={nirAtomicChecks}, floating-recovery={nirFloatingRecoveryChecks}, environment={nirEnvironmentChecks}, corpus={nirCorpusChecks}, input={nirInputChecks}, tail-recovery={nirTailRecoveryChecks}, exception={nirExceptionChecks}");
+        Console.WriteLine($"NIR aggregate checks passed: {nirAggregateChecks}");
+        Console.WriteLine($"NIR low-bit checks passed: {nirLowBitsChecks}");
         var originalBytes = Convert.FromHexString("1F2003D5");
         var immutableOrigin = new InstructionOrigin("fixture:immutable", 0x1000, 0, originalBytes);
         originalBytes[0] = 0;

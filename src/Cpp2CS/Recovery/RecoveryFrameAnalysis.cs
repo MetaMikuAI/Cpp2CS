@@ -361,10 +361,10 @@ internal sealed class RecoveryFrameAnalysis
                     ExitDiagnostic("contract.call-stack", "调用入口 SP 不满足所采用 ABI 的栈对齐");
                 if (call.Tail)
                 {
-                    var available = ssa.Interface.Arguments.OfType<StackArgumentLocation>()
-                        .Select(argument => argument.EntrySpOffset + 8).DefaultIfEmpty(0).Max();
-                    if (call.Summary.Interface.Arguments.OfType<StackArgumentLocation>()
-                        .Any(argument => argument.EntrySpOffset + 8 > available))
+                    var available = ssa.Interface.Arguments.SelectMany(MachineAbi.Pieces).Select(part => part.Location).OfType<StackArgumentLocation>()
+                        .Select(argument => argument.EntrySpOffset + (argument.Width + 63) / 64 * 8).DefaultIfEmpty(0).Max();
+                    if (call.Summary.Interface.Arguments.SelectMany(MachineAbi.Pieces).Select(part => part.Location).OfType<StackArgumentLocation>()
+                        .Any(argument => argument.EntrySpOffset + (argument.Width + 63) / 64 * 8 > available))
                         Diagnostic(block.Source.Address, "tail.stack-capacity", "被调栈实参超出当前入口合同保证的参数存储空间");
                 }
             }
@@ -489,12 +489,12 @@ internal sealed class RecoveryFrameAnalysis
         { InvalidateAll(state); return; }
         if (!call.Summary.World.MayWritePrivateStack) return;
         var windows = call.Summary.Callee.Abi == MachineAbiKind.WindowsX64;
-        var stackArguments = call.Summary.Interface.Arguments.OfType<StackArgumentLocation>().ToArray();
+        var stackArguments = call.Summary.Interface.Arguments.SelectMany(MachineAbi.Pieces).Select(part => part.Location).OfType<StackArgumentLocation>().ToArray();
         foreach (var offset in state.Keys.ToArray())
         {
             var relative = new BigInteger(offset) - calleeSp;
             if (relative < 0 || windows && relative < 40 ||
-                stackArguments.Any(argument => relative >= argument.EntrySpOffset && relative < argument.EntrySpOffset + 8))
+                stackArguments.Any(argument => relative >= argument.EntrySpOffset && relative < argument.EntrySpOffset + (argument.Width + 63) / 64 * 8))
                 state.Remove(offset);
         }
     }

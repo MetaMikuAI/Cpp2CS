@@ -10,7 +10,7 @@ namespace Cpp2CS.Recovery;
 
 public static class FunctionGraphBuilder
 {
-    public const string Version = "derived-function-graph/2";
+    public const string Version = "derived-function-graph/3";
 
     public static DerivedFunctionGraph Build(ImageDocument image, FunctionContract function,
         IEnumerable<FunctionContract> contracts, FunctionGraphOptions? options = null) =>
@@ -142,9 +142,20 @@ public static class FunctionGraphBuilder
                         Missing(RecoveryGapKind.UnclassifiedTailCall, "转移进入另一函数合同入口；缺少栈、保存状态和返回协议的尾调用证据");
                         continue;
                     }
-                    if (!Compatible(tailCallee, out var reason) || tailCallee.Signature.Result != function.Signature.Result)
+                    if (!Compatible(tailCallee, out var reason))
                     {
-                        Missing(RecoveryGapKind.UnsupportedInterface, reason ?? "尾调用结果接口与当前函数不一致");
+                        Missing(RecoveryGapKind.UnsupportedInterface, reason!);
+                        continue;
+                    }
+                    if (!MachineAbi.TypeEquals(tailCallee.Signature.Result, function.Signature.Result))
+                    {
+                        if (candidate && successor.TransferHint == TransferHint.None)
+                        {
+                            // 不采用不兼容的逻辑尾调用；在当前入口状态下继续验证实际机器体。
+                            dependencies.Add($"expanded-interface-boundary:0x{item.Address:X}:0x{target:X}");
+                            edges.Add(new(edgeId, item.Id, successor, DerivedEdgeKind.Direct, Schedule(target.Value), target, null, null, null));
+                        }
+                        else Missing(RecoveryGapKind.UnsupportedInterface, "尾调用结果接口与当前函数不一致");
                         continue;
                     }
                     dependencies.Add(known.Dependency(tailCallee));

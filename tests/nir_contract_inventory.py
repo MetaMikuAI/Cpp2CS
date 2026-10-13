@@ -9,6 +9,9 @@ import struct
 import pefile
 from elftools.elf.elffile import ELFFile
 
+from nir_il2cpp_types import Types, GenericMethods
+from nir_external_contracts import augment_external_contracts
+
 
 FORMAT = "cpp2cs.nir-contract-inventory.v1"
 METHOD_INFO_SOURCE = "https://unity.com/blog/engine-platform/il2cpp-internals-method-calls"
@@ -83,6 +86,8 @@ class Metadata:
         self.method_offset, self.methods = self.table(48, "<7i4H" if self.version == 31 else "<6i4H")
         self.parameter_offset, self.parameters = self.table(88, "<Iii")
         self.field_offset, self.fields = self.table(96, "<Iii")
+        self.generic_parameter_offset, self.generic_parameters = self.table(104, "<iIhhHH")
+        self.generic_container_offset, self.generic_containers = self.table(120, "<iiii")
         self.type_offset, self.types = self.table(160, "<16i8HII")
         self.image_offset, self.images = self.table(168, "<10i")
         self.method_images = [-1] * len(self.methods)
@@ -367,56 +372,15 @@ def find_code_registration(binary, modules, metadata_registration):
     return matches[0]
 
 
-class Types:
-    def __init__(self, binary, metadata, registration):
-        self.binary, self.metadata = binary, metadata
-        self.registration_address, self.registration, self.pointers = registration
-
-    def read(self, index):
-        assert 0 <= index < len(self.pointers)
-        pointer = self.pointers[index]
-        data, bits = struct.unpack_from("<QI", self.binary.data, self.binary.offset(pointer, 12))
-        return data, bits, {"typeIndex": index, "typeAddress": hex(pointer), "typeFileOffset": hex(self.binary.offset(pointer)),
-                            "typeCode": (bits >> 16) & 255, "byref": bool(bits & (1 << 29)), "data": hex(data)}
-
-    def scalar(self, index, active=()):
-        data, bits, evidence = self.read(index)
-        kind = (bits >> 16) & 255
-        if bits & (1 << 29) or kind in POINTER_TYPES:
-            return {"width": 64, "kind": "Address"}, [evidence], None
-        if kind == 1:
-            return None, [evidence], None
-        if kind in SCALAR_WIDTHS:
-            return {"width": SCALAR_WIDTHS[kind], "kind": "Integer"}, [evidence], None
-        if kind in (12, 13):
-            return {"width": 32 if kind == 12 else 64, "kind": "Float"}, [evidence], None
-        if kind == 17 and data < len(self.metadata.types):
-            definition = self.metadata.types[data]
-            if definition[24] & 2 and index not in active:
-                field_index = definition[8]
-                assert 0 <= field_index < len(self.metadata.fields)
-                assert self.metadata.string(self.metadata.fields[field_index][0]) == "value__"
-                scalar, nested, gap = self.scalar(self.metadata.fields[field_index][1], active + (index,))
-                return scalar, [evidence, {"kind": "metadata.enum-underlying", "typeDefinition": data,
-                                          "fieldDefinition": field_index, "recordFileOffset": hex(self.metadata.field_offset + field_index * 12)}] + nested, gap
-        if kind == 21:
-            generic = self.binary.words(data, 3)
-            if generic is not None:
-                definition_offset = self.binary.offset(generic[0], 12)
-                if definition_offset is not None:
-                    definition, definition_bits = struct.unpack_from("<QI", self.binary.data, definition_offset)
-                    if (definition_bits >> 16) & 255 == 18:
-                        return {"width": 64, "kind": "Address"}, [evidence], None
-        return None, [evidence], f"unsupported IL2CPP type 0x{kind:02x} at type index {index}"
-
-
-def make_method(metadata, binary, types, module, index, accept_method_info):
+def make_method(metadata, binary, types, module, index, accept_method_info, instance=None):
     row = metadata.methods[index]
     parameter_start, generic_container, token, flags, parameter_count = metadata.method_parts(row)
     type_definition = metadata.types[row[1]]
     pointer_index = (token & 0xFFFFFF) - 1
     assert token >> 24 == 6 and 0 <= pointer_index < module["count"]
     address = module["methods"][pointer_index]
+    if instance is not None:
+        address = instance["address"]
     record_offset = metadata.method_offset + index * (36 if metadata.version == 31 else 32)
     name = f"{module['name']}::{metadata.string(type_definition[1])}.{metadata.string(type_definition[0])}::{metadata.string(row[0])}#{token:08x}"
     evidence = [{"kind": "metadata.method", "methodDefinition": index, "recordFileOffset": hex(record_offset),
@@ -426,10 +390,15 @@ def make_method(metadata, binary, types, module, index, accept_method_info):
                  "recordFileOffset": binary.file_location(module["pointers"] + pointer_index * 8),
                  "recordAddress": hex(module["pointers"] + pointer_index * 8), "pointerIndex": pointer_index,
                  "binarySha256": binary.identity["sha256"]}]
+    if instance is not None:
+        evidence[1:2] = instance["evidence"]
     gaps = []
-    if generic_container >= 0 or type_definition[6] >= 0:
+    if instance is not None and instance["fullySharedMarkers"]:
+        gaps.append("registered fully-shared generic context requires a separately proven native prototype")
+    if instance is None and (generic_container >= 0 or type_definition[6] >= 0):
         gaps.append("generic definition requires concrete instantiation and sharing evidence")
-    result, result_evidence, gap = types.scalar(row[2])
+    context = instance["context"] if instance is not None else ((), ())
+    result, result_evidence, gap = types.scalar(row[2], context)
     evidence.extend(result_evidence)
     if gap:
         gaps.append(gap)
@@ -440,7 +409,7 @@ def make_method(metadata, binary, types, module, index, accept_method_info):
     for parameter_index in range(parameter_start, parameter_start + parameter_count):
         assert 0 <= parameter_index < len(metadata.parameters)
         parameter = metadata.parameters[parameter_index]
-        scalar, parameter_evidence, gap = types.scalar(parameter[2])
+        scalar, parameter_evidence, gap = types.scalar(parameter[2], context)
         evidence.append({"kind": "metadata.parameter", "parameterDefinition": parameter_index,
                          "recordFileOffset": hex(metadata.parameter_offset + parameter_index * 12)})
         evidence.extend(parameter_evidence)
@@ -451,7 +420,7 @@ def make_method(metadata, binary, types, module, index, accept_method_info):
     if accept_method_info:
         arguments.append({"width": 64, "kind": "Address"})
         evidence.append({"kind": "adopted-il2cpp-generated-method-prototype", "source": METHOD_INFO_SOURCE,
-                         "role": "trailing MethodInfo pointer", "scope": "non-generic module method, conditional native prototype",
+                         "role": "trailing MethodInfo pointer", "scope": "registered generated method, conditional native prototype",
                          "assumption": "registered codegen method follows standard IL2CPP generated free-function prototype"})
     else:
         gaps.append("native hidden MethodInfo parameter convention has not been explicitly adopted")
@@ -466,9 +435,40 @@ def make_method(metadata, binary, types, module, index, accept_method_info):
                                     "Standard IL2CPP generated-method prototype including explicit trailing MethodInfo is adopted.",
                                     "Analysis domain is conditional; no claim that every execution is normal or sequential."],
                     "domain": {"normalExecution": True, "validPrivateFrame": True, "stableThreadEnvironment": True, "sequentialMemory": True}}
-    return {"methodDefinition": index, "name": name, "entry": hex(address) if address else None,
+    record = {"methodDefinition": index, "name": name, "entry": hex(address) if address else None,
             "token": hex(token), "signature": signature, "signatureEvidence": evidence, "gaps": gaps,
             "contract": contract, "signatureStatus": "unsupported" if gaps else "known"}
+    if instance is not None:
+        record["genericInstance"] = {key: value for key, value in instance.items() if key not in ("context", "evidence", "address")}
+    return record
+
+
+def merge_method(binary, method):
+    if method["entry"] is None:
+        return
+    address = int(method["entry"], 16)
+    generic = method.get("genericInstance")
+    pointer_kind = "il2cpp.generic-method-pointer" if generic is not None else "il2cpp.module-method-pointer"
+    pointer_evidence = next(item for item in method["signatureEvidence"] if item.get("kind") == pointer_kind)
+    entry = binary.add(address, pointer_evidence)
+    if method["methodDefinition"] not in entry["methodDefinitions"]:
+        entry["methodDefinitions"].append(method["methodDefinition"])
+    if generic is not None:
+        entry.setdefault("genericMethodSpecs", []).append(generic)
+    entry["signatureEvidence"].extend(method["signatureEvidence"])
+    entry["gaps"].extend(method["gaps"])
+    contract = method["contract"]
+    if contract is not None:
+        if entry["contract"] is not None and entry["contract"]["signature"] != contract["signature"]:
+            entry["signatureStatus"] = "conflict"
+            entry["gaps"].append("multiple metadata definitions or instantiations assign incompatible signatures to one native entry")
+        elif entry["signatureStatus"] != "conflict":
+            entry["contract"] = contract
+            entry["signatureStatus"] = "known"
+    else:
+        if entry["signatureStatus"] == "unknown":
+            entry["signatureStatus"] = "unsupported"
+        entry["unresolvedSignatureAliases"] = True
 
 
 def add_registration_entries(binary, modules, registration, code_registration):
@@ -523,6 +523,7 @@ def inventory(binary_path, metadata_path, output, accept_method_info, reference_
     registration = find_metadata_registration(binary, metadata)
     types = Types(binary, metadata, registration)
     code_registration = find_code_registration(binary, modules, registration)
+    generic_methods = GenericMethods(binary, metadata, registration, code_registration, types)
     registration_entry_counts = add_registration_entries(binary, modules, registration, code_registration)
     reference_check = None
     if reference_script is not None:
@@ -546,34 +547,33 @@ def inventory(binary_path, metadata_path, output, accept_method_info, reference_
             module = modules[metadata.method_images[index]]
             method = make_method(metadata, binary, types, module, index, accept_method_info)
             method_counts[method["signatureStatus"]] += 1
-            if method["entry"] is not None:
-                address = int(method["entry"], 16)
-                entry = binary.add(address, method["signatureEvidence"][1])
-                entry["methodDefinitions"].append(index)
-                entry["signatureEvidence"].extend(method["signatureEvidence"])
-                entry["gaps"].extend(method["gaps"])
-                contract = method["contract"]
-                if contract is not None:
-                    if entry["contract"] is not None and entry["contract"]["signature"] != contract["signature"]:
-                        entry["signatureStatus"] = "conflict"
-                        entry["gaps"].append("multiple metadata definitions assign incompatible signatures to one native entry")
-                    elif entry["signatureStatus"] != "conflict":
-                        entry["contract"] = contract
-                        entry["signatureStatus"] = "known"
-                elif entry["signatureStatus"] == "unknown":
-                    entry["signatureStatus"] = "unsupported"
-                if contract is None:
-                    entry["unresolvedSignatureAliases"] = True
-            else:
+            merge_method(binary, method)
+            if method["entry"] is None:
                 method_counts["noNativePointer"] += 1
+            stream.write(json.dumps(method, ensure_ascii=False, separators=(",", ":")) + "\n")
+    generics_path = output.with_suffix(".generic-methods.jsonl")
+    generic_counts = Counter()
+    represented_pointers = set()
+    with generics_path.open("w", encoding="utf-8") as stream:
+        for instance in generic_methods.records():
+            index = instance["methodDefinition"]
+            module = modules[metadata.method_images[index]]
+            method = make_method(metadata, binary, types, module, index, accept_method_info, instance)
+            generic_counts[method["signatureStatus"]] += 1
+            generic_counts["fullySharedMarkerRecords"] += bool(instance["fullySharedMarkers"])
+            if method["entry"] is None:
+                generic_counts["noNativePointer"] += 1
+            represented_pointers.add(instance["pointerIndex"])
+            merge_method(binary, method)
             stream.write(json.dumps(method, ensure_ascii=False, separators=(",", ":")) + "\n")
     generic_table = code_registration[1][3]
     for index, address in enumerate(code_registration[2]):
-        if address:
+        if address and index not in represented_pointers:
             entry = binary.add(address, {"kind": "il2cpp.generic-method-pointer", "pointerIndex": index,
                                          "recordFileOffset": hex(binary.offset(generic_table + index * 8))})
             entry["unresolvedSignatureAliases"] = True
-            entry["gaps"].append("generic instantiation and shared-body native signature are not resolved")
+            entry["gaps"].append("generic method pointer has no exact registered MethodSpec")
+    external_counts = augment_external_contracts(binary)
     entries_path = output.with_suffix(".entries.jsonl")
     entry_counts = Counter()
     evidence_counts = Counter()
@@ -596,11 +596,16 @@ def inventory(binary_path, metadata_path, output, accept_method_info, reference_
                 "metadata": metadata.identity | {"version": metadata.version, "methodCount": len(metadata.methods),
                                                    "typeDefinitionCount": len(metadata.types), "imageCount": len(metadata.images)},
                 "provider": identity(Path(__file__)), "entriesFile": entries_path.name, "methodsFile": methods_path.name,
+                "providerSources": [identity(Path(__file__).with_name(name)) for name in ("nir_il2cpp_types.py", "nir_external_contracts.py")],
+                "genericMethodsFile": generics_path.name, "genericMethodsSha256": identity(generics_path)["sha256"],
                 "entriesSha256": identity(entries_path)["sha256"], "methodsSha256": identity(methods_path)["sha256"],
                 "entryCount": len(binary.entries), "summary": {"entries": dict(entry_counts), "methods": dict(method_counts),
-                                                               "entryEvidence": dict(evidence_counts)},
+                                                               "entryEvidence": dict(evidence_counts), "genericMethods": dict(generic_counts),
+                                                               "externalContracts": external_counts},
                 "registrations": {"metadata": hex(registration[0]), "code": hex(code_registration[0]),
                                   "types": len(registration[2]), "genericMethodPointers": len(code_registration[2]),
+                                  "genericTables": dict(generic_methods.counts),
+                                  "fullySharedTypeMarkers": list(types.shared_markers.values()),
                                   "otherEntryTables": registration_entry_counts,
                                   "codeGenModules": [{"name": m["name"], "address": hex(m["address"]), "methodCount": m["count"]} for m in modules.values()]},
                 "adoptedNativePrototype": {"enabled": accept_method_info, "source": METHOD_INFO_SOURCE},
@@ -608,7 +613,9 @@ def inventory(binary_path, metadata_path, output, accept_method_info, reference_
                 "limits": ["All available entry records are inventoried; this is not proof that every machine function has a record.",
                            "Signature availability is separate from NIR recovery or runtime equivalence.",
                            "Effects are conservative, including MayThrow; analysis-domain conditions are explicit assumptions.",
-                           "Generic shared signatures and aggregate ABI lowering remain explicit gaps."]}
+                           "Generic contracts use exact registered MethodSpec records, with no inferred fallback specialization.",
+                           "Fully-shared marker contexts and unresolved same-address aliases are rejected; ordinary generated prototypes are explicitly adopted.",
+                           "Value-type layout requires registered size and every instance field; generic value layouts and padding remain gaps."]}
     write_json(output, manifest)
     print(json.dumps({"phase": "complete", "output": str(output), "entryCount": len(binary.entries), "summary": manifest["summary"]}), flush=True)
 
