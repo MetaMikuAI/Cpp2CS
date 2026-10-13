@@ -16,6 +16,7 @@ public sealed class NativeSsa(NativeControlFlow flow, NativeMethod method, Nativ
     private readonly Dictionary<ulong, MachineEffects> effects = flow.Nodes.ToDictionary(n => n.Instruction.Address, n => Arm64Effects.Lower(n.Instruction));
     private readonly Dictionary<string, SsaValue> values = [];
     private readonly Dictionary<(ulong, string), string> inputs = [];
+    private readonly Queue<(ulong Pc, string Register)> pendingInputs = [];
     private readonly Dictionary<(ulong, string), string> outputs = [];
     private readonly Dictionary<ulong, NativeFlowNode> nodes = flow.Nodes.ToDictionary(n => n.Instruction.Address);
     private readonly Dictionary<ulong, NativeEdge[]> predecessors = flow.Nodes.SelectMany(n => n.Edges)
@@ -54,6 +55,7 @@ public sealed class NativeSsa(NativeControlFlow flow, NativeMethod method, Nativ
             if (effect.Returns) outputs.Add(Define($"return_{pc:x}", "return", 0, method.ReturnType == "void" ? [] : [In(pc, "x0"), In(pc, "x1")]));
             instructions.Add(new(pc, outputs.Distinct().ToArray(), condition, call));
         }
+        FillInputs();
         SimplifyPhis();
         return new(flow, values.Values.OrderBy(v => v.Id).ToArray(), instructions.ToArray(), problems.Distinct().ToArray());
     }
@@ -81,19 +83,28 @@ public sealed class NativeSsa(NativeControlFlow flow, NativeMethod method, Nativ
         var id = $"in_{pc:x}_{register}";
         inputs[(pc, register)] = id;
         Define(id, "phi", Width(register), [], address: pc, register: register);
-        var incoming = new List<SsaInput>();
-        if (pc == flow.Entry)
+        pendingInputs.Enqueue((pc, register));
+        return id;
+    }
+    // 前驱值按需填充；长指令链和回边都只引用已分配的身份，不递归遍历控制流。
+    private void FillInputs()
+    {
+        while (pendingInputs.TryDequeue(out var item))
         {
-            var seed = entry.GetValueOrDefault(register) ?? Define($"entry_{register}", "unknown", Width(register), []);
-            incoming.Add(new(0, "entry", seed));
+            var (pc, register) = item;
+            var incoming = new List<SsaInput>();
+            if (pc == flow.Entry)
+            {
+                var seed = entry.GetValueOrDefault(register) ?? Define($"entry_{register}", "unknown", Width(register), []);
+                incoming.Add(new(0, "entry", seed));
+            }
+            foreach (var edge in predecessors.GetValueOrDefault(pc, []))
+            {
+                if (!nodes.TryGetValue(edge.Source, out var source) || !source.Reachable) continue;
+                incoming.Add(new(edge.Source, edge.Kind, edge.Kind.StartsWith("exception-") ? ExceptionValue(edge.Source, register) : Out(edge.Source, register)));
+            }
+            Define(inputs[item], incoming.Count == 0 ? "unknown" : "phi", Width(register), [], incoming: incoming.Count == 0 ? null : incoming.ToArray());
         }
-        foreach (var edge in predecessors.GetValueOrDefault(pc, []))
-        {
-            if (!nodes.TryGetValue(edge.Source, out var source) || !source.Reachable) continue;
-            incoming.Add(new(edge.Source, edge.Kind, edge.Kind.StartsWith("exception-") ? ExceptionValue(edge.Source, register) : Out(edge.Source, register)));
-        }
-        if (incoming.Count == 0) return Define(id, "unknown", Width(register), []);
-        return Define(id, "phi", Width(register), [], incoming: incoming.ToArray());
     }
     private string ExceptionValue(ulong pc, string register)
     {
