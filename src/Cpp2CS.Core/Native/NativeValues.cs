@@ -5,6 +5,15 @@ namespace Cpp2CS.Native;
 // 位宽与来源随值传递；寄存器、栈和聚合字段使用同一套切片规则。
 public static class NativeValues
 {
+    public static bool IsManagedReference(string type) => type.EndsWith("_o*") || type.EndsWith("_array*") || type == "Il2CppObject*";
+    public static (string Type, Expression Left, Expression Right)? ReferenceSelection(NativeValue left, NativeValue right)
+    {
+        var type = IsManagedReference(left.Type) ? left.Type : right.Type;
+        if (!IsManagedReference(type) || left.Bits.Width != 64 || right.Bits.Width != 64) return null;
+        Expression? Arm(NativeValue value) => value.Type == type ? value.Expression :
+            value.Bits is ConstantBits { Value.IsZero: true } ? new NameExpression("null") : null;
+        return Arm(left) is { } l && Arm(right) is { } r ? (type, l, r) : null;
+    }
     public static void StoreStack(NativeState state, RegionId region, long offset, NativeValue value, string identity)
     {
         if (value.Bits.Width % 8 != 0) throw new ArgumentException("栈存储需要完整字节");

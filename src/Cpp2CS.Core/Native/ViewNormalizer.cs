@@ -171,7 +171,7 @@ public static class ViewNormalizer
     {
         NameExpression or ConstantExpression or CapturedExpression => true,
         BinaryExpression b when b.Operator is "==" or "!=" or "<" or "<=" or ">" or ">=" or "&" or "|" => Pure(b.Left) && Pure(b.Right),
-        OperationExpression { Operation: ValueOperation.Select or ValueOperation.IntegerCast or ValueOperation.Unsigned } o => o.Arguments.All(Pure),
+        OperationExpression { Operation: ValueOperation.Select or ValueOperation.ReferenceSelect or ValueOperation.IntegerCast or ValueOperation.Unsigned } o => o.Arguments.All(Pure),
         _ => false
     };
     internal static int Count(Expression e, string name) => e switch
@@ -193,7 +193,7 @@ public static class ViewNormalizer
         SourceMemberExpression m => ConditionalUse(m.Receiver, name), ObjectValueExpression o => o.Fields.Any(f => ConditionalUse(f.Value, name)),
         LambdaExpression l => Count(l, name) != 0,
         LambdaBlockExpression l => Count(l, name) != 0,
-        OperationExpression o => o.Operation == ValueOperation.Select && o.Arguments.Skip(1).Any(a => Count(a, name) > 0) || o.Arguments.Any(a => ConditionalUse(a, name)),
+        OperationExpression o => o.Operation is ValueOperation.Select or ValueOperation.ReferenceSelect && o.Arguments.Skip(1).Any(a => Count(a, name) > 0) || o.Arguments.Any(a => ConditionalUse(a, name)),
         InvocationExpression c => (c.Receiver is not null && ConditionalUse(c.Receiver, name)) || c.Arguments.Any(a => ConditionalUse(a, name)),
         MemberExpression m => ConditionalUse(m.Receiver, name), AddressOfExpression a => ConditionalUse(a.Target, name),
         BinaryExpression b => ConditionalUse(b.Left, name) || ConditionalUse(b.Right, name),

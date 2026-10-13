@@ -22,6 +22,45 @@ public static class SharedBodyChecks
         check(normal.Split("Joined()").Length == 2 && async.Split("Joined()").Length == 2,
             "普通与 await 分支共用结构化输出，合流业务只输出一次");
         check(normal == async.Replace("await ", ""), "await 包装不改变业务分支结构");
+        var inverted = diamond with { Blocks = new()
+        {
+            [0x100] = new(0x100, [], new BinaryExpression("<", new NameExpression("number"), new ConstantExpression(5)), [0x10c, 0x104]),
+            [0x104] = new(0x104, [Call(0x104, "Second")], null, [0x10c]),
+            [0x10c] = new(0x10c, [Call(0x10c, "Joined"), new ReturnStatement(0x110, null)], null, [])
+        }};
+        var invertedText = writer.Structured(inverted, true);
+        check(invertedText.Contains("((number < 5) == false)"),
+            "结构化分支取反保持布尔类型，且不以相反的浮点关系替代 NaN 语义");
+        var selectText = SemanticWriter.Expression(new OperationExpression(ValueOperation.ReferenceSelect, "Example_o*",
+            [new NameExpression("condition"), new NameExpression("item"), new NameExpression("null")]));
+        Directory.CreateDirectory("artifacts/conditional-fixture");
+        File.WriteAllText("artifacts/conditional-fixture/ConditionalFixture.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+            </Project>
+            """);
+        File.WriteAllText("artifacts/conditional-fixture/Program.cs", """
+            static class Program
+            {
+                static int second, joined;
+                static void Second() => second++;
+                static void Joined() => joined++;
+                static void Run(double number) /* BODY */
+                static object? Select(bool condition, object item) => /* SELECT */;
+                static void Main()
+                {
+                    foreach (var (number, expected) in new (double, int)[] { (double.NaN, 1), (double.NegativeInfinity, 0), (4, 0), (5, 1), (6, 1), (double.PositiveInfinity, 1) })
+                    {
+                        second = joined = 0;
+                        Run(number);
+                        if (second != expected || joined != 1) throw new Exception("branch behavior changed");
+                    }
+                    var item = new object();
+                    if (!ReferenceEquals(Select(true, item), item) || Select(false, item) is not null) throw new Exception("reference identity changed");
+                    Console.WriteLine("PASS: generated branch and reference selection compile and execute; 6 numeric inputs including NaN and both reference alternatives");
+                }
+            }
+            """.Replace("/* BODY */", invertedText).Replace("/* SELECT */", selectText));
 
         var read = new AssignStatement(0x100, "snapshot", new SourceMemberExpression(new NameExpression("this"), "Field", "int"), "int");
         var sequence = diamond with { Blocks = new()

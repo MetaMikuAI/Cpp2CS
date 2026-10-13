@@ -1,6 +1,6 @@
 namespace Cpp2CS.Native;
 
-public enum ValueOperation { SignedToFloat, ZeroExtendWord, Unsigned, IntegerCast, FloatDivide, Ceiling, FloatToSignedCeiling, BitCast, Add, Subtract, Select, ArrayElement, NewArray }
+public enum ValueOperation { SignedToFloat, ZeroExtendWord, Unsigned, IntegerCast, FloatDivide, Ceiling, FloatToSignedCeiling, BitCast, Add, Subtract, Select, ArrayElement, NewArray, ReferenceSelect }
 internal sealed record IndexedArrayAddress(Expression Array, Expression Index, HeaderField Elements) : Expression;
 public sealed record OperationExpression(ValueOperation Operation, string Type, Expression[] Arguments) : Expression;
 
@@ -31,6 +31,7 @@ public static class ValueOperations
             },
             ValueOperation.Add or ValueOperation.Subtract => $"unchecked(({type})({a[0]}) {(operation.Operation == ValueOperation.Add ? "+" : "-")} ({type})({a[1]}))",
             ValueOperation.Select => $"({a[0]} ? unchecked(({type})({a[1]})) : unchecked(({type})({a[2]})))",
+            ValueOperation.ReferenceSelect => $"({a[0]} ? {a[1]} : {a[2]})",
             ValueOperation.ArrayElement => $"{a[0]}[{a[1]}]",
             ValueOperation.NewArray => $"new {type}[{a[0]}]",
             _ => throw new InvalidOperationException("未实现的类型化操作")

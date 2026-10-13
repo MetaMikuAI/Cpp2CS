@@ -119,8 +119,15 @@ public sealed partial class FunctionLifter
             if (value.Operation == "condition-value")
                 return Numeric(value with { Width = Math.Max(8, width) }, ValueOperation.Select, "int32_t", FlagCondition((int)value.Immediate), new ConstantExpression(1), new ConstantExpression(0));
             if (value.Operation == "select")
-                return Numeric(value, ValueOperation.Select, width == 32 ? "int32_t" : "int64_t", Predicate(value.Inputs[0]),
-                    Evaluate(value.Inputs[1]).Expression, Evaluate(value.Inputs[2]).Expression);
+            {
+                var condition = Predicate(value.Inputs[0]);
+                var left = Evaluate(value.Inputs[1]); var right = Evaluate(value.Inputs[2]);
+                if (NativeValues.IsManagedReference(left.Type) || NativeValues.IsManagedReference(right.Type))
+                    return NativeValues.ReferenceSelection(left, right) is { } selection
+                        ? Numeric(value, ValueOperation.ReferenceSelect, selection.Type, condition, selection.Left, selection.Right)
+                        : Unknown(width, "引用选择两侧的类型或空值未确定");
+                return Numeric(value, ValueOperation.Select, width == 32 ? "int32_t" : "int64_t", condition, left.Expression, right.Expression);
+            }
             // 数组缩放寻址是 add(array, shift(sign-extend(index))) 的有类型投影。
             if (value.Operation == "add" && value.Inputs[1] is { Operation: "shift-left", Inputs: [var extended] } scale &&
                 extended is { Operation: "sign-extend", Inputs: [var indexValue] } && indexValue.Width == 32)

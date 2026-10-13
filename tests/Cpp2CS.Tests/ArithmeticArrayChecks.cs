@@ -24,6 +24,22 @@ public static class ArithmeticArrayChecks
             [new AssignStatement(0x100, "loaded", read, "int32_t"), new ReturnStatement(0x104,
                 new OperationExpression(ValueOperation.Select, "int32_t", [new NameExpression("condition"), captured, new ConstantExpression(0)]))], null, []) } };
         check(ViewNormalizer.Normalize(eager).Blocks[0x100].Statements[0] is AssignStatement, "CSEL 两侧已求值的读取不能移入惰性三元分支");
+        var reference = new NativeValue(new Cpp2CS.IR.InputBits("object", 64), "Example_o*", new NameExpression("item"));
+        var zero = new NativeValue(Cpp2CS.IR.BitOps.Constant(0, 64), "int64_t", new ConstantExpression(0));
+        var selection = NativeValues.ReferenceSelection(reference, zero);
+        check(selection is { Type: "Example_o*", Right: NameExpression { Name: "null" } }, "引用与明确的零位模式选择保留引用类型和 null");
+        check(NativeValues.ReferenceSelection(reference, reference) is { Type: "Example_o*" } &&
+            NativeValues.ReferenceSelection(reference, zero with { Bits = new Cpp2CS.IR.InputBits("loop", 64), Expression = new NameExpression("loop") }) is null,
+            "引用选择不能把未定整数循环值强转为对象或把对象强转为 long");
+        var referenceRead = read with { Field = read.Field with { Type = "Example_o*", Size = 8 }, ManagedType = "Example" };
+        var referenceBody = eager with { Blocks = new() { [0x100] = new(0x100,
+            [new AssignStatement(0x100, "loaded", referenceRead, "Example_o*"), new ReturnStatement(0x104,
+                new OperationExpression(ValueOperation.ReferenceSelect, "Example_o*", [new NameExpression("condition"),
+                    new CapturedExpression("loaded", referenceRead), new NameExpression("null")]))], null, []) } };
+        check(ViewNormalizer.Normalize(referenceBody).Blocks[0x100].Statements[0] is AssignStatement &&
+            SemanticWriter.Expression(new OperationExpression(ValueOperation.ReferenceSelect, "Example_o*",
+                [new NameExpression("condition"), new NameExpression("item"), new NameExpression("null")])) == "(condition ? item : null)",
+            "引用选择输出保留对象身份，字段读取仍先于惰性分支求值");
     }
     public static void Native(Action<bool, string> check, string config)
     {

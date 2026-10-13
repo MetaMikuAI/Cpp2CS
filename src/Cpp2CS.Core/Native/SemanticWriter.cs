@@ -150,7 +150,7 @@ public sealed class SemanticWriter(Symbols symbols)
         static Expression Negate(Expression expression) => expression is BinaryExpression { Operator: "==" } eq ? eq with { Operator = "!=" } :
             expression is BinaryExpression { Operator: "!=" } ne ? ne with { Operator = "==" } :
             expression is BinaryExpression { Operator: "is" } isn ? isn with { Operator = "is not" } :
-            expression is BinaryExpression { Operator: "is not" } isnot ? isnot with { Operator = "is" } : new BinaryExpression("==", expression, new ConstantExpression(0));
+            expression is BinaryExpression { Operator: "is not" } isnot ? isnot with { Operator = "is" } : new BinaryExpression("==", expression, new NameExpression("false"));
         Expression Rename(Expression e) => e switch
         {
             LambdaExpression l => l with { Body = SourceTree.Map(l.Body, node => node is NameExpression n && !l.Parameters.Contains(n.Name) ? n with { Name = names.GetValueOrDefault(n.Name, n.Name) } : node) },
