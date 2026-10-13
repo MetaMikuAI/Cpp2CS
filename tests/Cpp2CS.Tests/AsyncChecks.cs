@@ -34,6 +34,14 @@ public static class AsyncChecks
                 union { Context* context; const void* handle; };
                 uint32_t token;
             };
+            union IntegerUnion { uint64_t wide; uint8_t bytes[8]; };
+            struct IntegerPair { uint32_t first; uint32_t second; };
+            struct IntegerArray { IntegerPair pairs[2]; };
+            struct NestedMixed { Overlay first; Ambiguous second; };
+            struct FloatOverlay { union { float value; float values[2]; }; };
+            #pragma pack(push, 1)
+            struct PackedOverlay { uint8_t prefix; union { uint64_t wide; uint8_t bytes[8]; }; };
+            #pragma pack(pop)
             """);
         var layout = new HeaderLayout(path, compiler);
         check(layout.Shape("Task") is { Kind: Cpp2CS.Abi.ShapeKind.Composite, Size: 16, Alignment: 8 }, "Clang 实际布局保留 source/token 尾部 padding");
@@ -46,8 +54,15 @@ public static class AsyncChecks
         check(layout.ContainingField("Container", 8, 4) is { Name: "suffix", Type: "int32_t" }, "匿名聚合不阻断外层后续字段的偏移恢复");
         check(layout.Members("Overlay").Length == 0 && layout.ContainingField("Container", 4, 1) is null,
             "重叠存储不按声明顺序猜测活动字段");
-        check(layout.Shape("Overlay").Kind == Cpp2CS.Abi.ShapeKind.Unknown && layout.Shape("Container").Kind == Cpp2CS.Abi.ShapeKind.Unknown,
-            "匿名重叠聚合的 ABI 分类保持未确认");
+        check(layout.Shape("Overlay") is { Kind: Cpp2CS.Abi.ShapeKind.Composite, Size: 4, Alignment: 4 } &&
+            layout.Shape("Container") is { Kind: Cpp2CS.Abi.ShapeKind.Composite, Size: 12, Alignment: 4 },
+            "全整数重叠聚合按整体布局分类，不需要确定活动成员");
+        check(layout.Shape("IntegerUnion") is { Kind: Cpp2CS.Abi.ShapeKind.Composite, Size: 8, Alignment: 8 } &&
+            layout.Shape("IntegerArray") is { Kind: Cpp2CS.Abi.ShapeKind.Composite, Size: 16, Alignment: 4 },
+            "具名 union 与整数结构体数组共用整体 ABI 分类");
+        check(layout.Shape("NestedMixed").Kind == Cpp2CS.Abi.ShapeKind.Unknown && layout.Shape("FloatOverlay").Kind == Cpp2CS.Abi.ShapeKind.Unknown,
+            "递归分类不将浮点或混合重叠布局错误识别为全整数聚合");
+        check(layout.Shape("PackedOverlay").Kind == Cpp2CS.Abi.ShapeKind.Unknown, "未保留的外层 pack 上下文不能用于新聚合 ABI 分类");
         check(layout.Size("Callback") == 8 && layout.Size("WithCallback") == 24 &&
             layout.ContainingField("WithCallback", 8, 8) is { Name: "invoke", Type: "Callback" },
             "函数指针别名参与布局，参数所指的不完整类型不要求值布局");
@@ -56,8 +71,8 @@ public static class AsyncChecks
             "匿名 union 不隐藏同一结构体中独立字段的身份及真实偏移");
         check(layout.Members("Mixed").Select(f => f.Name).SequenceEqual(["invoke", "owner", "token"]) &&
             layout.Field("Mixed*", 16, 8) is null && layout.ContainingField("Mixed", 16, 8) is null &&
-            layout.Shape("Mixed").Kind == Cpp2CS.Abi.ShapeKind.Unknown,
-            "外层字段恢复后，重叠成员和整个聚合的 ABI 仍保持未确认");
+            layout.Shape("Mixed") is { Kind: Cpp2CS.Abi.ShapeKind.Composite, Size: 32, Alignment: 8 },
+            "指针聚合 ABI 可以确定，重叠字段身份继续保持未知");
     }
     public static void Run(Action<bool, string> check)
     {

@@ -18,6 +18,7 @@ public sealed class HeaderLayout
     private readonly HashSet<string> rejectedPacking = [];
     private readonly string scalarAliases;
     private readonly HashSet<string> floatingScalars = ["float", "double"];
+    private readonly Dictionary<string, bool> integerStorage = [];
     public HeaderLayout(string path, string compiler)
     {
         this.compiler = compiler;
@@ -73,7 +74,7 @@ public sealed class HeaderLayout
                 text[m.Index..(semicolon + 1)], m.Groups[1].Value, fields.ToArray(), body.Contains('{'), unsupported));
             m = startPattern.Match(text, semicolon + 1);
 
-            // 匿名聚合的字段只用于收集编译依赖；重叠成员不参与字段身份推断。
+            // 匿名聚合保留成员类型依赖；重叠成员不参与字段身份推断。
             void ReadFields(string source, bool direct = true)
             {
                 var begin = 0; var nesting = 0;
@@ -112,11 +113,14 @@ public sealed class HeaderLayout
         if (type.EndsWith('*')) return AbiShape.Integer();
         if (floatingScalars.Contains(type)) return AbiShape.Float(Size(type));
         if (Scalars.TryGetValue(type, out var scalar)) return AbiShape.Integer(scalar);
-        if (!records.TryGetValue(type, out var record) || record.Kind == "union" || record.Opaque || record.Unsupported is not null) return AbiShape.Unknown;
+        if (!records.TryGetValue(type, out var record) || record.Unsupported is not null) return AbiShape.Unknown;
+        var integers = HasIntegerStorage(type, []);
+        if (!integers && (record.Kind == "union" || record.Opaque)) return AbiShape.Unknown;
         Ensure(type);
+        var layout = layouts[type];
+        if (integers) return AbiShape.Composite(layout.Size, layout.Align);
         var fields = Flatten(type, 0).ToArray();
         if (fields.Any(f => records.ContainsKey(f.Type))) return AbiShape.Unknown;
-        var layout = layouts[type];
         if (fields.Length > 0 && fields.All(f => floatingScalars.Contains(f.Type) && Size(f.Type) == Size(fields[0].Type)))
         {
             var elementSize = Size(fields[0].Type);
@@ -126,6 +130,20 @@ public sealed class HeaderLayout
             if (count is >= 1 and <= 4 && contiguous && layout.Size == offset) return AbiShape.Hfa(elementSize, count);
         }
         return AbiShape.Composite(layout.Size, layout.Align);
+    }
+    // 整数/指针聚合不参与 HFA 分类；完整声明中的所有成员都需检查，字段身份仍由布局查询单独决定。
+    private bool HasIntegerStorage(string type, HashSet<string> active)
+    {
+        if (type.EndsWith('*')) return true;
+        if (Scalars.ContainsKey(type)) return !floatingScalars.Contains(type);
+        if (integerStorage.TryGetValue(type, out var known)) return known;
+        if (!records.TryGetValue(type, out var record) || record.Unsupported is not null || rejectedPacking.Contains(type)) return false;
+        if (!active.Add(type)) throw new InvalidDataException("递归值类型布局");
+        var result = (record.Fields.Length > 0 || record.Base is not null) &&
+            (record.Base is null || HasIntegerStorage(record.Base, active)) &&
+            record.Fields.All(f => f.Count > 0 && HasIntegerStorage(f.Type, active));
+        active.Remove(type);
+        return integerStorage[type] = result;
     }
     public string? ParentFields(string objectType)
     {

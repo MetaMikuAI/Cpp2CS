@@ -6,6 +6,11 @@ using Cpp2CS.IR;
 using Cpp2CS.Model;
 
 var passed = 0;
+if (args is ["aggregate-abi", var aggregateAbiConfig, var aggregateAbiDirectory])
+{
+    AggregateAbiFixtures.Export(aggregateAbiConfig, aggregateAbiDirectory);
+    return;
+}
 if (args is ["integer-projection" or "native-projection", var integerConfig, var integerDirectory])
 {
     NativeProjectionFixtures.Export(integerConfig, integerDirectory);
