@@ -17,7 +17,7 @@ public static class EffectBoundaryChecks
         var guarded = MirJson.Deserialize(MirJson.Serialize(b.Finish(MirExit.Next(0x1004))));
         foreach (var input in new[] { 0, 1 })
         {
-            var state = new MachineState();
+            var state = CoreChecks.CreateArmState();
             state.Slots["x0"] = input;
             state.Slots["x1"] = 7;
             var execution = MirInterpreter.Execute(guarded, state);

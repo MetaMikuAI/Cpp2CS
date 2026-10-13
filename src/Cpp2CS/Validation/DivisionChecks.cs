@@ -11,7 +11,7 @@ public static class DivisionChecks
         foreach (var signed in new[] { false, true })
         {
             var ir = Fixture(8, signed);
-            var state = new MachineState();
+            var state = CoreChecks.CreateArmState();
             for (var dividend = 0; dividend < 256; dividend++)
             for (var divisor = 0; divisor < 256; divisor++)
             {
@@ -42,7 +42,7 @@ public static class DivisionChecks
             var ir = Fixture(64, signed);
             foreach (var item in cases)
             {
-                var state = new MachineState();
+                var state = CoreChecks.CreateArmState();
                 state.Slots["x0"] = item.A;
                 state.Slots["x1"] = item.B;
                 MirInterpreter.Execute(ir, state);

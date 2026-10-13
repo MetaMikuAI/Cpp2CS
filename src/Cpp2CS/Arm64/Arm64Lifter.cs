@@ -92,6 +92,15 @@ public static partial class Arm64Lifter
         if ((w & 0x7E000000) == 0x36000000) return TestBranch(new(origin, w, "branch.bit"));
         if ((w & 0xFFFFFC1F) is 0xD61F0000 or 0xD63F0000 or 0xD65F0000)
             return RegisterBranch(new(origin, w, "branch.register"));
+        if ((w & 0xFFC00000) == 0xF9800000) return Prefetch(new(origin, w, "prefetch.unsigned"), 0);
+        if ((w & 0xFFE00C00) == 0xF8800000) return Prefetch(new(origin, w, "prefetch.unscaled"), 1);
+        if ((w & 0xFFE00C00) == 0xF8A00800) return Prefetch(new(origin, w, "prefetch.register"), 2);
+        if ((w & 0xFF000000) == 0xD8000000) return Prefetch(new(origin, w, "prefetch.literal"), 3);
+        if ((w & 0x3F000000) == 0x08000000) return OrderedMemory(new(origin, w, "memory.ordered-exclusive"));
+        if ((w & 0xFFFFF0FF) is 0xD503305F or 0xD503309F or 0xD50330BF or 0xD50330DF)
+            return MemoryBarrier(new(origin, w, "memory.barrier"));
+        if (w is 0xD503211F or 0xD503215F or 0xD503219F or 0xD50321DF or 0xD503231F or 0xD503233F or 0xD503235F or 0xD503237F or 0xD503239F or 0xD50323BF or 0xD50323DF or 0xD50323FF)
+            return PointerAuthentication(new(origin, w, "pointer-authentication"));
         if ((w & 0x3B000000) == 0x39000000) return SingleMemory(new(origin, w, "memory.unsigned"), 0);
         if ((w & 0x3B200000) == 0x38000000) return SingleMemory(new(origin, w, "memory.unscaled"), 1);
         if ((w & 0x3B200C00) == 0x38200800) return SingleMemory(new(origin, w, "memory.register"), 2);
@@ -105,15 +114,38 @@ public static partial class Arm64Lifter
         if ((w & 0xFFE0001F) == 0xD4200000)
             return new Context(origin, w, "brk").End(MirExit.Trap($"arm64.BRK.0x{(w >> 5) & 0xFFFF:X4}", origin.Address));
         if (w == 0xD503201F) return new Context(origin, w, "nop").Done();
+        if (w is 0xD503241F or 0xD503245F or 0xD503249F or 0xD50324DF) return new Context(origin, w, "bti").Done();
         return LiftResult.Unsupported($"word.{w:x8}", "Encoding has no implemented semantic rule");
     }
 
-    private sealed class Context(InstructionOrigin origin, uint word, string form)
+    private sealed class Context
     {
-        public readonly InstructionOrigin Origin = origin;
-        public readonly uint Word = word;
-        public readonly string Form = form;
-        public readonly MirBuilder B = new(Architecture.Arm64, origin, "arm64." + form);
+        public readonly InstructionOrigin Origin;
+        public readonly uint Word;
+        public readonly string Form;
+        public readonly MirBuilder B;
+        public readonly Value CurrentPageGuarded;
+        public Value? NextBranchType;
+
+        public Context(InstructionOrigin origin, uint word, string form)
+        {
+            Origin = origin;
+            Word = word;
+            Form = form;
+            B = new(Architecture.Arm64, origin, "arm64." + form);
+            CurrentPageGuarded = B.CodeGuarded(C(64, origin.Address));
+            var btype = B.Read("btype", 2);
+            var ordinary = B.Eq(btype, C(2, 0));
+            var allowed = word switch
+            {
+                0xD503245F => B.BoolNot(B.Eq(btype, C(2, 3))),
+                0xD503249F => B.BoolNot(B.Eq(btype, C(2, 2))),
+                0xD50324DF => C(1, 1),
+                0xD503233F or 0xD503237F => B.Or(B.BoolNot(B.Eq(btype, C(2, 3))), B.BoolNot(B.Read("bti_bt0", 1))),
+                _ => (word & 0xFFE0001F) is 0xD4200000 or 0xD4400000 ? C(1, 1) : ordinary
+            };
+            B.Guard(B.Or(B.BoolNot(CurrentPageGuarded), allowed), "arm64.BranchTargetException");
+        }
         public int Width => (Word & 0x80000000) != 0 ? 64 : 32;
         public int Rd => Field(0, 5);
         public int Rn => Field(5, 5);
@@ -140,8 +172,12 @@ public static partial class Arm64Lifter
         public void WriteVector(int register, Value value) => B.Write($"v{register}", value.Width == 128 ? value : B.Zext(value, 128));
         public Value Flag(string flag) => B.Read(flag, 1);
         public Value Address(long delta) => C(64, unchecked(Origin.Address + (ulong)delta));
-        public LiftResult Done() => LiftResult.Supported(B.Finish(MirExit.Next(unchecked(Origin.Address + 4))));
-        public LiftResult End(MirExit exit) => LiftResult.Supported(B.Finish(exit));
+        public LiftResult Done() => End(MirExit.Next(unchecked(Origin.Address + 4)));
+        public LiftResult End(MirExit exit)
+        {
+            if (exit.Kind != ExitKind.Trap) B.Write("btype", NextBranchType ?? C(2, 0));
+            return LiftResult.Supported(B.Finish(exit));
+        }
         public LiftResult Reject(string reason) => LiftResult.Unsupported(Form, reason);
         public void Nz(Value value)
         {

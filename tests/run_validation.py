@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/verified")
     parser.add_argument("--fuzz-words", type=int, default=200000)
     parser.add_argument("--baseline", type=Path, help="旧全量报告目录；按全部候选核对覆盖回退")
+    parser.add_argument("--qarma-source", type=Path, help="独立 QEMU pauth_helper.c 快照；来源和身份写入差分报告")
     args = parser.parse_args()
     output = args.output.resolve()
     if args.baseline is not None and args.baseline.resolve() == output:
@@ -55,11 +56,25 @@ def main():
     execute("float-core-build", ["dotnet", "build", TESTS / "FloatCoreHarness/FloatCoreHarness.csproj", "-c", "Release",
                                  "--source", TESTS / "FloatCoreHarness", "-p:MSBuildEnableWorkloadResolver=false"])
     execute("float-core-differential", [sys.executable, TESTS / "float_core_differential.py", "--output", output / "float-core-differential.json"])
+    if args.qarma_source is not None:
+        execute("qarma-core-build", ["dotnet", "build", TESTS / "QarmaCoreHarness/QarmaCoreHarness.csproj", "-c", "Release",
+                                     "--source", TESTS / "QarmaCoreHarness", "-p:MSBuildEnableWorkloadResolver=false"])
+        execute("qarma-differential", [sys.executable, TESTS / "qarma_differential.py",
+                                       "--core-dll", TESTS / "QarmaCoreHarness/bin/Release/net10.0/QarmaCoreHarness.dll",
+                                       "--qemu-source", args.qarma_source.resolve(), "--output", output / "qarma-differential.json"])
     execute("arm64-fixed-differential", [sys.executable, TESTS / "arm64_fixed_differential.py", "--dll", DLL,
                                          "--output", output / "arm64-fixed-differential.json"])
+    execute("arm64-ordered-differential", [sys.executable, TESTS / "arm64_ordered_differential.py", "--dll", DLL,
+                                           "--output", output / "arm64-ordered-differential.json"])
+    execute("arm64-pauth-prefetch-differential", [sys.executable, TESTS / "arm64_pauth_prefetch_differential.py", "--dll", DLL,
+                                                  "--output", output / "arm64-pauth-prefetch-differential.json"])
+    execute("arm64-bti-checks", [sys.executable, TESTS / "arm64_bti_checks.py", "--dll", DLL,
+                                 "--output", output / "arm64-bti-checks.json"])
     execute("arm64-differential", [sys.executable, TESTS / "arm64_differential.py", "--dll", DLL, "--output", output / "arm64-differential.json", "--fuzz-words", args.fuzz_words])
     x64 = execute("x64-differential", [sys.executable, TESTS / "x64_differential.py", DLL])
     (output / "x64-differential.json").write_text(json.dumps(json.loads(x64), indent=2) + "\n", encoding="utf-8")
+    avx = execute("x64-avx-differential", [sys.executable, TESTS / "x64_avx_differential.py", DLL])
+    (output / "x64-avx-differential.json").write_text(json.dumps(json.loads(avx), indent=2) + "\n", encoding="utf-8")
     reports = []
     all_represented = True
     fully_lifted = True

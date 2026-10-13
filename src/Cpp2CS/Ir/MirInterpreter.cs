@@ -7,6 +7,13 @@ public sealed class MachineState
     public Dictionary<string, BigInteger> Slots { get; } = [];
     public Dictionary<ulong, byte> Memory { get; } = [];
     public List<string> Accesses { get; } = [];
+    public List<WorldEvent> Events { get; } = [];
+    public ExclusiveReservation? Reservation { get; set; }
+    public Queue<bool> ExclusiveStoreDecisions { get; } = new();
+    public Queue<ScheduledMemoryEvent> Schedule { get; } = new();
+    public List<ScheduledMemoryEvent> AppliedSchedule { get; } = [];
+    public Dictionary<ulong, bool> WritePermissions { get; } = [];
+    public Dictionary<ulong, bool> CodeGuardedPages { get; } = [];
     public BigInteger ReadSlot(string slot) => Slots[slot];
 }
 
@@ -34,7 +41,10 @@ public static class MirInterpreter
             switch (op.Code)
             {
                 case OpCode.Constant: value = op.Immediate; break;
-                case OpCode.ReadSlot: value = state.ReadSlot(op.Slot!); break;
+                case OpCode.ReadSlot:
+                    value = state.ReadSlot(op.Slot!);
+                    if (value < 0 || value > Mask(width)) throw new InvalidOperationException($"State slot exceeds declared width: {op.Slot}");
+                    break;
                 case OpCode.WriteSlot: state.Slots[op.Slot!] = a; break;
                 case OpCode.Extract: value = a >> (int)op.Immediate; break;
                 case OpCode.Concat: value = (a << op.Inputs[1].Width) | b; break;
@@ -57,10 +67,20 @@ public static class MirInterpreter
                 case OpCode.Slt: value = Signed(a, op.Inputs[0].Width) < Signed(b, op.Inputs[1].Width) ? 1 : 0; break;
                 case OpCode.Select: value = a != 0 ? b : values[op.Inputs[2].Id]; break;
                 case OpCode.Undefined: choices++; break;
+                case OpCode.Qarma5: value = Qarma64.Evaluate((ulong)a, (ulong)b, values[op.Inputs[2].Id]); break;
+                case OpCode.CodeGuarded:
+                    if (!state.CodeGuardedPages.TryGetValue((ulong)a >> 12, out var guarded))
+                        return new("UnmodeledEnvironmentStop", null, index, choices, "guarded-page attribute is required");
+                    value = guarded ? 1 : 0;
+                    break;
                 case OpCode.Float:
+                case OpCode.FloatFused:
                 {
                     var f = op.Floating!;
-                    var floating = FloatEvaluator.Evaluate(ir.Architecture, f, a, b, (uint)values[op.Inputs[2].Id]);
+                    var floating = op.Code == OpCode.Float
+                        ? FloatEvaluator.Evaluate(ir.Architecture, f, a, b, (uint)values[op.Inputs[2].Id])
+                        : FloatEvaluator.EvaluateFused(ir.Architecture, f, a, b,
+                            values[op.Inputs[2].Id], (uint)values[op.Inputs[3].Id]);
                     value = floating.Bits | (new BigInteger(floating.Flags) << f.ResultWidth) |
                         (new BigInteger(floating.TrapFlags) << (f.ResultWidth + 6));
                     break;
@@ -70,18 +90,24 @@ public static class MirInterpreter
                     break;
                 case OpCode.Load:
                 case OpCode.Store:
+                case OpCode.LoadIf:
+                case OpCode.StoreIf:
+                case OpCode.LoadExclusive:
+                case OpCode.StoreExclusive:
+                case OpCode.ClearExclusive:
+                case OpCode.Barrier:
+                case OpCode.Prefetch:
+                case OpCode.WriteProbe:
                 {
-                    var address = (ulong)a;
-                    var size = (op.Code == OpCode.Load ? width : op.Inputs[1].Width) / 8;
-                    state.Accesses.Add($"{op.Code}:0x{address:X}:{size}");
-                    for (var i = 0; i < size; i++)
-                        if (!state.Memory.ContainsKey(unchecked(address + (ulong)i)))
-                            return new("UnmodeledFaultStop", null, index, choices);
-                    for (var i = 0; i < size; i++)
+                    if (op.Code is OpCode.LoadIf or OpCode.StoreIf)
                     {
-                        if (op.Code == OpCode.Load) value |= new BigInteger(state.Memory[unchecked(address + (ulong)i)]) << (8 * i);
-                        else state.Memory[unchecked(address + (ulong)i)] = (byte)((b >> (8 * i)) & 255);
+                        if (a.IsZero) break;
+                        a = b;
+                        b = op.Code == OpCode.StoreIf ? values[op.Inputs[2].Id] : BigInteger.Zero;
                     }
+                    var effect = MemoryEffects.Execute(op, state, a, b);
+                    if (effect.Outcome is not null) return new(effect.Outcome, null, index, choices, effect.Reason);
+                    value = effect.Value;
                     break;
                 }
                 default: throw new InvalidOperationException($"Unknown IR opcode {op.Code}");

@@ -19,9 +19,10 @@ public static class MirValidator
         {
             var arity = op.Code switch
             {
-                OpCode.Constant or OpCode.ReadSlot or OpCode.Undefined => 0,
-                OpCode.WriteSlot or OpCode.Extract or OpCode.Zext or OpCode.Sext or OpCode.Not or OpCode.Load or OpCode.Guard => 1,
-                OpCode.Select or OpCode.Float => 3,
+                OpCode.Constant or OpCode.ReadSlot or OpCode.Undefined or OpCode.ClearExclusive or OpCode.Barrier => 0,
+                OpCode.WriteSlot or OpCode.Extract or OpCode.Zext or OpCode.Sext or OpCode.Not or OpCode.Load or OpCode.Guard or OpCode.LoadExclusive or OpCode.Prefetch or OpCode.WriteProbe or OpCode.CodeGuarded => 1,
+                OpCode.Select or OpCode.Float or OpCode.Qarma5 or OpCode.StoreIf => 3,
+                OpCode.FloatFused => 4,
                 _ => 2
             };
             if (!Enum.IsDefined(op.Code) || op.Inputs.Length != arity) { errors.Add($"invalid opcode or arity: {op.Code}"); continue; }
@@ -30,7 +31,7 @@ public static class MirValidator
             {
                 if (input.Id < 0 || input.Id >= widths.Count || widths[input.Id] != input.Width) { errors.Add($"undefined or mismatched input v{input.Id}"); inputError = true; }
             }
-            var produces = op.Code is not (OpCode.WriteSlot or OpCode.Store or OpCode.Guard);
+            var produces = op.Code is not (OpCode.WriteSlot or OpCode.Store or OpCode.StoreIf or OpCode.Guard or OpCode.ClearExclusive or OpCode.Barrier or OpCode.Prefetch or OpCode.WriteProbe);
             if (produces != op.Result.HasValue) errors.Add($"result contract: {op.Code}");
             var width = op.Result?.Width ?? 0;
             if (op.Result is { } result)
@@ -60,16 +61,30 @@ public static class MirValidator
                 OpCode.UDiv or OpCode.SDiv => width == a && a == b,
                 OpCode.Load => a == 64 && width % 8 == 0,
                 OpCode.Store => a == 64 && b % 8 == 0,
+                OpCode.LoadIf => a == 1 && b == 64 && width % 8 == 0 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
+                OpCode.StoreIf => a == 1 && b == 64 && op.Inputs[2].Width % 8 == 0 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
+                OpCode.LoadExclusive => ir.Architecture == Architecture.Arm64 && a == 64 && width is 8 or 16 or 32 or 64 or 128 && op.Memory is not null,
+                OpCode.StoreExclusive => ir.Architecture == Architecture.Arm64 && a == 64 && b is 8 or 16 or 32 or 64 or 128 && width == 32 && op.Memory is not null,
+                OpCode.ClearExclusive => ir.Architecture == Architecture.Arm64 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
+                OpCode.Barrier => ValidBarrier(ir.Architecture, op.Barrier) && op.Immediate == 0 && op.Slot is null && op.Detail is null,
+                OpCode.Prefetch => a == 64 && op.Immediate >= 0 && (ir.Architecture == Architecture.Arm64 ? op.Immediate < 32 : op.Immediate <= 3 || op.Immediate == 8) && op.Slot is null && op.Detail is null,
+                OpCode.WriteProbe => ir.Architecture == Architecture.X64 && a == 64 && op.Immediate > 0 && op.Immediate <= 4096 && op.Slot is null && op.Detail is null,
+                OpCode.Qarma5 => ir.Architecture == Architecture.Arm64 && a == 64 && b == 64 && op.Inputs[2].Width == 128 && width == 64 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
+                OpCode.CodeGuarded => ir.Architecture == Architecture.Arm64 && a == 64 && width == 1 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
                 OpCode.Undefined => !string.IsNullOrWhiteSpace(op.Detail),
                 OpCode.Guard => a == 1 && !string.IsNullOrWhiteSpace(op.Detail) && op.Immediate == 0 && op.Slot is null,
                 OpCode.Float => ValidFloat(ir.Architecture, op, a, b, width),
+                OpCode.FloatFused => ValidFusedFloat(ir.Architecture, op, a, b, width),
                 _ => width == a && a == b
             };
             if (!valid) errors.Add($"type rule: {op.Code}");
-            if (op.Code != OpCode.Float && op.Floating is not null) errors.Add("non-float operation has floating specification");
-            if (op.Code is OpCode.Load or OpCode.Store or OpCode.Guard)
+            if (op.Code is not (OpCode.Float or OpCode.FloatFused) && op.Floating is not null) errors.Add("non-float operation has floating specification");
+            if (op.Memory is not null && !ValidMemory(ir.Architecture, op)) errors.Add("invalid memory specification");
+            if (op.Code != OpCode.Barrier && op.Barrier is not null) errors.Add("non-barrier operation has barrier specification");
+            if (op.Code is OpCode.Load or OpCode.Store or OpCode.LoadIf or OpCode.StoreIf or OpCode.Guard or OpCode.LoadExclusive or OpCode.StoreExclusive or OpCode.WriteProbe or OpCode.ClearExclusive or OpCode.Barrier or OpCode.Prefetch or OpCode.CodeGuarded)
             {
-                if (op.WorldIn != world || op.WorldOut != world + 1 || op.Fault != FaultPolicy.StopUnmodeled)
+                var fault = op.Code is OpCode.ClearExclusive or OpCode.Barrier or OpCode.Prefetch ? FaultPolicy.None : FaultPolicy.StopUnmodeled;
+                if (op.WorldIn != world || op.WorldOut != world + 1 || op.Fault != fault)
                     errors.Add("broken World or fault edge");
                 world++;
                 if (ir.Support == SupportClass.Exact) errors.Add("effect claimed exact without modeled fault");
@@ -93,10 +108,47 @@ public static class MirValidator
         return errors;
     }
 
+    private static bool ValidMemory(Architecture architecture, Operation op)
+    {
+        var m = op.Memory!;
+        if (op.Code is not (OpCode.Load or OpCode.Store or OpCode.LoadExclusive or OpCode.StoreExclusive) ||
+            !Enum.IsDefined(m.Order) || op.Immediate != 0 || op.Slot is not null || op.Detail is not null) return false;
+        var load = op.Code is OpCode.Load or OpCode.LoadExclusive;
+        var width = load ? op.Result?.Width ?? 0 : op.Inputs[1].Width;
+        if (m.ElementWidth is not (8 or 16 or 32 or 64 or 128 or 256 or 512) || width % m.ElementWidth != 0 ||
+            m.AtomicWidth != 0 && (m.AtomicWidth is not (8 or 16 or 32 or 64 or 128) || width % m.AtomicWidth != 0) ||
+            load && m.Order == MemoryOrder.Release || !load && m.Order == MemoryOrder.Acquire ||
+            m.NonTemporal && architecture != Architecture.X64) return false;
+        if (op.Code == OpCode.LoadExclusive)
+            return !m.NonTemporal && m.AtomicWidth == Math.Min(width, 64) && m.ElementWidth <= 64;
+        if (op.Code == OpCode.StoreExclusive)
+            return !m.NonTemporal && m.AtomicWidth == width && m.ElementWidth <= 64;
+        return m.Order == MemoryOrder.Relaxed || architecture == Architecture.Arm64 && width <= 64 && m.AtomicWidth == width;
+    }
+
+    private static bool ValidBarrier(Architecture architecture, BarrierOperation? barrier)
+    {
+        if (barrier is null || !Enum.IsDefined(barrier.Kind) || !Enum.IsDefined(barrier.Domain) || !Enum.IsDefined(barrier.Access)) return false;
+        if (architecture == Architecture.X64)
+            return barrier.Domain == BarrierDomain.FullSystem && barrier.Option == 0 && (barrier.Kind switch
+            {
+                BarrierKind.Sfence => barrier.Access == BarrierAccess.Stores,
+                BarrierKind.Lfence => barrier.Access == BarrierAccess.Loads,
+                BarrierKind.Mfence => barrier.Access == BarrierAccess.All,
+                _ => false
+            });
+        if (barrier.Kind == BarrierKind.Isb) return barrier.Option == 15 && barrier.Domain == BarrierDomain.FullSystem && barrier.Access == BarrierAccess.All;
+        if (barrier.Kind is not (BarrierKind.Dmb or BarrierKind.Dsb) || barrier.Option is < 0 or > 15 || (barrier.Option & 3) == 0) return false;
+        var domain = (barrier.Option >> 2) switch { 0 => BarrierDomain.OuterShareable, 1 => BarrierDomain.NonShareable, 2 => BarrierDomain.InnerShareable, _ => BarrierDomain.FullSystem };
+        var access = (barrier.Option & 3) switch { 1 => BarrierAccess.Loads, 2 => BarrierAccess.Stores, _ => BarrierAccess.All };
+        return barrier.Domain == domain && barrier.Access == access;
+    }
+
     private static bool ValidFloat(Architecture architecture, Operation op, int a, int b, int width)
     {
         var f = op.Floating;
         if (f is null || !Enum.IsDefined(f.Kind) || !Enum.IsDefined(f.Rounding) ||
+            f.Kind is FloatKind.MulAdd or FloatKind.MulSub or FloatKind.NegMulAdd or FloatKind.NegMulSub ||
             !FloatEvaluator.ValidFractionBits(architecture, f) ||
             f.OperandWidth is not (32 or 64) || a != f.OperandWidth || b != a ||
             op.Inputs[2].Width != 32 || width != f.ResultWidth + 12 || op.Immediate != 0 ||
@@ -109,5 +161,16 @@ public static class MirValidator
         if (f.Kind is FloatKind.Convert or FloatKind.FromSigned or FloatKind.FromUnsigned or FloatKind.ToSigned or FloatKind.ToUnsigned)
             return true;
         return f.ResultWidth == f.OperandWidth;
+    }
+
+    private static bool ValidFusedFloat(Architecture architecture, Operation op, int a, int b, int width)
+    {
+        var f = op.Floating;
+        return architecture == Architecture.X64 && f is not null &&
+            f.Kind is FloatKind.MulAdd or FloatKind.MulSub or FloatKind.NegMulAdd or FloatKind.NegMulSub &&
+            f.Rounding == FloatRounding.Current && f.FractionBits == 0 &&
+            f.OperandWidth is 32 or 64 && a == f.OperandWidth && b == a &&
+            op.Inputs[2].Width == a && op.Inputs[3].Width == 32 &&
+            f.ResultWidth == a && width == a + 12 && op.Immediate == 0 && op.Slot is null && op.Detail is null;
     }
 }

@@ -13,6 +13,7 @@ import unicorn
 from capstone import Cs, CS_ARCH_ARM64
 from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_READ
 from unicorn import arm64_const as arm
+from arm64_fixture import with_arm_fixture_environment, checked_arm_fixture_result
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -420,11 +421,11 @@ def main():
             raise AssertionError(message)
 
     def request(payload):
-        child.stdin.write(json.dumps(payload) + "\n")
+        child.stdin.write(json.dumps(with_arm_fixture_environment(payload)) + "\n")
         child.stdin.flush()
         line = child.stdout.readline()
         require(bool(line), "Product CLI ended before returning a result")
-        return json.loads(line)
+        return checked_arm_fixture_result(payload, json.loads(line))
 
     def registers():
         slots = {f"x{i}": rng.getrandbits(64) for i in range(31)}
@@ -634,7 +635,7 @@ def main():
         0xA9400060,  # ldp x0,x0,[x3]: constrained duplicate destination
         0xD53BD060,  # unmodeled system register
         0x1EA02000,  # reserved floating compare ftype
-        0xC85F7C20,  # exclusive load is explicitly unsupported
+        0xC85E7C20,  # exclusive-load status field is reserved
         0x0E000400,  # SIMD duplicate imm5=0
         0x0E080400,  # Q=0 duplicate D lane is reserved
         0x0E042C00,  # SMOV Wd,Sn has no sign extension

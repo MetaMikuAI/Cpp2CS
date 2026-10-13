@@ -23,6 +23,44 @@ public static class FloatChecks
         const uint ix = FloatEvaluator.Inexact, uf = FloatEvaluator.Underflow,
             inv = FloatEvaluator.Invalid, dz = FloatEvaluator.DivideByZero,
             ov = FloatEvaluator.Overflow, den = FloatEvaluator.InputDenormal;
+        void Fused(FloatKind kind, int width, ulong a, ulong b, ulong c, ulong expected,
+            uint flags = 0, uint control = 0x1F80)
+        {
+            var result = FloatEvaluator.EvaluateFused(Architecture.X64, new(kind, width, width), a, b, c, control);
+            if (result.Bits != expected || result.Flags != flags || result.TrapFlags != flags)
+                throw new InvalidOperationException($"FMA {kind}/{width} {a:X},{b:X},{c:X} control={control:X}: " +
+                    $"got {result.Bits:X}/{result.Flags:X}/{result.TrapFlags:X}, expected {expected:X}/{flags:X}");
+            checks++;
+        }
+
+        // (1 + 2^-p) * (1 - 2^-p) - 1 = -2^(-2p); rounding the product first loses the residual.
+        Fused(FloatKind.MulAdd, 32, 0x3F800001, 0x3F7FFFFE, 0xBF800000, 0xA8800000);
+        Fused(FloatKind.MulSub, 32, 0x3F800001, 0x3F7FFFFE, 0x3F800000, 0xA8800000);
+        Fused(FloatKind.NegMulAdd, 32, 0x3F800001, 0x3F7FFFFE, 0x3F800000, 0x28800000);
+        Fused(FloatKind.NegMulSub, 32, 0x3F800001, 0x3F7FFFFE, 0xBF800000, 0x28800000);
+        Fused(FloatKind.MulAdd, 64, 0x3FF0000000000001, 0x3FEFFFFFFFFFFFFE, 0xBFF0000000000000, 0xB970000000000000);
+        Fused(FloatKind.MulSub, 64, 0x3FF0000000000001, 0x3FEFFFFFFFFFFFFE, 0x3FF0000000000000, 0xB970000000000000);
+        Fused(FloatKind.NegMulAdd, 64, 0x3FF0000000000001, 0x3FEFFFFFFFFFFFFE, 0x3FF0000000000000, 0x3970000000000000);
+        Fused(FloatKind.NegMulSub, 64, 0x3FF0000000000001, 0x3FEFFFFFFFFFFFFE, 0xBFF0000000000000, 0x3970000000000000);
+        // The final result is exact even though a separately rounded product would overflow.
+        Fused(FloatKind.MulAdd, 32, 0x7F7FFFFF, 0x40000000, 0xFF7FFFFF, 0x7F7FFFFF);
+        Fused(FloatKind.MulAdd, 64, 0x7FEFFFFFFFFFFFFF, 0x4000000000000000, 0xFFEFFFFFFFFFFFFF, 0x7FEFFFFFFFFFFFFF);
+        // The tiny exact product is retained until the addition; only the final inexact flag applies.
+        Fused(FloatKind.MulAdd, 32, 0x00800000, 0x00800000, 0x3F800000, 0x3F800000, ix);
+        Fused(FloatKind.MulAdd, 64, 0x0010000000000000, 0x0010000000000000, 0x3FF0000000000000, 0x3FF0000000000000, ix);
+        Fused(FloatKind.MulAdd, 32, 1, 0x3F800000, 0, 1, den);
+        Fused(FloatKind.MulAdd, 32, 1, 0x3F800000, 0, 0, control: 0x1FC0);
+        Fused(FloatKind.MulAdd, 32, 0x00800000, 0x3F000000, 0, 0, uf | ix, 0x9F80);
+        Fused(FloatKind.MulAdd, 32, 0x00800000, 0x3F000000, 0, 0x00400000, uf, 0x9780);
+        foreach (var kind in new[] { FloatKind.MulAdd, FloatKind.MulSub, FloatKind.NegMulAdd, FloatKind.NegMulSub })
+        {
+            Fused(kind, 32, 0xFFC00123, 0x7F800456, 0x7FC00789, 0xFFC00123, inv);
+            Fused(kind, 32, 0x3F800000, 0xFFC00123, 0x7F800456, 0xFFC00123, inv);
+            Fused(kind, 32, 0, 0x7F800000, 0xFFC00123, 0xFFC00123);
+            Fused(kind, 32, 0, 0x7F800000, 0, 0xFFC00000, inv);
+            Fused(kind, 32, 0, 0, 0, kind == FloatKind.NegMulSub ? 0x80000000UL : 0);
+            Fused(kind, 32, 0, 0, 0, kind == FloatKind.MulAdd ? 0 : 0x80000000UL, control: 0x3F80);
+        }
         foreach (var architecture in new[] { Architecture.Arm64, Architecture.X64 })
         {
             var control = architecture == Architecture.X64 ? 0x1F80U : 0;
@@ -177,6 +215,52 @@ public static class FloatChecks
         ScaleContract(Architecture.X64, new(FloatKind.ToSigned, 32, 64, FloatRounding.TowardZero, 1), false);
         ScaleContract(Architecture.Arm64, new(FloatKind.ToSigned, 32, 32, FloatRounding.TiesEven), true);
         ScaleContract(Architecture.X64, new(FloatKind.FromSigned, 32, 64), true);
+
+        void FusedContract(Architecture architecture, FloatOperation spec, bool expected,
+            int[]? inputWidths = null, int? resultWidth = null)
+        {
+            inputWidths ??= [spec.OperandWidth, spec.OperandWidth, spec.OperandWidth, 32];
+            var operations = new List<Operation>();
+            var inputs = new Value[inputWidths.Length];
+            for (var i = 0; i < inputs.Length; i++)
+            {
+                inputs[i] = new(i, inputWidths[i]);
+                operations.Add(new(OpCode.Constant, inputs[i], []));
+            }
+            operations.Add(new(OpCode.FloatFused, new Value(inputs.Length, resultWidth ?? spec.ResultWidth + 12), inputs, Floating: spec));
+            var ir = new MirInstruction(architecture, new("fused-check", 0x1000, 0, new byte[4]),
+                "fused-check", operations, MirExit.Next(0x1004), SupportClass.Exact, []);
+            var errors = MirValidator.Validate(ir);
+            if (expected ? errors.Count != 0 : !errors.Any(e => e.Contains("FloatFused", StringComparison.Ordinal)))
+                throw new InvalidOperationException($"Fused floating contract: {architecture} {spec}; {string.Join("; ", errors)}");
+            checks++;
+        }
+        foreach (var kind in new[] { FloatKind.MulAdd, FloatKind.MulSub, FloatKind.NegMulAdd, FloatKind.NegMulSub })
+        {
+            FusedContract(Architecture.X64, new(kind, 32, 32), true);
+            FusedContract(Architecture.X64, new(kind, 64, 64), true);
+            FusedContract(Architecture.Arm64, new(kind, 32, 32), false);
+            FusedContract(Architecture.Arm64, new(kind, 64, 64), false);
+            ScaleContract(Architecture.X64, new(kind, 32, 32), false);
+            ScaleContract(Architecture.Arm64, new(kind, 32, 32), false);
+        }
+        foreach (var kind in Enum.GetValues<FloatKind>().Where(k => k is not (FloatKind.MulAdd or FloatKind.MulSub or FloatKind.NegMulAdd or FloatKind.NegMulSub)))
+            FusedContract(Architecture.X64, new(kind, 32, 32), false);
+        FusedContract(Architecture.X64, new((FloatKind)999, 32, 32), false);
+        foreach (var rounding in Enum.GetValues<FloatRounding>().Where(r => r != FloatRounding.Current))
+            FusedContract(Architecture.X64, new(FloatKind.MulAdd, 32, 32, rounding), false);
+        FusedContract(Architecture.X64, new(FloatKind.MulAdd, 32, 32, (FloatRounding)999), false);
+        FusedContract(Architecture.X64, new(FloatKind.MulAdd, 16, 16), false);
+        FusedContract(Architecture.X64, new(FloatKind.MulAdd, 128, 128), false);
+        FusedContract(Architecture.X64, new(FloatKind.MulAdd, 32, 64), false);
+        FusedContract(Architecture.X64, new(FloatKind.MulAdd, 64, 32), false);
+        FusedContract(Architecture.X64, new(FloatKind.MulAdd, 32, 32, FractionBits: 1), false);
+        FusedContract(Architecture.X64, new(FloatKind.MulAdd, 32, 32, FractionBits: -1), false);
+        foreach (var widths in new int[][] { [], [32], [32, 32], [32, 32, 32], [32, 32, 32, 32, 32],
+                     [64, 32, 32, 32], [32, 64, 32, 32], [32, 32, 64, 32], [32, 32, 32, 64] })
+            FusedContract(Architecture.X64, new(FloatKind.MulAdd, 32, 32), false, widths);
+        FusedContract(Architecture.X64, new(FloatKind.MulAdd, 32, 32), false, resultWidth: 38);
+        FusedContract(Architecture.X64, new(FloatKind.MulAdd, 32, 32), false, resultWidth: 32);
 
         // Independently known integer identities cover both signs, exact squares and format conversion.
         for (var value = -1024; value <= 1024; value++)

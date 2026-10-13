@@ -5,7 +5,7 @@ namespace Cpp2CS.Ir;
 // Integer/rational evaluation of binary32 and binary64. No host floating-point arithmetic.
 // Arm ARM: FPUnpack, FPProcessNaNs, FPRoundBase, FPToFixed (FEAT_AFP absent).
 // Intel SDM vol. 1: 4.8.3.5, 4.9.2, 10.2.3, 11.5.2 (legacy SSE).
-public static class FloatEvaluator
+public static partial class FloatEvaluator
 {
     public const uint Invalid = 1, DivideByZero = 2, Overflow = 4,
         Underflow = 8, Inexact = 16, InputDenormal = 32;
@@ -29,6 +29,8 @@ public static class FloatEvaluator
     public static FloatResult Evaluate(Architecture architecture, FloatOperation spec,
         BigInteger a, BigInteger b, uint control)
     {
+        if (spec.Kind is FloatKind.MulAdd or FloatKind.MulSub or FloatKind.NegMulAdd or FloatKind.NegMulSub)
+            throw new InvalidOperationException("Fused floating operation requires EvaluateFused");
         if (!ValidFractionBits(architecture, spec))
             throw new InvalidOperationException("Invalid fixed-point conversion scale or rounding mode");
         var input = GetFormat(spec.OperandWidth);

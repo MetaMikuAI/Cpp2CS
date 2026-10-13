@@ -234,7 +234,7 @@ for width in (32, 64):
     print(f"width {width}: {sum(arm_counts.values())} Arm64 simulator cases passed", flush=True)
 server.stdin.close()
 assert server.wait() == 0
-sources = ["src/Cpp2CS/Architecture.cs", "src/Cpp2CS/Ir/Model.cs", "src/Cpp2CS/Ir/FloatEvaluator.cs",
+sources = ["src/Cpp2CS/Architecture.cs", "src/Cpp2CS/Ir/Model.cs", "src/Cpp2CS/Ir/MemoryModel.cs", "src/Cpp2CS/Ir/FloatEvaluator.cs", "src/Cpp2CS/Ir/FloatFused.cs",
            "src/Cpp2CS/Ir/MirValidator.cs",
            "src/Cpp2CS/Validation/FloatChecks.cs", "tests/FloatCoreHarness/FloatCoreHarness.csproj",
            "tests/FloatCoreHarness/Program.cs", "tests/float_core_differential.py", "tests/x64_float_native.py"]

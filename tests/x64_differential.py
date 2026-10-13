@@ -39,6 +39,7 @@ class Harness:
         self.unicorn_fp_differences = {}
         self.unicorn_fp_examples = []
         self.unicorn_access_differences = {}
+        self.unicorn_legacy_high_differences = {}
         self.accesses = []
         self.machine.hook_add(UC_HOOK_MEM_READ, lambda _uc, _access, address, size, _value, _user: self.accesses.append(("Load", address, size)))
         self.machine.hook_add(UC_HOOK_MEM_WRITE, lambda _uc, _access, address, size, _value, _user: self.accesses.append(("Store", address, size)))
@@ -65,6 +66,7 @@ class Harness:
         slots.update(rsp=STACK + 64, fsbase=DATA, gsbase=DATA)
         if simd:
             slots.update({name: RNG.getrandbits(128) for name in XMM_REGISTERS})
+            slots.update({f"ymm{i}_hi": 0xcafe0123456789abcdef001122334455 ^ i for i in range(16)})
             slots["mxcsr"] = RNG.getrandbits(16)
         if values is not None:
             mask = (1 << width) - 1
@@ -85,7 +87,8 @@ class Harness:
             self.machine.reg_write(register, slots[name])
         if simd:
             for name, register in XMM_REGISTERS.items():
-                self.machine.reg_write(register, slots[name])
+                index = int(name[3:])
+                self.machine.reg_write(getattr(xc, f"UC_X86_REG_YMM{index}"), slots[name] | (slots[f"ymm{index}_hi"] << 128))
             self.machine.reg_write(xc.UC_X86_REG_MXCSR, slots["mxcsr"])
         self.machine.reg_write(xc.UC_X86_REG_EFLAGS, 2 | old_flags)
         for start, data in regions:
@@ -118,6 +121,12 @@ class Harness:
             for name, register in XMM_REGISTERS.items():
                 expected = hardware[name] if name in hardware else self.machine.reg_read(register)
                 assert actual_slots[name] == expected, (code_hex, name, hex(actual_slots[name]), hex(expected), slots)
+                index = int(name[3:])
+                # Legacy SSE leaves YMM[255:128] unchanged; Unicorn's helpers do not consistently preserve it.
+                expected_high = slots[f"ymm{index}_hi"]
+                if self.machine.reg_read(getattr(xc, f"UC_X86_REG_YMM{index}")) >> 128 != expected_high:
+                    self.unicorn_legacy_high_differences[code_hex] = self.unicorn_legacy_high_differences.get(code_hex, 0) + 1
+                assert actual_slots[f"ymm{index}_hi"] == expected_high, (code_hex, f"ymm{index}_hi", actual_slots[f"ymm{index}_hi"], expected_high)
             expected_mxcsr = hardware["mxcsr"] if native else self.machine.reg_read(xc.UC_X86_REG_MXCSR)
             assert actual_slots["mxcsr"] == expected_mxcsr, (code_hex, "mxcsr", hex(actual_slots["mxcsr"]), hex(expected_mxcsr), slots)
         for name, register in REGISTERS.items():
@@ -186,6 +195,7 @@ class Harness:
 
     def fault(self, code_hex, byte_count):
         slots = {name: RNG.getrandbits(128) for name in XMM_REGISTERS}
+        slots.update({f"ymm{i}_hi": 0xcafe0123456789abcdef001122334455 ^ i for i in range(16)})
         slots["rbx"] = DATA
         slots["mxcsr"] = 0x1f80
         data = RNG.randbytes(byte_count)
@@ -200,6 +210,7 @@ class Harness:
         slots = {name: RNG.getrandbits(64) for name in GPRS}
         slots.update({flag: RNG.getrandbits(1) for flag in FLAGS})
         slots.update({name: RNG.getrandbits(128) for name in XMM_REGISTERS})
+        slots.update({f"ymm{i}_hi": 0xcafe0123456789abcdef001122334455 ^ i for i in range(16)})
         slots["mxcsr"] = 0x1f80
         slots.update(updates)
         response = self.request(bytes.fromhex(code_hex), address, slots, memory or [])
@@ -754,7 +765,7 @@ def main():
         memory_pop_and_bits(h)
         simd_sse41(h)
         for code in ("f0480103", "f3a4", "9d", "d3f0",
-                     "0f6fc1", "0fefc1", "0f6ec3", "c5f810c1", "c5fa10c1", "c5f857c1", "660f3a15c101"):
+                     "0f6fc1", "0fefc1", "0f6ec3", "660f3a15c101"):
             h.reject(code)
         server.stdin.close()
         server.wait()
@@ -765,6 +776,8 @@ def main():
                           "native_only_cmp_imm8_checks": h.native_only_checks,
                           "unicorn_float_examples": h.unicorn_fp_examples,
                           "unicorn_access_differences": h.unicorn_access_differences,
+                          "unicorn_legacy_high_difference_count": sum(h.unicorn_legacy_high_differences.values()),
+                          "unicorn_legacy_high_difference_forms": len(h.unicorn_legacy_high_differences),
                           "scope": "production MIR + JSON roundtrip vs Unicorn; synthetic SSE also compared to native CPU data/MXCSR; no game execution or exception-delivery proof"}, indent=2))
 
 

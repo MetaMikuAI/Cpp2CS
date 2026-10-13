@@ -126,7 +126,14 @@ public static partial class Arm64Lifter
     private static LiftResult RegisterBranch(Context c)
     {
         var target = c.Read(c.Rn, 64);
-        if ((c.Word & 0xFFFFFC1F) == 0xD63F0000) c.Write(30, c.Address(4));
+        var kind = c.Word & 0xFFFFFC1F;
+        if (kind == 0xD63F0000)
+        {
+            c.Write(30, c.Address(4));
+            c.NextBranchType = c.C(2, 2);
+        }
+        else if (kind == 0xD61F0000)
+            c.NextBranchType = c.Rn is 16 or 17 ? c.C(2, 1) : c.B.Select(c.CurrentPageGuarded, c.C(2, 3), c.C(2, 1));
         return c.End(MirExit.Jump(target));
     }
 

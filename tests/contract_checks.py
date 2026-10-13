@@ -7,7 +7,7 @@ from pathlib import Path
 
 DLL = Path(sys.argv[1])
 BASE = {
-    "Schema": "cpp2cs.mir/0.1", "Semantics": "attempt08-fixed-memory-4", "Profile": "aarch64-le-el0-v2",
+    "Schema": "cpp2cs.mir/0.1", "Semantics": "attempt08-events-security-avx-5", "Profile": "aarch64-le-el0-v3",
     "Instruction": {
         "Architecture": "Arm64", "Origin": {"ImageId": "fixture:contract", "Address": "0x1000", "FileOffset": 0, "Bytes": "HyAD1Q=="},
         "Rule": "fixture.contract", "Operations": [{"Code": "Constant", "Result": {"Id": 0, "Width": 64}, "Inputs": [], "Immediate": "0x1", "WorldIn": -1, "WorldOut": -1, "Fault": "None"}],
@@ -28,6 +28,9 @@ cases.append(("old-semantics-version", bad))
 bad = copy.deepcopy(BASE)
 bad["Semantics"] = "attempt08-float-3"
 cases.append(("previous-float-semantics-version", bad))
+bad = copy.deepcopy(BASE)
+bad["Semantics"] = "attempt08-fixed-memory-4"
+cases.append(("previous-memory-semantics-version", bad))
 for name, value in (("Support", 999), ("Architecture", 999)):
     bad = copy.deepcopy(BASE)
     bad["Instruction"][name] = value
@@ -49,10 +52,16 @@ cases.append(("zero-width", bad))
 for name, payload in cases:
     result = run("validate-ir", payload)
     assert result.returncode != 0 and result.stderr, name
-missing = run("serve", {"arch": "arm64", "bytes": "20040091", "address": "0x1000", "slots": {}})
+missing = run("serve", {"arch": "arm64", "bytes": "20040091", "address": "0x1000", "slots": {"btype": "0x0"},
+                         "codePages": [{"address": "0x1000", "guarded": False}]})
 assert missing.returncode != 0 and "KeyNotFoundException" in missing.stderr, "missing state must not become zero"
+slot_cases = (("btype", 4), ("bti_bt0", 2), ("pauth_ia_enabled", 2), ("apia_key", 1 << 128), ("unknown_slot", 0))
+for name, value in slot_cases:
+    bad_state = run("serve", {"arch": "arm64", "bytes": "1f2403d5", "address": "0x1000",
+                               "slots": {"btype": "0x0", name: hex(value)}, "codePages": [{"address": "0x1000", "guarded": True}]})
+    assert bad_state.returncode != 0 and "Invalid state slot or value" in bad_state.stderr, name
 classification = run("serve", {"arch": "arm64", "bytes": "20040091", "address": "0x1000", "evaluate": False})
 assert classification.returncode == 0 and json.loads(classification.stdout)["supported"]
 first = run("serve", {"arch": "x64", "bytes": "4889d890", "address": "0x1000", "decodeFirst": True, "evaluate": False})
 assert first.returncode == 0 and json.loads(first.stdout)["length"] == 3 and json.loads(first.stdout)["decoded"]
-print(json.dumps({"contract_checks": len(cases) + 4, "passed": True}))
+print(json.dumps({"contract_checks": len(cases) + 4 + len(slot_cases), "passed": True}))

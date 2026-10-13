@@ -53,13 +53,58 @@ if (args.Length == 1 && args[0] == "serve")
         }
         var state = new MachineState();
         if (root.TryGetProperty("slots", out var slots))
-            foreach (var slot in slots.EnumerateObject()) state.Slots.Add(slot.Name, ParseBits(slot.Value.GetString()!));
+            foreach (var slot in slots.EnumerateObject())
+            {
+                var bits = ParseBits(slot.Value.GetString()!);
+                if (!StateLayout.For(architecture).TryGetValue(slot.Name, out var width) || bits < 0 || bits > MirInterpreter.Mask(width))
+                    throw new InvalidDataException($"Invalid state slot or value: {slot.Name}");
+                state.Slots.Add(slot.Name, bits);
+            }
         if (root.TryGetProperty("memory", out var memory))
             foreach (var region in memory.EnumerateArray())
             {
                 var start = ParseAddress(region.GetProperty("address").GetString()!);
                 var data = Convert.FromHexString(region.GetProperty("bytes").GetString()!);
                 for (var i = 0; i < data.Length; i++) state.Memory.Add(start + (ulong)i, data[i]);
+            }
+        if (root.TryGetProperty("reservation", out var reservation) && reservation.ValueKind != JsonValueKind.Null)
+        {
+            var size = reservation.GetProperty("sizeBytes").GetInt32();
+            if (size is not (1 or 2 or 4 or 8 or 16)) throw new InvalidDataException("Invalid reservation size");
+            state.Reservation = new(ParseAddress(reservation.GetProperty("address").GetString()!), size);
+        }
+        if (root.TryGetProperty("exclusiveDecisions", out var decisions))
+            foreach (var decision in decisions.EnumerateArray()) state.ExclusiveStoreDecisions.Enqueue(decision.GetBoolean());
+        if (root.TryGetProperty("codePages", out var codePages))
+            foreach (var page in codePages.EnumerateArray())
+            {
+                var start = ParseAddress(page.GetProperty("address").GetString()!);
+                if ((start & 4095) != 0) throw new InvalidDataException("Code page must be aligned to 4096 bytes");
+                state.CodeGuardedPages.Add(start >> 12, page.GetProperty("guarded").GetBoolean());
+            }
+        if (root.TryGetProperty("schedule", out var schedule))
+        {
+            var previous = 0;
+            foreach (var item in schedule.EnumerateArray())
+            {
+                var before = item.GetProperty("beforeEvent").GetInt32();
+                if (before < previous) throw new InvalidDataException("Schedule event indices must be nonnegative and ordered");
+                previous = before;
+                var location = item.TryGetProperty("address", out var locationJson) ? ParseAddress(locationJson.GetString()!) : (ulong?)null;
+                var data = item.TryGetProperty("bytes", out var dataJson) ? Convert.FromHexString(dataJson.GetString()!) : [];
+                var invalidate = item.GetProperty("invalidateExclusive").GetBoolean();
+                if (location is null && data.Length != 0 || location is null && !invalidate) throw new InvalidDataException("Empty scheduled event");
+                state.Schedule.Enqueue(new(before, location, data, invalidate));
+            }
+        }
+        if (root.TryGetProperty("writePermissions", out var permissions))
+            foreach (var permission in permissions.EnumerateArray())
+            {
+                var start = ParseAddress(permission.GetProperty("address").GetString()!);
+                var size = permission.GetProperty("size").GetInt32();
+                if (size < 0) throw new InvalidDataException("Negative permission range size");
+                var allowed = permission.GetProperty("allowed").GetBoolean();
+                for (var i = 0; i < size; i++) state.WritePermissions.Add(unchecked(start + (ulong)i), allowed);
             }
         var executable = root.TryGetProperty("roundtrip", out var roundtrip) && roundtrip.GetBoolean() ? MirJson.Deserialize(MirJson.Serialize(lift.Ir)) : lift.Ir;
         var execution = MirInterpreter.Execute(executable, state);
@@ -68,6 +113,10 @@ if (args.Length == 1 && args[0] == "serve")
             supported = true, length = bytes.Length, decoded, lift.Form, support = lift.Ir.Support.ToString(), operations = lift.Ir.Operations.Count,
             slots = state.Slots.ToDictionary(k => k.Key, v => "0x" + v.Value.ToString("X")),
             memory = state.Memory.ToDictionary(k => $"0x{k.Key:X}", v => (int)v.Value), state.Accesses,
+            events = state.Events,
+            reservation = state.Reservation is { } saved ? new { address = $"0x{saved.Address:X}", sizeBytes = saved.SizeBytes } : null,
+            exclusiveDecisions = state.ExclusiveStoreDecisions.ToArray(),
+            appliedSchedule = state.AppliedSchedule, remainingSchedule = state.Schedule.ToArray(),
             execution.Outcome, next = execution.NextAddress is { } pc ? $"0x{pc:X}" : null, execution.Choices,
             execution.Event, resumeAddress = execution.ResumeAddress is { } resume ? $"0x{resume:X}" : null
         }));

@@ -12,6 +12,7 @@ import subprocess
 import capstone
 import unicorn
 from unicorn import arm64_const as ar
+from arm64_fixture import with_arm_fixture_environment, checked_arm_fixture_result
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,11 +37,11 @@ controls = [(rc << 22) | (fz << 24) | (dn << 25)
 
 
 def exchange(server, request):
-    server.stdin.write(json.dumps(request) + "\n")
+    server.stdin.write(json.dumps(with_arm_fixture_environment(request)) + "\n")
     server.stdin.flush()
     response = server.stdout.readline()
     assert response, ("server exited", server.poll(), request)
-    return json.loads(response)
+    return checked_arm_fixture_result(request, json.loads(response))
 
 
 def float_values(width, integer_width, fraction):
@@ -198,7 +199,7 @@ core.stdin.close()
 assert product.wait() == 0 and core.wait() == 0
 sources = ["src/Cpp2CS/Ir/Model.cs", "src/Cpp2CS/Ir/FloatEvaluator.cs", "src/Cpp2CS/Ir/MirValidator.cs",
            "src/Cpp2CS/Arm64/Arm64Floating.cs", "src/Cpp2CS/Arm64/Arm64Lifter.cs", "src/Cpp2CS/Validation/FloatChecks.cs",
-           "tests/FloatCoreHarness/FloatCoreHarness.csproj", "tests/FloatCoreHarness/Program.cs", "tests/arm64_fixed_differential.py"]
+           "tests/FloatCoreHarness/FloatCoreHarness.csproj", "tests/FloatCoreHarness/Program.cs", "tests/arm64_fixed_differential.py", "tests/arm64_fixture.py"]
 report = dict(cases=sum(counts.values()), casesByForm=counts, coreCases=core_cases,
               classification=classification, guardCases=len(guard_cases), unicorn=unicorn.__version__, capstone=capstone.__version__,
               productSha256=hashlib.sha256(args.dll.read_bytes()).hexdigest(), coreSha256=hashlib.sha256(args.core_dll.read_bytes()).hexdigest(),

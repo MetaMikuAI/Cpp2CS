@@ -3,7 +3,7 @@ using Iced.Intel;
 
 namespace Cpp2CS.X64;
 
-/// <summary>在 64 位、CET 关闭的映像地址配置下提升整数及 legacy SSE 指令。</summary>
+/// <summary>在 64 位、CET 关闭的映像地址配置下提升整数、SSE 与 AVX 指令。</summary>
 public static partial class X64Lifter
 {
     public static LiftResult Lift(InstructionOrigin origin, in Instruction instruction)
@@ -12,13 +12,15 @@ public static partial class X64Lifter
             return LiftResult.Unsupported(instruction.Code.ToString(), "解码地址或长度与原始字节不一致");
         if (instruction.IsInvalid || instruction.CodeSize != CodeSize.Code64)
             return LiftResult.Unsupported(instruction.Code.ToString(), "不是有效的 x64 指令");
+        if (instruction.Encoding == EncodingKind.VEX)
+            return new Lifting(origin, instruction).Avx();
         if (instruction.Encoding != EncodingKind.Legacy)
-            return LiftResult.Unsupported(instruction.Code.ToString(), "仅支持 legacy 编码，VEX/EVEX 等状态尚未建模");
+            return LiftResult.Unsupported(instruction.Code.ToString(), "EVEX/XOP 等状态尚未建模");
         if (instruction.HasLockPrefix || instruction.HasXacquirePrefix || instruction.HasXreleasePrefix)
             return LiftResult.Unsupported(instruction.Code.ToString(), "原子性与事务前缀尚未建模");
         if (instruction.HasRepPrefix || instruction.HasRepnePrefix)
             return LiftResult.Unsupported(instruction.Code.ToString(), "重复或额外前缀尚未建模");
-        if (instruction.IsPrivileged)
+        if (instruction.IsPrivileged && instruction.Mnemonic != Mnemonic.Hlt)
             return LiftResult.Unsupported(instruction.Code.ToString(), "特权环境尚未建模");
         return new Lifting(origin, instruction).Run();
     }
@@ -86,6 +88,7 @@ public static partial class X64Lifter
                 Mnemonic.Pmovsxbw or Mnemonic.Pmovsxbd or Mnemonic.Pmovsxbq or Mnemonic.Pmovsxwd or Mnemonic.Pmovsxwq or Mnemonic.Pmovsxdq
                     or Mnemonic.Pmovzxbw or Mnemonic.Pmovzxbd or Mnemonic.Pmovzxbq or Mnemonic.Pmovzxwd or Mnemonic.Pmovzxwq or Mnemonic.Pmovzxdq => PackedExtend(),
                 Mnemonic.Ptest => PackedTest(),
+                Mnemonic.Pcmpistri => CompareImplicitStrings(),
                 Mnemonic.Psllw or Mnemonic.Pslld or Mnemonic.Psllq or Mnemonic.Psrlw or Mnemonic.Psrld or Mnemonic.Psrlq
                     or Mnemonic.Psraw or Mnemonic.Psrad => PackedLaneShift(),
                 Mnemonic.Addss or Mnemonic.Addsd or Mnemonic.Addps or Mnemonic.Addpd
@@ -129,14 +132,39 @@ public static partial class X64Lifter
                 Mnemonic.Pop => Pop(),
                 Mnemonic.Leave => Leave(),
                 Mnemonic.Xlatb => TranslateByte(),
+                Mnemonic.Prefetchnta or Mnemonic.Prefetcht0 or Mnemonic.Prefetcht1 or Mnemonic.Prefetcht2 or Mnemonic.Prefetchw => Prefetch(),
+                Mnemonic.Sfence or Mnemonic.Lfence or Mnemonic.Mfence => Fence(),
                 Mnemonic.Ud2 => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#UD", instruction.IP))),
                 Mnemonic.Int3 => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#BP", instruction.NextIP))),
+                Mnemonic.Hlt => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#GP(0)", instruction.IP))),
                 _ => Unsupported("尚无该指令形式的语义规则")
             };
         }
 
         private LiftResult Unsupported(string reason) => LiftResult.Unsupported(form, reason);
         private LiftResult Next() => LiftResult.Supported(b.Finish(MirExit.Next(instruction.NextIP)));
+
+        private LiftResult Prefetch()
+        {
+            if (instruction.OpCount != 1 || instruction.Op0Kind != OpKind.Memory || !ValidAddress())
+                return Unsupported("PREFETCH 需要有效地址表达式");
+            int hint = instruction.Mnemonic switch { Mnemonic.Prefetchnta => 0, Mnemonic.Prefetcht0 => 1,
+                Mnemonic.Prefetcht1 => 2, Mnemonic.Prefetcht2 => 3, _ => 8 };
+            b.Prefetch(Address(), hint);
+            return Next();
+        }
+
+        private LiftResult Fence()
+        {
+            var barrier = instruction.Mnemonic switch
+            {
+                Mnemonic.Lfence => new BarrierOperation(BarrierKind.Lfence, BarrierDomain.FullSystem, BarrierAccess.Loads, 0),
+                Mnemonic.Sfence => new BarrierOperation(BarrierKind.Sfence, BarrierDomain.FullSystem, BarrierAccess.Stores, 0),
+                _ => new BarrierOperation(BarrierKind.Mfence, BarrierDomain.FullSystem, BarrierAccess.All, 0)
+            };
+            b.Barrier(barrier);
+            return Next();
+        }
 
         private bool IsScalar(int operand, bool immediate = true)
         {

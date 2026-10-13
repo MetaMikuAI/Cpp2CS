@@ -9,7 +9,7 @@ public static class CoreChecks
 
     public static int Run()
     {
-        var checks = Images.ImageSelfTests.Run() + DivisionChecks.Run() + FloatChecks.Run() + EffectBoundaryChecks.Run();
+        var checks = Images.ImageSelfTests.Run() + DivisionChecks.Run() + FloatChecks.Run() + EffectBoundaryChecks.Run() + MemoryEffectChecks.Run();
         var originalBytes = Convert.FromHexString("1F2003D5");
         var immutableOrigin = new InstructionOrigin("fixture:immutable", 0x1000, 0, originalBytes);
         originalBytes[0] = 0;
@@ -32,7 +32,7 @@ public static class CoreChecks
             var ir = b.Finish(MirExit.Next(0x1004));
             Require(MirValidator.Validate(ir).Count == 0, "arithmetic fixture validation");
             Require(MirJson.Serialize(MirJson.Deserialize(MirJson.Serialize(ir))) == MirJson.Serialize(ir), "MIR roundtrip");
-            var state = new MachineState();
+            var state = CreateArmState();
             for (var x = 0; x < 256; x++)
             for (var y = 0; y < 256; y++)
             for (var c = 0; c < 2; c++)
@@ -62,7 +62,7 @@ public static class CoreChecks
         var memoryIr = memory.Finish(MirExit.Next(0));
         Require(memoryIr.Support == SupportClass.NormalPathOnly, "fault boundary");
         Require(MirValidator.Validate(memoryIr).Count == 0, "memory validation");
-        var faultState = new MachineState();
+        var faultState = CreateArmState();
         faultState.Slots["x0"] = 99;
         Require(MirInterpreter.Execute(memoryIr, faultState).Outcome == "UnmodeledFaultStop" && faultState.ReadSlot("x0") == 99, "no fabricated load result");
         var broken = memoryIr with { Operations = memoryIr.Operations.Select(op => op.Code == OpCode.Store ? op with { WorldIn = 0 } : op).ToArray() };
@@ -72,14 +72,14 @@ public static class CoreChecks
         {
             var b = new MirBuilder(Architecture.Arm64, Fixture, "fixture.totalshift");
             b.Write("x0", b.Shl(b.Const(64, 1UL), b.Const(8, (ulong)count)));
-            var state = new MachineState();
+            var state = CreateArmState();
             MirInterpreter.Execute(b.Finish(MirExit.Next(0)), state);
             Require(state.ReadSlot("x0") == (count >= 64 ? 0 : BigInteger.One << count), "total shift");
             checks++;
         }
         foreach (var initial in new[] { 1, 2 })
         {
-            var state = new MachineState();
+            var state = CreateArmState(0x55D979C);
             state.Slots["x9"] = initial;
             state.Slots["x10"] = 8;
             var code = Convert.FromHexString("290500F14A41009161FFFF54");
@@ -97,6 +97,14 @@ public static class CoreChecks
         }
         Console.WriteLine($"core checks passed: {checks}");
         return 0;
+    }
+
+    public static MachineState CreateArmState(ulong address = 0x1000)
+    {
+        var state = new MachineState();
+        state.Slots["btype"] = 0;
+        state.CodeGuardedPages[address >> 12] = false;
+        return state;
     }
 
     public static void Require(bool condition, string message)
