@@ -16,7 +16,7 @@ public sealed record ValueDestination(Value Target) : SuccessorDestination;
 public sealed record ExceptionDestination(ExceptionBoundary Boundary) : SuccessorDestination;
 public sealed record SuccessorCondition(Value Value, bool RequiredValue);
 public sealed record MirSuccessor(SuccessorKind Kind, SuccessorDestination Destination,
-    SuccessorCondition? Condition, StateToken State);
+    SuccessorCondition? Condition, StateToken State, TransferHint TransferHint = TransferHint.None);
 public sealed record MirInstructionView(InstructionOrigin Origin, string Rule, MachineProfile Profile,
     ImmutableArray<StateAccess> StateAccesses, ImmutableArray<EffectAccess> Effects,
     ImmutableArray<MirSuccessor> Successors, MirCapabilities Capabilities);
@@ -48,7 +48,7 @@ public static class MirInspection
             NextExit e => ImmutableArray.Create(new MirSuccessor(SuccessorKind.Fallthrough,
                 new AddressDestination(e.NextAddress), null, e.State)),
             JumpExit e => ImmutableArray.Create(new MirSuccessor(SuccessorKind.Jump,
-                new ValueDestination(e.Destination), null, e.State)),
+                new ValueDestination(e.Destination), null, e.State, e.TransferHint)),
             BranchExit e => ImmutableArray.Create(
                 new MirSuccessor(SuccessorKind.BranchTaken, new ValueDestination(e.Taken), new(e.Predicate, true), e.State),
                 new MirSuccessor(SuccessorKind.BranchNotTaken, new ValueDestination(e.NotTaken), new(e.Predicate, false), e.State)),

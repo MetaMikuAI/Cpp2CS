@@ -7,11 +7,11 @@ from pathlib import Path
 
 DLL = Path(sys.argv[1])
 BASE = {
-    "Schema": "cpp2cs.mir/0.2", "Semantics": "attempt08-mir-contract-7", "Profile": "aarch64-le-el0-v3",
+    "Schema": "cpp2cs.mir/0.3", "Semantics": "attempt08-native-8", "Profile": "aarch64-le-el0-v3",
     "Instruction": {
         "Architecture": "Arm64", "Origin": {"ImageId": "fixture:contract", "Address": "0x1000", "FileOffset": 0, "Bytes": "HyAD1Q=="},
         "Rule": "fixture.contract", "Operations": [{"Code": "Constant", "Result": {"Id": 0, "Width": 64}, "Inputs": [], "Payload": {"$kind": "immediate", "Value": "0x1"}, "Flow": None}],
-        "Exit": {"$kind": "next", "NextAddress": "0x1004", "State": {"Id": 0}}, "Annotations": [], "ProfileId": "aarch64-le-el0-v3"
+        "Exit": {"$kind": "next", "NextAddress": "0x1004", "State": {"Id": 0}, "TransferHint": "None"}, "Annotations": [], "ProfileId": "aarch64-le-el0-v3"
     }
 }
 
@@ -50,6 +50,14 @@ cases.append(("previous-atomic-semantics-version", bad))
 bad = copy.deepcopy(BASE)
 bad["Schema"] = "cpp2cs.mir/0.1"
 cases.append(("old-schema-version", bad))
+bad = copy.deepcopy(BASE)
+bad["Schema"] = "cpp2cs.mir/0.2"
+bad["Semantics"] = "attempt08-mir-contract-7"
+cases.append(("previous-contract-version", bad))
+for hint in ("Call", "Return", "unknown", 0):
+    bad = copy.deepcopy(BASE)
+    bad["Instruction"]["Exit"]["TransferHint"] = hint
+    cases.append((f"invalid-next-hint-{hint}", bad))
 for name, value in (("Support", "Exact"), ("Architecture", 0), ("Architecture", 999), ("ProfileId", "other-profile")):
     bad = copy.deepcopy(BASE)
     bad["Instruction"][name] = value
@@ -59,7 +67,7 @@ bad["Profile"] = "other-profile"
 cases.append(("envelope-profile-mismatch", bad))
 for path, member in (((), "Instruction"), (("Instruction",), "Architecture"), (("Instruction",), "Annotations"),
                      (("Instruction", "Operations", 0), "Code"), (("Instruction", "Operations", 0), "Payload"),
-                     (("Instruction", "Exit"), "State"), (("Instruction", "Exit"), "NextAddress"),
+                     (("Instruction", "Exit"), "State"), (("Instruction", "Exit"), "NextAddress"), (("Instruction", "Exit"), "TransferHint"),
                      (("Instruction", "Operations", 0, "Result"), "Id"), (("Instruction", "Operations", 0, "Result"), "Width"),
                      (("Instruction", "Exit", "State"), "Id")):
     bad = copy.deepcopy(BASE)
@@ -97,7 +105,7 @@ for path, member, value in ((("Instruction",), "Annotations", None),
     target[member] = value
     cases.append((f"invalid-{path}-{member}", bad))
 serialized = json.dumps(BASE)
-cases.append(("duplicate-envelope-member", serialized.replace('"Schema":', '"Schema": "cpp2cs.mir/0.2", "Schema":', 1)))
+cases.append(("duplicate-envelope-member", serialized.replace('"Schema":', '"Schema": "cpp2cs.mir/0.3", "Schema":', 1)))
 cases.append(("duplicate-nested-member", serialized.replace('"Value":', '"Value": "0x2", "Value":', 1)))
 for address in ("0x1001", "xx1000", "0x", "0x-1"):
     bad = copy.deepcopy(BASE)

@@ -100,6 +100,8 @@ public static class MirValidator
             _ => false
         };
         if (!exitValid) errors.Add("invalid terminator");
+        if (ir.Exit is { } exit && (!Enum.IsDefined(exit.TransferHint) || exit is not JumpExit && exit.TransferHint != TransferHint.None))
+            errors.Add("invalid transfer hint");
         if (ir.Exit is not null && ir.Exit.State.Id != state) errors.Add("terminator does not consume final state");
         foreach (var annotation in ir.Annotations)
             if (annotation is null || !Enum.IsDefined(annotation.Kind) || string.IsNullOrWhiteSpace(annotation.Reason) ||

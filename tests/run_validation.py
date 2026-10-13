@@ -62,6 +62,7 @@ def main():
         return result.stdout
 
     execute("core", ["dotnet", DLL, "selftest"])
+    execute("native", ["dotnet", DLL, "native-check", WORKSPACE / TARGETS[0][1], WORKSPACE / TARGETS[1][1], output])
     execute("contracts", [sys.executable, TESTS / "contract_checks.py", DLL])
     execute("coverage-contracts", [sys.executable, TESTS / "coverage_contracts.py"])
     execute("trap-boundaries", [sys.executable, TESTS / "trap_boundary_checks.py", DLL])
@@ -129,7 +130,7 @@ def main():
     assert test_identity() == tests, "验证过程中测试脚本的内容、文件集合发生变化"
     arm = json.loads((output / "arm64-differential.json").read_text(encoding="utf-8"))
     contract_regression_free = False if False in contract_comparisons else None if not contract_comparisons or None in contract_comparisons else True
-    checks = {"validationRunCompleted": True, "semanticFixturesPassed": True, "decoderChecksPassed": decoder_checks, "allKnownEntriesCovered": known_entries_covered,
+    checks = {"validationRunCompleted": True, "semanticFixturesPassed": True, "nativeFixturesPassed": True, "decoderChecksPassed": decoder_checks, "allKnownEntriesCovered": known_entries_covered,
               "coverageRegressionFree": coverage_regression_free, "semanticContractRegressionFree": contract_regression_free,
               "armClassificationDisagreements": arm["classification_disagreements"], "allCandidatesRepresented": all_represented, "fullyLifted": fully_lifted}
     manifest = {"status": "completed", "utc": datetime.now(timezone.utc).isoformat(), "assemblySha256": assembly_hash, "commands": commands, "scannerReports": reports, "checks": checks, "sources": sources, "testSources": tests, "artifacts": artifacts,

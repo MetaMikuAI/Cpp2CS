@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 namespace Cpp2CS.Ir;
 
 public enum ExitKind { Next, Jump, Branch, Trap }
+public enum TransferHint { None, Call, Return }
 public enum ExceptionKind { ArmBreakpoint, X64Breakpoint, X64Debug, X64InvalidOpcode, X64GeneralProtection }
 public sealed record ExceptionBoundary(ExceptionKind Kind, string Detail, ulong SavedAddress, ushort? Syndrome = null);
 
@@ -16,6 +17,7 @@ public abstract record MirExit
 {
     private protected MirExit() { }
     [JsonRequired] public StateToken State { get; init; }
+    [JsonRequired] public TransferHint TransferHint { get; init; }
     [JsonIgnore] public ExitKind Kind => this switch
     {
         NextExit => ExitKind.Next, JumpExit => ExitKind.Jump,
@@ -30,7 +32,7 @@ public abstract record MirExit
     [JsonIgnore] public ulong? ResumeAddress => this is TrapExit e ? e.Boundary.SavedAddress : null;
 
     public static MirExit Next(ulong address) => new NextExit(address);
-    public static MirExit Jump(Value target) => new JumpExit(target);
+    public static MirExit Jump(Value target, TransferHint transferHint = TransferHint.None) => new JumpExit(target) { TransferHint = transferHint };
     public static MirExit Branch(Value condition, Value taken, Value notTaken) => new BranchExit(condition, taken, notTaken);
     public static MirExit Trap(ExceptionKind kind, string detail, ulong resumeAddress, ushort? syndrome = null) =>
         new TrapExit(new(kind, detail, resumeAddress, syndrome));

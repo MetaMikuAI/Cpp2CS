@@ -136,12 +136,22 @@ public static class ExecutionContractChecks
         var partialState = new MachineState();
         partialState.Slots["x1"] = 17;
         for (var i = 0; i < 15; i++) partialState.Memory[Address + (ulong)i] = 0xA5;
+        var seed = new MirBuilder(Architecture.Arm64, Origin, "fixture.previous-instruction-event");
+        seed.Store(seed.Const(64, Address), seed.Const(8, 0xA5));
+        var seeded = MirInterpreter.Execute(Finish(seed), partialState);
+        Check(seeded.Status == ExecutionOutcome.Normal && partialState.Events.Count == 1,
+            "shared machine state retains an event from an earlier instruction");
+        var laterGuard = new MirBuilder(Architecture.Arm64, Origin, "fixture.guard-after-event");
+        laterGuard.Guard(laterGuard.Const(1, 0), "guard after a completed instruction");
+        result = MirInterpreter.Execute(Finish(laterGuard), partialState);
+        Check(result.Stop?.MemoryEventStart == 1 && result.Stop.MemoryEventCount == 0 && partialState.Events.Count == 1,
+            "guard failure after an earlier event reports an empty event interval");
         result = MirInterpreter.Execute(partialIr, partialState);
         Check(result.Status == ExecutionOutcome.UnmodeledFaultStop && result.Stop?.Kind == StopKind.FaultBoundary,
             "a later beat failure remains a typed fault boundary");
-        Check(result.CompletedStateToken == new StateToken(1) && result.Stop?.MemoryEventStart == 0 && result.Stop.MemoryEventCount == 2,
+        Check(result.CompletedStateToken == new StateToken(1) && result.Stop?.MemoryEventStart == 1 && result.Stop.MemoryEventCount == 2,
             "partial memory operation has no completed output token but retains both event records");
-        Check(partialState.Events is [{ Outcome: "Completed" }, { Outcome: "UnmodeledFaultStop" }] &&
+        Check(partialState.Events is [{ Outcome: "Completed" }, { Outcome: "Completed" }, { Outcome: "UnmodeledFaultStop" }] &&
             partialState.ReadSlot("x0") == 11 && partialState.ReadSlot("x1") == 17,
             "stopped prefix preserves the earlier slot write and completed memory beat");
         Check(Enumerable.Range(0, 8).All(i => partialState.Memory[Address + (ulong)i] == (byte)(0x1122334455667788UL >> (i * 8))) &&
@@ -149,6 +159,32 @@ public static class ExecutionContractChecks
             "partial witness does not roll back the first beat or partially commit the faulted beat");
         Check(result.StateKind == ExecutionStateKind.CompletedPrefixWitness && result.NextAddress is null,
             "partial witness is not advertised as a normal successor or delivered exception state");
+
+        var detachedAdd = new Operation(OpCode.Add, new Value(2000, 8), [new Value(900, 8), new Value(1200, 8)], NoPayload.Instance);
+        var kernelState = new MachineState();
+        var evaluation = MirOperationEvaluator.Evaluate(Architecture.Arm64, detachedAdd, [254, 3], kernelState, Origin, 37);
+        Check(evaluation.Bits == 1 && evaluation.Stop is null && evaluation.Choices == 0,
+            "operation kernel takes ordered input bits without interpreting local value identifiers and masks the result");
+        var detachedChoice = new Operation(OpCode.Undefined, new Value(3000, 8), [], new ChoicePayload("kernel choice"));
+        kernelState.ChoiceInputs.Enqueue(0xA5);
+        evaluation = MirOperationEvaluator.Evaluate(Architecture.Arm64, detachedChoice, [], kernelState, Origin, 41);
+        Check(evaluation.Bits == 0xA5 && evaluation.Choices == 1 && evaluation.Stop is null &&
+            kernelState.ChoiceObservations is [{ OperationIndex: 41, Result.Id: 3000, IsExplicit: true }],
+            "operation kernel preserves the original choice site without requiring an instruction-local values array");
+
+        var observed = new MirBuilder(Architecture.Arm64, Origin, "fixture.observed-branch-predicate");
+        var wrapped = observed.Add(observed.Const(8, 254), observed.Const(8, 3));
+        var predicate = observed.Eq(wrapped, observed.Const(8, 1));
+        var destination = observed.Const(64, 0x2000);
+        var observedIr = observed.Finish(MirExit.Branch(predicate, destination, destination));
+        var observations = new Dictionary<Value, BigInteger>();
+        result = MirInterpreter.Execute(observedIr, new MachineState(), (value, bits) => observations.Add(value, bits));
+        Check(result.NextAddress == 0x2000 && observations[wrapped] == 1 && observations[predicate] == 1,
+            "value observations expose the masked branch predicate even when both successors share an address");
+        observations.Clear();
+        result = MirInterpreter.Execute(partialIr, new MachineState(), (value, bits) => observations.Add(value, bits));
+        Check(result.Status == ExecutionOutcome.UnmodeledFaultStop && observations.Count == 3,
+            "value observations stop at the failing operation and do not report later values");
         return checks;
     }
 }

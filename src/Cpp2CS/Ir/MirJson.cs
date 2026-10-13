@@ -8,8 +8,8 @@ namespace Cpp2CS.Ir;
 
 public static class MirJson
 {
-    public const string SchemaVersion = "cpp2cs.mir/0.2";
-    public const string SemanticsVersion = "attempt08-mir-contract-7";
+    public const string SchemaVersion = "cpp2cs.mir/0.3";
+    public const string SemanticsVersion = "attempt08-native-8";
     public static readonly JsonSerializerOptions Options = CreateOptions();
 
     private static JsonSerializerOptions CreateOptions()

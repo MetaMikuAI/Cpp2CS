@@ -103,7 +103,7 @@ public static partial class Arm64Lifter
     {
         var target = c.Address(SignExtend((ulong)c.Field(0, 26), 26) << 2);
         if (c.Bit(31)) c.Write(30, c.Address(4));
-        return c.End(MirExit.Jump(target));
+        return c.End(MirExit.Jump(target, c.Bit(31) ? TransferHint.Call : TransferHint.None));
     }
 
     private static LiftResult ConditionalBranch(Context c) => c.End(MirExit.Branch(c.Condition(c.Field(0, 4)), c.Address(SignExtend((ulong)c.Field(5, 19), 19) << 2), c.Address(4)));
@@ -134,7 +134,8 @@ public static partial class Arm64Lifter
         }
         else if (kind == 0xD61F0000)
             c.NextBranchType = c.Rn is 16 or 17 ? c.C(2, 1) : c.B.Select(c.CurrentPageGuarded, c.C(2, 3), c.C(2, 1));
-        return c.End(MirExit.Jump(target));
+        return c.End(MirExit.Jump(target, kind == 0xD63F0000 ? TransferHint.Call :
+            kind == 0xD65F0000 ? TransferHint.Return : TransferHint.None));
     }
 
     private static LiftResult NzcvTransfer(Context c)

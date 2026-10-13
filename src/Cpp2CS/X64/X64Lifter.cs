@@ -678,7 +678,7 @@ public static partial class X64Lifter
             b.Store(stack, b.Const(64, instruction.NextIP));
             b.Write("rsp", stack);
             b.MarkNormalPathOnly("CALL 栈写入与目标检查的故障顺序未建模；配置要求 CET 关闭");
-            return LiftResult.Supported(b.Finish(MirExit.Jump(target)));
+            return LiftResult.Supported(b.Finish(MirExit.Jump(target, TransferHint.Call)));
         }
 
         private LiftResult Return()
@@ -690,7 +690,7 @@ public static partial class X64Lifter
             ulong adjustment = 8 + (instruction.OpCount == 0 ? 0UL : instruction.GetImmediate(0));
             b.Write("rsp", b.Add(stack, b.Const(64, adjustment)));
             b.MarkNormalPathOnly("RET 目标检查与栈提交的故障顺序未建模；配置要求 CET 关闭");
-            return LiftResult.Supported(b.Finish(MirExit.Jump(target)));
+            return LiftResult.Supported(b.Finish(MirExit.Jump(target, TransferHint.Return)));
         }
 
         private LiftResult Push()

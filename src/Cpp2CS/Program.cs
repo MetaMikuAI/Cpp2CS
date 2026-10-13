@@ -2,6 +2,7 @@ using Cpp2CS;
 using Cpp2CS.Arm64;
 using Cpp2CS.Images;
 using Cpp2CS.Ir;
+using Cpp2CS.Native;
 using Cpp2CS.Validation;
 using Cpp2CS.X64;
 using Iced.Intel;
@@ -10,6 +11,21 @@ using System.Numerics;
 using System.Text.Json;
 
 if (args.Length == 1 && args[0] == "selftest") return CoreChecks.Run();
+if (args.Length == 4 && args[0] == "native-check")
+{
+    NativeBinaryChecks.Run(args[1], args[2], args[3]);
+    return 0;
+}
+if (args.Length == 5 && args[0] == "native")
+{
+    var image = ImageDocument.Load(args[1]);
+    var entries = args[2].Split(',').Select(a => new EntrySeed(ParseAddress(a), "explicit CLI entry; not a proved function boundary"));
+    var region = RegionBuilder.Build(image, entries, int.Parse(args[3], CultureInfo.InvariantCulture));
+    var native = StateSsaConverter.Convert(region);
+    NativeReport.Write(native, args[4]);
+    Console.WriteLine(JsonSerializer.Serialize(new { report = Path.GetFullPath(args[4]), summary = NativeReport.Summary(native) }));
+    return 0;
+}
 if (args.Length == 1 && args[0] == "validate-ir")
 {
     Console.WriteLine(MirJson.Serialize(MirJson.Deserialize(Console.In.ReadToEnd())));
@@ -180,7 +196,7 @@ if (args.Length == 3 && args[0] == "lift")
     Console.WriteLine(lift.Ir is { } ir ? MirJson.Serialize(ir) : JsonSerializer.Serialize(lift));
     return lift.IsSupported ? 0 : 2;
 }
-Console.Error.WriteLine("Cpp2CS: selftest | serve | validate-ir (stdin) | scan <binary> <output-directory> | lift <binary> <image-va-hex>");
+Console.Error.WriteLine("Cpp2CS: selftest | serve | validate-ir (stdin) | scan <binary> <output-directory> | lift <binary> <image-va-hex> | native <binary> <entry-va-hex[,entry...]> <instruction-budget> <report.json> | native-check <arm64-binary> <x64-binary> <output-directory>");
 return 1;
 
 static LiftResult Lift(Architecture architecture, InstructionOrigin origin)
