@@ -176,8 +176,13 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
     }
     private NativeValue Load(ulong pc, NativeValue receiver, int offset, int size, List<Statement> statements, LiftResult result, string identity)
     {
-        if (receiver.Expression is IndexedArrayAddress indexed && offset == indexed.Elements.Offset && size == layouts.Size(indexed.Elements.Type))
-            return Capture(pc, size, indexed.Elements.Type, new OperationExpression(ValueOperation.ArrayElement, indexed.Elements.Type, [indexed.Array, indexed.Index]), statements);
+        if (receiver.Expression is IndexedArrayAddress or AddressOfExpression)
+            return Location(receiver, offset, size) switch
+            {
+                OperationExpression { Operation: ValueOperation.ArrayElement } element => Capture(pc, size, element.Type, element, statements),
+                MemberExpression member => Capture(pc, size, member.Field.Type, member, statements),
+                _ => Missing()
+            };
         if (layouts.ArrayElements(receiver.Type) is not null)
         {
             var length = layouts.Members(receiver.Type).Single(f => f.Name == "max_length");
@@ -186,8 +191,6 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
             if (Location(receiver, offset, size) is OperationExpression element)
                 return Capture(pc, size, element.Type, element, statements);
         }
-        if (receiver.Expression is AddressOfExpression && Location(receiver, offset, size) is MemberExpression indirect)
-            return Capture(pc, size, indirect.Field.Type, indirect, statements);
         if (receiver.Expression is AddressExpression address)
         {
             var at = checked((ulong)((long)address.Address + offset));
@@ -227,8 +230,12 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
             result.Proofs.Add(new(pc, "ClangFieldLayout", $"{receiver.Type}+0x{offset:x}/{size} = {field.DeclaringRecord}.{field.Name}"));
             return Capture(pc, size, field.Type, new MemberExpression(receiver.Expression, field, display, fieldType), statements);
         }
-        result.Problems.Add($"0x{pc:x}: 无法将 {receiver.Type}+0x{offset:x}/{size} 映射为字段");
-        return Capture(pc, size, "unknown", new UnknownExpression($"load({receiver.Type}+0x{offset:x})"), statements);
+        return Missing();
+        NativeValue Missing()
+        {
+            result.Problems.Add($"0x{pc:x}: 无法将 {receiver.Type}+0x{offset:x}/{size} 映射为字段");
+            return Capture(pc, size, "unknown", new UnknownExpression($"load({receiver.Type}+0x{offset:x})"), statements);
+        }
     }
     private static NativeValue Capture(ulong pc, int size, string type, Expression expression, List<Statement> statements)
     {

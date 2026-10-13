@@ -5,7 +5,7 @@ public static class SemanticData
     public static object Expression(Expression expression) => expression switch
     {
         NameExpression n => new { kind = "name", n.Name },
-        IndexedArrayAddress a => new { kind = "unresolved-array-address", array = Expression(a.Array), index = Expression(a.Index) },
+        IndexedArrayAddress a => new { kind = "unresolved-array-address", array = Expression(a.Array), index = Expression(a.Index), arrayType = a.ArrayType, byteOffset = a.Offset },
         StaticMemberExpression m => new { kind = "static-member", m.Owner, m.Name, m.Type, m.IsProperty },
         CapturedExpression c => new { kind = "capture", c.Name },
         PhiExpression p => new { kind = "unresolved-phi", p.Name, p.Type,

@@ -6,16 +6,15 @@ public sealed partial class FunctionLifter
 {
     private Expression? Location(NativeValue receiver, int offset, int size)
     {
+        if (receiver.Expression is IndexedArrayAddress or AddressOfExpression { Target: OperationExpression { Operation: ValueOperation.ArrayElement } })
+            return ArrayAddressProjection.Element(receiver, offset, size, layouts);
         if (receiver.Expression is AddressOfExpression address)
         {
-            if (address.Target is OperationExpression { Operation: ValueOperation.ArrayElement } element && offset == 0 && layouts.Size(element.Type) == size) return element;
             if (address.Target is not MemberExpression member) return null;
             if (offset == 0 && member.Field.Size == size) return member;
             return address.RootType is { } rootType ? Location(receiver with { Type = rootType, Expression = member.Receiver }, checked(member.Field.Offset + offset), size) : null;
         }
-        if (layouts.ArrayElements(receiver.Type) is { } elements && offset >= elements.Offset &&
-            layouts.Size(elements.Type) == size && (offset - elements.Offset) % size == 0)
-            return new OperationExpression(ValueOperation.ArrayElement, elements.Type, [receiver.Expression, new ConstantExpression((offset - elements.Offset) / size)]);
+        if (ArrayAddressProjection.Element(receiver, offset, size, layouts) is { } element) return element;
         var field = layouts.Field(receiver.Type, offset, size);
         if (field is null) return null;
         var owner = field.DeclaringRecord.EndsWith("_Fields") ? field.DeclaringRecord[..^7] + "_o" : field.DeclaringRecord;

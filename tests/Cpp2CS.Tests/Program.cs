@@ -6,9 +6,9 @@ using Cpp2CS.IR;
 using Cpp2CS.Model;
 
 var passed = 0;
-if (args is ["integer-projection", var integerConfig, var integerDirectory])
+if (args is ["integer-projection" or "native-projection", var integerConfig, var integerDirectory])
 {
-    IntegerProjectionChecks.Export(integerConfig, integerDirectory);
+    NativeProjectionFixtures.Export(integerConfig, integerDirectory);
     return;
 }
 if (args is ["namespace-inventory", var inventoryConfig, var inventoryOutput, .. var namespaces])

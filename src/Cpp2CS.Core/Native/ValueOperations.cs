@@ -1,7 +1,7 @@
 namespace Cpp2CS.Native;
 
 public enum ValueOperation { SignedToFloat, ZeroExtendWord, Unsigned, IntegerCast, FloatDivide, Ceiling, FloatToSignedCeiling, BitCast, Add, Subtract, Select, ArrayElement, NewArray, ReferenceSelect, SignExtend, ShiftLeft, LogicalShiftRight, ArithmeticShiftRight, BitAnd, BitOr, BitXor, Multiply }
-internal sealed record IndexedArrayAddress(Expression Array, Expression Index, HeaderField Elements) : Expression;
+internal sealed record IndexedArrayAddress(Expression Array, Expression Index, HeaderField Elements, string ArrayType, int Offset = 0) : Expression;
 public sealed record OperationExpression(ValueOperation Operation, string Type, Expression[] Arguments) : Expression;
 
 // 数值操作保留结果类型和舍入方式；数组元素是可取地址的左值。

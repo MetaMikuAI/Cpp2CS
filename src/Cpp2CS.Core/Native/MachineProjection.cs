@@ -51,7 +51,8 @@ public sealed partial class FunctionLifter
             else if (Location(item.Base, offset, size) is { } location)
             {
                 var value = item.Value.Expression;
-                if (location is MemberExpression member && member.Field.Type.EndsWith("_o*") && value is ConstantExpression { Value: 0 }) value = new NameExpression("null");
+                var type = location switch { MemberExpression member => member.Field.Type, OperationExpression element => element.Type, _ => "unknown" };
+                if (NativeValues.IsManagedReference(type) && value is ConstantExpression { Value: 0 }) value = new NameExpression("null");
                 statements.Add(new StoreStatement(pc, location, value));
                 result.Proofs.Add(new(pc, "FieldStore", "typed field address from Clang layout; store and GC barrier remain separate operations"));
             }
@@ -130,18 +131,6 @@ public sealed partial class FunctionLifter
                     ? Numeric(value, ValueOperation.Select, width == 32 ? "int32_t" : "int64_t", condition, leftInteger, rightInteger)
                     : Unknown(width, "条件选择的整数类型或位宽未确定");
             }
-            // 数组缩放寻址是 add(array, shift(sign-extend(index))) 的有类型投影。
-            if (value.Operation == "add" && value.Inputs[1] is { Operation: "shift-left", Inputs: [var extended] } scale &&
-                extended is { Operation: "sign-extend", Inputs: [var indexValue] } && indexValue.Width == 32)
-            {
-                var array = Evaluate(value.Inputs[0]);
-                if (layouts.ArrayElements(array.Type) is { } elements && (1L << (int)scale.Immediate) == layouts.Size(elements.Type))
-                {
-                    var index = Evaluate(indexValue);
-                    if (index.Type != "int32_t") return Unknown(width, "数组索引类型未确定");
-                    return new(new InputBits($"indexed:{pc:x}", 64), array.Type, new IndexedArrayAddress(array.Expression, index.Expression, elements));
-                }
-            }
             var inputs = value.Inputs.Select(Evaluate).ToArray();
             var first = inputs[0];
             switch (value.Operation)
@@ -179,9 +168,7 @@ public sealed partial class FunctionLifter
                     }
                     if (width is 32 or 64 && IntegerProjection.Bits(first) is { } leftNumber && IntegerProjection.Bits(right) is { } rightNumber)
                         return Numeric(value, add ? ValueOperation.Add : ValueOperation.Subtract, width == 32 ? "int32_t" : "int64_t", leftNumber, rightNumber);
-                    if (add && right.Expression is ConstantExpression { Value: >= int.MinValue and <= int.MaxValue } elementOffset && layouts.ArrayElements(first.Type) is { } element &&
-                        Location(first, checked((int)elementOffset.Value), layouts.Size(element.Type)) is OperationExpression { Operation: ValueOperation.ArrayElement } elementAddress)
-                        return new(new InputBits($"element-address:{pc:x}", 64), element.Type + "*", new AddressOfExpression(elementAddress) { RootType = first.Type });
+                    if (add && width == 64 && ArrayAddressProjection.Add(value.Id!, first, right, layouts) is { } arrayAddress) return arrayAddress;
                     if (add && first.Type.EndsWith('*') && right.Expression is ConstantExpression { Value: >= int.MinValue and <= int.MaxValue } displacement &&
                         layouts.FieldAt(first.Type, checked((int)displacement.Value)) is { } field && Location(first, field.Offset, field.Size) is { } location)
                         return new(new InputBits($"field-address:{pc:x}", 64), field.Type + "*", new AddressOfExpression(location) { RootType = (first.Expression as AddressOfExpression)?.RootType ?? first.Type });

@@ -15,7 +15,7 @@ public sealed class SemanticWriter(Symbols symbols)
         ConstantExpression { EnumType: { } type } c => "(" + type + ")" + c.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
         ConstantExpression c => c.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
         OperationExpression o => ValueOperations.Write(o),
-        IndexedArrayAddress a => $"Runtime.ArrayAddress({Expression(a.Array)}, {Expression(a.Index)})",
+        IndexedArrayAddress a => $"Runtime.ArrayAddress({Expression(a.Array)}, {Expression(a.Index)}, {a.Offset})",
         AddressExpression a => $"Runtime.Global(0x{a.Address:x})",
         AddressOfExpression a => "ref " + Expression(a.Target),
         StackAddressExpression a => $"Runtime.StackAddress({a.Offset})",
