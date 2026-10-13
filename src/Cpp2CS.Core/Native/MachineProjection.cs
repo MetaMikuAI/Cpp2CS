@@ -177,14 +177,14 @@ public sealed partial class FunctionLifter
                         var sum = unchecked((ulong)((long)address.Address + (add ? constant.Value : -constant.Value)));
                         return new(BitOps.Constant(sum, 64), "address", new AddressExpression(sum));
                     }
-                    if (add && right.Expression is ConstantExpression elementOffset && layouts.ArrayElements(first.Type) is { } element &&
-                        Location(first, checked((int)elementOffset.Value), layouts.Size(element.Type)) is OperationExpression { Operation: ValueOperation.ArrayElement } elementAddress)
-                        return new(new InputBits($"element-address:{pc:x}", 64), element.Type + "*", new AddressOfExpression(elementAddress) { RootType = first.Type });
-                    if (add && right.Expression is ConstantExpression displacement &&
-                        layouts.FieldAt(first.Type, checked((int)displacement.Value)) is { } field && Location(first, field.Offset, field.Size) is { } location)
-                        return new(new InputBits($"field-address:{pc:x}", 64), field.Type + "*", new AddressOfExpression(location) { RootType = (first.Expression as AddressOfExpression)?.RootType ?? first.Type });
                     if (width is 32 or 64 && IntegerProjection.Bits(first) is { } leftNumber && IntegerProjection.Bits(right) is { } rightNumber)
                         return Numeric(value, add ? ValueOperation.Add : ValueOperation.Subtract, width == 32 ? "int32_t" : "int64_t", leftNumber, rightNumber);
+                    if (add && right.Expression is ConstantExpression { Value: >= int.MinValue and <= int.MaxValue } elementOffset && layouts.ArrayElements(first.Type) is { } element &&
+                        Location(first, checked((int)elementOffset.Value), layouts.Size(element.Type)) is OperationExpression { Operation: ValueOperation.ArrayElement } elementAddress)
+                        return new(new InputBits($"element-address:{pc:x}", 64), element.Type + "*", new AddressOfExpression(elementAddress) { RootType = first.Type });
+                    if (add && first.Type.EndsWith('*') && right.Expression is ConstantExpression { Value: >= int.MinValue and <= int.MaxValue } displacement &&
+                        layouts.FieldAt(first.Type, checked((int)displacement.Value)) is { } field && Location(first, field.Offset, field.Size) is { } location)
+                        return new(new InputBits($"field-address:{pc:x}", 64), field.Type + "*", new AddressOfExpression(location) { RootType = (first.Expression as AddressOfExpression)?.RootType ?? first.Type });
                     return Unknown(width, "算术操作数类型未确定");
                 }
                 case "and":

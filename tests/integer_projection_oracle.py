@@ -43,9 +43,12 @@ case("zeroExtendedAdd", "int64_t", ["int32_t", "int64_t"], ["mov w0, w0", "add x
 case("zeroExtendedEqual", "int32_t", ["int32_t", "int64_t"], ["mov w0, w0", "cmp x0, x1", "cset w0, eq"])
 case("zeroExtendedSelect", "int64_t", ["int32_t", "int64_t", "int64_t"], ["mov w0, w0", "cmp x2, #0", "csel x0, x0, x1, eq"])
 case("signedStackLoad", "int64_t", ["int32_t"], ["str w0, [sp, #-16]!", "ldrsw x0, [sp]", "add sp, sp, #16"])
+case("largeConstantAdd", "int64_t", ["int64_t"], ["mov x1, #0x100000000", "add x0, x0, x1"])
+case("largeNegativeAdd", "int64_t", ["int64_t"], ["mov x1, #-0x100000000", "add x0, x0, x1"])
 case("undefinedHighAdd", "int64_t", ["int32_t"], ["add x0, x0, #1"], True)
 case("undefinedHighCompare", "int32_t", ["int32_t", "int64_t"], ["cmp x0, x1", "cset w0, eq"], True)
 case("referenceShift", "int64_t", ["Il2CppObject*"], ["lsl x0, x0, #1"], True)
+case("largePointerOffset", "int64_t", ["Il2CppObject*"], ["mov x1, #0x100000000", "add x0, x0, x1"], True)
 
 source = ".text\n" + "\n".join(f".global {s['Name']}\n.type {s['Name']}, %function\n{s['Name']}:\n" +
     "\n".join(s["Instructions"] + ["ret"]) + f"\n.size {s['Name']}, .-{s['Name']}" for s in samples)
