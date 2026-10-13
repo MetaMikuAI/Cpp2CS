@@ -14,10 +14,14 @@ public static class CoreChecks
         var ssaChecks = StateSsaChecks.Run();
         var normalizationChecks = NativePureRuleChecks.Run() + NativeParameterChecks.Run() + NativeNormalizationChecks.Run();
         var nativeChecks = NativeExecutionChecks.Run() + NativeEdgeExecutionChecks.Run();
+        var nirCoreChecks = NirCoreChecks.Run();
+        var recoveryGraphChecks = RecoveryGraphChecks.Run();
+        var nirRecoveryChecks = NirRecoveryChecks.Run();
         var checks = Images.ImageSelfTests.Run() + DivisionChecks.Run() + FloatChecks.Run() + EffectBoundaryChecks.Run() + MemoryEffectChecks.Run() + AtomicMemoryChecks.Run()
             + ExecutionContractChecks.Run() + MirStructureChecks.Run() + MirInspectionChecks.Run()
-            + regionChecks + ssaChecks + nativeChecks + normalizationChecks;
+            + regionChecks + ssaChecks + nativeChecks + normalizationChecks + nirCoreChecks + recoveryGraphChecks + nirRecoveryChecks;
         Console.WriteLine($"native core checks passed: region={regionChecks}, ssa={ssaChecks}, execution={nativeChecks}, normalization={normalizationChecks}");
+        Console.WriteLine($"NIR checks passed: core={nirCoreChecks}, graph={recoveryGraphChecks}, recovery={nirRecoveryChecks}");
         var originalBytes = Convert.FromHexString("1F2003D5");
         var immutableOrigin = new InstructionOrigin("fixture:immutable", 0x1000, 0, originalBytes);
         originalBytes[0] = 0;

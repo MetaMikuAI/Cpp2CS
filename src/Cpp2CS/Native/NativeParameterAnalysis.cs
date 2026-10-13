@@ -4,12 +4,17 @@ namespace Cpp2CS.Native;
 
 public static class NativeParameterAnalysis
 {
-    public static ImmutableDictionary<ValueId, NativeValue> FindAliases(NativeRegion region)
+    public static ImmutableDictionary<ValueId, NativeValue> FindAliases(NativeRegion region) => FindAliases(
+        region.Blocks.Select(block => new NativeAnalysisBlock(block.Id, block.Parameters, block.Nodes,
+            block.Edges.Where(edge => edge.Target is not null).Select(edge => new NativeAnalysisEdge(edge.Target!.Value, edge.Arguments)).ToImmutableArray())).ToImmutableArray(),
+        region.Source.Entries.Select(entry => entry.Block).ToImmutableHashSet());
+
+    public static ImmutableDictionary<ValueId, NativeValue> FindAliases(ImmutableArray<NativeAnalysisBlock> blocks,
+        ImmutableHashSet<BlockId> entries)
     {
-        var entries = region.Source.Entries.Select(entry => entry.Block).ToHashSet();
-        var incoming = region.Blocks.ToDictionary(block => block.Id, _ => new List<NativeEdge>());
+        var incoming = blocks.ToDictionary(block => block.Id, _ => new List<NativeAnalysisEdge>());
         var definitions = new Dictionary<ValueId, (BlockId Block, bool Parameter)>();
-        foreach (var block in region.Blocks)
+        foreach (var block in blocks)
         {
             foreach (var parameter in block.Parameters) definitions.Add(parameter.Value.Id, (block.Id, true));
             foreach (var node in block.Nodes)
@@ -21,7 +26,7 @@ public static class NativeParameterAnalysis
                 if (edge.Target is { } target) incoming[target].Add(edge);
         }
 
-        var candidates = region.Blocks.Where(block => !entries.Contains(block.Id))
+        var candidates = blocks.Where(block => !entries.Contains(block.Id))
             .SelectMany(block => block.Parameters.Select((parameter, index) => (block.Id, parameter.Value, Index: index)))
             .Where(item => item.Value.Type is BitsType).ToArray();
         var indices = candidates.Select((item, index) => (item.Value.Id, index)).ToDictionary(item => item.Id, item => item.index);
@@ -63,7 +68,8 @@ public static class NativeParameterAnalysis
             components.Add(component);
         }
 
-        var dominance = new NativeDominance(region);
+        var dominance = new NativeDominance(blocks.Select(block => block.Id),
+            blocks.SelectMany(block => block.Edges.Select(edge => (block.Id, edge.Target))), entries);
         var aliases = ImmutableDictionary.CreateBuilder<ValueId, NativeValue>();
         NativeValue Resolve(NativeValue value)
         {
@@ -131,20 +137,23 @@ internal sealed class NativeDominance
     private readonly int[] enter;
     private readonly int[] leave;
 
-    public NativeDominance(NativeRegion region)
+    public NativeDominance(NativeRegion region) : this(region.Blocks.Select(block => block.Id),
+        region.Blocks.SelectMany(block => block.Edges.Where(edge => edge.Target is not null).Select(edge => (block.Id, edge.Target!.Value))),
+        region.Source.Entries.Select(entry => entry.Block)) { }
+
+    public NativeDominance(IEnumerable<BlockId> blocks, IEnumerable<(BlockId Source, BlockId Target)> edges,
+        IEnumerable<BlockId> entries)
     {
-        indices = region.Blocks.Select((block, index) => (block.Id, index)).ToDictionary(item => item.Id, item => item.index);
-        var root = region.Blocks.Length;
+        indices = blocks.Select((id, index) => (id, index)).ToDictionary(item => item.id, item => item.index);
+        var root = indices.Count;
         var successors = Enumerable.Range(0, root + 1).Select(_ => new List<int>()).ToArray();
         var predecessors = Enumerable.Range(0, root + 1).Select(_ => new List<int>()).ToArray();
-        foreach (var block in region.Blocks)
-            foreach (var edge in block.Edges)
-                if (edge.Target is { } target)
-                {
-                    successors[indices[block.Id]].Add(indices[target]);
-                    predecessors[indices[target]].Add(indices[block.Id]);
-                }
-        foreach (var entry in region.Source.Entries.Select(entry => entry.Block).Distinct())
+        foreach (var edge in edges)
+        {
+            successors[indices[edge.Source]].Add(indices[edge.Target]);
+            predecessors[indices[edge.Target]].Add(indices[edge.Source]);
+        }
+        foreach (var entry in entries.Distinct())
         {
             successors[root].Add(indices[entry]);
             predecessors[indices[entry]].Add(root);

@@ -3,14 +3,73 @@ using Cpp2CS.Arm64;
 using Cpp2CS.Images;
 using Cpp2CS.Ir;
 using Cpp2CS.Native;
+using Cpp2CS.Nir;
+using Cpp2CS.Recovery;
 using Cpp2CS.Validation;
 using Cpp2CS.X64;
 using Iced.Intel;
 using System.Globalization;
 using System.Numerics;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 if (args.Length == 1 && args[0] == "selftest") return CoreChecks.Run();
+if (args.Length == 4 && args[0] == "nir-check")
+{
+    NirBinaryChecks.Run(args[1], args[2], args[3]);
+    return 0;
+}
+if (args.Length == 4 && args[0] == "nir")
+{
+    var image = ImageDocument.Load(args[1]);
+    var jsonOptions = new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true,
+        WriteIndented = true, UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        RespectNullableAnnotations = true, RespectRequiredConstructorParameters = true
+    };
+    jsonOptions.Converters.Add(new JsonStringEnumConverter());
+    using var document = JsonDocument.Parse(File.ReadAllText(args[2]), new JsonDocumentOptions { AllowDuplicateProperties = false });
+    var contracts = document.RootElement.Deserialize<FunctionContract[]>(jsonOptions)
+        ?? throw new InvalidDataException("NIR conversion requires an explicit function contract array");
+    if (contracts.Length == 0) throw new InvalidDataException("NIR conversion requires at least one function contract");
+    var result = NirRecovery.Recover(image, contracts);
+    Directory.CreateDirectory(args[3]);
+    var modulePath = Path.Combine(args[3], "module.nir.json");
+    var reportPath = Path.Combine(args[3], "recovery.json");
+    File.WriteAllText(modulePath, NirJson.Serialize(result.Module) + Environment.NewLine);
+    File.WriteAllText(Path.Combine(args[3], "module.nir.txt"), NirText.Format(result.Module));
+    var report = new
+    {
+        format = "cpp2cs.nir-recovery/1", result.Complete, sourceSha256 = image.Sha256,
+        architecture = image.Architecture.ToString(), module = Path.GetFullPath(modulePath), contracts,
+        functions = result.Functions.Select(function => new
+        {
+            function.Graph.Contract.Name, address = $"0x{function.Graph.Contract.EntryAddress:X}", function.Complete,
+            function.Statistics, diagnostics = function.Diagnostics, evidence = function.Evidence,
+            graphRevision = function.Graph.Revision, graphDependencies = function.Graph.Dependencies,
+            blockMap = function.Function?.Blocks.Select(block => new
+            {
+                nirBlock = block.Id.Id,
+                machineAddress = function.Graph.Blocks.FirstOrDefault(candidate => candidate.Id == block.Id.Id) is { } mapped
+                    ? $"0x{mapped.Address:X}" : null
+            }),
+            sourceInstructions = function.Graph.Blocks.Where(block => block.Instruction is not null).Select(block => new
+            {
+                block.Id, address = $"0x{block.Address:X}", fileOffset = $"0x{block.Instruction!.Origin.FileOffset:X}",
+                bytes = Convert.ToHexString(block.Instruction.Origin.Bytes.Span), block.Instruction.Rule
+            })
+        }),
+        limits = "Conditional native recovery under explicit contracts and domains; incomplete functions remain diagnostics. Managed compiler variables, async, closures and C# reconstruction are outside NIR."
+    };
+    File.WriteAllText(reportPath, JsonSerializer.Serialize(report, jsonOptions) + Environment.NewLine);
+    Console.WriteLine(JsonSerializer.Serialize(new
+    {
+        result.Complete, functions = result.Module.Functions.Length, drafts = result.Functions.Count(function => !function.Complete),
+        module = Path.GetFullPath(modulePath), report = Path.GetFullPath(reportPath)
+    }));
+    return result.Complete ? 0 : 2;
+}
 if (args.Length == 4 && args[0] == "native-check")
 {
     NativeBinaryChecks.Run(args[1], args[2], args[3]);
@@ -196,7 +255,7 @@ if (args.Length == 3 && args[0] == "lift")
     Console.WriteLine(lift.Ir is { } ir ? MirJson.Serialize(ir) : JsonSerializer.Serialize(lift));
     return lift.IsSupported ? 0 : 2;
 }
-Console.Error.WriteLine("Cpp2CS: selftest | serve | validate-ir (stdin) | scan <binary> <output-directory> | lift <binary> <image-va-hex> | native <binary> <entry-va-hex[,entry...]> <instruction-budget> <report.json> | native-check <arm64-binary> <x64-binary> <output-directory>");
+Console.Error.WriteLine("Cpp2CS: selftest | serve | validate-ir (stdin) | scan <binary> <output-directory> | lift <binary> <image-va-hex> | native <binary> <entry-va-hex[,entry...]> <instruction-budget> <report.json> | native-check <arm64-binary> <x64-binary> <output-directory> | nir <binary> <contracts.json> <output-directory> | nir-check <arm64-binary> <x64-binary> <output-directory>");
 return 1;
 
 static LiftResult Lift(Architecture architecture, InstructionOrigin origin)
