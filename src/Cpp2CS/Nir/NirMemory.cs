@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Numerics;
+using Cpp2CS.SemanticCore;
 
 namespace Cpp2CS.Nir;
 
@@ -9,6 +10,7 @@ public sealed record NirMemoryResult(ImmutableArray<byte> Bytes, string? Error =
 }
 public sealed record NirMemoryRegion(string Space, BigInteger Address, int Length, bool Writable);
 public sealed record NirAllocation(long Id, string Space, BigInteger Address, int Length);
+public sealed record NirAtomicMemoryResult(BigInteger Previous, BigInteger? Written, bool Success, string? Error = null, bool MissingInput = false);
 
 public sealed class NirMemory
 {
@@ -71,6 +73,38 @@ public sealed class NirMemory
         if (failure is not null) return new([], failure);
         for (var i = 0; i < data.Length; i++) bytes[(space, (address + i) & mask)] = data[i];
         return new([]);
+    }
+
+    internal string? CheckAtomicRange(string space, BigInteger address, int atomicWidth)
+    {
+        if (atomicWidth == 0) return null;
+        if (!spaces.TryGetValue(space, out var definition) || address < 0 || address >= (BigInteger.One << definition.AddressWidth) ||
+            atomicWidth < 8 || atomicWidth % 8 != 0 || atomicWidth / 8 > (BigInteger.One << definition.AddressWidth)) return "AtomicRangeFault";
+        return null;
+    }
+
+    // 单次更新先核对全部读写许可与初值，再提交；CAS 失败同样要求写许可。
+    internal NirAtomicMemoryResult Atomic(string space, BigInteger address, int width, NirByteOrder order,
+        NirAtomicCode code, BigInteger operand, BigInteger? expected = null, bool writeBackOnFailure = false)
+    {
+        var failure = CheckAtomicRange(space, address, width) ?? CheckAccess(space, address, width / 8, true, out _);
+        if (failure is not null) return new(0, null, false, failure);
+        var read = Read(space, address, width / 8);
+        if (!read.Success) return new(0, null, false, read.Error, read.MissingInput);
+        var previous = new BigInteger(read.Bytes.AsSpan(), isUnsigned: true, isBigEndian: order == NirByteOrder.Big);
+        var success = expected is null || previous == expected;
+        if (!success && !writeBackOnFailure) return new(previous, null, false);
+        var written = !success ? previous : BitVectorMath.Wrap(code switch
+        {
+            NirAtomicCode.Exchange => operand, NirAtomicCode.Add => previous + operand,
+            NirAtomicCode.Sub => previous - operand, NirAtomicCode.And => previous & operand,
+            NirAtomicCode.Or => previous | operand, NirAtomicCode.Xor => previous ^ operand,
+            NirAtomicCode.Neg => -previous, NirAtomicCode.Not => ~previous,
+            _ => throw new InvalidOperationException("原子操作未定义")
+        }, width);
+        var write = Write(space, address, NirAtomicContract.Bytes(written, width, order));
+        if (!write.Success) throw new InvalidOperationException("已核对的原子访问许可发生变化");
+        return new(previous, written, success);
     }
 
     internal NirAllocation? Allocate(string spaceId, int length, int alignment)

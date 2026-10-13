@@ -4,7 +4,7 @@ using Cpp2CS.Ir;
 namespace Cpp2CS.Recovery;
 
 public enum MachineAbiKind { Aapcs64, WindowsX64 }
-public enum RecoveryScalarKind { Integer, Address }
+public enum RecoveryScalarKind { Integer, Address, Float }
 public sealed record RecoveryScalarType(int Width, RecoveryScalarKind Kind = RecoveryScalarKind.Integer);
 public sealed record FunctionSignature(ImmutableArray<RecoveryScalarType> Arguments, RecoveryScalarType? Result);
 
@@ -50,7 +50,7 @@ public sealed record RecoveryGap(ulong Address, RecoveryGapKind Kind, string Rea
 public enum DerivedEdgeKind { Direct, Call, Return, TailCall, Gap, Exception }
 public sealed record DerivedFunctionEdge(int Id, int SourceBlock, MirSuccessor Source,
     DerivedEdgeKind Kind, int? TargetBlock, ulong? MachineTarget,
-    MachineCallSummary? Call, ulong? Continuation, RecoveryGap? Gap);
+    MachineCallSummary? Call, ulong? Continuation, RecoveryGap? Gap, bool IsTailCandidate = false);
 public sealed record DerivedFunctionBlock(int Id, ulong Address, MirInstruction? Instruction,
     ImmutableArray<DerivedFunctionEdge> Edges, RecoveryGap? Gap);
 
@@ -66,4 +66,5 @@ public sealed record DerivedFunctionGraph(string Revision, string ImageId, Archi
 
 public sealed record FunctionGraphOptions(int MaxInstructions = 10_000,
     ImmutableDictionary<ulong, string>? TailCallEvidence = null,
-    ImmutableDictionary<ulong, ulong>? IndirectCallTargets = null);
+    ImmutableDictionary<ulong, ulong>? IndirectCallTargets = null,
+    bool InferTailCallCandidates = false);

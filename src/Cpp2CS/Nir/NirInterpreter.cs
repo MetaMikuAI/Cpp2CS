@@ -6,6 +6,8 @@ namespace Cpp2CS.Nir;
 
 public static class NirInterpreter
 {
+    private sealed record Continuation(NirCall? Call, NirInvoke? Invoke,
+        ImmutableArray<NirRuntimeValue> NormalCaptured, ImmutableArray<NirRuntimeValue> UnwindCaptured);
     private sealed class Frame
     {
         public NirFunction Function { get; }
@@ -14,10 +16,10 @@ public static class NirInterpreter
         public List<NirAllocation> Allocations { get; } = [];
         public NirBlock Block { get; set; }
         public int Position { get; set; }
-        public NirCall? ReturnBinding { get; }
+        public Continuation? ReturnBinding { get; }
         public bool ForbidReturn { get; }
         public Frame(NirFunction function, NirBlockId entry, ImmutableArray<NirRuntimeValue> arguments,
-            NirRuntimeValue effect, NirCall? binding, bool forbidReturn)
+            NirRuntimeValue effect, Continuation? binding, bool forbidReturn)
         {
             Function = function;
             Blocks = function.Blocks.ToDictionary(b => b.Id);
@@ -50,16 +52,23 @@ public static class NirInterpreter
         var externals = module.Externals.ToDictionary(e => e.Id, StringComparer.Ordinal);
         var stack = new Stack<Frame>();
         long steps = 0;
-        NirExecutionResult Result(NirExecutionStatus status, string? detail = null, ImmutableArray<NirRuntimeValue> values = default)
+        NirExecutionResult Result(NirExecutionStatus status, string? detail = null, ImmutableArray<NirRuntimeValue> values = default,
+            NirRuntimeValue? exception = null)
         {
             var outcome = status switch { NirExecutionStatus.Faulted => NirOutcomes.Fault, NirExecutionStatus.Terminated => NirOutcomes.Terminate, _ => NirOutcomes.None };
             if (outcome != NirOutcomes.None && stack.Any(f => !f.Function.Outcomes.HasFlag(outcome)))
             { status = NirExecutionStatus.ContractViolation; detail = "Observed outcome exceeds active function contract: " + detail; }
-            return new(status, values.IsDefault ? [] : values, context.Effect, steps, detail, [], [.. context.Events]);
+            if (outcome != NirOutcomes.None)
+                while (stack.TryPop(out var completed)) context.Memory.Release(completed.Allocations);
+            return new(status, values.IsDefault ? [] : values, context.Effect, steps, detail, [], [.. context.Events], exception);
         }
         bool ValidValue(NirRuntimeValue value, NirType expected)
         {
+            if (value is null) return false;
             if (!NirInspection.TypeEquals(value.Type, expected)) return false;
+            if (expected is NirExceptionType)
+                return value.Bits.IsZero && value.Function is null && value.Exception is { } token && ReferenceEquals(token.Owner, context);
+            if (value.Exception is not null) return false;
             if (expected is NirFunctionType functionType)
             {
                 if (value.Function is null || !value.Bits.IsZero) return false;
@@ -79,8 +88,44 @@ public static class NirInterpreter
         if (entry != root.Entry && !root.AdditionalEntries.Contains(entry)) return Result(NirExecutionStatus.InvalidInput, "Entry is not an external entry of the function");
         stack.Push(new(root, entry, args, context.Token(), null, false));
 
+        NirExecutionResult? Returned(Continuation? binding, ImmutableArray<NirRuntimeValue> output)
+        {
+            if (stack.Count == 0) return Result(NirExecutionStatus.Returned, values: output);
+            var caller = stack.Peek();
+            if (binding?.Call is { } call) BindReturn(caller, call, output, context.Token());
+            else if (binding?.Invoke?.Normal is { } normal)
+                Resume(caller, normal.Target, [.. output, .. binding.NormalCaptured, context.Token()]);
+            else return Result(NirExecutionStatus.ContractViolation, "Invocation has no normal continuation");
+            return null;
+        }
+        NirExecutionResult? UnwindFrames(NirRuntimeValue exception)
+        {
+            while (stack.TryPeek(out var frame))
+            {
+                if (!frame.Function.Outcomes.HasFlag(NirOutcomes.Unwind))
+                    return Result(NirExecutionStatus.ContractViolation, "Unwind exceeds function contract: " + frame.Function.Id);
+                stack.Pop();
+                context.Memory.Release(frame.Allocations);
+                if (frame.ReturnBinding?.Invoke is { } invoke)
+                {
+                    Resume(stack.Peek(), invoke.Unwind.Target, [exception, .. frame.ReturnBinding.UnwindCaptured, context.Token()]);
+                    return null;
+                }
+            }
+            return Result(NirExecutionStatus.Unwound, exception: exception);
+        }
+        NirExecutionResult? ExternalUnwind(Continuation? binding, NirRuntimeValue exception)
+        {
+            if (binding?.Invoke is { } invoke)
+            {
+                Resume(stack.Peek(), invoke.Unwind.Target, [exception, .. binding.UnwindCaptured, context.Token()]);
+                return null;
+            }
+            return UnwindFrames(exception);
+        }
+
         NirExecutionResult? Invoke(Frame caller, NirCallTarget target, ImmutableArray<NirValue> inputValues,
-            NirCall? binding, bool tail, bool noReturn)
+            Continuation? binding, bool tail, bool noReturn)
         {
             var input = inputValues.Select(caller.Get).ToImmutableArray();
             var name = target is NirDirectTarget direct ? direct.Function : caller.Get(((NirIndirectTarget)target).Function).Function;
@@ -91,8 +136,9 @@ public static class NirInterpreter
             var possible = internalFunction?.Outcomes ?? external?.Outcomes ?? NirOutcomes.None;
             if (signature is null || !ValidValues(input, signature.Parameters)) return Result(NirExecutionStatus.ContractViolation, "Call signature mismatch");
             if (noReturn && possible.HasFlag(NirOutcomes.Return)) return Result(NirExecutionStatus.ContractViolation, "No-return target contract permits return");
-            if (!tail && !noReturn && !possible.HasFlag(NirOutcomes.Return)) return Result(NirExecutionStatus.ContractViolation, "Ordinary call target contract excludes return");
-            if ((possible & (NirOutcomes.Fault | NirOutcomes.Terminate | NirOutcomes.Diverge) & ~caller.Function.Outcomes) != 0)
+            if (!tail && !noReturn && binding?.Invoke is null && !possible.HasFlag(NirOutcomes.Return)) return Result(NirExecutionStatus.ContractViolation, "Ordinary call target contract excludes return");
+            var propagated = NirOutcomes.Fault | NirOutcomes.Terminate | NirOutcomes.Diverge | (binding?.Invoke is null ? NirOutcomes.Unwind : 0);
+            if ((possible & propagated & ~caller.Function.Outcomes) != 0)
                 return Result(NirExecutionStatus.ContractViolation, "Target outcomes exceed caller contract");
             if (target is NirIndirectTarget indirect && !ValidValue(caller.Get(indirect.Function), indirect.Function.Type))
                 return Result(NirExecutionStatus.ContractViolation, "Indirect target violates function-value contract");
@@ -111,26 +157,28 @@ public static class NirInterpreter
                 return null;
             }
             if (!context.Externals.TryGetValue(name, out var implementation)) return Result(NirExecutionStatus.MissingExternal, name);
-            var invocation = new NirExternalInvocation(external!, input, context.Memory);
+            var invocation = new NirExternalInvocation(external!, input, context.Memory, context.Environment, context.CreateException);
             var output = implementation(invocation);
             if (invocation.Violation is not null) return Result(NirExecutionStatus.ContractViolation, invocation.Violation);
+            if (output is null) return Result(NirExecutionStatus.ContractViolation, "External result is null");
             var actual = output.Outcome switch
             {
                 NirExternalOutcome.Return => NirOutcomes.Return, NirExternalOutcome.Fault => NirOutcomes.Fault,
-                NirExternalOutcome.Terminate => NirOutcomes.Terminate, _ => NirOutcomes.None
+                NirExternalOutcome.Terminate => NirOutcomes.Terminate, NirExternalOutcome.Unwind => NirOutcomes.Unwind, _ => NirOutcomes.None
             };
             if (actual == NirOutcomes.None || !possible.HasFlag(actual)) return Result(NirExecutionStatus.ContractViolation, "External result violates declared outcomes");
+            if (output.Outcome == NirExternalOutcome.Unwind)
+            {
+                if (output.Values.IsDefault || output.Values.Length != 0 || output.Exception is not { } exception || !ValidValue(exception, NirExceptionType.Instance))
+                    return Result(NirExecutionStatus.ContractViolation, "External unwind requires one owned exception and no normal results");
+                return ExternalUnwind(returnBinding, exception);
+            }
+            if (output.Exception is not null) return Result(NirExecutionStatus.ContractViolation, "Non-unwind result contains an exception");
             if (output.Outcome == NirExternalOutcome.Fault) return Result(NirExecutionStatus.Faulted, output.Detail ?? "ExternalFault");
             if (output.Outcome == NirExternalOutcome.Terminate) return Result(NirExecutionStatus.Terminated, output.Detail ?? "ExternalTermination");
             if (forbidReturn) return Result(NirExecutionStatus.ContractViolation, "No-return invocation returned");
             if (!ValidValues(output.Values, signature.Results)) return Result(NirExecutionStatus.ContractViolation, "External results violate declared signature");
-            if (tail)
-            {
-                if (stack.Count == 0) return Result(NirExecutionStatus.Returned, values: output.Values);
-                BindReturn(stack.Peek(), returnBinding!, output.Values, context.Token());
-            }
-            else BindReturn(caller, binding!, output.Values, context.Token());
-            return null;
+            return Returned(returnBinding, output.Values);
         }
 
         while (stack.Count > 0)
@@ -154,6 +202,52 @@ public static class NirInterpreter
                         break;
                     }
                     case NirPure pure: frame.Set(pure.Result, EvaluatePure(pure, pure.Inputs.Select(frame.Get).ToArray())); break;
+                    case NirExceptionCreate create:
+                        context.Advance("exception-create", frame.Function.Id);
+                        frame.Set(create.Result, context.CreateException());
+                        frame.Set(create.Flow.Output, context.Token());
+                        break;
+                    case NirFloat floating:
+                    {
+                        var specification = floating.Spec;
+                        if (floating.Controls is { } controls)
+                        {
+                            var rounding = (int)frame.Get(controls.RoundingMode).Bits;
+                            if (!Enum.IsDefined((BinaryFloatRounding)rounding)) return Result(NirExecutionStatus.ContractViolation, "InvalidFloatingRoundingMode");
+                            specification = specification with
+                            {
+                                Rounding = (BinaryFloatRounding)rounding,
+                                Rules = specification.Rules with
+                                {
+                                    SubnormalInput = frame.Get(controls.FlushSubnormalInput).Bits.IsZero ? BinarySubnormalInput.Preserve : BinarySubnormalInput.SignedZero,
+                                    SubnormalOutput = frame.Get(controls.FlushSubnormalOutput).Bits.IsZero ? BinarySubnormalOutput.Preserve : specification.Rules.SubnormalOutput,
+                                    NaN = frame.Get(controls.CanonicalNaN).Bits.IsZero ? specification.Rules.NaN : BinaryNaNRule.Canonical,
+                                    ExactTinyUnderflow = controls.ExactTinyUnderflow is { } exact ? !frame.Get(exact).Bits.IsZero : specification.Rules.ExactTinyUnderflow
+                                }
+                            };
+                        }
+                        var evaluated = BinaryFloatMath.Evaluate(specification, floating.Inputs.Select(v => frame.Get(v).Bits).ToArray());
+                        frame.Set(floating.Result, new(floating.Result.Type, evaluated.Bits));
+                        frame.Set(floating.Exceptions, new(floating.Exceptions.Type, (uint)evaluated.Exceptions));
+                        break;
+                    }
+                    case NirEnvironmentRead read:
+                        if (!context.Environment.TryGetValue(read.Field, out var environmentValue))
+                            return Result(NirExecutionStatus.MissingInput, "Environment requires an explicit value: " + read.Field);
+                        if (!NirEnvironmentContract.Valid(read.Field, environmentValue))
+                            return Result(NirExecutionStatus.InvalidInput, "Invalid environment value: " + read.Field);
+                        context.Advance("environment-read", frame.Function.Id, read.Field.ToString());
+                        frame.Set(read.Result, new(read.Result.Type, environmentValue));
+                        frame.Set(read.Flow.Output, context.Token());
+                        break;
+                    case NirEnvironmentWrite write:
+                        var replacement = frame.Get(write.Value).Bits;
+                        if (!NirEnvironmentContract.Valid(write.Field, replacement))
+                            return Result(NirExecutionStatus.ContractViolation, "Invalid environment write: " + write.Field);
+                        context.Environment[write.Field] = replacement;
+                        context.Advance("environment-write", frame.Function.Id, write.Field.ToString());
+                        frame.Set(write.Flow.Output, context.Token());
+                        break;
                     case NirChoose choose:
                         if (!context.Choices.TryDequeue(out var choice)) return Result(NirExecutionStatus.MissingInput, "Choose requires an explicit dynamic choice");
                         var chosen = new NirRuntimeValue(choose.Result.Type, choice);
@@ -165,10 +259,25 @@ public static class NirInterpreter
                     case NirLoad load:
                     {
                         var address = frame.Get(load.Address);
-                        var read = context.Memory.Read(((NirAddressType)address.Type).Space, address.Bits, ((NirBitsType)load.Result.Type).Width / 8);
-                        context.Advance("read", frame.Function.Id, read.Error);
-                        if (!read.Success) return Result(read.MissingInput ? NirExecutionStatus.MissingInput : NirExecutionStatus.Faulted, read.Error);
-                        var bits = new BigInteger(read.Bytes.AsSpan(), isUnsigned: true, isBigEndian: load.Order == NirByteOrder.Big);
+                        var space = ((NirAddressType)address.Type).Space;
+                        var width = ((NirBitsType)load.Result.Type).Width;
+                        var beatWidth = load.AtomicWidth == 0 ? width : load.AtomicWidth;
+                        var raw = new byte[width / 8];
+                        for (var offset = 0; offset < raw.Length; offset += beatWidth / 8)
+                        {
+                            var at = BitVectorMath.Wrap(address.Bits + offset, ((NirAddressType)address.Type).Width);
+                            var atomicFailure = context.Memory.CheckAtomicRange(space, at, load.AtomicWidth);
+                            var read = atomicFailure is null ? context.Memory.Read(space, at, beatWidth / 8) : new NirMemoryResult([], atomicFailure);
+                            if (!read.Success)
+                            {
+                                context.Advance("read", frame.Function.Id, read.Error, new(space, at, beatWidth, load.AtomicWidth, load.MemoryOrder));
+                                return Result(read.MissingInput ? NirExecutionStatus.MissingInput : NirExecutionStatus.Faulted, read.Error);
+                            }
+                            var beat = new BigInteger(read.Bytes.AsSpan(), isUnsigned: true, isBigEndian: load.Order == NirByteOrder.Big);
+                            context.Advance("read", frame.Function.Id, memory: new(space, at, beatWidth, load.AtomicWidth, load.MemoryOrder, ReadValue: beat));
+                            read.Bytes.CopyTo(raw, offset);
+                        }
+                        var bits = new BigInteger(raw, isUnsigned: true, isBigEndian: load.Order == NirByteOrder.Big);
                         frame.Set(load.Result, new(load.Result.Type, bits));
                         frame.Set(load.Flow.Output, context.Token());
                         break;
@@ -177,16 +286,56 @@ public static class NirInterpreter
                     {
                         var address = frame.Get(store.Address);
                         var value = frame.Get(store.Value);
-                        var length = ((NirBitsType)value.Type).Width / 8;
-                        var raw = new byte[length];
-                        var bytes = value.Bits.ToByteArray(isUnsigned: true, isBigEndian: store.Order == NirByteOrder.Big);
-                        bytes.CopyTo(raw, store.Order == NirByteOrder.Big ? length - bytes.Length : 0);
-                        var write = context.Memory.Write(((NirAddressType)address.Type).Space, address.Bits, [.. raw]);
-                        context.Advance("write", frame.Function.Id, write.Error);
-                        if (!write.Success) return Result(NirExecutionStatus.Faulted, write.Error);
+                        var width = ((NirBitsType)value.Type).Width;
+                        var space = ((NirAddressType)address.Type).Space;
+                        var beatWidth = store.AtomicWidth == 0 ? width : store.AtomicWidth;
+                        var bytes = NirAtomicContract.Bytes(value.Bits, width, store.Order);
+                        for (var offset = 0; offset < bytes.Length; offset += beatWidth / 8)
+                        {
+                            var at = BitVectorMath.Wrap(address.Bits + offset, ((NirAddressType)address.Type).Width);
+                            var slice = bytes.Slice(offset, beatWidth / 8);
+                            var beat = new BigInteger(slice.AsSpan(), isUnsigned: true, isBigEndian: store.Order == NirByteOrder.Big);
+                            var atomicFailure = context.Memory.CheckAtomicRange(space, at, store.AtomicWidth);
+                            var write = atomicFailure is null ? context.Memory.Write(space, at, slice) : new NirMemoryResult([], atomicFailure);
+                            context.Advance("write", frame.Function.Id, write.Error, new(space, at, beatWidth, store.AtomicWidth, store.MemoryOrder, WrittenValue: write.Success ? beat : null));
+                            if (!write.Success) return Result(NirExecutionStatus.Faulted, write.Error);
+                        }
                         frame.Set(store.Flow.Output, context.Token());
                         break;
                     }
+                    case NirAtomicRmw atomic:
+                    {
+                        var address = frame.Get(atomic.Address);
+                        var space = ((NirAddressType)address.Type).Space;
+                        var width = ((NirBitsType)atomic.Result.Type).Width;
+                        var memory = context.Memory.Atomic(space, address.Bits, width, atomic.Order, atomic.Code, frame.Get(atomic.Value).Bits);
+                        context.Advance("atomic-rmw", frame.Function.Id, memory.Error,
+                            new(space, address.Bits, width, width, atomic.MemoryOrder, memory.Error is null ? memory.Previous : null, memory.Written));
+                        if (memory.Error is not null) return Result(memory.MissingInput ? NirExecutionStatus.MissingInput : NirExecutionStatus.Faulted, memory.Error);
+                        frame.Set(atomic.Result, new(atomic.Result.Type, memory.Previous));
+                        frame.Set(atomic.Flow.Output, context.Token());
+                        break;
+                    }
+                    case NirCompareExchange exchange:
+                    {
+                        var address = frame.Get(exchange.Address);
+                        var space = ((NirAddressType)address.Type).Space;
+                        var width = ((NirBitsType)exchange.OldValue.Type).Width;
+                        var memory = context.Memory.Atomic(space, address.Bits, width, exchange.Order, NirAtomicCode.Exchange,
+                            frame.Get(exchange.Replacement).Bits, frame.Get(exchange.Expected).Bits, exchange.WriteBackOnFailure);
+                        context.Advance("compare-exchange", frame.Function.Id, memory.Error,
+                            new(space, address.Bits, width, width, memory.Success ? exchange.SuccessOrder : exchange.FailureOrder,
+                                memory.Error is null ? memory.Previous : null, memory.Written, memory.Error is null ? memory.Success : null));
+                        if (memory.Error is not null) return Result(memory.MissingInput ? NirExecutionStatus.MissingInput : NirExecutionStatus.Faulted, memory.Error);
+                        frame.Set(exchange.OldValue, new(exchange.OldValue.Type, memory.Previous));
+                        frame.Set(exchange.Success, new(exchange.Success.Type, memory.Success ? 1 : 0));
+                        frame.Set(exchange.Flow.Output, context.Token());
+                        break;
+                    }
+                    case NirFence fence:
+                        context.Advance("fence", frame.Function.Id, memory: new(null, null, 0, 0, fence.MemoryOrder));
+                        frame.Set(fence.Flow.Output, context.Token());
+                        break;
                     case NirLocalAlloc alloc:
                     {
                         var size = frame.Get(alloc.Size).Bits;
@@ -200,7 +349,7 @@ public static class NirInterpreter
                         break;
                     }
                     case NirCall call:
-                        var result = Invoke(frame, call.Target, call.Arguments, call, false, false);
+                        var result = Invoke(frame, call.Target, call.Arguments, new(call, null, [], []), false, false);
                         if (result is not null) return result;
                         break;
                     default: throw new InvalidOperationException("Validated NIR contains an unknown operation");
@@ -218,8 +367,8 @@ public static class NirInterpreter
                     if (frame.ForbidReturn || !frame.Function.Outcomes.HasFlag(NirOutcomes.Return)) return Result(NirExecutionStatus.ContractViolation, "No-return function returned");
                     stack.Pop();
                     context.Memory.Release(frame.Allocations);
-                    if (stack.Count == 0) return Result(NirExecutionStatus.Returned, values: output);
-                    BindReturn(stack.Peek(), frame.ReturnBinding!, output, context.Token());
+                    var result = Returned(frame.ReturnBinding, output);
+                    if (result is not null) return result;
                     break;
                 }
                 case NirTailCall tail:
@@ -231,6 +380,25 @@ public static class NirInterpreter
                 case NirNoReturnCall call:
                 {
                     var result = Invoke(frame, call.Target, call.Arguments, null, false, true);
+                    if (result is not null) return result;
+                    break;
+                }
+                case NirInvoke invoke:
+                {
+                    if (frame.Get(invoke.Effect).Bits != context.Effect) return Result(NirExecutionStatus.ContractViolation, "Stale invoke Effect");
+                    var binding = new Continuation(null, invoke,
+                        invoke.Normal?.Captured.Select(frame.Get).ToImmutableArray() ?? [], invoke.Unwind.Captured.Select(frame.Get).ToImmutableArray());
+                    var result = Invoke(frame, invoke.Target, invoke.Arguments, binding, false, invoke.Normal is null);
+                    if (result is not null) return result;
+                    break;
+                }
+                case NirRaise raise:
+                {
+                    var exception = frame.Get(raise.Exception);
+                    if (!ValidValue(exception, NirExceptionType.Instance) || frame.Get(raise.Effect).Bits != context.Effect)
+                        return Result(NirExecutionStatus.ContractViolation, "Raise requires an owned exception and current Effect");
+                    context.Advance("raise", frame.Function.Id);
+                    var result = UnwindFrames(exception);
                     if (result is not null) return result;
                     break;
                 }
@@ -250,7 +418,11 @@ public static class NirInterpreter
     private static void Follow(Frame frame, NirEdge edge)
     {
         var arguments = edge.Arguments.Select(frame.Get).ToImmutableArray();
-        frame.Block = frame.Blocks[edge.Target];
+        Resume(frame, edge.Target, arguments);
+    }
+    private static void Resume(Frame frame, NirBlockId target, ImmutableArray<NirRuntimeValue> arguments)
+    {
+        frame.Block = frame.Blocks[target];
         frame.BindEntry(arguments);
     }
     private static NirRuntimeValue EvaluatePure(NirPure operation, NirRuntimeValue[] inputs)
@@ -267,7 +439,7 @@ public static class NirInterpreter
             NirPureCode.Shl => BitVectorMath.ShiftLeft(a, b, width), NirPureCode.Shr => BitVectorMath.ShiftRight(a, b, width),
             NirPureCode.Sar => BitVectorMath.ArithmeticRight(a, b, width),
             NirPureCode.UDiv => BitVectorMath.UnsignedDivide(a, b), NirPureCode.SDiv => BitVectorMath.SignedDivide(a, b, width),
-            NirPureCode.Eq => a == b && inputs[0].Function == inputs[1].Function ? BigInteger.One : BigInteger.Zero,
+            NirPureCode.Eq => a == b && inputs[0].Function == inputs[1].Function && ReferenceEquals(inputs[0].Exception, inputs[1].Exception) ? BigInteger.One : BigInteger.Zero,
             NirPureCode.Ult => a < b ? BigInteger.One : BigInteger.Zero,
             NirPureCode.Slt => BitVectorMath.Signed(a, aw) < BitVectorMath.Signed(b, aw) ? BigInteger.One : BigInteger.Zero,
             NirPureCode.Zext or NirPureCode.AddressToBits or NirPureCode.BitsToAddress => a,

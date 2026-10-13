@@ -17,11 +17,22 @@ public static class CoreChecks
         var nirCoreChecks = NirCoreChecks.Run();
         var recoveryGraphChecks = RecoveryGraphChecks.Run();
         var nirRecoveryChecks = NirRecoveryChecks.Run();
+        var nirInterfaceChecks = NirInterfaceChecks.Run();
+        var nirNumericChecks = NirNumericChecks.Run();
+        var nirFloatingRecoveryChecks = NirFloatingRecoveryChecks.Run();
+        var nirAtomicChecks = NirAtomicChecks.Run() + NirAtomicRecoveryChecks.Run();
+        var nirEnvironmentChecks = NirEnvironmentChecks.Run();
+        var nirCorpusChecks = NirCorpusChecks.RunSelfChecks();
+        var nirInputChecks = NirInputChecks.Run();
+        var nirTailRecoveryChecks = NirTailRecoveryChecks.Run();
+        var nirExceptionChecks = NirExceptionChecks.Run();
         var checks = Images.ImageSelfTests.Run() + DivisionChecks.Run() + FloatChecks.Run() + EffectBoundaryChecks.Run() + MemoryEffectChecks.Run() + AtomicMemoryChecks.Run()
             + ExecutionContractChecks.Run() + MirStructureChecks.Run() + MirInspectionChecks.Run()
-            + regionChecks + ssaChecks + nativeChecks + normalizationChecks + nirCoreChecks + recoveryGraphChecks + nirRecoveryChecks;
+            + regionChecks + ssaChecks + nativeChecks + normalizationChecks + nirCoreChecks + recoveryGraphChecks + nirRecoveryChecks + nirInterfaceChecks + nirNumericChecks
+            + nirAtomicChecks + nirEnvironmentChecks + nirCorpusChecks + nirFloatingRecoveryChecks + nirInputChecks + nirTailRecoveryChecks + nirExceptionChecks;
         Console.WriteLine($"native core checks passed: region={regionChecks}, ssa={ssaChecks}, execution={nativeChecks}, normalization={normalizationChecks}");
-        Console.WriteLine($"NIR checks passed: core={nirCoreChecks}, graph={recoveryGraphChecks}, recovery={nirRecoveryChecks}");
+        Console.WriteLine($"NIR checks passed: core={nirCoreChecks}, graph={recoveryGraphChecks}, recovery={nirRecoveryChecks}, interfaces={nirInterfaceChecks}, numeric={nirNumericChecks}");
+        Console.WriteLine($"NIR extended checks passed: atomic={nirAtomicChecks}, floating-recovery={nirFloatingRecoveryChecks}, environment={nirEnvironmentChecks}, corpus={nirCorpusChecks}, input={nirInputChecks}, tail-recovery={nirTailRecoveryChecks}, exception={nirExceptionChecks}");
         var originalBytes = Convert.FromHexString("1F2003D5");
         var immutableOrigin = new InstructionOrigin("fixture:immutable", 0x1000, 0, originalBytes);
         originalBytes[0] = 0;

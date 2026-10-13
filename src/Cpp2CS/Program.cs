@@ -14,6 +14,20 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 
 if (args.Length == 1 && args[0] == "selftest") return CoreChecks.Run();
+if (args.Length == 1 && args[0] == "validate-nir")
+{
+    var validation = NirValidator.Validate(NirJson.Deserialize(Console.In.ReadToEnd()));
+    Console.WriteLine(JsonSerializer.Serialize(validation, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+    return validation.IsValid ? 0 : 1;
+}
+if (args.Length is >= 4 and <= 7 && args[0] == "nir-corpus")
+{
+    var options = new NirCorpusOptions(
+        MaxInstructions: args.Length > 4 ? int.Parse(args[4], CultureInfo.InvariantCulture) : 512,
+        MaxMachineDiagnosticInstructions: args.Length > 5 ? int.Parse(args[5], CultureInfo.InvariantCulture) : 32,
+        MaxNormalizationRounds: args.Length > 6 ? int.Parse(args[6], CultureInfo.InvariantCulture) : 64);
+    return NirCorpusChecks.Run(args[1], args[2], args[3], options) ? 0 : 2;
+}
 if (args.Length == 4 && args[0] == "nir-check")
 {
     NirBinaryChecks.Run(args[1], args[2], args[3]);
@@ -255,7 +269,7 @@ if (args.Length == 3 && args[0] == "lift")
     Console.WriteLine(lift.Ir is { } ir ? MirJson.Serialize(ir) : JsonSerializer.Serialize(lift));
     return lift.IsSupported ? 0 : 2;
 }
-Console.Error.WriteLine("Cpp2CS: selftest | serve | validate-ir (stdin) | scan <binary> <output-directory> | lift <binary> <image-va-hex> | native <binary> <entry-va-hex[,entry...]> <instruction-budget> <report.json> | native-check <arm64-binary> <x64-binary> <output-directory> | nir <binary> <contracts.json> <output-directory> | nir-check <arm64-binary> <x64-binary> <output-directory>");
+Console.Error.WriteLine("Cpp2CS: selftest | serve | validate-ir (stdin) | validate-nir (stdin) | scan <binary> <output-directory> | lift <binary> <image-va-hex> | native <binary> <entry-va-hex[,entry...]> <instruction-budget> <report.json> | native-check <arm64-binary> <x64-binary> <output-directory> | nir <binary> <contracts.json> <output-directory> | nir-check <arm64-binary> <x64-binary> <output-directory> | nir-corpus <binary> <inventory.json> <output-directory> [instruction-budget] [diagnostic-budget] [normalization-rounds]");
 return 1;
 
 static LiftResult Lift(Architecture architecture, InstructionOrigin origin)

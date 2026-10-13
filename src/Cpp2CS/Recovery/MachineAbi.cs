@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 // AAPCS64 §6.1/§6.8；Microsoft x64 calling convention 的标量接口与保存规则。
 public static class MachineAbi
 {
-    public const string Version = "scalar-abi/1";
+    public const string Version = "scalar-abi/2";
 
     public static Architecture ArchitectureFor(MachineAbiKind abi) => abi switch
     {
@@ -29,7 +29,7 @@ public static class MachineAbi
         if (contract.Signature.Arguments.Any(type => !Supported(type)) ||
             contract.Signature.Result is { } returnType && !Supported(returnType))
         {
-            reason = "首批 ABI 接口仅支持 1–64 位整数和 64 位地址；浮点、聚合、可变参数需独立接口合同";
+            reason = "标量 ABI 接口支持 1–64 位整数、64 位地址与 binary32/64 浮点；聚合及可变参数需独立接口合同";
             return false;
         }
         if (!contract.Effects.MayReturn && !contract.Effects.MayThrow &&
@@ -39,14 +39,28 @@ public static class MachineAbi
             return false;
         }
         var arm = contract.Abi == MachineAbiKind.Aapcs64;
-        var registerCount = arm ? 8 : 4;
         string[] windowsRegisters = ["rcx", "rdx", "r8", "r9"];
-        var arguments = contract.Signature.Arguments.Select((type, index) =>
-            index < registerCount
-                ? (MachineArgumentLocation)new SlotArgumentLocation(arm ? $"x{index}" : windowsRegisters[index], 0, type.Width)
-                : new StackArgumentLocation((arm ? 0L : 40L) + 8L * (index - registerCount), type.Width)).ToImmutableArray();
-        result = new(arguments,
-            contract.Signature.Result is { } returned ? new SlotArgumentLocation(arm ? "x0" : "rax", 0, returned.Width) : null,
+        var arguments = ImmutableArray.CreateBuilder<MachineArgumentLocation>();
+        var general = 0;
+        var floating = 0;
+        long stack = arm ? 0 : 40;
+        for (var index = 0; index < contract.Signature.Arguments.Length; index++)
+        {
+            var type = contract.Signature.Arguments[index];
+            var isFloat = type.Kind == RecoveryScalarKind.Float;
+            if (arm && (isFloat ? floating : general) < 8)
+                arguments.Add(new SlotArgumentLocation(isFloat ? $"v{floating++}" : $"x{general++}", 0, type.Width));
+            else if (!arm && index < 4)
+                arguments.Add(new SlotArgumentLocation(isFloat ? $"xmm{index}" : windowsRegisters[index], 0, type.Width));
+            else
+            {
+                arguments.Add(new StackArgumentLocation(stack, type.Width));
+                stack += 8;
+            }
+        }
+        result = new(arguments.ToImmutable(),
+            contract.Signature.Result is { } returned ? new SlotArgumentLocation(
+                returned.Kind == RecoveryScalarKind.Float ? arm ? "v0" : "xmm0" : arm ? "x0" : "rax", 0, returned.Width) : null,
             arm ? "sp" : "rsp", 16, arm ? 0 : 8);
         return true;
     }
@@ -109,7 +123,8 @@ public static class MachineAbi
     }
 
     private static bool Supported(RecoveryScalarType type) => type is not null && Enum.IsDefined(type.Kind) &&
-        type.Width is >= 1 and <= 64 && (type.Kind != RecoveryScalarKind.Address || type.Width == 64);
+        type.Width is >= 1 and <= 64 && (type.Kind != RecoveryScalarKind.Address || type.Width == 64) &&
+        (type.Kind != RecoveryScalarKind.Float || type.Width is 32 or 64);
 
     private static bool Numbered(string name, string prefix, int first, int last) =>
         name.StartsWith(prefix, StringComparison.Ordinal) && int.TryParse(name.AsSpan(prefix.Length), out var number) &&

@@ -45,6 +45,8 @@ internal sealed class NirEmitter(RecoveryMachineSsa machine, RecoveryFrameAnalys
             var operations = new List<NirOperation>();
             var blockParameters = new List<NirValue>();
             var effect = effects[block.Id];
+            var environment = new Dictionary<NirEnvironmentField, NirValue>();
+            NirValue? floatingExceptions = null;
             if (block == machine.Entry)
             {
                 for (var index = 0; index < machine.LogicalArguments.Count; index++)
@@ -99,11 +101,67 @@ internal sealed class NirEmitter(RecoveryMachineSsa machine, RecoveryFrameAnalys
                         operations.Add(new NirConstant(result!.Value, ((ImmediatePayload)node.Payload).Value));
                         break;
                     case OpCode.Load:
-                        operations.Add(new NirLoad(result!.Value, Address(node.Inputs[0]), NirByteOrder.Little, Flow()));
+                    {
+                        var memory = ((MemoryPayload)node.Payload).Specification;
+                        operations.Add(new NirLoad(result!.Value, Address(node.Inputs[0]), NirByteOrder.Little, Flow(),
+                            MemoryOrderFor(memory), memory.AtomicWidth));
                         break;
+                    }
                     case OpCode.Store:
-                        operations.Add(new NirStore(Address(node.Inputs[0]), inputs[1], NirByteOrder.Little, Flow()));
+                    {
+                        var memory = ((MemoryPayload)node.Payload).Specification;
+                        operations.Add(new NirStore(Address(node.Inputs[0]), inputs[1], NirByteOrder.Little, Flow(),
+                            MemoryOrderFor(memory), memory.AtomicWidth));
                         break;
+                    }
+                    case OpCode.AtomicRmw:
+                    {
+                        var atomic = ((AtomicPayload)node.Payload).Specification;
+                        var address = Address(node.Inputs[0]);
+                        var order = AtomicOrderFor(atomic.Order);
+                        if (atomic.Kind == AtomicKind.CompareExchange)
+                            operations.Add(new NirCompareExchange(result!.Value, Fresh(new NirBitsType(1)), address,
+                                inputs[2], inputs[1], NirByteOrder.Little, order, order, Flow(), WriteBackOnFailure: true));
+                        else operations.Add(new NirAtomicRmw(result!.Value, address, inputs[1], AtomicCode(atomic.Kind),
+                            NirByteOrder.Little, order, Flow()));
+                        break;
+                    }
+                    case OpCode.Barrier:
+                        operations.Add(new NirFence(FenceOrder(((BarrierPayload)node.Payload).Specification)!.Value, Flow()));
+                        break;
+                    case OpCode.Float:
+                    case OpCode.FloatFused:
+                    {
+                        var source = ((FloatPayload)node.Payload).Specification;
+                        var spec = RecoveryFloating.Specification(machine.Graph.Architecture, source);
+                        var rounding = source.Rounding == FloatRounding.Current ? Environment(NirEnvironmentField.RoundingMode)
+                            : ConstantValue(3, (int)RecoveryFloating.Rounding(source.Rounding));
+                        var flushInput = Environment(NirEnvironmentField.FlushSubnormalInput);
+                        var flushOutput = Environment(NirEnvironmentField.FlushSubnormalOutput);
+                        var enabledUnderflow = Pure(1, NirPureCode.Extract, [Environment(NirEnvironmentField.FloatingTrapMask)], 3);
+                        var canonical = machine.Graph.Architecture == Architecture.Arm64
+                            ? Environment(NirEnvironmentField.CanonicalNaN) : ConstantValue(1, 0);
+                        if (machine.Graph.Architecture == Architecture.X64)
+                            flushOutput = Pure(1, NirPureCode.And, [flushOutput, Pure(1, NirPureCode.Not, [enabledUnderflow])]);
+                        var data = Fresh(new NirBitsType(spec.ResultWidth));
+                        var flags = Fresh(new NirBitsType(6));
+                        operations.Add(new NirFloat(data, flags, spec, inputs.Take(spec.InputCount).ToImmutableArray(),
+                            new(rounding, flushInput, flushOutput, canonical, enabledUnderflow)));
+                        floatingExceptions = floatingExceptions is { } accumulated ? Pure(6, NirPureCode.Or, [accumulated, flags]) : flags;
+                        if (source.Kind is FloatKind.Compare or FloatKind.CompareSignal)
+                        {
+                            var isEqual = Pure(1, NirPureCode.Eq, [data, ConstantValue(2, 0)]);
+                            var isLess = Pure(1, NirPureCode.Eq, [data, ConstantValue(2, 1)]);
+                            var isGreater = Pure(1, NirPureCode.Eq, [data, ConstantValue(2, 2)]);
+                            data = Pure(4, NirPureCode.Select, [isEqual, ConstantValue(4, 6),
+                                Pure(4, NirPureCode.Select, [isLess, ConstantValue(4, 8),
+                                    Pure(4, NirPureCode.Select, [isGreater, ConstantValue(4, 2), ConstantValue(4, 3)])])]);
+                        }
+                        var lower = Pure(source.ResultWidth + 6, NirPureCode.Concat, [flags, data]);
+                        // 原 trapflags 仅流向已由正常执行域解除的 Guard；不成为逻辑输出。
+                        operations.Add(new NirPure(result!.Value, NirPureCode.Concat, [flags, lower]));
+                        break;
+                    }
                     case OpCode.Undefined:
                         operations.Add(new NirChoose(result!.Value, Flow()));
                         break;
@@ -112,6 +170,12 @@ internal sealed class NirEmitter(RecoveryMachineSsa machine, RecoveryFrameAnalys
                             node.Code == OpCode.Extract ? checked((int)((ImmediatePayload)node.Payload).Value) : 0));
                         break;
                 }
+            }
+            if (floatingExceptions is { } raised)
+            {
+                var previous = Environment(NirEnvironmentField.FloatingExceptions);
+                var accumulated = Pure(6, NirPureCode.Or, [previous, raised]);
+                operations.Add(new NirEnvironmentWrite(NirEnvironmentField.FloatingExceptions, accumulated, Flow()));
             }
             NirTerminator terminator;
             if (block.Call is { } transfer && (transfer.Tail || !transfer.Summary.Callee.Effects.MayReturn))
@@ -138,6 +202,26 @@ internal sealed class NirEmitter(RecoveryMachineSsa machine, RecoveryFrameAnalys
                 var input = effect;
                 effect = Fresh(NirEffectType.Instance);
                 return new(input, effect);
+            }
+            NirValue Environment(NirEnvironmentField field)
+            {
+                if (environment.TryGetValue(field, out var value)) return value;
+                value = Fresh(new NirBitsType(NirEnvironmentContract.Width(field)));
+                operations.Add(new NirEnvironmentRead(value, field, Flow()));
+                environment.Add(field, value);
+                return value;
+            }
+            NirValue ConstantValue(int width, BigInteger bits)
+            {
+                var value = Fresh(new NirBitsType(width));
+                operations.Add(new NirConstant(value, bits));
+                return value;
+            }
+            NirValue Pure(int width, NirPureCode code, ImmutableArray<NirValue> inputs, int offset = 0)
+            {
+                var value = Fresh(new NirBitsType(width));
+                operations.Add(new NirPure(value, code, inputs, offset));
+                return value;
             }
             NirValue Address(NativeValue value)
             {
@@ -175,10 +259,30 @@ internal sealed class NirEmitter(RecoveryMachineSsa machine, RecoveryFrameAnalys
                 Gap(block, "contract.return", "函数合同排除正常返回，但机器体存在返回出口");
             foreach (var node in block.Nodes)
             {
+                if (RecoveryFloating.IsFloating(node.Code))
+                {
+                    if (!NormalDomain) Gap(block, "floating.trap-domain", "浮点 trap 出口转换需要显式正常执行域，启用掩码仍参与数值计算");
+                    if (!machine.Graph.Contract.Effects.ExternalEffects)
+                        Gap(block, "contract.floating-effects", "粘滞浮点异常属于可观察环境效应，不能按数值结果不活跃而删除");
+                    if (machine.Blocks.Any(candidate => candidate.Call is not null))
+                        Gap(block, "floating.call-environment", "混合调用的机器浮点环境关系尚未单独核验");
+                    machine.Evidence.Add(new("floating.environment", node.Source.Origin.Address, node.Source.OperationIndex,
+                        "控制来自中立环境字段；每机器指令汇总六位异常后更新粘滞状态；机器 trapflags 仅用于正常执行域条件"));
+                    Keep(block, node);
+                    continue;
+                }
                 if (block.Call is { } call && node.Source.OperationIndex == call.OperationIndex)
                 {
                     Keep(block, node);
-                    if (call.Summary.Callee.Effects.MayThrow) Gap(block, "call.unwind", "语言异常调用尚无 NIR unwind 转换");
+                    if (call.Tail && !machine.Evidence.Any(evidence => evidence.Rule == "tail.return-protocol" &&
+                        evidence.Address == block.Source!.Address))
+                        Gap(block, "tail.frame-proof", "尾调用缺少已完成的本帧移除与实参来源证明");
+                    if (call.Summary.Callee.Effects.MayThrow)
+                    {
+                        if (!call.Tail) Gap(block, "call.unwind", "普通调用缺少源异常处理证据，尚不能恢复本地展开路径");
+                        else if (!machine.Graph.Contract.Effects.MayThrow)
+                            Gap(block, "contract.call-unwind", "已证明尾调用可能向外抛出异常，但当前函数合同排除该出口");
+                    }
                     if (Constant(call.Target) is { } target && target != call.Summary.Callee.EntryAddress)
                         Gap(block, "contract.call-target", "已知机器调用目标与采用的被调合同入口矛盾");
                     if (call.Tail && call.Summary.Callee.Effects.MayReturn && !machine.Graph.Contract.Effects.MayReturn)
@@ -214,21 +318,62 @@ internal sealed class NirEmitter(RecoveryMachineSsa machine, RecoveryFrameAnalys
                 }
                 if (node.Code is OpCode.Load or OpCode.Store)
                 {
-                    if (node.Payload is not MemoryPayload { Specification.Order: MemoryOrder.Relaxed, Specification.NonTemporal: false })
-                        Gap(block, "memory.order", "当前 NIR 转换尚不支持该内存顺序或访问提示");
+                    var memory = ((MemoryPayload)node.Payload).Specification;
+                    if (memory.NonTemporal)
+                        Gap(block, "memory.hint", "非临时内存访问提示尚无对应的 NIR 观察合同");
                     if (frame.TryOffset(node.Inputs[0], out _))
                     {
                         if (!PrivateFrame) Gap(block, "frame.contract", "消除机器帧或转换局部对象需要私有有效帧合同");
+                        if (memory.Order != MemoryOrder.Relaxed || memory.AtomicWidth != 0)
+                            Gap(block, "memory.atomic-frame", "私有帧上的有序或原子访问不能按普通局部读写消除");
                         continue;
                     }
-                    if (!(options.AssumeSequentialMemory || machine.Graph.Contract.Domain?.SequentialMemory == true))
-                        Gap(block, "memory.concurrent-domain", "顺序字节内存转换需要显式的顺序内存观察合同");
-                    else machine.Evidence.Add(new("memory.sequential", node.Source.Origin.Address, node.Source.OperationIndex,
-                        "采用顺序内存观察合同；不声明并发原子性等价"));
+                    RequireSequential(block, node);
                     if (node.Code == OpCode.Load && !machine.Graph.Contract.Effects.ReadsMemory ||
                         node.Code == OpCode.Store && !machine.Graph.Contract.Effects.WritesMemory)
                         Gap(block, "contract.memory-effects", "机器体访问程序内存，但逻辑合同排除了对应读写效应");
+                    if (memory.AtomicWidth != 0)
+                        machine.Evidence.Add(new("memory.atomic-beats", node.Source.Origin.Address, node.Source.OperationIndex,
+                            $"保留 {memory.Order} 顺序及每次 {memory.AtomicWidth} 位访问；不合并多个观察事件"));
                     Keep(block, node);
+                    continue;
+                }
+                if (node.Code == OpCode.AtomicRmw)
+                {
+                    if (frame.TryOffset(node.Inputs[0], out _))
+                        Gap(block, "memory.atomic-frame", "私有帧上的原子读改写尚无独立局部存储恢复合同");
+                    RequireSequential(block, node);
+                    if (!NormalDomain)
+                        Gap(block, "memory.atomic-address", "原子访问的机器地址与对齐故障需要显式正常执行域");
+                    else machine.Evidence.Add(new("domain.atomic-address", node.Source.Origin.Address, node.Source.OperationIndex,
+                        "正常执行域采用有效的机器地址与原子访问对齐；NIR 不携带机器地址合法性规则"));
+                    if (!machine.Graph.Contract.Effects.ReadsMemory || !machine.Graph.Contract.Effects.WritesMemory)
+                        Gap(block, "contract.memory-effects", "机器原子读改写超出函数声明的程序内存读写效应");
+                    var atomic = ((AtomicPayload)node.Payload).Specification;
+                    machine.Evidence.Add(new("memory.atomic-rmw", node.Source.Origin.Address, node.Source.OperationIndex,
+                        $"{atomic.Kind} 保留旧值结果、{atomic.Order} 顺序和完整读改写；比较成功标记不代替旧值"));
+                    Keep(block, node);
+                    continue;
+                }
+                if (node.Code == OpCode.Barrier)
+                {
+                    var barrier = ((BarrierPayload)node.Payload).Specification;
+                    if (FenceOrder(barrier) is null)
+                        Gap(block, "memory.barrier", "屏障的完成性、取指或共享域要求尚无中立 NIR fence 合同");
+                    else
+                    {
+                        RequireSequential(block, node);
+                        if (!machine.Graph.Contract.Effects.ExternalEffects)
+                            Gap(block, "contract.barrier-effects", "函数合同排除了机器屏障的可观察顺序效应");
+                        machine.Evidence.Add(new("memory.fence", node.Source.Origin.Address, node.Source.OperationIndex,
+                            $"在顺序观察域中保留 {barrier.Kind}/{barrier.Domain}/{barrier.Access} 顺序事件"));
+                        Keep(block, node);
+                    }
+                    continue;
+                }
+                if (node.Code is OpCode.LoadExclusive or OpCode.StoreExclusive or OpCode.ClearExclusive)
+                {
+                    Gap(block, "memory.exclusive", "LL/SC 监视器协议尚未恢复为有逻辑依据的原子操作");
                     continue;
                 }
                 if (node.Flow is not null && node.Code != OpCode.Undefined)
@@ -298,7 +443,7 @@ internal sealed class NirEmitter(RecoveryMachineSsa machine, RecoveryFrameAnalys
                         ? "contract.machine-input" : "value.machine-dependency", $"逻辑结果仍依赖未恢复的机器值: {info.Detail}");
                     continue;
                 }
-                if (node.Code is not (OpCode.Constant or OpCode.Load or OpCode.Undefined) && PureCode(node.Code) is null)
+                if (node.Code is not (OpCode.Constant or OpCode.Load or OpCode.AtomicRmw or OpCode.Float or OpCode.FloatFused or OpCode.Undefined) && PureCode(node.Code) is null)
                 { Gap(block, "value.unsupported", $"尚未转换纯值操作 {node.Code}"); continue; }
                 Keep(block, node);
             }
@@ -314,7 +459,10 @@ internal sealed class NirEmitter(RecoveryMachineSsa machine, RecoveryFrameAnalys
     {
         if (!retained.Add(Key(block, node))) return;
         for (var index = 0; index < node.Inputs.Length; index++)
+        {
+            if (RecoveryFloating.IsFloating(node.Code) && index == node.Inputs.Length - 1) continue;
             if (!(index == 0 && node.Code is OpCode.Load or OpCode.Store && frame.TryOffset(node.Inputs[0], out _))) Mark(node.Inputs[index]);
+        }
     }
     private void Mark(NativeValue value)
     {
@@ -330,6 +478,38 @@ internal sealed class NirEmitter(RecoveryMachineSsa machine, RecoveryFrameAnalys
         return (start, checked(start + width / 8));
     }
     private void Gap(RecoverySsaBlock block, string code, string message) => diagnostics.Add(new(block.Source?.Address ?? machine.Graph.Contract.EntryAddress, code, message));
+    private void RequireSequential(RecoverySsaBlock block, NativeNode node)
+    {
+        if (!(options.AssumeSequentialMemory || machine.Graph.Contract.Domain?.SequentialMemory == true))
+            Gap(block, "memory.concurrent-domain", "内存转换需要显式的顺序内存观察合同；当前验证不求解弱内存执行");
+        else machine.Evidence.Add(new("memory.sequential", node.Source.Origin.Address, node.Source.OperationIndex,
+            "采用顺序内存观察域，保留原子宽度和顺序标签；不声明跨线程弱内存等价"));
+    }
+    private static NirMemoryOrder MemoryOrderFor(MemoryOperation memory) => memory.AtomicWidth == 0
+        ? NirMemoryOrder.Unordered : AtomicOrderFor(memory.Order);
+    private static NirMemoryOrder AtomicOrderFor(MemoryOrder order) => order switch
+    {
+        MemoryOrder.Relaxed => NirMemoryOrder.Relaxed, MemoryOrder.Acquire => NirMemoryOrder.Acquire,
+        MemoryOrder.Release => NirMemoryOrder.Release, MemoryOrder.X64Locked => NirMemoryOrder.SequentiallyConsistent,
+        _ => throw new ArgumentOutOfRangeException(nameof(order))
+    };
+    private static NirMemoryOrder? FenceOrder(BarrierOperation barrier) => barrier switch
+    {
+        { Kind: BarrierKind.Mfence, Domain: BarrierDomain.FullSystem, Access: BarrierAccess.All } => NirMemoryOrder.SequentiallyConsistent,
+        { Kind: BarrierKind.Lfence, Domain: BarrierDomain.FullSystem, Access: BarrierAccess.Loads } => NirMemoryOrder.Acquire,
+        { Kind: BarrierKind.Sfence, Domain: BarrierDomain.FullSystem, Access: BarrierAccess.Stores } => NirMemoryOrder.Release,
+        { Kind: BarrierKind.Dmb, Domain: BarrierDomain.FullSystem, Access: BarrierAccess.All } => NirMemoryOrder.SequentiallyConsistent,
+        { Kind: BarrierKind.Dmb, Domain: BarrierDomain.FullSystem, Access: BarrierAccess.Loads } => NirMemoryOrder.Acquire,
+        { Kind: BarrierKind.Dmb, Domain: BarrierDomain.FullSystem, Access: BarrierAccess.Stores } => NirMemoryOrder.Release,
+        _ => null
+    };
+    private static NirAtomicCode AtomicCode(AtomicKind kind) => kind switch
+    {
+        AtomicKind.Exchange => NirAtomicCode.Exchange, AtomicKind.Add => NirAtomicCode.Add,
+        AtomicKind.Sub => NirAtomicCode.Sub, AtomicKind.And => NirAtomicCode.And, AtomicKind.Or => NirAtomicCode.Or,
+        AtomicKind.Xor => NirAtomicCode.Xor, AtomicKind.Neg => NirAtomicCode.Neg, AtomicKind.Not => NirAtomicCode.Not,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind))
+    };
     private static (int, int) Key(RecoverySsaBlock block, NativeNode node) => (block.Id, node.Source.OperationIndex);
     private NirValue Fresh(NirType type) => new(new(nextValue++), type);
     private NirValue Bits(NativeValue value)

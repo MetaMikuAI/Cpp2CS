@@ -15,24 +15,37 @@ public static class NirRecovery
     public static NirRecoveryResult Recover(IRegionInstructionSource source, IEnumerable<FunctionContract> contracts,
         NirRecoveryOptions? options = null)
     {
+        var known = contracts.ToImmutableArray();
+        return RecoverSet(source, known, new FunctionContractIndex(known), options);
+    }
+
+    public static NirRecoveryResult RecoverOne(IRegionInstructionSource source, FunctionContract contract,
+        FunctionContractIndex known, NirRecoveryOptions? options = null) => RecoverSet(source, [contract], known, options);
+
+    private static NirRecoveryResult RecoverSet(IRegionInstructionSource source, ImmutableArray<FunctionContract> targets,
+        FunctionContractIndex known, NirRecoveryOptions? options)
+    {
         options ??= new();
         if (options.MaxInstructions < 1 || options.MaxNormalizationRounds < 1)
             throw new ArgumentOutOfRangeException(nameof(options));
-        var known = contracts.ToImmutableArray();
-        if (known.Select(contract => contract.Name).Distinct(StringComparer.Ordinal).Count() != known.Length ||
-            known.Select(contract => contract.EntryAddress).Distinct().Count() != known.Length)
-            throw new ArgumentException("函数合同名称和入口必须唯一", nameof(contracts));
+        if (targets.Select(contract => contract.EntryAddress).Distinct().Count() != targets.Length)
+            throw new ArgumentException("恢复目标入口不能重复", nameof(targets));
         var results = ImmutableArray.CreateBuilder<NirFunctionRecovery>();
-        foreach (var contract in known)
+        foreach (var contract in targets)
         {
-            var graph = FunctionGraphBuilder.Build(source, contract, known, options.GraphOptions ?? new(options.MaxInstructions));
+            var graph = FunctionGraphBuilder.Build(source, contract, known,
+                options.GraphOptions ?? new(options.MaxInstructions, InferTailCallCandidates: true));
             var diagnostics = graph.Gaps.Select(gap => new NirRecoveryDiagnostic(gap.Address, $"graph.{gap.Kind}", gap.Reason)).ToList();
             foreach (var block in graph.Blocks)
+            {
+                if (block.Instruction is { } instruction && RecoveryFloating.Validate(instruction) is { } floatingGap)
+                    diagnostics.Add(new(block.Address, "contract.floating-environment", floatingGap));
                 if (block.Instruction?.Operations.Any(operation => operation.Code == OpCode.WriteSlot &&
-                    operation.Slot is "fpcr" or "fpsr" or "mxcsr" or "tpidr_el0" or "fsbase" or "gsbase" or
+                    operation.Slot is "tpidr_el0" or "fsbase" or "gsbase" or
                         "cs" or "es" or "ss" or "ds" or "fs" or "gs" or "apia_key" or "apib_key" or "pauth_ia_enabled" or "pauth_ib_enabled") == true)
                     diagnostics.Add(new(block.Address, "contract.unmodeled-environment",
                         "机器体修改了尚未投影的浮点或线程环境，不能按逻辑返回值不活跃而删除"));
+            }
             RecoveryMachineSsa? machine = null;
             NirEmitter? emitter = null;
             NirFunction? function = null;
@@ -83,7 +96,9 @@ public static class NirRecovery
         }
         var functions = results.Where(result => result.Complete).Select(result => result.Function!).ToImmutableArray();
         var emittedNames = functions.Select(function => function.Id).ToHashSet(StringComparer.Ordinal);
-        var externals = known.Where(contract => !emittedNames.Contains(contract.Name) && !contradicted.Contains(contract.Name) && !contract.Effects.MayThrow &&
+        var usedContracts = targets.Concat(results.SelectMany(result => result.Graph.Blocks).SelectMany(block => block.Edges)
+            .Where(edge => edge.Call is not null).Select(edge => edge.Call!.Callee)).DistinctBy(contract => contract.EntryAddress);
+        var externals = usedContracts.Where(contract => !emittedNames.Contains(contract.Name) && !contradicted.Contains(contract.Name) &&
                 MachineAbi.TryDescribe(contract, out _, out _)).Select(contract =>
                 new NirExternalContract(contract.Name, Signature(contract.Signature), ExternalEffects(contract), Outcomes(contract))).ToImmutableArray();
         var module = new NirModule(functions, externals,
@@ -95,7 +110,7 @@ public static class NirRecovery
 
     internal static NirType Type(RecoveryScalarType type) => type.Kind switch
     {
-        RecoveryScalarKind.Integer => new NirBitsType(type.Width),
+        RecoveryScalarKind.Integer or RecoveryScalarKind.Float => new NirBitsType(type.Width),
         RecoveryScalarKind.Address => new NirAddressType("memory", type.Width),
         _ => throw new ArgumentOutOfRangeException(nameof(type))
     };
@@ -105,6 +120,7 @@ public static class NirRecovery
     // 尚未证明终止性，且内存与被调函数可以失败；不从抽样执行删除这些出口。
     internal static NirOutcomes Outcomes(FunctionContract contract) => NirOutcomes.Fault | NirOutcomes.Diverge |
         (contract.Effects.MayReturn ? NirOutcomes.Return : NirOutcomes.None) |
+        (contract.Effects.MayThrow ? NirOutcomes.Unwind : NirOutcomes.None) |
         (contract.Effects.MayTerminate ? NirOutcomes.Terminate : NirOutcomes.None);
     private static NirExternalEffects ExternalEffects(FunctionContract contract) =>
         (contract.Effects.ReadsMemory ? NirExternalEffects.ReadMemory : NirExternalEffects.None) |

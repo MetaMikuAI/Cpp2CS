@@ -351,27 +351,37 @@ internal sealed class RecoveryFrameAnalysis
                 .Select(segment => (output.Slot, Segment: segment))).ToArray();
         foreach (var block in ssa.Blocks.Where(block => block.Source is not null))
         {
+            var beforeDiagnostics = Diagnostics.Count;
+            var candidate = block.Source!.Edges.Any(edge => edge.IsTailCandidate);
             if (block.Call is { } call)
             {
                 if (!TryOffset(call.Stack, out var callOffset))
-                    Diagnostic(block.Source!.Address, "call.stack", "无法证明调用入口的栈对齐");
+                    ExitDiagnostic("call.stack", "无法证明调用入口的栈对齐");
                 else if (callOffset % call.Summary.Interface.StackAlignment != 0)
-                    Diagnostic(block.Source!.Address, "contract.call-stack", "调用入口 SP 不满足所采用 ABI 的栈对齐");
+                    ExitDiagnostic("contract.call-stack", "调用入口 SP 不满足所采用 ABI 的栈对齐");
+                if (call.Tail)
+                {
+                    var available = ssa.Interface.Arguments.OfType<StackArgumentLocation>()
+                        .Select(argument => argument.EntrySpOffset + 8).DefaultIfEmpty(0).Max();
+                    if (call.Summary.Interface.Arguments.OfType<StackArgumentLocation>()
+                        .Any(argument => argument.EntrySpOffset + 8 > available))
+                        Diagnostic(block.Source.Address, "tail.stack-capacity", "被调栈实参超出当前入口合同保证的参数存储空间");
+                }
             }
             var returns = block.Source!.Edges.Any(edge => edge.Kind == DerivedEdgeKind.Return);
             var tail = block.Call?.Tail == true;
             if (!returns && !tail) continue;
-            if (!ssa.Graph.Contract.Effects.MayReturn && (returns || block.Call!.Summary.Callee.Effects.MayReturn))
+            if (!ssa.Graph.Contract.Effects.MayReturn && returns)
                 Diagnostic(block.Source.Address, "contract.unexpected-return", "声明不返回的函数具有正常返回出口");
             var expectedOffset = tail ? 0 : ssa.Interface.NormalReturnSpAdjustment;
             if (!TryOffset(block.Outputs[ssa.Interface.StackPointer], out var actualOffset))
-                Diagnostic(block.Source.Address, "return.stack", "实际出口 SP 与所采用的返回协议不一致");
+                ExitDiagnostic("return.stack", "实际出口 SP 与所采用的返回协议不一致");
             else if (actualOffset != expectedOffset)
-                Diagnostic(block.Source.Address, "contract.return-stack", "实际出口 SP 与所采用的返回协议不一致");
+                ExitDiagnostic("contract.return-stack", "实际出口 SP 与所采用的返回协议不一致");
             if (returns)
             {
                 if (block.TransferTarget is not { } target)
-                    Diagnostic(block.Source.Address, "return.target", "实际 RET 目标未还原为本次调用的入口返回地址");
+                    ExitDiagnostic("return.target", "实际 RET 目标未还原为本次调用的入口返回地址");
                 else CheckBits(target, 0, ssa.ReturnAddress, 0, 64, "return.target", "实际 RET 目标未还原为本次调用的入口返回地址");
             }
             else if (ssa.Graph.Architecture == Architecture.Arm64)
@@ -380,7 +390,7 @@ internal sealed class RecoveryFrameAnalysis
                     "tail.return-address", "尾调用没有恢复当前调用者的返回地址");
             }
             else if (!beforeCalls.TryGetValue(block.Id, out var memory) || !ReturnBytes(memory))
-                Diagnostic(block.Source.Address, "tail.return-address", "尾调用入口栈顶不是当前调用者的返回地址");
+                ExitDiagnostic("tail.return-address", "尾调用入口栈顶不是当前调用者的返回地址");
             foreach (var (slot, segment) in protocol)
             {
                 if (segment.Kind == SlotRelationKind.Preserve)
@@ -393,12 +403,19 @@ internal sealed class RecoveryFrameAnalysis
                         var expected = ((new BigInteger(segment.Constant) >> bit) & 1) != 0;
                         if (actual.Constant != expected)
                         {
-                            Diagnostic(block.Source.Address, actual.Constant is null ? "return.constant" : "contract.return-constant",
+                            ExitDiagnostic(actual.Constant is null ? "return.constant" : "contract.return-constant",
                                 $"出口不满足 ABI 常量协议：{slot}[{segment.Offset}:{segment.Width}]");
                             break;
                         }
                     }
             }
+            if (tail) VerifyTailArguments(block);
+            if (tail && Diagnostics.Count == beforeDiagnostics && !HasEscapes && ReachedFixedPoint)
+                ssa.Evidence.Add(new("tail.return-protocol", block.Source.Address, null,
+                    "入口 SP、调用者返回地址、ABI 保留位、栈实参空间及实参来源已证明；本帧没有逃逸地址"));
+
+            void ExitDiagnostic(string code, string message) => Diagnostic(block.Source.Address,
+                candidate ? "tail.proof-" + code.Replace("contract.", "", StringComparison.Ordinal).Replace('.', '-') : code, message);
 
             void CheckBits(NativeValue actual, int actualStart, NativeValue expected, int expectedStart, int width,
                 string code, string message)
@@ -410,7 +427,58 @@ internal sealed class RecoveryFrameAnalysis
                     var right = Bit(expected, expectedStart + bit);
                     return left.Constant is not null && left != right;
                 });
-                Diagnostic(block.Source.Address, contradicted ? "contract." + code.Replace('.', '-') : code, message);
+                ExitDiagnostic(contradicted ? "contract." + code.Replace('.', '-') : code, message);
+            }
+        }
+    }
+
+    private void VerifyTailArguments(RecoverySsaBlock tail)
+    {
+        var visited = new HashSet<ValueId>();
+        var arguments = ssa.LogicalArguments.Select(value => ssa.Resolve(value).Id).ToHashSet();
+        var predecessors = Predecessors();
+        var owners = ssa.Blocks.SelectMany(block => block.Nodes.Where(node => node.Result is not null)
+            .Select(node => (node.Result!.Value.Id, Block: block))).ToDictionary(item => item.Id, item => item.Block);
+        foreach (var argument in tail.Call!.Arguments) Visit(argument);
+
+        void Visit(NativeValue value)
+        {
+            value = ssa.Resolve(value);
+            if (arguments.Contains(value.Id) || !visited.Add(value.Id)) return;
+            if (parameterSources.TryGetValue(value.Id, out var parameter))
+            {
+                foreach (var parent in predecessors[parameter.Block.Id]) Visit(parent.Outputs[parameter.Slot]);
+                return;
+            }
+            if (!definitions.TryGetValue(value.Id, out var node))
+                throw new InvalidOperationException("Tail argument has no machine SSA definition");
+            var owner = owners[value.Id];
+            var information = owner.Information.GetValueOrDefault(node.Source.OperationIndex);
+            if (information?.Role is RecoveryValueRole.UnboundInput or RecoveryValueRole.CallClobber or
+                RecoveryValueRole.StackBase or RecoveryValueRole.ReturnAddress)
+            {
+                Diagnostic(tail.Source!.Address, "tail.arguments", $"尾调用实参仍依赖未恢复的机器值：{information.Detail}");
+                return;
+            }
+            if (node.Code == OpCode.Load && TryOffset(node.Inputs[0], out var loadedOffset))
+            {
+                if (!InitializedLoads.Contains(value.Id))
+                {
+                    Diagnostic(tail.Source!.Address, "tail.arguments", "尾调用栈实参没有所有路径上的初始化证据");
+                    return;
+                }
+                var loadedEnd = loadedOffset + (ssa.Width(value) + 7) / 8;
+                foreach (var initial in ssa.EntryBytes.Where(item => item.Key >= loadedOffset && item.Key < loadedEnd))
+                    if (initial.Value.Value is { } stored) Visit(stored);
+                foreach (var stored in ssa.Blocks.SelectMany(block => block.Nodes).Where(operation => operation.Code == OpCode.Store))
+                    if (TryOffset(stored.Inputs[0], out var offset) && offset < loadedEnd &&
+                        loadedOffset < offset + (ssa.Width(stored.Inputs[1]) + 7) / 8) Visit(stored.Inputs[1]);
+            }
+            for (var index = 0; index < node.Inputs.Length; index++)
+            {
+                if (RecoveryFloating.IsFloating(node.Code) && index == node.Inputs.Length - 1) continue;
+                if (index == 0 && node.Code == OpCode.Load && TryOffset(node.Inputs[0], out _)) continue;
+                Visit(node.Inputs[index]);
             }
         }
     }
@@ -540,6 +608,51 @@ internal sealed class RecoveryFrameAnalysis
                 offset = Math.Min(offset, width - 1);
                 value = node.Inputs[0];
                 continue;
+            }
+            if (node.Code is OpCode.Shl or OpCode.Shr or OpCode.Sar && Constant(node.Inputs[1], out var shiftBits))
+            {
+                var width = ssa.Width(node.Inputs[0]);
+                var shift = (int)BigInteger.Min(shiftBits, width);
+                if (node.Code == OpCode.Shl)
+                {
+                    if (offset < shift) return new(default, 0, false);
+                    offset -= shift;
+                }
+                else
+                {
+                    offset += shift;
+                    if (offset >= width)
+                    {
+                        if (node.Code == OpCode.Shr) return new(default, 0, false);
+                        offset = width - 1;
+                    }
+                }
+                value = node.Inputs[0];
+                continue;
+            }
+            if (node.Code is OpCode.And or OpCode.Or or OpCode.Xor)
+            {
+                var left = Bit(node.Inputs[0], offset);
+                var right = Bit(node.Inputs[1], offset);
+                if (node.Code == OpCode.Or)
+                {
+                    if (left.Constant == true || right.Constant == true) return new(default, 0, true);
+                    if (left.Constant == false || left == right) return right;
+                    if (right.Constant == false) return left;
+                }
+                else if (node.Code == OpCode.And)
+                {
+                    if (left.Constant == false || right.Constant == false) return new(default, 0, false);
+                    if (left.Constant == true || left == right) return right;
+                    if (right.Constant == true) return left;
+                }
+                else
+                {
+                    if (left == right) return new(default, 0, false);
+                    if (left.Constant == false) return right;
+                    if (right.Constant == false) return left;
+                    if (left.Constant is { } a && right.Constant is { } b) return new(default, 0, a ^ b);
+                }
             }
             return new(value.Id, offset, null);
         }

@@ -9,6 +9,7 @@ public static class NirValidator
     public static NirValidationResult Validate(NirModule module)
     {
         var errors = ImmutableArray.CreateBuilder<NirDiagnostic>();
+        if (!CheckStructure(module, errors)) return new(errors.ToImmutable());
         void Error(string code, string message) => errors.Add(new(code, message));
         if (module.Version != NirModule.FormatVersion) Error("version", "不支持的 NIR 格式版本");
         if (module.Functions.IsDefault || module.Externals.IsDefault || module.MemorySpaces.IsDefault || module.DataObjects.IsDefault)
@@ -65,9 +66,191 @@ public static class NirValidator
         return new(errors.ToImmutable());
     }
 
+    // 公开模型可由调用者直接构造；在遍历 SSA 前核对完整的引用结构。
+    private static bool CheckStructure(NirModule? module, ImmutableArray<NirDiagnostic>.Builder errors)
+    {
+        void Missing(string path) => errors.Add(new("structure-null", "必要引用不能为空: " + path));
+        void Unknown(string path) => errors.Add(new("structure-kind", "未定义的模型节点: " + path));
+        bool Array<T>(ImmutableArray<T> values, string path, string code = "structure-array")
+        {
+            if (!values.IsDefault) return true;
+            errors.Add(new(code, "集合必须初始化: " + path));
+            return false;
+        }
+        void Text(string? value, string path) { if (value is null) Missing(path); }
+        var activeSignatures = new HashSet<NirSignature>(ReferenceEqualityComparer.Instance);
+        void Type(NirType? type, string path, int depth = 0)
+        {
+            switch (type)
+            {
+                case null: Missing(path); break;
+                case NirBitsType or NirEffectType or NirExceptionType: break;
+                case NirAddressType address: Text(address.Space, path + ".space"); break;
+                case NirFunctionType function: Signature(function.Signature, path + ".signature", depth + 1); break;
+                default: Unknown(path); break;
+            }
+        }
+        void Signature(NirSignature? signature, string path, int depth = 0)
+        {
+            if (signature is null) { Missing(path); return; }
+            if (depth > 64 || !activeSignatures.Add(signature))
+            { errors.Add(new("structure-signature", "函数类型签名成环或嵌套超过 64 层: " + path)); return; }
+            if (Array(signature.Parameters, path + ".parameters", "signature"))
+                foreach (var type in signature.Parameters) Type(type, path + ".parameters[]", depth);
+            if (Array(signature.Results, path + ".results", "signature"))
+                foreach (var type in signature.Results) Type(type, path + ".results[]", depth);
+            activeSignatures.Remove(signature);
+        }
+        void Value(NirValue value, string path) => Type(value.Type, path + ".type");
+        void Values(ImmutableArray<NirValue> values, string path, string code = "structure-array")
+        {
+            if (Array(values, path, code)) foreach (var value in values) Value(value, path + "[]");
+        }
+        void Flow(NirEffectFlow? flow, string path)
+        {
+            if (flow is null) { Missing(path); return; }
+            Value(flow.Input, path + ".input");
+            Value(flow.Output, path + ".output");
+        }
+        void Target(NirCallTarget? target, string path)
+        {
+            switch (target)
+            {
+                case null: Missing(path); break;
+                case NirDirectTarget direct: Text(direct.Function, path + ".function"); break;
+                case NirIndirectTarget indirect: Value(indirect.Function, path + ".function"); break;
+                default: Unknown(path); break;
+            }
+        }
+        void Edge(NirEdge? edge, string path)
+        {
+            if (edge is null) { Missing(path); return; }
+            Values(edge.Arguments, path + ".arguments", "terminator-array");
+        }
+        void InvokeEdge(NirInvokeEdge? edge, string path)
+        {
+            if (edge is null) { Missing(path); return; }
+            Values(edge.Captured, path + ".captured", "terminator-array");
+        }
+        void Operation(NirOperation? operation, string path)
+        {
+            switch (operation)
+            {
+                case null: Missing(path); break;
+                case NirConstant constant: Value(constant.Result, path + ".result"); break;
+                case NirPure pure:
+                    Value(pure.Result, path + ".result"); Values(pure.Inputs, path + ".inputs", "operation-array"); break;
+                case NirFunctionConstant function:
+                    Value(function.Result, path + ".result"); Text(function.Function, path + ".function"); break;
+                case NirFloat floating:
+                    Value(floating.Result, path + ".result"); Value(floating.Exceptions, path + ".exceptions");
+                    Values(floating.Inputs, path + ".inputs", "operation-array");
+                    if (floating.Spec is null) Missing(path + ".spec");
+                    else if (floating.Spec.Rules is null) Missing(path + ".spec.rules");
+                    if (floating.Controls is { } controls)
+                    {
+                        Value(controls.RoundingMode, path + ".controls.roundingMode");
+                        Value(controls.FlushSubnormalInput, path + ".controls.flushSubnormalInput");
+                        Value(controls.FlushSubnormalOutput, path + ".controls.flushSubnormalOutput");
+                        Value(controls.CanonicalNaN, path + ".controls.canonicalNaN");
+                        if (controls.ExactTinyUnderflow is { } exact) Value(exact, path + ".controls.exactTinyUnderflow");
+                    }
+                    break;
+                case NirLoad load:
+                    Value(load.Result, path + ".result"); Value(load.Address, path + ".address"); Flow(load.Flow, path + ".flow"); break;
+                case NirStore store:
+                    Value(store.Address, path + ".address"); Value(store.Value, path + ".value"); Flow(store.Flow, path + ".flow"); break;
+                case NirLocalAlloc alloc:
+                    Value(alloc.Result, path + ".result"); Value(alloc.Size, path + ".size"); Flow(alloc.Flow, path + ".flow"); break;
+                case NirCall call:
+                    Target(call.Target, path + ".target"); Values(call.Arguments, path + ".arguments", "operation-array");
+                    Values(call.Results, path + ".results", "operation-array"); Flow(call.Flow, path + ".flow"); break;
+                case NirChoose choose:
+                    Value(choose.Result, path + ".result"); Flow(choose.Flow, path + ".flow"); break;
+                case NirExceptionCreate create:
+                    Value(create.Result, path + ".result"); Flow(create.Flow, path + ".flow"); break;
+                case NirAtomicRmw atomic:
+                    Value(atomic.Result, path + ".result"); Value(atomic.Address, path + ".address");
+                    Value(atomic.Value, path + ".value"); Flow(atomic.Flow, path + ".flow"); break;
+                case NirCompareExchange exchange:
+                    Value(exchange.OldValue, path + ".oldValue"); Value(exchange.Success, path + ".success");
+                    Value(exchange.Address, path + ".address"); Value(exchange.Expected, path + ".expected");
+                    Value(exchange.Replacement, path + ".replacement"); Flow(exchange.Flow, path + ".flow"); break;
+                case NirFence fence: Flow(fence.Flow, path + ".flow"); break;
+                case NirEnvironmentRead read:
+                    Value(read.Result, path + ".result"); Flow(read.Flow, path + ".flow"); break;
+                case NirEnvironmentWrite write:
+                    Value(write.Value, path + ".value"); Flow(write.Flow, path + ".flow"); break;
+                default: Unknown(path); break;
+            }
+        }
+        void Terminator(NirTerminator? terminator, string path)
+        {
+            switch (terminator)
+            {
+                case null: Missing(path); break;
+                case NirJump jump: Edge(jump.Edge, path + ".edge"); break;
+                case NirBranch branch:
+                    Value(branch.Condition, path + ".condition"); Edge(branch.WhenTrue, path + ".whenTrue"); Edge(branch.WhenFalse, path + ".whenFalse"); break;
+                case NirReturn returned:
+                    Values(returned.Values, path + ".values", "terminator-array"); Value(returned.Effect, path + ".effect"); break;
+                case NirTailCall tail:
+                    Target(tail.Target, path + ".target"); Values(tail.Arguments, path + ".arguments", "terminator-array"); Value(tail.Effect, path + ".effect"); break;
+                case NirNoReturnCall noReturn:
+                    Target(noReturn.Target, path + ".target"); Values(noReturn.Arguments, path + ".arguments", "terminator-array"); Value(noReturn.Effect, path + ".effect"); break;
+                case NirRaise raise: Value(raise.Exception, path + ".exception"); Value(raise.Effect, path + ".effect"); break;
+                case NirInvoke invoke:
+                    Target(invoke.Target, path + ".target"); Values(invoke.Arguments, path + ".arguments", "terminator-array");
+                    if (invoke.Normal is { } normal) InvokeEdge(normal, path + ".normal");
+                    InvokeEdge(invoke.Unwind, path + ".unwind"); Value(invoke.Effect, path + ".effect"); break;
+                case NirFault fault: Text(fault.Code, path + ".code"); Value(fault.Effect, path + ".effect"); break;
+                case NirTerminate stop: Text(stop.Reason, path + ".reason"); Value(stop.Effect, path + ".effect"); break;
+                default: Unknown(path); break;
+            }
+        }
+        if (module is null) { Missing("module"); return false; }
+        Text(module.Version, "module.version");
+        if (Array(module.MemorySpaces, "module.memorySpaces", "array"))
+            foreach (var space in module.MemorySpaces)
+            {
+                if (space is null) { Missing("module.memorySpaces[]"); continue; }
+                Text(space.Id, "memorySpace.id");
+            }
+        if (Array(module.DataObjects, "module.dataObjects", "array"))
+            foreach (var data in module.DataObjects)
+            {
+                if (data is null) { Missing("module.dataObjects[]"); continue; }
+                Text(data.Id, "dataObject.id"); Text(data.Space, "dataObject.space"); Array(data.Bytes, "dataObject.bytes", "data-bytes");
+            }
+        if (Array(module.Externals, "module.externals", "array"))
+            foreach (var external in module.Externals)
+            {
+                if (external is null) { Missing("module.externals[]"); continue; }
+                Text(external.Id, "external.id"); Signature(external.Signature, "external.signature");
+            }
+        if (Array(module.Functions, "module.functions", "array"))
+            foreach (var function in module.Functions)
+            {
+                if (function is null) { Missing("module.functions[]"); continue; }
+                Text(function.Id, "function.id"); Signature(function.Signature, "function.signature");
+                Array(function.AdditionalEntries, "function.additionalEntries", "function-array");
+                if (!Array(function.Blocks, "function.blocks", "function-array")) continue;
+                foreach (var block in function.Blocks)
+                {
+                    if (block is null) { Missing("function.blocks[]"); continue; }
+                    var path = $"function[{function.Id}].block[{block.Id.Id}]";
+                    Values(block.Parameters, path + ".parameters", "block-array");
+                    if (Array(block.Operations, path + ".operations", "block-array"))
+                        for (var index = 0; index < block.Operations.Length; index++) Operation(block.Operations[index], path + $".operations[{index}]");
+                    Terminator(block.Terminator, path + ".terminator");
+                }
+            }
+        return errors.Count == 0;
+    }
+
     private static void CheckOutcomes(NirOutcomes outcomes, Action<string, string> error)
     {
-        if (outcomes == NirOutcomes.None || (outcomes & ~(NirOutcomes.Return | NirOutcomes.Fault | NirOutcomes.Terminate | NirOutcomes.Diverge)) != 0)
+        if (outcomes == NirOutcomes.None || (outcomes & ~(NirOutcomes.Return | NirOutcomes.Fault | NirOutcomes.Terminate | NirOutcomes.Diverge | NirOutcomes.Unwind)) != 0)
             error("outcomes", "函数必须声明有效的可能结果");
     }
     private static void CheckSignature(NirSignature signature, Dictionary<string, NirMemorySpace> spaces, Action<string, string> error)
@@ -84,7 +267,7 @@ public static class NirValidator
         switch (type)
         {
             case NirBitsType bits when bits.Width is >= 1 and <= 4096: break;
-            case NirEffectType: break;
+            case NirEffectType or NirExceptionType: break;
             case NirAddressType address when spaces.TryGetValue(address.Space, out var space) && address.Width == space.AddressWidth: break;
             case NirFunctionType function: CheckSignature(function.Signature, spaces, error); CheckOutcomes(function.Outcomes, error); break;
             default: error("type", "类型无效、位宽不受支持或地址空间未声明"); break;
@@ -102,7 +285,7 @@ public static class NirValidator
         {
             if (block.Parameters.IsDefault || block.Operations.IsDefault) { Error("block-array", "块集合必须初始化", block.Id); return; }
             foreach (var operation in block.Operations)
-                if (operation is NirPure { Inputs.IsDefault: true } or NirCall { Arguments.IsDefault: true } or NirCall { Results.IsDefault: true })
+                if (operation is NirPure { Inputs.IsDefault: true } or NirFloat { Inputs.IsDefault: true } or NirCall { Arguments.IsDefault: true } or NirCall { Results.IsDefault: true })
                 { Error("operation-array", "操作集合必须初始化", block.Id); return; }
             if (NirInspection.Edges(block.Terminator).Any(e => e.Arguments.IsDefault) ||
                 block.Terminator is NirReturn { Values.IsDefault: true } or NirTailCall { Arguments.IsDefault: true } or NirNoReturnCall { Arguments.IsDefault: true })
@@ -136,17 +319,23 @@ public static class NirValidator
         }
         var predecessors = blocks.Keys.ToDictionary(id => id, _ => new HashSet<NirBlockId>());
         foreach (var block in function.Blocks)
+        {
+            foreach (var successor in NirInspection.Successors(block.Terminator))
+            {
+                if (!blocks.ContainsKey(successor)) { Error("edge-target", "边目标不存在", block.Id); continue; }
+                predecessors[successor].Add(block.Id);
+            }
             foreach (var edge in NirInspection.Edges(block.Terminator))
             {
-                if (!blocks.TryGetValue(edge.Target, out var target)) { Error("edge-target", "边目标不存在", block.Id); continue; }
-                predecessors[edge.Target].Add(block.Id);
+                if (!blocks.TryGetValue(edge.Target, out var target)) continue;
                 if (edge.Arguments.IsDefault || !NirInspection.TypesEqual(edge.Arguments.Select(x => x.Type), target.Parameters.Select(x => x.Type)))
                     Error("edge-arguments", "每条边的参数数量及类型必须匹配目标块", block.Id);
             }
+        }
         var reachable = new HashSet<NirBlockId>();
         var pending = new Queue<NirBlockId>(entries.Where(blocks.ContainsKey));
         while (pending.TryDequeue(out var id))
-            if (reachable.Add(id)) foreach (var edge in NirInspection.Edges(blocks[id].Terminator)) if (blocks.ContainsKey(edge.Target)) pending.Enqueue(edge.Target);
+            if (reachable.Add(id)) foreach (var target in NirInspection.Successors(blocks[id].Terminator)) if (blocks.ContainsKey(target)) pending.Enqueue(target);
         foreach (var block in function.Blocks) if (!reachable.Contains(block.Id)) Error("unreachable-block", "块不能从任何声明入口到达", block.Id);
         var dominance = reachable.ToDictionary(id => id, id => entries.Contains(id) ? new HashSet<NirBlockId> { id } : new HashSet<NirBlockId>(reachable));
         var changed = true;
@@ -170,7 +359,7 @@ public static class NirValidator
             while (acyclic.TryDequeue(out var id))
             {
                 removed++;
-                foreach (var target in NirInspection.Edges(blocks[id].Terminator).Select(e => e.Target).Distinct().Where(reachable.Contains))
+                foreach (var target in NirInspection.Successors(blocks[id].Terminator).Distinct().Where(reachable.Contains))
                     if (--degrees[target] == 0) acyclic.Enqueue(target);
             }
             if (removed != reachable.Count) Error("loop-outcome", "尚无终止证明的控制流环必须允许 Diverge");
@@ -199,7 +388,7 @@ public static class NirValidator
                 if (operation is NirFunctionConstant { Result.Type: NirFunctionType reference } symbol &&
                     outcomes.TryGetValue(symbol.Function, out var symbolOutcomes) && (symbolOutcomes & ~reference.Outcomes) != 0)
                     Error("function-outcomes", "函数值合同遗漏实际目标的可能出口", block.Id, i);
-                if (operation is NirLoad or NirStore or NirLocalAlloc && !function.Outcomes.HasFlag(NirOutcomes.Fault))
+                if (operation is NirLoad or NirStore or NirLocalAlloc or NirAtomicRmw or NirCompareExchange && !function.Outcomes.HasFlag(NirOutcomes.Fault))
                     Error("memory-outcome", "可能失败的内存操作必须声明函数 Fault 出口", block.Id, i);
                 if (operation is NirCall call) CheckCallOutcomes(call.Target, false, function, outcomes, (c, m) => Error(c, m, block.Id, i));
             }
@@ -234,6 +423,23 @@ public static class NirValidator
                     CheckCallOutcomes(call.Target, true, function, outcomes, (c, m) => Error(c, m, block.Id));
                     if (call.Effect.Id != effect.Id || call.Effect.Type is not NirEffectType) Error("no-return-effect", "无返回调用必须传出当前 Effect", block.Id);
                     break;
+                case NirRaise raise:
+                    if (raise.Exception.Type is not NirExceptionType || !function.Outcomes.HasFlag(NirOutcomes.Unwind))
+                        Error("raise", "Raise 要求异常身份值及函数 Unwind 出口", block.Id);
+                    if (raise.Effect.Id != effect.Id || raise.Effect.Type is not NirEffectType) Error("raise-effect", "Raise 必须传出当前 Effect", block.Id);
+                    break;
+                case NirInvoke invoke:
+                    var invokeSignature = CallSignature(invoke.Target, signatures);
+                    CheckCall(invoke.Target, invoke.Arguments, invokeSignature?.Results ?? [], signatures, (c, m) => Error(c, m, block.Id));
+                    var invokeOutcomes = CallOutcomes(invoke.Target, outcomes);
+                    if ((invoke.Normal is not null) != invokeOutcomes.HasFlag(NirOutcomes.Return) || !invokeOutcomes.HasFlag(NirOutcomes.Unwind))
+                        Error("invoke-outcomes", "Invoke 的正常边必须对应 Return，异常边要求目标允许 Unwind", block.Id);
+                    if ((invokeOutcomes & (NirOutcomes.Fault | NirOutcomes.Terminate | NirOutcomes.Diverge) & ~function.Outcomes) != 0)
+                        Error("callee-outcomes", "Invoke 的未捕获结果超出调用者合同", block.Id);
+                    if (invoke.Effect.Id != effect.Id || invoke.Effect.Type is not NirEffectType) Error("invoke-effect", "Invoke 必须传入当前 Effect", block.Id);
+                    if (invoke.Normal is { } normalEdge) CheckInvokeEdge(normalEdge, invokeSignature?.Results ?? []);
+                    CheckInvokeEdge(invoke.Unwind, [NirExceptionType.Instance]);
+                    break;
                 case NirFault fault:
                     if (!function.Outcomes.HasFlag(NirOutcomes.Fault) || fault.Effect.Id != effect.Id || fault.Effect.Type is not NirEffectType || string.IsNullOrWhiteSpace(fault.Code))
                         Error("fault", "Fault 必须符合函数合同并使用当前 Effect", block.Id);
@@ -243,38 +449,47 @@ public static class NirValidator
                         Error("terminate", "Terminate 必须符合函数合同并使用当前 Effect", block.Id);
                     break;
             }
+            void CheckInvokeEdge(NirInvokeEdge edge, IEnumerable<NirType> produced)
+            {
+                if (edge.Captured.Any(value => value.Type is NirEffectType)) Error("invoke-capture", "Invoke 捕获值不得包含 Effect", block.Id);
+                if (blocks.TryGetValue(edge.Target, out var target) &&
+                    !NirInspection.TypesEqual(produced.Concat(edge.Captured.Select(value => value.Type)).Append(NirEffectType.Instance), target.Parameters.Select(value => value.Type)))
+                    Error("invoke-edge", "Invoke 后继参数必须依次为调用结果、捕获值、Effect", block.Id);
+            }
         }
     }
 
     private static void CheckCallOutcomes(NirCallTarget target, bool tail, NirFunction owner,
         Dictionary<string, NirOutcomes> outcomes, Action<string, string> error)
     {
-        var possible = target switch
-        {
-            NirDirectTarget direct => outcomes.GetValueOrDefault(direct.Function),
-            NirIndirectTarget { Function.Type: NirFunctionType type } => type.Outcomes,
-            _ => NirOutcomes.None
-        };
+        var possible = CallOutcomes(target, outcomes);
         if (!tail && !possible.HasFlag(NirOutcomes.Return))
             error("call-outcomes", "排除 Return 的合同必须使用 NirNoReturnCall");
         if (tail && possible.HasFlag(NirOutcomes.Return) && !owner.Outcomes.HasFlag(NirOutcomes.Return))
             error("callee-outcomes", "尾调用可能正常返回，但调用者合同排除 Return");
-        if ((possible & (NirOutcomes.Fault | NirOutcomes.Terminate | NirOutcomes.Diverge) & ~owner.Outcomes) != 0)
+        if ((possible & (NirOutcomes.Fault | NirOutcomes.Terminate | NirOutcomes.Diverge | NirOutcomes.Unwind) & ~owner.Outcomes) != 0)
             error("callee-outcomes", "调用行为超出调用者声明的结果合同");
     }
     private static void CheckCall(NirCallTarget target, ImmutableArray<NirValue> arguments, IEnumerable<NirType> results,
         Dictionary<string, NirSignature> signatures, Action<string, string> error)
     {
-        var signature = target switch
-        {
-            NirDirectTarget direct => signatures.GetValueOrDefault(direct.Function),
-            NirIndirectTarget { Function.Type: NirFunctionType type } => type.Signature,
-            _ => null
-        };
+        var signature = CallSignature(target, signatures);
         if (signature is null) { error("call-target", "调用目标没有已声明的逻辑签名"); return; }
         if (arguments.IsDefault || !NirInspection.TypesEqual(arguments.Select(v => v.Type), signature.Parameters) || !NirInspection.TypesEqual(results, signature.Results))
             error("call-signature", "调用参数或结果与逻辑签名不一致");
     }
+    private static NirSignature? CallSignature(NirCallTarget target, Dictionary<string, NirSignature> signatures) => target switch
+    {
+        NirDirectTarget direct => signatures.GetValueOrDefault(direct.Function),
+        NirIndirectTarget { Function.Type: NirFunctionType type } => type.Signature,
+        _ => null
+    };
+    private static NirOutcomes CallOutcomes(NirCallTarget target, Dictionary<string, NirOutcomes> outcomes) => target switch
+    {
+        NirDirectTarget direct => outcomes.GetValueOrDefault(direct.Function),
+        NirIndirectTarget { Function.Type: NirFunctionType type } => type.Outcomes,
+        _ => NirOutcomes.None
+    };
     private static void CheckOperation(NirOperation operation, Dictionary<string, NirSignature> signatures, Action<string, string> error)
     {
         static int Width(NirType type) => type switch { NirBitsType x => x.Width, NirAddressType x => x.Width, _ => 0 };
@@ -289,13 +504,46 @@ public static class NirValidator
                     error("function-constant", "函数值必须绑定匹配的逻辑签名");
                 break;
             case NirPure pure: CheckPure(pure, error); break;
+            case NirFloat floating:
+                if (floating.Spec is null || floating.Spec.Validate() is not null || floating.Inputs.IsDefault ||
+                    floating.Inputs.Length != floating.Spec.InputCount || floating.Exceptions.Type is not NirBitsType { Width: 6 } ||
+                    floating.Result.Type is not NirBitsType floatResult || floatResult.Width != floating.Spec.ResultWidth ||
+                    floating.Inputs.Any(v => v.Type is not NirBitsType bits || bits.Width != floating.Spec.OperandWidth))
+                    error("float", "浮点操作要求明确格式、舍入及完整规则，输入输出宽度匹配，异常结果为 Bits(6)");
+                if (floating.Controls is { } controls && (controls.RoundingMode.Type is not NirBitsType { Width: 3 } ||
+                    controls.FlushSubnormalInput.Type is not NirBitsType { Width: 1 } || controls.FlushSubnormalOutput.Type is not NirBitsType { Width: 1 } ||
+                    controls.CanonicalNaN.Type is not NirBitsType { Width: 1 } || controls.ExactTinyUnderflow is { Type: not NirBitsType { Width: 1 } } ||
+                    floating.Spec?.Rules?.SubnormalOutput is null or BinarySubnormalOutput.Preserve))
+                    error("float-controls", "动态浮点控制必须使用明确的语义位值，并指定输出清零的检测阶段");
+                break;
             case NirLoad load:
                 if (load.Address.Type is not NirAddressType || load.Result.Type is not NirBitsType bits || bits.Width % 8 != 0 || !Enum.IsDefined(load.Order))
                     error("load", "读取要求显式地址、完整字节宽度和明确字节顺序");
+                if (load.Result.Type is NirBitsType readBits && (!NirAtomicContract.AtomicWidth(readBits.Width, load.AtomicWidth) || !NirAtomicContract.LoadOrder(load.MemoryOrder, load.AtomicWidth)))
+                    error("load-order", "读取的原子粒度与内存顺序无效");
                 break;
             case NirStore store:
                 if (store.Address.Type is not NirAddressType || store.Value.Type is not NirBitsType bits2 || bits2.Width % 8 != 0 || !Enum.IsDefined(store.Order))
                     error("store", "写入要求显式地址、完整字节宽度和明确字节顺序");
+                if (store.Value.Type is NirBitsType writeBits && (!NirAtomicContract.AtomicWidth(writeBits.Width, store.AtomicWidth) || !NirAtomicContract.StoreOrder(store.MemoryOrder, store.AtomicWidth)))
+                    error("store-order", "写入的原子粒度与内存顺序无效");
+                break;
+            case NirAtomicRmw atomic:
+                if (atomic.Address.Type is not NirAddressType || atomic.Result.Type is not NirBitsType old || old.Width % 8 != 0 ||
+                    !NirInspection.TypeEquals(atomic.Result.Type, atomic.Value.Type) || !Enum.IsDefined(atomic.Code) ||
+                    !Enum.IsDefined(atomic.Order) || !NirAtomicContract.RmwOrder(atomic.MemoryOrder))
+                    error("atomic-rmw", "原子更新要求一致的字节位宽、地址和已定义的操作与顺序");
+                break;
+            case NirCompareExchange exchange:
+                if (exchange.Address.Type is not NirAddressType || exchange.OldValue.Type is not NirBitsType prior || prior.Width % 8 != 0 ||
+                    !NirInspection.TypeEquals(exchange.OldValue.Type, exchange.Expected.Type) ||
+                    !NirInspection.TypeEquals(exchange.OldValue.Type, exchange.Replacement.Type) ||
+                    exchange.Success.Type is not NirBitsType { Width: 1 } || !Enum.IsDefined(exchange.Order) ||
+                    !NirAtomicContract.FailureOrder(exchange.SuccessOrder, exchange.FailureOrder))
+                    error("compare-exchange", "比较交换要求一致的字节位宽、Bits(1) 成功结果及合法的成功/失败顺序");
+                break;
+            case NirFence fence:
+                if (!NirAtomicContract.FenceOrder(fence.MemoryOrder)) error("fence-order", "Fence 要求 Acquire、Release、AcquireRelease 或 SequentiallyConsistent");
                 break;
             case NirLocalAlloc alloc:
                 if (alloc.Result.Type is not NirAddressType || alloc.Size.Type is not NirBitsType || alloc.Alignment <= 0 || (alloc.Alignment & (alloc.Alignment - 1)) != 0)
@@ -303,6 +551,17 @@ public static class NirValidator
                 break;
             case NirCall call: CheckCall(call.Target, call.Arguments, call.Results.Select(v => v.Type), signatures, error); break;
             case NirChoose choose: if (choose.Result.Type is not NirBitsType) error("choose", "Choose 当前仅支持位串结果"); break;
+            case NirExceptionCreate create:
+                if (create.Result.Type is not NirExceptionType) error("exception-create", "异常创建要求 Exception 类型结果");
+                break;
+            case NirEnvironmentRead read:
+                if (NirEnvironmentContract.Width(read.Field) == 0 || read.Result.Type is not NirBitsType readType || readType.Width != NirEnvironmentContract.Width(read.Field))
+                    error("environment-read", "环境读取必须匹配已定义字段的宽度");
+                break;
+            case NirEnvironmentWrite write:
+                if (NirEnvironmentContract.Width(write.Field) == 0 || write.Value.Type is not NirBitsType writeType || writeType.Width != NirEnvironmentContract.Width(write.Field))
+                    error("environment-write", "环境写入必须匹配已定义字段的宽度");
+                break;
         }
     }
     private static void CheckPure(NirPure pure, Action<string, string> error)

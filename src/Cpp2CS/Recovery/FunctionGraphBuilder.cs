@@ -10,29 +10,26 @@ namespace Cpp2CS.Recovery;
 
 public static class FunctionGraphBuilder
 {
-    public const string Version = "derived-function-graph/1";
+    public const string Version = "derived-function-graph/2";
 
     public static DerivedFunctionGraph Build(ImageDocument image, FunctionContract function,
         IEnumerable<FunctionContract> contracts, FunctionGraphOptions? options = null) =>
         Build(new ImageSource(image), function, contracts, options);
 
     public static DerivedFunctionGraph Build(IRegionInstructionSource source, FunctionContract function,
-        IEnumerable<FunctionContract> contracts, FunctionGraphOptions? options = null)
+        IEnumerable<FunctionContract> contracts, FunctionGraphOptions? options = null) =>
+        Build(source, function, new FunctionContractIndex(contracts.Append(function)), options);
+
+    public static DerivedFunctionGraph Build(IRegionInstructionSource source, FunctionContract function,
+        FunctionContractIndex known, FunctionGraphOptions? options = null)
     {
         options ??= new();
         if (options.MaxInstructions < 1) throw new ArgumentOutOfRangeException(nameof(options));
         if (!Enum.IsDefined(source.Architecture) || string.IsNullOrWhiteSpace(source.ImageId))
             throw new ArgumentException("函数图缺少机器来源", nameof(source));
-        var known = new Dictionary<ulong, FunctionContract>();
-        foreach (var contract in contracts.Append(function))
-        {
-            if (known.TryGetValue(contract.EntryAddress, out var prior) && ContractDependency(prior) != ContractDependency(contract))
-                throw new ArgumentException($"同一入口具有冲突的函数合同: 0x{contract.EntryAddress:X}", nameof(contracts));
-            known[contract.EntryAddress] = contract;
-        }
         var dependencies = new HashSet<string>(StringComparer.Ordinal)
         {
-            Version, MachineAbi.Version, MirJson.SemanticsVersion, ContractDependency(function)
+            Version, MachineAbi.Version, MirJson.SemanticsVersion, known.Dependency(function)
         };
         var blocks = new List<DerivedFunctionBlock>();
         var gaps = ImmutableArray.CreateBuilder<RecoveryGap>();
@@ -114,12 +111,12 @@ public static class FunctionGraphBuilder
                         Missing(RecoveryGapKind.UnsupportedInterface, reason!);
                         continue;
                     }
-                    dependencies.Add(ContractDependency(callee));
+                    dependencies.Add(known.Dependency(callee));
                     var continuation = callee.Effects.MayReturn
                         ? (ulong?)checked(instruction.Origin.Address + (ulong)instruction.Origin.Bytes.Length) : null;
                     edges.Add(new(edgeId, item.Id, successor, DerivedEdgeKind.Call,
                         continuation is { } next ? Schedule(next) : null, target,
-                        MachineAbi.CreateSummary(callee), continuation, null));
+                        known.Summary(callee), continuation, null));
                     continue;
                 }
                 if (successor.Kind == SuccessorKind.ExceptionBoundary)
@@ -139,7 +136,8 @@ public static class FunctionGraphBuilder
                 if (known.TryGetValue(target.Value, out var tailCallee) &&
                     (target != function.EntryAddress || hasTailEvidence))
                 {
-                    if (!hasTailEvidence || successor.Kind != SuccessorKind.Jump)
+                    var candidate = !hasTailEvidence && options.InferTailCallCandidates && target != function.EntryAddress;
+                    if ((!hasTailEvidence && !candidate) || successor.Kind != SuccessorKind.Jump)
                     {
                         Missing(RecoveryGapKind.UnclassifiedTailCall, "转移进入另一函数合同入口；缺少栈、保存状态和返回协议的尾调用证据");
                         continue;
@@ -149,10 +147,11 @@ public static class FunctionGraphBuilder
                         Missing(RecoveryGapKind.UnsupportedInterface, reason ?? "尾调用结果接口与当前函数不一致");
                         continue;
                     }
-                    dependencies.Add(ContractDependency(tailCallee));
-                    dependencies.Add($"adopted-tail-call:0x{item.Address:X}:{tailEvidence}");
+                    dependencies.Add(known.Dependency(tailCallee));
+                    dependencies.Add(candidate ? $"tail-call-candidate:0x{item.Address:X}:0x{target:X}"
+                        : $"adopted-tail-call:0x{item.Address:X}:{tailEvidence}");
                     edges.Add(new(edgeId, item.Id, successor, DerivedEdgeKind.TailCall, null, target,
-                        MachineAbi.CreateSummary(tailCallee), null, null));
+                        known.Summary(tailCallee), null, null, candidate));
                     continue;
                 }
                 edges.Add(new(edgeId, item.Id, successor, DerivedEdgeKind.Direct, Schedule(target.Value), target, null, null, null));

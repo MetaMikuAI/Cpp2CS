@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Collections.Immutable;
 using System.Numerics;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -53,22 +52,22 @@ public static class NirBinaryChecks
                 Contract(image.Architecture, "read_count", callee, new(32), true,
                     "direct machine call target from the class_count exported entry")
             };
-            var recovered = NirRecoveryChecks.Recover(source, contracts, new(TailCallEvidence:
-                ImmutableDictionary<ulong, string>.Empty.Add(trampoline,
-                    "named export consists solely of a direct branch, preserving entry frame and argument/return channels")));
+            var recovered = NirRecoveryChecks.Recover(source, contracts);
             CoreChecks.Require(recovered.Complete, NirRecoveryChecks.Explain(recovered));
             var stem = arm ? "arm64" : "x64";
             var contractJson = new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
             contractJson.Converters.Add(new JsonStringEnumConverter());
-            // CLI 合同文件不隐含尾调用证据；转发入口另在本验证的 GraphOptions 中采用。
+            // 转发入口由恢复器证明返回协议，不在合同文件中预先采用尾调用结论。
             File.WriteAllText(Path.Combine(outputDirectory, stem + ".contracts.json"), JsonSerializer.Serialize(
-                contracts.Where(contract => contract.Name != "unbox").ToArray(), contractJson) + Environment.NewLine);
+                contracts, contractJson) + Environment.NewLine);
             File.WriteAllText(Path.Combine(outputDirectory, stem + ".nir.json"), NirJson.Serialize(recovered.Module) + Environment.NewLine);
             File.WriteAllText(Path.Combine(outputDirectory, stem + ".nir.txt"), NirText.Format(recovered.Module));
             CoreChecks.Require(recovered.Module.Functions.Single(f => f.Id == "class_count").Blocks
                 .SelectMany(b => b.Operations).Count(op => op is NirCall) == 1, "real exported caller preserves one logical call");
             CoreChecks.Require(recovered.Module.Functions.Single(f => f.Id == "unbox").Blocks
-                .Any(block => block.Terminator is NirTailCall), "real export trampoline becomes a logical tail call under explicit protocol evidence");
+                .Any(block => block.Terminator is NirTailCall) && recovered.Functions.Single(f => f.Graph.Contract.Name == "unbox")
+                .Evidence.Any(evidence => evidence.Rule == "tail.return-protocol"),
+                "real export trampoline becomes a logical tail call after automatic protocol proof");
             checks += 3;
             var addresses = recovered.Functions.SelectMany(function => function.Graph.Blocks).Select(block => block.Address).ToArray();
             var space = recovered.Module.MemorySpaces.Single().Id;

@@ -76,6 +76,8 @@ public static class DerivedGraphValidator
                 if (direct is not null && edge.MachineTarget != direct) errors.Add("original machine target changed");
                 if (edge.Kind is not (DerivedEdgeKind.Call or DerivedEdgeKind.TailCall) &&
                     (edge.Call is not null || edge.Continuation is not null)) errors.Add("non-call edge contains a summary");
+                if (edge.IsTailCandidate && edge.Kind != DerivedEdgeKind.TailCall)
+                    errors.Add("tail candidate is attached to a non-tail edge");
                 switch (edge.Kind)
                 {
                     case DerivedEdgeKind.Direct:
@@ -125,12 +127,18 @@ public static class DerivedGraphValidator
             errors.AddRange(ValidateSummary(summary));
             if (edge.Kind == DerivedEdgeKind.TailCall)
             {
+                var evidence = edge.IsTailCandidate
+                    ? DirectTailCandidate()
+                    : graph.Dependencies.Any(value => value.StartsWith($"adopted-tail-call:0x{instruction.Origin.Address:X}:", StringComparison.Ordinal));
                 if (edge.Source.TransferHint != TransferHint.None || edge.Source.Kind != SuccessorKind.Jump ||
                     edge.TargetBlock is not null || edge.Continuation is not null ||
-                    summary.Callee.Signature.Result != graph.Contract.Signature.Result ||
-                    !graph.Dependencies.Any(value => value.StartsWith($"adopted-tail-call:0x{instruction.Origin.Address:X}:", StringComparison.Ordinal)))
-                    errors.Add("tail call lacks an adopted compatible return-protocol relation");
+                    summary.Callee.Signature.Result != graph.Contract.Signature.Result || !evidence)
+                    errors.Add("tail call lacks a compatible adopted relation or a direct candidate awaiting protocol proof");
                 return;
+
+                bool DirectTailCandidate() => summary.Callee.EntryAddress != graph.Contract.EntryAddress &&
+                    RegionBuilder.DirectAddress(instruction, edge.Source) == summary.Callee.EntryAddress &&
+                    graph.Dependencies.Contains($"tail-call-candidate:0x{instruction.Origin.Address:X}:0x{summary.Callee.EntryAddress:X}");
             }
             if (edge.Source.TransferHint != TransferHint.Call) errors.Add("call summary is not attached to a machine call");
             if (RegionBuilder.DirectAddress(instruction, edge.Source) is null &&

@@ -217,6 +217,14 @@ public static class RecoveryGraphChecks
 
             if (!arm)
             {
+                var volatileStatus = Analyze((builder, _) => builder.Write("mxcsr", builder.Or(builder.Read("mxcsr", 32),
+                    builder.Shl(builder.Zext(builder.Extract(builder.Read(argument, 64), 0, 1), 32), builder.Const(32, 5UL)))));
+                Check(volatileStatus.Frame.Diagnostics.All(diagnostic => diagnostic.Code is not ("return.preserved" or "contract.return-preserved")),
+                    "bitwise OR of a shifted low status bit preserves all higher ABI control bits");
+                var changedControl = Analyze((builder, _) => builder.Write("mxcsr", builder.Or(builder.Read("mxcsr", 32),
+                    builder.Shl(builder.Zext(builder.Extract(builder.Read(argument, 64), 0, 1), 32), builder.Const(32, 6UL)))));
+                Check(changedControl.Frame.Diagnostics.Any(diagnostic => diagnostic.Code == "return.preserved"),
+                    "bitwise proof does not assume an unknown written control bit is preserved");
                 var direction = Analyze((builder, _) => builder.Write("df", builder.Const(1, 1UL)));
                 Check(direction.Frame.Diagnostics.Any(diagnostic => diagnostic.Code == "contract.return-constant"),
                     "STD before return contradicts the ABI direction-flag protocol");
@@ -294,7 +302,7 @@ public static class RecoveryGraphChecks
         new(false, false, false, false, true, false, false),
         ["fixture adopts the stated scalar ABI"], new(true, true));
 
-    private static MirInstruction Decode(Architecture architecture, ulong address, string hex)
+    internal static MirInstruction Decode(Architecture architecture, ulong address, string hex)
     {
         var bytes = Convert.FromHexString(hex);
         var origin = new InstructionOrigin(ImageId, address, checked((long)address), bytes);

@@ -12,6 +12,7 @@ public readonly record struct NirBlockId(int Id);
 [JsonDerivedType(typeof(NirEffectType), "effect")]
 [JsonDerivedType(typeof(NirAddressType), "address")]
 [JsonDerivedType(typeof(NirFunctionType), "function")]
+[JsonDerivedType(typeof(NirExceptionType), "exception")]
 public abstract record NirType;
 public sealed record NirBitsType(int Width) : NirType;
 public sealed record NirEffectType : NirType
@@ -50,13 +51,22 @@ public sealed record NirIndirectTarget(NirValue Function) : NirCallTarget;
 [JsonDerivedType(typeof(NirLocalAlloc), "local-alloc")]
 [JsonDerivedType(typeof(NirCall), "call")]
 [JsonDerivedType(typeof(NirChoose), "choose")]
+[JsonDerivedType(typeof(NirFloat), "float")]
+[JsonDerivedType(typeof(NirAtomicRmw), "atomic-rmw")]
+[JsonDerivedType(typeof(NirCompareExchange), "compare-exchange")]
+[JsonDerivedType(typeof(NirFence), "fence")]
+[JsonDerivedType(typeof(NirEnvironmentRead), "environment-read")]
+[JsonDerivedType(typeof(NirEnvironmentWrite), "environment-write")]
+[JsonDerivedType(typeof(NirExceptionCreate), "exception-create")]
 public abstract record NirOperation;
 public sealed record NirConstant(NirValue Result, BigInteger Bits) : NirOperation;
 public sealed record NirPure(NirValue Result, NirPureCode Code, ImmutableArray<NirValue> Inputs, int BitOffset = 0) : NirOperation;
 public sealed record NirFunctionConstant(NirValue Result, string Function) : NirOperation;
-// 内存失败沿函数的 Fault 出口传播；不产生正常结果或提交部分写入。
-public sealed record NirLoad(NirValue Result, NirValue Address, NirByteOrder Order, NirEffectFlow Flow) : NirOperation;
-public sealed record NirStore(NirValue Address, NirValue Value, NirByteOrder Order, NirEffectFlow Flow) : NirOperation;
+// 内存失败沿函数的 Fault 出口传播；原子粒度明确时逐粒度访问，已提交的前序粒度保留。
+public sealed record NirLoad(NirValue Result, NirValue Address, NirByteOrder Order, NirEffectFlow Flow,
+    NirMemoryOrder MemoryOrder = NirMemoryOrder.Unordered, int AtomicWidth = 0) : NirOperation;
+public sealed record NirStore(NirValue Address, NirValue Value, NirByteOrder Order, NirEffectFlow Flow,
+    NirMemoryOrder MemoryOrder = NirMemoryOrder.Unordered, int AtomicWidth = 0) : NirOperation;
 public sealed record NirLocalAlloc(NirValue Result, NirValue Size, int Alignment, NirEffectFlow Flow) : NirOperation;
 public sealed record NirCall(NirCallTarget Target, ImmutableArray<NirValue> Arguments,
     ImmutableArray<NirValue> Results, NirEffectFlow Flow) : NirOperation;
@@ -72,6 +82,8 @@ public sealed record NirEdge(NirBlockId Target, ImmutableArray<NirValue> Argumen
 [JsonDerivedType(typeof(NirNoReturnCall), "no-return-call")]
 [JsonDerivedType(typeof(NirFault), "fault")]
 [JsonDerivedType(typeof(NirTerminate), "terminate")]
+[JsonDerivedType(typeof(NirInvoke), "invoke")]
+[JsonDerivedType(typeof(NirRaise), "raise")]
 public abstract record NirTerminator;
 public sealed record NirJump(NirEdge Edge) : NirTerminator;
 public sealed record NirBranch(NirValue Condition, NirEdge WhenTrue, NirEdge WhenFalse) : NirTerminator;
@@ -84,7 +96,7 @@ public sealed record NirBlock(NirBlockId Id, ImmutableArray<NirValue> Parameters
     ImmutableArray<NirOperation> Operations, NirTerminator Terminator);
 
 [Flags]
-public enum NirOutcomes { None = 0, Return = 1, Fault = 2, Terminate = 4, Diverge = 8 }
+public enum NirOutcomes { None = 0, Return = 1, Fault = 2, Terminate = 4, Diverge = 8, Unwind = 16 }
 [Flags]
 public enum NirExternalEffects { None = 0, ReadMemory = 1, WriteMemory = 2, Environment = 4 }
 public sealed record NirFunction(string Id, NirSignature Signature, NirBlockId Entry, ImmutableArray<NirBlock> Blocks)

@@ -27,6 +27,7 @@ public static class NirText
     public static string Type(NirType type) => type switch
     {
         NirBitsType bits => $"bits{bits.Width}", NirEffectType => "effect",
+        NirExceptionType => "exception",
         NirAddressType address => $"address(@{address.Space},{address.Width})",
         NirFunctionType function => "function" + Signature(function.Signature) + $"[{function.Outcomes}]",
         _ => throw new ArgumentOutOfRangeException(nameof(type))
@@ -46,10 +47,18 @@ public static class NirText
         NirConstant x => $"{Definition(x.Result)} = const {x.Bits}",
         NirFunctionConstant x => $"{Definition(x.Result)} = function @{x.Function}",
         NirPure x => $"{Definition(x.Result)} = {x.Code}({Values(x.Inputs)})" + (x.Code == NirPureCode.Extract ? $" offset={x.BitOffset}" : ""),
-        NirLoad x => $"{Definition(x.Result)}, {Value(x.Flow.Output)} = load.{x.Order}({Value(x.Address)}, {Value(x.Flow.Input)}) fault=propagate",
-        NirStore x => $"{Value(x.Flow.Output)} = store.{x.Order}({Value(x.Address)}, {Value(x.Value)}, {Value(x.Flow.Input)}) fault=propagate",
+        NirFloat x => $"{Definition(x.Result)}, {Definition(x.Exceptions)} = float.{x.Spec.Kind}({Values(x.Inputs)}) spec={System.Text.Json.JsonSerializer.Serialize(x.Spec)}" +
+            (x.Controls is { } controls ? $" controls=({Values(controls.Values)})" : ""),
+        NirLoad x => $"{Definition(x.Result)}, {Value(x.Flow.Output)} = load.{x.Order}({Value(x.Address)}, {Value(x.Flow.Input)}) order={x.MemoryOrder} atomic={x.AtomicWidth} fault=propagate",
+        NirStore x => $"{Value(x.Flow.Output)} = store.{x.Order}({Value(x.Address)}, {Value(x.Value)}, {Value(x.Flow.Input)}) order={x.MemoryOrder} atomic={x.AtomicWidth} fault=propagate",
+        NirAtomicRmw x => $"{Definition(x.Result)}, {Value(x.Flow.Output)} = atomic.{x.Code}.{x.Order}({Value(x.Address)}, {Value(x.Value)}, {Value(x.Flow.Input)}) order={x.MemoryOrder} fault=propagate",
+        NirCompareExchange x => $"{Definition(x.OldValue)}, {Definition(x.Success)}, {Value(x.Flow.Output)} = compare.exchange.{x.Order}({Value(x.Address)}, {Value(x.Expected)}, {Value(x.Replacement)}, {Value(x.Flow.Input)}) success={x.SuccessOrder} failure={x.FailureOrder} failure-writeback={x.WriteBackOnFailure} fault=propagate",
+        NirFence x => $"{Value(x.Flow.Output)} = fence.{x.MemoryOrder}({Value(x.Flow.Input)})",
         NirLocalAlloc x => $"{Definition(x.Result)}, {Value(x.Flow.Output)} = local.alloc({Value(x.Size)}, align={x.Alignment}, {Value(x.Flow.Input)}) fault=propagate",
         NirChoose x => $"{Definition(x.Result)}, {Value(x.Flow.Output)} = choose({Value(x.Flow.Input)})",
+        NirExceptionCreate x => $"{Definition(x.Result)}, {Value(x.Flow.Output)} = exception.create({Value(x.Flow.Input)})",
+        NirEnvironmentRead x => $"{Definition(x.Result)}, {Value(x.Flow.Output)} = environment.read.{x.Field}({Value(x.Flow.Input)})",
+        NirEnvironmentWrite x => $"{Value(x.Flow.Output)} = environment.write.{x.Field}({Value(x.Value)}, {Value(x.Flow.Input)})",
         NirCall x => $"{Values(x.Results.Append(x.Flow.Output))} = call {Target(x.Target)}({Values(x.Arguments.Append(x.Flow.Input))}) fault=propagate",
         _ => throw new ArgumentOutOfRangeException(nameof(operation))
     };
@@ -60,6 +69,10 @@ public static class NirText
         NirReturn x => $"return ({Values(x.Values.Append(x.Effect))})",
         NirTailCall x => $"tailcall {Target(x.Target)}({Values(x.Arguments.Append(x.Effect))})",
         NirNoReturnCall x => $"noreturn {Target(x.Target)}({Values(x.Arguments.Append(x.Effect))})",
+        NirRaise x => $"raise {Value(x.Exception)}, {Value(x.Effect)}",
+        NirInvoke x => $"invoke {Target(x.Target)}({Values(x.Arguments.Append(x.Effect))}) normal=" +
+            (x.Normal is { } normal ? $"b{normal.Target.Id}(results..., {Values(normal.Captured)}, effect)" : "none") +
+            $" unwind=b{x.Unwind.Target.Id}(exception, {Values(x.Unwind.Captured)}, effect)",
         NirFault x => $"fault {System.Text.Json.JsonSerializer.Serialize(x.Code)}, {Value(x.Effect)}",
         NirTerminate x => $"terminate {System.Text.Json.JsonSerializer.Serialize(x.Reason)}, {Value(x.Effect)}",
         _ => throw new ArgumentOutOfRangeException(nameof(terminator))

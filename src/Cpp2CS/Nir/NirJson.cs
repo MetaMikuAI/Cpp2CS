@@ -16,7 +16,8 @@ public static class NirJson
         var result = new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true,
-            UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow, RespectNullableAnnotations = true
+            UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow, RespectNullableAnnotations = true,
+            RespectRequiredConstructorParameters = true, AllowDuplicateProperties = false
         };
         result.Converters.Add(new BigIntegerConverter());
         result.Converters.Add(new JsonStringEnumConverter());

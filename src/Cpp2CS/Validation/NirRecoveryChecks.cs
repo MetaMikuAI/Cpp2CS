@@ -127,7 +127,7 @@ public static class NirRecoveryChecks
                 : ["F20F58C1", "B807000000", "C3"]);
             var unrecoveredEnvironment = Recover(deadFloat, [Contract(architecture, "dead_float", Entry, 0)]);
             CoreChecks.Require(!unrecoveredEnvironment.Complete && unrecoveredEnvironment.Gaps
-                .Any(gap => gap.Code == "contract.unmodeled-environment"),
+                .Any(gap => gap.Code == "contract.floating-effects"),
                 "dead floating result does not erase observable FPSR or MXCSR writes: " + Explain(unrecoveredEnvironment));
             checks++;
 
