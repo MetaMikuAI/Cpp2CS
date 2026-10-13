@@ -47,3 +47,13 @@ ldp w0, w1, [x3], #8
 ldr x0, [x3, x4, lsl #3]
 str w1, [x3, w4, sxtw #2]
 add x0, x29, #8
+mul w0, w1, w2
+mul x0, x1, x2
+mneg w0, w1, w2
+mneg x0, x1, x2
+madd w0, w1, w2, w4
+madd x0, x1, x2, x4
+msub w0, w1, w2, w4
+msub x0, x1, x2, x4
+madd w1, w1, w2, w1
+msub x2, x1, x2, x2

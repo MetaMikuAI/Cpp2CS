@@ -99,6 +99,17 @@ public static class Arm64Effects
                 Write(o[0].Register!, Node(op == "lsl" ? "shift-left" : op == "lsr" ? "shift-right" : "shift-arithmetic", width,
                     [Resize(Operand(o[1]), width)], o[2].Immediate, $"value_{pc:x}")); break;
             }
+            case "mul": case "mneg": case "madd": case "msub":
+            {
+                var width = Arm64Registers.Width(o[0].Register!);
+                if (o.Length != (op is "mul" or "mneg" ? 3 : 4) ||
+                    o.Any(p => p.Kind != 1 || p.Register?[0] is not ('w' or 'x') || Arm64Registers.Width(p.Register!) != width))
+                { unsupported = "乘法操作数不是同宽整数寄存器"; break; }
+                var product = Node("multiply", width, [Operand(o[1]), Operand(o[2])], id: $"product_{pc:x}");
+                Write(o[0].Register!, op == "mul" ? product : Node(op == "madd" ? "add" : "sub", width,
+                    [op == "mneg" ? Constant(0, width) : Operand(o[3]), product], id: $"value_{pc:x}"));
+                break;
+            }
             case "cmp": case "cmn": case "tst": case "fcmp":
             {
                 var left = Operand(o[0]);

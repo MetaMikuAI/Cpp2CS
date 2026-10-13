@@ -32,6 +32,11 @@ for width, reg in ((32, "w"), (64, "x")):
             case(f"{op}{width}_{shift}", kind, [kind], [f"{op} {reg}0, {reg}0, #{shift}"])
     for op in ("and", "orr", "eor"):
         case(f"{op}{width}", kind, [kind, kind], [f"{op} {reg}0, {reg}0, {reg}1"])
+    for op in ("mul", "mneg"):
+        case(f"{op}{width}", kind, [kind, kind], [f"{op} {reg}0, {reg}0, {reg}1"])
+    for op in ("madd", "msub"):
+        case(f"{op}{width}", kind, [kind, kind, kind], [f"{op} {reg}0, {reg}0, {reg}1, {reg}2"])
+    case(f"multiplyOverlap{width}", kind, [kind, kind], [f"msub {reg}1, {reg}0, {reg}1, {reg}1", f"mov {reg}0, {reg}1"])
     for suffix in ("b", "h", "w"):
         case(f"extend{suffix}{width}", kind, ["int32_t"], [f"mov {reg}1, #0", f"add {reg}0, {reg}1, w0, sxt{suffix}"])
 case("signedCompare", "int32_t", ["uint32_t", "uint32_t"], ["cmp w0, w1", "cset w0, lt"])
@@ -40,6 +45,7 @@ case("truncate", "int32_t", ["int64_t"], [])
 case("zeroExtendedReturn", "int64_t", ["int32_t"], ["mov w0, w0"])
 case("zeroExtendedShift", "int64_t", ["int32_t"], ["mov w0, w0", "lsl x0, x0, #17"])
 case("zeroExtendedAdd", "int64_t", ["int32_t", "int64_t"], ["mov w0, w0", "add x0, x0, x1"])
+case("zeroExtendedMultiply", "int64_t", ["int32_t", "int64_t"], ["mov w0, w0", "mul x0, x0, x1"])
 case("zeroExtendedEqual", "int32_t", ["int32_t", "int64_t"], ["mov w0, w0", "cmp x0, x1", "cset w0, eq"])
 case("zeroExtendedSelect", "int64_t", ["int32_t", "int64_t", "int64_t"], ["mov w0, w0", "cmp x2, #0", "csel x0, x0, x1, eq"])
 case("signedStackLoad", "int64_t", ["int32_t"], ["str w0, [sp, #-16]!", "ldrsw x0, [sp]", "add sp, sp, #16"])
@@ -49,6 +55,8 @@ case("undefinedHighAdd", "int64_t", ["int32_t"], ["add x0, x0, #1"], True)
 case("undefinedHighCompare", "int32_t", ["int32_t", "int64_t"], ["cmp x0, x1", "cset w0, eq"], True)
 case("referenceShift", "int64_t", ["Il2CppObject*"], ["lsl x0, x0, #1"], True)
 case("largePointerOffset", "int64_t", ["Il2CppObject*"], ["mov x1, #0x100000000", "add x0, x0, x1"], True)
+case("undefinedHighMultiply", "int64_t", ["int32_t", "int64_t"], ["mul x0, x0, x1"], True)
+case("referenceMultiply", "int64_t", ["Il2CppObject*", "int64_t"], ["mul x0, x0, x1"], True)
 
 source = ".text\n" + "\n".join(f".global {s['Name']}\n.type {s['Name']}, %function\n{s['Name']}:\n" +
     "\n".join(s["Instructions"] + ["ret"]) + f"\n.size {s['Name']}, .-{s['Name']}" for s in samples)

@@ -187,6 +187,10 @@ public sealed partial class FunctionLifter
                         return new(new InputBits($"field-address:{pc:x}", 64), field.Type + "*", new AddressOfExpression(location) { RootType = (first.Expression as AddressOfExpression)?.RootType ?? first.Type });
                     return Unknown(width, "算术操作数类型未确定");
                 }
+                case "multiply":
+                    if (width is 32 or 64 && IntegerProjection.Bits(first) is { } factor && IntegerProjection.Bits(inputs[1]) is { } multiplier)
+                        return Numeric(value, ValueOperation.Multiply, width == 32 ? "int32_t" : "int64_t", factor, multiplier);
+                    return Unknown(width, "乘法的整数类型或位宽未确定");
                 case "and":
                 {
                     if (width is 32 or 64 && IntegerProjection.Bits(first) is { } bitLeft && IntegerProjection.Bits(inputs[1]) is { } bitRight)

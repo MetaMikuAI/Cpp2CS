@@ -1,4 +1,5 @@
 """将统一机器效果逐条与 Unicorn 的真实 ARM64 执行比较，不使用游戏特例。"""
+import argparse
 import json
 import math
 import random
@@ -10,15 +11,19 @@ from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
 from unicorn.arm64_const import *
 
 ROOT = Path(__file__).resolve().parents[1]
-CFG = json.loads((ROOT / "native.local.json").read_text(encoding="utf-8"))
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("configuration", type=Path, nargs="?", default=ROOT / "native.local.json")
+parser.add_argument("--tool", type=Path, default=ROOT / "tests/Cpp2CS.Tests/bin/Release/net10.0/Cpp2CS.Tests.dll")
+args = parser.parse_args()
+CFG = json.loads(args.configuration.read_text(encoding="utf-8-sig"))
 OUT = ROOT / "artifacts" / "machine-effects"
 OUT.mkdir(parents=True, exist_ok=True)
 subprocess.run([CFG["Clang"], "-target", "aarch64-linux-gnu", "-c", str(ROOT / "tests/machine_effects.s"), "-o", str(OUT / "cases.o")], check=True)
 with (OUT / "cases.o").open("rb") as stream:
     code = ELFFile(stream).get_section_by_name(".text").data()
 (OUT / "cases.bin").write_bytes(code)
-subprocess.run(["dotnet", str(ROOT / "tests/Cpp2CS.Tests/bin/Release/net10.0/Cpp2CS.Tests.dll"),
-                "machine-effects", str(ROOT / "native.local.json"), str(OUT / "cases.bin"), str(OUT / "effects.json")], check=True)
+subprocess.run(["dotnet", str(args.tool.resolve()),
+                "machine-effects", str(args.configuration.resolve()), str(OUT / "cases.bin"), str(OUT / "effects.json")], check=True)
 effects = json.loads((OUT / "effects.json").read_text(encoding="utf-8"))
 BASE, MEMORY = 0x100000, 0x200000
 
@@ -49,6 +54,7 @@ def evaluate(node, registers, memory):
     elif op == "sign-extend": answer = signed(values[0], args[0]["Width"])
     elif op == "add": answer = values[0] + values[1]
     elif op == "sub": answer = values[0] - values[1]
+    elif op == "multiply": answer = values[0] * values[1]
     elif op == "and": answer = values[0] & values[1]
     elif op == "orr": answer = values[0] | values[1]
     elif op == "eor": answer = values[0] ^ values[1]
@@ -110,5 +116,8 @@ for effect in effects:
             checks += 1
         for address, expected in stored:
             assert bytes(uc.mem_read(address, len(expected))) == expected, (effect["Source"], case)
+            checks += 1
+        if effect["Source"]["Mnemonic"] in ("mul", "mneg", "madd", "msub"):
+            assert uc.reg_read(UC_ARM64_REG_NZCV) >> 28 == registers["nzcv"], (effect["Source"], case, "NZCV changed")
             checks += 1
 print(f"PASS: {len(effects)} ARM64 instructions x 32 states; {checks} independent register/memory comparisons")

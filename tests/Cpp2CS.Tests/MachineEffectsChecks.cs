@@ -23,6 +23,12 @@ public static class MachineEffectsChecks
         check(Arm64Effects.Lower(shifted).Unsupported is not null, "未知移位类型不会偷偷按 LSL 解释");
         var fp = new Instruction(0x108, "add", "", [Reg("x0"), Reg("fp"), new(2, null, 8, null, null, 0, 0, 0, 0)], false, false, "");
         check(Arm64Effects.Lower(fp).Reads.Contains("x29"), "循环分析使用的机器读取集合包含帧指针");
+        var multiply = new Instruction(0x10c, "msub", "", [Reg("w1"), Reg("w0"), Reg("w1"), Reg("w2")], false, false, "");
+        var multiplied = Arm64Effects.Lower(multiply);
+        check(multiplied.Unsupported is null && multiplied.Reads.ToHashSet().SetEquals(["x0", "x1", "x2"]) &&
+            multiplied.Writes.SequenceEqual(["x1"]), "乘减读取覆盖前的全部操作数，只写结果寄存器，不写标志");
+        var vector = new Instruction(0x110, "mul", "", [Reg("v0"), Reg("v1"), Reg("v2")], false, false, "");
+        check(Arm64Effects.Lower(vector).Unsupported is not null, "整数乘法不把同名 SIMD 指令当作标量计算");
     }
     public static void Export(string config, string binary, string output)
     {

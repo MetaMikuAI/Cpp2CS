@@ -1,6 +1,6 @@
 namespace Cpp2CS.Native;
 
-public enum ValueOperation { SignedToFloat, ZeroExtendWord, Unsigned, IntegerCast, FloatDivide, Ceiling, FloatToSignedCeiling, BitCast, Add, Subtract, Select, ArrayElement, NewArray, ReferenceSelect, SignExtend, ShiftLeft, LogicalShiftRight, ArithmeticShiftRight, BitAnd, BitOr, BitXor }
+public enum ValueOperation { SignedToFloat, ZeroExtendWord, Unsigned, IntegerCast, FloatDivide, Ceiling, FloatToSignedCeiling, BitCast, Add, Subtract, Select, ArrayElement, NewArray, ReferenceSelect, SignExtend, ShiftLeft, LogicalShiftRight, ArithmeticShiftRight, BitAnd, BitOr, BitXor, Multiply }
 internal sealed record IndexedArrayAddress(Expression Array, Expression Index, HeaderField Elements) : Expression;
 public sealed record OperationExpression(ValueOperation Operation, string Type, Expression[] Arguments) : Expression;
 
@@ -30,7 +30,7 @@ public static class ValueOperations
                 "long" => $"BitConverter.DoubleToInt64Bits({a[0]})",
                 _ => throw new InvalidOperationException("不支持的位转换类型")
             },
-            ValueOperation.Add or ValueOperation.Subtract => $"unchecked(({type})({a[0]}) {(operation.Operation == ValueOperation.Add ? "+" : "-")} ({type})({a[1]}))",
+            ValueOperation.Add or ValueOperation.Subtract or ValueOperation.Multiply => $"unchecked(({type})({a[0]}) {(operation.Operation == ValueOperation.Add ? "+" : operation.Operation == ValueOperation.Subtract ? "-" : "*")} ({type})({a[1]}))",
             ValueOperation.Select => $"({a[0]} ? unchecked(({type})({a[1]})) : unchecked(({type})({a[2]})))",
             ValueOperation.ReferenceSelect => $"({a[0]} ? {a[1]} : {a[2]})",
             ValueOperation.SignExtend => $"unchecked(({type})({(a[1] == "8" ? "sbyte" : a[1] == "16" ? "short" : a[1] == "32" ? "int" : "long")})({a[0]}))",
