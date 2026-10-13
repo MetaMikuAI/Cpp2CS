@@ -11,7 +11,9 @@ public sealed record SsaRecovery(NativeSsaProgram Program, InterfaceCall[] Inter
     public VirtualCall[] VirtualCalls { get; init; } = [];
     public AsyncBody? Body { get; init; }
     public SsaCallStorage[] CallStorages { get; init; } = [];
-    public string? CSharp => Async?.CSharp ?? Body?.CSharp;
+    public string[] OrdinaryProblems { get; init; } = [];
+    [System.Text.Json.Serialization.JsonIgnore] public LiftResult? Projection => Body?.Projection ?? Async?.Projection;
+    public string? CSharp => Body?.CSharp ?? Async?.CSharp;
 }
 public sealed class RecoverySession : IDisposable
 {
@@ -19,13 +21,11 @@ public sealed class RecoverySession : IDisposable
     public Symbols Symbols { get; }
     private readonly Arm64Decoder decoder;
     private readonly ManagedNames managed;
-    private readonly FunctionLifter lifter;
-    private readonly SemanticWriter writer;
+    private readonly Arm64MethodReader reader;
     private readonly NativeAbi abi;
     private readonly HeaderLayout layouts;
     private readonly RuntimeProfile runtime;
     private readonly NativeInputs inputs;
-    private readonly StaticSourceMembers staticMembers;
     private readonly Dictionary<string, string> inputHashes;
     public RecoverySession(NativeInputs inputs)
     {
@@ -42,41 +42,53 @@ public sealed class RecoverySession : IDisposable
         layouts = new HeaderLayout(inputs.Header, inputs.Clang);
         runtime = new RuntimeProfile(Image);
         abi = new(layouts, managed);
-        lifter = new(Image, decoder, Symbols, layouts, managed, runtime);
-        writer = new(Symbols);
-        staticMembers = new(layouts, managed, Symbols, address => lifter.Lift(address));
+        reader = new(Image, decoder, Symbols);
+    }
+    public MethodAnalysis Analyze(ulong address) => Analyze(Symbols.Unique(address) ?? throw new InvalidDataException("入口没有唯一符号签名"), Symbols.ForMethod());
+    private MethodAnalysis Analyze(NativeMethod source, Symbols symbols)
+    {
+        var method = abi.Normalize(source);
+        ManagedTypeBindings.Bind(method, symbols, layouts, managed);
+        var machine = reader.Read(method.Address);
+        var flow = NativeControlFlow.Build(machine.Instructions, machine.Boundary, runtime.NoReturn);
+        var ssa = new NativeSsa(flow, method, abi, symbols).Build();
+        var semantics = new SsaSemantics(ssa, method, symbols, layouts, abi, Image, runtime, new(Image, decoder));
+        var virtualCalls = VirtualDispatch.Recover(semantics, symbols, layouts, managed);
+        var dispatch = new InterfaceDispatch(semantics, layouts, managed, runtime);
+        var interfaces = dispatch.Recover();
+        return new(method, machine, flow, ssa, semantics, symbols, virtualCalls, interfaces, dispatch.Diagnostics.ToArray());
+    }
+    private LiftResult LiftExpression(ulong address)
+    {
+        var analysis = Analyze(address);
+        return new FunctionLifter(Image, decoder, analysis.Symbols, layouts, managed, runtime).Lift(analysis.Machine, analysis.Semantics) with { TypeSymbols = analysis.Symbols };
     }
     public LiftResult Recover(ulong address)
     {
-        var result = lifter.Lift(address);
-        var boundary = UnwindBoundary.Read(Image, result.Method.Address);
-        var flow = NativeControlFlow.Build(result.Instructions, boundary, runtime.NoReturn);
-        var ssa = new NativeSsa(flow, result.Method, abi, Symbols).Build();
-        var semantics = new SsaSemantics(ssa, result.Method, Symbols, layouts, abi, Image, runtime, new(Image, decoder));
-        var virtualCalls = VirtualDispatch.Recover(semantics, Symbols, layouts, managed);
-        var dispatch = new InterfaceDispatch(semantics, layouts, managed, runtime);
-        var interfaces = dispatch.Recover();
-        SsaSemantics LiftNative(NativeMethod source)
-        {
-            source = abi.Normalize(source);
-            var range = UnwindBoundary.Read(Image, source.Address);
-            var instructions = decoder.Decode(Image.Read(source.Address, checked((int)(range.End - source.Address))), source.Address);
-            var graph = NativeControlFlow.Build(instructions, range, runtime.NoReturn);
-            return new(new NativeSsa(graph, source, abi, Symbols).Build(), source, Symbols, layouts, abi, Image, runtime, new(Image, decoder));
-        }
-        var async = new AsyncRecovery(semantics, result.Method, managed, layouts, Symbols, LiftNative).Recover();
-        var body = new AsyncBodyRecovery(semantics, result.Method, managed, layouts, Symbols, LiftNative).Recover();
-        result.Ssa = new(ssa, interfaces, semantics.Calls(), semantics.Stores(), async, dispatch.Diagnostics.ToArray(), result.Problems.ToArray())
-        { AwaitSites = async is null ? null : Native.AwaitSites.Recover(semantics, Symbols, layouts), VirtualCalls = virtualCalls, Body = body, CallStorages = semantics.CallStorages() };
+        var analysis = Analyze(address);
+        var symbols = analysis.Symbols;
+        var flow = analysis.Flow;
+        var ssa = analysis.Ssa;
+        var semantics = analysis.Semantics;
+        SsaSemantics LiftNative(NativeMethod source) => Analyze(source, symbols.ForMethod()).Semantics;
+        var async = new AsyncRecovery(semantics, analysis.Method, managed, layouts, symbols, LiftNative).Recover();
+        var body = new AsyncBodyRecovery(semantics, analysis.Method, managed, layouts, symbols, LiftNative).Recover();
+        var ordinary = async is null && body is null ? SsaBodyRecovery.Recover(analysis, managed, layouts, symbols) : null;
+        var result = ordinary?.Body ?? (async is not null || body is not null
+            ? new LiftResult(analysis.Method, analysis.Machine.Instructions, [], [], [], new NativeGraph(analysis.Machine.Instructions, runtime.NoReturn))
+                { RecoveryPath = "ssa-async" }
+            : new FunctionLifter(Image, decoder, symbols, layouts, managed, runtime).Lift(analysis.Machine, semantics));
+        var legacyProblems = result.RecoveryPath == "expression" ? result.Problems.ToArray() : [];
+        result = result with { TypeSymbols = symbols };
+        result.Ssa = new(ssa, analysis.Interfaces, semantics.Calls(), semantics.Stores(), async, analysis.DispatchProblems, legacyProblems)
+        { AwaitSites = async is null ? null : Native.AwaitSites.Recover(semantics, symbols, layouts), VirtualCalls = analysis.VirtualCalls, Body = body, CallStorages = semantics.CallStorages(),
+            OrdinaryProblems = ordinary?.Problems ?? [] };
         if (result.Ssa.CSharp is not null)
         {
-            result.Problems.Clear();
-            result.Proofs.AddRange((async?.CSharp is not null ? async.Proofs : body!.Proofs).Select(p => new Proof(address, "SsaAsyncProtocol", p)));
+            result.Proofs.AddRange((body?.CSharp is not null ? body.Proofs : async!.Proofs).Select(p => new Proof(address, "SsaAsyncProtocol", p)));
         }
         else if (body is not null)
         {
-            // async 入口由元数据标识；普通表达式前端的限制保存在 LegacyProblems 中。
-            result.Problems.Clear();
             result.Problems.AddRange(ssa.Problems.Concat(flow.Problems).Concat(body.Problems).Distinct().Select(p => "SSA: " + p));
             if (result.Problems.Count == 0) result.Problems.Add("SSA: async 源码归约未完成");
         }
@@ -96,13 +108,14 @@ public sealed class RecoverySession : IDisposable
     }
     public LambdaProjection SourceView(LiftResult view)
     {
+        var staticMembers = new StaticSourceMembers(layouts, managed, view.TypeSymbols ?? Symbols, LiftExpression);
         var projection = LambdaProjectionBuilder.Build(view, cache =>
         {
         if (LambdaTarget(cache.Method) is not { } method || !managed.IsNonCapturingCachedLambda(view.Method, method, cache)) return null;
-        var body = ViewNormalizer.Normalize(lifter.Lift(method.Address));
+        var body = ViewNormalizer.Normalize(LiftExpression(method.Address));
         return LambdaBodies.Expression(body) is { } lambda ? new(cache, lambda, body) : null;
         });
-        projection = ClosureProjection.Build(projection, managed, LambdaTarget, address => ViewNormalizer.Normalize(lifter.Lift(address)));
+        projection = ClosureProjection.Build(projection, managed, LambdaTarget, address => ViewNormalizer.Normalize(LiftExpression(address)));
         if (projection.Closures.Length > 0)
         {
             var high = staticMembers.Normalize(projection.View);
@@ -128,16 +141,17 @@ public sealed class RecoverySession : IDisposable
         }
         return projection;
     }
-    public string Render(LiftResult result) => result.Ssa?.CSharp ?? writer.Structured(SourceView(View(result)).View);
+    public string Render(LiftResult result) => result.Ssa?.CSharp ?? new SemanticWriter(result.TypeSymbols ?? Symbols).Structured(SourceView(View(result)).View);
 
     public void Save(LiftResult result, string directory)
     {
         Directory.CreateDirectory(directory);
+        var symbols = result.TypeSymbols ?? Symbols;
+        var writer = new SemanticWriter(symbols);
         var prefix = Path.Combine(directory, $"0x{result.Method.Address:x}");
         var analysis = result.Ssa!;
         var ssa = analysis.Program; var flow = ssa.Flow; var async = analysis.Async;
         var csharp = analysis.CSharp;
-        object protocol = async?.CSharp is not null ? async : (object?)analysis.Body ?? async!;
         var boundary = UnwindBoundary.Read(Image, result.Method.Address);
         File.WriteAllText(prefix + ".async.json", JsonSerializer.Serialize(async, new JsonSerializerOptions { WriteIndented = true }));
         File.WriteAllText(prefix + ".finally.json", JsonSerializer.Serialize(result.Finally, new JsonSerializerOptions { WriteIndented = true }));
@@ -158,7 +172,7 @@ public sealed class RecoverySession : IDisposable
         var projection = SourceView(view);
         File.WriteAllText(prefix + ".lowered.cs.txt", csharp ?? writer.Structured(view));
         File.WriteAllText(prefix + ".cs.txt", csharp ?? writer.Structured(projection.View));
-        File.WriteAllText(prefix + ".source.semantics.json", JsonSerializer.Serialize(csharp is null ? SemanticData.Function(projection.View) : new { kind = "async-protocol", protocol }, new JsonSerializerOptions { WriteIndented = true }));
+        File.WriteAllText(prefix + ".source.semantics.json", JsonSerializer.Serialize(SemanticData.Function(analysis.Projection ?? projection.View), new JsonSerializerOptions { WriteIndented = true }));
         var lambdaEvidence = new
         {
             kind = "compiler-lambda-source-projection", projection.Diagnostics,
@@ -170,11 +184,12 @@ public sealed class RecoverySession : IDisposable
         File.WriteAllText(prefix + ".closures.json", JsonSerializer.Serialize(projection.Closures.Select(c => new
         { c.Allocation, c.EnvironmentType, c.Bindings, lambdas = c.Lambdas.Select(l => new { l.Construction, l.DelegateType,
             lambda = SemanticData.Expression(l.Lambda), method = l.Body.Method, instructions = l.Body.Instructions, body = SemanticData.Function(l.Body) }) }), new JsonSerializerOptions { WriteIndented = true }));
-        File.WriteAllText(prefix + ".semantics.json", JsonSerializer.Serialize(csharp is null ? SemanticData.Function(result) : new { kind = "async-protocol", protocol }, new JsonSerializerOptions { WriteIndented = true }));
-        File.WriteAllText(prefix + ".view.semantics.json", JsonSerializer.Serialize(csharp is null ? SemanticData.Function(view) : new { kind = "async-protocol", protocol }, new JsonSerializerOptions { WriteIndented = true }));
+        File.WriteAllText(prefix + ".semantics.json", JsonSerializer.Serialize(SemanticData.Function(result), new JsonSerializerOptions { WriteIndented = true }));
+        File.WriteAllText(prefix + ".view.semantics.json", JsonSerializer.Serialize(SemanticData.Function(analysis.Projection ?? view), new JsonSerializerOptions { WriteIndented = true }));
         var report = new
         {
             method = result.Method, binarySha256 = Image.Sha256,
+            recoveryPath = analysis.Projection?.RecoveryPath ?? result.RecoveryPath, analysis.OrdinaryProblems,
             status = csharp is not null ? "supported-async-view" : result.Problems.Count == 0 ? "supported-semantic-view" : "partial",
             nativeExecutionValidated = false,
             instructions = result.Instructions.Length, reachableBlocks = result.Blocks.Count,

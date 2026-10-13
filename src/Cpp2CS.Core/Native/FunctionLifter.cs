@@ -8,40 +8,26 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
 {
     private readonly Dictionary<(string Type, int Offset, int Width), string?> getters = [];
     private readonly RegionId stackRegion = new("frame", RegionKind.Stack);
-    public LiftResult Lift(ulong address)
+    public LiftResult Lift(ulong address) => Lift(new Arm64MethodReader(image, decoder, symbols).Read(address));
+    public LiftResult Lift(DecodedMethod machine, SsaSemantics? sharedSemantics = null)
     {
+        var address = machine.Address;
+        getters.Clear();
         aggregateValues.Clear();
         mutableStack.Clear();
         aggregateLogicalTypes.Clear();
         var method = new NativeAbi(layouts, managed).Normalize(symbols.Unique(address) ?? throw new InvalidDataException("入口没有唯一符号签名"));
-        var managedSignature = managed.SignatureOf(method.Name.Split("$$")[0], method.Name.Split("$$")[1]);
-        var managedParameters = method.Parameters.Where(p => p.Name != "__this" && !(p.Name == "method" && p.Type.Contains("MethodInfo"))).ToArray();
-        if (managedSignature is { } signature && signature.ParameterTypes.Length == managedParameters.Length)
-            for (var p = 0; p < managedParameters.Length; p++)
-                if (managedParameters[p].Type.EndsWith('*')) symbols.DisplayTypes.TryAdd(managedParameters[p].Type.TrimEnd('*'), signature.ParameterTypes[p]);
-        foreach (var parameter in method.Parameters.Where(p => p.Type.EndsWith("_o*")))
-        {
-            var nativeType = parameter.Type.TrimEnd('*');
-            var logicalType = symbols.Display(nativeType);
-            while (layouts.ParentFields(nativeType) is { } parent && managed.BaseTypeOf(logicalType) is { } logicalParent)
-            {
-                nativeType = parent.EndsWith("_Fields") ? parent[..^7] + "_o" : parent;
-                symbols.DisplayTypes.TryAdd(nativeType, logicalParent);
-                logicalType = logicalParent;
-            }
-        }
-        var boundary = UnwindBoundary.Read(image, address);
-        var end = boundary.Start == address && boundary.End > address ? boundary.End : symbols.Ceiling(address);
-        if (end <= address || end - address > 16384) throw new InvalidDataException("候选函数范围超出当前限制");
-        var instructions = decoder.Decode(image.Read(address, (int)(end - address)), address);
+        ManagedTypeBindings.Bind(method, symbols, layouts, managed);
+        var boundary = machine.Boundary;
+        var instructions = machine.Instructions;
         var graph = new NativeGraph(instructions, runtime.NoReturn, target => symbols.Unique(target) is not null || runtime.Helpers.ContainsKey(target));
         var result = new LiftResult(method, instructions, [], [.. graph.Problems], [], graph);
         var asyncStateMachine = managed.Implements(method.Name.Split("$$")[0], "System.Runtime.CompilerServices.IAsyncStateMachine");
         if (!asyncStateMachine && boundary.Unsupported is null && boundary.Lsda is not null && graph.Problems.Length == 0)
         {
             var nativeAbi = new NativeAbi(layouts, managed);
-            var flow = NativeControlFlow.Build(instructions, boundary, runtime.NoReturn);
-            var semantics = new SsaSemantics(new NativeSsa(flow, method, nativeAbi, symbols).Build(), method, symbols, layouts, nativeAbi, image, runtime, new(image, decoder));
+            var flow = sharedSemantics?.Program.Flow ?? NativeControlFlow.Build(instructions, boundary, runtime.NoReturn);
+            var semantics = sharedSemantics ?? new SsaSemantics(new NativeSsa(flow, method, nativeAbi, symbols).Build(), method, symbols, layouts, nativeAbi, image, runtime, new(image, decoder));
             if (FinallyLoops.Recover(graph, semantics, nativeAbi, runtime, result.Problems.Add) is { } cleanup)
             {
                 graph = new NativeGraph(instructions, runtime.NoReturn, target => symbols.Unique(target) is not null || runtime.Helpers.ContainsKey(target), [cleanup.Cleanup, cleanup.Continuation]);

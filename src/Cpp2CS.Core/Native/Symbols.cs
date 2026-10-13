@@ -13,6 +13,13 @@ public sealed class Symbols
     public Dictionary<ulong, MetadataReference> Metadata { get; } = [];
     public Dictionary<string, string> DisplayTypes { get; } = [];
     public ulong[] Entries { get; }
+    private Symbols(Symbols source)
+    {
+        Methods = source.Methods; NamedMethods = source.NamedMethods; Metadata = source.Metadata; Entries = source.Entries;
+        DisplayTypes = new(source.DisplayTypes);
+    }
+    // 元数据只读共享；分析期间发现的类型别名只属于当前方法。
+    public Symbols ForMethod() => new(this);
     public Symbols(string path)
     {
         using var stream = File.OpenRead(path);

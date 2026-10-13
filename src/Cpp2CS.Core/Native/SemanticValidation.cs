@@ -14,6 +14,7 @@ public static class SemanticValidation
                     CallStatement c => [c.Receiver, .. c.Arguments],
                     ConditionalInvokeStatement c => [c.Receiver, .. c.Arguments],
                     AssignStatement a => [a.Value],
+                    EvaluateStatement e => [e.Value],
                     SetLocalStatement s => [s.Value],
                     StoreStatement s => [s.Target, s.Value],
                     ReturnStatement r => [r.Value],
@@ -34,6 +35,10 @@ public static class SemanticValidation
                     break;
                 case CapturedExpression captured: Inspect(pc, captured.Value); break;
                 case MemberExpression member: Inspect(pc, member.Receiver); break;
+                case SourceMemberExpression member: Inspect(pc, member.Receiver); break;
+                case AwaitExpression awaited: Inspect(pc, awaited.Value); break;
+                case CastExpression cast: Inspect(pc, cast.Value); break;
+                case ObjectValueExpression obj: foreach (var field in obj.Fields) Inspect(pc, field.Value); break;
                 case AddressOfExpression address: Inspect(pc, address.Target); break;
                 case SliceExpression slice: Inspect(pc, slice.Value); break;
                 case ComposeExpression compose: foreach (var part in compose.Parts) Inspect(pc, part); break;

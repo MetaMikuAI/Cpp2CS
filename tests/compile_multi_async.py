@@ -9,7 +9,7 @@ parts = []
 for address in ['0x55d684c','0x55d4ad8','0x5bea518']:
     body = json.loads((ROOT/f'artifacts/recovered/{address}.async-body.json').read_text())
     assert body['CSharp'] and not body['Problems']
-    generated = (ROOT/f'artifacts/recovered/{address}.cs.txt').read_text(encoding='utf-8')
+    generated = (ROOT/f'artifacts/recovered/{address}.cs.txt').read_bytes().decode('utf-8')
     assert generated == body['CSharp']
     namespace, owner = body['Source']['Owner'].rsplit('.',1)
     parts.append(f'namespace {namespace} {{ public partial class {owner} {{\n' + generated + '\n} }')

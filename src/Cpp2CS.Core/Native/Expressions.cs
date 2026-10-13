@@ -26,6 +26,10 @@ public sealed record SliceExpression(Expression Value, int BitOffset, int BitWid
 public sealed record ComposeExpression(Expression[] Parts, int[] BitWidths) : Expression;
 public sealed record AggregateExpression(string Type, Expression Bits) : Expression;
 public sealed record InvocationExpression(string Name, Expression? Receiver, Expression[] Arguments, bool IsProperty) : Expression;
+public sealed record AwaitExpression(Expression Value) : Expression;
+public sealed record CastExpression(string Type, Expression Value) : Expression;
+public sealed record SourceMemberExpression(Expression Receiver, string Name, string Type) : Expression;
+public sealed record ObjectValueExpression(string Type, (string Name, Expression Value)[] Fields) : Expression;
 public sealed record LambdaExpression(string[] Parameters, Expression Body, ulong MethodAddress) : Expression;
 public sealed record StaticMemberExpression(string Owner, string Name, string Type, bool IsProperty = false) : Expression;
 public sealed record NativeValue(Bits Bits, string Type, Expression Expression);
@@ -38,6 +42,7 @@ public sealed record StoreStatement(ulong Pc, Expression Target, Expression Valu
 public sealed record ThrowStatement(ulong Pc, string Type) : Statement(Pc);
 public sealed record ReturnStatement(ulong Pc, Expression? Value) : Statement(Pc);
 public sealed record AssignStatement(ulong Pc, string Name, Expression Value, string Type) : Statement(Pc);
+public sealed record EvaluateStatement(ulong Pc, Expression Value) : Statement(Pc);
 public sealed record DeclareStatement(ulong Pc, string Name, string Type) : Statement(Pc);
 public sealed record SetLocalStatement(ulong Pc, string Name, Expression Value) : Statement(Pc);
 public sealed record UnresolvedStatement(ulong Pc, string Reason) : Statement(Pc);
@@ -53,6 +58,9 @@ public sealed record LiftResult(NativeMethod Method, Instruction[] Instructions,
     public bool IsSourceProjection { get; init; }
     public string? SourceLambdaOrigin { get; init; }
     public FinallyLoop? Finally { get; init; }
+    public string? SourceDeclaration { get; init; }
+    public string RecoveryPath { get; init; } = "expression";
+    [System.Text.Json.Serialization.JsonIgnore] public Symbols? TypeSymbols { get; init; }
 }
 
 public sealed class NativeState

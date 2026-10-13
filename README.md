@@ -60,3 +60,5 @@ dotnet run --project tests/Cpp2CS.Tests -c Release --no-build
 | `tests` | 断言、夹具和执行对照 |
 
 模型约定见 [核心模型](docs/核心模型.md)。
+
+方法恢复顺序、async 与普通业务体的公共部分、兼容回退和回归入口见 [方法恢复流水线](docs/方法恢复流水线.md)。

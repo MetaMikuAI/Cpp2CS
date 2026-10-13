@@ -37,7 +37,7 @@ public static class AsyncBodyChecks
             }
             AsyncBody? Recover(NativeSsaProgram candidate) => new AsyncBodyRecovery(Semantics(candidate), method, managed, layouts, symbols, Lift).Recover();
             var baseline = Recover(program)!;
-            check(baseline is { CSharp: not null, Problems.Length: 0 }, $"0x{address:x}: 完整 async 输出");
+            check(baseline is { CSharp: not null, Problems.Length: 0 }, $"0x{address:x}: 完整 async 输出：{string.Join("; ", baseline.Problems)}");
             var semantics = Semantics(program);
             var sites = AwaitSites.Recover(semantics, symbols, layouts).Sites;
             check(semantics.Calls().All(c => c.Kind != "indirect"), "接口和虚调用全部解析");

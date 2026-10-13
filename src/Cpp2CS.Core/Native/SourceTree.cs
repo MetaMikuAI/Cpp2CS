@@ -8,6 +8,10 @@ public static class SourceTree
         CapturedExpression c => c with { Value = Map(c.Value, rewrite) },
         IndexedArrayAddress a => a with { Array = Map(a.Array, rewrite), Index = Map(a.Index, rewrite) },
         MemberExpression m => m with { Receiver = Map(m.Receiver, rewrite) },
+        SourceMemberExpression m => m with { Receiver = Map(m.Receiver, rewrite) },
+        AwaitExpression a => a with { Value = Map(a.Value, rewrite) },
+        CastExpression c => c with { Value = Map(c.Value, rewrite) },
+        ObjectValueExpression o => o with { Fields = o.Fields.Select(f => (f.Name, Map(f.Value, rewrite))).ToArray() },
         AddressOfExpression a => a with { Target = Map(a.Target, rewrite) },
         BinaryExpression b => b with { Left = Map(b.Left, rewrite), Right = Map(b.Right, rewrite) },
         SliceExpression s => s with { Value = Map(s.Value, rewrite) },
@@ -22,6 +26,7 @@ public static class SourceTree
     public static Statement Map(Statement s, Func<Expression, Expression> rewrite) => s switch
     {
         AssignStatement a => a with { Value = Map(a.Value, rewrite) },
+        EvaluateStatement e => e with { Value = Map(e.Value, rewrite) },
         SetLocalStatement a => a with { Value = Map(a.Value, rewrite) },
         CallStatement c => c with { Receiver = c.Receiver is null ? null : Map(c.Receiver, rewrite), Arguments = c.Arguments.Select(p => Map(p, rewrite)).ToArray() },
         StoreStatement w => w with { Target = Map(w.Target, rewrite), Value = Map(w.Value, rewrite) },

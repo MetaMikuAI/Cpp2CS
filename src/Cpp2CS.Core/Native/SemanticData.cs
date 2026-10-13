@@ -15,6 +15,10 @@ public static class SemanticData
         StackAddressExpression a => new { kind = "stack-address", a.Offset },
         MetadataExpression m => new { kind = "metadata", m.IsSlot, m.Reference.Slot, m.Reference.Name },
         MemberExpression m => new { kind = "member", receiver = Expression(m.Receiver), m.Field.Offset, m.Field.Size, m.Field.Name },
+        SourceMemberExpression m => new { kind = "source-member", receiver = Expression(m.Receiver), m.Name, m.Type },
+        AwaitExpression a => new { kind = "await", value = Expression(a.Value) },
+        CastExpression c => new { kind = "cast", c.Type, value = Expression(c.Value) },
+        ObjectValueExpression o => new { kind = "object-value", o.Type, fields = o.Fields.Select(f => new { f.Name, value = Expression(f.Value) }) },
         BinaryExpression b => new { kind = "binary", b.Operator, left = Expression(b.Left), right = Expression(b.Right) },
         SliceExpression s => new { kind = "slice", value = Expression(s.Value), s.BitOffset, s.BitWidth },
         ComposeExpression c => new { kind = "compose", parts = c.Parts.Select(Expression).ToArray(), c.BitWidths },
@@ -28,6 +32,7 @@ public static class SemanticData
     public static object Statement(Statement statement) => statement switch
     {
         AssignStatement a => new { kind = "assign", a.Address, a.Name, a.Type, value = Expression(a.Value) },
+        EvaluateStatement e => new { kind = "evaluate", e.Address, value = Expression(e.Value) },
         DeclareStatement d => new { kind = "declare", d.Address, d.Name, d.Type },
         SetLocalStatement s => new { kind = "set-local", s.Address, s.Name, value = Expression(s.Value) },
         CallStatement c => new { kind = "call", c.Address, c.Name, c.Result, c.IsInstance, c.NoReturn, c.DeclaringType, receiver = c.Receiver is null ? null : Expression(c.Receiver), arguments = c.Arguments.Select(Expression).ToArray() },

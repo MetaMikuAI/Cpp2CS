@@ -162,7 +162,7 @@ public static class ViewNormalizer
     }
     internal static IEnumerable<Expression> Expressions(Statement s) => s switch
     {
-        AssignStatement a => [a.Value], CallStatement c => c.Receiver is null ? c.Arguments : [c.Receiver, .. c.Arguments],
+        AssignStatement a => [a.Value], EvaluateStatement e => [e.Value], CallStatement c => c.Receiver is null ? c.Arguments : [c.Receiver, .. c.Arguments],
         ConditionalInvokeStatement c => [c.Receiver, .. c.Arguments], StoreStatement w => [w.Target, w.Value],
         DelegateCacheStatement c => [c.Cache, c.Target, c.Method],
         ReturnStatement { Value: { } value } => [value], SetLocalStatement s1 => [s1.Value], _ => []
@@ -176,6 +176,8 @@ public static class ViewNormalizer
     };
     internal static int Count(Expression e, string name) => e switch
     {
+        AwaitExpression a => Count(a.Value, name), CastExpression c => Count(c.Value, name),
+        SourceMemberExpression m => Count(m.Receiver, name), ObjectValueExpression o => o.Fields.Sum(f => Count(f.Value, name)),
         LambdaExpression l => l.Parameters.Contains(name) ? 0 : Count(l.Body, name),
         LambdaBlockExpression l => l.Body.Blocks.Values.Sum(b => b.Statements.SelectMany(Expressions).Sum(e => Count(e, name)) + (b.Condition is null ? 0 : Count(b.Condition, name))),
         OperationExpression o => o.Arguments.Sum(a => Count(a, name)),
@@ -187,6 +189,8 @@ public static class ViewNormalizer
     };
     private static bool ConditionalUse(Expression e, string name) => e switch
     {
+        AwaitExpression a => ConditionalUse(a.Value, name), CastExpression c => ConditionalUse(c.Value, name),
+        SourceMemberExpression m => ConditionalUse(m.Receiver, name), ObjectValueExpression o => o.Fields.Any(f => ConditionalUse(f.Value, name)),
         LambdaExpression l => Count(l, name) != 0,
         LambdaBlockExpression l => Count(l, name) != 0,
         OperationExpression o => o.Operation == ValueOperation.Select && o.Arguments.Skip(1).Any(a => Count(a, name) > 0) || o.Arguments.Any(a => ConditionalUse(a, name)),
@@ -198,6 +202,10 @@ public static class ViewNormalizer
     };
     private static Expression Replace(Expression e, string name, Expression value) => e switch
     {
+        AwaitExpression a => a with { Value = Replace(a.Value, name, value) },
+        CastExpression c => c with { Value = Replace(c.Value, name, value) },
+        SourceMemberExpression m => m with { Receiver = Replace(m.Receiver, name, value) },
+        ObjectValueExpression o => o with { Fields = o.Fields.Select(f => (f.Name, Replace(f.Value, name, value))).ToArray() },
         OperationExpression o => o with { Arguments = o.Arguments.Select(a => Replace(a, name, value)).ToArray() },
         InvocationExpression c => c with { Receiver = c.Receiver is null ? null : Replace(c.Receiver, name, value), Arguments = c.Arguments.Select(a => Replace(a, name, value)).ToArray() },
         CapturedExpression c when c.Name == name => value,
@@ -211,6 +219,7 @@ public static class ViewNormalizer
     };
     private static Statement Replace(Statement s, string name, Expression value) => s switch
     {
+        EvaluateStatement e => e with { Value = Replace(e.Value, name, value) },
         AssignStatement a => a with { Value = Replace(a.Value, name, value) },
         CallStatement c => c with { Receiver = c.Receiver is null ? null : Replace(c.Receiver, name, value), Arguments = c.Arguments.Select(e => Replace(e, name, value)).ToArray() },
         ConditionalInvokeStatement c => c with { Receiver = Replace(c.Receiver, name, value), Arguments = c.Arguments.Select(e => Replace(e, name, value)).ToArray() },

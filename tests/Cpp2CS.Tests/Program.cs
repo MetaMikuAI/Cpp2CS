@@ -6,6 +6,11 @@ using Cpp2CS.IR;
 using Cpp2CS.Model;
 
 var passed = 0;
+if (args is ["method-snapshot" or "method-pipeline", var snapshotConfig, var snapshotDirectory])
+{
+    MethodPipelineChecks.Record(snapshotConfig, snapshotDirectory, args[0] == "method-pipeline");
+    return;
+}
 void Check(bool condition, string name)
 {
     if (!condition) throw new InvalidOperationException($"FAIL: {name}");
@@ -140,6 +145,7 @@ LambdaChecks.Run(Check);
 AsyncChecks.Run(Check);
 AwaitSiteChecks.Run(Check);
 FinallyChecks.Run(Check);
+SharedBodyChecks.Run(Check);
 if (args is ["native-layout", var compiler]) AsyncChecks.Layouts(Check, compiler);
 if (args is ["async-native", var config]) SsaRecoveryChecks.Run(Check, config);
 if (args is ["multi-await-native", var multiConfig]) AwaitSiteChecks.Native(Check, multiConfig);

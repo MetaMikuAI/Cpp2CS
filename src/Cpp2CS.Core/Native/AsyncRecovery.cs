@@ -2,7 +2,10 @@ namespace Cpp2CS.Native;
 
 public sealed record AsyncProtocol(AsyncSource Source, string AwaitedCall, string Constructor, string[] Arguments,
     long StateOffset, long AwaiterOffset, int AwaiterBytes, ulong Schedule, ulong Complete, ulong Fail,
-    string[] Proofs, string[] Problems, string? CSharp);
+    string[] Proofs, string[] Problems, string? CSharp)
+{
+    [System.Text.Json.Serialization.JsonIgnore] public LiftResult? Projection { get; init; }
+}
 
 // 单个 await 的协议归约。所有数据都来自 SSA，识别范围由协议决定，不由业务方法决定。
 public sealed class AsyncRecovery(SsaSemantics semantics, NativeMethod method, ManagedNames managed, HeaderLayout layouts,
@@ -89,15 +92,32 @@ public sealed class AsyncRecovery(SsaSemantics semantics, NativeMethod method, M
         if (captured is null) return Result(source);
         var objectType = constructor!.Name.Split("$$")[0];
         var methodName = work.Name.Split("$$")[1];
-        var expression = $"new {objectType}().{methodName}({string.Join(", ", captured)})";
+        var expression = new InvocationExpression(methodName, new InvocationExpression("new " + objectType, null, [], false),
+            captured.Select(name => (Expression)new NameExpression(name)).ToArray(), false);
         var declaration = $"public {(source.Static ? "static " : "")}async {source.ReturnType} {source.Name}({string.Join(", ", source.ParameterTypes.Zip(source.ParameterNames, (type, name) => type + " " + name))})";
         proofs.Add("SSA source/token slices retain the same aggregate producer across spill, interface calls and state-machine field copies");
         proofs.Add("AsyncStateMachineAttribute source identity and kickoff stores map captured fields to original parameters");
         proofs.Add("state 0 resumes saved awaiter; -1 restores running state; -2 completes; Pending branch schedules once");
         proofs.Add("SetResult/SetException stay outside the protected body; generated method uses the original UniTask builder contract");
         if (problems.Count != 0) proofs.Clear();
+        LiftResult? projection = null;
+        string? text = null;
+        if (problems.Count == 0)
+        {
+            var sourceMethod = new NativeMethod(method.Address, source.Owner + "$$" + source.Name, source.ReturnType,
+                source.ParameterTypes.Zip(source.ParameterNames, (type, name) => new NativeParameter(type, name)).ToArray(), declaration);
+            var instructions = Flow.Nodes.Select(n => n.Instruction).ToArray();
+            projection = new(sourceMethod, instructions,
+                new() { [method.Address] = new(method.Address, [new EvaluateStatement(work.Address, new AwaitExpression(expression))], null, []) },
+                [], [], new NativeGraph(instructions, _ => false))
+            { SourceDeclaration = declaration, IsSourceProjection = true, RecoveryPath = "ssa-async-single" };
+            SemanticValidation.Check(projection);
+            problems.AddRange(projection.Problems);
+            if (problems.Count == 0) text = new SemanticWriter(symbols).Structured(projection);
+        }
         return new(source, work.Name, constructor.Name, captured, stateOffset, awaiterOffset, produced.Width / 8,
-            schedule.Address, complete.Address, fail!.Address, proofs.ToArray(), problems.ToArray(), problems.Count == 0 ? declaration + "\n{\n    await " + expression + ";\n}\n" : null);
+            schedule.Address, complete.Address, fail!.Address, proofs.ToArray(), problems.ToArray(), text)
+        { Projection = text is null ? null : projection };
     }
     private AsyncProtocol Result(AsyncSource source) => new(source, "", "", [], 0, 0, 0, 0, 0, 0, proofs.ToArray(), problems.ToArray(), null);
     private void ValidateFlow(SsaManagedCall[] calls, SsaManagedStore[] stores, SsaManagedStore[] stateStores,

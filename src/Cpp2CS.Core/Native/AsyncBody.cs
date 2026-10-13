@@ -1,7 +1,10 @@
 namespace Cpp2CS.Native;
 
 public sealed record AsyncBodyNode(ulong Address, string Kind, string? Text, ulong[] Successors);
-public sealed record AsyncBody(AsyncSource Source, AsyncBodyNode[] Nodes, string[] Proofs, string[] Problems, string? CSharp);
+public sealed record AsyncBody(AsyncSource Source, AsyncBodyNode[] Nodes, string[] Proofs, string[] Problems, string? CSharp)
+{
+    [System.Text.Json.Serialization.JsonIgnore] public LiftResult? Projection { get; init; }
+}
 
 // 满足协议条件时收缩对应路径，保留协议外的调用、分支和异常。
 public sealed class AsyncBodyRecovery(SsaSemantics semantics, NativeMethod method, ManagedNames managed,
@@ -9,11 +12,14 @@ public sealed class AsyncBodyRecovery(SsaSemantics semantics, NativeMethod metho
 {
     private readonly List<string> problems = [];
     private readonly List<string> proofs = [];
-    private readonly Dictionary<string, string> resultNames = [];
-    private readonly HashSet<string> boolResults = [];
+    private ManagedExpressionBuilder expressions = null!;
+    private Dictionary<string, string> resultNames => expressions.Results;
+    private HashSet<string> boolResults => expressions.BooleanResults;
     private readonly Dictionary<long, string> captures = [];
     private readonly Dictionary<string, AwaitSite> inlineResults = [];
     private readonly Dictionary<ulong, AsyncBodyNode> body = [];
+    private readonly Dictionary<ulong, LiftedBlock> blocks = [];
+    private LiftResult? projection;
     private readonly Dictionary<ulong, ulong> projected = [];
     private readonly HashSet<ulong> active = [];
     private readonly HashSet<SsaManagedStore> protocolStores = [];
@@ -56,6 +62,7 @@ public sealed class AsyncBodyRecovery(SsaSemantics semantics, NativeMethod metho
     {
         var owner = method.Name.Split("$$")[0];
         if (!managed.Implements(owner, "System.Runtime.CompilerServices.IAsyncStateMachine") || Only(managed.SourcesFor(owner)) is not { } original) return null;
+        expressions = new(semantics, managed, layouts, symbols, problems.Add, proofs.Add) { Bind = BindExpression };
         source = original; calls = semantics.Calls(); stores = semantics.Stores();
         nodes = semantics.Program.Flow.Nodes.ToDictionary(n => n.Instruction.Address);
         var analysis = AwaitSites.Recover(semantics, symbols, layouts);
@@ -87,11 +94,21 @@ public sealed class AsyncBodyRecovery(SsaSemantics semantics, NativeMethod metho
         Need(businessStores.Keys.All(body.ContainsKey), "业务字段写入未被完整投影");
         if (problems.Count != 0) return Finish(null);
         var declaration = $"public {(source.Static ? "static " : "")}async {source.ReturnType} {source.Name}({string.Join(", ", source.ParameterTypes.Zip(source.ParameterNames, (t, n) => t + " " + n))})";
-        var text = Emit(entry, [], 1);
+        var sourceMethod = new NativeMethod(entry, source.Owner + "$$" + source.Name, source.ReturnType,
+            source.ParameterTypes.Zip(source.ParameterNames, (type, name) => new NativeParameter(type, name)).ToArray(), declaration);
+        var instructions = semantics.Program.Flow.Nodes.Select(n => n.Instruction).ToArray();
+        var noReturn = semantics.Program.Flow.Nodes.Where(n => n.Instruction.Mnemonic == "bl" && n.Edges.All(e => e.Kind != "normal-return"))
+            .Select(n => NativeGraph.Target(n.Instruction)).ToHashSet();
+        projection = new(sourceMethod, instructions, blocks, [], [], new NativeGraph(instructions, noReturn.Contains))
+        { SourceDeclaration = declaration, IsSourceProjection = true, RecoveryPath = "ssa-async" };
+        SemanticValidation.Check(projection);
+        problems.AddRange(projection.Problems);
+        var text = problems.Count == 0 ? new SemanticWriter(symbols).Structured(projection) : null;
         proofs.Add("all projected business branches and calls retained; only verified await protocol paths contracted");
-        return Finish(problems.Count == 0 ? declaration + "\n{\n" + text + "}\n" : null);
+        return Finish(problems.Count == 0 ? text : null);
     }
-    private AsyncBody Finish(string? text) => new(source, body.Values.OrderBy(n => n.Address).ToArray(), proofs.ToArray(), problems.Distinct().ToArray(), text);
+    private AsyncBody Finish(string? text) => new(source, body.Values.OrderBy(n => n.Address).ToArray(), proofs.ToArray(), problems.Distinct().ToArray(), text)
+    { Projection = text is null ? null : projection };
     private void BindCaptures()
     {
         var kickoff = Only(symbols.NamedMethods.GetValueOrDefault(source.Owner + "$$" + source.Name, []).Where(m =>
@@ -287,29 +304,40 @@ public sealed class AsyncBodyRecovery(SsaSemantics semantics, NativeMethod metho
         if (stores.Any(s => s.Address == pc && StateAddress(s.AddressValue) && s.Value is { Kind: "constant", Width: 32, Offset: 4294967294 }))
         {
             result = pc;
-            var expression = complete!.Arguments.Length > 1 ? Expression(complete.Arguments[1]) : null;
-            body[pc] = new(pc, "return", expression is null ? "return;" : "return " + expression + ";", []);
+            var expression = complete!.Arguments.Length > 1 ? expressions.Value(complete.Arguments[1]) : null;
+            AddBlock(pc, "return", [new ReturnStatement(pc, expression)], null, []);
         }
-        else if (call?.Name == "ThrowNullReference") { result = pc; body[pc] = new(pc, "throw", "throw new System.NullReferenceException();", []); }
+        else if (call?.Name == "ThrowNullReference") { result = pc; AddBlock(pc, "throw", [new ThrowStatement(pc, "System.NullReferenceException")], null, []); }
         else if (businessStores.TryGetValue(pc, out var writes))
         {
             result = pc;
             var assignments = writes.Select(w =>
             {
-                var value = w.Type == "bool" && w.Store.Value.Kind == "constant" ? (w.Store.Value.Offset == 0 ? "false" : "true") : Expression(w.Store.Value);
-                return Expression(SsaSemantics.AddressParts(w.Store.AddressValue).Root) + "." + w.Field + " = " + value + ";";
-            }).ToArray();
-            body[pc] = new(pc, "store", string.Join("\n", assignments), [Project(Next(pc).Single())]);
+                var target = new SourceMemberExpression(expressions.Value(SsaSemantics.AddressParts(w.Store.AddressValue).Root), w.Field, w.Type);
+                return (Statement)new StoreStatement(pc, target, expressions.TypedValue(w.Store.Value, w.Type));
+            }).ToList();
+            AddBlock(pc, "store", assignments, null, [Project(Next(pc).Single())]);
         }
         else if (call is { Kind: "managed" or "virtual" })
         {
             result = pc;
-            var text = CallExpression(call, out var before);
+            var statements = new List<Statement>();
+            var expression = expressions.Call(call, statements);
             var next = site is null ? Next(pc).Single() : Next(site.ResultCandidates.Single()).Single();
-            if (site is not null) text = site.Storage!.Result is null ? "await " + text + ";" : "var " + resultNames[calls.Single(c => c.Address == site.ResultCandidates[0]).Value] + " = await " + text + ";";
-            else if (call.ReturnType == "void") text += ";";
-            else { var name = "value" + calls.Where(c => c.Kind is "managed" or "virtual").TakeWhile(c => c.Address != pc).Count(); resultNames[call.Value] = name; text = "var " + name + " = " + text + ";"; }
-            body[pc] = new(pc, site is null ? "call" : "await", before + text, [Project(next)]);
+            if (site is not null)
+            {
+                expression = new AwaitExpression(expression);
+                statements.Add(site.Storage!.Result is null ? new EvaluateStatement(pc, expression) :
+                    new AssignStatement(pc, resultNames[calls.Single(c => c.Address == site.ResultCandidates[0]).Value], expression, site.Storage.Result.Type));
+            }
+            else if (call.ReturnType == "void") statements.Add(new EvaluateStatement(pc, expression));
+            else
+            {
+                var name = "value" + calls.Where(c => c.Kind is "managed" or "virtual").TakeWhile(c => c.Address != pc).Count();
+                resultNames[call.Value] = name;
+                statements.Add(new AssignStatement(pc, name, expression, call.ReturnType!));
+            }
+            AddBlock(pc, site is null ? "call" : "await", statements, null, [Project(next)]);
         }
         else
         {
@@ -323,11 +351,25 @@ public sealed class AsyncBodyRecovery(SsaSemantics semantics, NativeMethod metho
                 var yes = Project(nodes[pc].Edges.Single(e => e.Kind == "taken").Target!.Value);
                 var no = Project(nodes[pc].Edges.Single(e => e.Kind == "not-taken").Target!.Value);
                 if (yes == no) result = yes;
-                else { result = pc; body[pc] = new(pc, "branch", Expression(semantics.Resolve(condition)), [yes, no]); }
+                else { result = pc; AddBlock(pc, "branch", [], expressions.Value(semantics.Resolve(condition)), [yes, no]); }
             }
             else { problems.Add($"0x{pc:x}: 未覆盖的控制流出口"); result = 0; }
         }
         active.Remove(pc); projected[pc] = result; return result;
+    }
+    private void AddBlock(ulong address, string kind, List<Statement> statements, Expression? condition, ulong[] successors)
+    {
+        blocks[address] = new(address, statements, condition, successors);
+        body[address] = new(address, kind, condition is null ? string.Join("\n", statements.Select(SemanticWriter.Statement)) : SemanticWriter.Expression(condition), successors);
+    }
+    private Expression? BindExpression(SemanticTerm value)
+    {
+        if (value is { Kind: "field", Inputs: [var root] } && This(root) && captures.TryGetValue(value.Offset, out var capture))
+            return new NameExpression(capture);
+        if (value is { Kind: "slice", Inputs: [var task] } && inlineResults.TryGetValue(task.Key, out var site) &&
+            site.Storage!.Result is { } field && value.Offset == field.Offset * 8 && value.Width == field.Size * 8)
+            return new NameExpression(resultNames[calls.Single(c => c.Address == site.ResultCandidates[0]).Value]);
+        return null;
     }
     private bool? EvaluateState(SemanticTerm term, int state = -1)
     {
@@ -338,129 +380,5 @@ public sealed class AsyncBodyRecovery(SsaSemantics semantics, NativeMethod metho
             return (a == b) == (term.Kind == "b.eq");
         return null;
     }
-    private string CallExpression(SsaManagedCall call, out string before)
-    {
-        before = "";
-        var target = semantics.TargetMethod(call.Value)!;
-        var split = target.Name.Split("$$"); var owner = split[0]; var name = split[1];
-        var instance = target.Parameters.FirstOrDefault()?.Name == "__this";
-        var signature = managed.SignatureOf(owner, name);
-        var arguments = call.Arguments.Skip(instance ? 1 : 0).Take(target.Parameters.Length - (instance ? 1 : 0) - 1).Select((value, index) =>
-        {
-            var type = signature?.ParameterTypes.ElementAtOrDefault(index);
-            var nativeType = target.Parameters[index + (instance ? 1 : 0)].Type;
-            if (ConstantValue(nativeType, type ?? symbols.Display(nativeType), value) is { } literal) return literal;
-            if (value.Kind == "constant" && nativeType is "float" or "double")
-                return nativeType == "float" ? "System.BitConverter.Int32BitsToSingle(unchecked((int)" + unchecked((uint)value.Offset) + "u))" :
-                    "System.BitConverter.Int64BitsToDouble(unchecked((long)" + unchecked((ulong)value.Offset) + "UL))";
-            if (value is { Kind: "constant", Offset: 0 } && nativeType.EndsWith('*')) return "null";
-            var text = Expression(value);
-            if ((type == "System.Boolean" || target.Parameters[index + (instance ? 1 : 0)].Type == "bool") && value.Kind == "constant") return value.Offset == 0 ? "false" : "true";
-            if (type is not null && managed.BaseTypeOf(type) == "System.Enum") return "(" + type + ")(" + text + ")";
-            return text;
-        }).ToArray();
-        if (!instance && call.Arguments.LastOrDefault() is { Kind: "metadata" } info && info.Name.StartsWith("Method$"))
-        {
-            var full = info.Name[7..].Split('(')[0]; var dot = ManagedNames.LastTopLevelDot(full);
-            if (dot > 0) owner = full[..dot];
-        }
-        string receiver;
-        if (instance && SsaSemantics.AddressParts(call.Arguments[0]).Root.Kind == "stack" && managed.BaseTypeOf(owner) == "System.ValueType")
-        {
-            var stored = semantics.ReadCallStorage(call.Value, call.Arguments[0], layouts.Size(target.Parameters[0].Type.TrimEnd('*')) * 8);
-            receiver = "receiver_" + call.Address.ToString("x");
-            before = "var " + receiver + " = " + Expression(stored) + ";\n";
-            proofs.Add($"0x{call.Address:x}: value-type receiver loaded from pre-call stack memory; emitted as a separate value copy; later unknown writes remain invalidated");
-        }
-        else receiver = instance ? Expression(call.Arguments[0]) : owner;
-        if (name.StartsWith("get_") && managed.IsPropertyGetter(owner, name)) return receiver + "." + name[4..];
-        return receiver + "." + name + "(" + string.Join(", ", arguments) + ")";
-    }
-    private string Expression(SemanticTerm value)
-    {
-        if (value.Kind == "metadata" && symbols.Metadata.GetValueOrDefault(unchecked((ulong)value.Offset)) is { Kind: "ScriptString" } literal)
-            return System.Text.Json.JsonSerializer.Serialize(literal.Name);
-        if (value.Kind == "call-result" && resultNames.TryGetValue(value.Name, out var result)) return result;
-        if (value is { Kind: "slice", Inputs: [var task] } && inlineResults.TryGetValue(task.Key, out var site) && site.Storage!.Result is { } field && value.Offset == field.Offset * 8 && value.Width == field.Size * 8)
-            return resultNames[calls.Single(c => c.Address == site.ResultCandidates[0]).Value];
-        if (value.Kind == "phi")
-        {
-            var items = value.Inputs.Select(Expression).Distinct().ToArray();
-            if (items.Length == 1) return items[0];
-            problems.Add("业务 Phi 未按前驱归约：" + value.Name); return "UNKNOWN_PHI";
-        }
-        if (value.Kind is "slice" or "zero-extend" or "sign-extend" or "abi-extend" && value.Offset == 0) return Expression(value.Inputs[0]);
-        if (value.Kind == "field")
-        {
-            if (This(value.Inputs[0]) && captures.TryGetValue(value.Offset, out var name)) return name;
-            var text = Expression(value.Inputs[0]);
-            var owner = value.Inputs[0].Type is { } nativeType ? symbols.Display(nativeType) : "";
-            foreach (var part in (value.FieldPath.Length == 0 ? [value.Name] : value.FieldPath).Where(p => p != "fields"))
-            {
-                if (managed.SourceMember(owner, part) is { } member) { text += "." + member.Name; owner = member.Type; }
-                else { problems.Add("托管字段身份未绑定：" + owner + "." + part); text += "." + part; owner = ""; }
-            }
-            return managed.BaseTypeOf(owner) == "System.Enum" ? "((int)" + text + ")" : text;
-        }
-        if (value.Kind == "constant") return (value.Width == 32 ? unchecked((int)value.Offset) : value.Offset).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        if (value.Kind is "zero" or "nonzero")
-        {
-            var input = value.Inputs[0];
-            var right = input.Width == 64 ? "null" : "0";
-            return "(" + Expression(input) + (value.Kind == "zero" ? " == " : " != ") + right + ")";
-        }
-        if (value.Kind is "b.eq" or "b.ne" && value.Inputs[0] is { Kind: "compare" or "compare-add", Inputs: [var left, var rightValue] } compare)
-        {
-            var right = compare.Kind == "compare-add" && rightValue.Kind == "constant" ? SsaSemantics.Number(-rightValue.Offset, left.Width) : rightValue;
-            return "(" + Expression(left) + (value.Kind == "b.eq" ? " == " : " != ") + Expression(right) + ")";
-        }
-        if (value.Kind == "and" && value.Inputs[1] is { Kind: "constant", Offset: 1 })
-        {
-            var text = Expression(value.Inputs[0]);
-            if (boolResults.Contains(text)) return text;
-        }
-        if (value.Kind == "condition-value" && value.Offset == 2 && value.Inputs[0] is { Kind: "compare", Inputs: [var test, { Kind: "constant", Offset: 0 }] })
-        {
-            var text = Expression(test);
-            return boolResults.Contains(text) ? text : "(" + text + " != 0)";
-        }
-        problems.Add("C# 表达式未归约：" + value.Kind + ":" + value.Name); return "UNKNOWN";
-    }
-    private string? ConstantValue(string nativeType, string logicalType, SemanticTerm value)
-    {
-        if (nativeType.EndsWith('*') || layouts.Shape(nativeType).Kind is not (Cpp2CS.Abi.ShapeKind.Composite or Cpp2CS.Abi.ShapeKind.HomogeneousFloat) ||
-            !managed.HasDefaultValueConstruction(logicalType) || value.Width != layouts.Size(nativeType) * 8) return null;
-        byte[]? Bytes(SemanticTerm v) => v.Kind == "constant" && v.Width <= 64 ? Enumerable.Range(0, v.Width / 8).Select(i => (byte)((ulong)v.Offset >> (i * 8))).ToArray() :
-            v.Kind == "compose" && v.Inputs.All(p => p.Kind == "constant" && p.Width <= 64) ? v.Inputs.SelectMany(p => Bytes(p)!).ToArray() : null;
-        var bytes = Bytes(value);
-        if (bytes is null) return null;
-        if (bytes.All(b => b == 0)) return "default(" + logicalType + ")";
-        var assignments = new List<string>();
-        foreach (var field in layouts.Flatten(nativeType, 0))
-        {
-            if (managed.MutableField(logicalType, field.Name, true) is not { } name || field.Type is not ("float" or "double" or "int32_t" or "int64_t" or "bool")) return null;
-            var scalarSize = field.Type is "double" or "int64_t" ? 8 : field.Type == "bool" ? 1 : 4;
-            if (field.Size != scalarSize || field.Offset < 0 || field.Offset + field.Size > bytes.Length) return null;
-            var bits = bytes.Skip(field.Offset).Take(field.Size).Select((b, i) => (ulong)b << (8 * i)).Aggregate(0UL, (a, b) => a | b);
-            if (field.Type == "bool" && bits > 1) return null;
-            var text = field.Type switch
-            {
-                "float" => "System.BitConverter.Int32BitsToSingle(unchecked((int)" + bits + "u))",
-                "double" => "System.BitConverter.Int64BitsToDouble(unchecked((long)" + bits + "UL))",
-                "bool" => bits == 0 ? "false" : "true",
-                "int32_t" => unchecked((int)bits).ToString(System.Globalization.CultureInfo.InvariantCulture),
-                _ => unchecked((long)bits).ToString(System.Globalization.CultureInfo.InvariantCulture) + "L"
-            };
-            assignments.Add(name + " = " + text);
-        }
-        return assignments.Count == 0 ? null : "new " + logicalType + " { " + string.Join(", ", assignments) + " }";
-    }
-    private string Emit(ulong pc, HashSet<ulong> path, int depth)
-    {
-        if (pc == 0 || !body.TryGetValue(pc, out var node)) return "";
-        if (!path.Add(pc)) { problems.Add("业务图存在未结构化回边"); return ""; }
-        var indent = new string(' ', depth * 4);
-        if (node.Kind == "branch") return indent + "if " + node.Text + "\n" + indent + "{\n" + Emit(node.Successors[0], new(path), depth + 1) + indent + "}\n" + Emit(node.Successors[1], new(path), depth);
-        return indent + node.Text?.Replace("\n", "\n" + indent) + "\n" + (node.Successors is [var next] ? Emit(next, path, depth) : "");
-    }
+    private string Expression(SemanticTerm value) => SemanticWriter.Expression(expressions.Value(value));
 }

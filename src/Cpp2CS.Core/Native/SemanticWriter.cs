@@ -20,6 +20,11 @@ public sealed class SemanticWriter(Symbols symbols)
         MetadataExpression { IsSlot: false, Reference.Kind: "ScriptString" } m => System.Text.Json.JsonSerializer.Serialize(m.Reference.Name),
         MetadataExpression m => (m.IsSlot ? "MetadataSlot" : "MetadataValue") + "(\"" + m.Reference.Name.Replace("\"", "\\\"") + "\")",
         MemberExpression m => Expression(m.Receiver) + "." + m.DisplayName,
+        SourceMemberExpression m => Expression(m.Receiver) + "." + m.Name,
+        AwaitExpression a => "await " + Expression(a.Value),
+        CastExpression c => "((" + c.Type + ")(" + Expression(c.Value) + "))",
+        ObjectValueExpression o => o.Fields.Length == 0 ? "default(" + o.Type + ")" :
+            "new " + o.Type + " { " + string.Join(", ", o.Fields.Select(f => f.Name + " = " + Expression(f.Value))) + " }",
         BinaryExpression b => "(" + Expression(b.Left) + " " + b.Operator + " " + Expression(b.Right) + ")",
         SliceExpression s => $"Runtime.Bits({Expression(s.Value)}, {s.BitOffset}, {s.BitWidth})",
         ComposeExpression c => "Runtime.ConcatBits(" + string.Join(", ", c.Parts.Select((p, i) => $"({Expression(p)}, {c.BitWidths[i]})")) + ")",
@@ -34,6 +39,7 @@ public sealed class SemanticWriter(Symbols symbols)
     public static string Statement(Statement s) => s switch
     {
         AssignStatement a => $"{(a.Value is LambdaExpression ? a.Type : "var")} {a.Name} = {Expression(a.Value)};",
+        EvaluateStatement e => Expression(e.Value) + ";",
         DeclareStatement d => $"{(d.Type is "int32_t" ? "int" : d.Type is "int64_t" ? "long" : d.Type)} {d.Name};",
         SetLocalStatement local => local.Name + " = " + Expression(local.Value) + ";",
         CallStatement { IsInstance: true, Name: ".ctor" } c => "Runtime.InvokeConstructor(" + string.Join(", ", new[] { c.Receiver! }.Concat(c.Arguments).Select(Expression)) + ");",
@@ -97,8 +103,8 @@ public sealed class SemanticWriter(Symbols symbols)
         if (result.Problems.Count > 0) text.AppendLine("// PARTIAL: " + string.Join("; ", result.Problems));
         var parameters = result.Method.Parameters.Where(p => p.Name != "__this" && !(p.Name == "method" && p.Type.Contains("MethodInfo"))).Select(p => symbols.Display(p.Type) + " " + p.Name);
         var asLambda = result.SourceLambdaOrigin is not null;
-        text.AppendLine(asLambda ? $"// {result.SourceLambdaOrigin} 中的回调；外层实例由 this 捕获。\n({string.Join(", ", parameters)}) =>" :
-            $"{symbols.Display(result.Method.ReturnType)} {result.Method.Name.Split("$$")[1]}({string.Join(", ", parameters)})");
+        text.AppendLine(result.SourceDeclaration ?? (asLambda ? $"// {result.SourceLambdaOrigin} 中的回调；外层实例由 this 捕获。\n({string.Join(", ", parameters)}) =>" :
+            $"{symbols.Display(result.Method.ReturnType)} {result.Method.Name.Split("$$")[1]}({string.Join(", ", parameters)})"));
         }
         text.AppendLine("{");
         var names = new Dictionary<string, string>();
@@ -149,6 +155,10 @@ public sealed class SemanticWriter(Symbols symbols)
             NameExpression n => n with { Name = names.GetValueOrDefault(n.Name, n.Name) },
             CapturedExpression c => c with { Name = names.GetValueOrDefault(c.Name, c.Name) },
             MemberExpression m => m with { Receiver = Rename(m.Receiver) },
+            SourceMemberExpression m => m with { Receiver = Rename(m.Receiver) },
+            AwaitExpression a => a with { Value = Rename(a.Value) },
+            CastExpression c => c with { Value = Rename(c.Value) },
+            ObjectValueExpression o => o with { Fields = o.Fields.Select(f => (f.Name, Rename(f.Value))).ToArray() },
             AddressOfExpression a => a with { Target = Rename(a.Target) },
             SliceExpression s => s with { Value = Rename(s.Value) },
             ComposeExpression c => c with { Parts = c.Parts.Select(Rename).ToArray() },
@@ -162,6 +172,7 @@ public sealed class SemanticWriter(Symbols symbols)
         string S(Statement s) => Statement(s switch
         {
             AssignStatement a => a with { Name = names[a.Name], Value = Rename(a.Value) },
+            EvaluateStatement e => e with { Value = Rename(e.Value) },
             CallStatement c => c with { Result = c.Result is null ? null : names[c.Result], Receiver = c.Receiver is null ? null : Rename(c.Receiver), Arguments = c.Arguments.Select(Rename).ToArray() },
             StoreStatement w => w with { Target = Rename(w.Target), Value = Rename(w.Value) },
             ReturnStatement r => r with { Value = r.Value is null ? null : Rename(r.Value) },
