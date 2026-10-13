@@ -1,10 +1,17 @@
+using System.Collections.Immutable;
+
 namespace Cpp2CS.Ir;
 
 public sealed record MachineProfile(string Id, Architecture Architecture, string Endian, int AddressBits,
-    ulong LoadBias, string ExecutionMode, string MemoryModel, string FaultModel, string[] Assumptions)
+    ulong LoadBias, string ExecutionMode, string MemoryModel, string FaultModel, ImmutableArray<string> Assumptions)
 {
-    public static MachineProfile For(Architecture architecture) => architecture == Architecture.Arm64
-        ? new("aarch64-le-el0-v3", architecture, "little", 64, 0, "EL0; A64; FP/AdvSIMD, classic PAuth and BTI available",
+    public static MachineProfile For(Architecture architecture) => architecture switch
+    {
+        Architecture.Arm64 => Arm64, Architecture.X64 => X64,
+        _ => throw new ArgumentOutOfRangeException(nameof(architecture))
+    };
+
+    private static readonly MachineProfile Arm64 = new("aarch64-le-el0-v3", Architecture.Arm64, "little", 64, 0, "EL0; A64; FP/AdvSIMD, classic PAuth and BTI available",
             "explicit ordered memory events, reservations and external decisions; one concrete execution witness",
             "missing environment inputs and unmodeled faults stop explicitly",
             ["image addresses are execution addresses", "no MTE/SVE/SME/GCS/AFP/FP16/EBF",
@@ -16,8 +23,8 @@ public sealed record MachineProfile(string Id, Architecture Architecture, string
              "exclusive store needs an explicit global-monitor decision; external writes and monitor invalidations are explicit events",
              "atomic width, memory order and barriers are retained; the concrete interpreter does not enumerate weak-memory executions",
              "next-instruction fetch is outside this instruction transition; fault delivery and handler state are unmodeled",
-             "the binary does not establish these runtime configuration assumptions"])
-        : new("x64-le-user-v6", architecture, "little", 64, 0, "64-bit long mode; CPL3; CET disabled; SSE through SSE4.2, AVX/AVX2/FMA enabled; outside RTM and SGX enclaves",
+             "the binary does not establish these runtime configuration assumptions"]);
+    private static readonly MachineProfile X64 = new("x64-le-user-v6", Architecture.X64, "little", 64, 0, "64-bit long mode; CPL3; CET disabled; SSE through SSE4.2, AVX/AVX2/FMA enabled; outside RTM and SGX enclaves",
             "explicit ordered byte-addressed events; one concrete execution witness", "unmodeled memory/target fault stops",
             ["preferred image addresses are execution addresses", "48-bit canonical addresses; LA57 disabled", "FS/GS bases are explicit inputs",
              "SSE through SSE4.2, AVX/AVX2/FMA and DAZ available; CR0.EM=0; CR0.TS=0; CR4.OSFXSR=1; CR4.OSXSAVE=1; XCR0.x87/SSE/AVX=1",

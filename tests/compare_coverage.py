@@ -22,6 +22,25 @@ def rows(path):
             yield int(address, 16), int(offset, 16), int(length), status
 
 
+def contract_rows(report):
+    with gzip.open(report["contractIndex"], "rt", encoding="utf-8") as stream:
+        assert stream.readline().rstrip() == "address\tfileOffset\tlength\tsupport\tobligations"
+        for line in stream:
+            address, offset, length, support, obligations = line.rstrip().split("\t")
+            assert support in {"Exact", "NormalPathOnly", "ExceptionBoundaryOnly"}, "未知支持等级"
+            codes = () if obligations == "-" else tuple(obligations.split(","))
+            assert codes == tuple(sorted(set(codes))) and all(codes), "义务代码必须唯一且有序"
+            yield int(address, 16), int(offset, 16), int(length), support, codes
+
+
+def contract_stream(report):
+    assert ("contractIndex" in report) == ("contractIndexSha256" in report), "契约索引身份字段不完整"
+    if "contractIndex" not in report:
+        return None
+    assert sha(report["contractIndex"]) == report["contractIndexSha256"], "契约索引身份不符"
+    return contract_rows(report)
+
+
 def compare(before_path, after_path, output):
     before = json.loads(before_path.read_text(encoding="utf-8-sig"))
     after = json.loads(after_path.read_text(encoding="utf-8-sig"))
@@ -32,13 +51,20 @@ def compare(before_path, after_path, output):
     output.mkdir(parents=True, exist_ok=True)
     stem = after_path.name.removesuffix(".report.json")
     changes = output / f"{stem}.coverage-changes.tsv.gz"
+    contract_changes = output / f"{stem}.contract-changes.tsv.gz"
     report_path = output / f"{stem}.coverage-comparison.json"
     transitions = collections.Counter()
     old_counts = collections.Counter()
     new_counts = collections.Counter()
     candidates = candidate_bytes = regressions = 0
-    with gzip.open(changes, "wt", encoding="utf-8") as stream:
+    old_contracts, new_contracts = contract_stream(before), contract_stream(after)
+    contracts_available = old_contracts is not None and new_contracts is not None
+    support_rank = {"Exact": 2, "NormalPathOnly": 1, "ExceptionBoundaryOnly": 0}
+    contract_candidates = contract_regressions = 0
+    contract_transitions = collections.Counter()
+    with gzip.open(changes, "wt", encoding="utf-8") as stream, gzip.open(contract_changes, "wt", encoding="utf-8") as contract_output:
         stream.write("address\tfileOffset\tlength\tbefore\tafter\n")
+        contract_output.write("address\tfileOffset\tlength\tbeforeSupport\tafterSupport\tbeforeObligations\tafterObligations\tregression\n")
         for old, new in itertools.zip_longest(rows(before["boundaryIndex"]), rows(after["boundaryIndex"])):
             assert old is not None and new is not None, "候选数量改变"
             assert old[:3] == new[:3], f"解码边界改变：{old} -> {new}"
@@ -53,6 +79,25 @@ def compare(before_path, after_path, output):
                 stream.write(f"{address:X}\t{offset:X}\t{length}\t{old[3]}\t{status}\n")
             if old[3] == "V" and status != "V":
                 regressions += 1
+            old_contract = next(old_contracts, None) if old[3] == "V" and old_contracts is not None else None
+            new_contract = next(new_contracts, None) if status == "V" and new_contracts is not None else None
+            if old[3] == "V" and old_contracts is not None:
+                assert old_contract is not None and old_contract[:3] == old[:3], "旧契约索引未对应全部有效候选"
+            if status == "V" and new_contracts is not None:
+                assert new_contract is not None and new_contract[:3] == new[:3], "新契约索引未对应全部有效候选"
+            if old_contract is not None and new_contract is not None:
+                contract_candidates += 1
+                contract_transitions[f"{old_contract[3]}->{new_contract[3]}"] += 1
+                regression = support_rank[new_contract[3]] < support_rank[old_contract[3]] or bool(set(new_contract[4]) - set(old_contract[4]))
+                contract_regressions += int(regression)
+                if old_contract[3:] != new_contract[3:]:
+                    old_codes = ",".join(old_contract[4]) or "-"
+                    new_codes = ",".join(new_contract[4]) or "-"
+                    contract_output.write(f"{address:X}\t{offset:X}\t{length}\t{old_contract[3]}\t{new_contract[3]}\t{old_codes}\t{new_codes}\t{int(regression)}\n")
+    if old_contracts is not None:
+        assert next(old_contracts, None) is None, "旧契约索引含多余候选"
+    if new_contracts is not None:
+        assert next(new_contracts, None) is None, "新契约索引含多余候选"
     assert candidates == before["candidates"] == after["candidates"]
     for source, counts in ((before, old_counts), (after, new_counts)):
         assert candidate_bytes + source["truncatedOrUnalignedBytes"] == source["bytesCovered"]
@@ -71,13 +116,21 @@ def compare(before_path, after_path, output):
         "candidatesCompared": candidates, "candidateBytesCompared": candidate_bytes,
         "transitions": dict(sorted(transitions.items())), "coverageRegressions": regressions,
         "validatedGain": after["validated"] - before["validated"],
-        "beforeCandidateCoverage": before["validated"] / candidates,
-        "afterCandidateCoverage": after["validated"] / candidates,
+        "beforeCandidateCoverage": before["validated"] / candidates if candidates else None,
+        "afterCandidateCoverage": after["validated"] / candidates if candidates else None,
         "changedFormCounts": {form: delta for form, delta in form_delta.items() if delta},
-        "passed": regressions == 0 and after["validationErrors"] == 0,
+        "structuralCoveragePassed": regressions == 0 and after["validationErrors"] == 0,
+        "contractsCompared": contracts_available,
+        "contractComparisonStatus": "compared" if contracts_available else "unavailable",
+        "contractCandidatesCompared": contract_candidates if contracts_available else None,
+        "contractTransitions": dict(sorted(contract_transitions.items())) if contracts_available else None,
+        "contractRegressions": contract_regressions if contracts_available else None,
+        "semanticContractRegressionFree": contract_regressions == 0 if contracts_available else None,
+        "passed": regressions == 0 and after["validationErrors"] == 0 and (not contracts_available or contract_regressions == 0),
         "changeIndex": str(changes.resolve()), "changeIndexSha256": sha(changes),
+        "contractChangeIndex": str(contract_changes.resolve()), "contractChangeIndexSha256": sha(contract_changes),
         "scriptSha256": sha(__file__),
-        "meaning": "Identical candidate boundaries and supported-status preservation only. Profile/semantics changes are recorded; this does not prove semantic equivalence or reachable-code coverage.",
+        "meaning": "Structural coverage requires identical candidate boundaries and supported-status preservation. Contract comparison, when both indexes exist, detects support downgrades and added obligation codes; missing indexes are unavailable, not a semantic pass. Neither check proves semantic equivalence or reachable-code coverage. Profile and semantics changes remain explicit.",
     }
     report_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(report_path.resolve())

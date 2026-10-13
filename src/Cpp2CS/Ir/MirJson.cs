@@ -2,21 +2,39 @@ using System.Globalization;
 using System.Numerics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 
 namespace Cpp2CS.Ir;
 
 public static class MirJson
 {
-    public const string SchemaVersion = "cpp2cs.mir/0.1";
-    public const string SemanticsVersion = "attempt08-atomic-stack-6";
+    public const string SchemaVersion = "cpp2cs.mir/0.2";
+    public const string SemanticsVersion = "attempt08-mir-contract-7";
     public static readonly JsonSerializerOptions Options = CreateOptions();
 
     private static JsonSerializerOptions CreateOptions()
     {
-        var options = new JsonSerializerOptions { WriteIndented = false };
-        options.Converters.Add(new JsonStringEnumConverter());
+        var resolver = new DefaultJsonTypeInfoResolver();
+        resolver.Modifiers.Add(type =>
+        {
+            for (var index = type.Properties.Count - 1; index >= 0; index--)
+                if (type.Properties[index].AttributeProvider?.GetCustomAttributes(typeof(JsonIgnoreAttribute), true)
+                    .OfType<JsonIgnoreAttribute>().Any(attribute => attribute.Condition == JsonIgnoreCondition.Always) == true)
+                    type.Properties.RemoveAt(index);
+        });
+        var options = new JsonSerializerOptions
+        {
+            WriteIndented = false,
+            AllowDuplicateProperties = false,
+            RespectRequiredConstructorParameters = true,
+            RespectNullableAnnotations = true,
+            UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+            TypeInfoResolver = resolver
+        };
+        options.Converters.Add(new JsonStringEnumConverter(allowIntegerValues: false));
         options.Converters.Add(new BigIntegerHexConverter());
         options.Converters.Add(new UInt64HexConverter());
+        options.MakeReadOnly();
         return options;
     }
 
@@ -30,7 +48,8 @@ public static class MirJson
     {
         var envelope = JsonSerializer.Deserialize<MirEnvelope>(json, Options) ?? throw new InvalidDataException("Missing MIR envelope");
         if (envelope.Schema != SchemaVersion || envelope.Semantics != SemanticsVersion) throw new InvalidDataException("Unsupported MIR schema or semantics");
-        if (envelope.Profile != MachineProfile.For(envelope.Instruction.Architecture).Id) throw new InvalidDataException("Unsupported MIR profile");
+        if (envelope.Profile != envelope.Instruction.ProfileId || envelope.Profile != MachineProfile.For(envelope.Instruction.Architecture).Id)
+            throw new InvalidDataException("Unsupported MIR profile");
         var errors = MirValidator.Validate(envelope.Instruction);
         if (errors.Count != 0) throw new InvalidDataException(string.Join("; ", errors));
         return envelope.Instruction;

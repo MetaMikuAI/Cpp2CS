@@ -20,12 +20,13 @@ internal static partial class MemoryEffects
             else denied |= !allowed;
         }
         state.Accesses.Add($"AtomicRmw:0x{address:X}:{bytes}");
-        string? stop = addressFault || missing || denied ? "UnmodeledFaultStop" : unknown ? "UnmodeledEnvironmentStop" : null;
-        if (stop is not null)
+        MemoryStop? stop = addressFault || missing || denied ? new(StopKind.FaultBoundary, "atomic read/write access")
+            : unknown ? new(StopKind.MissingEnvironment, "atomic write permissions are required") : null;
+        if (stop is { } boundary)
         {
             state.Events.Add(new(state.Events.Count, "AtomicRmw", address, bytes, width,
-                MemoryOrder.X64Locked, stop, Atomic: op.Atomic));
-            return new(Outcome: stop, Reason: addressFault || missing || denied ? "atomic read/write access" : "atomic write permissions are required");
+                MemoryOrder.X64Locked, boundary.Outcome.ToString(), Atomic: op.Atomic));
+            return new(Stop: boundary);
         }
         BigInteger old = 0;
         for (int i = 0; i < bytes; i++) old |= new BigInteger(state.Memory[unchecked(address + (ulong)i)]) << (8 * i);

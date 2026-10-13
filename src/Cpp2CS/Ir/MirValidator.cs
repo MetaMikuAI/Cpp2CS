@@ -6,10 +6,12 @@ public static class MirValidator
     {
         List<string> errors = [];
         List<int> widths = [];
+        var state = 0;
+        if (ir.Origin is null) return ["missing instruction origin"];
+        if (!Enum.IsDefined(ir.Architecture)) return ["unknown architecture"];
         var slots = StateLayout.For(ir.Architecture);
-        var world = 0;
-        if (!Enum.IsDefined(ir.Architecture)) errors.Add("unknown architecture");
-        if (!Enum.IsDefined(ir.Support)) errors.Add("unknown support class");
+        if (ir.ProfileId != MachineProfile.For(ir.Architecture).Id) errors.Add("profile does not match architecture");
+        if (ir.Operations.IsDefault || ir.Annotations.IsDefault) return ["missing instruction collections"];
         if (ir.Architecture == Architecture.Arm64 && (ir.Origin.Address & 3) != 0) errors.Add("unaligned ARM64 instruction address");
         if (ir.Origin.FileOffset < 0) errors.Add("negative file offset");
         if (ir.Origin.Bytes.Length is < 1 or > 15 || ir.Architecture == Architecture.Arm64 && ir.Origin.Bytes.Length != 4)
@@ -17,22 +19,25 @@ public static class MirValidator
         if (string.IsNullOrWhiteSpace(ir.Origin.ImageId) || string.IsNullOrWhiteSpace(ir.Rule)) errors.Add("missing origin or semantic rule");
         foreach (var op in ir.Operations)
         {
-            var arity = op.Code switch
+            if (op is null) { errors.Add("null operation"); continue; }
+            if (!OperationSpecs.TryGet(op.Code, out var spec) || op.Inputs.IsDefault || op.Inputs.Length != spec.Arity)
+            { errors.Add($"invalid opcode or arity: {op.Code}"); continue; }
+            var arity = spec.Arity;
+            if (op.Payload is null || op.Payload.GetType() != spec.PayloadType)
+            { errors.Add($"payload contract: {op.Code}"); continue; }
+            if (spec.HasStateFlow)
             {
-                OpCode.Constant or OpCode.ReadSlot or OpCode.Undefined or OpCode.ClearExclusive or OpCode.Barrier => 0,
-                OpCode.WriteSlot or OpCode.Extract or OpCode.Zext or OpCode.Sext or OpCode.Not or OpCode.Load or OpCode.Guard or OpCode.LoadExclusive or OpCode.Prefetch or OpCode.WriteProbe or OpCode.CodeGuarded => 1,
-                OpCode.Select or OpCode.Float or OpCode.Qarma5 or OpCode.StoreIf or OpCode.AtomicRmw => 3,
-                OpCode.FloatFused => 4,
-                _ => 2
-            };
-            if (!Enum.IsDefined(op.Code) || op.Inputs.Length != arity) { errors.Add($"invalid opcode or arity: {op.Code}"); continue; }
+                if (op.Flow is not { } flow || flow.Input.Id != state || flow.Output.Id != state + 1)
+                    errors.Add($"broken state flow: {op.Code}");
+                state++;
+            }
+            else if (op.Flow is not null) errors.Add($"pure operation has state flow: {op.Code}");
             var inputError = false;
             foreach (var input in op.Inputs)
             {
                 if (input.Id < 0 || input.Id >= widths.Count || widths[input.Id] != input.Width) { errors.Add($"undefined or mismatched input v{input.Id}"); inputError = true; }
             }
-            var produces = op.Code is not (OpCode.WriteSlot or OpCode.Store or OpCode.StoreIf or OpCode.Guard or OpCode.ClearExclusive or OpCode.Barrier or OpCode.Prefetch or OpCode.WriteProbe);
-            if (produces != op.Result.HasValue) errors.Add($"result contract: {op.Code}");
+            if (spec.HasResult != op.Result.HasValue) errors.Add($"result contract: {op.Code}");
             var width = op.Result?.Width ?? 0;
             if (op.Result is { } result)
             {
@@ -76,41 +81,43 @@ public static class MirValidator
                 OpCode.Qarma5 => ir.Architecture == Architecture.Arm64 && a == 64 && b == 64 && op.Inputs[2].Width == 128 && width == 64 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
                 OpCode.CodeGuarded => ir.Architecture == Architecture.Arm64 && a == 64 && width == 1 && op.Immediate == 0 && op.Slot is null && op.Detail is null,
                 OpCode.Undefined => !string.IsNullOrWhiteSpace(op.Detail),
-                OpCode.Guard => a == 1 && !string.IsNullOrWhiteSpace(op.Detail) && op.Immediate == 0 && op.Slot is null,
+                OpCode.Guard => a == 1 && !string.IsNullOrWhiteSpace(op.Detail) && op.StopKind is { } stop && Enum.IsDefined(stop),
                 OpCode.Float => ValidFloat(ir.Architecture, op, a, b, width),
                 OpCode.FloatFused => ValidFusedFloat(ir.Architecture, op, a, b, width),
-                _ => width == a && a == b
+                OpCode.Add or OpCode.Sub or OpCode.Mul or OpCode.And or OpCode.Or or OpCode.Xor => width == a && a == b,
+                _ => false
             };
             if (!valid) errors.Add($"type rule: {op.Code}");
-            if (op.Code is not (OpCode.Float or OpCode.FloatFused) && op.Floating is not null) errors.Add("non-float operation has floating specification");
-            if (op.Memory is not null && !ValidMemory(ir.Architecture, op)) errors.Add("invalid memory specification");
-            if (op.Code != OpCode.Barrier && op.Barrier is not null) errors.Add("non-barrier operation has barrier specification");
-            if (op.Code != OpCode.AtomicRmw && op.Atomic is not null) errors.Add("non-atomic operation has atomic specification");
-            if (op.Code is OpCode.Load or OpCode.Store or OpCode.LoadIf or OpCode.StoreIf or OpCode.Guard or OpCode.LoadExclusive or OpCode.StoreExclusive or OpCode.WriteProbe or OpCode.ClearExclusive or OpCode.Barrier or OpCode.Prefetch or OpCode.CodeGuarded or OpCode.AtomicRmw)
-            {
-                var fault = op.Code is OpCode.ClearExclusive or OpCode.Barrier or OpCode.Prefetch ? FaultPolicy.None : FaultPolicy.StopUnmodeled;
-                if (op.WorldIn != world || op.WorldOut != world + 1 || op.Fault != fault)
-                    errors.Add("broken World or fault edge");
-                world++;
-                if (ir.Support == SupportClass.Exact) errors.Add("effect claimed exact without modeled fault");
-            }
-            else if (op.WorldIn != -1 || op.WorldOut != -1 || op.Fault != FaultPolicy.None) errors.Add("pure/state op has World or fault fields");
+            if (op.Payload is MemoryPayload && (op.Memory is null || !ValidMemory(ir.Architecture, op))) errors.Add("invalid memory specification");
         }
         bool ValidValue(Value? value, int width) => value is { } v && v.Width == width && v.Id >= 0 && v.Id < widths.Count && widths[v.Id] == width;
-        var exitValid = ir.Exit.Kind switch
+        var exitValid = ir.Exit switch
         {
-            ExitKind.Next => ir.Exit.Target is null && ir.Exit.Condition is null && ir.Exit.Alternative is null && ir.Exit.Reason is null,
-            ExitKind.Jump => ValidValue(ir.Exit.Target, 64) && ir.Exit.Condition is null && ir.Exit.Alternative is null && ir.Exit.Reason is null && ir.Exit.Address == 0,
-            ExitKind.Branch => ValidValue(ir.Exit.Target, 64) && ValidValue(ir.Exit.Condition, 1) && ValidValue(ir.Exit.Alternative, 64) && ir.Exit.Reason is null && ir.Exit.Address == 0,
-            ExitKind.Trap => !string.IsNullOrWhiteSpace(ir.Exit.Reason) && ir.Exit.ResumeAddress is not null && ir.Exit.Target is null && ir.Exit.Condition is null && ir.Exit.Alternative is null && ir.Exit.Address == 0,
+            NextExit => true,
+            JumpExit => ValidValue(ir.Exit.Target, 64),
+            BranchExit => ValidValue(ir.Exit.Target, 64) && ValidValue(ir.Exit.Condition, 1) && ValidValue(ir.Exit.Alternative, 64),
+            TrapExit trap => ValidException(ir, trap.Boundary),
             _ => false
         };
         if (!exitValid) errors.Add("invalid terminator");
-        if (ir.Exit.Kind != ExitKind.Trap && ir.Exit.ResumeAddress is not null) errors.Add("non-trap terminator has resume address");
-        if ((ir.Exit.Kind == ExitKind.Trap) != (ir.Support == SupportClass.ExceptionBoundaryOnly)) errors.Add("trap/support boundary mismatch");
-        if (ir.Support == SupportClass.Exact && ir.Limitations.Count != 0 || ir.Support != SupportClass.Exact && ir.Limitations.Count == 0)
-            errors.Add("support/limitations mismatch");
+        if (ir.Exit is not null && ir.Exit.State.Id != state) errors.Add("terminator does not consume final state");
+        foreach (var annotation in ir.Annotations)
+            if (annotation is null || !Enum.IsDefined(annotation.Kind) || string.IsNullOrWhiteSpace(annotation.Reason) ||
+                annotation.OperationIndex is { } index && (index < 0 || index >= ir.Operations.Length))
+                errors.Add("invalid semantic obligation");
         return errors;
+    }
+
+    private static bool ValidException(MirInstruction ir, ExceptionBoundary? boundary)
+    {
+        if (boundary is null || !Enum.IsDefined(boundary.Kind) || string.IsNullOrWhiteSpace(boundary.Detail)) return false;
+        if (ir.Architecture == Architecture.Arm64)
+            return boundary.Kind == ExceptionKind.ArmBreakpoint && boundary.Syndrome is not null && boundary.SavedAddress == ir.Origin.Address;
+        if (boundary.Kind == ExceptionKind.ArmBreakpoint) return false;
+        var next = boundary.Kind is ExceptionKind.X64Breakpoint or ExceptionKind.X64Debug;
+        var address = next ? unchecked(ir.Origin.Address + (ulong)ir.Origin.Bytes.Length) : ir.Origin.Address;
+        return boundary.SavedAddress == address &&
+            (boundary.Kind == ExceptionKind.X64GeneralProtection ? boundary.Syndrome == 0 : boundary.Syndrome is null);
     }
 
     private static bool ValidMemory(Architecture architecture, Operation op)

@@ -1,4 +1,5 @@
 using Cpp2CS.Ir;
+using System.Collections.Immutable;
 using System.Numerics;
 
 namespace Cpp2CS.Validation;
@@ -9,14 +10,15 @@ public static class CoreChecks
 
     public static int Run()
     {
-        var checks = Images.ImageSelfTests.Run() + DivisionChecks.Run() + FloatChecks.Run() + EffectBoundaryChecks.Run() + MemoryEffectChecks.Run() + AtomicMemoryChecks.Run();
+        var checks = Images.ImageSelfTests.Run() + DivisionChecks.Run() + FloatChecks.Run() + EffectBoundaryChecks.Run() + MemoryEffectChecks.Run() + AtomicMemoryChecks.Run()
+            + ExecutionContractChecks.Run() + MirStructureChecks.Run() + MirInspectionChecks.Run();
         var originalBytes = Convert.FromHexString("1F2003D5");
         var immutableOrigin = new InstructionOrigin("fixture:immutable", 0x1000, 0, originalBytes);
         originalBytes[0] = 0;
         Require(immutableOrigin.Bytes.Span[0] == 0x1F, "origin snapshot");
         var minimal = new MirBuilder(Architecture.Arm64, immutableOrigin, "fixture.structure").Finish(MirExit.Next(0x1004));
-        Require(MirValidator.Validate(minimal with { Support = (SupportClass)999 }).Count > 0, "reject unknown support");
-        Require(MirValidator.Validate(minimal with { Exit = MirExit.Trap("fixture") with { Target = new Value(999, 64) } }).Count > 0, "reject stray trap value");
+        Require(MirValidator.Validate(minimal with { ProfileId = "unknown-profile" }).Count > 0, "reject unknown profile");
+        Require(MirValidator.Validate(minimal with { Exit = MirExit.Trap(ExceptionKind.X64Breakpoint, "fixture", 0x1000) }).Count > 0, "reject trap from another architecture");
         Require(MirValidator.Validate(minimal with { Origin = new("fixture:unaligned", 0x1001, 0, originalBytes) }).Count > 0, "reject ARM alignment");
         checks += 4;
         foreach (var subtract in new[] { false, true })
@@ -65,7 +67,7 @@ public static class CoreChecks
         var faultState = CreateArmState();
         faultState.Slots["x0"] = 99;
         Require(MirInterpreter.Execute(memoryIr, faultState).Outcome == "UnmodeledFaultStop" && faultState.ReadSlot("x0") == 99, "no fabricated load result");
-        var broken = memoryIr with { Operations = memoryIr.Operations.Select(op => op.Code == OpCode.Store ? op with { WorldIn = 0 } : op).ToArray() };
+        var broken = memoryIr with { Operations = memoryIr.Operations.Select(op => op.Code == OpCode.Store ? op with { Flow = new(new(0), op.Flow!.Output) } : op).ToImmutableArray() };
         Require(MirValidator.Validate(broken).Count != 0, "reject broken World chain");
         checks += 4;
         for (var count = 0; count <= 80; count++)

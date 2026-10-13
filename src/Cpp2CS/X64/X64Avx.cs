@@ -131,7 +131,7 @@ public static partial class X64Lifter
             int width = Width(1);
             VectorAlignment(width / 8);
             b.Store(Address(), ReadVector(1), new(MemoryOrder.Relaxed, width, 0, NonTemporal: true));
-            b.MarkNormalPathOnly("non-temporal policy is retained as an event; cache and concurrent visibility are outside the byte-state interpreter");
+            b.MarkNormalPathOnly("non-temporal policy is retained as an event; cache and concurrent visibility are outside the byte-state interpreter", ObligationKind.CacheEffects);
             return Next();
         }
 

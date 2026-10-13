@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Collections.Immutable;
 using Cpp2CS.Ir;
 
 namespace Cpp2CS.Validation;
@@ -188,11 +189,11 @@ public static class FloatChecks
             Value a = new(0, spec.OperandWidth), b = new(1, spec.OperandWidth), control = new(2, 32);
             var operations = new Operation[]
             {
-                new(OpCode.Constant, a, []), new(OpCode.Constant, b, []), new(OpCode.Constant, control, []),
-                new(OpCode.Float, new Value(3, spec.ResultWidth + 12), [a, b, control], Floating: spec)
+                new(OpCode.Constant, a, [], new ImmediatePayload(0)), new(OpCode.Constant, b, [], new ImmediatePayload(0)), new(OpCode.Constant, control, [], new ImmediatePayload(0)),
+                new(OpCode.Float, new Value(3, spec.ResultWidth + 12), [a, b, control], new FloatPayload(spec))
             };
             var ir = new MirInstruction(architecture, new("scale-check", 0x1000, 0, new byte[4]),
-                "scale-check", operations, MirExit.Next(0x1004), SupportClass.Exact, []);
+                "scale-check", operations.ToImmutableArray(), MirExit.Next(0x1004), [], MachineProfile.For(architecture).Id);
             if ((MirValidator.Validate(ir).Count == 0) != expected)
                 throw new InvalidOperationException($"Fixed-point scale contract: {architecture} {spec}");
             checks++;
@@ -225,11 +226,11 @@ public static class FloatChecks
             for (var i = 0; i < inputs.Length; i++)
             {
                 inputs[i] = new(i, inputWidths[i]);
-                operations.Add(new(OpCode.Constant, inputs[i], []));
+                operations.Add(new(OpCode.Constant, inputs[i], [], new ImmediatePayload(0)));
             }
-            operations.Add(new(OpCode.FloatFused, new Value(inputs.Length, resultWidth ?? spec.ResultWidth + 12), inputs, Floating: spec));
+            operations.Add(new(OpCode.FloatFused, new Value(inputs.Length, resultWidth ?? spec.ResultWidth + 12), inputs.ToImmutableArray(), new FloatPayload(spec)));
             var ir = new MirInstruction(architecture, new("fused-check", 0x1000, 0, new byte[4]),
-                "fused-check", operations, MirExit.Next(0x1004), SupportClass.Exact, []);
+                "fused-check", operations.ToImmutableArray(), MirExit.Next(0x1004), [], MachineProfile.For(architecture).Id);
             var errors = MirValidator.Validate(ir);
             if (expected ? errors.Count != 0 : !errors.Any(e => e.Contains("FloatFused", StringComparison.Ordinal)))
                 throw new InvalidOperationException($"Fused floating contract: {architecture} {spec}; {string.Join("; ", errors)}");

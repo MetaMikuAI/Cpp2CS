@@ -28,6 +28,7 @@ public static class CorpusScanner
         var indexPath = Path.GetFullPath(Path.Combine(outputDirectory, stem + ".issues.tsv.gz"));
         var boundaryPath = Path.GetFullPath(Path.Combine(outputDirectory, stem + ".boundaries.tsv.gz"));
         var reportPath = Path.GetFullPath(Path.Combine(outputDirectory, stem + ".report.json"));
+        var contractPath = Path.GetFullPath(Path.Combine(outputDirectory, stem + ".contracts.tsv.gz"));
         var timer = Stopwatch.StartNew();
         var assemblyPath = typeof(ImageDocument).Assembly.Location;
         using var assemblyStream = File.OpenRead(assemblyPath);
@@ -39,10 +40,15 @@ public static class CorpusScanner
         using (var boundariesFile = File.Create(boundaryPath))
         using (var boundariesGzip = new GZipStream(boundariesFile, CompressionLevel.Fastest))
         using (var boundaries = new StreamWriter(boundariesGzip, new UTF8Encoding(false), 65536))
+        using (var contractFile = File.Create(contractPath))
+        using (var contractGzip = new GZipStream(contractFile, CompressionLevel.Fastest))
+        using (var contracts = new StreamWriter(contractGzip, new UTF8Encoding(false), 65536))
         {
             writer.WriteLine("address\tfileOffset\tlength\tstatus\tform\tbytes\treason");
             boundaries.WriteLine("address\tfileOffset\tlength\tstatus");
+            contracts.WriteLine("address\tfileOffset\tlength\tsupport\tobligations");
             counts.Boundaries = boundaries;
+            counts.Contracts = contracts;
             foreach (var range in image.ExecutableRanges)
             {
                 counts.ExecutableFileBytes += range.FileSize;
@@ -59,9 +65,13 @@ public static class CorpusScanner
         }
         timer.Stop();
         if (counts.BytesCovered != counts.ExecutableFileBytes) throw new InvalidDataException("扫描没有覆盖全部可执行文件字节");
+        var result = new CorpusScanResult(reportPath, indexPath, counts.Candidates, counts.Validated, counts.Unsupported,
+            counts.Invalid, counts.ValidationErrors, counts.BoundaryBytes + counts.ZeroFillBytes,
+            counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.NormalPathOnly)),
+            counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.ExceptionBoundaryOnly)));
         var report = new
         {
-            schemaVersion = 1,
+            schemaVersion = 2,
             mirSchemaVersion = MirJson.SchemaVersion,
             semanticsVersion = MirJson.SemanticsVersion,
             implementationAssembly = assemblyPath,
@@ -73,11 +83,11 @@ public static class CorpusScanner
             scanKind = image.Architecture == Architecture.Arm64 ? "Every aligned 4-byte word in executable file mappings" : "Iced 64-bit linear sweep of executable file mappings; invalid input continues at consumed byte boundary",
             scope = "Candidate bytes only: not reachable CFG, all legal x86 entry points, complete instruction semantics, native equivalence, or game runtime validation. Unsupported and invalid candidates remain in the index.",
             validation = "Every supported MIR candidate passed through MirValidator; structural checking is not semantic equivalence.",
-            passedStructuralValidation = counts.ValidationErrors == 0,
-            allCandidatesRepresented = counts.Unsupported == 0 && counts.Invalid == 0 && counts.ValidationErrors == 0 && counts.BoundaryBytes == 0 && counts.ZeroFillBytes == 0,
-            fullyLifted = counts.Unsupported == 0 && counts.Invalid == 0 && counts.ValidationErrors == 0 && counts.BoundaryBytes == 0 && counts.ZeroFillBytes == 0 && counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.Exact)) == counts.Validated,
-            normalPathOnlyCount = counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.NormalPathOnly)),
-            exceptionBoundaryOnlyCount = counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.ExceptionBoundaryOnly)),
+            passedStructuralValidation = result.StructuralChecksPassed,
+            allCandidatesRepresented = result.AllCandidatesRepresented,
+            fullyLifted = result.FullyLifted,
+            normalPathOnlyCount = result.NormalPathOnlyCount,
+            exceptionBoundaryOnlyCount = result.ExceptionBoundaryOnlyCount,
             executableFileBytes = counts.ExecutableFileBytes,
             executableMemoryBytes = counts.ExecutableMemoryBytes,
             bytesCovered = counts.BytesCovered,
@@ -95,6 +105,7 @@ public static class CorpusScanner
             supportClasses = Sorted(counts.SupportClasses),
             unsupportedReasons = Sorted(counts.UnsupportedReasons),
             limitations = Sorted(counts.Limitations),
+            obligations = Sorted(counts.Obligations),
             elapsedSeconds = timer.Elapsed.TotalSeconds,
             executableRanges = image.ExecutableRanges.Select(r => new { r.Name, address = $"0x{r.Address:X}", fileOffset = $"0x{r.FileOffset:X}", r.FileSize, r.MemorySize }),
             relocationTables = image.RelocationTables,
@@ -102,10 +113,12 @@ public static class CorpusScanner
             issueIndex = indexPath,
             issueIndexSha256 = FileHash(indexPath),
             boundaryIndex = boundaryPath,
-            boundaryIndexSha256 = FileHash(boundaryPath)
+            boundaryIndexSha256 = FileHash(boundaryPath),
+            contractIndex = contractPath,
+            contractIndexSha256 = FileHash(contractPath)
         };
         File.WriteAllText(reportPath, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
-        return new(reportPath, indexPath, counts.Candidates, counts.Validated, counts.Unsupported, counts.Invalid, counts.ValidationErrors, counts.BoundaryBytes + counts.ZeroFillBytes, counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.NormalPathOnly)), counts.SupportClasses.GetValueOrDefault(nameof(SupportClass.ExceptionBoundaryOnly)));
+        return result;
     }
 
     private static void ScanArm64(ImageDocument image, ImageRange range, StreamWriter writer, ScanCounts counts)
@@ -174,9 +187,6 @@ public static class CorpusScanner
             return;
         }
         Increment(counts.Forms, result.Form);
-        Increment(counts.SupportClasses, ir.Support.ToString());
-        foreach (var limitation in ir.Limitations) Increment(counts.Limitations, limitation);
-        counts.Operations += ir.Operations.Count;
         var errors = MirValidator.Validate(ir);
         if (errors.Count != 0)
         {
@@ -186,6 +196,17 @@ public static class CorpusScanner
             return;
         }
         counts.Validated++;
+        counts.Operations += ir.Operations.Length;
+        Increment(counts.SupportClasses, ir.Support.ToString());
+        var obligations = ir.Obligations;
+        foreach (var reason in obligations.Select(item => item.Reason).Distinct()) Increment(counts.Limitations, reason);
+        var codes = obligations.Select(item => item.Kind.ToString()).Distinct().Order(StringComparer.Ordinal).ToArray();
+        foreach (var code in codes) Increment(counts.Obligations, code);
+        counts.Contracts.Write(origin.Address.ToString("X", CultureInfo.InvariantCulture)); counts.Contracts.Write('\t');
+        counts.Contracts.Write(origin.FileOffset.ToString("X", CultureInfo.InvariantCulture)); counts.Contracts.Write('\t');
+        counts.Contracts.Write(origin.Bytes.Length.ToString(CultureInfo.InvariantCulture)); counts.Contracts.Write('\t');
+        counts.Contracts.Write(ir.Support.ToString()); counts.Contracts.Write('\t');
+        counts.Contracts.WriteLine(codes.Length == 0 ? "-" : string.Join(',', codes));
         WriteBoundary(counts, origin, 'V');
         counts.BytesLifted += (ulong)origin.Bytes.Length;
     }
@@ -251,11 +272,13 @@ public static class CorpusScanner
     private sealed class ScanCounts
     {
         public StreamWriter Boundaries = StreamWriter.Null;
+        public StreamWriter Contracts = StreamWriter.Null;
         public ulong ExecutableFileBytes, ExecutableMemoryBytes, BytesCovered, BytesLifted, ZeroFillBytes, BoundaryBytes;
         public long Candidates, DecodedX64, Validated, Unsupported, Invalid, ValidationErrors, Operations;
         public readonly Dictionary<string, long> Forms = new(StringComparer.Ordinal);
         public readonly Dictionary<string, long> SupportClasses = new(StringComparer.Ordinal);
         public readonly Dictionary<string, long> UnsupportedReasons = new(StringComparer.Ordinal);
         public readonly Dictionary<string, long> Limitations = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, long> Obligations = new(StringComparer.Ordinal);
     }
 }

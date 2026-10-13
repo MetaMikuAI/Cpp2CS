@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Collections.Immutable;
 using Cpp2CS.Ir;
 
 namespace Cpp2CS.Validation;
@@ -75,30 +76,30 @@ public static class AtomicMemoryChecks
         Operation atomic = reference.Operations[atomicIndex];
         foreach (Operation invalid in new[]
         {
-            atomic with { Atomic = null },
-            atomic with { Atomic = new((AtomicKind)999) },
-            atomic with { Atomic = new(AtomicKind.Add, MemoryOrder.Relaxed) },
-            atomic with { Memory = new(MemoryOrder.Relaxed, 64, 64) },
-            atomic with { Barrier = new(BarrierKind.Mfence, BarrierDomain.FullSystem, BarrierAccess.All, 0) },
-            atomic with { Fault = FaultPolicy.None },
-            atomic with { WorldOut = atomic.WorldOut + 1 },
+            atomic with { Payload = NoPayload.Instance },
+            atomic with { Payload = new AtomicPayload(new((AtomicKind)999)) },
+            atomic with { Payload = new AtomicPayload(new(AtomicKind.Add, MemoryOrder.Relaxed)) },
+            atomic with { Payload = new MemoryPayload(new(MemoryOrder.Relaxed, 64, 64)) },
+            atomic with { Payload = new BarrierPayload(new(BarrierKind.Mfence, BarrierDomain.FullSystem, BarrierAccess.All, 0)) },
+            atomic with { Flow = null },
+            atomic with { Flow = new(atomic.Flow!.Input, new(atomic.Flow.Output.Id + 1)) },
             atomic with { Inputs = atomic.Inputs[..2] },
-            atomic with { Immediate = 1 },
-            atomic with { Slot = "rax" },
-            atomic with { Detail = "invalid" }
+            atomic with { Payload = new ImmediatePayload(1) },
+            atomic with { Payload = new SlotPayload("rax") },
+            atomic with { Payload = new ChoicePayload("invalid") }
         })
         {
             Operation[] operations = reference.Operations.ToArray();
             operations[atomicIndex] = invalid;
-            Check(MirValidator.Validate(reference with { Operations = operations }).Count != 0, "atomic validator rejects malformed contract");
+            Check(MirValidator.Validate(reference with { Operations = operations.ToImmutableArray() }).Count != 0, "atomic validator rejects malformed contract");
         }
         var wrongArchitecture = reference with { Architecture = Architecture.Arm64 };
         Check(MirValidator.Validate(wrongArchitecture).Count != 0, "atomic x64 ordering is architecture scoped");
         var wide = Program(128);
         Operation[] wideOperations = wide.Operations.ToArray();
         int wideIndex = Array.FindIndex(wideOperations, op => op.Code == OpCode.AtomicRmw);
-        wideOperations[wideIndex] = wideOperations[wideIndex] with { Atomic = new(AtomicKind.Add) };
-        Check(MirValidator.Validate(wide with { Operations = wideOperations }).Count != 0, "128-bit atomic primitive is restricted to CMPXCHG16B");
+        wideOperations[wideIndex] = wideOperations[wideIndex] with { Payload = new AtomicPayload(new(AtomicKind.Add)) };
+        Check(MirValidator.Validate(wide with { Operations = wideOperations.ToImmutableArray() }).Count != 0, "128-bit atomic primitive is restricted to CMPXCHG16B");
 
         var store = new MirBuilder(Architecture.X64, Origin, "fixture.denied-store");
         store.Store(store.Const(64, Address), store.Const(64, 0));

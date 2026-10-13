@@ -2,8 +2,6 @@ using System.Numerics;
 
 namespace Cpp2CS.Ir;
 
-internal readonly record struct MemoryEffectResult(BigInteger Value = default, string? Outcome = null, string? Reason = null);
-
 // Executes one concrete event schedule. Ordering metadata is retained, not a weak-memory solver.
 internal static partial class MemoryEffects
 {
@@ -29,9 +27,11 @@ internal static partial class MemoryEffects
                 if (!state.WritePermissions.TryGetValue(unchecked(address + (ulong)i), out var allowed)) unknown = true;
                 else if (!allowed) denied = true;
             }
-            var outcome = denied ? "UnmodeledFaultStop" : unknown ? "UnmodeledEnvironmentStop" : null;
-            state.Events.Add(new(state.Events.Count, "WriteProbe", address, size, 0, MemoryOrder.Relaxed, outcome ?? "Completed"));
-            return new(Outcome: outcome, Reason: outcome is null ? null : "write-access permission probe");
+            MemoryStop? stop = denied ? new(StopKind.FaultBoundary, "write-access permission denied")
+                : unknown ? new(StopKind.MissingEnvironment, "write-access permission is required") : null;
+            state.Events.Add(new(state.Events.Count, "WriteProbe", address, size, 0, MemoryOrder.Relaxed,
+                stop?.Outcome.ToString() ?? "Completed"));
+            return new(Stop: stop);
         }
         var load = op.Code is OpCode.Load or OpCode.LoadExclusive or OpCode.LoadIf;
         var width = load ? op.Result!.Value.Width : op.Inputs[op.Code == OpCode.StoreIf ? 2 : 1].Width;
@@ -47,9 +47,10 @@ internal static partial class MemoryEffects
             {
                 if (!state.ExclusiveStoreDecisions.TryDequeue(out var permitted))
                 {
+                    var stop = new MemoryStop(StopKind.MissingEnvironment, "exclusive-store decision is required");
                     state.Events.Add(new(state.Events.Count, "StoreExclusive", address, bytes, width, spec!.Order,
-                        "UnmodeledEnvironmentStop"));
-                    return new(Outcome: "UnmodeledEnvironmentStop", Reason: "exclusive-store decision is required");
+                        stop.Outcome.ToString()));
+                    return new(Stop: stop);
                 }
                 var match = state.Reservation is { } reservation && reservation.Address == address && reservation.SizeBytes == bytes;
                 state.Reservation = null;
@@ -65,9 +66,10 @@ internal static partial class MemoryEffects
                 var location = unchecked(beatAddress + (ulong)i);
                 if (!state.Memory.ContainsKey(location) || !load && state.WritePermissions.TryGetValue(location, out var writable) && !writable)
                 {
+                    var stop = new MemoryStop(StopKind.FaultBoundary, "memory access");
                     state.Events.Add(new(state.Events.Count, op.Code.ToString(), beatAddress, beatBytes,
-                        spec?.AtomicWidth ?? 0, spec?.Order ?? MemoryOrder.Relaxed, "UnmodeledFaultStop"));
-                    return new(Outcome: "UnmodeledFaultStop", Reason: "memory access");
+                        spec?.AtomicWidth ?? 0, spec?.Order ?? MemoryOrder.Relaxed, stop.Outcome.ToString()));
+                    return new(Stop: stop);
                 }
             }
             if (op.Code == OpCode.LoadExclusive && offset == 0) state.Reservation = new(address, bytes);

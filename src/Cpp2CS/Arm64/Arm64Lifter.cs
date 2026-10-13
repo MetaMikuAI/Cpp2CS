@@ -112,7 +112,8 @@ public static partial class Arm64Lifter
         if ((w & 0xFFDFFFE0) is 0xD51B4400 or 0xD51B4420 or 0xD51BD040)
             return SystemRegister(new(origin, w, "system.register"));
         if ((w & 0xFFE0001F) == 0xD4200000)
-            return new Context(origin, w, "brk").End(MirExit.Trap($"arm64.BRK.0x{(w >> 5) & 0xFFFF:X4}", origin.Address));
+            return new Context(origin, w, "brk").End(MirExit.Trap(ExceptionKind.ArmBreakpoint,
+                $"arm64.BRK.0x{(w >> 5) & 0xFFFF:X4}", origin.Address, (ushort)((w >> 5) & 0xFFFF)));
         if (w == 0xD503201F) return new Context(origin, w, "nop").Done();
         if (w is 0xD503241F or 0xD503245F or 0xD503249F or 0xD50324DF) return new Context(origin, w, "bti").Done();
         return LiftResult.Unsupported($"word.{w:x8}", "Encoding has no implemented semantic rule");

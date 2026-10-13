@@ -2,6 +2,7 @@ using Cpp2CS.Ir;
 using Cpp2CS.X64;
 using Iced.Intel;
 using System.Numerics;
+using System.Collections.Immutable;
 
 namespace Cpp2CS.Validation;
 
@@ -26,9 +27,9 @@ public static class EffectBoundaryChecks
             CoreChecks.Require(state.Accesses.Count == 0, "guard is not a memory access");
             checks += 3;
         }
-        var brokenWorld = guarded.Operations.Select(op => op.Code == OpCode.Guard ? op with { WorldOut = op.WorldIn } : op).ToArray();
+        var brokenWorld = guarded.Operations.Select(op => op.Code == OpCode.Guard ? op with { Flow = new(op.Flow!.Input, op.Flow.Input) } : op).ToImmutableArray();
         CoreChecks.Require(MirValidator.Validate(guarded with { Operations = brokenWorld }).Count > 0, "guard World validation");
-        CoreChecks.Require(MirValidator.Validate(guarded with { Support = SupportClass.Exact, Limitations = [] }).Count > 0, "guard cannot claim exact");
+        CoreChecks.Require((guarded with { Annotations = [] }).Support == SupportClass.NormalPathOnly, "guard support is derived from its stop contract");
         checks += 2;
 
         foreach (var bytes in new[] { new byte[] { 0xCC }, new byte[] { 0x66, 0xCC }, new byte[] { 0x0F, 0x0B } })
@@ -48,8 +49,9 @@ public static class EffectBoundaryChecks
             CoreChecks.Require(result.Event == (bytes[^1] == 0xCC ? "x64.#BP" : "x64.#UD"), "trap event identity");
             CoreChecks.Require(result.ResumeAddress == (bytes[^1] == 0xCC ? instruction.NextIP : instruction.IP), "trap versus fault saved address");
             CoreChecks.Require(before.All(pair => state.Slots[pair.Key] == pair.Value) && state.Memory[0x8000] == 0xA5 && state.Accesses.Count == 0, "trap boundary does not simulate a handler");
-            CoreChecks.Require(MirValidator.Validate(ir with { Exit = ir.Exit with { ResumeAddress = null } }).Count > 0, "trap address required");
-            CoreChecks.Require(MirValidator.Validate(ir with { Support = SupportClass.Exact, Limitations = [] }).Count > 0, "trap boundary cannot claim full semantics");
+            var trap = (TrapExit)ir.Exit;
+            CoreChecks.Require(MirValidator.Validate(ir with { Exit = trap with { Boundary = trap.Boundary with { Kind = (ExceptionKind)999 } } }).Count > 0, "trap kind required");
+            CoreChecks.Require((ir with { Annotations = [] }).Support == SupportClass.ExceptionBoundaryOnly, "trap boundary support is derived from its terminator");
             checks += 7;
         }
 
@@ -61,11 +63,11 @@ public static class EffectBoundaryChecks
         foreach (var spec in new[] { new FloatOperation((FloatKind)999, 32, 32), new(FloatKind.Add, 16, 32),
             new(FloatKind.Add, 32, 64), new(FloatKind.Compare, 32, 32), new(FloatKind.Add, 32, 32, (FloatRounding)999) })
         {
-            var operations = valid.Operations.Select(op => op.Code == OpCode.Float ? op with { Floating = spec } : op).ToArray();
+            var operations = valid.Operations.Select(op => op.Code == OpCode.Float ? op with { Payload = new FloatPayload(spec) } : op).ToImmutableArray();
             CoreChecks.Require(MirValidator.Validate(valid with { Operations = operations }).Count > 0, "reject malformed float specification");
             checks++;
         }
-        var stray = valid.Operations.Select(op => op.Code == OpCode.Constant ? op with { Floating = new(FloatKind.Add, 32, 32) } : op).ToArray();
+        var stray = valid.Operations.Select(op => op.Code == OpCode.Constant ? op with { Payload = new FloatPayload(new(FloatKind.Add, 32, 32)) } : op).ToImmutableArray();
         CoreChecks.Require(MirValidator.Validate(valid with { Operations = stray }).Count > 0, "float metadata only on Float");
         return checks + 2;
     }

@@ -91,7 +91,7 @@ public static partial class X64Lifter
                 ? b.Sub(masked, b.Mul(b.UDiv(masked, b.Const(8, (ulong)width + 1)), b.Const(8, (ulong)width + 1))) : masked;
             Value zero = b.Eq(masked, b.Const(8, 0));
             if (width is 8 or 16)
-                b.Guard(b.Or(zero, b.BoolNot(b.Eq(count, b.Const(8, 0)))), "RCL/RCR nonzero masked count reduced to zero needs a resolved OF contract");
+                b.Guard(b.Or(zero, b.BoolNot(b.Eq(count, b.Const(8, 0)))), "RCL/RCR nonzero masked count reduced to zero needs a resolved OF contract", StopKind.UnmodeledSemantics);
             Value combined = b.Concat(oldCf, source), inverse = b.Sub(b.Const(8, (ulong)width + 1), count);
             bool left = instruction.Mnemonic == Mnemonic.Rcl;
             Value rotated = left ? b.Or(b.Shl(combined, count), b.Shr(combined, inverse))

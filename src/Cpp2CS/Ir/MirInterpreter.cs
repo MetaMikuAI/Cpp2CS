@@ -14,13 +14,12 @@ public sealed class MachineState
     public List<ScheduledMemoryEvent> AppliedSchedule { get; } = [];
     public Dictionary<ulong, bool> WritePermissions { get; } = [];
     public Dictionary<ulong, bool> CodeGuardedPages { get; } = [];
+    public Queue<BigInteger> ChoiceInputs { get; } = new();
+    public List<ChoiceObservation> ChoiceObservations { get; } = [];
     public BigInteger ReadSlot(string slot) => Slots[slot];
 }
 
-public sealed record ExecutionResult(string Outcome, ulong? NextAddress, int? FaultOperation, int Choices,
-    string? Event = null, ulong? ResumeAddress = null);
-
-// 用于具体验证；Undefined 在本次执行取零，不能据此作静态常量传播。
+// 用于具体验证；未显式给出的 Undefined 取零仅代表一个执行见证。
 public static class MirInterpreter
 {
     public static BigInteger Mask(int width) => (BigInteger.One << width) - 1;
@@ -29,11 +28,21 @@ public static class MirInterpreter
 
     public static ExecutionResult Execute(MirInstruction ir, MachineState state)
     {
-        var values = new BigInteger[ir.Operations.Count];
+        var errors = MirValidator.Validate(ir);
+        if (errors.Count != 0) throw new InvalidDataException(string.Join("; ", errors));
+        var values = new BigInteger[ir.Operations.Length];
         var choices = 0;
-        for (var index = 0; index < ir.Operations.Count; index++)
+        var completedState = new StateToken(0);
+        var operationEventStart = state.Events.Count;
+        ExecutionResult Stopped(StopKind kind, string reason, int index)
+        {
+            var stop = new ExecutionStop(kind, reason, index, completedState, operationEventStart, state.Events.Count);
+            return ExecutionResult.Stopped(stop, choices);
+        }
+        for (var index = 0; index < ir.Operations.Length; index++)
         {
             var op = ir.Operations[index];
+            operationEventStart = state.Events.Count;
             var a = op.Inputs.Length > 0 ? values[op.Inputs[0].Id] : BigInteger.Zero;
             var b = op.Inputs.Length > 1 ? values[op.Inputs[1].Id] : BigInteger.Zero;
             var width = op.Result?.Width ?? 0;
@@ -42,7 +51,8 @@ public static class MirInterpreter
             {
                 case OpCode.Constant: value = op.Immediate; break;
                 case OpCode.ReadSlot:
-                    value = state.ReadSlot(op.Slot!);
+                    if (!state.Slots.TryGetValue(op.Slot!, out value))
+                        return Stopped(StopKind.MissingEnvironment, $"state slot is required: {op.Slot}", index);
                     if (value < 0 || value > Mask(width)) throw new InvalidOperationException($"State slot exceeds declared width: {op.Slot}");
                     break;
                 case OpCode.WriteSlot: state.Slots[op.Slot!] = a; break;
@@ -66,11 +76,17 @@ public static class MirInterpreter
                 case OpCode.Ult: value = a < b ? 1 : 0; break;
                 case OpCode.Slt: value = Signed(a, op.Inputs[0].Width) < Signed(b, op.Inputs[1].Width) ? 1 : 0; break;
                 case OpCode.Select: value = a != 0 ? b : values[op.Inputs[2].Id]; break;
-                case OpCode.Undefined: choices++; break;
+                case OpCode.Undefined:
+                    var explicitChoice = state.ChoiceInputs.TryDequeue(out value);
+                    if (value < 0 || value > Mask(width)) throw new InvalidOperationException("Choice input exceeds declared width");
+                    state.ChoiceObservations.Add(new(state.ChoiceObservations.Count, ir.Origin.Address, index,
+                        op.Result!.Value, value, explicitChoice));
+                    choices++;
+                    break;
                 case OpCode.Qarma5: value = Qarma64.Evaluate((ulong)a, (ulong)b, values[op.Inputs[2].Id]); break;
                 case OpCode.CodeGuarded:
                     if (!state.CodeGuardedPages.TryGetValue((ulong)a >> 12, out var guarded))
-                        return new("UnmodeledEnvironmentStop", null, index, choices, "guarded-page attribute is required");
+                        return Stopped(StopKind.MissingEnvironment, "guarded-page attribute is required", index);
                     value = guarded ? 1 : 0;
                     break;
                 case OpCode.Float:
@@ -86,12 +102,12 @@ public static class MirInterpreter
                     break;
                 }
                 case OpCode.Guard:
-                    if (a.IsZero) return new("UnmodeledFaultStop", null, index, choices, op.Detail);
+                    if (a.IsZero) return Stopped(op.StopKind!.Value, op.Detail!, index);
                     break;
                 case OpCode.AtomicRmw:
                 {
                     var effect = MemoryEffects.Atomic(op, state, (ulong)a, b, values[op.Inputs[2].Id]);
-                    if (effect.Outcome is not null) return new(effect.Outcome, null, index, choices, effect.Reason);
+                    if (effect.Stop is { } stop) return Stopped(stop.Kind, stop.Reason, index);
                     value = effect.Value;
                     break;
                 }
@@ -113,13 +129,14 @@ public static class MirInterpreter
                         b = op.Code == OpCode.StoreIf ? values[op.Inputs[2].Id] : BigInteger.Zero;
                     }
                     var effect = MemoryEffects.Execute(op, state, a, b);
-                    if (effect.Outcome is not null) return new(effect.Outcome, null, index, choices, effect.Reason);
+                    if (effect.Stop is { } stop) return Stopped(stop.Kind, stop.Reason, index);
                     value = effect.Value;
                     break;
                 }
                 default: throw new InvalidOperationException($"Unknown IR opcode {op.Code}");
             }
             if (op.Result is { } result) values[result.Id] = value & Mask(result.Width);
+            if (op.Flow is { } flow) completedState = flow.Output;
         }
         var exit = ir.Exit;
         var next = exit.Kind switch
@@ -129,7 +146,7 @@ public static class MirInterpreter
             ExitKind.Branch => (ulong)values[(values[exit.Condition!.Value.Id] != 0 ? exit.Target : exit.Alternative)!.Value.Id],
             _ => (ulong?)null
         };
-        return new(exit.Kind == ExitKind.Trap ? "Trap" : "Normal", next, null, choices,
-            exit.Reason, exit.ResumeAddress);
+        return exit is TrapExit trap ? ExecutionResult.Trapped(trap.Boundary, choices, completedState)
+            : ExecutionResult.Completed(next!.Value, choices, completedState);
     }
 }

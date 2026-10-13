@@ -19,6 +19,19 @@ def sha(path):
         return hashlib.file_digest(stream, "sha256").hexdigest().upper()
 
 
+def source_identity():
+    paths = [path for path in (ROOT / "src/Cpp2CS").rglob("*")
+             if path.suffix in {".cs", ".csproj", ".props", ".targets"} and "obj" not in path.parts and "bin" not in path.parts]
+    paths.extend(path for path in ROOT.iterdir()
+                 if path.is_file() and (path.suffix in {".props", ".targets", ".slnx"} or path.name.lower() in {"global.json", "nuget.config"}))
+    return {str(path.relative_to(ROOT)): sha(path) for path in sorted(paths)}
+
+
+def test_identity():
+    return {str(path.relative_to(ROOT)): sha(path) for path in sorted(TESTS.rglob("*"))
+            if path.suffix in {".py", ".cs", ".csproj", ".props", ".targets"} and "bin" not in path.parts and "obj" not in path.parts}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/verified")
@@ -31,9 +44,8 @@ def main():
         parser.error("基线目录必须与输出目录不同，禁止覆盖后自比较")
     output.mkdir(parents=True, exist_ok=True)
     assembly_hash = sha(DLL)
-    sources = {str(path.relative_to(ROOT)): sha(path) for path in sorted((ROOT / "src/Cpp2CS").rglob("*.cs")) if "obj" not in path.parts and "bin" not in path.parts}
-    tests = {str(path.relative_to(ROOT)): sha(path) for path in sorted(TESTS.rglob("*"))
-             if path.suffix in {".py", ".cs", ".csproj"} and "bin" not in path.parts and "obj" not in path.parts}
+    sources = source_identity()
+    tests = test_identity()
     (output / "manifest.json").write_text(json.dumps({"status": "running", "utc": datetime.now(timezone.utc).isoformat(), "assemblySha256": assembly_hash}, indent=2) + "\n", encoding="utf-8")
     commands = []
 
@@ -87,6 +99,7 @@ def main():
     decoder_checks = True
     known_entries_covered = True
     coverage_regression_free = None if args.baseline is None else True
+    contract_comparisons = []
     for architecture, relative in TARGETS:
         binary = WORKSPACE / relative
         execute(f"{architecture}-scan", ["dotnet", DLL, "scan", binary, output], (0, 2))
@@ -104,21 +117,27 @@ def main():
             entries = json.loads((output / report_path.name.replace(".report.json", ".entry.report.json")).read_text(encoding="utf-8"))
             assert entries["sameAssemblyAsPrimary"], "入口补充与主扫描程序集不同"
             known_entries_covered &= entries["allKnownEntriesHaveCandidate"] and entries["allSupplementaryPathsJoinedOrEnded"]
+            decoder_checks &= entries["decoderChecksPassed"] and entries["supplementCounts"]["invalid"] == 0
         reports.append(str(report_path))
         if args.baseline is not None:
             execute(f"{architecture}-coverage-comparison", [sys.executable, TESTS / "compare_coverage.py", args.baseline.resolve() / report_path.name, report_path, "--output", output])
             comparison = json.loads((output / report_path.name.replace(".report.json", ".coverage-comparison.json")).read_text(encoding="utf-8"))
-            coverage_regression_free &= comparison["passed"]
+            coverage_regression_free &= comparison["structuralCoveragePassed"]
+            contract_comparisons.append(comparison["semanticContractRegressionFree"])
     artifacts = {str(path.relative_to(output)): sha(path) for path in sorted(output.iterdir()) if path.is_file() and path.name != "manifest.json"}
-    assert all(sha(ROOT / path) == digest for path, digest in sources.items()), "验证过程中源代码发生变化"
-    assert all(sha(ROOT / path) == digest for path, digest in tests.items()), "验证过程中测试脚本发生变化"
+    assert source_identity() == sources, "验证过程中源代码或构建输入的内容、文件集合发生变化"
+    assert test_identity() == tests, "验证过程中测试脚本的内容、文件集合发生变化"
     arm = json.loads((output / "arm64-differential.json").read_text(encoding="utf-8"))
-    checks = {"semanticFixturesPassed": True, "decoderChecksPassed": decoder_checks, "allKnownEntriesCovered": known_entries_covered, "coverageRegressionFree": coverage_regression_free, "armClassificationDisagreements": arm["classification_disagreements"], "allCandidatesRepresented": all_represented, "fullyLifted": fully_lifted}
+    contract_regression_free = False if False in contract_comparisons else None if not contract_comparisons or None in contract_comparisons else True
+    checks = {"validationRunCompleted": True, "semanticFixturesPassed": True, "decoderChecksPassed": decoder_checks, "allKnownEntriesCovered": known_entries_covered,
+              "coverageRegressionFree": coverage_regression_free, "semanticContractRegressionFree": contract_regression_free,
+              "armClassificationDisagreements": arm["classification_disagreements"], "allCandidatesRepresented": all_represented, "fullyLifted": fully_lifted}
     manifest = {"status": "completed", "utc": datetime.now(timezone.utc).isoformat(), "assemblySha256": assembly_hash, "commands": commands, "scannerReports": reports, "checks": checks, "sources": sources, "testSources": tests, "artifacts": artifacts,
-                "meaning": "Full executable candidate census and structural validation, plus independent decoder checks and finite semantic fixtures. Completeness must be read from each report; this manifest does not certify native or game equivalence."}
+                "optionalChecks": {"qarmaIndependentReference": "passed" if args.qarma_source is not None else "notRequested"},
+                "meaning": "Full executable candidate census and structural validation, plus independent decoder checks and finite semantic fixtures. A null semanticContractRegressionFree means no comparable contract index; structural preservation does not prove semantic equivalence. Completeness must be read from each report; this manifest does not certify native or game equivalence."}
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(output / "manifest.json")
-    return 0 if fully_lifted and decoder_checks and arm["classification_disagreements"] == 0 else 2
+    return 0 if fully_lifted and decoder_checks and known_entries_covered and coverage_regression_free is not False and contract_regression_free is not False and arm["classification_disagreements"] == 0 else 2
 
 
 if __name__ == "__main__":

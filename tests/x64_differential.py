@@ -33,6 +33,7 @@ class Harness:
         self.checks = 0
         self.rejected = 0
         self.fault_stops = 0
+        self.semantic_stops = 0
         self.native = None
         self.native_checks = 0
         self.native_only_checks = 0
@@ -206,7 +207,7 @@ class Harness:
         assert bytes(response["memory"][f"0x{DATA+i:X}"] for i in range(byte_count)) == data, (code_hex, "fault committed memory")
         self.fault_stops += 1
 
-    def guard_stop(self, code_hex, updates, memory=None, address=CODE):
+    def guard_stop(self, code_hex, updates, memory=None, address=CODE, semantic_gap=False):
         slots = {name: RNG.getrandbits(64) for name in GPRS}
         slots.update({flag: RNG.getrandbits(1) for flag in FLAGS})
         slots.update({name: RNG.getrandbits(128) for name in XMM_REGISTERS})
@@ -214,12 +215,17 @@ class Harness:
         slots["mxcsr"] = 0x1f80
         slots.update(updates)
         response = self.request(bytes.fromhex(code_hex), address, slots, memory or [])
-        assert response["supported"] and response["Outcome"] == "UnmodeledFaultStop", (code_hex, response)
+        expected = "UnmodeledSemanticsStop" if semantic_gap else "UnmodeledFaultStop"
+        assert response["supported"] and response["Outcome"] == expected, (code_hex, response)
+        assert response["stop"]["kind"] == ("UnmodeledSemantics" if semantic_gap else "FaultBoundary"), (code_hex, response)
         assert response["support"] == "NormalPathOnly" and response["next"] is None, (code_hex, response)
         assert {name: int(value, 16) for name, value in response["slots"].items()} == slots, (code_hex, "guard committed state")
         for start, data in memory or []:
             assert bytes(response["memory"][f"0x{start+i:X}"] for i in range(len(data))) == data, (code_hex, "guard committed memory")
-        self.fault_stops += 1
+        if semantic_gap:
+            self.semantic_stops += 1
+        else:
+            self.fault_stops += 1
 
 
 def arithmetic(h):
@@ -291,7 +297,7 @@ def other_registers(h):
         for suffix in ("bcc3", "bdc3"):
             for value in [0, 1, 2, 8, 1 << (width - 1), (1 << width) - 1] + [RNG.getrandbits(width) for _ in range(12)]:
                 if width == 32 and value == 0:
-                    h.guard_stop(prefix + "0f" + suffix, {"rbx": 0})
+                    h.guard_stop(prefix + "0f" + suffix, {"rbx": 0}, semantic_gap=True)
                     continue
                 h.run(prefix + "0f" + suffix, width=width, family="bitscan", values=(0xABABABABABABABAB, value), zero_source=value == 0)
 
@@ -596,7 +602,7 @@ def integer_remaining(h):
             for count in (0, 1, 2, 8, 9, 16, 17, 18, 27, 31, 32, 33, 63, 64, 65, 255):
                 masked = count & (63 if width == 64 else 31)
                 if width in (8, 16) and masked and masked % (width + 1) == 0:
-                    h.guard_stop(code, {"rcx": count})
+                    h.guard_stop(code, {"rcx": count}, semantic_gap=True)
                     continue
                 for source in (0, 1, 1 << (width - 1), (1 << width) - 1):
                     for flags in (0, FLAG_MASK):
@@ -772,6 +778,7 @@ def main():
         assert server.returncode == 0, server.returncode
         if h.native is not None: h.native.close()
         print(json.dumps({"x64_differential": h.checks, "forms": len(h.forms), "unsupported_rejected": h.rejected, "fault_stops": h.fault_stops,
+                          "semantic_stops": h.semantic_stops,
                           "native_float_checks": h.native_checks, "unicorn_float_differences": h.unicorn_fp_differences,
                           "native_only_cmp_imm8_checks": h.native_only_checks,
                           "unicorn_float_examples": h.unicorn_fp_examples,

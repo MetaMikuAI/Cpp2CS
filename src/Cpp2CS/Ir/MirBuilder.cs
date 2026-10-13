@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Numerics;
 
 namespace Cpp2CS.Ir;
@@ -5,22 +6,29 @@ namespace Cpp2CS.Ir;
 public sealed class MirBuilder(Architecture architecture, InstructionOrigin origin, string rule)
 {
     private readonly List<Operation> operations = [];
-    private readonly List<string> limitations = [];
+    private readonly List<SemanticObligation> annotations = [];
     private int nextValue;
-    private int world;
+    private int state;
 
-    private Value Emit(OpCode code, int width, Value[] inputs, BigInteger immediate = default, string? slot = null, string? detail = null)
+    private void Append(OpCode code, Value? result, ImmutableArray<Value> inputs, OperationPayload? payload = null)
+    {
+        var spec = OperationSpecs.For(code);
+        StateFlow? flow = spec.HasStateFlow ? new(new(state), new(++state)) : null;
+        operations.Add(new(code, result, inputs, payload ?? NoPayload.Instance, flow));
+    }
+
+    private Value Emit(OpCode code, int width, ImmutableArray<Value> inputs, OperationPayload? payload = null)
     {
         var value = new Value(nextValue++, width);
-        operations.Add(new(code, value, inputs, immediate, slot, detail));
+        Append(code, value, inputs, payload);
         return value;
     }
 
     public Value Const(int width, ulong value) => Const(width, new BigInteger(value));
-    public Value Const(int width, BigInteger value) => Emit(OpCode.Constant, width, [], value & ((BigInteger.One << width) - 1));
-    public Value Read(string slot, int width) => Emit(OpCode.ReadSlot, width, [], slot: slot);
-    public void Write(string slot, Value value) => operations.Add(new(OpCode.WriteSlot, null, [value], Slot: slot));
-    public Value Extract(Value value, int offset, int width) => Emit(OpCode.Extract, width, [value], offset);
+    public Value Const(int width, BigInteger value) => Emit(OpCode.Constant, width, [], new ImmediatePayload(value & ((BigInteger.One << width) - 1)));
+    public Value Read(string slot, int width) => Emit(OpCode.ReadSlot, width, [], new SlotPayload(slot));
+    public void Write(string slot, Value value) => Append(OpCode.WriteSlot, null, [value], new SlotPayload(slot));
+    public Value Extract(Value value, int offset, int width) => Emit(OpCode.Extract, width, [value], new ImmediatePayload(offset));
     public Value Concat(Value high, Value low) => Emit(OpCode.Concat, high.Width + low.Width, [high, low]);
     public Value Zext(Value value, int width) => value.Width == width ? value : Emit(OpCode.Zext, width, [value]);
     public Value Sext(Value value, int width) => value.Width == width ? value : Emit(OpCode.Sext, width, [value]);
@@ -43,127 +51,89 @@ public sealed class MirBuilder(Architecture architecture, InstructionOrigin orig
     public Value Slt(Value a, Value b) => Emit(OpCode.Slt, 1, [a, b]);
     public Value Select(Value condition, Value yes, Value no) => Emit(OpCode.Select, yes.Width, [condition, yes, no]);
     public Value BoolNot(Value value) => Xor(value, Const(1, 1UL));
-    public Value Undefined(int width, string reason) => Emit(OpCode.Undefined, width, [], detail: reason);
+    public Value Undefined(int width, string reason) => Emit(OpCode.Undefined, width, [], new ChoicePayload(reason));
     public Value Qarma5(Value data, Value modifier, Value key) => Emit(OpCode.Qarma5, 64, [data, modifier, key]);
     public Value CodeGuarded(Value address)
     {
-        var value = new Value(nextValue++, 1);
-        operations.Add(new(OpCode.CodeGuarded, value, [address], WorldIn: world, WorldOut: ++world, Fault: FaultPolicy.StopUnmodeled));
-        MarkNormalPathOnly("BTI entry checks require explicit guarded-page attributes; branch-target fault delivery is unmodeled");
-        return value;
+        return Emit(OpCode.CodeGuarded, 1, [address]);
     }
     public Value Float(FloatOperation operation, Value a, Value b, Value control)
     {
-        var value = new Value(nextValue++, operation.ResultWidth + 12);
-        operations.Add(new(OpCode.Float, value, [a, b, control], Floating: operation));
-        return value;
+        return Emit(OpCode.Float, operation.ResultWidth + 12, [a, b, control], new FloatPayload(operation));
     }
     public Value FusedFloat(FloatOperation operation, Value a, Value b, Value c, Value control)
     {
-        var value = new Value(nextValue++, operation.ResultWidth + 12);
-        operations.Add(new(OpCode.FloatFused, value, [a, b, c, control], Floating: operation));
-        return value;
+        return Emit(OpCode.FloatFused, operation.ResultWidth + 12, [a, b, c, control], new FloatPayload(operation));
     }
-    public void Guard(Value condition, string reason)
+    public void Guard(Value condition, string reason, StopKind stopKind = StopKind.FaultBoundary)
     {
-        operations.Add(new(OpCode.Guard, null, [condition], Detail: reason,
-            WorldIn: world, WorldOut: ++world, Fault: FaultPolicy.StopUnmodeled));
-        MarkNormalPathOnly(reason);
+        Append(OpCode.Guard, null, [condition], new GuardPayload(stopKind, reason));
     }
-    public void MarkNormalPathOnly(string reason)
+    public void MarkNormalPathOnly(string reason, ObligationKind kind = ObligationKind.PartialState)
     {
-        if (!limitations.Contains(reason)) limitations.Add(reason);
+        var obligation = new SemanticObligation(kind, reason);
+        if (!annotations.Contains(obligation)) annotations.Add(obligation);
     }
 
     public Value Load(Value address, int width, MemoryOperation? memory = null)
     {
-        var value = new Value(nextValue++, width);
-        operations.Add(new(OpCode.Load, value, [address], WorldIn: world, WorldOut: ++world, Fault: FaultPolicy.StopUnmodeled, Memory: memory));
-        MarkNormalPathOnly("memory fault outcome is an explicit unmodeled stop");
-        return value;
+        return Emit(OpCode.Load, width, [address], new MemoryPayload(memory ?? new(MemoryOrder.Relaxed, 8, 0)));
     }
 
     public void Store(Value address, Value data, MemoryOperation? memory = null)
     {
-        operations.Add(new(OpCode.Store, null, [address, data], WorldIn: world, WorldOut: ++world, Fault: FaultPolicy.StopUnmodeled, Memory: memory));
-        MarkNormalPathOnly("memory fault outcome is an explicit unmodeled stop");
+        Append(OpCode.Store, null, [address, data], new MemoryPayload(memory ?? new(MemoryOrder.Relaxed, 8, 0)));
     }
 
     public Value AtomicRmw(Value address, Value operand, Value expected, AtomicKind kind)
     {
-        var value = new Value(nextValue++, operand.Width);
-        operations.Add(new(OpCode.AtomicRmw, value, [address, operand, expected],
-            WorldIn: world, WorldOut: ++world, Fault: FaultPolicy.StopUnmodeled, Atomic: new(kind)));
-        MarkNormalPathOnly("one indivisible x64 locked RMW event; explicit write permissions required; fault delivery and complete concurrent executions are unmodeled");
-        return value;
+        return Emit(OpCode.AtomicRmw, operand.Width, [address, operand, expected], new AtomicPayload(new(kind)));
     }
 
     public Value LoadIf(Value condition, Value address, int width)
     {
-        var value = new Value(nextValue++, width);
-        operations.Add(new(OpCode.LoadIf, value, [condition, address], WorldIn: world, WorldOut: ++world, Fault: FaultPolicy.StopUnmodeled));
-        MarkNormalPathOnly("inactive load returns zero without an access; active memory faults stop explicitly");
-        return value;
+        return Emit(OpCode.LoadIf, width, [condition, address]);
     }
 
     public void StoreIf(Value condition, Value address, Value data)
     {
-        operations.Add(new(OpCode.StoreIf, null, [condition, address, data], WorldIn: world, WorldOut: ++world, Fault: FaultPolicy.StopUnmodeled));
-        MarkNormalPathOnly("inactive store performs no access; active memory faults stop explicitly");
+        Append(OpCode.StoreIf, null, [condition, address, data]);
     }
 
     public Value LoadExclusive(Value address, int width, MemoryOperation memory)
     {
-        var value = new Value(nextValue++, width);
-        operations.Add(new(OpCode.LoadExclusive, value, [address], WorldIn: world, WorldOut: ++world,
-            Fault: FaultPolicy.StopUnmodeled, Memory: memory));
-        MarkNormalPathOnly("exclusive monitor and ordered events are explicit; memory faults and implementation monitor granules are unmodeled");
-        return value;
+        return Emit(OpCode.LoadExclusive, width, [address], new MemoryPayload(memory));
     }
 
     public Value StoreExclusive(Value address, Value data, MemoryOperation memory)
     {
-        var value = new Value(nextValue++, 32);
-        operations.Add(new(OpCode.StoreExclusive, value, [address, data], WorldIn: world, WorldOut: ++world,
-            Fault: FaultPolicy.StopUnmodeled, Memory: memory));
-        MarkNormalPathOnly("exclusive-store success requires an external monitor decision; faults and weak-memory executions are unmodeled");
-        return value;
+        return Emit(OpCode.StoreExclusive, 32, [address, data], new MemoryPayload(memory));
     }
 
     public void ClearExclusive()
     {
-        operations.Add(new(OpCode.ClearExclusive, null, [], WorldIn: world, WorldOut: ++world));
-        MarkNormalPathOnly("local monitor clear is represented; implementation monitor granules are unmodeled");
+        Append(OpCode.ClearExclusive, null, []);
     }
 
     public void Barrier(BarrierOperation barrier)
     {
-        operations.Add(new(OpCode.Barrier, null, [], WorldIn: world, WorldOut: ++world, Barrier: barrier));
-        MarkNormalPathOnly("barrier ordering and domain are retained as events; this interpreter is not a weak-memory solver");
+        Append(OpCode.Barrier, null, [], new BarrierPayload(barrier));
     }
 
     public void Prefetch(Value address, int hint)
     {
-        operations.Add(new(OpCode.Prefetch, null, [address], hint, WorldIn: world, WorldOut: ++world));
-        MarkNormalPathOnly("prefetch hint is an explicit event; implementation-defined cache effects are outside the byte-state model");
+        Append(OpCode.Prefetch, null, [address], new ImmediatePayload(hint));
     }
 
     public void WriteProbe(Value address, int sizeBytes)
     {
-        operations.Add(new(OpCode.WriteProbe, null, [address], sizeBytes, WorldIn: world, WorldOut: ++world,
-            Fault: FaultPolicy.StopUnmodeled));
-        MarkNormalPathOnly("write permission probe requires an explicit environment response; fault delivery is unmodeled");
+        Append(OpCode.WriteProbe, null, [address], new ImmediatePayload(sizeBytes));
     }
 
     public MirInstruction Finish(MirExit exit)
     {
-        if (exit.Kind == ExitKind.Trap)
-        {
-            MarkNormalPathOnly("exception event and resume address are represented; delivery and handler state are unmodeled");
-            return new(architecture, origin, rule, operations.ToArray(), exit, SupportClass.ExceptionBoundaryOnly, limitations.ToArray());
-        }
-        return new(architecture, origin, rule, operations.ToArray(), exit,
-            limitations.Count == 0 ? SupportClass.Exact : SupportClass.NormalPathOnly, limitations.ToArray());
+        return new(architecture, origin, rule, operations.ToImmutableArray(), exit with { State = new(state) },
+            annotations.ToImmutableArray(), MachineProfile.For(architecture).Id);
     }
 }
 

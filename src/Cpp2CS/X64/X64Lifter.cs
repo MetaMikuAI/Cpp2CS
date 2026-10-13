@@ -139,10 +139,10 @@ public static partial class X64Lifter
                 Mnemonic.Xlatb => TranslateByte(),
                 Mnemonic.Prefetchnta or Mnemonic.Prefetcht0 or Mnemonic.Prefetcht1 or Mnemonic.Prefetcht2 or Mnemonic.Prefetchw => Prefetch(),
                 Mnemonic.Sfence or Mnemonic.Lfence or Mnemonic.Mfence => Fence(),
-                Mnemonic.Ud2 => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#UD", instruction.IP))),
-                Mnemonic.Int3 => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#BP", instruction.NextIP))),
-                Mnemonic.Int1 => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#DB", instruction.NextIP))),
-                Mnemonic.Hlt => LiftResult.Supported(b.Finish(MirExit.Trap("x64.#GP(0)", instruction.IP))),
+                Mnemonic.Ud2 => LiftResult.Supported(b.Finish(MirExit.Trap(ExceptionKind.X64InvalidOpcode, "x64.#UD", instruction.IP))),
+                Mnemonic.Int3 => LiftResult.Supported(b.Finish(MirExit.Trap(ExceptionKind.X64Breakpoint, "x64.#BP", instruction.NextIP))),
+                Mnemonic.Int1 => LiftResult.Supported(b.Finish(MirExit.Trap(ExceptionKind.X64Debug, "x64.#DB", instruction.NextIP))),
+                Mnemonic.Hlt => LiftResult.Supported(b.Finish(MirExit.Trap(ExceptionKind.X64GeneralProtection, "x64.#GP(0)", instruction.IP, 0))),
                 _ => Unsupported("尚无该指令形式的语义规则")
             };
         }
@@ -534,7 +534,7 @@ public static partial class X64Lifter
             int width = Width(0);
             Value source = ReadOperand(1, width), result = b.Const(width, 0);
             if (width == 32)
-                b.Guard(b.BoolNot(b.Eq(source, b.Const(width, 0))), "32-bit BSF/BSR zero-source full-register outcome is unmodeled");
+                b.Guard(b.BoolNot(b.Eq(source, b.Const(width, 0))), "32-bit BSF/BSR zero-source full-register outcome is unmodeled", StopKind.UnmodeledSemantics);
             bool forward = instruction.Mnemonic == Mnemonic.Bsf;
             for (int step = 0; step < width; step++)
             {

@@ -19,7 +19,7 @@ if (args.Length == 1 && args[0] == "serve")
 {
     while (Console.ReadLine() is { } line)
     {
-        using var input = JsonDocument.Parse(line);
+        using var input = JsonDocument.Parse(line, new JsonDocumentOptions { AllowDuplicateProperties = false });
         var root = input.RootElement;
         var architecture = root.GetProperty("arch").GetString() switch
         {
@@ -48,10 +48,16 @@ if (args.Length == 1 && args[0] == "serve")
         if (errors.Count != 0) throw new InvalidOperationException(string.Join("; ", errors));
         if (root.TryGetProperty("evaluate", out var evaluate) && !evaluate.GetBoolean())
         {
-            Console.WriteLine(JsonSerializer.Serialize(new { supported = true, length = bytes.Length, decoded, lift.Form, support = lift.Ir.Support.ToString(), operations = lift.Ir.Operations.Count }));
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                supported = true, length = bytes.Length, decoded, lift.Form, support = lift.Ir.Support.ToString(), operations = lift.Ir.Operations.Length,
+                profile = lift.Ir.ProfileId, capabilities = DescribeContract(lift.Ir)
+            }));
             continue;
         }
         var state = new MachineState();
+        if (root.TryGetProperty("choiceInputs", out var choiceInputs))
+            foreach (var choice in choiceInputs.EnumerateArray()) state.ChoiceInputs.Enqueue(ParseBits(choice.GetString()!));
         if (root.TryGetProperty("slots", out var slots))
             foreach (var slot in slots.EnumerateObject())
             {
@@ -110,7 +116,8 @@ if (args.Length == 1 && args[0] == "serve")
         var execution = MirInterpreter.Execute(executable, state);
         Console.WriteLine(JsonSerializer.Serialize(new
         {
-            supported = true, length = bytes.Length, decoded, lift.Form, support = lift.Ir.Support.ToString(), operations = lift.Ir.Operations.Count,
+            supported = true, length = bytes.Length, decoded, lift.Form, support = lift.Ir.Support.ToString(), operations = lift.Ir.Operations.Length,
+            profile = lift.Ir.ProfileId, capabilities = DescribeContract(lift.Ir),
             slots = state.Slots.ToDictionary(k => k.Key, v => "0x" + v.Value.ToString("X")),
             memory = state.Memory.ToDictionary(k => $"0x{k.Key:X}", v => (int)v.Value), state.Accesses,
             events = state.Events,
@@ -118,7 +125,24 @@ if (args.Length == 1 && args[0] == "serve")
             exclusiveDecisions = state.ExclusiveStoreDecisions.ToArray(),
             appliedSchedule = state.AppliedSchedule, remainingSchedule = state.Schedule.ToArray(),
             execution.Outcome, next = execution.NextAddress is { } pc ? $"0x{pc:X}" : null, execution.Choices,
-            execution.Event, resumeAddress = execution.ResumeAddress is { } resume ? $"0x{resume:X}" : null
+            execution.Event, resumeAddress = execution.ResumeAddress is { } resume ? $"0x{resume:X}" : null,
+            stoppedOperation = execution.FaultOperation, completedStateToken = execution.CompletedStateToken.Id,
+            stateKind = execution.StateKind.ToString(), choicePolicy = execution.ChoicePolicy.ToString(),
+            stop = execution.Stop is { } stop ? new
+            {
+                kind = stop.Kind.ToString(), reason = stop.Reason, operationIndex = stop.OperationIndex,
+                completedStateToken = stop.CompletedStateToken.Id, memoryEventStart = stop.MemoryEventStart, memoryEventCount = stop.MemoryEventCount
+            } : null,
+            exception = execution.Exception is { } boundary ? new
+            {
+                kind = boundary.Kind.ToString(), detail = boundary.Detail, savedAddress = $"0x{boundary.SavedAddress:X}", syndrome = boundary.Syndrome
+            } : null,
+            choiceObservations = state.ChoiceObservations.Select(choice => new
+            {
+                sequence = choice.Sequence, instructionAddress = $"0x{choice.InstructionAddress:X}", operationIndex = choice.OperationIndex,
+                result = choice.Result, bits = "0x" + choice.Bits.ToString("X"), isExplicit = choice.IsExplicit
+            }),
+            remainingChoiceInputs = state.ChoiceInputs.Select(bits => "0x" + bits.ToString("X"))
         }));
     }
     return 0;
@@ -171,3 +195,19 @@ static LiftResult Lift(Architecture architecture, InstructionOrigin origin)
 
 static ulong ParseAddress(string text) => ulong.Parse(text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text, NumberStyles.HexNumber);
 static BigInteger ParseBits(string text) => BigInteger.Parse("0" + (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text), NumberStyles.AllowHexSpecifier);
+
+static object DescribeContract(MirInstruction ir)
+{
+    var capability = MirContracts.Capabilities(ir);
+    return new
+    {
+        structuralRepresentation = true, support = capability.Support.ToString(),
+        normalTransitionRepresented = capability.NormalTransitionRepresented,
+        exceptionBoundaryRepresented = capability.ExceptionBoundaryRepresented,
+        mayStopBeforeExit = capability.MayStopBeforeExit, hasChoices = capability.HasChoices,
+        faultDeliveryModeled = capability.FaultDeliveryModeled, concurrentExecutionsVerified = capability.ConcurrentExecutionsVerified,
+        obligations = capability.Obligations.Select(item => new { kind = item.Kind.ToString(), reason = item.Reason, operationIndex = item.OperationIndex }),
+        finalStateToken = ir.FinalState.Id,
+        meaning = "MIR contract only; no native or game equivalence claim"
+    };
+}

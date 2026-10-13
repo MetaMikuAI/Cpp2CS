@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Collections.Immutable;
 using Cpp2CS.Ir;
 
 namespace Cpp2CS.Validation;
@@ -104,19 +105,19 @@ public static class MemoryEffectChecks
             foreach (var bad in new MemoryOperation?[] { null, good with { AtomicWidth = 0 }, good with { AtomicWidth = 32 },
                 good with { ElementWidth = 24 }, good with { Order = (MemoryOrder)999 }, good with { NonTemporal = true },
                 good with { Order = opcode == OpCode.LoadExclusive ? MemoryOrder.Release : MemoryOrder.Acquire } })
-                Check(MirValidator.Validate(Replace(ir, opcode, op => op with { Memory = bad })).Count > 0, "reject malformed exclusive atomic metadata");
-            Check(MirValidator.Validate(Replace(ir, opcode, op => op with { WorldOut = op.WorldIn })).Count > 0, "exclusive World chain is required");
-            Check(MirValidator.Validate(Replace(ir, opcode, op => op with { Fault = FaultPolicy.None })).Count > 0, "exclusive fault edge is required");
+                Check(MirValidator.Validate(Replace(ir, opcode, op => op with { Payload = bad is null ? NoPayload.Instance : new MemoryPayload(bad) })).Count > 0, "reject malformed exclusive atomic metadata");
+            Check(MirValidator.Validate(Replace(ir, opcode, op => op with { Flow = new(op.Flow!.Input, op.Flow.Input) })).Count > 0, "exclusive state chain is required");
+            Check(MirValidator.Validate(Replace(ir, opcode, op => op with { Flow = null })).Count > 0, "exclusive state edge is required");
             Check(MirValidator.Validate(ir with { Architecture = Architecture.X64 }).Count > 0, "exclusive primitive is ARM only");
         }
         var plain = new MirBuilder(Architecture.Arm64, Origin, "fixture.ordered-load");
         plain.Load(plain.Const(64, Address), 64, new(MemoryOrder.Acquire, 64, 64));
         var plainIr = Finish(plain);
         foreach (var memory in new[] { new MemoryOperation(MemoryOrder.Acquire, 64, 32), new(MemoryOrder.Release, 64, 64), new(MemoryOrder.Acquire, 128, 64), new(MemoryOrder.Relaxed, 64, 256) })
-            Check(MirValidator.Validate(Replace(plainIr, OpCode.Load, op => op with { Memory = memory })).Count > 0, "reject incompatible ordered memory metadata");
-        Check(MirValidator.Validate(Replace(plainIr, OpCode.Constant, op => op with { Memory = new(MemoryOrder.Relaxed, 64, 64) })).Count > 0, "memory metadata belongs only on memory operations");
-        Check(MirValidator.Validate(Replace(probeIr, OpCode.WriteProbe, op => op with { Immediate = 0 })).Count > 0, "zero-size permission probe is invalid");
-        Check(MirValidator.Validate(Replace(probeIr, OpCode.WriteProbe, op => op with { Immediate = 4097 })).Count > 0, "oversized permission probe is invalid");
+            Check(MirValidator.Validate(Replace(plainIr, OpCode.Load, op => op with { Payload = new MemoryPayload(memory) })).Count > 0, "reject incompatible ordered memory metadata");
+        Check(MirValidator.Validate(Replace(plainIr, OpCode.Constant, op => op with { Payload = new MemoryPayload(new(MemoryOrder.Relaxed, 64, 64)) })).Count > 0, "memory metadata belongs only on memory operations");
+        Check(MirValidator.Validate(Replace(probeIr, OpCode.WriteProbe, op => op with { Payload = new ImmediatePayload(0) })).Count > 0, "zero-size permission probe is invalid");
+        Check(MirValidator.Validate(Replace(probeIr, OpCode.WriteProbe, op => op with { Payload = new ImmediatePayload(4097) })).Count > 0, "oversized permission probe is invalid");
 
         var ordering = new MirBuilder(Architecture.Arm64, Origin, "fixture.ordering-events");
         ordering.CodeGuarded(ordering.Const(64, Origin.Address));
@@ -136,14 +137,14 @@ public static class MemoryEffectChecks
         Check(orderedState.Accesses.Count == 0 && orderedState.Events[0].Barrier == barrier, "barrier and prefetch retain metadata without data accesses");
         foreach (var bad in new BarrierOperation?[] { null, barrier with { Kind = BarrierKind.Mfence }, barrier with { Domain = BarrierDomain.FullSystem },
             barrier with { Access = BarrierAccess.Loads }, barrier with { Option = 0 }, barrier with { Option = 16 } })
-            Check(MirValidator.Validate(Replace(orderingIr, OpCode.Barrier, op => op with { Barrier = bad })).Count > 0, "reject barrier kind/domain/access/option mismatch");
+            Check(MirValidator.Validate(Replace(orderingIr, OpCode.Barrier, op => op with { Payload = bad is null ? NoPayload.Instance : new BarrierPayload(bad) })).Count > 0, "reject barrier kind/domain/access/option mismatch");
         foreach (var code in new[] { OpCode.Barrier, OpCode.ClearExclusive, OpCode.Prefetch })
         {
-            Check(MirValidator.Validate(Replace(orderingIr, code, op => op with { Fault = FaultPolicy.StopUnmodeled })).Count > 0, "nonfaulting ordering event rejects fault edge");
-            Check(MirValidator.Validate(Replace(orderingIr, code, op => op with { WorldOut = op.WorldIn })).Count > 0, "ordering event requires World progression");
+            Check(MirValidator.Validate(Replace(orderingIr, code, op => op with { Payload = new GuardPayload(StopKind.FaultBoundary, "stray guard") })).Count > 0, "nonfaulting ordering event rejects guard payload");
+            Check(MirValidator.Validate(Replace(orderingIr, code, op => op with { Flow = new(op.Flow!.Input, op.Flow.Input) })).Count > 0, "ordering event requires state progression");
         }
-        Check(MirValidator.Validate(Replace(orderingIr, OpCode.Prefetch, op => op with { Immediate = 32 })).Count > 0, "reject out-of-range prefetch hint");
-        Check(MirValidator.Validate(Replace(orderingIr, OpCode.CodeGuarded, op => op with { Barrier = barrier })).Count > 0, "barrier metadata belongs only on barrier operations");
+        Check(MirValidator.Validate(Replace(orderingIr, OpCode.Prefetch, op => op with { Payload = new ImmediatePayload(32) })).Count > 0, "reject out-of-range prefetch hint");
+        Check(MirValidator.Validate(Replace(orderingIr, OpCode.CodeGuarded, op => op with { Payload = new BarrierPayload(barrier) })).Count > 0, "barrier metadata belongs only on barrier operations");
 
         foreach (var isLoad in new[] { false, true })
         {
@@ -182,10 +183,10 @@ public static class MemoryEffectChecks
                 Check(active.Reservation == (!fault && !isLoad ? null : new ExclusiveReservation(Address, 8)), "successful conditional store invalidates overlapping reservation");
             }
             foreach (var mutation in new Func<Operation, Operation>[] {
-                op => op with { Memory = new(MemoryOrder.Relaxed, 64, 64) },
-                op => op with { Immediate = 1 }, op => op with { Slot = "x0" }, op => op with { Detail = "stray" },
-                op => op with { WorldIn = -1 }, op => op with { WorldOut = op.WorldIn }, op => op with { Fault = FaultPolicy.None },
-                op => op with { Barrier = barrier }, op => op with { Floating = new(FloatKind.Add, 64, 64) } })
+                op => op with { Payload = new MemoryPayload(new(MemoryOrder.Relaxed, 64, 64)) },
+                op => op with { Payload = new ImmediatePayload(1) }, op => op with { Payload = new SlotPayload("x0") }, op => op with { Payload = new ChoicePayload("stray") },
+                op => op with { Flow = new(new(-1), op.Flow!.Output) }, op => op with { Flow = new(op.Flow!.Input, op.Flow.Input) }, op => op with { Flow = null },
+                op => op with { Payload = new BarrierPayload(barrier) }, op => op with { Payload = new FloatPayload(new(FloatKind.Add, 64, 64)) } })
                 Check(MirValidator.Validate(Replace(conditionalIr, code, mutation)).Count > 0, "conditional memory rejects atomic metadata, stray fields and broken effects");
             foreach (var malformed in new[] { "condition", "address", "width" })
             {
@@ -213,7 +214,7 @@ public static class MemoryEffectChecks
     }
 
     private static MirInstruction Replace(MirInstruction ir, OpCode code, Func<Operation, Operation> replacement) =>
-        ir with { Operations = ir.Operations.Select(op => op.Code == code ? replacement(op) : op).ToArray() };
+        ir with { Operations = ir.Operations.Select(op => op.Code == code ? replacement(op) : op).ToImmutableArray() };
 
     private static MachineState State(int bytes)
     {

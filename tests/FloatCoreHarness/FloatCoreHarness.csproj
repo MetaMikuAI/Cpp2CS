@@ -3,6 +3,12 @@
   <ItemGroup>
     <Compile Include="../../src/Cpp2CS/Architecture.cs" Link="Architecture.cs" />
     <Compile Include="../../src/Cpp2CS/Ir/Model.cs" Link="Model.cs" />
+    <Compile Include="../../src/Cpp2CS/Ir/OperationModel.cs" Link="OperationModel.cs" />
+    <Compile Include="../../src/Cpp2CS/Ir/InstructionModel.cs" Link="InstructionModel.cs" />
+    <Compile Include="../../src/Cpp2CS/Ir/ExecutionModel.cs" Link="ExecutionModel.cs" />
+    <Compile Include="../../src/Cpp2CS/Ir/MirContracts.cs" Link="MirContracts.cs" />
+    <Compile Include="../../src/Cpp2CS/Ir/MachineProfile.cs" Link="MachineProfile.cs" />
+    <Compile Include="../../src/Cpp2CS/Ir/StateLayout.cs" Link="StateLayout.cs" />
     <Compile Include="../../src/Cpp2CS/Ir/MemoryModel.cs" Link="MemoryModel.cs" />
     <Compile Include="../../src/Cpp2CS/Ir/FloatEvaluator.cs" Link="FloatEvaluator.cs" />
     <Compile Include="../../src/Cpp2CS/Ir/FloatFused.cs" Link="FloatFused.cs" />
