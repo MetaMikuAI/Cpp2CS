@@ -27,6 +27,11 @@ public static class SemanticValidation
         {
             switch (value)
             {
+                case PhiExpression phi:
+                    var unresolved = $"0x{pc:x}: Phi 尚未按前驱降低：{phi.Name}";
+                    if (!result.Problems.Contains(unresolved)) result.Problems.Add(unresolved);
+                    foreach (var input in phi.Inputs) Inspect(pc, input.Value);
+                    break;
                 case IndexedArrayAddress:
                     result.Problems.Add($"0x{pc:x}: 数组地址尚未绑定到元素读取"); break;
                 case UnknownExpression unknown:

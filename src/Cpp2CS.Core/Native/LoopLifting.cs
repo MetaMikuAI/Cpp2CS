@@ -93,7 +93,6 @@ public sealed partial class FunctionLifter
                 list.Add((address, state.Copy()));
             }
         }
-        PhiLowering.Apply(result);
         var assignments = new Dictionary<(ulong Predecessor, ulong Header), List<(string Name, NativeValue Value)>>();
         foreach (var variable in variables)
         {
@@ -118,6 +117,8 @@ public sealed partial class FunctionLifter
             block.Statements.AddRange(copies.Select((c, index) => new AssignStatement(address, $"edge_{address:x}_{index}", c.Value.Expression, c.Value.Type)));
             block.Statements.AddRange(copies.Select((c, index) => new SetLocalStatement(address, c.Name, new NameExpression($"edge_{address:x}_{index}"))));
         }
+        // 边复制也可能引用入口合流值；全部语句建成后统一降低 Phi。
+        PhiLowering.Apply(result);
         SemanticValidation.Check(result);
         result.Proofs.Add(new(graph.Entry, "LoopRegisterPhi", "dominator-checked natural loops; live modified registers have stable typed identities; all entry/backedge values checked; parallel copies preserve swaps; loop stack writes rejected"));
         return result;

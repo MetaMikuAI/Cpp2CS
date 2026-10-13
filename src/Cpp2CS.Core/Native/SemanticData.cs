@@ -8,6 +8,8 @@ public static class SemanticData
         IndexedArrayAddress a => new { kind = "unresolved-array-address", array = Expression(a.Array), index = Expression(a.Index) },
         StaticMemberExpression m => new { kind = "static-member", m.Owner, m.Name, m.Type, m.IsProperty },
         CapturedExpression c => new { kind = "capture", c.Name },
+        PhiExpression p => new { kind = "unresolved-phi", p.Name, p.Type,
+            inputs = p.Inputs.Select(i => new { i.Predecessor, value = Expression(i.Value) }) },
         ConstantExpression c => new { kind = "constant", c.Value, c.EnumType, c.EnumMember },
         OperationExpression o => new { kind = "operation", operation = o.Operation.ToString(), o.Type, arguments = o.Arguments.Select(Expression).ToArray() },
         AddressExpression a => new { kind = "global", a.Address },

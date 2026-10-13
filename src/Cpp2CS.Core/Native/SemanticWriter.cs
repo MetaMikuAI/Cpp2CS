@@ -9,6 +9,8 @@ public sealed class SemanticWriter(Symbols symbols)
         NameExpression n => n.Name,
         StaticMemberExpression m => m.Owner + "." + m.Name,
         CapturedExpression c => c.Name,
+        PhiExpression p => "UNRESOLVED_PHI(\"" + p.Name + "\", " + string.Join(", ",
+            p.Inputs.Select(i => $"(0x{i.Predecessor:x}, {Expression(i.Value)})")) + ")",
         ConstantExpression { EnumType: { } type, EnumMember: { } member } => type + "." + member,
         ConstantExpression { EnumType: { } type } c => "(" + type + ")" + c.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
         ConstantExpression c => c.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),

@@ -6,39 +6,16 @@ public static class PhiLowering
     public static void Apply(LiftResult result)
     {
         var live = new Dictionary<string, PhiExpression>();
-        Expression Rewrite(Expression e) => e switch
-        {
-            PhiExpression phi => Reference(phi),
-            CapturedExpression c => c with { Value = Rewrite(c.Value) },
-            MemberExpression m => m with { Receiver = Rewrite(m.Receiver) },
-            AddressOfExpression a => a with { Target = Rewrite(a.Target) },
-            SliceExpression s => s with { Value = Rewrite(s.Value) },
-            ComposeExpression c => c with { Parts = c.Parts.Select(Rewrite).ToArray() },
-            AggregateExpression a => a with { Bits = Rewrite(a.Bits) },
-            BinaryExpression b => b with { Left = Rewrite(b.Left), Right = Rewrite(b.Right) },
-            OperationExpression o => o with { Arguments = o.Arguments.Select(Rewrite).ToArray() },
-            InvocationExpression c => c with { Receiver = c.Receiver is null ? null : Rewrite(c.Receiver), Arguments = c.Arguments.Select(Rewrite).ToArray() },
-            _ => e
-        };
+        Expression ReferenceNode(Expression e) => e is PhiExpression phi ? Reference(phi) : e;
+        Expression Rewrite(Expression e) => SourceTree.Map(e, ReferenceNode);
         Expression Reference(PhiExpression phi)
         {
-            if (!live.ContainsKey(phi.Name))
-            {
-                live.Add(phi.Name, phi);
-                foreach (var input in phi.Inputs) Rewrite(input.Value);
-            }
+            live.TryAdd(phi.Name, phi);
             return new NameExpression(phi.Name);
         }
         foreach (var block in result.Blocks.Values.ToArray())
         {
-            var statements = block.Statements.Select(s => s switch
-            {
-                AssignStatement a => a with { Value = Rewrite(a.Value) },
-                StoreStatement w => w with { Target = Rewrite(w.Target), Value = Rewrite(w.Value) },
-                CallStatement c => c with { Receiver = c.Receiver is null ? null : Rewrite(c.Receiver), Arguments = c.Arguments.Select(Rewrite).ToArray() },
-                ReturnStatement r => r with { Value = r.Value is null ? null : Rewrite(r.Value) },
-                _ => s
-            }).ToList();
+            var statements = block.Statements.Select(s => SourceTree.Map(s, ReferenceNode)).ToList();
             result.Blocks[block.Address] = block with { Statements = statements, Condition = block.Condition is null ? null : Rewrite(block.Condition) };
         }
         foreach (var phi in live.Values)

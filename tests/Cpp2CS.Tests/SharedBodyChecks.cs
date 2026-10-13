@@ -39,5 +39,22 @@ public static class SharedBodyChecks
         var unknown = SourceTree.Map(sequence, value => value is NameExpression { Name: "snapshot" } ? new UnknownExpression("unbound") : value);
         SemanticValidation.Check(unknown);
         check(unknown.Problems.Any(p => p.Contains("unbound")), "await 包装不能掩盖未知输入");
+
+        var phi = new PhiExpression("joined", "int32_t", [new(0x104, new ConstantExpression(1)), new(0x108, new ConstantExpression(2))]);
+        var pending = diamond with { Blocks = diamond.Blocks.ToDictionary(p => p.Key, p => p.Value with { Statements = [.. p.Value.Statements] }), Problems = [] };
+        pending.Blocks[0x10c] = pending.Blocks[0x10c] with { Statements =
+            [new EvaluateStatement(0x10c, new AwaitExpression(new InvocationExpression("Use", null, [new CastExpression("long", phi)], false))),
+             new SetLocalStatement(0x10c, "copy", phi)] };
+        SemanticValidation.Check(pending);
+        check(pending.Problems.Count == 1 && writer.Raw(pending).Contains("UNRESOLVED_PHI(\"joined\", (0x104, 1), (0x108, 2))"),
+            "未降低 Phi 保留前驱和值，并报告为未恢复，诊断输出不崩溃");
+        check(JsonSerializer.Serialize(SemanticData.Function(pending)).Contains("unresolved-phi"), "未降低 Phi 的语义证据可以序列化");
+        pending.Problems.Clear();
+        PhiLowering.Apply(pending);
+        SemanticValidation.Check(pending);
+        check(pending.Problems.Count == 0 && !writer.Raw(pending).Contains("UNRESOLVED_PHI") &&
+            pending.Blocks[0x104].Statements.OfType<SetLocalStatement>().Single().Value == new ConstantExpression(1) &&
+            pending.Blocks[0x108].Statements.OfType<SetLocalStatement>().Single().Value == new ConstantExpression(2),
+            "公共遍历降低 await、类型转换和边复制中的 Phi，保留前驱对应关系");
     }
 }

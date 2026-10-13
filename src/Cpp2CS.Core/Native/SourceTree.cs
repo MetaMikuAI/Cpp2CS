@@ -5,6 +5,7 @@ public static class SourceTree
 {
     public static Expression Map(Expression e, Func<Expression, Expression> rewrite) => rewrite(e switch
     {
+        PhiExpression p => p with { Inputs = p.Inputs.Select(i => i with { Value = Map(i.Value, rewrite) }).ToArray() },
         CapturedExpression c => c with { Value = Map(c.Value, rewrite) },
         IndexedArrayAddress a => a with { Array = Map(a.Array, rewrite), Index = Map(a.Index, rewrite) },
         MemberExpression m => m with { Receiver = Map(m.Receiver, rewrite) },
