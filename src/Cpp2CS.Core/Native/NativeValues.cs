@@ -39,6 +39,12 @@ public static class NativeValues
                 number -= 1L << width;
             return new(bits, type ?? value.Type, new ConstantExpression(number));
         }
+        if (offset == 0 && width is 8 or 16 or 32 && IntegerProjection.Width(value.Type) > width &&
+            (type is null || type == value.Type) && IntegerProjection.Bits(value) is { } integer)
+        {
+            var narrowed = (value.Type.StartsWith("uint") ? "uint" : "int") + width + "_t";
+            return new(bits, narrowed, new OperationExpression(ValueOperation.IntegerCast, narrowed, [integer]));
+        }
         var naturalWidth = value.Type switch { "bool" or "uint8_t" or "int8_t" => 8,
             "uint16_t" or "int16_t" => 16, "uint32_t" or "int32_t" or "float" => 32, "double" => 64, _ => 0 };
         if (offset == 0 && width == naturalWidth) return new(bits, type ?? value.Type, value.Expression);

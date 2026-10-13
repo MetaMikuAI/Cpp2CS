@@ -6,6 +6,11 @@ using Cpp2CS.IR;
 using Cpp2CS.Model;
 
 var passed = 0;
+if (args is ["integer-projection", var integerConfig, var integerDirectory])
+{
+    IntegerProjectionChecks.Export(integerConfig, integerDirectory);
+    return;
+}
 if (args is ["namespace-inventory", var inventoryConfig, var inventoryOutput, .. var namespaces])
 {
     NamespaceCorpus.Inventory(inventoryConfig, inventoryOutput, namespaces);
@@ -156,6 +161,7 @@ Check(imported.Methods.Count == 2 && imported.Methods[0].Address == imported.Met
 NativeChecks.Run(Check);
 MachineEffectsChecks.Run(Check);
 ArithmeticArrayChecks.Run(Check);
+IntegerProjectionChecks.Run(Check);
 DelegateCacheChecks.Run(Check);
 LambdaChecks.Run(Check);
 AsyncChecks.Run(Check);

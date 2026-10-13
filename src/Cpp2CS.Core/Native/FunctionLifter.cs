@@ -166,6 +166,10 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         var value = pieces.Length == 1 ? pieces[0] : NativeValues.Compose(pieces, method.ReturnType);
         if (layout.Return.Shape.Kind is ShapeKind.Composite or ShapeKind.HomogeneousFloat)
             return new AggregateExpression(symbols.Display(method.ReturnType), value.Expression);
+        if (IntegerProjection.Width(method.ReturnType) > 0)
+            return IntegerProjection.Bits(value) is { } integer
+                ? new OperationExpression(ValueOperation.IntegerCast, method.ReturnType, [integer])
+                : new UnknownExpression("整数返回的位宽或高位未确定");
         return method.ReturnType == "bool" && value.Type != "bool" ? BooleanValue(value.Expression) : value.Expression;
     }
     private NativeValue Load(ulong pc, NativeValue receiver, int offset, int size, List<Statement> statements, LiftResult result)

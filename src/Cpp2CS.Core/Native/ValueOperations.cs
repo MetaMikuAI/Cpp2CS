@@ -1,6 +1,6 @@
 namespace Cpp2CS.Native;
 
-public enum ValueOperation { SignedToFloat, ZeroExtendWord, Unsigned, IntegerCast, FloatDivide, Ceiling, FloatToSignedCeiling, BitCast, Add, Subtract, Select, ArrayElement, NewArray, ReferenceSelect }
+public enum ValueOperation { SignedToFloat, ZeroExtendWord, Unsigned, IntegerCast, FloatDivide, Ceiling, FloatToSignedCeiling, BitCast, Add, Subtract, Select, ArrayElement, NewArray, ReferenceSelect, SignExtend, ShiftLeft, LogicalShiftRight, ArithmeticShiftRight, BitAnd, BitOr, BitXor }
 internal sealed record IndexedArrayAddress(Expression Array, Expression Index, HeaderField Elements) : Expression;
 public sealed record OperationExpression(ValueOperation Operation, string Type, Expression[] Arguments) : Expression;
 
@@ -10,7 +10,8 @@ public static class ValueOperations
     public static string Write(OperationExpression operation)
     {
         var a = operation.Arguments.Select(SemanticWriter.Expression).ToArray();
-        var type = operation.Type switch { "int32_t" => "int", "int64_t" => "long", _ => operation.Type };
+        var type = operation.Type switch { "int8_t" => "sbyte", "uint8_t" => "byte", "int16_t" => "short", "uint16_t" => "ushort",
+            "int32_t" => "int", "uint32_t" => "uint", "int64_t" => "long", "uint64_t" => "ulong", _ => operation.Type };
         return operation.Operation switch
         {
             ValueOperation.SignedToFloat => $"(({type})unchecked(({(a[1] == "32" ? "int" : "long")})({a[0]})))",
@@ -32,6 +33,11 @@ public static class ValueOperations
             ValueOperation.Add or ValueOperation.Subtract => $"unchecked(({type})({a[0]}) {(operation.Operation == ValueOperation.Add ? "+" : "-")} ({type})({a[1]}))",
             ValueOperation.Select => $"({a[0]} ? unchecked(({type})({a[1]})) : unchecked(({type})({a[2]})))",
             ValueOperation.ReferenceSelect => $"({a[0]} ? {a[1]} : {a[2]})",
+            ValueOperation.SignExtend => $"unchecked(({type})({(a[1] == "8" ? "sbyte" : a[1] == "16" ? "short" : a[1] == "32" ? "int" : "long")})({a[0]}))",
+            ValueOperation.ShiftLeft => $"unchecked(({type})({a[0]}) << {a[1]})",
+            ValueOperation.ArithmeticShiftRight => $"(unchecked(({type})({a[0]})) >> {a[1]})",
+            ValueOperation.LogicalShiftRight => $"unchecked(({type})(({(type == "int" ? "uint" : "ulong")})({a[0]}) >> {a[1]}))",
+            ValueOperation.BitAnd or ValueOperation.BitOr or ValueOperation.BitXor => $"unchecked(({type})({a[0]}) {(operation.Operation == ValueOperation.BitAnd ? "&" : operation.Operation == ValueOperation.BitOr ? "|" : "^")} ({type})({a[1]}))",
             ValueOperation.ArrayElement => $"{a[0]}[{a[1]}]",
             ValueOperation.NewArray => $"new {type}[{a[0]}]",
             _ => throw new InvalidOperationException("未实现的类型化操作")

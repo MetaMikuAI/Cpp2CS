@@ -126,7 +126,9 @@ public sealed partial class FunctionLifter
                     return NativeValues.ReferenceSelection(left, right) is { } selection
                         ? Numeric(value, ValueOperation.ReferenceSelect, selection.Type, condition, selection.Left, selection.Right)
                         : Unknown(width, "引用选择两侧的类型或空值未确定");
-                return Numeric(value, ValueOperation.Select, width == 32 ? "int32_t" : "int64_t", condition, left.Expression, right.Expression);
+                return width is 32 or 64 && IntegerProjection.Bits(left) is { } leftInteger && IntegerProjection.Bits(right) is { } rightInteger
+                    ? Numeric(value, ValueOperation.Select, width == 32 ? "int32_t" : "int64_t", condition, leftInteger, rightInteger)
+                    : Unknown(width, "条件选择的整数类型或位宽未确定");
             }
             // 数组缩放寻址是 add(array, shift(sign-extend(index))) 的有类型投影。
             if (value.Operation == "add" && value.Inputs[1] is { Operation: "shift-left", Inputs: [var extended] } scale &&
@@ -158,7 +160,9 @@ public sealed partial class FunctionLifter
                         if ((number & (1L << (first.Bits.Width - 1))) != 0) number -= 1L << first.Bits.Width;
                         return Constant(number, width);
                     }
-                    return Unknown(width, "有符号扩展的 C# 投影未接通");
+                    if (width is 32 or 64 && first.Bits.Width is 8 or 16 or 32 && IntegerProjection.Bits(first) is { } signedInput)
+                        return Numeric(value, ValueOperation.SignExtend, width == 32 ? "int32_t" : "int64_t", signedInput, new ConstantExpression(first.Bits.Width));
+                    return Unknown(width, "有符号扩展的整数类型或位宽未确定");
                 case "add": case "sub":
                 {
                     var right = inputs[1];
@@ -179,13 +183,15 @@ public sealed partial class FunctionLifter
                     if (add && right.Expression is ConstantExpression displacement &&
                         layouts.FieldAt(first.Type, checked((int)displacement.Value)) is { } field && Location(first, field.Offset, field.Size) is { } location)
                         return new(new InputBits($"field-address:{pc:x}", 64), field.Type + "*", new AddressOfExpression(location) { RootType = (first.Expression as AddressOfExpression)?.RootType ?? first.Type });
-                    if (first.Type is "int32_t" or "int64_t" or "uint32_t" or "uint64_t" && (width == 32 || first.Type is "int64_t" or "uint64_t"))
-                        return Numeric(value, add ? ValueOperation.Add : ValueOperation.Subtract, width == 32 ? "int32_t" : "int64_t", first.Expression, right.Expression);
+                    if (width is 32 or 64 && IntegerProjection.Bits(first) is { } leftNumber && IntegerProjection.Bits(right) is { } rightNumber)
+                        return Numeric(value, add ? ValueOperation.Add : ValueOperation.Subtract, width == 32 ? "int32_t" : "int64_t", leftNumber, rightNumber);
                     return Unknown(width, "算术操作数类型未确定");
                 }
                 case "and":
                 {
-                    if (inputs[1].Expression is not ConstantExpression maskValue) return Unknown(width, "寄存器按位与的 C# 投影未接通");
+                    if (width is 32 or 64 && IntegerProjection.Bits(first) is { } bitLeft && IntegerProjection.Bits(inputs[1]) is { } bitRight)
+                        return Numeric(value, ValueOperation.BitAnd, width == 32 ? "int32_t" : "int64_t", bitLeft, bitRight);
+                    if (inputs[1].Expression is not ConstantExpression maskValue) return Unknown(width, "按位与的整数类型或位宽未确定");
                     var mask = unchecked((ulong)maskValue.Value);
                     if (first.Type == "bool" && mask == 1)
                     {
@@ -199,8 +205,16 @@ public sealed partial class FunctionLifter
                     var low = Project(NativeValues.Slice(first, 0, bits));
                     return low with { Bits = bits == width ? low.Bits : BitOps.Concat([low.Bits, BitOps.Constant(0, width - bits)]) };
                 }
-                case "shift-right":
+                case "orr": case "eor":
+                    if (width is 32 or 64 && IntegerProjection.Bits(first) is { } leftBits && IntegerProjection.Bits(inputs[1]) is { } rightBits)
+                        return Numeric(value, value.Operation == "orr" ? ValueOperation.BitOr : ValueOperation.BitXor, width == 32 ? "int32_t" : "int64_t", leftBits, rightBits);
+                    return Unknown(width, "按位运算的整数类型或位宽未确定");
+                case "shift-left": case "shift-arithmetic": case "shift-right":
                 {
+                    if (width is 32 or 64 && IntegerProjection.Bits(first) is { } shifted)
+                        return Numeric(value, value.Operation == "shift-left" ? ValueOperation.ShiftLeft : value.Operation == "shift-arithmetic" ? ValueOperation.ArithmeticShiftRight : ValueOperation.LogicalShiftRight,
+                            width == 32 ? "int32_t" : "int64_t", shifted, new ConstantExpression(value.Immediate));
+                    if (value.Operation != "shift-right") return Unknown(width, "移位的整数类型或位宽未确定");
                     var shift = checked((int)value.Immediate);
                     var low = Project(NativeValues.Slice(first, shift, width - shift));
                     return low with { Bits = shift == 0 ? low.Bits : BitOps.Concat([low.Bits, BitOps.Constant(0, shift)]) };
@@ -251,14 +265,16 @@ public sealed partial class FunctionLifter
         {
             if (before.Comparison is not { } compare || before.ComparisonKind is not ("compare" or "compare-float"))
             { Reject("条件标志来源未确定"); return new UnknownExpression("flags"); }
-            if (code is 1 or 2) return Compare(result, code == 1 ? "==" : "!=", compare.Left, compare.Right);
-            if (before.ComparisonKind == "compare-float" || code is not (3 or 4 or 9 or 10 or 11 or 12 or 13 or 14) ||
-                compare.Left.Type is not ("int32_t" or "uint32_t" or "int64_t" or "uint64_t") ||
-                !(compare.Right.Expression is ConstantExpression || compare.Right.Type == compare.Left.Type && compare.Right.Bits.Width == compare.Left.Bits.Width))
+            if (code is 1 or 2 && (before.ComparisonKind == "compare-float" || IntegerProjection.Width(compare.Left.Type) == 0))
+                return Compare(result, code == 1 ? "==" : "!=", compare.Left, compare.Right);
+            if (before.ComparisonKind == "compare-float" || code is not (1 or 2 or 3 or 4 or 9 or 10 or 11 or 12 or 13 or 14) ||
+                compare.Left.Bits.Width is not (32 or 64) || compare.Left.Bits.Width != compare.Right.Bits.Width ||
+                IntegerProjection.Bits(compare.Left) is not { } leftBits || IntegerProjection.Bits(compare.Right) is not { } rightBits)
             { Reject("整数分支的类型或位宽未确定"); return new UnknownExpression("flags"); }
             var unsigned = code is 3 or 4 or 9 or 10;
-            Expression Cast(NativeValue v) => unsigned ? new OperationExpression(ValueOperation.Unsigned, compare.Left.Bits.Width == 32 ? "uint32_t" : "uint64_t", [v.Expression]) : v.Expression;
-            return new BinaryExpression(code switch { 3 or 11 => ">=", 4 or 12 => "<", 9 or 13 => ">", _ => "<=" }, Cast(compare.Left), Cast(compare.Right));
+            var type = (unsigned ? "uint" : "int") + compare.Left.Bits.Width + "_t";
+            Expression Cast(Expression value) => new OperationExpression(ValueOperation.IntegerCast, type, [value]);
+            return new BinaryExpression(code switch { 1 => "==", 2 => "!=", 3 or 11 => ">=", 4 or 12 => "<", 9 or 13 => ">", _ => "<=" }, Cast(leftBits), Cast(rightBits));
         }
     }
     private static void InvalidateCallMemory(NativeState state, ulong pc)
