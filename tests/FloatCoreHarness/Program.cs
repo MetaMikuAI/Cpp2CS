@@ -12,7 +12,8 @@ while (Console.ReadLine() is { } line)
     var r = document.RootElement;
     var spec = new FloatOperation(Enum.Parse<FloatKind>(r.GetProperty("kind").GetString()!),
         r.GetProperty("width").GetInt32(), r.GetProperty("resultWidth").GetInt32(),
-        Enum.Parse<FloatRounding>(r.GetProperty("rounding").GetString()!));
+        Enum.Parse<FloatRounding>(r.GetProperty("rounding").GetString()!),
+        r.TryGetProperty("fractionBits", out var fraction) ? fraction.GetInt32() : 0);
     var output = FloatEvaluator.Evaluate(Enum.Parse<Architecture>(r.GetProperty("arch").GetString()!),
         spec, BigInteger.Parse("0" + r.GetProperty("a").GetString(), NumberStyles.HexNumber),
         BigInteger.Parse("0" + r.GetProperty("b").GetString(), NumberStyles.HexNumber),

@@ -642,6 +642,99 @@ def integer_remaining(h):
         h.checks += 1
 
 
+def memory_pop_and_bits(h):
+    for prefix, width in (("", 64), ("66", 16)):
+        for operand in ("03", "0424", "4424f8", "442402", "04cb"):
+            for flags in (0, FLAG_MASK):
+                h.run(prefix + "8f" + operand, memory=True, old_flags=flags,
+                      setup=lambda s, r, a: s.update(rcx=2))
+        for code in (prefix + "418f0424", "64" + prefix + "8f03", "65" + prefix + "8f03",
+                     "67" + prefix + "8f03", "67" + prefix + "8f0424"):
+            def setup(slots, _regions, _address):
+                slots["r12"] = DATA + 33
+                if code.startswith(("64", "65")): slots["rbx"] = 33
+                if code.startswith("67"): slots["rbx"] |= 0xcafef00d00000000
+            h.run(code, memory=True, setup=setup)
+        h.guard_stop(prefix + "8f03", {"rsp": STACK, "rbx": DATA},
+                     [(STACK, b"\x5a" * (width // 8)), (DATA, b"\0" * (width // 8 - 1))])
+        h.guard_stop(prefix + "8f03", {"rsp": STACK, "rbx": DATA},
+                     [(STACK, b"\x5a" * (width // 8 - 1)), (DATA, b"\0" * (width // 8))])
+    # 地址宽度只约束目的寻址；栈读和 RSP 自增仍为 64 位。
+    high_stack = 0x100000000 + STACK
+    h.machine.mem_map(high_stack, 0x1000)
+    for prefix in ("", "66"):
+        def setup(slots, regions, _address):
+            slots["rsp"] = high_stack + 64
+            regions.append((high_stack, bytearray(RNG.randbytes(128))))
+        h.run("67" + prefix + "8f0424", memory=True, setup=setup)
+
+    for width, prefix in ((16, "66"), (32, ""), (64, "48")):
+        for opcode, group in (("a3", "23"), ("ab", "2b"), ("b3", "33"), ("bb", "3b")):
+            for offset in (-2 * width - 1, -width, -1, 0, 1, width - 1, width, 2 * width + 1):
+                for flags in (0, FLAG_MASK):
+                    def setup(slots, _regions, _address):
+                        slots.update(rbx=DATA + 64, rcx=offset & ((1 << 64) - 1))
+                    h.run(prefix + "0f" + opcode + "0b", width=width, family="bittest", memory=True,
+                          setup=setup, old_flags=flags)
+            for immediate in (0, width - 1, width, 127, 128, 255):
+                h.run(prefix + "0fba" + group + f"{immediate:02x}", width=width, family="bittest", memory=True)
+            # 偏移寄存器同时参与地址；FS/GS 加到按地址宽度回绕后的位串地址上。
+            h.run("64" + prefix + "0f" + opcode + "1b", width=width, family="bittest", memory=True,
+                  setup=lambda s, r, a: s.update(rbx=32))
+            for segment in ("64", "65"):
+                h.run(segment + "67" + prefix + "0f" + opcode + "0b", width=width, family="bittest", memory=True,
+                      setup=lambda s, r, a: s.update(rbx=0xcafef00dfffffff8, rcx=128))
+            h.guard_stop(prefix + "0f" + opcode + "0b", {"rbx": DATA, "rcx": 0},
+                         [(DATA, b"\0" * (width // 8 - 1))])
+
+
+def simd_sse41(h):
+    # PCMPEQQ、PMIN/PMAX 的符号区别以及 PMULLD 的低 32 位乘积。
+    opcodes = (0x29, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x17)
+    edges = (0, 1, 0x7f7f7f7f, 0x80808080, 0xffffffff, 0x7fffffff, 0x80000000, 0x80007fff)
+    for opcode in opcodes:
+        for rex, modrm in (("", "c1"), ("", "c0"), ("45", "f9"), ("", "03")):
+            for index in range(24):
+                def setup(slots, regions, _address):
+                    if index < len(edges):
+                        left, right = edges[index], edges[(index + 3) % len(edges)]
+                        slots["xmm0"] = sum(left << bit for bit in range(0, 128, 32))
+                        slots["xmm1"] = sum(right << bit for bit in range(0, 128, 32))
+                        slots.update(xmm15=slots["xmm0"], xmm9=slots["xmm1"])
+                        if regions: regions[0][1][32:48] = slots["xmm1"].to_bytes(16, "little")
+                h.run("66" + rex + f"0f38{opcode:02x}" + modrm, simd=True, memory=modrm == "03", setup=setup)
+        h.fault(f"660f38{opcode:02x}03", 15)
+        h.guard_stop(f"660f38{opcode:02x}03", {"rbx": DATA + 1}, [(DATA + 1, b"\0" * 16)])
+    # 每个 PSHUFB 控制字节都覆盖；bits 6:4 忽略，bit 7 强制结果为零。
+    for rex, modrm in (("", "c1"), ("", "c0"), ("45", "f9"), ("", "03")):
+        for control in range(256):
+            def setup(slots, regions, _address):
+                slots["xmm0"] = int.from_bytes(bytes(range(16)), "little")
+                slots["xmm1"] = int.from_bytes(bytes([control]) * 16, "little")
+                if modrm == "c0": slots["xmm0"] = slots["xmm1"]
+                slots.update(xmm15=slots["xmm0"], xmm9=slots["xmm1"])
+                if regions: regions[0][1][32:48] = slots["xmm1"].to_bytes(16, "little")
+            h.run("66" + rex + "0f3800" + modrm, simd=True, memory=modrm == "03", setup=setup)
+    h.fault("660f380003", 15)
+    h.guard_stop("660f380003", {"rbx": DATA + 1}, [(DATA + 1, b"\0" * 16)])
+    # PMOVSX/ZX 只读 m64/m32/m16；这些子宽内存形式允许非 16 字节对齐。
+    for first in (0x20, 0x30):
+        for delta, size in enumerate((8, 4, 2, 8, 4, 8)):
+            opcode = first + delta
+            for rex, modrm in (("", "c1"), ("", "c0"), ("45", "f9"), ("", "03")):
+                for index in range(24):
+                    def setup(slots, regions, _address):
+                        value = int.from_bytes(bytes([edges[index % len(edges)] & 255]) * 16, "little") if index < 8 else RNG.getrandbits(128)
+                        slots.update(xmm1=value, xmm9=value)
+                        if modrm == "c0": slots["xmm0"] = value
+                        if regions:
+                            offset = 32 + index % 3
+                            slots["rbx"] = DATA + offset
+                            regions[0][1][offset:offset+16] = value.to_bytes(16, "little")
+                    h.run("66" + rex + f"0f38{opcode:02x}" + modrm, simd=True, memory=modrm == "03", setup=setup)
+            h.fault(f"660f38{opcode:02x}03", size - 1)
+
+
 def main():
     command = ["dotnet", str(Path(sys.argv[1]) if len(sys.argv) > 1 else DLL), "serve"]
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1) as server:
@@ -658,6 +751,8 @@ def main():
         floating(h)
         floating_memory(h)
         integer_remaining(h)
+        memory_pop_and_bits(h)
+        simd_sse41(h)
         for code in ("f0480103", "f3a4", "9d", "d3f0",
                      "0f6fc1", "0fefc1", "0f6ec3", "c5f810c1", "c5fa10c1", "c5f857c1", "660f3a15c101"):
             h.reject(code)

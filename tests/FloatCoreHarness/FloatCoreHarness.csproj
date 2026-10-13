@@ -4,6 +4,7 @@
     <Compile Include="../../src/Cpp2CS/Architecture.cs" Link="Architecture.cs" />
     <Compile Include="../../src/Cpp2CS/Ir/Model.cs" Link="Model.cs" />
     <Compile Include="../../src/Cpp2CS/Ir/FloatEvaluator.cs" Link="FloatEvaluator.cs" />
+    <Compile Include="../../src/Cpp2CS/Ir/MirValidator.cs" Link="MirValidator.cs" />
     <Compile Include="../../src/Cpp2CS/Validation/FloatChecks.cs" Link="FloatChecks.cs" />
   </ItemGroup>
 </Project>

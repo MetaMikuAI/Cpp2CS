@@ -10,10 +10,10 @@ public static class FloatChecks
         var checks = 0;
         void Check(Architecture arch, FloatKind kind, int width, ulong a, ulong b, ulong expected,
             uint flags = 0, uint control = 0, FloatRounding rounding = FloatRounding.Current,
-            int resultWidth = 0, uint? trapFlags = null)
+            int resultWidth = 0, uint? trapFlags = null, int fractionBits = 0)
         {
             if (resultWidth == 0) resultWidth = kind is FloatKind.Compare or FloatKind.CompareSignal ? 4 : width;
-            var result = FloatEvaluator.Evaluate(arch, new(kind, width, resultWidth, rounding), a, b, control);
+            var result = FloatEvaluator.Evaluate(arch, new(kind, width, resultWidth, rounding, fractionBits), a, b, control);
             if (result.Bits != expected || result.Flags != flags || result.TrapFlags != (trapFlags ?? flags))
                 throw new InvalidOperationException($"FP {arch} {kind}/{width}->{resultWidth} {a:X},{b:X} control={control:X} rounding={rounding}: " +
                     $"got {result.Bits:X}/{result.Flags:X}/{result.TrapFlags:X}, expected {expected:X}/{flags:X}/{trapFlags ?? flags:X}");
@@ -113,6 +113,70 @@ public static class FloatChecks
         Check(Architecture.Arm64, FloatKind.FromUnsigned, 64, ulong.MaxValue, 0, 0x43F0000000000000, ix);
         Check(Architecture.Arm64, FloatKind.RoundIntegral, 32, 0x3F000000, 0, 0x3F800000, rounding: FloatRounding.TiesAway);
         Check(Architecture.Arm64, FloatKind.RoundIntegral, 32, 0xBF000000, 0, 0xBF800000, rounding: FloatRounding.TiesAway);
+
+        Check(Architecture.Arm64, FloatKind.ToSigned, 32, 0x3FC00000, 0, 1536,
+            rounding: FloatRounding.TowardZero, fractionBits: 10);
+        Check(Architecture.Arm64, FloatKind.ToSigned, 32, 0xBFC00000, 0, 0xFFFFFA00,
+            rounding: FloatRounding.TowardZero, fractionBits: 10);
+        Check(Architecture.Arm64, FloatKind.ToSigned, 64, 0x3E70000000000000, 0, 1,
+            rounding: FloatRounding.TowardZero, resultWidth: 32, fractionBits: 24);
+        Check(Architecture.Arm64, FloatKind.ToSigned, 32, 0x3F000000, 0, 0x7FFFFFFF, inv,
+            rounding: FloatRounding.TowardZero, fractionBits: 32);
+        Check(Architecture.Arm64, FloatKind.ToSigned, 32, 0xBF000000, 0, 0x80000000,
+            rounding: FloatRounding.TowardZero, fractionBits: 32);
+        Check(Architecture.Arm64, FloatKind.ToUnsigned, 64, 0x3FE0000000000000, 0, 0x8000000000000000,
+            rounding: FloatRounding.TowardZero, fractionBits: 64);
+        Check(Architecture.Arm64, FloatKind.ToUnsigned, 32, 0xBF000000, 0, 0, inv,
+            rounding: FloatRounding.TowardZero, fractionBits: 32);
+        Check(Architecture.Arm64, FloatKind.ToSigned, 32, 0x7FC12345, 0, 0, inv,
+            rounding: FloatRounding.TowardZero, fractionBits: 10);
+        Check(Architecture.Arm64, FloatKind.ToSigned, 32, 1, 0, 0, ix,
+            rounding: FloatRounding.TowardZero, resultWidth: 64, fractionBits: 64);
+        Check(Architecture.Arm64, FloatKind.ToSigned, 32, 1, 0, 0, den, 1U << 24,
+            FloatRounding.TowardZero, resultWidth: 64, fractionBits: 64);
+        Check(Architecture.Arm64, FloatKind.FromSigned, 32, 1536, 0, 0x3FC00000, fractionBits: 10);
+        Check(Architecture.Arm64, FloatKind.FromSigned, 32, 0xFFFFFA00, 0, 0xBFF8000000000000,
+            resultWidth: 64, fractionBits: 10);
+        Check(Architecture.Arm64, FloatKind.FromUnsigned, 64, 1, 0, 0x1F800000,
+            resultWidth: 32, fractionBits: 64);
+        Check(Architecture.Arm64, FloatKind.FromUnsigned, 64, ulong.MaxValue, 0, 0x3F800000, ix,
+            resultWidth: 32, fractionBits: 64);
+        Check(Architecture.Arm64, FloatKind.FromUnsigned, 64, ulong.MaxValue, 0, 0x3F7FFFFF, ix, 3U << 22,
+            resultWidth: 32, fractionBits: 64);
+        Check(Architecture.Arm64, FloatKind.FromSigned, 32, 0x01000001, 0, 0x3F800000, ix, fractionBits: 24);
+
+        void ScaleContract(Architecture architecture, FloatOperation spec, bool expected)
+        {
+            Value a = new(0, spec.OperandWidth), b = new(1, spec.OperandWidth), control = new(2, 32);
+            var operations = new Operation[]
+            {
+                new(OpCode.Constant, a, []), new(OpCode.Constant, b, []), new(OpCode.Constant, control, []),
+                new(OpCode.Float, new Value(3, spec.ResultWidth + 12), [a, b, control], Floating: spec)
+            };
+            var ir = new MirInstruction(architecture, new("scale-check", 0x1000, 0, new byte[4]),
+                "scale-check", operations, MirExit.Next(0x1004), SupportClass.Exact, []);
+            if ((MirValidator.Validate(ir).Count == 0) != expected)
+                throw new InvalidOperationException($"Fixed-point scale contract: {architecture} {spec}");
+            checks++;
+        }
+        ScaleContract(Architecture.Arm64, new(FloatKind.FromSigned, 64, 32, FractionBits: 64), true);
+        ScaleContract(Architecture.Arm64, new(FloatKind.FromUnsigned, 32, 64, FractionBits: 32), true);
+        ScaleContract(Architecture.Arm64, new(FloatKind.FromSigned, 32, 64, FractionBits: 33), false);
+        ScaleContract(Architecture.Arm64, new(FloatKind.FromUnsigned, 64, 32, FractionBits: 65), false);
+        ScaleContract(Architecture.Arm64, new(FloatKind.ToSigned, 32, 64, FloatRounding.TowardZero, 64), true);
+        ScaleContract(Architecture.Arm64, new(FloatKind.ToUnsigned, 64, 32, FloatRounding.TowardZero, 32), true);
+        ScaleContract(Architecture.Arm64, new(FloatKind.ToSigned, 64, 32, FloatRounding.TowardZero, 33), false);
+        ScaleContract(Architecture.Arm64, new(FloatKind.ToUnsigned, 32, 64, FloatRounding.TowardZero, 65), false);
+        ScaleContract(Architecture.Arm64, new(FloatKind.ToSigned, 32, 32, FractionBits: 1), false);
+        ScaleContract(Architecture.Arm64, new(FloatKind.FromSigned, 32, 32, FloatRounding.TowardZero, 1), false);
+        ScaleContract(Architecture.Arm64, new(FloatKind.FromSigned, 32, 32, FractionBits: -1), false);
+        ScaleContract(Architecture.Arm64, new(FloatKind.Add, 32, 32, FractionBits: 1), false);
+        ScaleContract(Architecture.Arm64, new(FloatKind.Convert, 32, 64, FractionBits: 1), false);
+        ScaleContract(Architecture.Arm64, new(FloatKind.Compare, 32, 4, FractionBits: 1), false);
+        ScaleContract(Architecture.X64, new(FloatKind.FromSigned, 64, 32, FractionBits: 1), false);
+        ScaleContract(Architecture.X64, new(FloatKind.ToSigned, 32, 64, FloatRounding.TowardZero, 1), false);
+        ScaleContract(Architecture.Arm64, new(FloatKind.ToSigned, 32, 32, FloatRounding.TiesEven), true);
+        ScaleContract(Architecture.X64, new(FloatKind.FromSigned, 32, 64), true);
 
         // Independently known integer identities cover both signs, exact squares and format conversion.
         for (var value = -1024; value <= 1024; value++)

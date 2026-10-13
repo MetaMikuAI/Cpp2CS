@@ -9,14 +9,15 @@ public static partial class X64Lifter
     {
         private LiftResult PackedInteger()
         {
-            if (instruction.OpCount != 2 || !IsXmm(0) || !IsSimdSource(1)) return Unsupported("packed 整数运算仅支持 SSE2 XMM 形式");
+            if (instruction.OpCount != 2 || !IsXmm(0) || !IsSimdSource(1)) return Unsupported("packed 整数运算仅支持 legacy XMM 形式");
             SimdAlignment();
             int width = instruction.Mnemonic switch
             {
                 Mnemonic.Paddb or Mnemonic.Psubb or Mnemonic.Paddsb or Mnemonic.Paddusb or Mnemonic.Psubsb or Mnemonic.Psubusb
-                    or Mnemonic.Pcmpeqb or Mnemonic.Pcmpgtb or Mnemonic.Pminub or Mnemonic.Pmaxub => 8,
-                Mnemonic.Paddd or Mnemonic.Psubd or Mnemonic.Pcmpeqd or Mnemonic.Pcmpgtd => 32,
-                Mnemonic.Paddq or Mnemonic.Psubq => 64,
+                    or Mnemonic.Pcmpeqb or Mnemonic.Pcmpgtb or Mnemonic.Pminub or Mnemonic.Pmaxub or Mnemonic.Pminsb or Mnemonic.Pmaxsb => 8,
+                Mnemonic.Paddd or Mnemonic.Psubd or Mnemonic.Pcmpeqd or Mnemonic.Pcmpgtd
+                    or Mnemonic.Pminsd or Mnemonic.Pmaxsd or Mnemonic.Pminud or Mnemonic.Pmaxud or Mnemonic.Pmulld => 32,
+                Mnemonic.Paddq or Mnemonic.Psubq or Mnemonic.Pcmpeqq => 64,
                 _ => 16
             };
             bool subtract = instruction.Mnemonic is Mnemonic.Psubb or Mnemonic.Psubw or Mnemonic.Psubd or Mnemonic.Psubq
@@ -29,16 +30,20 @@ public static partial class X64Lifter
             for (int offset = 0; offset < 128; offset += width)
             {
                 Value a = b.Extract(left, offset, width), c = b.Extract(right, offset, width), value;
-                if (instruction.Mnemonic is Mnemonic.Pcmpeqb or Mnemonic.Pcmpeqw or Mnemonic.Pcmpeqd)
+                if (instruction.Mnemonic is Mnemonic.Pcmpeqb or Mnemonic.Pcmpeqw or Mnemonic.Pcmpeqd or Mnemonic.Pcmpeqq)
                     value = b.Sext(b.Eq(a, c), width);
                 else if (instruction.Mnemonic is Mnemonic.Pcmpgtb or Mnemonic.Pcmpgtw or Mnemonic.Pcmpgtd)
                     value = b.Sext(b.Slt(c, a), width);
-                else if (instruction.Mnemonic is Mnemonic.Pminub or Mnemonic.Pmaxub or Mnemonic.Pminsw or Mnemonic.Pmaxsw)
+                else if (instruction.Mnemonic is Mnemonic.Pminub or Mnemonic.Pmaxub or Mnemonic.Pminsw or Mnemonic.Pmaxsw
+                    or Mnemonic.Pminsb or Mnemonic.Pmaxsb or Mnemonic.Pminuw or Mnemonic.Pmaxuw
+                    or Mnemonic.Pminsd or Mnemonic.Pmaxsd or Mnemonic.Pminud or Mnemonic.Pmaxud)
                 {
-                    Value less = width == 8 ? b.Ult(a, c) : b.Slt(a, c);
-                    bool minimum = instruction.Mnemonic is Mnemonic.Pminub or Mnemonic.Pminsw;
+                    bool unsignedCompare = instruction.Mnemonic is Mnemonic.Pminub or Mnemonic.Pmaxub or Mnemonic.Pminuw or Mnemonic.Pmaxuw or Mnemonic.Pminud or Mnemonic.Pmaxud;
+                    Value less = unsignedCompare ? b.Ult(a, c) : b.Slt(a, c);
+                    bool minimum = instruction.Mnemonic is Mnemonic.Pminub or Mnemonic.Pminsw or Mnemonic.Pminsb or Mnemonic.Pminuw or Mnemonic.Pminsd or Mnemonic.Pminud;
                     value = b.Select(less, minimum ? a : c, minimum ? c : a);
                 }
+                else if (instruction.Mnemonic == Mnemonic.Pmulld) value = b.Mul(a, c);
                 else if (instruction.Mnemonic is Mnemonic.Pmullw or Mnemonic.Pmulhw or Mnemonic.Pmulhuw)
                 {
                     bool signed = instruction.Mnemonic == Mnemonic.Pmulhw;
@@ -59,6 +64,56 @@ public static partial class X64Lifter
                 lanes.Add(value);
             }
             WriteXmm(0, PackLanes(lanes));
+            return Next();
+        }
+
+        private LiftResult PackedShuffleBytes()
+        {
+            if (instruction.OpCount != 2 || !IsXmm(0) || !IsSimdSource(1)) return Unsupported("PSHUFB 仅支持 legacy XMM 形式");
+            SimdAlignment();
+            Value source = ReadXmm(0), control = ReadSimdSource(1, 128);
+            List<Value> lanes = [];
+            for (int offset = 0; offset < 128; offset += 8)
+            {
+                Value index = b.Extract(control, offset, 4);
+                Value shift = b.Mul(b.Zext(index, 8), b.Const(8, 8));
+                Value selected = b.Trunc(b.Shr(source, shift), 8);
+                lanes.Add(b.Select(b.Extract(control, offset + 7, 1), b.Const(8, 0), selected));
+            }
+            WriteXmm(0, PackLanes(lanes));
+            return Next();
+        }
+
+        private LiftResult PackedExtend()
+        {
+            (int from, int to) = instruction.Mnemonic switch
+            {
+                Mnemonic.Pmovsxbw or Mnemonic.Pmovzxbw => (8, 16),
+                Mnemonic.Pmovsxbd or Mnemonic.Pmovzxbd => (8, 32),
+                Mnemonic.Pmovsxbq or Mnemonic.Pmovzxbq => (8, 64),
+                Mnemonic.Pmovsxwd or Mnemonic.Pmovzxwd => (16, 32),
+                Mnemonic.Pmovsxwq or Mnemonic.Pmovzxwq => (16, 64),
+                _ => (32, 64)
+            };
+            int count = 128 / to, memoryWidth = count * from;
+            if (instruction.OpCount != 2 || !IsXmm(0) || !IsSimdSource(1, memoryWidth)) return Unsupported("PMOVSX/ZX 来源宽度未支持");
+            bool signed = instruction.Mnemonic is Mnemonic.Pmovsxbw or Mnemonic.Pmovsxbd or Mnemonic.Pmovsxbq
+                or Mnemonic.Pmovsxwd or Mnemonic.Pmovsxwq or Mnemonic.Pmovsxdq;
+            Value source = ReadSimdSource(1, memoryWidth);
+            List<Value> lanes = [];
+            for (int index = 0; index < count; index++) lanes.Add(Resize(b.Extract(source, index * from, from), to, signed));
+            WriteXmm(0, PackLanes(lanes));
+            return Next();
+        }
+
+        private LiftResult PackedTest()
+        {
+            if (instruction.OpCount != 2 || !IsXmm(0) || !IsSimdSource(1)) return Unsupported("PTEST 仅支持 legacy XMM 形式");
+            SimdAlignment();
+            Value left = ReadXmm(0), right = ReadSimdSource(1, 128), zero = b.Const(128, 0);
+            b.Write("zf", b.Eq(b.And(left, right), zero));
+            b.Write("cf", b.Eq(b.And(b.Not(left), right), zero));
+            foreach (string flag in new[] { "of", "sf", "af", "pf" }) b.Write(flag, b.Const(1, 0));
             return Next();
         }
 

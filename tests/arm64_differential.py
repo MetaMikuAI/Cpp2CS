@@ -125,6 +125,25 @@ def corpus(rng):
     yield from simd_corpus()
     yield from integer_simd_corpus()
     yield from floating_corpus()
+    yield from structured_memory_corpus()
+
+
+def structured_memory_corpus():
+    addressing = ((3, 0, 0), (31, 0, 0), (3, 1, 31), (31, 1, 31), (3, 1, 4), (31, 1, 4), (3, 1, 3), (3, 1, 0), (3, 1, 30))
+    for q, load, opcode, size in itertools.product(range(2), range(2), (0, 2, 4, 6, 7, 8, 10), range(4)):
+        if q == 0 and size == 3 and opcode in (0, 4, 8):
+            continue
+        for rt, (rn, post, rm) in itertools.product((0, 3, 29, 31), addressing):
+            yield "memory.structure-multiple", 0x0C000000 | (q << 30) | (post << 23) | (load << 22) | (rm << 16) | (opcode << 12) | (size << 10) | (rn << 5) | rt, True
+    for structures, load, scale in itertools.product(range(1, 5), range(2), range(4)):
+        for lane in range(16 >> scale):
+            selector = (lane & 3) << 10 | ((lane >> 2) & 1) << 12 | (lane >> 3) << 30 if scale == 0 else ((lane & 1) << 11) | (((lane >> 1) & 1) << 12) | ((lane >> 2) << 30) if scale == 1 else ((lane & 1) << 12) | ((lane >> 1) << 30) if scale == 2 else (1 << 10) | (lane << 30)
+            opcode = (min(scale, 2) << 1) | ((structures - 1) >> 1)
+            for rt, (rn, post, rm) in itertools.product((0, 31), addressing):
+                yield "memory.structure-lane", 0x0D000000 | selector | (post << 23) | (load << 22) | (((structures - 1) & 1) << 21) | (rm << 16) | (opcode << 13) | (rn << 5) | rt, True
+    for structures, q, size in itertools.product(range(1, 5), range(2), range(4)):
+        for rt, (rn, post, rm) in itertools.product((0, 31), addressing):
+            yield "memory.structure-replicate", 0x0D40C000 | (q << 30) | (post << 23) | (((structures - 1) & 1) << 21) | (rm << 16) | (((structures - 1) >> 1) << 13) | (size << 10) | (rn << 5) | rt, True
 
 
 def integer_simd_corpus():
@@ -337,6 +356,8 @@ def corpus_random_templates():
 
 
 def classification_boundaries():
+    for single, q, post, load, r, opcode, size, rm in itertools.product(range(2), range(2), range(2), range(2), range(2), range(16), range(4), range(32)):
+        yield "structure-memory-fields", 0x0C000060 | (single << 24) | (q << 30) | (post << 23) | (load << 22) | (r << 21) | (rm << 16) | (opcode << 12) | (size << 10)
     for q, op, scalar, imm5, opcode in itertools.product(range(2), range(2), range(2), range(32), range(32)):
         yield "simd-copy-fields", 0x0E000420 | (q << 30) | (op << 29) | (scalar << 28) | (imm5 << 16) | (opcode << 11)
     for q, op, scalar, size, opcode in itertools.product(range(2), range(2), range(2), range(4), range(64)):
@@ -361,7 +382,7 @@ def classification_boundaries():
         yield "simd-shift-fields", 0x0F000420 | (q << 30) | (u << 29) | (scalar << 28) | (imm << 16) | (opcode << 11)
     seeds = set()
     seed_counts = collections.Counter()
-    for family, word, _ in itertools.chain(simd_corpus(), integer_simd_corpus(), floating_corpus()):
+    for family, word, _ in itertools.chain(simd_corpus(), integer_simd_corpus(), floating_corpus(), structured_memory_corpus()):
         if seed_counts[family] < 8:
             seeds.add(word)
             seed_counts[family] += 1
@@ -376,6 +397,7 @@ def main():
     parser.add_argument("--dll", type=pathlib.Path, default=ROOT / "src/Cpp2CS/bin/Release/net10.0/Cpp2CS.dll")
     parser.add_argument("--output", type=pathlib.Path, default=ROOT / "artifacts/arm64-differential.json")
     parser.add_argument("--fuzz-words", type=int, default=200000)
+    parser.add_argument("--family-prefix", default="", help="Run only differential families with this prefix; retain classification and contract checks")
     args = parser.parse_args()
     rng = random.Random(SEED)
     decoder = Cs(CS_ARCH_ARM64, 0)
@@ -410,7 +432,7 @@ def main():
         slots.update(sp=BASE, n=0, z=0, c=0, v=0, fpcr=0, fpsr=0, tpidr_el0=0x12340000)
         return slots
 
-    cases = list(corpus(rng))
+    cases = [case for case in corpus(rng) if case[0].startswith(args.family_prefix)]
     for case_index, (family, word, memory_case) in enumerate(cases):
         code = word.to_bytes(4, "little")
         decoded = list(decoder.disasm(code, CODE))
@@ -418,6 +440,8 @@ def main():
         instruction = decoded[0]
         condition_family = family in ("conditional.select", "conditional.compare", "branch.condition", "nzcv.transfer", "fp.select", "fp.conditional-compare")
         variations = range(64) if family.startswith("fp.") and family not in ("fp.select", "fp.vector-sign") else range(16) if condition_family else range(12) if family == "simd.integer-binary" else range(10 if family.startswith("multiply.") or family == "integer.divide" else 8 if family == "addsub.carry" else 1 if family in ("simd.immediate", "fmov.immediate") else 4 if not memory_case else 2)
+        if family.startswith("memory.structure"):
+            variations = range(4)
         for variation in variations:
             slots = registers()
             slots["x1"] = edges[(case_index + variation) % len(edges)]
@@ -491,6 +515,11 @@ def main():
                     literal = rng.randbytes(64)
                     memory.append({"address": hex(CODE + 0x20), "bytes": literal.hex()})
                     machine.mem_write(CODE + 0x20, literal)
+                if family.startswith("memory.structure"):
+                    rn, rm = (word >> 5) & 31, (word >> 16) & 31
+                    if word & (1 << 23) and rm != 31:
+                        slots[f"x{rm}"] = (0, 1, 0xFFFFFFFFFFFFFFF9, 0x7FFF_FFFF_FFFF_FFF1)[variation]
+                    slots["sp" if rn == 31 else f"x{rn}"] = BASE + (0, 1, 7, 15)[variation]
             for i in range(31):
                 machine.reg_write(getattr(arm, f"UC_ARM64_REG_X{i}"), slots[f"x{i}"])
             for i in range(32):
@@ -509,6 +538,8 @@ def main():
             label = f"{family} {word:08x} {instruction.mnemonic} {instruction.op_str} variation={variation}"
             require(result["supported"], f"Unexpected unsupported: {label}: {result}")
             require(result["Outcome"] == "Normal", f"Unexpected outcome: {label}: {result['Outcome']}")
+            if family.startswith("memory.structure"):
+                require(result["support"] == "NormalPathOnly", f"Structured memory overclaims fault support: {label}")
             observed = {key: int(value, 16) for key, value in result["slots"].items()}
             expected = dict(slots)
             for i in range(31):
@@ -542,6 +573,19 @@ def main():
                 roundtrips.add(family)
 
     contract_cases = 0
+    # These check the MIR stop contract, not architectural data-abort delivery or partial state.
+    for word in (0x4CDF8060, 0x4C9F8060, 0x0DFF0060, 0x0DBF0060, 0x4DFFE060):
+        for mapped in (0, 1):
+            slots = registers()
+            slots["x3"] = BASE
+            memory = [{"address": hex(BASE), "bytes": "5a" * mapped}] if mapped else []
+            result = request({"arch": "arm64", "bytes": word.to_bytes(4, "little").hex(), "address": hex(CODE), "slots": {key: hex(value) for key, value in slots.items()}, "memory": memory, "roundtrip": True})
+            require(result["Outcome"] == "UnmodeledFaultStop" and result["support"] == "NormalPathOnly", f"Structured fault boundary lost: {word:x}")
+            require(int(result["slots"]["x3"], 16) == BASE, f"Structured fault performed post-index writeback: {word:x}")
+            kind = "Load" if word & (1 << 22) else "Store"
+            require(result["Accesses"] == [f"{kind}:0x{BASE + offset:X}:1" for offset in range(mapped + 1)], f"Structured effects crossed fault stop: {word:x}")
+            require(len(result["memory"]) == mapped and result["next"] is None, f"Structured fault was converted to normal progress: {word:x}")
+            contract_cases += 1
     # Unicorn does not implement the selected profile's FP trap enables and RES0 masks.
     for word, slot, mask in ((0xD51B4400, "fpcr", 0x07C09F00), (0xD51B4420, "fpsr", 0x0800009F)):
         slots = registers()
@@ -605,6 +649,16 @@ def main():
         0x0EE0F800,  # Q=0 double vector absolute value is reserved
         0x1E224000,  # FCVT S,S has equal source/destination widths
         0x1EA0C000,  # reserved scalar FABS ftype
+        0x0C607060,  # multiple structures: reserved bit21
+        0x0C417060,  # no-offset multiple structures: nonzero Rm
+        0x0C403060,  # reserved multiple-structure opcode
+        0x0C408C60,  # LD2 .1D is reserved
+        0x0D410060,  # no-offset single structure: nonzero Rm
+        0x0D404460,  # H lane: size low bit is reserved
+        0x0D408860,  # S/D lane: size high bit is reserved
+        0x0D409460,  # D lane: S is reserved
+        0x0D40D060,  # replicate: S is reserved
+        0x0D00C060,  # replicate store is reserved
         0xFFFFFFFF,
     ]
     for word in rejected:
@@ -624,6 +678,7 @@ def main():
         ("simd-three-registers", 0x0E200400, 0x71FFFFFF),
         ("fmov", 0x1E200000, 0x80FFFFFF),
         ("multiply-long-high", 0x9B000000, 0x00FFFFFF),
+        ("structured-memory", 0x0C000000, 0xC3FFFFFF),
     )
     fuzz_counts = collections.Counter()
     counterexamples = []
@@ -637,6 +692,9 @@ def main():
         raw = word.to_bytes(4, "little")
         result = request({"arch": "arm64", "bytes": raw.hex(), "address": hex(CODE), "evaluate": False})
         fuzz_counts[group] += 1
+        if group == "structure-memory-fields":
+            decoded = list(decoder.disasm(raw, CODE))
+            require(bool(result["supported"]) == (len(decoded) == 1), f"Structured field allocation disagreement: {word:08x} product={result} decoder={[(i.mnemonic, i.op_str) for i in decoded]}")
         if result["supported"]:
             fuzz_counts["product_supported"] += 1
             decoded = list(decoder.disasm(raw, CODE))
@@ -649,7 +707,7 @@ def main():
     classification_path.write_text(json.dumps(classification, indent=2) + "\n", encoding="utf-8")
     child.stdin.close()
     require(child.wait() == 0, "Product CLI failed")
-    summary = {"seed": SEED, "cases": sum(counts.values()), "families": dict(sorted(counts.items())), "rules": sorted(forms), "roundtrip_families": sorted(roundtrips), "rejected_cases": len(rejected), "architecture_contract_cases": contract_cases, "classification_words": classification_words, "classification_disagreements": len(counterexamples), "capstone": capstone.__version__, "unicorn": unicorn.__version__, "scope": "Product MIR interpreter versus independent emulator; synthetic single instructions, mapped memory and normal outcomes; FP trap/RES0 and BRK contracts separately checked without claiming Unicorn/hardware proof; not game, fault-delivery, weak-memory or whole-program proof"}
+    summary = {"seed": SEED, "family_prefix": args.family_prefix, "cases": sum(counts.values()), "families": dict(sorted(counts.items())), "rules": sorted(forms), "roundtrip_families": sorted(roundtrips), "rejected_cases": len(rejected), "architecture_contract_cases": contract_cases, "classification_words": classification_words, "classification_disagreements": len(counterexamples), "capstone": capstone.__version__, "unicorn": unicorn.__version__, "scope": "Product MIR interpreter versus independent emulator; synthetic single instructions, mapped memory and normal outcomes; FP trap/RES0, BRK and memory-stop contracts separately checked without claiming Unicorn/hardware proof; not game, fault-delivery, weak-memory or whole-program proof"}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2, ensure_ascii=False))

@@ -97,6 +97,7 @@ public static class MirValidator
     {
         var f = op.Floating;
         if (f is null || !Enum.IsDefined(f.Kind) || !Enum.IsDefined(f.Rounding) ||
+            !FloatEvaluator.ValidFractionBits(architecture, f) ||
             f.OperandWidth is not (32 or 64) || a != f.OperandWidth || b != a ||
             op.Inputs[2].Width != 32 || width != f.ResultWidth + 12 || op.Immediate != 0 ||
             op.Slot is not null || op.Detail is not null) return false;

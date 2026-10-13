@@ -17,7 +17,9 @@ from x64_float_native import NativeFloatOracle
 DLL = Path(__file__).parent / "FloatCoreHarness/bin/Release/net10.0/FloatCoreHarness.dll"
 parser = argparse.ArgumentParser()
 parser.add_argument("--output", type=Path, default=ROOT / "artifacts/float-core-differential.json")
+parser.add_argument("--harness", type=Path, default=DLL)
 args = parser.parse_args()
+DLL = args.harness
 core_checks = int(subprocess.check_output(["dotnet", str(DLL), "selftest"], text=True))
 server = subprocess.Popen(["dotnet", str(DLL)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 rng = random.Random(0xF108)
@@ -233,6 +235,7 @@ for width in (32, 64):
 server.stdin.close()
 assert server.wait() == 0
 sources = ["src/Cpp2CS/Architecture.cs", "src/Cpp2CS/Ir/Model.cs", "src/Cpp2CS/Ir/FloatEvaluator.cs",
+           "src/Cpp2CS/Ir/MirValidator.cs",
            "src/Cpp2CS/Validation/FloatChecks.cs", "tests/FloatCoreHarness/FloatCoreHarness.csproj",
            "tests/FloatCoreHarness/Program.cs", "tests/float_core_differential.py", "tests/x64_float_native.py"]
 report = {"nativeCases": count, "nativeCasesByKind": native_counts,

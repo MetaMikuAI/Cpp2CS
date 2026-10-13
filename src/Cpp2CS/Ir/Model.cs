@@ -34,7 +34,7 @@ public enum FloatKind
 }
 public enum FloatRounding { Current, TiesEven, PlusInfinity, MinusInfinity, TowardZero, TiesAway }
 public sealed record FloatOperation(FloatKind Kind, int OperandWidth, int ResultWidth,
-    FloatRounding Rounding = FloatRounding.Current);
+    FloatRounding Rounding = FloatRounding.Current, int FractionBits = 0);
 // Flags 位 0..5：invalid、divide-by-zero、overflow、underflow、inexact、input-denormal。
 public readonly record struct FloatResult(BigInteger Bits, uint Flags, uint TrapFlags)
 {

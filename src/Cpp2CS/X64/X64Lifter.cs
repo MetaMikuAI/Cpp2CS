@@ -76,10 +76,16 @@ public static partial class X64Lifter
                     or Mnemonic.Psubb or Mnemonic.Psubw or Mnemonic.Psubd or Mnemonic.Psubq
                     or Mnemonic.Paddsb or Mnemonic.Paddsw or Mnemonic.Paddusb or Mnemonic.Paddusw
                     or Mnemonic.Psubsb or Mnemonic.Psubsw or Mnemonic.Psubusb or Mnemonic.Psubusw
-                    or Mnemonic.Pcmpeqb or Mnemonic.Pcmpeqw or Mnemonic.Pcmpeqd
+                    or Mnemonic.Pcmpeqb or Mnemonic.Pcmpeqw or Mnemonic.Pcmpeqd or Mnemonic.Pcmpeqq
                     or Mnemonic.Pcmpgtb or Mnemonic.Pcmpgtw or Mnemonic.Pcmpgtd
                     or Mnemonic.Pminub or Mnemonic.Pmaxub or Mnemonic.Pminsw or Mnemonic.Pmaxsw
-                    or Mnemonic.Pmullw or Mnemonic.Pmulhw or Mnemonic.Pmulhuw => PackedInteger(),
+                    or Mnemonic.Pminsb or Mnemonic.Pmaxsb or Mnemonic.Pminuw or Mnemonic.Pmaxuw
+                    or Mnemonic.Pminsd or Mnemonic.Pmaxsd or Mnemonic.Pminud or Mnemonic.Pmaxud
+                    or Mnemonic.Pmullw or Mnemonic.Pmulhw or Mnemonic.Pmulhuw or Mnemonic.Pmulld => PackedInteger(),
+                Mnemonic.Pshufb => PackedShuffleBytes(),
+                Mnemonic.Pmovsxbw or Mnemonic.Pmovsxbd or Mnemonic.Pmovsxbq or Mnemonic.Pmovsxwd or Mnemonic.Pmovsxwq or Mnemonic.Pmovsxdq
+                    or Mnemonic.Pmovzxbw or Mnemonic.Pmovzxbd or Mnemonic.Pmovzxbq or Mnemonic.Pmovzxwd or Mnemonic.Pmovzxwq or Mnemonic.Pmovzxdq => PackedExtend(),
+                Mnemonic.Ptest => PackedTest(),
                 Mnemonic.Psllw or Mnemonic.Pslld or Mnemonic.Psllq or Mnemonic.Psrlw or Mnemonic.Psrld or Mnemonic.Psrlq
                     or Mnemonic.Psraw or Mnemonic.Psrad => PackedLaneShift(),
                 Mnemonic.Addss or Mnemonic.Addsd or Mnemonic.Addps or Mnemonic.Addpd
@@ -187,7 +193,13 @@ public static partial class X64Lifter
 
         private static bool HighByte(Register register) => register is Register.AH or Register.BH or Register.CH or Register.DH;
 
-        private Value Address(bool includeSegment = true)
+        private int MemoryAddressWidth() => instruction.MemoryBase.IsGPR32() || instruction.MemoryBase == Register.EIP || instruction.MemoryIndex.IsGPR32() ||
+            instruction.MemoryBase == Register.None && instruction.MemoryIndex == Register.None && instruction.MemoryDisplSize == 4 ? 32 : 64;
+
+        private Value AddressRegister(Register register, Value? stackOverride) => stackOverride is { } stack && register is Register.RSP or Register.ESP
+            ? Resize(stack, register.GetSize() * 8) : ReadRegister(register);
+
+        private Value Address(bool includeSegment = true, Value? stackOverride = null)
         {
             Value address;
             if (instruction.IsIPRelativeMemoryOperand)
@@ -196,13 +208,13 @@ public static partial class X64Lifter
             }
             else
             {
-                int width = instruction.MemoryBase.IsGPR32() || instruction.MemoryIndex.IsGPR32() ? 32 : 64;
+                int width = MemoryAddressWidth();
                 address = b.Const(width, instruction.MemoryDisplacement64);
                 if (instruction.MemoryBase != Register.None)
-                    address = b.Add(address, Resize(ReadRegister(instruction.MemoryBase), width));
+                    address = b.Add(address, Resize(AddressRegister(instruction.MemoryBase, stackOverride), width));
                 if (instruction.MemoryIndex != Register.None)
                 {
-                    Value index = Resize(ReadRegister(instruction.MemoryIndex), width);
+                    Value index = Resize(AddressRegister(instruction.MemoryIndex, stackOverride), width);
                     address = b.Add(address, b.Mul(index, b.Const(width, (ulong)instruction.MemoryIndexScale)));
                 }
                 address = Resize(address, 64);
@@ -443,11 +455,22 @@ public static partial class X64Lifter
 
         private LiftResult BitTest()
         {
-            if (!BinaryOperands() || instruction.Op0Kind != OpKind.Register)
-                return Unsupported("内存位串寻址尚未建模");
+            if (!BinaryOperands()) return Unsupported("位测试操作数形式未支持");
             int width = Width(0);
-            Value old = ReadOperand(0, width);
-            Value index = b.And(ReadOperand(1, width), b.Const(width, (ulong)width - 1));
+            Value offset = ReadOperand(1, width);
+            Value address = default;
+            if (instruction.Op0Kind == OpKind.Memory)
+            {
+                address = Address();
+                if (instruction.Op1Kind == OpKind.Register)
+                {
+                    int addressWidth = MemoryAddressWidth(), shift = width == 16 ? 4 : width == 32 ? 5 : 6;
+                    Value displacement = b.Mul(Resize(b.Sar(offset, b.Const(width, (ulong)shift)), addressWidth, true), b.Const(addressWidth, (ulong)width / 8));
+                    address = SourceSegment(Resize(b.Add(Resize(Address(false), addressWidth), displacement), 64));
+                }
+            }
+            Value old = instruction.Op0Kind == OpKind.Memory ? b.Load(address, width) : ReadOperand(0, width);
+            Value index = b.And(offset, b.Const(width, (ulong)width - 1));
             Value bit = b.Extract(b.Shr(old, index), 0, 1);
             if (instruction.Mnemonic != Mnemonic.Bt)
             {
@@ -458,7 +481,8 @@ public static partial class X64Lifter
                     Mnemonic.Btr => b.And(old, b.Not(mask)),
                     _ => b.Xor(old, mask)
                 };
-                WriteOperand(0, result);
+                if (instruction.Op0Kind == OpKind.Memory) b.Store(address, result);
+                else WriteOperand(0, result);
             }
             b.Write("cf", bit);
             foreach (string flag in new[] { "of", "sf", "af", "pf" })
@@ -647,11 +671,21 @@ public static partial class X64Lifter
         private LiftResult Pop()
         {
             int bytes = instruction.StackPointerIncrement;
-            if (instruction.OpCount != 1 || instruction.Op0Kind != OpKind.Register || !IsScalar(0, false) || bytes is not (2 or 8))
-                return Unsupported("仅支持通用寄存器 POP，内存目的的栈寻址尚未建模");
+            if (instruction.OpCount != 1 || !IsScalar(0, false) || bytes is not (2 or 8))
+                return Unsupported("POP 仅支持通用寄存器或普通 m16/m64");
             Value stack = b.Read("rsp", 64), value = b.Load(stack, bytes * 8);
-            b.Write("rsp", b.Add(stack, b.Const(64, (ulong)bytes)));
-            WriteOperand(0, value);
+            Value nextStack = b.Add(stack, b.Const(64, (ulong)bytes));
+            if (instruction.Op0Kind == OpKind.Memory)
+            {
+                b.Store(Address(stackOverride: nextStack), value);
+                b.Write("rsp", nextStack);
+                b.MarkNormalPathOnly("POP memory uses the incremented stack in destination addressing; fault priority and partial state are unmodeled");
+            }
+            else
+            {
+                b.Write("rsp", nextStack);
+                WriteOperand(0, value);
+            }
             return Next();
         }
     }

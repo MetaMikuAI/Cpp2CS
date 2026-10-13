@@ -36,6 +36,10 @@ public static partial class Arm64Lifter
         if ((w & 0x9F20FC00) == 0x0E208400 || (w & 0xDFE0FC00) == 0x5EE08400)
             return SimdAddSubtract(new(origin, w, "simd.addsub"));
         if ((w & 0x9FF80C00) == 0x0F000400) return SimdImmediate(new(origin, w, "simd.immediate"));
+        if ((w & 0x7F3E0000) is 0x1E020000 or 0x1E180000)
+            return FloatFixedGeneral(new(origin, w, "fp.fixed-general"));
+        if ((w & 0x8F80FC00) is 0x0F00E400 or 0x0F00FC00)
+            return FloatFixedSimd(new(origin, w, "fp.fixed-simd"));
         if ((w & 0xFFFFFC00) is 0x1E260000 or 0x1E270000 or 0x9E660000 or 0x9E670000 or 0x9EAE0000 or 0x9EAF0000)
             return FloatMoveGeneral(new(origin, w, "fmov.general"));
         if ((w & 0xFF3FFC00) == 0x1E204000) return FloatMoveRegister(new(origin, w, "fmov.register"));
@@ -93,6 +97,8 @@ public static partial class Arm64Lifter
         if ((w & 0x3B200C00) == 0x38200800) return SingleMemory(new(origin, w, "memory.register"), 2);
         if ((w & 0x3A000000) == 0x28000000) return PairMemory(new(origin, w, "memory.pair"));
         if ((w & 0x3B000000) == 0x18000000) return LiteralMemory(new(origin, w, "memory.literal"));
+        if ((w & 0xBF000000) == 0x0C000000) return StructureMultiple(new(origin, w, "memory.structure-multiple"));
+        if ((w & 0xBF000000) == 0x0D000000) return StructureSingle(new(origin, w, "memory.structure-single"));
         if ((w & 0xFFFFFFE0) is 0xD53B4200 or 0xD51B4200) return NzcvTransfer(new(origin, w, "nzcv.transfer"));
         if ((w & 0xFFDFFFE0) is 0xD51B4400 or 0xD51B4420 or 0xD51BD040)
             return SystemRegister(new(origin, w, "system.register"));

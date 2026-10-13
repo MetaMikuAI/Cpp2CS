@@ -55,6 +55,8 @@ def main():
     execute("float-core-build", ["dotnet", "build", TESTS / "FloatCoreHarness/FloatCoreHarness.csproj", "-c", "Release",
                                  "--source", TESTS / "FloatCoreHarness", "-p:MSBuildEnableWorkloadResolver=false"])
     execute("float-core-differential", [sys.executable, TESTS / "float_core_differential.py", "--output", output / "float-core-differential.json"])
+    execute("arm64-fixed-differential", [sys.executable, TESTS / "arm64_fixed_differential.py", "--dll", DLL,
+                                         "--output", output / "arm64-fixed-differential.json"])
     execute("arm64-differential", [sys.executable, TESTS / "arm64_differential.py", "--dll", DLL, "--output", output / "arm64-differential.json", "--fuzz-words", args.fuzz_words])
     x64 = execute("x64-differential", [sys.executable, TESTS / "x64_differential.py", DLL])
     (output / "x64-differential.json").write_text(json.dumps(json.loads(x64), indent=2) + "\n", encoding="utf-8")

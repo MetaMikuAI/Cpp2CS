@@ -29,6 +29,8 @@ public static class FloatEvaluator
     public static FloatResult Evaluate(Architecture architecture, FloatOperation spec,
         BigInteger a, BigInteger b, uint control)
     {
+        if (!ValidFractionBits(architecture, spec))
+            throw new InvalidOperationException("Invalid fixed-point conversion scale or rounding mode");
         var input = GetFormat(spec.OperandWidth);
         var rounding = ResolveRounding(architecture, spec.Rounding, control);
         if (spec.Kind is FloatKind.NegMul or FloatKind.AbsDiff)
@@ -47,7 +49,7 @@ public static class FloatEvaluator
             if (spec.Kind == FloatKind.FromSigned && integer.TestBit(spec.OperandWidth - 1))
                 integer -= BigInteger.One << spec.OperandWidth;
             return Round(architecture, GetFormat(spec.ResultWidth), integer.Sign < 0,
-                BigInteger.Abs(integer), BigInteger.One, 0, rounding, control, 0);
+                BigInteger.Abs(integer), BigInteger.One, -spec.FractionBits, rounding, control, 0);
         }
 
         uint flags = 0;
@@ -192,7 +194,7 @@ public static class FloatEvaluator
                 : value.NaN ? BigInteger.Zero : value.Negative ? minimum : maximum;
             return new(invalid & Mask(spec.ResultWidth), flags | Invalid);
         }
-        var integer = RoundInteger(value.Mantissa, BigInteger.One, value.Exponent,
+        var integer = RoundInteger(value.Mantissa, BigInteger.One, value.Exponent + spec.FractionBits,
             value.Negative, rounding, out var inexact);
         if (value.Negative) integer = -integer;
         if (integer < minimum || integer > maximum)
@@ -378,6 +380,18 @@ public static class FloatEvaluator
 
     private static uint DenormalFlags(Architecture architecture, Number left, Number right) =>
         architecture == Architecture.X64 && (left.Denormal || right.Denormal) ? InputDenormal : 0;
+
+    internal static bool ValidFractionBits(Architecture architecture, FloatOperation spec)
+    {
+        if (spec.FractionBits == 0) return true;
+        if (architecture != Architecture.Arm64 || spec.FractionBits < 0) return false;
+        return spec.Kind switch
+        {
+            FloatKind.FromSigned or FloatKind.FromUnsigned => spec.FractionBits <= spec.OperandWidth && spec.Rounding == FloatRounding.Current,
+            FloatKind.ToSigned or FloatKind.ToUnsigned => spec.FractionBits <= spec.ResultWidth && spec.Rounding == FloatRounding.TowardZero,
+            _ => false
+        };
+    }
 
     private static FloatRounding ResolveRounding(Architecture architecture, FloatRounding rounding, uint control)
     {

@@ -159,6 +159,52 @@ public static partial class Arm64Lifter
         return c.Done();
     }
 
+    private static LiftResult FloatFixedGeneral(Context c)
+    {
+        var type = c.Field(22, 2);
+        var fractionBits = 64 - c.Field(10, 6);
+        if (type >= 2 || fractionBits > c.Width)
+            return c.Reject("Reserved or unsupported fixed-point conversion size");
+        var fromInteger = c.Field(17, 4) == 1;
+        var unsigned = c.Bit(16);
+        var kind = fromInteger ? unsigned ? FloatKind.FromUnsigned : FloatKind.FromSigned
+            : unsigned ? FloatKind.ToUnsigned : FloatKind.ToSigned;
+        var floatWidth = 32 << type;
+        var inputWidth = fromInteger ? c.Width : floatWidth;
+        var resultWidth = fromInteger ? floatWidth : c.Width;
+        var rounding = fromInteger ? FloatRounding.Current : FloatRounding.TowardZero;
+        var source = fromInteger ? c.Read(c.Rn, inputWidth) : c.ReadVector(c.Rn, inputWidth);
+        var control = c.B.Read("fpcr", 32);
+        var packed = c.B.Float(new(kind, inputWidth, resultWidth, rounding, fractionBits), source, c.C(inputWidth, 0), control);
+        var result = FloatingResult(c, packed, resultWidth, control);
+        if (fromInteger) c.WriteVector(c.Rd, result);
+        else c.Write(c.Rd, result);
+        return c.Done();
+    }
+
+    private static LiftResult FloatFixedSimd(Context c)
+    {
+        var immh = c.Field(19, 4);
+        var scalar = c.Bit(28);
+        if (immh < 4 || scalar && !c.Bit(30) || !scalar && immh >= 8 && !c.Bit(30))
+            return c.Reject("Reserved or unsupported FP16 fixed-point SIMD conversion");
+        var elementWidth = immh >= 8 ? 64 : 32;
+        var width = scalar ? elementWidth : c.Bit(30) ? 128 : 64;
+        var fractionBits = elementWidth * 2 - c.Field(16, 7);
+        var fromInteger = c.Field(10, 6) == 57;
+        var kind = fromInteger ? c.Bit(29) ? FloatKind.FromUnsigned : FloatKind.FromSigned
+            : c.Bit(29) ? FloatKind.ToUnsigned : FloatKind.ToSigned;
+        var rounding = fromInteger ? FloatRounding.Current : FloatRounding.TowardZero;
+        var source = c.ReadVector(c.Rn, width);
+        var control = c.B.Read("fpcr", 32);
+        var results = new List<Value>();
+        for (var offset = 0; offset < width; offset += elementWidth)
+            results.Add(c.B.Float(new(kind, elementWidth, elementWidth, rounding, fractionBits),
+                c.B.Extract(source, offset, elementWidth), c.C(elementWidth, 0), control));
+        c.WriteVector(c.Rd, FloatingLanes(c, results, elementWidth, control));
+        return c.Done();
+    }
+
     private static LiftResult FloatVectorConvert(Context c)
     {
         var scalar = c.Bit(28);
