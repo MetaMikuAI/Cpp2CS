@@ -7,6 +7,10 @@ internal sealed class RelocationCollector(ImageReader reader, List<ImageRange> r
     private readonly ImageRange[] executable = ranges.Where(r => r.Executable).ToArray();
     public List<RelocationTableSummary> Summaries { get; } = [];
     public List<CodeRelocation> CodeRelocations { get; } = [];
+    /// <summary>RELATIVE 重定位：目标地址处指针的加载后值（基址 0）。</summary>
+    public Dictionary<ulong, ulong> Pointers { get; } = new();
+    /// <summary>ABS64/GLOB_DAT/JUMP_SLOT：目标地址处指针引用的动态符号与加数，待符号表解析。</summary>
+    public Dictionary<ulong, (uint Symbol, long Addend)> SymbolPointers { get; } = new();
 
     public void Add(string name, string format, long offset, ulong size, ulong stride)
     {
@@ -57,10 +61,18 @@ internal sealed class RelocationCollector(ImageReader reader, List<ImageRange> r
                     }
                     continue;
                 }
-                var kind = (uint)reader.U64(position + 8);
+                var info = reader.U64(position + 8);
+                var kind = (uint)info;
                 var size = ElfWidth(kind);
                 if (size == 0) { Increment(kinds, "AARCH64_NONE"); continue; }
                 Record(address, size, $"AARCH64_{kind}", position, kinds);
+                // REL 格式的加数在目标位置本身，读取时取文件内容即可，不进入表
+                if (table.Format == "RELA")
+                {
+                    var addend = reader.I64(position + 16);
+                    if (kind == 1027) Pointers[address] = (ulong)addend;
+                    else if (kind is 257 or 1025 or 1026) SymbolPointers[address] = ((uint)(info >> 32), addend);
+                }
                 fixups++;
             }
             Summaries.Add(new(table.Name, table.Format, table.Offset, table.Size, checked((long)(table.Size / table.Stride)), fixups, kinds));

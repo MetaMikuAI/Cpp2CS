@@ -9,4 +9,9 @@
     <PackageReference Include="Iced" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Cpp2CS.Input" />
+    <InternalsVisibleTo Include="Cpp2CS.Tests" />
+  </ItemGroup>
+
 </Project>

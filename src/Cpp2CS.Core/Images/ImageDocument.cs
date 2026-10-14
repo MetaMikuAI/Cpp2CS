@@ -29,6 +29,11 @@ public sealed class ImageDocument
     /// <summary>PE 异常目录（.pdata）的虚拟地址与长度。</summary>
     public (ulong Address, ulong Size)? ExceptionDirectory { get; private init; }
 
+    private IReadOnlyDictionary<ulong, ulong> pointerFixups = new Dictionary<ulong, ulong>();
+
+    /// <summary>引用未定义动态符号的指针位置（GOT、JUMP_SLOT）及符号名。</summary>
+    public IReadOnlyDictionary<ulong, string> Imports { get; private init; } = new Dictionary<ulong, string>();
+
     /// <summary>导出符号：ELF 动态符号表中已定义的函数，PE 导出表中的名称导出。</summary>
     public IReadOnlyDictionary<string, ulong> Exports { get; private init; } = new Dictionary<string, ulong>();
 
@@ -96,6 +101,19 @@ public sealed class ImageDocument
         if (mapping.Kind != AddressKind.FileBacked) return [];
         var available = (int)Math.Min((ulong)size, mapping.AvailableBytes);
         return bytes.AsSpan(checked((int)mapping.FileOffset!.Value), available);
+    }
+
+    /// <summary>
+    /// 读取加载后（按首选基址）的指针值：应用 ELF RELATIVE/符号重定位，零填充区为 0。
+    /// 引用外部符号的位置返回 null，名称见 <see cref="Imports"/>；未映射地址抛出。
+    /// </summary>
+    public ulong? ReadPointer(ulong address)
+    {
+        if (pointerFixups.TryGetValue(address, out var value)) return value;
+        if (Imports.ContainsKey(address)) return null;
+        var mapping = Resolve(address);
+        if (mapping.Kind == AddressKind.ZeroFill) return 0;
+        return ReadU64(address);
     }
 
     public uint ReadU32(ulong address) => BinaryPrimitives.ReadUInt32LittleEndian(Read(address, 4));
@@ -211,11 +229,16 @@ public sealed class ImageDocument
             reader.Require(stringsOffset, stringsSize);
         }
         var exports = new Dictionary<string, ulong>(StringComparer.Ordinal);
+        var symbols = new List<(string Name, ulong Value, bool Defined)>();
         for (ulong i = 0; i < shcount; i++)
         {
             var s = checked(shoff + (long)i * 64);
             var type = reader.U32(s + 4);
-            if (type == 11) ReadElfSymbols(reader, shoff, shcount, s, exports);
+            if (type == 11)
+            {
+                if (symbols.Count != 0) throw new InvalidDataException("ELF 有多个动态符号表");
+                ReadElfSymbols(reader, shoff, shcount, s, exports, symbols);
+            }
             if (type is 0x60000001 or 0x60000002) throw new NotSupportedException("暂不支持 Android packed relocation section");
             if (type is not (4 or 9 or 19)) continue;
             var name = stringsSize == 0 ? $"section[{i}]" : reader.String(stringsOffset, stringsSize, reader.U32(s));
@@ -256,15 +279,27 @@ public sealed class ImageDocument
             else if (tags.GetValueOrDefault(2) != 0) throw new InvalidDataException("缺少 DT_JMPREL");
         }
         collector.ScanElf();
+        var fixups = collector.Pointers;
+        var imports = new Dictionary<ulong, string>();
+        foreach (var (address, (symbol, addend)) in collector.SymbolPointers)
+        {
+            if (symbol >= symbols.Count) throw new InvalidDataException($"重定位符号索引越界：{symbol}");
+            var entry = symbols[(int)symbol];
+            if (entry.Defined) fixups[address] = unchecked(entry.Value + (ulong)addend);
+            else imports[address] = entry.Name;
+        }
         return new(reader.Bytes, Architecture.Arm64, ranges.Min(r => r.Address), ranges, collector.Summaries, collector.CodeRelocations)
         {
             EhFrameHeader = ehFrameHeader,
             Exports = exports,
+            Imports = imports,
+            pointerFixups = fixups,
         };
     }
 
-    // SHT_DYNSYM：只收集已定义（st_shndx != 0）的 STT_FUNC 符号。
-    private static void ReadElfSymbols(ImageReader reader, long shoff, ulong shcount, long section, Dictionary<string, ulong> exports)
+    // SHT_DYNSYM：symbols 按索引保存全部条目供重定位解析；exports 只收集已定义（st_shndx != 0）的 STT_FUNC 符号。
+    private static void ReadElfSymbols(ImageReader reader, long shoff, ulong shcount, long section, Dictionary<string, ulong> exports,
+        List<(string Name, ulong Value, bool Defined)> symbols)
     {
         if (reader.U64(section + 56) != 24) throw new InvalidDataException("ELF 符号表 entry 大小错误");
         var link = reader.U32(section + 40);
@@ -275,14 +310,16 @@ public sealed class ImageDocument
         var offset = reader.Offset(reader.U64(section + 24));
         var size = reader.U64(section + 32);
         reader.Require(offset, size);
+        symbols.Add(("", 0, false));
         for (ulong n = 24; n < size; n += 24)
         {
             var p = checked(offset + (long)n);
             var info = reader.Byte(p + 4);
             var index = reader.U16(p + 6);
             var value = reader.U64(p + 8);
-            if ((info & 0xf) != 2 || index == 0 || value == 0) continue;
             var name = reader.String(stringsOffset, stringsSize, reader.U32(p));
+            symbols.Add((name, value, index != 0));
+            if ((info & 0xf) != 2 || index == 0 || value == 0) continue;
             if (!exports.TryAdd(name, value) && exports[name] != value)
                 throw new InvalidDataException($"ELF 导出符号 {name} 地址冲突");
         }
