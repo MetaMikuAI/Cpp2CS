@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 就地编译第三方 Il2CppDumper 源码；它没有可空注解，也不按我们的警告策略编写。
+       本项目自己的文件逐个用 #nullable enable 打开检查。 -->
+  <PropertyGroup>
+    <RootNamespace>Cpp2CS.Input</RootNamespace>
+    <AssemblyName>Cpp2CS.Input</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS0168;CS0219;CS0414;CS0649;CS8632;SYSLIB0001</NoWarn>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Cpp2CS.Core/Cpp2CS.Core.csproj" />
+    <PackageReference Include="Mono.Cecil" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/**/*.cs"
+             Exclude="../../third_party/Il2CppDumper/Il2CppDumper/Program.cs;../../third_party/Il2CppDumper/Il2CppDumper/Resource1.Designer.cs;../../third_party/Il2CppDumper/Il2CppDumper/obj/**;../../third_party/Il2CppDumper/Il2CppDumper/bin/**" />
+    <Compile Include="*.cs" />
+    <EmbeddedResource Include="../../third_party/Il2CppDumper/Il2CppDumper/Libraries/Il2CppDummyDll.dll" LogicalName="Il2CppDummyDll" />
+  </ItemGroup>
+
+</Project>

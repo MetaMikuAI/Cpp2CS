@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Cpp2CS.Cli</RootNamespace>
+    <AssemblyName>cpp2cs</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Cpp2CS.Core/Cpp2CS.Core.csproj" />
+    
+  </ItemGroup>
+
+</Project>

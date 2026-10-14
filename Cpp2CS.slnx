@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="src/Cpp2CS.Core/Cpp2CS.Core.csproj" />
+  <Project Path="src/Cpp2CS.Input/Cpp2CS.Input.csproj" />
+  <Project Path="src/Cpp2CS.Cli/Cpp2CS.Cli.csproj" />
+  <Project Path="tests/Cpp2CS.Tests/Cpp2CS.Tests.csproj" />
+</Solution>

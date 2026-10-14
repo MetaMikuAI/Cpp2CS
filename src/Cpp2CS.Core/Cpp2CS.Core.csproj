@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Cpp2CS</RootNamespace>
+    <AssemblyName>Cpp2CS.Core</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Iced" />
+  </ItemGroup>
+
+</Project>
