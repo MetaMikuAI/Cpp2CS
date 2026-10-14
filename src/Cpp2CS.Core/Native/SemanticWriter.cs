@@ -4,6 +4,7 @@ namespace Cpp2CS.Native;
 
 public sealed class SemanticWriter(Symbols symbols)
 {
+    private static string Condition(Expression value) => value is BinaryExpression ? Expression(value) : "(" + Expression(value) + ")";
     public static string Expression(Expression e) => e switch
     {
         NameExpression n => n.Name,
@@ -66,7 +67,7 @@ public sealed class SemanticWriter(Symbols symbols)
             text.AppendLine($"L_{block.Address:x}:");
             foreach (var s in block.Statements) text.AppendLine($"  /*0x{s.Address:x}*/ {Statement(s)}");
             if (block.Condition is not null && block.Successors.Length == 2)
-                text.AppendLine($"  if {Expression(block.Condition)} goto L_{block.Successors[0]:x}; else goto L_{block.Successors[1]:x};");
+                text.AppendLine($"  if {Condition(block.Condition)} goto L_{block.Successors[0]:x}; else goto L_{block.Successors[1]:x};");
             else if (block.Successors.Length == 1) text.AppendLine($"  goto L_{block.Successors[0]:x};");
         }
         return text.ToString();
@@ -170,7 +171,6 @@ public sealed class SemanticWriter(Symbols symbols)
             InvocationExpression c => c with { Receiver = c.Receiver is null ? null : Rename(c.Receiver), Arguments = c.Arguments.Select(Rename).ToArray() },
             _ => e
         };
-        string E(Expression e) => Expression(Rename(e));
         string S(Statement s) => Statement(s switch
         {
             AssignStatement a => a with { Name = names[a.Name], Value = Rename(a.Value), Type = symbols?.Display(a.Type) ?? a.Type },
@@ -221,14 +221,14 @@ public sealed class SemanticWriter(Symbols symbols)
                 if (terminalIndex >= 0)
                 {
                     var condition = terminalIndex == 0 ? block.Condition : Negate(block.Condition);
-                    text.AppendLine(indent + "if " + E(condition)); text.AppendLine(indent + "{");
+                    text.AppendLine(indent + "if " + Condition(Rename(condition))); text.AppendLine(indent + "{");
                     Emit(block.Successors[terminalIndex], exit, depth + 1, new(visiting)); text.AppendLine(indent + "}");
                     address = block.Successors[1 - terminalIndex]; continue;
                 }
                 if (activeLoops.TryPeek(out var current) && block.Successors.Contains(loopExits[current.Header][0]))
                 {
                     var leaving = block.Successors[0] == loopExits[current.Header][0] ? 0 : 1;
-                    text.AppendLine(indent + "if " + E(leaving == 0 ? block.Condition : Negate(block.Condition)) + " break;");
+                    text.AppendLine(indent + "if " + Condition(Rename(leaving == 0 ? block.Condition : Negate(block.Condition))) + " break;");
                     address = block.Successors[1 - leaving]; continue;
                 }
                 var common = post[block.Successors[0]].Intersect(post[block.Successors[1]]).ToArray();
@@ -236,11 +236,11 @@ public sealed class SemanticWriter(Symbols symbols)
                 if (block.Successors.Contains(join))
                 {
                     var branch = block.Successors[0] == join ? 1 : 0;
-                    text.AppendLine(indent + "if " + E(branch == 0 ? block.Condition : Negate(block.Condition))); text.AppendLine(indent + "{");
+                    text.AppendLine(indent + "if " + Condition(Rename(branch == 0 ? block.Condition : Negate(block.Condition)))); text.AppendLine(indent + "{");
                     Emit(block.Successors[branch], join, depth + 1, new(visiting)); text.AppendLine(indent + "}");
                     address = join; continue;
                 }
-                text.AppendLine(indent + "if " + E(block.Condition)); text.AppendLine(indent + "{");
+                text.AppendLine(indent + "if " + Condition(Rename(block.Condition))); text.AppendLine(indent + "{");
                 Emit(block.Successors[0], join, depth + 1, new(visiting)); text.AppendLine(indent + "}");
                 text.AppendLine(indent + "else"); text.AppendLine(indent + "{");
                 Emit(block.Successors[1], join, depth + 1, new(visiting)); text.AppendLine(indent + "}");

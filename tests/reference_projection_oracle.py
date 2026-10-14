@@ -19,8 +19,8 @@ out.mkdir(parents=True, exist_ok=True)
 samples = []
 
 
-def case(name, kind, instructions, reject=False, right=None):
-    samples.append(dict(Name=name, ReturnType=kind, Types=[kind, right or kind, "int32_t"], Names=["left", "right", "count"], Instructions=instructions, Reject=reject))
+def case(name, kind, instructions, reject=False, right=None, ssa=False):
+    samples.append(dict(Name=name, ReturnType=kind, Types=[kind, right or kind, "int32_t"], Names=["left", "right", "count"], Instructions=instructions, Reject=reject, Ssa=ssa))
 
 
 for kind, prefix in (("Il2CppObject*", "Object"), ("System_String_o*", "String")):
@@ -32,6 +32,9 @@ for kind, prefix in (("Il2CppObject*", "Object"), ("System_String_o*", "String")
     case(prefix + "AllNull", kind, ["cbz w2, 1f", "mov x0, xzr", "b 2f", "1: mov x0, #0", "2:"])
     case(prefix + "LoopSwap", kind, ["mov w2, w2", "b 2f", "1: mov x3, x0", "mov x0, x1", "mov x1, x3", "sub w2, w2, #1", "2: cbnz w2, 1b"])
     case(prefix + "LoopNull", kind, ["mov w2, w2", "b 2f", "1: mov x0, xzr", "sub w2, w2, #1", "2: cbnz w2, 1b"])
+    for ssa in [False, True]:
+        for condition in ['eq', 'ne']:
+            case(prefix + f'Identity{condition}{ssa}', kind, ['cmp x0, x1', f'b.{condition} 1f', 'mov x0, xzr', 'ret', '1:'], ssa=ssa)
 case("ObjectStringJoin", "Il2CppObject*", ["cbz w2, 1f", "mov x0, x1", "1:"], right="System_String_o*")
 case("ObjectStringSelect", "Il2CppObject*", ["cmp w2, #0", "csel x0, x0, x1, eq"], right="System_String_o*")
 case("UnrelatedJoin", "System_String_o*", ["cbz w2, 1f", "mov x0, x1", "1:"], True, "Int32_array*")

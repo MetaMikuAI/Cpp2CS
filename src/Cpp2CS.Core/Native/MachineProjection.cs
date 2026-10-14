@@ -254,18 +254,25 @@ public sealed partial class FunctionLifter
         }
         Expression FlagCondition(int code)
         {
-            if (before.Comparison is not { } compare || before.ComparisonKind is not ("compare" or "compare-float"))
+            if (before.Comparison is not { } compare)
             { Reject("条件标志来源未确定"); return new UnknownExpression("flags"); }
-            if (code is 1 or 2 && (before.ComparisonKind == "compare-float" || IntegerProjection.Width(compare.Left.Type) == 0))
+            if (IntegerConditions.Project(before.ComparisonKind, code, compare.Left, compare.Right) is { } integer) return integer;
+            if (before.ComparisonKind == "compare" && code is 1 or 2 &&
+                (NativeValues.IsManagedReference(compare.Left.Type) || NativeValues.IsManagedReference(compare.Right.Type)))
+            {
+                if (NativeValues.ReferenceEqual(compare.Left, compare.Right) is { } equal)
+                    return code == 1 ? equal : new BinaryExpression("==", equal, new NameExpression("false"));
+                Reject("引用比较的类型或位宽未确定"); return new UnknownExpression("flags");
+            }
+            bool BooleanBits(NativeValue value) => value.Type == "bool" && value.Bits.Width >= 8 &&
+                (value.Bits.Width == 8 || BitOps.Slice(value.Bits, 8, value.Bits.Width - 8) is ConstantBits { Value.IsZero: true });
+            if (code is 1 or 2 && before.ComparisonKind == "compare" && BooleanBits(compare.Left) &&
+                (BooleanBits(compare.Right) || compare.Right.Bits is ConstantBits { Value: var boolean } && (boolean.IsZero || boolean.IsOne)))
+                return new BinaryExpression(code == 1 ? "==" : "!=", compare.Left.Expression, compare.Right.Type == "bool" ? compare.Right.Expression :
+                    new NameExpression(compare.Right.Bits is ConstantBits { Value.IsZero: true } ? "false" : "true"));
+            if (code is 1 or 2 && before.ComparisonKind == "compare-float")
                 return Compare(result, code == 1 ? "==" : "!=", compare.Left, compare.Right);
-            if (before.ComparisonKind == "compare-float" || code is not (1 or 2 or 3 or 4 or 9 or 10 or 11 or 12 or 13 or 14) ||
-                compare.Left.Bits.Width is not (32 or 64) || compare.Left.Bits.Width != compare.Right.Bits.Width ||
-                IntegerProjection.Bits(compare.Left) is not { } leftBits || IntegerProjection.Bits(compare.Right) is not { } rightBits)
-            { Reject("整数分支的类型或位宽未确定"); return new UnknownExpression("flags"); }
-            var unsigned = code is 3 or 4 or 9 or 10;
-            var type = (unsigned ? "uint" : "int") + compare.Left.Bits.Width + "_t";
-            Expression Cast(Expression value) => new OperationExpression(ValueOperation.IntegerCast, type, [value]);
-            return new BinaryExpression(code switch { 1 => "==", 2 => "!=", 3 or 11 => ">=", 4 or 12 => "<", 9 or 13 => ">", _ => "<=" }, Cast(leftBits), Cast(rightBits));
+            Reject("整数分支的类型或位宽未确定"); return new UnknownExpression("flags");
         }
     }
     private static void InvalidateCallMemory(NativeState state, ulong pc)

@@ -1,3 +1,5 @@
+using Cpp2CS.IR;
+
 namespace Cpp2CS.Native;
 
 // 普通方法与状态机投影共用的 SSA 到源码表达式转换，不读取机器指令。
@@ -70,6 +72,8 @@ public sealed class ManagedExpressionBuilder(SsaSemantics semantics, ManagedName
                 return new NameExpression(value.Offset == 0 ? "false" : "true");
         }
         var expression = Value(value);
+        if (IntegerProjection.Width(nativeType) > 0 && (Boolean(expression, value) || BooleanCondition(value) is not null))
+            expression = new OperationExpression(ValueOperation.Select, nativeType, [expression, new ConstantExpression(1), new ConstantExpression(0)]);
         return managed.BaseTypeOf(logicalType) == "System.Enum" ? new CastExpression(logicalType, expression) : expression;
     }
 
@@ -108,22 +112,87 @@ public sealed class ManagedExpressionBuilder(SsaSemantics semantics, ManagedName
                 input.Type?.EndsWith('*') == true ? new NameExpression("null") : new ConstantExpression(0);
             return new BinaryExpression(value.Kind == "zero" ? "==" : "!=", left, right);
         }
-        if (value.Kind is "b.eq" or "b.ne" && value.Inputs[0] is { Kind: "compare" or "compare-add", Inputs: [var leftTerm, var rightTerm] } compare)
+        if (value.Kind.StartsWith("b."))
         {
-            var right = compare.Kind == "compare-add" && rightTerm.Kind == "constant" ? SsaSemantics.Number(-rightTerm.Offset, leftTerm.Width) : rightTerm;
-            return new BinaryExpression(value.Kind == "b.eq" ? "==" : "!=", Value(leftTerm), Value(right));
+            if (Condition(value) is { } condition) return condition;
+            return Unknown("整数条件的类型或位宽未确定：" + value.Kind);
         }
         if (value.Kind == "and" && value.Inputs[1] is { Kind: "constant", Offset: 1 })
         {
             var input = Value(value.Inputs[0]);
             if (Boolean(input, value.Inputs[0])) return input;
         }
-        if (value.Kind == "condition-value" && value.Offset == 2 && value.Inputs[0] is { Kind: "compare", Inputs: [var test, { Kind: "constant", Offset: 0 }] })
-        {
-            var input = Value(test);
-            return Boolean(input, test) ? input : new BinaryExpression("!=", input, new ConstantExpression(0));
-        }
+        if (BooleanCondition(value) is { } boolean) return boolean;
+        if (value.Kind is "condition-value" or "select" && Integer(value) is { } integer) return integer.Expression;
         return Unknown("C# 表达式未归约：" + value.Kind + ":" + value.Name);
+    }
+    private Expression? Condition(SemanticTerm value)
+    {
+        if (value.Inputs is not [{ Kind: "compare" or "compare-add" or "compare-and" } flags] || flags.Inputs.Length != 2) return null;
+        if (Integer(flags.Inputs[0]) is { } left && Integer(flags.Inputs[1]) is { } right)
+            return IntegerConditions.Project(flags.Kind, checked((int)value.Offset), left, right);
+        if (flags.Kind == "compare" && value.Offset is 1 or 2 && Reference(flags.Inputs[0]) is { } a && Reference(flags.Inputs[1]) is { } b &&
+            NativeValues.ReferenceEqual(a, b) is { } equal) return value.Offset == 1 ? equal : new BinaryExpression("==", equal, new NameExpression("false"));
+        return null;
+    }
+    private NativeValue? Reference(SemanticTerm value) => value.Width != 64 ? null :
+        value is { Kind: "constant", Offset: 0 } ? new(BitOps.Constant(0, 64), "int64_t", new ConstantExpression(0)) :
+        value.Type is { } type && NativeValues.IsManagedReference(type) ? new(new InputBits("ssa:" + value.Name, 64), type, Value(value)) : null;
+    private Expression? BooleanCondition(SemanticTerm value) => value.Kind == "condition-value" && value.Offset == 2 &&
+        value.Inputs is [{ Kind: "compare", Inputs: [var tested, { Kind: "constant", Offset: 0 }] }] ? BooleanBits(tested) : null;
+    private Expression? BooleanBits(SemanticTerm value)
+    {
+        if (value.Kind == "zero-extend") return BooleanBits(value.Inputs[0]);
+        if (value.Kind == "and" && value.Inputs[1] is { Kind: "constant", Offset: 1 })
+        {
+            var input = value.Inputs[0];
+            while (input.Kind is "abi-extend" or "zero-extend" || input.Kind == "slice" && input.Offset == 0 && input.Width >= 8) input = input.Inputs[0];
+            return BooleanBits(input);
+        }
+        if (value.Width != 8) return null;
+        if (value.Kind == "phi")
+        {
+            var incoming = value.Inputs.Select(BooleanBits).ToArray();
+            return incoming.Length > 0 && incoming.All(v => v is not null) && incoming.Select(v => SemanticWriter.Expression(v!)).Distinct().Count() == 1 ? incoming[0] : null;
+        }
+        if (Bind?.Invoke(value) is { } bound && Boolean(bound, value)) return bound;
+        return value.Type == "bool" ? Value(value) : null;
+    }
+    private NativeValue? Integer(SemanticTerm value)
+    {
+        var width = value.Width;
+        if (width is <= 0 or > 64) return null;
+        var type = width <= 32 ? "uint32_t" : "uint64_t";
+        if (value.Kind == "constant")
+        {
+            var bits = BitOps.Constant(value.Offset, width);
+            return new(bits, type, new ConstantExpression(width == 64 ? value.Offset : (long)((ulong)value.Offset & ((1UL << width) - 1))));
+        }
+        if (BooleanBits(value) is { } boolean)
+            return new(new InputBits("ssa:" + value.Name, width), width <= 8 ? "uint8_t" : type,
+                new OperationExpression(ValueOperation.Select, width <= 8 ? "uint8_t" : type, [boolean, new ConstantExpression(1), new ConstantExpression(0)]));
+        if (value.Kind is "parameter" or "field" or "call-result" && IntegerProjection.Width(value.Type ?? "") == width)
+            return new(new InputBits("ssa:" + value.Name, width), value.Type!, Value(value));
+        if (value.Kind is "slice" or "zero-extend" or "sign-extend" or "abi-extend" && Integer(value.Inputs[0]) is { } input)
+        {
+            if (value.Kind == "slice") return NativeValues.Slice(input, checked((int)value.Offset), width);
+            if (width < input.Bits.Width) return null;
+            if (width == input.Bits.Width) return input;
+            if (value.Kind == "sign-extend")
+                return width is 32 or 64 && IntegerProjection.Bits(input) is { } signedInput ?
+                    new(new InputBits("ssa:" + value.Name, width), "int" + width + "_t",
+                        new OperationExpression(ValueOperation.SignExtend, "int" + width + "_t", [signedInput, new ConstantExpression(input.Bits.Width)])) : null;
+            Bits high = value.Kind == "zero-extend" ? BitOps.Constant(0, width - input.Bits.Width) : new UnknownBits("ssa-upper", "ABI", width - input.Bits.Width);
+            return input with { Bits = BitOps.Concat([input.Bits, high]) };
+        }
+        if (value.Kind == "condition-value" && Condition(value) is { } condition)
+            return new(new InputBits("ssa:" + value.Name, width), "int" + Math.Max(32, width) + "_t", new OperationExpression(ValueOperation.Select, "int" + Math.Max(32, width) + "_t",
+                [condition, new ConstantExpression(1), new ConstantExpression(0)]));
+        if (value.Kind == "select" && Condition(value.Inputs[0]) is { } selected &&
+            Integer(value.Inputs[1]) is { } left && Integer(value.Inputs[2]) is { } right &&
+            IntegerProjection.Bits(left) is { } a && IntegerProjection.Bits(right) is { } b && width is 32 or 64)
+            return new(new InputBits("ssa:" + value.Name, width), "int" + width + "_t", new OperationExpression(ValueOperation.Select, "int" + width + "_t", [selected, a, b]));
+        return null;
     }
     private bool Boolean(Expression expression, SemanticTerm value) =>
         value.Type is "bool" or "System.Boolean" || expression is NameExpression name && BooleanResults.Contains(name.Name) ||

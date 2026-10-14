@@ -4,7 +4,7 @@ using Cpp2CS.Native;
 
 public static class NativeProjectionFixtures
 {
-    public sealed record Case(ulong Address, int Offset, int Size, string Name, string ReturnType, string[] Types, string[] Names, bool Reject);
+    public sealed record Case(ulong Address, int Offset, int Size, string Name, string ReturnType, string[] Types, string[] Names, bool Reject, bool Ssa = false);
     public sealed record Helper(ulong Address, string Kind, bool NoReturn);
     public static void Export(string configuration, string directory)
     {
@@ -26,14 +26,31 @@ public static class NativeProjectionFixtures
         foreach (var sample in cases)
         {
             var instructions = decoder.Decode(code.AsSpan(sample.Offset, sample.Size).ToArray(), sample.Address);
-            var body = new FunctionLifter(image, decoder, symbols, layouts, managed, runtime).Lift(
-                new DecodedMethod(sample.Address, instructions, new(sample.Address, sample.Address + (ulong)sample.Size, null)));
-            if (sample.Reject != (body.Problems.Count > 0)) throw new InvalidOperationException(sample.Name + ": " + string.Join("; ", body.Problems));
-            reports.Add(new { sample.Name, sample.Reject, body.Problems });
+            var machine = new DecodedMethod(sample.Address, instructions, new(sample.Address, sample.Address + (ulong)sample.Size, null));
+            LiftResult? body;
+            string[] problems;
+            if (sample.Ssa)
+            {
+                var abi = new NativeAbi(layouts, managed);
+                var method = abi.Normalize(symbols.Unique(sample.Address)!);
+                var flow = NativeControlFlow.Build(instructions, machine.Boundary, runtime.NoReturn);
+                var ssa = new NativeSsa(flow, method, abi, symbols).Build();
+                var semantics = new SsaSemantics(ssa, method, symbols, layouts, abi, image, runtime, new(image, decoder));
+                var recovered = SsaBodyRecovery.Recover(new(method, machine, flow, ssa, semantics, symbols, [], [], []), managed, layouts, symbols);
+                body = recovered.Body;
+                problems = recovered.Problems;
+            }
+            else
+            {
+                body = new FunctionLifter(image, decoder, symbols, layouts, managed, runtime).Lift(machine);
+                problems = body.Problems.ToArray();
+            }
+            if (sample.Reject != (problems.Length > 0)) throw new InvalidOperationException(sample.Name + ": " + string.Join("; ", problems));
+            reports.Add(new { sample.Name, sample.Reject, Problems = problems });
             if (sample.Reject) continue;
             generated.Append("public static " + Display(sample.ReturnType) + " " + sample.Name + "(" +
                 string.Join(", ", sample.Types.Zip(sample.Names, (type, name) => Display(type) + " " + name)) + ") ");
-            generated.AppendLine(new SemanticWriter(symbols).Structured(ViewNormalizer.Normalize(body), true));
+            generated.AppendLine(new SemanticWriter(symbols).Structured(ViewNormalizer.Normalize(body!), true));
         }
         generated.AppendLine("}");
         File.WriteAllText(Path.Combine(directory, "Recovered.cs"), generated.ToString());
@@ -41,7 +58,7 @@ public static class NativeProjectionFixtures
         Console.WriteLine($"PASS: {cases.Length} synthetic native functions recovered or explicitly rejected");
         string Display(string type) => layouts.ArrayElements(type) is { } elements ? Display(elements.Type) + "[]" : type switch
         {
-            "void" => "void", "Il2CppObject*" => "object", "System_String_o*" => "string", "int8_t" => "sbyte", "uint8_t" => "byte", "int16_t" => "short", "uint16_t" => "ushort",
+            "void" => "void", "bool" => "bool", "Il2CppObject*" => "object", "System_String_o*" => "string", "int8_t" => "sbyte", "uint8_t" => "byte", "int16_t" => "short", "uint16_t" => "ushort",
             "int32_t" => "int", "uint32_t" => "uint", "int64_t" => "long", "uint64_t" => "ulong", _ => throw new InvalidOperationException(type)
         };
     }

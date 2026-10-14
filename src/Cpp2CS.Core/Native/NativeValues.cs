@@ -24,6 +24,13 @@ public static class NativeValues
     {
         return JoinReferences([left, right]) is { } joined ? (joined[0].Type, joined[0].Expression, joined[1].Expression) : null;
     }
+    public static Expression? ReferenceEqual(NativeValue left, NativeValue right)
+    {
+        if (JoinReferences([left, right]) is not { } joined) return null;
+        if (left.Bits is ConstantBits { Value.IsZero: true }) return new BinaryExpression("is", joined[1].Expression, new NameExpression("null"));
+        if (right.Bits is ConstantBits { Value.IsZero: true }) return new BinaryExpression("is", joined[0].Expression, new NameExpression("null"));
+        return new InvocationExpression("object.ReferenceEquals", null, [joined[0].Expression, joined[1].Expression], false);
+    }
     public static void StoreStack(NativeState state, RegionId region, long offset, NativeValue value, string identity)
     {
         if (value.Bits.Width % 8 != 0) throw new ArgumentException("栈存储需要完整字节");
