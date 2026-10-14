@@ -100,6 +100,9 @@ for effect in effects:
         registers = {f"x{i}": rng.getrandbits(64) for i in range(31)}
         registers.update({f"v{i}": rng.getrandbits(128) for i in range(32)})
         registers.update(sp=MEMORY+4096, x3=MEMORY+1024, x4=case, nzcv=case % 16)
+        if case < 4:
+            registers['x1'] = [0, (1 << 64) - 1, 1 << 31, 1 << 63][case]
+            registers['x2'] = 0 if case == 0 else 1
         if effect["Source"]["Mnemonic"] in ("fdiv", "frintp", "fcvtps", "fcmp"):
             scalar = 64 if effect["Source"]["Mnemonic"] == "frintp" else 32
             registers["v1"] = bits((-1 if case % 2 else 1) * (case + 0.25), scalar)
@@ -117,7 +120,7 @@ for effect in effects:
         for address, expected in stored:
             assert bytes(uc.mem_read(address, len(expected))) == expected, (effect["Source"], case)
             checks += 1
-        if effect["Source"]["Mnemonic"] in ("mul", "mneg", "madd", "msub"):
+        if not any(w['Register'] == 'nzcv' for w in effect['Assignments']):
             assert uc.reg_read(UC_ARM64_REG_NZCV) >> 28 == registers["nzcv"], (effect["Source"], case, "NZCV changed")
             checks += 1
 print(f"PASS: {len(effects)} ARM64 instructions x 32 states; {checks} independent register/memory comparisons")

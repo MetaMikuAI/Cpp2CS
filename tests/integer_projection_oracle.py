@@ -7,7 +7,7 @@ import random
 import subprocess
 from elftools.elf.elffile import ELFFile
 from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
-from unicorn.arm64_const import UC_ARM64_REG_X0, UC_ARM64_REG_SP, UC_ARM64_REG_X30
+from unicorn.arm64_const import UC_ARM64_REG_X0, UC_ARM64_REG_SP, UC_ARM64_REG_X30, UC_ARM64_REG_PC
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -39,6 +39,28 @@ for width, reg in ((32, "w"), (64, "x")):
     case(f"multiplyOverlap{width}", kind, [kind, kind], [f"msub {reg}1, {reg}0, {reg}1, {reg}1", f"mov {reg}0, {reg}1"])
     for suffix in ("b", "h", "w"):
         case(f"extend{suffix}{width}", kind, ["int32_t"], [f"mov {reg}1, #0", f"add {reg}0, {reg}1, w0, sxt{suffix}"])
+    for lsb, count in [(0, 1), (0, 3), (0, width), (1, 7), (5, 11), (width // 2, width // 2), (width - 1, 1)]:
+        for op in ('ubfx', 'sbfx', 'ubfiz', 'sbfiz'):
+            case(f'{op}{width}_{lsb}_{count}', kind, [kind], [f'{op} {reg}0, {reg}0, #{lsb}, #{count}'])
+        for op in ('bfi', 'bfxil'):
+            case(f'{op}{width}_{lsb}_{count}', kind, [kind, kind], [f'{op} {reg}0, {reg}1, #{lsb}, #{count}'])
+        case(f'bfc{width}_{lsb}_{count}', kind, [kind], [f'bfc {reg}0, #{lsb}, #{count}'])
+    case(f'insertOverlap{width}', kind, [kind], [f'bfi {reg}0, {reg}0, #7, #13'])
+    case(f'neg{width}', kind, [kind], [f'neg {reg}0, {reg}0'])
+    case(f'negShift{width}', kind, [kind], [f'neg {reg}0, {reg}0, lsl #3'])
+    case(f'negs{width}', 'int32_t', [kind], [f'negs {reg}1, {reg}0', 'cset w0, eq'])
+    case(f'extractConstant{width}', kind, [], [f'mov {reg}0, #-1', f'ubfx {reg}0, {reg}0, #4, #3'])
+    for size, suffix in [(8, 'b'), (16, 'h')]:
+        for signed in ['int', 'uint']:
+            source_type = f'{signed}{size}_t'
+            case(f'sxt{suffix}{width}_{signed}', kind, [source_type], [f'sxt{suffix} {reg}0, w0'])
+            case(f'narrowExtract{size}_{width}_{signed}', kind, [source_type], [f'ubfx {reg}0, {reg}0, #2, #3'])
+            case(f'narrowSignedExtract{size}_{width}_{signed}', kind, [source_type], [f'sbfx {reg}0, {reg}0, #2, #3'])
+    case(f'undefinedExtract{width}', kind, ['uint8_t'], [f'ubfx {reg}0, {reg}0, #7, #2'], True)
+    case(f'referenceExtract{width}', kind, ['Il2CppObject*'], [f'ubfx {reg}0, {reg}0, #3, #5'], True)
+case('sxtw', 'int64_t', ['uint32_t'], ['sxtw x0, w0'])
+case('uxtb', 'int32_t', ['int32_t'], ['uxtb w0, w0'])
+case('uxth', 'int32_t', ['int32_t'], ['uxth w0, w0'])
 case("signedCompare", "int32_t", ["uint32_t", "uint32_t"], ["cmp w0, w1", "cset w0, lt"])
 case("unsignedCompare", "int32_t", ["int64_t", "int64_t"], ["cmp x0, x1", "cset w0, hi"])
 case("truncate", "int32_t", ["int64_t"], [])
@@ -57,6 +79,11 @@ case("referenceShift", "int64_t", ["Il2CppObject*"], ["lsl x0, x0, #1"], True)
 case("largePointerOffset", "int64_t", ["Il2CppObject*"], ["mov x1, #0x100000000", "add x0, x0, x1"], True)
 case("undefinedHighMultiply", "int64_t", ["int32_t", "int64_t"], ["mul x0, x0, x1"], True)
 case("referenceMultiply", "int64_t", ["Il2CppObject*", "int64_t"], ["mul x0, x0, x1"], True)
+case('replaceUndefinedHigh', 'int32_t', ['uint8_t', 'int32_t'], ['bfi w0, w1, #8, #24'])
+case('constantZeroExtendByte', 'int64_t', [], ['mov x0, #-1', 'uxtb w0, w0'])
+case('zeroExtendedCrossExtract', 'int64_t', ['int32_t'], ['mov w0, w0', 'ubfx x0, x0, #24, #16'])
+case('zeroExtendedHighExtract', 'int64_t', ['int32_t'], ['mov w0, w0', 'ubfx x0, x0, #32, #17'])
+case('undefinedCrossExtract', 'int64_t', ['int32_t'], ['ubfx x0, x0, #24, #16'], True)
 
 source = ".text\n" + "\n".join(f".global {s['Name']}\n.type {s['Name']}, %function\n{s['Name']}:\n" +
     "\n".join(s["Instructions"] + ["ret"]) + f"\n.size {s['Name']}, .-{s['Name']}" for s in samples)
@@ -85,19 +112,21 @@ for sample in samples:
         continue
     for a, b, c in [(a, b, c) for a in edges for b in edges for c in (0, 1)] + [(rng.getrandbits(64), rng.getrandbits(64), rng.getrandbits(64)) for _ in range(64)]:
         uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
-        uc.mem_map(0x100000, 4096)
+        uc.mem_map(0x100000, (len(code) + 8191) & ~4095)
         uc.mem_map(0x200000, 4096)
         uc.mem_write(0x100000, code)
         for index, value in enumerate((a, b, c)):
             uc.reg_write(UC_ARM64_REG_X0 + index, value)
         uc.reg_write(UC_ARM64_REG_SP, 0x200800)
-        uc.reg_write(UC_ARM64_REG_X30, 0x100ff0)
-        uc.emu_start(sample["Address"], 0x100ff0, count=64)
+        stop = 0x100000 + ((len(code) + 4095) & ~4095)
+        uc.reg_write(UC_ARM64_REG_X30, stop)
+        uc.emu_start(sample["Address"], stop, count=64)
+        assert uc.reg_read(UC_ARM64_REG_PC) == stop, sample['Name']
         width = 32 if sample["ReturnType"].endswith("32_t") else 64
         expected = uc.reg_read(UC_ARM64_REG_X0) & ((1 << width) - 1)
         rows.append(dict(Name=sample["Name"], A=a, B=b, C=c, Width=width, Expected=expected))
 (out / "observations.json").write_text(json.dumps(rows), encoding="utf-8")
-types = {"int32_t": "int", "uint32_t": "uint", "int64_t": "long", "uint64_t": "ulong"}
+types = {"int8_t": "sbyte", "uint8_t": "byte", "int16_t": "short", "uint16_t": "ushort", "int32_t": "int", "uint32_t": "uint", "int64_t": "long", "uint64_t": "ulong"}
 arms = [f'"{s["Name"]}" => unchecked((ulong)Recovered.{s["Name"]}(' + ", ".join(f"unchecked(({types[t]}){n})" for t, n in zip(s["Types"], s["Names"])) + "))" for s in samples if not s["Reject"]]
 fixture = '''using System.Text.Json;
 var rows = JsonSerializer.Deserialize<JsonElement[]>(File.ReadAllText(args[0]))!;

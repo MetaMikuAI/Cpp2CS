@@ -43,6 +43,13 @@ public static class NativeValues
         var bits = BitOps.Slice(value.Bits, offset, width);
         if (IsManagedReference(value.Type) && (offset != 0 || width != 64)) type = "native-bits";
         if (offset == 0 && width == value.Bits.Width) return value with { Type = type ?? value.Type };
+        if (IntegerProjection.Width(value.Type) > 0 && (type is null || type == value.Type) && bits is ConstantBits integerBits && width <= 64)
+        {
+            var resultType = width is 8 or 16 or 32 or 64 ? (value.Type.StartsWith("uint") ? "uint" : "int") + width + "_t" : width <= 32 ? "uint32_t" : "uint64_t";
+            var number = unchecked((long)(ulong)integerBits.Value);
+            if (resultType.StartsWith("int") && width < 64 && (number & (1L << (width - 1))) != 0) number -= 1L << width;
+            return new(bits, resultType, new ConstantExpression(number));
+        }
         if (value.Expression is ConstantExpression && bits is ConstantBits constant && constant.Value <= long.MaxValue)
         {
             var number = (long)constant.Value;
@@ -58,10 +65,11 @@ public static class NativeValues
         }
         var naturalWidth = value.Type switch { "bool" or "uint8_t" or "int8_t" => 8,
             "uint16_t" or "int16_t" => 16, "uint32_t" or "int32_t" or "float" => 32, "double" => 64, _ => 0 };
-        if (offset == 0 && width == naturalWidth) return new(bits, type ?? value.Type, value.Expression);
+        if (offset == 0 && width == naturalWidth && value.Expression is not SliceExpression) return new(bits, type ?? value.Type, value.Expression);
         if (offset == 0 && naturalWidth > 0 && width > naturalWidth &&
             BitOps.Slice(value.Bits, naturalWidth, width - naturalWidth) is ConstantBits { Value.IsZero: true })
             return new(bits, type ?? value.Type, value.Expression);
+        if ((type is null || type == value.Type) && IntegerProjection.Extract(value, offset, width) is { } extracted) return extracted;
         var expression = value.Expression is SliceExpression slice ?
             new SliceExpression(slice.Value, checked(slice.BitOffset + offset), width) : new SliceExpression(value.Expression, offset, width);
         return new(bits, type ?? "native-bits", expression);

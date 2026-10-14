@@ -1,6 +1,6 @@
 namespace Cpp2CS.Native;
 
-public enum ValueOperation { SignedToFloat, ZeroExtendWord, Unsigned, IntegerCast, FloatDivide, Ceiling, FloatToSignedCeiling, BitCast, Add, Subtract, Select, ArrayElement, NewArray, ReferenceSelect, SignExtend, ShiftLeft, LogicalShiftRight, ArithmeticShiftRight, BitAnd, BitOr, BitXor, Multiply }
+public enum ValueOperation { SignedToFloat, ZeroExtendWord, Unsigned, IntegerCast, FloatDivide, Ceiling, FloatToSignedCeiling, BitCast, Add, Subtract, Select, ArrayElement, NewArray, ReferenceSelect, SignExtend, ShiftLeft, LogicalShiftRight, ArithmeticShiftRight, BitAnd, BitOr, BitXor, Multiply, ExtractBits }
 internal sealed record IndexedArrayAddress(Expression Array, Expression Index, HeaderField Elements, string ArrayType, int Offset = 0) : Expression;
 public sealed record OperationExpression(ValueOperation Operation, string Type, Expression[] Arguments) : Expression;
 
@@ -33,7 +33,9 @@ public static class ValueOperations
             ValueOperation.Add or ValueOperation.Subtract or ValueOperation.Multiply => $"unchecked(({type})({a[0]}) {(operation.Operation == ValueOperation.Add ? "+" : operation.Operation == ValueOperation.Subtract ? "-" : "*")} ({type})({a[1]}))",
             ValueOperation.Select => $"({a[0]} ? unchecked(({type})({a[1]})) : unchecked(({type})({a[2]})))",
             ValueOperation.ReferenceSelect => $"({a[0]} ? {a[1]} : {a[2]})",
-            ValueOperation.SignExtend => $"unchecked(({type})({(a[1] == "8" ? "sbyte" : a[1] == "16" ? "short" : a[1] == "32" ? "int" : "long")})({a[0]}))",
+            ValueOperation.SignExtend when a[1] is "8" or "16" or "32" => $"unchecked(({type})({(a[1] == "8" ? "sbyte" : a[1] == "16" ? "short" : "int")})({a[0]}))",
+            ValueOperation.SignExtend => $"unchecked(({type})((long)((ulong)({a[0]}) << (64 - {a[1]})) >> (64 - {a[1]})))",
+            ValueOperation.ExtractBits => $"unchecked(({type})(((ulong)({a[0]}) >> {a[1]}) & {(a[2] == "64" ? "ulong.MaxValue" : $"((1UL << {a[2]}) - 1UL)")}))",
             ValueOperation.ShiftLeft => $"unchecked(({type})({a[0]}) << {a[1]})",
             ValueOperation.ArithmeticShiftRight => $"(unchecked(({type})({a[0]})) >> {a[1]})",
             ValueOperation.LogicalShiftRight => $"unchecked(({type})(({(type == "int" ? "uint" : "ulong")})({a[0]}) >> {a[1]}))",

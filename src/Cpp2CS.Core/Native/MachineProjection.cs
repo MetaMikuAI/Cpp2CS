@@ -149,7 +149,7 @@ public sealed partial class FunctionLifter
                         if ((number & (1L << (first.Bits.Width - 1))) != 0) number -= 1L << first.Bits.Width;
                         return Constant(number, width);
                     }
-                    if (width is 32 or 64 && first.Bits.Width is 8 or 16 or 32 && IntegerProjection.Bits(first) is { } signedInput)
+                    if (width is 32 or 64 && first.Bits.Width > 0 && first.Bits.Width < width && IntegerProjection.Bits(first) is { } signedInput)
                         return Numeric(value, ValueOperation.SignExtend, width == 32 ? "int32_t" : "int64_t", signedInput, new ConstantExpression(first.Bits.Width));
                     return Unknown(width, "有符号扩展的整数类型或位宽未确定");
                 case "add": case "sub":
@@ -182,8 +182,8 @@ public sealed partial class FunctionLifter
                 {
                     if (width is 32 or 64 && IntegerProjection.Bits(first) is { } bitLeft && IntegerProjection.Bits(inputs[1]) is { } bitRight)
                         return Numeric(value, ValueOperation.BitAnd, width == 32 ? "int32_t" : "int64_t", bitLeft, bitRight);
-                    if (inputs[1].Expression is not ConstantExpression maskValue) return Unknown(width, "按位与的整数类型或位宽未确定");
-                    var mask = unchecked((ulong)maskValue.Value);
+                    if (inputs[1].Bits is not ConstantBits maskValue) return Unknown(width, "按位与的整数类型或位宽未确定");
+                    var mask = (ulong)maskValue.Value;
                     if (first.Type == "bool" && mask == 1)
                     {
                         var expression = first.Expression;

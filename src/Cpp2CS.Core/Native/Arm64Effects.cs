@@ -99,6 +99,58 @@ public static class Arm64Effects
                 Write(o[0].Register!, Node(op == "lsl" ? "shift-left" : op == "lsr" ? "shift-right" : "shift-arithmetic", width,
                     [Resize(Operand(o[1]), width)], o[2].Immediate, $"value_{pc:x}")); break;
             }
+            case "neg": case "negs":
+            {
+                var width = Arm64Registers.Width(o[0].Register!);
+                if (o.Length != 2 || width is not (32 or 64) || o.Any(p => p.Kind != 1 || p.Register?[0] is not ('w' or 'x') || Arm64Registers.Width(p.Register!) != width))
+                { unsupported = "取负操作数不是同宽整数寄存器"; break; }
+                var zero = Constant(0, width); var source = Operand(o[1]);
+                Write(o[0].Register!, Node("sub", width, [zero, source], id: $"value_{pc:x}"));
+                if (op == "negs") Write("nzcv", Node("compare", 4, [zero, source]));
+                break;
+            }
+            case "sxtb": case "sxth": case "sxtw": case "uxtb": case "uxth": case "uxtw":
+            {
+                var width = Arm64Registers.Width(o[0].Register!);
+                var part = op[^1] == 'b' ? 8 : op[^1] == 'h' ? 16 : 32;
+                if (o.Length != 2 || width is not (32 or 64) || o[0].Register?[0] is not ('w' or 'x') ||
+                    o[1].Kind != 1 || o[1].Register?[0] != 'w')
+                { unsupported = "整数扩展操作数未支持"; break; }
+                Write(o[0].Register!, Resize(Slice(Operand(o[1]), 0, part), width, op[0] == 's'));
+                break;
+            }
+            case "ubfx": case "sbfx": case "ubfiz": case "sbfiz": case "bfi": case "bfxil": case "bfc":
+            case "ubfm": case "sbfm": case "bfm":
+            {
+                var width = Arm64Registers.Width(o[0].Register!);
+                var clear = op == "bfc";
+                if (width is not (32 or 64) || o.Length != (clear ? 3 : 4) || o[0].Register?[0] is not ('w' or 'x') ||
+                    !clear && (o[1].Kind != 1 || o[1].Register?[0] is not ('w' or 'x') || Arm64Registers.Width(o[1].Register!) != width) ||
+                    o[^2].Kind != 2 || o[^1].Kind != 2)
+                { unsupported = "位域操作数未支持"; break; }
+                var kind = op;
+                var lsb = o[^2].Immediate; var count = o[^1].Immediate;
+                if (op is "ubfm" or "sbfm" or "bfm")
+                {
+                    if (lsb < 0 || lsb >= width || count < 0 || count >= width) { unsupported = "位域编码超出寄存器范围"; break; }
+                    var wraps = lsb > count;
+                    kind = op == "ubfm" ? wraps ? "ubfiz" : "ubfx" : op == "sbfm" ? wraps ? "sbfiz" : "sbfx" : wraps ? "bfi" : "bfxil";
+                    (lsb, count) = wraps ? (width - lsb, count + 1) : (lsb, count - lsb + 1);
+                }
+                if (lsb < 0 || lsb >= width || count <= 0 || count > width - lsb) { unsupported = "位域范围未支持"; break; }
+                var insert = kind is "ubfiz" or "sbfiz" or "bfi" or "bfc";
+                var source = clear ? Constant(0, width) : Operand(o[1]);
+                var field = Resize(Slice(source, insert ? 0 : (int)lsb, (int)count), width, kind is "sbfx" or "sbfiz");
+                if (insert && lsb != 0) field = Node("shift-left", width, [field], lsb);
+                if (kind is "bfi" or "bfxil" or "bfc")
+                {
+                    var mask = (ulong.MaxValue >> (64 - (int)count)) << (insert ? (int)lsb : 0);
+                    var preserved = Node("and", width, [Read(o[0].Register!), Constant(unchecked((long)~mask), width)]);
+                    field = Node("orr", width, [preserved, field]);
+                }
+                Write(o[0].Register!, field);
+                break;
+            }
             case "mul": case "mneg": case "madd": case "msub":
             {
                 var width = Arm64Registers.Width(o[0].Register!);

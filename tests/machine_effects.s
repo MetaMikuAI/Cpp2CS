@@ -57,3 +57,30 @@ msub w0, w1, w2, w4
 msub x0, x1, x2, x4
 madd w1, w1, w2, w1
 msub x2, x1, x2, x2
+ubfx w0, w1, #5, #11
+ubfx x0, x1, #31, #33
+sbfx w0, w1, #7, #5
+sbfx x0, x1, #63, #1
+ubfiz w0, w1, #7, #13
+ubfiz x0, x1, #32, #32
+sbfiz w0, w1, #3, #17
+sbfiz x0, x1, #1, #63
+bfi w0, w1, #3, #17
+bfi x0, x1, #3, #47
+bfi w1, w1, #7, #13
+bfxil x1, x1, #7, #13
+bfxil w0, w1, #3, #17
+bfxil x0, x1, #31, #33
+bfc w0, #7, #17
+bfc x0, #3, #47
+sxtb w0, w1
+sxth w0, w1
+sxtb x0, w1
+sxth x0, w1
+sxtw x0, w1
+uxtb w0, w1
+uxth w0, w1
+neg w0, w1
+neg x0, x1
+neg w1, w1, lsl #3
+negs x0, x1
