@@ -6,11 +6,23 @@ namespace Cpp2CS.IR;
 public abstract record Bits(int Width);
 public sealed record InputBits(string Identity, int BitWidth) : Bits(BitWidth);
 public sealed record ConstantBits(BigInteger Value, int BitWidth) : Bits(BitWidth);
-public sealed record SliceBits(Bits Source, int Offset, int BitWidth) : Bits(BitWidth);
+public sealed record SliceBits(Bits Source, int Offset, int BitWidth) : Bits(BitWidth)
+{
+    public bool Equals(SliceBits? other) => BitsGraph.Equal(this, other);
+    public override int GetHashCode() => BitsGraph.Hash(this);
+}
 // Parts 按低位到高位排列。
-public sealed record ConcatBits(Sequence<Bits> Parts, int BitWidth) : Bits(BitWidth);
+public sealed record ConcatBits(Sequence<Bits> Parts, int BitWidth) : Bits(BitWidth)
+{
+    public bool Equals(ConcatBits? other) => BitsGraph.Equal(this, other);
+    public override int GetHashCode() => BitsGraph.Hash(this);
+}
 public sealed record UnknownBits(string Identity, string Reason, int BitWidth) : Bits(BitWidth);
-public sealed record PhiBits(string Block, Sequence<Bits> Incoming, int BitWidth) : Bits(BitWidth);
+public sealed record PhiBits(string Block, Sequence<Bits> Incoming, int BitWidth) : Bits(BitWidth)
+{
+    public bool Equals(PhiBits? other) => BitsGraph.Equal(this, other);
+    public override int GetHashCode() => BitsGraph.Hash(this);
+}
 
 public static class BitOps
 {

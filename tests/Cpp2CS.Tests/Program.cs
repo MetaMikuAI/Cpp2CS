@@ -6,6 +6,11 @@ using Cpp2CS.IR;
 using Cpp2CS.Model;
 
 var passed = 0;
+if (args is ["profile-recovery", var profileConfig, var profileAddress])
+{
+    RecoveryProfile.Run(profileConfig, Convert.ToUInt64(profileAddress.StartsWith("0x") ? profileAddress[2..] : profileAddress, 16));
+    return;
+}
 if (args is ["aggregate-abi", var aggregateAbiConfig, var aggregateAbiDirectory])
 {
     AggregateAbiFixtures.Export(aggregateAbiConfig, aggregateAbiDirectory);
@@ -42,6 +47,7 @@ void Check(bool condition, string name)
     passed++;
     Console.WriteLine($"PASS: {name}");
 }
+BitsGraphChecks.Run(Check);
 var build = new BuildId("binary-a", "metadata-a", "aarch64-linux");
 var typeId = new DefinitionId(build, 0, 0x02000001);
 var methodId = new DefinitionId(build, 0, 0x06000001);

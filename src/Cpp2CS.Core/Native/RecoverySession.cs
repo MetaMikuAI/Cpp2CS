@@ -17,6 +17,7 @@ public sealed record SsaRecovery(NativeSsaProgram Program, InterfaceCall[] Inter
 }
 public sealed class RecoverySession : IDisposable
 {
+    public Action<ulong, string>? PhaseStarted { get; init; }
     public ElfImage Image { get; }
     public Symbols Symbols { get; }
     private readonly Arm64Decoder decoder;
@@ -47,13 +48,20 @@ public sealed class RecoverySession : IDisposable
     public MethodAnalysis Analyze(ulong address) => Analyze(Symbols.Unique(address) ?? throw new InvalidDataException("入口没有唯一符号签名"), Symbols.ForMethod());
     private MethodAnalysis Analyze(NativeMethod source, Symbols symbols)
     {
+        PhaseStarted?.Invoke(source.Address, "types");
         var method = abi.Normalize(source);
         ManagedTypeBindings.Bind(method, symbols, layouts, managed);
+        PhaseStarted?.Invoke(method.Address, "decode");
         var machine = reader.Read(method.Address);
+        PhaseStarted?.Invoke(method.Address, "control-flow");
         var flow = NativeControlFlow.Build(machine.Instructions, machine.Boundary, runtime.NoReturn);
+        PhaseStarted?.Invoke(method.Address, "ssa");
         var ssa = new NativeSsa(flow, method, abi, symbols).Build();
+        PhaseStarted?.Invoke(method.Address, "semantics");
         var semantics = new SsaSemantics(ssa, method, symbols, layouts, abi, Image, runtime, new(Image, decoder));
+        PhaseStarted?.Invoke(method.Address, "virtual-dispatch");
         var virtualCalls = VirtualDispatch.Recover(semantics, symbols, layouts, managed);
+        PhaseStarted?.Invoke(method.Address, "interface-dispatch");
         var dispatch = new InterfaceDispatch(semantics, layouts, managed, runtime);
         var interfaces = dispatch.Recover();
         return new(method, machine, flow, ssa, semantics, symbols, virtualCalls, interfaces, dispatch.Diagnostics.ToArray());
@@ -71,15 +79,20 @@ public sealed class RecoverySession : IDisposable
         var ssa = analysis.Ssa;
         var semantics = analysis.Semantics;
         SsaSemantics LiftNative(NativeMethod source) => Analyze(source, symbols.ForMethod()).Semantics;
+        PhaseStarted?.Invoke(address, "async-protocol");
         var async = new AsyncRecovery(semantics, analysis.Method, managed, layouts, symbols, LiftNative).Recover();
+        PhaseStarted?.Invoke(address, "async-body");
         var body = new AsyncBodyRecovery(semantics, analysis.Method, managed, layouts, symbols, LiftNative).Recover();
+        PhaseStarted?.Invoke(address, "ordinary-body");
         var ordinary = async is null && body is null ? SsaBodyRecovery.Recover(analysis, managed, layouts, symbols) : null;
+        PhaseStarted?.Invoke(address, "expression-body");
         var result = ordinary?.Body ?? (async is not null || body is not null
             ? new LiftResult(analysis.Method, analysis.Machine.Instructions, [], [], [], new NativeGraph(analysis.Machine.Instructions, runtime.NoReturn))
                 { RecoveryPath = "ssa-async" }
             : new FunctionLifter(Image, decoder, symbols, layouts, managed, runtime).Lift(analysis.Machine, semantics));
         var legacyProblems = result.RecoveryPath == "expression" ? result.Problems.ToArray() : [];
         result = result with { TypeSymbols = symbols };
+        PhaseStarted?.Invoke(address, "evidence");
         result.Ssa = new(ssa, analysis.Interfaces, semantics.Calls(), semantics.Stores(), async, analysis.DispatchProblems, legacyProblems)
         { AwaitSites = async is null ? null : Native.AwaitSites.Recover(semantics, symbols, layouts), VirtualCalls = analysis.VirtualCalls, Body = body, CallStorages = semantics.CallStorages(),
             OrdinaryProblems = ordinary?.Problems ?? [] };
@@ -92,6 +105,7 @@ public sealed class RecoverySession : IDisposable
             result.Problems.AddRange(ssa.Problems.Concat(flow.Problems).Concat(body.Problems).Distinct().Select(p => "SSA: " + p));
             if (result.Problems.Count == 0) result.Problems.Add("SSA: async 源码归约未完成");
         }
+        PhaseStarted?.Invoke(address, "recovered");
         return result;
     }
     public LiftResult View(LiftResult result) => result.Ssa?.CSharp is not null ? result :
