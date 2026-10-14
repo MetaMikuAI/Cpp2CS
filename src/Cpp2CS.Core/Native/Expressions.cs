@@ -17,6 +17,7 @@ public sealed record AddressOfExpression(Expression Target) : Expression
     public string? RootType { get; init; }
 }
 public sealed record StackAddressExpression(long Offset) : Expression;
+public sealed record ParameterAddressExpression(int Index, string Name, string Type, long Offset = 0) : Expression;
 public sealed record PhiInput(ulong Predecessor, Expression Value);
 public sealed record PhiExpression(string Name, string Type, PhiInput[] Inputs) : Expression;
 public sealed record MetadataExpression(MetadataReference Reference, bool IsSlot) : Expression;

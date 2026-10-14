@@ -45,7 +45,7 @@ public static class MethodPipelineChecks
         if (!verify) return;
         Require(baseline[0x55d02dc].Route == "ssa", "简单 getter 接入公共 SSA 业务体");
         Require(baseline[0x55d02dc].Text.Contains("_OnGuiAction_k__BackingField"), "getter 不得恢复成递归属性读取");
-        Require(baseline[0x55d02e4].Route == "expression", "未覆盖的尾调用保留原有恢复路径");
+        Require(baseline[0x55d02e4].Route == "ssa" && baseline[0x55d02e4].Text.Contains("GCWriteBarrier(ref this._OnGuiAction_k__BackingField)"), "尾调用写屏障通过公共 SSA 证明并保留实际字段");
         Require(baseline[0x55d9650].Route == "ssa-async-single", "单 await 构造模式接入公共语句树");
         Require(session.Symbols.DisplayTypes.SequenceEqual(originalTypes), "方法恢复不写入会话类型表");
         foreach (var address in Entries.Reverse()) Same(baseline[address], Take(session, session.Recover(address)), address);

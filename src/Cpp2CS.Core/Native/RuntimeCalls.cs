@@ -6,6 +6,8 @@ public sealed partial class FunctionLifter
 {
     private Expression? Location(NativeValue receiver, int offset, int size)
     {
+        if (receiver.Expression is ParameterAddressExpression parameter)
+            return Location(receiver with { Type = parameter.Type + "*", Expression = new NameExpression(NativeInterface.StorageName(parameter.Index)) }, checked((int)(parameter.Offset + offset)), size);
         if (receiver.Expression is IndexedArrayAddress or AddressOfExpression { Target: OperationExpression { Operation: ValueOperation.ArrayElement } })
             return ArrayAddressProjection.Element(receiver, offset, size, layouts);
         if (receiver.Expression is AddressOfExpression address)

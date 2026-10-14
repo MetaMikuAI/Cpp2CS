@@ -141,6 +141,7 @@ public static class ViewNormalizer
                     continue;
                 }
                 if (uses != 1) { i++; continue; }
+                if (i + 1 < block.Statements.Count && StorageUse(block.Statements[i + 1], assignment.Name)) { i++; continue; }
                 if (i + 1 < block.Statements.Count && Expressions(block.Statements[i + 1]).Any(e => ConditionalUse(e, assignment.Name))) { i++; continue; }
                 if (i + 1 < block.Statements.Count && Expressions(block.Statements[i + 1]).Any(e => Count(e, assignment.Name) == 1))
                     block.Statements[i + 1] = Replace(block.Statements[i + 1], assignment.Name, assignment.Value);
@@ -167,6 +168,21 @@ public static class ViewNormalizer
         DelegateCacheStatement c => [c.Cache, c.Target, c.Method],
         ReturnStatement { Value: { } value } => [value], SetLocalStatement s1 => [s1.Value], _ => []
     };
+    // 写入目标、ref 实参和实例调用接收者可能依赖独立存储，单次使用不等于可删除副本。
+    private static bool StorageUse(Statement statement, string name)
+    {
+        if (statement is StoreStatement store && Count(store.Target, name) != 0 ||
+            statement is CallStatement { Receiver: { } receiver } && Count(receiver, name) != 0) return true;
+        var storage = false;
+        foreach (var expression in Expressions(statement))
+            SourceTree.Map(expression, node =>
+            {
+                storage |= node is AddressOfExpression address && Count(address.Target, name) != 0 ||
+                    node is InvocationExpression { Receiver: { } target } && Count(target, name) != 0;
+                return node;
+            });
+        return storage;
+    }
     private static bool Pure(Expression expression) => expression switch
     {
         NameExpression or ConstantExpression or CapturedExpression => true,

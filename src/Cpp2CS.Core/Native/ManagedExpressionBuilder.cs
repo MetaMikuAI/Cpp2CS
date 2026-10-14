@@ -85,6 +85,10 @@ public sealed class ManagedExpressionBuilder(SsaSemantics semantics, ManagedName
             return new MetadataExpression(literal, false);
         if (value.Kind == "parameter") return new NameExpression(value.Name == "__this" ? "this" : value.Name);
         if (value.Kind == "call-result" && Results.TryGetValue(value.Name, out var result)) return new NameExpression(result);
+        if (value is { Kind: "slice", Inputs: [var aggregate] } && aggregate.Type is { } aggregateType &&
+            layouts.Shape(aggregateType).Kind is Cpp2CS.Abi.ShapeKind.Composite or Cpp2CS.Abi.ShapeKind.HomogeneousFloat &&
+            value.Offset % 8 == 0 && value.Width % 8 == 0 && layouts.Field(aggregateType, checked((int)value.Offset / 8), value.Width / 8) is { } field)
+            return FieldValue(SsaSemantics.Term("field", value.Width, field.Name, value.Offset / 8, field.Type, aggregate) with { FieldPath = field.Path });
         if (value.Kind == "phi")
         {
             var items = value.Inputs.Select(Value).DistinctBy(SemanticWriter.Expression).ToArray();

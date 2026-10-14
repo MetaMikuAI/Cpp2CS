@@ -28,9 +28,15 @@ public sealed partial class FunctionLifter
             if (branch.Operation != "constant") DelegateCall(instruction, state, statements, result);
             else if (unchecked((ulong)branch.Immediate) < result.Method.Address || unchecked((ulong)branch.Immediate) > result.Instructions[^1].Address)
             {
+                var tailProblem = this.sharedSemantics is null ? "尾调用缺少 SSA 状态证明" : TailCallProof.Check(this.sharedSemantics, result.Method, pc, new(layouts, managed));
+                if (tailProblem is not null)
+                {
+                    Reject(tailProblem);
+                    return null;
+                }
                 DirectCall(instruction, state, statements, result);
                 statements.Add(new ReturnStatement(pc, ReturnValue(result.Method, state)));
-                result.Proofs.Add(new(pc, "DirectTailCall", "external branch to a known method or runtime helper; existing call semantics retained; no fallthrough"));
+                result.Proofs.Add(new(pc, "DirectTailCall", "shared SSA proof: entry SP, LR, nonvolatile bits, result interface and argument lifetime"));
             }
             return null;
         }
@@ -156,6 +162,11 @@ public sealed partial class FunctionLifter
                 {
                     var right = inputs[1];
                     var add = value.Operation == "add";
+                    if (width == 64 && first.Expression is ParameterAddressExpression parameter && right.Expression is ConstantExpression displacementValue)
+                    {
+                        var offset = checked(parameter.Offset + (add ? displacementValue.Value : -displacementValue.Value));
+                        return new(new InputBits($"parameter-address:{parameter.Name}:{offset}", 64), "parameter-address", parameter with { Offset = offset });
+                    }
                     if (first.Expression is StackAddressExpression stack && right.Expression is ConstantExpression delta)
                     {
                         var offset = checked(stack.Offset + (add ? delta.Value : -delta.Value));

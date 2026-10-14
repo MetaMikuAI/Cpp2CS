@@ -49,6 +49,8 @@ public sealed class SsaSemantics(NativeSsaProgram program, NativeMethod method, 
         if (value.Kind == "phi") return Join(value.Name, width, value.Inputs.Select(v => Slice(v, offset, width)).ToArray());
         if (value.Kind == "constant" && width <= 64) return Number(unchecked((long)(((ulong)value.Offset >> offset) & (width == 64 ? ulong.MaxValue : (1UL << width) - 1))), width);
         if (value.Kind == "slice") return Slice(value.Inputs[0], checked((int)value.Offset + offset), width);
+        if (value.Kind == "partial-clobber" && offset >= 0 && (long)offset + width <= value.Offset)
+            return Slice(value.Inputs[0], offset, width);
         if (value.Kind is "zero-extend" or "abi-extend" or "sign-extend" && offset + width <= value.Inputs[0].Width) return Slice(value.Inputs[0], offset, width);
         return Term("slice", width, offset: offset, inputs: [value]);
     }
@@ -71,6 +73,7 @@ public sealed class SsaSemantics(NativeSsaProgram program, NativeMethod method, 
         {
             case "constant": return Number(value.Immediate, value.Width);
             case "parameter": return Term("parameter", value.Width, method.Parameters[(int)value.Immediate].Name, value.Immediate, value.Type);
+            case "parameter-address": return Term("parameter-address", 64, value.Id, value.Immediate, value.Type, Input(0));
             case "stack-address": return Term("stack", 64, "frame", type: "stack*");
             case "slice": return Slice(Input(0), (int)value.Immediate, value.Width);
             case "zero-extend": case "sign-extend": case "abi-extend":
@@ -148,7 +151,12 @@ public sealed class SsaSemantics(NativeSsaProgram program, NativeMethod method, 
         return matches.Count == 1 ? abi.Normalize(matches[0]) : null;
     }
     public SemanticTerm Argument(string call, int register) => Resolve(values[call].Inputs[register + 2]);
-    public SemanticTerm AbiArgument(string call, Abi.AbiValue argument) => Compose(argument.Pieces.Select(p =>
+    public SemanticTerm AbiArgument(string call, Abi.AbiValue argument)
+    {
+        var carrier = AbiCarrier(call, argument);
+        return argument.Indirect ? LoadAtCall(call, carrier, argument.Shape.Size) : carrier;
+    }
+    public SemanticTerm AbiCarrier(string call, Abi.AbiValue argument) => Compose(argument.Pieces.Select(p =>
         p.Location is Abi.RegisterLocation r ? Slice(RegisterArgument(call, r.Name), r.BitOffset, p.Size * 8) :
         p.Location is Abi.StackLocation s && values[call].Inputs.Length > NativeSsa.CallStackPointerIndex ?
             LoadAtCall(call, Add(Resolve(values[call].Inputs[NativeSsa.CallStackPointerIndex]), s.Offset), p.Size) :
@@ -219,17 +227,23 @@ public sealed class SsaSemantics(NativeSsaProgram program, NativeMethod method, 
     {
         if (address.Kind == "constant" && width == 64)
         {
-            var pointer = image.ReadResolvedPointer(unchecked((ulong)address.Offset));
+            // 可写缓存和 BSS 只有运行时状态，不能从文件初值推断当前指针。
+            var at = unchecked((ulong)address.Offset);
+            var pointer = image.TryRelativePointer(at, out var relocated) ? relocated : image.ReadImmutableScalar(at, 8);
             if (pointer is { } slot && symbols.Metadata.TryGetValue(slot, out var metadata))
                 return Term("metadata-slot", 64, metadata.Name, (long)slot, metadata.ValueType);
         }
         if (address.Kind == "metadata-slot" && width == 64) return MetadataContent(address);
         if (address.Kind == "constant" && image.ReadImmutableScalar(unchecked((ulong)address.Offset), width / 8) is { } constant)
             return Number(unchecked((long)constant), width);
-        if (AddressParts(address).Root.Kind == "stack")
+        if (AddressParts(address).Root.Kind is "stack" or "parameter-address")
         {
             var bytes = Enumerable.Range(0, width / 8).Select(n => ReadByte(memory, Add(address, n), [])).ToArray();
             var packed = Pack(bytes, id);
+            if (packed is { Kind: "slice", Inputs: [{ Kind: "parameter", Type: { } parameterType } parameter] } &&
+                packed.Offset % 8 == 0 && layouts.Field(parameterType, checked((int)packed.Offset / 8), width / 8) is { } parameterField)
+                return Term("field", width, parameterField.Name, packed.Offset / 8, parameterField.Type, parameter)
+                    with { ReadIdentity = id, FieldPath = parameterField.Path };
             if (packed is { Kind: "slice", Inputs: [var aggregate] } && aggregate.Kind == "call-storage" &&
                 aggregate.Type is { } aggregateType && layouts.Field(aggregateType, checked((int)packed.Offset / 8), width / 8) is { } valueField)
                 return Term("value-field", width, valueField.Name, packed.Offset / 8, valueField.Type, aggregate) with { ReadIdentity = id, FieldPath = valueField.Path };
@@ -255,7 +269,9 @@ public sealed class SsaSemantics(NativeSsaProgram program, NativeMethod method, 
             var (a, ao) = AddressParts(address); var (b, bo) = AddressParts(destination);
             var size = values[value.Inputs[2]].Width / 8;
             if (a.Key == b.Key && ao >= bo && ao < bo + size) result = Slice(Resolve(value.Inputs[2]), (int)(ao - bo) * 8, 8);
-            else if (a.Key == b.Key || a.Kind == "stack" && b.Kind is "constant" or "metadata-slot" or "parameter" or "new-object") result = ReadByte(value.Inputs[0], address, visiting);
+            else if (a.Key == b.Key || a.Kind == "stack" && b.Kind is "constant" or "metadata-slot" or "parameter" or "parameter-address" or "new-object" ||
+                a.Kind == "parameter-address" && b.Kind is "constant" or "metadata-slot" or "parameter-address" or "stack" or "new-object")
+                result = ReadByte(value.Inputs[0], address, visiting);
             else result = Term("unknown", 8, "possible-alias:" + memory);
         }
         else if (value.Operation == "phi")
@@ -289,13 +305,15 @@ public sealed class SsaSemantics(NativeSsaProgram program, NativeMethod method, 
                 var layout = abi.Classify(target);
                 pureStack = layout is not null && layout.Arguments.Take(target.Parameters.LastOrDefault()?.Name == "method" ? layout.Arguments.Count - 1 : layout.Arguments.Count).All(a =>
                 {
-                    var argument = AbiArgument(call, a);
+                    var argument = AbiCarrier(call, a);
                     return !Contains(argument, "stack") && (!a.Pieces.Any(p => p.Location is Abi.StackLocation) ||
                         !Contains(argument, "unknown") && !Contains(argument, "ssa") && !Contains(argument, "memory-cycle"));
                 });
             }
             // X8 不在显式实参列表中；未知返回目标仍可能与查询位置别名。
             if (uncertainStorage) pureStack = false;
+            // 间接聚合的副本可由被调代码改写；普通调用不能把入口初值当成调用后值。
+            if (AddressParts(address).Root.Kind == "parameter-address" && !Arm64Calls.PreservesCallerStack(helper)) pureStack = false;
             result = pureStack ? ReadByte(value.Inputs[0], address, visiting) : Term("unknown", 8, "call-may-write:" + call);
         }
         else result = Term("unknown", 8, "uninitialized-stack:" + memory);

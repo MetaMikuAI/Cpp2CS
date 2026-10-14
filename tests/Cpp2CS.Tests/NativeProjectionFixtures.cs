@@ -13,7 +13,8 @@ public static class NativeProjectionFixtures
         var code = File.ReadAllBytes(Path.Combine(directory, "cases.bin"));
         var symbols = new Symbols(Path.Combine(directory, "script.json"));
         var layouts = new HeaderLayout(Path.Combine(directory, "il2cpp.h"), inputs.Clang);
-        using var managed = new ManagedNames(inputs.ManagedAssembly);
+        var fixtureAssembly = Path.Combine(directory, "Managed.dll");
+        using var managed = new ManagedNames(File.Exists(fixtureAssembly) ? fixtureAssembly : inputs.ManagedAssembly);
         using var decoder = new Arm64Decoder(inputs.Capstone);
         var image = new ElfImage(inputs.Binary);
         var runtime = new RuntimeProfile(image);
@@ -59,7 +60,9 @@ public static class NativeProjectionFixtures
         string Display(string type) => layouts.ArrayElements(type) is { } elements ? Display(elements.Type) + "[]" : type switch
         {
             "void" => "void", "bool" => "bool", "Il2CppObject*" => "object", "System_String_o*" => "string", "int8_t" => "sbyte", "uint8_t" => "byte", "int16_t" => "short", "uint16_t" => "ushort",
-            "int32_t" => "int", "uint32_t" => "uint", "int64_t" => "long", "uint64_t" => "ulong", _ => throw new InvalidOperationException(type)
+            "int32_t" => "int", "uint32_t" => "uint", "int64_t" => "long", "uint64_t" => "ulong", "float" => "float", "double" => "double",
+            _ when layouts.Shape(type).Kind is Cpp2CS.Abi.ShapeKind.Composite or Cpp2CS.Abi.ShapeKind.HomogeneousFloat => symbols.Display(type),
+            _ => throw new InvalidOperationException(type)
         };
     }
 }

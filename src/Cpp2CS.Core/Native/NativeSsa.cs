@@ -27,20 +27,35 @@ public sealed class NativeSsa(NativeControlFlow flow, NativeMethod method, Nativ
     public NativeSsaProgram Build()
     {
         method = abi.Normalize(method);
-        var layout = abi.Classify(method);
-        if (layout is null) throw new InvalidDataException("SSA 入口 ABI 未确认");
+        var contract = NativeInterface.Describe(method, abi);
+        if (contract is null) throw new InvalidDataException("SSA 入口 ABI 未确认");
+        var layout = contract.Layout;
         entry["sp"] = Define("entry_sp", "stack-address", 64, [], "stack-address");
         entry["memory"] = Define("entry_memory", "memory", 0, []);
-        for (var index = 0; index < method.Parameters.Length; index++)
+        if (flow.Nodes.Any(n => n.Edges.Any(e => e.Kind == "tail-call")))
+            foreach (var register in TailCallProof.Registers.Where(r => r != "sp"))
+                entry[register] = Define("entry_" + register, "unknown", Width(register), []);
+        foreach (var binding in contract.Arguments)
         {
-            var argument = layout.Arguments[index];
-            var parameter = method.Parameters[index];
-            var root = Define($"arg_{index}", "parameter", argument.Indirect ? 64 : argument.Shape.Size * 8, [], parameter.Type, index);
+            var index = binding.Index;
+            var argument = binding.Storage;
+            var root = Define($"arg_{index}", "parameter", binding.ValueWidth, [], binding.Parameter.Type, index);
+            if (argument.Indirect)
+            {
+                var address = Define($"arg_address_{index}", "parameter-address", 64, [root], binding.CarrierType, index);
+                entry["memory"] = Define($"entry_argument_{index}", "store", 0, [entry["memory"], address, root]);
+                root = address;
+            }
             foreach (var piece in argument.Pieces)
             {
-                if (piece.Location is not RegisterLocation register)
-                { problems.Add("SSA 入口栈参数未接通"); continue; }
-                entry[register.Name.ToLowerInvariant()] = Extend(Slice(root, piece.ValueOffset * 8, piece.Size * 8), register.Name.StartsWith('V') ? 128 : 64, false, true);
+                var part = Slice(root, piece.ValueOffset * 8, piece.Size * 8);
+                if (piece.Location is RegisterLocation register)
+                    entry[register.Name.ToLowerInvariant()] = Extend(part, register.Name.StartsWith('V') ? 128 : 64, false, true);
+                else if (piece.Location is StackLocation stack)
+                {
+                    var address = Define($"entry_stack_address_{stack.Offset}", "add", 64, [entry["sp"], Constant(stack.Offset)]);
+                    entry["memory"] = Define($"entry_stack_{stack.Offset}", "store", 0, [entry["memory"], address, part]);
+                }
             }
         }
         var instructions = new List<SsaInstruction>();
@@ -51,8 +66,13 @@ public sealed class NativeSsa(NativeControlFlow flow, NativeMethod method, Nativ
             if (effect.Unsupported is not null) problems.Add($"0x{pc:x}: {effect.Unsupported}");
             var outputs = effect.Writes.Select(register => Out(pc, register)).ToList();
             var condition = effect.Condition is null ? null : Value(pc, effect.Condition);
-            var call = effect.Call is null ? null : Call(pc);
-            if (effect.Returns) outputs.Add(Define($"return_{pc:x}", "return", 0, method.ReturnType == "void" ? [] : [In(pc, "x0"), In(pc, "x1")]));
+            var tail = node.Edges.Any(e => e.Kind == "tail-call");
+            var call = effect.Call is not null || tail ? Call(pc) : null;
+            if (tail)
+                outputs.Add(Define($"tail_state_{pc:x}", "tail-state", 0, TailCallProof.Registers.Select(r => In(pc, r)).ToArray()));
+            if (effect.Returns)
+                outputs.Add(Define($"return_{pc:x}", "return", 0, layout.Return.Indirect ? [] : layout.Return.Pieces.Select(p =>
+                    Slice(In(pc, ((RegisterLocation)p.Location).Name), ((RegisterLocation)p.Location).BitOffset, p.Size * 8)).ToArray()));
             instructions.Add(new(pc, outputs.Distinct().ToArray(), condition, call));
         }
         FillInputs();
@@ -135,7 +155,7 @@ public sealed class NativeSsa(NativeControlFlow flow, NativeMethod method, Nativ
         var id = $"call_{pc:x}";
         if (values.ContainsKey(id)) return id;
         Define(id, "call", 0, [], address: pc);
-        var targetValue = effects[pc].Call!.Target;
+        var targetValue = effects[pc].Call?.Target ?? effects[pc].Branch!;
         var method = targetValue.Operation == "constant" ? symbols.Unique(unchecked((ulong)targetValue.Immediate)) : null;
         var layout = method is null ? null : abi.Classify(method);
         var target = Value(pc, targetValue);

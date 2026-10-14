@@ -15,6 +15,7 @@ public static class SemanticData
         AddressExpression a => new { kind = "global", a.Address },
         AddressOfExpression a => new { kind = "address-of", target = Expression(a.Target), rootType = a.RootType },
         StackAddressExpression a => new { kind = "stack-address", a.Offset },
+        ParameterAddressExpression a => new { kind = "unresolved-parameter-address", a.Name, a.Type, a.Offset },
         MetadataExpression m => new { kind = "metadata", m.IsSlot, m.Reference.Slot, m.Reference.Name },
         MemberExpression m => new { kind = "member", receiver = Expression(m.Receiver), m.Field.Offset, m.Field.Size, m.Field.Name },
         SourceMemberExpression m => new { kind = "source-member", receiver = Expression(m.Receiver), m.Name, m.Type },

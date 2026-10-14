@@ -48,30 +48,50 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         var order = graph.TopologicalOrder();
         var entry = new NativeState();
         var incoming = new Dictionary<ulong, List<(ulong Predecessor, NativeState State)>> { [address] = [(address, entry)] };
-        var abi = Classify(method);
-        if (abi is null) { result.Problems.Add("入口 ABI 尚不支持"); return result; }
-        for (var p = 0; p < method.Parameters.Length; p++)
+        var nativeInterface = NativeInterface.Describe(method, new NativeAbi(layouts, managed));
+        if (nativeInterface is null) { result.Problems.Add("入口 ABI 尚不支持"); return result; }
+        if (this.sharedSemantics is null && (nativeInterface.Arguments.Any(a => a.Storage.Indirect) ||
+            instructions.Any(i => Arm64Effects.Lower(i).Branch is { Operation: "constant" } branch &&
+                (unchecked((ulong)branch.Immediate) < address || unchecked((ulong)branch.Immediate) > instructions[^1].Address))))
         {
-            var parameter = method.Parameters[p];
-            var value = new NativeValue(new InputBits($"arg:{p}", checked(layouts.Size(parameter.Type) * 8)), parameter.Type,
+            var nativeAbi = new NativeAbi(layouts, managed);
+            var flow = NativeControlFlow.Build(instructions, boundary, runtime.NoReturn);
+            this.sharedSemantics = new(new NativeSsa(flow, method, nativeAbi, symbols).Build(), method, symbols, layouts, nativeAbi, image, runtime, new(image, decoder));
+        }
+        foreach (var binding in nativeInterface.Arguments)
+        {
+            var parameter = binding.Parameter;
+            var value = new NativeValue(new InputBits($"arg:{binding.Index}", binding.ValueWidth), parameter.Type,
                 new NameExpression(parameter.Name == "__this" ? "this" : parameter.Name));
-            if (abi.Arguments[p].Shape.Kind is ShapeKind.Composite or ShapeKind.HomogeneousFloat)
+            if (binding.Storage.Shape.Kind is ShapeKind.Composite or ShapeKind.HomogeneousFloat)
             {
                 aggregateValues[value.Bits] = (parameter.Type, value.Expression);
                 value = value with { Expression = new AggregateExpression(parameter.Type, value.Expression) };
             }
-            if (abi.Arguments[p].Indirect || abi.Arguments[p].Pieces.Any(piece => piece.Location is not RegisterLocation))
-            { result.Problems.Add("入口间接/栈参数尚未接通"); return result; }
-            foreach (var piece in abi.Arguments[p].Pieces)
-                BindAbiValue(entry, ((RegisterLocation)piece.Location).Name.ToLowerInvariant(), NativeValues.Slice(value, piece.ValueOffset * 8, piece.Size * 8));
+            if (binding.Storage.Indirect)
+                value = new(new InputBits($"arg-address:{binding.Index}", 64), "parameter-address", new ParameterAddressExpression(binding.Index, parameter.Name, parameter.Type));
+            foreach (var piece in binding.Storage.Pieces)
+            {
+                var part = NativeValues.Slice(value, piece.ValueOffset * 8, piece.Size * 8);
+                if (piece.Location is RegisterLocation register) BindAbiValue(entry, register.Name.ToLowerInvariant(), part);
+                else if (piece.Location is StackLocation stack) NativeValues.StoreStack(entry, stackRegion, stack.Offset, part, $"entry:{binding.Index}");
+            }
         }
-        if (order is null) return LiftLoops(result, entry);
+        var parameterStorage = nativeInterface.Arguments.Where(a => a.Storage.Indirect).Select(a =>
+            (Statement)new AssignStatement(address, NativeInterface.StorageName(a.Index), new NameExpression(a.Parameter.Name), a.Parameter.Type)).ToArray();
+        if (order is null)
+        {
+            var loops = LiftLoops(result, entry);
+            if (loops.Blocks.TryGetValue(address, out var first)) first.Statements.InsertRange(0, parameterStorage);
+            return loops;
+        }
         foreach (var blockAddress in order)
         {
             if (!incoming.TryGetValue(blockAddress, out var states)) continue;
             var state = Merge(blockAddress, states);
             var block = graph.Blocks[blockAddress];
             var lifted = new LiftedBlock(blockAddress, [], null, block.Successors);
+            if (blockAddress == address) lifted.Statements.AddRange(parameterStorage);
             result.Blocks.Add(blockAddress, lifted);
             foreach (var instruction in block.Instructions)
             {
@@ -168,11 +188,12 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         var layout = Classify(method);
         if (layout is null || layout.Return.Indirect) return new UnknownExpression("return-abi");
         var pieces = layout.Return.Pieces.Select(p => NativeValues.Slice(Read(state, ((RegisterLocation)p.Location).Name.ToLowerInvariant()), 0, p.Size * 8)).ToArray();
-        var value = pieces.Length == 1 ? pieces[0] : NativeValues.Compose(pieces, method.ReturnType);
+        var value = Project(pieces.Length == 1 ? pieces[0] : NativeValues.Compose(pieces, method.ReturnType));
         if (NativeValues.ReferenceAs(value, method.ReturnType) is { } reference) return reference.Expression;
         if (NativeValues.IsManagedReference(method.ReturnType) && value.Type == "native-bits") return new UnknownExpression("引用返回的位表示尚未恢复");
         if (layout.Return.Shape.Kind is ShapeKind.Composite or ShapeKind.HomogeneousFloat)
-            return new AggregateExpression(symbols.Display(method.ReturnType), value.Expression);
+            return value.Type == method.ReturnType && value.Expression is not (SliceExpression or ComposeExpression or AggregateExpression)
+                ? value.Expression : new AggregateExpression(symbols.Display(method.ReturnType), value.Expression);
         if (IntegerProjection.Width(method.ReturnType) > 0)
             return IntegerProjection.Bits(value) is { } integer
                 ? new OperationExpression(ValueOperation.IntegerCast, method.ReturnType, [integer])
@@ -181,6 +202,16 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
     }
     private NativeValue Load(ulong pc, NativeValue receiver, int offset, int size, List<Statement> statements, LiftResult result, string identity)
     {
+        if (receiver.Expression is ParameterAddressExpression parameter)
+        {
+            var resolved = this.sharedSemantics?.Resolve(identity);
+            if (resolved is null || SsaSemantics.Contains(resolved, "unknown") || SsaSemantics.Contains(resolved, "memory-cycle") || SsaSemantics.Contains(resolved, "ssa"))
+            {
+                result.Problems.Add($"0x{pc:x}: 间接参数的当前存储值未确定");
+                return new(new UnknownBits(identity, "参数存储未确定", size * 8), "unknown", new UnknownExpression("参数存储未确定"));
+            }
+            return Load(pc, receiver with { Type = parameter.Type + "*", Expression = new NameExpression(NativeInterface.StorageName(parameter.Index)) }, checked((int)(parameter.Offset + offset)), size, statements, result, identity);
+        }
         if (receiver.Expression is IndexedArrayAddress or AddressOfExpression)
             return Location(receiver, offset, size) switch
             {
@@ -311,15 +342,16 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
             InvalidateCallMemory(state, instruction.Address); Clobber(state, instruction.Address); return;
         }
         var arguments = new List<NativeValue>();
+        var carriers = new List<NativeValue>();
         foreach (var value in layout.Arguments)
         {
-            if (value.Indirect)
-            { result.Problems.Add($"0x{instruction.Address:x}: 调用包含尚未接通的间接聚合参数"); InvalidateCallMemory(state, instruction.Address); Clobber(state, instruction.Address); return; }
             var parts = value.Pieces.Select(piece => piece.Location is RegisterLocation register ?
                 NativeValues.Slice(Read(state, register.Name.ToLowerInvariant()), register.BitOffset, piece.Size * 8) :
                 NativeValues.LoadStack(state, stackRegion, state.StackOffset + ((StackLocation)piece.Location).Offset, piece.Size)).ToArray();
             var argumentType = method.Parameters[arguments.Count].Type;
-            var argumentValue = Project(NativeValues.Compose(parts, argumentType));
+            var carrier = NativeValues.Compose(parts, value.Indirect ? parts[0].Type : argumentType);
+            carriers.Add(carrier);
+            var argumentValue = value.Indirect ? ReadIndirectArgument(carrier, argumentType, value.Shape.Size, instruction.Address, state) : Project(carrier);
             if (argumentType == "bool" && parts.Length == 1 && parts[0].Type != "bool" && argumentValue.Expression is not ConstantExpression)
                 argumentValue = argumentValue with { Expression = BooleanValue(argumentValue.Expression) };
             if (value.Shape.Kind is ShapeKind.Composite or ShapeKind.HomogeneousFloat && argumentValue.Expression is SliceExpression or ComposeExpression)
@@ -393,7 +425,7 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         }
         statements.Add(new CallStatement(instruction.Address, isInstance ? instanceName : name, visible.ToArray(), variable, returnType, isInstance, receiver, property)
         { DeclaringType = method.Name.Split("$$")[0] });
-        TransferCallMemory(instruction.Address, method, layout, arguments, returnBuffer, state, result);
+        TransferCallMemory(instruction.Address, method, layout, carriers, returnBuffer, state, result);
         Clobber(state, instruction.Address);
         if (variable is not null)
         {
@@ -418,6 +450,20 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
             }
         }
         result.Proofs.Add(new(instruction.Address, "CallArguments", $"{method.Name}; {arguments.Count} native arguments incl. MethodInfo; return pieces={layout.Return.Pieces.Count}"));
+    }
+    private NativeValue ReadIndirectArgument(NativeValue carrier, string type, int size, ulong pc, NativeState state)
+    {
+        if (carrier.Expression is StackAddressExpression stack) return Project(NativeValues.LoadStack(state, stackRegion, stack.Offset, size)) with { Type = type };
+        if (carrier.Expression is ParameterAddressExpression { Offset: 0 } parameter && parameter.Type == type &&
+            this.sharedSemantics?.Program.Instructions.FirstOrDefault(i => i.Address == pc)?.Call is { } call)
+        {
+            var raw = this.sharedSemantics.Program.Values.Single(v => v.Operation == "parameter-address" &&
+                this.sharedSemantics.Resolve(v.Id).Inputs[0].Name == parameter.Name);
+            var current = this.sharedSemantics.LoadAtCall(call, this.sharedSemantics.Resolve(raw.Id), size);
+            if (!SsaSemantics.Contains(current, "unknown") && !SsaSemantics.Contains(current, "memory-cycle") && !SsaSemantics.Contains(current, "ssa"))
+                return new(new InputBits($"argument-storage:{pc:x}:{parameter.Name}", size * 8), type, new NameExpression(NativeInterface.StorageName(parameter.Index)));
+        }
+        return new(new UnknownBits($"indirect:{pc:x}", "间接实参存储未绑定", size * 8), type, new UnknownExpression("间接实参存储未绑定"));
     }
     private void DelegateCall(Instruction instruction, NativeState state, List<Statement> statements, LiftResult result)
     {

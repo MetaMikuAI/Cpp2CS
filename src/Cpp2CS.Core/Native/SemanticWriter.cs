@@ -20,6 +20,7 @@ public sealed class SemanticWriter(Symbols symbols)
         AddressExpression a => $"Runtime.Global(0x{a.Address:x})",
         AddressOfExpression a => "ref " + Expression(a.Target),
         StackAddressExpression a => $"Runtime.StackAddress({a.Offset})",
+        ParameterAddressExpression a => $"UNRESOLVED_PARAMETER_ADDRESS(\"{a.Name}\", {a.Offset})",
         MetadataExpression { IsSlot: false, Reference.Kind: "ScriptString" } m => System.Text.Json.JsonSerializer.Serialize(m.Reference.Name),
         MetadataExpression m => (m.IsSlot ? "MetadataSlot" : "MetadataValue") + "(\"" + m.Reference.Name.Replace("\"", "\\\"") + "\")",
         MemberExpression m => Expression(m.Receiver) + "." + m.DisplayName,

@@ -81,6 +81,8 @@ public static class SemanticValidation
                     break;
                 case IndexedArrayAddress:
                     result.Problems.Add($"0x{pc:x}: 数组地址尚未绑定到元素读取"); break;
+                case ParameterAddressExpression:
+                    result.Problems.Add($"0x{pc:x}: 参数存储地址尚未投影为值或明确的引用传递"); break;
                 case UnknownExpression unknown:
                     var problem = $"0x{pc:x}: 语义输入未确定: {unknown.Reason}";
                     if (!result.Problems.Contains(problem)) result.Problems.Add(problem);
