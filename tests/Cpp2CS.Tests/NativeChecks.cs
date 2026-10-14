@@ -42,6 +42,17 @@ public static class NativeChecks
     {
         Instruction I(ulong address, string mnemonic, params Operand[] operands) => new(address, mnemonic, "", operands, false, false, "");
         Operand Target(long address) => new(2, null, address, null, null, 0, 0, 0, 0);
+        Operand Register(string name) => new(1, name, 0, null, null, 0, 0, 0, 0);
+        NativeGraph Graph(params Instruction[] instructions) => new(instructions, _ => false);
+        var callGraph = Graph(I(0x100, "bl", Target(0x200)), I(0x104, "ret"));
+        check(UnusedReceiver.Prove(callGraph, "x1", _ => ["x0"]), "已知 helper 仅读 X0，调用破坏可证明入口 X1 未使用");
+        check(!UnusedReceiver.Prove(callGraph, "x1", _ => ["x0", "x1"]), "ABI 参数读取发生在调用破坏之前");
+        check(!UnusedReceiver.Prove(callGraph, "x1"), "未知调用不能证明入口参数未读");
+        check(UnusedReceiver.Prove(Graph(I(0x100, "mov", Register("w1"), Register("w2")), I(0x104, "ret")), "x1"), "W 覆盖使用统一机器效果清除入口 X 参数");
+        check(!UnusedReceiver.Prove(Graph(I(0x100, "mov", Register("w2"), Register("w1")), I(0x104, "mov", Register("w1"), Register("w0")), I(0x108, "ret")), "x1"), "子寄存器读取不能被后续覆盖隐藏");
+        check(!UnusedReceiver.Prove(Graph(I(0x100, "cbz", Register("w2"), Target(0x10c)), I(0x104, "mov", Register("w1"), Register("w0")),
+            I(0x108, "ret"), I(0x10c, "mov", Register("w0"), Register("w1")), I(0x110, "ret")), "x1"), "只有一条分支覆盖参数时不能证明未读");
+        check(!UnusedReceiver.Prove(Graph(I(0x100, "unsupported"), I(0x104, "mov", Register("w1"), Register("w0")), I(0x108, "ret")), "x1"), "未知机器效果阻止未读参数证明");
         var loop = new NativeGraph([I(0x100, "b", Target(0x100))], _ => false);
         check(loop.TopologicalOrder() is null, "含回边的图不生成无环排序");
         check(new NaturalLoops(loop).Loops is [{ Header: 0x100 }] && new NaturalLoops(loop).Reducible, "自回边识别为自然循环");

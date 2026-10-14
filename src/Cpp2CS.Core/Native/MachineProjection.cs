@@ -44,6 +44,7 @@ public sealed partial class FunctionLifter
         {
             var offset = checked((int)item.Store.Address.Immediate);
             var size = item.Store.Value.Width / 8;
+            if (item.Base.Expression is not StackAddressExpression && MayReferenceStack(item.Value)) state.StackEscaped = true;
             if (item.Base.Expression is StackAddressExpression stack)
                 NativeValues.StoreStack(state, stackRegion, stack.Offset + offset, item.Value, item.Store.Id);
             else if (item.Base.Expression is AddressExpression address)
@@ -69,7 +70,7 @@ public sealed partial class FunctionLifter
         }
         foreach (var assignment in effect.Assignments.Where(w => w.Register is "nzcv" or "memory"))
         {
-            if (assignment.Register == "memory") { state.Stack = state.Stack.Invalidate($"unknown-memory:{pc:x}"); state.StackViews.Clear(); }
+            if (assignment.Register == "memory") { state.Stack = state.Stack.Invalidate($"unknown-memory:{pc:x}"); state.StackViews.Clear(); state.StackEscaped = true; }
             else
             {
                 state.ComparisonKind = assignment.Value.Operation;
@@ -109,10 +110,9 @@ public sealed partial class FunctionLifter
                 var offset = checked((int)address.Immediate);
                 if (receiver.Expression is not StackAddressExpression stack) return Load(pc, receiver, offset, width / 8, statements, result, value.Id!);
                 var slot = stack.Offset + offset;
-                var loaded = NativeValues.LoadStack(before, stackRegion, slot, width / 8);
+                var loaded = Project(NativeValues.LoadStack(before, stackRegion, slot, width / 8));
                 if (mutableStack.Any(p => slot >= p.Key && slot + width / 8 <= p.Key + layouts.Size(p.Value.Type)))
                 {
-                    loaded = Project(loaded);
                     return Capture(pc, width / 8, loaded.Type, loaded.Expression, statements);
                 }
                 return loaded;
@@ -279,5 +279,6 @@ public sealed partial class FunctionLifter
     {
         state.Stack = state.Stack.Invalidate($"call:{pc:x}");
         state.StackViews.Clear();
+        state.StackEscaped = true;
     }
 }

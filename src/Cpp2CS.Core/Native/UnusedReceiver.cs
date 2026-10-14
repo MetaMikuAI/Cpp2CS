@@ -1,27 +1,31 @@
+using Cpp2CS.Abi;
+
 namespace Cpp2CS.Native;
 
 public static class UnusedReceiver
 {
-    public static bool Prove(NativeGraph graph)
+    public static bool Prove(NativeGraph graph, string register = "x0", Func<MachineCall, IEnumerable<string>>? callInputs = null)
     {
         if (graph.Problems.Length != 0) return false;
+        register = Arm64Registers.Canonical(register);
         var visited = new HashSet<ulong>();
-        bool Visit(ulong address)
+        var pending = new Stack<ulong>(); pending.Push(graph.Entry);
+        while (pending.TryPop(out var address))
         {
-            if (!visited.Add(address)) return false;
+            if (!visited.Add(address)) continue;
             var block = graph.Blocks[address];
+            var overwritten = false;
             foreach (var instruction in block.Instructions)
             {
-                var operands = instruction.Operands;
-                static bool Receiver(string? name) => name is "x0" or "w0";
-                if (operands.Any(o => Receiver(o.Base) || Receiver(o.Index))) return false;
-                var writes = instruction.Mnemonic is "mov" or "adr" or "adrp" or "add" or "sub" or "ldr" or "ldur" or "ldrb" or "ldrh" or "ldrsw";
-                if (operands.Skip(writes ? 1 : 0).Any(o => Receiver(o.Register))) return false;
-                if (writes && operands.Length > 0 && Receiver(operands[0].Register)) return true;
-                if (!(writes || instruction.Mnemonic is "stp" or "str" or "strb" or "strh" or "ldp" or "cmp" or "tst" or "nop" or "b" || NativeGraph.IsConditional(instruction))) return false;
+                var effect = Arm64Effects.Lower(instruction);
+                if (effect.Unsupported is not null || effect.Reads.Contains(register)) return false;
+                if (effect.Call is { } call && (callInputs?.Invoke(call) ?? Arm64Registers.CallInputs).Contains(register)) return false;
+                if (effect.Writes.Contains(register)) { overwritten = true; break; }
             }
-            return block.Successors.Length > 0 && block.Successors.All(Visit);
+            if (overwritten) continue;
+            if (block.Successors.Length == 0) return false;
+            foreach (var successor in block.Successors) pending.Push(successor);
         }
-        return Visit(graph.Entry);
+        return true;
     }
 }

@@ -17,6 +17,7 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         getters.Clear();
         aggregateValues.Clear();
         mutableStack.Clear();
+        unusedArguments.Clear();
         aggregateLogicalTypes.Clear();
         var method = new NativeAbi(layouts, managed).Normalize(symbols.Unique(address) ?? throw new InvalidDataException("入口没有唯一符号签名"));
         ManagedTypeBindings.Bind(method, symbols, layouts, managed);
@@ -121,6 +122,7 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         if (states.Length == 1) return states[0].Copy();
         var output = states[0].Copy();
         output.StackPointerKnown = states.All(s => s.StackPointerKnown && s.StackOffset == states[0].StackOffset);
+        output.StackEscaped = states.Any(s => s.StackEscaped);
         foreach (var key in states.SelectMany(s => s.Registers.Keys).Distinct())
         {
             var values = states.Select(s => Read(s, key)).ToArray();
@@ -312,7 +314,7 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         foreach (var value in layout.Arguments)
         {
             if (value.Indirect)
-            { result.Problems.Add($"0x{instruction.Address:x}: 调用包含尚未接通的间接聚合参数"); Clobber(state, instruction.Address); return; }
+            { result.Problems.Add($"0x{instruction.Address:x}: 调用包含尚未接通的间接聚合参数"); InvalidateCallMemory(state, instruction.Address); Clobber(state, instruction.Address); return; }
             var parts = value.Pieces.Select(piece => piece.Location is RegisterLocation register ?
                 NativeValues.Slice(Read(state, register.Name.ToLowerInvariant()), register.BitOffset, piece.Size * 8) :
                 NativeValues.LoadStack(state, stackRegion, state.StackOffset + ((StackLocation)piece.Location).Offset, piece.Size)).ToArray();
@@ -391,6 +393,7 @@ public sealed partial class FunctionLifter(ElfImage image, Arm64Decoder decoder,
         }
         statements.Add(new CallStatement(instruction.Address, isInstance ? instanceName : name, visible.ToArray(), variable, returnType, isInstance, receiver, property)
         { DeclaringType = method.Name.Split("$$")[0] });
+        TransferCallMemory(instruction.Address, method, layout, arguments, returnBuffer, state, result);
         Clobber(state, instruction.Address);
         if (variable is not null)
         {

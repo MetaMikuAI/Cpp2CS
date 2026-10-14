@@ -101,6 +101,7 @@ public sealed partial class FunctionLifter
         var variable = returnType is null ? null : $"call_{pc:x}";
         if (name is not null) statements.Add(new CallStatement(pc, name, arguments, variable, returnType, false, null, NoReturn: helper.NoReturn));
         result.Proofs.Add(new(pc, "RuntimeHelper", helper.Evidence));
+        if (!Arm64Calls.PreservesCallerStack(helper.Kind)) InvalidateCallMemory(state, pc);
         Clobber(state, pc);
         if (variable is not null) BindAbiValue(state, "x0", new(new InputBits(variable, 64), returnType!, new NameExpression(variable)));
         void Reject(string reason)

@@ -311,12 +311,10 @@ public sealed class SsaSemantics(NativeSsaProgram program, NativeMethod method, 
         if (layout.Return is { Indirect: true, Pieces: var pieces } && pieces.Count == 1 && pieces[0].Location is Abi.RegisterLocation register)
             effects.Add(new(call, "indirect-return", RegisterArgument(call, register.Name), CallValue(call)));
         // 可变值类型接收者使用调用后的存储身份，不沿用调用前的值或字段常量。
-        if (target.Parameters.FirstOrDefault() is { Name: "__this", Type: var receiverType } && receiverType.EndsWith('*') &&
-            abi.Managed.BaseTypeOf(target.Name.Split("$$")[0]) is "System.ValueType" or "System.Enum" &&
+        if (abi.MutableReceiverType(target) is { } type &&
             layout.Arguments[0].Pieces is var receiverPieces && receiverPieces.Count == 1 && receiverPieces[0].Location is Abi.RegisterLocation receiverRegister)
         {
             var address = RegisterArgument(call, receiverRegister.Name);
-            var type = receiverType[..^1];
             effects.Add(new(call, "mutable-receiver", address, Term("call-storage", layouts.Size(type) * 8, call, type: type, inputs: [address])));
         }
         return effects.ToArray();

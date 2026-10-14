@@ -6,6 +6,9 @@ namespace Cpp2CS.Native;
 public sealed class NativeAbi(HeaderLayout layouts, ManagedNames managed)
 {
     public ManagedNames Managed => managed;
+    public string? MutableReceiverType(NativeMethod method) =>
+        method.Parameters.FirstOrDefault() is { Name: "__this", Type: var type } &&
+        managed.BaseTypeOf(method.Name.Split("$$")[0]) is "System.ValueType" or "System.Enum" ? type.TrimEnd('*') : null;
     public NativeMethod Normalize(NativeMethod method)
     {
         if (method.Parameters.FirstOrDefault() is { Name: "__this" } receiver && !receiver.Type.EndsWith('*') &&

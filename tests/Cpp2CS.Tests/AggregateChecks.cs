@@ -21,7 +21,16 @@ public static class AggregateChecks
         string Shape(Expression expression) => JsonSerializer.Serialize(SemanticData.Expression(expression));
         check(rates.Length == 2 && Shape(rates[0].Arguments[2]) == Shape(rates[1].Arguments[2]), "两次进度条调用共享原始增强体力比例");
         check(Shape(rates[1].Arguments[1]) != Shape(rates[0].Arguments[1]) && Shape(rates[1].Arguments[3]) != Shape(rates[0].Arguments[3]), "转换后的普通和 boost 比例保持独立来源");
-        check(calls.Single(c => c.Name == "SetActive").Arguments[0] is BinaryExpression { Operator: "<=" }, "CSET 有符号 LE 还原为布尔参数");
+        bool LeBit(Expression value) => value switch
+        {
+            CapturedExpression captured => LeBit(captured.Value),
+            OperationExpression { Operation: ValueOperation.IntegerCast, Arguments: [var inner], Type: var type } when IntegerProjection.Width(type) > 0 => LeBit(inner),
+            OperationExpression { Operation: ValueOperation.Select, Arguments: [BinaryExpression { Operator: "<=" }, ConstantExpression { Value: 1 }, ConstantExpression { Value: 0 }] } => true,
+            _ => false
+        };
+        var active = calls.Single(c => c.Name == "SetActive").Arguments[0];
+        check(active is BinaryExpression { Operator: "<=" } || active is BinaryExpression { Operator: "!=", Right: ConstantExpression { Value: 0 } } converted && LeBit(converted.Left),
+            "CSET 有符号 LE 的 0/1 值经整数转换后仍作为同一布尔参数");
         check(text.Contains("masterMysekaiStamina.maxStamina") && text.Contains("this.ConvertLiveBonusToBoostStamina"), "泛型字段布局与省略接收者恢复");
         Operand R(string name) => new(1, name, 0, null, null, 0, 0, 0, 0);
         Instruction I(ulong address, string mnemonic, params Operand[] operands) => new(address, mnemonic, "", operands, false, false, "");

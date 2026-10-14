@@ -13,6 +13,11 @@ public static class CallStorageChecks
         var image = new ElfImage(inputs.Binary);
         var runtime = new RuntimeProfile(image);
         var abi = new NativeAbi(layouts, managed);
+        var unusedTarget = symbols.Unique(0x58bc0a4)!;
+        var unusedBoundary = UnwindBoundary.Read(image, unusedTarget.Address);
+        var unusedCode = decoder.Decode(image.Read(unusedTarget.Address, (int)(unusedBoundary.End - unusedTarget.Address)), unusedTarget.Address);
+        var unusedGraph = new NativeGraph(unusedCode, runtime.NoReturn, target => symbols.Unique(target) is not null || runtime.Helpers.ContainsKey(target));
+        check(UnusedReceiver.Prove(unusedGraph, "x1", call => Arm64Calls.Inputs(call, symbols, abi, runtime)), "真实隐藏参数在读取前被完整覆盖，证明消费共享机器效果与 helper ABI");
         check(managed.BaseTypeOf("System.Object") is null, "无基类类型的 nil 元数据句柄返回空，不越界读取");
         var equivalents = new NativeBodyEquivalence(image, decoder);
         var owner = symbols.Unique(0x58bbcb8)!;
@@ -68,5 +73,11 @@ public static class CallStorageChecks
         check(rethrow.Length == 2 && rethrow.All(c => c.Arguments.Length == 1), "重抛 helper 的签名包含一个参数");
         check(rethrow.All(c => flow.Nodes.Single(n => n.Instruction.Address == c.Address).Edges.All(e => e.Kind != "normal-return")), "重抛异常不能落入下一个处理块");
         check(flow.Nodes.SelectMany(n => n.Edges).Where(e => e.Region?.Actions.Any(a => a.Kind == "cleanup") == true).All(e => e.Kind != "unmatched-exception-unwind"), "真实清理区域不存在绕过 Dispose 的虚构展开边");
+
+        var rotated = new FunctionLifter(image, decoder, symbols, layouts, managed, runtime).Lift(0x57921fc);
+        var addition = rotated.Blocks.Values.SelectMany(b => b.Statements).OfType<CallStatement>().Single(c => c.Address == 0x5792334);
+        var unknownStorage = false;
+        SourceTree.Map(addition.Arguments[1], value => { unknownStorage |= value is UnknownExpression; return value; });
+        check(rotated.Problems.Count > 0 && unknownStorage, "未证明的真实栈构造调用不能继续使用调用前的零值");
     }
 }

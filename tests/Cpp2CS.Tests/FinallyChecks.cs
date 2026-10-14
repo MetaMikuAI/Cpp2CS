@@ -28,7 +28,18 @@ public static class FinallyChecks
         check(result.Problems.Count == 0 && result.Finally is not null, "真实循环清理区域完成证明");
         var text = File.ReadAllText("artifacts/recovered/0x58bbcb8.cs.txt");
         check(new[] { "Runtime.", "MetadataValue", "DisplayClass", "static_fields", "__9", "UNKNOWN", "PARTIAL" }.All(s => !text.Contains(s)), "完整源码没有编译器环境或未知占位");
-        check(text.Contains("finally") && text.Contains(".Dispose();") && text.Contains(".Current") && text.Contains("x => x.seq"), "完整输出保留枚举协议、清理与排序 lambda");
+        var source = session.SourceView(session.View(result)).View;
+        var sortKey = false;
+        SourceTree.Map(source, expression =>
+        {
+            if (expression is LambdaExpression { Parameters: [var parameter], Body: var body })
+            {
+                if (body is OperationExpression { Operation: ValueOperation.IntegerCast, Type: "int32_t", Arguments: [var argument] }) body = argument;
+                sortKey |= body is MemberExpression { Receiver: NameExpression receiver, Field.Name: "seq", Field.Type: "int32_t" } && receiver.Name == parameter;
+            }
+            return expression;
+        });
+        check(text.Contains("finally") && text.Contains(".Dispose();") && text.Contains(".Current") && sortKey, "完整输出保留枚举协议、清理与排序字段 lambda");
         Directory.CreateDirectory("artifacts/finally");
         var start = text.IndexOf("System.Collections.Generic.List<", StringComparison.Ordinal);
         File.WriteAllText("artifacts/finally/Recovered.cs", "namespace Sekai.Mysekai; public static partial class BulkHarvestMasterUtility { public static " + text[start..] + "\n}");
