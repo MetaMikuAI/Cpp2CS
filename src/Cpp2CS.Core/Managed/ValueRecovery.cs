@@ -211,10 +211,18 @@ public sealed partial class ValueRecovery
         }
     }
 
-    /// <summary>把内存位置恢复为实例字段或托管引用解引用，可用于读取和写入。</summary>
+    /// <summary>把内存位置恢复为静态字段、实例字段或托管引用解引用，可用于读取和写入。</summary>
     public ManagedValue? Location(Expr address, int width, out string? problem, bool whole = false)
     {
         problem = null;
+        if (Metadata.StaticAddress(address) is { } storage)
+        {
+            if (width <= 0 || width % 8 != 0 || types.StaticFieldPath(storage.Type, storage.Offset, width / 8) is not { Count: > 0 } fields)
+                return Fail($"静态字段位置未匹配 {storage.Type}+{storage.Offset}:{width}", out problem);
+            ManagedValue location = new StaticFieldValue(fields[0].Field, fields[0].Type, types.Size(fields[0].Type) * 8);
+            foreach (var field in fields.Skip(1)) location = new FieldValue(location, field.Field, field.Type, types.Size(field.Type) * 8);
+            return location;
+        }
         if (ArrayElement(address, width) is { } element) return element;
         if (address is FrameAddress frame)
         {
@@ -299,6 +307,12 @@ public sealed partial class ValueRecovery
 
     public ManagedValue? RecoverAs(Expr native, TypeRef expected, out string? problem)
     {
+        if (expected is ByRefRef staticReference && Metadata.StaticAddress(native) is not null)
+        {
+            var location = Location(native, types.Size(staticReference.Element) * 8, out problem, whole: true);
+            return location?.Type == staticReference.Element ? new AddressValue(location, staticReference)
+                : Fail("静态字段引用类型不符", out problem);
+        }
         if (native is FrameAddress frame && expected is ByRefRef byRef)
         {
             problem = null;

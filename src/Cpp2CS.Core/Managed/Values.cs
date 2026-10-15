@@ -22,6 +22,7 @@ public sealed record NewArrayValue(ArrayRef ArrayType, ManagedValue Length) : Ma
 public sealed record ArrayLengthValue(ManagedValue Array, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record ArrayElementValue(ManagedValue Array, ManagedValue Index, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width);
+public sealed record StaticFieldValue(FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record IndirectValue(ManagedValue Address, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record InvocationValue(ManagedInvocation Invocation, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record BinaryValue(BinOp Op, ManagedValue Left, ManagedValue Right, TypeRef Type, int Width) : ManagedValue(Type, Width);

@@ -6,7 +6,7 @@ namespace Cpp2CS.Managed;
 /// <summary>托管成员的访问权限。原生内联不改变恢复后 CIL/C# 所需的权限。</summary>
 public static class ManagedAccess
 {
-    public static bool Field(ManagedTypes types, TypeDef caller, FieldRef field, TypeRef receiver) =>
+    public static bool Field(ManagedTypes types, TypeDef caller, FieldRef field, TypeRef? receiver) =>
         Allowed(types, caller, field.Field.Owner, field.DeclaringType, (int)(field.Field.Attributes & FieldAttributes.FieldAccessMask), receiver);
 
     public static bool Method(ManagedTypes types, TypeDef caller, MethodRef method, TypeRef? receiver) =>

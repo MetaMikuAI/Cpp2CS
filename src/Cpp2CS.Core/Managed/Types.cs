@@ -218,6 +218,28 @@ public sealed class ManagedTypes
         }
     }
 
+    /// <summary>静态存储只包含本类字段；泛型静态布局、线程静态和未知偏移不套用普通静态字段布局。</summary>
+    public IReadOnlyList<(FieldRef Field, TypeRef Type)>? StaticFieldPath(DefinitionRef owner, int offset, int bytes)
+    {
+        if (owner.Arguments.Count != 0 || owner.Definition.GenericParameters.Count != 0 || offset < 0 || bytes <= 0) return null;
+        FieldDef? hit = null;
+        foreach (var field in owner.Definition.Fields.Where(f => f.IsStatic && !f.IsThreadStatic && f.Offset >= 0
+            && (f.Attributes & System.Reflection.FieldAttributes.Literal) == 0))
+        {
+            var size = Size(field.Type);
+            if (size <= 0 || offset < field.Offset || (long)offset >= (long)field.Offset + size) continue;
+            if (hit is not null) return null;
+            hit = field;
+        }
+        if (hit is null) return null;
+        var head = (new FieldRef(hit, owner), hit.Type);
+        var inner = offset - hit.Offset;
+        if (inner == 0 && Size(hit.Type) == bytes) return [head];
+        if (Kind(hit.Type) != ValueKind.Struct || (long)inner + bytes > Size(hit.Type)
+            || FieldPath(hit.Type, inner, bytes) is not { } nested) return null;
+        return [head, .. nested];
+    }
+
     /// <summary>a 是否可赋给 b（同一类型或 b 为 a 的基类/接口；引用类型）。</summary>
     public bool IsAssignable(TypeRef from, TypeRef to)
     {

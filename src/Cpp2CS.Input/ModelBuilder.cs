@@ -293,6 +293,9 @@ namespace Cpp2CS.Input
                 };
             }).ToArray();
             ReadCustomAttributes(assemblies, methods, fields, properties);
+            foreach (var field in fields)
+                field.IsThreadStatic = field.CustomAttributes.Any(a => a.Constructor.Owner.FullName == "System.ThreadStaticAttribute"
+                    && a.Constructor.Owner.Assembly == "mscorlib.dll");
 
             var model = new ProgramModel
             {

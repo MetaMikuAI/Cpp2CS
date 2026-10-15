@@ -17,6 +17,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
     private MethodBody body = null!;
     private ILProcessor il = null!;
     private TypeDef accessContext = null!;
+    private MethodRef methodContext = null!;
 
     public static string? Emit(Skeleton skeleton, ManagedTypes types, ManagedBody recovered)
     {
@@ -51,6 +52,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             return "具体泛型实例尚未合并为开放方法体";
         if (recovered.Blocks.Count == 0) return "空控制流图";
         accessContext = recovered.Method.Method.Owner;
+        methodContext = recovered.Method;
         if (method.IsConstructor && !method.IsStatic && !method.DeclaringType.IsValueType
             && ConstructorInitialization.Check(recovered) is { } initializationProblem) return initializationProblem;
         foreach (var block in recovered.Blocks)
@@ -58,6 +60,9 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             {
                 if (statement is ManagedCall c && !ManagedAccess.Method(types, accessContext, c.Invocation.Method, c.Invocation.Receiver?.Type))
                     return $"调用访问权限尚未恢复: {c.Invocation.Method}";
+                if (statement is ManagedStore store && StaticWriteProblem(store.Target) is { } writeProblem) return writeProblem;
+                if (statement is ManagedCall { Invocation.Receiver: { } receiver } && types.Kind(receiver.Type) == ValueKind.Struct
+                    && StaticWriteProblem(receiver) is { } receiverProblem) return receiverProblem;
                 foreach (var value in Values(statement))
                     if (Problem(value) is { } problem) return problem;
             }
@@ -101,8 +106,8 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
         {
             case ArgumentValue or LocalValue or StackLocalValue: return null;
             case StringValue: return value.Type == types.String ? null : "字符串常量类型不符";
-            case TypeHandleValue handle: return ManagedTypes.PrimitiveName(handle.Type) is null
-                && handle.Type is DefinitionRef { Definition.FullName: "System.RuntimeTypeHandle" } ? null : "类型句柄的托管类型不符";
+            case TypeHandleValue handle: return handle.Type == types.RuntimeTypeHandle && handle.Width == types.Size(types.RuntimeTypeHandle) * 8
+                ? null : "类型句柄的托管类型不符";
             case NewArrayValue array:
                 if (!array.ArrayType.IsVector || array.ArrayType.Rank != 1) return "数组分配需要 SZARRAY 类型";
                 children = [array.Length]; break;
@@ -113,7 +118,9 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 if (element.Array.Type is not ArrayRef { Rank: 1, IsVector: true } a || element.Type != a.Element) return "数组元素类型不符";
                 children = [element.Array, element.Index]; break;
             case DefaultValue: return types.Kind(value.Type) == ValueKind.Struct ? null : "default 值必须为已知结构体";
-            case AddressValue reference: children = [reference.Target]; break;
+            case AddressValue reference:
+                if (StaticWriteProblem(reference.Target) is { } addressProblem) return addressProblem;
+                children = [reference.Target]; break;
             case AggregateValue aggregate:
                 foreach (var member in aggregate.Members)
                 {
@@ -133,10 +140,18 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 if (!ManagedAccess.Field(types, accessContext, f.Field, f.Receiver.Type))
                     return $"内联字段访问权限尚未恢复: {f.Field.Field}";
                 children = [f.Receiver]; break;
+            case StaticFieldValue f:
+                if (!f.Field.Field.IsStatic || f.Field.Field.IsThreadStatic
+                    || (f.Field.Field.Attributes & System.Reflection.FieldAttributes.Literal) != 0) return "静态字段存储类型不符";
+                if (f.Type != f.Field.Field.Type.Substitute(f.Field.DeclaringType is DefinitionRef declaring ? declaring.Arguments : [], [])
+                    || f.Width != types.Size(f.Type) * 8) return "静态字段值类型或位宽不符";
+                return ManagedAccess.Field(types, accessContext, f.Field, null) ? null : $"静态字段访问权限尚未恢复: {f.Field.Field}";
             case IndirectValue i: children = [i.Address]; break;
             case InvocationValue invocation:
                 if (!ManagedAccess.Method(types, accessContext, invocation.Invocation.Method, invocation.Invocation.Receiver?.Type))
                     return $"调用访问权限尚未恢复: {invocation.Invocation.Method}";
+                if (invocation.Invocation.Receiver is { } target && types.Kind(target.Type) == ValueKind.Struct
+                    && StaticWriteProblem(target) is { } targetProblem) return targetProblem;
                 children = invocation.Invocation.Receiver is { } receiver
                     ? new[] { receiver }.Concat(invocation.Invocation.Arguments) : invocation.Invocation.Arguments;
                 break;
@@ -168,6 +183,21 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
         return null;
     }
 
+    private string? StaticWriteProblem(ManagedValue target)
+    {
+        FieldRef? readOnlyMember = null;
+        while (target is FieldValue field && types.Kind(field.Receiver.Type) == ValueKind.Struct)
+        {
+            if ((field.Field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0) readOnlyMember = field.Field;
+            target = field.Receiver;
+        }
+        if (target is not StaticFieldValue storage) return null;
+        if (readOnlyMember is not null) return $"静态存储内只读结构体字段的写入尚未恢复: {readOnlyMember.Field}";
+        return (storage.Field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
+            && !(methodContext.Method is { Name: ".cctor", IsStatic: true } && methodContext.Method.Owner == storage.Field.Field.Owner)
+                ? $"只读静态字段只能在本类静态构造函数中写入或传递可写引用: {storage.Field.Field}" : null;
+    }
+
     private VariableDefinition Local(LocalValue value)
     {
         if (!locals.TryGetValue(value.Variable, out var local)) locals.Add(value.Variable, local = Temp(value.Type));
@@ -195,6 +225,8 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             case ManagedStore { Target: StackLocalValue local } s: Value(s.Value); il.Emit(OpCodes.Stloc, StackLocal(local)); break;
             case ManagedStore { Target: FieldValue f } s:
                 Receiver(f.Receiver); Value(s.Value); il.Emit(OpCodes.Stfld, fieldReference(f.Field)); break;
+            case ManagedStore { Target: StaticFieldValue f } s:
+                Value(s.Value); il.Emit(OpCodes.Stsfld, fieldReference(f.Field)); break;
             case ManagedStore { Target: IndirectValue i } s:
                 Value(i.Address); Value(s.Value); il.Emit(OpCodes.Stobj, typeReference(i.Type)); break;
             case ManagedStore { Target: ArrayElementValue element } s:
@@ -246,6 +278,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             case StackLocalValue local: il.Emit(OpCodes.Ldloca, StackLocal(local)); break;
             case ArgumentValue { Index: >= 0 } argument: il.Emit(OpCodes.Ldarga, destination.Parameters[argument.Index]); break;
             case FieldValue field: Receiver(field.Receiver); il.Emit(OpCodes.Ldflda, fieldReference(field.Field)); break;
+            case StaticFieldValue field: il.Emit(OpCodes.Ldsflda, fieldReference(field.Field)); break;
             case IndirectValue indirect: Value(indirect.Address); break;
             case ArrayElementValue element:
                 Value(element.Array); Value(element.Index); il.Emit(OpCodes.Conv_U); il.Emit(OpCodes.Ldelema, typeReference(element.Type)); break;
@@ -307,6 +340,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             case ArrayElementValue element:
                 Value(element.Array); Value(element.Index); il.Emit(OpCodes.Conv_U); il.Emit(OpCodes.Ldelem_Any, typeReference(element.Type)); break;
             case FieldValue f: Receiver(f.Receiver); il.Emit(OpCodes.Ldfld, fieldReference(f.Field)); break;
+            case StaticFieldValue f: il.Emit(OpCodes.Ldsfld, fieldReference(f.Field)); break;
             case IndirectValue i: Value(i.Address); il.Emit(OpCodes.Ldobj, typeReference(i.Type)); break;
             case InvocationValue invocation: Invocation(invocation.Invocation); break;
             case BinaryValue b: Binary(b); break;

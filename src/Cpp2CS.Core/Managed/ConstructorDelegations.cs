@@ -148,7 +148,7 @@ public sealed class ConstructorDelegations(RecoverySession session)
             ChoiceValue c => c with { Condition = Expand(c.Condition), True = Expand(c.True), False = Expand(c.False) },
             BooleanValue b => b with { Left = Expand(b.Left), Right = Expand(b.Right) },
             NegatedValue n => n with { Operand = Expand(n.Operand) },
-            ArgumentValue or LocalValue or StackLocalValue or DefaultValue or ConstantValue or StringValue or TypeHandleValue => value,
+            ArgumentValue or LocalValue or StackLocalValue or DefaultValue or ConstantValue or StringValue or TypeHandleValue or StaticFieldValue => value,
             _ => throw new NotSupportedException(value.ToString()),
         };
         bool Copy(ManagedValue value) => types.Kind(value.Type) != ValueKind.Struct

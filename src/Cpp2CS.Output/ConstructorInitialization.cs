@@ -105,7 +105,7 @@ internal static class ConstructorInitialization
         BinaryValue b => [b.Left, b.Right], UnaryValue u => [u.Operand], ConversionValue c => [c.Operand],
         ComparisonValue c => [c.Left, c.Right], ChoiceValue c => [c.Condition, c.True, c.False],
         BooleanValue b => [b.Left, b.Right], NegatedValue n => [n.Operand],
-        ArgumentValue or LocalValue or StackLocalValue or DefaultValue or ConstantValue or StringValue or TypeHandleValue => [],
+        ArgumentValue or LocalValue or StackLocalValue or DefaultValue or ConstantValue or StringValue or TypeHandleValue or StaticFieldValue => [],
         _ => throw new NotSupportedException(value.ToString()),
     };
 }

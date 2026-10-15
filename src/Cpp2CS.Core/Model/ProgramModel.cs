@@ -155,7 +155,7 @@ public sealed class FieldDef
     public uint Token { get; init; }
     public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
     public bool IsStatic => (Attributes & FieldAttributes.Static) != 0;
-    public bool IsThreadStatic { get; init; }
+    public bool IsThreadStatic { get; internal set; }
     public override string ToString() => $"{Owner.FullName}.{Name}";
 }
 
