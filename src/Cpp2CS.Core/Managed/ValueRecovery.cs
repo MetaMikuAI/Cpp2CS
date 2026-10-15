@@ -7,7 +7,7 @@ namespace Cpp2CS.Managed;
 /// 从方法签名、字段布局和已知调用传播值类型。内存读取保留在原定义处，使用处只引用局部值，避免移动副作用。
 /// 不能确定的值返回 null，并保留原因；不把机器地址或未知位型伪装为托管对象。
 /// </summary>
-public sealed class ValueRecovery
+public sealed partial class ValueRecovery
 {
     private readonly RecoverySession session;
     private readonly PreparedMethod method;
@@ -46,33 +46,6 @@ public sealed class ValueRecovery
         arguments[piece.Register] = new ArgumentValue(index, name, value.Type, piece.Width);
     }
 
-    private void Infer()
-    {
-        var statements = method.Function.Blocks.SelectMany(b => b.Statements).ToArray();
-        var changed = true;
-        while (changed)
-        {
-            changed = false;
-            foreach (var statement in statements)
-            {
-                if (statement is Define define && !locals.ContainsKey(define.Target) && Recover(define.Value, out _) is { } value)
-                {
-                    locals.Add(define.Target, (value.Type, value.Width));
-                    changed = true;
-                }
-                else if (statement is Phi phi && !locals.ContainsKey(phi.Target))
-                {
-                    var sources = phi.Sources.Where(v => v != phi.Target).Select(v => Variable(v, phi.Target.Width, out _)).ToArray();
-                    if (sources.Length == 0 || sources.Any(v => v is null)) continue;
-                    var first = sources[0]!;
-                    if (sources.Any(v => v!.Type != first.Type || v.Width != first.Width)) continue;
-                    locals.Add(phi.Target, (first.Type, first.Width));
-                    changed = true;
-                }
-            }
-        }
-    }
-
     private ManagedValue? Variable(Variable variable, int width, out string? problem)
     {
         ManagedValue? value = variable.Version == 0
@@ -84,6 +57,12 @@ public sealed class ValueRecovery
         {
             problem = null;
             return new ConversionValue(ConvKind.Truncate, value, integer, width);
+        }
+        if (width > value.Width && width <= variable.Width && Numeric(value.Type) && Integer(width) is { } wide
+            && ZeroHigh(variable, value.Width))
+        {
+            problem = null;
+            return new ConversionValue(ConvKind.ZeroExtend, value, wide, width);
         }
         return Fail($"变量 {variable} 的有效位宽 {value.Width} 与读取 {width} 不符", out problem);
     }
@@ -100,8 +79,7 @@ public sealed class ValueRecovery
             case Ir.Convert conversion:
             {
                 if (Recover(conversion.Operand, out problem) is not { } operand) return null;
-                var target = conversion.Kind is ConvKind.SIntToFloat or ConvKind.UIntToFloat or ConvKind.FloatToFloat
-                    ? Float(conversion.Width) : Integer(conversion.Width, conversion.Kind is ConvKind.SignExtend or ConvKind.FloatToSInt);
+                var target = NumericResult(conversion);
                 if (target is null || !Numeric(operand.Type)) return Fail("未支持的位型转换", out problem);
                 return new ConversionValue(conversion.Kind, operand, target, conversion.Width);
             }
@@ -109,8 +87,7 @@ public sealed class ValueRecovery
             {
                 if (Recover(binary.Left, out problem) is not { } left || Recover(binary.Right, out problem) is not { } right) return null;
                 if (!Numeric(left.Type) || !Numeric(right.Type)) return Fail("对象地址运算尚未还原", out problem);
-                var floating = binary.Op is BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv or BinOp.FMin or BinOp.FMax;
-                var type = floating ? Float(binary.Width) : Integer(binary.Width, binary.Op is BinOp.SDiv or BinOp.SRem or BinOp.AShr or BinOp.MulHighS);
+                var type = NumericResult(binary);
                 if (type is null) return Fail("未支持的运算位宽", out problem);
                 return new BinaryValue(binary.Op, left, right, type, binary.Width);
             }
@@ -118,9 +95,7 @@ public sealed class ValueRecovery
             {
                 if (Recover(unary.Operand, out problem) is not { } operand) return null;
                 if (!Numeric(operand.Type)) return Fail("非数值一元运算", out problem);
-                var floating = unary.Op is UnOp.FNeg or UnOp.FAbs or UnOp.FSqrt or UnOp.FFloor or UnOp.FCeil
-                    or UnOp.FTrunc or UnOp.FRoundEven or UnOp.FRoundAway or UnOp.FRoundCurrent;
-                var type = floating ? Float(unary.Width) : Integer(unary.Width);
+                var type = NumericResult(unary);
                 return type is null ? Fail("未支持的一元运算位宽", out problem) : new UnaryValue(unary.Op, operand, type, unary.Width);
             }
             case Compare compare:
@@ -217,6 +192,11 @@ public sealed class ValueRecovery
 
     public ManagedValue? RecoverAs(Expr native, TypeRef expected, out string? problem)
     {
+        if (native is Use use && ManagedTypes.IsReferenceType(expected) && IsZero(use.Variable))
+        {
+            problem = null;
+            return new ConstantValue(0, expected, 64);
+        }
         if (Recover(native, out problem) is not { } value) return null;
         if (value.Type == expected) return value;
         if (Numeric(value.Type) && Numeric(expected) && types.Size(expected) * 8 == value.Width)
