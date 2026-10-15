@@ -13,7 +13,9 @@ namespace Cpp2CS.Tests;
 internal static class SsaRun
 {
     /// <summary>按托管签名给出返回值所在存储；结构体返回尚未区分（待验证），暂按 x0。</summary>
-    public static Expr? ReturnValue(MethodDef method, CallingConvention convention) => method.ReturnType.ToString() switch
+    public static Expr? ReturnValue(MethodDef method, CallingConvention convention) => ReturnValue(method.ReturnType, convention);
+
+    public static Expr? ReturnValue(TypeRef type, CallingConvention convention) => type.ToString() switch
     {
         "void" => null,
         "float" => new Read(convention.FloatResults[0], 32),

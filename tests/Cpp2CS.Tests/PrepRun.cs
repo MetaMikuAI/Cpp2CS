@@ -15,7 +15,7 @@ namespace Cpp2CS.Tests;
 /// </summary>
 internal static class PrepRun
 {
-    public sealed record Context(ProgramModel Model, FunctionTable Functions, IMachine Machine, CfgBuilder Builder, CallResolver Resolver, ManagedTypes Types, IManagedAbi Abi);
+    public sealed record Context(ProgramModel Model, FunctionTable Functions, IMachine Machine, CfgBuilder Builder, CallResolver Resolver, ManagedTypes Types, IManagedAbi Abi, ManagedCallModel Calls);
 
     public static Context Create(ProgramModel model)
     {
@@ -24,17 +24,19 @@ internal static class PrepRun
         var builder = new CfgBuilder(machine, functions);
         var resolver = new CallResolver(model, new RuntimeHelpers(builder), new ManagedCopies(machine, functions, model));
         var types = new ManagedTypes(model, 16);
-        return new Context(model, functions, machine, builder, resolver, types, new Arm64ManagedAbi(types));
+        var abi = new Arm64ManagedAbi(types);
+        return new Context(model, functions, machine, builder, resolver, types, abi, new ManagedCallModel(resolver.Resolve, abi, machine.Convention));
     }
 
     /// <summary>构建并整理一个方法；SSA 失败时返回错误。</summary>
-    public static (MachineFunction Function, Prepare.Result? Result, List<string> Errors) Build(Context context, MethodDef method, ulong address, FunctionRange? range)
+    public static (MachineFunction Function, Prepare.Result? Result, List<string> Errors) Build(Context context, MethodRef method, ulong address, FunctionRange? range)
     {
         var convention = context.Machine.Convention;
         var function = range is null ? context.Builder.Build(address) : context.Builder.Build(address, range);
-        var errors = SsaRun.Lower(function, convention, SsaRun.ReturnValue(method, convention));
+        var returnType = method.Method.ReturnType.Substitute(method.TypeArguments, method.MethodArguments);
+        var errors = Lowering.Registers(function, convention, context.Calls, SsaRun.ReturnValue(returnType, convention));
         if (errors.Count > 0) return (function, null, errors);
-        var result = new Prepare(context.Resolver, context.Abi, convention).Run(function);
+        var result = new Prepare(context.Resolver, context.Calls, convention).Run(function);
         return (function, result, SsaCheck.Verify(function, Dominators.Compute(function)));
     }
 
@@ -47,29 +49,47 @@ internal static class PrepRun
             var address = System.Convert.ToUInt64(selector[2..], 16);
             var owners = model.Code.TryGetValue(address, out var list) ? list : [];
             foreach (var owner in owners) Console.WriteLine($"// {owner.Method}");
-            var (function, result, errors) = Build(context, owners[0].Method.Method, address, null);
+            if (owners.Count == 0)
+            {
+                Console.Error.WriteLine($"0x{address:x} 没有托管方法签名");
+                return 1;
+            }
+            var (function, result, errors) = Build(context, owners[0].Method, address, null);
             foreach (var error in errors) Console.WriteLine($"// 错误: {error}");
             if (result is not null) Console.WriteLine($"// 提升栈槽 {result.PromotedSlots}  castclass {string.Join(",", result.Castclass.Select(a => $"0x{a:x}"))}");
             Console.Write(Annotate(context, function));
-            return 0;
+            return errors.Count == 0 ? 0 : 1;
         }
 
         var namespaces = selector?.Split(',') ?? Corpus.Default(model.Image.Architecture);
-        var methods = Corpus.Select(model, namespaces).GroupBy(m => m.Address).Select(g => g.First()).OrderBy(m => m.Address).ToList();
+        var definitions = model.Methods.Where(m => Corpus.InNamespaces(m.Owner, namespaces)).ToArray();
+        var cases = Corpus.Cases(model, namespaces);
+        var represented = cases.Select(c => c.Method.Method).ToHashSet();
+        var missing = definitions.Where(m => !represented.Contains(m) && !m.IsAbstract).ToArray();
+        Console.WriteLine($"方法定义   {definitions.Length}  抽象 {definitions.Count(m => m.IsAbstract)}  无代码 {missing.Length}");
+        Console.WriteLine($"代码 case  {cases.Count}  独立地址 {cases.Select(c => c.Address).Distinct().Count()}");
+        foreach (var group in definitions.GroupBy(m => Corpus.RootNamespace(m.Owner)).OrderBy(g => g.Key))
+            Console.WriteLine($"  范围 {group.Key}: {group.Count()} 个方法定义");
         var watch = Stopwatch.StartNew();
-        int built = 0, failed = 0, landing = 0;
+        int built = 0, failed = 0, landing = 0, noRange = 0;
         var calls = new Dictionary<string, int>();
         var unknowns = new Dictionary<string, int>();
         int escapes = 0, frameLoads = 0, blocks = 0, statements = 0;
         var samples = new Dictionary<string, string>();
-        foreach (var method in methods)
+        foreach (var (address, methodRef) in cases)
         {
-            if (context.Functions.At(method.Address) is not { } range || range.Start != method.Address) continue;
-            var (function, result, errors) = Build(context, method, method.Address, range);
+            if (context.Functions.At(address) is not { } range || range.Start != address)
+            {
+                noRange++;
+                Console.WriteLine($"无边界 0x{address:x} {methodRef}");
+                continue;
+            }
+            var (function, result, errors) = Build(context, methodRef, address, range);
             built++;
             if (errors.Count > 0)
             {
                 failed++;
+                foreach (var error in errors) Console.WriteLine($"失败 0x{address:x} {methodRef}: {error}");
                 continue;
             }
             if (function.Blocks.Any(b => b.IsLandingPad)) landing++;
@@ -87,7 +107,7 @@ internal static class PrepRun
                         _ => "未知",
                     };
                     calls[key] = calls.GetValueOrDefault(key) + 1;
-                    samples.TryAdd("调用 " + key, $"0x{method.Address:x}");
+                    samples.TryAdd("调用 " + key, $"0x{address:x}");
                 }
                 foreach (var e in ExprMap.Operands(stmt).SelectMany(ExprMap.Walk))
                 {
@@ -96,7 +116,7 @@ internal static class PrepRun
                         case Unknown u:
                             var reason = u.Reason.Contains("被调用破坏") ? "调用破坏" : u.Reason.Contains("已删除") ? "已删除" : u.Reason;
                             unknowns[reason] = unknowns.GetValueOrDefault(reason) + 1;
-                            samples.TryAdd("Unknown " + reason, $"0x{method.Address:x}");
+                            samples.TryAdd("Unknown " + reason, $"0x{address:x}");
                             break;
                         case Load { Address: FrameAddress }:
                             frameLoads++;
@@ -109,11 +129,11 @@ internal static class PrepRun
             }
         }
         Console.WriteLine($"命名空间   {string.Join(",", namespaces)}");
-        Console.WriteLine($"函数       {built}  失败 {failed}  有落地块 {landing}  用时 {watch.ElapsedMilliseconds} ms");
+        Console.WriteLine($"case       {built}  失败 {failed}  无边界 {noRange}  有落地块 {landing}  用时 {watch.ElapsedMilliseconds} ms");
         Console.WriteLine($"块         {blocks}  语句 {statements}  栈读 {frameLoads}  栈地址 {escapes}");
         foreach (var (key, count) in calls.OrderByDescending(p => p.Value)) Console.WriteLine($"  调用 {count,7}  {key}  例 {samples["调用 " + key]}");
         foreach (var (key, count) in unknowns.OrderByDescending(p => p.Value).Take(10)) Console.WriteLine($"  Unknown {count,7}  {key}  例 {samples["Unknown " + key]}");
-        return 0;
+        return cases.Count > 0 && failed == 0 && noRange == 0 ? 0 : 1;
     }
 
     /// <summary>打印函数，并在调用后注明被调用者。</summary>

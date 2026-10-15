@@ -24,6 +24,13 @@ internal static class Corpus
     public static List<MethodDef> Select(ProgramModel model, IReadOnlyList<string> namespaces) =>
         model.Methods.Where(m => m.Address != 0 && InNamespaces(m.Owner, namespaces)).ToList();
 
+    /// <summary>按方法身份保留全部代码所有者，包括共享泛型实例；同地址不合并不同签名。</summary>
+    public static IReadOnlyList<(ulong Address, MethodRef Method)> Cases(ProgramModel model, IReadOnlyList<string> namespaces) =>
+        model.Code.SelectMany(pair => pair.Value
+            .Where(owner => InNamespaces(owner.Method.Method.Owner, namespaces))
+            .Select(owner => (Address: pair.Key, Method: owner.Method)))
+            .Distinct().OrderBy(c => c.Address).ThenBy(c => c.Method.Method.Index).ToArray();
+
     public static IReadOnlyList<string> Default(Architecture architecture) => architecture == Architecture.Arm64
         ? ["Sekai.Mysekai", "Sekai.Api", "Sekai.API"]
         : ["GameData.Profile", "DayScene.UI.RogueLike", "GameData.RunTime.Common", "Night.BossBattle.DLC4_BossBattle", "Common.UI"];

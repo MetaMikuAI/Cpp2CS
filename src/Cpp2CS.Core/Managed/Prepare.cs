@@ -63,7 +63,7 @@ public sealed class CallResolver(ProgramModel model, RuntimeHelpers helpers, Man
 /// il2cpp_codegen_initialize_runtime_metadata、Il2CppCodeGenWriteBarrier）；判空、越界、协变数组检查
 /// 由 IL 指令本身保证，类构造与元数据初始化由 CLR 负责，因此删除后托管语义不变。
 /// </summary>
-public sealed class Prepare(CallResolver resolver, IManagedAbi abi, CallingConvention convention)
+public sealed class Prepare(CallResolver resolver, ManagedCallModel calls, CallingConvention convention)
 {
     /// <summary>整理结果：被标为 castclass 的 IsInst 调用地址；提升的栈槽数。</summary>
     public sealed class Result
@@ -96,55 +96,6 @@ public sealed class Prepare(CallResolver resolver, IManagedAbi abi, CallingConve
 
     // ---------- 1. 收窄调用 ----------
 
-    /// <summary>被调用者读的参数存储与写的结果存储；无法确定时返回 null（保持保守约定）。</summary>
-    private (HashSet<Storage> Reads, Storage[] Results)? Shape(Callee callee)
-    {
-        switch (callee)
-        {
-            case ManagedCallee managed:
-            {
-                var reads = new HashSet<Storage>();
-                var results = new List<Storage>();
-                foreach (var owner in managed.Owners)
-                {
-                    if (abi.Classify(owner.Method, out _) is not { } signature) return null;
-                    if (signature.Arguments.Any(a => a.Passing == Passing.Stack)) return null;
-                    foreach (var piece in signature.Arguments.SelectMany(a => a.Pieces)) reads.Add(piece.Register);
-                    if (signature.MethodInfo is { } methodInfo) reads.Add(methodInfo.Register);
-                    if (signature.Return is { } value)
-                    {
-                        if (value.Passing == Passing.Indirect) reads.Add(value.Pieces[0].Register);
-                        else
-                            foreach (var piece in value.Pieces)
-                                if (!results.Contains(piece.Register)) results.Add(piece.Register);
-                    }
-                }
-                return (reads, results.ToArray());
-            }
-            case HelperCallee { Helper.Kind: var kind }:
-            {
-                if (HelperShape(kind) is not { } shape) return null;
-                var (arguments, returns) = shape;
-                return (arguments.Select(i => convention.IntegerArguments[i]).ToHashSet(), returns ? [convention.IntegerResults[0]] : []);
-            }
-            default:
-                return null;
-        }
-    }
-
-    /// <summary>辅助函数读的整数参数个数与是否返回 x0（il2cpp-codegen 的 C 签名）。</summary>
-    private static (int[] Arguments, bool Returns)? HelperShape(HelperKind kind) => kind switch
-    {
-        HelperKind.InitMetadata or HelperKind.NullCheck or HelperKind.EnsureInit or HelperKind.ObjectNew or HelperKind.CxaBeginCatch => ([0], true),
-        HelperKind.ClassInit or HelperKind.Rethrow or HelperKind.UnwindResume or HelperKind.Terminate => ([0], false),
-        HelperKind.WriteBarrier or HelperKind.Raise or HelperKind.Throw => ([0, 1], false),
-        HelperKind.NewArray or HelperKind.Box or HelperKind.Unbox or HelperKind.IsInst or HelperKind.IsAssignableFrom
-            or HelperKind.GetException or HelperKind.GenericVirtualMethod => ([0, 1], true),
-        HelperKind.InterfaceLookup or HelperKind.Memcpy or HelperKind.Memset => ([0, 1, 2], true),
-        HelperKind.CxaEndCatch => ([], false),
-        _ => null,
-    };
-
     private void Narrow(MachineFunction function)
     {
         var killed = new HashSet<Variable>();
@@ -153,7 +104,7 @@ public sealed class Prepare(CallResolver resolver, IManagedAbi abi, CallingConve
             for (var i = 0; i < block.Statements.Count; i++)
             {
                 if (block.Statements[i] is not Call call || call.Sources.Length != call.Arguments.Length) continue;
-                if (resolver.Resolve(call) is not { } callee || Shape(callee) is not { } shape) continue;
+                if (calls.Shape(call) is not { } shape) continue;
                 var (reads, results) = shape;
                 var keep = Enumerable.Range(0, call.Sources.Length).Where(k => reads.Contains(call.Sources[k])).ToArray();
                 var defines = new List<Variable>();
