@@ -156,6 +156,7 @@ public sealed partial class ValueRecovery
             {
                 if (Recover(conversion.Operand, out problem) is not { } operand) return null;
                 var target = NumericResult(conversion);
+                if (types.Kind(operand.Type) == ValueKind.Struct && aggregates.Bits(operand) is { } bits) operand = bits;
                 if (target is null || !Numeric(operand.Type)) return Fail("未支持的位型转换", out problem);
                 return new ConversionValue(conversion.Kind, operand, target, conversion.Width);
             }
@@ -193,8 +194,16 @@ public sealed partial class ValueRecovery
             {
                 if (Recover(select.Condition, out problem) is not { } condition || Recover(select.True, out problem) is not { } yes
                     || Recover(select.False, out problem) is not { } no) return null;
-                if (yes.Type != no.Type) return Fail("条件值类型尚未合并", out problem);
-                return new ChoiceValue(condition, yes, no, yes.Type, select.Width);
+                if (condition.Width != 1 || yes.Width != select.Width || no.Width != select.Width) return Fail("条件值位宽不一致", out problem);
+                if (yes.Type == no.Type) return new ChoiceValue(condition, yes, no, yes.Type, select.Width);
+                if (Numeric(yes.Type) && Numeric(no.Type) && Integer(select.Width) is { } integer)
+                    return new ChoiceValue(condition, new ConversionValue(ConvKind.Bitcast, yes, integer, select.Width),
+                        new ConversionValue(ConvKind.Bitcast, no, integer, select.Width), integer, select.Width);
+                bool Zero(Expr native, ManagedValue value) => value is ConstantValue { Bits: 0 } || native is Use use && IsZero(use.Variable);
+                if (ManagedTypes.IsReferenceType(yes.Type) && Zero(select.False, no)) no = new ConstantValue(0, yes.Type, 64);
+                else if (ManagedTypes.IsReferenceType(no.Type) && Zero(select.True, yes)) yes = new ConstantValue(0, no.Type, 64);
+                if (!ManagedTypes.IsReferenceType(yes.Type) || !ManagedTypes.IsReferenceType(no.Type)) return Fail("条件值类型尚未合并", out problem);
+                return new ChoiceValue(condition, yes, no, CommonReference([yes.Type, no.Type]), select.Width);
             }
             case Logical logical:
             {

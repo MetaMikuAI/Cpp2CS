@@ -72,14 +72,14 @@ public static class BufferRecoveryCheck
             .. Copy(input, output), new Return(0x1014) { Buffer = output }]);
         Require(BufferInitialization.Check(escaped.Function, escaped.Return, types, _ => null).Count > 0, "未知调用不能取得返回缓冲区地址");
         var overlapping = Prepare(echo, [.. Copy(input, output, true), new Return(0x1014) { Buffer = output }]);
-        Require(TypedCopies.Recover(overlapping.Function, new ValueRecovery(session, overlapping), types).Count == 0, "重叠写入不能当作整值复制");
+        Require(TypedCopies.Recover(overlapping.Function, new ValueRecovery(session, overlapping), types, large).Count == 0, "重叠写入不能当作整值复制");
         var interleaved = Copy(input, output).ToList();
         interleaved.Insert(2, new Call(0x100a, CallKind.Direct, Expr.C(0x8000, 64)));
         var interrupted = Prepare(echo, [.. interleaved, new Return(0x1014) { Buffer = output }]);
-        Require(TypedCopies.Recover(interrupted.Function, new ValueRecovery(session, interrupted), types).Count == 0, "未知副作用不能跨越复制区间");
+        Require(TypedCopies.Recover(interrupted.Function, new ValueRecovery(session, interrupted), types, large).Count == 0, "未知副作用不能跨越复制区间");
         var readAfterWrite = Copy(input, output);
         var reordered = Prepare(echo, readAfterWrite[0], readAfterWrite[3], readAfterWrite[1], readAfterWrite[2], new Return(0x1014) { Buffer = output });
-        Require(TypedCopies.Recover(reordered.Function, new ValueRecovery(session, reordered), types).Count == 0, "交错读写不能改成先读完再写");
+        Require(TypedCopies.Recover(reordered.Function, new ValueRecovery(session, reordered), types, large).Count == 0, "交错读写不能改成先读完再写");
 
         MachineFunction Branch(bool both) => Graph(
             new Block(0x1000) { Statements = [new Branch(0x1000, Expr.C(1, 1), 0x2000, 0x3000)] },

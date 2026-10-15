@@ -17,7 +17,7 @@ public static class BodyRecovery
         problems.AddRange(values.BufferProblems);
         if (values.SignatureProblem is { } signatureProblem) problems.Add(new(prepared.Function.Entry, signatureProblem));
         var returnType = prepared.Method.Method.ReturnType.Substitute(prepared.Method.TypeArguments, prepared.Method.MethodArguments);
-        var copies = TypedCopies.Recover(prepared.Function, values, session.Types);
+        var copies = TypedCopies.Recover(prepared.Function, values, session.Types, returnType);
         var blocks = new List<ManagedBlock>();
         LocalValue? Local(Variable variable) => values.Locals.TryGetValue(variable, out var info) ? new(variable, info.Type, info.Width) : null;
 

@@ -9,6 +9,15 @@ public sealed class AggregateValues(ManagedTypes types)
     private sealed record Leaf(int Offset, TypeRef Type, IReadOnlyList<FieldRef> Path);
     private readonly Dictionary<TypeRef, IReadOnlyList<Leaf>?> layouts = new();
 
+    /// <summary>将完整、无填充的数值字段按原始位型拼成机器整数；不将引用或未知区域解释成位。</summary>
+    public ManagedValue? Bits(ManagedValue value)
+    {
+        if (types.Kind(value.Type) != ValueKind.Struct || types.Size(value.Type) * 8 != value.Width || Integer(value.Width) is not { } integer
+            || types.FieldSpan(value.Type, 0, value.Width / 8) is not { Count: > 0 } fields) return null;
+        var pieces = fields.Select(field => (field.Offset, Value: Field(value, new Leaf(field.Offset, field.Type, field.Path)))).ToArray();
+        return Range(pieces, 0, value.Width) is { } bits && Numeric(bits.Type) ? As(bits, integer) : null;
+    }
+
     public ManagedValue? Project(ManagedValue value, int offset, int width)
     {
         if (offset < 0 || width <= 0 || width % 8 != 0 || offset * 8 + width > value.Width) return null;

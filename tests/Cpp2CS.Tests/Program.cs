@@ -21,6 +21,7 @@ internal static class Program
             "control-flow-check" when args.Length == 1 || args.Length >= 3 => ControlFlowCheck.Run(args.ElementAtOrDefault(1), args.ElementAtOrDefault(2)),
             "field-store-check" when args.Length >= 3 => FieldStoreCheck.Run(args[1], args[2]),
             "zero-initialization-check" when args.Length >= 3 => ZeroInitializationCheck.Run(args[1], args[2]),
+            "conditional-value-check" when args.Length >= 4 => ConditionalValueCheck.Run(args[1], args[2], args[3]),
             "stack-check" when args.Length >= 3 => StackRecoveryCheck.Run(args[1], args[2]),
             "aggregate-check" when args.Length >= 3 => AggregateRecoveryCheck.Run(args[1], args[2]),
             "buffer-check" when args.Length >= 3 => BufferRecoveryCheck.Run(args[1], args[2]),
@@ -67,6 +68,7 @@ internal static class Program
                   Cpp2CS.Tests control-flow-check [binary metadata]
                   Cpp2CS.Tests field-store-check <binary> <metadata>
                   Cpp2CS.Tests zero-initialization-check <binary> <metadata>
+                  Cpp2CS.Tests conditional-value-check <binary> <metadata> <Unicorn参照.json>
                   Cpp2CS.Tests stack-check <binary> <metadata>
                   Cpp2CS.Tests aggregate-check <binary> <metadata>
                   Cpp2CS.Tests buffer-check <binary> <metadata>

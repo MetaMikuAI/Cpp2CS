@@ -8,6 +8,12 @@ public sealed partial class ValueRecovery
     /// <summary>恢复原位置的写入；合并的数值字段写入按完整字段拆解，接收者和源值各求值一次。</summary>
     public IReadOnlyList<ManagedStatement>? Store(Store store, out string? problem)
     {
+        if (Location(store.Target, store.Value.Width, out _, whole: true) is { } whole && types.Kind(whole.Type) == ValueKind.Struct
+            && Recover(store.Value, out _) is { } source && source.Type == whole.Type && source.Width == whole.Width)
+        {
+            problem = null;
+            return [new ManagedStore(store.Address, whole, source)];
+        }
         if (Location(store.Target, store.Value.Width, out problem) is { } location)
             return RecoverAs(store.Value, location.Type, out problem) is { } stored
                 ? [new ManagedStore(store.Address, location, stored)] : null;

@@ -86,14 +86,19 @@ public sealed partial class ValueRecovery
         }
         var references = sources.Where(v => !IsZero(v)).Select(v => Shape(v)!.Value).ToArray();
         if (references.Length == 0 || references.Any(s => !ManagedTypes.IsReferenceType(s.Type))) return null;
-        var common = references[0].Type;
+        return (CommonReference(references.Select(s => s.Type)), 64);
+    }
+
+    private TypeRef CommonReference(IEnumerable<TypeRef> references)
+    {
+        var common = references.First();
         foreach (var source in references.Skip(1))
         {
-            while (!types.IsAssignable(source.Type, common))
+            while (!types.IsAssignable(source, common))
                 common = common is DefinitionRef { Definition.BaseType: { } parent } definition
                     ? parent.Substitute(definition.Arguments, []) : types.Object;
         }
-        return (common, 64);
+        return common;
     }
 
     private TypeRef? NumericResult(Expr value) => value switch

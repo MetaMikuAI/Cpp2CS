@@ -1,5 +1,6 @@
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
+using Cpp2CS.Model;
 
 namespace Cpp2CS.Managed;
 
@@ -8,13 +9,42 @@ public static class TypedCopies
 {
     private sealed record Part(Define Read, Store Write, Expr Source, long SourceOffset, Expr Target, long TargetOffset);
 
-    public static IReadOnlyDictionary<Stmt, ManagedStatement?> Recover(MachineFunction function, ValueRecovery values, ManagedTypes types)
+    public static IReadOnlyDictionary<Stmt, ManagedStatement?> Recover(MachineFunction function, ValueRecovery values, ManagedTypes types, TypeRef returnType)
     {
         var statements = function.Blocks.SelectMany(b => b.Statements).ToArray();
         var definitions = statements.OfType<Define>().ToDictionary(d => d.Target);
         var result = new Dictionary<Stmt, ManagedStatement?>();
         foreach (var block in function.Blocks)
         {
+            if (block.Statements.LastOrDefault() is Return { Value: { } returned, Pieces.Length: 0, Buffer: null } ret && types.Kind(returnType) == ValueKind.Struct)
+            {
+                var width = types.Size(returnType) * 8;
+                var reads = new List<Define>();
+                var variables = new HashSet<Variable>();
+                Expr? Origin(Expr expression)
+                {
+                    if (width is not (8 or 16 or 32 or 64) || expression.Width < width) return null;
+                    if (expression is Ir.Convert { Kind: ConvKind.Bitcast or ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate } conversion)
+                        return Origin(conversion.Operand);
+                    if (expression is not Use use) return expression;
+                    if (!variables.Add(use.Variable) || !definitions.TryGetValue(use.Variable, out var define)
+                        || !block.Statements.Contains(define)) return null;
+                    reads.Add(define);
+                    return Origin(define.Value);
+                }
+                if (Origin(returned) is Load load && load.Width == width && reads.Count > 0
+                    && reads.Zip(reads.Skip(1)).All(p => block.Statements.IndexOf(p.First) > block.Statements.IndexOf(p.Second))
+                    && !statements.Any(s => s is Phi phi && phi.Sources.Any(variables.Contains)
+                        || s != ret && !(s is Define define && reads.Contains(define))
+                        && ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => variables.Contains(u.Variable)))
+                    && values.Location(load.Address, width, out _, whole: true) is { } source && source.Type == returnType)
+                {
+                    var saved = values.Temporary(returnType);
+                    foreach (var read in reads) result.Add(read, null);
+                    result[reads[^1]] = new ManagedAssignment(reads[^1].Address, saved, source);
+                    result.Add(ret, new ManagedReturn(ret.Address, saved));
+                }
+            }
             var parts = new List<Part>();
             foreach (var store in block.Statements.OfType<Store>())
             {

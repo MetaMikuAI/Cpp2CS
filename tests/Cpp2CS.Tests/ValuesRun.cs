@@ -48,9 +48,9 @@ internal static class ValuesRun
                     var values = new ValueRecovery(session, prepared);
                     foreach (var stackProblem in values.Stack.Problems) Problem(stackProblem.Address, stackProblem.Reason);
                     foreach (var bufferProblem in values.BufferProblems) Problem(bufferProblem.Address, bufferProblem.Reason);
-                    var copies = TypedCopies.Recover(prepared.Function, values, session.Types);
-                    if (values.SignatureProblem is { } signatureProblem) Problem(address, "入口 ABI: " + signatureProblem);
                     var returnType = method.Method.ReturnType.Substitute(method.TypeArguments, method.MethodArguments);
+                    var copies = TypedCopies.Recover(prepared.Function, values, session.Types, returnType);
+                    if (values.SignatureProblem is { } signatureProblem) Problem(address, "入口 ABI: " + signatureProblem);
                     foreach (var block in prepared.Function.Blocks)
                     {
                         if (block.IsLandingPad || block.Handler is not null) Problem(block.Start, "异常区域尚未恢复");
