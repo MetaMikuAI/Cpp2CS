@@ -155,6 +155,7 @@ public static class BodyRecovery
         }
         if (problems.Count > 0) return new(null, problems);
         var body = ObjectConstruction.Recover(new ManagedBody(prepared.Method, blocks));
+        if (recoverConstructors) body = InlineConstructors.Recover(session, body);
         if (recoverAccessors) body = InlineAccessors.Recover(session, body);
         if (recoverConstructors) body = session.Constructors.Recover(body);
         return new(body, problems);

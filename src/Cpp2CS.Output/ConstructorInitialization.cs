@@ -46,7 +46,7 @@ internal static class ConstructorInitialization
                 if (current is ArgumentValue { Index: -1 }) return true;
                 if (current is LocalValue local && seen.Add(local.Variable) && definitions.TryGetValue(local.Variable, out var sources))
                     foreach (var source in sources) pending.Push(source);
-                foreach (var child in Children(current)) pending.Push(child);
+                foreach (var child in ValueTree.Children(current)) pending.Push(child);
             }
             return false;
         }
@@ -96,18 +96,4 @@ internal static class ConstructorInitialization
         return null;
     }
 
-    private static IEnumerable<ManagedValue> Children(ManagedValue value) => value switch
-    {
-        AddressValue a => [a.Target], AggregateValue a => a.Members.Select(m => m.Value),
-        FieldValue f => [f.Receiver], IndirectValue i => [i.Address],
-        InvocationValue i => i.Invocation.Receiver is { } receiver ? new[] { receiver }.Concat(i.Invocation.Arguments) : i.Invocation.Arguments,
-        NewArrayValue a => [a.Length], ArrayLengthValue a => [a.Array], ArrayElementValue a => [a.Array, a.Index],
-        BoxValue b => [b.Operand],
-        NewObjectValue n => n.Arguments,
-        BinaryValue b => [b.Left, b.Right], UnaryValue u => [u.Operand], ConversionValue c => [c.Operand],
-        ComparisonValue c => [c.Left, c.Right], ChoiceValue c => [c.Condition, c.True, c.False],
-        BooleanValue b => [b.Left, b.Right], NegatedValue n => [n.Operand],
-        ArgumentValue or LocalValue or StackLocalValue or DefaultValue or ConstantValue or StringValue or TypeHandleValue or StaticFieldValue or ObjectAllocationValue => [],
-        _ => throw new NotSupportedException(value.ToString()),
-    };
 }

@@ -26,7 +26,7 @@ public sealed class ConstructorDelegations(RecoverySession session)
         return body;
     }
 
-    private ConstructorProof? Prove(MethodRef method)
+    internal ConstructorProof? Prove(MethodRef method)
     {
         if (proofs.TryGetValue(method, out var cached)) return cached;
         proofs[method] = null;
@@ -38,8 +38,9 @@ public sealed class ConstructorDelegations(RecoverySession session)
         if (address == 0 || !session.Model.Code.TryGetValue(address, out var owners) || !owners.Any(o => o.Method == method)
             || session.Functions.At(address) is not { } range || range.Start != address) return null;
         var recovered = BodyRecovery.Recover(session, session.Analyze(method, address, range), recoverAccessors: false, recoverConstructors: false);
-        if (recovered.Body is not { } body || Linear(session.Types, body) is not { } statements || Initialization(statements) != 0
-            || ((ManagedCall)statements[0]).Invocation.Method.DeclaringType != definition.Owner.BaseType) return null;
+        if (recovered.Body is not { } body || Linear(session.Types, body) is not { } statements) return null;
+        var initialize = Initialization(statements);
+        if (initialize < 0 || ((ManagedCall)statements[initialize]).Invocation.Method.DeclaringType != definition.Owner.BaseType) return null;
         return proofs[method] = new(address, body);
     }
 
@@ -113,7 +114,7 @@ public sealed class ConstructorDelegations(RecoverySession session)
     }
 
     /// <summary>只处理无分支、无回边、无边赋值的路径；展开参数与常量副本，不展开读取和调用结果。</summary>
-    private static List<ManagedStatement>? Linear(ManagedTypes types, ManagedBody body)
+    internal static List<ManagedStatement>? Linear(ManagedTypes types, ManagedBody body)
     {
         if (body.Method.Method.Name != ".ctor" || body.Method.Method.IsStatic || body.Blocks.Count == 0) return null;
         var blocks = body.Blocks.ToDictionary(b => b.Address);

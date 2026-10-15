@@ -115,7 +115,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 var constructor = created.Constructor;
                 if (constructor.Method.Name != ".ctor" || constructor.Method.IsStatic || !ManagedTypes.IsVoid(constructor.Method.ReturnType)
                     || !ObjectAllocation.Supported(types, created.Type) || constructor.Method.GenericParameters.Count != 0
-                    || constructor.Method.Owner.Methods.Any(m => m.Name == ".cctor" && m.IsStatic)
+                    || !ObjectConstruction.CanCombine(methodContext, (DefinitionRef)created.Type)
                     || constructor.Method.Parameters.Count != created.Arguments.Count) return "分配与构造的合并条件不符";
                 if (!ManagedAccess.Method(types, accessContext, constructor, created.Type)) return $"构造调用访问权限尚未恢复: {constructor}";
                 for (var i = 0; i < created.Arguments.Count; i++)

@@ -163,9 +163,9 @@ public static class ObjectAllocationCheck
         Console.WriteLine("清零分配及相邻构造合并的 C# 往返执行通过；分离式实例构造调用仅验证 CIL");
     }
 
-    private static void Source(AssemblyDefinition assembly, Action<SR.Assembly> execute)
+    internal static void Source(AssemblyDefinition assembly, Action<SR.Assembly> execute, string category = "allocation-source-check")
     {
-        var directory = Path.GetFullPath(Path.Combine("artifacts", "allocation-source-check", Guid.NewGuid().ToString("N")));
+        var directory = Path.GetFullPath(Path.Combine("artifacts", category, Guid.NewGuid().ToString("N")));
         Directory.CreateDirectory(directory); var file = Path.Combine(directory, assembly.Name.Name + ".dll"); assembly.Write(file);
         File.Copy(typeof(ObjectAllocationCheck).Assembly.Location, Path.Combine(directory, "Cpp2CS.Tests.dll"));
         var sources = Decompilation.Decompile(file, Path.GetDirectoryName(typeof(ObjectAllocationCheck).Assembly.Location)!, _ => true, false, recoveringBodies: true);

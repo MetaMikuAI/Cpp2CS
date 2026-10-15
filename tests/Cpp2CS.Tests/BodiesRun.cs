@@ -84,7 +84,7 @@ internal static class BodiesRun
         report.Flush();
         Console.WriteLine($"case {cases.Count}  托管方法体 {recoveredCount}  CIL 输出 {emittedCases}  方法定义 {emitted.Count}  用时 {watch.ElapsedMilliseconds} ms");
         Console.WriteLine($"内联访问器 case {accessorCases}  替换位置 {accessorUses}  依赖方法 {accessorDependencies.Count}");
-        Console.WriteLine($"构造委托 case {constructorCases}  依赖方法 {constructorDependencies.Count}");
+        Console.WriteLine($"构造恢复 case {constructorCases}  依赖方法 {constructorDependencies.Count}");
         foreach (var (reason, count) in reasons.OrderByDescending(p => p.Value).Take(20)) Console.WriteLine($"  {count,8} {reason}");
         var assemblies = Path.Combine(directory, "assemblies");
         skeleton.Write(assemblies);
