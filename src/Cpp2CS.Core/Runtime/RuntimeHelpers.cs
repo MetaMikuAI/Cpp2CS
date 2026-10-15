@@ -236,6 +236,7 @@ public sealed class RuntimeHelpers
             if (found is null) via = hop;
             found = match;
         }
+        if (found is { Kind: HelperKind.ObjectNew } && builder.Build(target).Blocks.Any(b => b.IsLandingPad || b.Handler is not null)) return null;
         return found is { } f ? new Helper(f.Kind, $"与导出 {f.Export} 经同一内部函数 0x{via:x}") : null;
     }
 

@@ -33,6 +33,7 @@ public static class InlineAccessors
                 case AddressValue reference: return reference with { Target = Value(reference.Target, address, needsAddress: true) };
                 case NewArrayValue array: return array with { Length = Value(array.Length, address) };
                 case BoxValue box: return box with { Operand = Value(box.Operand, address) };
+                case NewObjectValue created: return created with { Arguments = created.Arguments.Select(a => Value(a, address)).ToArray() };
                 case ArrayLengthValue length: return length with { Array = Value(length.Array, address) };
                 case ArrayElementValue element: return element with { Array = Value(element.Array, address), Index = Value(element.Index, address) };
                 case AggregateValue aggregate: return aggregate with { Members = aggregate.Members.Select(m => m with { Value = Value(m.Value, address) }).ToArray() };

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Cpp2CS.Managed;
+using Cpp2CS.Model;
 using Cpp2CS.Output;
 
 namespace Cpp2CS.Tests;
@@ -62,8 +63,12 @@ internal static class BodiesRun
                 address = $"0x{address:x}", methodIndex = method.Method.Index, method = method.ToString(),
                 assembly = method.Method.Owner.Assembly,
                 managedBody = result.Body is not null, cilEmitted = result.Body is not null && outputProblem is null,
-                calls = result.Body?.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>()
-                    .Select(c => new { methodIndex = c.Invocation.Method.Method.Index, method = c.Invocation.Method.ToString(), tail = c.Tail }),
+                calls = result.Body is { } calledBody ? Calls(calledBody)
+                    .Select(c => new { methodIndex = c.Method.Method.Index, method = c.Method.ToString(), tail = c.Tail }) : null,
+                allocations = result.Body?.Blocks.SelectMany(b => b.Statements).Select(s => (s.Address, Value: s switch
+                    { ManagedAssignment a => a.Value, ManagedReturn r => r.Value, _ => null }))
+                    .Where(a => a.Value is ObjectAllocationValue or NewObjectValue)
+                    .Select(a => new { address = $"0x{a.Address:x}", type = a.Value!.Type.ToString(), constructor = (a.Value as NewObjectValue)?.Constructor.ToString() }),
                 accessors = result.Body?.Accessors.Select(a => new
                 {
                     address = $"0x{a.Address:x}", accessorAddress = $"0x{a.Proof.Address:x}", methodIndex = a.Proof.Method.Method.Index,
@@ -125,5 +130,14 @@ internal static class BodiesRun
             readBackDefinitions = written.Length, sourceFiles = sourceCount, gameRuntimeVerified = false,
         }, new JsonSerializerOptions { WriteIndented = true }));
         return cases.Count > 0 && emittedCases == cases.Count && missing.Length == 0 ? 0 : 1;
+    }
+
+    private static IEnumerable<(MethodRef Method, bool Tail)> Calls(ManagedBody body)
+    {
+        foreach (var statement in body.Blocks.SelectMany(b => b.Statements))
+        {
+            if (statement is ManagedCall call) yield return (call.Invocation.Method, call.Tail);
+            else if (statement is ManagedAssignment { Value: NewObjectValue created }) yield return (created.Constructor, false);
+        }
     }
 }

@@ -154,7 +154,7 @@ public static class BodyRecovery
             blocks.Add(new(block.Start, statements));
         }
         if (problems.Count > 0) return new(null, problems);
-        var body = new ManagedBody(prepared.Method, blocks);
+        var body = ObjectConstruction.Recover(new ManagedBody(prepared.Method, blocks));
         if (recoverAccessors) body = InlineAccessors.Recover(session, body);
         if (recoverConstructors) body = session.Constructors.Recover(body);
         return new(body, problems);

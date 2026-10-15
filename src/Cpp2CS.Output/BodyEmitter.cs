@@ -108,6 +108,20 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             case StringValue: return value.Type == types.String ? null : "字符串常量类型不符";
             case TypeHandleValue handle: return handle.Type == types.RuntimeTypeHandle && handle.Width == types.Size(types.RuntimeTypeHandle) * 8
                 ? null : "类型句柄的托管类型不符";
+            case ObjectAllocationValue allocation:
+                ObjectAllocation.Plan(types, allocation.ObjectType, out var allocationProblem);
+                return allocationProblem;
+            case NewObjectValue created:
+                var constructor = created.Constructor;
+                if (constructor.Method.Name != ".ctor" || constructor.Method.IsStatic || !ManagedTypes.IsVoid(constructor.Method.ReturnType)
+                    || !ObjectAllocation.Supported(types, created.Type) || constructor.Method.GenericParameters.Count != 0
+                    || constructor.Method.Owner.Methods.Any(m => m.Name == ".cctor" && m.IsStatic)
+                    || constructor.Method.Parameters.Count != created.Arguments.Count) return "分配与构造的合并条件不符";
+                if (!ManagedAccess.Method(types, accessContext, constructor, created.Type)) return $"构造调用访问权限尚未恢复: {constructor}";
+                for (var i = 0; i < created.Arguments.Count; i++)
+                    if (!types.IsAssignable(created.Arguments[i].Type, constructor.Method.Parameters[i].Type.Substitute(constructor.TypeArguments, constructor.MethodArguments)))
+                        return "构造参数类型不符";
+                children = created.Arguments; break;
             case NewArrayValue array:
                 if (!array.ArrayType.IsVector || array.ArrayType.Rank != 1) return "数组分配需要 SZARRAY 类型";
                 children = [array.Length]; break;
@@ -340,6 +354,22 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 break;
             case StringValue text: il.Emit(OpCodes.Ldstr, text.Text); break;
             case BoxValue box: Box(box); break;
+            case NewObjectValue created:
+                foreach (var argument in created.Arguments) Value(argument);
+                il.Emit(OpCodes.Newobj, methodReference(created.Constructor)); break;
+            case ObjectAllocationValue allocation:
+                var plan = ObjectAllocation.Plan(types, allocation.ObjectType, out _) ?? throw new InvalidOperationException("分配计划未通过验证");
+                il.Emit(OpCodes.Ldtoken, typeReference(allocation.ObjectType));
+                il.Emit(OpCodes.Call, methodReference(plan.GetTypeFromHandle));
+                il.Emit(OpCodes.Call, methodReference(plan.Allocate));
+                il.Emit(OpCodes.Castclass, typeReference(allocation.ObjectType));
+                if (plan.Initialize is { } initialize)
+                {
+                    // 保留分配位置的类型初始化，不依赖 BeforeFieldInit 的提前或延后执行。
+                    il.Emit(OpCodes.Ldtoken, typeReference(allocation.ObjectType));
+                    il.Emit(OpCodes.Call, methodReference(initialize));
+                }
+                break;
             case TypeHandleValue handle: il.Emit(OpCodes.Ldtoken, typeReference(handle.TargetType)); break;
             case NewArrayValue array:
                 Value(array.Length); il.Emit(OpCodes.Conv_U); il.Emit(OpCodes.Newarr, typeReference(array.ArrayType.Element)); break;

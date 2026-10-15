@@ -8,6 +8,7 @@ public sealed partial class ValueRecovery
 {
     private TypeRef? HelperResultType(Call call) => session.Resolver.Resolve(call) switch
     {
+        HelperCallee { Helper.Kind: HelperKind.ObjectNew } when HelperType(call) is DefinitionRef type && ObjectAllocation.Supported(types, type) => type,
         HelperCallee { Helper.Kind: HelperKind.NewArray } when HelperType(call) is ArrayRef { Rank: 1, IsVector: true } array => array,
         HelperCallee { Helper.Kind: HelperKind.Box } when BoxOperandType(call) is { } type => ManagedTypes.IsReferenceType(type) ? type : types.Object,
         _ => null,
@@ -37,6 +38,9 @@ public sealed partial class ValueRecovery
     public ManagedValue? HelperValue(Call call, out string? problem)
     {
         problem = null;
+        if (session.Resolver.Resolve(call) is HelperCallee { Helper.Kind: HelperKind.ObjectNew })
+            return HelperResultType(call) is DefinitionRef allocated ? new ObjectAllocationValue(allocated)
+                : Fail("对象分配类型未知或尚未支持", out problem);
         if (session.Resolver.Resolve(call) is HelperCallee { Helper.Kind: HelperKind.Box })
         {
             if (BoxOperandType(call) is not { } type) return Fail("装箱类型未知或布局尚未支持", out problem);
