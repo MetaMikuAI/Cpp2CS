@@ -1,0 +1,15 @@
+artifacts/
+third_party/
+**/bin/
+**/obj/
+**/__pycache__/
+*.i64
+*.idb
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+*.log
+.vs/
+*.user
