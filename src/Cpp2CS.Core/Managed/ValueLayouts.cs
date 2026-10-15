@@ -6,6 +6,9 @@ namespace Cpp2CS.Managed;
 /// <summary>具体实例上的字段位置，Offset 相对值数据起始，不修改泛型定义的偏移。</summary>
 public sealed record InstanceField(FieldRef Field, TypeRef Type, int Offset);
 
+/// <summary>一段连续字段存储中的标量字段，Offset 相对根实例数据起始。</summary>
+public sealed record FieldPart(int Offset, TypeRef Type, IReadOnlyList<FieldRef> Path);
+
 /// <summary>值的大小、自然对齐及实例字段。IsInstantiated 表示按实参推导，尚非运行时测量。</summary>
 public sealed record ValueLayout(int Size, int Alignment, IReadOnlyList<InstanceField> Fields, bool IsInstantiated);
 

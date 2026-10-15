@@ -63,9 +63,7 @@ public static class BodyRecovery
                         if (Local(phi.Target) is null) problem = "汇合值类型未确定";
                         break;
                     case Store store:
-                        if (values.Location(store.Target, store.Value.Width, out problem) is { } location
-                            && values.RecoverAs(store.Value, location.Type, out problem) is { } stored)
-                            statements.Add(new ManagedStore(store.Address, location, stored));
+                        if (values.Store(store, out problem) is { } stores) statements.AddRange(stores);
                         break;
                     case Call call:
                         if (session.Resolver.Resolve(call) is HelperCallee helperCallee)

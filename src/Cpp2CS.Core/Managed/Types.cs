@@ -231,6 +231,57 @@ public sealed class ManagedTypes
         }
     }
 
+    /// <summary>完整覆盖指定范围的标量字段路径；不跨填充、不切开标量，不解释引用或重叠布局。</summary>
+    public IReadOnlyList<FieldPart>? FieldSpan(TypeRef type, int offset, int bytes)
+    {
+        if (offset < 0 || bytes <= 0 || (long)offset + bytes > int.MaxValue) return null;
+        var result = new List<FieldPart>();
+        bool Visit(TypeRef current, int start, int count, int origin, IReadOnlyList<FieldRef> path, HashSet<TypeRef> active)
+        {
+            if (!IsClosed(current) || !active.Add(current) || Fields(current) is not { Count: > 0 } fields) return false;
+            if (current is DefinitionRef d && (d.Definition.Attributes & System.Reflection.TypeAttributes.LayoutMask) == System.Reflection.TypeAttributes.ExplicitLayout)
+                return false;
+            for (TypeRef? owner = current; owner is DefinitionRef definition; owner = definition.Definition.BaseType?.Substitute(definition.Arguments, []))
+            {
+                if (!(definition.Definition.IsValueType && definition.Arguments.Count > 0)
+                    && definition.Definition.Fields.Any(f => !f.IsStatic && f.Offset < 0)) return false;
+                if (definition.Definition.IsValueType) break;
+            }
+            var end = start + count;
+            var previous = 0L;
+            foreach (var field in fields)
+            {
+                var size = Size(field.Type);
+                if (size <= 0 || field.Offset < previous || (long)field.Offset + size > int.MaxValue) return false;
+                previous = (long)field.Offset + size;
+            }
+            var cursor = start;
+            foreach (var field in fields)
+            {
+                var size = Size(field.Type);
+                var stop = field.Offset + size;
+                if (stop <= start || field.Offset >= end) continue;
+                if (field.Offset > cursor) return false;
+                var first = Math.Max(start, field.Offset);
+                var last = Math.Min(end, stop);
+                var nested = path.Append(field.Field).ToArray();
+                if (Kind(field.Type) == ValueKind.Struct)
+                {
+                    if (!Visit(field.Type, first - field.Offset, last - first, origin + field.Offset, nested, active)) return false;
+                }
+                else
+                {
+                    if (first != field.Offset || last != stop || Kind(field.Type) is not (ValueKind.Bool or ValueKind.Int or ValueKind.Float or ValueKind.Double)) return false;
+                    result.Add(new(origin + field.Offset, field.Type, nested));
+                }
+                cursor = last;
+            }
+            active.Remove(current);
+            return cursor == end;
+        }
+        return Visit(type, offset, bytes, 0, [], []) ? result : null;
+    }
+
     /// <summary>静态存储只包含本类字段；泛型静态布局、线程静态和未知偏移不套用普通静态字段布局。</summary>
     public IReadOnlyList<(FieldRef Field, TypeRef Type)>? StaticFieldPath(DefinitionRef owner, int offset, int bytes)
     {
