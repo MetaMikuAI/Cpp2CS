@@ -109,7 +109,20 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
         switch (value)
         {
             case ArgumentValue or LocalValue or StackLocalValue: return null;
+            case DefaultValue: return types.Kind(value.Type) == ValueKind.Struct ? null : "default 值必须为已知结构体";
             case AddressValue reference: children = [reference.Target]; break;
+            case AggregateValue aggregate:
+                foreach (var member in aggregate.Members)
+                {
+                    var receiverType = aggregate.Type;
+                    foreach (var field in member.Path)
+                    {
+                        if ((field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0) return $"只读聚合字段的非零初始化尚未恢复: {field.Field}";
+                        if (!ManagedAccess.Field(types, accessContext, field, receiverType)) return $"聚合字段访问权限尚未恢复: {field.Field}";
+                        receiverType = field.Field.Type.Substitute(field.DeclaringType is DefinitionRef d ? d.Arguments : [], []);
+                    }
+                }
+                children = aggregate.Members.Select(m => m.Value); break;
             case ConstantValue c:
                 return types.Kind(c.Type) is ValueKind.Int or ValueKind.Bool or ValueKind.Float or ValueKind.Double
                     || (c.Bits == 0 && ManagedTypes.IsReferenceType(c.Type)) ? null : "CIL 常量类型未支持";
@@ -247,6 +260,20 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             case LocalValue l: il.Emit(OpCodes.Ldloc, Local(l)); break;
             case StackLocalValue l: il.Emit(OpCodes.Ldloc, StackLocal(l)); break;
             case AddressValue reference: Address(reference.Target); break;
+            case DefaultValue empty:
+                var initialized = Temp(empty.Type);
+                il.Emit(OpCodes.Ldloca, initialized); il.Emit(OpCodes.Initobj, typeReference(empty.Type));
+                il.Emit(OpCodes.Ldloc, initialized); break;
+            case AggregateValue aggregate:
+                var constructed = Temp(aggregate.Type);
+                il.Emit(OpCodes.Ldloca, constructed); il.Emit(OpCodes.Initobj, typeReference(aggregate.Type));
+                foreach (var member in aggregate.Members)
+                {
+                    il.Emit(OpCodes.Ldloca, constructed);
+                    foreach (var field in member.Path.SkipLast(1)) il.Emit(OpCodes.Ldflda, fieldReference(field));
+                    Value(member.Value); il.Emit(OpCodes.Stfld, fieldReference(member.Path[^1]));
+                }
+                il.Emit(OpCodes.Ldloc, constructed); break;
             case ConstantValue c:
                 if (ManagedTypes.IsReferenceType(c.Type)) il.Emit(OpCodes.Ldnull);
                 else if (types.Kind(c.Type) == ValueKind.Float) il.Emit(OpCodes.Ldc_R4, BitConverter.Int32BitsToSingle(unchecked((int)c.Bits)));

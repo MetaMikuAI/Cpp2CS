@@ -69,11 +69,7 @@ public static class BodyRecovery
                         }
                         else if (!ManagedTypes.IsVoid(calledReturn))
                         {
-                            if (session.Abi.ClassifyReturn(calledReturn, out problem) is { Passing: Passing.Registers, Pieces: [var piece] })
-                            {
-                                var index = Array.IndexOf(call.Results, piece.Register);
-                                if (index >= 0 && index < call.Defines.Length) result = Local(call.Defines[index]);
-                            }
+                            result = values.CallResult(call);
                             if (result is null) problem ??= "调用返回值尚未组装";
                         }
                         if (problem is null) statements.Add(new ManagedCall(call.Address, invocation, result, tail));
@@ -87,7 +83,10 @@ public static class BodyRecovery
                         statements.Add(new ManagedJump(jump.Address, Edge(block, jump.Target)));
                         break;
                     case Return { Buffer: not null }: problem = "缓冲区返回尚未组装"; break;
-                    case Return { Pieces.Length: > 0 }: problem = "聚合返回尚未组装"; break;
+                    case Return { Pieces.Length: > 0 } ret:
+                        if (values.Aggregate(returnType, ret.Pieces, out problem) is { } aggregate)
+                            statements.Add(new ManagedReturn(ret.Address, aggregate));
+                        break;
                     case Return { Value: { } native } ret:
                         if (values.RecoverAs(native, returnType, out problem) is { } returned)
                             statements.Add(new ManagedReturn(ret.Address, returned));

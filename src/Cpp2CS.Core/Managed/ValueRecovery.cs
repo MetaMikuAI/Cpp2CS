@@ -12,7 +12,10 @@ public sealed partial class ValueRecovery
     private readonly RecoverySession session;
     private readonly PreparedMethod method;
     private readonly ManagedTypes types;
-    private readonly Dictionary<Storage, ArgumentValue> arguments = new();
+    private readonly Dictionary<Storage, ManagedValue> arguments = new();
+    private readonly Dictionary<Variable, ManagedValue> projections = new();
+    private readonly Dictionary<Call, LocalValue> callResults = new();
+    private readonly AggregateValues aggregates;
     private readonly Dictionary<Variable, (TypeRef Type, int Width)> locals = new();
     public IReadOnlyDictionary<Variable, (TypeRef Type, int Width)> Locals => locals;
     public string? SignatureProblem { get; }
@@ -23,6 +26,7 @@ public sealed partial class ValueRecovery
         this.session = session;
         this.method = method;
         types = session.Types;
+        aggregates = new AggregateValues(types);
         Stack = new StackObjects(method.Function, types, call => Target(call) is { } target ? session.Abi.Classify(target, out _) : null);
         var signature = session.Abi.Classify(method.Method, out var problem);
         SignatureProblem = problem;
@@ -31,30 +35,61 @@ public sealed partial class ValueRecovery
             if (signature.This is { } self) Bind(self, -1, "this");
             for (var i = 0; i < signature.Parameters.Length; i++) Bind(signature.Parameters[i], i, method.Method.Method.Parameters[i].Name);
         }
-        foreach (var call in method.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>())
+        var statements = method.Function.Blocks.SelectMany(b => b.Statements).ToArray();
+        var variables = statements.SelectMany(s => s switch
+        {
+            Define d => new[] { d.Target }, Phi p => p.Sources.Append(p.Target), Call c => c.Defines, _ => [],
+        }).Concat(statements.SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable));
+        var nextTemp = variables.Where(v => v.Storage.Bank == Bank.Temp).Select(v => v.Storage.Index).DefaultIfEmpty(-1).Max() + 1;
+        foreach (var call in statements.OfType<Call>())
         {
             if (Target(call) is not { } target || session.Abi.Classify(target, out _)?.Return is not
-                { Passing: Passing.Registers, Pieces: [var piece] } result) continue;
-            var index = Array.IndexOf(call.Results, piece.Register);
-            if (index >= 0 && index < call.Defines.Length && call.Defines[index] is { } variable)
+                { Passing: Passing.Registers, Pieces.Length: > 0 } result) continue;
+            if (result.Pieces is [var piece])
+            {
+                var index = Array.IndexOf(call.Results, piece.Register);
+                if (index < 0 || index >= call.Defines.Length) continue;
+                var variable = call.Defines[index];
                 locals[variable] = (result.Type, piece.Width);
+                callResults.Add(call, new(variable, result.Type, piece.Width));
+            }
+            else if (types.Kind(result.Type) == ValueKind.Struct)
+            {
+                var local = new LocalValue(new Variable(Storage.Temp(nextTemp++), 1), result.Type, types.Size(result.Type) * 8);
+                callResults.Add(call, local);
+                foreach (var part in result.Pieces)
+                {
+                    var index = Array.IndexOf(call.Results, part.Register);
+                    if (index >= 0 && index < call.Defines.Length && aggregates.Project(local, part.Offset, part.Width) is { } projected)
+                        projections.Add(call.Defines[index], projected);
+                }
+            }
         }
         Infer();
     }
 
     private void Bind(AbiValue value, int index, string name)
     {
-        if (value is not { Passing: Passing.Registers, Pieces: [var piece] } || piece.Offset != 0) return;
-        arguments[piece.Register] = new ArgumentValue(index, name, value.Type, piece.Width);
+        if (value.Passing != Passing.Registers) return;
+        var argument = new ArgumentValue(index, name, value.Type, types.Size(value.Type) * 8);
+        foreach (var piece in value.Pieces)
+            if (piece.Offset == 0 && piece.Width == argument.Width) arguments[piece.Register] = argument;
+            else if (types.Kind(value.Type) == ValueKind.Struct && aggregates.Project(argument, piece.Offset, piece.Width) is { } projected)
+                arguments[piece.Register] = projected;
     }
+
+    public LocalValue? CallResult(Call call) => callResults.GetValueOrDefault(call);
 
     private ManagedValue? Variable(Variable variable, int width, out string? problem)
     {
         ManagedValue? value = variable.Version == 0
             ? arguments.GetValueOrDefault(variable.Storage)
+            : projections.TryGetValue(variable, out var projected) ? projected
             : locals.TryGetValue(variable, out var local) ? new LocalValue(variable, local.Type, local.Width) : null;
         if (value is null) return Fail($"未确定变量 {variable}", out problem);
         if (width == value.Width) { problem = null; return value; }
+        if (width < value.Width && types.Kind(value.Type) == ValueKind.Struct && aggregates.Project(value, 0, width) is { } part)
+        { problem = null; return part; }
         if (width < value.Width && Numeric(value.Type) && Integer(width) is { } integer)
         {
             problem = null;
@@ -190,7 +225,19 @@ public sealed partial class ValueRecovery
 
     private ManagedValue? Argument(AbiValue argument, Call call, out string? problem)
     {
-        if (argument is not { Passing: Passing.Registers, Pieces: [var piece] }) return Fail("聚合或栈调用参数尚未还原", out problem);
+        if (argument.Passing != Passing.Registers || argument.Pieces.Length == 0) return Fail("间接或栈调用参数尚未还原", out problem);
+        if (argument.Pieces.Length > 1)
+        {
+            var parts = new List<ReturnPiece>();
+            foreach (var part in argument.Pieces)
+            {
+                var source = Array.IndexOf(call.Sources, part.Register);
+                if (source < 0 || source >= call.Arguments.Length) return Fail("调用参数缺少来源", out problem);
+                parts.Add(new(part.Offset, Fold.Convert(ConvKind.Truncate, call.Arguments[source], part.Width)));
+            }
+            return Aggregate(argument.Type, parts, out problem);
+        }
+        var piece = argument.Pieces[0];
         var index = Array.IndexOf(call.Sources, piece.Register);
         if (index < 0 || index >= call.Arguments.Length) return Fail("调用参数缺少来源", out problem);
         var native = Fold.Convert(ConvKind.Truncate, call.Arguments[index], piece.Width);
@@ -211,11 +258,24 @@ public sealed partial class ValueRecovery
         }
         if (Recover(native, out problem) is not { } value) return null;
         if (value.Type == expected) return value;
+        if (types.Kind(expected) == ValueKind.Struct && aggregates.Assemble(expected, [(0, value)]) is { } aggregate) return aggregate;
         if (Numeric(value.Type) && Numeric(expected) && types.Size(expected) * 8 == value.Width)
             return new ConversionValue(ConvKind.Bitcast, value, expected, value.Width);
         if (value is ConstantValue { Bits: 0 } && ManagedTypes.IsReferenceType(expected)) return new ConstantValue(0, expected, 64);
         if (types.IsAssignable(value.Type, expected)) return value;
         return Fail($"值类型不符 {value.Type} → {expected}", out problem);
+    }
+
+    public ManagedValue? Aggregate(TypeRef type, IReadOnlyList<ReturnPiece> pieces, out string? problem)
+    {
+        var recovered = new List<(int Offset, ManagedValue Value)>();
+        foreach (var piece in pieces)
+        {
+            if (Recover(piece.Value, out problem) is not { } value) return null;
+            recovered.Add((piece.Offset, value));
+        }
+        problem = null;
+        return aggregates.Assemble(type, recovered) ?? Fail("聚合分量与字段布局不符", out problem);
     }
 
     private bool Numeric(TypeRef type) => types.Kind(type) is ValueKind.Bool or ValueKind.Int or ValueKind.Float or ValueKind.Double;

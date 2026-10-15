@@ -56,6 +56,7 @@ public sealed partial class ValueRecovery
 
     private (TypeRef Type, int Width)? Shape(Variable variable) => variable.Version == 0
         ? arguments.TryGetValue(variable.Storage, out var argument) ? (argument.Type, argument.Width) : null
+        : projections.TryGetValue(variable, out var projected) ? (projected.Type, projected.Width)
         : locals.TryGetValue(variable, out var local) ? local : null;
 
     private (TypeRef Type, int Width)? PhiType(Phi phi)

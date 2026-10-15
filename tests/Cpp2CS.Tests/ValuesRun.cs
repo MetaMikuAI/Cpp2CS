@@ -63,7 +63,7 @@ internal static class ValuesRun
                                 Call c => values.Invocation(c, out problem) is not null,
                                 Branch b => values.Recover(b.Condition, out problem) is not null,
                                 Return { Buffer: not null } => Unsupported("缓冲区返回尚未组装", out problem),
-                                Return { Pieces.Length: > 0 } => Unsupported("聚合返回尚未组装", out problem),
+                                Return { Pieces.Length: > 0 } r => values.Aggregate(returnType, r.Pieces, out problem) is not null,
                                 Return { Value: { } v } => values.RecoverAs(v, returnType, out problem) is not null,
                                 Return or Jump or Nop => true,
                                 _ => Unsupported($"未支持语句 {stmt.GetType().Name}", out problem),

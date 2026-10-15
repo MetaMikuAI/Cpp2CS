@@ -31,6 +31,7 @@ public static class InlineAccessors
                 }
                 case IndirectValue indirect: return indirect with { Address = Value(indirect.Address, address) };
                 case AddressValue reference: return reference with { Target = Value(reference.Target, address, needsAddress: true) };
+                case AggregateValue aggregate: return aggregate with { Members = aggregate.Members.Select(m => m with { Value = Value(m.Value, address) }).ToArray() };
                 case BinaryValue binary: return binary with { Left = Value(binary.Left, address), Right = Value(binary.Right, address) };
                 case UnaryValue unary: return unary with { Operand = Value(unary.Operand, address) };
                 case ConversionValue conversion: return conversion with { Operand = Value(conversion.Operand, address) };

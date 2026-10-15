@@ -222,6 +222,8 @@ public sealed class ManagedTypes
     public bool IsAssignable(TypeRef from, TypeRef to)
     {
         if (from.Equals(to)) return true;
+        // 值类型到基类或接口需要显式装箱，不能仅沿元数据继承链当作引用赋值。
+        if (!IsReferenceType(from) || !IsReferenceType(to)) return false;
         if (to.Equals(Object) && IsReferenceType(from)) return true;
         if (from is ArrayRef && to.Equals(Array)) return true;
         if (from is not DefinitionRef d) return false;

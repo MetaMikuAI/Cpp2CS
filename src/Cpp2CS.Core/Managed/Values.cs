@@ -10,6 +10,10 @@ public sealed record LocalValue(Variable Variable, TypeRef Type, int Width) : Ma
 /// <summary>按栈区域共享的可变局部存储，不是寄存器 SSA 值。</summary>
 public sealed record StackLocalValue(long Offset, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record AddressValue(ManagedValue Target, ByRefRef ReferenceType) : ManagedValue(ReferenceType, 64);
+public sealed record AggregateMember(IReadOnlyList<FieldRef> Path, ManagedValue Value);
+/// <summary>按字段组装值类型；不调用构造函数，不复制未知填充字节。</summary>
+public sealed record AggregateValue(TypeRef Type, int Width, IReadOnlyList<AggregateMember> Members) : ManagedValue(Type, Width);
+public sealed record DefaultValue(TypeRef Type, int Width) : ManagedValue(Type, Width);
 /// <summary>Bits 保存原始位型，浮点常量也不经过整数到浮点的数值转换。</summary>
 public sealed record ConstantValue(ulong Bits, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width);
