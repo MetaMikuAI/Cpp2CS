@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup><Compile Include="../../artifacts/grid-storage/recovered/Recovered.cs" Link="Recovered.cs" /></ItemGroup>
+</Project>

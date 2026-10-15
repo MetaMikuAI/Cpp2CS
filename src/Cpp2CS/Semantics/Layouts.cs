@@ -34,8 +34,22 @@ public sealed class Layouts(Catalog catalog)
         "integer" => Integer(checked((int)type.Bytes), type.Signed),
         "aggregate" => catalog.Types.Single(t => t.NativeName == type.Name ||
             t.NativeName[..^2] + "_Fields" == type.Name).Name,
+        "pointer" when catalog.Types.Any(t => !t.ValueType && t.NativeName == type.Pointee) =>
+            catalog.Types.Single(t => !t.ValueType && t.NativeName == type.Pointee).Name,
         _ => throw new NotSupportedException($"不能直接转换原生类型 {type.Name}")
     };
+    public string ManagedPointee(NativeType type)
+    {
+        if (type.Kind != "pointer") throw new NotSupportedException("ref 参数必须为原生指针");
+        var aggregate = catalog.Types.SingleOrDefault(t => t.NativeName == type.Pointee);
+        if (aggregate is not null) return aggregate.Name;
+        return type.Pointee switch
+        {
+            "int32_t" => "System.Int32", "uint32_t" => "System.UInt32", "int64_t" => "System.Int64", "uint64_t" => "System.UInt64",
+            "bool" => "System.Boolean", "int8_t" => "System.SByte", "uint8_t" => "System.Byte",
+            _ => throw new NotSupportedException($"ref 参数目标类型未支持: {type.Pointee}")
+        };
+    }
     public Slice[] Span(Storage storage, int width)
     {
         var type = catalog.Type(storage.Root.Type);

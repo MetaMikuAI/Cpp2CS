@@ -24,6 +24,7 @@ import ida_nalt
 import ida_typeinf
 import ida_bytes
 import idautils
+import idc
 from ctree_export import export
 
 
@@ -75,6 +76,48 @@ for line in sys.stdin:
     if request["action"] == "describe":
         print(json.dumps({name: getattr(hx, name).__doc__ for name in request["names"]}), flush=True)
         continue
+    if request["action"] == "types":
+        result = {}
+        for name in request["names"]:
+            t = ida_typeinf.tinfo_t()
+            if not t.get_named_type(None, name):
+                raise ValueError(f"数据库缺少类型: {name}")
+            fields = ida_typeinf.udt_type_data_t()
+            result[name] = {"bytes": t.get_size(), "declaration": str(t), "fields": []}
+            if t.get_udt_details(fields):
+                result[name]["fields"] = [{"name": f.name, "offset_bits": f.offset,
+                    "size_bits": f.size, "type": str(f.type)} for f in fields]
+        (output / request.get("file", "types.json")).write_text(json.dumps(result, indent=2), encoding="utf-8")
+        print(json.dumps({"types": len(result)}), flush=True)
+        continue
+    if request["action"] == "inspect":
+        address = int(request["address"], 0)
+        f = ida_funcs.get_func(address)
+        end = f.end_ea if f else address + request.get("size", 64)
+        result = {"address": hex(address), "name": idc.get_name(address), "type": idc.get_type(address),
+            "bytes": ida_bytes.get_bytes(address, end-address).hex(),
+            "instructions": [{"ea": hex(ea), "text": ida_lines.tag_remove(idc.generate_disasm_line(ea, 0))}
+                for ea in idautils.Heads(address, end)]}
+        (output / f"{address:x}.inspect.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+        print(json.dumps({"inspected": hex(address)}), flush=True)
+        continue
+    if request["action"] == "prototypes":
+        revisions = []
+        for entry in request["entries"]:
+            address = int(entry["address"], 0)
+            before = idc.get_type(address)
+            t = ida_typeinf.tinfo_t()
+            if not ida_typeinf.parse_decl(t, None, entry["prototype"], ida_typeinf.PT_SIL):
+                raise ValueError(f"无法解析原型: {entry}")
+            if not ida_typeinf.apply_tinfo(address, t, ida_typeinf.TINFO_DEFINITE):
+                raise ValueError(f"不能应用原型: {entry}")
+            hx.mark_cfunc_dirty(address, False)
+            revisions.append(dict(entry, before=before, after=idc.get_type(address), input_sha256=info["input_sha256"]))
+        with (output / "prototype-revisions.jsonl").open('a', encoding='utf-8') as log:
+            for revision in revisions:
+                log.write(json.dumps(revision) + '\n')
+        print(json.dumps({"prototypes": len(request["entries"])}), flush=True)
+        continue
     if request["action"] != "decompile":
         raise ValueError(f"未知请求: {request['action']}")
     address = int(request["address"], 0)
@@ -92,6 +135,7 @@ for line in sys.stdin:
             raise ValueError("不能应用元数据原型")
         hx.mark_cfunc_dirty(address, False)
     failure = hx.hexrays_failure_t()
+    hx.mark_cfunc_dirty(address, False)
     cfunc = hx.decompile(address, failure)
     result = {"address": hex(address), "name": ida_funcs.get_func_name(address),
               "function_start": hex(function.start_ea) if function else None,

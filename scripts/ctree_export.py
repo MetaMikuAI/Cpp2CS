@@ -62,6 +62,17 @@ class Export(hx.ctree_visitor_t):
         elif item.op == hx.cit_while:
             node["condition"] = item.cwhile.expr.index
             node["body"] = item.cwhile.body.index
+        elif item.op == hx.cit_do:
+            node["condition"] = item.cdo.expr.index
+            node["body"] = item.cdo.body.index
+        elif item.op == hx.cit_for:
+            node["init"] = item.cfor.init.index
+            node["condition"] = item.cfor.expr.index
+            node["step"] = item.cfor.step.index
+            node["body"] = item.cfor.body.index
+        elif item.op == hx.cit_switch:
+            node["expression"] = item.cswitch.expr.index
+            node["cases"] = [{"values": list(c.values), "body": c.index} for c in item.cswitch.cases]
         self.nodes.append(node)
         return 0
 

@@ -1,0 +1,5 @@
+{
+  "binarySha256": "6CE1DE5C0357E122F153F62D648DE1655B7F8A339B2AE1C575595868A361E4BB",
+  "assembly": "Assembly-CSharp.dll",
+  "types": ["Sekai.Mysekai.GridAreaData", "Sekai.Api.GetSuiteUserPartsApi"]
+}

@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><CheckForOverflowUnderflow>true</CheckForOverflowUnderflow></PropertyGroup>
+  <ItemGroup><Compile Include="../../artifacts/calls/Recovered.cs" Link="Recovered.cs" /></ItemGroup>
+</Project>

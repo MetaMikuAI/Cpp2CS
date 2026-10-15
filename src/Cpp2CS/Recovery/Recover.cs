@@ -13,6 +13,7 @@ public sealed class Recover
     readonly Method method;
     readonly Ctree tree;
     readonly Layouts layouts;
+    readonly CallTargets calls;
     readonly Dictionary<int, Local> variables = [];
     readonly List<Local> locals = [];
 
@@ -20,6 +21,7 @@ public sealed class Recover
     {
         this.catalog = catalog; this.owner = owner; this.method = method; this.tree = tree;
         layouts = new(catalog);
+        calls = new(catalog);
         int expected = method.Parameters.Length + (method.Static ? 0 : 1) + 1;
         if (tree.Arguments.Length != expected) throw new InvalidOperationException("ctree 参数数量与元数据不符");
         int slot = 0;
@@ -33,10 +35,11 @@ public sealed class Recover
         foreach (var parameter in method.Parameters)
         {
             var native = tree.Variables.Single(v => v.Id == tree.Arguments[slot]);
-            string managed = layouts.Managed(native.NativeType);
-            if (managed != parameter.Type && !(catalog.IsEnum(parameter.Type) && managed == "System.Int32"))
+            string expectedType = parameter.Type.TrimEnd('&');
+            string managed = parameter.Type.EndsWith('&') ? layouts.ManagedPointee(native.NativeType) : layouts.Managed(native.NativeType);
+            if (managed != expectedType && !(catalog.IsEnum(expectedType) && managed == "System.Int32"))
                 throw new InvalidOperationException($"参数类型不符: {parameter.Name}");
-            variables.Add(tree.Arguments[slot++], new(parameter.Name, parameter.Type, true));
+            variables.Add(tree.Arguments[slot++], new(parameter.Name, expectedType, true));
         }
         var runtime = tree.Variables.Single(v => v.Id == tree.Arguments[slot]);
         if (runtime.NativeType.Pointee != "const MethodInfo") throw new InvalidOperationException("缺少 MethodInfo 参数");
@@ -58,7 +61,8 @@ public sealed class Recover
 
     public Body Run()
     {
-        var statements = Statements(tree[tree.Root]);
+        bool graph = tree.Nodes.Values.Any(n => n.Op is "goto" or "while" or "do" or "for" or "switch" || n.Int("label") >= 0);
+        var statements = graph ? [new FlowBuilder(tree, Value, Effect, Boolean, method.ReturnType).Build()] : Statements(tree[tree.Root]);
         if (!owner.ValueType && method.Name == ".ctor" && statements.FirstOrDefault() is not BaseInitialize)
             throw new NotSupportedException("引用构造必须首先调用已确认的 Object 构造");
         if (statements.Skip(1).Any(s => s is BaseInitialize)) throw new InvalidOperationException("重复或后置基类初始化");
@@ -72,7 +76,7 @@ public sealed class Recover
         {
             "block" => n.List("items").SelectMany(i => Statements(tree[i])).ToArray(),
             "expr" => [Effect(Child(n, "expression"))],
-            "return" => [new Return(Source(n), Cast(Value(Child(n, "expression")), method.ReturnType))],
+            "return" => [new Return(Source(n), Child(n, "expression").Op == "empty" ? null : Cast(Value(Child(n, "expression")), method.ReturnType))],
             "if" => [new If(Source(n), Boolean(Value(Child(n, "condition"))), Statements(Child(n, "then")),
                 n.Data.GetProperty("else").ValueKind == System.Text.Json.JsonValueKind.Null ? [] : Statements(Child(n, "else")))],
             _ => throw Unsupported(n, "语句未支持")
@@ -81,18 +85,37 @@ public sealed class Recover
 
     Statement Effect(Node n)
     {
+        if (n.Op is "preinc" or "postinc" or "predec" or "postdec")
+        {
+            var operand = Child(n,"x");
+            var storage = operand.Op == "var" ? Variable(operand.Int("variable")) : Value(operand);
+            if (storage is not (Local or FieldValue)) throw Unsupported(n,"递增目标不是完整存储");
+            if (storage is FieldValue { Field.ReadOnly: true } field && (method.Name != ".ctor" || field.Root.Name != "this"))
+                throw Unsupported(n,"只读字段递增不在本对象构造中");
+            return new Store(Source(n),storage,new Binary(n.Op.EndsWith("inc",StringComparison.Ordinal) ? "+" : "-",storage,new Constant(1,storage.Type),storage.Type));
+        }
         if (n.Op == "call")
         {
             var callee = Child(n, "x");
             var arguments = n.List("arguments");
-            if (method.Name != ".ctor" || owner.ValueType || callee.Op != "obj" ||
-                !callee.Text("object").Equals(catalog.ObjectConstructorAddress, StringComparison.OrdinalIgnoreCase) || arguments.Length != 2)
-                throw Unsupported(n, "调用没有托管契约");
-            var receiver = Place(tree[arguments[0]]);
-            var info = Value(tree[arguments[1]]);
-            if (receiver.Root.Name != "this" || receiver.Offset != 0 || info is not Constant { Bits: 0 })
-                throw Unsupported(n, "Object 构造实参不符");
-            return new BaseInitialize(Source(n), callee.Text("object"));
+            if (callee.Op == "obj" && callee.Text("object").Equals(catalog.ObjectConstructorAddress, StringComparison.OrdinalIgnoreCase))
+            {
+                if (method.Name != ".ctor" || owner.ValueType || arguments.Length != 2)
+                    throw Unsupported(n, "Object 构造调用位置或实参数量不符");
+                var receiver = Place(tree[arguments[0]]);
+                var info = Value(tree[arguments[1]]);
+                if (receiver.Root.Name != "this" || receiver.Offset != 0 || info is not Constant { Bits: 0 })
+                    throw Unsupported(n, "Object 构造实参不符");
+                return new BaseInitialize(Source(n), callee.Text("object"));
+            }
+            var call = Invocation(n);
+            if (call.Target.Method.Name == ".ctor")
+            {
+                if (!call.Target.Owner.ValueType || call.Receiver is not AddressOf address)
+                    throw Unsupported(n, "引用构造尚需分配与初始化分析");
+                return new InitializeValue(Source(n), call.Target, address.Storage, call.Arguments);
+            }
+            return new Evaluate(Source(n), call);
         }
         if (n.Op is not ("asg" or "asgadd" or "asgsub")) throw Unsupported(n, "赋值未支持");
         var target = Child(n, "x");
@@ -126,14 +149,30 @@ public sealed class Recover
     static Storage Offset(Storage storage, int offset) => storage with { Offset = checked(storage.Offset + offset) };
 
     Value Boolean(Value value) => value.Type == "System.Boolean" ? value :
+        value is Constant constant ? new Constant(constant.Bits == 0 ? 0UL : 1UL,"System.Boolean") :
         new Binary("!=", value, new Constant(0, value.Type), "System.Boolean");
 
     Value Value(Node n)
     {
+        if (n.Op == "call")
+        {
+            var call = Invocation(n);
+            if (call.Target.Method.Name == ".ctor" || call.Type == "System.Void")
+                throw Unsupported(n, "构造或 void 调用不能作为值");
+            return call;
+        }
         if (n.Op == "var") return Variable(n.Int("variable"));
         if (n.Op == "num") return new Constant(ulong.Parse(n.Text("number")), layouts.Managed(n.Type));
         if (n.Op is "memptr" or "memref" or "ptr") return layouts.Load(Place(n), layouts.Managed(n.Type));
-        if (n.Op == "cast") return Cast(Value(Child(n, "x")), layouts.Managed(n.Type));
+        if (n.Op == "cast")
+        {
+            var source = Child(n, "x");
+            var target = layouts.Managed(n.Type);
+            // IDA 的 Fields 包装不是托管对象；相同宽度的存储转换按真实字段跨度读取。
+            if (n.Type.Kind == "aggregate" && source.Op is "memptr" or "memref" or "ptr" && source.Type.Bytes == n.Type.Bytes)
+                return layouts.Load(Place(source), target);
+            return Cast(Value(source), target);
+        }
         if (n.Op == "tern") return new Choice(Boolean(Value(Child(n, "x"))), Value(Child(n, "y")), Value(Child(n, "z")), layouts.Managed(n.Type));
         if (n.Op is "lnot" or "bnot" or "neg")
         {
@@ -160,4 +199,40 @@ public sealed class Recover
         return new Binary(operation, Cast(left, operandType),
             Cast(right, n.Op is "shl" or "sshr" or "ushr" ? "System.Int32" : operandType), result);
     }
+
+    Invocation Invocation(Node n)
+    {
+        var callee = Child(n, "x");
+        if (callee.Op != "obj") throw Unsupported(n, "间接调用尚未绑定");
+        var target = calls.Resolve(callee.Text("object"));
+        var args = n.List("arguments");
+        int expected = target.Method.Parameters.Length + (target.Method.Static ? 0 : 1) + 1;
+        if (args.Length != expected) throw Unsupported(n, "调用实参与托管原型数量不同");
+        var info = tree[args[^1]];
+        while (info.Op == "cast") info = Child(info, "x");
+        if (info.Op != "num" || info.Text("number") != "0")
+            throw Unsupported(n, "调用的 MethodInfo 需要泛型上下文绑定");
+        int slot = 0;
+        Value? receiver = null;
+        if (!target.Method.Static)
+        {
+            var place = Place(tree[args[slot++]]);
+            var storage = layouts.Load(place, target.Owner.Name);
+            receiver = target.Owner.ValueType ? Address(storage, n) : storage;
+        }
+        var arguments = target.Method.Parameters.Select(p =>
+        {
+            var node = tree[args[slot++]];
+            if (p.Type.EndsWith('&')) return (Value)Address(layouts.Load(Place(node), p.Type[..^1]), n);
+            return Cast(Value(node), p.Type);
+        }).ToArray();
+        return new(target, receiver, arguments);
+    }
+
+    AddressOf Address(Value storage, Node n) => storage switch
+    {
+        Local => new(storage),
+        FieldValue { Field.ReadOnly: false } => new(storage),
+        _ => throw Unsupported(n, "ref 实参不是可写的完整托管存储")
+    };
 }

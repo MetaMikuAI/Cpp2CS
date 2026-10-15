@@ -25,6 +25,7 @@ else if (args[0] == "recover")
     var bodies = catalog.Types.ToDictionary(t => t.Name, t => t.Methods.Select(m =>
         new Recover(catalog, t, m, new Ctree(Path.Combine(args[2], m.Address[2..] + ".json"), catalog, m)).Run()).ToArray());
     var writer = new CSharp(catalog);
+    Cpp2CS.Semantics.Dependencies.Verify(catalog, bodies);
     var code = writer.Generate(bodies);
     Directory.CreateDirectory(args[3]);
     File.WriteAllText(Path.Combine(args[3], "Recovered.cs"), code);
@@ -41,9 +42,13 @@ else if (args[0] == "recover")
     File.WriteAllText(Path.Combine(args[3], "manifest.json"), JsonSerializer.Serialize(new
     {
         catalog.BinarySha256, catalog.Assembly, Types = catalog.Types.Select(t => new { t.Name, Methods = t.Methods.Select(m => new { m.Name, m.Token, m.Address }) }),
-        Methods = bodies.Values.Sum(x => x.Length), CompleteTypes = bodies.Count, PlaceholderBodies = 0,
-        Dependencies = new[] { "System.Object..ctor (CLR)" }, GameRuntimeVerified = false
+        Methods = bodies.Values.Sum(x => x.Length), CompleteTypes = catalog.Types.Count(t => t.Complete), PlaceholderBodies = 0,
+        PartialDependencies = catalog.Types.Where(t => !t.Complete).Select(t => new { t.Name, t.Assembly, Methods = t.Methods.Select(m => m.Token) }),
+        Dependencies = bodies.SelectMany(t => t.Value.Select(b => new
+        {
+            Owner = t.Key, b.Method.Token, Calls = Cpp2CS.Semantics.Dependencies.In(b).Select(c => c.Key)
+        })), RuntimeDependencies = new[] { "System.Object..ctor (CLR)" }, GameRuntimeVerified = false
     }, Catalog.Json));
-    Console.WriteLine($"recovered: {bodies.Count} complete types, {bodies.Values.Sum(x => x.Length)} methods");
+    Console.WriteLine($"recovered: {catalog.Types.Count(t => t.Complete)} complete types, {bodies.Values.Sum(x => x.Length)} methods");
 }
 else throw new ArgumentException($"未知命令 {args[0]}");

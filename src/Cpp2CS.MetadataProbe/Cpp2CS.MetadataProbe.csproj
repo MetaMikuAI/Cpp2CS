@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS0168;CS0219;CS0414;CS0649;SYSLIB0001</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Attributes/*.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/ExecutableFormats/*.cs" Exclude="../../third_party/Il2CppDumper/Il2CppDumper/ExecutableFormats/NSO.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Extensions/*.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Il2Cpp/*.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/IO/*.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Utils/Il2CppExecutor.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Utils/ArmUtils.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Utils/BlobValue.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Utils/SectionHelper.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Utils/SearchSection.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+</Project>
