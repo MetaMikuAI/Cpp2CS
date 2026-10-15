@@ -15,6 +15,7 @@ internal static class Program
             "copyfind" when args.Length >= 4 => HelperCensus.Find(args[1], args[2], Convert.ToUInt64(args[3], 16)),
             "copydiff" when args.Length >= 5 => HelperCensus.Diff(args[1], args[2], Convert.ToUInt64(args[3], 16), Convert.ToUInt64(args[4], 16)),
             "skeleton" when args.Length >= 4 => SkeletonCheck.Run(args[1], args[2], args[3], args.ElementAtOrDefault(4)),
+            "compile" when args.Length >= 4 => CompileCheck.Run(args[1], args[2], args[3], args.ElementAtOrDefault(4)),
             "helpers" when args.Length >= 3 => HelperCensus.Run(args[1], args[2], args.ElementAtOrDefault(3)),
             _ => Usage(),
         };
@@ -29,6 +30,7 @@ internal static class Program
                   Cpp2CS.Tests ssa <binary> <metadata> [0x地址 | 命名空间,...]
                   Cpp2CS.Tests helpers <binary> <metadata> [命名空间,...]
                   Cpp2CS.Tests skeleton <binary> <metadata> <输出目录> [类型全名,...]
+                  Cpp2CS.Tests compile <binary> <metadata> <输出目录> [回归命名空间,...]
             """);
         return 2;
     }

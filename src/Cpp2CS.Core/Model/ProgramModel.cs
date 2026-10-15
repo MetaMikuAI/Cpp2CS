@@ -83,7 +83,8 @@ public sealed class AssemblyDef
     public required Version Version { get; init; }
     public required string Culture { get; init; }
     /// <summary>公钥令牌，8 字节；无强名称时为空。</summary>
-    public required byte[] PublicKeyToken { get; init; }
+    /// <summary>完整公钥，空表示无强名称。</summary>
+    public required byte[] PublicKey { get; init; }
     public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
     public IReadOnlyList<TypeDef> Types { get; internal set; } = [];
     public override string ToString() => Name;
@@ -171,7 +172,9 @@ public sealed class MethodDef
     public IReadOnlyList<ParameterDef> Parameters { get; internal set; } = [];
     public IReadOnlyList<GenericParameterDef> GenericParameters { get; internal set; } = [];
     public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
-    /// <summary>返回值上的特性（元数据中挂在序号 0 的参数令牌上；v29 未单独保存，暂为空）。</summary>
+    /// <summary>返回值参数行（序号 0）的令牌：v31 起 Il2CppMethodDefinition.returnParameterToken；更早版本没有，为 0。</summary>
+    public uint ReturnParameterToken { get; init; }
+    /// <summary>返回值上的特性（挂在返回值参数令牌上；v31 之前元数据不保存，为空）。</summary>
     public IReadOnlyList<CustomAttributeDef> ReturnAttributes { get; internal set; } = [];
     /// <summary>非共享实现的代码地址（首选基址下的 VA）；0 表示无实现（抽象、extern 或仅有泛型实例）。</summary>
     public ulong Address { get; internal set; }
@@ -236,8 +239,6 @@ public sealed class ProgramModel
     public required ImageDocument Image { get; init; }
     public required double MetadataVersion { get; init; }
     public required IReadOnlyList<AssemblyDef> Assemblies { get; init; }
-    /// <summary>找不到所属元素的特性（返回值参数行不在 il2cpp 参数表中）。</summary>
-    public required IReadOnlyList<(AssemblyDef Assembly, uint Token, IReadOnlyList<CustomAttributeDef> Attributes)> UnattachedAttributes { get; init; }
     public required IReadOnlyList<TypeDef> Types { get; init; }
     public required IReadOnlyList<MethodDef> Methods { get; init; }
     public required IReadOnlyList<FieldDef> Fields { get; init; }

@@ -22,8 +22,8 @@ internal static class ModelCheck
         Console.WriteLine($"vtable    {model.Types.Sum(t => t.VTable.Count)} 槽位，空 {model.Types.Sum(t => t.VTable.Count(s => s is null))}  接口偏移 {model.Types.Sum(t => t.InterfaceOffsets.Count)}");
         var attributes = model.Assemblies.Sum(a => a.CustomAttributes.Count) + model.Types.Sum(t => t.CustomAttributes.Count
             + t.Fields.Sum(f => f.CustomAttributes.Count) + t.Properties.Sum(p => p.CustomAttributes.Count) + t.Events.Sum(e => e.CustomAttributes.Count)
-            + t.Methods.Sum(m => m.CustomAttributes.Count + m.Parameters.Sum(p => p.CustomAttributes.Count)));
-        Console.WriteLine($"特性      {attributes}  无归属 {model.UnattachedAttributes.Sum(u => u.Attributes.Count)}（{model.UnattachedAttributes.Count} 个令牌）  事件 {model.Types.Sum(t => t.Events.Count)}  已知大小 {model.Types.Count(t => t.Size >= 0)}  RVA 数据 {model.Fields.Count(f => f.InitialValue is not null)}（{model.Fields.Sum(f => f.InitialValue?.Length ?? 0)} 字节）");
+            + t.Methods.Sum(m => m.CustomAttributes.Count + m.ReturnAttributes.Count + m.Parameters.Sum(p => p.CustomAttributes.Count)));
+        Console.WriteLine($"特性      {attributes}（返回值 {model.Methods.Sum(m => m.ReturnAttributes.Count)}）  事件 {model.Types.Sum(t => t.Events.Count)}  已知大小 {model.Types.Count(t => t.Size >= 0)}  RVA 数据 {model.Fields.Count(f => f.InitialValue is not null)}（{model.Fields.Sum(f => f.InitialValue?.Length ?? 0)} 字节）");
         if (script is null) return 0;
 
         using var document = JsonDocument.Parse(File.ReadAllBytes(script));

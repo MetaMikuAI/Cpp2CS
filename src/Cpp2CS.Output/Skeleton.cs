@@ -75,7 +75,7 @@ public sealed class Skeleton
         var name = new AssemblyNameDefinition(definition.AssemblyName, definition.Version)
         {
             Culture = definition.Culture,
-            PublicKeyToken = definition.PublicKeyToken,
+            PublicKey = definition.PublicKey,
         };
         var assembly = AssemblyDefinition.CreateAssembly(name, definition.Name, new ModuleParameters
         {
@@ -195,6 +195,8 @@ public sealed class Skeleton
                 SetMethod = property.Setter is null ? null : methods[property.Setter.Index],
                 HasThis = !accessor.IsStatic,
             };
+            if (property.Getter is null && property.Setter is { } setter && setter.CustomAttributes.Any(IsCompilerGenerated))
+                definition.GetMethod = SynthesizeGetter(property, setter, created, definition.PropertyType);
             var indexParameters = property.Getter?.Parameters ?? property.Setter!.Parameters.Take(property.Setter.Parameters.Count - 1).ToArray();
             foreach (var parameter in indexParameters) definition.Parameters.Add(new ParameterDefinition(parameter.Name, ParameterAttributes.None, Reference(module, parameter.Type, created, null)));
             created.Properties.Add(definition);
@@ -208,6 +210,36 @@ public sealed class Skeleton
                 InvokeMethod = @event.Raise is null ? null : methods[@event.Raise.Index],
             });
         }
+    }
+
+    private static bool IsCompilerGenerated(CustomAttributeDef attribute) =>
+        attribute.Constructor.Owner.FullName == "System.Runtime.CompilerServices.CompilerGeneratedAttribute";
+
+    /// <summary>推断补出的 get 访问器及其依据的 set 访问器（特性在 DefineAttributes 阶段从 set 访问器复制）。</summary>
+    private readonly List<(MethodDefinition Getter, MethodDef Setter)> synthesizedGetters = [];
+
+    /// <summary>
+    /// 自动属性的 get 访问器被裁剪（属性只剩带 [CompilerGenerated] 的 set）时补一个占位 get：
+    /// C# 的自动属性必须有 get，set 上的 [CompilerGenerated] 说明这是自动属性。属于推断，不是元数据中的定义。
+    /// 例如特性类的自动属性只在特性实参中被赋值，get 从未调用而被裁剪；缺 get 时 C# 不允许以命名实参赋值。
+    /// </summary>
+    private MethodDefinition SynthesizeGetter(PropertyDef property, MethodDef setter, TypeDefinition owner, TypeReference propertyType)
+    {
+        var setterDefinition = methods[setter.Index];
+        if (setter.Parameters.Count != 1) throw new InvalidDataException($"自动属性 {property} 的 set 访问器参数个数为 {setter.Parameters.Count}");
+        var getter = new MethodDefinition("get_" + property.Name, setterDefinition.Attributes, propertyType)
+        {
+            ImplAttributes = setterDefinition.ImplAttributes,
+        };
+        owner.Methods.Add(getter);
+        if (getter.HasBody)
+        {
+            var il = getter.Body.GetILProcessor();
+            il.Emit(OpCodes.Ldnull);
+            il.Emit(OpCodes.Throw);
+        }
+        synthesizedGetters.Add((getter, setter));
+        return getter;
     }
 
     private readonly Dictionary<ModuleDefinition, ModuleReference> pinvokeModules = new();
@@ -267,11 +299,25 @@ public sealed class Skeleton
                 for (var i = 0; i < method.Parameters.Count; i++) AddAttributes(definition.Parameters[i].CustomAttributes, method.Parameters[i].CustomAttributes, module);
             }
             var properties = types[type.Index].Properties;
-            for (var i = 0; i < type.Properties.Count; i++) AddAttributes(properties[i].CustomAttributes, type.Properties[i].CustomAttributes, module);
+            for (var i = 0; i < type.Properties.Count; i++)
+            {
+                var property = type.Properties[i];
+                AddAttributes(properties[i].CustomAttributes, property.CustomAttributes, module);
+                // v31 之前元数据不保存返回值特性（补出的 get 也没有）。C# 编译器在属性和 get 的返回值上写同样的类型编码特性（元组元素名等），
+                // 缺失时从属性复制；否则重写或实现带元组名的属性时 get 的签名对不上。属于推断。
+                if (properties[i].GetMethod is { } getter && getter.MethodReturnType.CustomAttributes.Count == 0 && (model.MetadataVersion < 31 || property.Getter is null))
+                    AddAttributes(getter.MethodReturnType.CustomAttributes, property.CustomAttributes.Where(IsTypeEncoding).ToArray(), module);
+            }
             var events = types[type.Index].Events;
             for (var i = 0; i < type.Events.Count; i++) AddAttributes(events[i].CustomAttributes, type.Events[i].CustomAttributes, module);
         }
+        foreach (var (getter, setter) in synthesizedGetters.Where(g => g.Getter.Module == module))
+            AddAttributes(getter.CustomAttributes, setter.CustomAttributes.Where(IsCompilerGenerated).ToArray(), module);
     }
+
+    /// <summary>补充类型信息的编码特性：元组元素名、dynamic、nint。</summary>
+    private static bool IsTypeEncoding(CustomAttributeDef attribute) => attribute.Constructor.Owner.FullName is
+        "System.Runtime.CompilerServices.TupleElementNamesAttribute" or "System.Runtime.CompilerServices.DynamicAttribute" or "System.Runtime.CompilerServices.NativeIntegerAttribute";
 
     private void AddAttributes(IList<CustomAttribute> target, IReadOnlyList<CustomAttributeDef> attributes, ModuleDefinition module)
     {

@@ -185,6 +185,7 @@ namespace Cpp2CS.Input
                         Owner = type,
                         Name = String(methodDef.nameIndex),
                         Token = methodDef.token,
+                        ReturnParameterToken = (uint)methodDef.returnParameterToken,
                         Attributes = (MethodAttributes)methodDef.flags,
                         ImplAttributes = (MethodImplAttributes)methodDef.iflags,
                         Slot = methodDef.slot == ushort.MaxValue ? -1 : methodDef.slot,
@@ -278,7 +279,7 @@ namespace Cpp2CS.Input
                     // 生成的程序集（__Generated）的 build/revision 为 -1
                     Version = name.build < 0 ? new Version(name.major, name.minor) : new Version(name.major, name.minor, name.build, name.revision),
                     Culture = String(name.cultureIndex),
-                    PublicKeyToken = name.public_key_token.Any(b => b != 0) ? name.public_key_token : [],
+                    PublicKey = PublicKey(name),
                     Types = Enumerable.Range(imageDef.typeStart, (int)imageDef.typeCount).Select(k => types[k]).ToArray(),
                 };
             }).ToArray();
@@ -289,7 +290,6 @@ namespace Cpp2CS.Input
                 Image = image,
                 MetadataVersion = metadata.Version,
                 Assemblies = assemblies,
-                UnattachedAttributes = unattached,
                 Types = types,
                 Methods = methods,
                 Fields = fields,
@@ -317,6 +317,20 @@ namespace Cpp2CS.Input
         }
 
         /// <summary>Il2CppInterfaceOffsetPair { int32 interfaceTypeIndex; int32 offset; }，Il2CppDumper 未读取这张表。</summary>
+        /// <summary>
+        /// 公钥在字符串区按 blob 存放：压缩长度 + 原始字节（中间可能有 0，不能按字符串读）。
+        /// 用 SHA-1 末 8 字节倒序与元数据里的公钥标记核对。
+        /// </summary>
+        private byte[] PublicKey(Il2CppAssemblyNameDefinition name)
+        {
+            metadata.Position = (ulong)metadata.header.stringOffset + name.publicKeyIndex;
+            var key = metadata.ReadBytes((int)metadata.ReadCompressedUInt32());
+            var token = key.Length == 0 ? new byte[8] : System.Security.Cryptography.SHA1.HashData(key)[^8..].Reverse().ToArray();
+            if (!token.SequenceEqual(name.public_key_token))
+                throw new InvalidDataException($"{String(name.nameIndex)} 的公钥与公钥标记不符");
+            return key;
+        }
+
         private (TypeRef Interface, int Offset)[] InterfaceOffsets(Il2CppTypeDefinition def)
         {
             const int PairSize = 8;
@@ -391,6 +405,7 @@ namespace Cpp2CS.Input
                     foreach (var method in type.Methods)
                     {
                         byToken[method.Token] = list => method.CustomAttributes = list;
+                        if (method.ReturnParameterToken != 0) byToken[method.ReturnParameterToken] = list => method.ReturnAttributes = list;
                         foreach (var parameter in method.Parameters) byToken[parameter.Token] = list => parameter.CustomAttributes = list;
                     }
                     foreach (var property in type.Properties) byToken[property.Token] = list => property.CustomAttributes = list;
@@ -413,15 +428,12 @@ namespace Cpp2CS.Input
                             visitor.Fields.Select(x => (fields[x.Index], AttributeValueOf(x.Value))).ToArray(),
                             visitor.Properties.Select(x => (properties[x.Index], AttributeValueOf(x.Value))).ToArray()));
                     }
-                    if (byToken.TryGetValue(range.token, out var assign)) assign(list);
-                    // 返回值参数行（序号 0）不在 il2cpp 的参数表中，无法从令牌确定所属方法：单独记录
-                    else if (range.token >> 24 == 0x08) unattached.Add((assembly, range.token, list));
-                    else throw new InvalidDataException($"{assembly.Name} 的特性令牌 0x{range.token:x8} 没有对应的元素");
+                    if (!byToken.TryGetValue(range.token, out var assign))
+                        throw new InvalidDataException($"{assembly.Name} 的特性令牌 0x{range.token:x8} 没有对应的元素");
+                    assign(list);
                 }
             }
         }
-
-        private readonly List<(AssemblyDef Assembly, uint Token, IReadOnlyList<CustomAttributeDef> Attributes)> unattached = [];
 
         /// <summary>
         /// HasFieldRVA 字段的数据与默认值同存于 fieldAndParameterDefaultValueData，按字段类型（值类型）的大小截取。
