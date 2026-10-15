@@ -21,7 +21,9 @@ public sealed record DefinitionRef(TypeDef Definition, IReadOnlyList<TypeRef> Ar
 
 public sealed record ArrayRef(TypeRef Element, int Rank) : TypeRef
 {
-    public override string ToString() => $"{Element}[{new string(',', Rank - 1)}]";
+    /// <summary>SZARRAY 与 rank=1 的 ARRAY 是不同的 CLR 类型。</summary>
+    public bool IsVector { get; init; } = Rank == 1;
+    public override string ToString() => $"{Element}[{(Rank == 1 && !IsVector ? "*" : new string(',', Rank - 1))}]";
 }
 
 public sealed record PointerRef(TypeRef Element) : TypeRef

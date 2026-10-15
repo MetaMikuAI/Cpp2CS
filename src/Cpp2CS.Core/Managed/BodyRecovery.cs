@@ -30,6 +30,7 @@ public static class BodyRecovery
             var copies = new List<ManagedCopy>();
             foreach (var phi in to.Statements.OfType<Phi>())
             {
+                if (values.Metadata.IsRuntimeReference(phi.Target)) continue;
                 if (Local(phi.Target) is not { } local) { problems.Add(new(phi.Address, "汇合值类型未确定")); continue; }
                 if (values.RecoverAs(new Use(phi.Sources[incoming], local.Width), local.Type, out var reason) is not { } value)
                     problems.Add(new(phi.Address, reason!));
@@ -53,11 +54,13 @@ public static class BodyRecovery
                 switch (statement)
                 {
                     case Define define:
+                        if (values.Metadata.IsRuntimeReference(define.Target)) break;
                         if (values.Recover(define.Value, out problem) is { } value && Local(define.Target) is { } local)
                             statements.Add(new ManagedAssignment(define.Address, local, value));
                         else problem ??= "定义的类型未确定";
                         break;
                     case Phi phi:
+                        if (values.Metadata.IsRuntimeReference(phi.Target)) break;
                         if (Local(phi.Target) is null) problem = "汇合值类型未确定";
                         break;
                     case Store store:
@@ -66,6 +69,18 @@ public static class BodyRecovery
                             statements.Add(new ManagedStore(store.Address, location, stored));
                         break;
                     case Call call:
+                        if (session.Resolver.Resolve(call) is HelperCallee)
+                        {
+                            if (values.HelperValue(call, out problem) is not { } helper) break;
+                            if (call.Kind == CallKind.Tail)
+                            {
+                                if (session.Types.IsAssignable(helper.Type, returnType)) statements.Add(new ManagedReturn(call.Address, helper));
+                                else problem = "运行时尾调用返回类型不符";
+                            }
+                            else if (values.CallResult(call) is { } helperResult) statements.Add(new ManagedAssignment(call.Address, helperResult, helper));
+                            else problem = "运行时调用返回值尚未恢复";
+                            break;
+                        }
                         if (values.Invocation(call, out problem) is not { } invocation) break;
                         var tail = call.Kind is CallKind.Tail or CallKind.TailIndirect;
                         var calledReturn = invocation.Method.Method.ReturnType.Substitute(invocation.Method.TypeArguments, invocation.Method.MethodArguments);

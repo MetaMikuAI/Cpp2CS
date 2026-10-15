@@ -60,10 +60,10 @@ internal static class ValuesRun
                             string? problem = null;
                             var accepted = stmt switch
                             {
-                                Define d => values.Recover(d.Value, out problem) is not null,
-                                Phi p => values.Locals.ContainsKey(p.Target),
+                                Define d => values.Metadata.IsRuntimeReference(d.Target) || values.Recover(d.Value, out problem) is not null,
+                                Phi p => values.Metadata.IsRuntimeReference(p.Target) || values.Locals.ContainsKey(p.Target),
                                 Store s => Store(s, values, out problem),
-                                Call c => values.Invocation(c, out problem) is not null,
+                                Call c => session.Resolver.Resolve(c) is HelperCallee ? values.HelperValue(c, out problem) is not null : values.Invocation(c, out problem) is not null,
                                 Branch b => values.Recover(b.Condition, out problem) is not null,
                                 Return { Buffer: not null } => values.ReturnValue is not null,
                                 Return { Pieces.Length: > 0 } r => values.Aggregate(returnType, r.Pieces, out problem) is not null,

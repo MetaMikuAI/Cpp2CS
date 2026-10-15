@@ -371,13 +371,19 @@ public sealed class Skeleton
         PrimitiveRef { Name: "void" } => Import(module, Corlib("System.Void")),
         DefinitionRef { Arguments.Count: 0 } d => Import(module, d.Definition),
         DefinitionRef d => Instance(Import(module, d.Definition), d.Arguments.Select(a => Reference(module, a, typeContext, methodContext))),
-        ArrayRef { Rank: 1 } a => new ArrayType(Reference(module, a.Element, typeContext, methodContext)),
-        ArrayRef a => new ArrayType(Reference(module, a.Element, typeContext, methodContext), a.Rank),
+        ArrayRef a => ArrayReference(a, Reference(module, a.Element, typeContext, methodContext)),
         PointerRef p => new PointerType(Reference(module, p.Element, typeContext, methodContext)),
         ByRefRef r => new ByReferenceType(Reference(module, r.Element, typeContext, methodContext)),
         GenericParameterRef g => GenericParameter(g, g.IsMethod ? methodContext : typeContext),
         _ => throw new NotSupportedException($"类型引用 {type}"),
     };
+
+    internal static ArrayType ArrayReference(ArrayRef type, TypeReference element)
+    {
+        var result = new ArrayType(element, type.Rank);
+        if (type.Rank == 1 && !type.IsVector) result.Dimensions[0] = new ArrayDimension(0, null);
+        return result;
+    }
 
     private static GenericInstanceType Instance(TypeReference element, IEnumerable<TypeReference> arguments)
     {

@@ -16,6 +16,10 @@ public sealed record AggregateValue(TypeRef Type, int Width, IReadOnlyList<Aggre
 public sealed record DefaultValue(TypeRef Type, int Width) : ManagedValue(Type, Width);
 /// <summary>Bits 保存原始位型，浮点常量也不经过整数到浮点的数值转换。</summary>
 public sealed record ConstantValue(ulong Bits, TypeRef Type, int Width) : ManagedValue(Type, Width);
+public sealed record StringValue(string Text, TypeRef Type) : ManagedValue(Type, 64);
+public sealed record NewArrayValue(ArrayRef ArrayType, ManagedValue Length) : ManagedValue(ArrayType, 64);
+public sealed record ArrayLengthValue(ManagedValue Array, TypeRef Type, int Width) : ManagedValue(Type, Width);
+public sealed record ArrayElementValue(ManagedValue Array, ManagedValue Index, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record IndirectValue(ManagedValue Address, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record InvocationValue(ManagedInvocation Invocation, TypeRef Type, int Width) : ManagedValue(Type, Width);

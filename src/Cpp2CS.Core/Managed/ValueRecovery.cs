@@ -16,6 +16,7 @@ public sealed partial class ValueRecovery
     private readonly Dictionary<Variable, ManagedValue> projections = new();
     private readonly Dictionary<Call, LocalValue> callResults = new();
     private readonly Dictionary<Call, Expr> callDestinations = new();
+    private readonly Dictionary<Call, MethodRef?> callTargets = new();
     private int nextTemp;
     private readonly AggregateValues aggregates;
     private readonly Dictionary<Variable, (TypeRef Type, int Width)> locals = new();
@@ -24,12 +25,14 @@ public sealed partial class ValueRecovery
     public StackObjects Stack { get; }
     public LocalValue? ReturnValue { get; }
     public IReadOnlyList<RecoveryProblem> BufferProblems { get; }
+    public MetadataReferences Metadata { get; }
 
     public ValueRecovery(RecoverySession session, PreparedMethod method)
     {
         this.session = session;
         this.method = method;
         types = session.Types;
+        Metadata = new MetadataReferences(session.Model, method.Function);
         aggregates = new AggregateValues(types);
         Stack = new StackObjects(method.Function, types, call => Target(call) is { } target ? session.Abi.Classify(target, out _) : null);
         BufferProblems = BufferInitialization.Check(method.Function, method.Return, types, call => Target(call) is { } target ? session.Abi.Classify(target, out _) : null);
@@ -53,6 +56,12 @@ public sealed partial class ValueRecovery
         }
         foreach (var call in statements.OfType<Call>())
         {
+            if (HelperResultType(call) is { } helperType && call.Defines is [var helperResult])
+            {
+                locals[helperResult] = (helperType, 64);
+                callResults.Add(call, new(helperResult, helperType, 64));
+                continue;
+            }
             if (Target(call) is not { } target || session.Abi.Classify(target, out _)?.Return is not { Pieces.Length: > 0 } result) continue;
             if (result is { Passing: Passing.Indirect, Pieces: [var output] })
             {
@@ -139,7 +148,10 @@ public sealed partial class ValueRecovery
             case Use use: return Variable(use.Variable, use.Width, out problem);
             case Const constant when Integer(constant.Width) is { } type:
                 return new ConstantValue(constant.Value, type, constant.Width);
-            case Load load: return Location(load.Address, load.Width, out problem);
+            case Load load:
+                if (Metadata.Usage(load) is { Kind: UsageKind.StringLiteral, Value: string text }) return new StringValue(text, types.String);
+                if (ArrayLength(load) is { } length) return length;
+                return Location(load.Address, load.Width, out problem);
             case Ir.Convert conversion:
             {
                 if (Recover(conversion.Operand, out problem) is not { } operand) return null;
@@ -202,6 +214,8 @@ public sealed partial class ValueRecovery
     /// <summary>把内存位置恢复为实例字段或托管引用解引用，可用于读取和写入。</summary>
     public ManagedValue? Location(Expr address, int width, out string? problem, bool whole = false)
     {
+        problem = null;
+        if (ArrayElement(address, width) is { } element) return element;
         if (address is FrameAddress frame)
         {
             problem = null;
@@ -228,7 +242,12 @@ public sealed partial class ValueRecovery
         return receiver;
     }
 
-    private MethodRef? Target(Call call) => session.Resolver.Resolve(call) is ManagedCallee { Owners: [var owner] } ? owner.Method : null;
+    private MethodRef? Target(Call call)
+    {
+        if (callTargets.TryGetValue(call, out var cached)) return cached;
+        return callTargets[call] = session.Resolver.Resolve(call) is ManagedCallee managed
+            ? CallTargets.Resolve(call, managed, session.Abi, Metadata) : null;
+    }
 
     public ManagedInvocation? Invocation(Call call, out string? problem)
     {

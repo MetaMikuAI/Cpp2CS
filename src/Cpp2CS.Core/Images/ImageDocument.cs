@@ -31,6 +31,9 @@ public sealed class ImageDocument
 
     private IReadOnlyDictionary<ulong, ulong> pointerFixups = new Dictionary<ulong, ulong>();
 
+    /// <summary>加载器重定位记录明确指定的指针；不把文件中的任意整数当作地址。</summary>
+    public ulong? RelocatedPointer(ulong address) => pointerFixups.TryGetValue(address, out var target) ? target : null;
+
     /// <summary>引用未定义动态符号的指针位置（GOT、JUMP_SLOT）及符号名。</summary>
     public IReadOnlyDictionary<ulong, string> Imports { get; private init; } = new Dictionary<ulong, string>();
 

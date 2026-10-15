@@ -109,6 +109,16 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
         switch (value)
         {
             case ArgumentValue or LocalValue or StackLocalValue: return null;
+            case StringValue: return value.Type == types.String ? null : "字符串常量类型不符";
+            case NewArrayValue array:
+                if (!array.ArrayType.IsVector || array.ArrayType.Rank != 1) return "数组分配需要 SZARRAY 类型";
+                children = [array.Length]; break;
+            case ArrayLengthValue length:
+                if (length.Array.Type is not ArrayRef { Rank: 1, IsVector: true }) return "数组长度需要 SZARRAY 类型";
+                children = [length.Array]; break;
+            case ArrayElementValue element:
+                if (element.Array.Type is not ArrayRef { Rank: 1, IsVector: true } a || element.Type != a.Element) return "数组元素类型不符";
+                children = [element.Array, element.Index]; break;
             case DefaultValue: return types.Kind(value.Type) == ValueKind.Struct ? null : "default 值必须为已知结构体";
             case AddressValue reference: children = [reference.Target]; break;
             case AggregateValue aggregate:
@@ -194,6 +204,9 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 Receiver(f.Receiver); Value(s.Value); il.Emit(OpCodes.Stfld, fieldReference(f.Field)); break;
             case ManagedStore { Target: IndirectValue i } s:
                 Value(i.Address); Value(s.Value); il.Emit(OpCodes.Stobj, typeReference(i.Type)); break;
+            case ManagedStore { Target: ArrayElementValue element } s:
+                Value(element.Array); Value(element.Index); il.Emit(OpCodes.Conv_U); Value(s.Value);
+                il.Emit(OpCodes.Stelem_Any, typeReference(element.Type)); break;
             case ManagedCall c:
                 Invocation(c.Invocation);
                 if (c.Tail) il.Emit(OpCodes.Ret);
@@ -241,6 +254,8 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             case ArgumentValue { Index: >= 0 } argument: il.Emit(OpCodes.Ldarga, destination.Parameters[argument.Index]); break;
             case FieldValue field: Receiver(field.Receiver); il.Emit(OpCodes.Ldflda, fieldReference(field.Field)); break;
             case IndirectValue indirect: Value(indirect.Address); break;
+            case ArrayElementValue element:
+                Value(element.Array); Value(element.Index); il.Emit(OpCodes.Conv_U); il.Emit(OpCodes.Ldelema, typeReference(element.Type)); break;
             case InvocationValue invocation:
                 Value(invocation);
                 var temp = Temp(invocation.Type);
@@ -281,6 +296,13 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 else if (c.Width == 64) il.Emit(OpCodes.Ldc_I8, unchecked((long)c.Bits));
                 else il.Emit(OpCodes.Ldc_I4, unchecked((int)c.Bits));
                 break;
+            case StringValue text: il.Emit(OpCodes.Ldstr, text.Text); break;
+            case NewArrayValue array:
+                Value(array.Length); il.Emit(OpCodes.Conv_U); il.Emit(OpCodes.Newarr, typeReference(array.ArrayType.Element)); break;
+            case ArrayLengthValue length:
+                Value(length.Array); il.Emit(OpCodes.Ldlen); il.Emit(length.Width == 64 ? OpCodes.Conv_U8 : OpCodes.Conv_U4); break;
+            case ArrayElementValue element:
+                Value(element.Array); Value(element.Index); il.Emit(OpCodes.Conv_U); il.Emit(OpCodes.Ldelem_Any, typeReference(element.Type)); break;
             case FieldValue f: Receiver(f.Receiver); il.Emit(OpCodes.Ldfld, fieldReference(f.Field)); break;
             case IndirectValue i: Value(i.Address); il.Emit(OpCodes.Ldobj, typeReference(i.Type)); break;
             case InvocationValue invocation: Invocation(invocation.Invocation); break;

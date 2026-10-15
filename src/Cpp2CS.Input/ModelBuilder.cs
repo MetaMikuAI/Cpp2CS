@@ -558,7 +558,7 @@ namespace Cpp2CS.Input
         private TypeRef ConvertArray(Il2CppType type)
         {
             var array = il2Cpp.MapVATR<Il2CppArrayType>(type.data.array);
-            return new ArrayRef(Convert(Runtime(array.etype)), array.rank);
+            return new ArrayRef(Convert(Runtime(array.etype)), array.rank) { IsVector = false };
         }
 
         private TypeRef ConvertGenericInstance(Il2CppType type)
