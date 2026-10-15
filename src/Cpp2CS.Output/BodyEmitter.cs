@@ -3,7 +3,6 @@ using Cpp2CS.Managed;
 using Cpp2CS.Model;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
-using SR = System.Reflection;
 
 namespace Cpp2CS.Output;
 
@@ -20,15 +19,30 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
 
     public static string? Emit(Skeleton skeleton, ManagedTypes types, ManagedBody recovered)
     {
-        var method = skeleton.Method(recovered.Method.Method);
-        var emitter = new BodyEmitter(types,
-            t => skeleton.Reference(method.Module, t, method.DeclaringType, method),
-            f => skeleton.Reference(method.Module, f, method.DeclaringType, method),
-            m => skeleton.Reference(method.Module, m, method.DeclaringType, method));
-        return emitter.Emit(recovered, method);
+        var pending = new List<(BodyEmitter Emitter, ManagedBody Body, MethodDefinition Method)>();
+        foreach (var body in recovered.Accessors.Select(a => a.Proof.Body).Append(recovered).DistinctBy(b => b.Method))
+        {
+            var method = skeleton.Method(body.Method.Method);
+            var emitter = new BodyEmitter(types,
+                t => skeleton.Reference(method.Module, t, method.DeclaringType, method),
+                f => skeleton.Reference(method.Module, f, method.DeclaringType, method),
+                m => skeleton.Reference(method.Module, m, method.DeclaringType, method));
+            if (emitter.Validate(body, method) is { } problem)
+                return body == recovered ? problem : $"访问器依赖无法输出: {body.Method}: {problem}";
+            pending.Add((emitter, body, method));
+        }
+        foreach (var item in pending) item.Emitter.Write(item.Body, item.Method);
+        return null;
     }
 
     public string? Emit(ManagedBody recovered, MethodDefinition method)
+    {
+        if (Validate(recovered, method) is { } problem) return problem;
+        Write(recovered, method);
+        return null;
+    }
+
+    private string? Validate(ManagedBody recovered, MethodDefinition method)
     {
         if (!method.HasBody) return "方法不允许 CIL 方法体";
         if (recovered.Method.TypeArguments.Count > 0 || recovered.Method.MethodArguments.Count > 0
@@ -41,13 +55,16 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
         foreach (var block in recovered.Blocks)
             foreach (var statement in block.Statements)
             {
-                if (statement is ManagedCall c && !Accessible(c.Invocation.Method.Method.Owner,
-                    (int)(c.Invocation.Method.Method.Attributes & SR.MethodAttributes.MemberAccessMask), c.Invocation.Receiver))
+                if (statement is ManagedCall c && !ManagedAccess.Method(types, accessContext, c.Invocation.Method, c.Invocation.Receiver?.Type))
                     return $"调用访问权限尚未恢复: {c.Invocation.Method}";
                 foreach (var value in Values(statement))
                     if (Problem(value) is { } problem) return problem;
             }
+        return null;
+    }
 
+    private void Write(ManagedBody recovered, MethodDefinition method)
+    {
         destination = method;
         body = new MethodBody(method) { InitLocals = true };
         il = body.GetILProcessor();
@@ -60,29 +77,6 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             foreach (var statement in block.Statements) Statement(statement);
         }
         method.Body = body;
-        return null;
-    }
-
-    // FieldAccessMask 与 MemberAccessMask 的 0..6 取值相同。Family 同时限制访问上下文与接收者类型。
-    private bool Accessible(TypeDef owner, int access, ManagedValue? receiver)
-    {
-        var sameAssembly = owner.Assembly == accessContext.Assembly;
-        var privateAccess = false;
-        var familyAccess = false;
-        for (var context = accessContext; context is not null; context = context.DeclaringType)
-        {
-            privateAccess |= context == owner;
-            var contextType = new DefinitionRef(context, []);
-            var receiverType = receiver?.Type is ByRefRef byRef ? byRef.Element : receiver?.Type;
-            familyAccess |= types.IsAssignable(contextType, new DefinitionRef(owner, []))
-                && (receiverType is null || types.IsAssignable(receiverType, contextType));
-        }
-        return access switch
-        {
-            6 => true, 1 => privateAccess, 2 => familyAccess && sameAssembly,
-            3 => sameAssembly, 4 => familyAccess, 5 => familyAccess || sameAssembly,
-            _ => false,
-        };
     }
 
     private static bool HasEntryConstructorCall(ManagedBody recovered)
@@ -117,10 +111,16 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 return types.Kind(c.Type) is ValueKind.Int or ValueKind.Bool or ValueKind.Float or ValueKind.Double
                     || (c.Bits == 0 && ManagedTypes.IsReferenceType(c.Type)) ? null : "CIL 常量类型未支持";
             case FieldValue f:
-                if (!Accessible(f.Field.Field.Owner, (int)(f.Field.Field.Attributes & SR.FieldAttributes.FieldAccessMask), f.Receiver))
+                if (!ManagedAccess.Field(types, accessContext, f.Field, f.Receiver.Type))
                     return $"内联字段访问权限尚未恢复: {f.Field.Field}";
                 children = [f.Receiver]; break;
             case IndirectValue i: children = [i.Address]; break;
+            case InvocationValue invocation:
+                if (!ManagedAccess.Method(types, accessContext, invocation.Invocation.Method, invocation.Invocation.Receiver?.Type))
+                    return $"调用访问权限尚未恢复: {invocation.Invocation.Method}";
+                children = invocation.Invocation.Receiver is { } receiver
+                    ? new[] { receiver }.Concat(invocation.Invocation.Arguments) : invocation.Invocation.Arguments;
+                break;
             case BinaryValue b:
                 if (b.Op is not (BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Shl or BinOp.LShr or BinOp.AShr
                     or BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv)) return $"CIL 运算尚未支持 {b.Op}";
@@ -172,9 +172,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             case ManagedStore { Target: IndirectValue i } s:
                 Value(i.Address); Value(s.Value); il.Emit(OpCodes.Stobj, typeReference(i.Type)); break;
             case ManagedCall c:
-                if (c.Invocation.Receiver is { } receiver) Receiver(receiver);
-                foreach (var argument in c.Invocation.Arguments) Value(argument);
-                il.Emit(OpCodes.Call, methodReference(c.Invocation.Method));
+                Invocation(c.Invocation);
                 if (c.Tail) il.Emit(OpCodes.Ret);
                 else if (c.Result is { } result) il.Emit(OpCodes.Stloc, Local(result));
                 break;
@@ -204,6 +202,13 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
         else Value(value);
     }
 
+    private void Invocation(ManagedInvocation invocation)
+    {
+        if (invocation.Receiver is { } receiver) Receiver(receiver);
+        foreach (var argument in invocation.Arguments) Value(argument);
+        il.Emit(OpCodes.Call, methodReference(invocation.Method));
+    }
+
     private void Address(ManagedValue value)
     {
         switch (value)
@@ -212,6 +217,10 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             case ArgumentValue { Index: >= 0 } argument: il.Emit(OpCodes.Ldarga, destination.Parameters[argument.Index]); break;
             case FieldValue field: Receiver(field.Receiver); il.Emit(OpCodes.Ldflda, fieldReference(field.Field)); break;
             case IndirectValue indirect: Value(indirect.Address); break;
+            case InvocationValue invocation:
+                Value(invocation);
+                var temp = Temp(invocation.Type);
+                il.Emit(OpCodes.Stloc, temp); il.Emit(OpCodes.Ldloca, temp); break;
             default: throw new NotSupportedException($"不可取地址的值 {value}");
         }
     }
@@ -234,6 +243,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 break;
             case FieldValue f: Receiver(f.Receiver); il.Emit(OpCodes.Ldfld, fieldReference(f.Field)); break;
             case IndirectValue i: Value(i.Address); il.Emit(OpCodes.Ldobj, typeReference(i.Type)); break;
+            case InvocationValue invocation: Invocation(invocation.Invocation); break;
             case BinaryValue b: Binary(b); break;
             case UnaryValue u:
                 if (u.Op == UnOp.FNeg) Floating(u.Operand); else Integer(u.Operand, false);

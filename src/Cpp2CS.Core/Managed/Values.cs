@@ -11,6 +11,7 @@ public sealed record LocalValue(Variable Variable, TypeRef Type, int Width) : Ma
 public sealed record ConstantValue(ulong Bits, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record IndirectValue(ManagedValue Address, TypeRef Type, int Width) : ManagedValue(Type, Width);
+public sealed record InvocationValue(ManagedInvocation Invocation, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record BinaryValue(BinOp Op, ManagedValue Left, ManagedValue Right, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record UnaryValue(UnOp Op, ManagedValue Operand, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record ConversionValue(ConvKind Kind, ManagedValue Operand, TypeRef Type, int Width) : ManagedValue(Type, Width);

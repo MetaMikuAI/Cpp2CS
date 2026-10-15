@@ -15,6 +15,9 @@ public sealed record ManagedBranch(ulong Address, ManagedValue Condition, Manage
 public sealed record ManagedCopy(LocalValue Target, ManagedValue Value);
 public sealed record ManagedEdge(ulong Target, IReadOnlyList<ManagedCopy> Copies);
 public sealed record ManagedBlock(ulong Address, IReadOnlyList<ManagedStatement> Statements);
-public sealed record ManagedBody(MethodRef Method, IReadOnlyList<ManagedBlock> Blocks);
+public sealed record ManagedBody(MethodRef Method, IReadOnlyList<ManagedBlock> Blocks)
+{
+    public IReadOnlyList<AccessorUse> Accessors { get; init; } = [];
+}
 public sealed record RecoveryProblem(ulong Address, string Reason);
 public sealed record BodyRecoveryResult(ManagedBody? Body, IReadOnlyList<RecoveryProblem> Problems);

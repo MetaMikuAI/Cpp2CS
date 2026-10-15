@@ -25,6 +25,8 @@ internal static class BodiesRun
         using var report = new StreamWriter(Path.Combine(directory, "manifest.jsonl"));
         var reasons = new Dictionary<string, int>();
         var emitted = new HashSet<int>();
+        var accessorDependencies = new HashSet<int>();
+        int accessorCases = 0, accessorUses = 0;
         int recoveredCount = 0, emittedCases = 0;
         var watch = Stopwatch.StartNew();
         foreach (var (address, method) in cases)
@@ -38,7 +40,13 @@ internal static class BodiesRun
             {
                 recoveredCount++;
                 outputProblem = BodyEmitter.Emit(skeleton, session.Types, body);
-                if (outputProblem is null) { emitted.Add(method.Method.Index); emittedCases++; }
+                if (outputProblem is null)
+                {
+                    emitted.Add(method.Method.Index); emittedCases++;
+                    if (body.Accessors.Count > 0) accessorCases++;
+                    accessorUses += body.Accessors.Count;
+                    accessorDependencies.UnionWith(body.Accessors.Select(a => a.Proof.Method.Method.Index));
+                }
             }
             foreach (var reason in result.Problems.Select(p => p.Reason).Append(outputProblem).Where(p => p is not null))
             {
@@ -52,16 +60,23 @@ internal static class BodiesRun
                 managedBody = result.Body is not null, cilEmitted = result.Body is not null && outputProblem is null,
                 calls = result.Body?.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>()
                     .Select(c => new { methodIndex = c.Invocation.Method.Method.Index, method = c.Invocation.Method.ToString(), tail = c.Tail }),
+                accessors = result.Body?.Accessors.Select(a => new
+                {
+                    address = $"0x{a.Address:x}", accessorAddress = $"0x{a.Proof.Address:x}", methodIndex = a.Proof.Method.Method.Index,
+                    method = a.Proof.Method.ToString(), field = a.Proof.Field.ToString(), setter = a.Proof.IsSetter,
+                }),
                 problems = result.Problems.Select(p => new { address = $"0x{p.Address:x}", reason = p.Reason }), outputProblem,
             }));
         }
         report.Flush();
         Console.WriteLine($"case {cases.Count}  托管方法体 {recoveredCount}  CIL 输出 {emittedCases}  方法定义 {emitted.Count}  用时 {watch.ElapsedMilliseconds} ms");
+        Console.WriteLine($"内联访问器 case {accessorCases}  替换位置 {accessorUses}  依赖方法 {accessorDependencies.Count}");
         foreach (var (reason, count) in reasons.OrderByDescending(p => p.Value).Take(20)) Console.WriteLine($"  {count,8} {reason}");
         var assemblies = Path.Combine(directory, "assemblies");
         skeleton.Write(assemblies);
         // 使用写出后的 token 回读实际方法体，避免仅以恢复计数声称已生成。
-        foreach (var group in emitted.Select(index => skeleton.Method(model.Methods[index])).GroupBy(m => m.Module.Name))
+        var written = emitted.Union(accessorDependencies).ToArray();
+        foreach (var group in written.Select(index => skeleton.Method(model.Methods[index])).GroupBy(m => m.Module.Name))
         {
             using var saved = Mono.Cecil.AssemblyDefinition.ReadAssembly(Path.Combine(assemblies, group.Key));
             foreach (var original in group)
@@ -71,7 +86,7 @@ internal static class BodiesRun
                     throw new InvalidOperationException($"写出的方法体与内存不符: {loaded}");
             }
         }
-        Console.WriteLine($"CIL 回读 {emitted.Count} 个方法定义通过");
+        Console.WriteLine($"CIL 回读 {written.Length} 个方法定义通过（含访问器依赖）");
         var sourceDirectory = Path.Combine(directory, "src");
         Directory.CreateDirectory(sourceDirectory);
         var invalid = Path.GetInvalidFileNameChars();
@@ -94,7 +109,9 @@ internal static class BodiesRun
         {
             binarySha256 = model.Image.Sha256, namespaces, definitions = definitions.Length, missingCode = missing.Length,
             cases = cases.Count, managedBodies = recoveredCount, cilEmittedCases = emittedCases, emittedDefinitions = emitted.Count,
-            readBackDefinitions = emitted.Count, sourceFiles = sourceCount, gameRuntimeVerified = false,
+            accessorCases, accessorUses, accessorDependencies = accessorDependencies.Count,
+            extraAccessorDefinitions = accessorDependencies.Except(emitted).Count(),
+            readBackDefinitions = written.Length, sourceFiles = sourceCount, gameRuntimeVerified = false,
         }, new JsonSerializerOptions { WriteIndented = true }));
         return cases.Count > 0 && emittedCases == cases.Count && missing.Length == 0 ? 0 : 1;
     }
