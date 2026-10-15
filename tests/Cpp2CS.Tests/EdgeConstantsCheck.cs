@@ -95,7 +95,7 @@ internal static class EdgeConstantsCheck
         return 0;
     }
 
-    private static MachineFunction Graph(params Block[] blocks)
+    internal static MachineFunction Graph(params Block[] blocks)
     {
         foreach (var block in blocks)
         {
@@ -111,7 +111,7 @@ internal static class EdgeConstantsCheck
         return result;
     }
 
-    private static ulong Execute(MachineFunction function, Variable x, ulong a, Variable y, ulong b)
+    internal static ulong Execute(MachineFunction function, Variable x, ulong a, Variable y, ulong b)
     {
         var values = new Dictionary<Variable, ulong> { [x] = a, [y] = b };
         var evaluator = new Evaluator();

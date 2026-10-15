@@ -21,12 +21,11 @@ public static class BodyRecovery
         var blocks = new List<ManagedBlock>();
         LocalValue? Local(Variable variable) => values.Locals.TryGetValue(variable, out var info) ? new(variable, info.Type, info.Width) : null;
 
-        ManagedEdge Edge(Block from, ulong target)
+        ManagedEdge Edge(Block from, int successor, ulong target)
         {
-            var to = from.NormalSuccessors.FirstOrDefault(b => b.Start == target);
-            if (to is null) throw new InvalidOperationException($"CFG 中缺少边 {from.Start:x} → {target:x}");
-            var incoming = to.Predecessors.IndexOf(from);
-            if (incoming < 0) throw new InvalidOperationException("CFG 前驱与后继不一致");
+            var to = from.NormalSuccessors.ElementAtOrDefault(successor);
+            if (to is null || to.Start != target) throw new InvalidOperationException($"CFG 中缺少第 {successor} 条边 {from.Start:x} → {target:x}");
+            var incoming = MachineFunction.PredecessorIndex(from, successor);
             var copies = new List<ManagedCopy>();
             foreach (var phi in to.Statements.OfType<Phi>())
             {
@@ -118,11 +117,11 @@ public static class BodyRecovery
                         break;
                     case Branch branch:
                         if (values.Recover(branch.Condition, out problem) is { Width: 1 } condition)
-                            statements.Add(new ManagedBranch(branch.Address, condition, Edge(block, branch.Target), Edge(block, branch.Fallthrough)));
+                            statements.Add(new ManagedBranch(branch.Address, condition, Edge(block, 0, branch.Target), Edge(block, 1, branch.Fallthrough)));
                         else problem ??= "分支条件不是布尔值";
                         break;
                     case Jump jump:
-                        statements.Add(new ManagedJump(jump.Address, Edge(block, jump.Target)));
+                        statements.Add(new ManagedJump(jump.Address, Edge(block, 0, jump.Target)));
                         break;
                     case Return { Buffer: not null } ret:
                         if (values.ReturnValue is { } buffered) statements.Add(new ManagedReturn(ret.Address, buffered));
@@ -148,7 +147,7 @@ public static class BodyRecovery
             if (statements.LastOrDefault() is not (ManagedReturn or ManagedJump or ManagedBranch or ManagedCall { Tail: true }))
             {
                 var successors = block.NormalSuccessors.ToArray();
-                if (successors.Length == 1) statements.Add(new ManagedJump(block.End, Edge(block, successors[0].Start)));
+                if (successors.Length == 1) statements.Add(new ManagedJump(block.End, Edge(block, 0, successors[0].Start)));
                 else problems.Add(new(block.Start, "基本块没有唯一终结方式"));
             }
             blocks.Add(new(block.Start, statements));

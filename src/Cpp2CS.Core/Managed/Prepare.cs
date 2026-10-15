@@ -59,7 +59,7 @@ public sealed class CallResolver(ProgramModel model, RuntimeHelpers helpers, Man
 /// 1. 按被调用者签名收窄调用的参数与结果，签名之外的结果变量视为已删除（使用处成为 Unknown，φ 中成为未定义值）；
 /// 2. 删除元数据初始化（InitMetadata 与方法内的 s_Il2CppMethodInitialized 标志）和写屏障，保留类初始化副作用；
 /// 3. 删除通往判空/越界/数组类型不符抛出块的分支；InvalidCastException 抛出块前的 IsInst 标为 castclass；
-/// 4. 删除两侧等价的分支（另一侧是空块且汇合处 φ 取值相同）；
+/// 4. 每轮传播后删除常量分支和两侧等价的分支，按具体边维护 φ；
 /// 5. 不逃逸、宽度一致的栈槽提升为 SSA 变量。
 /// 依据：IL2CPP 生成代码的固定形态（il2cpp-codegen 的 NullCheck、IL2CPP_RUNTIME_CLASS_INIT、
 /// il2cpp_codegen_initialize_runtime_metadata、Il2CppCodeGenWriteBarrier）；判空、越界、协变数组检查
@@ -84,18 +84,21 @@ public sealed class Prepare(CallResolver resolver, ManagedCallModel calls, Calli
         Settle(function);
         RemoveThrowEdges(function, result);
         Settle(function);
-        while (RemoveEmptyBranches(function)) Settle(function);
         RemoveUnusedPure(function, result);
         Settle(function);
         result.PromotedSlots = PromoteFrame(function);
+        Settle(function);
         return result;
     }
 
     /// <summary>删除不可达块、重算支配树并传播清理。</summary>
     private static void Settle(MachineFunction function)
     {
-        function.Renumber();
-        Propagate.Run(function, Dominators.Compute(function));
+        do
+        {
+            function.Renumber();
+            Propagate.Run(function, Dominators.Compute(function));
+        } while (ControlFlow.Simplify(function));
     }
 
     // ---------- 1. 收窄调用 ----------
@@ -268,43 +271,6 @@ public sealed class Prepare(CallResolver resolver, ManagedCallModel calls, Calli
                 break;
             }
         }
-    }
-
-    // ---------- 4. 两侧等价的分支 ----------
-
-    private static bool RemoveEmptyBranches(MachineFunction function)
-    {
-        var changed = false;
-        foreach (var block in function.Blocks)
-        {
-            if (block.Statements.Count == 0 || block.Statements[^1] is not Branch branch) continue;
-            var normal = block.NormalSuccessors.ToArray();
-            if (normal.Length != 2) continue;
-            if (normal[0] == normal[1])
-            {
-                block.Statements[^1] = new Jump(branch.Address, normal[0].Start);
-                MachineFunction.RemoveEdge(block, normal[0]);
-                changed = true;
-                continue;
-            }
-            for (var side = 0; side < 2; side++)
-            {
-                var empty = normal[side];
-                var join = normal[1 - side];
-                if (empty.Predecessors.Count != 1 || empty.Successors.Count != 1 || empty.Successors[0] != join || empty.Handler is not null) continue;
-                if (!empty.Statements.All(s => s is Jump or Nop)) continue;
-                var fromBlock = join.Predecessors.IndexOf(block);
-                var fromEmpty = join.Predecessors.IndexOf(empty);
-                var same = join.Statements.TakeWhile(s => s is Phi).Cast<Phi>()
-                    .All(p => p.Sources[fromBlock] == p.Sources[fromEmpty] || p.Sources[fromEmpty].Version < 0);
-                if (!same) continue;
-                block.Statements[^1] = new Jump(branch.Address, join.Start);
-                MachineFunction.RemoveEdge(block, empty);
-                changed = true;
-                break;
-            }
-        }
-        return changed;
     }
 
     // ---------- 纯辅助调用 ----------

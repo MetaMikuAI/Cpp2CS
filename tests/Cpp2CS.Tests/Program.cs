@@ -18,6 +18,7 @@ internal static class Program
             "accessor-check" when args.Length >= 3 => AccessorCheck.Run(args[1], args[2]),
             "phi-check" when args.Length >= 3 => PhiRecoveryCheck.Run(args[1], args[2]),
             "edge-check" when args.Length == 1 || args.Length >= 3 => EdgeConstantsCheck.Run(args.ElementAtOrDefault(1), args.ElementAtOrDefault(2)),
+            "control-flow-check" when args.Length == 1 || args.Length >= 3 => ControlFlowCheck.Run(args.ElementAtOrDefault(1), args.ElementAtOrDefault(2)),
             "stack-check" when args.Length >= 3 => StackRecoveryCheck.Run(args[1], args[2]),
             "aggregate-check" when args.Length >= 3 => AggregateRecoveryCheck.Run(args[1], args[2]),
             "buffer-check" when args.Length >= 3 => BufferRecoveryCheck.Run(args[1], args[2]),
@@ -61,6 +62,7 @@ internal static class Program
                   Cpp2CS.Tests accessor-check <binary> <metadata>
                   Cpp2CS.Tests phi-check <binary> <metadata>
                   Cpp2CS.Tests edge-check [binary metadata]
+                  Cpp2CS.Tests control-flow-check [binary metadata]
                   Cpp2CS.Tests stack-check <binary> <metadata>
                   Cpp2CS.Tests aggregate-check <binary> <metadata>
                   Cpp2CS.Tests buffer-check <binary> <metadata>

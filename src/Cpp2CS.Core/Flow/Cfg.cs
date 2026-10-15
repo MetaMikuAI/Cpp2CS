@@ -65,13 +65,29 @@ public sealed class MachineFunction
     public static void RemoveEdge(Block from, Block to)
     {
         var successor = from.Successors.LastIndexOf(to);
-        var predecessor = to.Predecessors.LastIndexOf(from);
-        if (successor < 0 || predecessor < 0) throw new InvalidOperationException($"{from} → {to} 不是边");
+        if (successor < 0) throw new InvalidOperationException($"{from} → {to} 不是边");
+        RemoveEdgeAt(from, successor);
+    }
+
+    /// <summary>按后继位置删除一条边，保留同目标的其他正常边、异常边及其 φ 输入。</summary>
+    public static void RemoveEdgeAt(Block from, int successor)
+    {
+        var to = from.Successors[successor];
+        var predecessor = PredecessorIndex(from, successor);
+        var handler = from.Handler is not null && successor == from.Successors.Count - 1;
         from.Successors.RemoveAt(successor);
         to.Predecessors.RemoveAt(predecessor);
-        if (from.Handler == to && !from.Successors.Contains(to)) from.Handler = null;
+        if (handler) from.Handler = null;
         for (var i = 0; i < to.Statements.Count && to.Statements[i] is Phi phi; i++)
             to.Statements[i] = phi with { Sources = [.. phi.Sources[..predecessor], .. phi.Sources[(predecessor + 1)..]] };
+    }
+
+    /// <summary>后继位置对应的前驱位置；同一对块的重边按出现顺序对应。</summary>
+    public static int PredecessorIndex(Block from, int successor)
+    {
+        var to = from.Successors[successor];
+        var occurrence = from.Successors.Take(successor).Count(b => b == to);
+        return to.Predecessors.Select((b, i) => (b, i)).Where(p => p.b == from).Select(p => p.i).ElementAt(occurrence);
     }
 
     public override string ToString()
