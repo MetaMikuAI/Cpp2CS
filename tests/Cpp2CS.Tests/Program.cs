@@ -20,6 +20,7 @@ internal static class Program
             "edge-check" when args.Length == 1 || args.Length >= 3 => EdgeConstantsCheck.Run(args.ElementAtOrDefault(1), args.ElementAtOrDefault(2)),
             "stack-check" when args.Length >= 3 => StackRecoveryCheck.Run(args[1], args[2]),
             "aggregate-check" when args.Length >= 3 => AggregateRecoveryCheck.Run(args[1], args[2]),
+            "buffer-check" when args.Length >= 3 => BufferRecoveryCheck.Run(args[1], args[2]),
             "bodies" when args.Length >= 4 => BodiesRun.Run(args[1], args[2], args[3], args.ElementAtOrDefault(4)),
             "arm64-oracle" => Arm64Oracle.Run(args.Skip(1).Where(a => !a.StartsWith("--")).ToArray(), 4),
             "model" when args.Length >= 3 => ModelCheck.Run(args[1], args[2], args.ElementAtOrDefault(3)),
@@ -52,6 +53,7 @@ internal static class Program
                   Cpp2CS.Tests edge-check [binary metadata]
                   Cpp2CS.Tests stack-check <binary> <metadata>
                   Cpp2CS.Tests aggregate-check <binary> <metadata>
+                  Cpp2CS.Tests buffer-check <binary> <metadata>
                   Cpp2CS.Tests bodies <binary> <metadata> <输出目录> [命名空间,...]
                   Cpp2CS.Tests model <binary> <metadata> [script.json]
                   Cpp2CS.Tests cfg <binary> <metadata> [0x地址 | 命名空间,...]

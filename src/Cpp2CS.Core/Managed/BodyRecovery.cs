@@ -14,8 +14,10 @@ public static class BodyRecovery
         if (problems.Count > 0) return new(null, problems);
         var values = new ValueRecovery(session, prepared);
         problems.AddRange(values.Stack.Problems);
+        problems.AddRange(values.BufferProblems);
         if (values.SignatureProblem is { } signatureProblem) problems.Add(new(prepared.Function.Entry, signatureProblem));
         var returnType = prepared.Method.Method.ReturnType.Substitute(prepared.Method.TypeArguments, prepared.Method.MethodArguments);
+        var copies = TypedCopies.Recover(prepared.Function, values, session.Types);
         var blocks = new List<ManagedBlock>();
         LocalValue? Local(Variable variable) => values.Locals.TryGetValue(variable, out var info) ? new(variable, info.Type, info.Width) : null;
 
@@ -42,6 +44,11 @@ public static class BodyRecovery
             var statements = new List<ManagedStatement>();
             foreach (var statement in block.Statements)
             {
+                if (copies.TryGetValue(statement, out var replacement))
+                {
+                    if (replacement is not null) statements.Add(replacement);
+                    continue;
+                }
                 string? problem = null;
                 switch (statement)
                 {
@@ -72,7 +79,16 @@ public static class BodyRecovery
                             result = values.CallResult(call);
                             if (result is null) problem ??= "调用返回值尚未组装";
                         }
-                        if (problem is null) statements.Add(new ManagedCall(call.Address, invocation, result, tail));
+                        if (problem is null)
+                        {
+                            statements.Add(new ManagedCall(call.Address, invocation, result, tail));
+                            if (!tail && result is not null && values.CallDestination(call) is { } destination)
+                            {
+                                var target = values.Location(destination, result.Width, out problem, whole: true);
+                                if (target?.Type == result.Type) statements.Add(new ManagedStore(call.Address, target, result));
+                                else problem ??= "调用返回缓冲区类型不符";
+                            }
+                        }
                         break;
                     case Branch branch:
                         if (values.Recover(branch.Condition, out problem) is { Width: 1 } condition)
@@ -82,7 +98,10 @@ public static class BodyRecovery
                     case Jump jump:
                         statements.Add(new ManagedJump(jump.Address, Edge(block, jump.Target)));
                         break;
-                    case Return { Buffer: not null }: problem = "缓冲区返回尚未组装"; break;
+                    case Return { Buffer: not null } ret:
+                        if (values.ReturnValue is { } buffered) statements.Add(new ManagedReturn(ret.Address, buffered));
+                        else problem = "缓冲区返回尚未组装";
+                        break;
                     case Return { Pieces.Length: > 0 } ret:
                         if (values.Aggregate(returnType, ret.Pieces, out problem) is { } aggregate)
                             statements.Add(new ManagedReturn(ret.Address, aggregate));

@@ -20,26 +20,35 @@ public sealed class StackObjects
         this.types = types;
         if (!function.Blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).Any(e => e is FrameAddress)) return;
         var references = new Dictionary<Call, Dictionary<int, Access>>();
+        var outputs = new Dictionary<Call, (int Index, Access Access)>();
         var candidates = new List<(ulong Address, long Offset, TypeRef Type, int Size)>();
         foreach (var call in function.Blocks.SelectMany(b => b.Statements).OfType<Call>())
         {
             if (signature(call) is not { } shape) continue;
             var arguments = new Dictionary<int, Access>();
-            foreach (var argument in shape.Arguments)
+            void Candidate(int index, FrameAddress frame, TypeRef type, bool output)
             {
-                if (argument is not { Type: ByRefRef byRef, Passing: Passing.Registers, Pieces: [var piece] }) continue;
-                var index = Array.IndexOf(call.Sources, piece.Register);
-                if (index < 0 || index >= call.Arguments.Length || call.Arguments[index] is not FrameAddress frame) continue;
-                var size = types.Size(byRef.Element);
-                if (size <= 0 || frame.Offset >= 0 || frame.Offset + size > 0 || types.Kind(byRef.Element) is null or ValueKind.Void or ValueKind.Pointer)
-                {
-                    Problems.Add(new(call.Address, "栈对象范围或类型尚未支持"));
-                    continue;
-                }
+                var size = types.Size(type);
+                if (size <= 0 || frame.Offset >= 0 || frame.Offset + size > 0 || types.Kind(type) is null or ValueKind.Void or ValueKind.Pointer)
+                { Problems.Add(new(call.Address, "栈对象范围或类型尚未支持")); return; }
                 if (shape.Return is { } returned && types.Kind(returned.Type) == ValueKind.Pointer)
                     Problems.Add(new(call.Address, "栈引用经调用返回的别名尚未跟踪"));
-                candidates.Add((call.Address, frame.Offset, byRef.Element, size));
-                arguments[index] = new(frame.Offset, size);
+                candidates.Add((call.Address, frame.Offset, type, size));
+                if (output) outputs.Add(call, (index, new(frame.Offset, size)));
+                else arguments[index] = new(frame.Offset, size);
+            }
+            foreach (var argument in shape.Arguments)
+            {
+                if (argument.Pieces is not [var piece] || (argument.Passing != Passing.Indirect && argument.Type is not ByRefRef)) continue;
+                var index = Array.IndexOf(call.Sources, piece.Register);
+                if (index < 0 || index >= call.Arguments.Length || call.Arguments[index] is not FrameAddress frame) continue;
+                Candidate(index, frame, argument.Type is ByRefRef byRef ? byRef.Element : argument.Type, false);
+            }
+            if (shape.Return is { Passing: Passing.Indirect, Pieces: [var pointer] } result)
+            {
+                var index = Array.IndexOf(call.Sources, pointer.Register);
+                if (index >= 0 && index < call.Arguments.Length && call.Arguments[index] is FrameAddress frame)
+                    Candidate(index, frame, result.Type, true);
             }
             references.Add(call, arguments);
         }
@@ -64,7 +73,7 @@ public sealed class StackObjects
                 {
                     if (expression is Load { Address: FrameAddress frame } load)
                     {
-                        if (Location(frame.Offset, load.Width) is null) Problems.Add(new(statement.Address, "栈读取位置与类型不符"));
+                        if (!Contains(frame.Offset, load.Width)) Problems.Add(new(statement.Address, "栈读取越界或范围未知"));
                         else reads.Add(new(frame.Offset, load.Width / 8));
                         return;
                     }
@@ -80,7 +89,7 @@ public sealed class StackObjects
                     Read(store.Value);
                     if (store.Target is FrameAddress frame)
                     {
-                        if (Location(frame.Offset, store.Value.Width) is null) Problems.Add(new(statement.Address, "栈写入位置与类型不符"));
+                        if (!Contains(frame.Offset, store.Value.Width)) Problems.Add(new(statement.Address, "栈写入越界或范围未知"));
                         else write = new(frame.Offset, store.Value.Width / 8);
                     }
                     else Read(store.Target);
@@ -90,7 +99,8 @@ public sealed class StackObjects
                     Read(call.Target);
                     for (var i = 0; i < call.Arguments.Length; i++)
                     {
-                        if (references.TryGetValue(call, out var arguments) && arguments.TryGetValue(i, out var access)) reads.Add(access);
+                        if (outputs.TryGetValue(call, out var output) && output.Index == i) write = output.Access;
+                        else if (references.TryGetValue(call, out var arguments) && arguments.TryGetValue(i, out var access)) reads.Add(access);
                         else Read(call.Arguments[i]);
                     }
                 }
@@ -102,6 +112,9 @@ public sealed class StackObjects
         if (Problems.Count > 0) return;
         CheckInitialization(function, sites);
     }
+
+    private bool Contains(long offset, int width) => width > 0 && width % 8 == 0
+        && objects.Any(o => offset >= o.Offset && offset + width / 8 <= o.Offset + o.Width / 8);
 
     public ManagedValue? Location(long offset, int width, TypeRef? expected = null)
     {

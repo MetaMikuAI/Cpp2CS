@@ -47,6 +47,8 @@ internal static class ValuesRun
                     preparedCount++;
                     var values = new ValueRecovery(session, prepared);
                     foreach (var stackProblem in values.Stack.Problems) Problem(stackProblem.Address, stackProblem.Reason);
+                    foreach (var bufferProblem in values.BufferProblems) Problem(bufferProblem.Address, bufferProblem.Reason);
+                    var copies = TypedCopies.Recover(prepared.Function, values, session.Types);
                     if (values.SignatureProblem is { } signatureProblem) Problem(address, "入口 ABI: " + signatureProblem);
                     var returnType = method.Method.ReturnType.Substitute(method.TypeArguments, method.MethodArguments);
                     foreach (var block in prepared.Function.Blocks)
@@ -54,6 +56,7 @@ internal static class ValuesRun
                         if (block.IsLandingPad || block.Handler is not null) Problem(block.Start, "异常区域尚未恢复");
                         foreach (var stmt in block.Statements)
                         {
+                            if (copies.ContainsKey(stmt)) { good++; continue; }
                             string? problem = null;
                             var accepted = stmt switch
                             {
@@ -62,7 +65,7 @@ internal static class ValuesRun
                                 Store s => Store(s, values, out problem),
                                 Call c => values.Invocation(c, out problem) is not null,
                                 Branch b => values.Recover(b.Condition, out problem) is not null,
-                                Return { Buffer: not null } => Unsupported("缓冲区返回尚未组装", out problem),
+                                Return { Buffer: not null } => values.ReturnValue is not null,
                                 Return { Pieces.Length: > 0 } r => values.Aggregate(returnType, r.Pieces, out problem) is not null,
                                 Return { Value: { } v } => values.RecoverAs(v, returnType, out problem) is not null,
                                 Return or Jump or Nop => true,

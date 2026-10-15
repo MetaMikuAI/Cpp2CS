@@ -15,11 +15,15 @@ public sealed partial class ValueRecovery
     private readonly Dictionary<Storage, ManagedValue> arguments = new();
     private readonly Dictionary<Variable, ManagedValue> projections = new();
     private readonly Dictionary<Call, LocalValue> callResults = new();
+    private readonly Dictionary<Call, Expr> callDestinations = new();
+    private int nextTemp;
     private readonly AggregateValues aggregates;
     private readonly Dictionary<Variable, (TypeRef Type, int Width)> locals = new();
     public IReadOnlyDictionary<Variable, (TypeRef Type, int Width)> Locals => locals;
     public string? SignatureProblem { get; }
     public StackObjects Stack { get; }
+    public LocalValue? ReturnValue { get; }
+    public IReadOnlyList<RecoveryProblem> BufferProblems { get; }
 
     public ValueRecovery(RecoverySession session, PreparedMethod method)
     {
@@ -28,6 +32,7 @@ public sealed partial class ValueRecovery
         types = session.Types;
         aggregates = new AggregateValues(types);
         Stack = new StackObjects(method.Function, types, call => Target(call) is { } target ? session.Abi.Classify(target, out _) : null);
+        BufferProblems = BufferInitialization.Check(method.Function, method.Return, types, call => Target(call) is { } target ? session.Abi.Classify(target, out _) : null);
         var signature = session.Abi.Classify(method.Method, out var problem);
         SignatureProblem = problem;
         if (signature is not null)
@@ -40,11 +45,26 @@ public sealed partial class ValueRecovery
         {
             Define d => new[] { d.Target }, Phi p => p.Sources.Append(p.Target), Call c => c.Defines, _ => [],
         }).Concat(statements.SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable));
-        var nextTemp = variables.Where(v => v.Storage.Bank == Bank.Temp).Select(v => v.Storage.Index).DefaultIfEmpty(-1).Max() + 1;
+        nextTemp = variables.Where(v => v.Storage.Bank == Bank.Temp).Select(v => v.Storage.Index).DefaultIfEmpty(-1).Max() + 1;
+        if (method.Return is { Passing: Passing.Indirect, Pieces: [var pointer] } returned)
+        {
+            ReturnValue = Temporary(returned.Type);
+            arguments[pointer.Register] = new AddressValue(ReturnValue, new ByRefRef(returned.Type));
+        }
         foreach (var call in statements.OfType<Call>())
         {
-            if (Target(call) is not { } target || session.Abi.Classify(target, out _)?.Return is not
-                { Passing: Passing.Registers, Pieces.Length: > 0 } result) continue;
+            if (Target(call) is not { } target || session.Abi.Classify(target, out _)?.Return is not { Pieces.Length: > 0 } result) continue;
+            if (result is { Passing: Passing.Indirect, Pieces: [var output] })
+            {
+                var index = Array.IndexOf(call.Sources, output.Register);
+                if (index >= 0 && index < call.Arguments.Length)
+                {
+                    callResults.Add(call, Temporary(result.Type));
+                    callDestinations.Add(call, call.Arguments[index]);
+                }
+                continue;
+            }
+            if (result.Passing != Passing.Registers) continue;
             if (result.Pieces is [var piece])
             {
                 var index = Array.IndexOf(call.Results, piece.Register);
@@ -70,8 +90,13 @@ public sealed partial class ValueRecovery
 
     private void Bind(AbiValue value, int index, string name)
     {
-        if (value.Passing != Passing.Registers) return;
         var argument = new ArgumentValue(index, name, value.Type, types.Size(value.Type) * 8);
+        if (value is { Passing: Passing.Indirect, Pieces: [var pointer] })
+        {
+            arguments[pointer.Register] = new AddressValue(argument, new ByRefRef(value.Type));
+            return;
+        }
+        if (value.Passing != Passing.Registers) return;
         foreach (var piece in value.Pieces)
             if (piece.Offset == 0 && piece.Width == argument.Width) arguments[piece.Register] = argument;
             else if (types.Kind(value.Type) == ValueKind.Struct && aggregates.Project(argument, piece.Offset, piece.Width) is { } projected)
@@ -79,6 +104,8 @@ public sealed partial class ValueRecovery
     }
 
     public LocalValue? CallResult(Call call) => callResults.GetValueOrDefault(call);
+    public Expr? CallDestination(Call call) => callDestinations.GetValueOrDefault(call);
+    public LocalValue Temporary(TypeRef type) => new(new Variable(Storage.Temp(nextTemp++), 1), type, types.Size(type) * 8);
 
     private ManagedValue? Variable(Variable variable, int width, out string? problem)
     {
@@ -173,7 +200,7 @@ public sealed partial class ValueRecovery
     }
 
     /// <summary>把内存位置恢复为实例字段或托管引用解引用，可用于读取和写入。</summary>
-    public ManagedValue? Location(Expr address, int width, out string? problem)
+    public ManagedValue? Location(Expr address, int width, out string? problem, bool whole = false)
     {
         if (address is FrameAddress frame)
         {
@@ -191,7 +218,7 @@ public sealed partial class ValueRecovery
         if (type is ByRefRef byRef)
         {
             type = byRef.Element;
-            if (offset == 0 && types.Size(type) * 8 == width && types.Kind(type) != ValueKind.Struct)
+            if (offset == 0 && types.Size(type) * 8 == width && (whole || types.Kind(type) != ValueKind.Struct))
                 return new IndirectValue(receiver, type, width);
         }
         else if (!ManagedTypes.IsReferenceType(type)) return Fail("内存基址没有对象或托管引用类型", out problem);
@@ -225,6 +252,13 @@ public sealed partial class ValueRecovery
 
     private ManagedValue? Argument(AbiValue argument, Call call, out string? problem)
     {
+        if (argument is { Passing: Passing.Indirect, Pieces: [var pointer] })
+        {
+            var source = Array.IndexOf(call.Sources, pointer.Register);
+            if (source < 0 || source >= call.Arguments.Length) return Fail("间接参数缺少来源", out problem);
+            var value = Location(call.Arguments[source], types.Size(argument.Type) * 8, out problem, whole: true);
+            return value?.Type == argument.Type ? value : Fail("间接参数类型尚未确认", out problem);
+        }
         if (argument.Passing != Passing.Registers || argument.Pieces.Length == 0) return Fail("间接或栈调用参数尚未还原", out problem);
         if (argument.Pieces.Length > 1)
         {
