@@ -132,7 +132,7 @@ public static class ExprMap
         Call c => [c.Target, .. c.Arguments],
         Branch b => [b.Condition],
         IndirectJump j => [j.Target],
-        Return { Value: { } v } => [v],
+        Return r => [.. r.Value is { } v ? new[] { v } : [], .. r.Pieces.Select(p => p.Value), .. r.Buffer is { } b ? new[] { b } : []],
         _ => [],
     };
 
@@ -156,7 +156,14 @@ public static class ExprMap
             }
             case Branch b: { var v = f(b.Condition); return ReferenceEquals(v, b.Condition) ? b : b with { Condition = v }; }
             case IndirectJump j: { var v = f(j.Target); return ReferenceEquals(v, j.Target) ? j : j with { Target = v }; }
-            case Return { Value: { } value } r: { var v = f(value); return ReferenceEquals(v, value) ? r : r with { Value = v }; }
+            case Return r:
+            {
+                var v = r.Value is null ? null : f(r.Value);
+                var b = r.Buffer is null ? null : f(r.Buffer);
+                var pieces = r.Pieces.Select(p => p with { Value = f(p.Value) }).ToArray();
+                return ReferenceEquals(v, r.Value) && ReferenceEquals(b, r.Buffer) && pieces.AsSpan().SequenceEqual(r.Pieces)
+                    ? r : r with { Value = v, Buffer = b, Pieces = pieces };
+            }
             default: return stmt;
         }
     }

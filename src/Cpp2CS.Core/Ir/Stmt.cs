@@ -71,10 +71,18 @@ public sealed record IndirectJump(ulong Address, Expr Target) : Stmt(Address)
     public override string ToString() => $"goto *{Target}";
 }
 
+/// <summary>聚合返回值的一段；Offset 是段在返回值中的字节偏移。</summary>
+public sealed record ReturnPiece(int Offset, Expr Value);
+
 public sealed record Return(ulong Address) : Stmt(Address)
 {
     public Expr? Value { get; init; }
-    public override string ToString() => Value is null ? "return" : $"return {Value}";
+    public ReturnPiece[] Pieces { get; init; } = [];
+    /// <summary>间接返回时，调用方在函数入口提供的结果缓冲区。</summary>
+    public Expr? Buffer { get; init; }
+    public override string ToString() => Buffer is not null ? $"return buffer {Buffer}"
+        : Pieces.Length > 0 ? $"return {{{string.Join(", ", Pieces.Select(p => $"+{p.Offset}: {p.Value}"))}}}"
+        : Value is null ? "return" : $"return {Value}";
 }
 
 /// <summary>不返回的陷入（brk/ud2/int3）。</summary>

@@ -62,15 +62,11 @@ public sealed class Arm64ManagedAbi(ManagedTypes types) : IManagedAbi
         }
         AbiPiece? methodInfo = gpr < Registers ? new AbiPiece(Storage.Gpr(gpr), 64, 0) : null;
         var returnType = Concrete(definition.ReturnType);
-        AbiValue? result = null;
-        if (!ManagedTypes.IsVoid(returnType))
+        var result = ClassifyReturn(returnType, out problem);
+        if (problem is not null)
         {
-            if (Result(returnType, out problem) is not { } value)
-            {
-                problem = $"返回值: {problem}";
-                return null;
-            }
-            result = value;
+            problem = $"返回值: {problem}";
+            return null;
         }
         return new AbiSignature(self, parameters, methodInfo, result);
     }
@@ -129,11 +125,13 @@ public sealed class Arm64ManagedAbi(ManagedTypes types) : IManagedAbi
         }
     }
 
-    private AbiValue? Result(TypeRef type, out string? problem)
+    public AbiValue? ClassifyReturn(TypeRef type, out string? problem)
     {
         problem = null;
         switch (types.Kind(type))
         {
+            case ValueKind.Void:
+                return null;
             case null:
                 problem = $"无法确定类别的类型 {type}";
                 return null;

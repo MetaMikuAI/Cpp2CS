@@ -14,10 +14,16 @@ internal static class ManagedCallsCheck
     private sealed class UnusedAbi : IManagedAbi
     {
         public AbiSignature? Classify(MethodRef method, out string? problem) => throw new InvalidOperationException("此测试不包含托管目标");
+        public AbiValue? ClassifyReturn(TypeRef type, out string? problem) => throw new InvalidOperationException("此测试不分类返回值");
     }
 
     private sealed class FixedAbi(AbiSignature? signature) : IManagedAbi
     {
+        public AbiValue? ClassifyReturn(TypeRef type, out string? problem)
+        {
+            problem = signature is null ? "未知布局" : null;
+            return signature?.Return;
+        }
         public AbiSignature? Classify(MethodRef method, out string? problem)
         {
             problem = signature is null ? "未知布局" : null;

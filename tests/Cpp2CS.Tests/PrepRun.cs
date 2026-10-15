@@ -6,6 +6,7 @@ using Cpp2CS.Managed;
 using Cpp2CS.Model;
 using Cpp2CS.Runtime;
 using Cpp2CS.Ssa;
+using Context = Cpp2CS.Managed.RecoverySession;
 
 namespace Cpp2CS.Tests;
 
@@ -15,29 +16,13 @@ namespace Cpp2CS.Tests;
 /// </summary>
 internal static class PrepRun
 {
-    public sealed record Context(ProgramModel Model, FunctionTable Functions, IMachine Machine, CfgBuilder Builder, CallResolver Resolver, ManagedTypes Types, IManagedAbi Abi, ManagedCallModel Calls);
-
-    public static Context Create(ProgramModel model)
-    {
-        var functions = FunctionTable.Build(model.Image);
-        var machine = Corpus.Machine(model.Image);
-        var builder = new CfgBuilder(machine, functions);
-        var resolver = new CallResolver(model, new RuntimeHelpers(builder), new ManagedCopies(machine, functions, model));
-        var types = new ManagedTypes(model, 16);
-        var abi = new Arm64ManagedAbi(types);
-        return new Context(model, functions, machine, builder, resolver, types, abi, new ManagedCallModel(resolver.Resolve, abi, machine.Convention));
-    }
+    public static Context Create(ProgramModel model) => new(model);
 
     /// <summary>构建并整理一个方法；SSA 失败时返回错误。</summary>
     public static (MachineFunction Function, Prepare.Result? Result, List<string> Errors) Build(Context context, MethodRef method, ulong address, FunctionRange? range)
     {
-        var convention = context.Machine.Convention;
-        var function = range is null ? context.Builder.Build(address) : context.Builder.Build(address, range);
-        var returnType = method.Method.ReturnType.Substitute(method.TypeArguments, method.MethodArguments);
-        var errors = Lowering.Registers(function, convention, context.Calls, SsaRun.ReturnValue(returnType, convention));
-        if (errors.Count > 0) return (function, null, errors);
-        var result = new Prepare(context.Resolver, context.Calls, convention).Run(function);
-        return (function, result, SsaCheck.Verify(function, Dominators.Compute(function)));
+        var analyzed = context.Analyze(method, address, range);
+        return (analyzed.Function, analyzed.Preparation, analyzed.Problems.ToList());
     }
 
     public static int Run(string binary, string metadata, string? selector)

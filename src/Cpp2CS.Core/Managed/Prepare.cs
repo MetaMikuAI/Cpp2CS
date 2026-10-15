@@ -11,6 +11,8 @@ namespace Cpp2CS.Managed;
 public interface IManagedAbi
 {
     AbiSignature? Classify(MethodRef method, out string? problem);
+    /// <summary>独立分类返回值；void 返回 null 且 problem 为空。</summary>
+    AbiValue? ClassifyReturn(TypeRef type, out string? problem);
 }
 
 /// <summary>直接调用目标的分类。</summary>

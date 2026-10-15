@@ -72,7 +72,7 @@ public sealed class SsaBuilder
                         Sources = calls.Reads(call).ToArray(),
                         Results = calls.Results(call).ToArray(),
                     },
-                    Return { Value: null } ret when returnValue is not null => ret with { Value = returnValue },
+                    Return { Value: null, Pieces.Length: 0, Buffer: null } ret when returnValue is not null => ret with { Value = returnValue },
                     var other => other,
                 };
             }
