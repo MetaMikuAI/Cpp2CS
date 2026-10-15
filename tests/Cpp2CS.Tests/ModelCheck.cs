@@ -20,6 +20,10 @@ internal static class ModelCheck
         Console.WriteLine($"运行时类型 {model.RuntimeTypes.Count}  方法实例 {model.MethodSpecs.Count}  字段引用 {model.FieldRefs.Count}  字符串 {model.StringLiterals.Count}");
         Console.WriteLine($"代码地址  {model.Code.Count}（共享多所有者 {model.Code.Count(p => p.Value.Count > 1)}）");
         Console.WriteLine($"vtable    {model.Types.Sum(t => t.VTable.Count)} 槽位，空 {model.Types.Sum(t => t.VTable.Count(s => s is null))}");
+        var attributes = model.Assemblies.Sum(a => a.CustomAttributes.Count) + model.Types.Sum(t => t.CustomAttributes.Count
+            + t.Fields.Sum(f => f.CustomAttributes.Count) + t.Properties.Sum(p => p.CustomAttributes.Count) + t.Events.Sum(e => e.CustomAttributes.Count)
+            + t.Methods.Sum(m => m.CustomAttributes.Count + m.Parameters.Sum(p => p.CustomAttributes.Count)));
+        Console.WriteLine($"特性      {attributes}  无归属 {model.UnattachedAttributes.Sum(u => u.Attributes.Count)}（{model.UnattachedAttributes.Count} 个令牌）  事件 {model.Types.Sum(t => t.Events.Count)}  已知大小 {model.Types.Count(t => t.Size >= 0)}");
         if (script is null) return 0;
 
         using var document = JsonDocument.Parse(File.ReadAllBytes(script));

@@ -65,17 +65,49 @@ namespace Cpp2CS.Input
                 _ => throw new NotSupportedException(image.Architecture.ToString()),
             };
             il2Cpp.SetProperties(metadata.Version, metadata.metadataUsagesCount);
-            if (!il2Cpp.PlusSearch(metadata.methodDefs.Count(m => m.methodIndex >= 0), metadata.typeDefs.Length, metadata.imageDefs.Length)
-                && !il2Cpp.Search() && !il2Cpp.SymbolSearch())
-                throw new InvalidDataException("无法定位 IL2CPP CodeRegistration/MetadataRegistration");
+            var metadataRegistration = FindRegistration(il2Cpp, metadata, binaryPath);
             if (il2Cpp.IsDumped) throw new NotSupportedException("只支持磁盘映像，不支持内存转储");
             var builder = new ModelBuilder(metadata, il2Cpp, image);
-            return (builder.Build(), builder);
+            return (builder.Build(il2Cpp.MapVATR<Il2CppMetadataRegistration>(metadataRegistration)), builder);
+        }
+
+        /// <summary>
+        /// 定位 CodeRegistration/MetadataRegistration 并初始化 il2Cpp，返回 MetadataRegistration 地址。
+        /// Il2CppDumper 的 PlusSearch 在大映像上需要几十秒；它把交给 Init 的两个地址打印到控制台（AutoPlusInit），
+        /// 这里从输出取回，连同最终版本号按 文件名+大小+修改时间 缓存在临时目录，之后直接以缓存值调用 Init。
+        /// 以最终版本号重放 Init 与原过程等价：Init 内只有从旧版本号出发的修正分支。
+        /// </summary>
+        private static ulong FindRegistration(Il2Cpp il2Cpp, Metadata metadata, string binaryPath)
+        {
+            var invariant = System.Globalization.CultureInfo.InvariantCulture;
+            var file = new FileInfo(binaryPath);
+            var cache = Path.Combine(Path.GetTempPath(), "cpp2cs-registration", $"{file.Name}-{file.Length}-{file.LastWriteTimeUtc.Ticks}.txt");
+            if (File.Exists(cache))
+            {
+                var parts = File.ReadAllText(cache).Split(' ');
+                il2Cpp.Version = double.Parse(parts[0], invariant);
+                var cachedMeta = System.Convert.ToUInt64(parts[2], 16);
+                il2Cpp.Init(System.Convert.ToUInt64(parts[1], 16), cachedMeta);
+                return cachedMeta;
+            }
+            var console = Console.Out;
+            var captured = new StringWriter();
+            Console.SetOut(captured);
+            var found = il2Cpp.PlusSearch(metadata.methodDefs.Count(m => m.methodIndex >= 0), metadata.typeDefs.Length, metadata.imageDefs.Length);
+            Console.SetOut(console);
+            if (!found) throw new InvalidDataException("PlusSearch 无法定位 IL2CPP CodeRegistration/MetadataRegistration");
+            var lines = captured.ToString().Split('\n');
+            ulong Printed(string prefix) => System.Convert.ToUInt64(lines.Last(l => l.StartsWith(prefix, StringComparison.Ordinal))[prefix.Length..].Trim(), 16);
+            var code = Printed("CodeRegistration : ");
+            var meta = Printed("MetadataRegistration : ");
+            Directory.CreateDirectory(Path.GetDirectoryName(cache)!);
+            File.WriteAllText(cache, $"{il2Cpp.Version.ToString(invariant)} {code:x} {meta:x}");
+            return meta;
         }
 
         private string String(uint index) => metadata.GetStringFromIndex(index);
 
-        private ProgramModel Build()
+        private ProgramModel Build(Il2CppMetadataRegistration registration)
         {
             foreach (var imageDef in metadata.imageDefs)
             {
@@ -106,7 +138,7 @@ namespace Cpp2CS.Input
                 var def = metadata.typeDefs[i];
                 var type = types[i];
                 if (def.declaringTypeIndex >= 0) type.DeclaringType = Definition(il2Cpp.types[def.declaringTypeIndex]);
-                if (def.genericContainerIndex >= 0) type.GenericParameters = ContainerNames(def.genericContainerIndex);
+                if (def.genericContainerIndex >= 0) type.GenericParameters = GenericParameters(def.genericContainerIndex);
                 if (def.parentIndex >= 0) type.BaseType = Convert(il2Cpp.types[def.parentIndex]);
                 type.Interfaces = Enumerable.Range(def.interfacesStart, def.interfaces_count)
                     .Select(k => Convert(il2Cpp.types[metadata.interfaceIndices[k]])).ToArray();
@@ -135,6 +167,7 @@ namespace Cpp2CS.Input
                         Attributes = attributes,
                         Offset = offset,
                         Constant = constant,
+                        Token = fieldDef.token,
                     };
                     fields[f] = field;
                     typeFields.Add(field);
@@ -157,7 +190,7 @@ namespace Cpp2CS.Input
                         ReturnType = Convert(il2Cpp.types[methodDef.returnType]),
                         Address = il2Cpp.GetMethodPointer(type.Assembly, methodDef),
                     };
-                    if (methodDef.genericContainerIndex >= 0) method.GenericParameters = ContainerNames(methodDef.genericContainerIndex);
+                    if (methodDef.genericContainerIndex >= 0) method.GenericParameters = GenericParameters(methodDef.genericContainerIndex);
                     var parameters = new ParameterDef[methodDef.parameterCount];
                     for (var p = 0; p < parameters.Length; p++)
                     {
@@ -167,7 +200,10 @@ namespace Cpp2CS.Input
                         var hasDefault = metadata.GetParameterDefaultValueFromIndex(methodDef.parameterStart + p, out var parameterDefault)
                             && parameterDefault.dataIndex != -1
                             && executor.TryGetDefaultValue(parameterDefault.typeIndex, parameterDefault.dataIndex, out defaultValue);
-                        parameters[p] = new ParameterDef(String(parameterDef.nameIndex), Convert(parameterType), (ParameterAttributes)parameterType.attrs, defaultValue, hasDefault);
+                        parameters[p] = new ParameterDef(String(parameterDef.nameIndex), Convert(parameterType), (ParameterAttributes)parameterType.attrs, defaultValue, hasDefault)
+                        {
+                            Token = parameterDef.token,
+                        };
                     }
                     method.Parameters = parameters;
                     methods[m] = method;
@@ -176,19 +212,44 @@ namespace Cpp2CS.Input
                 type.Methods = typeMethods;
             }
 
+            var properties = new PropertyDef[metadata.propertyDefs.Length];
+            var sizes = il2Cpp.MapVATR<ulong>(registration.typeDefinitionsSizes, registration.typeDefinitionsSizesCount);
             for (var i = 0; i < types.Length; i++)
             {
                 var def = metadata.typeDefs[i];
                 types[i].Properties = Enumerable.Range(def.propertyStart, def.property_count).Select(k =>
                 {
                     var property = metadata.propertyDefs[k];
-                    return new PropertyDef
+                    return properties[k] = new PropertyDef
                     {
                         Name = String(property.nameIndex),
+                        Attributes = (PropertyAttributes)property.attrs,
+                        Token = property.token,
                         Getter = property.get >= 0 ? methods[def.methodStart + property.get] : null,
                         Setter = property.set >= 0 ? methods[def.methodStart + property.set] : null,
                     };
                 }).ToArray();
+                types[i].Events = Enumerable.Range(def.eventStart, def.event_count).Select(k =>
+                {
+                    var definition = metadata.eventDefs[k];
+                    var eventType = il2Cpp.types[definition.typeIndex];
+                    return new EventDef
+                    {
+                        Name = String(definition.nameIndex),
+                        Type = Convert(eventType),
+                        Attributes = (EventAttributes)eventType.attrs,
+                        Token = definition.token,
+                        Add = definition.add >= 0 ? methods[def.methodStart + definition.add] : null,
+                        Remove = definition.remove >= 0 ? methods[def.methodStart + definition.remove] : null,
+                        Raise = definition.raise >= 0 ? methods[def.methodStart + definition.raise] : null,
+                    };
+                }).ToArray();
+                // Il2CppTypeDefinitionSizes.instance_size：值类型也按装箱对象计（含对象头）
+                if (i < sizes.Length && sizes[i] != 0)
+                {
+                    var instanceSize = (int)il2Cpp.MapVATR<uint>(sizes[i]);
+                    types[i].Size = types[i].IsValueType ? instanceSize - ObjectHeaderSize : instanceSize;
+                }
             }
 
             var runtimeTypes = il2Cpp.types.Select(t => Convert(t)).ToArray();
@@ -204,10 +265,19 @@ namespace Cpp2CS.Input
             }).ToArray();
             var literals = Enumerable.Range(0, metadata.stringLiterals.Length).Select(k => metadata.GetStringLiteralFromIndex((uint)k)).ToArray();
 
+            var assemblies = metadata.imageDefs.Select(imageDef => new AssemblyDef
+            {
+                Name = String(imageDef.nameIndex),
+                Types = Enumerable.Range(imageDef.typeStart, (int)imageDef.typeCount).Select(k => types[k]).ToArray(),
+            }).ToArray();
+            ReadCustomAttributes(assemblies, methods, fields, properties);
+
             var model = new ProgramModel
             {
                 Image = image,
                 MetadataVersion = metadata.Version,
+                Assemblies = assemblies,
+                UnattachedAttributes = unattached,
                 Types = types,
                 Methods = methods,
                 Fields = fields,
@@ -250,12 +320,108 @@ namespace Cpp2CS.Input
             return owners.ToDictionary(p => p.Key, p => (IReadOnlyList<CodeOwner>)p.Value);
         }
 
-        private IReadOnlyList<string> ContainerNames(int containerIndex)
+        private int ObjectHeaderSize => image.Architecture is Architecture.Arm64 or Architecture.X64 ? 16 : throw new NotSupportedException(image.Architecture.ToString());
+
+        private IReadOnlyList<GenericParameterDef> GenericParameters(int containerIndex)
         {
             var container = metadata.genericContainers[containerIndex];
-            return Enumerable.Range(container.genericParameterStart, container.type_argc)
-                .Select(k => String(metadata.genericParameters[k].nameIndex)).ToArray();
+            return Enumerable.Range(container.genericParameterStart, container.type_argc).Select(k =>
+            {
+                var parameter = metadata.genericParameters[k];
+                return new GenericParameterDef
+                {
+                    Name = String(parameter.nameIndex),
+                    Position = parameter.num,
+                    Attributes = (GenericParameterAttributes)parameter.flags,
+                    Constraints = Enumerable.Range(parameter.constraintsStart, parameter.constraintsCount)
+                        .Select(c => Convert(il2Cpp.types[metadata.constraintIndices[c]])).ToArray(),
+                };
+            }).ToArray();
         }
+
+        /// <summary>
+        /// v29+ 的自定义特性数据：每个 image 的 attributeDataRanges 按令牌给出数据区间，
+        /// 区间内是 构造函数索引表 + 逐个特性的 (实参, 字段, 属性) 编码值。
+        /// </summary>
+        private void ReadCustomAttributes(AssemblyDef[] assemblies, MethodDef[] methods, FieldDef[] fields, PropertyDef[] properties)
+        {
+            if (metadata.Version < 29) throw new NotSupportedException($"元数据版本 {metadata.Version} 的特性由生成函数构造，尚未支持");
+            var byToken = new Dictionary<uint, Action<IReadOnlyList<CustomAttributeDef>>>();
+            for (var a = 0; a < assemblies.Length; a++)
+            {
+                var imageDef = metadata.imageDefs[a];
+                byToken.Clear();
+                var assembly = assemblies[a];
+                var assemblyDef = metadata.assemblyDefs[imageDef.assemblyIndex];
+                byToken[assemblyDef.token] = list => assembly.CustomAttributes = list;
+                foreach (var type in assembly.Types)
+                {
+                    byToken[type.Token] = list => type.CustomAttributes = list;
+                    foreach (var field in type.Fields) byToken[field.Token] = list => field.CustomAttributes = list;
+                    foreach (var method in type.Methods)
+                    {
+                        byToken[method.Token] = list => method.CustomAttributes = list;
+                        foreach (var parameter in method.Parameters) byToken[parameter.Token] = list => parameter.CustomAttributes = list;
+                    }
+                    foreach (var property in type.Properties) byToken[property.Token] = list => property.CustomAttributes = list;
+                    foreach (var definition in type.Events) byToken[definition.Token] = list => definition.CustomAttributes = list;
+                }
+                for (var r = imageDef.customAttributeStart; r < imageDef.customAttributeStart + imageDef.customAttributeCount; r++)
+                {
+                    var range = metadata.attributeDataRanges[r];
+                    var end = metadata.attributeDataRanges[r + 1].startOffset;
+                    metadata.Position = metadata.header.attributeDataOffset + range.startOffset;
+                    var reader = new CustomAttributeDataReader(executor, metadata.ReadBytes((int)(end - range.startOffset)));
+                    var list = new List<CustomAttributeDef>();
+                    for (var k = 0; k < reader.Count; k++)
+                    {
+                        var visitor = reader.VisitCustomAttributeData();
+                        var constructor = methods[visitor.CtorIndex];
+                        list.Add(new CustomAttributeDef(
+                            constructor,
+                            visitor.Arguments.Select(x => AttributeValueOf(x.Value)).ToArray(),
+                            visitor.Fields.Select(x => (fields[x.Index], AttributeValueOf(x.Value))).ToArray(),
+                            visitor.Properties.Select(x => (properties[x.Index], AttributeValueOf(x.Value))).ToArray()));
+                    }
+                    if (byToken.TryGetValue(range.token, out var assign)) assign(list);
+                    // 返回值参数行（序号 0）不在 il2cpp 的参数表中，无法从令牌确定所属方法：单独记录
+                    else if (range.token >> 24 == 0x08) unattached.Add((assembly, range.token, list));
+                    else throw new InvalidDataException($"{assembly.Name} 的特性令牌 0x{range.token:x8} 没有对应的元素");
+                }
+            }
+        }
+
+        private readonly List<(AssemblyDef Assembly, uint Token, IReadOnlyList<CustomAttributeDef> Attributes)> unattached = [];
+
+        private readonly Dictionary<string, TypeDef> corlib = new();
+
+        private TypeRef Corlib(string fullName)
+        {
+            if (corlib.Count == 0)
+                foreach (var type in types.Where(t => t.Assembly == "mscorlib.dll" && t.DeclaringType is null)) corlib[type.FullName] = type;
+            return new DefinitionRef(corlib[fullName], []);
+        }
+
+        private AttributeValue AttributeValueOf(BlobValue blob)
+        {
+            if (blob.EnumType is not null) return new AttributeValue(Convert(blob.EnumType), blob.Value);
+            switch (blob.il2CppTypeEnum)
+            {
+                case Il2CppTypeEnum.IL2CPP_TYPE_SZARRAY:
+                {
+                    var elements = (blob.Value as BlobValue[])?.Select(AttributeValueOf).ToArray();
+                    var elementType = elements is [var first, ..] && elements.All(e => e.Type == first.Type) ? first.Type : Corlib("System.Object");
+                    return new AttributeValue(new ArrayRef(elementType, 1), elements);
+                }
+                case Il2CppTypeEnum.IL2CPP_TYPE_IL2CPP_TYPE_INDEX:
+                    return new AttributeValue(Corlib("System.Type"), blob.Value is Il2CppType t ? Convert(t) : null);
+                default:
+                    var name = Builtins.TryGetValue(blob.il2CppTypeEnum, out var builtin) ? builtin
+                        : throw new NotSupportedException($"特性值类型 {blob.il2CppTypeEnum}");
+                    return new AttributeValue(Corlib(name), blob.Value);
+            }
+        }
+
 
         private TypeDef Definition(Il2CppType type) =>
             Convert(type) is DefinitionRef d ? d.Definition : throw new InvalidDataException($"不是类型定义：{type.type}");

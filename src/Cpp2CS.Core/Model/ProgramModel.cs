@@ -39,6 +39,34 @@ public sealed record GenericParameterRef(string Name, bool IsMethod, int Positio
     public override string ToString() => Name;
 }
 
+/// <summary>泛型参数：名称、位置、约束标志（class/struct/new()/协变逆变）与类型约束。</summary>
+public sealed class GenericParameterDef
+{
+    public required string Name { get; init; }
+    public required int Position { get; init; }
+    public required GenericParameterAttributes Attributes { get; init; }
+    public IReadOnlyList<TypeRef> Constraints { get; internal set; } = [];
+    public override string ToString() => Name;
+}
+
+/// <summary>自定义特性的参数值。Type 为编码时的类型（基元、string、System.Type、枚举、数组）；
+/// Value 为基元值、string、TypeRef（typeof）、AttributeValue[]（数组）或 null。</summary>
+public sealed record AttributeValue(TypeRef Type, object? Value);
+
+public sealed record CustomAttributeDef(
+    MethodDef Constructor,
+    IReadOnlyList<AttributeValue> Arguments,
+    IReadOnlyList<(FieldDef Field, AttributeValue Value)> Fields,
+    IReadOnlyList<(PropertyDef Property, AttributeValue Value)> Properties);
+
+public sealed class AssemblyDef
+{
+    public required string Name { get; init; }
+    public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
+    public IReadOnlyList<TypeDef> Types { get; internal set; } = [];
+    public override string ToString() => Name;
+}
+
 public sealed class TypeDef
 {
     public required int Index { get; init; }
@@ -51,13 +79,18 @@ public sealed class TypeDef
     public required bool IsValueType { get; init; }
     public required bool IsEnum { get; init; }
     public TypeDef? DeclaringType { get; internal set; }
-    public IReadOnlyList<string> GenericParameters { get; internal set; } = [];
+    /// <summary>本类型声明的泛型参数（嵌套类型按 CLR 规则包含外层类型的参数）。</summary>
+    public IReadOnlyList<GenericParameterDef> GenericParameters { get; internal set; } = [];
     public TypeRef? BaseType { get; internal set; }
     public IReadOnlyList<TypeRef> Interfaces { get; internal set; } = [];
     public IReadOnlyList<FieldDef> Fields { get; internal set; } = [];
     public IReadOnlyList<MethodDef> Methods { get; internal set; } = [];
     public IReadOnlyList<PropertyDef> Properties { get; internal set; } = [];
+    public IReadOnlyList<EventDef> Events { get; internal set; } = [];
     public IReadOnlyList<TypeDef> NestedTypes { get; internal set; } = [];
+    public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
+    /// <summary>值类型为实例数据大小（不含对象头），引用类型为含对象头的实例大小；未知为 -1。</summary>
+    public int Size { get; internal set; } = -1;
     /// <summary>vtable 槽位到方法；接口方法槽位由运行时按 interface offset 拼接，元数据中为 MethodRef/MethodDef。</summary>
     public IReadOnlyList<MethodRef?> VTable { get; internal set; } = [];
     /// <summary>(接口, 起始槽位)。</summary>
@@ -88,12 +121,18 @@ public sealed class FieldDef
     /// <summary>实例字段相对对象起始（引用类型含对象头，值类型已减去对象头）；静态字段相对 static_fields；-1 未知。</summary>
     public required int Offset { get; init; }
     public object? Constant { get; init; }
+    public uint Token { get; init; }
+    public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
     public bool IsStatic => (Attributes & FieldAttributes.Static) != 0;
     public bool IsThreadStatic { get; init; }
     public override string ToString() => $"{Owner.FullName}.{Name}";
 }
 
-public sealed record ParameterDef(string Name, TypeRef Type, ParameterAttributes Attributes, object? DefaultValue, bool HasDefault);
+public sealed record ParameterDef(string Name, TypeRef Type, ParameterAttributes Attributes, object? DefaultValue, bool HasDefault)
+{
+    public uint Token { get; init; }
+    public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
+}
 
 public sealed class MethodDef
 {
@@ -106,7 +145,10 @@ public sealed class MethodDef
     public required int Slot { get; init; }
     public TypeRef ReturnType { get; internal set; } = new PrimitiveRef("void");
     public IReadOnlyList<ParameterDef> Parameters { get; internal set; } = [];
-    public IReadOnlyList<string> GenericParameters { get; internal set; } = [];
+    public IReadOnlyList<GenericParameterDef> GenericParameters { get; internal set; } = [];
+    public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
+    /// <summary>返回值上的特性（元数据中挂在序号 0 的参数令牌上；v29 未单独保存，暂为空）。</summary>
+    public IReadOnlyList<CustomAttributeDef> ReturnAttributes { get; internal set; } = [];
     /// <summary>非共享实现的代码地址（首选基址下的 VA）；0 表示无实现（抽象、extern 或仅有泛型实例）。</summary>
     public ulong Address { get; internal set; }
 
@@ -119,8 +161,25 @@ public sealed class MethodDef
 public sealed class PropertyDef
 {
     public required string Name { get; init; }
+    public required PropertyAttributes Attributes { get; init; }
+    public required uint Token { get; init; }
     public MethodDef? Getter { get; init; }
     public MethodDef? Setter { get; init; }
+    public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
+    public override string ToString() => Name;
+}
+
+public sealed class EventDef
+{
+    public required string Name { get; init; }
+    public required TypeRef Type { get; init; }
+    public required EventAttributes Attributes { get; init; }
+    public required uint Token { get; init; }
+    public MethodDef? Add { get; init; }
+    public MethodDef? Remove { get; init; }
+    public MethodDef? Raise { get; init; }
+    public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
+    public override string ToString() => Name;
 }
 
 /// <summary>方法引用：泛型定义上的方法加上类与方法实参（可能为空）。</summary>
@@ -152,6 +211,9 @@ public sealed class ProgramModel
 {
     public required ImageDocument Image { get; init; }
     public required double MetadataVersion { get; init; }
+    public required IReadOnlyList<AssemblyDef> Assemblies { get; init; }
+    /// <summary>找不到所属元素的特性（返回值参数行不在 il2cpp 参数表中）。</summary>
+    public required IReadOnlyList<(AssemblyDef Assembly, uint Token, IReadOnlyList<CustomAttributeDef> Attributes)> UnattachedAttributes { get; init; }
     public required IReadOnlyList<TypeDef> Types { get; init; }
     public required IReadOnlyList<MethodDef> Methods { get; init; }
     public required IReadOnlyList<FieldDef> Fields { get; init; }
