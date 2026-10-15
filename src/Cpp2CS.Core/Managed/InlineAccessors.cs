@@ -30,6 +30,7 @@ public static class InlineAccessors
                     return rewritten;
                 }
                 case IndirectValue indirect: return indirect with { Address = Value(indirect.Address, address) };
+                case AddressValue reference: return reference with { Target = Value(reference.Target, address, needsAddress: true) };
                 case BinaryValue binary: return binary with { Left = Value(binary.Left, address), Right = Value(binary.Right, address) };
                 case UnaryValue unary: return unary with { Operand = Value(unary.Operand, address) };
                 case ConversionValue conversion: return conversion with { Operand = Value(conversion.Operand, address) };

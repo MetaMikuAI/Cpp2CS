@@ -13,6 +13,7 @@ public static class BodyRecovery
         problems.AddRange(prepared.Function.Problems.Select(p => new RecoveryProblem(prepared.Function.Entry, "CFG: " + p)));
         if (problems.Count > 0) return new(null, problems);
         var values = new ValueRecovery(session, prepared);
+        problems.AddRange(values.Stack.Problems);
         if (values.SignatureProblem is { } signatureProblem) problems.Add(new(prepared.Function.Entry, signatureProblem));
         var returnType = prepared.Method.Method.ReturnType.Substitute(prepared.Method.TypeArguments, prepared.Method.MethodArguments);
         var blocks = new List<ManagedBlock>();

@@ -11,6 +11,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
     Func<FieldRef, FieldReference> fieldReference, Func<MethodRef, MethodReference> methodReference)
 {
     private readonly Dictionary<Variable, VariableDefinition> locals = new();
+    private readonly Dictionary<long, VariableDefinition> stackLocals = new();
     private readonly Dictionary<ulong, Instruction> labels = new();
     private MethodDefinition destination = null!;
     private MethodBody body = null!;
@@ -69,6 +70,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
         body = new MethodBody(method) { InitLocals = true };
         il = body.GetILProcessor();
         locals.Clear();
+        stackLocals.Clear();
         labels.Clear();
         foreach (var block in recovered.Blocks) labels.Add(block.Address, Instruction.Create(OpCodes.Nop));
         foreach (var block in recovered.Blocks)
@@ -102,11 +104,12 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
 
     private string? Problem(ManagedValue value)
     {
-        if (value.Width is not (1 or 8 or 16 or 32 or 64)) return $"CIL 尚未支持位宽 {value.Width}";
+        if (value.Width is not (1 or 8 or 16 or 32 or 64) && types.Kind(value.Type) != ValueKind.Struct) return $"CIL 尚未支持位宽 {value.Width}";
         IEnumerable<ManagedValue> children;
         switch (value)
         {
-            case ArgumentValue or LocalValue: return null;
+            case ArgumentValue or LocalValue or StackLocalValue: return null;
+            case AddressValue reference: children = [reference.Target]; break;
             case ConstantValue c:
                 return types.Kind(c.Type) is ValueKind.Int or ValueKind.Bool or ValueKind.Float or ValueKind.Double
                     || (c.Bits == 0 && ManagedTypes.IsReferenceType(c.Type)) ? null : "CIL 常量类型未支持";
@@ -162,11 +165,18 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
         return local;
     }
 
+    private VariableDefinition StackLocal(StackLocalValue value)
+    {
+        if (!stackLocals.TryGetValue(value.Offset, out var local)) stackLocals.Add(value.Offset, local = Temp(value.Type));
+        return local;
+    }
+
     private void Statement(ManagedStatement statement)
     {
         switch (statement)
         {
             case ManagedAssignment a: Value(a.Value); il.Emit(OpCodes.Stloc, Local(a.Target)); break;
+            case ManagedStore { Target: StackLocalValue local } s: Value(s.Value); il.Emit(OpCodes.Stloc, StackLocal(local)); break;
             case ManagedStore { Target: FieldValue f } s:
                 Receiver(f.Receiver); Value(s.Value); il.Emit(OpCodes.Stfld, fieldReference(f.Field)); break;
             case ManagedStore { Target: IndirectValue i } s:
@@ -214,6 +224,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
         switch (value)
         {
             case LocalValue local: il.Emit(OpCodes.Ldloca, Local(local)); break;
+            case StackLocalValue local: il.Emit(OpCodes.Ldloca, StackLocal(local)); break;
             case ArgumentValue { Index: >= 0 } argument: il.Emit(OpCodes.Ldarga, destination.Parameters[argument.Index]); break;
             case FieldValue field: Receiver(field.Receiver); il.Emit(OpCodes.Ldflda, fieldReference(field.Field)); break;
             case IndirectValue indirect: Value(indirect.Address); break;
@@ -234,6 +245,8 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 else il.Emit(OpCodes.Ldarg, destination.Parameters[a.Index]);
                 break;
             case LocalValue l: il.Emit(OpCodes.Ldloc, Local(l)); break;
+            case StackLocalValue l: il.Emit(OpCodes.Ldloc, StackLocal(l)); break;
+            case AddressValue reference: Address(reference.Target); break;
             case ConstantValue c:
                 if (ManagedTypes.IsReferenceType(c.Type)) il.Emit(OpCodes.Ldnull);
                 else if (types.Kind(c.Type) == ValueKind.Float) il.Emit(OpCodes.Ldc_R4, BitConverter.Int32BitsToSingle(unchecked((int)c.Bits)));

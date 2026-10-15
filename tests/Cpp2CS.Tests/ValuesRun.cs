@@ -46,6 +46,7 @@ internal static class ValuesRun
                 {
                     preparedCount++;
                     var values = new ValueRecovery(session, prepared);
+                    foreach (var stackProblem in values.Stack.Problems) Problem(stackProblem.Address, stackProblem.Reason);
                     if (values.SignatureProblem is { } signatureProblem) Problem(address, "入口 ABI: " + signatureProblem);
                     var returnType = method.Method.ReturnType.Substitute(method.TypeArguments, method.MethodArguments);
                     foreach (var block in prepared.Function.Blocks)

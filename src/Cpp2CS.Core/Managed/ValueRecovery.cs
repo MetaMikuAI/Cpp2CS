@@ -16,12 +16,14 @@ public sealed partial class ValueRecovery
     private readonly Dictionary<Variable, (TypeRef Type, int Width)> locals = new();
     public IReadOnlyDictionary<Variable, (TypeRef Type, int Width)> Locals => locals;
     public string? SignatureProblem { get; }
+    public StackObjects Stack { get; }
 
     public ValueRecovery(RecoverySession session, PreparedMethod method)
     {
         this.session = session;
         this.method = method;
         types = session.Types;
+        Stack = new StackObjects(method.Function, types, call => Target(call) is { } target ? session.Abi.Classify(target, out _) : null);
         var signature = session.Abi.Classify(method.Method, out var problem);
         SignatureProblem = problem;
         if (signature is not null)
@@ -130,7 +132,7 @@ public sealed partial class ValueRecovery
                 return Recover(not.Operand, out problem) is { } operand ? new NegatedValue(operand, types.Boolean) : null;
             }
             case Unknown unknown: return Fail($"未知机器值: {unknown.Reason}", out problem);
-            case FrameAddress: return Fail("栈对象尚未还原", out problem);
+            case FrameAddress frame: return Stack.Address(frame.Offset) ?? Fail("栈对象尚未还原", out problem);
             default: return Fail($"未支持表达式 {expression.GetType().Name}", out problem);
         }
     }
@@ -138,6 +140,11 @@ public sealed partial class ValueRecovery
     /// <summary>把内存位置恢复为实例字段或托管引用解引用，可用于读取和写入。</summary>
     public ManagedValue? Location(Expr address, int width, out string? problem)
     {
+        if (address is FrameAddress frame)
+        {
+            problem = null;
+            return Stack.Location(frame.Offset, width) ?? Fail("栈位置尚未还原", out problem);
+        }
         long offset = 0;
         if (address is Binary { Op: BinOp.Add, Right: Const c } add)
         {
@@ -192,6 +199,11 @@ public sealed partial class ValueRecovery
 
     public ManagedValue? RecoverAs(Expr native, TypeRef expected, out string? problem)
     {
+        if (native is FrameAddress frame && expected is ByRefRef byRef)
+        {
+            problem = null;
+            return Stack.Address(frame.Offset, byRef.Element) ?? Fail("栈引用类型不符", out problem);
+        }
         if (native is Use use && ManagedTypes.IsReferenceType(expected) && IsZero(use.Variable))
         {
             problem = null;
