@@ -39,6 +39,21 @@ public sealed record GenericParameterRef(string Name, bool IsMethod, int Positio
     public override string ToString() => Name;
 }
 
+public static class TypeRefs
+{
+    /// <summary>以类与方法实参代入泛型参数；实参不足的参数保持原样。</summary>
+    public static TypeRef Substitute(this TypeRef type, IReadOnlyList<TypeRef> typeArguments, IReadOnlyList<TypeRef> methodArguments) => type switch
+    {
+        GenericParameterRef { IsMethod: false } g when g.Position < typeArguments.Count => typeArguments[g.Position],
+        GenericParameterRef { IsMethod: true } g when g.Position < methodArguments.Count => methodArguments[g.Position],
+        DefinitionRef { Arguments.Count: > 0 } d => d with { Arguments = d.Arguments.Select(a => a.Substitute(typeArguments, methodArguments)).ToArray() },
+        ArrayRef a => a with { Element = a.Element.Substitute(typeArguments, methodArguments) },
+        PointerRef p => p with { Element = p.Element.Substitute(typeArguments, methodArguments) },
+        ByRefRef r => r with { Element = r.Element.Substitute(typeArguments, methodArguments) },
+        _ => type,
+    };
+}
+
 /// <summary>泛型参数：名称、位置、约束标志（class/struct/new()/协变逆变）与类型约束。</summary>
 public sealed class GenericParameterDef
 {
@@ -61,7 +76,14 @@ public sealed record CustomAttributeDef(
 
 public sealed class AssemblyDef
 {
+    /// <summary>映像名（含扩展名，如 Assembly-CSharp.dll）。</summary>
     public required string Name { get; init; }
+    /// <summary>程序集名（不含扩展名）。</summary>
+    public required string AssemblyName { get; init; }
+    public required Version Version { get; init; }
+    public required string Culture { get; init; }
+    /// <summary>公钥令牌，8 字节；无强名称时为空。</summary>
+    public required byte[] PublicKeyToken { get; init; }
     public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
     public IReadOnlyList<TypeDef> Types { get; internal set; } = [];
     public override string ToString() => Name;
@@ -121,6 +143,8 @@ public sealed class FieldDef
     /// <summary>实例字段相对对象起始（引用类型含对象头，值类型已减去对象头）；静态字段相对 static_fields；-1 未知。</summary>
     public required int Offset { get; init; }
     public object? Constant { get; init; }
+    /// <summary>HasFieldRVA 字段的初始数据（数组初始化器的源数据），长度为字段类型的大小；其他字段为 null。</summary>
+    public byte[]? InitialValue { get; internal set; }
     public uint Token { get; init; }
     public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
     public bool IsStatic => (Attributes & FieldAttributes.Static) != 0;

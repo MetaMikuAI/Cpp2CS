@@ -151,6 +151,7 @@ namespace Cpp2CS.Input
                     var fieldDef = metadata.fieldDefs[f];
                     var fieldType = il2Cpp.types[fieldDef.typeIndex];
                     var attributes = (FieldAttributes)fieldType.attrs;
+                    // 默认值项的 dataIndex 为 -1 表示 null（libil2cpp 的 kDefaultValueIndexNull）
                     object? constant = null;
                     if (metadata.GetFieldDefaultValueFromIndex(f, out var defaultValue) && defaultValue.dataIndex != -1
                         && executor.TryGetDefaultValue(defaultValue.typeIndex, defaultValue.dataIndex, out var value))
@@ -198,8 +199,8 @@ namespace Cpp2CS.Input
                         var parameterType = il2Cpp.types[parameterDef.typeIndex];
                         object? defaultValue = null;
                         var hasDefault = metadata.GetParameterDefaultValueFromIndex(methodDef.parameterStart + p, out var parameterDefault)
-                            && parameterDefault.dataIndex != -1
-                            && executor.TryGetDefaultValue(parameterDefault.typeIndex, parameterDefault.dataIndex, out defaultValue);
+                            && (parameterDefault.dataIndex == -1
+                                || executor.TryGetDefaultValue(parameterDefault.typeIndex, parameterDefault.dataIndex, out defaultValue));
                         parameters[p] = new ParameterDef(String(parameterDef.nameIndex), Convert(parameterType), (ParameterAttributes)parameterType.attrs, defaultValue, hasDefault)
                         {
                             Token = parameterDef.token,
@@ -265,10 +266,21 @@ namespace Cpp2CS.Input
             }).ToArray();
             var literals = Enumerable.Range(0, metadata.stringLiterals.Length).Select(k => metadata.GetStringLiteralFromIndex((uint)k)).ToArray();
 
-            var assemblies = metadata.imageDefs.Select(imageDef => new AssemblyDef
+            ReadInitialValues(fields);
+
+            var assemblies = metadata.imageDefs.Select(imageDef =>
             {
-                Name = String(imageDef.nameIndex),
-                Types = Enumerable.Range(imageDef.typeStart, (int)imageDef.typeCount).Select(k => types[k]).ToArray(),
+                var name = metadata.assemblyDefs[imageDef.assemblyIndex].aname;
+                return new AssemblyDef
+                {
+                    Name = String(imageDef.nameIndex),
+                    AssemblyName = String(name.nameIndex),
+                    // 生成的程序集（__Generated）的 build/revision 为 -1
+                    Version = name.build < 0 ? new Version(name.major, name.minor) : new Version(name.major, name.minor, name.build, name.revision),
+                    Culture = String(name.cultureIndex),
+                    PublicKeyToken = name.public_key_token.Any(b => b != 0) ? name.public_key_token : [],
+                    Types = Enumerable.Range(imageDef.typeStart, (int)imageDef.typeCount).Select(k => types[k]).ToArray(),
+                };
             }).ToArray();
             ReadCustomAttributes(assemblies, methods, fields, properties);
 
@@ -299,8 +311,26 @@ namespace Cpp2CS.Input
                     var usage = model.DecodeToken(Metadata.GetEncodedIndexType(encoded), metadata.GetDecodedMethodIndex(encoded));
                     return usage?.Value as MethodRef ?? throw new InvalidDataException($"vtable 槽位编码无法解析：0x{encoded:x}");
                 }).ToArray();
+                types[i].InterfaceOffsets = InterfaceOffsets(def);
             }
             return model;
+        }
+
+        /// <summary>Il2CppInterfaceOffsetPair { int32 interfaceTypeIndex; int32 offset; }，Il2CppDumper 未读取这张表。</summary>
+        private (TypeRef Interface, int Offset)[] InterfaceOffsets(Il2CppTypeDefinition def)
+        {
+            const int PairSize = 8;
+            if ((long)(def.interfaceOffsetsStart + def.interface_offsets_count) * PairSize > metadata.header.interfaceOffsetsSize)
+                throw new InvalidDataException($"接口偏移区间越界：{def.interfaceOffsetsStart}+{def.interface_offsets_count}");
+            var pairs = new (TypeRef, int)[def.interface_offsets_count];
+            metadata.Position = (ulong)metadata.header.interfaceOffsetsOffset + (ulong)def.interfaceOffsetsStart * PairSize;
+            for (var k = 0; k < pairs.Length; k++)
+            {
+                var typeIndex = metadata.ReadInt32();
+                var offset = metadata.ReadInt32();
+                pairs[k] = (Convert(il2Cpp.types[typeIndex]), offset);
+            }
+            return pairs;
         }
 
         private Dictionary<ulong, IReadOnlyList<CodeOwner>> CodeOwners(MethodDef[] methods, MethodRef[] methodSpecs)
@@ -392,6 +422,23 @@ namespace Cpp2CS.Input
         }
 
         private readonly List<(AssemblyDef Assembly, uint Token, IReadOnlyList<CustomAttributeDef> Attributes)> unattached = [];
+
+        /// <summary>
+        /// HasFieldRVA 字段的数据与默认值同存于 fieldAndParameterDefaultValueData，按字段类型（值类型）的大小截取。
+        /// </summary>
+        private void ReadInitialValues(FieldDef[] fields)
+        {
+            foreach (var field in fields)
+            {
+                if ((field.Attributes & FieldAttributes.HasFieldRVA) == 0) continue;
+                if (!metadata.GetFieldDefaultValueFromIndex(field.Index, out var value) || value.dataIndex == -1)
+                    throw new InvalidDataException($"HasFieldRVA 字段 {field} 没有数据");
+                if (field.Type is not DefinitionRef { Definition: { IsValueType: true, Size: > 0 } type })
+                    throw new InvalidDataException($"HasFieldRVA 字段 {field} 的类型 {field.Type} 大小未知");
+                metadata.Position = metadata.GetDefaultValueFromIndex(value.dataIndex);
+                field.InitialValue = metadata.ReadBytes(type.Size);
+            }
+        }
 
         private readonly Dictionary<string, TypeDef> corlib = new();
 
