@@ -11,8 +11,6 @@ namespace Cpp2CS.Tests;
 /// </summary>
 internal static class CompileCheck
 {
-    private const string MainAssembly = "Assembly-CSharp";
-
     public static int Run(string binary, string metadata, string directory, string? regressionNamespaces)
     {
         var watch = Stopwatch.StartNew();
@@ -23,11 +21,17 @@ internal static class CompileCheck
         skeleton.Write(directory);
         Console.WriteLine($"骨架      {watch.ElapsedMilliseconds} ms  程序集 {skeleton.Assemblies.Count}");
 
-        watch.Restart();
-        var main = Path.Combine(directory, MainAssembly + ".dll");
-        var sources = Decompilation.Decompile(main, directory, _ => true, assemblyAttributes: true);
+        return Saved(directory, regressionNamespaces);
+    }
+
+    /// <summary>只验证已写出的程序集，不重新生成骨架覆盖恢复结果。</summary>
+    public static int Saved(string directory, string? regressionNamespaces, string assemblyName = "Assembly-CSharp")
+    {
+        var watch = Stopwatch.StartNew();
+        var main = Path.Combine(directory, assemblyName + ".dll");
+        var sources = Decompilation.Decompile(main, directory, _ => true, assemblyAttributes: true, recoveringBodies: true);
         Console.WriteLine($"反编译    {watch.ElapsedMilliseconds} ms  文件 {sources.Count}  行 {sources.Sum(s => s.Source.Count(c => c == '\n'))}");
-        WriteSources(Path.Combine(directory, "src"), sources);
+        WriteSources(Path.Combine(directory, "src-" + assemblyName), sources);
 
         watch.Restart();
         var regression = regressionNamespaces?.Split(',').ToHashSet() ?? [];
@@ -35,10 +39,10 @@ internal static class CompileCheck
         var trees = new SyntaxTree[sources.Count];
         Parallel.For(0, sources.Count, i => trees[i] = CSharpSyntaxTree.ParseText(sources[i].Source, parseOptions, path: sources[i].TypeName ?? "AssemblyInfo"));
         var references = Directory.GetFiles(directory, "*.dll")
-            .Where(p => Path.GetFileNameWithoutExtension(p) != MainAssembly)
+            .Where(p => Path.GetFileNameWithoutExtension(p) != assemblyName)
             .Select(p => MetadataReference.CreateFromFile(p))
             .ToArray();
-        var compilation = CSharpCompilation.Create(MainAssembly, trees, references, new CSharpCompilationOptions(
+        var compilation = CSharpCompilation.Create(assemblyName, trees, references, new CSharpCompilationOptions(
             OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true, nullableContextOptions: NullableContextOptions.Disable));
         var shims = Shims.Where(shim => compilation.GetTypeByMetadataName(shim.MetadataName) is null).ToArray();
         if (shims.Length > 0)
@@ -50,8 +54,9 @@ internal static class CompileCheck
         Console.WriteLine($"编译      {watch.ElapsedMilliseconds} ms");
 
         var namespaceOf = sources.Where(s => s.TypeName is not null).ToDictionary(s => s.TypeName!, s => s.Namespace);
-        bool InRegression(Diagnostic d) => d.Location.SourceTree?.FilePath is { } path && namespaceOf.TryGetValue(path, out var ns) && regression.Contains(ns);
-        var regressionFiles = sources.Count(s => s.TypeName is not null && regression.Contains(s.Namespace));
+        bool Included(string ns) => regression.Any(root => ns == root || ns.StartsWith(root + ".", StringComparison.Ordinal));
+        bool InRegression(Diagnostic d) => d.Location.SourceTree?.FilePath is { } path && namespaceOf.TryGetValue(path, out var ns) && Included(ns);
+        var regressionFiles = sources.Count(s => s.TypeName is not null && Included(s.Namespace));
         Console.WriteLine($"错误      {errors.Length}  涉及文件 {errors.Select(d => d.Location.SourceTree?.FilePath).Distinct().Count()}");
         Console.WriteLine($"回归错误  {errors.Count(InRegression)}  回归文件 {regressionFiles}  有错文件 {errors.Where(InRegression).Select(d => d.Location.SourceTree!.FilePath).Distinct().Count()}");
         foreach (var group in errors.GroupBy(d => d.Id).OrderByDescending(g => g.Count()).Take(25))
@@ -59,7 +64,7 @@ internal static class CompileCheck
             var sample = group.First();
             Console.WriteLine($"  {group.Key,-8} {group.Count(),6}  {sample.Location.SourceTree?.FilePath}{sample.Location.GetLineSpan().StartLinePosition}: {sample.GetMessage()}");
         }
-        return 0;
+        return errors.Length == 0 ? 0 : 1;
     }
 
     /// <summary>

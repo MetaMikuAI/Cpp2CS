@@ -16,9 +16,14 @@ public sealed record SourceFile(string? TypeName, string Namespace, string Sourc
 /// <summary>用 ICSharpCode.Decompiler 把写出的程序集还原成 C#，按顶层类型分文件。</summary>
 public static class Decompilation
 {
-    public static DecompilerSettings Settings() => new()
+    public static DecompilerSettings Settings(bool recoveringBodies = false) => new()
     {
         ThrowOnAssemblyResolveErrors = true,
+        // 恢复中的方法与骨架混合存在，自动属性变换可能隐藏仍被方法体引用的字段。
+        AutomaticProperties = !recoveringBodies,
+        GetterOnlyAutomaticProperties = !recoveringBodies,
+        FieldKeyword = !recoveringBodies,
+        StructDefaultConstructorsAndFieldInitializers = !recoveringBodies,
     };
 
     /// <summary>与 ILSpy 导出工程（WholeProjectDecompiler）相同的附加变换：转义非法标识符（编译器生成的名字）、去掉 CLSCompliant。</summary>
@@ -54,12 +59,13 @@ public static class Decompilation
     /// 反编译 <paramref name="assemblyPath"/> 中满足 <paramref name="include"/> 的顶层类型，
     /// 依赖从 <paramref name="searchDirectory"/> 解析。共享一个类型系统，并行反编译各类型。
     /// </summary>
-    public static IReadOnlyList<SourceFile> Decompile(string assemblyPath, string searchDirectory, Func<ITypeDefinition, bool> include, bool assemblyAttributes)
+    public static IReadOnlyList<SourceFile> Decompile(string assemblyPath, string searchDirectory, Func<ITypeDefinition, bool> include, bool assemblyAttributes,
+        bool recoveringBodies = false)
     {
         var file = new PEFile(assemblyPath);
         var resolver = new UniversalAssemblyResolver(assemblyPath, true, file.DetectTargetFrameworkId());
         resolver.AddSearchDirectory(searchDirectory);
-        var settings = Settings();
+        var settings = Settings(recoveringBodies);
         var typeSystem = new DecompilerTypeSystem(file, resolver, settings);
         var types = typeSystem.MainModule.TopLevelTypeDefinitions
             .Where(t => t.Name != "<Module>" && include(t))

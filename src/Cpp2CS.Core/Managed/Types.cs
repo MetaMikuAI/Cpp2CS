@@ -203,8 +203,8 @@ public sealed class ManagedTypes
                 if (size <= 0) continue;
                 if (offset >= f.Offset && offset < f.Offset + size)
                 {
+                    if (hit is not null) return null;
                     hit = f;
-                    break;
                 }
             }
             if (hit is not { } found) return null;

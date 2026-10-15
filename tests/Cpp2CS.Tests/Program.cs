@@ -12,6 +12,10 @@ internal static class Program
             "managed-returns" => ManagedReturnsCheck.Run(),
             "value-layouts" => ValueLayoutsCheck.Run(),
             "layout-model" when args.Length >= 3 => LayoutModelCheck.Run(args[1], args[2]),
+            "values" when args.Length >= 4 => ValuesRun.Run(args[1], args[2], args[3], args.ElementAtOrDefault(4)),
+            "value-check" when args.Length >= 3 => ValueRecoveryCheck.Run(args[1], args[2]),
+            "body-check" when args.Length >= 3 => BodyEmissionCheck.Run(args[1], args[2]),
+            "bodies" when args.Length >= 4 => BodiesRun.Run(args[1], args[2], args[3], args.ElementAtOrDefault(4)),
             "arm64-oracle" => Arm64Oracle.Run(args.Skip(1).Where(a => !a.StartsWith("--")).ToArray(), 4),
             "model" when args.Length >= 3 => ModelCheck.Run(args[1], args[2], args.ElementAtOrDefault(3)),
             "cfg" when args.Length >= 3 => CfgCheck.Run(args[1], args[2], args.ElementAtOrDefault(3)),
@@ -21,6 +25,7 @@ internal static class Program
             "copydiff" when args.Length >= 5 => HelperCensus.Diff(args[1], args[2], Convert.ToUInt64(args[3], 16), Convert.ToUInt64(args[4], 16)),
             "skeleton" when args.Length >= 4 => SkeletonCheck.Run(args[1], args[2], args[3], args.ElementAtOrDefault(4)),
             "compile" when args.Length >= 4 => CompileCheck.Run(args[1], args[2], args[3], args.ElementAtOrDefault(4)),
+            "compile-saved" when args.Length >= 2 => CompileCheck.Saved(args[1], args.ElementAtOrDefault(2), args.ElementAtOrDefault(3) ?? "Assembly-CSharp"),
             "helpers" when args.Length >= 3 => HelperCensus.Run(args[1], args[2], args.ElementAtOrDefault(3)),
             _ => Usage(),
         };
@@ -34,6 +39,10 @@ internal static class Program
                   Cpp2CS.Tests managed-returns
                   Cpp2CS.Tests value-layouts
                   Cpp2CS.Tests layout-model <binary> <metadata>
+                  Cpp2CS.Tests values <binary> <metadata> <报告.jsonl> [命名空间,...]
+                  Cpp2CS.Tests value-check <binary> <metadata>
+                  Cpp2CS.Tests body-check <binary> <metadata>
+                  Cpp2CS.Tests bodies <binary> <metadata> <输出目录> [命名空间,...]
                   Cpp2CS.Tests model <binary> <metadata> [script.json]
                   Cpp2CS.Tests cfg <binary> <metadata> [0x地址 | 命名空间,...]
                   Cpp2CS.Tests ssa <binary> <metadata> [0x地址 | 命名空间,...]
@@ -41,6 +50,7 @@ internal static class Program
                   Cpp2CS.Tests helpers <binary> <metadata> [命名空间,...]
                   Cpp2CS.Tests skeleton <binary> <metadata> <输出目录> [类型全名,...]
                   Cpp2CS.Tests compile <binary> <metadata> <输出目录> [回归命名空间,...]
+                  Cpp2CS.Tests compile-saved <程序集目录> [回归命名空间,...] [程序集名]
             """);
         return 2;
     }
