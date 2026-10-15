@@ -21,7 +21,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
     public static string? Emit(Skeleton skeleton, ManagedTypes types, ManagedBody recovered)
     {
         var pending = new List<(BodyEmitter Emitter, ManagedBody Body, MethodDefinition Method)>();
-        foreach (var body in recovered.Accessors.Select(a => a.Proof.Body).Append(recovered).DistinctBy(b => b.Method))
+        foreach (var body in recovered.Accessors.Select(a => a.Proof.Body).Concat(recovered.Constructors.Select(c => c.Body)).Append(recovered).DistinctBy(b => b.Method))
         {
             var method = skeleton.Method(body.Method.Method);
             var emitter = new BodyEmitter(types,
@@ -29,7 +29,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 f => skeleton.Reference(method.Module, f, method.DeclaringType, method),
                 m => skeleton.Reference(method.Module, m, method.DeclaringType, method));
             if (emitter.Validate(body, method) is { } problem)
-                return body == recovered ? problem : $"访问器依赖无法输出: {body.Method}: {problem}";
+                return body == recovered ? problem : $"恢复依赖无法输出: {body.Method}: {problem}";
             pending.Add((emitter, body, method));
         }
         foreach (var item in pending) item.Emitter.Write(item.Body, item.Method);
@@ -282,6 +282,15 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 il.Emit(OpCodes.Ldloc, constructed); break;
             case ConstantValue c:
                 if (ManagedTypes.IsReferenceType(c.Type)) il.Emit(OpCodes.Ldnull);
+                // C# 的 NaN 字面表示不保留符号和载荷；以整数位型输出，避免源码往返时被规范化。
+                else if (types.Kind(c.Type) == ValueKind.Float && (c.Bits & 0x7f800000) == 0x7f800000 && (c.Bits & 0x7fffff) != 0)
+                {
+                    il.Emit(OpCodes.Ldc_I4, unchecked((int)c.Bits)); Reinterpret(types.UInt32, c.Type);
+                }
+                else if (types.Kind(c.Type) == ValueKind.Double && (c.Bits & 0x7ff0000000000000) == 0x7ff0000000000000 && (c.Bits & 0xfffffffffffff) != 0)
+                {
+                    il.Emit(OpCodes.Ldc_I8, unchecked((long)c.Bits)); Reinterpret(types.UInt64, c.Type);
+                }
                 else if (types.Kind(c.Type) == ValueKind.Float) il.Emit(OpCodes.Ldc_R4, BitConverter.Int32BitsToSingle(unchecked((int)c.Bits)));
                 else if (types.Kind(c.Type) == ValueKind.Double) il.Emit(OpCodes.Ldc_R8, BitConverter.Int64BitsToDouble(unchecked((long)c.Bits)));
                 else if (c.Width == 64) il.Emit(OpCodes.Ldc_I8, unchecked((long)c.Bits));

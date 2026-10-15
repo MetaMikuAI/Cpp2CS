@@ -26,6 +26,8 @@ internal static class BodiesRun
         var reasons = new Dictionary<string, int>();
         var emitted = new HashSet<int>();
         var accessorDependencies = new HashSet<int>();
+        var constructorDependencies = new HashSet<int>();
+        var constructorCases = 0;
         int accessorCases = 0, accessorUses = 0;
         int recoveredCount = 0, emittedCases = 0;
         var watch = Stopwatch.StartNew();
@@ -46,6 +48,8 @@ internal static class BodiesRun
                     if (body.Accessors.Count > 0) accessorCases++;
                     accessorUses += body.Accessors.Count;
                     accessorDependencies.UnionWith(body.Accessors.Select(a => a.Proof.Method.Method.Index));
+                    if (body.Constructors.Count > 0) constructorCases++;
+                    constructorDependencies.UnionWith(body.Constructors.Select(c => c.Body.Method.Method.Index));
                 }
             }
             foreach (var reason in result.Problems.Select(p => p.Reason).Append(outputProblem).Where(p => p is not null))
@@ -65,17 +69,22 @@ internal static class BodiesRun
                     address = $"0x{a.Address:x}", accessorAddress = $"0x{a.Proof.Address:x}", methodIndex = a.Proof.Method.Method.Index,
                     method = a.Proof.Method.ToString(), field = a.Proof.Field.ToString(), setter = a.Proof.IsSetter,
                 }),
+                constructors = result.Body?.Constructors.Select(c => new
+                {
+                    address = $"0x{c.Address:x}", methodIndex = c.Body.Method.Method.Index, method = c.Body.Method.ToString(),
+                }),
                 problems = result.Problems.Select(p => new { address = $"0x{p.Address:x}", reason = p.Reason }), outputProblem,
             }));
         }
         report.Flush();
         Console.WriteLine($"case {cases.Count}  托管方法体 {recoveredCount}  CIL 输出 {emittedCases}  方法定义 {emitted.Count}  用时 {watch.ElapsedMilliseconds} ms");
         Console.WriteLine($"内联访问器 case {accessorCases}  替换位置 {accessorUses}  依赖方法 {accessorDependencies.Count}");
+        Console.WriteLine($"构造委托 case {constructorCases}  依赖方法 {constructorDependencies.Count}");
         foreach (var (reason, count) in reasons.OrderByDescending(p => p.Value).Take(20)) Console.WriteLine($"  {count,8} {reason}");
         var assemblies = Path.Combine(directory, "assemblies");
         skeleton.Write(assemblies);
         // 使用写出后的 token 回读实际方法体，避免仅以恢复计数声称已生成。
-        var written = emitted.Union(accessorDependencies).ToArray();
+        var written = emitted.Union(accessorDependencies).Union(constructorDependencies).ToArray();
         foreach (var group in written.Select(index => skeleton.Method(model.Methods[index])).GroupBy(m => m.Module.Name))
         {
             using var saved = Mono.Cecil.AssemblyDefinition.ReadAssembly(Path.Combine(assemblies, group.Key));
@@ -86,7 +95,7 @@ internal static class BodiesRun
                     throw new InvalidOperationException($"写出的方法体与内存不符: {loaded}");
             }
         }
-        Console.WriteLine($"CIL 回读 {written.Length} 个方法定义通过（含访问器依赖）");
+        Console.WriteLine($"CIL 回读 {written.Length} 个方法定义通过（含恢复依赖）");
         var sourceDirectory = Path.Combine(directory, "src");
         Directory.CreateDirectory(sourceDirectory);
         var invalid = Path.GetInvalidFileNameChars();
@@ -111,6 +120,8 @@ internal static class BodiesRun
             cases = cases.Count, managedBodies = recoveredCount, cilEmittedCases = emittedCases, emittedDefinitions = emitted.Count,
             accessorCases, accessorUses, accessorDependencies = accessorDependencies.Count,
             extraAccessorDefinitions = accessorDependencies.Except(emitted).Count(),
+            constructorCases, constructorDependencies = constructorDependencies.Count,
+            extraConstructorDefinitions = constructorDependencies.Except(emitted).Count(),
             readBackDefinitions = written.Length, sourceFiles = sourceCount, gameRuntimeVerified = false,
         }, new JsonSerializerOptions { WriteIndented = true }));
         return cases.Count > 0 && emittedCases == cases.Count && missing.Length == 0 ? 0 : 1;

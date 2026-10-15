@@ -4,6 +4,8 @@ using Cpp2CS.Ir;
 using Cpp2CS.Managed;
 using Cpp2CS.Model;
 using Cpp2CS.Output;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using SR = System.Reflection;
@@ -66,6 +68,18 @@ internal static class BodyEmissionCheck
         Expression("SignedLess", types.Boolean, new ComparisonValue(Cond.Slt, Arg(types.UInt32), C(0, types.UInt32), types.Boolean), types.UInt32);
         Expression("FloatBits", types.Single, new ConversionValue(ConvKind.Bitcast, Arg(types.UInt32), types.Single, 32), types.UInt32);
         Expression("IntegerBits", types.UInt32, new ConversionValue(ConvKind.Bitcast, Arg(types.Single), types.UInt32, 32), types.Single);
+        uint[] constant32 = [0, 1, 0x80000000, 0x3f800000, 0x7f800000, 0x7f801234, 0x7fc01234, 0xffc05678];
+        ulong[] constant64 = [0, 1, 0x8000000000000000, 0x3ff0000000000000, 0x7ff0000000000000, 0x7ff0000000001234, 0x7ff8000000001234, 0xfff8000000005678];
+        foreach (var bits in constant32)
+        {
+            Expression("ConstantFloat" + bits, types.Single, new ConversionValue(ConvKind.Bitcast, C(bits, types.UInt32), types.Single, 32));
+            Expression("ConstantUInt" + bits, types.UInt32, new ConversionValue(ConvKind.Bitcast, C(bits, types.Single), types.UInt32, 32));
+        }
+        foreach (var bits in constant64)
+        {
+            Expression("ConstantDouble" + bits, types.Double, new ConversionValue(ConvKind.Bitcast, C(bits, types.UInt64), types.Double, 64));
+            Expression("ConstantULong" + bits, types.UInt64, new ConversionValue(ConvKind.Bitcast, C(bits, types.Double), types.UInt64, 64));
+        }
         foreach (var condition in new[] { Cond.FEq, Cond.FUne, Cond.FLt, Cond.FLe, Cond.FGt, Cond.FGe, Cond.FUlt, Cond.FUle, Cond.FUgt, Cond.FUge })
             Expression(condition.ToString(), types.Boolean, new ComparisonValue(condition, Arg(types.Single), Arg(types.Single, 1), types.Boolean), types.Single, types.Single);
 
@@ -157,6 +171,21 @@ internal static class BodyEmissionCheck
             Require(unchecked((uint)BitConverter.SingleToInt32Bits(floating)) == bits, "整数到浮点位型保留");
             Require((uint)Run("IntegerBits", floating) == bits, "浮点到整数位型保留");
         }
+        void CheckConstants(Type actual)
+        {
+            object Constant(string name) => actual.GetMethod(name)!.Invoke(null, [])!;
+            foreach (var bits in constant32)
+            {
+                Require(unchecked((uint)BitConverter.SingleToInt32Bits((float)Constant("ConstantFloat" + bits))) == bits, "常量整数到单精度位型保留 " + bits);
+                Require((uint)Constant("ConstantUInt" + bits) == bits, "常量单精度到整数位型保留 " + bits);
+            }
+            foreach (var bits in constant64)
+            {
+                Require(unchecked((ulong)BitConverter.DoubleToInt64Bits((double)Constant("ConstantDouble" + bits))) == bits, "常量整数到双精度位型保留 " + bits);
+                Require((ulong)Constant("ConstantULong" + bits) == bits, "常量双精度到整数位型保留 " + bits);
+            }
+        }
+        CheckConstants(runtime);
         foreach (var left in new[] { -1f, 0f, 1f, float.NaN })
         foreach (var right in new[] { -1f, 0f, 1f, float.NaN })
         {
@@ -180,7 +209,27 @@ internal static class BodyEmissionCheck
         }
         Console.WriteLine("CIL 执行检查通过：宽度、符号、移位、浮点位型/NaN、循环边赋值、字段顺序和调用");
         Console.WriteLine("真实 case 0x55d261c/0x55d2624 的恢复方法体在替代宿主中执行通过；未验证游戏运行时");
+        CheckConstants(SourceRoundTrip(assembly));
+        Console.WriteLine("常量位型的 C# 重新编译执行通过：单精度、双精度、负零、极小值与 NaN 载荷");
         return 0;
+    }
+
+    private static Type SourceRoundTrip(AssemblyDefinition assembly)
+    {
+        var directory = Path.Combine("artifacts", "body-source-check", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, assembly.Name.Name + ".dll");
+        assembly.Write(path);
+        var sources = Decompilation.Decompile(path, directory, _ => true, assemblyAttributes: false, recoveringBodies: true);
+        File.WriteAllText(Path.Combine(directory, "Recovered.cs"), string.Join(Environment.NewLine, sources.Select(s => s.Source)));
+        var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
+            .Select(p => MetadataReference.CreateFromFile(p));
+        var compilation = CSharpCompilation.Create("RecompiledBodyChecks", sources.Select(s => CSharpSyntaxTree.ParseText(s.Source)), references,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true));
+        using var stream = new MemoryStream();
+        var result = compilation.Emit(stream);
+        Require(result.Success, string.Join(Environment.NewLine, result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error)));
+        return SR.Assembly.Load(stream.ToArray()).GetType("Checks.Harness", true)!;
     }
 
     private static void Require(bool condition, string message)

@@ -12,7 +12,12 @@ public static class ConstructorCheck
     public class BaseProbe
     {
         public static int Calls;
-        public BaseProbe() => Calls++;
+        public static readonly List<int?> Observed = [];
+        public BaseProbe()
+        {
+            Calls++;
+            Observed.Add(GetType().GetField("Value") is { } field ? (int)field.GetValue(this)! : null);
+        }
     }
 
     public static int Run(string binary, string metadata)
@@ -70,6 +75,25 @@ public static class ConstructorCheck
         Require(ConstructorInitialization.Check(new(constructor, [new(0x1000, [Initialize(), Jump(0x1000)])])) is not null,
             "回边不能重复初始化 this");
 
+        var copied = new LocalValue(new Variable(Storage.Temp(9), 1), types.Int32, 32);
+        var argument = new ArgumentValue(0, "value", types.Int32, 32);
+        var mutate = new MethodRef(new MethodDef
+        {
+            Index = -1, Owner = owner, Name = "Mutate", Token = 0, Slot = -1, Attributes = SR.MethodAttributes.Public | SR.MethodAttributes.Static,
+            ImplAttributes = SR.MethodImplAttributes.IL, ReturnType = types.Void,
+            Parameters = [new ParameterDef("value", new ByRefRef(types.Int32), 0, null, false)],
+        }, [], []);
+        var parameterStore = new ManagedStore(0x3000, location, argument);
+        var delegationTarget = new ManagedBody(Method(owner, ".ctor", types.Int32), [new(0x1000, [Initialize(), parameterStore, returned])]);
+        var addressedCopy = new ManagedBody(Method(owner, ".ctor", types.Int32, types.Boolean), [new(0x1000,
+        [
+            new ManagedAssignment(0x1000, copied, argument),
+            new ManagedCall(0x1004, new(mutate, null, [new AddressValue(copied, new ByRefRef(types.Int32))]), null, false),
+            Initialize(), parameterStore, returned,
+        ])]);
+        Require(ConstructorDelegations.Match(types, addressedCopy, new(0x2000, delegationTarget)) is null,
+            "被取地址的局部副本不能替换为参数本身，否则 ref 写入会改变后续构造参数");
+
         using var assembly = AssemblyDefinition.CreateAssembly(new AssemblyNameDefinition("ConstructorChecks", new Version(1, 0)), "ConstructorChecks", ModuleKind.Dll);
         var module = assembly.MainModule;
         var host = new TypeDefinition("Checks", "Harness", TypeAttributes.Public, module.ImportReference(typeof(BaseProbe)));
@@ -92,6 +116,7 @@ public static class ConstructorCheck
         using var stream = new MemoryStream(); assembly.Write(stream);
         var runtime = SR.Assembly.Load(stream.ToArray()).GetType("Checks.Harness", true)!;
         BaseProbe.Calls = 0;
+        BaseProbe.Observed.Clear();
         foreach (var choice in new[] { false, true })
         {
             var instance = Activator.CreateInstance(runtime, [choice])!;
@@ -100,8 +125,10 @@ public static class ConstructorCheck
         Require(BaseProbe.Calls == 2, "每个实例恰好调用一次基类构造函数");
         var aliased = Activator.CreateInstance(runtime, [0])!;
         Require(BaseProbe.Calls == 3 && (int)runtime.GetField("Value")!.GetValue(aliased)! == 5, "CLR 执行 this 副本上的基类构造调用");
+        Require(BaseProbe.Observed.SequenceEqual(new int?[] { 0, 3, 0 }), "基类观察到的字段值保留初始化先后顺序");
         Console.WriteLine("构造初始化检查通过：准备语句、字段初始化、this 副本、分支、回边，以及缺失、重复、读取和逃逸拒绝");
         Native(session);
+        ConstructorDelegationCheck.Run(session);
         return 0;
     }
 

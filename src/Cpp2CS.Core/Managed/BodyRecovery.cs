@@ -7,7 +7,7 @@ namespace Cpp2CS.Managed;
 /// <summary>将完整 CFG 转为托管语句和边赋值。存在未恢复语句时不返回可输出的方法体。</summary>
 public static class BodyRecovery
 {
-    public static BodyRecoveryResult Recover(RecoverySession session, PreparedMethod prepared, bool recoverAccessors = true)
+    public static BodyRecoveryResult Recover(RecoverySession session, PreparedMethod prepared, bool recoverAccessors = true, bool recoverConstructors = true)
     {
         var problems = prepared.Problems.Select(p => new RecoveryProblem(prepared.Function.Entry, p)).ToList();
         problems.AddRange(prepared.Function.Problems.Select(p => new RecoveryProblem(prepared.Function.Entry, "CFG: " + p)));
@@ -144,6 +144,8 @@ public static class BodyRecovery
         }
         if (problems.Count > 0) return new(null, problems);
         var body = new ManagedBody(prepared.Method, blocks);
-        return new(recoverAccessors ? InlineAccessors.Recover(session, body) : body, problems);
+        if (recoverAccessors) body = InlineAccessors.Recover(session, body);
+        if (recoverConstructors) body = session.Constructors.Recover(body);
+        return new(body, problems);
     }
 }

@@ -22,6 +22,7 @@ public sealed class RecoverySession
     public IManagedAbi Abi { get; }
     public ManagedCallModel Calls { get; }
     public Accessors Accessors { get; }
+    public ConstructorDelegations Constructors { get; }
 
     public RecoverySession(ProgramModel model)
     {
@@ -38,6 +39,7 @@ public sealed class RecoverySession
         Abi = new Arm64ManagedAbi(Types);
         Calls = new ManagedCallModel(Resolver.Resolve, Abi, Machine.Convention);
         Accessors = new Accessors(this);
+        Constructors = new ConstructorDelegations(this);
     }
 
     /// <summary>按具体方法实参建立返回数据流、寄存器 SSA，再整理运行时样板；不生成占位方法体。</summary>

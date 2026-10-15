@@ -18,6 +18,7 @@ public sealed record ManagedBlock(ulong Address, IReadOnlyList<ManagedStatement>
 public sealed record ManagedBody(MethodRef Method, IReadOnlyList<ManagedBlock> Blocks)
 {
     public IReadOnlyList<AccessorUse> Accessors { get; init; } = [];
+    public IReadOnlyList<ConstructorProof> Constructors { get; init; } = [];
 }
 public sealed record RecoveryProblem(ulong Address, string Reason);
 public sealed record BodyRecoveryResult(ManagedBody? Body, IReadOnlyList<RecoveryProblem> Problems);
