@@ -17,6 +17,7 @@ public sealed record DefaultValue(TypeRef Type, int Width) : ManagedValue(Type, 
 /// <summary>Bits 保存原始位型，浮点常量也不经过整数到浮点的数值转换。</summary>
 public sealed record ConstantValue(ulong Bits, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record StringValue(string Text, TypeRef Type) : ManagedValue(Type, 64);
+public sealed record TypeHandleValue(TypeRef TargetType, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record NewArrayValue(ArrayRef ArrayType, ManagedValue Length) : ManagedValue(ArrayType, 64);
 public sealed record ArrayLengthValue(ManagedValue Array, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record ArrayElementValue(ManagedValue Array, ManagedValue Index, TypeRef Type, int Width) : ManagedValue(Type, Width);

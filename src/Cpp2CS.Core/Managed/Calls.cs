@@ -49,11 +49,11 @@ public sealed class ManagedCallModel(Func<Call, Callee?> resolve, IManagedAbi ab
                 }
                 return new CallShape(reads.Distinct().ToArray(), results.Distinct().ToArray());
             }
-            case HelperCallee { Helper.Kind: var kind }:
+            case HelperCallee { Helper: var helper }:
             {
-                if (HelperShape(kind) is not { } shape) return null;
+                if (HelperShape(helper.Kind) is not { } shape) return null;
                 return new CallShape(shape.Arguments.Select(i => convention.IntegerArguments[i]).ToArray(),
-                    shape.Returns ? [convention.IntegerResults[0]] : []);
+                    shape.Returns || helper.ReturnedArgument is not null ? [convention.IntegerResults[0]] : []);
             }
             default:
                 return null;

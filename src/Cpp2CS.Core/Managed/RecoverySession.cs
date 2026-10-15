@@ -34,7 +34,7 @@ public sealed class RecoverySession
         };
         Functions = FunctionTable.Build(model.Image);
         Builder = new CfgBuilder(Machine, Functions);
-        Resolver = new CallResolver(model, new RuntimeHelpers(Builder), new ManagedCopies(Machine, Functions, model));
+        Resolver = new CallResolver(model, new RuntimeHelpers(Builder, RuntimeClassLayout.For(model)?.ConstructorFinished), new ManagedCopies(Machine, Functions, model));
         Types = new ManagedTypes(model, 16);
         Abi = new Arm64ManagedAbi(Types);
         Calls = new ManagedCallModel(Resolver.Resolve, Abi, Machine.Convention);

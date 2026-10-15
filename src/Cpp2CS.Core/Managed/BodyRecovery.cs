@@ -69,8 +69,19 @@ public static class BodyRecovery
                             statements.Add(new ManagedStore(store.Address, location, stored));
                         break;
                     case Call call:
-                        if (session.Resolver.Resolve(call) is HelperCallee)
+                        if (session.Resolver.Resolve(call) is HelperCallee helperCallee)
                         {
+                            if (helperCallee.Helper.Kind == Runtime.HelperKind.ClassInit)
+                            {
+                                if (ClassInitialization.Invocation(session.Types, call, values.Metadata, out problem) is not { } initialize) break;
+                                statements.Add(new ManagedCall(call.Address, initialize, null, false));
+                                if (call.Kind == CallKind.Tail)
+                                {
+                                    if (ManagedTypes.IsVoid(returnType)) statements.Add(new ManagedReturn(call.Address, null));
+                                    else problem = "类初始化尾调用不能作为普通托管返回值";
+                                }
+                                break;
+                            }
                             if (values.HelperValue(call, out problem) is not { } helper) break;
                             if (call.Kind == CallKind.Tail)
                             {

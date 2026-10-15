@@ -40,6 +40,7 @@ public enum HelperKind
 /// <summary>Detail：Throw/GetException 的异常类型全名，LibM 的函数名。</summary>
 public sealed record Helper(HelperKind Kind, string Evidence, string? Detail = null)
 {
+    public int? ReturnedArgument { get; init; }
     public override string ToString() => Detail is null ? Kind.ToString() : $"{Kind}({Detail})";
 }
 
@@ -96,15 +97,17 @@ public sealed class RuntimeHelpers
     private readonly IMachine machine;
     private readonly CfgBuilder builder;
     private readonly NoReturnOracle noReturn;
+    private readonly int? constructorFinished;
     private readonly Dictionary<ulong, Helper?> cache = new();
     private readonly Dictionary<ulong, (HelperKind Kind, string Export)> exportTargets = new();
     private readonly HashSet<ulong> ambiguous = [];
     private readonly HashSet<ulong> assignableFrom = [];
     private readonly Dictionary<ulong, Helper> fromExportBodies = new();
 
-    public RuntimeHelpers(CfgBuilder builder)
+    public RuntimeHelpers(CfgBuilder builder, int? constructorFinished = null)
     {
         this.builder = builder;
+        this.constructorFinished = constructorFinished;
         machine = builder.Machine;
         noReturn = builder.NoReturn;
         var exports = machine.Image.Exports;
@@ -525,12 +528,15 @@ public sealed class RuntimeHelpers
         if (Lowering.Registers(function, convention, new ConservativeCallModel(convention), x0).Count > 0) return null;
         var returns = function.Blocks.SelectMany(b => b.Statements).OfType<Return>().ToList();
         if (returns.Count == 0 || !returns.All(r => r.Value is Use { Variable: { Version: 0 } v } && v.Storage == x0.Storage)) return null;
-        var callees = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Select(c => c.Target is Const t ? Identify(t.Value) : null).ToList();
+        var calls = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().ToArray();
+        var callees = calls.Select(c => c.Target is Const t ? Identify(t.Value) : null).ToList();
         if (callees.Count == 0) return null;
         if (callees.All(h => h is { Kind: HelperKind.Throw, Detail: "System.NullReferenceException" }))
             return new Helper(HelperKind.NullCheck, "所有返回路径返回入口 x0，唯一的调用是抛 NullReferenceException");
-        if (callees.All(h => h is { Kind: HelperKind.ClassInit }))
-            return new Helper(HelperKind.ClassInit, "所有返回路径返回入口 x0，唯一的调用是 ClassInit（条件类初始化）");
+        if (callees.All(h => h is { Kind: HelperKind.ClassInit }) && constructorFinished is { } offset
+            && ClassInitializationWrapper.Matches(function, convention, offset, address => Identify(address) is { Kind: HelperKind.ClassInit }))
+            return new Helper(HelperKind.ClassInit, "同一入口类型的完成标志分支与类初始化，无额外可见副作用")
+            { ReturnedArgument = calls.Any(c => c.Kind == CallKind.Tail) ? null : 0 };
         return new Helper(HelperKind.EnsureInit, "所有返回路径返回入口 x0，其余只有调用（启发式：运行时初始化）");
     }
 

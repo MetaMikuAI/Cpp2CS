@@ -74,6 +74,10 @@ internal static class ManagedCallsCheck
         var indirect = direct with { Kind = CallKind.Indirect, Target = new Read(Storage.Gpr(9), 64) };
         Require(calls.Reads(indirect).Count == 17 && calls.Results(indirect).Count == 6, "未知间接调用保留全部约定寄存器");
         Require(calls.Reads(direct with { Target = Expr.C(0x4000, 64) }).Count == 17, "未知直接调用保持保守约定");
+        var classPassThrough = new ManagedCallModel(_ => new HelperCallee(new Helper(HelperKind.ClassInit, "返回类型指针的测试包装") { ReturnedArgument = 0 }),
+            new UnusedAbi(), convention);
+        Require(classPassThrough.Reads(direct).SequenceEqual([Storage.Gpr(0)]) && classPassThrough.Results(direct).SequenceEqual([Storage.Gpr(0)]),
+            "返回类型指针的类初始化包装仍产生 x0 结果");
         var owner = new TypeDef
         {
             Index = 0, Assembly = "Test.dll", Namespace = "Test", Name = "Owner", Token = 0,

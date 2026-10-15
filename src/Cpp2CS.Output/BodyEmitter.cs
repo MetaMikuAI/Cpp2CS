@@ -101,6 +101,8 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
         {
             case ArgumentValue or LocalValue or StackLocalValue: return null;
             case StringValue: return value.Type == types.String ? null : "字符串常量类型不符";
+            case TypeHandleValue handle: return ManagedTypes.PrimitiveName(handle.Type) is null
+                && handle.Type is DefinitionRef { Definition.FullName: "System.RuntimeTypeHandle" } ? null : "类型句柄的托管类型不符";
             case NewArrayValue array:
                 if (!array.ArrayType.IsVector || array.ArrayType.Rank != 1) return "数组分配需要 SZARRAY 类型";
                 children = [array.Length]; break;
@@ -297,6 +299,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 else il.Emit(OpCodes.Ldc_I4, unchecked((int)c.Bits));
                 break;
             case StringValue text: il.Emit(OpCodes.Ldstr, text.Text); break;
+            case TypeHandleValue handle: il.Emit(OpCodes.Ldtoken, typeReference(handle.TargetType)); break;
             case NewArrayValue array:
                 Value(array.Length); il.Emit(OpCodes.Conv_U); il.Emit(OpCodes.Newarr, typeReference(array.ArrayType.Element)); break;
             case ArrayLengthValue length:

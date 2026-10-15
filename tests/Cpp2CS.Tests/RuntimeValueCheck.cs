@@ -5,6 +5,8 @@ using Cpp2CS.Managed;
 using Cpp2CS.Model;
 using Cpp2CS.Output;
 using Cpp2CS.Runtime;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Mono.Cecil;
 using Convert = System.Convert;
 using SR = System.Reflection;
@@ -212,7 +214,8 @@ internal static class RuntimeValueCheck
         enumType.Fields.Add(new FieldDefinition("Member", FieldAttributes.Public | FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.HasDefault, enumType) { Constant = 13 });
         module.Types.Add(enumType);
         TypeReference Reference(TypeRef type) => type == element ? enumType : type is ArrayRef array ? new ArrayType(Reference(array.Element))
-            : type == types.String ? module.TypeSystem.String : throw new NotSupportedException(type.ToString());
+            : type == types.String ? module.TypeSystem.String : type == types.RuntimeTypeHandle ? module.ImportReference(typeof(RuntimeTypeHandle))
+            : type == types.Corlib("System.IO.Path") ? module.ImportReference(typeof(Path)) : throw new NotSupportedException(type.ToString());
         var methods = new Dictionary<MethodDef, MethodDefinition>();
         foreach (var source in new[] { slash, file, content })
         {
@@ -227,6 +230,9 @@ internal static class RuntimeValueCheck
                 return module.ImportReference(typeof(Path).GetMethod(nameof(Path.Combine), [typeof(string[])]));
             if (method.Method.Address == 0xa1c5924 && method.Method.Owner.FullName == "System.String" && method.Method.Name == "Replace")
                 return module.ImportReference(typeof(string).GetMethod(nameof(string.Replace), [typeof(string), typeof(string)]));
+            if (method.Method.Owner.FullName == "System.Runtime.CompilerServices.RuntimeHelpers" && method.Method.Name == "RunClassConstructor"
+                && method.Method.Parameters is [{ Type: var handle }] && handle == types.RuntimeTypeHandle)
+                return module.ImportReference(typeof(System.Runtime.CompilerServices.RuntimeHelpers).GetMethod("RunClassConstructor", [typeof(RuntimeTypeHandle)]));
             throw new NotSupportedException(method.ToString());
         }
         var emitter = new BodyEmitter(types, Reference, f => throw new NotSupportedException(f.ToString()), Called);
@@ -234,25 +240,48 @@ internal static class RuntimeValueCheck
         {
             var recovered = BodyRecovery.Recover(session, session.Analyze(source, source.Method.Address));
             Require(recovered.Body is not null, string.Join("; ", recovered.Problems));
+            if (source == slash)
+            {
+                var initialize = recovered.Body!.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>()
+                    .Single(c => c.Invocation.Method.Method.Name == "RunClassConstructor");
+                Require(initialize.Invocation.Arguments is [TypeHandleValue { TargetType: var target }] && target == types.Corlib("System.IO.Path"),
+                    "原生路径方法保留 System.IO.Path 的类初始化");
+            }
             var problem = emitter.Emit(recovered.Body!, methods[source.Method]);
             Require(problem is null, problem ?? "真实方法输出");
         }
         using var stream = new MemoryStream(); assembly.Write(stream);
-        var runtime = SR.Assembly.Load(stream.ToArray()).GetType("Checks.Native", true)!;
-        var paths = runtime.GetMethod(file.Method.Name)!;
+        ExecuteNative(SR.Assembly.Load(stream.ToArray()).GetType("Checks.Native", true)!);
+        var directory = Path.Combine("artifacts", "runtime-source-check", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, assembly.Name.Name + ".dll"); assembly.Write(path);
+        var sources = Decompilation.Decompile(path, directory, _ => true, assemblyAttributes: false, recoveringBodies: true);
+        foreach (var source in sources) File.WriteAllText(Path.Combine(directory, source.TypeName + ".cs"), source.Source);
+        var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
+            .Select(p => MetadataReference.CreateFromFile(p));
+        var compilation = CSharpCompilation.Create("RecompiledNativeRuntimeChecks",
+            sources.Select(s => CSharpSyntaxTree.ParseText(s.Source)), references,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true));
+        using var compiled = new MemoryStream(); var result = compilation.Emit(compiled);
+        Require(result.Success, string.Join(Environment.NewLine, result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error)));
+        ExecuteNative(SR.Assembly.Load(compiled.ToArray()).GetType("Checks.Native", true)!);
+        Console.WriteLine($"真实方法 CIL 与 C# 重新编译执行通过：GetFileCombinePath 0x{file.Method.Address:x} → GetSlashCombinePath 0x55d2ac4；ContentListTypes 0x5acb814；未加载 Unity，路径库使用当前 CLR");
+    }
+
+    private static void ExecuteNative(Type runtime)
+    {
+        var paths = runtime.GetMethod("GetFileCombinePath")!;
         foreach (var input in new[] { Array.Empty<string>(), new[] { "one" }, new[] { "a", "b", "c" }, new[] { "a\\b", "c" }, new[] { "空白", "路径" } })
         {
             var actual = (string)paths.Invoke(null, [input])!;
             Require(actual == Path.Combine(input).Replace("\\", "/"), "两个真实恢复方法串联，BCL 提供路径组合和字符串替换");
         }
         Fault<ArgumentNullException>(() => paths.Invoke(null, [null]));
-        var create = runtime.GetMethod(content.Method.Name)!;
+        var create = runtime.GetMethod("get_ContentListTypes")!;
         var first = (Array)create.Invoke(null, null)!;
         var second = (Array)create.Invoke(null, null)!;
         Require(first.Length == 1 && Convert.ToInt32(first.GetValue(0)) == 13 && !ReferenceEquals(first, second), "真实方法分配并初始化枚举数组");
         first.SetValue(Enum.ToObject(first.GetType().GetElementType()!, 99), 0);
         Require(Convert.ToInt32(second.GetValue(0)) == 13, "真实方法的多次分配互不影响");
-        Console.WriteLine($"真实方法执行通过：GetFileCombinePath 0x{file.Method.Address:x} → GetSlashCombinePath 0x55d2ac4；ContentListTypes 0x5acb814；未加载 Unity，路径库使用当前 CLR");
     }
 
     private static void Fault<T>(Func<object?> action) where T : Exception

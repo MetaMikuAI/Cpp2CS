@@ -139,7 +139,11 @@ public static class ConstructorCheck
             "真实 API 构造函数签名");
         var recovered = BodyRecovery.Recover(session, session.Analyze(source, source.Method.Address));
         Require(recovered.Body is not null, string.Join("; ", recovered.Problems));
-        var baseCall = recovered.Body!.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Single();
+        var calls = recovered.Body!.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().ToArray();
+        var baseCall = calls.Single(c => c.Invocation.Method.Method.Name == ".ctor");
+        var initialize = calls.Single(c => c.Invocation.Method.Method.Name == "RunClassConstructor");
+        Require(initialize.Invocation.Arguments is [TypeHandleValue handle] && handle.TargetType == source.Method.Owner.BaseType,
+            "真实构造函数保留具体泛型基类的显式类初始化");
         Require(baseCall.Invocation.Method.DeclaringType == source.Method.Owner.BaseType && baseCall.Invocation.Arguments.Count == 0, "实际基类构造调用");
         Require(ManagedAccess.Method(session.Types, source.Method.Owner, baseCall.Invocation.Method, source.DeclaringType), "具体泛型基类的 protected 构造函数可从派生类调用");
         Require(!ManagedAccess.Method(session.Types, source.Method.Owner, baseCall.Invocation.Method, baseCall.Invocation.Method.DeclaringType),
@@ -153,9 +157,12 @@ public static class ConstructorCheck
         var actual = new MethodDefinition(".ctor", MethodAttributes.Public | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName, module.TypeSystem.Void);
         actual.Parameters.Add(new ParameterDefinition(module.TypeSystem.Int64)); host.Methods.Add(actual);
         TypeReference Reference(TypeRef type) => type == source.DeclaringType ? host : type == source.Method.Owner.BaseType ? module.ImportReference(typeof(BaseProbe))
+            : type == session.Types.Corlib("System.RuntimeTypeHandle") ? module.ImportReference(typeof(RuntimeTypeHandle))
             : type == session.Types.Int64 ? module.TypeSystem.Int64 : ManagedTypes.IsVoid(type) ? module.TypeSystem.Void : throw new NotSupportedException(type.ToString());
         var emitter = new BodyEmitter(session.Types, Reference, f => f.Field == field ? actualField : throw new NotSupportedException(f.ToString()),
-            m => m == baseCall.Invocation.Method ? module.ImportReference(typeof(BaseProbe).GetConstructor(System.Type.EmptyTypes)) : throw new NotSupportedException(m.ToString()));
+            m => m == baseCall.Invocation.Method ? module.ImportReference(typeof(BaseProbe).GetConstructor(System.Type.EmptyTypes))
+                : m == initialize.Invocation.Method ? module.ImportReference(typeof(System.Runtime.CompilerServices.RuntimeHelpers).GetMethod("RunClassConstructor", [typeof(RuntimeTypeHandle)]))
+                : throw new NotSupportedException(m.ToString()));
         var problem = emitter.Emit(recovered.Body, actual); Require(problem is null, problem ?? "真实构造函数输出");
         using var stream = new MemoryStream(); assembly.Write(stream);
         var runtime = SR.Assembly.Load(stream.ToArray()).GetType("Checks.Api", true)!;

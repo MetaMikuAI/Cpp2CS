@@ -57,13 +57,13 @@ public sealed class CallResolver(ProgramModel model, RuntimeHelpers helpers, Man
 /// <summary>
 /// 托管语义恢复之前对寄存器 SSA 的整理，删去 IL2CPP 运行时样板而不改变托管语义：
 /// 1. 按被调用者签名收窄调用的参数与结果，签名之外的结果变量视为已删除（使用处成为 Unknown，φ 中成为未定义值）；
-/// 2. 删除元数据初始化（InitMetadata 与方法内的 s_Il2CppMethodInitialized 标志）、类初始化（ClassInit）、写屏障；
+/// 2. 删除元数据初始化（InitMetadata 与方法内的 s_Il2CppMethodInitialized 标志）和写屏障，保留类初始化副作用；
 /// 3. 删除通往判空/越界/数组类型不符抛出块的分支；InvalidCastException 抛出块前的 IsInst 标为 castclass；
 /// 4. 删除两侧等价的分支（另一侧是空块且汇合处 φ 取值相同）；
 /// 5. 不逃逸、宽度一致的栈槽提升为 SSA 变量。
 /// 依据：IL2CPP 生成代码的固定形态（il2cpp-codegen 的 NullCheck、IL2CPP_RUNTIME_CLASS_INIT、
 /// il2cpp_codegen_initialize_runtime_metadata、Il2CppCodeGenWriteBarrier）；判空、越界、协变数组检查
-/// 由 IL 指令本身保证，类构造与元数据初始化由 CLR 负责，因此删除后托管语义不变。
+/// 由 IL 指令本身保证；类初始化另行恢复为显式 CLR 初始化，保留调用位置。
 /// </summary>
 public sealed class Prepare(CallResolver resolver, ManagedCallModel calls, CallingConvention convention)
 {
@@ -79,6 +79,8 @@ public sealed class Prepare(CallResolver resolver, ManagedCallModel calls, Calli
         var result = new Result();
         Narrow(function);
         RemoveRuntime(function);
+        Settle(function);
+        ClassInitialization.NormalizeGuards(resolver, function);
         Settle(function);
         RemoveThrowEdges(function, result);
         Settle(function);
@@ -167,16 +169,21 @@ public sealed class Prepare(CallResolver resolver, ManagedCallModel calls, Calli
             foreach (var stmt in block.Statements)
             {
                 if (stmt is Store { Target: Const flag, Value: Const { Value: 1, Width: 8 } } && loaded.Contains(flag.Value)) continue;
-                if (stmt is not Call call || resolver.Resolve(call) is not HelperCallee { Helper.Kind: var kind })
+                if (stmt is not Call call || resolver.Resolve(call) is not HelperCallee { Helper: var helper })
                 {
                     output.Add(stmt);
                     continue;
                 }
-                switch (kind)
+                switch (helper.Kind)
                 {
                     case HelperKind.ClassInit:
-                        killed.UnionWith(call.Defines.Where(v => v is not null));
-                        if (call.Kind == CallKind.Tail) output.Add(new Return(call.Address));
+                        output.Add(call with { Results = [], Defines = [] });
+                        if (helper.ReturnedArgument is { } argument && call.Defines is [var result])
+                        {
+                            var index = Array.IndexOf(call.Sources, convention.IntegerArguments[argument]);
+                            if (index < 0 || index >= call.Arguments.Length) throw new InvalidOperationException("类初始化返回参数缺少来源");
+                            output.Add(new Define(call.Address, result, call.Arguments[index]));
+                        }
                         break;
                     case HelperKind.WriteBarrier:
                         killed.UnionWith(call.Defines.Where(v => v is not null));

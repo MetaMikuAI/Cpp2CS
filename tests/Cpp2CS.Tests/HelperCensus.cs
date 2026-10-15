@@ -63,7 +63,7 @@ internal static class HelperCensus
         var functions = FunctionTable.Build(model.Image);
         var machine = Corpus.Machine(model.Image);
         var builder = new CfgBuilder(machine, functions);
-        var helpers = new RuntimeHelpers(builder);
+        var helpers = new RuntimeHelpers(builder, Managed.RuntimeClassLayout.For(model)?.ConstructorFinished);
         var copies = new ManagedCopies(machine, functions, model);
         var namespaces = selector?.Split(',') ?? Corpus.Default(model.Image.Architecture);
         var addresses = Corpus.Select(model, namespaces).Select(m => m.Address).Distinct().Order().ToList();
