@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <CheckForOverflowUnderflow>true</CheckForOverflowUnderflow>
+    <RecoveredSource Condition="'$(RecoveredSource)' == ''">$(MSBuildThisFileDirectory)../../artifacts/first/recovered/Recovered.cs</RecoveredSource>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(RecoveredSource)" Link="Recovered.cs" />
+  </ItemGroup>
+</Project>

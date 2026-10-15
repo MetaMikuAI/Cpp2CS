@@ -21,7 +21,10 @@ import ida_hexrays as hx
 import ida_kernwin
 import ida_lines
 import ida_nalt
+import ida_typeinf
+import ida_bytes
 import idautils
+from ctree_export import export
 
 
 class Tree(hx.ctree_visitor_t):
@@ -75,18 +78,33 @@ for line in sys.stdin:
     if request["action"] != "decompile":
         raise ValueError(f"未知请求: {request['action']}")
     address = int(request["address"], 0)
+    if request.get("binary_sha256", info["input_sha256"]).lower() != info["input_sha256"]:
+        raise ValueError("请求与数据库的输入哈希不一致")
     started = time.monotonic()
     function = ida_funcs.get_func(address)
+    previous_type = ida_typeinf.tinfo_t()
+    ida_nalt.get_tinfo(previous_type, address)
+    if "prototype" in request:
+        signature = ida_typeinf.tinfo_t()
+        if not ida_typeinf.parse_decl(signature, None, request["prototype"], ida_typeinf.PT_SIL):
+            raise ValueError(f"无法解析元数据原型: {request['prototype']}")
+        if not ida_typeinf.apply_tinfo(address, signature, ida_typeinf.TINFO_DEFINITE):
+            raise ValueError("不能应用元数据原型")
+        hx.mark_cfunc_dirty(address, False)
     failure = hx.hexrays_failure_t()
     cfunc = hx.decompile(address, failure)
     result = {"address": hex(address), "name": ida_funcs.get_func_name(address),
               "function_start": hex(function.start_ea) if function else None,
               "function_end": hex(function.end_ea) if function else None,
+              "input_sha256": info["input_sha256"],
+              "prototype_before": str(previous_type), "prototype_applied": request.get("prototype"),
+              "bytes": ida_bytes.get_bytes(function.start_ea, function.end_ea - function.start_ea).hex() if function else None,
               "decompiled": cfunc is not None, "failure": str(failure),
               "xrefs_to": [{"from": hex(x.frm), "type": x.type} for x in idautils.XrefsTo(address)],
               "blocks": None}
     if cfunc is not None:
         result["pseudocode"] = "\n".join(ida_lines.tag_remove(x.line) for x in cfunc.get_pseudocode())
+        result["structured"] = export(cfunc)
         tree = Tree()
         tree.apply_to(cfunc.body, None)
         result["ctree"] = tree.nodes
