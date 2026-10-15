@@ -7,13 +7,13 @@ namespace Cpp2CS.Managed;
 public static class ManagedAccess
 {
     public static bool Field(ManagedTypes types, TypeDef caller, FieldRef field, TypeRef receiver) =>
-        Allowed(types, caller, field.Field.Owner, (int)(field.Field.Attributes & FieldAttributes.FieldAccessMask), receiver);
+        Allowed(types, caller, field.Field.Owner, field.DeclaringType, (int)(field.Field.Attributes & FieldAttributes.FieldAccessMask), receiver);
 
     public static bool Method(ManagedTypes types, TypeDef caller, MethodRef method, TypeRef? receiver) =>
-        Allowed(types, caller, method.Method.Owner, (int)(method.Method.Attributes & MethodAttributes.MemberAccessMask), receiver);
+        Allowed(types, caller, method.Method.Owner, method.DeclaringType, (int)(method.Method.Attributes & MethodAttributes.MemberAccessMask), receiver);
 
     // FieldAccessMask 与 MemberAccessMask 的 0..6 取值相同。Family 同时限制访问上下文与接收者类型。
-    private static bool Allowed(ManagedTypes types, TypeDef caller, TypeDef owner, int access, TypeRef? receiver)
+    private static bool Allowed(ManagedTypes types, TypeDef caller, TypeDef owner, TypeRef declaringType, int access, TypeRef? receiver)
     {
         var sameAssembly = owner.Assembly == caller.Assembly;
         var privateAccess = false;
@@ -23,7 +23,7 @@ public static class ManagedAccess
             privateAccess |= context == owner;
             var contextType = new DefinitionRef(context, []);
             var receiverType = receiver is ByRefRef byRef ? byRef.Element : receiver;
-            familyAccess |= types.IsAssignable(contextType, new DefinitionRef(owner, []))
+            familyAccess |= types.IsAssignable(contextType, declaringType)
                 && (receiverType is null || types.IsAssignable(receiverType, contextType));
         }
         return access switch

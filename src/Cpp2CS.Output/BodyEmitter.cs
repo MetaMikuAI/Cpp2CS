@@ -52,7 +52,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
         if (recovered.Blocks.Count == 0) return "空控制流图";
         accessContext = recovered.Method.Method.Owner;
         if (method.IsConstructor && !method.IsStatic && !method.DeclaringType.IsValueType
-            && !HasEntryConstructorCall(recovered)) return "引用类型构造函数的基类初始化尚未确认";
+            && ConstructorInitialization.Check(recovered) is { } initializationProblem) return initializationProblem;
         foreach (var block in recovered.Blocks)
             foreach (var statement in block.Statements)
             {
@@ -79,15 +79,6 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             foreach (var statement in block.Statements) Statement(statement);
         }
         method.Body = body;
-    }
-
-    private static bool HasEntryConstructorCall(ManagedBody recovered)
-    {
-        if (recovered.Blocks[0].Statements.FirstOrDefault() is not ManagedCall
-            { Invocation: { Method: var target, Receiver: ArgumentValue { Index: -1 } } }) return false;
-        var owner = recovered.Method.Method.Owner;
-        return target.Method.Name == ".ctor" && !target.Method.IsStatic
-            && (target.Method.Owner == owner || target.DeclaringType == owner.BaseType);
     }
 
     private static IEnumerable<ManagedValue> Values(ManagedStatement statement) => statement switch
@@ -358,6 +349,11 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
         switch (c.Kind)
         {
             case ConvKind.Bitcast:
+                if (c.Operand is ConstantValue constant)
+                {
+                    Value(new ConstantValue(constant.Bits, c.Type, c.Width));
+                    break;
+                }
                 Value(c.Operand); Reinterpret(c.Operand.Type, c.Type); break;
             case ConvKind.SignExtend:
                 Integer(c.Operand, true); IntegerWidth(c.Width, true); break;
