@@ -44,6 +44,8 @@ public enum CallKind : byte { Direct, Indirect, Tail, TailIndirect }
 public sealed record Call(ulong Address, CallKind Kind, Expr Target) : Stmt(Address)
 {
     public Expr[] Arguments { get; init; } = [];
+    /// <summary>Arguments 各项读自的存储单元（一一对应；ABI 阶段填入）。</summary>
+    public Storage[] Sources { get; init; } = [];
     /// <summary>返回值写入的存储单元（ABI 阶段确定）。</summary>
     public Storage[] Results { get; init; } = [];
     /// <summary>SSA 之后 Results 对应的变量（一一对应）。</summary>

@@ -12,6 +12,7 @@ internal static class Program
             "model" when args.Length >= 3 => ModelCheck.Run(args[1], args[2], args.ElementAtOrDefault(3)),
             "cfg" when args.Length >= 3 => CfgCheck.Run(args[1], args[2], args.ElementAtOrDefault(3)),
             "ssa" when args.Length >= 3 => SsaRun.Run(args[1], args[2], args.ElementAtOrDefault(3)),
+            "prep" when args.Length >= 3 => PrepRun.Run(args[1], args[2], args.ElementAtOrDefault(3)),
             "copyfind" when args.Length >= 4 => HelperCensus.Find(args[1], args[2], Convert.ToUInt64(args[3], 16)),
             "copydiff" when args.Length >= 5 => HelperCensus.Diff(args[1], args[2], Convert.ToUInt64(args[3], 16), Convert.ToUInt64(args[4], 16)),
             "skeleton" when args.Length >= 4 => SkeletonCheck.Run(args[1], args[2], args[3], args.ElementAtOrDefault(4)),

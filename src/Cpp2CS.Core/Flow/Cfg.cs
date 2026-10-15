@@ -56,10 +56,22 @@ public sealed class MachineFunction
         }
         order.Reverse();
         foreach (var block in Blocks.Where(b => !seen.Contains(b)))
-            foreach (var successor in block.Successors)
-                successor.Predecessors.Remove(block);
+            while (block.Successors.Count > 0) RemoveEdge(block, block.Successors[^1]);
         for (var i = 0; i < order.Count; i++) order[i].Index = i;
         Blocks = order;
+    }
+
+    /// <summary>删除一条 from→to 边（有重边时删一条），同时删去 to 中各 φ 对应该前驱的操作数。</summary>
+    public static void RemoveEdge(Block from, Block to)
+    {
+        var successor = from.Successors.LastIndexOf(to);
+        var predecessor = to.Predecessors.LastIndexOf(from);
+        if (successor < 0 || predecessor < 0) throw new InvalidOperationException($"{from} → {to} 不是边");
+        from.Successors.RemoveAt(successor);
+        to.Predecessors.RemoveAt(predecessor);
+        if (from.Handler == to && !from.Successors.Contains(to)) from.Handler = null;
+        for (var i = 0; i < to.Statements.Count && to.Statements[i] is Phi phi; i++)
+            to.Statements[i] = phi with { Sources = [.. phi.Sources[..predecessor], .. phi.Sources[(predecessor + 1)..]] };
     }
 
     public override string ToString()

@@ -69,6 +69,7 @@ public sealed class SsaBuilder
                     Call { Arguments.Length: 0, Results.Length: 0 } call => call with
                     {
                         Arguments = calls.Reads(call).Select(s => (Expr)new Read(s, s.Width)).ToArray(),
+                        Sources = calls.Reads(call).ToArray(),
                         Results = calls.Results(call).ToArray(),
                     },
                     Return { Value: null } ret when returnValue is not null => ret with { Value = returnValue },
@@ -263,7 +264,7 @@ public sealed class SsaBuilder
                     {
                         var target = assign.Target;
                         var value = assign.Value;
-                        if (target.Bank is Bank.Gpr or Bank.Vec or Bank.Temp && value.Width < target.Width)
+                        if (target.Bank is Bank.Gpr or Bank.Vec or Bank.Temp or Bank.Stack && value.Width < target.Width)
                             value = Fold.Convert(ConvKind.ZeroExtend, value, target.Width);
                         var version = Fresh(target);
                         Push(index[target], version);
