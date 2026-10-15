@@ -46,8 +46,10 @@ public sealed record Call(ulong Address, CallKind Kind, Expr Target) : Stmt(Addr
     public Expr[] Arguments { get; init; } = [];
     /// <summary>返回值写入的存储单元（ABI 阶段确定）。</summary>
     public Storage[] Results { get; init; } = [];
+    /// <summary>SSA 之后 Results 对应的变量（一一对应）。</summary>
+    public Variable[] Defines { get; init; } = [];
     public override string ToString() =>
-        $"{(Results.Length == 0 ? "" : string.Join(", ", Results) + " = ")}{Kind.ToString().ToLowerInvariant()} {Target}({string.Join(", ", Arguments.Select(a => a.ToString()))})";
+        $"{(Defines.Length > 0 ? string.Join(", ", Defines) + " = " : Results.Length == 0 ? "" : string.Join(", ", Results) + " = ")}{Kind.ToString().ToLowerInvariant()} {Target}({string.Join(", ", Arguments.Select(a => a.ToString()))})";
 }
 
 public sealed record Jump(ulong Address, ulong Target) : Stmt(Address)

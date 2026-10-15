@@ -41,7 +41,7 @@ public sealed class NoReturnOracle(IMachine machine, FunctionTable functions)
 
     public void AddEvidence(ulong target) => known[target] = true;
 
-    /// <summary>以导入桩开头的函数返回导入名（PLT 桩 / x64 IAT 跳转）。</summary>
+    /// <summary>以导入桩开头的函数返回其符号名（PLT 桩，含指向本模块已定义符号的；x64 IAT 跳转）。</summary>
     public string? ImportName(ulong target)
     {
         if (imports.TryGetValue(target, out var cached)) return cached;
@@ -57,7 +57,7 @@ public sealed class NoReturnOracle(IMachine machine, FunctionTable functions)
             if (last is IndirectJump jump)
             {
                 foreach (var stmt in statements.Take(statements.Count - 1)) state.Step(stmt);
-                if (state.Eval(jump.Target) is Load { Address: Const slot } && machine.Image.Imports.TryGetValue(slot.Value, out var import)) name = import;
+                if (state.Eval(jump.Target) is Load { Address: Const slot } && machine.Image.SymbolSlots.TryGetValue(slot.Value, out var import)) name = import;
                 break;
             }
             if (last is Jump or Branch or Call or Return or Trap or Opaque) break;

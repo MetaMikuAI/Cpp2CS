@@ -34,6 +34,9 @@ public sealed class ImageDocument
     /// <summary>引用未定义动态符号的指针位置（GOT、JUMP_SLOT）及符号名。</summary>
     public IReadOnlyDictionary<ulong, string> Imports { get; private init; } = new Dictionary<ulong, string>();
 
+    /// <summary>按符号重定位的指针位置及符号名，含已定义符号（如静态链接并导出的 libc++abi 经 PLT 引用）。</summary>
+    public IReadOnlyDictionary<ulong, string> SymbolSlots { get; private init; } = new Dictionary<ulong, string>();
+
     /// <summary>导出符号：ELF 动态符号表中已定义的函数，PE 导出表中的名称导出。</summary>
     public IReadOnlyDictionary<string, ulong> Exports { get; private init; } = new Dictionary<string, ulong>();
 
@@ -281,10 +284,12 @@ public sealed class ImageDocument
         collector.ScanElf();
         var fixups = collector.Pointers;
         var imports = new Dictionary<ulong, string>();
+        var slots = new Dictionary<ulong, string>();
         foreach (var (address, (symbol, addend)) in collector.SymbolPointers)
         {
             if (symbol >= symbols.Count) throw new InvalidDataException($"重定位符号索引越界：{symbol}");
             var entry = symbols[(int)symbol];
+            if (entry.Name.Length > 0) slots[address] = entry.Name;
             if (entry.Defined) fixups[address] = unchecked(entry.Value + (ulong)addend);
             else imports[address] = entry.Name;
         }
@@ -293,6 +298,7 @@ public sealed class ImageDocument
             EhFrameHeader = ehFrameHeader,
             Exports = exports,
             Imports = imports,
+            SymbolSlots = slots,
             pointerFixups = fixups,
         };
     }

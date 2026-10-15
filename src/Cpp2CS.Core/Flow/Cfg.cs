@@ -338,7 +338,15 @@ public sealed class CfgBuilder
                     new Assign(root, conv.IntegerResults[1], new Intrinsic("eh_selector", [], 64)),
                 ]);
             }
-            var function = new MachineFunction { Entry = entry, Range = range, Blocks = blocks.OrderBy(b => b.Start != entry).ToList() };
+            var ordered = blocks.OrderBy(b => b.Start != entry).ToList();
+            if (ordered[0].Predecessors.Count > 0)
+            {
+                // 入口处于环上：加一个空的起始块，保证入口值只从函数外流入
+                var start = new Block(entry) { End = entry };
+                Link(start, ordered[0]);
+                ordered.Insert(0, start);
+            }
+            var function = new MachineFunction { Entry = entry, Range = range, Blocks = ordered };
             function.Problems.AddRange(problems);
             function.UnresolvedIndirectJumps = unresolved;
             function.JumpTables = resolvedTables;
