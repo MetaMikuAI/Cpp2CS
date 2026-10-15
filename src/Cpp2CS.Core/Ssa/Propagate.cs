@@ -5,14 +5,21 @@ namespace Cpp2CS.Ssa;
 
 /// <summary>
 /// SSA 上的传播与清理：复制/常量/栈地址传播，无 Load 的标志位定义代入条件，平凡 φ 消除，
-/// 表达式化简，然后删除无使用的纯定义。SSA 下变量取值处处相同，这些替换对所有执行都成立。
+/// 表达式化简，以及条件边上的 φ 常量来源，然后删除无使用的纯定义。
+/// SSA 下变量取值处处相同；条件边的常量仅替换对应的 φ 输入。
 /// 带 Load 的表达式不移动（中间可能有写内存），留给后续按区间判定的表达式合并。
 /// </summary>
 public static class Propagate
 {
     public static void Run(MachineFunction function, Dominators dominators)
     {
-        while (Substitute(function, dominators)) RemoveDead(function);
+        while (true)
+        {
+            var changed = Substitute(function, dominators);
+            changed |= EdgeConstants.Run(function) > 0;
+            if (!changed) break;
+            RemoveDead(function);
+        }
         RemoveDead(function);
     }
 
