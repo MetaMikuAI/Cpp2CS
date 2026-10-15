@@ -194,12 +194,16 @@ internal static class RuntimeValueCheck
         Console.WriteLine($"共享泛型目标检查通过：{expected[0]}；{expected[1]}；不匹配的元数据拒绝");
     }
 
-    private static void Native(RecoverySession session)
+    internal static void Native(RecoverySession session)
     {
         var types = session.Types;
         var slash = session.Model.Code[0x55d2ac4].Single().Method;
         var file = new MethodRef(slash.Method.Owner.Methods.Single(m => m.Name == "GetFileCombinePath"), [], []);
         var content = session.Model.Code[0x5acb814].Single().Method;
+        var combine = session.Model.Code[0x55d295c].Single().Method;
+        Require(combine.ToString() == "Sekai.Mysekai.PathUtility.GetCombinePath", "完整路径方法身份");
+        var pathKind = (DefinitionRef)combine.Method.Parameters[0].Type;
+        var format = (string)session.Model.UsageAt(session.Model.Image.RelocatedPointer(0xb737498)!.Value)!.Value;
         Require(slash.ToString() == "Sekai.Mysekai.PathUtility.GetSlashCombinePath"
             && content.ToString() == "Sekai.Mysekai.ScreenLayerMysekaiCanvas.get_ContentListTypes", "真实方法身份");
         var element = (DefinitionRef)((ArrayRef)content.Method.ReturnType).Element;
@@ -213,11 +217,18 @@ internal static class RuntimeValueCheck
         enumType.Fields.Add(new FieldDefinition("value__", FieldAttributes.Public | FieldAttributes.SpecialName | FieldAttributes.RTSpecialName, module.TypeSystem.Int32));
         enumType.Fields.Add(new FieldDefinition("Member", FieldAttributes.Public | FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.HasDefault, enumType) { Constant = 13 });
         module.Types.Add(enumType);
-        TypeReference Reference(TypeRef type) => type == element ? enumType : type is ArrayRef array ? new ArrayType(Reference(array.Element))
-            : type == types.String ? module.TypeSystem.String : type == types.RuntimeTypeHandle ? module.ImportReference(typeof(RuntimeTypeHandle))
+        var pathEnum = new TypeDefinition("Checks", "PathKind", TypeAttributes.Public | TypeAttributes.Sealed, module.ImportReference(typeof(Enum)));
+        pathEnum.Fields.Add(new FieldDefinition("value__", FieldAttributes.Public | FieldAttributes.SpecialName | FieldAttributes.RTSpecialName, module.TypeSystem.Int32));
+        foreach (var field in pathKind.Definition.Fields.Where(f => (f.Attributes & SR.FieldAttributes.Literal) != 0))
+            pathEnum.Fields.Add(new FieldDefinition(field.Name, FieldAttributes.Public | FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.HasDefault, pathEnum) { Constant = field.Constant });
+        module.Types.Add(pathEnum);
+        TypeReference Reference(TypeRef type) => type == element ? enumType : type == pathKind ? pathEnum : type is ArrayRef array ? new ArrayType(Reference(array.Element))
+            : type == types.String ? module.TypeSystem.String : type == types.Object ? module.TypeSystem.Object
+            : type == types.Void ? module.TypeSystem.Void : type == types.RuntimeTypeHandle ? module.ImportReference(typeof(RuntimeTypeHandle))
+            : type is DefinitionRef { Definition.FullName: "UnityEngine.Debug" } ? module.ImportReference(typeof(BoxingCheck))
             : type == types.Corlib("System.IO.Path") ? module.ImportReference(typeof(Path)) : throw new NotSupportedException(type.ToString());
         var methods = new Dictionary<MethodDef, MethodDefinition>();
-        foreach (var source in new[] { slash, file, content })
+        foreach (var source in new[] { slash, file, content, combine })
         {
             var definition = new MethodDefinition(source.Method.Name, MethodAttributes.Public | MethodAttributes.Static, Reference(source.Method.ReturnType));
             foreach (var parameter in source.Method.Parameters) definition.Parameters.Add(new ParameterDefinition(Reference(parameter.Type)));
@@ -230,13 +241,18 @@ internal static class RuntimeValueCheck
                 return module.ImportReference(typeof(Path).GetMethod(nameof(Path.Combine), [typeof(string[])]));
             if (method.Method.Address == 0xa1c5924 && method.Method.Owner.FullName == "System.String" && method.Method.Name == "Replace")
                 return module.ImportReference(typeof(string).GetMethod(nameof(string.Replace), [typeof(string), typeof(string)]));
+            if (method.Method.Address == 0xa1b55f8 && method.Method.Owner.FullName == "System.String" && method.Method.Name == "Format")
+                return module.ImportReference(typeof(string).GetMethod(nameof(string.Format), [typeof(string), typeof(object)]));
+            if (method.Method.Address == 0xad22a88 && method.Method.Owner.FullName == "UnityEngine.Debug" && method.Method.Name == "LogError")
+                return module.ImportReference(typeof(BoxingCheck).GetMethod(nameof(BoxingCheck.LogError)));
             if (method.Method.Owner.FullName == "System.Runtime.CompilerServices.RuntimeHelpers" && method.Method.Name == "RunClassConstructor"
                 && method.Method.Parameters is [{ Type: var handle }] && handle == types.RuntimeTypeHandle)
                 return module.ImportReference(typeof(System.Runtime.CompilerServices.RuntimeHelpers).GetMethod("RunClassConstructor", [typeof(RuntimeTypeHandle)]));
             throw new NotSupportedException(method.ToString());
         }
-        var emitter = new BodyEmitter(types, Reference, f => throw new NotSupportedException(f.ToString()), Called);
-        foreach (var source in new[] { slash, file, content })
+        var emitter = new BodyEmitter(types, Reference, f => f.Field.Owner.FullName == "System.String" && f.Field.Name == "Empty"
+            ? module.ImportReference(typeof(string).GetField(nameof(string.Empty))) : throw new NotSupportedException(f.ToString()), Called);
+        foreach (var source in new[] { slash, file, content, combine })
         {
             var recovered = BodyRecovery.Recover(session, session.Analyze(source, source.Method.Address));
             Require(recovered.Body is not null, string.Join("; ", recovered.Problems));
@@ -251,23 +267,23 @@ internal static class RuntimeValueCheck
             Require(problem is null, problem ?? "真实方法输出");
         }
         using var stream = new MemoryStream(); assembly.Write(stream);
-        ExecuteNative(SR.Assembly.Load(stream.ToArray()).GetType("Checks.Native", true)!);
+        ExecuteNative(SR.Assembly.Load(stream.ToArray()).GetType("Checks.Native", true)!, format);
         var directory = Path.Combine("artifacts", "runtime-source-check", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, assembly.Name.Name + ".dll"); assembly.Write(path);
-        var sources = Decompilation.Decompile(path, directory, _ => true, assemblyAttributes: false, recoveringBodies: true);
+        var sources = Decompilation.Decompile(path, Path.GetDirectoryName(typeof(BoxingCheck).Assembly.Location)!, _ => true, assemblyAttributes: false, recoveringBodies: true);
         foreach (var source in sources) File.WriteAllText(Path.Combine(directory, source.TypeName + ".cs"), source.Source);
         var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
-            .Select(p => MetadataReference.CreateFromFile(p));
+            .Append(typeof(BoxingCheck).Assembly.Location).Distinct().Select(p => MetadataReference.CreateFromFile(p));
         var compilation = CSharpCompilation.Create("RecompiledNativeRuntimeChecks",
             sources.Select(s => CSharpSyntaxTree.ParseText(s.Source)), references,
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true));
         using var compiled = new MemoryStream(); var result = compilation.Emit(compiled);
         Require(result.Success, string.Join(Environment.NewLine, result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error)));
-        ExecuteNative(SR.Assembly.Load(compiled.ToArray()).GetType("Checks.Native", true)!);
-        Console.WriteLine($"真实方法 CIL 与 C# 重新编译执行通过：GetFileCombinePath 0x{file.Method.Address:x} → GetSlashCombinePath 0x55d2ac4；ContentListTypes 0x5acb814；未加载 Unity，路径库使用当前 CLR");
+        ExecuteNative(SR.Assembly.Load(compiled.ToArray()).GetType("Checks.Native", true)!, format);
+        Console.WriteLine($"真实方法 CIL 与 C# 重新编译执行通过：GetCombinePath 0x55d295c、GetFileCombinePath 0x{file.Method.Address:x} → GetSlashCombinePath 0x55d2ac4；ContentListTypes 0x5acb814；日志为记录宿主，未加载 Unity，路径库使用当前 CLR");
     }
 
-    private static void ExecuteNative(Type runtime)
+    private static void ExecuteNative(Type runtime, string format)
     {
         var paths = runtime.GetMethod("GetFileCombinePath")!;
         foreach (var input in new[] { Array.Empty<string>(), new[] { "one" }, new[] { "a", "b", "c" }, new[] { "a\\b", "c" }, new[] { "空白", "路径" } })
@@ -282,6 +298,25 @@ internal static class RuntimeValueCheck
         Require(first.Length == 1 && Convert.ToInt32(first.GetValue(0)) == 13 && !ReferenceEquals(first, second), "真实方法分配并初始化枚举数组");
         first.SetValue(Enum.ToObject(first.GetType().GetElementType()!, 99), 0);
         Require(Convert.ToInt32(second.GetValue(0)) == 13, "真实方法的多次分配互不影响");
+        var combine = runtime.GetMethod("GetCombinePath")!;
+        var pathKind = combine.GetParameters()[0].ParameterType;
+        BoxingCheck.Logged.Clear(); BoxingCheck.ThrowOnLog = false;
+        foreach (var kind in new[] { 0, 1 })
+            foreach (var input in new[] { new[] { "a", "b" }, new[] { "a\\b", "c" }, new[] { "", "" }, new[] { "空白", "路径" } })
+                Require((string)combine.Invoke(null, [Enum.ToObject(pathKind, kind), input[0], input[1]])! == Path.Combine(input).Replace("\\", "/"),
+                    "真实方法的两条正常路径返回拼接结果");
+        Require(BoxingCheck.Logged.Count == 0, "正常路径不进入错误日志");
+        Fault<ArgumentNullException>(() => combine.Invoke(null, [Enum.ToObject(pathKind, 0), null, "name"]));
+        foreach (var kind in new[] { int.MinValue, -1, 2, int.MaxValue })
+        {
+            BoxingCheck.Logged.Clear(); var value = Enum.ToObject(pathKind, kind);
+            Require(ReferenceEquals(combine.Invoke(null, [value, null, null]), string.Empty)
+                && BoxingCheck.Logged.Count == 1 && (string)BoxingCheck.Logged[0]! == string.Format(format, value),
+                "错误分支装箱原枚举、格式化、记录一次日志并返回 String.Empty，不读取路径参数");
+        }
+        BoxingCheck.ThrowOnLog = true;
+        Fault<InvalidOperationException>(() => combine.Invoke(null, [Enum.ToObject(pathKind, -1), null, null]));
+        BoxingCheck.ThrowOnLog = false;
     }
 
     private static void Fault<T>(Func<object?> action) where T : Exception

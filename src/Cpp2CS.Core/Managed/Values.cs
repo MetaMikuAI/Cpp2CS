@@ -19,6 +19,9 @@ public sealed record ConstantValue(ulong Bits, TypeRef Type, int Width) : Manage
 public sealed record StringValue(string Text, TypeRef Type) : ManagedValue(Type, 64);
 public sealed record TypeHandleValue(TypeRef TargetType, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record NewArrayValue(ArrayRef ArrayType, ManagedValue Length) : ManagedValue(ArrayType, 64);
+/// <summary>在当前位置复制值并装箱；nullable 沿用 CLR 的空值和内部值装箱规则。</summary>
+public sealed record BoxInitialization(TypeRef TargetType, MethodRef RunClassConstructor, MethodRef? HasValue, MethodRef? GetValueOrDefault);
+public sealed record BoxValue(ManagedValue Operand, TypeRef ObjectType, BoxInitialization? Initialization = null) : ManagedValue(ObjectType, 64);
 public sealed record ArrayLengthValue(ManagedValue Array, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record ArrayElementValue(ManagedValue Array, ManagedValue Index, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width);

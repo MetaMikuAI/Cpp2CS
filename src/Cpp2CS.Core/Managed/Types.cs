@@ -96,6 +96,19 @@ public sealed class ManagedTypes
         _ => false,
     };
 
+    public static bool IsClosed(TypeRef type) => type switch
+    {
+        DefinitionRef d => d.Arguments.Count == d.Definition.GenericParameters.Count && d.Arguments.All(IsClosed),
+        ArrayRef a => IsClosed(a.Element),
+        PointerRef p => IsClosed(p.Element),
+        _ => false,
+    };
+
+    /// <summary>只有类型已闭合、布局已知且允许驻留堆上的值才可装箱。</summary>
+    public bool CanBox(TypeRef type) => type is DefinitionRef { Definition.IsValueType: true } d
+        && !IsVoid(type) && IsClosed(type) && Layouts.Get(type) is { Size: > 0 }
+        && !d.Definition.CustomAttributes.Any(a => a.Constructor.Owner.FullName == "System.Runtime.CompilerServices.IsByRefLikeAttribute");
+
     /// <summary>值的类别。泛型参数无法确定（共享代码），返回 null。</summary>
     public ValueKind? Kind(TypeRef type)
     {

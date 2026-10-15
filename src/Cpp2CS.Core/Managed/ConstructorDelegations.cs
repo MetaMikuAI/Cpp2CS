@@ -140,6 +140,7 @@ public sealed class ConstructorDelegations(RecoverySession session)
                 Arguments = i.Invocation.Arguments.Select(Expand).ToArray(),
             } },
             NewArrayValue a => a with { Length = Expand(a.Length) },
+            BoxValue b => b with { Operand = Expand(b.Operand) },
             ArrayLengthValue a => a with { Array = Expand(a.Array) },
             ArrayElementValue a => a with { Array = Expand(a.Array), Index = Expand(a.Index) },
             BinaryValue b => b with { Left = Expand(b.Left), Right = Expand(b.Right) },

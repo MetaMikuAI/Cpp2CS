@@ -111,6 +111,13 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
             case NewArrayValue array:
                 if (!array.ArrayType.IsVector || array.ArrayType.Rank != 1) return "数组分配需要 SZARRAY 类型";
                 children = [array.Length]; break;
+            case BoxValue box:
+                if (box.Type != types.Object || !types.CanBox(box.Operand.Type) || box.Operand.Width != types.Size(box.Operand.Type) * 8)
+                    return "装箱值的类型或位宽不符";
+                var initialization = Boxing.Initialization(types, box.Operand.Type, out var initializationProblem);
+                if (initializationProblem is not null) return initializationProblem;
+                if (box.Initialization != initialization) return "装箱的类初始化顺序尚未确认";
+                children = [box.Operand]; break;
             case ArrayLengthValue length:
                 if (length.Array.Type is not ArrayRef { Rank: 1, IsVector: true }) return "数组长度需要 SZARRAY 类型";
                 children = [length.Array]; break;
@@ -332,6 +339,7 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 else il.Emit(OpCodes.Ldc_I4, unchecked((int)c.Bits));
                 break;
             case StringValue text: il.Emit(OpCodes.Ldstr, text.Text); break;
+            case BoxValue box: Box(box); break;
             case TypeHandleValue handle: il.Emit(OpCodes.Ldtoken, typeReference(handle.TargetType)); break;
             case NewArrayValue array:
                 Value(array.Length); il.Emit(OpCodes.Conv_U); il.Emit(OpCodes.Newarr, typeReference(array.ArrayType.Element)); break;
@@ -364,6 +372,44 @@ public sealed class BodyEmitter(ManagedTypes types, Func<TypeRef, TypeReference>
                 il.Append(shortCircuit); il.Emit(OpCodes.Ldc_I4, b.IsAnd ? 0 : 1); il.Append(done); break;
             case NegatedValue n: Value(n.Operand); Invert(); break;
             default: throw new NotSupportedException(value.ToString());
+        }
+    }
+
+    private void Box(BoxValue box)
+    {
+        if (box.Initialization is not { } initialize)
+        {
+            Value(box.Operand); il.Emit(OpCodes.Box, typeReference(box.Operand.Type)); return;
+        }
+        // 地址先固定，初始化后再读取；静态构造函数可能修改原存储。
+        var pointer = Temp(new ByRefRef(box.Operand.Type));
+        if (box.Operand is LocalValue or StackLocalValue or ArgumentValue or FieldValue or StaticFieldValue or IndirectValue or ArrayElementValue or InvocationValue)
+            Address(box.Operand);
+        else
+        {
+            var copy = Temp(box.Operand.Type); Value(box.Operand); il.Emit(OpCodes.Stloc, copy); il.Emit(OpCodes.Ldloca, copy);
+        }
+        il.Emit(OpCodes.Stloc, pointer);
+        var empty = Instruction.Create(OpCodes.Ldnull);
+        var end = Instruction.Create(OpCodes.Nop);
+        if (initialize.HasValue is { } hasValue)
+        {
+            il.Emit(OpCodes.Ldloc, pointer); il.Emit(OpCodes.Call, methodReference(hasValue)); il.Emit(OpCodes.Brfalse, empty);
+        }
+        // 原生先分配，再初始化类型，最后复制数据；用一次空值装箱保留分配和异常的先后关系。
+        var initial = Temp(initialize.TargetType);
+        var allocated = Temp(types.Object);
+        il.Emit(OpCodes.Ldloca, initial); il.Emit(OpCodes.Initobj, typeReference(initialize.TargetType));
+        il.Emit(OpCodes.Ldloc, initial); il.Emit(OpCodes.Box, typeReference(initialize.TargetType)); il.Emit(OpCodes.Stloc, allocated);
+        il.Emit(OpCodes.Ldtoken, typeReference(initialize.TargetType)); il.Emit(OpCodes.Call, methodReference(initialize.RunClassConstructor));
+        il.Emit(OpCodes.Ldloc, allocated); il.Emit(OpCodes.Unbox, typeReference(initialize.TargetType));
+        il.Emit(OpCodes.Ldloc, pointer);
+        if (initialize.GetValueOrDefault is { } getValue) il.Emit(OpCodes.Call, methodReference(getValue));
+        else il.Emit(OpCodes.Ldobj, typeReference(box.Operand.Type));
+        il.Emit(OpCodes.Stobj, typeReference(initialize.TargetType)); il.Emit(OpCodes.Ldloc, allocated);
+        if (initialize.HasValue is not null)
+        {
+            il.Emit(OpCodes.Br, end); il.Append(empty); il.Append(end);
         }
     }
 

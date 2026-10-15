@@ -24,8 +24,13 @@ public static class ClassInitialization
 
     public static ManagedInvocation? Invocation(ManagedTypes types, Call call, MetadataReferences metadata, out string? problem)
     {
-        problem = null;
         if (Target(call, metadata) is not { } target) { problem = "类初始化的类型信息尚未确定"; return null; }
+        return Invocation(types, target, out problem);
+    }
+
+    public static ManagedInvocation? Invocation(ManagedTypes types, TypeRef target, out string? problem)
+    {
+        problem = null;
         var handle = types.CorlibDefinition("System.RuntimeTypeHandle");
         var helper = types.CorlibDefinition("System.Runtime.CompilerServices.RuntimeHelpers");
         if (handle is null || helper is null) { problem = "元数据缺少 CLR 类初始化接口"; return null; }

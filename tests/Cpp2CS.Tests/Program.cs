@@ -25,6 +25,8 @@ internal static class Program
             "constructor-check" when args.Length >= 3 => ConstructorCheck.Run(args[1], args[2]),
             "class-init-check" when args.Length >= 3 => ClassInitializationCheck.Run(args[1], args[2]),
             "static-field-check" when args.Length >= 3 => StaticFieldCheck.Run(args[1], args[2]),
+            "boxing-check" when args.Length >= 3 => BoxingCheck.Run(args[1], args[2]),
+            "boxing-source-check" when args.Length >= 2 => BoxingCheck.Saved(args[1]),
             "bodies" when args.Length >= 4 => BodiesRun.Run(args[1], args[2], args[3], args.ElementAtOrDefault(4)),
             "arm64-oracle" => Arm64Oracle.Run(args.Skip(1).Where(a => !a.StartsWith("--")).ToArray(), 4),
             "model" when args.Length >= 3 => ModelCheck.Run(args[1], args[2], args.ElementAtOrDefault(3)),
@@ -62,6 +64,8 @@ internal static class Program
                   Cpp2CS.Tests constructor-check <binary> <metadata>
                   Cpp2CS.Tests class-init-check <binary> <metadata>
                   Cpp2CS.Tests static-field-check <binary> <metadata>
+                  Cpp2CS.Tests boxing-check <binary> <metadata>
+                  Cpp2CS.Tests boxing-source-check <已保存的 BoxingChecks.dll>
                   Cpp2CS.Tests bodies <binary> <metadata> <输出目录> [命名空间,...]
                   Cpp2CS.Tests model <binary> <metadata> [script.json]
                   Cpp2CS.Tests cfg <binary> <metadata> [0x地址 | 命名空间,...]

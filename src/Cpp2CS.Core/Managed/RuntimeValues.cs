@@ -6,9 +6,27 @@ namespace Cpp2CS.Managed;
 
 public sealed partial class ValueRecovery
 {
-    private ArrayRef? HelperResultType(Call call) => session.Resolver.Resolve(call) is HelperCallee { Helper.Kind: HelperKind.NewArray }
-        && HelperArgument(call, 0) is { } type && Metadata.Usage(type) is { Kind: UsageKind.TypeInfo, Value: ArrayRef { Rank: 1, IsVector: true } array }
-        ? array : null;
+    private TypeRef? HelperResultType(Call call) => session.Resolver.Resolve(call) switch
+    {
+        HelperCallee { Helper.Kind: HelperKind.NewArray } when HelperType(call) is ArrayRef { Rank: 1, IsVector: true } array => array,
+        HelperCallee { Helper.Kind: HelperKind.Box } when BoxOperandType(call) is { } type => ManagedTypes.IsReferenceType(type) ? type : types.Object,
+        _ => null,
+    };
+
+    private TypeRef? HelperType(Call call) => HelperArgument(call, 0) is { } argument
+        && Metadata.Usage(argument) is { Kind: UsageKind.TypeInfo, Value: TypeRef type } ? type : null;
+
+    private TypeRef? BoxOperandType(Call call) => HelperType(call) is { } type
+        && (types.CanBox(type) || ManagedTypes.IsReferenceType(type) && ManagedTypes.IsClosed(type)) ? type : null;
+
+    // 装箱按 x1 指向的类型读取完整值；不把该地址当作逃逸引用，也不省略初始化检查。
+    private AbiSignature? MemorySignature(Call call)
+    {
+        if (Target(call) is { } target) return session.Abi.Classify(target, out _);
+        if (session.Resolver.Resolve(call) is not HelperCallee { Helper.Kind: HelperKind.Box } || BoxOperandType(call) is not { } type) return null;
+        return new(null, [new(new ByRefRef(type), Passing.Registers, [new(Storage.Gpr(1), 64, 0)])], null,
+            new(types.Object, Passing.Registers, [new(Storage.Gpr(0), 64, 0)]));
+    }
 
     private static Expr? HelperArgument(Call call, int index)
     {
@@ -19,7 +37,17 @@ public sealed partial class ValueRecovery
     public ManagedValue? HelperValue(Call call, out string? problem)
     {
         problem = null;
-        if (HelperResultType(call) is not { } array) return Fail("运行时调用的类型或操作尚未恢复", out problem);
+        if (session.Resolver.Resolve(call) is HelperCallee { Helper.Kind: HelperKind.Box })
+        {
+            if (BoxOperandType(call) is not { } type) return Fail("装箱类型未知或布局尚未支持", out problem);
+            if (HelperArgument(call, 1) is not { } source) return Fail("装箱缺少值地址", out problem);
+            if (Location(source, types.Size(type) * 8, out problem, whole: true) is not { } operand) return null;
+            if (operand.Type != type) return Fail("装箱数据与元数据类型不符", out problem);
+            if (ManagedTypes.IsReferenceType(type)) return operand;
+            var initialize = Boxing.Initialization(types, type, out problem);
+            return problem is null ? new BoxValue(operand, types.Object, initialize) : null;
+        }
+        if (HelperResultType(call) is not ArrayRef array) return Fail("运行时调用的类型或操作尚未恢复", out problem);
         if (HelperArgument(call, 1) is not { } native) return Fail("数组分配缺少长度来源", out problem);
         if (Recover(native, out problem) is not { } length) return null;
         if (types.Kind(length.Type) != ValueKind.Int || length.Width is not (32 or 64)) return Fail("数组长度不是整数", out problem);

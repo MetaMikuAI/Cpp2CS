@@ -102,6 +102,7 @@ internal static class ConstructorInitialization
         FieldValue f => [f.Receiver], IndirectValue i => [i.Address],
         InvocationValue i => i.Invocation.Receiver is { } receiver ? new[] { receiver }.Concat(i.Invocation.Arguments) : i.Invocation.Arguments,
         NewArrayValue a => [a.Length], ArrayLengthValue a => [a.Array], ArrayElementValue a => [a.Array, a.Index],
+        BoxValue b => [b.Operand],
         BinaryValue b => [b.Left, b.Right], UnaryValue u => [u.Operand], ConversionValue c => [c.Operand],
         ComparisonValue c => [c.Left, c.Right], ChoiceValue c => [c.Condition, c.True, c.False],
         BooleanValue b => [b.Left, b.Right], NegatedValue n => [n.Operand],

@@ -34,8 +34,8 @@ public sealed partial class ValueRecovery
         types = session.Types;
         Metadata = new MetadataReferences(session.Model, method.Function);
         aggregates = new AggregateValues(types);
-        Stack = new StackObjects(method.Function, types, call => Target(call) is { } target ? session.Abi.Classify(target, out _) : null);
-        BufferProblems = BufferInitialization.Check(method.Function, method.Return, types, call => Target(call) is { } target ? session.Abi.Classify(target, out _) : null);
+        Stack = new StackObjects(method.Function, types, MemorySignature);
+        BufferProblems = BufferInitialization.Check(method.Function, method.Return, types, MemorySignature);
         var signature = session.Abi.Classify(method.Method, out var problem);
         SignatureProblem = problem;
         if (signature is not null)

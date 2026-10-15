@@ -33,7 +33,31 @@ public static class Decompilation
         decompiler.AstTransforms.Add(new EscapeInvalidIdentifiers());
         decompiler.AstTransforms.Add(new RemoveCLSCompliantAttribute());
         decompiler.AstTransforms.Add(new StrippedMathConstants());
+        decompiler.AstTransforms.Add(new WritableUnboxing());
         return decompiler;
+    }
+
+    /// <summary>unbox 得到的可写引用不能用 C# 强制转换作左值；目标库有对应接口时输出 Unsafe.Unbox。</summary>
+    private sealed class WritableUnboxing : IAstTransform
+    {
+        public void Run(AstNode rootNode, TransformContext context)
+        {
+            var available = context.TypeSystem.Modules.SelectMany(m => m.TopLevelTypeDefinitions)
+                .Where(t => t.FullName == "System.Runtime.CompilerServices.Unsafe")
+                .SelectMany(t => t.Methods).Any(m => m.Name == "Unbox" && m.IsStatic && m.Accessibility == Accessibility.Public && m.TypeParameters.Count == 1
+                    && m.Parameters.Count == 1 && m.Parameters[0].Type.FullName == "System.Object" && m.ReturnType is ByReferenceType);
+            if (!available) return;
+            foreach (var assignment in rootNode.Descendants.OfType<AssignmentExpression>().ToArray())
+            {
+                if (assignment.Operator != AssignmentOperatorType.Assign || assignment.Left is not CastExpression cast
+                    || !cast.Annotations.OfType<ICSharpCode.Decompiler.IL.Unbox>().Any()) continue;
+                AstType type = new MemberType(new SimpleType("global"), "System") { IsDoubleColon = true };
+                type = new MemberType(new MemberType(new MemberType(type, "Runtime"), "CompilerServices"), "Unsafe");
+                var method = new MemberReferenceExpression(new TypeReferenceExpression(type), "Unbox");
+                method.TypeArguments.Add(cast.Type.Clone());
+                cast.ReplaceWith(new InvocationExpression(method, cast.Expression.Clone()));
+            }
+        }
     }
 
     /// <summary>
