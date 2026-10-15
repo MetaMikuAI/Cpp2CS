@@ -114,6 +114,10 @@ public sealed class TypeDef
     public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
     /// <summary>值类型为实例数据大小（不含对象头），引用类型为含对象头的实例大小；未知为 -1。</summary>
     public int Size { get; internal set; } = -1;
+    /// <summary>元数据中的字段打包上限；0 为默认，-1 为未知。</summary>
+    public int PackingSize { get; init; } = -1;
+    /// <summary>元数据是否使用默认类大小；null 表示尚未读取。</summary>
+    public bool? ClassSizeIsDefault { get; init; }
     /// <summary>vtable 槽位到方法；接口方法槽位由运行时按 interface offset 拼接，元数据中为 MethodRef/MethodDef。</summary>
     public IReadOnlyList<MethodRef?> VTable { get; internal set; } = [];
     /// <summary>(接口, 起始槽位)。</summary>

@@ -107,6 +107,13 @@ namespace Cpp2CS.Input
 
         private string String(uint index) => metadata.GetStringFromIndex(index);
 
+        private static int DecodePackingSize(uint bitfield)
+        {
+            var encoded = (int)((bitfield >> 6) & 15);
+            if (encoded > 8) throw new InvalidDataException($"未知 packing 编码 {encoded}");
+            return encoded == 0 ? 0 : 1 << (encoded - 1);
+        }
+
         private ProgramModel Build(Il2CppMetadataRegistration registration)
         {
             foreach (var imageDef in metadata.imageDefs)
@@ -126,6 +133,8 @@ namespace Cpp2CS.Input
                         Attributes = flags,
                         IsValueType = def.IsValueType,
                         IsEnum = def.IsEnum,
+                        PackingSize = DecodePackingSize(def.bitfield),
+                        ClassSizeIsDefault = ((def.bitfield >> 11) & 1) != 0,
                     };
                 }
             }
@@ -158,7 +167,7 @@ namespace Cpp2CS.Input
                         constant = value;
                     var isStatic = (attributes & FieldAttributes.Static) != 0;
                     var offset = (attributes & FieldAttributes.Literal) != 0 ? -1
-                        : il2Cpp.GetFieldOffsetFromIndex(i, f - def.fieldStart, f, false, isStatic);
+                        : il2Cpp.GetFieldOffsetFromIndex(i, f - def.fieldStart, f, type.IsValueType, isStatic);
                     var field = new FieldDef
                     {
                         Index = f,

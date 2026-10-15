@@ -10,6 +10,8 @@ internal static class Program
         {
             "managed-calls" => ManagedCallsCheck.Run(),
             "managed-returns" => ManagedReturnsCheck.Run(),
+            "value-layouts" => ValueLayoutsCheck.Run(),
+            "layout-model" when args.Length >= 3 => LayoutModelCheck.Run(args[1], args[2]),
             "arm64-oracle" => Arm64Oracle.Run(args.Skip(1).Where(a => !a.StartsWith("--")).ToArray(), 4),
             "model" when args.Length >= 3 => ModelCheck.Run(args[1], args[2], args.ElementAtOrDefault(3)),
             "cfg" when args.Length >= 3 => CfgCheck.Run(args[1], args[2], args.ElementAtOrDefault(3)),
@@ -30,6 +32,8 @@ internal static class Program
             用法: Cpp2CS.Tests arm64-oracle <oracle.jsonl>...
                   Cpp2CS.Tests managed-calls
                   Cpp2CS.Tests managed-returns
+                  Cpp2CS.Tests value-layouts
+                  Cpp2CS.Tests layout-model <binary> <metadata>
                   Cpp2CS.Tests model <binary> <metadata> [script.json]
                   Cpp2CS.Tests cfg <binary> <metadata> [0x地址 | 命名空间,...]
                   Cpp2CS.Tests ssa <binary> <metadata> [0x地址 | 命名空间,...]

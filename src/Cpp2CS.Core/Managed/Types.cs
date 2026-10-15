@@ -7,12 +7,13 @@ public enum ValueKind { Void, Bool, Int, Float, Double, Reference, Pointer, Stru
 
 /// <summary>
 /// 托管类型的机器视图：基元宽度与符号、枚举底层类型、对象头、实例字段布局。
-/// 泛型类型定义的字段偏移不一定适用于其实例（运行时按实参布局，待验证），实例上的字段查找只在全部实参为引用类型时使用定义的偏移。
+/// 泛型值类型按实参计算字段位置，不能直接使用泛型定义的偏移。
 /// </summary>
 public sealed class ManagedTypes
 {
     private readonly Dictionary<string, TypeDef> corlib = new();
     private readonly Dictionary<TypeDef, FieldDef[]> instanceFields = new();
+    public ValueLayouts Layouts { get; } = new();
 
     public ManagedTypes(ProgramModel model, int headerSize)
     {
@@ -139,7 +140,7 @@ public sealed class ManagedTypes
                 };
             case ValueKind.Struct:
                 var d = (DefinitionRef)type;
-                return d.Arguments.Count == 0 ? d.Definition.Size : -1;
+                return d.Arguments.Count == 0 ? d.Definition.Size : Layouts.Get(d)?.Size ?? -1;
             default: return -1;
         }
     }
@@ -159,21 +160,22 @@ public sealed class ManagedTypes
 
     /// <summary>
     /// 实例字段（含基类，按偏移排序），字段类型按 type 的实参代入。
-    /// 泛型实例只在全部实参为引用类型时给出（共享布局与定义相同，待验证）；否则返回 null。
+    /// 泛型值类型使用具体布局。泛型引用类型只保留全部实参为引用类型的共享布局路径（待验证）。
     /// </summary>
-    public IReadOnlyList<(FieldRef Field, TypeRef Type)>? Fields(TypeRef type)
+    public IReadOnlyList<InstanceField>? Fields(TypeRef type)
     {
         if (type is not DefinitionRef d) return null;
+        if (d.Definition.IsValueType && d.Arguments.Count > 0) return Layouts.Get(d)?.Fields;
         if (d.Arguments.Count > 0 && !d.Arguments.All(IsReferenceType)) return null;
-        var result = new List<(FieldRef, TypeRef)>();
+        var result = new List<InstanceField>();
         for (TypeRef? current = d; current is DefinitionRef c; current = c.Definition.BaseType?.Substitute(c.Arguments, []))
         {
             if (c.Arguments.Count > 0 && !c.Arguments.All(IsReferenceType)) return null;
             foreach (var field in Declared(c.Definition))
-                result.Add((new FieldRef(field, c), field.Type.Substitute(c.Arguments, [])));
+                result.Add(new InstanceField(new FieldRef(field, c), field.Type.Substitute(c.Arguments, []), field.Offset));
             if (c.Definition.IsValueType) break;
         }
-        result.Sort((a, b) => a.Item1.Field.Offset.CompareTo(b.Item1.Field.Offset));
+        result.Sort((a, b) => a.Offset.CompareTo(b.Offset));
         return result;
     }
 
@@ -194,20 +196,20 @@ public sealed class ManagedTypes
         while (true)
         {
             if (Fields(type) is not { } fields) return null;
-            (FieldRef Field, TypeRef Type)? hit = null;
+            InstanceField? hit = null;
             foreach (var f in fields)
             {
                 var size = Size(f.Type);
                 if (size <= 0) continue;
-                if (offset >= f.Field.Field.Offset && offset < f.Field.Field.Offset + size)
+                if (offset >= f.Offset && offset < f.Offset + size)
                 {
                     hit = f;
                     break;
                 }
             }
             if (hit is not { } found) return null;
-            path.Add(found);
-            var inner = offset - found.Field.Field.Offset;
+            path.Add((found.Field, found.Type));
+            var inner = offset - found.Offset;
             var fieldSize = Size(found.Type);
             if (inner == 0 && fieldSize == bytes) return path;
             if (Kind(found.Type) != ValueKind.Struct || inner + bytes > fieldSize) return null;

@@ -169,8 +169,14 @@ public sealed class Arm64ManagedAbi(ManagedTypes types) : IManagedAbi
     private bool Flatten(TypeRef type, List<ValueKind> members)
     {
         if (types.Fields(type) is not { } fields) return false;
-        foreach (var (_, fieldType) in fields)
+        var offset = 0;
+        foreach (var field in fields)
         {
+            if (field.Offset != offset) return false;
+            var fieldType = field.Type;
+            var size = types.Size(fieldType);
+            if (size <= 0) return false;
+            offset += size;
             switch (types.Kind(fieldType))
             {
                 case ValueKind.Float or ValueKind.Double:
@@ -184,6 +190,6 @@ public sealed class Arm64ManagedAbi(ManagedTypes types) : IManagedAbi
             }
             if (members.Count > 4) return false;
         }
-        return true;
+        return offset == types.Size(type);
     }
 }
