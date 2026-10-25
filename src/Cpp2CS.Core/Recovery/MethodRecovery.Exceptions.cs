@@ -137,7 +137,7 @@ public sealed partial class MethodRecovery
                             Translate(fragment.Block, statement, translated);
                             // 帧拷贝等规则缓存了已恢复的值，不再经过 Variable；其读取也必须保留原生定义。
                             foreach (var value in translated.SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
-                                .SelectMany(ManagedValues.Walk).OfType<LocalValue>()) exceptionDemand.Add(value.Variable);
+                                .SelectMany(WalkRecoveryValue).OfType<LocalValue>()) exceptionDemand.Add(value.Variable);
                         }
                     }
                     catch (HoleException) { /* 实际写出遍历仍会记录这个洞；这里只收集已读到的来源。 */ }

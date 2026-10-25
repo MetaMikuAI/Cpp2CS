@@ -16,6 +16,13 @@ public sealed partial class MethodRecovery
         private int fragmentSteps;
         private int nextStructLocal = -1;
 
+        /// <summary>恢复期间遍历结构体片的叶子；最终方法体仍须通过片残留检查。</summary>
+        private static IEnumerable<ManagedValue> WalkRecoveryValue(ManagedValue value)
+        {
+            var children = value is Fragment fragment ? fragment.Parts.Select(p => p.Value) : ManagedValues.Children(value);
+            return children.SelectMany(WalkRecoveryValue).Prepend(value);
+        }
+
         private LocalValue StructLocal(TypeRef type, int width) => new(new Variable(Storage.Temp(nextStructLocal--), 1), type, width);
 
         private Fragment? MemoryFragment(Expr root, TypeRef type, long offset, int width)

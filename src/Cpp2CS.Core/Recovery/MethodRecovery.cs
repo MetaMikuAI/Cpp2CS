@@ -1256,7 +1256,9 @@ public sealed partial class MethodRecovery
                     else if (terminatorHole is { } cause) { Record(Derived(cause, "控制流 终结语句未恢复"), block.Start); statements.Add(new ManagedHole(block.End, "控制流 终结语句未恢复", true)); }
                     else { Hole(block.Start, "控制流 基本块没有唯一终结方式"); statements.Add(new ManagedHole(block.End, "控制流 基本块没有唯一终结方式", true)); }
                 }
-                managedBlocks.Add(new(block.Start, statements));
+                // 循环入口前的空块没有原生指令；其标签必须与实际循环入口区分，回边仍指向原生地址。
+                var label = block == function.EntryBlock && block.End == block.Start ? 0xf400000000000000UL : block.Start;
+                managedBlocks.Add(new(label, statements));
             }
             return new ManagedBody(method, managedBlocks);
         }

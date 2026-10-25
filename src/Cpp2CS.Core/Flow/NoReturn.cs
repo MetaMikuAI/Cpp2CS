@@ -68,7 +68,7 @@ public sealed class NoReturnOracle(IMachine machine, CodeMap functions)
         return result;
     }
 
-    private bool Returns(ulong entry, CodeFunction range)
+    internal bool Returns(ulong entry, CodeFunction range)
     {
         bool InRange(ulong a) => range.Contains(a);
         ulong? PadAt(ulong a)
@@ -94,7 +94,8 @@ public sealed class NoReturnOracle(IMachine machine, CodeMap functions)
                 var size = machine.Lift(address, statements);
                 if (size == 0) continue;
                 var next = address + (ulong)size;
-                switch (statements[^1])
+                // 无效果指令可能不产生 IR，仍按顺序执行到下一条指令。
+                switch (statements.LastOrDefault())
                 {
                     case Return:
                     case IndirectJump:

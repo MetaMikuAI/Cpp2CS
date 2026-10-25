@@ -33,6 +33,13 @@ internal static class StateDispatchCheck
         a.True(!original.Same(Read(true, 2)), "状态值改变不能视为同一清理");
         a.True(!original.Same(Read(true, target: 0x9000)), "清理调用目标改变不能匹配");
         a.Equal(0, original.Otherwise.Length, "其他状态不调用清理");
+        var loop = new MachineFunction
+        {
+            Entry = 0x1000,
+            Range = new(0x1000, 0x1010, CodeRegion.Managed, default),
+            Blocks = [new(0x1000), new(0x1000) { Statements = [new Jump(0x1000, 0x1000)] }],
+        };
+        a.True(StateDispatch.Read(loop, c => c) is null, "带同地址空入口的循环不能认作清理分派");
         return a.Finish("state-dispatch");
     }
 }

@@ -12,6 +12,8 @@ internal sealed record StateDispatch(Expr Receiver, int Offset, IReadOnlyDiction
     internal static StateDispatch? Read(MachineFunction function, Func<Call, Call?> managedCall)
     {
         if (function.Blocks.Count > 24 || function.Range.ExceptionRegions.Any()) return null;
+        // 入口在循环中时 CFG 会增加同地址的空入口块；这种图不属于按地址解释的小型状态分派。
+        if (function.Blocks.Select(b => b.Start).Distinct().Count() != function.Blocks.Count) return null;
         var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
         Expr Expand(Expr e, int depth = 0) => depth > 32 ? new Unknown("状态分派循环", e.Width) : Fold.Simplify(ExprMap.Map(e,
             p => p is Use u && definitions.TryGetValue(u.Variable, out var value)

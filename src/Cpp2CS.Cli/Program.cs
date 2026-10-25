@@ -24,6 +24,7 @@ internal static class Program
             ["ssa", var binary, var metadata, .. var addresses] when addresses.Length > 0 => Ssa(binary, metadata, addresses.Where(a => a != "--idioms").Select(a => Convert.ToUInt64(a, 16)).ToArray(), addresses.Contains("--idioms")),
             ["idioms", var binary, var metadata, var output, .. var options] => Idioms(binary, metadata, output, options),
             ["recover", var binary, var metadata, var output, .. var options] => RecoverCommand.Run(binary, metadata, output, options),
+            ["source-project", var assembly, var output] => SourceProject(assembly, output),
             _ => Usage(),
         };
     }
@@ -38,12 +39,22 @@ internal static class Program
                                                                       打印函数的寄存器 SSA（--idioms：L2 归一之后）
                   cpp2cs idioms <libil2cpp.so> <global-metadata.dat> <输出目录> [--owner 前缀] [--limit N]
                                                                       对托管函数做 L2 模板普查，写出 idioms.txt 与 idiom-residuals.tsv
-                  cpp2cs recover <libil2cpp.so> <global-metadata.dat> <输出目录> [--all | --assemblies A.dll,B.dll | --namespaces A,B] [--no-source] [--limit N] [--methods 清单] [--verified-accessors 证据.tsv]
+                  cpp2cs recover <libil2cpp.so> <global-metadata.dat> <输出目录> [--all | --assemblies A.dll,B.dll | --namespaces A,B] [--no-source] [--limit N] [--methods 清单] [--verified-accessors 证据.tsv] [--source-layout flat|project]
                                                                       恢复范围必须显式指定，写出 CIL 与 C#；
                                                                       --methods：从外部方法清单选择目标，候选访问器另作依赖；
                                                                       --verified-accessors：使用 execute 生成的证据认回内联访问器。
+                                                                      --source-layout project：按程序集/命名空间/类型导出，含范围内全部类型声明与 csproj。
+                  cpp2cs source-project <程序集.dll> <输出目录>          将已有程序集按项目目录导出 C#，依赖从程序集所在目录解析。
             """);
         return 2;
+    }
+
+    private static int SourceProject(string assembly, string output)
+    {
+        var path = Path.GetFullPath(assembly);
+        var count = Output.SourceProject.Write(path, Path.GetDirectoryName(path)!, output, _ => true);
+        Console.WriteLine($"C#：{count} 个类型文件，{Path.GetFullPath(output)}");
+        return 0;
     }
 
     /// <summary>打印一个函数的边界、所有者与引用普查结果（调试用）。</summary>

@@ -80,6 +80,7 @@ public sealed partial class BodyEmitter
         if (!method.HasBody) return "方法不允许 CIL 方法体";
         if (recovered.Blocks.Count == 0) return "空控制流图";
         var blockAddresses = recovered.Blocks.Select(b => b.Address).ToHashSet();
+        if (blockAddresses.Count != recovered.Blocks.Count) return "控制流 块地址重复，无法唯一确定跳转标签";
         foreach (var edge in recovered.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Edges))
             if (!blockAddresses.Contains(edge.Target)) return $"控制流 跳转目标 0x{edge.Target:x} 不在方法体中";
         accessContext = recovered.Method.Method.Owner;

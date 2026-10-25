@@ -27,6 +27,7 @@ internal static class RecoverCommand
         var scopeCount = 0;
         var all = false;
         var noSource = false;
+        var sourceLayout = "flat";
         string[]? assembliesFilter = null;
         var limit = int.MaxValue;
         string? list = null;
@@ -44,8 +45,10 @@ internal static class RecoverCommand
             else if (option == "--methods") { list = options[i]; scopeCount++; }
             else if (option == "--rejected-accessors") rejectedAccessors = options[i];
             else if (option == "--verified-accessors") accessorEvidence = options[i];
+            else if (option == "--source-layout") sourceLayout = options[i];
             else throw new ArgumentException($"未知参数 {option}");
         }
+        if (sourceLayout is not ("flat" or "project")) throw new ArgumentException("--source-layout 必须是 flat 或 project");
         if (scopeCount != 1 || !(all || namespaces.Length > 0 || assembliesFilter is { Length: > 0 } || !string.IsNullOrWhiteSpace(list)))
         {
             Console.Error.WriteLine("必须且只能指定一种恢复范围：--all、--assemblies、--namespaces 或 --methods。");
@@ -77,7 +80,13 @@ internal static class RecoverCommand
         var watch = Stopwatch.StartNew();
         // 单线程：FieldLayouts 的缓存不是线程安全的
         var recovery = new MethodRecovery(facts, types);
-        var targets = methods.Select(m => recovery.Recover(new MethodRef(m, [], []), m.Address)).ToArray();
+        var targets = new MethodRecoveryResult[methods.Length];
+        for (var i = 0; i < methods.Length; i++)
+        {
+            targets[i] = recovery.Recover(new MethodRef(methods[i], [], []), methods[i].Address);
+            if ((i + 1) % 1000 == 0 || i + 1 == methods.Length)
+                Console.Error.WriteLine($"恢复进度 {i + 1}/{methods.Length}，{watch.Elapsed.TotalSeconds:F1} s");
+        }
         var bytes = targets.Select(r => r.Entry).Distinct().ToDictionary(e => e,
             e => checked((long)(facts.Code.At(e) ?? throw new InvalidDataException($"0x{e:x} 没有 L0 函数边界")).Size));
         Console.Error.WriteLine($"L3 {watch.Elapsed.TotalSeconds:F1} s");
@@ -153,6 +162,8 @@ internal static class RecoverCommand
         // 第六列是方法在写出的程序集中的元数据标记（Cecil 写出时分配）；末尾追加范围/依赖标记，原有列位置不变
         var emittedRows = emitted.Select(r => (Top: Top(r.Method.Method.Owner), r.Method))
             .Select(x => $"{x.Top.Assembly}\t{x.Top.Namespace}\t{x.Top.SimpleName}\t0x{x.Method.Method.Address:x}\t{x.Method}\t0x{skeleton.Method(x.Method.Method).MetadataToken.ToUInt32():x8}\t{(dependencies.Contains(x.Method.Method) ? "dependency" : "target")}").ToArray();
+        File.WriteAllLines(Path.Combine(output, "emitted.tsv"), emittedRows);
+        File.WriteAllText(Path.Combine(output, "holes.txt"), report.ToString());
         // C# 输出用的方法体（只写进反编译用的 assemblies-src，执行对照仍用 assemblies 里的原样 CIL）：
         // async 入口方法与 MoveNext 都有方法体时提升成 async/await（AsyncLifting），全部方法体再经 SourceRewriter 整理。
         var written = emitted.Concat(partialEmitted).Where(r => !dependencies.Contains(r.Method.Method)).GroupBy(r => r.Method.Method).ToDictionary(g => g.Key, g => g.First().Body ?? g.First().Partial!);
@@ -198,21 +209,36 @@ internal static class RecoverCommand
         Directory.CreateDirectory(sources);
         var invalid = Path.GetInvalidFileNameChars();
         var files = 0;
-        foreach (var group in emitted.Concat(partialEmitted).Select(r => Top(r.Method.Method.Owner)).Distinct().Where(_ => !noSource).GroupBy(t => t.Assembly))
+        var sourceTypes = sourceLayout == "project"
+            ? facts.Model.Types.Where(t => t.DeclaringType is null && (list is not null ? methods.Any(m => Top(m.Owner) == t)
+                : (all || InNamespaces(t, namespaces)) && (assembliesFilter is null || assembliesFilter.Contains(t.Assembly, StringComparer.Ordinal))))
+            : emitted.Concat(partialEmitted).Select(r => Top(r.Method.Method.Owner)).Distinct();
+        var sourceGroups = sourceTypes.GroupBy(t => t.Assembly).ToDictionary(g => g.Key, g => g.Select(t => (t.Namespace, t.SimpleName)).ToHashSet());
+        var sourceAssemblyNames = sourceLayout == "project" && all
+            ? facts.Model.Assemblies.Select(a => a.Name).Where(a => assembliesFilter is null || assembliesFilter.Contains(a, StringComparer.Ordinal))
+            : sourceGroups.Keys.AsEnumerable();
+        foreach (var assemblyName in sourceAssemblyNames.Where(_ => !noSource))
         {
-            var wanted = group.Select(t => (t.Namespace, t.SimpleName)).ToHashSet();
-            foreach (var source in Decompilation.Decompile(Path.Combine(sourceAssemblies, group.Key), sourceAssemblies, t => wanted.Contains((t.Namespace, t.Name)), false, recoveringBodies: true))
+            var wanted = sourceGroups.GetValueOrDefault(assemblyName) ?? [];
+            if (sourceLayout == "project")
             {
-                File.WriteAllText(Path.Combine(sources, new string((group.Key + "_" + source.TypeName).Select(c => invalid.Contains(c) ? '_' : c).ToArray()) + ".cs"), source.Source);
+                var count = SourceProject.Write(Path.Combine(sourceAssemblies, assemblyName), sourceAssemblies, sources,
+                    t => all || wanted.Contains((t.Namespace, t.Name)));
+                files += count;
+                Console.Error.WriteLine($"C# {assemblyName}：{count} 个类型文件，累计 {files}");
+                continue;
+            }
+            foreach (var source in Decompilation.Decompile(Path.Combine(sourceAssemblies, assemblyName), sourceAssemblies, t => wanted.Contains((t.Namespace, t.Name)), false, recoveringBodies: true))
+            {
+                File.WriteAllText(Path.Combine(sources, new string((assemblyName + "_" + source.TypeName).Select(c => invalid.Contains(c) ? '_' : c).ToArray()) + ".cs"), source.Source);
                 files++;
             }
         }
-        File.WriteAllLines(Path.Combine(output, "emitted.tsv"), emittedRows);
         report.AppendLine();
         report.AppendLine($"部分方法体：有洞的范围方法 {partials.Length} 个有部分方法体，写出 {partialEmitted.Count} / {partialEmitted.Sum(r => bytes[r.Entry])} 字节（洞写成 Cpp2CS.Unrecovered 标记；不计入指标）");
         report.AppendLine($"C# 整理：{rewritten.Count - sourceProblems.Count} / {rewritten.Count} 个方法体经 SourceRewriter 整理后写出");
         report.AppendLine($"async 提升：{lifted.Count} 个方法写成 async/await；未提升 {liftFailures.Values.Sum()}（{string.Join("；", liftFailures.OrderByDescending(p => p.Value).Take(8).Select(p => $"{p.Key} {p.Value}"))}）");
-        report.AppendLine($"C#：{files} 个类型文件（只含已写出方法或部分方法体所在的顶层类型；其余成员仍为骨架占位体），{watch.Elapsed.TotalSeconds:F1} s");
+        report.AppendLine($"C#：{files} 个类型文件（{(sourceLayout == "project" ? "按程序集/命名空间组织，包含范围内的类型声明" : "只含已写出方法或部分方法体所在的顶层类型")}；未恢复成员仍为骨架占位体），{watch.Elapsed.TotalSeconds:F1} s");
         File.WriteAllText(Path.Combine(output, "holes.txt"), report.ToString());
         Console.Write(report);
         return 0;
@@ -318,6 +344,11 @@ internal static class RecoverCommand
                 if (feature is not null) features.Add(feature);
                 if (ManagedTypes.PrimitiveName(value.Type) is "Single" or "Double") features.Add("float");
             }
+        }
+        if (body.Blocks.Select(b => b.Address).Distinct().Count() != body.Blocks.Count)
+        {
+            features.Add("invalid-control-flow");
+            return features.ToArray();
         }
         var blocks = body.Blocks.ToDictionary(b => b.Address);
         if (body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Edges).Any(e => !blocks.ContainsKey(e.Target)))

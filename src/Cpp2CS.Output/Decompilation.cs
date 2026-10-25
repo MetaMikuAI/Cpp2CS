@@ -147,7 +147,7 @@ public static partial class Decompilation
     /// 依赖从 <paramref name="searchDirectory"/> 解析。共享一个类型系统，并行反编译各类型。
     /// </summary>
     public static IReadOnlyList<SourceFile> Decompile(string assemblyPath, string searchDirectory, Func<ITypeDefinition, bool> include, bool assemblyAttributes,
-        bool recoveringBodies = false)
+        bool recoveringBodies = false, bool groupByName = false)
     {
         var file = new PEFile(assemblyPath);
         var resolver = new UniversalAssemblyResolver(assemblyPath, true, file.DetectTargetFrameworkId());
@@ -156,13 +156,15 @@ public static partial class Decompilation
         var typeSystem = new DecompilerTypeSystem(file, resolver, settings);
         var types = typeSystem.MainModule.TopLevelTypeDefinitions
             .Where(t => t.Name != "<Module>" && include(t))
-            .Select(t => ((TypeDefinitionHandle)t.MetadataToken, t.Namespace, t.ReflectionName))
+            .GroupBy(t => (t.Namespace, Name: groupByName ? t.Name.Split('`')[0] : t.ReflectionName))
+            .Select(g => (Handles: g.Select(t => (TypeDefinitionHandle)t.MetadataToken).ToArray(), g.Key.Namespace,
+                Name: groupByName && g.Key.Namespace.Length > 0 ? g.Key.Namespace + "." + g.Key.Name : g.Key.Name))
             .ToArray();
         var results = new ConcurrentBag<(int Index, SourceFile File)>();
         Parallel.For(0, types.Length, i =>
         {
-            var (handle, ns, name) = types[i];
-            var tree = CreateDecompiler(typeSystem, settings).DecompileTypes([handle]);
+            var (handles, ns, name) = types[i];
+            var tree = CreateDecompiler(typeSystem, settings).DecompileTypes(handles);
             results.Add((i, new SourceFile(name, ns, Print(tree, settings))));
         });
         var files = results.OrderBy(r => r.Index).Select(r => r.File).ToList();
