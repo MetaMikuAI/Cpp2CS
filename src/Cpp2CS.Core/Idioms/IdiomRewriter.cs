@@ -169,7 +169,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         private int nextTemp = -1;
         private Defs defs = new(function);
         private readonly bool recording = owner.RecordFilter?.Invoke(function.Entry) ?? true;
-        /// <summary>函数自身的托管所有者与其 MethodInfo* 参数寄存器（共享泛型代码由此取自身的 RGCTX）。</summary>
+        /// <summary>函数自身的托管所有者与其 MethodInfo* 入口位置（共享泛型代码由此取自身的 RGCTX）。</summary>
         private MethodRef? self;
         private Storage? selfMethodInfo;
         private bool foldedRuntimeGuards;
@@ -188,6 +188,15 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 // 自身只提供定义上下文；入口转传的 MethodInfo 不能实例化为任意一个正见证。
                 self = new MethodRef(identity.Definition, [], []);
                 selfMethodInfo = identity.Abi.MethodInfo?.Register;
+            }
+            var entrySignatures = facts.EntriesAt(function.Entry).Select(e => e.Method).OfType<MethodRef>().Distinct()
+                .Select(m => owner.abi.Classify(m, out _)).ToArray();
+            if (entrySignatures.Length == 0 && facts.Unregistered.At(function.Entry) is { } stackIdentity) entrySignatures = [stackIdentity.Abi];
+            if (entrySignatures.All(s => s is not null)
+                && StackInputNormalizer.Run(function, owner.abi, entrySignatures.Select(s => s!).ToArray(), out var hiddenStack))
+            {
+                if (hiddenStack is { } offset) selfMethodInfo = Storage.Slot(offset);
+                Cleanup();
             }
             CountCalls();
             TrimResultBuffers();

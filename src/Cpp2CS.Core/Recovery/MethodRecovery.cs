@@ -256,10 +256,17 @@ public sealed partial class MethodRecovery
                 return false;
             }
             if (signature.This is { } self) arguments[self.Pieces[0].Register] = new(-1, self.Type, 64);
+            var incomingStack = owner.abi.StackArguments(signature);
             for (var i = 0; i < signature.Parameters.Length; i++)
             {
                 var parameter = signature.Parameters[i];
                 if (Registry.Parameters.Any(rule => rule(this, parameter, i))) continue;
+                if (incomingStack.Parameters.FirstOrDefault(p => p.Index == i) is { Indirect: false } stackParameter
+                    && types.Kind(parameter.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Reference or TypeKind.Float or TypeKind.Double)
+                {
+                    arguments[Storage.Slot(stackParameter.Offset)] = new(i, parameter.Type, stackParameter.Size * 8);
+                    continue;
+                }
                 if (parameter.Passing != Passing.Registers || parameter.Pieces.Length != 1 || types.Kind(parameter.Type) is TypeKind.Struct or null || types.Kind(parameter.Type) == TypeKind.Pointer && (parameter.Type is not ByRefRef parameterReference || types.Kind(parameterReference.Element) != TypeKind.Struct))
                 {
                     var hole = Hole(entry, $"参数 {definition.Parameters[i].Name} 的类型 {parameter.Type} 尚未支持");
