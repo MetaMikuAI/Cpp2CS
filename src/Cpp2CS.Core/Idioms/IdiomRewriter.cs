@@ -93,6 +93,32 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         .Where(s => (s.Flags & 1) != 0 && !s.Executable && s.Name != ".got").ToArray();
     private readonly ManagedAbi abi = new(facts.Layouts);
     private readonly Lifting.FactsCallModel calls = new(facts, new Arm64Machine(facts.Code).Convention);
+    private readonly Lifting.FunctionLifter inputLifter = new(facts);
+    private readonly Dictionary<ulong, HashSet<Storage>?> nativeInputs = new();
+
+    private bool UnusedInput(ulong entry, Storage register)
+    {
+        if (!nativeInputs.TryGetValue(entry, out var reads))
+        {
+            var methods = facts.EntriesAt(entry).Select(e => e.Method).OfType<MethodRef>().ToArray();
+            reads = null;
+            if (methods.Length > 0 && methods.All(m => !m.Method.IsVirtual && m.Method.Address == entry
+                && m.Method.GenericParameters.Count == 0 && m.Method.Owner.GenericParameters.Count == 0))
+            {
+                var signatures = methods.Select(m => abi.Classify(m, out _)).ToArray();
+                if (signatures.All(s => s is not null))
+                {
+                    // 同地址的多个所有者取返回寄存器并集，不能把另一签名的返回输入误判为未用。
+                    var returned = signatures.SelectMany(s => s!.Return?.Pieces ?? []).Distinct()
+                        .Select(p => (Expr)new Read(p.Register, p.Width)).ToArray();
+                    reads = Lifting.NativeInputs.Reads(inputLifter.Lift(entry,
+                        returned.Length == 0 ? null : new Intrinsic("return", returned, 64), simplify: false));
+                }
+            }
+            nativeInputs.Add(entry, reads);
+        }
+        return reads is not null && !reads.Contains(register);
+    }
 
     /// <summary>为哪些函数（按入口）记录模板实例；null 为全部。记录要逐个寄存器回溯取值，普查全程序时按函数抽样。</summary>
     public Func<ulong, bool>? RecordFilter { get; set; }
@@ -694,8 +720,9 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                         var methods = facts.EntriesAt(t.Value).Select(e => e.Method).OfType<MethodRef>().ToArray();
                         var hidden = methods.Length > 0 && methods.All(m => m.Method.GenericParameters.Count == 0 && m.Method.Owner.GenericParameters.Count == 0)
                             ? signature.MethodInfo : null;
-                        if (call.Arguments.Where((_, i) => i >= call.Sources.Length || call.Sources[i] != hidden)
-                            .SelectMany(ExprMap.Walk).OfType<Use>().Any(u => u.Variable == v)) return true;
+                        // 只有原生被调方确实读取的参数才保留合并值；未用寄存器可能只是元数据初始化的残值。
+                        if (call.Arguments.Where((argument, i) => ExprMap.Walk(argument).OfType<Use>().Any(u => u.Variable == v)
+                            && (i >= call.Sources.Length || call.Sources[i] != hidden && !owner.UnusedInput(t.Value, call.Sources[i]))).Any()) return true;
                     }
                     if (ExprMap.Walk(call.Target).OfType<Use>().Any(u => u.Variable == v)) return true;
                 }

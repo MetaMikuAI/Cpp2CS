@@ -33,6 +33,8 @@ public sealed partial class MethodRecovery
             parameter is { Passing: Passing.Registers, Pieces: [var piece] }
             && DirectInputProof(call, callee) && owner.UnusedParameter(callee, piece.Register);
 
+        private static bool MissingInput(Expr expression) => expression is Unknown or Use { Variable.Version: < 0 };
+
         // 编译器可以省略未用输入。仅填补 Unknown 或不能表示成引用的残值，保留已有求值。
         [ArgumentRule(30)]
         private ManagedValue? UnusedArgument(AbiValue parameter, ArgumentSite site)
@@ -40,7 +42,7 @@ public sealed partial class MethodRecovery
             if (parameter.Passing != Passing.Registers || parameter.Pieces is not [var piece]
                 || !site.Registers.TryGetValue(piece.Register, out var expression)) return null;
             var kind = types.Kind(parameter.Type);
-            if (expression is Unknown && kind is TypeKind.Reference or TypeKind.Int or TypeKind.Bool
+            if (MissingInput(expression) && kind is TypeKind.Reference or TypeKind.Int or TypeKind.Bool
                 && UnusedInput(site.Call, site.Callee, parameter))
             {
                 var declared = site.Callee.Method.Parameters[site.Index];
@@ -60,7 +62,7 @@ public sealed partial class MethodRecovery
 
         // 无实例读取的直接调用可复用当前 this；不能凭空补 null，使 C# 调用引入空引用异常。
         private ManagedValue? UnusedReceiver(Call call, MethodRef callee, AbiValue self, Expr expression) =>
-            expression is Unknown && types.Kind(self.Type) == TypeKind.Reference && UnusedInput(call, callee, self)
+            MissingInput(expression) && types.Kind(self.Type) == TypeKind.Reference && UnusedInput(call, callee, self)
                 && arguments.Values.FirstOrDefault(a => a.Index == -1 && types.IsAssignable(a.Type, self.Type)) is { } current
                 ? new ArgumentValue(-1, current.Type, current.Width) : null;
     }
