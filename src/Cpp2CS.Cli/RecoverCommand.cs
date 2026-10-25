@@ -57,25 +57,29 @@ internal static class RecoverCommand
         all |= assembliesFilter is not null;
         var facts = FactsBuilder.Build(binary, metadata, Console.Error.WriteLine);
         var types = new ManagedTypes(facts.Model, facts.Layouts);
-        MethodDef[] methods;
+        RecoveryTarget[] selected;
         if (list is null)
         {
-            methods = facts.Model.Methods.Where(m => m.Address != 0 && (all || InNamespaces(m.Owner, namespaces))
-                && (assembliesFilter is null || assembliesFilter.Contains(m.Owner.Assembly, StringComparer.Ordinal)) && facts.Code.RegionOf(m.Address) == CodeRegion.Managed)
-                .Take(limit).ToArray();
-            Console.Error.WriteLine($"恢复 {methods.Length} 个方法（{(all ? assembliesFilter is null ? "全程序方法定义" : string.Join(", ", assembliesFilter) : string.Join(", ", namespaces))}）");
+            bool Included(MethodDef m) => (all || InNamespaces(m.Owner, namespaces))
+                && (assembliesFilter is null || assembliesFilter.Contains(m.Owner.Assembly, StringComparer.Ordinal));
+            var ordinary = facts.Model.Methods.Where(m => m.Address != 0 && Included(m)
+                && facts.Code.RegionOf(m.Address) == CodeRegion.Managed).Select(m => new RecoveryTarget(new(m, [], []), m.Address));
+            var shared = facts.Model.Code.SelectMany(p => p.Value.Where(o => o.IsInstance && Included(o.Method.Method))
+                .Select(o => new RecoveryTarget(o.Method, p.Key))).Where(t => t.Instance.Method.Address == 0)
+                .GroupBy(t => t.Instance.Method).Select(g => g.OrderBy(t => t.Instance.TypeArguments.Concat(t.Instance.MethodArguments)
+                    .Any(a => !ManagedTypes.IsReferenceType(a) || FieldLayouts.IsFullyShared(a))).ThenBy(t => t.Entry).First());
+            selected = ordinary.Concat(shared).Take(limit).ToArray();
+            Console.Error.WriteLine($"恢复 {selected.Length} 个方法（{(all ? assembliesFilter is null ? "全程序方法定义" : string.Join(", ", assembliesFilter) : string.Join(", ", namespaces))}）");
         }
         else
         {
-            var byAddress = facts.Model.Methods.Where(m => m.Address != 0).ToLookup(m => m.Address);
-            methods = File.ReadLines(list).Where(l => l.Length > 0 && !l.StartsWith('#')).Select(l => l.Split('\t')).Select(f =>
-            {
-                var address = Convert.ToUInt64(f[0], 16);
-                return byAddress[address].SingleOrDefault(m => new MethodRef(m, [], []).ToString() == f[1])
-                    ?? throw new InvalidDataException($"{list}: 0x{address:x} 处没有方法 {f[1]}");
-            }).ToArray();
-            Console.Error.WriteLine($"恢复 {methods.Length} 个方法（{list}）");
+            selected = File.ReadLines(list).Where(l => l.Length > 0 && !l.StartsWith('#')).Select(l => l.Split('\t'))
+                .Select(f => RecoveryTarget.Find(facts, Convert.ToUInt64(f[0], 16), f[1])).ToArray();
+            Console.Error.WriteLine($"恢复 {selected.Length} 个方法（{list}）");
         }
+        if (selected.GroupBy(t => t.Instance.Method).Any(g => g.Count() > 1))
+            throw new InvalidDataException("同一方法定义只能选择一个原生入口，不能以多个实例体覆盖同一 CIL 方法");
+        var methods = selected.Select(t => t.Instance.Method).ToArray();
 
         var watch = Stopwatch.StartNew();
         // 单线程：FieldLayouts 的缓存不是线程安全的
@@ -83,7 +87,7 @@ internal static class RecoverCommand
         var targets = new MethodRecoveryResult[methods.Length];
         for (var i = 0; i < methods.Length; i++)
         {
-            targets[i] = recovery.Recover(new MethodRef(methods[i], [], []), methods[i].Address);
+            targets[i] = selected[i].Recover(recovery);
             if ((i + 1) % 1000 == 0 || i + 1 == methods.Length)
                 Console.Error.WriteLine($"恢复进度 {i + 1}/{methods.Length}，{watch.Elapsed.TotalSeconds:F1} s");
         }
@@ -160,8 +164,8 @@ internal static class RecoverCommand
         var assemblies = Path.Combine(output, "assemblies");
         skeleton.Write(assemblies);
         // 第六列是方法在写出的程序集中的元数据标记（Cecil 写出时分配）；末尾追加范围/依赖标记，原有列位置不变
-        var emittedRows = emitted.Select(r => (Top: Top(r.Method.Method.Owner), r.Method))
-            .Select(x => $"{x.Top.Assembly}\t{x.Top.Namespace}\t{x.Top.SimpleName}\t0x{x.Method.Method.Address:x}\t{x.Method}\t0x{skeleton.Method(x.Method.Method).MetadataToken.ToUInt32():x8}\t{(dependencies.Contains(x.Method.Method) ? "dependency" : "target")}").ToArray();
+        var emittedRows = emitted.Select(r => (Top: Top(r.Method.Method.Owner), r.Method, r.Entry))
+            .Select(x => $"{x.Top.Assembly}\t{x.Top.Namespace}\t{x.Top.SimpleName}\t0x{x.Entry:x}\t{x.Method}\t0x{skeleton.Method(x.Method.Method).MetadataToken.ToUInt32():x8}\t{(dependencies.Contains(x.Method.Method) ? "dependency" : "target")}").ToArray();
         File.WriteAllLines(Path.Combine(output, "emitted.tsv"), emittedRows);
         File.WriteAllText(Path.Combine(output, "holes.txt"), report.ToString());
         // C# 输出用的方法体（只写进反编译用的 assemblies-src，执行对照仍用 assemblies 里的原样 CIL）：

@@ -45,10 +45,11 @@ internal static partial class ExecutionCheck
         var bytes = full ? ReadBytes(Path.Combine(slice, "recovery.jsonl")) : new Dictionary<ulong, long>();
         var facts = FactsBuilder.Build(binary, metadata);
         var types = new ManagedTypes(facts.Model, facts.Layouts);
-        var methods = full ? ReadList(facts.Model, Path.Combine(slice, "emitted.tsv"), 3, 4) : ReadList(facts.Model, slice, 0, 1);
+        var methods = full ? ReadList(facts, Path.Combine(slice, "emitted.tsv"), 3, 4) : ReadList(facts, slice, 0, 1);
         var recovery = new MethodRecovery(facts, types);
-        var results = methods.Select(m => m.Address == 0 ? new MethodRecoveryResult(new(m, [], []), 0, null, [new(0, "语言定义 待核对元数据证据")])
-            : recovery.Recover(new MethodRef(m, [], []), m.Address)).ToArray();
+        var instances = methods.ToDictionary(t => t.Method.Method, t => t.Instance);
+        var results = methods.Select(t => t.Entry == 0 ? new MethodRecoveryResult(t.Method, 0, null, [new(0, "语言定义 待核对元数据证据")])
+            : t.Recover(recovery)).ToArray();
         if (full) AutoPropertyManifest.RestoreSynthesized(slice, types, results);
         var skeleton = new Skeleton(facts.Model);
         var emitter = new BodyEmitter(skeleton, types);
@@ -136,7 +137,7 @@ internal static partial class ExecutionCheck
             {
                 outcome = result.Entry == 0 && candidates.GetValueOrDefault(result.Method.Method) is { LanguageDefined: true }
                     ? new Outcome("language-defined", 0, 0, "自动属性语言定义；无原生代码，未执行对照")
-                    : Check(result.Method, skeleton, cecil, interpreter, machine, index, verbose, caseCount);
+                    : Check(instances[result.Method.Method], skeleton, cecil, interpreter, machine, index, verbose, caseCount, result.Entry);
             }
             catch (InferredCallError e)
             {
@@ -158,7 +159,7 @@ internal static partial class ExecutionCheck
             baselineNullCalls += interpreter.NullAccessorCalls - nullBefore;
             if (outcome.Verdict == "verified" && outcome.Matches == Cases && candidates.TryGetValue(result.Method.Method, out var accessor))
                 verifiedAccessors.Add(AccessorEvidence.Describe(facts, skeleton, accessor));
-            if (outcome.Verdict == "verified" && outcome.Matches == Cases && result.Entry != 0 && inlineCandidates.Count > 0
+            if (outcome.Verdict == "verified" && outcome.Matches == Cases && result.Method.Method.Address != 0 && inlineCandidates.Count > 0
                 && AccessorEvidence.Describe(facts, skeleton, result.Method) is var inlineEvidence && inlineCandidates.Contains(inlineEvidence))
                 verifiedAccessors.Add(inlineEvidence);
             var dependency = dependencyMethods.Contains((result.Entry, result.Method.ToString()));
@@ -430,10 +431,12 @@ internal static partial class ExecutionCheck
     /// <summary>Reason：不可检查时的主要原因（用例最多的一类，去掉具体类型与方法名以便汇总）。</summary>
     private sealed record Outcome(string Verdict, int Matches, double Coverage, string Detail, string Reason = "", int ThrowCases = 0);
 
-    private static Outcome Check(MethodRef tested, Skeleton skeleton, CecilModel cecil, CilInterpreter interpreter, NativeMachine machine, WorldIndex index, bool verbose, int caseCount = Cases)
+    private static Outcome Check(MethodRef tested, Skeleton skeleton, CecilModel cecil, CilInterpreter interpreter, NativeMachine machine, WorldIndex index, bool verbose, int caseCount = Cases, ulong? nativeEntry = null)
     {
+        cecil.Context = tested;
         var definition = skeleton.Method(tested.Method);
-        var function = index.Facts.Code.At(tested.Method.Address)!;
+        var entry = nativeEntry ?? tested.Method.Address;
+        var function = index.Facts.Code.At(entry)!;
         var signature = index.StructAbi.Signature(tested);
         var statics = interpreter.ExpandedInstructions(definition)
             .Where(i => i.OpCode.Code is Code.Ldsfld or Code.Stsfld or Code.Ldsflda).Select(i => cecil.Field((Mono.Cecil.FieldReference)i.Operand))
@@ -457,7 +460,7 @@ internal static partial class ExecutionCheck
                 foreach (var field in statics) world.PrepareStatic(field);
                 var (bits, values) = Arguments(world, interpreter, tested, signature);
                 var cil = interpreter.Run(world, definition, tested, values);
-                var native = machine.Run(world, tested, signature, bits, cil.Callees);
+                var native = machine.Run(world, tested, signature, bits, cil.Callees, entry);
                 if (arrayAccesses is not null)
                 {
                     var completed = cil.ArrayAccesses!.Where(arrayInstructions.Contains).ToArray();
@@ -571,14 +574,12 @@ internal static partial class ExecutionCheck
     }
 
     /// <summary>方法清单（制表符分隔，第 addressColumn 列为十六进制入口、第 nameColumn 列为方法名，两者都要对得上）。</summary>
-    private static MethodDef[] ReadList(ProgramModel model, string path, int addressColumn, int nameColumn)
+    private static RecoveryTarget[] ReadList(ProgramFacts facts, string path, int addressColumn, int nameColumn)
     {
-        var byAddress = model.Methods.ToLookup(m => m.Address);
         return File.ReadLines(path).Where(l => l.Length > 0 && !l.StartsWith('#')).Select(l => l.Split('\t')).Select(f =>
         {
             var address = Convert.ToUInt64(f[addressColumn], 16);
-            return byAddress[address].SingleOrDefault(m => new MethodRef(m, [], []).ToString() == f[nameColumn])
-                ?? throw new InvalidDataException($"{path}: 0x{address:x} 处没有方法 {f[nameColumn]}");
+            return RecoveryTarget.Find(facts, address, f[nameColumn]);
         }).ToArray();
     }
 }

@@ -81,10 +81,20 @@ public sealed partial class MethodRecovery
     public MethodRecoveryResult Recover(MethodRef method, ulong entry) => new Context(this, method, entry).Run();
 
     /// <summary>
-    /// 恢复泛型类型的一个封闭实例方法（只有类型实参、没有方法实参），用于认出访问器的形态（F9 泛型访问器）；
+    /// 恢复泛型类型或泛型方法的封闭实例，用于认出访问器等形态；
     /// 方法体以封闭类型表达，不写成泛型定义的 CIL。
     /// </summary>
     public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => new Context(this, method, entry) { ClosedInstance = true }.Run();
+
+    /// <summary>从引用共享实例恢复开放泛型体；类型参数始终保留，不把 object 实例写入泛型定义。</summary>
+    public MethodRecoveryResult RecoverShared(MethodRef instance, ulong entry)
+    {
+        var open = MethodRef.Open(instance.Method);
+        if (instance.TypeArguments.Count != open.TypeArguments.Count || instance.MethodArguments.Count != open.MethodArguments.Count
+            || instance.TypeArguments.Concat(instance.MethodArguments).Any(t => !ManagedTypes.IsReferenceType(t) || FieldLayouts.IsFullyShared(t)))
+            return new(open, entry, null, [new(entry, "泛型 不是引用共享实例")]);
+        return new Context(this, open, entry) { SharedDefinition = true }.Run();
+    }
 
     /// <summary>异常类型的无参实例构造函数（全名，含 mscorlib 之外的类型）。</summary>
     private MethodRef? ExceptionConstructor(string fullName)
@@ -227,6 +237,7 @@ public sealed partial class MethodRecovery
 
         /// <summary>允许泛型类型的封闭实例（RecoverInstance）。</summary>
         public bool ClosedInstance { get; init; }
+        public bool SharedDefinition { get; init; }
 
         private bool Prepare()
         {
@@ -234,7 +245,7 @@ public sealed partial class MethodRecovery
             // 封闭实例：泛型类型与泛型方法的实参都是具体类型（引用类型实参的共享代码按 object 实例登记）。
             var closed = ClosedInstance && method.MethodArguments.Count == definition.GenericParameters.Count
                 && method.TypeArguments.Count == definition.Owner.GenericParameters.Count && method.TypeArguments.Concat(method.MethodArguments).All(a => a is DefinitionRef or ArrayRef);
-            if (!closed && (definition.GenericParameters.Count > 0 || definition.Owner.GenericParameters.Count > 0 || method.TypeArguments.Count > 0))
+            if (!closed && !SharedDefinition && (definition.GenericParameters.Count > 0 || definition.Owner.GenericParameters.Count > 0 || method.TypeArguments.Count > 0))
             {
                 Hole(entry, "泛型 方法或类型带泛型参数");
                 return false;

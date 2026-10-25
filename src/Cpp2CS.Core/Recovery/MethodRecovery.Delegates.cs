@@ -68,7 +68,7 @@ public sealed partial class MethodRecovery
             var targetMethod = lookup is not null ? VirtualDelegateMethod(lookup)
                 : registers.TryGetValue(Storage.Gpr(2), out var identity) && Expand(identity) is Symbol { Kind: SymbolKind.Method, Value: MethodRef direct } ? direct : null;
             if (targetMethod is null) throw Fail(address, "委托 方法身份或虚表槽位未确定");
-            if (!Closed(targetMethod.DeclaringType) || targetMethod.MethodArguments.Any(t => !Closed(t))
+            if (!Bound(targetMethod.DeclaringType) || targetMethod.MethodArguments.Any(t => !Bound(t))
                 || targetMethod.Method.GenericParameters.Count != targetMethod.MethodArguments.Count)
                 throw Fail(address, "委托 目标方法含未确定的泛型参数");
             if (targetMethod.Method.Owner.IsValueType) throw Fail(address, "委托 值类型目标尚未支持");
@@ -95,11 +95,11 @@ public sealed partial class MethodRecovery
             output.Add(new ManagedAssignment(address, Local(constructed[call]), new DelegateValue(type, receiver, targetMethod, binding)));
         }
 
-        private static bool Closed(TypeRef type) => type switch
+        private bool Bound(TypeRef type) => type switch
         {
-            GenericParameterRef => false,
-            DefinitionRef d => d.Arguments.Count == d.Definition.GenericParameters.Count && d.Arguments.All(Closed),
-            ArrayRef a => Closed(a.Element), ByRefRef b => Closed(b.Element), PointerRef p => Closed(p.Element), _ => true,
+            GenericParameterRef parameter => SharedDefinition && method.TypeArguments.Concat(method.MethodArguments).Contains(parameter),
+            DefinitionRef d => d.Arguments.Count == d.Definition.GenericParameters.Count && d.Arguments.All(Bound),
+            ArrayRef a => Bound(a.Element), ByRefRef b => Bound(b.Element), PointerRef p => Bound(p.Element), _ => true,
         };
     }
 }

@@ -218,6 +218,10 @@ public sealed class EventDef
 /// <summary>方法引用：泛型定义上的方法加上类与方法实参（可能为空）。</summary>
 public sealed record MethodRef(MethodDef Method, IReadOnlyList<TypeRef> TypeArguments, IReadOnlyList<TypeRef> MethodArguments)
 {
+    public static MethodRef Open(MethodDef method) => new(method,
+        method.Owner.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, false, p.Position)).ToArray(),
+        method.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, true, p.Position)).ToArray());
+
     public bool Equals(MethodRef? other) => other is not null && Method == other.Method && TypeArguments.SequenceEqual(other.TypeArguments) && MethodArguments.SequenceEqual(other.MethodArguments);
     public override int GetHashCode() => MethodArguments.Aggregate(TypeArguments.Aggregate(Method.Index, (h, a) => HashCode.Combine(h, a)), (h, a) => HashCode.Combine(h, a));
     public TypeRef DeclaringType => new DefinitionRef(Method.Owner, TypeArguments);

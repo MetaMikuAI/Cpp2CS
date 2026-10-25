@@ -172,6 +172,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         /// <summary>函数自身的托管所有者与其 MethodInfo* 参数寄存器（共享泛型代码由此取自身的 RGCTX）。</summary>
         private MethodRef? self;
         private Storage? selfMethodInfo;
+        private bool foldedRuntimeGuards;
 
         public IdiomResult Result { get; } = new();
 
@@ -208,6 +209,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             RefreshInterfaceOperands();
             if (!owner.AuditLegacyDelegateCalls && DelegateCallNormalizer.Run(facts, function, Result)) Cleanup();
             if (!owner.AuditRawManagedThrows && ManagedThrowNormalizer.Run(facts, function, Result)) Cleanup();
+            if (foldedRuntimeGuards) PruneRuntimeGuards();
             while (FiniteConditions.Simplify(function)) Cleanup();
             Residuals();
         }
@@ -322,6 +324,15 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 var changed = false;
                 Expr? Map(Expr e)
                 {
+                    // RGCTX 已解析为元数据表后，判空只决定运行时的延迟初始化；托管体使用初始化后的表。
+                    if (e is Compare { Cond: Cond.Eq or Cond.Ne, Left: Symbol { Kind: SymbolKind.Rgctx, Value: RgctxTable guardTable }, Right: Const { Value: 0 } } guard
+                        && facts.Registrations.Rgctx.TryGetValue((guardTable.Image, guardTable.Token), out var entries) && entries.Length > 0)
+                    {
+                        changed = true;
+                        foldedRuntimeGuards = true;
+                        Result.Hit(Template.MethodRgctxGuard);
+                        return Expr.C(guard.Cond == Cond.Ne ? 1UL : 0UL, 1);
+                    }
                     // MethodInfo.slot（uint16）：泛型实例与定义相同，取元数据中的槽位
                     if (e is Load { Width: 16, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Method, Value: MethodRef slotted }, Right: Const { Value: RuntimeLayout.MethodSlot } } }
                         && slotted.Method.Slot is >= 0 and < 0xFFFF)
@@ -371,6 +382,21 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 if (!changed) break;
                 Propagate.Run(function, dominators);
             }
+        }
+
+        // Calls 已记录 InitMetadata 的初始化证据，再删除只负责延迟初始化的不可达分支。
+        private void PruneRuntimeGuards()
+        {
+            foreach (var block in function.Blocks)
+            {
+                if (block.Statements.LastOrDefault() is not Branch { Condition: Const constant } branch) continue;
+                var normal = block.NormalSuccessors.ToArray();
+                if (normal.Length != 2 || normal[0].Start != branch.Target || normal[1].Start != branch.Fallthrough) continue;
+                var side = constant.Value != 0 ? 0 : 1;
+                block.Statements[^1] = new Jump(branch.Address, normal[side].Start);
+                MachineFunction.RemoveEdgeAt(block, 1 - side);
+            }
+            Cleanup();
         }
 
         // ---------- 守卫 ----------

@@ -13,6 +13,7 @@ internal sealed class CecilModel
     private readonly Dictionary<TypeDefinition, TypeDef> types = new();
     private readonly Dictionary<MethodDefinition, MethodDef> methods = new();
     private readonly Dictionary<FieldDefinition, FieldDef> fields = new();
+    public MethodRef? Context { get; set; }
 
     public CecilModel(ProgramModel model, Skeleton skeleton)
     {
@@ -27,6 +28,8 @@ internal sealed class CecilModel
         ArrayType a => new ArrayRef(Type(a.ElementType), a.Rank) { IsVector = a.IsVector },
         PointerType p => new PointerRef(Type(p.ElementType)),
         ByReferenceType r => new ByRefRef(Type(r.ElementType)),
+        GenericParameter p when Context is { } context => new GenericParameterRef(p.Name, p.Type == GenericParameterType.Method, p.Position)
+            .Substitute(context.TypeArguments, context.MethodArguments),
         GenericParameter => throw new Unsupported($"泛型参数 {type}"),
         _ => new DefinitionRef(Definition(type), []),
     };

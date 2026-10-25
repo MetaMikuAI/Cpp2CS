@@ -98,9 +98,10 @@ internal sealed partial class NativeMachine : IDisposable
     /// 执行 method（入口 entry）。arguments 为按 ABI 各部分排列的实参位型；calleesFromCil 为 CIL 侧依次调用的方法。
     /// 环境不足时抛出 <see cref="Unsupported"/>。
     /// </summary>
-    public NativeSide Run(World world, MethodRef method, Aapcs64Classifier.Signature signature, IReadOnlyList<byte[]> arguments, IReadOnlyList<MethodRef> calleesFromCil)
+    public NativeSide Run(World world, MethodRef method, Aapcs64Classifier.Signature signature, IReadOnlyList<byte[]> arguments, IReadOnlyList<MethodRef> calleesFromCil, ulong? entry = null)
     {
-        function = facts.Code.At(method.Method.Address) ?? throw new Unsupported("入口不在代码地图中");
+        var start = entry ?? method.Method.Address;
+        function = facts.Code.At(start) ?? throw new Unsupported("入口不在代码地图中");
         side = new NativeSide(world, uc);
         tested = signature;
         testedReturnType = method.Method.ReturnType.Substitute(method.TypeArguments, method.MethodArguments);
@@ -136,13 +137,18 @@ internal sealed partial class NativeMachine : IDisposable
                 }
                 else PutLocation(location, arguments[i]);
             }
-            PutLocation(signature.MethodInfo, StructAbi.Bytes(world.MethodInfo(method), 8));
+            var methodInfo = world.MethodInfo(method);
+            PutLocation(signature.MethodInfo, StructAbi.Bytes(methodInfo, 8));
+            // 泛型方法的 RGCTX 守卫同时保护全局元数据槽位；槽位初始未解析时让原生代码执行初始化路径。
+            if (method.MethodArguments.Count > 0 && facts.Scan.Of(facts.Code.IndexOf(start)).ToArray()
+                .Any(r => r.Kind == RefKind.Call && facts.Helpers.At(r.Target)?.Kind == HelperKind.InitMethodRgctx))
+                uc.Write(methodInfo + RuntimeLayout.MethodRgctxData, new byte[8]);
             if (signature.Return is { Indirect: true })
             {
                 uc.Write(ReturnBuffer, new byte[world.StorageSize(testedReturnType)]);
                 uc.SetReg(Unicorn.X(8), ReturnBuffer);
             }
-            var error = uc.Start(method.Method.Address, InstructionLimit);
+            var error = uc.Start(start, InstructionLimit);
             if (failure is not null) throw failure is Unsupported or InferredCallError or InvalidDataException ? failure : new Unsupported($"原生侧出错：{failure.Message}");
             if (side.Result is null) throw new Unsupported(error != 0 ? $"原生执行出错：{Unicorn.Error(error)} @0x{uc.Reg(Unicorn.RegPc):x}" : "原生执行超过指令数上限");
             return side;
@@ -365,7 +371,15 @@ internal sealed partial class NativeMachine : IDisposable
             case HelperKind.ClassInit:
                 side.RunClassConstructor(TypeOfKlass(X(0)));
                 break;
-            case HelperKind.InitializedTypeInfo or HelperKind.InitMethodRgctx or HelperKind.WriteBarrier or HelperKind.MemoryBarrier:
+            case HelperKind.InitMethodRgctx:
+            {
+                var info = X(0);
+                if (world.MethodOfInfo(info) is null) throw new Unsupported("泛型上下文初始化的 MethodInfo 不是合成的");
+                var offset = checked((int)(info + RuntimeLayout.MethodRgctxData - World.RuntimeBase));
+                uc.Write(info + RuntimeLayout.MethodRgctxData, world.RuntimeBytes.Slice(offset, 8));
+                break;
+            }
+            case HelperKind.InitializedTypeInfo or HelperKind.WriteBarrier or HelperKind.MemoryBarrier:
                 break;
             case HelperKind.ObjectNew:
             {
