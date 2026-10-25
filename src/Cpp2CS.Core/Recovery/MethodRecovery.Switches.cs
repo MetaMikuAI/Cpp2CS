@@ -21,9 +21,15 @@ public sealed partial class MethodRecovery
             {
                 if (block.Statements.LastOrDefault() is not IndirectJump { Targets.Length: > 0 } jump) continue;
                 var computation = new HashSet<Variable>();
+                var expandedIndices = new Dictionary<Variable, Expr>();
                 // 表项读取的地址只展开纯运算（不含访存）的定义；下标变量本身（例如读出的状态字段）保留。
                 Expr Shallow(Expr e) => ExprMap.Map(e, x => x is Use u && values.TryGetValue(u.Variable, out var v) && !ExprMap.Walk(v).Any(w => w is Load)
-                    ? Track(u.Variable, Shallow(v)) : null);
+                    ? ExpandIndex(u.Variable, Shallow(v)) : null);
+                Expr ExpandIndex(Variable variable, Expr value)
+                {
+                    expandedIndices[variable] = value;
+                    return Track(variable, value);
+                }
                 Expr Target(Expr e) => ExprMap.Map(e, x => x switch
                 {
                     Use u when values.TryGetValue(u.Variable, out var v) => Track(u.Variable, Target(v)),
@@ -58,6 +64,9 @@ public sealed partial class MethodRecovery
                 if (index is null || ExprMap.Walk(index).Any(e => e is Load)) continue;
                 var indexVariables = ExprMap.Walk(index).OfType<Use>().Select(u => u.Variable).ToHashSet();
                 computation.ExceptWith(indexVariables);
+                // 上界检查可能复用展开前的索引。它及索引的纯计算仍是托管值，不属于跳转地址。
+                var indexExpressions = ExprMap.Walk(index).ToHashSet();
+                computation.ExceptWith(expandedIndices.Where(p => indexExpressions.Contains(p.Value)).Select(p => p.Key));
                 // 地址计算的中间值若还有别的使用，就不是只服务于跳转的值。
                 var uses = blocks.SelectMany(b => b.Statements).Where(s => s is not Define d || !computation.Contains(d.Target))
                     .Where(s => s != jump).SelectMany(s => s is Phi phi ? phi.Sources.AsEnumerable() : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable));

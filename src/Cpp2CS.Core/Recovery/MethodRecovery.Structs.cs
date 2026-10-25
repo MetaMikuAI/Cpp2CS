@@ -23,6 +23,9 @@ public sealed partial class MethodRecovery
                 if (types.Kind(slot.Type) == TypeKind.Struct)
                     foreach (var nested in StructPaths(slot.Type, at, fields)) yield return nested;
             }
+            // 基类中的结构体仍以整个对象为根，字段偏移不再叠加一层对象头。
+            if (!d.Definition.IsValueType && d.Definition.BaseType?.Substitute(d.Arguments, []) is { } parent)
+                foreach (var inherited in StructPaths(parent, offset, path)) yield return inherited;
         }
 
         private ManagedValue PathValue(ManagedValue root, IReadOnlyList<FieldRef> path)
