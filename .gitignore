@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+artifacts/
+*.user
+*.suo
+.vs/
+.cpp2cs/
+tests/**/Recovered.cs
+**/__pycache__/
+*.local.*

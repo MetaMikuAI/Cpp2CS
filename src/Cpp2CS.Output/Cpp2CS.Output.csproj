@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Cpp2CS.Output</RootNamespace>
+    <AssemblyName>Cpp2CS.Output</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Cpp2CS.Core/Cpp2CS.Core.csproj" />
+    <PackageReference Include="Mono.Cecil" />
+    <PackageReference Include="ICSharpCode.Decompiler" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Cpp2CS.Tests" />
+  </ItemGroup>
+
+</Project>

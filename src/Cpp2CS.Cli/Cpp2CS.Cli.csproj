@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Cpp2CS.Cli</RootNamespace>
+    <AssemblyName>cpp2cs</AssemblyName>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Cpp2CS.Core/Cpp2CS.Core.csproj" />
+    <ProjectReference Include="../Cpp2CS.Input/Cpp2CS.Input.csproj" />
+    <ProjectReference Include="../Cpp2CS.Output/Cpp2CS.Output.csproj" />
+  </ItemGroup>
+
+</Project>
