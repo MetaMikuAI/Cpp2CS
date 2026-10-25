@@ -161,6 +161,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 Symbols(rgctx: true);
             }
             RefreshOperands();
+            if (FreshArrayElementClasses()) Cleanup();
             RefreshInterfaceOperands();
             if (!owner.AuditLegacyDelegateCalls && DelegateCallNormalizer.Run(facts, function, Result)) Cleanup();
             if (!owner.AuditRawManagedThrows && ManagedThrowNormalizer.Run(facts, function, Result)) Cleanup();
@@ -1234,6 +1235,27 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     if (block.Statements[i] is not Call { Op: { Operand: null, Kind: OpKind.InitClass or OpKind.RunClassConstructor or OpKind.NewObject or OpKind.NewArray or OpKind.Box or OpKind.Unbox or OpKind.IsInst } op } call) continue;
                     if (ClassOperand(call.Arguments) is { } type) block.Statements[i] = call with { Op = op with { Operand = type } };
                 }
+        }
+
+        /// <summary>新建数组的运行时元素类型确定；参数和字段数组可能协变，不能按静态类型替换。</summary>
+        private bool FreshArrayElementClasses()
+        {
+            var arrays = function.Blocks.SelectMany(b => b.Statements).OfType<Call>()
+                .Where(c => c.Op is { Kind: OpKind.NewArray, Operand: ArrayRef } && c.Defines.Length > 0)
+                .ToDictionary(c => c.Defines[0], c => (ArrayRef)c.Op!.Operand!);
+            var changed = false;
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                {
+                    if (block.Statements[i] is not Call { Op: { Kind: OpKind.IsInst, Operand: null } op, Arguments: [var value, var type] } call
+                        || defs.Expand(type) is not Load { Width: 64, Address: var elementAddress }
+                        || Split(elementAddress) is not (Load { Width: 64, Address: Use { Variable: var array } }, RuntimeLayout.ClassElementClass)
+                        || !arrays.TryGetValue(array, out var arrayType)) continue;
+                    block.Statements[i] = call with { Op = op with { Operand = arrayType.Element },
+                        Arguments = [value, new Symbol(SymbolKind.Class, arrayType.Element)] };
+                    changed = true;
+                }
+            return changed;
         }
 
         private Call? Indirect(Call call)

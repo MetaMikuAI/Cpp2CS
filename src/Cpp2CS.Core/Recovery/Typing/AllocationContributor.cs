@@ -14,12 +14,13 @@ internal sealed class AllocationContributor : ITypeContributor
             {
                 { Kind: OpKind.NewObject, Operand: TypeRef t } => t,
                 { Kind: OpKind.NewArray, Operand: ArrayRef t } => t,
+                { Kind: OpKind.NewException, Operand: string name } => context.Types.Corlib(name),
                 { Kind: OpKind.Box } => context.Types.Object,
                 { Kind: OpKind.IsInst, Operand: TypeRef t } => t,
                 _ => null,
             };
             if (type is not null)
-                foreach (var variable in call.Defines.OfType<Variable>())
+                foreach (var variable in call.Op?.Kind == OpKind.NewException ? call.Defines.Take(1) : call.Defines.OfType<Variable>())
                     constraints.Defines(variable, type, new(Name, call.Address, $"{call.Op!.Kind} : {type}"));
         }
     }

@@ -59,8 +59,9 @@ public sealed partial class MethodRecovery
                     if (types.Kind(parameter.Type) is not (TypeKind.Float or TypeKind.Double or TypeKind.Int or TypeKind.Bool or TypeKind.Reference)) continue;
                     var width = types.Size(parameter.Type) * 8;
                     if (width is not (8 or 16 or 32 or 64)
-                        || ReachingStackStore(block, block.Statements.IndexOf(call), callSp + parameter.Offset, [], width) is not { } store) continue;
-                    if (!ExclusiveStackArgument(callSp + parameter.Offset, width)) continue;
+                        || ReachingStackStore(block, block.Statements.IndexOf(call), callSp + parameter.Offset, [], width, allowWider: true) is not { } store) continue;
+                    // AAPCS64 栈参数按 8 字节对齐；整槽清零可用 64 位写入，参数只读取低位。
+                    if (!ExclusiveStackArgument(callSp + parameter.Offset, store.Value.Width)) continue;
                     if (!stackArgumentStores.TryGetValue(store, out var local))
                         stackArgumentStores[store] = local = StructLocal(parameter.Type, width);
                     if (!local.Type.Equals(parameter.Type)) continue;
@@ -71,6 +72,12 @@ public sealed partial class MethodRecovery
 
         private bool ExclusiveStackArgument(long offset, int width)
         {
+            bool Exposes(Expr expression)
+            {
+                if (expression is Load) return false;
+                if (FrameOffset(expression) is { } at) return at >= offset && at < offset + width / 8;
+                return ExprMap.Children(expression).Any(Exposes);
+            }
             // 消费写入前排除普通加载及地址逃逸，避免同一槽既是实参又是可变局部时丢失内存副作用。
             foreach (var statement in blocks.SelectMany(b => b.Statements))
             {
@@ -79,7 +86,7 @@ public sealed partial class MethodRecovery
                     if (FrameOffset(load.Address) is { } at && at < offset + width / 8 && offset < at + load.Width / 8) return false;
                 var exposed = statement is Store store ? new[] { store.Value } : values;
                 if (statement is Define { Value: Load } || statement is Define { Value: Ir.Convert { Operand: Load } }) continue;
-                if (exposed.SelectMany(ExprMap.Walk).Any(e => e is FrameAddress)) return false;
+                if (exposed.Any(Exposes)) return false;
             }
             return true;
         }

@@ -98,7 +98,7 @@ public sealed partial class MethodRecovery
             return expression is Symbol { Kind: SymbolKind.Method, Value: MethodRef method } ? method : null;
         }
 
-        private Store? ReachingStackStore(Block block, int before, long offset, HashSet<Block> active, int width = 64)
+        private Store? ReachingStackStore(Block block, int before, long offset, HashSet<Block> active, int width = 64, bool allowWider = false)
         {
             if (!active.Add(block)) return null;
             for (var i = before - 1; i >= 0; i--)
@@ -108,11 +108,11 @@ public sealed partial class MethodRecovery
                 if (statement is not Store store) continue;
                 if (FrameOffset(store.Target) is not { } at) return null;
                 if (at < offset + width / 8 && offset < at + store.Value.Width / 8)
-                    return at == offset && store.Value.Width == width ? store : null;
+                    return at == offset && (store.Value.Width == width || allowWider && store.Value.Width > width && store.Value.Width <= 64) ? store : null;
             }
             var parents = block.Predecessors.Where(p => blocks.Contains(p)).ToArray();
             if (parents.Length == 0) return null;
-            var sources = parents.Select(p => ReachingStackStore(p, p.Statements.Count, offset, new(active), width)).ToArray();
+            var sources = parents.Select(p => ReachingStackStore(p, p.Statements.Count, offset, new(active), width, allowWider)).ToArray();
             return sources[0] is { } source && sources.All(s => ReferenceEquals(s, source)) ? source : null;
         }
     }

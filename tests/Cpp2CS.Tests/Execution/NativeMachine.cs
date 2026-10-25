@@ -288,6 +288,22 @@ internal sealed partial class NativeMachine : IDisposable
         var locations = StructAbi.Arguments(signature);
         var rawArguments = locations.Select(a => ReadLocation(a)).ToArray();
         var arguments = world.Index.StructAbi.ObservableArguments(side, types, rawArguments);
+        if (callee.Method is { Name: "ToString", IsStatic: false, Parameters.Count: 0, Owner.FullName: "System.Enum" }
+            && arguments is [var receiver] && receiver >= World.StackBase
+            && receiver + RuntimeLayout.ObjectHeaderSize + 8 <= World.StackBase + World.StackSize
+            && side.Read64(receiver + RuntimeLayout.ObjectMonitor) == ulong.MaxValue
+            && world.TypeOfKlass(side.Read64(receiver + RuntimeLayout.ObjectKlass)) is DefinitionRef { Definition.IsEnum: true } enumType)
+        {
+            // 原生栈临时对象的 klass、monitor=-1、枚举值构成 Il2CppFakeBox。
+            // 只把无参 Enum.ToString 的接收者映射为同值装箱对象；仍比较枚举类型、值、调用与后续内存。
+            var size = world.StorageSize(enumType);
+            var data = new byte[size];
+            side.Read(receiver + RuntimeLayout.ObjectHeaderSize, data);
+            var box = side.New(enumType, RuntimeLayout.ObjectHeaderSize + size);
+            side.RunClassConstructor(enumType);
+            side.Write(box + RuntimeLayout.ObjectHeaderSize, data);
+            arguments[0] = box;
+        }
         if (callee.Method is { Name: ".ctor", Parameters.Count: 0 } && Side.InExceptionRegion(arguments[0])) { Back(); return; }
         _ = side.NextCall();
         // 异常对象的无参构造不记事件（与 CIL 侧的约定相同）

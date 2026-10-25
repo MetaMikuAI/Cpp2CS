@@ -1394,6 +1394,10 @@ public sealed partial class MethodRecovery
                 case { Kind: OpKind.ThrowNew, Operand: string exception }:
                     output.Add(new ManagedThrow(address, new NewObjectValue(owner.ExceptionConstructor(exception) ?? throw Fail(address, $"异常 {exception} 没有无参构造函数"), [])));
                     return;
+                case { Kind: OpKind.NewException, Operand: string exception } when call.Defines.FirstOrDefault() is { } created:
+                    output.Add(new ManagedAssignment(address, Local(created), new NewObjectValue(
+                        owner.ExceptionConstructor(exception) ?? throw Fail(address, $"异常 {exception} 没有无参构造函数"), [])));
+                    return;
                 case { Kind: OpKind.Throw or OpKind.ThrowManaged or OpKind.Rethrow }:
                     output.Add(new ManagedThrow(address, Recover(call.Arguments[0], null)));
                     return;
