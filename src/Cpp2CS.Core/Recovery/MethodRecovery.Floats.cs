@@ -16,7 +16,7 @@ public sealed partial class MethodRecovery
             var widths = new Dictionary<Storage, int>();
             MethodRef[] methods;
             // 接口/虚调用：L2 的调用把全部实参寄存器都列为来源；按被调方法签名，不是浮点参数的向量寄存器只是透传（宽度 0：不是实参，不算使用）。
-            if (call.Op is { Kind: OpKind.CallInterface or OpKind.CallVirtual } && !returned && Callee(call) is { } indirect
+            if (call.Op is { Kind: OpKind.CallInterface or OpKind.CallVirtual or OpKind.CallGenericVirtual } && !returned && Callee(call) is { } indirect
                 && owner.abi.Classify(indirect, out _) is { } indirectSignature)
             {
                 foreach (var register in call.Sources.Where(s => s.Bank == Bank.Vec))

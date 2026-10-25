@@ -194,6 +194,7 @@ internal static partial class ExecutionCheck
             }
         }
         Console.WriteLine($"  F8 运行时身份核对通过 {machine.InferredIdentityChecks} 次");
+        Console.WriteLine($"  原生泛型虚方法实例化 {machine.GenericVirtualResolutions} 次");
         Console.WriteLine($"  F5 异常方法 {exceptionMethods}，两侧实际注入抛出 {thrownCases}/{exceptionMethods * Cases} 用例");
         if (full)
         {

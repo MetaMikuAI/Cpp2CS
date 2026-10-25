@@ -546,7 +546,6 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
     /// <summary>callvirt 按接收者的运行时类型选择实现（接口方法经 interface offsets）。</summary>
     private MethodRef Dispatch(CilSide side, ulong receiver, MethodRef target)
     {
-        if (target.MethodArguments.Count > 0) throw new Unsupported("泛型虚方法");
         if (side.TypeOf(receiver) is not DefinitionRef type) throw new Unsupported("数组上的虚调用");
         var slot = target.Method.Slot;
         if (target.Method.Owner.IsInterface)
@@ -555,7 +554,10 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
             if (pair.Interface is null) throw new Unsupported($"{type} 未实现 {target.DeclaringType}");
             slot += pair.Offset;
         }
-        return WorldIndex.VTableEntry(type, slot) ?? throw new Unsupported($"{type} 的虚表槽位 {slot} 为空");
+        var implementation = WorldIndex.VTableEntry(type, slot) ?? throw new Unsupported($"{type} 的虚表槽位 {slot} 为空");
+        if (implementation.Method.GenericParameters.Count != target.MethodArguments.Count)
+            throw new Unsupported($"{implementation} 的泛型实参数量不匹配");
+        return implementation with { MethodArguments = target.MethodArguments };
     }
 
     /// <summary>

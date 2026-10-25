@@ -41,6 +41,7 @@ internal sealed partial class NativeMachine : IDisposable
     private TypeRef testedReturnType = null!;
     private const ulong ReturnBuffer = World.StackBase + 0x10000;
     private readonly List<CodeFunction> entered = new();
+    private readonly Dictionary<ulong, bool> genericVirtualHelpers = new();
     private Exception? failure;
 
     public NativeMachine(ProgramFacts facts)
@@ -214,6 +215,15 @@ internal sealed partial class NativeMachine : IDisposable
             if (facts.Unregistered.At(address) is not null) Call(address);
             else if (facts.Helpers.At(address) is { } helper)
             {
+                if (!genericVirtualHelpers.TryGetValue(address, out var genericVirtual))
+                    genericVirtualHelpers[address] = genericVirtual = GenericVirtualDispatch.Matches(facts, address);
+                if (genericVirtual)
+                {
+                    uc.SetReg(Unicorn.X(0), GenericVirtualDispatch.Resolve(side.World, uc.Reg(Unicorn.X(0)), uc.Reg(Unicorn.X(1))));
+                    GenericVirtualResolutions++;
+                    Back();
+                    return;
+                }
                 // 不属于运行时服务的 helper（未内联的判空、条件抛出等普通代码）照常执行，不按分类结论打桩，
                 // 免得两侧共用提升器的同一个分类结论而看不出它的错误
                 if (helper.Kind is HelperKind.NullCheck or HelperKind.Unknown && facts.Code.At(address) is { } body && body.Start == address)
@@ -265,6 +275,7 @@ internal sealed partial class NativeMachine : IDisposable
     }
 
     public int InferredIdentityChecks { get; private set; }
+    public int GenericVirtualResolutions { get; private set; }
 
     private void Call(ulong address)
     {

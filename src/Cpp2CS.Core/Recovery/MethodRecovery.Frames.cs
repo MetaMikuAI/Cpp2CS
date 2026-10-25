@@ -42,9 +42,18 @@ public sealed partial class MethodRecovery
             {
                 if (stackEnums.ContainsKey(call)) continue;
                 if (!call.Arguments.Any(argument => FrameOffset(argument) is not null)) continue;
-                // 基元的装箱由“写一次再装箱”并入 box（FrameSlots），不作为标量帧区域。
-                if (call.Op is { Kind: OpKind.Box, Operand: TypeRef boxedType } && call.Arguments.LastOrDefault() is { } data && types.Kind(boxedType) == TypeKind.Struct)
+                // 装箱提供精确值类型；标量的到达写入划出生命期，允许后续结构体复用同一物理槽。
+                if (call.Op is { Kind: OpKind.Box, Operand: TypeRef boxedType } && call.Arguments.LastOrDefault() is { } data
+                    && types.Kind(boxedType) is TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)
+                {
                     Bind(data, boxedType, call);
+                    if (types.Kind(boxedType) != TypeKind.Struct && FrameOffset(data) is { } offset)
+                    {
+                        var block = blocks.Single(b => b.Statements.Contains(call));
+                        if (ReachingStackStore(block, block.Statements.IndexOf(call), offset, [], types.Size(boxedType) * 8) is { } store)
+                            witnesses.Add(new(offset, boxedType, store, true));
+                    }
+                }
                 if (Resolve(call) is not { } callee || owner.abi.Classify(callee, out _) is not { } signature) continue;
                 // 帧区域按这次解析的签名定型；之后类型变化也不能换成另一个 ICF 候选，否则区域类型与调用不一致。
                 resolved[call] = (callee, Pinned);
@@ -284,11 +293,13 @@ public sealed partial class MethodRecovery
         private bool BoxFrame(Call call, List<ManagedStatement> output)
         {
             if (call is not { Op: { Kind: OpKind.Box, Operand: TypeRef type }, Arguments: [_, var data] }
-                || types.Kind(type) != TypeKind.Struct || FrameAccess(data) is null) return false;
+                || types.Kind(type) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)
+                || FrameAccess(data) is null) return false;
             if (type is DefinitionRef { Definition.FullName: "System.Nullable" }) throw Fail(call.Address, "装箱 Nullable 栈值尚未支持");
             if (call.Defines.FirstOrDefault() is not { } created) throw Fail(call.Address, "装箱 缺少结果变量");
             var address = StructAddress(data, type);
-            output.Add(new ManagedAssignment(call.Address, Local(created), new BoxValue(new IndirectValue(address, type), type, types.Object)));
+            var value = address is AddressValue a ? a.Target : new IndirectValue(address, type);
+            output.Add(new ManagedAssignment(call.Address, Local(created), new BoxValue(value, type, types.Object)));
             return true;
         }
 

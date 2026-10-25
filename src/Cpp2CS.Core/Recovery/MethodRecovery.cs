@@ -403,6 +403,7 @@ public sealed partial class MethodRecovery
         private void MarkRuntime()
         {
             MarkVtableLoads();
+            MarkGenericVirtualLoads();
             MarkVirtualDelegateLoads();
             bool changed;
             do
@@ -706,7 +707,7 @@ public sealed partial class MethodRecovery
                     case Store store:
                         return BaseOf(store.Target) == value && !IsStatic(store.Target);
                     case Call call when Receiver(call) == value:
-                        if (call.Op is null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate })
+                        if (call.Op is null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual })
                         {
                             virtualCalls.Add(call);
                             return true;
@@ -846,6 +847,8 @@ public sealed partial class MethodRecovery
                     if (receiver is not DefinitionRef { Definition: var type } || slot >= type.VTable.Count || type.VTable[slot] is not { } entry) return null;
                     if (entry.Method.Owner.GenericParameters.Count == 0) return entry with { TypeArguments = [] };
                     return Instantiation(receiver, entry.Method.Owner) is { } arguments ? entry with { TypeArguments = arguments } : null;
+                case { Kind: OpKind.CallGenericVirtual, Operand: MethodRef generic } when generic.Method.IsVirtual:
+                    return generic;
                 case { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> pair } when pair.Item1 is DefinitionRef itf:
                     return itf.Definition.Methods.FirstOrDefault(m => m.Slot == pair.Item2) is { } method ? new MethodRef(method, itf.Arguments, []) : null;
                 case { Kind: OpKind.CallDelegate } when receiver is DefinitionRef d:
@@ -1351,8 +1354,8 @@ public sealed partial class MethodRecovery
         {
             foreach (var rule in Registry.Calls) if (rule(this, call, output)) return;
             var address = call.Address;
-            var ignored = call.Op?.Kind is OpKind.WriteBarrier or OpKind.InitClass or OpKind.InitMethodRgctx or OpKind.InterfaceInvokeData
-                || call.Op is null && call.Target is Const helper && facts.Helpers.At(helper.Value) is { Kind: HelperKind.WriteBarrier } && facts.Code.RegionOf(helper.Value) != CodeRegion.Managed;
+            var ignored = IsWriteBarrier(call) || call.Op?.Kind is OpKind.InitClass or OpKind.InitMethodRgctx or OpKind.InterfaceInvokeData
+                || genericResolvers.Contains(call);
             if (ignored)
             {
                 // 尾调用形式（函数的最后一步是写屏障）：删去之后在这里返回
@@ -1425,7 +1428,7 @@ public sealed partial class MethodRecovery
                 case { Kind: OpKind.IsInst, Operand: TypeRef type } when call.Defines.FirstOrDefault() is { } created:
                     output.Add(new ManagedAssignment(address, Local(created), new IsInstValue(Coerce(Recover(call.Arguments[0], types.Object), types.Object, address), type)));
                     return;
-                case null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate }:
+                case null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual }:
                     Invocation(call, output);
                     return;
                 default:

@@ -13,6 +13,7 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
     {
         var values = context.Statements.OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
         var phis = context.Statements.OfType<Phi>().Select(p => p.Target).ToHashSet();
+        var active = new HashSet<Variable>();
         void Hint(Expr expression, TypeRef type, ulong address, string detail)
         {
             if (context.Types.Kind(type) is not (TypeKind.Bool or TypeKind.Int or TypeKind.Reference or TypeKind.Float or TypeKind.Double)) return;
@@ -34,6 +35,13 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                             if (constant.Width is not (1 or 8 or 16 or 32 or 64)) return;
                             type = Integer(constant.Width, ManagedTypes.IsSigned(type));
                         }
+                    }
+                    else if (context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
+                        && value is Convert or Binary && active.Add(u.Variable))
+                    {
+                        Hint(value, type, address, detail);
+                        active.Remove(u.Variable);
+                        return;
                     }
                     else if (!phis.Contains(u.Variable) && !FloatingChoice(context, values, u.Variable, type)) return;
                     constraints.Requires(u.Variable, type, new(Name, address, detail));
@@ -86,7 +94,10 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                     yield return (index, context.Types.Integer(index.Width, false), statement.Address, "数组边界检查下标");
                     yield return (length, context.Types.Integer(length.Width, false), statement.Address, "数组边界检查长度");
                     break;
-                case Call call when call.Op is null or { Kind: OpKind.CallVirtual or OpKind.CallInterface }
+                case Call { Op.Kind: OpKind.NewArray, Arguments: [_, var length] }:
+                    yield return (length, context.Types.Integer(length.Width, false), statement.Address, "数组分配长度");
+                    break;
+                case Call call when call.Op is null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual }
                     && context.Resolve(call) is { } target && abi.Classify(target, out _) is { } signature:
                     var registers = call.ArgumentsBySource();
                     foreach (var parameter in signature.Arguments)

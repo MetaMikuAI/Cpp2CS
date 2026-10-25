@@ -12,7 +12,7 @@ internal sealed class CallResultContributor : ITypeContributor
         var abi = new ManagedAbi(context.Types.Layouts);
         foreach (var call in context.Statements.OfType<Call>())
         {
-            if (call.Op is not (null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate })
+            if (call.Op is not (null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual })
                 || context.Resolve(call) is not { } method || abi.Classify(method, out _) is not { } signature) continue;
             var returned = signature.Return;
             if (returned is not null && context.Types.Kind(returned.Type) != TypeKind.Struct)

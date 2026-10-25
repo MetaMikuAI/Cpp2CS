@@ -21,7 +21,15 @@ public sealed partial class MethodRecovery
             foreach (var block in function.Blocks)
                 for (var i = 0; i < block.Statements.Count; i++)
                 {
-                    if (block.Statements[i] is not Call call || Callee(call) is not { } callee || owner.abi.Classify(callee, out _) is not { } signature) continue;
+                    if (block.Statements[i] is not Call call) continue;
+                    // 托管写入自带 GC 屏障；通知调用的地址实参不应保活原生地址计算及其 φ。
+                    if (IsWriteBarrier(call) && call.Arguments.Length > 0)
+                    {
+                        block.Statements[i] = call with { Arguments = [], Sources = [] };
+                        changed = true;
+                        continue;
+                    }
+                    if (Callee(call) is not { } callee || owner.abi.Classify(callee, out _) is not { } signature) continue;
                     var reads = signature.Reads.ToHashSet();
                     var keep = Enumerable.Range(0, call.Sources.Length).Where(k => reads.Contains(call.Sources[k])).ToArray();
                     if (keep.Length == call.Sources.Length || keep.Length != reads.Count) continue;
@@ -31,6 +39,10 @@ public sealed partial class MethodRecovery
             if (changed) Propagate.RemoveDead(function);
         }
 
+        private bool IsWriteBarrier(Call call) => call.Op?.Kind == OpKind.WriteBarrier
+            || call.Op is null && call.Target is Const helper && facts.Helpers.At(helper.Value) is { Kind: HelperKind.WriteBarrier }
+                && facts.Code.RegionOf(helper.Value) != CodeRegion.Managed;
+
         /// <summary>
         /// 签名已知的间接调用：接口调用按接口方法；虚调用（含尾调用 br）的接收者是入口参数时，按其声明类型虚表槽位上的方法
         /// （覆盖它的方法签名相同）。尾调用的保守约定还读 x8，常把类指针的读取留成活值。
@@ -39,6 +51,8 @@ public sealed partial class MethodRecovery
         {
             switch (call.Op)
             {
+                case { Kind: OpKind.CallGenericVirtual, Operand: MethodRef generic } when generic.Method.IsVirtual:
+                    return generic;
                 case { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } pair }:
                     return itf.Definition.Methods.FirstOrDefault(m => m.Slot == pair.Item2 && !m.IsStatic) is { } method ? new MethodRef(method, itf.Arguments, []) : null;
                 case { Kind: OpKind.CallVirtual, Operand: int slot } when call.Arguments.FirstOrDefault() is Use { Variable: { Version: 0 } self }

@@ -54,7 +54,7 @@ public sealed partial class MethodRecovery
                     var start = Array.IndexOf(chain, definition.Call);
                     var end = i + 1 == ordered.Length ? chain.Length : Array.IndexOf(chain, ordered[i + 1].Call);
                     var live = chain[start..end].ToHashSet();
-                    var region = new FrameRegion(offset, definition.Type, types.Size(definition.Type), StructLocal(definition.Type, 0));
+                    var region = new FrameRegion(offset, definition.Type, types.Size(definition.Type), StructLocal(definition.Type, ScalarWidth(definition.Type)));
                     if (related.Any(w => live.Contains(w.Call) && !ContainsFrameType(region, w.Offset, w.Type))) { valid = false; break; }
                     split.Add((region, live));
                 }
