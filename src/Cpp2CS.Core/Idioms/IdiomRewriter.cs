@@ -95,6 +95,22 @@ public sealed class IdiomRewriter(ProgramFacts facts)
     private readonly Lifting.FactsCallModel calls = new(facts, new Arm64Machine(facts.Code).Convention);
     private readonly Lifting.FunctionLifter inputLifter = new(facts);
     private readonly Dictionary<ulong, HashSet<Storage>?> nativeInputs = new();
+    private readonly Dictionary<ulong, bool> unusedResultBuffers = new();
+
+    private bool UnusedResultBuffer(ulong entry)
+    {
+        if (!unusedResultBuffers.TryGetValue(entry, out var unused))
+        {
+            var convention = inputLifter.Machine.Convention;
+            // 未知签名保留全部可能的返回寄存器，x8 只承担间接返回地址，不是托管参数寄存器。
+            var returned = convention.IntegerResults.Concat(convention.FloatResults)
+                .Select(r => (Expr)new Read(r, r.Bank == Bank.Vec ? 128 : 64)).ToArray();
+            var reads = Lifting.NativeInputs.Reads(inputLifter.Lift(entry, new Intrinsic("return", returned, 64), simplify: false));
+            unused = convention.IndirectResult is { } buffer && reads is not null && !reads.Contains(buffer);
+            unusedResultBuffers.Add(entry, unused);
+        }
+        return unused;
+    }
 
     private bool UnusedInput(ulong entry, Storage register)
     {
@@ -173,6 +189,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 selfMethodInfo = identity.Abi.MethodInfo?.Register;
             }
             CountCalls();
+            TrimResultBuffers();
             Symbols(rgctx: false);
             Normalize();
             // RGCTX 数组只在其守卫（InitMethodRgctx）归一之后才当作已初始化的值
@@ -217,6 +234,27 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         }
 
         private IEnumerable<Stmt> All => function.Blocks.Where(b => !removed.Contains(b)).SelectMany(b => b.Statements);
+
+        private void TrimResultBuffers()
+        {
+            if (owner.inputLifter.Machine.Convention.IndirectResult is not { } buffer) return;
+            var changed = false;
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                {
+                    if (block.Statements[i] is not Call { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target } call
+                        || facts.Code.RegionOf(target.Value) != CodeRegion.Managed || owner.calls.Signature(target.Value) is not null) continue;
+                    var index = Array.IndexOf(call.Sources, buffer);
+                    if (index < 0 || !owner.UnusedResultBuffer(target.Value)) continue;
+                    block.Statements[i] = call with
+                    {
+                        Sources = call.Sources.Where((_, k) => k != index).ToArray(),
+                        Arguments = call.Arguments.Where((_, k) => k != index).ToArray(),
+                    };
+                    changed = true;
+                }
+            if (changed) Cleanup();
+        }
 
         private void CountCalls()
         {

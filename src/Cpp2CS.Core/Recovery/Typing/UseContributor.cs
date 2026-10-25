@@ -65,6 +65,15 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
     {
         var expressions = input.Expressions(context);
         var abi = new ManagedAbi(context.Types.Layouts);
+        // 窄整数比较给控制标志与计数 φ 提供用途；64 位判空仍可能是引用，不能据此定为整数。
+        foreach (var statement in context.Statements)
+            foreach (var comparison in ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Compare>())
+                if (comparison.Cond is >= Cond.Eq and <= Cond.Uge && comparison.Left.Width is 8 or 16 or 32)
+                {
+                    var integer = context.Types.Integer(comparison.Left.Width, comparison.Cond is Cond.Slt or Cond.Sle or Cond.Sgt or Cond.Sge);
+                    yield return (comparison.Left, integer, statement.Address, "整数比较左值");
+                    yield return (comparison.Right, integer, statement.Address, "整数比较右值");
+                }
         foreach (var statement in context.Statements)
             switch (statement)
             {
