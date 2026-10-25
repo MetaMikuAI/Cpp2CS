@@ -166,11 +166,28 @@ internal sealed class DelegateCallNormalizer
         {
             if (facts.Layouts.Of(type) is not { } layout) return null;
             var fields = statics is { Kind: SymbolKind.StaticFields } ? layout.Statics : layout.Fields;
-            foreach (var field in fields)
-                if (field.Offset == fieldOffset && abi.Size(field.Type) * 8 == load.Width) return field.Type;
+            var matches = FieldTypes(fields, fieldOffset, load.Width).ToArray();
+            if (matches.Length > 0) return matches is [var fieldType] ? fieldType : null;
             if (statics is { Kind: SymbolKind.StaticFields }) break;
         }
         return null;
+    }
+
+    // 内嵌结构体的委托字段与对象字段一样是引用；只接受唯一且宽度完全重合的叶子。
+    private IEnumerable<TypeRef> FieldTypes(IEnumerable<FieldSlot> fields, long offset, int width)
+    {
+        foreach (var field in fields)
+        {
+            var size = abi.Size(field.Type);
+            if (field.Offset > offset || offset + width / 8 > field.Offset + size) continue;
+            if (abi.Kind(field.Type) == ValueKind.Struct && field.Type is DefinitionRef value
+                && facts.Layouts.Of(value) is { } layout)
+            {
+                foreach (var leaf in FieldTypes(layout.Fields, offset - field.Offset + RuntimeLayout.ObjectHeaderSize, width))
+                    yield return leaf;
+            }
+            else if (field.Offset == offset && size * 8 == width) yield return field.Type;
+        }
     }
 
     private Expr ExpandOne(Expr expression) => Expand(expression);
