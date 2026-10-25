@@ -208,13 +208,14 @@ public sealed partial class MethodRecovery
                 catch (HoleException e) { Record(e, fragment.Block.Start); statements.Add(new ManagedHole(e.Address == 0 ? fragment.Block.Start : e.Address, e.Message, true)); }
                 output.Add(new(FragmentLabel(fragment), statements));
             }
-            return new ManagedBody(method, output)
+            var body = new ManagedBody(method, output)
             {
                 Regions = layout.Regions.OrderByDescending(r => r.Try.Count + r.Handler.Count).Select(r => new ManagedRegion(
                     order.Where(r.Try.Contains).Select(FragmentLabel).ToArray(), FragmentLabel(r.Entry),
                     order.Where(r.Handler.Contains).Select(FragmentLabel).ToArray(), caughtExceptions.GetValueOrDefault(r),
                     r.Kind == "catch" ? ManagedRegionKind.Catch : ManagedRegionKind.Fault)).ToArray(),
             };
+            return RouteExceptionSources(body, layout, order);
         }
 
         private ManagedEdge ExceptionEdge(ExceptionFragment from, ExceptionFragment to)

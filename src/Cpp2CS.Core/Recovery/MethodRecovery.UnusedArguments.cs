@@ -1,4 +1,5 @@
 using Cpp2CS.Facts;
+using Cpp2CS.Flow;
 using Cpp2CS.Ir;
 using Cpp2CS.Lifting;
 using Cpp2CS.Model;
@@ -60,10 +61,27 @@ public sealed partial class MethodRecovery
             return new ConstantValue(0, parameter.Type, piece.Width);
         }
 
-        // 无实例读取的直接调用可复用当前 this；不能凭空补 null，使 C# 调用引入空引用异常。
-        private ManagedValue? UnusedReceiver(Call call, MethodRef callee, AbiValue self, Expr expression) =>
-            MissingInput(expression) && types.Kind(self.Type) == TypeKind.Reference && UnusedInput(call, callee, self)
-                && arguments.Values.FirstOrDefault(a => a.Index == -1 && types.IsAssignable(a.Type, self.Type)) is { } current
-                ? new ArgumentValue(-1, current.Type, current.Width) : null;
+        // 无实例读取的直接调用可复用当前 this，或必经路径上已判空的同类型 SSA 值。
+        private ManagedValue? UnusedReceiver(Call call, MethodRef callee, AbiValue self, Expr expression)
+        {
+            if (!MissingInput(expression) || types.Kind(self.Type) != TypeKind.Reference || !UnusedInput(call, callee, self)) return null;
+            if (arguments.Values.FirstOrDefault(a => a.Index == -1 && types.IsAssignable(a.Type, self.Type)) is { } current)
+                return new ArgumentValue(-1, current.Type, current.Width);
+            var block = blocks.FirstOrDefault(b => b.Statements.Any(s => ReferenceEquals(s, call)));
+            if (block is null) return null;
+            var position = block.Statements.FindIndex(s => ReferenceEquals(s, call));
+            var seen = new HashSet<Block>();
+            while (seen.Add(block))
+            {
+                foreach (var statement in block.Statements.Take(position).Reverse())
+                    if (statement is Call { Op.Kind: OpKind.NullCheck, Arguments: [Use checkedValue] }
+                        && known.TryGetValue(checkedValue.Variable, out var type) && types.IsAssignable(type, self.Type))
+                        return RecoverAs(checkedValue, self.Type, call.Address);
+                if (block.Predecessors.ToArray() is not [var parent] || parent.Handler == block || !parent.NormalSuccessors.Contains(block)) break;
+                block = parent;
+                position = block.Statements.Count;
+            }
+            return null;
+        }
     }
 }

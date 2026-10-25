@@ -209,10 +209,16 @@ public static class ExceptionRegionBuilder
                     foreach (var inner in regions.Where(r => r != outer))
                     {
                         // catch 体抛出的异常由外层接住时，外层 try 包含整个内层 try 语句（C# 的 try 按词法嵌套；原生侧内层 try 的语句只指向内层 handler）。
-                        if (outer.Try.Overlaps(inner.Handler) && !outer.Try.Overlaps(inner.Try) && !inner.Try.Contains(outer.Entry) && !inner.Handler.Contains(outer.Entry))
+                        if (outer.Try.Overlaps(inner.Handler) && !inner.Try.Contains(outer.Entry) && !inner.Handler.Contains(outer.Entry))
                             foreach (var f in inner.Try) expanded |= outer.Try.Add(f);
                         if (!outer.Try.Overlaps(inner.Try) || inner.Try.IsSupersetOf(outer.Try)) continue;
-                        if (!inner.Try.IsSubsetOf(outer.Try)) return Result("未证成/try交叉", $"{outer.Entry}/{inner.Entry}");
+                        if (!inner.Try.IsSubsetOf(outer.Try))
+                        {
+                            if (Environment.GetEnvironmentVariable("CPP2CS_EH_DEBUG") == "1")
+                                foreach (var r in new[] { outer, inner })
+                                    Console.Error.WriteLine($"  [EH] {r.Kind} entry={r.Entry} try=[{string.Join(" ", r.Try.OrderBy(x => x.Id))}] handler=[{string.Join(" ", r.Handler.OrderBy(x => x.Id))}]");
+                            return Result("未证成/try交叉", $"{outer.Entry}/{inner.Entry}");
+                        }
                         if (!CanContain(inner, outer)) return Result("未证成/内层handler抛出目标不同", $"{outer.Entry}/{inner.Entry}");
                         foreach (var f in inner.Handler) expanded |= outer.Try.Add(f);
                     }
