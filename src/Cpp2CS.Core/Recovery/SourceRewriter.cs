@@ -19,10 +19,11 @@ public static class SourceRewriter
         body = TypedCatches(body);
         body = CachedDelegates(body);
         body = Map(body, v => Simplify(v, types));
+        body = FreshArrayLengths(body, types);
         body = DropStatements(body);
         for (var round = 0; round < 4; round++)
             body = DeadAssignments(Map(Retype(Propagate(body)), v => Simplify(v, types)));
-        body = BooleanStores(body, types);
+        body = DropStatements(BooleanStores(body, types));
         return SourceIteratorCleanup.Rewrite(SourceIteratorDispatch.Rewrite(SourceReturns.Rewrite(FoldFieldCopies(DeadStores(body)))));
     }
 
@@ -83,6 +84,22 @@ public static class SourceRewriter
     {
         ManagedValue Deep(ManagedValue v) => f(ManagedValues.Map(v, Deep));
         return body with { Blocks = body.Blocks.Select(b => b with { Statements = b.Statements.Select(s => ManagedValues.Map(s, Deep, t => ManagedValues.Map(t, Deep))).ToArray() }).ToArray() };
+    }
+
+    // 新建数组的长度不可变；只传播无重定义、未取地址的分配结果，保留分配与元素写入。
+    private static ManagedBody FreshArrayLengths(ManagedBody body, ManagedTypes types)
+    {
+        var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
+        var written = statements.SelectMany(ManagedValues.Edges).SelectMany(e => e.Copies).Select(c => c.Target.Variable)
+            .Concat(statements.OfType<ManagedCall>().Where(c => c.Result is not null).Select(c => c.Result!.Variable))
+            .Concat(statements.OfType<ManagedAwait>().Where(c => c.Result is not null).Select(c => c.Result!.Variable))
+            .Concat(statements.SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
+                .OfType<AddressValue>().Select(a => a.Target).OfType<LocalValue>().Select(l => l.Variable)).ToHashSet();
+        var lengths = statements.OfType<ManagedAssignment>().GroupBy(a => a.Target.Variable)
+            .Where(g => g.Count() == 1 && !written.Contains(g.Key) && g.Single().Value is NewArrayValue { Length: ConstantValue { Bits: <= int.MaxValue } })
+            .ToDictionary(g => g.Key, g => ((ConstantValue)((NewArrayValue)g.Single().Value).Length).Bits);
+        return lengths.Count == 0 ? body : Map(body, v => Simplify(v is ArrayLengthValue { Array: LocalValue array } length
+            && lengths.TryGetValue(array.Variable, out var count) ? new ConstantValue(count, length.Type, length.Width) : v, types));
     }
 
     // ---------- 0：catch 类型与委托缓存 ----------
@@ -210,6 +227,7 @@ public static class SourceRewriter
             for (var i = 0; i < block.Statements.Count; i++)
             {
                 var statement = block.Statements[i];
+                if (statement is ManagedCheck { Condition: ConstantValue { Bits: 0 } }) { drop.Add(statement); continue; }
                 if (statement is ManagedCall { Invocation.Method: { Method.Name: "RunClassConstructor" } method }
                     && method.DeclaringType is DefinitionRef { Definition.FullName: "System.Runtime.CompilerServices.RuntimeHelpers" }) { drop.Add(statement); continue; }
                 if (statement is not ManagedCheck { Exception.DeclaringType: DefinitionRef { Definition.FullName: "System.NullReferenceException" },
@@ -231,6 +249,14 @@ public static class SourceRewriter
         bool Bool(ManagedValue v) => types.Kind(v.Type) == TypeKind.Bool;
         switch (value)
         {
+            case ConversionValue { Kind: ConvKind.Truncate or ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: ConstantValue c } conversion
+                when types.Kind(c.Type) is TypeKind.Int or TypeKind.Bool && types.Kind(conversion.Type) is TypeKind.Int or TypeKind.Bool
+                    && Fold.Simplify(new Ir.Convert(conversion.Kind, Expr.C(c.Bits, c.Width), conversion.Width)) is Const converted:
+                return new ConstantValue(converted.Value, conversion.Type, conversion.Width);
+            case ComparisonValue { Left: ConstantValue left, Right: ConstantValue right } comparison
+                when types.Kind(left.Type) is TypeKind.Int or TypeKind.Bool && types.Kind(right.Type) is TypeKind.Int or TypeKind.Bool
+                    && Fold.Simplify(new Compare(comparison.Condition, Expr.C(left.Bits, left.Width), Expr.C(right.Bits, right.Width))) is Const compared:
+                return new ConstantValue(compared.Value, comparison.Type, comparison.Width);
             case ComposedValue composed when SourceStructCopies.WholeValue(composed) is { } whole:
                 return whole;
             // 整数等值比较可按同一位宽移项，避免状态判断遗留为 state + 3 == 0。
@@ -315,6 +341,7 @@ public static class SourceRewriter
             // 复制：t2 = t1（t1 只赋值一次或是参数）
             if (value is LocalValue source && source.Type.Equals(list[0].Target.Type) && (Single(source.Variable) || !assignments.ContainsKey(source.Variable) && !written.Contains(source.Variable)))
                 replace[variable] = value;
+            else if (value is ConstantValue && value.Type.Equals(list[0].Target.Type)) replace[variable] = value;
             else if (value is ArgumentValue argument && !addressedArguments.Contains(argument.Index) && value.Type.Equals(list[0].Target.Type)) replace[variable] = value;
             // lambda 所在类的单例 <>c.<>9（只读静态字段）
             else if (value is StaticFieldValue { Field.Field.Name: "<>9" } && value.Type.Equals(list[0].Target.Type)) replace[variable] = value;

@@ -130,6 +130,7 @@ internal static class ConstructorInitialization
         // 字段初始化器：基类调用之前的本类字段写入，连同只为它们求值、只用一次的临时变量
         if (chainsWithThis) return "构造函数 以 this(...) 链接却先写本类字段，C# 无法表达";
         if (StraightPrefix(body, blocks, IsInitialization) is not { } prefix) return "构造函数 字段初始化不在入口的直线路径上";
+        Dictionary<Variable, int>? prefixLocals = null;
         string? Key(ManagedValue value)
         {
             string? Children(string head, IEnumerable<ManagedValue> children)
@@ -139,13 +140,14 @@ internal static class ConstructorInitialization
             }
             return value switch
             {
+                LocalValue l when prefixLocals is not null => prefixLocals.TryGetValue(l.Variable, out var ordinal) ? $"v{ordinal}:{l.Type}" : null,
                 LocalValue l => definitions.TryGetValue(l.Variable, out var d) && d.Count == 1 && uses.GetValueOrDefault(l.Variable) == 1 ? Key(d[0]) : null,
                 ArgumentValue => null,
                 ConstantValue c => $"{c.Type}:{c.Bits:x}/{c.Width}",
                 StringValue s => $"\"{s.Text.Replace("\\", "\\\\").Replace("\"", "\\\"")}\"",
                 TypeHandleValue t => $"typeof({t.Target})",
                 StaticFieldValue f => $"{f.Field}",
-                NewObjectValue n => Children($"new {n.Constructor}", n.Arguments),
+                NewObjectValue n => Children($"new#{n.Constructor.Method.Index} {n.Constructor}", n.Arguments),
                 NewArrayValue a => Children($"new {a.ArrayType}", [a.Length]),
                 BoxValue b => Children($"box {b.Boxed} {b.ObjectType}", [b.Operand]),
                 IsInstValue i => Children($"isinst {i.Target}", [i.Operand]),
@@ -162,12 +164,53 @@ internal static class ConstructorInitialization
                 _ => null,
             };
         }
+        // 数组和集合初始化会多次引用同一新对象，静态工厂也可参与求值。
+        // 按原顺序比较完整前缀，局部变量按定义次序编号；不能只比较最后存入字段的 new 表达式。
+        Shape? PrefixShape()
+        {
+            prefixLocals = new();
+            var keys = new List<string>();
+            var last = prefix.FindLastIndex(s => IsOwnFieldStore(s));
+            string? Values(string head, IEnumerable<ManagedValue> values)
+            {
+                var items = values.Select(Key).ToArray();
+                return items.Any(k => k is null) ? null : $"{head}({string.Join(", ", items)})";
+            }
+            for (var i = 0; i <= last; i++)
+            {
+                var statement = prefix[i];
+                var key = statement switch
+                {
+                    ManagedAssignment a => Values("assign", [a.Value]),
+                    ManagedStore { Target: FieldValue field } s when IsOwnFieldStore(s) => Values($"field#{field.Field.Field.Index}", [s.Value]),
+                    ManagedStore s => Values("store", [s.Target, s.Value]),
+                    ManagedCall c when !c.Tail => Values($"call#{c.Invocation.Method.Method.Index}:{c.Invocation.Method}:{c.Invocation.Virtual}",
+                        c.Invocation.Receiver is { } receiver ? [receiver, .. c.Invocation.Arguments] : c.Invocation.Arguments),
+                    ManagedCheck c => Values($"check#{c.Exception.Method.Index}", [c.Condition]),
+                    _ => null,
+                };
+                if (key is null) return null;
+                var defined = statement switch { ManagedAssignment a => a.Target, ManagedCall c => c.Result, _ => null };
+                if (defined is not null)
+                {
+                    if (!prefixLocals.TryAdd(defined.Variable, prefixLocals.Count)) return null;
+                    key += $" -> v{prefixLocals[defined.Variable]}:{defined.Type}";
+                }
+                keys.Add(key);
+            }
+            return new Shape(false, keys);
+        }
         var initializerLocals = new HashSet<Variable>();
         var initializers = new List<string>();
         foreach (var store in prefix.Where(IsOwnFieldStore).Cast<ManagedStore>())
         {
             if (UsesArgument(store.Value, a => a.Index >= 0)) return "构造函数 字段初始化器引用了参数";
-            if (Key(store.Value) is not { } key) return "构造函数 字段初始化器的值尚未支持比较";
+            if (Key(store.Value) is not { } key)
+            {
+                if (PrefixShape() is not { } prefixShape) return "构造函数 字段初始化器的值尚未支持比较";
+                shape = prefixShape;
+                return null;
+            }
             initializers.Add($"{((FieldValue)store.Target).Field.Field.Name} = {key}");
             foreach (var local in ManagedValues.Walk(store.Value).OfType<LocalValue>()) initializerLocals.Add(local.Variable);
             // Key 只展开只定义一次、只用一次的变量，因此一层层加入即可覆盖全部
