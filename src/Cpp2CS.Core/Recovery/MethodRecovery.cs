@@ -547,7 +547,7 @@ public sealed partial class MethodRecovery
             foreach (var block in blocks)
                 foreach (var statement in block.Statements)
                     if (!dropped.Contains(statement) && (statement is not Call enumCall || !stackEnums.ContainsKey(enumCall))
-                        && (statement is not Store savedArgument || !stackArgumentStores.ContainsKey(savedArgument)))
+                        && (statement is not Store savedArgument || !stackArgumentStores.ContainsKey(savedArgument) && !boxArgumentStores.ContainsKey(savedArgument)))
                     foreach (var e in ExprMap.Operands(statement).SelectMany(ExprMap.Walk))
                         if (e is FrameAddress frame)
                         {

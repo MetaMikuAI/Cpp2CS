@@ -28,8 +28,10 @@ public sealed partial class MethodRecovery
         private Fragment? MemoryFragment(Expr root, TypeRef type, long offset, int width)
         {
             if (type is not (ByRefRef or DefinitionRef)) return null;
-            var paths = StructPaths(type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)
-                && (type is ByRefRef || p.Path.Length > 1) && p.Offset >= offset && p.Offset + types.Size(p.Type) <= offset + width / 8)
+            var leaves = StructPaths(type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
+            if (leaves.Any(p => p.Offset < offset + width / 8 && offset < p.Offset + types.Size(p.Type)
+                && (p.Offset < offset || p.Offset + types.Size(p.Type) > offset + width / 8))) return null;
+            var paths = leaves.Where(p => p.Offset >= offset && p.Offset + types.Size(p.Type) <= offset + width / 8)
                 .OrderBy(p => p.Offset).ToArray();
             // 叶子之间可以有填充（如 ValueTuple<bool, int> 的 3 字节）：片只按叶子使用，打包成整数时才因填充报洞。
             var cursor = offset;
@@ -68,9 +70,16 @@ public sealed partial class MethodRecovery
             finally { fragmentActive.Remove(variable); }
         }
 
-        private ManagedValue ResizeFragment(Fragment fragment, int width) => width == fragment.Width ? fragment
-            : new Fragment(fragment.Parts.Where(p => p.Low < width).Select(p => p.Low + p.Value.Width <= width ? p
-                : new Part(p.Low, Slice(p.Value, 0, width - p.Low))).ToArray(), fragment.Type, width);
+        private ManagedValue ResizeFragment(Fragment fragment, int width)
+        {
+            if (width == fragment.Width) return fragment;
+            var parts = fragment.Parts.Where(p => p.Low < width).Select(p => p.Low + p.Value.Width <= width ? p
+                : new Part(p.Low, Slice(p.Value, 0, width - p.Low))).ToList();
+            // 零扩展的高位来自指令语义，不是结构体填充；逐字节保留已知的零。
+            for (var low = fragment.Width; low < width; low += 8)
+                parts.Add(new Part(low, new ConstantValue(0, types.Byte, 8)));
+            return new Fragment(parts, fragment.Type, width);
+        }
 
         private ManagedValue Slice(ManagedValue value, int low, int width)
         {

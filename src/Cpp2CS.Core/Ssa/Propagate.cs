@@ -97,6 +97,13 @@ public static class Propagate
             var value = Value(use.Variable);
             return use.Width == value.Width ? value : Fold.Convert(ConvKind.Truncate, value, use.Width);
         }));
+        // 不同前驱可分别装载同一个常量或元数据符号；寄存器版本不同不代表值不同。
+        foreach (var phi in function.Blocks.SelectMany(b => b.Statements).OfType<Phi>())
+        {
+            if (replace.ContainsKey(phi.Target)) continue;
+            var inputs = phi.Sources.Select(v => Resolve(new Use(v, phi.Target.Width))).Distinct().ToArray();
+            if (inputs is [Const or Symbol or FrameAddress]) replace[phi.Target] = inputs[0];
+        }
         bool Mentions(Expr expr) => ExprMap.Walk(expr).Any(e => e is Use u && replace.ContainsKey(u.Variable));
 
         var changed = false;
@@ -130,42 +137,27 @@ public static class Propagate
         _ => [],
     };
 
-    /// <summary>删除没有使用的纯定义与 φ（迭代到不动点）。调用、写内存、控制流语句不删。</summary>
+    /// <summary>从调用、写内存及控制流反向保留纯定义；没有外部使用的 φ 环也会删除。</summary>
     public static void RemoveDead(MachineFunction function)
     {
-        var uses = new Dictionary<Variable, int>();
         var definitions = new Dictionary<Variable, Stmt>();
-        void Count(Stmt stmt, int delta)
-        {
-            if (stmt is Phi phi)
-            {
-                foreach (var source in phi.Sources)
-                    if (source != phi.Target) uses[source] = uses.GetValueOrDefault(source) + delta;
-                return;
-            }
-            foreach (var e in ExprMap.Operands(stmt).SelectMany(ExprMap.Walk))
-                if (e is Use use) uses[use.Variable] = uses.GetValueOrDefault(use.Variable) + delta;
-        }
+        static IEnumerable<Variable> Inputs(Stmt statement) => statement is Phi phi ? phi.Sources
+            : ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable);
+        var work = new Stack<Variable>();
         foreach (var block in function.Blocks)
             foreach (var stmt in block.Statements)
             {
-                Count(stmt, 1);
                 if (stmt is Define d) definitions[d.Target] = stmt;
                 else if (stmt is Phi p) definitions[p.Target] = stmt;
+                else foreach (var input in Inputs(stmt)) work.Push(input);
             }
-
-        var dead = new HashSet<Stmt>(ReferenceEqualityComparer.Instance);
-        var work = new Stack<Variable>(definitions.Keys.Where(v => uses.GetValueOrDefault(v) == 0));
-        while (work.Count > 0)
+        var live = new HashSet<Variable>();
+        while (work.TryPop(out var variable))
         {
-            var variable = work.Pop();
-            var stmt = definitions[variable];
-            if (uses.GetValueOrDefault(variable) != 0 || !dead.Add(stmt)) continue;
-            Count(stmt, -1);
-            IEnumerable<Variable> operands = stmt is Phi phi ? phi.Sources : ExprMap.Operands(stmt).SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable);
-            foreach (var operand in operands)
-                if (uses.GetValueOrDefault(operand) == 0 && definitions.ContainsKey(operand)) work.Push(operand);
+            if (!live.Add(variable) || !definitions.TryGetValue(variable, out var stmt)) continue;
+            foreach (var input in Inputs(stmt)) work.Push(input);
         }
+        var dead = definitions.Where(p => !live.Contains(p.Key)).Select(p => p.Value).ToHashSet(ReferenceEqualityComparer.Instance);
         if (dead.Count == 0) return;
         foreach (var block in function.Blocks)
         {

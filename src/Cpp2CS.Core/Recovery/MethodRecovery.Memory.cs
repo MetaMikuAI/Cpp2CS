@@ -97,8 +97,11 @@ public sealed partial class MethodRecovery
             var receiverType = TypeOfAddressBase(baseTerm)!;
             if (receiverType is ArrayRef { IsVector: true } array)
             {
-                if (rest.Count == 0 && offset == RuntimeLayout.ArrayMaxLength && width == 32)
-                    return new ArrayLengthValue(Recover(baseTerm, null), types.Int32, 32);
+                if (rest.Count == 0 && offset == RuntimeLayout.ArrayMaxLength && width is 32 or 64)
+                {
+                    var length = new ArrayLengthValue(Recover(baseTerm, null), types.Int32, 32);
+                    return width == 32 ? length : new ConversionValue(ConvKind.ZeroExtend, length, types.UInt64, 64);
+                }
                 if (ElementOf(address) is var (_, index) && types.Kind(array.Element) is not (TypeKind.Struct or null) && width == Math.Max(types.Bits(array.Element), 8))
                     return new ArrayElementValue(Recover(baseTerm, null), Index(index), array.Element, width);
                 if (rest.Count == 0 && offset >= RuntimeLayout.ArrayData && types.Size(array.Element) is > 0 and var size && (offset - RuntimeLayout.ArrayData) % size == 0

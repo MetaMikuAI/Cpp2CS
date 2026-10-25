@@ -3,7 +3,7 @@ using Cpp2CS.Ir;
 
 namespace Cpp2CS.Ssa;
 
-/// <summary>将条件边上确定的完整位型写为 φ 的常量来源。常量定义无副作用，证据仅用于对应输入边。</summary>
+/// <summary>传播条件边确定的完整位型：用于 φ 输入，以及没有其他前驱的目标块。</summary>
 public static class EdgeConstants
 {
     public static int Run(MachineFunction function)
@@ -49,6 +49,21 @@ public static class EdgeConstants
                     var sources = (Variable[])phi.Sources.Clone();
                     sources[incoming] = replacement;
                     target.Statements[i] = phi with { Sources = sources };
+                    replaced++;
+                }
+                if (target.Predecessors.Count != 1) continue;
+                for (var i = 0; i < target.Statements.Count; i++)
+                {
+                    var statement = target.Statements[i];
+                    if (statement is Phi) continue;
+                    var rewritten = ExprMap.MapOperands(statement, e =>
+                    {
+                        var mapped = ExprMap.Map(e, part => part is Use use && facts.TryGetValue(use.Variable, out var value) && use.Width <= value.Width
+                            ? Fold.Convert(ConvKind.Truncate, value, use.Width) : null);
+                        return ReferenceEquals(mapped, e) ? e : Fold.Simplify(mapped);
+                    });
+                    if (ReferenceEquals(statement, rewritten)) continue;
+                    target.Statements[i] = rewritten;
                     replaced++;
                 }
             }
