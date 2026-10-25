@@ -605,7 +605,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         var bits = index.StructAbi.ObservableArguments(side, arguments, rawArguments);
         if (!(callee.Method is { Name: ".ctor", Parameters.Count: 0 } && Side.InExceptionRegion(values[0].Bits)))
         {
-            try { side.CallEvent(index.CodeAddress(callee), bits, Side.IsGenericInstance(callee) ? callee : null); }
+            try { side.CallEvent(index.CodeAddress(callee), index.StructAbi.CallInputs(callee, bits), Side.IsGenericInstance(callee) ? callee : null); }
             catch (PlannedThrow e) { throw new CilThrow(side.TypeOf(e.Object), e.Object); }
         }
         index.StructAbi.WriteBack(side, callee, ordinal, rawArguments);

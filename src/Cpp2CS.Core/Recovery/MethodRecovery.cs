@@ -1459,9 +1459,13 @@ public sealed partial class MethodRecovery
             ManagedValue? receiver = null;
             if (signature.This is { } self)
             {
-                receiver = stackEnums.TryGetValue(call, out var stackEnum)
-                    ? new BoxValue(RecoverAs(stackEnum.Value, stackEnum.Type, address), stackEnum.Type, self.Type)
-                    : RecoverAs(call.DelegateReceiver ?? Argument(self, "this"), self.Type, address);
+                if (stackEnums.TryGetValue(call, out var stackEnum))
+                    receiver = new BoxValue(RecoverAs(stackEnum.Value, stackEnum.Type, address), stackEnum.Type, self.Type);
+                else
+                {
+                    var expression = call.DelegateReceiver ?? Argument(self, "this");
+                    receiver = UnusedReceiver(call, callee, self, expression) ?? RecoverAs(expression, self.Type, address);
+                }
             }
             var parameters = new List<ManagedValue>();
             for (var i = 0; i < signature.Parameters.Length; i++)

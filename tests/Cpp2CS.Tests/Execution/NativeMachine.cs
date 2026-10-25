@@ -318,7 +318,7 @@ internal sealed partial class NativeMachine : IDisposable
             }
         }
         if (!(callee.Method is { Name: ".ctor", Parameters.Count: 0 } && Side.InExceptionRegion(arguments[0])))
-            side.CallEvent(address, arguments, instance);
+            side.CallEvent(address, world.Index.StructAbi.CallInputs(callee, arguments), instance);
         world.Index.StructAbi.WriteBack(side, callee, ordinal, rawArguments);
         var returnType = callee.Method.ReturnType.Substitute(callee.TypeArguments, callee.MethodArguments);
         if (signature.Return is { } returned)
