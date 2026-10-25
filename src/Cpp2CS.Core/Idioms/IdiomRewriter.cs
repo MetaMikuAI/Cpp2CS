@@ -687,7 +687,15 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     }
                     if (!ExprMap.Operands(stmt).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => u.Variable == v)) continue;
                     if (stmt is not Call call) return true;
-                    if (call.Kind is CallKind.Direct or CallKind.Tail && call.Target is Const t && owner.calls.Signature(t.Value) is not null) return true;
+                    if (call.Kind is CallKind.Direct or CallKind.Tail && call.Target is Const t && owner.calls.Signature(t.Value) is { } signature)
+                    {
+                        // 非泛型调用的隐藏 MethodInfo 不参与托管参数语义；泛型调用仍保留实例身份依赖。
+                        var methods = facts.EntriesAt(t.Value).Select(e => e.Method).OfType<MethodRef>().ToArray();
+                        var hidden = methods.Length > 0 && methods.All(m => m.Method.GenericParameters.Count == 0 && m.Method.Owner.GenericParameters.Count == 0)
+                            ? signature.MethodInfo : null;
+                        if (call.Arguments.Where((_, i) => i >= call.Sources.Length || call.Sources[i] != hidden)
+                            .SelectMany(ExprMap.Walk).OfType<Use>().Any(u => u.Variable == v)) return true;
+                    }
                     if (ExprMap.Walk(call.Target).OfType<Use>().Any(u => u.Variable == v)) return true;
                 }
             }

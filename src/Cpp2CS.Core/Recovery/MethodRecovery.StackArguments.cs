@@ -56,7 +56,7 @@ public sealed partial class MethodRecovery
                 var layout = owner.abi.StackArguments(signature);
                 foreach (var parameter in layout.Parameters)
                 {
-                    if (types.Kind(parameter.Type) is not (TypeKind.Float or TypeKind.Double or TypeKind.Int or TypeKind.Bool)) continue;
+                    if (types.Kind(parameter.Type) is not (TypeKind.Float or TypeKind.Double or TypeKind.Int or TypeKind.Bool or TypeKind.Reference)) continue;
                     var width = types.Size(parameter.Type) * 8;
                     if (width is not (8 or 16 or 32 or 64)
                         || ReachingStackStore(block, block.Statements.IndexOf(call), callSp + parameter.Offset, [], width) is not { } store) continue;

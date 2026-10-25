@@ -40,6 +40,6 @@ dotnet run --project src/Cpp2CS.Cli -c Release -- recover <binary> <metadata> <o
 | `recovery.jsonl`、`emitted.tsv` | 逐方法诊断与完整写出清单 |
 | `holes.txt` | 未恢复原因与汇总 |
 
-部分方法可以输出可读片段，并以 `Cpp2CS.Unrecovered` 标记缺口；它们不计入完整写出清单。源码折叠和类型名称还原不等于整个工程可以编译或在 Unity 中运行。
+部分方法可以输出可读片段，并以 `Cpp2CS.Unrecovered` 和原生地址标记缺口；完整原因见 `recovery.jsonl`，不嵌入程序集字符串堆。这些方法不计入完整写出清单。源码折叠和类型名称还原不等于整个工程可以编译或在 Unity 中运行。
 
 实现边界见 [架构](docs/架构.md)，检查方式见 [验证](docs/验证.md)。

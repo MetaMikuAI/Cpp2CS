@@ -9,8 +9,11 @@ namespace Cpp2CS.Output;
 /// <summary>语句与边的 CIL 写法：每种语句一处；边先读出全部复制的值，再写入目标局部。</summary>
 public sealed partial class BodyEmitter
 {
+    private ulong statementAddress;
+
     private void Statement(ManagedStatement statement)
     {
+        statementAddress = statement.Address;
         switch (statement)
         {
             case ManagedAssignment a: Value(a.Value); il.Emit(OpCodes.Stloc, Local(a.Target)); break;
@@ -68,7 +71,7 @@ public sealed partial class BodyEmitter
                 else il.Emit(OpCodes.Call, Generic(helpers.Do, awaited.Task.Type));
                 break;
             case ManagedHole hole:
-                il.Emit(OpCodes.Ldstr, HoleText(hole.Address, hole.Reason));
+                il.Emit(OpCodes.Ldc_I8, unchecked((long)hole.Address));
                 if (hole.Terminal) { il.Emit(OpCodes.Call, Unrecovered().Fail); il.Emit(OpCodes.Throw); }
                 else il.Emit(OpCodes.Call, Unrecovered().At);
                 break;
@@ -81,9 +84,7 @@ public sealed partial class BodyEmitter
         }
     }
 
-    private static string HoleText(ulong address, string reason) => address == 0 ? reason : $"0x{address:x} {reason}";
-
-    /// <summary>部分方法体的洞标记：每个模块一个 Cpp2CS.Unrecovered 静态类，At/Fail/Value&lt;T&gt; 的方法体只抛出。</summary>
+    /// <summary>洞标记只携带原生地址，完整原因留在 recovery.jsonl，避免诊断文本撑爆 #US 字符串堆。</summary>
     private (MethodReference At, MethodReference Fail, MethodDefinition Value) Unrecovered()
     {
         var module = destination.Module;
@@ -93,7 +94,7 @@ public sealed partial class BodyEmitter
         MethodDefinition Method(string name, TypeReference returns)
         {
             var method = new MethodDefinition(name, MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, returns);
-            method.Parameters.Add(new ParameterDefinition("reason", ParameterAttributes.None, TypeReference(types.Corlib("System.String"))));
+            method.Parameters.Add(new ParameterDefinition("address", ParameterAttributes.None, TypeReference(types.UInt64)));
             var processor = method.Body.GetILProcessor();
             processor.Emit(OpCodes.Ldnull); processor.Emit(OpCodes.Throw);
             type.Methods.Add(method);

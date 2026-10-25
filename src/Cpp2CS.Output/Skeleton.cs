@@ -1,6 +1,8 @@
 using Cpp2CS.Model;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using System.Reflection.Metadata.Ecma335;
+using System.Reflection.PortableExecutable;
 using SR = System.Reflection;
 
 namespace Cpp2CS.Output;
@@ -67,7 +69,15 @@ public sealed class Skeleton
     public void Write(string directory)
     {
         Directory.CreateDirectory(directory);
-        foreach (var assembly in assemblies) assembly.Write(Path.Combine(directory, assembly.MainModule.Name));
+        foreach (var assembly in assemblies)
+        {
+            var path = Path.Combine(directory, assembly.MainModule.Name);
+            assembly.Write(path);
+            using var pe = new PEReader(File.OpenRead(path));
+            var metadata = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader(pe);
+            if (metadata.GetHeapSize(HeapIndex.UserString) > 0x1000000)
+                throw new InvalidDataException($"{path} 的 #US 字符串堆超过 24 位令牌范围");
+        }
     }
 
     private AssemblyDefinition CreateAssembly(AssemblyDef definition)

@@ -32,7 +32,7 @@ public sealed partial class BodyEmitter
                 else il.Emit(OpCodes.Call, Generic(Awaits().Completed, result.Type));
                 break;
             case HoleValue hole:
-                il.Emit(OpCodes.Ldstr, HoleText(0, hole.Reason));
+                il.Emit(OpCodes.Ldc_I8, unchecked((long)statementAddress));
                 il.Emit(OpCodes.Call, new GenericInstanceMethod(Unrecovered().Value) { GenericArguments = { TypeReference(hole.Type) } });
                 break;
             case ConstantValue c:
