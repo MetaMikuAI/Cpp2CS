@@ -55,6 +55,9 @@ internal static partial class ExecutionCheck
         var emitter = new BodyEmitter(skeleton, types);
         var closure = new AccessorRecovery(facts, types, recovery, emitter, results, full ? AutoPropertyManifest.ReadRejected(Path.Combine(slice, "autoprop-rejected-input.tsv")) : null);
         var index = new WorldIndex(facts, types);
+        if (options.Contains("--concrete-generics"))
+            foreach (var result in results.Where(Selected))
+                instances[result.Method.Method] = ConcreteGenericInput(instances[result.Method.Method], result.Entry, index);
         var cecil = new CecilModel(facts.Model, skeleton);
         var interpreter = new CilInterpreter(cecil, index);
         using var machine = new NativeMachine(facts);
