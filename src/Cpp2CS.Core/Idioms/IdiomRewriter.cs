@@ -208,6 +208,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             RefreshInterfaceOperands();
             if (!owner.AuditLegacyDelegateCalls && DelegateCallNormalizer.Run(facts, function, Result)) Cleanup();
             if (!owner.AuditRawManagedThrows && ManagedThrowNormalizer.Run(facts, function, Result)) Cleanup();
+            while (FiniteConditions.Simplify(function)) Cleanup();
             Residuals();
         }
 
