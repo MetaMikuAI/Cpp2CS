@@ -27,6 +27,8 @@ internal static class InlineConstructors
                 case Store { Target: FrameAddress, Value: Use { Variable: { Version: 0 } v } }
                     when v.Storage == Storage.Gpr(30) || v.Storage.Bank == Bank.Gpr && v.Storage.Index is >= 19 and <= 29: continue;
                 case Return { Value: null }:
+                case Call { Kind: CallKind.Tail, Op.Kind: OpKind.WriteBarrier }:
+                    // 尾部写屏障只通知 GC；调用点保留自身屏障及其返回语义。
                     return effects.Count > 1 && effects.Any(s => s is Store)
                         && effects[0] is Call { Op: null, Kind: CallKind.Direct } ? new(method, signature, effects) : null;
                 case Call { Kind: CallKind.Direct } call when call.Op is null or { Kind: OpKind.WriteBarrier }:
