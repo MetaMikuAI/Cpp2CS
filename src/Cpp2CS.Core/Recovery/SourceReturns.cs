@@ -54,6 +54,18 @@ internal static class SourceReturns
                 changed = true;
             }
         } while (changed);
-        return body with { Blocks = body.Blocks.Select(b => blocks[b.Address]).ToArray() };
+        return body with { Blocks = body.Blocks.Select(b =>
+        {
+            var block = blocks[b.Address];
+            if (!iterator) return block;
+            // 共享尾部展开后，相邻的常量状态写入只保留最后一次；中间没有读取、调用或异常点。
+            var statements = block.Statements.ToList();
+            for (var i = statements.Count - 2; i >= 0; i--)
+                if (StateWrite(statements[i]) && StateWrite(statements[i + 1])
+                    && statements[i] is ManagedStore { Value: ConstantValue } first
+                    && statements[i + 1] is ManagedStore { Value: ConstantValue } second
+                    && first.Target.Equals(second.Target)) statements.RemoveAt(i);
+            return block with { Statements = statements };
+        }).ToArray() };
     }
 }

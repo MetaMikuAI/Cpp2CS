@@ -86,5 +86,14 @@ internal static class SourceReturnsCheck
             "完成路径先写状态 -1，再返回 false");
         var ordinary = shared with { Blocks = [.. shared.Blocks.Take(2), new(2, [write with { Target = Read(2, state, "Other").Value }, new ManagedReturn(2, result)])] };
         a.True(SourceReturns.Rewrite(ordinary).Blocks[0].Statements[0] is ManagedJump, "普通字段写入不应用迭代器返回规则");
+        var overwritten = shared with { Blocks = [shared.Blocks[0] with { Statements =
+            [write with { Value = new ConstantValue(uint.MaxValue, integer, 32) }, .. shared.Blocks[0].Statements] }, .. shared.Blocks.Skip(1)] };
+        a.True(SourceReturns.Rewrite(overwritten).Blocks[0].Statements is
+            [ManagedStore { Value: ConstantValue { Bits: 1 } }, ManagedReturn { Value: ConstantValue { Bits: 1 } }],
+            "展开挂起尾部后删除紧邻且被覆盖的负状态");
+        var observed = overwritten with { Blocks = [overwritten.Blocks[0] with { Statements =
+            [overwritten.Blocks[0].Statements[0], Read(0, state, "<>1__state"), shared.Blocks[0].Statements[0]] }, .. shared.Blocks.Skip(1)] };
+        a.True(SourceReturns.Rewrite(observed).Blocks[0].Statements.OfType<ManagedStore>().Count() == 2,
+            "两次写入之间有读取时保留中间状态");
     }
 }
