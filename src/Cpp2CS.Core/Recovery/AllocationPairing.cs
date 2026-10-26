@@ -17,8 +17,8 @@ internal static class AllocationPairing
                 if (block.Statements[i] is Jump) break;
                 yield return (block, block.Statements[i]);
             }
-            // LSDA 的 call-site 在调用处切块，没有显式 Jump；其唯一正常后继就是顺序继续执行处。
-            if (block.Statements.LastOrDefault() is not (Jump or Call { Kind: CallKind.Direct or CallKind.Indirect })) yield break;
+            // LSDA 调用点和已折叠的元数据读取可能留下无显式 Jump 的空块；唯一正常后继仍是顺序执行处。
+            if (block.Statements.LastOrDefault() is not (null or Jump or Call { Kind: CallKind.Direct or CallKind.Indirect })) yield break;
             var successors = block.NormalSuccessors.ToArray();
             if (successors.Length != 1) yield break;
             var next = successors[0];

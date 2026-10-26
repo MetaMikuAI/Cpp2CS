@@ -32,10 +32,10 @@ public static class ManagedTypeMap
             ConstantValue v => v with { Type = map(v.Type), Width = W(v.Type, map(v.Type), v.Width) },
             StringValue v => v,
             TypeHandleValue v => v with { Target = map(v.Target) },
-            NewArrayValue v => v with { ArrayType = (ArrayRef)map(v.ArrayType), Length = Value(v.Length) },
-            NewObjectValue v => v with { Constructor = Method(v.Constructor), Arguments = v.Arguments.Select(Value).ToArray() },
-            DelegateValue v => v with { DelegateType = (DefinitionRef)map(v.DelegateType), Target = Value(v.Target), Method = Method(v.Method) },
-            BoxValue v => v with { Operand = Value(v.Operand), Boxed = map(v.Boxed), ObjectType = map(v.ObjectType) },
+            NewArrayValue v => new NewArrayValue((ArrayRef)map(v.ArrayType), Value(v.Length)),
+            NewObjectValue v => new NewObjectValue(Method(v.Constructor), v.Arguments.Select(Value).ToArray()) { Transparent = v.Transparent },
+            DelegateValue v => new DelegateValue((DefinitionRef)map(v.DelegateType), Value(v.Target), Method(v.Method), v.Binding),
+            BoxValue v => new BoxValue(Value(v.Operand), map(v.Boxed), map(v.ObjectType)),
             UnboxAddressValue v => new UnboxAddressValue(Value(v.Operand), map(v.Target)),
             IsInstValue v => new IsInstValue(Value(v.Operand), map(v.Target), v.BoxedType is { } boxed ? map(boxed) : null),
             ArrayLengthValue v => v with { Array = Value(v.Array), Type = map(v.Type) },
@@ -85,7 +85,8 @@ public static class ManagedTypeMap
         };
         return new ManagedBody(Method(body.Method), body.Blocks.Select(b => b with { Statements = b.Statements.Select(Statement).ToArray() }).ToArray())
         {
-            Regions = body.Regions.Select(r => r with { Exception = r.Exception is { } e ? Local(e) : null }).ToArray(),
+            Regions = body.Regions.Select(r => r with { Exception = r.Exception is { } e ? Local(e) : null,
+                CatchType = r.CatchType is { } caught ? map(caught) : null }).ToArray(),
         };
     }
 }

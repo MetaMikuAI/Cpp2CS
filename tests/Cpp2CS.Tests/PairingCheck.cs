@@ -45,6 +45,8 @@ internal static class PairingCheck
         var middle = new Block(12) { Statements = [new Nop(12, "test"), new Jump(12, last.Start)] };
         MachineFunction.RemoveEdge(first, last); MachineFunction.AddEdge(first, middle); MachineFunction.AddEdge(middle, last);
         a.True(Reaches(), "可跨多个直线块");
+        middle.Statements.Clear();
+        a.True(Reaches(), "元数据读取折叠后的空块仍保持直线控制流");
         last.Statements = [new Jump(24, middle.Start)];
         MachineFunction.AddEdge(last, middle);
         a.True(AllocationPairing.Following(first, 0).Count() < 10, "遇环有限结束");

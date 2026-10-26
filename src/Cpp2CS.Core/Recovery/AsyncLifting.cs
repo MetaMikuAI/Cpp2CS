@@ -17,6 +17,10 @@ public static partial class AsyncLifting
 
     public static ManagedBody? Lift(ManagedBody kickoff, ManagedBody moveNext, out string reason)
     {
+        // 状态机的类参数包含入口的类型参数及方法参数，必须按 Start 的实际类型一起代换。
+        if (StateMachineOf(kickoff) is DefinitionRef machine && machine.Definition == moveNext.Method.Method.Owner
+            && machine.Arguments.Count > 0)
+            moveNext = ManagedTypeMap.Map(moveNext, t => t.Substitute(machine.Arguments, []));
         var lifter = new Lifter(kickoff, moveNext);
         var body = lifter.Run();
         reason = lifter.Reason;

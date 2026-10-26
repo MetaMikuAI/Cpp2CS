@@ -235,10 +235,11 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             if (!owner.AuditLegacyDelegateCalls && DelegateCallNormalizer.Run(facts, function, Result)) Cleanup();
             if (!owner.AuditRawManagedThrows && ManagedThrowNormalizer.Run(facts, function, Result)) Cleanup();
             if (foldedRuntimeGuards) PruneRuntimeGuards();
-            if (InitializedClassLoads())
+            while (InitializedClassLoads())
             {
                 Cleanup();
                 PruneRuntimeGuards();
+                Symbols(rgctx: true);
             }
             if (SplitClassGuards()) Cleanup();
             while (FiniteConditions.Simplify(function)) Cleanup();
@@ -1011,33 +1012,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             return changed;
         }
 
-        // 同一类型初始化已在所有到达路径上完成时，后续 cctor_finished 检查走已初始化分支。
-        private bool InitializedClassLoads()
-        {
-            if (self?.Method.Name == ".cctor") return false;
-            var initialized = function.Blocks.SelectMany(b => b.Statements.Select((s, i) => (Block: b, Index: i, Statement: s)))
-                .Where(p => p.Statement is Call { Op: { Kind: OpKind.RunClassConstructor, Operand: DefinitionRef } }).ToArray();
-            if (initialized.Length == 0) return false;
-            var dominators = Dominators.Compute(function);
-            var changed = false;
-            foreach (var block in function.Blocks)
-                for (var i = 0; i < block.Statements.Count; i++)
-                {
-                    var statement = block.Statements[i];
-                    var mapped = ExprMap.MapOperands(statement, e => ExprMap.Map(e, value =>
-                    {
-                        if (value is not Load { Width: 32, Address: Binary { Op: BinOp.Add,
-                            Left: Symbol { Kind: SymbolKind.Class, Value: DefinitionRef type },
-                            Right: Const { Value: RuntimeLayout.ClassCctorFinishedOrNoCctor } } }) return null;
-                        if (!initialized.Any(p => ((Call)p.Statement).Op!.Operand!.Equals(type)
-                            && dominators.Dominates(p.Block.Index, block.Index) && (p.Block != block || p.Index < i))) return null;
-                        changed = true;
-                        return Expr.C(1, 32);
-                    }));
-                    block.Statements[i] = mapped;
-                }
-            return changed;
-        }
+        private bool InitializedClassLoads() => self?.Method.Name != ".cctor" && ClassInitializationFacts.Run(function);
 
         /// <summary>从 start 出发的单前驱、单后继直链，直到 merge；不是直链返回 null。</summary>
         private static List<Block>? Chain(Block start, Block merge)
