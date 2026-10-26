@@ -32,6 +32,13 @@ internal static class SourceIteratorCopiesCheck
             public class Probe
             {
                 public int Value;
+                public static int BranchVisits;
+                public static void Touch(int value) => BranchVisits += value;
+                public static Func<int> BranchCapture(int seed)
+                {
+                    int current = seed;
+                    return () => ++current;
+                }
                 public IEnumerable<int> InstanceValues()
                 {
                     var owner = this;
@@ -54,6 +61,28 @@ internal static class SourceIteratorCopiesCheck
             }
             """, "IteratorCopies.Input");
         using var module = ModuleDefinition.ReadModule(new MemoryStream(bytes));
+        var branchCapture = module.GetType("Probe").Methods.Single(m => m.Name == "BranchCapture");
+        var originalInstructions = branchCapture.Body.Instructions.ToArray();
+        var constructors = originalInstructions.Where(i => i.OpCode == OpCodes.Newobj).Select(i => (MethodReference)i.Operand).ToArray();
+        var callback = (MethodReference)originalInstructions.Single(i => i.OpCode == OpCodes.Ldftn).Operand;
+        var captured = (FieldReference)originalInstructions.Single(i => i.OpCode == OpCodes.Stfld).Operand;
+        var touch = module.GetType("Probe").Methods.Single(m => m.Name == "Touch");
+        var root = new VariableDefinition(constructors[0].DeclaringType);
+        var alias = new VariableDefinition(root.VariableType);
+        branchCapture.Body.Instructions.Clear(); branchCapture.Body.Variables.Clear();
+        branchCapture.Body.Variables.Add(root); branchCapture.Body.Variables.Add(alias);
+        var branchIl = branchCapture.Body.GetILProcessor();
+        var right = branchIl.Create(OpCodes.Ldc_I4_2);
+        var joined = branchIl.Create(OpCodes.Ldloc, alias);
+        // 两个分支把同一个入口闭包赋给副本，回调必须继续共享该对象。
+        foreach (var instruction in new[] {
+            branchIl.Create(OpCodes.Newobj, constructors[0]), branchIl.Create(OpCodes.Stloc, root),
+            branchIl.Create(OpCodes.Ldloc, root), branchIl.Create(OpCodes.Ldarg_0), branchIl.Create(OpCodes.Stfld, captured),
+            branchIl.Create(OpCodes.Ldarg_0), branchIl.Create(OpCodes.Ldc_I4_0), branchIl.Create(OpCodes.Bge, right),
+            branchIl.Create(OpCodes.Ldc_I4_1), branchIl.Create(OpCodes.Call, touch),
+            branchIl.Create(OpCodes.Ldloc, root), branchIl.Create(OpCodes.Stloc, alias), branchIl.Create(OpCodes.Br, joined),
+            right, branchIl.Create(OpCodes.Call, touch), branchIl.Create(OpCodes.Ldloc, root), branchIl.Create(OpCodes.Stloc, alias), joined, branchIl.Create(OpCodes.Ldftn, callback),
+            branchIl.Create(OpCodes.Newobj, constructors[1]), branchIl.Create(OpCodes.Ret) }) branchIl.Append(instruction);
         var move = module.GetTypes().SelectMany(t => t.Methods).Single(m => m.Name == "MoveNext" && m.DeclaringType.Name.StartsWith("<Values>", StringComparison.Ordinal));
         move.Body.SimplifyMacros();
         var il = move.Body.GetILProcessor();
@@ -81,6 +110,7 @@ internal static class SourceIteratorCopiesCheck
         var original = System.Reflection.Assembly.Load(File.ReadAllBytes(input)).GetType("Probe")!.GetMethod("Values")!.CreateDelegate<Func<int, IEnumerable<int>>>();
         var restored = System.Reflection.Assembly.Load(rebuilt).GetType("Probe")!.GetMethod("Values")!.CreateDelegate<Func<int, IEnumerable<int>>>();
         var a = new Assertions();
+        a.True(!source.Contains("DisplayClass", StringComparison.Ordinal), "分支副本和挂起副本均展开为共享捕获变量");
         a.True(reads.Length > 1 && source.Contains("yield return", StringComparison.Ordinal), "多个闭包读取副本仍成功折叠");
         foreach (var seed in new[] { -4, 0, 7 })
         {
@@ -94,6 +124,14 @@ internal static class SourceIteratorCopiesCheck
         foreach (var assembly in new[] { File.ReadAllBytes(input), rebuilt })
         {
             var type = System.Reflection.Assembly.Load(assembly).GetType("Probe")!;
+            var factory = type.GetMethod("BranchCapture")!.CreateDelegate<Func<int, Func<int>>>();
+            foreach (var seed in new[] { -4, 7 })
+            {
+                type.GetField("BranchVisits")!.SetValue(null, 0);
+                var callbackProbe = factory(seed);
+                a.True(callbackProbe() == seed + 1 && callbackProbe() == seed + 2 && (int)type.GetField("BranchVisits")!.GetValue(null)! == (seed < 0 ? 1 : 2),
+                    $"seed={seed} 分支合流后的回调共享可变捕获并保留分支调用");
+            }
             var instance = Activator.CreateInstance(type)!;
             type.GetField("Value")!.SetValue(instance, 7);
             var iterator = ((IEnumerable<int>)type.GetMethod("InstanceValues")!.Invoke(instance, null)!).GetEnumerator();
