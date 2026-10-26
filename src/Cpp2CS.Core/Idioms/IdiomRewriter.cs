@@ -112,10 +112,12 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         return unused;
     }
 
-    private bool UnusedInput(ulong entry, Storage register)
+    internal bool UnusedInput(ulong entry, Storage register)
     {
         if (!nativeInputs.TryGetValue(entry, out var reads))
         {
+            // 递归调用暂不证明未用；后续只缓存完整分析的结果。
+            nativeInputs.Add(entry, null);
             var methods = facts.EntriesAt(entry).Select(e => e.Method).OfType<MethodRef>().ToArray();
             reads = null;
             if (methods.Length > 0 && methods.All(m => !m.Method.IsVirtual && m.Method.Address == entry
@@ -128,10 +130,12 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     var returned = signatures.SelectMany(s => s!.Return?.Pieces ?? []).Distinct()
                         .Select(p => (Expr)new Read(p.Register, p.Width)).ToArray();
                     reads = Lifting.NativeInputs.Reads(inputLifter.Lift(entry,
-                        returned.Length == 0 ? null : new Intrinsic("return", returned, 64), simplify: false));
+                        returned.Length == 0 ? null : new Intrinsic("return", returned, 64), simplify: false),
+                        RecoverUnusedInputs ? (call, input) => call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target }
+                            && UnusedInput(target.Value, input) : null);
                 }
             }
-            nativeInputs.Add(entry, reads);
+            nativeInputs[entry] = reads;
         }
         return reads is not null && !reads.Contains(register);
     }
@@ -142,6 +146,8 @@ public sealed class IdiomRewriter(ProgramFacts facts)
     public bool AuditLegacyDelegateCalls { get; init; }
     /// <summary>仅供全程序普查保留 allocate/store/throw 的原始配对证据。</summary>
     public bool AuditRawManagedThrows { get; init; }
+    /// <summary>恢复托管调用时清理未用输入的残值；事实推断仍保留原始调用参数。</summary>
+    public bool RecoverUnusedInputs { get; init; }
 
     public IdiomResult Run(MachineFunction function)
     {
@@ -229,6 +235,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             for (var round = 0; round < 32; round++)
             {
                 defs = new Defs(function);
+                if (owner.RecoverUnusedInputs) DiscardUnusedInputs();
                 // 类型检查先于抛异常检查：castclass / as 后判空的失败一侧是只抛异常的块
                 var changed = Guards();
                 changed |= TypeChecks();
@@ -246,6 +253,44 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         }
 
         private IEnumerable<Stmt> All => function.Blocks.Where(b => !removed.Contains(b)).SelectMany(b => b.Statements);
+
+        // 未用参数中的寄存器残值不应保活元数据守卫和无定义的合并值。
+        private void DiscardUnusedInputs()
+        {
+            var phis = All.OfType<Phi>().ToDictionary(p => p.Target);
+            var metadataResults = All.OfType<Call>().Where(c => owner.HelperOf(c)?.Kind == HelperKind.InitMetadata)
+                .SelectMany(c => c.Defines).ToHashSet();
+            bool ResidualInput(Expr value, HashSet<Variable> seen)
+            {
+                if (value is Unknown or Use { Variable.Version: < 0 } or Symbol { Kind: not SymbolKind.String }) return true;
+                if (value is Ir.Convert convert) return ResidualInput(convert.Operand, seen);
+                if (value is not Use use || !seen.Add(use.Variable)) return false;
+                if (metadataResults.Contains(use.Variable)) return true;
+                if (defs.Raw(use.Variable) is { } source) return ResidualInput(source, seen);
+                return phis.TryGetValue(use.Variable, out var phi)
+                    && phi.Sources.Any(v => ResidualInput(new Use(v, v.Width), seen));
+            }
+            var changed = false;
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                {
+                    if (block.Statements[i] is not Call { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target } call
+                        || owner.calls.Signature(target.Value) is not { } signature) continue;
+                    var methods = facts.EntriesAt(target.Value).Select(e => e.Method).OfType<MethodRef>().ToArray();
+                    if (methods.Length == 0 || methods.Any(m => m.Method.Address != target.Value
+                        || m.Method.GenericParameters.Count != 0 || m.Method.Owner.GenericParameters.Count != 0)) continue;
+                    var args = (Expr[])call.Arguments.Clone();
+                    for (var k = 0; k < args.Length && k < call.Sources.Length; k++)
+                    {
+                        if (args[k] is Unknown || !ResidualInput(args[k], [])) continue;
+                        if (call.Sources[k] != signature.MethodInfo && !owner.UnusedInput(target.Value, call.Sources[k])) continue;
+                        args[k] = new Unknown("原生被调方未用的输入", args[k].Width);
+                        changed = true;
+                    }
+                    block.Statements[i] = call with { Arguments = args };
+                }
+            if (changed) Cleanup();
+        }
 
         private void TrimResultBuffers()
         {

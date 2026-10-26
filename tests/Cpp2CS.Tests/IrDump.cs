@@ -14,7 +14,7 @@ internal static class IrDump
     {
         var facts = FactsBuilder.Build(binary, metadata);
         var lifter = new FunctionLifter(facts);
-        var rewriter = new IdiomRewriter(facts) { RecordFilter = _ => false };
+        var rewriter = new IdiomRewriter(facts) { RecordFilter = _ => false, RecoverUnusedInputs = true };
         foreach (var text in entries)
         {
             var entry = System.Convert.ToUInt64(text, 16);

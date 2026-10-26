@@ -161,7 +161,8 @@ public sealed partial class MethodRecovery
         /// <summary>范围内恰好从 range.Offset 开始、大小为 width 的最外层结构体位置。</summary>
         private ManagedValue? WholeStructAt(CopyRange range, int width)
         {
-            if (types.Kind(range.Type) == TypeKind.Struct && range.Offset == 0 && types.Size(range.Type) * 8 == width) return range.Root;
+            if (types.Kind(range.Type) == TypeKind.Struct && range.Offset == 0 && types.Size(range.Type) * 8 == width)
+                return range.Root is AddressValue address ? address.Target : new IndirectValue(range.Root, range.Type);
             var path = StructPaths(range.Type).Where(p => p.Offset == range.Offset && types.Kind(p.Type) == TypeKind.Struct && types.Size(p.Type) * 8 == width)
                 .OrderBy(p => p.Path.Length).FirstOrDefault();
             return path.Path is null ? null : PathValue(range.Root, path.Path);

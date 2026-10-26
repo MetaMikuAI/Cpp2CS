@@ -148,13 +148,32 @@ public sealed partial class MethodRecovery
                 }
             } while (changed);
             var lives = new Dictionary<TypeRef, HashSet<Stmt>>();
+            TypeRef? FollowingDefinition(Block block, int position)
+            {
+                var seen = new HashSet<Block>();
+                while (seen.Add(block))
+                {
+                    foreach (var statement in block.Statements.Skip(position))
+                    {
+                        if (defining.TryGetValue(statement, out var own)) return own[0];
+                        if (Touches(statement)) return null;
+                    }
+                    if (block.NormalSuccessors.ToArray() is not [var next] || next.Predecessors.Count != 1) return null;
+                    block = next;
+                    position = 0;
+                }
+                return null;
+            }
             foreach (var block in blocks)
                 for (var i = 0; i < block.Statements.Count; i++)
                 {
                     var statement = block.Statements[i];
                     if (!users.Contains(statement)) continue;
                     TypeRef? type;
-                    if (defining.TryGetValue(statement, out var own)) type = own[0];
+                    // 构造前的整值清零属于新生命期；不同分支遗留的旧类型不参与这次写入。
+                    if (statement is Store clear && FrameOffset(clear.Target) == offset && FrameZero(clear.Value)
+                        && FollowingDefinition(block, i + 1) is { } nextType && clear.Value.Width == types.Size(nextType) * 8) type = nextType;
+                    else if (defining.TryGetValue(statement, out var own)) type = own[0];
                     else
                     {
                         var reached = reaching[statement];

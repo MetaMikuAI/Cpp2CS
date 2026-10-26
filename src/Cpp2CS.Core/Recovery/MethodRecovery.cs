@@ -46,7 +46,7 @@ public sealed partial class MethodRecovery
         this.facts = facts;
         this.types = types;
         lifter = new FunctionLifter(facts);
-        rewriter = new IdiomRewriter(facts) { RecordFilter = _ => false };
+        rewriter = new IdiomRewriter(facts) { RecordFilter = _ => false, RecoverUnusedInputs = true };
         abi = new ManagedAbi(facts.Layouts);
         runClassConstructor = types.CorlibMethod("System.Runtime.CompilerServices.RuntimeHelpers", "RunClassConstructor", types.RuntimeTypeHandle);
         memoryBarrier = types.CorlibMethod("System.Threading.Thread", "MemoryBarrier");

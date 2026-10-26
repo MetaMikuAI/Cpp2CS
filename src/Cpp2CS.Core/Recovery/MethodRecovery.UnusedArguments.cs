@@ -8,20 +8,7 @@ namespace Cpp2CS.Recovery;
 
 public sealed partial class MethodRecovery
 {
-    private readonly Dictionary<MethodRef, HashSet<Storage>?> nativeInputs = new();
-
-    private bool UnusedParameter(MethodRef method, Storage register)
-    {
-        if (!nativeInputs.TryGetValue(method, out var reads))
-        {
-            var signature = abi.Classify(method, out _)!;
-            Expr? returned = signature.Return is not { } value ? null
-                : new Intrinsic("diagnostic_return", value.Pieces.Select(p => (Expr)new Read(p.Register, p.Width)).ToArray(), 64);
-            reads = NativeInputs.Reads(lifter.Lift(method.Method.Address, returned, simplify: false));
-            nativeInputs.Add(method, reads);
-        }
-        return reads is not null && !reads.Contains(register);
-    }
+    private bool UnusedParameter(MethodRef method, Storage register) => rewriter.UnusedInput(method.Method.Address, register);
 
     private sealed partial class Context
     {
