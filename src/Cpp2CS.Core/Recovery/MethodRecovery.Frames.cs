@@ -65,6 +65,7 @@ public sealed partial class MethodRecovery
                     else if (argument.Passing == Passing.Indirect) Bind(expression, argument.Type, call, ReferenceEquals(argument, signature.Return));
                 }
             }
+            WitnessStoredArguments(witnesses);
             WitnessStoredResults(witnesses);
             WitnessFrameCopies(witnesses);
             var regions = witnesses.DistinctBy(w => (w.Offset, w.Type)).Select(w => new FrameRegion(w.Offset, w.Type, types.Size(w.Type), StructLocal(w.Type, ScalarWidth(w.Type))))
@@ -109,6 +110,30 @@ public sealed partial class MethodRecovery
             // IR 改写后，定义索引按新语句重建。
             definitions = IndexDefinitions();
             PrepareFrameInitializers();
+        }
+
+        /// <summary>入口结构体参数的全部 ABI 片原样落栈时，用完整参数类型覆盖只被单个字段调用看见的区域。</summary>
+        private void WitnessStoredArguments(List<FrameWitness> witnesses)
+        {
+            var stores = blocks.SelectMany(b => b.Statements).OfType<Store>()
+                .Where(s => s.Value is Use { Variable.Version: 0 } && FrameOffset(s.Target) is not null)
+                .ToLookup(s => ((Use)s.Value).Variable.Storage);
+            foreach (var group in structArguments.GroupBy(p => p.Value.Root))
+            {
+                long? origin = null;
+                Store? first = null;
+                foreach (var (register, argument) in group)
+                {
+                    var matches = stores[register].Where(s => s.Value.Width == argument.Piece.Width).ToArray();
+                    if (matches is not [var store]) { origin = null; break; }
+                    var at = FrameOffset(store.Target)!.Value - argument.Piece.Offset;
+                    if (origin is not null && origin != at) { origin = null; break; }
+                    origin = at;
+                    first ??= store;
+                }
+                if (origin is not { } offset || first is null || offset >= 0 || offset + types.Size(group.Key.Type) > 0) continue;
+                witnesses.Add(new(offset, group.Key.Type, first, true));
+            }
         }
 
         /// <summary>
