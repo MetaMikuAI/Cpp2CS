@@ -317,6 +317,7 @@ public sealed partial class MethodRecovery
             if (function.Blocks.Any(b => b.IsLandingPad))
                 ManagedFramePromotion.Run(facts, function, owner.abi, owner.lifter.Calls, owner.lifter.Machine.Convention.StackPointer);
             NormalizeCleanupThunks();
+            NormalizeOutlinedCalls(idioms);
             if (function.Blocks.Any(b => b.IsLandingPad))
                 while (ExceptionNullBranches.Run(facts, function)) function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
             foreach (var residual in idioms.Residuals)
