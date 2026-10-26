@@ -84,6 +84,7 @@ public sealed partial class MethodRecovery
             for (var i = 0; i < block.Statements.Count; i++)
             {
                 var old = block.Statements[i];
+                if (stackEnumStorage.Contains(old)) continue;
                 var mapped = ExprMap.MapOperands(old, e => ExprMap.Map(e, part =>
                 {
                     if (FrameOffset(part) is not { } offset) return null;
@@ -155,11 +156,34 @@ public sealed partial class MethodRecovery
         /// </summary>
         private void WitnessFrameCopies(List<FrameWitness> witnesses)
         {
-            var copies = new List<(long From, long To, int Width, Stmt Store)>();
+            var sites = blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Block: b, Index: i)))
+                .Where(p => p.Statement is Define).ToDictionary(p => ((Define)p.Statement).Target);
+            TypeRef? ReachingType(Variable value, long offset)
+            {
+                if (!sites.TryGetValue(value, out var site)) return null;
+                var block = site.Block;
+                var position = site.Index;
+                var seen = new HashSet<Block>();
+                while (seen.Add(block))
+                {
+                    foreach (var statement in block.Statements.Take(position).Reverse())
+                    {
+                        var writers = witnesses.Where(w => w.Offset == offset && ReferenceEquals(w.Call, statement) && (w.Writes || w.Call is Store))
+                            .Select(w => w.Type).Distinct().ToArray();
+                        if (writers.Length > 0) return writers is [var type] ? type : null;
+                        if (statement is Call call && !IsWriteBarrier(call) && call.Arguments.Any(a => FrameOffset(a) == offset)) return null;
+                    }
+                    if (block.Predecessors.ToArray() is not [var parent] || parent.Handler == block) return null;
+                    block = parent;
+                    position = block.Statements.Count;
+                }
+                return null;
+            }
+            var copies = new List<(long From, long To, int Width, Stmt Store, Variable Value)>();
             foreach (var store in blocks.SelectMany(b => b.Statements).OfType<Store>())
                 if (store.Value is Use { Variable: var v } use && values.TryGetValue(v, out var value) && CopiedLoad(value) is { Width: 64 or 128 or 32 } load
                     && load.Width == use.Width && FrameOffset(load.Address) is { } from && FrameOffset(store.Target) is { } to)
-                    copies.Add((from, to, load.Width, store));
+                    copies.Add((from, to, load.Width, store, v));
             if (copies.Count == 0) return;
             for (var round = 0; round < 8; round++)
             {
@@ -168,18 +192,20 @@ public sealed partial class MethodRecovery
                 {
                     var size = types.Size(known.Type);
                     var leaves = StructPaths(known.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
+                    var ambiguous = witnesses.Any(w => w.Offset == known.Offset && !w.Type.Equals(known.Type)
+                        && !StructPaths(known.Type).Any(p => p.Offset == 0 && p.Type.Equals(w.Type))
+                        && !StructPaths(w.Type).Any(p => p.Offset == 0 && p.Type.Equals(known.Type)));
                     foreach (var forward in new[] { true, false })
                         foreach (var group in copies.Where(c => (forward ? c.From : c.To) >= known.Offset && (forward ? c.From : c.To) < known.Offset + size)
+                            // 复用的源槽按本次读取前的完整写入定型，不能沿另一生命期的类型传播。
+                            .Where(c => !forward || !ambiguous || known.Type.Equals(ReachingType(c.Value, known.Offset)))
                             .GroupBy(c => forward ? c.To - c.From : c.From - c.To))
                         {
                             var other = known.Offset + group.Key;
                             if (witnesses.Any(w => w.Offset == other && w.Type.Equals(known.Type))) continue;
                             // 明确来源的正向复制也可能覆盖一个已被复用的槽；保留新类型见证，交给生命期分析拆分。
-                            // 反向传播不能覆盖调用签名；来源本身有不相容的类型时，复制不足以决定当前使用的是哪一种。
-                            if (witnesses.Any(w => w.Offset == other)
-                                && (!forward || witnesses.Any(w => w.Offset == known.Offset && !w.Type.Equals(known.Type)
-                                    && !StructPaths(known.Type).Any(p => p.Offset == 0 && p.Type.Equals(w.Type))
-                                    && !StructPaths(w.Type).Any(p => p.Offset == 0 && p.Type.Equals(known.Type))))) continue;
+                            // 反向传播不能覆盖调用签名；正向只使用本次读取已经确定的类型。
+                            if (witnesses.Any(w => w.Offset == other) && !forward) continue;
                             var covered = new HashSet<long>();
                             foreach (var c in group)
                                 for (var k = 0; k < c.Width / 8; k++) covered.Add((forward ? c.From : c.To) - known.Offset + k);

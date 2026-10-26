@@ -39,7 +39,7 @@ public sealed partial class MethodRecovery
                 var related = witnesses.Where(w => w.Offset >= offset && w.Offset < offset + size).ToArray();
                 // 非嵌套的其他起点重叠会要求更一般的区间别名分析。
                 if (candidates.Any(r => r.Offset < offset && offset < r.Offset + r.Size)) continue;
-                var users = blocks.SelectMany(b => b.Statements).Where(s => ExprMap.Operands(s).SelectMany(ExprMap.Walk)
+                var users = blocks.SelectMany(b => b.Statements).Where(s => !stackEnumStorage.Contains(s) && ExprMap.Operands(s).SelectMany(ExprMap.Walk)
                     .OfType<FrameAddress>().Any(f => f.Offset >= offset && f.Offset < offset + size)).ToArray();
                 if (users.Any(s => s is Define d && FrameOffset(d.Value) is not null
                     || s is Store store && FrameOffset(store.Value) is not null)) continue;
@@ -82,7 +82,7 @@ public sealed partial class MethodRecovery
             // 与已经拆分过生命期的区域重叠时不再拆（两种拆分会让同一语句落在两个区域）。
             if (frameLives.Keys.Any(r => r.Offset < offset + size && offset < r.Offset + r.Size)) return;
             var related = witnesses.Where(w => w.Offset >= offset && w.Offset < offset + size).ToArray();
-            bool Touches(Stmt s) => ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<FrameAddress>().Any(f => f.Offset >= offset && f.Offset < offset + size);
+            bool Touches(Stmt s) => !stackEnumStorage.Contains(s) && ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<FrameAddress>().Any(f => f.Offset >= offset && f.Offset < offset + size);
             var users = blocks.SelectMany(b => b.Statements).Where(Touches).ToHashSet();
             if (users.Any(s => s is Define d && FrameOffset(d.Value) is not null || s is Store store && FrameOffset(store.Value) is not null)) return;
             // 定义：写满整个槽（从槽起点开始、大小等于该类型）的见证。

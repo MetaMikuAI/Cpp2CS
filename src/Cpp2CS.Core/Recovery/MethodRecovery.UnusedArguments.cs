@@ -48,14 +48,17 @@ public sealed partial class MethodRecovery
             return new ConstantValue(0, parameter.Type, piece.Width);
         }
 
-        // 无实例读取的直接调用可复用当前 this，或必经路径上已判空的同类型 SSA 值。
+        // 无实例读取的直接调用可复用当前 this 或必经路径上的同类型 SSA 值。
         private ManagedValue? UnusedReceiver(Call call, MethodRef callee, AbiValue self, Expr expression)
         {
-            if (!MissingInput(expression) || types.Kind(self.Type) != TypeKind.Reference || !UnusedInput(call, callee, self)) return null;
+            if (types.Kind(self.Type) != TypeKind.Reference) return null;
+            if (!MissingInput(expression) && (TypeOfValue(expression) is not { } actual || types.IsAssignable(actual, self.Type))) return null;
+            if (!UnusedInput(call, callee, self)) return null;
             if (arguments.Values.FirstOrDefault(a => a.Index == -1 && types.IsAssignable(a.Type, self.Type)) is { } current)
                 return new ArgumentValue(-1, current.Type, current.Width);
             var block = blocks.FirstOrDefault(b => b.Statements.Any(s => ReferenceEquals(s, call)));
             if (block is null) return null;
+            var callBlock = block;
             var position = block.Statements.FindIndex(s => ReferenceEquals(s, call));
             var seen = new HashSet<Block>();
             while (seen.Add(block))
@@ -68,6 +71,12 @@ public sealed partial class MethodRecovery
                 block = parent;
                 position = block.Statements.Count;
             }
+            // 被调方不读取 this；可复用支配调用的同类型值，不额外引入字段读取或判空。
+            var dominators = Ssa.Dominators.Compute(function);
+            foreach (var prior in blocks.Where(b => dominators.Dominates(b.Index, callBlock.Index)))
+                foreach (var define in prior.Statements.Take(prior == callBlock ? callBlock.Statements.IndexOf(call) : prior.Statements.Count).OfType<Define>())
+                    if (known.TryGetValue(define.Target, out var type) && types.IsAssignable(type, self.Type))
+                        return RecoverAs(new Use(define.Target, define.Value.Width), self.Type, call.Address);
             return null;
         }
     }

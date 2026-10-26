@@ -847,6 +847,13 @@ public sealed partial class MethodRecovery
                     var symbolic = call.Arguments.Select(Expand).OfType<Symbol>().Where(s => s.Kind == SymbolKind.Method).Select(s => (MethodRef)s.Value)
                         .FirstOrDefault(m => candidates.Contains(m.Method));
                     if (symbolic is not null) return symbolic;
+                    // 唯一直接入口的 this 若确实未用，前一次调用留下的无关对象不能否定其方法身份。
+                    if (candidates is [var unique] && !unique.IsStatic && unique.GenericParameters.Count == 0 && unique.Owner.GenericParameters.Count == 0
+                        && receiver is not null && !types.IsAssignable(receiver, new DefinitionRef(unique.Owner, [])))
+                    {
+                        var direct = new MethodRef(unique, [], []);
+                        if (owner.abi.Classify(direct, out _)?.This is { } unusedThis && UnusedInput(call, direct, unusedThis)) return direct;
+                    }
                     foreach (var candidate in candidates.OrderBy(c => c.Index))
                     {
                         if (candidate.GenericParameters.Count > 0) continue;

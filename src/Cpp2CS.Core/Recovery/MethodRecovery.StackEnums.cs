@@ -1,4 +1,5 @@
 using Cpp2CS.Facts;
+using Cpp2CS.Flow;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
 
@@ -10,6 +11,7 @@ public sealed partial class MethodRecovery
     {
         private sealed record StackEnum(DefinitionRef Type, Expr Value, long Offset, Store[] Stores);
         private readonly Dictionary<Call, StackEnum> stackEnums = new(ReferenceEqualityComparer.Instance);
+        private readonly HashSet<Stmt> stackEnumStorage = new(ReferenceEqualityComparer.Instance);
 
         /// <summary>Il2CppFakeBox 的类指针、栈标记和枚举值组成临时装箱；仅接收不逃逸的 Enum 实例调用。</summary>
         [Analysis("栈上枚举", 28, After = ["异常值", "栈上调用"])]
@@ -49,15 +51,68 @@ public sealed partial class MethodRecovery
                 var members = group.ToArray();
                 var end = group.Key + RuntimeLayout.ObjectHeaderSize + members.Max(p => types.Size(p.Value.Type));
                 var covered = members.SelectMany(p => p.Value.Stores.Cast<Stmt>().Append(p.Key)).ToHashSet(ReferenceEqualityComparer.Instance);
-                // 地址被保存、转交或另行读取时，不能只删除局部对象头。
+                // 地址逃逸不能按物理栈槽重绑定；其他生命期的读写由覆盖前读取检查区分。
                 if (blocks.SelectMany(b => b.Statements).Any(s => !covered.Contains(s)
-                    && ExprMap.Operands(s).SelectMany(ExprMap.Walk).Any(e => FrameOffset(e) is { } at && at >= group.Key && at < end))) continue;
+                    && (s is Define d && FrameOffset(d.Value) is { } value && value >= group.Key && value < end
+                        || s is Store stored && FrameOffset(stored.Value) is { } pointer && pointer >= group.Key && pointer < end))) continue;
                 foreach (var (call, box) in members)
                 {
+                    if (StackBoxReadAfter(call, box)) continue;
                     stackEnums[call] = box;
                     dropped.UnionWith(box.Stores);
+                    stackEnumStorage.UnionWith(box.Stores);
+                    stackEnumStorage.Add(call);
                 }
             }
+        }
+
+        // Enum 调用后，盒内字节在被覆盖之前不能再被原生代码读取。
+        private bool StackBoxReadAfter(Call call, StackEnum box)
+        {
+            var size = RuntimeLayout.ObjectHeaderSize + types.Size(box.Type);
+            uint Bytes(long offset, int count)
+            {
+                var first = (int)Math.Clamp(offset - box.Offset, 0, size);
+                var end = (int)Math.Clamp(offset - box.Offset + count, 0, size);
+                return ((1u << (end - first)) - 1) << first;
+            }
+            bool Reads(Expr value, uint live) => ExprMap.Walk(value).Any(e =>
+                e is Load load && FrameOffset(load.Address) is { } offset && (Bytes(offset, load.Width / 8) & live) != 0
+                || FrameOffset(e) is { } address && (Bytes(address, 1) & live) != 0);
+            var firstBlock = blocks.Single(b => b.Statements.Contains(call));
+            var pending = new Queue<(Block Block, int Position, uint Live)>();
+            pending.Enqueue((firstBlock, firstBlock.Statements.IndexOf(call) + 1, (1u << size) - 1));
+            var seen = new Dictionary<(Block, int), uint>();
+            while (pending.TryDequeue(out var item))
+            {
+                var key = (item.Block, item.Position);
+                var previous = seen.GetValueOrDefault(key);
+                if ((item.Live & ~previous) == 0) continue;
+                seen[key] = previous | item.Live;
+                var live = item.Live;
+                if (item.Block.Handler is { } handler) pending.Enqueue((handler, 0, live));
+                foreach (var statement in item.Block.Statements.Skip(item.Position))
+                {
+                    if (statement is Call barrier && IsWriteBarrier(barrier)) continue;
+                    if (statement is Store store && FrameOffset(store.Target) is { } target)
+                    {
+                        if (Reads(store.Value, live)) return true;
+                        live &= ~Bytes(target, store.Value.Width / 8);
+                    }
+                    else if (statement is Call next && Resolve(next) is { } callee
+                        && owner.abi.Classify(callee, out _)?.Return is { Passing: Passing.Indirect, Pieces: [var piece] } result
+                        && ArgumentsOf(next).TryGetValue(piece.Register, out var buffer) && FrameOffset(buffer) is { } destination)
+                    {
+                        if (Reads(next.Target, live) || next.Arguments.Where((_, i) => i >= next.Sources.Length || next.Sources[i] != piece.Register).Any(a => Reads(a, live))) return true;
+                        live &= ~Bytes(destination, types.Size(result.Type));
+                    }
+                    else if (ExprMap.Operands(statement).Any(e => Reads(e, live))) return true;
+                    if (live == 0) break;
+                }
+                if (live != 0)
+                    foreach (var successor in item.Block.NormalSuccessors) pending.Enqueue((successor, 0, live));
+            }
+            return false;
         }
     }
 }
