@@ -72,6 +72,8 @@ public static partial class AsyncLifting
             FoldDispatch();
             Simplify();
             Prune();
+            // 被删分支可能是协议字段副本的最后一个使用者。
+            Simplify();
             RemoveCopiedAwaiters();
             foreach (var site in sites)
                 if (Uses(site.Awaiter)) return Fail<ManagedBody>($"awaiter {site.Awaiter} 仍被使用" + (Environment.GetEnvironmentVariable("CPP2CS_EMIT_DEBUG") == "1"
@@ -378,6 +380,32 @@ public static partial class AsyncLifting
         /// <summary>两边去向相同的分支改成跳转；删去结果不再使用、没有副作用的赋值（IsCompleted 的结果、状态号的副本）。</summary>
         private void Simplify()
         {
+            bool Harmless(ManagedAssignment assignment) => Pure(assignment.Value) || inlineReads.Contains(assignment.Target.Variable);
+            // 协议调用消失后，异常路由标志可能只是在直线路径上反复赋值；被覆盖前不能有读取或可能抛出的操作。
+            bool Overwritten(ulong address, int index, Variable variable)
+            {
+                var seen = new HashSet<ulong>();
+                while (seen.Add(address))
+                {
+                    var statements = blocks[address];
+                    for (; index < statements.Count; index++)
+                    {
+                        var statement = statements[index];
+                        if (ManagedValues.Of(statement).Where(v => statement is not ManagedAssignment a || !ReferenceEquals(v, a.Target))
+                            .Concat(ManagedValues.CopiedValues(statement)).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => l.Variable == variable)) return false;
+                        if (statement is ManagedAssignment assignment)
+                        {
+                            if (assignment.Target.Variable == variable) return Harmless(assignment);
+                            if (Harmless(assignment)) continue;
+                        }
+                        if (statement is ManagedJump { Edge.Copies.Count: 0 } jump)
+                        { address = jump.Edge.Target; index = 0; break; }
+                        return false;
+                    }
+                    if (index >= statements.Count) return false;
+                }
+                return false;
+            }
             ulong Resolve(ulong target)
             {
                 var seen = new HashSet<ulong>();
@@ -391,6 +419,9 @@ public static partial class AsyncLifting
                 foreach (var address in order)
                 {
                     var statements = blocks[address];
+                    for (var i = 0; i < statements.Count; i++)
+                        if (statements[i] is ManagedAssignment { Value: ConstantValue } a && Overwritten(address, i + 1, a.Target.Variable))
+                        { statements.RemoveAt(i--); changed = true; }
                     if (statements.LastOrDefault() is ManagedBranch { Taken.Copies.Count: 0, Fallthrough.Copies.Count: 0 } b && Resolve(b.Taken.Target) == Resolve(b.Fallthrough.Target))
                     { statements[^1] = new ManagedJump(b.Address, b.Taken); changed = true; }
                 }
