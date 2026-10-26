@@ -61,7 +61,7 @@ public sealed partial class MethodRecovery
         private (Expr Array, Expr Index, ArrayRef Type, int Offset)? ArrayLocation(Expr address)
         {
             var (array, offset, rest) = Split(address);
-            if (array is null || TypeOfAddressBase(array) is not ArrayRef { IsVector: true } type || offset < RuntimeLayout.ArrayData) return null;
+            if (array is null || TypeOfAddressBase(array) is not ArrayRef { IsVector: true } type || rest.Count == 0 && offset < RuntimeLayout.ArrayData) return null;
             var size = types.Size(type.Element);
             if (size <= 0) return null;
             Expr? index = rest switch
@@ -74,8 +74,10 @@ public sealed partial class MethodRecovery
             };
             if (index is null) return null;
             var displacement = offset - RuntimeLayout.ArrayData;
-            if (displacement / size != 0) index = Fold.Simplify(new Binary(BinOp.Add, index, new Const((ulong)(displacement / size), index.Width), index.Width));
-            return (array, index, type, (int)(displacement % size));
+            var within = (displacement % size + size) % size;
+            var elements = (displacement - within) / size;
+            if (elements != 0) index = Fold.Simplify(new Binary(BinOp.Add, index, new Const(unchecked((ulong)elements), index.Width), index.Width));
+            return (array, index, type, (int)within);
         }
 
         private ManagedValue ArrayStructLocation(Expr array, Expr index, ArrayRef type, int offset, int width)
@@ -258,6 +260,7 @@ public sealed partial class MethodRecovery
             var seen = new HashSet<Variable>();
             Expr ExpandAddress(Expr e)
             {
+                if (e is Use cursor && arrayCursors.TryGetValue(cursor.Variable, out var address)) return ExpandAddress(address);
                 if (e is Use u && seen.Add(u.Variable) && values.TryGetValue(u.Variable, out var value))
                 {
                     if (value is Intrinsic { Name: "managed_field_address" or "managed_generic_buffer" }) return value;

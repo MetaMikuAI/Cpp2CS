@@ -24,7 +24,11 @@ public sealed partial class MethodRecovery
 
         /// <summary>先解析接收者及虚调用返回类型，避免帧区域只看见直调签名而提前固定错误的栈槽类型。</summary>
         [Analysis("帧前类型", 29, After = ["异常值", "栈上调用"])]
-        private void PrepareFrameTypes() => InferTypes();
+        private void PrepareFrameTypes()
+        {
+            InferTypes();
+            PrepareArrayCursors();
+        }
 
         /// <summary>只有精确调用签名提供类型；普通访存宽度不能定型。异型重叠先拒绝，嵌套字段见证合并到外根。</summary>
         [Analysis("帧区域", 30, After = ["异常值", "栈上调用", "帧前类型"])]
