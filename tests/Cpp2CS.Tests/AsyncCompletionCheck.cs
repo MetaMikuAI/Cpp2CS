@@ -42,6 +42,26 @@ internal static class AsyncCompletionCheck
         a.True(AsyncLifting.Lift(Kickoff(0), move, out _) is null, "普通参数仍可能为空，不能把它当作实例接收者");
         var overwritten = move with { Blocks = [new(0, [new ManagedStore(0, Capture(receiver), new ConstantValue(0, ownerType, 64)), check, finish, new ManagedReturn(5, null)])] };
         a.True(AsyncLifting.Lift(Kickoff(-1), overwritten, out _) is null, "捕获被重写时保留判空");
+        var integer = new PrimitiveRef("I4");
+        var seed = new LocalValue(new(Storage.Temp(20), 1), integer, 32);
+        var saved = new LocalValue(new(Storage.Temp(21), 1), integer, 32);
+        var first = new ManagedAssignment(20, saved, seed);
+        var replace = new ManagedAssignment(22, saved, new ConstantValue(7, integer, 32));
+        var finishValue = finish with { Invocation = finish.Invocation with { Arguments = [saved] } };
+        var failed = finish with { Address = 100, Invocation = finish.Invocation with { Method = new(Method(builder, "SetException"), [], []) } };
+        ManagedBody? LiftCopies(params ManagedStatement[] prefix) => AsyncLifting.Lift(Kickoff(-1), move with
+        {
+            Blocks = [new(0, [.. prefix, replace, finishValue, new ManagedReturn(25, null)]), new(100, [failed, new ManagedReturn(101, null)])],
+            Regions = [new([0], 100, [100], null, ManagedRegionKind.Catch)]
+        }, out _);
+        var pureCopies = LiftCopies(first);
+        a.True(pureCopies is not null && !pureCopies.Blocks.SelectMany(b => b.Statements).Contains(first), "被覆盖的局部纯复制可删除");
+        var effect = new ManagedCall(21, new(new(Method(owner, "Effect"), [], []), null, [], false), null, false);
+        a.True(LiftCopies(first, effect)?.Blocks.SelectMany(b => b.Statements).Contains(first) == true, "潜在抛出前的副本保留供异常路径使用");
+        var read = effect with { Invocation = effect.Invocation with { Arguments = [saved] } };
+        a.True(LiftCopies(first, read)?.Blocks.SelectMany(b => b.Statements).Contains(first) == true, "覆盖前已读取的副本不能删除");
+        var risky = first with { Value = new IndirectValue(new LocalValue(new(Storage.Temp(22), 1), new ByRefRef(integer), 64), integer) };
+        a.True(LiftCopies(risky)?.Blocks.SelectMany(b => b.Statements).Contains(risky) == true, "被覆盖的间接读取仍可能抛出，必须保留");
         return a.Finish("async-completion");
     }
 }

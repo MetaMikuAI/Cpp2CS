@@ -413,7 +413,7 @@ public static partial class AsyncLifting
         private void Simplify()
         {
             bool Harmless(ManagedAssignment assignment) => Pure(assignment.Value) || inlineReads.Contains(assignment.Target.Variable);
-            // 协议调用消失后，异常路由标志可能只是在直线路径上反复赋值；被覆盖前不能有读取或可能抛出的操作。
+            // 协议调用消失后，异常路由标志可能只是在直线路径上反复赋值；纯复制被覆盖前不能有读取或可能抛出的操作。
             bool Overwritten(ulong address, int index, Variable variable)
             {
                 var seen = new HashSet<ulong>();
@@ -438,12 +438,6 @@ public static partial class AsyncLifting
                 }
                 return false;
             }
-            ulong Resolve(ulong target)
-            {
-                var seen = new HashSet<ulong>();
-                while (seen.Add(target) && blocks.TryGetValue(target, out var s) && s is [ManagedJump { Edge.Copies.Count: 0 } j]) target = j.Edge.Target;
-                return target;
-            }
             bool changed;
             do
             {
@@ -452,9 +446,10 @@ public static partial class AsyncLifting
                 {
                     var statements = blocks[address];
                     for (var i = 0; i < statements.Count; i++)
-                        if (statements[i] is ManagedAssignment { Value: ConstantValue } a && Overwritten(address, i + 1, a.Target.Variable))
+                        if (statements[i] is ManagedAssignment a && Harmless(a) && Overwritten(address, i + 1, a.Target.Variable))
                         { statements.RemoveAt(i--); changed = true; }
-                    if (statements.LastOrDefault() is ManagedBranch { Taken.Copies.Count: 0, Fallthrough.Copies.Count: 0 } b && Resolve(b.Taken.Target) == Resolve(b.Fallthrough.Target))
+                    if (statements.LastOrDefault() is ManagedBranch b && Pure(b.Condition)
+                        && AsyncBranchCopies.Equivalent(b.Taken, b.Fallthrough, blocks, Pure))
                     { statements[^1] = new ManagedJump(b.Address, b.Taken); changed = true; }
                 }
                 var used = blocks.Values.SelectMany(s => s).SelectMany(s => ManagedValues.Of(s).Where(v => s is not ManagedAssignment a || !ReferenceEquals(v, a.Target))
