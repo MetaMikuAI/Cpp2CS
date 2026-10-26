@@ -104,7 +104,11 @@ public sealed partial class MethodRecovery
                 var current = new HashSet<TypeRef?>(state);
                 foreach (var statement in block.Statements)
                 {
-                    record?.Add(statement, new(current));
+                    if (record is not null)
+                    {
+                        if (record.TryGetValue(statement, out var previous)) previous.UnionWith(current);
+                        else record.Add(statement, new(current));
+                    }
                     if (defining.TryGetValue(statement, out var type)) current = [type[0]];
                 }
                 return current;

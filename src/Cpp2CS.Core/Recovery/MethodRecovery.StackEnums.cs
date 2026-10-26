@@ -94,9 +94,9 @@ public sealed partial class MethodRecovery
                 if (writes.Count != block.Predecessors.Count) continue;
                 var inputs = writes.Select(_ => new Variable(Storage.Temp(next++), 1)).ToArray();
                 for (var i = 0; i < writes.Count; i++)
-                    block.Predecessors[i].Statements.Insert(block.Predecessors[i].Statements.IndexOf(writes[i]), new Define(writes[i].Address, inputs[i], writes[i].Value));
+                    InsertAnalysisStatement(block.Predecessors[i], block.Predecessors[i].Statements.IndexOf(writes[i]), new Define(writes[i].Address, inputs[i], writes[i].Value));
                 var result = new Variable(Storage.Temp(next++), 1);
-                block.Statements.Insert(0, new Phi(block.Start, result, inputs));
+                InsertAnalysisStatement(block, 0, new Phi(block.Start, result, inputs));
                 candidates[call] = new(type, new Use(result, types.Bits(type)), offset, [klass, monitor, .. writes]);
                 resolved[call] = (callee, Pinned);
             }

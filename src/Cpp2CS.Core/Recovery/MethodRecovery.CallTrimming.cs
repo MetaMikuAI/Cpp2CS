@@ -36,7 +36,7 @@ public sealed partial class MethodRecovery
                     block.Statements[i] = call with { Arguments = keep.Select(k => call.Arguments[k]).ToArray(), Sources = keep.Select(k => call.Sources[k]).ToArray() };
                     changed = true;
                 }
-            if (changed) Propagate.RemoveDead(function);
+            if (changed) RemoveDeadDefinitions();
         }
 
         private bool IsWriteBarrier(Call call) => call.Op?.Kind == OpKind.WriteBarrier

@@ -52,7 +52,7 @@ public sealed partial class MethodRecovery
                 changed = true;
             }
             if (!changed) return;
-            Ssa.Propagate.RemoveDead(function);
+            RemoveDeadDefinitions();
             definitions = IndexDefinitions();
         }
 

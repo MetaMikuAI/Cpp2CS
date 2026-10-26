@@ -56,6 +56,7 @@ public sealed partial class BodyEmitter
         {
             case ArgumentValue a when a.Index >= 0: il.Emit(OpCodes.Ldarga, destination.Parameters[a.Index]); break;
             case LocalValue l: il.Emit(OpCodes.Ldloca, Local(l)); break;
+            case IndirectValue indirect: Value(indirect.Address); break;
             case FieldValue f: Value(f.Receiver); il.Emit(OpCodes.Ldflda, FieldReference(f.Field)); break;
             case StaticFieldValue s: il.Emit(OpCodes.Ldsflda, FieldReference(s.Field)); break;
             default: throw new NotSupportedException($"没有可取地址的存储位置：{value}");

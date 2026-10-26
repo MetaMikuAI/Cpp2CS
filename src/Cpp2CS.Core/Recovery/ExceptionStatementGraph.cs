@@ -8,8 +8,8 @@ public sealed class ExceptionFragment(int id, Block block, int first, int limit)
 {
     public int Id { get; } = id;
     public Block Block { get; } = block;
-    public int First { get; } = first;
-    public int Limit { get; } = limit;
+    public int First { get; internal set; } = first;
+    public int Limit { get; internal set; } = limit;
     public IEnumerable<Stmt> Statements => Block.Statements.Skip(First).Take(Limit - First);
     public List<ExceptionFragment> Normal { get; } = [];
     public ExceptionFragment? Exceptional { get; internal set; }

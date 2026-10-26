@@ -19,6 +19,39 @@ public sealed partial class MethodRecovery
         private bool collectingExceptionDemand;
         private static ulong FragmentLabel(ExceptionFragment fragment) => 0xf500000000000000UL + (uint)fragment.Id;
 
+        /// <summary>删除纯定义后按保留语句重映射异常片段；调用及控制流边不变。</summary>
+        private void RemoveDeadDefinitions()
+        {
+            var previous = exceptionLayout is { Succeeded: true } layout
+                ? layout.Graph.Fragments.Select(f => f.Block).Distinct().ToDictionary(b => b, b => b.Statements.ToArray()) : null;
+            Ssa.Propagate.RemoveDead(function);
+            if (previous is null) return;
+            foreach (var group in exceptionLayout!.Graph.Fragments.GroupBy(f => f.Block))
+            {
+                var retained = group.Key.Statements.ToHashSet(ReferenceEqualityComparer.Instance);
+                var old = previous[group.Key];
+                var positions = new int[old.Length + 1];
+                for (var i = 0; i < old.Length; i++) positions[i + 1] = positions[i] + (retained.Contains(old[i]) ? 1 : 0);
+                foreach (var fragment in group)
+                {
+                    fragment.First = positions[fragment.First];
+                    fragment.Limit = positions[fragment.Limit];
+                }
+            }
+        }
+
+        /// <summary>插入的定义属于随后语句所在片段；同步其余片段的半开区间。</summary>
+        private void InsertAnalysisStatement(Block block, int index, Stmt statement)
+        {
+            if (exceptionLayout is { Succeeded: true } layout)
+                foreach (var fragment in layout.Graph.Fragments.Where(f => f.Block == block))
+                {
+                    if (fragment.First > index) fragment.First++;
+                    if (fragment.Limit > index) fragment.Limit++;
+                }
+            block.Statements.Insert(index, statement);
+        }
+
         private bool PrepareExceptionRegions()
         {
             exceptionLayout = ExceptionRegionBuilder.Build(facts, function);
@@ -281,8 +314,12 @@ public sealed partial class MethodRecovery
             var storage = phi.Target.Storage;
             if (storage.Bank != Bank.Stack && (storage.Bank != Bank.Gpr || storage.Index == 30 || !CalleeSaved.Contains(storage))) return null;
             var dead = function.Dead.Where(d => d.Define.Target.Storage == storage).ToLookup(d => d.Block, d => d.Define);
+            var reaching = new Dictionary<(Block Block, int End, ulong Boundary), Variable?>();
+            var cycles = 0;
             Variable? Reaching(Block block, int end, ulong boundary, HashSet<Block> active)
             {
+                var key = (block, end, boundary);
+                if (reaching.TryGetValue(key, out var cached)) return cached;
                 var removed = dead[block].Where(d => d.Address < boundary).MaxBy(d => d.Address);
                 for (var i = end - 1; i >= 0; i--)
                 {
@@ -294,10 +331,19 @@ public sealed partial class MethodRecovery
                 }
                 if (removed is not null) return removed.Target;
                 if (block == function.EntryBlock) return new(storage, 0);
-                if (!active.Add(block)) return null;
-                var incoming = block.Predecessors.Distinct().Select(p => Reaching(p, p.Statements.Count, ulong.MaxValue, active)).Distinct().ToArray();
+                if (!active.Add(block)) { cycles++; return null; }
+                var before = cycles;
+                Variable? reached = null;
+                foreach (var parent in block.Predecessors.Distinct())
+                {
+                    var incoming = Reaching(parent, parent.Statements.Count, ulong.MaxValue, active);
+                    if (incoming is null || reached is not null && reached != incoming) { reached = null; break; }
+                    reached = incoming;
+                }
                 active.Remove(block);
-                return incoming is [var same] ? same : null;
+                // 环上的拒绝依赖当前递归路径；只复用没有遇到回边的结果。
+                if (cycles == before) reaching[key] = reached;
+                return reached;
             }
             Expr Value(Variable variable)
             {

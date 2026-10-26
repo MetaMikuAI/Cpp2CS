@@ -9,7 +9,7 @@ public sealed partial class MethodRecovery
         // ABI 聚合参数被认回后，其原始寄存器复制可能已无使用；尤其不能写出 null 的托管 ref 局部。
         private static ManagedBody DropUnusedRegisterCopies(ManagedBody body)
         {
-            bool Pure(ManagedValue value) => ManagedValues.Walk(value).All(v => v is ConstantValue or LocalValue or ArgumentValue or ConversionValue
+            bool Pure(ManagedValue value) => WalkRecoveryValue(value).All(v => v is ConstantValue or LocalValue or ArgumentValue or ConversionValue
                 or AddressValue { Target: LocalValue });
             while (true)
             {
@@ -18,7 +18,7 @@ public sealed partial class MethodRecovery
                     ManagedAssignment a => new[] { a.Value },
                     _ => ManagedValues.Of(s),
                 }).Concat(body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.CopiedValues))
-                    .SelectMany(ManagedValues.Walk).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
+                    .SelectMany(WalkRecoveryValue).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
                 var changed = false;
                 bool Keep(LocalValue target, ManagedValue value)
                 {
