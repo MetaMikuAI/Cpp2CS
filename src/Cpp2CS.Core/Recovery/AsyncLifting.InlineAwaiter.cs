@@ -64,17 +64,20 @@ public static partial class AsyncLifting
             {
                 var statements = blocks[address];
                 if (statements.LastOrDefault() is not ManagedBranch
-                    { Condition: ComparisonValue { Condition: Cond.Eq or Cond.Ne } comparison, Taken.Copies.Count: 0, Fallthrough.Copies.Count: 0 } branch) continue;
+                    { Condition: ComparisonValue { Condition: Cond.Eq or Cond.Ne } comparison } branch) continue;
                 if (!(Member(comparison.Left, "source") && comparison.Right is ConstantValue { Bits: 0 }
                     || Member(comparison.Right, "source") && comparison.Left is ConstantValue { Bits: 0 })) continue;
                 var empty = comparison.Condition == Cond.Eq ? branch.Taken : branch.Fallthrough;
                 var present = comparison.Condition == Cond.Eq ? branch.Fallthrough : branch.Taken;
-                if (FoldInlineResult(held, branch, statements, empty, present, definitions, Member, SourceCall, SkipJumps)) continue;
+                if (empty.Copies.Count == 0 && present.Copies.Count == 0
+                    && FoldInlineResult(held, branch, statements, empty, present, definitions, Member, SourceCall, SkipJumps)) continue;
+                if (present.Copies.Count != 0) continue;
                 var current = present.Target;
                 var seen = new HashSet<ulong>();
                 ManagedCall? getResult = null;
                 ulong callBlock = 0;
                 var valid = true;
+                IReadOnlyList<ManagedCopy> exitCopies = [];
                 while (SkipJumps(current) != SkipJumps(empty.Target) && seen.Add(current))
                 {
                     var path = blocks[current];
@@ -85,10 +88,12 @@ public static partial class AsyncLifting
                         { getResult = call; callBlock = current; continue; }
                         valid = false;
                     }
-                    if (!valid || path.LastOrDefault() is not ManagedJump { Edge.Copies.Count: 0 } jump) { valid = false; break; }
+                    if (!valid || path.LastOrDefault() is not ManagedJump jump
+                        || jump.Edge.Copies.Count != 0 && SkipJumps(jump.Edge.Target) != SkipJumps(empty.Target)) { valid = false; break; }
+                    exitCopies = jump.Edge.Copies;
                     current = jump.Edge.Target;
                 }
-                if (!valid || getResult is null || SkipJumps(current) != SkipJumps(empty.Target)) continue;
+                if (!valid || getResult is null || SkipJumps(current) != SkipJumps(empty.Target) || !exitCopies.SequenceEqual(empty.Copies)) continue;
                 statements[^1] = new ManagedJump(branch.Address, present);
                 var index = blocks[callBlock].IndexOf(getResult);
                 blocks[callBlock][index] = new ManagedAwait(getResult.Address, held, null);

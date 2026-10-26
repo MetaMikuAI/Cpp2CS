@@ -40,6 +40,42 @@ internal static class SourceStructCopies
             var statements = block.Statements.ToList();
             for (var i = 0; i < statements.Count; i++)
             {
+                if (statements[i] is not ManagedAssignment { Value: FieldValue field } first
+                    || Local(field.Receiver) is not { Type: DefinitionRef { Definition: { IsValueType: true, IsEnum: false } definition } } source) continue;
+                var fields = definition.Fields.Where(f => !f.IsStatic).ToHashSet();
+                var reads = statements.Skip(i).Take(fields.Count).OfType<ManagedAssignment>().ToArray();
+                if (fields.Count < 2 || reads.Length != fields.Count || reads.Any(r => r.Value is not FieldValue f || Local(f.Receiver) != source)
+                    || !reads.Select(r => ((FieldValue)r.Value).Field.Field).ToHashSet().SetEquals(fields)
+                    || reads.Select(r => r.Target.Variable).Distinct().Count() != fields.Count) continue;
+                var snapshots = reads.ToDictionary(r => r.Target.Variable, r => (FieldValue)r.Value);
+                var destinations = new Dictionary<LocalValue, HashSet<FieldDef>>();
+                var initialized = new HashSet<LocalValue>();
+                var consumed = new Dictionary<Cpp2CS.Ir.Variable, int>();
+                var end = i + reads.Length;
+                while (end < statements.Count)
+                {
+                    if (statements[end] is ManagedStore { Target: IndirectValue { Address: AddressValue { Target: LocalValue zero } }, Value: ComposedValue { Leaves.Count: 0 } }
+                        && zero.Type.Equals(source.Type) && zero != source && !destinations.ContainsKey(zero)) initialized.Add(zero);
+                    else if (statements[end] is ManagedStore { Target: FieldValue target, Value: LocalValue value }
+                        && Local(target.Receiver) is { } destination && destination != source && destination.Type.Equals(source.Type)
+                        && snapshots.TryGetValue(value.Variable, out var read) && target.Field.Equals(read.Field))
+                    {
+                        if (!destinations.TryGetValue(destination, out var copied)) destinations[destination] = copied = [];
+                        if (!copied.Add(target.Field.Field)) break;
+                        consumed[value.Variable] = consumed.GetValueOrDefault(value.Variable) + 1;
+                    }
+                    else break;
+                    end++;
+                }
+                // 同一快照可写入多个临时结构体；每个目标都须完整覆盖，字段快照不得流出复制区。
+                if (destinations.Count == 0 || initialized.Any(d => !destinations.ContainsKey(d)) || destinations.Values.Any(f => !f.SetEquals(fields))
+                    || snapshots.Keys.Any(v => consumed.GetValueOrDefault(v) != uses.GetValueOrDefault(v))) continue;
+                statements.RemoveRange(i, end - i);
+                statements.InsertRange(i, destinations.Keys.Select(d => new ManagedAssignment(first.Address, d, source)));
+                i += destinations.Count - 1;
+            }
+            for (var i = 0; i < statements.Count; i++)
+            {
                 if (statements[i] is not ManagedAssignment { Value: FieldValue { Accessor: null } field } first
                     || Local(field.Receiver) is not { Type: DefinitionRef { Definition: { IsValueType: true, IsEnum: false } definition } } source) continue;
                 var fields = definition.Fields.Where(f => !f.IsStatic).ToHashSet();

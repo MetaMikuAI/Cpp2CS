@@ -32,6 +32,13 @@ internal static partial class SourceListCalls
             }
             bool IsField(ManagedValue value, string name) => value is FieldValue f && f.Receiver.Equals(receiver)
                 && f.Field.DeclaringType.Equals(owner) && f.Field.Field.Name == name;
+            // 循环退出判断已经读过 Count，紧接着 Clear 可复用这个旧长度；两者之间没有写入或调用。
+            if (start == 0 && flow.Predecessors.GetValueOrDefault(block.Address) == 1)
+                foreach (var previous in body.Blocks)
+                    if (flow.SameRegion(previous.Address, block.Address)
+                        && previous.Statements is [ManagedAssignment snapshot, ManagedBranch guard]
+                        && ManagedValues.Edges(guard).Any(e => e.Target == block.Address && e.Copies.Count == 0)
+                        && IsField(snapshot.Value, "_size")) values[snapshot.Target.Variable] = snapshot.Value;
             bool ReadsChanged(ManagedValue value) => ManagedValues.Walk(value).OfType<FieldValue>()
                 .Any(f => zeroed && IsField(f, "_size") || versioned && IsField(f, "_version"));
             bool Assign(ManagedAssignment assignment)
@@ -96,7 +103,7 @@ internal static partial class SourceListCalls
             remove.Add(arrayClear); remove.Add(branch);
             if (body.Blocks.SelectMany(b => b.Statements).Where(s => !remove.Contains(s))
                 .SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
-                .OfType<LocalValue>().Any(l => values.ContainsKey(l.Variable))) continue;
+                .OfType<LocalValue>().Any(l => remove.OfType<ManagedAssignment>().Any(a => a.Target.Variable == l.Variable))) continue;
             var method = new MethodRef(clear, owner.Arguments, []);
             if (!ManagedAccess.Method(types, body.Method.Method.Owner, method, receiver.Type)) continue;
             var call = new ManagedCall(first.Address, new ManagedInvocation(method, receiver, [], true), null, false);

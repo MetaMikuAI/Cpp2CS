@@ -5,12 +5,11 @@ namespace Cpp2CS.Output;
 
 public static partial class Decompilation
 {
-    /// <summary>迭代器字段提升后，先合并闭包引用副本，避免闭包展开将同一对象拆成不同捕获。</summary>
+    /// <summary>合并单次赋值的闭包引用副本，避免闭包展开将同一对象拆成不同捕获。</summary>
     private sealed class IteratorCopies : IILTransform
     {
         public void Run(ILFunction function, ILTransformContext context)
         {
-            if (!function.IsIterator) return;
             bool changed;
             do
             {

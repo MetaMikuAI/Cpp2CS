@@ -38,6 +38,8 @@ public static partial class Decompilation
         decompiler.AstTransforms.Add(new WritableUnboxing());
         decompiler.AstTransforms.Add(new TupleInitializers());
         decompiler.AstTransforms.Add(new AsyncMarkers());
+        decompiler.AstTransforms.Add(new RecoveredForeach());
+        decompiler.AstTransforms.Add(new CompilerScaffolding());
         return decompiler;
     }
 

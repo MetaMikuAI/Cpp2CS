@@ -29,6 +29,15 @@ internal static partial class SourceListCalls
         }
         public bool SameRegion(ulong a, ulong b) => body.Regions.All(r => r.Try.Contains(a) == r.Try.Contains(b) && r.Handler.Contains(a) == r.Handler.Contains(b));
 
+        public ManagedStatement? Exit(ManagedStatement? statement)
+        {
+            var seen = new HashSet<ulong>();
+            while (statement is ManagedJump { Edge.Copies.Count: 0 } jump && seen.Add(jump.Edge.Target)
+                && blocks.TryGetValue(jump.Edge.Target, out var block)
+                && block.Statements is [ManagedJump { Edge.Copies.Count: 0 } next]) statement = next;
+            return statement;
+        }
+
         // 只穿过单入口直线块，不跨异常边界；共享后继保留为退出边。
         public IEnumerable<ManagedStatement> Straight(ulong entry, int start, ulong region)
         {
@@ -136,7 +145,7 @@ internal static partial class SourceListCalls
                 || invocation.Method.Method.Name != "AddWithResize" || !invocation.Method.DeclaringType.Equals(owner)
                 || !Equals(invocation.Receiver, receiver) || !invocation.Arguments[0].Equals(item)) continue;
             var slowExit = resize.Tail ? new ManagedReturn(resize.Address, null) : slow.MoveNext() ? slow.Current : null;
-            if (!SameExit(fastExit, slowExit)) continue;
+            if (!SameExit(flow.Exit(fastExit), flow.Exit(slowExit))) continue;
             remove.Add(size); remove.Add(write); remove.Add(resize); remove.Add(branch);
             if (body.Blocks.SelectMany(b => b.Statements).Where(s => !remove.Contains(s))
                 .SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)

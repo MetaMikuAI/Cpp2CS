@@ -47,6 +47,17 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
         if (value is not ComposedValue aggregate || aggregate.Leaves.Count == 0) return value;
         var expected = Leaves(aggregate.Type).ToArray();
         if (expected.Length != aggregate.Leaves.Count || expected.Any(e => !aggregate.Leaves.Any(l => l.Path.SequenceEqual(e.Path)))) return value;
+        ManagedValue? Whole(ManagedValue leaf, IReadOnlyList<FieldRef> path)
+        {
+            foreach (var field in path.Reverse())
+            {
+                if (leaf is not FieldValue component || !component.Field.Equals(field)) return null;
+                leaf = component.Receiver is AddressValue address ? address.Target : component.Receiver;
+            }
+            return leaf;
+        }
+        var whole = aggregate.Leaves.Select(l => Whole(l.Value, l.Path)).ToArray();
+        if (whole[0] is { } common && common.Type.Equals(aggregate.Type) && whole.All(v => Equals(v, common))) return common;
         var roots = aggregate.Leaves.Select(l => (l, p: Path(l.Value))).ToArray();
         if (!roots.All(p => p.p.Root.Equals(roots[0].p.Root) && p.p.Path.SequenceEqual(p.l.Path))) return value;
         var root = roots[0].p.Root;
@@ -107,6 +118,7 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
     {
         body = SourceListCalls.Rewrite(body, types, (site, method) =>
             Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{site:x}\t{body.Method}\t{method}"));
+        body = RewriteFieldCalls(body);
         var caller = body.Method.Method.Owner;
         body = AccessorRewriter.Rewrite(body, (value, write) =>
         {

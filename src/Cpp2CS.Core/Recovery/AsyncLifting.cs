@@ -63,6 +63,9 @@ public static partial class AsyncLifting
             foreach (var site in sites) if (!Redirect(site.Entry, site.Join)) return null;
             if (!RemoveTemplate(sites.Count == 0)) return null;
             Prune();
+            FoldDispatch();
+            Simplify();
+            Prune();
             FoldTaskCopies();
             foreach (var awaiter in sites.Select(s => s.Awaiter).Distinct()) if (!Await(awaiter)) return null;
             // IsCompleted 已换成常量 true：挂起判断随之折叠。
@@ -71,7 +74,9 @@ public static partial class AsyncLifting
             Prune();
             RemoveCopiedAwaiters();
             foreach (var site in sites)
-                if (Uses(site.Awaiter)) return Fail<ManagedBody>($"awaiter {site.Awaiter} 仍被使用");
+                if (Uses(site.Awaiter)) return Fail<ManagedBody>($"awaiter {site.Awaiter} 仍被使用" + (Environment.GetEnvironmentVariable("CPP2CS_EMIT_DEBUG") == "1"
+                    ? "：" + string.Join(" | ", blocks.Values.SelectMany(s => s).Where(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))
+                        .SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => l.Variable == site.Awaiter))) : ""));
             var lifted = MapFields(arguments);
             if (Reason.Length > 0) return null;
             var body = new ManagedBody(kickoff.Method, order.Select(a => new ManagedBlock(a, lifted[a])).ToArray()) { Regions = regions };
@@ -115,7 +120,8 @@ public static partial class AsyncLifting
         /// <summary>SSA 局部变量只赋值一次：值由状态字段（初始 -1）与常量决定的分支、switch 折叠成跳转。</summary>
         private void FoldDispatch()
         {
-            var known = new Dictionary<Variable, ulong>();
+            var known = ConstantCopies();
+            var copies = new Dictionary<Variable, ulong>(known);
             var assignments = blocks.Values.SelectMany(s => s).OfType<ManagedAssignment>().GroupBy(a => a.Target.Variable).Where(g => g.Count() == 1).Select(g => g.Single()).ToArray();
             bool changed;
             do
@@ -128,12 +134,17 @@ public static partial class AsyncLifting
             {
                 var statements = blocks[address];
                 for (var i = 0; i < statements.Count; i++)
-                    statements[i] = statements[i] switch
+                {
+                    ManagedValue Value(ManagedValue value) => value is AddressValue ? value
+                        : value is LocalValue local && copies.TryGetValue(local.Variable, out var constant)
+                            ? new ConstantValue(constant & Mask(local.Width), local.Type, local.Width) : ManagedValues.Map(value, Value);
+                    statements[i] = ManagedValues.Map(statements[i], Value, target => target) switch
                     {
                         ManagedBranch b when Eval(b.Condition, known) is { } x => new ManagedJump(b.Address, x != 0 ? b.Taken : b.Fallthrough),
                         ManagedSwitch w when Eval(w.Index, known) is { } x && x < (ulong)w.Cases.Count => new ManagedJump(w.Address, w.Cases[(int)x]),
                         var s => s,
                     };
+                }
             }
         }
 
@@ -386,8 +397,17 @@ public static partial class AsyncLifting
                 var used = blocks.Values.SelectMany(s => s).SelectMany(s => ManagedValues.Of(s).Where(v => s is not ManagedAssignment a || !ReferenceEquals(v, a.Target))
                     .Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
                 foreach (var statements in blocks.Values)
+                {
                     changed |= statements.RemoveAll(s => s is ManagedAssignment a && !used.Contains(a.Target.Variable)
                         && (Pure(a.Value) || inlineReads.Contains(a.Target.Variable))) > 0;
+                    for (var i = 0; i < statements.Count; i++)
+                        statements[i] = ManagedValues.MapEdges(statements[i], edge =>
+                        {
+                            var copies = edge.Copies.Where(c => used.Contains(c.Target.Variable) || !Pure(c.Value)).ToArray();
+                            changed |= copies.Length != edge.Copies.Count;
+                            return edge with { Copies = copies };
+                        });
+                }
             } while (changed);
         }
 
