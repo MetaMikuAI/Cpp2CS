@@ -238,12 +238,13 @@ public sealed partial class MethodRecovery
 
         /// <summary>
         /// 异常边的 phi 在可能抛出前快照。空桥逐级代入来源；普通边索引只用于原图实际存在的边。
-        /// L2 消掉的异常边只有 phi 全部来源相同时才可恢复，否则保留洞，不猜寄存器版本。
+        /// L2 消掉的异常边从原生存储的到达赋值取值；被传播删去的复制定义仍是赋值证据。
         /// </summary>
         private void ExceptionCopies(ExceptionEntryPath path, List<ManagedStatement> statements)
         {
             var aliases = new Dictionary<Variable, Variable>();
             var from = path.Source.Block;
+            var previousFragment = path.Source;
             var copies = new List<ManagedCopy>();
             foreach (var fragment in path.Bridges.Append(path.Entry))
             {
@@ -255,7 +256,8 @@ public sealed partial class MethodRecovery
                     if (runtime.Contains(phi.Target) || exceptionValues.ContainsKey(phi.Target) || !exceptionDemand.Contains(phi.Target)) continue;
                     var sources = phi.Sources.Distinct().ToArray();
                     var source = incoming >= 0 ? phi.Sources[incoming] : sources.Length == 1 ? sources[0]
-                        : throw Fail(phi.Address, $"异常区域 异常边 φ 来源未证成 {phi.Target} site=0x{path.Source.NativeExceptionSite:x}");
+                        : ExceptionReachingSource(previousFragment, phi, previousFragment == path.Source)
+                            ?? throw Fail(phi.Address, $"异常区域 异常边 φ 来源未证成 {phi.Target} site=0x{path.Source.NativeExceptionSite:x}");
                     var seen = new HashSet<Variable>();
                     while (aliases.TryGetValue(source, out var previous) && seen.Add(source)) source = previous;
                     aliases[phi.Target] = source;
@@ -265,11 +267,55 @@ public sealed partial class MethodRecovery
                     copies.Add(new(target, Coerce(value, target.Type, phi.Address)));
                 }
                 from = fragment.Block;
+                previousFragment = fragment;
             }
             // 并行复制不能因目的地与另一个来源重叠而改变值。
             var saved = copies.Select(c => (c.Target, Value: c.Value, Temp: StructLocal(c.Target.Type, c.Target.Width))).ToArray();
             foreach (var c in saved) statements.Add(new ManagedAssignment(path.Source.NativeExceptionSite ?? from.Start, c.Temp, c.Value));
             foreach (var c in saved) statements.Add(new ManagedAssignment(path.Source.NativeExceptionSite ?? from.Start, c.Target, c.Temp));
+        }
+
+        /// <summary>仅追溯调用不会破坏的寄存器和已提升栈槽；不同前驱必须给出同一版本，不补猜缺失的赋值。</summary>
+        private Variable? ExceptionReachingSource(ExceptionFragment from, Phi phi, bool beforeCall)
+        {
+            var storage = phi.Target.Storage;
+            if (storage.Bank != Bank.Stack && (storage.Bank != Bank.Gpr || storage.Index == 30 || !CalleeSaved.Contains(storage))) return null;
+            var dead = function.Dead.Where(d => d.Define.Target.Storage == storage).ToLookup(d => d.Block, d => d.Define);
+            Variable? Reaching(Block block, int end, ulong boundary, HashSet<Block> active)
+            {
+                var removed = dead[block].Where(d => d.Address < boundary).MaxBy(d => d.Address);
+                for (var i = end - 1; i >= 0; i--)
+                {
+                    var statement = block.Statements[i];
+                    if (removed is not null && removed.Address > statement.Address) return removed.Target;
+                    if (statement is Define define && define.Target.Storage == storage) return define.Target;
+                    if (statement is Phi merged && merged.Target.Storage == storage) return merged.Target;
+                    if (statement is Call call && call.Defines.FirstOrDefault(v => v?.Storage == storage) is { } result) return result;
+                }
+                if (removed is not null) return removed.Target;
+                if (block == function.EntryBlock) return new(storage, 0);
+                if (!active.Add(block)) return null;
+                var incoming = block.Predecessors.Distinct().Select(p => Reaching(p, p.Statements.Count, ulong.MaxValue, active)).Distinct().ToArray();
+                active.Remove(block);
+                return incoming is [var same] ? same : null;
+            }
+            Expr Value(Variable variable)
+            {
+                var seen = new HashSet<Variable>();
+                while (seen.Add(variable))
+                {
+                    var value = values.GetValueOrDefault(variable) ?? function.Dead.FirstOrDefault(d => d.Define.Target == variable).Define?.Value;
+                    if (value is Const constant) return constant;
+                    if (value is not Use use || use.Width != variable.Width) break;
+                    variable = use.Variable;
+                }
+                return new Use(variable, variable.Width);
+            }
+            var end = beforeCall ? from.First : from.Limit;
+            var boundary = end < from.Block.Statements.Count ? from.Block.Statements[end].Address : ulong.MaxValue;
+            if (Reaching(from.Block, end, boundary, []) is not { } reached) return null;
+            var expression = Value(reached);
+            return phi.Sources.FirstOrDefault(source => Value(source) == expression);
         }
         /// <summary>异常筛选的类型判断：catch 的 IsAssignableFrom 写成 isinst 比较，结果补零到 64 位。</summary>
         [CallRule(20)]
