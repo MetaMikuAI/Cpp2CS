@@ -222,7 +222,7 @@ public sealed partial class MethodRecovery
                         ? new ManagedHole(s.Address, "结构体 片未拆回叶子", s is ManagedJump or ManagedBranch or ManagedSwitch or ManagedReturn or ManagedCall { Tail: true }) : s).ToArray() }).ToArray() };
                     if (body.Blocks.SelectMany(b => b.Statements).FirstOrDefault(Leftover) is { } leftover) throw Fail(leftover.Address, "结构体 片未拆回叶子");
                     foreach (var proof in Registry.Proofs) proof(this, body);
-                    if (ledger.Count == 0) return new(method, entry, body, ledger.Holes);
+                    if (ledger.Count == 0) return new(method, entry, owner.RestoreBaseConstructor(body), ledger.Holes);
                     ledger.Finish();
                 }
             }
