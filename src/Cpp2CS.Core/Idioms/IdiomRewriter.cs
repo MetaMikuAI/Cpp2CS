@@ -767,6 +767,21 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 var changed = false;
                 Expr? Map(Expr e)
                 {
+                    // FieldInfo 表按声明顺序排列，每项包含 name/type/parent/offset/token，共 32 字节。
+                    if (e is Load { Width: 64, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: DefinitionRef fieldOwner }, Right: Const { Value: RuntimeLayout.ClassFields } } }
+                        && fieldOwner.Definition.Fields.Count > 0)
+                    {
+                        changed = true;
+                        return new Symbol(SymbolKind.Field, new FieldRef(fieldOwner.Definition.Fields[0], fieldOwner));
+                    }
+                    if (e is Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Field, Value: FieldRef field }, Right: Const fieldOffset }
+                        && field.DeclaringType is DefinitionRef fieldType && fieldOffset.Value % RuntimeLayout.FieldInfoSize == 0
+                        && fieldType.Definition.Fields.ToList().IndexOf(field.Field) + (long)fieldOffset.Value / RuntimeLayout.FieldInfoSize is var fieldIndex
+                        && fieldIndex >= 0 && fieldIndex < fieldType.Definition.Fields.Count)
+                    {
+                        changed = true;
+                        return new Symbol(SymbolKind.Field, new FieldRef(fieldType.Definition.Fields[(int)fieldIndex], fieldType));
+                    }
                     // RGCTX 已解析为元数据表后，判空只决定运行时的延迟初始化；托管体使用初始化后的表。
                     if (e is Compare { Cond: Cond.Eq or Cond.Ne, Left: Symbol { Kind: SymbolKind.Rgctx, Value: RgctxTable guardTable }, Right: Const { Value: 0 } } guard
                         && facts.Registrations.Rgctx.TryGetValue((guardTable.Image, guardTable.Token), out var entries) && entries.Length > 0)

@@ -80,6 +80,13 @@ internal static class RecoverCommand
         if (selected.GroupBy(t => t.Instance.Method).Any(g => g.Count() > 1))
             throw new InvalidDataException("同一方法定义只能选择一个原生入口，不能以多个实例体覆盖同一 CIL 方法");
         var methods = selected.Select(t => t.Instance.Method).ToArray();
+        var selectedDefinitions = methods.ToHashSet();
+        var selectedTypes = methods.Select(m => Top(m.Owner)).ToHashSet();
+        var nativeEntries = facts.Model.Code.SelectMany(p => p.Value.Select(o => (Method: o.Method.Method, Entry: p.Key)))
+            .Where(p => selectedTypes.Contains(Top(p.Method.Owner))).GroupBy(p => p.Method)
+            .ToDictionary(g => g.Key, g => g.Select(p => p.Entry).Distinct().Order().ToArray());
+        var unselected = facts.Model.Methods.Where(m => selectedTypes.Contains(Top(m.Owner)) && !selectedDefinitions.Contains(m))
+            .OrderBy(m => m.Index).ToArray();
 
         var watch = Stopwatch.StartNew();
         // 单线程：FieldLayouts 的缓存不是线程安全的
@@ -123,6 +130,8 @@ internal static class RecoverCommand
         Console.Error.WriteLine($"CIL {watch.Elapsed.TotalSeconds:F1} s");
 
         Directory.CreateDirectory(output);
+        File.WriteAllLines(Path.Combine(output, "unselected-methods.tsv"), new[] { "method\tdefinition_index\tkind\tnative_entries" }.Concat(unselected.Select(m =>
+            $"{MethodRef.Open(m)}\t{m.Index}\t{(m.IsAbstract ? "abstract" : nativeEntries.ContainsKey(m) ? "native-omitted" : "no-native-entry")}\t{string.Join(",", nativeEntries.GetValueOrDefault(m, []).Select(e => $"0x{e:x}"))}")));
         AutoPropertyManifest.Write(output, closure, rejectedAccessors);
         File.WriteAllLines(Path.Combine(output, "stack-methodinfo.tsv"),
             new[] { "entry\tsite\tstore\tsp\tslot\tmethod" }.Concat(recovery.StackCalls.OrderBy(c => c.Site)
@@ -149,6 +158,7 @@ internal static class RecoverCommand
         var targetResults = targets.ToHashSet();
         var report = Report(targets, emitted.Where(targetResults.Contains).ToList(), emitProblems.Where(p => targetResults.Contains(p.Key)).ToDictionary(),
             targets.Select(r => r.Entry).Distinct().ToDictionary(e => e, e => bytes[e]));
+        report.AppendLine($"范围审计：所选顶层类型（含嵌套类型）还有 {unselected.Count(m => nativeEntries.ContainsKey(m))} 个有原生入口的方法未入清单；详见 unselected-methods.tsv。上述比例仅代表所选方法，不能作为整个类的恢复率。");
         report.AppendLine($"F9 依赖访问器：{closure.Dependencies.Count}，已写出 {emitted.Count(r => dependencies.Contains(r.Method.Method))}；不计入范围方法/字节指标");
         report.AppendLine($"F9b 语言定义候选：{closure.LanguageAccessors.Count}，合成 {closure.Synthesized.Count}（有原生代码 {closure.Synthesized.Count(p => p.Key.Address != 0)}，无原生代码 {closure.Synthesized.Count(p => p.Key.Address == 0)}）；其余保留普通恢复体");
         report.AppendLine($"F9 可用候选：{descriptions.Count}，证据匹配 {descriptions.Values.Count(evidence.Contains)}，实际认回目标 {emitter.AccessorCalls.Values.Select(a => a.Method).Distinct().Count()}");

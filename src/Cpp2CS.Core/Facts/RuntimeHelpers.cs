@@ -100,6 +100,10 @@ public sealed class RuntimeHelpers
 
     public RuntimeHelper? At(ulong address) => helpers.GetValueOrDefault(address);
 
+    /// <summary>运行时模板内部的调用也沿导出链和指令形态识别，不要求它被托管函数直接调用。</summary>
+    public RuntimeHelper InternalCall(ulong address) => helpers.TryGetValue(address, out var helper) ? helper
+        : helpers[address] = Classify(address, 0, 0);
+
     /// <summary>
     /// targets：托管代码调用的、没有托管所有者的目标及调用点数；slotAddressesBeforeCall：目标 → 调用点前紧邻构造了已解码元数据槽位地址的次数。
     /// </summary>

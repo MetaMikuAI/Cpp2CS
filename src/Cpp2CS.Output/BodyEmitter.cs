@@ -124,7 +124,9 @@ public sealed partial class BodyEmitter
     {
         // async void 的完成标记不产生栈值，不能按普通值要求非零位宽。
         if (value is AsyncResultValue { Value: null } && ManagedTypes.IsVoid(value.Type)) return null;
-        if (value.Width is not (1 or 8 or 16 or 32 or 64) && !(value.Width == 0 && types.Kind(value.Type) == TypeKind.Struct)) return $"位宽 {value.Width} 尚未支持";
+        // 开放 T 的大小由 CLR 决定；仅保留有类型的复制、字段、局部和 default(T)。
+        var genericStorage = value.Type is GenericParameterRef && value is LocalValue or FieldValue or IndirectValue or ComposedValue { Leaves.Count: 0 };
+        if (value.Width is not (1 or 8 or 16 or 32 or 64) && !(value.Width == 0 && (types.Kind(value.Type) == TypeKind.Struct || genericStorage))) return $"位宽 {value.Width} 尚未支持";
         // C# 里每个值的类型都可能要按名写出（局部变量声明、转换）
         if (!CanAccess(value.Type)) return $"访问权限 类型 {value.Type}";
         switch (value)

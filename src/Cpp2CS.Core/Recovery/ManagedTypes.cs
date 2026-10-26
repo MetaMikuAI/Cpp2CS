@@ -98,7 +98,7 @@ public sealed class ManagedTypes
             case GenericParameterRef { NativeScalar: { } scalar }: return Kind(scalar);
             case PointerRef or ByRefRef: return TypeKind.Pointer;
             case DefinitionRef d:
-                if (FieldLayouts.IsFullyShared(d)) return null;
+                if (FieldLayouts.IsFullyShared(d) && d.Definition.IsValueType) return null;
                 return PrimitiveName(d) switch
                 {
                     "Boolean" => TypeKind.Bool,

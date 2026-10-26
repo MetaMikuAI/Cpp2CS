@@ -95,6 +95,10 @@ public enum OpKind : byte
     ThrowManaged,
     /// <summary>引用原子比较交换：位置、新值、比较值 → 旧引用。</summary>
     CompareExchangeReference,
+    /// <summary>按元数据类型复制/清零共享泛型存储；参数为托管地址，Operand 为类型。</summary>
+    CopyGenericValue, ClearGenericValue,
+    /// <summary>MethodInfo.invoker_method 的已拆包调用，Operand 为方法；最后一个参数为返回存储。</summary>
+    InvokeGeneric,
 }
 
 /// <summary>调用所表达的运行时操作。Operand：类型（TypeRef）、异常名、槽位号等，见 <see cref="OpKind"/>。</summary>

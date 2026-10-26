@@ -92,7 +92,7 @@ public sealed partial class MethodRecovery
     {
         var open = MethodRef.Open(instance.Method);
         if (instance.TypeArguments.Count != open.TypeArguments.Count || instance.MethodArguments.Count != open.MethodArguments.Count
-            || instance.TypeArguments.Concat(instance.MethodArguments).Any(t => (!ManagedTypes.IsReferenceType(t) && !t.Equals(types.Int32)) || FieldLayouts.IsFullyShared(t)))
+            || instance.TypeArguments.Concat(instance.MethodArguments).Any(t => !ManagedTypes.IsReferenceType(t) && !t.Equals(types.Int32) && !FieldLayouts.IsFullyShared(t)))
             return new(open, entry, null, [new(entry, "泛型 不是引用共享实例")]);
         open = open with
         {
@@ -101,7 +101,7 @@ public sealed partial class MethodRecovery
         };
         return new Context(this, open, entry) { SharedDefinition = true }.Run();
         static TypeRef Bind(TypeRef parameter, TypeRef instance) => parameter is GenericParameterRef g
-            ? ManagedTypes.IsReferenceType(instance) ? g with { SharedReference = true } : g with { NativeScalar = instance } : parameter;
+            ? FieldLayouts.IsFullyShared(instance) ? g : ManagedTypes.IsReferenceType(instance) ? g with { SharedReference = true } : g with { NativeScalar = instance } : parameter;
     }
 
     /// <summary>异常类型的无参实例构造函数（全名，含 mscorlib 之外的类型）。</summary>
@@ -307,6 +307,8 @@ public sealed partial class MethodRecovery
             function = lifted.Function;
             var idioms = owner.rewriter.Run(function);
             if (SharedDefinition) BindSharedReferences();
+            NormalizeSharedFields();
+            NormalizeSharedValues();
             foreach (var error in idioms.Errors) Hole(entry, $"L2 {error}");
             if (idioms.Errors.Count > 0) return false;
             NormalizeScalarVectors();
@@ -317,7 +319,7 @@ public sealed partial class MethodRecovery
                 while (ExceptionNullBranches.Run(facts, function)) function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
             foreach (var residual in idioms.Residuals)
                 // 没有身份证据的未注册调用交给 L3 的调用解析（方法的本地副本，CopyOf）；解析不了时在调用处留洞。
-                if (residual.Category is not ("helper:WriteBarrier" or "call:unregistered-managed") && !cleanupSites.Contains(residual.Address))
+                if (residual.Category is not ("helper:WriteBarrier" or "call:unregistered-managed") && !cleanupSites.Contains(residual.Address) && !sharedSites.Contains(residual.Address))
                 {
                     var hole = Hole(residual.Address, $"残余 {residual.Category}");
                     foreach (var statement in function.Blocks.SelectMany(b => b.Statements).Where(s => s.Address == residual.Address))
@@ -635,10 +637,12 @@ public sealed partial class MethodRecovery
                     {
                         if (!AllocationPairing.Uses(statement, created)) { middle.Add(statement); continue; }
                         MethodDef? forwarded = null;
-                        if (statement is Call { Op: null, Kind: CallKind.Direct, Target: Const target } call && Receiver(call) is Use { Variable: var receiver } && receiver == created
-                            && (facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false } ctor } && ctor.Owner == type.Definition)
-                                || facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false, Parameters.Count: 0 } ctor } && ctor.Owner != type.Definition)
-                                    && (forwarded = owner.ForwardingConstructor(type, target.Value)) is not null))
+                        if (statement is Call call && Receiver(call) is Use { Variable: var receiver } && receiver == created
+                            && (call.Op is { Kind: OpKind.CallMethodPointer, Operand: MethodRef { Method: { Name: ".ctor", IsStatic: false } pointerCtor } } && pointerCtor.Owner == type.Definition
+                                || call is { Op: null, Kind: CallKind.Direct, Target: Const target }
+                                    && (facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false } ctor } && ctor.Owner == type.Definition)
+                                        || facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false, Parameters.Count: 0 } ctor } && ctor.Owner != type.Definition)
+                                            && (forwarded = owner.ForwardingConstructor(type, target.Value)) is not null)))
                         {
                             if (current != block && AllocationPairing.MotionProblem(function.Range, block, allocation, current, call, middle, created) is { } problem)
                             {
@@ -848,6 +852,8 @@ public sealed partial class MethodRecovery
             if (receiver is GenericParameterRef { ReferenceBase: { } constraint }) receiver = constraint;
             switch (call.Op)
             {
+                case { Kind: OpKind.CallMethodPointer, Operand: MethodRef pointerMethod }:
+                    return pointerMethod;
                 case null when call.Target is Const target:
                 {
                     var candidates = facts.EntriesAt(target.Value).Where(e => e.Kind is EntryKind.Method or EntryKind.GenericMethod && e.Method is not null)
@@ -1077,6 +1083,7 @@ public sealed partial class MethodRecovery
         {
             switch (e)
             {
+                case Intrinsic { Name: "managed_field_address" or "managed_generic_buffer" } address: return SharedAddress(address);
                 case TypedFrame f: return new AddressValue(f.Region.Local);
                 case Const c:
                 {
@@ -1554,7 +1561,7 @@ public sealed partial class MethodRecovery
                 case { Kind: OpKind.IsInstArrayElement } when call.Defines.FirstOrDefault() is { } created:
                     ArrayElementCheck(call, created, output);
                     return;
-                case null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual }:
+                case null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual or OpKind.CallMethodPointer }:
                     Invocation(call, output);
                     return;
                 default:

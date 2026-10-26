@@ -74,6 +74,8 @@ public sealed partial class MethodRecovery
         /// <summary>访存位置：字段、静态字段、数组长度、数组元素。</summary>
         private ManagedValue Location(Expr address, int width)
         {
+            if (AddressExpression(address) is Intrinsic { Name: "managed_field_address" } shared
+                && SharedAddress(shared) is AddressValue sharedField && sharedField.Target.Width == width) return sharedField.Target;
             if (FrameAccess(address) is { } frameAccess) return FrameLocation(frameAccess.Region, frameAccess.Offset, width);
             foreach (var part in ExprMap.Walk(address))
             {
@@ -236,6 +238,7 @@ public sealed partial class MethodRecovery
             {
                 if (e is Use u && seen.Add(u.Variable) && values.TryGetValue(u.Variable, out var value))
                 {
+                    if (value is Intrinsic { Name: "managed_field_address" or "managed_generic_buffer" }) return value;
                     if (inlined.Contains(u.Variable) && value is Binary { Op: BinOp.Add }) return ExpandAddress(value);
                     if (value is Use forwarded && TypeOfAddressBase(forwarded) is ByRefRef) return ExpandAddress(value);
                     if (value is Binary { Op: BinOp.Add, Right: Const } addition

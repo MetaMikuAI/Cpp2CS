@@ -41,6 +41,7 @@ public static class RuntimeLayout
 
     // FieldInfo { name; type; parent; offset; token }
     public const int FieldName = 0x00, FieldType = 0x08, FieldParent = 0x10, FieldOffset = 0x18, FieldToken = 0x1C;
+    public const int FieldInfoSize = 0x20;
 
     // Il2CppDelegate
     public const int DelegateMethodPtr = 0x10, DelegateInvokeImpl = 0x18, DelegateTarget = 0x20, DelegateMethod = 0x28;

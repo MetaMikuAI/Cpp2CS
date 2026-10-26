@@ -57,7 +57,7 @@ public sealed partial class ManagedAbi(FieldLayouts layouts)
             case GenericParameterRef generic:
                 return generic.IsReference ? ValueKind.Reference : generic.NativeScalar is { } scalar ? Kind(scalar) : null;
             case DefinitionRef d:
-                if (FieldLayouts.IsFullyShared(d)) return null;
+                if (FieldLayouts.IsFullyShared(d) && d.Definition.IsValueType) return null;
                 var t = d.Definition;
                 if (t.Assembly == "mscorlib.dll" && t.Namespace == "System" && t.DeclaringType is null)
                     switch (t.Name)
