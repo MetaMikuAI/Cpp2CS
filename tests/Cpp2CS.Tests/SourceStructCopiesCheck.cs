@@ -12,7 +12,10 @@ internal static class SourceStructCopiesCheck
     {
         var definition = new TypeDef { Index = 0, Assembly = "Sample", Namespace = "Sample", Name = "Record", Token = 0,
             Attributes = TypeAttributes.SequentialLayout, IsValueType = true, IsEnum = false };
-        var integer = new PrimitiveRef("I4");
+        var integerDefinition = new TypeDef { Index = -100, Assembly = "Sample", Namespace = "System", Name = "Int32", Token = 0,
+            Attributes = TypeAttributes.SequentialLayout, IsValueType = true, IsEnum = false };
+        var integer = new DefinitionRef(integerDefinition, []);
+        integerDefinition.Fields = [new FieldDef { Index = -100, Owner = integerDefinition, Name = "m_value", Type = integer, Offset = 0, Attributes = FieldAttributes.Private }];
         definition.Fields = Enumerable.Range(0, 3).Select(i => new FieldDef { Index = i, Owner = definition, Name = "Part" + i,
             Type = integer, Attributes = FieldAttributes.Private | FieldAttributes.InitOnly, Offset = i * 4 }).ToArray();
         var type = new DefinitionRef(definition, []);
@@ -83,6 +86,27 @@ internal static class SourceStructCopiesCheck
         var mixedReturn = Body(statements.Take(3).Append(new ManagedReturn(0, new ComposedValue(type,
             returnedLeaves.Take(2).Append((returnedLeaves[2].Item1, new ConstantValue(0, integer, 32))).ToArray()))));
         a.True(SourceStructCopies.Rewrite(mixedReturn).Blocks.Single().Statements.Count == 4, "返回中更改叶子时不能折为整值");
+        var wrapper = new TypeDef { Index = -2, Assembly = "Sample", Namespace = "Sample", Name = "Wrapper", Token = 0,
+            Attributes = TypeAttributes.SequentialLayout, IsValueType = true, IsEnum = false };
+        var wrapperType = new DefinitionRef(wrapper, []);
+        wrapper.Fields = [new FieldDef { Index = -2, Owner = wrapper, Name = "Nested", Type = type, Attributes = FieldAttributes.Public, Offset = 0 }];
+        var nestedSource = new LocalValue(new(Storage.Temp(-20), 1), wrapperType, 0);
+        var array = new ArgumentValue(1, new ArrayRef(wrapperType, 1), 64);
+        var index = new BinaryValue(BinOp.Add, new ArgumentValue(2, integer, 32), new ConstantValue(1, integer, 32), integer, 32);
+        var element = new ArrayElementValue(array, index, wrapperType, 0);
+        FieldValue Nested(ManagedValue root, int i) => new(new AddressValue(new FieldValue(new AddressValue(root),
+            new(wrapper.Fields[0], wrapperType), type, 0)), new(definition.Fields[i], type), integer, 32);
+        var nestedReads = snapshots.Select((s, i) => (ManagedStatement)new ManagedAssignment(0, s, Nested(nestedSource, i))).ToArray();
+        var nestedWrites = snapshots.Select((s, i) => (ManagedStatement)new ManagedStore(0, Nested(element, i), s)).ToArray();
+        var nestedCopy = Body(nestedReads.Concat(nestedWrites));
+        a.True(SourceStructCopies.Rewrite(nestedCopy).Blocks.Single().Statements is [ManagedStore { Target: var nestedTarget, Value: var nestedValue }]
+            && nestedTarget == element && nestedValue == nestedSource, "嵌套私有只读字段的完整快照折回数组整值写入");
+        var partialNested = Body(nestedReads.Concat(nestedWrites.Take(2)));
+        a.Equal(5, SourceStructCopies.Rewrite(partialNested).Blocks.Single().Statements.Count, "缺少嵌套叶子时不扩大写入");
+        var interruptedNested = Body(nestedReads.Append(new ManagedCall(0, new(null!, null, [], false), null, false)).Concat(nestedWrites));
+        a.Equal(7, SourceStructCopies.Rewrite(interruptedNested).Blocks.Single().Statements.Count, "嵌套复制不能跨可观察调用");
+        var escapingNested = Body(nestedReads.Concat(nestedWrites).Append(new ManagedReturn(0, snapshots[0])));
+        a.Equal(7, SourceStructCopies.Rewrite(escapingNested).Blocks.Single().Statements.Count, "快照还被外部使用时保留叶子局部");
         return a.Finish("source-struct-copies");
     }
 }

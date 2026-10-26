@@ -40,6 +40,35 @@ internal static class SourceStructCopies
         return body with { Blocks = body.Blocks.Select(block =>
         {
             var statements = block.Statements.ToList();
+            // 嵌套结构体按叶子读取后立即完整写入同型位置，仍是一次整值复制。
+            for (var i = 0; i < statements.Count; i++)
+            {
+                if (statements[i] is not ManagedAssignment first || FieldPath(first.Value) is not { } initial
+                    || initial.Root.Type is not DefinitionRef type || LeafPaths(type) is not { Count: > 0 } paths) continue;
+                var count = paths.Count;
+                var reads = statements.Skip(i).Take(count).OfType<ManagedAssignment>().ToArray();
+                if (reads.Length != count || reads.Any(r => FieldPath(r.Value) is not { } path || path.Root != initial.Root
+                        || uses.GetValueOrDefault(r.Target.Variable) != 1)
+                    || reads.Select(r => r.Target.Variable).Distinct().Count() != count) continue;
+                var snapshots = reads.ToDictionary(r => r.Target.Variable, r => FieldPath(r.Value)!.Value.Path);
+                if (!SamePaths(paths, snapshots.Values)) continue;
+                var writes = statements.Skip(i + count).Take(count).OfType<ManagedStore>().ToArray();
+                if (writes.Length != count) continue;
+                ManagedValue? destination = null;
+                var copied = new List<IReadOnlyList<FieldRef>>();
+                foreach (var write in writes)
+                {
+                    if (FieldPath(write.Target) is not { } target || !target.Root.Type.Equals(type)
+                        || destination is not null && destination != target.Root || write.Value is not LocalValue local
+                        || !snapshots.TryGetValue(local.Variable, out var sourcePath) || !sourcePath.SequenceEqual(target.Path)) break;
+                    destination = target.Root;
+                    copied.Add(target.Path);
+                }
+                if (destination is null || !SamePaths(paths, copied)) continue;
+                statements.RemoveRange(i, 2 * count);
+                statements.Insert(i, destination is LocalValue localTarget ? new ManagedAssignment(first.Address, localTarget, initial.Root)
+                    : new ManagedStore(first.Address, destination, initial.Root));
+            }
             // 读取全部直属字段后立即按原字段返回，等价于在原读取位置复制整个结构体。
             for (var i = 0; i < statements.Count; i++)
             {
@@ -166,6 +195,52 @@ internal static class SourceStructCopies
         FieldValue { Accessor: null } field => Stable(field.Receiver),
         ArrayElementValue element => Stable(element.Array) && Stable(element.Index),
         ConversionValue conversion => Stable(conversion.Operand),
+        BinaryValue { Op: not (Cpp2CS.Ir.BinOp.SDiv or Cpp2CS.Ir.BinOp.UDiv or Cpp2CS.Ir.BinOp.SRem or Cpp2CS.Ir.BinOp.URem) } binary
+            => Stable(binary.Left) && Stable(binary.Right),
         _ => false,
     };
+
+    private static (ManagedValue Root, IReadOnlyList<FieldRef> Path)? FieldPath(ManagedValue value)
+    {
+        var path = new List<FieldRef>();
+        while (value is FieldValue { Accessor: null } field)
+        {
+            var receiver = field.Receiver is AddressValue address ? address.Target : field.Receiver;
+            if (receiver.Type is not DefinitionRef { Definition.IsValueType: true }) break;
+            path.Insert(0, field.Field);
+            value = receiver;
+        }
+        return path.Count > 0 && Stable(value) ? (value, path) : null;
+    }
+
+    private static List<IReadOnlyList<FieldRef>>? LeafPaths(DefinitionRef type, int depth = 0)
+    {
+        if (depth > 16 || !type.Definition.IsValueType || type.Definition.IsEnum
+            || (type.Definition.Attributes & System.Reflection.TypeAttributes.LayoutMask) == System.Reflection.TypeAttributes.ExplicitLayout) return null;
+        var paths = new List<IReadOnlyList<FieldRef>>();
+        foreach (var field in type.Definition.Fields.Where(f => !f.IsStatic))
+        {
+            var reference = new FieldRef(field, type);
+            var fieldType = field.Type.Substitute(type.Arguments, []);
+            if (fieldType is DefinitionRef { Definition: { IsValueType: true, IsEnum: false, Keyword: null or "decimal" } } nested)
+            {
+                if (LeafPaths(nested, depth + 1) is not { Count: > 0 } children) return null;
+                paths.AddRange(children.Select(p => (IReadOnlyList<FieldRef>)new[] { reference }.Concat(p).ToArray()));
+            }
+            else paths.Add([reference]);
+        }
+        return paths;
+    }
+
+    private static bool SamePaths(IEnumerable<IReadOnlyList<FieldRef>> expected, IEnumerable<IReadOnlyList<FieldRef>> actual)
+    {
+        var remaining = actual.ToList();
+        foreach (var path in expected)
+        {
+            var index = remaining.FindIndex(p => p.SequenceEqual(path));
+            if (index < 0) return false;
+            remaining.RemoveAt(index);
+        }
+        return remaining.Count == 0;
+    }
 }
