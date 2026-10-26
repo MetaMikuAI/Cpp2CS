@@ -1,5 +1,7 @@
+using ICSharpCode.Decompiler.CSharp;
 using ICSharpCode.Decompiler.CSharp.Syntax;
 using ICSharpCode.Decompiler.CSharp.Transforms;
+using ICSharpCode.Decompiler.Semantics;
 
 namespace Cpp2CS.Output;
 
@@ -9,6 +11,19 @@ public static partial class Decompilation
     {
         public void Run(AstNode rootNode, TransformContext context)
         {
+            // 类实例的单一定义副本仍是同一个 this；按 IL 变量身份替换，包括 lambda 中的捕获。
+            foreach (var declaration in rootNode.Descendants.OfType<VariableDeclarationStatement>().ToArray())
+            {
+                if (declaration.Variables.ToArray() is not [var variable] || variable.Initializer is not ThisReferenceExpression receiver
+                    || variable.GetILVariable() is not { IsSingleDefinition: true, UsesInitialValue: false, Type.IsReferenceType: true } local
+                    || local.AddressInstructions.Count != 0 || receiver.Annotation<ResolveResult>()?.Type.Equals(local.Type) != true) continue;
+                var references = rootNode.Descendants.OfType<IdentifierExpression>().Where(id => id.GetILVariable() == local).ToArray();
+                if (references.Any(id => id.Parent is DirectionExpression
+                    || id.Parent is AssignmentExpression assignment && assignment.Left == id
+                    || id.Ancestors.OfType<InvocationExpression>().Any(call => call.Target is IdentifierExpression { Identifier: "nameof" }))) continue;
+                foreach (var reference in references) reference.ReplaceWith(receiver.Clone());
+                declaration.Remove();
+            }
             if (!rootNode.Descendants.Any(n => n is SimpleType { Identifier: "Await" or "Unrecovered" }
                 or IdentifierExpression { Identifier: "Await" or "Unrecovered" }))
                 foreach (var import in rootNode.Descendants.OfType<UsingDeclaration>().Where(u => u.Namespace == "Cpp2CS").ToArray()) import.Remove();

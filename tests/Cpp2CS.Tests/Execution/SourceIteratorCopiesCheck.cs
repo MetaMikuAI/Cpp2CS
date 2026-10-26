@@ -29,8 +29,17 @@ internal static class SourceIteratorCopiesCheck
         var bytes = Compile("""
             using System;
             using System.Collections.Generic;
-            public static class Probe
+            public class Probe
             {
+                public int Value;
+                public IEnumerable<int> InstanceValues()
+                {
+                    var owner = this;
+                    Action advance = () => owner.Value++;
+                    yield return owner.Value;
+                    advance();
+                    yield return owner.Value;
+                }
                 public static IEnumerable<int> Values(int seed)
                 {
                     int current = seed;
@@ -45,7 +54,7 @@ internal static class SourceIteratorCopiesCheck
             }
             """, "IteratorCopies.Input");
         using var module = ModuleDefinition.ReadModule(new MemoryStream(bytes));
-        var move = module.GetTypes().SelectMany(t => t.Methods).Single(m => m.Name == "MoveNext");
+        var move = module.GetTypes().SelectMany(t => t.Methods).Single(m => m.Name == "MoveNext" && m.DeclaringType.Name.StartsWith("<Values>", StringComparison.Ordinal));
         move.Body.SimplifyMacros();
         var il = move.Body.GetILProcessor();
         var reads = move.Body.Instructions.Where(i => i.OpCode == OpCodes.Ldfld
@@ -81,6 +90,16 @@ internal static class SourceIteratorCopiesCheck
             iterator.MoveNext();
             iterator.Dispose();
             a.True(!iterator.MoveNext(), $"seed={seed} 保留当前编译器的提前释放行为");
+        }
+        foreach (var assembly in new[] { File.ReadAllBytes(input), rebuilt })
+        {
+            var type = System.Reflection.Assembly.Load(assembly).GetType("Probe")!;
+            var instance = Activator.CreateInstance(type)!;
+            type.GetField("Value")!.SetValue(instance, 7);
+            var iterator = ((IEnumerable<int>)type.GetMethod("InstanceValues")!.Invoke(instance, null)!).GetEnumerator();
+            a.True(iterator.MoveNext() && iterator.Current == 7, "this 副本首次挂起读取实例");
+            type.GetField("Value")!.SetValue(instance, 123);
+            a.True(iterator.MoveNext() && iterator.Current == 124 && !iterator.MoveNext(), "跨挂起后的 lambda 仍修改同一个实例");
         }
         return a.Finish("source-iterator-copies");
     }
