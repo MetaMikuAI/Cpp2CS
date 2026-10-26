@@ -4,6 +4,25 @@ namespace Cpp2CS.Tests;
 
 internal static class SourceView
 {
+    [Command("type-source-view", "按类型清单导出已有源码程序集，包含无完整方法的类型", Arguments = "<inventory> <recover 输出目录> <output>")]
+    public static int Types(string inventory, string directory, string output)
+    {
+        var requested = File.ReadLines(Path.Combine(inventory, "types.tsv")).Skip(1).Select(l => l.Split('\t')[1]).ToHashSet();
+        var assemblies = Path.Combine(directory, "assemblies-src");
+        Directory.CreateDirectory(output);
+        var count = 0;
+        foreach (var assembly in Directory.GetFiles(assemblies, "*.dll").Where(p => requested.Any(f => f.StartsWith(Path.GetFileName(p) + "_", StringComparison.Ordinal))))
+            foreach (var source in Decompilation.Decompile(assembly, assemblies,
+                t => requested.Contains(Path.GetFileName(assembly) + "_" + t.ReflectionName + ".cs"), false, recoveringBodies: true))
+            {
+                File.WriteAllText(Path.Combine(output, Path.GetFileName(assembly) + "_" + source.TypeName + ".cs"), source.Source);
+                count++;
+            }
+        if (count != requested.Count) throw new InvalidDataException($"类型清单 {requested.Count}，实际导出 {count}");
+        Console.WriteLine($"从已有 assemblies-src 导出 {count} 个类型。");
+        return 0;
+    }
+
     [Command("source-view", "从已有源码程序集导出所选方法的所在类型，不重跑恢复", Arguments = "<recover 输出目录> <方法清单> <output>")]
     public static int Run(string directory, string methods, string output)
     {

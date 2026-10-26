@@ -19,9 +19,9 @@ public static partial class Decompilation
     public static DecompilerSettings Settings(bool recoveringBodies = false) => new()
     {
         ThrowOnAssemblyResolveErrors = true,
-        // 恢复中的方法与骨架混合存在，自动属性变换可能隐藏仍被方法体引用的字段。
-        AutomaticProperties = !recoveringBodies,
-        GetterOnlyAutomaticProperties = !recoveringBodies,
+        AutomaticProperties = true,
+        GetterOnlyAutomaticProperties = true,
+        AggressiveInlining = true,
         FieldKeyword = !recoveringBodies,
         StructDefaultConstructorsAndFieldInitializers = !recoveringBodies,
     };
@@ -57,7 +57,8 @@ public static partial class Decompilation
         public void Run(AstNode rootNode, TransformContext context)
         {
             var functions = new HashSet<AstNode>();
-            foreach (var call in rootNode.Descendants.OfType<InvocationExpression>().ToArray())
+            // 外层 Result 会克隆参数；先转换内部 await，避免副本中残留标记。
+            foreach (var call in rootNode.Descendants.OfType<InvocationExpression>().Reverse().ToArray())
             {
                 if (call.Target is not MemberReferenceExpression { Target: TypeReferenceExpression { Type: var type } } member || Last(type) != "Await"
                     || member.MemberName is not ("Of" or "Do" or "Result" or "Completed")) continue;
