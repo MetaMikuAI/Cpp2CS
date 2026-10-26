@@ -302,6 +302,8 @@ public sealed partial class MethodRecovery
             TrimIndirectArguments();
             Ssa.Propagate.RemoveDead(function);
             NormalizeCleanupThunks();
+            if (function.Blocks.Any(b => b.IsLandingPad))
+                while (ExceptionNullBranches.Run(facts, function)) function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
             foreach (var residual in idioms.Residuals)
                 // 没有身份证据的未注册调用交给 L3 的调用解析（方法的本地副本，CopyOf）；解析不了时在调用处留洞。
                 if (residual.Category is not ("helper:WriteBarrier" or "call:unregistered-managed") && !cleanupSites.Contains(residual.Address))
@@ -944,6 +946,7 @@ public sealed partial class MethodRecovery
                 return known.TryGetValue(v, out var t) ? Math.Max(types.Bits(t), 8) : result.Call.Results[result.Index].Width;
             if (phis.TryGetValue(v, out var phi))
             {
+                if (known.TryGetValue(v, out var reference) && types.Kind(reference) == TypeKind.Reference) return 64;
                 // 各来源位宽的最大值；常量来源只要求容得下它的值。环上的来源（正在计算的 φ）跳过。
                 if (!phiInProgress.Add(v)) return 0;
                 try
@@ -1040,6 +1043,7 @@ public sealed partial class MethodRecovery
                 case Use u:
                     return Variable(u.Variable, u.Width);
                 case Extract extract: return Slice(Recover(extract.Operand, null), extract.Low, extract.Width);
+                case Insert insert: return InsertedFragment(insert);
                 case Load load:
                     return Location(load.Address, load.Width);
                 case Symbol { Kind: SymbolKind.String, Value: string text }:

@@ -1,4 +1,5 @@
 using Cpp2CS.Ir;
+using Cpp2CS.Model;
 
 namespace Cpp2CS.Recovery;
 
@@ -6,7 +7,7 @@ public sealed partial class MethodRecovery
 {
     private sealed partial class Context
     {
-        /// <summary>结构体地址已绑定到有界区域后，恢复与其相邻、地址不逃逸的整数计数槽。</summary>
+        /// <summary>结构体地址已绑定到有界区域后，恢复地址不逃逸的整数计数槽和已定型的引用槽。</summary>
         [Analysis("整数帧槽", 35, After = ["帧区域"])]
         private void PrepareScalarFrames()
         {
@@ -40,13 +41,41 @@ public sealed partial class MethodRecovery
                 _ => (false, false),
             };
             var scalar = new Dictionary<long, FrameRegion>();
+            bool? registerCalls = null;
+            bool NoStackArguments(Call call)
+            {
+                if (call.Op?.Kind is OpKind.InitClass or OpKind.RunClassConstructor or OpKind.InitMethodRgctx
+                    or OpKind.NewObject or OpKind.NewArray or OpKind.Box or OpKind.Unbox or OpKind.IsInst or OpKind.IsAssignableFrom
+                    or OpKind.TypeCheck or OpKind.ThrowIf or OpKind.NullCheck or OpKind.BoundsCheck or OpKind.Throw or OpKind.ThrowNew
+                    or OpKind.NewException or OpKind.Rethrow or OpKind.WriteBarrier or OpKind.MemoryBarrier or OpKind.InterfaceInvokeData
+                    or OpKind.ResolveGenericVirtual or OpKind.BeginCatch or OpKind.EndCatch or OpKind.ResumeUnwind or OpKind.Terminate or OpKind.ThrowManaged) return true;
+                return Resolve(call) is { } target && owner.abi.Classify(target, out _) is { MethodInfo: not null } signature
+                    && signature.Arguments.All(a => a.Passing != Facts.Passing.Stack);
+            }
             foreach (var group in accesses.GroupBy(a => a.Offset))
             {
                 var offset = group.Key;
-                if (offset >= 0 || group.Any(a => a.Width != 32) || !group.Any(a => a.Written is null)
+                if (offset >= 0 || group.Select(a => a.Width).Distinct().ToArray() is not [var width and (32 or 64)]
                     || escapes.Any(at => at <= offset)
-                    || frameRegions.Any(r => offset < r.Offset + r.Size && r.Offset < offset + 4)
-                    || accesses.Any(a => a.Offset != offset && offset < a.Offset + a.Width / 8 && a.Offset < offset + 4)) continue;
+                    || frameRegions.Any(r => offset < r.Offset + r.Size && r.Offset < offset + width / 8)
+                    || accesses.Any(a => a.Offset != offset && offset < a.Offset + a.Width / 8 && a.Offset < offset + width / 8)) continue;
+                if (!group.Any(a => a.Written is null))
+                {
+                    // 无读取的常量备份只有在所有调用都不从调用者栈取参数时才可删去。
+                    if (group.All(a => a.Written is Const) && (registerCalls ??= blocks.SelectMany(b => b.Statements).OfType<Call>().All(NoStackArguments)))
+                        dropped.UnionWith(blocks.SelectMany(b => b.Statements).OfType<Store>().Where(s => FrameOffset(s.Target) == offset));
+                    continue;
+                }
+                if (width == 64)
+                {
+                    TypeRef? Reference(Expr value) => value is Use use && known.TryGetValue(use.Variable, out var type) && types.Kind(type) == TypeKind.Reference ? type : null;
+                    var writes = group.Where(a => a.Written is not null).Select(a => a.Written!).ToArray();
+                    var candidates = writes.Select(Reference).OfType<TypeRef>().Distinct().ToArray();
+                    if (candidates.FirstOrDefault(t => candidates.All(other => types.IsAssignable(other, t))) is { } reference
+                        && writes.All(v => v is Const { Value: 0 } || Reference(v) is not null))
+                        scalar[offset] = new(offset, reference, 8, StructLocal(reference, 64));
+                    continue;
+                }
                 var written = group.Where(a => a.Written is not null).Select(a => Written(a.Written!, [])).ToArray();
                 if (!written.Any(w => w.Integer) || written.Any(w => !w.Allowed)) continue;
                 scalar[offset] = new(offset, types.Int32, 4, StructLocal(types.Int32, 32));

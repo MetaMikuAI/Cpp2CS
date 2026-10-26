@@ -57,7 +57,7 @@ public sealed partial class MethodRecovery
             // 未证实的结构体仍由 LocalOf 的类型/位宽检查留洞，不补默认值。
             if (fragmentActive.Count == 0) fragmentSteps = 0;
             if (fragmentActive.Count >= 64 || ++fragmentSteps > 1024) return null;
-            if (!values.TryGetValue(variable, out var expression) || expression is not (Load { Width: > 32 } or Use or Ir.Convert) || !fragmentActive.Add(variable)) return null;
+            if (!values.TryGetValue(variable, out var expression) || expression is not (Load { Width: > 32 } or Use or Ir.Convert or Insert) || !fragmentActive.Add(variable)) return null;
             try
             {
                 if (Recover(expression, null) is not Fragment fragment) return null;
@@ -79,6 +79,29 @@ public sealed partial class MethodRecovery
             for (var low = fragment.Width; low < width; low += 8)
                 parts.Add(new Part(low, new ConstantValue(0, types.Byte, 8)));
             return new Fragment(parts, fragment.Type, width);
+        }
+
+        /// <summary>覆盖整个向量的逐道计算保留为独立叶子，按原定义顺序快照。</summary>
+        private Fragment InsertedFragment(Insert insert)
+        {
+            var pieces = new List<(int Low, Expr Value)>();
+            Expr current = insert;
+            while (current is Insert part)
+            {
+                pieces.Add((part.Low, part.Value));
+                current = part.Base;
+            }
+            if (current is not Const { Value: 0 } || insert.Width != 128) throw Fail(0, "向量 插入基值或位宽尚未支持");
+            var cursor = 0;
+            var leaves = new List<Part>();
+            foreach (var piece in pieces.OrderBy(p => p.Low))
+            {
+                if (piece.Low != cursor || piece.Value.Width is not (32 or 64)) throw Fail(0, "向量 插入未完整覆盖独立叶子");
+                cursor += piece.Value.Width;
+                leaves.Add(new(piece.Low, Recover(piece.Value, null)));
+            }
+            if (cursor != insert.Width) throw Fail(0, "向量 插入未覆盖整个向量");
+            return new Fragment(leaves, types.UInt64, insert.Width);
         }
 
         private ManagedValue Slice(ManagedValue value, int low, int width)
@@ -169,7 +192,7 @@ public sealed partial class MethodRecovery
         [DefineRule(10)]
         private bool DefineFragment(Define define, List<ManagedStatement> output)
         {
-            if (define.Value is not (Load { Width: > 32 } or Use or Ir.Convert) || Recover(define.Value, null) is not Fragment source) return false;
+            if (define.Value is not (Load { Width: > 32 } or Use or Ir.Convert or Insert) || Recover(define.Value, null) is not Fragment source) return false;
             var target = FragmentVariable(define.Target, source.Width)!;
             for (var i = 0; i < source.Parts.Count; i++)
                 output.Add(new ManagedAssignment(define.Address, (LocalValue)target.Parts[i].Value, source.Parts[i].Value));
