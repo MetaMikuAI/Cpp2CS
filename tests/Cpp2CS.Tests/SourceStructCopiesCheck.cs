@@ -107,6 +107,24 @@ internal static class SourceStructCopiesCheck
         a.Equal(7, SourceStructCopies.Rewrite(interruptedNested).Blocks.Single().Statements.Count, "嵌套复制不能跨可观察调用");
         var escapingNested = Body(nestedReads.Concat(nestedWrites).Append(new ManagedReturn(0, snapshots[0])));
         a.Equal(7, SourceStructCopies.Rewrite(escapingNested).Blocks.Single().Statements.Count, "快照还被外部使用时保留叶子局部");
+        var container = new TypeDef { Index = -3, Assembly = "Sample", Namespace = "Sample", Name = "Container", Token = 0,
+            Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false };
+        var containerType = new DefinitionRef(container, []);
+        var storage = new FieldDef { Index = -3, Owner = container, Name = "Value", Type = type, Offset = 16, Attributes = FieldAttributes.Private };
+        var parent = new FieldValue(new ArgumentValue(0, containerType, 64), new(storage, containerType), type, 0);
+        FieldValue Part(int i) => new(new AddressValue(parent), new(definition.Fields[i], type), integer, 32);
+        var assembled = Body(snapshots.Select((s, i) => new ManagedStore(0, Part(i), s)));
+        a.True(SourceStructCopies.Rewrite(assembled).Blocks.Single().Statements is [ManagedStore { Target: var wholeTarget, Value: ComposedValue { Leaves.Count: 3 } }]
+            && wholeTarget == parent, "完整字段快照写回引用对象中的整个结构体字段");
+        var missingPart = Body(assembled.Blocks[0].Statements.Take(2));
+        a.Equal(2, SourceStructCopies.Rewrite(missingPart).Blocks[0].Statements.Count, "不补未写入的字段");
+        var dependent = Body(new ManagedStatement[] { new ManagedStore(0, Part(0), snapshots[0]),
+            new ManagedStore(0, Part(1), Part(0)), new ManagedStore(0, Part(2), snapshots[2]) });
+        a.Equal(3, SourceStructCopies.Rewrite(dependent).Blocks[0].Statements.Count, "后续读取引用对象中的字段时保留逐次写入顺序");
+        var valueFields = Body(Enumerable.Range(0, 3).Select(i => new ManagedStore(0, Part(i),
+            new FieldValue(new AddressValue(source), new(definition.Fields[2 - i], type), integer, 32))));
+        a.True(SourceStructCopies.Rewrite(valueFields).Blocks[0].Statements is [ManagedStore { Value: ComposedValue { Leaves.Count: 3 } }],
+            "不同字段组合可从独立的值类型局部快照构造");
         return a.Finish("source-struct-copies");
     }
 }
