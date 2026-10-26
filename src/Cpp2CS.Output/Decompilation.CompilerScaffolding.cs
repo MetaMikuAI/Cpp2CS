@@ -1,7 +1,9 @@
 using ICSharpCode.Decompiler.CSharp;
 using ICSharpCode.Decompiler.CSharp.Syntax;
 using ICSharpCode.Decompiler.CSharp.Transforms;
+using ICSharpCode.Decompiler.IL;
 using ICSharpCode.Decompiler.Semantics;
+using ICSharpCode.Decompiler.TypeSystem;
 
 namespace Cpp2CS.Output;
 
@@ -40,12 +42,25 @@ public static partial class Decompilation
                     && declaration.GetParent<MethodDeclaration>() is { } method
                     && !method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == variable.Name)) declaration.Remove();
 
+            // lambda 已展开后，不再使用的编译器委托缓存读取不能继续维持闭包类型的引用。
+            foreach (var declaration in rootNode.Descendants.OfType<VariableDeclarationStatement>().ToArray())
+                if (declaration.Variables.ToArray() is [var variable] && variable.Initializer?.GetSymbol() is IField { IsStatic: true } field
+                    && field.Name.StartsWith("<>9__", StringComparison.Ordinal)
+                    && field.DeclaringTypeDefinition?.GetAttributes().Any(a => a.AttributeType.FullName == "System.Runtime.CompilerServices.CompilerGeneratedAttribute") == true
+                    && variable.GetILVariable() is { IsSingleDefinition: true } local && local.AddressInstructions.Count == 0
+                    && !rootNode.Descendants.OfType<IdentifierExpression>().Any(id => id.GetILVariable() == local)) declaration.Remove();
+
+            var expanded = rootNode.Descendants.Where(n => n is LambdaExpression or AnonymousMethodExpression)
+                .SelectMany(n => n.Annotations.OfType<ILFunction>()).Where(f => f.Method is not null)
+                .Select(f => f.Method!.MemberDefinition).ToHashSet();
             // 只有所有引用都已展开成捕获变量后，才能移除残留的闭包类型声明。
             foreach (var type in rootNode.Descendants.OfType<TypeDeclaration>().Reverse().ToArray())
             {
                 if (type.Parent is not TypeDeclaration || !type.Modifiers.HasFlag(Modifiers.Private)
-                    || !type.Name.Contains("DisplayClass", StringComparison.Ordinal)
                     || !type.Attributes.SelectMany(s => s.Attributes).Any(a => a.Type.ToString() is "CompilerGenerated" or "CompilerGeneratedAttribute")) continue;
+                if (!type.Name.Contains("DisplayClass", StringComparison.Ordinal)
+                    && (type.GetSymbol() is not ITypeDefinition definition || definition.Name != "<>c" && !definition.Name.StartsWith("<>c__", StringComparison.Ordinal)
+                        || type.Members.OfType<MethodDeclaration>().Any(m => m.GetSymbol() is not IMethod method || !expanded.Contains(method.MemberDefinition)))) continue;
                 if (rootNode.Descendants.Where(n => !n.Ancestors.Contains(type)).Any(n => n switch
                 {
                     SimpleType reference => reference.Identifier == type.Name,
