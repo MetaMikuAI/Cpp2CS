@@ -11,7 +11,7 @@ namespace Cpp2CS.Ssa;
 /// 3. 至少读一次、写一次。只写不读的槽可能是出参或隐藏的栈参数（被调用者隐式读取，调用模型不登记这种读取），保持原样。
 /// 4. 没有其他访问与它的字节区间重叠。
 /// 5. 没有地址逃逸到它的下方或它本身：逃逸的地址（作为实参、被存储、进入 φ、参与其他运算）可能被用来访问它之上的整块区域，
-///    例如按指针传出的结构体局部。偏移不小于任一逃逸地址的槽都不提升。
+///    例如按指针传出的结构体局部。调用签名给出长度时，只阻止提升与该区间重叠的槽。
 /// 原生对照不观察栈帧内容，提升不改变可观察行为；被删去的只是帧内的写入。
 /// </summary>
 public static class FrameSlotPromotion
@@ -19,7 +19,8 @@ public static class FrameSlotPromotion
     private sealed record Access(long Offset, int Width, bool IsStore);
 
     /// <summary>改写可提升的槽，返回提升的个数（为 0 时函数不变）。</summary>
-    public static int Run(MachineFunction function)
+    public static int Run(MachineFunction function, Func<Call, int, int?>? argumentSize = null,
+        IReadOnlyList<(long Offset, int Size)>? preserved = null)
     {
         var statements = function.Blocks.SelectMany(b => b.Statements).ToArray();
         var aliases = new Dictionary<Variable, long>();
@@ -40,15 +41,15 @@ public static class FrameSlotPromotion
         }
 
         var accesses = new List<Access>();
-        var escapes = new List<long>();
-        void Visit(Expr e)
+        var escapes = new List<(long Offset, int? Size)>();
+        void Visit(Expr e, int? size = null)
         {
             if (e is Load load && Resolve(load.Address) is { } loaded)
             {
                 accesses.Add(new(loaded, load.Width, false));
                 return;
             }
-            if (Resolve(e) is { } escaped) { escapes.Add(escaped); return; }
+            if (Resolve(e) is { } escaped) { escapes.Add((escaped, size)); return; }
             foreach (var child in ExprMap.Children(e)) Visit(child);
         }
         foreach (var statement in statements)
@@ -62,7 +63,13 @@ public static class FrameSlotPromotion
                     break;
                 case Phi phi:
                     foreach (var source in phi.Sources)
-                        if (aliases.TryGetValue(source, out var merged)) escapes.Add(merged);
+                        if (aliases.TryGetValue(source, out var merged)) escapes.Add((merged, null));
+                    break;
+                case Call call:
+                    Visit(call.Target);
+                    if (call.DelegateReceiver is { } receiver) Visit(receiver);
+                    for (var i = 0; i < call.Arguments.Length; i++)
+                        Visit(call.Arguments[i], Resolve(call.Arguments[i]) is not null ? argumentSize?.Invoke(call, i) : null);
                     break;
                 default:
                     foreach (var operand in ExprMap.Operands(statement)) Visit(operand);
@@ -70,14 +77,15 @@ public static class FrameSlotPromotion
             }
         if (accesses.Count == 0) return 0;
 
-        var lowestEscape = escapes.Count == 0 ? long.MaxValue : escapes.Min();
         static bool Overlap(Access a, Access b) => a.Offset < b.Offset + b.Width / 8 && b.Offset < a.Offset + Math.Max(1, a.Width / 8);
         var promoted = new Dictionary<long, int>();
         foreach (var group in accesses.GroupBy(a => a.Offset))
         {
             var offset = group.Key;
             var widths = group.Select(a => a.Width).Distinct().ToArray();
-            if (offset >= 0 || offset >= lowestEscape || widths is not [var width and (8 or 16 or 32 or 64)]) continue;
+            if (offset >= 0 || widths is not [var width and (8 or 16 or 32 or 64)]) continue;
+            if (escapes.Any(e => offset + width / 8 > e.Offset && (e.Size is not { } size || offset < e.Offset + size))) continue;
+            if (preserved?.Any(r => offset + width / 8 > r.Offset && offset < r.Offset + r.Size) == true) continue;
             if (!group.Any(a => a.IsStore) || !group.Any(a => !a.IsStore)) continue;
             var own = new Access(offset, width, false);
             if (accesses.Any(a => a.Offset != offset && Overlap(a, own))) continue;

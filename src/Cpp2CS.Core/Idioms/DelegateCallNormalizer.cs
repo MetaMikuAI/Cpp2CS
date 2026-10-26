@@ -2,6 +2,7 @@ using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
+using Cpp2CS.Recovery;
 
 namespace Cpp2CS.Idioms;
 
@@ -196,9 +197,13 @@ internal sealed class DelegateCallNormalizer
             if (definitions.TryGetValue(u.Variable, out var value)) type = TypeOf(value, active);
             else if (phis.TryGetValue(u.Variable, out var phi))
             {
-                var sources = phi.Sources.Select(v => (Expr)new Use(v, v.Width)).Where(v => Top(v) is not Const { Value: 0 }).ToArray();
-                var types = sources.Select(v => TypeOf(v, active)).ToArray();
-                if (types.Length > 0 && types[0] is not null && types.All(t => Equals(t, types[0]))) type = types[0];
+                type = JoinedReferenceType(phi.Sources.Select(v => (Expr)new Use(v, v.Width)), definitions, phis, e => TypeOf(e, new(active)));
+                if (type is null)
+                {
+                    var sources = phi.Sources.Select(v => (Expr)new Use(v, v.Width)).Where(v => Top(v) is not Const { Value: 0 }).ToArray();
+                    var types = sources.Select(v => TypeOf(v, active)).ToArray();
+                    if (types.Length > 0 && types[0] is not null && types.All(t => Equals(t, types[0]))) type = types[0];
+                }
             }
             else if (results.TryGetValue(u.Variable, out var call))
             {
@@ -217,6 +222,8 @@ internal sealed class DelegateCallNormalizer
             return type;
         }
         if (expression is Ir.Convert c) return TypeOf(c.Operand, active);
+        if (expression is Select select)
+            return JoinedReferenceType([select.True, select.False], definitions, phis, e => TypeOf(e, new(active)));
         if (expression is Load { Address: FrameAddress frame } read && frameTypes.TryGetValue(frame.Offset, out var stored)
             && abi.Size(stored) * 8 == read.Width) return stored;
         if (expression is not Load load || Split(load.Address) is not { Root: { } root } split) return null;
@@ -237,6 +244,41 @@ internal sealed class DelegateCallNormalizer
             if (statics is { Kind: SymbolKind.StaticFields }) break;
         }
         return null;
+    }
+
+    // phi/条件选择的循环只合并引用来源；null 不提供类型，其他未知来源不能被忽略。
+    internal static TypeRef? JoinedReferenceType(IEnumerable<Expr> roots, IReadOnlyDictionary<Variable, Expr> definitions,
+        IReadOnlyDictionary<Variable, Phi> phis, Func<Expr, TypeRef?> resolve)
+    {
+        var pending = new Queue<Expr>(roots);
+        var seen = new HashSet<Variable>();
+        TypeRef? found = null;
+        while (pending.TryDequeue(out var expression))
+        {
+            if (expression is Const { Value: 0, Width: 64 }) continue;
+            if (expression is Use use)
+            {
+                if (definitions.TryGetValue(use.Variable, out var value) && value is Use or Select or Const { Value: 0, Width: 64 })
+                {
+                    if (seen.Add(use.Variable)) pending.Enqueue(value);
+                    continue;
+                }
+                if (phis.TryGetValue(use.Variable, out var phi))
+                {
+                    if (seen.Add(use.Variable)) foreach (var source in phi.Sources) pending.Enqueue(new Use(source, use.Width));
+                    continue;
+                }
+            }
+            if (expression is Select select)
+            {
+                pending.Enqueue(select.True); pending.Enqueue(select.False);
+                continue;
+            }
+            var type = resolve(expression);
+            if (type is null || !ManagedTypes.IsReferenceType(type) || found is not null && !found.Equals(type)) return null;
+            found = type;
+        }
+        return found;
     }
 
     // 内嵌结构体的委托字段与对象字段一样是引用；只接受唯一且宽度完全重合的叶子。

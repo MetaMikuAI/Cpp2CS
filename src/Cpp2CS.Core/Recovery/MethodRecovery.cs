@@ -314,6 +314,8 @@ public sealed partial class MethodRecovery
             NormalizeScalarVectors();
             TrimIndirectArguments();
             Ssa.Propagate.RemoveDead(function);
+            if (function.Blocks.Any(b => b.IsLandingPad))
+                ManagedFramePromotion.Run(facts, function, owner.abi, owner.lifter.Calls, owner.lifter.Machine.Convention.StackPointer);
             NormalizeCleanupThunks();
             if (function.Blocks.Any(b => b.IsLandingPad))
                 while (ExceptionNullBranches.Run(facts, function)) function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
@@ -916,6 +918,8 @@ public sealed partial class MethodRecovery
                     return itf.Definition.Methods.FirstOrDefault(m => m.Slot == pair.Item2) is { } interfaceMethod ? new MethodRef(interfaceMethod, itf.Arguments, []) : null;
                 case { Kind: OpKind.CallDelegate } when receiver is DefinitionRef d:
                     return d.Definition.Methods.FirstOrDefault(m => m.Name == "Invoke" && !m.IsStatic) is { } invoke ? new MethodRef(invoke, d.Arguments, []) : null;
+                case { Kind: OpKind.CallDelegate, Operand: MethodRef knownInvoke } when receiver is null:
+                    return knownInvoke;
                 default:
                     return null;
             }

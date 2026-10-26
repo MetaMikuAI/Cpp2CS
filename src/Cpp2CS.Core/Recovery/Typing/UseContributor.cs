@@ -5,7 +5,7 @@ using Convert = Cpp2CS.Ir.Convert;
 
 namespace Cpp2CS.Recovery.Typing;
 
-/// <summary>T1 的使用侧约束。只反传到常量、φ、整数表达式与已证的浮点选择，不给未知加载或调用结果猜类型。</summary>
+/// <summary>T1 的使用侧约束。反传到常量、φ、整数表达式及引用/浮点选择，不给未知加载或调用结果猜类型。</summary>
 internal sealed class UseContributor(TypingInputs input) : ITypeContributor
 {
     public string Name => "使用";
@@ -38,6 +38,12 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                     }
                     else if (context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
                         && value is Convert or Binary && active.Add(u.Variable))
+                    {
+                        Hint(value, type, address, detail);
+                        active.Remove(u.Variable);
+                        return;
+                    }
+                    else if (context.Types.Kind(type) == TypeKind.Reference && value is Select && active.Add(u.Variable))
                     {
                         Hint(value, type, address, detail);
                         active.Remove(u.Variable);
@@ -117,6 +123,8 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                 case Call call when call.Op is null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual or OpKind.CallDelegate }
                     && context.Resolve(call) is { } target && abi.Classify(target, out _) is { } signature:
                     var registers = call.ArgumentsBySource();
+                    if (call.DelegateReceiver is { } delegateReceiver && signature.This is { } delegateThis)
+                        yield return (delegateReceiver, delegateThis.Type, call.Address, "委托接收者");
                     foreach (var parameter in signature.Arguments)
                         if (parameter is { Passing: Passing.Registers, Pieces.Length: 1 } && registers.TryGetValue(parameter.Pieces[0].Register, out var argument))
                         {

@@ -53,6 +53,15 @@ internal static class TypingContributorCheck
         block.Statements[0] = new Define(0x1000, unknown, Expr.C(0, 64));
         restricted = new(); new UseContributor(input).Contribute(Context(), restricted);
         a.Equal<TypeResult?>(new ManagedResult(types.Object), TypeSolver.Solve(restricted, types).GetValueOrDefault(unknown), "64 位 null 可由返回签名定型");
+        var nullChoice = V(14); var unknownChoice = V(15); var choice = V(16);
+        block.Statements = [new Define(0x1000, nullChoice, Expr.C(0, 64)),
+            new Define(0x1004, unknownChoice, new Load(Expr.C(0x100, 64), 64)),
+            new Define(0x1008, choice, new Select(Expr.C(1, 1), new Use(nullChoice, 64), new Use(unknownChoice, 64), 64)),
+            new Return(0x100c) { Value = new Use(choice, 64) }];
+        restricted = new(); new UseContributor(input).Contribute(Context(), restricted);
+        var selectedReference = TypeSolver.Solve(restricted, types);
+        a.Equal<TypeResult?>(new ManagedResult(types.Object), selectedReference.GetValueOrDefault(nullChoice), "引用选择的使用传到 null 分支");
+        a.True(!selectedReference.ContainsKey(unknownChoice), "引用选择仍不猜未知加载类型");
 
         var exception = types.Corlib("System.Exception");
         var root = new Variable(Storage.Gpr(0), 0);

@@ -256,7 +256,13 @@ public static class ExceptionRegionBuilder
                 }
             foreach (var region in regions)
             {
-                if (region.Try.Overlaps(region.Handler)) return Result("未证成/try与自身handler交叉", region.Entry.ToString());
+                if (region.Try.Overlaps(region.Handler))
+                {
+                    if (Environment.GetEnvironmentVariable("CPP2CS_EH_DEBUG") == "1")
+                        foreach (var r in regions)
+                            Console.Error.WriteLine($"  [EH] {r.Kind} entry={r.Entry} try=[{string.Join(" ", r.Try.OrderBy(x => x.Id))}] handler=[{string.Join(" ", r.Handler.OrderBy(x => x.Id))}]");
+                    return Result("未证成/try与自身handler交叉", region.Entry.ToString());
+                }
                 var heads = region.Try.Where(f => f == graph.Entry || previous[f].Any(p => !region.Try.Contains(p))).ToArray();
                 if (heads.Length != 1) return Result("未证成/多入口try", $"{region.Entry}: {heads.Length}");
                 region.TryEntry = heads[0];
