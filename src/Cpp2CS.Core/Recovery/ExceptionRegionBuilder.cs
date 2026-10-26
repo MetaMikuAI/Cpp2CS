@@ -61,10 +61,10 @@ public static class ExceptionRegionBuilder
         // InitClass、写屏障在现有 L3 已按运行时事实删除；其余未知调用不扩大受保护范围。
         private static bool NonThrowing(Stmt s) => s is Phi or Define or Store or Jump or Branch or Nop or Return ||
             s is Call { Op.Kind: OpKind.BeginCatch or OpKind.EndCatch or OpKind.InitClass or OpKind.WriteBarrier or OpKind.MemoryBarrier };
-        // 只取出异常对象与 selector 再汇合的落地块（C++ 编译器为同一个 catch 复制的落地块）也是桥：异常值经 φ 由 L3 的异常值闭包处理。
+        // 取出异常对象、selector 或设置状态常量后汇合的落地块也是桥；常量与异常值经 φ 的异常边复制保留。
         // 异常从内层 catch 中传出时，落地块先 __cxa_end_catch（结束内层 catch）再转给外层的 selector 分派：同样是桥（CIL 退出内层 handler 是隐式的）。
         private static bool EmptyBridge(ExceptionFragment f) => f.Statements.All(s => s is Phi or Jump or Nop or Call { Op.Kind: OpKind.EndCatch }
-            || s is Define { Value: Intrinsic { Name: "eh_exception" or "eh_selector" } or Use or Ir.Convert { Operand: Use } });
+            || s is Define { Value: Intrinsic { Name: "eh_exception" or "eh_selector" } or Const or Use or Ir.Convert { Operand: Use } });
         private ExceptionFragment Canonical(ExceptionFragment f)
         {
             var seen = new HashSet<ExceptionFragment>();
@@ -86,7 +86,9 @@ public static class ExceptionRegionBuilder
             Block Normalize(Block b)
             {
                 var seen = new HashSet<Block>();
-                while (seen.Add(b) && b.Handler is null && b.Statements.All(s => s is Phi or Jump) && b.NormalSuccessors.ToArray() is [var n]) b = n;
+                while (seen.Add(b) && b.Handler is null && b.Statements.All(s => s is Phi or Jump or Nop
+                    || s is Define { Target.Storage: { Bank: Bank.Gpr, Index: > 1 }, Value: Const })
+                    && b.NormalSuccessors.ToArray() is [var n]) b = n;
                 return b;
             }
             var byAddress = function.Blocks.GroupBy(b => b.Start).ToDictionary(g => g.Key, g => g.First());
@@ -98,11 +100,31 @@ public static class ExceptionRegionBuilder
             }
             var incomingByPad = function.Range.ExceptionRegions.Where(r => r.LandingPad != 0).Select(r => (Region: r, Pad: Resolve(r.LandingPad)))
                 .Where(p => p.Pad is not null).GroupBy(p => Normalize(p.Pad!)).ToDictionary(g => g.Key, g => g.Select(p => p.Region).ToArray());
-            var normalEntries = function.Blocks.Where(b => b.Predecessors.Any(p => p.NormalSuccessors.Contains(b) && Normalize(p) != Normalize(b)))
-                .Select(Normalize).ToHashSet();
-            foreach (var block in function.Blocks)
+            bool changed;
+            do
+            {
+                changed = false;
+                IEnumerable<ExceptionFragment> Successors(ExceptionFragment f)
+                {
+                    var successors = f.Normal.AsEnumerable();
+                    if (f.Statements.LastOrDefault() is Branch { Condition: Compare { Cond: Cond.Eq or Cond.Ne } cmp } branch
+                        && Values(cmp.Left) is { } left && Values(cmp.Right) is { } right)
+                    {
+                        var choices = left.SelectMany(l => right.Select(r => cmp.Cond == Cond.Eq ? l == r : l != r)).Distinct().ToArray();
+                        if (choices is [var choice]) successors = successors.Where(n => n.Block.Start == (choice ? branch.Target : branch.Fallthrough));
+                    }
+                    if (f.Exceptional is { } ex && !f.Statements.OfType<Call>().All(Bookkeeping)) successors = successors.Append(ex);
+                    return successors;
+                }
+                // 已证成的 selector 会切掉外语异常清理路径；其 phi 输入不能再阻塞外层 catch 的证明。
+                var active = Reach([graph.Entry], Successors);
+                var activeBlocks = active.Select(f => f.Block).ToHashSet();
+                var normalEntries = active.SelectMany(f => Successors(f).Where(n => f.Normal.Contains(n)
+                    && n.Block != f.Block && Normalize(n.Block) != Normalize(f.Block))).Select(n => Normalize(n.Block)).ToHashSet();
+                foreach (var block in function.Blocks.Where(activeBlocks.Contains))
                 foreach (var d in block.Statements.OfType<Define>().Where(d => d.Value is Intrinsic { Name: "eh_selector" }))
                 {
+                    if (selector.ContainsKey(d.Target)) continue;
                     if (normalEntries.Contains(Normalize(block)) || !incomingByPad.TryGetValue(Normalize(block), out var incoming)) continue;
                     var values = new HashSet<long>(); var proven = true;
                     foreach (var r in incoming)
@@ -113,18 +135,15 @@ public static class ExceptionRegionBuilder
                         else if (action.Filter > 0 && action.TypeInfo is > 0 && wrapperSlot(action.TypeInfo.Value)) values.Add(action.Filter);
                         else proven = false;
                     }
-                    if (proven) selector[d.Target] = values.Order().ToArray();
+                    if (proven) { selector[d.Target] = values.Order().ToArray(); changed = true; }
                 }
-            bool changed;
-            do
-            {
-                changed = false;
                 foreach (var d in definitions)
                     if (!selector.ContainsKey(d.Target) && Values(d.Value) is { } v) { selector[d.Target] = v; changed = true; }
-                foreach (var p in function.Blocks.SelectMany(b => b.Statements).OfType<Phi>())
+                foreach (var block in function.Blocks.Where(activeBlocks.Contains))
+                foreach (var p in block.Statements.OfType<Phi>())
                 {
                     if (selector.ContainsKey(p.Target)) continue;
-                    var inputs = p.Sources.Where(v => v != p.Target).Distinct().ToArray();
+                    var inputs = p.Sources.Where((v, i) => v != p.Target && activeBlocks.Contains(block.Predecessors[i])).Distinct().ToArray();
                     if (inputs.Length > 0 && inputs.All(selector.ContainsKey))
                     { selector[p.Target] = inputs.SelectMany(v => selector[v]).Distinct().Order().ToArray(); changed = true; }
                 }
@@ -187,17 +206,22 @@ public static class ExceptionRegionBuilder
                 f.Statements.All(NonThrowing) || protectedBy.GetValueOrDefault(f) == outer);
             // 普通后继的共同支配者补齐每个 try；支配图含异常边，支持 try/catch 内的完整嵌套。
             var dom = Dominators();
-            foreach (var region in regions)
+            HashSet<ExceptionFragment>? TryClosure(ExceptionRegionPlan region)
             {
                 var head = region.Try.First();
                 while (!region.Try.All(f => Dominates(dom, head, f)))
                 {
-                    if (dom[head] == head) return Result("未证成/无共同入口", region.Entry.ToString());
+                    if (dom[head] == head) return null;
                     head = dom[head];
                 }
                 var closure = Reach(region.Try, f => f == head ? [] : previous[f].Where(p => normal[p].Contains(f)));
                 closure.Add(head);
                 // 连接语句即使可能抛出（原生侧没有指向本 handler 的异常边）也并入 try：不做静态证明，由执行对照判定（用户决定）。
+                return closure;
+            }
+            foreach (var region in regions)
+            {
+                if (TryClosure(region) is not { } closure) return Result("未证成/无共同入口", region.Entry.ToString());
                 region.Try.UnionWith(closure);
             }
             // 若外层 try 已包含内层的一部分，就只能完整包含内层 try+handler。不得只包含 handler。
@@ -222,6 +246,12 @@ public static class ExceptionRegionBuilder
                         if (!CanContain(inner, outer)) return Result("未证成/内层handler抛出目标不同", $"{outer.Entry}/{inner.Entry}");
                         foreach (var f in inner.Handler) expanded |= outer.Try.Add(f);
                     }
+                // 并入内层区域后，原共同入口可能已不再支配所有成员，需要补齐新增路径。
+                foreach (var region in regions)
+                {
+                    if (TryClosure(region) is not { } closure) return Result("未证成/无共同入口", region.Entry.ToString());
+                    foreach (var f in closure) expanded |= region.Try.Add(f);
+                }
             } while (expanded);
             // catch 与正常路径共用的尾部（C++ 编译器合并了相同代码）移出 handler，handler 以 leave 跳到共用尾部；启发式，由执行对照判定（用户决定）。
             foreach (var region in regions.Where(r => r.Kind == "catch"))

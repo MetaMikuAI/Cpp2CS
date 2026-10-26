@@ -80,6 +80,16 @@ public sealed partial class MethodRecovery
             foreach (var (variable, exception) in closedExceptions) exceptionValues.TryAdd(variable, exception);
             foreach (var variable in wrappers.Keys) runtime.Add(variable);
             foreach (var (variable, exception) in exceptionValues) known[variable] = exception.Type;
+            // selector 分派剪枝后，外语异常清理路径的栈上备份可能已没有任何读取。
+            var selectors = values.Where(p => p.Value is Intrinsic { Name: "eh_selector" }).Select(p => p.Key).ToHashSet();
+            foreach (var store in blocks.SelectMany(b => b.Statements).OfType<Store>())
+                if (store is { Target: FrameAddress address, Value: Use use } && selectors.Contains(use.Variable)
+                    && !blocks.SelectMany(b => b.Statements).Where(s => !ReferenceEquals(s, store))
+                        .SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).Any(e =>
+                            e is Load load && FrameOffset(load.Address) is { } offset
+                                && offset < address.Offset + use.Width / 8 && offset + load.Width / 8 > address.Offset
+                            || FrameOffset(e) is { } pointer && pointer >= address.Offset && pointer < address.Offset + use.Width / 8))
+                    dropped.Add(store);
         }
 
         private bool PrepareExceptionTypeChecks()
