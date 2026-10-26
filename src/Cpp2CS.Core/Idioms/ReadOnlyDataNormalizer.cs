@@ -58,10 +58,13 @@ internal static class ReadOnlyDataNormalizer
             {
                 if (!dominators.Dominates(parent.Index, block.Index)
                     || parent.Statements.LastOrDefault() is not Branch { Condition: Compare { Left: var compared, Right: Const limit } condition } branch
-                    || compared != index || limit.Value is 0 or > 256) continue;
-                var destination = condition.Cond switch { Cond.Ult => branch.Target, Cond.Uge => branch.Fallthrough, _ => 0UL };
+                    || compared != index || limit.Value > 256) continue;
+                var count = (int)limit.Value + (condition.Cond is Cond.Ule or Cond.Ugt ? 1 : 0);
+                if (count is < 1 or > 256) continue;
+                var destination = condition.Cond switch
+                { Cond.Ult or Cond.Ule => branch.Target, Cond.Uge or Cond.Ugt => branch.Fallthrough, _ => 0UL };
                 var child = parent.NormalSuccessors.FirstOrDefault(b => b.Start == destination);
-                if (child is not null && child.Predecessors.Count == 1 && dominators.Dominates(child.Index, block.Index)) return (int)limit.Value;
+                if (child is not null && child.Predecessors.Count == 1 && dominators.Dominates(child.Index, block.Index)) return count;
             }
             return 0;
         }
