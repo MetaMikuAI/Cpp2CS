@@ -109,7 +109,7 @@ public static class SourceRewriter
     /// il2cpp 的 catch 一律接住异常再判断类型：handler 入口的直线序列中，按 isinst 结果分支、不匹配一侧重新抛出时，
     /// 改成带类型的 catch，分支只留匹配一侧（不匹配的异常本来就继续传播）。
     /// </summary>
-    private static ManagedBody TypedCatches(ManagedBody body)
+    internal static ManagedBody TypedCatches(ManagedBody body)
     {
         if (body.Regions.Count == 0) return body;
         var blocks = body.Blocks.ToDictionary(b => b.Address);
@@ -136,7 +136,14 @@ public static class SourceRewriter
                 if (s is ManagedBranch test)
                 {
                     var check = Expand(test.Condition, 0).OfType<IsInstValue>().FirstOrDefault(i => IsException(i.Operand, exception.Variable));
-                    if (check is null) break;
+                    // catch 的类型必须是 Exception 或其子类；handler 内的 object/interface 检查不是 catch 类型。
+                    bool ExceptionType(TypeRef type)
+                    {
+                        for (TypeRef? current = type; current is DefinitionRef definition; current = definition.Definition.BaseType?.Substitute(definition.Arguments, []))
+                            if (definition.Definition is { Assembly: "mscorlib.dll", FullName: "System.Exception" }) return true;
+                        return false;
+                    }
+                    if (check is null || !ExceptionType(check.Target)) break;
                     bool taken = Rethrows(test.Taken.Target, exception.Variable), fallthrough = Rethrows(test.Fallthrough.Target, exception.Variable);
                     if (taken == fallthrough) break;
                     regions[k] = region with { CatchType = check.Target };
