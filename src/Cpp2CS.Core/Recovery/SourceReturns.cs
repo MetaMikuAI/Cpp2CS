@@ -65,6 +65,28 @@ internal static class SourceReturns
                     && statements[i] is ManagedStore { Value: ConstantValue } first
                     && statements[i + 1] is ManagedStore { Value: ConstantValue } second
                     && first.Target.Equals(second.Target)) statements.RemoveAt(i);
+            // 指令调度可把捕获局部值的保存插进 current/state 序列。相互独立且不抛出的写入先完成，再连续挂起。
+            static bool Scalar(ManagedValue value) => Pure(value) || value is BinaryValue
+                { Op: BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Shl or BinOp.LShr or BinOp.AShr
+                    or BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv } binary && Scalar(binary.Left) && Scalar(binary.Right);
+            for (var i = 0; i < statements.Count - 3; i++)
+            {
+                if (statements[i] is not ManagedStore { Target: FieldValue { Receiver: ArgumentValue { Index: -1 }, Accessor: null,
+                        Field.Field.Name: "<>2__current" } current, Value: var yielded }
+                    || current.Field.Field.Owner != method.Owner || !Scalar(yielded)) continue;
+                var end = i + 1;
+                while (end < statements.Count && statements[end] is ManagedStore
+                    { Target: FieldValue { Receiver: ArgumentValue { Index: -1 }, Accessor: null } field, Value: var saved }
+                    && field.Field.Field.Owner == method.Owner && field.Field.Field.Name is not ("<>1__state" or "<>2__current")
+                    && Scalar(saved)) end++;
+                if (end == i + 1 || end + 1 >= statements.Count || !StateWrite(statements[end])
+                    || statements[end] is not ManagedStore { Value: ConstantValue }
+                    || statements[end + 1] is not ManagedReturn { Value: ConstantValue { Bits: 1 } }) continue;
+                var write = statements[i];
+                statements.RemoveAt(i);
+                statements.Insert(end - 1, write);
+                i = end;
+            }
             return block with { Statements = statements };
         }).ToArray() };
     }

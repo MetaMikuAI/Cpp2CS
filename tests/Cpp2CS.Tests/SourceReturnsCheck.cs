@@ -95,5 +95,18 @@ internal static class SourceReturnsCheck
             [overwritten.Blocks[0].Statements[0], Read(0, state, "<>1__state"), shared.Blocks[0].Statements[0]] }, .. shared.Blocks.Skip(1)] };
         a.True(SourceReturns.Rewrite(observed).Blocks[0].Statements.OfType<ManagedStore>().Count() == 2,
             "两次写入之间有读取时保留中间状态");
+        var current = new ManagedStore(0, Read(0, capture, "<>2__current").Value, new ConstantValue(0, type, 64));
+        var saved = new ManagedStore(0, Read(0, state, "<time>5__2").Value,
+            new BinaryValue(BinOp.Add, state, new ConstantValue(1, integer, 32), integer, 32));
+        var suspended = new ManagedBody(body.Method, [new(0, [current, saved, write with { Value = new ConstantValue(1, integer, 32) },
+            new ManagedReturn(0, new ConstantValue(1, result.Type, 1))])]);
+        var reordered = SourceReturns.Rewrite(suspended).Blocks[0].Statements;
+        a.True(reordered[0] == saved && reordered[1] == current, "独立的局部值写入先完成，current/state 挂起序列相邻");
+        var readsCurrent = suspended with { Blocks = [suspended.Blocks[0] with { Statements =
+            [current, saved with { Value = current.Target }, .. suspended.Blocks[0].Statements.Skip(2)] }] };
+        a.True(SourceReturns.Rewrite(readsCurrent).Blocks[0].Statements[0] == current, "读取 current 的写入不能提前");
+        var callBetween = suspended with { Blocks = [suspended.Blocks[0] with { Statements =
+            [current, new ManagedCall(0, new(null!, null, [], false), null, false), .. suspended.Blocks[0].Statements.Skip(1)] }] };
+        a.True(SourceReturns.Rewrite(callBetween).Blocks[0].Statements[0] == current, "不跨过调用调整挂起写入");
     }
 }
