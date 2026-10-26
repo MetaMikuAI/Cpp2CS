@@ -32,6 +32,8 @@ internal static class SourceStructCopies
             AddressValue { Target: LocalValue local } => local,
             _ => null,
         };
+        static ManagedValue? Destination(ManagedValue value) => value is AddressValue { Target: FieldValue { Receiver: LocalValue or ArgumentValue } field }
+            ? field : Local(value);
         var uses = body.Blocks.SelectMany(b => b.Statements).SelectMany(s =>
                 (s is ManagedAssignment a ? [a.Value] : ManagedValues.Of(s)).Concat(ManagedValues.CopiedValues(s)))
             .SelectMany(ManagedValues.Walk).OfType<LocalValue>().GroupBy(l => l.Variable).ToDictionary(g => g.Key, g => g.Count());
@@ -48,7 +50,7 @@ internal static class SourceStructCopies
                     || !reads.Select(r => ((FieldValue)r.Value).Field.Field).ToHashSet().SetEquals(fields)
                     || reads.Select(r => r.Target.Variable).Distinct().Count() != fields.Count) continue;
                 var snapshots = reads.ToDictionary(r => r.Target.Variable, r => (FieldValue)r.Value);
-                var destinations = new Dictionary<LocalValue, HashSet<FieldDef>>();
+                var destinations = new Dictionary<ManagedValue, HashSet<FieldDef>>();
                 var initialized = new HashSet<LocalValue>();
                 var consumed = new Dictionary<Cpp2CS.Ir.Variable, int>();
                 var end = i + reads.Length;
@@ -57,7 +59,7 @@ internal static class SourceStructCopies
                     if (statements[end] is ManagedStore { Target: IndirectValue { Address: AddressValue { Target: LocalValue zero } }, Value: ComposedValue { Leaves.Count: 0 } }
                         && zero.Type.Equals(source.Type) && zero != source && !destinations.ContainsKey(zero)) initialized.Add(zero);
                     else if (statements[end] is ManagedStore { Target: FieldValue target, Value: LocalValue value }
-                        && Local(target.Receiver) is { } destination && destination != source && destination.Type.Equals(source.Type)
+                        && Destination(target.Receiver) is { } destination && destination != source && destination.Type.Equals(source.Type)
                         && snapshots.TryGetValue(value.Variable, out var read) && target.Field.Equals(read.Field))
                     {
                         if (!destinations.TryGetValue(destination, out var copied)) destinations[destination] = copied = [];
@@ -71,7 +73,8 @@ internal static class SourceStructCopies
                 if (destinations.Count == 0 || initialized.Any(d => !destinations.ContainsKey(d)) || destinations.Values.Any(f => !f.SetEquals(fields))
                     || snapshots.Keys.Any(v => consumed.GetValueOrDefault(v) != uses.GetValueOrDefault(v))) continue;
                 statements.RemoveRange(i, end - i);
-                statements.InsertRange(i, destinations.Keys.Select(d => new ManagedAssignment(first.Address, d, source)));
+                statements.InsertRange(i, destinations.Keys.Select(d => d is LocalValue local
+                    ? (ManagedStatement)new ManagedAssignment(first.Address, local, source) : new ManagedStore(first.Address, d, source)));
                 i += destinations.Count - 1;
             }
             for (var i = 0; i < statements.Count; i++)

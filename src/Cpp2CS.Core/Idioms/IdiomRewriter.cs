@@ -120,8 +120,8 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             nativeInputs.Add(entry, null);
             var methods = facts.EntriesAt(entry).Select(e => e.Method).OfType<MethodRef>().ToArray();
             reads = null;
-            if (methods.Length > 0 && methods.All(m => !m.Method.IsVirtual && m.Method.Address == entry
-                && m.Method.GenericParameters.Count == 0 && m.Method.Owner.GenericParameters.Count == 0))
+            if (methods.Length > 0 && methods.All(m => !m.Method.IsVirtual && (m.Method.Address == entry || m.Method.Address == 0)
+                && !m.TypeArguments.Concat(m.MethodArguments).Any(FieldLayouts.IsFullyShared)))
             {
                 var signatures = methods.Select(m => abi.Classify(m, out _)).ToArray();
                 if (signatures.All(s => s is not null))
@@ -227,6 +227,11 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             if (!owner.AuditLegacyDelegateCalls && DelegateCallNormalizer.Run(facts, function, Result)) Cleanup();
             if (!owner.AuditRawManagedThrows && ManagedThrowNormalizer.Run(facts, function, Result)) Cleanup();
             if (foldedRuntimeGuards) PruneRuntimeGuards();
+            if (InitializedClassLoads())
+            {
+                Cleanup();
+                PruneRuntimeGuards();
+            }
             while (FiniteConditions.Simplify(function)) Cleanup();
             Residuals();
         }
@@ -279,11 +284,14 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     if (block.Statements[i] is not Call { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target } call
                         || owner.calls.Signature(target.Value) is not { } signature) continue;
                     var methods = facts.EntriesAt(target.Value).Select(e => e.Method).OfType<MethodRef>().ToArray();
-                    if (methods.Length == 0 || methods.Any(m => m.Method.Address != target.Value
-                        || m.Method.GenericParameters.Count != 0 || m.Method.Owner.GenericParameters.Count != 0)) continue;
+                    if (methods.Length == 0 || methods.Any(m => m.Method.Address != target.Value && m.Method.Address != 0
+                        || m.TypeArguments.Concat(m.MethodArguments).Any(FieldLayouts.IsFullyShared))) continue;
                     var args = (Expr[])call.Arguments.Clone();
                     for (var k = 0; k < args.Length && k < call.Sources.Length; k++)
                     {
+                        // 原生函数可不读 MethodInfo，但恢复泛型调用仍依赖它选择实例。
+                        if (call.Sources[k] == signature.MethodInfo && methods.Any(m => m.Method.GenericParameters.Count != 0
+                            || m.Method.Owner.GenericParameters.Count != 0)) continue;
                         if (args[k] is Unknown || !ResidualInput(args[k], [])) continue;
                         if (call.Sources[k] != signature.MethodInfo && !owner.UnusedInput(target.Value, call.Sources[k])) continue;
                         args[k] = new Unknown("原生被调方未用的输入", args[k].Width);
@@ -340,7 +348,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             address is Binary { Op: BinOp.Add, Right: Const offset } b ? (b.Left, offset.Value) : (address, 0);
 
         private static DefinitionRef GenericForm(TypeDef type) =>
-            new(type, type.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, false, p.Position)).ToArray());
+            new(type, type.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, false, p.Position) { Parameter = p }).ToArray());
 
         private static RgctxTable Table(MethodRef method) => new(method.Method.Owner.Assembly, method.Method.Token, method.ToString(), method.TypeArguments, method.MethodArguments);
 
@@ -497,6 +505,34 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         }
 
         // ---------- 守卫 ----------
+
+        // 同一类型初始化已在所有到达路径上完成时，后续 cctor_finished 检查走已初始化分支。
+        private bool InitializedClassLoads()
+        {
+            if (self?.Method.Name == ".cctor") return false;
+            var initialized = function.Blocks.SelectMany(b => b.Statements.Select((s, i) => (Block: b, Index: i, Statement: s)))
+                .Where(p => p.Statement is Call { Op: { Kind: OpKind.RunClassConstructor, Operand: DefinitionRef } }).ToArray();
+            if (initialized.Length == 0) return false;
+            var dominators = Dominators.Compute(function);
+            var changed = false;
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                {
+                    var statement = block.Statements[i];
+                    var mapped = ExprMap.MapOperands(statement, e => ExprMap.Map(e, value =>
+                    {
+                        if (value is not Load { Width: 32, Address: Binary { Op: BinOp.Add,
+                            Left: Symbol { Kind: SymbolKind.Class, Value: DefinitionRef type },
+                            Right: Const { Value: RuntimeLayout.ClassCctorFinishedOrNoCctor } } }) return null;
+                        if (!initialized.Any(p => ((Call)p.Statement).Op!.Operand!.Equals(type)
+                            && dominators.Dominates(p.Block.Index, block.Index) && (p.Block != block || p.Index < i))) return null;
+                        changed = true;
+                        return Expr.C(1, 32);
+                    }));
+                    block.Statements[i] = mapped;
+                }
+            return changed;
+        }
 
         /// <summary>从 start 出发的单前驱、单后继直链，直到 merge；不是直链返回 null。</summary>
         private static List<Block>? Chain(Block start, Block merge)
@@ -862,7 +898,11 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 var call = chain.SelectMany(b => b.Statements).OfType<Call>().FirstOrDefault(c => c.Defines.Contains(inside));
                 if (call is not null && resultEquals is not null && call.Defines[0] == inside)
                 {
-                    if (defs.Expand(new Use(skipped, 64)) != resultEquals) return null;
+                    if (defs.Expand(new Use(skipped, 64)) != resultEquals)
+                    {
+                        if (Used(phi.Target)) return null;
+                        overrides[phi.Target] = new Variable(phi.Target.Storage, -1);
+                    }
                     continue;
                 }
                 if (call is null && reload?.Invoke(inside) is { } fresh)

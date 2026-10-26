@@ -110,6 +110,9 @@ public sealed partial class MethodRecovery
                 throw Fail(0, $"数组 {array} 的访问 +0x{offset:x}:{width} 尚未支持");
             }
             if (rest.Count != 0) throw Fail(0, $"访存 地址 {address} 含变址");
+            if (receiverType is ByRefRef reference && offset == 0 && width == types.Bits(reference.Element)
+                && types.Kind(reference.Element) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference)
+                return new IndirectValue(Recover(baseTerm, null), reference.Element, width);
             if (StructLocation(baseTerm, receiverType, offset, width) is { } leaf) return leaf;
             if (MemoryFragment(baseTerm, receiverType, offset, width) is { } fragment) return fragment;
             if (offset == RuntimeLayout.ObjectKlass) throw Fail(0, "访存 读取对象的类指针");

@@ -81,6 +81,7 @@ public sealed class ManagedTypes
     public static bool IsReferenceType(TypeRef type) => type switch
     {
         ArrayRef => true,
+        GenericParameterRef generic => generic.IsReference,
         DefinitionRef d => !d.Definition.IsValueType,
         _ => false,
     };
@@ -93,6 +94,7 @@ public sealed class ManagedTypes
         switch (type)
         {
             case ArrayRef: return TypeKind.Reference;
+            case GenericParameterRef { IsReference: true }: return TypeKind.Reference;
             case PointerRef or ByRefRef: return TypeKind.Pointer;
             case DefinitionRef d:
                 if (FieldLayouts.IsFullyShared(d)) return null;
@@ -136,6 +138,8 @@ public sealed class ManagedTypes
         if (from.Equals(to)) return true;
         if (!IsReferenceType(from) || !IsReferenceType(to)) return false;
         if (to.Equals(Object)) return true;
+        if (from is GenericParameterRef generic)
+            return generic.Parameter?.Constraints.Any(c => IsAssignable(c, to)) == true;
         if (from is ArrayRef array)
         {
             // C# 17.2.2/17.2.3、17.6：数组继承 Array；只有 SZARRAY 实现泛型集合接口。
@@ -169,6 +173,7 @@ public sealed class ManagedTypes
     public FieldAccess? InstanceField(TypeRef receiver, int offset, int bytes)
     {
         TypeRef? current = receiver;
+        if (receiver is GenericParameterRef { ReferenceBase: { } constraint }) current = constraint;
         if (receiver is ByRefRef { Element: DefinitionRef { Definition.IsValueType: true } value })
         {
             current = value;

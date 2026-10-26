@@ -115,7 +115,7 @@ public sealed partial class MethodRecovery
                 if (containing.Length == 1) return Slice(containing[0].Value, low - containing[0].Low, width);
                 var parts = fragment.Parts.Where(p => p.Low >= low && p.Low + p.Value.Width <= low + width)
                     .Select(p => new Part(p.Low - low, p.Value)).ToArray();
-                return Pack(new Fragment(parts, fragment.Type, width));
+                return new Fragment(parts, fragment.Type, width);
             }
             if (width is not (8 or 16 or 32 or 64) || value.Width > 64 || low + width > value.Width)
                 throw Fail(0, $"结构体 位段 [{low},{low + width}) 无法由已证明的叶子重建");

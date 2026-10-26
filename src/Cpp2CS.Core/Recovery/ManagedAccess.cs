@@ -57,8 +57,8 @@ public static class ManagedAccess
             privateAccess |= context == owner;
             var contextType = new DefinitionRef(context, []);
             var receiverType = receiver is ByRefRef byRef ? byRef.Element : receiver;
-            familyAccess |= types.IsAssignable(contextType, declaringType)
-                && (receiverType is null || types.IsAssignable(receiverType, contextType));
+            familyAccess |= DerivesFrom(contextType, owner)
+                && (receiverType is null || DerivesFrom(receiverType, context));
         }
         return access switch
         {
@@ -66,5 +66,13 @@ public static class ManagedAccess
             3 => sameAssembly, 4 => familyAccess, 5 => familyAccess || sameAssembly,
             _ => false,
         };
+    }
+
+    private static bool DerivesFrom(TypeRef type, TypeDef definition)
+    {
+        if (type is GenericParameterRef { ReferenceBase: { } constraint }) type = constraint;
+        for (TypeRef? current = type; current is DefinitionRef d; current = d.Definition.BaseType?.Substitute(d.Arguments, []))
+            if (d.Definition == definition) return true;
+        return false;
     }
 }

@@ -38,6 +38,14 @@ public sealed record ByRefRef(TypeRef Element) : TypeRef
 
 public sealed record GenericParameterRef(string Name, bool IsMethod, int Position) : TypeRef
 {
+    public GenericParameterDef? Parameter { get; init; }
+    public DefinitionRef? ReferenceBase => Parameter?.Constraints.OfType<DefinitionRef>().FirstOrDefault(t => !t.Definition.IsValueType
+        && !t.Definition.IsInterface && t.Definition.FullName is not ("System.Object" or "System.ValueType" or "System.Enum"));
+    public bool IsReference => (Parameter?.Attributes & GenericParameterAttributes.ReferenceTypeConstraint) != 0 && Parameter is not null
+        || ReferenceBase is not null;
+    // 约束是参数的语义信息，不改变其名称和槽位身份。
+    public bool Equals(GenericParameterRef? other) => other is not null && Name == other.Name && IsMethod == other.IsMethod && Position == other.Position;
+    public override int GetHashCode() => HashCode.Combine(Name, IsMethod, Position);
     public override string ToString() => Name;
 }
 
@@ -219,8 +227,8 @@ public sealed class EventDef
 public sealed record MethodRef(MethodDef Method, IReadOnlyList<TypeRef> TypeArguments, IReadOnlyList<TypeRef> MethodArguments)
 {
     public static MethodRef Open(MethodDef method) => new(method,
-        method.Owner.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, false, p.Position)).ToArray(),
-        method.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, true, p.Position)).ToArray());
+        method.Owner.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, false, p.Position) { Parameter = p }).ToArray(),
+        method.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, true, p.Position) { Parameter = p }).ToArray());
 
     public bool Equals(MethodRef? other) => other is not null && Method == other.Method && TypeArguments.SequenceEqual(other.TypeArguments) && MethodArguments.SequenceEqual(other.MethodArguments);
     public override int GetHashCode() => MethodArguments.Aggregate(TypeArguments.Aggregate(Method.Index, (h, a) => HashCode.Combine(h, a)), (h, a) => HashCode.Combine(h, a));

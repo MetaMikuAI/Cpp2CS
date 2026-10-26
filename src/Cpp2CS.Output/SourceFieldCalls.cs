@@ -8,20 +8,43 @@ namespace Cpp2CS.Output;
 public sealed partial class SourceLibraryCalls
 {
     private sealed record FieldCall(MethodRef Method, FieldRef Field, bool Write);
-    private readonly Dictionary<TypeDef, FieldCall[]> fieldCalls = [];
+    private readonly Dictionary<DefinitionRef, FieldCall[]> fieldCalls = [];
+    private Dictionary<MethodRef, ulong>? fieldCallEntries;
 
-    // 只用实际原生方法的单字段读写形态认回公开入口，不按属性名猜字段。
-    private FieldCall[] FieldCalls(TypeDef type)
+    // 只用实际原生方法的单字段读写形态认回可访问入口，不按属性名猜字段。
+    private FieldCall[] FieldCalls(DefinitionRef type)
     {
         if (fieldCalls.TryGetValue(type, out var cached)) return cached;
         var found = new List<FieldCall>();
-        foreach (var method in type.Methods.Where(m => m.Address != 0 && m.GenericParameters.Count == 0 && m.Owner.GenericParameters.Count == 0
+        foreach (var method in type.Definition.Methods.Where(m => m.GenericParameters.Count == 0
             && m.Name is not (".ctor" or ".cctor") && m.Parameters.Count <= 1 && !m.IsVirtual
-            && (m.Attributes & System.Reflection.MethodAttributes.MemberAccessMask) == System.Reflection.MethodAttributes.Public
-            && facts.Code.At(m.Address) is { Region: CodeRegion.Managed, Size: <= 128 }))
+            && (m.Attributes & System.Reflection.MethodAttributes.MemberAccessMask) is System.Reflection.MethodAttributes.Public
+                or System.Reflection.MethodAttributes.Family or System.Reflection.MethodAttributes.FamORAssem))
         {
-            var reference = new MethodRef(method, [], []);
-            if (recovery.Recover(reference, method.Address).Body is not { Regions.Count: 0 } original) continue;
+            var reference = new MethodRef(method, type.Arguments, []);
+            var entry = method.Address;
+            if (type.Arguments.Count != 0)
+            {
+                fieldCallEntries ??= facts.Code.Functions.SelectMany(fn => facts.EntriesAt(fn.Start)
+                    .Where(e => e.Kind == EntryKind.GenericMethod && e.Method is not null).Select(e => (Method: e.Method!, Entry: fn.Start)))
+                    .GroupBy(p => p.Method).ToDictionary(g => g.Key, g => g.First().Entry);
+                var shared = new MethodRef(method, type.Arguments.Select(a => ManagedTypes.IsReferenceType(a) ? (TypeRef)types.Object : a).ToArray(), []);
+                if (!fieldCallEntries.TryGetValue(reference, out entry) && !fieldCallEntries.TryGetValue(shared, out entry))
+                {
+                    // Nullable 的单字段入口可能只保留了另一个同布局实例；仍须恢复并证明单字段读写。
+                    if (type.Definition is not { Assembly: "mscorlib.dll", FullName: "System.Nullable" }
+                        || facts.Layouts.Of(type) is not { } expected) continue;
+                    entry = fieldCallEntries.FirstOrDefault(p => p.Key.Method == method
+                        && p.Key.DeclaringType is DefinitionRef instance && facts.Layouts.Of(instance) is { } layout
+                        && layout.Fields.Count == expected.Fields.Count && layout.Fields.Zip(expected.Fields).All(pair =>
+                            pair.First.Field == pair.Second.Field && pair.First.Offset == pair.Second.Offset
+                            && types.Size(pair.First.Type) == types.Size(pair.Second.Type)
+                            && types.Kind(pair.First.Type) == types.Kind(pair.Second.Type))).Value;
+                }
+            }
+            if (entry == 0 || facts.Code.At(entry) is not { Region: CodeRegion.Managed, Size: <= 128 }) continue;
+            var recovered = type.Arguments.Count == 0 ? recovery.Recover(reference, entry) : recovery.RecoverInstance(reference, entry);
+            if (recovered.Body is not { Regions.Count: 0 } original) continue;
             var body = SourceRewriter.Rewrite(original, types);
             var values = new Dictionary<Variable, ManagedValue>();
             var stores = new List<ManagedStore>();
@@ -39,6 +62,9 @@ public sealed partial class SourceLibraryCalls
                 }
             }
             if (!valid) continue;
+            if (types.Kind(method.ReturnType.Substitute(type.Arguments, [])) == TypeKind.Bool
+                && returned is ConversionValue { Kind: ConvKind.Truncate, Operand: ConversionValue { Kind: ConvKind.ZeroExtend, Operand: var boolean } } narrowed
+                && narrowed.Width == boolean.Width && types.Kind(boolean.Type) == TypeKind.Bool) returned = boolean;
             FieldRef? Storage(ManagedValue value) => value switch
             {
                 FieldValue { Receiver: ArgumentValue { Index: -1 }, Field: var field } when !method.IsStatic => field,
@@ -53,7 +79,7 @@ public sealed partial class SourceLibraryCalls
                     return Equals(Storage(v), storage) || method.Parameters.Count == 1 && v is ArgumentValue { Index: 0 };
                 });
             if (method.Parameters.Count == 0 && stores.Count == 0 && returned is not null && Storage(returned) is { } read
-                && returned.Type.Equals(method.ReturnType) && OnlyStorage(read)) found.Add(new(reference, read, false));
+                && returned.Type.Equals(method.ReturnType.Substitute(type.Arguments, [])) && OnlyStorage(read)) found.Add(new(reference, read, false));
             if (method.Parameters.Count == 1 && ManagedTypes.IsVoid(method.ReturnType) && stores is [var write]
                 && Storage(write.Target) is { } field && write.Value is ArgumentValue { Index: 0 } argument
                 && argument.Type.Equals(write.Target.Type) && OnlyStorage(field)) found.Add(new(reference, field, true));
@@ -65,8 +91,10 @@ public sealed partial class SourceLibraryCalls
     {
         FieldCall? Find(ManagedValue value, bool write)
         {
-            if (FieldAccessor.FieldOf(value) is not { } field || ManagedAccess.Field(types, body.Method.Method.Owner, field, FieldAccessor.ReceiverType(value))) return null;
-            return FieldCalls(field.Field.Owner).FirstOrDefault(c => c.Write == write && c.Field.Equals(field)
+            if (FieldAccessor.FieldOf(value) is not { } field || field.Field.Owner == body.Method.Method.Owner
+                && ManagedAccess.Field(types, body.Method.Method.Owner, field, FieldAccessor.ReceiverType(value))) return null;
+            if (field.DeclaringType is not DefinitionRef declaring) return null;
+            return FieldCalls(declaring).FirstOrDefault(c => c.Write == write && c.Field.Equals(field)
                 && ManagedAccess.Method(types, body.Method.Method.Owner, c.Method, FieldAccessor.ReceiverType(value)));
         }
         return body with { Blocks = body.Blocks.Select(block =>
@@ -85,11 +113,13 @@ public sealed partial class SourceLibraryCalls
                         value = field with { Receiver = receiver };
                     }
                     else value = ManagedValues.Map(value, Read);
-                    if (Find(value, false) is not { } candidate) return value;
+                    var target = value is StaticFieldValue array ? EmptyArrayGetter(array) : null;
+                    target ??= Find(value, false)?.Method;
+                    if (target is null) return value;
                     var result = new LocalValue(new Variable(Storage.Temp(next--), 1), value.Type, value.Width);
-                    output.Add(new ManagedCall(statement.Address, new ManagedInvocation(candidate.Method,
+                    output.Add(new ManagedCall(statement.Address, new ManagedInvocation(target,
                         value is FieldValue member ? member.Receiver : null, [], false), result, false));
-                    Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{statement.Address:x}\t{body.Method}\t{candidate.Method}");
+                    Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{statement.Address:x}\t{body.Method}\t{target}");
                     return result;
                 }
                 if (statement is ManagedStore store && Find(store.Target, true) is { } setter)

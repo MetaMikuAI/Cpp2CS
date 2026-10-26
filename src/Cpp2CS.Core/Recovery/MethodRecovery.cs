@@ -267,7 +267,9 @@ public sealed partial class MethodRecovery
                     arguments[Storage.Slot(stackParameter.Offset)] = new(i, parameter.Type, stackParameter.Size * 8);
                     continue;
                 }
-                if (parameter.Passing != Passing.Registers || parameter.Pieces.Length != 1 || types.Kind(parameter.Type) is TypeKind.Struct or null || types.Kind(parameter.Type) == TypeKind.Pointer && (parameter.Type is not ByRefRef parameterReference || types.Kind(parameterReference.Element) != TypeKind.Struct))
+                if (parameter.Passing != Passing.Registers || parameter.Pieces.Length != 1 || types.Kind(parameter.Type) is TypeKind.Struct or null
+                    || types.Kind(parameter.Type) == TypeKind.Pointer && (parameter.Type is not ByRefRef parameterReference
+                        || types.Kind(parameterReference.Element) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference)))
                 {
                     var hole = Hole(entry, $"参数 {definition.Parameters[i].Name} 的类型 {parameter.Type} 尚未支持");
                     foreach (var piece in parameter.Pieces) Poison(new Variable(piece.Register, 0), hole);
@@ -832,6 +834,7 @@ public sealed partial class MethodRecovery
             if (call.Op is null && call.Target is Const inferredTarget && facts.Unregistered.At(inferredTarget.Value) is { } identity)
                 return UnregisteredMethods.Resolve(identity, call, Expand, owner.abi, out _);
             var receiver = Receiver(call) is { } r ? TypeOfValue(r) : null;
+            if (receiver is GenericParameterRef { ReferenceBase: { } constraint }) receiver = constraint;
             switch (call.Op)
             {
                 case null when call.Target is Const target:
@@ -901,6 +904,7 @@ public sealed partial class MethodRecovery
         private static IReadOnlyList<TypeRef>? Instantiation(TypeRef? type, TypeDef definition)
         {
             if (type is ByRefRef byRef) type = byRef.Element;
+            if (type is GenericParameterRef { ReferenceBase: { } constraint }) type = constraint;
             for (var current = type; current is DefinitionRef d; current = d.Definition.BaseType?.Substitute(d.Arguments, []))
                 if (d.Definition == definition) return d.Arguments;
             return null;
@@ -960,6 +964,16 @@ public sealed partial class MethodRecovery
                         else width = Math.Max(width, LocalWidth(source));
                     }
                     if (width == 0) width = known.TryGetValue(v, out var t) ? Math.Max(types.Bits(t), 8) : 64;
+                    // 结构体 ABI 返回片可含高位填充；终端整数 φ 只保留所有实际读取需要的低位。
+                    if (known.TryGetValue(v, out var integer) && types.Kind(integer) is TypeKind.Int or TypeKind.Bool
+                        && !phiUses.GetValueOrDefault(v, []).Any()
+                        && phi.Sources.Any(s => results.TryGetValue(s, out var r) && Resolve(r.Call) is { } callee
+                            && owner.abi.Classify(callee, out _)?.Return is { } returned && RegisterStruct(returned)))
+                    {
+                        var reads = blocks.SelectMany(b => b.Statements).Where(s => s is not Phi)
+                            .SelectMany(s => ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>()).Where(u => u.Variable == v).ToArray();
+                        if (reads.Length > 0) width = Math.Min(width, reads.Max(u => u.Width));
+                    }
                     return width switch { 1 => 1, <= 8 => 8, <= 16 => 16, <= 32 => 32, _ => 64 };
                 }
                 finally { phiInProgress.Remove(v); }
@@ -991,6 +1005,7 @@ public sealed partial class MethodRecovery
             // 窄于片的整数目标只取低位（如寄存器结构体的首叶子作为 int 实参；高位是填充）。
             if (value is Fragment fragment)
                 value = types.Kind(target) is TypeKind.Int && types.Bits(target) < fragment.Width ? Slice(fragment, 0, types.Bits(target)) : Pack(fragment);
+            if (value is Fragment projected) value = Pack(projected);
             // 打包寄存器中的浮点叶子已经有托管类型；来回的同宽位重解释是恒等值。
             if (value is ConversionValue { Kind: ConvKind.Bitcast } bitcast && bitcast.Operand.Type.Equals(target)) return bitcast.Operand;
             // 已是目标类型的值（如寄存器结构体的 IntPtr 叶子 Playable.m_Handle.m_Handle）原样使用。
@@ -1122,6 +1137,8 @@ public sealed partial class MethodRecovery
                 value = LocalOf(v);
                 signed = false;
             }
+            if (value is Fragment inlineFragment)
+                return width < value.Width ? Slice(inlineFragment, 0, width) : ResizeFragment(inlineFragment, width);
             if (width == value.Width) return value;
             if (types.Kind(value.Type) is not (TypeKind.Int or TypeKind.Bool)) throw Fail(0, $"位宽 {value.Type} 以 {width} 位读取");
             if (width is not (1 or 8 or 16 or 32 or 64)) throw Fail(0, $"位宽 {width} 的整数转换尚未支持");
@@ -1153,7 +1170,7 @@ public sealed partial class MethodRecovery
                 right = Recover(b.Right, b.Op is BinOp.Shl or BinOp.LShr or BinOp.AShr ? null : left.Type);
             }
             if (FrameShift(b.Op, left, right, b.Width) is { } projected) return projected;
-            // 结构体片与掩码：掩码对每个叶子和每段填充要么全留要么全清时，被清的叶子与填充成为零（如 Vector3Int 的 z 片清掉高 32 位填充）。
+            // 掩码清除的填充位来自指令语义；保留的位仍须来自已知叶子。
             if (b.Op == BinOp.And && left is Fragment masked && right is ConstantValue { Bits: var mask } && MaskFragment(masked, mask, b.Width) is { } kept)
                 return kept;
             if (left is Fragment lf) left = Pack(lf);
@@ -1166,21 +1183,29 @@ public sealed partial class MethodRecovery
         private Fragment? MaskFragment(Fragment fragment, ulong mask, int width)
         {
             ulong Bits(int low, int bits) => mask & (Expr.Mask(bits) << low);
-            bool Whole(int low, int bits) => Bits(low, bits) is var b && (b == 0 || b == Expr.Mask(bits) << low);
             var parts = new List<Part>();
             var cursor = 0;
             foreach (var part in fragment.Parts.OrderBy(p => p.Low).Append(new Part(width, new ConstantValue(0, types.Int32, 0))))
             {
-                // 叶子之间的填充：须整段被清，且能写成一个零整数。
+                // 填充必须整段被清；逐字节表示可覆盖 bool 与 int 之间的三字节间隔。
                 if (part.Low > cursor)
                 {
                     var gap = part.Low - cursor;
-                    if (Bits(cursor, gap) != 0 || gap is not (8 or 16 or 32)) return null;
-                    parts.Add(new Part(cursor, new ConstantValue(0, types.Integer(gap, false), gap)));
+                    if (Bits(cursor, gap) != 0 || gap % 8 != 0) return null;
+                    for (var low = cursor; low < part.Low; low += 8)
+                        parts.Add(new Part(low, new ConstantValue(0, types.Byte, 8)));
                 }
                 if (part.Low >= width) break;
-                if (!Whole(part.Low, part.Value.Width)) return null;
-                parts.Add(Bits(part.Low, part.Value.Width) == 0 ? new Part(part.Low, new ConstantValue(0, types.Integer(part.Value.Width, false), part.Value.Width)) : part);
+                var leafMask = Bits(part.Low, part.Value.Width) >> part.Low;
+                if (leafMask == Expr.Mask(part.Value.Width)) parts.Add(part);
+                else if (leafMask == 0) parts.Add(new Part(part.Low, new ConstantValue(0, types.Integer(part.Value.Width, false), part.Value.Width)));
+                else
+                {
+                    if (types.Kind(part.Value.Type) is not (TypeKind.Int or TypeKind.Bool)) return null;
+                    var integer = types.Integer(part.Value.Width, false);
+                    parts.Add(new Part(part.Low, new BinaryValue(BinOp.And, Coerce(part.Value, integer, 0),
+                        new ConstantValue(leafMask, integer, part.Value.Width), integer, part.Value.Width)));
+                }
                 cursor = part.Low + part.Value.Width;
             }
             return new Fragment(parts, fragment.Type, width);
@@ -1245,6 +1270,7 @@ public sealed partial class MethodRecovery
                 case ConvKind.Bitcast:
                     if (operand.Width != c.Width) throw Fail(0, "转换 位重解释的宽度不一致");
                     var floatHint = hint is not null && types.Kind(hint) is TypeKind.Float or TypeKind.Double;
+                    if (floatHint && operand.Type.Equals(hint)) return operand;
                     var toFloat = types.Kind(operand.Type) is TypeKind.Int or TypeKind.Bool ? true : false;
                     if (operand is ConstantValue k) return new ConstantValue(k.Bits, floatHint ? hint! : c.Width == 32 ? types.Single : types.Double, c.Width);
                     return new ConversionValue(c.Kind, operand, toFloat ? c.Width == 32 ? types.Single : types.Double : types.Integer(c.Width, false), c.Width);

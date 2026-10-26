@@ -8,18 +8,18 @@ namespace Cpp2CS.Recovery;
 
 public sealed partial class MethodRecovery
 {
-    private bool UnusedParameter(MethodRef method, Storage register) => rewriter.UnusedInput(method.Method.Address, register);
-
     private sealed partial class Context
     {
-        private static bool DirectInputProof(Call call, MethodRef callee) =>
+        private bool DirectInputProof(Call call, MethodRef callee) =>
             call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target }
-            && target.Value == callee.Method.Address && callee.Method.Address != 0 && !callee.Method.IsVirtual
-            && callee.Method.GenericParameters.Count == 0 && callee.Method.Owner.GenericParameters.Count == 0;
+            && !callee.Method.IsVirtual && facts.EntriesAt(target.Value).Any(e => e.Method is MethodRef candidate && candidate.Method == callee.Method);
+
+        private bool UnusedParameter(Call call, Storage register) =>
+            call.Target is Const target && owner.rewriter.UnusedInput(target.Value, register);
 
         private bool UnusedInput(Call call, MethodRef callee, AbiValue parameter) =>
             parameter is { Passing: Passing.Registers, Pieces: [var piece] }
-            && DirectInputProof(call, callee) && owner.UnusedParameter(callee, piece.Register);
+            && DirectInputProof(call, callee) && UnusedParameter(call, piece.Register);
 
         private static bool MissingInput(Expr expression) => expression is Unknown or Use { Variable.Version: < 0 };
 
@@ -44,7 +44,7 @@ public sealed partial class MethodRecovery
             var value = Recover(expression, null);
             if (value is ConstantValue { Bits: 0 } || value is Fragment || types.IsAssignable(value.Type, parameter.Type)
                 || types.Kind(value.Type) is not (TypeKind.Reference or TypeKind.Int or TypeKind.Bool)
-                || !owner.UnusedParameter(site.Callee, piece.Register)) return null;
+                || !UnusedParameter(site.Call, piece.Register)) return null;
             return new ConstantValue(0, parameter.Type, piece.Width);
         }
 

@@ -41,6 +41,7 @@ namespace Cpp2CS.Input
         private readonly ImageDocument image;
         private readonly TypeDef[] types;
         private readonly Dictionary<Il2CppType, TypeRef> converted = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<int, GenericParameterDef> genericParameters = new();
 
         public Il2CppExecutor Executor => executor;
 
@@ -386,18 +387,22 @@ namespace Cpp2CS.Input
         private IReadOnlyList<GenericParameterDef> GenericParameters(int containerIndex)
         {
             var container = metadata.genericContainers[containerIndex];
-            return Enumerable.Range(container.genericParameterStart, container.type_argc).Select(k =>
+            return Enumerable.Range(container.genericParameterStart, container.type_argc).Select(GenericParameter).ToArray();
+        }
+
+        private GenericParameterDef GenericParameter(int index)
+        {
+            if (genericParameters.TryGetValue(index, out var cached)) return cached;
+            var parameter = metadata.genericParameters[index];
+            var result = new GenericParameterDef
             {
-                var parameter = metadata.genericParameters[k];
-                return new GenericParameterDef
-                {
-                    Name = String(parameter.nameIndex),
-                    Position = parameter.num,
-                    Attributes = (GenericParameterAttributes)parameter.flags,
-                    Constraints = Enumerable.Range(parameter.constraintsStart, parameter.constraintsCount)
-                        .Select(c => Convert(il2Cpp.types[metadata.constraintIndices[c]])).ToArray(),
-                };
-            }).ToArray();
+                Name = String(parameter.nameIndex), Position = parameter.num,
+                Attributes = (GenericParameterAttributes)parameter.flags,
+            };
+            genericParameters[index] = result;
+            result.Constraints = Enumerable.Range(parameter.constraintsStart, parameter.constraintsCount)
+                .Select(c => Convert(il2Cpp.types[metadata.constraintIndices[c]])).ToArray();
+            return result;
         }
 
         /// <summary>
@@ -580,7 +585,8 @@ namespace Cpp2CS.Input
         {
             var parameter = executor.GetGenericParameteFromIl2CppType(type);
             var container = metadata.genericContainers[parameter.ownerIndex];
-            return new GenericParameterRef(String(parameter.nameIndex), container.is_method != 0, parameter.num);
+            return new GenericParameterRef(String(parameter.nameIndex), container.is_method != 0, parameter.num)
+                { Parameter = GenericParameter(container.genericParameterStart + parameter.num) };
         }
     }
 }

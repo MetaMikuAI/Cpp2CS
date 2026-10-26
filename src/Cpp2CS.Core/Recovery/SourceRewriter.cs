@@ -24,6 +24,7 @@ public static class SourceRewriter
         for (var round = 0; round < 4; round++)
             body = DeadAssignments(Map(Retype(Propagate(body)), v => Simplify(v, types)));
         body = DropStatements(BooleanStores(body, types));
+        body = SourceStructCopies.Rewrite(body);
         return SourceIteratorCleanup.Rewrite(SourceIteratorDispatch.Rewrite(SourceReturns.Rewrite(FoldFieldCopies(DeadStores(body)))));
     }
 

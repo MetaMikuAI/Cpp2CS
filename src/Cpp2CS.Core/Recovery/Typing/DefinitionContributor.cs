@@ -15,8 +15,13 @@ internal sealed class DefinitionContributor(TypingInputs input) : ITypeContribut
         var expressions = input.Expressions(context);
         var loads = context.Statements.OfType<Define>().Where(d => d.Value is Load { Width: 64, Address: Use }).ToDictionary(d => d.Target, d => ((Load)d.Value).Address);
         foreach (var define in context.Statements.OfType<Define>())
-            if (!context.IsRuntime(define.Target) && (SealedCast(loads, define.Value) ?? TypeOfDefinition(expressions, define.Value)) is { } type)
+        {
+            // 标量 FMOV 写入浮点寄存器；结构体片投影可能已经返回对应的 float/double 叶子。
+            var projected = define is { Target.Storage.Bank: Bank.Vec, Value: Ir.Convert { Kind: ConvKind.Bitcast, Width: 32 or 64 } cast }
+                ? expressions.TypeOf(cast, cast.Width == 32 ? context.Types.Single : context.Types.Double) : null;
+            if (!context.IsRuntime(define.Target) && (SealedCast(loads, define.Value) ?? projected ?? TypeOfDefinition(expressions, define.Value)) is { } type)
                 constraints.Defines(define.Target, type, new(Name, define.Address, $"{define.Value} : {type}"));
+        }
     }
 
     /// <summary>klass(obj) == Class&lt;T&gt;（T sealed）? obj : null 是 obj as T，类型为 T（见 MethodRecovery.PrepareSealedChecks）。</summary>

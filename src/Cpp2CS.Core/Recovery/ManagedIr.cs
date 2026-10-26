@@ -40,7 +40,7 @@ public sealed record AddressValue(ManagedValue Target) : ManagedValue(new ByRefR
 /// <summary>叶子均已证明的结构体值；L4 用 initobj 和逐叶子写入构造。</summary>
 public sealed record ComposedValue(TypeRef StructType, IReadOnlyList<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> Leaves) : ManagedValue(StructType, 0);
 /// <summary>读取/写入已定型的结构体根，地址必须由托管存储位置证明。</summary>
-public sealed record IndirectValue(ManagedValue Address, TypeRef Type) : ManagedValue(Type, 0);
+public sealed record IndirectValue(ManagedValue Address, TypeRef Type, int Width = 0) : ManagedValue(Type, Width);
 public sealed record StaticFieldValue(FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width)
 {
     public FieldAccessor? Accessor { get; init; }
