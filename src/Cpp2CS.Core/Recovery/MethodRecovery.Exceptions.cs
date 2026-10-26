@@ -275,30 +275,44 @@ public sealed partial class MethodRecovery
         /// </summary>
         private void ExceptionCopies(ExceptionEntryPath path, List<ManagedStatement> statements)
         {
-            var aliases = new Dictionary<Variable, Variable>();
+            var aliases = new Dictionary<Variable, Expr>();
+            var copies = new List<ManagedCopy>();
+            Expr Resolve(Expr expression) => ExprMap.Map(expression, e =>
+            {
+                if (e is not Use use) return null;
+                var value = aliases.GetValueOrDefault(use.Variable)
+                    ?? (values.GetValueOrDefault(use.Variable) is Const constant ? constant : null);
+                if (value is null) return null;
+                return value.Width == use.Width ? value : Fold.Simplify(new Ir.Convert(
+                    value.Width > use.Width ? ConvKind.Truncate : ConvKind.ZeroExtend, value, use.Width));
+            });
+            void Copy(Variable variable, Expr expression, ulong address)
+            {
+                var value = Resolve(expression);
+                aliases[variable] = value;
+                var target = Local(variable);
+                copies.Add(new(target, Coerce(Recover(value, target.Type), target.Type, address)));
+            }
             var from = path.Source.Block;
             var previousFragment = path.Source;
-            var copies = new List<ManagedCopy>();
             foreach (var fragment in path.Bridges.Append(path.Entry))
             {
-                if (from == fragment.Block) continue;
                 var successor = from.Successors.FindLastIndex(b => b == fragment.Block);
                 var incoming = successor >= 0 ? MachineFunction.PredecessorIndex(from, successor) : -1;
-                foreach (var phi in fragment.Statements.OfType<Phi>())
+                foreach (var phi in fragment.Statements.OfType<Phi>().Where(_ => from != fragment.Block))
                 {
                     if (runtime.Contains(phi.Target) || exceptionValues.ContainsKey(phi.Target) || !exceptionDemand.Contains(phi.Target)) continue;
                     var sources = phi.Sources.Distinct().ToArray();
                     var source = incoming >= 0 ? phi.Sources[incoming] : sources.Length == 1 ? sources[0]
                         : ExceptionReachingSource(previousFragment, phi, previousFragment == path.Source)
                             ?? throw Fail(phi.Address, $"异常区域 异常边 φ 来源未证成 {phi.Target} site=0x{path.Source.NativeExceptionSite:x}");
-                    var seen = new HashSet<Variable>();
-                    while (aliases.TryGetValue(source, out var previous) && seen.Add(source)) source = previous;
-                    aliases[phi.Target] = source;
-                    var target = Local(phi.Target);
-                    var value = values.TryGetValue(source, out var constant) && constant is Const c
-                        ? new ConstantValue(c.Value & Expr.Mask(target.Width), target.Type, target.Width) : Variable(source, target.Width);
-                    copies.Add(new(target, Coerce(value, target.Type, phi.Address)));
+                    Copy(phi.Target, new Use(source, phi.Target.Width), phi.Address);
                 }
+                // 桥中的纯复制也被区域图消去；逐级代入后与 phi 一起在调用前快照。
+                if (fragment != path.Entry)
+                    foreach (var define in fragment.Statements.OfType<Define>())
+                        if (!runtime.Contains(define.Target) && !exceptionValues.ContainsKey(define.Target)
+                            && exceptionDemand.Contains(define.Target)) Copy(define.Target, define.Value, define.Address);
                 from = fragment.Block;
                 previousFragment = fragment;
             }

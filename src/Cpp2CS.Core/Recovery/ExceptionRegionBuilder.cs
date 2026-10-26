@@ -202,8 +202,6 @@ public static class ExceptionRegionBuilder
             }
             if (regions.Count == 0) return Result("未证成/只有清理", "无 catch/fault 区域");
             var protectedBy = regions.SelectMany(r => r.Try.Select(f => (Fragment: f, Region: r))).ToDictionary(p => p.Fragment, p => p.Region);
-            bool CanContain(ExceptionRegionPlan inner, ExceptionRegionPlan outer) => inner != outer && inner.Handler.All(f =>
-                f.Statements.All(NonThrowing) || protectedBy.GetValueOrDefault(f) == outer);
             // 普通后继的共同支配者补齐每个 try；支配图含异常边，支持 try/catch 内的完整嵌套。
             var dom = Dominators();
             HashSet<ExceptionFragment>? TryClosure(ExceptionRegionPlan region)
@@ -240,7 +238,6 @@ public static class ExceptionRegionBuilder
                         if (!outer.Try.Overlaps(inner.Try) || inner.Try.IsSupersetOf(outer.Try)) continue;
                         // 暂时交叉的闭包可能仍待上层扩展，最终区域检查负责拒绝未收敛的交叉。
                         if (!inner.Try.IsSubsetOf(outer.Try)) continue;
-                        if (!CanContain(inner, outer)) return Result("未证成/内层handler抛出目标不同", $"{outer.Entry}/{inner.Entry}");
                         foreach (var f in inner.Handler) expanded |= outer.Try.Add(f);
                     }
                 // 并入内层区域后，原共同入口可能已不再支配所有成员，需要补齐新增路径。
@@ -290,6 +287,13 @@ public static class ExceptionRegionBuilder
                         return Result("未证成/区域交叉或共享handler", $"{a.Entry}/{b.Entry}");
                     }
                 }
+            // 多层嵌套中，内层 handler 先由最近的 try 保护；不能要求它直接跳到每一个祖先 handler。
+            foreach (var fragment in regions.SelectMany(r => r.Handler).Distinct().Where(f => !f.Statements.All(NonThrowing)))
+            {
+                var nearest = regions.Where(r => r.Try.Contains(fragment)).OrderBy(r => r.Try.Count).FirstOrDefault();
+                if (protectedBy.GetValueOrDefault(fragment) != nearest)
+                    return Result("未证成/内层handler抛出目标不同", $"{fragment}: 原生={protectedBy.GetValueOrDefault(fragment)?.Entry} 区域={nearest?.Entry}");
+            }
             var order = new List<ExceptionFragment>();
             void Emit(HashSet<ExceptionFragment> members, ExceptionRegionPlan? parent, string? part, ExceptionFragment entry)
             {

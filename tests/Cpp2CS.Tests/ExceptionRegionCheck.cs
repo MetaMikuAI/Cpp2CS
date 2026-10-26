@@ -91,6 +91,31 @@ internal static class ExceptionRegionCheck
         a.True(crossing.Succeeded && crossing.Regions.Count(r => r.Parent is not null) == 1,
             $"先内后外枚举仍恢复完整嵌套：{crossing.Reason} {crossing.Detail}");
 
+        var outerStart3 = Block(0x1800, Op(0x1800, OpKind.CallVirtual));
+        var middleStart3 = Block(0x1820, Op(0x1820, OpKind.CallVirtual));
+        var innerStart3 = Block(0x1840, Op(0x1840, OpKind.CallVirtual));
+        var middleEnd3 = Block(0x1860, Op(0x1860, OpKind.CallVirtual));
+        var outerEnd3 = Block(0x1880, Op(0x1880, OpKind.CallVirtual));
+        var innerCatch3 = Block(0x18a0, Op(0x18a0, OpKind.BeginCatch), Op(0x18a4, OpKind.CallInterface));
+        var innerCatchEnd3 = Block(0x18b0, Op(0x18b0, OpKind.EndCatch));
+        var middleCatch3 = Block(0x18c0, Op(0x18c0, OpKind.BeginCatch), Op(0x18c4, OpKind.CallInterface));
+        var middleCatchEnd3 = Block(0x18d0, Op(0x18d0, OpKind.EndCatch));
+        var outerCatch3 = Block(0x18e0, Op(0x18e0, OpKind.BeginCatch), Op(0x18e4, OpKind.EndCatch));
+        var done3 = Block(0x1900, new Return(0x1900));
+        MachineFunction.AddEdge(outerStart3, middleStart3); MachineFunction.AddEdge(middleStart3, innerStart3);
+        MachineFunction.AddEdge(innerStart3, middleEnd3); MachineFunction.AddEdge(middleEnd3, outerEnd3); MachineFunction.AddEdge(outerEnd3, done3);
+        MachineFunction.AddEdge(innerCatch3, innerCatchEnd3); MachineFunction.AddEdge(innerCatchEnd3, middleEnd3);
+        MachineFunction.AddEdge(middleCatch3, middleCatchEnd3); MachineFunction.AddEdge(middleCatchEnd3, outerEnd3); MachineFunction.AddEdge(outerCatch3, done3);
+        Exception(outerStart3, outerCatch3); Exception(outerEnd3, outerCatch3);
+        Exception(middleStart3, middleCatch3); Exception(middleEnd3, middleCatch3); Exception(innerStart3, innerCatch3);
+        Exception(innerCatch3, middleCatch3); Exception(middleCatch3, outerCatch3);
+        var tripleFunction = Function(outerStart3, middleStart3, innerStart3, middleEnd3, outerEnd3, innerCatch3, innerCatchEnd3, middleCatch3, middleCatchEnd3, outerCatch3, done3);
+        var triple = ExceptionRegionBuilder.Build(tripleFunction, _ => true);
+        a.True(triple.Succeeded && triple.Regions.Length == 3 && triple.Regions.Count(r => r.Parent is not null) == 2,
+            $"内层 catch 先进入中层，再由中层进入外层：{triple.Reason} {triple.Detail}");
+        MachineFunction.RemoveEdge(innerCatch3, middleCatch3); Exception(innerCatch3, outerCatch3);
+        a.True(!ExceptionRegionBuilder.Build(tripleFunction, _ => true).Succeeded, "原生越过中层捕获时不能伪造逐层嵌套");
+
         // 同一门既有 wrapper 也有 catch-all 来源时，不能把 selector 无条件置为 1。
         var selectorValue = new Variable(Storage.Gpr(1), 1);
         var gate = Block(0x1680, new Define(0x1680, selectorValue, new Intrinsic("eh_selector", [], 64)),
