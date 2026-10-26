@@ -31,8 +31,8 @@ public sealed partial class UnregisteredMethods
         {
             var definition = facts.Model.Methods[item.Definition];
             var witnesses = item.Witnesses.Select(w => new MethodWitness(w.Caller, w.Site, Method(w.Method))).ToArray();
-            // Build 使用第一个封闭见证的 ABI；重新分类使类型引用归属本次模型。
-            var signature = abi.Classify(witnesses[0].Instance, out _);
+            // Build 使用第一个完整见证的 ABI；重新分类使类型引用归属本次模型。
+            var signature = ClassifyInstance(witnesses[0].Instance, abi);
             if (signature is null || Shape(signature) != item.Abi || witnesses.Any(w => w.Instance.Method != definition))
                 throw new InvalidDataException($"未注册事实缓存的 ABI/定义不一致：0x{item.Address:x}");
             result.accepted.Add(item.Address, new(item.Address, definition, signature, witnesses, item.Matches,

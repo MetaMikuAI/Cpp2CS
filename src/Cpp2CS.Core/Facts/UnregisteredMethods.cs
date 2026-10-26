@@ -25,6 +25,35 @@ public sealed partial class UnregisteredMethods
     public static bool IsClosed(MethodRef method) => Closed(method.DeclaringType)
         && method.MethodArguments.Count == method.Method.GenericParameters.Count && method.MethodArguments.All(Closed);
 
+    /// <summary>开放参数可以完整表达实例；其传递布局还必须由 ABI 分类单独证明。</summary>
+    public static bool IsComplete(MethodRef method) => Complete(method.DeclaringType)
+        && method.MethodArguments.Count == method.Method.GenericParameters.Count && method.MethodArguments.All(Complete);
+
+    private static bool Complete(TypeRef type) => type switch
+    {
+        DefinitionRef d => d.Arguments.Count == d.Definition.GenericParameters.Count && d.Arguments.All(Complete),
+        ArrayRef a => Complete(a.Element),
+        ByRefRef r => Complete(r.Element),
+        PointerRef p => Complete(p.Element),
+        _ => true,
+    };
+
+    internal static AbiSignature? ClassifyInstance(MethodRef method, ManagedAbi abi)
+    {
+        bool Known(TypeRef type, HashSet<TypeDef> path) => type switch
+        {
+            GenericParameterRef g => g.IsReference || g.NativeScalar is { } scalar && Known(scalar, path),
+            DefinitionRef d when d.Definition.IsValueType => abi.Kind(d) is { } kind && (kind != ValueKind.Struct
+                || !FieldLayouts.IsFullyShared(d) && path.Add(d.Definition)
+                    && d.Definition.Fields.Where(f => !f.IsStatic).All(f => Known(f.Type.Substitute(d.Arguments, []), new(path)))),
+            _ => true,
+        };
+        // 布局器为共享恢复保留的泛型占位大小不能证明按值 ABI。
+        if (!IsComplete(method) || !method.Method.Parameters.Select(p => p.Type).Append(method.Method.ReturnType)
+            .All(t => Known(t.Substitute(method.TypeArguments, method.MethodArguments), []))) return null;
+        return abi.Classify(method, out _);
+    }
+
     private static bool Closed(TypeRef type) => type switch
     {
         GenericParameterRef => false,
@@ -55,8 +84,8 @@ public sealed partial class UnregisteredMethods
             return null;
         }
         if (method.Method != identity.Definition) { reason = "MethodInfo 与定义身份冲突"; return null; }
-        if (!IsClosed(method)) { reason = "MethodInfo 不是封闭实例"; return null; }
-        if (abi.Classify(method, out _) is not { } signature || Shape(signature) != Shape(identity.Abi))
+        if (!IsComplete(method)) { reason = "MethodInfo 实参不完整"; return null; }
+        if (ClassifyInstance(method, abi) is not { } signature || Shape(signature) != Shape(identity.Abi))
         { reason = "MethodInfo 实例 ABI 不吻合"; return null; }
         reason = "";
         return method;

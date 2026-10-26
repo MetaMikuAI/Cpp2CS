@@ -32,7 +32,9 @@ public sealed partial class UnregisteredMethods
         private readonly List<string> analysisErrors = [];
         private AbiSignature? Signature(MethodRef method)
         {
-            if (!signatures.TryGetValue(method, out var result)) signatures[method] = result = abi.Classify(method, out _);
+            // 开放参数的相等性只包含名称和槽位，不包含调用者的约束；不能跨调用者复用分类。
+            if (!IsClosed(method)) return ClassifyInstance(method, abi);
+            if (!signatures.TryGetValue(method, out var result)) signatures[method] = result = ClassifyInstance(method, abi);
             return result;
         }
 
@@ -52,7 +54,7 @@ public sealed partial class UnregisteredMethods
             {
                 var observations = group.ToArray();
                 var positive = observations.SelectMany(s => s.Positive).Distinct().ToArray();
-                var closed = positive.Where(IsClosed).ToArray();
+                var complete = positive.Where(IsComplete).ToArray();
                 var definitions = positive.Select(m => m.Method).Distinct().ToArray();
                 var definition = definitions.Length == 1 ? definitions[0] : null;
                 var reason = "A/无见证";
@@ -60,22 +62,22 @@ public sealed partial class UnregisteredMethods
                 ulong[] matches = [];
                 var adjustors = Adjustors(group.Key, observations);
                 if (definitions.Length > 1) reason = "A/不同定义冲突";
-                else if (definition is not null && closed.Length == 0) reason = "A/开放或不完整实例";
+                else if (definition is not null && complete.Length == 0) reason = "A/不完整实例";
                 else if (definition is not null)
                 {
-                    signature = Signature(closed[0])!;
+                    signature = Signature(complete[0])!;
                     var register = signature.MethodInfo!.Register;
                     reason = observations.Any(s => s.Symbols.TryGetValue(register, out var symbols) && symbols.Any(m => m.Method != definition)) ? "A/不同定义冲突"
                         : observations.Any(s => s.Failed) ? "A/分析不完整"
-                        : closed.Any(m => Signature(m) is not { } sig || Shape(sig) != Shape(signature)) ? "ABI/正见证不吻合"
+                        : complete.Any(m => Signature(m) is not { } sig || Shape(sig) != Shape(signature)) ? "ABI/正见证不吻合"
                         : "A/通过";
                     // 非单值符号也不能掩盖 ABI 冲突；它不给正见证，但有否决权。
                     if (reason == "A/通过" && observations.SelectMany(s => s.Symbols.GetValueOrDefault(register) ?? [])
-                        .Where(IsClosed).Any(m => Signature(m) is { } sig && Shape(sig) != Shape(signature))) reason = "ABI/候选槽位不吻合";
+                        .Where(IsComplete).Any(m => Signature(m) is { } sig && Shape(sig) != Shape(signature))) reason = "ABI/候选槽位不吻合";
                     if (reason == "A/通过")
                     {
                         reason = Compare(functions[group.Key], definition, signature, shapes, out matches);
-                        // 开放符号仍可否决定义身份，但不能提供具体 ABI；调用点 Resolve 继续拒绝开放实例。
+                        // ABI 由本调用的完整实例分类；开放参数不替换成任意封闭见证。
                     }
                 }
                 if (reason == "A/不同定义冲突") conflicts.Add($"0x{group.Key:x}: {string.Join(';', positive.Select(m => m.ToString()))}");
@@ -87,7 +89,7 @@ public sealed partial class UnregisteredMethods
                 }
                 if (reason == "接受")
                     result.accepted.Add(group.Key, new(group.Key, definition!, signature!,
-                        observations.SelectMany(s => s.Positive.Where(IsClosed).Select(m => new MethodWitness(s.Caller, s.Reference.Site, m))).ToArray(), matches, adjustors));
+                        observations.SelectMany(s => s.Positive.Where(IsComplete).Select(m => new MethodWitness(s.Caller, s.Reference.Site, m))).ToArray(), matches, adjustors));
                 result.decisions.Add(new(group.Key, reason, observations.Length, observations.Count(s => s.Positive.Count > 0), positive.Length, definition?.Index));
             }
             facts.Checks.Add("unregistered.definition-conflict", "Warning", functions.Count, conflicts, "不同定义的 MethodInfo 见证，拒绝身份推断");

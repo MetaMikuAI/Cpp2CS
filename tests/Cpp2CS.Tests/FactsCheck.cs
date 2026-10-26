@@ -14,8 +14,9 @@ internal static class FactsCheck
         foreach (var check in facts.Checks.All.Where(c => c.Severity == "Error"))
             a.True(check.Passed, $"{check.Name}：{check.Violations}/{check.Total} 违例，例如 {string.Join("；", check.Samples.Take(3))}");
         a.True(facts.Unregistered.All.All(d => d.ShapeMatches.Count > 0 && d.Witnesses.Count > 0
-            && d.Witnesses.All(w => w.Instance.Method == d.Definition && UnregisteredMethods.IsClosed(w.Instance))),
-            "F8 证据完整，正见证封闭且定义一致");
+            && d.Witnesses.All(w => w.Instance.Method == d.Definition && UnregisteredMethods.IsComplete(w.Instance)
+                && UnregisteredMethods.ClassifyInstance(w.Instance, new ManagedAbi(facts.Layouts)) is { } abi && UnregisteredMethods.Shape(abi) == UnregisteredMethods.Shape(d.Abi))),
+            "F8 证据完整，正见证实参完整、ABI 和定义一致");
         foreach (var check in facts.Checks.All.Where(c => c.Severity == "Warning" && !c.Passed))
             Console.WriteLine($"! {check.Name}：{check.Violations}/{check.Total}（已知缺口）");
         Execution.LsdaCheck.Compare(facts, a);
