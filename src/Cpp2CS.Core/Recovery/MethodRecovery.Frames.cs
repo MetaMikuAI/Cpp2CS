@@ -71,6 +71,7 @@ public sealed partial class MethodRecovery
             }
             WitnessStoredArguments(witnesses);
             WitnessStoredResults(witnesses);
+            WitnessFieldCopies(witnesses);
             WitnessFrameCopies(witnesses);
             var regions = witnesses.DistinctBy(w => (w.Offset, w.Type)).Select(w => new FrameRegion(w.Offset, w.Type, types.Size(w.Type), StructLocal(w.Type, ScalarWidth(w.Type))))
                 .OrderByDescending(r => r.Size).ThenBy(r => r.Offset).ToArray();
@@ -176,6 +177,34 @@ public sealed partial class MethodRecovery
                 if (outer is not [var type]) continue;
                 foreach (var (store, offset) in group)
                     if (store.Value.Width == load.Width) witnesses.Add(new(offset!.Value, type, store, false));
+            }
+        }
+
+        /// <summary>字段或参数上的已知结构体与栈完整互拷时，以原存储位置的类型为栈区域定型。</summary>
+        private void WitnessFieldCopies(List<FrameWitness> witnesses)
+        {
+            foreach (var block in blocks)
+            {
+                var copies = new List<(long Offset, CopyRange Range, Store Store, int Width)>();
+                foreach (var store in block.Statements.OfType<Store>())
+                {
+                    if (store.Value is not Use use || !values.TryGetValue(use.Variable, out var value)
+                        || CopiedLoad(value) is not { Width: 32 or 64 or 128 } load || load.Width != use.Width) continue;
+                    if (FrameOffset(store.Target) is { } to && FrameOffset(load.Address) is null)
+                        copies.AddRange(CopyRanges(load.Address, load.Width).Select(r => (to - r.Offset, r, store, load.Width)));
+                    if (FrameOffset(load.Address) is { } from && FrameOffset(store.Target) is null)
+                        copies.AddRange(CopyRanges(store.Target, load.Width).Select(r => (from - r.Offset, r, store, load.Width)));
+                }
+                foreach (var group in copies.GroupBy(c => (c.Offset, c.Range.Type, c.Range.Root)))
+                {
+                    var (offset, type, _) = group.Key;
+                    var size = types.Size(type);
+                    if (offset >= 0 || offset + size > 0 || witnesses.Any(w => w.Offset == offset && w.Type.Equals(type))) continue;
+                    var covered = group.SelectMany(c => Enumerable.Range(c.Range.Offset, c.Width / 8)).ToHashSet();
+                    var leaves = StructPaths(type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
+                    if (leaves.Length == 0 || leaves.Any(p => Enumerable.Range(p.Offset, types.Size(p.Type)).Any(b => !covered.Contains(b)))) continue;
+                    witnesses.Add(new(offset, type, group.First().Store, false));
+                }
             }
         }
 
