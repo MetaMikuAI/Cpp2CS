@@ -39,6 +39,7 @@ internal static class OutlinedCallCheck
         }
         var sample = Caller();
         var helper = Callee();
+        helper.EntryBlock.Statements.Insert(0, new Nop(0x2000, "类布局已初始化"));
         var before = helper.ToString();
         a.True(OutlinedCallInlining.Run(sample.Caller, sample.Block, sample.Call, helper), "展开两个返回分支");
         a.Equal(2, sample.Handler.Predecessors.Count, "每个内部调用继承异常边");
@@ -46,6 +47,8 @@ internal static class OutlinedCallCheck
         a.True(sample.Caller.Blocks.SelectMany(b => b.Statements).OfType<Call>().All(c => c.NativeExceptionSite == sample.Call.Address), "内部调用保留原始 LSDA 位置");
         a.Equal(0, SsaCheck.Verify(sample.Caller, Dominators.Compute(sample.Caller)).Count, "展开后 SSA 完整");
         a.Equal(before, helper.ToString(), "展开不修改共享的被调函数");
+        a.True(sample.Caller.Blocks.SelectMany(b => b.Statements).All(s => !helper.Blocks.SelectMany(b => b.Statements).Any(original => ReferenceEquals(s, original))),
+            "包含 Nop 在内的语句都使用独立实例，重复展开不会共享位置键");
         var usedResult = Caller(true);
         a.True(!OutlinedCallInlining.Run(usedResult.Caller, usedResult.Block, usedResult.Call, Callee()), "返回值被使用时拒绝无返回展开");
         var locals = Caller();

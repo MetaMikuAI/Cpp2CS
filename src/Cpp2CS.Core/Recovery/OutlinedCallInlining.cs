@@ -64,7 +64,7 @@ internal static class OutlinedCallInlining
                     Branch b => b with { Target = labels[b.Target], Fallthrough = labels[b.Fallthrough] },
                     Jump j => j with { Target = labels[j.Target] },
                     Return r => new Jump(r.Address, continuation.Start),
-                    _ => mapped,
+                    _ => mapped with { },
                 });
             }
             clone.Predecessors.AddRange(source.Predecessors.Select(p => clones[p]));
