@@ -17,7 +17,7 @@ internal static class SourceStructCopies
             if (path.Count != 1 || leaf is not FieldValue field || !field.Field.Equals(path[0])
                 || !fields.Remove(field.Field.Field)) return null;
             var receiver = field.Receiver is AddressValue address ? address.Target : field.Receiver;
-            if (receiver is not (LocalValue or ArgumentValue) || !receiver.Type.Equals(value.StructType)
+            if (!Stable(receiver) || !receiver.Type.Equals(value.StructType)
                 || root is not null && !root.Equals(receiver)) return null;
             root = receiver;
         }
@@ -40,6 +40,47 @@ internal static class SourceStructCopies
         return body with { Blocks = body.Blocks.Select(block =>
         {
             var statements = block.Statements.ToList();
+            // 读取全部直属字段后立即按原字段返回，等价于在原读取位置复制整个结构体。
+            for (var i = 0; i < statements.Count; i++)
+            {
+                if (statements[i] is not ManagedAssignment { Value: FieldValue { Accessor: null } field }) continue;
+                var root = field.Receiver is AddressValue address ? address.Target : field.Receiver;
+                if (root.Type is not DefinitionRef { Definition: { IsValueType: true, IsEnum: false } definition }
+                    || !Stable(root)) continue;
+                var fields = definition.Fields.Where(f => !f.IsStatic).ToHashSet();
+                var reads = statements.Skip(i).Take(fields.Count).OfType<ManagedAssignment>().ToArray();
+                if (fields.Count == 0 || reads.Length != fields.Count || i + fields.Count >= statements.Count
+                    || reads.Any(r => r.Value is not FieldValue { Accessor: null } f || !f.Receiver.Equals(field.Receiver)
+                        || !fields.Contains(f.Field.Field) || uses.GetValueOrDefault(r.Target.Variable) != 1)
+                    || reads.Select(r => ((FieldValue)r.Value).Field.Field).Distinct().Count() != fields.Count
+                    || reads.Select(r => r.Target.Variable).Distinct().Count() != fields.Count
+                    || statements[i + fields.Count] is not ManagedReturn { Value: ComposedValue composed } returned
+                    || !composed.Type.Equals(root.Type) || composed.Leaves.Count != fields.Count) continue;
+                var snapshots = reads.ToDictionary(r => r.Target.Variable, r => ((FieldValue)r.Value).Field);
+                if (composed.Leaves.Any(p => p.Path.Count != 1 || p.Value is not LocalValue local
+                    || !snapshots.TryGetValue(local.Variable, out var copied) || !copied.Equals(p.Path[0]))
+                    || composed.Leaves.Select(p => p.Path[0].Field).Distinct().Count() != fields.Count) continue;
+                statements.RemoveRange(i, fields.Count + 1);
+                statements.Insert(i, returned with { Value = root });
+            }
+            // 参数或局部值的完整逐字段写入，折回属性后备字段等存储位置的整体赋值。
+            for (var i = 0; i < statements.Count; i++)
+            {
+                if (statements[i] is not ManagedStore { Target: FieldValue { Accessor: null } target,
+                        Value: FieldValue { Accessor: null } sourceField } first
+                    || Destination(target.Receiver) is not { Type: DefinitionRef { Definition: { IsValueType: true, IsEnum: false } definition } } destination) continue;
+                var source = sourceField.Receiver is AddressValue address ? address.Target : sourceField.Receiver;
+                if (source is not (LocalValue or ArgumentValue) || !source.Type.Equals(destination.Type)) continue;
+                var fields = definition.Fields.Where(f => !f.IsStatic).ToHashSet();
+                var writes = statements.Skip(i).Take(fields.Count).OfType<ManagedStore>().ToArray();
+                if (fields.Count == 0 || writes.Length != fields.Count || writes.Any(s =>
+                    s.Target is not FieldValue { Accessor: null } t || s.Value is not FieldValue { Accessor: null } v
+                    || !t.Receiver.Equals(target.Receiver) || !v.Receiver.Equals(sourceField.Receiver) || !t.Field.Equals(v.Field))
+                    || !writes.Select(s => ((FieldValue)s.Target).Field.Field).ToHashSet().SetEquals(fields)) continue;
+                statements.RemoveRange(i, fields.Count);
+                statements.Insert(i, destination is LocalValue local ? new ManagedAssignment(first.Address, local, source)
+                    : new ManagedStore(first.Address, destination, source));
+            }
             for (var i = 0; i < statements.Count; i++)
             {
                 if (statements[i] is not ManagedAssignment { Value: FieldValue field } first
@@ -117,4 +158,14 @@ internal static class SourceStructCopies
             return block with { Statements = statements };
         }).ToArray() };
     }
+
+    private static bool Stable(ManagedValue value) => value switch
+    {
+        LocalValue or ArgumentValue or ConstantValue => true,
+        AddressValue address => Stable(address.Target),
+        FieldValue { Accessor: null } field => Stable(field.Receiver),
+        ArrayElementValue element => Stable(element.Array) && Stable(element.Index),
+        ConversionValue conversion => Stable(conversion.Operand),
+        _ => false,
+    };
 }

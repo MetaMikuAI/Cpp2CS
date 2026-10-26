@@ -73,6 +73,16 @@ internal static class SourceStructCopiesCheck
         a.True(SourceStructCopies.WholeValue(new(type, leaves.Take(2).ToArray())) is null, "遗漏字段不能整体复制");
         a.True(SourceStructCopies.WholeValue(new(type, leaves.Take(2).Append((leaves[2].Item1, Field(destination, 2))).ToArray())) is null, "混合来源不能整体复制");
         a.True(SourceStructCopies.WholeValue(new(type, leaves.Take(2).Append((leaves[2].Item1, new ConstantValue(0, integer, 32))).ToArray())) is null, "重置字段不能整体复制");
+        var direct = Body(Enumerable.Range(0, 3).Select(i => new ManagedStore(0, Field(destination, i), Field(source, i))));
+        a.True(SourceStructCopies.Rewrite(direct).Blocks.Single().Statements is [ManagedAssignment { Value: var directSource }] && directSource == source,
+            "完整逐字段写入还原整体赋值");
+        var returnedLeaves = Enumerable.Range(0, 3).Select(i => ((IReadOnlyList<FieldRef>)new[] { new FieldRef(definition.Fields[i], type) }, (ManagedValue)snapshots[i])).ToArray();
+        var returned = Body(statements.Take(3).Append(new ManagedReturn(0, new ComposedValue(type, returnedLeaves))));
+        a.True(SourceStructCopies.Rewrite(returned).Blocks.Single().Statements is [ManagedReturn { Value: var returnedSource }] && returnedSource == source,
+            "完整快照立即返回时保留整体值");
+        var mixedReturn = Body(statements.Take(3).Append(new ManagedReturn(0, new ComposedValue(type,
+            returnedLeaves.Take(2).Append((returnedLeaves[2].Item1, new ConstantValue(0, integer, 32))).ToArray()))));
+        a.True(SourceStructCopies.Rewrite(mixedReturn).Blocks.Single().Statements.Count == 4, "返回中更改叶子时不能折为整值");
         return a.Finish("source-struct-copies");
     }
 }
