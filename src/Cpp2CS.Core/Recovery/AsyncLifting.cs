@@ -60,6 +60,7 @@ public static partial class AsyncLifting
             FoldDispatch();
             var sites = Suspensions();
             if (sites is null) return null;
+            if (sites.Count == 0 && regions.Count == 0) RemoveCapturedReceiverChecks(arguments);
             foreach (var site in sites) if (!Redirect(site.Entry, site.Join)) return null;
             if (!RemoveTemplate(sites.Count == 0)) return null;
             Prune();
@@ -90,6 +91,33 @@ public static partial class AsyncLifting
         private static IEnumerable<string> Holes(ManagedBody body) => body.Blocks.SelectMany(b => b.Statements).SelectMany(s =>
             (s is ManagedHole h ? new[] { $"{h.Address:x}:{h.Terminal}:{h.Reason}" } : [])
             .Concat(ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)).SelectMany(ManagedValues.Walk).OfType<HoleValue>().Select(v => v.Reason)));
+
+        private void RemoveCapturedReceiverChecks(IReadOnlyDictionary<FieldDef, ArgumentValue> arguments)
+        {
+            var captured = arguments.Where(p => p.Value.Index == -1 && ManagedTypes.IsReferenceType(p.Value.Type)).Select(p => p.Key).ToHashSet();
+            var statements = blocks.Values.SelectMany(s => s).ToArray();
+            var addressed = statements.SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).OfType<AddressValue>()
+                .SelectMany(ManagedValues.Walk).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
+            var copies = statements.OfType<ManagedAssignment>().GroupBy(a => a.Target.Variable)
+                .Where(g => g.Count() == 1 && !addressed.Contains(g.Key)).ToDictionary(g => g.Key, g => g.Single().Value);
+            // 仅使用未改写、未按引用传出的入口捕获证据。
+            foreach (var statement in statements)
+            {
+                if (statement is ManagedStore store && StorageValue(store.Target) is FieldValue field && IsThis(field.Receiver)) captured.Remove(field.Field.Field);
+                foreach (var address in ManagedValues.Of(statement).SelectMany(ManagedValues.Walk).OfType<AddressValue>())
+                    if (address.Target is FieldValue escaped && IsThis(escaped.Receiver)) captured.Remove(escaped.Field.Field);
+            }
+            bool Receiver(ManagedValue value)
+            {
+                var seen = new HashSet<Variable>();
+                while (value is LocalValue local && seen.Add(local.Variable) && copies.TryGetValue(local.Variable, out var copy)) value = copy;
+                return value is FieldValue field && IsThis(field.Receiver) && captured.Contains(field.Field.Field);
+            }
+            foreach (var block in blocks.Values)
+                block.RemoveAll(s => s is ManagedCheck { Condition: ComparisonValue { Condition: Cond.Eq } comparison }
+                    && (Receiver(comparison.Left) && comparison.Right is ConstantValue { Bits: 0 }
+                        || Receiver(comparison.Right) && comparison.Left is ConstantValue { Bits: 0 }));
+        }
 
         // ---------- 1. 状态分派按初始状态折叠 ----------
 
