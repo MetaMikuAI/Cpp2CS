@@ -17,7 +17,9 @@ public sealed partial class SourceLibraryCalls
         if (fieldCalls.TryGetValue(type, out var cached)) return cached;
         var found = new List<FieldCall>();
         foreach (var method in type.Definition.Methods.Where(m => m.GenericParameters.Count == 0
-            && m.Name is not (".ctor" or ".cctor") && m.Parameters.Count <= 1 && !m.IsVirtual
+            && m.Name != ".cctor" && (m.Name != ".ctor" || type.Definition.IsValueType
+                && type.Definition.Fields.Count(f => !f.IsStatic) == 1)
+            && m.Parameters.Count <= 1 && !m.IsVirtual
             && (m.Attributes & System.Reflection.MethodAttributes.MemberAccessMask) is System.Reflection.MethodAttributes.Public
                 or System.Reflection.MethodAttributes.Family or System.Reflection.MethodAttributes.FamORAssem))
         {
@@ -113,6 +115,29 @@ public sealed partial class SourceLibraryCalls
                         value = field with { Receiver = receiver };
                     }
                     else value = ManagedValues.Map(value, Read);
+                    if (value is ComposedValue composed)
+                    {
+                        var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
+                        foreach (var (path, original) in composed.Leaves)
+                        {
+                            var leaf = original;
+                            var length = path.Count;
+                            // 单字段构造也可位于元组等聚合值的叶子；保持各叶子的求值顺序。
+                            while (length > 0 && path[length - 1].DeclaringType is DefinitionRef declaring
+                                && FieldCalls(declaring).FirstOrDefault(c => c.Method.Method.Name == ".ctor"
+                                    && c.Field.Equals(path[length - 1])
+                                    && ManagedAccess.Method(types, body.Method.Method.Owner, c.Method, null)) is { } constructor)
+                            {
+                                if (length == 1 && composed.Leaves.Count != 1) break;
+                                leaf = new NewObjectValue(constructor.Method, [leaf]) { Transparent = true };
+                                Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{statement.Address:x}\t{body.Method}\t{constructor.Method}");
+                                length--;
+                            }
+                            if (length == 0) return leaf;
+                            leaves.Add((path.Take(length).ToArray(), leaf));
+                        }
+                        return composed with { Leaves = leaves };
+                    }
                     var target = value is StaticFieldValue array ? EmptyArrayGetter(array) : null;
                     target ??= Find(value, false)?.Method;
                     if (target is null) return value;
