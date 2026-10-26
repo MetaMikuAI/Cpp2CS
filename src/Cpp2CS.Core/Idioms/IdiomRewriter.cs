@@ -252,7 +252,13 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             if (ArrayAddressPhis()) Cleanup();
             if (ArrayPointerLoops()) Cleanup();
             if (ExceptionStackValues.Run(function)) Cleanup();
-            if (ReadOnlyDataNormalizer.Run(function, facts.Model.Image)) Cleanup();
+            if (ReadOnlyDataNormalizer.Run(function, facts.Model.Image, address => facts.Usages.At(address)?.Usage.Kind
+                is UsageKind.StringLiteral or UsageKind.MethodDef or UsageKind.MethodRef))
+            {
+                Cleanup();
+                if (MetadataSlotPhis()) Cleanup();
+                if (StringSlotChoices()) Cleanup();
+            }
             if (MergedAllocationNormalizer.Run(function, facts)) Cleanup();
             if (FlagPhiConditions()) Cleanup();
             Residuals();
@@ -856,15 +862,32 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                         if (part is not Load { Width: 64 } load) return null;
                         var address = load.Address;
                         for (var depth = 0; depth < 8 && address is Use use && definitions.Raw(use.Variable) is { } value; depth++) address = value;
-                        if (address is not Select choice || definitions.Expand(choice.True) is not Const yes
-                            || definitions.Expand(choice.False) is not Const no) return null;
-                        if (facts.Usages.At(yes.Value) is not { Usage.Kind: UsageKind.StringLiteral } first
-                            || facts.Usages.At(no.Value) is not { Usage.Kind: UsageKind.StringLiteral } second) return null;
+                        if (address is not Select || SlotValue(definitions.Expand(address), out var slots) is not { } choice
+                            || slots.Any(s => s.Usage.Kind != UsageKind.StringLiteral)) return null;
                         changed = true;
-                        Result.ReadSlots.UnionWith([yes.Value, no.Value]);
-                        return choice with { True = new Symbol(SymbolKind.String, first.Usage.Value), False = new Symbol(SymbolKind.String, second.Usage.Value) };
+                        Result.ReadSlots.UnionWith(slots.Select(s => s.Address));
+                        return choice;
                     }));
             return changed;
+        }
+
+        private Expr? SlotValue(Expr address, out UsageSlot[] slots)
+        {
+            var found = new List<UsageSlot>();
+            Expr? Read(Expr value)
+            {
+                if (value is Const constant && facts.Usages.At(constant.Value) is { } slot
+                    && slot.Usage.Kind is UsageKind.StringLiteral or UsageKind.MethodDef or UsageKind.MethodRef)
+                {
+                    found.Add(slot);
+                    return new Symbol(SymbolOf(slot.Usage.Kind), slot.Usage.Value);
+                }
+                return value is Select choice && Read(choice.True) is { } yes && Read(choice.False) is { } no
+                    ? choice with { True = yes, False = no } : null;
+            }
+            var result = Read(address);
+            slots = found.ToArray();
+            return slots.Select(s => SymbolOf(s.Usage.Kind)).Distinct().Count() == 1 ? result : null;
         }
 
         private bool MetadataSlotPhis()
@@ -876,26 +899,30 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             {
                 if (phi.Sources.Length != block.Predecessors.Count
                     || block.Predecessors.Any(p => !p.NormalSuccessors.Contains(block) || p.Handler == block)) continue;
-                var slots = phi.Sources.Select(v => definitions.Expand(new Use(v, v.Width)) is Const address
-                    ? facts.Usages.At(address.Value) : null).ToArray();
-                if (slots.Any(s => s?.Usage.Kind is not (UsageKind.StringLiteral or UsageKind.MethodDef or UsageKind.MethodRef))
-                    || slots.Select(s => SymbolOf(s!.Usage.Kind)).Distinct().Count() != 1) continue;
+                var choices = phi.Sources.Select(v =>
+                {
+                    var value = SlotValue(definitions.Expand(new Use(v, v.Width)), out var slots);
+                    return (Value: value, Slots: slots);
+                }).ToArray();
+                if (choices.Any(c => c.Value is null)
+                    || choices.SelectMany(c => c.Slots).Select(s => SymbolOf(s.Usage.Kind)).Distinct().Count() != 1) continue;
                 var loads = All.SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<Load>()
                     .Where(l => l is { Width: 64, Address: Use use } && use.Variable == phi.Target).ToHashSet();
                 if (loads.Count == 0) continue;
                 var target = Fresh();
-                var sources = new Variable[slots.Length];
-                for (var i = 0; i < slots.Length; i++)
+                var sources = new Variable[choices.Length];
+                for (var i = 0; i < choices.Length; i++)
                 {
-                    var slot = slots[i]!;
-                    var symbol = new Symbol(SymbolOf(slot.Usage.Kind), slot.Usage.Value);
                     var parent = block.Predecessors[i];
                     var last = parent.Statements.LastOrDefault();
                     var position = parent.Statements.Count - (last is Jump or Branch or IndirectJump or Return ? 1 : 0);
                     sources[i] = Fresh();
-                    parent.Statements.Insert(position, new Define(last?.Address ?? parent.Start, sources[i], symbol));
-                    Result.ReadSlots.Add(slot.Address);
-                    symbolSlots.TryAdd(symbol, slot.Address);
+                    parent.Statements.Insert(position, new Define(last?.Address ?? parent.Start, sources[i], choices[i].Value!));
+                    foreach (var slot in choices[i].Slots)
+                    {
+                        Result.ReadSlots.Add(slot.Address);
+                        symbolSlots.TryAdd(new Symbol(SymbolOf(slot.Usage.Kind), slot.Usage.Value), slot.Address);
+                    }
                 }
                 block.Statements.Insert(block.Statements.IndexOf(phi) + 1, new Phi(phi.Address, target, sources));
                 foreach (var member in function.Blocks)

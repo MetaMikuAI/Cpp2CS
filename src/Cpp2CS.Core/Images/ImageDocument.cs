@@ -59,6 +59,9 @@ public sealed class ImageDocument
 
     public ImageSection? SectionAt(ulong address) => Sections.FirstOrDefault(s => s.Contains(address));
 
+    /// <summary>ELF 加载器完成重定位后保护为只读的范围。</summary>
+    public IReadOnlyList<(ulong Address, ulong Size)> RelroRanges { get; private init; } = [];
+
     /// <summary>导出符号：ELF 动态符号表中已定义的函数，PE 导出表中的名称导出。</summary>
     public IReadOnlyDictionary<string, ulong> Exports { get; private init; } = new Dictionary<string, ulong>();
 
@@ -216,6 +219,7 @@ public sealed class ImageDocument
         reader.Require(phoff, checked((ulong)phcount * 56));
         var ranges = new List<ImageRange>();
         var dynamicRanges = new List<(long Offset, ulong Size)>();
+        var relroRanges = new List<(ulong Address, ulong Size)>();
         ulong? ehFrameHeader = null;
         for (uint i = 0; i < phcount; i++)
         {
@@ -234,6 +238,7 @@ public sealed class ImageDocument
                 ranges.Add(new($"LOAD[{i}]", address, offset, fileSize, memorySize, (reader.U32(p + 4) & 1) != 0));
             }
             if (type == 2 && fileSize != 0) dynamicRanges.Add((offset, fileSize));
+            if (type == 0x6474e552 && memorySize != 0) relroRanges.Add((address, memorySize));
             if (type == 0x6474e550 && memorySize != 0)
             {
                 if (ehFrameHeader is not null) throw new InvalidDataException("ELF 有多个 PT_GNU_EH_FRAME");
@@ -322,6 +327,7 @@ public sealed class ImageDocument
         return new(reader.Bytes, Architecture.Arm64, ranges.Min(r => r.Address), ranges, collector.Summaries, collector.CodeRelocations)
         {
             EhFrameHeader = ehFrameHeader,
+            RelroRanges = relroRanges,
             Sections = sections.OrderBy(x => x.Address).ToArray(),
             Exports = exports,
             Imports = imports,

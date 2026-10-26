@@ -5,10 +5,10 @@ using Cpp2CS.Ssa;
 
 namespace Cpp2CS.Idioms;
 
-/// <summary>只读常量与有上界证明的数值查表；不把可写槽位、重定位指针或跳转地址当作数值。</summary>
+/// <summary>只读常量与有上界证明的查表；重定位项须指向已知元数据槽，不把地址当作数值。</summary>
 internal static class ReadOnlyDataNormalizer
 {
-    public static bool Run(MachineFunction function, ImageDocument image)
+    public static bool Run(MachineFunction function, ImageDocument image, Func<ulong, bool>? metadataSlot = null)
     {
         var dominators = Dominators.Compute(function);
         var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
@@ -41,11 +41,16 @@ internal static class ReadOnlyDataNormalizer
                     else if (load.Width != 8) return null;
                     if (index is Ir.Convert { Kind: ConvKind.SignExtend or ConvKind.ZeroExtend } extension) index = extension.Operand;
                     var count = Bound(index, block);
-                    if (count is < 1 or > 256 || !Readable(table.Value, count * load.Width / 8)) return null;
-                    Expr result = Read(table.Value + (ulong)(count - 1) * (ulong)load.Width / 8, load.Width);
+                    if (count is < 1 or > 256) return null;
+                    var size = count * load.Width / 8;
+                    var pointers = load.Width == 64 && (table.Value & 7) == 0 && ReadOnlyPointers(table.Value, size);
+                    if (!pointers && !Readable(table.Value, size)) return null;
+                    Expr Cell(int index) => pointers ? Expr.C(image.RelocatedPointer(table.Value + (ulong)index * 8)!.Value, 64)
+                        : Read(table.Value + (ulong)index * (ulong)load.Width / 8, load.Width);
+                    Expr result = Cell(count - 1);
                     for (var k = count - 2; k >= 0; k--)
                         result = new Select(new Compare(Cond.Eq, index, Expr.C((ulong)k, index.Width)),
-                            Read(table.Value + (ulong)k * (ulong)load.Width / 8, load.Width), result, load.Width);
+                            Cell(k), result, load.Width);
                     changed = true;
                     return result;
                 }));
@@ -58,6 +63,7 @@ internal static class ReadOnlyDataNormalizer
             {
                 if (!dominators.Dominates(parent.Index, block.Index)
                     || parent.Statements.LastOrDefault() is not Branch { Condition: Compare { Left: var compared, Right: Const limit } condition } branch
+                    || condition.Cond is not (Cond.Ult or Cond.Ule or Cond.Uge or Cond.Ugt)
                     || compared != index || limit.Value > 256) continue;
                 var count = (int)limit.Value + (condition.Cond is Cond.Ule or Cond.Ugt ? 1 : 0);
                 if (count is < 1 or > 256) continue;
@@ -76,6 +82,19 @@ internal static class ReadOnlyDataNormalizer
                 || image.ReadUpTo(address, size).Length != size) return false;
             for (var offset = -7; offset < size; offset++)
                 if (image.RelocatedPointer(unchecked(address + (ulong)offset)) is not null || image.Imports.ContainsKey(unchecked(address + (ulong)offset))) return false;
+            return true;
+        }
+
+        bool ReadOnlyPointers(ulong address, int size)
+        {
+            var section = image.SectionAt(address);
+            if (metadataSlot is null || section is null || section.Executable || !section.Contains(address + (ulong)size - 1)
+                || image.ReadUpTo(address, size).Length != size) return false;
+            if ((section.Flags & 1) != 0 && !image.RelroRanges.Any(r => address >= r.Address && address - r.Address < r.Size
+                && (ulong)size <= r.Size - (address - r.Address))) return false;
+            for (var offset = 0; offset < size; offset += 8)
+                if (image.Imports.ContainsKey(address + (ulong)offset) || image.RelocatedPointer(address + (ulong)offset) is not { } pointer
+                    || !metadataSlot(pointer)) return false;
             return true;
         }
 
