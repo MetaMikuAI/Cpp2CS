@@ -21,7 +21,8 @@ public sealed partial class MethodRecovery
             parameter is { Passing: Passing.Registers, Pieces: [var piece] }
             && DirectInputProof(call, callee) && UnusedParameter(call, piece.Register);
 
-        private static bool MissingInput(Expr expression) => expression is Unknown or Use { Variable.Version: < 0 };
+        private bool MissingInput(Expr expression) => expression is Unknown or Use { Variable.Version: < 0 }
+            || expression is Use use && runtime.Contains(use.Variable);
 
         // 编译器可以省略未用输入。仅填补 Unknown 或不能表示成引用的残值，保留已有求值。
         [ArgumentRule(30)]
@@ -52,7 +53,7 @@ public sealed partial class MethodRecovery
         private ManagedValue? UnusedReceiver(Call call, MethodRef callee, AbiValue self, Expr expression)
         {
             if (types.Kind(self.Type) != TypeKind.Reference) return null;
-            if (!MissingInput(expression) && (TypeOfValue(expression) is not { } actual || types.IsAssignable(actual, self.Type))) return null;
+            if (!MissingInput(expression) && TypeOfValue(expression) is { } actual && types.IsAssignable(actual, self.Type)) return null;
             if (!UnusedInput(call, callee, self)) return null;
             if (arguments.Values.FirstOrDefault(a => a.Index == -1 && types.IsAssignable(a.Type, self.Type)) is { } current)
                 return new ArgumentValue(-1, current.Type, current.Width);

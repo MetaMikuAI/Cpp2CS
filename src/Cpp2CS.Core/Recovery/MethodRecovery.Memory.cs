@@ -90,6 +90,7 @@ public sealed partial class MethodRecovery
                     if (types.StaticField(owner, (int)offset, width / 8) is { } field)
                         return new StaticFieldValue(field.Field, field.Type, width);
                     if (StaticStructLocation(owner, offset, width) is { } component) return component;
+                    if (StaticMemoryFragment(owner, offset, width) is { } packed) return packed;
                     throw Fail(0, $"静态字段 {owner}+0x{offset:x}:{width} 未匹配");
                 case null:
                     throw Fail(0, $"访存 地址 {address} 的基址类型未知");
@@ -118,6 +119,15 @@ public sealed partial class MethodRecovery
             if (offset == RuntimeLayout.ObjectKlass) throw Fail(0, "访存 读取对象的类指针");
             if (types.InstanceField(receiverType, (int)offset, width / 8) is not { } instance) throw Fail(0, $"字段 {receiverType}+0x{offset:x}:{width} 未匹配");
             return new FieldValue(Recover(baseTerm, null), instance.Field, instance.Type, width);
+        }
+
+        private Fragment? StaticMemoryFragment(DefinitionRef owner, long offset, int width)
+        {
+            var slots = facts.Layouts.Of(owner)?.Statics.Where(s => types.Kind(s.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Reference or TypeKind.Float or TypeKind.Double
+                && s.Offset >= offset && s.Offset + types.Size(s.Type) <= offset + width / 8).OrderBy(s => s.Offset).ToArray();
+            if (slots is null || slots.Length < 2) return null;
+            return new Fragment(slots.Select(s => new Part((s.Offset - (int)offset) * 8,
+                new StaticFieldValue(new FieldRef(s.Field, owner), s.Type, types.Size(s.Type) * 8))).ToArray(), types.UInt64, width);
         }
 
         /// <summary>静态值类型也可能按成员或多成员片访问；偏移只取匹配版本的布局，不补填充。</summary>
@@ -218,7 +228,7 @@ public sealed partial class MethodRecovery
                     if (inlined.Contains(u.Variable) && value is Binary { Op: BinOp.Add }) return ExpandAddress(value);
                     if (value is Use forwarded && TypeOfAddressBase(forwarded) is ByRefRef) return ExpandAddress(value);
                     if (value is Binary { Op: BinOp.Add, Right: Const } addition
-                        && TypeOfAddressBase(addition.Left) is { } baseType && (baseType is ByRefRef || ManagedTypes.IsReferenceType(baseType) && baseType is DefinitionRef))
+                        && TypeOfAddressBase(addition.Left) is { } baseType && (baseType is ByRefRef || ManagedTypes.IsReferenceType(baseType)))
                         return ExpandAddress(value);
                 }
                 if (e is Binary { Op: BinOp.Add } b) return b with { Left = ExpandAddress(b.Left), Right = ExpandAddress(b.Right) };

@@ -12,11 +12,13 @@ public sealed partial class MethodRecovery
         private readonly Dictionary<(ulong Site, int Parameter), LocalValue> stackArgumentValues = [];
 
         /// <summary>按 AAPCS64 栈布局匹配到达写入，值在原写入位置快照；不把寄存器耗尽后的参数丢掉。</summary>
-        [Analysis("标量栈实参", 22, After = ["栈上调用"])]
+        [Analysis("标量栈实参", 29, After = ["帧前类型"])]
         private void PrepareScalarStackArguments()
         {
             var definitions = values.Concat(function.Dead.Select(d => new KeyValuePair<Variable, Expr>(d.Define.Target, d.Define.Value)))
                 .GroupBy(p => p.Key).ToDictionary(g => g.Key, g => g.First().Value);
+            Expr Definition(Expr expression, int depth = 12) => depth == 0 ? expression : ExprMap.Map(expression,
+                e => e is Use use && definitions.TryGetValue(use.Variable, out var value) ? Definition(value, depth - 1) : null);
             long? Offset(Expr expression, HashSet<Variable> active) => expression switch
             {
                 FrameAddress f => f.Offset,
@@ -48,12 +50,18 @@ public sealed partial class MethodRecovery
             foreach (var block in blocks)
             foreach (var call in block.Statements.OfType<Call>())
             {
-                if (Resolve(call) is not { } callee || owner.abi.Classify(callee, out _) is not { } signature
-                    || !signature.Parameters.Any(p => p.Passing == Passing.Stack)) continue;
+                if (Resolve(call) is not { } callee || owner.abi.Classify(callee, out _) is not { } signature) continue;
                 var state = writes[block].LastOrDefault(d => d.Address < call.Address) is { } last
                     ? new HashSet<long?> { Offset(last.Value, []) } : Input(block);
                 if (state.Count != 1 || state.Single() is not { } callSp) continue;
                 var layout = owner.abi.StackArguments(signature);
+                // 虚调用的隐藏 MethodInfo 与方法指针来自同一个 vtable 槽，寄存器耗尽时写入栈。
+                if (call.Op?.Kind == OpKind.CallVirtual && layout.MethodInfoOffset is { } hidden
+                    && ReachingStackStore(block, block.Statements.IndexOf(call), callSp + hidden, []) is { } metadata
+                    && Definition(metadata.Value) is Load { Width: 64 } info && Definition(call.Target) is Load { Width: 64 } pointer
+                    && Split(info.Address) is var infoAt && Split(pointer.Address) is var pointerAt
+                    && infoAt.Base == pointerAt.Base && infoAt.Offset == pointerAt.Offset + 8)
+                    dropped.Add(metadata);
                 foreach (var parameter in layout.Parameters)
                 {
                     if (types.Kind(parameter.Type) is not (TypeKind.Float or TypeKind.Double or TypeKind.Int or TypeKind.Bool or TypeKind.Reference)) continue;

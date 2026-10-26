@@ -357,6 +357,7 @@ public sealed partial class MethodRecovery
                 MarkRuntime();
                 InferTypes();
             }
+            TrimIndirectArguments(typed: true);
         }
 
         /// <summary>
@@ -616,6 +617,7 @@ public sealed partial class MethodRecovery
                 {
                     if (block.Statements[i] is not Call { Op: { Kind: OpKind.NewObject, Operand: DefinitionRef type } } allocation || allocation.Defines.FirstOrDefault() is not { } created) continue;
                     if (DelegateFacts.IsDelegate(type)) { DelegateAllocation(block, i, allocation, type, created); continue; }
+                    if (BranchConstructors(block, i, allocation, type, created)) continue;
                     Call? constructor = null;
                     var inline = false;
                     RecoveryHole? failure = null;
@@ -1089,6 +1091,8 @@ public sealed partial class MethodRecovery
                 case Ir.Select s:
                 {
                     var condition = Recover(s.Condition, types.Boolean);
+                    // 常量臂没有独立类型；先从另一臂取得引用或浮点类型，避免把 null 当成 long。
+                    if (hint is null && s.True is Const && s.False is not Const) hint = TypeOfValue(s.False);
                     var whenTrue = Recover(s.True, hint);
                     if (whenTrue is Fragment f) whenTrue = Pack(f);
                     var whenFalse = Coerce(Recover(s.False, whenTrue.Type), whenTrue.Type, 0);
@@ -1148,6 +1152,13 @@ public sealed partial class MethodRecovery
 
         private ManagedValue Binary(Binary b)
         {
+            if (b is { Op: BinOp.Ror, Width: 32 or 64 })
+            {
+                var shift = new Binary(BinOp.And, b.Right, Expr.C((ulong)b.Width - 1, b.Right.Width), b.Right.Width);
+                var opposite = new Binary(BinOp.And, new Unary(UnOp.Neg, shift, shift.Width), Expr.C((ulong)b.Width - 1, shift.Width), shift.Width);
+                return Recover(new Binary(BinOp.Or, new Binary(BinOp.LShr, b.Left, shift, b.Width),
+                    new Binary(BinOp.Shl, b.Left, opposite, b.Width), b.Width), null);
+            }
             if (b.Op is BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv or BinOp.FMin or BinOp.FMax)
             {
                 if (b.Width is not (32 or 64)) throw Fail(0, $"运算 {b.Op} 的浮点宽度 {b.Width} 尚未支持");
@@ -1250,8 +1261,8 @@ public sealed partial class MethodRecovery
                 operand = Pack(f);
             }
             // 写入向量寄存器低位的值（S/D 读写清零高位）：只有低位是托管值，高位不属于任何叶子（如 HFA 实参的各片来自各自的 float 字段）。
-            if (c.Kind == ConvKind.ZeroExtend && c.Width == 128 && (StructOrigin(c.Operand) || types.Kind(operand.Type) is TypeKind.Float or TypeKind.Double))
-                return new Fragment([new Part(0, operand)], types.UInt64, 128);
+            if (c.Kind == ConvKind.ZeroExtend && c.Width == 128 && (StructOrigin(c.Operand) || types.Kind(operand.Type) is TypeKind.Float or TypeKind.Double or TypeKind.Int or TypeKind.Bool))
+                return ResizeFragment(new Fragment([new Part(0, operand)], types.UInt64, operand.Width), 128);
             switch (c.Kind)
             {
                 case ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate:
@@ -1472,8 +1483,9 @@ public sealed partial class MethodRecovery
                     output.Add(new ManagedAssignment(address, Local(call.Defines[0]),
                         new NewObjectValue(constructor.Method, constructorArguments) { Transparent = true }));
                     return;
-                case { Kind: OpKind.NewArray, Operand: ArrayRef array } when call.Defines.FirstOrDefault() is { } created:
-                    output.Add(new ManagedAssignment(address, Local(created), new NewArrayValue(array, Index(call.Arguments[1]))));
+                case { Kind: OpKind.NewArray, Operand: ArrayRef array }:
+                    output.Add(new ManagedAssignment(address, call.Defines.FirstOrDefault() is { } createdArray ? Local(createdArray) : StructLocal(array, 64),
+                        new NewArrayValue(array, Index(call.Arguments[1]))));
                     return;
                 case { Kind: OpKind.Box, Operand: TypeRef type } when call.Defines.FirstOrDefault() is { } created && boxed.TryGetValue(call, out var content):
                     if (types.Kind(type) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double) || type is DefinitionRef { Definition.FullName: "System.Nullable" })
@@ -1492,6 +1504,9 @@ public sealed partial class MethodRecovery
                     return;
                 case { Kind: OpKind.IsInst, Operand: TypeRef type } when call.Defines.FirstOrDefault() is { } created:
                     output.Add(new ManagedAssignment(address, Local(created), new IsInstValue(Coerce(Recover(call.Arguments[0], types.Object), types.Object, address), type)));
+                    return;
+                case { Kind: OpKind.IsInstArrayElement } when call.Defines.FirstOrDefault() is { } created:
+                    ArrayElementCheck(call, created, output);
                     return;
                 case null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual }:
                     Invocation(call, output);

@@ -222,6 +222,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             }
             RefreshOperands();
             if (FreshArrayElementClasses()) Cleanup();
+            if (DynamicArrayElementChecks()) Cleanup();
             if (EnumElementClasses()) Cleanup();
             RefreshInterfaceOperands();
             if (!owner.AuditLegacyDelegateCalls && DelegateCallNormalizer.Run(facts, function, Result)) Cleanup();
@@ -233,6 +234,11 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 PruneRuntimeGuards();
             }
             while (FiniteConditions.Simplify(function)) Cleanup();
+            if (CheckedReferenceValues()) Cleanup();
+            if (ZeroPhiSources()) Cleanup();
+            if (EqualAddressPhis()) Cleanup();
+            if (StaticFieldPhiLoads()) Cleanup();
+            if (ReadOnlyDataNormalizer.Run(function, facts.Model.Image)) Cleanup();
             Residuals();
         }
 
@@ -244,9 +250,12 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 defs = new Defs(function);
                 if (owner.RecoverUnusedInputs) DiscardUnusedInputs();
                 // 类型检查先于抛异常检查：castclass / as 后判空的失败一侧是只抛异常的块
-                var changed = Guards();
+                var changed = SplitMetadataGuards();
+                changed |= Guards();
+                changed |= RetainMetadataPath();
                 changed |= TypeChecks();
                 changed |= Checks();
+                changed |= CheckedTypeChains();
                 if (!changed) return;
                 Cleanup();
             }
@@ -260,6 +269,171 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         }
 
         private IEnumerable<Stmt> All => function.Blocks.Where(b => !removed.Contains(b)).SelectMany(b => b.Statements);
+
+        // null 与通过 castclass 检查的路径汇合后，值具有目标引用类型；后续 phi 也必须保留这个类型。
+        private bool CheckedReferenceValues()
+        {
+            var dominators = Dominators.Compute(function);
+            var changed = false;
+            foreach (var join in function.Blocks.Where(b => b.Predecessors.Count == 2))
+            foreach (var check in join.Predecessors)
+            {
+                if (check.Statements.LastOrDefault() is not Jump to || to.Target != join.Start) continue;
+                var path = new List<Block> { check };
+                var first = check;
+                while (first.Predecessors is [var parent] && parent.Statements.LastOrDefault() is Jump next
+                    && next.Target == first.Start && !path.Contains(parent)) { path.Add(parent); first = parent; }
+                if (first.Predecessors is not [var head] || !join.Predecessors.Contains(head)
+                    || head.Statements.LastOrDefault() is not Branch { Condition: Compare { Cond: Cond.Eq or Cond.Ne, Left: Use obj, Right: Const { Value: 0 } } test } branch
+                    || (test.Cond == Cond.Eq ? branch.Target : branch.Fallthrough) != join.Start) continue;
+                var calls = path.SelectMany(b => b.Statements).OfType<Call>().ToArray();
+                TypeRef? target = null;
+                foreach (var call in calls)
+                {
+                    if (call is { Op.Kind: OpKind.TypeCheck, Op.Operand: DefinitionRef { Definition.IsValueType: false } type, Arguments: [Use klass] }
+                        && RawDefinition(klass) is Load { Width: 64, Address: var source } && source == obj
+                        && call.Defines.FirstOrDefault() is { } flag && calls.Any(c => c is
+                            { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException", Arguments: [Compare { Cond: Cond.Eq, Left: Use result, Right: Const { Value: 0 } }] }
+                            && result.Variable == flag)) target = type;
+                    if (call is { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException", Arguments: [Compare { Cond: Cond.Ne, Left: Use sealedClass, Right: Symbol { Kind: SymbolKind.Class, Value: DefinitionRef { Definition.IsValueType: false } sealedType } }] }
+                        && (sealedType.Definition.Attributes & System.Reflection.TypeAttributes.Sealed) != 0
+                        && RawDefinition(sealedClass) is Load { Width: 64, Address: var instance } && instance == obj) target = sealedType;
+                }
+                if (target is null) continue;
+                var cast = Fresh();
+                foreach (var block in function.Blocks)
+                    for (var i = 0; i < block.Statements.Count; i++)
+                    {
+                        if (block.Statements[i] is Phi phi)
+                        {
+                            var sources = phi.Sources.Select((source, at) => source == obj.Variable
+                                && dominators.Dominates(join.Index, block.Predecessors[at].Index) ? cast : source).ToArray();
+                            block.Statements[i] = phi with { Sources = sources };
+                        }
+                        else if (dominators.Dominates(join.Index, block.Index))
+                            block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e,
+                                part => part is Use use && use.Variable == obj.Variable ? new Use(cast, use.Width) : null));
+                    }
+                join.Statements.Insert(join.Statements.TakeWhile(s => s is Phi).Count(), new Call(join.Start, CallKind.Direct, Expr.C(0, 64))
+                {
+                    Op = new RuntimeOp(OpKind.IsInst, target), Arguments = [obj], Results = [cast.Storage], Defines = [cast],
+                });
+                changed = true;
+                break;
+            }
+            return changed;
+        }
+
+        // 判空边上的对象寄存器确定为零，也可复用作 Nullable 等结构体的全零返回片。
+        private bool ZeroPhiSources()
+        {
+            var dominators = Dominators.Compute(function);
+            var zeros = new List<(Variable Value, Block From, Block To)>();
+            foreach (var block in function.Blocks)
+                if (block.Statements.LastOrDefault() is Branch { Condition: Compare { Cond: Cond.Eq or Cond.Ne, Left: Use { Width: 64 } value, Right: Const { Value: 0 } } test } branch
+                    && block.NormalSuccessors.FirstOrDefault(b => b.Start == (test.Cond == Cond.Eq ? branch.Target : branch.Fallthrough)) is { } target)
+                    zeros.Add((value.Variable, block, target));
+            var changed = false;
+            foreach (var block in function.Blocks)
+                foreach (var phi in block.Statements.OfType<Phi>().ToArray())
+                {
+                    var sources = phi.Sources.ToArray();
+                    for (var i = 0; i < sources.Length; i++)
+                    {
+                        var parent = block.Predecessors[i];
+                        if (!zeros.Any(z => z.Value == sources[i] && (z.From == parent && z.To == block
+                            || z.To.Predecessors.Count == 1 && dominators.Dominates(z.To.Index, parent.Index)))) continue;
+                        sources[i] = Fresh();
+                        var terminal = parent.Statements.LastOrDefault();
+                        parent.Statements.Insert(parent.Statements.Count - (terminal is Jump or Branch or IndirectJump or Return ? 1 : 0),
+                            new Define(terminal?.Address ?? parent.Start, sources[i], Expr.C(0, 64)));
+                        changed = true;
+                    }
+                    block.Statements[block.Statements.IndexOf(phi)] = phi with { Sources = sources };
+                }
+            return changed;
+        }
+
+        // 分支选择静态字段的地址、合流后再读取：把只读元数据寻址分发到原分支，合流的是字段值。
+        private bool StaticFieldPhiLoads()
+        {
+            Expr ResolveMetadata(Expr expression)
+            {
+                var mapped = ExprMap.Map(expression, part => !ReferenceEquals(part, expression) ? ResolveMetadata(part) : null);
+                var part = mapped;
+                if (part is not Load { Width: 64 } load) return mapped;
+                if (load.Address is Const address)
+                {
+                    if (facts.Usages.At(address.Value) is { } usage) return new Symbol(SymbolOf(usage.Usage.Kind), usage.Usage.Value);
+                    if (facts.Model.Image.RelocatedPointer(address.Value) is { } pointer && facts.Usages.At(pointer) is not null) return Expr.C(pointer, 64);
+                }
+                return Split(load.Address) is (Symbol { Kind: SymbolKind.Class } type, RuntimeLayout.ClassStaticFields)
+                    ? new Symbol(SymbolKind.StaticFields, type.Value) : mapped;
+            }
+            var changed = false;
+            foreach (var block in function.Blocks)
+            foreach (var phi in block.Statements.OfType<Phi>().ToArray())
+            {
+                if (block.Predecessors.Any(p => p.NormalSuccessors.Count() != 1 || p.Handler == block)) continue;
+                foreach (var statement in block.Statements.Where(s => s is not Phi).ToArray())
+                {
+                    if (statement is not Define && statement is not Return) break;
+                    foreach (var load in ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Load>().ToArray())
+                    {
+                        var expanded = defs.Expand(load);
+                        if (!ExprMap.Walk(expanded).OfType<Use>().Any(u => u.Variable == phi.Target)) continue;
+                        var values = phi.Sources.Select(v => ResolveMetadata(ExprMap.Map(expanded,
+                            part => part is Use use && use.Variable == phi.Target ? defs.Expand(new Use(v, v.Width)) : null))).ToArray();
+                        if (values.Any(v => v is not Load l || Split(l.Address).Basis is not Symbol { Kind: SymbolKind.StaticFields })) continue;
+                        var target = Fresh();
+                        var incoming = new Variable[values.Length];
+                        for (var i = 0; i < values.Length; i++)
+                        {
+                            var parent = block.Predecessors[i];
+                            var last = parent.Statements.LastOrDefault();
+                            incoming[i] = Fresh();
+                            parent.Statements.Insert(parent.Statements.Count - (last is Jump or Branch or IndirectJump or Return ? 1 : 0),
+                                new Define(last?.Address ?? parent.Start, incoming[i], values[i]));
+                        }
+                        block.Statements.Insert(block.Statements.IndexOf(phi) + 1, new Phi(phi.Address, target, incoming));
+                        var position = block.Statements.IndexOf(statement);
+                        if (position >= 0) block.Statements[position] = ExprMap.MapOperands(statement, e => ExprMap.Map(e, part => part == load ? new Use(target, load.Width) : null));
+                        changed = true;
+                    }
+                }
+            }
+            return changed;
+        }
+
+        // 不同分支计算同一个字段地址时，合流后仍使用原地址表达式，不生成无类型的原生指针局部。
+        private bool EqualAddressPhis()
+        {
+            var changed = false;
+            var phis = All.OfType<Phi>().ToDictionary(p => p.Target);
+            void Leaves(Expr value, HashSet<Variable> active, HashSet<Expr> leaves)
+            {
+                value = defs.Expand(value);
+                if (value is Use use && phis.TryGetValue(use.Variable, out var phi))
+                {
+                    if (!active.Add(use.Variable)) return;
+                    foreach (var source in phi.Sources) Leaves(new Use(source, source.Width), active, leaves);
+                }
+                else leaves.Add(value);
+            }
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                {
+                    if (block.Statements[i] is not Phi phi || phi.Sources.Length == 0) continue;
+                    var leaves = new HashSet<Expr>();
+                    Leaves(new Use(phi.Target, phi.Target.Width), [], leaves);
+                    var sources = leaves.ToArray();
+                    if (sources is not [Binary { Op: BinOp.Add, Right: Const } address]
+                        || ExprMap.Walk(address).Any(e => e is Load or Unknown or Intrinsic)) continue;
+                    block.Statements[i] = new Define(phi.Address, phi.Target, address);
+                    changed = true;
+                }
+            return changed;
+        }
 
         // 未用参数中的寄存器残值不应保活元数据守卫和无定义的合并值。
         private void DiscardUnusedInputs()
@@ -505,6 +679,94 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         }
 
         // ---------- 守卫 ----------
+
+        // 初始化臂还含字段重读时保留该臂的数据流，只移除元数据标志；避免丢掉合流处实际使用的值。
+        private bool RetainMetadataPath()
+        {
+            var changed = false;
+            foreach (var head in function.Blocks)
+            {
+                if (removed.Contains(head) || head.Statements.LastOrDefault() is not Branch branch || head.NormalSuccessors.ToArray() is not [var first, var second]) continue;
+                var condition = defs.Expand(branch.Condition);
+                if (TopLoads(condition).Distinct().ToArray() is not [Load { Width: 8, Address: Const guard } load]
+                    || !owner.guardSections.Any(s => s.Contains(guard.Value))) continue;
+                var side = Direction(condition, Replace(load, 0));
+                if (side is not (0 or 1) || Direction(condition, Replace(load, 1)) != 1 - side) continue;
+                var init = side == 0 ? first : second;
+                var skip = side == 0 ? second : first;
+                if (Chain(init, skip) is not { Count: > 0 } chain) continue;
+                var statements = chain.SelectMany(b => b.Statements).ToArray();
+                var calls = statements.OfType<Call>().ToArray();
+                var stores = statements.OfType<Store>().ToArray();
+                if (calls.Length == 0 || stores is not [Store { Target: Const target, Value: Const { Value: 1, Width: 8 } } set]
+                    || target.Value != guard.Value || calls.Any(c => owner.HelperOf(c)?.Kind != HelperKind.InitMetadata)
+                    || statements.Any(s => s is not (Call or Store or Define or Nop or Jump))) continue;
+                var slots = calls.Select(c => defs.Expand(c.Arguments.FirstOrDefault() ?? Expr.C(0, 64)))
+                    .OfType<Const>().Select(c => c.Value).ToArray();
+                if (slots.Length != calls.Length || slots.Any(s => facts.Usages.At(s) is null)) continue;
+                var storeBlock = chain.Single(b => b.Statements.Contains(set));
+                storeBlock.Statements[storeBlock.Statements.IndexOf(set)] = new Nop(set.Address, "MetadataInitGuard");
+                head.Statements[^1] = new Jump(branch.Address, init.Start);
+                MachineFunction.RemoveEdgeAt(head, 1 - side.Value);
+                Result.GuardSlots[guard.Value] = slots.Distinct().Order().ToArray();
+                Result.InitializedSlots.UnionWith(slots);
+                Result.MetadataGuardBranches.Add(branch.Address);
+                Result.Hit(Template.MetadataInitGuard);
+                changed = true;
+            }
+            return changed;
+        }
+
+        // 初始化分支复制了后继业务判断时，两臂没有直线汇合；只跳过已证明等价的初始化前缀。
+        private bool SplitMetadataGuards()
+        {
+            var changed = false;
+            foreach (var head in function.Blocks)
+            {
+                if (head.Statements.LastOrDefault() is not Branch branch || head.NormalSuccessors.ToArray() is not [var first, var second]) continue;
+                var condition = defs.Expand(branch.Condition);
+                if (TopLoads(condition).Distinct().ToArray() is not [Load { Width: 8, Address: Const guard } load]
+                    || !owner.guardSections.Any(s => s.Contains(guard.Value))) continue;
+                var side = Direction(condition, Replace(load, 0));
+                if (side is not (0 or 1) || Direction(condition, Replace(load, 1)) != 1 - side) continue;
+                var init = side == 0 ? first : second;
+                var skip = side == 0 ? second : first;
+                if (init.IsLandingPad || init.Predecessors.Count != 1 || init.Statements.LastOrDefault() is not Branch after
+                    || skip.Statements.LastOrDefault() is not Branch normal || skip.Statements.Any(s => s is not (Define or Nop or Branch))) continue;
+                var left = defs.Expand(after.Condition);
+                var right = defs.Expand(normal.Condition);
+                if (!(left == right && after.Target == normal.Target && after.Fallthrough == normal.Fallthrough)
+                    && !(left == Fold.Simplify(new Not(right)) && after.Target == normal.Fallthrough && after.Fallthrough == normal.Target)) continue;
+                var slots = new List<ulong>();
+                var sets = 0;
+                var valid = true;
+                foreach (var statement in init.Statements.SkipLast(1))
+                    switch (statement)
+                    {
+                        case Call call when owner.HelperOf(call)?.Kind == HelperKind.InitMetadata
+                            && defs.Expand(call.Arguments.FirstOrDefault() ?? Expr.C(0, 64)) is Const slot && facts.Usages.At(slot.Value) is not null:
+                            slots.Add(slot.Value);
+                            break;
+                        case Store { Target: Const target, Value: Const { Value: 1, Width: 8 } } when target.Value == guard.Value:
+                            sets++;
+                            break;
+                        case Define { Value: Const or Symbol } or Nop:
+                            break;
+                        default:
+                            valid = false;
+                            break;
+                    }
+                if (!valid || slots.Count == 0 || sets != 1) continue;
+                head.Statements[^1] = new Jump(branch.Address, skip.Start);
+                MachineFunction.RemoveEdgeAt(head, side.Value);
+                Result.GuardSlots[guard.Value] = slots.Distinct().Order().ToArray();
+                Result.InitializedSlots.UnionWith(slots);
+                Result.MetadataGuardBranches.Add(branch.Address);
+                Result.Hit(Template.MetadataInitGuard);
+                changed = true;
+            }
+            return changed;
+        }
 
         // 同一类型初始化已在所有到达路径上完成时，后续 cctor_finished 检查走已初始化分支。
         private bool InitializedClassLoads()
@@ -1106,7 +1368,8 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 // 形态一：next 以继承链比较分支到成功/失败 → 两块合成一个分支
                 if (next.Statements.LastOrDefault() is Branch compare && IsHierarchyTest(compare.Condition, out var equalTaken)
                     && next.Statements.Take(next.Statements.Count - 1).All(s => s is Define or Nop)
-                    && next.NormalSuccessors.ToArray() is [var a0, var a1] && a0 != a1 && (a0 == fail || a1 == fail))
+                    && next.NormalSuccessors.ToArray() is [var a0, var a1] && a0 != a1 && (a0 == fail || a1 == fail)
+                    && (a0 == fail ? a1 : a0).Predecessors.Count == 1)
                 {
                     var success = a0 == fail ? a1 : a0;
                     if ((compare.Target == success.Start) != equalTaken || success.Predecessors.Count != 1) continue;
@@ -1134,10 +1397,46 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                         next.Statements[i] = ExprMap.MapOperands(next.Statements[i], e => ExprMap.Map(e, Substitute));
                     if (!replaced) continue;
                     head.Statements.Insert(head.Statements.Count - 1, op);
+                    head.Statements[^1] = branch with { Condition = depth.Cond == Cond.Ult ? new Not(isType) : isType };
                 }
                 Result.Hit(Template.InlineTypeCheck);
                 changed = true;
             }
+            return changed;
+        }
+
+        // castclass 的两个失败分支可能已归一成 ThrowIf；继承深度与继承表检查共同还原为一次类型检查。
+        private bool CheckedTypeChains()
+        {
+            var changed = false;
+            foreach (var head in function.Blocks)
+                for (var index = 0; index < head.Statements.Count; index++)
+                {
+                    if (head.Statements[index] is not Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException", Arguments: [Compare { Cond: Cond.Ult } depth] } first
+                        || StripConversions(defs.Expand(depth.Left)) is not Load { Width: 8, Address: Binary { Op: BinOp.Add, Right: Const { Value: RuntimeLayout.ClassTypeHierarchyDepth } } objectDepth }
+                        || StripConversions(defs.Expand(depth.Right)) is not Load { Width: 8, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class } type, Right: Const { Value: RuntimeLayout.ClassTypeHierarchyDepth } } }) continue;
+                    var klass = StripConversions(RawDefinition(StripConversions(depth.Left)) ?? depth.Left);
+                    var objectClass = klass is Load { Address: Binary { Left: var basis } } ? basis : objectDepth.Left;
+                    var hierarchy = new Load(Fold.Simplify(new Binary(BinOp.Add, objectDepth.Left, Expr.C(RuntimeLayout.ClassTypeHierarchy, 64), 64)), 64);
+                    foreach (var (block, statement) in Recovery.AllocationPairing.Following(head, index))
+                    {
+                        if (statement is Define or Nop) continue;
+                        if (statement is not Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException", Arguments: [Compare { Cond: Cond.Ne } compare] } second) break;
+                        var expanded = defs.Expand(compare);
+                        if (expanded is not Compare test || test.Right != type || test.Left is not Load { Width: 64 } item
+                            || !Terms(item.Address).Contains(hierarchy)) break;
+                        var result = Fresh();
+                        head.Statements.Insert(index, new Call(first.Address, CallKind.Direct, Expr.C(0, 64))
+                        {
+                            Op = new RuntimeOp(OpKind.TypeCheck, type.Value), Arguments = [objectClass], Results = [result.Storage], Defines = [result],
+                        });
+                        head.Statements[++index] = first with { Arguments = [new Compare(Cond.Eq, new Use(result, 64), Expr.C(0, 64))] };
+                        block.Statements[block.Statements.IndexOf(second)] = new Nop(second.Address, "TypeCheck");
+                        Result.Hit(Template.InlineTypeCheck);
+                        changed = true;
+                        break;
+                    }
+                }
             return changed;
         }
 
@@ -1506,7 +1805,23 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             return changed;
         }
 
-        /// <summary>Enum.GetValues 的数组枚举器只产生该枚举的装箱值；不把任意 IEnumerator 当作同类来源。</summary>
+        private bool DynamicArrayElementChecks()
+        {
+            var changed = false;
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                    if (block.Statements[i] is Call { Op: { Kind: OpKind.IsInst, Operand: null }, Arguments: [var value, var type] } call
+                        && (RawDefinition(type) ?? type) is Load { Width: 64, Address: var elementAddress }
+                        && Split(elementAddress) is (Use klass, RuntimeLayout.ClassElementClass)
+                        && RawDefinition(klass) is Load { Width: 64, Address: Use array })
+                    {
+                        block.Statements[i] = call with { Op = new RuntimeOp(OpKind.IsInstArrayElement, null), Arguments = [value, array] };
+                        changed = true;
+                    }
+            return changed;
+        }
+
+        /// <summary>Enum.GetValues 的数组读取只产生该枚举的装箱值；不把任意 Array 或 IEnumerator 当作同类来源。</summary>
         private bool EnumElementClasses()
         {
             var results = All.OfType<Call>().Where(c => c.Defines.Length > 0).ToDictionary(c => c.Defines[0]);
@@ -1515,10 +1830,16 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 && facts.EntriesAt(target.Value).Any(e => e.Method is { } m && m.Method.Owner.FullName == ownerName && m.Method.Name == name);
             TypeRef? Element(Expr value)
             {
-                if (Source(value) is not { Op: { Kind: OpKind.CallInterface, Operand: (DefinitionRef { Definition.FullName: "System.Collections.IEnumerator" }, 1) }, Arguments: [var iterator, ..] }) return null;
-                var enumerator = Source(iterator);
-                if (!Named(enumerator, "System.Array", "GetEnumerator") || enumerator!.Arguments.Length == 0) return null;
-                var array = Source(enumerator.Arguments[0]);
+                var current = Source(value);
+                Call? array;
+                if (Named(current, "System.Array", "GetValue") && current!.Arguments.Length > 0) array = Source(current.Arguments[0]);
+                else
+                {
+                    if (current is not { Op: { Kind: OpKind.CallInterface, Operand: (DefinitionRef { Definition.FullName: "System.Collections.IEnumerator" }, 1) }, Arguments: [var iterator, ..] }) return null;
+                    var enumerator = Source(iterator);
+                    if (!Named(enumerator, "System.Array", "GetEnumerator") || enumerator!.Arguments.Length == 0) return null;
+                    array = Source(enumerator.Arguments[0]);
+                }
                 if (!Named(array, "System.Enum", "GetValues") || array!.Arguments.Length == 0) return null;
                 var type = Source(array.Arguments[0]);
                 return Named(type, "System.Type", "GetTypeFromHandle") && type!.Arguments.Length > 0

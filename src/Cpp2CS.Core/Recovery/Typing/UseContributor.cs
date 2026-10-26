@@ -87,7 +87,7 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
             {
                 case Return { Value: { } value } when input.ReturnSupported:
                     yield return (value, input.Method.Method.ReturnType, statement.Address, "返回签名"); break;
-                case Store store when !input.Dropped.Contains(store)
+                case Store store when (!input.Dropped.Contains(store) || input.StoredArguments.ContainsKey(store))
                     && (input.StoredArguments.GetValueOrDefault(store) ?? expressions.LocationType(store.Target, store.Value.Width)) is { } type:
                     yield return (store.Value, type, store.Address, $"写入 {store.Target}:{store.Value.Width}"); break;
                 case Call { Op.Kind: OpKind.BoundsCheck, Arguments: [var index, var length] }:
@@ -103,12 +103,16 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                     yield return (value, type, call.Address, "原子交换的新引用");
                     yield return (comparand, type, call.Address, "原子交换的比较引用");
                     break;
-                case Call call when call.Op is null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual }
+                case Call call when call.Op is null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual or OpKind.CallDelegate }
                     && context.Resolve(call) is { } target && abi.Classify(target, out _) is { } signature:
                     var registers = call.ArgumentsBySource();
                     foreach (var parameter in signature.Arguments)
                         if (parameter is { Passing: Passing.Registers, Pieces.Length: 1 } && registers.TryGetValue(parameter.Pieces[0].Register, out var argument))
+                        {
+                            if (ReferenceEquals(parameter, signature.This) && expressions.TypeOf(argument) is { } actual
+                                && !context.Types.IsAssignable(actual, parameter.Type) && input.UnusedInput(call, target, parameter)) continue;
                             yield return (argument, parameter.Type, call.Address, $"{target} 实参 {parameter.Pieces[0].Register}");
+                        }
                     break;
             }
     }

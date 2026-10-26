@@ -87,10 +87,20 @@ public sealed partial class MethodRecovery
                 foreach (var phi in block.Statements.OfType<Phi>())
                 {
                     if (phi.Target.Storage.Bank != Bank.Gpr || structPhiMembers.ContainsKey(phi.Target) || phiSources[phi.Target].Any()) continue;
-                    if (uses[phi.Target].ToArray() is not [Store { Value: Use { Width: 64 or 32 } use } store] || use.Variable != phi.Target) continue;
-                    var width = use.Width;
-                    if (CopyRanges(store.Target, width).FirstOrDefault(r => r.Offset == 0 && types.Kind(r.Type) == TypeKind.Struct && types.Size(r.Type) * 8 == width) is not { } target) continue;
-                    var type = target.Type;
+                    TypeRef? type = null;
+                    var width = 0;
+                    if (uses[phi.Target].ToArray() is [Store { Value: Use { Width: 64 or 32 } use } store] && use.Variable == phi.Target)
+                    {
+                        width = use.Width;
+                        type = CopyRanges(store.Target, width).FirstOrDefault(r => r.Offset == 0 && types.Kind(r.Type) == TypeKind.Struct && types.Size(r.Type) * 8 == width)?.Type;
+                    }
+                    else if (uses[phi.Target].ToArray() is [Return { Value: Use { Width: 64 or 32 } returned }]
+                        && returned.Variable == phi.Target && types.Kind(returnType) == TypeKind.Struct && types.Size(returnType) * 8 == returned.Width)
+                    {
+                        width = returned.Width;
+                        type = returnType;
+                    }
+                    if (type is null) continue;
                     var origins = new List<Func<ManagedValue>>();
                     var absorbed = new List<Variable>();
                     foreach (var source in phi.Sources)

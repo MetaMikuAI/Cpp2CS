@@ -331,6 +331,17 @@ namespace Cpp2CS.Input
                 }).ToArray();
                 types[i].InterfaceOffsets = InterfaceOffsets(def);
             }
+            // 抽象虚方法没有代码入口，元数据虚表可留空；托管 callvirt 仍需其声明与槽位。
+            foreach (var type in types)
+            {
+                var table = type.VTable.ToArray();
+                for (var current = new DefinitionRef(type, type.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, false, p.Position) { Parameter = p }).ToArray());
+                    current is not null; current = current.Definition.BaseType?.Substitute(current.Arguments, []) as DefinitionRef)
+                    foreach (var method in current.Definition.Methods.Where(m => m.IsVirtual && m.Slot >= 0 && m.Slot < table.Length))
+                        if (table[method.Slot] is null && method.IsAbstract)
+                            table[method.Slot] = new MethodRef(method, current.Arguments, []);
+                type.VTable = table;
+            }
             return model;
         }
 

@@ -91,7 +91,7 @@ public sealed partial class MethodRecovery
                 pieces.Add((part.Low, part.Value));
                 current = part.Base;
             }
-            if (current is not Const { Value: 0 } || insert.Width != 128) throw Fail(0, "向量 插入基值或位宽尚未支持");
+            if (current is not Const { Value: 0 } || insert.Width is not (32 or 64 or 128)) throw Fail(0, "向量 插入基值或位宽尚未支持");
             var cursor = 0;
             var leaves = new List<Part>();
             foreach (var piece in pieces.OrderBy(p => p.Low))

@@ -25,6 +25,7 @@ internal sealed class TypingInputs
     public required IReadOnlyDictionary<Variable, LocalValue> Exceptions { get; init; }
     public required bool HasExceptions { get; init; }
     public required bool ReturnSupported { get; init; }
+    public Func<Call, MethodRef, AbiValue, bool> UnusedInput { get; init; } = (_, _, _) => false;
     /// <summary>表达式定型服务：恢复器自己的 Recover 按引擎当前的解回答（MethodRecovery.HostTyping）。</summary>
     public required Func<TypingContext, IExpressionTyping> Host { get; init; }
 

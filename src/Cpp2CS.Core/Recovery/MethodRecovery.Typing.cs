@@ -98,7 +98,8 @@ public sealed partial class MethodRecovery
                 return host.StructReceiverArguments(receiver, owner);
             }
 
-            public IEnumerable<(Call Call, Use Klass)> TypeChecks() => host.typeChecks.Select(p => (p.Key, p.Value)).ToArray();
+            public IEnumerable<(Call Call, Use Klass)> TypeChecks() => host.typeChecks.Keys
+                .Where(c => c.Arguments.LastOrDefault() is Use).Select(c => (c, (Use)c.Arguments[^1])).ToArray();
         }
 
         /// <summary>引擎的输入：EH 已证明保留的块与 φ 入边构成的类型视图、入口参数类型、已证明的非类型分析结果。</summary>
@@ -119,10 +120,13 @@ public sealed partial class MethodRecovery
                 Method = method,
                 Arguments = arguments.ToDictionary(p => p.Key, p => new EntryArgument(p.Value.Index, p.Value.Type, p.Value.Width)),
                 StructArguments = structArguments.ToDictionary(), Dropped = dropped.ToHashSet(),
-                StoredArguments = stackArgumentStores.Concat(boxArgumentStores).ToDictionary(p => p.Key, p => p.Value.Type),
+                StoredArguments = stackArgumentStores.Concat(boxArgumentStores).Select(p => (p.Key, p.Value.Type))
+                    .Concat(stackEnums.Values.SelectMany(e => e.Stores.Where(s => s.Target is FrameAddress f && f.Offset == e.Offset + Facts.RuntimeLayout.ObjectHeaderSize)
+                        .Select(s => (s, (TypeRef)e.Type)))).Distinct().ToDictionary(p => p.Item1, p => p.Item2),
                 Constructed = constructed.ToDictionary(), DelegateCreations = delegateCreations.ToDictionary(),
                 Wrappers = wrappers.ToDictionary(), Exceptions = exceptionValues.ToDictionary(),
                 HasExceptions = exceptionLayout is { Succeeded: true }, ReturnSupported = returnHole is null,
+                UnusedInput = UnusedInput,
                 Host = context => new HostTyping(this, context),
             };
             var entry = input.Arguments.Where(p => !input.StructArguments.ContainsKey(p.Key) && p.Value.Type is not ByRefRef)

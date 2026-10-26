@@ -15,7 +15,7 @@ public sealed partial class MethodRecovery
         /// 否则被调用破坏的寄存器经 φ 流进这些实参，连带让只为这些 φ 存在的值（例如 awaiter 的 128 位拷贝）无法恢复。
         /// 结果寄存器不裁剪（SSA 版本已经分配，后续读取保持原样）。
         /// </summary>
-        private void TrimIndirectArguments()
+        private void TrimIndirectArguments(bool typed = false)
         {
             var changed = false;
             foreach (var block in function.Blocks)
@@ -29,7 +29,7 @@ public sealed partial class MethodRecovery
                         changed = true;
                         continue;
                     }
-                    if (Callee(call) is not { } callee || owner.abi.Classify(callee, out _) is not { } signature) continue;
+                    if ((typed ? Resolve(call) : Callee(call)) is not { } callee || owner.abi.Classify(callee, out _) is not { } signature) continue;
                     var reads = signature.Reads.ToHashSet();
                     var keep = Enumerable.Range(0, call.Sources.Length).Where(k => reads.Contains(call.Sources[k])).ToArray();
                     if (keep.Length == call.Sources.Length || keep.Length != reads.Count) continue;

@@ -13,6 +13,7 @@ internal sealed class DelegateCallNormalizer
     private readonly Dictionary<Variable, Expr> definitions;
     private readonly Dictionary<Variable, Phi> phis;
     private readonly Dictionary<Variable, Call> results;
+    private readonly Dictionary<Variable, Block> owners;
     private readonly Dictionary<Storage, TypeRef> inputs = [];
     private readonly Dictionary<Variable, TypeRef> known = [];
 
@@ -24,6 +25,8 @@ internal sealed class DelegateCallNormalizer
         definitions = all.OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
         foreach (var (_, dead) in function.Dead) definitions.TryAdd(dead.Target, dead.Value);
         phis = all.OfType<Phi>().ToDictionary(p => p.Target);
+        owners = function.Blocks.SelectMany(b => b.Statements.OfType<Define>().Select(d => (d.Target, Block: b)))
+            .ToDictionary(p => p.Target, p => p.Block);
         results = all.OfType<Call>().SelectMany(c => c.Defines.Where(v => v is not null).Select(v => (v, c))).ToDictionary(x => x.v, x => x.c);
         // 共享入口不能选第一个托管实例猜输入类型；只有所有注册签名一致的寄存器才提供类型证据。
         var signatures = facts.EntriesAt(function.Entry).Select(e => e.Method).OfType<MethodRef>().Distinct()
@@ -39,21 +42,25 @@ internal sealed class DelegateCallNormalizer
 
     public static bool Run(ProgramFacts facts, MachineFunction function, IdiomResult report)
     {
-        if (!function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any(c => c.Op?.Kind == OpKind.CallDelegate)) return false;
+        if (!function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any(c => c.Op?.Kind == OpKind.CallDelegate || c.Op is null && c.Target is Use)) return false;
         var context = new DelegateCallNormalizer(facts, function);
         var invalidResults = new HashSet<Variable>();
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
-                if (block.Statements[i] is not Call { Op.Kind: OpKind.CallDelegate } call) continue;
-                var normalized = context.Normalize(call);
+                if (block.Statements[i] is not Call call || !(call.Op?.Kind == OpKind.CallDelegate || call.Op is null && call.Target is Use)) continue;
+                var normalized = context.Normalize(call, block);
                 if (normalized is null)
                 {
-                    block.Statements[i] = call with { Op = null };
-                    report.Hits[Template.DelegateCall]--;
+                    if (call.Op?.Kind == OpKind.CallDelegate)
+                    {
+                        block.Statements[i] = call with { Op = null };
+                        report.Hits[Template.DelegateCall]--;
+                    }
                     continue;
                 }
                 invalidResults.UnionWith(call.Defines.Except(normalized.Defines).Where(v => v is not null));
+                if (call.Op is null) report.Hit(Template.DelegateCall);
                 block.Statements[i] = normalized;
             }
         // 保守 clobber 里不属于 Invoke 结果的值没有托管含义。真实使用保留 Unknown 留洞，不能猜成原寄存器值。
@@ -98,11 +105,49 @@ internal sealed class DelegateCallNormalizer
         return (rest.Count == 1 ? rest[0] : null, offset);
     }
 
-    private Call? Normalize(Call call)
+    // 两个分支分别读取同一委托字段，汇合后调用；中间不能有写入或其他调用。
+    private Expr JoinedField(Expr expression, Block destination, Call call)
     {
-        if (Top(call.Target) is not Load { Width: 64 } target || Split(target.Address) is not { Root: { } root, Offset: 0x18 }) return null;
+        var value = Top(expression);
+        if (value is not Use use || !phis.TryGetValue(use.Variable, out var phi)) return value;
+        var loads = new List<Load>();
+        foreach (var source in phi.Sources)
+        {
+            if (Top(new Use(source, source.Width)) is not Load { Width: 64 } load || !owners.TryGetValue(source, out var origin)) return value;
+            var index = origin.Statements.FindIndex(s => s is Define d && d.Target == source);
+            var current = origin;
+            var visited = new HashSet<Block>();
+            var reached = false;
+            while (visited.Add(current))
+            {
+                foreach (var statement in current.Statements.Skip(index + 1))
+                {
+                    if (ReferenceEquals(statement, call)) { reached = true; break; }
+                    if (statement is not (Define or Phi or Nop or Jump)) return value;
+                }
+                if (reached) break;
+                if (current.NormalSuccessors.ToArray() is not [var next] || next.IsLandingPad) return value;
+                current = next;
+                index = -1;
+            }
+            if (!reached || current != destination) return value;
+            loads.Add(load);
+        }
+        if (loads.Count == 0) return value;
+        if (loads.All(l => Equals(l, loads[0]))) return loads[0];
+        var fields = loads.Select(l => Split(l.Address)).ToArray();
+        if (fields.Any(f => f.Root is not Use || f.Offset != fields[0].Offset)) return value;
+        var roots = fields.Select(f => ((Use)f.Root!).Variable).ToArray();
+        var receiver = destination.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources.SequenceEqual(roots));
+        return receiver is null ? value : new Load(new Binary(BinOp.Add,
+            new Use(receiver.Target, 64), Expr.C(unchecked((ulong)fields[0].Offset), 64), 64), 64);
+    }
+
+    private Call? Normalize(Call call, Block block)
+    {
+        if (JoinedField(call.Target, block, call) is not Load { Width: 64 } target || Split(target.Address) is not { Root: { } root, Offset: 0x18 }) return null;
         var registers = call.Sources.Select((r, i) => (r, e: call.Arguments[i])).ToDictionary(x => x.r, x => x.e);
-        bool Field(Expr? value, long offset) => value is not null && Top(value) is Load { Width: 64 } load
+        bool Field(Expr? value, long offset) => value is not null && JoinedField(value, block, call) is Load { Width: 64 } load
             // Load 定义不可展开后比较：同一字段在两次读取之间可能已被写过，只有同一个 SSA 根才是见证。
             && Split(load.Address) is { Root: { } other } split && split.Offset == offset && Equals(root, other);
         if (!Field(registers.GetValueOrDefault(Storage.Gpr(0)), 0x40) || TypeOf(root, []) is not DefinitionRef type

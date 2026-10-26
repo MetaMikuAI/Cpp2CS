@@ -47,6 +47,8 @@ public enum OpKind : byte
     /// <summary>初始化泛型方法的 RGCTX（结果为参数本身）。</summary>
     InitMethodRgctx,
     NewObject, NewArray, Box, Unbox, IsInst, IsAssignableFrom,
+    /// <summary>按数组的实际元素类型检查对象；Arguments 为（对象, 数组），返回原对象或 null。</summary>
+    IsInstArrayElement,
     /// <summary>内联的类继承检查（IsInstClass 快速路径）：参数为对象的 Il2CppClass*，结果为 1 表示是 Operand 类型或其子类。</summary>
     TypeCheck,
     /// <summary>条件成立时抛出 Operand 指名的异常（判空、越界之外的检查）。</summary>

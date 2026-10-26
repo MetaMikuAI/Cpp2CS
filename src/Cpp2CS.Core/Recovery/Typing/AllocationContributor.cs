@@ -18,6 +18,7 @@ internal sealed class AllocationContributor : ITypeContributor
                 { Kind: OpKind.Box } => context.Types.Object,
                 { Kind: OpKind.Unbox, Operand: TypeRef t } => new ByRefRef(t),
                 { Kind: OpKind.IsInst, Operand: TypeRef t } => t,
+                { Kind: OpKind.IsInstArrayElement } => context.Types.Object,
                 _ => null,
             };
             if (type is not null)
