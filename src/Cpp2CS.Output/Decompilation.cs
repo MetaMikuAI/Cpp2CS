@@ -31,6 +31,7 @@ public static partial class Decompilation
     {
         var decompiler = new CSharpDecompiler(typeSystem, settings);
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.Transforms.DelegateConstruction), new IteratorCopies());
+        decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new DistinctLocalNames());
         decompiler.AstTransforms.Add(new EnumeratorCopies());
         decompiler.AstTransforms.Add(new EscapeInvalidIdentifiers());
         decompiler.AstTransforms.Add(new RemoveCLSCompliantAttribute());
@@ -40,6 +41,7 @@ public static partial class Decompilation
         decompiler.AstTransforms.Add(new AsyncMarkers());
         decompiler.AstTransforms.Add(new RecoveredForeach());
         decompiler.AstTransforms.Add(new EventFieldNames());
+        decompiler.AstTransforms.Add(new ConstructorFields());
         decompiler.AstTransforms.Add(new CompilerScaffolding());
         return decompiler;
     }
