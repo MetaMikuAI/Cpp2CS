@@ -66,7 +66,7 @@ public sealed partial class MethodRecovery
                 foreach (var pair in symbols.Where(p => entries.Contains(p.Symbol!.Method)))
                 {
                     var candidate = pair.Symbol!;
-                    if (!UnregisteredMethods.IsClosed(candidate)) continue;
+                    // 开放参数可以保留；已绑定的共享类型和精确 ABI 决定寄存器与隐藏槽位。
                     if (owner.abi.Classify(candidate, out _) is not { } signature || signature.MethodInfo is not null) continue;
                     var layout = owner.abi.StackArguments(signature);
                     if (layout.MethodInfoOffset is not { } hidden || FrameOffset(pair.Store.Target) != callSp + hidden) continue;
@@ -75,7 +75,7 @@ public sealed partial class MethodRecovery
                     matches.Add((candidate, pair.Store));
                 }
                 // 非泛型等调用可传空 MethodInfo；身份由调用目标解析，槽位仍按精确签名与 SP 核对。
-                if (Resolve(call) is { } direct && UnregisteredMethods.IsClosed(direct)
+                if (Resolve(call) is { } direct
                     && owner.abi.Classify(direct, out _) is { MethodInfo: null } directSignature
                     && directSignature.Reads.ToHashSet().SetEquals(call.Sources)
                     && owner.abi.StackArguments(directSignature).MethodInfoOffset is { } directHidden
