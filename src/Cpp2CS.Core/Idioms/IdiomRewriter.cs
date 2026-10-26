@@ -216,6 +216,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             Normalize();
             if (SharedInterfaceTails.Run(function, c => c.Op is null && owner.HelperOf(c)?.Kind == HelperKind.InterfaceLookup, Fresh)) Cleanup();
             if (InterfaceDispatch()) Cleanup();
+            if (SharedInterfaceTails.SplitInvokes(function, e => defs.Expand(e), Fresh)) Cleanup();
             Calls();
             // 延迟值替换后才出现的 MethodInfo 符号（如内联 Array.Empty<T>() 的 MethodInfo+0x38 → RGCTX）：再符号化一次。
             if (lazyValues.Count > 0)

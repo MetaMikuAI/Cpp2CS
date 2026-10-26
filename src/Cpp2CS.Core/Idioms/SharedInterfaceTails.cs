@@ -6,6 +6,63 @@ namespace Cpp2CS.Idioms;
 /// <summary>接口的不同槽位被尾合并时，按接收者来源拆回各自的查找和调用。</summary>
 internal static class SharedInterfaceTails
 {
+    /// <summary>已识别的接口查找在同一间接调用前合流时，把调用放回对应的入边。</summary>
+    internal static bool SplitInvokes(MachineFunction function, Func<Expr, Expr> expand, Func<Variable> fresh)
+    {
+        var changed = false;
+        var data = function.Blocks.SelectMany(b => b.Statements).OfType<Call>()
+            .Where(c => c.Op?.Kind == OpKind.InterfaceInvokeData).SelectMany(c => c.Defines).ToHashSet();
+        foreach (var merge in function.Blocks.ToArray())
+        {
+            if (!function.Blocks.Contains(merge) || merge.Handler is not null || merge.IsLandingPad
+                || merge.Predecessors.Count < 2 || merge.NormalSuccessors.ToArray() is not [var exit]
+                || merge.Statements.Any(s => s is not (Phi or Define or Call or Jump or Nop))
+                || merge.Statements.OfType<Call>().ToArray() is not [Call { Op: null, Kind: CallKind.Indirect, Target: Use target }]
+                || merge.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == target.Variable) is not { } pointer
+                || !pointer.Sources.All(v => expand(new Use(v, v.Width)) is Load { Width: 64, Address: Use address } && data.Contains(address.Variable))) continue;
+            var incoming = merge.Predecessors.ToArray();
+            if (incoming.Distinct().Count() != incoming.Length || incoming.Any(p => p == merge || p == exit || p.Handler is not null || p.IsLandingPad
+                || p.NormalSuccessors.ToArray() is not [var next] || next != merge || p.Statements.LastOrDefault() is Branch)) continue;
+            var defined = merge.Statements.SelectMany(Defines).ToHashSet();
+            // 尾部的定义只供该次调用使用；流出的返回值与外部 φ 需另行建模。
+            if (function.Blocks.Where(b => b != merge).SelectMany(b => b.Statements).Any(s => s is Phi phi && phi.Sources.Any(defined.Contains)
+                || ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => defined.Contains(u.Variable)))) continue;
+            var exitIndex = exit.Predecessors.IndexOf(merge);
+            var exitValues = exit.Statements.OfType<Phi>().ToDictionary(p => p.Target, p => p.Sources[exitIndex]);
+            var statements = merge.Statements.ToArray();
+            var phis = statements.OfType<Phi>().ToArray();
+            for (var side = 0; side < incoming.Length; side++)
+            {
+                var predecessor = incoming[side];
+                var map = phis.ToDictionary(p => p.Target, p => p.Sources[side]);
+                predecessor.Statements.RemoveAll(s => s is Jump);
+                foreach (var statement in statements.Where(s => s is not (Phi or Jump)))
+                {
+                    var mapped = ExprMap.MapOperands(statement, e => ExprMap.Map(e,
+                        value => value is Use u && map.TryGetValue(u.Variable, out var replacement) ? new Use(replacement, u.Width) : null));
+                    if (mapped is Define d)
+                    {
+                        var variable = fresh(); map[d.Target] = variable;
+                        mapped = d with { Target = variable };
+                    }
+                    else if (mapped is Call call)
+                    {
+                        var variables = call.Defines.Select(v => v is null ? null! : fresh()).ToArray();
+                        for (var i = 0; i < variables.Length; i++) if (call.Defines[i] is { } old) map[old] = variables[i];
+                        mapped = call with { Defines = variables };
+                    }
+                    predecessor.Statements.Add(mapped);
+                }
+                Redirect(predecessor, merge, exit);
+                for (var i = 0; i < exit.Statements.Count && exit.Statements[i] is Phi phi; i++)
+                    exit.Statements[i] = phi with { Sources = [.. phi.Sources, exitValues[phi.Target]] };
+            }
+            function.Renumber();
+            changed = true;
+        }
+        return changed;
+    }
+
     internal static bool Run(MachineFunction function, Func<Call, bool> isLookup, Func<Variable> fresh)
     {
         var changed = false;
