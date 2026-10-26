@@ -87,7 +87,8 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
             {
                 case Return { Value: { } value } when input.ReturnSupported:
                     yield return (value, input.Method.Method.ReturnType, statement.Address, "返回签名"); break;
-                case Store store when !input.Dropped.Contains(store) && expressions.LocationType(store.Target, store.Value.Width) is { } type:
+                case Store store when !input.Dropped.Contains(store)
+                    && (input.StoredArguments.GetValueOrDefault(store) ?? expressions.LocationType(store.Target, store.Value.Width)) is { } type:
                     yield return (store.Value, type, store.Address, $"写入 {store.Target}:{store.Value.Width}"); break;
                 case Call { Op.Kind: OpKind.BoundsCheck, Arguments: [var index, var length] }:
                     // 已识别的数组边界检查提供整数用途，使常量初始化的循环 φ 能开始定型。

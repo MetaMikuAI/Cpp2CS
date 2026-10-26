@@ -40,7 +40,7 @@ internal static class TypingContributorCheck
         var exceptions = new Dictionary<Variable, LocalValue>();
         var input = new TypingInputs
         {
-            Method = method, Arguments = arguments, StructArguments = structs, Dropped = new HashSet<Stmt>(),
+            Method = method, Arguments = arguments, StructArguments = structs, Dropped = new HashSet<Stmt>(), StoredArguments = new Dictionary<Store, TypeRef>(),
             Constructed = new Dictionary<Call, Variable>(), DelegateCreations = new Dictionary<Call, DefinitionRef>(),
             Wrappers = wrappers, Exceptions = exceptions, HasExceptions = true, ReturnSupported = true, Host = _ => new NoExpressions(),
         };

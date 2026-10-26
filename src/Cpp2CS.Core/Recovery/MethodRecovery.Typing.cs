@@ -119,6 +119,7 @@ public sealed partial class MethodRecovery
                 Method = method,
                 Arguments = arguments.ToDictionary(p => p.Key, p => new EntryArgument(p.Value.Index, p.Value.Type, p.Value.Width)),
                 StructArguments = structArguments.ToDictionary(), Dropped = dropped.ToHashSet(),
+                StoredArguments = stackArgumentStores.Concat(boxArgumentStores).ToDictionary(p => p.Key, p => p.Value.Type),
                 Constructed = constructed.ToDictionary(), DelegateCreations = delegateCreations.ToDictionary(),
                 Wrappers = wrappers.ToDictionary(), Exceptions = exceptionValues.ToDictionary(),
                 HasExceptions = exceptionLayout is { Succeeded: true }, ReturnSupported = returnHole is null,

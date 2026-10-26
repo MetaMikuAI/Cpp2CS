@@ -44,7 +44,7 @@ public sealed partial class MethodRecovery
                 && facts.Code.RegionOf(helper.Value) != CodeRegion.Managed;
 
         /// <summary>
-        /// 签名已知的间接调用：接口调用按接口方法；虚调用（含尾调用 br）的接收者是入口参数时，按其声明类型虚表槽位上的方法
+        /// 签名已知的间接调用：接口调用按接口方法；虚调用（含尾调用 br）的接收者是入口参数或已知分配结果时，按其类型虚表槽位上的方法
         /// （覆盖它的方法签名相同）。尾调用的保守约定还读 x8，常把类指针的读取留成活值。
         /// </summary>
         private MethodRef? Callee(Call call)
@@ -55,10 +55,13 @@ public sealed partial class MethodRecovery
                     return generic;
                 case { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } pair }:
                     return itf.Definition.Methods.FirstOrDefault(m => m.Slot == pair.Item2 && !m.IsStatic) is { } method ? new MethodRef(method, itf.Arguments, []) : null;
-                case { Kind: OpKind.CallVirtual, Operand: int slot } when call.Arguments.FirstOrDefault() is Use { Variable: { Version: 0 } self }
-                    && arguments.TryGetValue(self.Storage, out var argument) && argument.Type is DefinitionRef { Arguments.Count: 0, Definition: var type }
-                    && slot < type.VTable.Count && type.VTable[slot] is { Method.Owner.GenericParameters.Count: 0 } entry:
-                    return entry with { TypeArguments = [] };
+                case { Kind: OpKind.CallVirtual, Operand: int slot } when call.Arguments.FirstOrDefault() is Use { Variable: var self }:
+                    var receiver = self.Version == 0 && arguments.TryGetValue(self.Storage, out var argument) ? argument.Type
+                        : function.Blocks.SelectMany(b => b.Statements).OfType<Call>()
+                            .FirstOrDefault(c => c.Op?.Kind == OpKind.NewObject && c.Defines.FirstOrDefault() == self)?.Op?.Operand as TypeRef;
+                    return receiver is DefinitionRef { Arguments.Count: 0, Definition: var type }
+                        && slot < type.VTable.Count && type.VTable[slot] is { Method.Owner.GenericParameters.Count: 0 } entry
+                        ? entry with { TypeArguments = [] } : null;
                 default:
                     return null;
             }

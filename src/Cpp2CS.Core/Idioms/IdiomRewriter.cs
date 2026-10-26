@@ -207,6 +207,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             CountCalls();
             TrimResultBuffers();
             Symbols(rgctx: false);
+            if (StringSlotPhis()) Cleanup();
             Normalize();
             // RGCTX 数组只在其守卫（InitMethodRgctx）归一之后才当作已初始化的值
             Symbols(rgctx: true);
@@ -436,6 +437,47 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 if (!changed) break;
                 Propagate.Run(function, dominators);
             }
+        }
+
+        // 分支先选择字符串槽地址、合流后统一读取；将只读元数据的选择还原成字符串值的选择。
+        private bool StringSlotPhis()
+        {
+            var changed = false;
+            var definitions = new Defs(function);
+            foreach (var block in function.Blocks)
+            foreach (var phi in block.Statements.OfType<Phi>().ToArray())
+            {
+                if (phi.Sources.Length != block.Predecessors.Count
+                    || block.Predecessors.Any(p => !p.NormalSuccessors.Contains(block) || p.Handler == block)) continue;
+                var slots = phi.Sources.Select(v => definitions.Expand(new Use(v, v.Width)) is Const address
+                    ? facts.Usages.At(address.Value) : null).ToArray();
+                if (slots.Any(s => s?.Usage.Kind != UsageKind.StringLiteral)) continue;
+                var loads = All.SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<Load>()
+                    .Where(l => l is { Width: 64, Address: Use use } && use.Variable == phi.Target).ToHashSet();
+                if (loads.Count == 0) continue;
+                var target = Fresh();
+                var sources = new Variable[slots.Length];
+                for (var i = 0; i < slots.Length; i++)
+                {
+                    var slot = slots[i]!;
+                    var symbol = new Symbol(SymbolKind.String, slot.Usage.Value);
+                    var parent = block.Predecessors[i];
+                    var last = parent.Statements.LastOrDefault();
+                    var position = parent.Statements.Count - (last is Jump or Branch or IndirectJump or Return ? 1 : 0);
+                    sources[i] = Fresh();
+                    parent.Statements.Insert(position, new Define(last?.Address ?? parent.Start, sources[i], symbol));
+                    Result.ReadSlots.Add(slot.Address);
+                    symbolSlots.TryAdd(symbol, slot.Address);
+                }
+                block.Statements.Insert(block.Statements.IndexOf(phi) + 1, new Phi(phi.Address, target, sources));
+                foreach (var member in function.Blocks)
+                    for (var i = 0; i < member.Statements.Count; i++)
+                        member.Statements[i] = ExprMap.MapOperands(member.Statements[i], e => ExprMap.Map(e,
+                            part => part is Load load && loads.Contains(load) ? new Use(target, 64) : null));
+                Result.Hit(Template.MetadataSlot);
+                changed = true;
+            }
+            return changed;
         }
 
         // Calls 已记录 InitMetadata 的初始化证据，再删除只负责延迟初始化的不可达分支。
