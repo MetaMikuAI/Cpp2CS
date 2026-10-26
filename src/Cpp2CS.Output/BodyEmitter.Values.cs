@@ -184,6 +184,10 @@ public sealed partial class BodyEmitter
                 il.Emit(c.Width == 32 ? OpCodes.Conv_R4 : OpCodes.Conv_R8); break;
             case ConvKind.FloatToFloat:
                 Floating(c.Operand); il.Emit(c.Width == 32 ? OpCodes.Conv_R4 : OpCodes.Conv_R8); break;
+            case ConvKind.FloatToSInt or ConvKind.FloatToUInt:
+                Floating(c.Operand);
+                NativeArithmetic.FloatToInteger(il, c.Operand.Width, c.Width, c.Kind == ConvKind.FloatToSInt,
+                    name => TypeReference(types.Corlib(name))); break;
             default: throw new NotSupportedException(c.Kind.ToString());
         }
     }

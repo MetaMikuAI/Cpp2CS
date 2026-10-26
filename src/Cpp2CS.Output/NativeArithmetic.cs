@@ -7,6 +7,44 @@ namespace Cpp2CS.Output;
 /// <summary>ARM64 标量运算的 CIL 展开。输入各求值一次；采用 FPCR 默认模式（AH/DN/FZ 为 0）。</summary>
 public static class NativeArithmetic
 {
+    /// <summary>FCVTZS/FCVTZU：NaN 为零，越界饱和；只对有效范围内的值使用 CIL 转换。</summary>
+    public static void FloatToInteger(ILProcessor il, int from, int width, bool signed, Func<string, TypeReference>? corlib = null)
+    {
+        if (from is not (32 or 64) || width is not (32 or 64)) throw new ArgumentOutOfRangeException(nameof(width));
+        var module = il.Body.Method.Module;
+        var floating = corlib?.Invoke(from == 32 ? "System.Single" : "System.Double")
+            ?? (from == 32 ? module.TypeSystem.Single : module.TypeSystem.Double);
+        var input = new VariableDefinition(floating);
+        il.Body.Variables.Add(input);
+        void Bits(ulong value)
+        {
+            if (width == 32) il.Emit(OpCodes.Ldc_I4, unchecked((int)value));
+            else il.Emit(OpCodes.Ldc_I8, unchecked((long)value));
+        }
+        void Bound(double value)
+        {
+            if (from == 32) il.Emit(OpCodes.Ldc_R4, (float)value);
+            else il.Emit(OpCodes.Ldc_R8, value);
+        }
+        var number = Instruction.Create(OpCodes.Nop);
+        var belowUpper = Instruction.Create(OpCodes.Nop);
+        var convert = Instruction.Create(OpCodes.Nop);
+        var done = Instruction.Create(OpCodes.Nop);
+        il.Emit(OpCodes.Stloc, input);
+        il.Emit(OpCodes.Ldloc, input); il.Emit(OpCodes.Ldloc, input); il.Emit(OpCodes.Ceq); il.Emit(OpCodes.Brtrue, number);
+        Bits(0); il.Emit(OpCodes.Br, done); il.Append(number);
+        var upper = Math.Pow(2, signed ? width - 1 : width);
+        il.Emit(OpCodes.Ldloc, input); Bound(upper); il.Emit(OpCodes.Clt); il.Emit(OpCodes.Brtrue, belowUpper);
+        Bits(signed ? (1UL << (width - 1)) - 1 : width == 64 ? ulong.MaxValue : uint.MaxValue);
+        il.Emit(OpCodes.Br, done); il.Append(belowUpper);
+        il.Emit(OpCodes.Ldloc, input); Bound(signed ? -upper : 0); il.Emit(OpCodes.Cgt); il.Emit(OpCodes.Brtrue, convert);
+        Bits(signed ? 1UL << (width - 1) : 0); il.Emit(OpCodes.Br, done); il.Append(convert);
+        il.Emit(OpCodes.Ldloc, input);
+        il.Emit((width, signed) switch { (32, true) => OpCodes.Conv_I4, (32, false) => OpCodes.Conv_U4,
+            (64, true) => OpCodes.Conv_I8, _ => OpCodes.Conv_U8 });
+        il.Append(done);
+    }
+
     public static void Emit(ILProcessor il, BinOp operation, int width, Func<string, TypeReference>? corlib = null,
         Func<string, MethodReference>? bitConverter = null)
     {

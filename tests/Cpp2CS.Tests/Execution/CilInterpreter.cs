@@ -754,7 +754,12 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
             {
                 Code.Conv_R4 => StackValue.F((float)value.Double),
                 Code.Conv_R8 => value,
-                _ => throw new Unsupported("浮点到整数的转换"),
+                Code.Conv_I4 when value.Double >= -2147483648d && value.Double < 2147483648d => StackValue.I4((int)value.Double),
+                Code.Conv_U4 when value.Double >= 0 && value.Double < 4294967296d => StackValue.I4(unchecked((int)(uint)value.Double)),
+                Code.Conv_I8 when value.Double >= -9223372036854775808d && value.Double < 9223372036854775808d
+                    => StackValue.I8(unchecked((ulong)(long)value.Double)),
+                Code.Conv_U8 when value.Double >= 0 && value.Double < 18446744073709551616d => StackValue.I8((ulong)value.Double),
+                _ => throw new Unsupported("浮点到整数的未定义越界转换"),
             };
         var integer = value.Integer;
         var unsigned = value.Kind == StackKind.I4 ? (uint)value.Int32 : value.Bits;

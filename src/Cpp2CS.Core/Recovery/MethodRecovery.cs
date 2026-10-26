@@ -1325,6 +1325,8 @@ public sealed partial class MethodRecovery
                     return new ConversionValue(c.Kind, operand, c.Width == 32 ? types.Single : types.Double, c.Width);
                 case ConvKind.FloatToFloat:
                     return new ConversionValue(c.Kind, operand, c.Width == 32 ? types.Single : types.Double, c.Width);
+                case ConvKind.FloatToSInt or ConvKind.FloatToUInt when c.Width is 32 or 64 && operand.Width is 32 or 64:
+                    return new ConversionValue(c.Kind, operand, types.Integer(c.Width, c.Kind == ConvKind.FloatToSInt), c.Width);
                 case ConvKind.Bitcast:
                     if (operand.Width != c.Width) throw Fail(0, "转换 位重解释的宽度不一致");
                     var floatHint = hint is not null && types.Kind(hint) is TypeKind.Float or TypeKind.Double;
