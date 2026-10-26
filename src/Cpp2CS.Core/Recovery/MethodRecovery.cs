@@ -1567,9 +1567,11 @@ public sealed partial class MethodRecovery
                 case { Kind: OpKind.Unbox, Operand: TypeRef type } when (type is DefinitionRef { Definition.IsEnum: true } or GenericParameterRef { NativeScalar: not null }) && call.Defines.FirstOrDefault() is { } created:
                     output.Add(new ManagedAssignment(address, Local(created), new UnboxAddressValue(RecoverAs(call.Arguments[0], types.Object, address), type)));
                     return;
-                case { Kind: OpKind.IsInst, Operand: TypeRef type } when call.Defines.FirstOrDefault() is { } created:
-                    output.Add(new ManagedAssignment(address, Local(created), new IsInstValue(Coerce(Recover(call.Arguments[0], types.Object), types.Object, address), type,
-                        type is GenericParameterRef { NativeScalar: not null } ? types.Object : null)));
+                case { Kind: OpKind.IsInst, Operand: TypeRef type } when call.Kind == CallKind.Tail || call.Defines.FirstOrDefault() is not null:
+                    var instance = new IsInstValue(Coerce(Recover(call.Arguments[0], types.Object), types.Object, address), type,
+                        type is GenericParameterRef { NativeScalar: not null } ? types.Object : null);
+                    if (call.Kind == CallKind.Tail) output.Add(new ManagedReturn(address, Coerce(instance, returnType, address)));
+                    else output.Add(new ManagedAssignment(address, Local(call.Defines[0]), instance));
                     return;
                 case { Kind: OpKind.IsInstArrayElement } when call.Defines.FirstOrDefault() is { } created:
                     ArrayElementCheck(call, created, output);
