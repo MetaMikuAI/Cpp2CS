@@ -21,9 +21,10 @@ public sealed partial class BodyEmitter
             case AsyncResultValue result:
                 if (result.Value is { } completed)
                 {
-                    // builder 的内联 result 写入可能只剩底层整数；返回标记仍须保留任务声明的枚举结果类型。
-                    var completedType = result.Type is DefinitionRef { Arguments: [DefinitionRef { Definition.IsEnum: true } declared] }
-                        && types.Kind(completed.Type) == TypeKind.Int && types.Bits(completed.Type) == types.Bits(declared)
+                    // builder 内联后可能只剩寄存器整数类型；返回标记保留任务声明的符号与枚举类型。
+                    var completedType = result.Type is DefinitionRef { Arguments: [var declared] }
+                        && types.Kind(declared) == TypeKind.Int && types.Kind(completed.Type) == TypeKind.Int
+                        && types.Bits(completed.Type) == types.Bits(declared)
                         ? declared : completed.Type;
                     Value(completed);
                     il.Emit(OpCodes.Call, Generic(Awaits().Result, result.Type, completedType));
