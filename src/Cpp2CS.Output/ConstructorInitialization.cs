@@ -67,8 +67,21 @@ internal static class ConstructorInitialization
         bool UsesThis(ManagedValue value) => UsesArgument(value, a => a.Index == -1);
         bool IsInitialization(ManagedStatement statement) =>
             statement is ManagedCall { Invocation: { Method.Method.Name: ".ctor", Receiver: { } receiver } } && IsThis(receiver);
-        bool IsOwnFieldStore(ManagedStatement statement) =>
-            statement is ManagedStore { Target: FieldValue f } && IsThis(f.Receiver) && f.Field.Field.Owner == owner;
+        FieldValue? OwnField(ManagedValue value) => value switch
+        {
+            IndirectValue { Address: AddressValue address } => OwnField(address.Target),
+            FieldValue f when IsThis(f.Receiver) && f.Field.Field.Owner == owner => f,
+            FieldValue { Receiver: AddressValue address } => OwnField(address.Target),
+            _ => null,
+        };
+        bool IsOwnFieldStore(ManagedStatement statement) => statement is ManagedStore s && OwnField(s.Target) is not null;
+        string StorePath(ManagedValue value) => value switch
+        {
+            IndirectValue { Address: AddressValue address } => StorePath(address.Target),
+            FieldValue { Receiver: AddressValue address } field => StorePath(address.Target) + $".{field.Field.Field.Index}",
+            FieldValue field => $"field#{field.Field.Field.Index}",
+            _ => "",
+        };
 
         var blocks = body.Blocks.ToDictionary(b => b.Address);
         var queue = new Queue<(ulong Address, bool Initialized)>();
@@ -76,6 +89,7 @@ internal static class ConstructorInitialization
         var visited = new HashSet<(ulong, bool)>();
         var targets = new HashSet<MethodRef>();
         var initializerStores = false;
+        var beforeBase = new List<ManagedStatement>();
         while (queue.TryDequeue(out var state))
         {
             if (!visited.Add(state)) continue;
@@ -95,6 +109,7 @@ internal static class ConstructorInitialization
                 }
                 else if (!initialized)
                 {
+                    beforeBase.Add(statement);
                     initializerStores |= IsOwnFieldStore(statement);
                     var permitted = statement switch
                     {
@@ -129,7 +144,16 @@ internal static class ConstructorInitialization
 
         // 字段初始化器：基类调用之前的本类字段写入，连同只为它们求值、只用一次的临时变量
         if (chainsWithThis) return "构造函数 以 this(...) 链接却先写本类字段，C# 无法表达";
-        if (StraightPrefix(body, blocks, IsInitialization) is not { } prefix) return "构造函数 字段初始化不在入口的直线路径上";
+        if (StraightPrefix(body, blocks, IsInitialization) is not { } prefix)
+        {
+            // 唯一构造函数的集合初始化可以带容量分支；仍在原位置写出，不能提前调用基类。
+            if (owner.Methods.Count(m => m.Name == ".ctor" && !m.IsStatic) != 1
+                || beforeBase.SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
+                    .Any(v => UsesArgument(v, a => a.Index >= 0)))
+                return "构造函数 字段初始化不在入口的直线路径上";
+            shape = new Shape(false, [$"initializer-cfg#{body.Method.Method.Index}"]);
+            return null;
+        }
         Dictionary<Variable, int>? prefixLocals = null;
         string? Key(ManagedValue value)
         {
@@ -149,9 +173,12 @@ internal static class ConstructorInitialization
                 StaticFieldValue f => $"{f.Field}",
                 NewObjectValue n => Children($"new#{n.Constructor.Method.Index} {n.Constructor}", n.Arguments),
                 NewArrayValue a => Children($"new {a.ArrayType}", [a.Length]),
+                ComposedValue c => Children($"struct {c.StructType}:{string.Join("/", c.Leaves.Select(l => string.Join(".", l.Path.Select(f => f.Field.Index))))}", c.Leaves.Select(l => l.Value)),
                 BoxValue b => Children($"box {b.Boxed} {b.ObjectType}", [b.Operand]),
                 IsInstValue i => Children($"isinst {i.Target}", [i.Operand]),
                 FieldValue f => Children($"{f.Field}", [f.Receiver]),
+                AddressValue a => Children("address", [a.Target]),
+                IndirectValue i => Children("indirect", [i.Address]),
                 ArrayLengthValue a => Children($"len {a.Type}/{a.Width}", [a.Array]),
                 ArrayElementValue a => Children($"elem {a.Type}/{a.Width}", [a.Array, a.Index]),
                 BinaryValue b => Children($"{b.Op} {b.Type}/{b.Width}", [b.Left, b.Right]),
@@ -182,7 +209,7 @@ internal static class ConstructorInitialization
                 var key = statement switch
                 {
                     ManagedAssignment a => Values("assign", [a.Value]),
-                    ManagedStore { Target: FieldValue field } s when IsOwnFieldStore(s) => Values($"field#{field.Field.Field.Index}", [s.Value]),
+                    ManagedStore s when IsOwnFieldStore(s) => Values(StorePath(s.Target), [s.Value]),
                     ManagedStore s => Values("store", [s.Target, s.Value]),
                     ManagedCall c when !c.Tail => Values($"call#{c.Invocation.Method.Method.Index}:{c.Invocation.Method}:{c.Invocation.Virtual}",
                         c.Invocation.Receiver is { } receiver ? [receiver, .. c.Invocation.Arguments] : c.Invocation.Arguments),
@@ -211,7 +238,7 @@ internal static class ConstructorInitialization
                 shape = prefixShape;
                 return null;
             }
-            initializers.Add($"{((FieldValue)store.Target).Field.Field.Name} = {key}");
+            initializers.Add($"{StorePath(store.Target)} = {key}");
             foreach (var local in ManagedValues.Walk(store.Value).OfType<LocalValue>()) initializerLocals.Add(local.Variable);
             // Key 只展开只定义一次、只用一次的变量，因此一层层加入即可覆盖全部
             for (var added = true; added;)

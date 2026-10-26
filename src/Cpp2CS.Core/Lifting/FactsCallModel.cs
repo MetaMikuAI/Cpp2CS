@@ -56,6 +56,8 @@ public sealed class FactsCallModel : ICallModel
         HelperKind.InterfaceLookup => new([X(0), X(1), X(2)], [X(0)], "helper"),
         HelperKind.Raise => new([X(0), X(1)], [], "helper"),
         HelperKind.Rethrow => new([X(0)], [], "helper"),
+        HelperKind.Throw => new([], [], "helper"),
+        HelperKind.GetException => new([], [X(0)], "helper"),
         HelperKind.MemoryBarrier => new([], [], "helper"),
         HelperKind.CompareExchangeReference => new([X(0), X(1), X(2)], [X(0)], "helper"),
         HelperKind.Import => helper.Detail switch

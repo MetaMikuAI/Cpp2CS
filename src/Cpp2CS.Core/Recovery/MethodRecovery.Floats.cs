@@ -8,7 +8,8 @@ public sealed partial class MethodRecovery
 {
     private sealed partial class Context
     {
-        private void NormalizeScalarVectors() => ScalarVectorNarrowing.Run(function.Blocks, call => ScalarWidths(call, false), call => ScalarWidths(call, true));
+        private void NormalizeScalarVectors() => ScalarVectorNarrowing.Run(function.Blocks, call => ScalarWidths(call, false), call => ScalarWidths(call, true),
+            arguments.Where(p => p.Key.Bank == Bank.Vec && types.Kind(p.Value.Type) is TypeKind.Float or TypeKind.Double).ToDictionary(p => p.Key, p => p.Value.Width));
 
         /// <summary>调用的标量浮点实参（或返回值）所在向量寄存器的宽度；ICF 共用入口要求各签名一致。</summary>
         private Dictionary<Storage, int> ScalarWidths(Call call, bool returned)

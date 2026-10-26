@@ -18,6 +18,7 @@ internal sealed class TypingInputs
     public required IReadOnlySet<Stmt> Dropped { get; init; }
     /// <summary>已配对的栈实参与装箱写入；位置已被替换为局部变量，仍保留签名给出的类型。</summary>
     public required IReadOnlyDictionary<Store, TypeRef> StoredArguments { get; init; }
+    public IReadOnlyList<(Expr Value, TypeRef Type)> StackEnumValues { get; init; } = [];
     public required IReadOnlyDictionary<Call, Variable> Constructed { get; init; }
     public required IReadOnlyDictionary<Call, DefinitionRef> DelegateCreations { get; init; }
     /// <summary>F5 异常值闭包（<see cref="Analysis.ExceptionValueClosure"/>）：wrapper 运行时引用与被捕获的异常对象。</summary>

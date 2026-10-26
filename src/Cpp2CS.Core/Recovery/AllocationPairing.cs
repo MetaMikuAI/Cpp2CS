@@ -39,6 +39,9 @@ internal static class AllocationPairing
         {
             if (Uses(statement, created)) return "构造之前分配结果已被使用";
             if (statement is Nop || statement is Define d && !ExprMap.Walk(d.Value).Any(e => e is Load or Intrinsic or Unknown)) continue;
+            // NewObject 已完成相同类型的布局初始化；重复 Class::Init 不运行静态构造。
+            if (statement is Call { Op.Kind: OpKind.InitClass } init && allocation.Op is { Kind: OpKind.NewObject, Operand: { } type }
+                && Equals(init.Op.Operand, type)) continue;
             return "分配与构造之间有可观察操作，不能移动分配";
         }
         var first = range.ExceptionRegions.FirstOrDefault(r => r.Start <= allocation.Address && allocation.Address < r.End);

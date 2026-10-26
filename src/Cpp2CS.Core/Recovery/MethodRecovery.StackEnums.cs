@@ -18,6 +18,7 @@ public sealed partial class MethodRecovery
         private void PrepareStackEnums()
         {
             var candidates = new Dictionary<Call, StackEnum>(ReferenceEqualityComparer.Instance);
+            BranchStackEnums(candidates);
             foreach (var block in blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
@@ -64,6 +65,42 @@ public sealed partial class MethodRecovery
                     stackEnumStorage.Add(call);
                 }
             }
+        }
+
+        private void BranchStackEnums(Dictionary<Call, StackEnum> candidates)
+        {
+            var next = blocks.SelectMany(b => b.Statements).SelectMany(s => s switch
+            {
+                Define d => new[] { d.Target }, Phi p => p.Sources.Append(p.Target), Call c => c.Defines.OfType<Variable>(), _ => [],
+            }).Where(v => v.Storage.Bank == Bank.Temp).Select(v => v.Storage.Index).DefaultIfEmpty(-1).Max() + 1;
+            foreach (var block in blocks)
+            foreach (var call in block.Statements.OfType<Call>().ToArray())
+            {
+                if (Receiver(call) is not { } receiver || FrameOffset(receiver) is not { } offset
+                    || Resolve(call) is not { Method: { IsStatic: false, Owner.FullName: "System.Enum" } } callee) continue;
+                var prefix = block.Statements.TakeWhile(s => !ReferenceEquals(s, call)).Where(s => s is not (Phi or Define or Nop)).ToArray();
+                if (prefix is not [Store klass, Store monitor]
+                    || FrameOffset(klass.Target) != offset || FrameOffset(monitor.Target) != offset + RuntimeLayout.ObjectMonitor
+                    || klass.Value is not Symbol { Kind: SymbolKind.Class, Value: DefinitionRef { Definition.IsEnum: true } type }
+                    || monitor.Value is not Const { Width: 64, Value: ulong.MaxValue } || block.Predecessors.Count < 2) continue;
+                var writes = new List<Store>();
+                foreach (var parent in block.Predecessors)
+                {
+                    var store = parent.Statements.OfType<Store>().LastOrDefault(s => FrameOffset(s.Target) == offset + RuntimeLayout.ObjectHeaderSize);
+                    if (store is null || store.Value.Width != types.Bits(type) || parent.NormalSuccessors.ToArray() is not [var target] || target != block
+                        || parent.Statements.Skip(parent.Statements.IndexOf(store) + 1).Any(s => s is not (Define or Jump or Nop))) break;
+                    writes.Add(store);
+                }
+                if (writes.Count != block.Predecessors.Count) continue;
+                var inputs = writes.Select(_ => new Variable(Storage.Temp(next++), 1)).ToArray();
+                for (var i = 0; i < writes.Count; i++)
+                    block.Predecessors[i].Statements.Insert(block.Predecessors[i].Statements.IndexOf(writes[i]), new Define(writes[i].Address, inputs[i], writes[i].Value));
+                var result = new Variable(Storage.Temp(next++), 1);
+                block.Statements.Insert(0, new Phi(block.Start, result, inputs));
+                candidates[call] = new(type, new Use(result, types.Bits(type)), offset, [klass, monitor, .. writes]);
+                resolved[call] = (callee, Pinned);
+            }
+            if (candidates.Count > 0) definitions = IndexDefinitions();
         }
 
         // Enum 调用后，盒内字节在被覆盖之前不能再被原生代码读取。

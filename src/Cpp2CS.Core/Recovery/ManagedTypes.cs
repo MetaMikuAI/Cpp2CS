@@ -95,6 +95,7 @@ public sealed class ManagedTypes
         {
             case ArrayRef: return TypeKind.Reference;
             case GenericParameterRef { IsReference: true }: return TypeKind.Reference;
+            case GenericParameterRef { NativeScalar: { } scalar }: return Kind(scalar);
             case PointerRef or ByRefRef: return TypeKind.Pointer;
             case DefinitionRef d:
                 if (FieldLayouts.IsFullyShared(d)) return null;
@@ -184,7 +185,7 @@ public sealed class ManagedTypes
         {
             if (Layouts.Of(c) is not { } layout) return null;
             foreach (var slot in layout.Fields)
-                if (slot.Offset == offset && Size(slot.Type) == bytes) return new(new FieldRef(slot.Field, c), slot.Type);
+                if (slot.Offset == offset && Size(slot.Type) == bytes) return new(new FieldRef(slot.Field, c), slot.Type.Substitute(c.Arguments, []));
             if (c.Definition.IsValueType) break;
         }
         return null;

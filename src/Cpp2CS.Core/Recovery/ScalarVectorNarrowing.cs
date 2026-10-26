@@ -13,7 +13,8 @@ internal static class ScalarVectorNarrowing
     internal static Expr Low(Expr value, int width) => value.Width == width ? value
         : value.Width > width ? Fold.Convert(ConvKind.Truncate, value, width) : value;
 
-    internal static int Run(IReadOnlyList<Block> blocks, Func<Call, IReadOnlyDictionary<Storage, int>> callWidths, Func<Call, IReadOnlyDictionary<Storage, int>>? resultWidths = null)
+    internal static int Run(IReadOnlyList<Block> blocks, Func<Call, IReadOnlyDictionary<Storage, int>> callWidths, Func<Call, IReadOnlyDictionary<Storage, int>>? resultWidths = null,
+        IReadOnlyDictionary<Storage, int>? inputWidths = null)
     {
         // 标量 spill 的低位往返只替换 SSA 值引用，不移动加载或重新求值。
         var copies = blocks.SelectMany(b => b.Statements).OfType<Define>()
@@ -81,6 +82,7 @@ internal static class ScalarVectorNarrowing
         {
             // 被调用破坏的来源（版本 -1）没有值，不约束宽度。
             var widths = web.Select(v => candidates.TryGetValue(v, out var scalar) ? scalar.Width : scalarResults.TryGetValue(v, out var result) ? result
+                : v.Version == 0 && inputWidths?.TryGetValue(v.Storage, out var input) == true ? input
                 : phiTargets.Contains(v) || v.Version < 0 ? 0 : -1).ToArray();
             if (widths.Contains(-1) || widths.Where(w => w > 0).Distinct().Count() != 1) continue;
             var width = widths.First(w => w > 0);

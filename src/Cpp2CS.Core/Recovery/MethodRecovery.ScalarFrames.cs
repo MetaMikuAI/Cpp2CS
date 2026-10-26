@@ -11,6 +11,7 @@ public sealed partial class MethodRecovery
         [Analysis("整数帧槽", 35, After = ["帧区域"])]
         private void PrepareScalarFrames()
         {
+            InferTypes();
             var accesses = new List<(long Offset, int Width, Expr? Written)>();
             var escapes = new List<long>();
             void Visit(Expr expression)
@@ -22,7 +23,7 @@ public sealed partial class MethodRecovery
             }
             foreach (var statement in blocks.SelectMany(b => b.Statements))
             {
-                if (dropped.Contains(statement) || statement is Call call && stackEnums.ContainsKey(call)) continue;
+                if (dropped.Contains(statement) || statement is Call call && (stackEnums.ContainsKey(call) || IsWriteBarrier(call))) continue;
                 if (statement is Store store && FrameOffset(store.Target) is { } offset)
                 {
                     accesses.Add((offset, store.Value.Width, store.Value));

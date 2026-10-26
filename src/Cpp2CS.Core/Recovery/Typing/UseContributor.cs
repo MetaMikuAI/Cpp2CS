@@ -73,6 +73,7 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
     {
         var expressions = input.Expressions(context);
         var abi = new ManagedAbi(context.Types.Layouts);
+        foreach (var (value, type) in input.StackEnumValues) yield return (value, type, 0, "栈上枚举值");
         // 窄整数比较给控制标志与计数 φ 提供用途；64 位判空仍可能是引用，不能据此定为整数。
         foreach (var statement in context.Statements)
             foreach (var comparison in ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Compare>())
@@ -86,7 +87,17 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
             switch (statement)
             {
                 case Return { Value: { } value } when input.ReturnSupported:
-                    yield return (value, input.Method.Method.ReturnType, statement.Address, "返回签名"); break;
+                    if (value is Intrinsic { Name: "diagnostic_return" } pieces
+                        && abi.Classify(input.Method, out _)?.Return is { Type: DefinitionRef aggregate } returned
+                        && context.Types.Layouts.Of(aggregate) is { } layout && pieces.Arguments.Length == returned.Pieces.Length)
+                    {
+                        for (var i = 0; i < returned.Pieces.Length; i++)
+                            if (layout.Fields.Where(f => f.Offset - RuntimeLayout.ObjectHeaderSize == returned.Pieces[i].Offset
+                                && context.Types.Size(f.Type) * 8 == returned.Pieces[i].Width).ToArray() is [var leaf])
+                                yield return (pieces.Arguments[i], leaf.Type, statement.Address, "聚合返回叶子");
+                    }
+                    else yield return (value, input.Method.Method.ReturnType, statement.Address, "返回签名");
+                    break;
                 case Store store when (!input.Dropped.Contains(store) || input.StoredArguments.ContainsKey(store))
                     && (input.StoredArguments.GetValueOrDefault(store) ?? expressions.LocationType(store.Target, store.Value.Width)) is { } type:
                     yield return (store.Value, type, store.Address, $"写入 {store.Target}:{store.Value.Width}"); break;
@@ -109,8 +120,9 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                     foreach (var parameter in signature.Arguments)
                         if (parameter is { Passing: Passing.Registers, Pieces.Length: 1 } && registers.TryGetValue(parameter.Pieces[0].Register, out var argument))
                         {
-                            if (ReferenceEquals(parameter, signature.This) && expressions.TypeOf(argument) is { } actual
-                                && !context.Types.IsAssignable(actual, parameter.Type) && input.UnusedInput(call, target, parameter)) continue;
+                            if (ReferenceEquals(parameter, signature.This)
+                                && (argument is Unknown or Symbol || expressions.TypeOf(argument) is { } actual && !context.Types.IsAssignable(actual, parameter.Type))
+                                && input.UnusedInput(call, target, parameter)) continue;
                             yield return (argument, parameter.Type, call.Address, $"{target} 实参 {parameter.Pieces[0].Register}");
                         }
                     break;

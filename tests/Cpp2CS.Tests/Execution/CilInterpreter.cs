@@ -392,7 +392,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     // beforefieldinit 值类型的实例方法与构造函数不是初始化触发点（ECMA-335 II.10.5.3：只保证在首次访问静态字段之前）；
                     // 原生代码在这些调用前的显式初始化由 L3 照原样写出（MethodRecovery.Implied 不再删去它）。
                     // System.Math 的浮点内建函数对应单条 FABS/FSQRT/FRINT 指令，不访问 Math 的静态字段，不是初始化触发点。
-                    if (target.Method.IsStatic && !(target.Method is { Owner.FullName: "System.Math", Name: "Abs" or "Sqrt" or "Floor" or "Ceiling" or "Truncate" or "Round", Parameters.Count: 1 }
+                    if (target.Method.IsStatic && (target.Method.Owner.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) == 0 && !(target.Method is { Owner.FullName: "System.Math", Name: "Abs" or "Sqrt" or "Floor" or "Ceiling" or "Truncate" or "Round", Parameters.Count: 1 }
                         or { Owner.FullName: "System.BitConverter", Name: "SingleToInt32Bits" or "Int32BitsToSingle" or "DoubleToInt64Bits" or "Int64BitsToDouble", Parameters.Count: 1 })
                         || target.Method.Name == ".ctor" && !BeforeFieldInitValue(target.DeclaringType)
                         || target.DeclaringType is DefinitionRef { Definition.IsValueType: true } && !BeforeFieldInitValue(target.DeclaringType))

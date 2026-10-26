@@ -69,6 +69,7 @@ public sealed partial class MethodRecovery
         private sealed record ArgumentSite(Call Call, MethodRef Callee, string Name, Dictionary<Storage, Expr> Registers, Func<AbiValue, string, Expr> Argument)
         {
             public int Index { get; init; }
+            public required List<ManagedStatement> Output { get; init; }
         }
 
         private static class Registry

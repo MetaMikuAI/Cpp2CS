@@ -36,7 +36,12 @@ public sealed partial class BodyEmitter
                 il.Emit(OpCodes.Call, new GenericInstanceMethod(Unrecovered().Value) { GenericArguments = { TypeReference(hole.Type) } });
                 break;
             case ConstantValue c:
-                if (ManagedTypes.IsReferenceType(c.Type)) il.Emit(OpCodes.Ldnull);
+                if (c.Type is GenericParameterRef { IsReferenceConstrained: false })
+                {
+                    var zero = Temp(c.Type);
+                    il.Emit(OpCodes.Ldloca, zero); il.Emit(OpCodes.Initobj, TypeReference(c.Type)); il.Emit(OpCodes.Ldloc, zero);
+                }
+                else if (ManagedTypes.IsReferenceType(c.Type)) il.Emit(OpCodes.Ldnull);
                 // 非规范的 NaN 以整数位型输出再重解释，保留载荷。规范的静默 NaN（IL2CPP 对 float.NaN / double.NaN 的翻译，符号位不定）直接作为 NaN 常量，
                 // 反编译为 float.NaN：NaN 的符号与载荷只有按位查看时才可区分
                 else if (types.Kind(c.Type) == TypeKind.Float && (c.Bits & 0x7f800000) == 0x7f800000 && (c.Bits & 0x7fffff) != 0 && (c.Bits & 0x7fffffff) != 0x7fc00000)
@@ -57,7 +62,13 @@ public sealed partial class BodyEmitter
             case TypeHandleValue handle: il.Emit(OpCodes.Ldtoken, TypeReference(handle.Target)); break;
             case BoxValue box: Value(box.Operand); il.Emit(OpCodes.Box, TypeReference(box.Boxed)); break;
             case UnboxAddressValue unbox: Value(unbox.Operand); il.Emit(OpCodes.Unbox, TypeReference(unbox.Target)); break;
-            case IsInstValue test: Value(test.Operand); il.Emit(OpCodes.Isinst, TypeReference(test.Target)); break;
+            case IsInstValue test:
+                Value(test.Operand);
+                if (test.Operand.Type is GenericParameterRef { IsReferenceConstrained: false }) il.Emit(OpCodes.Box, TypeReference(test.Operand.Type));
+                il.Emit(OpCodes.Isinst, TypeReference(test.Target));
+                // isinst 的结果是对象引用；开放泛型局部需要恢复为 !T 栈类型。
+                if (test.BoxedType is null && test.Target is GenericParameterRef { IsReferenceConstrained: false }) il.Emit(OpCodes.Unbox_Any, TypeReference(test.Target));
+                break;
             case NewObjectValue created:
             {
                 foreach (var argument in created.Arguments) Value(argument);
@@ -99,6 +110,8 @@ public sealed partial class BodyEmitter
                 if (u.Op == UnOp.FNeg) Floating(u.Operand); else Integer(u.Operand, false);
                 il.Emit(u.Op == UnOp.Not ? OpCodes.Not : OpCodes.Neg);
                 Normalize(u); break;
+            case ConversionValue { Type: GenericParameterRef { NativeScalar: not null } } copy:
+                Value(copy.Operand); break;
             case ConversionValue c: Conversion(c); break;
             case ComparisonValue c: Comparison(c); break;
             case ChoiceValue c:
@@ -178,7 +191,16 @@ public sealed partial class BodyEmitter
     private void Comparison(ComparisonValue c)
     {
         var floating = c.Condition is Cond.FEq or Cond.FUne or Cond.FLt or Cond.FLe or Cond.FGt or Cond.FGe or Cond.FUlt or Cond.FUle or Cond.FUgt or Cond.FUge;
-        if (ManagedTypes.IsReferenceType(c.Left.Type) || ManagedTypes.IsReferenceType(c.Right.Type)) { Value(c.Left); Value(c.Right); }
+        if (ManagedTypes.IsReferenceType(c.Left.Type) || ManagedTypes.IsReferenceType(c.Right.Type))
+        {
+            void Reference(ManagedValue operand)
+            {
+                if (operand is ConstantValue { Bits: 0 }) { il.Emit(OpCodes.Ldnull); return; }
+                Value(operand);
+                if (operand.Type is GenericParameterRef { IsReferenceConstrained: false }) il.Emit(OpCodes.Box, TypeReference(operand.Type));
+            }
+            Reference(c.Left); Reference(c.Right);
+        }
         else if (floating) { Floating(c.Left); Floating(c.Right); }
         else
         {

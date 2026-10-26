@@ -9,7 +9,7 @@ internal static partial class SourceListCalls
 {
     public static ManagedBody Rewrite(ManagedBody body, ManagedTypes types, Action<ulong, MethodRef> matched)
     {
-        while ((MatchAdd(body, types, matched) ?? MatchClear(body, types, matched)) is { } rewritten) body = rewritten;
+        while ((MatchInitializer(body, types, matched) ?? MatchAdd(body, types, matched) ?? MatchClear(body, types, matched)) is { } rewritten) body = rewritten;
         return body;
     }
 

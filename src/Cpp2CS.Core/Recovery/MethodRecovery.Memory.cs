@@ -36,7 +36,7 @@ public sealed partial class MethodRecovery
             foreach (var t in terms)
                 if (t is Const c) offset += c.Signed;
                 else rest.Add(t);
-            Expr? baseTerm = rest.FirstOrDefault(t => t is Symbol { Kind: SymbolKind.StaticFields } || TypeOfAddressBase(t) is not null);
+            Expr? baseTerm = rest.FirstOrDefault(t => t is Symbol { Kind: SymbolKind.StaticFields or SymbolKind.ThreadStaticFields } || TypeOfAddressBase(t) is not null);
             if (baseTerm is not null) rest.Remove(baseTerm);
             return (baseTerm, offset, rest);
         }
@@ -84,11 +84,16 @@ public sealed partial class MethodRecovery
             var (baseTerm, offset, rest) = Split(address);
             switch (baseTerm)
             {
+                case Symbol { Kind: SymbolKind.ThreadStaticFields, Value: DefinitionRef threadType } when rest.Count == 0:
+                    if (facts.Layouts.Of(threadType)?.ThreadStatics.FirstOrDefault(s => s.Offset == offset && types.Bits(s.Type) == width) is { } threadField)
+                        return new StaticFieldValue(new FieldRef(threadField.Field, threadType), threadField.Type, width);
+                    throw Fail(0, $"线程静态字段 {threadType}+0x{offset:x}:{width} 未匹配");
                 case Symbol { Kind: SymbolKind.StaticFields, Value: DefinitionRef generic } when rest.Count == 0:
                     // 封闭实例经自身 MethodInfo 的 RGCTX 得到的类型保留泛型参数形式，代入实例的实参。
                     var owner = ClosedInstance ? (DefinitionRef)generic.Substitute(method.TypeArguments, method.MethodArguments) : generic;
                     if (types.StaticField(owner, (int)offset, width / 8) is { } field)
-                        return new StaticFieldValue(field.Field, field.Type, width);
+                        return types.Kind(field.Type) == TypeKind.Struct && StaticStructLocation(owner, offset, width) is { } value
+                            ? value : new StaticFieldValue(field.Field, field.Type, width);
                     if (StaticStructLocation(owner, offset, width) is { } component) return component;
                     if (StaticMemoryFragment(owner, offset, width) is { } packed) return packed;
                     throw Fail(0, $"静态字段 {owner}+0x{offset:x}:{width} 未匹配");
@@ -117,7 +122,13 @@ public sealed partial class MethodRecovery
             if (StructLocation(baseTerm, receiverType, offset, width) is { } leaf) return leaf;
             if (MemoryFragment(baseTerm, receiverType, offset, width) is { } fragment) return fragment;
             if (offset == RuntimeLayout.ObjectKlass) throw Fail(0, "访存 读取对象的类指针");
-            if (types.InstanceField(receiverType, (int)offset, width / 8) is not { } instance) throw Fail(0, $"字段 {receiverType}+0x{offset:x}:{width} 未匹配");
+            if (types.InstanceField(receiverType, (int)offset, width / 8) is not { } instance)
+            {
+                // 截断 long/ulong 时 clang 只读取低 32 位；字段身份仍按完整元数据布局取得。
+                if (width == 32 && types.InstanceField(receiverType, (int)offset, 8) is { } wide && types.Kind(wide.Type) == TypeKind.Int)
+                    return new ConversionValue(ConvKind.Truncate, new FieldValue(Recover(baseTerm, null), wide.Field, wide.Type, 64), types.UInt32, 32);
+                throw Fail(0, $"字段 {receiverType}+0x{offset:x}:{width} 未匹配");
+            }
             return new FieldValue(Recover(baseTerm, null), instance.Field, instance.Type, width);
         }
 
@@ -249,6 +260,9 @@ public sealed partial class MethodRecovery
         private ManagedValue StructAddress(Expr expression, TypeRef expected)
         {
             var (root, offset, rest) = Split(expression);
+            if (root is Symbol { Kind: SymbolKind.StaticFields } && rest.Count == 0
+                && Location(expression, types.Size(expected) * 8) is { } field && field.Type.Equals(expected))
+                return new AddressValue(field);
             if (root is null || rest.Count != 0 || TypeOfAddressBase(root) is not { } rootType)
                 throw Fail(0, $"调用 {expected} 的 this/ref 地址没有已证明的根");
             if (offset == 0 && rootType is ByRefRef b && b.Element.Equals(expected)) return Recover(root, null);

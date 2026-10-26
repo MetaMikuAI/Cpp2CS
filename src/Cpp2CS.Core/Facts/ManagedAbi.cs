@@ -55,7 +55,7 @@ public sealed partial class ManagedAbi(FieldLayouts layouts)
             case PointerRef or ByRefRef or ArrayRef:
                 return ValueKind.Integer;
             case GenericParameterRef generic:
-                return generic.IsReference ? ValueKind.Reference : null;
+                return generic.IsReference ? ValueKind.Reference : generic.NativeScalar is { } scalar ? Kind(scalar) : null;
             case DefinitionRef d:
                 if (FieldLayouts.IsFullyShared(d)) return null;
                 var t = d.Definition;

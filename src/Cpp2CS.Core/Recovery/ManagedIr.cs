@@ -27,7 +27,7 @@ public sealed record BoxValue(ManagedValue Operand, TypeRef Boxed, TypeRef Objec
 /// <summary>拆箱后的托管地址；保留 unbox 的判空与类型检查。</summary>
 public sealed record UnboxAddressValue(ManagedValue Operand, TypeRef Target) : ManagedValue(new ByRefRef(Target), 64);
 /// <summary>isinst：Operand 是 Target 类型（或其子类、实现）时为 Operand，否则为 null。</summary>
-public sealed record IsInstValue(ManagedValue Operand, TypeRef Target) : ManagedValue(Target, 64);
+public sealed record IsInstValue(ManagedValue Operand, TypeRef Target, TypeRef? BoxedType = null) : ManagedValue(BoxedType ?? Target, 64);
 public sealed record ArrayLengthValue(ManagedValue Array, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record ArrayElementValue(ManagedValue Array, ManagedValue Index, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width)

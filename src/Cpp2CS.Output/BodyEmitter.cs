@@ -149,12 +149,12 @@ public sealed partial class BodyEmitter
                 break;
             case BoxValue box:
                 if (!CanAccess(box.Boxed)) return $"访问权限 类型 {box.Boxed}";
-                if (types.Kind(box.Boxed) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Struct)) return $"装箱 类型 {box.Boxed}";
+                if (box.Boxed is not GenericParameterRef && types.Kind(box.Boxed) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Struct)) return $"装箱 类型 {box.Boxed}";
                 if (box.Boxed is DefinitionRef { Definition.FullName: "System.Nullable" }) return "装箱 Nullable 尚未支持";
                 break;
             case UnboxAddressValue unbox:
                 if (!CanAccess(unbox.Target)) return $"访问权限 类型 {unbox.Target}";
-                if (unbox.Target is not DefinitionRef { Definition.IsEnum: true }) return $"拆箱 类型 {unbox.Target} 尚未支持";
+                if (unbox.Target is not (DefinitionRef { Definition.IsEnum: true } or GenericParameterRef { NativeScalar: not null })) return $"拆箱 类型 {unbox.Target} 尚未支持";
                 break;
             case ArrayLengthValue length:
                 if (length.Array.Type is not ArrayRef { IsVector: true }) return "数组 长度需要一维向量类型";
@@ -183,7 +183,7 @@ public sealed partial class BodyEmitter
                 if (f.Accessor is { } instanceAccessor ? !instanceAccessor.Matches(types, accessContext, f, instanceAccessor.Write) : !CanAccess(f.Field, f.Receiver.Type)) return $"访问权限 字段 {f.Field}";
                 return Problem(f.Receiver is AddressValue address ? address.Target : f.Receiver);
             case StaticFieldValue f:
-                if (!f.Field.Field.IsStatic || f.Field.Field.IsThreadStatic || (f.Field.Field.Attributes & System.Reflection.FieldAttributes.Literal) != 0)
+                if (!f.Field.Field.IsStatic || (f.Field.Field.Attributes & System.Reflection.FieldAttributes.Literal) != 0)
                     return "静态字段 存储类型不符";
                 if (f.Accessor is { } staticAccessor ? !staticAccessor.Matches(types, accessContext, f, staticAccessor.Write) : !CanAccess(f.Field, null)) return $"访问权限 静态字段 {f.Field}";
                 break;

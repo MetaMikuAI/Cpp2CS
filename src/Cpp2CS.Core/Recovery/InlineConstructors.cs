@@ -147,13 +147,28 @@ internal static class InlineConstructors
 public sealed partial class MethodRecovery
 {
     private readonly Dictionary<MethodRef, InlineConstructors.Pattern?> constructorPatterns = new();
+    private ILookup<MethodDef, CodeEntry>? constructorEntries;
+
+    private ulong ConstructorEntry(MethodRef method)
+    {
+        if (method.Method.Address != 0) return method.Method.Address;
+        constructorEntries ??= facts.Registrations.Entries.Where(e => e.Kind == EntryKind.GenericMethod && e.Method?.Method.Name == ".ctor")
+            .ToLookup(e => e.Method!.Method);
+        var entries = constructorEntries[method.Method].ToArray();
+        if (entries.FirstOrDefault(e => e.Method!.Equals(method)) is { } exact) return exact.Address;
+        if (!method.TypeArguments.Concat(method.MethodArguments).All(ManagedTypes.IsReferenceType)) return 0;
+        var shared = entries.Where(e => e.Method!.TypeArguments.Concat(e.Method.MethodArguments)
+            .All(t => ManagedTypes.IsReferenceType(t) && !FieldLayouts.IsFullyShared(t))).Select(e => e.Address).Distinct().ToArray();
+        return shared is [var address] ? address : 0;
+    }
 
     private InlineConstructors.Pattern? ConstructorPattern(MethodRef method)
     {
         if (constructorPatterns.TryGetValue(method, out var cached)) return cached;
         InlineConstructors.Pattern? pattern = null;
-        if (method.Method.Address != 0 && facts.Code.RegionOf(method.Method.Address) == CodeRegion.Managed
-            && abi.Classify(method, out _) is { } signature && lifter.Lift(method.Method.Address) is { Succeeded: true } lifted)
+        var entry = ConstructorEntry(method);
+        if (entry != 0 && facts.Code.RegionOf(entry) == CodeRegion.Managed
+            && abi.Classify(method, out _) is { } signature && lifter.Lift(entry) is { Succeeded: true } lifted)
         {
             var normalized = rewriter.Run(lifted.Function);
             if (normalized.Errors.Count == 0 && normalized.Residuals.Count == 0)

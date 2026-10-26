@@ -124,6 +124,7 @@ public sealed partial class MethodRecovery
                     .Concat(stackEnums.Values.SelectMany(e => e.Stores.Where(s => s.Target is FrameAddress f && f.Offset == e.Offset + Facts.RuntimeLayout.ObjectHeaderSize)
                         .Select(s => (s, (TypeRef)e.Type)))).Distinct().ToDictionary(p => p.Item1, p => p.Item2),
                 Constructed = constructed.ToDictionary(), DelegateCreations = delegateCreations.ToDictionary(),
+                StackEnumValues = stackEnums.Values.Select(e => (e.Value, (TypeRef)e.Type)).ToArray(),
                 Wrappers = wrappers.ToDictionary(), Exceptions = exceptionValues.ToDictionary(),
                 HasExceptions = exceptionLayout is { Succeeded: true }, ReturnSupported = returnHole is null,
                 UnusedInput = UnusedInput,

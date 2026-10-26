@@ -3,6 +3,7 @@ using Cpp2CS.Flow;
 using Cpp2CS.Images;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
+using Cpp2CS.Recovery;
 using Cpp2CS.Ssa;
 
 namespace Cpp2CS.Idioms;
@@ -208,10 +209,12 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             TrimResultBuffers();
             Symbols(rgctx: false);
             if (StringSlotPhis()) Cleanup();
+            if (StringSlotChoices()) Cleanup();
             Normalize();
             // RGCTX 数组只在其守卫（InitMethodRgctx）归一之后才当作已初始化的值
             Symbols(rgctx: true);
             Normalize();
+            if (SharedInterfaceTails.Run(function, c => c.Op is null && owner.HelperOf(c)?.Kind == HelperKind.InterfaceLookup, Fresh)) Cleanup();
             if (InterfaceDispatch()) Cleanup();
             Calls();
             // 延迟值替换后才出现的 MethodInfo 符号（如内联 Array.Empty<T>() 的 MethodInfo+0x38 → RGCTX）：再符号化一次。
@@ -221,9 +224,12 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 Symbols(rgctx: true);
             }
             RefreshOperands();
+            if (ThreadStaticBlocks()) Cleanup();
+            if (FrameMemoryNormalizer.Run(function, Fresh)) Cleanup();
             if (FreshArrayElementClasses()) Cleanup();
             if (DynamicArrayElementChecks()) Cleanup();
             if (EnumElementClasses()) Cleanup();
+            if (UnboxGuards()) Cleanup();
             RefreshInterfaceOperands();
             if (!owner.AuditLegacyDelegateCalls && DelegateCallNormalizer.Run(facts, function, Result)) Cleanup();
             if (!owner.AuditRawManagedThrows && ManagedThrowNormalizer.Run(facts, function, Result)) Cleanup();
@@ -233,12 +239,20 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 Cleanup();
                 PruneRuntimeGuards();
             }
+            if (SplitClassGuards()) Cleanup();
             while (FiniteConditions.Simplify(function)) Cleanup();
             if (CheckedReferenceValues()) Cleanup();
+            if (SuccessfulTypeCheckValues()) Cleanup();
             if (ZeroPhiSources()) Cleanup();
             if (EqualAddressPhis()) Cleanup();
             if (StaticFieldPhiLoads()) Cleanup();
+            if (StringSlotChoices()) Cleanup();
+            if (ArrayAddressPhis()) Cleanup();
+            if (ArrayPointerLoops()) Cleanup();
+            if (ExceptionStackValues.Run(function)) Cleanup();
             if (ReadOnlyDataNormalizer.Run(function, facts.Model.Image)) Cleanup();
+            if (MergedAllocationNormalizer.Run(function, facts)) Cleanup();
+            if (FlagPhiConditions()) Cleanup();
             Residuals();
         }
 
@@ -269,6 +283,209 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         }
 
         private IEnumerable<Stmt> All => function.Blocks.Where(b => !removed.Contains(b)).SelectMany(b => b.Statements);
+
+        private bool ArrayAddressPhis()
+        {
+            var allocations = All.OfType<Call>().Where(c => c.Op is { Kind: OpKind.NewArray, Operand: ArrayRef { IsVector: true } a }
+                && ManagedTypes.IsReferenceType(a.Element) && c.Defines.FirstOrDefault() is not null).ToDictionary(c => c.Defines[0], c => c.Op!.Operand);
+            Expr MathValue(Expr expression, int depth = 0) => depth > 12 ? expression : ExprMap.Map(expression,
+                e => e is Use use && RawDefinition(use) is (Binary or Ir.Convert) and var value ? MathValue(value, depth + 1) : null);
+            Expr? Index(Expr offset) => MathValue(offset) switch
+            {
+                Const { Value: 0 } => Expr.C(0, 64),
+                Binary { Op: BinOp.Shl, Right: Const { Value: 3 }, Left: var value } => value,
+                Binary { Op: BinOp.AShr, Right: Const { Value: 29 }, Left: Binary { Op: BinOp.Shl, Left: var value, Right: Const { Value: 32 } } }
+                    => Fold.Convert(ConvKind.SignExtend, Fold.Convert(ConvKind.Truncate, value, 32), 64),
+                _ => null,
+            };
+            var changed = false;
+            foreach (var block in function.Blocks)
+            foreach (var pointer in block.Statements.OfType<Phi>().ToArray())
+            {
+                if (block.Predecessors.Any(p => p.NormalSuccessors.Count() != 1) || !block.Statements.Contains(pointer)) continue;
+                foreach (var basis in block.Statements.OfType<Phi>().Where(p => p != pointer).ToArray())
+                {
+                    if (basis.Sources.Length != pointer.Sources.Length || !basis.Sources.All(allocations.ContainsKey)
+                        || basis.Sources.Select(v => allocations[v]).Distinct().Count() != 1) continue;
+                    var indices = new List<Expr>();
+                    for (var i = 0; i < pointer.Sources.Length; i++)
+                    {
+                        if (pointer.Sources[i] == basis.Sources[i]) { indices.Add(Expr.C(0, 64)); continue; }
+                        if (RawDefinition(new Use(pointer.Sources[i], 64)) is not Binary { Op: BinOp.Add, Left: Use root, Right: var offset }
+                            || root.Variable != basis.Sources[i] || Index(offset) is not { } index) break;
+                        indices.Add(index);
+                    }
+                    if (indices.Count != pointer.Sources.Length) continue;
+                    var sources = indices.Select(_ => Fresh()).ToArray();
+                    for (var i = 0; i < indices.Count; i++)
+                    {
+                        var pred = block.Predecessors[i];
+                        pred.Statements.Insert(pred.Statements.Count - (pred.Statements.LastOrDefault() is Jump ? 1 : 0), new Define(pointer.Address, sources[i], indices[i]));
+                    }
+                    var selected = Fresh();
+                    block.Statements.Remove(pointer);
+                    block.Statements.Insert(0, new Phi(pointer.Address, selected, sources));
+                    block.Statements.Insert(block.Statements.TakeWhile(s => s is Phi).Count(), new Define(pointer.Address, pointer.Target,
+                        new Binary(BinOp.Add, new Use(basis.Target, 64), new Binary(BinOp.Shl, new Use(selected, 64), Expr.C(3, 64), 64), 64)));
+                    changed = true;
+                    break;
+                }
+            }
+            return changed;
+        }
+
+        // 指针和下标同步递增的数组循环：pointer += 8 与 index++ 保持同一元素位置。
+        private bool ArrayPointerLoops()
+        {
+            var arrays = All.OfType<Call>().Where(c => c.Op is { Kind: OpKind.NewArray, Operand: ArrayRef { IsVector: true } a }
+                && ManagedTypes.IsReferenceType(a.Element) && c.Defines.FirstOrDefault() is not null).Select(c => c.Defines[0]).ToHashSet();
+            Use Root(Use value)
+            {
+                var seen = new HashSet<Variable>();
+                while (seen.Add(value.Variable) && RawDefinition(value) is Use copy) value = copy;
+                return value;
+            }
+            var changed = false;
+            foreach (var block in function.Blocks)
+            foreach (var pointer in block.Statements.OfType<Phi>().Where(p => p.Sources.Length == 2).ToArray())
+            {
+                for (var seed = 0; seed < 2; seed++)
+                {
+                    if (RawDefinition(new Use(pointer.Sources[seed], 64)) is not Binary { Op: BinOp.Add, Left: Use array, Right: Const { Value: 32 } }
+                        || !arrays.Contains(Root(array).Variable)
+                        || RawDefinition(new Use(pointer.Sources[1 - seed], 64)) is not Binary { Op: BinOp.Add, Left: Use previous, Right: Const { Value: 8 } }
+                        || previous.Variable != pointer.Target) continue;
+                    var index = block.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources.Length == 2
+                        && RawDefinition(new Use(p.Sources[seed], 64)) is Const { Value: 0 }
+                        && RawDefinition(new Use(p.Sources[1 - seed], 64)) is Binary { Op: BinOp.Add, Left: Use prior, Right: Const { Value: 1 }, Width: 64 }
+                        && prior.Variable == p.Target);
+                    if (index is null) continue;
+                    block.Statements.Remove(pointer);
+                    var address = new Binary(BinOp.Add, new Binary(BinOp.Add, array, Expr.C(32, 64), 64),
+                        new Binary(BinOp.Shl, new Use(index.Target, 64), Expr.C(3, 64), 64), 64);
+                    foreach (var current in function.Blocks)
+                        for (var i = 0; i < current.Statements.Count; i++)
+                            current.Statements[i] = ExprMap.MapOperands(current.Statements[i], e => ExprMap.Map(e,
+                                part => part is Use use && use.Variable == pointer.Target ? address : null));
+                    changed = true;
+                    break;
+                }
+            }
+            return changed;
+        }
+
+        private bool SplitClassGuards()
+        {
+            var changed = false;
+            foreach (var head in function.Blocks)
+            {
+                if (head.Statements.LastOrDefault() is not Branch guard || head.NormalSuccessors.ToArray() is not [var first, var second]) continue;
+                var condition = defs.Expand(guard.Condition);
+                if (TopLoads(condition).Distinct().ToArray() is not [Load { Width: 32,
+                    Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef type },
+                        Right: Const { Value: RuntimeLayout.ClassCctorFinishedOrNoCctor } } } load]) continue;
+                var side = Direction(condition, Replace(load, 0));
+                if (side is not (0 or 1) || Direction(condition, Replace(load, 1)) != 1 - side) continue;
+                var init = side == 0 ? first : second;
+                var skip = side == 0 ? second : first;
+                if (init.Predecessors.Count != 1 || init.Statements.LastOrDefault() is not Branch after
+                    || skip.Statements.LastOrDefault() is not Branch normal || skip.Statements.Any(s => s is not (Define or Nop or Branch))) continue;
+                var prefix = init.Statements.SkipLast(1).Where(s => s is not Nop).ToArray();
+                if (prefix is not [Call { Op.Kind: OpKind.RunClassConstructor } call] || !Equals(call.Op.Operand, type)) continue;
+                var a = defs.Expand(after.Condition);
+                var b = defs.Expand(normal.Condition);
+                if (!(a == b && after.Target == normal.Target && after.Fallthrough == normal.Fallthrough)
+                    && !(a == Fold.Simplify(new Not(b)) && after.Target == normal.Fallthrough && after.Fallthrough == normal.Target)) continue;
+                // RunClassConstructor 自身处理已初始化状态；保留初始化臂及其后续业务分支。
+                head.Statements[^1] = new Jump(guard.Address, init.Start);
+                MachineFunction.RemoveEdgeAt(head, 1 - side.Value);
+                changed = true;
+            }
+            return changed;
+        }
+
+        private bool FlagPhiConditions()
+        {
+            var changed = false;
+            foreach (var block in function.Blocks)
+                foreach (var phi in block.Statements.OfType<Phi>().Where(p => p.Target.Storage.Bank == Bank.Flags).ToArray())
+                {
+                    var tests = All.SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<TestFlags>()
+                        .Where(t => t.FlagsValue is Use u && u.Variable == phi.Target).Distinct().ToArray();
+                    foreach (var test in tests)
+                    {
+                        var conditions = phi.Sources.Select(v => Fold.TestFlags(defs.Expand(new Use(v, 0)), test.Code)).ToArray();
+                        if (conditions.Any(c => ExprMap.Walk(c).Any(e => e is TestFlags or Flags or ConditionalFlags or Unknown or Load))) continue;
+                        var result = Fresh();
+                        var inputs = conditions.Select(_ => Fresh()).ToArray();
+                        for (var p = 0; p < inputs.Length; p++)
+                        {
+                            var pred = block.Predecessors[p];
+                            var index = pred.Statements.Count - (pred.Statements.LastOrDefault() is Jump or Branch ? 1 : 0);
+                            pred.Statements.Insert(index, new Define(phi.Address, inputs[p], conditions[p]));
+                        }
+                        block.Statements.Insert(0, new Phi(phi.Address, result, inputs));
+                        foreach (var current in function.Blocks)
+                            for (var i = 0; i < current.Statements.Count; i++)
+                                current.Statements[i] = ExprMap.MapOperands(current.Statements[i], e => ExprMap.Map(e, x => x.Equals(test) ? new Use(result, 1) : null));
+                        changed = true;
+                    }
+                }
+            return changed;
+        }
+
+        private bool SuccessfulTypeCheckValues()
+        {
+            var dominators = Dominators.Compute(function);
+            var checks = All.OfType<Call>().Where(c => c.Op?.Kind == OpKind.TypeCheck).ToArray();
+            var changed = false;
+            foreach (var check in checks)
+            {
+                if (check.Op?.Operand is not TypeRef type || check.Arguments is not [Use klass]
+                    || RawDefinition(klass) is not Load { Width: 64, Address: Use obj } || check.Defines.FirstOrDefault() is not { } flag) continue;
+                foreach (var block in function.Blocks)
+                {
+                    var at = block.Statements.FindIndex(s => s is Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException",
+                        Arguments: [Compare { Cond: Cond.Eq, Left: Use result, Right: Const { Value: 0 } }] } && result.Variable == flag);
+                    Block? start = at >= 0 ? block : null;
+                    var position = at + 1;
+                    if (start is null && block.Statements.LastOrDefault() is Branch
+                        { Condition: Compare { Cond: Cond.Eq or Cond.Ne, Left: Use result, Right: Const { Value: 0 } } test } branch && result.Variable == flag)
+                    {
+                        var address = test.Cond == Cond.Eq ? branch.Fallthrough : branch.Target;
+                        start = block.NormalSuccessors.FirstOrDefault(b => b.Start == address && b.Predecessors.Count == 1);
+                        position = start?.Statements.TakeWhile(s => s is Phi).Count() ?? 0;
+                    }
+                    if (start is null) continue;
+                    var cast = Fresh();
+                    RefineReferenceUses(start, position, obj, cast, dominators);
+                    start.Statements.Insert(position, new Call(check.Address, CallKind.Direct, Expr.C(0, 64))
+                    {
+                        Op = new RuntimeOp(OpKind.IsInst, type), Arguments = [obj], Results = [cast.Storage], Defines = [cast],
+                    });
+                    changed = true;
+                    break;
+                }
+            }
+            return changed;
+        }
+
+        private void RefineReferenceUses(Block start, int position, Use obj, Variable cast, Dominators dominators)
+        {
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                {
+                    if (block.Statements[i] is Phi phi)
+                    {
+                        var sources = phi.Sources.Select((source, at) => source == obj.Variable
+                            && dominators.Dominates(start.Index, block.Predecessors[at].Index) ? cast : source).ToArray();
+                        block.Statements[i] = phi with { Sources = sources };
+                    }
+                    else if (dominators.Dominates(start.Index, block.Index) && (block != start || i >= position))
+                        block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e,
+                            part => part is Use use && use.Variable == obj.Variable ? new Use(cast, use.Width) : null));
+                }
+        }
 
         // null 与通过 castclass 检查的路径汇合后，值具有目标引用类型；后续 phi 也必须保留这个类型。
         private bool CheckedReferenceValues()
@@ -301,19 +518,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 }
                 if (target is null) continue;
                 var cast = Fresh();
-                foreach (var block in function.Blocks)
-                    for (var i = 0; i < block.Statements.Count; i++)
-                    {
-                        if (block.Statements[i] is Phi phi)
-                        {
-                            var sources = phi.Sources.Select((source, at) => source == obj.Variable
-                                && dominators.Dominates(join.Index, block.Predecessors[at].Index) ? cast : source).ToArray();
-                            block.Statements[i] = phi with { Sources = sources };
-                        }
-                        else if (dominators.Dominates(join.Index, block.Index))
-                            block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e,
-                                part => part is Use use && use.Variable == obj.Variable ? new Use(cast, use.Width) : null));
-                    }
+                RefineReferenceUses(join, 0, obj, cast, dominators);
                 join.Statements.Insert(join.Statements.TakeWhile(s => s is Phi).Count(), new Call(join.Start, CallKind.Direct, Expr.C(0, 64))
                 {
                     Op = new RuntimeOp(OpKind.IsInst, target), Arguments = [obj], Results = [cast.Storage], Defines = [cast],
@@ -384,7 +589,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                         if (!ExprMap.Walk(expanded).OfType<Use>().Any(u => u.Variable == phi.Target)) continue;
                         var values = phi.Sources.Select(v => ResolveMetadata(ExprMap.Map(expanded,
                             part => part is Use use && use.Variable == phi.Target ? defs.Expand(new Use(v, v.Width)) : null))).ToArray();
-                        if (values.Any(v => v is not Load l || Split(l.Address).Basis is not Symbol { Kind: SymbolKind.StaticFields })) continue;
+                        if (values.Any(v => v is not Load l || Split(l.Address).Basis is not (Symbol { Kind: SymbolKind.StaticFields } or Use))) continue;
                         var target = Fresh();
                         var incoming = new Variable[values.Length];
                         for (var i = 0; i < values.Length; i++)
@@ -623,6 +828,28 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         }
 
         // 分支先选择字符串槽地址、合流后统一读取；将只读元数据的选择还原成字符串值的选择。
+        private bool StringSlotChoices()
+        {
+            var definitions = new Defs(function);
+            var changed = false;
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                    block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e, part =>
+                    {
+                        if (part is not Load { Width: 64 } load) return null;
+                        var address = load.Address;
+                        for (var depth = 0; depth < 8 && address is Use use && definitions.Raw(use.Variable) is { } value; depth++) address = value;
+                        if (address is not Select choice || definitions.Expand(choice.True) is not Const yes
+                            || definitions.Expand(choice.False) is not Const no) return null;
+                        if (facts.Usages.At(yes.Value) is not { Usage.Kind: UsageKind.StringLiteral } first
+                            || facts.Usages.At(no.Value) is not { Usage.Kind: UsageKind.StringLiteral } second) return null;
+                        changed = true;
+                        Result.ReadSlots.UnionWith([yes.Value, no.Value]);
+                        return choice with { True = new Symbol(SymbolKind.String, first.Usage.Value), False = new Symbol(SymbolKind.String, second.Usage.Value) };
+                    }));
+            return changed;
+        }
+
         private bool StringSlotPhis()
         {
             var changed = false;
@@ -1785,6 +2012,51 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         }
 
         /// <summary>新建数组的运行时元素类型确定；参数和字段数组可能协变，不能按静态类型替换。</summary>
+        private bool ThreadStaticBlocks()
+        {
+            var changed = false;
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                {
+                    if (block.Statements[i] is not Call { Op: null, Target: Const target, Arguments: [Symbol { Kind: SymbolKind.Class, Value: DefinitionRef type }, ..] } call
+                        || call.Defines.FirstOrDefault() is not { } result || facts.Layouts.Of(type)?.ThreadStatics.Count is not > 0
+                        || facts.Code.Word(target.Value) != 0xb9411400 || facts.Code.Word(target.Value + 4) is not { } branch || !A64.IsB(branch)) continue;
+                    var lookup = A64.Imm26Target(branch, target.Value + 4);
+                    // thread_static_fields_offset 的高低 16 位索引经 pthread_getspecific 取得的两级线程表。
+                    if (facts.Code.Word(lookup + 16) != 0x53107c13 || facts.Code.Word(lookup + 20) != 0x12003c14
+                        || facts.Code.Word(lookup + 32) is not { } get || !A64.IsBl(get)
+                        || facts.Code.At(A64.Imm26Target(get, lookup + 32))?.Import != "pthread_getspecific"
+                        || facts.Code.Word(lookup + 36) != 0xf8735808 || facts.Code.Word(lookup + 40) != 0xf8745900) continue;
+                    block.Statements[i] = new Define(call.Address, result, new Symbol(SymbolKind.ThreadStaticFields, type));
+                    changed = true;
+                }
+            return changed;
+        }
+
+        private bool UnboxGuards()
+        {
+            var changed = false;
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                {
+                    if (block.Statements[i] is not Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException",
+                        Arguments: [Compare { Cond: Cond.Ne } compare] } check
+                        || defs.Expand(compare.Left) is not Load { Width: 64, Address: Binary { Op: BinOp.Add,
+                            Left: Load { Width: 64, Address: var obj }, Right: Const { Value: RuntimeLayout.ClassElementClass } } }
+                        || defs.Expand(compare.Right) is not Load { Width: 64, Address: Binary { Op: BinOp.Add,
+                            Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef type }, Right: Const { Value: RuntimeLayout.ClassElementClass } } }) continue;
+                    var following = block.Statements.Skip(i + 1).Where(s => s is not (Nop or Jump)).ToArray();
+                    if (following.Length == 0 && block.NormalSuccessors.ToArray() is [var next] && next.Predecessors.Count == 1)
+                        following = next.Statements.Where(s => s is not Nop).ToArray();
+                    if (following.FirstOrDefault() is not Call { Op.Kind: OpKind.Unbox, Arguments: [var value, ..] } unbox
+                        || !Equals(unbox.Op.Operand, type) || !Equals(defs.Expand(value), obj)) continue;
+                    // unbox 在同一位置执行类型与 null 检查，原生 element_class 检查不另造托管字段访问。
+                    block.Statements[i] = new Nop(check.Address, "拆箱类型检查");
+                    changed = true;
+                }
+            return changed;
+        }
+
         private bool FreshArrayElementClasses()
         {
             var arrays = function.Blocks.SelectMany(b => b.Statements).OfType<Call>()

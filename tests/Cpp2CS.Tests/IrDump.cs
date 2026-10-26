@@ -18,8 +18,20 @@ internal static class IrDump
         foreach (var text in entries)
         {
             var entry = System.Convert.ToUInt64(text, 16);
-            var lifted = lifter.Lift(entry);
+            var method = facts.EntriesAt(entry).FirstOrDefault(e => e.Kind is EntryKind.Method or EntryKind.GenericMethod && e.Method is not null)?.Method;
+            var result = method is null ? null : new ManagedAbi(facts.Layouts).Classify(method, out _)?.Return;
+            Expr? returned = result is null ? null : result.Pieces.Length == 1 ? new Read(result.Pieces[0].Register, result.Pieces[0].Width)
+                : new Intrinsic("diagnostic_return", result.Pieces.Select(p => (Expr)new Read(p.Register, p.Width)).ToArray(), 64);
+            var lifted = lifter.Lift(entry, returned);
             Console.WriteLine($"== 0x{entry:x}{(lifted.Succeeded ? "" : "（提升失败：" + string.Join("；", lifted.Errors) + "）")}");
+            if (Environment.GetEnvironmentVariable("CPP2CS_INPUT_TRACE") == "1")
+            {
+                foreach (var registered in facts.EntriesAt(entry).Where(e => e.Method is not null))
+                    Console.WriteLine($"  {registered.Method} virtual={registered.Method!.Method.IsVirtual} address=0x{registered.Method.Method.Address:x}");
+                var reads = NativeInputs.Reads(lifter.Lift(entry, returned, simplify: false));
+                Console.WriteLine($"  入口读取: {(reads is null ? "未证明" : string.Join(",", reads))}");
+                Console.WriteLine($"  x0 未使用: {rewriter.UnusedInput(entry, Storage.Gpr(0))}");
+            }
             if (!lifted.Succeeded) continue;
             var idioms = rewriter.Run(lifted.Function);
             foreach (var error in idioms.Errors) Console.WriteLine($"  L2 错误 {error}");
@@ -63,7 +75,7 @@ internal static class RecoverDump
                 foreach (var hole in result.Holes) Console.WriteLine($"  0x{hole.Address:x} {(hole.Derived ? "连带" : "独立")} {hole.Reason}");
                 if ((result.Body ?? result.Partial) is { } body)
                 {
-                    if (sourceView) body = Cpp2CS.Recovery.SourceRewriter.Rewrite(body, types);
+                    if (sourceView) body = new Cpp2CS.Output.SourceLibraryCalls(facts, types, recovery).Rewrite(Cpp2CS.Recovery.SourceRewriter.Rewrite(body, types));
                     foreach (var region in body.Regions) Console.WriteLine($"  {Show(region)}");
                     foreach (var block in body.Blocks)
                     {

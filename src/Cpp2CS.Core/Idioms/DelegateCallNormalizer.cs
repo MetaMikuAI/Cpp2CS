@@ -16,6 +16,7 @@ internal sealed class DelegateCallNormalizer
     private readonly Dictionary<Variable, Block> owners;
     private readonly Dictionary<Storage, TypeRef> inputs = [];
     private readonly Dictionary<Variable, TypeRef> known = [];
+    private readonly Dictionary<long, TypeRef> frameTypes = [];
 
     private DelegateCallNormalizer(ProgramFacts facts, MachineFunction function)
     {
@@ -38,6 +39,24 @@ internal sealed class DelegateCallNormalizer
                 if (signatures.All(s => s!.Arguments.Any(v => v.Passing == Passing.Registers && v.Pieces.Length == 1
                     && v.Pieces[0].Register == register && Equals(v.Type, value.Type)))) inputs[register] = value.Type;
             }
+        var addressed = new List<(long Offset, TypeRef Type)>();
+        foreach (var call in all.OfType<Call>())
+        {
+            if (call.Op is not null || call.Target is not Const target) continue;
+            var methods = facts.EntriesAt(target.Value).Select(e => e.Method).OfType<MethodRef>().Distinct().ToArray();
+            var exact = call.Arguments.Select(ExpandOne).OfType<Symbol>().Where(s => s.Kind == SymbolKind.Method).Select(s => (MethodRef)s.Value)
+                .Where(m => methods.Any(c => c.Method == m.Method)).Distinct().ToArray();
+            var callee = exact.Length == 1 ? exact[0] : methods.Length == 1 ? methods[0] : null;
+            if (callee is null || abi.Classify(callee, out _) is not { } signature) continue;
+            foreach (var parameter in signature.Parameters)
+            {
+                if (parameter is not { Type: ByRefRef byRef, Passing: Passing.Registers, Pieces: [var piece] }) continue;
+                var index = Array.IndexOf(call.Sources, piece.Register);
+                if (index >= 0 && Top(call.Arguments[index]) is FrameAddress frame) addressed.Add((frame.Offset, byRef.Element));
+            }
+        }
+        foreach (var group in addressed.GroupBy(p => p.Offset))
+            if (group.Select(p => p.Type).Distinct().ToArray() is [var type]) frameTypes[group.Key] = type;
     }
 
     public static bool Run(ProgramFacts facts, MachineFunction function, IdiomResult report)
@@ -198,6 +217,8 @@ internal sealed class DelegateCallNormalizer
             return type;
         }
         if (expression is Ir.Convert c) return TypeOf(c.Operand, active);
+        if (expression is Load { Address: FrameAddress frame } read && frameTypes.TryGetValue(frame.Offset, out var stored)
+            && abi.Size(stored) * 8 == read.Width) return stored;
         if (expression is not Load load || Split(load.Address) is not { Root: { } root } split) return null;
         var statics = Top(root) as Symbol;
         var owner = statics is { Kind: SymbolKind.StaticFields, Value: DefinitionRef d } ? d : TypeOf(root, active);

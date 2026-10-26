@@ -39,10 +39,15 @@ public sealed record ByRefRef(TypeRef Element) : TypeRef
 public sealed record GenericParameterRef(string Name, bool IsMethod, int Position) : TypeRef
 {
     public GenericParameterDef? Parameter { get; init; }
+    /// <summary>当前原生入口已证明使用引用共享 ABI；不改变元数据中的泛型约束。</summary>
+    public bool SharedReference { get; init; }
+    /// <summary>原生实例的标量布局见证；托管输出仍保留类型参数，仅允许复制、默认值和拆箱。</summary>
+    public TypeRef? NativeScalar { get; init; }
     public DefinitionRef? ReferenceBase => Parameter?.Constraints.OfType<DefinitionRef>().FirstOrDefault(t => !t.Definition.IsValueType
         && !t.Definition.IsInterface && t.Definition.FullName is not ("System.Object" or "System.ValueType" or "System.Enum"));
-    public bool IsReference => (Parameter?.Attributes & GenericParameterAttributes.ReferenceTypeConstraint) != 0 && Parameter is not null
+    public bool IsReferenceConstrained => (Parameter?.Attributes & GenericParameterAttributes.ReferenceTypeConstraint) != 0 && Parameter is not null
         || ReferenceBase is not null;
+    public bool IsReference => SharedReference || IsReferenceConstrained;
     // 约束是参数的语义信息，不改变其名称和槽位身份。
     public bool Equals(GenericParameterRef? other) => other is not null && Name == other.Name && IsMethod == other.IsMethod && Position == other.Position;
     public override int GetHashCode() => HashCode.Combine(Name, IsMethod, Position);

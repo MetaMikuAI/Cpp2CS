@@ -3,7 +3,7 @@ using Cpp2CS.Ir;
 
 namespace Cpp2CS.Recovery;
 
-/// <summary>小型状态分派的精确分区：条件仅由同一 int 字段与常量的相等比较组成。</summary>
+/// <summary>小型状态分派的精确分区：同一 int 字段的相等、有限范围和范围内位掩码判断。</summary>
 internal sealed record StateDispatch(Expr Receiver, int Offset, IReadOnlyDictionary<uint, ulong[]> Cases, ulong[] Otherwise)
 {
     internal bool Same(StateDispatch other) => Offset == other.Offset && Otherwise.SequenceEqual(other.Otherwise)
@@ -46,22 +46,46 @@ internal sealed record StateDispatch(Expr Receiver, int Offset, IReadOnlyDiction
             }
             return false;
         }
+        bool Partition(Expr e)
+        {
+            if (e is Logical l) return Partition(l.Left) && Partition(l.Right);
+            if (e is Not n) return Partition(n.Operand);
+            if (e is not Compare c) return false;
+            if (Affine(c.Left, out var x, out var a) && Affine(c.Right, out var y, out var b) && x != y)
+            {
+                if (c.Cond is Cond.Eq or Cond.Ne)
+                { constants.Add(x == 1 ? unchecked(b - a) : unchecked(a - b)); return true; }
+                if (c.Cond is Cond.Ugt or Cond.Ule && x == 1 && y == 0 && b <= 256)
+                {
+                    for (uint i = 0; i <= b; i++) constants.Add(unchecked(i - a));
+                    return true;
+                }
+            }
+            return BitTest(c);
+        }
+        bool BitTest(Compare c) => c is { Cond: Cond.Eq or Cond.Ne, Right: Const { Value: 0 },
+            Left: Binary { Op: BinOp.And, Right: Const, Left: Binary { Op: BinOp.Shl, Left: Const { Value: 1 }, Right: var shift } } }
+            && Affine(shift, out var coefficient, out _) && coefficient == 1;
         bool Condition(Expr e, uint state, out bool result)
         {
             result = false;
-            if (e is Logical l && Condition(l.Left, state, out var left) && Condition(l.Right, state, out var right))
-            { result = l.IsAnd ? left && right : left || right; return true; }
+            if (e is Logical l)
+            {
+                if (!Condition(l.Left, state, out var left)) return false;
+                // 范围外必须由范围守卫短路，不能用一个取样值推断周期性的位掩码。
+                if (l.IsAnd != left) { result = left; return true; }
+                return Condition(l.Right, state, out result);
+            }
             if (e is Not n && Condition(n.Operand, state, out var operand)) { result = !operand; return true; }
-            if (e is not Compare { Cond: Cond.Eq or Cond.Ne } c || !Affine(c.Left, out var x, out var a)
-                || !Affine(c.Right, out var y, out var b) || x == y) return false;
-            constants.Add(x == 1 ? unchecked(b - a) : unchecked(a - b));
-            result = unchecked((uint)x * state + a) == unchecked((uint)y * state + b);
-            if (c.Cond == Cond.Ne) result = !result;
+            if (e is not Compare c || BitTest(c) && !constants.Contains(state)) return false;
+            var evaluated = Fold.Simplify(ExprMap.Map(c, part => part == field ? Expr.C(state, 32) : null));
+            if (evaluated is not Const value) return false;
+            result = value.Value != 0;
             return true;
         }
         foreach (var statement in blocks.Values.SelectMany(s => s))
         {
-            if (statement is Branch branch && !Condition(branch.Condition, 0, out _)) return null;
+            if (statement is Branch branch && !Partition(branch.Condition)) return null;
             if (statement is not (Define or Branch or Jump or Return { Value: null } or Call or Nop)) return null;
             if (ExprMap.Operands(statement).SelectMany(ExprMap.Walk).Any(e => e is Unknown or Intrinsic or FrameAddress)) return null;
             // 接收者链和状态字段以外的读取不能在匹配时丢失。

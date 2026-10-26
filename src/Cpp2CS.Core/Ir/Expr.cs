@@ -189,6 +189,8 @@ public enum SymbolKind : byte
     Rgctx,
     /// <summary>RGCTX 中的 constrained 调用条目。Value 为 (TypeRef, MethodRef)。</summary>
     Constrained,
+    /// <summary>当前线程的静态字段块。Value 为 TypeRef。</summary>
+    ThreadStaticFields,
 }
 
 /// <summary>

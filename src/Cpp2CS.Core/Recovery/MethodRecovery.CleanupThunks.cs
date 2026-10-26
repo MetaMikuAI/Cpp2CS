@@ -128,6 +128,16 @@ public sealed partial class MethodRecovery
                     if (old is Call call && cleanupCalls.Remove(call)) cleanupCalls.Add((Call)mapped);
                 }
             // 仅删除不再被读取或取址的局部写入。
+            foreach (var group in function.Blocks.SelectMany(b => b.Statements).OfType<Store>().Where(s => s.Target is FrameAddress)
+                .GroupBy(s => ((FrameAddress)s.Target).Offset).ToArray())
+            {
+                var writes = group.ToHashSet();
+                if (group.Select(s => s.Value.Width).Distinct().ToArray() is not [var width]
+                    || group.Any(s => ExprMap.Walk(s.Value).Any(e => e is Load or Intrinsic or Unknown))
+                    || function.Blocks.SelectMany(b => b.Statements).Where(s => s is not Store store || !writes.Contains(store))
+                        .Any(s => Touches(s, group.Key, width / 8))) continue;
+                foreach (var block in function.Blocks) block.Statements.RemoveAll(s => s is Store store && writes.Contains(store));
+            }
             bool changed;
             do
             {

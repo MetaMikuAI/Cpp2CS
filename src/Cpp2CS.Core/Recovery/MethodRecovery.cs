@@ -54,18 +54,19 @@ public sealed partial class MethodRecovery
 
     public ManagedTypes Types => types;
 
-    private readonly Dictionary<(TypeDef, ulong), MethodDef?> forwarding = new();
+    private readonly Dictionary<(DefinitionRef, ulong), MethodDef?> forwarding = new();
 
     /// <summary>
     /// type 自己的无参构造函数是否只把 this 转给 target（基类的构造函数）：原生代码中只有这一个调用（尾调用或调用后返回），
     /// 首个实参是入口的 x0，没有分支、没有其他调用、没有栈帧之外的写入。clang 把这样的构造函数内联后，调用者分配对象后直接调用基类构造。
     /// </summary>
-    private MethodDef? ForwardingConstructor(TypeDef type, ulong target)
+    private MethodDef? ForwardingConstructor(DefinitionRef type, ulong target)
     {
         if (forwarding.TryGetValue((type, target), out var known)) return known;
         MethodDef? result = null;
-        if (type.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic && m.Parameters.Count == 0).ToArray() is [var constructor]
-            && constructor.Address != 0 && facts.Code.RegionOf(constructor.Address) == CodeRegion.Managed && lifter.Lift(constructor.Address) is { Succeeded: true } lifted)
+        if (type.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic && m.Parameters.Count == 0).ToArray() is [var constructor]
+            && ConstructorEntry(new(constructor, type.Arguments, [])) is > 0 and var entry
+            && facts.Code.RegionOf(entry) == CodeRegion.Managed && lifter.Lift(entry) is { Succeeded: true } lifted)
         {
             var statements = lifted.Function.Blocks.SelectMany(b => b.Statements).ToArray();
             var calls = statements.OfType<Call>().ToArray();
@@ -91,9 +92,16 @@ public sealed partial class MethodRecovery
     {
         var open = MethodRef.Open(instance.Method);
         if (instance.TypeArguments.Count != open.TypeArguments.Count || instance.MethodArguments.Count != open.MethodArguments.Count
-            || instance.TypeArguments.Concat(instance.MethodArguments).Any(t => !ManagedTypes.IsReferenceType(t) || FieldLayouts.IsFullyShared(t)))
+            || instance.TypeArguments.Concat(instance.MethodArguments).Any(t => (!ManagedTypes.IsReferenceType(t) && !t.Equals(types.Int32)) || FieldLayouts.IsFullyShared(t)))
             return new(open, entry, null, [new(entry, "泛型 不是引用共享实例")]);
+        open = open with
+        {
+            TypeArguments = open.TypeArguments.Zip(instance.TypeArguments, Bind).ToArray(),
+            MethodArguments = open.MethodArguments.Zip(instance.MethodArguments, Bind).ToArray(),
+        };
         return new Context(this, open, entry) { SharedDefinition = true }.Run();
+        static TypeRef Bind(TypeRef parameter, TypeRef instance) => parameter is GenericParameterRef g
+            ? ManagedTypes.IsReferenceType(instance) ? g with { SharedReference = true } : g with { NativeScalar = instance } : parameter;
     }
 
     /// <summary>异常类型的无参实例构造函数（全名，含 mscorlib 之外的类型）。</summary>
@@ -207,7 +215,7 @@ public sealed partial class MethodRecovery
                 if (Prepare())
                 {
                     Analyze();
-                    var body = RewriteAwaiters(Build());
+                    var body = DropUnusedRegisterCopies(RewriteAwaiters(Build()));
                     // 结构体片只活在 L3 内；残留在方法体中的片（某个使用处没有拆回叶子）是洞。
                     bool Leftover(ManagedStatement s) => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)).Any(v => FragmentInside(v));
                     partial = body with { Blocks = body.Blocks.Select(b => b with { Statements = b.Statements.Select(s => Leftover(s)
@@ -298,6 +306,7 @@ public sealed partial class MethodRecovery
             }
             function = lifted.Function;
             var idioms = owner.rewriter.Run(function);
+            if (SharedDefinition) BindSharedReferences();
             foreach (var error in idioms.Errors) Hole(entry, $"L2 {error}");
             if (idioms.Errors.Count > 0) return false;
             NormalizeScalarVectors();
@@ -629,7 +638,7 @@ public sealed partial class MethodRecovery
                         if (statement is Call { Op: null, Kind: CallKind.Direct, Target: Const target } call && Receiver(call) is Use { Variable: var receiver } && receiver == created
                             && (facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false } ctor } && ctor.Owner == type.Definition)
                                 || facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false, Parameters.Count: 0 } ctor } && ctor.Owner != type.Definition)
-                                    && (forwarded = owner.ForwardingConstructor(type.Definition, target.Value)) is not null))
+                                    && (forwarded = owner.ForwardingConstructor(type, target.Value)) is not null))
                         {
                             if (current != block && AllocationPairing.MotionProblem(function.Range, block, allocation, current, call, middle, created) is { } problem)
                             {
@@ -758,9 +767,9 @@ public sealed partial class MethodRecovery
                         continue;
                     case Store store:
                         return Static(store.Target);
-                    // beforefieldinit 值类型的实例构造函数不是初始化触发点（ECMA-335 II.10.5.3），其前的显式初始化不能删去。
+                    // beforefieldinit 静态调用不保证触发初始化；原生显式初始化必须保留。
                     case Call { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target }:
-                        return facts.EntriesAt(target.Value).Any(e => e.Method is { Method: var m } && m.Owner == type.Definition && (m.IsStatic
+                        return facts.EntriesAt(target.Value).Any(e => e.Method is { Method: var m } && m.Owner == type.Definition && (m.IsStatic && (m.Owner.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) == 0
                             || m.Name == ".ctor" && !(m.Owner.IsValueType && (m.Owner.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) != 0)));
                     default:
                         return false;
@@ -821,7 +830,7 @@ public sealed partial class MethodRecovery
             if (resolved.TryGetValue(call, out var cached) && cached.Method is not null && (cached.Version == Pinned || cached.Version == typeVersion)) return cached.Method;
             var result = ResolveOnce(call);
             // 封闭实例：经自身 MethodInfo/RGCTX 得到的方法保留泛型参数形式（如 IUniTaskSource<T>.GetResult），代入实例的实参。
-            if (ClosedInstance && result is not null)
+            if ((ClosedInstance || SharedDefinition) && result is not null)
                 result = result with
                 {
                     TypeArguments = result.TypeArguments.Select(t => t.Substitute(method.TypeArguments, method.MethodArguments)).ToArray(),
@@ -854,6 +863,17 @@ public sealed partial class MethodRecovery
                     var symbolic = call.Arguments.Select(Expand).OfType<Symbol>().Where(s => s.Kind == SymbolKind.Method).Select(s => (MethodRef)s.Value)
                         .FirstOrDefault(m => candidates.Contains(m.Method));
                     if (symbolic is not null) return symbolic;
+                    // 编译器生成的嵌套类型沿用外层泛型实参；未读取 this 的直接入口仍可由这层身份解析。
+                    if (candidates is [var nestedTarget] && nestedTarget.GenericParameters.Count == 0
+                        && nestedTarget.Owner.GenericParameters.Count > 0 && nestedTarget.Owner.GenericParameters.Count <= method.TypeArguments.Count)
+                    {
+                        for (var parent = method.Method.Owner; parent is not null; parent = parent.DeclaringType)
+                        {
+                            if (parent != nestedTarget.Owner) continue;
+                            var inferred = new MethodRef(nestedTarget, method.TypeArguments.Take(parent.GenericParameters.Count).ToArray(), []);
+                            if (inferred.Method.IsStatic || owner.abi.Classify(inferred, out _)?.This is { } unused && UnusedInput(call, inferred, unused)) return inferred;
+                        }
+                    }
                     // 唯一直接入口的 this 若确实未用，前一次调用留下的无关对象不能否定其方法身份。
                     if (candidates is [var unique] && !unique.IsStatic && unique.GenericParameters.Count == 0 && unique.Owner.GenericParameters.Count == 0
                         && receiver is not null && !types.IsAssignable(receiver, new DefinitionRef(unique.Owner, [])))
@@ -882,7 +902,7 @@ public sealed partial class MethodRecovery
                 case { Kind: OpKind.CallGenericVirtual, Operand: MethodRef generic } when generic.Method.IsVirtual:
                     return generic;
                 case { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> pair } when pair.Item1 is DefinitionRef itf:
-                    return itf.Definition.Methods.FirstOrDefault(m => m.Slot == pair.Item2) is { } method ? new MethodRef(method, itf.Arguments, []) : null;
+                    return itf.Definition.Methods.FirstOrDefault(m => m.Slot == pair.Item2) is { } interfaceMethod ? new MethodRef(interfaceMethod, itf.Arguments, []) : null;
                 case { Kind: OpKind.CallDelegate } when receiver is DefinitionRef d:
                     return d.Definition.Methods.FirstOrDefault(m => m.Name == "Invoke" && !m.IsStatic) is { } invoke ? new MethodRef(invoke, d.Arguments, []) : null;
                 default:
@@ -933,7 +953,7 @@ public sealed partial class MethodRecovery
             {
                 case TypeKind.Float or TypeKind.Double when types.Bits(type) != width:
                     throw Fail(0, $"浮点 变量 {v} 的类型 {type} 与定义位宽 {width} 不一致");
-                case TypeKind.Int when types.Bits(type) != width:
+                case TypeKind.Int when types.Bits(type) != width && type is not GenericParameterRef:
                 case TypeKind.Bool when width is not (1 or 8):
                     if (width is not (1 or 8 or 16 or 32 or 64)) throw Fail(0, $"变量 {v} 的位宽 {width}");
                     type = IntegerOf(width, ManagedTypes.IsSigned(type));
@@ -1004,6 +1024,13 @@ public sealed partial class MethodRecovery
         /// <summary>把值调整为 target 类型的位宽：引用要求可赋值；整数截断或补零（局部变量高位为 0）；同宽的整数与浮点按位重解释。</summary>
         private ManagedValue Coerce(ManagedValue value, TypeRef target, ulong address)
         {
+            if (target is GenericParameterRef { NativeScalar: not null })
+            {
+                if (value.Type.Equals(target)) return value;
+                if (value is ConstantValue { Bits: 0 }) return new ConstantValue(0, target, types.Bits(target));
+                throw Fail(address, $"泛型复制 {value.Type} 不能转换为 {target}");
+            }
+            if (value.Type is GenericParameterRef { NativeScalar: not null }) throw Fail(address, $"泛型复制 不能将 {value.Type} 当作 {target}");
             // 窄于片的整数目标只取低位（如寄存器结构体的首叶子作为 int 实参；高位是填充）。
             if (value is Fragment fragment)
                 value = types.Kind(target) is TypeKind.Int && types.Bits(target) < fragment.Width ? Slice(fragment, 0, types.Bits(target)) : Pack(fragment);
@@ -1018,6 +1045,8 @@ public sealed partial class MethodRecovery
             {
                 case TypeKind.Reference:
                     if (value is ConstantValue { Bits: 0 }) return new ConstantValue(0, target, 64);
+                    if (value.Type is GenericParameterRef { IsReferenceConstrained: false } generic && !target.Equals(generic)
+                        && types.IsAssignable(generic, target)) return new BoxValue(value, generic, target);
                     if (types.Kind(value.Type) == TypeKind.Reference && types.IsAssignable(value.Type, target)) return value;
                     throw Fail(address, $"类型 {value.Type} 不能赋给 {target}");
                 case TypeKind.Bool or TypeKind.Int:
@@ -1051,6 +1080,7 @@ public sealed partial class MethodRecovery
                 case TypedFrame f: return new AddressValue(f.Region.Local);
                 case Const c:
                 {
+                    if (hint is GenericParameterRef { NativeScalar: not null } && c.Value != 0) throw Fail(0, "泛型复制 只接受默认值常量");
                     if (hint is not null)
                     {
                         var kind = types.Kind(hint);
@@ -1075,7 +1105,7 @@ public sealed partial class MethodRecovery
                 {
                     var operand = Recover(u.Operand, hint);
                     if (operand is Fragment f) operand = Pack(f);
-                    if (types.Kind(operand.Type) is not (TypeKind.Int or TypeKind.Bool)) throw Fail(0, $"运算 {u.Op} 的操作数类型 {operand.Type}");
+                    if (operand.Type is GenericParameterRef { NativeScalar: not null } || types.Kind(operand.Type) is not (TypeKind.Int or TypeKind.Bool)) throw Fail(0, $"运算 {u.Op} 的操作数类型 {operand.Type}");
                     return new UnaryValue(u.Op, operand, IntegerOf(u.Width, ManagedTypes.IsSigned(operand.Type)), u.Width);
                 }
                 case Unary { Op: UnOp.FNeg or UnOp.FAbs or UnOp.FSqrt or UnOp.FFloor or UnOp.FCeil or UnOp.FTrunc or UnOp.FRoundEven } u:
@@ -1144,6 +1174,8 @@ public sealed partial class MethodRecovery
             if (value is Fragment inlineFragment)
                 return width < value.Width ? Slice(inlineFragment, 0, width) : ResizeFragment(inlineFragment, width);
             if (width == value.Width) return value;
+            if (value.Type is GenericParameterRef { NativeScalar: not null } && width >= types.Bits(value.Type))
+                return new ConversionValue(ConvKind.ZeroExtend, value, value.Type, width);
             if (types.Kind(value.Type) is not (TypeKind.Int or TypeKind.Bool)) throw Fail(0, $"位宽 {value.Type} 以 {width} 位读取");
             if (width is not (1 or 8 or 16 or 32 or 64)) throw Fail(0, $"位宽 {width} 的整数转换尚未支持");
             return new ConversionValue(width < value.Width ? ConvKind.Truncate : signed ? ConvKind.SignExtend : ConvKind.ZeroExtend, value,
@@ -1186,8 +1218,10 @@ public sealed partial class MethodRecovery
                 return kept;
             if (left is Fragment lf) left = Pack(lf);
             if (right is Fragment rf) right = Pack(rf);
+            if (left.Type is GenericParameterRef { NativeScalar: not null } || right.Type is GenericParameterRef { NativeScalar: not null })
+                throw Fail(0, "泛型复制 不支持原生数值比较");
             foreach (var operand in new[] { left, right })
-                if (types.Kind(operand.Type) is not (TypeKind.Int or TypeKind.Bool)) throw Fail(0, $"运算 {b.Op} 的操作数类型 {operand.Type}");
+                    if (operand.Type is GenericParameterRef { NativeScalar: not null } || types.Kind(operand.Type) is not (TypeKind.Int or TypeKind.Bool)) throw Fail(0, $"运算 {b.Op} 的操作数类型 {operand.Type}");
             return new BinaryValue(b.Op, left, right, IntegerOf(b.Width, b.Op == BinOp.SDiv || b.Op != BinOp.UDiv && ManagedTypes.IsSigned(left.Type)), b.Width);
         }
 
@@ -1254,6 +1288,12 @@ public sealed partial class MethodRecovery
         private ManagedValue Conversion(Convert c, TypeRef? hint)
         {
             var operand = Recover(c.Operand, null);
+            if (operand.Type is GenericParameterRef { NativeScalar: not null })
+            {
+                if (c.Kind is ConvKind.ZeroExtend or ConvKind.Truncate && c.Width >= types.Bits(operand.Type))
+                    return new ConversionValue(c.Kind, operand, operand.Type, c.Width);
+                throw Fail(0, $"泛型复制 不支持 {c.Kind} 到 {c.Width} 位");
+            }
             if (operand is Fragment f)
             {
                 if (c.Kind == ConvKind.Truncate) return Slice(f, 0, c.Width);
@@ -1321,7 +1361,11 @@ public sealed partial class MethodRecovery
                 if (statements.LastOrDefault() is not (ManagedReturn or ManagedJump or ManagedBranch or ManagedSwitch or ManagedThrow or ManagedCall { Tail: true } or ManagedHole { Terminal: true }))
                 {
                     var successors = block.NormalSuccessors.ToArray();
-                    if (successors.Length == 1)
+                    if (successors.Length == 0 && statements.LastOrDefault() is ManagedCall { Result: null } noReturn
+                        && ManagedTypes.IsVoid(noReturn.Invocation.Method.Method.ReturnType)
+                        && block.Statements.LastOrDefault() is Call { Target: Const target } && owner.lifter.NoReturn.IsNoReturn(target.Value)
+                        && ManagedTypes.IsVoid(returnType)) statements[^1] = noReturn with { Tail = true };
+                    else if (successors.Length == 1)
                     {
                         try { statements.Add(new ManagedJump(block.End, Edge(block, 0, successors[0].Start))); }
                         catch (HoleException e) { Record(e, block.End); statements.Add(new ManagedHole(block.End, e.Message, true)); }
@@ -1484,8 +1528,9 @@ public sealed partial class MethodRecovery
                         new NewObjectValue(constructor.Method, constructorArguments) { Transparent = true }));
                     return;
                 case { Kind: OpKind.NewArray, Operand: ArrayRef array }:
-                    output.Add(new ManagedAssignment(address, call.Defines.FirstOrDefault() is { } createdArray ? Local(createdArray) : StructLocal(array, 64),
-                        new NewArrayValue(array, Index(call.Arguments[1]))));
+                    var arrayValue = new NewArrayValue(array, Index(call.Arguments[1]));
+                    if (call.Kind == CallKind.Tail) output.Add(new ManagedReturn(address, Coerce(arrayValue, returnType, address)));
+                    else output.Add(new ManagedAssignment(address, call.Defines.FirstOrDefault() is { } createdArray ? Local(createdArray) : StructLocal(array, 64), arrayValue));
                     return;
                 case { Kind: OpKind.Box, Operand: TypeRef type } when call.Defines.FirstOrDefault() is { } created && boxed.TryGetValue(call, out var content):
                     if (types.Kind(type) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double) || type is DefinitionRef { Definition.FullName: "System.Nullable" })
@@ -1499,11 +1544,12 @@ public sealed partial class MethodRecovery
                         new ConstantValue(0, type, 64), types.Boolean);
                     output.Add(new ManagedAssignment(address, Local(checkedValue), Coerce(matches, types.UInt64, address)));
                     return;
-                case { Kind: OpKind.Unbox, Operand: DefinitionRef { Definition.IsEnum: true } type } when call.Defines.FirstOrDefault() is { } created:
+                case { Kind: OpKind.Unbox, Operand: TypeRef type } when (type is DefinitionRef { Definition.IsEnum: true } or GenericParameterRef { NativeScalar: not null }) && call.Defines.FirstOrDefault() is { } created:
                     output.Add(new ManagedAssignment(address, Local(created), new UnboxAddressValue(RecoverAs(call.Arguments[0], types.Object, address), type)));
                     return;
                 case { Kind: OpKind.IsInst, Operand: TypeRef type } when call.Defines.FirstOrDefault() is { } created:
-                    output.Add(new ManagedAssignment(address, Local(created), new IsInstValue(Coerce(Recover(call.Arguments[0], types.Object), types.Object, address), type)));
+                    output.Add(new ManagedAssignment(address, Local(created), new IsInstValue(Coerce(Recover(call.Arguments[0], types.Object), types.Object, address), type,
+                        type is GenericParameterRef { NativeScalar: not null } ? types.Object : null)));
                     return;
                 case { Kind: OpKind.IsInstArrayElement } when call.Defines.FirstOrDefault() is { } created:
                     ArrayElementCheck(call, created, output);
@@ -1554,7 +1600,7 @@ public sealed partial class MethodRecovery
             for (var i = 0; i < signature.Parameters.Length; i++)
             {
                 var parameter = signature.Parameters[i];
-                var site = new ArgumentSite(call, callee, definition.Parameters[i].Name, registers, Argument) { Index = i };
+                var site = new ArgumentSite(call, callee, definition.Parameters[i].Name, registers, Argument) { Index = i, Output = output };
                 if (Registry.Arguments.Select(rule => rule(this, parameter, site)).FirstOrDefault(v => v is not null) is { } shaped)
                 {
                     parameters.Add(shaped);
