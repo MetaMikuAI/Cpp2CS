@@ -34,6 +34,12 @@ internal static class SourceIteratorCopiesCheck
                 public int Value;
                 public static int BranchVisits;
                 public static void Touch(int value) => BranchVisits += value;
+                public static bool NullAfterReset(bool reset)
+                {
+                    object value = new object();
+                    if (reset) value = null;
+                    return value == null;
+                }
                 public static Func<int> BranchCapture(int seed)
                 {
                     int current = seed;
@@ -74,10 +80,13 @@ internal static class SourceIteratorCopiesCheck
         var branchIl = branchCapture.Body.GetILProcessor();
         var right = branchIl.Create(OpCodes.Ldc_I4_2);
         var joined = branchIl.Create(OpCodes.Ldloc, alias);
+        var initialize = branchIl.Create(OpCodes.Ldloc, root);
         // 两个分支把同一个入口闭包赋给副本，回调必须继续共享该对象。
         foreach (var instruction in new[] {
             branchIl.Create(OpCodes.Newobj, constructors[0]), branchIl.Create(OpCodes.Stloc, root),
-            branchIl.Create(OpCodes.Ldloc, root), branchIl.Create(OpCodes.Ldarg_0), branchIl.Create(OpCodes.Stfld, captured),
+            branchIl.Create(OpCodes.Ldloc, root), branchIl.Create(OpCodes.Brtrue, initialize),
+            branchIl.Create(OpCodes.Newobj, module.ImportReference(typeof(NullReferenceException).GetConstructor(Type.EmptyTypes)!)), branchIl.Create(OpCodes.Throw),
+            initialize, branchIl.Create(OpCodes.Ldarg_0), branchIl.Create(OpCodes.Stfld, captured),
             branchIl.Create(OpCodes.Ldarg_0), branchIl.Create(OpCodes.Ldc_I4_0), branchIl.Create(OpCodes.Bge, right),
             branchIl.Create(OpCodes.Ldc_I4_1), branchIl.Create(OpCodes.Call, touch),
             branchIl.Create(OpCodes.Ldloc, root), branchIl.Create(OpCodes.Stloc, alias), branchIl.Create(OpCodes.Br, joined),
@@ -124,6 +133,8 @@ internal static class SourceIteratorCopiesCheck
         foreach (var assembly in new[] { File.ReadAllBytes(input), rebuilt })
         {
             var type = System.Reflection.Assembly.Load(assembly).GetType("Probe")!;
+            var checkNull = type.GetMethod("NullAfterReset")!.CreateDelegate<Func<bool, bool>>();
+            a.True(!checkNull(false) && checkNull(true), "允许重新赋值为 null 的变量不能按新对象消除判空");
             var factory = type.GetMethod("BranchCapture")!.CreateDelegate<Func<int, Func<int>>>();
             foreach (var seed in new[] { -4, 7 })
             {

@@ -30,6 +30,7 @@ public static partial class Decompilation
     private static CSharpDecompiler CreateDecompiler(DecompilerTypeSystem typeSystem, DecompilerSettings settings)
     {
         var decompiler = new CSharpDecompiler(typeSystem, settings);
+        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.Transforms.DelegateConstruction), new AllocatedNullChecks());
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.Transforms.DelegateConstruction), new IteratorCopies());
         decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new DistinctLocalNames());
         decompiler.AstTransforms.Add(new EnumeratorCopies());
