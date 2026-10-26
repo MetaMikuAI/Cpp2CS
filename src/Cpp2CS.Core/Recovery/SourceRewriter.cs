@@ -21,6 +21,7 @@ public static class SourceRewriter
         body = Map(body, v => Simplify(v, types));
         body = FreshArrayLengths(body, types);
         body = DropStatements(body);
+        body = SourceArgumentAliases.Rewrite(body);
         for (var round = 0; round < 4; round++)
             body = DeadAssignments(Map(Retype(Propagate(body)), v => Simplify(v, types)));
         body = DropStatements(BooleanStores(body, types));

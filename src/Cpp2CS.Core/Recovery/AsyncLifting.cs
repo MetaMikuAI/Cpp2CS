@@ -21,7 +21,7 @@ public static partial class AsyncLifting
         if (StateMachineOf(kickoff) is DefinitionRef machine && machine.Definition == moveNext.Method.Method.Owner
             && machine.Arguments.Count > 0)
             moveNext = ManagedTypeMap.Map(moveNext, t => t.Substitute(machine.Arguments, []));
-        var lifter = new Lifter(kickoff, moveNext);
+        var lifter = new Lifter(kickoff, SourceArgumentAliases.Rewrite(moveNext));
         var body = lifter.Run();
         reason = lifter.Reason;
         return body;
@@ -80,6 +80,9 @@ public static partial class AsyncLifting
             // 被删分支可能是协议字段副本的最后一个使用者。
             Simplify();
             RemoveCopiedAwaiters();
+            AsyncConstantBranches.Run(blocks, order[0], regions, Eval);
+            Prune();
+            Simplify();
             foreach (var site in sites)
                 if (Uses(site.Awaiter)) return Fail<ManagedBody>($"awaiter {site.Awaiter} 仍被使用" + (Environment.GetEnvironmentVariable("CPP2CS_EMIT_DEBUG") == "1"
                     ? "：" + string.Join(" | ", blocks.Values.SelectMany(s => s).Where(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))
