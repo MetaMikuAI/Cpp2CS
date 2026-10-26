@@ -309,6 +309,7 @@ public sealed partial class MethodRecovery
             if (SharedDefinition) BindSharedReferences();
             NormalizeSharedFields();
             NormalizeSharedValues();
+            NormalizeDelegateChoices();
             foreach (var error in idioms.Errors) Hole(entry, $"L2 {error}");
             if (idioms.Errors.Count > 0) return false;
             NormalizeScalarVectors();

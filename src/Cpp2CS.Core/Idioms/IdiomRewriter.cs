@@ -208,7 +208,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             CountCalls();
             TrimResultBuffers();
             Symbols(rgctx: false);
-            if (StringSlotPhis()) Cleanup();
+            if (MetadataSlotPhis()) Cleanup();
             if (StringSlotChoices()) Cleanup();
             Normalize();
             // RGCTX 数组只在其守卫（InitMethodRgctx）归一之后才当作已初始化的值
@@ -867,7 +867,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             return changed;
         }
 
-        private bool StringSlotPhis()
+        private bool MetadataSlotPhis()
         {
             var changed = false;
             var definitions = new Defs(function);
@@ -878,7 +878,8 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     || block.Predecessors.Any(p => !p.NormalSuccessors.Contains(block) || p.Handler == block)) continue;
                 var slots = phi.Sources.Select(v => definitions.Expand(new Use(v, v.Width)) is Const address
                     ? facts.Usages.At(address.Value) : null).ToArray();
-                if (slots.Any(s => s?.Usage.Kind != UsageKind.StringLiteral)) continue;
+                if (slots.Any(s => s?.Usage.Kind is not (UsageKind.StringLiteral or UsageKind.MethodDef or UsageKind.MethodRef))
+                    || slots.Select(s => SymbolOf(s!.Usage.Kind)).Distinct().Count() != 1) continue;
                 var loads = All.SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<Load>()
                     .Where(l => l is { Width: 64, Address: Use use } && use.Variable == phi.Target).ToHashSet();
                 if (loads.Count == 0) continue;
@@ -887,7 +888,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 for (var i = 0; i < slots.Length; i++)
                 {
                     var slot = slots[i]!;
-                    var symbol = new Symbol(SymbolKind.String, slot.Usage.Value);
+                    var symbol = new Symbol(SymbolOf(slot.Usage.Kind), slot.Usage.Value);
                     var parent = block.Predecessors[i];
                     var last = parent.Statements.LastOrDefault();
                     var position = parent.Statements.Count - (last is Jump or Branch or IndirectJump or Return ? 1 : 0);

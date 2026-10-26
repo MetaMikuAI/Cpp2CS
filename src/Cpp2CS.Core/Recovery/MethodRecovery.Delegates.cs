@@ -11,11 +11,32 @@ public sealed partial class MethodRecovery
     {
         private readonly Dictionary<Call, DefinitionRef> delegateCreations = new(ReferenceEqualityComparer.Instance);
 
+        private void NormalizeDelegateChoices()
+        {
+            var definitions = function.Blocks.SelectMany(b => b.Statements.OfType<Define>()).ToDictionary(d => d.Target, d => d.Value);
+            Expr ExpandIdentity(Expr expression)
+            {
+                var seen = new HashSet<Variable>();
+                while (expression is Use use && seen.Add(use.Variable) && definitions.TryGetValue(use.Variable, out var value)) expression = value;
+                return expression;
+            }
+            bool Constructor(Call call) => call is { Op: null, Kind: CallKind.Direct, Target: Const target }
+                && facts.EntriesAt(target.Value).Any(e => e.Method is { Method.Name: ".ctor", DeclaringType: DefinitionRef type }
+                    && DelegateFacts.IsDelegate(type));
+            if (DelegateConstructorChoices.Split(function, Constructor, ExpandIdentity))
+                Ssa.Propagate.Run(function, Ssa.Dominators.Compute(function));
+        }
+
         private void DelegateAllocation(Block block, int index, Call allocation, DefinitionRef type, Variable created)
         {
             bool Constructor(Call call) => call is { Op: null, Kind: CallKind.Direct, Target: Const target }
                 && facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false } m } && m.Owner == type.Definition);
             var constructors = blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => Constructor(c) && Receiver(c) is Use u && u.Variable == created).ToArray();
+            if (constructors.Length == 2 && BranchConstructors(block, index, allocation, type, created))
+            {
+                foreach (var branchConstructor in constructors) delegateCreations[branchConstructor] = type;
+                return;
+            }
             void Reject(string reason)
             {
                 var hole = Hole(allocation.Address, "委托 " + reason);
