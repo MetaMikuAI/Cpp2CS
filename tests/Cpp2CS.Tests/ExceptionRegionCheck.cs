@@ -32,7 +32,7 @@ internal static class ExceptionRegionCheck
         a.True(layout.Order[0].Block == source && layout.Order[0].First == 0, "整个方法从原入口片段开始");
         a.Equal(4, handler.Statements.Count, "区域视图不修改生产块");
 
-        // 有调用的连接语句不能因两端受相同 handler 保护就扩大捕获范围。
+        // 连接语句按当前启发式纳入区域，异常行为另由原生执行对照检查。
         var first = Block(0x1300, Op(0x1300, OpKind.CallVirtual));
         var gap = Block(0x1320, Op(0x1320, OpKind.CallInterface));
         var second = Block(0x1340, Op(0x1340, OpKind.CallVirtual));
@@ -41,8 +41,8 @@ internal static class ExceptionRegionCheck
         MachineFunction.AddEdge(first, gap); MachineFunction.AddEdge(gap, second); MachineFunction.AddEdge(second, end2); MachineFunction.AddEdge(catch2, end2);
         Exception(first, catch2); Exception(second, catch2);
         var joined = Function(first, gap, second, catch2, end2);
-        var rejected = ExceptionRegionBuilder.Build(joined, _ => true);
-        a.Equal("未证成/连接语句可能抛出", rejected.Reason, "不能把未受保护的调用加入 try");
+        var bridged = ExceptionRegionBuilder.Build(joined, _ => true);
+        a.True(bridged.Succeeded && bridged.Regions[0].Try.Any(f => f.Block == gap), "启发式补齐含调用的连接片段，仍需执行对照");
         gap.Statements[0] = new Store(0x1320, Expr.C(0x8888, 64), Expr.C(2, 64));
         var connected = ExceptionRegionBuilder.Build(joined, _ => true);
         a.True(connected.Succeeded && connected.Regions[0].Try.Any(f => f.Block == gap), "非抛出连接语句构造单入口闭包");
@@ -72,6 +72,24 @@ internal static class ExceptionRegionCheck
         innerCatch.Statements.Insert(1, Op(0x1582, OpKind.CallInterface));
         var unsafeNested = ExceptionRegionBuilder.Build(nestedFunction, _ => true);
         a.True(!unsafeNested.Succeeded, "不能使内层 handler 中原本向外逃逸的调用改被外层捕获");
+
+        // 内层 catch 受外层保护，两个 try 的初始逆向闭包会暂时交叉；先补齐嵌套，再判定交叉。
+        var nestedStart = Block(0x1700, Op(0x1700, OpKind.CallVirtual));
+        var split = Block(0x1720, new Branch(0x1720, Expr.C(1, 1), 0x1740, 0x1760));
+        var nestedTail = Block(0x1740, Op(0x1740, OpKind.CallVirtual));
+        var outerTail = Block(0x1760, Op(0x1760, OpKind.CallVirtual));
+        var nestedHandler = Block(0x1780, Op(0x1780, OpKind.BeginCatch), Op(0x1784, OpKind.CallInterface));
+        var nestedEnd = Block(0x17a0, Op(0x17a0, OpKind.EndCatch));
+        var outerHandler = Block(0x17c0, Op(0x17c0, OpKind.BeginCatch), Op(0x17c4, OpKind.EndCatch));
+        var nestedDone = Block(0x17e0, new Return(0x17e0));
+        MachineFunction.AddEdge(nestedStart, split); MachineFunction.AddEdge(split, nestedTail); MachineFunction.AddEdge(split, outerTail);
+        MachineFunction.AddEdge(nestedTail, nestedDone); MachineFunction.AddEdge(outerTail, nestedDone);
+        MachineFunction.AddEdge(nestedHandler, nestedEnd); MachineFunction.AddEdge(nestedEnd, nestedDone); MachineFunction.AddEdge(outerHandler, nestedDone);
+        Exception(nestedStart, nestedHandler); Exception(nestedTail, nestedHandler);
+        Exception(outerTail, outerHandler); Exception(nestedHandler, outerHandler);
+        var crossing = ExceptionRegionBuilder.Build(Function(nestedStart, split, nestedTail, outerTail, nestedHandler, nestedEnd, outerHandler, nestedDone), _ => true);
+        a.True(crossing.Succeeded && crossing.Regions.Count(r => r.Parent is not null) == 1,
+            $"先内后外枚举仍恢复完整嵌套：{crossing.Reason} {crossing.Detail}");
 
         // 同一门既有 wrapper 也有 catch-all 来源时，不能把 selector 无条件置为 1。
         var selectorValue = new Variable(Storage.Gpr(1), 1);

@@ -229,20 +229,17 @@ public static class ExceptionRegionBuilder
             do
             {
                 expanded = false;
+                // 先根据 handler 的保护关系补齐嵌套；不能让区域枚举顺序决定是否提前报 try 交叉。
+                foreach (var outer in regions)
+                    foreach (var inner in regions.Where(r => r != outer))
+                        if (outer.Try.Overlaps(inner.Handler) && !inner.Try.Contains(outer.Entry) && !inner.Handler.Contains(outer.Entry))
+                            foreach (var f in inner.Try) expanded |= outer.Try.Add(f);
                 foreach (var outer in regions)
                     foreach (var inner in regions.Where(r => r != outer))
                     {
-                        // catch 体抛出的异常由外层接住时，外层 try 包含整个内层 try 语句（C# 的 try 按词法嵌套；原生侧内层 try 的语句只指向内层 handler）。
-                        if (outer.Try.Overlaps(inner.Handler) && !inner.Try.Contains(outer.Entry) && !inner.Handler.Contains(outer.Entry))
-                            foreach (var f in inner.Try) expanded |= outer.Try.Add(f);
                         if (!outer.Try.Overlaps(inner.Try) || inner.Try.IsSupersetOf(outer.Try)) continue;
-                        if (!inner.Try.IsSubsetOf(outer.Try))
-                        {
-                            if (Environment.GetEnvironmentVariable("CPP2CS_EH_DEBUG") == "1")
-                                foreach (var r in new[] { outer, inner })
-                                    Console.Error.WriteLine($"  [EH] {r.Kind} entry={r.Entry} try=[{string.Join(" ", r.Try.OrderBy(x => x.Id))}] handler=[{string.Join(" ", r.Handler.OrderBy(x => x.Id))}]");
-                            return Result("未证成/try交叉", $"{outer.Entry}/{inner.Entry}");
-                        }
+                        // 暂时交叉的闭包可能仍待上层扩展，最终区域检查负责拒绝未收敛的交叉。
+                        if (!inner.Try.IsSubsetOf(outer.Try)) continue;
                         if (!CanContain(inner, outer)) return Result("未证成/内层handler抛出目标不同", $"{outer.Entry}/{inner.Entry}");
                         foreach (var f in inner.Handler) expanded |= outer.Try.Add(f);
                     }
