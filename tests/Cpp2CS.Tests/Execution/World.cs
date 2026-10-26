@@ -474,6 +474,8 @@ internal sealed partial class World
                         { Kind: RgctxKind.Type, Value: TypeRef t } => TypePointer(close(t)),
                         { Kind: RgctxKind.Array, Value: TypeRef t } => Klass(new ArrayRef(close(t is ByRefRef r ? r.Element : t), 1)),
                         { Kind: RgctxKind.Method, Value: MethodRef m } => MethodInfo(m with { TypeArguments = m.TypeArguments.Select(close).ToArray(), MethodArguments = m.MethodArguments.Select(close).ToArray() }),
+                        { Kind: RgctxKind.Constrained, Value: ValueTuple<TypeRef, MethodRef> c } => ConstrainedInfo(close(c.Item1),
+                            c.Item2 with { TypeArguments = c.Item2.TypeArguments.Select(close).ToArray(), MethodArguments = c.Item2.MethodArguments.Select(close).ToArray() }),
                         _ => 0,
                     });
                 }
@@ -482,6 +484,15 @@ internal sealed partial class World
         }
         finally { rgctxDepth--; }
         return array;
+    }
+
+    // constrained RGCTX 的类型/接口对来自注册表；运行时身份从现有虚表模型取，不使用恢复器选择的调用目标。
+    private ulong ConstrainedInfo(TypeRef receiver, MethodRef contract)
+    {
+        if (receiver is not DefinitionRef { Definition.IsValueType: true } type || !contract.Method.Owner.IsInterface || contract.Method.Slot < 0) return 0;
+        var pair = type.Definition.InterfaceOffsets.FirstOrDefault(p => p.Interface.Substitute(type.Arguments, []).Equals(contract.DeclaringType));
+        if (pair.Interface is null || WorldIndex.VTableEntry(type, pair.Offset + contract.Method.Slot) is not { } implementation) return 0;
+        return MethodInfo(implementation with { MethodArguments = contract.MethodArguments });
     }
 
     /// <summary>合成的 MethodInfo 对应的方法；不是合成的时为 null。</summary>

@@ -869,6 +869,11 @@ public sealed partial class MethodRecovery
                     var symbolic = call.Arguments.Select(Expand).OfType<Symbol>().Where(s => s.Kind == SymbolKind.Method).Select(s => (MethodRef)s.Value)
                         .FirstOrDefault(m => candidates.Contains(m.Method));
                     if (symbolic is not null) return symbolic;
+                    // RGCTX 的 constrained 项携带值类型及接口身份；用槽位核对直接目标后保留该实例实参。
+                    for (var i = 0; i < call.Arguments.Length; i++)
+                        if (Expand(call.Arguments[i]) is Symbol { Kind: SymbolKind.Constrained, Value: ValueTuple<TypeRef, MethodRef> constrained }
+                            && ConstrainedImplementation(constrained.Item1, constrained.Item2, candidates) is { } implementation
+                            && owner.abi.Classify(implementation, out _)?.MethodInfo?.Register == call.Sources[i]) return implementation;
                     // 编译器生成的嵌套类型沿用外层泛型实参；未读取 this 的直接入口仍可由这层身份解析。
                     if (candidates is [var nestedTarget] && nestedTarget.GenericParameters.Count == 0
                         && nestedTarget.Owner.GenericParameters.Count > 0 && nestedTarget.Owner.GenericParameters.Count <= method.TypeArguments.Count)
