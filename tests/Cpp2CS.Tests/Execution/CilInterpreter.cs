@@ -614,6 +614,14 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
             return computed;
         // 完全栅栏：对照在单线程中执行，栅栏不改变顺序语义（ECMA-335 I.12.6.5），原生侧的 dmb 也不产生事件。
         if (callee.Method is { Name: "MemoryBarrier", IsStatic: true, Owner.FullName: "System.Threading.Thread" }) return null;
+        // 单线程对照按 BCL 的引用比较交换契约执行；原生侧仍执行独占读写指令。
+        if (callee.Method is { Name: "CompareExchange", IsStatic: true, Owner.FullName: "System.Threading.Interlocked", GenericParameters.Count: 1 }
+            && values.Length == 3 && callee.MethodArguments is [var exchangedType] && Types.Kind(exchangedType) == TypeKind.Reference)
+        {
+            var old = side.Read64(values[0].Bits);
+            if (old == values[2].Bits) side.WriteValue(values[0].Bits, values[1].Bits, 8);
+            return StackValue.O(old);
+        }
         // 已有的无参异常构造抽象不产生调用事件；被 catch 后继续执行时也不能消耗调用序号。
         if (callee.Method is { Name: ".ctor", Parameters.Count: 0 } && Side.InExceptionRegion(values[0].Bits)) return null;
         var ordinal = side.NextCall();

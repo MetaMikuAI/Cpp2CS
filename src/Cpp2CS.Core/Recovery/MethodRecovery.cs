@@ -978,6 +978,10 @@ public sealed partial class MethodRecovery
             if (types.Kind(target) == TypeKind.Reference && e is Use { Width: 64 }
                 && (nullPaths ??= new NullPathFacts(function)).IsNull(e, address))
                 return new ConstantValue(0, target, 64);
+            if (types.Kind(target) == TypeKind.Reference && e is Use { Width: 64 } referenceValue
+                && TypeOfValue(e) is { } sourceType && types.Kind(sourceType) == TypeKind.Reference
+                && !types.IsAssignable(sourceType, target) && CheckedNullableReference(referenceValue, target, address))
+                return new IsInstValue(Recover(e, sourceType), target);
             return target is ByRefRef reference ? StructAddress(e, reference.Element) : Coerce(Recover(e, target), target, address);
         }
 
@@ -1397,6 +1401,9 @@ public sealed partial class MethodRecovery
             }
             switch (call.Op)
             {
+                case { Kind: OpKind.CompareExchangeReference }:
+                    CompareExchangeReference(call, output);
+                    return;
                 case { Kind: OpKind.RunClassConstructor, Operand: TypeRef type }:
                     if (owner.runClassConstructor is not { } run) throw Fail(address, "类初始化 核心库缺少 RuntimeHelpers.RunClassConstructor");
                     output.Add(new ManagedCall(address, new ManagedInvocation(run, null, [new TypeHandleValue(type, types.RuntimeTypeHandle, types.Size(types.RuntimeTypeHandle) * 8)], false), null, false));

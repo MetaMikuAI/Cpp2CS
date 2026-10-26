@@ -47,7 +47,7 @@ public sealed partial class MethodRecovery
                 if (call.Op?.Kind is OpKind.InitClass or OpKind.RunClassConstructor or OpKind.InitMethodRgctx
                     or OpKind.NewObject or OpKind.NewArray or OpKind.Box or OpKind.Unbox or OpKind.IsInst or OpKind.IsAssignableFrom
                     or OpKind.TypeCheck or OpKind.ThrowIf or OpKind.NullCheck or OpKind.BoundsCheck or OpKind.Throw or OpKind.ThrowNew
-                    or OpKind.NewException or OpKind.Rethrow or OpKind.WriteBarrier or OpKind.MemoryBarrier or OpKind.InterfaceInvokeData
+                    or OpKind.NewException or OpKind.Rethrow or OpKind.WriteBarrier or OpKind.MemoryBarrier or OpKind.CompareExchangeReference or OpKind.InterfaceInvokeData
                     or OpKind.ResolveGenericVirtual or OpKind.BeginCatch or OpKind.EndCatch or OpKind.ResumeUnwind or OpKind.Terminate or OpKind.ThrowManaged) return true;
                 return Resolve(call) is { } target && owner.abi.Classify(target, out _) is { MethodInfo: not null } signature
                     && signature.Arguments.All(a => a.Passing != Facts.Passing.Stack);

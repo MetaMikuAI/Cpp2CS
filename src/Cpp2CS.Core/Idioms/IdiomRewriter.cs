@@ -1346,6 +1346,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 HelperKind.GetException => (OpKind.NewException, helper.Detail, []),
                 HelperKind.Rethrow => (OpKind.Rethrow, null, [Arg(0)]),
                 HelperKind.MemoryBarrier => (OpKind.MemoryBarrier, null, []),
+                HelperKind.CompareExchangeReference => (OpKind.CompareExchangeReference, null, [Arg(0), Arg(1), Arg(2)]),
                 HelperKind.Terminate => (OpKind.Terminate, null, []),
                 HelperKind.UnwindResume => (OpKind.ResumeUnwind, null, [Arg(0)]),
                 HelperKind.FieldAddress => (OpKind.FieldAddress, null, [Arg(0), Arg(1)]),

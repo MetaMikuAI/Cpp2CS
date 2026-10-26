@@ -9,5 +9,6 @@ internal static class TypingContributors
         new UseContributor(input), new PhiUseContributor(), new RuntimeContributor(input),
         new TypeCheckContributor(input), new FloatContributor(input), new StructContributor(input),
         new DelegateContributor(input), new ExceptionContributor(input), new PairingContributor(input),
+        new AtomicReferenceContributor(input),
     ];
 }

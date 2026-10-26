@@ -57,6 +57,7 @@ public sealed class FactsCallModel : ICallModel
         HelperKind.Raise => new([X(0), X(1)], [], "helper"),
         HelperKind.Rethrow => new([X(0)], [], "helper"),
         HelperKind.MemoryBarrier => new([], [], "helper"),
+        HelperKind.CompareExchangeReference => new([X(0), X(1), X(2)], [X(0)], "helper"),
         HelperKind.Import => helper.Detail switch
         {
             "memcpy" or "memmove" or "memset" => new([X(0), X(1), X(2)], [X(0)], "libc"),

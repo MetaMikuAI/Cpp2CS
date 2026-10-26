@@ -42,6 +42,7 @@ internal sealed partial class NativeMachine : IDisposable
     private const ulong ReturnBuffer = World.StackBase + 0x10000;
     private readonly List<CodeFunction> entered = new();
     private readonly Dictionary<ulong, bool> genericVirtualHelpers = new();
+    private readonly HashSet<ulong> writeBarrierBodies = [];
     private Exception? failure;
 
     public NativeMachine(ProgramFacts facts)
@@ -49,6 +50,16 @@ internal sealed partial class NativeMachine : IDisposable
         this.facts = facts;
         erratumStubs = facts.Code.Patches.Values.Select(p => p.Stub).ToHashSet();
         var image = facts.Model.Image;
+        // 从 GC 导出符号追踪薄包装；内部调用的纯跳板不一定出现在托管调用目标表中。
+        if (image.Exports.TryGetValue("il2cpp_gc_wbarrier_set_field", out var barrier))
+            for (var depth = 0; depth < 6 && writeBarrierBodies.Add(barrier); depth++)
+            {
+                var entry = facts.Code.EntryIndex(barrier);
+                if (entry < 0 || facts.Code.Functions[entry].Size > 32) break;
+                var calls = facts.Scan.Of(entry).ToArray().Where(r => r.Kind is RefKind.Call or RefKind.TailCall).ToArray();
+                if (calls is not [var next]) break;
+                barrier = next.Target;
+            }
         var pages = image.Ranges.Select(r => (Start: r.Address & ~0xFFFUL, End: (r.Address + r.MemorySize + 0xFFF) & ~0xFFFUL)).OrderBy(p => p.Start).ToList();
         for (var i = 0; i < pages.Count; i++)
         {
@@ -232,7 +243,7 @@ internal sealed partial class NativeMachine : IDisposable
                 }
                 // 不属于运行时服务的 helper（未内联的判空、条件抛出等普通代码）照常执行，不按分类结论打桩，
                 // 免得两侧共用提升器的同一个分类结论而看不出它的错误
-                if (helper.Kind is HelperKind.NullCheck or HelperKind.Unknown && facts.Code.At(address) is { } body && body.Start == address)
+                if (helper.Kind is HelperKind.NullCheck or HelperKind.Unknown or HelperKind.CompareExchangeReference && facts.Code.At(address) is { } body && body.Start == address)
                 {
                     entered.Add(body);
                     EnterHelperFrame();
@@ -249,6 +260,9 @@ internal sealed partial class NativeMachine : IDisposable
                 EnterHelperFrame();
                 return;
             }
+            // GC 页标记不参与单线程托管语义；位置写入已由原始原子指令执行并记入内存对照。
+            else if (writeBarrierBodies.Contains(address)
+                || facts.Code.Word(address) is { } branch && A64.IsB(branch) && writeBarrierBodies.Contains(A64.Imm26Target(branch, address))) Back();
             else Call(address);
         }
         catch (PlannedThrow e)

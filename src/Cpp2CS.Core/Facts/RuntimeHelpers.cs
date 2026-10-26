@@ -43,6 +43,8 @@ public enum HelperKind
     Import,
     /// <summary>其他 il2cpp_* 导出（Detail 为导出名），语义按导出 API 理解。</summary>
     Export,
+    /// <summary>引用的原子比较交换，返回旧值；参数为位置、新值、比较值。</summary>
+    CompareExchangeReference,
 }
 
 /// <summary>一个被托管代码调用的辅助函数。Evidence 说明依据；Callers 为托管调用点数。</summary>
@@ -209,6 +211,12 @@ public sealed class RuntimeHelpers
         if (interfaceSlowPath is { } slow && chain.Contains(slow))
             return (HelperKind.InterfaceLookup, null, $"il2cpp_object_get_virtual_method 在接口偏移扫描失败后调用 0x{slow:x}");
         var calls = CallsOf(body).ToArray();
+        // ARM64 引用 CAS：独占读写重试、完整屏障、GC 写屏障，最后返回交换前的引用。
+        if (words is [0xa9bf4ffe, 0xc85ffc08, 0xeb02011f, 0x540000a1, 0xc809fc01, 0x35ffff89,
+            0x52800029, 0x14000003, 0xd5033f5f, 0x2a1f03e9, 0xd5033bbf, 0x7100013f, 0x9a881053,
+            var barrierCall, 0xaa1303e0, 0xa8c14ffe, 0xd65f03c0]
+            && A64.IsBl(barrierCall) && calls is [var writeBarrier] && KindAt(writeBarrier) == HelperKind.WriteBarrier)
+            return (HelperKind.CompareExchangeReference, null, "ldaxr/stlxr 比较交换重试；dmb ish；GC 写屏障；返回旧引用");
         var imports = calls.Select(ImportAt).Where(n => n is not null).ToArray();
         if (imports.Contains("__cxa_allocate_exception") && imports.Contains("__cxa_throw") && ThrowsIl2CppWrapper(body))
             return (HelperKind.Rethrow, null, "以 __cxa_allocate_exception/__cxa_throw 抛出 typeinfo 名含 Il2CppExceptionWrapper 的 C++ 异常");

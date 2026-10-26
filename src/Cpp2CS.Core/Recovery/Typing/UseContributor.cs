@@ -98,6 +98,11 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                 case Call { Op.Kind: OpKind.NewArray, Arguments: [_, var length] }:
                     yield return (length, context.Types.Integer(length.Width, false), statement.Address, "数组分配长度");
                     break;
+                case Call { Op.Kind: OpKind.CompareExchangeReference, Arguments: [var location, var value, var comparand] } call
+                    when expressions.LocationType(location, 64) is { } type && context.Types.Kind(type) == TypeKind.Reference:
+                    yield return (value, type, call.Address, "原子交换的新引用");
+                    yield return (comparand, type, call.Address, "原子交换的比较引用");
+                    break;
                 case Call call when call.Op is null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual }
                     && context.Resolve(call) is { } target && abi.Classify(target, out _) is { } signature:
                     var registers = call.ArgumentsBySource();

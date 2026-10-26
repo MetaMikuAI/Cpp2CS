@@ -91,6 +91,8 @@ public enum OpKind : byte
     Import,
     /// <summary>逐点证明的 allocate(8)/wrapper+0/__cxa_throw；唯一参数为托管异常对象。</summary>
     ThrowManaged,
+    /// <summary>引用原子比较交换：位置、新值、比较值 → 旧引用。</summary>
+    CompareExchangeReference,
 }
 
 /// <summary>调用所表达的运行时操作。Operand：类型（TypeRef）、异常名、槽位号等，见 <see cref="OpKind"/>。</summary>
