@@ -310,11 +310,24 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     stack.Push(StackValue.I8(side.Read64(array + RuntimeLayout.ArrayMaxLength)));
                     break;
                 }
+                // ECMA-335 III.4.9：ldelema 返回元素存储地址，仍检查 null、下标及精确元素类型。
+                case Code.Ldelema:
+                {
+                    var type = model.Type((TypeReference)operand);
+                    var position = Pop();
+                    var array = Pop();
+                    var address = Element(side, type, position, array);
+                    if (side.TypeOf(array.Bits) is not ArrayRef actual || !actual.Element.Equals(type))
+                        throw new CilThrow(Types.Corlib("System.ArrayTypeMismatchException"));
+                    stack.Push(StackValue.O(address));
+                    side.ArrayAccesses?.Add(instruction);
+                    break;
+                }
                 case Code.Ldelem_Any:
                 {
                     var type = model.Type((TypeReference)operand);
                     var address = Element(side, type, Pop(), Pop());
-                    stack.Push(Load(type, side.ReadValue(address, world.StorageSize(type))));
+                    stack.Push(ReadValue(side, type, address));
                     side.ArrayAccesses?.Add(instruction);
                     break;
                 }
@@ -325,7 +338,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     var address = Element(side, type, Pop(), Pop());
                     if (ManagedTypes.IsReferenceType(type) && value.Bits != 0 && !Types.IsAssignable(side.TypeOf(value.Bits), type))
                         throw new CilThrow(Types.Corlib("System.ArrayTypeMismatchException"));
-                    side.WriteValue(address, Raw(type, value), world.StorageSize(type));
+                    WriteValue(side, type, address, value);
                     side.ArrayAccesses?.Add(instruction);
                     break;
                 }

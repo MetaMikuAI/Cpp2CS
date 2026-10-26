@@ -56,19 +56,39 @@ public sealed partial class MethodRecovery
         private bool IsStatic(Expr address) => Split(address).Base is Symbol;
 
         private (Expr Array, Expr Index)? ElementOf(Expr address)
+            => ArrayLocation(address) is { Offset: 0 } location ? (location.Array, location.Index) : null;
+
+        private (Expr Array, Expr Index, ArrayRef Type, int Offset)? ArrayLocation(Expr address)
         {
             var (array, offset, rest) = Split(address);
-            if (array is null || TypeOfAddressBase(array) is not ArrayRef { IsVector: true } type || offset != RuntimeLayout.ArrayData) return null;
+            if (array is null || TypeOfAddressBase(array) is not ArrayRef { IsVector: true } type || offset < RuntimeLayout.ArrayData) return null;
             var size = types.Size(type.Element);
             if (size <= 0) return null;
-            return rest switch
+            Expr? index = rest switch
             {
-                [] => null,
-                [Binary { Op: BinOp.Shl, Right: Const shift } scaled] when (1L << (int)shift.Value) == size => (array, scaled.Left),
-                [Binary { Op: BinOp.Mul, Right: Const factor } scaled] when (long)factor.Value == size => (array, scaled.Left),
-                [var index] when size == 1 => (array, index),
+                [] => new Const(0, 64),
+                [Binary { Op: BinOp.Shl, Right: Const shift } scaled] when shift.Value < 63 && (1L << (int)shift.Value) == size => scaled.Left,
+                [Binary { Op: BinOp.Mul, Right: Const factor } scaled] when (long)factor.Value == size => scaled.Left,
+                [var unscaled] when size == 1 => unscaled,
                 _ => null,
             };
+            if (index is null) return null;
+            var displacement = offset - RuntimeLayout.ArrayData;
+            if (displacement / size != 0) index = Fold.Simplify(new Binary(BinOp.Add, index, new Const((ulong)(displacement / size), index.Width), index.Width));
+            return (array, index, type, (int)(displacement % size));
+        }
+
+        private ManagedValue ArrayStructLocation(Expr array, Expr index, ArrayRef type, int offset, int width)
+        {
+            var root = new ArrayElementValue(Recover(array, null), Index(index), type.Element, 0);
+            if (offset + width / 8 > types.Size(type.Element)) throw Fail(0, "数组 访存跨越结构体元素");
+            var leaves = StructPaths(type.Element).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)
+                && p.Offset < offset + width / 8 && offset < p.Offset + types.Size(p.Type)).OrderBy(p => p.Offset).ToArray();
+            if (leaves.Length == 0 || leaves.Any(p => p.Offset < offset || p.Offset + types.Size(p.Type) > offset + width / 8)
+                || leaves.Zip(leaves.Skip(1)).Any(p => p.First.Offset + types.Size(p.First.Type) > p.Second.Offset))
+                throw Fail(0, "数组 结构体元素叶子重叠或仅被部分覆盖");
+            var parts = leaves.Select(p => new Part((p.Offset - offset) * 8, PathValue(root, p.Path))).ToArray();
+            return parts is [var single] && single.Low == 0 && single.Value.Width == width ? single.Value : new Fragment(parts, types.UInt64, width);
         }
 
         /// <summary>访存位置：字段、静态字段、数组长度、数组元素。</summary>
@@ -112,6 +132,8 @@ public sealed partial class MethodRecovery
                 }
                 if (ElementOf(address) is var (_, index) && types.Kind(array.Element) is not (TypeKind.Struct or null) && width == Math.Max(types.Bits(array.Element), 8))
                     return new ArrayElementValue(Recover(baseTerm, null), Index(index), array.Element, width);
+                if (types.Kind(array.Element) == TypeKind.Struct && ArrayLocation(address) is { } element)
+                    return ArrayStructLocation(element.Array, element.Index, element.Type, element.Offset, width);
                 if (rest.Count == 0 && offset >= RuntimeLayout.ArrayData && types.Size(array.Element) is > 0 and var size && (offset - RuntimeLayout.ArrayData) % size == 0
                     && types.Kind(array.Element) is not (TypeKind.Struct or null) && width == types.Bits(array.Element))
                     return new ArrayElementValue(Recover(baseTerm, null), new ConstantValue((ulong)((offset - RuntimeLayout.ArrayData) / size), types.Int32, 32), array.Element, width);
@@ -262,6 +284,13 @@ public sealed partial class MethodRecovery
 
         private ManagedValue StructAddress(Expr expression, TypeRef expected)
         {
+            if (ArrayLocation(expression) is { } element && types.Kind(element.Type.Element) == TypeKind.Struct)
+            {
+                var value = new ArrayElementValue(Recover(element.Array, null), Index(element.Index), element.Type.Element, 0);
+                if (element.Offset == 0 && element.Type.Element.Equals(expected)) return new AddressValue(value);
+                var fields = StructPaths(element.Type.Element).Where(p => p.Offset == element.Offset && p.Type.Equals(expected)).ToArray();
+                if (fields is [var nested]) return new AddressValue(PathValue(value, nested.Path));
+            }
             var (root, offset, rest) = Split(expression);
             if (root is Symbol { Kind: SymbolKind.StaticFields } && rest.Count == 0
                 && Location(expression, types.Size(expected) * 8) is { } field && field.Type.Equals(expected))
