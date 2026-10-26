@@ -13,6 +13,7 @@ internal static class ClassInitializationFacts
 
     internal static bool Run(MachineFunction function)
     {
+        if (ClassInitializationReloads.Run(function)) return true;
         var points = function.Blocks.SelectMany(b => b.Statements.Select((s, i) => new Point(b, i, s))).ToArray();
         var initializers = points.Where(p => p.Statement is Call { Op: { Kind: OpKind.InitClass or OpKind.RunClassConstructor, Operand: DefinitionRef } }).ToArray();
         if (initializers.Length == 0) return false;

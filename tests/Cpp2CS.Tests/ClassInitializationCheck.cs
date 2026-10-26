@@ -43,6 +43,34 @@ internal static class ClassInitializationCheck
         var merge = new Block(64) { Statements = [read, Test(1)] };
         MachineFunction.AddEdge(start, left); MachineFunction.AddEdge(start, right); MachineFunction.AddEdge(left, merge); MachineFunction.AddEdge(right, merge);
         a.True(!ClassInitializationFacts.Run(Function(start, left, right, merge)), "只有一条入边初始化不满足支配关系");
+
+        MachineFunction ReloadGuard(bool checkedBefore = true, bool changedField = false, bool sideEffect = false, bool reverse = false)
+        {
+            var oldValue = new Variable(Storage.Gpr(1), 1);
+            var newValue = oldValue with { Version = 2 };
+            var subject = new Use(new(Storage.Gpr(0), 0), 64);
+            Expr Field(ulong offset) => new Load(new Binary(BinOp.Add, subject, Expr.C(offset, 64), 64), 64);
+            Call Check(Variable value) => new(8, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.NullCheck, null), Arguments = [new Use(value, 64)] };
+            var guard = new Block(0) { Statements = [new Define(4, oldValue, Field(16))] };
+            if (checkedBefore) guard.Statements.Add(Check(oldValue));
+            if (sideEffect) guard.Statements.Add(new Store(10, Expr.C(128, 64), Expr.C(1, 64)));
+            var load = new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassCctorFinishedOrNoCctor, 64), 64), 32);
+            guard.Statements.Add(new Branch(12, new Compare(reverse ? Cond.Eq : Cond.Ne, load, Expr.C(0, 32)), reverse ? 16UL : 32UL, reverse ? 32UL : 16UL));
+            var initialize = new Block(16) { Statements = [new Call(16, CallKind.Direct, Expr.C(0, 64))
+                { Op = new(OpKind.RunClassConstructor, type), Arguments = [klass] },
+                new Define(20, newValue, Field(changedField ? 24UL : 16UL)), Check(newValue), new Jump(28, 32)] };
+            var done = new Block(32) { Statements = [new Phi(32, new(Storage.Gpr(1), 3), [oldValue, newValue]), new Return(36)] };
+            MachineFunction.AddEdge(guard, done); MachineFunction.AddEdge(guard, initialize); MachineFunction.AddEdge(initialize, done);
+            return Function(guard, initialize, done);
+        }
+        var guarded = ReloadGuard();
+        a.True(ClassInitializationReloads.Run(guarded), "已有快照和判空时保留初始化后的同字段重读");
+        a.True(guarded.EntryBlock.Statements[^1] is Jump { Target: 16 }, "统一执行幂等类构造检查");
+        a.True(guarded.Blocks[2].Statements[0] is Phi { Sources.Length: 1 }, "汇合只保留重新读取的输入");
+        a.True(ClassInitializationReloads.Run(ReloadGuard(reverse: true)), "反向条件同样识别");
+        a.True(!ClassInitializationReloads.Run(ReloadGuard(checkedBefore: false)), "缺少原先判空不能增加抛出点");
+        a.True(!ClassInitializationReloads.Run(ReloadGuard(changedField: true)), "不能重读不同字段");
+        a.True(!ClassInitializationReloads.Run(ReloadGuard(sideEffect: true)), "字段快照与守卫之间有写入时拒绝");
         return a.Finish("class-initialization");
     }
 }
