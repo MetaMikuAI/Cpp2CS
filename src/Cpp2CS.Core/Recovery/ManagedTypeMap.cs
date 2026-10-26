@@ -36,6 +36,7 @@ public static class ManagedTypeMap
             NewObjectValue v => v with { Constructor = Method(v.Constructor), Arguments = v.Arguments.Select(Value).ToArray() },
             DelegateValue v => v with { DelegateType = (DefinitionRef)map(v.DelegateType), Target = Value(v.Target), Method = Method(v.Method) },
             BoxValue v => v with { Operand = Value(v.Operand), Boxed = map(v.Boxed), ObjectType = map(v.ObjectType) },
+            UnboxAddressValue v => new UnboxAddressValue(Value(v.Operand), map(v.Target)),
             IsInstValue v => v with { Operand = Value(v.Operand), Target = map(v.Target) },
             ArrayLengthValue v => v with { Array = Value(v.Array), Type = map(v.Type) },
             ArrayElementValue v => v with { Array = Value(v.Array), Index = Value(v.Index), Type = map(v.Type), Width = W(v.Type, map(v.Type), v.Width) },

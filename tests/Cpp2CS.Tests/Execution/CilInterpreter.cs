@@ -349,6 +349,16 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     stack.Push(StackValue.O(value.Bits != 0 && Types.IsAssignable(side.TypeOf(value.Bits), type) ? value.Bits : 0));
                     break;
                 }
+                case Code.Unbox:
+                {
+                    var instance = NotNull(Pop());
+                    var target = model.Type((TypeReference)operand);
+                    var actual = side.TypeOf(instance);
+                    if (!ManagedTypes.Underlying(actual).Equals(ManagedTypes.Underlying(target)))
+                        throw new CilThrow(Types.Corlib("System.InvalidCastException"));
+                    stack.Push(StackValue.I8(instance + RuntimeLayout.ObjectHeaderSize));
+                    break;
+                }
                 case Code.Ldftn:
                     // 原生委托 ctor 第三个参数为 Method<M>，与 ldftn 的方法身份一一对应。
                     stack.Push(StackValue.I8(world.MethodInfo(model.Method((MethodReference)operand))));
@@ -549,7 +559,12 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
     /// <summary>callvirt 按接收者的运行时类型选择实现（接口方法经 interface offsets）。</summary>
     private MethodRef Dispatch(CilSide side, ulong receiver, MethodRef target)
     {
-        if (side.TypeOf(receiver) is not DefinitionRef type) throw new Unsupported("数组上的虚调用");
+        var type = side.TypeOf(receiver) switch
+        {
+            DefinitionRef definition => definition,
+            ArrayRef { IsVector: true } when target.Method.Owner.FullName is "System.Array" or "System.Object" => Types.Corlib("System.Array"),
+            _ => throw new Unsupported("数组上的虚调用"),
+        };
         var slot = target.Method.Slot;
         if (target.Method.Owner.IsInterface)
         {
@@ -615,7 +630,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         }
         index.StructAbi.WriteBack(side, callee, ordinal, rawArguments);
         var returnType = callee.Method.ReturnType.Substitute(callee.TypeArguments, callee.MethodArguments);
-        return ManagedTypes.IsVoid(returnType) ? null : FromBytes(returnType, world.ReturnBytes(ordinal, returnType));
+        return ManagedTypes.IsVoid(returnType) ? null : FromBytes(returnType, side.EnumArrayReturn(callee, bits) ?? world.ReturnBytes(ordinal, returnType));
     }
 
     // —— 值的表示 ——

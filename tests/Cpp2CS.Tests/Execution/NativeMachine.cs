@@ -340,7 +340,7 @@ internal sealed partial class NativeMachine : IDisposable
         var returnType = callee.Method.ReturnType.Substitute(callee.TypeArguments, callee.MethodArguments);
         if (signature.Return is { } returned)
         {
-            var value = world.ReturnBytes(ordinal, returnType);
+            var value = side.EnumArrayReturn(callee, arguments) ?? world.ReturnBytes(ordinal, returnType);
             if (returned.Indirect) side.Write(GetPiece(returned.Pieces[0]), value);
             else PutLocation(returned, value);
         }
@@ -412,6 +412,10 @@ internal sealed partial class NativeMachine : IDisposable
                 Result(instance != 0 && world.Types.IsAssignable(side.TypeOf(instance), TypeOfKlass(X(1))) ? instance : 0);
                 break;
             }
+            case HelperKind.Unbox:
+                // Object::Unbox 只越过对象头；判空与类型检查由调用方完成。
+                Result(X(0) + RuntimeLayout.ObjectHeaderSize);
+                break;
             case HelperKind.IsAssignableFrom:
                 Result(world.Types.IsAssignable(TypeOfKlass(X(1)), TypeOfKlass(X(0))) ? 1UL : 0);
                 break;

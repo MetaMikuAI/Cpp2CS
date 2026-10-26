@@ -26,6 +26,13 @@ public sealed partial class MethodRecovery
             return true;
         }
 
+        [ArgumentRule(5)]
+        private ManagedValue? TypeHandleArgument(AbiValue parameter, ArgumentSite site) =>
+            parameter.Type.Equals(types.RuntimeTypeHandle) && parameter.Passing == Passing.Registers
+            && parameter.Pieces is [{ Width: 64, Offset: 0 } piece] && site.Registers.TryGetValue(piece.Register, out var value)
+            && Expand(value) is Symbol { Kind: SymbolKind.Type, Value: TypeRef type }
+                ? new TypeHandleValue(type, types.RuntimeTypeHandle, 64) : null;
+
         [ArgumentRule(10)]
         private ManagedValue? RegisterStructArgument(AbiValue parameter, ArgumentSite site) => !RegisterStruct(parameter) ? null
             : Compose(parameter, p => site.Registers.TryGetValue(p.Register, out var e) ? e : throw Fail(site.Call.Address, $"调用 缺少结构体片 {p.Register}"));

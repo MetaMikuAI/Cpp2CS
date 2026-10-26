@@ -222,6 +222,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             }
             RefreshOperands();
             if (FreshArrayElementClasses()) Cleanup();
+            if (EnumElementClasses()) Cleanup();
             RefreshInterfaceOperands();
             if (!owner.AuditLegacyDelegateCalls && DelegateCallNormalizer.Run(facts, function, Result)) Cleanup();
             if (!owner.AuditRawManagedThrows && ManagedThrowNormalizer.Run(facts, function, Result)) Cleanup();
@@ -1443,6 +1444,48 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                         Arguments = [value, new Symbol(SymbolKind.Class, arrayType.Element)] };
                     changed = true;
                 }
+            return changed;
+        }
+
+        /// <summary>Enum.GetValues 的数组枚举器只产生该枚举的装箱值；不把任意 IEnumerator 当作同类来源。</summary>
+        private bool EnumElementClasses()
+        {
+            var results = All.OfType<Call>().Where(c => c.Defines.Length > 0).ToDictionary(c => c.Defines[0]);
+            Call? Source(Expr value) => defs.Expand(value) is Use u ? results.GetValueOrDefault(u.Variable) : null;
+            bool Named(Call? call, string ownerName, string name) => call is { Op: null, Target: Const target }
+                && facts.EntriesAt(target.Value).Any(e => e.Method is { } m && m.Method.Owner.FullName == ownerName && m.Method.Name == name);
+            TypeRef? Element(Expr value)
+            {
+                if (Source(value) is not { Op: { Kind: OpKind.CallInterface, Operand: (DefinitionRef { Definition.FullName: "System.Collections.IEnumerator" }, 1) }, Arguments: [var iterator, ..] }) return null;
+                var enumerator = Source(iterator);
+                if (!Named(enumerator, "System.Array", "GetEnumerator") || enumerator!.Arguments.Length == 0) return null;
+                var array = Source(enumerator.Arguments[0]);
+                if (!Named(array, "System.Enum", "GetValues") || array!.Arguments.Length == 0) return null;
+                var type = Source(array.Arguments[0]);
+                return Named(type, "System.Type", "GetTypeFromHandle") && type!.Arguments.Length > 0
+                    && defs.Expand(type.Arguments[0]) is Symbol { Kind: SymbolKind.Type, Value: DefinitionRef { Definition.IsEnum: true } item } ? item : null;
+            }
+            var changed = false;
+            TypeRef? ElementClass(Expr expression)
+            {
+                if (defs.Expand(expression) is not Load { Width: 64, Address: var address }) return null;
+                return Split(address) switch
+                {
+                    (Load { Width: 64, Address: var instance }, RuntimeLayout.ClassElementClass) => Element(instance),
+                    (Symbol { Kind: SymbolKind.Class, Value: DefinitionRef { Definition.IsEnum: true } type }, RuntimeLayout.ClassElementClass) => type,
+                    _ => null,
+                };
+            }
+            Expr? Replace(Expr expression)
+            {
+                if (expression is not Compare { Cond: Cond.Eq or Cond.Ne } compare
+                    || ElementClass(compare.Left) is not { } left || !left.Equals(ElementClass(compare.Right))) return null;
+                changed = true;
+                return Expr.C(compare.Cond == Cond.Eq ? 1UL : 0, 1);
+            }
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                    block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e, Replace));
             return changed;
         }
 

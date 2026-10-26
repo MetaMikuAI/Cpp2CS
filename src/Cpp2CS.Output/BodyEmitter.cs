@@ -152,6 +152,10 @@ public sealed partial class BodyEmitter
                 if (types.Kind(box.Boxed) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Struct)) return $"装箱 类型 {box.Boxed}";
                 if (box.Boxed is DefinitionRef { Definition.FullName: "System.Nullable" }) return "装箱 Nullable 尚未支持";
                 break;
+            case UnboxAddressValue unbox:
+                if (!CanAccess(unbox.Target)) return $"访问权限 类型 {unbox.Target}";
+                if (unbox.Target is not DefinitionRef { Definition.IsEnum: true }) return $"拆箱 类型 {unbox.Target} 尚未支持";
+                break;
             case ArrayLengthValue length:
                 if (length.Array.Type is not ArrayRef { IsVector: true }) return "数组 长度需要一维向量类型";
                 break;

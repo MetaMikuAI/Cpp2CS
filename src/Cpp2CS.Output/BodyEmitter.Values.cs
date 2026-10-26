@@ -56,6 +56,7 @@ public sealed partial class BodyEmitter
             case StringValue text: il.Emit(OpCodes.Ldstr, text.Text); break;
             case TypeHandleValue handle: il.Emit(OpCodes.Ldtoken, TypeReference(handle.Target)); break;
             case BoxValue box: Value(box.Operand); il.Emit(OpCodes.Box, TypeReference(box.Boxed)); break;
+            case UnboxAddressValue unbox: Value(unbox.Operand); il.Emit(OpCodes.Unbox, TypeReference(unbox.Target)); break;
             case IsInstValue test: Value(test.Operand); il.Emit(OpCodes.Isinst, TypeReference(test.Target)); break;
             case NewObjectValue created:
             {
@@ -80,6 +81,10 @@ public sealed partial class BodyEmitter
             case IndirectValue i: Value(i.Address); il.Emit(OpCodes.Ldobj, TypeReference(i.Type)); break;
             case ComposedValue c: Compose(c); break;
             case FieldValue f:
+                // 枚举的 value__ 是整个值的底层表示；以 ldobj 读取，避免 C# 泄漏不可访问的字段名。
+                if (f.Field.Field is { Owner.IsEnum: true, Name: "value__" } && f.Receiver.Type is ByRefRef enumReference
+                    && enumReference.Element.Equals(f.Field.DeclaringType))
+                { Value(f.Receiver); il.Emit(OpCodes.Ldobj, TypeReference(enumReference.Element)); break; }
                 // 值类型的访问器是实例方法：this 是该值的地址（ldloca/ldflda），不能先读出值。
                 if (f.Accessor is { Method.Method.Owner.IsValueType: true } structGetter) { Value(f.Receiver); AccessorCall(structGetter); break; }
                 Value(f.Receiver is AddressValue address ? address.Target : f.Receiver);

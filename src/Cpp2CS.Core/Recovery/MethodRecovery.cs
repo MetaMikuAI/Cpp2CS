@@ -1450,6 +1450,9 @@ public sealed partial class MethodRecovery
                         new ConstantValue(0, type, 64), types.Boolean);
                     output.Add(new ManagedAssignment(address, Local(checkedValue), Coerce(matches, types.UInt64, address)));
                     return;
+                case { Kind: OpKind.Unbox, Operand: DefinitionRef { Definition.IsEnum: true } type } when call.Defines.FirstOrDefault() is { } created:
+                    output.Add(new ManagedAssignment(address, Local(created), new UnboxAddressValue(RecoverAs(call.Arguments[0], types.Object, address), type)));
+                    return;
                 case { Kind: OpKind.IsInst, Operand: TypeRef type } when call.Defines.FirstOrDefault() is { } created:
                     output.Add(new ManagedAssignment(address, Local(created), new IsInstValue(Coerce(Recover(call.Arguments[0], types.Object), types.Object, address), type)));
                     return;

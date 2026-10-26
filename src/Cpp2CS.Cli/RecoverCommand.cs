@@ -342,7 +342,7 @@ internal static class RecoverCommand
                 {
                     FieldValue => "field-load", StaticFieldValue => "static-load", NewObjectValue => "newobj", DelegateValue => "delegate-new", NewArrayValue => "newarr",
                     ArrayElementValue => "array-load", ArrayLengthValue => "array-length", StringValue => "string", BoxValue => "box",
-                    IsInstValue => "isinst", BinaryValue => "arith", ConversionValue => "convert", ChoiceValue => "select", ComparisonValue => "compare",
+                    IsInstValue => "isinst", UnboxAddressValue => "unbox", BinaryValue => "arith", ConversionValue => "convert", ChoiceValue => "select", ComparisonValue => "compare",
                     _ => null,
                 };
                 if (feature is not null) features.Add(feature);

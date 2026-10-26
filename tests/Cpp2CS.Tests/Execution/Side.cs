@@ -13,7 +13,7 @@ internal sealed record TraceEvent(string Text, IReadOnlyDictionary<ulong, byte> 
 /// 分配规则两侧相同：Heap 区按 16 字节对齐顺序分配、内容为 0、写入 klass；异常类型的对象分配在异常区，不计入比较也不产生事件。
 /// 异常类型的无参构造调用不产生事件（原生侧的判空、越界检查由 helper 直接抛出，没有构造调用）。
 /// </summary>
-internal abstract class Side(World world)
+internal abstract partial class Side(World world)
 {
     private readonly Dictionary<ulong, byte> written = new();
     private ulong heapTop = World.HeapBase;

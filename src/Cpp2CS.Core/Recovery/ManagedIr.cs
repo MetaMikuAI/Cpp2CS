@@ -24,6 +24,8 @@ public enum DelegateBinding { Static, ClosedInstance, VirtualInstance }
 public sealed record DelegateValue(DefinitionRef DelegateType, ManagedValue Target, MethodRef Method, DelegateBinding Binding) : ManagedValue(DelegateType, 64);
 /// <summary>把 Operand 按 Boxed 类型装箱（Boxed 决定对象的运行时类型，与 Operand 的整数符号无关）。</summary>
 public sealed record BoxValue(ManagedValue Operand, TypeRef Boxed, TypeRef ObjectType) : ManagedValue(ObjectType, 64);
+/// <summary>拆箱后的托管地址；保留 unbox 的判空与类型检查。</summary>
+public sealed record UnboxAddressValue(ManagedValue Operand, TypeRef Target) : ManagedValue(new ByRefRef(Target), 64);
 /// <summary>isinst：Operand 是 Target 类型（或其子类、实现）时为 Operand，否则为 null。</summary>
 public sealed record IsInstValue(ManagedValue Operand, TypeRef Target) : ManagedValue(Target, 64);
 public sealed record ArrayLengthValue(ManagedValue Array, TypeRef Type, int Width) : ManagedValue(Type, Width);
@@ -119,7 +121,7 @@ public static class ManagedValues
         IndirectValue i => [i.Address],
         ComposedValue c => c.Leaves.Select(l => l.Value),
         NewArrayValue a => [a.Length], ArrayLengthValue a => [a.Array], ArrayElementValue a => [a.Array, a.Index],
-        BoxValue b => [b.Operand], IsInstValue i => [i.Operand], NewObjectValue n => n.Arguments,
+        BoxValue b => [b.Operand], UnboxAddressValue u => [u.Operand], IsInstValue i => [i.Operand], NewObjectValue n => n.Arguments,
         DelegateValue d => [d.Target],
         BinaryValue b => [b.Left, b.Right], UnaryValue u => [u.Operand], ConversionValue c => [c.Operand],
         ComparisonValue c => [c.Left, c.Right], ChoiceValue c => [c.Condition, c.True, c.False],
@@ -143,6 +145,7 @@ public static class ManagedValues
         ArrayLengthValue v => v with { Array = f(v.Array) },
         ArrayElementValue v => v with { Array = f(v.Array), Index = f(v.Index) },
         BoxValue v => v with { Operand = f(v.Operand) },
+        UnboxAddressValue v => v with { Operand = f(v.Operand) },
         IsInstValue v => v with { Operand = f(v.Operand) },
         NewObjectValue v => v with { Arguments = v.Arguments.Select(f).ToArray() },
         DelegateValue v => v with { Target = f(v.Target) },
