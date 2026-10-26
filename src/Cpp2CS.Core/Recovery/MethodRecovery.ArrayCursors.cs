@@ -18,6 +18,21 @@ public sealed partial class MethodRecovery
                 runtime.Add(cursor.Pointer);
                 runtime.UnionWith(cursor.AddressCopies);
             }
+            bool changed;
+            do
+            {
+                changed = false;
+                foreach (var (variable, expression) in values)
+                {
+                    if (arrayCursors.ContainsKey(variable) || expression is not Binary { Op: BinOp.Add }
+                        || ExprMap.Walk(expression).Any(e => e is not (Use or Const or Ir.Binary or Ir.Convert))
+                        || ArrayLocation(expression) is null) continue;
+                    // 只展开纯地址计算；数组引用的字段读取仍使用原 SSA 快照。
+                    arrayCursors[variable] = expression;
+                    runtime.Add(variable);
+                    changed = true;
+                }
+            } while (changed);
             if (arrayCursors.Count > 0) InferTypes();
         }
     }
