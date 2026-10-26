@@ -31,9 +31,33 @@ internal static class ArrayCursorRecognition
             if (value is Use same && same.Variable == target) return 0;
             return value is Binary { Op: BinOp.Add, Left: Use previous, Right: Const amount } && previous.Variable == target ? amount.Signed : null;
         }
-        (Expr Root, long Offset, int Size)? Seed(Variable source, Block loop)
+        int? OffsetSize(Phi pointer)
+        {
+            var sizes = new HashSet<int>();
+            bool AddressUse(Expr expression)
+            {
+                if (expression is Binary { Op: BinOp.Add } sum)
+                {
+                    var other = sum.Left is Use left && left.Variable == pointer.Target ? sum.Right
+                        : sum.Right is Use right && right.Variable == pointer.Target ? sum.Left : null;
+                    if (other is not null && elementSize(other) is > 0 and var size) { sizes.Add(size); return true; }
+                }
+                return expression is not Use use || use.Variable != pointer.Target
+                    ? ExprMap.Children(expression).All(AddressUse) : false;
+            }
+            foreach (var statement in function.Blocks.SelectMany(b => b.Statements))
+            {
+                if (statement == pointer || statement is Define d && pointer.Sources.Contains(d.Target) && Step(d.Target, pointer.Target) is not null) continue;
+                if (statement is Phi phi && phi.Sources.Contains(pointer.Target) || !ExprMap.Operands(statement).All(AddressUse)) return null;
+            }
+            return sizes.Count == 1 ? sizes.Single() : null;
+        }
+        (Expr Root, long Offset, int Size)? Seed(Variable source, Block loop, Phi pointer)
         {
             var value = Expand(new Use(source, 64));
+            // 数组根可在循环内重读；常量字节偏移只在全部使用都是数组加法时认回。
+            if (value is Const initial && initial.Signed >= Facts.RuntimeLayout.ArrayData && OffsetSize(pointer) is { } element)
+                return (Expr.C(0, 64), initial.Signed, element);
             long offset = 0;
             while (value is Binary { Op: BinOp.Add, Right: Const constant } addition) { offset += constant.Signed; value = addition.Left; }
             if (value is not Use root || elementSize(root) is not { } size || size <= 0 || offset < Facts.RuntimeLayout.ArrayData
@@ -64,7 +88,7 @@ internal static class ArrayCursorRecognition
                     }
                     continue;
                 }
-                if (Seed(pointer.Sources[i], block) is not { } seed || Expand(new Use(counter.Sources[i], 64)) is not Const initial
+                if (Seed(pointer.Sources[i], block, pointer) is not { } seed || Expand(new Use(counter.Sources[i], 64)) is not Const initial
                     || size != 0 && size != seed.Size) { valid = false; break; }
                 var bias = (Int128)seed.Offset - (Int128)initial.Signed * seed.Size;
                 if (bias < long.MinValue || bias > long.MaxValue || root is not null && (root != seed.Root || origin != (long)bias)) { valid = false; break; }
@@ -79,6 +103,9 @@ internal static class ArrayCursorRecognition
                 foreach (var use in ExprMap.Walk(value).OfType<Use>()) Collect(use.Variable);
             }
             foreach (var source in pointer.Sources) Collect(source);
+            if (root is Const && function.Blocks.SelectMany(b => b.Statements).Any(s => s != pointer
+                && !(s is Define d && copies.Contains(d.Target)) && (s is Phi p ? p.Sources.Any(copies.Contains)
+                    : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => copies.Contains(u.Variable))))) continue;
             var scaled = new Binary(BinOp.Mul, new Use(counter.Target, 64), Expr.C((ulong)size, 64), 64);
             yield return new(pointer.Target, new Binary(BinOp.Add, new Binary(BinOp.Add, root, Expr.C(unchecked((ulong)origin), 64), 64), scaled, 64), copies);
             break;

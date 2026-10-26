@@ -46,6 +46,23 @@ internal static class ArrayCursorCheck
         a.Equal(0, Read(Loop(increment: 0)).Length, "指针变化而下标不变时拒绝");
         a.Equal(0, Read(Loop(swap: true)).Length, "前驱边必须一一对应");
         a.Equal(0, Read(Loop(earlyRoot: false)).Length, "循环内重建的数组不能当作固定根");
+        MachineFunction OffsetLoop(bool scalarUse = false, bool copyEscapes = false, long stride = 16)
+        {
+            var function = Loop(first: 0, stride: stride);
+            var initial = (Define)function.Blocks[0].Statements[0];
+            function.Blocks[0].Statements[0] = initial with { Value = Expr.C(32, 64) };
+            function.Blocks[1].Statements.Add(new Define(0x101c, new Variable(Storage.Gpr(3), 1),
+                new Binary(BinOp.Add, new Use(array, 64), new Use(pointer, 64), 64)));
+            if (scalarUse) function.Blocks[1].Statements.Add(new Return(0x1020) { Value = new Use(pointer, 64) });
+            if (copyEscapes) function.Blocks[1].Statements.Add(new Return(0x1020) { Value = new Use(initial.Target, 64) });
+            return function;
+        }
+        var offset = Read(OffsetLoop());
+        a.Equal(1, offset.Length, "字节偏移与元素下标成对递增");
+        a.True(offset.Single().Address is Binary { Left: Binary { Left: Const { Value: 0 }, Right: Const { Value: 32 } } }, "保留数组头偏移");
+        a.Equal(0, Read(OffsetLoop(scalarUse: true)).Length, "偏移作为普通数值返回时不消去");
+        a.Equal(0, Read(OffsetLoop(copyEscapes: true)).Length, "初值副本仍被使用时不消去");
+        a.Equal(0, Read(OffsetLoop(stride: 8)).Length, "字节步长不符时拒绝");
         return a.Finish("array-cursors");
     }
 }
