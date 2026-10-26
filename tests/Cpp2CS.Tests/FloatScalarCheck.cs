@@ -74,6 +74,23 @@ internal static class FloatScalarCheck
             a.True(copy.Statements[0] is Define { Value: Load }, "低位投影保留原加载及位置");
             a.True(copy.Statements[^1] is Return { Value: Use u } && u.Variable == (width <= 32 ? source : narrowed), "只穿透完全保留所读取低位的扩展与截断");
         }
+        int ReturnedPhi(int resultWidth, int readWidth = 32)
+        {
+            var result = new Variable(Storage.Vec(0), 2);
+            var joined = new Variable(Storage.Vec(1), 2);
+            var first = new Block(0x3000) { Statements = [new Define(0x3000, v,
+                new Ir.Convert(ConvKind.ZeroExtend, Expr.C(0, 32), 128))] };
+            var called = new Block(0x3010) { Statements = [new Call(0x3010, CallKind.Indirect, Expr.C(0x4000, 64))
+                { Results = [Storage.Vec(0)], Defines = [result] }] };
+            var merge = new Block(0x3020) { Statements = [new Phi(0x3020, joined, [v, result]),
+                new Return(0x3024) { Value = new Use(joined, readWidth) }] };
+            return ScalarVectorNarrowing.Run([first, called, merge], Unknown,
+                _ => resultWidth > 0 ? new Dictionary<Storage, int> { [Storage.Vec(0)] = resultWidth } : []);
+        }
+        a.Equal(1, ReturnedPhi(32), "已知调用返回位宽可与常量分支汇合");
+        a.Equal(0, ReturnedPhi(0), "未知调用返回值不提供宽度证明");
+        a.Equal(0, ReturnedPhi(64), "分支返回位宽不一致时拒绝");
+        a.Equal(0, ReturnedPhi(32, 128), "汇合后仍读取高位时拒绝");
         return a.Finish("float-unit");
     }
 }

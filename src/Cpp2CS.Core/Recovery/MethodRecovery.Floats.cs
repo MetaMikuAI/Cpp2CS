@@ -17,9 +17,17 @@ public sealed partial class MethodRecovery
             var widths = new Dictionary<Storage, int>();
             MethodRef[] methods;
             // 接口/虚调用：L2 的调用把全部实参寄存器都列为来源；按被调方法签名，不是浮点参数的向量寄存器只是透传（宽度 0：不是实参，不算使用）。
-            if (call.Op is { Kind: OpKind.CallInterface or OpKind.CallVirtual or OpKind.CallGenericVirtual } && !returned && Callee(call) is { } indirect
+            if (call.Op is { Kind: OpKind.CallInterface or OpKind.CallVirtual or OpKind.CallGenericVirtual } && Callee(call) is { } indirect
                 && owner.abi.Classify(indirect, out _) is { } indirectSignature)
             {
+                if (returned)
+                {
+                    if (indirectSignature.Return is { Passing: Passing.Registers, Pieces.Length: > 0 } result
+                        && result.Pieces.All(p => p.Register.Bank == Bank.Vec)
+                        && types.Kind(result.Type) is TypeKind.Float or TypeKind.Double or TypeKind.Struct)
+                        foreach (var piece in result.Pieces) widths[piece.Register] = piece.Width;
+                    return widths;
+                }
                 foreach (var register in call.Sources.Where(s => s.Bank == Bank.Vec))
                     widths[register] = indirectSignature.Arguments.FirstOrDefault(a => a.Passing == Passing.Registers && a.Pieces.Length == 1 && a.Pieces[0].Register == register
                         && types.Kind(a.Type) is TypeKind.Float or TypeKind.Double) is { } parameter ? parameter.Pieces[0].Width
