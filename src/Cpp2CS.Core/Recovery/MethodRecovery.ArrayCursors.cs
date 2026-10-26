@@ -11,17 +11,18 @@ public sealed partial class MethodRecovery
 
         private void PrepareArrayCursors()
         {
-            foreach (var cursor in ArrayCursorRecognition.Read(function,
-                expression => TypeOfAddressBase(expression) is ArrayRef { IsVector: true } array ? types.Size(array.Element) : null))
-            {
-                arrayCursors[cursor.Pointer] = cursor.Address;
-                runtime.Add(cursor.Pointer);
-                runtime.UnionWith(cursor.AddressCopies);
-            }
             bool changed;
             do
             {
                 changed = false;
+                foreach (var cursor in ArrayCursorRecognition.Read(function,
+                    expression => TypeOfAddressBase(expression) is ArrayRef { IsVector: true } array ? types.Size(array.Element) : null))
+                {
+                    if (!arrayCursors.TryAdd(cursor.Pointer, cursor.Address)) continue;
+                    runtime.Add(cursor.Pointer);
+                    runtime.UnionWith(cursor.AddressCopies);
+                    changed = true;
+                }
                 foreach (var (variable, expression) in values)
                 {
                     if (arrayCursors.ContainsKey(variable) || expression is not Binary { Op: BinOp.Add }
@@ -32,8 +33,8 @@ public sealed partial class MethodRecovery
                     runtime.Add(variable);
                     changed = true;
                 }
+                if (changed) InferTypes();
             } while (changed);
-            if (arrayCursors.Count > 0) InferTypes();
         }
     }
 }

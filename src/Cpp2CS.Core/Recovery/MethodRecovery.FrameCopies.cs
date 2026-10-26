@@ -15,6 +15,16 @@ public sealed partial class MethodRecovery
 
         private IEnumerable<CopyRange> CopyRanges(Expr address, int width)
         {
+            if (ArrayLocation(address) is { } element && types.Kind(element.Type.Element) == TypeKind.Struct
+                && element.Offset + width / 8 <= types.Size(element.Type.Element))
+            {
+                var item = new ArrayElementValue(Recover(element.Array, null), Index(element.Index), element.Type.Element, 0);
+                yield return new(element.Type.Element, new AddressValue(item), element.Offset);
+                foreach (var path in StructPaths(item.Type).Where(p => types.Kind(p.Type) == TypeKind.Struct
+                    && p.Offset <= element.Offset && element.Offset + width / 8 <= p.Offset + types.Size(p.Type)))
+                    yield return new(path.Type, new AddressValue(PathValue(item, path.Path)), element.Offset - path.Offset);
+                yield break;
+            }
             var (root, offset, rest) = Split(address);
             if (root is Symbol { Kind: SymbolKind.StaticFields, Value: DefinitionRef owner } && rest.Count == 0 && facts.Layouts.Of(owner) is { } layout)
             {
