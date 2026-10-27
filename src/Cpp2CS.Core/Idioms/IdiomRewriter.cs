@@ -246,6 +246,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             while (FiniteConditions.Simplify(function)) Cleanup();
             if (CheckedReferenceValues()) Cleanup();
             if (SuccessfulTypeCheckValues()) Cleanup();
+            if (CheckedClassValues.Run(function, RawDefinition, Fresh)) Cleanup();
             if (ZeroPhiSources()) Cleanup();
             if (EqualAddressPhis()) Cleanup();
             if (StaticFieldPhiLoads()) Cleanup();
@@ -491,21 +492,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         }
 
         private void RefineReferenceUses(Block start, int position, Use obj, Variable cast, Dominators dominators)
-        {
-            foreach (var block in function.Blocks)
-                for (var i = 0; i < block.Statements.Count; i++)
-                {
-                    if (block.Statements[i] is Phi phi)
-                    {
-                        var sources = phi.Sources.Select((source, at) => source == obj.Variable
-                            && dominators.Dominates(start.Index, block.Predecessors[at].Index) ? cast : source).ToArray();
-                        block.Statements[i] = phi with { Sources = sources };
-                    }
-                    else if (dominators.Dominates(start.Index, block.Index) && (block != start || i >= position))
-                        block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e,
-                            part => part is Use use && use.Variable == obj.Variable ? new Use(cast, use.Width) : null));
-                }
-        }
+            => CheckedClassValues.Refine(function, start, position, obj, cast, dominators);
 
         // null 与通过 castclass 检查的路径汇合后，值具有目标引用类型；后续 phi 也必须保留这个类型。
         private bool CheckedReferenceValues()
