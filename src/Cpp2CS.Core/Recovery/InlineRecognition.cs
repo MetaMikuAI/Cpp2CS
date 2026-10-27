@@ -280,6 +280,17 @@ public static class InlineRecognition
     private static bool SameShape(ManagedValue a, ManagedValue b) =>
         a.GetType() == b.GetType() && ManagedValues.Map(a, c => new ConstantValue(0x5EED, c.Type, c.Width)).Equals(ManagedValues.Map(b, c => new ConstantValue(0x5EED, c.Type, c.Width)));
 
+    private static Dictionary<Variable, ManagedValue> ArgumentCopies(ManagedBody body)
+    {
+        var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
+        var excluded = statements.SelectMany(ManagedValues.Edges).SelectMany(e => e.Copies).Select(c => c.Target.Variable)
+            .Concat(statements.OfType<ManagedCall>().Where(c => c.Result is not null).Select(c => c.Result!.Variable))
+            .Concat(statements.SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).OfType<AddressValue>()
+                .Select(a => a.Target).OfType<LocalValue>().Select(l => l.Variable)).ToHashSet();
+        return statements.OfType<ManagedAssignment>().GroupBy(a => a.Target.Variable)
+            .Where(g => g.Count() == 1 && !excluded.Contains(g.Key)).ToDictionary(g => g.Key, g => g.Single().Value);
+    }
+
     // ---------- 匹配 ----------
 
     private sealed class Matcher(ManagedBody caller, Dictionary<ulong, ManagedBlock> blocks, ManagedBlock startBlock, int startIndex, Callee calleeMethod, TypeRef boolean, int variable)
@@ -290,6 +301,7 @@ public static class InlineRecognition
         private readonly int index = startIndex;
         private readonly Dictionary<ulong, ManagedBlock> callerBlocks = blocks;
         private readonly Dictionary<ulong, ManagedBlock> calleeBlocks = calleeMethod.Pattern.Blocks.ToDictionary(b => b.Address);
+        private readonly Dictionary<Variable, ManagedValue> booleanCopies = ArgumentCopies(caller);
         /// <summary>被调方法的参数（-1 为 this）→ 调用者中的值。</summary>
         private readonly Dictionary<int, ManagedValue> arguments = new();
         private readonly HashSet<ulong> region = [];
@@ -423,7 +435,7 @@ public static class InlineRecognition
                         for (var k = 0; k < c.Invocation.Arguments.Count; k++)
                             if (!Same(inner, outer, c.Invocation.Arguments[k], d.Invocation.Arguments[k], valuation)) { failure += $"（实参 {k} 不同）"; return false; }
                         // 调用者丢弃了结果（如 await 不取值时内联的 GetResult）：被调方的结果绑定为一个不透明的叶子，出口不能依赖它。
-                        if (c.Result is null && d.Result is not null) { failure += "（结果有无不同）"; return false; }
+                        // 包装方法可丢弃内部调用结果；调用点保留的局部仍计入 internals，后续用途及区域外逃逸由出口检查约束。
                         if (c.Result is { } cv) results[cv.Variable] = d.Result ?? new LocalValue(new Variable(Storage.Temp(-1000 - cv.Variable.Version), 1), cv.Type, cv.Width);
                         break;
                     case (StoreItem c, StoreItem d):
@@ -456,10 +468,17 @@ public static class InlineRecognition
         {
             var resolved = outer.Resolve(value);
             var raw = inner.Resolve(pattern, bind: false);
+            // bool 参数的 AND 1、扩展及截断是恒等复制；调用者可能把复制提前到匹配区域之外。
+            if (raw.Type.Equals(BooleanType) && resolved.Type.Equals(BooleanType)
+                && BooleanCopies.Argument(raw) is { } parameter && BooleanCopies.Argument(resolved, booleanCopies) is { } argument)
+            {
+                raw = parameter;
+                resolved = argument;
+            }
             if (Contains(raw, IsParameter))
             {
                 if (!Unify(raw, resolved, arguments)) return false;
-                raw = inner.Resolve(pattern);
+                raw = inner.Resolve(raw);
             }
             if (structural || value.Width == 0 || value.Type is ByRefRef) return raw.Equals(resolved);
             if (raw.Width != resolved.Width && !(raw.Width <= 8 && resolved.Width <= 8)) return false;
