@@ -164,6 +164,17 @@ public static class Fold
         return new Insert(target, value, low);
     }
 
+    /// <summary>普通整数的位段替换；向量继续保留逐道表示。</summary>
+    public static Expr? ScalarInsert(Insert insert)
+    {
+        var width = insert.Width;
+        if (width is not (32 or 64) || insert.Low < 0 || insert.Value.Width <= 0
+            || insert.Low > width - insert.Value.Width) return null;
+        var mask = Mask(insert.Value.Width) << insert.Low;
+        return Binary(BinOp.Or, Binary(BinOp.And, insert.Base, C(~mask, width), width),
+            Binary(BinOp.Shl, Convert(ConvKind.ZeroExtend, insert.Value, width), C((ulong)insert.Low, width), width), width);
+    }
+
     public static Expr Compare(Cond cond, Expr left, Expr right)
     {
         if (left is Const a && right is Const b && left.Width <= 64)

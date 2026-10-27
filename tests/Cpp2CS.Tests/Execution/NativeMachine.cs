@@ -455,6 +455,13 @@ internal sealed partial class NativeMachine : IDisposable
                 Result(side.New(type, world.Index.Facts.Layouts.Of(type)!.InstanceSize));
                 break;
             }
+            case HelperKind.Import when helper.Detail == "modf":
+            {
+                var fraction = NativeMathLibrary.Modf(BitConverter.Int64BitsToDouble(unchecked((long)uc.Reg(Unicorn.D(0)))), out var integral);
+                side.Write(X(0), BitConverter.GetBytes(integral));
+                uc.SetReg(Unicorn.D(0), unchecked((ulong)BitConverter.DoubleToInt64Bits(fraction)));
+                break;
+            }
             case HelperKind.Import when helper.Detail is "memcpy" or "memmove":
             {
                 var data = new byte[X(2)];

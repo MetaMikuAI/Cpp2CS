@@ -82,7 +82,7 @@ public sealed partial class MethodRecovery
         }
 
         /// <summary>覆盖整个向量的逐道计算保留为独立叶子，按原定义顺序快照。</summary>
-        private Fragment InsertedFragment(Insert insert)
+        private ManagedValue InsertedFragment(Insert insert)
         {
             var pieces = new List<(int Low, Expr Value)>();
             Expr current = insert;
@@ -91,6 +91,8 @@ public sealed partial class MethodRecovery
                 pieces.Add((part.Low, part.Value));
                 current = part.Base;
             }
+            if ((current is not Const { Value: 0 } || pieces.Any(p => p.Value.Width is not (32 or 64)))
+                && Fold.ScalarInsert(insert) is { } scalar) return Recover(scalar, null);
             if (current is not Const { Value: 0 } || insert.Width is not (32 or 64 or 128)) throw Fail(0, "向量 插入基值或位宽尚未支持");
             var cursor = 0;
             var leaves = new List<Part>();

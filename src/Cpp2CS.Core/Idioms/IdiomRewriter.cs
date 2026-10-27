@@ -228,6 +228,13 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             RefreshOperands();
             if (ThreadStaticBlocks()) Cleanup();
             if (FrameMemoryNormalizer.Run(function, Fresh)) Cleanup();
+            if (MathImportNormalizer.Run(function, Fresh))
+            {
+                if (Lifting.FunctionLifter.PromoteFrameSlots && FrameSlotPromotion.Run(function) > 0)
+                    SsaBuilder.Build(function, Dominators.Compute(function), s => s.Bank == Bank.Stack,
+                        owner.calls, owner.inputLifter.Machine.Convention.StackPointer);
+                Cleanup();
+            }
             if (FreshArrayElementClasses()) Cleanup();
             if (DynamicArrayElementChecks()) Cleanup();
             if (EnumElementClasses()) Cleanup();

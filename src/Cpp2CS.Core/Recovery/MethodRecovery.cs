@@ -869,7 +869,7 @@ public sealed partial class MethodRecovery
                         foreach (var candidateType in ReceiverTypes(call, receiver))
                             if (candidateType is DefinitionRef { Arguments.Count: 0 } receiverType && owner.CopyOf(target.Value, receiverType.Definition) is { } copy)
                                 return new MethodRef(copy, [], []);
-                        return null;
+                        return ConversionCopy(call, target.Value);
                     }
                     var symbolic = call.Arguments.Select(Expand).OfType<Symbol>().Where(s => s.Kind == SymbolKind.Method).Select(s => (MethodRef)s.Value)
                         .FirstOrDefault(m => candidates.Contains(m.Method));

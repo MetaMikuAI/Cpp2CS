@@ -22,6 +22,23 @@ internal static class FoldInsertCheck
         a.Equal<Expr>(unknown, Fold.Simplify(unknown), "非常量保留原位段表达式");
         var vector = new Insert(Expr.C(0, 128), Expr.C(7, 64), 64);
         a.Equal<Expr>(vector, Fold.Simplify(vector), "高于 64 位的向量不截成 ulong 常量");
+        foreach (var width in new[] { 32, 64 })
+        foreach (var bits in new[] { 1, 8, 16, 32 })
+        foreach (var low in new[] { 0, width - bits }.Distinct())
+        {
+            var insert = new Insert(new Read(Storage.Gpr(0), width), new Read(Storage.Gpr(1), bits), low);
+            var scalar = Fold.ScalarInsert(insert)!;
+            foreach (var basis in new[] { 0UL, ulong.MaxValue, 0x123456789abcdef0UL })
+            foreach (var value in new[] { 0UL, ulong.MaxValue, 0xfedcba9876543210UL })
+            {
+                var evaluator = new Evaluator();
+                evaluator.Registers[Storage.Gpr(0)] = basis;
+                evaluator.Registers[Storage.Gpr(1)] = value;
+                a.Equal(evaluator.Eval(insert), evaluator.Eval(scalar), "整数位段替换保留未写入的位");
+                a.True(evaluator.Failure is null, "整数位段可求值");
+            }
+        }
+        a.True(Fold.ScalarInsert(vector) is null, "向量不按整数打包");
         return a.Finish("fold-insert");
     }
 }

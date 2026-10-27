@@ -25,7 +25,7 @@ public sealed partial class MethodRecovery
                     // 托管写入自带 GC 屏障；通知调用的地址实参不应保活原生地址计算及其 φ。
                     if (IsWriteBarrier(call) && call.Arguments.Length > 0)
                     {
-                        block.Statements[i] = call with { Arguments = [], Sources = [] };
+                        block.Statements[i] = Trimmed(call, [], []);
                         changed = true;
                         continue;
                     }
@@ -33,10 +33,35 @@ public sealed partial class MethodRecovery
                     var reads = signature.Reads.ToHashSet();
                     var keep = Enumerable.Range(0, call.Sources.Length).Where(k => reads.Contains(call.Sources[k])).ToArray();
                     if (keep.Length == call.Sources.Length || keep.Length != reads.Count) continue;
-                    block.Statements[i] = call with { Arguments = keep.Select(k => call.Arguments[k]).ToArray(), Sources = keep.Select(k => call.Sources[k]).ToArray() };
+                    block.Statements[i] = Trimmed(call, keep.Select(k => call.Arguments[k]).ToArray(), keep.Select(k => call.Sources[k]).ToArray());
                     changed = true;
                 }
-            if (changed) RemoveDeadDefinitions();
+            if (!changed) return;
+            RemoveDeadDefinitions();
+            if (typed) definitions = IndexDefinitions();
+
+            Call Trimmed(Call call, Expr[] arguments, Storage[] sources)
+            {
+                var replacement = call with { Arguments = arguments, Sources = sources };
+                if (!typed) return replacement;
+                // 裁去未读取的实参不改变调用身份；保留已建立的返回局部、构造配对与异常证据。
+                Copy(typeChecks); Copy(constructed); Copy(forwardedConstructors); Copy(boxed); Copy(resolved);
+                Copy(structResults); Copy(delegateCreations); Copy(exceptionTypeTargets); Copy(stackEnums); Copy(virtualDelegates);
+                Copy(frameCopies); Copy(frameInitializers);
+                Keep(dropped); Keep(virtualCalls); Keep(cleanupCalls); Keep(genericResolvers); Keep(stackEnumStorage);
+                foreach (var live in frameLives.Values) Keep(live);
+                ledger.Replace(call, replacement);
+                return replacement;
+
+                void Copy<TKey, TValue>(Dictionary<TKey, TValue> map) where TKey : Stmt
+                {
+                    if (call is TKey key && replacement is TKey next && map.TryGetValue(key, out var value)) map[next] = value;
+                }
+                void Keep<T>(HashSet<T> set) where T : Stmt
+                {
+                    if (call is T key && replacement is T next && set.Contains(key)) set.Add(next);
+                }
+            }
         }
 
         private bool IsWriteBarrier(Call call) => call.Op?.Kind == OpKind.WriteBarrier
