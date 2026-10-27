@@ -73,6 +73,9 @@ internal static partial class SourceListCalls
             var values = new Dictionary<Variable, ManagedValue>();
             var remove = new HashSet<ManagedStatement>(ReferenceEqualityComparer.Instance);
             var locals = new HashSet<Variable>();
+            var states = new Dictionary<Variable, ManagedValue>();
+            var writes = body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
+                .GroupBy(a => a.Target.Variable).ToDictionary(g => g.Key, g => g.Count());
             ManagedValue Resolve(ManagedValue value)
             {
                 value = Strip(value);
@@ -81,9 +84,26 @@ internal static partial class SourceListCalls
             }
             bool IsField(ManagedValue value, string name) => value is FieldValue f && f.Receiver.Equals(receiver)
                 && f.Field.DeclaringType.Equals(owner) && f.Field.Field.Name == name;
+            // 同一块中的旧 Count 可被其他对象字段使用；只有未修改集合的直线前缀才保留这个快照。
+            foreach (var preceding in block.Statements.Take(start))
+            {
+                if (preceding is ManagedAssignment a && IsField(Strip(a.Value), "_size"))
+                    values[a.Target.Variable] = Strip(a.Value);
+                else if (preceding is ManagedStore { Target: FieldValue target, Value: var value }
+                    && target.Field.Field.Owner != list && Strip(value) is LocalValue or ArgumentValue or ConstantValue) { }
+                else values.Clear();
+            }
+            var savedCount = values.Count != 0;
             bool Increment(ManagedValue value, ManagedValue original) => value is BinaryValue { Op: BinOp.Add, Right: ConstantValue { Bits: 1 } } add && add.Left.Equals(original);
             bool Assign(ManagedAssignment assignment)
             {
+                // 异常状态拷贝保持原位置；两臂必须写相同常量，Add 放在容量判断处、这些拷贝之后。
+                if (savedCount && writes.GetValueOrDefault(assignment.Target.Variable) > 1 && assignment.Value is ConstantValue)
+                {
+                    if (states.TryGetValue(assignment.Target.Variable, out var previous) && !previous.Equals(assignment.Value)) return false;
+                    states[assignment.Target.Variable] = assignment.Value;
+                    return true;
+                }
                 if (locals.Contains(assignment.Target.Variable)) return false;
                 var value = Resolve(assignment.Value);
                 if (ManagedValues.Walk(value).Any(v => v is not (FieldValue or LocalValue or ArgumentValue or ConstantValue or BinaryValue or ConversionValue or ArrayLengthValue)
@@ -141,27 +161,32 @@ internal static partial class SourceListCalls
             if (!Snapshot(item)) continue;
             var fastExit = Next(fast);
             using var slow = flow.Straight(slowEdge.Target, 0, block.Address).GetEnumerator();
-            if (!slow.MoveNext() || slow.Current is not ManagedCall { Result: null, Invocation: { Arguments.Count: 1 } invocation } resize
+            if (Next(slow) is not ManagedCall { Result: null, Invocation: { Arguments.Count: 1 } invocation } resize
                 || invocation.Method.Method.Name != "AddWithResize" || !invocation.Method.DeclaringType.Equals(owner)
                 || !Equals(invocation.Receiver, receiver) || !invocation.Arguments[0].Equals(item)) continue;
-            var slowExit = resize.Tail ? new ManagedReturn(resize.Address, null) : slow.MoveNext() ? slow.Current : null;
+            var slowExit = resize.Tail ? new ManagedReturn(resize.Address, null) : Next(slow);
             if (!SameExit(flow.Exit(fastExit), flow.Exit(slowExit))) continue;
             remove.Add(size); remove.Add(write); remove.Add(resize); remove.Add(branch);
             if (body.Blocks.SelectMany(b => b.Statements).Where(s => !remove.Contains(s))
                 .SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
                 .OfType<LocalValue>().Any(l => locals.Contains(l.Variable))) continue;
+            if (states.Count != 0 && (remove.SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).OfType<LocalValue>()
+                    .Any(l => states.ContainsKey(l.Variable))
+                || states.Keys.Any(v => !flow.Straight(block.Address, start, block.Address).TakeWhile(s => !ReferenceEquals(s, branch))
+                    .OfType<ManagedAssignment>().Any(a => a.Target.Variable == v)))) continue;
             var add = list.Methods.SingleOrDefault(m => m.Name == "Add" && !m.IsStatic && m.Parameters.Count == 1
                 && ManagedTypes.IsVoid(m.ReturnType) && m.Parameters[0].Type.Substitute(owner.Arguments, []).Equals(element.Type));
             if (add is null) continue;
             var method = new MethodRef(add, owner.Arguments, []);
             if (!ManagedAccess.Method(types, body.Method.Method.Owner, method, receiver.Type)) continue;
-            var call = new ManagedCall(first.Address, new ManagedInvocation(method, receiver, [item], true), null, false);
+            var call = new ManagedCall(states.Count == 0 ? first.Address : branch.Address, new ManagedInvocation(method, receiver, [item], true), null, false);
             var rewritten = body with
             {
                 Blocks = body.Blocks.Select(b => b with
                 {
-                    Statements = b.Statements.SelectMany(s => ReferenceEquals(s, first) ? new ManagedStatement[] { call }
-                        : ReferenceEquals(s, branch) ? [new ManagedJump(branch.Address, fastEdge)] : remove.Contains(s) ? [] : [s]).ToArray(),
+                    Statements = b.Statements.SelectMany(s => ReferenceEquals(s, first) && states.Count == 0 ? new ManagedStatement[] { call }
+                        : ReferenceEquals(s, branch) ? states.Count == 0 ? [new ManagedJump(branch.Address, fastEdge)] : [call, new ManagedJump(branch.Address, fastEdge)]
+                        : remove.Contains(s) ? [] : [s]).ToArray(),
                 }).ToArray(),
             };
             matched(first.Address, method);
