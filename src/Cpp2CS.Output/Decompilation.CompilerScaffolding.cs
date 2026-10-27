@@ -13,6 +13,19 @@ public static partial class Decompilation
     {
         public void Run(AstNode rootNode, TransformContext context)
         {
+            // Unity 的 IL 后处理器可注入跨程序集 internal 标记，C# 无法直接声明它。
+            foreach (var attribute in rootNode.Descendants.OfType<ICSharpCode.Decompiler.CSharp.Syntax.Attribute>().ToArray())
+            {
+                if (attribute.Arguments.Count != 0 || attribute.Type.Annotation<ResolveResult>()?.Type.GetDefinition() is not
+                    {
+                        FullName: "Unity.Jobs.DOTSCompilerGeneratedAttribute",
+                        Accessibility: Accessibility.Internal
+                    } marker || marker.ParentModule == context.TypeSystem.MainModule
+                    || attribute.Parent is not AttributeSection { Parent: { } owner } section) continue;
+                owner.AddLeadingTrivia(new Comment($" IL 后处理器标记：[{attribute}]；原始特性保留在恢复程序集。"));
+                attribute.Remove();
+                if (section.Attributes.Count == 0) section.Remove();
+            }
             // 类实例的单一定义副本仍是同一个 this；按 IL 变量身份替换，包括 lambda 中的捕获。
             foreach (var declaration in rootNode.Descendants.OfType<VariableDeclarationStatement>().ToArray())
             {
