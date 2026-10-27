@@ -249,6 +249,7 @@ public sealed class FieldLayouts
         switch (type)
         {
             case GenericParameterRef { NativeScalar: { } scalar }: return SizeAndAlignment(scalar, preferMetadata);
+            case GenericParameterRef { NativeAggregate: { } aggregate }: return SizeAndAlignment(aggregate, preferMetadata);
             case ByRefRef or PointerRef or ArrayRef or GenericParameterRef or PrimitiveRef:
                 return (8, 8);
             case DefinitionRef d:

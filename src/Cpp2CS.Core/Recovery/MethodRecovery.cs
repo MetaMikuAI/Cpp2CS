@@ -97,7 +97,8 @@ public sealed partial class MethodRecovery
         if (RuntimeDeclaration(open, entry) is { } declaration) return declaration;
         if (instance.TypeArguments.Count != open.TypeArguments.Count || instance.MethodArguments.Count != open.MethodArguments.Count
             || instance.TypeArguments.Concat(instance.MethodArguments).Any(t => !ManagedTypes.IsReferenceType(t)
-                && types.Kind(t) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double) && !FieldLayouts.IsFullyShared(t)))
+                && types.Kind(t) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)
+                && !(types.Kind(t) == TypeKind.Struct && types.Size(t) > 0) && !FieldLayouts.IsFullyShared(t)))
             return new(open, entry, null, [new(entry, "泛型 实例缺少可用的共享或标量布局")]);
         open = open with
         {
@@ -105,8 +106,10 @@ public sealed partial class MethodRecovery
             MethodArguments = open.MethodArguments.Zip(instance.MethodArguments, Bind).ToArray(),
         };
         return new Context(this, open, entry) { SharedDefinition = true }.Run();
-        static TypeRef Bind(TypeRef parameter, TypeRef instance) => parameter is GenericParameterRef g
-            ? FieldLayouts.IsFullyShared(instance) ? g with { NativeShared = true } : ManagedTypes.IsReferenceType(instance) ? g with { SharedReference = true } : g with { NativeScalar = instance } : parameter;
+        TypeRef Bind(TypeRef parameter, TypeRef instance) => parameter is GenericParameterRef g
+            ? FieldLayouts.IsFullyShared(instance) ? g with { NativeShared = true }
+                : ManagedTypes.IsReferenceType(instance) ? g with { SharedReference = true }
+                : types.Kind(instance) == TypeKind.Struct ? g with { NativeAggregate = instance } : g with { NativeScalar = instance } : parameter;
     }
 
     /// <summary>异常类型的无参实例构造函数（全名，含 mscorlib 之外的类型）。</summary>
@@ -207,7 +210,7 @@ public sealed partial class MethodRecovery
         /// <summary>值中有 L3 内部的值（结构体片等，ManagedValues 不认识的类型）。</summary>
         private static bool FragmentInside(ManagedValue value)
         {
-            if (value is Fragment) return true;
+            if (value is Fragment or AggregatePiece) return true;
             try { return ManagedValues.Children(value).Any(FragmentInside); }
             catch (NotSupportedException) { return true; }
         }
@@ -314,6 +317,8 @@ public sealed partial class MethodRecovery
             function = lifted.Function;
             var idioms = owner.rewriter.Run(function);
             if (SharedDefinition) BindSharedReferences();
+            if (method.TypeArguments.Concat(method.MethodArguments).Any(t => t is GenericParameterRef { NativeAggregate: not null }))
+                PromotePrivateFrameSlots();
             NormalizeSharedFields();
             NormalizeSharedValues();
             NormalizeDelegateChoices();

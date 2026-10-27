@@ -19,7 +19,8 @@ public sealed partial class MethodRecovery
         /// <summary>恢复期间遍历结构体片的叶子；最终方法体仍须通过片残留检查。</summary>
         private static IEnumerable<ManagedValue> WalkRecoveryValue(ManagedValue value)
         {
-            var children = value is Fragment fragment ? fragment.Parts.Select(p => p.Value) : ManagedValues.Children(value);
+            var children = value is Fragment fragment ? fragment.Parts.Select(p => p.Value)
+                : value is AggregatePiece part ? [part.Root] : ManagedValues.Children(value);
             return children.SelectMany(WalkRecoveryValue).Prepend(value);
         }
 
@@ -109,6 +110,8 @@ public sealed partial class MethodRecovery
         private ManagedValue Slice(ManagedValue value, int low, int width)
         {
             if (low == 0 && width == value.Width && value is not Fragment) return value;
+            if (value is AggregatePiece part && low % 8 == 0 && width % 8 == 0 && low + width <= part.Width)
+                return part with { Offset = part.Offset + low / 8, Width = width };
             if (value is Fragment fragment)
             {
                 var exact = fragment.Parts.Where(p => p.Low == low && p.Value.Width == width).ToArray();

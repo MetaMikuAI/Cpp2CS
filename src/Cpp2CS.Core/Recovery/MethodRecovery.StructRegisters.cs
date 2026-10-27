@@ -10,6 +10,7 @@ public sealed partial class MethodRecovery
     {
         private readonly Dictionary<Storage, (ArgumentValue Root, AbiPiece Piece)> structArguments = new();
         private readonly Dictionary<Call, LocalValue> structResults = new(ReferenceEqualityComparer.Instance);
+        private sealed record AggregatePiece(ManagedValue Root, int Offset, int Width) : ManagedValue(Root.Type, Width);
 
         private bool RegisterStruct(AbiValue value) => types.Kind(value.Type) == TypeKind.Struct
             && value.Passing == Passing.Registers && value.Pieces.All(p => p.Register.Bank is Bank.Gpr or Bank.Vec);
@@ -66,6 +67,7 @@ public sealed partial class MethodRecovery
 
         private ManagedValue StructPiece(ManagedValue root, AbiPiece piece)
         {
+            if (root.Type is GenericParameterRef { NativeAggregate: not null }) return new AggregatePiece(root, piece.Offset, piece.Width);
             var paths = StructPaths(root.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)
                 && p.Offset >= piece.Offset && p.Offset + types.Size(p.Type) <= piece.Offset + piece.Width / 8).ToArray();
             var parts = paths.Select(p => new Part((p.Offset - piece.Offset) * 8, PathValue(root, p.Path))).ToArray();
@@ -77,6 +79,15 @@ public sealed partial class MethodRecovery
         {
             if (!RegisterStruct(value)) throw Fail(0, $"结构体 {value.Type} 的寄存器形态尚未支持");
             var pieces = value.Pieces.Select(p => (Piece: p, Value: Recover(expression(p), null))).ToArray();
+            if (value.Type is GenericParameterRef { NativeAggregate: not null })
+            {
+                var parts = pieces.Select(p => (p.Piece, Value: Slice(p.Value, 0, p.Piece.Width))).ToArray();
+                if (parts.All(p => p.Value is AggregatePiece part && part.Offset == p.Piece.Offset && part.Width == p.Piece.Width)
+                    && parts.Select(p => ((AggregatePiece)p.Value).Root).Distinct().ToArray() is [var root]
+                    && root.Type.Equals(value.Type)) return root;
+                if (parts.All(p => p.Value is ConstantValue { Bits: 0 })) return new ComposedValue(value.Type, []);
+                throw Fail(0, "泛型聚合片未能完整重建同一个值");
+            }
             var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
             foreach (var path in StructPaths(value.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)))
             {

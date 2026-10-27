@@ -99,6 +99,7 @@ public sealed class ManagedTypes
             case ArrayRef: return TypeKind.Reference;
             case GenericParameterRef { IsReference: true }: return TypeKind.Reference;
             case GenericParameterRef { NativeScalar: { } scalar }: return Kind(scalar);
+            case GenericParameterRef { NativeAggregate: not null }: return TypeKind.Struct;
             case PointerRef or ByRefRef: return TypeKind.Pointer;
             case DefinitionRef d:
                 if (FieldLayouts.IsFullyShared(d) && d.Definition.IsValueType) return null;

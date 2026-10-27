@@ -61,7 +61,8 @@ public sealed partial class ManagedAbi(FieldLayouts layouts)
             case PointerRef or ByRefRef or ArrayRef:
                 return ValueKind.Integer;
             case GenericParameterRef generic:
-                return generic.IsReference ? ValueKind.Reference : generic.NativeScalar is { } scalar ? Kind(scalar) : null;
+                return generic.IsReference ? ValueKind.Reference : generic.NativeScalar is { } scalar ? Kind(scalar)
+                    : generic.NativeAggregate is not null ? ValueKind.Struct : null;
             case DefinitionRef d:
                 if (FieldLayouts.IsFullyShared(d) && d.Definition.IsValueType) return null;
                 var t = d.Definition;
@@ -233,6 +234,7 @@ public sealed partial class ManagedAbi(FieldLayouts layouts)
     /// <summary>同质浮点聚合：展开后 1–4 个成员全为 float 或全为 double，且无空洞。</summary>
     private (int Count, int Width)? Hfa(TypeRef type)
     {
+        if (type is GenericParameterRef { NativeAggregate: { } aggregate }) return Hfa(aggregate);
         var members = new List<ValueKind>();
         if (!Flatten(type, members) || members.Count is 0 or > 4) return null;
         if (members.Any(m => m != members[0])) return null;

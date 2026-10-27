@@ -64,7 +64,7 @@ public sealed partial class MethodRecovery
             var address = new AddressValue(ownReturnBuffer);
             var leaves = StructPaths(ownReturnBuffer.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null))
                 .Select(p => PathValue(address, p.Path)).ToHashSet();
-            if (ManagedAbi.SharedValue(ownReturnBuffer.Type)) leaves.Add(ownReturnBuffer);
+            if (ManagedAbi.SharedValue(ownReturnBuffer.Type) || ownReturnBuffer.Type is GenericParameterRef { NativeAggregate: not null }) leaves.Add(ownReturnBuffer);
             var blocksByAddress = body.Blocks.ToDictionary(b => b.Address);
             IEnumerable<ulong> Successors(ManagedBlock block) => block.Statements.LastOrDefault() is { } last ? ManagedValues.Edges(last).Select(e => e.Target) : [];
             var predecessors = body.Blocks.SelectMany(b => Successors(b).Select(s => (From: b.Address, To: s)))

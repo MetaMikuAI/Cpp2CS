@@ -345,6 +345,12 @@ public sealed partial class MethodRecovery
                     smallest = smallest.Where(p => smallest.All(q => q == p || StructPaths(p.source.Type).Any(path => path.Offset == 0 && path.Type.Equals(q.source.Type)))).ToArray();
                 if (smallest.Length != 1) continue;
                 var (from, to) = smallest[0];
+                if (from.Type is GenericParameterRef { NativeAggregate: not null })
+                {
+                    // 开放 T 没有可访问的实例字段；只允许后续完整覆盖检查把所有片合并成一次复制。
+                    copies.Add(new FrameCopy(define, store, from, to, new Fragment([], types.UInt64, load.Width)));
+                    continue;
+                }
                 var paths = StructPaths(from.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)).OrderBy(p => p.Offset).ToArray();
                 var touched = paths.Where(p => p.Offset < from.Offset + load.Width / 8 && from.Offset < p.Offset + types.Size(p.Type)).ToArray();
                 if (touched.Length == 0 || touched.Any(p => p.Offset < from.Offset || p.Offset + types.Size(p.Type) > from.Offset + load.Width / 8)) continue;
