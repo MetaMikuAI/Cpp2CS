@@ -22,7 +22,9 @@ public static partial class Decompilation
 
         private static bool FirstReceiver(Expression? expression, Expression read) => ReferenceEquals(expression, read) || expression switch
         {
-            InvocationExpression call => FirstReceiver(call.Target, read),
+            InvocationExpression call => FirstReceiver(call.Target, read)
+                || call.Target is IdentifierExpression && call.GetSymbol() is IMethod { DeclaringType.Kind: not TypeKind.Delegate }
+                    && FirstReceiver(call.Arguments.FirstOrDefault(), read),
             MemberReferenceExpression member => FirstReceiver(member.Target, read),
             IndexerExpression indexer => FirstReceiver(indexer.Target, read),
             ParenthesizedExpression parentheses => FirstReceiver(parentheses.Expression, read),
