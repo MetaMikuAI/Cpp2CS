@@ -47,6 +47,50 @@ internal static class SharedInterfaceTailsCheck
             a.True(rightCall.Target == Use(rightPointer) && rightCall.Arguments.SequenceEqual([Use(rightReceiver), Use(rightArgument)]), "右分支保留自身接口槽位、接收者和实参");
             a.True(!function.Blocks.Contains(merge) && done.Predecessors.Count == 2, "共享尾部移出并保留两条出口边");
         }
+        foreach (var mode in new[] { "grouped", "different-input", "slot", "return-value" })
+        {
+            var version = 0;
+            Variable Fresh() => new(Storage.Temp(version++), 1);
+            Expr Use(Variable value) => new Use(value, value.Width);
+            var left = Fresh(); var right = Fresh(); var other = Fresh();
+            var slowReceiver = Fresh(); var hitReceiver = Fresh(); var mergedReceiver = Fresh();
+            var slowData = Fresh(); var hitData = Fresh(); var pointer = Fresh(); var state = Fresh();
+            Block Block(ulong address, params Stmt[] statements) => new(address) { End = address + 16, Statements = statements.ToList() };
+            var start = Block(0, new Branch(0, Expr.C(1, 1), 32, 128));
+            var leftCheck = Block(32, new Branch(32, Expr.C(1, 1), 224, 64));
+            var leftScan = Block(64, new Branch(64, Expr.C(1, 1), 256, 96));
+            var leftFallback = Block(96, new Jump(96, 224));
+            var rightCheck = Block(128, new Branch(128, Expr.C(1, 1), 224, 160));
+            var rightScan = Block(160, new Branch(160, Expr.C(1, 1), 256, 192));
+            var rightFallback = Block(192, new Jump(192, 224));
+            var slow = Block(224, new Phi(224, slowReceiver, [left, left, right, right]),
+                new Phi(224, state, [left, mode == "different-input" ? other : left, right, right]),
+                new Call(228, CallKind.Direct, Expr.C(512, 64)) { Arguments = [Use(slowReceiver), Expr.C(0, 64), Expr.C(mode == "slot" ? 99UL : 1UL, 64)], Defines = [slowData] },
+                new Jump(232, 288));
+            var hit = Block(256, new Phi(256, hitReceiver, [left, right]), new Define(260, hitData, Expr.C(768, 64)), new Jump(264, 288));
+            var merge = Block(288, new Phi(288, mergedReceiver, [slowReceiver, hitReceiver]), new Phi(288, pointer, [slowData, hitData]),
+                new Call(292, CallKind.Indirect, Use(pointer)) { Arguments = [Use(mergedReceiver)] },
+                new Return(300) { Value = mode == "return-value" ? Use(pointer) : null });
+            MachineFunction.AddEdge(start, leftCheck); MachineFunction.AddEdge(start, rightCheck);
+            MachineFunction.AddEdge(leftCheck, slow); MachineFunction.AddEdge(leftCheck, leftScan);
+            MachineFunction.AddEdge(leftScan, hit); MachineFunction.AddEdge(leftScan, leftFallback); MachineFunction.AddEdge(leftFallback, slow);
+            MachineFunction.AddEdge(rightCheck, slow); MachineFunction.AddEdge(rightCheck, rightScan);
+            MachineFunction.AddEdge(rightScan, hit); MachineFunction.AddEdge(rightScan, rightFallback); MachineFunction.AddEdge(rightFallback, slow);
+            MachineFunction.AddEdge(slow, merge); MachineFunction.AddEdge(hit, merge);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 320, CodeRegion.Managed, BoundaryEvidence.EhFrame),
+                Blocks = [start, leftCheck, leftScan, leftFallback, rightCheck, rightScan, rightFallback, slow, hit, merge] };
+            var changed = SharedInterfaceTails.Run(function, c => c.Target is Const { Value: 512 }, Fresh);
+            a.Equal(mode == "grouped", changed, $"查找入边按接收者分组 {mode}");
+            if (!changed) continue;
+            var lookups = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Kind == CallKind.Direct).ToArray();
+            a.True(lookups.Select(c => c.Arguments[0]).SequenceEqual([Use(right), Use(left)])
+                || lookups.Select(c => c.Arguments[0]).SequenceEqual([Use(left), Use(right)]), "两个查找分别保留接收者");
+            a.True(leftCheck.Successors[0] == leftFallback.Successors[0] && rightCheck.Successors[0] == rightFallback.Successors[0]
+                && leftCheck.Successors[0] != rightCheck.Successors[0], "每个接收者的失败边汇入自身副本");
+            a.True(new[] { leftCheck, leftScan, rightCheck, rightScan }.All(b => b.Statements[^1] is Branch branch
+                && branch.Target == b.Successors[0].Start && branch.Fallthrough == b.Successors[1].Start), "保留条件分支的后继位置");
+            a.Equal(2, function.Blocks.SelectMany(b => b.Statements).OfType<Return>().Count(), "两个调用各自返回 void");
+        }
         return a.Finish("interface-tails");
     }
 }
