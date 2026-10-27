@@ -117,24 +117,7 @@ internal static class SourceExceptionPaths
                 ? new ManagedJump(branch.Address, condition.Condition == Cond.Eq ? branch.Taken : branch.Fallthrough) : statement;
         }).ToArray() }).ToArray() };
         body = Prune(body);
-        bool changed;
-        do
-        {
-            var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
-            var used = statements.SelectMany(s => (s is ManagedAssignment a ? [a.Value] : ManagedValues.Of(s)).Concat(ManagedValues.CopiedValues(s)))
-                .SelectMany(ManagedValues.Walk).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
-            changed = false;
-            body = body with { Blocks = body.Blocks.Select(block => block with { Statements = block.Statements.Where(s =>
-            {
-                var dead = s is ManagedAssignment { Value: LocalValue or ConstantValue, Target: var target } && !used.Contains(target.Variable);
-                changed |= dead; return !dead;
-            }).Select(s => ManagedValues.MapEdges(s, edge =>
-            {
-                var kept = edge.Copies.Where(c => used.Contains(c.Target.Variable) || c.Value is not (LocalValue or ConstantValue)).ToArray();
-                changed |= kept.Length != edge.Copies.Count; return edge with { Copies = kept };
-            })).ToArray() }).ToArray() };
-        } while (changed);
-        return body;
+        return SourceDeadLocals.Rewrite(body);
     }
 
     private static ManagedBody Prune(ManagedBody body)
