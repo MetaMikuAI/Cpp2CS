@@ -79,8 +79,8 @@ public sealed partial class MethodRecovery
         return forwarding[(type, target)] = result;
     }
 
-    private static MethodRecoveryResult? RuntimeDeclaration(MethodRef method, ulong entry) => DelegateFacts.IsRuntimeMethod(method.Method)
-        ? new(method, entry, null, []) { Declaration = RuntimeDeclarationKind.Delegate } : null;
+    private MethodRecoveryResult? RuntimeDeclaration(MethodRef method, ulong entry) => DelegateFacts.IsRuntimeMethod(method.Method)
+        ? new(method, entry, null, []) { Declaration = RuntimeDeclarationKind.Delegate } : PlatformDeclaration(method, entry);
 
     public MethodRecoveryResult Recover(MethodRef method, ulong entry) => RuntimeDeclaration(method, entry) ?? new Context(this, method, entry).Run();
 

@@ -43,6 +43,17 @@ public sealed class Skeleton
     public FieldDefinition Field(FieldDef field) => fields[field.Index];
     public AssemblyDefinition Assembly(string imageName) => byImage[imageName];
 
+    /// <summary>应用已由原生包装核验的导入声明；不创建方法体。</summary>
+    public void ApplyDeclarations(IEnumerable<Cpp2CS.Recovery.MethodRecoveryResult> results)
+    {
+        foreach (var result in results.Where(r => r.PlatformImport is not null))
+        {
+            var method = Method(result.Method.Method);
+            if (!method.IsPInvokeImpl || method.HasBody) throw new InvalidDataException("导入声明必须对应 extern 方法");
+            method.PInvokeInfo = ImportInfo(method.Module, result.PlatformImport!);
+        }
+    }
+
     public Skeleton(ProgramModel model)
     {
         this.model = model;
@@ -448,19 +459,41 @@ public sealed class Skeleton
                 | TypeAttributes.BeforeFieldInit, Reference(module, new DefinitionRef(Corlib("System.Object"), []), null, null));
             module.Types.Add(container);
         }
-        var library = module.ModuleReferences.FirstOrDefault(r => r.Name == imported.Library);
-        if (library is null) module.ModuleReferences.Add(library = new ModuleReference(imported.Library));
         var declaration = new MethodDefinition(method.Name, MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.PInvokeImpl,
             Reference(module, method.ReturnType, null, null))
         {
             ImplAttributes = MethodImplAttributes.PreserveSig,
-            PInvokeInfo = new(PInvokeAttributes.CallConvCdecl | PInvokeAttributes.NoMangle, imported.EntryPoint, library),
+            PInvokeInfo = ImportInfo(module, imported),
         };
         foreach (var parameter in method.Parameters)
             declaration.Parameters.Add(new ParameterDefinition(parameter.Name, 0, Reference(module, parameter.Type, null, null)));
         container.Methods.Add(declaration);
         nativeImports.Add((module, imported), declaration);
         return declaration;
+    }
+
+    private static PInvokeInfo ImportInfo(ModuleDefinition module, NativeImport imported)
+    {
+        var library = module.ModuleReferences.FirstOrDefault(r => r.Name == imported.Library);
+        if (library is null) module.ModuleReferences.Add(library = new ModuleReference(imported.Library));
+        var convention = imported.CallingConvention switch
+        {
+            System.Runtime.InteropServices.CallingConvention.Winapi => PInvokeAttributes.CallConvWinapi,
+            System.Runtime.InteropServices.CallingConvention.Cdecl => PInvokeAttributes.CallConvCdecl,
+            System.Runtime.InteropServices.CallingConvention.StdCall => PInvokeAttributes.CallConvStdCall,
+            System.Runtime.InteropServices.CallingConvention.ThisCall => PInvokeAttributes.CallConvThiscall,
+            System.Runtime.InteropServices.CallingConvention.FastCall => PInvokeAttributes.CallConvFastcall,
+            _ => throw new InvalidDataException("未支持的导入调用约定"),
+        };
+        var charset = imported.CharSet switch
+        {
+            System.Runtime.InteropServices.CharSet.None => PInvokeAttributes.CharSetNotSpec,
+            System.Runtime.InteropServices.CharSet.Ansi => PInvokeAttributes.CharSetAnsi,
+            System.Runtime.InteropServices.CharSet.Unicode => PInvokeAttributes.CharSetUnicode,
+            System.Runtime.InteropServices.CharSet.Auto => PInvokeAttributes.CharSetAuto,
+            _ => throw new InvalidDataException("未支持的导入字符集"),
+        };
+        return new(convention | charset | (imported.ExactSpelling ? PInvokeAttributes.NoMangle : 0), imported.EntryPoint, library);
     }
 
     public FieldReference Reference(ModuleDefinition module, FieldRef field, IGenericParameterProvider? typeContext, IGenericParameterProvider? methodContext)

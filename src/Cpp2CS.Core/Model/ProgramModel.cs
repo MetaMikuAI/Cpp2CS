@@ -179,7 +179,12 @@ public sealed record ParameterDef(string Name, TypeRef Type, ParameterAttributes
 }
 
 /// <summary>已知 C ABI 导入的库名和精确入口；签名由所属方法描述。</summary>
-public sealed record NativeImport(string Library, string EntryPoint);
+public sealed record NativeImport(string Library, string EntryPoint)
+{
+    public System.Runtime.InteropServices.CallingConvention CallingConvention { get; init; } = System.Runtime.InteropServices.CallingConvention.Cdecl;
+    public System.Runtime.InteropServices.CharSet CharSet { get; init; } = System.Runtime.InteropServices.CharSet.None;
+    public bool ExactSpelling { get; init; } = true;
+}
 
 public sealed class MethodDef
 {

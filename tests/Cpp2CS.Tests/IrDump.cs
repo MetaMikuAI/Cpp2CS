@@ -73,6 +73,7 @@ internal static class RecoverDump
                 var method = result.Method;
                 Console.WriteLine($"== 0x{entry:x} {method}：{(result.Declaration is { } declaration ? $"运行时声明 {declaration}；未恢复原生方法体" : result.Body is null ? $"{result.Holes.Count} 个洞" : "无洞")}");
                 foreach (var hole in result.Holes) Console.WriteLine($"  0x{hole.Address:x} {(hole.Derived ? "连带" : "独立")} {hole.Reason}");
+                if (result.PlatformImport is { } imported) Console.WriteLine($"  {imported}");
                 if ((result.Body ?? result.Partial) is { } body)
                 {
                     if (sourceView) body = new Cpp2CS.Output.SourceLibraryCalls(facts, types, recovery).Rewrite(Cpp2CS.Recovery.SourceRewriter.Rewrite(body, types));

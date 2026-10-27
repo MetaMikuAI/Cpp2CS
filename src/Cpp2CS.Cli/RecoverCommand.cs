@@ -104,10 +104,12 @@ internal static class RecoverCommand
 
         watch.Restart();
         var skeleton = new Skeleton(facts.Model);
+        skeleton.ApplyDeclarations(targets);
         var emitter = new BodyEmitter(skeleton, types);
         var emitProblems = new Dictionary<MethodRecoveryResult, string>();
         var emitted = new List<MethodRecoveryResult>();
         var closure = new AccessorRecovery(facts, types, recovery, emitter, targets, AutoPropertyManifest.ReadRejected(rejectedAccessors));
+        skeleton.ApplyDeclarations(closure.All);
         var evidence = AccessorEvidence.Read(accessorEvidence);
         var descriptions = closure.Candidates.Values.ToDictionary(c => c.Method.Method, c => AccessorEvidence.Describe(facts, skeleton, c));
         var inlineDescriptions = closure.InlineCandidates.ToDictionary(p => p.Key, p => AccessorEvidence.Describe(facts, skeleton, p.Value.Method));
@@ -146,6 +148,7 @@ internal static class RecoverCommand
                     dependency = dependencies.Contains(result.Method.Method),
                     bodySource = result.Declaration is not null ? "runtime-declaration" : result.Body is null ? null : closure.Synthesized.ContainsKey(result.Method.Method) ? "language-definition" : "native-recovery",
                     declaration = result.Declaration?.ToString(),
+                    platformImport = result.PlatformImport,
                     accessorProof = closure.LanguageAccessors.ContainsKey(result.Method.Method) ? "language-definition" : null,
                     holes = result.Holes.Select(h => new { address = $"0x{h.Address:x}", reason = h.Reason, derived = h.Derived }),
                     emitProblem = emitProblems.GetValueOrDefault(result),

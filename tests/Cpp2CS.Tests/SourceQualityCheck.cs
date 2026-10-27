@@ -53,6 +53,8 @@ internal static class SourceQualityCheck
             emitFailedMethods = targets.Count(r => r.GetProperty("status").GetString() == "emit-failed"),
             runtimeDeclarationMethods = declarations.Length,
             runtimeDeclarationBytes = declarations.Select(r => r.GetProperty("address").GetString()!).Distinct().Sum(e => entries[e]),
+            declarationsByKind = declarations.GroupBy(r => r.GetProperty("declaration").GetString()!).ToDictionary(g => g.Key,
+                g => new { methods = g.Count(), bytes = g.Select(r => r.GetProperty("address").GetString()!).Distinct().Sum(e => entries[e]) }),
             source = totals, emittedBytes = bytes, totalBytes, byteCoverage = (double)bytes / totalBytes,
         };
         var options = new JsonSerializerOptions { WriteIndented = true };

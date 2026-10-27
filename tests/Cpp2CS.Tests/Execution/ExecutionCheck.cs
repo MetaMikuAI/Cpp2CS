@@ -52,8 +52,21 @@ internal static partial class ExecutionCheck
             : t.Recover(recovery)).ToArray();
         if (full) AutoPropertyManifest.RestoreSynthesized(slice, types, results);
         var skeleton = new Skeleton(facts.Model);
+        skeleton.ApplyDeclarations(results);
+        if (full)
+            foreach (var line in File.ReadLines(Path.Combine(slice, "recovery.jsonl")))
+            {
+                using var declaration = JsonDocument.Parse(line);
+                var row = declaration.RootElement;
+                if (!row.TryGetProperty("declaration", out var kind) || kind.GetString() != "PlatformInvoke") continue;
+                var target = RecoveryTarget.Find(facts, Convert.ToUInt64(row.GetProperty("address").GetString(), 16), row.GetProperty("method").GetString()!);
+                var recovered = target.Recover(recovery);
+                if (recovered.PlatformImport is null) throw new InvalidDataException("原生导入声明未复现");
+                skeleton.ApplyDeclarations([recovered]);
+            }
         var emitter = new BodyEmitter(skeleton, types);
         var closure = new AccessorRecovery(facts, types, recovery, emitter, results, full ? AutoPropertyManifest.ReadRejected(Path.Combine(slice, "autoprop-rejected-input.tsv")) : null);
+        skeleton.ApplyDeclarations(closure.All);
         var index = new WorldIndex(facts, types);
         if (options.Contains("--concrete-generics"))
             foreach (var result in results.Where(Selected))
