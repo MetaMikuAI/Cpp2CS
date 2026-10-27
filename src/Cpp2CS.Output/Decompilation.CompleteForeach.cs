@@ -39,6 +39,32 @@ public static partial class Decompilation
             return Dispose(cleanup, name) && Rethrow(finalThrow);
         }
 
+        private static bool DisposablePattern(Expression? expression, string name, out string variable)
+        {
+            while (expression is ParenthesizedExpression parentheses) expression = parentheses.Expression;
+            variable = "";
+            if (expression is not BinaryOperatorExpression { Operator: BinaryOperatorType.IsPattern, Left: var value,
+                Right: DeclarationExpression { Designation: SingleVariableDesignation designation } pattern }
+                || !Name(value, name) || pattern.Type?.Annotation<ResolveResult>()?.Type.FullName != "System.IDisposable") return false;
+            variable = designation.Identifier;
+            return true;
+        }
+
+        private static bool InterfaceCleanup(CatchClause catcher, Statement normal, string name, AstNode method)
+        {
+            bool Rethrow(Statement s) => s is ThrowStatement t && (t.Expression is null || Name(t.Expression, catcher.VariableName));
+            if (catcher.Body?.Statements.ToArray() is not [IfElseStatement { FalseStatement: null,
+                Condition: UnaryOperatorExpression { Operator: UnaryOperatorType.Not, Expression: var rejected },
+                TrueStatement: BlockStatement { Statements.Count: 1 } absent }, var exceptionalDispose, var finalThrow]
+                || !DisposablePattern(rejected, name, out var exceptional) || !Rethrow(absent.Statements.Single())
+                || !Dispose(exceptionalDispose, exceptional) || !Rethrow(finalThrow)
+                || normal is not IfElseStatement { FalseStatement: null, Condition: var accepted,
+                    TrueStatement: BlockStatement { Statements.Count: 1 } present }
+                || !DisposablePattern(accepted, name, out var ordinary) || !Dispose(present.Statements.Single(), ordinary)) return false;
+            var allowed = catcher.Descendants.Concat(normal.Descendants).ToHashSet();
+            return !method.Descendants.OfType<IdentifierExpression>().Any(id => (id.Identifier == exceptional || id.Identifier == ordinary) && !allowed.Contains(id));
+        }
+
         // 完整 try/while 加正常清理；允许可写元素局部和工厂附近的纯局部初始化。
         private static void RecoverCompleteLoops(AstNode root)
         {
@@ -50,7 +76,6 @@ public static partial class Decompilation
                     || guarded.TryBlock?.Statements.LastOrDefault() is not WhileStatement
                         { Condition: InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression { MemberName: "MoveNext", Target: IdentifierExpression enumerator } },
                             EmbeddedStatement: BlockStatement body }
-                    || !ConditionalCleanup(catcher, enumerator.Identifier)
                     || body.Statements.FirstOrDefault() is not VariableDeclarationStatement current || current.Variables.ToArray() is not [var element]
                     || element.Initializer is not MemberReferenceExpression { MemberName: "Current", Target: var receiver } read || !Name(receiver, enumerator.Identifier)
                     || read.GetSymbol() is IProperty { ReturnType: ByReferenceType }) continue;
@@ -62,7 +87,11 @@ public static partial class Decompilation
                     && error.Type?.ToString() is "NullReferenceException" or "System.NullReferenceException") { guard = test; inside = inside.Skip(1).ToArray(); }
                 if (inside.Any(s => !PureLocals(s))) continue;
                 var siblings = parent.Statements.ToArray(); var index = Array.IndexOf(siblings, guarded);
-                if (index + 1 >= siblings.Length || !Dispose(siblings[index + 1], enumerator.Identifier) && !NullableDispose(siblings[index + 1], enumerator.Identifier)) continue;
+                if (index + 1 >= siblings.Length
+                    || guarded.Ancestors.FirstOrDefault(n => n is MethodDeclaration or LambdaExpression or AnonymousMethodExpression) is not { } method) continue;
+                var conditionalInterface = InterfaceCleanup(catcher, siblings[index + 1], enumerator.Identifier, method);
+                if (!conditionalInterface && (!ConditionalCleanup(catcher, enumerator.Identifier)
+                    || !Dispose(siblings[index + 1], enumerator.Identifier) && !NullableDispose(siblings[index + 1], enumerator.Identifier))) continue;
                 var prefix = siblings.Take(index).Reverse().TakeWhile(PureLocals).Reverse().ToArray();
                 var factory = siblings.Take(index - prefix.Length).LastOrDefault();
                 var initialized = factory switch
@@ -73,10 +102,11 @@ public static partial class Decompilation
                     _ => null,
                 };
                 if (initialized is not InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression { MemberName: "GetEnumerator" } get } invocation
-                    || invocation.Annotation<ResolveResult>()?.Type.GetAllBaseTypes().Any(t => t.FullName == "System.IDisposable") != true
-                    || guarded.Ancestors.FirstOrDefault(n => n is MethodDeclaration or LambdaExpression or AnonymousMethodExpression) is not { } method
                     || !StableCopies(method, prefix.Concat(inside), invocation)) continue;
-                if (invocation.Annotation<ResolveResult>()!.Type.IsReferenceType == true && !NullableDispose(siblings[index + 1], enumerator.Identifier)
+                var iteratorType = invocation.Annotation<ResolveResult>()?.Type;
+                if (conditionalInterface ? iteratorType?.FullName != "System.Collections.IEnumerator"
+                    : iteratorType?.GetAllBaseTypes().Any(t => t.FullName == "System.IDisposable") != true) continue;
+                if (!conditionalInterface && iteratorType!.IsReferenceType == true && !NullableDispose(siblings[index + 1], enumerator.Identifier)
                     && catcher.Body!.Statements.FirstOrDefault() is not IfElseStatement) continue;
                 var removed = new List<Statement> { factory!, siblings[index + 1] };
                 if (index + 2 < siblings.Length && siblings[index + 2] is ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
