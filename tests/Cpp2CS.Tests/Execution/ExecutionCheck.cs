@@ -50,6 +50,8 @@ internal static partial class ExecutionCheck
         var instances = methods.ToDictionary(t => t.Method.Method, t => t.Instance);
         var results = methods.Select(t => t.Entry == 0 ? new MethodRecoveryResult(t.Method, 0, null, [new(0, "语言定义 待核对元数据证据")])
             : t.Recover(recovery)).ToArray();
+        if (only is not null && only.Except(results.Select(r => (r.Entry, r.Method.ToString()))).Any())
+            throw new InvalidDataException("--only 含未匹配方法；请使用写出清单中的入口与开放泛型方法名");
         if (full) AutoPropertyManifest.RestoreSynthesized(slice, types, results);
         var skeleton = new Skeleton(facts.Model);
         skeleton.ApplyDeclarations(results);
@@ -201,7 +203,7 @@ internal static partial class ExecutionCheck
             if (mutate && outcome.Verdict == "verified")
             {
                 var methodMutants = new Dictionary<string, string>();
-                Mutate(result.Method, skeleton, cecil, interpreter, machine, index, methodMutants, emitter.ExplicitInitializations, caseCount);
+                Mutate(instances[result.Method.Method], result.Entry, skeleton, cecil, interpreter, machine, index, methodMutants, emitter.ExplicitInitializations, caseCount);
                 foreach (var pair in methodMutants) mutants.Add(pair.Key, pair.Value);
                 if (skeleton.Method(result.Method.Method).Body.HasExceptionHandlers)
                     foreach (var pair in methodMutants) exceptionMutants.Add(pair.Key, pair.Value);
@@ -297,7 +299,7 @@ internal static partial class ExecutionCheck
     }
 
     /// <summary>对一个方法逐个应用变异、跑全部用例、复原。</summary>
-    private static void Mutate(MethodRef tested, Skeleton skeleton, CecilModel cecil, CilInterpreter interpreter, NativeMachine machine, WorldIndex index, Dictionary<string, string> results, IReadOnlySet<Instruction> initializations, int caseCount)
+    private static void Mutate(MethodRef tested, ulong entry, Skeleton skeleton, CecilModel cecil, CilInterpreter interpreter, NativeMachine machine, WorldIndex index, Dictionary<string, string> results, IReadOnlySet<Instruction> initializations, int caseCount)
     {
         var definition = skeleton.Method(tested.Method);
         var signature = index.StructAbi.Signature(tested);
@@ -321,7 +323,7 @@ internal static partial class ExecutionCheck
                 foreach (var field in statics) world.PrepareStatic(field);
                 var (bits, values) = Arguments(world, interpreter, tested, signature);
                 var cil = interpreter.Run(world, definition, tested, values);
-                var native = machine.Run(world, tested, signature, bits, cil.Callees);
+                var native = machine.Run(world, tested, signature, bits, cil.Callees, entry);
                 if (Trace.Difference(world, native, cil) is { } difference)
                     throw new InvalidOperationException($"F5 附加基线不一致：{tested} 种子 {seed} 计划 {plan}：{difference}");
                 mutationCases.Add((seed, plan));
@@ -342,7 +344,7 @@ internal static partial class ExecutionCheck
                         foreach (var field in statics) world.PrepareStatic(field);
                         var (bits, values) = Arguments(world, interpreter, tested, signature);
                         var cil = interpreter.Run(world, definition, tested, values);
-                        var native = machine.Run(world, tested, signature, bits, cil.Callees);
+                        var native = machine.Run(world, tested, signature, bits, cil.Callees, entry);
                         verdict = Trace.Difference(world, native, cil) is null ? "未检出" : "检出";
                     }
                     catch (InferredCallError) { verdict = "检出"; }
@@ -356,7 +358,7 @@ internal static partial class ExecutionCheck
                 }
             }
             finally { revert(); }
-            results[$"0x{tested.Method.Address:x} {tested}: {description}"] = verdict;
+            results[$"0x{entry:x} {tested}: {description}"] = verdict;
         }
     }
 

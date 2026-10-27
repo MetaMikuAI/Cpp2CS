@@ -90,14 +90,15 @@ public sealed partial class MethodRecovery
     /// </summary>
     public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => RuntimeDeclaration(method, entry) ?? new Context(this, method, entry) { ClosedInstance = true }.Run();
 
-    /// <summary>从引用共享实例恢复开放泛型体；类型参数始终保留，不把 object 实例写入泛型定义。</summary>
+    /// <summary>从已知原生实例恢复开放泛型体；标量实例只提供传参布局，输出保留类型参数。</summary>
     public MethodRecoveryResult RecoverShared(MethodRef instance, ulong entry)
     {
         var open = MethodRef.Open(instance.Method);
         if (RuntimeDeclaration(open, entry) is { } declaration) return declaration;
         if (instance.TypeArguments.Count != open.TypeArguments.Count || instance.MethodArguments.Count != open.MethodArguments.Count
-            || instance.TypeArguments.Concat(instance.MethodArguments).Any(t => !ManagedTypes.IsReferenceType(t) && !t.Equals(types.Int32) && !FieldLayouts.IsFullyShared(t)))
-            return new(open, entry, null, [new(entry, "泛型 不是引用共享实例")]);
+            || instance.TypeArguments.Concat(instance.MethodArguments).Any(t => !ManagedTypes.IsReferenceType(t)
+                && types.Kind(t) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double) && !FieldLayouts.IsFullyShared(t)))
+            return new(open, entry, null, [new(entry, "泛型 实例缺少可用的共享或标量布局")]);
         open = open with
         {
             TypeArguments = open.TypeArguments.Zip(instance.TypeArguments, Bind).ToArray(),
@@ -1221,6 +1222,10 @@ public sealed partial class MethodRecovery
 
         private ManagedValue Binary(Binary b)
         {
+            // C++ bool 传参取低一位；布局见证为 bool 的 T 在托管侧仍是同一个 T 值。
+            if (b is { Op: BinOp.And, Right: Const { Value: 1 } } && Recover(b.Left, null) is { } boolean
+                && boolean.Type is GenericParameterRef { NativeScalar: { } scalar } && types.Kind(scalar) == TypeKind.Bool)
+                return new ConversionValue(ConvKind.ZeroExtend, boolean, boolean.Type, b.Width);
             if (b is { Op: BinOp.Ror, Width: 32 or 64 })
             {
                 var shift = new Binary(BinOp.And, b.Right, Expr.C((ulong)b.Width - 1, b.Right.Width), b.Right.Width);
@@ -1314,6 +1319,8 @@ public sealed partial class MethodRecovery
             if (left is Fragment lf) left = Pack(lf);
             if (right is Fragment rf) right = Pack(rf);
             var reference = types.Kind(left.Type) == TypeKind.Reference || types.Kind(right.Type) == TypeKind.Reference;
+            if (left.Type is GenericParameterRef { NativeScalar: not null } || right.Type is GenericParameterRef { NativeScalar: not null })
+                throw Fail(0, "泛型复制 不支持原生数值比较");
             if (reference)
             {
                 if (c.Cond is not (Cond.Eq or Cond.Ne)) throw Fail(0, $"比较 引用的 {c.Cond}");
