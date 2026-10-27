@@ -58,7 +58,10 @@ public static partial class Decompilation
         public void Run(AstNode rootNode, TransformContext context)
         {
             RecoverSearchLoops(rootNode);
+            var searches = NormalizeAdvanceSearch(rootNode);
             RecoverResultLoops(rootNode);
+            foreach (var (original, replacement) in searches)
+                if (replacement.Parent is not null) replacement.ReplaceWith(original);
             RecoverAdvanceResultLoops(rootNode);
             RecoverCompleteLoops(rootNode);
             var normalized = NormalizeDirectLoops(rootNode);
