@@ -40,6 +40,7 @@ internal static class SourceQualityCheck
         var records = File.ReadLines(Path.Combine(directory, "recovery.jsonl")).Select(l => JsonDocument.Parse(l)).ToArray();
         var targets = records.Select(d => d.RootElement).Where(r => !r.GetProperty("dependency").GetBoolean()).ToArray();
         var emitted = targets.Where(r => r.GetProperty("status").GetString() == "emitted").ToArray();
+        var declarations = targets.Where(r => r.GetProperty("status").GetString() == "runtime-declaration").ToArray();
         var entries = File.ReadLines(Path.Combine(inventory, "native-entries.tsv")).Skip(1).Select(l => l.Split('\t'))
             .ToDictionary(p => p[0], p => long.Parse(p[1]));
         var recoveredEntries = emitted.Select(r => r.GetProperty("address").GetString()!).Distinct().ToArray();
@@ -50,6 +51,8 @@ internal static class SourceQualityCheck
             files = rows.Count, selectedMethods = targets.Length, emittedMethods = emitted.Length,
             holeMethods = targets.Count(r => r.GetProperty("status").GetString() == "hole"),
             emitFailedMethods = targets.Count(r => r.GetProperty("status").GetString() == "emit-failed"),
+            runtimeDeclarationMethods = declarations.Length,
+            runtimeDeclarationBytes = declarations.Select(r => r.GetProperty("address").GetString()!).Distinct().Sum(e => entries[e]),
             source = totals, emittedBytes = bytes, totalBytes, byteCoverage = (double)bytes / totalBytes,
         };
         var options = new JsonSerializerOptions { WriteIndented = true };

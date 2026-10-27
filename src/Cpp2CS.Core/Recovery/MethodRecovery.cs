@@ -79,18 +79,22 @@ public sealed partial class MethodRecovery
         return forwarding[(type, target)] = result;
     }
 
-    public MethodRecoveryResult Recover(MethodRef method, ulong entry) => new Context(this, method, entry).Run();
+    private static MethodRecoveryResult? RuntimeDeclaration(MethodRef method, ulong entry) => DelegateFacts.IsRuntimeMethod(method.Method)
+        ? new(method, entry, null, []) { Declaration = RuntimeDeclarationKind.Delegate } : null;
+
+    public MethodRecoveryResult Recover(MethodRef method, ulong entry) => RuntimeDeclaration(method, entry) ?? new Context(this, method, entry).Run();
 
     /// <summary>
     /// 恢复泛型类型或泛型方法的封闭实例，用于认出访问器等形态；
     /// 方法体以封闭类型表达，不写成泛型定义的 CIL。
     /// </summary>
-    public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => new Context(this, method, entry) { ClosedInstance = true }.Run();
+    public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => RuntimeDeclaration(method, entry) ?? new Context(this, method, entry) { ClosedInstance = true }.Run();
 
     /// <summary>从引用共享实例恢复开放泛型体；类型参数始终保留，不把 object 实例写入泛型定义。</summary>
     public MethodRecoveryResult RecoverShared(MethodRef instance, ulong entry)
     {
         var open = MethodRef.Open(instance.Method);
+        if (RuntimeDeclaration(open, entry) is { } declaration) return declaration;
         if (instance.TypeArguments.Count != open.TypeArguments.Count || instance.MethodArguments.Count != open.MethodArguments.Count
             || instance.TypeArguments.Concat(instance.MethodArguments).Any(t => !ManagedTypes.IsReferenceType(t) && !t.Equals(types.Int32) && !FieldLayouts.IsFullyShared(t)))
             return new(open, entry, null, [new(entry, "泛型 不是引用共享实例")]);

@@ -105,8 +105,11 @@ public sealed record ManagedBody(MethodRef Method, IReadOnlyList<ManagedBlock> B
 
 /// <summary>未恢复之处：地址与原因。原因的第一个词用于分桶统计。</summary>
 public sealed record RecoveryHole(ulong Address, string Reason, bool Derived = false);
+public enum RuntimeDeclarationKind { Delegate }
 public sealed record MethodRecoveryResult(MethodRef Method, ulong Entry, ManagedBody? Body, IReadOnlyList<RecoveryHole> Holes)
 {
+    /// <summary>已核验的运行时声明；没有恢复原生方法体，不计入方法体及字节覆盖率。</summary>
+    public RuntimeDeclarationKind? Declaration { get; init; }
     /// <summary>有洞时已恢复部分组成的方法体：洞写成 <see cref="ManagedHole"/>/<see cref="HoleValue"/>，只供阅读，不进执行对照与指标。</summary>
     public ManagedBody? Partial { get; init; }
 }

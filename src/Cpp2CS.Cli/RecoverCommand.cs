@@ -139,12 +139,13 @@ internal static class RecoverCommand
         using (var writer = new StreamWriter(Path.Combine(output, "recovery.jsonl")))
             foreach (var result in results)
             {
-                var status = result.Body is null ? "hole" : emitProblems.ContainsKey(result) ? "emit-failed" : "emitted";
+                var status = result.Declaration is not null ? "runtime-declaration" : result.Body is null ? "hole" : emitProblems.ContainsKey(result) ? "emit-failed" : "emitted";
                 writer.WriteLine(JsonSerializer.Serialize(new
                 {
                     address = $"0x{result.Entry:x}", method = result.Method.ToString(), status, bytes = bytes[result.Entry],
                     dependency = dependencies.Contains(result.Method.Method),
-                    bodySource = result.Body is null ? null : closure.Synthesized.ContainsKey(result.Method.Method) ? "language-definition" : "native-recovery",
+                    bodySource = result.Declaration is not null ? "runtime-declaration" : result.Body is null ? null : closure.Synthesized.ContainsKey(result.Method.Method) ? "language-definition" : "native-recovery",
+                    declaration = result.Declaration?.ToString(),
                     accessorProof = closure.LanguageAccessors.ContainsKey(result.Method.Method) ? "language-definition" : null,
                     holes = result.Holes.Select(h => new { address = $"0x{h.Address:x}", reason = h.Reason, derived = h.Derived }),
                     emitProblem = emitProblems.GetValueOrDefault(result),
@@ -226,7 +227,7 @@ internal static class RecoverCommand
         var sourceTypes = sourceLayout == "project"
             ? facts.Model.Types.Where(t => t.DeclaringType is null && (list is not null ? methods.Any(m => Top(m.Owner) == t)
                 : (all || InNamespaces(t, namespaces)) && (assembliesFilter is null || assembliesFilter.Contains(t.Assembly, StringComparer.Ordinal))))
-            : emitted.Concat(partialEmitted).Select(r => Top(r.Method.Method.Owner)).Distinct();
+            : emitted.Concat(partialEmitted).Concat(results.Where(r => r.Declaration is not null)).Select(r => Top(r.Method.Method.Owner)).Distinct();
         var sourceGroups = sourceTypes.GroupBy(t => t.Assembly).ToDictionary(g => g.Key, g => g.Select(t => (t.Namespace, t.SimpleName)).ToHashSet());
         var sourceAssemblyNames = sourceLayout == "project" && all
             ? facts.Model.Assemblies.Select(a => a.Name).Where(a => assembliesFilter is null || assembliesFilter.Contains(a, StringComparer.Ordinal))
@@ -269,9 +270,11 @@ internal static class RecoverCommand
         var report = new StringBuilder();
         report.AppendLine($"方法 {results.Length}（字节 {total}）：L3 无洞 {recovered.Length}（{(double)recovered.Length / Math.Max(1, results.Length):P1}，字节 {Fraction(Bytes(recovered)):P2}），写出 CIL {emitted.Count}（{(double)emitted.Count / Math.Max(1, results.Length):P1}，字节 {Fraction(Bytes(emitted)):P2}）");
         report.AppendLine("字节均按入口去重；各桶会重叠，不可直接相加。并集用于对账；“仅此”只看独立洞。");
-        var buckets = results.Where(r => r.Body is null).Select(r => (Result: r,
+        var declarations = results.Where(r => r.Declaration is not null).ToArray();
+        report.AppendLine($"运行时声明已核验：{declarations.Length} 方法 / {Bytes(declarations)} 原生字节（未恢复为 CIL 方法体，不计入字节覆盖率）");
+        var buckets = results.Where(r => r.Body is null && r.Declaration is null).Select(r => (Result: r,
             Categories: r.Holes.Where(h => !h.Derived).Select(h => Category(h.Reason)).Distinct().ToArray())).ToArray();
-        report.AppendLine($"状态对账：洞 {buckets.Length} / {Bytes(buckets.Select(b => b.Result))} 字节；写出失败 {emitProblems.Count} / {Bytes(emitProblems.Keys)} 字节；已写出 {emitted.Count} / {Bytes(emitted)} 字节；入口并集 {bytes.Count} / {total} 字节");
+        report.AppendLine($"状态对账：洞 {buckets.Length} / {Bytes(buckets.Select(b => b.Result))} 字节；写出失败 {emitProblems.Count} / {Bytes(emitProblems.Keys)} 字节；已写出 {emitted.Count} / {Bytes(emitted)} 字节；运行时声明 {declarations.Length} / {Bytes(declarations)} 字节；入口并集 {bytes.Count} / {total} 字节");
         report.AppendLine();
         report.AppendLine("独立洞分桶：方法数 / 字节数 / 仅此方法数 / 仅此字节数 / 连带洞条数 / 桶");
         var derived = results.SelectMany(r => r.Holes).Where(h => h.Derived).GroupBy(h => Category(h.Reason)).ToDictionary(g => g.Key, g => g.Count());
