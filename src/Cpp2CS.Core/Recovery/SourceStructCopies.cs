@@ -53,27 +53,48 @@ internal static class SourceStructCopies
                     || initial.Root.Type is not DefinitionRef type || LeafPaths(type) is not { Count: > 0 } paths) continue;
                 var count = paths.Count;
                 var reads = statements.Skip(i).Take(count).OfType<ManagedAssignment>().ToArray();
-                if (reads.Length != count || reads.Any(r => FieldPath(r.Value) is not { } path || path.Root != initial.Root
-                        || uses.GetValueOrDefault(r.Target.Variable) != 1)
+                if (reads.Length != count || reads.Any(r => FieldPath(r.Value) is not { } path || path.Root != initial.Root)
                     || reads.Select(r => r.Target.Variable).Distinct().Count() != count) continue;
                 var snapshots = reads.ToDictionary(r => r.Target.Variable, r => FieldPath(r.Value)!.Value.Path);
                 if (!SamePaths(paths, snapshots.Values)) continue;
-                var writes = statements.Skip(i + count).Take(count).OfType<ManagedStore>().ToArray();
-                if (writes.Length != count) continue;
-                ManagedValue? destination = null;
-                var copied = new List<IReadOnlyList<FieldRef>>();
-                foreach (var write in writes)
+                var destinations = new Dictionary<ManagedValue, List<IReadOnlyList<FieldRef>>>();
+                var initialized = new HashSet<LocalValue>();
+                var consumed = new Dictionary<Variable, int>();
+                var end = i + count;
+                while (end < statements.Count)
                 {
-                    if (FieldPath(write.Target, write: true) is not { } target || !target.Root.Type.Equals(type)
-                        || destination is not null && destination != target.Root || write.Value is not LocalValue local
-                        || !snapshots.TryGetValue(local.Variable, out var sourcePath) || !sourcePath.SequenceEqual(target.Path)) break;
-                    destination = target.Root;
-                    copied.Add(target.Path);
+                    if (statements[end] is ManagedStore { Target: IndirectValue { Address: AddressValue { Target: LocalValue zero } },
+                            Value: ComposedValue { Leaves.Count: 0 } } && zero.Type.Equals(type) && zero != initial.Root && !destinations.ContainsKey(zero))
+                        initialized.Add(zero);
+                    else if (statements[end] is ManagedStore write && FieldPath(write.Target, write: true) is { } target && target.Root.Type.Equals(type)
+                        && write.Value is LocalValue local && snapshots.TryGetValue(local.Variable, out var sourcePath) && sourcePath.SequenceEqual(target.Path))
+                    {
+                        if (!destinations.TryGetValue(target.Root, out var copied)) destinations[target.Root] = copied = [];
+                        if (copied.Any(p => p.SequenceEqual(target.Path))) break;
+                        copied.Add(target.Path);
+                        consumed[local.Variable] = consumed.GetValueOrDefault(local.Variable) + 1;
+                    }
+                    else break;
+                    end++;
                 }
-                if (destination is null || !SamePaths(paths, copied)) continue;
-                statements.RemoveRange(i, 2 * count);
-                statements.Insert(i, destination is LocalValue localTarget ? new ManagedAssignment(first.Address, localTarget, initial.Root)
-                    : new ManagedStore(first.Address, destination, initial.Root));
+                if (destinations.Count == 0 || destinations.Values.Any(copied => !SamePaths(paths, copied))
+                    || initialized.Any(d => !destinations.ContainsKey(d))
+                    || snapshots.Keys.Any(v => consumed.GetValueOrDefault(v) != uses.GetValueOrDefault(v))
+                    || destinations.Count > 1 && (initial.Root is not (LocalValue or ArgumentValue) || destinations.Keys.Any(d => d is not LocalValue))) continue;
+                var replacements = new List<ManagedStatement>();
+                var source = initial.Root;
+                if (destinations.Count > 1)
+                {
+                    // 多个局部目标可交错写入；先保存整值，避免某个目标覆盖来源后影响后续复制。
+                    var snapshot = new LocalValue(new Variable(Storage.Temp(next++), 1), type, 0);
+                    replacements.Add(new ManagedAssignment(first.Address, snapshot, source));
+                    source = snapshot;
+                }
+                replacements.AddRange(destinations.Keys.Select(d => d is LocalValue localTarget
+                    ? (ManagedStatement)new ManagedAssignment(first.Address, localTarget, source) : new ManagedStore(first.Address, d, source)));
+                statements.RemoveRange(i, end - i);
+                statements.InsertRange(i, replacements);
+                i += replacements.Count - 1;
             }
             // 读取全部直属字段后立即按原字段返回，等价于在原读取位置复制整个结构体。
             for (var i = 0; i < statements.Count; i++)

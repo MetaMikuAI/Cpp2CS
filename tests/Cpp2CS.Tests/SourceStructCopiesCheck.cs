@@ -115,6 +115,23 @@ internal static class SourceStructCopiesCheck
         var provenCopy = Body(provenReads.Cast<ManagedStatement>().Concat(provenWrites));
         a.True(SourceStructCopies.Rewrite(provenCopy).Blocks[0].Statements is [ManagedStore { Target: var provenTarget, Value: var provenSource }]
             && provenTarget == element && provenSource == nestedSource, "已证明的叶子访问器不阻塞完整结构体复制");
+        var secondDestination = nestedSource with { Variable = new(Storage.Temp(-21), 1) };
+        var thirdDestination = nestedSource with { Variable = new(Storage.Temp(-22), 1) };
+        ManagedStore Zero(LocalValue local) => new(0, new IndirectValue(new AddressValue(local), local.Type), new ComposedValue(local.Type, []));
+        var multipleWrites = snapshots.SelectMany((s, i) => new ManagedStatement[]
+            { new ManagedStore(0, Nested(secondDestination, i), s), new ManagedStore(0, Nested(thirdDestination, i), s) }).ToArray();
+        var multiple = Body(nestedReads.Append(Zero(secondDestination)).Concat(multipleWrites));
+        var wholeCopies = SourceStructCopies.Rewrite(multiple).Blocks[0].Statements;
+        a.True(wholeCopies is [ManagedAssignment { Value: var originalValue, Target: var capturedValue },
+            ManagedAssignment { Target: var firstTarget, Value: var firstValue }, ManagedAssignment { Target: var secondTarget, Value: var secondValue }]
+            && originalValue == nestedSource && firstTarget == secondDestination && secondTarget == thirdDestination
+            && firstValue == capturedValue && secondValue == capturedValue, "嵌套快照可交错复制到多个局部，来源只读取一次");
+        var missingDestination = Body(nestedReads.Concat(multipleWrites.SkipLast(1)));
+        a.Equal(8, SourceStructCopies.Rewrite(missingDestination).Blocks[0].Statements.Count, "任一目标不完整时保留叶子复制");
+        var escapedMultiple = Body(nestedReads.Concat(multipleWrites).Append(new ManagedReturn(0, snapshots[0])));
+        a.Equal(10, SourceStructCopies.Rewrite(escapedMultiple).Blocks[0].Statements.Count, "多目标快照逃逸时不能移除原局部");
+        var clearedOnly = Body(nestedReads.Append(Zero(secondDestination)).Concat(nestedWrites));
+        a.Equal(7, SourceStructCopies.Rewrite(clearedOnly).Blocks[0].Statements.Count, "未被完整覆盖的清零不能删除");
         var wrongDirection = Body(provenReads.Select(s => s with { Value = Proven((FieldValue)s.Value, true) }).Cast<ManagedStatement>().Concat(provenWrites));
         a.Equal(6, SourceStructCopies.Rewrite(wrongDirection).Blocks[0].Statements.Count, "写访问器不能作为读取证明");
         var escapedProof = Body(provenReads.Cast<ManagedStatement>().Concat(provenWrites).Append(new ManagedReturn(0, snapshots[0])));
