@@ -27,6 +27,8 @@ internal static class SourceQualityCheck
                 ["unrecoveredCalls"] = root.DescendantNodes().OfType<InvocationExpressionSyntax>().Count(c => c.Expression is MemberAccessExpressionSyntax m
                     && m.Expression.ToString() is "Unrecovered" or "Cpp2CS.Unrecovered" or "global::Cpp2CS.Unrecovered"),
                 ["visibleMoveNext"] = root.DescendantNodes().OfType<MethodDeclarationSyntax>().Count(m => m.Identifier.ValueText == "MoveNext"),
+                ["moveNextCalls"] = root.DescendantNodes().OfType<InvocationExpressionSyntax>().Count(c => c.Expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: "MoveNext" }
+                    or IdentifierNameSyntax { Identifier.ValueText: "MoveNext" }),
                 ["throwNull"] = root.DescendantNodes().Count(n => n is ThrowStatementSyntax { Expression.RawKind: (int)SyntaxKind.NullLiteralExpression }
                     or ThrowExpressionSyntax { Expression.RawKind: (int)SyntaxKind.NullLiteralExpression }),
                 ["asyncMethods"] = root.DescendantNodes().OfType<MethodDeclarationSyntax>().Count(m => m.Modifiers.Any(t => t.RawKind == (int)SyntaxKind.AsyncKeyword)),

@@ -63,13 +63,21 @@ public static partial class Decompilation
                 // 只接收元素读取以外不使用枚举器的循环体。
                 if (body.Descendants.OfType<IdentifierExpression>().Count(id => id.Identifier == name) != 1) continue;
                 var prefix = siblings.Take(index).Reverse().SkipWhile(s => s is VariableDeclarationStatement d && d.Variables.All(v => v.Initializer is null)).ToArray();
-                if (prefix is not [ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
-                        Left: var destination, Right: IdentifierExpression temporary } } assignment,
-                    VariableDeclarationStatement factory, ..] || !Name(destination, name) || factory.Variables.Count != 1
-                    || factory.Variables.Single() is not { Initializer: InvocationExpression { Arguments.Count: 0,
-                        Target: MemberReferenceExpression { MemberName: "GetEnumerator" } get } } created || created.Name != temporary.Identifier) continue;
+                if (prefix.FirstOrDefault() is not ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
+                    Left: var destination, Right: var initialized } } assignment || !Name(destination, name)) continue;
+                VariableDeclarationStatement? factory = null;
+                IdentifierExpression? temporary = null;
+                if (initialized is IdentifierExpression copied && prefix.ElementAtOrDefault(1) is VariableDeclarationStatement declarationFactory
+                    && declarationFactory.Variables.Count == 1 && declarationFactory.Variables.Single().Name == copied.Identifier)
+                {
+                    temporary = copied;
+                    factory = declarationFactory;
+                    initialized = factory.Variables.Single().Initializer;
+                }
+                if (initialized is not InvocationExpression { Arguments.Count: 0,
+                    Target: MemberReferenceExpression { MemberName: "GetEnumerator" } get }) continue;
                 var method = loop.Ancestors.FirstOrDefault(n => n is MethodDeclaration or LambdaExpression or AnonymousMethodExpression);
-                if (method is null || method.Descendants.OfType<IdentifierExpression>().Count(id => id.Identifier == temporary.Identifier) != 1) continue;
+                if (method is null || temporary is not null && method.Descendants.OfType<IdentifierExpression>().Count(id => id.Identifier == temporary.Identifier) != 1) continue;
                 var allowed = loop.Descendants.OfType<IdentifierExpression>().Concat(removed.SelectMany(s => s.Descendants.OfType<IdentifierExpression>()))
                     .Concat(assignment.Descendants.OfType<IdentifierExpression>()).ToHashSet();
                 if (method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == name && !allowed.Contains(id))) continue;
@@ -81,7 +89,7 @@ public static partial class Decompilation
                 replacement.Statements.Last().Remove();
                 loop.ReplaceWith(new ForeachStatement(current.Type.Clone(), new SingleVariableDesignation(current.Variables.Single().Name), get.Target.Clone(), replacement));
                 foreach (var statement in removed) statement.Remove();
-                assignment.Remove(); factory.Remove(); declaration.Remove();
+                assignment.Remove(); factory?.Remove(); declaration.Remove();
                 foreach (var unused in method.Descendants.OfType<VariableDeclarationStatement>().Where(d => d.Variables.Count == 1
                     && d.Variables.Single().Initializer is null && !method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == d.Variables.Single().Name)).ToArray()) unused.Remove();
             }
