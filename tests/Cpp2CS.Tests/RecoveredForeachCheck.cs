@@ -14,7 +14,7 @@ internal static class RecoveredForeachCheck
         MemberReferenceExpression Member(string name) => new(Id("iterator"), name);
         ExpressionStatement Dispose() => new(new InvocationExpression(Member("Dispose")));
         var a = new Assertions();
-        foreach (var mode in new[] { "local", "receiver", "projection" })
+        foreach (var mode in new[] { "local", "receiver", "projection", "conditional", "conditional-rewrap", "increment" })
         foreach (var cleanupMode in new[] { "external", "internal", "continuation", "direct" })
         foreach (var temporary in new[] { false, true })
         foreach (var escape in new[] { false, true })
@@ -32,7 +32,14 @@ internal static class RecoveredForeachCheck
             if (temporary) method.Body.Statements.Add(new VariableDeclarationStatement(new SimpleType("var"), "saved", get));
             method.Body.Statements.Add(new ExpressionStatement(new AssignmentExpression(Id("iterator"), temporary ? Id("saved") : get)));
             var body = new BlockStatement();
-            if (mode == "receiver") body.Statements.Add(new ExpressionStatement(new InvocationExpression(new MemberReferenceExpression(Member("Current"), "Touch"))));
+            if (mode is "conditional" or "conditional-rewrap" or "increment")
+            {
+                var operand = new UnaryOperatorExpression(mode == "increment" ? UnaryOperatorType.PostIncrement : UnaryOperatorType.NullConditional, Member("Current"));
+                Expression call = new InvocationExpression(new MemberReferenceExpression(operand, "Touch"));
+                if (mode == "conditional-rewrap") call = new UnaryOperatorExpression(UnaryOperatorType.NullConditionalRewrap, call);
+                body.Statements.Add(new ExpressionStatement(call));
+            }
+            else if (mode == "receiver") body.Statements.Add(new ExpressionStatement(new InvocationExpression(new MemberReferenceExpression(Member("Current"), "Touch"))));
             else if (mode == "projection") body.Statements.Add(new VariableDeclarationStatement(new SimpleType("var"), "key", new MemberReferenceExpression(Member("Current"), "Key")));
             else
             {
@@ -101,8 +108,8 @@ internal static class RecoveredForeachCheck
                 }
             }
             transform.Run(tree, null!);
-            a.Equal(escape ? 0 : 1, tree.Descendants.OfType<ForeachStatement>().Count(), "直接初始化和临时复制均折叠，枚举器逃逸时保留");
-            if (!escape)
+            a.Equal(escape || mode == "increment" ? 0 : 1, tree.Descendants.OfType<ForeachStatement>().Count(), "直接初始化和临时复制均折叠，枚举器逃逸或读取被修改时保留");
+            if (!escape && mode != "increment")
             {
                 a.True(!tree.Descendants.OfType<MemberReferenceExpression>().Any(m => m.MemberName is "MoveNext" or "Dispose" or "Current"), "显式枚举与清理已全部收敛");
                 if (mode != "local") a.True(tree.ToString().Contains("item2"), "循环变量避开未使用的参数名");

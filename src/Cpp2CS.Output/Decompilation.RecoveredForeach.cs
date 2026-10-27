@@ -26,6 +26,8 @@ public static partial class Decompilation
             MemberReferenceExpression member => FirstReceiver(member.Target, read),
             IndexerExpression indexer => FirstReceiver(indexer.Target, read),
             ParenthesizedExpression parentheses => FirstReceiver(parentheses.Expression, read),
+            UnaryOperatorExpression { Operator: UnaryOperatorType.NullConditional or UnaryOperatorType.NullConditionalRewrap } conditional
+                => FirstReceiver(conditional.Expression, read),
             _ => false,
         };
 
