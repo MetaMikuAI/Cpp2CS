@@ -51,6 +51,12 @@ internal static class FrameExtentCheck
             block.Statements.Add(new Return(0x1034) { Value = new Load(new FrameAddress(-16), 64) });
             a.Equal(1, FrameSlotPromotion.Run(function, preserved: FrameCopySpans.Read(function).ToArray()), "范围以外的独立标量仍可提升");
         }
+        var invocation = new Call(0x1000, CallKind.Indirect, Expr.C(0, 64)) { Arguments = [new FrameAddress(-64)] };
+        a.True(FrameUses.Touches(invocation, -32, 16, (_, _) => 48), "结构体传址保留末段写入");
+        a.True(!FrameUses.Touches(invocation, -16, 8, (_, _) => 48), "已知长度不覆盖相邻独立槽");
+        a.True(FrameUses.Touches(invocation, -16, 8, (_, _) => null), "未知传址范围仍可能读取上方槽");
+        a.True(!FrameUses.Touches(new Return(0x1000) { Value = new Load(new FrameAddress(-64), 64) }, -32, 8, (_, _) => null), "精确读取不视为整段逃逸");
+        a.True(FrameUses.Touches(new Store(0x1000, Expr.C(0x2000, 64), new FrameAddress(-64)), -32, 8, (_, _) => null), "存入外部内存的地址保护后续分片");
         return a.Finish("frame-extents");
     }
 }

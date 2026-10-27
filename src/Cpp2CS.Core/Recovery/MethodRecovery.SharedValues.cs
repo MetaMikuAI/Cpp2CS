@@ -55,6 +55,24 @@ public sealed partial class MethodRecovery
                 Load { Address: FrameAddress frame } when singleStores.TryGetValue(frame.Offset, out var store) => AddressType(store.Value, depth + 1),
                 _ => null,
             };
+            Dictionary<long, Store> InvokerStores(Block block, int index)
+            {
+                var stores = new Dictionary<long, Store>();
+                var seen = new HashSet<Block>();
+                while (seen.Count < 32 && seen.Add(block))
+                {
+                    foreach (var statement in block.Statements.Take(index).Reverse())
+                    {
+                        if (statement is Call || statement is Store { Target: not FrameAddress }) return stores;
+                        if (statement is Store { Target: FrameAddress slot } store) stores.TryAdd(slot.Offset, store);
+                    }
+                    if (block.Predecessors.ToArray() is not [var parent] || parent.Handler == block
+                        || parent.NormalSuccessors.ToArray() is not [var next] || next != block) break;
+                    block = parent;
+                    index = block.Statements.Count;
+                }
+                return stores;
+            }
             foreach (var block in function.Blocks)
                 for (var i = 0; i < block.Statements.Count; i++)
                 {
@@ -172,8 +190,7 @@ public sealed partial class MethodRecovery
                         var returned = Concrete(callee, callee.Method.ReturnType);
                         if (!ManagedTypes.IsVoid(returned) && !Equals(AddressType(call.Arguments[4]), returned)
                             && !(call.Arguments[4] is FrameAddress && types.Size(returned) > 0)) continue;
-                        var stores = block.Statements.Take(i).OfType<Store>().Where(s => s.Target is FrameAddress)
-                            .GroupBy(s => ((FrameAddress)s.Target).Offset).ToDictionary(g => g.Key, g => g.Last());
+                        var stores = InvokerStores(block, i);
                         var args = new List<Expr> { call.Arguments[2] };
                         var consumed = new List<Store>();
                         for (var p = 0; p < callee.Method.Parameters.Count; p++)
@@ -189,7 +206,11 @@ public sealed partial class MethodRecovery
                         block.Statements[i] = call with { Op = new(OpKind.InvokeGeneric, callee), Arguments = args.ToArray(),
                             Sources = [], Results = [], Defines = [], Target = Expr.C(0, 64) };
                         // 参数数组只供这次 invoker 读取；同址后续写入仍保留。
-                        foreach (var store in consumed) block.Statements[block.Statements.IndexOf(store)] = new Nop(store.Address, "invoker 参数");
+                        foreach (var store in consumed)
+                        {
+                            var ownerBlock = function.Blocks.Single(b => b.Statements.Contains(store));
+                            ownerBlock.Statements[ownerBlock.Statements.IndexOf(store)] = new Nop(store.Address, "invoker 参数");
+                        }
                     }
                     if (!ReferenceEquals(block.Statements[i], call)) sharedSites.Add(call.Address);
                 }

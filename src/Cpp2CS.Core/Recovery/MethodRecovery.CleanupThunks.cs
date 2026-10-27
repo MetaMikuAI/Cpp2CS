@@ -95,17 +95,17 @@ public sealed partial class MethodRecovery
             {
                 Load { Address: FrameAddress f } load when f.Offset < offset + 8 && f.Offset + load.Width / 8 > offset
                     => f.Offset == offset && load.Width == 64,
-                FrameAddress f when f.Offset >= offset && f.Offset < offset + 8 => false,
+                FrameAddress f when f.Offset < offset + 8 => false,
                 _ => ExprMap.Children(e).All(p => Safe(p, offset))
             };
-            static bool Touches(Stmt statement, long offset, int bytes) =>
-                statement is Store { Target: FrameAddress f } write && f.Offset < offset + bytes && f.Offset + write.Value.Width / 8 > offset
-                || ExprMap.Operands(statement).SelectMany(ExprMap.Walk).Any(e => e switch
-                {
-                    Load { Address: FrameAddress f } read => f.Offset < offset + bytes && f.Offset + read.Width / 8 > offset,
-                    FrameAddress f => f.Offset >= offset && f.Offset < offset + bytes,
-                    _ => false,
-                });
+            int? InvokerExtent(Call call, int index)
+            {
+                if (call.Op is not { Kind: OpKind.InvokeGeneric, Operand: MethodRef callee } || index == 0) return null;
+                var type = index == call.Arguments.Length - 1 ? Concrete(callee, callee.Method.ReturnType)
+                    : Concrete(callee, callee.Method.Parameters[index - 1].Type);
+                return types.Size(type) is > 0 and var size ? size : null;
+            }
+            bool Touches(Stmt statement, long offset, int bytes) => FrameUses.Touches(statement, offset, bytes, InvokerExtent);
             var promotable = stores.Where(pair => pair.Value.Value is FrameAddress or Use { Variable.Version: 0 }
                 && all.Where(s => !ReferenceEquals(s, pair.Value)).All(s =>
                     !Touches(s, pair.Key, 8)

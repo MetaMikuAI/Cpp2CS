@@ -120,7 +120,7 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                     yield return (value, type, call.Address, "原子交换的新引用");
                     yield return (comparand, type, call.Address, "原子交换的比较引用");
                     break;
-                case Call call when call.Op is null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual or OpKind.CallDelegate }
+                case Call call when call.Op is null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual or OpKind.CallDelegate or OpKind.CallMethodPointer }
                     && context.Resolve(call) is { } target && abi.Classify(target, out _) is { } signature:
                     var registers = call.ArgumentsBySource();
                     if (call.DelegateReceiver is { } delegateReceiver && signature.This is { } delegateThis)

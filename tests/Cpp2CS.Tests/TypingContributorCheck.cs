@@ -128,6 +128,21 @@ internal static class TypingContributorCheck
             var unproven = new TypeEngine([new PhiContributor(), new UseContributor(input), new PhiUseContributor()]).Run(Context());
             a.True(unproven.Converged && unproven.Solution.Count == 0, "无整数用途的循环不凭零初值猜类型");
         }
+        var receiverNull = V(17); var pointerResult = V(18); var pointerClobber = V(19);
+        var pointerCall = new Call(0x1004, CallKind.Indirect, Expr.C(0, 64))
+        {
+            Op = new(OpKind.CallMethodPointer, method), Arguments = [new Use(receiverNull, 64)], Sources = [Storage.Gpr(0)],
+            Results = [Storage.Gpr(0), Storage.Gpr(1)], Defines = [pointerResult, pointerClobber],
+        };
+        block.Statements = [new Define(0x1000, receiverNull, Expr.C(0, 64)), pointerCall];
+        var pointerTypes = new TypeEngine([new CallResultContributor(), new UseContributor(input)])
+            .Run(new TypingContext(function, types, new Dictionary<Storage, TypeRef>(), _ => method));
+        a.Equal<TypeResult?>(new ManagedResult(types.Object), pointerTypes.Solution.GetValueOrDefault(pointerResult), "已确定方法指针的返回签名定型");
+        a.Equal<TypeResult?>(new ManagedResult(types.Object), pointerTypes.Solution.GetValueOrDefault(receiverNull), "方法指针的接收者用途传到 null");
+        a.True(pointerTypes.Solution.GetValueOrDefault(pointerClobber) is ClobberedResult, "方法指针的非返回寄存器仍是破坏值");
+        block.Statements = [pointerCall with { Op = new(OpKind.Import, "unknown") }];
+        var notManaged = new TypeEngine([new CallResultContributor()]).Run(new TypingContext(function, types, new Dictionary<Storage, TypeRef>(), _ => method));
+        a.True(!notManaged.Solution.ContainsKey(pointerResult), "其他运行时操作不能套用托管调用返回规则");
         return a.Finish("typing-contributors");
     }
 }
