@@ -12,7 +12,7 @@ internal static class SourceStructCopiesCheck
     {
         var definition = new TypeDef { Index = 0, Assembly = "Sample", Namespace = "Sample", Name = "Record", Token = 0,
             Attributes = TypeAttributes.SequentialLayout, IsValueType = true, IsEnum = false };
-        var integerDefinition = new TypeDef { Index = -100, Assembly = "Sample", Namespace = "System", Name = "Int32", Token = 0,
+        var integerDefinition = new TypeDef { Index = -100, Assembly = "mscorlib.dll", Namespace = "System", Name = "Int32", Token = 0,
             Attributes = TypeAttributes.SequentialLayout, IsValueType = true, IsEnum = false };
         var integer = new DefinitionRef(integerDefinition, []);
         integerDefinition.Fields = [new FieldDef { Index = -100, Owner = integerDefinition, Name = "m_value", Type = integer, Offset = 0, Attributes = FieldAttributes.Private }];
@@ -132,6 +132,19 @@ internal static class SourceStructCopiesCheck
         a.Equal(10, SourceStructCopies.Rewrite(escapedMultiple).Blocks[0].Statements.Count, "多目标快照逃逸时不能移除原局部");
         var clearedOnly = Body(nestedReads.Append(Zero(secondDestination)).Concat(nestedWrites));
         a.Equal(7, SourceStructCopies.Rewrite(clearedOnly).Blocks[0].Statements.Count, "未被完整覆盖的清零不能删除");
+        var cleared = Body(new[] { Clear(2), Clear(0), Clear(1) });
+        a.True(SourceStructCopies.Rewrite(cleared).Blocks[0].Statements is [ManagedStore { Target: IndirectValue { Address: AddressValue { Target: var reset } },
+            Value: ComposedValue { Leaves.Count: 0 } }] && reset == source, "全部字段乱序清零仍恢复为 default");
+        a.Equal(2, SourceStructCopies.Rewrite(Body(new[] { Clear(2), Clear(0) })).Blocks[0].Statements.Count, "部分清零不扩大写入范围");
+        a.Equal(3, SourceStructCopies.Rewrite(Body(new[] { Clear(2), Clear(0), Clear(1) with { Value = new ConstantValue(1, integer, 32) } })).Blocks[0].Statements.Count,
+            "非零字段不合并成 default");
+        a.Equal(4, SourceStructCopies.Rewrite(Body(new ManagedStatement[] { Clear(0), new ManagedCall(0, new(null!, null, [], false), null, false), Clear(1), Clear(2) })).Blocks[0].Statements.Count,
+            "不跨过可观察调用合并清零");
+        var nestedZero = Body([new ManagedStore(0, new FieldValue(new AddressValue(nestedSource), new(wrapper.Fields[0], wrapperType), type, 0), new ComposedValue(type, []))]);
+        a.True(SourceStructCopies.Rewrite(nestedZero).Blocks[0].Statements is [ManagedStore { Target: IndirectValue }], "子结构体 default 也计入完整清零");
+        var indirectZero = Body(nestedZero.Blocks[0].Statements.Cast<ManagedStore>().Select(s => s with { Target = new IndirectValue(new AddressValue(s.Target), s.Target.Type) }));
+        a.True(SourceStructCopies.Rewrite(indirectZero).Blocks[0].Statements is [ManagedStore { Target: IndirectValue { Address: AddressValue { Target: LocalValue } } }],
+            "经字段地址清零子结构体也折回局部整体 default");
         var wrongDirection = Body(provenReads.Select(s => s with { Value = Proven((FieldValue)s.Value, true) }).Cast<ManagedStatement>().Concat(provenWrites));
         a.Equal(6, SourceStructCopies.Rewrite(wrongDirection).Blocks[0].Statements.Count, "写访问器不能作为读取证明");
         var escapedProof = Body(provenReads.Cast<ManagedStatement>().Concat(provenWrites).Append(new ManagedReturn(0, snapshots[0])));

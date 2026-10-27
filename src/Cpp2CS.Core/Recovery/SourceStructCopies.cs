@@ -211,6 +211,29 @@ internal static class SourceStructCopies
                     i++;
                 }
             }
+            // 连续清空局部结构体的全部直属字段，包含子结构体的 default，等价于一次 initobj。
+            for (var i = 0; i < statements.Count; i++)
+            {
+                static FieldValue? Storage(ManagedValue value) => value switch
+                {
+                    FieldValue { Accessor: null } field => field,
+                    IndirectValue { Address: AddressValue { Target: FieldValue { Accessor: null } field } } indirect when indirect.Type.Equals(field.Type) => field,
+                    _ => null,
+                };
+                if (statements[i] is not ManagedStore first || Storage(first.Target) is not { } firstField
+                    || Local(firstField.Receiver) is not { Type: DefinitionRef { Definition: { IsValueType: true, IsEnum: false } definition } } local
+                    || (definition.Attributes & System.Reflection.TypeAttributes.LayoutMask) == System.Reflection.TypeAttributes.ExplicitLayout) continue;
+                var fields = definition.Fields.Where(f => !f.IsStatic).ToHashSet();
+                var writes = statements.Skip(i).Take(fields.Count).OfType<ManagedStore>().ToArray();
+                static bool Zero(ManagedValue value, TypeRef type) => value is ComposedValue { Leaves.Count: 0 } composed && composed.Type.Equals(type)
+                    || value is ConstantValue { Bits: 0 } && (ManagedTypes.IsReferenceType(type)
+                        || ManagedTypes.PrimitiveName(type) is not null || type is DefinitionRef { Definition.IsEnum: true });
+                if (fields.Count == 0 || writes.Length != fields.Count
+                    || writes.Any(s => Storage(s.Target) is not { } target || Local(target.Receiver) != local || !Zero(s.Value, target.Type))
+                    || !writes.Select(s => Storage(s.Target)!.Field.Field).ToHashSet().SetEquals(fields)) continue;
+                statements.RemoveRange(i, fields.Count);
+                statements.Insert(i, new ManagedStore(first.Address, new IndirectValue(new AddressValue(local), local.Type), new ComposedValue(local.Type, [])));
+            }
             // 引用对象内的结构体字段被完整覆盖时，生成整值写入，供属性 setter 认回。
             for (var i = 0; i < statements.Count; i++)
             {
