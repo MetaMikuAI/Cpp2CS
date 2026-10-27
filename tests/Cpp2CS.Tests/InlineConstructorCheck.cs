@@ -44,6 +44,20 @@ internal static class InlineConstructorCheck
         caller.EntryBlock.Statements[2] = Field(new Use(created, 64), new Load(value, 64));
         a.True(InlineConstructors.Find(pattern!, caller, caller.EntryBlock, 0, created) is null,
             "不能把有访存的实参提前到对象分配点");
+        var guarded = Function(new Call(0, CallKind.Direct, Expr.C(100, 64)), Base(new Use(created, 64)), new Jump(8, 16));
+        var writes = new Block(16) { Statements = [Field(new Use(created, 64), value), new Return(20)] };
+        var handler = new Block(24) { IsLandingPad = true, Statements = [new Return(28)] };
+        MachineFunction.AddEdge(guarded.EntryBlock, writes);
+        MachineFunction.AddEdge(guarded.EntryBlock, handler);
+        guarded.EntryBlock.Handler = handler;
+        guarded.Blocks.AddRange([writes, handler]);
+        guarded.Renumber();
+        a.True(InlineConstructors.Find(pattern!, guarded, guarded.EntryBlock, 0, created) is not null,
+            "新对象直接字段写入可位于保护调用之后的无异常边块");
+        guarded.EntryBlock.Statements.RemoveAt(1);
+        writes.Statements.Insert(0, Base(new Use(created, 64)));
+        a.True(InlineConstructors.Find(pattern!, guarded, guarded.EntryBlock, 0, created) is null,
+            "基类调用不能跨越分配的异常去向");
         return a.Finish("inline-constructors");
     }
 }

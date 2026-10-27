@@ -1520,6 +1520,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 for (var side = 0; side < 2; side++)
                 {
                     if (ThrowBlock(normal[side]) is not { } helper || ThrowBlock(normal[1 - side]) is not null) continue;
+                    if (!FoldedCheckEdges.Preserve(function, head, normal[side], side, Fresh)) continue;
                     var condition = Fold.Simplify(side == 0 ? branch.Condition : new Not(branch.Condition));
                     var (kind, template, arguments) = (helper.Detail, condition) switch
                     {

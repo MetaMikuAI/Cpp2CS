@@ -18,14 +18,12 @@ public static partial class Decompilation
                     || guarded.FinallyBlock is not null || guarded.CatchClauses.ToArray() is not [var catcher]
                     || catcher.Condition is not null || catcher.Type?.ToString() is not ("Exception" or "System.Exception")
                     || guarded.TryBlock is not { } tryBody || tryBody.Statements.Count < 2
-                    || tryBody.Statements.Last() is not ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
-                        Left: IdentifierExpression output, Right: IdentifierExpression state } }
-                    || tryBody.Statements.ElementAt(tryBody.Statements.Count - 2) is not WhileStatement
-                        { Condition: PrimitiveExpression { Value: true }, EmbeddedStatement: BlockStatement content } loop
+                    || tryBody.Statements.OfType<WhileStatement>().ToArray() is not [
+                        { Condition: PrimitiveExpression { Value: true }, EmbeddedStatement: BlockStatement content } loop]
                     || content.Statements.ToArray() is not [VariableDeclarationStatement advance, VariableDeclarationStatement carried,
                         IfElseStatement { FalseStatement: null, TrueStatement: BlockStatement positive } test,
                         ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign, Left: var exhaustedTarget, Right: var exhaustedValue } }, BreakStatement]
-                    || !Name(exhaustedTarget, state.Identifier) || !IntegerConstant(exhaustedValue, 0)
+                    || exhaustedTarget is not IdentifierExpression state || !IntegerConstant(exhaustedValue, 0)
                     || advance.Variables.ToArray() is not [var flag] || !Name(test.Condition, flag.Name)
                     || flag.Initializer is not InvocationExpression { Arguments.Count: 0,
                         Target: MemberReferenceExpression { MemberName: "MoveNext", Target: IdentifierExpression enumerator } }
@@ -39,6 +37,13 @@ public static partial class Decompilation
                         Left: var foundTarget, Right: var foundValue } }, BreakStatement stopped]
                     || !Name(foundTarget, state.Identifier) || !Name(foundValue, carriedValue.Name)
                     || !ConditionalCleanup(catcher, enumerator.Identifier)) continue;
+                var suffix = tryBody.Statements.SkipWhile(s => s != loop).Skip(1).ToArray();
+                bool Copy(Statement statement) => PureLocals(statement) || statement is ExpressionStatement
+                    { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign, Left: IdentifierExpression,
+                        Right: IdentifierExpression or PrimitiveExpression } };
+                if (suffix.Any(s => !Copy(s)) || suffix.OfType<ExpressionStatement>().Where(s => s.Expression is AssignmentExpression assignment
+                        && Name(assignment.Right, state.Identifier)).ToArray() is not [var transfer]
+                    || transfer.Expression is not AssignmentExpression { Left: IdentifierExpression output }) continue;
                 var siblings = parent.Statements.ToArray(); var index = Array.IndexOf(siblings, guarded);
                 if (index + 1 >= siblings.Length || !Dispose(siblings[index + 1], enumerator.Identifier)) continue;
                 var factory = siblings.Take(index).OfType<VariableDeclarationStatement>().LastOrDefault(d => d.Variables.Any(v => v.Name == enumerator.Identifier));
@@ -46,15 +51,14 @@ public static partial class Decompilation
                         Target: MemberReferenceExpression { MemberName: "GetEnumerator" } get } invocation
                     || invocation.Annotation<ResolveResult>()?.Type.GetAllBaseTypes().Any(t => t.FullName == "System.IDisposable") != true
                     || guarded.Ancestors.FirstOrDefault(n => n is MethodDeclaration or LambdaExpression or AnonymousMethodExpression) is not { } method) continue;
-                var before = tryBody.Statements.Take(tryBody.Statements.Count - 2).ToArray();
+                var before = tryBody.Statements.TakeWhile(s => s != loop).ToArray();
                 if (before.FirstOrDefault() is not IfElseStatement guard || !NullTest(guard.Condition, enumerator.Identifier, BinaryOperatorType.Equality)
                     || guard.FalseStatement is not null || guard.TrueStatement is not BlockStatement { Statements.Count: 1 } missing
                     || missing.Statements.Single() is not ThrowStatement { Expression: ObjectCreateExpression { Arguments.Count: 0 } error }
                     || error.Type?.ToString() is not ("NullReferenceException" or "System.NullReferenceException")) continue;
                 var prefix = before.Skip(1).Where(s => s is not VariableDeclarationStatement d || d.Variables.ToArray() is not [{ Initializer: null } v] || v.Name != state.Identifier).ToArray();
                 if (before.OfType<VariableDeclarationStatement>().SelectMany(d => d.Variables).Count(v => v.Name == state.Identifier && v.Initializer is null) != 1
-                    || prefix.Any(s => s is not ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
-                        Left: IdentifierExpression, Right: IdentifierExpression or PrimitiveExpression } })) continue;
+                    || prefix.Any(s => !Copy(s))) continue;
                 var outside = siblings.Skip(Array.IndexOf(siblings, factory) + 1).Take(index - Array.IndexOf(siblings, factory) - 1).ToArray();
                 var numeric = method.Descendants.OfType<VariableDeclarationStatement>().Where(d => d.Type is PrimitiveType { Keyword:
                     "byte" or "sbyte" or "short" or "ushort" or "int" or "uint" or "long" or "ulong" or "float" or "double" }).SelectMany(d => d.Variables).Select(v => v.Name).ToHashSet();
@@ -63,7 +67,7 @@ public static partial class Decompilation
                     || value is BinaryOperatorExpression { Operator: BinaryOperatorType.Add or BinaryOperatorType.Subtract or BinaryOperatorType.Multiply
                         or BinaryOperatorType.BitwiseAnd or BinaryOperatorType.BitwiseOr or BinaryOperatorType.ExclusiveOr } binary && Scalar(binary.Left) && Scalar(binary.Right);
                 if (outside.Any(s => !PureLocals(s) && (s is not VariableDeclarationStatement d || d.Variables.Any(v => v.Initializer is null || !Scalar(v.Initializer))))
-                    || !StableCopies(method, outside.Concat(prefix), invocation)) continue;
+                    || !StableCopies(method, outside.Concat(prefix).Concat(suffix), invocation)) continue;
                 var declarations = siblings.Take(index).OfType<VariableDeclarationStatement>().Where(d => d.Variables.Any(v => v.Name == output.Identifier)).ToArray();
                 if (declarations is not [var resultDeclaration] || resultDeclaration.Variables.ToArray() is not [{ Initializer: null } resultVariable]) continue;
                 var after = siblings.Skip(index + 2).SelectMany(s => s.DescendantsAndSelf).ToHashSet();
@@ -76,7 +80,8 @@ public static partial class Decompilation
                 var allowed = guarded.Descendants.Concat(siblings[index + 1].Descendants).ToHashSet();
                 if (method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == enumerator.Identifier && !allowed.Contains(id))
                     || positive.Descendants.OfType<IdentifierExpression>().Count(id => id.Identifier == enumerator.Identifier) != 1) continue;
-                var written = prefix.Cast<ExpressionStatement>().Select(s => ((IdentifierExpression)((AssignmentExpression)s.Expression).Left).Identifier).ToHashSet();
+                var written = prefix.Concat(suffix).OfType<ExpressionStatement>()
+                    .Select(s => ((IdentifierExpression)((AssignmentExpression)s.Expression).Left).Identifier).ToHashSet();
                 if (guarded.Ancestors.OfType<TryCatchStatement>().SelectMany(t => t.CatchClauses.SelectMany(c => c.Descendants)
                     .Concat(t.FinallyBlock?.Descendants ?? [])).OfType<IdentifierExpression>().Any(id => written.Contains(id.Identifier))) continue;
                 var labels = positive.Descendants.OfType<LabelStatement>().Select(l => l.Label).ToHashSet();
@@ -96,6 +101,7 @@ public static partial class Decompilation
                 body.Statements.Add(new BreakStatement());
                 var replacement = new BlockStatement(); foreach (var statement in prefix) replacement.Statements.Add(statement.Clone());
                 replacement.Statements.Add(new ForeachStatement(current.Type.Clone(), new SingleVariableDesignation(element.Name), get.Target.Clone(), body));
+                foreach (var statement in suffix.Where(s => s != transfer)) replacement.Statements.Add(statement.Clone());
                 resultVariable.Initializer = zero.Clone();
                 guarded.ReplaceWith(replacement); factory.Remove(); siblings[index + 1].Remove();
             }

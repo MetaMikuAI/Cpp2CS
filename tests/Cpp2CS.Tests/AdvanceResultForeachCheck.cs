@@ -19,7 +19,7 @@ internal static class AdvanceResultForeachCheck
         ExpressionStatement Set(string name, Expression value) => new(new AssignmentExpression(Id(name), value));
         ExpressionStatement Call(string name) => new(new InvocationExpression(new MemberReferenceExpression(Id("iterator"), name)));
         var a = new Assertions();
-        foreach (var mode in new[] { "valid", "escape", "read-result", "write-current", "captured", "extra-catch", "wrong-zero", "throwing-prefix", "outer-observer" })
+        foreach (var mode in new[] { "valid", "copies", "throwing-suffix", "escape", "read-result", "write-current", "captured", "extra-catch", "wrong-zero", "throwing-prefix", "outer-observer", "outer-result" })
         {
             var tree = new SyntaxTree(); var type = new TypeDeclaration { Name = "Subject" }; tree.Members.Add(type);
             var method = new MethodDeclaration { Name = "Visit", ReturnType = new PrimitiveType("void"), Body = new BlockStatement() }; type.Members.Add(method);
@@ -44,22 +44,28 @@ internal static class AdvanceResultForeachCheck
             var guarded = new TryCatchStatement { TryBlock = new BlockStatement {
                 new IfElseStatement(new BinaryOperatorExpression(Id("iterator"), BinaryOperatorType.Equality, new NullReferenceExpression()), new BlockStatement { new ThrowStatement(new ObjectCreateExpression(new SimpleType("NullReferenceException"))) }),
                 Set("sum", Id("next")), new VariableDeclarationStatement(new PrimitiveType("ulong"), "state"), loop, Set("result", Id("state")) } };
+            if (mode is "copies" or "throwing-suffix")
+            {
+                guarded.TryBlock.Statements.InsertBefore(loop, new VariableDeclarationStatement(new PrimitiveType("int"), "copied", Id("sum")));
+                guarded.TryBlock.Statements.InsertAfter(loop, new VariableDeclarationStatement(new PrimitiveType("int"), "saved", Id("copied")));
+                guarded.TryBlock.Statements.Add(Set("sum", mode == "throwing-suffix" ? new InvocationExpression(Id("Read")) : Id("saved")));
+            }
             var catcher = new CatchClause { Type = new SimpleType("Exception"), VariableName = "error", Body = new BlockStatement {
                 new IfElseStatement(new BinaryOperatorExpression(Id("iterator"), BinaryOperatorType.InEquality, new NullReferenceExpression()), new BlockStatement { Call("Dispose"), new ThrowStatement(Id("error")) }), new ThrowStatement(Id("error")) } };
             if (mode == "extra-catch") catcher.Body.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Log"))));
             guarded.CatchClauses.Add(catcher); outer.Statements.Add(guarded); outer.Statements.Add(Call("Dispose"));
             outer.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Use"), Id("result"), Id("sum"))));
             if (mode == "escape") outer.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Use"), Id("iterator"))));
-            if (mode == "outer-observer")
+            if (mode is "outer-observer" or "outer-result")
             {
                 outer.Remove();
                 var wrapper = new TryCatchStatement { TryBlock = outer }; method.Body = new BlockStatement { wrapper };
-                wrapper.CatchClauses.Add(new CatchClause { Type = new SimpleType("Exception"), VariableName = "observed", Body = new BlockStatement { new ExpressionStatement(new InvocationExpression(Id("Use"), Id("sum"))) } });
+                wrapper.CatchClauses.Add(new CatchClause { Type = new SimpleType("Exception"), VariableName = "observed", Body = new BlockStatement { new ExpressionStatement(new InvocationExpression(Id("Use"), Id(mode == "outer-result" ? "result" : "sum"))) } });
             }
             var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).GetNestedType("RecoveredForeach", BindingFlags.NonPublic)!, nonPublic: true)!;
             transform.Run(tree, null!);
-            a.Equal(mode == "valid" ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的结果和副作用边界");
-            if (mode != "valid") continue;
+            a.Equal(mode is "valid" or "copies" ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的结果和副作用边界");
+            if (mode is not ("valid" or "copies")) continue;
             a.True(!tree.Descendants.OfType<MemberReferenceExpression>().Any(m => m.MemberName is "MoveNext" or "Dispose" or "Current"), "显式枚举已折叠");
             a.True(tree.Descendants.OfType<VariableInitializer>().Single(v => v.Name == "result").Initializer is PrimitiveExpression { Value: 0UL }, "耗尽保持零");
             a.True(tree.Descendants.OfType<ForeachStatement>().Single().Descendants.OfType<AssignmentExpression>().Any(x => x.Left.ToString() == "result" && x.Right is PrimitiveExpression { Value: 1UL }), "提前退出保持一");

@@ -61,8 +61,9 @@ internal static class InlineConstructors
         var effect = 0;
         foreach (var (current, statement) in AllocationPairing.Following(block, index))
         {
-            // newobj 留在原分配点；整个展开区间须有相同异常去向。
-            if (!SameRegion(function, block, allocation, current, statement)) return null;
+                // newobj 留在原分配点；会抛出的调用须有相同异常去向。
+                // 模板只写新对象的直接字段，写入本身不引入托管异常。
+                if (statement is Call && !SameRegion(function, block, allocation, current, statement)) return null;
             matched.Add(statement);
             if (statement is Nop) continue;
             if (statement is Define d && Pure(d.Value)) { definitions[d.Target] = Expand(d.Value, definitions); continue; }
