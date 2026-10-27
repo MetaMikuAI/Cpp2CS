@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Reflection;
 using Cpp2CS.Images;
 
@@ -285,15 +286,16 @@ public sealed class ProgramModel
     public required IReadOnlyList<string> StringLiterals { get; init; }
     /// <summary>代码地址到托管所有者。</summary>
     public required IReadOnlyDictionary<ulong, IReadOnlyList<CodeOwner>> Code { get; init; }
-    private readonly Dictionary<ulong, Usage?> slots = new();
+    private readonly ConcurrentDictionary<ulong, Usage?> slots = new();
 
     /// <summary>
     /// 读取元数据槽位（v27+：全局变量初值为编码令牌 ((kind&lt;&lt;29)|(index&lt;&lt;1))+1）。
     /// 编码不合法或索引越界返回 null。
     /// </summary>
-    public Usage? UsageAt(ulong slot)
+    public Usage? UsageAt(ulong slot) => slots.GetOrAdd(slot, DecodeSlot);
+
+    private Usage? DecodeSlot(ulong slot)
     {
-        if (slots.TryGetValue(slot, out var cached)) return cached;
         Usage? usage = null;
         var mapping = Image.Resolve(slot);
         if (mapping.Kind == AddressKind.FileBacked && mapping.AvailableBytes >= 8 && !mapping.Range!.Executable)
@@ -307,7 +309,6 @@ public sealed class ProgramModel
                 if (kind is >= 1 and <= 6 && raw == ((kind << 29) | (index << 1)) + 1) usage = DecodeToken(kind, index);
             }
         }
-        slots[slot] = usage;
         return usage;
     }
 

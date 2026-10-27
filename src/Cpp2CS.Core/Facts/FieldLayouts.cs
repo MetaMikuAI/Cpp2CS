@@ -39,6 +39,7 @@ public sealed class FieldLayouts
 {
     private const int EmptyStructSize = 1;
     private readonly ProgramModel model;
+    private readonly object gate = new();
     private readonly Dictionary<DefinitionRef, TypeLayout> cache = new();
     private readonly Dictionary<DefinitionRef, TypeLayout> computed = new();
     private readonly HashSet<DefinitionRef> active = new();
@@ -54,6 +55,12 @@ public sealed class FieldLayouts
     public TypeLayout? Compute(DefinitionRef type) => Layout(type, preferMetadata: false);
 
     private TypeLayout? Layout(DefinitionRef type, bool preferMetadata)
+    {
+        // 递归构建中的临时布局只对持锁线程可见，完成后共享缓存。
+        lock (gate) return LayoutCore(type, preferMetadata);
+    }
+
+    private TypeLayout? LayoutCore(DefinitionRef type, bool preferMetadata)
     {
         var store = preferMetadata ? cache : computed;
         if (store.TryGetValue(type, out var known)) return known;

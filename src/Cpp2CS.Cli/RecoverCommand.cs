@@ -30,6 +30,7 @@ internal static class RecoverCommand
         var sourceLayout = "flat";
         string[]? assembliesFilter = null;
         var limit = int.MaxValue;
+        var jobs = 1;
         string? list = null;
         string? accessorEvidence = null;
         string? rejectedAccessors = null;
@@ -42,6 +43,7 @@ internal static class RecoverCommand
             if (option == "--namespaces") { namespaces = options[i].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries); scopeCount++; }
             else if (option == "--assemblies") { assembliesFilter = options[i].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries); scopeCount++; }
             else if (option == "--limit") limit = int.Parse(options[i]);
+            else if (option == "--jobs") jobs = int.Parse(options[i]);
             else if (option == "--methods") { list = options[i]; scopeCount++; }
             else if (option == "--rejected-accessors") rejectedAccessors = options[i];
             else if (option == "--verified-accessors") accessorEvidence = options[i];
@@ -49,6 +51,7 @@ internal static class RecoverCommand
             else throw new ArgumentException($"未知参数 {option}");
         }
         if (sourceLayout is not ("flat" or "project")) throw new ArgumentException("--source-layout 必须是 flat 或 project");
+        if (jobs < 1) throw new ArgumentException("--jobs 必须大于零");
         if (scopeCount != 1 || !(all || namespaces.Length > 0 || assembliesFilter is { Length: > 0 } || !string.IsNullOrWhiteSpace(list)))
         {
             Console.Error.WriteLine("必须且只能指定一种恢复范围：--all、--assemblies、--namespaces 或 --methods。");
@@ -89,14 +92,26 @@ internal static class RecoverCommand
             .OrderBy(m => m.Index).ToArray();
 
         var watch = Stopwatch.StartNew();
-        // 单线程：FieldLayouts 的缓存不是线程安全的
         var recovery = new MethodRecovery(facts, types);
         var targets = new MethodRecoveryResult[methods.Length];
-        for (var i = 0; i < methods.Length; i++)
+        var completed = 0;
+        void Recover(int i, MethodRecovery worker)
         {
-            targets[i] = selected[i].Recover(recovery);
-            if ((i + 1) % 1000 == 0 || i + 1 == methods.Length)
-                Console.Error.WriteLine($"恢复进度 {i + 1}/{methods.Length}，{watch.Elapsed.TotalSeconds:F1} s");
+            targets[i] = selected[i].Recover(worker);
+            var count = Interlocked.Increment(ref completed);
+            if (count % 1000 == 0 || count == methods.Length)
+                Console.Error.WriteLine($"恢复进度 {count}/{methods.Length}，{watch.Elapsed.TotalSeconds:F1} s");
+        }
+        Console.Error.WriteLine($"方法恢复并行度：{jobs}");
+        MethodRecovery.StackCallWitness[] stackCalls = [];
+        if (jobs == 1)
+            for (var i = 0; i < methods.Length; i++) Recover(i, recovery);
+        else
+        {
+            // 工作线程独享恢复器和分析缓存；结果按原清单索引汇总。
+            using var workers = new ThreadLocal<MethodRecovery>(() => new(facts, types), trackAllValues: true);
+            Parallel.For(0, methods.Length, new ParallelOptions { MaxDegreeOfParallelism = jobs }, i => Recover(i, workers.Value!));
+            stackCalls = workers.Values.SelectMany(w => w.StackCalls).Distinct().ToArray();
         }
         var bytes = targets.Select(r => r.Entry).Distinct().ToDictionary(e => e,
             e => checked((long)(facts.Code.At(e) ?? throw new InvalidDataException($"0x{e:x} 没有 L0 函数边界")).Size));
@@ -136,8 +151,9 @@ internal static class RecoverCommand
             $"{MethodRef.Open(m)}\t{m.Index}\t{(m.IsAbstract ? "abstract" : nativeEntries.ContainsKey(m) ? "native-omitted" : "no-native-entry")}\t{string.Join(",", nativeEntries.GetValueOrDefault(m, []).Select(e => $"0x{e:x}"))}")));
         AutoPropertyManifest.Write(output, closure, rejectedAccessors);
         File.WriteAllLines(Path.Combine(output, "stack-methodinfo.tsv"),
-            new[] { "entry\tsite\tstore\tsp\tslot\tmethod" }.Concat(recovery.StackCalls.OrderBy(c => c.Site)
-                .Select(c => $"0x{c.Entry:x}\t0x{c.Site:x}\t0x{c.Store:x}\t{c.Sp}\t{c.Slot}\t{c.Method}")));
+            new[] { "entry\tsite\tstore\tsp\tslot\tmethod" }.Concat(stackCalls.Concat(recovery.StackCalls)
+                .Select(c => $"0x{c.Entry:x}\t0x{c.Site:x}\t0x{c.Store:x}\t{c.Sp}\t{c.Slot}\t{c.Method}")
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)));
         using (var writer = new StreamWriter(Path.Combine(output, "recovery.jsonl")))
             foreach (var result in results)
             {

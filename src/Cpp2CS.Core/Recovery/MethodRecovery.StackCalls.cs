@@ -8,8 +8,8 @@ namespace Cpp2CS.Recovery;
 public sealed partial class MethodRecovery
 {
     public sealed record StackCallWitness(ulong Entry, ulong Site, ulong Store, long Sp, long Slot, MethodRef Method);
-    private readonly Dictionary<ulong, StackCallWitness> stackCalls = [];
-    public IReadOnlyCollection<StackCallWitness> StackCalls => stackCalls.Values;
+    private readonly HashSet<StackCallWitness> stackCalls = [];
+    public IReadOnlyCollection<StackCallWitness> StackCalls => stackCalls;
 
     private sealed partial class Context
     {
@@ -86,8 +86,8 @@ public sealed partial class MethodRecovery
                 if (unique is not [var match]) continue;
                 resolved[call] = (match.Method, Pinned);
                 dropped.Add(match.Store);
-                owner.stackCalls[call.Address] = new(entry, call.Address, match.Store.Address, callSp,
-                    FrameOffset(match.Store.Target)!.Value, match.Method);
+                owner.stackCalls.Add(new(entry, call.Address, match.Store.Address, callSp,
+                    FrameOffset(match.Store.Target)!.Value, match.Method));
             }
         }
 

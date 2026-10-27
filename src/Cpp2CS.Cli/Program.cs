@@ -39,11 +39,12 @@ internal static class Program
                                                                       打印函数的寄存器 SSA（--idioms：L2 归一之后）
                   cpp2cs idioms <libil2cpp.so> <global-metadata.dat> <输出目录> [--owner 前缀] [--limit N]
                                                                       对托管函数做 L2 模板普查，写出 idioms.txt 与 idiom-residuals.tsv
-                  cpp2cs recover <libil2cpp.so> <global-metadata.dat> <输出目录> [--all | --assemblies A.dll,B.dll | --namespaces A,B] [--no-source] [--limit N] [--methods 清单] [--verified-accessors 证据.tsv] [--source-layout flat|project]
+                  cpp2cs recover <libil2cpp.so> <global-metadata.dat> <输出目录> [--all | --assemblies A.dll,B.dll | --namespaces A,B] [--no-source] [--limit N] [--jobs N] [--methods 清单] [--verified-accessors 证据.tsv] [--source-layout flat|project]
                                                                       恢复范围必须显式指定，写出 CIL 与 C#；
                                                                       --methods：从外部方法清单选择目标，候选访问器另作依赖；
                                                                       --verified-accessors：使用 execute 生成的证据认回内联访问器。
                                                                       --source-layout project：按程序集/命名空间/类型导出，含范围内全部类型声明与 csproj。
+                                                                      --jobs N：方法恢复的最大并行度，默认 1；程序集写出按顺序执行。
                   cpp2cs source-project <程序集.dll> <输出目录>          将已有程序集按项目目录导出 C#，依赖从程序集所在目录解析。
             """);
         return 2;

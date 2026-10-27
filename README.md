@@ -26,6 +26,8 @@ dotnet run --project src/Cpp2CS.Cli -c Release -- recover <binary> <metadata> <o
 `--assemblies A.dll,B.dll` 按程序集选择；`--all` 选择全部托管方法定义；`--limit N` 限制非清单模式的方法数量；`--no-source` 跳过 C# 文件生成。
 
 `--source-layout project` 按 `src/程序集.dll/命名空间/类型.cs` 导出，并为每个程序集生成 `.csproj`；泛型同名类型合并到同一文件。包含所选范围内的全部类型声明，未恢复成员仍为占位体。默认 `flat` 保持平铺输出；项目文件不代表源码已通过编译。
+
+`--jobs N` 设置方法恢复的最大并行度，默认 `1`。例如 `--jobs 8` 同时恢复最多八个方法，共享基础事实，每个工作线程使用独立恢复器；结果按原清单顺序汇总。依赖处理和程序集写出仍按顺序执行，最终 C# 按类型并行生成。
 已有程序集可用 `source-project <程序集.dll> <输出目录>` 单独导出，依赖从程序集所在目录解析。
 
 其他入口：`facts` 建立基础事实，`refs` 查询函数引用，`layout` 查询字段布局，`ssa` 查看机器 IR，`idioms` 统计编译器模式。无参数运行 CLI 可查看用法。
