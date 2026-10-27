@@ -159,6 +159,10 @@ public sealed partial class BodyEmitter
                 if (!CanAccess(unbox.Target)) return $"访问权限 类型 {unbox.Target}";
                 if (unbox.Target is not (DefinitionRef { Definition.IsEnum: true } or GenericParameterRef { NativeScalar: not null })) return $"拆箱 类型 {unbox.Target} 尚未支持";
                 break;
+            case CheckedCastValue cast:
+                if (!ManagedTypes.IsReferenceType(cast.Operand.Type) || !ManagedTypes.IsReferenceType(cast.Target))
+                    return "引用转换 需要引用类型的来源与目标";
+                break;
             case ArrayLengthValue length:
                 if (length.Array.Type is not ArrayRef { IsVector: true }) return "数组 长度需要一维向量类型";
                 break;

@@ -57,6 +57,7 @@ public static partial class Decompilation
 
         public void Run(AstNode rootNode, TransformContext context)
         {
+            var typedReads = NormalizeTypedCurrent(rootNode);
             RecoverSearchLoops(rootNode);
             var searches = NormalizeAdvanceSearch(rootNode);
             RecoverResultLoops(rootNode);
@@ -249,6 +250,8 @@ public static partial class Decompilation
             RecoverMergedLoops(rootNode);
             RecoverNullableMergedLoops(rootNode);
             if (context?.TypeSystem is { } compilation) RecoverAny(rootNode, compilation);
+            foreach (var (declaration, replacement, original) in typedReads)
+                if (rootNode.Descendants.Contains(declaration)) { replacement.ReplaceWith(original); declaration.Remove(); }
         }
     }
 }

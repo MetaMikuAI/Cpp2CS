@@ -28,6 +28,8 @@ public sealed record BoxValue(ManagedValue Operand, TypeRef Boxed, TypeRef Objec
 public sealed record UnboxAddressValue(ManagedValue Operand, TypeRef Target) : ManagedValue(new ByRefRef(Target), 64);
 /// <summary>isinst：Operand 是 Target 类型（或其子类、实现）时为 Operand，否则为 null。</summary>
 public sealed record IsInstValue(ManagedValue Operand, TypeRef Target, TypeRef? BoxedType = null) : ManagedValue(BoxedType ?? Target, 64);
+/// <summary>引用类型显式转换；null 原样通过，非兼容对象抛 InvalidCastException。</summary>
+public sealed record CheckedCastValue(ManagedValue Operand, TypeRef Target) : ManagedValue(Target, 64);
 public sealed record ArrayLengthValue(ManagedValue Array, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record ArrayElementValue(ManagedValue Array, ManagedValue Index, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width)
@@ -130,7 +132,7 @@ public static class ManagedValues
         IndirectValue i => [i.Address],
         ComposedValue c => c.Leaves.Select(l => l.Value),
         NewArrayValue a => [a.Length], ArrayLengthValue a => [a.Array], ArrayElementValue a => [a.Array, a.Index],
-        BoxValue b => [b.Operand], UnboxAddressValue u => [u.Operand], IsInstValue i => [i.Operand], NewObjectValue n => n.Arguments,
+        BoxValue b => [b.Operand], UnboxAddressValue u => [u.Operand], IsInstValue i => [i.Operand], CheckedCastValue c => [c.Operand], NewObjectValue n => n.Arguments,
         DelegateValue d => [d.Target],
         BinaryValue b => [b.Left, b.Right], UnaryValue u => [u.Operand], ConversionValue c => [c.Operand],
         ComparisonValue c => [c.Left, c.Right], ChoiceValue c => [c.Condition, c.True, c.False],
@@ -158,6 +160,7 @@ public static class ManagedValues
         BoxValue v => v with { Operand = f(v.Operand) },
         UnboxAddressValue v => v with { Operand = f(v.Operand) },
         IsInstValue v => v with { Operand = f(v.Operand) },
+        CheckedCastValue v => v with { Operand = f(v.Operand) },
         NewObjectValue v => v with { Arguments = v.Arguments.Select(f).ToArray() },
         DelegateValue v => v with { Target = f(v.Target) },
         BinaryValue v => v with { Left = f(v.Left), Right = f(v.Right) },

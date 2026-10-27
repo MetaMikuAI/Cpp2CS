@@ -176,6 +176,7 @@ internal static class ConstructorInitialization
                 ComposedValue c => Children($"struct {c.StructType}:{string.Join("/", c.Leaves.Select(l => string.Join(".", l.Path.Select(f => f.Field.Index))))}", c.Leaves.Select(l => l.Value)),
                 BoxValue b => Children($"box {b.Boxed} {b.ObjectType}", [b.Operand]),
                 IsInstValue i => Children($"isinst {i.Target}", [i.Operand]),
+                CheckedCastValue c => Children($"castclass {c.Target}", [c.Operand]),
                 FieldValue f => Children($"{f.Field}", [f.Receiver]),
                 AddressValue a => Children("address", [a.Target]),
                 IndirectValue i => Children("indirect", [i.Address]),

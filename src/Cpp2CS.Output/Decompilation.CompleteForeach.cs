@@ -77,7 +77,7 @@ public static partial class Decompilation
                         { Condition: InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression { MemberName: "MoveNext", Target: IdentifierExpression enumerator } },
                             EmbeddedStatement: BlockStatement body }
                     || body.Statements.FirstOrDefault() is not VariableDeclarationStatement current || current.Variables.ToArray() is not [var element]
-                    || element.Initializer is not MemberReferenceExpression { MemberName: "Current", Target: var receiver } read || !Name(receiver, enumerator.Identifier)
+                    || CurrentRead(element.Initializer) is not { Target: var receiver } read || !Name(receiver, enumerator.Identifier)
                     || read.GetSymbol() is IProperty { ReturnType: ByReferenceType }) continue;
                 var inside = guarded.TryBlock.Statements.Take(guarded.TryBlock.Statements.Count - 1).ToArray();
                 IfElseStatement? guard = null;

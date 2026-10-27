@@ -74,6 +74,8 @@ public sealed partial class BodyEmitter
                 // isinst 的结果是对象引用；开放泛型局部需要恢复为 !T 栈类型。
                 if (test.BoxedType is null && test.Target is GenericParameterRef { IsReferenceConstrained: false }) il.Emit(OpCodes.Unbox_Any, TypeReference(test.Target));
                 break;
+            case CheckedCastValue cast:
+                Value(cast.Operand); il.Emit(OpCodes.Castclass, TypeReference(cast.Target)); break;
             case NewObjectValue created:
             {
                 foreach (var argument in created.Arguments) Value(argument);
