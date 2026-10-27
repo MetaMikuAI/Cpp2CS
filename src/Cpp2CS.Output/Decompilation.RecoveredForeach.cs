@@ -1,5 +1,7 @@
+using ICSharpCode.Decompiler.CSharp;
 using ICSharpCode.Decompiler.CSharp.Syntax;
 using ICSharpCode.Decompiler.CSharp.Transforms;
+using ICSharpCode.Decompiler.TypeSystem;
 
 namespace Cpp2CS.Output;
 
@@ -18,6 +20,15 @@ public static partial class Decompilation
         private static bool NullTest(Expression? expression, string name, BinaryOperatorType op) => expression is BinaryOperatorExpression b
             && b.Operator == op && Name(b.Left, name) && b.Right is NullReferenceExpression;
 
+        private static bool FirstReceiver(Expression? expression, Expression read) => ReferenceEquals(expression, read) || expression switch
+        {
+            InvocationExpression call => FirstReceiver(call.Target, read),
+            MemberReferenceExpression member => FirstReceiver(member.Target, read),
+            IndexerExpression indexer => FirstReceiver(indexer.Target, read),
+            ParenthesizedExpression parentheses => FirstReceiver(parentheses.Expression, read),
+            _ => false,
+        };
+
         public void Run(AstNode rootNode, TransformContext context)
         {
             foreach (var loop in rootNode.Descendants.OfType<WhileStatement>().ToArray())
@@ -30,11 +41,17 @@ public static partial class Decompilation
                     || guarded.TryBlock is not { } tryBlock || tryBlock.Statements.ToArray() is not [IfElseStatement test] || test.FalseStatement is not null
                     || test.Condition is not InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression
                         { MemberName: "MoveNext", Target: IdentifierExpression enumerator } }
-                    || test.TrueStatement is not BlockStatement body || body.Statements.LastOrDefault() is not ContinueStatement
-                    || body.Statements.FirstOrDefault() is not VariableDeclarationStatement current || current.Variables.Count != 1
-                    || current.Variables.Single().Initializer is not MemberReferenceExpression { MemberName: "Current", Target: var read }
-                    || !Name(read, enumerator.Identifier)) continue;
+                    || test.TrueStatement is not BlockStatement body || body.Statements.LastOrDefault() is not ContinueStatement) continue;
                 var name = enumerator.Identifier;
+                if (body.Descendants.OfType<MemberReferenceExpression>().Where(m => m.MemberName == "Current" && Name(m.Target, name)).ToArray()
+                    is not [var read]) continue;
+                var current = body.Statements.FirstOrDefault() as VariableDeclarationStatement;
+                if (current is not null)
+                {
+                    if (current.Variables.Count != 1 || !ReferenceEquals(current.Variables.Single().Initializer, read)) continue;
+                }
+                else if (body.Statements.FirstOrDefault() is not ExpressionStatement first || !FirstReceiver(first.Expression, read)
+                    || read.GetSymbol() is IProperty { ReturnType: ByReferenceType }) continue;
                 var catcher = guarded.CatchClauses.Single();
                 if (catcher.Type?.ToString() is not ("Exception" or "System.Exception")
                     || catcher.Body is not { } catchBody || catchBody.Statements.ToArray() is not [ExpressionStatement { Expression: AssignmentExpression
@@ -85,9 +102,19 @@ public static partial class Decompilation
                 if (declarations is not [var declaration] || declaration.Variables.Count != 1
                     || declaration.Variables.Single().Initializer is not DefaultValueExpression) continue;
                 var replacement = (BlockStatement)body.Clone();
-                replacement.Statements.First().Remove();
+                var item = current?.Variables.Single().Name ?? "item";
+                if (current is not null) replacement.Statements.First().Remove();
+                else
+                {
+                    var names = method.Descendants.OfType<IdentifierExpression>().Select(id => id.Identifier)
+                        .Concat(method.Descendants.OfType<VariableInitializer>().Select(v => v.Name))
+                        .Concat(method.Descendants.OfType<ParameterDeclaration>().Select(p => p.Name)).ToHashSet();
+                    for (var suffix = 2; names.Contains(item); suffix++) item = "item" + suffix;
+                    replacement.Descendants.OfType<MemberReferenceExpression>().Single(m => m.MemberName == "Current" && Name(m.Target, name))
+                        .ReplaceWith(new IdentifierExpression(item));
+                }
                 replacement.Statements.Last().Remove();
-                loop.ReplaceWith(new ForeachStatement(current.Type.Clone(), new SingleVariableDesignation(current.Variables.Single().Name), get.Target.Clone(), replacement));
+                loop.ReplaceWith(new ForeachStatement(current?.Type.Clone() ?? new SimpleType("var"), new SingleVariableDesignation(item), get.Target.Clone(), replacement));
                 foreach (var statement in removed) statement.Remove();
                 assignment.Remove(); factory?.Remove(); declaration.Remove();
                 foreach (var unused in method.Descendants.OfType<VariableDeclarationStatement>().Where(d => d.Variables.Count == 1

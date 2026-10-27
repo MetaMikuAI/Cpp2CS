@@ -14,10 +14,12 @@ internal static class RecoveredForeachCheck
         MemberReferenceExpression Member(string name) => new(Id("iterator"), name);
         ExpressionStatement Dispose() => new(new InvocationExpression(Member("Dispose")));
         var a = new Assertions();
+        foreach (var inline in new[] { false, true })
         foreach (var temporary in new[] { false, true })
         foreach (var escape in new[] { false, true })
         {
             var method = new MethodDeclaration { Name = "Visit", ReturnType = new PrimitiveType("void"), Body = new BlockStatement() };
+            method.Parameters.Add(new ParameterDeclaration { Type = new SimpleType("object"), Name = "item" });
             var tree = new SyntaxTree();
             var type = new TypeDeclaration { Name = "Sample" };
             type.Members.Add(method);
@@ -27,8 +29,12 @@ internal static class RecoveredForeachCheck
             if (temporary) method.Body.Statements.Add(new VariableDeclarationStatement(new SimpleType("var"), "saved", get));
             method.Body.Statements.Add(new ExpressionStatement(new AssignmentExpression(Id("iterator"), temporary ? Id("saved") : get)));
             var body = new BlockStatement();
-            body.Statements.Add(new VariableDeclarationStatement(new PrimitiveType("int"), "current", Member("Current")));
-            body.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Use"), Id("current"))));
+            if (inline) body.Statements.Add(new ExpressionStatement(new InvocationExpression(new MemberReferenceExpression(Member("Current"), "Touch"))));
+            else
+            {
+                body.Statements.Add(new VariableDeclarationStatement(new PrimitiveType("int"), "current", Member("Current")));
+                body.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Use"), Id("current"))));
+            }
             body.Statements.Add(new ContinueStatement());
             var guarded = new TryCatchStatement { TryBlock = new BlockStatement() };
             guarded.TryBlock.Statements.Add(new IfElseStatement(new InvocationExpression(Member("MoveNext")), body));
@@ -53,7 +59,10 @@ internal static class RecoveredForeachCheck
             transform.Run(tree, null!);
             a.Equal(escape ? 0 : 1, tree.Descendants.OfType<ForeachStatement>().Count(), "直接初始化和临时复制均折叠，枚举器逃逸时保留");
             if (!escape)
+            {
                 a.True(!tree.Descendants.OfType<MemberReferenceExpression>().Any(m => m.MemberName is "MoveNext" or "Dispose" or "Current"), "显式枚举与清理已全部收敛");
+                if (inline) a.True(tree.ToString().Contains("item2"), "循环变量避开未使用的参数名");
+            }
         }
         return a.Finish("recovered-foreach");
     }
