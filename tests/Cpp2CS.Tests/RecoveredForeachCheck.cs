@@ -112,6 +112,27 @@ internal static class RecoveredForeachCheck
             }
             if (escape) method.Body.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Use"), Member("Current"))));
             var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).GetNestedType("RecoveredForeach", BindingFlags.NonPublic)!, nonPublic: true)!;
+            if (cleanupMode == "catch" && !temporary && !escape)
+            {
+                foreach (var returns in new[] { false, true })
+                {
+                    var direct = (SyntaxTree)tree.Clone();
+                    var directLoop = direct.Descendants.OfType<WhileStatement>().Single();
+                    var directGuard = directLoop.Descendants.OfType<TryCatchStatement>().Single();
+                    var selection = directGuard.TryBlock!.Statements.OfType<IfElseStatement>().Single();
+                    var directBody = (BlockStatement)selection.TrueStatement.Clone();
+                    directBody.Statements.Last().Remove();
+                    if (returns) directBody.Statements.Add(new ReturnStatement());
+                    var copiedGuard = (TryCatchStatement)directGuard.Clone();
+                    copiedGuard.TryBlock = new BlockStatement { new WhileStatement(selection.Condition!.Clone(), directBody) };
+                    var directParent = (BlockStatement)directLoop.Parent!;
+                    directParent.Statements.InsertBefore(directLoop, new VariableDeclarationStatement(new PrimitiveType("int"), "total", new PrimitiveExpression(0)));
+                    directLoop.ReplaceWith(copiedGuard);
+                    transform.Run(direct, null!);
+                    a.Equal(returns || mode is "increment" or "unresolved-argument" ? 0 : 1, direct.Descendants.OfType<ForeachStatement>().Count(), "完整保护循环可折叠，越过清理的 return 保留");
+                    if (returns) a.True(direct.Descendants.OfType<WhileStatement>().Single().Condition is InvocationExpression, "未折叠时保留原循环形态");
+                }
+            }
             if (escape && mode == "local" && cleanupMode == "external" && !temporary)
             {
                 foreach (var placement in new[] { "after", "before", "label" })

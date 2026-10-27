@@ -57,6 +57,7 @@ public static partial class Decompilation
 
         public void Run(AstNode rootNode, TransformContext context)
         {
+            var normalized = NormalizeDirectLoops(rootNode);
             foreach (var loop in rootNode.Descendants.OfType<WhileStatement>().ToArray())
             {
                 if (loop.Parent is not BlockStatement parent || loop.Condition is not PrimitiveExpression { Value: true }
@@ -181,7 +182,8 @@ public static partial class Decompilation
                 }
                 // 只接收元素读取以外不使用枚举器的循环体。
                 if (body.Descendants.OfType<IdentifierExpression>().Count(id => id.Identifier == name) != 1) continue;
-                var prefix = siblings.Take(index).Reverse().SkipWhile(s => s is VariableDeclarationStatement d && d.Variables.All(v => v.Initializer is null)).ToArray();
+                var prefix = siblings.Take(index).Reverse().SkipWhile(s => s is VariableDeclarationStatement d
+                    && d.Variables.All(v => v.Initializer is null or PrimitiveExpression or NullReferenceExpression or DefaultValueExpression)).ToArray();
                 if (prefix.FirstOrDefault() is not ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
                     Left: var destination, Right: var initialized } } assignment || !Name(destination, name)) continue;
                 VariableDeclarationStatement? factory = null;
@@ -233,6 +235,8 @@ public static partial class Decompilation
                 foreach (var unused in method.Descendants.OfType<VariableDeclarationStatement>().Where(d => d.Variables.Count == 1
                     && d.Variables.Single().Initializer is null && !method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == d.Variables.Single().Name)).ToArray()) unused.Remove();
             }
+            foreach (var (loop, original) in normalized)
+                if (loop.Parent is not null) loop.ReplaceWith(original);
             RecoverAsyncLoops(rootNode);
             RecoverGuardedAsyncLoops(rootNode);
             RecoverMergedLoops(rootNode);
