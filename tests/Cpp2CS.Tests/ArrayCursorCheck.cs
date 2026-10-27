@@ -63,6 +63,35 @@ internal static class ArrayCursorCheck
         a.Equal(0, Read(OffsetLoop(scalarUse: true)).Length, "偏移作为普通数值返回时不消去");
         a.Equal(0, Read(OffsetLoop(copyEscapes: true)).Length, "初值副本仍被使用时不消去");
         a.Equal(0, Read(OffsetLoop(stride: 8)).Length, "字节步长不符时拒绝");
+        MachineFunction NarrowLoop(Cond comparison = Cond.Slt, bool bypass = false, ulong initialIndex = 0, ulong increment = 1)
+        {
+            var function = OffsetLoop();
+            var entry = function.Blocks[0];
+            entry.Statements[1] = new Define(0x1004, counter with { Version = 1 }, Expr.C(initialIndex, 64));
+            var loop = function.Blocks[1];
+            var advance = new Block(0x1030) { Statements = loop.Statements.OfType<Define>().ToList<Stmt>() };
+            var indexStep = advance.Statements.OfType<Define>().Single(d => d.Target == (counter with { Version = 3 }));
+            advance.Statements[advance.Statements.IndexOf(indexStep)] = indexStep with { Value = new Ir.Convert(ConvKind.ZeroExtend,
+                new Binary(BinOp.Add, new Use(counter, 32), Expr.C(increment, 32), 32), 64) };
+            loop.Statements.RemoveAll(s => s is Define);
+            var done = new Block(0x1040) { Statements = [new Return(0x1040)] };
+            loop.Statements.Add(new Branch(0x1020, new Compare(comparison, new Use(counter, 32), Expr.C(int.MaxValue, 32)), advance.Start, done.Start));
+            loop.Successors.Remove(loop);
+            loop.Predecessors.Remove(loop);
+            MachineFunction.AddEdge(loop, advance);
+            MachineFunction.AddEdge(loop, done);
+            MachineFunction.AddEdge(advance, loop);
+            if (bypass) MachineFunction.AddEdge(entry, advance);
+            function.Blocks.AddRange([advance, done]);
+            function.Renumber();
+            return function;
+        }
+        a.Equal(1, Read(NarrowLoop()).Length, "有严格有符号上界的 32 位下标不会回绕");
+        a.Equal(0, Read(NarrowLoop(comparison: Cond.Ult)).Length, "无符号上界可能包含 int.MaxValue 以外的值");
+        a.Equal(0, Read(NarrowLoop(comparison: Cond.Sle)).Length, "包含上界时加一可能越过 int.MaxValue");
+        a.Equal(0, Read(NarrowLoop(bypass: true)).Length, "递增不能绕过边界分支");
+        a.Equal(0, Read(NarrowLoop(initialIndex: uint.MaxValue)).Length, "拒绝 32 位负数种子");
+        a.Equal(0, Read(NarrowLoop(increment: 2)).Length, "窄下标暂只接受有界逐次加一");
         return a.Finish("array-cursors");
     }
 }
