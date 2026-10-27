@@ -70,6 +70,7 @@ public sealed partial class MethodRecovery
                 }
             }
             WitnessStoredArguments(witnesses);
+            WitnessLoadedArguments(witnesses);
             WitnessStoredResults(witnesses);
             WitnessFieldCopies(witnesses);
             WitnessFrameCopies(witnesses);

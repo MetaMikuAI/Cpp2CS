@@ -58,6 +58,25 @@ internal static class ManagedFramePromotion
                 }
         // 已定型结构体经逐片读写复制到另一段栈时，两侧都保留物理布局供后续整体恢复。
         var definitions = statements.OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+        var loadedDefinitions = statements.OfType<Define>().ToDictionary(d => d.Target);
+        // 按值传参的结构体同样需要完整布局，不能先把其中的引用字段单独提升。
+        foreach (var call in statements.OfType<Call>())
+        {
+            if (Signature(call) is not { } signature) continue;
+            var registers = call.ArgumentsBySource();
+            foreach (var argument in signature.Arguments.Where(a => a.Passing == Passing.Registers && abi.Kind(a.Type) == ValueKind.Struct))
+            {
+                var pieces = new List<(int Offset, int Width, long Frame)>();
+                foreach (var piece in argument.Pieces)
+                {
+                    if (!registers.TryGetValue(piece.Register, out var value) || FrameArgumentSpan.Loaded(value, loadedDefinitions) is not { } read
+                        || read.Load.Width != piece.Width || read.Load.Address is not FrameAddress frame) break;
+                    pieces.Add((piece.Offset, piece.Width, frame.Offset));
+                }
+                var size = abi.Size(argument.Type);
+                if (pieces.Count == argument.Pieces.Length && FrameArgumentSpan.Origin(size, pieces) is { } origin) preserved.Add((origin, size));
+            }
+        }
         var copies = statements.OfType<Store>().Where(s => s is { Target: FrameAddress, Value: Use })
             .Select(s => (Store: s, Value: definitions.GetValueOrDefault(((Use)s.Value).Variable)))
             .Where(p => p.Value is Load { Address: FrameAddress } load && load.Width == p.Store.Value.Width)
