@@ -39,8 +39,39 @@ internal static class SourceReturnsCheck
         var field = new FieldDef { Index = -1, Owner = owner, Name = "Flag", Token = 0, Type = boolean, Offset = 16, Attributes = FieldAttributes.Public };
         var read = new FieldValue(new ArgumentValue(0, new DefinitionRef(owner, []), 64), new(field, new DefinitionRef(owner, [])), boolean, 8);
         a.True(SourceReturns.Rewrite(Body(read)).Blocks[0].Statements[0] is ManagedJump, "可能抛出的字段读取保留位置");
+        Throws(a, method);
         Dispatch(a);
         return a.Finish("source-returns");
+    }
+
+    private static void Throws(Assertions a, MethodRef method)
+    {
+        var type = new PrimitiveRef("Object");
+        var first = new LocalValue(new(Storage.Temp(1), 1), type, 64);
+        var second = new LocalValue(new(Storage.Temp(2), 1), type, 64);
+        var merged = new LocalValue(new(Storage.Temp(3), 1), type, 64);
+        var body = new ManagedBody(method, [
+            new(0, [new ManagedJump(0, new(2, [new(merged, first)]))]),
+            new(1, [new ManagedJump(1, new(2, [new(merged, second)]))]),
+            new(2, [new ManagedJump(2, new(3, []))]), new(3, [new ManagedThrow(3, merged)])]);
+        var result = SourceReturns.Rewrite(body);
+        a.True(result.Blocks[0].Statements is [ManagedAssignment { Value: var value }, ManagedThrow { Exception: var thrown }]
+            && value == first && thrown == merged, "第一条失败路径保留赋值后直接抛出");
+        a.True(result.Blocks[1].Statements is [ManagedAssignment { Value: var other }, ManagedThrow] && other == second,
+            "第二条失败路径使用自己的异常值");
+        a.True(result.Blocks[2].Statements is [ManagedThrow], "纯跳转链收敛到抛出尾部");
+        var region = body with { Regions = [new([0, 1, 2], 3, [3], merged, ManagedRegionKind.Catch)] };
+        a.True(SourceReturns.Rewrite(region).Blocks[2].Statements is [ManagedJump], "抛出操作不能跨越异常区域");
+        var writes = body with { Blocks = [body.Blocks[0] with { Statements = [new ManagedJump(0, new(3,
+            [new(merged, first), new(second, new ConstantValue(0, type, 64))]))] }, .. body.Blocks.Skip(1)] };
+        a.True(SourceReturns.Rewrite(writes).Blocks[0].Statements is [ManagedAssignment, ManagedAssignment { Target: var target }, ManagedThrow]
+            && target == second, "外层异常处理可能读取的其他边复制不能丢弃");
+        var parallel = body with { Blocks = [body.Blocks[0] with { Statements = [new ManagedJump(0, new(3,
+            [new(merged, second), new(second, first)]))] }, .. body.Blocks.Skip(1)] };
+        a.True(SourceReturns.Rewrite(parallel).Blocks[0].Statements is [ManagedJump], "有交叉依赖的同时复制不顺序展开");
+        var call = body with { Blocks = [.. body.Blocks.Take(3), new(3,
+            [new ManagedCall(3, new(method, null, [], false), null, false), new ManagedThrow(3, merged)])] };
+        a.True(SourceReturns.Rewrite(call).Blocks[2].Statements is [ManagedJump], "不复制带调用的异常尾部");
     }
 
     private static void Dispatch(Assertions a)

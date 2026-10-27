@@ -3,7 +3,7 @@ using Cpp2CS.Model;
 
 namespace Cpp2CS.Recovery;
 
-/// <summary>将共享返回尾部还原到前驱；迭代器保留对应状态写入，布尔结果不保留寄存器扩展包装。</summary>
+/// <summary>将共享返回或抛出尾部还原到前驱；保留异常区域、边复制与迭代器状态写入。</summary>
 internal static class SourceReturns
 {
     public static ManagedBody Rewrite(ManagedBody body)
@@ -39,8 +39,22 @@ internal static class SourceReturns
             {
                 var block = blocks[address];
                 if (block.Statements.LastOrDefault() is not ManagedJump jump
-                    || blocks[jump.Edge.Target].Statements is not { Count: > 0 } tail
-                    || tail[^1] is not ManagedReturn { Value: { } value } || !Pure(value)
+                    || blocks[jump.Edge.Target].Statements is not { Count: > 0 } tail) continue;
+                if (tail[^1] is ManagedThrow thrown && Pure(thrown.Exception) && SameRegion(address, jump.Edge.Target)
+                    && tail.SkipLast(1).All(s => s is ManagedAssignment assignment && Pure(assignment.Value))
+                    && jump.Edge.Copies.All(c => Pure(c.Value)))
+                {
+                    var targets = jump.Edge.Copies.Select(c => c.Target.Variable).ToHashSet();
+                    // 无交叉依赖时，同时复制可顺序写入；写入仍保留，外层 catch 可以观察这些局部。
+                    if (jump.Edge.Copies.Any(c => ManagedValues.Walk(c.Value).OfType<LocalValue>()
+                        .Any(l => targets.Contains(l.Variable) && l.Variable != c.Target.Variable))) continue;
+                    blocks[address] = block with { Statements = [.. block.Statements.SkipLast(1),
+                        .. jump.Edge.Copies.Select(c => new ManagedAssignment(jump.Address, c.Target, c.Value)),
+                        .. tail.SkipLast(1), thrown with { Address = jump.Address }] };
+                    changed = true;
+                    continue;
+                }
+                if (tail[^1] is not ManagedReturn { Value: { } value } || !Pure(value)
                     || tail.Count != 1 && !(tail.Count == 2 && StateWrite(tail[0]) && SameRegion(address, jump.Edge.Target))
                     || jump.Edge.Copies.Any(c => c.Value is not (LocalValue or ArgumentValue or ConstantValue))) continue;
                 var copies = jump.Edge.Copies.ToDictionary(c => c.Target.Variable, c => c.Value);
