@@ -120,6 +120,7 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
             ? FieldCalls(type).FirstOrDefault(c => c.Write && c.Method.Equals(method))?.Field : null);
         body = SourceListCalls.Rewrite(body, types, (site, method) =>
             Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{site:x}\t{body.Method}\t{method}"));
+        body = RewriteGuardedUpdates(body);
         body = RewriteFieldCalls(body);
         var caller = body.Method.Method.Owner;
         body = AccessorRewriter.Rewrite(body, (value, write) =>
