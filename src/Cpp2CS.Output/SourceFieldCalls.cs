@@ -19,7 +19,7 @@ public sealed partial class SourceLibraryCalls
         foreach (var method in type.Definition.Methods.Where(m => m.GenericParameters.Count == 0
             && m.Name != ".cctor" && (m.Name != ".ctor" || type.Definition.IsValueType
                 && type.Definition.Fields.Count(f => !f.IsStatic) == 1)
-            && m.Parameters.Count <= 1 && !m.IsVirtual
+            && m.Parameters.Count <= 1 && (!m.IsVirtual || (m.Attributes & System.Reflection.MethodAttributes.Final) != 0)
             && (m.Attributes & System.Reflection.MethodAttributes.MemberAccessMask) is System.Reflection.MethodAttributes.Public
                 or System.Reflection.MethodAttributes.Family or System.Reflection.MethodAttributes.FamORAssem))
         {
@@ -69,6 +69,7 @@ public sealed partial class SourceLibraryCalls
                 && narrowed.Width == boolean.Width && types.Kind(boolean.Type) == TypeKind.Bool) returned = boolean;
             FieldRef? Storage(ManagedValue value) => value switch
             {
+                IndirectValue { Address: AddressValue address } when address.Target.Type.Equals(value.Type) => Storage(address.Target),
                 FieldValue { Receiver: ArgumentValue { Index: -1 }, Field: var field } when !method.IsStatic => field,
                 StaticFieldValue { Field: var field } when method.IsStatic && field.DeclaringType.Equals(reference.DeclaringType) => field,
                 _ => null,
