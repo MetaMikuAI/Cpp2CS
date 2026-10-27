@@ -32,6 +32,11 @@ internal static class AllocationPairing
         statement is Phi phi && phi.Sources.Contains(created)
         || ExprMap.Operands(statement).SelectMany(ExprMap.Walk).Any(e => e is Use u && u.Variable == created);
 
+    internal static bool PrivateArgumentStore(Store store, Call constructor, IEnumerable<Stmt> statements) =>
+        !ExprMap.Walk(store.Value).Any(e => e is Load or Intrinsic or Unknown)
+        && statements.Where(s => ExprMap.Operands(s).SelectMany(ExprMap.Walk).Contains(store.Target))
+            .All(s => ReferenceEquals(s, store) || ReferenceEquals(s, constructor));
+
     internal static string? MotionProblem(CodeFunction range, Block source, Call allocation, Block destination,
         Call constructor, IEnumerable<Stmt> middle, Variable created)
     {

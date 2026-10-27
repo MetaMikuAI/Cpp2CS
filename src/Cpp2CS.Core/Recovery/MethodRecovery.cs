@@ -656,13 +656,14 @@ public sealed partial class MethodRecovery
                         if (!AllocationPairing.Uses(statement, created)) { middle.Add(statement); continue; }
                         MethodDef? forwarded = null;
                         if (statement is Call call && Receiver(call) is Use { Variable: var receiver } && receiver == created
-                            && (call.Op is { Kind: OpKind.CallMethodPointer, Operand: MethodRef { Method: { Name: ".ctor", IsStatic: false } pointerCtor } } && pointerCtor.Owner == type.Definition
+                            && (call.Op is { Kind: OpKind.CallMethodPointer or OpKind.InvokeGeneric, Operand: MethodRef { Method: { Name: ".ctor", IsStatic: false } pointerCtor } } && pointerCtor.Owner == type.Definition
                                 || call is { Op: null, Kind: CallKind.Direct, Target: Const target }
                                     && (facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false } ctor } && ctor.Owner == type.Definition)
                                         || facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false, Parameters.Count: 0 } ctor } && ctor.Owner != type.Definition)
                                             && (forwarded = owner.ForwardingConstructor(type, target.Value)) is not null)))
                         {
-                            if (current != block && AllocationPairing.MotionProblem(function.Range, block, allocation, current, call, middle, created) is { } problem)
+                            if (current != block && AllocationPairing.MotionProblem(function.Range, block, allocation, current, call,
+                                middle.Where(s => !PrivateInvokerInitializer(s, call)), created) is { } problem)
                             {
                                 failure = Hole(allocation.Address, $"分配 {type} {problem}");
                                 break;
@@ -688,7 +689,16 @@ public sealed partial class MethodRecovery
                 }
         }
 
-        private static Expr? Receiver(Call call) => call.DelegateReceiver ?? (call.Sources.Length > 0 && call.Sources[0] == Storage.Gpr(0) ? call.Arguments[0] : null);
+        private static Expr? Receiver(Call call) => call.DelegateReceiver ?? (call.Op?.Kind == OpKind.InvokeGeneric
+            || call.Sources.Length > 0 && call.Sources[0] == Storage.Gpr(0) ? call.Arguments[0] : null);
+
+        // invoker 的独占实参栈槽不可被异常处理器或其他调用观察；纯值写入不限制分配配对。
+        private bool PrivateInvokerInitializer(Stmt statement, Call constructor)
+        {
+            if (constructor.Op?.Kind != OpKind.InvokeGeneric || statement is not Store { Target: TypedFrame frame } store
+                || frame.Region.Offset >= 0 || store.Value.Width != frame.Region.Size * 8) return false;
+            return AllocationPairing.PrivateArgumentStore(store, constructor, blocks.SelectMany(b => b.Statements));
+        }
 
         /// <summary>判空与越界的吸收（见类注释第 4 条）。</summary>
         [Analysis("检查吸收", 80, After = ["帧区域"])]

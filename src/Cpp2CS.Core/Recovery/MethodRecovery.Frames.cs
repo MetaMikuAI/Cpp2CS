@@ -31,8 +31,10 @@ public sealed partial class MethodRecovery
             if (PinnedArrayRecognition.Run(function, e => TypeOfAddressBase(e) is ArrayRef { IsVector: true } array
                 && types.Kind(array.Element) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double ? array : null) > 0)
             {
-                Ssa.Propagate.RemoveDead(function);
-                while (Ssa.ControlFlow.Simplify(function)) function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
+                RemoveDeadDefinitions();
+                // 异常片段已绑定基本块；此处只删纯定义，不改变受保护控制流。
+                if (exceptionLayout is not { Succeeded: true })
+                    while (Ssa.ControlFlow.Simplify(function)) function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
                 blocks = function.Blocks;
                 definitions = IndexDefinitions();
                 InferTypes();
@@ -56,6 +58,17 @@ public sealed partial class MethodRecovery
             {
                 if (stackEnums.ContainsKey(call)) continue;
                 if (!call.Arguments.Any(argument => FrameOffset(argument) is not null)) continue;
+                if (call.Op is { Kind: OpKind.InvokeGeneric, Operand: MethodRef invoked })
+                {
+                    for (var i = 0; i < invoked.Method.Parameters.Count; i++)
+                    {
+                        var type = Concrete(invoked, invoked.Method.Parameters[i].Type);
+                        if (!ManagedTypes.IsReferenceType(type)) Bind(call.Arguments[i + 1], type, call);
+                    }
+                    var returned = Concrete(invoked, invoked.Method.ReturnType);
+                    if (!ManagedTypes.IsVoid(returned)) Bind(call.Arguments[^1], returned, call, true);
+                    continue;
+                }
                 // 装箱提供精确值类型；标量的到达写入划出生命期，允许后续结构体复用同一物理槽。
                 if (call.Op is { Kind: OpKind.Box, Operand: TypeRef boxedType } && call.Arguments.LastOrDefault() is { } data
                     && types.Kind(boxedType) is TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)

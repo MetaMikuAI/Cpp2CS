@@ -76,6 +76,14 @@ internal static class PairingCheck
             new Store(8, Expr.C(0, 64), Expr.C(1, 64)),
             new Call(8, CallKind.Direct, Expr.C(300, 64)),
         }) a.True(Problem(statement) is not null, $"不能把分配移动到 {statement.GetType().Name} 之后");
+        var slot = new FrameAddress(-8);
+        var saved = new Store(8, slot, new Use(temporary, 64));
+        var invoker = constructor with { Arguments = [slot] };
+        a.True(AllocationPairing.PrivateArgumentStore(saved, invoker, [saved, invoker]), "仅构造调用读取的纯实参写入");
+        a.True(!AllocationPairing.PrivateArgumentStore(saved, invoker, [saved, invoker, new Define(28, temporary, new Load(slot, 64))]), "处理器或后续读取使栈槽可观察");
+        a.True(!AllocationPairing.PrivateArgumentStore(saved, invoker, [saved, invoker, new Store(28, new Binary(BinOp.Add, slot, Expr.C(4, 64), 64), Expr.C(0, 32))]), "重叠栈写入不能忽略");
+        a.True(!AllocationPairing.PrivateArgumentStore(saved, invoker, [saved, invoker, constructor with { Arguments = [slot] }]), "其他调用的地址逃逸不能忽略");
+        a.True(!AllocationPairing.PrivateArgumentStore(saved with { Value = new Load(Expr.C(0, 64), 64) }, invoker, [invoker]), "实参写入中的访存仍可抛出");
         return a.Finish("pairing");
     }
 }

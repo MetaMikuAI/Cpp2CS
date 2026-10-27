@@ -29,8 +29,10 @@ public sealed partial class MethodRecovery
 
         private void DelegateAllocation(Block block, int index, Call allocation, DefinitionRef type, Variable created)
         {
-            bool Constructor(Call call) => call is { Op: null, Kind: CallKind.Direct, Target: Const target }
-                && facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false } m } && m.Owner == type.Definition);
+            bool Constructor(Call call) => call.Op is { Kind: OpKind.CallMethodPointer, Operand: MethodRef { Method: { Name: ".ctor", IsStatic: false } pointerCtor } }
+                    && pointerCtor.Owner == type.Definition
+                || call is { Op: null, Kind: CallKind.Direct, Target: Const target }
+                    && facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false } m } && m.Owner == type.Definition);
             var constructors = blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => Constructor(c) && Receiver(c) is Use u && u.Variable == created).ToArray();
             if (constructors.Length == 2 && BranchConstructors(block, index, allocation, type, created))
             {
@@ -44,7 +46,7 @@ public sealed partial class MethodRecovery
             }
             if (constructors.Length != 1)
             {
-                Reject(constructors.Length > 1 ? "同一分配有多个构造候选" : phiUses.ContainsKey(created) ? "φ 汇合后构造尚未支持" : "分配没有唯一直接构造候选");
+                Reject(constructors.Length > 1 ? "同一分配有多个构造候选" : phiUses.ContainsKey(created) ? "φ 汇合后构造尚未支持" : "分配没有唯一构造候选");
                 return;
             }
             var constructor = constructors[0];

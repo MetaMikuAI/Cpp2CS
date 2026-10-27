@@ -170,7 +170,8 @@ public sealed partial class MethodRecovery
                         && ExpandValue(call.Arguments[1]) == methodInfo && call.Arguments[3] is FrameAddress array)
                     {
                         var returned = Concrete(callee, callee.Method.ReturnType);
-                        if (!ManagedTypes.IsVoid(returned) && !Equals(AddressType(call.Arguments[4]), returned)) continue;
+                        if (!ManagedTypes.IsVoid(returned) && !Equals(AddressType(call.Arguments[4]), returned)
+                            && !(call.Arguments[4] is FrameAddress && types.Size(returned) > 0)) continue;
                         var stores = block.Statements.Take(i).OfType<Store>().Where(s => s.Target is FrameAddress)
                             .GroupBy(s => ((FrameAddress)s.Target).Offset).ToDictionary(g => g.Key, g => g.Last());
                         var args = new List<Expr> { call.Arguments[2] };
@@ -179,7 +180,8 @@ public sealed partial class MethodRecovery
                         {
                             if (!stores.TryGetValue(array.Offset + p * 8, out var store)) break;
                             var type = Concrete(callee, callee.Method.Parameters[p].Type);
-                            if (!ManagedTypes.IsReferenceType(type) && !Equals(AddressType(store.Value), type)) break;
+                            if (!ManagedTypes.IsReferenceType(type) && !Equals(AddressType(store.Value), type)
+                                && !(store.Value is FrameAddress && types.Size(type) > 0)) break;
                             args.Add(store.Value); consumed.Add(store);
                         }
                         if (consumed.Count != callee.Method.Parameters.Count) continue;
@@ -202,8 +204,14 @@ public sealed partial class MethodRecovery
 
         private void NormalizeStackCanary(Func<Expr, int, Expr> expand)
         {
+            var storesBySlot = function.Blocks.SelectMany(b => b.Statements).OfType<Store>()
+                .Where(s => s.Target is FrameAddress).GroupBy(s => (FrameAddress)s.Target)
+                .Where(g => g.Count() == 1).ToDictionary(g => g.Key, g => g.Single());
+            bool ThreadPointer(Expr e) => e is Intrinsic { Name: "sysreg_tpidr_el0" }
+                || e is Load { Width: 64, Address: FrameAddress slot } && storesBySlot.TryGetValue(slot, out var saved)
+                    && expand(saved.Value, 0) is Intrinsic { Name: "sysreg_tpidr_el0" };
             bool Canary(Expr e) => expand(e, 0) is Load { Width: 64, Address: Binary { Op: BinOp.Add,
-                Left: Intrinsic { Name: "sysreg_tpidr_el0" }, Right: Const { Value: 0x28 } } };
+                Left: var thread, Right: Const { Value: 0x28 } } } && ThreadPointer(thread);
             foreach (var block in function.Blocks.ToArray())
             {
                 if (block.Statements.LastOrDefault() is not Branch branch || expand(branch.Condition, 0) is not Compare
@@ -239,6 +247,11 @@ public sealed partial class MethodRecovery
             if (call.Op is not { Kind: OpKind.InvokeGeneric, Operand: MethodRef callee }) return false;
             var parameters = callee.Method.Parameters.Select((p, i) => Concrete(callee, p.Type) is var type && ManagedTypes.IsReferenceType(type)
                 ? RecoverAs(call.Arguments[i + 1], type, call.Address) : SharedValue(call.Arguments[i + 1], type)).ToArray();
+            if (constructed.TryGetValue(call, out var created))
+            {
+                output.Add(new ManagedAssignment(call.Address, Local(created), new NewObjectValue(callee, parameters)));
+                return true;
+            }
             var returned = Concrete(callee, callee.Method.ReturnType);
             var result = ManagedTypes.IsVoid(returned) ? null : (SharedValue(call.Arguments[^1], returned) as LocalValue
                 ?? throw Fail(call.Address, "共享返回存储不是局部变量"));
