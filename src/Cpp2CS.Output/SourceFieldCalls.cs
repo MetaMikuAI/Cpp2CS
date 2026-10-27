@@ -9,6 +9,7 @@ public sealed partial class SourceLibraryCalls
 {
     private sealed record FieldCall(MethodRef Method, FieldRef Field, bool Write);
     private readonly Dictionary<DefinitionRef, FieldCall[]> fieldCalls = [];
+    private readonly Dictionary<DefinitionRef, SourceValueConstructor[]> valueConstructors = [];
     private Dictionary<MethodRef, ulong>? fieldCallEntries;
 
     // 只用实际原生方法的单字段读写形态认回可访问入口，不按属性名猜字段。
@@ -16,10 +17,11 @@ public sealed partial class SourceLibraryCalls
     {
         if (fieldCalls.TryGetValue(type, out var cached)) return cached;
         var found = new List<FieldCall>();
+        var constructors = new List<SourceValueConstructor>();
         foreach (var method in type.Definition.Methods.Where(m => m.GenericParameters.Count == 0
-            && m.Name != ".cctor" && (m.Name != ".ctor" || type.Definition.IsValueType
-                && type.Definition.Fields.Count(f => !f.IsStatic) == 1)
-            && m.Parameters.Count <= 1 && (!m.IsVirtual || (m.Attributes & System.Reflection.MethodAttributes.Final) != 0)
+            && m.Name != ".cctor" && (m.Name != ".ctor" || type.Definition.IsValueType)
+            && (m.Parameters.Count <= 1 || m.Name == ".ctor" && m.Parameters.Count <= 8)
+            && (!m.IsVirtual || (m.Attributes & System.Reflection.MethodAttributes.Final) != 0)
             && (m.Attributes & System.Reflection.MethodAttributes.MemberAccessMask) is System.Reflection.MethodAttributes.Public
                 or System.Reflection.MethodAttributes.Family or System.Reflection.MethodAttributes.FamORAssem))
         {
@@ -64,6 +66,9 @@ public sealed partial class SourceLibraryCalls
                 }
             }
             if (!valid) continue;
+            if (body.Blocks is [{ Statements: var sequence }] && sequence.LastOrDefault() is ManagedReturn { Value: null }
+                && values.Values.SelectMany(ManagedValues.Walk).All(v => v is ArgumentValue or ConstantValue)
+                && SourceValueConstructor.Create(reference, stores) is { } constructor) constructors.Add(constructor);
             if (types.Kind(method.ReturnType.Substitute(type.Arguments, [])) == TypeKind.Bool
                 && returned is ConversionValue { Kind: ConvKind.Truncate, Operand: ConversionValue { Kind: ConvKind.ZeroExtend, Operand: var boolean } } narrowed
                 && narrowed.Width == boolean.Width && types.Kind(boolean.Type) == TypeKind.Bool) returned = boolean;
@@ -84,9 +89,11 @@ public sealed partial class SourceLibraryCalls
             if (method.Parameters.Count == 0 && stores.Count == 0 && returned is not null && Storage(returned) is { } read
                 && returned.Type.Equals(method.ReturnType.Substitute(type.Arguments, [])) && OnlyStorage(read)) found.Add(new(reference, read, false));
             if (method.Parameters.Count == 1 && ManagedTypes.IsVoid(method.ReturnType) && stores is [var write]
+                && (method.Name != ".ctor" || type.Definition.Fields.Count(f => !f.IsStatic) == 1)
                 && Storage(write.Target) is { } field && write.Value is ArgumentValue { Index: 0 } argument
                 && argument.Type.Equals(write.Target.Type) && OnlyStorage(field)) found.Add(new(reference, field, true));
         }
+        valueConstructors[type] = constructors.ToArray();
         return fieldCalls[type] = found.ToArray();
     }
 
@@ -130,6 +137,17 @@ public sealed partial class SourceLibraryCalls
                     else value = ManagedValues.Map(value, Read);
                     if (value is ComposedValue composed)
                     {
+                        if (composed.Type is DefinitionRef valueType)
+                        {
+                            _ = FieldCalls(valueType);
+                            foreach (var constructor in valueConstructors[valueType])
+                            {
+                                if (!ManagedAccess.Method(types, body.Method.Method.Owner, constructor.Method, null)
+                                    || constructor.Build(composed) is not { } created) continue;
+                                Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{statement.Address:x}\t{body.Method}\t{constructor.Method}");
+                                return created;
+                            }
+                        }
                         var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
                         foreach (var (path, original) in composed.Leaves)
                         {
