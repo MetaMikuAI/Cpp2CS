@@ -15,12 +15,13 @@ internal static class RecoveredForeachCheck
         ExpressionStatement Dispose() => new(new InvocationExpression(Member("Dispose")));
         var a = new Assertions();
         foreach (var mode in new[] { "local", "receiver", "projection", "conditional", "conditional-rewrap", "increment", "unresolved-argument" })
-        foreach (var cleanupMode in new[] { "external", "internal", "continuation", "direct" })
+        foreach (var cleanupMode in new[] { "external", "internal", "continuation", "direct", "catch", "internal-catch", "catch-continuation" })
         foreach (var temporary in new[] { false, true })
         foreach (var escape in new[] { false, true })
         foreach (var earlyExit in cleanupMode is "external" or "direct" && mode == "local" && !temporary ? new[] { false, true } : new[] { false })
         {
-            var internalCleanup = cleanupMode == "internal";
+            var internalCleanup = cleanupMode is "internal" or "internal-catch";
+            var directCatch = cleanupMode is "catch" or "internal-catch";
             var method = new MethodDeclaration { Name = "Visit", ReturnType = new PrimitiveType("void"), Body = new BlockStatement() };
             method.Parameters.Add(new ParameterDeclaration { Type = new SimpleType("object"), Name = "item" });
             var tree = new SyntaxTree();
@@ -58,19 +59,35 @@ internal static class RecoveredForeachCheck
             }
             else guarded.TryBlock.Statements.Add(new IfElseStatement(new InvocationExpression(Member("MoveNext")), body));
             var catcher = new CatchClause { Type = new SimpleType("Exception"), VariableName = "error", Body = new BlockStatement() };
-            catcher.Body.Statements.Add(new ExpressionStatement(new AssignmentExpression(Id("pending"), Id("error"))));
-            catcher.Body.Statements.Add(new GotoStatement("cleanup"));
+            if (directCatch)
+            {
+                catcher.Body.Statements.Add(Dispose());
+                catcher.Body.Statements.Add(new ThrowStatement(Id("error")));
+            }
+            else
+            {
+                catcher.Body.Statements.Add(new ExpressionStatement(new AssignmentExpression(Id(cleanupMode == "catch-continuation" ? "merged" : "pending"), Id("error"))));
+                catcher.Body.Statements.Add(cleanupMode == "catch-continuation" ? new BreakStatement() : new GotoStatement("cleanup"));
+            }
             guarded.CatchClauses.Add(catcher);
             var loop = new BlockStatement();
             loop.Statements.Add(new VariableDeclarationStatement(new SimpleType("Exception"), "pending"));
             loop.Statements.Add(guarded);
-            if (cleanupMode == "continuation")
+            if (cleanupMode is "continuation" or "catch-continuation")
             {
                 method.Body.Statements.Add(new VariableDeclarationStatement(new SimpleType("Exception"), "merged"));
                 loop.Statements.Add(new ExpressionStatement(new AssignmentExpression(Id("merged"), new NullReferenceExpression())));
                 loop.Statements.Add(new BreakStatement());
-                loop.Statements.Add(new LabelStatement("cleanup"));
-                loop.Statements.Add(new ExpressionStatement(new AssignmentExpression(Id("merged"), Id("pending"))));
+                if (cleanupMode == "continuation")
+                {
+                    loop.Statements.Add(new LabelStatement("cleanup"));
+                    loop.Statements.Add(new ExpressionStatement(new AssignmentExpression(Id("merged"), Id("pending"))));
+                    loop.Statements.Add(new BreakStatement());
+                }
+            }
+            else if (directCatch)
+            {
+                if (internalCleanup) loop.Statements.Add(Dispose());
                 loop.Statements.Add(new BreakStatement());
             }
             else
@@ -86,7 +103,7 @@ internal static class RecoveredForeachCheck
             }
             method.Body.Statements.Add(new WhileStatement(new PrimitiveExpression(true), loop));
             if (!internalCleanup) method.Body.Statements.Add(Dispose());
-            if (cleanupMode == "continuation")
+            if (cleanupMode is "continuation" or "catch-continuation")
             {
                 var success = new BlockStatement();
                 success.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Finish"))));

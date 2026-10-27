@@ -61,6 +61,18 @@ internal static class SourceCatchCheck
         a.True(SourceCaughtExceptions.Rewrite(replaced).Blocks[1].Statements.Last() is ManagedBranch, "捕获对象重新赋值后不再假定非空");
         var addressed = NullBranch(caught, Cond.Eq, new ManagedCall(0, new(method, null, [new AddressValue(caught)], false), null, false));
         a.True(SourceCaughtExceptions.Rewrite(addressed).Blocks[1].Statements.Last() is ManagedBranch, "按引用传出的异常保留判断");
+        var handler = new ManagedBody(method, [new(0, [new ManagedJump(0, new(4, []))]),
+            new(1, [new ManagedJump(1, new(3, []))]), new(2, [new ManagedReturn(2, null)]),
+            new(3, [new ManagedCall(3, new(method, null, [], false), null, false), new ManagedJump(3, new(4, []))]),
+            new(4, [new ManagedReturn(4, null)])]) { Regions = [new([0], 1, [1], caught, ManagedRegionKind.Catch)] };
+        var extended = SourceCatchHandlers.Rewrite(handler);
+        a.True(extended.Regions[0].Handler.SequenceEqual(new ulong[] { 1, 3 }), "仅异常路径到达的调用归回 catch，共享退出不纳入");
+        a.True(extended.Blocks.Select(b => b.Address).SequenceEqual(new ulong[] { 0, 1, 3, 2, 4 }), "移动后 handler 保持连续");
+        a.Equal(handler.Blocks.Single(b => b.Address == 3), extended.Blocks.Single(b => b.Address == 3), "调用、边复制和跳转保持原样");
+        var shared = handler with { Blocks = [handler.Blocks[0] with { Statements = [new ManagedJump(0, new(3, []))] }, .. handler.Blocks.Skip(1)] };
+        a.Equal(1, SourceCatchHandlers.Rewrite(shared).Regions[0].Handler.Count, "正常路径也能到达的处理块不纳入 catch");
+        var nested = handler with { Regions = [.. handler.Regions, new([0, 1], 2, [2], copy, ManagedRegionKind.Catch)] };
+        a.Equal(1, SourceCatchHandlers.Rewrite(nested).Regions[0].Handler.Count, "不改变调用所处的外层保护范围");
         return a.Finish("source-catches");
     }
 }

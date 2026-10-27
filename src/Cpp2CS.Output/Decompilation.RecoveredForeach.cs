@@ -100,9 +100,22 @@ public static partial class Decompilation
                 }
                 var catcher = guarded.CatchClauses.Single();
                 if (catcher.Condition is not null || catcher.Type?.ToString() is not ("Exception" or "System.Exception")
-                    || catcher.Body is not { } catchBody || catchBody.Statements.ToArray() is not [ExpressionStatement { Expression: AssignmentExpression
-                        { Operator: AssignmentOperatorType.Assign, Left: IdentifierExpression saved, Right: var caught } }, GotoStatement jump]
-                    || !Name(caught, catcher.VariableName)) continue;
+                    || catcher.Body is not { } catchBody) continue;
+                string? savedName = null;
+                string? failureLabel = null;
+                var mergedCatch = false;
+                var directCatch = catchBody.Statements.ToArray() is [var catchCleanup, ThrowStatement catchThrow]
+                    && Dispose(catchCleanup, name) && (catchThrow.Expression is null || Name(catchThrow.Expression, catcher.VariableName));
+                if (!directCatch)
+                {
+                    if (catchBody.Statements.ToArray() is not [ExpressionStatement { Expression: AssignmentExpression
+                            { Operator: AssignmentOperatorType.Assign, Left: IdentifierExpression saved, Right: var caught } }, var exit]
+                        || exit is not (GotoStatement or BreakStatement)
+                        || !Name(caught, catcher.VariableName)) continue;
+                    savedName = saved.Identifier;
+                    failureLabel = (exit as GotoStatement)?.Label;
+                    mergedCatch = exit is BreakStatement;
+                }
                 var before = parts.TakeWhile(s => s != guarded).ToArray();
                 if (before.Any(s => s is not VariableDeclarationStatement d || d.Variables.Any(v => v.Initializer is not null))) continue;
                 var tail = parts.SkipWhile(s => s != guarded).Skip(1).ToArray();
@@ -112,24 +125,46 @@ public static partial class Decompilation
                 var removed = new List<Statement>();
                 IfElseStatement? continuation = null;
                 string? mergedException = null;
-                if (tail is [var normalCleanup, BreakStatement, LabelStatement internalLabel, var failureCleanup, IfElseStatement emptyBreak, ThrowStatement internalThrow]
-                    && Dispose(normalCleanup, name) && internalLabel.Label == jump.Label && Dispose(failureCleanup, name)
-                    && NullTest(emptyBreak.Condition, saved.Identifier, BinaryOperatorType.Equality) && emptyBreak.FalseStatement is null
+                if (directCatch)
+                {
+                    if (tail is [var internalCleanup, BreakStatement] && Dispose(internalCleanup, name)) { }
+                    else if (tail is [BreakStatement] && index + 1 < siblings.Length && Dispose(siblings[index + 1], name)) removed.Add(siblings[index + 1]);
+                    else continue;
+                }
+                else if (mergedCatch)
+                {
+                    if (tail is not [var emptyCatch, BreakStatement] || !Set(emptyCatch, savedName!, null)
+                        || index + 2 >= siblings.Length || !Dispose(siblings[index + 1], name)
+                        || siblings[index + 2] is not IfElseStatement rethrow || rethrow.FalseStatement is not null) continue;
+                    mergedException = savedName;
+                    removed.Add(siblings[index + 1]);
+                    if (NullTest(rethrow.Condition, savedName!, BinaryOperatorType.InEquality)
+                        && rethrow.TrueStatement is BlockStatement { Statements.Count: 1 } throwBody
+                        && throwBody.Statements.Single() is ThrowStatement finalThrow && Name(finalThrow.Expression, savedName)) removed.Add(rethrow);
+                    else if (NullTest(rethrow.Condition, savedName!, BinaryOperatorType.Equality)
+                        && rethrow.TrueStatement is BlockStatement && index + 3 < siblings.Length
+                        && siblings[index + 3] is ThrowStatement failed && Name(failed.Expression, savedName))
+                    { continuation = rethrow; removed.Add(failed); }
+                    else continue;
+                }
+                else if (tail is [var normalCleanup, BreakStatement, LabelStatement internalLabel, var failureCleanup, IfElseStatement emptyBreak, ThrowStatement internalThrow]
+                    && Dispose(normalCleanup, name) && internalLabel.Label == failureLabel && Dispose(failureCleanup, name)
+                    && NullTest(emptyBreak.Condition, savedName!, BinaryOperatorType.Equality) && emptyBreak.FalseStatement is null
                     && emptyBreak.TrueStatement is BlockStatement { Statements.Count: 1 } breakBody
-                    && breakBody.Statements.Single() is BreakStatement && Name(internalThrow.Expression, saved.Identifier)) { }
+                    && breakBody.Statements.Single() is BreakStatement && Name(internalThrow.Expression, savedName)) { }
                 else
                 {
                     if (index + 1 >= siblings.Length || !Dispose(siblings[index + 1], name)) continue;
                     removed.Add(siblings[index + 1]);
                     if (tail is [BreakStatement, LabelStatement directLabel, var directCleanup, ThrowStatement directThrow]
-                        && directLabel.Label == jump.Label && Dispose(directCleanup, name) && Name(directThrow.Expression, saved.Identifier)) { }
+                        && directLabel.Label == failureLabel && Dispose(directCleanup, name) && Name(directThrow.Expression, savedName)) { }
                     else if (tail is [BreakStatement, LabelStatement label, var cleanup, IfElseStatement empty, ThrowStatement thrown]
-                        && label.Label == jump.Label && Dispose(cleanup, name) && NullTest(empty.Condition, saved.Identifier, BinaryOperatorType.Equality)
+                        && label.Label == failureLabel && Dispose(cleanup, name) && NullTest(empty.Condition, savedName!, BinaryOperatorType.Equality)
                         && empty.FalseStatement is null && empty.TrueStatement is BlockStatement { Statements.Count: 1 } emptyBody
-                        && emptyBody.Statements.Single() is ReturnStatement { Expression: null } && Name(thrown.Expression, saved.Identifier)) { }
+                        && emptyBody.Statements.Single() is ReturnStatement { Expression: null } && Name(thrown.Expression, savedName)) { }
                     else if (tail is [ExpressionStatement { Expression: AssignmentExpression { Left: IdentifierExpression merged } }, BreakStatement,
-                        LabelStatement mergeLabel, var copy, BreakStatement] && mergeLabel.Label == jump.Label
-                        && Set(tail[0], merged.Identifier, null) && Set(copy, merged.Identifier, saved.Identifier)
+                        LabelStatement mergeLabel, var copy, BreakStatement] && mergeLabel.Label == failureLabel
+                        && Set(tail[0], merged.Identifier, null) && Set(copy, merged.Identifier, savedName)
                         && index + 2 < siblings.Length && siblings[index + 2] is IfElseStatement rethrow && rethrow.FalseStatement is null)
                     {
                         mergedException = merged.Identifier;
