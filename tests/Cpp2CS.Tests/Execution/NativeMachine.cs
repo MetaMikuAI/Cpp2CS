@@ -462,6 +462,12 @@ internal sealed partial class NativeMachine : IDisposable
                 uc.SetReg(Unicorn.D(0), unchecked((ulong)BitConverter.DoubleToInt64Bits(fraction)));
                 break;
             }
+            case HelperKind.Import when helper.Detail == "sinf":
+            {
+                var result = NativeMathLibrary.Sinf(BitConverter.UInt32BitsToSingle((uint)uc.Reg(Unicorn.S(0))));
+                uc.SetReg(Unicorn.S(0), BitConverter.SingleToUInt32Bits(result));
+                break;
+            }
             case HelperKind.Import when helper.Detail is "memcpy" or "memmove":
             {
                 var data = new byte[X(2)];

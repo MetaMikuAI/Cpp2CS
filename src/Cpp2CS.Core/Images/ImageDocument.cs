@@ -49,6 +49,9 @@ public sealed class ImageDocument
     /// <summary>引用未定义动态符号的指针位置（GOT、JUMP_SLOT）及符号名。</summary>
     public IReadOnlyDictionary<ulong, string> Imports { get; private init; } = new Dictionary<ulong, string>();
 
+    /// <summary>ELF DT_NEEDED 中声明的动态库名，不从导入符号名推测库名。</summary>
+    public IReadOnlyList<string> NeededLibraries { get; private init; } = [];
+
     /// <summary>按符号重定位的指针位置及符号名，含已定义符号（如静态链接并导出的 libc++abi 经 PLT 引用）。</summary>
     public IReadOnlyDictionary<ulong, string> SymbolSlots { get; private init; } = new Dictionary<ulong, string>();
 
@@ -281,24 +284,34 @@ public sealed class ImageDocument
             if (reader.U64(s + 56) != stride) throw new InvalidDataException($"{name} relocation entry 大小错误");
             collector.Add(name, format, reader.Offset(reader.U64(s + 24)), reader.U64(s + 32), stride);
         }
+        var neededLibraries = new List<string>();
         foreach (var (offset, size) in dynamicRanges)
         {
             reader.Require(offset, size);
             if (size % 16 != 0) throw new InvalidDataException("ELF dynamic table 长度错误");
             var tags = new Dictionary<long, ulong>();
+            var needed = new List<ulong>();
             var terminated = false;
             for (ulong i = 0; i < size; i += 16)
             {
                 var p = checked(offset + (long)i);
                 var tag = reader.I64(p);
                 if (tag == 0) { terminated = true; break; }
-                if (tag is 2 or 7 or 8 or 9 or 17 or 18 or 19 or 20 or 23 or 35 or 36 or 37 or 0x6000000f or 0x60000011 or 0x6fffe000 or 0x6fffe001 or 0x6fffe003)
+                if (tag == 1) needed.Add(reader.U64(p + 8));
+                if (tag is 2 or 5 or 7 or 8 or 9 or 10 or 17 or 18 or 19 or 20 or 23 or 35 or 36 or 37 or 0x6000000f or 0x60000011 or 0x6fffe000 or 0x6fffe001 or 0x6fffe003)
                 {
                     var value = reader.U64(p + 8);
                     if (!tags.TryAdd(tag, value) && tags[tag] != value) throw new InvalidDataException("重复 ELF dynamic relocation tag 不一致");
                 }
             }
             if (!terminated) throw new InvalidDataException("ELF dynamic table 缺少 DT_NULL");
+            if (needed.Count > 0)
+            {
+                if (!tags.TryGetValue(5, out var stringAddress) || !tags.TryGetValue(10, out var stringSize))
+                    throw new InvalidDataException("ELF DT_NEEDED 缺少动态字符串表");
+                var stringOffset = MapFile(ranges, stringAddress, stringSize);
+                neededLibraries.AddRange(needed.Select(n => reader.String(stringOffset, stringSize, checked((uint)n))));
+            }
             if (tags.ContainsKey(0x6000000f) || tags.ContainsKey(0x60000011)) throw new NotSupportedException("暂不支持 Android packed REL/RELA，不能确认代码重定位覆盖");
             AddDynamicTable(collector, ranges, tags, "DT_RELA", 7, 8, 9, "RELA", 24);
             AddDynamicTable(collector, ranges, tags, "DT_REL", 17, 18, 19, "REL", 16);
@@ -331,6 +344,7 @@ public sealed class ImageDocument
             Sections = sections.OrderBy(x => x.Address).ToArray(),
             Exports = exports,
             Imports = imports,
+            NeededLibraries = neededLibraries.Distinct(StringComparer.Ordinal).ToArray(),
             SymbolSlots = slots,
             pointerFixups = fixups,
         };

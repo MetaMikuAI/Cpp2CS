@@ -76,6 +76,12 @@ public static class CilBodyFingerprint
             Type(reference.ReturnType);
             writer.Write(reference.Parameters.Count);
             foreach (var parameter in reference.Parameters) Type(parameter.ParameterType);
+            // 同模块的合成导入使用 MethodDef token；库、入口和 ABI 也是调用身份的一部分。
+            var import = (reference as MethodDefinition)?.PInvokeInfo;
+            if (import is not null)
+            {
+                writer.Write("pinvoke"); writer.Write(import.Module.Name); writer.Write(import.EntryPoint); writer.Write((int)import.Attributes);
+            }
         }
         Method(method);
         writer.Write(body.InitLocals);

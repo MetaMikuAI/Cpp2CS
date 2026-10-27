@@ -242,7 +242,8 @@ internal static class RecoverCommand
                 Console.Error.WriteLine($"C# {assemblyName}：{count} 个类型文件，累计 {files}");
                 continue;
             }
-            foreach (var source in Decompilation.Decompile(Path.Combine(sourceAssemblies, assemblyName), sourceAssemblies, t => wanted.Contains((t.Namespace, t.Name)), false, recoveringBodies: true))
+            foreach (var source in Decompilation.Decompile(Path.Combine(sourceAssemblies, assemblyName), sourceAssemblies,
+                t => wanted.Contains((t.Namespace, t.Name)) || t.FullName == "Cpp2CS.NativeImports", false, recoveringBodies: true))
             {
                 File.WriteAllText(Path.Combine(sources, new string((assemblyName + "_" + source.TypeName).Select(c => invalid.Contains(c) ? '_' : c).ToArray()) + ".cs"), source.Source);
                 files++;

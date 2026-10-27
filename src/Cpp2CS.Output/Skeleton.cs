@@ -35,6 +35,7 @@ public sealed class Skeleton
     private readonly MethodDefinition[] methods;
     private readonly FieldDefinition[] fields;
     private readonly Dictionary<string, TypeDef> corlib = new();
+    private readonly Dictionary<(ModuleDefinition, NativeImport), MethodDefinition> nativeImports = new();
 
     public IReadOnlyList<AssemblyDefinition> Assemblies => assemblies;
     public TypeDefinition Type(TypeDef type) => types[type.Index];
@@ -412,6 +413,7 @@ public sealed class Skeleton
     /// <summary>方法引用：声明类型为泛型实例时以开放签名挂到实例上，有方法实参时再构造泛型方法实例。</summary>
     public MethodReference Reference(ModuleDefinition module, MethodRef method, IGenericParameterProvider? typeContext, IGenericParameterProvider? methodContext)
     {
+        if (method.Method.NativeImport is { } imported) return NativeReference(module, method.Method, imported);
         var reference = module.ImportReference(methods[method.Method.Index]);
         if (method.TypeArguments.Count > 0)
         {
@@ -432,6 +434,33 @@ public sealed class Skeleton
             reference = instance;
         }
         return reference;
+    }
+
+    private MethodDefinition NativeReference(ModuleDefinition module, MethodDef method, NativeImport imported)
+    {
+        if (nativeImports.TryGetValue((module, imported), out var cached)) return cached;
+        if (model.Types.Any(t => t.Assembly == module.Name && t.Namespace == "Cpp2CS" && t.Name == "NativeImports"))
+            throw new InvalidDataException("原类型与导入声明容器 Cpp2CS.NativeImports 重名");
+        var container = module.Types.FirstOrDefault(t => t.Namespace == "Cpp2CS" && t.Name == "NativeImports");
+        if (container is null)
+        {
+            container = new TypeDefinition("Cpp2CS", "NativeImports", TypeAttributes.Public | TypeAttributes.Abstract | TypeAttributes.Sealed
+                | TypeAttributes.BeforeFieldInit, Reference(module, new DefinitionRef(Corlib("System.Object"), []), null, null));
+            module.Types.Add(container);
+        }
+        var library = module.ModuleReferences.FirstOrDefault(r => r.Name == imported.Library);
+        if (library is null) module.ModuleReferences.Add(library = new ModuleReference(imported.Library));
+        var declaration = new MethodDefinition(method.Name, MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.PInvokeImpl,
+            Reference(module, method.ReturnType, null, null))
+        {
+            ImplAttributes = MethodImplAttributes.PreserveSig,
+            PInvokeInfo = new(PInvokeAttributes.CallConvCdecl | PInvokeAttributes.NoMangle, imported.EntryPoint, library),
+        };
+        foreach (var parameter in method.Parameters)
+            declaration.Parameters.Add(new ParameterDefinition(parameter.Name, 0, Reference(module, parameter.Type, null, null)));
+        container.Methods.Add(declaration);
+        nativeImports.Add((module, imported), declaration);
+        return declaration;
     }
 
     public FieldReference Reference(ModuleDefinition module, FieldRef field, IGenericParameterProvider? typeContext, IGenericParameterProvider? methodContext)

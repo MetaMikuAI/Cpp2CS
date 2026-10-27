@@ -178,6 +178,9 @@ public sealed record ParameterDef(string Name, TypeRef Type, ParameterAttributes
     public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
 }
 
+/// <summary>已知 C ABI 导入的库名和精确入口；签名由所属方法描述。</summary>
+public sealed record NativeImport(string Library, string EntryPoint);
+
 public sealed class MethodDef
 {
     public required int Index { get; init; }
@@ -187,6 +190,7 @@ public sealed class MethodDef
     public required MethodAttributes Attributes { get; init; }
     public required MethodImplAttributes ImplAttributes { get; init; }
     public required int Slot { get; init; }
+    public NativeImport? NativeImport { get; init; }
     public TypeRef ReturnType { get; internal set; } = new PrimitiveRef("void");
     public IReadOnlyList<ParameterDef> Parameters { get; internal set; } = [];
     public IReadOnlyList<GenericParameterDef> GenericParameters { get; internal set; } = [];

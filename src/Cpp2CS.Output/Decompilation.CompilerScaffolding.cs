@@ -39,8 +39,8 @@ public static partial class Decompilation
                 foreach (var reference in references) reference.ReplaceWith(receiver.Clone());
                 declaration.Remove();
             }
-            if (!rootNode.Descendants.Any(n => n is SimpleType { Identifier: "Await" or "Unrecovered" }
-                or IdentifierExpression { Identifier: "Await" or "Unrecovered" }))
+            if (!rootNode.Descendants.Any(n => n is SimpleType { Identifier: "Await" or "Unrecovered" or "NativeImports" }
+                or IdentifierExpression { Identifier: "Await" or "Unrecovered" or "NativeImports" }))
                 foreach (var import in rootNode.Descendants.OfType<UsingDeclaration>().Where(u => u.Namespace == "Cpp2CS").ToArray()) import.Remove();
             // 异步 builder 的故障转发已由 async 承担；无副作用的原样重抛不需要再包一层。
             foreach (var guarded in rootNode.Descendants.OfType<TryCatchStatement>().ToArray())
