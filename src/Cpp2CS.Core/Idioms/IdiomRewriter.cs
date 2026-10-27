@@ -214,6 +214,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             // RGCTX 数组只在其守卫（InitMethodRgctx）归一之后才当作已初始化的值
             Symbols(rgctx: true);
             Normalize();
+            if (MergedIndirectTails.Run(function)) Cleanup();
             if (SharedInterfaceTails.Run(function, c => c.Op is null && owner.HelperOf(c)?.Kind == HelperKind.InterfaceLookup, Fresh)) Cleanup();
             if (InterfaceDispatch()) Cleanup();
             if (SharedInterfaceTails.SplitInvokes(function, e => defs.Expand(e), Fresh)) Cleanup();
