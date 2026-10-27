@@ -34,8 +34,10 @@ internal sealed record SourceValueConstructor(MethodRef Method, IReadOnlyList<(F
 
     internal NewObjectValue? Build(ComposedValue value)
     {
+        static bool Snapshot(ManagedValue v) => v is LocalValue or ArgumentValue or ConstantValue
+            || v is NewObjectValue { Transparent: true } created && created.Arguments.All(Snapshot);
         if (!value.Type.Equals(Method.DeclaringType) || value.Leaves.Count != Fields.Count
-            || value.Leaves.Any(l => l.Path.Count != 1 || l.Value is not (LocalValue or ArgumentValue or ConstantValue))
+            || value.Leaves.Any(l => l.Path.Count != 1 || !Snapshot(l.Value))
             || value.Leaves.Select(l => l.Path[0]).Distinct().Count() != Fields.Count) return null;
         var arguments = new ManagedValue?[Method.Method.Parameters.Count];
         foreach (var (field, expected) in Fields)
@@ -50,5 +52,13 @@ internal sealed record SourceValueConstructor(MethodRef Method, IReadOnlyList<(F
             else if (!expected.Equals(actual)) return null;
         }
         return arguments.Any(a => a is null) ? null : new NewObjectValue(Method, arguments!) { Transparent = true };
+    }
+
+    internal ComposedValue? Expand(IReadOnlyList<ManagedValue> arguments)
+    {
+        if (arguments.Count != Method.Method.Parameters.Count || arguments.Where((a, i) =>
+            !a.Type.Equals(Method.Method.Parameters[i].Type.Substitute(Method.TypeArguments, Method.MethodArguments))).Any()) return null;
+        return new(Method.DeclaringType, Fields.Select(f => ((IReadOnlyList<FieldRef>)new[] { f.Field },
+            f.Value is ArgumentValue parameter ? arguments[parameter.Index] : f.Value)).ToArray());
     }
 }

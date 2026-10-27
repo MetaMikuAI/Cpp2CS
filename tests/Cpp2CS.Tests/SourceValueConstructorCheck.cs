@@ -46,6 +46,25 @@ internal static class SourceValueConstructorCheck
             "未使用的构造参数不能凭空补齐");
         a.True(pattern.Build(new(type, [([Field(0)], second), ([Field(1)], constant), ([Field(2)], new FieldValue(receiver, Field(0), integer, 32))])) is null,
             "可变内存读取不能因参数次序而移动");
+        a.True(pattern.Expand([first, second]) is { Leaves: var expanded } && expanded[0].Value == second
+            && expanded[1].Value == constant && expanded[2].Value == first, "构造按已证实字段映射展开");
+        a.True(pattern.Expand([first]) is null, "构造参数必须齐全");
+        var destination = new LocalValue(new(Storage.Temp(10), 1), type, 0);
+        foreach (var mode in new[] { "valid", "missing", "duplicate", "other-target", "self-read", "interrupted" })
+        {
+            var writes = Value(constant).Leaves.Select(p => (ManagedStatement)new ManagedStore(1,
+                new FieldValue(new AddressValue(destination), p.Path[0], integer, 32), p.Value)).ToList();
+            if (mode == "missing") writes.RemoveAt(1);
+            if (mode == "duplicate") writes[1] = writes[0];
+            if (mode == "other-target") writes[1] = ((ManagedStore)writes[1]) with { Target = new FieldValue(receiver, Field(0), integer, 32) };
+            if (mode == "self-read") writes[1] = ((ManagedStore)writes[1]) with { Value = new FieldValue(new AddressValue(destination), Field(0), integer, 32) };
+            if (mode == "interrupted") writes.Insert(1, new ManagedCall(2, new(method, null, [], false), null, false));
+            writes.Add(new ManagedReturn(3, destination));
+            var body = new ManagedBody(method, [new(0, writes)]);
+            var result = SourceConstructorWrites.Rewrite(body, _ => [pattern], (_, _) => { });
+            a.Equal(mode == "valid" ? 1 : 0, result.Blocks[0].Statements.OfType<ManagedAssignment>()
+                .Count(s => s.Value is NewObjectValue), "连续构造写入 " + mode);
+        }
         return a.Finish("source-value-constructor");
     }
 }

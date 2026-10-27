@@ -135,6 +135,19 @@ public sealed partial class SourceLibraryCalls
             foreach (var statement in block.Statements)
             {
                 if (ManagedValues.Edges(statement).Any(e => e.Copies.Count != 0)) { output.Add(statement); continue; }
+                NewObjectValue? Construct(ComposedValue composed)
+                {
+                    if (composed.Type is not DefinitionRef valueType) return null;
+                    _ = FieldCalls(valueType);
+                    foreach (var constructor in valueConstructors[valueType])
+                    {
+                        if (!ManagedAccess.Method(types, body.Method.Method.Owner, constructor.Method, null)
+                            || constructor.Build(composed) is not { } created) continue;
+                        Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{statement.Address:x}\t{body.Method}\t{constructor.Method}");
+                        return created;
+                    }
+                    return null;
+                }
                 ManagedValue Read(ManagedValue value)
                 {
                     if (value is AddressValue) return value;
@@ -147,17 +160,7 @@ public sealed partial class SourceLibraryCalls
                     else value = ManagedValues.Map(value, Read);
                     if (value is ComposedValue composed)
                     {
-                        if (composed.Type is DefinitionRef valueType)
-                        {
-                            _ = FieldCalls(valueType);
-                            foreach (var constructor in valueConstructors[valueType])
-                            {
-                                if (!ManagedAccess.Method(types, body.Method.Method.Owner, constructor.Method, null)
-                                    || constructor.Build(composed) is not { } created) continue;
-                                Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{statement.Address:x}\t{body.Method}\t{constructor.Method}");
-                                return created;
-                            }
-                        }
+                        if (Construct(composed) is { } created) return created;
                         var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
                         foreach (var (path, original) in composed.Leaves)
                         {
@@ -177,7 +180,8 @@ public sealed partial class SourceLibraryCalls
                             if (length == 0) return leaf;
                             leaves.Add((path.Take(length).ToArray(), leaf));
                         }
-                        return composed with { Leaves = leaves };
+                        var combined = composed with { Leaves = leaves };
+                        return (ManagedValue?)Construct(combined) ?? combined;
                     }
                     var target = value is StaticFieldValue array ? EmptyArrayGetter(array) : null;
                     target ??= Find(value, false)?.Method;

@@ -118,8 +118,19 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
     {
         body = SourceFieldInitialization.Rewrite(body, method => method.DeclaringType is DefinitionRef type
             ? FieldCalls(type).FirstOrDefault(c => c.Write && c.Method.Equals(method))?.Field : null);
+        SourceValueConstructor? Constructor(MethodRef method)
+        {
+            if (method.Method.Name != ".ctor" || method.DeclaringType is not DefinitionRef type) return null;
+            _ = FieldCalls(type);
+            return valueConstructors[type].FirstOrDefault(c => c.Method.Equals(method));
+        }
+        body = SourceConstructorWrites.Rewrite(body, type =>
+        {
+            _ = FieldCalls(type);
+            return valueConstructors[type].Where(c => ManagedAccess.Method(types, body.Method.Method.Owner, c.Method, null));
+        }, (site, method) => Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{site:x}\t{body.Method}\t{method}"));
         body = SourceListCalls.Rewrite(body, types, (site, method) =>
-            Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{site:x}\t{body.Method}\t{method}"));
+            Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{site:x}\t{body.Method}\t{method}"), Constructor);
         body = RewriteGuardedUpdates(body);
         body = RewriteFieldCalls(body);
         var caller = body.Method.Method.Owner;

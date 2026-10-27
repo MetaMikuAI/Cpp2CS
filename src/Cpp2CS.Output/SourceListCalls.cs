@@ -7,9 +7,10 @@ namespace Cpp2CS.Output;
 /// <summary>List 内联操作的字段读写和分支结构，合并为公开调用。</summary>
 internal static partial class SourceListCalls
 {
-    public static ManagedBody Rewrite(ManagedBody body, ManagedTypes types, Action<ulong, MethodRef> matched)
+    public static ManagedBody Rewrite(ManagedBody body, ManagedTypes types, Action<ulong, MethodRef> matched,
+        Func<MethodRef, SourceValueConstructor?>? constructor = null)
     {
-        while ((MatchInitializer(body, types, matched) ?? MatchAdd(body, types, matched) ?? MatchClear(body, types, matched)) is { } rewritten) body = rewritten;
+        while ((MatchInitializer(body, types, matched) ?? MatchAdd(body, types, matched, constructor) ?? MatchClear(body, types, matched)) is { } rewritten) body = rewritten;
         return body;
     }
 
@@ -57,7 +58,8 @@ internal static partial class SourceListCalls
         }
     }
 
-    private static ManagedBody? MatchAdd(ManagedBody body, ManagedTypes types, Action<ulong, MethodRef> matched)
+    private static ManagedBody? MatchAdd(ManagedBody body, ManagedTypes types, Action<ulong, MethodRef> matched,
+        Func<MethodRef, SourceValueConstructor?>? constructor)
     {
         var list = types.CorlibDefinition("System.Collections.Generic.List");
         if (list is null) return null;
@@ -144,8 +146,8 @@ internal static partial class SourceListCalls
                 return null;
             }
             if (Next(fast) is not ManagedStore size || !IsField(size.Target, "_size") || !Increment(Resolve(size.Value), condition.Left)) continue;
-            var elementWrites = new List<ManagedStore>();
-            if (ReadElement(Next(fast), () => Next(fast), types, elementWrites) is not { } written
+            var elementWrites = new List<ManagedStatement>();
+            if (ReadElement(Next(fast), () => Next(fast), types, elementWrites, constructor) is not { } written
                 || !Resolve(written.Element.Array).Equals(length.Array) || !Resolve(written.Element.Index).Equals(condition.Left)) continue;
             var (element, item) = written;
             // 参数须为进入内联区域前已求值的快照，不把有副作用的取值提前。
@@ -165,7 +167,7 @@ internal static partial class SourceListCalls
             using var slow = flow.Straight(slowEdge.Target, 0, block.Address).GetEnumerator();
             if (Next(slow) is not ManagedCall { Result: null, Invocation: { Arguments.Count: 1 } invocation } resize
                 || invocation.Method.Method.Name != "AddWithResize" || !invocation.Method.DeclaringType.Equals(owner)
-                || !Equals(invocation.Receiver, receiver) || !SameItem(invocation.Arguments[0], item)) continue;
+                || !Equals(invocation.Receiver, receiver) || !SameItem(ExpandItem(invocation.Arguments[0], constructor), item)) continue;
             var slowExit = resize.Tail ? new ManagedReturn(resize.Address, null) : Next(slow);
             if (!SameExit(flow.Exit(fastExit), flow.Exit(slowExit))) continue;
             remove.Add(size); remove.UnionWith(elementWrites); remove.Add(resize); remove.Add(branch);

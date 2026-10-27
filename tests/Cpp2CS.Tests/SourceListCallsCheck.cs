@@ -65,13 +65,26 @@ internal static class SourceListCallsCheck
 
     private static void CheckStructItems(Assertions a, ManagedTypes types, TypeDef list, MethodRef method)
     {
-        foreach (var mode in new[] { "complete", "missing", "duplicate", "slow-duplicate", "other-index", "other-value", "interrupted", "explicit-layout" })
+        foreach (var mode in new[] { "complete", "missing", "duplicate", "slow-duplicate", "other-index", "other-value", "interrupted", "explicit-layout",
+            "constructor", "constructor-no-proof", "constructor-other-value", "constructor-result" })
         {
+            var nested = new TypeDef { Index = -10, Assembly = "Tests.dll", Namespace = "Tests", Name = "Part", Token = 0,
+                Attributes = TypeAttributes.Public | TypeAttributes.SequentialLayout, IsValueType = true, IsEnum = false };
+            var nestedType = new DefinitionRef(nested, []);
+            nested.Fields = [new() { Index = -11, Owner = nested, Name = "Value", Type = types.Int32, Attributes = FieldAttributes.Private, Offset = 16 }];
+            var ctor = new MethodRef(new() { Index = -12, Owner = nested, Name = ".ctor", Token = 0,
+                Attributes = MethodAttributes.Public, ImplAttributes = 0, Slot = -1,
+                Parameters = [new("value", types.Int32, 0, null, false)] }, [], []);
+            var proof = SourceValueConstructor.Create(ctor, [new(0,
+                new FieldValue(new ArgumentValue(-1, new ByRefRef(nestedType), 64), new(nested.Fields[0], nestedType), types.Int32, 32),
+                new ArgumentValue(0, types.Int32, 32))]);
+            var constructed = mode.StartsWith("constructor", StringComparison.Ordinal);
             var record = new TypeDef { Index = -2, Assembly = "Tests.dll", Namespace = "Tests", Name = "Item", Token = 0,
                 Attributes = TypeAttributes.Public | (mode == "explicit-layout" ? TypeAttributes.ExplicitLayout : TypeAttributes.SequentialLayout),
                 IsValueType = true, IsEnum = false };
             record.Fields = Enumerable.Range(0, 2).Select(i => new FieldDef { Index = -3 - i, Owner = record,
-                Name = "Part" + i, Type = types.Int32, Attributes = FieldAttributes.Public, Offset = 16 + 4 * i }).ToArray();
+                Name = "Part" + i, Type = constructed && i == 1 ? nestedType : types.Int32,
+                Attributes = FieldAttributes.Public, Offset = 16 + 4 * i }).ToArray();
             var type = new DefinitionRef(record, []);
             var owner = new DefinitionRef(list, [type]);
             var receiver = new ArgumentValue(0, owner, 64);
@@ -82,24 +95,28 @@ internal static class SourceListCallsCheck
             ManagedValue Number(ulong value) => new ConstantValue(value, types.Int32, 32);
             ManagedValue Increment(ManagedValue value) => new BinaryValue(BinOp.Add, value, Number(1), types.Int32, 32);
             var element = new ArrayElementValue(array, count, type, 0);
-            FieldValue Field(int index, ArrayElementValue target) => new(new AddressValue(target), new(record.Fields[index], type), types.Int32, 32);
+            FieldValue Field(int index, ArrayElementValue target) => new(new AddressValue(target), new(record.Fields[index], type), record.Fields[index].Type, 32);
             var fast = new List<ManagedStatement> { new ManagedStore(16, ListField("_size"), Increment(count)),
                 new ManagedStore(17, Field(0, element), Number(4)) };
             if (mode == "interrupted") fast.Add(new ManagedCall(18, new(method, null, [], false), null, false));
-            if (mode != "missing") fast.Add(new ManagedStore(19, Field(mode == "duplicate" ? 0 : 1,
+            if (constructed) fast.Add(new ManagedCall(19, new(ctor, new AddressValue(Field(1, element)), [Number(5)], false),
+                mode == "constructor-result" ? count : null, false));
+            else if (mode != "missing") fast.Add(new ManagedStore(19, Field(mode == "duplicate" ? 0 : 1,
                 mode == "other-index" ? element with { Index = Number(0) } : element), Number(5)));
             fast.Add(new ManagedReturn(20, null));
             var value = new ComposedValue(type, record.Fields.Select((field, i) =>
                 ((IReadOnlyList<FieldRef>)new[] { new FieldRef(mode == "slow-duplicate" ? record.Fields[0] : field, type) },
-                    Number(mode == "slow-duplicate" ? 4 : (ulong)(4 + i + (mode == "other-value" ? 1 : 0))))).ToArray());
+                    constructed && i == 1 ? new NewObjectValue(ctor, [Number(mode == "constructor-other-value" ? 6UL : 5UL)])
+                        : Number(mode == "slow-duplicate" ? 4 : (ulong)(4 + i + (mode == "other-value" ? 1 : 0))))).ToArray());
             var resize = new MethodRef(list.Methods.Single(m => m.Name == "AddWithResize"), owner.Arguments, []);
             var original = new ManagedBody(method, [new(0, [new ManagedAssignment(0, array, ListField("_items")),
                 new ManagedStore(1, ListField("_version"), Increment(ListField("_version"))),
                 new ManagedAssignment(2, count, ListField("_size")),
                 new ManagedBranch(3, new ComparisonValue(Cond.Ult, count, new ArrayLengthValue(array, types.Int32, 32), types.Boolean), new(16, []), new(32, []))]),
                 new(16, fast), new(32, [new ManagedCall(32, new(resize, receiver, [value], false), null, false), new ManagedReturn(33, null)])]);
-            var rewritten = SourceListCalls.Rewrite(original, types, (_, _) => { });
-            a.Equal(mode == "complete" ? 1 : 0, rewritten.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>()
+            var rewritten = SourceListCalls.Rewrite(original, types, (_, _) => { },
+                candidate => mode != "constructor-no-proof" && candidate.Equals(ctor) ? proof : null);
+            a.Equal(mode is "complete" or "constructor" ? 1 : 0, rewritten.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>()
                 .Count(c => c.Invocation.Method.Method.Name == "Add"), "结构体元素 " + mode);
         }
     }
