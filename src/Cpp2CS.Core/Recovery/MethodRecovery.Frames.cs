@@ -63,7 +63,7 @@ public sealed partial class MethodRecovery
                     for (var i = 0; i < invoked.Method.Parameters.Count; i++)
                     {
                         var type = Concrete(invoked, invoked.Method.Parameters[i].Type);
-                        if (!ManagedTypes.IsReferenceType(type)) Bind(call.Arguments[i + 1], type, call);
+                        if (!ManagedTypes.IsReferenceType(type)) Bind(call.Arguments[i + 1], type is ByRefRef reference ? reference.Element : type, call);
                     }
                     var returned = Concrete(invoked, invoked.Method.ReturnType);
                     if (!ManagedTypes.IsVoid(returned)) Bind(call.Arguments[^1], returned, call, true);

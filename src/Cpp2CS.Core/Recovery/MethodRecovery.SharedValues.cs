@@ -31,6 +31,9 @@ public sealed partial class MethodRecovery
             var joins = original.OfType<Phi>().ToDictionary(p => p.Target);
             var singleStores = original.OfType<Store>().Where(s => s.Target is FrameAddress).GroupBy(s => ((FrameAddress)s.Target).Offset)
                 .Where(g => g.Count() == 1).ToDictionary(g => g.Key, g => g.Single());
+            var positions = function.Blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Block: b, Index: i)))
+                .ToDictionary(p => p.Statement, (IEqualityComparer<Stmt>)ReferenceEqualityComparer.Instance);
+            var dominators = Ssa.Dominators.Compute(function);
             Expr ExpandValue(Expr e, int depth = 0) => depth > 24 ? e : ExprMap.Map(e,
                 p => p is Use u && defs.TryGetValue(u.Variable, out var value) ? ExpandValue(value, depth + 1) : null);
             Expr Scalar(Expr e)
@@ -38,6 +41,14 @@ public sealed partial class MethodRecovery
                 e = ExpandValue(e);
                 while (e is Convert c) e = c.Operand;
                 return e;
+            }
+            Variable? Incoming(Expr value, Block block, int index)
+            {
+                value = ExpandValue(value);
+                if (value is Load { Width: 64, Address: FrameAddress slot } && singleStores.TryGetValue(slot.Offset, out var saved)
+                    && saved.Value.Width == 64 && positions[saved] is var at && dominators.Dominates(at.Block.Index, block.Index)
+                    && (at.Block != block || at.Index < index)) value = ExpandValue(saved.Value);
+                return value is Use { Width: 64, Variable.Version: 0 } use ? use.Variable : null;
             }
             TypeRef? SizeType(Expr e, int depth = 0)
             {
@@ -53,6 +64,7 @@ public sealed partial class MethodRecovery
                 Intrinsic { Name: "managed_generic_buffer" or "managed_generic_argument", Arguments: [Symbol { Value: TypeRef type }, _] } => type,
                 Intrinsic { Name: "managed_field_address", Arguments: [_, Symbol { Value: FieldRef field }] } => FieldType(field),
                 Use { Variable: { Version: 0 } variable } when indirectRoots.TryGetValue(variable.Storage, out var root) && root.Type is ByRefRef reference => reference.Element,
+                Use { Variable: { Version: 0 } variable } when arguments.TryGetValue(variable.Storage, out var argument) && argument.Type is ByRefRef reference => reference.Element,
                 Load { Address: FrameAddress frame } when singleStores.TryGetValue(frame.Offset, out var store) => AddressType(store.Value, depth + 1),
                 Use u when joins.TryGetValue(u.Variable, out var phi) && phi.Sources.Length > 0
                     && phi.Sources.Select(v => AddressType(new Use(v, v.Width), depth + 1)).Distinct().ToArray() is [TypeRef type] => type,
@@ -95,7 +107,8 @@ public sealed partial class MethodRecovery
             {
                 if (block.Statements[i] is not Define define || ExpandValue(define.Value) is not Select
                     { Condition: Compare { Cond: Cond.Slt, Left: var bits, Right: Const { Value: 0 } },
-                      True: Use { Variable: { Version: 0 } incoming }, False: FrameAddress slot }
+                      True: var selected, False: FrameAddress slot }
+                    || Incoming(selected, block, i) is not { } incoming
                     || Scalar(bits) is not Load { Width: 32, Address: Binary { Op: BinOp.Add,
                         Left: Symbol { Kind: SymbolKind.Class, Value: GenericParameterRef generic }, Right: Const { Value: 0x28 } } }
                     || !sharedIncoming.TryGetValue(incoming.Storage, out var argument) || !argument.Type.Equals(generic)
@@ -201,8 +214,9 @@ public sealed partial class MethodRecovery
                         {
                             if (!stores.TryGetValue(array.Offset + p * 8, out var store)) break;
                             var type = Concrete(callee, callee.Method.Parameters[p].Type);
-                            if (!ManagedTypes.IsReferenceType(type) && !Equals(AddressType(store.Value), type)
-                                && !(store.Value is FrameAddress && types.Size(type) > 0)) break;
+                            var storedType = type is ByRefRef reference ? reference.Element : type;
+                            if (!ManagedTypes.IsReferenceType(type) && !Equals(AddressType(store.Value), storedType)
+                                && !(store.Value is FrameAddress && types.Size(storedType) > 0)) break;
                             args.Add(store.Value); consumed.Add(store);
                         }
                         if (consumed.Count != callee.Method.Parameters.Count) continue;
@@ -279,7 +293,7 @@ public sealed partial class MethodRecovery
                 return true;
             }
             if (call.Op is not { Kind: OpKind.InvokeGeneric, Operand: MethodRef callee }) return false;
-            var parameters = callee.Method.Parameters.Select((p, i) => Concrete(callee, p.Type) is var type && ManagedTypes.IsReferenceType(type)
+            var parameters = callee.Method.Parameters.Select((p, i) => Concrete(callee, p.Type) is var type && (ManagedTypes.IsReferenceType(type) || type is ByRefRef)
                 ? RecoverAs(call.Arguments[i + 1], type, call.Address) : SharedValue(call.Arguments[i + 1], type)).ToArray();
             if (constructed.TryGetValue(call, out var created))
             {
