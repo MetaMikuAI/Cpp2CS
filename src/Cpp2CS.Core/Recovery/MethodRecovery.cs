@@ -316,8 +316,8 @@ public sealed partial class MethodRecovery
             CallArgumentProjection.Run(function.Blocks, StructArgumentWidths);
             TrimIndirectArguments();
             Ssa.Propagate.RemoveDead(function);
-            if (function.Blocks.Any(b => b.IsLandingPad))
-                ManagedFramePromotion.Run(facts, function, owner.abi, owner.lifter.Calls, owner.lifter.Machine.Convention.StackPointer);
+            // 库内存操作归一后也可能产生新栈读写；普通方法与异常方法采用同一有界提升规则。
+            ManagedFramePromotion.Run(facts, function, owner.abi, owner.lifter.Calls, owner.lifter.Machine.Convention.StackPointer);
             NormalizeCleanupThunks();
             NormalizeOutlinedCalls(idioms);
             if (function.Blocks.Any(b => b.IsLandingPad))
