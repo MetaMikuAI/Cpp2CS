@@ -102,5 +102,7 @@ internal static class ManagedFramePromotion
         var slots = function.Blocks.SelectMany(b => b.Statements).OfType<Assign>().Select(a => a.Target).ToHashSet();
         var dominators = Dominators.Compute(function);
         SsaBuilder.Build(function, dominators, slots.Contains, calls, stackPointer);
+        // 新的栈局部别名不应遮住连续复制；传播只消除纯副本，不移动读取。
+        Propagate.Run(function, dominators);
     }
 }

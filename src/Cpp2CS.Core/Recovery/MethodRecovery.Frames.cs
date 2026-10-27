@@ -253,7 +253,9 @@ public sealed partial class MethodRecovery
                     if (offset >= 0 || offset + size > 0 || witnesses.Any(w => w.Offset == offset && w.Type.Equals(type))) continue;
                     var covered = group.SelectMany(c => Enumerable.Range(c.Range.Offset, c.Width / 8)).ToHashSet();
                     var leaves = StructPaths(type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
-                    if (leaves.Length == 0 || leaves.Any(p => Enumerable.Range(p.Offset, types.Size(p.Type)).Any(b => !covered.Contains(b)))) continue;
+                    if (type is GenericParameterRef { NativeAggregate: not null }
+                        ? Enumerable.Range(0, size).Any(b => !covered.Contains(b))
+                        : leaves.Length == 0 || leaves.Any(p => Enumerable.Range(p.Offset, types.Size(p.Type)).Any(b => !covered.Contains(b)))) continue;
                     witnesses.Add(new(offset, type, group.First().Store, false));
                 }
             }
@@ -319,7 +321,9 @@ public sealed partial class MethodRecovery
                             foreach (var c in group)
                                 for (var k = 0; k < c.Width / 8; k++) covered.Add((forward ? c.From : c.To) - known.Offset + k);
                             if (group.Any(c => (forward ? c.From : c.To) + c.Width / 8 > known.Offset + size)
-                                || leaves.Any(p => Enumerable.Range(p.Offset, types.Size(p.Type)).Any(b => !covered.Contains(b)))) continue;
+                                || (known.Type is GenericParameterRef { NativeAggregate: not null }
+                                    ? Enumerable.Range(0, size).Any(b => !covered.Contains(b))
+                                    : leaves.Any(p => Enumerable.Range(p.Offset, types.Size(p.Type)).Any(b => !covered.Contains(b))))) continue;
                             witnesses.Add(new(other, known.Type, group.First().Store, false));
                             added = true;
                         }

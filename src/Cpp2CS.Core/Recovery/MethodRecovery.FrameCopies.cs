@@ -319,6 +319,8 @@ public sealed partial class MethodRecovery
             var uses = new Dictionary<Variable, List<Stmt>>();
             foreach (var statement in statements)
             {
+                // 间接返回由 x8 指向的完整缓冲区决定，L2 的返回寄存器不参与托管返回值。
+                if (statement is Return && ownReturnBuffer is not null) continue;
                 var variables = statement is Phi phi ? phi.Sources : ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable);
                 foreach (var variable in variables)
                 {
@@ -329,7 +331,7 @@ public sealed partial class MethodRecovery
             var copies = new List<FrameCopy>();
             foreach (var define in statements.OfType<Define>())
             {
-                if (CopiedLoad(define.Value) is not { Width: 64 or 128 or 32 } load || load.Width == 32 && define.Value is Load || !uses.TryGetValue(define.Target, out var users)
+                if (CopiedLoad(define.Value) is not { Width: 64 or 128 or 32 } load || !uses.TryGetValue(define.Target, out var users)
                     || users is not [Store { Value: Use use } store] || use.Width != load.Width || dropped.Contains(store)) continue;
                 // 至少一端是栈结构体根时可以逐叶子拷贝；两端都不在栈上时，只接受下面合并成的整体拷贝（覆盖整个结构体）。
                 var onFrame = FrameAccess(load.Address) is not null || FrameAccess(store.Target) is not null;
