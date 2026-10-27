@@ -231,6 +231,9 @@ public sealed partial class MethodRecovery
             if (address is TypedFrame frame) return (frame.Region, 0);
             if (address is Binary { Op: BinOp.Add, Right: Const c } b && FrameAccess(b.Left) is { } inner)
                 return (inner.Region, inner.Offset + c.Signed);
+            if (discoveryFrames.Length > 0 && FrameOffset(address) is { } offset
+                && discoveryFrames.Where(r => offset >= r.Offset && offset < r.Offset + r.Size).Take(2).ToArray() is [var region])
+                return (region, offset - region.Offset);
             return null;
         }
 

@@ -14,6 +14,7 @@ public sealed partial class MethodRecovery
         // 只在 L3 内使用的地址见证；保留区域身份，后续栈着色不会把两个局部变量混为一体。
         private sealed record TypedFrame(FrameRegion Region) : Expr(64);
         private readonly List<FrameRegion> frameRegions = [];
+        private FrameRegion[] discoveryFrames = [];
         private readonly HashSet<long> conflictingFrames = [];
         private readonly Dictionary<FrameRegion, HashSet<Stmt>> frameLives = [];
         private readonly Dictionary<Stmt, ManagedStatement[]> frameInitializers = new(ReferenceEqualityComparer.Instance);
@@ -83,6 +84,7 @@ public sealed partial class MethodRecovery
             WitnessStoredResults(witnesses);
             WitnessFieldCopies(witnesses);
             WitnessFrameCopies(witnesses);
+            DiscoverArrayFrameCopies(witnesses);
             var regions = witnesses.DistinctBy(w => (w.Offset, w.Type)).Select(w => new FrameRegion(w.Offset, w.Type, types.Size(w.Type), StructLocal(w.Type, ScalarWidth(w.Type))))
                 .OrderByDescending(r => r.Size).ThenBy(r => r.Offset).ToArray();
             foreach (var region in regions)
@@ -125,6 +127,32 @@ public sealed partial class MethodRecovery
             // IR 改写后，定义索引按新语句重建。
             definitions = IndexDefinitions();
             PrepareFrameInitializers();
+        }
+
+        /// <summary>返回帧中的数组引用可为游标和结构体复制提供新见证；在地址绑定前迭代，避免先固定其内嵌的标量槽。</summary>
+        private void DiscoverArrayFrameCopies(List<FrameWitness> witnesses)
+        {
+            if (!witnesses.Any(w => w.Type is ArrayRef || StructPaths(w.Type).Any(p => p.Type is ArrayRef))) return;
+            for (var round = 0; round < 8; round++)
+            {
+                var candidates = witnesses.DistinctBy(w => (w.Offset, w.Type))
+                    .Select(w => new FrameRegion(w.Offset, w.Type, types.Size(w.Type), StructLocal(w.Type, ScalarWidth(w.Type))))
+                    .OrderByDescending(r => r.Size).ToArray();
+                // 发现阶段只使用不冲突的精确布局；复用栈槽仍由最终生命期分析处理。
+                discoveryFrames = candidates.Where(r => !candidates.Any(other => other != r
+                    && r.Offset < other.Offset + other.Size && other.Offset < r.Offset + r.Size
+                    && !ContainsFrameType(r, other.Offset, other.Type) && !ContainsFrameType(other, r.Offset, r.Type)))
+                    .Where(r => !candidates.Any(outer => outer != r && ContainsFrameType(outer, r.Offset, r.Type))).ToArray();
+                fragmentLocals.Clear();
+                InferTypes();
+                PrepareArrayCursors();
+                var count = witnesses.Count;
+                WitnessFieldCopies(witnesses);
+                WitnessFrameCopies(witnesses);
+                if (witnesses.Count == count) break;
+            }
+            discoveryFrames = [];
+            fragmentLocals.Clear();
         }
 
         /// <summary>入口结构体参数的全部 ABI 片原样落栈时，用完整参数类型覆盖只被单个字段调用看见的区域。</summary>

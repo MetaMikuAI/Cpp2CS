@@ -598,7 +598,12 @@ internal sealed partial class World
                 double[] values = [0, 1, -1, 0.5, 2.5, 100, -3.25, double.NaN, 1e-3];
                 return BitConverter.DoubleToUInt64Bits(rng.Next(4) == 0 ? rng.NextDouble() * 200 - 100 : values[rng.Next(values.Length)]);
             }
-            case TypeKind.Pointer: return type is ByRefRef b ? ValueStorage(b.Element, key) : 0;
+            case TypeKind.Pointer:
+                if (type is ByRefRef b) return ValueStorage(b.Element, key);
+                if (type is PointerRef) return 0;
+                // 原生整数是可复制的位型；非零、高位和负值可区分结构体中的不同指针字段。
+                ulong[] pointers = [0, 1, uint.MaxValue, 1UL << 32, 1UL << 63, ulong.MaxValue];
+                return pointers[rng.Next(pointers.Length)];
             case TypeKind.Reference:
                 if (depth >= MaxDepth || rng.Next(5) == 0) return 0;
                 return Object(type, key, depth + 1);

@@ -7,8 +7,24 @@ public sealed partial class MethodRecovery
 {
     private sealed partial class Context
     {
+        [Analysis("帧快照", 32, After = ["帧区域"])]
+        private void ForwardFrameSnapshots()
+        {
+            var replacements = FrameSnapshots.Read(function);
+            foreach (var block in blocks)
+            for (var i = 0; i < block.Statements.Count; i++)
+            {
+                var old = block.Statements[i];
+                if (!replacements.TryGetValue(old, out var mapped)) continue;
+                block.Statements[i] = mapped;
+                ledger.Replace(old, mapped);
+                if (old is Call call && resolved.Remove(call, out var target)) resolved[(Call)mapped] = target;
+            }
+            if (replacements.Count > 0) definitions = IndexDefinitions();
+        }
+
         /// <summary>结构体地址已绑定到有界区域后，恢复地址不逃逸的整数计数槽和已定型的引用槽。</summary>
-        [Analysis("整数帧槽", 35, After = ["帧区域"])]
+        [Analysis("整数帧槽", 35, After = ["帧区域", "帧快照"])]
         private void PrepareScalarFrames()
         {
             InferTypes();

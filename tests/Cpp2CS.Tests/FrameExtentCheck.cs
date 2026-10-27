@@ -2,6 +2,7 @@ using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Functions;
 using Cpp2CS.Ir;
+using Cpp2CS.Recovery;
 using Cpp2CS.Ssa;
 
 namespace Cpp2CS.Tests;
@@ -32,6 +33,24 @@ internal static class FrameExtentCheck
         var promoted = Function(-40);
         FrameSlotPromotion.Run(promoted, (_, _) => 16);
         a.True(promoted.Blocks[0].Statements[0] is Assign && promoted.Blocks[0].Statements[2] is Return { Value: Read }, "成对替换标量写入与读取");
+        foreach (var outward in new[] { false, true })
+        {
+            var block = new Block(0x1000);
+            var root = new Use(new Variable(Storage.Gpr(0), 0), 64);
+            foreach (var (offset, width) in new[] { (0, 128), (16, 128), (32, 64) })
+            {
+                var variable = new Variable(width == 128 ? Storage.Vec(offset / 16) : Storage.Gpr(1), 1);
+                Expr frame = new FrameAddress(-64 + offset);
+                Expr external = new Binary(BinOp.Add, root, Expr.C((ulong)offset, 64), 64);
+                block.Statements.Add(new Define((ulong)(0x1000 + offset), variable, new Load(outward ? frame : external, width)));
+                block.Statements.Add(new Store((ulong)(0x1004 + offset), outward ? external : frame, new Use(variable, width)));
+            }
+            var function = new MachineFunction { Entry = block.Start, Range = new(0x1000, 0x1040, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [block] };
+            a.True(FrameCopySpans.Read(function).SequenceEqual(new[] { (-64L, 40) }), "连续宽复制保留两侧标量尾部");
+            block.Statements.Add(new Store(0x1030, new FrameAddress(-16), Expr.C(1, 64)));
+            block.Statements.Add(new Return(0x1034) { Value = new Load(new FrameAddress(-16), 64) });
+            a.Equal(1, FrameSlotPromotion.Run(function, preserved: FrameCopySpans.Read(function).ToArray()), "范围以外的独立标量仍可提升");
+        }
         return a.Finish("frame-extents");
     }
 }

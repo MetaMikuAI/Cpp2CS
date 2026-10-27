@@ -61,12 +61,14 @@ internal static class RecoverDump
             var shared = selection.StartsWith("shared:", StringComparison.Ordinal);
             if (shared) selection = selection[7..];
             // 十六进制入口，或方法全名的一部分（只取有代码、非泛型的前 20 个）。
-            var isAddress = ulong.TryParse(selection, System.Globalization.NumberStyles.HexNumber, null, out var parsed);
+            var isAddress = ulong.TryParse(selection.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? selection[2..] : selection,
+                System.Globalization.NumberStyles.HexNumber, null, out var parsed);
             var methods = isAddress ? facts.Model.Methods.Where(m => m.Address == parsed)
                 : facts.Model.Methods.Where(m => m.Address != 0 && m.GenericParameters.Count == 0 && m.Owner.GenericParameters.Count == 0 && m.ToString().Contains(selection, StringComparison.Ordinal)).Take(20);
             // 没有方法定义的地址：按该处登记的泛型实例恢复（封闭实例）。
             var instances = isAddress && !methods.Any() ? facts.EntriesAt(parsed).Where(e => e.Kind == EntryKind.GenericMethod && e.Method is not null)
                 .Select(e => shared ? recovery.RecoverShared(e.Method!, parsed) : recovery.RecoverInstance(e.Method!, parsed)).Take(1).ToArray() : [];
+            if (!methods.Any() && instances.Length == 0) throw new ArgumentException($"未匹配任何方法：{text}");
             foreach (var result in instances.Concat(methods.Select(m => recovery.Recover(new Cpp2CS.Model.MethodRef(m, [], []), m.Address))))
             {
                 var entry = result.Entry;

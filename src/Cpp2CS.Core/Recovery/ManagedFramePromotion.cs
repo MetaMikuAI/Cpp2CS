@@ -45,6 +45,7 @@ internal static class ManagedFramePromotion
         var stores = statements.OfType<Store>().Where(s => s is { Target: FrameAddress, Value: Use })
             .ToLookup(s => ((Use)s.Value).Variable);
         var preserved = new List<(long Offset, int Size)>();
+        preserved.AddRange(FrameCopySpans.Read(function));
         foreach (var call in statements.OfType<Call>())
             for (var i = 0; i < call.Arguments.Length; i++)
                 if (call.Arguments[i] is FrameAddress frame && ArgumentSize(call, i) is { } size) preserved.Add((frame.Offset, size));

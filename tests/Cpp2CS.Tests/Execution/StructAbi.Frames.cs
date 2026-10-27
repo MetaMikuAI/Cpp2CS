@@ -11,6 +11,7 @@ internal sealed partial class StructAbi
     /// </summary>
     public void WriteBack(Side side, MethodRef method, int ordinal, IReadOnlyList<byte[]> arguments)
     {
+        if (side.ResizeArray(method, arguments)) return;
         var parameters = ArgumentTypes(method);
         for (var i = 0; i < parameters.Length; i++)
         {
