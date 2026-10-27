@@ -324,7 +324,13 @@ public sealed partial class MethodRecovery
             TrimIndirectArguments();
             Ssa.Propagate.RemoveDead(function);
             // 库内存操作归一后也可能产生新栈读写；普通方法与异常方法采用同一有界提升规则。
+            var constantFrameIndices = FrameConstantIndices.Run(function) > 0;
             ManagedFramePromotion.Run(facts, function, owner.abi, owner.lifter.Calls, owner.lifter.Machine.Convention.StackPointer);
+            if (constantFrameIndices)
+            {
+                Ssa.Propagate.Run(function, Ssa.Dominators.Compute(function));
+                PromotePrivateFrameSlots();
+            }
             NormalizeCleanupThunks();
             NormalizeOutlinedCalls(idioms);
             if (function.Blocks.Any(b => b.IsLandingPad))

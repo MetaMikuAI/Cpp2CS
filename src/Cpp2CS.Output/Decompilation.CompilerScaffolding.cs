@@ -13,6 +13,7 @@ public static partial class Decompilation
     {
         public void Run(AstNode rootNode, TransformContext context)
         {
+            RewriteInjectedCalls(rootNode, context);
             // Unity 的 IL 后处理器可注入跨程序集 internal 标记，C# 无法直接声明它。
             foreach (var attribute in rootNode.Descendants.OfType<ICSharpCode.Decompiler.CSharp.Syntax.Attribute>().ToArray())
             {
