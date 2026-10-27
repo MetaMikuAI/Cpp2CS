@@ -116,6 +116,8 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
 
     public ManagedBody Rewrite(ManagedBody body)
     {
+        body = SourceFieldInitialization.Rewrite(body, method => method.DeclaringType is DefinitionRef type
+            ? FieldCalls(type).FirstOrDefault(c => c.Write && c.Method.Equals(method))?.Field : null);
         body = SourceListCalls.Rewrite(body, types, (site, method) =>
             Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{site:x}\t{body.Method}\t{method}"));
         body = RewriteFieldCalls(body);
