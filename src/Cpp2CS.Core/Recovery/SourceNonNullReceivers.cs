@@ -1,3 +1,4 @@
+using Cpp2CS.Ir;
 using Cpp2CS.Model;
 
 namespace Cpp2CS.Recovery;
@@ -5,6 +6,23 @@ namespace Cpp2CS.Recovery;
 /// <summary>沿正常边传播非空或空值事实；重新赋值和取址不沿用旧事实。</summary>
 internal static class SourceNonNullReceivers
 {
+    internal static ManagedBody FoldBranches(ManagedBody body)
+    {
+        var present = Read(body, null);
+        var absent = ReadNull(body);
+        return body with { Blocks = body.Blocks.Select(b => b with { Statements = b.Statements.Select(s =>
+        {
+            if (s is not ManagedBranch branch) return s;
+            if (branch.Condition is ConstantValue constant) return new ManagedJump(s.Address, constant.Bits != 0 ? branch.Taken : branch.Fallthrough);
+            if (branch.Condition is not ComparisonValue { Condition: Cond.Eq or Cond.Ne } condition) return s;
+            bool Known(Dictionary<ManagedStatement, HashSet<ManagedValue>> facts, ManagedValue value, ManagedValue zero)
+                => zero is ConstantValue { Bits: 0 } && facts[s].Contains(value);
+            bool? nonnull = Known(present, condition.Left, condition.Right) || Known(present, condition.Right, condition.Left) ? true
+                : Known(absent, condition.Left, condition.Right) || Known(absent, condition.Right, condition.Left) ? false : null;
+            return nonnull is { } known ? new ManagedJump(s.Address, known == (condition.Condition == Cond.Ne) ? branch.Taken : branch.Fallthrough) : s;
+        }).ToArray() }).ToArray() };
+    }
+
     internal static Dictionary<ManagedStatement, HashSet<ManagedValue>> Read(ManagedBody body, Func<MethodRef, bool>? getter)
         => Read(body, getter, false);
 
@@ -44,12 +62,25 @@ internal static class SourceNonNullReceivers
             known.Remove(target);
             if (proven && Track(target)) known.Add(target);
         }
-        HashSet<ManagedValue> Edge(HashSet<ManagedValue> input, ManagedEdge edge)
+        var blocks = body.Blocks.ToDictionary(b => b.Address);
+        HashSet<ManagedValue> Edge(HashSet<ManagedValue> input, ulong predecessor, ManagedEdge edge)
         {
             var output = input.ToHashSet();
+            if (blocks[predecessor].Statements.LastOrDefault() is ManagedBranch { Condition: ComparisonValue { Condition: Cond.Eq or Cond.Ne } condition } branch
+                && !ReferenceEquals(branch.Taken, branch.Fallthrough))
+            {
+                var value = condition.Right is ConstantValue { Bits: 0 } ? condition.Left
+                    : condition.Left is ConstantValue { Bits: 0 } ? condition.Right : null;
+                if (value is not null && Track(value))
+                {
+                    var isNull = ReferenceEquals(branch.Taken, edge) == (condition.Condition == Cond.Eq);
+                    if (isNull == nullOnly) output.Add(value); else output.Remove(value);
+                }
+            }
+            var beforeCopies = output.ToHashSet();
             foreach (var copy in edge.Copies) output.Remove(copy.Target);
             foreach (var copy in edge.Copies)
-                if (Track(copy.Target) && (input.Contains(copy.Value) || nullOnly && copy.Value is ConstantValue { Bits: 0 }
+                if (Track(copy.Target) && (beforeCopies.Contains(copy.Value) || nullOnly && copy.Value is ConstantValue { Bits: 0 }
                     && ManagedTypes.IsReferenceType(copy.Value.Type))) output.Add(copy.Target);
             return output;
         }
@@ -67,8 +98,8 @@ internal static class SourceNonNullReceivers
                 var state = new HashSet<ManagedValue>();
                 if (!entries.Contains(block.Address) && incoming.TryGetValue(block.Address, out var predecessors))
                 {
-                    state = Edge(outputs[predecessors[0].Block], predecessors[0].Edge);
-                    foreach (var predecessor in predecessors.Skip(1)) state.IntersectWith(Edge(outputs[predecessor.Block], predecessor.Edge));
+                    state = Edge(outputs[predecessors[0].Block], predecessors[0].Block, predecessors[0].Edge);
+                    foreach (var predecessor in predecessors.Skip(1)) state.IntersectWith(Edge(outputs[predecessor.Block], predecessor.Block, predecessor.Edge));
                 }
                 inputs[block.Address] = state.ToHashSet();
                 foreach (var statement in block.Statements) Transfer(state, statement);

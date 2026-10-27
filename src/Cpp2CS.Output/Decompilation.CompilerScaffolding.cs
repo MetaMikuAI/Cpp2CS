@@ -14,6 +14,19 @@ public static partial class Decompilation
         public void Run(AstNode rootNode, TransformContext context)
         {
             RewriteInjectedCalls(rootNode, context);
+            // 类型与分支事实归约后，局部值上的空判断没有可观察效果。
+            static bool PureCondition(Expression? expression) => expression is PrimitiveExpression or NullReferenceExpression
+                || expression is IdentifierExpression id && id.GetILVariable() is not null
+                || expression is UnaryOperatorExpression { Operator: UnaryOperatorType.Not } negated
+                    && negated.Annotation<OperatorResolveResult>() is { UserDefinedOperatorMethod: null } && PureCondition(negated.Expression)
+                || expression is BinaryOperatorExpression { Operator: BinaryOperatorType.Equality or BinaryOperatorType.InEquality
+                    or BinaryOperatorType.ConditionalAnd or BinaryOperatorType.ConditionalOr } binary
+                    && binary.Annotation<OperatorResolveResult>() is { UserDefinedOperatorMethod: null }
+                    && PureCondition(binary.Left) && PureCondition(binary.Right);
+            static bool Empty(Statement? statement) => statement is null or EmptyStatement || statement is BlockStatement { Statements.Count: 0 };
+            foreach (var condition in rootNode.Descendants.OfType<IfElseStatement>().Reverse().ToArray())
+                if (Empty(condition.TrueStatement) && Empty(condition.FalseStatement)
+                    && condition.Condition.Annotation<ResolveResult>()?.Type.FullName == "System.Boolean" && PureCondition(condition.Condition)) condition.Remove();
             // Unity 的 IL 后处理器可注入跨程序集 internal 标记，C# 无法直接声明它。
             foreach (var attribute in rootNode.Descendants.OfType<ICSharpCode.Decompiler.CSharp.Syntax.Attribute>().ToArray())
             {

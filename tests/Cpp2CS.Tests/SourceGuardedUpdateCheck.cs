@@ -32,12 +32,14 @@ internal static class SourceGuardedUpdateCheck
         var a = new Assertions();
         var candidate = SourceGuardedUpdate.Create(template, types);
         a.True(candidate is { Guards.Count: 2 }, "完整条件更新方法得到两个有序守卫");
+        var normalized = SourceGuardedUpdate.Create(SourceRewriter.Rewrite(template, types), types);
+        a.True(normalized is { Guards.Count: 2 } && normalized.Guards.SequenceEqual(candidate!.Guards), "布尔条件整理后仍保留相同守卫顺序与极性");
         if (candidate is null) return a.Finish("source-guarded-update");
         var receiver = new ArgumentValue(0, type, 64);
         var getter = new MethodRef(new MethodDef { Index = -2, Owner = owner, Name = "Read", Token = 0,
             Attributes = MethodAttributes.Public, ImplAttributes = 0, Slot = -1, ReturnType = types.Boolean }, [], []);
         var observer = new ManagedCall(12, new(method, receiver, [], false), null, false);
-        foreach (var mode in new[] { "valid", "snapshot", "escaping-snapshot", "getter", "opaque-getter", "unproven-getter", "escaping-getter",
+        foreach (var mode in new[] { "valid", "negated", "snapshot", "escaping-snapshot", "getter", "opaque-getter", "unproven-getter", "escaping-getter",
             "other-receiver", "other-value", "observer", "shared-entry", "wrong-guard", "other-failure", "other-handler" })
         {
             var second = new List<ManagedStatement>();
@@ -62,10 +64,11 @@ internal static class SourceGuardedUpdateCheck
             if (mode == "shared-entry") blocks.Add(new(14, [new ManagedJump(14, new(11, []))]));
             if (mode == "other-failure") blocks.Add(new(14, [new ManagedReturn(14, null)]));
             var original = new ManagedBody(method, blocks);
+            if (mode == "negated") original = SourceRewriter.Rewrite(original, types);
             if (mode == "other-handler") original = original with { Regions = [new([10], 13, [13], null, ManagedRegionKind.Catch)] };
             var changed = candidate.Rewrite(original, types, () => new(new(Storage.Temp(-10), 1), types.Boolean, 1), (_, _) => { },
                 m => m == getter && mode != "unproven-getter" ? new(fields[1], type) : null);
-            a.Equal(mode is "valid" or "snapshot" or "getter", changed is not null, mode);
+            a.Equal(mode is "valid" or "negated" or "snapshot" or "getter", changed is not null, mode);
             if (changed is not null)
             {
                 a.True(!changed.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>().Any(), "字段写入归入已证明调用");

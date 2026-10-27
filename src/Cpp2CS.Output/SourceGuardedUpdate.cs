@@ -17,6 +17,7 @@ internal sealed record SourceGuardedUpdate(MethodRef Method, IReadOnlyList<(Fiel
 
     private static (FieldValue Field, bool TakenValue)? Guard(ManagedValue condition, ManagedTypes types)
     {
+        if (condition is NegatedValue negated && Guard(negated.Operand, types) is { } inner) return (inner.Field, !inner.TakenValue);
         if (condition is FieldValue direct && types.Kind(direct.Type) == TypeKind.Bool) return (direct, true);
         if (condition is not ComparisonValue { Condition: Cond.Eq or Cond.Ne, Right: ConstantValue { Bits: 0 } } comparison
             || Strip(comparison.Left) is not FieldValue field || types.Kind(field.Type) != TypeKind.Bool) return null;

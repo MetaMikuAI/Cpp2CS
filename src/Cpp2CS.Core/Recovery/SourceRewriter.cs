@@ -29,7 +29,8 @@ public static class SourceRewriter
         body = SourceStructCopies.Rewrite(body);
         body = SourceScalarStructCopies.Rewrite(body);
         body = SourceStructCopies.SnapshotReads(body);
-        body = SourceCaughtExceptions.Rewrite(body);
+        body = DeadAssignments(Map(SourceCaughtExceptions.Rewrite(body, types), v => Simplify(v, types)));
+        body = DropStatements(SourceNonNullReceivers.FoldBranches(body));
         body = SourceExceptionPaths.Rewrite(body);
         return SourceIteratorCleanup.Rewrite(SourceIteratorDispatch.Rewrite(SourceTryBlocks.Rewrite(SourceCatchHandlers.Rewrite(SourceReturns.Rewrite(FoldFieldCopies(DeadStores(body)))), fieldGetter)));
     }
@@ -263,6 +264,9 @@ public static class SourceRewriter
         bool Bool(ManagedValue v) => types.Kind(v.Type) == TypeKind.Bool;
         switch (value)
         {
+            case IsInstValue { BoxedType: null } test when ManagedTypes.IsReferenceType(test.Operand.Type)
+                && types.IsAssignable(test.Operand.Type, test.Target):
+                return test.Operand;
             case ConversionValue { Kind: ConvKind.Truncate or ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: ConstantValue c } conversion
                 when types.Kind(c.Type) is TypeKind.Int or TypeKind.Bool && types.Kind(conversion.Type) is TypeKind.Int or TypeKind.Bool
                     && Fold.Simplify(new Ir.Convert(conversion.Kind, Expr.C(c.Bits, c.Width), conversion.Width)) is Const converted:
@@ -271,6 +275,12 @@ public static class SourceRewriter
                 when types.Kind(left.Type) is TypeKind.Int or TypeKind.Bool && types.Kind(right.Type) is TypeKind.Int or TypeKind.Bool
                     && Fold.Simplify(new Compare(comparison.Condition, Expr.C(left.Bits, left.Width), Expr.C(right.Bits, right.Width))) is Const compared:
                 return new ConstantValue(compared.Value, comparison.Type, comparison.Width);
+            case BinaryValue { Left: ConstantValue left, Right: ConstantValue right } binary
+                when types.Kind(left.Type) is TypeKind.Int or TypeKind.Bool && types.Kind(right.Type) is TypeKind.Int or TypeKind.Bool
+                    && Fold.Simplify(new Binary(binary.Op, Expr.C(left.Bits, left.Width), Expr.C(right.Bits, right.Width), binary.Width)) is Const result:
+                return new ConstantValue(result.Value, binary.Type, binary.Width);
+            case NegatedValue { Operand: ConstantValue constant } negated:
+                return new ConstantValue(constant.Bits == 0 ? 1UL : 0UL, negated.Type, negated.Width);
             case ComposedValue composed when SourceStructCopies.WholeValue(composed) is { } whole:
                 return whole;
             // 整数等值比较可按同一位宽移项，避免状态判断遗留为 state + 3 == 0。
@@ -286,6 +296,10 @@ public static class SourceRewriter
                 return inner;
             case ConversionValue { Kind: ConvKind.Truncate } t when Extended(t.Operand) is { } inner && inner.Width > t.Width:
                 return t with { Operand = inner };
+            case ConversionValue { Kind: ConvKind.Truncate, Operand: ConversionValue { Kind: ConvKind.ZeroExtend } extension } t
+                when extension.Operand.Width < t.Width && t.Width < extension.Width
+                    && types.Kind(extension.Operand.Type) is TypeKind.Int or TypeKind.Bool && types.Kind(t.Type) is TypeKind.Int or TypeKind.Bool:
+                return extension with { Type = t.Type, Width = t.Width };
             case ConversionValue { Kind: ConvKind.Truncate } t when t.Operand is ConversionValue { Kind: ConvKind.Truncate } u:
                 return t with { Operand = u.Operand };
             // (b ? 1 : 0) & 1 → (b ? 1 : 0)
@@ -418,7 +432,7 @@ public static class SourceRewriter
         };
     }
 
-    /// <summary>只赋值一次、只被截断回原位宽使用的扩展副本 r = ext(e)：r 改为 e 的类型，使用处的截断去掉。</summary>
+    /// <summary>只赋值一次、使用处仍保留全部原始位的扩展副本，局部改用原类型，使用处保留必要扩展。</summary>
     private static ManagedBody Retype(ManagedBody body)
     {
         var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
@@ -429,10 +443,13 @@ public static class SourceRewriter
         foreach (var (variable, definition) in definitions)
             if (definition.Value is ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: var operand } && !written.Contains(variable)
                 && OnlyTruncated(statements, variable) && statements.SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
-                    .OfType<ConversionValue>().Where(c => c is { Kind: ConvKind.Truncate, Operand: LocalValue l } && l.Variable == variable).All(c => c.Width == operand.Width))
+                    .OfType<ConversionValue>().Where(c => c is { Kind: ConvKind.Truncate, Operand: LocalValue l } && l.Variable == variable)
+                    .All(c => c.Width >= operand.Width && c.Width <= definition.Value.Width))
                 retyped[variable] = new LocalValue(variable, operand.Type, operand.Width);
         if (retyped.Count == 0) return body;
-        ManagedValue Deep(ManagedValue v) => v is ConversionValue { Kind: ConvKind.Truncate, Operand: LocalValue l } && retyped.TryGetValue(l.Variable, out var r) ? r : ManagedValues.Map(v, Deep);
+        ManagedValue Deep(ManagedValue v) => v is ConversionValue { Kind: ConvKind.Truncate, Operand: LocalValue l } conversion && retyped.TryGetValue(l.Variable, out var r)
+            ? conversion.Width == r.Width ? r : new ConversionValue(((ConversionValue)definitions[l.Variable].Value).Kind, r, conversion.Type, conversion.Width)
+            : ManagedValues.Map(v, Deep);
         return body with
         {
             Blocks = body.Blocks.Select(b => b with
@@ -512,20 +529,23 @@ public static class SourceRewriter
     private static bool OnlyTruncated(ManagedStatement[] statements, Variable variable)
     {
         var uses = 0;
+        bool Inspect(ManagedValue value)
+        {
+            if (value is ConversionValue { Kind: ConvKind.Truncate, Operand: LocalValue local } && local.Variable == variable)
+            { uses++; return true; }
+            if (value is LocalValue other && other.Variable == variable) return false;
+            var valid = true;
+            ManagedValues.Map(value, child => { valid &= Inspect(child); return child; });
+            return valid;
+        }
         foreach (var statement in statements)
             foreach (var root in ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement)))
             {
                 if (statement is ManagedAssignment a && ReferenceEquals(root, a.Target)) continue;
-                foreach (var v in ManagedValues.Walk(root))
-                {
-                    if (v is ConversionValue { Kind: ConvKind.Truncate, Operand: LocalValue l } && l.Variable == variable) uses++;
-                    else if (v is LocalValue other && other.Variable == variable && !IsTruncated(root, other)) return false;
-                }
+                if (!Inspect(root)) return false;
             }
         return uses > 0;
     }
-
-    private static bool IsTruncated(ManagedValue root, LocalValue local) => ManagedValues.Walk(root).Any(v => v is ConversionValue { Kind: ConvKind.Truncate, Operand: var o } && ReferenceEquals(o, local));
 
     private static ManagedBody DeadAssignments(ManagedBody body)
     {
