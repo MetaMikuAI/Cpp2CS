@@ -914,7 +914,11 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     || choices.SelectMany(c => c.Slots).Select(s => SymbolOf(s.Usage.Kind)).Distinct().Count() != 1) continue;
                 var loads = All.SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<Load>()
                     .Where(l => l is { Width: 64, Address: Use use } && use.Variable == phi.Target).ToHashSet();
-                if (loads.Count == 0) continue;
+                var initializers = All.OfType<Call>().Where(c => c.Kind == CallKind.Direct
+                    && owner.HelperOf(c)?.Kind == HelperKind.InitMetadata
+                    && c.Arguments is [Use { Variable: var argument }, ..] && argument == phi.Target
+                    && c.Defines.Length <= 1).ToHashSet(ReferenceEqualityComparer.Instance);
+                if (loads.Count == 0 && initializers.Count == 0) continue;
                 var target = Fresh();
                 var sources = new Variable[choices.Length];
                 for (var i = 0; i < choices.Length; i++)
@@ -927,13 +931,20 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     foreach (var slot in choices[i].Slots)
                     {
                         Result.ReadSlots.Add(slot.Address);
+                        if (initializers.Count > 0) Result.InitializedSlots.Add(slot.Address);
                         symbolSlots.TryAdd(new Symbol(SymbolOf(slot.Usage.Kind), slot.Usage.Value), slot.Address);
                     }
                 }
                 block.Statements.Insert(block.Statements.IndexOf(phi) + 1, new Phi(phi.Address, target, sources));
                 foreach (var member in function.Blocks)
                     for (var i = 0; i < member.Statements.Count; i++)
-                        member.Statements[i] = ExprMap.MapOperands(member.Statements[i], e => ExprMap.Map(e,
+                        if (member.Statements[i] is Call call && initializers.Contains(call))
+                        {
+                            member.Statements[i] = call.Defines is [var result]
+                                ? new Define(call.Address, result, new Use(target, 64)) : new Nop(call.Address, "InitMetadata");
+                            Result.Hit(Template.LazyMetadataInit);
+                        }
+                        else member.Statements[i] = ExprMap.MapOperands(member.Statements[i], e => ExprMap.Map(e,
                             part => part is Load load && loads.Contains(load) ? new Use(target, 64) : null));
                 Result.Hit(Template.MetadataSlot);
                 changed = true;
