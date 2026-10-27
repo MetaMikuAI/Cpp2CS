@@ -264,6 +264,8 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 Cleanup();
                 Symbols(rgctx: true);
             }
+            if (ClassPhiAllocations.Run(function, address => facts.EntriesAt(address)
+                .Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false, Parameters.Count: 0 } }), Fresh)) Cleanup();
             if (MergedAllocationNormalizer.Run(function, facts)) Cleanup();
             if (FlagPhiConditions()) Cleanup();
             Residuals();
