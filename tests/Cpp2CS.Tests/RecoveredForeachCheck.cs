@@ -18,6 +18,7 @@ internal static class RecoveredForeachCheck
         foreach (var cleanupMode in new[] { "external", "internal", "continuation" })
         foreach (var temporary in new[] { false, true })
         foreach (var escape in new[] { false, true })
+        foreach (var earlyExit in cleanupMode == "external" && mode == "local" && !temporary ? new[] { false, true } : new[] { false })
         {
             var internalCleanup = cleanupMode == "internal";
             var method = new MethodDeclaration { Name = "Visit", ReturnType = new PrimitiveType("void"), Body = new BlockStatement() };
@@ -40,7 +41,14 @@ internal static class RecoveredForeachCheck
             }
             body.Statements.Add(new ContinueStatement());
             var guarded = new TryCatchStatement { TryBlock = new BlockStatement() };
-            guarded.TryBlock.Statements.Add(new IfElseStatement(new InvocationExpression(Member("MoveNext")), body));
+            if (earlyExit)
+            {
+                var exhausted = new BlockStatement();
+                exhausted.Statements.Add(new BreakStatement());
+                guarded.TryBlock.Statements.Add(new IfElseStatement(new UnaryOperatorExpression(UnaryOperatorType.Not, new InvocationExpression(Member("MoveNext"))), exhausted));
+                foreach (var statement in body.Statements) guarded.TryBlock.Statements.Add(statement.Clone());
+            }
+            else guarded.TryBlock.Statements.Add(new IfElseStatement(new InvocationExpression(Member("MoveNext")), body));
             var catcher = new CatchClause { Type = new SimpleType("Exception"), VariableName = "error", Body = new BlockStatement() };
             catcher.Body.Statements.Add(new ExpressionStatement(new AssignmentExpression(Id("pending"), Id("error"))));
             catcher.Body.Statements.Add(new GotoStatement("cleanup"));
@@ -60,7 +68,7 @@ internal static class RecoveredForeachCheck
             else
             {
                 if (internalCleanup) loop.Statements.Add(Dispose());
-                loop.Statements.Add(new BreakStatement());
+                if (!earlyExit) loop.Statements.Add(new BreakStatement());
                 loop.Statements.Add(new LabelStatement("cleanup"));
                 loop.Statements.Add(Dispose());
                 var returned = new BlockStatement();

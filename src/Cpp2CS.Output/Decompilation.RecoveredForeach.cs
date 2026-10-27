@@ -60,10 +60,25 @@ public static partial class Decompilation
                 var parts = content.Statements.ToArray();
                 if (parts.OfType<TryCatchStatement>().ToArray() is not [var guarded]
                     || guarded.FinallyBlock is not null || guarded.CatchClauses.Count != 1
-                    || guarded.TryBlock is not { } tryBlock || tryBlock.Statements.ToArray() is not [IfElseStatement test] || test.FalseStatement is not null
-                    || test.Condition is not InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression
+                    || guarded.TryBlock is not { } tryBlock) continue;
+                var guardedStatements = tryBlock.Statements.ToArray();
+                Expression? advance;
+                BlockStatement body;
+                var earlyExit = false;
+                if (guardedStatements is [IfElseStatement { FalseStatement: null, TrueStatement: BlockStatement positive } test])
+                { advance = test.Condition; body = positive; }
+                else if (guardedStatements.FirstOrDefault() is IfElseStatement { FalseStatement: null,
+                    Condition: UnaryOperatorExpression { Operator: UnaryOperatorType.Not, Expression: var operand },
+                    TrueStatement: BlockStatement { Statements.Count: 1 } exited } && exited.Statements.Single() is BreakStatement)
+                {
+                    advance = operand; earlyExit = true;
+                    body = new BlockStatement();
+                    foreach (var statement in guardedStatements.Skip(1)) body.Statements.Add(statement.Clone());
+                }
+                else continue;
+                if (advance is not InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression
                         { MemberName: "MoveNext", Target: IdentifierExpression enumerator } }
-                    || test.TrueStatement is not BlockStatement body || body.Statements.LastOrDefault() is not ContinueStatement) continue;
+                    || body.Statements.LastOrDefault() is not ContinueStatement) continue;
                 var name = enumerator.Identifier;
                 if (body.Descendants.OfType<MemberReferenceExpression>().Where(m => m.MemberName == "Current" && Name(m.Target, name)).ToArray()
                     is not [var read]) continue;
@@ -87,6 +102,7 @@ public static partial class Decompilation
                 var before = parts.TakeWhile(s => s != guarded).ToArray();
                 if (before.Any(s => s is not VariableDeclarationStatement d || d.Variables.Any(v => v.Initializer is not null))) continue;
                 var tail = parts.SkipWhile(s => s != guarded).Skip(1).ToArray();
+                if (earlyExit) tail = new Statement[] { new BreakStatement() }.Concat(tail).ToArray();
                 var siblings = parent.Statements.ToArray();
                 var index = Array.IndexOf(siblings, loop);
                 var removed = new List<Statement>();
