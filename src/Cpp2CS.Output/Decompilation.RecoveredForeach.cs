@@ -58,6 +58,7 @@ public static partial class Decompilation
         public void Run(AstNode rootNode, TransformContext context)
         {
             RecoverSearchLoops(rootNode);
+            RecoverResultLoops(rootNode);
             var normalized = NormalizeDirectLoops(rootNode);
             foreach (var loop in rootNode.Descendants.OfType<WhileStatement>().ToArray())
             {

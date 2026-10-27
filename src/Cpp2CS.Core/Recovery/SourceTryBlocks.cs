@@ -1,4 +1,5 @@
 using Cpp2CS.Ir;
+using Cpp2CS.Model;
 
 namespace Cpp2CS.Recovery;
 
@@ -20,17 +21,20 @@ internal static class SourceTryBlocks
         _ => false,
     };
 
-    internal static ManagedBody Rewrite(ManagedBody body)
+    internal static ManagedBody Rewrite(ManagedBody body, Func<MethodRef, bool>? getter = null)
     {
         if (body.Regions.Count == 0 || body.Blocks.Any(b => b.Statements.LastOrDefault() is not
             (ManagedJump or ManagedBranch or ManagedSwitch or ManagedReturn or ManagedThrow or ManagedRethrow or ManagedEndFault))) return body;
         var blocks = body.Blocks.ToDictionary(b => b.Address);
         var order = body.Blocks.Select(b => b.Address).ToList();
         var regions = body.Regions.ToArray();
+        var nonnull = getter is null ? null : SourceNonNullReceivers.Read(body, getter);
         bool NonThrowing(ManagedBlock block) => block.Statements.All(s => s switch
         {
             ManagedAssignment assignment => Pure(assignment.Value),
             ManagedJump or ManagedBranch or ManagedSwitch or ManagedReturn => ManagedValues.Of(s).All(Pure),
+            ManagedCall { Invocation: { Receiver: LocalValue receiver, Arguments.Count: 0 } invocation } when getter is not null
+                => getter(invocation.Method) && nonnull![s].Contains(receiver),
             _ => false,
         }) && block.Statements.SelectMany(ManagedValues.Edges).SelectMany(e => e.Copies).All(c => Pure(c.Value));
         foreach (var index in Enumerable.Range(0, regions.Length).OrderBy(i => regions[i].Try.Count))

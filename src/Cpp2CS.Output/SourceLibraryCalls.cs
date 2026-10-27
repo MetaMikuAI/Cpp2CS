@@ -174,7 +174,8 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
             }
             blocks.Add(block with { Statements = output.ToArray() });
         }
-        return SourceRewriter.Rewrite(body with { Blocks = blocks }, types);
+        var fieldGetters = fieldCalls.Values.SelectMany(c => c).Where(c => !c.Write && !c.Method.Method.IsStatic).Select(c => c.Method).ToHashSet();
+        return SourceRewriter.Rewrite(body with { Blocks = blocks }, types, fieldGetters.Contains);
     }
 
     private bool Match(ManagedBody body, List<ManagedStatement> statements, int start, Pattern pattern, out ManagedCall? replacement, out int end)

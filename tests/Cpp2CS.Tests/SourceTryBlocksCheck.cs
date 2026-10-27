@@ -41,6 +41,35 @@ internal static class SourceTryBlocksCheck
             if (expected) a.True(result.Blocks.Select(b => b.Address).SequenceEqual(mode == "entry-prefix"
                 ? new ulong[] { 0, 3, 1, 2, 4 } : new ulong[] { 0, 1, 3, 2, 4 }), "合并后保护区连续且保留唯一入口");
         }
+        var receiverType = new DefinitionRef(owner, []);
+        var receiver = new LocalValue(new(Storage.Temp(3), 1), receiverType, 64);
+        var alias = new LocalValue(new(Storage.Temp(4), 1), receiverType, 64);
+        var readMethod = new MethodRef(new MethodDef { Index = 1, Owner = owner, Name = "get_Value", Token = 0, Attributes = MethodAttributes.Public,
+            ImplAttributes = 0, Slot = -1, ReturnType = integer }, [], []);
+        var field = new FieldRef(new FieldDef { Index = 0, Owner = owner, Name = "value", Type = integer, Attributes = FieldAttributes.Public, Offset = 16 }, receiverType);
+        foreach (var mode in new[] { "getter", "field", "alias", "unknown", "reset", "addressed", "conditional", "mixed" })
+        {
+            var fieldRead = new FieldValue(receiver, field, integer, 32);
+            ManagedStatement first = mode is "field" or "conditional"
+                ? new ManagedAssignment(1, local, mode == "conditional" ? new ChoiceValue(local, fieldRead, new ConstantValue(0, integer, 32), integer, 32) : fieldRead)
+                : new ManagedCall(1, new(mode == "unknown" ? method : readMethod, receiver, [], false), local, false);
+            var middle = new List<ManagedStatement> { first };
+            if (mode == "reset") middle.Add(new ManagedAssignment(1, receiver, new ConstantValue(0, receiverType, 64)));
+            if (mode == "alias") middle.Add(new ManagedAssignment(1, alias, receiver));
+            middle.Add(Jump(1, 3));
+            var second = new ManagedCall(3, new(readMethod, mode == "alias" ? alias : receiver, [], false), local, false);
+            var start = new List<ManagedStatement> { new ManagedAssignment(0, receiver, new ArgumentValue(0, receiverType, 64)) };
+            if (mode == "addressed") start.Add(new ManagedCall(0, new(method, null, [new AddressValue(receiver)], false), null, false));
+            start.Add(mode == "mixed" ? new ManagedBranch(0, local, new(1, []), new(4, [])) : Jump(0, 1));
+            var body = new ManagedBody(method, [new(0, start), new(1, middle), new(2, [new ManagedRethrow(2)]),
+                new(3, [second, new ManagedReturn(3, null)]), new(4, [Jump(4, 3)])])
+                { Regions = [new([1], 2, [2], caught, ManagedRegionKind.Catch)] };
+            if (mode != "mixed") body = body with { Blocks = body.Blocks.Where(b => b.Address != 4).ToArray() };
+            var expected = mode is "getter" or "field" or "alias";
+            var facts = SourceNonNullReceivers.Read(body, m => m.Equals(readMethod));
+            a.Equal(expected, facts[second].Contains(second.Invocation.Receiver!), $"{mode} 的接收者非空证据");
+            a.Equal(expected, SourceTryBlocks.Rewrite(body, m => m.Equals(readMethod)).Regions[0].Try.Contains(3UL), $"{mode} 的纯 getter 区域合并");
+        }
         return a.Finish("source-try-blocks");
     }
 }

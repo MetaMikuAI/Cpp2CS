@@ -12,7 +12,7 @@ namespace Cpp2CS.Recovery;
 /// </summary>
 public static class SourceRewriter
 {
-    public static ManagedBody Rewrite(ManagedBody body, ManagedTypes types)
+    public static ManagedBody Rewrite(ManagedBody body, ManagedTypes types, Func<MethodRef, bool>? fieldGetter = null)
     {
         body = Normalize(body);
         body = SourceStructCopies.Rewrite(body);
@@ -28,7 +28,7 @@ public static class SourceRewriter
         body = SourceStructCopies.Rewrite(body);
         body = SourceScalarStructCopies.Rewrite(body);
         body = SourceCaughtExceptions.Rewrite(body);
-        return SourceIteratorCleanup.Rewrite(SourceIteratorDispatch.Rewrite(SourceTryBlocks.Rewrite(SourceCatchHandlers.Rewrite(SourceReturns.Rewrite(FoldFieldCopies(DeadStores(body)))))));
+        return SourceIteratorCleanup.Rewrite(SourceIteratorDispatch.Rewrite(SourceTryBlocks.Rewrite(SourceCatchHandlers.Rewrite(SourceReturns.Rewrite(FoldFieldCopies(DeadStores(body)))), fieldGetter)));
     }
 
     /// <summary>bool 目标上的参数恒等复制不保留寄存器搬运转换，供普通字段与迭代器入口共同使用。</summary>
