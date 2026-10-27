@@ -73,6 +73,35 @@ internal static class SourceCatchCheck
         a.Equal(1, SourceCatchHandlers.Rewrite(shared).Regions[0].Handler.Count, "正常路径也能到达的处理块不纳入 catch");
         var nested = handler with { Regions = [.. handler.Regions, new([0, 1], 2, [2], copy, ManagedRegionKind.Catch)] };
         a.Equal(1, SourceCatchHandlers.Rewrite(nested).Regions[0].Handler.Count, "不改变调用所处的外层保护范围");
+        foreach (var mode in new[] { "valid", "outer", "cycle", "returns", "reset", "addressed", "external-entry", "cross-region", "edge-reset" })
+        {
+            var cleanup = new ManagedBody(method, [
+                new(0, [new ManagedJump(0, new(3, [new(merged, zero)]))]),
+                new(1, [new ManagedJump(1, new(3, mode == "edge-reset" ? [new(caught, zero), new(merged, caught)] : [new(merged, caught)]))]),
+                new(3, [new ManagedCall(3, new(method, null, mode == "addressed" ? [new AddressValue(caught)] : [], false), null, false),
+                    .. mode == "reset" ? new ManagedStatement[] { new ManagedAssignment(3, merged, zero) } : [],
+                    new ManagedBranch(3, new ComparisonValue(Cond.Ne, merged, zero, boolean), new(4, []), new(5, []))]),
+                new(4, [mode == "cycle" ? new ManagedJump(4, new(3, [])) : mode == "returns" ? new ManagedReturn(4, null) : new ManagedThrow(4, merged)]),
+                new(5, [new ManagedReturn(5, null)]), new(6, [new ManagedCall(6, new(method, null, [merged], false), null, false), new ManagedThrow(6, copy)])])
+                { Regions = [new([0], 1, [1], caught, ManagedRegionKind.Catch)] };
+            if (mode == "external-entry") cleanup = cleanup with { Blocks = [cleanup.Blocks[0] with { Statements = [new ManagedJump(0, new(1, []))] }, .. cleanup.Blocks.Skip(1)] };
+            if (mode is "outer" or "cross-region") cleanup = cleanup with { Regions = [.. cleanup.Regions,
+                new(mode == "outer" ? [0, 1, 3, 4, 5] : [0, 1], 6, [6], copy, ManagedRegionKind.Catch)] };
+            var separated = SourceExceptionPaths.Rewrite(cleanup);
+            var expected = mode is "valid" or "outer";
+            a.Equal(expected, separated.Regions[0].HandlerEntry != 1, $"{mode} 的异常路径分离边界");
+            if (!expected) continue;
+            var privateBlocks = separated.Blocks.Where(b => separated.Regions[0].Handler.Contains(b.Address)).ToArray();
+            a.Equal(1, privateBlocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Count(), "清理调用在异常路径仍恰好一次");
+            a.True(!privateBlocks.SelectMany(b => b.Statements).OfType<ManagedBranch>().Any(), "已知异常非空的判断消除");
+            a.True(privateBlocks.SelectMany(b => b.Statements).OfType<ManagedThrow>().Single().Exception == caught, "抛出同一捕获对象");
+            a.True(separated.Blocks.Single(b => b.Address == 3).Statements.Last() is ManagedJump { Edge.Target: 5 }, "正常清理的已知空异常直接继续");
+            if (mode == "outer")
+            {
+                a.True(privateBlocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Edges).SelectMany(e => e.Copies).Any(c => c.Target == merged), "保留外层 catch 可能观察到的写入");
+                a.True(privateBlocks.All(b => separated.Regions[1].Try.Contains(b.Address)), "清理异常仍由原外层 catch 处理");
+            }
+        }
         return a.Finish("source-catches");
     }
 }

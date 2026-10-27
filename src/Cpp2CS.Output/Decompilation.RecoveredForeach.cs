@@ -59,6 +59,7 @@ public static partial class Decompilation
         {
             RecoverSearchLoops(rootNode);
             RecoverResultLoops(rootNode);
+            RecoverCompleteLoops(rootNode);
             var normalized = NormalizeDirectLoops(rootNode);
             foreach (var loop in rootNode.Descendants.OfType<WhileStatement>().ToArray())
             {

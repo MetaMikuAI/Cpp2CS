@@ -18,7 +18,7 @@ internal static class NullableForeachCheck
         IdentifierExpression Id(string name) => new(name);
         ExpressionStatement Set(string name, Expression value) => new(new AssignmentExpression(Id(name), value));
         var a = new Assertions();
-        foreach (var mode in new[] { "valid", "escape", "exception-escape", "external-jump", "outgoing-jump", "extra-catch", "throwing-prefix", "current-write", "return", "wrong-cleanup", "captured", "addressed" })
+        foreach (var mode in new[] { "valid", "escape", "exception-escape", "external-jump", "outgoing-jump", "extra-catch", "throwing-prefix", "current-write", "return", "wrong-cleanup", "captured", "addressed", "direct" })
         {
             var tree = new SyntaxTree(); var type = new TypeDeclaration { Name = "Subject" }; tree.Members.Add(type);
             var method = new MethodDeclaration { Name = "Visit", ReturnType = new PrimitiveType("void"), Body = new BlockStatement() }; type.Members.Add(method);
@@ -52,10 +52,18 @@ internal static class NullableForeachCheck
             outer.Statements.Add(new ThrowStatement(Id("pending")));
             if (mode is "escape" or "exception-escape") outer.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Observe"), Id(mode == "escape" ? "iterator" : "pending"))));
             if (mode == "external-jump") outer.Statements.Add(new GotoStatement("cleanup"));
+            if (mode == "direct")
+            {
+                catcher.Body = new BlockStatement { new IfElseStatement(new BinaryOperatorExpression(Id("iterator"), BinaryOperatorType.Equality, new NullReferenceExpression()),
+                    new BlockStatement { new ThrowStatement(Id("error")) }), new ExpressionStatement(new InvocationExpression(new MemberReferenceExpression(Id("iterator"), "Dispose"))), new ThrowStatement(Id("error")) };
+                foreach (var statement in outer.Statements.SkipWhile(s => s != guarded).Skip(1).ToArray()) statement.Remove();
+                outer.Statements.Add(new ExpressionStatement(new UnaryOperatorExpression(UnaryOperatorType.NullConditionalRewrap,
+                    new InvocationExpression(new MemberReferenceExpression(new UnaryOperatorExpression(UnaryOperatorType.NullConditional, Id("iterator")), "Dispose")))));
+            }
             var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).GetNestedType("RecoveredForeach", BindingFlags.NonPublic)!, nonPublic: true)!;
             transform.Run(tree, null!);
-            a.Equal(mode == "valid" ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的清理边界");
-            if (mode == "valid")
+            a.Equal(mode is "valid" or "direct" ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的清理边界");
+            if (mode is "valid" or "direct")
             {
                 a.True(!tree.Descendants.OfType<MemberReferenceExpression>().Any(m => m.MemberName is "MoveNext" or "Current" or "Dispose"), "显式枚举已消除");
                 a.True(tree.Descendants.OfType<VariableInitializer>().Any(v => v.Name == "total" && v.Initializer is IdentifierExpression { Identifier: "initial" }), "保留局部初始化");

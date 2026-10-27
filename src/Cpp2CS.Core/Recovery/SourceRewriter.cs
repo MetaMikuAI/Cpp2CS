@@ -28,6 +28,7 @@ public static class SourceRewriter
         body = SourceStructCopies.Rewrite(body);
         body = SourceScalarStructCopies.Rewrite(body);
         body = SourceCaughtExceptions.Rewrite(body);
+        body = SourceExceptionPaths.Rewrite(body);
         return SourceIteratorCleanup.Rewrite(SourceIteratorDispatch.Rewrite(SourceTryBlocks.Rewrite(SourceCatchHandlers.Rewrite(SourceReturns.Rewrite(FoldFieldCopies(DeadStores(body)))), fieldGetter)));
     }
 

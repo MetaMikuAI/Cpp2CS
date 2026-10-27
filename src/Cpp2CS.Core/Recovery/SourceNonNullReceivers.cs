@@ -2,10 +2,15 @@ using Cpp2CS.Model;
 
 namespace Cpp2CS.Recovery;
 
-/// <summary>只沿正常边传播成功解引用的非空事实；重新赋值和取址不沿用旧事实。</summary>
+/// <summary>沿正常边传播非空或空值事实；重新赋值和取址不沿用旧事实。</summary>
 internal static class SourceNonNullReceivers
 {
     internal static Dictionary<ManagedStatement, HashSet<ManagedValue>> Read(ManagedBody body, Func<MethodRef, bool>? getter)
+        => Read(body, getter, false);
+
+    internal static Dictionary<ManagedStatement, HashSet<ManagedValue>> ReadNull(ManagedBody body) => Read(body, null, true);
+
+    private static Dictionary<ManagedStatement, HashSet<ManagedValue>> Read(ManagedBody body, Func<MethodRef, bool>? getter, bool nullOnly)
     {
         var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
         var addressed = statements.SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
@@ -15,13 +20,13 @@ internal static class SourceNonNullReceivers
         {
             void Read(ManagedValue value)
             {
-                if (value is FieldValue field && Track(field.Receiver)) known.Add(field.Receiver);
+                if (!nullOnly && value is FieldValue field && Track(field.Receiver)) known.Add(field.Receiver);
                 if (value is ChoiceValue choice) { Read(choice.Condition); return; }
                 if (value is BooleanValue boolean) { Read(boolean.Left); return; }
                 ManagedValues.Map(value, child => { Read(child); return child; });
             }
             foreach (var value in ManagedValues.Of(statement)) Read(value);
-            if (statement is ManagedCall { Invocation: var invocation } && (invocation.Virtual || getter?.Invoke(invocation.Method) == true)
+            if (!nullOnly && statement is ManagedCall { Invocation: var invocation } && (invocation.Virtual || getter?.Invoke(invocation.Method) == true)
                 && invocation.Receiver is { } receiver && Track(receiver)) known.Add(receiver);
             ManagedValue? target = statement switch
             {
@@ -33,16 +38,19 @@ internal static class SourceNonNullReceivers
             };
             if (target is null) return;
             var source = statement switch { ManagedAssignment copy => copy.Value, ManagedStore store => store.Value, _ => null };
-            var nonnull = source is not null && (known.Contains(source) || source is NewObjectValue or NewArrayValue or DelegateValue or StringValue);
+            var proven = source is not null && (known.Contains(source) || (nullOnly
+                ? source is ConstantValue { Bits: 0 } && ManagedTypes.IsReferenceType(source.Type)
+                : source is NewObjectValue or NewArrayValue or DelegateValue or StringValue));
             known.Remove(target);
-            if (nonnull && Track(target)) known.Add(target);
+            if (proven && Track(target)) known.Add(target);
         }
         HashSet<ManagedValue> Edge(HashSet<ManagedValue> input, ManagedEdge edge)
         {
             var output = input.ToHashSet();
             foreach (var copy in edge.Copies) output.Remove(copy.Target);
             foreach (var copy in edge.Copies)
-                if (Track(copy.Target) && input.Contains(copy.Value)) output.Add(copy.Target);
+                if (Track(copy.Target) && (input.Contains(copy.Value) || nullOnly && copy.Value is ConstantValue { Bits: 0 }
+                    && ManagedTypes.IsReferenceType(copy.Value.Type))) output.Add(copy.Target);
             return output;
         }
         var incoming = body.Blocks.SelectMany(b => b.Statements.SelectMany(ManagedValues.Edges).Select(e => (Block: b.Address, Edge: e)))
@@ -68,7 +76,7 @@ internal static class SourceNonNullReceivers
                 outputs[block.Address] = state; changed = true;
             }
         } while (changed);
-        var result = new Dictionary<ManagedStatement, HashSet<ManagedValue>>();
+        var result = new Dictionary<ManagedStatement, HashSet<ManagedValue>>(ReferenceEqualityComparer.Instance);
         foreach (var block in body.Blocks)
         {
             var state = inputs[block.Address].ToHashSet();

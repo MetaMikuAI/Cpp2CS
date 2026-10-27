@@ -21,7 +21,7 @@ internal static class MergedForeachCheck
         IdentifierExpression Id(string name) => new(name);
         ExpressionStatement Set(string name, Expression value) => new(new AssignmentExpression(Id(name), value));
         var a = new Assertions();
-        foreach (var mode in new[] { "valid", "write", "ref", "increment", "escape", "exception-escape", "external-jump", "outgoing-jump", "extra-catch", "no-disposable" })
+        foreach (var mode in new[] { "valid", "write", "ref", "increment", "escape", "exception-escape", "external-jump", "outgoing-jump", "extra-catch", "no-disposable", "direct", "direct-write" })
         {
             var method = new MethodDeclaration { Name = "Visit", ReturnType = new PrimitiveType("void"), Body = new BlockStatement() };
             method.Parameters.Add(new ParameterDeclaration { Type = new SimpleType("object"), Name = "item" });
@@ -31,12 +31,12 @@ internal static class MergedForeachCheck
             var outer = method.Body;
             if (mode == "external-jump") outer.Statements.Add(new GotoStatement("cleanup"));
             var factory = new InvocationExpression(new MemberReferenceExpression(Id("values"), "GetEnumerator"));
-            if (mode != "no-disposable") factory.AddAnnotation(new ResolveResult(disposable));
+            if (mode != "no-disposable") factory.AddAnnotation(new ResolveResult(mode.StartsWith("direct") ? typeSystem.FindType(typeof(List<int>.Enumerator)) : disposable));
             outer.Statements.Add(new VariableDeclarationStatement(new SimpleType("var"), "iterator", factory));
             outer.Statements.Add(new VariableDeclarationStatement(new SimpleType("Exception"), "pending"));
             var body = new BlockStatement { new VariableDeclarationStatement(new PrimitiveType("int"), "current", new MemberReferenceExpression(Id("iterator"), "Current")),
                 new ExpressionStatement(new InvocationExpression(Id("Use"), Id("current"))) };
-            if (mode == "write") body.Statements.Add(Set("current", new PrimitiveExpression(0)));
+            if (mode is "write" or "direct-write") body.Statements.Add(Set("current", new PrimitiveExpression(0)));
             if (mode == "ref") body.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Mutate"), new DirectionExpression(FieldDirection.Ref, Id("current")))));
             if (mode == "increment") body.Statements.Add(new ExpressionStatement(new UnaryOperatorExpression(UnaryOperatorType.PostIncrement, Id("current"))));
             if (mode == "outgoing-jump") body.Statements.Add(new GotoStatement("cleanup"));
@@ -53,15 +53,23 @@ internal static class MergedForeachCheck
             outer.Statements.Add(Set("iterator", new DefaultValueExpression(new SimpleType("Enumerator"))));
             outer.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Finish"))));
             if (mode is "escape" or "exception-escape") outer.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Observe"), Id(mode == "escape" ? "iterator" : "exception"))));
+            if (mode.StartsWith("direct"))
+            {
+                catcher.Body = new BlockStatement { new ExpressionStatement(new InvocationExpression(new MemberReferenceExpression(Id("iterator"), "Dispose"))), new ThrowStatement(Id("error")) };
+                foreach (var statement in outer.Statements.SkipWhile(s => s != guarded).Skip(1).ToArray()) statement.Remove();
+                outer.Statements.Add(new ExpressionStatement(new InvocationExpression(new MemberReferenceExpression(Id("iterator"), "Dispose"))));
+                outer.Statements.Add(Set("iterator", new DefaultValueExpression(new SimpleType("Enumerator"))));
+                outer.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Finish"))));
+            }
             var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).GetNestedType("RecoveredForeach", BindingFlags.NonPublic)!, nonPublic: true)!;
             transform.Run(tree, null!);
-            var expected = mode is "valid" or "write" or "ref" or "increment";
+            var expected = mode is "valid" or "write" or "ref" or "increment" or "direct" or "direct-write";
             a.Equal(expected ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的清理与逃逸边界");
             if (expected)
             {
                 a.True(!tree.Descendants.OfType<MemberReferenceExpression>().Any(m => m.MemberName is "MoveNext" or "Dispose" or "Current"), "显式枚举已折叠");
                 a.True(method.Body.Statements.Last().ToString().Contains("Finish"), "正常后续工作保留");
-                if (mode != "valid") a.True(tree.ToString().Contains("current = item2"), "写入使用独立局部并避开参数名");
+                if (mode is not ("valid" or "direct")) a.True(tree.ToString().Contains("current = item2"), "写入使用独立局部并避开参数名");
             }
         }
         return a.Finish("merged-foreach");
