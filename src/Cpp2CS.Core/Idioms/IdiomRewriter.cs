@@ -405,14 +405,17 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 if (side is not (0 or 1) || Direction(condition, Replace(load, 1)) != 1 - side) continue;
                 var init = side == 0 ? first : second;
                 var skip = side == 0 ? second : first;
-                if (init.Predecessors.Count != 1 || init.Statements.LastOrDefault() is not Branch after
+                if (init.Predecessors.Count != 1 || init.Handler != head.Handler || skip.Handler != head.Handler
+                    || init.IsLandingPad || skip.IsLandingPad || init.Statements.LastOrDefault() is not Branch after
                     || skip.Statements.LastOrDefault() is not Branch normal || skip.Statements.Any(s => s is not (Define or Nop or Branch))) continue;
                 var prefix = init.Statements.SkipLast(1).Where(s => s is not Nop).ToArray();
                 if (prefix is not [Call { Op.Kind: OpKind.RunClassConstructor } call] || !Equals(call.Op.Operand, type)) continue;
                 var a = defs.Expand(after.Condition);
                 var b = defs.Expand(normal.Condition);
-                if (!(a == b && after.Target == normal.Target && after.Fallthrough == normal.Fallthrough)
-                    && !(a == Fold.Simplify(new Not(b)) && after.Target == normal.Fallthrough && after.Fallthrough == normal.Target)) continue;
+                if (!(a == b && ClassGuardExits.Same(init, after.Target, skip, normal.Target)
+                        && ClassGuardExits.Same(init, after.Fallthrough, skip, normal.Fallthrough))
+                    && !(a == Fold.Simplify(new Not(b)) && ClassGuardExits.Same(init, after.Target, skip, normal.Fallthrough)
+                        && ClassGuardExits.Same(init, after.Fallthrough, skip, normal.Target))) continue;
                 // RunClassConstructor 自身处理已初始化状态；保留初始化臂及其后续业务分支。
                 head.Statements[^1] = new Jump(guard.Address, init.Start);
                 MachineFunction.RemoveEdgeAt(head, 1 - side.Value);
