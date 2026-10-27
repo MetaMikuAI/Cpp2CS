@@ -152,6 +152,9 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
                 var loaded = new Dictionary<StaticFieldValue, LocalValue>();
                 ManagedValue Replace(ManagedValue value)
                 {
+                    if (value is IndirectValue { Address: AddressValue { Target: StaticFieldValue storage } } indirect
+                        && storage.Type.Equals(indirect.Type)) value = storage;
+                    if (value is AddressValue) return value;
                     if (value is not StaticFieldValue field || ManagedAccess.Field(types, caller, field.Field, null)
                         || (field.Field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) == 0) return ManagedValues.Map(value, Replace);
                     var getter = Patterns(field.Field.Field.Owner).FirstOrDefault(p => p.Method.Method.IsStatic && p.Method.Method.Parameters.Count == 0
@@ -169,7 +172,8 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
                     return local;
                 }
                 // 只替换读取；字段地址若被写入或传出，保留原始操作。
-                if (statement is ManagedAssignment assignment) statement = assignment with { Value = Replace(assignment.Value) };
+                if (statement is ManagedAssignment or ManagedCall or ManagedReturn or ManagedStore)
+                    statement = ManagedValues.Map(statement, Replace, target => target);
                 output.Add(statement);
             }
             blocks.Add(block with { Statements = output.ToArray() });
