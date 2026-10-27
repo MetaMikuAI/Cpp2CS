@@ -235,6 +235,7 @@ public static partial class Decompilation
             }
             RecoverAsyncLoops(rootNode);
             RecoverGuardedAsyncLoops(rootNode);
+            RecoverMergedLoops(rootNode);
         }
     }
 }
