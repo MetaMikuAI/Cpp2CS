@@ -259,6 +259,11 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 if (MetadataSlotPhis()) Cleanup();
                 if (StringSlotChoices()) Cleanup();
             }
+            if (AddressPhiLoads.Run(function, Fresh))
+            {
+                Cleanup();
+                Symbols(rgctx: true);
+            }
             if (MergedAllocationNormalizer.Run(function, facts)) Cleanup();
             if (FlagPhiConditions()) Cleanup();
             Residuals();
