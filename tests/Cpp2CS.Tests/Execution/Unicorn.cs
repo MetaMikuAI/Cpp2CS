@@ -84,11 +84,12 @@ internal sealed class Unicorn : IDisposable
     public void OnBlock(CodeHook hook) => Add(HookBlock, hook);
     public void OnWrite(MemoryHook hook) => Add(HookMemWrite, hook);
     public void OnUnmapped(InvalidMemoryHook hook) => Add(HookMemUnmapped, hook);
+    public void OnNullPage(MemoryHook hook) => Add(1024 | HookMemWrite, hook, 0, 0xfff);
 
-    private void Add(int type, Delegate hook)
+    private void Add(int type, Delegate hook, ulong begin = 1, ulong end = 0)
     {
         hooks.Add(hook);
-        Check(uc_hook_add(handle, out _, type, Marshal.GetFunctionPointerForDelegate(hook), IntPtr.Zero, 1, 0), "uc_hook_add");
+        Check(uc_hook_add(handle, out _, type, Marshal.GetFunctionPointerForDelegate(hook), IntPtr.Zero, begin, end), "uc_hook_add");
     }
 
     /// <summary>从 begin 执行，最多 count 条指令；返回错误码（0 为正常结束或被 Stop）。</summary>

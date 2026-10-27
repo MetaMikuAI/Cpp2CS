@@ -1107,6 +1107,10 @@ public sealed partial class MethodRecovery
         {
             switch (e)
             {
+                case Intrinsic { Name: "pinned_array_start", Arguments: [var array] }:
+                    var pinned = Recover(array, null);
+                    return pinned.Type is ArrayRef { IsVector: true } arrayType ? new PinnedArrayValue(pinned, arrayType)
+                        : throw Fail(0, "固定地址 来源不是一维数组");
                 case Intrinsic { Name: "managed_field_address" or "managed_generic_buffer" } address: return SharedAddress(address);
                 case TypedFrame f: return new AddressValue(f.Region.Local);
                 case Const c:
@@ -1116,6 +1120,7 @@ public sealed partial class MethodRecovery
                     {
                         var kind = types.Kind(hint);
                         if (kind == TypeKind.Reference && c.Value == 0) return new ConstantValue(0, hint, 64);
+                        if (ManagedTypes.IsNativePointer(hint) && c.Value == 0 && c.Width == 64) return new ConstantValue(0, hint, 64);
                         if (kind is TypeKind.Int or TypeKind.Float or TypeKind.Double && types.Bits(hint) == c.Width) return new ConstantValue(c.Value, hint, c.Width);
                         if (kind == TypeKind.Bool && c.Width is 1 or 8) return new ConstantValue(c.Value, hint, c.Width);
                     }
@@ -1245,6 +1250,8 @@ public sealed partial class MethodRecovery
                 right = Recover(b.Right, b.Op is BinOp.Shl or BinOp.LShr or BinOp.AShr ? null : left.Type);
             }
             if (FrameShift(b.Op, left, right, b.Width) is { } projected) return projected;
+            if (b.Op == BinOp.Add && b.Width == 64 && left.Type is PointerRef && types.Kind(right.Type) == TypeKind.Int)
+                return new PointerOffsetValue(left, right);
             // 掩码清除的填充位来自指令语义；保留的位仍须来自已知叶子。
             if (b.Op == BinOp.And && left is Fragment masked && right is ConstantValue { Bits: var mask } && MaskFragment(masked, mask, b.Width) is { } kept)
                 return kept;

@@ -37,6 +37,10 @@ public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef T
 }
 /// <summary>根或字段存储位置的托管地址；不把机器地址当整数。</summary>
 public sealed record AddressValue(ManagedValue Target) : ManagedValue(new ByRefRef(Target.Type), 64);
+/// <summary>固定数组并取得首元素地址；null 或空数组返回空指针。</summary>
+public sealed record PinnedArrayValue(ManagedValue Array, ArrayRef ArrayType) : ManagedValue(new PointerRef(ArrayType.Element), 64);
+/// <summary>非托管指针按字节偏移，不增加数组边界检查。</summary>
+public sealed record PointerOffsetValue(ManagedValue Pointer, ManagedValue Offset) : ManagedValue(Pointer.Type, 64);
 /// <summary>叶子均已证明的结构体值；L4 用 initobj 和逐叶子写入构造。</summary>
 public sealed record ComposedValue(TypeRef StructType, IReadOnlyList<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> Leaves) : ManagedValue(StructType, 0);
 /// <summary>读取/写入已定型的结构体根，地址必须由托管存储位置证明。</summary>
@@ -122,6 +126,7 @@ public static class ManagedValues
     {
         FieldValue f => [f.Receiver],
         AddressValue a => [a.Target],
+        PinnedArrayValue a => [a.Array], PointerOffsetValue p => [p.Pointer, p.Offset],
         IndirectValue i => [i.Address],
         ComposedValue c => c.Leaves.Select(l => l.Value),
         NewArrayValue a => [a.Length], ArrayLengthValue a => [a.Array], ArrayElementValue a => [a.Array, a.Index],
@@ -143,6 +148,8 @@ public static class ManagedValues
     {
         FieldValue v => v with { Receiver = f(v.Receiver) },
         AddressValue v => v with { Target = f(v.Target) },
+        PinnedArrayValue v => v with { Array = f(v.Array) },
+        PointerOffsetValue v => v with { Pointer = f(v.Pointer), Offset = f(v.Offset) },
         IndirectValue v => v with { Address = f(v.Address) },
         ComposedValue v => v with { Leaves = v.Leaves.Select(l => (l.Path, f(l.Value))).ToArray() },
         NewArrayValue v => v with { Length = f(v.Length) },

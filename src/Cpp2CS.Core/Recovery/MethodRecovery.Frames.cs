@@ -27,6 +27,15 @@ public sealed partial class MethodRecovery
         private void PrepareFrameTypes()
         {
             InferTypes();
+            if (PinnedArrayRecognition.Run(function, e => TypeOfAddressBase(e) is ArrayRef { IsVector: true } array
+                && types.Kind(array.Element) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double ? array : null) > 0)
+            {
+                Ssa.Propagate.RemoveDead(function);
+                while (Ssa.ControlFlow.Simplify(function)) function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
+                blocks = function.Blocks;
+                definitions = IndexDefinitions();
+                InferTypes();
+            }
             PrepareArrayCursors();
         }
 

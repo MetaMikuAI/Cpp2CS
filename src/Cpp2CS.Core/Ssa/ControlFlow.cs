@@ -34,6 +34,18 @@ public static class ControlFlow
                 if (join.Statements.OfType<Phi>().All(p => p.Sources[first] == p.Sources[second])) Keep(0);
                 continue;
             }
+            if (normal.All(b => b.Handler is null && !b.IsLandingPad && b.Successors.Count == 1 && b.Statements.All(s => s is Jump or Nop))
+                && normal[0].Successors[0] == normal[1].Successors[0])
+            {
+                var join = normal[0].Successors[0];
+                var first = MachineFunction.PredecessorIndex(normal[0], 0);
+                var second = MachineFunction.PredecessorIndex(normal[1], 0);
+                if (join.Statements.OfType<Phi>().All(p => p.Sources[first] == p.Sources[second]))
+                {
+                    Keep(0);
+                    continue;
+                }
+            }
             for (var side = 0; side < 2; side++)
             {
                 var empty = normal[side];

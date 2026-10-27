@@ -16,6 +16,7 @@ public sealed partial class BodyEmitter
     private readonly ManagedTypes types;
     private readonly Skeleton skeleton;
     private readonly Dictionary<Variable, VariableDefinition> locals = new();
+    private readonly Dictionary<PinnedArrayValue, VariableDefinition> pinnedArrays = new();
     private readonly Dictionary<ulong, Instruction> labels = new();
     private readonly Dictionary<ModuleDefinition, (MethodReference At, MethodReference Fail, MethodDefinition Value)> unrecovered = new();
     private readonly Dictionary<ModuleDefinition, (MethodDefinition Of, MethodDefinition Do, MethodDefinition Result, MethodDefinition Completed, MethodDefinition CompletedVoid)> awaits = new();
@@ -164,6 +165,13 @@ public sealed partial class BodyEmitter
             case ArrayElementValue element:
                 if (element.Array.Type is not ArrayRef { IsVector: true } a || !element.Type.Equals(a.Element)) return "数组 元素类型不符";
                 break;
+            case PinnedArrayValue pinned:
+                if (!pinned.Array.Type.Equals(pinned.ArrayType) || !pinned.ArrayType.IsVector
+                    || types.Kind(pinned.ArrayType.Element) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)) return "固定地址 需要基元一维数组";
+                break;
+            case PointerOffsetValue pointer:
+                if (pointer.Pointer.Type is not PointerRef || pointer.Offset.Width != 64 || types.Kind(pointer.Offset.Type) != TypeKind.Int) return "指针偏移 类型或位宽不符";
+                break;
             case ConstantValue c:
                 if (!(types.Kind(c.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double
                     || c.Bits == 0 && (ManagedTypes.IsReferenceType(c.Type) || ManagedTypes.IsNativePointer(c.Type))))
@@ -220,11 +228,19 @@ public sealed partial class BodyEmitter
         body = new MethodBody(method) { InitLocals = true };
         il = body.GetILProcessor();
         locals.Clear();
+        pinnedArrays.Clear();
         labels.Clear();
         methodContext = recovered.Method;
         regions = recovered.Regions;
         exceptionReturn = null;
         exceptionReturnValue = null;
+        foreach (var pinned in recovered.Blocks.SelectMany(b => b.Statements).SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
+            .SelectMany(ManagedValues.Walk).OfType<PinnedArrayValue>().Distinct())
+        {
+            var local = new VariableDefinition(new PinnedType(TypeReference(pinned.ArrayType)));
+            body.Variables.Add(local);
+            pinnedArrays.Add(pinned, local);
+        }
         foreach (var block in recovered.Blocks) labels.Add(block.Address, Instruction.Create(OpCodes.Nop));
         foreach (var block in recovered.Blocks)
         {

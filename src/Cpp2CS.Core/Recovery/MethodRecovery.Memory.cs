@@ -47,7 +47,7 @@ public sealed partial class MethodRecovery
             // 聚合参数的寄存器承载的是 ABI 片；引用叶子的类型由结构体贡献者写入 known。
             Use { Width: 64 } u when u.Variable.Version == 0 && !structArguments.ContainsKey(u.Variable.Storage)
                 && arguments.TryGetValue(u.Variable.Storage, out var a) && a.Width == 64 => a.Type,
-            Use { Width: 64 } u when known.TryGetValue(u.Variable, out var t) && (ManagedTypes.IsReferenceType(t) || t is ByRefRef) => t,
+            Use { Width: 64 } u when known.TryGetValue(u.Variable, out var t) && (ManagedTypes.IsReferenceType(t) || t is ByRefRef or PointerRef) => t,
             _ => null,
         };
 
@@ -125,6 +125,8 @@ public sealed partial class MethodRecovery
                     throw Fail(0, $"访存 地址 {address} 的基址类型未知");
             }
             var receiverType = TypeOfAddressBase(baseTerm)!;
+            if (receiverType is PointerRef && width is 8 or 16 or 32 or 64)
+                return new IndirectValue(Recover(address, null), types.Integer(width, false), width);
             if (receiverType is ArrayRef { IsVector: true } array)
             {
                 if (rest.Count == 0 && offset == RuntimeLayout.ArrayMaxLength && width is 32 or 64)

@@ -28,6 +28,7 @@ internal sealed class CecilModel
         ArrayType a => new ArrayRef(Type(a.ElementType), a.Rank) { IsVector = a.IsVector },
         PointerType p => new PointerRef(Type(p.ElementType)),
         ByReferenceType r => new ByRefRef(Type(r.ElementType)),
+        PinnedType p => Type(p.ElementType),
         GenericParameter p when Context is { } context => new GenericParameterRef(p.Name, p.Type == GenericParameterType.Method, p.Position)
             .Substitute(context.TypeArguments, context.MethodArguments),
         GenericParameter => throw new Unsupported($"泛型参数 {type}"),

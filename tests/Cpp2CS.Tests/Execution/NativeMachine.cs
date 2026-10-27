@@ -100,6 +100,12 @@ internal sealed partial class NativeMachine : IDisposable
         uc.OnBlock(blockHook);
         uc.OnWrite(writeHook);
         uc.OnUnmapped(unmappedHook);
+        // 零链接基址的映像头不是真实进程中的空指针页；无效指针访问不能借 ELF 头映射伪装成正常返回。
+        uc.OnNullPage((_, _, address, _, _, _) =>
+        {
+            failure ??= new Unsupported($"原生访问空指针页 0x{address:x}（pc 0x{uc.Reg(Unicorn.RegPc):x}）");
+            uc.Stop();
+        });
     }
 
     /// <summary>本次执行覆盖的被测函数基本块（地址, 字节数）。</summary>

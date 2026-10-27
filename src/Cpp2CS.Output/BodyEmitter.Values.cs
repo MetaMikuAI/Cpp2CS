@@ -91,6 +91,10 @@ public sealed partial class BodyEmitter
             case ArrayElementValue element:
                 Value(element.Array); Value(element.Index); il.Emit(OpCodes.Ldelem_Any, TypeReference(element.Type)); break;
             case AddressValue a: Address(a.Target); break;
+            case PinnedArrayValue pinned:
+                PinArray(pinned); break;
+            case PointerOffsetValue pointer:
+                Value(pointer.Pointer); Value(pointer.Offset); il.Emit(OpCodes.Conv_I); il.Emit(OpCodes.Add); break;
             // 读取存储位置上的整个结构体：直接 ldloc/ldarg/ldfld/ldsfld（不对只读静态字段取址）
             case IndirectValue { Address: AddressValue { Target: LocalValue or FieldValue or StaticFieldValue or ArgumentValue { Index: >= 0 } } location } i
                 when location.Target.Type.Equals(i.Type): Value(location.Target); break;
@@ -195,6 +199,26 @@ public sealed partial class BodyEmitter
                     name => TypeReference(types.Corlib(name))); break;
             default: throw new NotSupportedException(c.Kind.ToString());
         }
+    }
+
+    private void PinArray(PinnedArrayValue pinned)
+    {
+        var local = pinnedArrays[pinned];
+        var pointer = Temp(pinned.Type);
+        var empty = Instruction.Create(OpCodes.Ldc_I4_0);
+        var address = Instruction.Create(OpCodes.Ldloc, local);
+        var done = Instruction.Create(OpCodes.Nop);
+        Value(pinned.Array); il.Emit(OpCodes.Dup); il.Emit(OpCodes.Stloc, local); il.Emit(OpCodes.Brfalse, empty);
+        il.Emit(OpCodes.Ldloc, local); il.Emit(OpCodes.Ldlen); il.Emit(OpCodes.Conv_I4); il.Emit(OpCodes.Brtrue, address);
+        il.Append(empty); il.Emit(OpCodes.Conv_U); il.Emit(OpCodes.Stloc, pointer); il.Emit(OpCodes.Br, done);
+        il.Append(address); il.Emit(OpCodes.Ldc_I4_0); il.Emit(OpCodes.Ldelema, TypeReference(pinned.ArrayType.Element));
+        il.Emit(OpCodes.Conv_U); il.Emit(OpCodes.Stloc, pointer);
+        il.Append(done); il.Emit(OpCodes.Ldloc, pointer);
+    }
+
+    private void ClearPinnedArrays()
+    {
+        foreach (var local in pinnedArrays.Values) { il.Emit(OpCodes.Ldnull); il.Emit(OpCodes.Stloc, local); }
     }
 
     private void Comparison(ComparisonValue c)

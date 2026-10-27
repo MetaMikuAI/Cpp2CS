@@ -16,7 +16,7 @@ public sealed partial class BodyEmitter
     private void ReturnFromBlock()
     {
         if (!regions.Any(r => r.Try.Contains(currentBlock) || r.Handler.Contains(currentBlock)))
-        { il.Emit(OpCodes.Ret); return; }
+        { ClearPinnedArrays(); il.Emit(OpCodes.Ret); return; }
         exceptionReturn ??= Instruction.Create(OpCodes.Nop);
         if (!ManagedTypes.IsVoid(methodContext.Method.ReturnType))
         {
@@ -34,6 +34,7 @@ public sealed partial class BodyEmitter
         if (exceptionReturn is not null)
         {
             if (exceptionReturnValue is not null) il.Emit(OpCodes.Ldloc, exceptionReturnValue);
+            ClearPinnedArrays();
             il.Emit(OpCodes.Ret);
         }
         else { il.Emit(OpCodes.Ldnull); il.Emit(OpCodes.Throw); }
