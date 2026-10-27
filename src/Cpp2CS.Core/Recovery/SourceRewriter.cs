@@ -26,6 +26,7 @@ public static class SourceRewriter
             body = DeadAssignments(Map(Retype(Propagate(body)), v => Simplify(v, types)));
         body = DropStatements(BooleanStores(body, types));
         body = SourceStructCopies.Rewrite(body);
+        body = SourceScalarStructCopies.Rewrite(body);
         return SourceIteratorCleanup.Rewrite(SourceIteratorDispatch.Rewrite(SourceReturns.Rewrite(FoldFieldCopies(DeadStores(body)))));
     }
 
