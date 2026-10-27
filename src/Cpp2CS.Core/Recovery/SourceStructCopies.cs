@@ -4,7 +4,7 @@ using Cpp2CS.Model;
 namespace Cpp2CS.Recovery;
 
 /// <summary>局部结构体的完整字段快照、复制和清零，按值恢复；不跨越其他语句。</summary>
-internal static class SourceStructCopies
+internal static partial class SourceStructCopies
 {
     /// <summary>同一结构体的全部直属字段原样重组，就是该位置的值；只在完整覆盖时折回整体复制。</summary>
     internal static ManagedValue? WholeValue(ComposedValue value)
