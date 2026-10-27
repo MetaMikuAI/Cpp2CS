@@ -15,10 +15,11 @@ internal static class RecoveredForeachCheck
         ExpressionStatement Dispose() => new(new InvocationExpression(Member("Dispose")));
         var a = new Assertions();
         foreach (var mode in new[] { "local", "receiver", "projection" })
-        foreach (var internalCleanup in new[] { false, true })
+        foreach (var cleanupMode in new[] { "external", "internal", "continuation" })
         foreach (var temporary in new[] { false, true })
         foreach (var escape in new[] { false, true })
         {
+            var internalCleanup = cleanupMode == "internal";
             var method = new MethodDeclaration { Name = "Visit", ReturnType = new PrimitiveType("void"), Body = new BlockStatement() };
             method.Parameters.Add(new ParameterDeclaration { Type = new SimpleType("object"), Name = "item" });
             var tree = new SyntaxTree();
@@ -47,18 +48,50 @@ internal static class RecoveredForeachCheck
             var loop = new BlockStatement();
             loop.Statements.Add(new VariableDeclarationStatement(new SimpleType("Exception"), "pending"));
             loop.Statements.Add(guarded);
-            if (internalCleanup) loop.Statements.Add(Dispose());
-            loop.Statements.Add(new BreakStatement());
-            loop.Statements.Add(new LabelStatement("cleanup"));
-            loop.Statements.Add(Dispose());
-            var returned = new BlockStatement();
-            returned.Statements.Add(internalCleanup ? new BreakStatement() : new ReturnStatement());
-            loop.Statements.Add(new IfElseStatement(new BinaryOperatorExpression(Id("pending"), BinaryOperatorType.Equality, new NullReferenceExpression()), returned));
-            loop.Statements.Add(new ThrowStatement(Id("pending")));
+            if (cleanupMode == "continuation")
+            {
+                method.Body.Statements.Add(new VariableDeclarationStatement(new SimpleType("Exception"), "merged"));
+                loop.Statements.Add(new ExpressionStatement(new AssignmentExpression(Id("merged"), new NullReferenceExpression())));
+                loop.Statements.Add(new BreakStatement());
+                loop.Statements.Add(new LabelStatement("cleanup"));
+                loop.Statements.Add(new ExpressionStatement(new AssignmentExpression(Id("merged"), Id("pending"))));
+                loop.Statements.Add(new BreakStatement());
+            }
+            else
+            {
+                if (internalCleanup) loop.Statements.Add(Dispose());
+                loop.Statements.Add(new BreakStatement());
+                loop.Statements.Add(new LabelStatement("cleanup"));
+                loop.Statements.Add(Dispose());
+                var returned = new BlockStatement();
+                returned.Statements.Add(internalCleanup ? new BreakStatement() : new ReturnStatement());
+                loop.Statements.Add(new IfElseStatement(new BinaryOperatorExpression(Id("pending"), BinaryOperatorType.Equality, new NullReferenceExpression()), returned));
+                loop.Statements.Add(new ThrowStatement(Id("pending")));
+            }
             method.Body.Statements.Add(new WhileStatement(new PrimitiveExpression(true), loop));
             if (!internalCleanup) method.Body.Statements.Add(Dispose());
+            if (cleanupMode == "continuation")
+            {
+                var success = new BlockStatement();
+                success.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Finish"))));
+                method.Body.Statements.Add(new IfElseStatement(new BinaryOperatorExpression(Id("merged"), BinaryOperatorType.Equality, new NullReferenceExpression()), success));
+                method.Body.Statements.Add(new ThrowStatement(Id("merged")));
+            }
             if (escape) method.Body.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Use"), Member("Current"))));
             var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).GetNestedType("RecoveredForeach", BindingFlags.NonPublic)!, nonPublic: true)!;
+            if (escape && mode == "local" && cleanupMode == "external" && !temporary)
+            {
+                foreach (var placement in new[] { "after", "before", "label" })
+                {
+                    var reused = (SyntaxTree)tree.Clone();
+                    var statements = reused.Descendants.OfType<MethodDeclaration>().Single().Body!.Statements;
+                    var reset = new ExpressionStatement(new AssignmentExpression(Id("iterator"), new InvocationExpression(new MemberReferenceExpression(Id("other"), "GetEnumerator"))));
+                    statements.InsertBefore(placement == "before" ? statements.ElementAt(1) : statements.Last(), reset);
+                    if (placement == "label") statements.InsertBefore(statements.Last(), new LabelStatement("skipReset"));
+                    transform.Run(reused, null!);
+                    a.Equal(placement == "after" ? 1 : 0, reused.Descendants.OfType<ForeachStatement>().Count(), "后续读取须由新的无跳转初始化支配");
+                }
+            }
             transform.Run(tree, null!);
             a.Equal(escape ? 0 : 1, tree.Descendants.OfType<ForeachStatement>().Count(), "直接初始化和临时复制均折叠，枚举器逃逸时保留");
             if (!escape)

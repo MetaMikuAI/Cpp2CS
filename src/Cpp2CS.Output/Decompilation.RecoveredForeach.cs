@@ -29,6 +29,28 @@ public static partial class Decompilation
             _ => false,
         };
 
+        // 另一次 GetEnumerator 必须在同一块中先于使用，且没有可跳过初始化的标签。
+        private static bool IndependentUse(IdentifierExpression use, string name, Statement removedInitialization, AstNode method)
+        {
+            bool Reset(Statement statement) => statement != removedInitialization && statement is ExpressionStatement
+                { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign, Left: var left,
+                    Right: InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression { MemberName: "GetEnumerator" } } factory } }
+                && Name(left, name) && !factory.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == name);
+            if (use.Ancestors.TakeWhile(n => n != method).Any(n => n is EntityDeclaration or LambdaExpression or AnonymousMethodExpression)) return false;
+            if (use.Parent is AssignmentExpression assignment && ReferenceEquals(assignment.Left, use)
+                && assignment.Parent is Statement initialized && Reset(initialized)) return true;
+            foreach (var anchor in use.Ancestors.OfType<Statement>())
+            {
+                if (anchor.Parent is not BlockStatement block) continue;
+                foreach (var previous in block.Statements.TakeWhile(s => s != anchor).Reverse())
+                {
+                    if (previous is LabelStatement || previous.DescendantsAndSelf.Any(n => n == removedInitialization)) return false;
+                    if (previous is ExpressionStatement { Expression: AssignmentExpression { Left: var left } } && Name(left, name)) return Reset(previous);
+                }
+            }
+            return false;
+        }
+
         public void Run(AstNode rootNode, TransformContext context)
         {
             foreach (var loop in rootNode.Descendants.OfType<WhileStatement>().ToArray())
@@ -68,6 +90,8 @@ public static partial class Decompilation
                 var siblings = parent.Statements.ToArray();
                 var index = Array.IndexOf(siblings, loop);
                 var removed = new List<Statement>();
+                IfElseStatement? continuation = null;
+                string? mergedException = null;
                 if (tail is [var normalCleanup, BreakStatement, LabelStatement internalLabel, var failureCleanup, IfElseStatement emptyBreak, ThrowStatement internalThrow]
                     && Dispose(normalCleanup, name) && internalLabel.Label == jump.Label && Dispose(failureCleanup, name)
                     && NullTest(emptyBreak.Condition, saved.Identifier, BinaryOperatorType.Equality) && emptyBreak.FalseStatement is null
@@ -84,11 +108,18 @@ public static partial class Decompilation
                     else if (tail is [ExpressionStatement { Expression: AssignmentExpression { Left: IdentifierExpression merged } }, BreakStatement,
                         LabelStatement mergeLabel, var copy, BreakStatement] && mergeLabel.Label == jump.Label
                         && Set(tail[0], merged.Identifier, null) && Set(copy, merged.Identifier, saved.Identifier)
-                        && index + 2 < siblings.Length && siblings[index + 2] is IfElseStatement rethrow
-                        && rethrow.FalseStatement is null && NullTest(rethrow.Condition, merged.Identifier, BinaryOperatorType.InEquality)
-                        && rethrow.TrueStatement is BlockStatement { Statements.Count: 1 } throwBody
-                        && throwBody.Statements.Single() is ThrowStatement finalThrow && Name(finalThrow.Expression, merged.Identifier))
-                        removed.Add(rethrow);
+                        && index + 2 < siblings.Length && siblings[index + 2] is IfElseStatement rethrow && rethrow.FalseStatement is null)
+                    {
+                        mergedException = merged.Identifier;
+                        if (NullTest(rethrow.Condition, merged.Identifier, BinaryOperatorType.InEquality)
+                            && rethrow.TrueStatement is BlockStatement { Statements.Count: 1 } throwBody
+                            && throwBody.Statements.Single() is ThrowStatement finalThrow && Name(finalThrow.Expression, merged.Identifier)) removed.Add(rethrow);
+                        else if (NullTest(rethrow.Condition, merged.Identifier, BinaryOperatorType.Equality)
+                            && rethrow.TrueStatement is BlockStatement && index + 3 < siblings.Length
+                            && siblings[index + 3] is ThrowStatement failed && Name(failed.Expression, merged.Identifier))
+                        { continuation = rethrow; removed.Add(failed); }
+                        else continue;
+                    }
                     else continue;
                 }
                 // 只接收元素读取以外不使用枚举器的循环体。
@@ -111,7 +142,11 @@ public static partial class Decompilation
                 if (method is null || temporary is not null && method.Descendants.OfType<IdentifierExpression>().Count(id => id.Identifier == temporary.Identifier) != 1) continue;
                 var allowed = loop.Descendants.OfType<IdentifierExpression>().Concat(removed.SelectMany(s => s.Descendants.OfType<IdentifierExpression>()))
                     .Concat(assignment.Descendants.OfType<IdentifierExpression>()).ToHashSet();
-                if (method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == name && !allowed.Contains(id))) continue;
+                var exceptionUses = allowed.Concat(continuation?.Condition.DescendantsAndSelf.OfType<IdentifierExpression>() ?? []).ToHashSet();
+                if (mergedException is not null && method.Descendants.OfType<IdentifierExpression>()
+                    .Any(id => id.Identifier == mergedException && !exceptionUses.Contains(id))) continue;
+                if (method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == name && !allowed.Contains(id)
+                    && !IndependentUse(id, name, assignment, method))) continue;
                 var declarations = method.Descendants.OfType<VariableDeclarationStatement>().Where(d => d.Variables.Any(v => v.Name == name)).ToArray();
                 if (declarations is not [var declaration] || declaration.Variables.Count != 1
                     || declaration.Variables.Single().Initializer is not DefaultValueExpression) continue;
@@ -130,7 +165,14 @@ public static partial class Decompilation
                 replacement.Statements.Last().Remove();
                 loop.ReplaceWith(new ForeachStatement(current?.Type.Clone() ?? new SimpleType("var"), new SingleVariableDesignation(item), get.Target.Clone(), replacement));
                 foreach (var statement in removed) statement.Remove();
-                assignment.Remove(); factory?.Remove(); declaration.Remove();
+                if (continuation is not null)
+                {
+                    var statements = continuation.TrueStatement;
+                    statements.Remove();
+                    continuation.ReplaceWith(statements);
+                }
+                assignment.Remove(); factory?.Remove();
+                if (!method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == name)) declaration.Remove();
                 foreach (var unused in method.Descendants.OfType<VariableDeclarationStatement>().Where(d => d.Variables.Count == 1
                     && d.Variables.Single().Initializer is null && !method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == d.Variables.Single().Name)).ToArray()) unused.Remove();
             }
