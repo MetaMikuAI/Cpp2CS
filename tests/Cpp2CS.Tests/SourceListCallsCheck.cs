@@ -59,6 +59,48 @@ internal static class SourceListCallsCheck
             a.True(rewritten.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>().Count(s => s.Target == state) == 2,
                 "保留正常路径状态拷贝，未执行的慢分支被删除");
         }
+        CheckStructItems(a, types, list, method);
         return a.Finish("source-list-calls");
+    }
+
+    private static void CheckStructItems(Assertions a, ManagedTypes types, TypeDef list, MethodRef method)
+    {
+        foreach (var mode in new[] { "complete", "missing", "duplicate", "slow-duplicate", "other-index", "other-value", "interrupted", "explicit-layout" })
+        {
+            var record = new TypeDef { Index = -2, Assembly = "Tests.dll", Namespace = "Tests", Name = "Item", Token = 0,
+                Attributes = TypeAttributes.Public | (mode == "explicit-layout" ? TypeAttributes.ExplicitLayout : TypeAttributes.SequentialLayout),
+                IsValueType = true, IsEnum = false };
+            record.Fields = Enumerable.Range(0, 2).Select(i => new FieldDef { Index = -3 - i, Owner = record,
+                Name = "Part" + i, Type = types.Int32, Attributes = FieldAttributes.Public, Offset = 16 + 4 * i }).ToArray();
+            var type = new DefinitionRef(record, []);
+            var owner = new DefinitionRef(list, [type]);
+            var receiver = new ArgumentValue(0, owner, 64);
+            var array = new LocalValue(new(Storage.Temp(20), 1), new ArrayRef(type, 1), 64);
+            var count = new LocalValue(new(Storage.Temp(21), 1), types.Int32, 32);
+            FieldValue ListField(string name) => new(receiver, new(list.Fields.Single(f => f.Name == name), owner),
+                name == "_items" ? array.Type : types.Int32, name == "_items" ? 64 : 32);
+            ManagedValue Number(ulong value) => new ConstantValue(value, types.Int32, 32);
+            ManagedValue Increment(ManagedValue value) => new BinaryValue(BinOp.Add, value, Number(1), types.Int32, 32);
+            var element = new ArrayElementValue(array, count, type, 0);
+            FieldValue Field(int index, ArrayElementValue target) => new(new AddressValue(target), new(record.Fields[index], type), types.Int32, 32);
+            var fast = new List<ManagedStatement> { new ManagedStore(16, ListField("_size"), Increment(count)),
+                new ManagedStore(17, Field(0, element), Number(4)) };
+            if (mode == "interrupted") fast.Add(new ManagedCall(18, new(method, null, [], false), null, false));
+            if (mode != "missing") fast.Add(new ManagedStore(19, Field(mode == "duplicate" ? 0 : 1,
+                mode == "other-index" ? element with { Index = Number(0) } : element), Number(5)));
+            fast.Add(new ManagedReturn(20, null));
+            var value = new ComposedValue(type, record.Fields.Select((field, i) =>
+                ((IReadOnlyList<FieldRef>)new[] { new FieldRef(mode == "slow-duplicate" ? record.Fields[0] : field, type) },
+                    Number(mode == "slow-duplicate" ? 4 : (ulong)(4 + i + (mode == "other-value" ? 1 : 0))))).ToArray());
+            var resize = new MethodRef(list.Methods.Single(m => m.Name == "AddWithResize"), owner.Arguments, []);
+            var original = new ManagedBody(method, [new(0, [new ManagedAssignment(0, array, ListField("_items")),
+                new ManagedStore(1, ListField("_version"), Increment(ListField("_version"))),
+                new ManagedAssignment(2, count, ListField("_size")),
+                new ManagedBranch(3, new ComparisonValue(Cond.Ult, count, new ArrayLengthValue(array, types.Int32, 32), types.Boolean), new(16, []), new(32, []))]),
+                new(16, fast), new(32, [new ManagedCall(32, new(resize, receiver, [value], false), null, false), new ManagedReturn(33, null)])]);
+            var rewritten = SourceListCalls.Rewrite(original, types, (_, _) => { });
+            a.Equal(mode == "complete" ? 1 : 0, rewritten.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>()
+                .Count(c => c.Invocation.Method.Method.Name == "Add"), "结构体元素 " + mode);
+        }
     }
 }

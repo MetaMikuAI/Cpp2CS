@@ -144,9 +144,10 @@ internal static partial class SourceListCalls
                 return null;
             }
             if (Next(fast) is not ManagedStore size || !IsField(size.Target, "_size") || !Increment(Resolve(size.Value), condition.Left)) continue;
-            if (Next(fast) is not ManagedStore { Target: ArrayElementValue element } write
-                || !Resolve(element.Array).Equals(length.Array) || !Resolve(element.Index).Equals(condition.Left)) continue;
-            var item = write.Value;
+            var elementWrites = new List<ManagedStore>();
+            if (ReadElement(Next(fast), () => Next(fast), types, elementWrites) is not { } written
+                || !Resolve(written.Element.Array).Equals(length.Array) || !Resolve(written.Element.Index).Equals(condition.Left)) continue;
+            var (element, item) = written;
             // 参数须为进入内联区域前已求值的快照，不把有副作用的取值提前。
             bool Snapshot(ManagedValue value) => value switch
             {
@@ -156,6 +157,7 @@ internal static partial class SourceListCalls
                 // 按值保存的结构体字段仍属于快照；不沿引用字段或 ref 参数继续读取对象。
                 FieldValue f when (f.Receiver is AddressValue a ? a.Target : f.Receiver) is var root
                     && types.Kind(root.Type) == TypeKind.Struct => Snapshot(root),
+                ComposedValue composed => composed.Leaves.All(p => Snapshot(p.Value)),
                 _ => false,
             };
             if (!Snapshot(item)) continue;
@@ -163,10 +165,10 @@ internal static partial class SourceListCalls
             using var slow = flow.Straight(slowEdge.Target, 0, block.Address).GetEnumerator();
             if (Next(slow) is not ManagedCall { Result: null, Invocation: { Arguments.Count: 1 } invocation } resize
                 || invocation.Method.Method.Name != "AddWithResize" || !invocation.Method.DeclaringType.Equals(owner)
-                || !Equals(invocation.Receiver, receiver) || !invocation.Arguments[0].Equals(item)) continue;
+                || !Equals(invocation.Receiver, receiver) || !SameItem(invocation.Arguments[0], item)) continue;
             var slowExit = resize.Tail ? new ManagedReturn(resize.Address, null) : Next(slow);
             if (!SameExit(flow.Exit(fastExit), flow.Exit(slowExit))) continue;
-            remove.Add(size); remove.Add(write); remove.Add(resize); remove.Add(branch);
+            remove.Add(size); remove.UnionWith(elementWrites); remove.Add(resize); remove.Add(branch);
             if (body.Blocks.SelectMany(b => b.Statements).Where(s => !remove.Contains(s))
                 .SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
                 .OfType<LocalValue>().Any(l => locals.Contains(l.Variable))) continue;
