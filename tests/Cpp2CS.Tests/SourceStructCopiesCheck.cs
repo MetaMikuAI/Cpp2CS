@@ -104,7 +104,9 @@ internal static class SourceStructCopiesCheck
         var partialNested = Body(nestedReads.Concat(nestedWrites.Take(2)));
         a.Equal(5, SourceStructCopies.Rewrite(partialNested).Blocks.Single().Statements.Count, "缺少嵌套叶子时不扩大写入");
         var interruptedNested = Body(nestedReads.Append(new ManagedCall(0, new(null!, null, [], false), null, false)).Concat(nestedWrites));
-        a.Equal(7, SourceStructCopies.Rewrite(interruptedNested).Blocks.Single().Statements.Count, "嵌套复制不能跨可观察调用");
+        var interruptedSnapshot = SourceStructCopies.Rewrite(interruptedNested).Blocks.Single().Statements;
+        a.True(interruptedSnapshot.Count == 8 && interruptedSnapshot[4] is ManagedCall
+            && interruptedSnapshot.Skip(5).SequenceEqual(nestedWrites), "读取快照仍在调用前，逐字段写入不能越过调用");
         var escapingNested = Body(nestedReads.Concat(nestedWrites).Append(new ManagedReturn(0, snapshots[0])));
         a.Equal(7, SourceStructCopies.Rewrite(escapingNested).Blocks.Single().Statements.Count, "快照还被外部使用时保留叶子局部");
         FieldValue Proven(FieldValue field, bool write) => field with { Accessor = new(null!, field.Field, field.Type, field.Width, write) };
@@ -119,6 +121,16 @@ internal static class SourceStructCopiesCheck
         a.Equal(7, SourceStructCopies.Rewrite(escapedProof).Blocks[0].Statements.Count, "访问器快照逃逸时仍保留叶子");
         var partialProof = Body(provenReads.Cast<ManagedStatement>().Concat(provenWrites.Take(2)));
         a.Equal(5, SourceStructCopies.Rewrite(partialProof).Blocks[0].Statements.Count, "访问器不能补齐缺失的嵌套字段");
+        var snapshotReads = SourceStructCopies.Rewrite(Body(provenReads));
+        a.True(snapshotReads.Blocks[0].Statements.Count == 4 && snapshotReads.Blocks[0].Statements[0] is ManagedAssignment { Value: FieldValue },
+            "连续完整子结构体读取先保存一次整值快照");
+        var snapshot = ((ManagedAssignment)snapshotReads.Blocks[0].Statements[0]).Target;
+        a.True(snapshotReads.Blocks[0].Statements.Skip(1).Cast<ManagedAssignment>().All(s =>
+            s.Value is FieldValue { Receiver: AddressValue { Target: var captured } } && captured == snapshot), "全部叶子从同一快照读取");
+        a.Equal(2, SourceStructCopies.Rewrite(Body(provenReads.Take(2))).Blocks[0].Statements.Count, "部分子结构体读取不扩大读取范围");
+        a.Equal(4, SourceStructCopies.Rewrite(Body(provenReads.Take(1).Cast<ManagedStatement>()
+            .Append(new ManagedCall(0, new(null!, null, [], false), null, false)).Concat(provenReads.Skip(1)))).Blocks[0].Statements.Count,
+            "子结构体快照不跨越调用");
         var container = new TypeDef { Index = -3, Assembly = "Sample", Namespace = "Sample", Name = "Container", Token = 0,
             Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false };
         var containerType = new DefinitionRef(container, []);

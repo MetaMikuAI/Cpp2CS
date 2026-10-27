@@ -1,3 +1,4 @@
+using Cpp2CS.Ir;
 using Cpp2CS.Model;
 
 namespace Cpp2CS.Recovery;
@@ -37,6 +38,11 @@ internal static class SourceStructCopies
         var uses = body.Blocks.SelectMany(b => b.Statements).SelectMany(s =>
                 (s is ManagedAssignment a ? [a.Value] : ManagedValues.Of(s)).Concat(ManagedValues.CopiedValues(s)))
             .SelectMany(ManagedValues.Walk).OfType<LocalValue>().GroupBy(l => l.Variable).ToDictionary(g => g.Key, g => g.Count());
+        var next = body.Blocks.SelectMany(b => b.Statements).SelectMany(s => ManagedValues.Of(s)
+                .Concat(ManagedValues.CopiedValues(s)).Concat(ManagedValues.Edges(s).SelectMany(e => e.Copies).Select(c => c.Target))
+                .Concat(s switch { ManagedCall { Result: { } r } => [r], ManagedAwait { Result: { } r } => [r], _ => Array.Empty<ManagedValue>() }))
+            .Concat(body.Regions.Select(r => r.Exception).OfType<ManagedValue>()).SelectMany(ManagedValues.Walk).OfType<LocalValue>()
+            .Where(l => l.Variable.Storage.Bank == Bank.Temp).Select(l => l.Variable.Storage.Index).DefaultIfEmpty(0).Max() + 1;
         return body with { Blocks = body.Blocks.Select(block =>
         {
             var statements = block.Statements.ToList();
@@ -198,6 +204,32 @@ internal static class SourceStructCopies
                 var leaves = writes.Select(s => ((IReadOnlyList<FieldRef>)new[] { ((FieldValue)s.Target).Field }, s.Value)).ToArray();
                 statements.RemoveRange(i, writes.Length);
                 statements.Insert(i, new ManagedStore(first.Address, destination, new ComposedValue(type, leaves)));
+            }
+            // 连续读取值类型局部中某个结构体的全部直属字段，保留一次整值快照，供 getter 认回。
+            for (var i = 0; i < statements.Count; i++)
+            {
+                if (statements[i] is not ManagedAssignment { Value: FieldValue firstField } first
+                    || (firstField.Receiver is AddressValue address ? address.Target : firstField.Receiver) is not FieldValue root
+                    || root.Type is not DefinitionRef { Definition: { IsValueType: true, IsEnum: false, Keyword: null } } type
+                    || (root.Receiver is AddressValue ownerAddress ? ownerAddress.Target : root.Receiver) is not { Type: DefinitionRef { Definition.IsValueType: true } } owner
+                    || owner is not (LocalValue or ArgumentValue)
+                    || (type.Definition.Attributes & System.Reflection.TypeAttributes.LayoutMask) == System.Reflection.TypeAttributes.ExplicitLayout) continue;
+                var fields = type.Definition.Fields.Where(f => !f.IsStatic).ToHashSet();
+                var reads = statements.Skip(i).Take(fields.Count).OfType<ManagedAssignment>().ToArray();
+                if (fields.Count < 2 || reads.Length != fields.Count
+                    || owner is LocalValue ownerLocal && reads.Any(r => r.Target.Variable == ownerLocal.Variable)
+                    || reads.Any(r => r.Value is not FieldValue f || !f.Receiver.Equals(firstField.Receiver)
+                        || f.Accessor is { } accessor && (accessor.Write || !accessor.Field.Equals(f.Field)))
+                    || !reads.Select(r => ((FieldValue)r.Value).Field.Field).ToHashSet().SetEquals(fields)
+                    || statements.ElementAtOrDefault(i + fields.Count) is ManagedStore) continue;
+                var snapshot = new LocalValue(new Variable(Storage.Temp(next++), 1), type, 0);
+                for (var j = 0; j < reads.Length; j++)
+                {
+                    var field = (FieldValue)reads[j].Value;
+                    statements[i + j] = reads[j] with { Value = field with { Receiver = field.Receiver is AddressValue ? new AddressValue(snapshot) : snapshot } };
+                }
+                statements.Insert(i, new ManagedAssignment(first.Address, snapshot, root));
+                i += reads.Length;
             }
             return block with { Statements = statements };
         }).ToArray() };
