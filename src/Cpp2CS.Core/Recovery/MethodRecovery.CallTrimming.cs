@@ -76,7 +76,7 @@ public sealed partial class MethodRecovery
         {
             switch (call.Op)
             {
-                case { Kind: OpKind.CallMethodPointer, Operand: MethodRef pointerMethod }:
+                case { Kind: OpKind.CallMethodPointer or OpKind.CallDelegate, Operand: MethodRef pointerMethod }:
                     return pointerMethod;
                 case { Kind: OpKind.CallGenericVirtual, Operand: MethodRef generic } when generic.Method.IsVirtual:
                     return generic;
