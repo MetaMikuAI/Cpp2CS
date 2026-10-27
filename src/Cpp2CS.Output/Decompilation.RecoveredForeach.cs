@@ -234,6 +234,7 @@ public static partial class Decompilation
                     && d.Variables.Single().Initializer is null && !method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == d.Variables.Single().Name)).ToArray()) unused.Remove();
             }
             RecoverAsyncLoops(rootNode);
+            RecoverGuardedAsyncLoops(rootNode);
         }
     }
 }
