@@ -39,6 +39,16 @@ internal static class SourceArgumentAliasCheck
         var caught = Body(new(0, [new ManagedAssignment(0, local, argument), new ManagedReturn(1, local)]), new(8, [new ManagedReturn(8, local)]))
             with { Regions = [new([0], 8, [8], null, ManagedRegionKind.Catch)] };
         a.True(ReferenceEquals(caught, SourceArgumentAliases.Rewrite(caught)), "handler 不借用 try 块内尚未发生的赋值");
+        var storage = new LocalValue(new(Storage.Temp(3), 1), type.Element, 32);
+        var address = new AddressValue(storage);
+        var localAddress = Body(new ManagedBlock(0, [new ManagedAssignment(0, local, address),
+            new ManagedStore(1, storage, new ConstantValue(7, storage.Type, 32)), new ManagedReturn(2, new IndirectValue(local, storage.Type))]));
+        var addressFolded = SourceArgumentAliases.Rewrite(localAddress);
+        a.True(addressFolded.Blocks[0].Statements is [ManagedStore, ManagedReturn { Value: IndirectValue { Address: var root } }]
+            && root == address, "局部存储的地址保持稳定，保留其间值写入");
+        var alternatives = sample with { Blocks = [new(0, [branch with { Taken = new(4, [new(local, address)]),
+            Fallthrough = new(4, [new(local, new AddressValue(storage with { Variable = new(Storage.Temp(4), 1) }))]) }]), sample.Blocks[1]] };
+        a.True(ReferenceEquals(alternatives, SourceArgumentAliases.Rewrite(alternatives)), "不同局部存储的条件引用不能直接归并");
         return a.Finish("source-argument-aliases");
     }
 }

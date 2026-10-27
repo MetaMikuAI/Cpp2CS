@@ -39,6 +39,29 @@ internal static class SourceReturnsCheck
         var field = new FieldDef { Index = -1, Owner = owner, Name = "Flag", Token = 0, Type = boolean, Offset = 16, Attributes = FieldAttributes.Public };
         var read = new FieldValue(new ArgumentValue(0, new DefinitionRef(owner, []), 64), new(field, new DefinitionRef(owner, [])), boolean, 8);
         a.True(SourceReturns.Rewrite(Body(read)).Blocks[0].Statements[0] is ManagedJump, "可能抛出的字段读取保留位置");
+        var reference = new LocalValue(new(Storage.Temp(3), 1), new ByRefRef(boolean), 64);
+        var indirect = new IndirectValue(reference, boolean);
+        var selected = Body(indirect, new ManagedCopy(reference, new AddressValue(local)));
+        a.True(SourceReturns.Rewrite(selected).Blocks[0].Statements is [ManagedReturn { Value: var selectedValue }] && selectedValue == local,
+            "条件引用在返回前选择局部存储时直接返回局部值");
+        var updated = Body(indirect, new(reference, new AddressValue(local)), new(local, other));
+        a.True(SourceReturns.Rewrite(updated).Blocks[0].Statements is [ManagedJump], "地址目标同时被边复制写入时不能返回旧值");
+        var refChain = Body(indirect);
+        a.True(SourceReturns.Rewrite(refChain).Blocks[0].Statements is [ManagedReturn { Value: IndirectValue }], "同一区域内的纯跳转可以复制间接返回");
+        var guarded = refChain with { Regions = [new([0], 1, [1], null, ManagedRegionKind.Catch)] };
+        a.True(SourceReturns.Rewrite(guarded).Blocks[0].Statements is [ManagedJump], "可能抛出的ref读取不能越过catch边界");
+        var generic = new GenericParameterRef("T", true, 0);
+        var genericLocal = local with { Type = generic, Width = 0 };
+        var genericReference = reference with { Type = new ByRefRef(generic) };
+        var copiedReturn = Body(indirect) with { Blocks = [new(0, [new ManagedAssignment(0, genericLocal,
+            new IndirectValue(genericReference, generic)), new ManagedReturn(1, genericLocal)])] };
+        a.True(SourceReturns.Rewrite(copiedReturn).Blocks[0].Statements is [ManagedReturn { Value: IndirectValue }], "紧邻返回的局部读取副本原地内联");
+        var observedReturn = copiedReturn with { Blocks = [new(0, [new ManagedAssignment(0, genericReference, new AddressValue(genericLocal)),
+            .. copiedReturn.Blocks[0].Statements])] };
+        a.True(SourceReturns.Rewrite(observedReturn).Blocks[0].Statements.Count == 3, "被取地址的返回局部仍保留实际写入");
+        var narrowed = copiedReturn with { Blocks = [new(0, [new ManagedAssignment(0, local,
+            new ConstantValue(256, new PrimitiveRef("U8"), 64)), new ManagedReturn(1, local)])] };
+        a.True(SourceReturns.Rewrite(narrowed).Blocks[0].Statements.Count == 2, "局部赋值隐含的类型或位宽转换不能省略");
         Throws(a, method);
         Dispatch(a);
         return a.Finish("source-returns");

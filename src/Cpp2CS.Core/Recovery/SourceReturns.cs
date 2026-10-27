@@ -16,8 +16,10 @@ internal static class SourceReturns
             while (source is ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate } conversion) source = conversion.Operand;
             return source is { Width: 1 } && ManagedTypes.PrimitiveName(source.Type) == "Boolean" ? source : value;
         }
-        static bool Pure(ManagedValue value) => value is LocalValue or ArgumentValue or ConstantValue
+        static bool Pure(ManagedValue value) => value is LocalValue or ArgumentValue or ConstantValue or ComposedValue { Leaves.Count: 0 }
             || value is ConversionValue conversion && Pure(conversion.Operand);
+        var addressed = body.Blocks.SelectMany(b => b.Statements).SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
+            .SelectMany(ManagedValues.Walk).OfType<AddressValue>().Select(a => a.Target).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
         var method = body.Method.Method;
         var iterator = method.Name == "MoveNext" && !method.IsStatic && method.Parameters.Count == 0
             && method.Owner.Interfaces.OfType<DefinitionRef>().Any(t => t.Definition.FullName == "System.Collections.IEnumerator")
@@ -38,6 +40,15 @@ internal static class SourceReturns
             foreach (var address in body.Blocks.Select(b => b.Address).Reverse())
             {
                 var block = blocks[address];
+                if (block.Statements is { Count: >= 2 } sequence && sequence[^1] is ManagedReturn { Value: LocalValue result } direct
+                    && sequence[^2] is ManagedAssignment assignment && assignment.Target.Variable == result.Variable
+                    && assignment.Value.Type.Equals(result.Type) && assignment.Value.Width == result.Width
+                    && !addressed.Contains(result.Variable) && (Pure(assignment.Value) || assignment.Value is IndirectValue { Address: LocalValue { Type: ByRefRef } }))
+                {
+                    block = block with { Statements = [.. sequence.Take(sequence.Count - 2), direct with { Value = assignment.Value }] };
+                    blocks[address] = block;
+                    changed = true;
+                }
                 if (block.Statements.LastOrDefault() is not ManagedJump jump
                     || blocks[jump.Edge.Target].Statements is not { Count: > 0 } tail) continue;
                 if (tail[^1] is ManagedThrow thrown && Pure(thrown.Exception) && SameRegion(address, jump.Edge.Target)
@@ -54,17 +65,26 @@ internal static class SourceReturns
                     changed = true;
                     continue;
                 }
-                if (tail[^1] is not ManagedReturn { Value: { } value } || !Pure(value)
+                if (tail[^1] is not ManagedReturn { Value: { } value }
                     || tail.Count != 1 && !(tail.Count == 2 && StateWrite(tail[0]) && SameRegion(address, jump.Edge.Target))
-                    || jump.Edge.Copies.Any(c => c.Value is not (LocalValue or ArgumentValue or ConstantValue))) continue;
+                    || jump.Edge.Copies.Any(c => c.Value is not (LocalValue or ArgumentValue or ConstantValue or AddressValue { Target: LocalValue { Type: not ByRefRef } }))) continue;
                 var copies = jump.Edge.Copies.ToDictionary(c => c.Target.Variable, c => c.Value);
                 // 边复制同时生效：替换成源值之后不再沿本条边递归追踪其他目标。
-                ManagedValue Replace(ManagedValue v) => v is LocalValue l && copies.TryGetValue(l.Variable, out var copy)
-                    ? copy : ManagedValues.Map(v, Replace);
+                ManagedValue Replace(ManagedValue v)
+                {
+                    var mapped = v is LocalValue l && copies.TryGetValue(l.Variable, out var copy) ? copy : ManagedValues.Map(v, Replace);
+                    return mapped is IndirectValue { Address: AddressValue { Target: LocalValue local } } load && load.Type.Equals(local.Type) ? local : mapped;
+                }
+                var returned = Replace(value);
+                // 通过地址读到的是边复制完成后的存储值，不能误用同时复制前的局部快照。
+                if (value is IndirectValue && returned is LocalValue selected && copies.ContainsKey(selected.Variable)) continue;
+                // 未解析的 ref 读取可能抛异常，只可穿过同一异常区域内的纯跳转。
+                if (!Pure(returned) && !(tail.Count == 1 && returned is IndirectValue { Address: LocalValue { Type: ByRefRef } }
+                    && jump.Edge.Copies.Count == 0 && SameRegion(address, jump.Edge.Target))) continue;
                 // 同一异常区域内，状态写入与返回仍相邻且执行一次；分别代入本条边上的同时复制值。
                 blocks[address] = block with { Statements = [.. block.Statements.SkipLast(1),
                     .. tail.Take(tail.Count - 1).Cast<ManagedStore>().Select(s => s with { Value = Replace(s.Value) }),
-                    new ManagedReturn(jump.Address, Result(Replace(value)))] };
+                    new ManagedReturn(jump.Address, Result(returned))] };
                 changed = true;
             }
         } while (changed);

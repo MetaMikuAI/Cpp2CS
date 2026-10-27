@@ -22,7 +22,7 @@ public static class SourceRewriter
         body = FreshArrayLengths(body, types);
         body = DropStatements(body);
         body = SourceCheckedCasts.Rewrite(body);
-        body = SourceArgumentAliases.Rewrite(body);
+        body = Normalize(SourceArgumentAliases.Rewrite(body));
         for (var round = 0; round < 4; round++)
             body = DeadAssignments(Map(Retype(Propagate(body)), v => Simplify(v, types)));
         body = DropStatements(BooleanStores(body, types));

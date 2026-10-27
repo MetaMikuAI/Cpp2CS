@@ -3,7 +3,7 @@ using Cpp2CS.Model;
 
 namespace Cpp2CS.Recovery;
 
-/// <summary>多条路径指向同一个 ref 参数时，消去仅搬运地址的局部副本。</summary>
+/// <summary>多条路径指向同一个参数或局部存储时，消去仅搬运地址的局部副本。</summary>
 internal static class SourceArgumentAliases
 {
     public static ManagedBody Rewrite(ManagedBody body)
@@ -16,24 +16,25 @@ internal static class SourceArgumentAliases
             .Concat(statements.OfType<ManagedAwait>().Where(c => c.Result is not null).Select(c => c.Result!.Variable))
             .Concat(statements.SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
                 .OfType<AddressValue>().Select(a => a.Target).OfType<LocalValue>().Select(l => l.Variable)).ToHashSet();
-        var aliases = new Dictionary<Variable, ArgumentValue>();
+        var aliases = new Dictionary<Variable, ManagedValue>();
         foreach (var (variable, copies) in writes)
         {
             if (copies[0].Target.Type is not ByRefRef || blocked.Contains(variable)) continue;
             var pending = new Stack<ManagedValue>([copies[0].Target]);
             var seen = new HashSet<Variable>();
-            var roots = new HashSet<ArgumentValue>();
+            var roots = new HashSet<ManagedValue>();
             var valid = true;
             while (pending.TryPop(out var value))
             {
                 if (value is ArgumentValue { Type: ByRefRef } argument) { roots.Add(argument); continue; }
+                if (value is AddressValue { Target: LocalValue { Type: not ByRefRef } }) { roots.Add(value); continue; }
                 if (value is not LocalValue local || blocked.Contains(local.Variable) || !writes.TryGetValue(local.Variable, out var incoming))
                 { valid = false; break; }
                 if (!seen.Add(local.Variable)) continue;
                 foreach (var copy in incoming) pending.Push(copy.Value);
             }
             if (valid && roots.ToArray() is [var root] && root.Type.Equals(copies[0].Target.Type)
-                && !statements.OfType<ManagedStore>().Any(s => s.Target is ArgumentValue target && target.Index == root.Index)
+                && (root is not ArgumentValue parameter || !statements.OfType<ManagedStore>().Any(s => s.Target is ArgumentValue target && target.Index == parameter.Index))
                 && seen.All(v => AssignedBeforeRead(body, v)))
                 aliases[variable] = root;
         }
