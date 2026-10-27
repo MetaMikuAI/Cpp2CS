@@ -109,12 +109,16 @@ internal static class SourceExceptionPaths
         if (!separated) return body;
         body = Prune(body);
         var knownNull = SourceNonNullReceivers.ReadNull(body);
+        var knownNonNull = SourceNonNullReceivers.Read(body, null);
         body = body with { Blocks = body.Blocks.Select(block => block with { Statements = block.Statements.Select(statement =>
         {
             if (statement is not ManagedBranch { Condition: ComparisonValue { Condition: Cond.Eq or Cond.Ne } condition } branch) return statement;
             bool Null(ManagedValue value, ManagedValue zero) => knownNull[statement].Contains(value) && zero is ConstantValue { Bits: 0 };
-            return Null(condition.Left, condition.Right) || Null(condition.Right, condition.Left)
-                ? new ManagedJump(branch.Address, condition.Condition == Cond.Eq ? branch.Taken : branch.Fallthrough) : statement;
+            bool Present(ManagedValue value, ManagedValue zero) => knownNonNull[statement].Contains(value) && zero is ConstantValue { Bits: 0 };
+            if (Null(condition.Left, condition.Right) || Null(condition.Right, condition.Left))
+                return new ManagedJump(branch.Address, condition.Condition == Cond.Eq ? branch.Taken : branch.Fallthrough);
+            return Present(condition.Left, condition.Right) || Present(condition.Right, condition.Left)
+                ? new ManagedJump(branch.Address, condition.Condition == Cond.Ne ? branch.Taken : branch.Fallthrough) : statement;
         }).ToArray() }).ToArray() };
         body = Prune(body);
         return SourceDeadLocals.Rewrite(body);

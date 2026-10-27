@@ -29,6 +29,10 @@ public static partial class Decompilation
         {
             bool Rethrow(Statement s) => s is ThrowStatement t && (t.Expression is null || Name(t.Expression, catcher.VariableName));
             if (catcher.Body?.Statements.ToArray() is [var dispose, var thrown] && (Dispose(dispose, name) || NullableDispose(dispose, name)) && Rethrow(thrown)) return true;
+            if (catcher.Body?.Statements.ToArray() is [IfElseStatement conditional, var final]
+                && NullTest(conditional.Condition, name, BinaryOperatorType.InEquality) && conditional.FalseStatement is null
+                && conditional.TrueStatement is BlockStatement positive && positive.Statements.ToArray() is [var cleanupCall, var caughtThrow]
+                && Dispose(cleanupCall, name) && Rethrow(caughtThrow) && Rethrow(final)) return true;
             if (catcher.Body?.Statements.ToArray() is not [IfElseStatement test, var cleanup, var finalThrow]
                 || !NullTest(test.Condition, name, BinaryOperatorType.Equality) || test.FalseStatement is not null
                 || test.TrueStatement is not BlockStatement { Statements.Count: 1 } body || !Rethrow(body.Statements.Single())) return false;
@@ -72,7 +76,8 @@ public static partial class Decompilation
                     || invocation.Annotation<ResolveResult>()?.Type.GetAllBaseTypes().Any(t => t.FullName == "System.IDisposable") != true
                     || guarded.Ancestors.FirstOrDefault(n => n is MethodDeclaration or LambdaExpression or AnonymousMethodExpression) is not { } method
                     || !StableCopies(method, prefix.Concat(inside), invocation)) continue;
-                if (invocation.Annotation<ResolveResult>()!.Type.IsReferenceType == true && !NullableDispose(siblings[index + 1], enumerator.Identifier)) continue;
+                if (invocation.Annotation<ResolveResult>()!.Type.IsReferenceType == true && !NullableDispose(siblings[index + 1], enumerator.Identifier)
+                    && catcher.Body!.Statements.FirstOrDefault() is not IfElseStatement) continue;
                 var removed = new List<Statement> { factory!, siblings[index + 1] };
                 if (index + 2 < siblings.Length && siblings[index + 2] is ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
                     Left: var reset, Right: DefaultValueExpression } } && Name(reset, enumerator.Identifier)) removed.Add(siblings[index + 2]);
