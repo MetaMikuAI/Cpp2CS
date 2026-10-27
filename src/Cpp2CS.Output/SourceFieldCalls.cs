@@ -97,7 +97,19 @@ public sealed partial class SourceLibraryCalls
             if (FieldAccessor.FieldOf(value) is not { } field || field.Field.Owner == body.Method.Method.Owner
                 && ManagedAccess.Field(types, body.Method.Method.Owner, field, FieldAccessor.ReceiverType(value))) return null;
             if (field.DeclaringType is not DefinitionRef declaring) return null;
-            return FieldCalls(declaring).FirstOrDefault(c => c.Write == write && c.Field.Equals(field)
+            var owners = new List<DefinitionRef> { declaring };
+            var receiver = FieldAccessor.ReceiverType(value);
+            if (receiver is ByRefRef reference) receiver = reference.Element;
+            if (receiver is GenericParameterRef parameter) receiver = parameter.ReferenceBase;
+            var chain = new List<DefinitionRef>();
+            for (var current = receiver as DefinitionRef; current is not null && !chain.Contains(current);
+                current = current.Definition.BaseType?.Substitute(current.Arguments, []) as DefinitionRef) chain.Add(current);
+            // 派生类可以公开读取继承字段；只沿实际接收者的基类链寻找，静态字段不改变初始化类型。
+            if (!field.Field.IsStatic && chain.Contains(declaring)
+                && !ManagedAccess.Field(types, body.Method.Method.Owner, field, FieldAccessor.ReceiverType(value)))
+                owners.AddRange(chain.TakeWhile(t => !t.Equals(declaring)));
+            return owners.SelectMany(FieldCalls).FirstOrDefault(c => c.Write == write && c.Field.Equals(field)
+                && c.Method.Method != body.Method.Method
                 && ManagedAccess.Method(types, body.Method.Method.Owner, c.Method, FieldAccessor.ReceiverType(value)));
         }
         return body with { Blocks = body.Blocks.Select(block =>
