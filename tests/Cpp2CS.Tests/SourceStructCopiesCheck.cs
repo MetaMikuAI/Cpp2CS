@@ -86,6 +86,18 @@ internal static class SourceStructCopiesCheck
         var mixedReturn = Body(statements.Take(3).Append(new ManagedReturn(0, new ComposedValue(type,
             returnedLeaves.Take(2).Append((returnedLeaves[2].Item1, new ConstantValue(0, integer, 32))).ToArray()))));
         a.True(SourceStructCopies.Rewrite(mixedReturn).Blocks.Single().Statements.Count == 4, "返回中更改叶子时不能折为整值");
+        var consumer = new ManagedCall(0, new(null!, null, [new ComposedValue(type, returnedLeaves)], false), null, false);
+        var argumentCopy = SourceStructCopies.Rewrite(Body(statements.Take(3).Append(consumer))).Blocks[0].Statements;
+        a.True(argumentCopy is [ManagedAssignment { Target: var argumentSnapshot, Value: var argumentSource },
+                ManagedCall { Invocation.Arguments: [var argument] }] && argumentSource == source && argument == argumentSnapshot,
+            "参数重组保存整值快照，并保留原读取位置");
+        var changedArgument = consumer with { Invocation = consumer.Invocation with { Arguments = [((ManagedReturn)mixedReturn.Blocks[0].Statements[^1]).Value!] } };
+        a.Equal(4, SourceStructCopies.Rewrite(Body(statements.Take(3).Append(changedArgument))).Blocks[0].Statements.Count,
+            "更改参数叶子时不扩大为整值复制");
+        a.Equal(5, SourceStructCopies.Rewrite(Body(statements.Take(3).Append(new ManagedCall(0, new(null!, null, [], false), null, false)).Append(consumer)))
+            .Blocks[0].Statements.Count, "参数快照不能跨过调用");
+        a.Equal(5, SourceStructCopies.Rewrite(Body(statements.Take(3).Append(consumer).Append(new ManagedReturn(0, snapshots[0]))))
+            .Blocks[0].Statements.Count, "字段快照仍有其他使用时保留原值");
         var wrapper = new TypeDef { Index = -2, Assembly = "Sample", Namespace = "Sample", Name = "Wrapper", Token = 0,
             Attributes = TypeAttributes.SequentialLayout, IsValueType = true, IsEnum = false };
         var wrapperType = new DefinitionRef(wrapper, []);

@@ -96,28 +96,39 @@ internal static class SourceStructCopies
                 statements.InsertRange(i, replacements);
                 i += replacements.Count - 1;
             }
-            // 读取全部直属字段后立即按原字段返回，等价于在原读取位置复制整个结构体。
+            // 全部直属字段立即重组到返回值或参数时，在原读取位置保存整个结构体。
             for (var i = 0; i < statements.Count; i++)
             {
-                if (statements[i] is not ManagedAssignment { Value: FieldValue { Accessor: null } field }) continue;
+                if (statements[i] is not ManagedAssignment { Value: FieldValue { Accessor: null } field } first) continue;
                 var root = field.Receiver is AddressValue address ? address.Target : field.Receiver;
                 if (root.Type is not DefinitionRef { Definition: { IsValueType: true, IsEnum: false } definition }
-                    || !Stable(root)) continue;
+                    || !Stable(root) || (definition.Attributes & System.Reflection.TypeAttributes.LayoutMask) == System.Reflection.TypeAttributes.ExplicitLayout) continue;
                 var fields = definition.Fields.Where(f => !f.IsStatic).ToHashSet();
                 var reads = statements.Skip(i).Take(fields.Count).OfType<ManagedAssignment>().ToArray();
                 if (fields.Count == 0 || reads.Length != fields.Count || i + fields.Count >= statements.Count
                     || reads.Any(r => r.Value is not FieldValue { Accessor: null } f || !f.Receiver.Equals(field.Receiver)
                         || !fields.Contains(f.Field.Field) || uses.GetValueOrDefault(r.Target.Variable) != 1)
                     || reads.Select(r => ((FieldValue)r.Value).Field.Field).Distinct().Count() != fields.Count
-                    || reads.Select(r => r.Target.Variable).Distinct().Count() != fields.Count
-                    || statements[i + fields.Count] is not ManagedReturn { Value: ComposedValue composed } returned
-                    || !composed.Type.Equals(root.Type) || composed.Leaves.Count != fields.Count) continue;
+                    || reads.Select(r => r.Target.Variable).Distinct().Count() != fields.Count) continue;
+                var consumer = statements[i + fields.Count];
+                if (consumer is not (ManagedReturn or ManagedAssignment or ManagedCall or ManagedStore)) continue;
                 var snapshots = reads.ToDictionary(r => r.Target.Variable, r => ((FieldValue)r.Value).Field);
-                if (composed.Leaves.Any(p => p.Path.Count != 1 || p.Value is not LocalValue local
-                    || !snapshots.TryGetValue(local.Variable, out var copied) || !copied.Equals(p.Path[0]))
-                    || composed.Leaves.Select(p => p.Path[0].Field).Distinct().Count() != fields.Count) continue;
+                bool Rebuilt(ComposedValue composed) => composed.Type.Equals(root.Type) && composed.Leaves.Count == fields.Count
+                    && composed.Leaves.All(p => p.Path.Count == 1 && p.Value is LocalValue local
+                        && snapshots.TryGetValue(local.Variable, out var copied) && copied.Equals(p.Path[0]))
+                    && composed.Leaves.Select(p => p.Path[0].Field).Distinct().Count() == fields.Count;
+                if (ManagedValues.Of(consumer).SelectMany(ManagedValues.Walk).OfType<ComposedValue>().Count(Rebuilt) != 1) continue;
                 statements.RemoveRange(i, fields.Count + 1);
-                statements.Insert(i, returned with { Value = root });
+                if (consumer is ManagedReturn { Value: ComposedValue returned } result && Rebuilt(returned))
+                    statements.Insert(i, result with { Value = root });
+                else
+                {
+                    var snapshot = new LocalValue(new Variable(Storage.Temp(next++), 1), root.Type, 0);
+                    ManagedValue Replace(ManagedValue value) => value is ComposedValue composed && Rebuilt(composed)
+                        ? snapshot : ManagedValues.Map(value, Replace);
+                    statements.Insert(i, new ManagedAssignment(first.Address, snapshot, root));
+                    statements.Insert(++i, ManagedValues.Map(consumer, Replace));
+                }
             }
             // 参数或局部值的完整逐字段写入，折回属性后备字段等存储位置的整体赋值。
             for (var i = 0; i < statements.Count; i++)
