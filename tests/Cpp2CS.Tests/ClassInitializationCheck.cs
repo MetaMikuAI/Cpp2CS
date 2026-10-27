@@ -27,6 +27,16 @@ internal static class ClassInitializationCheck
             function.Renumber(); return function;
         }
         var a = new Assertions();
+        var wide = (Load)Load();
+        var extended = new Cpp2CS.Ir.Convert(ConvKind.ZeroExtend, wide, 64);
+        Expr Bit(Expr value, ulong mask = 1) => new Compare(Cond.Ne, new Binary(BinOp.And, value, Expr.C(mask, value.Width), value.Width), Expr.C(0, value.Width));
+        a.True(ClassInitializationFlags.IsBitTest(Bit(extended), wide), "16 位读取只检查初始化低位");
+        a.True(ClassInitializationFlags.IsBitTest(Bit(new Extract(extended, 0, 32)), wide), "寄存器截取仍保留低位");
+        a.True(!ClassInitializationFlags.IsBitTest(Bit(extended, 2), wide), "其他标志位不能作为初始化证据");
+        a.True(!ClassInitializationFlags.IsBitTest(new Compare(Cond.Ne, extended, Expr.C(0, 64)), wide), "整个标志字非零不能作为初始化证据");
+        a.True(ClassInitializationFlags.IsReload(extended, wide), "重读保留零扩展");
+        a.True(!ClassInitializationFlags.IsReload(new Cpp2CS.Ir.Convert(ConvKind.SignExtend, wide, 64), wide), "不能将符号扩展替换为零扩展");
+        a.True(!ClassInitializationFlags.IsReload(new Load(Expr.C(0, 64), 16), wide), "重读必须来自同一字段");
         var block = new Block(0) { End = 24, Statements = [Init(4), read, Init(12) with { Defines = [result] }, Test(1)] };
         a.True(ClassInitializationFacts.Run(Function(block)), "初始化之后的 16 位读取只按低位折叠");
         a.True(block.Statements[^1] is Branch { Condition: Const { Value: 1 } }, "低位已置位");

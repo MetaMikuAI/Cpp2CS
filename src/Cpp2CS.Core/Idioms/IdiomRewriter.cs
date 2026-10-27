@@ -1090,7 +1090,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                         && skipped.NormalSuccessors.ToArray() is [var merge] && merge != head
                         && Chain(normal[side], merge) is { Count: > 0 } guarded
                         && guarded.SelectMany(b => b.Statements).OfType<Call>().ToArray() is [var initializer]
-                        && owner.HelperOf(initializer)?.Kind == HelperKind.ClassInit)
+                        && owner.HelperOf(initializer)?.Kind is HelperKind.ClassInit or HelperKind.InitializedTypeInfo)
                     {
                         var targets = side == 0 ? new List<(Block, Block)> { (normal[0], head), (merge, skipped) }
                             : [(merge, skipped), (normal[1], head)];
@@ -1372,23 +1372,32 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 HelperKind.InitMethodRgctx => (OpKind.InitMethodRgctx, Template.MethodRgctxGuard, 0UL, 0x1000UL, RuntimeLayout.MethodRgctxData, 64, true),
                 _ => default,
             };
-            if (width == 0 || load.Width != width || load.Address != Field(offset) || !Decides(enter, skip)) return false;
+            if (width == 0 || load.Address != Field(offset) || !Decides(enter, skip)) return false;
+            if (kind == OpKind.InitClass)
+            {
+                if (!ClassInitializationFlags.IsBitTest(condition, load)) return false;
+            }
+            else if (load.Width != width) return false;
             // 区域内除 helper 调用外只允许纯定义：常量、符号、对守卫字段的重新读取（初始化之后的值）
             if (!statements.All(s => s is Nop or Jump || ReferenceEquals(s, helperCall)
-                || s is Define { Value: Const or Symbol } || s is Define d && defs.Expand(d.Value) == load)) return false;
+                || s is Define { Value: Const or Symbol } || s is Define d && ClassInitializationFlags.IsReload(defs.Expand(d.Value), load))) return false;
             var result = returnsArgument && helperCall.Defines.Length > 0 ? helperCall.Defines[0] : null;
             if (result is not null && statements.Any(s => ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => u.Variable == result))) return false;
 
             var reload = new List<Stmt>();
-            Variable? reloaded = null;
-            Variable Reload()
+            var reloaded = new Dictionary<Expr, Variable>();
+            Variable Reload(Expr value)
             {
-                if (reloaded is not null) return reloaded;
-                reloaded = Fresh();
-                reload.Add(new Define(helperCall.Address, reloaded, new Load(Fold.Simplify(new Binary(BinOp.Add, argument, Expr.C((ulong)offset, 64), 64)), width)));
-                return reloaded;
+                if (reloaded.TryGetValue(value, out var previous)) return previous;
+                var variable = Fresh();
+                var source = ExprMap.Map(value, e => e == load
+                    ? new Load(Fold.Simplify(new Binary(BinOp.Add, argument, Expr.C((ulong)offset, 64), 64)), load.Width) : null);
+                reload.Add(new Define(helperCall.Address, variable, source));
+                reloaded[value] = variable;
+                return variable;
             }
-            if (Merge(head, chain, merge, result is null ? null : subject, v => defs.Expand(new Use(v, 64)) == load ? Reload() : null) is not { } merged) return false;
+            if (Merge(head, chain, merge, result is null ? null : subject,
+                v => defs.Expand(new Use(v, 64)) is var value && ClassInitializationFlags.IsReload(value, load) ? Reload(value) : null) is not { } merged) return false;
             var op = new Call(helperCall.Address, CallKind.Direct, helperCall.Target)
             {
                 Op = new RuntimeOp(kind, subject is Symbol { Kind: SymbolKind.Class } c ? c.Value : null),
