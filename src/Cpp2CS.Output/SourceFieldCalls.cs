@@ -11,6 +11,7 @@ public sealed partial class SourceLibraryCalls
     private readonly Dictionary<DefinitionRef, FieldCall[]> fieldCalls = [];
     private readonly Dictionary<DefinitionRef, SourceValueConstructor[]> valueConstructors = [];
     private Dictionary<MethodRef, ulong>? fieldCallEntries;
+    private ILookup<TypeRef, MethodDef>? staticFieldReaders;
 
     // 只用实际原生方法的单字段读写形态认回可访问入口，不按属性名猜字段。
     private FieldCall[] FieldCalls(DefinitionRef type)
@@ -18,14 +19,18 @@ public sealed partial class SourceLibraryCalls
         if (fieldCalls.TryGetValue(type, out var cached)) return cached;
         var found = new List<FieldCall>();
         var constructors = new List<SourceValueConstructor>();
-        foreach (var method in type.Definition.Methods.Where(m => m.GenericParameters.Count == 0
+        staticFieldReaders ??= facts.Model.Methods.Where(m => m.IsStatic && m.Parameters.Count == 1 && m.Address != 0
+            && m.Owner.GenericParameters.Count == 0 && m.GenericParameters.Count == 0 && !ManagedTypes.IsVoid(m.ReturnType))
+            .ToLookup(m => m.Parameters[0].Type);
+        var candidates = type.Definition.Methods.Concat(type.Arguments.Count == 0 ? staticFieldReaders[type] : []).Distinct();
+        foreach (var method in candidates.Where(m => m.GenericParameters.Count == 0
             && m.Name != ".cctor" && (m.Name != ".ctor" || type.Definition.IsValueType)
             && (m.Parameters.Count <= 1 || m.Name == ".ctor" && m.Parameters.Count <= 8)
             && (!m.IsVirtual || (m.Attributes & System.Reflection.MethodAttributes.Final) != 0)
             && (m.Attributes & System.Reflection.MethodAttributes.MemberAccessMask) is System.Reflection.MethodAttributes.Public
                 or System.Reflection.MethodAttributes.Family or System.Reflection.MethodAttributes.FamORAssem))
         {
-            var reference = new MethodRef(method, type.Arguments, []);
+            var reference = new MethodRef(method, method.Owner == type.Definition ? type.Arguments : [], []);
             var entry = method.Address;
             if (type.Arguments.Count != 0)
             {
@@ -76,6 +81,8 @@ public sealed partial class SourceLibraryCalls
             {
                 IndirectValue { Address: AddressValue address } when address.Target.Type.Equals(value.Type) => Storage(address.Target),
                 FieldValue { Receiver: ArgumentValue { Index: -1 }, Field: var field } when !method.IsStatic => field,
+                FieldValue { Receiver: ArgumentValue { Index: 0 }, Field: var field } when method.IsStatic
+                    && method.Parameters.Count == 1 && method.Parameters[0].Type.Equals(type) && field.DeclaringType.Equals(type) => field,
                 StaticFieldValue { Field: var field } when method.IsStatic && field.DeclaringType.Equals(reference.DeclaringType) => field,
                 _ => null,
             };
@@ -86,8 +93,11 @@ public sealed partial class SourceLibraryCalls
                         && types.Kind(receiver.Type) == TypeKind.Struct && receiver is not ArgumentValue { Index: -1 }) v = receiver;
                     return Equals(Storage(v), storage) || method.Parameters.Count == 1 && v is ArgumentValue { Index: 0 };
                 });
-            if (method.Parameters.Count == 0 && stores.Count == 0 && returned is not null && Storage(returned) is { } read
-                && returned.Type.Equals(method.ReturnType.Substitute(type.Arguments, [])) && OnlyStorage(read)) found.Add(new(reference, read, false));
+            if ((method.Parameters.Count == 0 || method.IsStatic && method.Parameters.Count == 1)
+                && stores.Count == 0 && returned is not null && Storage(returned) is { } read
+                && returned.Type.Equals(method.ReturnType.Substitute(type.Arguments, [])) && OnlyStorage(read)
+                && (method.Parameters.Count == 0 || values.Values.SelectMany(ManagedValues.Walk)
+                    .All(v => v is ArgumentValue or ConstantValue or FieldValue or ConversionValue))) found.Add(new(reference, read, false));
             if (method.Parameters.Count == 1 && ManagedTypes.IsVoid(method.ReturnType) && stores is [var write]
                 && (method.Name != ".ctor" || type.Definition.Fields.Count(f => !f.IsStatic) == 1)
                 && Storage(write.Target) is { } field && write.Value is ArgumentValue { Index: 0 } argument
@@ -174,7 +184,8 @@ public sealed partial class SourceLibraryCalls
                     if (target is null) return value;
                     var result = new LocalValue(new Variable(Storage.Temp(next--), 1), value.Type, value.Width);
                     output.Add(new ManagedCall(statement.Address, new ManagedInvocation(target,
-                        value is FieldValue member ? member.Receiver : null, [], false), result, false));
+                        value is FieldValue member && !target.Method.IsStatic ? member.Receiver : null,
+                        value is FieldValue argument && target.Method.IsStatic ? [argument.Receiver] : [], false), result, false));
                     Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{statement.Address:x}\t{body.Method}\t{target}");
                     return result;
                 }
