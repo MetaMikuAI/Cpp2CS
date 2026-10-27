@@ -58,7 +58,7 @@ internal static class SourceStructCopies
                 var copied = new List<IReadOnlyList<FieldRef>>();
                 foreach (var write in writes)
                 {
-                    if (FieldPath(write.Target) is not { } target || !target.Root.Type.Equals(type)
+                    if (FieldPath(write.Target, write: true) is not { } target || !target.Root.Type.Equals(type)
                         || destination is not null && destination != target.Root || write.Value is not LocalValue local
                         || !snapshots.TryGetValue(local.Variable, out var sourcePath) || !sourcePath.SequenceEqual(target.Path)) break;
                     destination = target.Root;
@@ -224,10 +224,13 @@ internal static class SourceStructCopies
         _ => false,
     };
 
-    private static (ManagedValue Root, IReadOnlyList<FieldRef> Path)? FieldPath(ManagedValue value)
+    private static (ManagedValue Root, IReadOnlyList<FieldRef> Path)? FieldPath(ManagedValue value, bool write = false)
     {
         var path = new List<FieldRef>();
-        while (value is FieldValue { Accessor: null } field)
+        // 叶子访问器已证明是原字段的等值读写；中间结构体仍须保留真实存储位置。
+        while (value is FieldValue field && (field.Accessor is null || path.Count == 0
+            && field.Accessor is { } accessor && accessor.Write == write && accessor.Field.Equals(field.Field)
+            && accessor.ValueType.Equals(field.Type) && accessor.Width == field.Width))
         {
             var receiver = field.Receiver is AddressValue address ? address.Target : field.Receiver;
             if (receiver.Type is not DefinitionRef { Definition.IsValueType: true }) break;

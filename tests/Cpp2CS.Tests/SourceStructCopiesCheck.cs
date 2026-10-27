@@ -107,6 +107,18 @@ internal static class SourceStructCopiesCheck
         a.Equal(7, SourceStructCopies.Rewrite(interruptedNested).Blocks.Single().Statements.Count, "嵌套复制不能跨可观察调用");
         var escapingNested = Body(nestedReads.Concat(nestedWrites).Append(new ManagedReturn(0, snapshots[0])));
         a.Equal(7, SourceStructCopies.Rewrite(escapingNested).Blocks.Single().Statements.Count, "快照还被外部使用时保留叶子局部");
+        FieldValue Proven(FieldValue field, bool write) => field with { Accessor = new(null!, field.Field, field.Type, field.Width, write) };
+        var provenReads = nestedReads.Cast<ManagedAssignment>().Select(s => s with { Value = Proven((FieldValue)s.Value, false) }).ToArray();
+        var provenWrites = nestedWrites.Cast<ManagedStore>().Select(s => s with { Target = Proven((FieldValue)s.Target, true) }).ToArray();
+        var provenCopy = Body(provenReads.Cast<ManagedStatement>().Concat(provenWrites));
+        a.True(SourceStructCopies.Rewrite(provenCopy).Blocks[0].Statements is [ManagedStore { Target: var provenTarget, Value: var provenSource }]
+            && provenTarget == element && provenSource == nestedSource, "已证明的叶子访问器不阻塞完整结构体复制");
+        var wrongDirection = Body(provenReads.Select(s => s with { Value = Proven((FieldValue)s.Value, true) }).Cast<ManagedStatement>().Concat(provenWrites));
+        a.Equal(6, SourceStructCopies.Rewrite(wrongDirection).Blocks[0].Statements.Count, "写访问器不能作为读取证明");
+        var escapedProof = Body(provenReads.Cast<ManagedStatement>().Concat(provenWrites).Append(new ManagedReturn(0, snapshots[0])));
+        a.Equal(7, SourceStructCopies.Rewrite(escapedProof).Blocks[0].Statements.Count, "访问器快照逃逸时仍保留叶子");
+        var partialProof = Body(provenReads.Cast<ManagedStatement>().Concat(provenWrites.Take(2)));
+        a.Equal(5, SourceStructCopies.Rewrite(partialProof).Blocks[0].Statements.Count, "访问器不能补齐缺失的嵌套字段");
         var container = new TypeDef { Index = -3, Assembly = "Sample", Namespace = "Sample", Name = "Container", Token = 0,
             Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false };
         var containerType = new DefinitionRef(container, []);
