@@ -74,6 +74,9 @@ public sealed class ManagedTypes
 
     public static bool IsVoid(TypeRef type) => type is PrimitiveRef { Name: "void" } || PrimitiveName(type) == "Void";
 
+    /// <summary>非托管指针值与原生整数；不包含需要保持 GC 跟踪的托管引用地址。</summary>
+    public static bool IsNativePointer(TypeRef type) => type is PointerRef || PrimitiveName(type) is "IntPtr" or "UIntPtr";
+
     /// <summary>枚举的底层整数类型；非枚举原样返回。</summary>
     public static TypeRef Underlying(TypeRef type) =>
         type is DefinitionRef { Definition: { IsEnum: true } definition } ? definition.Fields.First(f => !f.IsStatic).Type : type;

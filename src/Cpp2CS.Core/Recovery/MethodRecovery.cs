@@ -270,13 +270,14 @@ public sealed partial class MethodRecovery
                 var parameter = signature.Parameters[i];
                 if (Registry.Parameters.Any(rule => rule(this, parameter, i))) continue;
                 if (incomingStack.Parameters.FirstOrDefault(p => p.Index == i) is { Indirect: false } stackParameter
-                    && types.Kind(parameter.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Reference or TypeKind.Float or TypeKind.Double)
+                    && (types.Kind(parameter.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Reference or TypeKind.Float or TypeKind.Double
+                        || ManagedTypes.IsNativePointer(parameter.Type)))
                 {
                     arguments[Storage.Slot(stackParameter.Offset)] = new(i, parameter.Type, stackParameter.Size * 8);
                     continue;
                 }
                 if (parameter.Passing != Passing.Registers || parameter.Pieces.Length != 1 || types.Kind(parameter.Type) is TypeKind.Struct or null
-                    || types.Kind(parameter.Type) == TypeKind.Pointer && (parameter.Type is not ByRefRef parameterReference
+                    || types.Kind(parameter.Type) == TypeKind.Pointer && !ManagedTypes.IsNativePointer(parameter.Type) && (parameter.Type is not ByRefRef parameterReference
                         || types.Kind(parameterReference.Element) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference)))
                 {
                     var hole = Hole(entry, $"参数 {definition.Parameters[i].Name} 的类型 {parameter.Type} 尚未支持");
@@ -290,7 +291,8 @@ public sealed partial class MethodRecovery
             Expr? returnValue = null;
             if (signature.Return is { } ret)
             {
-                if (!RegisterStruct(ret) && !IndirectStruct(ret) && (ret.Passing != Passing.Registers || ret.Pieces.Length != 1 || types.Kind(ret.Type) is TypeKind.Struct or TypeKind.Pointer or null))
+                if (!RegisterStruct(ret) && !IndirectStruct(ret) && (ret.Passing != Passing.Registers || ret.Pieces.Length != 1 || types.Kind(ret.Type) is TypeKind.Struct or null
+                    || types.Kind(ret.Type) == TypeKind.Pointer && !ManagedTypes.IsNativePointer(ret.Type)))
                 {
                     returnHole = Hole(entry, $"返回值 类型 {ret.Type} 尚未支持");
                 }
@@ -977,6 +979,7 @@ public sealed partial class MethodRecovery
                     type = IntegerOf(width, ManagedTypes.IsSigned(type));
                     break;
                 case TypeKind.Pointer when type is ByRefRef: break;
+                case TypeKind.Pointer when width == 64 && ManagedTypes.IsNativePointer(type): break;
                 case TypeKind.Struct or TypeKind.Pointer or TypeKind.Void or null:
                     throw Fail(0, $"变量 {v} 的类型 {type} 尚未支持");
             }
@@ -1061,6 +1064,11 @@ public sealed partial class MethodRecovery
             var width = kind is TypeKind.Bool ? 8 : types.Bits(target);
             switch (kind)
             {
+                case TypeKind.Pointer when ManagedTypes.IsNativePointer(target):
+                    if (value is ConstantValue { Bits: 0, Width: 64 }) return new ConstantValue(0, target, 64);
+                    if (value.Width == 64 && ManagedTypes.IsNativePointer(value.Type))
+                        return value.Type.Equals(target) ? value : new ConversionValue(ConvKind.Bitcast, value, target, 64);
+                    throw Fail(address, $"指针 {value.Type} 不能转换为 {target}");
                 case TypeKind.Reference:
                     if (value is ConstantValue { Bits: 0 }) return new ConstantValue(0, target, 64);
                     if (value.Type is GenericParameterRef { IsReferenceConstrained: false } generic && !target.Equals(generic)
@@ -1599,7 +1607,8 @@ public sealed partial class MethodRecovery
             if (Resolve(call) is not { } callee) throw Fail(address, CallResolutionFailure(call));
             if (owner.abi.Classify(callee, out var problem) is not { } signature) throw Fail(address, $"调用 {callee} 的签名: {problem}");
             if (call.Op?.Kind == OpKind.CallDelegate && signature.Return is { } delegateReturn
-                && (delegateReturn.Passing != Passing.Registers || delegateReturn.Pieces.Length != 1 || types.Kind(delegateReturn.Type) is TypeKind.Struct or TypeKind.Pointer or null))
+                && (delegateReturn.Passing != Passing.Registers || delegateReturn.Pieces.Length != 1 || types.Kind(delegateReturn.Type) is TypeKind.Struct or null
+                    || types.Kind(delegateReturn.Type) == TypeKind.Pointer && !ManagedTypes.IsNativePointer(delegateReturn.Type)))
                 throw Fail(address, $"委托 Invoke 返回值 {delegateReturn.Type} 的 ABI 尚未支持");
             var registers = ArgumentsOf(call);
             Expr Argument(AbiValue value, string name)
@@ -1630,7 +1639,7 @@ public sealed partial class MethodRecovery
                     parameters.Add(shaped);
                     continue;
                 }
-                if (types.Kind(parameter.Type) is TypeKind.Struct or null || types.Kind(parameter.Type) == TypeKind.Pointer && (parameter.Type is not ByRefRef parameterReference
+                if (types.Kind(parameter.Type) is TypeKind.Struct or null || types.Kind(parameter.Type) == TypeKind.Pointer && !ManagedTypes.IsNativePointer(parameter.Type) && (parameter.Type is not ByRefRef parameterReference
                     || types.Kind(parameterReference.Element) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference)))
                     throw Fail(address, $"调用 {callee} 的参数类型 {parameter.Type} 尚未支持");
                 parameters.Add(RecoverAs(Argument(parameter, definition.Parameters[i].Name), parameter.Type, address));

@@ -165,7 +165,8 @@ public sealed partial class BodyEmitter
                 if (element.Array.Type is not ArrayRef { IsVector: true } a || !element.Type.Equals(a.Element)) return "数组 元素类型不符";
                 break;
             case ConstantValue c:
-                if (!(types.Kind(c.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double || c.Bits == 0 && ManagedTypes.IsReferenceType(c.Type)))
+                if (!(types.Kind(c.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double
+                    || c.Bits == 0 && (ManagedTypes.IsReferenceType(c.Type) || ManagedTypes.IsNativePointer(c.Type))))
                     return $"常量 类型 {c.Type}";
                 break;
             case ComposedValue c:

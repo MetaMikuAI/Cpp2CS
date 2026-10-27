@@ -43,6 +43,10 @@ public sealed partial class BodyEmitter
                     il.Emit(OpCodes.Ldloca, zero); il.Emit(OpCodes.Initobj, TypeReference(c.Type)); il.Emit(OpCodes.Ldloc, zero);
                 }
                 else if (ManagedTypes.IsReferenceType(c.Type)) il.Emit(OpCodes.Ldnull);
+                else if (ManagedTypes.IsNativePointer(c.Type))
+                {
+                    il.Emit(OpCodes.Ldc_I4_0); il.Emit(OpCodes.Conv_U);
+                }
                 // 非规范的 NaN 以整数位型输出再重解释，保留载荷。规范的静默 NaN（IL2CPP 对 float.NaN / double.NaN 的翻译，符号位不定）直接作为 NaN 常量，
                 // 反编译为 float.NaN：NaN 的符号与载荷只有按位查看时才可区分
                 else if (types.Kind(c.Type) == TypeKind.Float && (c.Bits & 0x7f800000) == 0x7f800000 && (c.Bits & 0x7fffff) != 0 && (c.Bits & 0x7fffffff) != 0x7fc00000)
@@ -246,6 +250,11 @@ public sealed partial class BodyEmitter
 
     private void Reinterpret(TypeRef from, TypeRef to)
     {
+        if (ManagedTypes.IsNativePointer(from) && ManagedTypes.IsNativePointer(to))
+        {
+            il.Emit(ManagedTypes.IsSigned(to) ? OpCodes.Conv_I : OpCodes.Conv_U);
+            return;
+        }
         var fromFloat = types.Kind(from) is TypeKind.Float or TypeKind.Double;
         var toFloat = types.Kind(to) is TypeKind.Float or TypeKind.Double;
         if (fromFloat == toFloat) return;
