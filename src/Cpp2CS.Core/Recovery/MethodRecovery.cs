@@ -313,6 +313,7 @@ public sealed partial class MethodRecovery
             foreach (var error in idioms.Errors) Hole(entry, $"L2 {error}");
             if (idioms.Errors.Count > 0) return false;
             NormalizeScalarVectors();
+            CallArgumentProjection.Run(function.Blocks, StructArgumentWidths);
             TrimIndirectArguments();
             Ssa.Propagate.RemoveDead(function);
             if (function.Blocks.Any(b => b.IsLandingPad))
