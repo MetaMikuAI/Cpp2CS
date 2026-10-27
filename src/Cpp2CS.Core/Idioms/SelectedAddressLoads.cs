@@ -3,7 +3,7 @@ using Cpp2CS.Ir;
 
 namespace Cpp2CS.Idioms;
 
-/// <summary>常量偏移的条件选择改为条件读取；字段身份仍由后续内存模型核对。</summary>
+/// <summary>无副作用的地址选择改为条件读取；字段身份仍由后续内存模型核对。</summary>
 internal static class SelectedAddressLoads
 {
     public static bool Run(MachineFunction function)
@@ -15,7 +15,7 @@ internal static class SelectedAddressLoads
         {
             if (address is Use use && seen.Add(use.Variable) && definitions.TryGetValue(use.Variable, out var value))
                 return value is Use or Select ? Choice(value, seen) : null;
-            if (address is Select { Width: 64, True: Const, False: Const } select && Pure(select.Condition)) return select;
+            if (address is Select { Width: 64 } select && Pure(select.Condition) && Pure(select.True) && Pure(select.False)) return select;
             if (address is not Binary { Op: BinOp.Add, Width: 64 } add) return null;
             if (Pure(add.Right) && Choice(add.Left, seen) is { } left)
                 return left with { True = Fold.Simplify(add with { Left = left.True }), False = Fold.Simplify(add with { Left = left.False }) };

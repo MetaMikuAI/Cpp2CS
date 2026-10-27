@@ -8,7 +8,7 @@ namespace Cpp2CS.Tests;
 
 internal static class SelectedAddressLoadsCheck
 {
-    [Command("selected-address-loads", "常量地址选择的读取值及求值边界", Gate = Gate.Unit)]
+    [Command("selected-address-loads", "条件地址读取的位宽、单臂求值和副作用边界", Gate = Gate.Unit)]
     public static int Run()
     {
         var offset = new Variable(Storage.Gpr(8), 1);
@@ -36,9 +36,25 @@ internal static class SelectedAddressLoadsCheck
             }
         }
         a.True(!SelectedAddressLoads.Run(Sample(32, choice with { Condition = new Load(Expr.C(0x2000, 64), 8) })), "不重读条件中的内存");
-        a.True(!SelectedAddressLoads.Run(Sample(32, choice with { True = new Use(result, 64) })), "非固定偏移不展开");
+        a.True(!SelectedAddressLoads.Run(Sample(32, choice with { True = new Load(Expr.C(0x2000, 64), 64) })), "不重读地址分支中的内存");
+        a.True(!SelectedAddressLoads.Run(Sample(32, choice with { False = new Unknown("address", 64) })), "不消除未知地址求值");
         a.True(!SelectedAddressLoads.Run(Sample(32, loadBase: true)), "不重复读取地址基址");
         a.True(!SelectedAddressLoads.Run(Sample(32, store: true)), "不把写入目标改成值选择");
+        foreach (var width in new[] { 8, 32, 64 })
+        {
+            var sample = Sample(width, choice with { True = new Binary(BinOp.Add, new Read(Storage.Gpr(2), 64), Expr.C(16, 64), 64) });
+            a.True(SelectedAddressLoads.Run(sample), "不同存储根的地址可以选择");
+            var expression = ((Define)sample.Blocks[0].Statements[1]).Value;
+            foreach (var flag in new uint[] { 0, 1 })
+            {
+                var evaluator = new Evaluator();
+                evaluator.Registers[Storage.Gpr(1)] = flag;
+                evaluator.Registers[Storage.Gpr(2)] = 0x500;
+                var expected = evaluator.Eval(new Load(Expr.C(flag == 0 ? 0x1510u : 0x1018u, 64), width));
+                a.Equal(expected, evaluator.Eval(expression), "地址分支保留各自的基址与偏移");
+                a.True(evaluator.Failure is null, "动态地址选择可求值");
+            }
+        }
         return a.Finish("selected-address-loads");
     }
 }
