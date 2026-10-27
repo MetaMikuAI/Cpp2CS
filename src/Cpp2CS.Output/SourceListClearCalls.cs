@@ -80,8 +80,9 @@ internal static partial class SourceListCalls
             if (nonemptyTaken is null) continue;
             var filledEdge = nonemptyTaken.Value ? branch.Taken : branch.Fallthrough;
             var emptyEdge = nonemptyTaken.Value ? branch.Fallthrough : branch.Taken;
+            // 清理调用留在原保护区，正常退出边可以离开；下面仍须证明两臂具有同一出口。
             if (flow.Predecessors.GetValueOrDefault(filledEdge.Target) != 1
-                || !flow.SameRegion(block.Address, filledEdge.Target) || !flow.SameRegion(block.Address, emptyEdge.Target)) continue;
+                || !flow.SameRegion(block.Address, filledEdge.Target)) continue;
             using var filled = flow.Straight(filledEdge.Target, 0, block.Address).GetEnumerator();
             ManagedStatement? Next()
             {
