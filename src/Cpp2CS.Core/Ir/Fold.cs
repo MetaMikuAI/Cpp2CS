@@ -270,6 +270,14 @@ public static class Fold
             {
                 if (code is FlagCondition.Eq or FlagCondition.Ne)
                     return Compare(code == FlagCondition.Eq ? Cond.Eq : Cond.Ne, Binary(BinOp.Add, add.Left, right, add.OperandWidth), C(0, add.OperandWidth));
+                if (right is Const amount && code is FlagCondition.Hs or FlagCondition.Lo or FlagCondition.Hi or FlagCondition.Ls)
+                {
+                    // 加 k 的进位边界为 2^width-k；k=0 时永不进位。
+                    if (amount.Value == 0) return C(code is FlagCondition.Lo or FlagCondition.Ls ? 1UL : 0, 1);
+                    var boundary = C(unchecked(0UL - amount.Value), add.OperandWidth);
+                    var condition = code switch { FlagCondition.Hs => Cond.Uge, FlagCondition.Lo => Cond.Ult, FlagCondition.Hi => Cond.Ugt, _ => Cond.Ule };
+                    return Compare(condition, add.Left, boundary);
+                }
                 // cmn x, #k 等价于 cmp x, #-k（-k 可表示时有符号条件一致）
                 if (right is Const k && k.Value != 0 && k.Value != 1UL << (add.OperandWidth - 1) && code is FlagCondition.Ge or FlagCondition.Lt or FlagCondition.Gt or FlagCondition.Le)
                 {
