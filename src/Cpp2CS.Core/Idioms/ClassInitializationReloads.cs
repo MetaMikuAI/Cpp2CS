@@ -31,7 +31,7 @@ internal static class ClassInitializationReloads
             var chain = new List<Block>();
             var previous = head;
             var current = enter;
-            while (current != merge && chain.Count < 32 && current.Predecessors.Count == 1 && current.Predecessors[0] == previous
+            while (current != merge && chain.Count < 32 && !chain.Contains(current) && current.Predecessors.Contains(previous)
                 && !current.IsLandingPad && current.NormalSuccessors.Count() == 1 && current.Statements.LastOrDefault() is not Branch)
             {
                 chain.Add(current);
@@ -39,6 +39,32 @@ internal static class ClassInitializationReloads
                 current = current.NormalSuccessors.Single();
             }
             if (current != merge || chain.Count == 0) continue;
+            var shared = chain.Any(b => b.Predecessors.Count != 1);
+            if (shared)
+            {
+                // 共用初始化尾部只传递已有值；强制经过该尾部不能改变最终合流值。
+                var copies = new Dictionary<Variable, Expr>();
+                Expr Value(Variable variable) => copies.GetValueOrDefault(variable) ?? new Use(variable, variable.Width);
+                var validPath = true;
+                previous = head;
+                foreach (var block in chain)
+                {
+                    if (block.Handler != head.Handler) { validPath = false; break; }
+                    var incoming = block.Predecessors.IndexOf(previous);
+                    foreach (var statement in block.Statements)
+                    {
+                        if (statement is Phi phi && phi.Sources.Length == block.Predecessors.Count)
+                            copies[phi.Target] = Value(phi.Sources[incoming]);
+                        else if (statement is not (Nop or Jump or Call { Op.Kind: OpKind.RunClassConstructor }))
+                        { validPath = false; break; }
+                    }
+                    previous = block;
+                }
+                var direct = merge.Predecessors.IndexOf(head);
+                var initializedPath = merge.Predecessors.IndexOf(chain[^1]);
+                if (!validPath || direct < 0 || initializedPath < 0 || merge.Statements.OfType<Phi>().Any(p =>
+                    p.Sources.Length != merge.Predecessors.Count || Value(p.Sources[direct]) != Value(p.Sources[initializedPath]))) continue;
+            }
             bool PreviousRead(Expr value, bool check)
             {
                 value = Expand(value);
@@ -61,7 +87,7 @@ internal static class ClassInitializationReloads
             var valid = true;
             foreach (var statement in chain.SelectMany(b => b.Statements))
             {
-                if (statement is Nop or Jump) continue;
+                if (statement is Nop or Jump || shared && statement is Phi) continue;
                 if (!initialized && statement is Call { Op: { Kind: OpKind.RunClassConstructor, Operand: DefinitionRef owner } }
                     && owner.Equals(type)) { initialized = true; continue; }
                 if (statement is Define d && ExprMap.Walk(d.Value).All(e => e is Use or Const or Symbol or Binary or Unary or Ir.Convert

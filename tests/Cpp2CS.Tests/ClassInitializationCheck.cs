@@ -71,6 +71,34 @@ internal static class ClassInitializationCheck
         a.True(!ClassInitializationReloads.Run(ReloadGuard(checkedBefore: false)), "缺少原先判空不能增加抛出点");
         a.True(!ClassInitializationReloads.Run(ReloadGuard(changedField: true)), "不能重读不同字段");
         a.True(!ClassInitializationReloads.Run(ReloadGuard(sideEffect: true)), "字段快照与守卫之间有写入时拒绝");
+        MachineFunction SharedGuard(bool differentValue = false, bool effect = false, bool otherType = false, bool handler = false)
+        {
+            var one = new Variable(Storage.Gpr(1), 0);
+            var two = new Variable(Storage.Gpr(2), 0);
+            var selected = new Variable(Storage.Gpr(3), 1);
+            var final = new Variable(Storage.Gpr(4), 1);
+            var flag = new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassCctorFinishedOrNoCctor, 64), 64), 32);
+            var entry = new Block(0) { Statements = [new Branch(0, Expr.C(1, 1), 16, 32)] };
+            var first = new Block(16) { Statements = [new Branch(16, new Compare(Cond.Ne, flag, Expr.C(0, 32)), 64, 48)] };
+            var second = new Block(32) { Statements = [new Branch(32, new Compare(Cond.Ne, flag, Expr.C(0, 32)), 64, 48)] };
+            var initializer = new Block(48) { Statements = [new Phi(48, selected, differentValue ? [two, one] : [one, two]),
+                new Call(52, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.RunClassConstructor, otherType ? null : type), Arguments = [klass] }, new Jump(56, 64)] };
+            var done = new Block(64) { Statements = [new Phi(64, final, [one, two, selected]), new Return(68) { Value = new Use(final, 64) }] };
+            MachineFunction.AddEdge(entry, first); MachineFunction.AddEdge(entry, second);
+            MachineFunction.AddEdge(first, done); MachineFunction.AddEdge(first, initializer);
+            MachineFunction.AddEdge(second, done); MachineFunction.AddEdge(second, initializer);
+            MachineFunction.AddEdge(initializer, done);
+            if (effect) initializer.Statements.Insert(1, new Store(50, Expr.C(128, 64), Expr.C(1, 64)));
+            if (handler) initializer.Handler = done;
+            return Function(entry, first, second, initializer, done);
+        }
+        var shared = SharedGuard();
+        a.True(ClassInitializationReloads.Run(shared), "同型初始化尾部可由多条业务路径共用");
+        a.True(ClassInitializationReloads.Run(shared), "另一条入口也保留自身的合流参数");
+        a.True(!ClassInitializationReloads.Run(SharedGuard(differentValue: true)), "初始化分支更改业务值时不能强制执行");
+        a.True(!ClassInitializationReloads.Run(SharedGuard(effect: true)), "共用尾部有写入时拒绝");
+        a.True(!ClassInitializationReloads.Run(SharedGuard(otherType: true)), "初始化目标必须与守卫一致");
+        a.True(!ClassInitializationReloads.Run(SharedGuard(handler: true)), "共用尾部不能跨异常区域");
         return a.Finish("class-initialization");
     }
 }
