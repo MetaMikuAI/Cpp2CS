@@ -27,6 +27,7 @@ public static class SourceRewriter
         body = DropStatements(BooleanStores(body, types));
         body = SourceStructCopies.Rewrite(body);
         body = SourceScalarStructCopies.Rewrite(body);
+        body = SourceCaughtExceptions.Rewrite(body);
         return SourceIteratorCleanup.Rewrite(SourceIteratorDispatch.Rewrite(SourceReturns.Rewrite(FoldFieldCopies(DeadStores(body)))));
     }
 

@@ -117,7 +117,9 @@ public static partial class Decompilation
                 {
                     if (index + 1 >= siblings.Length || !Dispose(siblings[index + 1], name)) continue;
                     removed.Add(siblings[index + 1]);
-                    if (tail is [BreakStatement, LabelStatement label, var cleanup, IfElseStatement empty, ThrowStatement thrown]
+                    if (tail is [BreakStatement, LabelStatement directLabel, var directCleanup, ThrowStatement directThrow]
+                        && directLabel.Label == jump.Label && Dispose(directCleanup, name) && Name(directThrow.Expression, saved.Identifier)) { }
+                    else if (tail is [BreakStatement, LabelStatement label, var cleanup, IfElseStatement empty, ThrowStatement thrown]
                         && label.Label == jump.Label && Dispose(cleanup, name) && NullTest(empty.Condition, saved.Identifier, BinaryOperatorType.Equality)
                         && empty.FalseStatement is null && empty.TrueStatement is BlockStatement { Statements.Count: 1 } emptyBody
                         && emptyBody.Statements.Single() is ReturnStatement { Expression: null } && Name(thrown.Expression, saved.Identifier)) { }

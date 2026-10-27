@@ -15,10 +15,10 @@ internal static class RecoveredForeachCheck
         ExpressionStatement Dispose() => new(new InvocationExpression(Member("Dispose")));
         var a = new Assertions();
         foreach (var mode in new[] { "local", "receiver", "projection" })
-        foreach (var cleanupMode in new[] { "external", "internal", "continuation" })
+        foreach (var cleanupMode in new[] { "external", "internal", "continuation", "direct" })
         foreach (var temporary in new[] { false, true })
         foreach (var escape in new[] { false, true })
-        foreach (var earlyExit in cleanupMode == "external" && mode == "local" && !temporary ? new[] { false, true } : new[] { false })
+        foreach (var earlyExit in cleanupMode is "external" or "direct" && mode == "local" && !temporary ? new[] { false, true } : new[] { false })
         {
             var internalCleanup = cleanupMode == "internal";
             var method = new MethodDeclaration { Name = "Visit", ReturnType = new PrimitiveType("void"), Body = new BlockStatement() };
@@ -73,7 +73,7 @@ internal static class RecoveredForeachCheck
                 loop.Statements.Add(Dispose());
                 var returned = new BlockStatement();
                 returned.Statements.Add(internalCleanup ? new BreakStatement() : new ReturnStatement());
-                loop.Statements.Add(new IfElseStatement(new BinaryOperatorExpression(Id("pending"), BinaryOperatorType.Equality, new NullReferenceExpression()), returned));
+                if (cleanupMode != "direct") loop.Statements.Add(new IfElseStatement(new BinaryOperatorExpression(Id("pending"), BinaryOperatorType.Equality, new NullReferenceExpression()), returned));
                 loop.Statements.Add(new ThrowStatement(Id("pending")));
             }
             method.Body.Statements.Add(new WhileStatement(new PrimitiveExpression(true), loop));
