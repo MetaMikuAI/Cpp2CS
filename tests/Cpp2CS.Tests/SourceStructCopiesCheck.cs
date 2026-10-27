@@ -182,6 +182,11 @@ internal static class SourceStructCopiesCheck
         var assembled = Body(snapshots.Select((s, i) => new ManagedStore(0, Part(i), s)));
         a.True(SourceStructCopies.Rewrite(assembled).Blocks.Single().Statements is [ManagedStore { Target: var wholeTarget, Value: ComposedValue { Leaves.Count: 3 } }]
             && wholeTarget == parent, "完整字段快照写回引用对象中的整个结构体字段");
+        var accessorWrites = assembled.Blocks[0].Statements.Cast<ManagedStore>().Select(s => s with { Target = Proven((FieldValue)s.Target, true) }).ToArray();
+        a.True(SourceStructCopies.Rewrite(Body(accessorWrites)).Blocks[0].Statements is [ManagedStore { Target: var accessorTarget, Value: ComposedValue { Leaves.Count: 3 } }]
+            && accessorTarget == parent, "已证明的 setter 仍保留完整字段初始化证据");
+        a.Equal(3, SourceStructCopies.Rewrite(Body(accessorWrites.Select(s => s with { Target = Proven((FieldValue)s.Target, false) }))).Blocks[0].Statements.Count,
+            "读取访问器不能作为初始化写入证据");
         var missingPart = Body(assembled.Blocks[0].Statements.Take(2));
         a.Equal(2, SourceStructCopies.Rewrite(missingPart).Blocks[0].Statements.Count, "不补未写入的字段");
         var dependent = Body(new ManagedStatement[] { new ManagedStore(0, Part(0), snapshots[0]),

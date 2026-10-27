@@ -248,13 +248,14 @@ internal static class SourceStructCopies
             // 引用对象内的结构体字段被完整覆盖时，生成整值写入，供属性 setter 认回。
             for (var i = 0; i < statements.Count; i++)
             {
-                if (statements[i] is not ManagedStore { Target: FieldValue { Accessor: null } target } first
+                if (statements[i] is not ManagedStore { Target: FieldValue target } first
                     || Destination(target.Receiver) is not FieldValue { Type: DefinitionRef type } destination
                     || !ManagedTypes.IsReferenceType(destination.Receiver.Type)
                     || LeafPaths(type) is not { Count: > 0 } paths || paths.Any(p => p.Count != 1)) continue;
                 var writes = statements.Skip(i).Take(paths.Count).OfType<ManagedStore>().ToArray();
-                if (writes.Length != paths.Count || writes.Any(s => s.Target is not FieldValue { Accessor: null } field
-                    || !field.Receiver.Equals(target.Receiver) || !Snapshot(s.Value))
+                if (writes.Length != paths.Count || writes.Any(s => s.Target is not FieldValue field
+                    || !field.Receiver.Equals(target.Receiver) || FieldPath(field, write: true) is not { Path.Count: 1 } path
+                    || !path.Root.Equals(destination) || !Snapshot(s.Value))
                     || !SamePaths(paths, writes.Select(s => (IReadOnlyList<FieldRef>)new[] { ((FieldValue)s.Target).Field }))) continue;
                 var leaves = writes.Select(s => ((IReadOnlyList<FieldRef>)new[] { ((FieldValue)s.Target).Field }, s.Value)).ToArray();
                 statements.RemoveRange(i, writes.Length);
