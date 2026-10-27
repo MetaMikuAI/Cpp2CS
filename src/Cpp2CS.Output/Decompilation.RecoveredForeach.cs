@@ -46,14 +46,19 @@ public static partial class Decompilation
                 if (body.Descendants.OfType<MemberReferenceExpression>().Where(m => m.MemberName == "Current" && Name(m.Target, name)).ToArray()
                     is not [var read]) continue;
                 var current = body.Statements.FirstOrDefault() as VariableDeclarationStatement;
-                if (current is not null)
+                if (current?.Variables.Count != 1 || !ReferenceEquals(current.Variables.Single().Initializer, read))
                 {
-                    if (current.Variables.Count != 1 || !ReferenceEquals(current.Variables.Single().Initializer, read)) continue;
+                    var first = body.Statements.FirstOrDefault() switch
+                    {
+                        VariableDeclarationStatement { Variables.Count: 1 } firstDeclaration => firstDeclaration.Variables.Single().Initializer,
+                        ExpressionStatement expression => expression.Expression,
+                        _ => null,
+                    };
+                    if (!FirstReceiver(first, read) || read.GetSymbol() is IProperty { ReturnType: ByReferenceType }) continue;
+                    current = null;
                 }
-                else if (body.Statements.FirstOrDefault() is not ExpressionStatement first || !FirstReceiver(first.Expression, read)
-                    || read.GetSymbol() is IProperty { ReturnType: ByReferenceType }) continue;
                 var catcher = guarded.CatchClauses.Single();
-                if (catcher.Type?.ToString() is not ("Exception" or "System.Exception")
+                if (catcher.Condition is not null || catcher.Type?.ToString() is not ("Exception" or "System.Exception")
                     || catcher.Body is not { } catchBody || catchBody.Statements.ToArray() is not [ExpressionStatement { Expression: AssignmentExpression
                         { Operator: AssignmentOperatorType.Assign, Left: IdentifierExpression saved, Right: var caught } }, GotoStatement jump]
                     || !Name(caught, catcher.VariableName)) continue;
@@ -62,21 +67,30 @@ public static partial class Decompilation
                 var tail = parts.SkipWhile(s => s != guarded).Skip(1).ToArray();
                 var siblings = parent.Statements.ToArray();
                 var index = Array.IndexOf(siblings, loop);
-                if (index + 1 >= siblings.Length || !Dispose(siblings[index + 1], name)) continue;
-                var removed = new List<Statement> { siblings[index + 1] };
-                if (tail is [BreakStatement, LabelStatement label, var cleanup, IfElseStatement empty, ThrowStatement thrown]
-                    && label.Label == jump.Label && Dispose(cleanup, name) && NullTest(empty.Condition, saved.Identifier, BinaryOperatorType.Equality)
-                    && empty.FalseStatement is null && empty.TrueStatement is BlockStatement { Statements.Count: 1 } emptyBody
-                    && emptyBody.Statements.Single() is ReturnStatement { Expression: null } && Name(thrown.Expression, saved.Identifier)) { }
-                else if (tail is [ExpressionStatement { Expression: AssignmentExpression { Left: IdentifierExpression merged } }, BreakStatement,
-                    LabelStatement mergeLabel, var copy, BreakStatement] && mergeLabel.Label == jump.Label
-                    && Set(tail[0], merged.Identifier, null) && Set(copy, merged.Identifier, saved.Identifier)
-                    && index + 2 < siblings.Length && siblings[index + 2] is IfElseStatement rethrow
-                    && rethrow.FalseStatement is null && NullTest(rethrow.Condition, merged.Identifier, BinaryOperatorType.InEquality)
-                    && rethrow.TrueStatement is BlockStatement { Statements.Count: 1 } throwBody
-                    && throwBody.Statements.Single() is ThrowStatement finalThrow && Name(finalThrow.Expression, merged.Identifier))
-                    removed.Add(rethrow);
-                else continue;
+                var removed = new List<Statement>();
+                if (tail is [var normalCleanup, BreakStatement, LabelStatement internalLabel, var failureCleanup, IfElseStatement emptyBreak, ThrowStatement internalThrow]
+                    && Dispose(normalCleanup, name) && internalLabel.Label == jump.Label && Dispose(failureCleanup, name)
+                    && NullTest(emptyBreak.Condition, saved.Identifier, BinaryOperatorType.Equality) && emptyBreak.FalseStatement is null
+                    && emptyBreak.TrueStatement is BlockStatement { Statements.Count: 1 } breakBody
+                    && breakBody.Statements.Single() is BreakStatement && Name(internalThrow.Expression, saved.Identifier)) { }
+                else
+                {
+                    if (index + 1 >= siblings.Length || !Dispose(siblings[index + 1], name)) continue;
+                    removed.Add(siblings[index + 1]);
+                    if (tail is [BreakStatement, LabelStatement label, var cleanup, IfElseStatement empty, ThrowStatement thrown]
+                        && label.Label == jump.Label && Dispose(cleanup, name) && NullTest(empty.Condition, saved.Identifier, BinaryOperatorType.Equality)
+                        && empty.FalseStatement is null && empty.TrueStatement is BlockStatement { Statements.Count: 1 } emptyBody
+                        && emptyBody.Statements.Single() is ReturnStatement { Expression: null } && Name(thrown.Expression, saved.Identifier)) { }
+                    else if (tail is [ExpressionStatement { Expression: AssignmentExpression { Left: IdentifierExpression merged } }, BreakStatement,
+                        LabelStatement mergeLabel, var copy, BreakStatement] && mergeLabel.Label == jump.Label
+                        && Set(tail[0], merged.Identifier, null) && Set(copy, merged.Identifier, saved.Identifier)
+                        && index + 2 < siblings.Length && siblings[index + 2] is IfElseStatement rethrow
+                        && rethrow.FalseStatement is null && NullTest(rethrow.Condition, merged.Identifier, BinaryOperatorType.InEquality)
+                        && rethrow.TrueStatement is BlockStatement { Statements.Count: 1 } throwBody
+                        && throwBody.Statements.Single() is ThrowStatement finalThrow && Name(finalThrow.Expression, merged.Identifier))
+                        removed.Add(rethrow);
+                    else continue;
+                }
                 // 只接收元素读取以外不使用枚举器的循环体。
                 if (body.Descendants.OfType<IdentifierExpression>().Count(id => id.Identifier == name) != 1) continue;
                 var prefix = siblings.Take(index).Reverse().SkipWhile(s => s is VariableDeclarationStatement d && d.Variables.All(v => v.Initializer is null)).ToArray();
