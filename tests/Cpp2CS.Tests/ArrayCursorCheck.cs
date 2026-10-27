@@ -37,6 +37,7 @@ internal static class ArrayCursorCheck
         var sample = Read(Loop());
         a.Equal(1, sample.Length, "指针与下标同循环递增");
         a.Equal(pointer, sample.Single().Pointer, "归纳目标为元素指针");
+        a.True(!sample.Single().IsOffset, "含数组根的指针不能作为普通整数展开");
         a.True(sample.Single().Address is Binary { Left: Binary { Right: Const bias }, Right: Binary { Right: Const scale } }
             && bias.Signed == -32 && scale.Value == 16, "初始下标包含数组头时保留负偏移");
         a.Equal(2, sample.Single().AddressCopies.Count, "仅消去指针初值和递增副本");
@@ -59,9 +60,17 @@ internal static class ArrayCursorCheck
         }
         var offset = Read(OffsetLoop());
         a.Equal(1, offset.Length, "字节偏移与元素下标成对递增");
+        a.True(offset.Single().IsOffset, "纯字节偏移可还原数值用途");
         a.True(offset.Single().Address is Binary { Left: Binary { Left: Const { Value: 0 }, Right: Const { Value: 32 } } }, "保留数组头偏移");
-        a.Equal(0, Read(OffsetLoop(scalarUse: true)).Length, "偏移作为普通数值返回时不消去");
-        a.Equal(0, Read(OffsetLoop(copyEscapes: true)).Length, "初值副本仍被使用时不消去");
+        a.Equal(1, Read(OffsetLoop(scalarUse: true)).Length, "偏移作为普通数值返回时保留归纳关系");
+        a.Equal(1, Read(OffsetLoop(copyEscapes: true)).Length, "初值副本的数值用途由副本表达式保留");
+        foreach (var index in new[] { 0UL, 1UL, 7UL, ulong.MaxValue })
+        {
+            var evaluator = new Evaluator();
+            evaluator.Registers[counter.Storage] = index;
+            var expression = ExprMap.Map(offset.Single().Address, e => e is Use use ? new Read(use.Variable.Storage, use.Width) : null);
+            a.Equal<UInt128>(unchecked(32 + index * 16), evaluator.Eval(expression), "偏移关系保留 64 位回绕");
+        }
         a.Equal(0, Read(OffsetLoop(stride: 8)).Length, "字节步长不符时拒绝");
         MachineFunction NarrowLoop(Cond comparison = Cond.Slt, bool bypass = false, ulong initialIndex = 0, ulong increment = 1)
         {

@@ -402,6 +402,11 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     var target = model.Method((MethodReference)operand);
                     var values = PopMany(target.Method.Parameters.Count + (target.Method.IsStatic ? 0 : 1));
                     if (instruction.OpCode.Code == Code.Callvirt) NotNull(values[0]);
+                    if (side.RuntimeTypeReturn(target, values.Select(v => v.Bits).ToArray()) is { } reflected)
+                    {
+                        stack.Push(Load(target.Method.ReturnType, reflected));
+                        break;
+                    }
                     // beforefieldinit 值类型的实例方法与构造函数不是初始化触发点（ECMA-335 II.10.5.3：只保证在首次访问静态字段之前）；
                     // 原生代码在这些调用前的显式初始化由 L3 照原样写出（MethodRecovery.Implied 不再删去它）。
                     // System.Math 的浮点内建函数对应单条 FABS/FSQRT/FRINT 指令，不访问 Math 的静态字段，不是初始化触发点。

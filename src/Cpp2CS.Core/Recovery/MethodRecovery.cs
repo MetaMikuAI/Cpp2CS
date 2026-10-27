@@ -1166,6 +1166,7 @@ public sealed partial class MethodRecovery
             // SSA 的负版本是未定义/被调用破坏的值，不能因 phi 反向推断出类型就读零初始化局部。
             if (exceptionLayout is { Succeeded: true } && v.Version < 0) throw Fail(0, $"异常区域 读取未定义 SSA 值 {v}");
             CheckPoison(v);
+            if (arrayOffsets.TryGetValue(v, out var offset)) return Recover(Fold.Convert(ConvKind.Truncate, offset, width), null);
             if (exceptionValues.TryGetValue(v, out var exception)) return exception;
             if (width == 64 && v.Version == 0 && indirectRoots.TryGetValue(v.Storage, out var root)) return root;
             if (RegisterPiece(v, width) is { } piece) return piece;

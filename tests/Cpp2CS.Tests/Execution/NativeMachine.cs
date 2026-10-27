@@ -319,6 +319,13 @@ internal sealed partial class NativeMachine : IDisposable
         var locations = StructAbi.Arguments(signature);
         var rawArguments = locations.Select(a => ReadLocation(a)).ToArray();
         var arguments = world.Index.StructAbi.ObservableArguments(side, types, rawArguments);
+        if (side.RuntimeTypeReturn(callee, arguments) is { } reflected)
+        {
+            var reflectionResult = signature.Return ?? throw new Unsupported("反射方法没有返回位置");
+            PutLocation(reflectionResult, StructAbi.Bytes(reflected, world.StorageSize(callee.Method.ReturnType)));
+            Back();
+            return;
+        }
         if (callee.Method is { Name: "ToString", IsStatic: false, Parameters.Count: 0, Owner.FullName: "System.Enum" }
             && arguments is [var receiver] && receiver >= World.StackBase
             && receiver + RuntimeLayout.ObjectHeaderSize + 8 <= World.StackBase + World.StackSize

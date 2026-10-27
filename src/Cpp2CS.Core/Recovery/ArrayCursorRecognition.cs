@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery;
 /// <summary>同一循环的元素指针与整数下标按对应步长递增时，恢复数组根和下标关系。</summary>
 internal static class ArrayCursorRecognition
 {
-    internal sealed record Cursor(Variable Pointer, Expr Address, IReadOnlySet<Variable> AddressCopies);
+    internal sealed record Cursor(Variable Pointer, Expr Address, IReadOnlySet<Variable> AddressCopies, bool IsOffset);
 
     public static IEnumerable<Cursor> Read(MachineFunction function, Func<Expr, int?> elementSize)
     {
@@ -52,28 +52,27 @@ internal static class ArrayCursorRecognition
         int? OffsetSize(Phi pointer)
         {
             var sizes = new HashSet<int>();
-            bool AddressUse(Expr expression)
+            void AddressUse(Expr expression)
             {
                 if (expression is Binary { Op: BinOp.Add } sum)
                 {
                     var other = sum.Left is Use left && left.Variable == pointer.Target ? sum.Right
                         : sum.Right is Use right && right.Variable == pointer.Target ? sum.Left : null;
-                    if (other is not null && elementSize(other) is > 0 and var size) { sizes.Add(size); return true; }
+                    if (other is not null && elementSize(other) is > 0 and var size) sizes.Add(size);
                 }
-                return expression is not Use use || use.Variable != pointer.Target
-                    ? ExprMap.Children(expression).All(AddressUse) : false;
+                foreach (var child in ExprMap.Children(expression)) AddressUse(child);
             }
             foreach (var statement in function.Blocks.SelectMany(b => b.Statements))
             {
                 if (statement == pointer || statement is Define d && pointer.Sources.Contains(d.Target) && Step(d.Target, pointer.Target) is not null) continue;
-                if (statement is Phi phi && phi.Sources.Contains(pointer.Target) || !ExprMap.Operands(statement).All(AddressUse)) return null;
+                foreach (var expression in ExprMap.Operands(statement)) AddressUse(expression);
             }
             return sizes.Count == 1 ? sizes.Single() : null;
         }
         (Expr Root, long Offset, int Size)? Seed(Variable source, Block loop, Phi pointer)
         {
             var value = Expand(new Use(source, 64));
-            // 数组根可在循环内重读；常量字节偏移只在全部使用都是数组加法时认回。
+            // 数组根可在循环内重读；常量字节偏移由数组加法确定元素大小，其他用途保留其数值。
             if (value is Const initial && initial.Signed >= Facts.RuntimeLayout.ArrayData && OffsetSize(pointer) is { } element)
                 return (Expr.C(0, 64), initial.Signed, element);
             long offset = 0;
@@ -125,11 +124,8 @@ internal static class ArrayCursorRecognition
                 foreach (var use in ExprMap.Walk(value).OfType<Use>()) Collect(use.Variable);
             }
             foreach (var source in pointer.Sources) Collect(source);
-            if (root is Const && function.Blocks.SelectMany(b => b.Statements).Any(s => s != pointer
-                && !(s is Define d && copies.Contains(d.Target)) && (s is Phi p ? p.Sources.Any(copies.Contains)
-                    : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => copies.Contains(u.Variable))))) continue;
             var scaled = new Binary(BinOp.Mul, new Use(counter.Target, 64), Expr.C((ulong)size, 64), 64);
-            yield return new(pointer.Target, new Binary(BinOp.Add, new Binary(BinOp.Add, root, Expr.C(unchecked((ulong)origin), 64), 64), scaled, 64), copies);
+            yield return new(pointer.Target, new Binary(BinOp.Add, new Binary(BinOp.Add, root, Expr.C(unchecked((ulong)origin), 64), 64), scaled, 64), copies, root is Const);
             break;
         }
     }
