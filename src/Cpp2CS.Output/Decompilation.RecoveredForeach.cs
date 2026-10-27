@@ -242,6 +242,7 @@ public static partial class Decompilation
             RecoverAsyncLoops(rootNode);
             RecoverGuardedAsyncLoops(rootNode);
             RecoverMergedLoops(rootNode);
+            RecoverNullableMergedLoops(rootNode);
             if (context?.TypeSystem is { } compilation) RecoverAny(rootNode, compilation);
         }
     }
