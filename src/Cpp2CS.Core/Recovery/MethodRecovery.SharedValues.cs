@@ -28,6 +28,7 @@ public sealed partial class MethodRecovery
             if (!original.OfType<Define>().Any(d => ExprMap.Walk(d.Value).Any(e => e is Load
                 { Address: Binary { Left: Symbol { Kind: SymbolKind.Class, Value: GenericParameterRef }, Right: Const { Value: RuntimeLayout.ClassStackSlotSize } } }))) return;
             var defs = original.OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+            var joins = original.OfType<Phi>().ToDictionary(p => p.Target);
             var singleStores = original.OfType<Store>().Where(s => s.Target is FrameAddress).GroupBy(s => ((FrameAddress)s.Target).Offset)
                 .Where(g => g.Count() == 1).ToDictionary(g => g.Key, g => g.Single());
             Expr ExpandValue(Expr e, int depth = 0) => depth > 24 ? e : ExprMap.Map(e,
@@ -53,6 +54,8 @@ public sealed partial class MethodRecovery
                 Intrinsic { Name: "managed_field_address", Arguments: [_, Symbol { Value: FieldRef field }] } => FieldType(field),
                 Use { Variable: { Version: 0 } variable } when indirectRoots.TryGetValue(variable.Storage, out var root) && root.Type is ByRefRef reference => reference.Element,
                 Load { Address: FrameAddress frame } when singleStores.TryGetValue(frame.Offset, out var store) => AddressType(store.Value, depth + 1),
+                Use u when joins.TryGetValue(u.Variable, out var phi) && phi.Sources.Length > 0
+                    && phi.Sources.Select(v => AddressType(new Use(v, v.Width), depth + 1)).Distinct().ToArray() is [TypeRef type] => type,
                 _ => null,
             };
             Dictionary<long, Store> InvokerStores(Block block, int index)
@@ -123,6 +126,7 @@ public sealed partial class MethodRecovery
             function.Renumber();
             Ssa.Propagate.Run(function, Ssa.Dominators.Compute(function));
             defs = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+            joins = function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().ToDictionary(p => p.Target);
 
             // 不同分支选择不同的 MethodInfo/实参后汇入同一个 invoker；调用分别留在原分支上。
             foreach (var block in function.Blocks.ToArray())
@@ -212,7 +216,16 @@ public sealed partial class MethodRecovery
                             ownerBlock.Statements[ownerBlock.Statements.IndexOf(store)] = new Nop(store.Address, "invoker 参数");
                         }
                     }
-                    if (!ReferenceEquals(block.Statements[i], call)) sharedSites.Add(call.Address);
+                    if (!ReferenceEquals(block.Statements[i], call))
+                    {
+                        sharedSites.Add(call.Address);
+                        // memcpy/memset 返回目标地址；托管值复制不能丢失仍被使用的指针定义。
+                        if (call is { Op: { Kind: OpKind.Import, Operand: "memcpy" or "memset" }, Defines: [var result] })
+                        {
+                            block.Statements.Insert(++i, new Define(call.Address, result, call.Arguments[0]));
+                            defs[result] = call.Arguments[0];
+                        }
+                    }
                 }
             NormalizeStackCanary(ExpandValue);
             PromotePrivateFrameSlots();
