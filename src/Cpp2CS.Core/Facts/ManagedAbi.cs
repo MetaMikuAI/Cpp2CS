@@ -10,10 +10,12 @@ public enum Passing
 {
     /// <summary>值本身在 Pieces 所列寄存器中。</summary>
     Registers,
-    /// <summary>寄存器 Pieces[0] 中是值副本的地址（大结构参数；返回值时为 x8 指向的结果缓冲区）。</summary>
+    /// <summary>寄存器 Pieces[0] 中是值副本或返回缓冲区的地址。</summary>
     Indirect,
     /// <summary>经栈传递。</summary>
     Stack,
+    /// <summary>完全共享的类型参数：引用值或值类型副本地址，占一个普通整数参数位置。</summary>
+    Shared,
 }
 
 public sealed record AbiValue(TypeRef Type, Passing Passing, AbiPiece[] Pieces);
@@ -23,7 +25,7 @@ public sealed record AbiSignature(AbiValue? This, AbiValue[] Parameters, AbiPiec
 {
     public IEnumerable<AbiValue> Arguments => This is null ? Parameters : [This, .. Parameters];
 
-    /// <summary>调用读取的寄存器：各参数的寄存器段、MethodInfo 寄存器；间接返回时加 x8。</summary>
+    /// <summary>调用读取的寄存器：参数、MethodInfo 及间接返回缓冲区。</summary>
     public Storage[] Reads => [.. Arguments.SelectMany(a => a.Pieces).Select(p => p.Register).Distinct(),
         .. MethodInfo is { } m ? [m.Register] : Array.Empty<Storage>(),
         .. Return is { Passing: Passing.Indirect } r ? [r.Pieces[0].Register] : Array.Empty<Storage>()];
@@ -40,11 +42,15 @@ public enum ValueKind { Void, Integer, Reference, Float, Double, Struct }
 /// (this, 参数..., const MethodInfo*)，值类型的 this 为指向数据的指针。
 /// 整数/指针/引用依次占 x0–x7，float/double 依次占 v0–v7；HFA（1–4 个同类浮点成员）占连续 v 寄存器；
 /// 其余不超过 16 字节的结构占 1–2 个 x 寄存器（不拆分到栈），更大的结构传副本地址；返回值同理，大结构经 x8 写回。
-/// 大小与成员布局取自 <see cref="FieldLayouts"/>；含泛型参数或完全共享占位类型的签名无法分类（返回 null）。
+/// 完全共享的类型参数占一个整数寄存器；其返回缓冲区放在显式参数之后、MethodInfo 之前。
+/// 大小与成员布局取自 <see cref="FieldLayouts"/>；缺少原生实例见证的开放类型参数无法分类（返回 null）。
 /// </summary>
 public sealed partial class ManagedAbi(FieldLayouts layouts)
 {
     private const int Registers = 8;
+
+    internal static bool SharedValue(TypeRef type) => type is GenericParameterRef { NativeShared: true }
+        || type is DefinitionRef { Definition: { Namespace: "Unity.IL2CPP.Metadata", Name: "__Il2CppFullySharedGenericType" or "__Il2CppFullySharedGenericStructType" } };
 
     public ValueKind? Kind(TypeRef type)
     {
@@ -117,8 +123,15 @@ public sealed partial class ManagedAbi(FieldLayouts layouts)
             }
             parameters[i] = value;
         }
+        var returnType = Concrete(definition.ReturnType);
+        AbiValue? result;
+        if (SharedValue(returnType))
+        {
+            if (gpr >= Registers) { problem = "完全共享返回缓冲区的栈传递尚未支持"; return null; }
+            result = new(returnType, Passing.Indirect, [new AbiPiece(Storage.Gpr(gpr++), 64, 0)]);
+        }
+        else result = ClassifyReturn(returnType, out problem);
         AbiPiece? methodInfo = gpr < Registers ? new AbiPiece(Storage.Gpr(gpr), 64, 0) : null;
-        var result = ClassifyReturn(Concrete(definition.ReturnType), out problem);
         if (problem is not null)
         {
             problem = $"返回值: {problem}";
@@ -130,6 +143,11 @@ public sealed partial class ManagedAbi(FieldLayouts layouts)
     private AbiValue? Argument(TypeRef type, ref int gpr, ref int vec, out string? problem)
     {
         problem = null;
+        if (SharedValue(type))
+        {
+            if (gpr >= Registers) { problem = "完全共享参数的栈传递尚未支持"; return null; }
+            return new(type, Passing.Shared, [new AbiPiece(Storage.Gpr(gpr++), 64, 0)]);
+        }
         switch (Kind(type))
         {
             case null:

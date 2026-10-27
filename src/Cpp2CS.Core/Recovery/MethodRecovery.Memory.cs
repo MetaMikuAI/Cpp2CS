@@ -268,7 +268,7 @@ public sealed partial class MethodRecovery
                 if (e is Use cursor && arrayCursors.TryGetValue(cursor.Variable, out var address)) return ExpandAddress(address);
                 if (e is Use u && seen.Add(u.Variable) && values.TryGetValue(u.Variable, out var value))
                 {
-                    if (value is Intrinsic { Name: "managed_field_address" or "managed_generic_buffer" }) return value;
+                    if (value is Intrinsic { Name: "managed_field_address" or "managed_generic_buffer" or "managed_generic_argument" }) return value;
                     if (inlined.Contains(u.Variable) && value is Binary { Op: BinOp.Add }) return ExpandAddress(value);
                     if (value is Use forwarded && TypeOfAddressBase(forwarded) is ByRefRef) return ExpandAddress(value);
                     if (value is Binary { Op: BinOp.Add, Right: Const } addition

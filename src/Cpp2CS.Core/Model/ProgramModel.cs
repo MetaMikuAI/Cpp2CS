@@ -43,6 +43,8 @@ public sealed record GenericParameterRef(string Name, bool IsMethod, int Positio
     public bool SharedReference { get; init; }
     /// <summary>原生实例的标量布局见证；托管输出仍保留类型参数，仅允许复制、默认值和拆箱。</summary>
     public TypeRef? NativeScalar { get; init; }
+    /// <summary>登记为完全共享入口；引用实参传值，值实参传存储地址，大小由 RGCTX 给出。</summary>
+    public bool NativeShared { get; init; }
     public DefinitionRef? ReferenceBase => Parameter?.Constraints.OfType<DefinitionRef>().FirstOrDefault(t => !t.Definition.IsValueType
         && !t.Definition.IsInterface && t.Definition.FullName is not ("System.Object" or "System.ValueType" or "System.Enum"));
     public bool IsReferenceConstrained => (Parameter?.Attributes & GenericParameterAttributes.ReferenceTypeConstraint) != 0 && Parameter is not null

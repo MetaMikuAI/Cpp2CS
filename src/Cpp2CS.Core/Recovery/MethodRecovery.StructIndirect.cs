@@ -10,7 +10,7 @@ public sealed partial class MethodRecovery
     {
         private readonly Dictionary<Storage, ManagedValue> indirectRoots = new();
         private LocalValue? ownReturnBuffer;
-        private bool IndirectStruct(AbiValue value) => value.Passing == Passing.Indirect && types.Kind(value.Type) == TypeKind.Struct;
+        private bool IndirectStruct(AbiValue value) => value.Passing == Passing.Indirect && (types.Kind(value.Type) == TypeKind.Struct || ManagedAbi.SharedValue(value.Type));
 
         [ParameterBinding(20)]
         private bool PrepareIndirectArgument(AbiValue parameter, int index)
@@ -42,7 +42,7 @@ public sealed partial class MethodRecovery
             ManagedInvocation invocation, List<ManagedStatement> output)
         {
             if (signature.Return is not { } returned || !IndirectStruct(returned)) return false;
-            if (!registers.TryGetValue(returned.Pieces.Single().Register, out var expression)) throw Fail(call.Address, "调用 缺少 x8 返回缓冲区");
+            if (!registers.TryGetValue(returned.Pieces.Single().Register, out var expression)) throw Fail(call.Address, "调用 缺少返回缓冲区");
             var address = StructAddress(expression, returned.Type);
             var result = CallStructLocal(call, returned.Type);
             output.Add(new ManagedCall(call.Address, invocation, result, false));
@@ -50,7 +50,7 @@ public sealed partial class MethodRecovery
             if (call.Kind is CallKind.Tail or CallKind.TailIndirect)
             {
                 if (ownReturnBuffer is null || !address.Equals(new AddressValue(ownReturnBuffer)) || !returned.Type.Equals(returnType))
-                    throw Fail(call.Address, "尾调用 x8 不是本方法返回根");
+                    throw Fail(call.Address, "尾调用缓冲区不是本方法返回根");
                 output.Add(new ManagedReturn(call.Address, ownReturnBuffer));
             }
             return true;
@@ -64,6 +64,7 @@ public sealed partial class MethodRecovery
             var address = new AddressValue(ownReturnBuffer);
             var leaves = StructPaths(ownReturnBuffer.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null))
                 .Select(p => PathValue(address, p.Path)).ToHashSet();
+            if (ManagedAbi.SharedValue(ownReturnBuffer.Type)) leaves.Add(ownReturnBuffer);
             var blocksByAddress = body.Blocks.ToDictionary(b => b.Address);
             IEnumerable<ulong> Successors(ManagedBlock block) => block.Statements.LastOrDefault() is { } last ? ManagedValues.Edges(last).Select(e => e.Target) : [];
             var predecessors = body.Blocks.SelectMany(b => Successors(b).Select(s => (From: b.Address, To: s)))
@@ -80,6 +81,8 @@ public sealed partial class MethodRecovery
             }
             void Apply(HashSet<ManagedValue> state, ManagedStatement statement)
             {
+                if (statement is ManagedAssignment assignment && assignment.Target.Equals(ownReturnBuffer)) state.UnionWith(leaves);
+                if (statement is ManagedCall { Result: { } result } && result.Equals(ownReturnBuffer)) state.UnionWith(leaves);
                 if (statement is ManagedStore store)
                 {
                     if (leaves.Contains(store.Target)) state.Add(store.Target);
@@ -104,7 +107,7 @@ public sealed partial class MethodRecovery
                 {
                     Apply(state, statement);
                     if (statement is ManagedReturn && !state.IsSupersetOf(leaves))
-                        Hole(statement.Address, $"返回值 x8 缓冲区仍有 {leaves.Count - state.Count} 个叶子未在所有路径定义");
+                        Hole(statement.Address, $"返回缓冲区仍有 {leaves.Count - state.Count} 个叶子未在所有路径定义");
                 }
             }
         }

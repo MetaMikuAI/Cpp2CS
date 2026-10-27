@@ -106,7 +106,7 @@ public sealed partial class MethodRecovery
         };
         return new Context(this, open, entry) { SharedDefinition = true }.Run();
         static TypeRef Bind(TypeRef parameter, TypeRef instance) => parameter is GenericParameterRef g
-            ? FieldLayouts.IsFullyShared(instance) ? g : ManagedTypes.IsReferenceType(instance) ? g with { SharedReference = true } : g with { NativeScalar = instance } : parameter;
+            ? FieldLayouts.IsFullyShared(instance) ? g with { NativeShared = true } : ManagedTypes.IsReferenceType(instance) ? g with { SharedReference = true } : g with { NativeScalar = instance } : parameter;
     }
 
     /// <summary>异常类型的无参实例构造函数（全名，含 mscorlib 之外的类型）。</summary>
@@ -1118,7 +1118,7 @@ public sealed partial class MethodRecovery
                     var pinned = Recover(array, null);
                     return pinned.Type is ArrayRef { IsVector: true } arrayType ? new PinnedArrayValue(pinned, arrayType)
                         : throw Fail(0, "固定地址 来源不是一维数组");
-                case Intrinsic { Name: "managed_field_address" or "managed_generic_buffer" } address: return SharedAddress(address);
+                case Intrinsic { Name: "managed_field_address" or "managed_generic_buffer" or "managed_generic_argument" } address: return SharedAddress(address);
                 case TypedFrame f: return new AddressValue(f.Region.Local);
                 case Const c:
                 {
@@ -1509,7 +1509,7 @@ public sealed partial class MethodRecovery
                 case Return ret:
                     if (returnHole is { } cause) throw Derived(cause, "返回 返回值类型尚未支持");
                     if (ManagedTypes.IsVoid(returnType)) output.Add(new ManagedReturn(ret.Address, null));
-                    else if (ret.Value is { } returned) output.Add(new ManagedReturn(ret.Address, types.Kind(returnType) == TypeKind.Struct
+                    else if (ret.Value is { } returned) output.Add(new ManagedReturn(ret.Address, ownReturnBuffer is not null || types.Kind(returnType) == TypeKind.Struct
                         ? StructReturn(returned) : RecoverAs(returned, returnType, ret.Address)));
                     else throw Fail(ret.Address, "返回 非 void 方法缺少返回值");
                     return;

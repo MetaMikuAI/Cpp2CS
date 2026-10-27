@@ -11,6 +11,15 @@ public sealed partial class MethodRecovery
     private sealed partial class Context
     {
         private readonly Dictionary<ulong, LocalValue> sharedBuffers = [];
+        private readonly Dictionary<Storage, ArgumentValue> sharedIncoming = [];
+
+        [ParameterBinding(15)]
+        private bool PrepareSharedArgument(AbiValue parameter, int index)
+        {
+            if (parameter.Passing != Passing.Shared) return false;
+            sharedIncoming.Add(parameter.Pieces.Single().Register, new(index, parameter.Type, 0));
+            return true;
+        }
 
         // fully shared 的 T 只经有类型的存储复制；不为它猜测寄存器宽度或对象布局。
         private void NormalizeSharedValues()
@@ -29,25 +38,28 @@ public sealed partial class MethodRecovery
                 while (e is Convert c) e = c.Operand;
                 return e;
             }
-            TypeRef? SizeType(Expr e)
+            TypeRef? SizeType(Expr e, int depth = 0)
             {
+                if (depth > 24) return null;
                 e = ExpandValue(e);
                 while (e is Convert c) e = c.Operand;
-                if (e is Load { Address: FrameAddress slot } && singleStores.TryGetValue(slot.Offset, out var stored)) return SizeType(stored.Value);
+                if (e is Load { Address: FrameAddress slot } && singleStores.TryGetValue(slot.Offset, out var stored)) return SizeType(stored.Value, depth + 1);
                 return e is Load { Width: 32, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: GenericParameterRef type }, Right: Const { Value: RuntimeLayout.ClassStackSlotSize } } }
                     ? type : null;
             }
-            TypeRef? AddressType(Expr e) => ExpandValue(e) switch
+            TypeRef? AddressType(Expr e, int depth = 0) => depth > 24 ? null : ExpandValue(e) switch
             {
-                Intrinsic { Name: "managed_generic_buffer", Arguments: [Symbol { Value: TypeRef type }, _] } => type,
+                Intrinsic { Name: "managed_generic_buffer" or "managed_generic_argument", Arguments: [Symbol { Value: TypeRef type }, _] } => type,
                 Intrinsic { Name: "managed_field_address", Arguments: [_, Symbol { Value: FieldRef field }] } => FieldType(field),
+                Use { Variable: { Version: 0 } variable } when indirectRoots.TryGetValue(variable.Storage, out var root) && root.Type is ByRefRef reference => reference.Element,
+                Load { Address: FrameAddress frame } when singleStores.TryGetValue(frame.Offset, out var store) => AddressType(store.Value, depth + 1),
                 _ => null,
             };
             foreach (var block in function.Blocks)
                 for (var i = 0; i < block.Statements.Count; i++)
                 {
                     if (block.Statements[i] is not Define define || ExpandValue(define.Value) is not Binary
-                        { Op: BinOp.Sub, Left: FrameAddress, Right: Binary { Op: BinOp.And, Left: Binary { Op: BinOp.Add, Left: var size, Right: Const { Value: 15 } }, Right: Const { Value: 0x1fffffff0 } } }
+                        { Op: BinOp.Sub, Left: FrameAddress or Intrinsic { Name: "managed_generic_buffer" }, Right: Binary { Op: BinOp.And, Left: Binary { Op: BinOp.Add, Left: var size, Right: Const { Value: 15 } }, Right: Const { Value: 0x1fffffff0 } } }
                         || SizeType(size) is not { } type) continue;
                     var buffer = new Intrinsic("managed_generic_buffer", [new Symbol(SymbolKind.Type, type), Expr.C(define.Address, 64)], 64);
                     sharedBuffers[define.Address] = StructLocal(type, 0);
@@ -55,6 +67,22 @@ public sealed partial class MethodRecovery
                     defs[define.Target] = buffer;
                 }
             if (sharedBuffers.Count == 0) return;
+
+            // 完全共享入参：值类型直接使用传入地址，引用类型使用寄存器的栈副本地址。
+            foreach (var block in function.Blocks)
+            for (var i = 0; i < block.Statements.Count; i++)
+            {
+                if (block.Statements[i] is not Define define || ExpandValue(define.Value) is not Select
+                    { Condition: Compare { Cond: Cond.Slt, Left: var bits, Right: Const { Value: 0 } },
+                      True: Use { Variable: { Version: 0 } incoming }, False: FrameAddress slot }
+                    || Scalar(bits) is not Load { Width: 32, Address: Binary { Op: BinOp.Add,
+                        Left: Symbol { Kind: SymbolKind.Class, Value: GenericParameterRef generic }, Right: Const { Value: 0x28 } } }
+                    || !sharedIncoming.TryGetValue(incoming.Storage, out var argument) || !argument.Type.Equals(generic)
+                    || !singleStores.TryGetValue(slot.Offset, out var saved) || saved.Value is not Use { Width: 64 } copy || copy.Variable != incoming) continue;
+                var address = new Intrinsic("managed_generic_argument", [new Symbol(SymbolKind.Type, generic), Expr.C((ulong)incoming.Storage.Index, 64)], 64);
+                block.Statements[i] = define with { Value = address };
+                defs[define.Target] = address;
+            }
 
             // invoker 对引用 T 传对象、对值 T 传地址；两条路径在托管侧都是同一个 T 值。
             foreach (var block in function.Blocks.ToArray())
