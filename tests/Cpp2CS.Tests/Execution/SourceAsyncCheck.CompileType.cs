@@ -32,8 +32,13 @@ internal static partial class SourceAsyncCheck
         if (!File.Exists(path)) path = Path.Combine(directory, "src", "Assembly-CSharp.dll", type[..type.LastIndexOf('.')], type[(type.LastIndexOf('.') + 1)..] + ".cs");
         var source = File.ReadAllText(path);
         var tree = CSharpSyntaxTree.ParseText(source);
-        var compilation = CSharpCompilation.Create("RecoveredType", [tree],
-            CompilationReferences(Path.Combine(directory, "assemblies"), proof, includeVoidBuilder: true),
+        var assembly = Path.GetFileName(path).Contains(".dll_", StringComparison.Ordinal)
+            ? Path.GetFileName(path).Split(".dll_", 2, StringSplitOptions.None)[0] : Directory.GetParent(path)!.Parent!.Name[..^4];
+        var sourceName = assembly + ".Recovered";
+        var assemblies = Path.Combine(directory, "assemblies-src");
+        var compilation = CSharpCompilation.Create(sourceName, [tree],
+            ScopeCompilationReferences.Create(assemblies, assembly, new HashSet<string> { type }, sourceName, proof,
+                CompilationReferences(assemblies, proof, includeVoidBuilder: true)),
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true));
         var result = compilation.Emit(Path.Combine(proof, "Recovered.dll"));
         File.WriteAllLines(Path.Combine(proof, "compile.txt"), result.Diagnostics.Select(d => d.ToString()));
