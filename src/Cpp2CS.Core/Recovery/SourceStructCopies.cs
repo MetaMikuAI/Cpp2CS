@@ -29,6 +29,7 @@ internal static partial class SourceStructCopies
     internal static ManagedBody Rewrite(ManagedBody body)
     {
         body = ConstructorConstants(body);
+        body = LocalSnapshotCopies(body);
         static LocalValue? Local(ManagedValue value) => value switch
         {
             LocalValue local => local,

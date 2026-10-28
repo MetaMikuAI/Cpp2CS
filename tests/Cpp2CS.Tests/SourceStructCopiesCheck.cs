@@ -153,6 +153,60 @@ internal static class SourceStructCopiesCheck
         a.Equal(4, SourceStructCopies.Rewrite(Body(new ManagedStatement[] { Clear(0), new ManagedCall(0, new(null!, null, [], false), null, false), Clear(1), Clear(2) })).Blocks[0].Statements.Count,
             "不跨过可观察调用合并清零");
         var nestedZero = Body([new ManagedStore(0, new FieldValue(new AddressValue(nestedSource), new(wrapper.Fields[0], wrapperType), type, 0), new ComposedValue(type, []))]);
+        var partSnapshot = new LocalValue(new(Storage.Temp(-40), 1), type, 0);
+        var counter = new LocalValue(new(Storage.Temp(-41), 1), integer, 32);
+        var readPart = new ManagedAssignment(0, partSnapshot,
+            new FieldValue(new AddressValue(nestedSource), new(wrapper.Fields[0], wrapperType), type, 0));
+        var splitReads = snapshots.Select((s, i) => (ManagedStatement)new ManagedAssignment(0, s, Field(partSnapshot, i))).ToArray();
+        var splitWrites = snapshots.Select((s, i) => (ManagedStatement)new ManagedStore(0, Nested(secondDestination, i), s)).ToArray();
+        var resetCounter = new ManagedAssignment(1, counter, new ConstantValue(0, integer, 32));
+        var splitCopy = Body(new ManagedStatement[] { readPart, splitReads[0], resetCounter }.Concat(splitReads.Skip(1)).Concat(splitWrites));
+        var collapsedSplit = SourceStructCopies.Rewrite(splitCopy).Blocks[0].Statements;
+        a.True(collapsedSplit is [ManagedAssignment, ManagedAssignment { Target: var copiedSplit, Value: var originalSplit }]
+            && collapsedSplit[0] == resetCounter && copiedSplit == secondDestination && originalSplit == nestedSource,
+            "嵌套临时快照和无关常量不阻碍完整局部复制");
+        string ExecuteSplit(ManagedBody body, int[] values)
+        {
+            Dictionary<FieldDef, object> Record(int[] parts) => new()
+            {
+                [wrapper.Fields[0]] = definition.Fields.Select((field, index) => (field, index)).ToDictionary(p => p.field, p => (object)parts[p.index])
+            };
+            var variables = new Dictionary<Variable, object> { [nestedSource.Variable] = Record(values), [secondDestination.Variable] = Record([-1, -1, -1]) };
+            object Copy(object value) => value is Dictionary<FieldDef, object> fields ? fields.ToDictionary(p => p.Key, p => Copy(p.Value)) : value;
+            object Read(ManagedValue value) => value switch
+            {
+                ConstantValue constant => unchecked((int)constant.Bits), LocalValue local => variables[local.Variable],
+                AddressValue address => Read(address.Target),
+                FieldValue field => ((Dictionary<FieldDef, object>)Read(field.Receiver))[field.Field.Field],
+                _ => throw new NotSupportedException(value.ToString()),
+            };
+            foreach (var statement in body.Blocks[0].Statements)
+                switch (statement)
+                {
+                    case ManagedAssignment assignment: variables[assignment.Target.Variable] = Copy(Read(assignment.Value)); break;
+                    case ManagedStore { Target: FieldValue field } store:
+                        ((Dictionary<FieldDef, object>)Read(field.Receiver))[field.Field.Field] = Copy(Read(store.Value)); break;
+                    default: throw new NotSupportedException(statement.ToString());
+                }
+            return string.Join(',', Enumerable.Range(0, 3).Select(i => Read(Nested(secondDestination, i))))
+                + ";" + string.Join(',', Enumerable.Range(0, 3).Select(i => Read(Nested(nestedSource, i)))) + ";" + Read(counter);
+        }
+        foreach (var values in new[] { new[] { 0, 0, 0 }, new[] { 7, -3, 991 }, new[] { int.MinValue, int.MaxValue, -1 } })
+            a.Equal(ExecuteSplit(splitCopy, values), ExecuteSplit(SourceStructCopies.Rewrite(splitCopy), values), "嵌套复制保留目标、来源和无关常量值");
+        foreach (var barrier in new ManagedStatement[] { new ManagedCall(1, new(null!, null, [], false), null, false),
+            new ManagedAssignment(1, nestedSource, secondDestination),
+            new ManagedAssignment(1, new LocalValue(new(Storage.Temp(-42), 1), new ByRefRef(type), 64), new AddressValue(partSnapshot)) })
+        {
+            var interruptedSplit = Body(new ManagedStatement[] { readPart, splitReads[0], barrier }.Concat(splitReads.Skip(1)).Concat(splitWrites));
+            a.True(!SourceStructCopies.Rewrite(interruptedSplit).Blocks[0].Statements.OfType<ManagedAssignment>()
+                .Any(s => s.Target == secondDestination && s.Value == nestedSource), "不跨调用、来源改写或地址逃逸折叠嵌套快照");
+        }
+        var missingSplit = Body(splitCopy.Blocks[0].Statements.SkipLast(1));
+        a.True(!SourceStructCopies.Rewrite(missingSplit).Blocks[0].Statements.OfType<ManagedAssignment>()
+            .Any(s => s.Target == secondDestination && s.Value == nestedSource), "嵌套快照写入缺失时不补字段");
+        var escapedSplit = Body(splitCopy.Blocks[0].Statements.Append(new ManagedReturn(2, partSnapshot)));
+        a.True(SourceStructCopies.Rewrite(escapedSplit).Blocks[0].Statements.OfType<ManagedAssignment>().Any(s => s.Target == partSnapshot),
+            "中间结构体仍被使用时保留快照");
         a.True(SourceStructCopies.Rewrite(nestedZero).Blocks[0].Statements is [ManagedStore { Target: IndirectValue }], "子结构体 default 也计入完整清零");
         var indirectZero = Body(nestedZero.Blocks[0].Statements.Cast<ManagedStore>().Select(s => s with { Target = new IndirectValue(new AddressValue(s.Target), s.Target.Type) }));
         a.True(SourceStructCopies.Rewrite(indirectZero).Blocks[0].Statements is [ManagedStore { Target: IndirectValue { Address: AddressValue { Target: LocalValue } } }],
