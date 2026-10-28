@@ -37,10 +37,27 @@ internal static class ConstantDivisionNormalizer
             shift = (int)amount.Value;
             quotient = resolve(shifted.Left);
         }
-        if (quotient is not Binary { Op: BinOp.MulHighS, Width: 64, Left: Use { Width: 64 } input,
-                Right: Const { Width: 64, Value: > 0 and <= long.MaxValue } magic }
-            || resolve(correction) is not Binary { Op: BinOp.LShr, Width: 64, Right: Const { Value: 63 } } sign
+        if (resolve(correction) is not Binary { Op: BinOp.LShr, Width: 64, Right: Const { Value: 63 } } sign
             || resolve(sign.Left) != quotient) return null;
+
+        var product = quotient;
+        Expr? added = null;
+        if (quotient is Binary { Op: BinOp.Add, Width: 64 } add)
+        {
+            product = resolve(add.Left);
+            added = add.Right;
+            if (product is not Binary { Op: BinOp.MulHighS })
+            {
+                product = resolve(add.Right);
+                added = add.Left;
+            }
+        }
+        if (product is not Binary { Op: BinOp.MulHighS, Width: 64, Left: Use { Width: 64 } input,
+                Right: Const { Width: 64, Value: > 0 } magic }
+            || (magic.Value <= long.MaxValue ? added is not null : added != input)) return null;
+
+        // 负乘数 m 的高位积加 n 等于 floor(n*(m+2^64)/2^64)，结果仍在有符号范围内。
+        // 必须加回同一输入，并使用加回之后的符号位；此时 magic.Value 即有效的正乘数。
 
         var scale = UInt128.One << (64 + shift);
         var divisor = scale / magic.Value + 1;
