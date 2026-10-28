@@ -62,13 +62,16 @@ internal sealed class DelegateCallNormalizer
 
     public static bool Run(ProgramFacts facts, MachineFunction function, IdiomResult report)
     {
-        if (!function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any(c => c.Op?.Kind == OpKind.CallDelegate || c.Op is null && c.Target is Use)) return false;
+        static bool NeedsProof(Call call) => call.Op?.Kind == OpKind.CallDelegate
+            ? call is not { Target: Symbol { Kind: SymbolKind.Method }, DelegateReceiver: not null }
+            : call.Op is null && call.Target is Use;
+        if (!function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any(NeedsProof)) return false;
         var context = new DelegateCallNormalizer(facts, function);
         var invalidResults = new HashSet<Variable>();
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
-                if (block.Statements[i] is not Call call || !(call.Op?.Kind == OpKind.CallDelegate || call.Op is null && call.Target is Use)) continue;
+                if (block.Statements[i] is not Call call || !NeedsProof(call)) continue;
                 var normalized = context.Normalize(call, block);
                 if (normalized is null)
                 {

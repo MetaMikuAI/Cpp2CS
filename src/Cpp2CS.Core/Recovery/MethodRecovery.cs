@@ -336,6 +336,15 @@ public sealed partial class MethodRecovery
             }
             NormalizeCleanupThunks();
             NormalizeOutlinedCalls(idioms);
+            // 清理 thunk 拆开后，栈上的 this 可回代为参数；用同一套委托证明消费新出现的类型证据。
+            if (DelegateCallNormalizer.Run(facts, function, idioms))
+            {
+                function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
+                var delegates = function.Blocks.SelectMany(b => b.Statements).OfType<Call>()
+                    .Where(c => c is { Op.Kind: OpKind.CallDelegate, Target: Symbol { Kind: SymbolKind.Method }, DelegateReceiver: not null })
+                    .Select(c => c.Address).ToHashSet();
+                idioms.Residuals.RemoveAll(r => r.Category.StartsWith("indirect:", StringComparison.Ordinal) && delegates.Contains(r.Address));
+            }
             if (function.Blocks.Any(b => b.IsLandingPad))
                 while (ExceptionNullBranches.Run(facts, function)) function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
             foreach (var residual in idioms.Residuals)
