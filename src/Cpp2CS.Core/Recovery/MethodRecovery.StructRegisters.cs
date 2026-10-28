@@ -82,7 +82,9 @@ public sealed partial class MethodRecovery
             var pieces = new List<(AbiPiece Piece, ManagedValue Value)>();
             foreach (var piece in value.Pieces)
             {
-                if (!expression(piece).Bind(e => Recover(e, null)).TryGet(out var recovered, out var failure)) return failure;
+                // ABI 片只读取声明的低位；间接调用的保守寄存器外壳可能仍是 128 位。
+                if (!expression(piece).Bind(e => Recover(e.Width > piece.Width ? Fold.Convert(ConvKind.Truncate, e, piece.Width) : e, null))
+                    .TryGet(out var recovered, out var failure)) return failure;
                 pieces.Add((piece, recovered));
             }
             if (value.Type is GenericParameterRef { NativeAggregate: not null })
