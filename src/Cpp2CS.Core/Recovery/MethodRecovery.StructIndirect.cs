@@ -34,6 +34,23 @@ public sealed partial class MethodRecovery
             arguments[register] = new(-2, root.Type, 64);
         }
 
+        // 尾部 memcpy 完整写入本方法返回根时，保留有类型的结构体读取与复制。
+        [CallRule(21)]
+        private RecoveryResult<bool> CopyStructReturn(Call call, List<ManagedStatement> output)
+        {
+            if (call is not { Kind: CallKind.Tail, Op: { Kind: OpKind.Import, Operand: "memcpy" },
+                    Arguments: [var destination, var source, Const count] }
+                || ownReturnBuffer is null || types.Kind(returnType) != TypeKind.Struct
+                || types.Size(returnType) <= 0 || count.Value != (ulong)types.Size(returnType)) return false;
+            if (!StructAddress(destination, returnType).TryGet(out var target, out var failure)) return failure;
+            if (!target.Equals(new AddressValue(ownReturnBuffer))) return false;
+            if (!StructAddress(source, returnType).TryGet(out var address, out failure)) return failure;
+            if (ManagedValues.Walk(address).Contains(ownReturnBuffer)) return false;
+            output.Add(new ManagedAssignment(call.Address, ownReturnBuffer, new IndirectValue(address, returnType)));
+            output.Add(new ManagedReturn(call.Address, ownReturnBuffer));
+            return true;
+        }
+
         [ArgumentRule(20)]
         private RecoveryResult<ManagedValue?> IndirectStructArgument(AbiValue parameter, ArgumentSite site) => !IndirectStruct(parameter) ? (ManagedValue?)null
             : site.Argument(new AbiValue(new ByRefRef(parameter.Type), Passing.Registers, parameter.Pieces), site.Name)
