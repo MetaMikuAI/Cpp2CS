@@ -31,6 +31,17 @@ internal static class AsyncBranchCopyCheck
         a.True(!Same(new(1, []), new(3, [])), "纯跳转环不能当作到达续接点");
         blocks[1] = [new ManagedAssignment(1, x, new IndirectValue(new AddressValue(y), integer)), Jump(3)];
         a.True(!Same(new(1, []), new(3, [])), "可能抛出的间接读取不参与路径消除");
+        blocks[3] = [new ManagedAssignment(3, x, new ConstantValue(1, integer, 32)), Jump(4)];
+        blocks[1] = [Jump(3)];
+        a.True(AsyncBranchCopies.OverwrittenAtEntry(x.Variable, 1, blocks), "合流入口先重置局部，新增正常路径不泄漏中间标志值");
+        blocks[1] = [new ManagedAssignment(1, y, x), Jump(3)];
+        a.True(!AsyncBranchCopies.OverwrittenAtEntry(x.Variable, 1, blocks), "覆盖前的读取使中间标志可观察");
+        blocks[1] = [new ManagedCall(1, new(null!, null, [], false), null, false), Jump(3)];
+        a.True(!AsyncBranchCopies.OverwrittenAtEntry(x.Variable, 1, blocks), "可能抛出的调用前不能改变异常路径观察值");
+        blocks[1] = [Jump(3, new ManagedCopy(y, x))];
+        a.True(!AsyncBranchCopies.OverwrittenAtEntry(x.Variable, 1, blocks), "边复制可能读取中间标志，必须拒绝");
+        blocks[1] = [Jump(1)];
+        a.True(!AsyncBranchCopies.OverwrittenAtEntry(x.Variable, 1, blocks), "纯跳转环不是覆盖证明");
         return a.Finish("async-branch-copies");
     }
 }

@@ -5,6 +5,19 @@ namespace Cpp2CS.Recovery;
 /// <summary>比较只经过纯局部赋值的两条续接路径，边上的 phi 复制按并行赋值处理。</summary>
 internal static class AsyncBranchCopies
 {
+    /// <summary>沿无副作用跳转确认局部在任何读取、调用或异常点前被常量覆盖。</summary>
+    internal static bool OverwrittenAtEntry(Variable variable, ulong entry, IReadOnlyDictionary<ulong, List<ManagedStatement>> blocks)
+    {
+        var seen = new HashSet<ulong>();
+        while (seen.Add(entry) && blocks.TryGetValue(entry, out var statements))
+        {
+            if (statements.FirstOrDefault() is ManagedAssignment { Value: ConstantValue } write && write.Target.Variable == variable) return true;
+            if (statements is not [ManagedJump { Edge.Copies.Count: 0 } jump]) return false;
+            entry = jump.Edge.Target;
+        }
+        return false;
+    }
+
     public static bool Equivalent(ManagedEdge left, ManagedEdge right, IReadOnlyDictionary<ulong, List<ManagedStatement>> blocks,
         Func<ManagedValue, bool> pure)
     {

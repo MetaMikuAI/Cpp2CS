@@ -58,6 +58,9 @@ public static partial class AsyncLifting
                 while (seen.Add(address) && blocks[address] is [ManagedJump { Edge.Copies.Count: 0 } jump]) address = jump.Edge.Target;
                 return address;
             }
+            var addressed = blocks.Values.SelectMany(s => s).SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
+                .SelectMany(ManagedValues.Walk).OfType<AddressValue>().Select(a => a.Target).OfType<LocalValue>()
+                .Select(l => l.Variable).ToHashSet();
             // 非泛型 GetResult：source 为 null 时立即成功，否则沿直线调用 source.GetResult(token)。
             // 两条路径合并成一次 await，避免 null 快路跳过 await 或引入额外的 GetResult。
             foreach (var address in order)
@@ -84,6 +87,9 @@ public static partial class AsyncLifting
                     foreach (var statement in path.SkipLast(1))
                     {
                         if (statement is ManagedAssignment assignment && Read(assignment.Value)) continue;
+                        // 异常区域标志在 GetResult 前写入；保留该写入，并证明正常合流后读取前会被覆盖。
+                        if (statement is ManagedAssignment { Value: ConstantValue } marker && !addressed.Contains(marker.Target.Variable)
+                            && AsyncBranchCopies.OverwrittenAtEntry(marker.Target.Variable, empty.Target, blocks)) continue;
                         if (statement is ManagedCall { Invocation.Method.Method.Name: "GetResult", Result: null } call && SourceCall(call) && getResult is null)
                         { getResult = call; callBlock = current; continue; }
                         valid = false;
