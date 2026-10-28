@@ -23,6 +23,8 @@ internal static class AddressPhiLoads
             Binary { Op: BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.Shl or BinOp.LShr or BinOp.AShr or BinOp.And or BinOp.Or or BinOp.Xor } binary
                 => Pure(binary.Left) && Pure(binary.Right),
             Ir.Convert { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate } conversion => Pure(conversion.Operand),
+            Compare comparison => Pure(comparison.Left) && Pure(comparison.Right),
+            Select selection => Pure(selection.Condition) && Pure(selection.True) && Pure(selection.False),
             _ => false,
         };
         var changed = false;

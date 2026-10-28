@@ -261,17 +261,13 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             if (ArrayAddressPhis()) Cleanup();
             if (ArrayPointerLoops()) Cleanup();
             if (ExceptionStackValues.Run(function)) Cleanup();
-            if (ReadOnlyDataNormalizer.Run(function, facts.Model.Image, address => facts.Usages.At(address)?.Usage.Kind
-                is UsageKind.StringLiteral or UsageKind.MethodDef or UsageKind.MethodRef))
-            {
-                Cleanup();
-                if (MetadataSlotPhis()) Cleanup();
-                if (StringSlotChoices()) Cleanup();
-            }
-            if (AddressPhiLoads.Run(function, Fresh))
+            ReadOnlyData();
+            while (AddressPhiLoads.Run(function, Fresh))
             {
                 Cleanup();
                 Symbols(rgctx: true);
+                if (StringSlotChoices()) Cleanup();
+                ReadOnlyData();
             }
             if (ClassPhiAllocations.Run(function, address => facts.EntriesAt(address)
                 .Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false, Parameters.Count: 0 } }), Fresh)) Cleanup();
@@ -280,6 +276,15 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             if (ConstantDivisionNormalizer.Run(function)) Cleanup();
             if (FlagPhiConditions()) Cleanup();
             Residuals();
+        }
+
+        private void ReadOnlyData()
+        {
+            if (!ReadOnlyDataNormalizer.Run(function, facts.Model.Image, address => facts.Usages.At(address)?.Usage.Kind
+                is UsageKind.StringLiteral or UsageKind.MethodDef or UsageKind.MethodRef)) return;
+            Cleanup();
+            if (MetadataSlotPhis()) Cleanup();
+            if (StringSlotChoices()) Cleanup();
         }
 
         /// <summary>守卫与检查归一到不动点：一个守卫删除之后汇合处的 φ 变平凡，依赖它的下一个守卫才能判定。</summary>

@@ -53,6 +53,18 @@ internal static class AddressPhiLoadsCheck
         a.True(!Run(Sample(handler: true)), "不跨越异常区域");
         a.True(!Run(Sample(precedingRead: true)), "不跨越更早的内存读取");
         a.True(!Run(Sample(otherPhi: true)), "不把合流处才定义的值提前到前驱");
+        var selected = Sample();
+        var parent = selected.Blocks.Single(b => b.Start == 0x1010);
+        var original = (Define)parent.Statements[0];
+        var choice = new Select(new Compare(Cond.Eq, new Use(new(Storage.Gpr(7), 0), 32), Expr.C(0, 32)), Expr.C(0x3000, 64), Expr.C(0x4000, 64), 64);
+        parent.Statements[0] = original with { Value = choice };
+        a.True(Run(selected), "只读表生成的纯地址选择允许继续分配外层读取");
+        a.True(parent.Statements.OfType<Define>().Any(d => d.Value is Load { Address: Select }), "选择在原必经前驱中求值，不提前到分支之外");
+        var repeated = Sample();
+        repeated.Blocks.Single(b => b.Start == 0x1010).Statements[0] = original with
+            { Value = choice with { Condition = new Load(Expr.C(0x2000, 64), 1) } };
+        a.True(Run(repeated) && repeated.Blocks.Single(b => b.Start == 0x1010).Statements.OfType<Define>()
+            .Any(d => d.Value is Load { Address: Use use } && use.Variable == original.Target), "条件含内存读取时保留原指针快照，不复制选择表达式");
         return a.Finish("address-phi-loads");
     }
 }

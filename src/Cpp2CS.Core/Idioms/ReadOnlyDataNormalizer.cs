@@ -64,7 +64,7 @@ internal static class ReadOnlyDataNormalizer
                 if (!dominators.Dominates(parent.Index, block.Index)
                     || parent.Statements.LastOrDefault() is not Branch { Condition: Compare { Left: var compared, Right: Const limit } condition } branch
                     || condition.Cond is not (Cond.Ult or Cond.Ule or Cond.Uge or Cond.Ugt)
-                    || compared != index || limit.Value > 256) continue;
+                    || IndexValue(compared, definitions) != IndexValue(index, definitions) || limit.Value > 256) continue;
                 var count = (int)limit.Value + (condition.Cond is Cond.Ule or Cond.Ugt ? 1 : 0);
                 if (count is < 1 or > 256) continue;
                 var destination = condition.Cond switch
@@ -107,5 +107,15 @@ internal static class ReadOnlyDataNormalizer
             for (var i = 0; i < bytes.Length; i++) bits |= (ulong)bytes[i] << (8 * i);
             return Expr.C(bits, width);
         }
+    }
+
+    /// <summary>比较检查与查表的同宽 SSA 索引；不展开内存读取，避免混同不同时间的快照。</summary>
+    internal static Expr IndexValue(Expr index, IReadOnlyDictionary<Variable, Expr> definitions)
+    {
+        var seen = new HashSet<Variable>();
+        while (index is Use use && seen.Add(use.Variable) && definitions.TryGetValue(use.Variable, out var value)
+            && value.Width >= use.Width && !ExprMap.Walk(value).Any(e => e is Load or Read or Intrinsic or Unknown))
+            index = Fold.Simplify(Fold.Convert(ConvKind.Truncate, value, use.Width));
+        return index;
     }
 }
