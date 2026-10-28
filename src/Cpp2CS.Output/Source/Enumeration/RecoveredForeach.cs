@@ -285,6 +285,7 @@ internal sealed partial class RecoveredForeach : IAstTransform
         foreach (var (loop, original) in normalized)
             if (loop.Parent is not null) loop.ReplaceWith(original);
         RecoverAsyncLoops(rootNode);
+        RecoverConditionalAsyncLoops(rootNode);
         RecoverGuardedAsyncLoops(rootNode);
         RecoverMergedLoops(rootNode);
         RecoverNullableMergedLoops(rootNode);

@@ -22,7 +22,8 @@ internal static class GuardedAsyncForeachCheck
         ExpressionStatement Set(string name, Expression value) => new(new AssignmentExpression(Id(name), value));
         ExpressionStatement Flag(bool value) => Set("active", new PrimitiveExpression(value));
         var a = new Assertions();
-        foreach (var mode in new[] { "valid", "call-before", "enabled-before", "escape", "no-disposable", "current-write", "current-increment" })
+        foreach (var mode in new[] { "valid", "call-before", "enabled-before", "escape", "no-disposable", "current-write", "current-increment",
+            "conditional", "conditional-call", "conditional-count", "conditional-extra" })
         {
             var method = new MethodDeclaration { Name = "Visit", Modifiers = Modifiers.Async, ReturnType = new SimpleType("Task"), Body = new BlockStatement() };
             method.Parameters.Add(new ParameterDeclaration { Type = new SimpleType("Collection"), Name = "values" });
@@ -39,7 +40,8 @@ internal static class GuardedAsyncForeachCheck
             contents.Add(Flag(mode == "enabled-before"));
             if (mode == "call-before") contents.Add(new ExpressionStatement(new InvocationExpression(Id("Observe"))));
             var factory = new InvocationExpression(new MemberReferenceExpression(Id("items"), "GetEnumerator"));
-            if (mode != "no-disposable") factory.AddAnnotation(new ResolveResult(disposable));
+            if (mode != "no-disposable") factory.AddAnnotation(new ResolveResult(mode.StartsWith("conditional", StringComparison.Ordinal)
+                ? typeSystem.FindType(typeof(List<int>.Enumerator)) : disposable));
             contents.Add(new VariableDeclarationStatement(new SimpleType("var"), "created", factory));
             contents.Add(Flag(true));
             contents.Add(Set("iterator", Id("created")));
@@ -65,9 +67,34 @@ internal static class GuardedAsyncForeachCheck
             if (mode == "escape") success.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Observe"), Id("iterator"))));
             outer.Statements.Add(new IfElseStatement(new BinaryOperatorExpression(Id("exception"), BinaryOperatorType.Equality, new NullReferenceExpression()), success));
             outer.Statements.Add(new ThrowStatement(Id("exception")));
+            if (mode.StartsWith("conditional", StringComparison.Ordinal))
+            {
+                var source = (VariableDeclarationStatement)contents.First().Clone();
+                if (mode == "conditional-call") source.Variables.Single().Initializer = new InvocationExpression(Id("Read"));
+                var branch = new BlockStatement();
+                foreach (var statement in contents.Skip(1)) branch.Statements.Add(statement.Clone());
+                branch.Statements.Add(new GotoStatement("normal"));
+                var count = new MemberReferenceExpression(Id("items"), "Count");
+                var list = typeSystem.FindType(typeof(List<int>));
+                if (mode != "conditional-count") count.AddAnnotation(new MemberResolveResult(new ResolveResult(list), list.GetProperties().Single(p => p.Name == "Count")));
+                var condition = new BinaryOperatorExpression(new BinaryOperatorExpression(Id("items"), BinaryOperatorType.InEquality, new NullReferenceExpression()),
+                    BinaryOperatorType.ConditionalAnd, new BinaryOperatorExpression(count, BinaryOperatorType.GreaterThanOrEqual, new PrimitiveExpression(1)));
+                guarded.TryBlock = new BlockStatement { Flag(false), Flag(true), source, new IfElseStatement(condition, branch) };
+                foreach (var statement in outer.Statements.SkipWhile(s => s != guarded).Skip(1).ToArray()) statement.Remove();
+                outer.Statements.Add(new GotoStatement("end")); outer.Statements.Add(new LabelStatement("normal"));
+                outer.Statements.Add(Set("pending", new NullReferenceExpression())); outer.Statements.Add(new GotoStatement("cleanup"));
+                outer.Statements.Add(new LabelStatement("cleanup"));
+                outer.Statements.Add(new ExpressionStatement(new InvocationExpression(new MemberReferenceExpression(Id("iterator"), "Dispose"))));
+                outer.Statements.Add(new VariableDeclarationStatement(new SimpleType("Exception"), "exception", Id("pending")));
+                outer.Statements.Add(new IfElseStatement(new BinaryOperatorExpression(Id("exception"), BinaryOperatorType.InEquality, new NullReferenceExpression()),
+                    new BlockStatement { new ThrowStatement(Id("exception")) }));
+                outer.Statements.Add(Set("iterator", new DefaultValueExpression(new SimpleType("Enumerator"))));
+                if (mode == "conditional-extra") outer.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Observe"))));
+                outer.Statements.Add(new GotoStatement("end")); outer.Statements.Add(new LabelStatement("end")); outer.Statements.Add(new EmptyStatement());
+            }
             var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).Assembly.GetType("Cpp2CS.Output.RecoveredForeach")!, nonPublic: true)!;
             transform.Run(tree, null!);
-            a.Equal(mode == "valid" ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的清理与逃逸边界");
+            a.Equal(mode is "valid" or "conditional" ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的清理与逃逸边界");
             a.Equal(1, tree.Descendants.OfType<UnaryOperatorExpression>().Count(e => e.Operator == UnaryOperatorType.Await), "await 保留一次且仍在循环内");
         }
         return a.Finish("guarded-async-foreach");
