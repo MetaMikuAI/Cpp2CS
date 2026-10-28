@@ -19,27 +19,36 @@ internal sealed partial class RecoveredForeach
         return expression is MemberReferenceExpression { MemberName: "Current" } read ? read : null;
     }
 
-    // 给已内联的 (T)iterator.Current 建立匹配视图；未恢复为 foreach 时还原原表达式。
-    private static List<(VariableDeclarationStatement Declaration, IdentifierExpression Replacement, CastExpression Original)> NormalizeTypedCurrent(AstNode root)
+    // 给首个必求值位置的 Current 建立匹配视图，保留成员读取和转换；未折叠时还原。
+    private static List<(VariableDeclarationStatement Declaration, IdentifierExpression Replacement, Expression Original)> NormalizeLeadingCurrent(AstNode root)
     {
-        var changed = new List<(VariableDeclarationStatement, IdentifierExpression, CastExpression)>();
+        var changed = new List<(VariableDeclarationStatement, IdentifierExpression, Expression)>();
         foreach (var loop in root.Descendants.OfType<WhileStatement>().ToArray())
         {
             if (loop.Condition is not InvocationExpression { Target: MemberReferenceExpression { MemberName: "MoveNext", Target: IdentifierExpression iterator } }
-                || loop.EmbeddedStatement is not BlockStatement body || body.Statements.FirstOrDefault() is not ExpressionStatement first
-                || first.Descendants.OfType<CastExpression>().Where(c => CurrentRead(c) is { Target: var receiver } && Name(receiver, iterator.Identifier)).ToArray() is not [var cast]
-                || !FirstReceiver(first.Expression, cast)
+                || loop.EmbeddedStatement is not BlockStatement body || body.Statements.FirstOrDefault() is not { } first
+                || first.Descendants.OfType<MemberReferenceExpression>().Where(m => m.MemberName == "Current" && Name(m.Target, iterator.Identifier)).ToArray() is not [var read]
+                || CurrentByReference(read)
                 || loop.Ancestors.FirstOrDefault(n => n is MethodDeclaration or LambdaExpression or AnonymousMethodExpression) is not { } method) continue;
+            var expression = first switch
+            {
+                ExpressionStatement statement => statement.Expression,
+                VariableDeclarationStatement initialized when initialized.Variables.ToArray() is [var variable] => variable.Initializer,
+                _ => null,
+            };
+            Expression value = read.Parent is CastExpression converted ? converted : read;
+            if (CurrentRead(value) is null || !FirstReceiver(expression, value)
+                || first is VariableDeclarationStatement && expression == value) continue;
             var names = method.Descendants.OfType<IdentifierExpression>().Select(id => id.Identifier)
                 .Concat(method.Descendants.OfType<VariableInitializer>().Select(v => v.Name))
                 .Concat(method.Descendants.OfType<ParameterDeclaration>().Select(p => p.Name)).ToHashSet();
             var name = "item";
             for (var suffix = 2; names.Contains(name); suffix++) name = "item" + suffix;
-            var declaration = new VariableDeclarationStatement(cast.Type.Clone(), name, cast.Clone());
+            var declaration = new VariableDeclarationStatement(value is CastExpression cast ? cast.Type.Clone() : new SimpleType("var"), name, value.Clone());
             var replacement = new IdentifierExpression(name);
-            cast.ReplaceWith(replacement);
+            value.ReplaceWith(replacement);
             body.Statements.InsertBefore(first, declaration);
-            changed.Add((declaration, replacement, cast));
+            changed.Add((declaration, replacement, value));
         }
         return changed;
     }
