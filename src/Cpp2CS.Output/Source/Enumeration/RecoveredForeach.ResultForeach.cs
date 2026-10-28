@@ -31,12 +31,12 @@ internal sealed partial class RecoveredForeach
         return changed;
     }
 
-    // 耗尽路径只写结果常量；这些局部在元素处理期间仅写入，提前退出保持其最终值。
+    // 结果常量可前置；局部回退值在耗尽后复制，命中路径直接跳过该复制。
     private static void RecoverResultLoops(AstNode root)
     {
         foreach (var guarded in root.Descendants.OfType<TryCatchStatement>().ToArray())
         {
-            if (guarded.Parent is not BlockStatement parent || guarded.Ancestors.OfType<TryCatchStatement>().Any()
+            if (guarded.Parent is not BlockStatement parent
                 || guarded.FinallyBlock is not null || guarded.CatchClauses.ToArray() is not [var catcher]
                 || catcher.Condition is not null || catcher.Type?.ToString() is not ("Exception" or "System.Exception")
                 || guarded.TryBlock?.Statements.LastOrDefault() is not WhileStatement { Condition: PrimitiveExpression { Value: true }, EmbeddedStatement: BlockStatement content } loop
@@ -56,17 +56,21 @@ internal sealed partial class RecoveredForeach
             var tail = content.Statements.Skip(1).ToArray();
             var defaults = tail.TakeWhile(s => s is not BreakStatement).ToArray();
             if (defaults.Length == 0 || defaults.Any(s => s is not ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
-                Left: IdentifierExpression, Right: PrimitiveExpression or NullReferenceExpression } })) continue;
+                Left: IdentifierExpression, Right: PrimitiveExpression or NullReferenceExpression or IdentifierExpression } })) continue;
             var writes = defaults.Cast<ExpressionStatement>().Select(s => (AssignmentExpression)s.Expression).ToArray();
+            var fallback = writes.Any(a => a.Right is IdentifierExpression);
+            if (fallback ? writes.Length != 1 : guarded.Ancestors.OfType<TryCatchStatement>().Any()) continue;
             var names = writes.Select(a => ((IdentifierExpression)a.Left).Identifier).ToHashSet();
             if (names.Count != writes.Length) continue;
             var suffix = tail.Skip(defaults.Length).Where(s => s is not ContinueStatement).ToArray();
             string? exit = null;
             if (suffix is [BreakStatement, LabelStatement label, BreakStatement]) exit = label.Label;
             else if (suffix is not [BreakStatement]) continue;
+            if (fallback && exit is not null) continue;
             var statements = parent.Statements.ToArray(); var index = Array.IndexOf(statements, guarded);
             if (index + 1 >= statements.Length || !Dispose(statements[index + 1], enumerator.Identifier)) continue;
-            var initialization = statements.Take(index).Reverse().SkipWhile(s => s is VariableDeclarationStatement d && d.Variables.All(v => v.Initializer is null)).FirstOrDefault();
+            var initialization = statements.Take(index).Reverse().SkipWhile(s => s is VariableDeclarationStatement d
+                && (d.Variables.All(v => v.Initializer is null) || fallback && PureLocals(s))).FirstOrDefault();
             var initialized = initialization switch
             {
                 VariableDeclarationStatement d when d.Variables.ToArray() is [var v] && v.Name == enumerator.Identifier => v.Initializer,
@@ -77,6 +81,8 @@ internal sealed partial class RecoveredForeach
             if (initialized is not InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression { MemberName: "GetEnumerator" } get } factory
                 || !Enumerator(factory).Disposable
                 || guarded.GetParent<MethodDeclaration>() is not { } method) continue;
+            if (fallback && (!LocalResultCopy(defaults[0], parent, guarded, method)
+                || !StableCopies(method, statements.SkipWhile(s => s != initialization).Skip(1).TakeWhile(s => s != guarded), factory))) continue;
             var declarations = statements.Take(index).OfType<VariableDeclarationStatement>()
                 .Where(d => d.Variables.Any(v => names.Contains(v.Name))).ToArray();
             if (declarations.Length != names.Count || declarations.Any(d => d.Variables.ToArray() is not [{ Initializer: null }])) continue;
@@ -102,13 +108,32 @@ internal sealed partial class RecoveredForeach
                     or UnaryOperatorType.PostIncrement or UnaryOperatorType.PostDecrement or UnaryOperatorType.AddressOf && UsesElement(u.Expression))) continue;
             var body = (BlockStatement)positive.Clone(); body.Statements.First().Remove();
             if (body.Statements.Last() is ContinueStatement) body.Statements.Last().Remove();
-            foreach (var declaration in declarations)
+            string? completed = null;
+            if (fallback)
+            {
+                var used = method.Descendants.OfType<LabelStatement>().Select(l => l.Label).ToHashSet();
+                completed = "enumerationDone";
+                for (var n = 2; used.Contains(completed); n++) completed = "enumerationDone" + n;
+                foreach (var stopped in body.Descendants.OfType<BreakStatement>().Where(b => !b.Ancestors.TakeWhile(n => n != body)
+                    .Any(n => n is WhileStatement or DoWhileStatement or ForStatement or ForeachStatement or SwitchStatement
+                        or LambdaExpression or AnonymousMethodExpression or LocalFunctionDeclarationStatement)).ToArray())
+                    stopped.ReplaceWith(new GotoStatement(completed));
+            }
+            else foreach (var declaration in declarations)
             {
                 var variable = declaration.Variables.Single();
                 variable.Initializer = writes.Single(a => Name(a.Left, variable.Name)).Right.Clone();
             }
             var replacement = new ForeachStatement(current.Type.Clone(), new SingleVariableDesignation(element.Name), get.Target.Clone(), body);
             guarded.ReplaceWith(replacement);
+            if (completed is not null)
+            {
+                var exhausted = defaults[0].Clone();
+                var done = new LabelStatement(completed);
+                parent.Statements.InsertAfter(replacement, exhausted);
+                parent.Statements.InsertAfter(exhausted, done);
+                parent.Statements.InsertAfter(done, new EmptyStatement());
+            }
             if (exit is not null)
             {
                 var exitLabel = new LabelStatement(exit);
