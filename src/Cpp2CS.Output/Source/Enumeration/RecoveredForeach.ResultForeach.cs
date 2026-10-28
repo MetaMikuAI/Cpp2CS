@@ -15,15 +15,20 @@ internal sealed partial class RecoveredForeach
             if (guarded.Parent is not BlockStatement parent || guarded.Ancestors.OfType<TryCatchStatement>().Any()
                 || guarded.FinallyBlock is not null || guarded.CatchClauses.ToArray() is not [var catcher]
                 || catcher.Condition is not null || catcher.Type?.ToString() is not ("Exception" or "System.Exception")
-                || guarded.TryBlock?.Statements.ToArray() is not [WhileStatement { Condition: PrimitiveExpression { Value: true }, EmbeddedStatement: BlockStatement content }]
+                || guarded.TryBlock?.Statements.LastOrDefault() is not WhileStatement { Condition: PrimitiveExpression { Value: true }, EmbeddedStatement: BlockStatement content } loop
                 || content.Statements.FirstOrDefault() is not IfElseStatement { FalseStatement: null, Condition: InvocationExpression { Arguments.Count: 0,
                     Target: MemberReferenceExpression { MemberName: "MoveNext", Target: IdentifierExpression enumerator } }, TrueStatement: BlockStatement positive }
                 || positive.Statements.FirstOrDefault() is not VariableDeclarationStatement current || current.Variables.ToArray() is not [var element]
                 || element.Initializer is not MemberReferenceExpression { MemberName: "Current", Target: var receiver } read || !Name(receiver, enumerator.Identifier)
                 || CurrentByReference(read)
                 || positive.Statements.LastOrDefault() is not (ContinueStatement or BreakStatement)
-                || catcher.Body?.Statements.ToArray() is not [var failureDispose, ThrowStatement thrown]
-                || !Dispose(failureDispose, enumerator.Identifier) || thrown.Expression is not null && !Name(thrown.Expression, catcher.VariableName)) continue;
+                || !ConditionalCleanup(catcher, enumerator.Identifier)) continue;
+            var prefix = guarded.TryBlock.Statements.TakeWhile(s => s != loop).ToArray();
+            if (prefix.Length != 0 && (prefix is not [IfElseStatement guard]
+                || !NullTest(guard.Condition, enumerator.Identifier, BinaryOperatorType.Equality) || guard.FalseStatement is not null
+                || guard.TrueStatement is not BlockStatement { Statements.Count: 1 } missing
+                || missing.Statements.Single() is not ThrowStatement { Expression: ObjectCreateExpression { Arguments.Count: 0 } error }
+                || error.Type?.ToString() is not ("NullReferenceException" or "System.NullReferenceException"))) continue;
             var tail = content.Statements.Skip(1).ToArray();
             var defaults = tail.TakeWhile(s => s is not BreakStatement).ToArray();
             if (defaults.Length == 0 || defaults.Any(s => s is not ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
@@ -38,16 +43,23 @@ internal sealed partial class RecoveredForeach
             var statements = parent.Statements.ToArray(); var index = Array.IndexOf(statements, guarded);
             if (index + 1 >= statements.Length || !Dispose(statements[index + 1], enumerator.Identifier)) continue;
             var initialization = statements.Take(index).Reverse().SkipWhile(s => s is VariableDeclarationStatement d && d.Variables.All(v => v.Initializer is null)).FirstOrDefault();
-            if (initialization is not ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign, Left: var target,
-                    Right: InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression { MemberName: "GetEnumerator" } get } factory } }
-                || !Name(target, enumerator.Identifier) || !Enumerator(factory).Disposable
+            var initialized = initialization switch
+            {
+                VariableDeclarationStatement d when d.Variables.ToArray() is [var v] && v.Name == enumerator.Identifier => v.Initializer,
+                ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign, Left: var target, Right: var value } }
+                    when Name(target, enumerator.Identifier) => value,
+                _ => null,
+            };
+            if (initialized is not InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression { MemberName: "GetEnumerator" } get } factory
+                || !Enumerator(factory).Disposable
                 || guarded.GetParent<MethodDeclaration>() is not { } method) continue;
             var declarations = statements.Take(index).OfType<VariableDeclarationStatement>()
                 .Where(d => d.Variables.Any(v => names.Contains(v.Name))).ToArray();
             if (declarations.Length != names.Count || declarations.Any(d => d.Variables.ToArray() is not [{ Initializer: null }])) continue;
             var enumDeclarations = method.Descendants.OfType<VariableDeclarationStatement>().Where(d => d.Variables.Any(v => v.Name == enumerator.Identifier)).ToArray();
-            if (enumDeclarations is not [var enumDeclaration] || enumDeclaration.Variables.ToArray() is not [{ Initializer: DefaultValueExpression }]) continue;
-            var allowed = guarded.Descendants.Concat(initialization.Descendants).Concat(statements[index + 1].Descendants).ToHashSet();
+            if (enumDeclarations is not [var enumDeclaration] || enumDeclaration != initialization
+                && enumDeclaration.Variables.ToArray() is not [{ Initializer: DefaultValueExpression }]) continue;
+            var allowed = guarded.Descendants.Concat(initialization!.Descendants).Concat(statements[index + 1].Descendants).ToHashSet();
             if (positive.Descendants.OfType<IdentifierExpression>().Count(id => id.Identifier == enumerator.Identifier) != 1
                 || method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == enumerator.Identifier && !allowed.Contains(id))
                 || positive.Descendants.OfType<IdentifierExpression>().Any(id => names.Contains(id.Identifier)

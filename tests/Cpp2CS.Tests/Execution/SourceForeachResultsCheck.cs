@@ -23,8 +23,8 @@ internal static class SourceForeachResultsCheck
             if (!emitted.Success) throw new InvalidOperationException(string.Join('\n', emitted.Diagnostics));
             return stream.ToArray();
         }
-        string[] modes = ["Valid", "OuterLocal", "CapturedSource", "CapturedTarget", "FactoryCopy", "Reused", "ObservedFactory", "PrefixCallback", "Find"];
-        var methods = string.Join('\n', modes.Where(mode => mode != "Find").Select(mode => $$"""
+        string[] modes = ["Valid", "OuterLocal", "CapturedSource", "CapturedTarget", "FactoryCopy", "Reused", "ObservedFactory", "PrefixCallback", "Find", "InterfaceFind", "OtherNullFailure"];
+        var methods = string.Join('\n', modes.Where(mode => mode is not ("Find" or "InterfaceFind" or "OtherNullFailure")).Select(mode => $$"""
             public static int {{mode}}(Sequence sequence)
             {
                 int result = -7;
@@ -55,14 +55,14 @@ internal static class SourceForeachResultsCheck
                 return result;
             }
             """));
-        methods += """
-            public static int Find(Sequence sequence)
+        methods += string.Join('\n', new[] { "Find", "InterfaceFind", "OtherNullFailure" }.Select(mode => $$"""
+            public static int {{mode}}(Sequence sequence)
             {
-                Sequence.Enumerator iterator = default;
-                iterator = sequence.GetEnumerator();
+                {{(mode == "Find" ? "Sequence.Enumerator iterator = default; iterator = sequence.GetEnumerator();" : "IEnumerator<int> iterator = ((IEnumerable<int>)sequence).GetEnumerator();")}}
                 int result;
                 try
                 {
+                    {{(mode == "Find" ? "" : "if (iterator == null) throw new " + (mode == "OtherNullFailure" ? "InvalidOperationException" : "NullReferenceException") + "();")}}
                     while (true)
                     {
                         if (iterator.MoveNext())
@@ -76,11 +76,11 @@ internal static class SourceForeachResultsCheck
                         break;
                     }
                 }
-                catch (Exception) { iterator.Dispose(); throw; }
+                catch (Exception) { {{(mode == "Find" ? "" : "if (iterator == null) throw;")}} iterator.Dispose(); throw; }
                 iterator.Dispose();
                 return result;
             }
-            """;
+            """));
         var inputSource = """
             using System;
             using System.Collections;
@@ -89,12 +89,14 @@ internal static class SourceForeachResultsCheck
             {
                 public static List<string> Trace;
                 public static int Failure;
-                public class Sequence
+                public class Sequence : IEnumerable<int>
                 {
                     public int Count;
                     public Action OnDispose;
                     public Action OnGetEnumerator;
                     public Enumerator GetEnumerator() { OnGetEnumerator?.Invoke(); return new Enumerator { Owner = this, Index = 0 }; }
+                    IEnumerator<int> IEnumerable<int>.GetEnumerator() => Failure == 4 ? null : GetEnumerator();
+                    IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable<int>)this).GetEnumerator();
                     public struct Enumerator : IEnumerator<int>
                     {
                         public Sequence Owner;
@@ -118,12 +120,13 @@ internal static class SourceForeachResultsCheck
                             "CapturedSource" => CapturedSource(sequence), "CapturedTarget" => CapturedTarget(sequence),
                             "FactoryCopy" => FactoryCopy(sequence), "Reused" => Reused(sequence),
                             "ObservedFactory" => ObservedFactory(sequence), "PrefixCallback" => PrefixCallback(sequence),
-                            "Find" => Find(sequence),
+                            "Find" => Find(sequence), "InterfaceFind" => InterfaceFind(sequence), "OtherNullFailure" => OtherNullFailure(sequence),
                             _ => throw new ArgumentException()
                         };
                         Trace.Add("R" + result);
                     }
                     catch (InvalidOperationException) { Trace.Add("X"); }
+                    catch (NullReferenceException) { Trace.Add("N"); }
                     return string.Join(",", Trace);
                 }
                 METHODS
@@ -137,7 +140,7 @@ internal static class SourceForeachResultsCheck
         var tree = CSharpSyntaxTree.ParseText(source).GetRoot();
         var a = new Assertions();
         foreach (var mode in modes)
-            a.Equal(mode is "Valid" or "FactoryCopy" or "Find" ? 1 : mode == "Reused" ? 2 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
+            a.Equal(mode is "Valid" or "FactoryCopy" or "Find" or "InterfaceFind" ? 1 : mode == "Reused" ? 2 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
                 .DescendantNodes().OfType<ForEachStatementSyntax>().Count(), "仅局部且异常后不可观察的复制可延后：" + mode);
         var rebuilt = Compile(source, "ForeachResults.Rebuilt");
         Func<string, int, int, string> Observe(byte[] bytes) => System.Reflection.Assembly.Load(bytes).GetType("Probe")!.GetMethod("Observe")!
@@ -153,6 +156,10 @@ internal static class SourceForeachResultsCheck
         a.Equal("M,C1,M,C2,M,C3,M,D,R9", after("PrefixCallback", 3, 0), "工厂回调仍先于局部快照求值");
         a.Equal("M,C1,M,C2,D,R2", after("Find", 3, 0), "首个命中后立即释放并返回");
         a.Equal("M,C1,M,D,R0", after("Find", 1, 0), "耗尽保留默认结果");
+        foreach (var mode in new[] { "InterfaceFind", "OtherNullFailure" })
+            a.Equal(before(mode, 3, 4), after(mode, 3, 4), "空接口枚举器保留原异常且不释放");
+        a.Equal("N", after("InterfaceFind", 3, 4), "空接口枚举器抛空引用异常");
+        a.Equal("X", after("OtherNullFailure", 3, 4), "不折叠具有其他空值异常的防护");
         return a.Finish("source-foreach-results");
     }
 }
