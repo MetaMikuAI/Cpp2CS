@@ -82,17 +82,33 @@ public static partial class Decompilation
                     && declaration.GetParent<MethodDeclaration>() is { } method
                     && !method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == variable.Name)) declaration.Remove();
 
-            // lambda 已展开后，不再使用的编译器委托缓存读取不能继续维持闭包类型的引用。
-            foreach (var declaration in rootNode.Descendants.OfType<VariableDeclarationStatement>().ToArray())
-                if (declaration.Variables.ToArray() is [var variable] && variable.Initializer?.GetSymbol() is IField { IsStatic: true } field
-                    && field.Name.StartsWith("<>9__", StringComparison.Ordinal)
-                    && field.DeclaringTypeDefinition?.GetAttributes().Any(a => a.AttributeType.FullName == "System.Runtime.CompilerServices.CompilerGeneratedAttribute") == true
-                    && variable.GetILVariable() is { IsSingleDefinition: true } local && local.AddressInstructions.Count == 0
-                    && !rootNode.Descendants.OfType<IdentifierExpression>().Any(id => id.GetILVariable() == local)) declaration.Remove();
-
             var expanded = rootNode.Descendants.Where(n => n is LambdaExpression or AnonymousMethodExpression)
                 .SelectMany(n => n.Annotations.OfType<ILFunction>()).Where(f => f.Method is not null)
                 .Select(f => f.Method!.MemberDefinition).ToHashSet();
+            // 缓存类仅初始化空实例和委托字段；有显式构造逻辑或未展开方法时保留读取。
+            var caches = rootNode.Descendants.OfType<TypeDeclaration>().Where(type =>
+                type.Parent is TypeDeclaration && type.Modifiers.HasFlag(Modifiers.Private)
+                && type.GetSymbol() is ITypeDefinition definition && (definition.Name == "<>c" || definition.Name.StartsWith("<>c__", StringComparison.Ordinal))
+                && definition.GetAttributes().Any(a => a.AttributeType.FullName == "System.Runtime.CompilerServices.CompilerGeneratedAttribute")
+                && type.Members.All(m => m is FieldDeclaration or MethodDeclaration)
+                && type.Members.OfType<MethodDeclaration>().All(m => m.GetSymbol() is IMethod method && expanded.Contains(method.MemberDefinition))
+                && type.Members.OfType<FieldDeclaration>().All(f => f.Variables.ToArray() is [var v] && f.GetSymbol() is IField { IsStatic: true } field
+                    && (field.Name.StartsWith("<>9__", StringComparison.Ordinal) && field.ReturnType.Kind == TypeKind.Delegate
+                        && v.Initializer is null or NullReferenceExpression
+                        || field.Name == "<>9" && v.Initializer is ObjectCreateExpression { Arguments.Count: 0, Initializer: null } creation
+                            && creation.Type.Annotation<ResolveResult>()?.Type.GetDefinition()?.Equals(definition) == true)))
+                .Select(t => (ITypeDefinition)t.GetSymbol()!).ToHashSet();
+            bool CacheRead(Expression? expression) => expression?.GetSymbol() is IField { IsStatic: true } field
+                && field.Name.StartsWith("<>9__", StringComparison.Ordinal) && field.DeclaringTypeDefinition is { } owner && caches.Contains(owner);
+            // lambda 已展开后，未使用的缓存读取不再维持辅助类的引用。
+            foreach (var declaration in rootNode.Descendants.OfType<VariableDeclarationStatement>().ToArray())
+                if (declaration.Variables.ToArray() is [var variable] && CacheRead(variable.Initializer)
+                    && variable.GetILVariable() is { IsSingleDefinition: true } local && local.AddressInstructions.Count == 0
+                    && !rootNode.Descendants.OfType<IdentifierExpression>().Any(id => id.GetILVariable() == local)) declaration.Remove();
+            foreach (var statement in rootNode.Descendants.OfType<ExpressionStatement>().ToArray())
+                if (statement.Expression is AssignmentExpression { Operator: AssignmentOperatorType.Assign,
+                        Left: IdentifierExpression { Identifier: "_" } discard } assignment
+                    && discard.GetILVariable() is null && CacheRead(assignment.Right)) statement.Remove();
             // 只有所有引用都已展开成捕获变量后，才能移除残留的闭包类型声明。
             foreach (var type in rootNode.Descendants.OfType<TypeDeclaration>().Reverse().ToArray())
             {
