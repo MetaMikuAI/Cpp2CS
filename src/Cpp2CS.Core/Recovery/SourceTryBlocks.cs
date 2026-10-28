@@ -42,6 +42,10 @@ internal static class SourceTryBlocks
         bool NonThrowing(ManagedBlock block) => block.Statements.All(s => (s switch
         {
             ManagedAssignment assignment => Pure(assignment.Value, nonnull[s], getter),
+            ManagedStore { Target: FieldValue { Accessor: null } field } store
+                => ManagedTypes.PrimitiveName(field.Type) is "Boolean" or "Char" or "SByte" or "Byte" or "Int16" or "UInt16"
+                        or "Int32" or "UInt32" or "Int64" or "UInt64" or "Single" or "Double"
+                    && Pure(field, nonnull[s], getter) && Pure(store.Value, nonnull[s], getter),
             ManagedJump or ManagedBranch or ManagedSwitch or ManagedReturn => ManagedValues.Of(s).All(v => Pure(v, nonnull[s], getter)),
             ManagedCall { Invocation: { Receiver: { } receiver, Arguments.Count: 0 } invocation } when getter is not null
                 => getter(invocation.Method) && Receiver(receiver, nonnull[s], getter),

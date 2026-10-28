@@ -23,7 +23,7 @@ internal static class SourceForeachExitsCheck
             if (!emitted.Success) throw new InvalidOperationException(string.Join('\n', emitted.Diagnostics));
             return stream.ToArray();
         }
-        string[] modes = ["Valid", "Captured", "Typed", "LeadingMember", "AssignedMember", "AssignmentTarget", "NestedIf", "OuterFinally", "MissingCleanup", "SharedEntry", "Fallthrough", "Split", "SplitRejected"];
+        string[] modes = ["Valid", "Captured", "Typed", "LeadingMember", "AssignedMember", "AssignmentTarget", "NestedIf", "OuterFinally", "MissingCleanup", "SharedEntry", "Fallthrough", "Split", "SplitRejected", "NestedCallback"];
         var methods = string.Join('\n', modes.Where(mode => !mode.StartsWith("Split", StringComparison.Ordinal)).Select(mode => $$"""
             public static Entry {{mode}}({{(mode == "Typed" ? "ObjectSequence" : "Sequence")}} sequence, int key, bool bypass)
             {
@@ -37,7 +37,7 @@ internal static class SourceForeachExitsCheck
                     while (iterator.MoveNext())
                     {
                         {{(mode == "LeadingMember" ? "int[] numbers = iterator.Current.Numbers; if (numbers.Length == 0) continue; current = new Entry(numbers[0]);" : mode == "AssignmentTarget" ? "Receiver().Value = iterator.Current.Self; current = Storage.Value;" : "current = " + (mode == "Typed" ? "(Entry)" : "") + "iterator.Current" + (mode == "AssignedMember" ? ".Self" : "") + ";")}}
-                        if (current.Id != key) continue;
+                        {{(mode == "NestedCallback" ? "Func<int> read = () => { Trace.Add(\"L\"); return current.Id; }; if (read() != key) continue;" : "if (current.Id != key) continue;")}}
                         goto found;
                     }
                 }
@@ -158,6 +158,7 @@ internal static class SourceForeachExitsCheck
                             "Fallthrough" => Fallthrough(sequence, key, bypass),
                             "Split" => Split(sequence, key, bypass),
                             "SplitRejected" => SplitRejected(sequence, key, bypass),
+                            "NestedCallback" => NestedCallback(sequence, key, bypass),
                             _ => throw new NotSupportedException()
                         };
                         Trace.Add(Array.IndexOf(input, result) >= 0 ? "original" : "created");
@@ -191,7 +192,7 @@ internal static class SourceForeachExitsCheck
         var tree = CSharpSyntaxTree.ParseText(source).GetRoot();
         var a = new Assertions();
         foreach (var mode in modes)
-            a.Equal(mode == "Split" ? 2 : mode is "Valid" or "Captured" or "Typed" or "LeadingMember" or "AssignedMember" or "NestedIf" ? 1 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
+            a.Equal(mode == "Split" ? 2 : mode is "Valid" or "Captured" or "Typed" or "LeadingMember" or "AssignedMember" or "NestedIf" or "NestedCallback" ? 1 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
                 .DescendantNodes().OfType<ForEachStatementSyntax>().Count(), "只在外跳清理完整且独占时恢复 foreach");
         var rebuilt = Compile(source, "ForeachExits.Rebuilt");
         Func<string, int[], int, int, bool, string> Observe(byte[] bytes) => System.Reflection.Assembly.Load(bytes).GetType("Probe")!.GetMethod("Observe")!

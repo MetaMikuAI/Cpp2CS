@@ -134,6 +134,36 @@ internal static class SourceTryBlocksCheck
             a.Equal(mode is "value" or "address" or "getter" or "embedded", result.Regions[0].Try.Contains(3UL), "值类型接收者 " + mode);
             a.Equal(body.Blocks[3], result.Blocks.Single(b => b.Address == 3), "值类型读取与调用保留原顺序");
         }
+        var boolean = new DefinitionRef(new TypeDef { Index = 8, Assembly = "mscorlib.dll", Namespace = "System", Name = "Boolean",
+            Token = 0, Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false }, []);
+        var flagField = new FieldRef(new FieldDef { Index = 8, Owner = owner, Name = "flag", Type = boolean,
+            Attributes = FieldAttributes.Public, Offset = 32 }, receiverType);
+        foreach (var mode in new[] { "checked", "unchecked", "reset", "addressed", "accessor", "static", "array", "reference", "throwing-value" })
+        {
+            var prefix = new List<ManagedStatement>();
+            if (mode != "unchecked") prefix.Add(new ManagedCheck(1, new ComparisonValue(Cond.Eq, receiver,
+                new ConstantValue(0, receiverType, 64), new PrimitiveRef("Boolean")), method));
+            if (mode == "reset") prefix.Add(new ManagedAssignment(1, receiver, new ConstantValue(0, receiverType, 64)));
+            if (mode == "addressed") prefix.Add(new ManagedCall(1, new(method, null, [new AddressValue(receiver)], false), null, false));
+            prefix.Add(Jump(1, 3));
+            var target = new FieldValue(receiver, flagField, boolean, 8);
+            ManagedValue storedAt = mode switch
+            {
+                "accessor" => target with { Accessor = new(method, flagField, boolean, 8, true) },
+                "static" => new StaticFieldValue(flagField, boolean, 8),
+                "array" => new ArrayElementValue(new ArgumentValue(0, new ArrayRef(boolean, 1), 64), local, boolean, 8),
+                "reference" => new FieldValue(receiver, new(new FieldDef { Index = 9, Owner = owner, Name = "link", Type = receiverType,
+                    Attributes = FieldAttributes.Public, Offset = 40 }, receiverType), receiverType, 64),
+                _ => target,
+            };
+            var store = new ManagedStore(3, storedAt, mode == "throwing-value"
+                ? new FieldValue(alias, flagField, boolean, 8) : new ConstantValue(1, storedAt.Type, 8));
+            var body = new ManagedBody(method, [new(0, [Jump(0, 1)]), new(1, prefix), new(2, [new ManagedRethrow(2)]),
+                new(3, [store, Jump(3, 1)])]) { Regions = [new([1], 2, [2], caught, ManagedRegionKind.Catch)] };
+            var result = SourceTryBlocks.Rewrite(body);
+            a.Equal(mode == "checked", result.Regions[0].Try.Contains(3UL), "基础值字段写入 " + mode);
+            a.Equal(body.Blocks[3], result.Blocks.Single(b => b.Address == 3), "写入内容与顺序不变");
+        }
         return a.Finish("source-try-blocks");
     }
 }

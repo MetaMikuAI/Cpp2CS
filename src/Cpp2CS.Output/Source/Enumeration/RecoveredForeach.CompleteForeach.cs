@@ -157,7 +157,8 @@ internal sealed partial class RecoveredForeach
             var declarations = method.Descendants.OfType<VariableDeclarationStatement>().Where(d => d.Variables.Any(v => v.Name == enumerator.Identifier)).ToArray();
             if (declarations is not [var declaration] || declaration != factory && declaration.Variables.ToArray() is not [{ Initializer: DefaultValueExpression }]) continue;
             var labels = body.Descendants.OfType<LabelStatement>().Select(l => l.Label).ToHashSet();
-            if (body.Descendants.OfType<ReturnStatement>().Any()
+            if (body.Descendants.OfType<ReturnStatement>().Any(returned => !returned.Ancestors.TakeWhile(n => n != body)
+                    .Any(n => n is LambdaExpression or AnonymousMethodExpression or LocalFunctionDeclarationStatement))
                 || method.Descendants.OfType<GotoStatement>().Any(j => j.Label is not null && labels.Contains(j.Label) && !body.Descendants.Contains(j))) continue;
             var content = (BlockStatement)body.Clone(); var item = element.Name;
             bool UsesElement(AstNode node) => node.DescendantsAndSelf.OfType<IdentifierExpression>().Any(id => id.Identifier == element.Name);
