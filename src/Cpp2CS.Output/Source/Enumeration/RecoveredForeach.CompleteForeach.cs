@@ -63,6 +63,20 @@ internal sealed partial class RecoveredForeach
         return !method.Descendants.OfType<IdentifierExpression>().Any(id => (id.Identifier == exceptional || id.Identifier == ordinary) && !allowed.Contains(id));
     }
 
+    // 结果局部只活在清理所在块中；释放抛错离开该作用域时，延后复制不能被观察。
+    private static bool LocalResultCopy(Statement statement, BlockStatement parent, Statement guarded, AstNode method)
+    {
+        if (statement is not ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
+                Left: IdentifierExpression left, Right: IdentifierExpression right } }
+            || left.GetILVariable() is not { Type.Kind: not TypeKind.ByReference, AddressInstructions.Count: 0, CaptureScope: null } target
+            || right.GetILVariable() is not { Type.Kind: not TypeKind.ByReference, AddressInstructions.Count: 0, CaptureScope: null } source
+            || !target.Type.Equals(source.Type)
+            || !parent.Statements.TakeWhile(s => s != guarded).OfType<VariableDeclarationStatement>()
+                .Any(d => d.Variables.Any(v => v.Name == left.Identifier))) return false;
+        return !method.Descendants.OfType<IdentifierExpression>().Any(id => (id.GetILVariable() == target || id.GetILVariable() == source)
+            && id.Ancestors.TakeWhile(n => n != method).Any(n => n is LambdaExpression or AnonymousMethodExpression or LocalFunctionDeclarationStatement));
+    }
+
     // 完整 try/while 加正常清理；允许可写元素局部和工厂附近的纯局部初始化。
     private static void RecoverCompleteLoops(AstNode root)
     {
@@ -71,13 +85,14 @@ internal sealed partial class RecoveredForeach
             if (guarded.Parent is not BlockStatement parent || guarded.FinallyBlock is not null
                 || guarded.CatchClauses.ToArray() is not [var catcher] || catcher.Condition is not null
                 || catcher.Type?.ToString() is not ("Exception" or "System.Exception")
-                || guarded.TryBlock?.Statements.LastOrDefault() is not WhileStatement
+                || guarded.TryBlock?.Statements.OfType<WhileStatement>().LastOrDefault() is not WhileStatement
                     { Condition: InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression { MemberName: "MoveNext", Target: IdentifierExpression enumerator } },
-                        EmbeddedStatement: BlockStatement body }
+                        EmbeddedStatement: BlockStatement body } originalLoop
                 || body.Statements.FirstOrDefault() is not VariableDeclarationStatement current || current.Variables.ToArray() is not [var element]
                 || CurrentRead(element.Initializer) is not { Target: var receiver } read || !Name(receiver, enumerator.Identifier)
                 || CurrentByReference(read)) continue;
-            var inside = guarded.TryBlock.Statements.Take(guarded.TryBlock.Statements.Count - 1).ToArray();
+            var inside = guarded.TryBlock.Statements.TakeWhile(s => s != originalLoop).ToArray();
+            var trailing = guarded.TryBlock.Statements.SkipWhile(s => s != originalLoop).Skip(1).ToArray();
             IfElseStatement? guard = null;
             if (inside.FirstOrDefault() is IfElseStatement test && NullTest(test.Condition, enumerator.Identifier, BinaryOperatorType.Equality)
                 && test.FalseStatement is null && test.TrueStatement is BlockStatement { Statements.Count: 1 } absent
@@ -87,6 +102,7 @@ internal sealed partial class RecoveredForeach
             var siblings = parent.Statements.ToArray(); var index = Array.IndexOf(siblings, guarded);
             if (index + 1 >= siblings.Length
                 || guarded.Ancestors.FirstOrDefault(n => n is MethodDeclaration or LambdaExpression or AnonymousMethodExpression) is not { } method) continue;
+            if (trailing.Any(s => !LocalResultCopy(s, parent, guarded, method))) continue;
             var conditionalInterface = InterfaceCleanup(catcher, siblings[index + 1], enumerator.Identifier, method);
             if (!conditionalInterface && (!ConditionalCleanup(catcher, enumerator.Identifier)
                 || !Dispose(siblings[index + 1], enumerator.Identifier) && !NullableDispose(siblings[index + 1], enumerator.Identifier))) continue;
@@ -113,7 +129,7 @@ internal sealed partial class RecoveredForeach
             if (index + 2 < siblings.Length && siblings[index + 2] is ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
                 Left: var reset, Right: DefaultValueExpression } } && Name(reset, enumerator.Identifier)) removed.Add(siblings[index + 2]);
             var allowed = removed.SelectMany(s => s.Descendants).Concat(catcher.Descendants).Concat(guard?.Descendants ?? [])
-                .Concat(((WhileStatement)guarded.TryBlock.Statements.Last()).Condition!.DescendantsAndSelf).Concat(read.Descendants).ToHashSet();
+                .Concat(originalLoop.Condition!.DescendantsAndSelf).Concat(read.Descendants).ToHashSet();
             if (method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == enumerator.Identifier && !allowed.Contains(id))) continue;
             var declarations = method.Descendants.OfType<VariableDeclarationStatement>().Where(d => d.Variables.Any(v => v.Name == enumerator.Identifier)).ToArray();
             if (declarations is not [var declaration] || declaration != factory && declaration.Variables.ToArray() is not [{ Initializer: DefaultValueExpression }]) continue;
@@ -137,8 +153,25 @@ internal sealed partial class RecoveredForeach
             }
             else content.Statements.First().Remove();
             var loop = new ForeachStatement(current.Type.Clone(), new SingleVariableDesignation(item), get.Target.Clone(), content);
-            if (inside.Length == 0) guarded.ReplaceWith(loop);
-            else { var replacement = new BlockStatement(); foreach (var s in inside) replacement.Statements.Add(s.Clone()); replacement.Statements.Add(loop); guarded.ReplaceWith(replacement); }
+            if (inside.Length == 0)
+            {
+                guarded.ReplaceWith(loop);
+                Statement previous = loop;
+                foreach (var s in trailing)
+                {
+                    var copy = s.Clone();
+                    parent.Statements.InsertAfter(previous, copy);
+                    previous = copy;
+                }
+            }
+            else
+            {
+                var replacement = new BlockStatement();
+                foreach (var s in inside) replacement.Statements.Add(s.Clone());
+                replacement.Statements.Add(loop);
+                foreach (var s in trailing) replacement.Statements.Add(s.Clone());
+                guarded.ReplaceWith(replacement);
+            }
             foreach (var statement in removed) statement.Remove();
             if (declaration != factory) declaration.Remove();
         }
