@@ -407,6 +407,16 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                         stack.Push(StackValue.F(NativeMathLibrary.Sinf((float)Pop().Double)));
                         break;
                     }
+                    if (instruction.OpCode.Code == Code.Call && ((MethodReference)operand).Resolve() is
+                        { IsStatic: true, IsPInvokeImpl: true, ReturnType.FullName: "System.Single",
+                            Parameters: [{ ParameterType.FullName: "System.Single" }, { ParameterType.FullName: "System.Single" }],
+                            PInvokeInfo: { EntryPoint: "fmodf", IsCallConvCdecl: true, Module.Name: "libm.so" or "libm.so.6" } })
+                    {
+                        var divisor = (float)Pop().Double;
+                        var value = (float)Pop().Double;
+                        stack.Push(StackValue.F(NativeMathLibrary.Fmodf(value, divisor)));
+                        break;
+                    }
                     var target = model.Method((MethodReference)operand);
                     var values = PopMany(target.Method.Parameters.Count + (target.Method.IsStatic ? 0 : 1));
                     if (instruction.OpCode.Code == Code.Callvirt) NotNull(values[0]);

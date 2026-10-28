@@ -474,6 +474,13 @@ internal sealed partial class NativeMachine : IDisposable
                 uc.SetReg(Unicorn.S(0), BitConverter.SingleToUInt32Bits(result));
                 break;
             }
+            case HelperKind.Import when helper.Detail == "fmodf":
+            {
+                var result = NativeMathLibrary.Fmodf(BitConverter.UInt32BitsToSingle((uint)uc.Reg(Unicorn.S(0))),
+                    BitConverter.UInt32BitsToSingle((uint)uc.Reg(Unicorn.S(1))));
+                uc.SetReg(Unicorn.S(0), BitConverter.SingleToUInt32Bits(result));
+                break;
+            }
             case HelperKind.Import when helper.Detail is "memcpy" or "memmove":
             {
                 var data = new byte[X(2)];

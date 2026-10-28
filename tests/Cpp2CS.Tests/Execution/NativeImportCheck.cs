@@ -39,6 +39,12 @@ internal static class NativeImportCheck
         declaration.PInvokeInfo.EntryPoint = "cosf";
         a.True(!fingerprint.SequenceEqual(CilBodyFingerprint.Describe(caller)), "调用身份包含导入符号");
         declaration.PInvokeInfo.EntryPoint = "sinf";
+        var remainder = new MethodDef { Index = -1, Owner = owner, Name = "fmodf", Token = 0, Attributes = SR.MethodAttributes.Public | SR.MethodAttributes.Static,
+            ImplAttributes = SR.MethodImplAttributes.PreserveSig, Slot = -1, ReturnType = types.Single,
+            Parameters = [new("value", types.Single, 0, null, false), new("divisor", types.Single, 0, null, false)], NativeImport = new("libm.so", "fmodf") };
+        var remainderDeclaration = (MethodDefinition)skeleton.Reference(module, new MethodRef(remainder, [], []), null, null);
+        a.True(remainderDeclaration.Parameters is [{ ParameterType.FullName: "System.Single" }, { ParameterType.FullName: "System.Single" }]
+            && remainderDeclaration.PInvokeInfo.IsCallConvCdecl && remainderDeclaration.PInvokeInfo.EntryPoint == "fmodf", "双实参单精度 C ABI 声明");
         using var stream = new MemoryStream();
         module.Write(stream);
         stream.Position = 0;
@@ -51,12 +57,19 @@ internal static class NativeImportCheck
         var loaded = SR.Assembly.Load(stream.ToArray());
         NativeLibrary.SetDllImportResolver(loaded, (library, _, _) => library == "libm.so" ? NativeMathLibrary.Library : IntPtr.Zero);
         var invoke = loaded.GetType("Cpp2CS.NativeImports")!.GetMethod("sinf")!.CreateDelegate<Func<float, float>>();
+        var remainderInvoke = loaded.GetType("Cpp2CS.NativeImports")!.GetMethod("fmodf")!.CreateDelegate<Func<float, float, float>>();
         uint[] samples = [0, 0x80000000, 1, 0x80000001, 0x007fffff, 0x00800000, 0x3f800000, 0xbf800000,
             0x40490fdb, 0x7f7fffff, 0xff7fffff, 0x7f800000, 0xff800000, 0x7fc12345];
         foreach (var bits in samples)
         {
             var value = BitConverter.UInt32BitsToSingle(bits);
             a.Equal(BitConverter.SingleToUInt32Bits(NativeMathLibrary.Sinf(value)), BitConverter.SingleToUInt32Bits(invoke(value)), $"CLR 调用位型 {bits:x8}");
+            foreach (var divisorBits in samples)
+            {
+                var divisor = BitConverter.UInt32BitsToSingle(divisorBits);
+                a.Equal(BitConverter.SingleToUInt32Bits(NativeMathLibrary.Fmodf(value, divisor)),
+                    BitConverter.SingleToUInt32Bits(remainderInvoke(value, divisor)), $"双实参 CLR 调用位型 {bits:x8}, {divisorBits:x8}");
+            }
         }
         return a.Finish("native-import");
     }
