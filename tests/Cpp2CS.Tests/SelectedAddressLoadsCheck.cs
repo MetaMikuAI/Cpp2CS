@@ -55,6 +55,44 @@ internal static class SelectedAddressLoadsCheck
                 a.True(evaluator.Failure is null, "动态地址选择可求值");
             }
         }
+        var condition = new Compare(Cond.Eq, new Use(new(Storage.Gpr(1), 1), 32), Expr.C(0, 32));
+        foreach (var taken in new[] { false, true })
+        {
+            var sample = Sample(64, choice with { Condition = condition });
+            var entry = sample.Blocks[0];
+            var read = entry.Statements[1];
+            var path = new Block(12) { Statements = [new Jump(12, 24)] };
+            var other = new Block(20) { Statements = [new Return(20)] };
+            var load = new Block(24) { Statements = [read, new Return(28)] };
+            entry.Statements = [entry.Statements[0], new Branch(8, condition, taken ? 12UL : 20UL, taken ? 20UL : 12UL)];
+            sample.Blocks.AddRange([path, other, load]);
+            MachineFunction.AddEdge(entry, taken ? path : other);
+            MachineFunction.AddEdge(entry, taken ? other : path);
+            MachineFunction.AddEdge(path, load);
+            a.True(SelectedAddressLoads.Run(sample), "分支后的条件地址被归约");
+            a.Equal<Expr>(new Load(Expr.C(taken ? 0x1010UL : 0x1018UL, 64), 64), ((Define)load.Statements[0]).Value,
+                "唯一前驱路径确认所选地址，另一臂不再参与类型恢复");
+            load.Statements[0] = ((Define)read) with { Value = new Select(condition,
+                new Load(Expr.C(0x1010, 64), 64), new Load(Expr.C(0x1018, 64), 64), 64) };
+            a.True(SelectedAddressLoads.Run(sample), "已分配到两臂的条件加载仍使用路径事实");
+            a.Equal<Expr>(new Load(Expr.C(taken ? 0x1010UL : 0x1018UL, 64), 64), ((Define)load.Statements[0]).Value,
+                "先前归约产生的选择保留实际执行的加载");
+            var invocation = new Call(26, CallKind.Direct, Expr.C(0x2000, 64)) { Arguments = [new Use(offset, 64)] };
+            load.Statements.Insert(1, invocation);
+            SelectedAddressLoads.Run(sample);
+            a.Equal<Expr>(Expr.C(taken ? 16UL : 24UL, 64), ((Call)load.Statements[1]).Arguments[0], "调用使用路径上确定的同一引用，避免类指针与接收者身份分裂");
+            load.Statements.RemoveAt(1);
+            load.Statements[0] = read;
+            other.Statements = [new Jump(20, 24)];
+            MachineFunction.AddEdge(other, load);
+            SelectedAddressLoads.Run(sample);
+            a.True(((Define)load.Statements[0]).Value is Select, "合流后的读取不继承单边条件");
+            MachineFunction.RemoveEdgeAt(other, 0);
+            load.Statements[0] = read;
+            entry.Statements[1] = new Branch(8, condition with { Left = new Use(new(Storage.Gpr(1), 2), 32) }, taken ? 12UL : 20UL, taken ? 20UL : 12UL);
+            SelectedAddressLoads.Run(sample);
+            a.True(((Define)load.Statements[0]).Value is Select, "相同寄存器的不同 SSA 版本不能共享条件");
+        }
         return a.Finish("selected-address-loads");
     }
 }

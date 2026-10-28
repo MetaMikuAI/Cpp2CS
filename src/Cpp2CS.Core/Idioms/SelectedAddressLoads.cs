@@ -3,7 +3,7 @@ using Cpp2CS.Ir;
 
 namespace Cpp2CS.Idioms;
 
-/// <summary>无副作用的地址选择改为条件读取；字段身份仍由后续内存模型核对。</summary>
+/// <summary>条件地址改为单臂读取；已走过的分支可确认引用别名，字段身份仍由内存模型核对。</summary>
 internal static class SelectedAddressLoads
 {
     public static bool Run(MachineFunction function)
@@ -11,6 +11,20 @@ internal static class SelectedAddressLoads
         var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
         static bool Pure(Expr value) => !ExprMap.Walk(value).Any(e => e is Load or Intrinsic or Unknown
             or Binary { Op: BinOp.SDiv or BinOp.UDiv or BinOp.SRem or BinOp.URem });
+        static bool? KnownSide(Block block, Expr condition)
+        {
+            // 只沿唯一前驱追踪同一 SSA 条件；可重读的内存和未转换的寄存器不能作为路径事实。
+            if (!Pure(condition) || ExprMap.Walk(condition).Any(e => e is Read or Use { Variable.Version: < 0 })) return null;
+            var seen = new HashSet<Block> { block };
+            while (block.Predecessors.ToArray() is [var parent] && seen.Add(parent))
+            {
+                if (parent.Statements.LastOrDefault() is Branch branch && branch.Condition == condition
+                    && branch.Target != branch.Fallthrough && parent.NormalSuccessors.Contains(block))
+                    return block.Start == branch.Target;
+                block = parent;
+            }
+            return null;
+        }
         Select? Choice(Expr address, HashSet<Variable> seen)
         {
             if (address is Use use && seen.Add(use.Variable) && definitions.TryGetValue(use.Variable, out var value))
@@ -27,11 +41,21 @@ internal static class SelectedAddressLoads
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
-                if (block.Statements[i] is not Define define) continue;
-                var value = ExprMap.Map(define.Value, expression => expression is Load load && Choice(load.Address, []) is { } choice
-                    ? new Select(choice.Condition, load with { Address = choice.True }, load with { Address = choice.False }, load.Width) : null);
-                if (ReferenceEquals(value, define.Value)) continue;
-                block.Statements[i] = define with { Value = value };
+                var statement = block.Statements[i];
+                var rewritten = ExprMap.MapOperands(statement, operand => ExprMap.Map(operand, expression =>
+                {
+                    if (expression is Use use && definitions.TryGetValue(use.Variable, out var definition)
+                        && definition is Select { True: Use or Const or Symbol, False: Use or Const or Symbol } alias
+                        && use.Width == alias.Width && KnownSide(block, alias.Condition) is { } aliasSide)
+                        return aliasSide ? alias.True : alias.False;
+                    if (expression is Select { True: Load, False: Load } selected
+                        && KnownSide(block, selected.Condition) is { } selectedSide) return selectedSide ? selected.True : selected.False;
+                    if (statement is not Define || expression is not Load load || Choice(load.Address, []) is not { } choice) return null;
+                    return KnownSide(block, choice.Condition) is { } side ? load with { Address = side ? choice.True : choice.False }
+                        : new Select(choice.Condition, load with { Address = choice.True }, load with { Address = choice.False }, load.Width);
+                }));
+                if (ReferenceEquals(rewritten, statement)) continue;
+                block.Statements[i] = rewritten;
                 changed = true;
             }
         return changed;
