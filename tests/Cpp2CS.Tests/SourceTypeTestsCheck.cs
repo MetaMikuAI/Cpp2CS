@@ -18,6 +18,29 @@ internal static class SourceTypeTestsCheck
         ManagedValue Rewritten(ManagedValue value) => SourceRewriter.Rewrite(new(method,
             [new(0, [new ManagedReturn(0, value)])]), types).Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value!;
         var a = new Assertions();
+        var targetType = new TypeDef { Index = -2, Assembly = "Tests.dll", Namespace = "Tests", Name = "Record", Token = 0,
+            Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false };
+        var reference = new DefinitionRef(targetType, []);
+        var instance = new ArgumentValue(0, reference, 64);
+        var field = new FieldRef(new FieldDef { Index = -2, Owner = targetType, Name = "value", Type = types.Int32,
+            Attributes = FieldAttributes.Public, Offset = 16 }, reference);
+        var inspect = new MethodRef(new MethodDef { Index = -2, Owner = targetType, Name = "Inspect", Token = 0,
+            Attributes = MethodAttributes.Public, ImplAttributes = 0, Slot = -1, ReturnType = types.Int32 }, [], []);
+        var nullError = types.CorlibMethod("System.NullReferenceException", ".ctor")!;
+        foreach (var checkedReceiver in new[] { false, true })
+        {
+            var statements = new List<ManagedStatement>();
+            if (checkedReceiver) statements.Add(new ManagedCheck(1, new ComparisonValue(Cond.Eq, instance,
+                new ConstantValue(0, reference, 64), types.Boolean), nullError));
+            statements.Add(new ManagedCall(2, new(inspect, instance, [], false), null, false));
+            statements.Add(new ManagedJump(3, new(3, [])));
+            var input = new ManagedBody(method, [new(0, [new ManagedJump(0, new(1, []))]), new(1, statements),
+                new(2, [new ManagedRethrow(2)]), new(3, [new ManagedReturn(3, new FieldValue(instance, field, types.Int32, 32))])])
+                { Regions = [new([1], 2, [2], null, ManagedRegionKind.Catch)] };
+            var output = SourceRewriter.Rewrite(input, types);
+            a.Equal(checkedReceiver, output.Regions[0].Try.Contains(3UL), "在删除显式判空前使用其字段访问证据");
+            a.True(!output.Blocks.SelectMany(b => b.Statements).OfType<ManagedCheck>().Any(), "调用前的冗余判空仍可删除");
+        }
         foreach (var from in new TypeRef[] { types.String, new ArrayRef(types.String, 1), types.Corlib("System.InvalidOperationException") })
         {
             var value = new ArgumentValue(0, from, 64);

@@ -32,6 +32,7 @@ public static class SourceRewriter
         Apply("source.cached-delegates", CachedDelegates);
         Apply("source.values", b => Map(b, v => Simplify(v, types)));
         Apply("source.array-lengths", b => FreshArrayLengths(b, types));
+        Apply("source.checked-try-blocks", b => SourceTryBlocks.Rewrite(b, fieldGetter));
         Apply("source.drop-checks", DropStatements);
         Apply("source.checked-casts", SourceCheckedCasts.Rewrite);
         Apply("source.argument-aliases", b => Normalize(SourceArgumentAliases.Rewrite(b)));

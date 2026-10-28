@@ -138,10 +138,16 @@ internal static class SourceTryBlocksCheck
             Token = 0, Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false }, []);
         var flagField = new FieldRef(new FieldDef { Index = 8, Owner = owner, Name = "flag", Type = boolean,
             Attributes = FieldAttributes.Public, Offset = 32 }, receiverType);
-        foreach (var mode in new[] { "checked", "unchecked", "reset", "addressed", "accessor", "static", "array", "reference", "throwing-value" })
+        var enumeration = new TypeDef { Index = 10, Assembly = "Sample", Namespace = "", Name = "State", Token = 0,
+            Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = true };
+        var int32 = new DefinitionRef(new TypeDef { Index = 11, Assembly = "mscorlib.dll", Namespace = "System", Name = "Int32",
+            Token = 0, Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false }, []);
+        enumeration.Fields = [new FieldDef { Index = 10, Owner = enumeration, Name = "value__", Type = int32,
+            Attributes = FieldAttributes.Public, Offset = 0 }];
+        foreach (var mode in new[] { "checked", "this", "enum", "unchecked", "reset", "addressed", "accessor", "static", "array", "reference", "throwing-value" })
         {
             var prefix = new List<ManagedStatement>();
-            if (mode != "unchecked") prefix.Add(new ManagedCheck(1, new ComparisonValue(Cond.Eq, receiver,
+            if (mode is not ("unchecked" or "this")) prefix.Add(new ManagedCheck(1, new ComparisonValue(Cond.Eq, receiver,
                 new ConstantValue(0, receiverType, 64), new PrimitiveRef("Boolean")), method));
             if (mode == "reset") prefix.Add(new ManagedAssignment(1, receiver, new ConstantValue(0, receiverType, 64)));
             if (mode == "addressed") prefix.Add(new ManagedCall(1, new(method, null, [new AddressValue(receiver)], false), null, false));
@@ -152,6 +158,9 @@ internal static class SourceTryBlocksCheck
                 "accessor" => target with { Accessor = new(method, flagField, boolean, 8, true) },
                 "static" => new StaticFieldValue(flagField, boolean, 8),
                 "array" => new ArrayElementValue(new ArgumentValue(0, new ArrayRef(boolean, 1), 64), local, boolean, 8),
+                "this" => target with { Receiver = new ArgumentValue(-1, receiverType, 64) },
+                "enum" => new FieldValue(receiver, new(new FieldDef { Index = 12, Owner = owner, Name = "state", Type = new DefinitionRef(enumeration, []),
+                    Attributes = FieldAttributes.Public, Offset = 36 }, receiverType), new DefinitionRef(enumeration, []), 32),
                 "reference" => new FieldValue(receiver, new(new FieldDef { Index = 9, Owner = owner, Name = "link", Type = receiverType,
                     Attributes = FieldAttributes.Public, Offset = 40 }, receiverType), receiverType, 64),
                 _ => target,
@@ -161,7 +170,7 @@ internal static class SourceTryBlocksCheck
             var body = new ManagedBody(method, [new(0, [Jump(0, 1)]), new(1, prefix), new(2, [new ManagedRethrow(2)]),
                 new(3, [store, Jump(3, 1)])]) { Regions = [new([1], 2, [2], caught, ManagedRegionKind.Catch)] };
             var result = SourceTryBlocks.Rewrite(body);
-            a.Equal(mode == "checked", result.Regions[0].Try.Contains(3UL), "基础值字段写入 " + mode);
+            a.Equal(mode is "checked" or "this" or "enum", result.Regions[0].Try.Contains(3UL), "基础值字段写入 " + mode);
             a.Equal(body.Blocks[3], result.Blocks.Single(b => b.Address == 3), "写入内容与顺序不变");
         }
         return a.Finish("source-try-blocks");

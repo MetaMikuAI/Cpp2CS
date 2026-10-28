@@ -8,6 +8,8 @@ internal static class SourceTryBlocks
 {
     private static bool Receiver(ManagedValue value, HashSet<ManagedValue> nonnull, Func<MethodRef, bool>? getter) => value switch
     {
+        // C# 实例方法中的 this；普通参数仍需路径上的非空证据。
+        ArgumentValue { Index: -1, Type: DefinitionRef { Definition.IsValueType: false } } => true,
         LocalValue or ArgumentValue => nonnull.Contains(value) || value.Type is DefinitionRef { Definition.IsValueType: true },
         AddressValue address => address.Target.Type is DefinitionRef { Definition.IsValueType: true }
             && address.Target is LocalValue or ArgumentValue or FieldValue && Pure(address.Target, nonnull, getter),
@@ -43,7 +45,7 @@ internal static class SourceTryBlocks
         {
             ManagedAssignment assignment => Pure(assignment.Value, nonnull[s], getter),
             ManagedStore { Target: FieldValue { Accessor: null } field } store
-                => ManagedTypes.PrimitiveName(field.Type) is "Boolean" or "Char" or "SByte" or "Byte" or "Int16" or "UInt16"
+                => ManagedTypes.PrimitiveName(ManagedTypes.Underlying(field.Type)) is "Boolean" or "Char" or "SByte" or "Byte" or "Int16" or "UInt16"
                         or "Int32" or "UInt32" or "Int64" or "UInt64" or "Single" or "Double"
                     && Pure(field, nonnull[s], getter) && Pure(store.Value, nonnull[s], getter),
             ManagedJump or ManagedBranch or ManagedSwitch or ManagedReturn => ManagedValues.Of(s).All(v => Pure(v, nonnull[s], getter)),
