@@ -134,6 +134,10 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
         body = SourceListCalls.Rewrite(body, types, (site, method) =>
             Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{site:x}\t{body.Method}\t{method}"), Constructor);
         body = RewriteGuardedUpdates(body);
+        body = SourceEnumeratorReads.Rewrite(body, field => field.Field.DeclaringType is DefinitionRef declaring
+            && FieldCalls(declaring).Any(call => !call.Write && call.Field.Equals(field.Field)
+                && (field.Accessor is null || !field.Accessor.Write && field.Accessor.Method.Equals(call.Method))
+                && call.Method.Method.Owner.Properties.Any(property => property.Name == "Current" && property.Getter == call.Method.Method)));
         body = RewriteFieldCalls(body);
         var caller = body.Method.Method.Owner;
         body = AccessorRewriter.Rewrite(body, (value, write) =>
