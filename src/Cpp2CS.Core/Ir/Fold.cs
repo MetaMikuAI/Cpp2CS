@@ -175,6 +175,17 @@ public static class Fold
             Binary(BinOp.Shl, Convert(ConvKind.ZeroExtend, insert.Value, width), C((ulong)insert.Low, width), width), width);
     }
 
+    /// <summary>整数位段零扩展到普通宽度；先移位和掩码，不把非字节位宽伪装成托管整数。</summary>
+    public static Expr? ScalarExtract(Extract extract, int width)
+    {
+        var source = extract.Operand.Width;
+        if (source is not (32 or 64) || width is not (8 or 16 or 32 or 64)
+            || extract.Low < 0 || extract.Width <= 0 || extract.Width > width || extract.Low > source - extract.Width) return null;
+        var shifted = Binary(BinOp.LShr, extract.Operand, C((ulong)extract.Low, source), source);
+        var masked = Binary(BinOp.And, shifted, C(Mask(extract.Width), source), source);
+        return Convert(source > width ? ConvKind.Truncate : ConvKind.ZeroExtend, masked, width);
+    }
+
     public static Expr Compare(Cond cond, Expr left, Expr right)
     {
         if (left is Const a && right is Const b && left.Width <= 64)

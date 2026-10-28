@@ -39,6 +39,23 @@ internal static class FoldInsertCheck
             }
         }
         a.True(Fold.ScalarInsert(vector) is null, "向量不按整数打包");
+        foreach (var source in new[] { 32, 64 })
+        foreach (var width in new[] { 8, 16, 32, 64 })
+        foreach (var bits in new[] { 1, 5, 13, 31 }.Where(b => b <= width && b <= source))
+        foreach (var low in new[] { 0, source - bits }.Distinct())
+        {
+            var extract = new Extract(new Read(Storage.Gpr(0), source), low, bits);
+            var scalar = Fold.ScalarExtract(extract, width)!;
+            foreach (var value in new[] { 0UL, ulong.MaxValue, 0x123456789abcdef0UL, 1UL << low })
+            {
+                var evaluator = new Evaluator();
+                evaluator.Registers[Storage.Gpr(0)] = value;
+                a.Equal(evaluator.Eval(new Cpp2CS.Ir.Convert(ConvKind.ZeroExtend, extract, width)), evaluator.Eval(scalar), "非字节位段投影保留低位和最高位边界");
+                a.True(evaluator.Failure is null, "整数位段零扩展可求值");
+            }
+        }
+        a.True(Fold.ScalarExtract(new Extract(new Read(Storage.Vec(0), 128), 4, 1), 32) is null, "向量位段不猜测整数布局");
+        a.True(Fold.ScalarExtract(new Extract(new Read(Storage.Gpr(0), 32), 31, 2), 32) is null, "越过源值边界的位段不能归约");
         return a.Finish("fold-insert");
     }
 }

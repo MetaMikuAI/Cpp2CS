@@ -1410,6 +1410,8 @@ public sealed partial class MethodRecovery
 
         private RecoveryResult<ManagedValue> Conversion(Convert c, TypeRef? hint)
         {
+            if (c.Kind == ConvKind.ZeroExtend && c.Operand is Extract { Width: not (8 or 16 or 32 or 64) } extract
+                && Fold.ScalarExtract(extract, c.Width) is { } scalar) return Recover(scalar, hint);
             if (!Recover(c.Operand, null).TryGet(out var operand, out var failure)) return failure;
             if (operand.Type is GenericParameterRef { NativeScalar: not null })
             {
