@@ -18,10 +18,22 @@ internal sealed partial class RecoveredForeach : IAstTransform
     private static bool NullTest(Expression? expression, string name, BinaryOperatorType op) => expression is BinaryOperatorExpression b
         && b.Operator == op && Name(b.Left, name) && b.Right is NullReferenceExpression;
 
+    private static bool StableCallTarget(InvocationExpression call)
+    {
+        if (call.GetSymbol() is not IMethod { DeclaringType.Kind: not TypeKind.Delegate }) return false;
+        if (call.Target is IdentifierExpression) return true;
+        if (call.Target is not MemberReferenceExpression { Target: IdentifierExpression receiver }
+            || receiver.GetILVariable() is not { Type.IsReferenceType: true, AddressInstructions.Count: 0, CaptureScope: null } local
+            || receiver.Ancestors.FirstOrDefault(n => n is MethodDeclaration or ConstructorDeclaration or Accessor) is not { } scope) return false;
+        // 展开闭包后，参数未必带 CaptureScope；嵌套函数仍可在 Current 求值时改写该引用。
+        return !scope.Descendants.OfType<IdentifierExpression>().Any(id => id.GetILVariable() == local
+            && id.Ancestors.TakeWhile(n => n != scope).Any(n => n is LambdaExpression or AnonymousMethodExpression or LocalFunctionDeclarationStatement));
+    }
+
     private static bool FirstReceiver(Expression? expression, Expression read) => ReferenceEquals(expression, read) || expression switch
     {
         InvocationExpression call => FirstReceiver(call.Target, read)
-            || call.Target is IdentifierExpression && call.GetSymbol() is IMethod { DeclaringType.Kind: not TypeKind.Delegate }
+            || StableCallTarget(call)
                 && FirstReceiver(call.Arguments.FirstOrDefault(), read),
         MemberReferenceExpression member => FirstReceiver(member.Target, read),
         IndexerExpression indexer => FirstReceiver(indexer.Target, read),
