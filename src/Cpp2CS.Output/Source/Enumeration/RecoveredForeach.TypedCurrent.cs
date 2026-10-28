@@ -32,6 +32,9 @@ internal sealed partial class RecoveredForeach
                 || loop.Ancestors.FirstOrDefault(n => n is MethodDeclaration or LambdaExpression or AnonymousMethodExpression) is not { } method) continue;
             var expression = first switch
             {
+                ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
+                    Left: IdentifierExpression target, Right: var assigned } }
+                    when target.GetILVariable() is { Type.Kind: not TypeKind.ByReference } => assigned,
                 ExpressionStatement statement => statement.Expression,
                 VariableDeclarationStatement initialized when initialized.Variables.ToArray() is [var variable] => variable.Initializer,
                 _ => null,

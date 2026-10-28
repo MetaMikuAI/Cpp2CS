@@ -23,7 +23,7 @@ internal static class SourceForeachExitsCheck
             if (!emitted.Success) throw new InvalidOperationException(string.Join('\n', emitted.Diagnostics));
             return stream.ToArray();
         }
-        string[] modes = ["Valid", "Captured", "Typed", "LeadingMember", "NestedIf", "OuterFinally", "MissingCleanup", "SharedEntry", "Fallthrough"];
+        string[] modes = ["Valid", "Captured", "Typed", "LeadingMember", "AssignedMember", "AssignmentTarget", "NestedIf", "OuterFinally", "MissingCleanup", "SharedEntry", "Fallthrough"];
         var methods = string.Join('\n', modes.Select(mode => $$"""
             public static Entry {{mode}}({{(mode == "Typed" ? "ObjectSequence" : "Sequence")}} sequence, int key, bool bypass)
             {
@@ -36,7 +36,7 @@ internal static class SourceForeachExitsCheck
                 {
                     while (iterator.MoveNext())
                     {
-                        {{(mode == "LeadingMember" ? "int[] numbers = iterator.Current.Numbers; if (numbers.Length == 0) continue; current = new Entry(numbers[0]);" : "current = " + (mode == "Typed" ? "(Entry)" : "") + "iterator.Current;")}}
+                        {{(mode == "LeadingMember" ? "int[] numbers = iterator.Current.Numbers; if (numbers.Length == 0) continue; current = new Entry(numbers[0]);" : mode == "AssignmentTarget" ? "Receiver().Value = iterator.Current.Self; current = Storage.Value;" : "current = " + (mode == "Typed" ? "(Entry)" : "") + "iterator.Current" + (mode == "AssignedMember" ? ".Self" : "") + ";")}}
                         if (current.Id != key) continue;
                         goto found;
                     }
@@ -66,10 +66,14 @@ internal static class SourceForeachExitsCheck
             {
                 public static List<string> Trace;
                 public static int Failure;
+                public class Holder { public Entry Value; }
+                public static Holder Storage = new Holder();
+                public static Holder Receiver() { Trace.Add("R"); return Storage; }
                 public class Entry
                 {
                     public int Id;
                     public int[] Numbers { get { Trace.Add("P"); if (Failure == 4) throw new InvalidOperationException(); return new[] { Id }; } }
+                    public Entry Self { get { Trace.Add("S"); return this; } }
                     public Entry(int id) { Id = id; Trace?.Add("N" + id); }
                     public void Initialize() { Trace.Add("I" + Id); if (Failure == 3) throw new InvalidOperationException(); }
                 }
@@ -101,6 +105,8 @@ internal static class SourceForeachExitsCheck
                             "Captured" => Captured(sequence, key, bypass),
                             "Typed" => Typed(new ObjectSequence { Values = input }, key, bypass),
                             "LeadingMember" => LeadingMember(sequence, key, bypass),
+                            "AssignedMember" => AssignedMember(sequence, key, bypass),
+                            "AssignmentTarget" => AssignmentTarget(sequence, key, bypass),
                             "NestedIf" => NestedIf(sequence, key, bypass),
                             "OuterFinally" => OuterFinally(sequence, key, bypass),
                             "MissingCleanup" => MissingCleanup(sequence, key, bypass),
@@ -139,7 +145,7 @@ internal static class SourceForeachExitsCheck
         var tree = CSharpSyntaxTree.ParseText(source).GetRoot();
         var a = new Assertions();
         foreach (var mode in modes)
-            a.Equal(mode is "Valid" or "Captured" or "Typed" or "LeadingMember" or "NestedIf" ? 1 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
+            a.Equal(mode is "Valid" or "Captured" or "Typed" or "LeadingMember" or "AssignedMember" or "NestedIf" ? 1 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
                 .DescendantNodes().OfType<ForEachStatementSyntax>().Count(), "只在外跳清理完整且独占时恢复 foreach");
         var rebuilt = Compile(source, "ForeachExits.Rebuilt");
         Func<string, int[], int, int, bool, string> Observe(byte[] bytes) => System.Reflection.Assembly.Load(bytes).GetType("Probe")!.GetMethod("Observe")!
@@ -158,6 +164,7 @@ internal static class SourceForeachExitsCheck
         a.Equal("G,M,C,F,D,I2,original", after("OuterFinally", [2], 2, 0, false), "跨外层 finally 的释放顺序保持不变");
         a.Equal(before("LeadingMember", [2], 2, 4, false), after("LeadingMember", [2], 2, 4, false), "成员 getter 抛错仍正确释放");
         a.Equal("G,M,C,P,D,X", after("LeadingMember", [2], 2, 4, false), "Current 之后读取成员，异常后释放一次");
+        a.Equal("G,M,R,C,S,D,I2,original", after("AssignmentTarget", [2], 2, 0, false), "有副作用的赋值目标仍先于 Current 求值");
         return a.Finish("source-foreach-exits");
     }
 }
