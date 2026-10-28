@@ -35,6 +35,7 @@ public static class SourceRewriter
         Apply("source.drop-checks", DropStatements);
         Apply("source.checked-casts", SourceCheckedCasts.Rewrite);
         Apply("source.argument-aliases", b => Normalize(SourceArgumentAliases.Rewrite(b)));
+        Apply("source.iterator-constants", SourceIteratorConstants.Rewrite);
         var reduced = Iteration.Run(body, current => DeadAssignments(Map(Retype(Propagate(current)), v => Simplify(v, types))), ManagedStructure.Same, 16);
         iteration?.Invoke(reduced);
         if (reduced.Status != IterationStatus.Stable) return original;
