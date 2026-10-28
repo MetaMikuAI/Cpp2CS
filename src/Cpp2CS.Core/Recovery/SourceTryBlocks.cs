@@ -1,24 +1,25 @@
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
-using Cpp2CS.Analysis;
 
 namespace Cpp2CS.Recovery;
 
-/// <summary>把保护区出口处不抛异常的局部运算归回 try，保留调用、字段访问和其他异常区域。</summary>
+/// <summary>把保护区出口处已证明不抛异常的运算归回 try，保留未知访问和其他异常区域。</summary>
 internal static class SourceTryBlocks
 {
-    private static bool Pure(ManagedValue value) => ManagedEffects.CanMoveAcrossExceptionBoundary(value) && value switch
+    private static bool Pure(ManagedValue value, HashSet<ManagedValue> nonnull, Func<MethodRef, bool>? getter) => value switch
     {
         LocalValue or ArgumentValue or ConstantValue => true,
+        FieldValue field => field.Receiver is LocalValue or ArgumentValue && nonnull.Contains(field.Receiver)
+            && !field.Field.Field.IsStatic && (field.Accessor is null || !field.Accessor.Write && getter?.Invoke(field.Accessor.Method) == true),
         ConversionValue conversion => ManagedTypes.PrimitiveName(conversion.Type) is not null
-            && ManagedTypes.PrimitiveName(conversion.Operand.Type) is not null && Pure(conversion.Operand),
+            && ManagedTypes.PrimitiveName(conversion.Operand.Type) is not null && Pure(conversion.Operand, nonnull, getter),
         BinaryValue { Op: BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor
             or BinOp.Shl or BinOp.LShr or BinOp.AShr or BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv } binary
-            => Pure(binary.Left) && Pure(binary.Right),
-        ComparisonValue comparison => Pure(comparison.Left) && Pure(comparison.Right),
-        ChoiceValue choice => Pure(choice.Condition) && Pure(choice.True) && Pure(choice.False),
-        BooleanValue boolean => Pure(boolean.Left) && Pure(boolean.Right),
-        NegatedValue negated => Pure(negated.Operand),
+            => Pure(binary.Left, nonnull, getter) && Pure(binary.Right, nonnull, getter),
+        ComparisonValue comparison => Pure(comparison.Left, nonnull, getter) && Pure(comparison.Right, nonnull, getter),
+        ChoiceValue choice => Pure(choice.Condition, nonnull, getter) && Pure(choice.True, nonnull, getter) && Pure(choice.False, nonnull, getter),
+        BooleanValue boolean => Pure(boolean.Left, nonnull, getter) && Pure(boolean.Right, nonnull, getter),
+        NegatedValue negated => Pure(negated.Operand, nonnull, getter),
         _ => false,
     };
 
@@ -29,15 +30,15 @@ internal static class SourceTryBlocks
         var blocks = body.Blocks.ToDictionary(b => b.Address);
         var order = body.Blocks.Select(b => b.Address).ToList();
         var regions = body.Regions.ToArray();
-        var nonnull = getter is null ? null : SourceNonNullReceivers.Read(body, getter);
-        bool NonThrowing(ManagedBlock block) => block.Statements.All(s => s switch
+        var nonnull = SourceNonNullReceivers.Read(body, getter);
+        bool NonThrowing(ManagedBlock block) => block.Statements.All(s => (s switch
         {
-            ManagedAssignment assignment => Pure(assignment.Value),
-            ManagedJump or ManagedBranch or ManagedSwitch or ManagedReturn => ManagedValues.Of(s).All(Pure),
+            ManagedAssignment assignment => Pure(assignment.Value, nonnull[s], getter),
+            ManagedJump or ManagedBranch or ManagedSwitch or ManagedReturn => ManagedValues.Of(s).All(v => Pure(v, nonnull[s], getter)),
             ManagedCall { Invocation: { Receiver: LocalValue receiver, Arguments.Count: 0 } invocation } when getter is not null
-                => getter(invocation.Method) && nonnull![s].Contains(receiver),
+                => getter(invocation.Method) && nonnull[s].Contains(receiver),
             _ => false,
-        }) && block.Statements.SelectMany(ManagedValues.Edges).SelectMany(e => e.Copies).All(c => Pure(c.Value));
+        }) && ManagedValues.Edges(s).SelectMany(e => e.Copies).All(c => Pure(c.Value, nonnull[s], getter)));
         foreach (var index in Enumerable.Range(0, regions.Length).OrderBy(i => regions[i].Try.Count))
         {
             var region = regions[index];

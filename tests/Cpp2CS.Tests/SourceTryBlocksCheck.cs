@@ -74,6 +74,34 @@ internal static class SourceTryBlocksCheck
             a.Equal(expected, SourceTryBlocks.Rewrite(body, m => m.Equals(readMethod)).Regions[0].Try.Contains(3UL), $"{mode} 的纯 getter 区域合并");
             if (mode == "check-ne") a.True(SourceNonNullReceivers.ReadNull(body)[second].Contains(receiver), "反向检查通过后为空，不误证非空");
         }
+        foreach (var mode in new[] { "field", "comparison", "copy", "getter", "unknown-getter", "unchecked", "reset", "addressed", "nested", "static" })
+        {
+            var start = new List<ManagedStatement> { new ManagedAssignment(0, receiver, new ArgumentValue(0, receiverType, 64)) };
+            if (mode == "addressed") start.Add(new ManagedCall(0, new(method, null, [new AddressValue(receiver)], false), null, false));
+            start.Add(Jump(0, 1));
+            var middle = new List<ManagedStatement>();
+            if (mode != "unchecked") middle.Add(new ManagedCheck(1, new ComparisonValue(Cond.Eq, receiver,
+                new ConstantValue(0, receiverType, 64), new PrimitiveRef("Boolean")), method));
+            if (mode == "reset") middle.Add(new ManagedAssignment(1, receiver, new ConstantValue(0, receiverType, 64)));
+            middle.Add(Jump(1, 3));
+            var fieldRead = new FieldValue(receiver, field, integer, 32);
+            ManagedValue read = mode switch
+            {
+                "getter" or "unknown-getter" => fieldRead with { Accessor = new(mode == "getter" ? readMethod : method, field, integer, 32, false) },
+                "nested" => fieldRead with { Receiver = new FieldValue(receiver, field, receiverType, 64) },
+                "static" => new StaticFieldValue(field, integer, 32),
+                _ => fieldRead,
+            };
+            ManagedStatement second = mode == "comparison"
+                ? new ManagedBranch(3, new ComparisonValue(Cond.Eq, read, local, new PrimitiveRef("Boolean")), new(1, []), new(4, []))
+                : mode == "copy" ? new ManagedJump(3, new(1, [new(local, read)])) : new ManagedAssignment(3, local, read);
+            var body = new ManagedBody(method, [new(0, start), new(1, middle), new(2, [new ManagedRethrow(2)]),
+                new(3, mode is "comparison" or "copy" ? [second] : [second, Jump(3, 1)]), new(4, [new ManagedReturn(4, null)])])
+                { Regions = [new([1], 2, [2], caught, ManagedRegionKind.Catch)] };
+            var result = SourceTryBlocks.Rewrite(body, mode is "getter" or "unknown-getter" ? m => m.Equals(readMethod) : null);
+            a.Equal(mode is "field" or "comparison" or "copy" or "getter", result.Regions[0].Try.Contains(3UL), $"{mode} 的非空字段读取合并");
+            a.Equal(body.Blocks.Single(b => b.Address == 3), result.Blocks.Single(b => b.Address == 3), "字段读取不提前、不复制、不修改");
+        }
         return a.Finish("source-try-blocks");
     }
 }
