@@ -143,7 +143,8 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
                 && call.Method.Method.Owner.Properties.Any(property => property.Name == "Current" && property.Getter == call.Method.Method));
         body = SourceEnumeratorSnapshots.Rewrite(body, CurrentField, PureField,
             field => new LocalValue(new Variable(Storage.Temp(next--), 1), field.Type, field.Width));
-        body = SourceEnumeratorReads.Rewrite(body, CurrentField);
+        body = SourceEnumeratorReads.Rewrite(body, CurrentField,
+            field => new LocalValue(new Variable(Storage.Temp(next--), 1), field.Type, field.Width));
         body = RewriteFieldCalls(body);
         var caller = body.Method.Method.Owner;
         body = AccessorRewriter.Rewrite(body, (value, write) =>

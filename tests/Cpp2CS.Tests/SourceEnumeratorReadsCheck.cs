@@ -60,6 +60,26 @@ internal static class SourceEnumeratorReadsCheck
             if (mode is "same-block" or "straight")
                 a.True(first[1] == prefix, "其他读取仍保留结果");
         }
+        foreach (var mode in new[] { "branch", "check", "call-condition", "copied-call-condition", "edge-copy", "missing-proof" })
+        {
+            var temporary = Local(10, number, 32);
+            var prefix = new List<ManagedStatement>();
+            if (mode.Contains("call-condition")) prefix.Add(new ManagedCall(0, new(method, null, [], false), saved, false));
+            if (mode == "copied-call-condition") prefix.Add(new ManagedAssignment(0, temporary, saved));
+            prefix.Add(new ManagedBranch(1, mode == "copied-call-condition" ? temporary : saved,
+                new(8, mode == "edge-copy" ? [new(saved, result)] : []), new(16, [])));
+            var read = new ManagedAssignment(9, result, storage);
+            var selected = new List<ManagedStatement>();
+            if (mode == "check") selected.Add(new ManagedCheck(8, saved, method));
+            selected.Add(read); selected.Add(new ManagedReturn(10, result));
+            var body = new ManagedBody(method, [new(0, prefix), new(8, selected), new(16, [new ManagedReturn(16, result)])]);
+            var fresh = Local(20, number, 32);
+            var output = SourceEnumeratorReads.Rewrite(body, _ => mode != "missing-proof", _ => fresh);
+            var moved = mode is "branch" or "check";
+            a.Equal(moved, output.Blocks[0].Statements.OfType<ManagedAssignment>().Any(s => s.Target == fresh && s.Value == storage), "分支快照条件：" + mode);
+            a.Equal(read with { Value = moved ? fresh : storage }, output.Blocks[1].Statements.OfType<ManagedAssignment>().Last(), "原目标仍在原位置写入：" + mode);
+            a.True(body.Blocks[2].Statements.SequenceEqual(output.Blocks[2].Statements), "另一条边不改写原结果：" + mode);
+        }
         return a.Finish("source-enumerator-reads");
     }
 }
