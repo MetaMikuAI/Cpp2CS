@@ -162,5 +162,45 @@ internal static class SourceReturnsCheck
         var callBetween = suspended with { Blocks = [suspended.Blocks[0] with { Statements =
             [current, new ManagedCall(0, new(null!, null, [], false), null, false), .. suspended.Blocks[0].Statements.Skip(1)] }] };
         a.True(SourceReturns.Rewrite(callBetween).Blocks[0].Statements[0] == current, "不跨过调用调整挂起写入");
+        var savedLocal = state with { Variable = new(Storage.Temp(4), 1) };
+        var savedRead = Read(0, savedLocal, "<time>5__2");
+        var captured = suspended with { Blocks = [suspended.Blocks[0] with { Statements =
+            [current, savedRead, saved with { Value = new BinaryValue(BinOp.Add, savedLocal, new ConstantValue(1, integer, 32), integer, 32) },
+                .. suspended.Blocks[0].Statements.Skip(2)] }] };
+        var capturedResult = SourceReturns.Rewrite(captured).Blocks[0].Statements;
+        a.True(capturedResult[0] == savedRead && capturedResult[2] == current, "捕获字段的读取、递增和保存整体位于挂起序列之前");
+        var alteredYield = captured with { Blocks = [captured.Blocks[0] with { Statements =
+            [current with { Value = savedLocal }, .. captured.Blocks[0].Statements.Skip(1)] }] };
+        a.True(SourceReturns.Rewrite(alteredYield).Blocks[0].Statements[0] is ManagedStore { Value: var yielded } && yielded == savedLocal,
+            "中间赋值覆盖 yield 值依赖的局部时不调整顺序");
+        var capturesCurrent = captured with { Blocks = [captured.Blocks[0] with { Statements =
+            [current, savedRead with { Value = current.Target }, .. captured.Blocks[0].Statements.Skip(2)] }] };
+        a.True(SourceReturns.Rewrite(capturesCurrent).Blocks[0].Statements[0] == current, "不能把 current 的读取提前到其写入之前");
+        var reset = write with { Value = new ConstantValue(uint.MaxValue, integer, 32) };
+        var cleanup = new ManagedBody(new(Method(owner, "<>m__Finally1"), [], []),
+            [new(0, [load, reset, new ManagedReturn(0, null)])]);
+        a.True(SourceIteratorDispatch.Rewrite(cleanup).Blocks[0].Statements is [ManagedStore, ManagedAssignment, ManagedReturn],
+            "清理入口的状态复位可提前到自身捕获字段读取之前");
+        var stateRead = cleanup with { Blocks = [new(0, [Read(0, state, "<>1__state"), reset, new ManagedReturn(0, null)])] };
+        a.True(SourceIteratorDispatch.Rewrite(stateRead).Blocks[0] == stateRead.Blocks[0], "不能改变清理入口读取到的旧状态");
+        var foreign = cleanup with { Blocks = [new(0, [load with { Value = ((FieldValue)load.Value) with { Receiver = capture } }, reset,
+            new ManagedReturn(0, null)])] };
+        a.True(SourceIteratorDispatch.Rewrite(foreign).Blocks[0] == foreign.Blocks[0], "可能抛出的外部对象读取不可越过状态复位");
+        var exception = new LocalValue(new(Storage.Temp(5), 1), new PrimitiveRef("Object"), 64);
+        var innerException = exception with { Variable = new(Storage.Temp(6), 1) };
+        var dispose = new MethodRef(Method(owner, "System.IDisposable.Dispose"), [], []);
+        var nested = new ManagedBody(body.Method, [
+            new(0, [new ManagedJump(0, new(1, []))]),
+            new(1, [new ManagedCall(1, new(dispose, new ArgumentValue(-1, type, 64), [], false), null, false), new ManagedJump(1, new(3, []))]),
+            new(2, [new ManagedThrow(2, innerException)]),
+            new(3, [new ManagedReturn(3, new ConstantValue(0, result.Type, 1))]),
+            new(4, [new ManagedCall(4, new(dispose, new ArgumentValue(-1, type, 64), [], false), null, false), new ManagedThrow(4, exception)])])
+        { Regions = [new([0, 1, 2, 3], 4, [4], exception, ManagedRegionKind.Catch),
+            new([1], 2, [2], innerException, ManagedRegionKind.Catch) { CatchType = innerException.Type }] };
+        var fault = Cpp2CS.Structure.IteratorCleanup.Rewrite(nested);
+        a.True(fault.Regions is [{ Kind: ManagedRegionKind.Fault }, { Kind: ManagedRegionKind.Catch }]
+            && fault.Blocks.Single(b => b.Address == 2).Statements is [ManagedThrow], "外层清理还原 fault 时保留内部 catch 和原抛出");
+        var outside = nested with { Regions = [nested.Regions[0] with { Try = [0, 1, 3] }, nested.Regions[1]] };
+        a.Equal(outside, Cpp2CS.Structure.IteratorCleanup.Rewrite(outside), "内层 handler 不属于外层 try 时不合并清理范围");
     }
 }

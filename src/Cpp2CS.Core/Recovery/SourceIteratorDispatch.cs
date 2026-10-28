@@ -9,9 +9,11 @@ internal static class SourceIteratorDispatch
     public static ManagedBody Rewrite(ManagedBody body)
     {
         var method = body.Method.Method;
-        if (method.Name != "MoveNext" || method.IsStatic || method.Parameters.Count != 0
+        if (method.IsStatic || method.Parameters.Count != 0
             || !method.Owner.Interfaces.OfType<DefinitionRef>().Any(t => t.Definition.FullName == "System.Collections.IEnumerator")
             || !method.Owner.CustomAttributes.Any(a => a.Constructor.Owner.FullName == "System.Runtime.CompilerServices.CompilerGeneratedAttribute")) return body;
+        if (method.Name.StartsWith("<>m__Finally", StringComparison.Ordinal)) return CleanupState(body);
+        if (method.Name != "MoveNext") return body;
         var blocks = body.Blocks.ToDictionary(b => b.Address);
         var state = body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>().Where(a => a.Value is
             FieldValue { Receiver: ArgumentValue { Index: -1 }, Accessor: null, Field.Field.Name: "<>1__state" }).ToArray();
@@ -57,4 +59,17 @@ internal static class SourceIteratorDispatch
             Statements = (index == 0 ? captures.Cast<ManagedStatement>() : []).Concat(block.Statements.Where(s => !captures.Contains(s))).ToArray(),
         }).ToArray() };
     }
+
+    // 清理入口先复位状态，再读取捕获资源。仅交换非空 this 的字段读取，不跨调用、分支或状态读取。
+    private static ManagedBody CleanupState(ManagedBody body) => body with { Blocks = body.Blocks.Select(block =>
+    {
+        var prefix = block.Statements.TakeWhile(s => s is ManagedAssignment { Value: FieldValue
+            { Receiver: ArgumentValue { Index: -1 }, Accessor: null } field }
+            && field.Field.Field.Owner == body.Method.Method.Owner && field.Field.Field.Name != "<>1__state").Count();
+        if (prefix == 0 || block.Statements.ElementAtOrDefault(prefix) is not ManagedStore
+            { Target: FieldValue { Receiver: ArgumentValue { Index: -1 }, Accessor: null, Field.Field.Name: "<>1__state" } state,
+                Value: ConstantValue { Width: 32, Bits: > int.MaxValue } } write
+            || state.Field.Field.Owner != body.Method.Method.Owner) return block;
+        return block with { Statements = [write, .. block.Statements.Take(prefix), .. block.Statements.Skip(prefix + 1)] };
+    }).ToArray() };
 }

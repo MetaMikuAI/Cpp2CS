@@ -10,8 +10,12 @@ internal static class IteratorCleanup
     public static ManagedBody Rewrite(ManagedBody body)
     {
         var method = body.Method.Method;
-        if (!EnumerationProtocol.IteratorMoveNext(method)
-            || body.Regions is not [{ Kind: ManagedRegionKind.Catch, CatchType: null, Exception: { } exception } region]) return body;
+        if (!EnumerationProtocol.IteratorMoveNext(method)) return body;
+        var outer = body.Regions.Where(r => r is { Kind: ManagedRegionKind.Catch, CatchType: null, Exception: not null }
+            && body.Regions.Where(n => n != r).All(n => n.Try.Concat(n.Handler).All(r.Try.Contains))).ToArray();
+        if (outer is not [var region]) return body;
+        var exception = region.Exception!;
+        var nested = body.Regions.Where(r => r != region).ToArray();
 
         var blocks = body.Blocks.ToDictionary(b => b.Address);
         var aliases = new Dictionary<Variable, ManagedValue>();
@@ -73,6 +77,7 @@ internal static class IteratorCleanup
             if (handler.Contains(address)) return body;
             if (!normal.Add(address)) continue;
             foreach (var edge in blocks[address].Statements.SelectMany(ManagedValues.Edges)) pending.Push(edge.Target);
+            foreach (var inner in nested.Where(r => r.Try.Contains(address))) pending.Push(inner.HandlerEntry);
         }
         // 原生 EH 只覆盖会抛出的指令。把外围的状态写入、复制和返回纳入同一个 try，不能新增可抛出的操作。
         static bool Harmless(ManagedValue value) => value switch
@@ -99,9 +104,11 @@ internal static class IteratorCleanup
         var resultBody = body with
         {
             Blocks = [.. ordered, fault],
-            Regions = [new ManagedRegion(ordered.Select(b => b.Address).ToArray(), fault.Address, [fault.Address], null, ManagedRegionKind.Fault)],
+            Regions = [new ManagedRegion(ordered.Select(b => b.Address).ToArray(), fault.Address, [fault.Address], null, ManagedRegionKind.Fault),
+                .. nested.Where(r => r.Try.Any(normal.Contains)).Select(r => r with
+                { Try = r.Try.Where(normal.Contains).ToArray(), Handler = r.Handler.Where(normal.Contains).ToArray() })],
         };
-        return SplitStateEntries(resultBody);
+        return SourceReturns.Rewrite(SplitStateEntries(resultBody));
     }
 
     // 优化器合并了首次进入与 yield 恢复后的负状态写入；拆开共享入口，保留各自的 finally 边界。
@@ -112,7 +119,9 @@ internal static class IteratorCleanup
             .GroupBy(e => e.Target).ToDictionary(g => g.Key, g => g.Count());
         var shared = body.Blocks.Where(b => incoming.GetValueOrDefault(b.Address) > 1 && b.Statements is
             [ManagedStore { Target: FieldValue { Receiver: ArgumentValue { Index: -1 }, Field.Field.Name: "<>1__state" },
-                Value: ConstantValue { Bits: > int.MaxValue, Width: 32 } }, ManagedJump { Edge.Copies.Count: 0 }]).ToDictionary(b => b.Address);
+                Value: ConstantValue { Bits: > int.MaxValue, Width: 32 } }, ManagedJump { Edge.Copies.Count: 0 }]
+            && !body.Regions.Skip(1).Any(r => r.Try.Contains(b.Address) || r.Handler.Contains(b.Address)))
+            .ToDictionary(b => b.Address);
         if (shared.Count == 0) return body;
         var output = new List<ManagedBlock>();
         var copies = new List<ManagedBlock>();
@@ -125,12 +134,12 @@ internal static class IteratorCleanup
                 copies.Add(clone);
                 return edge with { Target = clone.Address };
             })).ToArray() });
-        var region = body.Regions.Single();
+        var region = body.Regions[0];
         var normal = output.Where(b => region.Try.Contains(b.Address)).Concat(copies).ToArray();
         return body with
         {
             Blocks = [.. normal, .. output.Where(b => region.Handler.Contains(b.Address))],
-            Regions = [region with { Try = normal.Select(b => b.Address).ToArray() }],
+            Regions = body.Regions.Select(r => r == region ? r with { Try = normal.Select(b => b.Address).ToArray() } : r).ToArray(),
         };
     }
 }
