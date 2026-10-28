@@ -31,6 +31,8 @@ internal static class SourceForeachArgumentsCheck
             ("LateArgument", "sink.AddPair(Effect(), iterator.Current);"),
             ("RefReceiver", "sink.Add(iterator.Current);"),
             ("Captured", "sink.Add(iterator.Current);"),
+            ("Arithmetic", "sink.Add((int)(double)(iterator.Current + Effect()));"),
+            ("LateArithmetic", "sink.Add((int)(double)(Effect() + iterator.Current));"),
         };
         var methods = string.Join('\n', samples.Select(s => $$"""
             public static void {{s.Name}}(Sequence sequence, {{(s.Name == "RefReceiver" ? "ref " : "")}}Sink sink)
@@ -89,6 +91,8 @@ internal static class SourceForeachArgumentsCheck
                             case "LateArgument": LateArgument(sequence, sink); break;
                             case "RefReceiver": RefReceiver(sequence, ref sink); break;
                             case "Captured": Captured(sequence, sink); break;
+                            case "Arithmetic": Arithmetic(sequence, sink); break;
+                            case "LateArithmetic": LateArithmetic(sequence, sink); break;
                         }
                     }
                     catch (InvalidOperationException) { Trace.Add("X"); }
@@ -106,7 +110,7 @@ internal static class SourceForeachArgumentsCheck
         var tree = CSharpSyntaxTree.ParseText(source).GetRoot();
         var a = new Assertions();
         foreach (var sample in samples)
-            a.Equal(sample.Name == "Direct" ? 1 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == sample.Name)
+            a.Equal(sample.Name is "Direct" or "Arithmetic" ? 1 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == sample.Name)
                 .DescendantNodes().OfType<ForEachStatementSyntax>().Count(), "只提升稳定引用局部的第一个参数，保留调用、条件执行、前置参数与 ref 接收者");
         var rebuilt = Compile(source, "ForeachArguments.Rebuilt");
         Func<string, int, string> Observe(byte[] bytes) => System.Reflection.Assembly.Load(bytes).GetType("Probe")!.GetMethod("Observe")!
@@ -121,6 +125,8 @@ internal static class SourceForeachArgumentsCheck
         a.Equal("M,C,D,X", after("Direct", 1), "Current 抛错时释放一次");
         a.Equal("M,C,A0,D,X", after("Direct", 2), "主体抛错时释放一次");
         a.Equal("M,C,A0,M,C,D,N", after("Captured", 0), "Current 改写捕获接收者时仍使用调用前读取的引用");
+        a.Equal("M,C,D,X", after("Arithmetic", 1), "左侧 Current 抛错时不执行右侧调用");
+        a.Equal("M,E,C,D,X", after("LateArithmetic", 1), "右侧 Current 不能越过左侧调用");
         return a.Finish("source-foreach-arguments");
     }
 }
