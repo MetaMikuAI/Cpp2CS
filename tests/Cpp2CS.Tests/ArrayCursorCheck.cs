@@ -101,6 +101,43 @@ internal static class ArrayCursorCheck
         a.Equal(0, Read(NarrowLoop(bypass: true)).Length, "递增不能绕过边界分支");
         a.Equal(0, Read(NarrowLoop(initialIndex: uint.MaxValue)).Length, "拒绝 32 位负数种子");
         a.Equal(0, Read(NarrowLoop(increment: 2)).Length, "窄下标暂只接受有界逐次加一");
+        var firstIndex = new Variable(Storage.Gpr(4), 0);
+        MachineFunction IndexedLoop(bool sameIndex = true, bool arrayBound = true, bool bypass = false)
+        {
+            var function = NarrowLoop(bypass: bypass);
+            var entry = function.Blocks[0];
+            Expr index = new Ir.Convert(ConvKind.SignExtend, new Use(firstIndex, 32), 64);
+            var scaled = new Binary(BinOp.Mul, index, Expr.C(16, 64), 64);
+            entry.Statements[0] = new Define(0x1000, pointer with { Version = 1 }, new Binary(BinOp.Add,
+                new Binary(BinOp.Add, new Use(array, 64), scaled, 64), Expr.C(32, 64), 64));
+            entry.Statements[1] = new Define(0x1004, counter with { Version = 1 }, new Ir.Convert(ConvKind.ZeroExtend,
+                new Use(sameIndex ? firstIndex : firstIndex with { Storage = Storage.Gpr(5) }, 32), 64));
+            var loop = function.Blocks[1];
+            loop.Statements.RemoveAll(s => s is Branch);
+            Expr length = arrayBound ? new Load(Add(array, RuntimeLayout.ArrayMaxLength), 32) : new Use(new(Storage.Gpr(6), 0), 32);
+            loop.Statements.Add(new Call(0x1020, CallKind.Direct, Expr.C(0, 64))
+                { Op = new(OpKind.BoundsCheck, null), Arguments = [new Use(counter, 32), length] });
+            loop.Statements.Add(new Jump(0x1024, 0x1030));
+            var done = function.Blocks.Single(b => b.Start == 0x1040);
+            loop.Successors.Remove(done);
+            done.Predecessors.Remove(loop);
+            function.Blocks.Remove(done);
+            function.Renumber();
+            return function;
+        }
+        var indexed = Read(IndexedLoop());
+        a.Equal(1, indexed.Length, "动态有符号起点与零扩展的循环下标可按低位对应");
+        a.Equal(0, Read(IndexedLoop(sameIndex: false)).Length, "指针与下标起点不同时拒绝");
+        a.Equal(0, Read(IndexedLoop(arrayBound: false)).Length, "未知长度的无符号边界检查不证明有符号递增无溢出");
+        a.Equal(0, Read(IndexedLoop(bypass: true)).Length, "不能绕过数组边界检查执行递增");
+        foreach (var index in new[] { -2, -1, 0, 1, 8, int.MaxValue })
+        {
+            var evaluator = new Evaluator();
+            evaluator.Registers[array.Storage] = 0x10000;
+            evaluator.Registers[counter.Storage] = unchecked((uint)index);
+            var expression = ExprMap.Map(indexed.Single().Address, e => e is Use use ? new Read(use.Variable.Storage, use.Width) : null);
+            a.Equal<UInt128>(unchecked((ulong)(0x10000L + 32 + (long)index * 16)), evaluator.Eval(expression), "动态起点保留符号；负下标仍交由原边界检查抛出");
+        }
         return a.Finish("array-cursors");
     }
 }
