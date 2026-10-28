@@ -32,6 +32,9 @@ public static partial class Decompilation
         var decompiler = new CSharpDecompiler(typeSystem, settings);
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.Transforms.DelegateConstruction), new AllocatedNullChecks());
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.Transforms.DelegateConstruction), new IteratorCopies());
+        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.Transforms.TransformDisplayClassUsage), new ClosureLinks());
+        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.Transforms.TransformDisplayClassUsage), new IteratorCopies());
+        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.Transforms.TransformDisplayClassUsage), new AllocatedNullChecks());
         decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new DistinctLocalNames());
         decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is IntroduceQueryExpressions), new PreserveLambdaOrigins());
         decompiler.AstTransforms.Add(new EnumeratorCopies());

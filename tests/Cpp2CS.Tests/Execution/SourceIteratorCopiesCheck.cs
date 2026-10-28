@@ -1,4 +1,5 @@
 using Cpp2CS.Output;
+using ICSharpCode.Decompiler.Metadata;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Mono.Cecil;
@@ -44,6 +45,16 @@ internal static class SourceIteratorCopiesCheck
                 {
                     int current = seed;
                     return () => ++current;
+                }
+                public static Func<int>[] NestedCapture(int seed, bool branch)
+                {
+                    int current = seed;
+                    Func<int> outer = () => ++current;
+                    if (seed < 0) return new[] { outer, outer };
+                    {
+                        int step = 2;
+                        return new[] { outer, () => current += step };
+                    }
                 }
                 public IEnumerable<int> InstanceValues()
                 {
@@ -110,6 +121,30 @@ internal static class SourceIteratorCopiesCheck
             branchIl.Create(OpCodes.Ldloc, root), branchIl.Create(OpCodes.Stloc, alias), branchIl.Create(OpCodes.Br, joined),
             right, branchIl.Create(OpCodes.Call, touch), branchIl.Create(OpCodes.Ldloc, root), branchIl.Create(OpCodes.Stloc, alias), joined, branchIl.Create(OpCodes.Ldftn, callback),
             branchIl.Create(OpCodes.Newobj, constructors[1]), branchIl.Create(OpCodes.Ret) }) branchIl.Append(instruction);
+        var nested = module.GetType("Probe").Methods.Single(m => m.Name == "NestedCapture");
+        nested.Body.SimplifyMacros();
+        var linkStore = nested.Body.Instructions.Single(i => i.OpCode == OpCodes.Stfld && i.Operand is FieldReference field
+            && field.Name.Contains("locals", StringComparison.Ordinal));
+        var link = (FieldReference)linkStore.Operand;
+        var holder = nested.Body.Variables.Single(v => v.VariableType.FullName == link.DeclaringType.FullName);
+        var linked = new VariableDefinition(link.FieldType);
+        nested.Body.Variables.Add(linked);
+        var nestedIl = nested.Body.GetILProcessor();
+        var alternate = nestedIl.Create(OpCodes.Ldc_I4_2);
+        var join = nestedIl.Create(OpCodes.Ldloc, linked);
+        var cursorLink = linkStore;
+        // 两条路径从内层闭包读取同一外层引用，合流后仍共享可变捕获。
+        foreach (var instruction in new[] {
+            nestedIl.Create(OpCodes.Ldarg_1), nestedIl.Create(OpCodes.Brtrue, alternate),
+            nestedIl.Create(OpCodes.Ldc_I4_1), nestedIl.Create(OpCodes.Call, touch),
+            nestedIl.Create(OpCodes.Ldloc, holder), nestedIl.Create(OpCodes.Ldfld, link), nestedIl.Create(OpCodes.Stloc, linked), nestedIl.Create(OpCodes.Br, join),
+            alternate, nestedIl.Create(OpCodes.Call, touch), nestedIl.Create(OpCodes.Ldloc, holder), nestedIl.Create(OpCodes.Ldfld, link),
+            nestedIl.Create(OpCodes.Stloc, linked), join,
+            nestedIl.Create(OpCodes.Ldfld, link.FieldType.Resolve().Fields.Single(f => f.Name == "current")), nestedIl.Create(OpCodes.Call, touch) })
+        {
+            nestedIl.InsertAfter(cursorLink, instruction);
+            cursorLink = instruction;
+        }
         var move = module.GetTypes().SelectMany(t => t.Methods).Single(m => m.Name == "MoveNext" && m.DeclaringType.Name.StartsWith("<Values>", StringComparison.Ordinal));
         move.Body.SimplifyMacros();
         var il = move.Body.GetILProcessor();
@@ -137,6 +172,24 @@ internal static class SourceIteratorCopiesCheck
         var original = System.Reflection.Assembly.Load(File.ReadAllBytes(input)).GetType("Probe")!.GetMethod("Values")!.CreateDelegate<Func<int, IEnumerable<int>>>();
         var restored = System.Reflection.Assembly.Load(rebuilt).GetType("Probe")!.GetMethod("Values")!.CreateDelegate<Func<int, IEnumerable<int>>>();
         var a = new Assertions();
+        bool EmptyClosureConstructor(string path)
+        {
+            using var file = new ICSharpCode.Decompiler.Metadata.PEFile(path);
+            var resolver = new ICSharpCode.Decompiler.Metadata.UniversalAssemblyResolver(path, true, file.DetectTargetFrameworkId());
+            var system = new ICSharpCode.Decompiler.TypeSystem.DecompilerTypeSystem(file, resolver, Decompilation.Settings(true));
+            var constructor = system.MainModule.TopLevelTypeDefinitions.Single(t => t.Name == "Probe").NestedTypes
+                .Single(t => t.Name == link.DeclaringType.Name).Methods.Single(m => m.IsConstructor && !m.IsStatic);
+            return (bool)typeof(Decompilation).GetNestedType("ClosureLinks", System.Reflection.BindingFlags.NonPublic)!
+                .GetMethod("EmptyConstructor", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.Invoke(null, [constructor])!;
+        }
+        a.True(EmptyClosureConstructor(input), "普通闭包构造只调用 object 构造");
+        var publishingConstructor = link.DeclaringType.Resolve().Methods.Single(m => m.IsConstructor && !m.IsStatic);
+        var constructorIl = publishingConstructor.Body.GetILProcessor();
+        constructorIl.InsertBefore(publishingConstructor.Body.Instructions[0], constructorIl.Create(OpCodes.Call, touch));
+        constructorIl.InsertBefore(publishingConstructor.Body.Instructions[0], constructorIl.Create(OpCodes.Ldc_I4_1));
+        var altered = Path.Combine(directory, "ConstructorEffect.dll");
+        module.Write(altered);
+        a.True(!EmptyClosureConstructor(altered), "附加构造调用可能发布 this，不能据此消除字段读取");
         a.True(!source.Contains("DisplayClass", StringComparison.Ordinal), "分支副本和挂起副本均展开为共享捕获变量");
         a.True(reads.Length > 1 && source.Contains("yield return", StringComparison.Ordinal), "多个闭包读取副本仍成功折叠");
         foreach (var seed in new[] { -4, 0, 7 })
@@ -161,6 +214,16 @@ internal static class SourceIteratorCopiesCheck
                 a.True(callbackProbe() == seed + 1 && callbackProbe() == seed + 2 && (int)type.GetField("BranchVisits")!.GetValue(null)! == (seed < 0 ? 1 : 2),
                     $"seed={seed} 分支合流后的回调共享可变捕获并保留分支调用");
             }
+            var nestedFactory = type.GetMethod("NestedCapture")!.CreateDelegate<Func<int, bool, Func<int>[]>>();
+            foreach (var seed in new[] { -4, 0, 7 })
+                foreach (var branch in new[] { false, true })
+                {
+                    type.GetField("BranchVisits")!.SetValue(null, 0);
+                    var callbacks = nestedFactory(seed, branch);
+                    a.True(callbacks[0]() == seed + 1 && callbacks[1]() == seed + (seed < 0 ? 2 : 3)
+                        && callbacks[0]() == seed + (seed < 0 ? 3 : 4), "嵌套闭包与分支合流仍共享同一捕获对象");
+                    a.Equal(seed < 0 ? 0 : seed + (branch ? 2 : 1), (int)type.GetField("BranchVisits")!.GetValue(null)!, "保留分支调用和读取顺序");
+                }
             var instance = Activator.CreateInstance(type)!;
             type.GetField("Value")!.SetValue(instance, 7);
             var iterator = ((IEnumerable<int>)type.GetMethod("InstanceValues")!.Invoke(instance, null)!).GetEnumerator();
