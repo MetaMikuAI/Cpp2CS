@@ -97,6 +97,10 @@ public sealed partial class BodyEmitter
         }
         foreach (var statement in recovered.Blocks.SelectMany(b => b.Statements))
         {
+            if (statement is ManagedCall { Invocation.Constraint: { } constraint } constrained
+                && (!constrained.Invocation.Virtual || constrained.Invocation.Method.Method.IsStatic
+                    || constrained.Invocation.Receiver?.Type is not ByRefRef reference || !reference.Element.Equals(constraint)))
+                return "受约束调用需要同类型托管地址与实例 callvirt";
             if (statement is ManagedCall c && !CanAccess(c.Invocation.Method, c.Invocation.Receiver?.Type))
                 return $"访问权限 调用 {c.Invocation.Method}";
             if (statement is ManagedStore store && (StaticWriteProblem(store.Target) ?? ReadonlyWriteProblem(store.Target)) is { } writeProblem)
@@ -130,7 +134,7 @@ public sealed partial class BodyEmitter
         // async void 的完成标记不产生栈值，不能按普通值要求非零位宽。
         if (value is AsyncResultValue { Value: null } && ManagedTypes.IsVoid(value.Type)) return null;
         // 开放 T 的大小由 CLR 决定；仅保留有类型的复制、字段、局部和 default(T)。
-        var genericStorage = value.Type is GenericParameterRef && value is ArgumentValue or LocalValue or FieldValue or IndirectValue or ComposedValue { Leaves.Count: 0 };
+        var genericStorage = value.Type is GenericParameterRef && value is ArgumentValue or LocalValue or FieldValue or IndirectValue or UnboxValue or ComposedValue { Leaves.Count: 0 };
         if (value.Width is not (1 or 8 or 16 or 32 or 64) && !(value.Width == 0 && (types.Kind(value.Type) == TypeKind.Struct || genericStorage))) return $"位宽 {value.Width} 尚未支持";
         // C# 里每个值的类型都可能要按名写出（局部变量声明、转换）
         if (!CanAccess(value.Type)) return $"访问权限 类型 {value.Type}";
@@ -162,6 +166,9 @@ public sealed partial class BodyEmitter
             case UnboxAddressValue unbox:
                 if (!CanAccess(unbox.Target)) return $"访问权限 类型 {unbox.Target}";
                 if (unbox.Target is not (DefinitionRef { Definition.IsEnum: true } or GenericParameterRef { NativeScalar: not null })) return $"拆箱 类型 {unbox.Target} 尚未支持";
+                break;
+            case UnboxValue unbox:
+                if (!ManagedTypes.IsReferenceType(unbox.Operand.Type)) return "拆箱值需要对象来源";
                 break;
             case CheckedCastValue cast:
                 if (!ManagedTypes.IsReferenceType(cast.Operand.Type) || !ManagedTypes.IsReferenceType(cast.Target))

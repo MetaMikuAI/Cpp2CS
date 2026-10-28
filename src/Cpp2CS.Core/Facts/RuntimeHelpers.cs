@@ -152,10 +152,11 @@ public sealed class RuntimeHelpers
 
     private ulong? Thin(ulong address)
     {
+        // 导出跳板可以没有独立的展开表入口，首条无条件跳转仍给出完整的目标证据。
+        if (map.Word(address) is { } first && A64.IsB(first)) return A64.Imm26Target(first, address);
         var index = map.EntryIndex(address);
         if (index < 0) return null;
         var function = map.Functions[index];
-        if (map.Word(address) is { } first && A64.IsB(first)) return A64.Imm26Target(first, address);
         if (function.Size > ThinLimit * 4) return null;
         // 导出 API 外层常有 catch(...) 落地块，其中的 __cxa_begin_catch/__cxa_end_catch/terminate 不算包装的调用
         var refs = scan.Of(index).ToArray().Where(r => !IsExceptionPlumbing(r.Target)).ToArray();
@@ -288,7 +289,7 @@ public sealed class RuntimeHelpers
             }
 
         var chain = Chain(target).ToArray();
-        foreach (var hop in chain.Skip(1))
+        foreach (var hop in chain)
             if (exportChains.TryGetValue(hop, out var e))
                 return new(target, e.Kind, e.Kind == HelperKind.Export || e.Kind == HelperKind.VirtualMethodLookup ? e.Export : null,
                     $"跳板链 {string.Join(" → ", chain.TakeWhile(h => h != hop).Append(hop).Select(h => $"0x{h:x}"))} 与导出 {e.Export} 相交", calls);

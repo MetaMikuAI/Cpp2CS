@@ -67,6 +67,7 @@ public sealed partial class BodyEmitter
             case TypeHandleValue handle: il.Emit(OpCodes.Ldtoken, TypeReference(handle.Target)); break;
             case BoxValue box: Value(box.Operand); il.Emit(OpCodes.Box, TypeReference(box.Boxed)); break;
             case UnboxAddressValue unbox: Value(unbox.Operand); il.Emit(OpCodes.Unbox, TypeReference(unbox.Target)); break;
+            case UnboxValue unbox: Value(unbox.Operand); il.Emit(OpCodes.Unbox_Any, TypeReference(unbox.Target)); break;
             case IsInstValue test:
                 Value(test.Operand);
                 if (test.Operand.Type is GenericParameterRef { IsReferenceConstrained: false }) il.Emit(OpCodes.Box, TypeReference(test.Operand.Type));

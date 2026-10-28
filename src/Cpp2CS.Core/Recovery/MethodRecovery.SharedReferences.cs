@@ -20,6 +20,7 @@ public sealed partial class MethodRecovery
                     MethodArguments = target.MethodArguments.Select(Type).ToArray(),
                 },
                 FieldRef field => field with { DeclaringType = Type(field.DeclaringType) },
+                ValueTuple<TypeRef, MethodRef> constrained => (Type(constrained.Item1), (MethodRef)Bind(constrained.Item2)!),
                 ValueTuple<object?, int> pair => (Bind(pair.Item1), pair.Item2),
                 _ => value,
             };

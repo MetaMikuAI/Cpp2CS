@@ -29,6 +29,8 @@ public sealed partial class MethodRecovery
             if (!original.OfType<Define>().Any(d => ExprMap.Walk(d.Value).Any(e => e is Load
                 { Address: Binary { Left: Symbol { Kind: SymbolKind.Class, Value: GenericParameterRef }, Right: Const { Value: RuntimeLayout.ClassStackSlotSize } } }))) return;
             var defs = original.OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+            foreach (var init in original.OfType<Call>().Where(c => c is { Op.Kind: OpKind.InitClass, Arguments.Length: 1, Defines.Length: 1 }))
+                defs[init.Defines[0]] = init.Arguments[0];
             var joins = original.OfType<Phi>().ToDictionary(p => p.Target);
             var singleStores = original.OfType<Store>().Where(s => s.Target is FrameAddress).GroupBy(s => ((FrameAddress)s.Target).Offset)
                 .Where(g => g.Count() == 1).ToDictionary(g => g.Key, g => g.Single());
@@ -93,10 +95,14 @@ public sealed partial class MethodRecovery
                 for (var i = 0; i < block.Statements.Count; i++)
                 {
                     if (block.Statements[i] is not Define define || ExpandValue(define.Value) is not Binary
-                        { Op: BinOp.Sub, Left: FrameAddress or Intrinsic { Name: "managed_generic_buffer" }, Right: Binary { Op: BinOp.And, Left: Binary { Op: BinOp.Add, Left: var size, Right: Const { Value: 15 } }, Right: Const { Value: 0x1fffffff0 } } }
-                        || SizeType(size) is not { } type) continue;
-                    var buffer = new Intrinsic("managed_generic_buffer", [new Symbol(SymbolKind.Type, type), Expr.C(define.Address, 64)], 64);
-                    sharedBuffers[define.Address] = StructLocal(type, 0);
+                        { Op: BinOp.Sub, Left: FrameAddress or Intrinsic { Name: "managed_generic_buffer" or "managed_box_scratch" },
+                          Right: Binary { Op: BinOp.And, Left: Binary { Op: BinOp.Add, Left: var size, Right: Const { Value: 15 } }, Right: Const { Value: 0x1fffffff0 } } }) continue;
+                    var scratch = Scalar(size) is Binary { Op: BinOp.Add, Width: 32, Left: var payload, Right: Const { Value: RuntimeLayout.ObjectHeaderSize } }
+                        && SizeType(payload) is { };
+                    var type = SizeType(scratch ? ((Binary)Scalar(size)).Left : size);
+                    if (type is null) continue;
+                    var buffer = new Intrinsic(scratch ? "managed_box_scratch" : "managed_generic_buffer", [new Symbol(SymbolKind.Type, type), Expr.C(define.Address, 64)], 64);
+                    if (!scratch) sharedBuffers[define.Address] = StructLocal(type, 0);
                     block.Statements[i] = define with { Value = buffer };
                     defs[define.Target] = buffer;
                 }
@@ -138,9 +144,46 @@ public sealed partial class MethodRecovery
                 MachineFunction.RemoveEdgeAt(block, 1);
             }
             function.Renumber();
+            NormalizeStackCanary(ExpandValue);
             Ssa.Propagate.Run(function, Ssa.Dominators.Compute(function));
             defs = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
             joins = function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().ToDictionary(p => p.Target);
+
+            foreach (var block in function.Blocks)
+            for (var i = 0; i < block.Statements.Count; i++)
+            {
+                if (block.Statements[i] is not Call { Op: null, Kind: CallKind.Direct, Target: Const target } call) continue;
+                bool UnusedResultsExcept(Stmt? allowed) => function.Blocks.SelectMany(b => b.Statements)
+                    .Where(s => !ReferenceEquals(s, allowed)).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk)
+                    .OfType<Use>().All(u => !call.Defines.Contains(u.Variable));
+                if (call.Arguments is [var obj, Symbol { Kind: SymbolKind.Class, Value: GenericParameterRef type }, var temporary, ..]
+                    && Equals(AddressType(temporary), type) && call.Defines.FirstOrDefault() is { } pointer
+                    && i + 1 < block.Statements.Count && block.Statements[i + 1] is Call
+                    { Op: { Kind: OpKind.Import, Operand: "memcpy" }, Arguments: [var destination, Use copied, var count] } copy
+                    && copied.Variable == pointer && Equals(SizeType(count), type) && Equals(AddressType(destination), type)
+                    && UnusedResultsExcept(copy) && SharedRuntimeHelpers.UnboxAny(facts, target.Value))
+                {
+                    block.Statements[i] = call with { Op = new(OpKind.UnboxGenericValue, type), Arguments = [destination, obj],
+                        Sources = [], Defines = [], Results = [], Target = Expr.C(0, 64) };
+                    block.Statements[i + 1] = copy.Defines is [var result]
+                        ? new Define(copy.Address, result, destination) : new Nop(copy.Address, "拆箱值复制");
+                    sharedSites.Add(call.Address); sharedSites.Add(copy.Address);
+                }
+                else if (call.Arguments is [Symbol { Kind: SymbolKind.Class, Value: GenericParameterRef constraint },
+                    Symbol { Kind: SymbolKind.Constrained, Value: ValueTuple<TypeRef, MethodRef> dispatch }, var scratch, var receiver, Const { Value: 0 }, FrameAddress returned, ..]
+                    && Equals(dispatch.Item1, constraint) && Equals(AddressType(receiver), constraint)
+                    && ExpandValue(scratch) is Intrinsic { Name: "managed_box_scratch", Arguments: [Symbol { Value: TypeRef scratchType }, _] }
+                    && Equals(scratchType, constraint) && dispatch.Item2.Method is { IsStatic: false, Parameters.Count: 0 }
+                    && Concrete(dispatch.Item2, dispatch.Item2.Method.ReturnType) is { } resultType && ManagedTypes.IsReferenceType(resultType)
+                    && UnusedResultsExcept(null) && SharedRuntimeHelpers.ConstrainedInvoke(facts, target.Value))
+                {
+                    var result = StructLocal(resultType, 64).Variable;
+                    block.Statements[i] = call with { Op = new(OpKind.InvokeConstrainedGeneric, dispatch.Item2),
+                        Arguments = [new Symbol(SymbolKind.Type, constraint), receiver], Sources = [], Defines = [result], Results = [], Target = Expr.C(0, 64) };
+                    block.Statements.Insert(++i, new Store(call.Address, returned, new Use(result, 64)));
+                    sharedSites.Add(call.Address);
+                }
+            }
 
             // 不同分支选择不同的 MethodInfo/实参后汇入同一个 invoker；调用分别留在原分支上。
             foreach (var block in function.Blocks.ToArray())
@@ -284,6 +327,22 @@ public sealed partial class MethodRecovery
         [CallRule(9)]
         private RecoveryResult<bool> LowerSharedValues(Call call, List<ManagedStatement> output)
         {
+            if (call.Op is { Kind: OpKind.UnboxGenericValue, Operand: TypeRef unboxed })
+            {
+                if (!SharedValue(call.Arguments[0], unboxed).TryGet(out var target, out var failure)) return failure;
+                if (!RecoverAs(call.Arguments[1], types.Object, call.Address).TryGet(out var value, out failure)) return failure;
+                var cast = new UnboxValue(value, unboxed, Math.Max(0, types.Bits(unboxed)));
+                output.Add(target is LocalValue local ? new ManagedAssignment(call.Address, local, cast) : new ManagedStore(call.Address, target, cast));
+                return true;
+            }
+            if (call is { Op: { Kind: OpKind.InvokeConstrainedGeneric, Operand: MethodRef contract },
+                Arguments: [Symbol { Value: TypeRef constraint }, var address], Defines: [var defined] })
+            {
+                if (!SharedValue(address, constraint).TryGet(out var constrainedValue, out var failure)) return failure;
+                if (!Local(defined).TryGet(out var constrainedResult, out failure)) return failure;
+                output.Add(new ManagedCall(call.Address, new(contract, new AddressValue(constrainedValue), [], true) { Constraint = constraint }, constrainedResult, false));
+                return true;
+            }
             if (call.Op is { Kind: OpKind.CopyGenericValue or OpKind.ClearGenericValue, Operand: TypeRef type })
             {
                 if (!SharedValue(call.Arguments[0], type).TryGet(out var target, out var failure)) return failure;

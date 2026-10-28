@@ -26,6 +26,8 @@ public sealed record DelegateValue(DefinitionRef DelegateType, ManagedValue Targ
 public sealed record BoxValue(ManagedValue Operand, TypeRef Boxed, TypeRef ObjectType) : ManagedValue(ObjectType, 64);
 /// <summary>拆箱后的托管地址；保留 unbox 的判空与类型检查。</summary>
 public sealed record UnboxAddressValue(ManagedValue Operand, TypeRef Target) : ManagedValue(new ByRefRef(Target), 64);
+/// <summary>按目标类型执行 unbox.any；引用、值类型和 Nullable 均保留 CLR 的检查语义。</summary>
+public sealed record UnboxValue(ManagedValue Operand, TypeRef Target, int Width) : ManagedValue(Target, Width);
 /// <summary>isinst：Operand 是 Target 类型（或其子类、实现）时为 Operand，否则为 null。</summary>
 public sealed record IsInstValue(ManagedValue Operand, TypeRef Target, TypeRef? BoxedType = null) : ManagedValue(BoxedType ?? Target, 64);
 /// <summary>引用类型显式转换；null 原样通过，非兼容对象抛 InvalidCastException。</summary>
@@ -64,7 +66,10 @@ public sealed record AsyncResultValue(ManagedValue? Value, TypeRef Type) : Manag
 public sealed record HoleValue(string Reason, TypeRef Type, int Width) : ManagedValue(Type, Width);
 
 /// <summary>托管调用。Receiver 为 null 表示静态调用；Virtual 为真时按 callvirt 分派（并对接收者判空）。不含隐藏的 MethodInfo* 参数。</summary>
-public sealed record ManagedInvocation(MethodRef Method, ManagedValue? Receiver, IReadOnlyList<ManagedValue> Arguments, bool Virtual);
+public sealed record ManagedInvocation(MethodRef Method, ManagedValue? Receiver, IReadOnlyList<ManagedValue> Arguments, bool Virtual)
+{
+    public TypeRef? Constraint { get; init; }
+}
 
 public abstract record ManagedStatement(ulong Address);
 public sealed record ManagedAssignment(ulong Address, LocalValue Target, ManagedValue Value) : ManagedStatement(Address);
@@ -140,7 +145,7 @@ public static class ManagedValues
         IndirectValue i => [i.Address],
         ComposedValue c => c.Leaves.Select(l => l.Value),
         NewArrayValue a => [a.Length], ArrayLengthValue a => [a.Array], ArrayElementValue a => [a.Array, a.Index],
-        BoxValue b => [b.Operand], UnboxAddressValue u => [u.Operand], IsInstValue i => [i.Operand], CheckedCastValue c => [c.Operand], NewObjectValue n => n.Arguments,
+        BoxValue b => [b.Operand], UnboxAddressValue u => [u.Operand], UnboxValue u => [u.Operand], IsInstValue i => [i.Operand], CheckedCastValue c => [c.Operand], NewObjectValue n => n.Arguments,
         DelegateValue d => [d.Target],
         BinaryValue b => [b.Left, b.Right], UnaryValue u => [u.Operand], ConversionValue c => [c.Operand],
         ComparisonValue c => [c.Left, c.Right], ChoiceValue c => [c.Condition, c.True, c.False],
@@ -167,6 +172,7 @@ public static class ManagedValues
         ArrayElementValue v => v with { Array = f(v.Array), Index = f(v.Index) },
         BoxValue v => v with { Operand = f(v.Operand) },
         UnboxAddressValue v => v with { Operand = f(v.Operand) },
+        UnboxValue v => v with { Operand = f(v.Operand) },
         IsInstValue v => v with { Operand = f(v.Operand) },
         CheckedCastValue v => v with { Operand = f(v.Operand) },
         NewObjectValue v => v with { Arguments = v.Arguments.Select(f).ToArray() },

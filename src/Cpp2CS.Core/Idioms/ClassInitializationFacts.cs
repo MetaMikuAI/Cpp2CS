@@ -13,13 +13,13 @@ internal static class ClassInitializationFacts
 
     internal static bool Run(MachineFunction function)
     {
-        if (ClassInitializationReloads.Run(function)) return true;
+        if (ClassLayoutReloads.Run(function) || ClassInitializationReloads.Run(function)) return true;
         var points = function.Blocks.SelectMany(b => b.Statements.Select((s, i) => new Point(b, i, s))).ToArray();
-        var initializers = points.Where(p => p.Statement is Call { Op: { Kind: OpKind.InitClass or OpKind.RunClassConstructor, Operand: DefinitionRef } }).ToArray();
+        var initializers = points.Where(p => p.Statement is Call { Op: { Kind: OpKind.InitClass or OpKind.RunClassConstructor, Operand: TypeRef } }).ToArray();
         if (initializers.Length == 0) return false;
         var definitions = points.Where(p => p.Statement is Define).ToDictionary(p => ((Define)p.Statement).Target);
         var dominators = Dominators.Compute(function);
-        bool Initialized(DefinitionRef type, OpKind kind, Point at) => initializers.Any(p => ((Call)p.Statement).Op is { } op
+        bool Initialized(TypeRef type, OpKind kind, Point at) => initializers.Any(p => ((Call)p.Statement).Op is { } op
             && op.Kind == kind && Equals(op.Operand, type) && dominators.Dominates(p.Block.Index, at.Block.Index)
             && (p.Block != at.Block || p.Index < at.Index));
         bool InitializationBit(Expr value, Point at, HashSet<Variable> seen) => value switch
@@ -28,7 +28,7 @@ internal static class ClassInitializationFacts
                 => InitializationBit(((Define)definition.Statement).Value, definition, seen),
             Ir.Convert c when c.Kind is ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate => InitializationBit(c.Operand, at, seen),
             Extract { Low: 0 } e => InitializationBit(e.Operand, at, seen),
-            Load { Width: 8 or 16, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: DefinitionRef type },
+            Load { Width: 8 or 16, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef type },
                 Right: Const { Value: RuntimeLayout.ClassBitflags1 } } } => Initialized(type, OpKind.InitClass, at),
             _ => false,
         };
@@ -36,7 +36,7 @@ internal static class ClassInitializationFacts
         foreach (var point in points)
         {
             var statement = point.Statement;
-            if (statement is Call { Op: { Kind: OpKind.InitClass, Operand: DefinitionRef type }, Arguments: [var subject] } call
+            if (statement is Call { Op: { Kind: OpKind.InitClass, Operand: TypeRef type }, Arguments: [var subject] } call
                 && call.Defines.Length <= 1 && Initialized(type, OpKind.InitClass, point))
             {
                 point.Block.Statements[point.Index] = call.Defines is [var result] ? new Define(call.Address, result, subject) : new Nop(call.Address, "类布局已初始化");

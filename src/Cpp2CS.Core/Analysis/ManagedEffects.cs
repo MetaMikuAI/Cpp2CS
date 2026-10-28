@@ -21,7 +21,7 @@ public static class ManagedEffects
             FieldValue or ArrayLengthValue or ArrayElementValue or IndirectValue or PinnedArrayValue => EffectKind.Read | EffectKind.Throw,
             StaticFieldValue => EffectKind.Read | EffectKind.ClassInitialization | EffectKind.Throw,
             NewObjectValue or NewArrayValue or BoxValue or DelegateValue => EffectKind.Allocate | EffectKind.Throw,
-            CheckedCastValue or UnboxAddressValue => EffectKind.Throw,
+            CheckedCastValue or UnboxAddressValue or UnboxValue => EffectKind.Throw,
             AsyncResultValue => EffectKind.Allocate | EffectKind.Throw,
             _ => EffectKind.Unknown | EffectKind.Read | EffectKind.Write | EffectKind.Throw,
         };

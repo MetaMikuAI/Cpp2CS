@@ -19,6 +19,7 @@ internal sealed class AllocationContributor : ITypeContributor
                 { Kind: OpKind.Unbox, Operand: TypeRef t } => new ByRefRef(t),
                 { Kind: OpKind.IsInst, Operand: TypeRef t } => t is GenericParameterRef { NativeScalar: not null } ? context.Types.Object : t,
                 { Kind: OpKind.IsInstArrayElement } => context.Types.Object,
+                { Kind: OpKind.InvokeConstrainedGeneric, Operand: MethodRef method } => method.Method.ReturnType.Substitute(method.TypeArguments, method.MethodArguments),
                 _ => null,
             };
             if (type is not null)

@@ -37,6 +37,7 @@ public static class ManagedTypeMap
             DelegateValue v => new DelegateValue((DefinitionRef)map(v.DelegateType), Value(v.Target), Method(v.Method), v.Binding),
             BoxValue v => new BoxValue(Value(v.Operand), map(v.Boxed), map(v.ObjectType)),
             UnboxAddressValue v => new UnboxAddressValue(Value(v.Operand), map(v.Target)),
+            UnboxValue v => new UnboxValue(Value(v.Operand), map(v.Target), W(v.Type, map(v.Target), v.Width)),
             IsInstValue v => new IsInstValue(Value(v.Operand), map(v.Target), v.BoxedType is { } boxed ? map(boxed) : null),
             CheckedCastValue v => new CheckedCastValue(Value(v.Operand), map(v.Target)),
             ArrayLengthValue v => v with { Array = Value(v.Array), Type = map(v.Type) },
@@ -69,6 +70,7 @@ public static class ManagedTypeMap
                 Invocation = c.Invocation with
                 {
                     Method = Method(c.Invocation.Method),
+                    Constraint = c.Invocation.Constraint is { } constraint ? map(constraint) : null,
                     Receiver = c.Invocation.Receiver is { } receiver ? Value(receiver) : null,
                     Arguments = c.Invocation.Arguments.Select(Value).ToArray(),
                 },

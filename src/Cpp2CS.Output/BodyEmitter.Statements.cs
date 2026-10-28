@@ -156,6 +156,7 @@ public sealed partial class BodyEmitter
     {
         if (invocation.Receiver is { } receiver) Value(receiver);
         foreach (var argument in invocation.Arguments) Value(argument);
+        if (invocation.Constraint is { } constraint) il.Emit(OpCodes.Constrained, TypeReference(constraint));
         var call = Instruction.Create(invocation.Virtual ? OpCodes.Callvirt : OpCodes.Call, MethodReference(invocation.Method));
         il.Append(call);
         return call;
