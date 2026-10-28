@@ -32,6 +32,7 @@ public static partial class Decompilation
         var decompiler = new CSharpDecompiler(typeSystem, settings);
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.ControlFlow.SwitchDetection), new BranchResults());
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.ControlFlow.SwitchDetection), new ICSharpCode.Decompiler.IL.Transforms.ILInlining());
+        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.ControlFlow.SwitchDetection), new CopyBlocks());
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.Transforms.DelegateConstruction), new AllocatedNullChecks());
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.Transforms.DelegateConstruction), new IteratorCopies());
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ICSharpCode.Decompiler.IL.Transforms.TransformDisplayClassUsage), new ClosureLinks());
