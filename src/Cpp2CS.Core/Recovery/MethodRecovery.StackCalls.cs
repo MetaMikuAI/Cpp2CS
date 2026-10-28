@@ -84,7 +84,7 @@ public sealed partial class MethodRecovery
                     matches.Add((direct, zero));
                 var unique = matches.Distinct().ToArray();
                 if (unique is not [var match]) continue;
-                resolved[call] = (match.Method, Pinned);
+                callBindings.Commit(call, match.Method);
                 dropped.Add(match.Store);
                 owner.stackCalls.Add(new(entry, call.Address, match.Store.Address, callSp,
                     FrameOffset(match.Store.Target)!.Value, match.Method));

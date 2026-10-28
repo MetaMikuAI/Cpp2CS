@@ -18,7 +18,7 @@ public sealed partial class MethodRecovery
                 if (!replacements.TryGetValue(old, out var mapped)) continue;
                 block.Statements[i] = mapped;
                 ledger.Replace(old, mapped);
-                if (old is Call call && resolved.Remove(call, out var target)) resolved[(Call)mapped] = target;
+                if (old is Call call) callBindings.Move(call, (Call)mapped);
             }
             if (replacements.Count > 0) definitions = IndexDefinitions();
         }

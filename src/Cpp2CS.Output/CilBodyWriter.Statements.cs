@@ -7,7 +7,7 @@ using Mono.Cecil.Cil;
 namespace Cpp2CS.Output;
 
 /// <summary>语句与边的 CIL 写法：每种语句一处；边先读出全部复制的值，再写入目标局部。</summary>
-public sealed partial class BodyEmitter
+internal sealed partial class CilBodyWriter
 {
     private ulong statementAddress;
 

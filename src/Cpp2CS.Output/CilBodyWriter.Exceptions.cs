@@ -3,7 +3,7 @@ using Mono.Cecil.Cil;
 
 namespace Cpp2CS.Output;
 
-public sealed partial class BodyEmitter
+internal sealed partial class CilBodyWriter
 {
     private IReadOnlyList<ManagedRegion> regions = [];
     private ulong currentBlock;

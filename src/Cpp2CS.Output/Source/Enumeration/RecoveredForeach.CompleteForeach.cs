@@ -176,27 +176,11 @@ internal sealed partial class RecoveredForeach
                 ((VariableDeclarationStatement)content.Statements.First()).Variables.Single().Initializer = new IdentifierExpression(item);
             }
             else content.Statements.First().Remove();
-            var loop = new ForeachStatement(current.Type.Clone(), new SingleVariableDesignation(item), get.Target.Clone(), content);
-            if (inside.Length == 0)
-            {
-                guarded.ReplaceWith(loop);
-                Statement previous = loop;
-                foreach (var s in trailing)
-                {
-                    var copy = s.Clone();
-                    parent.Statements.InsertAfter(previous, copy);
-                    previous = copy;
-                }
-            }
-            else
-            {
-                var replacement = new BlockStatement();
-                foreach (var s in inside) replacement.Statements.Add(s.Clone());
-                replacement.Statements.Add(loop);
-                foreach (var s in trailing) replacement.Statements.Add(s.Clone());
-                guarded.ReplaceWith(replacement);
-            }
-            foreach (var statement in removed) statement.Remove();
+            var rewrite = new ForeachRewrite(guarded, new(current.Type, item, get.Target, content));
+            rewrite.Prefix.AddRange(inside.Select(s => s.Clone()));
+            rewrite.Suffix.AddRange(trailing.Select(s => s.Clone()));
+            rewrite.Removed.AddRange(removed);
+            rewrite.Commit();
             if (declaration != factory && !method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == enumerator.Identifier)) declaration.Remove();
         }
     }

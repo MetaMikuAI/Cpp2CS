@@ -43,6 +43,7 @@ public static partial class RecoverySession
         var batch = manifest.Step("recovery", () => RecoverMethods(selected, facts, types, request.Jobs, Log));
         var recovery = batch.Recovery;
         var summaries = new MethodSummaryService(recovery);
+        for (var i = 0; i < selected.Length; i++) summaries.Seed(selected[i], batch.Targets[i]);
         var targets = batch.Targets;
         var stackCalls = batch.StackCalls;
         var bytes = targets.Select(r => r.Entry).Distinct().ToDictionary(e => e,
@@ -68,14 +69,12 @@ public static partial class RecoverySession
         var problems = closure.Problems;
         foreach (var result in results.Where(r => r.Body is not null))
         {
-            if (problems.TryGetValue(result.Body!, out var problem)) emitProblems[result] = problem;
+            if (problems.TryGetValue(result.Body!, out var problem)) emitProblems[result] = problem.Message;
             else emitted.Add(result);
         }
         // 部分方法体：有洞的范围方法写出已恢复的部分（洞写成 Cpp2CS.Unrecovered 标记），只供阅读，不进 emitted.tsv 与指标。
         var partials = results.Where(r => r.Body is null && r.Partial is not null && !dependencies.Contains(r.Method.Method)).ToArray();
-        emitter.Policy = EmissionPolicy.Partial;
-        var partialProblems = emitter.Emit(partials.Select(r => r.Partial!));
-        emitter.Policy = EmissionPolicy.Checked;
+        var partialProblems = emitter.Emit(partials.Select(r => r.Partial!), EmissionPolicy.Partial);
         var partialEmitted = partials.Where(r => !partialProblems.ContainsKey(r.Partial!)).ToHashSet();
         Log($"CIL {watch.Elapsed.TotalSeconds:F1} s");
         manifest.End();

@@ -41,7 +41,7 @@ public sealed partial class MethodRecovery
                             && data.Value.Width == types.Bits(type))
                         {
                             candidates[call] = new(type, data.Value, offset, stores.ToArray());
-                            resolved[call] = (callee, Pinned);
+                            callBindings.Commit(call, callee);
                         }
                     }
                     break;
@@ -98,7 +98,7 @@ public sealed partial class MethodRecovery
                 var result = new Variable(Storage.Temp(next++), 1);
                 InsertAnalysisStatement(block, 0, new Phi(block.Start, result, inputs));
                 candidates[call] = new(type, new Use(result, types.Bits(type)), offset, [klass, monitor, .. writes]);
-                resolved[call] = (callee, Pinned);
+                callBindings.Commit(call, callee);
             }
             if (candidates.Count > 0) definitions = IndexDefinitions();
         }

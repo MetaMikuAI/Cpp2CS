@@ -56,7 +56,8 @@ public sealed partial class MethodRecovery
         /// <summary>只改未被 ABI 观察的位时，保留语句身份关联的证明与诊断。</summary>
         private void PreserveStatementAnalysis(Stmt previous, Stmt replacement)
         {
-            Copy(typeChecks); Copy(constructed); Copy(forwardedConstructors); Copy(boxed); Copy(resolved); Copy(callResolutions);
+            Copy(typeChecks); Copy(constructed); Copy(forwardedConstructors); Copy(boxed);
+            if (previous is Call call && replacement is Call nextCall) callBindings.Copy(call, nextCall);
             Copy(structResults); Copy(delegateCreations); Copy(exceptionTypeTargets); Copy(stackEnums); Copy(virtualDelegates); Copy(nativeImports);
             Copy(frameCopies); Copy(frameInitializers);
             Keep(dropped); Keep(virtualCalls); Keep(cleanupCalls); Keep(genericResolvers); Keep(stackEnumStorage);

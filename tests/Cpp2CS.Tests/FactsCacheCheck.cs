@@ -108,7 +108,7 @@ internal static class FactsCacheCheck
         {
             var method = facts.EntriesAt(address).First(e => e.Method is not null).Method!;
             var result = recovery.Recover(method, address);
-            var problem = result.Body is null ? "L3 有洞" : emitter.Emit([result.Body]).GetValueOrDefault(result.Body);
+            var problem = result.Body is null ? "L3 有洞" : emitter.Emit([result.Body]).GetValueOrDefault(result.Body)?.Message;
             var body = problem is null ? skeleton.Method(method.Method).Body : null;
             if (body is not null) emitted++;
             string? Operand(object? operand) => operand switch

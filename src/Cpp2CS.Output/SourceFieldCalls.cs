@@ -11,8 +11,6 @@ public sealed partial class SourceLibraryCalls
     private sealed record FieldCall(MethodRef Method, FieldRef Field, bool Write);
     private readonly Dictionary<DefinitionRef, FieldCall[]> fieldCalls = [];
     private readonly Dictionary<DefinitionRef, SourceValueConstructor[]> valueConstructors = [];
-    private Dictionary<MethodRef, ulong>? fieldCallEntries;
-    private ILookup<TypeRef, MethodDef>? staticFieldReaders;
 
     // 只用实际原生方法的单字段读写形态认回可访问入口，不按属性名猜字段。
     private FieldCall[] FieldCalls(DefinitionRef type)
@@ -20,10 +18,7 @@ public sealed partial class SourceLibraryCalls
         if (fieldCalls.TryGetValue(type, out var cached)) return cached;
         var found = new List<FieldCall>();
         var constructors = new List<SourceValueConstructor>();
-        staticFieldReaders ??= facts.Model.Methods.Where(m => m.IsStatic && m.Parameters.Count == 1 && m.Address != 0
-            && m.Owner.GenericParameters.Count == 0 && m.GenericParameters.Count == 0 && !ManagedTypes.IsVoid(m.ReturnType))
-            .ToLookup(m => m.Parameters[0].Type);
-        var candidates = type.Definition.Methods.Concat(type.Arguments.Count == 0 ? staticFieldReaders[type] : []).Distinct();
+        var candidates = type.Definition.Methods.Concat(type.Arguments.Count == 0 ? libraryIndex.StaticFieldReaders(type) : []).Distinct();
         foreach (var method in candidates.Where(m => m.GenericParameters.Count == 0
             && m.Name != ".cctor" && (m.Name != ".ctor" || type.Definition.IsValueType)
             && (m.Parameters.Count <= 1 || m.Name == ".ctor" && m.Parameters.Count <= 8)
@@ -35,9 +30,7 @@ public sealed partial class SourceLibraryCalls
             var entry = method.Address;
             if (type.Arguments.Count != 0)
             {
-                fieldCallEntries ??= facts.Code.Functions.SelectMany(fn => facts.EntriesAt(fn.Start)
-                    .Where(e => e.Kind == EntryKind.GenericMethod && e.Method is not null).Select(e => (Method: e.Method!, Entry: fn.Start)))
-                    .GroupBy(p => p.Method).ToDictionary(g => g.Key, g => g.First().Entry);
+                var fieldCallEntries = libraryIndex.GenericEntries;
                 var shared = new MethodRef(method, type.Arguments.Select(types.SharedGenericArgument).ToArray(), []);
                 if (!fieldCallEntries.TryGetValue(reference, out entry) && !fieldCallEntries.TryGetValue(shared, out entry))
                 {
@@ -53,9 +46,8 @@ public sealed partial class SourceLibraryCalls
                 }
             }
             if (entry == 0 || facts.Code.At(entry) is not { Region: CodeRegion.Managed, Size: <= 128 }) continue;
-            var recovered = type.Arguments.Count == 0 ? summaries.Find(new(reference, entry)) : summaries.Find(new(reference, entry, RecoveryMode.Instance));
-            if (recovered?.Body is not { Regions.Count: 0 } original) continue;
-            var body = SourceRewriter.Rewrite(original, types);
+            var mode = type.Arguments.Count == 0 ? RecoveryMode.Definition : RecoveryMode.Instance;
+            if (SummaryBody(new(reference, entry, mode)) is not { } body) continue;
             var values = new Dictionary<Variable, ManagedValue>();
             var stores = new List<ManagedStore>();
             ManagedValue? returned = null;

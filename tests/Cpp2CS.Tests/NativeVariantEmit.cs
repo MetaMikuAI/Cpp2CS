@@ -62,7 +62,7 @@ internal static class NativeVariantEmit
                     address = $"0x{result.Entry:x}", method = result.Method.ToString(), status = success ? "emitted" : result.Body is null ? "hole" : "emit-failed",
                     bytes = size, dependency = false, artifact = artifact.Path, token = artifact.Token, cilHash = hash,
                     holes = result.Holes.Select(h => new { address = $"0x{h.Address:x}", reason = h.Reason }),
-                    emitProblem = result.Body is null ? null : problems.GetValueOrDefault(result.Body),
+                    emitProblem = result.Body is null ? null : problems.GetValueOrDefault(result.Body)?.Message,
                 }, json));
             }
             Console.WriteLine($"批次 {batch.Key + 1}，累计写出 {emitted}，独立入口 {bytes.Count}，字节 {bytes.Values.Sum()}");

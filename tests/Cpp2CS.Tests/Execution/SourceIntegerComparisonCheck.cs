@@ -49,7 +49,7 @@ internal static class SourceIntegerComparisonCheck
         foreach (var policy in new[] { EmissionPolicy.Recovered, EmissionPolicy.Source })
         {
             var skeleton = new Skeleton(model);
-            a.Equal(0, new BodyEmitter(skeleton, types) { Policy = policy }.Emit(bodies).Count, "有无符号参数的比较均可写出");
+            a.Equal(0, new BodyEmitter(skeleton, types).Emit(bodies, policy).Count, "有无符号参数的比较均可写出");
             if (policy == EmissionPolicy.Source)
                 a.True(methods.All(m => skeleton.Method(m.Method).Body.Instructions.All(i => i.OpCode.Code is not (Code.Conv_I4 or Code.Conv_U4))),
                     "源码比较不依赖重复 int32 转换");

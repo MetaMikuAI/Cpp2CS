@@ -4,20 +4,8 @@ using Mono.Cecil.Cil;
 
 namespace Cpp2CS.Output;
 
-public sealed partial class BodyEmitter
+internal sealed partial class CilBodyWriter
 {
-    private string? ReadonlyWriteProblem(ManagedValue value)
-    {
-        if (value is AddressValue a) return ReadonlyWriteProblem(a.Target);
-        if (value is IndirectValue indirect) return ReadonlyWriteProblem(indirect.Address);
-        if (value is not FieldValue field || IgnoreAccess) return null;
-        if ((field.Field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
-            && !(methodContext.Method.Name == ".ctor" && methodContext.Method.Owner == field.Field.Field.Owner))
-            return $"只读实例字段 不能在所属类型构造函数之外取得可写地址：{field.Field}";
-        if (field.Receiver is AddressValue address) return ReadonlyWriteProblem(address.Target);
-        return null;
-    }
-
     private void Compose(ComposedValue value)
     {
         var local = Temp(value.Type);

@@ -28,7 +28,7 @@ public sealed partial class MethodRecovery
                         reads.Add(read.Statement);
                     }
                     if (pieces.Count != argument.Pieces.Length || FrameArgumentSpan.Origin(types.Size(argument.Type), pieces) is not { } origin) continue;
-                    resolved[call] = (callee, Pinned);
+                    callBindings.Commit(call, callee);
                     foreach (var read in reads) witnesses.Add(new(origin, argument.Type, read, false));
                 }
             }

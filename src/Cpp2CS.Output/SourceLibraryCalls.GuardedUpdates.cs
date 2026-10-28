@@ -24,8 +24,8 @@ public sealed partial class SourceLibraryCalls
                     && m.GenericParameters.Count == 0 && types.Kind(m.ReturnType) == TypeKind.Bool
                     && (m.Attributes & MethodAttributes.MemberAccessMask) == MethodAttributes.Public
                     && facts.Code.At(m.Address) is { Region: CodeRegion.Managed, Size: <= 128 });
-                candidates = methods.Select(m => summaries.Find(new(new(m, [], []), m.Address))?.Body)
-                    .Where(b => b is not null).Select(b => SourceGuardedUpdate.Create(SourceRewriter.Rewrite(b!, types), types))
+                candidates = methods.Select(m => SummaryBody(new(new(m, [], []), m.Address), allowRegions: true))
+                    .Where(b => b is not null).Select(b => SourceGuardedUpdate.Create(b!, types))
                     .OfType<SourceGuardedUpdate>().ToArray();
                 guardedUpdates[owner] = candidates;
             }

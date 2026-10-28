@@ -125,7 +125,7 @@ internal static class ClosureDump
         var skeleton = new Cpp2CS.Output.Skeleton(facts.Model);
         var emitter = new Cpp2CS.Output.BodyEmitter(skeleton, types);
         var closure = new Cpp2CS.Pipeline.AccessorRecovery(facts, types, new MethodSummaryService(recovery), emitter, results);
-        var before = results.ToDictionary(r => r.Method.Method, r => r.Body is { } b ? closure.Problems.GetValueOrDefault(b) : "有洞");
+        var before = results.ToDictionary(r => r.Method.Method, r => r.Body is { } b ? closure.Problems.GetValueOrDefault(b)?.Message : "有洞");
         Console.WriteLine($"内联候选 {closure.InlineCandidates.Count}：{string.Join("，", closure.InlineCandidates.Keys.Select(m => m.ToString()))}");
         Console.WriteLine($"泛型访问器 {closure.GenericAccessors.Count}：{string.Join("，", closure.GenericAccessors.Select(a => a.Method.ToString()))}");
         foreach (var access in closure.Accesses) Console.WriteLine($"  越权 {access.Value.GetType().Name} {Cpp2CS.Recovery.FieldAccessor.FieldOf(access.Value)} 写 {access.Write}：候选 {access.Candidates.Length}");
@@ -133,7 +133,7 @@ internal static class ClosureDump
         foreach (var result in closure.Targets)
         {
             var owner = result.Method.Method.Owner;
-            Console.WriteLine($"== {result.Method}：认回前 {before[result.Method.Method]}；认回后 {(result.Body is { } b ? closure.Problems.GetValueOrDefault(b) ?? "可写出" : "有洞")}；内联调用 {result.Body?.Blocks.SelectMany(x => x.Statements).OfType<Cpp2CS.Recovery.ManagedCall>().Count(c => c.Inlined)}");
+            Console.WriteLine($"== {result.Method}：认回前 {before[result.Method.Method]}；认回后 {(result.Body is { } b ? closure.Problems.GetValueOrDefault(b)?.Message ?? "可写出" : "有洞")}；内联调用 {result.Body?.Blocks.SelectMany(x => x.Statements).OfType<Cpp2CS.Recovery.ManagedCall>().Count(c => c.Inlined)}");
             if (result.Body is null) continue;
             foreach (var block in result.Body.Blocks)
                 foreach (var statement in block.Statements)

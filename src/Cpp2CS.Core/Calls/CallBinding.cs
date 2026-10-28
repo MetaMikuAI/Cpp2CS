@@ -7,7 +7,4 @@ public sealed record CallResolution(ulong Site, ulong? NativeEntry, int TypeVers
     MethodRef? Selected, string Status);
 
 /// <summary>语义方法身份与入口处的类型状态分别保存；提交到帧布局后的绑定不能静默更换。</summary>
-internal sealed record CallBinding(MethodRef? Method, int Version, bool Committed = false, int IrVersion = 0)
-{
-    public static implicit operator CallBinding((MethodRef? Method, int Version) value) => new(value.Method, value.Version, value.Version < 0);
-}
+internal sealed record CallBinding(MethodRef? Method, int Version, bool Committed = false, int IrVersion = 0);

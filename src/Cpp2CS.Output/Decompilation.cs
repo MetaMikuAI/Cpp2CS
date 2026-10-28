@@ -55,7 +55,7 @@ public static partial class Decompilation
     }
 
     /// <summary>
-    /// async 提升的标记（Cpp2CS.Await，见 BodyEmitter.Awaits）改写成 C#：Of/Do → await，Result(x) → x，Completed() → 无值的 return；
+    /// async 提升的标记（Cpp2CS.Await，见 EmissionSymbols.Awaits）改写成 C#：Of/Do → await，Result(x) → x，Completed() → 无值的 return；
     /// 最近的方法或匿名函数加 async，去掉 [AsyncStateMachine]、[DebuggerStepThrough] 与状态机的嵌套类型声明。
     /// </summary>
     private sealed class AsyncMarkers : IAstTransform

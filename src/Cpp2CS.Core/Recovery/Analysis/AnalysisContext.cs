@@ -16,11 +16,14 @@ internal interface IMethodAnalysis<out T> where T : class
 /// 分析看到的 IR：保留的块（EH 未证明时只有正常边可达的块），以及 EH 已证明的 φ（筛去异常入边后的来源）。
 /// 分析期间 IR 只读；改写 IR 的步骤（目前是帧区域的 <c>TypedFrame</c> 改写）之后要建新的上下文。
 /// </summary>
-internal sealed record MethodView(IReadOnlyList<Block> Blocks, IReadOnlyDictionary<Variable, Phi> ExceptionPhis)
+internal sealed class MethodView
 {
     /// <summary>全部语句，φ 换成 EH 已证明的版本。</summary>
-    public IEnumerable<Stmt> Statements { get; init; } = Blocks.SelectMany(b => b.Statements)
-        .Select(s => s is Phi phi && ExceptionPhis.TryGetValue(phi.Target, out var proven) ? proven : s).ToArray();
+    public IReadOnlyList<Stmt> Statements { get; }
+
+    public MethodView(IReadOnlyList<Block> blocks, IReadOnlyDictionary<Variable, Phi> exceptionPhis) =>
+        Statements = Array.AsReadOnly(blocks.SelectMany(b => b.Statements)
+            .Select(s => s is Phi phi && exceptionPhis.TryGetValue(phi.Target, out var proven) ? proven : s).ToArray());
 }
 
 internal sealed class AnalysisContext(MethodView view)

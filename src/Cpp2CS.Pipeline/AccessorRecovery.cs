@@ -12,7 +12,7 @@ public sealed class AccessorRecovery
     public MethodRecoveryResult[] Targets { get; }
     public List<MethodRecoveryResult> Dependencies { get; } = [];
     public List<Access> Accesses { get; } = [];
-    public Dictionary<ManagedBody, string> Problems { get; private set; }
+    public Dictionary<ManagedBody, EmissionProblem> Problems { get; private set; }
     public Dictionary<MethodDef, FieldAccessor> Candidates { get; } = [];
     public int PropertyCount { get; }
     public Dictionary<MethodDef, string> Inspected { get; } = [];
@@ -28,13 +28,14 @@ public sealed class AccessorRecovery
     private readonly Dictionary<ManagedBody, MethodDef[]> inlineOptions = new(ReferenceEqualityComparer.Instance);
     /// <summary>按普查建模的泛型内联被调方法（GenericInline）：方法体由同一定义的另一实例代换类型得到，不写出、不需要执行证据。</summary>
     private readonly Dictionary<ManagedBody, InlineRecognition.Callee[]> genericInline = new(ReferenceEqualityComparer.Instance);
-    private readonly Dictionary<ManagedBody, string> dependencyProblems = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<ManagedBody, EmissionProblem> dependencyProblems = new(ReferenceEqualityComparer.Instance);
     private readonly ProgramFacts facts;
 
     public AccessorRecovery(ProgramFacts facts, ManagedTypes types, MethodSummaryService recovery, BodyEmitter emitter, MethodRecoveryResult[] targets, IReadOnlySet<string>? rejected = null, bool useLanguage = true)
     {
         this.facts = facts;
         Targets = targets;
+        // 候选证据和执行对照读取 CIL 指纹，先写出检查通过的原体。
         Problems = emitter.Emit(targets.Where(r => r.Body is not null).Select(r => r.Body!));
         var recovered = targets.ToDictionary(r => r.Method.Method);
         var scope = recovered.Keys.ToHashSet();
@@ -88,7 +89,7 @@ public sealed class AccessorRecovery
         // EmptyArray<T>.Value 只经 Array.Empty<T>() 公开（原生代码内联了它；empty-census 核对全部实例都只返回该字段）。
         var arrayEmpty = facts.Model.Types.FirstOrDefault(t => t.FullName == "System.Array")?.Methods
             .FirstOrDefault(m => m is { Name: "Empty", IsStatic: true, GenericParameters.Count: 1, Parameters.Count: 0 });
-        foreach (var result in targets.Where(r => r.Body is not null && Problems.GetValueOrDefault(r.Body)?.StartsWith("访问权限 ", StringComparison.Ordinal) == true))
+        foreach (var result in targets.Where(r => r.Body is not null && Problems.GetValueOrDefault(r.Body)?.Kind == EmissionProblemKind.AccessDenied))
             foreach (var (address, value, write) in Fields(result.Body!))
             {
                 var field = FieldAccessor.FieldOf(value)!;
@@ -120,7 +121,7 @@ public sealed class AccessorRecovery
                 recovered[method] = result = recovery.Recover(new MethodRef(method, [], []), method.Address);
             return inlineShapes[method] = result.Body is { Regions.Count: 0 } body && body.Blocks.Sum(b => b.Statements.Count) <= 40 ? result : null;
         }
-        foreach (var result in targets.Where(r => r.Body is not null && Problems.GetValueOrDefault(r.Body)?.Split(' ')[0] is "访问权限" or "只读实例字段"))
+        foreach (var result in targets.Where(r => r.Body is not null && Problems.GetValueOrDefault(r.Body)?.CanRecoverAccess == true))
         {
             var owner = result.Method.Method.Owner;
             var methods = new List<MethodDef>();
@@ -223,10 +224,7 @@ public sealed class AccessorRecovery
             Targets[i] = result with { Body = AccessorRewriter.Rewrite(body, Select) };
         }
         // 已核验访问器替换之后，剩余内联访问按恢复策略写出并保留访问限制。
-        var previousPolicy = emitter.Policy;
-        emitter.Policy = EmissionPolicy.Recovered;
-        try { Problems = emitter.Emit(All.Where(r => r.Body is not null && !dependencyProblems.ContainsKey(r.Body)).Select(r => r.Body!)); }
-        finally { emitter.Policy = previousPolicy; }
+        Problems = emitter.Emit(All.Where(r => r.Body is not null && !dependencyProblems.ContainsKey(r.Body)).Select(r => r.Body!), EmissionPolicy.Recovered);
         foreach (var pair in dependencyProblems) Problems[pair.Key] = pair.Value;
         CheckTransparent();
     }
@@ -250,7 +248,7 @@ public sealed class AccessorRecovery
                 foreach (var dependency in TransparentConstructors(result.Body!))
                     if (!written.ContainsKey(dependency))
                     {
-                        Problems[result.Body!] = $"构造函数 内联的 {dependency} 没有写出";
+                        Problems[result.Body!] = new(EmissionProblemKind.Dependency, $"构造函数 内联的 {dependency} 没有写出", result.Method);
                         written.Remove(result.Method.Method);
                         changed = true;
                         break;

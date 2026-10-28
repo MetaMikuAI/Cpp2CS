@@ -30,11 +30,7 @@ internal sealed class MethodSnapshot
             }
             foreach (var intrinsic in ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Intrinsic>()) Watch(intrinsic.Arguments);
         }
-        View = new(blocks, exceptionPhis.ToDictionary())
-        {
-            Statements = blocks.SelectMany(b => b.Statements).Select(s => s is Phi phi
-                && exceptionPhis.TryGetValue(phi.Target, out var proven) ? proven : s).ToArray(),
-        };
+        View = new(blocks, exceptionPhis);
     }
 
     private void Watch<T>(T[] values)

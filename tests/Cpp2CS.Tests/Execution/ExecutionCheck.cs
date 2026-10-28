@@ -145,7 +145,7 @@ internal static partial class ExecutionCheck
             var name = $"0x{result.Entry:x} {result.Method}";
             if (result.Body is null || problems.ContainsKey(result.Body))
             {
-                var reason = result.Body is null ? string.Join("；", result.Holes.Select(h => h.Reason).Distinct()) : problems[result.Body];
+                var reason = result.Body is null ? string.Join("；", result.Holes.Select(h => h.Reason).Distinct()) : problems[result.Body].Message;
                 a.True(false, $"{name} 没有写出 CIL：{reason}");
                 continue;
             }

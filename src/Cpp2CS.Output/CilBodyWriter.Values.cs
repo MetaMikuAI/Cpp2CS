@@ -7,7 +7,7 @@ using Mono.Cecil.Cil;
 namespace Cpp2CS.Output;
 
 /// <summary>值的 CIL 写法：每种值一处。求值栈上的整数只有 32 位与 64 位，运算之后按值的位宽与符号规范化。</summary>
-public sealed partial class BodyEmitter
+internal sealed partial class CilBodyWriter
 {
     private void Value(ManagedValue value)
     {
@@ -246,7 +246,7 @@ public sealed partial class BodyEmitter
             {
                 // 32 位整数已在 int32 栈上；比较符号由 clt/cgt 指令决定。
                 if (value.Width == 32 && types.Kind(value.Type) == TypeKind.Int && (c.Condition is Cond.Eq or Cond.Ne
-                    || Policy == EmissionPolicy.Source && types.Bits(value.Type) == 32)) Value(value);
+                    || policy == EmissionPolicy.Source && types.Bits(value.Type) == 32)) Value(value);
                 else Integer(value, signed);
             }
             Operand(c.Left); Operand(c.Right);
@@ -287,31 +287,11 @@ public sealed partial class BodyEmitter
         var fromFloat = types.Kind(from) is TypeKind.Float or TypeKind.Double;
         var toFloat = types.Kind(to) is TypeKind.Float or TypeKind.Double;
         if (fromFloat == toFloat) return;
-        il.Emit(OpCodes.Call, MethodReference(BitConversion(from, to)
+        il.Emit(OpCodes.Call, MethodReference(BitConversions.Find(types, from, to)
             ?? throw new NotSupportedException($"缺少同宽位重解释: {from} → {to}")));
     }
 
-    /// <summary>同宽位重解释使用 BCL 契约，不通过不同类型的托管地址读取。</summary>
-    private MethodRef? BitConversion(TypeRef from, TypeRef to)
-    {
-        var width = types.Bits(from);
-        if (width != types.Bits(to) || width is not (32 or 64)) return null;
-        var fromKind = types.Kind(from);
-        var toKind = types.Kind(to);
-        var name = (fromKind, toKind) switch
-        {
-            (TypeKind.Float, TypeKind.Int) => "SingleToInt32Bits",
-            (TypeKind.Double, TypeKind.Int) => "DoubleToInt64Bits",
-            (TypeKind.Int, TypeKind.Float) => "Int32BitsToSingle",
-            (TypeKind.Int, TypeKind.Double) => "Int64BitsToDouble",
-            _ => null,
-        };
-        if (name is null) return null;
-        var parameter = fromKind == TypeKind.Int ? types.Integer(width, true) : from;
-        var expected = toKind == TypeKind.Int ? types.Integer(width, true) : to;
-        return types.CorlibMethod("System.BitConverter", name, parameter) is { Method.IsStatic: true } method
-            && method.Method.ReturnType.Equals(expected) ? method : null;
-    }
+
 
     private void Normalize(ManagedValue value)
     {

@@ -74,7 +74,7 @@ public sealed partial class MethodRecovery
                 if (uses.Any(computation.Contains)) continue;
                 foreach (var variable in computation) runtime.Add(variable);
                 switchIndices[jump] = index;
-                typeVersion++;
+                callBindings.InvalidateTypes();
             }
         }
 

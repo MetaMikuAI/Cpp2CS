@@ -59,7 +59,7 @@ public sealed partial class MethodRecovery
         {
             if (ReferenceEquals(syncedSolution, solution)) return;
             syncedSolution = solution;
-            typeVersion++;
+            callBindings.InvalidateTypes();
             known.Clear();
             foreach (var (variable, result) in solution)
             {

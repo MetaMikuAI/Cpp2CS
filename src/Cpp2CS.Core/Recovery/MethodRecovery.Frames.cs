@@ -84,7 +84,7 @@ public sealed partial class MethodRecovery
                 }
                 if (Resolve(call) is not { } callee || owner.abi.Classify(callee, out _) is not { } signature) continue;
                 // 帧区域按这次解析的签名定型；之后类型变化也不能换成另一个 ICF 候选，否则区域类型与调用不一致。
-                resolved[call] = (callee, Pinned);
+                callBindings.Commit(call, callee);
                 var registers = ArgumentsOf(call);
                 foreach (var argument in signature.Arguments.Concat(signature.Return is { Passing: Passing.Indirect } ret ? [ret] : []))
                 {
@@ -136,7 +136,7 @@ public sealed partial class MethodRecovery
                 dropped.Remove(old);
                 block.Statements[i] = mapped;
                 ledger.Replace(old, mapped);
-                if (mapped is Call call && resolved.Remove((Call)old, out var target)) resolved[call] = target;
+                if (mapped is Call call) callBindings.Move((Call)old, call);
             }
             // IR 改写后，定义索引按新语句重建。
             definitions = IndexDefinitions();
@@ -219,7 +219,7 @@ public sealed partial class MethodRecovery
                     origin = at;
                 }
                 if (origin is not { } offset) continue;
-                resolved[call] = (callee, Pinned);
+                callBindings.Commit(call, callee);
                 witnesses.Add(new(offset, returned.Type, call, false));
             }
             // 结构体值的整体读取（静态字段、对象或 ByRef 根上的结构体字段）原样写入栈槽：例如 await UniTask.CompletedTask 把静态字段拷进临时 awaiter。

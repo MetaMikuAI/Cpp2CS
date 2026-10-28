@@ -122,28 +122,26 @@ internal sealed partial class RecoveredForeach
                         or LambdaExpression or AnonymousMethodExpression or LocalFunctionDeclarationStatement)).ToArray())
                     stopped.ReplaceWith(new GotoStatement(completed));
             }
-            else foreach (var declaration in declarations)
+            var rewrite = new ForeachRewrite(guarded, new(current.Type, element.Name, get.Target, body));
+            if (!fallback) foreach (var declaration in declarations)
             {
                 var variable = declaration.Variables.Single();
-                variable.Initializer = writes.Single(a => Name(a.Left, variable.Name)).Right.Clone();
+                rewrite.Initializers.Add((variable, writes.Single(a => Name(a.Left, variable.Name)).Right));
             }
-            var replacement = new ForeachStatement(current.Type.Clone(), new SingleVariableDesignation(element.Name), get.Target.Clone(), body);
-            guarded.ReplaceWith(replacement);
+            var replacement = rewrite.Loop;
             if (completed is not null)
             {
                 var exhausted = defaults[0].Clone();
                 var done = new LabelStatement(completed);
-                parent.Statements.InsertAfter(replacement, exhausted);
-                parent.Statements.InsertAfter(exhausted, done);
-                parent.Statements.InsertAfter(done, new EmptyStatement());
+                rewrite.Suffix.AddRange([exhausted, done, new EmptyStatement()]);
             }
             if (exit is not null)
             {
                 var exitLabel = new LabelStatement(exit);
-                parent.Statements.InsertAfter(replacement, exitLabel);
-                parent.Statements.InsertAfter(exitLabel, new EmptyStatement());
+                rewrite.Suffix.InsertRange(0, [exitLabel, new EmptyStatement()]);
             }
-            statements[index + 1].Remove(); initialization.Remove(); enumDeclaration.Remove();
+            rewrite.Removed.AddRange([statements[index + 1], initialization, enumDeclaration]);
+            rewrite.Commit();
             if (exit is not null && parent == method.Body) FoldResultReturns(method, replacement, declarations, exit);
         }
     }

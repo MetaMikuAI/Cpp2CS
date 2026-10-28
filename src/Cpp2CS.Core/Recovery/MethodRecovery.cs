@@ -153,15 +153,7 @@ public sealed partial class MethodRecovery
         private readonly Dictionary<Call, MethodRef> forwardedConstructors = new(ReferenceEqualityComparer.Instance);
         /// <summary>装箱调用 → 写入被装箱栈槽的值。</summary>
         private readonly Dictionary<Call, Expr> boxed = new(ReferenceEqualityComparer.Instance);
-        /// <summary>
-        /// 调用目标的缓存：（方法，求值时的类型状态版本）。类型状态（known、运行时引用）每变化一次，<see cref="typeVersion"/> 加一，
-        /// 旧版本的结果不再复用，解析因此只取决于当前的类型，不取决于第一次解析发生在推断之前还是之后。
-        /// 由证明确定的解析（栈上调用的隐藏参数匹配、帧区域用过的解析）固定为 <see cref="Pinned"/>。
-        /// </summary>
-        private readonly Dictionary<Call, CallBinding> resolved = new(ReferenceEqualityComparer.Instance);
-        private readonly Dictionary<Call, CallResolution> callResolutions = new(ReferenceEqualityComparer.Instance);
-        private const int Pinned = -1;
-        private int typeVersion;
+        private readonly CallBindingState callBindings = new();
         /// <summary>内联到使用处的定义（见类注释第 8 条）。</summary>
         private readonly HashSet<Variable> inlined = [];
         private readonly Dictionary<long, RecoveryHole> frameHoles = new();
@@ -228,12 +220,12 @@ public sealed partial class MethodRecovery
                         Record(Fail(leftover.Address, "结构体 片未拆回叶子"), entry);
                     else foreach (var proof in Registry.Proofs) proof(this, body);
                     if (ledger.Count == 0) return new(method, entry, owner.RestoreBaseConstructor(body), ledger.Holes)
-                        { Analyses = analysisSteps.ToArray(), Calls = callResolutions.Values.ToArray(), Rules = ruleTraces.ToArray() };
+                        { Analyses = analysisSteps.ToArray(), Calls = callBindings.Resolutions.ToArray(), Rules = ruleTraces.ToArray() };
                     ledger.Finish();
                 }
             }
             return new(method, entry, null, ledger.Holes) { Partial = partial is null ? null : Summarized(partial, ledger.Holes),
-                Analyses = analysisSteps.ToArray(), Calls = callResolutions.Values.ToArray(), Rules = ruleTraces.ToArray() };
+                Analyses = analysisSteps.ToArray(), Calls = callBindings.Resolutions.ToArray(), Rules = ruleTraces.ToArray() };
         }
 
         /// <summary>没有落在某条语句上的洞（异常区域、签名等方法级的洞）汇总成方法入口处的一条标记。</summary>
@@ -430,7 +422,7 @@ public sealed partial class MethodRecovery
                     objectClasses[klass.Variable] = obj;
                     typeChecks[call] = obj;
                     runtime.Add(klass.Variable);
-                    typeVersion++;
+                    callBindings.InvalidateTypes();
                 }
             return PrepareSealedChecks() | typeChecks.Count > 0;
         }
@@ -452,7 +444,7 @@ public sealed partial class MethodRecovery
                 if (sealedCompares == 0 || uses.GetValueOrDefault(variable) != sealedCompares) continue;
                 objectClasses[variable] = obj;
                 runtime.Add(variable);
-                typeVersion++;
+                callBindings.InvalidateTypes();
                 found = true;
             }
             return found;
@@ -501,7 +493,7 @@ public sealed partial class MethodRecovery
                     if (!runtime.Contains(variable) && phi.Sources.Any(runtime.Contains))
                         changed |= runtime.Add(variable);
             } while (changed);
-            typeVersion++;
+            callBindings.InvalidateTypes();
         }
 
         /// <summary>
@@ -889,8 +881,7 @@ public sealed partial class MethodRecovery
         /// <summary>托管调用的方法（具体实例）；依据尚不足（接收者类型未定）时为 null。</summary>
         private MethodRef? Resolve(Call call)
         {
-            if (resolved.TryGetValue(call, out var cached) && cached.Method is not null
-                && (cached.Committed || cached.Version == typeVersion && cached.IrVersion == analyses.Version)) return cached.Method;
+            if (callBindings.Cached(call, analyses.Version) is { } cached) return cached;
             var result = ResolveOnce(call);
             // 封闭实例：经自身 MethodInfo/RGCTX 得到的方法保留泛型参数形式（如 IUniTaskSource<T>.GetResult），代入实例的实参。
             if ((ClosedInstance || SharedDefinition) && result is not null)
@@ -899,11 +890,7 @@ public sealed partial class MethodRecovery
                     TypeArguments = result.TypeArguments.Select(t => t.Substitute(method.TypeArguments, method.MethodArguments)).ToArray(),
                     MethodArguments = result.MethodArguments.Select(t => t.Substitute(method.TypeArguments, method.MethodArguments)).ToArray(),
                 };
-            resolved[call] = new(result, typeVersion, IrVersion: analyses.Version);
-            if (!callResolutions.TryGetValue(call, out var resolution) || resolution.TypeVersion != typeVersion)
-                callResolutions[call] = new(call.Address, (call.Target as Const)?.Value, typeVersion,
-                    result is null ? [] : [new(result, call.Op?.Kind.ToString() ?? "native-identity")], result, result is null ? "blocked" : "bound");
-            else if (result is not null) callResolutions[call] = resolution with { Selected = result };
+            callBindings.Remember(call, result, analyses.Version);
             return result;
         }
 
@@ -975,7 +962,7 @@ public sealed partial class MethodRecovery
                     }
                     var accepted = available.Where(c => c.Rejection is null).Select(c => c.Method).Distinct().ToArray();
                     var selected = accepted.Length == 1 ? accepted[0] : null;
-                    callResolutions[call] = new(call.Address, target.Value, typeVersion, available, selected,
+                    callBindings.Candidates(call, target.Value, available, selected,
                         accepted.Length == 0 ? "blocked" : accepted.Length == 1 ? "bound" : "conflict");
                     return selected;
                 }

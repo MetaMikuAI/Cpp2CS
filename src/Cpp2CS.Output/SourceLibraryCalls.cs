@@ -7,12 +7,20 @@ using Cpp2CS.Recovery;
 namespace Cpp2CS.Output;
 
 /// <summary>源码中的内联库操作：匹配库方法体或已知集合操作的控制流与读写结构。</summary>
-public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes types, IMethodSummaries summaries)
+public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes types, IMethodSummaries summaries, SourceLibraryIndex? index = null)
 {
+    private readonly SourceLibraryIndex libraryIndex = index ?? new(facts);
     private sealed record Pattern(MethodRef Method, ManagedStatement[] Statements, Dictionary<Variable, ManagedValue> Values, ManagedValue Returned);
     private readonly Dictionary<TypeDef, Pattern[]> patterns = [];
     public List<string> Evidence { get; } = [];
     private int next = -4_000_000;
+
+    private ManagedBody? SummaryBody(MethodRequest request, bool allowRegions = false)
+    {
+        // 每次先读取摘要，确保当前调用方登记依赖；只复用已经补齐的整理结果。
+        if (summaries.Find(request)?.Body is not { } original || !allowRegions && original.Regions.Count != 0) return null;
+        return libraryIndex.Prepare(request, original, types);
+    }
 
     private IEnumerable<(FieldRef[] Path, TypeRef Type)> Leaves(TypeRef type, FieldRef[]? path = null)
     {
@@ -88,8 +96,7 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
             && m.Name is not (".ctor" or ".cctor") && m.Parameters.Count <= 3).OrderBy(m => m.Parameters.Count))
         {
             var reference = new MethodRef(method, [], []);
-            if (summaries.Find(new(reference, method.Address))?.Body is not { Regions.Count: 0 } original) continue;
-            var body = SourceRewriter.Rewrite(original, types);
+            if (SummaryBody(new(reference, method.Address)) is not { } body) continue;
             var blocks = body.Blocks.ToDictionary(b => b.Address);
             var seen = new HashSet<ulong>();
             var statements = new List<ManagedStatement>();
