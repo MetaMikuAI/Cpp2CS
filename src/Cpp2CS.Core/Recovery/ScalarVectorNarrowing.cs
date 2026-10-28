@@ -45,6 +45,14 @@ internal static class ScalarVectorNarrowing
                     if (!args.AsSpan().SequenceEqual(call.Arguments)) block.Statements[i] = call with { Arguments = args };
                 }
 
+        return NarrowDefinitions(blocks, callWidths, resultWidths, inputWidths);
+    }
+
+    /// <summary>仅收窄已证明的定义；调用实参投影已完成时可在类型推断后复用。</summary>
+    internal static int NarrowDefinitions(IReadOnlyList<Block> blocks, Func<Call, IReadOnlyDictionary<Storage, int>> callWidths,
+        Func<Call, IReadOnlyDictionary<Storage, int>>? resultWidths = null, IReadOnlyDictionary<Storage, int>? inputWidths = null,
+        Action<Define, Define>? replaced = null)
+    {
         var candidates = blocks.SelectMany(b => b.Statements).OfType<Define>()
             .Where(d => d.Target.Storage.Bank == Bank.Vec && d.Value is Ir.Convert { Kind: ConvKind.ZeroExtend, Width: 128, Operand.Width: 32 or 64 } c
                 && !ExprMap.Walk(c.Operand).Any(e => e is Insert or Intrinsic))
@@ -122,7 +130,9 @@ internal static class ScalarVectorNarrowing
                 if (block.Statements[i] is Define d && used.Contains(d.Target) && !rejected.Contains(d.Target)
                     && candidates.TryGetValue(d.Target, out var scalar))
                 {
-                    block.Statements[i] = d with { Value = scalar };
+                    var replacement = d with { Value = scalar };
+                    block.Statements[i] = replacement;
+                    replaced?.Invoke(d, replacement);
                     changed++;
                 }
         return changed;

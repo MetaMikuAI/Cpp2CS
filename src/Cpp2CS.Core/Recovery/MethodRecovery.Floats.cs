@@ -12,13 +12,24 @@ public sealed partial class MethodRecovery
         private void NormalizeScalarVectors() => ScalarVectorNarrowing.Run(function.Blocks, call => ScalarWidths(call, false), call => ScalarWidths(call, true),
             arguments.Where(p => p.Key.Bank == Bank.Vec && types.Kind(p.Value.Type) is TypeKind.Float or TypeKind.Double).ToDictionary(p => p.Key, p => p.Value.Width));
 
+        private void NarrowTypedScalars()
+        {
+            var changed = ScalarVectorNarrowing.NarrowDefinitions(blocks, call => ScalarWidths(call, false, typed: true),
+                call => ScalarWidths(call, true, typed: true),
+                arguments.Where(p => p.Key.Bank == Bank.Vec && types.Kind(p.Value.Type) is TypeKind.Float or TypeKind.Double).ToDictionary(p => p.Key, p => p.Value.Width),
+                (previous, replacement) => PreserveStatementAnalysis(previous, replacement));
+            if (changed == 0) return;
+            definitions = IndexDefinitions();
+            InferTypes();
+        }
+
         /// <summary>调用的标量浮点实参（或返回值）所在向量寄存器的宽度；ICF 共用入口要求各签名一致。</summary>
-        private Dictionary<Storage, int> ScalarWidths(Call call, bool returned)
+        private Dictionary<Storage, int> ScalarWidths(Call call, bool returned, bool typed = false)
         {
             var widths = new Dictionary<Storage, int>();
             MethodRef[] methods;
             // 按已知间接调用签名投影；不是实参的向量寄存器只作透传（宽度 0），不算使用。
-            if (call.Op is { Kind: OpKind.CallInterface or OpKind.CallVirtual or OpKind.CallGenericVirtual or OpKind.CallDelegate } && Callee(call) is { } indirect
+            if (call.Op is { Kind: OpKind.CallInterface or OpKind.CallVirtual or OpKind.CallGenericVirtual or OpKind.CallDelegate } && (typed ? Resolve(call) : Callee(call)) is { } indirect
                 && owner.abi.Classify(indirect, out _) is { } indirectSignature)
             {
                 if (returned)
@@ -30,8 +41,9 @@ public sealed partial class MethodRecovery
                     return widths;
                 }
                 foreach (var register in call.Sources.Where(s => s.Bank == Bank.Vec))
-                    widths[register] = indirectSignature.Arguments.FirstOrDefault(a => a.Passing == Passing.Registers && a.Pieces.Length == 1 && a.Pieces[0].Register == register
-                        && types.Kind(a.Type) is TypeKind.Float or TypeKind.Double) is { } parameter ? parameter.Pieces[0].Width
+                    widths[register] = indirectSignature.Arguments.Where(a => a.Passing == Passing.Registers
+                        && a.Pieces.All(p => p.Register.Bank == Bank.Vec) && types.Kind(a.Type) is TypeKind.Float or TypeKind.Double or TypeKind.Struct)
+                        .SelectMany(a => a.Pieces).SingleOrDefault(p => p.Register == register) is { } parameter ? parameter.Width
                         : indirectSignature.Arguments.Any(a => a.Pieces.Any(p => p.Register == register)) ? -1 : 0;
                 foreach (var register in widths.Where(p => p.Value < 0).Select(p => p.Key).ToArray()) widths.Remove(register);
                 return widths;

@@ -32,8 +32,12 @@ public sealed partial class MethodRecovery
                     if ((typed ? Resolve(call) : Callee(call)) is not { } callee || owner.abi.Classify(callee, out _) is not { } signature) continue;
                     var reads = signature.Reads.ToHashSet();
                     var keep = Enumerable.Range(0, call.Sources.Length).Where(k => reads.Contains(call.Sources[k])).ToArray();
-                    if (keep.Length == call.Sources.Length || keep.Length != reads.Count) continue;
-                    block.Statements[i] = Trimmed(call, keep.Select(k => call.Arguments[k]).ToArray(), keep.Select(k => call.Sources[k]).ToArray());
+                    if (keep.Length != reads.Count) continue;
+                    var widths = typed ? ScalarWidths(call, false, typed: true) : [];
+                    var args = keep.Select(k => widths.TryGetValue(call.Sources[k], out var width) && width > 0
+                        ? ScalarVectorNarrowing.Low(call.Arguments[k], width) : call.Arguments[k]).ToArray();
+                    if (keep.Length == call.Sources.Length && args.AsSpan().SequenceEqual(call.Arguments)) continue;
+                    block.Statements[i] = Trimmed(call, args, keep.Select(k => call.Sources[k]).ToArray());
                     changed = true;
                 }
             if (!changed) return;
@@ -44,23 +48,28 @@ public sealed partial class MethodRecovery
             {
                 var replacement = call with { Arguments = arguments, Sources = sources };
                 if (!typed) return replacement;
-                // 裁去未读取的实参不改变调用身份；保留已建立的返回局部、构造配对与异常证据。
-                Copy(typeChecks); Copy(constructed); Copy(forwardedConstructors); Copy(boxed); Copy(resolved);
-                Copy(structResults); Copy(delegateCreations); Copy(exceptionTypeTargets); Copy(stackEnums); Copy(virtualDelegates);
-                Copy(frameCopies); Copy(frameInitializers);
-                Keep(dropped); Keep(virtualCalls); Keep(cleanupCalls); Keep(genericResolvers); Keep(stackEnumStorage);
-                foreach (var live in frameLives.Values) Keep(live);
-                ledger.Replace(call, replacement);
+                PreserveStatementAnalysis(call, replacement);
                 return replacement;
+            }
+        }
 
-                void Copy<TKey, TValue>(Dictionary<TKey, TValue> map) where TKey : Stmt
-                {
-                    if (call is TKey key && replacement is TKey next && map.TryGetValue(key, out var value)) map[next] = value;
-                }
-                void Keep<T>(HashSet<T> set) where T : Stmt
-                {
-                    if (call is T key && replacement is T next && set.Contains(key)) set.Add(next);
-                }
+        /// <summary>只改未被 ABI 观察的位时，保留语句身份关联的证明与诊断。</summary>
+        private void PreserveStatementAnalysis(Stmt previous, Stmt replacement)
+        {
+            Copy(typeChecks); Copy(constructed); Copy(forwardedConstructors); Copy(boxed); Copy(resolved); Copy(callResolutions);
+            Copy(structResults); Copy(delegateCreations); Copy(exceptionTypeTargets); Copy(stackEnums); Copy(virtualDelegates); Copy(nativeImports);
+            Copy(frameCopies); Copy(frameInitializers);
+            Keep(dropped); Keep(virtualCalls); Keep(cleanupCalls); Keep(genericResolvers); Keep(stackEnumStorage);
+            foreach (var live in frameLives.Values) Keep(live);
+            ledger.Replace(previous, replacement);
+
+            void Copy<TKey, TValue>(Dictionary<TKey, TValue> map) where TKey : Stmt
+            {
+                if (previous is TKey key && replacement is TKey next && map.TryGetValue(key, out var value)) map[next] = value;
+            }
+            void Keep<T>(HashSet<T> set) where T : Stmt
+            {
+                if (previous is T key && replacement is T next && set.Contains(key)) set.Add(next);
             }
         }
 

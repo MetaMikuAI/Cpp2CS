@@ -40,6 +40,23 @@ internal static class FloatScalarCheck
             a.Equal(0, ScalarVectorNarrowing.Run([caller], Unknown), "未知调用、HFA 及签名不一致不提供标量宽度");
             a.Equal(1, ScalarVectorNarrowing.Run([caller], _ => new Dictionary<Storage, int> { [Storage.Vec(0)] = width }), "已证签名仅观察低位");
             a.True(caller.Statements[1] is Call { Arguments: [Use u] } && u.Width == width, "调用实参带实际标量位宽");
+            var other = new Variable(Storage.Vec(0), 2);
+            var joined = new Variable(Storage.Vec(0), 3);
+            var initial = new Block(0x2000) { Statements = [definition] };
+            var alternate = new Block(0x2010) { Statements = [new Define(0x2010, other,
+                new Ir.Convert(ConvKind.ZeroExtend, Expr.C(0, width), 128))] };
+            var merging = new Phi(0x2020, joined, [v, other]);
+            var indirect = call with { Arguments = [new Use(joined, 128)] };
+            var merge = new Block(0x2020) { Statements = [merging, indirect] };
+            a.Equal(0, ScalarVectorNarrowing.Run([initial, alternate, merge], Unknown), "晚确认的调用签名前不收窄 φ 网");
+            var projectedCall = indirect with { Arguments = [new Use(joined, width)] };
+            merge.Statements[1] = projectedCall;
+            var replacements = new List<(Define Previous, Define Replacement)>();
+            a.Equal(2, ScalarVectorNarrowing.NarrowDefinitions([initial, alternate, merge], Unknown,
+                replaced: (previous, replacement) => replacements.Add((previous, replacement))), "实参按签名投影后复用相同收窄证明");
+            a.True(ReferenceEquals(merge.Statements[0], merging) && ReferenceEquals(merge.Statements[1], projectedCall), "定义收窄不再替换已分析的调用和 φ");
+            a.True(replacements.Count == 2 && replacements.All(p => p.Previous.Target == p.Replacement.Target
+                && p.Previous.Address == p.Replacement.Address && p.Replacement.Value.Width == width), "替换回调保留定义身份供诊断与帧证据迁移");
             foreach (var bits in new ulong[] { 0, 1, 0x80000000, 0x7f800000, 0x7fc00001, 0x8000000000000000, 0x7ff0000000000000, 0x7ff8000000000001 })
             {
                 var operand = Expr.C(bits, width);

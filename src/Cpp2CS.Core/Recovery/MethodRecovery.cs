@@ -410,6 +410,7 @@ public sealed partial class MethodRecovery
                 InferTypes();
             }
             TrimIndirectArguments(typed: true);
+            NarrowTypedScalars();
         }
 
         /// <summary>
