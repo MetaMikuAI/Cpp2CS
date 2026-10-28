@@ -6,10 +6,18 @@ namespace Cpp2CS.Recovery;
 /// <summary>把保护区出口处已证明不抛异常的运算归回 try，保留未知访问和其他异常区域。</summary>
 internal static class SourceTryBlocks
 {
+    private static bool Receiver(ManagedValue value, HashSet<ManagedValue> nonnull, Func<MethodRef, bool>? getter) => value switch
+    {
+        LocalValue or ArgumentValue => nonnull.Contains(value) || value.Type is DefinitionRef { Definition.IsValueType: true },
+        AddressValue address => address.Target.Type is DefinitionRef { Definition.IsValueType: true }
+            && address.Target is LocalValue or ArgumentValue or FieldValue && Pure(address.Target, nonnull, getter),
+        _ => false,
+    };
+
     private static bool Pure(ManagedValue value, HashSet<ManagedValue> nonnull, Func<MethodRef, bool>? getter) => value switch
     {
         LocalValue or ArgumentValue or ConstantValue => true,
-        FieldValue field => field.Receiver is LocalValue or ArgumentValue && nonnull.Contains(field.Receiver)
+        FieldValue field => Receiver(field.Receiver, nonnull, getter)
             && !field.Field.Field.IsStatic && (field.Accessor is null || !field.Accessor.Write && getter?.Invoke(field.Accessor.Method) == true),
         ConversionValue conversion => ManagedTypes.PrimitiveName(conversion.Type) is not null
             && ManagedTypes.PrimitiveName(conversion.Operand.Type) is not null && Pure(conversion.Operand, nonnull, getter),
@@ -35,8 +43,8 @@ internal static class SourceTryBlocks
         {
             ManagedAssignment assignment => Pure(assignment.Value, nonnull[s], getter),
             ManagedJump or ManagedBranch or ManagedSwitch or ManagedReturn => ManagedValues.Of(s).All(v => Pure(v, nonnull[s], getter)),
-            ManagedCall { Invocation: { Receiver: LocalValue receiver, Arguments.Count: 0 } invocation } when getter is not null
-                => getter(invocation.Method) && nonnull[s].Contains(receiver),
+            ManagedCall { Invocation: { Receiver: { } receiver, Arguments.Count: 0 } invocation } when getter is not null
+                => getter(invocation.Method) && Receiver(receiver, nonnull[s], getter),
             _ => false,
         }) && ManagedValues.Edges(s).SelectMany(e => e.Copies).All(c => Pure(c.Value, nonnull[s], getter)));
         foreach (var index in Enumerable.Range(0, regions.Length).OrderBy(i => regions[i].Try.Count))

@@ -102,6 +102,38 @@ internal static class SourceTryBlocksCheck
             a.Equal(mode is "field" or "comparison" or "copy" or "getter", result.Regions[0].Try.Contains(3UL), $"{mode} 的非空字段读取合并");
             a.Equal(body.Blocks.Single(b => b.Address == 3), result.Blocks.Single(b => b.Address == 3), "字段读取不提前、不复制、不修改");
         }
+        var record = new TypeDef { Index = 2, Assembly = "Sample", Namespace = "", Name = "Record", Token = 0,
+            Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false };
+        var recordType = new DefinitionRef(record, []);
+        var recordRead = new MethodRef(new MethodDef { Index = 2, Owner = record, Name = "get_Part", Token = 0,
+            Attributes = MethodAttributes.Public, ImplAttributes = 0, Slot = -1, ReturnType = integer }, [], []);
+        var stored = new LocalValue(new(Storage.Temp(5), 1), recordType, 0);
+        var component = new FieldRef(new FieldDef { Index = 1, Owner = record, Name = "part", Type = integer,
+            Attributes = FieldAttributes.Public, Offset = 16 }, recordType);
+        var embedded = new FieldRef(new FieldDef { Index = 2, Owner = owner, Name = "record", Type = recordType,
+            Attributes = FieldAttributes.Public, Offset = 24 }, receiverType);
+        foreach (var mode in new[] { "value", "address", "getter", "embedded", "unchecked", "unknown-getter", "ref", "array" })
+        {
+            ManagedValue target = mode switch
+            {
+                "embedded" or "unchecked" => new FieldValue(receiver, embedded, recordType, 0),
+                "ref" => new ArgumentValue(1, new ByRefRef(recordType), 64),
+                "array" => new ArrayElementValue(new ArgumentValue(1, new ArrayRef(recordType, 1), 64), local, recordType, 0),
+                _ => stored,
+            };
+            ManagedValue location = mode is "value" or "ref" ? target : new AddressValue(target);
+            ManagedStatement read = mode is "value" or "address" ? new ManagedAssignment(3, local, new FieldValue(location, component, integer, 32))
+                : new ManagedCall(3, new(recordRead, location, [], false), local, false);
+            var prefix = new List<ManagedStatement>();
+            if (mode == "embedded") prefix.Add(new ManagedCheck(1, new ComparisonValue(Cond.Eq, receiver,
+                new ConstantValue(0, receiverType, 64), new PrimitiveRef("Boolean")), method));
+            prefix.Add(Jump(1, 3));
+            var body = new ManagedBody(method, [new(0, [Jump(0, 1)]), new(1, prefix), new(2, [new ManagedRethrow(2)]),
+                new(3, [read, Jump(3, 1)])]) { Regions = [new([1], 2, [2], caught, ManagedRegionKind.Catch)] };
+            var result = SourceTryBlocks.Rewrite(body, candidate => mode != "unknown-getter" && candidate.Equals(recordRead));
+            a.Equal(mode is "value" or "address" or "getter" or "embedded", result.Regions[0].Try.Contains(3UL), "值类型接收者 " + mode);
+            a.Equal(body.Blocks[3], result.Blocks.Single(b => b.Address == 3), "值类型读取与调用保留原顺序");
+        }
         return a.Finish("source-try-blocks");
     }
 }
