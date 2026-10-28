@@ -43,14 +43,27 @@ public static partial class Decompilation
             // 类实例的单一定义副本仍是同一个 this；按 IL 变量身份替换，包括 lambda 中的捕获。
             foreach (var declaration in rootNode.Descendants.OfType<VariableDeclarationStatement>().ToArray())
             {
-                if (declaration.Variables.ToArray() is not [var variable] || variable.Initializer is not ThisReferenceExpression receiver
+                if (declaration.Variables.ToArray() is not [var variable]
                     || variable.GetILVariable() is not { IsSingleDefinition: true, UsesInitialValue: false, Type.IsReferenceType: true } local
-                    || local.AddressInstructions.Count != 0 || receiver.Annotation<ResolveResult>()?.Type.Equals(local.Type) != true) continue;
+                    || local.AddressInstructions.Count != 0) continue;
                 var references = rootNode.Descendants.OfType<IdentifierExpression>().Where(id => id.GetILVariable() == local).ToArray();
+                var receiver = variable.Initializer as ThisReferenceExpression;
+                ExpressionStatement? separateStore = null;
+                if (receiver is null && variable.Initializer is null)
+                {
+                    var writes = references.Where(id => id.Parent is AssignmentExpression assignment && assignment.Left == id).ToArray();
+                    if (writes is not [var target] || target.Parent is not AssignmentExpression
+                        { Operator: AssignmentOperatorType.Assign, Right: ThisReferenceExpression instance, Parent: ExpressionStatement statement }) continue;
+                    receiver = instance;
+                    separateStore = statement;
+                    references = references.Where(id => id != target).ToArray();
+                }
+                if (receiver?.Annotation<ResolveResult>()?.Type.Equals(local.Type) != true) continue;
                 if (references.Any(id => id.Parent is DirectionExpression
                     || id.Parent is AssignmentExpression assignment && assignment.Left == id
                     || id.Ancestors.OfType<InvocationExpression>().Any(call => call.Target is IdentifierExpression { Identifier: "nameof" }))) continue;
                 foreach (var reference in references) reference.ReplaceWith(receiver.Clone());
+                separateStore?.Remove();
                 declaration.Remove();
             }
             if (!rootNode.Descendants.Any(n => n is SimpleType { Identifier: "Await" or "Unrecovered" or "NativeImports" }

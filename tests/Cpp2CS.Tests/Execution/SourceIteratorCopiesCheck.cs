@@ -53,6 +53,24 @@ internal static class SourceIteratorCopiesCheck
                     advance();
                     yield return owner.Value;
                 }
+                public IEnumerable<int> RepeatedInstanceValues(int count)
+                {
+                    Probe owner;
+                    for (int i = 0; i < count; i++)
+                    {
+                        owner = this;
+                        Action advance = () => owner.Value++;
+                        yield return owner.Value;
+                        advance();
+                    }
+                }
+                public IEnumerable<int> ReassignedInstanceValues(Probe other)
+                {
+                    var owner = this;
+                    yield return owner.Value;
+                    owner = other;
+                    yield return owner.Value;
+                }
                 public static IEnumerable<int> Values(int seed)
                 {
                     int current = seed;
@@ -149,6 +167,14 @@ internal static class SourceIteratorCopiesCheck
             a.True(iterator.MoveNext() && iterator.Current == 7, "this 副本首次挂起读取实例");
             type.GetField("Value")!.SetValue(instance, 123);
             a.True(iterator.MoveNext() && iterator.Current == 124 && !iterator.MoveNext(), "跨挂起后的 lambda 仍修改同一个实例");
+            type.GetField("Value")!.SetValue(instance, 4);
+            var repeated = (IEnumerable<int>)type.GetMethod("RepeatedInstanceValues")!.Invoke(instance, [3])!;
+            a.True(repeated.SequenceEqual([4, 5, 6]) && (int)type.GetField("Value")!.GetValue(instance)! == 7,
+                "循环内赋值的 this 副本保留挂起与捕获修改");
+            var other = Activator.CreateInstance(type)!;
+            type.GetField("Value")!.SetValue(other, 99);
+            var reassigned = (IEnumerable<int>)type.GetMethod("ReassignedInstanceValues")!.Invoke(instance, [other])!;
+            a.True(reassigned.SequenceEqual([7, 99]), "可改为其他实例的局部变量不能替换为 this");
         }
         return a.Finish("source-iterator-copies");
     }
