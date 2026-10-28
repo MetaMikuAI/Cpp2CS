@@ -28,12 +28,12 @@ internal static partial class SourceAsyncCheck
     {
         var proof = Path.Combine(directory, "type-compile", type);
         Directory.CreateDirectory(proof);
-        var path = Path.Combine(directory, "src", "Assembly-CSharp.dll_" + type + ".cs");
-        if (!File.Exists(path)) path = Path.Combine(directory, "src", "Assembly-CSharp.dll", type[..type.LastIndexOf('.')], type[(type.LastIndexOf('.') + 1)..] + ".cs");
+        const string assembly = "Assembly-CSharp";
+        var separator = type.LastIndexOf('.');
+        var path = Path.Combine(directory, "src", assembly + ".dll_" + type + ".cs");
+        if (!File.Exists(path)) path = Path.Combine(directory, "src", assembly + ".dll", separator < 0 ? "" : type[..separator], type[(separator + 1)..].Split('`')[0] + ".cs");
         var source = File.ReadAllText(path);
         var tree = CSharpSyntaxTree.ParseText(source);
-        var assembly = Path.GetFileName(path).Contains(".dll_", StringComparison.Ordinal)
-            ? Path.GetFileName(path).Split(".dll_", 2, StringSplitOptions.None)[0] : Directory.GetParent(path)!.Parent!.Name[..^4];
         var sourceName = assembly + ".Recovered";
         var assemblies = Path.Combine(directory, "assemblies-src");
         var compilation = CSharpCompilation.Create(sourceName, [tree],

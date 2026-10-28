@@ -196,6 +196,30 @@ internal static class SourceStructCopiesCheck
             new FieldValue(new AddressValue(source), new(definition.Fields[2 - i], type), integer, 32))));
         a.True(SourceStructCopies.Rewrite(valueFields).Blocks[0].Statements is [ManagedStore { Value: ComposedValue { Leaves.Count: 3 } }],
             "不同字段组合可从独立的值类型局部快照构造");
+        var constructor = new MethodDef { Index = -3, Owner = container, Name = ".ctor", Token = 0,
+            Attributes = MethodAttributes.Public, ImplAttributes = 0, Slot = -1, ReturnType = new PrimitiveRef("Void") };
+        var self = new ArgumentValue(-1, containerType, 64);
+        var selfField = parent with { Receiver = self };
+        var otherField = new FieldValue(self, new(new FieldDef { Index = -4, Owner = container, Name = "Other", Type = integer,
+            Offset = 32, Attributes = FieldAttributes.Private }, containerType), integer, 32);
+        ManagedStore Init(int i) => new((ulong)i, new FieldValue(new AddressValue(selfField), new(definition.Fields[i], type), integer, 32),
+            new ConstantValue((ulong)(i + 1), integer, 32));
+        var otherWrite = new ManagedStore(8, otherField, new ConstantValue(9, integer, 32));
+        var initializers = new ManagedBody(new(constructor, [], []), [new(0, [Init(2), otherWrite, Init(0), Init(1)])]);
+        var grouped = SourceStructCopies.Rewrite(initializers).Blocks[0].Statements;
+        a.True(grouped is [ManagedStore { Target: var initializerTarget, Value: ComposedValue { Leaves.Count: 3 } }, ManagedStore]
+            && initializerTarget == selfField && grouped[1] == otherWrite, "构造入口交错常量叶子合成完整字段初始化器");
+        foreach (var barrier in new ManagedStatement[] { new ManagedAssignment(8, snapshots[0], otherField),
+            new ManagedCall(8, new(null!, null, [], false), null, false), new ManagedReturn(8, null),
+            otherWrite with { Value = snapshots[0] } })
+        {
+            var blocked = initializers with { Blocks = [new(0, [Init(2), barrier, Init(0), Init(1)])] };
+            a.Equal(4, SourceStructCopies.Rewrite(blocked).Blocks[0].Statements.Count, "不跨读取、调用、返回或非常量写入");
+        }
+        var overlapping = initializers with { Blocks = [new(0, [Init(2), new ManagedStore(8, selfField, new ComposedValue(type, [])), Init(0), Init(1)])] };
+        a.Equal(4, SourceStructCopies.Rewrite(overlapping).Blocks[0].Statements.Count, "整字段与分量重叠写入不改序");
+        var repeated = initializers with { Blocks = [new(0, [Init(2), Init(2), otherWrite, Init(0), Init(1)])] };
+        a.Equal(5, SourceStructCopies.Rewrite(repeated).Blocks[0].Statements.Count, "重复叶子不归并");
         return a.Finish("source-struct-copies");
     }
 }
