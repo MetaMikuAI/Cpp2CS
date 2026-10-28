@@ -23,8 +23,8 @@ internal static class SourceForeachResultsCheck
             if (!emitted.Success) throw new InvalidOperationException(string.Join('\n', emitted.Diagnostics));
             return stream.ToArray();
         }
-        string[] modes = ["Valid", "OuterLocal", "CapturedSource", "CapturedTarget", "FactoryCopy", "Reused", "ObservedFactory", "PrefixCallback"];
-        var methods = string.Join('\n', modes.Select(mode => $$"""
+        string[] modes = ["Valid", "OuterLocal", "CapturedSource", "CapturedTarget", "FactoryCopy", "Reused", "ObservedFactory", "PrefixCallback", "Find"];
+        var methods = string.Join('\n', modes.Where(mode => mode != "Find").Select(mode => $$"""
             public static int {{mode}}(Sequence sequence)
             {
                 int result = -7;
@@ -55,6 +55,32 @@ internal static class SourceForeachResultsCheck
                 return result;
             }
             """));
+        methods += """
+            public static int Find(Sequence sequence)
+            {
+                Sequence.Enumerator iterator = default;
+                iterator = sequence.GetEnumerator();
+                int result;
+                try
+                {
+                    while (true)
+                    {
+                        if (iterator.MoveNext())
+                        {
+                            int current = iterator.Current;
+                            if (current < 2) continue;
+                            result = current;
+                            break;
+                        }
+                        result = 0;
+                        break;
+                    }
+                }
+                catch (Exception) { iterator.Dispose(); throw; }
+                iterator.Dispose();
+                return result;
+            }
+            """;
         var inputSource = """
             using System;
             using System.Collections;
@@ -92,6 +118,7 @@ internal static class SourceForeachResultsCheck
                             "CapturedSource" => CapturedSource(sequence), "CapturedTarget" => CapturedTarget(sequence),
                             "FactoryCopy" => FactoryCopy(sequence), "Reused" => Reused(sequence),
                             "ObservedFactory" => ObservedFactory(sequence), "PrefixCallback" => PrefixCallback(sequence),
+                            "Find" => Find(sequence),
                             _ => throw new ArgumentException()
                         };
                         Trace.Add("R" + result);
@@ -110,7 +137,7 @@ internal static class SourceForeachResultsCheck
         var tree = CSharpSyntaxTree.ParseText(source).GetRoot();
         var a = new Assertions();
         foreach (var mode in modes)
-            a.Equal(mode is "Valid" or "FactoryCopy" ? 1 : mode == "Reused" ? 2 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
+            a.Equal(mode is "Valid" or "FactoryCopy" or "Find" ? 1 : mode == "Reused" ? 2 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
                 .DescendantNodes().OfType<ForEachStatementSyntax>().Count(), "仅局部且异常后不可观察的复制可延后：" + mode);
         var rebuilt = Compile(source, "ForeachResults.Rebuilt");
         Func<string, int, int, string> Observe(byte[] bytes) => System.Reflection.Assembly.Load(bytes).GetType("Probe")!.GetMethod("Observe")!
@@ -124,6 +151,8 @@ internal static class SourceForeachResultsCheck
         a.Equal("M,C1,M,C2,M,C3,M,D,R6", after("CapturedSource", 3, 0), "释放回调修改源局部不改变已保存结果");
         a.Equal("M,C1,M,C2,M,C3,M,D,O6,R6", after("CapturedTarget", 3, 0), "释放回调仍观察复制后的目标");
         a.Equal("M,C1,M,C2,M,C3,M,D,R9", after("PrefixCallback", 3, 0), "工厂回调仍先于局部快照求值");
+        a.Equal("M,C1,M,C2,D,R2", after("Find", 3, 0), "首个命中后立即释放并返回");
+        a.Equal("M,C1,M,D,R0", after("Find", 1, 0), "耗尽保留默认结果");
         return a.Finish("source-foreach-results");
     }
 }

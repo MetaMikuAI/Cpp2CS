@@ -21,7 +21,7 @@ internal sealed partial class RecoveredForeach
                 || positive.Statements.FirstOrDefault() is not VariableDeclarationStatement current || current.Variables.ToArray() is not [var element]
                 || element.Initializer is not MemberReferenceExpression { MemberName: "Current", Target: var receiver } read || !Name(receiver, enumerator.Identifier)
                 || CurrentByReference(read)
-                || positive.Statements.LastOrDefault() is not ContinueStatement
+                || positive.Statements.LastOrDefault() is not (ContinueStatement or BreakStatement)
                 || catcher.Body?.Statements.ToArray() is not [var failureDispose, ThrowStatement thrown]
                 || !Dispose(failureDispose, enumerator.Identifier) || thrown.Expression is not null && !Name(thrown.Expression, catcher.VariableName)) continue;
             var tail = content.Statements.Skip(1).ToArray();
@@ -64,7 +64,8 @@ internal sealed partial class RecoveredForeach
                 || positive.Descendants.OfType<DirectionExpression>().Any(d => UsesElement(d.Expression))
                 || positive.Descendants.OfType<UnaryOperatorExpression>().Any(u => u.Operator is UnaryOperatorType.Increment or UnaryOperatorType.Decrement
                     or UnaryOperatorType.PostIncrement or UnaryOperatorType.PostDecrement or UnaryOperatorType.AddressOf && UsesElement(u.Expression))) continue;
-            var body = (BlockStatement)positive.Clone(); body.Statements.First().Remove(); body.Statements.Last().Remove();
+            var body = (BlockStatement)positive.Clone(); body.Statements.First().Remove();
+            if (body.Statements.Last() is ContinueStatement) body.Statements.Last().Remove();
             foreach (var declaration in declarations)
             {
                 var variable = declaration.Variables.Single();
