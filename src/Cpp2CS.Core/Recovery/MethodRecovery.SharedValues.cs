@@ -148,20 +148,20 @@ public sealed partial class MethodRecovery
                 var calls = block.Statements.OfType<Call>().Where(c => c.Kind == CallKind.Indirect && c.Arguments.Length >= 5).ToArray();
                 if (function.Range.ExceptionRegions.Length != 0 || calls is not [var call] || call.Arguments[1] is not Use methodUse || call.Arguments[3] is not FrameAddress array
                     || block.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == methodUse.Variable) is not { } methodPhi
-                    || ExpandValue(call.Target) is not Load { Width: 64, Address: Binary { Op: BinOp.Add, Left: Use targetUse, Right: Const { Value: RuntimeLayout.MethodInvoker } } }
-                    || targetUse.Variable != methodUse.Variable || ExpandValue(call.Arguments[0]) is not Load { Width: 64, Address: Use pointerUse }
-                    || pointerUse.Variable != methodUse.Variable || block.Predecessors.Any(p => p.NormalSuccessors.ToArray() is not [var next] || next != block)) continue;
+                    || block.Predecessors.Any(p => p.NormalSuccessors.ToArray() is not [var next] || next != block)) continue;
                 var before = block.Statements.Take(block.Statements.IndexOf(call)).ToArray();
                 if (before.Any(s => s is not (Phi or Define or Nop or Store { Target: FrameAddress }))) continue;
                 var stores = before.OfType<Store>().GroupBy(s => ((FrameAddress)s.Target).Offset).ToDictionary(g => g.Key, g => g.Last());
                 var replacements = new List<(Block Block, Call Call)>();
                 for (var side = 0; side < block.Predecessors.Count; side++)
                 {
-                    if (ExpandValue(new Use(methodPhi.Sources[side], 64)) is not Symbol { Kind: SymbolKind.Method, Value: MethodRef callee }) break;
-                    var returned = Concrete(callee, callee.Method.ReturnType);
-                    if (!Equals(AddressType(call.Arguments[4]), returned)) break;
                     Expr OnEdge(Expr expression) => ExprMap.Map(expression, e => e is Use use
                         && block.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == use.Variable) is { } phi ? new Use(phi.Sources[side], use.Width) : null);
+                    Expr Identity(Expr expression) => ExpandValue(OnEdge(ExpandValue(expression)));
+                    // 地址合流归约后，方法指针可能已经在各前驱加载；逐边同时核对三者的身份。
+                    if (GenericInvokerIdentity.Match(Identity(call.Target), Identity(call.Arguments[0]), Identity(call.Arguments[1])) is not { } callee) break;
+                    var returned = Concrete(callee, callee.Method.ReturnType);
+                    if (!Equals(AddressType(call.Arguments[4]), returned)) break;
                     var args = new List<Expr> { OnEdge(call.Arguments[2]) };
                     for (var p = 0; p < callee.Method.Parameters.Count; p++)
                     {
@@ -200,10 +200,8 @@ public sealed partial class MethodRecovery
                         && owner.SharedFieldSetter(target.Value) == -1 && SizeType(count) is { } stored
                         && Equals(FieldType(field), stored) && Equals(AddressType(value), stored))
                         block.Statements[i] = Operation(OpKind.CopyGenericValue, stored, FieldAddress(obj, symbol), value);
-                    else if (call.Kind == CallKind.Indirect && ExpandValue(call.Target) is Load
-                        { Width: 64, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Method, Value: MethodRef callee } methodInfo, Right: Const { Value: RuntimeLayout.MethodInvoker } } }
-                        && call.Arguments.Length >= 5 && ExpandValue(call.Arguments[0]) is Load { Width: 64 } pointer && pointer.Address == methodInfo
-                        && ExpandValue(call.Arguments[1]) == methodInfo && call.Arguments[3] is FrameAddress array)
+                    else if (call.Kind == CallKind.Indirect && call.Arguments.Length >= 5 && call.Arguments[3] is FrameAddress array
+                        && GenericInvokerIdentity.Match(ExpandValue(call.Target), ExpandValue(call.Arguments[0]), ExpandValue(call.Arguments[1])) is { } callee)
                     {
                         var returned = Concrete(callee, callee.Method.ReturnType);
                         if (!ManagedTypes.IsVoid(returned) && !Equals(AddressType(call.Arguments[4]), returned)
