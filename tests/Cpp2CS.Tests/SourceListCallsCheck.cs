@@ -60,7 +60,39 @@ internal static class SourceListCallsCheck
                 "保留正常路径状态拷贝，未执行的慢分支被删除");
         }
         CheckStructItems(a, types, list, method);
+        CheckFastRegions(a, types, list, method);
         return a.Finish("source-list-calls");
+    }
+
+    private static void CheckFastRegions(Assertions a, ManagedTypes types, TypeDef list, MethodRef method)
+    {
+        foreach (var mode in new[] { "inside", "outside", "reference", "slow-outside", "handler", "new-try", "call", "wrong-index" })
+        {
+            var type = mode == "reference" ? types.Object : types.Int32;
+            var owner = new DefinitionRef(list, [type]);
+            var receiver = new ArgumentValue(0, owner, 64);
+            var item = new ArgumentValue(1, type, mode == "reference" ? 64 : 32);
+            var array = new LocalValue(new(Storage.Temp(30), 1), new ArrayRef(type, 1), 64);
+            var count = new LocalValue(new(Storage.Temp(31), 1), types.Int32, 32);
+            FieldValue Field(string name) => new(receiver, new(list.Fields.Single(f => f.Name == name), owner),
+                name == "_items" ? array.Type : types.Int32, name == "_items" ? 64 : 32);
+            ManagedValue Increment(ManagedValue value) => new BinaryValue(BinOp.Add, value, new ConstantValue(1, types.Int32, 32), types.Int32, 32);
+            var resize = new MethodRef(list.Methods.Single(m => m.Name == "AddWithResize"), owner.Arguments, []);
+            var fast = new List<ManagedStatement> { new ManagedStore(16, Field("_size"), Increment(count)),
+                new ManagedStore(17, new ArrayElementValue(array, mode == "wrong-index" ? Increment(count) : count, type, item.Width), item) };
+            if (mode == "call") fast.Add(new ManagedCall(18, new(method, null, [], false), null, false));
+            fast.Add(new ManagedJump(19, new(48, [])));
+            var original = new ManagedBody(method, [new(0, [new ManagedAssignment(0, array, Field("_items")),
+                new ManagedStore(1, Field("_version"), Increment(Field("_version"))), new ManagedAssignment(2, count, Field("_size")),
+                new ManagedBranch(3, new ComparisonValue(Cond.Ult, count, new ArrayLengthValue(array, types.Int32, 32), types.Boolean), new(16, []), new(32, []))]),
+                new(16, fast), new(32, [new ManagedCall(32, new(resize, receiver, [item], false), null, false), new ManagedJump(33, new(48, []))]),
+                new(48, [new ManagedReturn(48, null)]), new(64, [new ManagedReturn(64, null)])])
+            { Regions = [new(mode == "inside" ? [0, 16, 32] : mode == "slow-outside" ? [0, 16] : mode == "new-try" ? [16] : [0, 32],
+                64, mode == "handler" ? [16, 64] : [64], null, ManagedRegionKind.Catch)] };
+            var rewritten = SourceListCalls.Rewrite(original, types, (_, _) => { });
+            a.Equal(mode is "inside" or "outside" ? 1 : 0, rewritten.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>()
+                .Count(c => c.Invocation.Method.Method.Name == "Add"), "快速路径保护区 " + mode);
+        }
     }
 
     private static void CheckStructItems(Assertions a, ManagedTypes types, TypeDef list, MethodRef method)

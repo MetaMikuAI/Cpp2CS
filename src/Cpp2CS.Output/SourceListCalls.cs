@@ -29,6 +29,8 @@ internal static partial class SourceListCalls
             foreach (var region in body.Regions) Predecessors[region.HandlerEntry] = Predecessors.GetValueOrDefault(region.HandlerEntry) + 2;
         }
         public bool SameRegion(ulong a, ulong b) => body.Regions.All(r => r.Try.Contains(a) == r.Try.Contains(b) && r.Handler.Contains(a) == r.Handler.Contains(b));
+        public bool LeavesTry(ulong a, ulong b) => body.Regions.All(r => r.Handler.Contains(a) == r.Handler.Contains(b)
+            && (!r.Try.Contains(b) || r.Try.Contains(a)));
 
         public ManagedStatement? Exit(ManagedStatement? statement)
         {
@@ -133,9 +135,13 @@ internal static partial class SourceListCalls
                 || !IsField(condition.Left, "_size") || condition.Right is not ArrayLengthValue length || !IsField(length.Array, "_items")) continue;
             var fastEdge = condition.Condition == Cond.Ult ? branch.Taken : branch.Fallthrough;
             var slowEdge = condition.Condition == Cond.Ult ? branch.Fallthrough : branch.Taken;
+            var outside = !flow.SameRegion(block.Address, fastEdge.Target);
             if (flow.Predecessors.GetValueOrDefault(fastEdge.Target) != 1 || flow.Predecessors.GetValueOrDefault(slowEdge.Target) != 1
-                || !flow.SameRegion(block.Address, fastEdge.Target) || !flow.SameRegion(block.Address, slowEdge.Target)) continue;
-            using var fast = flow.Straight(fastEdge.Target, 0, block.Address).GetEnumerator();
+                || !flow.SameRegion(block.Address, slowEdge.Target)
+                || outside && (!flow.LeavesTry(block.Address, fastEdge.Target)
+                    || types.Kind(owner.Arguments[0]) is not (TypeKind.Bool or TypeKind.Int or TypeKind.Float or TypeKind.Double))) continue;
+            // 容量判断保证值类型数组写入不抛错；快速路径可在 try 外，扩容调用仍须保留原保护区。
+            using var fast = flow.Straight(fastEdge.Target, 0, fastEdge.Target).GetEnumerator();
             ManagedStatement? Next(IEnumerator<ManagedStatement> path)
             {
                 while (path.MoveNext())
@@ -149,6 +155,7 @@ internal static partial class SourceListCalls
             var elementWrites = new List<ManagedStatement>();
             if (ReadElement(Next(fast), () => Next(fast), types, elementWrites, constructor) is not { } written
                 || !Resolve(written.Element.Array).Equals(length.Array) || !Resolve(written.Element.Index).Equals(condition.Left)) continue;
+            if (outside && elementWrites.Any(s => s is not ManagedStore)) continue;
             var (element, item) = written;
             // 参数须为进入内联区域前已求值的快照，不把有副作用的取值提前。
             bool Snapshot(ManagedValue value) => value switch
