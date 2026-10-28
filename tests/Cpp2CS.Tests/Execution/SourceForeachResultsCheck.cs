@@ -23,7 +23,7 @@ internal static class SourceForeachResultsCheck
             if (!emitted.Success) throw new InvalidOperationException(string.Join('\n', emitted.Diagnostics));
             return stream.ToArray();
         }
-        string[] modes = ["Valid", "OuterLocal", "CapturedSource", "CapturedTarget"];
+        string[] modes = ["Valid", "OuterLocal", "CapturedSource", "CapturedTarget", "FactoryCopy", "Reused", "ObservedFactory", "PrefixCallback"];
         var methods = string.Join('\n', modes.Select(mode => $$"""
             public static int {{mode}}(Sequence sequence)
             {
@@ -32,19 +32,25 @@ internal static class SourceForeachResultsCheck
                 int sum = 0;
                 {{(mode == "CapturedSource" ? "sequence.OnDispose = () => sum = 99;" : "")}}
                 {{(mode == "CapturedTarget" ? "sequence.OnDispose = () => Trace.Add(\"O\" + result);" : "")}}
-                Sequence.Enumerator iterator = sequence.GetEnumerator();
+                Sequence.Enumerator iterator = default;
+                {{(mode == "Reused" ? "iterator = sequence.GetEnumerator(); try { while (iterator.MoveNext()) { int first = iterator.Current; sum += first; if (first < 0) break; } } catch (Exception) { iterator.Dispose(); throw; } iterator.Dispose();" : "")}}
+                {{(mode == "PrefixCallback" ? "int counter = 0; sequence.OnGetEnumerator = () => counter++;" : "")}}
+                {{(mode is "FactoryCopy" or "ObservedFactory" or "PrefixCallback" ? "Sequence.Enumerator factory = sequence.GetEnumerator();" : "")}}
+                {{(mode == "FactoryCopy" ? "int offset = 1;" : mode == "PrefixCallback" ? "int offset = counter;" : "")}}
+                iterator = {{(mode is "FactoryCopy" or "ObservedFactory" or "PrefixCallback" ? "factory" : "sequence.GetEnumerator()")}};
                 try
                 {
                     while (iterator.MoveNext())
                     {
                         int current = iterator.Current;
-                        sum += current;
+                        sum += current{{(mode is "FactoryCopy" or "PrefixCallback" ? " + offset" : "")}};
                         if (current < 0) break;
                     }
                     result = sum;
                 }
                 catch (Exception) { iterator.Dispose(); throw; }
                 iterator.Dispose();
+                {{(mode == "ObservedFactory" ? "factory.MoveNext();" : "")}}
                 {{(mode == "OuterLocal" ? "} catch (InvalidOperationException) { Trace.Add(\"O\" + result); }" : "")}}
                 return result;
             }
@@ -61,7 +67,8 @@ internal static class SourceForeachResultsCheck
                 {
                     public int Count;
                     public Action OnDispose;
-                    public Enumerator GetEnumerator() => new Enumerator { Owner = this, Index = 0 };
+                    public Action OnGetEnumerator;
+                    public Enumerator GetEnumerator() { OnGetEnumerator?.Invoke(); return new Enumerator { Owner = this, Index = 0 }; }
                     public struct Enumerator : IEnumerator<int>
                     {
                         public Sequence Owner;
@@ -83,6 +90,8 @@ internal static class SourceForeachResultsCheck
                         {
                             "Valid" => Valid(sequence), "OuterLocal" => OuterLocal(sequence),
                             "CapturedSource" => CapturedSource(sequence), "CapturedTarget" => CapturedTarget(sequence),
+                            "FactoryCopy" => FactoryCopy(sequence), "Reused" => Reused(sequence),
+                            "ObservedFactory" => ObservedFactory(sequence), "PrefixCallback" => PrefixCallback(sequence),
                             _ => throw new ArgumentException()
                         };
                         Trace.Add("R" + result);
@@ -101,7 +110,7 @@ internal static class SourceForeachResultsCheck
         var tree = CSharpSyntaxTree.ParseText(source).GetRoot();
         var a = new Assertions();
         foreach (var mode in modes)
-            a.Equal(mode == "Valid" ? 1 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
+            a.Equal(mode is "Valid" or "FactoryCopy" ? 1 : mode == "Reused" ? 2 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
                 .DescendantNodes().OfType<ForEachStatementSyntax>().Count(), "仅局部且异常后不可观察的复制可延后：" + mode);
         var rebuilt = Compile(source, "ForeachResults.Rebuilt");
         Func<string, int, int, string> Observe(byte[] bytes) => System.Reflection.Assembly.Load(bytes).GetType("Probe")!.GetMethod("Observe")!
@@ -114,6 +123,7 @@ internal static class SourceForeachResultsCheck
         a.Equal("M,C1,M,C2,M,C3,M,D,O6,R6", after("OuterLocal", 3, 3), "释放失败时外部捕获仍读到复制结果");
         a.Equal("M,C1,M,C2,M,C3,M,D,R6", after("CapturedSource", 3, 0), "释放回调修改源局部不改变已保存结果");
         a.Equal("M,C1,M,C2,M,C3,M,D,O6,R6", after("CapturedTarget", 3, 0), "释放回调仍观察复制后的目标");
+        a.Equal("M,C1,M,C2,M,C3,M,D,R9", after("PrefixCallback", 3, 0), "工厂回调仍先于局部快照求值");
         return a.Finish("source-foreach-results");
     }
 }

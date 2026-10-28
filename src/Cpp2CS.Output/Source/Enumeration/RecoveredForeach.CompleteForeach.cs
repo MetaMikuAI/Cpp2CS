@@ -115,8 +115,20 @@ internal sealed partial class RecoveredForeach
                     when Name(target, enumerator.Identifier) => value,
                 _ => null,
             };
+            VariableDeclarationStatement? factoryCopy = null;
+            var between = Array.Empty<Statement>();
+            if (initialized is IdentifierExpression temporary)
+            {
+                var beforeFactory = siblings.TakeWhile(s => s != factory).ToArray();
+                between = beforeFactory.Reverse().TakeWhile(PureLocals).Reverse().ToArray();
+                if (beforeFactory.Take(beforeFactory.Length - between.Length).LastOrDefault() is not VariableDeclarationStatement copied
+                    || copied.Variables.ToArray() is not [var variable] || variable.Name != temporary.Identifier
+                    || method.Descendants.OfType<IdentifierExpression>().Count(id => id.Identifier == temporary.Identifier) != 1) continue;
+                factoryCopy = copied;
+                initialized = variable.Initializer;
+            }
             if (initialized is not InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression { MemberName: "GetEnumerator" } get } invocation
-                || !StableCopies(method, prefix.Concat(inside), invocation)) continue;
+                || !StableCopies(method, prefix.Concat(inside).Concat(between), invocation)) continue;
             var iteratorType = invocation.Annotation<ResolveResult>()?.Type;
             if (conditionalInterface ? iteratorType?.FullName != "System.Collections.IEnumerator"
                 : !Enumerator(iteratorType).Disposable) continue;
@@ -125,12 +137,14 @@ internal sealed partial class RecoveredForeach
             var exitDisposals = ExitDisposals(body, method, parent, guarded, enumerator.Identifier);
             if (exitDisposals is null) continue;
             var removed = new List<Statement> { factory!, siblings[index + 1] };
+            if (factoryCopy is not null) removed.Add(factoryCopy);
             removed.AddRange(exitDisposals);
             if (index + 2 < siblings.Length && siblings[index + 2] is ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
                 Left: var reset, Right: DefaultValueExpression } } && Name(reset, enumerator.Identifier)) removed.Add(siblings[index + 2]);
             var allowed = removed.SelectMany(s => s.Descendants).Concat(catcher.Descendants).Concat(guard?.Descendants ?? [])
                 .Concat(originalLoop.Condition!.DescendantsAndSelf).Concat(read.Descendants).ToHashSet();
-            if (method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == enumerator.Identifier && !allowed.Contains(id))) continue;
+            if (method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == enumerator.Identifier && !allowed.Contains(id)
+                && !IndependentUse(id, enumerator.Identifier, factory!, method))) continue;
             var declarations = method.Descendants.OfType<VariableDeclarationStatement>().Where(d => d.Variables.Any(v => v.Name == enumerator.Identifier)).ToArray();
             if (declarations is not [var declaration] || declaration != factory && declaration.Variables.ToArray() is not [{ Initializer: DefaultValueExpression }]) continue;
             var labels = body.Descendants.OfType<LabelStatement>().Select(l => l.Label).ToHashSet();
@@ -173,7 +187,7 @@ internal sealed partial class RecoveredForeach
                 guarded.ReplaceWith(replacement);
             }
             foreach (var statement in removed) statement.Remove();
-            if (declaration != factory) declaration.Remove();
+            if (declaration != factory && !method.Descendants.OfType<IdentifierExpression>().Any(id => id.Identifier == enumerator.Identifier)) declaration.Remove();
         }
     }
 }
