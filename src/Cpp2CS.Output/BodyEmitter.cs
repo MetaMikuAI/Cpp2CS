@@ -208,9 +208,10 @@ public sealed partial class BodyEmitter
                 break;
             case ConversionValue { Kind: ConvKind.Bitcast } bitcast
                 when (types.Kind(bitcast.Operand.Type) is TypeKind.Float or TypeKind.Double) != (types.Kind(bitcast.Type) is TypeKind.Float or TypeKind.Double):
-                // Reinterpret 用 stloc/ldloca/ldobj 换类型读取，ILVerify 判为不可验证（float& 按 int 读取）。
-                // 改用 BitConverter 并在执行对照中作为内建运算之前，不写出（F2 后续）
-                return "转换 浮点与整数的位重解释尚未以可验证的 IL 写出";
+                if (bitcast.Width != bitcast.Operand.Width || bitcast.Width != types.Bits(bitcast.Type)
+                    || BitConversion(bitcast.Operand.Type, bitcast.Type) is null)
+                    return "转换 浮点位重解释缺少同宽核心库方法";
+                break;
             case BinaryValue b:
                 if (b.Left.Width != b.Width || b.Right.Width != b.Width && b.Op is not (BinOp.Shl or BinOp.LShr or BinOp.AShr)) return "运算 位宽不一致";
                 break;
