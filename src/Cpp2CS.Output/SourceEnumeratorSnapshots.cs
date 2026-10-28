@@ -3,7 +3,7 @@ using Cpp2CS.Recovery;
 
 namespace Cpp2CS.Output;
 
-/// <summary>以已证明的原生 Current 字段读取合并直线路径中的元素快照。</summary>
+/// <summary>以已证明的原生 Current 字段读取合并单入口路径中的元素快照。</summary>
 internal static class SourceEnumeratorSnapshots
 {
     internal static ManagedBody Rewrite(ManagedBody body, Func<FieldValue, bool> currentField,
@@ -19,48 +19,64 @@ internal static class SourceEnumeratorSnapshots
             LocalValue { Type: not ByRefRef } or ArgumentValue { Type: not ByRefRef } or ConstantValue => true,
             FieldValue field => (field.Accessor is null || pureField(field))
                 && ReadOnly(field.Receiver is AddressValue address ? address.Target : field.Receiver),
+            ComparisonValue comparison => ReadOnly(comparison.Left) && ReadOnly(comparison.Right),
+            NegatedValue negated => ReadOnly(negated.Operand),
+            ConversionValue conversion => ReadOnly(conversion.Operand),
             _ => false,
         };
-        FieldValue? Current(ManagedValue value)
+        FieldValue? Current(ManagedValue value) => ManagedValues.Walk(value).OfType<FieldValue>().FirstOrDefault(field =>
+            field.Receiver is AddressValue { Target: LocalValue { Type: DefinitionRef { Definition.IsValueType: true } } }
+            && field.Type is not ByRefRef && currentField(field));
+        ManagedValue[] Reads(ManagedStatement statement) => statement switch
         {
-            while (value is FieldValue field)
-            {
-                if (field.Receiver is AddressValue { Target: LocalValue { Type: DefinitionRef { Definition.IsValueType: true } } }
-                    && field.Type is not ByRefRef && currentField(field)) return field;
-                value = field.Receiver is AddressValue address ? address.Target : field.Receiver;
-            }
-            return null;
-        }
+            ManagedAssignment assignment when ReadOnly(assignment.Value) => [assignment.Value],
+            ManagedBranch { Taken.Copies.Count: 0, Fallthrough.Copies.Count: 0 } branch when ReadOnly(branch.Condition) => [branch.Condition],
+            ManagedJump jump when jump.Edge.Copies.All(copy => ReadOnly(copy.Value)) => jump.Edge.Copies.Select(copy => copy.Value).ToArray(),
+            _ => [],
+        };
         foreach (var source in body.Blocks)
-        foreach (var original in source.Statements.OfType<ManagedAssignment>())
+        foreach (var original in source.Statements)
         {
             var firstIndex = blocks[source.Address].IndexOf(original);
-            if (firstIndex < 0 || Current(original.Value) is not { Receiver: AddressValue { Target: LocalValue receiver } } field) continue;
-            var uses = new List<(ulong Block, int Index, ManagedAssignment Read)>();
-            var address = source.Address;
-            var index = firstIndex;
-            var visited = new HashSet<ulong> { address };
-            while (true)
+            if (firstIndex < 0 || Reads(original).Select(Current).FirstOrDefault(f => f is not null)
+                is not { Receiver: AddressValue { Target: LocalValue receiver } } field) continue;
+            var uses = new List<(ulong Block, int Index, ManagedStatement Read)>();
+            var pending = new Stack<(ulong Address, int Index)>();
+            pending.Push((source.Address, firstIndex));
+            var visited = new HashSet<ulong>();
+            while (pending.TryPop(out var point))
             {
-                var statement = blocks[address][index];
-                if (statement is ManagedAssignment assignment && assignment.Target.Variable != receiver.Variable
-                    && ReadOnly(assignment.Value))
+                var (address, index) = point;
+                if (!visited.Add(address)) continue;
+                for (; index < blocks[address].Count; index++)
                 {
-                    if (Equals(Current(assignment.Value), field)) uses.Add((address, index, assignment));
-                    index++;
-                    if (index < blocks[address].Count) continue;
+                    var statement = blocks[address][index];
+                    if (statement is ManagedAssignment written && written.Target.Variable == receiver.Variable) break;
+                    if (Reads(statement).Any(value => Equals(Current(value), field))) uses.Add((address, index, statement));
+                    if (statement is ManagedAssignment assignment && assignment.Target.Variable != receiver.Variable
+                        && ReadOnly(assignment.Value))
+                    {
+                        continue;
+                    }
+                    var edges = statement switch
+                    {
+                        ManagedJump { Edge.Copies.Count: 0 } jump => new[] { jump.Edge },
+                        ManagedBranch { Taken.Copies.Count: 0, Fallthrough.Copies.Count: 0 } branch when ReadOnly(branch.Condition)
+                            => [branch.Taken, branch.Fallthrough],
+                        _ => [],
+                    };
+                    foreach (var edge in edges)
+                        if (incoming.GetValueOrDefault(edge.Target) is [var predecessor] && predecessor == address
+                            && !handlers.Contains(edge.Target) && SameRegion(source.Address, edge.Target)
+                            && blocks.TryGetValue(edge.Target, out var target) && target.Count != 0)
+                            pending.Push((edge.Target, 0));
+                    break;
                 }
-                else if (statement is ManagedJump { Edge: { Copies.Count: 0 } edge }
-                    && incoming.GetValueOrDefault(edge.Target) is [var predecessor] && predecessor == address
-                    && !handlers.Contains(edge.Target) && SameRegion(source.Address, edge.Target)
-                    && blocks.TryGetValue(edge.Target, out var target) && target.Count != 0 && visited.Add(edge.Target))
-                { address = edge.Target; index = 0; continue; }
-                break;
             }
             if (uses.Count < 2) continue;
             var snapshot = temporary(field);
             ManagedValue Replace(ManagedValue value) => Equals(value, field) ? snapshot : ManagedValues.Map(value, Replace);
-            foreach (var use in uses) blocks[use.Block][use.Index] = use.Read with { Value = Replace(use.Read.Value) };
+            foreach (var use in uses) blocks[use.Block][use.Index] = ManagedValues.Map(use.Read, Replace);
             blocks[source.Address].Insert(firstIndex, new ManagedAssignment(original.Address, snapshot, field));
         }
         return body with { Blocks = body.Blocks.Select(b => b with { Statements = blocks[b.Address] }).ToArray() };
