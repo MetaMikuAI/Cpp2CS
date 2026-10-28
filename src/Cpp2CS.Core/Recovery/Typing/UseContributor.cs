@@ -60,6 +60,11 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                 case Binary binary when context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
                     && binary.Op is BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor:
                     Hint(binary.Left, type, address, detail); Hint(binary.Right, type, address, detail); break;
+                case Binary binary when context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
+                    && binary.Op is BinOp.Shl or BinOp.LShr or BinOp.AShr
+                    && binary.Left.Width is 8 or 16 or 32 or 64 && binary.Right.Width is 8 or 16 or 32 or 64:
+                    Hint(binary.Left, Integer(binary.Left.Width, binary.Op == BinOp.AShr || binary.Op == BinOp.Shl && ManagedTypes.IsSigned(type)), address, detail);
+                    Hint(binary.Right, Integer(binary.Right.Width, false), address, detail); break;
             }
         }
         TypeRef Integer(int width, bool signed) => width == 1 ? context.Types.Boolean : context.Types.Integer(width, signed);

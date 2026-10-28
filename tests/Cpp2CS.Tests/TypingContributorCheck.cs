@@ -124,6 +124,20 @@ internal static class TypingContributorCheck
             var loop = new TypeEngine([new PhiContributor(), new UseContributor(input), new PhiUseContributor()]).Run(Context());
             a.True(loop.Converged && new[] { initial, index, next }.All(v => loop.Solution.GetValueOrDefault(v) is ManagedResult m && TypeSolver.Integral(types, m.Type)),
                 $"{width} 位边界检查为常量起始循环提供整数约束");
+            var count = V(13);
+            foreach (var operation in new[] { BinOp.Shl, BinOp.LShr, BinOp.AShr })
+            {
+                block.Statements[2] = new Call(0x1008, CallKind.Direct, Expr.C(0, 64))
+                { Op = new(OpKind.BoundsCheck, null), Arguments = [new Binary(operation, read, new Use(count, 32), width), Expr.C(3, width)] };
+                block.Statements.Add(new Define(0x1010, count, Expr.C(2, 64)));
+                var shifted = new TypeEngine([new PhiContributor(), new UseContributor(input), new PhiUseContributor()]).Run(Context());
+                a.True(shifted.Converged && new[] { initial, index, next, count }.All(v => shifted.Solution.GetValueOrDefault(v) is ManagedResult m && TypeSolver.Integral(types, m.Type)),
+                    $"{width} 位 {operation} 的整数用途穿过移位传到循环与移位量");
+                block.Statements[^1] = new Define(0x1010, count, new Load(Expr.C(0x100, 64), 32));
+                var unknownCount = new TypeEngine([new PhiContributor(), new UseContributor(input), new PhiUseContributor()]).Run(Context());
+                a.True(!unknownCount.Solution.ContainsKey(count), "移位用途不为未知加载猜类型");
+                block.Statements.RemoveAt(block.Statements.Count - 1);
+            }
             block.Statements.RemoveAt(2);
             var unproven = new TypeEngine([new PhiContributor(), new UseContributor(input), new PhiUseContributor()]).Run(Context());
             a.True(unproven.Converged && unproven.Solution.Count == 0, "无整数用途的循环不凭零初值猜类型");
