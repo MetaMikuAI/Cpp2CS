@@ -74,6 +74,7 @@ internal sealed partial class RecoveredForeach : IAstTransform
         foreach (var (original, replacement) in searches)
             if (replacement.Parent is not null) replacement.ReplaceWith(original);
         RecoverAdvanceResultLoops(rootNode);
+        var assignedReads = NormalizeAssignedCurrent(rootNode);
         RecoverCompleteLoops(rootNode);
         var normalized = NormalizeDirectLoops(rootNode);
         foreach (var loop in rootNode.Descendants.OfType<WhileStatement>().ToArray())
@@ -260,6 +261,12 @@ internal sealed partial class RecoveredForeach : IAstTransform
         RecoverMergedLoops(rootNode);
         RecoverNullableMergedLoops(rootNode);
         if (context?.TypeSystem is { } compilation) RecoverAny(rootNode, compilation);
+        foreach (var (read, copy, original) in assignedReads)
+            if (rootNode.Descendants.Contains(read))
+            {
+                ((AssignmentExpression)copy.Expression).Right.ReplaceWith(original);
+                read.Remove();
+            }
         foreach (var (declaration, replacement, original) in typedReads)
             if (rootNode.Descendants.Contains(declaration)) { replacement.ReplaceWith(original); declaration.Remove(); }
     }

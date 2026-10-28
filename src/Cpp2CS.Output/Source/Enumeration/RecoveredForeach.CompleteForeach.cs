@@ -106,7 +106,10 @@ internal sealed partial class RecoveredForeach
                 : !Enumerator(iteratorType).Disposable) continue;
             if (!conditionalInterface && iteratorType!.IsReferenceType == true && !NullableDispose(siblings[index + 1], enumerator.Identifier)
                 && catcher.Body!.Statements.FirstOrDefault() is not IfElseStatement) continue;
+            var exitDisposals = ExitDisposals(body, method, parent, guarded, enumerator.Identifier);
+            if (exitDisposals is null) continue;
             var removed = new List<Statement> { factory!, siblings[index + 1] };
+            removed.AddRange(exitDisposals);
             if (index + 2 < siblings.Length && siblings[index + 2] is ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign,
                 Left: var reset, Right: DefaultValueExpression } } && Name(reset, enumerator.Identifier)) removed.Add(siblings[index + 2]);
             var allowed = removed.SelectMany(s => s.Descendants).Concat(catcher.Descendants).Concat(guard?.Descendants ?? [])
@@ -115,7 +118,7 @@ internal sealed partial class RecoveredForeach
             var declarations = method.Descendants.OfType<VariableDeclarationStatement>().Where(d => d.Variables.Any(v => v.Name == enumerator.Identifier)).ToArray();
             if (declarations is not [var declaration] || declaration != factory && declaration.Variables.ToArray() is not [{ Initializer: DefaultValueExpression }]) continue;
             var labels = body.Descendants.OfType<LabelStatement>().Select(l => l.Label).ToHashSet();
-            if (body.Descendants.OfType<ReturnStatement>().Any() || body.Descendants.OfType<GotoStatement>().Any(j => j.Label is null || !labels.Contains(j.Label))
+            if (body.Descendants.OfType<ReturnStatement>().Any()
                 || method.Descendants.OfType<GotoStatement>().Any(j => j.Label is not null && labels.Contains(j.Label) && !body.Descendants.Contains(j))) continue;
             var content = (BlockStatement)body.Clone(); var item = element.Name;
             bool UsesElement(AstNode node) => node.DescendantsAndSelf.OfType<IdentifierExpression>().Any(id => id.Identifier == element.Name);
