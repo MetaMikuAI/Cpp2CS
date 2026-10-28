@@ -249,16 +249,17 @@ public sealed partial class MethodRecovery
 
         // ---------- 准备：签名、提升、L2 ----------
 
-        /// <summary>允许泛型类型的封闭实例（RecoverInstance）。</summary>
+        /// <summary>允许具体实参或已有引用布局见证的泛型实例（RecoverInstance）。</summary>
         public bool ClosedInstance { get; init; }
         public bool SharedDefinition { get; init; }
 
         private bool Prepare()
         {
             var definition = method.Method;
-            // 封闭实例：泛型类型与泛型方法的实参都是具体类型（引用类型实参的共享代码按 object 实例登记）。
+            // 依赖访问器可以沿用调用者的引用布局见证，保留其 T 身份；没有见证的开放参数仍拒绝。
             var closed = ClosedInstance && method.MethodArguments.Count == definition.GenericParameters.Count
-                && method.TypeArguments.Count == definition.Owner.GenericParameters.Count && method.TypeArguments.Concat(method.MethodArguments).All(a => a is DefinitionRef or ArrayRef);
+                && method.TypeArguments.Count == definition.Owner.GenericParameters.Count && method.TypeArguments.Concat(method.MethodArguments).All(a =>
+                    a is DefinitionRef or ArrayRef or GenericParameterRef { Binding: { Kind: NativeBindingKind.Reference, Entry: > 0 } });
             if (!closed && !SharedDefinition && (definition.GenericParameters.Count > 0 || definition.Owner.GenericParameters.Count > 0 || method.TypeArguments.Count > 0))
             {
                 Hole(entry, "泛型 方法或类型带泛型参数");
