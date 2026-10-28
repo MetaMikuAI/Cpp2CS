@@ -23,8 +23,8 @@ internal static class SourceForeachResultsCheck
             if (!emitted.Success) throw new InvalidOperationException(string.Join('\n', emitted.Diagnostics));
             return stream.ToArray();
         }
-        string[] modes = ["Valid", "OuterLocal", "CapturedSource", "CapturedTarget", "FactoryCopy", "Reused", "ObservedFactory", "PrefixCallback", "Find", "InterfaceFind", "OtherNullFailure"];
-        var methods = string.Join('\n', modes.Where(mode => mode is not ("Find" or "InterfaceFind" or "OtherNullFailure")).Select(mode => $$"""
+        string[] modes = ["Valid", "OuterLocal", "CapturedSource", "CapturedTarget", "FactoryCopy", "Reused", "ObservedFactory", "PrefixCallback", "Find", "InterfaceFind", "OtherNullFailure", "ExhaustedFind", "ExpressionFind"];
+        var methods = string.Join('\n', modes.Where(mode => mode is not ("Find" or "InterfaceFind" or "OtherNullFailure" or "ExhaustedFind" or "ExpressionFind")).Select(mode => $$"""
             public static int {{mode}}(Sequence sequence)
             {
                 int result = -7;
@@ -81,6 +81,28 @@ internal static class SourceForeachResultsCheck
                 return result;
             }
             """));
+        methods += string.Join('\n', new[] { "ExhaustedFind", "ExpressionFind" }.Select(mode => $$"""
+            public static int {{mode}}(Sequence sequence)
+            {
+                Sequence.Enumerator iterator = default;
+                iterator = sequence.GetEnumerator();
+                int result;
+                try
+                {
+                    while (true)
+                    {
+                        if (!iterator.MoveNext()) { result = 0; break; }
+                        int current = {{(mode == "ExpressionFind" ? "Identity(iterator.Current)" : "iterator.Current")}};
+                        if (current < 2) continue;
+                        result = current;
+                        break;
+                    }
+                }
+                catch (Exception) { iterator.Dispose(); throw; }
+                iterator.Dispose();
+                return result;
+            }
+            """));
         var inputSource = """
             using System;
             using System.Collections;
@@ -89,6 +111,7 @@ internal static class SourceForeachResultsCheck
             {
                 public static List<string> Trace;
                 public static int Failure;
+                public static int Identity(int value) { Trace.Add("I" + value); return value; }
                 public class Sequence : IEnumerable<int>
                 {
                     public int Count;
@@ -121,6 +144,7 @@ internal static class SourceForeachResultsCheck
                             "FactoryCopy" => FactoryCopy(sequence), "Reused" => Reused(sequence),
                             "ObservedFactory" => ObservedFactory(sequence), "PrefixCallback" => PrefixCallback(sequence),
                             "Find" => Find(sequence), "InterfaceFind" => InterfaceFind(sequence), "OtherNullFailure" => OtherNullFailure(sequence),
+                            "ExhaustedFind" => ExhaustedFind(sequence), "ExpressionFind" => ExpressionFind(sequence),
                             _ => throw new ArgumentException()
                         };
                         Trace.Add("R" + result);
@@ -140,7 +164,7 @@ internal static class SourceForeachResultsCheck
         var tree = CSharpSyntaxTree.ParseText(source).GetRoot();
         var a = new Assertions();
         foreach (var mode in modes)
-            a.Equal(mode is "Valid" or "FactoryCopy" or "Find" or "InterfaceFind" ? 1 : mode == "Reused" ? 2 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
+            a.Equal(mode is "Valid" or "FactoryCopy" or "Find" or "InterfaceFind" or "ExhaustedFind" or "ExpressionFind" ? 1 : mode == "Reused" ? 2 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
                 .DescendantNodes().OfType<ForEachStatementSyntax>().Count(), "仅局部且异常后不可观察的复制可延后：" + mode);
         var rebuilt = Compile(source, "ForeachResults.Rebuilt");
         Func<string, int, int, string> Observe(byte[] bytes) => System.Reflection.Assembly.Load(bytes).GetType("Probe")!.GetMethod("Observe")!

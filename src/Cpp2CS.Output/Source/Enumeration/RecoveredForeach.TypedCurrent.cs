@@ -25,8 +25,13 @@ internal sealed partial class RecoveredForeach
         var changed = new List<(VariableDeclarationStatement, IdentifierExpression, Expression)>();
         foreach (var loop in root.Descendants.OfType<WhileStatement>().ToArray())
         {
-            if (loop.Condition is not InvocationExpression { Target: MemberReferenceExpression { MemberName: "MoveNext", Target: IdentifierExpression iterator } }
-                || loop.EmbeddedStatement is not BlockStatement body || body.Statements.FirstOrDefault() is not { } first
+            if (loop.EmbeddedStatement is not BlockStatement body) continue;
+            var condition = loop.Condition;
+            if (condition is PrimitiveExpression { Value: true } && body.Statements.FirstOrDefault() is IfElseStatement
+                { FalseStatement: null, TrueStatement: BlockStatement positive } test)
+            { condition = test.Condition; body = positive; }
+            if (condition is not InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression { MemberName: "MoveNext", Target: IdentifierExpression iterator } }
+                || body.Statements.FirstOrDefault() is not { } first
                 || first.Descendants.OfType<MemberReferenceExpression>().Where(m => m.MemberName == "Current" && Name(m.Target, iterator.Identifier)).ToArray() is not [var read]
                 || CurrentByReference(read)
                 || loop.Ancestors.FirstOrDefault(n => n is MethodDeclaration or LambdaExpression or AnonymousMethodExpression) is not { } method) continue;

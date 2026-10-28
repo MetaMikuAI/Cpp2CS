@@ -7,6 +7,30 @@ namespace Cpp2CS.Output;
 
 internal sealed partial class RecoveredForeach
 {
+    // 耗尽检查在循环开头时，建立相同的正向分支视图；未恢复的循环原样还原。
+    private static List<(WhileStatement Original, WhileStatement Replacement)> NormalizeExhaustedResults(AstNode root)
+    {
+        var changed = new List<(WhileStatement, WhileStatement)>();
+        foreach (var loop in root.Descendants.OfType<WhileStatement>().ToArray())
+        {
+            if (loop.Condition is not PrimitiveExpression { Value: true } || loop.EmbeddedStatement is not BlockStatement body
+                || body.Statements.FirstOrDefault() is not IfElseStatement { FalseStatement: null,
+                    Condition: UnaryOperatorExpression { Operator: UnaryOperatorType.Not, Expression: InvocationExpression { Arguments.Count: 0,
+                        Target: MemberReferenceExpression { MemberName: "MoveNext", Target: IdentifierExpression } } advance },
+                    TrueStatement: BlockStatement exhausted }
+                || exhausted.Statements.LastOrDefault() is not BreakStatement) continue;
+            var positive = new BlockStatement();
+            foreach (var statement in body.Statements.Skip(1)) positive.Statements.Add(statement.Clone());
+            if (positive.Statements.LastOrDefault() is not (BreakStatement or ContinueStatement)) positive.Statements.Add(new ContinueStatement());
+            var content = new BlockStatement { new IfElseStatement(advance.Clone(), positive) };
+            foreach (var statement in exhausted.Statements) content.Statements.Add(statement.Clone());
+            var replacement = new WhileStatement(loop.Condition.Clone(), content);
+            loop.ReplaceWith(replacement);
+            changed.Add((loop, replacement));
+        }
+        return changed;
+    }
+
     // 耗尽路径只写结果常量；这些局部在元素处理期间仅写入，提前退出保持其最终值。
     private static void RecoverResultLoops(AstNode root)
     {

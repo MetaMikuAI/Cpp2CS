@@ -69,6 +69,7 @@ internal sealed partial class RecoveredForeach : IAstTransform
 
     public void Run(AstNode rootNode, TransformContext context)
     {
+        var exhaustedResults = NormalizeExhaustedResults(rootNode);
         var leadingReads = NormalizeLeadingCurrent(rootNode);
         RecoverSearchLoops(rootNode);
         var searches = NormalizeAdvanceSearch(rootNode);
@@ -271,5 +272,7 @@ internal sealed partial class RecoveredForeach : IAstTransform
             }
         foreach (var (declaration, replacement, original) in leadingReads)
             if (rootNode.Descendants.Contains(declaration)) { replacement.ReplaceWith(original); declaration.Remove(); }
+        foreach (var (original, replacement) in exhaustedResults)
+            if (rootNode.Descendants.Contains(replacement)) replacement.ReplaceWith(original);
     }
 }
