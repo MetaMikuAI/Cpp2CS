@@ -53,7 +53,7 @@ internal static class FloatScalarCheck
             new Ir.Convert(ConvKind.SignExtend, Expr.C(1, 32), 128),
             new Ir.Convert(ConvKind.ZeroExtend, Expr.C(1, 16), 128),
             new Intrinsic("dup", [Expr.C(1, 32)], 128),
-            new Ir.Convert(ConvKind.ZeroExtend, new Intrinsic("vdup.32", [Expr.C(1, 32)], 64), 128),
+            new Ir.Convert(ConvKind.ZeroExtend, new Intrinsic("vdup.32", [new Use(v, 32)], 64), 128),
         })
         {
             var block = new Block(0x1000) { Statements = [new Define(0x1000, v, original), new Return(0x1004) { Value = new Use(v, 32) }] };
@@ -91,6 +91,24 @@ internal static class FloatScalarCheck
         a.Equal(0, ReturnedPhi(0), "未知调用返回值不提供宽度证明");
         a.Equal(0, ReturnedPhi(64), "分支返回位宽不一致时拒绝");
         a.Equal(0, ReturnedPhi(32, 128), "汇合后仍读取高位时拒绝");
+        foreach (var laneWidth in new[] { 8, 16, 32, 64 })
+            foreach (var totalWidth in new[] { 64, 128 })
+                foreach (var bits in new ulong[] { 0, 1, ulong.MaxValue, 0x80000000, 0x7f800000, 0x7fc00123, 0x8000000000000000, 0x7ff0000000000000, 0x7ff8000000000123 })
+                {
+                    var duplicate = new Intrinsic($"vdup.{laneWidth}", [Expr.C(bits, laneWidth)], totalWidth);
+                    var expanded = ScalarVectorNarrowing.RepeatedConstant(duplicate)!;
+                    var evaluator = new Evaluator();
+                    a.Equal(evaluator.Eval(duplicate), evaluator.Eval(expanded), "常量复制的所有道逐位相同，包含负零、无穷和 NaN");
+                    a.True(evaluator.Failure is null && expanded.Width == totalWidth, "向量宽度与求值保持完整");
+                }
+        foreach (var rejected in new[]
+        {
+            new Intrinsic("vdup.32", [new Load(address, 32)], 128),
+            new Intrinsic("vdup.32", [new Use(v, 32)], 128),
+            new Intrinsic("vdup.32", [Expr.C(1, 64)], 128),
+            new Intrinsic("vdup.32", [Expr.C(1, 32)], 256),
+            new Intrinsic("vdup.24", [Expr.C(1, 24)], 128),
+        }) a.True(ScalarVectorNarrowing.RepeatedConstant(rejected) is null, "拒绝非恒定值、未知道宽与不匹配位宽");
         return a.Finish("float-unit");
     }
 }
