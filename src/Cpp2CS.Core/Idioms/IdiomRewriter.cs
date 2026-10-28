@@ -1084,13 +1084,14 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 if (normal.Length != 2 || normal[0] == normal[1]) continue;
                 for (var side = 0; side < 2; side++)
                 {
-                    // 两臂都跳到汇合点时，先越过没有活语句的跳过臂，形成标准的类初始化守卫。
+                    // 两臂都跳到汇合点时，先越过没有活语句的跳过臂，形成标准的元数据或类初始化守卫。
                     var skipped = normal[1 - side];
                     if (skipped.Predecessors.Count == 1 && !skipped.IsLandingPad && skipped.Statements.All(s => s is Nop or Jump)
                         && skipped.NormalSuccessors.ToArray() is [var merge] && merge != head
                         && Chain(normal[side], merge) is { Count: > 0 } guarded
-                        && guarded.SelectMany(b => b.Statements).OfType<Call>().ToArray() is [var initializer]
-                        && owner.HelperOf(initializer)?.Kind is HelperKind.ClassInit or HelperKind.InitializedTypeInfo)
+                        && guarded.SelectMany(b => b.Statements).OfType<Call>().ToArray() is { Length: > 0 } initializers
+                        && (initializers.All(c => owner.HelperOf(c)?.Kind == HelperKind.InitMetadata)
+                            || initializers is [var initializer] && owner.HelperOf(initializer)?.Kind is HelperKind.ClassInit or HelperKind.InitializedTypeInfo))
                     {
                         var targets = side == 0 ? new List<(Block, Block)> { (normal[0], head), (merge, skipped) }
                             : [(merge, skipped), (normal[1], head)];
