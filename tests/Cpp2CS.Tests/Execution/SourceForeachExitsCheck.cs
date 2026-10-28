@@ -23,13 +23,14 @@ internal static class SourceForeachExitsCheck
             if (!emitted.Success) throw new InvalidOperationException(string.Join('\n', emitted.Diagnostics));
             return stream.ToArray();
         }
-        string[] modes = ["Valid", "Captured", "Typed", "MissingCleanup", "SharedEntry", "Fallthrough"];
+        string[] modes = ["Valid", "Captured", "Typed", "NestedIf", "OuterFinally", "MissingCleanup", "SharedEntry", "Fallthrough"];
         var methods = string.Join('\n', modes.Select(mode => $$"""
             public static Entry {{mode}}({{(mode == "Typed" ? "ObjectSequence" : "Sequence")}} sequence, int key, bool bypass)
             {
                 {{(mode == "Typed" ? "ObjectSequence" : "Sequence")}}.Enumerator iterator = default;
                 Entry current = null;
                 {{(mode == "Captured" ? "Action observe = () => Trace.Add(\"O\" + (current?.Id.ToString() ?? \"null\"));" : "")}}
+                {{(mode == "NestedIf" ? "if (!bypass) { if (sequence != null) {" : mode == "OuterFinally" ? "try { if (!bypass) {" : "")}}
                 iterator = sequence.GetEnumerator();
                 try
                 {
@@ -42,6 +43,7 @@ internal static class SourceForeachExitsCheck
                 }
                 catch (Exception) { iterator.Dispose(); throw; }
                 iterator.Dispose();
+                {{(mode == "NestedIf" ? "} }" : mode == "OuterFinally" ? "} } finally { Trace.Add(\"F\"); }" : "")}}
                 Entry created = new Entry(99);
                 Entry result = created;
                 {{(mode == "SharedEntry" ? "if (bypass) { current = created; goto found; }" : "")}}
@@ -97,6 +99,8 @@ internal static class SourceForeachExitsCheck
                             "Valid" => Valid(sequence, key, bypass),
                             "Captured" => Captured(sequence, key, bypass),
                             "Typed" => Typed(new ObjectSequence { Values = input }, key, bypass),
+                            "NestedIf" => NestedIf(sequence, key, bypass),
+                            "OuterFinally" => OuterFinally(sequence, key, bypass),
                             "MissingCleanup" => MissingCleanup(sequence, key, bypass),
                             "SharedEntry" => SharedEntry(sequence, key, bypass),
                             "Fallthrough" => Fallthrough(sequence, key, bypass),
@@ -133,7 +137,7 @@ internal static class SourceForeachExitsCheck
         var tree = CSharpSyntaxTree.ParseText(source).GetRoot();
         var a = new Assertions();
         foreach (var mode in modes)
-            a.Equal(mode is "Valid" or "Captured" or "Typed" ? 1 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
+            a.Equal(mode is "Valid" or "Captured" or "Typed" or "NestedIf" ? 1 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
                 .DescendantNodes().OfType<ForEachStatementSyntax>().Count(), "只在外跳清理完整且独占时恢复 foreach");
         var rebuilt = Compile(source, "ForeachExits.Rebuilt");
         Func<string, int[], int, int, bool, string> Observe(byte[] bytes) => System.Reflection.Assembly.Load(bytes).GetType("Probe")!.GetMethod("Observe")!
@@ -148,6 +152,8 @@ internal static class SourceForeachExitsCheck
         a.Equal("G,M,C,D,I2,original", after("Valid", [2], 2, 0, false), "匹配分支先释放再初始化原对象");
         a.Equal("G,M,D,N99,I99,created", after("Valid", [], 2, 0, false), "耗尽分支先释放再创建对象");
         a.Equal("G,M,C,D,O2,I2,original", after("Captured", [2], 2, 0, false), "捕获局部仍收到实际元素");
+        a.Equal("G,M,C,D,I2,original", after("NestedIf", [2], 2, 0, false), "跨普通分支仍先释放再使用结果");
+        a.Equal("G,M,C,F,D,I2,original", after("OuterFinally", [2], 2, 0, false), "跨外层 finally 的释放顺序保持不变");
         return a.Finish("source-foreach-exits");
     }
 }

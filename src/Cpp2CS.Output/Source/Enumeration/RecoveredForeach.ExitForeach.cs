@@ -35,14 +35,22 @@ internal sealed partial class RecoveredForeach
     {
         var internalLabels = body.Descendants.OfType<LabelStatement>().Select(l => l.Label).ToHashSet();
         var jumps = body.Descendants.OfType<GotoStatement>().Where(j => j.Label is null || !internalLabels.Contains(j.Label)).ToArray();
-        var statements = parent.Statements.ToArray();
         var result = new List<Statement>();
         foreach (var group in jumps.GroupBy(j => j.Label))
         {
-            if (group.Key is null || parent.Statements.OfType<LabelStatement>().Where(l => l.Label == group.Key).ToArray() is not [var label]) return null;
+            if (group.Key is null || method.Descendants.OfType<LabelStatement>().Where(l => l.Label == group.Key).ToArray() is not [var label]
+                || label.Parent is not BlockStatement destination) return null;
+            AstNode anchor = guarded;
+            // 跨普通分支不改变清理顺序；跨异常区域或循环需要另行证明。
+            while (anchor.Parent != destination)
+            {
+                if (anchor.Parent is not (BlockStatement or IfElseStatement)) return null;
+                anchor = anchor.Parent;
+            }
+            var statements = destination.Statements.ToArray();
             var index = Array.IndexOf(statements, label);
             // 清理标签不能被正常分支顺落或其他路径跳入，否则移除它会改变释放次数。
-            if (index <= Array.IndexOf(statements, guarded) + 1 || index + 1 >= statements.Length
+            if (anchor is not Statement entry || index <= Array.IndexOf(statements, entry) + (destination == parent ? 1 : 0) || index + 1 >= statements.Length
                 || statements[index - 1] is not (GotoStatement or ReturnStatement or ThrowStatement)
                 || !Dispose(statements[index + 1], enumerator)
                 || method.Descendants.OfType<GotoStatement>().Any(j => j.Label == group.Key && !body.Descendants.Contains(j))) return null;
