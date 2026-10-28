@@ -60,7 +60,7 @@ internal sealed partial class RecoveredForeach : IAstTransform
         ParenthesizedExpression parentheses => FirstReceiver(parentheses.Expression, read),
         CastExpression cast => FirstReceiver(cast.Expression, read),
         BinaryOperatorExpression binary => FirstReceiver(binary.Left, read),
-        UnaryOperatorExpression { Operator: UnaryOperatorType.NullConditional or UnaryOperatorType.NullConditionalRewrap } conditional
+        UnaryOperatorExpression { Operator: UnaryOperatorType.NullConditional or UnaryOperatorType.NullConditionalRewrap or UnaryOperatorType.Not } conditional
             => FirstReceiver(conditional.Expression, read),
         _ => false,
     };
@@ -89,6 +89,7 @@ internal sealed partial class RecoveredForeach : IAstTransform
 
     public void Run(AstNode rootNode, TransformContext context)
     {
+        var splitCleanup = NormalizeSplitCleanup(rootNode);
         var finallyLoops = NormalizeFinallyLoops(rootNode);
         var currentPrefixes = NormalizeCurrentPrefixes(rootNode);
         var exhaustedResults = NormalizeExhaustedResults(rootNode);
@@ -101,6 +102,7 @@ internal sealed partial class RecoveredForeach : IAstTransform
         RecoverAdvanceResultLoops(rootNode);
         var assignedReads = NormalizeAssignedCurrent(rootNode);
         RecoverCompleteLoops(rootNode);
+        RestoreSplitCleanup(rootNode, splitCleanup);
         var normalized = NormalizeDirectLoops(rootNode);
         foreach (var loop in rootNode.Descendants.OfType<WhileStatement>().ToArray())
         {

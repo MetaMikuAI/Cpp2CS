@@ -62,6 +62,7 @@ internal sealed partial class RecoveredForeach
                     when target.GetILVariable() is { Type.Kind: not TypeKind.ByReference } => assigned,
                 ExpressionStatement statement => statement.Expression,
                 YieldReturnStatement statement => statement.Expression,
+                IfElseStatement statement => statement.Condition,
                 VariableDeclarationStatement initialized when initialized.Variables.ToArray() is [var variable] => variable.Initializer,
                 _ => null,
             };

@@ -23,8 +23,8 @@ internal static class SourceForeachExitsCheck
             if (!emitted.Success) throw new InvalidOperationException(string.Join('\n', emitted.Diagnostics));
             return stream.ToArray();
         }
-        string[] modes = ["Valid", "Captured", "Typed", "LeadingMember", "AssignedMember", "AssignmentTarget", "NestedIf", "OuterFinally", "MissingCleanup", "SharedEntry", "Fallthrough"];
-        var methods = string.Join('\n', modes.Select(mode => $$"""
+        string[] modes = ["Valid", "Captured", "Typed", "LeadingMember", "AssignedMember", "AssignmentTarget", "NestedIf", "OuterFinally", "MissingCleanup", "SharedEntry", "Fallthrough", "Split", "SplitRejected"];
+        var methods = string.Join('\n', modes.Where(mode => !mode.StartsWith("Split", StringComparison.Ordinal)).Select(mode => $$"""
             public static Entry {{mode}}({{(mode == "Typed" ? "ObjectSequence" : "Sequence")}} sequence, int key, bool bypass)
             {
                 {{(mode == "Typed" ? "ObjectSequence" : "Sequence")}}.Enumerator iterator = default;
@@ -58,6 +58,49 @@ internal static class SourceForeachExitsCheck
                 return result;
             }
             """));
+        methods += string.Join('\n', new[] { "Split", "SplitRejected" }.Select(mode => $$"""
+            public static Entry {{mode}}(Sequence sequence, int key, bool bypass)
+            {
+                Sequence.Enumerator iterator = default;
+                Entry current = null;
+                if (bypass)
+                {
+                    iterator = sequence.GetEnumerator();
+                    try
+                    {
+                        while (iterator.MoveNext())
+                        {
+                            current = iterator.Current;
+                            if (current.Id != key) continue;
+                            goto found;
+                        }
+                    }
+                    catch (Exception) { iterator.Dispose(); throw; }
+                }
+                else
+                {
+                    iterator = sequence.Other().GetEnumerator();
+                    try
+                    {
+                        while (iterator.MoveNext())
+                        {
+                            {{(mode == "SplitRejected" ? "Trace.Add(\"B\");" : "")}}
+                            current = iterator.Current;
+                            if (current.Id < key) continue;
+                            if (current.Id != key) continue;
+                            goto found;
+                        }
+                    }
+                    catch (Exception) { iterator.Dispose(); throw; }
+                }
+                iterator.Dispose();
+                return new Entry(99);
+                found:
+                iterator.Dispose();
+                current.Initialize();
+                return current;
+            }
+            """));
         var inputSource = """
             using System;
             using System.Collections;
@@ -80,6 +123,7 @@ internal static class SourceForeachExitsCheck
                 public class Sequence
                 {
                     public Entry[] Values;
+                    public Sequence Other() { Trace.Add("O"); return this; }
                     public Enumerator GetEnumerator() { Trace.Add("G"); return new Enumerator { Values = Values, Index = -1 }; }
                     public struct Enumerator : IEnumerator<Entry>
                     {
@@ -112,6 +156,8 @@ internal static class SourceForeachExitsCheck
                             "MissingCleanup" => MissingCleanup(sequence, key, bypass),
                             "SharedEntry" => SharedEntry(sequence, key, bypass),
                             "Fallthrough" => Fallthrough(sequence, key, bypass),
+                            "Split" => Split(sequence, key, bypass),
+                            "SplitRejected" => SplitRejected(sequence, key, bypass),
                             _ => throw new NotSupportedException()
                         };
                         Trace.Add(Array.IndexOf(input, result) >= 0 ? "original" : "created");
@@ -145,7 +191,7 @@ internal static class SourceForeachExitsCheck
         var tree = CSharpSyntaxTree.ParseText(source).GetRoot();
         var a = new Assertions();
         foreach (var mode in modes)
-            a.Equal(mode is "Valid" or "Captured" or "Typed" or "LeadingMember" or "AssignedMember" or "NestedIf" ? 1 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
+            a.Equal(mode == "Split" ? 2 : mode is "Valid" or "Captured" or "Typed" or "LeadingMember" or "AssignedMember" or "NestedIf" ? 1 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
                 .DescendantNodes().OfType<ForEachStatementSyntax>().Count(), "只在外跳清理完整且独占时恢复 foreach");
         var rebuilt = Compile(source, "ForeachExits.Rebuilt");
         Func<string, int[], int, int, bool, string> Observe(byte[] bytes) => System.Reflection.Assembly.Load(bytes).GetType("Probe")!.GetMethod("Observe")!
