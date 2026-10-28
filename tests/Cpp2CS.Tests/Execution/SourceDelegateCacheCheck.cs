@@ -34,6 +34,8 @@ internal static class SourceDelegateCacheCheck
                 public static Func<int, int> Transform() => value => value + 1;
                 public static Func<T, T> Identity<T>() => value => value;
                 public static int[] Project(int[] values) => values.Select(value => value * 3).ToArray();
+                public static int[] Groups(int[] values) => values.GroupBy(value => value % 3).Select(group => group.Sum()).ToArray();
+                public static int[] Filter(int[] values) => values.Where(value => value > 0).Select(value => value + 4).ToArray();
             }
             """, "DelegateCache.Input");
         var a = new Assertions();
@@ -42,7 +44,7 @@ internal static class SourceDelegateCacheCheck
             using var module = ModuleDefinition.ReadModule(new MemoryStream(bytes));
             var owner = module.GetType("Probe");
             var cache = owner.NestedTypes.Single(t => t.Name == "<>c");
-            foreach (var method in owner.Methods.Where(m => m.Name is "Transform" or "Project" or "Identity"))
+            foreach (var method in owner.Methods.Where(m => m.Name is "Transform" or "Project" or "Identity" or "Groups" or "Filter"))
             {
                 var field = (FieldReference)method.Body.Instructions.First(i => i.OpCode == OpCodes.Ldsfld
                     && ((FieldReference)i.Operand).Name.StartsWith("<>9__", StringComparison.Ordinal)).Operand;
@@ -63,6 +65,8 @@ internal static class SourceDelegateCacheCheck
             File.WriteAllText(Path.ChangeExtension(input, ".cs"), source);
             a.Equal(sideEffect, source.Contains("_003C_003Ec", StringComparison.Ordinal), "只清除初始化无副作用且全部展开的缓存类");
             a.Equal(sideEffect, source.Contains("_ = _003C_003Ec", StringComparison.Ordinal), "有静态初始化副作用的读取必须保留");
+            a.True(source.Contains("group value by", StringComparison.Ordinal) && source.Contains("where value > 0", StringComparison.Ordinal),
+                "分组和筛选确实转换为查询语法");
             var rebuilt = Compile(source, sideEffect ? "DelegateCache.Effect.Rebuilt" : "DelegateCache.Pure.Rebuilt");
             foreach (var assembly in new[] { File.ReadAllBytes(input), rebuilt })
             {
@@ -70,10 +74,14 @@ internal static class SourceDelegateCacheCheck
                 var factory = type.GetMethod("Transform")!.CreateDelegate<Func<Func<int, int>>>();
                 var project = type.GetMethod("Project")!.CreateDelegate<Func<int[], int[]>>();
                 var identity = type.GetMethod("Identity")!.MakeGenericMethod(typeof(object)).CreateDelegate<Func<Func<object, object>>>();
+                var groups = type.GetMethod("Groups")!.CreateDelegate<Func<int[], int[]>>();
+                var filter = type.GetMethod("Filter")!.CreateDelegate<Func<int[], int[]>>();
                 var instance = new object();
                 a.True(ReferenceEquals(instance, identity()(instance)) && identity()(null!) is null, "泛型方法缓存保持实例身份和 null");
                 a.True(factory()(7) == 8 && factory()(-2) == -1, "委托主体与重复调用结果保持");
                 a.True(project([1, -2, 0]).SequenceEqual([3, -6, 0]) && project([]).Length == 0, "枚举与空集合结果保持");
+                a.True(groups([1, 4, 2, 3]).SequenceEqual([5, 2, 3]) && groups([]).Length == 0, "分组顺序与分组内聚合保持");
+                a.True(filter([-2, 0, 3, 1]).SequenceEqual([7, 5]), "筛选与投影的查询方法保持");
                 a.Equal(sideEffect ? 1 : 0, (int)type.GetField("Visits")!.GetValue(null)!, "静态初始化次数保持");
             }
         }

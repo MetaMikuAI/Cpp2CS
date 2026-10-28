@@ -84,7 +84,7 @@ public static partial class Decompilation
 
             var expanded = rootNode.Descendants.Where(n => n is LambdaExpression or AnonymousMethodExpression)
                 .SelectMany(n => n.Annotations.OfType<ILFunction>()).Where(f => f.Method is not null)
-                .Select(f => f.Method!.MemberDefinition).ToHashSet();
+                .Select(f => f.Method!.MemberDefinition).Concat(rootNode.Annotation<ExpandedLambdaOrigins>()?.Methods ?? Array.Empty<IMember>()).ToHashSet();
             // 缓存类仅初始化空实例和委托字段；有显式构造逻辑或未展开方法时保留读取。
             var caches = rootNode.Descendants.OfType<TypeDeclaration>().Where(type =>
                 type.Parent is TypeDeclaration && type.Modifiers.HasFlag(Modifiers.Private)
