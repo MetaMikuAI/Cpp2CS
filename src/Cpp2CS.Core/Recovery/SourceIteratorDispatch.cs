@@ -13,6 +13,7 @@ internal static class SourceIteratorDispatch
             || !method.Owner.Interfaces.OfType<DefinitionRef>().Any(t => t.Definition.FullName == "System.Collections.IEnumerator")
             || !method.Owner.CustomAttributes.Any(a => a.Constructor.Owner.FullName == "System.Runtime.CompilerServices.CompilerGeneratedAttribute")) return body;
         if (method.Name.StartsWith("<>m__Finally", StringComparison.Ordinal)) return CleanupState(body);
+        if (method.Name is "Dispose" or "System.IDisposable.Dispose") return SourceIteratorDispose.Rewrite(body);
         if (method.Name != "MoveNext") return body;
         var blocks = body.Blocks.ToDictionary(b => b.Address);
         var state = body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>().Where(a => a.Value is
