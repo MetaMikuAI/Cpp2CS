@@ -58,8 +58,7 @@ internal static class RecoveryCensus
                 Arm64Lifter.Lift(pc, facts.Code.Word(pc)!.Value, statements);
                 var operations = statements.OfType<Assign>().SelectMany(s => ExprMap.Walk(s.Value)).Select(e => e switch
                 {
-                    Binary { Op: BinOp.FMin or BinOp.FMax or BinOp.SDiv or BinOp.UDiv or BinOp.Ror or BinOp.MulHighS or BinOp.MulHighU } b => b.Op.ToString(),
-                    Intrinsic { Name: "fminnm" or "fmaxnm" } i => i.Name,
+                    Binary { Op: BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber or BinOp.SDiv or BinOp.UDiv or BinOp.Ror or BinOp.MulHighS or BinOp.MulHighU } b => b.Op.ToString(),
                     _ => null,
                 }).OfType<string>().Distinct();
                 foreach (var operation in operations)

@@ -1,4 +1,5 @@
 using Cpp2CS.Ir;
+using Cpp2CS.Arm64;
 using Cpp2CS.Output;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
@@ -19,7 +20,7 @@ internal static class NativeArithmeticCheck
         static ulong?[] Constants(BinOp op) => op is BinOp.SDiv or BinOp.UDiv ? [null, 0, ulong.MaxValue, 7] : [null];
         static string Name(BinOp op, int width, ulong? constant) => $"{op}{width}_{constant?.ToString() ?? "dynamic"}";
         foreach (var width in new[] { 32, 64 })
-            foreach (var op in new[] { BinOp.FMin, BinOp.FMax, BinOp.SDiv, BinOp.UDiv })
+            foreach (var op in new[] { BinOp.FMin, BinOp.FMax, BinOp.FMinNumber, BinOp.FMaxNumber, BinOp.SDiv, BinOp.UDiv })
             foreach (var constant in Constants(op))
             {
                 var integer = width == 32 ? module.TypeSystem.UInt32 : module.TypeSystem.UInt64;
@@ -31,7 +32,7 @@ internal static class NativeArithmeticCheck
                 var il = method.Body.GetILProcessor();
                 foreach (var parameter in method.Parameters)
                 {
-                    if (op is BinOp.FMin or BinOp.FMax) { il.Emit(OpCodes.Ldarga, parameter); il.Emit(OpCodes.Ldobj, floating); }
+                    if (op is BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber) { il.Emit(OpCodes.Ldarga, parameter); il.Emit(OpCodes.Ldobj, floating); }
                     else if (parameter.Index == 1 && constant is { } value)
                     {
                         if (width == 32) il.Emit(OpCodes.Ldc_I4, unchecked((int)value));
@@ -42,7 +43,7 @@ internal static class NativeArithmeticCheck
                 NativeArithmetic.Emit(il, op, width, rightConstant: constant);
                 if (constant == 7) assertions.True(!method.Body.Instructions.Any(i => i.OpCode.FlowControl == FlowControl.Cond_Branch),
                     "安全常量除数直接写出 div，不引入保护分支");
-                if (op is BinOp.FMin or BinOp.FMax)
+                if (op is BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber)
                 {
                     var result = new VariableDefinition(floating); method.Body.Variables.Add(result);
                     il.Emit(OpCodes.Stloc, result); il.Emit(OpCodes.Ldloca, result); il.Emit(OpCodes.Ldobj, integer);
@@ -54,7 +55,7 @@ internal static class NativeArithmeticCheck
         var loaded = System.Reflection.Assembly.Load(stream.ToArray()).GetType("Tests.Arithmetic")!;
         ulong pc = 0x1000;
         foreach (var width in new[] { 32, 64 })
-            foreach (var op in new[] { BinOp.FMin, BinOp.FMax, BinOp.SDiv, BinOp.UDiv })
+            foreach (var op in new[] { BinOp.FMin, BinOp.FMax, BinOp.FMinNumber, BinOp.FMaxNumber, BinOp.SDiv, BinOp.UDiv })
             foreach (var constant in Constants(op))
             {
                 var method = loaded.GetMethod(Name(op, width, constant))!;
@@ -65,11 +66,14 @@ internal static class NativeArithmeticCheck
                     invoke = (x, y) => function((uint)x, (uint)y);
                 }
                 else invoke = method.CreateDelegate<Func<ulong, ulong, ulong>>();
-                var fp = op is BinOp.FMin or BinOp.FMax;
-                uint word = op switch { BinOp.FMin => 0x1e215800, BinOp.FMax => 0x1e214800, BinOp.SDiv => 0x1ac10c00, _ => 0x1ac10800 };
+                var fp = op is BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber;
+                uint word = op switch { BinOp.FMin => 0x1e215800, BinOp.FMax => 0x1e214800,
+                    BinOp.FMinNumber => 0x1e217800, BinOp.FMaxNumber => 0x1e216800, BinOp.SDiv => 0x1ac10c00, _ => 0x1ac10800 };
                 if (width == 64) word |= fp ? 1u << 22 : 1u << 31;
                 pc += 4;
                 arm.Write(pc, BitConverter.GetBytes(word));
+                var lifted = new List<Stmt>();
+                Arm64Lifter.Lift(pc, word, lifted);
                 var inputs = width == 32
                     ? new ulong[] { 0, 1, 0xffffffff, 0x80000000, 0x7fffffff, 3, 7, 0xfffffff9, 0x3f800000, 0xbf800000, 0x7f800000, 0xff800000, 0x7fc01234, 0xffc05678, 0x7f801234, 0xff805678, 0x00800000, 0x007fffff }
                     : new ulong[] { 0, 1, ulong.MaxValue, 0x8000000000000000, 0x7fffffffffffffff, 3, 7, 0xfffffffffffffff9, 0x3ff0000000000000, 0xbff0000000000000, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000012345678, 0xfff8000056781234, 0x7ff0000012345678, 0xfff0000056781234, 0x0010000000000000, 0x000fffffffffffff };
@@ -84,6 +88,13 @@ internal static class NativeArithmeticCheck
                     var error = arm.Start(pc, 1);
                     if (error != 0) throw new InvalidOperationException(Unicorn.Error(error));
                     assertions.Equal(arm.Reg(first) & Expr.Mask(width), invoke(x, y), $"{op}{width} 0x{x:x}, 0x{y:x}");
+                    var evaluator = new Evaluator();
+                    var destination = fp ? Storage.Vec(0) : Storage.Gpr(0);
+                    evaluator.Registers[destination] = x;
+                    evaluator.Registers[fp ? Storage.Vec(1) : Storage.Gpr(1)] = y;
+                    evaluator.Run(lifted, pc, pc + 4);
+                    assertions.True(evaluator.Failure is null, "原指令提升结果可求值");
+                    assertions.Equal((UInt128)(arm.Reg(first) & Expr.Mask(width)), evaluator.Get(destination), $"提升 {op}{width} 0x{x:x}, 0x{y:x}");
                 }
             }
         return assertions.Finish("native-arithmetic");

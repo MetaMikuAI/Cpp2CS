@@ -144,9 +144,9 @@ public sealed partial class BodyEmitter
 
     private void Binary(BinaryValue b)
     {
-        if (b.Op is BinOp.FMin or BinOp.FMax or BinOp.SDiv or BinOp.UDiv)
+        if (b.Op is BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber or BinOp.SDiv or BinOp.UDiv)
         {
-            if (b.Op is BinOp.FMin or BinOp.FMax) { Floating(b.Left); Floating(b.Right); }
+            if (b.Op is BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber) { Floating(b.Left); Floating(b.Right); }
             else { Integer(b.Left, b.Op == BinOp.SDiv); Integer(b.Right, b.Op == BinOp.SDiv); }
             NativeArithmetic.Emit(il, b.Op, b.Width, name => TypeReference(types.Corlib(name)), name => MethodReference(
                 types.CorlibMethod("System.BitConverter", name, name switch

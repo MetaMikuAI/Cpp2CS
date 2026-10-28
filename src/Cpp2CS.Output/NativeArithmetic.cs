@@ -92,7 +92,9 @@ public static class NativeArithmetic
             il.Append(done);
             return;
         }
-        if (operation is not (BinOp.FMin or BinOp.FMax)) throw new ArgumentOutOfRangeException(nameof(operation));
+        if (operation is not (BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber)) throw new ArgumentOutOfRangeException(nameof(operation));
+        var minimum = operation is BinOp.FMin or BinOp.FMinNumber;
+        var numberPreferred = operation is BinOp.FMinNumber or BinOp.FMaxNumber;
         var x = Local(floating); var y = Local(floating);
         var xb = Local(integer); var yb = Local(integer);
         MethodReference ConvertBits(bool toInteger)
@@ -111,7 +113,7 @@ public static class NativeArithmetic
         il.Emit(OpCodes.Ldloc, x); il.Emit(OpCodes.Ldloc, y); il.Emit(OpCodes.Ceq); il.Emit(OpCodes.Brfalse, unequal);
         // 相等的有限数位型相同；对 ±0，min 取符号位 OR，max 取 AND。
         il.Emit(OpCodes.Ldloc, xb); il.Emit(OpCodes.Ldloc, yb);
-        il.Emit(operation == BinOp.FMin ? OpCodes.Or : OpCodes.And);
+        il.Emit(minimum ? OpCodes.Or : OpCodes.And);
         Result(); il.Emit(OpCodes.Br, done); il.Append(unequal);
         var absolute = width == 32 ? 0x7fffffffUL : 0x7fffffffffffffffUL;
         var infinity = width == 32 ? 0x7f800000UL : 0x7ff0000000000000UL;
@@ -123,11 +125,19 @@ public static class NativeArithmetic
                 var next = Instruction.Create(OpCodes.Nop);
                 il.Emit(OpCodes.Ldloc, bits); Bits(absolute); il.Emit(OpCodes.And); Bits(infinity); il.Emit(OpCodes.Cgt_Un); il.Emit(OpCodes.Brfalse, next);
                 if (signaling) { il.Emit(OpCodes.Ldloc, bits); Bits(quiet); il.Emit(OpCodes.And); il.Emit(OpCodes.Brtrue, next); }
+                else if (numberPreferred)
+                {
+                    // 两侧 sNaN 已排除；仅一侧 qNaN 时返回另一侧数值。
+                    var bothNaN = Instruction.Create(OpCodes.Nop);
+                    var other = bits == xb ? yb : xb;
+                    il.Emit(OpCodes.Ldloc, other); Bits(absolute); il.Emit(OpCodes.And); Bits(infinity); il.Emit(OpCodes.Cgt_Un); il.Emit(OpCodes.Brtrue, bothNaN);
+                    il.Emit(OpCodes.Ldloc, other); Result(); il.Emit(OpCodes.Br, done); il.Append(bothNaN);
+                }
                 il.Emit(OpCodes.Ldloc, bits); Bits(quiet); il.Emit(OpCodes.Or); Result(); il.Emit(OpCodes.Br, done); il.Append(next);
             }
         var second = Instruction.Create(OpCodes.Nop);
         il.Emit(OpCodes.Ldloc, x); il.Emit(OpCodes.Ldloc, y);
-        il.Emit(operation == BinOp.FMin ? OpCodes.Clt : OpCodes.Cgt); il.Emit(OpCodes.Brfalse, second);
+        il.Emit(minimum ? OpCodes.Clt : OpCodes.Cgt); il.Emit(OpCodes.Brfalse, second);
         il.Emit(OpCodes.Ldloc, x); il.Emit(OpCodes.Br, done); il.Append(second); il.Emit(OpCodes.Ldloc, y); il.Append(done);
         void Result() => il.Emit(OpCodes.Call, ConvertBits(false));
     }

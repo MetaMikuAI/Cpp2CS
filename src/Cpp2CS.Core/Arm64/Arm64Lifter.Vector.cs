@@ -145,8 +145,8 @@ public static partial class Arm64Lifter
                 (true, true, 0x1A) => i => new Unary(UnOp.FAbs, FloatLane(BinOp.FSub, N(i), M(i)), esize),
                 (false, false, 0x1E) => i => FloatLane(BinOp.FMax, N(i), M(i)),
                 (false, true, 0x1E) => i => FloatLane(BinOp.FMin, N(i), M(i)),
-                (false, false, 0x18) => i => new Intrinsic("fmaxnm", [N(i), M(i)], esize),
-                (false, true, 0x18) => i => new Intrinsic("fminnm", [N(i), M(i)], esize),
+                (false, false, 0x18) => i => FloatLane(BinOp.FMaxNumber, N(i), M(i)),
+                (false, true, 0x18) => i => FloatLane(BinOp.FMinNumber, N(i), M(i)),
                 (false, false, 0x1C) => i => AllOnes(new Compare(Cond.FEq, N(i), M(i)), esize),
                 (true, false, 0x1C) => i => AllOnes(new Compare(Cond.FGe, N(i), M(i)), esize),
                 (true, true, 0x1C) => i => AllOnes(new Compare(Cond.FGt, N(i), M(i)), esize),
@@ -323,7 +323,7 @@ public static partial class Arm64Lifter
                     SetV(Rd, FloatLane(size < 2 ? BinOp.FMax : BinOp.FMin, First(fsize), Second(fsize)));
                     return;
                 case (true, 0x0C):
-                    SetV(Rd, new Intrinsic(size < 2 ? "fmaxnm" : "fminnm", [First(fsize), Second(fsize)], fsize));
+                    SetV(Rd, FloatLane(size < 2 ? BinOp.FMaxNumber : BinOp.FMinNumber, First(fsize), Second(fsize)));
                     return;
                 default:
                     Unsupported("simd.scalar.pairwise");

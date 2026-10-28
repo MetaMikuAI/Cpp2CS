@@ -30,7 +30,7 @@ internal sealed class FloatContributor(TypingInputs input) : ITypeContributor
             foreach (var e in ExprMap.Operands(statement).SelectMany(ExprMap.Walk))
                 switch (e)
                 {
-                    case Binary b when b.Width is 32 or 64 && b.Op is BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv or BinOp.FMin or BinOp.FMax:
+                    case Binary b when b.Width is 32 or 64 && b.Op is BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv or BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber:
                         yield return (b.Left, Floating(b.Width), statement.Address, b.Op.ToString());
                         yield return (b.Right, Floating(b.Width), statement.Address, b.Op.ToString()); break;
                     case Unary u when u.Width is 32 or 64 && u.Op is UnOp.FNeg or UnOp.FAbs or UnOp.FSqrt or UnOp.FFloor or UnOp.FCeil or UnOp.FTrunc or UnOp.FRoundEven or UnOp.FRoundAway or UnOp.FRoundCurrent:

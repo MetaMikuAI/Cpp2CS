@@ -57,8 +57,8 @@ public static partial class Arm64Lifter
                     3 => Op(BinOp.FSub, left, right),
                     4 => Op(BinOp.FMax, left, right),
                     5 => Op(BinOp.FMin, left, right),
-                    6 => new Intrinsic("fmaxnm", [left, right], width),
-                    7 => new Intrinsic("fminnm", [left, right], width),
+                    6 => Op(BinOp.FMaxNumber, left, right),
+                    7 => Op(BinOp.FMinNumber, left, right),
                     8 => new Unary(UnOp.FNeg, Op(BinOp.FMul, left, right), width),
                     _ => null,
                 };

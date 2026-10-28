@@ -141,8 +141,6 @@ public sealed class Evaluator
                 for (var i = 0; i < intrinsic.Width; i += size) result |= element << i;
                 return result;
             }
-            case "fmaxnm" or "fminnm":
-                return FloatBinary(intrinsic.Name == "fmaxnm" ? BinOp.FMax : BinOp.FMin, Eval(args[0]), Eval(args[1]), intrinsic.Width, numberPreferred: true);
             default:
                 return Fail(intrinsic.Name);
         }
@@ -258,19 +256,16 @@ public sealed class Evaluator
             }
             case BinOp.MulHighU: return ((UInt128)(ulong)a * (ulong)b) >> 64;
             case BinOp.MulHighS: return (UInt128)(ulong)(long)(((Int128)(long)(ulong)a * (long)(ulong)b) >> 64);
-            default: return FloatBinary(binary.Op, a, b, width, numberPreferred: false);
+            default: return FloatBinary(binary.Op, a, b, width);
         }
     }
 
-    private UInt128 FloatBinary(BinOp op, UInt128 a, UInt128 b, int width, bool numberPreferred)
+    private UInt128 FloatBinary(BinOp op, UInt128 a, UInt128 b, int width)
     {
+        if (op is BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber)
+            return FloatExtremum(op, (ulong)a, (ulong)b, width);
         var x = ToDouble(a, width);
         var y = ToDouble(b, width);
-        if (numberPreferred)
-        {
-            if (double.IsNaN(x) && !double.IsNaN(y)) x = y;
-            if (double.IsNaN(y) && !double.IsNaN(x)) y = x;
-        }
         if (width == 32)
         {
             var (fx, fy) = ((float)x, (float)y);
@@ -280,8 +275,6 @@ public sealed class Evaluator
                 BinOp.FSub => fx - fy,
                 BinOp.FMul => fx * fy,
                 BinOp.FDiv => fx / fy,
-                BinOp.FMax => MathF.Max(fx, fy),
-                BinOp.FMin => MathF.Min(fx, fy),
                 _ => (float)Fail(op.ToString()),
             };
             if (float.IsNaN(r) && !double.IsNaN(x) && !double.IsNaN(y)) return DefaultNaN(32);
@@ -294,12 +287,34 @@ public sealed class Evaluator
             BinOp.FSub => x - y,
             BinOp.FMul => x * y,
             BinOp.FDiv => x / y,
-            BinOp.FMax => Math.Max(x, y),
-            BinOp.FMin => Math.Min(x, y),
             _ => (double)Fail(op.ToString()),
         };
         if (double.IsNaN(result) && !double.IsNaN(x) && !double.IsNaN(y)) return DefaultNaN(64);
         return BitConverter.DoubleToUInt64Bits(result);
+    }
+
+    private UInt128 FloatExtremum(BinOp op, ulong a, ulong b, int width)
+    {
+        if (width is not (32 or 64)) return Fail("float" + width);
+        var absolute = width == 32 ? 0x7fffffffUL : 0x7fffffffffffffffUL;
+        var infinity = width == 32 ? 0x7f800000UL : 0x7ff0000000000000UL;
+        var quiet = width == 32 ? 0x00400000UL : 0x0008000000000000UL;
+        bool NaN(ulong bits) => (bits & absolute) > infinity;
+        // 先处理 sNaN，再处理 qNaN，避免宿主浮点转换提前改变载荷。
+        if (NaN(a) && (a & quiet) == 0) return a | quiet;
+        if (NaN(b) && (b & quiet) == 0) return b | quiet;
+        if (op is BinOp.FMinNumber or BinOp.FMaxNumber)
+        {
+            if (NaN(a) && !NaN(b)) return b;
+            if (NaN(b) && !NaN(a)) return a;
+        }
+        if (NaN(a)) return a | quiet;
+        if (NaN(b)) return b | quiet;
+        var minimum = op is BinOp.FMin or BinOp.FMinNumber;
+        var x = ToDouble(a, width);
+        var y = ToDouble(b, width);
+        if (x == y) return minimum ? a | b : a & b;
+        return (minimum ? x < y : x > y) ? a : b;
     }
 
     private double ToDouble(UInt128 bits, int width) => width switch

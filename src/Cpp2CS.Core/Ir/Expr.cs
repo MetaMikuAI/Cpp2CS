@@ -5,6 +5,8 @@ public enum BinOp : byte
     Add, Sub, Mul, SDiv, UDiv, SRem, URem, And, Or, Xor, Shl, LShr, AShr, Ror,
     MulHighS, MulHighU,
     FAdd, FSub, FMul, FDiv, FMin, FMax,
+    /// <summary>单侧 quiet NaN 时取数值；signaling NaN 仍优先传播。</summary>
+    FMinNumber, FMaxNumber,
 }
 
 public enum UnOp : byte

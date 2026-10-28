@@ -1304,7 +1304,7 @@ public sealed partial class MethodRecovery
                 return Recover(new Binary(BinOp.Or, new Binary(BinOp.LShr, b.Left, shift, b.Width),
                     new Binary(BinOp.Shl, b.Left, opposite, b.Width), b.Width), null);
             }
-            if (b.Op is BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv or BinOp.FMin or BinOp.FMax)
+            if (b.Op is BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv or BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber)
             {
                 if (b.Width is not (32 or 64)) return Fail(0, $"运算 {b.Op} 的浮点宽度 {b.Width} 尚未支持");
                 var floating = b.Width == 32 ? types.Single : types.Double;
