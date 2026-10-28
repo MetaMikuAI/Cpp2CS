@@ -22,6 +22,9 @@ internal static class SourceQualityCheck
                 ["escapedOpen"] = identifiers.Sum(s => s.Split("_003C", StringSplitOptions.None).Length - 1),
                 ["escapedClose"] = identifiers.Sum(s => s.Split("_003E", StringSplitOptions.None).Length - 1),
                 ["backingFieldReferences"] = identifiers.Count(s => s.Contains("BackingField", StringComparison.Ordinal)),
+                ["displayClassDeclarations"] = root.DescendantNodes().OfType<ClassDeclarationSyntax>()
+                    .Count(c => c.Identifier.ValueText.Contains("DisplayClass", StringComparison.Ordinal)),
+                ["displayClassIdentifiers"] = identifiers.Count(s => s.Contains("DisplayClass", StringComparison.Ordinal)),
                 ["unrecoveredCalls"] = root.DescendantNodes().OfType<InvocationExpressionSyntax>().Count(c => c.Expression is MemberAccessExpressionSyntax m
                     && m.Expression.ToString() is "Unrecovered" or "Cpp2CS.Unrecovered" or "global::Cpp2CS.Unrecovered"),
                 ["visibleMoveNext"] = root.DescendantNodes().OfType<MethodDeclarationSyntax>().Count(m => m.Identifier.ValueText == "MoveNext"),
