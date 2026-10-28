@@ -38,7 +38,7 @@ public sealed partial class SourceLibraryCalls
                 fieldCallEntries ??= facts.Code.Functions.SelectMany(fn => facts.EntriesAt(fn.Start)
                     .Where(e => e.Kind == EntryKind.GenericMethod && e.Method is not null).Select(e => (Method: e.Method!, Entry: fn.Start)))
                     .GroupBy(p => p.Method).ToDictionary(g => g.Key, g => g.First().Entry);
-                var shared = new MethodRef(method, type.Arguments.Select(a => ManagedTypes.IsReferenceType(a) ? (TypeRef)types.Object : a).ToArray(), []);
+                var shared = new MethodRef(method, type.Arguments.Select(types.SharedGenericArgument).ToArray(), []);
                 if (!fieldCallEntries.TryGetValue(reference, out entry) && !fieldCallEntries.TryGetValue(shared, out entry))
                 {
                     // Nullable 的单字段入口可能只保留了另一个同布局实例；仍须恢复并证明单字段读写。

@@ -61,6 +61,15 @@ public sealed class ManagedTypes
     public DefinitionRef Corlib(string fullName) => new(corlib[fullName], []);
     public TypeDef? CorlibDefinition(string fullName) => corlib.GetValueOrDefault(fullName);
 
+    /// <summary>IL2CPP 共享实参：引用归为 object，枚举归为同底层类型的共享枚举，值类型实参递归处理。</summary>
+    public TypeRef SharedGenericArgument(TypeRef type) => IsReferenceType(type) ? Object : type switch
+    {
+        DefinitionRef { Definition.IsEnum: true } e when CorlibDefinition($"System.{PrimitiveName(Underlying(e))}Enum") is { IsEnum: true } shared
+            && Underlying(new DefinitionRef(shared, [])).Equals(Underlying(e)) => new DefinitionRef(shared, []),
+        DefinitionRef { Arguments.Count: > 0 } value => value with { Arguments = value.Arguments.Select(SharedGenericArgument).ToArray() },
+        _ => type,
+    };
+
     /// <summary>mscorlib 中 owner 类型名为 name、参数类型依次为 parameters 的方法；没有时为 null。</summary>
     public MethodRef? CorlibMethod(string owner, string name, params TypeRef[] parameters) =>
         CorlibDefinition(owner)?.Methods.FirstOrDefault(m => m.Name == name && m.GenericParameters.Count == 0
