@@ -244,9 +244,9 @@ public sealed partial class BodyEmitter
             var signed = c.Condition is Cond.Slt or Cond.Sle or Cond.Sgt or Cond.Sge;
             void Operand(ManagedValue value)
             {
-                // 32 位整数已在 int32 栈上；迭代器范围比较的符号由 clt/cgt 指令决定。
+                // 32 位整数已在 int32 栈上；比较符号由 clt/cgt 指令决定。
                 if (value.Width == 32 && types.Kind(value.Type) == TypeKind.Int && (c.Condition is Cond.Eq or Cond.Ne
-                    || Policy == EmissionPolicy.Source && types.Bits(value.Type) == 32 && Cpp2CS.Structure.EnumerationProtocol.IteratorMoveNext(methodContext.Method))) Value(value);
+                    || Policy == EmissionPolicy.Source && types.Bits(value.Type) == 32)) Value(value);
                 else Integer(value, signed);
             }
             Operand(c.Left); Operand(c.Right);
