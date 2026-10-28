@@ -250,6 +250,8 @@ public sealed partial class BodyEmitter
         regions = recovered.Regions;
         exceptionReturn = null;
         exceptionReturnValue = null;
+        var entryDefaults = Policy == EmissionPolicy.Source && Cpp2CS.Structure.EnumerationProtocol.IteratorMoveNext(recovered.Method.Method)
+            ? SourceEntryDefaults.Find(recovered) : [];
         foreach (var pinned in recovered.Blocks.SelectMany(b => b.Statements).SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
             .SelectMany(ManagedValues.Walk).OfType<PinnedArrayValue>().Distinct())
         {
@@ -264,7 +266,8 @@ public sealed partial class BodyEmitter
             il.Append(labels[block.Address]);
             foreach (var region in regions.Where(r => r.HandlerEntry == block.Address && r.Kind == ManagedRegionKind.Catch))
                 il.Emit(OpCodes.Stloc, Local(region.Exception!));
-            foreach (var statement in block.Statements) Statement(statement);
+            foreach (var statement in block.Statements)
+                if (!entryDefaults.Contains(statement)) Statement(statement);
         }
         WriteExceptionTable(recovered);
         method.Body = body;
