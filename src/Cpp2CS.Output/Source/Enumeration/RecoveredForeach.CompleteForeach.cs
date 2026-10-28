@@ -51,12 +51,21 @@ internal sealed partial class RecoveredForeach
     private static bool InterfaceCleanup(CatchClause catcher, Statement normal, string name, AstNode method)
     {
         bool Rethrow(Statement s) => s is ThrowStatement t && (t.Expression is null || Name(t.Expression, catcher.VariableName));
-        if (catcher.Body?.Statements.ToArray() is not [IfElseStatement { FalseStatement: null,
+        string exceptional;
+        if (catcher.Body?.Statements.ToArray() is [IfElseStatement { FalseStatement: null,
             Condition: UnaryOperatorExpression { Operator: UnaryOperatorType.Not, Expression: var rejected },
             TrueStatement: BlockStatement { Statements.Count: 1 } absent }, var exceptionalDispose, var finalThrow]
-            || !DisposablePattern(rejected, name, out var exceptional) || !Rethrow(absent.Statements.Single())
-            || !Dispose(exceptionalDispose, exceptional) || !Rethrow(finalThrow)
-            || normal is not IfElseStatement { FalseStatement: null, Condition: var accepted,
+            && DisposablePattern(rejected, name, out var pattern) && Rethrow(absent.Statements.Single())
+            && Dispose(exceptionalDispose, pattern) && Rethrow(finalThrow)) exceptional = pattern;
+        else if (catcher.Body?.Statements.ToArray() is [VariableDeclarationStatement declaration,
+            IfElseStatement { FalseStatement: null, TrueStatement: BlockStatement { Statements.Count: 1 } missing } check, var cleanup, var thrown]
+            && declaration.Variables.ToArray() is [var variable]
+            && variable.Initializer is AsExpression { Expression: var receiver, Type: var type }
+            && Name(receiver, name) && type.Annotation<ResolveResult>()?.Type.FullName == "System.IDisposable"
+            && NullTest(check.Condition, variable.Name, BinaryOperatorType.Equality) && Rethrow(missing.Statements.Single())
+            && Dispose(cleanup, variable.Name) && Rethrow(thrown)) exceptional = variable.Name;
+        else return false;
+        if (normal is not IfElseStatement { FalseStatement: null, Condition: var accepted,
                 TrueStatement: BlockStatement { Statements.Count: 1 } present }
             || !DisposablePattern(accepted, name, out var ordinary) || !Dispose(present.Statements.Single(), ordinary)) return false;
         var allowed = catcher.Descendants.Concat(normal.Descendants).ToHashSet();

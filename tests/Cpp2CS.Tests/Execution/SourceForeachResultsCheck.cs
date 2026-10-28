@@ -23,9 +23,9 @@ internal static class SourceForeachResultsCheck
             if (!emitted.Success) throw new InvalidOperationException(string.Join('\n', emitted.Diagnostics));
             return stream.ToArray();
         }
-        string[] modes = ["Valid", "OuterLocal", "CapturedSource", "CapturedTarget", "FactoryCopy", "Reused", "ObservedFactory", "PrefixCallback", "Find", "InterfaceFind", "OtherNullFailure", "ExhaustedFind", "ExpressionFind", "Fallback", "FallbackOuter", "FallbackCaptured"];
+        string[] modes = ["Valid", "OuterLocal", "CapturedSource", "CapturedTarget", "FactoryCopy", "Reused", "ObservedFactory", "PrefixCallback", "Find", "InterfaceFind", "OtherNullFailure", "ExhaustedFind", "ExpressionFind", "Fallback", "FallbackOuter", "FallbackCaptured", "AdvanceInterface", "AdvanceExtra"];
         var methods = string.Join('\n', modes.Where(mode => mode is not ("Find" or "InterfaceFind" or "OtherNullFailure" or "ExhaustedFind" or "ExpressionFind")
-            && !mode.StartsWith("Fallback", StringComparison.Ordinal)).Select(mode => $$"""
+            && !mode.StartsWith("Fallback", StringComparison.Ordinal) && !mode.StartsWith("Advance", StringComparison.Ordinal)).Select(mode => $$"""
             public static int {{mode}}(Sequence sequence)
             {
                 int result = -7;
@@ -134,6 +134,41 @@ internal static class SourceForeachResultsCheck
                 {{(mode == "FallbackOuter" ? "} catch (InvalidOperationException) { Trace.Add(\"O\"); return -8; }" : "")}}
             }
             """));
+        methods += string.Join('\n', new[] { "AdvanceInterface", "AdvanceExtra" }.Select(mode => $$"""
+            public static int {{mode}}(Sequence sequence)
+            {
+                IEnumerator iterator = ((IEnumerable)sequence).GetEnumerator();
+                ulong result;
+                try
+                {
+                    if (iterator == null) throw new NullReferenceException();
+                    while (true)
+                    {
+                        bool advanced = iterator.MoveNext();
+                        ulong number = advanced ? 1UL : 0UL;
+                        if (advanced)
+                        {
+                            object current = iterator.Current;
+                            if (current == null) throw new NullReferenceException();
+                            if ((int)current < 2) continue;
+                            result = number;
+                            break;
+                        }
+                        result = 0UL;
+                        break;
+                    }
+                }
+                catch (Exception)
+                {
+                    if (!(iterator is IDisposable exceptional)) throw;
+                    exceptional.Dispose();
+                    {{(mode == "AdvanceExtra" ? "Trace.Add(\"E\");" : "")}}
+                    throw;
+                }
+                if (iterator is IDisposable ordinary) ordinary.Dispose();
+                return (int)result;
+            }
+            """));
         var inputSource = """
             using System;
             using System.Collections;
@@ -150,7 +185,14 @@ internal static class SourceForeachResultsCheck
                     public Action OnGetEnumerator;
                     public Enumerator GetEnumerator() { OnGetEnumerator?.Invoke(); return new Enumerator { Owner = this, Index = 0 }; }
                     IEnumerator<int> IEnumerable<int>.GetEnumerator() => Failure == 4 ? null : GetEnumerator();
-                    IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable<int>)this).GetEnumerator();
+                    IEnumerator IEnumerable.GetEnumerator() => Failure == 5 ? new WithoutDispose { Inner = GetEnumerator() } : ((IEnumerable<int>)this).GetEnumerator();
+                    public class WithoutDispose : IEnumerator
+                    {
+                        public Enumerator Inner;
+                        public object Current => Inner.Current;
+                        public bool MoveNext() => Inner.MoveNext();
+                        public void Reset() => Inner.Reset();
+                    }
                     public struct Enumerator : IEnumerator<int>
                     {
                         public Sequence Owner;
@@ -177,6 +219,7 @@ internal static class SourceForeachResultsCheck
                             "Find" => Find(sequence), "InterfaceFind" => InterfaceFind(sequence), "OtherNullFailure" => OtherNullFailure(sequence),
                             "ExhaustedFind" => ExhaustedFind(sequence), "ExpressionFind" => ExpressionFind(sequence),
                             "Fallback" => Fallback(sequence), "FallbackOuter" => FallbackOuter(sequence), "FallbackCaptured" => FallbackCaptured(sequence),
+                            "AdvanceInterface" => AdvanceInterface(sequence), "AdvanceExtra" => AdvanceExtra(sequence),
                             _ => throw new ArgumentException()
                         };
                         Trace.Add("R" + result);
@@ -196,7 +239,7 @@ internal static class SourceForeachResultsCheck
         var tree = CSharpSyntaxTree.ParseText(source).GetRoot();
         var a = new Assertions();
         foreach (var mode in modes)
-            a.Equal(mode is "Valid" or "FactoryCopy" or "Find" or "InterfaceFind" or "ExhaustedFind" or "ExpressionFind" or "Fallback" or "FallbackOuter" ? 1 : mode == "Reused" ? 2 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
+            a.Equal(mode is "Valid" or "FactoryCopy" or "Find" or "InterfaceFind" or "ExhaustedFind" or "ExpressionFind" or "Fallback" or "FallbackOuter" or "AdvanceInterface" ? 1 : mode == "Reused" ? 2 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == mode)
                 .DescendantNodes().OfType<ForEachStatementSyntax>().Count(), "仅局部且异常后不可观察的复制可延后：" + mode);
         var rebuilt = Compile(source, "ForeachResults.Rebuilt");
         Func<string, int, int, string> Observe(byte[] bytes) => System.Reflection.Assembly.Load(bytes).GetType("Probe")!.GetMethod("Observe")!
@@ -218,6 +261,10 @@ internal static class SourceForeachResultsCheck
         a.Equal("X", after("OtherNullFailure", 3, 4), "不折叠具有其他空值异常的防护");
         a.Equal("M,C1,M,D,R1", after("Fallback", 1, 0), "耗尽返回最后候选，不提前读取回退值");
         a.Equal("M,C1,M,C2,D,R2", after("FallbackOuter", 3, 0), "命中跳过回退赋值且保留外层异常处理");
+        foreach (var mode in new[] { "AdvanceInterface", "AdvanceExtra" })
+        foreach (var failure in new[] { 4, 5 })
+            a.Equal(before(mode, 3, failure), after(mode, 3, failure), "非泛型枚举器允许 null 或不实现 IDisposable");
+        a.Equal("M,C1,M,C2,R1", after("AdvanceInterface", 3, 5), "没有释放接口时仍返回命中标志");
         return a.Finish("source-foreach-results");
     }
 }

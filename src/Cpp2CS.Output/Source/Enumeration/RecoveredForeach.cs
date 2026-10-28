@@ -96,6 +96,7 @@ internal sealed partial class RecoveredForeach : IAstTransform
         var leadingReads = NormalizeLeadingCurrent(rootNode);
         RecoverSearchLoops(rootNode);
         var searches = NormalizeAdvanceSearch(rootNode);
+        leadingReads.AddRange(NormalizeLeadingCurrent(rootNode));
         RecoverResultLoops(rootNode);
         foreach (var (original, replacement) in searches)
             if (replacement.Parent is not null) replacement.ReplaceWith(original);

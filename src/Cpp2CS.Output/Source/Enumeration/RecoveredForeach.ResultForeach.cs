@@ -46,7 +46,7 @@ internal sealed partial class RecoveredForeach
                 || element.Initializer is not MemberReferenceExpression { MemberName: "Current", Target: var receiver } read || !Name(receiver, enumerator.Identifier)
                 || CurrentByReference(read)
                 || positive.Statements.LastOrDefault() is not (ContinueStatement or BreakStatement)
-                || !ConditionalCleanup(catcher, enumerator.Identifier)) continue;
+                || guarded.GetParent<MethodDeclaration>() is not { } method) continue;
             var prefix = guarded.TryBlock.Statements.TakeWhile(s => s != loop).ToArray();
             if (prefix.Length != 0 && (prefix is not [IfElseStatement guard]
                 || !NullTest(guard.Condition, enumerator.Identifier, BinaryOperatorType.Equality) || guard.FalseStatement is not null
@@ -68,7 +68,10 @@ internal sealed partial class RecoveredForeach
             else if (suffix is not [BreakStatement]) continue;
             if (fallback && exit is not null) continue;
             var statements = parent.Statements.ToArray(); var index = Array.IndexOf(statements, guarded);
-            if (index + 1 >= statements.Length || !Dispose(statements[index + 1], enumerator.Identifier)) continue;
+            if (index + 1 >= statements.Length) continue;
+            var conditionalInterface = InterfaceCleanup(catcher, statements[index + 1], enumerator.Identifier, method);
+            if (!conditionalInterface && (!ConditionalCleanup(catcher, enumerator.Identifier)
+                || !Dispose(statements[index + 1], enumerator.Identifier))) continue;
             var initialization = statements.Take(index).Reverse().SkipWhile(s => s is VariableDeclarationStatement d
                 && (d.Variables.All(v => v.Initializer is null) || fallback && PureLocals(s))).FirstOrDefault();
             var initialized = initialization switch
@@ -79,8 +82,8 @@ internal sealed partial class RecoveredForeach
                 _ => null,
             };
             if (initialized is not InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression { MemberName: "GetEnumerator" } get } factory
-                || !Enumerator(factory).Disposable
-                || guarded.GetParent<MethodDeclaration>() is not { } method) continue;
+                || (conditionalInterface ? factory.Annotation<ResolveResult>()?.Type.FullName != "System.Collections.IEnumerator"
+                    : !Enumerator(factory).Disposable)) continue;
             if (fallback && (!LocalResultCopy(defaults[0], parent, guarded, method)
                 || !StableCopies(method, statements.SkipWhile(s => s != initialization).Skip(1).TakeWhile(s => s != guarded), factory))) continue;
             var declarations = statements.Take(index).OfType<VariableDeclarationStatement>()
