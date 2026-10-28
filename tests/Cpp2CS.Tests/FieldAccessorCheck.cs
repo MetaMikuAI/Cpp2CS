@@ -74,6 +74,11 @@ internal static class FieldAccessorCheck
         var choice = new ChoiceValue(new ConstantValue(0, types.Boolean, 1), read, new ConstantValue(0, types.Int32, 32), types.Int32, 32);
         var rewritten = AccessorRewriter.Rewrite(Body(getter, new ManagedReturn(0, choice)), (v, w) => v == read && !w ? recognized : null);
         a.True(rewritten.Blocks[0].Statements is [ManagedReturn { Value: ChoiceValue { True: FieldValue { Accessor: not null } } }], "getter 留在条件表达式原求值位置");
+        var edge = new ManagedEdge(1, [new(local, read)]);
+        var branch = new ManagedBranch(0, new ComparisonValue(Cond.Eq, read, parameter, types.Boolean), edge, new(2, []));
+        var edgeRead = AccessorRewriter.Rewrite(Body(getter, branch), (v, w) => v == read && !w ? recognized : null);
+        a.True(edgeRead.Blocks[0].Statements is [ManagedBranch { Condition: ComparisonValue { Left: FieldValue { Accessor: not null } },
+            Taken.Copies: [{ Value: FieldValue { Accessor: not null } }], Fallthrough.Copies.Count: 0 }], "条件与边复制分别在原位置读取，不提前执行另一条边");
         DependencyShape(a);
         return a.Finish("F9 严格认回边界");
     }

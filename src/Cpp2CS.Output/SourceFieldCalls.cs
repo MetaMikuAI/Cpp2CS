@@ -130,7 +130,7 @@ public sealed partial class SourceLibraryCalls
                 && c.Method.Method != body.Method.Method
                 && ManagedAccess.Method(types, body.Method.Method.Owner, c.Method, FieldAccessor.ReceiverType(value)));
         }
-        return body with { Blocks = body.Blocks.Select(block =>
+        body = body with { Blocks = body.Blocks.Select(block =>
         {
             var output = new List<ManagedStatement>();
             foreach (var statement in block.Statements)
@@ -205,5 +205,15 @@ public sealed partial class SourceLibraryCalls
             }
             return block with { Statements = output };
         }).ToArray() };
+        // 边复制与条件表达式中的读取保留原求值位置，不把访问器调用提前到分支之前。
+        return AccessorRewriter.Rewrite(body, (value, write) =>
+        {
+            var existing = value switch { FieldValue f => f.Accessor, StaticFieldValue f => f.Accessor, _ => null };
+            if (write || existing is not null || Find(value, false) is not { Method.Method.Parameters.Count: 0 } getter) return existing;
+            var accessor = new FieldAccessor(getter.Method, getter.Field, value.Type, value.Width, false);
+            if (!accessor.Matches(types, body.Method.Method.Owner, value, false)) return existing;
+            Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{body.Method.Method.Address:x}\t{body.Method}\t{getter.Method}");
+            return accessor;
+        });
     }
 }

@@ -117,6 +117,7 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
 
     public ManagedBody Rewrite(ManagedBody body)
     {
+        body = RewriteStringCreations(body);
         body = SourceFieldInitialization.Rewrite(body, method => method.DeclaringType is DefinitionRef type
             ? FieldCalls(type).FirstOrDefault(c => c.Write && c.Method.Equals(method))?.Field : null);
         SourceValueConstructor? Constructor(MethodRef method)
