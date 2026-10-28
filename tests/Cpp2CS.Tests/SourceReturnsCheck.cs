@@ -126,6 +126,26 @@ internal static class SourceReturnsCheck
         a.Equal(blocked, SourceIteratorDispatch.Rewrite(blocked), "不跨过写入提前读取捕获对象");
         var loop = body with { Blocks = [.. body.Blocks.Take(3), new(3, [new ManagedJump(3, new(1, []))])] };
         a.Equal(loop, SourceIteratorDispatch.Rewrite(loop), "业务路径重入状态判断时不提升读取");
+        var selection = body with { Blocks = [body.Blocks[0], new(1, [load, new ManagedSwitch(1, state, [new(2, []), new(3, [])])]),
+            .. body.Blocks.Skip(2)] };
+        var selected = SourceIteratorDispatch.Rewrite(selection);
+        a.True(selected.Blocks[0].Statements[0] == load && selected.Blocks[1].Statements is [ManagedSwitch],
+            "switch 状态分派前的捕获读取移至入口，保持连续的状态分派");
+        var otherSelection = selection with { Blocks = [selection.Blocks[0], new(1, [load,
+            ((ManagedSwitch)selection.Blocks[1].Statements[1]) with { Index = capture }]), .. selection.Blocks.Skip(2)] };
+        a.Equal(otherSelection, SourceIteratorDispatch.Rewrite(otherSelection), "普通 switch 不作为状态分派");
+        var bounded = selection with { Blocks = [new(0, [Read(0, state, "<>1__state"), new ManagedBranch(0,
+            new ComparisonValue(Cond.Ugt, state, new ConstantValue(1, integer, 32), new PrimitiveRef("Boolean")), new(2, []), new(1, []))]),
+            selection.Blocks[1], .. selection.Blocks.Skip(2)] };
+        var compared = SourceIteratorDispatch.Rewrite(bounded);
+        a.True(compared.Blocks[0].Statements[^1] is ManagedJump && !compared.Blocks.SelectMany(b => b.Statements).OfType<ManagedSwitch>().Any()
+            && compared.Blocks.SelectMany(b => b.Statements).OfType<ManagedBranch>().Count(b => b.Condition is ComparisonValue { Condition: Cond.Eq }) == 2,
+            "有精确范围守卫的状态 switch 转为等值分派，范围外仍返回 false");
+        var tooWide = bounded with { Blocks = [bounded.Blocks[0] with { Statements = [Read(0, state, "<>1__state"),
+            ((ManagedBranch)bounded.Blocks[0].Statements[^1]) with { Condition = new ComparisonValue(Cond.Ugt, state,
+                new ConstantValue(2, integer, 32), new PrimitiveRef("Boolean")) }] }, .. bounded.Blocks.Skip(1)] };
+        a.True(SourceIteratorDispatch.Rewrite(tooWide).Blocks.SelectMany(b => b.Statements).OfType<ManagedSwitch>().Any(),
+            "范围与 switch 项数不匹配时不改写分派");
 
         var result = new LocalValue(new(Storage.Temp(3), 1), new PrimitiveRef("Boolean"), 1);
         var write = new ManagedStore(2, Read(2, state, "<>1__state").Value, state);
@@ -150,6 +170,38 @@ internal static class SourceReturnsCheck
         a.True(SourceReturns.Rewrite(observed).Blocks[0].Statements.OfType<ManagedStore>().Count() == 2,
             "两次写入之间有读取时保留中间状态");
         var current = new ManagedStore(0, Read(0, capture, "<>2__current").Value, new ConstantValue(0, type, 64));
+        var small = new LocalValue(new(Storage.Temp(7), 1), new PrimitiveRef("U1"), 8);
+        var sharedYield = new ManagedBody(body.Method, [
+            new(0, [new ManagedJump(0, new(2, [new(small, new ConstantValue(7, small.Type, 8))]))]),
+            new(1, [new ManagedJump(1, new(2, [new(small, new ConstantValue(19, small.Type, 8))]))]),
+            new(2, [current, new ManagedJump(2, new(3, [new(state, new ConversionValue(ConvKind.ZeroExtend, small, integer, 32)),
+                new(result, new ConstantValue(1, result.Type, 1))]))]),
+            new(3, [write, new ManagedReturn(3, result)])]);
+        var splitYield = SourceReturns.Rewrite(sharedYield);
+        foreach (var (index, bits) in new[] { (0, 7UL), (1, 19UL) })
+            a.True(splitYield.Blocks[index].Statements is [ManagedStore firstCurrent, ManagedStore { Value: ConstantValue nextState },
+                ManagedReturn { Value: ConstantValue { Bits: 1 } }] && firstCurrent == current && nextState.Bits == bits,
+                "共享挂起尾部保留 current/state/true 顺序，并逐路径折叠窄状态转换");
+        var guardedYield = sharedYield with { Regions = [new([2, 3], 1, [1], null, ManagedRegionKind.Catch)] };
+        a.True(SourceReturns.Rewrite(guardedYield).Blocks[0].Statements is [ManagedJump], "共享挂起不能跨异常区域展开");
+        var exitEdges = new[] { new ManagedEdge(2, [new(state, new ConstantValue(uint.MaxValue, integer, 32)), new(result, new ConstantValue(0, result.Type, 1))]),
+            new ManagedEdge(2, [new(state, new ConstantValue(7, integer, 32)), new(result, new ConstantValue(1, result.Type, 1))]) };
+        var switchExit = new ManagedBody(body.Method, [new(0, [new ManagedSwitch(0, state, exitEdges)]), new(2, [write, new ManagedReturn(2, result)])]);
+        var splitExit = SourceReturns.Rewrite(switchExit);
+        var exits = ((ManagedSwitch)splitExit.Blocks[0].Statements[0]).Cases;
+        a.True(exits.All(e => e.Copies.Count == 0) && exits.Select(e => e.Target).Distinct().Count() == 2
+            && splitExit.Blocks.Single(b => b.Address == exits[0].Target).Statements is [ManagedStore { Value: ConstantValue { Bits: uint.MaxValue } },
+                ManagedReturn { Value: ConstantValue { Bits: 0 } }], "switch 常量出口写入真实状态后返回，不泄漏合流局部");
+        var protectedExit = switchExit with { Regions = [new([0, 2], 9, [9], null, ManagedRegionKind.Catch)] };
+        var splitProtected = SourceReturns.Rewrite(protectedExit);
+        a.True(splitProtected.Blocks.Skip(2).All(b => splitProtected.Regions[0].Try.Contains(b.Address)), "新出口保留原异常区域成员关系");
+        var nonConstantExit = switchExit with { Blocks = [new(0, [new ManagedSwitch(0, state, [new(2, [new(state, state), new(result, result)])])]), switchExit.Blocks[1]] };
+        a.Equal(2, SourceReturns.Rewrite(nonConstantExit).Blocks.Count, "非恒定 switch 边不推测状态");
+        var constantReturn = switchExit with { Blocks = [switchExit.Blocks[0], new(2, [new ManagedReturn(2, result)])] };
+        var splitReturn = SourceReturns.Rewrite(constantReturn);
+        a.True(splitReturn.Blocks.Skip(2).All(b => b.Statements is [ManagedReturn { Value: ConstantValue }])
+            && ((ManagedSwitch)splitReturn.Blocks[0].Statements[0]).Cases.All(e => e.Copies.Count == 0),
+            "范围外直接返回也展开常量边，保持完整状态分派");
         var saved = new ManagedStore(0, Read(0, state, "<time>5__2").Value,
             new BinaryValue(BinOp.Add, state, new ConstantValue(1, integer, 32), integer, 32));
         var suspended = new ManagedBody(body.Method, [new(0, [current, saved, write with { Value = new ConstantValue(1, integer, 32) },

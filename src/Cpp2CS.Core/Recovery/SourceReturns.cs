@@ -27,6 +27,18 @@ internal static class SourceReturns
         bool StateWrite(ManagedStatement statement) => iterator && statement is ManagedStore
             { Target: FieldValue { Receiver: ArgumentValue { Index: -1 }, Accessor: null, Field.Field.Name: "<>1__state" } field, Value: var value }
             && field.Field.Field.Owner == method.Owner && Pure(value);
+        bool CurrentWrite(ManagedStatement statement) => iterator && statement is ManagedStore
+            { Target: FieldValue { Receiver: ArgumentValue { Index: -1 }, Accessor: null, Field.Field.Name: "<>2__current" } field, Value: var value }
+            && field.Field.Field.Owner == method.Owner && Pure(value);
+        static ManagedValue ConstantConversion(ManagedValue value)
+        {
+            if (value is not ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate } conversion) return value;
+            var operand = ConstantConversion(conversion.Operand);
+            return operand is ConstantValue constant && Fold.Convert(conversion.Kind, Expr.C(constant.Bits, constant.Width), conversion.Width) is Const folded
+                ? new ConstantValue(folded.Value, conversion.Type, conversion.Width) : conversion with { Operand = operand };
+        }
+        static bool CopyValue(ManagedValue value) => value is LocalValue or ArgumentValue or ConstantValue or AddressValue { Target: LocalValue { Type: not ByRefRef } }
+            || value is ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate } conversion && CopyValue(conversion.Operand);
         bool SameRegion(ulong left, ulong right) => body.Regions.All(r => r.Try.Contains(left) == r.Try.Contains(right)
             && r.Handler.Contains(left) == r.Handler.Contains(right));
         var blocks = body.Blocks.ToDictionary(b => b.Address, b => b with
@@ -66,14 +78,15 @@ internal static class SourceReturns
                     continue;
                 }
                 if (tail[^1] is not ManagedReturn { Value: { } value }
-                    || tail.Count != 1 && !(tail.Count == 2 && StateWrite(tail[0]) && SameRegion(address, jump.Edge.Target))
-                    || jump.Edge.Copies.Any(c => c.Value is not (LocalValue or ArgumentValue or ConstantValue or AddressValue { Target: LocalValue { Type: not ByRefRef } }))) continue;
+                    || tail.Count != 1 && !(SameRegion(address, jump.Edge.Target) && (tail.Count == 2 && StateWrite(tail[0])
+                        || tail.Count == 3 && CurrentWrite(tail[0]) && StateWrite(tail[1])))
+                    || jump.Edge.Copies.Any(c => !CopyValue(c.Value))) continue;
                 var copies = jump.Edge.Copies.ToDictionary(c => c.Target.Variable, c => c.Value);
                 // 边复制同时生效：替换成源值之后不再沿本条边递归追踪其他目标。
                 ManagedValue Replace(ManagedValue v)
                 {
                     var mapped = v is LocalValue l && copies.TryGetValue(l.Variable, out var copy) ? copy : ManagedValues.Map(v, Replace);
-                    return mapped is IndirectValue { Address: AddressValue { Target: LocalValue local } } load && load.Type.Equals(local.Type) ? local : mapped;
+                    return mapped is IndirectValue { Address: AddressValue { Target: LocalValue local } } load && load.Type.Equals(local.Type) ? local : ConstantConversion(mapped);
                 }
                 var returned = Replace(value);
                 // 通过地址读到的是边复制完成后的存储值，不能误用同时复制前的局部快照。
@@ -88,6 +101,37 @@ internal static class SourceReturns
                 changed = true;
             }
         } while (changed);
+        // 分支与 switch 的常量边不能直接内联语句；为状态写入和返回创建同一异常区域中的专用出口。
+        var added = new List<(ManagedBlock Block, ulong Original)>();
+        var next = blocks.Keys.Max() + 1;
+        foreach (var address in body.Blocks.Select(b => b.Address))
+        {
+            var block = blocks[address];
+            blocks[address] = block with { Statements = block.Statements.Select(statement => statement is ManagedBranch or ManagedSwitch
+                ? ManagedValues.MapEdges(statement, edge =>
+                {
+                    if (!iterator || edge.Copies.Count == 0 || edge.Copies.Any(c => c.Value is not ConstantValue || addressed.Contains(c.Target.Variable))
+                        || !SameRegion(address, edge.Target)) return edge;
+                    var tail = blocks[edge.Target].Statements;
+                    if (tail.LastOrDefault() is not ManagedReturn { Value: { } returned } ret
+                        || tail.Count != 1 && !(tail.Count == 2 && StateWrite(tail[0]))) return edge;
+                    var copies = edge.Copies.ToDictionary(c => c.Target.Variable, c => c.Value);
+                    ManagedValue Replace(ManagedValue value) => ConstantConversion(value is LocalValue local && copies.TryGetValue(local.Variable, out var copy)
+                        ? copy : ManagedValues.Map(value, Replace));
+                    if (Replace(returned) is not ConstantValue result) return edge;
+                    ManagedStore? stored = null;
+                    if (tail.Count == 2)
+                    {
+                        var store = (ManagedStore)tail[0];
+                        if (Replace(store.Value) is not ConstantValue state) return edge;
+                        stored = store with { Value = state };
+                    }
+                    var target = next++;
+                    added.Add((new(target, stored is null ? [ret with { Value = Result(result) }]
+                        : [stored, ret with { Value = Result(result) }]), edge.Target));
+                    return new ManagedEdge(target, []);
+                }) : statement).ToArray() };
+        }
         return body with { Blocks = body.Blocks.Select(b =>
         {
             var block = blocks[b.Address];
@@ -134,6 +178,10 @@ internal static class SourceReturns
                 i = end;
             }
             return block with { Statements = statements };
+        }).Concat(added.Select(p => p.Block)).ToArray(), Regions = body.Regions.Select(region => region with
+        {
+            Try = region.Try.Concat(added.Where(p => region.Try.Contains(p.Original)).Select(p => p.Block.Address)).ToArray(),
+            Handler = region.Handler.Concat(added.Where(p => region.Handler.Contains(p.Original)).Select(p => p.Block.Address)).ToArray(),
         }).ToArray() };
     }
 }
