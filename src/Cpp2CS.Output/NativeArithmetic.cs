@@ -46,9 +46,17 @@ public static class NativeArithmetic
     }
 
     public static void Emit(ILProcessor il, BinOp operation, int width, Func<string, TypeReference>? corlib = null,
-        Func<string, MethodReference>? bitConverter = null)
+        Func<string, MethodReference>? bitConverter = null, ulong? rightConstant = null)
     {
         if (width is not (32 or 64)) throw new ArgumentOutOfRangeException(nameof(width));
+        // 已知非零且不会触发有符号溢出的除数不需要原生异常行为的保护分支。
+        if (operation is BinOp.SDiv or BinOp.UDiv && rightConstant is { } constant
+            && (constant & Expr.Mask(width)) != 0
+            && (operation == BinOp.UDiv || (constant & Expr.Mask(width)) != Expr.Mask(width)))
+        {
+            il.Emit(operation == BinOp.SDiv ? OpCodes.Div : OpCodes.Div_Un);
+            return;
+        }
         var module = il.Body.Method.Module;
         var integer = corlib?.Invoke(width == 32 ? "System.UInt32" : "System.UInt64") ?? (width == 32 ? module.TypeSystem.UInt32 : module.TypeSystem.UInt64);
         var floating = corlib?.Invoke(width == 32 ? "System.Single" : "System.Double") ?? (width == 32 ? module.TypeSystem.Single : module.TypeSystem.Double);

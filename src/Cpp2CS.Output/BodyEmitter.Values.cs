@@ -153,7 +153,8 @@ public sealed partial class BodyEmitter
                 {
                     "SingleToInt32Bits" => types.Single, "DoubleToInt64Bits" => types.Double,
                     "Int32BitsToSingle" => types.Int32, _ => types.Int64,
-                }) ?? throw new NotSupportedException($"核心库缺少 BitConverter.{name}")));
+                }) ?? throw new NotSupportedException($"核心库缺少 BitConverter.{name}")),
+                rightConstant: b.Right is ConstantValue constant ? constant.Bits : null);
             Normalize(b);
             return;
         }

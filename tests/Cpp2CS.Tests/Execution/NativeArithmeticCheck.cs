@@ -16,12 +16,15 @@ internal static class NativeArithmeticCheck
         using var module = ModuleDefinition.CreateModule("ArithmeticCheck", ModuleKind.Dll);
         var owner = new TypeDefinition("Tests", "Arithmetic", TypeAttributes.Public | TypeAttributes.Abstract | TypeAttributes.Sealed, module.TypeSystem.Object);
         module.Types.Add(owner);
+        static ulong?[] Constants(BinOp op) => op is BinOp.SDiv or BinOp.UDiv ? [null, 0, ulong.MaxValue, 7] : [null];
+        static string Name(BinOp op, int width, ulong? constant) => $"{op}{width}_{constant?.ToString() ?? "dynamic"}";
         foreach (var width in new[] { 32, 64 })
             foreach (var op in new[] { BinOp.FMin, BinOp.FMax, BinOp.SDiv, BinOp.UDiv })
+            foreach (var constant in Constants(op))
             {
                 var integer = width == 32 ? module.TypeSystem.UInt32 : module.TypeSystem.UInt64;
                 var floating = width == 32 ? module.TypeSystem.Single : module.TypeSystem.Double;
-                var method = new MethodDefinition($"{op}{width}", MethodAttributes.Public | MethodAttributes.Static, integer);
+                var method = new MethodDefinition(Name(op, width, constant), MethodAttributes.Public | MethodAttributes.Static, integer);
                 owner.Methods.Add(method);
                 method.Parameters.Add(new("left", ParameterAttributes.None, integer));
                 method.Parameters.Add(new("right", ParameterAttributes.None, integer));
@@ -29,9 +32,16 @@ internal static class NativeArithmeticCheck
                 foreach (var parameter in method.Parameters)
                 {
                     if (op is BinOp.FMin or BinOp.FMax) { il.Emit(OpCodes.Ldarga, parameter); il.Emit(OpCodes.Ldobj, floating); }
+                    else if (parameter.Index == 1 && constant is { } value)
+                    {
+                        if (width == 32) il.Emit(OpCodes.Ldc_I4, unchecked((int)value));
+                        else il.Emit(OpCodes.Ldc_I8, unchecked((long)value));
+                    }
                     else il.Emit(OpCodes.Ldarg, parameter);
                 }
-                NativeArithmetic.Emit(il, op, width);
+                NativeArithmetic.Emit(il, op, width, rightConstant: constant);
+                if (constant == 7) assertions.True(!method.Body.Instructions.Any(i => i.OpCode.FlowControl == FlowControl.Cond_Branch),
+                    "安全常量除数直接写出 div，不引入保护分支");
                 if (op is BinOp.FMin or BinOp.FMax)
                 {
                     var result = new VariableDefinition(floating); method.Body.Variables.Add(result);
@@ -45,8 +55,9 @@ internal static class NativeArithmeticCheck
         ulong pc = 0x1000;
         foreach (var width in new[] { 32, 64 })
             foreach (var op in new[] { BinOp.FMin, BinOp.FMax, BinOp.SDiv, BinOp.UDiv })
+            foreach (var constant in Constants(op))
             {
-                var method = loaded.GetMethod($"{op}{width}")!;
+                var method = loaded.GetMethod(Name(op, width, constant))!;
                 Func<ulong, ulong, ulong> invoke;
                 if (width == 32)
                 {
@@ -63,8 +74,8 @@ internal static class NativeArithmeticCheck
                     ? new ulong[] { 0, 1, 0xffffffff, 0x80000000, 0x7fffffff, 3, 7, 0xfffffff9, 0x3f800000, 0xbf800000, 0x7f800000, 0xff800000, 0x7fc01234, 0xffc05678, 0x7f801234, 0xff805678, 0x00800000, 0x007fffff }
                     : new ulong[] { 0, 1, ulong.MaxValue, 0x8000000000000000, 0x7fffffffffffffff, 3, 7, 0xfffffffffffffff9, 0x3ff0000000000000, 0xbff0000000000000, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000012345678, 0xfff8000056781234, 0x7ff0000012345678, 0xfff0000056781234, 0x0010000000000000, 0x000fffffffffffff };
                 var random = new Random(20261024);
-                var pairs = inputs.SelectMany(x => inputs.Select(y => (x, y))).Concat(Enumerable.Range(0, 512).Select(_ =>
-                    ((ulong)random.NextInt64() & Expr.Mask(width), (ulong)random.NextInt64() & Expr.Mask(width))));
+                var pairs = inputs.SelectMany(x => inputs.Select(y => (x, y: constant ?? y)).Distinct()).Concat(Enumerable.Range(0, 512).Select(_ =>
+                    ((ulong)random.NextInt64() & Expr.Mask(width), (constant ?? (ulong)random.NextInt64()) & Expr.Mask(width))));
                 foreach (var (x, y) in pairs)
                 {
                     var first = fp ? width == 32 ? Unicorn.S(0) : Unicorn.D(0) : Unicorn.X(0);
