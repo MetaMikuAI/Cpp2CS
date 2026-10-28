@@ -109,12 +109,7 @@ public sealed partial class UnregisteredMethods
                 else text.Append(word.ToString("x8"));
                 text.Append(';');
             }
-            // EH 表暂不抽象；绝对区间与动作原值均保留，不为提高匹配率擦掉异常行为。
-            foreach (var region in function.ExceptionRegions)
-            {
-                text.Append("EH:").Append(region);
-                foreach (var action in region.Actions) text.Append(action);
-            }
+            text.Append(ExceptionShape(function, facts.Model.Image.RelocatedPointer));
             describe?.Invoke(text.ToString());
             return new(System.Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text.ToString()))), guardCandidates, pairs, branches);
         }
