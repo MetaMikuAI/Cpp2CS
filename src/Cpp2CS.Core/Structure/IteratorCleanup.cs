@@ -80,22 +80,24 @@ internal static class IteratorCleanup
             foreach (var inner in nested.Where(r => r.Try.Contains(address))) pending.Push(inner.HandlerEntry);
         }
         // 原生 EH 只覆盖会抛出的指令。把外围的状态写入、复制和返回纳入同一个 try，不能新增可抛出的操作。
-        static bool Harmless(ManagedValue value) => value switch
+        var nonnull = SourceNonNullReceivers.Read(body, null);
+        static bool Harmless(ManagedValue value, HashSet<ManagedValue> known) => value switch
         {
             ArgumentValue or LocalValue or ConstantValue => true,
             FieldValue { Receiver: ArgumentValue { Index: -1 }, Accessor: null } => true,
+            FieldValue { Receiver: var receiver, Accessor: null } when known.Contains(receiver) => true,
             AddressValue { Target: FieldValue { Receiver: ArgumentValue { Index: -1 }, Accessor: null } } => true,
-            ComposedValue composed => composed.Leaves.All(l => Harmless(l.Value)),
-            ConversionValue or ComparisonValue or NegatedValue or BooleanValue => ManagedValues.Children(value).All(Harmless),
-            BinaryValue { Op: BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Add or BinOp.Sub } => ManagedValues.Children(value).All(Harmless),
+            ComposedValue composed => composed.Leaves.All(l => Harmless(l.Value, known)),
+            ConversionValue or ComparisonValue or NegatedValue or BooleanValue => ManagedValues.Children(value).All(v => Harmless(v, known)),
+            BinaryValue { Op: BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Add or BinOp.Sub } => ManagedValues.Children(value).All(v => Harmless(v, known)),
             _ => false,
         };
         bool Safe(ManagedStatement statement) => statement switch
         {
             ManagedAssignment or ManagedReturn or ManagedJump or ManagedBranch =>
-                ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement)).All(Harmless),
-            ManagedStore { Target: FieldValue { Receiver: ArgumentValue { Index: -1 }, Accessor: null }, Value: var value } => Harmless(value),
-            ManagedStore { Target: IndirectValue { Address: AddressValue { Target: FieldValue { Receiver: ArgumentValue { Index: -1 }, Accessor: null } } }, Value: var value } => Harmless(value),
+                ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement)).All(v => Harmless(v, nonnull[statement])),
+            ManagedStore { Target: FieldValue field, Value: var value } => Harmless(field, nonnull[statement]) && Harmless(value, nonnull[statement]),
+            ManagedStore { Target: IndirectValue { Address: AddressValue { Target: FieldValue { Receiver: ArgumentValue { Index: -1 }, Accessor: null } } }, Value: var value } => Harmless(value, nonnull[statement]),
             _ => false,
         };
         if (normal.Except(region.Try).Any(a => !blocks[a].Statements.All(Safe))) return body;

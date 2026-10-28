@@ -11,36 +11,7 @@ internal static class ManagedFramePromotion
 {
     public static void Run(ProgramFacts facts, MachineFunction function, ManagedAbi abi, ICallModel calls, Storage stackPointer)
     {
-        var signatures = new Dictionary<Call, AbiSignature?>(ReferenceEqualityComparer.Instance);
-        AbiSignature? Signature(Call call)
-        {
-            if (!signatures.TryGetValue(call, out var signature))
-            {
-                var candidates = call.Op?.Operand is MethodRef method ? [method]
-                    : call.Op is null && call.Target is Const target
-                        ? facts.EntriesAt(target.Value).Select(e => e.Method).OfType<MethodRef>().Distinct().ToArray() : [];
-                var exact = call.Arguments.OfType<Symbol>().Where(s => s.Kind == SymbolKind.Method).Select(s => (MethodRef)s.Value)
-                    .Where(m => candidates.Any(c => c.Method == m.Method)).Distinct().ToArray();
-                var callee = call.Op is null && call.Target is Const address && facts.Unregistered.At(address.Value) is { } identity
-                    ? UnregisteredMethods.Resolve(identity, call, e => e, abi, out _)
-                    : exact is [var known] ? known : candidates is [var only] ? only : null;
-                signature = callee is null ? null : abi.Classify(callee, out _);
-                signatures[call] = signature;
-            }
-            return signature;
-        }
-        int? ArgumentSize(Call call, int index)
-        {
-            if (call.Op?.Kind == OpKind.WriteBarrier && index == 0) return 8;
-            if (index >= call.Sources.Length) return null;
-            var signature = Signature(call);
-            if (signature is null) return null;
-            var register = call.Sources[index];
-            var argument = signature.Arguments.Concat(signature.Return is { Passing: Passing.Indirect } result ? [result] : [])
-                .FirstOrDefault(a => a.Pieces is [var piece] && piece.Register == register);
-            var type = argument?.Passing == Passing.Indirect ? argument.Type : (argument?.Type as ByRefRef)?.Element;
-            return type is not null && abi.Size(type) is > 0 and var size ? size : null;
-        }
+        var frames = new ManagedCallFrames(facts, abi);
         var statements = function.Blocks.SelectMany(b => b.Statements).ToArray();
         var stores = statements.OfType<Store>().Where(s => s is { Target: FrameAddress, Value: Use })
             .ToLookup(s => ((Use)s.Value).Variable);
@@ -48,9 +19,9 @@ internal static class ManagedFramePromotion
         preserved.AddRange(FrameCopySpans.Read(function));
         foreach (var call in statements.OfType<Call>())
             for (var i = 0; i < call.Arguments.Length; i++)
-                if (call.Arguments[i] is FrameAddress frame && ArgumentSize(call, i) is { } size) preserved.Add((frame.Offset, size));
+                if (call.Arguments[i] is FrameAddress frame && frames.ArgumentSize(call, i) is { } size) preserved.Add((frame.Offset, size));
         foreach (var call in statements.OfType<Call>().Where(c => c.Defines.Any(v => v is not null && stores.Contains(v))))
-            if (Signature(call)?.Return is { Passing: Passing.Registers } result && abi.Kind(result.Type) == ValueKind.Struct)
+            if (frames.Signature(call)?.Return is { Passing: Passing.Registers } result && abi.Kind(result.Type) == ValueKind.Struct)
                 foreach (var piece in result.Pieces)
                 {
                     var index = Array.IndexOf(call.Results, piece.Register);
@@ -63,7 +34,7 @@ internal static class ManagedFramePromotion
         // 按值传参的结构体同样需要完整布局，不能先把其中的引用字段单独提升。
         foreach (var call in statements.OfType<Call>())
         {
-            if (Signature(call) is not { } signature) continue;
+            if (frames.Signature(call) is not { } signature) continue;
             var registers = call.ArgumentsBySource();
             foreach (var argument in signature.Arguments.Where(a => a.Passing == Passing.Registers && abi.Kind(a.Type) == ValueKind.Struct))
             {
@@ -97,8 +68,8 @@ internal static class ManagedFramePromotion
             foreach (var call in statements.OfType<Call>())
                 for (var i = 0; i < call.Arguments.Length; i++)
                     if (ExprMap.Walk(call.Arguments[i]).Any(e => e is FrameAddress))
-                        Console.Error.WriteLine($"[frame] 0x{call.Address:x} {call.Op} {call.Target} arg{i} {call.Arguments[i]} size={ArgumentSize(call, i)}");
-        if (!Lifting.FunctionLifter.PromoteFrameSlots || FrameSlotPromotion.Run(function, ArgumentSize, ranges.ToArray()) == 0) return;
+                        Console.Error.WriteLine($"[frame] 0x{call.Address:x} {call.Op} {call.Target} arg{i} {call.Arguments[i]} size={frames.ArgumentSize(call, i)}");
+        if (!Lifting.FunctionLifter.PromoteFrameSlots || FrameSlotPromotion.Run(function, frames.ArgumentSize, ranges.ToArray()) == 0) return;
         var slots = function.Blocks.SelectMany(b => b.Statements).OfType<Assign>().Select(a => a.Target).ToHashSet();
         var dominators = Dominators.Compute(function);
         SsaBuilder.Build(function, dominators, slots.Contains, calls, stackPointer);

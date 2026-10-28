@@ -47,14 +47,17 @@ internal static class SourceTryBlocksCheck
         var readMethod = new MethodRef(new MethodDef { Index = 1, Owner = owner, Name = "get_Value", Token = 0, Attributes = MethodAttributes.Public,
             ImplAttributes = 0, Slot = -1, ReturnType = integer }, [], []);
         var field = new FieldRef(new FieldDef { Index = 0, Owner = owner, Name = "value", Type = integer, Attributes = FieldAttributes.Public, Offset = 16 }, receiverType);
-        foreach (var mode in new[] { "getter", "field", "alias", "unknown", "reset", "addressed", "conditional", "mixed", "virtual", "virtual-reset" })
+        foreach (var mode in new[] { "getter", "field", "alias", "unknown", "reset", "addressed", "conditional", "mixed", "virtual", "virtual-reset", "check", "check-reset", "check-ne" })
         {
             var fieldRead = new FieldValue(receiver, field, integer, 32);
-            ManagedStatement first = mode is "field" or "conditional"
+            ManagedStatement first = mode.StartsWith("check", StringComparison.Ordinal)
+                ? new ManagedCheck(1, new ComparisonValue(mode == "check-ne" ? Cond.Ne : Cond.Eq, receiver,
+                    new ConstantValue(0, receiverType, 64), new PrimitiveRef("Boolean")), method)
+                : mode is "field" or "conditional"
                 ? new ManagedAssignment(1, local, mode == "conditional" ? new ChoiceValue(local, fieldRead, new ConstantValue(0, integer, 32), integer, 32) : fieldRead)
                 : new ManagedCall(1, new(mode is "unknown" or "virtual" or "virtual-reset" ? method : readMethod, receiver, [], mode.StartsWith("virtual")), local, false);
             var middle = new List<ManagedStatement> { first };
-            if (mode is "reset" or "virtual-reset") middle.Add(new ManagedAssignment(1, receiver, new ConstantValue(0, receiverType, 64)));
+            if (mode is "reset" or "virtual-reset" or "check-reset") middle.Add(new ManagedAssignment(1, receiver, new ConstantValue(0, receiverType, 64)));
             if (mode == "alias") middle.Add(new ManagedAssignment(1, alias, receiver));
             middle.Add(Jump(1, 3));
             var second = new ManagedCall(3, new(readMethod, mode == "alias" ? alias : receiver, [], false), local, false);
@@ -65,10 +68,11 @@ internal static class SourceTryBlocksCheck
                 new(3, [second, new ManagedReturn(3, null)]), new(4, [Jump(4, 3)])])
                 { Regions = [new([1], 2, [2], caught, ManagedRegionKind.Catch)] };
             if (mode != "mixed") body = body with { Blocks = body.Blocks.Where(b => b.Address != 4).ToArray() };
-            var expected = mode is "getter" or "field" or "alias" or "virtual";
+            var expected = mode is "getter" or "field" or "alias" or "virtual" or "check";
             var facts = SourceNonNullReceivers.Read(body, m => m.Equals(readMethod));
             a.Equal(expected, facts[second].Contains(second.Invocation.Receiver!), $"{mode} 的接收者非空证据");
             a.Equal(expected, SourceTryBlocks.Rewrite(body, m => m.Equals(readMethod)).Regions[0].Try.Contains(3UL), $"{mode} 的纯 getter 区域合并");
+            if (mode == "check-ne") a.True(SourceNonNullReceivers.ReadNull(body)[second].Contains(receiver), "反向检查通过后为空，不误证非空");
         }
         return a.Finish("source-try-blocks");
     }

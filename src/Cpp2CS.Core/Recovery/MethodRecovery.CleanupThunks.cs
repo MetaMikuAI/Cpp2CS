@@ -99,14 +99,16 @@ public sealed partial class MethodRecovery
                 FrameAddress f when f.Offset < offset + 8 => false,
                 _ => ExprMap.Children(e).All(p => Safe(p, offset))
             };
-            int? InvokerExtent(Call call, int index)
+            var frames = new ManagedCallFrames(facts, owner.abi);
+            int? ArgumentExtent(Call call, int index)
             {
-                if (call.Op is not { Kind: OpKind.InvokeGeneric, Operand: MethodRef callee } || index == 0) return null;
+                if (call.Op is not { Kind: OpKind.InvokeGeneric, Operand: MethodRef callee }) return frames.ArgumentSize(call, index);
+                if (index == 0) return null;
                 var type = index == call.Arguments.Length - 1 ? Concrete(callee, callee.Method.ReturnType)
                     : Concrete(callee, callee.Method.Parameters[index - 1].Type);
                 return types.Size(type) is > 0 and var size ? size : null;
             }
-            bool Touches(Stmt statement, long offset, int bytes) => FrameUses.Touches(statement, offset, bytes, InvokerExtent);
+            bool Touches(Stmt statement, long offset, int bytes) => FrameUses.Touches(statement, offset, bytes, ArgumentExtent);
             var promotable = stores.Where(pair => pair.Value.Value is FrameAddress or Use { Variable.Version: 0 }
                 && all.Where(s => !ReferenceEquals(s, pair.Value)).All(s =>
                     !Touches(s, pair.Key, 8)

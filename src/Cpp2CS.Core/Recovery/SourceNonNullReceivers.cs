@@ -44,6 +44,16 @@ internal static class SourceNonNullReceivers
                 ManagedValues.Map(value, child => { Read(child); return child; });
             }
             foreach (var value in ManagedValues.Of(statement)) Read(value);
+            if (statement is ManagedCheck { Condition: ComparisonValue { Condition: Cond.Eq or Cond.Ne } check })
+            {
+                var checkedValue = check.Right is ConstantValue { Bits: 0 } ? check.Left
+                    : check.Left is ConstantValue { Bits: 0 } ? check.Right : null;
+                if (checkedValue is not null && Track(checkedValue))
+                {
+                    if (nullOnly == (check.Condition == Cond.Ne)) known.Add(checkedValue);
+                    else known.Remove(checkedValue);
+                }
+            }
             if (!nullOnly && statement is ManagedCall { Invocation: var invocation } && (invocation.Virtual || getter?.Invoke(invocation.Method) == true)
                 && invocation.Receiver is { } receiver && Track(receiver)) known.Add(receiver);
             ManagedValue? target = statement switch

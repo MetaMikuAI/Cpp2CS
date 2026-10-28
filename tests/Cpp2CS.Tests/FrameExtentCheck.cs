@@ -4,6 +4,8 @@ using Cpp2CS.Functions;
 using Cpp2CS.Ir;
 using Cpp2CS.Recovery;
 using Cpp2CS.Ssa;
+using Cpp2CS.Model;
+using System.Reflection;
 
 namespace Cpp2CS.Tests;
 
@@ -57,6 +59,31 @@ internal static class FrameExtentCheck
         a.True(FrameUses.Touches(invocation, -16, 8, (_, _) => null), "未知传址范围仍可能读取上方槽");
         a.True(!FrameUses.Touches(new Return(0x1000) { Value = new Load(new FrameAddress(-64), 64) }, -32, 8, (_, _) => null), "精确读取不视为整段逃逸");
         a.True(FrameUses.Touches(new Store(0x1000, Expr.C(0x2000, 64), new FrameAddress(-64)), -32, 8, (_, _) => null), "存入外部内存的地址保护后续分片");
+        ManagedBounds(a);
         return a.Finish("frame-extents");
+    }
+
+    private static void ManagedBounds(Assertions a)
+    {
+        var integer = new TypeDef { Index = 1, Assembly = "mscorlib.dll", Namespace = "System", Name = "Int64", Token = 0,
+            Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false };
+        var parameter = new GenericParameterDef { Name = "T", Position = 0, Attributes = 0 };
+        var packet = new TypeDef { Index = 2, Assembly = "Frame.Tests.dll", Namespace = "Tests", Name = "Packet`1", Token = 0,
+            Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false, GenericParameters = [parameter] };
+        packet.Fields = Enumerable.Range(0, 3).Select(i => new FieldDef { Index = i, Owner = packet, Name = "Value" + i,
+            Type = new GenericParameterRef("T", false, 0), Offset = -1, Attributes = FieldAttributes.Public }).ToArray();
+        var type = new DefinitionRef(packet, [new DefinitionRef(integer, [])]);
+        var method = new MethodRef(new MethodDef { Index = 1, Owner = packet, Name = "Copy", Token = 0,
+            Attributes = MethodAttributes.Public | MethodAttributes.Static, ImplAttributes = 0, Slot = -1, ReturnType = type,
+            Parameters = [new("value", new ByRefRef(type), 0, null, false)] }, type.Arguments, []);
+        var call = new Call(0x1000, CallKind.Indirect, Expr.C(0, 64)) { Op = new(OpKind.CallMethodPointer, method),
+            Arguments = [new FrameAddress(-64), new FrameAddress(-32)], Sources = [Storage.Gpr(0), Storage.Gpr(8)] };
+        var frames = new ManagedCallFrames(null!, new ManagedAbi(new FieldLayouts(null!)));
+        a.Equal(24, frames.ArgumentSize(call, 0), "ref 参数的完整结构体长度");
+        a.Equal(24, frames.ArgumentSize(call, 1), "x8 返回缓冲区与 ref 参数使用同一布局证明");
+        a.True(FrameUses.Touches(call, -16, 8, frames.ArgumentSize), "返回缓冲区尾部必须保留");
+        a.True(!FrameUses.Touches(call, -8, 8, frames.ArgumentSize), "返回缓冲区末尾之后的捕获槽不逃逸");
+        a.True(frames.ArgumentSize(call with { Sources = [Storage.Gpr(1), Storage.Gpr(8)] }, 0) is null,
+            "隐藏元数据参数不能被误认为有界 ref 参数");
     }
 }
