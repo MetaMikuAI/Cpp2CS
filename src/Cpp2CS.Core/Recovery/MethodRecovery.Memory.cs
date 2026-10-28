@@ -49,6 +49,8 @@ public sealed partial class MethodRecovery
             Use { Width: 64 } u when u.Variable.Version == 0 && !structArguments.ContainsKey(u.Variable.Storage)
                 && arguments.TryGetValue(u.Variable.Storage, out var a) && a.Width == 64 => a.Type,
             Use { Width: 64 } u when known.TryGetValue(u.Variable, out var t) && (ManagedTypes.IsReferenceType(t) || t is ByRefRef or PointerRef) => t,
+            // 条件归约可把已加载的引用内联进字段路径；每层仍须由真实布局确认，不从用途猜加载类型。
+            Load { Width: 64 } load when TypeOfValue(load) is { } t && (ManagedTypes.IsReferenceType(t) || t is ByRefRef or PointerRef) => t,
             _ => null,
         };
 
