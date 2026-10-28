@@ -4,6 +4,20 @@ namespace Cpp2CS.Tests;
 
 internal static class SourceView
 {
+    [Command("project-source-view", "按固定类型清单重新导出项目源码，不重复原生恢复", Arguments = "<inventory> <recover 输出目录> <output>")]
+    public static int Projects(string inventory, string directory, string output)
+    {
+        var requested = File.ReadLines(Path.Combine(inventory, "types.tsv")).Skip(1).Select(l => l.Split('\t')[1]).ToHashSet();
+        var assemblies = Path.Combine(directory, "assemblies-src");
+        var count = 0;
+        foreach (var assembly in Directory.GetFiles(assemblies, "*.dll").Where(p => requested.Any(f => f.StartsWith(Path.GetFileName(p) + "_", StringComparison.Ordinal))))
+            count += SourceProject.Write(assembly, assemblies, output,
+                type => requested.Contains(Path.GetFileName(assembly) + "_" + type.ReflectionName + ".cs"));
+        if (count != requested.Count) throw new InvalidDataException($"类型清单 {requested.Count}，实际导出 {count}");
+        Console.WriteLine($"从已有 assemblies-src 导出 {count} 个项目类型文件。");
+        return 0;
+    }
+
     [Command("type-source-view", "按类型清单导出已有源码程序集，包含无完整方法的类型", Arguments = "<inventory> <recover 输出目录> <output>")]
     public static int Types(string inventory, string directory, string output)
     {

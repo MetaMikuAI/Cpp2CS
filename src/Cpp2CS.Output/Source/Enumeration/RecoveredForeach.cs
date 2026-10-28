@@ -30,11 +30,31 @@ internal sealed partial class RecoveredForeach : IAstTransform
             && id.Ancestors.TakeWhile(n => n != scope).Any(n => n is LambdaExpression or AnonymousMethodExpression or LocalFunctionDeclarationStatement));
     }
 
+    private static bool StableArgument(Expression expression)
+    {
+        if (expression is PrimitiveExpression or NullReferenceExpression or ThisReferenceExpression) return true;
+        if (expression is not IdentifierExpression id || id.GetILVariable() is not
+                { Type.Kind: not TypeKind.ByReference, AddressInstructions.Count: 0, CaptureScope: null } local
+            || id.Ancestors.FirstOrDefault(n => n is MethodDeclaration or ConstructorDeclaration or Accessor) is not { } method) return false;
+        return !method.Descendants.OfType<IdentifierExpression>().Any(use => use.GetILVariable() == local
+            && use.Ancestors.TakeWhile(n => n != method).Any(n => n is LambdaExpression or AnonymousMethodExpression or LocalFunctionDeclarationStatement));
+    }
+
+    private static bool LeadingArgument(InvocationExpression call, Expression read)
+    {
+        foreach (var argument in call.Arguments)
+        {
+            if (FirstReceiver(argument, read)) return true;
+            if (!StableArgument(argument)) return false;
+        }
+        return false;
+    }
+
     private static bool FirstReceiver(Expression? expression, Expression read) => ReferenceEquals(expression, read) || expression switch
     {
         InvocationExpression call => FirstReceiver(call.Target, read)
             || StableCallTarget(call)
-                && FirstReceiver(call.Arguments.FirstOrDefault(), read),
+                && LeadingArgument(call, read),
         MemberReferenceExpression member => FirstReceiver(member.Target, read),
         IndexerExpression indexer => FirstReceiver(indexer.Target, read),
         ParenthesizedExpression parentheses => FirstReceiver(parentheses.Expression, read),
@@ -69,6 +89,8 @@ internal sealed partial class RecoveredForeach : IAstTransform
 
     public void Run(AstNode rootNode, TransformContext context)
     {
+        var finallyLoops = NormalizeFinallyLoops(rootNode);
+        var currentPrefixes = NormalizeCurrentPrefixes(rootNode);
         var exhaustedResults = NormalizeExhaustedResults(rootNode);
         var leadingReads = NormalizeLeadingCurrent(rootNode);
         RecoverSearchLoops(rootNode);
@@ -274,5 +296,10 @@ internal sealed partial class RecoveredForeach : IAstTransform
             if (rootNode.Descendants.Contains(declaration)) { replacement.ReplaceWith(original); declaration.Remove(); }
         foreach (var (original, replacement) in exhaustedResults)
             if (rootNode.Descendants.Contains(replacement)) replacement.ReplaceWith(original);
+        foreach (var (read, previous) in currentPrefixes)
+            if (rootNode.Descendants.Contains(read) && previous.Parent is BlockStatement body)
+            { read.Remove(); body.Statements.InsertAfter(previous, read); }
+        foreach (var (original, view, cleanup) in finallyLoops)
+            if (rootNode.Descendants.Contains(view)) { view.ReplaceWith(original); cleanup.Remove(); }
     }
 }

@@ -7,6 +7,26 @@ namespace Cpp2CS.Output;
 
 internal sealed partial class RecoveredForeach
 {
+    private static List<(Statement Read, Statement Previous)> NormalizeCurrentPrefixes(AstNode root)
+    {
+        var changed = new List<(Statement, Statement)>();
+        foreach (var loop in root.Descendants.OfType<WhileStatement>().ToArray())
+        {
+            if (loop.Condition is not InvocationExpression { Arguments.Count: 0,
+                    Target: MemberReferenceExpression { MemberName: "MoveNext", Target: IdentifierExpression iterator } }
+                || loop.EmbeddedStatement is not BlockStatement body) continue;
+            var prefix = body.Statements.TakeWhile(PureLocals).ToArray();
+            if (prefix.Length == 0 || body.Statements.Skip(prefix.Length).FirstOrDefault() is not VariableDeclarationStatement declaration
+                || declaration.Variables.ToArray() is not [var variable] || CurrentRead(variable.Initializer) is not { } read
+                || !Name(read.Target, iterator.Identifier) || CurrentByReference(read)
+                || loop.Ancestors.FirstOrDefault(n => n is MethodDeclaration or LambdaExpression or AnonymousMethodExpression) is not { } method
+                || !StableCopies(method, prefix, read)) continue;
+            declaration.Remove(); body.Statements.InsertBefore(prefix[0], declaration);
+            changed.Add((declaration, prefix[^1]));
+        }
+        return changed;
+    }
+
     private static MemberReferenceExpression? CurrentRead(Expression? expression)
     {
         if (expression is CastExpression cast)
@@ -41,6 +61,7 @@ internal sealed partial class RecoveredForeach
                     Left: IdentifierExpression target, Right: var assigned } }
                     when target.GetILVariable() is { Type.Kind: not TypeKind.ByReference } => assigned,
                 ExpressionStatement statement => statement.Expression,
+                YieldReturnStatement statement => statement.Expression,
                 VariableDeclarationStatement initialized when initialized.Variables.ToArray() is [var variable] => variable.Initializer,
                 _ => null,
             };

@@ -4,6 +4,29 @@ namespace Cpp2CS.Output;
 
 internal sealed partial class RecoveredForeach
 {
+    // finally 的匹配视图复用已有清理配对；未折叠的节点必须完整还原。
+    private static List<(TryCatchStatement Original, TryCatchStatement View, Statement Cleanup)> NormalizeFinallyLoops(AstNode root)
+    {
+        var changed = new List<(TryCatchStatement, TryCatchStatement, Statement)>();
+        foreach (var guarded in root.Descendants.OfType<TryCatchStatement>().Reverse().ToArray())
+        {
+            if (guarded.Parent is not BlockStatement parent || guarded.CatchClauses.Count != 0
+                || guarded.FinallyBlock?.Statements.ToArray() is not [var cleanup]
+                || guarded.TryBlock?.Statements.ToArray() is not [WhileStatement { Condition: InvocationExpression { Arguments.Count: 0,
+                    Target: MemberReferenceExpression { MemberName: "MoveNext", Target: IdentifierExpression iterator } } }]
+                || !Dispose(cleanup, iterator.Identifier) && !NullableDispose(cleanup, iterator.Identifier)) continue;
+            var view = (TryCatchStatement)guarded.Clone();
+            view.FinallyBlock = null;
+            view.CatchClauses.Add(new CatchClause { Type = new SimpleType("Exception"),
+                Body = new BlockStatement { cleanup.Clone(), new ThrowStatement() } });
+            var normal = cleanup.Clone();
+            guarded.ReplaceWith(view);
+            parent.Statements.InsertAfter(view, normal);
+            changed.Add((guarded, view, normal));
+        }
+        return changed;
+    }
+
     // 在匹配视图中统一 try 包住 while 的形态；未成功折叠时还原原 AST。
     private static List<(WhileStatement Loop, TryCatchStatement Original)> NormalizeDirectLoops(AstNode root)
     {

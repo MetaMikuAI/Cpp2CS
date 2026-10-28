@@ -33,16 +33,21 @@ internal static class SourceForeachArgumentsCheck
             ("Captured", "sink.Add(iterator.Current);"),
             ("Arithmetic", "sink.Add((int)(double)(iterator.Current + Effect()));"),
             ("LateArithmetic", "sink.Add((int)(double)(Effect() + iterator.Current));"),
+            ("StableArgument", "sink.AddPair(sink, iterator.Current);"),
+            ("CapturedArgument", "sink.AddPair(sink, iterator.Current);"),
+            ("FinallyDirect", "sink.Add(iterator.Current);"),
+            ("FinallyPrefix", "Sink saved = sink; int current = iterator.Current; saved.Add(current);"),
+            ("FinallyExtra", "sink.Add(iterator.Current);"),
+            ("FinallyYield", "yield return iterator.Current;"),
         };
         var methods = string.Join('\n', samples.Select(s => $$"""
-            public static void {{s.Name}}(Sequence sequence, {{(s.Name == "RefReceiver" ? "ref " : "")}}Sink sink)
+            public static {{(s.Name == "FinallyYield" ? "IEnumerable<int>" : "void")}} {{s.Name}}(Sequence sequence, {{(s.Name == "RefReceiver" ? "ref " : "")}}Sink sink)
             {
-                {{(s.Name == "Captured" ? "sequence.OnCurrent = () => sink = null;" : "")}}
+                {{(s.Name is "Captured" or "CapturedArgument" ? "sequence.OnCurrent = () => sink = null;" : "")}}
                 Sequence.Enumerator iterator = default;
                 iterator = sequence.GetEnumerator();
                 try { while (iterator.MoveNext()) { {{s.Statement}} } }
-                catch (Exception) { iterator.Dispose(); throw; }
-                iterator.Dispose();
+                {{(s.Name.StartsWith("Finally", StringComparison.Ordinal) ? "finally { iterator.Dispose(); " + (s.Name == "FinallyExtra" ? "Trace.Add(\"F\");" : "") + " }" : "catch (Exception) { iterator.Dispose(); throw; } iterator.Dispose();")}}
             }
             """));
         var inputSource = """
@@ -57,6 +62,7 @@ internal static class SourceForeachArgumentsCheck
                 {
                     public void Add(int value) { Trace.Add("A" + value); if (Failure == 2) throw new InvalidOperationException(); }
                     public void AddPair(int first, int value) { Trace.Add("P" + first + ":" + value); Add(value); }
+                    public void AddPair(Sink first, int value) { Trace.Add(first == null ? "PN" : "PS"); Add(value); }
                 }
                 public class Sequence
                 {
@@ -93,6 +99,12 @@ internal static class SourceForeachArgumentsCheck
                             case "Captured": Captured(sequence, sink); break;
                             case "Arithmetic": Arithmetic(sequence, sink); break;
                             case "LateArithmetic": LateArithmetic(sequence, sink); break;
+                            case "StableArgument": StableArgument(sequence, sink); break;
+                            case "CapturedArgument": CapturedArgument(sequence, sink); break;
+                            case "FinallyDirect": FinallyDirect(sequence, sink); break;
+                            case "FinallyPrefix": FinallyPrefix(sequence, sink); break;
+                            case "FinallyExtra": FinallyExtra(sequence, sink); break;
+                            case "FinallyYield": foreach (var value in FinallyYield(sequence, sink)) { Trace.Add("Y" + value); if (failure == 6) break; } break;
                         }
                     }
                     catch (InvalidOperationException) { Trace.Add("X"); }
@@ -110,15 +122,16 @@ internal static class SourceForeachArgumentsCheck
         var tree = CSharpSyntaxTree.ParseText(source).GetRoot();
         var a = new Assertions();
         foreach (var sample in samples)
-            a.Equal(sample.Name is "Direct" or "Arithmetic" ? 1 : 0, tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == sample.Name)
-                .DescendantNodes().OfType<ForEachStatementSyntax>().Count(), "只提升稳定引用局部的第一个参数，保留调用、条件执行、前置参数与 ref 接收者");
+            a.Equal(sample.Name is "Direct" or "Arithmetic" or "StableArgument" or "FinallyDirect" or "FinallyPrefix" or "FinallyYield" ? 1 : 0,
+                tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(m => m.Identifier.ValueText == sample.Name)
+                .DescendantNodes().OfType<ForEachStatementSyntax>().Count(), "保留参数求值与 finally 清理边界：" + sample.Name);
         var rebuilt = Compile(source, "ForeachArguments.Rebuilt");
         Func<string, int, string> Observe(byte[] bytes) => System.Reflection.Assembly.Load(bytes).GetType("Probe")!.GetMethod("Observe")!
             .CreateDelegate<Func<string, int, string>>();
         var before = Observe(original);
         var after = Observe(rebuilt);
         foreach (var sample in samples)
-            foreach (var failure in Enumerable.Range(0, 6))
+            foreach (var failure in Enumerable.Range(0, 7))
                 a.Equal(before(sample.Name, failure), after(sample.Name, failure), "正常、空集合、Current/主体/Dispose 异常及 null 接收者事件顺序一致");
         a.Equal("M,C,D,N", after("Direct", 5), "null 接收者仍先读取 Current 再抛错并释放");
         a.Equal("M,M,M,M,D", after("Conditional", 5), "空条件接收者不读取 Current");
@@ -127,6 +140,7 @@ internal static class SourceForeachArgumentsCheck
         a.Equal("M,C,A0,M,C,D,N", after("Captured", 0), "Current 改写捕获接收者时仍使用调用前读取的引用");
         a.Equal("M,C,D,X", after("Arithmetic", 1), "左侧 Current 抛错时不执行右侧调用");
         a.Equal("M,E,C,D,X", after("LateArithmetic", 1), "右侧 Current 不能越过左侧调用");
+        a.Equal("M,C,Y0,D", after("FinallyYield", 6), "暂停后提前释放仍清理枚举器一次");
         return a.Finish("source-foreach-arguments");
     }
 }
