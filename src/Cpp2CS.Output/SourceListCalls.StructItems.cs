@@ -1,4 +1,5 @@
 using System.Reflection;
+using Cpp2CS.Ir;
 using Cpp2CS.Model;
 using Cpp2CS.Recovery;
 
@@ -92,6 +93,13 @@ internal static partial class SourceListCalls
         }
         return composed with { Leaves = leaves };
     }
+
+    // 同位宽整数写入只保留低位；有符号与无符号的截断结果可表示相同元素。
+    private static bool SameStoredItem(ManagedValue left, ManagedValue right, TypeRef element, ManagedTypes types) => SameItem(left, right)
+        || left is ConversionValue { Kind: ConvKind.Truncate } a && right is ConversionValue { Kind: ConvKind.Truncate } b
+            && a.Width == b.Width && a.Width == types.Size(element) * 8 && a.Width < a.Operand.Width
+            && types.Kind(element) == TypeKind.Int && types.Kind(a.Type) == TypeKind.Int && types.Kind(b.Type) == TypeKind.Int
+            && types.Kind(a.Operand.Type) == TypeKind.Int && a.Operand.Equals(b.Operand);
 
     private static bool SameItem(ManagedValue left, ManagedValue right) => left.Equals(right)
         || left is ComposedValue a && right is ComposedValue b && a.Type.Equals(b.Type) && a.Leaves.Count == b.Leaves.Count

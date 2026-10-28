@@ -10,7 +10,8 @@ internal static partial class SourceListCalls
     public static ManagedBody Rewrite(ManagedBody body, ManagedTypes types, Action<ulong, MethodRef> matched,
         Func<MethodRef, SourceValueConstructor?>? constructor = null)
     {
-        while ((MatchInitializer(body, types, matched) ?? MatchAdd(body, types, matched, constructor) ?? MatchClear(body, types, matched)) is { } rewritten) body = rewritten;
+        while ((MatchInitializer(body, types, matched) ?? MatchAdd(body, types, matched, constructor)
+            ?? MatchSharedAdd(body, types, matched, constructor) ?? MatchClear(body, types, matched)) is { } rewritten) body = rewritten;
         return body;
     }
 
@@ -61,7 +62,7 @@ internal static partial class SourceListCalls
     }
 
     private static ManagedBody? MatchAdd(ManagedBody body, ManagedTypes types, Action<ulong, MethodRef> matched,
-        Func<MethodRef, SourceValueConstructor?>? constructor)
+        Func<MethodRef, SourceValueConstructor?>? constructor, ManagedAssignment? candidate = null)
     {
         var list = types.CorlibDefinition("System.Collections.Generic.List");
         if (list is null) return null;
@@ -71,6 +72,7 @@ internal static partial class SourceListCalls
         for (var start = 0; start < block.Statements.Count; start++)
         {
             if (block.Statements[start] is not ManagedAssignment first || Strip(first.Value) is not FieldValue field
+                || candidate is not null && !ReferenceEquals(candidate, first)
                 || field.Field.Field.Name is not ("_items" or "_version") || field.Field.Field.Owner != list
                 || field.Receiver is not (LocalValue or ArgumentValue) || field.Receiver.Type is not DefinitionRef { Arguments.Count: 1 } owner) continue;
             var receiver = field.Receiver;
@@ -174,7 +176,7 @@ internal static partial class SourceListCalls
             using var slow = flow.Straight(slowEdge.Target, 0, block.Address).GetEnumerator();
             if (Next(slow) is not ManagedCall { Result: null, Invocation: { Arguments.Count: 1 } invocation } resize
                 || invocation.Method.Method.Name != "AddWithResize" || !invocation.Method.DeclaringType.Equals(owner)
-                || !Equals(invocation.Receiver, receiver) || !SameItem(ExpandItem(invocation.Arguments[0], constructor), item)) continue;
+                || !Equals(invocation.Receiver, receiver) || !SameStoredItem(ExpandItem(invocation.Arguments[0], constructor), item, element.Type, types)) continue;
             var slowExit = resize.Tail ? new ManagedReturn(resize.Address, null) : Next(slow);
             if (!SameExit(flow.Exit(fastExit), flow.Exit(slowExit))) continue;
             remove.Add(size); remove.UnionWith(elementWrites); remove.Add(resize); remove.Add(branch);

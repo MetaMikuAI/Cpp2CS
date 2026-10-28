@@ -12,7 +12,7 @@ internal static class SourceListCallsCheck
     [Command("source-list-calls", "List 添加的旧长度与异常状态边界", Arguments = "<binary> <metadata>", Gate = Gate.Image)]
     public static int Run(string binary, string metadata)
     {
-        var facts = FactsBuilder.Build(binary, metadata);
+        var facts = FactsBuilder.Build(binary, metadata, inferUnregistered: false);
         var types = new ManagedTypes(facts.Model, facts.Layouts);
         var list = types.CorlibDefinition("System.Collections.Generic.List")!;
         var owner = new DefinitionRef(list, [types.Object]);
@@ -61,7 +61,55 @@ internal static class SourceListCallsCheck
         }
         CheckStructItems(a, types, list, method);
         CheckFastRegions(a, types, list, method);
+        CheckSharedFastTail(a, types, list, method);
         return a.Finish("source-list-calls");
+    }
+
+    private static void CheckSharedFastTail(Assertions a, ManagedTypes types, TypeDef list, MethodRef method)
+    {
+        var owner = new DefinitionRef(list, [types.Int32]);
+        var receiver = new ArgumentValue(0, owner, 64);
+        var item = new ArgumentValue(1, types.Int32, 32);
+        LocalValue Local(int index, TypeRef type, int width) => new(new(Storage.Temp(index), 1), type, width);
+        var arrayType = new ArrayRef(types.Int32, 1);
+        var mergedArray = Local(70, arrayType, 64); var mergedCount = Local(71, types.Int32, 32); var mergedItem = Local(72, types.Int32, 32);
+        FieldValue Field(string name) => new(receiver, new(list.Fields.Single(f => f.Name == name), owner),
+            name == "_items" ? arrayType : types.Int32, name == "_items" ? 64 : 32);
+        ManagedValue Number(ulong value) => new ConstantValue(value, types.Int32, 32);
+        ManagedValue Increment(ManagedValue value) => new BinaryValue(BinOp.Add, value, Number(1), types.Int32, 32);
+        var resize = new MethodRef(list.Methods.Single(m => m.Name == "AddWithResize"), owner.Arguments, []);
+        foreach (var mode in new[] { "valid", "signed-bits", "different-width", "wrong-index", "different-item", "escape", "extra-call" })
+        {
+            var converted = mode is "signed-bits" or "different-width";
+            var sourceItem = converted ? new ArgumentValue(1, types.UInt64, 64) : item;
+            var sharedItem = converted ? Local(72, types.UInt64, 64) : mergedItem;
+            ManagedValue storedItem = converted ? new ConversionValue(ConvKind.Truncate, sharedItem,
+                mode == "different-width" ? types.UInt16 : types.UInt32, mode == "different-width" ? 16 : 32) : sharedItem;
+            ManagedValue resizedItem = converted ? new ConversionValue(ConvKind.Truncate, sourceItem, types.Int32, 32)
+                : mode == "different-item" ? Number(9) : item;
+            ManagedBlock Prefix(ulong address, int index, ulong slow)
+            {
+                var array = Local(index, arrayType, 64); var count = Local(index + 1, types.Int32, 32);
+                return new(address, [new ManagedAssignment(address, array, Field("_items")),
+                    new ManagedStore(address + 1, Field("_version"), Increment(Field("_version"))), new ManagedAssignment(address + 2, count, Field("_size")),
+                    new ManagedBranch(address + 3, new ComparisonValue(Cond.Ult, count, new ArrayLengthValue(array, types.Int32, 32), types.Boolean),
+                        new(48, [new(mergedArray, array), new(mergedCount, count), new(sharedItem, sourceItem)]), new(slow, []))]);
+            }
+            ManagedBlock Slow(ulong address) => new(address, [new ManagedCall(address, new(resize, receiver,
+                [resizedItem], false), null, false), new ManagedJump(address + 1, new(80, []))]);
+            var tail = new List<ManagedStatement> { new ManagedStore(48, Field("_size"), Increment(mergedCount)),
+                new ManagedStore(49, new ArrayElementValue(mergedArray, mode == "wrong-index" ? Increment(mergedCount) : mergedCount, types.Int32, 32), storedItem) };
+            if (mode == "extra-call") tail.Add(new ManagedCall(50, new(method, null, [], false), null, false));
+            tail.Add(new ManagedJump(51, new(80, [])));
+            var input = new ManagedBody(method, [new(0, [new ManagedBranch(0, new ArgumentValue(2, types.Boolean, 8), new(1, []), new(8, []))]),
+                Prefix(1, 80, 16), Slow(16), Prefix(8, 90, 32), Slow(32), new(64, [new ManagedRethrow(64)]),
+                new(48, tail), new(80, [new ManagedReturn(80, mode == "escape" ? mergedCount : null)])])
+                { Regions = [new([1, 16, 8, 32], 64, [64], null, ManagedRegionKind.Catch)] };
+            var output = SourceListCalls.Rewrite(input, types, (_, _) => { });
+            a.Equal(mode is "valid" or "signed-bits" ? 2 : 0, output.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>()
+                .Count(call => call.Invocation.Method.Method.Name == "Add"), "共享添加尾部 " + mode);
+            if (mode is not ("valid" or "signed-bits")) a.Equal(input.Blocks.Count, output.Blocks.Count, "失败视图不保留复制块");
+        }
     }
 
     private static void CheckFastRegions(Assertions a, ManagedTypes types, TypeDef list, MethodRef method)
