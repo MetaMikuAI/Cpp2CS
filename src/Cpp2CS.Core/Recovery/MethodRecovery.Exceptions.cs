@@ -143,7 +143,7 @@ public sealed partial class MethodRecovery
             return exceptionTypeTargets.Count != 0;
         }
 
-        private ManagedBody BuildExceptionBody()
+        private RecoveryResult<ManagedBody> BuildExceptionBody()
         {
             var layout = exceptionLayout!;
             var byId = layout.Graph.Fragments.ToDictionary(f => f.Id);
@@ -168,22 +168,18 @@ public sealed partial class MethodRecovery
                             || !ExprMap.Walk(define.Value).Any(e => e is Load)) continue;
                         exceptionDemand.Add(define.Target);
                     }
-                    try
+                    if (statement is Branch branch)
                     {
-                        if (statement is Branch branch)
-                        {
-                            if ((normal.GetValueOrDefault(fragment.Id) ?? []).Length == 2) _ = Recover(branch.Condition, types.Boolean);
-                        }
-                        else
-                        {
-                            var translated = new List<ManagedStatement>();
-                            Translate(fragment.Block, statement, translated);
-                            // 帧拷贝等规则缓存了已恢复的值，不再经过 Variable；其读取也必须保留原生定义。
-                            foreach (var value in translated.SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
-                                .SelectMany(WalkRecoveryValue).OfType<LocalValue>()) exceptionDemand.Add(value.Variable);
-                        }
+                        if ((normal.GetValueOrDefault(fragment.Id) ?? []).Length == 2) _ = Recover(branch.Condition, types.Boolean);
                     }
-                    catch (HoleException) { /* 实际写出遍历仍会记录这个洞；这里只收集已读到的来源。 */ }
+                    else
+                    {
+                        var translated = new List<ManagedStatement>();
+                        // 失败由实际写出遍历登记；此遍历只收集已读取的来源。
+                        if (Translate(fragment.Block, statement, translated) is not null) continue;
+                        foreach (var value in translated.SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
+                            .SelectMany(WalkRecoveryValue).OfType<LocalValue>()) exceptionDemand.Add(value.Variable);
+                    }
                 }
             collectingExceptionDemand = false;
             var work = new Queue<Variable>(exceptionDemand);
@@ -197,9 +193,10 @@ public sealed partial class MethodRecovery
             foreach (var fragment in order)
             {
                 var statements = new List<ManagedStatement>();
-                try
+                RecoveryFailure? LowerFragment()
                 {
-                    foreach (var path in layout.EntryPaths.Where(p => p.Source == fragment && active.Contains(p.Entry))) ExceptionCopies(path, statements);
+                    foreach (var path in layout.EntryPaths.Where(p => p.Source == fragment && active.Contains(p.Entry)))
+                        if (ExceptionCopies(path, statements) is { } failure) return failure;
                     var successors = normal.GetValueOrDefault(fragment.Id) ?? [];
                     foreach (var statement in fragment.Statements)
                     {
@@ -209,29 +206,43 @@ public sealed partial class MethodRecovery
                         if (statement is Call { Op.Kind: OpKind.ResumeUnwind } resume)
                         {
                             if (!layout.Regions.Any(r => r.Kind == "fault" && r.Handler.Contains(fragment)))
-                                throw Fail(resume.Address, "异常区域 可达清理未映射为 fault");
+                                return Fail(resume.Address, "异常区域 可达清理未映射为 fault");
                             statements.Add(new ManagedEndFault(resume.Address)); continue;
                         }
                         if (statement is Branch branch)
                         {
-                            if (successors is [var only]) statements.Add(new ManagedJump(branch.Address, ExceptionEdge(fragment, only)));
-                            else if (successors.Length == 2) statements.Add(new ManagedBranch(branch.Address, Truth(Recover(branch.Condition, types.Boolean)),
-                                ExceptionEdge(fragment, successors.Single(f => f.Block.Start == branch.Target)),
-                                ExceptionEdge(fragment, successors.Single(f => f.Block.Start == branch.Fallthrough))));
-                            else throw Fail(branch.Address, "异常区域 分支后继未证成");
+                            if (successors is [var only])
+                            {
+                                if (Emit(ExceptionEdge(fragment, only).Map(edge => new ManagedJump(branch.Address, edge)), statements) is { } failure) return failure;
+                            }
+                            else if (successors.Length == 2)
+                            {
+                                if (!Recover(branch.Condition, types.Boolean).Bind(Truth).TryGet(out var condition, out var failure)) return failure;
+                                if (!ExceptionEdge(fragment, successors.Single(f => f.Block.Start == branch.Target)).TryGet(out var taken, out failure)) return failure;
+                                if (!ExceptionEdge(fragment, successors.Single(f => f.Block.Start == branch.Fallthrough)).TryGet(out var other, out failure)) return failure;
+                                statements.Add(new ManagedBranch(branch.Address, condition, taken, other));
+                            }
+                            else return Fail(branch.Address, "异常区域 分支后继未证成");
                             continue;
                         }
                         if (statement is Jump jump)
                         {
-                            if (successors is not [var only]) throw Fail(jump.Address, "异常区域 跳转后继未证成");
-                            statements.Add(new ManagedJump(jump.Address, ExceptionEdge(fragment, only))); continue;
+                            if (successors is not [var only]) return Fail(jump.Address, "异常区域 跳转后继未证成");
+                            if (Emit(ExceptionEdge(fragment, only).Map(edge => new ManagedJump(jump.Address, edge)), statements) is { } failure) return failure;
+                            continue;
                         }
                         if (statement is IndirectJump table && switchIndices.TryGetValue(table, out var index))
                         {
                             var targets = successors.ToDictionary(f => f.Block.Start);
-                            if (table.Targets.Any(t => !targets.ContainsKey(t))) throw Fail(table.Address, "异常区域 switch 后继未证成");
-                            statements.Add(new ManagedSwitch(table.Address, Index(index),
-                                table.Targets.Select(t => ExceptionEdge(fragment, targets[t])).ToArray()));
+                            if (table.Targets.Any(t => !targets.ContainsKey(t))) return Fail(table.Address, "异常区域 switch 后继未证成");
+                            if (!Index(index).TryGet(out var selector, out var failure)) return failure;
+                            var edges = new List<ManagedEdge>();
+                            foreach (var target in table.Targets)
+                            {
+                                if (!ExceptionEdge(fragment, targets[target]).TryGet(out var edge, out failure)) return failure;
+                                edges.Add(edge);
+                            }
+                            statements.Add(new ManagedSwitch(table.Address, selector, edges));
                             continue;
                         }
                         if (statement is Call { Op.Kind: OpKind.ThrowManaged or OpKind.Rethrow, Arguments: [Use value] } rethrow
@@ -239,16 +250,24 @@ public sealed partial class MethodRecovery
                             // rethrow 指向最内层活动 catch；内层 catch 中再次抛出外层保存对象必须用 throw。
                             && caughtExceptions.Where(p => p.Key.Handler.Contains(fragment)).OrderBy(p => p.Key.Handler.Count).FirstOrDefault().Value == current)
                         { statements.Add(new ManagedRethrow(rethrow.Address)); continue; }
-                        if (ledger.TryGetDiagnosis(statement, out var cause)) throw Derived(cause, "异常区域 语句已诊断");
-                        Translate(fragment.Block, statement, statements);
+                        if (ledger.TryGetDiagnosis(statement, out var cause)) return Derived(cause, "异常区域 语句已诊断");
+                        if (Translate(fragment.Block, statement, statements) is { } translationFailure) return translationFailure;
                     }
                     if (statements.LastOrDefault() is not (ManagedReturn or ManagedJump or ManagedBranch or ManagedSwitch or ManagedThrow or ManagedRethrow or ManagedEndFault or ManagedCall { Tail: true }))
                     {
-                        if (successors is [var only]) statements.Add(new ManagedJump(fragment.Block.End, ExceptionEdge(fragment, only)));
-                        else throw Fail(fragment.Block.Start, "异常区域 片段缺少终结方式");
+                        if (successors is [var only])
+                        {
+                            if (Emit(ExceptionEdge(fragment, only).Map(edge => new ManagedJump(fragment.Block.End, edge)), statements) is { } failure) return failure;
+                        }
+                        else return Fail(fragment.Block.Start, "异常区域 片段缺少终结方式");
                     }
+                    return null;
                 }
-                catch (HoleException e) { Record(e, fragment.Block.Start); statements.Add(new ManagedHole(e.Address == 0 ? fragment.Block.Start : e.Address, e.Message, true)); }
+                if (LowerFragment() is { } failure)
+                {
+                    Record(failure, fragment.Block.Start);
+                    statements.Add(new ManagedHole(failure.Address == 0 ? fragment.Block.Start : failure.Address, failure.Message, true));
+                }
                 output.Add(new(FragmentLabel(fragment), statements));
             }
             var body = new ManagedBody(method, output)
@@ -261,19 +280,19 @@ public sealed partial class MethodRecovery
             return RouteExceptionSources(body, layout, order);
         }
 
-        private ManagedEdge ExceptionEdge(ExceptionFragment from, ExceptionFragment to)
+        private RecoveryResult<ManagedEdge> ExceptionEdge(ExceptionFragment from, ExceptionFragment to)
         {
-            if (from.Block == to.Block) return new(FragmentLabel(to), []);
+            if (from.Block == to.Block) return new ManagedEdge(FragmentLabel(to), []);
             var successor = from.Block.NormalSuccessors.ToList().IndexOf(to.Block);
-            if (successor < 0) throw Fail(from.Block.Start, "异常区域 普通边没有原始 SSA 来源");
-            return Edge(from.Block, successor, to.Block.Start) with { Target = FragmentLabel(to) };
+            if (successor < 0) return Fail(from.Block.Start, "异常区域 普通边没有原始 SSA 来源");
+            return Edge(from.Block, successor, to.Block.Start).Map(edge => edge with { Target = FragmentLabel(to) });
         }
 
         /// <summary>
         /// 异常边的 phi 在可能抛出前快照。空桥逐级代入来源；普通边索引只用于原图实际存在的边。
         /// L2 消掉的异常边从原生存储的到达赋值取值；被传播删去的复制定义仍是赋值证据。
         /// </summary>
-        private void ExceptionCopies(ExceptionEntryPath path, List<ManagedStatement> statements)
+        private RecoveryFailure? ExceptionCopies(ExceptionEntryPath path, List<ManagedStatement> statements)
         {
             var aliases = new Dictionary<Variable, Expr>();
             var copies = new List<ManagedCopy>();
@@ -286,12 +305,14 @@ public sealed partial class MethodRecovery
                 return value.Width == use.Width ? value : Fold.Simplify(new Ir.Convert(
                     value.Width > use.Width ? ConvKind.Truncate : ConvKind.ZeroExtend, value, use.Width));
             });
-            void Copy(Variable variable, Expr expression, ulong address)
+            RecoveryFailure? Copy(Variable variable, Expr expression, ulong address)
             {
                 var value = Resolve(expression);
                 aliases[variable] = value;
-                var target = Local(variable);
-                copies.Add(new(target, Coerce(Recover(value, target.Type), target.Type, address)));
+                if (!Local(variable).TryGet(out var target, out var failure)) return failure;
+                if (!Recover(value, target.Type).Bind(recovered => Coerce(recovered, target.Type, address)).TryGet(out var result, out failure)) return failure;
+                copies.Add(new(target, result));
+                return null;
             }
             var from = path.Source.Block;
             var previousFragment = path.Source;
@@ -304,15 +325,16 @@ public sealed partial class MethodRecovery
                     if (runtime.Contains(phi.Target) || exceptionValues.ContainsKey(phi.Target) || !exceptionDemand.Contains(phi.Target)) continue;
                     var sources = phi.Sources.Distinct().ToArray();
                     var source = incoming >= 0 ? phi.Sources[incoming] : sources.Length == 1 ? sources[0]
-                        : ExceptionReachingSource(previousFragment, phi, previousFragment == path.Source)
-                            ?? throw Fail(phi.Address, $"异常区域 异常边 φ 来源未证成 {phi.Target} site=0x{path.Source.NativeExceptionSite:x}");
-                    Copy(phi.Target, new Use(source, phi.Target.Width), phi.Address);
+                        : ExceptionReachingSource(previousFragment, phi, previousFragment == path.Source);
+                    if (source is null) return Fail(phi.Address, $"异常区域 异常边 φ 来源未证成 {phi.Target} site=0x{path.Source.NativeExceptionSite:x}");
+                    if (Copy(phi.Target, new Use(source, phi.Target.Width), phi.Address) is { } failure) return failure;
                 }
                 // 桥中的纯复制也被区域图消去；逐级代入后与 phi 一起在调用前快照。
                 if (fragment != path.Entry)
                     foreach (var define in fragment.Statements.OfType<Define>())
                         if (!runtime.Contains(define.Target) && !exceptionValues.ContainsKey(define.Target)
-                            && exceptionDemand.Contains(define.Target)) Copy(define.Target, define.Value, define.Address);
+                            && exceptionDemand.Contains(define.Target))
+                            if (Copy(define.Target, define.Value, define.Address) is { } failure) return failure;
                 from = fragment.Block;
                 previousFragment = fragment;
             }
@@ -320,6 +342,7 @@ public sealed partial class MethodRecovery
             var saved = copies.Select(c => (c.Target, Value: c.Value, Temp: StructLocal(c.Target.Type, c.Target.Width))).ToArray();
             foreach (var c in saved) statements.Add(new ManagedAssignment(path.Source.NativeExceptionSite ?? from.Start, c.Temp, c.Value));
             foreach (var c in saved) statements.Add(new ManagedAssignment(path.Source.NativeExceptionSite ?? from.Start, c.Target, c.Temp));
+            return null;
         }
 
         /// <summary>仅追溯调用不会破坏的寄存器和已提升栈槽；不同前驱必须给出同一版本，不补猜缺失的赋值。</summary>
@@ -379,13 +402,14 @@ public sealed partial class MethodRecovery
         }
         /// <summary>异常筛选的类型判断：catch 的 IsAssignableFrom 写成 isinst 比较，结果补零到 64 位。</summary>
         [CallRule(20)]
-        private bool LowerExceptionTypeTarget(Call call, List<ManagedStatement> output)
+        private RecoveryResult<bool> LowerExceptionTypeTarget(Call call, List<ManagedStatement> output)
         {
             if (!exceptionTypeTargets.TryGetValue(call, out var exceptionType) || !typeChecks.TryGetValue(call, out var exceptionObject)
                 || call.Defines.FirstOrDefault() is not { } exceptionResult) return false;
-            var matched = new ComparisonValue(Cond.Ne, new IsInstValue(RecoverAs(exceptionObject, types.Object, call.Address), exceptionType),
+            if (!RecoverAs(exceptionObject, types.Object, call.Address).TryGet(out var value, out var failure)) return failure;
+            var matched = new ComparisonValue(Cond.Ne, new IsInstValue(value, exceptionType),
                 new ConstantValue(0, exceptionType, 64), types.Boolean);
-            output.Add(new ManagedAssignment(call.Address, Local(exceptionResult), Coerce(matched, types.UInt64, call.Address)));
+            if (Assign(call.Address, exceptionResult, () => Coerce(matched, types.UInt64, call.Address), output) is { } assignmentFailure) return assignmentFailure;
             return true;
         }
     }

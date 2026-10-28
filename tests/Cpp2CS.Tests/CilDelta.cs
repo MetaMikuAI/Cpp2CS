@@ -6,20 +6,22 @@ namespace Cpp2CS.Tests;
 /// <summary>比较恢复产物的方法集合和 CIL；不要求附带 C# 文本，也不把新增方法视为回归。</summary>
 internal static class CilDelta
 {
-    [Command("cil-delta", "比较两个恢复目录的新增、丢失及 CIL 变化，输出抽查清单", Arguments = "<before> <after> <output> [--source] [--only 清单]")]
+    [Command("cil-delta", "比较两个恢复目录的新增、丢失及 CIL 变化，输出抽查清单", Arguments = "<before> <after> <output> [--source] [--partial] [--only 清单]")]
     public static int Run(string before, string after, string output, string[] options)
     {
         var assemblies = "assemblies";
+        var partial = false;
         HashSet<string>? selected = null;
         for (var i = 0; i < options.Length; i++)
         {
             if (options[i] == "--source") assemblies = "assemblies-src";
+            else if (options[i] == "--partial") partial = true;
             else if (options[i] == "--only" && i + 1 < options.Length)
                 selected = File.ReadLines(options[++i]).Where(l => l.Length > 0 && !l.StartsWith('#')).ToHashSet(StringComparer.Ordinal);
             else throw new ArgumentException($"未知或不完整的参数：{options[i]}");
         }
-        var old = Read(before);
-        var current = Read(after);
+        var old = partial ? ReadPartial(before, assemblies) : Read(before);
+        var current = partial ? ReadPartial(after, assemblies) : Read(after);
         if (selected is not null)
         {
             old = old.Where(p => selected.Contains(p.Key)).ToDictionary();
@@ -70,6 +72,26 @@ internal static class CilDelta
 
     private static Dictionary<string, string[]> Read(string directory) => File.ReadLines(Path.Combine(directory, "emitted.tsv"))
         .Select(line => line.Split('\t')).ToDictionary(row => $"{row[3]}\t{row[4]}", StringComparer.Ordinal);
+
+    private static Dictionary<string, string[]> ReadPartial(string directory, string assemblies)
+    {
+        var result = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        foreach (var file in Directory.EnumerateFiles(Path.Combine(directory, assemblies), "*.dll").Order(StringComparer.Ordinal))
+        {
+            using var module = ModuleDefinition.ReadModule(file);
+            foreach (var method in module.GetTypes().SelectMany(t => t.Methods).Where(m => m.HasBody
+                && m.Body.Instructions.Any(i => i.Operand is MethodReference called && called.DeclaringType.FullName == "Cpp2CS.Unrecovered")))
+                result.Add($"{module.Name}\t{method.FullName}",
+                    [Path.GetFileName(file), "", "", "partial", method.FullName, $"0x{method.MetadataToken.ToUInt32():x8}", "target"]);
+        }
+        var expected = File.ReadLines(Path.Combine(directory, "recovery.jsonl")).Count(line =>
+        {
+            using var row = JsonDocument.Parse(line);
+            return row.RootElement.GetProperty("partial").GetBoolean();
+        });
+        if (result.Count != expected) throw new InvalidDataException($"部分方法体清单为 {expected}，含缺口标记的方法体为 {result.Count}");
+        return result;
+    }
 
     private static void Dump(TextWriter writer, string label, MethodDefinition method)
     {

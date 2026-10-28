@@ -109,11 +109,19 @@ public sealed record ManagedBody(MethodRef Method, IReadOnlyList<ManagedBlock> B
     public IReadOnlyList<ManagedRegion> Regions { get; init; } = [];
 }
 
-/// <summary>未恢复之处：地址与原因。原因的第一个词用于分桶统计。</summary>
-public sealed record RecoveryHole(ulong Address, string Reason, bool Derived = false);
+/// <summary>未恢复之处：编号与来源独立于可读说明，派生诊断保留根因编号。</summary>
+public sealed record RecoveryHole(ulong Address, string Reason, bool Derived = false)
+{
+    public string Code { get; init; } = "recovery.unsupported";
+    public int Id { get; init; }
+    public int? CauseId { get; init; }
+}
 public enum RuntimeDeclarationKind { Delegate, PlatformInvoke }
 public sealed record MethodRecoveryResult(MethodRef Method, ulong Entry, ManagedBody? Body, IReadOnlyList<RecoveryHole> Holes)
 {
+    public IReadOnlyList<Analysis.AnalysisStep> Analyses { get; init; } = [];
+    public IReadOnlyList<Analysis.RuleTrace> Rules { get; init; } = [];
+    public IReadOnlyList<Cpp2CS.Calls.CallResolution> Calls { get; init; } = [];
     /// <summary>已核验的运行时声明；没有恢复原生方法体，不计入方法体及字节覆盖率。</summary>
     public RuntimeDeclarationKind? Declaration { get; init; }
     public NativeImport? PlatformImport { get; init; }

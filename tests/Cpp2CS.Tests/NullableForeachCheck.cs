@@ -66,7 +66,7 @@ internal static class NullableForeachCheck
                     outer.Statements.Last().ReplaceWith(new ExpressionStatement(new InvocationExpression(new MemberReferenceExpression(Id("iterator"), "Dispose"))));
                 }
             }
-            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).GetNestedType("RecoveredForeach", BindingFlags.NonPublic)!, nonPublic: true)!;
+            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).Assembly.GetType("Cpp2CS.Output.RecoveredForeach")!, nonPublic: true)!;
             transform.Run(tree, null!);
             a.Equal(mode is "valid" or "direct" or "direct-cleanup" ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的清理边界");
             if (mode is "valid" or "direct" or "direct-cleanup")

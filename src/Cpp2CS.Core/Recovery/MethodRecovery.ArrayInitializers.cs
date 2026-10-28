@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
 
@@ -9,7 +10,7 @@ public sealed partial class MethodRecovery
     {
         // RuntimeHelpers.InitializeArray 的 FieldRVA 数据来自匹配元数据，按数组元素宽度还原常量写入。
         [InvocationRule(4)]
-        private bool InitializeConstantArray(Call call, List<ManagedStatement> output)
+        private RecoveryResult<bool> InitializeConstantArray(Call call, List<ManagedStatement> output)
         {
             if (Resolve(call) is not { Method.Name: "InitializeArray", Method.Owner.FullName: "System.Runtime.CompilerServices.RuntimeHelpers" }
                 || call.Arguments.Length < 2 || Expand(call.Arguments[1]) is not Symbol { Kind: SymbolKind.Field, Value: FieldRef { Field.InitialValue: { } data } }
@@ -18,7 +19,7 @@ public sealed partial class MethodRecovery
                 || length.Value > 65536 || types.Kind(type.Element) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)) return false;
             var size = types.Size(type.Element);
             if (size is not (1 or 2 or 4 or 8) || length.Value * (ulong)size > (ulong)data.Length) return false;
-            var target = Recover(array, type);
+            if (!Recover(array, type).TryGet(out var target, out var failure)) return failure;
             for (var index = 0; (ulong)index < length.Value; index++)
             {
                 ulong bits = 0;

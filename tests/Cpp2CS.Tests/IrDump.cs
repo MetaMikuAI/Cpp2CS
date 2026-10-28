@@ -1,3 +1,4 @@
+using Cpp2CS.Pipeline;
 using Cpp2CS.Facts;
 using Cpp2CS.Idioms;
 using Cpp2CS.Input;
@@ -78,7 +79,7 @@ internal static class RecoverDump
                 if (result.PlatformImport is { } imported) Console.WriteLine($"  {imported}");
                 if ((result.Body ?? result.Partial) is { } body)
                 {
-                    if (sourceView) body = new Cpp2CS.Output.SourceLibraryCalls(facts, types, recovery).Rewrite(Cpp2CS.Recovery.SourceRewriter.Rewrite(body, types));
+                    if (sourceView) body = new Cpp2CS.Pipeline.MethodSummaryService(recovery).Complete(summaries => new Cpp2CS.Output.SourceLibraryCalls(facts, types, summaries).Rewrite(Cpp2CS.Recovery.SourceRewriter.Rewrite(body, types)));
                     foreach (var region in body.Regions) Console.WriteLine($"  {Show(region)}");
                     foreach (var block in body.Blocks)
                     {
@@ -123,7 +124,7 @@ internal static class ClosureDump
         var results = facts.Model.Methods.Where(m => entries.Contains(m.Address)).Select(m => recovery.Recover(new Cpp2CS.Model.MethodRef(m, [], []), m.Address)).ToArray();
         var skeleton = new Cpp2CS.Output.Skeleton(facts.Model);
         var emitter = new Cpp2CS.Output.BodyEmitter(skeleton, types);
-        var closure = new Cpp2CS.Output.AccessorRecovery(facts, types, recovery, emitter, results);
+        var closure = new Cpp2CS.Pipeline.AccessorRecovery(facts, types, new MethodSummaryService(recovery), emitter, results);
         var before = results.ToDictionary(r => r.Method.Method, r => r.Body is { } b ? closure.Problems.GetValueOrDefault(b) : "有洞");
         Console.WriteLine($"内联候选 {closure.InlineCandidates.Count}：{string.Join("，", closure.InlineCandidates.Keys.Select(m => m.ToString()))}");
         Console.WriteLine($"泛型访问器 {closure.GenericAccessors.Count}：{string.Join("，", closure.GenericAccessors.Select(a => a.Method.ToString()))}");

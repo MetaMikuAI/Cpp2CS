@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
@@ -20,9 +21,9 @@ public sealed partial class MethodRecovery
         /// 这组 φ 是一个结构体局部变量；φ 只被返回使用。逐片读取的定义并入入边上的整体读取。
         /// </summary>
         [Analysis("结构体汇合", 95, After = ["类型"])]
-        private void StructPhis()
+        private RecoveryFailure? StructPhis()
         {
-            if (owner.abi.Classify(method, out _)?.Return is not { } returned || !RegisterStruct(returned) || returned.Pieces.Length < 2) return;
+            if (owner.abi.Classify(method, out _)?.Return is not { } returned || !RegisterStruct(returned) || returned.Pieces.Length < 2) return null;
             var type = returned.Type;
             var size = types.Size(type);
             var uses = blocks.SelectMany(b => b.Statements).Where(s => s is not Phi)
@@ -54,9 +55,10 @@ public sealed partial class MethodRecovery
                     if (sources.Zip(returned.Pieces).All(p => PieceLoad(p.First, p.Second) is not null) && PieceLoad(sources[0], returned.Pieces[0]) is { } first
                         && sources.Zip(returned.Pieces).All(p => PieceLoad(p.First, p.Second) is { } l
                             && Split(l.Address).Offset - Split(first.Address).Offset == p.Second.Offset && Split(l.Address).Base == Split(first.Address).Base)
-                        && sources.All(s => !uses[s].Any() && phiSources[s].All(p => members.Contains(p)))
-                        && CopyRanges(first.Address, size * 8).FirstOrDefault(r => r.Offset == 0 && r.Type.Equals(type)) is { } range)
+                        && sources.All(s => !uses[s].Any() && phiSources[s].All(p => members.Contains(p))))
                     {
+                        if (!CopyRanges(first.Address, size * 8).TryGet(out var ranges, out var failure)) return failure;
+                        if (ranges.FirstOrDefault(r => r.Offset == 0 && r.Type.Equals(type)) is not { } range) continue;
                         origins.Add(() => new IndirectValue(range.Root, type));
                         absorbed.AddRange(sources);
                         continue;
@@ -69,6 +71,7 @@ public sealed partial class MethodRecovery
                 foreach (var variable in absorbed)
                     foreach (var definition in blocks.SelectMany(b => b.Statements).OfType<Define>().Where(d => d.Target == variable)) dropped.Add(definition);
             }
+            return null;
         }
 
         /// <summary>
@@ -77,7 +80,7 @@ public sealed partial class MethodRecovery
         /// φ 是一个该类型的结构体局部变量；读取并入入边上的整体赋值。
         /// </summary>
         [Analysis("结构体写入汇合", 96, After = ["结构体汇合"])]
-        private void StoredStructPhis()
+        private RecoveryFailure? StoredStructPhis()
         {
             var statements = blocks.SelectMany(b => b.Statements).ToArray();
             var uses = statements.Where(s => s is not Phi)
@@ -92,7 +95,8 @@ public sealed partial class MethodRecovery
                     if (uses[phi.Target].ToArray() is [Store { Value: Use { Width: 64 or 32 } use } store] && use.Variable == phi.Target)
                     {
                         width = use.Width;
-                        type = CopyRanges(store.Target, width).FirstOrDefault(r => r.Offset == 0 && types.Kind(r.Type) == TypeKind.Struct && types.Size(r.Type) * 8 == width)?.Type;
+                        if (!CopyRanges(store.Target, width).TryGet(out var ranges, out var failure)) return failure;
+                        type = ranges.FirstOrDefault(r => r.Offset == 0 && types.Kind(r.Type) == TypeKind.Struct && types.Size(r.Type) * 8 == width)?.Type;
                     }
                     else if (uses[phi.Target].ToArray() is [Return { Value: Use { Width: 64 or 32 } returned }]
                         && returned.Variable == phi.Target && types.Kind(returnType) == TypeKind.Struct && types.Size(returnType) * 8 == returned.Width)
@@ -111,9 +115,10 @@ public sealed partial class MethodRecovery
                             origins.Add(() => new ComposedValue(type, []));
                             continue;
                         }
-                        if (value is Load load && load.Width == width && !uses[source].Any() && phiSources[source].All(p => ReferenceEquals(p, phi))
-                            && CopyRanges(load.Address, width).FirstOrDefault(r => r.Offset == 0 && r.Type.Equals(type)) is { } range)
+                        if (value is Load load && load.Width == width && !uses[source].Any() && phiSources[source].All(p => ReferenceEquals(p, phi)))
                         {
+                            if (!CopyRanges(load.Address, width).TryGet(out var ranges, out var failure)) return failure;
+                            if (ranges.FirstOrDefault(r => r.Offset == 0 && r.Type.Equals(type)) is not { } range) break;
                             origins.Add(() => new IndirectValue(range.Root, type));
                             absorbed.Add(source);
                             continue;
@@ -127,15 +132,18 @@ public sealed partial class MethodRecovery
                     foreach (var variable in absorbed)
                         foreach (var definition in statements.OfType<Define>().Where(d => d.Target == variable)) dropped.Add(definition);
                 }
+            return null;
         }
 
         /// <summary>结构体 φ 的一片（返回时按 ABI 片读取）。</summary>
-        private ManagedValue? StructPhiPiece(Variable variable, int width)
+        private RecoveryResult<ManagedValue?> StructPhiPiece(Variable variable, int width)
         {
-            if (!structPhiMembers.TryGetValue(variable, out var member)) return null;
+            if (!structPhiMembers.TryGetValue(variable, out var member)) return (ManagedValue?)null;
             var fragment = StructPiece(member.Group.Local, member.Piece);
             if (width == fragment.Width) return fragment;
-            return width < fragment.Width ? Slice(fragment, 0, width) : fragment is Fragment f ? ResizeFragment(f, width) : new Fragment([new Part(0, fragment)], types.UInt64, width);
+            return width < fragment.Width ? Slice(fragment, 0, width).Map<ManagedValue?>(value => value)
+                : fragment is Fragment f ? ResizeFragment(f, width).Map<ManagedValue?>(value => value)
+                : new Fragment([new Part(0, fragment)], types.UInt64, width);
         }
     }
 }

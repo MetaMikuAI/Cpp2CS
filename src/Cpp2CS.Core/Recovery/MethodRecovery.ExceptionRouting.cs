@@ -1,4 +1,5 @@
 using Cpp2CS.Ir;
+using Cpp2CS.Recovery.Analysis;
 
 namespace Cpp2CS.Recovery;
 
@@ -10,7 +11,7 @@ public sealed partial class MethodRecovery
         /// 单入口闭包可能把只属于外层的调用包进内层 try。用原生异常边标记当前捕获目标，
         /// 内层 catch 对这些调用直接 rethrow，保留外层处理路径。
         /// </summary>
-        private ManagedBody RouteExceptionSources(ManagedBody body, ExceptionLayout layout, ExceptionFragment[] order)
+        private RecoveryResult<ManagedBody> RouteExceptionSources(ManagedBody body, ExceptionLayout layout, ExceptionFragment[] order)
         {
             var byEntry = layout.Regions.ToDictionary(r => r.Entry);
             var targets = layout.EntryPaths.ToDictionary(p => p.Source, p => byEntry.GetValueOrDefault(p.Entry));
@@ -29,8 +30,13 @@ public sealed partial class MethodRecovery
             var guards = guarded.Select((r, i) => (Region: r, Flag: StructLocal(types.Boolean, 8),
                 Entry: 0xf700000000000000UL + (ulong)i * 2, Reject: 0xf700000000000001UL + (ulong)i * 2)).ToArray();
             var original = body.Blocks.ToDictionary(b => b.Address);
-            var updates = guarded.ToDictionary(r => r, Updates);
-            Dictionary<ExceptionFragment, bool> Updates(ExceptionRegionPlan region)
+            var updates = new Dictionary<ExceptionRegionPlan, Dictionary<ExceptionFragment, bool>>();
+            foreach (var region in guarded)
+            {
+                if (!Updates(region).TryGet(out var values, out var failure)) return failure;
+                updates.Add(region, values);
+            }
+            RecoveryResult<Dictionary<ExceptionFragment, bool>> Updates(ExceptionRegionPlan region)
             {
                 var desired = new Dictionary<ExceptionFragment, bool>();
                 foreach (var fragment in order.Where(region.Try.Contains))
@@ -39,7 +45,7 @@ public sealed partial class MethodRecovery
                     if (original[FragmentLabel(fragment)].Statements is [ManagedJump { Edge.Copies.Count: 0 }]) continue;
                     var target = targets.GetValueOrDefault(fragment);
                     if (target is not null && !Within(target, region) && !Within(region, target))
-                        throw Fail(fragment.Block.Start, "异常区域 捕获目标不在当前嵌套链");
+                        return Fail(fragment.Block.Start, "异常区域 捕获目标不在当前嵌套链");
                     desired[fragment] = target is not null ? Within(target, region) : fragment.NativeExceptionSite is null;
                 }
                 // 1/2 是两种已知值，4 表示从区域外进入。所有入边值相同时才省略重复赋值。

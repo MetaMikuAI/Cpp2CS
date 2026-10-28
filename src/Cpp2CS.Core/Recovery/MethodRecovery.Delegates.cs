@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
@@ -72,50 +73,50 @@ public sealed partial class MethodRecovery
         }
 
         [InvocationRule(10)]
-        private bool LowerDelegateCreation(Call call, List<ManagedStatement> output)
+        private RecoveryResult<bool> LowerDelegateCreation(Call call, List<ManagedStatement> output)
         {
             if (!delegateCreations.ContainsKey(call)) return false;
-            CreateDelegate(call, output);
+            if (CreateDelegate(call, output) is { } failure) return failure;
             return true;
         }
 
-        private void CreateDelegate(Call call, List<ManagedStatement> output)
+        private RecoveryFailure? CreateDelegate(Call call, List<ManagedStatement> output)
         {
             var address = call.Address;
             var type = delegateCreations[call];
             var registers = ArgumentsOf(call);
             if (DelegateFacts.Constructor(type) is null || DelegateFacts.Invoke(type) is not { } invoke)
-                throw Fail(address, "委托 具体分配类型没有标准构造与唯一 Invoke");
-            if (!registers.TryGetValue(Storage.Gpr(1), out var target)) throw Fail(address, "委托 构造缺少绑定对象");
+                return Fail(address, "委托 具体分配类型没有标准构造与唯一 Invoke");
+            if (!registers.TryGetValue(Storage.Gpr(1), out var target)) return Fail(address, "委托 构造缺少绑定对象");
             var lookup = virtualDelegates.GetValueOrDefault(call);
             var targetMethod = lookup is not null ? VirtualDelegateMethod(lookup)
                 : registers.TryGetValue(Storage.Gpr(2), out var identity) && Expand(identity) is Symbol { Kind: SymbolKind.Method, Value: MethodRef direct } ? direct : null;
-            if (targetMethod is null) throw Fail(address, "委托 方法身份或虚表槽位未确定");
+            if (targetMethod is null) return Fail(address, "委托 方法身份或虚表槽位未确定");
             if (!Bound(targetMethod.DeclaringType) || targetMethod.MethodArguments.Any(t => !Bound(t))
                 || targetMethod.Method.GenericParameters.Count != targetMethod.MethodArguments.Count)
-                throw Fail(address, "委托 目标方法含未确定的泛型参数");
-            if (targetMethod.Method.Owner.IsValueType) throw Fail(address, "委托 值类型目标尚未支持");
-            if (lookup is null && targetMethod.Method.IsAbstract) throw Fail(address, "委托 直接符号指向抽象方法");
+                return Fail(address, "委托 目标方法含未确定的泛型参数");
+            if (targetMethod.Method.Owner.IsValueType) return Fail(address, "委托 值类型目标尚未支持");
+            if (lookup is null && targetMethod.Method.IsAbstract) return Fail(address, "委托 直接符号指向抽象方法");
             var parameters = invoke.Method.Parameters.Select(p => Concrete(invoke, p.Type)).ToArray();
             var accepts = targetMethod.Method.Parameters.Select(p => Concrete(targetMethod, p.Type)).ToArray();
             var result = Concrete(targetMethod, targetMethod.Method.ReturnType);
             var returns = Concrete(invoke, invoke.Method.ReturnType);
             bool Compatible(TypeRef from, TypeRef to) => from.Equals(to) || types.IsAssignable(from, to);
             if (parameters.Length != accepts.Length || !parameters.Zip(accepts).All(p => Compatible(p.First, p.Second)) || !Compatible(result, returns))
-                throw Fail(address, "委托 目标方法与 Invoke 签名不兼容（开放绑定或绑定静态首参尚未支持）");
+                return Fail(address, "委托 目标方法与 Invoke 签名不兼容（开放绑定或绑定静态首参尚未支持）");
             ManagedValue receiver;
             var binding = lookup is not null ? DelegateBinding.VirtualInstance : targetMethod.Method.IsStatic ? DelegateBinding.Static : DelegateBinding.ClosedInstance;
             if (binding == DelegateBinding.Static)
             {
-                if (Expand(target) is not Const { Value: 0 }) throw Fail(address, "委托 静态绑定对象不是 null");
+                if (Expand(target) is not Const { Value: 0 }) return Fail(address, "委托 静态绑定对象不是 null");
                 receiver = new ConstantValue(0, types.Object, 64);
             }
             else
             {
-                if (Expand(target) is Const { Value: 0 }) throw Fail(address, "委托 闭合实例目标为 null");
-                receiver = RecoverAs(target, targetMethod.DeclaringType, address);
+                if (Expand(target) is Const { Value: 0 }) return Fail(address, "委托 闭合实例目标为 null");
+                if (!RecoverAs(target, targetMethod.DeclaringType, address).TryGet(out receiver, out var failure)) return failure;
             }
-            output.Add(new ManagedAssignment(address, Local(constructed[call]), new DelegateValue(type, receiver, targetMethod, binding)));
+            return Assign(address, constructed[call], () => new DelegateValue(type, receiver, targetMethod, binding), output);
         }
 
         private bool Bound(TypeRef type) => type switch

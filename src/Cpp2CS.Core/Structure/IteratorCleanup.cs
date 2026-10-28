@@ -1,17 +1,16 @@
 using Cpp2CS.Ir;
+using Cpp2CS.Recovery;
 using Cpp2CS.Model;
 
-namespace Cpp2CS.Recovery;
+namespace Cpp2CS.Structure;
 
 /// <summary>把迭代器的捕获、清理、重抛序列还原为 CIL fault，供源码反编译识别。</summary>
-internal static class SourceIteratorCleanup
+internal static class IteratorCleanup
 {
     public static ManagedBody Rewrite(ManagedBody body)
     {
         var method = body.Method.Method;
-        if (method.Name != "MoveNext" || method.IsStatic || method.Parameters.Count != 0
-            || !method.Owner.Interfaces.OfType<DefinitionRef>().Any(t => t.Definition.FullName == "System.Collections.IEnumerator")
-            || !method.Owner.CustomAttributes.Any(a => a.Constructor.Owner.FullName == "System.Runtime.CompilerServices.CompilerGeneratedAttribute")
+        if (!EnumerationProtocol.IteratorMoveNext(method)
             || body.Regions is not [{ Kind: ManagedRegionKind.Catch, CatchType: null, Exception: { } exception } region]) return body;
 
         var blocks = body.Blocks.ToDictionary(b => b.Address);
@@ -47,8 +46,7 @@ internal static class SourceIteratorCleanup
                         next = test.Condition == Cond.Ne ? branch.Taken : branch.Fallthrough;
                         break;
                     case ManagedCall { Result: null, Tail: false, Invocation: { Arguments.Count: 0 } invocation } call
-                        when cleanup is null && invocation.Method.Method.Owner == method.Owner
-                            && invocation.Method.Method.Name == "System.IDisposable.Dispose"
+                        when cleanup is null && EnumerationProtocol.IteratorDispose(invocation.Method.Method, method.Owner)
                             && invocation.Receiver is { } receiver && Expand(receiver) is ArgumentValue { Index: -1 }:
                         cleanup = call with { Invocation = invocation with { Receiver = Expand(receiver) } };
                         break;

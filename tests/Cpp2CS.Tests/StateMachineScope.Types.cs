@@ -14,12 +14,13 @@ internal static partial class StateMachineScope
     {
         var facts = FactsBuilder.Build(binary, metadata);
         var requested = File.ReadLines(typeFile).Select(l => l.Trim()).Where(l => l.Length != 0 && !l.StartsWith('#')).ToArray();
-        var roots = requested.Select(name =>
+        var roots = requested.SelectMany(name =>
         {
             var generic = name.IndexOf('<');
             var full = generic < 0 ? name : name[..generic];
             var arity = generic < 0 ? 0 : name[generic..].Count(c => c == ',') + 1;
-            return facts.Model.Types.Single(t => t.FullName == full && t.GenericParameters.Count == arity);
+            var matches = facts.Model.Types.Where(t => t.FullName == full && (generic < 0 || t.GenericParameters.Count == arity)).ToArray();
+            return matches.Length > 0 ? matches : throw new InvalidDataException($"范围类型不存在：{name}");
         }).ToHashSet();
         string Selected(TypeDef type)
         {

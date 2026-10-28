@@ -117,11 +117,7 @@ public sealed class ManagedTypes
     }
 
     /// <summary>值的字节数（结构体为实例数据大小）；无法确定为 -1。</summary>
-    public int Size(TypeRef type)
-    {
-        try { return Layouts.SizeAndAlignment(type).Size; }
-        catch (Exception e) when (e is InvalidDataException or NotSupportedException) { return -1; }
-    }
+    public int Size(TypeRef type) => Layouts.TrySizeAndAlignment(type)?.Size ?? -1;
 
     /// <summary>非结构体值在机器上的位宽（bool 为 8）。</summary>
     public int Bits(TypeRef type) => Kind(type) is TypeKind.Struct or null ? -1 : Size(type) * 8;

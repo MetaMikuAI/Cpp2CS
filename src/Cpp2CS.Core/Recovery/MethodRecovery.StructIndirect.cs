@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -34,23 +35,24 @@ public sealed partial class MethodRecovery
         }
 
         [ArgumentRule(20)]
-        private ManagedValue? IndirectStructArgument(AbiValue parameter, ArgumentSite site) => !IndirectStruct(parameter) ? null
-            : new IndirectValue(StructAddress(site.Argument(new AbiValue(new ByRefRef(parameter.Type), Passing.Registers, parameter.Pieces), site.Name), parameter.Type), parameter.Type);
+        private RecoveryResult<ManagedValue?> IndirectStructArgument(AbiValue parameter, ArgumentSite site) => !IndirectStruct(parameter) ? (ManagedValue?)null
+            : site.Argument(new AbiValue(new ByRefRef(parameter.Type), Passing.Registers, parameter.Pieces), site.Name)
+                .Bind(expression => StructAddress(expression, parameter.Type)).Map<ManagedValue?>(address => new IndirectValue(address, parameter.Type));
 
         [InvocationOutputRule(10)]
-        private bool IndirectInvocation(Call call, AbiSignature signature, Dictionary<Storage, Expr> registers,
+        private RecoveryResult<bool> IndirectInvocation(Call call, AbiSignature signature, Dictionary<Storage, Expr> registers,
             ManagedInvocation invocation, List<ManagedStatement> output)
         {
             if (signature.Return is not { } returned || !IndirectStruct(returned)) return false;
-            if (!registers.TryGetValue(returned.Pieces.Single().Register, out var expression)) throw Fail(call.Address, "调用 缺少返回缓冲区");
-            var address = StructAddress(expression, returned.Type);
+            if (!registers.TryGetValue(returned.Pieces.Single().Register, out var expression)) return Fail(call.Address, "调用 缺少返回缓冲区");
+            if (!StructAddress(expression, returned.Type).TryGet(out var address, out var failure)) return failure;
             var result = CallStructLocal(call, returned.Type);
             output.Add(new ManagedCall(call.Address, invocation, result, false));
             output.Add(new ManagedStore(call.Address, new IndirectValue(address, returned.Type), result));
             if (call.Kind is CallKind.Tail or CallKind.TailIndirect)
             {
                 if (ownReturnBuffer is null || !address.Equals(new AddressValue(ownReturnBuffer)) || !returned.Type.Equals(returnType))
-                    throw Fail(call.Address, "尾调用缓冲区不是本方法返回根");
+                    return Fail(call.Address, "尾调用缓冲区不是本方法返回根");
                 output.Add(new ManagedReturn(call.Address, ownReturnBuffer));
             }
             return true;

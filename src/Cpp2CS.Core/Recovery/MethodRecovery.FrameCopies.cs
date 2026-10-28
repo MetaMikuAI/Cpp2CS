@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
@@ -13,17 +14,20 @@ public sealed partial class MethodRecovery
         private sealed record FrameCopy(Define Load, Store Store, CopyRange Source, CopyRange Target, Fragment Snapshot);
         private readonly Dictionary<Stmt, ManagedStatement[]> frameCopies = new(ReferenceEqualityComparer.Instance);
 
-        private IEnumerable<CopyRange> CopyRanges(Expr address, int width)
+        private RecoveryResult<CopyRange[]> CopyRanges(Expr address, int width)
         {
+            var ranges = new List<CopyRange>();
             if (ArrayLocation(address) is { } element && types.Kind(element.Type.Element) == TypeKind.Struct
                 && element.Offset + width / 8 <= types.Size(element.Type.Element))
             {
-                var item = new ArrayElementValue(Recover(element.Array, null), Index(element.Index), element.Type.Element, 0);
-                yield return new(element.Type.Element, new AddressValue(item), element.Offset);
+                if (!Recover(element.Array, null).TryGet(out var array, out var failure)) return failure;
+                if (!Index(element.Index).TryGet(out var index, out failure)) return failure;
+                var item = new ArrayElementValue(array, index, element.Type.Element, 0);
+                ranges.Add(new(element.Type.Element, new AddressValue(item), element.Offset));
                 foreach (var path in StructPaths(item.Type).Where(p => types.Kind(p.Type) == TypeKind.Struct
                     && p.Offset <= element.Offset && element.Offset + width / 8 <= p.Offset + types.Size(p.Type)))
-                    yield return new(path.Type, new AddressValue(PathValue(item, path.Path)), element.Offset - path.Offset);
-                yield break;
+                    ranges.Add(new(path.Type, new AddressValue(PathValue(item, path.Path)), element.Offset - path.Offset));
+                return ranges.ToArray();
             }
             var (root, offset, rest) = Split(address);
             if (root is Symbol { Kind: SymbolKind.StaticFields, Value: DefinitionRef owner } && rest.Count == 0 && facts.Layouts.Of(owner) is { } layout)
@@ -32,22 +36,21 @@ public sealed partial class MethodRecovery
                 foreach (var slot in layout.Statics.Where(s => types.Kind(s.Type) == TypeKind.Struct && s.Offset <= offset && offset + width / 8 <= s.Offset + types.Size(s.Type)))
                 {
                     var field = new StaticFieldValue(new FieldRef(slot.Field, owner), slot.Type, 0);
-                    yield return new(slot.Type, new AddressValue(field), (int)offset - slot.Offset);
+                    ranges.Add(new(slot.Type, new AddressValue(field), (int)offset - slot.Offset));
                     foreach (var path in StructPaths(slot.Type).Where(p => types.Kind(p.Type) == TypeKind.Struct
                         && slot.Offset + p.Offset <= offset && offset + width / 8 <= slot.Offset + p.Offset + types.Size(p.Type)))
-                        yield return new(path.Type, new AddressValue(PathValue(field, path.Path)), (int)offset - slot.Offset - path.Offset);
+                        ranges.Add(new(path.Type, new AddressValue(PathValue(field, path.Path)), (int)offset - slot.Offset - path.Offset));
                 }
-                yield break;
+                return ranges.ToArray();
             }
-            if (root is null || rest.Count != 0 || TypeOfAddressBase(root) is not { } type) yield break;
-            ManagedValue value;
-            try { value = Recover(root, null); }
-            catch (HoleException) { yield break; }
+            if (root is null || rest.Count != 0 || TypeOfAddressBase(root) is not { } type) return ranges.ToArray();
+            if (!Recover(root, null).TryGet(out var value, out _)) return ranges.ToArray();
             if (type is ByRefRef reference && types.Kind(reference.Element) == TypeKind.Struct && offset >= 0 && offset + width / 8 <= types.Size(reference.Element))
-                yield return new(reference.Element, value, (int)offset);
+                ranges.Add(new(reference.Element, value, (int)offset));
             foreach (var path in StructPaths(type).Where(p => types.Kind(p.Type) == TypeKind.Struct
                 && p.Offset <= offset && offset + width / 8 <= p.Offset + types.Size(p.Type)))
-                yield return new(path.Type, new AddressValue(PathValue(value, path.Path)), (int)offset - path.Offset);
+                ranges.Add(new(path.Type, new AddressValue(PathValue(value, path.Path)), (int)offset - path.Offset));
+            return ranges.ToArray();
         }
 
         /// <summary>
@@ -55,11 +58,12 @@ public sealed partial class MethodRecovery
         /// 写入范围落在同一个结构体值之内、只覆盖完整的叶子与填充时，逐叶子写零。填充不是托管值（ECMA-335 I.8.2.1），对照器也不比较它。
         /// </summary>
         [StoreRule(15)]
-        private bool StoreStructZero(Store store, List<ManagedStatement> output)
+        private RecoveryResult<bool> StoreStructZero(Store store, List<ManagedStatement> output)
         {
             if (!FrameZero(store.Value) || FrameAccess(store.Target) is not null || store.Value.Width < 16) return false;
             var width = store.Value.Width;
-            var range = CopyRanges(store.Target, width).OrderBy(r => types.Size(r.Type)).FirstOrDefault();
+            if (!CopyRanges(store.Target, width).TryGet(out var ranges, out var failure)) return failure;
+            var range = ranges.OrderBy(r => types.Size(r.Type)).FirstOrDefault();
             if (range is null) return false;
             var leaves = StructPaths(range.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)
                 && p.Offset < range.Offset + width / 8 && range.Offset < p.Offset + types.Size(p.Type)).ToArray();
@@ -107,9 +111,7 @@ public sealed partial class MethodRecovery
                 output.Add(new ManagedStore(store.Address, new IndirectValue(new AddressValue(whole), whole.Type), new ComposedValue(whole.Type, [])));
                 return true;
             }
-            ManagedValue source;
-            try { source = Recover(store.Value, null); }
-            catch (HoleException) { return false; }
+            if (!Recover(store.Value, null).TryGet(out var source, out _)) return false;
             // 写入的值：同类型结构体值的叶子（单叶子），或各片都是同一个结构体值的叶子（寄存器传递的结构体参数/结果）。
             var parts = source is Fragment fragment ? fragment.Parts.Select(p => p.Value).ToArray() : [source];
             foreach (var layer in candidates)
@@ -195,12 +197,13 @@ public sealed partial class MethodRecovery
         }
 
         [Analysis("帧拷贝", 110, After = ["类型"])]
-        private void FrameCopies()
+        private RecoveryFailure? FrameCopies()
         {
-            PrepareFrameCopies();
-            PrepareStructZeroes();
+            if (!PrepareFrameCopies().TryGet(out _, out var failure)) return failure;
+            if (PrepareStructZeroes() is { } zeroFailure) return zeroFailure;
             PrepareFrameZeroes();
             PrepareStoredResults();
+            return null;
         }
 
         /// <summary>
@@ -236,7 +239,7 @@ public sealed partial class MethodRecovery
         /// 同一块内相邻的零写入合起来覆盖一个结构体值的全部叶子（如 <c>this.&lt;&gt;u__1 = default</c> 的两个 64 位写入）时，写成整体 initobj：
         /// 逐叶子写零会写到只读字段（UniTask.source），而 initobj 与原生的整段清零（含填充）相同。
         /// </summary>
-        private void PrepareStructZeroes()
+        private RecoveryFailure? PrepareStructZeroes()
         {
             foreach (var block in blocks)
                 for (var i = 0; i < block.Statements.Count; i++)
@@ -245,7 +248,12 @@ public sealed partial class MethodRecovery
                     var run = new List<Store>();
                     for (var j = i; j < block.Statements.Count && block.Statements[j] is Store s && FrameZero(s.Value) && FrameAccess(s.Target) is null && !frameCopies.ContainsKey(s); j++) run.Add(s);
                     if (run.Count < 2) continue;
-                    var ranges = run.Select(s => CopyRanges(s.Target, s.Value.Width).ToArray()).ToArray();
+                    var ranges = new List<CopyRange[]>();
+                    foreach (var store in run)
+                    {
+                        if (!CopyRanges(store.Target, store.Value.Width).TryGet(out var candidates, out var failure)) return failure;
+                        ranges.Add(candidates);
+                    }
                     // 候选是第一条写入所在的结构体值（从外到内）；每条写入都须落在其中，并合起来覆盖它的全部叶子。
                     foreach (var whole in ranges[0].Where(r => r.Offset == 0).OrderByDescending(r => types.Size(r.Type)))
                     {
@@ -266,6 +274,7 @@ public sealed partial class MethodRecovery
                         break;
                     }
                 }
+            return null;
         }
 
         /// <summary>
@@ -313,7 +322,7 @@ public sealed partial class MethodRecovery
             _ => null,
         };
 
-        private bool PrepareFrameCopies()
+        private RecoveryResult<bool> PrepareFrameCopies()
         {
             var statements = blocks.SelectMany(b => b.Statements).ToArray();
             var uses = new Dictionary<Variable, List<Stmt>>();
@@ -335,8 +344,10 @@ public sealed partial class MethodRecovery
                     || users is not [Store { Value: Use use } store] || use.Width != load.Width || dropped.Contains(store)) continue;
                 // 至少一端是栈结构体根时可以逐叶子拷贝；两端都不在栈上时，只接受下面合并成的整体拷贝（覆盖整个结构体）。
                 var onFrame = FrameAccess(load.Address) is not null || FrameAccess(store.Target) is not null;
-                var pairs = (from source in CopyRanges(load.Address, load.Width)
-                             from target in CopyRanges(store.Target, load.Width)
+                if (!CopyRanges(load.Address, load.Width).TryGet(out var sources, out var failure)) return failure;
+                if (!CopyRanges(store.Target, load.Width).TryGet(out var targets, out failure)) return failure;
+                var pairs = (from source in sources
+                             from target in targets
                              where source.Type.Equals(target.Type) && source.Offset == target.Offset
                              orderby types.Size(source.Type)
                              select (source, target)).ToArray();

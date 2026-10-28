@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
 
@@ -57,18 +58,19 @@ public sealed partial class MethodRecovery
         }
 
         [StoreRule(2)]
-        private bool StoreBoxArgument(Store store, List<ManagedStatement> output)
+        private RecoveryResult<bool> StoreBoxArgument(Store store, List<ManagedStatement> output)
         {
             if (!boxArgumentStores.TryGetValue(store, out var local)) return false;
-            output.Add(new ManagedAssignment(store.Address, local, RecoverAs(store.Value, local.Type, store.Address)));
+            if (!RecoverAs(store.Value, local.Type, store.Address).TryGet(out var value, out var failure)) return failure;
+            output.Add(new ManagedAssignment(store.Address, local, value));
             return true;
         }
 
         [CallRule(9)]
-        private bool BoxMergedArgument(Call call, List<ManagedStatement> output)
+        private RecoveryResult<bool> BoxMergedArgument(Call call, List<ManagedStatement> output)
         {
             if (!mergedBoxValues.TryGetValue(call.Address, out var local) || call.Defines.FirstOrDefault() is not { } result) return false;
-            output.Add(new ManagedAssignment(call.Address, Local(result), new BoxValue(local, local.Type, types.Object)));
+            if (Assign(call.Address, result, () => new BoxValue(local, local.Type, types.Object), output) is { } failure) return failure;
             return true;
         }
     }

@@ -1,5 +1,6 @@
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
+using Cpp2CS.Recovery.Analysis;
 
 namespace Cpp2CS.Recovery;
 
@@ -78,12 +79,18 @@ public sealed partial class MethodRecovery
         }
 
         [StatementRule(30)]
-        private bool LowerSwitch(Block block, Stmt statement, List<ManagedStatement> output)
+        private RecoveryResult<bool> LowerSwitch(Block block, Stmt statement, List<ManagedStatement> output)
         {
             if (statement is not IndirectJump jump || !switchIndices.TryGetValue(jump, out var index)) return false;
             var successors = block.NormalSuccessors.Select(b => b.Start).ToList();
-            var cases = jump.Targets.Select(t => Edge(block, successors.IndexOf(t), t)).ToArray();
-            output.Add(new ManagedSwitch(jump.Address, Index(index), cases));
+            var cases = new List<ManagedEdge>();
+            foreach (var target in jump.Targets)
+            {
+                if (!Edge(block, successors.IndexOf(target), target).TryGet(out var edge, out var failure)) return failure;
+                cases.Add(edge);
+            }
+            if (!Index(index).TryGet(out var value, out var indexFailure)) return indexFailure;
+            output.Add(new ManagedSwitch(jump.Address, value, cases));
             return true;
         }
     }

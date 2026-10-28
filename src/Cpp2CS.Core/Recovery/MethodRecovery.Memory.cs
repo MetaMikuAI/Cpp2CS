@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
@@ -80,30 +81,36 @@ public sealed partial class MethodRecovery
             return (array, index, type, (int)within);
         }
 
-        private ManagedValue ArrayStructLocation(Expr array, Expr index, ArrayRef type, int offset, int width)
+        private RecoveryResult<ManagedValue> ArrayStructLocation(Expr array, Expr index, ArrayRef type, int offset, int width)
         {
-            var root = new ArrayElementValue(Recover(array, null), Index(index), type.Element, 0);
-            if (offset + width / 8 > types.Size(type.Element)) throw Fail(0, "数组 访存跨越结构体元素");
+            if (!Recover(array, null).TryGet(out var arrayValue, out var failure)) return failure;
+            if (!Index(index).TryGet(out var indexValue, out failure)) return failure;
+            var root = new ArrayElementValue(arrayValue, indexValue, type.Element, 0);
+            if (offset + width / 8 > types.Size(type.Element)) return Fail(0, "数组 访存跨越结构体元素");
             var leaves = StructPaths(type.Element).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)
                 && p.Offset < offset + width / 8 && offset < p.Offset + types.Size(p.Type)).OrderBy(p => p.Offset).ToArray();
             if (leaves.Length == 0 || leaves.Any(p => p.Offset < offset || p.Offset + types.Size(p.Type) > offset + width / 8)
                 || leaves.Zip(leaves.Skip(1)).Any(p => p.First.Offset + types.Size(p.First.Type) > p.Second.Offset))
-                throw Fail(0, "数组 结构体元素叶子重叠或仅被部分覆盖");
+                return Fail(0, "数组 结构体元素叶子重叠或仅被部分覆盖");
             var parts = leaves.Select(p => new Part((p.Offset - offset) * 8, PathValue(root, p.Path))).ToArray();
             return parts is [var single] && single.Low == 0 && single.Value.Width == width ? single.Value : new Fragment(parts, types.UInt64, width);
         }
 
         /// <summary>访存位置：字段、静态字段、数组长度、数组元素。</summary>
-        private ManagedValue Location(Expr address, int width)
+        private RecoveryResult<ManagedValue> Location(Expr address, int width)
         {
-            if (AddressExpression(address) is Intrinsic { Name: "managed_field_address" } shared
-                && SharedAddress(shared) is AddressValue sharedField && sharedField.Target.Width == width) return sharedField.Target;
+            RecoveryFailure failure;
+            if (AddressExpression(address) is Intrinsic { Name: "managed_field_address" } shared)
+            {
+                if (!SharedAddress(shared).TryGet(out var sharedValue, out failure)) return failure;
+                if (sharedValue is AddressValue sharedField && sharedField.Target.Width == width) return sharedField.Target;
+            }
             if (FrameAccess(address) is { } frameAccess) return FrameLocation(frameAccess.Region, frameAccess.Offset, width);
             foreach (var part in ExprMap.Walk(address))
             {
-                if (part is Use use) CheckPoison(use.Variable);
+                if (part is Use use && CheckPoison(use.Variable) is { } poison) return poison;
                 if (part is FrameAddress frame && frameHoles.TryGetValue(frame.Offset, out var cause))
-                    throw Derived(cause, $"访存 使用未恢复的栈槽 {frame.Offset:x}");
+                    return Derived(cause, $"访存 使用未恢复的栈槽 {frame.Offset:x}");
             }
             var (baseTerm, offset, rest) = Split(address);
             switch (baseTerm)
@@ -111,7 +118,7 @@ public sealed partial class MethodRecovery
                 case Symbol { Kind: SymbolKind.ThreadStaticFields, Value: DefinitionRef threadType } when rest.Count == 0:
                     if (facts.Layouts.Of(threadType)?.ThreadStatics.FirstOrDefault(s => s.Offset == offset && types.Bits(s.Type) == width) is { } threadField)
                         return new StaticFieldValue(new FieldRef(threadField.Field, threadType), threadField.Type, width);
-                    throw Fail(0, $"线程静态字段 {threadType}+0x{offset:x}:{width} 未匹配");
+                    return Fail(0, $"线程静态字段 {threadType}+0x{offset:x}:{width} 未匹配");
                 case Symbol { Kind: SymbolKind.StaticFields, Value: DefinitionRef generic } when rest.Count == 0:
                     // 封闭实例经自身 MethodInfo 的 RGCTX 得到的类型保留泛型参数形式，代入实例的实参。
                     var owner = ClosedInstance ? (DefinitionRef)generic.Substitute(method.TypeArguments, method.MethodArguments) : generic;
@@ -120,44 +127,48 @@ public sealed partial class MethodRecovery
                             ? value : new StaticFieldValue(field.Field, field.Type, width);
                     if (StaticStructLocation(owner, offset, width) is { } component) return component;
                     if (StaticMemoryFragment(owner, offset, width) is { } packed) return packed;
-                    throw Fail(0, $"静态字段 {owner}+0x{offset:x}:{width} 未匹配");
+                    return Fail(0, $"静态字段 {owner}+0x{offset:x}:{width} 未匹配");
                 case null:
-                    throw Fail(0, $"访存 地址 {address} 的基址类型未知");
+                    return Fail(0, $"访存 地址 {address} 的基址类型未知");
             }
             var receiverType = TypeOfAddressBase(baseTerm)!;
             if (receiverType is PointerRef && width is 8 or 16 or 32 or 64)
-                return new IndirectValue(Recover(address, null), types.Integer(width, false), width);
+                return Recover(address, null).Map<ManagedValue>(value => new IndirectValue(value, types.Integer(width, false), width));
             if (receiverType is ArrayRef { IsVector: true } array)
             {
                 if (rest.Count == 0 && offset == RuntimeLayout.ArrayMaxLength && width is 32 or 64)
                 {
-                    var length = new ArrayLengthValue(Recover(baseTerm, null), types.Int32, 32);
+                    if (!Recover(baseTerm, null).TryGet(out var arrayValue, out failure)) return failure;
+                    var length = new ArrayLengthValue(arrayValue, types.Int32, 32);
                     return width == 32 ? length : new ConversionValue(ConvKind.ZeroExtend, length, types.UInt64, 64);
                 }
                 if (ElementOf(address) is var (_, index) && types.Kind(array.Element) is not (TypeKind.Struct or null) && width == Math.Max(types.Bits(array.Element), 8))
-                    return new ArrayElementValue(Recover(baseTerm, null), Index(index), array.Element, width);
+                    return Recover(baseTerm, null).Bind(value => Index(index).Map<ManagedValue>(at => new ArrayElementValue(value, at, array.Element, width)));
                 if (types.Kind(array.Element) == TypeKind.Struct && ArrayLocation(address) is { } element)
                     return ArrayStructLocation(element.Array, element.Index, element.Type, element.Offset, width);
                 if (rest.Count == 0 && offset >= RuntimeLayout.ArrayData && types.Size(array.Element) is > 0 and var size && (offset - RuntimeLayout.ArrayData) % size == 0
                     && types.Kind(array.Element) is not (TypeKind.Struct or null) && width == types.Bits(array.Element))
-                    return new ArrayElementValue(Recover(baseTerm, null), new ConstantValue((ulong)((offset - RuntimeLayout.ArrayData) / size), types.Int32, 32), array.Element, width);
-                throw Fail(0, $"数组 {array} 的访问 +0x{offset:x}:{width} 尚未支持");
+                    return Recover(baseTerm, null).Map<ManagedValue>(value => new ArrayElementValue(value,
+                        new ConstantValue((ulong)((offset - RuntimeLayout.ArrayData) / size), types.Int32, 32), array.Element, width));
+                return Fail(0, $"数组 {array} 的访问 +0x{offset:x}:{width} 尚未支持");
             }
-            if (rest.Count != 0) throw Fail(0, $"访存 地址 {address} 含变址");
+            if (rest.Count != 0) return Fail(0, $"访存 地址 {address} 含变址");
             if (receiverType is ByRefRef reference && offset == 0 && width == types.Bits(reference.Element)
                 && types.Kind(reference.Element) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference)
-                return new IndirectValue(Recover(baseTerm, null), reference.Element, width);
-            if (StructLocation(baseTerm, receiverType, offset, width) is { } leaf) return leaf;
-            if (MemoryFragment(baseTerm, receiverType, offset, width) is { } fragment) return fragment;
-            if (offset == RuntimeLayout.ObjectKlass) throw Fail(0, "访存 读取对象的类指针");
+                return Recover(baseTerm, null).Map<ManagedValue>(value => new IndirectValue(value, reference.Element, width));
+            if (!StructLocation(baseTerm, receiverType, offset, width).TryGet(out var leaf, out failure)) return failure;
+            if (leaf is not null) return leaf;
+            if (!MemoryFragment(baseTerm, receiverType, offset, width).TryGet(out var fragment, out failure)) return failure;
+            if (fragment is not null) return fragment;
+            if (offset == RuntimeLayout.ObjectKlass) return Fail(0, "访存 读取对象的类指针");
             if (types.InstanceField(receiverType, (int)offset, width / 8) is not { } instance)
             {
                 // 截断 long/ulong 时 clang 只读取低 32 位；字段身份仍按完整元数据布局取得。
                 if (width == 32 && types.InstanceField(receiverType, (int)offset, 8) is { } wide && types.Kind(wide.Type) == TypeKind.Int)
-                    return new ConversionValue(ConvKind.Truncate, new FieldValue(Recover(baseTerm, null), wide.Field, wide.Type, 64), types.UInt32, 32);
-                throw Fail(0, $"字段 {receiverType}+0x{offset:x}:{width} 未匹配");
+                    return Recover(baseTerm, null).Map<ManagedValue>(value => new ConversionValue(ConvKind.Truncate, new FieldValue(value, wide.Field, wide.Type, 64), types.UInt32, 32));
+                return Fail(0, $"字段 {receiverType}+0x{offset:x}:{width} 未匹配");
             }
-            return new FieldValue(Recover(baseTerm, null), instance.Field, instance.Type, width);
+            return Recover(baseTerm, null).Map<ManagedValue>(value => new FieldValue(value, instance.Field, instance.Type, width));
         }
 
         private Fragment? StaticMemoryFragment(DefinitionRef owner, long offset, int width)
@@ -191,12 +202,12 @@ public sealed partial class MethodRecovery
         }
 
         /// <summary>数组下标：取 64 位地址运算中的下标表达式，恢复为 int。</summary>
-        private ManagedValue Index(Expr index)
+        private RecoveryResult<ManagedValue> Index(Expr index)
         {
             while (index is Convert { Kind: ConvKind.SignExtend or ConvKind.ZeroExtend, Width: 64 } c && c.Operand.Width == 32) index = c.Operand;
-            var value = Recover(index, types.Int32);
-            if (types.Kind(value.Type) is not (TypeKind.Int or TypeKind.Bool)) throw Fail(0, $"数组 下标类型 {value.Type}");
-            return value.Width == 32 ? value : value.Width == 64 ? new ConversionValue(ConvKind.Truncate, value, types.Int32, 32) : throw Fail(0, $"数组 下标位宽 {value.Width}");
+            if (!Recover(index, types.Int32).TryGet(out var value, out var failure)) return failure;
+            if (types.Kind(value.Type) is not (TypeKind.Int or TypeKind.Bool)) return Fail(0, $"数组 下标类型 {value.Type}");
+            return value.Width == 32 ? value : value.Width == 64 ? new ConversionValue(ConvKind.Truncate, value, types.Int32, 32) : Fail(0, $"数组 下标位宽 {value.Width}");
         }
 
         private long? FrameOffset(Expr expression, HashSet<Variable>? active = null)
@@ -237,25 +248,25 @@ public sealed partial class MethodRecovery
             return null;
         }
 
-        private ManagedValue FrameLocation(FrameRegion region, long offset, int width)
+        private RecoveryResult<ManagedValue> FrameLocation(FrameRegion region, long offset, int width)
         {
-            if (offset < 0 || offset + width / 8 > region.Size) throw Fail(0, "栈 访存跨越结构体区域");
+            if (offset < 0 || offset + width / 8 > region.Size) return Fail(0, "栈 访存跨越结构体区域");
             // 标量帧区域：整体读写这个局部变量（bool 以字节读写）。
             if (types.Kind(region.Type) != TypeKind.Struct)
-                return offset == 0 && width == region.Local.Width ? region.Local : throw Fail(0, "栈 标量栈槽的访问宽度不符");
+                return offset == 0 && width == region.Local.Width ? region.Local : Fail(0, "栈 标量栈槽的访问宽度不符");
             var leaves = StructPaths(region.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
             if (leaves.Any(p => p.Offset < offset + width / 8 && offset < p.Offset + types.Size(p.Type)
                 && (p.Offset < offset || p.Offset + types.Size(p.Type) > offset + width / 8)))
-                throw Fail(0, "栈 访存只覆盖部分叶子");
+                return Fail(0, "栈 访存只覆盖部分叶子");
             var parts = leaves.Where(p => p.Offset >= offset && p.Offset + types.Size(p.Type) <= offset + width / 8)
                 .OrderBy(p => p.Offset).Select(p => new Part((int)(p.Offset - offset) * 8, PathValue(region.Local, p.Path))).ToArray();
             var end = 0;
             foreach (var part in parts)
             {
-                if (part.Low < end) throw Fail(0, "栈 栈槽类型冲突：叶子重叠");
+                if (part.Low < end) return Fail(0, "栈 栈槽类型冲突：叶子重叠");
                 end = part.Low + part.Value.Width;
             }
-            if (parts.Length == 0) throw Fail(0, "栈 访存只有填充");
+            if (parts.Length == 0) return Fail(0, "栈 访存只有填充");
             return parts is [var one] && one.Low == 0 && one.Value.Width == width ? one.Value : new Fragment(parts, types.UInt64, width);
         }
 
@@ -281,34 +292,38 @@ public sealed partial class MethodRecovery
             return ExpandAddress(expression);
         }
 
-        private ManagedValue? StructLocation(Expr root, TypeRef type, long offset, int width)
+        private RecoveryResult<ManagedValue?> StructLocation(Expr root, TypeRef type, long offset, int width)
         {
-            if (type is not (ByRefRef or DefinitionRef)) return null;
+            if (type is not (ByRefRef or DefinitionRef)) return (ManagedValue?)null;
             var matches = StructPaths(type).Where(p => p.Offset == offset && types.Kind(p.Type) is not (TypeKind.Struct or null)
                 && types.Size(p.Type) * 8 == width && (type is ByRefRef || p.Path.Length > 1)).ToArray();
             // 显式布局同址别名不能仅靠偏移选择一个托管字段。
-            return matches.Length == 1 ? PathValue(Recover(root, null), matches[0].Path) : null;
+            return matches.Length == 1 ? Recover(root, null).Map<ManagedValue?>(value => PathValue(value, matches[0].Path)) : (ManagedValue?)null;
         }
 
-        private ManagedValue StructAddress(Expr expression, TypeRef expected)
+        private RecoveryResult<ManagedValue> StructAddress(Expr expression, TypeRef expected)
         {
             if (ArrayLocation(expression) is { } element && types.Kind(element.Type.Element) == TypeKind.Struct)
             {
-                var value = new ArrayElementValue(Recover(element.Array, null), Index(element.Index), element.Type.Element, 0);
+                if (!Recover(element.Array, null).TryGet(out var array, out var failure)) return failure;
+                if (!Index(element.Index).TryGet(out var index, out failure)) return failure;
+                var value = new ArrayElementValue(array, index, element.Type.Element, 0);
                 if (element.Offset == 0 && element.Type.Element.Equals(expected)) return new AddressValue(value);
                 var fields = StructPaths(element.Type.Element).Where(p => p.Offset == element.Offset && p.Type.Equals(expected)).ToArray();
                 if (fields is [var nested]) return new AddressValue(PathValue(value, nested.Path));
             }
             var (root, offset, rest) = Split(expression);
-            if (root is Symbol { Kind: SymbolKind.StaticFields } && rest.Count == 0
-                && Location(expression, types.Size(expected) * 8) is { } field && field.Type.Equals(expected))
-                return new AddressValue(field);
+            if (root is Symbol { Kind: SymbolKind.StaticFields } && rest.Count == 0)
+            {
+                if (!Location(expression, types.Size(expected) * 8).TryGet(out var field, out var failure)) return failure;
+                if (field.Type.Equals(expected)) return new AddressValue(field);
+            }
             if (root is null || rest.Count != 0 || TypeOfAddressBase(root) is not { } rootType)
-                throw Fail(0, $"调用 {expected} 的 this/ref 地址没有已证明的根");
+                return Fail(0, $"调用 {expected} 的 this/ref 地址没有已证明的根");
             if (offset == 0 && rootType is ByRefRef b && b.Element.Equals(expected)) return Recover(root, null);
             var paths = StructPaths(rootType).Where(p => p.Offset == offset && p.Type.Equals(expected)).ToArray();
-            if (paths.Length != 1) throw Fail(0, $"调用 {expected} 的 this/ref 子字段地址不唯一或未匹配");
-            return new AddressValue(PathValue(Recover(root, null), paths[0].Path));
+            if (paths.Length != 1) return Fail(0, $"调用 {expected} 的 this/ref 子字段地址不唯一或未匹配");
+            return Recover(root, null).Map<ManagedValue>(value => new AddressValue(PathValue(value, paths[0].Path)));
         }
     }
 }

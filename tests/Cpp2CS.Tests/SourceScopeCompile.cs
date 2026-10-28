@@ -10,11 +10,23 @@ internal static class SourceScopeCompile
     public static int Run(string inventory, string directory, string output)
     {
         Directory.CreateDirectory(output);
-        var files = File.ReadLines(Path.Combine(inventory, "types.tsv")).Skip(1).Select(l => Path.Combine(directory, "src", l.Split('\t')[1])).ToArray();
-        var errors = files.GroupBy(p => Path.GetFileName(p).Split(".dll_", 2, StringSplitOptions.None)[0]).SelectMany(group =>
+        var files = ScopeSource.Read(inventory, directory);
+        var errors = files.GroupBy(p => p.Assembly).SelectMany(group =>
         {
-            var trees = group.Select(p => CSharpSyntaxTree.ParseText(File.ReadAllText(p), new CSharpParseOptions(LanguageVersion.Preview), path: Path.GetFileName(p))).ToArray();
-            var roots = group.Select(p => Path.GetFileNameWithoutExtension(p)[(group.Key.Length + 5)..]).ToHashSet();
+            var trees = group.Select(p => CSharpSyntaxTree.ParseText(File.ReadAllText(p.Path), new CSharpParseOptions(LanguageVersion.Preview), path: p.Name + ".cs")).ToArray();
+            // 项目布局把不同泛型元数的同名类型合并到一个文件；以实际声明确定引用替换范围。
+            var roots = trees.SelectMany(tree => tree.GetRoot().DescendantNodes().OfType<MemberDeclarationSyntax>())
+                .Where(node => node is BaseTypeDeclarationSyntax or DelegateDeclarationSyntax
+                    && !node.Ancestors().Any(parent => parent is BaseTypeDeclarationSyntax))
+                .Select(node =>
+                {
+                    var name = node is BaseTypeDeclarationSyntax type ? type.Identifier.ValueText : ((DelegateDeclarationSyntax)node).Identifier.ValueText;
+                    var arity = node is TypeDeclarationSyntax generic ? generic.TypeParameterList?.Parameters.Count ?? 0
+                        : node is DelegateDeclarationSyntax callback ? callback.TypeParameterList?.Parameters.Count ?? 0 : 0;
+                    if (arity > 0) name += "`" + arity;
+                    var space = string.Join(".", node.Ancestors().OfType<BaseNamespaceDeclarationSyntax>().Reverse().Select(n => n.Name.ToString()));
+                    return space.Length == 0 ? name : space + "." + name;
+                }).ToHashSet();
             var sourceName = group.Key + ".Recovered";
             var assemblies = Path.Combine(directory, "assemblies-src");
             var references = ScopeCompilationReferences.Create(assemblies, group.Key, roots, sourceName, output,

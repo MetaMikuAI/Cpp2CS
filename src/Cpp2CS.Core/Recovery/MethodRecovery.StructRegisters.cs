@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -35,8 +36,8 @@ public sealed partial class MethodRecovery
                 ? new TypeHandleValue(type, types.RuntimeTypeHandle, 64) : null;
 
         [ArgumentRule(10)]
-        private ManagedValue? RegisterStructArgument(AbiValue parameter, ArgumentSite site) => !RegisterStruct(parameter) ? null
-            : Compose(parameter, p => site.Registers.TryGetValue(p.Register, out var e) ? e : throw Fail(site.Call.Address, $"调用 缺少结构体片 {p.Register}"));
+        private RecoveryResult<ManagedValue?> RegisterStructArgument(AbiValue parameter, ArgumentSite site) => !RegisterStruct(parameter) ? (ManagedValue?)null
+            : Compose(parameter, p => site.Registers.TryGetValue(p.Register, out var e) ? e : Fail(site.Call.Address, $"调用 缺少结构体片 {p.Register}")).Map<ManagedValue?>(value => value);
 
         [ResultRule(10)]
         private LocalValue? RegisterStructResult(Call call, AbiValue returned) => RegisterStruct(returned) ? CallStructLocal(call, returned.Type) : null;
@@ -47,7 +48,7 @@ public sealed partial class MethodRecovery
             return local;
         }
 
-        private ManagedValue? RegisterPiece(Variable variable, int width)
+        private RecoveryResult<ManagedValue?> RegisterPiece(Variable variable, int width)
         {
             ManagedValue root;
             AbiPiece piece;
@@ -57,12 +58,12 @@ public sealed partial class MethodRecovery
                 && owner.abi.Classify(callee, out _)?.Return is { } returned && RegisterStruct(returned)
                 && returned.Pieces.FirstOrDefault(p => p.Register == result.Call.Results[result.Index]) is { } found)
                 (root, piece) = (CallStructLocal(result.Call, returned.Type), found);
-            else return null;
+            else return (ManagedValue?)null;
             var fragment = StructPiece(root, piece);
             if (width == fragment.Width) return fragment;
-            if (width < fragment.Width) return Slice(fragment, 0, width);
+            if (width < fragment.Width) return Slice(fragment, 0, width).Map<ManagedValue?>(value => value);
             // 寄存器高位并非托管值的一部分；保留“没有叶子”的范围，只有明确截取叶子才可使用。
-            return fragment is Fragment f ? ResizeFragment(f, width) : new Fragment([new Part(0, fragment)], types.UInt64, width);
+            return fragment is Fragment f ? ResizeFragment(f, width).Map<ManagedValue?>(value => value) : new Fragment([new Part(0, fragment)], types.UInt64, width);
         }
 
         private ManagedValue StructPiece(ManagedValue root, AbiPiece piece)
@@ -75,27 +76,38 @@ public sealed partial class MethodRecovery
                 : new Fragment(parts, types.UInt64, piece.Width);
         }
 
-        private ManagedValue Compose(AbiValue value, Func<AbiPiece, Expr> expression)
+        private RecoveryResult<ManagedValue> Compose(AbiValue value, Func<AbiPiece, RecoveryResult<Expr>> expression)
         {
-            if (!RegisterStruct(value)) throw Fail(0, $"结构体 {value.Type} 的寄存器形态尚未支持");
-            var pieces = value.Pieces.Select(p => (Piece: p, Value: Recover(expression(p), null))).ToArray();
+            if (!RegisterStruct(value)) return Fail(0, $"结构体 {value.Type} 的寄存器形态尚未支持");
+            var pieces = new List<(AbiPiece Piece, ManagedValue Value)>();
+            foreach (var piece in value.Pieces)
+            {
+                if (!expression(piece).Bind(e => Recover(e, null)).TryGet(out var recovered, out var failure)) return failure;
+                pieces.Add((piece, recovered));
+            }
             if (value.Type is GenericParameterRef { NativeAggregate: not null })
             {
-                var parts = pieces.Select(p => (p.Piece, Value: Slice(p.Value, 0, p.Piece.Width))).ToArray();
+                var parts = new List<(AbiPiece Piece, ManagedValue Value)>();
+                foreach (var piece in pieces)
+                {
+                    if (!Slice(piece.Value, 0, piece.Piece.Width).TryGet(out var sliced, out var failure)) return failure;
+                    parts.Add((piece.Piece, sliced));
+                }
                 if (parts.All(p => p.Value is AggregatePiece part && part.Offset == p.Piece.Offset && part.Width == p.Piece.Width)
                     && parts.Select(p => ((AggregatePiece)p.Value).Root).Distinct().ToArray() is [var root]
                     && root.Type.Equals(value.Type)) return root;
                 if (parts.All(p => p.Value is ConstantValue { Bits: 0 })) return new ComposedValue(value.Type, []);
-                throw Fail(0, "泛型聚合片未能完整重建同一个值");
+                return Fail(0, "泛型聚合片未能完整重建同一个值");
             }
             var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
             foreach (var path in StructPaths(value.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)))
             {
                 var size = types.Size(path.Type);
                 var matches = pieces.Where(p => path.Offset >= p.Piece.Offset && path.Offset + size <= p.Piece.Offset + p.Piece.Width / 8).ToArray();
-                if (matches.Length != 1) throw Fail(0, $"结构体 叶子 {path.Path.Last()} 不能唯一对应 ABI 片");
+                if (matches.Length != 1) return Fail(0, $"结构体 叶子 {path.Path.Last()} 不能唯一对应 ABI 片");
                 var match = matches[0];
-                leaves.Add((path.Path, Coerce(Slice(match.Value, (path.Offset - match.Piece.Offset) * 8, size * 8), path.Type, 0)));
+                if (!Slice(match.Value, (path.Offset - match.Piece.Offset) * 8, size * 8).Bind(v => Coerce(v, path.Type, 0)).TryGet(out var leaf, out var failure)) return failure;
+                leaves.Add((path.Path, leaf));
             }
             // 参数/调用结果是不可变值根；逐叶子同源时直接整体传递，避免制造无必要的私有字段访问。
             foreach (var root in structArguments.Values.Select(p => (ManagedValue)p.Root).Concat(structResults.Values).Distinct())
@@ -135,20 +147,20 @@ public sealed partial class MethodRecovery
                 }
                 if (e is Load load)
                 {
-                    try { return Location(load.Address, load.Width) is FieldValue { Field.DeclaringType: DefinitionRef { Definition.IsValueType: true } } or Fragment; }
-                    catch (HoleException) { return false; }
+                    return Location(load.Address, load.Width).TryGet(out var value, out _)
+                        && value is FieldValue { Field.DeclaringType: DefinitionRef { Definition.IsValueType: true } } or Fragment;
                 }
                 return e is Ir.Convert c && Visit(c.Operand);
             }
             return Visit(expression);
         }
 
-        private ManagedValue StructReturn(Expr expression)
+        private RecoveryResult<ManagedValue> StructReturn(Expr expression)
         {
             var value = owner.abi.Classify(method, out _)!.Return!;
-            if (IndirectStruct(value)) return ownReturnBuffer ?? throw Fail(0, "返回值 x8 根未建立");
+            if (IndirectStruct(value)) return ownReturnBuffer is { } buffer ? buffer : Fail(0, "返回值 x8 根未建立");
             var parts = expression is Intrinsic { Name: "diagnostic_return" } i ? i.Arguments : [expression];
-            if (parts.Length != value.Pieces.Length) throw Fail(0, "结构体 返回值片数不符");
+            if (parts.Length != value.Pieces.Length) return Fail(0, "结构体 返回值片数不符");
             return Compose(value, p => parts[Array.IndexOf(value.Pieces, p)]);
         }
     }

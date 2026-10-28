@@ -1,3 +1,4 @@
+using Cpp2CS.Calls;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
 using Cpp2CS.Recovery;
@@ -21,7 +22,7 @@ public sealed partial class SourceLibraryCalls
         if (definition is null) return null;
         var method = new MethodRef(definition, [], [element]);
         var entry = facts.Model.Code.FirstOrDefault(p => p.Value.Any(o => o.Method.Equals(method))).Key;
-        if (entry == 0 || recovery.RecoverInstance(method, entry).Body is not { Regions.Count: 0 } original) return null;
+        if (entry == 0 || summaries.Find(new(method, entry, RecoveryMode.Instance))?.Body is not { Regions.Count: 0 } original) return null;
         var body = SourceRewriter.Rewrite(original, types);
         var values = new Dictionary<Variable, ManagedValue>();
         ManagedValue? returned = null;

@@ -61,7 +61,7 @@ internal static class MergedForeachCheck
                 outer.Statements.Add(Set("iterator", new DefaultValueExpression(new SimpleType("Enumerator"))));
                 outer.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Finish"))));
             }
-            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).GetNestedType("RecoveredForeach", BindingFlags.NonPublic)!, nonPublic: true)!;
+            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).Assembly.GetType("Cpp2CS.Output.RecoveredForeach")!, nonPublic: true)!;
             transform.Run(tree, null!);
             var expected = mode is "valid" or "write" or "ref" or "increment" or "direct" or "direct-write";
             a.Equal(expected ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的清理与逃逸边界");

@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -63,11 +64,11 @@ public sealed partial class MethodRecovery
             return widths;
         }
 
-        private ManagedValue FloatingNegation(Unary unary)
+        private RecoveryResult<ManagedValue> FloatingNegation(Unary unary)
         {
-            if (unary.Width is not (32 or 64)) throw Fail(0, $"浮点 一元运算位宽 {unary.Width} 尚未支持");
+            if (unary.Width is not (32 or 64)) return Fail(0, $"浮点 一元运算位宽 {unary.Width} 尚未支持");
             var type = unary.Width == 32 ? types.Single : types.Double;
-            return new UnaryValue(unary.Op, RecoverAs(unary.Operand, type, 0), type, unary.Width);
+            return RecoverAs(unary.Operand, type, 0).Map<ManagedValue>(value => new UnaryValue(unary.Op, value, type, unary.Width));
         }
 
         [BodyProof(20)]

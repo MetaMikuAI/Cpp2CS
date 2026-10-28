@@ -57,7 +57,7 @@ internal static class ResultForeachCheck
                 new ConditionalExpression(Id("found"), new PrimitiveExpression(1U), new PrimitiveExpression(0U)), BinaryOperatorType.BitwiseAnd,
                 new ConditionalExpression(new BinaryOperatorExpression(Id("status"), BinaryOperatorType.Equality, new PrimitiveExpression(5)), new PrimitiveExpression(1U), new PrimitiveExpression(0U)))), BinaryOperatorType.InEquality, new PrimitiveExpression(0));
             outer.Statements.Add(new ReturnStatement(result));
-            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).GetNestedType("RecoveredForeach", BindingFlags.NonPublic)!, nonPublic: true)!;
+            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).Assembly.GetType("Cpp2CS.Output.RecoveredForeach")!, nonPublic: true)!;
             transform.Run(tree, null!);
             a.Equal(mode is "valid" or "valid-mask" ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的退出与使用边界");
             if (mode is "valid" or "valid-mask")

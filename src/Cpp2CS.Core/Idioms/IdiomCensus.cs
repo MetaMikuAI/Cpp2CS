@@ -95,38 +95,31 @@ public sealed class IdiomCensus
                 var function = functions[i];
                 var name = $"0x{function.Start:x} {facts.EntriesAt(function.Start).FirstOrDefault()?.Method?.ToString() ?? "?"}";
                 local.Functions++;
-                try
-                {
-                    var lifted = lifter.Lift(function.Start);
-                    if (!lifted.Succeeded)
-                    {
-                        local.Failed++;
-                        Add(local.Errors, "ssa:" + Category(lifted.Errors[0]), $"{name}: {lifted.Errors[0]}");
-                        continue;
-                    }
-                    if (lifter.Calls is FactsCallModel model) entryReads[function.Start] = AbiChecks(model, lifted.Function, name, local.Abi, unset);
-                    var result = rewriter.Run(lifted.Function);
-                    foreach (var (template, count) in result.Hits) local.Hits[template] = local.Hits.GetValueOrDefault(template) + count;
-                    foreach (var (kind, count) in result.HelperCalls) local.HelperCalls[kind] = local.HelperCalls.GetValueOrDefault(kind) + count;
-                    local.IndirectCalls += result.IndirectCalls;
-                    foreach (var residual in result.Residuals) Add(local.Residuals, residual.Category, $"{name} @0x{residual.Address:x}: {residual.Detail}");
-                    foreach (var error in result.Errors.Take(1)) Add(local.Errors, "rewrite:" + Category(error), $"{name}: {error}");
-                    foreach (var (guard, slots) in result.GuardSlots)
-                    {
-                        if (!local.GuardOwners.TryGetValue(guard, out var owners)) local.GuardOwners[guard] = owners = [];
-                        owners.Add(function.Start);
-                        if (!local.GuardSlotSets.TryGetValue(guard, out var sets)) local.GuardSlotSets[guard] = sets = [];
-                        sets.Add(string.Join(",", slots.Select(x => x.ToString("x"))));
-                    }
-                    foreach (var instance in result.Instances) Keep(local.Instances, instance.Template, [instance]);
-                    if (result.Errors.Count > 0) local.Failed++;
-                    else if (result.Residuals.Count == 0) local.Clean++;
-                }
-                catch (Exception e)
+                var lifted = lifter.Lift(function.Start);
+                if (!lifted.Succeeded)
                 {
                     local.Failed++;
-                    Add(local.Errors, "exception:" + e.GetType().Name, $"{name}: {e.Message} {e.StackTrace?.Split('\n').FirstOrDefault()?.Trim()}");
+                    Add(local.Errors, "ssa:" + Category(lifted.Errors[0]), $"{name}: {lifted.Errors[0]}");
+                    continue;
                 }
+                if (lifter.Calls is FactsCallModel model) entryReads[function.Start] = AbiChecks(model, lifted.Function, name, local.Abi, unset);
+                var result = rewriter.Run(lifted.Function);
+                foreach (var (template, count) in result.Hits) local.Hits[template] = local.Hits.GetValueOrDefault(template) + count;
+                foreach (var (kind, count) in result.HelperCalls) local.HelperCalls[kind] = local.HelperCalls.GetValueOrDefault(kind) + count;
+                local.IndirectCalls += result.IndirectCalls;
+                foreach (var residual in result.Residuals) Add(local.Residuals, residual.Category, $"{name} @0x{residual.Address:x}: {residual.Detail}");
+                foreach (var error in result.Errors.Take(1)) Add(local.Errors, "rewrite:" + Category(error), $"{name}: {error}");
+                foreach (var (guard, slots) in result.GuardSlots)
+                {
+                    if (!local.GuardOwners.TryGetValue(guard, out var owners)) local.GuardOwners[guard] = owners = [];
+                    owners.Add(function.Start);
+                    if (!local.GuardSlotSets.TryGetValue(guard, out var sets)) local.GuardSlotSets[guard] = sets = [];
+                    sets.Add(string.Join(",", slots.Select(x => x.ToString("x"))));
+                }
+                foreach (var instance in result.Instances) Keep(local.Instances, instance.Template, [instance]);
+                if (result.Errors.Count > 0) local.Failed++;
+                else if (result.Residuals.Count == 0) local.Clean++;
+
             }
             lock (gate)
             {

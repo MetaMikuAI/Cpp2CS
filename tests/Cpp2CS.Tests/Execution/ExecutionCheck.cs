@@ -1,3 +1,4 @@
+using Cpp2CS.Pipeline;
 using System.Text.Json;
 using Cpp2CS.Facts;
 using Cpp2CS.Input;
@@ -67,7 +68,7 @@ internal static partial class ExecutionCheck
                 skeleton.ApplyDeclarations([recovered]);
             }
         var emitter = new BodyEmitter(skeleton, types);
-        var closure = new AccessorRecovery(facts, types, recovery, emitter, results, full ? AutoPropertyManifest.ReadRejected(Path.Combine(slice, "autoprop-rejected-input.tsv")) : null);
+        var closure = new AccessorRecovery(facts, types, new MethodSummaryService(recovery), emitter, results, full ? AutoPropertyManifest.ReadRejected(Path.Combine(slice, "autoprop-rejected-input.tsv")) : null);
         skeleton.ApplyDeclarations(closure.All);
         var index = new WorldIndex(facts, types);
         if (options.Contains("--concrete-generics"))

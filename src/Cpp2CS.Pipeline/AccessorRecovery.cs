@@ -1,8 +1,9 @@
+using Cpp2CS.Output;
 using Cpp2CS.Facts;
 using Cpp2CS.Model;
 using Cpp2CS.Recovery;
 
-namespace Cpp2CS.Output;
+namespace Cpp2CS.Pipeline;
 
 /// <summary>F9 的一层定向依赖：只从范围内已确认的访问权限失败出发，不递归扩张普通调用。</summary>
 public sealed class AccessorRecovery
@@ -30,7 +31,7 @@ public sealed class AccessorRecovery
     private readonly Dictionary<ManagedBody, string> dependencyProblems = new(ReferenceEqualityComparer.Instance);
     private readonly ProgramFacts facts;
 
-    public AccessorRecovery(ProgramFacts facts, ManagedTypes types, MethodRecovery recovery, BodyEmitter emitter, MethodRecoveryResult[] targets, IReadOnlySet<string>? rejected = null, bool useLanguage = true)
+    public AccessorRecovery(ProgramFacts facts, ManagedTypes types, MethodSummaryService recovery, BodyEmitter emitter, MethodRecoveryResult[] targets, IReadOnlySet<string>? rejected = null, bool useLanguage = true)
     {
         this.facts = facts;
         Targets = targets;
@@ -221,10 +222,11 @@ public sealed class AccessorRecovery
                 .SelectMany(a => a.Candidates).FirstOrDefault(a => allowed.Contains(a) && a.Matches(types, result.Method.Method.Owner, value, write));
             Targets[i] = result with { Body = AccessorRewriter.Rewrite(body, Select) };
         }
-        // 认回访问器之后仍越权的访问按原样写出（用户决定：语义等价即计入）。
-        emitter.IgnoreAccess = true;
+        // 已核验访问器替换之后，剩余内联访问按恢复策略写出并保留访问限制。
+        var previousPolicy = emitter.Policy;
+        emitter.Policy = EmissionPolicy.Recovered;
         try { Problems = emitter.Emit(All.Where(r => r.Body is not null && !dependencyProblems.ContainsKey(r.Body)).Select(r => r.Body!)); }
-        finally { emitter.IgnoreAccess = false; }
+        finally { emitter.Policy = previousPolicy; }
         foreach (var pair in dependencyProblems) Problems[pair.Key] = pair.Value;
         CheckTransparent();
     }
@@ -273,7 +275,7 @@ public sealed class AccessorRecovery
     /// 方法体中越权字段所在的泛型封闭类型（如 UniTask&lt;bool&gt;、UniTask.Awaiter&lt;bool&gt;）上按普查建模的方法：取同一定义的一个实例
     /// （类型实参是非基元的具体类型，代换时不会误换其他类型）的恢复体，把它的类型实参换成所需的。
     /// </summary>
-    private IEnumerable<InlineRecognition.Callee> GenericCallees(ManagedTypes types, TypeDef caller, MethodRecovery recovery, ManagedBody body)
+    private IEnumerable<InlineRecognition.Callee> GenericCallees(ManagedTypes types, TypeDef caller, MethodSummaryService recovery, ManagedBody body)
     {
         var closed = new HashSet<DefinitionRef>();
         foreach (var (_, value, _) in Fields(body))

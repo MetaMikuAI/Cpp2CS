@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -14,7 +15,7 @@ public sealed partial class MethodRecovery
         /// 不能直接调用。前面直线路径上紧邻的是这次 Start&lt;T&gt; 的 RGCTX 初始化、T 是状态机、接收者是 T 的帧区域时，写成在 builder 字段上调用 Start&lt;T&gt;。
         /// </summary>
         [CallRule(5)]
-        private bool StartStateMachine(Call call, List<ManagedStatement> output)
+        private RecoveryResult<bool> StartStateMachine(Call call, List<ManagedStatement> output)
         {
             if (call is not { Op: null, Kind: CallKind.Direct, Target: Const target } || Receiver(call) is not { } receiver) return false;
             var moveNext = facts.EntriesAt(target.Value).Select(e => e.Method).FirstOrDefault(m => m is { Method: { Name: "MoveNext", IsStatic: false, Parameters.Count: 0 } });
@@ -23,7 +24,7 @@ public sealed partial class MethodRecovery
             var builderType = start.DeclaringType;
             var builder = StructPaths(argument).FirstOrDefault(p => p.Path.Length == 1 && p.Type.Equals(builderType));
             if (builder.Path is null) return false;
-            var state = StructAddress(receiver, argument);
+            if (!StructAddress(receiver, argument).TryGet(out var state, out var failure)) return failure;
             var stateValue = state is AddressValue { Target: var local } ? local : new IndirectValue(state, argument);
             output.Add(new ManagedCall(call.Address, new ManagedInvocation(start, new AddressValue(PathValue(stateValue, builder.Path)), [state], false), null, false) { Inlined = true });
             return true;

@@ -23,7 +23,7 @@ internal static class SharedSignatureCheck
         var abi = new ManagedAbi(new FieldLayouts(null!));
         var a = new Assertions();
         a.True(abi.Classify(MethodRef.Open(method), out _) is null, "开放签名本身不提供共享 ABI 证据");
-        var shared = new MethodRef(method, [], [input with { NativeShared = true }, output with { NativeShared = true }]);
+        var shared = new MethodRef(method, [], [input with { Binding = new(NativeBindingKind.Shared) }, output with { Binding = new(NativeBindingKind.Shared) }]);
         var signature = abi.Classify(shared, out _)!;
         a.True(signature.Parameters[1] is { Passing: Passing.Shared, Pieces: [{ Width: 64 }] }, "T 保留引用值或值副本地址的双重形式");
         a.Equal(Storage.Gpr(1), signature.Parameters[1].Pieces[0].Register, "T 在第二个整数参数位置");

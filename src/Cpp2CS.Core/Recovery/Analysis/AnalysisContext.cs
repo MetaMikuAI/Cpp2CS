@@ -19,8 +19,8 @@ internal interface IMethodAnalysis<out T> where T : class
 internal sealed record MethodView(IReadOnlyList<Block> Blocks, IReadOnlyDictionary<Variable, Phi> ExceptionPhis)
 {
     /// <summary>全部语句，φ 换成 EH 已证明的版本。</summary>
-    public IEnumerable<Stmt> Statements => Blocks.SelectMany(b => b.Statements)
-        .Select(s => s is Phi phi && ExceptionPhis.TryGetValue(phi.Target, out var proven) ? proven : s);
+    public IEnumerable<Stmt> Statements { get; init; } = Blocks.SelectMany(b => b.Statements)
+        .Select(s => s is Phi phi && ExceptionPhis.TryGetValue(phi.Target, out var proven) ? proven : s).ToArray();
 }
 
 internal sealed class AnalysisContext(MethodView view)
@@ -34,12 +34,9 @@ internal sealed class AnalysisContext(MethodView view)
     {
         if (results.TryGetValue(analysis, out var cached)) return (T)cached;
         if (!running.Add(analysis)) throw new InvalidOperationException($"分析 {analysis.GetType().Name} 的依赖成环");
-        try
-        {
-            var result = analysis.Run(this);
-            results[analysis] = result;
-            return result;
-        }
-        finally { running.Remove(analysis); }
+        var result = analysis.Run(this);
+        results[analysis] = result;
+        running.Remove(analysis);
+        return result;
     }
 }

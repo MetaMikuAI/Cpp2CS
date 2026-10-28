@@ -40,11 +40,11 @@ public sealed class FieldLayouts
     private const int EmptyStructSize = 1;
     private readonly ProgramModel model;
     private readonly object gate = new();
-    private readonly Dictionary<DefinitionRef, TypeLayout> cache = new();
-    private readonly Dictionary<DefinitionRef, TypeLayout> computed = new();
-    private readonly HashSet<DefinitionRef> active = new();
+    private readonly Dictionary<(DefinitionRef Type, string Binding), TypeLayout> cache = new();
+    private readonly Dictionary<(DefinitionRef Type, string Binding), TypeLayout> computed = new();
+    private readonly HashSet<(DefinitionRef Type, string Binding)> active = new();
     /// <summary>实例部分已排好、静态部分尚在计算的布局：类型以自身值类型作静态字段时（如 Vector2.zeroVector）由此取大小。</summary>
-    private readonly Dictionary<(DefinitionRef, bool), TypeLayout> provisional = new();
+    private readonly Dictionary<((DefinitionRef Type, string Binding), bool), TypeLayout> provisional = new();
 
     public FieldLayouts(ProgramModel model) => this.model = model;
 
@@ -62,19 +62,20 @@ public sealed class FieldLayouts
 
     private TypeLayout? LayoutCore(DefinitionRef type, bool preferMetadata)
     {
+        var key = (type, NativeBindings.Key(type));
         var store = preferMetadata ? cache : computed;
-        if (store.TryGetValue(type, out var known)) return known;
-        if (provisional.TryGetValue((type, preferMetadata), out var partial)) return partial;
+        if (store.TryGetValue(key, out var known)) return known;
+        if (provisional.TryGetValue((key, preferMetadata), out var partial)) return partial;
         var definition = type.Definition;
         if (definition.GenericParameters.Count != type.Arguments.Count) return null;
-        if (!active.Add(type)) throw new InvalidDataException($"布局递归：{type}");
+        if (!active.Add(key)) throw new InvalidDataException($"布局递归：{type}");
         try
         {
             var layout = Build(type, preferMetadata);
-            store[type] = layout;
+            store[key] = layout;
             return layout;
         }
-        finally { active.Remove(type); }
+        finally { active.Remove(key); }
     }
 
     private TypeLayout Build(DefinitionRef type, bool preferMetadata)
@@ -128,7 +129,7 @@ public sealed class FieldLayouts
             instanceSize = ExplicitClassSize(definition, generic, instanceSize, actualClassSize);
             minimumAlignment = alignment;
             actualSize = generic || definition.ClassSizeIsDefault != false ? actualClassSize : instanceSize;
-            provisional[(type, preferMetadata)] = new TypeLayout
+            provisional[((type, NativeBindings.Key(type)), preferMetadata)] = new TypeLayout
             {
                 Type = type, InstanceSize = instanceSize, ActualSize = actualSize, MinimumAlignment = minimumAlignment, HasReferences = hasReferences,
                 Fields = fields, Statics = [], StaticSize = 0, ThreadStatics = [], FromMetadata = false,
@@ -146,7 +147,7 @@ public sealed class FieldLayouts
             if (valueType) instanceSize = actualSize = EmptyStructSize + RuntimeLayout.ObjectHeaderSize;
             instanceSize = ExplicitClassSize(definition, generic, UpdateForGeneric(definition, generic, instanceSize), actualSize);
         }
-        provisional.Remove((type, preferMetadata));
+        provisional.Remove(((type, NativeBindings.Key(type)), preferMetadata));
 
         var fromMetadata = false;
         if (preferMetadata && !generic && definition.Size > 0)
@@ -251,22 +252,27 @@ public sealed class FieldLayouts
     /// <summary>作为字段时的大小与对齐（FieldLayout::GetTypeSizeAndAlignment）。</summary>
     public (int Size, int Alignment) SizeAndAlignment(TypeRef type) => SizeAndAlignment(type, preferMetadata: true);
 
-    private (int Size, int Alignment) SizeAndAlignment(TypeRef type, bool preferMetadata)
+    /// <summary>未绑定或不支持的字段类型没有布局；递归和损坏的元数据仍直接报错。</summary>
+    public (int Size, int Alignment)? TrySizeAndAlignment(TypeRef type) => TrySizeAndAlignment(type, preferMetadata: true);
+
+    private (int Size, int Alignment) SizeAndAlignment(TypeRef type, bool preferMetadata) =>
+        TrySizeAndAlignment(type, preferMetadata) ?? throw new InvalidDataException($"类型 {type} 没有可用字段布局");
+
+    private (int Size, int Alignment)? TrySizeAndAlignment(TypeRef type, bool preferMetadata)
     {
         switch (type)
         {
-            case GenericParameterRef { NativeScalar: { } scalar }: return SizeAndAlignment(scalar, preferMetadata);
-            case GenericParameterRef { NativeAggregate: { } aggregate }: return SizeAndAlignment(aggregate, preferMetadata);
+            case GenericParameterRef { NativeScalar: { } scalar }: return TrySizeAndAlignment(scalar, preferMetadata);
+            case GenericParameterRef { NativeAggregate: { } aggregate }: return TrySizeAndAlignment(aggregate, preferMetadata);
             case ByRefRef or PointerRef or ArrayRef or GenericParameterRef or PrimitiveRef:
                 return (8, 8);
             case DefinitionRef d:
                 if (PrimitiveSize(d) is { } primitive) return (primitive, primitive);
                 if (!d.Definition.IsValueType) return (8, 8);
-                if (d.Definition.IsEnum) return SizeAndAlignment(EnumUnderlying(d), preferMetadata);
-                var layout = Layout(d, preferMetadata) ?? throw new InvalidDataException($"值类型 {d} 没有可用布局");
-                return (layout.ValueSize, layout.MinimumAlignment);
+                if (d.Definition.IsEnum) return TrySizeAndAlignment(EnumUnderlying(d), preferMetadata);
+                return Layout(d, preferMetadata) is { } layout ? (layout.ValueSize, layout.MinimumAlignment) : null;
             default:
-                throw new NotSupportedException($"未知类型引用 {type}");
+                return null;
         }
     }
 
@@ -307,16 +313,14 @@ public sealed class FieldLayouts
         var explicitDivergence = new List<string>();
         var runtimeDefined = 0;
         var staticMismatch = new List<string>();
-        int types = 0, fieldCount = 0, staticCount = 0, failures = 0;
+        int types = 0, fieldCount = 0, staticCount = 0;
         var failed = new List<string>();
         foreach (var definition in model.Types)
         {
             if (definition.GenericParameters.Count > 0 || definition.IsInterface || definition.Size <= 0 || definition.Name == "<Module>") continue;
             var type = new DefinitionRef(definition, []);
-            TypeLayout? layout;
-            try { layout = Compute(type); }
-            catch (Exception e) { failures++; failed.Add($"{definition}: {e.Message}"); continue; }
-            if (layout is null) continue;
+            var layout = Compute(type);
+            if (layout is null) { failed.Add($"{definition}: 没有可用布局"); continue; }
             types++;
             if (RuntimeDefinedTypes.Contains(definition.FullName)) { runtimeDefined++; continue; }
             var known = InvolvesExplicitStruct(definition);
@@ -335,7 +339,7 @@ public sealed class FieldLayouts
                 if (slot.Field.Offset != slot.Offset) staticMismatch.Add($"{slot.Field}：算法 0x{slot.Offset:x}，元数据 0x{slot.Field.Offset:x}");
             }
         }
-        checks.Add("layout.compute", "Error", types + failures, failed, "非泛型类型均能按算法完成布局");
+        checks.Add("layout.compute", "Error", types + failed.Count, failed, "非泛型类型均能按算法完成布局");
         checks.Add("layout.instance-size", "Error", types, sizeMismatch,
             $"算法重算的 instance_size 与元数据 Il2CppTypeDefinitionSizes 一致（运行时定义大小的类型 {runtimeDefined} 个不比较）");
         checks.Add("layout.explicit-struct-alignment", "Warning", types, explicitDivergence,
@@ -349,11 +353,9 @@ public sealed class FieldLayouts
         var valueTypes = 0;
         foreach (var instance in instances)
         {
-            try
-            {
-                if (Of(instance) is { IsValueType: true }) valueTypes++;
-            }
-            catch (Exception e) { genericFailures.Add($"{instance}: {e.Message}"); }
+            var layout = Of(instance);
+            if (layout is null) genericFailures.Add($"{instance}: 没有可用布局");
+            else if (layout.IsValueType) valueTypes++;
         }
         checks.Add("layout.generic-instances", "Error", instances.Length, genericFailures,
             $"元数据中全部封闭泛型实例类型均能计算布局（其中值类型 {valueTypes} 个；实参含完全共享占位类型、偏移需经 RGCTX 的 {instances.Count(IsFullyShared)} 个）");

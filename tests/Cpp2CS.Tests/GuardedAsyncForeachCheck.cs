@@ -65,7 +65,7 @@ internal static class GuardedAsyncForeachCheck
             if (mode == "escape") success.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Observe"), Id("iterator"))));
             outer.Statements.Add(new IfElseStatement(new BinaryOperatorExpression(Id("exception"), BinaryOperatorType.Equality, new NullReferenceExpression()), success));
             outer.Statements.Add(new ThrowStatement(Id("exception")));
-            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).GetNestedType("RecoveredForeach", BindingFlags.NonPublic)!, nonPublic: true)!;
+            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).Assembly.GetType("Cpp2CS.Output.RecoveredForeach")!, nonPublic: true)!;
             transform.Run(tree, null!);
             a.Equal(mode == "valid" ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的清理与逃逸边界");
             a.Equal(1, tree.Descendants.OfType<UnaryOperatorExpression>().Count(e => e.Operator == UnaryOperatorType.Await), "await 保留一次且仍在循环内");

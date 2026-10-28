@@ -1,5 +1,6 @@
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
+using Cpp2CS.Analysis;
 
 namespace Cpp2CS.Recovery;
 
@@ -12,27 +13,47 @@ namespace Cpp2CS.Recovery;
 /// </summary>
 public static class SourceRewriter
 {
-    public static ManagedBody Rewrite(ManagedBody body, ManagedTypes types, Func<MethodRef, bool>? fieldGetter = null)
+    public static ManagedBody Rewrite(ManagedBody body, ManagedTypes types, Func<MethodRef, bool>? fieldGetter = null,
+        Action<IterationResult<ManagedBody>>? iteration = null, Action<Cpp2CS.Structure.SourcePass>? trace = null)
     {
-        body = Normalize(body);
-        body = SourceStructCopies.Rewrite(body);
-        body = TypedCatches(body);
-        body = CachedDelegates(body);
-        body = Map(body, v => Simplify(v, types));
-        body = FreshArrayLengths(body, types);
-        body = DropStatements(body);
-        body = SourceCheckedCasts.Rewrite(body);
-        body = Normalize(SourceArgumentAliases.Rewrite(body));
-        for (var round = 0; round < 4; round++)
-            body = DeadAssignments(Map(Retype(Propagate(body)), v => Simplify(v, types)));
-        body = DropStatements(BooleanStores(body, types));
-        body = SourceStructCopies.Rewrite(body);
-        body = SourceScalarStructCopies.Rewrite(body);
-        body = SourceStructCopies.SnapshotReads(body);
-        body = DeadAssignments(Map(SourceCaughtExceptions.Rewrite(body, types), v => Simplify(v, types)));
-        body = DropStatements(SourceNonNullReceivers.FoldBranches(body));
-        body = SourceExceptionPaths.Rewrite(body);
-        return SourceIteratorCleanup.Rewrite(SourceIteratorDispatch.Rewrite(SourceTryBlocks.Rewrite(SourceCatchHandlers.Rewrite(SourceReturns.Rewrite(FoldFieldCopies(DeadStores(body)))), fieldGetter)));
+        var original = body;
+        void Apply(string rule, Func<ManagedBody, ManagedBody> transform)
+        {
+            var before = body;
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            body = transform(before);
+            if (trace is not null) trace(new(rule, !ManagedStructure.Same(before, body),
+                before.Blocks.Sum(b => b.Statements.Count), body.Blocks.Sum(b => b.Statements.Count),
+                System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds));
+        }
+        Apply("source.normalize", Normalize);
+        Apply("source.struct-copies", SourceStructCopies.Rewrite);
+        Apply("source.typed-catches", TypedCatches);
+        Apply("source.cached-delegates", CachedDelegates);
+        Apply("source.values", b => Map(b, v => Simplify(v, types)));
+        Apply("source.array-lengths", b => FreshArrayLengths(b, types));
+        Apply("source.drop-checks", DropStatements);
+        Apply("source.checked-casts", SourceCheckedCasts.Rewrite);
+        Apply("source.argument-aliases", b => Normalize(SourceArgumentAliases.Rewrite(b)));
+        var reduced = Iteration.Run(body, current => DeadAssignments(Map(Retype(Propagate(current)), v => Simplify(v, types))), ManagedStructure.Same, 16);
+        iteration?.Invoke(reduced);
+        if (reduced.Status != IterationStatus.Stable) return original;
+        Apply("source.scalar-reduction", _ => reduced.Value);
+        Apply("source.boolean-stores", b => DropStatements(BooleanStores(b, types)));
+        Apply("source.struct-copies-final", SourceStructCopies.Rewrite);
+        Apply("source.scalar-struct-copies", SourceScalarStructCopies.Rewrite);
+        Apply("source.struct-snapshots", SourceStructCopies.SnapshotReads);
+        Apply("source.caught-exceptions", b => DeadAssignments(Map(SourceCaughtExceptions.Rewrite(b, types), v => Simplify(v, types))));
+        Apply("source.nonnull-branches", b => DropStatements(SourceNonNullReceivers.FoldBranches(b)));
+        Apply("source.exception-paths", SourceExceptionPaths.Rewrite);
+        Apply("source.dead-stores", DeadStores);
+        Apply("source.field-copies", FoldFieldCopies);
+        Apply("source.returns", SourceReturns.Rewrite);
+        Apply("source.catch-handlers", SourceCatchHandlers.Rewrite);
+        Apply("source.try-blocks", b => SourceTryBlocks.Rewrite(b, fieldGetter));
+        Apply("structure.iterator-dispatch", SourceIteratorDispatch.Rewrite);
+        Apply("structure.iterator-cleanup", Cpp2CS.Structure.IteratorCleanup.Rewrite);
+        return body;
     }
 
     /// <summary>bool 目标上的参数恒等复制不保留寄存器搬运转换，供普通字段与迭代器入口共同使用。</summary>

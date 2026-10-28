@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
@@ -44,7 +45,7 @@ public sealed partial class MethodRecovery
 
         /// <summary>只有精确调用签名提供类型；普通访存宽度不能定型。异型重叠先拒绝，嵌套字段见证合并到外根。</summary>
         [Analysis("帧区域", 30, After = ["异常值", "栈上调用", "帧前类型"])]
-        private void PrepareFrames()
+        private RecoveryFailure? PrepareFrames()
         {
             var witnesses = new List<FrameWitness>();
             void Bind(Expr expression, TypeRef type, Call call, bool writes = false)
@@ -94,10 +95,10 @@ public sealed partial class MethodRecovery
             }
             WitnessStoredArguments(witnesses);
             WitnessLoadedArguments(witnesses);
-            WitnessStoredResults(witnesses);
-            WitnessFieldCopies(witnesses);
+            if (WitnessStoredResults(witnesses) is { } resultFailure) return resultFailure;
+            if (WitnessFieldCopies(witnesses) is { } fieldFailure) return fieldFailure;
             WitnessFrameCopies(witnesses);
-            DiscoverArrayFrameCopies(witnesses);
+            if (DiscoverArrayFrameCopies(witnesses) is { } arrayFailure) return arrayFailure;
             var regions = witnesses.DistinctBy(w => (w.Offset, w.Type)).Select(w => new FrameRegion(w.Offset, w.Type, types.Size(w.Type), StructLocal(w.Type, ScalarWidth(w.Type))))
                 .OrderByDescending(r => r.Size).ThenBy(r => r.Offset).ToArray();
             foreach (var region in regions)
@@ -140,12 +141,13 @@ public sealed partial class MethodRecovery
             // IR 改写后，定义索引按新语句重建。
             definitions = IndexDefinitions();
             PrepareFrameInitializers();
+            return null;
         }
 
         /// <summary>返回帧中的数组引用可为游标和结构体复制提供新见证；在地址绑定前迭代，避免先固定其内嵌的标量槽。</summary>
-        private void DiscoverArrayFrameCopies(List<FrameWitness> witnesses)
+        private RecoveryFailure? DiscoverArrayFrameCopies(List<FrameWitness> witnesses)
         {
-            if (!witnesses.Any(w => w.Type is ArrayRef || StructPaths(w.Type).Any(p => p.Type is ArrayRef))) return;
+            if (!witnesses.Any(w => w.Type is ArrayRef || StructPaths(w.Type).Any(p => p.Type is ArrayRef))) return null;
             for (var round = 0; round < 8; round++)
             {
                 var candidates = witnesses.DistinctBy(w => (w.Offset, w.Type))
@@ -160,12 +162,13 @@ public sealed partial class MethodRecovery
                 InferTypes();
                 PrepareArrayCursors();
                 var count = witnesses.Count;
-                WitnessFieldCopies(witnesses);
+                if (WitnessFieldCopies(witnesses) is { } fieldFailure) return fieldFailure;
                 WitnessFrameCopies(witnesses);
                 if (witnesses.Count == count) break;
             }
             discoveryFrames = [];
             fragmentLocals.Clear();
+            return null;
         }
 
         /// <summary>入口结构体参数的全部 ABI 片原样落栈时，用完整参数类型覆盖只被单个字段调用看见的区域。</summary>
@@ -196,12 +199,12 @@ public sealed partial class MethodRecovery
         /// 寄存器返回的结构体按 ABI 片原样写入相邻栈槽（每片恰好一次写入、偏移差等于片偏移）：这段栈就是一个该类型的值，
         /// 例如 GetAwaiter 内联时把返回的 UniTask 存进临时 awaiter。类型来自被调用者的签名，与参数见证同一依据。
         /// </summary>
-        private void WitnessStoredResults(List<FrameWitness> witnesses)
+        private RecoveryFailure? WitnessStoredResults(List<FrameWitness> witnesses)
         {
             var stores = blocks.SelectMany(b => b.Statements).OfType<Store>()
                 .Select(s => (Store: s, Offset: s.Value is Use ? FrameOffset(s.Target) : null)).Where(p => p.Offset is not null)
                 .ToLookup(p => ((Use)p.Store.Value).Variable);
-            if (stores.Count == 0) return;
+            if (stores.Count == 0) return null;
             foreach (var call in blocks.SelectMany(b => b.Statements).OfType<Call>())
             {
                 if (!call.Defines.Any(d => d is not null && stores.Contains(d))) continue;
@@ -223,16 +226,18 @@ public sealed partial class MethodRecovery
             foreach (var group in stores)
             {
                 if (!values.TryGetValue(group.Key, out var value) || value is not Load { Width: 64 or 128 } load) continue;
-                var ranges = CopyRanges(load.Address, load.Width).Where(r => r.Offset == 0 && types.Size(r.Type) * 8 == load.Width).ToArray();
+                if (!CopyRanges(load.Address, load.Width).TryGet(out var candidates, out var failure)) return failure;
+                var ranges = candidates.Where(r => r.Offset == 0 && types.Size(r.Type) * 8 == load.Width).ToArray();
                 var outer = ranges.Where(r => ranges.All(q => q == r || StructPaths(r.Type).Any(p => p.Offset == 0 && p.Type.Equals(q.Type)))).Select(r => r.Type).Distinct().ToArray();
                 if (outer is not [var type]) continue;
                 foreach (var (store, offset) in group)
                     if (store.Value.Width == load.Width) witnesses.Add(new(offset!.Value, type, store, false));
             }
+            return null;
         }
 
         /// <summary>字段或参数上的已知结构体与栈完整互拷时，以原存储位置的类型为栈区域定型。</summary>
-        private void WitnessFieldCopies(List<FrameWitness> witnesses)
+        private RecoveryFailure? WitnessFieldCopies(List<FrameWitness> witnesses)
         {
             foreach (var block in blocks)
             {
@@ -242,9 +247,15 @@ public sealed partial class MethodRecovery
                     if (store.Value is not Use use || !values.TryGetValue(use.Variable, out var value)
                         || CopiedLoad(value) is not { Width: 32 or 64 or 128 } load || load.Width != use.Width) continue;
                     if (FrameOffset(store.Target) is { } to && FrameOffset(load.Address) is null)
-                        copies.AddRange(CopyRanges(load.Address, load.Width).Select(r => (to - r.Offset, r, store, load.Width)));
+                        {
+                        if (!CopyRanges(load.Address, load.Width).TryGet(out var ranges, out var failure)) return failure;
+                        copies.AddRange(ranges.Select(r => (to - r.Offset, r, store, load.Width)));
+                    }
                     if (FrameOffset(load.Address) is { } from && FrameOffset(store.Target) is null)
-                        copies.AddRange(CopyRanges(store.Target, load.Width).Select(r => (from - r.Offset, r, store, load.Width)));
+                        {
+                        if (!CopyRanges(store.Target, load.Width).TryGet(out var ranges, out var failure)) return failure;
+                        copies.AddRange(ranges.Select(r => (from - r.Offset, r, store, load.Width)));
+                    }
                 }
                 foreach (var group in copies.GroupBy(c => (c.Offset, c.Range.Type, c.Range.Root)))
                 {
@@ -259,6 +270,7 @@ public sealed partial class MethodRecovery
                     witnesses.Add(new(offset, type, group.First().Store, false));
                 }
             }
+            return null;
         }
 
         /// <summary>
@@ -390,7 +402,7 @@ public sealed partial class MethodRecovery
         }
 
         [StoreRule(10)]
-        private bool StoreFrameZero(Store store, List<ManagedStatement> output)
+        private RecoveryResult<bool> StoreFrameZero(Store store, List<ManagedStatement> output)
         {
             if (FrameAccess(store.Target) is not { } frame || !FrameZero(store.Value)) return false;
             // 一次清零覆盖相邻的多个帧区域（如两个 out float）：按区域逐个清零，每个区域须被完整覆盖。
@@ -402,14 +414,14 @@ public sealed partial class MethodRecovery
                 if (covered.Any(r => r.Offset < start || r.Offset + r.Size > end) || covered.Sum(r => (long)r.Size) != end - start) return false;
                 foreach (var region in covered)
                 {
-                    var whole = FrameLocation(region, 0, region.Size * 8);
+                    if (!FrameLocation(region, 0, region.Size * 8).TryGet(out var whole, out var failure)) return failure;
                     foreach (var leaf in whole is Fragment parts ? parts.Parts.Select(p => p.Value) : [whole])
                         output.Add(StoreTo(store.Address, leaf, new ConstantValue(0, leaf.Type, leaf.Width)));
                 }
                 return true;
             }
             // 不先把 q 零值强行缩成 ulong；按区域布局逐个验证完整覆盖的叶子。
-            var location = FrameLocation(frame.Region, frame.Offset, store.Value.Width);
+            if (!FrameLocation(frame.Region, frame.Offset, store.Value.Width).TryGet(out var location, out var locationFailure)) return locationFailure;
             foreach (var leaf in location is Fragment fragment ? fragment.Parts.Select(p => p.Value) : [location])
                 output.Add(StoreTo(store.Address, leaf, new ConstantValue(0, leaf.Type, leaf.Width)));
             return true;
@@ -421,24 +433,25 @@ public sealed partial class MethodRecovery
 
         /// <summary>写入标量帧区域（局部变量）：赋值。</summary>
         [StoreTargetRule(1)]
-        private bool StoreScalarFrame(Store store, ManagedValue target, List<ManagedStatement> output)
+        private RecoveryResult<bool> StoreScalarFrame(Store store, ManagedValue target, List<ManagedStatement> output)
         {
             if (target is not LocalValue local) return false;
-            output.Add(new ManagedAssignment(store.Address, local, RecoverAs(store.Value, local.Type, store.Address)));
+            if (!RecoverAs(store.Value, local.Type, store.Address).TryGet(out var value, out var failure)) return failure;
+            output.Add(new ManagedAssignment(store.Address, local, value));
             return true;
         }
 
         [CallRule(10)]
-        private bool BoxFrame(Call call, List<ManagedStatement> output)
+        private RecoveryResult<bool> BoxFrame(Call call, List<ManagedStatement> output)
         {
             if (call is not { Op: { Kind: OpKind.Box, Operand: TypeRef type }, Arguments: [_, var data] }
                 || types.Kind(type) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)
                 || FrameAccess(data) is null) return false;
-            if (type is DefinitionRef { Definition.FullName: "System.Nullable" }) throw Fail(call.Address, "装箱 Nullable 栈值尚未支持");
-            if (call.Defines.FirstOrDefault() is not { } created) throw Fail(call.Address, "装箱 缺少结果变量");
-            var address = StructAddress(data, type);
+            if (type is DefinitionRef { Definition.FullName: "System.Nullable" }) return Fail(call.Address, "装箱 Nullable 栈值尚未支持");
+            if (call.Defines.FirstOrDefault() is not { } created) return Fail(call.Address, "装箱 缺少结果变量");
+            if (!StructAddress(data, type).TryGet(out var address, out var failure)) return failure;
             var value = address is AddressValue a ? a.Target : new IndirectValue(address, type);
-            output.Add(new ManagedAssignment(call.Address, Local(created), new BoxValue(value, type, types.Object)));
+            if (Assign(call.Address, created, () => new BoxValue(value, type, types.Object), output) is { } assignmentFailure) return assignmentFailure;
             return true;
         }
 

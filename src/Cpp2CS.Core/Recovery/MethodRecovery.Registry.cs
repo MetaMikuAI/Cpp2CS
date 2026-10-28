@@ -1,3 +1,5 @@
+using System.Linq.Expressions;
+using Cpp2CS.Recovery.Analysis;
 using System.Reflection;
 using Cpp2CS.Facts;
 using Cpp2CS.Flow;
@@ -10,7 +12,8 @@ public sealed partial class MethodRecovery
 {
     private sealed partial class Context
     {
-        // ---------- 注册：形态在自己的部分类文件里用属性声明分析、下降规则与证明，中心代码不再随形态改动 ----------
+        // 注册按依赖排序分析、下降规则与证明。可失败的下降规则返回 RecoveryResult，
+        // 分析返回 RecoveryFailure?；纯规则仍可返回 bool/空值，由注册器适配。
 
         /// <summary>分析步骤 <c>void M()</c>。按 After 拓扑排序，同时可运行的按 Order 从小到大。</summary>
         [AttributeUsage(AttributeTargets.Method)]
@@ -66,7 +69,7 @@ public sealed partial class MethodRecovery
         private sealed class BodyProofAttribute(int order) : Attribute { public int Order => order; }
 
         /// <summary>实参规则看到的调用现场：<c>Argument</c> 取单个寄存器传递的实参（不是时登记洞）。</summary>
-        private sealed record ArgumentSite(Call Call, MethodRef Callee, string Name, Dictionary<Storage, Expr> Registers, Func<AbiValue, string, Expr> Argument)
+        private sealed record ArgumentSite(Call Call, MethodRef Callee, string Name, Dictionary<Storage, Expr> Registers, Func<AbiValue, string, RecoveryResult<Expr>> Argument)
         {
             public int Index { get; init; }
             public required List<ManagedStatement> Output { get; init; }
@@ -77,35 +80,46 @@ public sealed partial class MethodRecovery
             private const BindingFlags Members = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
             private static readonly MethodInfo[] Methods = typeof(Context).GetMethods(Members);
 
-            public static readonly (string Name, Action<Context> Run)[] Analyses = OrderAnalyses();
-            public static readonly Func<Context, Block, Stmt, List<ManagedStatement>, bool>[] Statements = Rules<StatementRuleAttribute, Func<Context, Block, Stmt, List<ManagedStatement>, bool>>(a => a.Order);
-            public static readonly Func<Context, Define, List<ManagedStatement>, bool>[] Defines = Rules<DefineRuleAttribute, Func<Context, Define, List<ManagedStatement>, bool>>(a => a.Order);
-            public static readonly Func<Context, Store, List<ManagedStatement>, bool>[] Stores = Rules<StoreRuleAttribute, Func<Context, Store, List<ManagedStatement>, bool>>(a => a.Order);
-            public static readonly Func<Context, Store, ManagedValue, List<ManagedStatement>, bool>[] StoreTargets = Rules<StoreTargetRuleAttribute, Func<Context, Store, ManagedValue, List<ManagedStatement>, bool>>(a => a.Order);
-            public static readonly Func<Context, Call, List<ManagedStatement>, bool>[] Calls = Rules<CallRuleAttribute, Func<Context, Call, List<ManagedStatement>, bool>>(a => a.Order);
-            public static readonly Func<Context, Call, List<ManagedStatement>, bool>[] Invocations = Rules<InvocationRuleAttribute, Func<Context, Call, List<ManagedStatement>, bool>>(a => a.Order);
-            public static readonly Func<Context, Call, AbiSignature, Dictionary<Storage, Expr>, ManagedInvocation, List<ManagedStatement>, bool>[] InvocationOutputs =
-                Rules<InvocationOutputRuleAttribute, Func<Context, Call, AbiSignature, Dictionary<Storage, Expr>, ManagedInvocation, List<ManagedStatement>, bool>>(a => a.Order);
-            public static readonly Func<Context, AbiValue, ArgumentSite, ManagedValue?>[] Arguments = Rules<ArgumentRuleAttribute, Func<Context, AbiValue, ArgumentSite, ManagedValue?>>(a => a.Order);
-            public static readonly Func<Context, Call, AbiValue, LocalValue?>[] Results = Rules<ResultRuleAttribute, Func<Context, Call, AbiValue, LocalValue?>>(a => a.Order);
+            public static readonly (string Name, Func<Context, RecoveryFailure?> Run)[] Analyses = OrderAnalyses();
+            public static readonly Func<Context, Block, Stmt, List<ManagedStatement>, RecoveryResult<bool>>[] Statements = Rules<StatementRuleAttribute, Func<Context, Block, Stmt, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
+            public static readonly Func<Context, Define, List<ManagedStatement>, RecoveryResult<bool>>[] Defines = Rules<DefineRuleAttribute, Func<Context, Define, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
+            public static readonly Func<Context, Store, List<ManagedStatement>, RecoveryResult<bool>>[] Stores = Rules<StoreRuleAttribute, Func<Context, Store, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
+            public static readonly Func<Context, Store, ManagedValue, List<ManagedStatement>, RecoveryResult<bool>>[] StoreTargets = Rules<StoreTargetRuleAttribute, Func<Context, Store, ManagedValue, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
+            public static readonly Func<Context, Call, List<ManagedStatement>, RecoveryResult<bool>>[] Calls = Rules<CallRuleAttribute, Func<Context, Call, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
+            public static readonly Func<Context, Call, List<ManagedStatement>, RecoveryResult<bool>>[] Invocations = Rules<InvocationRuleAttribute, Func<Context, Call, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
+            public static readonly Func<Context, Call, AbiSignature, Dictionary<Storage, Expr>, ManagedInvocation, List<ManagedStatement>, RecoveryResult<bool>>[] InvocationOutputs =
+                Rules<InvocationOutputRuleAttribute, Func<Context, Call, AbiSignature, Dictionary<Storage, Expr>, ManagedInvocation, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
+            public static readonly Func<Context, AbiValue, ArgumentSite, RecoveryResult<ManagedValue?>>[] Arguments = Rules<ArgumentRuleAttribute, Func<Context, AbiValue, ArgumentSite, RecoveryResult<ManagedValue?>>>(a => a.Order);
+            public static readonly Func<Context, Call, AbiValue, RecoveryResult<LocalValue?>>[] Results = Rules<ResultRuleAttribute, Func<Context, Call, AbiValue, RecoveryResult<LocalValue?>>>(a => a.Order);
             public static readonly Func<Context, AbiValue, int, bool>[] Parameters = Rules<ParameterBindingAttribute, Func<Context, AbiValue, int, bool>>(a => a.Order);
             public static readonly Action<Context, ManagedBody>[] Proofs = Rules<BodyProofAttribute, Action<Context, ManagedBody>>(a => a.Order);
 
             private static TDelegate[] Rules<TAttribute, TDelegate>(Func<TAttribute, int> order) where TAttribute : Attribute where TDelegate : Delegate =>
                 Methods.Select(m => (Method: m, Attribute: m.GetCustomAttribute<TAttribute>())).Where(p => p.Attribute is not null)
                     .OrderBy(p => order(p.Attribute!)).ThenBy(p => p.Method.Name, StringComparer.Ordinal)
-                    .Select(p => p.Method.CreateDelegate<TDelegate>()).ToArray();
+                    .Select(p => Adapt<TDelegate>(p.Method)).ToArray();
+
+            private static TDelegate Adapt<TDelegate>(MethodInfo method) where TDelegate : Delegate
+            {
+                var signature = typeof(TDelegate).GetMethod("Invoke")!;
+                var arguments = signature.GetParameters().Select(p => Expression.Parameter(p.ParameterType, p.Name)).ToArray();
+                var call = Expression.Call(arguments[0], method, arguments.Skip(1));
+                Expression result = method.ReturnType == typeof(void) && signature.ReturnType != typeof(void)
+                    ? Expression.Block(call, Expression.Default(signature.ReturnType))
+                    : method.ReturnType == signature.ReturnType ? call : Expression.Convert(call, signature.ReturnType);
+                return Expression.Lambda<TDelegate>(result, arguments).Compile();
+            }
 
             /// <summary>拓扑排序：After 中的步骤必须已经运行；可运行的步骤中先运行 Order 最小的。缺少依赖或成环时启动即失败。</summary>
-            private static (string, Action<Context>)[] OrderAnalyses()
+            private static (string, Func<Context, RecoveryFailure?>)[] OrderAnalyses()
             {
                 var steps = Methods.Select(m => (Method: m, Attribute: m.GetCustomAttribute<AnalysisAttribute>())).Where(p => p.Attribute is not null)
-                    .ToDictionary(p => p.Attribute!.Name, p => (p.Attribute!, Run: p.Method.CreateDelegate<Action<Context>>()));
+                    .ToDictionary(p => p.Attribute!.Name, p => (p.Attribute!, Run: Adapt<Func<Context, RecoveryFailure?>>(p.Method)));
                 foreach (var (name, (attribute, _)) in steps)
                     foreach (var dependency in attribute.After)
                         if (!steps.ContainsKey(dependency)) throw new InvalidOperationException($"分析 {name} 依赖未注册的分析 {dependency}");
                 var done = new HashSet<string>();
-                var ordered = new List<(string, Action<Context>)>();
+                var ordered = new List<(string, Func<Context, RecoveryFailure?>)>();
                 while (ordered.Count < steps.Count)
                 {
                     var next = steps.Where(p => !done.Contains(p.Key) && p.Value.Item1.After.All(done.Contains))

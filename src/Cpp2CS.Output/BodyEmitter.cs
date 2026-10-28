@@ -6,6 +6,9 @@ using Mono.Cecil.Cil;
 
 namespace Cpp2CS.Output;
 
+/// <summary>完整检查、部分阅读体与源码视图分别记录输出策略。</summary>
+public enum EmissionPolicy { Checked, Partial, Source, Recovered }
+
 /// <summary>
 /// 把 L3 的托管方法体写成 CIL：每个 SSA 局部变量一个 IL 局部变量，边赋值先读后写，
 /// 整数运算后按值的位宽与符号规范化。先检查支持范围（访问权限、构造函数的 this 初始化、各类值），不支持时不替换骨架方法体。
@@ -30,9 +33,10 @@ public sealed partial class BodyEmitter
 
     /// <summary>
     /// 放行越权访问：内联进来的代码对别的类型私有成员（含只读字段）的直接访问按原样写出，语义等价，但对着原程序集编译不过。
-    /// 只在认回访问器之后的最终写出打开（<see cref="AccessorRecovery.Rewrite"/>），访问器候选仍从越权失败中发现。
+    /// 只在认回访问器之后的最终写出打开，访问器候选仍从越权失败中发现。
     /// </summary>
-    public bool IgnoreAccess { get; set; }
+    public EmissionPolicy Policy { get; set; } = EmissionPolicy.Checked;
+    private bool IgnoreAccess => Policy != EmissionPolicy.Checked;
 
     private bool CanAccess(MethodRef method, TypeRef? receiver) => IgnoreAccess || ManagedAccess.Method(types, accessContext, method, receiver);
     private bool CanAccess(TypeRef type) => IgnoreAccess || ManagedAccess.Type(types, accessContext, type);

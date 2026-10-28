@@ -11,6 +11,8 @@ public sealed partial class MethodRecovery
         /// <summary>只在最终写出调用失败时描述证据；不缓存类型推导尚未收敛时的失败原因，也不改变 ResolveOnce 的选择。</summary>
         private string CallResolutionFailure(Call call)
         {
+            if (callResolutions.GetValueOrDefault(call) is { Status: "conflict" } conflict)
+                return $"调用 多个兼容候选未消歧：{string.Join('；', conflict.Candidates.Where(c => c.Rejection is null).Select(c => c.Method))}";
             if (call.Op is not null) return $"调用 {call.Op} 的方法未确定";
             if (call.Target is not Const target) return "调用 目标地址未确定";
             var entries = facts.EntriesAt(target.Value);

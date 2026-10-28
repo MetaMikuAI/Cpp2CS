@@ -1,3 +1,4 @@
+using Cpp2CS.Calls;
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -6,7 +7,7 @@ using Cpp2CS.Recovery;
 namespace Cpp2CS.Output;
 
 /// <summary>源码中的内联库操作：匹配库方法体或已知集合操作的控制流与读写结构。</summary>
-public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes types, MethodRecovery recovery)
+public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes types, IMethodSummaries summaries)
 {
     private sealed record Pattern(MethodRef Method, ManagedStatement[] Statements, Dictionary<Variable, ManagedValue> Values, ManagedValue Returned);
     private readonly Dictionary<TypeDef, Pattern[]> patterns = [];
@@ -87,7 +88,7 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
             && m.Name is not (".ctor" or ".cctor") && m.Parameters.Count <= 3).OrderBy(m => m.Parameters.Count))
         {
             var reference = new MethodRef(method, [], []);
-            if (recovery.Recover(reference, method.Address).Body is not { Regions.Count: 0 } original) continue;
+            if (summaries.Find(new(reference, method.Address))?.Body is not { Regions.Count: 0 } original) continue;
             var body = SourceRewriter.Rewrite(original, types);
             var blocks = body.Blocks.ToDictionary(b => b.Address);
             var seen = new HashSet<ulong>();

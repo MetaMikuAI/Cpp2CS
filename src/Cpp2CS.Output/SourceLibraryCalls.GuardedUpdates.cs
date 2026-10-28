@@ -1,3 +1,4 @@
+using Cpp2CS.Calls;
 using System.Reflection;
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
@@ -23,7 +24,7 @@ public sealed partial class SourceLibraryCalls
                     && m.GenericParameters.Count == 0 && types.Kind(m.ReturnType) == TypeKind.Bool
                     && (m.Attributes & MethodAttributes.MemberAccessMask) == MethodAttributes.Public
                     && facts.Code.At(m.Address) is { Region: CodeRegion.Managed, Size: <= 128 });
-                candidates = methods.Select(m => recovery.Recover(new(m, [], []), m.Address).Body)
+                candidates = methods.Select(m => summaries.Find(new(new(m, [], []), m.Address))?.Body)
                     .Where(b => b is not null).Select(b => SourceGuardedUpdate.Create(SourceRewriter.Rewrite(b!, types), types))
                     .OfType<SourceGuardedUpdate>().ToArray();
                 guardedUpdates[owner] = candidates;

@@ -10,7 +10,7 @@ public sealed partial class MethodRecovery
         [Analysis("帧快照", 32, After = ["帧区域"])]
         private void ForwardFrameSnapshots()
         {
-            var replacements = FrameSnapshots.Read(function);
+            var replacements = FrameSnapshots.Read(function, ruleTraces.Add);
             foreach (var block in blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {

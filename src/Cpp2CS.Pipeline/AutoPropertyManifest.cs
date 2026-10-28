@@ -1,6 +1,7 @@
+using Cpp2CS.Output;
 using Cpp2CS.Recovery;
 
-namespace Cpp2CS.Output;
+namespace Cpp2CS.Pipeline;
 
 /// <summary>语言证据与执行证据分开记录；无原生代码的方法不冒充 verified。</summary>
 public static class AutoPropertyManifest

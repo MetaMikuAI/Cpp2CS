@@ -11,6 +11,7 @@
     <ProjectReference Include="../../src/Cpp2CS.Core/Cpp2CS.Core.csproj" />
     <ProjectReference Include="../../src/Cpp2CS.Input/Cpp2CS.Input.csproj" />
     <ProjectReference Include="../../src/Cpp2CS.Output/Cpp2CS.Output.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Pipeline/Cpp2CS.Pipeline.csproj" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
     <PackageReference Include="Microsoft.ILVerification" />
   </ItemGroup>

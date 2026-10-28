@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -109,12 +110,14 @@ public sealed partial class MethodRecovery
         }
 
         [ArgumentRule(5)]
-        private ManagedValue? ArraySpanArgument(AbiValue parameter, ArgumentSite site)
+        private RecoveryResult<ManagedValue?> ArraySpanArgument(AbiValue parameter, ArgumentSite site)
         {
-            if (!arraySpans.TryGetValue((site.Call, site.Index), out var span)) return null;
+            if (!arraySpans.TryGetValue((site.Call, site.Index), out var span)) return (ManagedValue?)null;
+            if (!RecoverAs(span.Array, new ArrayRef(types.Byte, 1), site.Call.Address).TryGet(out var array, out var failure)) return failure;
+            if (!RecoverAs(span.Start, types.Int32, site.Call.Address).TryGet(out var start, out failure)) return failure;
             var result = StructLocal(parameter.Type, 0);
             site.Output.Add(new ManagedCall(site.Call.Address, new ManagedInvocation(span.Factory, null,
-                [RecoverAs(span.Array, new ArrayRef(types.Byte, 1), site.Call.Address), RecoverAs(span.Start, types.Int32, site.Call.Address)], false), result, false));
+                [array, start], false), result, false));
             return result;
         }
     }

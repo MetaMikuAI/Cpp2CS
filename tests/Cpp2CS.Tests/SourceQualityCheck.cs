@@ -12,11 +12,9 @@ internal static class SourceQualityCheck
         Directory.CreateDirectory(output);
         var rows = new List<object>();
         var totals = new Dictionary<string, int>();
-        foreach (var line in File.ReadLines(Path.Combine(inventory, "types.tsv")).Skip(1))
+        foreach (var source in ScopeSource.Read(inventory, directory))
         {
-            var fields = line.Split('\t');
-            var path = Path.Combine(directory, "src", fields[1]);
-            if (!File.Exists(path)) throw new FileNotFoundException("目标类型源码未导出", path);
+            var path = source.Path;
             var root = CSharpSyntaxTree.ParseText(File.ReadAllText(path)).GetRoot();
             var identifiers = root.DescendantTokens().Where(t => t.RawKind == (int)SyntaxKind.IdentifierToken).Select(t => t.ValueText).ToArray();
             var counts = new Dictionary<string, int>
@@ -35,7 +33,7 @@ internal static class SourceQualityCheck
                 ["iteratorMethods"] = root.DescendantNodes().OfType<MethodDeclarationSyntax>().Count(m => m.DescendantNodes().OfType<YieldStatementSyntax>().Any()),
             };
             foreach (var (key, value) in counts) totals[key] = totals.GetValueOrDefault(key) + value;
-            rows.Add(new { type = fields[0], counts });
+            rows.Add(new { type = source.Type, counts });
         }
         var records = File.ReadLines(Path.Combine(directory, "recovery.jsonl")).Select(l => JsonDocument.Parse(l)).ToArray();
         var targets = records.Select(d => d.RootElement).Where(r => !r.GetProperty("dependency").GetBoolean()).ToArray();

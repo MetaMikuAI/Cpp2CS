@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
@@ -155,12 +156,13 @@ public sealed partial class MethodRecovery
         }
 
         [CallRule(10)]
-        private bool LowerCleanupThunk(Call call, List<ManagedStatement> output)
+        private RecoveryResult<bool> LowerCleanupThunk(Call call, List<ManagedStatement> output)
         {
             if (!cleanupCalls.Contains(call)) return false;
             var callee = facts.EntriesAt(((Const)call.Target).Value).Select(e => e.Method).OfType<MethodRef>().Single();
+            if (!RecoverAs(call.Arguments[0], callee.DeclaringType, call.Address).TryGet(out var receiver, out var failure)) return failure;
             output.Add(new ManagedCall(call.Address, new ManagedInvocation(callee,
-                RecoverAs(call.Arguments[0], callee.DeclaringType, call.Address), [], false), null, false) { Inlined = true });
+                receiver, [], false), null, false) { Inlined = true });
             return true;
         }
     }

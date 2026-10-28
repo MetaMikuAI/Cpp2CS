@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
@@ -100,10 +101,11 @@ public sealed partial class MethodRecovery
         }
 
         [StoreRule(1)]
-        private bool StoreStackArgument(Store store, List<ManagedStatement> output)
+        private RecoveryResult<bool> StoreStackArgument(Store store, List<ManagedStatement> output)
         {
             if (!stackArgumentStores.TryGetValue(store, out var local)) return false;
-            output.Add(new ManagedAssignment(store.Address, local, RecoverAs(store.Value, local.Type, store.Address)));
+            if (!RecoverAs(store.Value, local.Type, store.Address).TryGet(out var value, out var failure)) return failure;
+            output.Add(new ManagedAssignment(store.Address, local, value));
             return true;
         }
 

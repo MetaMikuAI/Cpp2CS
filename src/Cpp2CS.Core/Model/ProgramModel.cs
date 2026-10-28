@@ -41,13 +41,14 @@ public sealed record GenericParameterRef(string Name, bool IsMethod, int Positio
 {
     public GenericParameterDef? Parameter { get; init; }
     /// <summary>当前原生入口已证明使用引用共享 ABI；不改变元数据中的泛型约束。</summary>
-    public bool SharedReference { get; init; }
+    public bool SharedReference => Binding?.Kind == NativeBindingKind.Reference;
     /// <summary>原生实例的标量布局见证；托管输出仍保留类型参数，仅允许复制、默认值和拆箱。</summary>
-    public TypeRef? NativeScalar { get; init; }
+    public TypeRef? NativeScalar => Binding?.Kind == NativeBindingKind.Scalar ? Binding.Layout : null;
     /// <summary>原生实例的聚合传参布局；只用于完整值复制，不向开放类型参数暴露实例字段。</summary>
-    public TypeRef? NativeAggregate { get; init; }
+    public TypeRef? NativeAggregate => Binding?.Kind == NativeBindingKind.Aggregate ? Binding.Layout : null;
     /// <summary>登记为完全共享入口；引用实参传值，值实参传存储地址，大小由 RGCTX 给出。</summary>
-    public bool NativeShared { get; init; }
+    public bool NativeShared => Binding?.Kind == NativeBindingKind.Shared;
+    public NativeBinding? Binding { get; init; }
     public DefinitionRef? ReferenceBase => Parameter?.Constraints.OfType<DefinitionRef>().FirstOrDefault(t => !t.Definition.IsValueType
         && !t.Definition.IsInterface && t.Definition.FullName is not ("System.Object" or "System.ValueType" or "System.Enum"));
     public bool IsReferenceConstrained => (Parameter?.Attributes & GenericParameterAttributes.ReferenceTypeConstraint) != 0 && Parameter is not null

@@ -22,9 +22,9 @@ internal sealed class HoleLedger(Func<Stmt, IEnumerable<Variable>> definedBy)
     /// <summary>派生洞的文本：原因加上"源于"根因。</summary>
     public static string DerivedReason(RecoveryHole cause, string reason) => $"{reason}（源于 0x{cause.Address:x}：{cause.Reason}）";
 
-    public RecoveryHole Add(ulong address, string reason, bool derived = false)
+    public RecoveryHole Add(ulong address, string reason, bool derived = false, string code = "recovery.unsupported")
     {
-        var hole = new RecoveryHole(address, reason, derived);
+        var hole = new RecoveryHole(address, reason, derived) { Code = code, Id = holes.Count + 1 };
         holes.Add(hole);
         return hole;
     }
@@ -108,7 +108,7 @@ internal sealed class HoleLedger(Func<Stmt, IEnumerable<Variable>> definedBy)
             {
                 var reason = holes[i].Reason;
                 var marker = reason.IndexOf("（源于 ", StringComparison.Ordinal);
-                holes[i] = holes[i] with { Derived = true, Reason = DerivedReason(Root(cause), marker < 0 ? reason : reason[..marker]) };
+                holes[i] = holes[i] with { Derived = true, CauseId = Root(cause).Id, Reason = DerivedReason(Root(cause), marker < 0 ? reason : reason[..marker]) };
             }
     }
 }

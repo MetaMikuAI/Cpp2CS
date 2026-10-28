@@ -90,11 +90,7 @@ public sealed partial class ManagedAbi(FieldLayouts layouts)
     }
 
     /// <summary>值的字节数；无法确定为 -1。</summary>
-    public int Size(TypeRef type)
-    {
-        try { return layouts.SizeAndAlignment(type).Size; }
-        catch (Exception e) when (e is InvalidDataException or NotSupportedException) { return -1; }
-    }
+    public int Size(TypeRef type) => layouts.TrySizeAndAlignment(type)?.Size ?? -1;
 
     /// <summary>值类型的实例字段（偏移相对值的起点，不含对象头）；没有布局为 null。</summary>
     public IReadOnlyList<(TypeRef Type, int Offset)>? Fields(DefinitionRef type) =>

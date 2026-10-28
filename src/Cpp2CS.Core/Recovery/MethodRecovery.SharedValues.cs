@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
@@ -275,35 +276,51 @@ public sealed partial class MethodRecovery
             function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
         }
 
-        private ManagedValue SharedValue(Expr address, TypeRef type)
+        private RecoveryResult<ManagedValue> SharedValue(Expr address, TypeRef type)
         {
-            var value = Recover(AddressExpression(address), null);
-            if (value.Type is not ByRefRef reference || !reference.Element.Equals(type)) throw Fail(0, $"共享存储 {type} 的地址类型不匹配");
+            if (!Recover(AddressExpression(address), null).TryGet(out var value, out var failure)) return failure;
+            if (value.Type is not ByRefRef reference || !reference.Element.Equals(type)) return Fail(0, $"共享存储 {type} 的地址类型不匹配");
             return value is AddressValue direct ? direct.Target : new IndirectValue(value, type);
         }
 
         [CallRule(9)]
-        private bool LowerSharedValues(Call call, List<ManagedStatement> output)
+        private RecoveryResult<bool> LowerSharedValues(Call call, List<ManagedStatement> output)
         {
             if (call.Op is { Kind: OpKind.CopyGenericValue or OpKind.ClearGenericValue, Operand: TypeRef type })
             {
-                var target = SharedValue(call.Arguments[0], type);
-                var value = call.Op.Kind == OpKind.ClearGenericValue ? new ComposedValue(type, []) : SharedValue(call.Arguments[1], type);
+                if (!SharedValue(call.Arguments[0], type).TryGet(out var target, out var failure)) return failure;
+                ManagedValue value = new ComposedValue(type, []);
+                if (call.Op.Kind != OpKind.ClearGenericValue && !SharedValue(call.Arguments[1], type).TryGet(out value, out failure)) return failure;
                 output.Add(target is LocalValue local ? new ManagedAssignment(call.Address, local, value) : new ManagedStore(call.Address, target, value));
                 return true;
             }
             if (call.Op is not { Kind: OpKind.InvokeGeneric, Operand: MethodRef callee }) return false;
-            var parameters = callee.Method.Parameters.Select((p, i) => Concrete(callee, p.Type) is var type && (ManagedTypes.IsReferenceType(type) || type is ByRefRef)
-                ? RecoverAs(call.Arguments[i + 1], type, call.Address) : SharedValue(call.Arguments[i + 1], type)).ToArray();
+            var parameters = new List<ManagedValue>();
+            foreach (var parameter in callee.Method.Parameters)
+            {
+                var parameterType = Concrete(callee, parameter.Type);
+                var recovered = ManagedTypes.IsReferenceType(parameterType) || parameterType is ByRefRef
+                    ? RecoverAs(call.Arguments[parameters.Count + 1], parameterType, call.Address)
+                    : SharedValue(call.Arguments[parameters.Count + 1], parameterType);
+                if (!recovered.TryGet(out var value, out var failure)) return failure;
+                parameters.Add(value);
+            }
             if (constructed.TryGetValue(call, out var created))
             {
-                output.Add(new ManagedAssignment(call.Address, Local(created), new NewObjectValue(callee, parameters)));
+                if (Assign(call.Address, created, () => new NewObjectValue(callee, parameters), output) is { } failure) return failure;
                 return true;
             }
             var returned = Concrete(callee, callee.Method.ReturnType);
-            var result = ManagedTypes.IsVoid(returned) ? null : (SharedValue(call.Arguments[^1], returned) as LocalValue
-                ?? throw Fail(call.Address, "共享返回存储不是局部变量"));
-            output.Add(new ManagedCall(call.Address, new(callee, callee.Method.IsStatic ? null : RecoverAs(call.Arguments[0], callee.DeclaringType, call.Address), parameters,
+            LocalValue? result = null;
+            if (!ManagedTypes.IsVoid(returned))
+            {
+                if (!SharedValue(call.Arguments[^1], returned).TryGet(out var value, out var failure)) return failure;
+                if (value is not LocalValue local) return Fail(call.Address, "共享返回存储不是局部变量");
+                result = local;
+            }
+            ManagedValue? receiver = null;
+            if (!callee.Method.IsStatic && !RecoverAs(call.Arguments[0], callee.DeclaringType, call.Address).TryGet(out receiver, out var receiverFailure)) return receiverFailure;
+            output.Add(new ManagedCall(call.Address, new(callee, receiver, parameters,
                 callee.DeclaringType is DefinitionRef declaring && DelegateFacts.IsDelegate(declaring)), result, false));
             return true;
         }

@@ -49,7 +49,7 @@ internal static class SearchForeachCheck
             if (mode == "enum-escape") outer.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Observe"), Id("iterator"))));
             if (mode == "extra-entry") outer.Statements.Add(new GotoStatement("again"));
             outer.Statements.Add(new ReturnStatement(Id("found")));
-            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).GetNestedType("RecoveredForeach", BindingFlags.NonPublic)!, nonPublic: true)!;
+            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).Assembly.GetType("Cpp2CS.Output.RecoveredForeach")!, nonPublic: true)!;
             transform.Run(tree, null!);
             a.Equal(mode == "valid" ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的查找和外泄边界");
             if (mode == "valid")

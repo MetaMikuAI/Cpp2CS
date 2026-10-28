@@ -111,7 +111,7 @@ internal static class RecoveredForeachCheck
                 method.Body.Statements.Add(new ThrowStatement(Id("merged")));
             }
             if (escape) method.Body.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Use"), Member("Current"))));
-            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).GetNestedType("RecoveredForeach", BindingFlags.NonPublic)!, nonPublic: true)!;
+            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).Assembly.GetType("Cpp2CS.Output.RecoveredForeach")!, nonPublic: true)!;
             if (cleanupMode == "catch" && !temporary && !escape)
             {
                 foreach (var returns in new[] { false, true })

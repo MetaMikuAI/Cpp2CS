@@ -18,6 +18,8 @@ internal static class UnregisteredFactsCache
     internal static string Key(string image, string metadata, string implementation, string runtime) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"unregistered-v1\n{image}\n{metadata}\n{implementation}\n{runtime}")));
 
+    internal static string PathFor(string directory, string key) => Path.Combine(directory, key + ".cache");
+
     private static string HashFile(string path)
     {
         using var stream = File.OpenRead(path);
@@ -33,8 +35,13 @@ internal static class UnregisteredFactsCache
         }
         var key = Key(facts.Model.Image.Sha256, HashFile(metadata), Implementation.Value,
             RuntimeInformation.FrameworkDescription + "/" + RuntimeInformation.ProcessArchitecture + "/frame-slots=" + FunctionLifter.PromoteFrameSlots);
-        var path = Path.Combine(directory, "latest.cache");
-        var snapshot = Read(path, key, log);
+        var path = PathFor(directory, key);
+        var snapshot = File.Exists(path) ? Read(path, key, log) : null;
+        if (snapshot is null && File.Exists(Path.Combine(directory, "latest.cache")))
+        {
+            snapshot = Read(Path.Combine(directory, "latest.cache"), key, log);
+            if (snapshot is not null) Write(path, key, snapshot, log);
+        }
         if (snapshot is not null)
         {
             var restored = UnregisteredMethods.Restore(snapshot, facts);

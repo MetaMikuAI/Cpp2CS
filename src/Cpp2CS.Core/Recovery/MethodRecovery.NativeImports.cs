@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using System.Reflection;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -35,13 +36,15 @@ public sealed partial class MethodRecovery
         }
 
         [CallRule(20)]
-        private bool NativeImportCall(Call call, List<ManagedStatement> output)
+        private RecoveryResult<bool> NativeImportCall(Call call, List<ManagedStatement> output)
         {
             if (!nativeImports.TryGetValue(call, out var imported)) return false;
             if (call.Kind == CallKind.Tail && !returnType.Equals(imported.Method.ReturnType)) return false;
-            var argument = RecoverAs(ScalarVectorNarrowing.Low(call.Arguments[0], 32), types.Single, call.Address);
+            if (!RecoverAs(ScalarVectorNarrowing.Low(call.Arguments[0], 32), types.Single, call.Address).TryGet(out var argument, out var failure)) return failure;
+            LocalValue? result = null;
+            if (call.Kind != CallKind.Tail && !Local(call.Defines[0]).TryGet(out result, out failure)) return failure;
             output.Add(new ManagedCall(call.Address, new(imported, null, [argument], false),
-                call.Kind == CallKind.Tail ? null : Local(call.Defines[0]), call.Kind == CallKind.Tail));
+                result, call.Kind == CallKind.Tail));
             return true;
         }
     }

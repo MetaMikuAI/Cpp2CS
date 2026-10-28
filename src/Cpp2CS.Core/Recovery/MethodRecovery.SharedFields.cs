@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -72,13 +73,13 @@ public sealed partial class MethodRecovery
                 }
         }
 
-        private ManagedValue SharedAddress(Intrinsic address) => address switch
+        private RecoveryResult<ManagedValue> SharedAddress(Intrinsic address) => address switch
         {
             { Name: "managed_generic_buffer", Arguments: [_, Const id] } => new AddressValue(sharedBuffers[id.Value]),
             { Name: "managed_generic_argument", Arguments: [_, Const register] } => new AddressValue(sharedIncoming[Storage.Gpr((int)register.Value)]),
             { Name: "managed_field_address", Arguments: [var receiver, Symbol { Value: FieldRef field }] }
-                => new AddressValue(new FieldValue(RecoverAs(receiver, field.DeclaringType, 0), field, FieldType(field), Math.Max(0, types.Bits(FieldType(field))))),
-            _ => throw Fail(0, $"共享地址 {address.Name} 尚未支持"),
+                => RecoverAs(receiver, field.DeclaringType, 0).Map<ManagedValue>(value => new AddressValue(new FieldValue(value, field, FieldType(field), Math.Max(0, types.Bits(FieldType(field)))))),
+            _ => Fail(0, $"共享地址 {address.Name} 尚未支持"),
         };
     }
 }

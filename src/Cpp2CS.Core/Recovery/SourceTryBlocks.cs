@@ -1,12 +1,13 @@
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
+using Cpp2CS.Analysis;
 
 namespace Cpp2CS.Recovery;
 
 /// <summary>把保护区出口处不抛异常的局部运算归回 try，保留调用、字段访问和其他异常区域。</summary>
 internal static class SourceTryBlocks
 {
-    private static bool Pure(ManagedValue value) => value switch
+    private static bool Pure(ManagedValue value) => ManagedEffects.CanMoveAcrossExceptionBoundary(value) && value switch
     {
         LocalValue or ArgumentValue or ConstantValue => true,
         ConversionValue conversion => ManagedTypes.PrimitiveName(conversion.Type) is not null

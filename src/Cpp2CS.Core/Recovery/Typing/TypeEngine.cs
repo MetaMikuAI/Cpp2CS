@@ -1,6 +1,7 @@
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
+using Cpp2CS.Analysis;
 
 namespace Cpp2CS.Recovery.Typing;
 
@@ -52,15 +53,15 @@ public sealed class TypeEngine(IReadOnlyList<ITypeContributor> contributors, int
 
     public (Dictionary<Variable, TypeResult> Solution, int Rounds, bool Converged) Run(TypingContext context)
     {
-        for (var round = 1; round <= maxRounds; round++)
+        var result = Iteration.Run(context.Solution, previous =>
         {
+            context.Solution = previous;
             var constraints = new TypeConstraints();
             foreach (var contributor in Contributors) contributor.Contribute(context, constraints);
-            var solution = TypeSolver.Solve(constraints, context.Types);
-            if (Same(solution, context.Solution)) return (solution, round, true);
-            context.Solution = solution;
-        }
-        return (context.Solution, maxRounds, false);
+            return TypeSolver.Solve(constraints, context.Types);
+        }, Same, maxRounds);
+        context.Solution = result.Value;
+        return (result.Value, result.Rounds, result.Status == IterationStatus.Stable);
     }
 
     private static bool Same(Dictionary<Variable, TypeResult> a, Dictionary<Variable, TypeResult> b) =>

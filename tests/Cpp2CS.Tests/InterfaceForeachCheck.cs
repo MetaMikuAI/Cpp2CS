@@ -70,7 +70,7 @@ internal static class InterfaceForeachCheck
             if (mode == "extra-cleanup") cleanup.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Log"))));
             method.Body.Statements.Add(new IfElseStatement(Pattern("success"), cleanup));
             if (mode is "escape" or "cleanup-escape" or "typed-escape") method.Body.Statements.Add(new ExpressionStatement(new InvocationExpression(Id("Observe"), Id(mode == "cleanup-escape" ? "success" : "iterator"))));
-            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).GetNestedType("RecoveredForeach", BindingFlags.NonPublic)!, nonPublic: true)!;
+            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).Assembly.GetType("Cpp2CS.Output.RecoveredForeach")!, nonPublic: true)!;
             transform.Run(tree, null!);
             var folded = mode is "valid" or "typed" or "inline-typed";
             a.Equal(folded ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的条件释放边界");

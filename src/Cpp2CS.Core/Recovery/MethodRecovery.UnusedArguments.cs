@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
@@ -26,10 +27,10 @@ public sealed partial class MethodRecovery
 
         // 编译器可以省略未用输入。仅填补 Unknown 或不能表示成引用的残值，保留已有求值。
         [ArgumentRule(30)]
-        private ManagedValue? UnusedArgument(AbiValue parameter, ArgumentSite site)
+        private RecoveryResult<ManagedValue?> UnusedArgument(AbiValue parameter, ArgumentSite site)
         {
             if (parameter.Passing != Passing.Registers || parameter.Pieces is not [var piece]
-                || !site.Registers.TryGetValue(piece.Register, out var expression)) return null;
+                || !site.Registers.TryGetValue(piece.Register, out var expression)) return (ManagedValue?)null;
             var kind = types.Kind(parameter.Type);
             if (MissingInput(expression) && kind is TypeKind.Reference or TypeKind.Int or TypeKind.Bool
                 && UnusedInput(site.Call, site.Callee, parameter))
@@ -41,24 +42,24 @@ public sealed partial class MethodRecovery
             }
             if (kind != TypeKind.Reference
                 || expression is not (Use or Const) || expression is Use use && inlined.Contains(use.Variable)
-                || !DirectInputProof(site.Call, site.Callee)) return null;
-            var value = Recover(expression, null);
+                || !DirectInputProof(site.Call, site.Callee)) return (ManagedValue?)null;
+            if (!Recover(expression, null).TryGet(out var value, out var failure)) return failure;
             if (value is ConstantValue { Bits: 0 } || value is Fragment || types.IsAssignable(value.Type, parameter.Type)
                 || types.Kind(value.Type) is not (TypeKind.Reference or TypeKind.Int or TypeKind.Bool)
-                || !UnusedParameter(site.Call, piece.Register)) return null;
+                || !UnusedParameter(site.Call, piece.Register)) return (ManagedValue?)null;
             return new ConstantValue(0, parameter.Type, piece.Width);
         }
 
         // 无实例读取的直接调用可复用当前 this 或必经路径上的同类型 SSA 值。
-        private ManagedValue? UnusedReceiver(Call call, MethodRef callee, AbiValue self, Expr expression)
+        private RecoveryResult<ManagedValue?> UnusedReceiver(Call call, MethodRef callee, AbiValue self, Expr expression)
         {
-            if (types.Kind(self.Type) != TypeKind.Reference) return null;
-            if (!MissingInput(expression) && TypeOfValue(expression) is { } actual && types.IsAssignable(actual, self.Type)) return null;
-            if (!UnusedInput(call, callee, self)) return null;
+            if (types.Kind(self.Type) != TypeKind.Reference) return (ManagedValue?)null;
+            if (!MissingInput(expression) && TypeOfValue(expression) is { } actual && types.IsAssignable(actual, self.Type)) return (ManagedValue?)null;
+            if (!UnusedInput(call, callee, self)) return (ManagedValue?)null;
             if (arguments.Values.FirstOrDefault(a => a.Index == -1 && types.IsAssignable(a.Type, self.Type)) is { } current)
                 return new ArgumentValue(-1, current.Type, current.Width);
             var block = blocks.FirstOrDefault(b => b.Statements.Any(s => ReferenceEquals(s, call)));
-            if (block is null) return null;
+            if (block is null) return (ManagedValue?)null;
             var callBlock = block;
             var position = block.Statements.FindIndex(s => ReferenceEquals(s, call));
             var seen = new HashSet<Block>();
@@ -67,7 +68,7 @@ public sealed partial class MethodRecovery
                 foreach (var statement in block.Statements.Take(position).Reverse())
                     if (statement is Call { Op.Kind: OpKind.NullCheck, Arguments: [Use checkedValue] }
                         && known.TryGetValue(checkedValue.Variable, out var type) && types.IsAssignable(type, self.Type))
-                        return RecoverAs(checkedValue, self.Type, call.Address);
+                        return RecoverAs(checkedValue, self.Type, call.Address).Map<ManagedValue?>(value => value);
                 if (block.Predecessors.ToArray() is not [var parent] || parent.Handler == block || !parent.NormalSuccessors.Contains(block)) break;
                 block = parent;
                 position = block.Statements.Count;
@@ -77,8 +78,8 @@ public sealed partial class MethodRecovery
             foreach (var prior in blocks.Where(b => dominators.Dominates(b.Index, callBlock.Index)))
                 foreach (var define in prior.Statements.Take(prior == callBlock ? callBlock.Statements.IndexOf(call) : prior.Statements.Count).OfType<Define>())
                     if (known.TryGetValue(define.Target, out var type) && types.IsAssignable(type, self.Type))
-                        return RecoverAs(new Use(define.Target, define.Value.Width), self.Type, call.Address);
-            return null;
+                        return RecoverAs(new Use(define.Target, define.Value.Width), self.Type, call.Address).Map<ManagedValue?>(value => value);
+            return (ManagedValue?)null;
         }
     }
 }

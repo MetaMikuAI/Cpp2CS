@@ -1,5 +1,6 @@
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
+using Cpp2CS.Memory;
 
 namespace Cpp2CS.Recovery;
 
@@ -349,13 +350,6 @@ internal static partial class SourceStructCopies
 
     private static bool SamePaths(IEnumerable<IReadOnlyList<FieldRef>> expected, IEnumerable<IReadOnlyList<FieldRef>> actual)
     {
-        var remaining = actual.ToList();
-        foreach (var path in expected)
-        {
-            var index = remaining.FindIndex(p => p.SequenceEqual(path));
-            if (index < 0) return false;
-            remaining.RemoveAt(index);
-        }
-        return remaining.Count == 0;
+        return ValueCoverage.Exact(expected.ToArray(), actual, new ValueCoverage.PathComparer<FieldRef>());
     }
 }

@@ -43,6 +43,15 @@ internal static class FactsCacheCheck
         UnregisteredFactsCache.Write(Path.Combine(path, "blocked.cache"), key, snapshot, messages.Add);
         a.True(messages.Any(m => m.Contains("无法保存")), "路径不可写时只禁用缓存");
         a.Equal(1, Directory.GetFiles(directory).Length, "只保留一份缓存，无临时文件残留");
+        var otherKey = UnregisteredFactsCache.Key("image", "metadata", "other-code", "runtime");
+        var versioned = UnregisteredFactsCache.PathFor(directory, key);
+        var otherVersion = UnregisteredFactsCache.PathFor(directory, otherKey);
+        UnregisteredFactsCache.Write(versioned, key, snapshot, null);
+        UnregisteredFactsCache.Write(otherVersion, otherKey, snapshot, null);
+        a.True(versioned != otherVersion && UnregisteredFactsCache.Read(versioned, key, null) is not null
+            && UnregisteredFactsCache.Read(otherVersion, otherKey, null) is not null, "不同实现版本的缓存同时保留并可读取");
+        File.Delete(versioned);
+        File.Delete(otherVersion);
         File.Delete(path);
         Directory.Delete(directory);
         return a.Finish("facts-cache-storage");

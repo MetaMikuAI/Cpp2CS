@@ -1,3 +1,4 @@
+using Cpp2CS.Calls;
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -52,8 +53,8 @@ public sealed partial class SourceLibraryCalls
                 }
             }
             if (entry == 0 || facts.Code.At(entry) is not { Region: CodeRegion.Managed, Size: <= 128 }) continue;
-            var recovered = type.Arguments.Count == 0 ? recovery.Recover(reference, entry) : recovery.RecoverInstance(reference, entry);
-            if (recovered.Body is not { Regions.Count: 0 } original) continue;
+            var recovered = type.Arguments.Count == 0 ? summaries.Find(new(reference, entry)) : summaries.Find(new(reference, entry, RecoveryMode.Instance));
+            if (recovered?.Body is not { Regions.Count: 0 } original) continue;
             var body = SourceRewriter.Rewrite(original, types);
             var values = new Dictionary<Variable, ManagedValue>();
             var stores = new List<ManagedStore>();

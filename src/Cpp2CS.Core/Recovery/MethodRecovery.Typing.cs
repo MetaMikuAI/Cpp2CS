@@ -27,6 +27,7 @@ public sealed partial class MethodRecovery
             var result = new TypeEngine([.. TypingContributors.Create(input), .. trace is null ? [] : new ITypeContributor[] { trace }]).Run(context);
             syncedSolution = null;
             Sync(result.Solution, final: true);
+            if (!result.Converged) Hole(entry, $"类型推断 {result.Rounds} 轮后未收敛");
             trace?.Print(result.Solution, result.Rounds);
         }
 
@@ -79,15 +80,13 @@ public sealed partial class MethodRecovery
             public TypeRef? TypeOf(Expr expression, TypeRef? hint = null)
             {
                 host.Sync(typing.Solution);
-                try { return host.Recover(expression, hint).Type; }
-                catch (HoleException) { return null; }
+                return host.Recover(expression, hint).TryGet(out var value, out _) ? value.Type : null;
             }
 
             public TypeRef? LocationType(Expr address, int width)
             {
                 host.Sync(typing.Solution);
-                try { return host.Location(address, width).Type; }
-                catch (HoleException) { return null; }
+                return host.Location(address, width).TryGet(out var value, out _) ? value.Type : null;
             }
 
             public Expr Expand(Expr expression) => host.Expand(expression);

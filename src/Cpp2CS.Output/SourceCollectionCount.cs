@@ -1,3 +1,4 @@
+using Cpp2CS.Calls;
 using Cpp2CS.Facts;
 using Cpp2CS.Model;
 using Cpp2CS.Recovery;
@@ -29,7 +30,7 @@ public sealed partial class SourceLibraryCalls
                 var bytes = facts.Model.Image.ReadUpTo(first.Function.Start, checked((int)first.Function.Size)).ToArray();
                 if (instances.All(p => p.Function.Size == first.Function.Size
                     && facts.Model.Image.ReadUpTo(p.Function.Start, bytes.Length).SequenceEqual(bytes))
-                    && recovery.RecoverInstance(first.Method, first.Function.Start).Body is { } body)
+                    && summaries.Find(new(first.Method, first.Function.Start, RecoveryMode.Instance))?.Body is { } body)
                     shape = FieldAccessor.Recognize(body, false, types);
             }
             collectionCounts[owner.Definition] = shape;

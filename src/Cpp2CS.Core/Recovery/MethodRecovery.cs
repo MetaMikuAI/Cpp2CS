@@ -5,6 +5,7 @@ using Cpp2CS.Ir;
 using Cpp2CS.Lifting;
 using Cpp2CS.Model;
 using Cpp2CS.Recovery.Analysis;
+using Cpp2CS.Calls;
 using Convert = Cpp2CS.Ir.Convert;
 
 namespace Cpp2CS.Recovery;
@@ -107,9 +108,9 @@ public sealed partial class MethodRecovery
         };
         return new Context(this, open, entry) { SharedDefinition = true }.Run();
         TypeRef Bind(TypeRef parameter, TypeRef instance) => parameter is GenericParameterRef g
-            ? FieldLayouts.IsFullyShared(instance) ? g with { NativeShared = true }
-                : ManagedTypes.IsReferenceType(instance) ? g with { SharedReference = true }
-                : types.Kind(instance) == TypeKind.Struct ? g with { NativeAggregate = instance } : g with { NativeScalar = instance } : parameter;
+            ? g with { Binding = new(FieldLayouts.IsFullyShared(instance) ? NativeBindingKind.Shared
+                : ManagedTypes.IsReferenceType(instance) ? NativeBindingKind.Reference
+                : types.Kind(instance) == TypeKind.Struct ? NativeBindingKind.Aggregate : NativeBindingKind.Scalar, instance, entry) } : parameter;
     }
 
     /// <summary>异常类型的无参实例构造函数（全名，含 mscorlib 之外的类型）。</summary>
@@ -123,14 +124,6 @@ public sealed partial class MethodRecovery
 
     private sealed record Argument(int Index, TypeRef Type, int Width);
 
-    private sealed class HoleException(ulong address, string reason, bool derived = false, RecoveryHole? cause = null, Variable? unresolved = null) : Exception(reason)
-    {
-        public ulong Address { get; } = address;
-        public bool Derived { get; } = derived;
-        public RecoveryHole? Cause { get; } = cause;
-        public Variable? Unresolved { get; } = unresolved;
-    }
-
     private sealed partial class Context(MethodRecovery owner, MethodRef method, ulong entry)
     {
         private readonly ManagedTypes types = owner.types;
@@ -141,6 +134,9 @@ public sealed partial class MethodRecovery
         private readonly Dictionary<Storage, Argument> arguments = new();
         /// <summary>定义索引（<see cref="Definitions"/>）；帧改写之后重建。</summary>
         private Definitions definitions = Definitions.Empty;
+        private readonly MethodAnalyses analyses = new();
+        private readonly List<AnalysisStep> analysisSteps = [];
+        private readonly List<RuleTrace> ruleTraces = [];
         private IReadOnlyDictionary<Variable, Expr> values => definitions.Values;
         private IReadOnlyDictionary<Variable, Phi> phis => definitions.Phis;
         private IReadOnlyDictionary<Variable, (Call Call, int Index)> results => definitions.Results;
@@ -162,7 +158,8 @@ public sealed partial class MethodRecovery
         /// 旧版本的结果不再复用，解析因此只取决于当前的类型，不取决于第一次解析发生在推断之前还是之后。
         /// 由证明确定的解析（栈上调用的隐藏参数匹配、帧区域用过的解析）固定为 <see cref="Pinned"/>。
         /// </summary>
-        private readonly Dictionary<Call, (MethodRef? Method, int Version)> resolved = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<Call, CallBinding> resolved = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<Call, CallResolution> callResolutions = new(ReferenceEqualityComparer.Instance);
         private const int Pinned = -1;
         private int typeVersion;
         /// <summary>内联到使用处的定义（见类注释第 8 条）。</summary>
@@ -173,15 +170,15 @@ public sealed partial class MethodRecovery
         private MachineFunction function = null!;
         private TypeRef returnType = null!;
 
-        private RecoveryHole Hole(ulong address, string reason, bool derived = false) => ledger.Add(address, reason, derived);
-        private static HoleException Fail(ulong address, string reason) => new(address, reason);
+        private RecoveryHole Hole(ulong address, string reason, bool derived = false, [System.Runtime.CompilerServices.CallerMemberName] string rule = "unknown")
+            => ledger.Add(address, reason, derived, "recovery." + rule);
+        private static RecoveryFailure Fail(ulong address, string reason, [System.Runtime.CompilerServices.CallerMemberName] string rule = "unknown")
+            => new(address, reason, Code: "recovery." + rule);
 
-        private static HoleException Derived(RecoveryHole cause, string reason) => new(0, HoleLedger.DerivedReason(cause, reason), true, cause);
+        private static RecoveryFailure Derived(RecoveryHole cause, string reason) => new(0, HoleLedger.DerivedReason(cause, reason), true, cause);
 
-        private void CheckPoison(Variable variable)
-        {
-            if (ledger.TryGetPoison(variable, out var cause)) throw Derived(cause, $"变量 {variable} 依赖未恢复的值");
-        }
+        private RecoveryFailure? CheckPoison(Variable variable) => ledger.TryGetPoison(variable, out var cause)
+            ? Derived(cause, $"变量 {variable} 依赖未恢复的值") : null;
 
         private void Poison(Variable variable, RecoveryHole cause) => ledger.Poison(variable, cause);
         private void Poison(Stmt statement, RecoveryHole cause) => ledger.Poison(statement, cause);
@@ -196,9 +193,9 @@ public sealed partial class MethodRecovery
             }
         }
 
-        private RecoveryHole Record(HoleException exception, ulong address, Stmt? statement = null)
+        private RecoveryHole Record(RecoveryFailure exception, ulong address, Stmt? statement = null)
         {
-            var hole = Hole(exception.Address == 0 ? address : exception.Address, exception.Message, exception.Derived);
+            var hole = ledger.Add(exception.Address == 0 ? address : exception.Address, exception.Message, exception.Derived, exception.Code);
             if (exception.Cause is { } source) ledger.Link(hole, source);
             if (exception.Unresolved is { } variable) ledger.Unresolved(variable, statement);
             // 未定型的定义可能来自尚未遍历到的调用/回边；等全部语句诊断完再决定根因。
@@ -211,31 +208,32 @@ public sealed partial class MethodRecovery
         private static bool FragmentInside(ManagedValue value)
         {
             if (value is Fragment or AggregatePiece) return true;
-            try { return ManagedValues.Children(value).Any(FragmentInside); }
-            catch (NotSupportedException) { return true; }
+            return ManagedValues.Children(value).Any(FragmentInside);
         }
 
         public MethodRecoveryResult Run()
         {
             ManagedBody? partial = null;
-            try
+            if (Prepare())
             {
-                if (Prepare())
+                if (Analyze() is { } analysisFailure) Record(analysisFailure, entry);
+                else if (!Build().TryGet(out var built, out var buildFailure)) Record(buildFailure, entry);
+                else
                 {
-                    Analyze();
-                    var body = DropUnusedRegisterCopies(RewriteAwaiters(Build()));
-                    // 结构体片只活在 L3 内；残留在方法体中的片（某个使用处没有拆回叶子）是洞。
-                    bool Leftover(ManagedStatement s) => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)).Any(v => FragmentInside(v));
+                    var body = DropUnusedRegisterCopies(RewriteAwaiters(built));
+                    bool Leftover(ManagedStatement s) => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)).Any(FragmentInside);
                     partial = body with { Blocks = body.Blocks.Select(b => b with { Statements = b.Statements.Select(s => Leftover(s)
                         ? new ManagedHole(s.Address, "结构体 片未拆回叶子", s is ManagedJump or ManagedBranch or ManagedSwitch or ManagedReturn or ManagedCall { Tail: true }) : s).ToArray() }).ToArray() };
-                    if (body.Blocks.SelectMany(b => b.Statements).FirstOrDefault(Leftover) is { } leftover) throw Fail(leftover.Address, "结构体 片未拆回叶子");
-                    foreach (var proof in Registry.Proofs) proof(this, body);
-                    if (ledger.Count == 0) return new(method, entry, owner.RestoreBaseConstructor(body), ledger.Holes);
+                    if (body.Blocks.SelectMany(b => b.Statements).FirstOrDefault(Leftover) is { } leftover)
+                        Record(Fail(leftover.Address, "结构体 片未拆回叶子"), entry);
+                    else foreach (var proof in Registry.Proofs) proof(this, body);
+                    if (ledger.Count == 0) return new(method, entry, owner.RestoreBaseConstructor(body), ledger.Holes)
+                        { Analyses = analysisSteps.ToArray(), Calls = callResolutions.Values.ToArray(), Rules = ruleTraces.ToArray() };
                     ledger.Finish();
                 }
             }
-            catch (HoleException e) { Record(e, entry); }
-            return new(method, entry, null, ledger.Holes) { Partial = partial is null ? null : Summarized(partial, ledger.Holes) };
+            return new(method, entry, null, ledger.Holes) { Partial = partial is null ? null : Summarized(partial, ledger.Holes),
+                Analyses = analysisSteps.ToArray(), Calls = callResolutions.Values.ToArray(), Rules = ruleTraces.ToArray() };
         }
 
         /// <summary>没有落在某条语句上的洞（异常区域、签名等方法级的洞）汇总成方法入口处的一条标记。</summary>
@@ -372,13 +370,24 @@ public sealed partial class MethodRecovery
 
         // ---------- 分析：定义、运行时引用、配对、类型 ----------
 
-        private void Analyze()
+        private RecoveryFailure? Analyze()
         {
             definitions = IndexDefinitions();
             // 依赖边取改写前的数据流：帧改写把别名换成 TypedFrame，但值仍然来自原来的来源。
             foreach (var (source, target) in definitions.DataFlow) ledger.Dependency(source, target);
             ledger.PropagateExisting();
-            foreach (var (_, run) in Registry.Analyses) run(this);
+            foreach (var (name, run) in Registry.Analyses)
+            {
+                var version = analyses.Version;
+                var inputTypes = known.Count;
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                var failure = run(this);
+                if (analyses.Refresh(blocks, exceptionPhis)) definitions = analyses.Get(Definitions.Analysis);
+                analysisSteps.Add(new(name, version, analyses.Version, inputTypes, known.Count,
+                    System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds));
+                if (failure is not null) return failure;
+            }
+            return null;
         }
 
         /// <summary>类型推断；认出新的类型检查后（klass 加载成为运行时引用），标记运行时值再推断一次。</summary>
@@ -453,7 +462,11 @@ public sealed partial class MethodRecovery
             return null;
         }
 
-        private Definitions IndexDefinitions() => new AnalysisContext(new MethodView(blocks, exceptionPhis)).Get(Definitions.Analysis);
+        private Definitions IndexDefinitions()
+        {
+            analyses.Refresh(blocks, exceptionPhis);
+            return analyses.Get(Definitions.Analysis);
+        }
 
         /// <summary>运行时引用：值是类、方法等运行时结构（不是托管值）的变量。只能出现在运行时操作的参数中。</summary>
         [Analysis("运行时引用", 40, After = ["帧区域", "异常值"])]
@@ -864,7 +877,8 @@ public sealed partial class MethodRecovery
         /// <summary>托管调用的方法（具体实例）；依据尚不足（接收者类型未定）时为 null。</summary>
         private MethodRef? Resolve(Call call)
         {
-            if (resolved.TryGetValue(call, out var cached) && cached.Method is not null && (cached.Version == Pinned || cached.Version == typeVersion)) return cached.Method;
+            if (resolved.TryGetValue(call, out var cached) && cached.Method is not null
+                && (cached.Committed || cached.Version == typeVersion && cached.IrVersion == analyses.Version)) return cached.Method;
             var result = ResolveOnce(call);
             // 封闭实例：经自身 MethodInfo/RGCTX 得到的方法保留泛型参数形式（如 IUniTaskSource<T>.GetResult），代入实例的实参。
             if ((ClosedInstance || SharedDefinition) && result is not null)
@@ -873,7 +887,11 @@ public sealed partial class MethodRecovery
                     TypeArguments = result.TypeArguments.Select(t => t.Substitute(method.TypeArguments, method.MethodArguments)).ToArray(),
                     MethodArguments = result.MethodArguments.Select(t => t.Substitute(method.TypeArguments, method.MethodArguments)).ToArray(),
                 };
-            resolved[call] = (result, typeVersion);
+            resolved[call] = new(result, typeVersion, IrVersion: analyses.Version);
+            if (!callResolutions.TryGetValue(call, out var resolution) || resolution.TypeVersion != typeVersion)
+                callResolutions[call] = new(call.Address, (call.Target as Const)?.Value, typeVersion,
+                    result is null ? [] : [new(result, call.Op?.Kind.ToString() ?? "native-identity")], result, result is null ? "blocked" : "bound");
+            else if (result is not null) callResolutions[call] = resolution with { Selected = result };
             return result;
         }
 
@@ -925,18 +943,29 @@ public sealed partial class MethodRecovery
                         var direct = new MethodRef(unique, [], []);
                         if (owner.abi.Classify(direct, out _)?.This is { } unusedThis && UnusedInput(call, direct, unusedThis)) return direct;
                     }
+                    var available = new List<CallCandidate>();
                     foreach (var candidate in candidates.OrderBy(c => c.Index))
                     {
-                        if (candidate.GenericParameters.Count > 0) continue;
-                        if (candidate.Owner.GenericParameters.Count == 0)
+                        if (candidate.GenericParameters.Count > 0)
                         {
-                            if (candidate.IsStatic || receiver is null || types.IsAssignable(receiver, new DefinitionRef(candidate.Owner, [])) || receiver is ByRefRef)
-                                return new MethodRef(candidate, [], []);
+                            available.Add(new(MethodRef.Open(candidate), "native-entry", "call.generic-arguments-missing"));
                             continue;
                         }
-                        if (!candidate.IsStatic && (Instantiation(receiver, candidate.Owner) ?? StructReceiverArguments(Receiver(call), candidate.Owner)) is { } typeArguments) return new MethodRef(candidate, typeArguments, []);
+                        if (candidate.Owner.GenericParameters.Count == 0)
+                        {
+                            var compatible = candidate.IsStatic || receiver is null || types.IsAssignable(receiver, new DefinitionRef(candidate.Owner, [])) || receiver is ByRefRef;
+                            available.Add(new(new(candidate, [], []), "native-entry+receiver", compatible ? null : "call.receiver-incompatible"));
+                            continue;
+                        }
+                        if (!candidate.IsStatic && (Instantiation(receiver, candidate.Owner) ?? StructReceiverArguments(Receiver(call), candidate.Owner)) is { } typeArguments)
+                            available.Add(new(new(candidate, typeArguments, []), "native-entry+receiver-instance"));
+                        else available.Add(new(MethodRef.Open(candidate), "native-entry", "call.type-arguments-missing"));
                     }
-                    return null;
+                    var accepted = available.Where(c => c.Rejection is null).Select(c => c.Method).Distinct().ToArray();
+                    var selected = accepted.Length == 1 ? accepted[0] : null;
+                    callResolutions[call] = new(call.Address, target.Value, typeVersion, available, selected,
+                        accepted.Length == 0 ? "blocked" : accepted.Length == 1 ? "bound" : "conflict");
+                    return selected;
                 }
                 case { Kind: OpKind.CallVirtual, Operand: int slot }:
                     // 接收者静态类型的 vtable 槽位：callvirt 按对象的实际类型在同一槽位分派
@@ -984,30 +1013,29 @@ public sealed partial class MethodRecovery
 
         private TypeRef? TypeOfValue(Expr e)
         {
-            try { return Recover(e, null).Type; }
-            catch (HoleException) { return null; }
+            return Recover(e, null).TryGet(out var value, out _) ? value.Type : null;
         }
 
         /// <summary>局部变量的类型与位宽：整数类型按位宽取同符号的整数类型，使二者一致（布尔值允许 1 位或 8 位）。</summary>
-        private LocalValue LocalOf(Variable v)
+        private RecoveryResult<LocalValue> LocalOf(Variable v)
         {
-            CheckPoison(v);
-            if (runtime.Contains(v)) throw Fail(0, $"运行时引用 {v} 作为托管值");
-            if (!known.TryGetValue(v, out var type)) throw new HoleException(0, $"变量 {v} 的类型未确定", unresolved: v);
+            if (CheckPoison(v) is { } poison) return poison;
+            if (runtime.Contains(v)) return Fail(0, $"运行时引用 {v} 作为托管值");
+            if (!known.TryGetValue(v, out var type)) return new RecoveryFailure(0, $"变量 {v} 的类型未确定", Unresolved: v, Code: "recovery.variable-type");
             var width = LocalWidth(v);
             switch (types.Kind(type))
             {
                 case TypeKind.Float or TypeKind.Double when types.Bits(type) != width:
-                    throw Fail(0, $"浮点 变量 {v} 的类型 {type} 与定义位宽 {width} 不一致");
+                    return Fail(0, $"浮点 变量 {v} 的类型 {type} 与定义位宽 {width} 不一致");
                 case TypeKind.Int when types.Bits(type) != width && type is not GenericParameterRef:
                 case TypeKind.Bool when width is not (1 or 8):
-                    if (width is not (1 or 8 or 16 or 32 or 64)) throw Fail(0, $"变量 {v} 的位宽 {width}");
+                    if (width is not (1 or 8 or 16 or 32 or 64)) return Fail(0, $"变量 {v} 的位宽 {width}");
                     type = IntegerOf(width, ManagedTypes.IsSigned(type));
                     break;
                 case TypeKind.Pointer when type is ByRefRef: break;
                 case TypeKind.Pointer when width == 64 && ManagedTypes.IsNativePointer(type): break;
                 case TypeKind.Struct or TypeKind.Pointer or TypeKind.Void or null:
-                    throw Fail(0, $"变量 {v} 的类型 {type} 尚未支持");
+                    return Fail(0, $"变量 {v} 的类型 {type} 尚未支持");
             }
             return new LocalValue(v, type, width);
         }
@@ -1056,7 +1084,7 @@ public sealed partial class MethodRecovery
 
         private NullPathFacts? nullPaths;
 
-        private ManagedValue RecoverAs(Expr e, TypeRef target, ulong address)
+        private RecoveryResult<ManagedValue> RecoverAs(Expr e, TypeRef target, ulong address)
         {
             if (types.Kind(target) == TypeKind.Reference && e is Use { Width: 64 }
                 && (nullPaths ??= new NullPathFacts(function)).IsNull(e, address))
@@ -1064,24 +1092,27 @@ public sealed partial class MethodRecovery
             if (types.Kind(target) == TypeKind.Reference && e is Use { Width: 64 } referenceValue
                 && TypeOfValue(e) is { } sourceType && types.Kind(sourceType) == TypeKind.Reference
                 && !types.IsAssignable(sourceType, target) && CheckedNullableReference(referenceValue, target, address))
-                return new IsInstValue(Recover(e, sourceType), target);
-            return target is ByRefRef reference ? StructAddress(e, reference.Element) : Coerce(Recover(e, target), target, address);
+                return Recover(e, sourceType).Map<ManagedValue>(value => new IsInstValue(value, target));
+            return target is ByRefRef reference ? StructAddress(e, reference.Element) : Recover(e, target).Bind(value => Coerce(value, target, address));
         }
 
         /// <summary>把值调整为 target 类型的位宽：引用要求可赋值；整数截断或补零（局部变量高位为 0）；同宽的整数与浮点按位重解释。</summary>
-        private ManagedValue Coerce(ManagedValue value, TypeRef target, ulong address)
+        private RecoveryResult<ManagedValue> Coerce(ManagedValue value, TypeRef target, ulong address)
         {
             if (target is GenericParameterRef { NativeScalar: not null })
             {
                 if (value.Type.Equals(target)) return value;
                 if (value is ConstantValue { Bits: 0 }) return new ConstantValue(0, target, types.Bits(target));
-                throw Fail(address, $"泛型复制 {value.Type} 不能转换为 {target}");
+                return Fail(address, $"泛型复制 {value.Type} 不能转换为 {target}");
             }
-            if (value.Type is GenericParameterRef { NativeScalar: not null }) throw Fail(address, $"泛型复制 不能将 {value.Type} 当作 {target}");
+            if (value.Type is GenericParameterRef { NativeScalar: not null }) return Fail(address, $"泛型复制 不能将 {value.Type} 当作 {target}");
             // 窄于片的整数目标只取低位（如寄存器结构体的首叶子作为 int 实参；高位是填充）。
             if (value is Fragment fragment)
-                value = types.Kind(target) is TypeKind.Int && types.Bits(target) < fragment.Width ? Slice(fragment, 0, types.Bits(target)) : Pack(fragment);
-            if (value is Fragment projected) value = Pack(projected);
+            {
+                var projected = types.Kind(target) is TypeKind.Int && types.Bits(target) < fragment.Width ? Slice(fragment, 0, types.Bits(target)) : Pack(fragment);
+                if (!projected.TryGet(out value, out var failure)) return failure;
+            }
+            if (value is Fragment remaining && !Pack(remaining).TryGet(out value, out var packFailure)) return packFailure;
             // 打包寄存器中的浮点叶子已经有托管类型；来回的同宽位重解释是恒等值。
             if (value is ConversionValue { Kind: ConvKind.Bitcast } bitcast && bitcast.Operand.Type.Equals(target)) return bitcast.Operand;
             // 已是目标类型的值（如寄存器结构体的 IntPtr 叶子 Playable.m_Handle.m_Handle）原样使用。
@@ -1094,13 +1125,13 @@ public sealed partial class MethodRecovery
                     if (value is ConstantValue { Bits: 0, Width: 64 }) return new ConstantValue(0, target, 64);
                     if (value.Width == 64 && ManagedTypes.IsNativePointer(value.Type))
                         return value.Type.Equals(target) ? value : new ConversionValue(ConvKind.Bitcast, value, target, 64);
-                    throw Fail(address, $"指针 {value.Type} 不能转换为 {target}");
+                    return Fail(address, $"指针 {value.Type} 不能转换为 {target}");
                 case TypeKind.Reference:
                     if (value is ConstantValue { Bits: 0 }) return new ConstantValue(0, target, 64);
                     if (value.Type is GenericParameterRef { IsReferenceConstrained: false } generic && !target.Equals(generic)
                         && types.IsAssignable(generic, target)) return new BoxValue(value, generic, target);
                     if (types.Kind(value.Type) == TypeKind.Reference && types.IsAssignable(value.Type, target)) return value;
-                    throw Fail(address, $"类型 {value.Type} 不能赋给 {target}");
+                    return Fail(address, $"类型 {value.Type} 不能赋给 {target}");
                 case TypeKind.Bool or TypeKind.Int:
                     if (value is ConstantValue c) return new ConstantValue(c.Bits & Expr.Mask(width), target, width);
                     switch (types.Kind(value.Type))
@@ -1111,33 +1142,34 @@ public sealed partial class MethodRecovery
                         case TypeKind.Float or TypeKind.Double when value.Width == width:
                             return new ConversionValue(ConvKind.Bitcast, value, target, width);
                     }
-                    throw Fail(address, $"类型 {value.Type} 不能作为整数 {target}");
+                    return Fail(address, $"类型 {value.Type} 不能作为整数 {target}");
                 case TypeKind.Float or TypeKind.Double:
                     if (value is ConstantValue f && f.Width == width) return new ConstantValue(f.Bits, target, width);
                     if (types.Kind(value.Type) == kind && value.Width == width) return value;
                     if (types.Kind(value.Type) == TypeKind.Int && value.Width == width) return new ConversionValue(ConvKind.Bitcast, value, target, width);
-                    throw Fail(address, $"类型 {value.Type} 不能作为浮点 {target}");
+                    return Fail(address, $"类型 {value.Type} 不能作为浮点 {target}");
                 default:
-                    throw Fail(address, $"类型 目标类型 {target} 尚未支持");
+                    return Fail(address, $"类型 目标类型 {target} 尚未支持");
             }
         }
 
         private DefinitionRef IntegerOf(int width, bool signed) => width == 1 ? types.Boolean : types.Integer(width, signed);
 
         /// <summary>恢复表达式；结果的位宽等于表达式的位宽。hint 只用于给常量定型。</summary>
-        private ManagedValue Recover(Expr e, TypeRef? hint)
+        private RecoveryResult<ManagedValue> Recover(Expr e, TypeRef? hint)
         {
+            RecoveryFailure failure;
             switch (e)
             {
                 case Intrinsic { Name: "pinned_array_start", Arguments: [var array] }:
-                    var pinned = Recover(array, null);
+                    if (!Recover(array, null).TryGet(out var pinned, out failure)) return failure;
                     return pinned.Type is ArrayRef { IsVector: true } arrayType ? new PinnedArrayValue(pinned, arrayType)
-                        : throw Fail(0, "固定地址 来源不是一维数组");
+                        : Fail(0, "固定地址 来源不是一维数组");
                 case Intrinsic { Name: "managed_field_address" or "managed_generic_buffer" or "managed_generic_argument" } address: return SharedAddress(address);
                 case TypedFrame f: return new AddressValue(f.Region.Local);
                 case Const c:
                 {
-                    if (hint is GenericParameterRef { NativeScalar: not null } && c.Value != 0) throw Fail(0, "泛型复制 只接受默认值常量");
+                    if (hint is GenericParameterRef { NativeScalar: not null } && c.Value != 0) return Fail(0, "泛型复制 只接受默认值常量");
                     if (hint is not null)
                     {
                         var kind = types.Kind(hint);
@@ -1146,12 +1178,12 @@ public sealed partial class MethodRecovery
                         if (kind is TypeKind.Int or TypeKind.Float or TypeKind.Double && types.Bits(hint) == c.Width) return new ConstantValue(c.Value, hint, c.Width);
                         if (kind == TypeKind.Bool && c.Width is 1 or 8) return new ConstantValue(c.Value, hint, c.Width);
                     }
-                    if (c.Width is not (1 or 8 or 16 or 32 or 64)) throw Fail(0, $"常量 位宽 {c.Width}");
+                    if (c.Width is not (1 or 8 or 16 or 32 or 64)) return Fail(0, $"常量 位宽 {c.Width}");
                     return new ConstantValue(c.Value, IntegerOf(c.Width, true), c.Width);
                 }
                 case Use u:
                     return Variable(u.Variable, u.Width);
-                case Extract extract: return Slice(Recover(extract.Operand, null), extract.Low, extract.Width);
+                case Extract extract: return Recover(extract.Operand, null).Bind(value => Slice(value, extract.Low, extract.Width));
                 case Insert insert: return InsertedFragment(insert);
                 case Load load:
                     return Location(load.Address, load.Width);
@@ -1161,9 +1193,9 @@ public sealed partial class MethodRecovery
                     return Binary(b);
                 case Unary { Op: UnOp.Neg or UnOp.Not } u:
                 {
-                    var operand = Recover(u.Operand, hint);
-                    if (operand is Fragment f) operand = Pack(f);
-                    if (operand.Type is GenericParameterRef { NativeScalar: not null } || types.Kind(operand.Type) is not (TypeKind.Int or TypeKind.Bool)) throw Fail(0, $"运算 {u.Op} 的操作数类型 {operand.Type}");
+                    if (!Recover(u.Operand, hint).TryGet(out var operand, out failure)) return failure;
+                    if (operand is Fragment f && !Pack(f).TryGet(out operand, out failure)) return failure;
+                    if (operand.Type is GenericParameterRef { NativeScalar: not null } || types.Kind(operand.Type) is not (TypeKind.Int or TypeKind.Bool)) return Fail(0, $"运算 {u.Op} 的操作数类型 {operand.Type}");
                     return new UnaryValue(u.Op, operand, IntegerOf(u.Width, ManagedTypes.IsSigned(operand.Type)), u.Width);
                 }
                 case Unary { Op: UnOp.FNeg or UnOp.FAbs or UnOp.FSqrt or UnOp.FFloor or UnOp.FCeil or UnOp.FTrunc or UnOp.FRoundEven } u:
@@ -1175,59 +1207,64 @@ public sealed partial class MethodRecovery
                 // klass == Class<T>（T sealed）? obj : null 即 obj as T，结果类型是 T。
                 case Ir.Select { Condition: Compare { Cond: Cond.Eq } test, False: Const { Value: 0 } } s
                     when SealedOperands(test) is var (klass, sealedType) && objectClasses.TryGetValue(klass, out var tested) && s.True == tested:
-                    return new IsInstValue(Recover(tested, types.Object), sealedType);
+                    return Recover(tested, types.Object).Map<ManagedValue>(value => new IsInstValue(value, sealedType));
                 case Ir.Select s:
                 {
-                    var condition = Recover(s.Condition, types.Boolean);
+                    if (!Recover(s.Condition, types.Boolean).TryGet(out var condition, out failure)) return failure;
                     // 常量臂没有独立类型；先从另一臂取得引用或浮点类型，避免把 null 当成 long。
                     if (hint is null && s.True is Const && s.False is not Const) hint = TypeOfValue(s.False);
-                    var whenTrue = Recover(s.True, hint);
-                    if (whenTrue is Fragment f) whenTrue = Pack(f);
-                    var whenFalse = Coerce(Recover(s.False, whenTrue.Type), whenTrue.Type, 0);
-                    if (whenTrue.Width != s.Width || whenFalse.Width != s.Width) throw Fail(0, "选择 两侧位宽不一致");
+                    if (!Recover(s.True, hint).TryGet(out var whenTrue, out failure)) return failure;
+                    if (whenTrue is Fragment f && !Pack(f).TryGet(out whenTrue, out failure)) return failure;
+                    if (!Recover(s.False, whenTrue.Type).Bind(value => Coerce(value, whenTrue.Type, 0)).TryGet(out var whenFalse, out failure)) return failure;
+                    if (whenTrue.Width != s.Width || whenFalse.Width != s.Width) return Fail(0, "选择 两侧位宽不一致");
                     return new ChoiceValue(condition, whenTrue, whenFalse, whenTrue.Type, s.Width);
                 }
                 case Logical l:
-                    return new BooleanValue(l.IsAnd, Truth(Recover(l.Left, types.Boolean)), Truth(Recover(l.Right, types.Boolean)), types.Boolean);
+                    return Recover(l.Left, types.Boolean).Bind(Truth).Bind(left => Recover(l.Right, types.Boolean).Bind(Truth)
+                        .Map<ManagedValue>(right => new BooleanValue(l.IsAnd, left, right, types.Boolean)));
                 case Not n:
-                    return new NegatedValue(Truth(Recover(n.Operand, types.Boolean)), types.Boolean);
+                    return Recover(n.Operand, types.Boolean).Bind(Truth).Map<ManagedValue>(value => new NegatedValue(value, types.Boolean));
                 default:
-                    throw Fail(0, $"表达式 {e.GetType().Name} 尚未支持");
+                    return Fail(0, $"表达式 {e.GetType().Name} 尚未支持");
             }
         }
 
-        private static ManagedValue Truth(ManagedValue value) => value.Width == 1 ? value
-            : throw Fail(0, "条件 不是一位的布尔值");
+        private static RecoveryResult<ManagedValue> Truth(ManagedValue value) => value.Width == 1 ? value
+            : Fail(0, "条件 不是一位的布尔值");
 
-        private ManagedValue Variable(Variable v, int width)
+        private RecoveryResult<ManagedValue> Variable(Variable v, int width)
         {
             if (collectingExceptionDemand) exceptionDemand.Add(v);
             // SSA 的负版本是未定义/被调用破坏的值，不能因 phi 反向推断出类型就读零初始化局部。
-            if (exceptionLayout is { Succeeded: true } && v.Version < 0) throw Fail(0, $"异常区域 读取未定义 SSA 值 {v}");
-            CheckPoison(v);
+            if (exceptionLayout is { Succeeded: true } && v.Version < 0) return Fail(0, $"异常区域 读取未定义 SSA 值 {v}");
+            if (CheckPoison(v) is { } poison) return poison;
             if (arrayOffsets.TryGetValue(v, out var offset)) return Recover(Fold.Convert(ConvKind.Truncate, offset, width), null);
             if (exceptionValues.TryGetValue(v, out var exception)) return exception;
             if (width == 64 && v.Version == 0 && indirectRoots.TryGetValue(v.Storage, out var root)) return root;
-            if (RegisterPiece(v, width) is { } piece) return piece;
-            if (StructPhiPiece(v, width) is { } merged) return merged;
-            if (FragmentVariable(v, width) is { } fragment) return fragment;
+            if (!RegisterPiece(v, width).TryGet(out var piece, out var failure)) return failure;
+            if (piece is not null) return piece;
+            if (!StructPhiPiece(v, width).TryGet(out var merged, out failure)) return failure;
+            if (merged is not null) return merged;
+            if (!FragmentVariable(v, width).TryGet(out var fragment, out failure)) return failure;
+            if (fragment is not null) return fragment;
             ManagedValue value;
             bool signed;
             if (v.Version == 0)
             {
-                if (!arguments.TryGetValue(v.Storage, out var argument)) throw Fail(0, $"入口 读取了参数之外的入口寄存器 {v}");
+                if (!arguments.TryGetValue(v.Storage, out var argument)) return Fail(0, $"入口 读取了参数之外的入口寄存器 {v}");
                 value = new ArgumentValue(argument.Index, argument.Type, argument.Width);
                 signed = ManagedTypes.IsSigned(argument.Type);
             }
             else if (inlined.Contains(v))
             {
                 var hint = known.GetValueOrDefault(v);
-                value = Recover(values[v], hint is not null && types.Kind(hint) is TypeKind.Float or TypeKind.Double ? hint : null);
+                if (!Recover(values[v], hint is not null && types.Kind(hint) is TypeKind.Float or TypeKind.Double ? hint : null).TryGet(out value, out failure)) return failure;
                 signed = false;
             }
             else
             {
-                value = LocalOf(v);
+                if (!LocalOf(v).TryGet(out var local, out failure)) return failure;
+                value = local;
                 signed = false;
             }
             if (value is Fragment inlineFragment)
@@ -1235,18 +1272,22 @@ public sealed partial class MethodRecovery
             if (width == value.Width) return value;
             if (value.Type is GenericParameterRef { NativeScalar: not null } && width >= types.Bits(value.Type))
                 return new ConversionValue(ConvKind.ZeroExtend, value, value.Type, width);
-            if (types.Kind(value.Type) is not (TypeKind.Int or TypeKind.Bool)) throw Fail(0, $"位宽 {value.Type} 以 {width} 位读取");
-            if (width is not (1 or 8 or 16 or 32 or 64)) throw Fail(0, $"位宽 {width} 的整数转换尚未支持");
+            if (types.Kind(value.Type) is not (TypeKind.Int or TypeKind.Bool)) return Fail(0, $"位宽 {value.Type} 以 {width} 位读取");
+            if (width is not (1 or 8 or 16 or 32 or 64)) return Fail(0, $"位宽 {width} 的整数转换尚未支持");
             return new ConversionValue(width < value.Width ? ConvKind.Truncate : signed ? ConvKind.SignExtend : ConvKind.ZeroExtend, value,
                 IntegerOf(width, ManagedTypes.IsSigned(value.Type)), width);
         }
 
-        private ManagedValue Binary(Binary b)
+        private RecoveryResult<ManagedValue> Binary(Binary b)
         {
             // C++ bool 传参取低一位；布局见证为 bool 的 T 在托管侧仍是同一个 T 值。
-            if (b is { Op: BinOp.And, Right: Const { Value: 1 } } && Recover(b.Left, null) is { } boolean
-                && boolean.Type is GenericParameterRef { NativeScalar: { } scalar } && types.Kind(scalar) == TypeKind.Bool)
-                return new ConversionValue(ConvKind.ZeroExtend, boolean, boolean.Type, b.Width);
+            RecoveryFailure failure;
+            if (b is { Op: BinOp.And, Right: Const { Value: 1 } })
+            {
+                if (!Recover(b.Left, null).TryGet(out var boolean, out failure)) return failure;
+                if (boolean.Type is GenericParameterRef { NativeScalar: { } scalar } && types.Kind(scalar) == TypeKind.Bool)
+                    return new ConversionValue(ConvKind.ZeroExtend, boolean, boolean.Type, b.Width);
+            }
             if (b is { Op: BinOp.Ror, Width: 32 or 64 })
             {
                 var shift = new Binary(BinOp.And, b.Right, Expr.C((ulong)b.Width - 1, b.Right.Width), b.Right.Width);
@@ -1256,41 +1297,45 @@ public sealed partial class MethodRecovery
             }
             if (b.Op is BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv or BinOp.FMin or BinOp.FMax)
             {
-                if (b.Width is not (32 or 64)) throw Fail(0, $"运算 {b.Op} 的浮点宽度 {b.Width} 尚未支持");
+                if (b.Width is not (32 or 64)) return Fail(0, $"运算 {b.Op} 的浮点宽度 {b.Width} 尚未支持");
                 var floating = b.Width == 32 ? types.Single : types.Double;
-                var fl = Coerce(Recover(b.Left, floating), floating, 0);
-                var fr = Coerce(Recover(b.Right, floating), floating, 0);
+                if (!Recover(b.Left, floating).Bind(value => Coerce(value, floating, 0)).TryGet(out var fl, out failure)) return failure;
+                if (!Recover(b.Right, floating).Bind(value => Coerce(value, floating, 0)).TryGet(out var fr, out failure)) return failure;
                 return new BinaryValue(b.Op, fl, fr, floating, b.Width);
             }
             if (b.Op is not (BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Shl or BinOp.LShr or BinOp.AShr or BinOp.SDiv or BinOp.UDiv))
-                throw Fail(0, $"运算 {b.Op} 尚未支持");
+                return Fail(0, $"运算 {b.Op} 尚未支持");
             ManagedValue left, right;
             if (b.Left is Const && b.Right is not Const)
             {
-                right = Recover(b.Right, null);
-                left = Recover(b.Left, right.Type);
+                if (!Recover(b.Right, null).TryGet(out right, out failure)) return failure;
+                if (!Recover(b.Left, right.Type).TryGet(out left, out failure)) return failure;
             }
             else
             {
-                left = Recover(b.Left, null);
-                right = Recover(b.Right, b.Op is BinOp.Shl or BinOp.LShr or BinOp.AShr ? null : left.Type);
+                if (!Recover(b.Left, null).TryGet(out left, out failure)) return failure;
+                if (!Recover(b.Right, b.Op is BinOp.Shl or BinOp.LShr or BinOp.AShr ? null : left.Type).TryGet(out right, out failure)) return failure;
             }
-            if (FrameShift(b.Op, left, right, b.Width) is { } projected) return projected;
+            if (!FrameShift(b.Op, left, right, b.Width).TryGet(out var projected, out failure)) return failure;
+            if (projected is not null) return projected;
             if (b.Op == BinOp.Add && b.Width == 64 && left.Type is PointerRef && types.Kind(right.Type) == TypeKind.Int)
                 return new PointerOffsetValue(left, right);
             // 掩码清除的填充位来自指令语义；保留的位仍须来自已知叶子。
-            if (b.Op == BinOp.And && left is Fragment masked && right is ConstantValue { Bits: var mask } && MaskFragment(masked, mask, b.Width) is { } kept)
-                return kept;
-            if (left is Fragment lf) left = Pack(lf);
-            if (right is Fragment rf) right = Pack(rf);
+            if (b.Op == BinOp.And && left is Fragment masked && right is ConstantValue { Bits: var mask })
+            {
+                if (!MaskFragment(masked, mask, b.Width).TryGet(out var kept, out failure)) return failure;
+                if (kept is not null) return kept;
+            }
+            if (left is Fragment lf && !Pack(lf).TryGet(out left, out failure)) return failure;
+            if (right is Fragment rf && !Pack(rf).TryGet(out right, out failure)) return failure;
             if (left.Type is GenericParameterRef { NativeScalar: not null } || right.Type is GenericParameterRef { NativeScalar: not null })
-                throw Fail(0, "泛型复制 不支持原生数值比较");
+                return Fail(0, "泛型复制 不支持原生数值比较");
             foreach (var operand in new[] { left, right })
-                    if (operand.Type is GenericParameterRef { NativeScalar: not null } || types.Kind(operand.Type) is not (TypeKind.Int or TypeKind.Bool)) throw Fail(0, $"运算 {b.Op} 的操作数类型 {operand.Type}");
+                    if (operand.Type is GenericParameterRef { NativeScalar: not null } || types.Kind(operand.Type) is not (TypeKind.Int or TypeKind.Bool)) return Fail(0, $"运算 {b.Op} 的操作数类型 {operand.Type}");
             return new BinaryValue(b.Op, left, right, IntegerOf(b.Width, b.Op == BinOp.SDiv || b.Op != BinOp.UDiv && ManagedTypes.IsSigned(left.Type)), b.Width);
         }
 
-        private Fragment? MaskFragment(Fragment fragment, ulong mask, int width)
+        private RecoveryResult<Fragment?> MaskFragment(Fragment fragment, ulong mask, int width)
         {
             ulong Bits(int low, int bits) => mask & (Expr.Mask(bits) << low);
             var parts = new List<Part>();
@@ -1301,7 +1346,7 @@ public sealed partial class MethodRecovery
                 if (part.Low > cursor)
                 {
                     var gap = part.Low - cursor;
-                    if (Bits(cursor, gap) != 0 || gap % 8 != 0) return null;
+                    if (Bits(cursor, gap) != 0 || gap % 8 != 0) return (Fragment?)null;
                     for (var low = cursor; low < part.Low; low += 8)
                         parts.Add(new Part(low, new ConstantValue(0, types.Byte, 8)));
                 }
@@ -1311,9 +1356,10 @@ public sealed partial class MethodRecovery
                 else if (leafMask == 0) parts.Add(new Part(part.Low, new ConstantValue(0, types.Integer(part.Value.Width, false), part.Value.Width)));
                 else
                 {
-                    if (types.Kind(part.Value.Type) is not (TypeKind.Int or TypeKind.Bool)) return null;
+                    if (types.Kind(part.Value.Type) is not (TypeKind.Int or TypeKind.Bool)) return (Fragment?)null;
                     var integer = types.Integer(part.Value.Width, false);
-                    parts.Add(new Part(part.Low, new BinaryValue(BinOp.And, Coerce(part.Value, integer, 0),
+                    if (!Coerce(part.Value, integer, 0).TryGet(out var converted, out var failure)) return failure;
+                    parts.Add(new Part(part.Low, new BinaryValue(BinOp.And, converted,
                         new ConstantValue(leafMask, integer, part.Value.Width), integer, part.Value.Width)));
                 }
                 cursor = part.Low + part.Value.Width;
@@ -1321,51 +1367,52 @@ public sealed partial class MethodRecovery
             return new Fragment(parts, fragment.Type, width);
         }
 
-        private ManagedValue Comparison(Compare c)
+        private RecoveryResult<ManagedValue> Comparison(Compare c)
         {
+            RecoveryFailure failure;
             if (c.Cond is Cond.Eq or Cond.Ne && SealedOperands(c) is var (klass, sealedType) && objectClasses.TryGetValue(klass, out var checkedObject))
-                return new ComparisonValue(c.Cond == Cond.Eq ? Cond.Ne : Cond.Eq, new IsInstValue(Recover(checkedObject, types.Object), sealedType),
-                    new ConstantValue(0, sealedType, 64), types.Boolean);
+                return Recover(checkedObject, types.Object).Map<ManagedValue>(value => new ComparisonValue(c.Cond == Cond.Eq ? Cond.Ne : Cond.Eq, new IsInstValue(value, sealedType),
+                    new ConstantValue(0, sealedType, 64), types.Boolean));
             ManagedValue left, right;
             if (c.Left is Const && c.Right is not Const)
             {
-                right = Recover(c.Right, null);
-                left = Recover(c.Left, right.Type);
+                if (!Recover(c.Right, null).TryGet(out right, out failure)) return failure;
+                if (!Recover(c.Left, right.Type).TryGet(out left, out failure)) return failure;
             }
             else
             {
-                left = Recover(c.Left, null);
-                right = Recover(c.Right, left.Type);
+                if (!Recover(c.Left, null).TryGet(out left, out failure)) return failure;
+                if (!Recover(c.Right, left.Type).TryGet(out right, out failure)) return failure;
             }
-            if (left is Fragment lf) left = Pack(lf);
-            if (right is Fragment rf) right = Pack(rf);
+            if (left is Fragment lf && !Pack(lf).TryGet(out left, out failure)) return failure;
+            if (right is Fragment rf && !Pack(rf).TryGet(out right, out failure)) return failure;
             var reference = types.Kind(left.Type) == TypeKind.Reference || types.Kind(right.Type) == TypeKind.Reference;
             if (left.Type is GenericParameterRef { NativeScalar: not null } || right.Type is GenericParameterRef { NativeScalar: not null })
-                throw Fail(0, "泛型复制 不支持原生数值比较");
+                return Fail(0, "泛型复制 不支持原生数值比较");
             if (reference)
             {
-                if (c.Cond is not (Cond.Eq or Cond.Ne)) throw Fail(0, $"比较 引用的 {c.Cond}");
+                if (c.Cond is not (Cond.Eq or Cond.Ne)) return Fail(0, $"比较 引用的 {c.Cond}");
                 if (types.Kind(left.Type) != TypeKind.Reference && left is not ConstantValue { Bits: 0 } || types.Kind(right.Type) != TypeKind.Reference && right is not ConstantValue { Bits: 0 })
-                    throw Fail(0, "比较 引用与非引用");
+                    return Fail(0, "比较 引用与非引用");
             }
-            else if (left.Width != right.Width) throw Fail(0, "比较 位宽不一致");
+            else if (left.Width != right.Width) return Fail(0, "比较 位宽不一致");
             return new ComparisonValue(c.Cond, left, right, types.Boolean);
         }
 
-        private ManagedValue Conversion(Convert c, TypeRef? hint)
+        private RecoveryResult<ManagedValue> Conversion(Convert c, TypeRef? hint)
         {
-            var operand = Recover(c.Operand, null);
+            if (!Recover(c.Operand, null).TryGet(out var operand, out var failure)) return failure;
             if (operand.Type is GenericParameterRef { NativeScalar: not null })
             {
                 if (c.Kind is ConvKind.ZeroExtend or ConvKind.Truncate && c.Width >= types.Bits(operand.Type))
                     return new ConversionValue(c.Kind, operand, operand.Type, c.Width);
-                throw Fail(0, $"泛型复制 不支持 {c.Kind} 到 {c.Width} 位");
+                return Fail(0, $"泛型复制 不支持 {c.Kind} 到 {c.Width} 位");
             }
             if (operand is Fragment f)
             {
                 if (c.Kind == ConvKind.Truncate) return Slice(f, 0, c.Width);
                 if (c.Kind == ConvKind.ZeroExtend) return ResizeFragment(f, c.Width);
-                operand = Pack(f);
+                if (!Pack(f).TryGet(out operand, out failure)) return failure;
             }
             // 写入向量寄存器低位的值（S/D 读写清零高位）：只有低位是托管值，高位不属于任何叶子（如 HFA 实参的各片来自各自的 float 字段）。
             if (c.Kind == ConvKind.ZeroExtend && c.Width == 128 && (StructOrigin(c.Operand) || types.Kind(operand.Type) is TypeKind.Float or TypeKind.Double or TypeKind.Int or TypeKind.Bool))
@@ -1376,9 +1423,9 @@ public sealed partial class MethodRecovery
                     if (operand.Width == c.Width) return operand;
                     // 栈溢出的浮点寄存器按位保存为整数，扩展/截断作用于位型，不能当作数值转换。
                     if (types.Kind(operand.Type) is TypeKind.Float or TypeKind.Double)
-                        operand = Coerce(operand, types.Integer(operand.Width, false), 0);
-                    if (types.Kind(operand.Type) is not (TypeKind.Int or TypeKind.Bool)) throw Fail(0, $"转换 {c.Kind} 的操作数类型 {operand.Type}");
-                    if (c.Width is not (8 or 16 or 32 or 64)) throw Fail(0, $"转换 位宽 {c.Width}");
+                        if (!Coerce(operand, types.Integer(operand.Width, false), 0).TryGet(out operand, out failure)) return failure;
+                    if (types.Kind(operand.Type) is not (TypeKind.Int or TypeKind.Bool)) return Fail(0, $"转换 {c.Kind} 的操作数类型 {operand.Type}");
+                    if (c.Width is not (8 or 16 or 32 or 64)) return Fail(0, $"转换 位宽 {c.Width}");
                     return operand.Width == c.Width ? operand
                         : new ConversionValue(c.Kind, operand, types.Integer(c.Width, c.Kind == ConvKind.SignExtend || c.Kind == ConvKind.Truncate && ManagedTypes.IsSigned(operand.Type)), c.Width);
                 case ConvKind.SIntToFloat or ConvKind.UIntToFloat:
@@ -1388,20 +1435,20 @@ public sealed partial class MethodRecovery
                 case ConvKind.FloatToSInt or ConvKind.FloatToUInt when c.Width is 32 or 64 && operand.Width is 32 or 64:
                     return new ConversionValue(c.Kind, operand, types.Integer(c.Width, c.Kind == ConvKind.FloatToSInt), c.Width);
                 case ConvKind.Bitcast:
-                    if (operand.Width != c.Width) throw Fail(0, "转换 位重解释的宽度不一致");
+                    if (operand.Width != c.Width) return Fail(0, "转换 位重解释的宽度不一致");
                     var floatHint = hint is not null && types.Kind(hint) is TypeKind.Float or TypeKind.Double;
                     if (floatHint && operand.Type.Equals(hint)) return operand;
                     var toFloat = types.Kind(operand.Type) is TypeKind.Int or TypeKind.Bool ? true : false;
                     if (operand is ConstantValue k) return new ConstantValue(k.Bits, floatHint ? hint! : c.Width == 32 ? types.Single : types.Double, c.Width);
                     return new ConversionValue(c.Kind, operand, toFloat ? c.Width == 32 ? types.Single : types.Double : types.Integer(c.Width, false), c.Width);
                 default:
-                    throw Fail(0, $"转换 {c.Kind} 尚未支持（浮点转整数的饱和语义）");
+                    return Fail(0, $"转换 {c.Kind} 尚未支持（浮点转整数的饱和语义）");
             }
         }
 
         // ---------- 方法体 ----------
 
-        private ManagedBody Build()
+        private RecoveryResult<ManagedBody> Build()
         {
             if (exceptionLayout is { Succeeded: true }) return BuildExceptionBody();
             var managedBlocks = new List<ManagedBlock>();
@@ -1412,12 +1459,9 @@ public sealed partial class MethodRecovery
                 foreach (var statement in block.Statements)
                 {
                     if (dropped.Contains(statement)) continue;
-                    try
-                    {
-                        if (ledger.TryGetDiagnosis(statement, out var cause)) throw Derived(cause, $"{cause.Reason.Split(' ')[0]} 语句已诊断");
-                        Translate(block, statement, statements);
-                    }
-                    catch (HoleException e)
+                    var failure = ledger.TryGetDiagnosis(statement, out var diagnosed) ? Derived(diagnosed, $"{diagnosed.Reason.Split(' ')[0]} 语句已诊断")
+                        : Translate(block, statement, statements);
+                    if (failure is { } e)
                     {
                         var cause = Record(e, statement.Address, statement);
                         var terminal = statement is Branch or Jump or Return or IndirectJump or Trap or Call { Kind: CallKind.Tail or CallKind.TailIndirect }
@@ -1436,8 +1480,8 @@ public sealed partial class MethodRecovery
                         && ManagedTypes.IsVoid(returnType)) statements[^1] = noReturn with { Tail = true };
                     else if (successors.Length == 1)
                     {
-                        try { statements.Add(new ManagedJump(block.End, Edge(block, 0, successors[0].Start))); }
-                        catch (HoleException e) { Record(e, block.End); statements.Add(new ManagedHole(block.End, e.Message, true)); }
+                        if (Edge(block, 0, successors[0].Start).TryGet(out var edge, out var failure)) statements.Add(new ManagedJump(block.End, edge));
+                        else { Record(failure, block.End); statements.Add(new ManagedHole(block.End, failure.Message, true)); }
                     }
                     else if (terminatorHole is { } cause) { Record(Derived(cause, "控制流 终结语句未恢复"), block.Start); statements.Add(new ManagedHole(block.End, "控制流 终结语句未恢复", true)); }
                     else { Hole(block.Start, "控制流 基本块没有唯一终结方式"); statements.Add(new ManagedHole(block.End, "控制流 基本块没有唯一终结方式", true)); }
@@ -1449,9 +1493,9 @@ public sealed partial class MethodRecovery
             return new ManagedBody(method, managedBlocks);
         }
 
-        private LocalValue Local(Variable v) => LocalOf(v);
+        private RecoveryResult<LocalValue> Local(Variable v) => LocalOf(v);
 
-        private ManagedEdge Edge(Block from, int successor, ulong target)
+        private RecoveryResult<ManagedEdge> Edge(Block from, int successor, ulong target)
         {
             var to = from.NormalSuccessors.ElementAtOrDefault(successor);
             if (to is null || to.Start != target) throw new InvalidOperationException($"CFG 中缺少第 {successor} 条边 {from.Start:x} → {target:x}");
@@ -1460,200 +1504,219 @@ public sealed partial class MethodRecovery
             foreach (var group in structPhis.Where(g => g.Block == to)) copies.Add(new(group.Local, group.Incoming(incoming)));
             foreach (var phi in to.Statements.OfType<Phi>())
             {
-                if (structPhiMembers.ContainsKey(phi.Target)) continue;
-                if (exceptionLayout is { Succeeded: true } && !exceptionDemand.Contains(phi.Target)) continue;
-                if (runtime.Contains(phi.Target) || exceptionValues.ContainsKey(phi.Target)) continue;
-                var local = Local(phi.Target);
+                if (structPhiMembers.ContainsKey(phi.Target) || exceptionLayout is { Succeeded: true } && !exceptionDemand.Contains(phi.Target)
+                    || runtime.Contains(phi.Target) || exceptionValues.ContainsKey(phi.Target)) continue;
+                if (!Local(phi.Target).TryGet(out var local, out var failure)) return failure;
                 var source = phi.Sources[incoming];
-                try
+                var attempt = Copy();
+                if (attempt.TryGet(out var copied, out failure)) copies.Add(new(local, copied));
+                else
                 {
-                    CheckPoison(source);
-                    if (source.Version == 0 && !arguments.ContainsKey(source.Storage)) throw Fail(phi.Address, $"汇合 未定义的来源 {source}");
-                    // 以 φ 的位宽读取来源（高位为 0），再按 φ 的类型定型
-                    var copied = values.TryGetValue(source, out var c) && c is Const constant
-                        ? new ConstantValue(constant.Value & Expr.Mask(local.Width), local.Type, local.Width)
-                        : Variable(source, local.Width);
-                    if (copied is Fragment fragment) copied = Pack(fragment);
-                    if (copied.Width != local.Width) throw Fail(phi.Address, $"汇合 来源 {source} 的位宽与 φ 不一致");
-                    copies.Add(new(local, types.Kind(local.Type) == TypeKind.Reference ? Coerce(copied, local.Type, phi.Address) : copied));
+                    if (collectingExceptionDemand) return failure;
+                    Record(failure, phi.Address);
+                    copies.Add(new(local, new HoleValue(failure.Message, local.Type, local.Width)));
                 }
-                // 单个复制的洞不连累整条边：部分方法体里该复制写成未恢复的值。
-                catch (HoleException e) when (!collectingExceptionDemand) { Record(e, phi.Address); copies.Add(new(local, new HoleValue(e.Message, local.Type, local.Width))); }
+                RecoveryResult<ManagedValue> Copy()
+                {
+                    if (CheckPoison(source) is { } poison) return poison;
+                    if (source.Version == 0 && !arguments.ContainsKey(source.Storage)) return Fail(phi.Address, $"汇合 未定义的来源 {source}");
+                    RecoveryResult<ManagedValue> read = values.TryGetValue(source, out var c) && c is Const constant
+                        ? new ConstantValue(constant.Value & Expr.Mask(local.Width), local.Type, local.Width) : Variable(source, local.Width);
+                    if (!read.TryGet(out var value, out var error)) return error;
+                    if (value is Fragment fragment && !Pack(fragment).TryGet(out value, out error)) return error;
+                    if (value.Width != local.Width) return Fail(phi.Address, $"汇合 来源 {source} 的位宽与 φ 不一致");
+                    return types.Kind(local.Type) == TypeKind.Reference ? Coerce(value, local.Type, phi.Address) : value;
+                }
             }
-            return new(target, copies);
+            return new ManagedEdge(target, copies);
         }
 
-        private void Translate(Block block, Stmt statement, List<ManagedStatement> output)
+        private static RecoveryFailure? Rules(IEnumerable<RecoveryResult<bool>> candidates, out bool handled)
         {
-            foreach (var rule in Registry.Statements) if (rule(this, block, statement, output)) return;
+            handled = false;
+            foreach (var candidate in candidates)
+            {
+                if (!candidate.TryGet(out handled, out var failure)) return failure;
+                if (handled) break;
+            }
+            return null;
+        }
+
+        private static RecoveryResult<T?> FirstValue<T>(IEnumerable<RecoveryResult<T?>> candidates) where T : class
+        {
+            foreach (var candidate in candidates)
+            {
+                if (!candidate.TryGet(out var value, out var failure)) return failure;
+                if (value is not null) return value;
+            }
+            return (T?)null;
+        }
+
+        private static RecoveryFailure? Emit<T>(RecoveryResult<T> result, List<ManagedStatement> output) where T : ManagedStatement
+        {
+            if (!result.TryGet(out var statement, out var failure)) return failure;
+            output.Add(statement);
+            return null;
+        }
+
+        private RecoveryFailure? Assign(ulong address, Variable target, Func<RecoveryResult<ManagedValue>> value, List<ManagedStatement> output) =>
+            Emit(Local(target).Bind(local => value().Map(v => new ManagedAssignment(address, local, v))), output);
+
+        private RecoveryFailure? Translate(Block block, Stmt statement, List<ManagedStatement> output)
+        {
+            if (Rules(Registry.Statements.Select(rule => rule(this, block, statement, output)), out var handled) is { } ruleFailure) return ruleFailure;
+            if (handled) return null;
             switch (statement)
             {
                 case Define define:
+                {
                     if (objectClasses.TryGetValue(define.Target, out var obj))
-                    {
-                        output.Add(Check(define.Address, new ComparisonValue(Cond.Eq, Recover(obj, types.Object),
-                            new ConstantValue(0, types.Object, 64), types.Boolean), "System.NullReferenceException"));
-                        return;
-                    }
-                    if (runtime.Contains(define.Target) || inlined.Contains(define.Target)) return;
-                    foreach (var rule in Registry.Defines) if (rule(this, define, output)) return;
-                    var local = Local(define.Target);
-                    var value = Recover(define.Value, local.Type);
-                    // 结构体片（如掩码后的寄存器结构体片）只活在 L3 内：赋给局部变量时打包成整数。
-                    output.Add(new ManagedAssignment(define.Address, local, value.Width == local.Width && value is not Fragment ? value : Coerce(value, local.Type, define.Address)));
-                    return;
-                case Phi or Nop:
-                    return;
+                        return Emit(Recover(obj, types.Object).Bind(value => Check(define.Address,
+                            new ComparisonValue(Cond.Eq, value, new ConstantValue(0, types.Object, 64), types.Boolean), "System.NullReferenceException")), output);
+                    if (runtime.Contains(define.Target) || inlined.Contains(define.Target)) return null;
+                    if (Rules(Registry.Defines.Select(rule => rule(this, define, output)), out handled) is { } failed) return failed;
+                    if (handled) return null;
+                    if (!Local(define.Target).TryGet(out var local, out var failure)) return failure;
+                    if (!Recover(define.Value, local.Type).TryGet(out var value, out failure)) return failure;
+                    if ((value.Width != local.Width || value is Fragment) && !Coerce(value, local.Type, define.Address).TryGet(out value, out failure)) return failure;
+                    output.Add(new ManagedAssignment(define.Address, local, value));
+                    return null;
+                }
+                case Phi or Nop: return null;
                 case Store store:
                 {
-                    foreach (var rule in Registry.Stores) if (rule(this, store, output)) return;
-                    var target = Location(store.Target, store.Value.Width);
-                    foreach (var rule in Registry.StoreTargets) if (rule(this, store, target, output)) return;
-                    output.Add(new ManagedStore(store.Address, target, RecoverAs(store.Value, target.Type, store.Address)));
-                    return;
+                    if (Rules(Registry.Stores.Select(rule => rule(this, store, output)), out handled) is { } failed) return failed;
+                    if (handled) return null;
+                    if (!Location(store.Target, store.Value.Width).TryGet(out var target, out var failure)) return failure;
+                    if (Rules(Registry.StoreTargets.Select(rule => rule(this, store, target, output)), out handled) is { } rejected) return rejected;
+                    if (handled) return null;
+                    return Emit(RecoverAs(store.Value, target.Type, store.Address).Map(value => new ManagedStore(store.Address, target, value)), output);
                 }
-                case Call call:
-                    TranslateCall(call, output);
-                    return;
+                case Call call: return TranslateCall(call, output);
                 case Branch branch:
-                    output.Add(new ManagedBranch(branch.Address, Truth(Recover(branch.Condition, types.Boolean)), Edge(block, 0, branch.Target), Edge(block, 1, branch.Fallthrough)));
-                    return;
-                case Jump jump:
-                    output.Add(new ManagedJump(jump.Address, Edge(block, 0, jump.Target)));
-                    return;
+                    return Emit(Recover(branch.Condition, types.Boolean).Bind(Truth).Bind(condition => Edge(block, 0, branch.Target)
+                        .Bind(taken => Edge(block, 1, branch.Fallthrough).Map(fallthrough => new ManagedBranch(branch.Address, condition, taken, fallthrough)))), output);
+                case Jump jump: return Emit(Edge(block, 0, jump.Target).Map(edge => new ManagedJump(jump.Address, edge)), output);
                 case Return ret:
-                    if (returnHole is { } cause) throw Derived(cause, "返回 返回值类型尚未支持");
-                    if (ManagedTypes.IsVoid(returnType)) output.Add(new ManagedReturn(ret.Address, null));
-                    else if (ret.Value is { } returned) output.Add(new ManagedReturn(ret.Address, ownReturnBuffer is not null || types.Kind(returnType) == TypeKind.Struct
-                        ? StructReturn(returned) : RecoverAs(returned, returnType, ret.Address)));
-                    else throw Fail(ret.Address, "返回 非 void 方法缺少返回值");
-                    return;
-                default:
-                    throw Fail(statement.Address, $"语句 {statement.GetType().Name} 尚未支持");
+                    if (returnHole is { } cause) return Derived(cause, "返回 返回值类型尚未支持");
+                    if (ManagedTypes.IsVoid(returnType)) { output.Add(new ManagedReturn(ret.Address, null)); return null; }
+                    if (ret.Value is not { } returned) return Fail(ret.Address, "返回 非 void 方法缺少返回值");
+                    return Emit((ownReturnBuffer is not null || types.Kind(returnType) == TypeKind.Struct ? StructReturn(returned)
+                        : RecoverAs(returned, returnType, ret.Address)).Map(value => new ManagedReturn(ret.Address, value)), output);
+                default: return Fail(statement.Address, $"语句 {statement.GetType().Name} 尚未支持");
             }
         }
 
-        private void TranslateCall(Call call, List<ManagedStatement> output)
+        private RecoveryFailure? TranslateCall(Call call, List<ManagedStatement> output)
         {
-            foreach (var rule in Registry.Calls) if (rule(this, call, output)) return;
+            if (Rules(Registry.Calls.Select(rule => rule(this, call, output)), out var handled) is { } ruleFailure) return ruleFailure;
+            if (handled) return null;
             var address = call.Address;
-            var ignored = IsWriteBarrier(call) || call.Op?.Kind is OpKind.InitClass or OpKind.InitMethodRgctx or OpKind.InterfaceInvokeData
-                || genericResolvers.Contains(call);
+            var ignored = IsWriteBarrier(call) || call.Op?.Kind is OpKind.InitClass or OpKind.InitMethodRgctx or OpKind.InterfaceInvokeData || genericResolvers.Contains(call);
             if (ignored)
             {
-                // 尾调用形式（函数的最后一步是写屏障）：删去之后在这里返回
                 if (call.Kind == CallKind.Tail)
                 {
-                    if (!ManagedTypes.IsVoid(returnType)) throw Fail(address, "返回 尾调用写屏障的方法不是 void");
+                    if (!ManagedTypes.IsVoid(returnType)) return Fail(address, "返回 尾调用写屏障的方法不是 void");
                     output.Add(new ManagedReturn(address, null));
                 }
-                return;
+                return null;
             }
             switch (call.Op)
             {
-                case { Kind: OpKind.CompareExchangeReference }:
-                    CompareExchangeReference(call, output);
-                    return;
+                case { Kind: OpKind.CompareExchangeReference }: return CompareExchangeReference(call, output);
                 case { Kind: OpKind.RunClassConstructor, Operand: TypeRef type }:
-                    if (owner.runClassConstructor is not { } run) throw Fail(address, "类初始化 核心库缺少 RuntimeHelpers.RunClassConstructor");
+                    if (owner.runClassConstructor is not { } run) return Fail(address, "类初始化 核心库缺少 RuntimeHelpers.RunClassConstructor");
                     output.Add(new ManagedCall(address, new ManagedInvocation(run, null, [new TypeHandleValue(type, types.RuntimeTypeHandle, types.Size(types.RuntimeTypeHandle) * 8)], false), null, false));
-                    return;
-                // dmb ish（volatile 读写、Thread.MemoryBarrier）：写成完全栅栏 Thread.MemoryBarrier()。
+                    return null;
                 case { Kind: OpKind.MemoryBarrier }:
-                    if (owner.memoryBarrier is not { } barrier) throw Fail(address, "运行时操作 核心库缺少 Thread.MemoryBarrier");
+                    if (owner.memoryBarrier is not { } barrier) return Fail(address, "运行时操作 核心库缺少 Thread.MemoryBarrier");
                     output.Add(new ManagedCall(address, new ManagedInvocation(barrier, null, [], false), null, false));
-                    return;
+                    return null;
                 case { Kind: OpKind.NullCheck }:
-                    // L2 也把 TypeCheck 的 0/1 结果为零时抛 NRE 归一为 NullCheck；此时比较整数零。
-                    var checkedOperand = Recover(call.Arguments[0], types.Object);
-                    var zeroType = call.Arguments[0] is Use u && results.TryGetValue(u.Variable, out var checkedResult) && typeChecks.ContainsKey(checkedResult.Call)
-                        ? checkedOperand.Type : types.Object;
-                    output.Add(Check(address, new ComparisonValue(Cond.Eq, checkedOperand, new ConstantValue(0, zeroType, 64), types.Boolean), "System.NullReferenceException"));
-                    return;
-                case { Kind: OpKind.BoundsCheck } when call.Arguments is [var index, var length]:
                 {
-                    var i = Recover(index, types.Int32);
-                    var n = Coerce(Recover(length, i.Type), i.Type, address);
-                    output.Add(Check(address, new ComparisonValue(Cond.Uge, i, n, types.Boolean), "System.IndexOutOfRangeException"));
-                    return;
+                    if (!Recover(call.Arguments[0], types.Object).TryGet(out var operand, out var failure)) return failure;
+                    var zeroType = call.Arguments[0] is Use u && results.TryGetValue(u.Variable, out var checkedResult) && typeChecks.ContainsKey(checkedResult.Call) ? operand.Type : types.Object;
+                    return Emit(Check(address, new ComparisonValue(Cond.Eq, operand, new ConstantValue(0, zeroType, 64), types.Boolean), "System.NullReferenceException"), output);
                 }
+                case { Kind: OpKind.BoundsCheck } when call.Arguments is [var index, var length]:
+                    return Emit(Recover(index, types.Int32).Bind(i => Recover(length, i.Type).Bind(value => Coerce(value, i.Type, address))
+                        .Bind(n => Check(address, new ComparisonValue(Cond.Uge, i, n, types.Boolean), "System.IndexOutOfRangeException"))), output);
                 case { Kind: OpKind.ThrowIf, Operand: string exception }:
-                    output.Add(Check(address, Truth(Recover(call.Arguments[0], types.Boolean)), exception));
-                    return;
+                    return Emit(Recover(call.Arguments[0], types.Boolean).Bind(Truth).Bind(condition => Check(address, condition, exception)), output);
                 case { Kind: OpKind.ThrowNew, Operand: string exception }:
-                    output.Add(new ManagedThrow(address, new NewObjectValue(owner.ExceptionConstructor(exception) ?? throw Fail(address, $"异常 {exception} 没有无参构造函数"), [])));
-                    return;
+                    if (owner.ExceptionConstructor(exception) is not { } throwConstructor) return Fail(address, $"异常 {exception} 没有无参构造函数");
+                    output.Add(new ManagedThrow(address, new NewObjectValue(throwConstructor, [])));
+                    return null;
                 case { Kind: OpKind.NewException, Operand: string exception } when call.Defines.FirstOrDefault() is { } created:
-                    output.Add(new ManagedAssignment(address, Local(created), new NewObjectValue(
-                        owner.ExceptionConstructor(exception) ?? throw Fail(address, $"异常 {exception} 没有无参构造函数"), [])));
-                    return;
+                    return Assign(address, created, () => owner.ExceptionConstructor(exception) is { } constructor
+                        ? new NewObjectValue(constructor, []) : Fail(address, $"异常 {exception} 没有无参构造函数"), output);
                 case { Kind: OpKind.Throw or OpKind.ThrowManaged or OpKind.Rethrow }:
-                    output.Add(new ManagedThrow(address, Recover(call.Arguments[0], null)));
-                    return;
+                    return Emit(Recover(call.Arguments[0], null).Map(value => new ManagedThrow(address, value)), output);
                 case { Kind: OpKind.NewObject } when inlineConstructors.TryGetValue(call, out var constructor):
-                    var constructorArguments = constructor.Arguments.Select((argument, i) => RecoverAs(argument,
-                        Concrete(constructor.Method, constructor.Method.Method.Parameters[i].Type), address)).ToArray();
-                    output.Add(new ManagedAssignment(address, Local(call.Defines[0]),
-                        new NewObjectValue(constructor.Method, constructorArguments) { Transparent = true }));
-                    return;
+                {
+                    var arguments = new List<ManagedValue>();
+                    foreach (var (argument, i) in constructor.Arguments.Select((v, i) => (v, i)))
+                    {
+                        if (!RecoverAs(argument, Concrete(constructor.Method, constructor.Method.Method.Parameters[i].Type), address).TryGet(out var value, out var failure)) return failure;
+                        arguments.Add(value);
+                    }
+                    return Assign(address, call.Defines[0], () => new NewObjectValue(constructor.Method, arguments) { Transparent = true }, output);
+                }
                 case { Kind: OpKind.NewArray, Operand: ArrayRef array }:
-                    var arrayValue = new NewArrayValue(array, Index(call.Arguments[1]));
-                    if (call.Kind == CallKind.Tail) output.Add(new ManagedReturn(address, Coerce(arrayValue, returnType, address)));
-                    else output.Add(new ManagedAssignment(address, call.Defines.FirstOrDefault() is { } createdArray ? Local(createdArray) : StructLocal(array, 64), arrayValue));
-                    return;
+                {
+                    if (!Index(call.Arguments[1]).TryGet(out var length, out var failure)) return failure;
+                    var value = new NewArrayValue(array, length);
+                    if (call.Kind == CallKind.Tail) return Emit(Coerce(value, returnType, address).Map(result => new ManagedReturn(address, result)), output);
+                    if (call.Defines.FirstOrDefault() is { } createdArray) return Assign(address, createdArray, () => value, output);
+                    output.Add(new ManagedAssignment(address, StructLocal(array, 64), value));
+                    return null;
+                }
                 case { Kind: OpKind.Box, Operand: TypeRef type } when call.Defines.FirstOrDefault() is { } created && boxed.TryGetValue(call, out var content):
                     if (types.Kind(type) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double) || type is DefinitionRef { Definition.FullName: "System.Nullable" })
-                        throw Fail(address, $"装箱 类型 {type} 尚未支持");
-                    output.Add(new ManagedAssignment(address, Local(created), new BoxValue(RecoverAs(content, type, address), type, types.Object)));
-                    return;
-                case { Kind: OpKind.TypeCheck, Operand: TypeRef type } when typeChecks.TryGetValue(call, out var obj)
-                    && call.Defines.FirstOrDefault() is { } checkedValue:
-                    // TypeCheck 返回 0/1；isinst 返回原引用/null。比较结果再补零到 L2 的 64 位临时值。
-                    var matches = new ComparisonValue(Cond.Ne, new IsInstValue(RecoverAs(obj, types.Object, address), type),
-                        new ConstantValue(0, type, 64), types.Boolean);
-                    output.Add(new ManagedAssignment(address, Local(checkedValue), Coerce(matches, types.UInt64, address)));
-                    return;
+                        return Fail(address, $"装箱 类型 {type} 尚未支持");
+                    return Assign(address, created, () => RecoverAs(content, type, address).Map<ManagedValue>(value => new BoxValue(value, type, types.Object)), output);
+                case { Kind: OpKind.TypeCheck, Operand: TypeRef type } when typeChecks.TryGetValue(call, out var obj) && call.Defines.FirstOrDefault() is { } checkedValue:
+                    return Assign(address, checkedValue, () => RecoverAs(obj, types.Object, address).Bind(value => Coerce(new ComparisonValue(Cond.Ne,
+                        new IsInstValue(value, type), new ConstantValue(0, type, 64), types.Boolean), types.UInt64, address)), output);
                 case { Kind: OpKind.Unbox, Operand: TypeRef type } when (type is DefinitionRef { Definition.IsEnum: true } or GenericParameterRef { NativeScalar: not null }) && call.Defines.FirstOrDefault() is { } created:
-                    output.Add(new ManagedAssignment(address, Local(created), new UnboxAddressValue(RecoverAs(call.Arguments[0], types.Object, address), type)));
-                    return;
+                    return Assign(address, created, () => RecoverAs(call.Arguments[0], types.Object, address).Map<ManagedValue>(value => new UnboxAddressValue(value, type)), output);
                 case { Kind: OpKind.IsInst, Operand: TypeRef type } when call.Kind == CallKind.Tail || call.Defines.FirstOrDefault() is not null:
-                    var instance = new IsInstValue(Coerce(Recover(call.Arguments[0], types.Object), types.Object, address), type,
-                        type is GenericParameterRef { NativeScalar: not null } ? types.Object : null);
-                    if (call.Kind == CallKind.Tail) output.Add(new ManagedReturn(address, Coerce(instance, returnType, address)));
-                    else output.Add(new ManagedAssignment(address, Local(call.Defines[0]), instance));
-                    return;
-                case { Kind: OpKind.IsInstArrayElement } when call.Defines.FirstOrDefault() is { } created:
-                    ArrayElementCheck(call, created, output);
-                    return;
+                {
+                    if (!Recover(call.Arguments[0], types.Object).Bind(value => Coerce(value, types.Object, address)).TryGet(out var value, out var failure)) return failure;
+                    var instance = new IsInstValue(value, type, type is GenericParameterRef { NativeScalar: not null } ? types.Object : null);
+                    return call.Kind == CallKind.Tail ? Emit(Coerce(instance, returnType, address).Map(v => new ManagedReturn(address, v)), output)
+                        : Assign(address, call.Defines[0], () => instance, output);
+                }
+                case { Kind: OpKind.IsInstArrayElement } when call.Defines.FirstOrDefault() is { } created: return ArrayElementCheck(call, created, output);
                 case null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual or OpKind.CallMethodPointer }:
-                    Invocation(call, output);
-                    return;
-                default:
-                    throw Fail(address, $"运行时操作 {call.Op?.Kind.ToString() ?? call.Kind.ToString()} 尚未支持");
+                    return Invocation(call, output);
+                default: return Fail(address, $"运行时操作 {call.Op?.Kind.ToString() ?? call.Kind.ToString()} 尚未支持");
             }
         }
 
-        private ManagedCheck Check(ulong address, ManagedValue condition, string exception) =>
-            new(address, condition, owner.ExceptionConstructor(exception) ?? throw Fail(address, $"异常 {exception} 没有无参构造函数"));
+        private RecoveryResult<ManagedCheck> Check(ulong address, ManagedValue condition, string exception) => owner.ExceptionConstructor(exception) is { } constructor
+            ? new ManagedCheck(address, condition, constructor) : Fail(address, $"异常 {exception} 没有无参构造函数");
 
-        private void Invocation(Call call, List<ManagedStatement> output)
+        private RecoveryFailure? Invocation(Call call, List<ManagedStatement> output)
         {
             var address = call.Address;
-            foreach (var rule in Registry.Invocations) if (rule(this, call, output)) return;
+            if (Rules(Registry.Invocations.Select(rule => rule(this, call, output)), out var handled) is { } ruleFailure) return ruleFailure;
+            if (handled) return null;
             if (call.Op is null && call.Target is Const target && facts.Code.RegionOf(target.Value) != CodeRegion.Managed)
-                throw Fail(address, $"调用 运行时函数 0x{target.Value:x}（{facts.Helpers.At(target.Value)?.Kind.ToString() ?? "未识别"}）");
-            if (call.Op is null && call.Kind is not (CallKind.Direct or CallKind.Tail)) throw Fail(address, "调用 来源未知的间接调用");
-            if (Resolve(call) is not { } callee) throw Fail(address, CallResolutionFailure(call));
-            if (owner.abi.Classify(callee, out var problem) is not { } signature) throw Fail(address, $"调用 {callee} 的签名: {problem}");
+                return Fail(address, $"调用 运行时函数 0x{target.Value:x}（{facts.Helpers.At(target.Value)?.Kind.ToString() ?? "未识别"}）");
+            if (call.Op is null && call.Kind is not (CallKind.Direct or CallKind.Tail)) return Fail(address, "调用 来源未知的间接调用");
+            if (Resolve(call) is not { } callee) return Fail(address, CallResolutionFailure(call));
+            if (owner.abi.Classify(callee, out var problem) is not { } signature) return Fail(address, $"调用 {callee} 的签名: {problem}");
             if (call.Op?.Kind == OpKind.CallDelegate && signature.Return is { } delegateReturn
                 && (delegateReturn.Passing != Passing.Registers || delegateReturn.Pieces.Length != 1 || types.Kind(delegateReturn.Type) is TypeKind.Struct or null
                     || types.Kind(delegateReturn.Type) == TypeKind.Pointer && !ManagedTypes.IsNativePointer(delegateReturn.Type)))
-                throw Fail(address, $"委托 Invoke 返回值 {delegateReturn.Type} 的 ABI 尚未支持");
+                return Fail(address, $"委托 Invoke 返回值 {delegateReturn.Type} 的 ABI 尚未支持");
             var registers = ArgumentsOf(call);
-            Expr Argument(AbiValue value, string name)
+            RecoveryResult<Expr> Argument(AbiValue value, string name)
             {
-                if (value.Passing != Passing.Registers || value.Pieces.Length != 1) throw Fail(address, $"调用 {callee} 的参数 {name} 的传递方式尚未支持");
-                if (!registers.TryGetValue(value.Pieces[0].Register, out var e)) throw Fail(address, $"调用 {callee} 缺少参数 {name}");
+                if (value.Passing != Passing.Registers || value.Pieces.Length != 1) return Fail(address, $"调用 {callee} 的参数 {name} 的传递方式尚未支持");
+                if (!registers.TryGetValue(value.Pieces[0].Register, out var e)) return Fail(address, $"调用 {callee} 缺少参数 {name}");
                 return types.Kind(value.Type) is TypeKind.Float or TypeKind.Double ? ScalarVectorNarrowing.Low(e, value.Pieces[0].Width) : e;
             }
             var definition = callee.Method;
@@ -1661,11 +1724,16 @@ public sealed partial class MethodRecovery
             if (signature.This is { } self)
             {
                 if (stackEnums.TryGetValue(call, out var stackEnum))
-                    receiver = new BoxValue(RecoverAs(stackEnum.Value, stackEnum.Type, address), stackEnum.Type, self.Type);
+                {
+                    if (!RecoverAs(stackEnum.Value, stackEnum.Type, address).TryGet(out var value, out var failure)) return failure;
+                    receiver = new BoxValue(value, stackEnum.Type, self.Type);
+                }
                 else
                 {
-                    var expression = call.DelegateReceiver ?? Argument(self, "this");
-                    receiver = UnusedReceiver(call, callee, self, expression) ?? RecoverAs(expression, self.Type, address);
+                    RecoveryResult<Expr> argument = call.DelegateReceiver is { } delegateReceiver ? delegateReceiver : Argument(self, "this");
+                    if (!argument.TryGet(out var expression, out var failure)) return failure;
+                    if (!UnusedReceiver(call, callee, self, expression).TryGet(out receiver, out failure)) return failure;
+                    if (receiver is null && !RecoverAs(expression, self.Type, address).TryGet(out receiver, out failure)) return failure;
                 }
             }
             var parameters = new List<ManagedValue>();
@@ -1673,58 +1741,55 @@ public sealed partial class MethodRecovery
             {
                 var parameter = signature.Parameters[i];
                 var site = new ArgumentSite(call, callee, definition.Parameters[i].Name, registers, Argument) { Index = i, Output = output };
-                if (Registry.Arguments.Select(rule => rule(this, parameter, site)).FirstOrDefault(v => v is not null) is { } shaped)
-                {
-                    parameters.Add(shaped);
-                    continue;
-                }
-                if (types.Kind(parameter.Type) is TypeKind.Struct or null || types.Kind(parameter.Type) == TypeKind.Pointer && !ManagedTypes.IsNativePointer(parameter.Type) && (parameter.Type is not ByRefRef parameterReference
-                    || types.Kind(parameterReference.Element) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference)))
-                    throw Fail(address, $"调用 {callee} 的参数类型 {parameter.Type} 尚未支持");
-                parameters.Add(RecoverAs(Argument(parameter, definition.Parameters[i].Name), parameter.Type, address));
+                if (!FirstValue(Registry.Arguments.Select(rule => rule(this, parameter, site))).TryGet(out var shaped, out var failure)) return failure;
+                if (shaped is not null) { parameters.Add(shaped); continue; }
+                if (types.Kind(parameter.Type) is TypeKind.Struct or null || types.Kind(parameter.Type) == TypeKind.Pointer && !ManagedTypes.IsNativePointer(parameter.Type)
+                    && (parameter.Type is not ByRefRef parameterReference || types.Kind(parameterReference.Element) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference)))
+                    return Fail(address, $"调用 {callee} 的参数类型 {parameter.Type} 尚未支持");
+                if (!Argument(parameter, definition.Parameters[i].Name).Bind(e => RecoverAs(e, parameter.Type, address)).TryGet(out var recovered, out failure)) return failure;
+                parameters.Add(recovered);
             }
             var calledReturn = Concrete(callee, definition.ReturnType);
             if (constructed.TryGetValue(call, out var created))
             {
-                // 内联的转调构造：写成类型自己的构造函数，执行对照透明执行它（其中仍是这次基类构造调用）。
                 var value = forwardedConstructors.TryGetValue(call, out var own)
                     ? new NewObjectValue(own with { TypeArguments = ((DefinitionRef)known[created]).Arguments }, []) { Transparent = true }
                     : new NewObjectValue(callee with { TypeArguments = ((DefinitionRef)known[created]).Arguments }, parameters);
-                output.Add(new ManagedAssignment(address, Local(created), value));
-                return;
+                return Assign(address, created, () => value, output);
             }
-            // 调用的是方法的本地副本（无注册入口）：执行对照两侧透明执行。
             var copied = call.Op is null && call.Target is Const copyTarget && facts.EntriesAt(copyTarget.Value).Length == 0 && facts.Unregistered.At(copyTarget.Value) is null;
             var isVirtual = call.Op is not null || virtualCalls.Contains(call)
                 || definition.IsVirtual && (definition.Attributes & System.Reflection.MethodAttributes.Final) != 0 && receiver is not ArgumentValue { Index: -1 };
             var invocation = new ManagedInvocation(callee, receiver, parameters, isVirtual && receiver is not null && receiver.Type is not ByRefRef);
-            foreach (var rule in Registry.InvocationOutputs) if (rule(this, call, signature, registers, invocation, output)) return;
+            if (Rules(Registry.InvocationOutputs.Select(rule => rule(this, call, signature, registers, invocation, output)), out handled) is { } rejected) return rejected;
+            if (handled) return null;
             if (call.Kind is CallKind.Tail or CallKind.TailIndirect)
             {
-                // 机器尾分支没有后继；调用者签名为 void，返回寄存器在本方法中不再读取。
-                // ECMA-335 III.3.19/3.54/3.57：保留调用，用 pop 丢弃整个托管值后 ret；x8 返回缓冲区由独立规则处理。
                 if (ManagedTypes.IsVoid(returnType) && signature.Return is { Passing: Passing.Registers } discarded
-                    && (RegisterStruct(discarded) || discarded.Pieces.Length == 1
-                        && types.Kind(calledReturn) is TypeKind.Bool or TypeKind.Int or TypeKind.Float or TypeKind.Double or TypeKind.Reference))
+                    && (RegisterStruct(discarded) || discarded.Pieces.Length == 1 && types.Kind(calledReturn) is TypeKind.Bool or TypeKind.Int or TypeKind.Float or TypeKind.Double or TypeKind.Reference))
                 {
                     output.Add(new ManagedCall(address, invocation, null, false) { Inlined = copied });
                     output.Add(new ManagedReturn(address, null));
-                    return;
+                    return null;
                 }
                 if (ManagedTypes.IsVoid(returnType) != ManagedTypes.IsVoid(calledReturn) || !ManagedTypes.IsVoid(returnType) && !calledReturn.Equals(returnType)
-                    && !types.IsAssignable(calledReturn, returnType)) throw Fail(address, $"尾调用 返回类型 {calledReturn} 与 {returnType} 不符");
+                    && !types.IsAssignable(calledReturn, returnType)) return Fail(address, $"尾调用 返回类型 {calledReturn} 与 {returnType} 不符");
                 output.Add(new ManagedCall(address, invocation, null, true) { Inlined = copied });
-                return;
+                return null;
             }
             LocalValue? result = null;
-            if (signature.Return is { } returned && Registry.Results.Select(rule => rule(this, call, returned)).FirstOrDefault(l => l is not null) is { } shapedResult)
-                result = shapedResult;
-            else if (signature.Return is { } ret)
+            if (signature.Return is { } returned)
             {
-                var index = Array.IndexOf(call.Results, ret.Pieces[0].Register);
-                if (index >= 0 && index < call.Defines.Length && call.Defines[index] is { } defined && !runtime.Contains(defined)) result = Local(defined);
+                if (!FirstValue(Registry.Results.Select(rule => rule(this, call, returned))).TryGet(out result, out var failure)) return failure;
+                if (result is null)
+                {
+                    var index = Array.IndexOf(call.Results, returned.Pieces[0].Register);
+                    if (index >= 0 && index < call.Defines.Length && call.Defines[index] is { } defined && !runtime.Contains(defined)
+                        && !Local(defined).TryGet(out result, out failure)) return failure;
+                }
             }
             output.Add(new ManagedCall(address, invocation, result, false) { Inlined = copied });
+            return null;
         }
     }
 }

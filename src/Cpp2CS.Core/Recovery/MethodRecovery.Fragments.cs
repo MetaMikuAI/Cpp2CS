@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -26,12 +27,12 @@ public sealed partial class MethodRecovery
 
         private LocalValue StructLocal(TypeRef type, int width) => new(new Variable(Storage.Temp(nextStructLocal--), 1), type, width);
 
-        private Fragment? MemoryFragment(Expr root, TypeRef type, long offset, int width)
+        private RecoveryResult<Fragment?> MemoryFragment(Expr root, TypeRef type, long offset, int width)
         {
-            if (type is not (ByRefRef or DefinitionRef)) return null;
+            if (type is not (ByRefRef or DefinitionRef)) return (Fragment?)null;
             var leaves = StructPaths(type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
             if (leaves.Any(p => p.Offset < offset + width / 8 && offset < p.Offset + types.Size(p.Type)
-                && (p.Offset < offset || p.Offset + types.Size(p.Type) > offset + width / 8))) return null;
+                && (p.Offset < offset || p.Offset + types.Size(p.Type) > offset + width / 8))) return (Fragment?)null;
             var paths = leaves.Where(p => p.Offset >= offset && p.Offset + types.Size(p.Type) <= offset + width / 8)
                 .OrderBy(p => p.Offset).ToArray();
             // 叶子之间可以有填充（如 ValueTuple<bool, int> 的 3 字节）：片只按叶子使用，打包成整数时才因填充报洞。
@@ -39,43 +40,51 @@ public sealed partial class MethodRecovery
             var gaps = false;
             foreach (var p in paths)
             {
-                if (p.Offset < cursor) return null;
+                if (p.Offset < cursor) return (Fragment?)null;
                 gaps |= p.Offset != cursor;
                 cursor = p.Offset + types.Size(p.Type);
             }
             gaps |= cursor != offset + width / 8;
-            if (paths.Length == 0 || paths.Length < 2 && !gaps || cursor > offset + width / 8) return null;
-            var value = Recover(root, null);
+            if (paths.Length == 0 || paths.Length < 2 && !gaps || cursor > offset + width / 8) return (Fragment?)null;
+            if (!Recover(root, null).TryGet(out var value, out var failure)) return failure;
             return new Fragment(paths.Select(p => new Part((p.Offset - (int)offset) * 8, PathValue(value, p.Path))).ToArray(), types.UInt64, width);
         }
 
         /// <summary>加载的多叶子片在原定义处逐叶子快照；后续字段写入不能改变已经读出的片。</summary>
-        private Fragment? FragmentVariable(Variable variable, int width)
+        private RecoveryResult<Fragment?> FragmentVariable(Variable variable, int width)
         {
-            // 内联的变量没有定义语句，不能用片局部变量（内联分析之前的恢复可能已经缓存了它们）。
-            if (!inlined.Contains(variable) && fragmentLocals.TryGetValue(variable, out var cached)) return (Fragment)ResizeFragment(cached, width);
-            // 片识别是可选探测；长标量转换链保留为 SSA 局部值，避免探测递归耗尽宿主栈。
-            // 未证实的结构体仍由 LocalOf 的类型/位宽检查留洞，不补默认值。
+            if (!inlined.Contains(variable) && fragmentLocals.TryGetValue(variable, out var cached))
+                return ResizeFragment(cached, width).Map<Fragment?>(value => (Fragment)value);
             if (fragmentActive.Count == 0) fragmentSteps = 0;
-            if (fragmentActive.Count >= 64 || ++fragmentSteps > 1024) return null;
-            if (!values.TryGetValue(variable, out var expression) || expression is not (Load { Width: > 32 } or Use or Ir.Convert or Insert) || !fragmentActive.Add(variable)) return null;
-            try
+            if (fragmentActive.Count >= 64 || ++fragmentSteps > 1024) return (Fragment?)null;
+            if (!values.TryGetValue(variable, out var expression) || expression is not (Load { Width: > 32 } or Use or Ir.Convert or Insert)
+                || !fragmentActive.Add(variable)) return (Fragment?)null;
+            var recovered = RecoverFragment();
+            fragmentActive.Remove(variable);
+            // 可选探测未获得片时，普通局部变量路径仍会检查类型和位宽。
+            return recovered.TryGet(out var result, out _) ? result : (Fragment?)null;
+
+            RecoveryResult<Fragment?> RecoverFragment()
             {
-                if (Recover(expression, null) is not Fragment fragment) return null;
-                if (inlined.Contains(variable)) return (Fragment)ResizeFragment(fragment, width);
+                if (!Recover(expression, null).TryGet(out var value, out var failure)) return failure;
+                if (value is not Fragment fragment) return (Fragment?)null;
+                if (inlined.Contains(variable)) return ResizeFragment(fragment, width).Map<Fragment?>(v => (Fragment)v);
                 var locals = new Fragment(fragment.Parts.Select(p => new Part(p.Low, StructLocal(p.Value.Type, p.Value.Width))).ToArray(), fragment.Type, fragment.Width);
                 fragmentLocals.Add(variable, locals);
-                return (Fragment)ResizeFragment(locals, width);
+                return ResizeFragment(locals, width).Map<Fragment?>(v => (Fragment)v);
             }
-            catch (HoleException) { return null; }
-            finally { fragmentActive.Remove(variable); }
         }
 
-        private ManagedValue ResizeFragment(Fragment fragment, int width)
+        private RecoveryResult<ManagedValue> ResizeFragment(Fragment fragment, int width)
         {
             if (width == fragment.Width) return fragment;
-            var parts = fragment.Parts.Where(p => p.Low < width).Select(p => p.Low + p.Value.Width <= width ? p
-                : new Part(p.Low, Slice(p.Value, 0, width - p.Low))).ToList();
+            var parts = new List<Part>();
+            foreach (var part in fragment.Parts.Where(p => p.Low < width))
+            {
+                if (part.Low + part.Value.Width <= width) { parts.Add(part); continue; }
+                if (!Slice(part.Value, 0, width - part.Low).TryGet(out var value, out var failure)) return failure;
+                parts.Add(new(part.Low, value));
+            }
             // 零扩展的高位来自指令语义，不是结构体填充；逐字节保留已知的零。
             for (var low = fragment.Width; low < width; low += 8)
                 parts.Add(new Part(low, new ConstantValue(0, types.Byte, 8)));
@@ -83,7 +92,7 @@ public sealed partial class MethodRecovery
         }
 
         /// <summary>覆盖整个向量的逐道计算保留为独立叶子，按原定义顺序快照。</summary>
-        private ManagedValue InsertedFragment(Insert insert)
+        private RecoveryResult<ManagedValue> InsertedFragment(Insert insert)
         {
             var pieces = new List<(int Low, Expr Value)>();
             Expr current = insert;
@@ -94,20 +103,21 @@ public sealed partial class MethodRecovery
             }
             if ((current is not Const { Value: 0 } || pieces.Any(p => p.Value.Width is not (32 or 64)))
                 && Fold.ScalarInsert(insert) is { } scalar) return Recover(scalar, null);
-            if (current is not Const { Value: 0 } || insert.Width is not (32 or 64 or 128)) throw Fail(0, "向量 插入基值或位宽尚未支持");
+            if (current is not Const { Value: 0 } || insert.Width is not (32 or 64 or 128)) return Fail(0, "向量 插入基值或位宽尚未支持");
             var cursor = 0;
             var leaves = new List<Part>();
             foreach (var piece in pieces.OrderBy(p => p.Low))
             {
-                if (piece.Low != cursor || piece.Value.Width is not (32 or 64)) throw Fail(0, "向量 插入未完整覆盖独立叶子");
+                if (piece.Low != cursor || piece.Value.Width is not (32 or 64)) return Fail(0, "向量 插入未完整覆盖独立叶子");
                 cursor += piece.Value.Width;
-                leaves.Add(new(piece.Low, Recover(piece.Value, null)));
+                if (!Recover(piece.Value, null).TryGet(out var value, out var failure)) return failure;
+                leaves.Add(new(piece.Low, value));
             }
-            if (cursor != insert.Width) throw Fail(0, "向量 插入未覆盖整个向量");
+            if (cursor != insert.Width) return Fail(0, "向量 插入未覆盖整个向量");
             return new Fragment(leaves, types.UInt64, insert.Width);
         }
 
-        private ManagedValue Slice(ManagedValue value, int low, int width)
+        private RecoveryResult<ManagedValue> Slice(ManagedValue value, int low, int width)
         {
             if (low == 0 && width == value.Width && value is not Fragment) return value;
             if (value is AggregatePiece part && low % 8 == 0 && width % 8 == 0 && low + width <= part.Width)
@@ -123,7 +133,7 @@ public sealed partial class MethodRecovery
                 return new Fragment(parts, fragment.Type, width);
             }
             if (width is not (8 or 16 or 32 or 64) || value.Width > 64 || low + width > value.Width)
-                throw Fail(0, $"结构体 位段 [{low},{low + width}) 无法由已证明的叶子重建");
+                return Fail(0, $"结构体 位段 [{low},{low + width}) 无法由已证明的叶子重建");
             var resultType = types.Integer(width, false);
             if (value is ConstantValue constant) return new ConstantValue((constant.Bits >> low) & Expr.Mask(width), resultType, width);
             if (value is ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate } conversion)
@@ -137,8 +147,8 @@ public sealed partial class MethodRecovery
                 if (binary.Op is BinOp.And or BinOp.Or or BinOp.Xor
                     || binary.Op == BinOp.Add && (low == 0 || ZeroLow(binary.Left, low) || ZeroLow(binary.Right, low)))
                 {
-                    var left = Slice(binary.Left, low, width);
-                    var right = Slice(binary.Right, low, width);
+                    if (!Slice(binary.Left, low, width).TryGet(out var left, out var failure)) return failure;
+                    if (!Slice(binary.Right, low, width).TryGet(out var right, out failure)) return failure;
                     if (left is ConstantValue { Bits: 0 })
                     {
                         if (binary.Op == BinOp.And) return left;
@@ -160,7 +170,7 @@ public sealed partial class MethodRecovery
                     if (binary.Op == BinOp.LShr && low + count + width <= binary.Width) return Slice(binary.Left, low + count, width);
                 }
             }
-            var raw = Coerce(value, types.Integer(value.Width, false), 0);
+            if (!Coerce(value, types.Integer(value.Width, false), 0).TryGet(out var raw, out var convertFailure)) return convertFailure;
             if (low != 0) raw = new BinaryValue(BinOp.LShr, raw, new ConstantValue((ulong)low, types.Int32, 32), raw.Type, raw.Width);
             return Coerce(raw, types.Integer(width, false), 0);
         }
@@ -175,42 +185,48 @@ public sealed partial class MethodRecovery
             _ => false,
         };
 
-        private ManagedValue Pack(Fragment fragment)
+        private RecoveryResult<ManagedValue> Pack(Fragment fragment)
         {
             if (fragment.Parts is [var single] && single.Low == 0 && single.Value.Width == fragment.Width) return single.Value;
-            if (fragment.Width is not (8 or 16 or 32 or 64)) throw Fail(0, $"结构体 {fragment.Width} 位片必须逐叶子使用");
+            if (fragment.Width is not (8 or 16 or 32 or 64)) return Fail(0, $"结构体 {fragment.Width} 位片必须逐叶子使用");
             var cursor = 0;
             ManagedValue result = new ConstantValue(0, types.Integer(fragment.Width, false), fragment.Width);
             foreach (var part in fragment.Parts.OrderBy(p => p.Low))
             {
-                if (part.Low != cursor) throw Fail(0, "结构体 不能把填充重建成整数");
+                if (part.Low != cursor) return Fail(0, "结构体 不能把填充重建成整数");
                 cursor += part.Value.Width;
-                var raw = Coerce(part.Value, types.Integer(part.Value.Width, false), 0);
-                raw = Coerce(raw, result.Type, 0);
+                if (!Coerce(part.Value, types.Integer(part.Value.Width, false), 0).TryGet(out var raw, out var failure)) return failure;
+                if (!Coerce(raw, result.Type, 0).TryGet(out raw, out failure)) return failure;
                 if (part.Low != 0) raw = new BinaryValue(BinOp.Shl, raw, new ConstantValue((ulong)part.Low, types.Int32, 32), raw.Type, raw.Width);
                 result = new BinaryValue(BinOp.Or, result, raw, result.Type, result.Width);
             }
-            if (cursor != fragment.Width) throw Fail(0, "结构体 不能把填充重建成整数");
+            if (cursor != fragment.Width) return Fail(0, "结构体 不能把填充重建成整数");
             return result;
         }
 
         [DefineRule(10)]
-        private bool DefineFragment(Define define, List<ManagedStatement> output)
+        private RecoveryResult<bool> DefineFragment(Define define, List<ManagedStatement> output)
         {
-            if (define.Value is not (Load { Width: > 32 } or Use or Ir.Convert or Insert) || Recover(define.Value, null) is not Fragment source) return false;
-            var target = FragmentVariable(define.Target, source.Width)!;
+            if (define.Value is not (Load { Width: > 32 } or Use or Ir.Convert or Insert)) return false;
+            if (!Recover(define.Value, null).TryGet(out var value, out var failure)) return failure;
+            if (value is not Fragment source) return false;
+            if (!FragmentVariable(define.Target, source.Width).TryGet(out var target, out failure)) return failure;
+            if (target is null) return Fail(define.Address, "结构体 片局部变量未建立");
             for (var i = 0; i < source.Parts.Count; i++)
                 output.Add(new ManagedAssignment(define.Address, (LocalValue)target.Parts[i].Value, source.Parts[i].Value));
             return true;
         }
 
         [StoreTargetRule(10)]
-        private bool StoreFragment(Store store, ManagedValue target, List<ManagedStatement> output)
+        private RecoveryResult<bool> StoreFragment(Store store, ManagedValue target, List<ManagedStatement> output)
         {
             if (target is not Fragment fragment) return false;
-            var source = Recover(store.Value, null);
+            if (!Recover(store.Value, null).TryGet(out var source, out var failure)) return failure;
             foreach (var part in fragment.Parts)
-                output.Add(new ManagedStore(store.Address, part.Value, Coerce(Slice(source, part.Low, part.Value.Width), part.Value.Type, store.Address)));
+            {
+                if (!Slice(source, part.Low, part.Value.Width).Bind(value => Coerce(value, part.Value.Type, store.Address)).TryGet(out var value, out failure)) return failure;
+                output.Add(new ManagedStore(store.Address, part.Value, value));
+            }
             return true;
         }
     }
