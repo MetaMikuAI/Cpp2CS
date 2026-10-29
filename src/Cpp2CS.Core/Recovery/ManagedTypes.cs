@@ -1,3 +1,4 @@
+using System.Reflection;
 using Cpp2CS.Facts;
 using Cpp2CS.Model;
 
@@ -142,7 +143,7 @@ public sealed class ManagedTypes
         _ => throw new ArgumentOutOfRangeException(nameof(bits), bits, "整数位宽"),
     };
 
-    /// <summary>from 的值能否不经转换赋给 to（同一类型，或引用类型沿继承链/接口上行）。</summary>
+    /// <summary>from 的值能否不经转换赋给 to；按元数据处理继承、接口及引用实参的泛型变体。</summary>
     public bool IsAssignable(TypeRef from, TypeRef to)
     {
         if (from.Equals(to)) return true;
@@ -166,15 +167,39 @@ public sealed class ManagedTypes
         }
         for (TypeRef? current = from; current is DefinitionRef c; current = c.Definition.BaseType?.Substitute(c.Arguments, []))
         {
-            if (current.Equals(to)) return true;
+            if (current.Equals(to) || to is DefinitionRef target && VariantAssignable(c, target)) return true;
             foreach (var itf in c.Definition.Interfaces)
                 if (Implements(itf.Substitute(c.Arguments, []), to)) return true;
         }
         return false;
     }
 
-    private static bool Implements(TypeRef itf, TypeRef target) =>
-        itf.Equals(target) || itf is DefinitionRef d && d.Definition.Interfaces.Any(i => Implements(i.Substitute(d.Arguments, []), target));
+    private bool Implements(TypeRef itf, TypeRef target) =>
+        itf.Equals(target) || itf is DefinitionRef d && (target is DefinitionRef t && VariantAssignable(d, t)
+            || d.Definition.Interfaces.Any(i => Implements(i.Substitute(d.Arguments, []), target)));
+
+    private bool VariantAssignable(DefinitionRef from, DefinitionRef to)
+    {
+        if (from.Definition != to.Definition || from.Arguments.Count == 0 || from.Arguments.Count != to.Arguments.Count
+            || from.Definition.GenericParameters.Count != from.Arguments.Count
+            || !from.Definition.IsInterface && from.Definition.BaseType is not
+                DefinitionRef { Definition: { Assembly: "mscorlib.dll", FullName: "System.MulticastDelegate" } }) return false;
+        for (var i = 0; i < from.Arguments.Count; i++)
+        {
+            var source = from.Arguments[i];
+            var target = to.Arguments[i];
+            if (source.Equals(target)) continue;
+            if (!IsReferenceType(source) || !IsReferenceType(target)) return false;
+            var matches = (from.Definition.GenericParameters[i].Attributes & GenericParameterAttributes.VarianceMask) switch
+            {
+                GenericParameterAttributes.Covariant => IsAssignable(source, target),
+                GenericParameterAttributes.Contravariant => IsAssignable(target, source),
+                _ => false,
+            };
+            if (!matches) return false;
+        }
+        return true;
+    }
 
     /// <summary>
     /// 接收者 receiver（引用类型的对象，或值类型数据的指针 ByRefRef）中起始于 offset、宽 bytes 字节的字段。

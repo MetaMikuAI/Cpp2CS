@@ -37,6 +37,23 @@ internal static class ArrayAssignabilityCheck
         a.True(!types.IsAssignable(new ArrayRef(types.Int32, 1), new DefinitionRef(types.CorlibDefinition("System.Collections.Generic.List")!, [types.Int32])), "数组不是 List");
         foreach (var name in new[] { "System.Array", "System.Collections.IEnumerable", "System.Collections.ICollection", "System.Collections.IList" })
             a.True(types.IsAssignable(new ArrayRef(types.Int32, 2), types.Corlib(name)), $"数组沿真实 Array 元数据实现 {name}");
+        foreach (var clr in new[] { typeof(IEnumerable<>), typeof(IList<>), typeof(IComparer<>), typeof(Action<>), typeof(List<>) })
+        {
+            var definition = facts.Model.Types.Single(t => t.Assembly == "mscorlib.dll" && t.Namespace == clr.Namespace && t.Name == clr.Name);
+            foreach (var (from, clrFrom) in elements)
+            foreach (var (to, clrTo) in elements)
+                a.Equal(clr.MakeGenericType(clrTo).IsAssignableFrom(clr.MakeGenericType(clrFrom)),
+                    types.IsAssignable(new DefinitionRef(definition, [from]), new DefinitionRef(definition, [to])),
+                    "泛型接口/委托变体与类不变性服从 CLR，值类型不发生装箱协变");
+        }
+        var list = types.CorlibDefinition("System.Collections.Generic.List")!;
+        var enumerable = types.CorlibDefinition("System.Collections.Generic.IEnumerable")!;
+        foreach (var (from, clrFrom) in elements)
+        foreach (var (to, clrTo) in elements)
+            a.Equal(typeof(IEnumerable<>).MakeGenericType(clrTo).IsAssignableFrom(typeof(List<>).MakeGenericType(clrFrom)),
+                types.IsAssignable(new DefinitionRef(list, [from]), new DefinitionRef(enumerable, [to])), "类实现接口后允许合法协变");
+        a.True(types.IsAssignable(new DefinitionRef(enumerable, [new DefinitionRef(enumerable, [types.String])]),
+            new DefinitionRef(enumerable, [new DefinitionRef(enumerable, [types.Object])])), "嵌套引用协变逐层核对");
         return a.Finish("array-assignability");
     }
 }
