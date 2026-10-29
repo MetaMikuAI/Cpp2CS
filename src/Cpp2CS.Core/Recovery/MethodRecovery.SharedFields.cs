@@ -45,6 +45,37 @@ public sealed partial class MethodRecovery
         private static Intrinsic FieldAddress(Expr receiver, Symbol field) => new("managed_field_address", [receiver, field], 64);
         private static TypeRef FieldType(FieldRef field) => field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
 
+        [Analysis("字段地址", 89, After = ["帧槽", "检查吸收"])]
+        private void PrepareFieldAddresses()
+        {
+            InferTypes();
+            var dominators = Ssa.Dominators.Compute(function);
+            Expr Alias(Expr value, int depth = 32) => depth > 0 && value is Use use && values.GetValueOrDefault(use.Variable) is Use source
+                ? Alias(source, depth - 1) : value;
+            bool Dereferenced(Stmt statement, Expr receiver) => statement is Call { Op.Kind: OpKind.NullCheck, Arguments: [var checkedValue] } && Alias(checkedValue) == receiver
+                || ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Load>().Any(load =>
+                    Split(load.Address) is var (root, offset, terms) && root is not null && Alias(root) == receiver && terms.Count == 0
+                    && types.InstanceField(TypeOfValue(receiver)!, (int)offset, load.Width / 8) is not null);
+            var changed = false;
+            foreach (var block in blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                {
+                    if (block.Statements[i] is not Define definition || definition.Value is not Binary { Op: BinOp.Add, Width: 64 }) continue;
+                    var (root, offset, terms) = Split(definition.Value);
+                    if (root is null || terms.Count != 0 || offset < RuntimeLayout.ObjectHeaderSize || offset > int.MaxValue) continue;
+                    var receiver = Alias(root);
+                    if (TypeOfValue(receiver) is not DefinitionRef type || !ManagedTypes.IsReferenceType(type)
+                        || facts.Layouts.Of(type)?.Fields.FirstOrDefault(f => f.Offset == offset) is not { } field) continue;
+                    if (!blocks.Where(b => dominators.Dominates(b.Index, block.Index)).Any(b =>
+                        b.Statements.Take(b == block ? i : b.Statements.Count).Any(s => Dereferenced(s, receiver)))) continue;
+                    var replacement = definition with { Value = FieldAddress(receiver, new Symbol(SymbolKind.Field, new FieldRef(field.Field, type))) };
+                    block.Statements[i] = replacement;
+                    PreserveStatementAnalysis(definition, replacement);
+                    changed = true;
+                }
+            if (changed) definitions = IndexDefinitions();
+        }
+
         private void NormalizeSharedFields()
         {
             foreach (var block in function.Blocks)

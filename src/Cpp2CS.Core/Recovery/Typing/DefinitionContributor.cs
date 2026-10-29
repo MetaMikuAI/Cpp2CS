@@ -13,13 +13,14 @@ internal sealed class DefinitionContributor(TypingInputs input) : ITypeContribut
     public void Contribute(TypingContext context, TypeConstraints constraints)
     {
         var expressions = input.Expressions(context);
+        var definitions = context.Statements.OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
         var loads = context.Statements.OfType<Define>().Where(d => d.Value is Load { Width: 64, Address: Use }).ToDictionary(d => d.Target, d => ((Load)d.Value).Address);
         foreach (var define in context.Statements.OfType<Define>())
         {
             // 标量 FMOV 写入浮点寄存器；结构体片投影可能已经返回对应的 float/double 叶子。
             var projected = define is { Target.Storage.Bank: Bank.Vec, Value: Ir.Convert { Kind: ConvKind.Bitcast, Width: 32 or 64 } cast }
                 ? expressions.TypeOf(cast, cast.Width == 32 ? context.Types.Single : context.Types.Double) : null;
-            if (!context.IsRuntime(define.Target) && (SealedCast(loads, define.Value) ?? projected ?? TypeOfDefinition(expressions, define.Value)) is { } type)
+            if (!context.IsRuntime(define.Target) && (SealedCast(loads, define.Value) ?? projected ?? TypeOfDefinition(expressions, define.Value, definitions)) is { } type)
                 constraints.Defines(define.Target, type, new(Name, define.Address, $"{define.Value} : {type}"));
         }
     }
@@ -35,13 +36,21 @@ internal sealed class DefinitionContributor(TypingInputs input) : ITypeContribut
     }
 
     /// <summary>常量没有自己的类型：选择的一臂是常量时，取另一臂的类型（例如 c ? 0x3f800000 : f 是 float，不是 int）。</summary>
-    private static TypeRef? TypeOfDefinition(IExpressionTyping expressions, Expr e) => e switch
+    private static TypeRef? TypeOfDefinition(IExpressionTyping expressions, Expr e, Dictionary<Variable, Expr> definitions) => e switch
     {
-        _ when ConstantLeaves(e) => null,
-        Select s when ConstantLeaves(s.True) => TypeOfDefinition(expressions, s.False),
-        Select s when ConstantLeaves(s.False) => TypeOfDefinition(expressions, s.True),
+        _ when ConstantLeaves(e, definitions, []) => null,
+        Select s when ConstantLeaves(s.True, definitions, []) => TypeOfDefinition(expressions, s.False, definitions),
+        Select s when ConstantLeaves(s.False, definitions, []) => TypeOfDefinition(expressions, s.True, definitions),
         _ => expressions.TypeOf(e),
     };
 
-    private static bool ConstantLeaves(Expr e) => e is Const || e is Select s && ConstantLeaves(s.True) && ConstantLeaves(s.False);
+    private static bool ConstantLeaves(Expr e, Dictionary<Variable, Expr> definitions, HashSet<Variable> active)
+    {
+        if (e is Const) return true;
+        if (e is Select s) return ConstantLeaves(s.True, definitions, active) && ConstantLeaves(s.False, definitions, active);
+        if (e is not Use use || !active.Add(use.Variable) || !definitions.TryGetValue(use.Variable, out var value)) return false;
+        var result = value.Width == use.Width && ConstantLeaves(value, definitions, active);
+        active.Remove(use.Variable);
+        return result;
+    }
 }

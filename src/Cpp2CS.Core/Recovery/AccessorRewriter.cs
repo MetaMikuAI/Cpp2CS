@@ -10,6 +10,10 @@ public static class AccessorRewriter
             var accessor = value is FieldValue or StaticFieldValue ? select(value, write) : null;
             return value switch
             {
+                // 读取值类型的子字段只需要值；已证明的整值 getter 可替代中间字段的取址。
+                FieldValue { Receiver: AddressValue { Target: FieldValue component } } f when !write
+                    && component.Type is Cpp2CS.Model.DefinitionRef { Definition.IsValueType: true }
+                    && select(component, false) is not null => f with { Receiver = Value(component), Accessor = accessor },
                 FieldValue f => f with { Receiver = Value(f.Receiver), Accessor = accessor },
                 StaticFieldValue f => f with { Accessor = accessor },
                 // F3 的结构体形态。取地址处（ldflda/ldsflda）不能认回：getter 只给出值，不给出存储位置；只改写其中的子值

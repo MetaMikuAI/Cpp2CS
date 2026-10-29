@@ -67,6 +67,15 @@ public sealed partial class MethodRecovery
             if (array is null || TypeOfAddressBase(array) is not ArrayRef { IsVector: true } type || rest.Count == 0 && offset < RuntimeLayout.ArrayData) return null;
             var size = types.Size(type.Element);
             if (size <= 0) return null;
+            Expr ExpandIndex(Expr expression, int depth = 0)
+            {
+                if (depth >= 16) return expression;
+                return Fold.Simplify(ExprMap.Map(expression, e => e is Use use && values.TryGetValue(use.Variable, out var value)
+                    && value.Width >= use.Width && value is Ir.Binary or Convert
+                    && !ExprMap.Walk(value).Any(p => p is Load or Read or Intrinsic or Unknown)
+                    ? Fold.Convert(ConvKind.Truncate, ExpandIndex(value, depth + 1), use.Width) : null));
+            }
+            rest = rest.Select(e => ExpandIndex(e)).ToList();
             Expr? index = rest switch
             {
                 [] => new Const(0, 64),
@@ -165,9 +174,12 @@ public sealed partial class MethodRecovery
             if (offset == RuntimeLayout.ObjectKlass) return Fail(0, "访存 读取对象的类指针");
             if (types.InstanceField(receiverType, (int)offset, width / 8) is not { } instance)
             {
-                // 截断 long/ulong 时 clang 只读取低 32 位；字段身份仍按完整元数据布局取得。
-                if (width == 32 && types.InstanceField(receiverType, (int)offset, 8) is { } wide && types.Kind(wide.Type) == TypeKind.Int)
-                    return Recover(baseTerm, null).Map<ManagedValue>(value => new ConversionValue(ConvKind.Truncate, new FieldValue(value, wide.Field, wide.Type, 64), types.UInt32, 32));
+                // 小端整数或枚举字段的低位读取，字段身份和完整宽度仍来自元数据。
+                if (width is 8 or 16 or 32)
+                    foreach (var bytes in new[] { 2, 4, 8 }.Where(bytes => bytes * 8 > width))
+                        if (types.InstanceField(receiverType, (int)offset, bytes) is { } wide && types.Kind(wide.Type) == TypeKind.Int)
+                            return Recover(baseTerm, null).Map<ManagedValue>(value => new ConversionValue(ConvKind.Truncate,
+                                new FieldValue(value, wide.Field, wide.Type, bytes * 8), types.Integer(width, false), width));
                 return Fail(0, $"字段 {receiverType}+0x{offset:x}:{width} 未匹配");
             }
             return Recover(baseTerm, null).Map<ManagedValue>(value => new FieldValue(value, instance.Field, instance.Type, width));

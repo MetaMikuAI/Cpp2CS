@@ -19,8 +19,17 @@ public sealed partial class MethodRecovery
         [ParameterBinding(10)]
         private bool PrepareStructArgument(AbiValue parameter, int index)
         {
-            if (!RegisterStruct(parameter)) return false;
-            foreach (var piece in parameter.Pieces)
+            if (types.Kind(parameter.Type) != TypeKind.Struct) return false;
+            var pieces = parameter.Pieces;
+            if (!RegisterStruct(parameter))
+            {
+                if (parameter.Passing != Passing.Stack || owner.abi.Hfa(parameter.Type) is not { } hfa
+                    || owner.abi.Classify(method, out _) is not { } signature
+                    || owner.abi.StackArguments(signature).Parameters.FirstOrDefault(p => p.Index == index) is not { Indirect: false } stack) return false;
+                pieces = Enumerable.Range(0, hfa.Count)
+                    .Select(i => new AbiPiece(Storage.Slot(stack.Offset + i * hfa.Width / 8), hfa.Width, i * hfa.Width / 8)).ToArray();
+            }
+            foreach (var piece in pieces)
             {
                 structArguments[piece.Register] = (new ArgumentValue(index, parameter.Type, 0), piece);
                 arguments[piece.Register] = new(index, parameter.Type, piece.Width);

@@ -45,6 +45,16 @@ public static class Fold
         }
         if (right is Const r)
         {
+            // 高位中的窄整数加法，再算术右移，可还原为符号扩展后的缩放索引。
+            if (op == BinOp.AShr && width is 32 or 64
+                && left is Binary { Op: BinOp.Add, Left: Binary { Op: BinOp.Shl, Left: var source, Right: Const up }, Right: Const delta }
+                && up.Value < (ulong)width && r.Value <= up.Value && width - (int)up.Value is 8 or 16 or 32
+                && (delta.Value & Mask((int)up.Value)) == 0)
+            {
+                var bits = width - (int)up.Value;
+                var index = Binary(BinOp.Add, Convert(ConvKind.Truncate, source, bits), C(delta.Value >> (int)up.Value, bits), bits);
+                return Binary(BinOp.Shl, Convert(ConvKind.SignExtend, index, width), C(up.Value - r.Value, width), width);
+            }
             switch (op)
             {
                 case BinOp.Add or BinOp.Sub or BinOp.Or or BinOp.Xor or BinOp.Shl or BinOp.LShr or BinOp.AShr or BinOp.Ror when r.Value == 0:

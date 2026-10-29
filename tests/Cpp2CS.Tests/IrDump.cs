@@ -29,7 +29,11 @@ internal static class IrDump
             {
                 foreach (var registered in facts.EntriesAt(entry).Where(e => e.Method is not null))
                     Console.WriteLine($"  {registered.Method} virtual={registered.Method!.Method.IsVirtual} address=0x{registered.Method.Method.Address:x}");
-                var reads = NativeInputs.Reads(lifter.Lift(entry, returned, simplify: false));
+                var raw = lifter.Lift(entry, returned, simplify: false);
+                var reads = NativeInputs.Reads(raw);
+                foreach (var error in raw.Errors.Concat(raw.Function.Problems)) Console.WriteLine($"  入口证据缺失: {error}");
+                foreach (var statement in raw.Function.Blocks.SelectMany(b => b.Statements).Where(s => s is Opaque or IndirectJump { Targets.Length: 0 }))
+                    Console.WriteLine($"  入口证据缺失 0x{statement.Address:x}: {statement}");
                 Console.WriteLine($"  入口读取: {(reads is null ? "未证明" : string.Join(",", reads))}");
                 Console.WriteLine($"  x0 未使用: {rewriter.UnusedInput(entry, Storage.Gpr(0))}");
             }

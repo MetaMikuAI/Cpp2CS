@@ -79,6 +79,18 @@ internal static class FieldAccessorCheck
         var edgeRead = AccessorRewriter.Rewrite(Body(getter, branch), (v, w) => v == read && !w ? recognized : null);
         a.True(edgeRead.Blocks[0].Statements is [ManagedBranch { Condition: ComparisonValue { Left: FieldValue { Accessor: not null } },
             Taken.Copies: [{ Value: FieldValue { Accessor: not null } }], Fallthrough.Copies.Count: 0 }], "条件与边复制分别在原位置读取，不提前执行另一条边");
+        var valueOwner = (DefinitionRef)types.Int32;
+        var leaf = new FieldValue(new AddressValue(read), new FieldRef(valueOwner.Definition.Fields.Single(f => !f.IsStatic), valueOwner), types.Int32, 32);
+        FieldAccessor? Select(ManagedValue value, bool write) => value == read && !write ? recognized : null;
+        var nestedRead = AccessorRewriter.Rewrite(Body(getter, new ManagedReturn(0, leaf)), Select);
+        a.True(nestedRead.Blocks[0].Statements is [ManagedReturn { Value: FieldValue { Receiver: FieldValue { Accessor: not null } } }],
+            "只读子字段使用整值 getter，不保留私有字段地址");
+        var nestedWrite = AccessorRewriter.Rewrite(Body(getter, new ManagedStore(0, leaf, parameter)), Select);
+        a.True(nestedWrite.Blocks[0].Statements is [ManagedStore { Target: FieldValue { Receiver: AddressValue { Target: FieldValue { Accessor: null } } } }],
+            "写子字段仍使用原存储地址");
+        var escapingAddress = AccessorRewriter.Rewrite(Body(getter, new ManagedReturn(0, new AddressValue(read))), Select);
+        a.True(escapingAddress.Blocks[0].Statements is [ManagedReturn { Value: AddressValue { Target: FieldValue { Accessor: null } } }],
+            "传出地址不替换为 getter 返回的副本");
         DependencyShape(a);
         return a.Finish("F9 严格认回边界");
     }

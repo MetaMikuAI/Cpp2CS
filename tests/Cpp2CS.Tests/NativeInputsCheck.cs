@@ -38,6 +38,16 @@ internal static class NativeInputsCheck
         function.Problems.Clear();
         function.UnresolvedIndirectJumps = 1;
         a.True(NativeInputs.Reads(lifted) is null, "未解析跳转不能证明未用");
+        var receiver = new Use(new Variable(Storage.Gpr(1), 0), 64);
+        var target = new Load(new Binary(BinOp.Add, new Load(receiver, 64), Expr.C((ulong)RuntimeLayout.VtableMethodPointer(2), 64), 64), 64);
+        var tail = new Call(0x1000, CallKind.TailIndirect, target) { Arguments = [receiver] };
+        block.Statements = [tail];
+        a.True(NativeInputs.Reads(lifted) is { } virtualReads && virtualReads.Contains(receiver.Variable.Storage) && !virtualReads.Contains(register),
+            "同一接收者的 vtable 尾调用保留输入读取证明");
+        block.Statements = [tail with { Arguments = [new Use(input, 64)] }];
+        a.True(NativeInputs.Reads(lifted) is null, "vtable 对象与接收者不一致仍拒绝证明");
+        block.Statements = [tail with { Target = new Load(receiver, 64) }];
+        a.True(NativeInputs.Reads(lifted) is null, "任意指针尾跳转不能视为 vtable 调用");
         return a.Finish("native-inputs");
     }
 

@@ -11,9 +11,11 @@ internal static class SourceIteratorDispose
     internal static ManagedBody Rewrite(ManagedBody body)
     {
         if (body.Regions.Count != 0 || body.Blocks.Count is 0 or > 24) return body;
+        var original = body;
+        body = ExpandSwitches(body);
         var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
         var values = statements.SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).ToArray();
-        if (!values.OfType<BinaryValue>().Any(v => v.Op == BinOp.Shl)
+        if (ReferenceEquals(original, body) && !values.OfType<BinaryValue>().Any(v => v.Op == BinOp.Shl)
             || statements.SelectMany(ManagedValues.Edges).Any(e => e.Copies.Count != 0)
             || statements.OfType<ManagedAssignment>().GroupBy(a => a.Target.Variable).Any(g => g.Count() != 1)) return body;
         var fields = values.OfType<FieldValue>().Distinct().ToArray();
@@ -80,5 +82,34 @@ internal static class SourceIteratorDispose
         for (var i = 0; i < calls.Length; i++) rewritten.Add(new(callBlocks[i], [calls[i] with { Tail = false }, new ManagedReturn(callBlocks[i], null)]));
         rewritten.Add(new(end, [new ManagedReturn(end, null)]));
         return body with { Blocks = rewritten };
+    }
+
+    private static ManagedBody ExpandSwitches(ManagedBody body)
+    {
+        var blocks = body.Blocks.ToDictionary(b => b.Address);
+        var next = blocks.Keys.Max() + 1;
+        var changed = false;
+        foreach (var block in body.Blocks)
+        {
+            if (block.Statements is not [ManagedSwitch selection] || selection.Cases.Count is 0 or > 16
+                || selection.Cases.Any(e => e.Copies.Count != 0)
+                || ManagedValues.Walk(selection.Index).Any(v => v is not (LocalValue or ConstantValue or BinaryValue or ConversionValue))) continue;
+            var predecessors = body.Blocks.Where(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == block.Address)).ToArray();
+            if (predecessors is not [var predecessor] || predecessor.Statements.LastOrDefault() is not ManagedBranch
+                { Condition: ComparisonValue { Condition: Cond.Ugt, Right: ConstantValue limit } condition } guard
+                || !Equals(condition.Left, selection.Index) || limit.Bits != (ulong)selection.Cases.Count - 1
+                || guard.Fallthrough.Target != block.Address || guard.Taken.Target == block.Address
+                || guard.Taken.Copies.Count != 0 || guard.Fallthrough.Copies.Count != 0) continue;
+            // 现有范围守卫保证 switch 下标有效；最后一条等值检查仍回到同一范围外出口。
+            var addresses = selection.Cases.Select((_, i) => i == 0 ? block.Address : next++).ToArray();
+            for (var i = 0; i < addresses.Length; i++)
+            {
+                var test = new ComparisonValue(Cond.Eq, selection.Index, new ConstantValue((ulong)i, selection.Index.Type, selection.Index.Width), condition.Type);
+                blocks[addresses[i]] = new(addresses[i], [new ManagedBranch(selection.Address, test, selection.Cases[i],
+                    i + 1 < addresses.Length ? new(addresses[i + 1], []) : guard.Taken)]);
+            }
+            changed = true;
+        }
+        return changed ? body with { Blocks = blocks.Values.ToArray() } : body;
     }
 }

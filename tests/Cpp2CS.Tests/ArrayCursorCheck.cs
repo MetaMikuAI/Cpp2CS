@@ -62,6 +62,11 @@ internal static class ArrayCursorCheck
         a.Equal(1, offset.Length, "字节偏移与元素下标成对递增");
         a.True(offset.Single().IsOffset, "纯字节偏移可还原数值用途");
         a.True(offset.Single().Address is Binary { Left: Binary { Left: Const { Value: 0 }, Right: Const { Value: 32 } } }, "保留数组头偏移");
+        var elementOffset = OffsetLoop();
+        var initialOffset = (Define)elementOffset.Blocks[0].Statements[0];
+        elementOffset.Blocks[0].Statements[0] = initialOffset with { Value = Expr.C(0, 64) };
+        a.True(Read(elementOffset) is [var zeroBased] && zeroBased.Address is Binary { Left: Binary { Left: Const { Value: 0 }, Right: Const { Value: 0 } } },
+            "元素相对偏移可从零开始，数组头仍由实际访存地址提供");
         a.Equal(1, Read(OffsetLoop(scalarUse: true)).Length, "偏移作为普通数值返回时保留归纳关系");
         a.Equal(1, Read(OffsetLoop(copyEscapes: true)).Length, "初值副本的数值用途由副本表达式保留");
         foreach (var index in new[] { 0UL, 1UL, 7UL, ulong.MaxValue })

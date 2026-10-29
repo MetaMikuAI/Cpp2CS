@@ -87,6 +87,17 @@ internal static class TypingContributorCheck
         block.Statements = [new Define(0x1000, phi, new Binary(BinOp.FAdd, selected, Expr.C(0, 32), 32))];
         var floating = new TypeConstraints(); new FloatContributor(input).Contribute(Context(), floating);
         a.Equal<TypeResult?>(new ManagedResult(types.Single), TypeSolver.Solve(floating, types).GetValueOrDefault(methodPointer), "F2 浮点使用穿过 Select 约束两侧，独立于 T1 适用范围");
+        var firstChoice = new Select(Expr.C(1, 1), Expr.C(0x3f000000, 32), Expr.C(0x3f800000, 32), 32);
+        var nextChoice = new Select(Expr.C(1, 1), Expr.C(0x3e800000, 32), new Use(methodPointer, 32), 32);
+        block.Statements = [new Define(0x1000, methodPointer, firstChoice), new Define(0x1004, beyond, nextChoice),
+            new Define(0x1008, phi, new Binary(BinOp.FAdd, new Use(beyond, 32), Expr.C(0, 32), 32))];
+        restricted = new(); new UseContributor(input).Contribute(Context(), restricted);
+        var choices = TypeSolver.Solve(restricted, types);
+        a.True(new[] { methodPointer, beyond }.All(v => choices.GetValueOrDefault(v) == new ManagedResult(types.Single)),
+            "浮点用途穿过连续的常量位型选择");
+        block.Statements[0] = new Define(0x1000, methodPointer, new Load(Expr.C(0x100, 64), 32));
+        restricted = new(); new UseContributor(input).Contribute(Context(), restricted);
+        a.True(!TypeSolver.Solve(restricted, types).ContainsKey(methodPointer), "连续浮点选择仍不猜未知加载类型");
 
         var caught = new LocalValue(new(Storage.Temp(-1), 1), exception, 64);
         block.Statements = [new Define(0x1000, methodPointer, new Load(new Use(metadataResult, 64), 64)), new Define(0x1004, beyond, new Use(methodPointer, 64)), new Phi(0x1008, phi, [methodPointer, beyond])];

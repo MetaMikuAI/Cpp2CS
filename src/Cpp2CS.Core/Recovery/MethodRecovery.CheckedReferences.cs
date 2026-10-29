@@ -8,6 +8,21 @@ public sealed partial class MethodRecovery
 {
     private sealed partial class Context
     {
+        private bool CheckedReference(Use value, TypeRef target, ulong address)
+        {
+            if (CheckedNullableReference(value, target, address)) return true;
+            var sites = blocks.Where(b => b.Statements.Any(s => s.Address == address)).ToArray();
+            if (sites is not [var site]) return false;
+            var dominators = Dominators.Compute(function);
+            foreach (var block in blocks.Where(b => dominators.Dominates(b.Index, site.Index)))
+            foreach (var check in block.Statements.Take(block == site ? block.Statements.FindIndex(s => s.Address == address) : block.Statements.Count).OfType<Call>())
+                if (check is { Op.Kind: OpKind.ThrowIf, Arguments: [Compare { Cond: Cond.Ne } comparison] }
+                    && SealedOperands(comparison) is var (klass, checkedType) && checkedType.Equals(target)
+                    && objectClasses.TryGetValue(klass, out var checkedValue) && checkedValue == value)
+                    return true;
+            return false;
+        }
+
         // null 绕过检查、非 null 经类型检查后汇合；保留原抛出点，只为汇合后的同一 SSA 引用补类型。
         private bool CheckedNullableReference(Use value, TypeRef target, ulong address)
         {

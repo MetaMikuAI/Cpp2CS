@@ -18,6 +18,40 @@ public static class FrameSlotPromotion
 {
     private sealed record Access(long Offset, int Width, bool IsStore);
 
+    /// <summary>调用前保存、调用后原位读回的独占帧槽；调用必须已证明不会访问调用者的栈。</summary>
+    internal static bool ForwardCallSpills(MachineFunction function, Func<Call, bool> safeCall)
+    {
+        var changed = false;
+        foreach (var block in function.Blocks)
+        foreach (var store in block.Statements.OfType<Store>().ToArray())
+        {
+            if (store is not { Target: FrameAddress { Offset: <= -16 } frame, Value: Use or Const } || store.Value.Width != 128) continue;
+            var index = block.Statements.IndexOf(store);
+            var following = block.Statements.Skip(index + 1).TakeWhile(s => s is Nop || s is Call c && safeCall(c)).ToArray();
+            if (following.OfType<Call>().Count() != 1 || block.Statements.ElementAtOrDefault(index + following.Length + 1)
+                is not Define { Value: Load { Width: 128, Address: FrameAddress read } } restore || read != frame) continue;
+            bool Exposes(Expr e) => e switch
+            {
+                // 只接受没有别名或部分访存的独占区域；其他帧地址只允许直接读写不相交的区间。
+                Load { Address: FrameAddress at } load => at.Offset < frame.Offset + 16 && frame.Offset < at.Offset + load.Width / 8,
+                FrameAddress at => at.Offset <= frame.Offset + 15,
+                _ => ExprMap.Children(e).Any(Exposes),
+            };
+            bool OtherAccess(Stmt statement)
+            {
+                if (ReferenceEquals(statement, store) || ReferenceEquals(statement, restore)) return false;
+                if (statement is Store { Target: FrameAddress at } write)
+                    return at.Offset < frame.Offset + 16 && frame.Offset < at.Offset + write.Value.Width / 8 || Exposes(write.Value);
+                return ExprMap.Operands(statement).Any(Exposes);
+            }
+            if (function.Blocks.SelectMany(b => b.Statements).Any(OtherAccess)) continue;
+            block.Statements[block.Statements.IndexOf(restore)] = restore with { Value = store.Value };
+            block.Statements.Remove(store);
+            changed = true;
+        }
+        return changed;
+    }
+
     /// <summary>改写可提升的槽，返回提升的个数（为 0 时函数不变）。</summary>
     public static int Run(MachineFunction function, Func<Call, int, int?>? argumentSize = null,
         IReadOnlyList<(long Offset, int Size)>? preserved = null)

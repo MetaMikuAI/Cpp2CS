@@ -1,4 +1,7 @@
 using Cpp2CS.Input;
+using Cpp2CS.Facts;
+using Cpp2CS.Flow;
+using Cpp2CS.Functions;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
 using Cpp2CS.Recovery;
@@ -85,6 +88,31 @@ internal static class TypingCheck
         a.Equal<TypeResult?>(new ManagedResult(types.Int32), s.GetValueOrDefault(V(14)), "只有整数使用时取与顺序无关的代表");
         a.Equal<TypeResult?>(new ManagedResult(disposable), s.GetValueOrDefault(V(17)), "公共超类 object 不满足使用时，取各定义都能赋给的接口");
         a.True(s.GetValueOrDefault(V(18)) is ConflictResult { Lower: var lower } && stream.Equals(lower), "冲突结果带着下界，供下一轮推导");
+        var block = new Block(0x1000) { Statements = Enumerable.Range(0, 24)
+            .Select(i => (Stmt)new Define((ulong)(0x1000 + i * 4), new(Storage.Temp(i), 1), Expr.C(0, 32))).ToList() };
+        var function = new MachineFunction { Entry = block.Start, Blocks = [block],
+            Range = new(0x1000, 0x1060, CodeRegion.Managed, BoundaryEvidence.EhFrame) };
+        TypingContext Context() => new(function, types, new Dictionary<Storage, TypeRef>(), _ => null);
+        var chain = new TypeEngine([new DelayedTypes(false)]).Run(Context());
+        a.True(chain.Converged && chain.Rounds == 25 && chain.Solution.Count == 24, "长表达式依赖链可超过固定 16 轮");
+        a.True(!new TypeEngine([new DelayedTypes(false)], maxRounds: 16).Run(Context()).Converged, "显式预算仍保留未收敛诊断");
+        var cycle = new TypeEngine([new DelayedTypes(true)]).Run(Context());
+        a.True(!cycle.Converged && cycle.Rounds == 3, "真正的循环不会因增加预算而伪装收敛");
         return a.Finish("typing");
+    }
+
+    private sealed class DelayedTypes(bool cycle) : ITypeContributor
+    {
+        public string Name => "延迟表达式";
+        public void Contribute(TypingContext context, TypeConstraints constraints)
+        {
+            foreach (var definition in context.Statements.OfType<Define>())
+            {
+                var index = definition.Target.Storage.Index;
+                var type = cycle ? context.TypeOf(definition.Target) == context.Types.Int32 ? context.Types.Int64 : context.Types.Int32
+                    : index == 0 ? context.Types.Int32 : context.TypeOf(new(Storage.Temp(index - 1), 1));
+                if (type is not null) constraints.Defines(definition.Target, type, new(Name, definition.Address, "依赖上一轮"));
+            }
+        }
     }
 }

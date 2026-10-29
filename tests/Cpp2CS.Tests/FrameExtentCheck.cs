@@ -60,7 +60,30 @@ internal static class FrameExtentCheck
         a.True(!FrameUses.Touches(new Return(0x1000) { Value = new Load(new FrameAddress(-64), 64) }, -32, 8, (_, _) => null), "精确读取不视为整段逃逸");
         a.True(FrameUses.Touches(new Store(0x1000, Expr.C(0x2000, 64), new FrameAddress(-64)), -32, 8, (_, _) => null), "存入外部内存的地址保护后续分片");
         ManagedBounds(a);
+        CallSpills(a);
         return a.Finish("frame-extents");
+    }
+
+    private static void CallSpills(Assertions a)
+    {
+        MachineFunction Sample(bool escape = false, bool overlap = false, long offset = -32)
+        {
+            var frame = new FrameAddress(offset);
+            var block = new Block(0x1000) { Statements = [
+                new Store(0x1000, frame, new Use(new(Storage.Vec(0), 1), 128)),
+                new Call(0x1004, CallKind.Direct, Expr.C(0x2000, 64)),
+                new Define(0x1008, new(Storage.Vec(0), 2), new Load(frame, 128))] };
+            if (escape) block.Statements.Add(new Define(0x100c, new(Storage.Gpr(1), 1), frame));
+            if (overlap) block.Statements.Add(new Store(0x100c, new FrameAddress(-24), Expr.C(1, 32)));
+            return new() { Entry = block.Start, Range = new(0x1000, 0x1010, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [block] };
+        }
+        var valid = Sample();
+        a.True(FrameSlotPromotion.ForwardCallSpills(valid, _ => true), "已知调用前后的向量保存可回代");
+        a.True(valid.Blocks[0].Statements is [Call, Define { Value: Use { Width: 128, Variable.Version: 1 } }], "保留全部 128 位的原 SSA 快照");
+        a.True(!FrameSlotPromotion.ForwardCallSpills(Sample(), _ => false), "未知调用不假设无法访问栈");
+        a.True(!FrameSlotPromotion.ForwardCallSpills(Sample(escape: true), _ => true), "地址逃逸时保留实际存储");
+        a.True(!FrameSlotPromotion.ForwardCallSpills(Sample(overlap: true), _ => true), "部分重叠访问不替换");
+        a.True(!FrameSlotPromotion.ForwardCallSpills(Sample(offset: -8), _ => true), "跨入调用者帧的保存不替换");
     }
 
     private static void ManagedBounds(Assertions a)

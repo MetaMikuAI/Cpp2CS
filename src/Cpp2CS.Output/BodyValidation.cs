@@ -165,7 +165,8 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                 break;
             case ComparisonValue c:
                 if (c.Condition is not (Cond.Eq or Cond.Ne or Cond.Slt or Cond.Sle or Cond.Sgt or Cond.Sge or Cond.Ult or Cond.Ule or Cond.Ugt or Cond.Uge
-                    or Cond.FEq or Cond.FUne or Cond.FLt or Cond.FLe or Cond.FGt or Cond.FGe or Cond.FUlt or Cond.FUle or Cond.FUgt or Cond.FUge))
+                    or Cond.FEq or Cond.FNe or Cond.FUne or Cond.FLt or Cond.FLe or Cond.FGt or Cond.FGe or Cond.FUlt or Cond.FUle or Cond.FUgt or Cond.FUge
+                    or Cond.FOrdered or Cond.FUnordered))
                     return new(EmissionProblemKind.Unsupported, $"比较 {c.Condition} 尚未支持");
                 break;
         }

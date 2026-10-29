@@ -79,6 +79,28 @@ internal static class SourceStructCopiesCheck
         var direct = Body(Enumerable.Range(0, 3).Select(i => new ManagedStore(0, Field(destination, i), Field(source, i))));
         a.True(SourceStructCopies.Rewrite(direct).Blocks.Single().Statements is [ManagedAssignment { Value: var directSource }] && directSource == source,
             "完整逐字段写入还原整体赋值");
+        var holder = new TypeDef { Index = -2, Assembly = "Sample", Namespace = "Sample", Name = "Holder", Token = 0,
+            Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false };
+        var holderType = new DefinitionRef(holder, []);
+        var receiver = new LocalValue(new(Storage.Temp(-20), 1), holderType, 64);
+        var record = new FieldValue(receiver, new(new FieldDef { Index = -2, Owner = holder, Name = "Record", Type = type,
+            Attributes = FieldAttributes.Public, Offset = 16 }, holderType), type, 0);
+        var separate = new FieldValue(receiver, new(new FieldDef { Index = -3, Owner = holder, Name = "Other", Type = integer,
+            Attributes = FieldAttributes.Public, Offset = 28 }, holderType), integer, 32);
+        foreach (var mode in new[] { "valid", "read", "call", "duplicate", "partial" })
+        {
+            var writes = Enumerable.Range(0, 3).Select(i => (ManagedStatement)new ManagedStore(0,
+                new FieldValue(new AddressValue(record), new(definition.Fields[i], type), integer, 32), Field(source, i))).ToList();
+            ManagedStatement between = mode == "call" ? new ManagedCall(0, new(null!, null, [], false), null, false)
+                : new ManagedStore(0, separate, mode == "read" ? Field(source, 0) : new ConstantValue(9, integer, 32));
+            writes.Insert(1, between);
+            if (mode == "duplicate") writes[2] = writes[0];
+            if (mode == "partial") writes.RemoveAt(writes.Count - 1);
+            var merged = SourceStructCopies.Rewrite(Body(writes));
+            a.Equal(mode == "valid" ? 2 : writes.Count, merged.Blocks[0].Statements.Count, "交错字段复制 " + mode);
+            if (mode == "valid") a.True(merged.Blocks[0].Statements is [ManagedStore { Target: var target, Value: var value }, var kept]
+                && target == record && value == source && kept == between, "完整赋值保留独立字段写入");
+        }
         var returnedLeaves = Enumerable.Range(0, 3).Select(i => ((IReadOnlyList<FieldRef>)new[] { new FieldRef(definition.Fields[i], type) }, (ManagedValue)snapshots[i])).ToArray();
         var returned = Body(statements.Take(3).Append(new ManagedReturn(0, new ComposedValue(type, returnedLeaves))));
         a.True(SourceStructCopies.Rewrite(returned).Blocks.Single().Statements is [ManagedReturn { Value: var returnedSource }] && returnedSource == source,

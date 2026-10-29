@@ -58,6 +58,7 @@ internal static class SourceIteratorDisposeCheck
                     {
                         case ManagedAssignment assignment: locals[assignment.Target.Variable] = Eval(assignment.Value); break;
                         case ManagedBranch branch: current = Eval(branch.Condition) != 0 ? branch.Taken.Target : branch.Fallthrough.Target; break;
+                        case ManagedSwitch selection: current = selection.Cases[(int)Eval(selection.Index)].Target; break;
                         case ManagedCall call: count++; if (call.Tail) return count; break;
                         case ManagedReturn: return count;
                         default: throw new NotSupportedException(statement.ToString());
@@ -81,6 +82,14 @@ internal static class SourceIteratorDisposeCheck
         a.Equal(copied, SourceIteratorDispose.Rewrite(copied), "带边赋值时保持原图");
         var mutated = original with { Blocks = [new(0, [assign, new ManagedStore(0, field, C(0)), guard]), .. original.Blocks.Skip(1)] };
         a.Equal(mutated, SourceIteratorDispose.Rewrite(mutated), "分派中的状态写入不能丢弃");
+        var table = original with { Blocks = [original.Blocks[0], new(1, [new ManagedSwitch(1, shifted,
+            [new(2, []), new(3, []), new(2, []), new(3, []), new(3, []), new(3, []), new(2, [])])]), .. original.Blocks.Skip(2)] };
+        var tableResult = SourceIteratorDispose.Rewrite(table);
+        a.True(!tableResult.Blocks.SelectMany(b => b.Statements).OfType<ManagedSwitch>().Any(), "已有范围守卫的跳转表归并为状态分派");
+        foreach (var state in Enumerable.Range(-40, 100).Select(i => unchecked((uint)i)).Append(uint.MaxValue))
+            a.Equal(Run(table, state), Run(tableResult, state), "跳转表与改写分派的清理次数一致");
+        var unbounded = table with { Blocks = [new(0, [assign, new ManagedJump(0, new(1, []))]), .. table.Blocks.Skip(1)] };
+        a.Equal(unbounded, SourceIteratorDispose.Rewrite(unbounded), "没有范围守卫的 switch 不改写");
         return a.Finish("source-iterator-dispose");
     }
 }

@@ -69,6 +69,19 @@ internal static class InlineConstructorCheck
         initialized.EntryBlock.Statements[2] = Base(new Use(created, 64)) with { Target = Expr.C(201, 64) };
         a.True(InlineConstructors.Find(fieldsFirst!, initialized, initialized.EntryBlock, 0, created) is null,
             "基类调用目标必须相同");
+        Store NextField(Expr receiver, Expr value) => new(9, new Binary(BinOp.Add, receiver, Expr.C(24, 64), 64), value);
+        var ordered = InlineConstructors.Create(method, signature,
+            Function(Base(self), Field(self, argument), NextField(self, Expr.C(7, 64)), tail))!;
+        var swapped = Function(new Call(0, CallKind.Direct, Expr.C(100, 64)), Base(new Use(created, 64)),
+            NextField(new Use(created, 64), Expr.C(7, 64)), Field(new Use(created, 64), value), tail);
+        a.True(InlineConstructors.Find(ordered, swapped, swapped.EntryBlock, 0, created) is null,
+            "未证明对象尚未发布时保留字段顺序");
+        a.True(InlineConstructors.Find(ordered with { ReorderStores = true }, swapped, swapped.EntryBlock, 0, created)
+            is { } reordered && reordered.Arguments.SequenceEqual([value]), "独立字段交换仍绑定相同构造实参");
+        var overlap = ordered with { ReorderStores = true, Effects = [ordered.Effects[0], ordered.Effects[1],
+            Field(self, Expr.C(7, 64))] };
+        a.True(InlineConstructors.Find(overlap, swapped, swapped.EntryBlock, 0, created) is null,
+            "重叠字段不能交换写入顺序");
         return a.Finish("inline-constructors");
     }
 }

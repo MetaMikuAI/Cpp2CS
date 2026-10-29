@@ -36,6 +36,19 @@ public sealed partial class MethodRecovery
                     var widths = typed ? ScalarWidths(call, false, typed: true) : [];
                     var args = keep.Select(k => widths.TryGetValue(call.Sources[k], out var width) && width > 0
                         ? ScalarVectorNarrowing.Low(call.Arguments[k], width) : call.Arguments[k]).ToArray();
+                    if (typed && signature.This is { Pieces: [var selfPiece] } self && UnusedInput(call, callee, self)
+                        && arguments.FirstOrDefault(p => p.Value.Index == -1 && types.IsAssignable(p.Value.Type, self.Type)) is { Value: not null } current)
+                    {
+                        var position = Array.FindIndex(keep, k => call.Sources[k] == selfPiece.Register);
+                        if (position >= 0 && DiscardableReceiver(args[position], [])) args[position] = new Use(new Variable(current.Key, 0), selfPiece.Width);
+                    }
+                    // 非泛型调用已绑定后，以方法身份承载隐藏参数，避免保活调用破坏的寄存器及循环 phi。
+                    if (typed && callee.Method.GenericParameters.Count == 0 && callee.Method.Owner.GenericParameters.Count == 0
+                        && signature.MethodInfo is { } info)
+                    {
+                        var position = Array.FindIndex(keep, k => call.Sources[k] == info.Register);
+                        if (position >= 0) args[position] = new Symbol(SymbolKind.Method, callee);
+                    }
                     if (keep.Length == call.Sources.Length && args.AsSpan().SequenceEqual(call.Arguments)) continue;
                     block.Statements[i] = Trimmed(call, args, keep.Select(k => call.Sources[k]).ToArray());
                     changed = true;
@@ -53,13 +66,25 @@ public sealed partial class MethodRecovery
             }
         }
 
+        private bool DiscardableReceiver(Expr value, HashSet<Variable> visited)
+        {
+            if (value is Use use)
+            {
+                if (!visited.Add(use.Variable) || use.Variable.Version <= 0 || results.ContainsKey(use.Variable)) return true;
+                if (values.TryGetValue(use.Variable, out var source)) return DiscardableReceiver(source, visited);
+                return blocks.SelectMany(b => b.Statements).OfType<Phi>().FirstOrDefault(p => p.Target == use.Variable) is { } phi
+                    && phi.Sources.All(v => DiscardableReceiver(new Use(v, use.Width), visited));
+            }
+            return value is Const or Unknown || value is Select select && ExprMap.Children(select).All(e => DiscardableReceiver(e, visited));
+        }
+
         /// <summary>只改未被 ABI 观察的位时，保留语句身份关联的证明与诊断。</summary>
         private void PreserveStatementAnalysis(Stmt previous, Stmt replacement)
         {
             Copy(typeChecks); Copy(constructed); Copy(forwardedConstructors); Copy(boxed);
             if (previous is Call call && replacement is Call nextCall) callBindings.Copy(call, nextCall);
             Copy(structResults); Copy(delegateCreations); Copy(exceptionTypeTargets); Copy(stackEnums); Copy(virtualDelegates); Copy(nativeImports);
-            Copy(frameCopies); Copy(frameInitializers);
+            Copy(frameCopies); Copy(frameInitializers); Copy(stackArgumentStores); Copy(boxArgumentStores);
             Keep(dropped); Keep(virtualCalls); Keep(cleanupCalls); Keep(genericResolvers); Keep(stackEnumStorage);
             foreach (var live in frameLives.Values) Keep(live);
             ledger.Replace(previous, replacement);

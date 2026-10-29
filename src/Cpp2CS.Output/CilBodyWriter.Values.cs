@@ -109,7 +109,18 @@ internal sealed partial class CilBodyWriter
                     && enumReference.Element.Equals(f.Field.DeclaringType))
                 { Value(f.Receiver); il.Emit(OpCodes.Ldobj, TypeReference(enumReference.Element)); break; }
                 // 值类型的访问器是实例方法：this 是该值的地址（ldloca/ldflda），不能先读出值。
-                if (f.Accessor is { Method.Method.Owner.IsValueType: true } structGetter) { Value(f.Receiver); AccessorCall(structGetter); break; }
+                if (f.Accessor is { Method.Method.Owner.IsValueType: true } structGetter)
+                {
+                    Value(f.Receiver);
+                    if (f.Receiver.Type is not ByRefRef)
+                    {
+                        var copy = Temp(f.Receiver.Type);
+                        il.Emit(OpCodes.Stloc, copy);
+                        il.Emit(OpCodes.Ldloca, copy);
+                    }
+                    AccessorCall(structGetter);
+                    break;
+                }
                 Value(f.Receiver is AddressValue address ? address.Target : f.Receiver);
                 if (f.Accessor is { } getter) AccessorCall(getter); else il.Emit(OpCodes.Ldfld, FieldReference(f.Field)); break;
             case StaticFieldValue f:
@@ -227,6 +238,21 @@ internal sealed partial class CilBodyWriter
 
     private void Comparison(ComparisonValue c)
     {
+        if (c.Condition is Cond.FOrdered or Cond.FUnordered or Cond.FNe)
+        {
+            // 两个操作数只求值一次；无序比较在任一操作数为 NaN 时成立。
+            var left = Temp(c.Left.Width == 32 ? types.Single : types.Double);
+            var right = Temp(c.Right.Width == 32 ? types.Single : types.Double);
+            Floating(c.Left); il.Emit(OpCodes.Stloc, left);
+            Floating(c.Right); il.Emit(OpCodes.Stloc, right);
+            il.Emit(OpCodes.Ldloc, left); il.Emit(OpCodes.Ldloc, right);
+            il.Emit(c.Condition == Cond.FNe ? OpCodes.Clt : OpCodes.Clt_Un);
+            il.Emit(OpCodes.Ldloc, left); il.Emit(OpCodes.Ldloc, right);
+            il.Emit(c.Condition == Cond.FNe ? OpCodes.Cgt : OpCodes.Cgt_Un);
+            il.Emit(c.Condition == Cond.FNe ? OpCodes.Or : OpCodes.And);
+            if (c.Condition == Cond.FOrdered) Invert();
+            return;
+        }
         var floating = c.Condition is Cond.FEq or Cond.FUne or Cond.FLt or Cond.FLe or Cond.FGt or Cond.FGe or Cond.FUlt or Cond.FUle or Cond.FUgt or Cond.FUge;
         if (ManagedTypes.IsReferenceType(c.Left.Type) || ManagedTypes.IsReferenceType(c.Right.Type))
         {

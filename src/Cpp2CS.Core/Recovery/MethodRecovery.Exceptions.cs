@@ -1,3 +1,5 @@
+using Cpp2CS.Calls;
+using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -7,8 +9,60 @@ namespace Cpp2CS.Recovery;
 
 public sealed partial class MethodRecovery
 {
+    private readonly Dictionary<MethodRequest, NewObjectValue?> throwingConstructors = [];
+
+    private NewObjectValue? ThrowingConstructor(MethodRef callee, ulong address)
+    {
+        var request = new MethodRequest(callee, address);
+        if (throwingConstructors.TryGetValue(request, out var known)) return known;
+        NewObjectValue? result = null;
+        if (callee.Method is { IsStatic: true, GenericParameters.Count: 0, Owner.GenericParameters.Count: 0 }
+            && ManagedTypes.IsVoid(callee.Method.ReturnType) && callee.Method.Address == address
+            && !callee.Method.Owner.Methods.Any(m => m.Name == ".cctor")
+            && facts.Code.At(address) is { Region: CodeRegion.Managed, Size: <= 256 }
+            && lifter.NoReturn.IsNoReturn(address)
+            && new Context(this, callee, address) { ExpandThrowCalls = false }.Run().Body is { } body
+            && ThrowConstruction(body) is { } created && types.IsAssignable(created.Type, types.Corlib("System.Exception")))
+            result = created;
+        return throwingConstructors[request] = result;
+    }
+
+    /// <summary>只认单次异常构造后抛出的包装；参数按原顺序恰好使用一次，不省略或复制求值。</summary>
+    internal static NewObjectValue? ThrowConstruction(ManagedBody body)
+    {
+        if (!body.Method.Method.IsStatic || !ManagedTypes.IsVoid(body.Method.Method.ReturnType)
+            || body.Regions.Count != 0 || body.Blocks is not [var block]) return null;
+        var created = block.Statements switch
+        {
+            [ManagedThrow { Exception: NewObjectValue value }] => value,
+            [ManagedAssignment { Target: var local, Value: NewObjectValue value }, ManagedThrow { Exception: var thrown }]
+                when local.Equals(thrown) => value,
+            _ => null,
+        };
+        return created is { Transparent: false } && created.Arguments.All(v => v is ArgumentValue or ConstantValue or StringValue)
+            && created.Arguments.OfType<ArgumentValue>().Select(a => a.Index).SequenceEqual(Enumerable.Range(0, body.Method.Method.Parameters.Count))
+            ? created : null;
+    }
+
     private sealed partial class Context
     {
+        public bool ExpandThrowCalls { get; init; } = true;
+
+        [InvocationOutputRule(90)]
+        private bool ThrowingInvocation(Call call, AbiSignature signature, Dictionary<Storage, Expr> registers,
+            ManagedInvocation invocation, List<ManagedStatement> output)
+        {
+            if (!ExpandThrowCalls || call is not { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target }
+                || invocation is not { Virtual: false, Receiver: null }
+                || owner.ThrowingConstructor(invocation.Method, target.Value) is not { } created
+                || !ManagedAccess.Method(types, method.Method.Owner, created.Constructor, created.Type)) return false;
+            output.Add(new ManagedThrow(call.Address, created with
+            {
+                Arguments = created.Arguments.Select(v => v is ArgumentValue argument ? invocation.Arguments[argument.Index] : v).ToArray(),
+            }));
+            return true;
+        }
+
         private ExceptionLayout? exceptionLayout;
         private readonly Dictionary<ExceptionRegionPlan, LocalValue> caughtExceptions = [];
         private readonly Dictionary<Variable, LocalValue> exceptionValues = [];

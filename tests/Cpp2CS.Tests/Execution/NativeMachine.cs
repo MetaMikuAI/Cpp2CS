@@ -27,6 +27,7 @@ internal sealed class NativeSide(World world, Unicorn uc) : Side(world)
 internal sealed partial class NativeMachine : IDisposable
 {
     private const ulong InstructionLimit = 200_000;
+    private static readonly byte[] emptyRuntime = new byte[World.RuntimeSize];
     private readonly Unicorn uc = new();
     private readonly ProgramFacts facts;
     private readonly HashSet<ulong> erratumStubs;
@@ -129,7 +130,7 @@ internal sealed partial class NativeMachine : IDisposable
         ResetUnwind();
         // 映像恢复原状；Heap 区不必清零：每次分配都先写 0
         Restore();
-        uc.Write(World.RuntimeBase, world.RuntimeBytes);
+        InitializeRuntime(uc, world.RuntimeBytes);
         world.Active = side;
         try
         {
@@ -174,6 +175,13 @@ internal sealed partial class NativeMachine : IDisposable
         {
             world.Active = null;
         }
+    }
+
+    internal static void InitializeRuntime(Unicorn engine, ReadOnlySpan<byte> initial)
+    {
+        // 本例未分配区也须恢复初值，原生指针访问不能读到上一例残留。
+        engine.Write(World.RuntimeBase, emptyRuntime);
+        engine.Write(World.RuntimeBase, initial);
     }
 
     private void SetPiece(Aapcs64Classifier.Piece piece, ulong value)

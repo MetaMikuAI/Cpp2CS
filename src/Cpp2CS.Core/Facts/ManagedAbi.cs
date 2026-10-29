@@ -228,7 +228,7 @@ public sealed partial class ManagedAbi(FieldLayouts layouts)
     }
 
     /// <summary>同质浮点聚合：展开后 1–4 个成员全为 float 或全为 double，且无空洞。</summary>
-    private (int Count, int Width)? Hfa(TypeRef type)
+    internal (int Count, int Width)? Hfa(TypeRef type)
     {
         if (type is GenericParameterRef { NativeAggregate: { } aggregate }) return Hfa(aggregate);
         var members = new List<ValueKind>();

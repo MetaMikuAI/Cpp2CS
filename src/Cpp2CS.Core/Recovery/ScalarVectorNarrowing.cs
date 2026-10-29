@@ -54,12 +54,12 @@ internal static class ScalarVectorNarrowing
         Action<Define, Define>? replaced = null)
     {
         var candidates = blocks.SelectMany(b => b.Statements).OfType<Define>()
-            .Where(d => d.Target.Storage.Bank == Bank.Vec && d.Value is Ir.Convert { Kind: ConvKind.ZeroExtend, Width: 128, Operand.Width: 32 or 64 } c
+            .Where(d => d.Target.Storage.Bank is Bank.Vec or Bank.Temp && d.Value is Ir.Convert { Kind: ConvKind.ZeroExtend, Width: 128, Operand.Width: 32 or 64 } c
                 && !ExprMap.Walk(c.Operand).Any(e => e is Insert or Intrinsic))
             .ToDictionary(d => d.Target, d => ((Ir.Convert)d.Value).Operand);
         // φ 网：经 φ 相连的向量寄存器值。网中每个非 φ 定义都是同宽标量的清高位、每个读取都恰好取这个宽度时，
         // 整个网都是这个标量（如循环中的 float 局部变量 t = 0; t += dt）；φ 本身不改，位宽随来源变窄。
-        var phis = blocks.SelectMany(b => b.Statements).OfType<Phi>().Where(p => p.Target.Storage.Bank == Bank.Vec).ToArray();
+        var phis = blocks.SelectMany(b => b.Statements).OfType<Phi>().ToArray();
         var parent = new Dictionary<Variable, Variable>();
         Variable Find(Variable v)
         {
@@ -75,6 +75,21 @@ internal static class ScalarVectorNarrowing
                 var (a, b) = (Find(phi.Target), Find(source));
                 if (a != b) parent[a] = b;
             }
+        }
+        // 常量位型可存于整数寄存器，也可能被提升为 64 位后写入向量低位；仅全部观察低 32 位时截断。
+        var observed = blocks.SelectMany(b => b.Statements).Where(s => s is not Phi)
+            .SelectMany(s => ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>())
+            .GroupBy(u => Find(u.Variable)).ToDictionary(g => g.Key, g => g.Select(u => u.Width).Distinct().ToArray());
+        foreach (var definition in blocks.SelectMany(b => b.Statements).OfType<Define>())
+        {
+            var constant = definition.Value switch
+            {
+                Const { Width: 64 } c => c,
+                Ir.Convert { Kind: ConvKind.ZeroExtend, Width: 128, Operand: Const { Width: 64 } c } => c,
+                _ => null,
+            };
+            if (constant is not null && observed.GetValueOrDefault(Find(definition.Target)) is [32])
+                candidates[definition.Target] = Expr.C(constant.Value, 32);
         }
         var phiTargets = phis.Select(p => p.Target).ToHashSet();
         // 标量浮点返回值（AAPCS64 C.1：只占 v0 的低位）作为网的成员，本身不改写。

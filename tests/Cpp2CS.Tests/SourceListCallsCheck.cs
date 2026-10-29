@@ -62,7 +62,68 @@ internal static class SourceListCallsCheck
         CheckStructItems(a, types, list, method);
         CheckFastRegions(a, types, list, method);
         CheckSharedFastTail(a, types, list, method);
+        CheckEarlierCount(a, types, list, method);
+        CheckClearCopies(a, types, list, method);
         return a.Finish("source-list-calls");
+    }
+
+    private static void CheckEarlierCount(Assertions a, ManagedTypes types, TypeDef list, MethodRef method)
+    {
+        var owner = new DefinitionRef(list, [types.Object]);
+        var receiver = new ArgumentValue(0, owner, 64);
+        var item = new ArgumentValue(1, types.Object, 64);
+        var count = new LocalValue(new(Storage.Temp(100), 1), types.Int32, 32);
+        var array = new LocalValue(new(Storage.Temp(101), 1), new ArrayRef(types.Object, 1), 64);
+        FieldValue Field(string name) => new(receiver, new(list.Fields.Single(f => f.Name == name), owner),
+            name == "_items" ? array.Type : types.Int32, name == "_items" ? 64 : 32);
+        ManagedValue Increment(ManagedValue value) => new BinaryValue(BinOp.Add, value, new ConstantValue(1, types.Int32, 32), types.Int32, 32);
+        var resize = new MethodRef(list.Methods.Single(m => m.Name == "AddWithResize"), owner.Arguments, []);
+        foreach (var mode in new[] { "valid", "call", "store", "extra-predecessor" })
+        {
+            var prefix = new List<ManagedStatement> { new ManagedAssignment(0, count, Field("_size")) };
+            if (mode == "call") prefix.Add(new ManagedCall(1, new(resize, receiver, [item], false), null, false));
+            if (mode == "store") prefix.Add(new ManagedStore(1, Field("_size"), Increment(count)));
+            prefix.Add(new ManagedBranch(2, new ArgumentValue(2, types.Boolean, 1), new(16, []), new(64, [])));
+            var body = new ManagedBody(method, [new(0, prefix), new(16, [
+                new ManagedAssignment(16, array, Field("_items")), new ManagedStore(17, Field("_version"), Increment(Field("_version"))),
+                new ManagedBranch(18, new ComparisonValue(Cond.Ult, count, new ArrayLengthValue(array, types.Int32, 32), types.Boolean), new(32, []), new(48, []))]),
+                new(32, [new ManagedStore(32, Field("_size"), Increment(count)), new ManagedStore(33, new ArrayElementValue(array, count, types.Object, 64), item),
+                    new ManagedJump(34, new(64, []))]),
+                new(48, [new ManagedCall(48, new(resize, receiver, [item], false), null, false), new ManagedJump(49, new(64, []))]),
+                new(64, mode == "extra-predecessor" ? [new ManagedJump(64, new(16, []))] : [new ManagedReturn(64, null)])]);
+            var output = SourceListCalls.Rewrite(body, types, (_, _) => { });
+            a.Equal(mode == "valid" ? 1 : 0, output.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>()
+                .Count(c => c.Invocation.Method.Method.Name == "Add"), "前置分支的长度快照 " + mode);
+        }
+    }
+
+    private static void CheckClearCopies(Assertions a, ManagedTypes types, TypeDef list, MethodRef method)
+    {
+        var owner = new DefinitionRef(list, [types.Object]);
+        var receiver = new ArgumentValue(0, owner, 64);
+        var other = new ArgumentValue(1, owner, 64);
+        var count = new LocalValue(new(Storage.Temp(110), 1), types.Int32, 32);
+        var chosen = new LocalValue(new(Storage.Temp(111), 1), owner, 64);
+        FieldValue Field(string name) => new(receiver, new(list.Fields.Single(f => f.Name == name), owner),
+            name == "_items" ? new ArrayRef(types.Object, 1) : types.Int32, name == "_items" ? 64 : 32);
+        var clear = new MethodRef(types.CorlibDefinition("System.Array")!.Methods.Single(m => m.Name == "Clear" && m.Parameters.Count == 3
+            && m.Parameters[1].Type.Equals(types.Int32)), [], []);
+        foreach (var mode in new[] { "valid", "wrong-start", "wrong-count" })
+        {
+            var branch = new ManagedBranch(3, new ComparisonValue(Cond.Slt, count, new ConstantValue(1, types.Int32, 32), types.Boolean),
+                new(32, [new(chosen, receiver)]), new(16, []));
+            var body = new ManagedBody(method, [new(0, [new ManagedAssignment(0, count, Field("_size")),
+                new ManagedStore(1, Field("_size"), new ConstantValue(0, types.Int32, 32)),
+                new ManagedStore(2, Field("_version"), new BinaryValue(BinOp.Add, Field("_version"), new ConstantValue(1, types.Int32, 32), types.Int32, 32)), branch]),
+                new(16, [new ManagedCall(16, new(clear, null, [Field("_items"), new ConstantValue(mode == "wrong-start" ? 1UL : 0UL, types.Int32, 32),
+                    mode == "wrong-count" ? new ConstantValue(1, types.Int32, 32) : count], false), null, false), new ManagedJump(17, new(32, [new(chosen, other)]))]),
+                new(32, [new ManagedReturn(32, chosen)])]);
+            var output = SourceListCalls.Rewrite(body, types, (_, _) => { });
+            a.Equal(mode == "valid" ? 1 : 0, output.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>()
+                .Count(c => c.Invocation.Method.Method.Owner == list && c.Invocation.Method.Method.Name == "Clear"), "清理后的边复制 " + mode);
+            if (mode == "valid") a.True(output.Blocks[0].Statements.Contains(branch)
+                && output.Blocks[0].Statements.OfType<ManagedAssignment>().Any(s => s.Target == count), "保留旧长度分支及两臂原有结果");
+        }
     }
 
     private static void CheckSharedFastTail(Assertions a, ManagedTypes types, TypeDef list, MethodRef method)

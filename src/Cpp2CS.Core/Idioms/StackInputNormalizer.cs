@@ -4,7 +4,7 @@ using Cpp2CS.Ir;
 
 namespace Cpp2CS.Idioms;
 
-/// <summary>AAPCS64 栈上传入的标量及隐藏 MethodInfo：只读且不传址时改写成入口 SSA 值。</summary>
+/// <summary>AAPCS64 栈上传入的标量、浮点聚合分量及隐藏 MethodInfo：只读且不传址时改写成入口 SSA 值。</summary>
 internal static class StackInputNormalizer
 {
     public static bool Run(MachineFunction function, ManagedAbi abi, AbiSignature[] signatures, out int? methodInfoOffset)
@@ -17,6 +17,9 @@ internal static class StackInputNormalizer
             var slots = layout.Parameters.Where(p => !p.Indirect && p.Size is 1 or 2 or 4 or 8
                 && abi.Kind(p.Type) is ValueKind.Integer or ValueKind.Reference or ValueKind.Float or ValueKind.Double)
                 .ToDictionary(p => p.Offset, p => p.Size * 8);
+            foreach (var parameter in layout.Parameters.Where(p => !p.Indirect && abi.Kind(p.Type) == ValueKind.Struct))
+                if (abi.Hfa(parameter.Type) is { } hfa)
+                    for (var i = 0; i < hfa.Count; i++) slots.Add(parameter.Offset + i * hfa.Width / 8, hfa.Width);
             if (layout.MethodInfoOffset is { } hidden) slots.Add(hidden, 64);
             return slots;
         }

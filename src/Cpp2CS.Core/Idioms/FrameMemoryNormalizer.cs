@@ -3,7 +3,7 @@ using Cpp2CS.Ir;
 
 namespace Cpp2CS.Idioms;
 
-/// <summary>把有固定范围的栈帧清零展开为写入，交给结构体叶子初始化分析。</summary>
+/// <summary>把定长栈帧清零和复制展开为访存；复制先读取全部源值，保留重叠区域的语义。</summary>
 internal static class FrameMemoryNormalizer
 {
     public static bool Run(MachineFunction function, Func<Variable> fresh)
@@ -15,7 +15,7 @@ internal static class FrameMemoryNormalizer
                 if (block.Statements[i] is not Call { Op.Kind: OpKind.Import,
                     Arguments: [var start, var source, Const { Value: > 0 and <= 4096 } size] } call) continue;
                 var zero = call.Op.Operand is "memset" && start is FrameAddress && source is Const { Value: 0 };
-                var copy = call.Op.Operand is "memcpy" && (start is FrameAddress || source is FrameAddress);
+                var copy = call.Op.Operand is "memcpy" or "memmove" && (start is FrameAddress || source is FrameAddress);
                 if (!zero && !copy) continue;
                 Expr At(Expr root, int offset) => root is FrameAddress frame ? new FrameAddress(frame.Offset + offset)
                     : offset == 0 ? root : new Binary(BinOp.Add, root, Expr.C((ulong)offset, 64), 64);

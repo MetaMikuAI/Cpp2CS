@@ -8,7 +8,10 @@ namespace Cpp2CS.Recovery;
 /// <summary>以真实构造函数的直线调用、字段写入为模板，认回分配之后展开的构造。</summary>
 internal static class InlineConstructors
 {
-    internal sealed record Pattern(MethodRef Method, AbiSignature Signature, IReadOnlyList<Stmt> Effects);
+    internal sealed record Pattern(MethodRef Method, AbiSignature Signature, IReadOnlyList<Stmt> Effects)
+    {
+        public bool ReorderStores { get; init; }
+    }
     internal sealed record Match(MethodRef Method, IReadOnlyList<Expr> Arguments, IReadOnlyList<Stmt> Statements);
 
     internal static Pattern? Create(MethodRef method, AbiSignature signature, MachineFunction function)
@@ -62,6 +65,7 @@ internal static class InlineConstructors
         var widths = parameters.ToDictionary(p => new Variable(p.Register, 0), p => p.Width);
         var definitions = new Dictionary<Variable, Expr>();
         var matched = new List<Stmt>();
+        var stores = new List<Store>();
         var effect = 0;
         foreach (var (current, statement) in AllocationPairing.Following(block, index))
         {
@@ -72,7 +76,21 @@ internal static class InlineConstructors
             if (statement is Nop) continue;
             if (statement is Define d && Pure(d.Value)) { definitions[d.Target] = Expand(d.Value, definitions); continue; }
             var actual = ExprMap.MapOperands(statement, e => Expand(e, definitions));
-            if (!Statement(pattern.Effects[effect], actual, bindings, widths)) return null;
+            var expected = pattern.Effects[effect];
+            if (pattern.ReorderStores && actual is Store write && expected is Store)
+            {
+                if (stores.Count == 0)
+                {
+                    stores.AddRange(pattern.Effects.Skip(effect).TakeWhile(s => s is Store).Cast<Store>());
+                    if (!DisjointStores(stores)) return null;
+                }
+                expected = stores.SingleOrDefault(s => s.Value.Width == write.Value.Width
+                    && Expression(s.Target, write.Target, bindings, widths));
+                if (expected is not Store selected) return null;
+                stores.Remove(selected);
+            }
+            else if (stores.Count != 0) return null;
+            if (!Statement(expected, actual, bindings, widths)) return null;
             if (++effect == pattern.Effects.Count) break;
         }
         if (effect != pattern.Effects.Count) return null;
@@ -90,6 +108,17 @@ internal static class InlineConstructors
             if (statement is Phi phi && phi.Sources.Any(locals.Contains)
                 || ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => locals.Contains(u.Variable))) return null;
         return new(pattern.Method, args, matched);
+    }
+
+    // 新对象尚未发布时，连续且互不重叠的纯字段写入允许交换；调用和屏障仍保持顺序。
+    private static bool DisjointStores(IReadOnlyList<Store> stores)
+    {
+        if (stores.Any(s => !Pure(s.Value) || s.Target is not Binary
+            { Op: BinOp.Add, Left: Use, Right: Const })) return false;
+        var spans = stores.Select(s => (Root: ((Binary)s.Target).Left, Offset: ((Const)((Binary)s.Target).Right).Signed,
+            Size: s.Value.Width / 8)).OrderBy(s => s.Offset).ToArray();
+        return spans.All(s => s.Root == spans[0].Root && s.Offset >= 16 && s.Size > 0)
+            && spans.Zip(spans.Skip(1)).All(p => p.First.Offset + p.First.Size <= p.Second.Offset);
     }
 
     private static IEnumerable<Variable> Defines(Stmt statement) => statement switch
@@ -179,7 +208,14 @@ public sealed partial class MethodRecovery
         {
             var normalized = rewriter.Run(lifted.Function);
             if (normalized.Errors.Count == 0 && normalized.Residuals.Count == 0)
+            {
                 pattern = InlineConstructors.Create(method, signature, lifted.Function);
+                if (pattern is { Effects: [Call { Target: Const target }, ..] }
+                    && pattern.Effects.Skip(1).All(s => s is Store or Call { Op.Kind: OpKind.WriteBarrier })
+                    && facts.EntriesAt(target.Value).Any(e => e.Method is { Method:
+                        { Name: ".ctor", IsStatic: false, Parameters.Count: 0, Owner.FullName: "System.Object" } }))
+                    pattern = pattern with { ReorderStores = true };
+            }
         }
         return constructorPatterns[method] = pattern;
     }

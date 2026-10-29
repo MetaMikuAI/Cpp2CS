@@ -10,7 +10,7 @@ namespace Cpp2CS.Output;
 public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes types, IMethodSummaries summaries, SourceLibraryIndex? index = null)
 {
     private readonly SourceLibraryIndex libraryIndex = index ?? new(facts);
-    private sealed record Pattern(MethodRef Method, ManagedStatement[] Statements, Dictionary<Variable, ManagedValue> Values, ManagedValue Returned);
+    private sealed record Pattern(MethodRef Method, ManagedStatement[] Statements, Dictionary<Variable, ManagedValue> Values, ManagedValue? Returned);
     private readonly Dictionary<TypeDef, Pattern[]> patterns = [];
     public List<string> Evidence { get; } = [];
     private int next = -4_000_000;
@@ -91,6 +91,7 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
         if (patterns.TryGetValue(owner, out var cached)) return cached;
         var list = new List<Pattern>();
         foreach (var method in owner.Methods.Where(m => m.Address != 0 && m.GenericParameters.Count == 0 && owner.GenericParameters.Count == 0
+            && !m.IsVirtual
             && facts.Code.RegionOf(m.Address) == CodeRegion.Managed
             && (m.Attributes & System.Reflection.MethodAttributes.MemberAccessMask) == System.Reflection.MethodAttributes.Public
             && m.Name is not (".ctor" or ".cctor") && m.Parameters.Count <= 3).OrderBy(m => m.Parameters.Count))
@@ -108,16 +109,17 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
             }
             if (statements.LastOrDefault() is ManagedCall { Tail: true } tail)
             {
-                var result = new LocalValue(new Variable(Storage.Temp(next--), 1), method.ReturnType, types.Kind(method.ReturnType) == TypeKind.Struct ? 0 : types.Size(method.ReturnType) * 8);
+                var result = ManagedTypes.IsVoid(method.ReturnType) ? null
+                    : new LocalValue(new Variable(Storage.Temp(next--), 1), method.ReturnType, types.Kind(method.ReturnType) == TypeKind.Struct ? 0 : types.Size(method.ReturnType) * 8);
                 statements[^1] = tail with { Tail = false, Result = result };
                 statements.Add(new ManagedReturn(tail.Address, result));
             }
-            if (seen.Count != body.Blocks.Count || statements.Count > 40 || statements.LastOrDefault() is not ManagedReturn { Value: { } returned }
-                || statements.Take(statements.Count - 1).Any(s => s is not (ManagedAssignment or ManagedCall { Tail: false, Result: not null }))) continue;
+            if (seen.Count != body.Blocks.Count || statements.Count > 40 || statements.LastOrDefault() is not ManagedReturn returned
+                || statements.Take(statements.Count - 1).Any(s => s is not (ManagedAssignment or ManagedCall { Tail: false }))) continue;
             var assignments = statements.OfType<ManagedAssignment>().GroupBy(a => a.Target.Variable).ToArray();
             if (assignments.Any(g => g.Count() != 1)) continue;
             var values = assignments.ToDictionary(g => g.Key, g => g.Single().Value);
-            list.Add(new(reference, statements.ToArray(), values, Expand(returned, values)));
+            list.Add(new(reference, statements.ToArray(), values, returned.Value is null ? null : Expand(returned.Value, values)));
         }
         return patterns[owner] = list.ToArray();
     }
@@ -141,6 +143,7 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
         body = SourceListCalls.Rewrite(body, types, (site, method) =>
             Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{site:x}\t{body.Method}\t{method}"), Constructor);
         body = RewriteGuardedUpdates(body);
+        body = RewriteBooleanUpdates(body);
         bool PureField(FieldValue field) => field.Field.DeclaringType is DefinitionRef declaring
             && FieldCalls(declaring).Any(call => !call.Write && call.Field.Equals(field.Field)
                 && (field.Accessor is null || !field.Accessor.Write && field.Accessor.Method.Equals(call.Method)));
@@ -171,6 +174,12 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
                 var statement = statements[i];
                 if (statement is ManagedCall call && !ManagedAccess.Method(types, caller, call.Invocation.Method, call.Invocation.Receiver?.Type))
                 {
+                    if (StaticWrites(call, caller) is { } stores)
+                    {
+                        output.AddRange(stores);
+                        Evidence.Add($"0x{body.Method.Method.Address:x}\t0x{call.Address:x}\t{body.Method}\t{call.Invocation.Method}");
+                        continue;
+                    }
                     foreach (var pattern in Patterns(call.Invocation.Method.Method.Owner))
                     {
                         if (!ManagedAccess.Method(types, caller, pattern.Method, pattern.Method.Method.IsStatic ? null : new ByRefRef(pattern.Method.DeclaringType))) continue;
@@ -216,12 +225,72 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
         return SourceRewriter.Rewrite(body with { Blocks = blocks }, types, fieldGetters.Contains);
     }
 
+    // 不可访问的无返回包装若只写公开静态字段，可按实际方法体展开；先保存实参，再按原顺序写入。
+    private ManagedStatement[]? StaticWrites(ManagedCall call, TypeDef caller)
+    {
+        var invocation = call.Invocation;
+        var method = invocation.Method;
+        if (call.Tail || call.Result is not null || invocation.Virtual || method.Method.IsVirtual
+            || !ManagedTypes.IsVoid(method.Method.ReturnType) || method.Method.Name is ".ctor" or ".cctor"
+            || invocation.Receiver is not (null or LocalValue or ArgumentValue or ConstantValue)
+            || facts.Code.At(method.Method.Address) is not { Region: CodeRegion.Managed, Size: <= 256 }
+            || SummaryBody(new(method, method.Method.Address)) is not { } body) return null;
+        var blocks = body.Blocks.ToDictionary(b => b.Address);
+        var sequence = new List<ManagedStatement>();
+        var seen = new HashSet<ulong>();
+        var block = body.Blocks[0];
+        while (seen.Add(block.Address))
+        {
+            sequence.AddRange(block.Statements.Where(s => s is not ManagedJump));
+            if (block.Statements.LastOrDefault() is not ManagedJump { Edge.Copies.Count: 0 } jump
+                || !blocks.TryGetValue(jump.Edge.Target, out block!)) break;
+        }
+        if (seen.Count != blocks.Count || sequence.LastOrDefault() is not ManagedReturn { Value: null }) return null;
+        var values = new Dictionary<Variable, ManagedValue>();
+        var writes = new List<ManagedStore>();
+        bool Input(ManagedValue value) => value switch
+        {
+            ArgumentValue { Index: >= 0 } => true,
+            ConstantValue => true,
+            FieldValue { Accessor: null } field => types.Kind(field.Receiver is AddressValue address ? address.Target.Type : field.Receiver.Type) == TypeKind.Struct
+                && Input(field.Receiver),
+            AddressValue address => Input(address.Target),
+            _ => false,
+        };
+        bool Target(ManagedValue value) => value switch
+        {
+            StaticFieldValue { Accessor: null } field => ManagedAccess.Field(types, caller, field.Field, null)
+                && (field.Field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) == 0,
+            FieldValue { Accessor: null } field => ManagedAccess.Field(types, caller, field.Field, field.Receiver.Type)
+                && (field.Field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) == 0
+                && Target(field.Receiver),
+            AddressValue address => Target(address.Target),
+            _ => false,
+        };
+        foreach (var statement in sequence.SkipLast(1))
+        {
+            if (statement is ManagedAssignment assignment && Input(Expand(assignment.Value, values)))
+                values[assignment.Target.Variable] = Expand(assignment.Value, values);
+            else if (statement is ManagedStore store && Expand(store.Target, values) is { } target && Target(target)
+                && Expand(store.Value, values) is { } input && Input(input)) writes.Add(store with { Target = target, Value = input });
+            else return null;
+        }
+        if (writes.Count == 0) return null;
+        var arguments = invocation.Arguments.Select(a => new LocalValue(new Variable(Storage.Temp(next--), 1), a.Type, a.Width)).ToArray();
+        ManagedValue Replace(ManagedValue value) => value is ArgumentValue { Index: >= 0 } argument ? arguments[argument.Index]
+            : ManagedValues.Map(value, Replace);
+        return arguments.Select((a, i) => (ManagedStatement)new ManagedAssignment(call.Address, a, invocation.Arguments[i]))
+            .Concat(writes.Select(store => new ManagedStore(call.Address, Replace(store.Target), Replace(store.Value)))).ToArray();
+    }
+
     private bool Match(ManagedBody body, List<ManagedStatement> statements, int start, Pattern pattern, out ManagedCall? replacement, out int end)
     {
         replacement = null;
         end = start;
         var calls = pattern.Statements.OfType<ManagedCall>().ToArray();
-        if (calls.Length == 0 || calls.Length > 3 || pattern.Returned is not LocalValue returned || calls[^1].Result?.Variable != returned.Variable) return false;
+        if (calls.Length == 0 || calls.Length > 3
+            || (pattern.Returned is null ? calls[^1].Result is not null
+                : pattern.Returned is not LocalValue returned || calls[^1].Result?.Variable != returned.Variable)) return false;
         var definitions = statements.Take(start).OfType<ManagedAssignment>().GroupBy(a => a.Target.Variable)
             .Where(g => g.Count() == 1).ToDictionary(g => g.Key, g => g.Single().Value);
         var bound = new Dictionary<int, ManagedValue>();
@@ -230,6 +299,7 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
         var removed = new HashSet<Variable>();
         var firstCall = (ManagedCall)statements[start];
         var callIndex = 0;
+        var needsNullCheck = false;
         bool Unify(ManagedValue p, ManagedValue v)
         {
             p = Expand(p, pattern.Values);
@@ -277,19 +347,28 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
                 definitions[assignment.Target.Variable] = assignment.Value; removed.Add(assignment.Target.Variable); at++;
             }
             if (at >= statements.Count || statements[at] is not ManagedCall { Tail: false } actual || !actual.Invocation.Method.Equals(expected.Invocation.Method)
-                || actual.Invocation.Virtual != expected.Invocation.Virtual
                 || (expected.Invocation.Receiver is null) != (actual.Invocation.Receiver is null) || expected.Invocation.Arguments.Count != actual.Invocation.Arguments.Count) return false;
+            if (actual.Invocation.Virtual != expected.Invocation.Virtual)
+            {
+                // 非虚实例方法的 callvirt 只增加判空；仅允许把起始调用对同一接收者的判空移至包装调用。
+                if (callIndex != 0 || !actual.Invocation.Virtual || expected.Invocation.Method.Method.IsVirtual) return false;
+                needsNullCheck = true;
+            }
             if (expected.Invocation.Receiver is { } receiver && !Unify(receiver, actual.Invocation.Receiver!)) return false;
             if (!expected.Invocation.Arguments.Zip(actual.Invocation.Arguments).All(pair => Unify(pair.First, pair.Second))) return false;
-            if (expected.Result is not { } result || actual.Result is null) return false;
-            locals[result.Variable] = actual.Result;
-            removed.Add(actual.Result.Variable);
+            if ((expected.Result is null) != (actual.Result is null)) return false;
+            if (expected.Result is { } result)
+            {
+                locals[result.Variable] = actual.Result!;
+                removed.Add(actual.Result!.Variable);
+            }
             last = actual;
             end = at++;
             callIndex++;
         }
-        if (last?.Result is not { } final || !final.Type.Equals(pattern.Returned.Type)) return false;
-        removed.Remove(final.Variable);
+        var final = last?.Result;
+        if (pattern.Returned is not null && (final is null || !final.Type.Equals(pattern.Returned.Type))) return false;
+        if (final is not null) removed.Remove(final.Variable);
         var replaced = statements.Skip(start).Take(end - start + 1).ToHashSet();
         if (body.Blocks.SelectMany(b => b.Statements).Where(s => !replaced.Contains(s))
             .SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => removed.Contains(l.Variable))) return false;
@@ -303,13 +382,14 @@ public sealed partial class SourceLibraryCalls(ProgramFacts facts, ManagedTypes 
         }
         var method = pattern.Method.Method;
         var arguments = method.Parameters.Select((p, i) => Argument(i, p.Type)).ToArray();
-        var self = method.IsStatic ? null : Argument(-1, new ByRefRef(pattern.Method.DeclaringType));
+        var self = method.IsStatic ? null : Argument(-1, method.Owner.IsValueType ? new ByRefRef(pattern.Method.DeclaringType) : pattern.Method.DeclaringType);
         if (arguments.Any(a => a is null) || !method.IsStatic && self is null) return false;
+        if (needsNullCheck && !Equals(firstCall.Invocation.Receiver, self)) return false;
         // 绑定值只允许快照、值参数和常量；不把可变内存读取移到新的调用位置。
         if (arguments.Append(self).OfType<ManagedValue>().SelectMany(ManagedValues.Walk).Any(v => v is StaticFieldValue or ArrayElementValue or IndirectValue or NewObjectValue or NewArrayValue
             || v is FieldValue f && (Path(f).Root is not (LocalValue or ArgumentValue) || types.Kind(Path(f).Root.Type) != TypeKind.Struct))) return false;
         if (arguments.Any(a => a!.Type is ByRefRef)) return false;
-        replacement = new ManagedCall(firstCall.Address, new ManagedInvocation(pattern.Method, self, arguments!, false), final, false);
+        replacement = new ManagedCall(firstCall.Address, new ManagedInvocation(pattern.Method, self, arguments!, needsNullCheck), final, false);
         return true;
     }
 }

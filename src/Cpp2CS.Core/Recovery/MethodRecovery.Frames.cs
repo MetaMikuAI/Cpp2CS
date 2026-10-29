@@ -29,18 +29,31 @@ public sealed partial class MethodRecovery
         private void PrepareFrameTypes()
         {
             InferTypes();
+            NormalizePinnedArrays(true);
+            PrepareArrayCursors();
+        }
+
+        [Analysis("帧后数组地址", 37, After = ["整数帧槽"])]
+        private void PrepareFrameArrayAddresses()
+        {
+            InferTypes();
+            NormalizePinnedArrays(false);
+            PrepareArrayCursors();
+        }
+
+        private void NormalizePinnedArrays(bool simplifyFlow)
+        {
             if (PinnedArrayRecognition.Run(function, e => TypeOfAddressBase(e) is ArrayRef { IsVector: true } array
                 && types.Kind(array.Element) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double ? array : null) > 0)
             {
                 RemoveDeadDefinitions();
                 // 异常片段已绑定基本块；此处只删纯定义，不改变受保护控制流。
-                if (exceptionLayout is not { Succeeded: true })
+                if (simplifyFlow && exceptionLayout is not { Succeeded: true })
                     while (Ssa.ControlFlow.Simplify(function)) function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
                 blocks = function.Blocks;
                 definitions = IndexDefinitions();
                 InferTypes();
             }
-            PrepareArrayCursors();
         }
 
         /// <summary>只有精确调用签名提供类型；普通访存宽度不能定型。异型重叠先拒绝，嵌套字段见证合并到外根。</summary>
@@ -135,8 +148,7 @@ public sealed partial class MethodRecovery
                 // 若隐藏槽同时属于托管区域，其写入也有字段语义，不能仅作为调用元数据删去。
                 dropped.Remove(old);
                 block.Statements[i] = mapped;
-                ledger.Replace(old, mapped);
-                if (mapped is Call call) callBindings.Move((Call)old, call);
+                PreserveStatementAnalysis(old, mapped);
             }
             // IR 改写后，定义索引按新语句重建。
             definitions = IndexDefinitions();

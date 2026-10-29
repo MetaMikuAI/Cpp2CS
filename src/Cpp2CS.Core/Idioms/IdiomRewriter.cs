@@ -121,7 +121,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             nativeInputs.Add(entry, null);
             var methods = facts.EntriesAt(entry).Select(e => e.Method).OfType<MethodRef>().ToArray();
             reads = null;
-            if (methods.Length > 0 && methods.All(m => !m.Method.IsVirtual && (m.Method.Address == entry || m.Method.Address == 0)
+            if (methods.Length > 0 && methods.All(m => (m.Method.Address == entry || m.Method.Address == 0)
                 && !m.TypeArguments.Concat(m.MethodArguments).Any(FieldLayouts.IsFullyShared)))
             {
                 var signatures = methods.Select(m => abi.Classify(m, out _)).ToArray();
@@ -180,6 +180,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         private MethodRef? self;
         private Storage? selfMethodInfo;
         private bool foldedRuntimeGuards;
+        private readonly List<(Block End, ulong Guard)> initializedGuards = [];
 
         public IdiomResult Result { get; } = new();
 
@@ -215,6 +216,8 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             Symbols(rgctx: true);
             Normalize();
             if (MergedIndirectTails.Run(function)) Cleanup();
+            if (FrameSlotPromotion.ForwardCallSpills(function, c => c.Op is null
+                && owner.HelperOf(c)?.Kind == HelperKind.InterfaceLookup)) Cleanup();
             if (SharedInterfaceTails.Run(function, c => c.Op is null && owner.HelperOf(c)?.Kind == HelperKind.InterfaceLookup, Fresh)) Cleanup();
             if (InterfaceDispatch()) Cleanup();
             if (SharedInterfaceTails.SplitInvokes(function, e => defs.Expand(e), Fresh)) Cleanup();
@@ -275,6 +278,9 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             if (SelectedAddressLoads.Run(function)) Cleanup();
             if (ConstantDivisionNormalizer.Run(function)) Cleanup();
             if (FlagPhiConditions()) Cleanup();
+            // 后续守卫归约可能才把对象和类指针的入边对齐。
+            defs = new Defs(function);
+            Calls(indirectOnly: true);
             Residuals();
         }
 
@@ -294,6 +300,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             {
                 defs = new Defs(function);
                 if (owner.RecoverUnusedInputs) DiscardUnusedInputs();
+                if (KnownMetadataGuards()) Cleanup();
                 // 类型检查先于抛异常检查：castclass / as 后判空的失败一侧是只抛异常的块
                 var changed = SplitMetadataGuards();
                 changed |= Guards();
@@ -975,6 +982,35 @@ public sealed class IdiomRewriter(ProgramFacts facts)
 
         // ---------- 守卫 ----------
 
+        // 已证明初始化完成的路径，其后重复读取同一单调标志可以直接取真。
+        private bool KnownMetadataGuards()
+        {
+            if (initializedGuards.Count == 0) return false;
+            var dominators = Dominators.Compute(function);
+            var seeds = initializedGuards.Where(p => function.Blocks.Contains(p.End) && !removed.Contains(p.End)
+                && !All.OfType<Store>().Any(s => s.Target is Const target && target.Value == p.Guard
+                    && s.Value is not Const { Value: 1, Width: 8 })).ToArray();
+            var changed = false;
+            foreach (var block in function.Blocks.Where(b => !removed.Contains(b)))
+            {
+                var known = seeds.Where(p => p.End != block && dominators.Dominates(p.End.Index, block.Index))
+                    .Select(p => p.Guard).ToHashSet();
+                if (known.Count == 0) continue;
+                for (var i = 0; i < block.Statements.Count; i++)
+                {
+                    var previous = block.Statements[i];
+                    var replacement = previous is Store { Target: Const target, Value: Const { Value: 1, Width: 8 } } store
+                        && known.Contains(target.Value) ? new Nop(store.Address, "MetadataInitGuard")
+                        : ExprMap.MapOperands(previous, e => ExprMap.Map(e, part =>
+                            part is Load { Width: 8, Address: Const address } && known.Contains(address.Value) ? Expr.C(1, 8) : null));
+                    if (replacement == previous) continue;
+                    block.Statements[i] = replacement;
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
         // 初始化臂还含字段重读时保留该臂的数据流，只移除元数据标志；避免丢掉合流处实际使用的值。
         private bool RetainMetadataPath()
         {
@@ -1001,6 +1037,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 if (slots.Length != calls.Length || slots.Any(s => facts.Usages.At(s) is null)) continue;
                 var storeBlock = chain.Single(b => b.Statements.Contains(set));
                 storeBlock.Statements[storeBlock.Statements.IndexOf(set)] = new Nop(set.Address, "MetadataInitGuard");
+                initializedGuards.Add((storeBlock, guard.Value));
                 head.Statements[^1] = new Jump(branch.Address, init.Start);
                 MachineFunction.RemoveEdgeAt(head, 1 - side.Value);
                 Result.GuardSlots[guard.Value] = slots.Distinct().Order().ToArray();
@@ -1054,6 +1091,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 if (!valid || slots.Count == 0 || sets != 1) continue;
                 head.Statements[^1] = new Jump(branch.Address, skip.Start);
                 MachineFunction.RemoveEdgeAt(head, side.Value);
+                initializedGuards.Add((head, guard.Value));
                 Result.GuardSlots[guard.Value] = slots.Distinct().Order().ToArray();
                 Result.InitializedSlots.UnionWith(slots);
                 Result.MetadataGuardBranches.Add(branch.Address);
@@ -1358,6 +1396,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 });
                 Collapse(head, merge, head, [], overrides, branch.Address);
                 Remove(chain);
+                initializedGuards.Add((head, guard.Value));
                 Result.GuardSlots[guard.Value] = [.. Result.GuardSlots.GetValueOrDefault(guard.Value, []).Union(slots).Order()];
                 Result.MetadataGuardBranches.Add(branch.Address);
                 Result.InitializedSlots.UnionWith(slots);
@@ -1900,13 +1939,14 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         private object? ClassOperand(IEnumerable<Expr> arguments) =>
             arguments.Select(a => defs.Expand(a)).OfType<Symbol>().FirstOrDefault(s => s.Kind == SymbolKind.Class)?.Value;
 
-        private void Calls()
+        private void Calls(bool indirectOnly = false)
         {
             foreach (var block in function.Blocks)
             {
                 for (var i = 0; i < block.Statements.Count; i++)
                 {
                     if (block.Statements[i] is not Call { Op: null } call) continue;
+                    if (indirectOnly && call.Kind is not (CallKind.Indirect or CallKind.TailIndirect)) continue;
                     var rewritten = call.Kind is CallKind.Indirect or CallKind.TailIndirect ? Indirect(call) : Direct(block, i, call);
                     if (rewritten is null) continue;
                     // 虚调用：目标 = (*obj)->vtable[n].methodPtr，obj 为第一个参数
@@ -2064,7 +2104,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                 }
         }
 
-        /// <summary>新建数组的运行时元素类型确定；参数和字段数组可能协变，不能按静态类型替换。</summary>
+        /// <summary>线程静态块查询替换为字段基址，其余调用结果仍视为被调用破坏。</summary>
         private bool ThreadStaticBlocks()
         {
             var changed = false;
@@ -2081,6 +2121,13 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                         || facts.Code.At(A64.Imm26Target(get, lookup + 32))?.Import != "pthread_getspecific"
                         || facts.Code.Word(lookup + 36) != 0xf8735808 || facts.Code.Word(lookup + 40) != 0xf8745900) continue;
                     block.Statements[i] = new Define(call.Address, result, new Symbol(SymbolKind.ThreadStaticFields, type));
+                    var clobbered = call.Defines.Where(v => v is not null && v != result).ToHashSet();
+                    foreach (var affected in function.Blocks)
+                        for (var j = 0; j < affected.Statements.Count; j++)
+                            affected.Statements[j] = affected.Statements[j] is Phi phi
+                                ? phi with { Sources = phi.Sources.Select(v => clobbered.Contains(v) ? new Variable(v.Storage, -1) : v).ToArray() }
+                                : ExprMap.MapOperands(affected.Statements[j], e => ExprMap.Map(e, p => p is Use use && clobbered.Contains(use.Variable)
+                                    ? new Unknown($"{use.Variable.Storage} 被调用破坏", use.Width) : null));
                     changed = true;
                 }
             return changed;
@@ -2297,6 +2344,16 @@ public sealed class IdiomRewriter(ProgramFacts facts)
             foreach (var stmt in function.Blocks.SelectMany(b => b.Statements))
                 if (stmt is Define define) values[define.Target] = define.Value;
             foreach (var (_, define) in function.Dead) values.TryAdd(define.Target, define.Value);
+            // 对象与其不可变类指针同时汇合；每条边必须逐一对应同一对象，不能只比较静态类型。
+            foreach (var block in function.Blocks)
+            foreach (var klass in block.Statements.OfType<Phi>())
+            {
+                var objects = klass.Sources.Select(v => values.GetValueOrDefault(v) is Load { Width: 64, Address: Use { Width: 64 } obj }
+                    ? obj.Variable : null).ToArray();
+                if (objects.Length == 0 || objects.Any(v => v is null)) continue;
+                var receiver = block.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources.SequenceEqual(objects!));
+                if (receiver is not null) values[klass.Target] = new Load(new Use(receiver.Target, 64), 64);
+            }
         }
 
         /// <summary>变量的定义表达式（不展开）；不是 Define 定义的为 null。</summary>

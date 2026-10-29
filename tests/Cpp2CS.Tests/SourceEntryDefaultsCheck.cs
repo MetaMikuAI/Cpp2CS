@@ -40,6 +40,14 @@ internal static class SourceEntryDefaultsCheck
         a.Equal(0, SourceEntryDefaults.Find(Body(new ManagedBlock(0, [addressedParameter, read]))).Count, "外部地址清零具有副作用");
         var guarded = baseline with { Regions = [new ManagedRegion([0], 1, [1], null, ManagedRegionKind.Fault)] };
         a.Equal(0, SourceEntryDefaults.Find(guarded).Count, "异常入口不能当作唯一的正常入边");
+        var captured = new ManagedAssignment(0, new LocalValue(new(Storage.Temp(2), 1), integer, 32),
+            new FieldValue(new ArgumentValue(-1, new DefinitionRef(owner, []), 64), new(new FieldDef
+            { Index = 0, Owner = owner, Name = "state", Type = integer, Attributes = FieldAttributes.Private, Offset = 16 },
+                new DefinitionRef(owner, [])), integer, 32));
+        a.Equal(2, SourceEntryDefaults.Find(Body(new(0, [captured, new ManagedJump(0, new(1, []))]),
+            new(1, [zero, clear, read]))).Count, "提前读取捕获字段不阻断其他局部值的入口清零");
+        a.Equal(0, SourceEntryDefaults.Find(Body(new ManagedBlock(0, [captured with { Target = scalar }, zero, read]))).Count,
+            "字段读取后对同一个局部值的重置必须保留");
         return a.Finish("source-entry-defaults");
     }
 }

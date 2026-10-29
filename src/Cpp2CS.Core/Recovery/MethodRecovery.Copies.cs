@@ -38,13 +38,20 @@ public sealed partial class MethodRecovery
         var lifted = lifter.Lift(entry);
         if (lifted.Succeeded && rewriter.Run(lifted.Function) is { Errors.Count: 0 })
         {
+            var statements = lifted.Function.Blocks.SelectMany(b => b.Statements).ToArray();
+            var saved = statements.OfType<Store>().Where(s => s is
+                { Target: FrameAddress { Offset: < 0 } frame, Value: Use { Width: 64, Variable.Version: 0, Variable.Storage.Bank: Bank.Gpr } use }
+                && frame.Offset + 8 <= 0 && use.Variable.Storage.Index is >= 19 and <= 30).ToHashSet();
+            // 仅有入口寄存器保存、没有其他帧访问时，保存槽布局不参与方法身份比较。
+            if (statements.Where(s => s is not Store store || !saved.Contains(store))
+                .SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).Any(e => e is FrameAddress)) saved.Clear();
             var index = lifted.Function.Blocks.Select((b, i) => (b.Start, i)).ToDictionary(p => p.Start, p => p.i);
             string Block(ulong address) => index.TryGetValue(address, out var i) ? $"B{i}" : $"0x{address:x}";
             var text = new System.Text.StringBuilder();
             foreach (var block in lifted.Function.Blocks)
             {
                 text.Append('|');
-                foreach (var statement in block.Statements)
+                foreach (var statement in block.Statements.Where(s => s is not Store store || !saved.Contains(store)))
                     text.Append(statement switch
                     {
                         Branch b => $"if {b.Condition} goto {Block(b.Target)} else {Block(b.Fallthrough)}",

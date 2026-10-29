@@ -44,6 +44,12 @@ public static partial class AsyncLifting
                 static bool Bool(ManagedValue v) => v.Type is DefinitionRef { Definition.Keyword: "bool" };
                 return mapped switch
                 {
+                    ConversionValue { Kind: ConvKind.Truncate, Operand: ConversionValue
+                        { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: var narrow } } conversion
+                        when conversion.Width == narrow.Width => narrow,
+                    ComparisonValue { Condition: Cond.Eq or Cond.Ne, Left: var operand, Right: ConstantValue constant } comparison
+                        when operand.Type is DefinitionRef { Definition.IsEnum: true } && constant.Width == operand.Width
+                        => comparison with { Right = new ConstantValue(constant.Bits, operand.Type, operand.Width) },
                     ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate, Operand: var operand } when Bool(operand) => operand,
                     BinaryValue { Op: BinOp.And, Left: var left, Right: ConstantValue { Bits: 1 } } when Bool(left) => left,
                     ComparisonValue { Condition: Cond.Ne, Left: var left, Right: ConstantValue { Bits: 0 } } when Bool(left) => left,

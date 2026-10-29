@@ -24,14 +24,15 @@ internal static class ReadOnlyDataCheck
         var checkedIndex = new Variable(Storage.Gpr(8), 1);
         var output = new Variable(Storage.Gpr(0), 1);
         Expr Index(ulong delta = 1) => new Binary(BinOp.Add, new Use(input, 32), Expr.C(delta, 32), 32);
-        MachineFunction Sample(Cond condition = Cond.Uge, ulong delta = 1, bool bypass = false, bool snapshot = false, bool wide = false)
+        MachineFunction Sample(Cond condition = Cond.Uge, ulong delta = 1, bool bypass = false, bool snapshot = false, bool wide = false,
+            bool ssa = false, bool loaded = false, ConvKind extension = ConvKind.ZeroExtend)
         {
             var entry = new Block(0x1000) { Statements =
             [new Define(0x1000, checkedIndex, snapshot ? new Load(Expr.C(0x100, 64), 64)
-                : new Cpp2CS.Ir.Convert(ConvKind.ZeroExtend, Index(), 64)),
+                : new Cpp2CS.Ir.Convert(extension, loaded ? new Load(new Use(input, 64), 32) : Index(), 64)),
              new Branch(0x1004, new Compare(condition, new Use(checkedIndex, wide ? 64 : 32), Expr.C(3, wide ? 64 : 32)), 0x1020, 0x1010)] };
             var load = new Block(0x1010) { Statements = [new Define(0x1010, output, new Load(new Binary(BinOp.Add,
-                new Binary(BinOp.Shl, new Cpp2CS.Ir.Convert(ConvKind.SignExtend, Index(delta), 64), Expr.C(3, 64), 64), Expr.C(table, 64), 64), 64)),
+                new Binary(BinOp.Shl, ssa ? new Use(checkedIndex, 64) : new Cpp2CS.Ir.Convert(ConvKind.SignExtend, Index(delta), 64), Expr.C(3, 64), 64), Expr.C(table, 64), 64), 64)),
                 new Return(0x1014) { Value = new Use(output, 64) }] };
             var exit = new Block(0x1020) { Statements = [bypass ? new Jump(0x1020, load.Start) : new Return(0x1020)] };
             MachineFunction.AddEdge(entry, exit); MachineFunction.AddEdge(entry, load);
@@ -55,6 +56,19 @@ internal static class ReadOnlyDataCheck
         a.True(!ReadOnlyDataNormalizer.Run(Sample(snapshot: true), image, Slot), "内存快照不等同于索引表达式");
         a.True(!ReadOnlyDataNormalizer.Run(Sample(wide: true), image, Slot), "不同位宽的条件不直接视为同一索引");
         a.True(!ReadOnlyDataNormalizer.Run(Sample(), image, _ => false), "未知重定位目标不当作元数据槽");
+        foreach (var extension in new[] { ConvKind.SignExtend, ConvKind.ZeroExtend })
+        {
+            var loaded = Sample(ssa: true, loaded: true, extension: extension);
+            a.True(ReadOnlyDataNormalizer.Run(loaded, image, Slot), "扩展后的地址索引与已检查的低位属于同一 SSA 快照");
+            var selected = loaded.Blocks[1].Statements.OfType<Define>().Single().Value;
+            for (var i = 0; i < 3; i++)
+                a.Equal<Expr>(Expr.C(image.RelocatedPointer(table + (ulong)i * 8)!.Value, 64),
+                    Fold.Simplify(ExprMap.Map(selected, e => e is Use use && use.Variable == checkedIndex ? Expr.C((ulong)i, use.Width) : null)),
+                    "窄索引选择与原始表项一致");
+        }
+        a.True(!ReadOnlyDataNormalizer.Run(Sample(ssa: true, snapshot: true), image, Slot), "只检查低位不能约束任意 64 位加载的高位");
+        a.True(!ReadOnlyDataNormalizer.Run(Sample(ssa: true, loaded: true, condition: Cond.Sge), image, Slot), "扩展来源不能代替无符号范围检查");
+        a.True(!ReadOnlyDataNormalizer.Run(Sample(ssa: true, loaded: true, bypass: true), image, Slot), "索引快照一致仍不能绕过范围检查");
         return a.Finish("readonly-data");
     }
 }

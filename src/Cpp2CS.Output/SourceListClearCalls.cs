@@ -68,7 +68,7 @@ internal static partial class SourceListCalls
                 branch = statement as ManagedBranch;
                 break;
             }
-            if (!zeroed || !versioned || branch is not { Taken.Copies.Count: 0, Fallthrough.Copies.Count: 0 }
+            if (!zeroed || !versioned || branch is null
                 || ReadsChanged(branch.Condition) || Resolve(branch.Condition) is not ComparisonValue condition || !IsField(condition.Left, "_size")
                 || condition.Right is not ConstantValue limit) continue;
             bool? nonemptyTaken = (condition.Condition, limit.Bits) switch
@@ -81,7 +81,7 @@ internal static partial class SourceListCalls
             var filledEdge = nonemptyTaken.Value ? branch.Taken : branch.Fallthrough;
             var emptyEdge = nonemptyTaken.Value ? branch.Fallthrough : branch.Taken;
             // 清理调用留在原保护区，正常退出边可以离开；下面仍须证明两臂具有同一出口。
-            if (flow.Predecessors.GetValueOrDefault(filledEdge.Target) != 1
+            if (filledEdge.Copies.Count != 0 || flow.Predecessors.GetValueOrDefault(filledEdge.Target) != 1
                 || !flow.SameRegion(block.Address, filledEdge.Target)) continue;
             using var filled = flow.Straight(filledEdge.Target, 0, block.Address).GetEnumerator();
             ManagedStatement? Next()
@@ -99,21 +99,39 @@ internal static partial class SourceListCalls
                 || !IsField(Resolve(invocation.Arguments[0]), "_items") || Resolve(invocation.Arguments[1]) is not ConstantValue { Bits: 0 }
                 || !Resolve(invocation.Arguments[2]).Equals(condition.Left)) continue;
             var exit = arrayClear.Tail ? new ManagedReturn(arrayClear.Address, null) : Next();
-            if (!(exit is ManagedJump jump && jump.Edge.Target == emptyEdge.Target && jump.Edge.Copies.SequenceEqual(emptyEdge.Copies))
-                && !SameExit(exit, flow.Straight(emptyEdge.Target, 0, block.Address).FirstOrDefault())) continue;
-            remove.Add(arrayClear); remove.Add(branch);
+            var sameExit = exit is ManagedJump jump && jump.Edge.Target == emptyEdge.Target && jump.Edge.Copies.SequenceEqual(emptyEdge.Copies)
+                || emptyEdge.Copies.Count == 0 && SameExit(exit, flow.Straight(emptyEdge.Target, 0, block.Address).FirstOrDefault());
+            remove.Add(arrayClear);
+            if (sameExit) remove.Add(branch);
+            else
+            {
+                // 两臂还有不同的结果或重读时保留原分支；只收回已证明的 Clear 操作。
+                if (arrayClear.Tail) continue;
+                while (true)
+                {
+                    var used = body.Blocks.SelectMany(b => b.Statements).Where(s => !remove.Contains(s))
+                        .SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
+                        .SelectMany(ManagedValues.Walk).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
+                    var needed = remove.OfType<ManagedAssignment>().Where(a => used.Contains(a.Target.Variable)).ToArray();
+                    if (needed.Length == 0) break;
+                    foreach (var assignment in needed) remove.Remove(assignment);
+                }
+                if (values.Keys.Any(v => !remove.OfType<ManagedAssignment>().Any(a => a.Target.Variable == v)
+                    && ManagedValues.Walk(values[v]).OfType<FieldValue>().Any(f => !IsField(f, "_size")))) continue;
+            }
             if (body.Blocks.SelectMany(b => b.Statements).Where(s => !remove.Contains(s))
                 .SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
                 .OfType<LocalValue>().Any(l => remove.OfType<ManagedAssignment>().Any(a => a.Target.Variable == l.Variable))) continue;
             var method = new MethodRef(clear, owner.Arguments, []);
             if (!ManagedAccess.Method(types, body.Method.Method.Owner, method, receiver.Type)) continue;
-            var call = new ManagedCall(first.Address, new ManagedInvocation(method, receiver, [], true), null, false);
+            var call = new ManagedCall(sameExit ? first.Address : branch.Address, new ManagedInvocation(method, receiver, [], true), null, false);
             var rewritten = body with
             {
                 Blocks = body.Blocks.Select(b => b with
                 {
-                    Statements = b.Statements.SelectMany(s => ReferenceEquals(s, first) ? new ManagedStatement[] { call }
-                        : ReferenceEquals(s, branch) ? [new ManagedJump(branch.Address, emptyEdge)] : remove.Contains(s) ? [] : [s]).ToArray(),
+                    Statements = b.Statements.SelectMany(s => sameExit && ReferenceEquals(s, first) ? new ManagedStatement[] { call }
+                        : ReferenceEquals(s, branch) ? sameExit ? [new ManagedJump(branch.Address, emptyEdge)] : [call, branch]
+                        : remove.Contains(s) ? [] : [s]).ToArray(),
                 }).ToArray(),
             };
             matched(first.Address, method);

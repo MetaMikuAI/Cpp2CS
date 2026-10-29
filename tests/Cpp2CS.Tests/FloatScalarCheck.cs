@@ -91,15 +91,16 @@ internal static class FloatScalarCheck
             a.True(copy.Statements[0] is Define { Value: Load }, "低位投影保留原加载及位置");
             a.True(copy.Statements[^1] is Return { Value: Use u } && u.Variable == (width <= 32 ? source : narrowed), "只穿透完全保留所读取低位的扩展与截断");
         }
-        int ReturnedPhi(int resultWidth, int readWidth = 32)
+        int ReturnedPhi(int resultWidth, int readWidth = 32, bool temporary = false)
         {
             var result = new Variable(Storage.Vec(0), 2);
             var joined = new Variable(Storage.Vec(1), 2);
-            var first = new Block(0x3000) { Statements = [new Define(0x3000, v,
+            var loaded = temporary ? new Variable(Storage.Temp(0), 1) : v;
+            var first = new Block(0x3000) { Statements = [new Define(0x3000, loaded,
                 new Ir.Convert(ConvKind.ZeroExtend, Expr.C(0, 32), 128))] };
             var called = new Block(0x3010) { Statements = [new Call(0x3010, CallKind.Indirect, Expr.C(0x4000, 64))
                 { Results = [Storage.Vec(0)], Defines = [result] }] };
-            var merge = new Block(0x3020) { Statements = [new Phi(0x3020, joined, [v, result]),
+            var merge = new Block(0x3020) { Statements = [new Phi(0x3020, joined, [loaded, result]),
                 new Return(0x3024) { Value = new Use(joined, readWidth) }] };
             return ScalarVectorNarrowing.Run([first, called, merge], Unknown,
                 _ => resultWidth > 0 ? new Dictionary<Storage, int> { [Storage.Vec(0)] = resultWidth } : []);
@@ -108,6 +109,25 @@ internal static class FloatScalarCheck
         a.Equal(0, ReturnedPhi(0), "未知调用返回值不提供宽度证明");
         a.Equal(0, ReturnedPhi(64), "分支返回位宽不一致时拒绝");
         a.Equal(0, ReturnedPhi(32, 128), "汇合后仍读取高位时拒绝");
+        a.Equal(1, ReturnedPhi(32, temporary: true), "搬移后的临时值仍由原来的清高位定义证明标量宽度");
+        a.Equal(0, ReturnedPhi(64, temporary: true), "临时值不能掩盖不同来源的位宽差异");
+        a.Equal(0, ReturnedPhi(32, 128, temporary: true), "临时值仍须保留被读取的高位");
+        foreach (var vector in new[] { false, true })
+            foreach (var readWidth in new[] { 32, 64 })
+            {
+                var first = new Variable(vector ? Storage.Vec(0) : Storage.Gpr(0), 1);
+                var second = new Variable(first.Storage, 2);
+                var joined = new Variable(first.Storage, 3);
+                Expr Constant(ulong bits) => vector ? new Ir.Convert(ConvKind.ZeroExtend, Expr.C(bits, 64), 128) : Expr.C(bits, 64);
+                var block = new Block(0x4000) { Statements = [
+                    new Define(0x4000, first, Constant(0x3f800000)),
+                    new Define(0x4004, second, Constant(0x3f000000)),
+                    new Phi(0x4008, joined, [first, second]),
+                    new Return(0x400c) { Value = new Use(joined, readWidth) }] };
+                ScalarVectorNarrowing.Run([block], Unknown);
+                a.Equal(readWidth, ((Define)block.Statements[0]).Value.Width,
+                    "整数与向量常量按实际观察位宽收窄，64 位读取保留");
+            }
         foreach (var laneWidth in new[] { 8, 16, 32, 64 })
             foreach (var totalWidth in new[] { 64, 128 })
                 foreach (var bits in new ulong[] { 0, 1, ulong.MaxValue, 0x80000000, 0x7f800000, 0x7fc00123, 0x8000000000000000, 0x7ff0000000000000, 0x7ff8000000000123 })

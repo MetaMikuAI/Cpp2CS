@@ -49,6 +49,17 @@ internal static class SourceArgumentAliasCheck
         var alternatives = sample with { Blocks = [new(0, [branch with { Taken = new(4, [new(local, address)]),
             Fallthrough = new(4, [new(local, new AddressValue(storage with { Variable = new(Storage.Temp(4), 1) }))]) }]), sample.Blocks[1]] };
         a.True(ReferenceEquals(alternatives, SourceArgumentAliases.Rewrite(alternatives)), "不同局部存储的条件引用不能直接归并");
+        var destination = new LocalValue(new(Storage.Temp(5), 1), type, 64);
+        var stored = Body(new(0, [new ManagedAssignment(0, local, argument),
+            new ManagedAssignment(1, other, new ArgumentValue(2, type, 64)), branch with
+            { Taken = new(4, [new(destination, local)]), Fallthrough = new(4, [new(destination, other)]) }]),
+            new(4, [new ManagedStore(4, new IndirectValue(destination, type.Element), new ConstantValue(7, type.Element, 32)), new ManagedReturn(5, null)]));
+        var spread = SourceArgumentAliases.Rewrite(stored);
+        a.True(spread.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>().Select(s => ((IndirectValue)s.Target).Address)
+            .OfType<ArgumentValue>().Select(p => p.Index).Order().SequenceEqual(new[] { 0, 2 }), "条件引用的写入保留各分支目标");
+        var observed = stored with { Blocks = [stored.Blocks[0], stored.Blocks[1] with
+            { Statements = [stored.Blocks[1].Statements[0], new ManagedReturn(5, destination)] }] };
+        a.Equal(2, SourceArgumentAliases.Rewrite(observed).Blocks.Count, "引用还被返回时不拆分写入");
         return a.Finish("source-argument-aliases");
     }
 }

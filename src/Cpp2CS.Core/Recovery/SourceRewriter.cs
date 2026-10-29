@@ -47,6 +47,7 @@ public static class SourceRewriter
         Apply("source.struct-snapshots", SourceStructCopies.SnapshotReads);
         Apply("source.caught-exceptions", b => DeadAssignments(Map(SourceCaughtExceptions.Rewrite(b, types), v => Simplify(v, types))));
         Apply("source.nonnull-branches", b => DropStatements(SourceNonNullReceivers.FoldBranches(b)));
+        Apply("source.boolean-values", b => DeadAssignments(SourceNonNullReceivers.FoldBooleans(b, types)));
         Apply("source.exception-paths", SourceExceptionPaths.Rewrite);
         Apply("source.dead-stores", DeadStores);
         Apply("source.field-copies", FoldFieldCopies);

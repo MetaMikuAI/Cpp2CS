@@ -140,16 +140,28 @@ internal static partial class SourceStructCopies
                         Value: FieldValue { Accessor: null } sourceField } first
                     || Destination(target.Receiver) is not { Type: DefinitionRef { Definition: { IsValueType: true, IsEnum: false } definition } } destination) continue;
                 var source = sourceField.Receiver is AddressValue address ? address.Target : sourceField.Receiver;
-                if (source is not (LocalValue or ArgumentValue) || !source.Type.Equals(destination.Type)) continue;
+                if (source is not (LocalValue or ArgumentValue) || !source.Type.Equals(destination.Type)
+                    || (definition.Attributes & System.Reflection.TypeAttributes.LayoutMask) == System.Reflection.TypeAttributes.ExplicitLayout) continue;
                 var fields = definition.Fields.Where(f => !f.IsStatic).ToHashSet();
-                var writes = statements.Skip(i).Take(fields.Count).OfType<ManagedStore>().ToArray();
-                if (fields.Count == 0 || writes.Length != fields.Count || writes.Any(s =>
-                    s.Target is not FieldValue { Accessor: null } t || s.Value is not FieldValue { Accessor: null } v
-                    || !t.Receiver.Equals(target.Receiver) || !v.Receiver.Equals(sourceField.Receiver) || !t.Field.Equals(v.Field))
-                    || !writes.Select(s => ((FieldValue)s.Target).Field.Field).ToHashSet().SetEquals(fields)) continue;
-                statements.RemoveRange(i, fields.Count);
-                statements.Insert(i, destination is LocalValue local ? new ManagedAssignment(first.Address, local, source)
-                    : new ManagedStore(first.Address, destination, source));
+                var positions = new List<int>();
+                var copied = new HashSet<FieldDef>();
+                for (var j = i; j < statements.Count && copied.Count < fields.Count; j++)
+                {
+                    if (statements[j] is ManagedStore { Target: FieldValue { Accessor: null } t, Value: FieldValue { Accessor: null } v }
+                        && t.Receiver.Equals(target.Receiver) && v.Receiver.Equals(sourceField.Receiver) && t.Field.Equals(v.Field)
+                        && fields.Contains(t.Field.Field) && copied.Add(t.Field.Field)) positions.Add(j);
+                    // 同一对象另一个字段的纯赋值不会读取或覆盖结构体；保留它的原有位置。
+                    else if (destination is FieldValue member && statements[j] is ManagedStore { Target: FieldValue { Accessor: null } other,
+                            Value: LocalValue or ArgumentValue or ConstantValue }
+                        && other.Receiver.Equals(member.Receiver) && !other.Field.Equals(member.Field)
+                        && other.Field.Field.Owner == member.Field.Field.Owner
+                        && (member.Field.Field.Owner.Attributes & System.Reflection.TypeAttributes.LayoutMask) != System.Reflection.TypeAttributes.ExplicitLayout) { }
+                    else break;
+                }
+                if (fields.Count == 0 || !copied.SetEquals(fields)) continue;
+                foreach (var position in positions.Skip(1).Reverse()) statements.RemoveAt(position);
+                statements[i] = destination is LocalValue local ? new ManagedAssignment(first.Address, local, source)
+                    : new ManagedStore(first.Address, destination, source);
             }
             for (var i = 0; i < statements.Count; i++)
             {

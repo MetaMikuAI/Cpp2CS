@@ -50,6 +50,11 @@ internal static class SourceValueConstructorCheck
             && expanded[1].Value == constant && expanded[2].Value == first, "构造按已证实字段映射展开");
         a.True(pattern.Expand([first]) is null, "构造参数必须齐全");
         var destination = new LocalValue(new(Storage.Temp(10), 1), type, 0);
+        var localField = new FieldValue(new AddressValue(destination), Field(0), integer, 32);
+        a.True(pattern.Build(new(type, [([Field(0)], second), ([Field(1)], constant), ([Field(2)], localField)])) is not null,
+            "值类型局部的纯字段读取可作为构造参数");
+        a.True(pattern.Build(new(type, [([Field(0)], second), ([Field(1)], constant),
+            ([Field(2)], new BinaryValue(BinOp.SDiv, first, second, integer, 32))])) is null, "可能抛错的整数除法不重排");
         foreach (var mode in new[] { "valid", "missing", "duplicate", "other-target", "self-read", "interrupted" })
         {
             var writes = Value(constant).Leaves.Select(p => (ManagedStatement)new ManagedStore(1,
@@ -65,6 +70,24 @@ internal static class SourceValueConstructorCheck
             a.Equal(mode == "valid" ? 1 : 0, result.Blocks[0].Statements.OfType<ManagedAssignment>()
                 .Count(s => s.Value is NewObjectValue), "连续构造写入 " + mode);
         }
+        var outerDefinition = new TypeDef { Index = 1, Assembly = "Test", Namespace = "Test", Name = "Outer", Token = 0,
+            Attributes = TypeAttributes.SequentialLayout, IsValueType = true, IsEnum = false };
+        var outerType = new DefinitionRef(outerDefinition, []);
+        var outerField = new FieldDef { Index = 3, Owner = outerDefinition, Name = "Data", Type = type, Attributes = FieldAttributes.Private, Offset = 0 };
+        outerDefinition.Fields = [outerField];
+        var outerMethod = new MethodRef(new MethodDef { Index = 1, Owner = outerDefinition, Name = ".ctor", Token = 0,
+            Attributes = MethodAttributes.Public, ImplAttributes = 0, Slot = -1, Parameters = [new("data", type, 0, null, false)] }, [], []);
+        var member = new FieldRef(outerField, outerType);
+        var outerPattern = SourceValueConstructor.Create(outerMethod, [new(0,
+            new FieldValue(new ArgumentValue(-1, new ByRefRef(outerType), 64), member, type, 0), new ArgumentValue(0, type, 0))])!;
+        var outerLocal = new LocalValue(new(Storage.Temp(11), 1), outerType, 0);
+        var nestedTarget = new FieldValue(new AddressValue(outerLocal), member, type, 0);
+        var nestedWrites = Value(constant).Leaves.Select(p => (ManagedStatement)new ManagedStore(0,
+            new FieldValue(new AddressValue(nestedTarget), p.Path[0], integer, 32), p.Value)).ToArray();
+        var nestedBody = new ManagedBody(method, [new(0, [.. nestedWrites, new ManagedReturn(1, outerLocal)])]);
+        var nestedOutput = SourceConstructorWrites.Rewrite(nestedBody, t => t == type ? [pattern] : t == outerType ? [outerPattern] : [], (_, _) => { });
+        a.True(nestedOutput.Blocks[0].Statements is [ManagedAssignment { Value: NewObjectValue { Arguments: [NewObjectValue] } }, ManagedReturn],
+            "交错叶子写入从内到外按已证明构造还原");
         return a.Finish("source-value-constructor");
     }
 }

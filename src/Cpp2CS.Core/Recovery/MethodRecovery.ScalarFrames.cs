@@ -17,8 +17,7 @@ public sealed partial class MethodRecovery
                 var old = block.Statements[i];
                 if (!replacements.TryGetValue(old, out var mapped)) continue;
                 block.Statements[i] = mapped;
-                ledger.Replace(old, mapped);
-                if (old is Call call) callBindings.Move(call, (Call)mapped);
+                PreserveStatementAnalysis(old, mapped);
             }
             if (replacements.Count > 0) definitions = IndexDefinitions();
         }
@@ -58,16 +57,17 @@ public sealed partial class MethodRecovery
                 _ => (false, false),
             };
             var scalar = new Dictionary<long, FrameRegion>();
-            bool? registerCalls = null;
-            bool NoStackArguments(Call call)
+            bool NoStackRead(Call call, long offset, int width)
             {
                 if (call.Op?.Kind is OpKind.InitClass or OpKind.RunClassConstructor or OpKind.InitMethodRgctx
                     or OpKind.NewObject or OpKind.NewArray or OpKind.Box or OpKind.Unbox or OpKind.IsInst or OpKind.IsAssignableFrom
                     or OpKind.TypeCheck or OpKind.ThrowIf or OpKind.NullCheck or OpKind.BoundsCheck or OpKind.Throw or OpKind.ThrowNew
                     or OpKind.NewException or OpKind.Rethrow or OpKind.WriteBarrier or OpKind.MemoryBarrier or OpKind.CompareExchangeReference or OpKind.InterfaceInvokeData
                     or OpKind.ResolveGenericVirtual or OpKind.BeginCatch or OpKind.EndCatch or OpKind.ResumeUnwind or OpKind.Terminate or OpKind.ThrowManaged) return true;
-                return Resolve(call) is { } target && owner.abi.Classify(target, out _) is { MethodInfo: not null } signature
-                    && signature.Arguments.All(a => a.Passing != Facts.Passing.Stack);
+                return Resolve(call) is { } target && owner.abi.Classify(target, out _) is { } signature
+                    && (signature.MethodInfo is not null && signature.Arguments.All(a => a.Passing != Facts.Passing.Stack)
+                        || callStackAreas.TryGetValue(call.Address, out var area)
+                            && (offset + width / 8 <= area.Offset || offset >= area.Offset + area.Size));
             }
             foreach (var group in accesses.GroupBy(a => a.Offset))
             {
@@ -78,8 +78,8 @@ public sealed partial class MethodRecovery
                     || accesses.Any(a => a.Offset != offset && offset < a.Offset + a.Width / 8 && a.Offset < offset + width / 8)) continue;
                 if (!group.Any(a => a.Written is null))
                 {
-                    // 无读取的常量备份只有在所有调用都不从调用者栈取参数时才可删去。
-                    if (group.All(a => a.Written is Const) && (registerCalls ??= blocks.SelectMany(b => b.Statements).OfType<Call>().All(NoStackArguments)))
+                    // 无读取的常量备份还须与每个调用的栈参数区域分离。
+                    if (group.All(a => a.Written is Const) && blocks.SelectMany(b => b.Statements).OfType<Call>().All(c => NoStackRead(c, offset, width)))
                         dropped.UnionWith(blocks.SelectMany(b => b.Statements).OfType<Store>().Where(s => FrameOffset(s.Target) == offset));
                     continue;
                 }
@@ -108,7 +108,7 @@ public sealed partial class MethodRecovery
                         FrameOffset(part) is { } offset && scalar.TryGetValue(offset, out var region) ? new TypedFrame(region) : null));
                     if (ReferenceEquals(old, mapped)) continue;
                     block.Statements[i] = mapped;
-                    ledger.Replace(old, mapped);
+                    PreserveStatementAnalysis(old, mapped);
                 }
             definitions = IndexDefinitions();
         }

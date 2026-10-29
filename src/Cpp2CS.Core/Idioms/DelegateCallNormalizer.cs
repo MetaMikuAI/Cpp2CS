@@ -49,7 +49,7 @@ internal sealed class DelegateCallNormalizer
                 .Where(m => methods.Any(c => c.Method == m.Method)).Distinct().ToArray();
             var callee = exact.Length == 1 ? exact[0] : methods.Length == 1 ? methods[0] : null;
             if (callee is null || abi.Classify(callee, out _) is not { } signature) continue;
-            foreach (var parameter in signature.Parameters)
+            foreach (var parameter in signature.Arguments)
             {
                 if (parameter is not { Type: ByRefRef byRef, Passing: Passing.Registers, Pieces: [var piece] }) continue;
                 var index = Array.IndexOf(call.Sources, piece.Register);
@@ -229,6 +229,14 @@ internal sealed class DelegateCallNormalizer
             return JoinedReferenceType([select.True, select.False], definitions, phis, e => TypeOf(e, new(active)));
         if (expression is Load { Address: FrameAddress frame } read && frameTypes.TryGetValue(frame.Offset, out var stored)
             && abi.Size(stored) * 8 == read.Width) return stored;
+        if (expression is Load { Address: FrameAddress member } memberRead)
+        {
+            var candidates = frameTypes.Where(p => member.Offset >= p.Key && member.Offset + memberRead.Width / 8 <= p.Key + abi.Size(p.Value))
+                .SelectMany(p => p.Value is DefinitionRef type && facts.Layouts.Of(type) is { } layout
+                    ? FieldTypes(layout.Fields, member.Offset - p.Key + RuntimeLayout.ObjectHeaderSize, memberRead.Width) : [])
+                .Distinct().ToArray();
+            if (candidates is [var fieldType]) return fieldType;
+        }
         if (expression is not Load load || Split(load.Address) is not { Root: { } root } split) return null;
         var statics = Top(root) as Symbol;
         var owner = statics is { Kind: SymbolKind.StaticFields, Value: DefinitionRef d } ? d : TypeOf(root, active);

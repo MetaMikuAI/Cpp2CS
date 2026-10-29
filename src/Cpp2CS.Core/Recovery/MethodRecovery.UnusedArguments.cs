@@ -13,7 +13,7 @@ public sealed partial class MethodRecovery
     {
         private bool DirectInputProof(Call call, MethodRef callee) =>
             call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target }
-            && !callee.Method.IsVirtual && facts.EntriesAt(target.Value).Any(e => e.Method is MethodRef candidate && candidate.Method == callee.Method);
+            && !virtualCalls.Contains(call) && facts.EntriesAt(target.Value).Any(e => e.Method is MethodRef candidate && candidate.Method == callee.Method);
 
         private bool UnusedParameter(Call call, Storage register) =>
             call.Target is Const target && owner.rewriter.UnusedInput(target.Value, register);
@@ -24,6 +24,47 @@ public sealed partial class MethodRecovery
 
         private bool MissingInput(Expr expression) => expression is Unknown or Use { Variable.Version: < 0 }
             || expression is Use use && runtime.Contains(use.Variable);
+
+        // 各入边已有的判空对象汇合后，可补回编译器省略的实例输入；不重新读取对象或新增判空。
+        private void PrepareUnusedReceiverPhis()
+        {
+            var changed = false;
+            foreach (var block in blocks.Where(b => b.Predecessors.Count > 1 && !b.IsLandingPad))
+                foreach (var call in block.Statements.OfType<Call>().ToArray())
+                {
+                    if (Resolve(call) is not { } callee || owner.abi.Classify(callee, out _)?.This is not { Pieces: [var piece] } self
+                        || types.Kind(self.Type) != TypeKind.Reference || !UnusedInput(call, callee, self)) continue;
+                    var index = Array.IndexOf(call.Sources, piece.Register);
+                    if (index < 0 || !MissingInput(call.Arguments[index])) continue;
+                    var receivers = block.Predecessors.Select(parent => CheckedOnPath(parent, self.Type)).ToArray();
+                    if (receivers.Any(v => v is null)) continue;
+                    var target = new Variable(Storage.Temp(nextStructLocal--), 1);
+                    block.Statements.Insert(0, new Phi(block.Start, target, receivers.Select(v => v!).ToArray()));
+                    var args = call.Arguments.ToArray();
+                    args[index] = new Use(target, piece.Width);
+                    var replacement = call with { Arguments = args };
+                    block.Statements[block.Statements.IndexOf(call)] = replacement;
+                    PreserveStatementAnalysis(call, replacement);
+                    changed = true;
+                }
+            if (!changed) return;
+            definitions = IndexDefinitions();
+            InferTypes();
+
+            Variable? CheckedOnPath(Block block, TypeRef type)
+            {
+                var seen = new HashSet<Block>();
+                while (seen.Add(block))
+                {
+                    foreach (var statement in block.Statements.AsEnumerable().Reverse())
+                        if (statement is Call { Op.Kind: OpKind.NullCheck, Arguments: [Use receiver] }
+                            && known.TryGetValue(receiver.Variable, out var actual) && types.IsAssignable(actual, type)) return receiver.Variable;
+                    if (block.Predecessors.ToArray() is not [var parent] || parent.Handler == block || !parent.NormalSuccessors.Contains(block)) return null;
+                    block = parent;
+                }
+                return null;
+            }
+        }
 
         // 编译器可以省略未用输入。仅填补 Unknown 或不能表示成引用的残值，保留已有求值。
         [ArgumentRule(30)]

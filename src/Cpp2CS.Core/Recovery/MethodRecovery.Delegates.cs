@@ -24,7 +24,11 @@ public sealed partial class MethodRecovery
             bool Constructor(Call call) => call is { Op: null, Kind: CallKind.Direct, Target: Const target }
                 && facts.EntriesAt(target.Value).Any(e => e.Method is { Method.Name: ".ctor", DeclaringType: DefinitionRef type }
                     && DelegateFacts.IsDelegate(type));
-            if (DelegateConstructorChoices.Split(function, Constructor, ExpandIdentity))
+            bool GenericIdentity(Call call, int argument, MethodRef target) => call.Target is Const address
+                && argument < call.Sources.Length && owner.abi.Classify(target, out _)?.MethodInfo?.Register == call.Sources[argument]
+                && facts.EntriesAt(address.Value).Any(e => e.Method?.Method == target.Method);
+            if (CallIdentityChoices.Split(function, Constructor, ExpandIdentity)
+                | CallIdentityChoices.SplitGeneric(function, GenericIdentity, ExpandIdentity))
                 Ssa.Propagate.Run(function, Ssa.Dominators.Compute(function));
         }
 

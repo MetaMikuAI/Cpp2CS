@@ -1,4 +1,5 @@
 using Cpp2CS.Ir;
+using Cpp2CS.Facts;
 
 namespace Cpp2CS.Lifting;
 
@@ -8,7 +9,9 @@ internal static class NativeInputs
     public static HashSet<Storage>? Reads(LiftedFunction lifted, Func<Call, Storage, bool>? unused = null)
     {
         var statements = lifted.Function.Blocks.SelectMany(b => b.Statements).ToArray();
-        if (!lifted.Succeeded || lifted.Function.Problems.Count != 0 || lifted.Function.UnresolvedIndirectJumps != 0
+        var tails = statements.OfType<Call>().Where(c => c.Kind == CallKind.TailIndirect).ToArray();
+        if (!lifted.Succeeded || lifted.Function.Problems.Count != 0
+            || lifted.Function.UnresolvedIndirectJumps != 0 && (lifted.Function.UnresolvedIndirectJumps != tails.Length || !tails.All(c => VirtualTail(c, statements)))
             || statements.Any(s => s is Opaque or IndirectJump { Targets.Length: 0 })) return null;
         if (unused is null)
             return statements.SelectMany(s => ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable)
@@ -53,5 +56,17 @@ internal static class NativeInputs
             if (definitions.TryGetValue(variable, out var inputs))
                 foreach (var input in inputs) if (roots.Add(input)) pending.Push(input);
         return roots.Where(v => v.Version == 0).Select(v => v.Storage).ToHashSet();
+    }
+
+    // 已知 vtable 取址及同一对象作为 this，足以证明该跳转是尾调用；所有实参仍参与入口读取分析。
+    private static bool VirtualTail(Call call, Stmt[] statements)
+    {
+        var definitions = statements.OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+        Expr Expand(Expr value, int depth = 32) => depth == 0 ? value : Fold.Simplify(ExprMap.Map(value,
+            e => e is Use use && definitions.TryGetValue(use.Variable, out var source) ? Expand(source, depth - 1) : null));
+        if (Expand(call.Target) is not Load { Width: 64, Address: Binary { Op: BinOp.Add, Left: Load { Width: 64 } klass, Right: Const offset } }
+            || offset.Value < RuntimeLayout.ClassVtable || (offset.Value - RuntimeLayout.ClassVtable) % RuntimeLayout.VirtualInvokeDataSize != 0)
+            return false;
+        return call.Arguments.Length > 0 && Expand(call.Arguments[0]) == klass.Address;
     }
 }

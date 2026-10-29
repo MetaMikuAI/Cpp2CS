@@ -27,6 +27,42 @@ public sealed partial class MethodRecovery
 
         private LocalValue StructLocal(TypeRef type, int width) => new(new Variable(Storage.Temp(nextStructLocal--), 1), type, width);
 
+        /// <summary>循环中的结构体片按相同叶子汇合；填充仍没有值，不能借助零初值把填充变成整数。</summary>
+        [Analysis("片汇合", 98, After = ["结构体写入汇合"])]
+        private void PrepareFragmentPhis()
+        {
+            var phis = blocks.SelectMany(b => b.Statements).OfType<Phi>().ToArray();
+            var targets = phis.Select(p => p.Target).ToHashSet();
+            var links = phis.SelectMany(p => p.Sources.SelectMany(s => new[] { (From: p.Target, To: s), (From: s, To: p.Target) }))
+                .ToLookup(p => p.From, p => p.To);
+            var seen = new HashSet<Variable>();
+            foreach (var phi in phis)
+            {
+                if (seen.Contains(phi.Target)) continue;
+                var web = new HashSet<Variable>();
+                var pending = new Stack<Variable>(); pending.Push(phi.Target);
+                while (pending.TryPop(out var next))
+                    if (web.Add(next)) foreach (var linked in links[next]) pending.Push(linked);
+                seen.UnionWith(web);
+                if (web.Any(v => v.Width != 64 || structPhiMembers.ContainsKey(v))) continue;
+                var fragments = new List<Fragment>();
+                var zeros = new List<Variable>();
+                var complete = true;
+                foreach (var source in web.Where(v => !targets.Contains(v)))
+                {
+                    if (values.GetValueOrDefault(source) is Const { Value: 0, Width: 64 }) { zeros.Add(source); continue; }
+                    if (!Variable(source, 64).TryGet(out var value, out _) || value is not Fragment fragment) { complete = false; break; }
+                    fragments.Add(fragment);
+                }
+                if (!complete || fragments.Count == 0) continue;
+                var shape = fragments[0].Parts.Select(p => (p.Low, p.Value.Type, p.Value.Width)).ToArray();
+                if (fragments.Any(f => !f.Parts.Select(p => (p.Low, p.Value.Type, p.Value.Width)).SequenceEqual(shape))) continue;
+                foreach (var target in web.Where(targets.Contains))
+                    fragmentLocals[target] = new Fragment(shape.Select(p => new Part(p.Low, StructLocal(p.Type, p.Width))).ToArray(), types.UInt64, 64);
+                inlined.UnionWith(zeros);
+            }
+        }
+
         private RecoveryResult<Fragment?> MemoryFragment(Expr root, TypeRef type, long offset, int width)
         {
             if (type is not (ByRefRef or DefinitionRef)) return (Fragment?)null;
@@ -57,7 +93,7 @@ public sealed partial class MethodRecovery
                 return ResizeFragment(cached, width).Map<Fragment?>(value => (Fragment)value);
             if (fragmentActive.Count == 0) fragmentSteps = 0;
             if (fragmentActive.Count >= 64 || ++fragmentSteps > 1024) return (Fragment?)null;
-            if (!values.TryGetValue(variable, out var expression) || expression is not (Load { Width: > 32 } or Use or Ir.Convert or Insert)
+            if (!values.TryGetValue(variable, out var expression) || expression is not (Load { Width: > 32 } or Use or Ir.Convert or Insert or Binary { Op: BinOp.LShr, Right: Const })
                 || !fragmentActive.Add(variable)) return (Fragment?)null;
             var recovered = RecoverFragment();
             fragmentActive.Remove(variable);
@@ -94,6 +130,29 @@ public sealed partial class MethodRecovery
         /// <summary>覆盖整个向量的逐道计算保留为独立叶子，按原定义顺序快照。</summary>
         private RecoveryResult<ManagedValue> InsertedFragment(Insert insert)
         {
+            if (Recover(insert.Base, null).TryGet(out var original, out _) && Recover(insert.Value, null).TryGet(out var inserted, out _)
+                && (original is Fragment || inserted is Fragment))
+            {
+                var parts = new List<Part>();
+                void Append(ManagedValue value, int at)
+                {
+                    if (value is Fragment fragment) parts.AddRange(fragment.Parts.Select(p => new Part(at + p.Low, p.Value)));
+                    else parts.Add(new Part(at, value));
+                }
+                if (insert.Low > 0)
+                {
+                    if (!Slice(original, 0, insert.Low).TryGet(out var low, out var failure)) return failure;
+                    Append(low, 0);
+                }
+                Append(inserted, insert.Low);
+                var end = insert.Low + insert.Value.Width;
+                if (end < insert.Width)
+                {
+                    if (!Slice(original, end, insert.Width - end).TryGet(out var high, out var failure)) return failure;
+                    Append(high, end);
+                }
+                return new Fragment(parts, types.UInt64, insert.Width);
+            }
             var pieces = new List<(int Low, Expr Value)>();
             Expr current = insert;
             while (current is Insert part)
@@ -207,7 +266,7 @@ public sealed partial class MethodRecovery
         [DefineRule(10)]
         private RecoveryResult<bool> DefineFragment(Define define, List<ManagedStatement> output)
         {
-            if (define.Value is not (Load { Width: > 32 } or Use or Ir.Convert or Insert)) return false;
+            if (define.Value is not (Load { Width: > 32 } or Use or Ir.Convert or Insert or Binary { Op: BinOp.LShr, Right: Const })) return false;
             if (!Recover(define.Value, null).TryGet(out var value, out var failure)) return failure;
             if (value is not Fragment source) return false;
             if (!FragmentVariable(define.Target, source.Width).TryGet(out var target, out failure)) return failure;

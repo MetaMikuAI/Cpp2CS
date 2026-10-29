@@ -18,10 +18,10 @@ public sealed partial class MethodRecovery
                 || left is not Fragment && (frameRegions.Count == 0 || operation != BinOp.AShr)) return (ManagedValue?)null;
             var low = (int)(shift.Bits & (ulong)(width - 1));
             var narrow = width - low;
-            if (narrow is not (8 or 16 or 32) || narrow == width) return (ManagedValue?)null;
+            if (narrow == width || (operation == BinOp.LShr && left is Fragment ? narrow % 8 != 0 : narrow is not (8 or 16 or 32))) return (ManagedValue?)null;
             if (!Slice(left, low, narrow).TryGet(out var leaf, out var failure)) return failure;
             if (operation == BinOp.LShr)
-                return ResizeFragment(new Fragment([new Part(0, leaf)], types.UInt64, narrow), width).Map<ManagedValue?>(value => value);
+                return ResizeFragment(leaf as Fragment ?? new Fragment([new Part(0, leaf)], types.UInt64, narrow), width).Map<ManagedValue?>(value => value);
             if (!Coerce(leaf, types.Integer(narrow, false), 0).TryGet(out leaf, out failure)) return failure;
             return new ConversionValue(ConvKind.SignExtend, leaf, types.Integer(width, true), width);
         }

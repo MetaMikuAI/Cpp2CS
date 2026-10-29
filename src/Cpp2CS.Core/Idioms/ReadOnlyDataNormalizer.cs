@@ -40,6 +40,10 @@ internal static class ReadOnlyDataNormalizer
                         index = scaled.Left;
                     else if (load.Width != 8) return null;
                     if (index is Ir.Convert { Kind: ConvKind.SignExtend or ConvKind.ZeroExtend } extension) index = extension.Operand;
+                    // 同一 SSA 快照的高位已由扩展确定；无符号上界排除了符号扩展的负数。
+                    else if (index is Use { Width: 64 } use && definitions.TryGetValue(use.Variable, out var definition)
+                        && definition is Ir.Convert { Kind: ConvKind.SignExtend or ConvKind.ZeroExtend, Width: 64, Operand.Width: 32 })
+                        index = new Use(use.Variable, 32);
                     var count = Bound(index, block);
                     if (count is < 1 or > 256) return null;
                     var size = count * load.Width / 8;

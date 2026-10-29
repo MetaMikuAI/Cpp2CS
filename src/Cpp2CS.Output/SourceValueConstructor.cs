@@ -1,4 +1,5 @@
 using System.Reflection;
+using Cpp2CS.Ir;
 using Cpp2CS.Model;
 using Cpp2CS.Recovery;
 
@@ -34,8 +35,22 @@ internal sealed record SourceValueConstructor(MethodRef Method, IReadOnlyList<(F
 
     internal NewObjectValue? Build(ComposedValue value)
     {
-        static bool Snapshot(ManagedValue v) => v is LocalValue or ArgumentValue or ConstantValue
-            || v is NewObjectValue { Transparent: true } created && created.Arguments.All(Snapshot);
+        static bool LocalStorage(ManagedValue v) => v switch
+        {
+            LocalValue { Type: DefinitionRef { Definition.IsValueType: true } } => true,
+            AddressValue address => LocalStorage(address.Target),
+            FieldValue { Accessor: null } field => LocalStorage(field.Receiver),
+            _ => false,
+        };
+        static bool Snapshot(ManagedValue v) => v switch
+        {
+            LocalValue or ArgumentValue or ConstantValue => true,
+            NewObjectValue { Transparent: true } created => created.Arguments.All(Snapshot),
+            FieldValue { Accessor: null } field => LocalStorage(field.Receiver),
+            BinaryValue { Op: BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv } binary => Snapshot(binary.Left) && Snapshot(binary.Right),
+            ConversionValue conversion => Snapshot(conversion.Operand),
+            _ => false,
+        };
         if (!value.Type.Equals(Method.DeclaringType) || value.Leaves.Count != Fields.Count
             || value.Leaves.Any(l => l.Path.Count != 1 || !Snapshot(l.Value))
             || value.Leaves.Select(l => l.Path[0]).Distinct().Count() != Fields.Count) return null;

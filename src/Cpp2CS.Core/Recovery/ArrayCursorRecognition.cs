@@ -88,7 +88,7 @@ internal static class ArrayCursorRecognition
         {
             var value = Expand(new Use(source, 64));
             // 数组根可在循环内重读；常量字节偏移由数组加法确定元素大小，其他用途保留其数值。
-            if (value is Const initial && initial.Signed >= Facts.RuntimeLayout.ArrayData && OffsetSize(pointer) is { } element)
+            if (value is Const initial && initial.Signed >= 0 && OffsetSize(pointer) is { } element)
                 return (Expr.C(0, 64), initial.Signed, element, null);
             long offset = 0;
             while (value is Binary { Op: BinOp.Add, Right: Const constant } addition) { offset += constant.Signed; value = addition.Left; }

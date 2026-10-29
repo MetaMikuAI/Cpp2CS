@@ -349,15 +349,16 @@ public sealed partial class MethodRecovery
                 var pairs = (from source in sources
                              from target in targets
                              where source.Type.Equals(target.Type) && source.Offset == target.Offset
-                             orderby types.Size(source.Type)
+                             orderby types.Size(source.Type) descending
                              select (source, target)).ToArray();
                 if (pairs.Length == 0) continue;
-                var smallest = pairs.Where(p => types.Size(p.source.Type) == types.Size(pairs[0].source.Type)).Distinct().ToArray();
+                // 先使用两端共有的最外层类型，连续分片才能一起覆盖包含嵌套结构体的完整值。
+                var outermost = pairs.Where(p => types.Size(p.source.Type) == types.Size(pairs[0].source.Type)).Distinct().ToArray();
                 // 同样大小、在同一偏移互相嵌套的结构体（例如 UniTask.Awaiter 只有一个 UniTask 字段）覆盖相同的叶子，取最外层，逐叶子拷贝的结果相同。
-                if (smallest.Length > 1)
-                    smallest = smallest.Where(p => smallest.All(q => q == p || StructPaths(p.source.Type).Any(path => path.Offset == 0 && path.Type.Equals(q.source.Type)))).ToArray();
-                if (smallest.Length != 1) continue;
-                var (from, to) = smallest[0];
+                if (outermost.Length > 1)
+                    outermost = outermost.Where(p => outermost.All(q => q == p || StructPaths(p.source.Type).Any(path => path.Offset == 0 && path.Type.Equals(q.source.Type)))).ToArray();
+                if (outermost.Length != 1) continue;
+                var (from, to) = outermost[0];
                 if (from.Type is GenericParameterRef { NativeAggregate: not null })
                 {
                     // 开放 T 没有可访问的实例字段；只允许后续完整覆盖检查把所有片合并成一次复制。

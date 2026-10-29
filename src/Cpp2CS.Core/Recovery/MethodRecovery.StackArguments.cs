@@ -2,6 +2,7 @@ using Cpp2CS.Recovery.Analysis;
 using Cpp2CS.Facts;
 using Cpp2CS.Flow;
 using Cpp2CS.Ir;
+using Cpp2CS.Model;
 
 namespace Cpp2CS.Recovery;
 
@@ -10,7 +11,8 @@ public sealed partial class MethodRecovery
     private sealed partial class Context
     {
         private readonly Dictionary<Store, LocalValue> stackArgumentStores = [];
-        private readonly Dictionary<(ulong Site, int Parameter), LocalValue> stackArgumentValues = [];
+        private readonly Dictionary<(ulong Site, int Parameter), ManagedValue> stackArgumentValues = [];
+        private readonly Dictionary<ulong, (long Offset, int Size)> callStackAreas = [];
 
         /// <summary>按 AAPCS64 栈布局匹配到达写入，值在原写入位置快照；不把寄存器耗尽后的参数丢掉。</summary>
         [Analysis("标量栈实参", 29, After = ["帧前类型"])]
@@ -56,6 +58,7 @@ public sealed partial class MethodRecovery
                     ? new HashSet<long?> { Offset(last.Value, []) } : Input(block);
                 if (state.Count != 1 || state.Single() is not { } callSp) continue;
                 var layout = owner.abi.StackArguments(signature);
+                callStackAreas[call.Address] = (callSp, layout.Size);
                 // 虚调用的隐藏 MethodInfo 与方法指针来自同一个 vtable 槽，寄存器耗尽时写入栈。
                 if (call.Op?.Kind == OpKind.CallVirtual && layout.MethodInfoOffset is { } hidden
                     && ReachingStackStore(block, block.Statements.IndexOf(call), callSp + hidden, []) is { } metadata
@@ -65,6 +68,23 @@ public sealed partial class MethodRecovery
                     dropped.Add(metadata);
                 foreach (var parameter in layout.Parameters)
                 {
+                    if (!parameter.Indirect && types.Kind(parameter.Type) == TypeKind.Struct && owner.abi.Hfa(parameter.Type) is { } hfa)
+                    {
+                        var leaves = StructPaths(parameter.Type).Where(p => types.Kind(p.Type) is TypeKind.Float or TypeKind.Double).ToArray();
+                        var stores = leaves.Select(p => ReachingStackStore(block, block.Statements.IndexOf(call),
+                            callSp + parameter.Offset + p.Offset, [], hfa.Width)).ToArray();
+                        if (leaves.Length != hfa.Count || stores.Any(s => s is null)
+                            || leaves.Any(p => !ExclusiveStackArgument(callSp + parameter.Offset + p.Offset, hfa.Width))
+                            || stores.Where((s, i) => stackArgumentStores.TryGetValue(s!, out var local) && !local.Type.Equals(leaves[i].Type)).Any()) continue;
+                        var parts = leaves.Select((p, i) =>
+                        {
+                            if (!stackArgumentStores.TryGetValue(stores[i]!, out var local))
+                                stackArgumentStores[stores[i]!] = local = StructLocal(p.Type, hfa.Width);
+                            return ((IReadOnlyList<FieldRef>)p.Path, (ManagedValue)local);
+                        }).ToArray();
+                        stackArgumentValues[(call.Address, parameter.Index)] = new ComposedValue(parameter.Type, parts);
+                        continue;
+                    }
                     if (types.Kind(parameter.Type) is not (TypeKind.Float or TypeKind.Double or TypeKind.Int or TypeKind.Bool or TypeKind.Reference)) continue;
                     var width = types.Size(parameter.Type) * 8;
                     if (width is not (8 or 16 or 32 or 64)

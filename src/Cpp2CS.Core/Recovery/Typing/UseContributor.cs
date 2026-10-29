@@ -43,10 +43,11 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                         active.Remove(u.Variable);
                         return;
                     }
-                    else if (context.Types.Kind(type) == TypeKind.Reference && value is Select && active.Add(u.Variable))
+                    else if (value is Select && (context.Types.Kind(type) == TypeKind.Reference || FloatingChoice(context, values, u.Variable, type)) && active.Add(u.Variable))
                     {
                         Hint(value, type, address, detail);
                         active.Remove(u.Variable);
+                        constraints.Requires(u.Variable, type, new(Name, address, detail));
                         return;
                     }
                     else if (!phis.Contains(u.Variable) && !FloatingChoice(context, values, u.Variable, type)) return;
@@ -76,7 +77,19 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
     {
         if (context.Types.Kind(type) is not (TypeKind.Float or TypeKind.Double) || !values.TryGetValue(variable, out var value)) return false;
         var width = context.Types.Bits(type);
-        bool Bits(Expr e) => e.Width == width && (e is Const || e is Use u && context.TypeOf(u.Variable) == type || e is Select s && Bits(s.True) && Bits(s.False));
+        var active = new HashSet<Variable>();
+        bool Bits(Expr e)
+        {
+            if (e.Width != width) return false;
+            if (e is Const) return true;
+            if (e is Select s) return Bits(s.True) && Bits(s.False);
+            if (e is not Use u) return false;
+            if (context.TypeOf(u.Variable) == type) return true;
+            if (!active.Add(u.Variable) || !values.TryGetValue(u.Variable, out var source)) return false;
+            var result = Bits(source);
+            active.Remove(u.Variable);
+            return result;
+        }
         return value is Select && Bits(value);
     }
 
@@ -94,6 +107,14 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                     yield return (comparison.Left, integer, statement.Address, "整数比较左值");
                     yield return (comparison.Right, integer, statement.Address, "整数比较右值");
                 }
+        foreach (var statement in context.Statements)
+            foreach (var addition in ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Binary>().Where(b => b.Op == BinOp.Add && b.Width == 64))
+            {
+                if (expressions.TypeOf(addition.Left) is PointerRef)
+                    yield return (addition.Right, context.Types.Int64, statement.Address, "原生指针字节偏移");
+                if (expressions.TypeOf(addition.Right) is PointerRef)
+                    yield return (addition.Left, context.Types.Int64, statement.Address, "原生指针字节偏移");
+            }
         foreach (var statement in context.Statements)
             switch (statement)
             {
@@ -131,6 +152,15 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                     if (call.DelegateReceiver is { } delegateReceiver && signature.This is { } delegateThis)
                         yield return (delegateReceiver, delegateThis.Type, call.Address, "委托接收者");
                     foreach (var parameter in signature.Arguments)
+                    {
+                        if (parameter.Passing == Passing.Registers && context.Types.Kind(parameter.Type) == TypeKind.Struct && abi.Hfa(parameter.Type) is { } hfa)
+                        {
+                            foreach (var piece in parameter.Pieces)
+                                if (registers.TryGetValue(piece.Register, out var component))
+                                    yield return (ScalarVectorNarrowing.Low(component, piece.Width), hfa.Width == 32 ? context.Types.Single : context.Types.Double,
+                                        call.Address, $"{target} 同质浮点实参 {piece.Register}");
+                            continue;
+                        }
                         if (parameter is { Passing: Passing.Registers, Pieces.Length: 1 } && registers.TryGetValue(parameter.Pieces[0].Register, out var argument))
                         {
                             if (ReferenceEquals(parameter, signature.This)
@@ -138,6 +168,7 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                                 && input.UnusedInput(call, target, parameter)) continue;
                             yield return (argument, parameter.Type, call.Address, $"{target} 实参 {parameter.Pieces[0].Register}");
                         }
+                    }
                     break;
             }
     }

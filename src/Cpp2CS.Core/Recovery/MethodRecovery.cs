@@ -295,9 +295,10 @@ public sealed partial class MethodRecovery
                 {
                     returnHole = Hole(entry, $"返回值 类型 {ret.Type} 尚未支持");
                 }
-                // 聚合返回也保留全部寄存器读取，避免诊断前被当作死定义删去；不会翻译成托管值。
-                returnValue = ret.Pieces.Length == 1 ? new Read(ret.Pieces[0].Register, ret.Pieces[0].Width)
-                    : new Intrinsic("diagnostic_return", ret.Pieces.Select(p => (Expr)new Read(p.Register, p.Width)).ToArray(), 64);
+                // 寄存器聚合返回保留全部片；间接返回只写入口缓冲区，返回时的 x8 内容不属于结果。
+                if (!IndirectStruct(ret))
+                    returnValue = ret.Pieces.Length == 1 ? new Read(ret.Pieces[0].Register, ret.Pieces[0].Width)
+                        : new Intrinsic("diagnostic_return", ret.Pieces.Select(p => (Expr)new Read(p.Register, p.Width)).ToArray(), 64);
             }
             var lifted = owner.lifter.Lift(entry, returnValue);
             if (!lifted.Succeeded)
@@ -403,6 +404,7 @@ public sealed partial class MethodRecovery
                 MarkRuntime();
                 InferTypes();
             }
+            PrepareUnusedReceiverPhis();
             TrimIndirectArguments(typed: true);
             NarrowTypedScalars();
         }
@@ -515,11 +517,21 @@ public sealed partial class MethodRecovery
                 void Add(Expr e) { if (e is Binary { Op: BinOp.Add } b) { Add(b.Left); Add(b.Right); } else terms.Add(e); }
                 Add(Expand(entry.Address));
                 if (terms.OfType<Use>().ToArray() is not [{ Variable: var klass }] || terms.Count(t => t is not Const) != 1) continue;
-                if (!values.TryGetValue(klass, out var klassValue) || klassValue is not Load { Width: 64, Address: var objectAddress } || Expand(objectAddress) != Expand(call.Arguments[0])) continue;
+                var joined = new List<Variable>();
+                if (phis.TryGetValue(klass, out var klassPhi) && call.Arguments[0] is Use receiver && phis.TryGetValue(receiver.Variable, out var objectPhi)
+                    && blocks.Any(b => b.Statements.OfType<Phi>().Any(p => p.Target == klassPhi.Target)
+                        && b.Statements.OfType<Phi>().Any(p => p.Target == objectPhi.Target))
+                    && klassPhi.Sources.Length == objectPhi.Sources.Length
+                    && klassPhi.Sources.Zip(objectPhi.Sources).All(pair => values.GetValueOrDefault(pair.First) is Load { Width: 64, Address: Use obj }
+                        && obj.Variable == pair.Second && users[pair.First].All(s => s is Phi p && p.Target == klassPhi.Target)))
+                    joined.AddRange(klassPhi.Sources);
+                else if (!values.TryGetValue(klass, out var klassValue) || klassValue is not Load { Width: 64, Address: var objectAddress }
+                    || Expand(objectAddress) != Expand(call.Arguments[0])) continue;
                 // 类指针的使用：虚表项的读取，或作为调用实参（保守约定）。
                 var entries = values.Where(p => p.Value is Load { Width: 64 } l && ReadsKlass(l.Address, klass)).Select(p => p.Key).ToHashSet();
                 if (users[klass].Any(s => s is not Call && !(s is Define d && entries.Contains(d.Target)))) continue;
                 runtime.Add(klass);
+                runtime.UnionWith(joined);
                 foreach (var e in entries) runtime.Add(e);
             }
         }
@@ -952,7 +964,8 @@ public sealed partial class MethodRecovery
                         }
                         if (candidate.Owner.GenericParameters.Count == 0)
                         {
-                            var compatible = candidate.IsStatic || receiver is null || types.IsAssignable(receiver, new DefinitionRef(candidate.Owner, [])) || receiver is ByRefRef;
+                            var compatible = candidate.IsStatic || receiver is null || types.IsAssignable(receiver, new DefinitionRef(candidate.Owner, [])) || receiver is ByRefRef
+                                || Receiver(call) is Use reference && CheckedReference(reference, new DefinitionRef(candidate.Owner, []), call.Address);
                             available.Add(new(new(candidate, [], []), "native-entry+receiver", compatible ? null : "call.receiver-incompatible"));
                             continue;
                         }
@@ -1090,7 +1103,7 @@ public sealed partial class MethodRecovery
                 return new ConstantValue(0, target, 64);
             if (types.Kind(target) == TypeKind.Reference && e is Use { Width: 64 } referenceValue
                 && TypeOfValue(e) is { } sourceType && types.Kind(sourceType) == TypeKind.Reference
-                && !types.IsAssignable(sourceType, target) && CheckedNullableReference(referenceValue, target, address))
+                && !types.IsAssignable(sourceType, target) && CheckedReference(referenceValue, target, address))
                 return Recover(e, sourceType).Map<ManagedValue>(value => new IsInstValue(value, target));
             return target is ByRefRef reference ? StructAddress(e, reference.Element) : Recover(e, target).Bind(value => Coerce(value, target, address));
         }
@@ -1319,6 +1332,8 @@ public sealed partial class MethodRecovery
             if (projected is not null) return projected;
             if (b.Op == BinOp.Add && b.Width == 64 && left.Type is PointerRef && types.Kind(right.Type) == TypeKind.Int)
                 return new PointerOffsetValue(left, right);
+            if (b.Op == BinOp.Add && b.Width == 64 && right.Type is PointerRef && types.Kind(left.Type) == TypeKind.Int)
+                return new PointerOffsetValue(right, left);
             // 掩码清除的填充位来自指令语义；保留的位仍须来自已知叶子。
             if (b.Op == BinOp.And && left is Fragment masked && right is ConstantValue { Bits: var mask })
             {
@@ -1507,6 +1522,16 @@ public sealed partial class MethodRecovery
             {
                 if (structPhiMembers.ContainsKey(phi.Target) || exceptionLayout is { Succeeded: true } && !exceptionDemand.Contains(phi.Target)
                     || runtime.Contains(phi.Target) || exceptionValues.ContainsKey(phi.Target)) continue;
+                if (fragmentLocals.TryGetValue(phi.Target, out var fragmentTarget))
+                {
+                    if (!Variable(phi.Sources[incoming], fragmentTarget.Width).TryGet(out var fragmentSource, out var fragmentFailure)) return fragmentFailure;
+                    foreach (var part in fragmentTarget.Parts)
+                    {
+                        if (!Slice(fragmentSource, part.Low, part.Value.Width).Bind(v => Coerce(v, part.Value.Type, phi.Address)).TryGet(out var value, out fragmentFailure)) return fragmentFailure;
+                        copies.Add(new((LocalValue)part.Value, value));
+                    }
+                    continue;
+                }
                 if (!Local(phi.Target).TryGet(out var local, out var failure)) return failure;
                 var source = phi.Sources[incoming];
                 var attempt = Copy();
@@ -1601,8 +1626,9 @@ public sealed partial class MethodRecovery
                 case Return ret:
                     if (returnHole is { } cause) return Derived(cause, "返回 返回值类型尚未支持");
                     if (ManagedTypes.IsVoid(returnType)) { output.Add(new ManagedReturn(ret.Address, null)); return null; }
+                    if (ownReturnBuffer is not null) { output.Add(new ManagedReturn(ret.Address, ownReturnBuffer)); return null; }
                     if (ret.Value is not { } returned) return Fail(ret.Address, "返回 非 void 方法缺少返回值");
-                    return Emit((ownReturnBuffer is not null || types.Kind(returnType) == TypeKind.Struct ? StructReturn(returned)
+                    return Emit((types.Kind(returnType) == TypeKind.Struct ? StructReturn(returned)
                         : RecoverAs(returned, returnType, ret.Address)).Map(value => new ManagedReturn(ret.Address, value)), output);
                 default: return Fail(statement.Address, $"语句 {statement.GetType().Name} 尚未支持");
             }

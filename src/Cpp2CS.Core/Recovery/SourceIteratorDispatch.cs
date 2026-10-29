@@ -26,6 +26,9 @@ internal static class SourceIteratorDispatch
         bool Capture(ManagedStatement statement) => statement is ManagedAssignment { Value: FieldValue
             { Receiver: ArgumentValue { Index: -1 }, Accessor: null, Field.Field.Name: "<>4__this" } field }
             && field.Field.Field.Owner == method.Owner;
+        bool Initialize(ManagedStatement statement) => statement is ManagedStore
+            { Target: IndirectValue { Address: AddressValue { Target: LocalValue } }, Value: ComposedValue { Leaves.Count: 0 } }
+            or ManagedAssignment { Value: ComposedValue { Leaves.Count: 0 } or ConstantValue };
         var dispatch = new HashSet<ulong>();
         var pending = new Stack<ulong>();
         pending.Push(body.Blocks[0].Address);
@@ -33,7 +36,7 @@ internal static class SourceIteratorDispatch
         {
             var block = blocks[address];
             if (dispatch.Contains(address) || block.Statements.Count == 0
-                || block.Statements.SkipLast(1).Any(s => s != state[0] && !Capture(s))) continue;
+                || block.Statements.SkipLast(1).Any(s => s != state[0] && !Capture(s) && !Initialize(s))) continue;
             var last = block.Statements[^1];
             if (last is not ManagedJump && !(last is ManagedBranch branch && Test(branch.Condition))
                 && !(last is ManagedSwitch selection && State(selection.Index))) continue;

@@ -99,6 +99,29 @@ internal static partial class SourceListCalls
                     && target.Field.Field.Owner != list && Strip(value) is LocalValue or ArgumentValue or ConstantValue) { }
                 else values.Clear();
             }
+            // 容量分支之前的条件块可复用旧长度；沿唯一前驱回溯，遇到调用或写入即停止。
+            if (values.Count == 0)
+            {
+                var current = block;
+                var before = start;
+                var visited = new HashSet<ulong>();
+                bool PreservesCount(ManagedStatement s) => s is ManagedAssignment or ManagedBranch or ManagedJump
+                    && !ManagedValues.Edges(s).Any(e => e.Copies.Count != 0)
+                    && (s is not ManagedAssignment assignment || assignment.Target != receiver);
+                while (visited.Add(current.Address))
+                {
+                    var prefixStatements = current.Statements.Take(before).Reverse().ToArray();
+                    var snapshot = prefixStatements.TakeWhile(PreservesCount)
+                        .OfType<ManagedAssignment>().FirstOrDefault(a => IsField(Strip(a.Value), "_size") && writes.GetValueOrDefault(a.Target.Variable) == 1);
+                    if (snapshot is not null) { values[snapshot.Target.Variable] = Strip(snapshot.Value); break; }
+                    if (prefixStatements.Any(s => !PreservesCount(s))
+                        || flow.Predecessors.GetValueOrDefault(current.Address) != 1) break;
+                    var previous = body.Blocks.Single(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == current.Address));
+                    if (!flow.SameRegion(previous.Address, block.Address)) break;
+                    current = previous;
+                    before = current.Statements.Count;
+                }
+            }
             var savedCount = values.Count != 0;
             bool Increment(ManagedValue value, ManagedValue original) => value is BinaryValue { Op: BinOp.Add, Right: ConstantValue { Bits: 1 } } add && add.Left.Equals(original);
             bool Assign(ManagedAssignment assignment)
@@ -217,7 +240,7 @@ internal static partial class SourceListCalls
 
     private static bool SameExit(ManagedStatement? left, ManagedStatement? right) => (left, right) switch
     {
-        (ManagedReturn { Value: null }, ManagedReturn { Value: null }) => true,
+        (ManagedReturn a, ManagedReturn b) => Equals(a.Value, b.Value),
         (ManagedJump a, ManagedJump b) => a.Edge.Target == b.Edge.Target && a.Edge.Copies.SequenceEqual(b.Edge.Copies),
         _ => false,
     };

@@ -39,7 +39,7 @@ internal static class DelegateConstructorChoiceCheck
             return new() { Entry = 0, Range = new(0, 28, CodeRegion.Managed, BoundaryEvidence.EhFrame)
                 { ExceptionRegions = handler ? [new(0, 24, 32)] : [] }, Blocks = [entry, left, right, join] };
         }
-        bool Split(MachineFunction function) => DelegateConstructorChoices.Split(function, c => c.Target == constructor.Target,
+        bool Split(MachineFunction function) => CallIdentityChoices.Split(function, c => c.Target == constructor.Target,
             e => e is Use u && methods.TryGetValue(u.Variable, out var value) ? value : e);
         var a = new Assertions();
         var sample = Diamond();
@@ -52,6 +52,40 @@ internal static class DelegateConstructorChoiceCheck
         a.True(!Split(Diamond(effects: true)), "不跨越构造前的其他调用");
         a.True(!Split(Diamond(handler: true)), "异常区域尚未证明时不移动调用");
         a.True(!Split(Diamond(extraPredecessor: true)), "分支带其他入口时不复制构造");
+        var allocated = Diamond();
+        var result = ((Use)constructor.Arguments[0]).Variable;
+        var allocation = new Call(18, CallKind.Direct, Expr.C(400, 64))
+            { Op = new(OpKind.NewObject, new DefinitionRef(owner, [])), Defines = [result], Results = [result.Storage] };
+        allocated.Blocks[3].Statements.Insert(2, allocation);
+        a.True(Split(allocated), "紧邻的分配与委托构造一起移到原入边");
+        var resultPhi = allocated.Blocks[3].Statements.OfType<Phi>().Single(p => p.Target == result);
+        for (var side = 0; side < 2; side++)
+        {
+            var calls = allocated.Blocks[side + 1].Statements.OfType<Call>().ToArray();
+            a.True(calls is [var create, var construct] && create.Defines[0] == resultPhi.Sources[side]
+                && construct.Arguments[0] == new Use(create.Defines[0], 64), "每条入边只构造自己分配的委托，结果按同一入边汇合");
+        }
+        var generic = Diamond();
+        generic.Blocks[3].Statements.Remove(constructor);
+        var resultVariable = new Variable(Storage.Gpr(0), 9);
+        var sharedCall = constructor with { Defines = [resultVariable], Results = [resultVariable.Storage] };
+        generic.Blocks[3].Statements.Insert(2, sharedCall);
+        bool SplitGeneric(MachineFunction function, bool proven = true) => CallIdentityChoices.SplitGeneric(function, (c, i, m) => proven && i == 2,
+            e => e is Use u && methods.TryGetValue(u.Variable, out var value) ? value : e);
+        a.True(!SplitGeneric(generic, false), "MethodInfo 的 ABI 位置与原生入口尚未核对时不拆分");
+        a.True(SplitGeneric(generic), "有返回值的分支方法调用沿原入边拆分");
+        var merged = generic.Blocks[3].Statements.OfType<Phi>().Single(p => p.Target == resultVariable);
+        for (var side = 0; side < 2; side++)
+        {
+            var branchCall = generic.Blocks[side + 1].Statements.OfType<Call>().Single();
+            a.True(branchCall.Defines.Single() == merged.Sources[side]
+                && branchCall.Arguments[1] == new Use(new(Storage.Gpr(side + 10), 0), 64), "返回值与调用接收者沿同一条边汇合");
+        }
+        a.True(!SplitGeneric(Diamond(effects: true)), "泛型调用不跨越其他副作用");
+        a.True(!SplitGeneric(Diamond(handler: true)), "泛型调用不跨越异常区域");
+        var absentResult = Diamond();
+        absentResult.Blocks[3].Statements[2] = constructor with { Defines = [null!] };
+        a.True(!SplitGeneric(absentResult), "缺失结果定义时保留调用，不生成无效 phi");
         methods.Remove(secondMethod);
         a.True(!Split(Diamond()), "任一方法身份不明时保留原状");
         return a.Finish("delegate-constructor-choices");

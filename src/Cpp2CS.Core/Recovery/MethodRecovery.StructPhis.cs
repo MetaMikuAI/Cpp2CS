@@ -23,6 +23,7 @@ public sealed partial class MethodRecovery
         [Analysis("结构体汇合", 95, After = ["类型"])]
         private RecoveryFailure? StructPhis()
         {
+            CallResultPhis();
             if (owner.abi.Classify(method, out _)?.Return is not { } returned || !RegisterStruct(returned) || returned.Pieces.Length < 2) return null;
             var type = returned.Type;
             var size = types.Size(type);
@@ -32,7 +33,7 @@ public sealed partial class MethodRecovery
             foreach (var block in blocks)
             {
                 var members = returned.Pieces.Select(piece => block.Statements.OfType<Phi>().FirstOrDefault(p => p.Target.Storage == piece.Register)).ToArray();
-                if (members.Any(m => m is null) || members.Any(m => phiSources[m!.Target].Any() || uses[m.Target].Any(s => s is not Return))) continue;
+                if (members.Any(m => m is null || structPhiMembers.ContainsKey(m.Target)) || members.Any(m => phiSources[m!.Target].Any() || uses[m.Target].Any(s => s is not Return))) continue;
                 var count = members[0]!.Sources.Length;
                 var origins = new List<Func<ManagedValue>>();
                 var absorbed = new List<Variable>();
@@ -74,6 +75,28 @@ public sealed partial class MethodRecovery
             return null;
         }
 
+        private void CallResultPhis()
+        {
+            foreach (var block in blocks)
+            foreach (var phi in block.Statements.OfType<Phi>())
+            {
+                if (structPhiMembers.ContainsKey(phi.Target) || phi.Sources.Length == 0
+                    || !results.TryGetValue(phi.Sources[0], out var first) || Resolve(first.Call) is not { } callee
+                    || owner.abi.Classify(callee, out _)?.Return is not { } returned || !RegisterStruct(returned)) continue;
+                var members = returned.Pieces.Select(piece => block.Statements.OfType<Phi>().FirstOrDefault(p =>
+                    p.Sources.Length == phi.Sources.Length && p.Sources.Zip(phi.Sources).All(pair =>
+                        results.TryGetValue(pair.First, out var source) && results.TryGetValue(pair.Second, out var other)
+                        && ReferenceEquals(source.Call, other.Call) && source.Call.Results[source.Index] == piece.Register))).ToArray();
+                if (members.Any(p => p is null || structPhiMembers.ContainsKey(p.Target))) continue;
+                var calls = phi.Sources.Select(v => results.GetValueOrDefault(v).Call).ToArray();
+                if (calls.Any(c => c is null || Resolve(c) is not { } target || owner.abi.Classify(target, out _)?.Return is not { } result
+                    || !RegisterStruct(result) || !result.Type.Equals(returned.Type) || !result.Pieces.SequenceEqual(returned.Pieces))) continue;
+                var group = new StructPhi(StructLocal(returned.Type, 0), returned.Type, block, k => CallStructLocal(calls[k], returned.Type));
+                structPhis.Add(group);
+                for (var i = 0; i < members.Length; i++) structPhiMembers[members[i]!.Target] = (group, returned.Pieces[i]);
+            }
+        }
+
         /// <summary>
         /// 整体写入结构体位置的整数 φ（内联的 setter：this.f = c ? new Nullable&lt;E&gt;(x) : default）：φ 只被同宽的整体写入使用，
         /// 写入位置是一个大小等于该宽度的结构体，每条入边的来源是同类型结构体位置的整体读取（只被这个 φ 使用）或常量 0（default）时，
@@ -92,6 +115,7 @@ public sealed partial class MethodRecovery
                     if (phi.Target.Storage.Bank != Bank.Gpr || structPhiMembers.ContainsKey(phi.Target) || phiSources[phi.Target].Any()) continue;
                     TypeRef? type = null;
                     var width = 0;
+                    var inferredFromRead = false;
                     if (uses[phi.Target].ToArray() is [Store { Value: Use { Width: 64 or 32 } use } store] && use.Variable == phi.Target)
                     {
                         width = use.Width;
@@ -103,6 +127,22 @@ public sealed partial class MethodRecovery
                     {
                         width = returned.Width;
                         type = returnType;
+                    }
+                    else
+                    {
+                        // 整值读取在前驱末尾与 default 合流；后续只取字段时保留结构体，观察填充的操作仍会失败。
+                        foreach (var source in phi.Sources)
+                        {
+                            if (!values.TryGetValue(source, out var expression) || expression is not Load { Width: 32 or 64 } load) continue;
+                            var predecessor = block.Predecessors[Array.IndexOf(phi.Sources, source)];
+                            if (predecessor.Statements.LastOrDefault(s => s is not (Nop or Jump)) is not Define definition || definition.Target != source) continue;
+                            if (!CopyRanges(load.Address, load.Width).TryGet(out var ranges, out var failure)) return failure;
+                            if (ranges.FirstOrDefault(r => r.Offset == 0 && types.Kind(r.Type) == TypeKind.Struct && types.Size(r.Type) * 8 == load.Width) is not { } range) continue;
+                            type = range.Type;
+                            width = load.Width;
+                            inferredFromRead = true;
+                            break;
+                        }
                     }
                     if (type is null) continue;
                     var origins = new List<Func<ManagedValue>>();
@@ -117,6 +157,11 @@ public sealed partial class MethodRecovery
                         }
                         if (value is Load load && load.Width == width && !uses[source].Any() && phiSources[source].All(p => ReferenceEquals(p, phi)))
                         {
+                            if (inferredFromRead)
+                            {
+                                var last = block.Predecessors[Array.IndexOf(phi.Sources, source)].Statements.LastOrDefault(s => s is not (Nop or Jump));
+                                if (last is not Define definition || definition.Target != source) break;
+                            }
                             if (!CopyRanges(load.Address, width).TryGet(out var ranges, out var failure)) return failure;
                             if (ranges.FirstOrDefault(r => r.Offset == 0 && r.Type.Equals(type)) is not { } range) break;
                             origins.Add(() => new IndirectValue(range.Root, type));

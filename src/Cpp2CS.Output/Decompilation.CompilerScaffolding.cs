@@ -14,6 +14,20 @@ public static partial class Decompilation
         public void Run(AstNode rootNode, TransformContext context)
         {
             RewriteInjectedCalls(rootNode, context);
+            // 同一局部函数的重复展开只保留一份；方法来源和捕获变量身份都必须一致。
+            foreach (var scope in rootNode.Descendants.OfType<BlockStatement>())
+            {
+                var kept = new List<LocalFunctionDeclarationStatement>();
+                foreach (var function in scope.Statements.OfType<LocalFunctionDeclarationStatement>().ToArray())
+                {
+                    var origin = function.Declaration.GetSymbol();
+                    var duplicate = kept.Any(previous => origin is not null && Equals(origin, previous.Declaration.GetSymbol())
+                        && previous.ToString() == function.ToString()
+                        && previous.Descendants.OfType<IdentifierExpression>().Select(id => id.GetILVariable())
+                            .SequenceEqual(function.Descendants.OfType<IdentifierExpression>().Select(id => id.GetILVariable())));
+                    if (duplicate) function.Remove(); else kept.Add(function);
+                }
+            }
             // 类型与分支事实归约后，局部值上的空判断没有可观察效果。
             static bool PureCondition(Expression? expression) => expression is PrimitiveExpression or NullReferenceExpression
                 || expression is IdentifierExpression id && id.GetILVariable() is not null

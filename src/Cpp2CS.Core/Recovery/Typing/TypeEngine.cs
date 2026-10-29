@@ -47,19 +47,21 @@ public sealed class TypingContext(MachineFunction function, ManagedTypes types,
 /// 冲突的变量仍向贡献者给出下界（<see cref="ConflictResult.Lower"/>），避免"冲突—类型消失—约束消失—类型恢复"的振荡。
 /// 超过轮数上限视为不收敛，由调用者记洞。规则的顺序不影响结果。
 /// </summary>
-public sealed class TypeEngine(IReadOnlyList<ITypeContributor> contributors, int maxRounds = 16)
+public sealed class TypeEngine(IReadOnlyList<ITypeContributor> contributors, int? maxRounds = null)
 {
     public IReadOnlyList<ITypeContributor> Contributors { get; } = contributors;
 
     public (Dictionary<Variable, TypeResult> Solution, int Rounds, bool Converged) Run(TypingContext context)
     {
+        // 长依赖链每轮才确定下一层表达式；预算随函数规模增长，重复解仍由迭代器判为循环。
+        var budget = maxRounds ?? Math.Max(16, context.Statements.Count() + 1);
         var result = Iteration.Run(context.Solution, previous =>
         {
             context.Solution = previous;
             var constraints = new TypeConstraints();
             foreach (var contributor in Contributors) contributor.Contribute(context, constraints);
             return TypeSolver.Solve(constraints, context.Types);
-        }, Same, maxRounds);
+        }, Same, budget);
         context.Solution = result.Value;
         return (result.Value, result.Rounds, result.Status == IterationStatus.Stable);
     }
