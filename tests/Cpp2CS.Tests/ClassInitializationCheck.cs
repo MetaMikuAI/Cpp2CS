@@ -81,6 +81,43 @@ internal static class ClassInitializationCheck
         a.True(!ClassInitializationReloads.Run(ReloadGuard(checkedBefore: false)), "缺少原先判空不能增加抛出点");
         a.True(!ClassInitializationReloads.Run(ReloadGuard(changedField: true)), "不能重读不同字段");
         a.True(!ClassInitializationReloads.Run(ReloadGuard(sideEffect: true)), "字段快照与守卫之间有写入时拒绝");
+        MachineFunction ExtendedReload(bool changedField = false, bool sideEffect = false, string? stored = null)
+        {
+            var oldValue = new Variable(Storage.Gpr(1), 1);
+            var newValue = oldValue with { Version = 2 };
+            var statics = new Symbol(SymbolKind.StaticFields, type);
+            Expr Read(ulong offset) => new Cpp2CS.Ir.Convert(ConvKind.ZeroExtend,
+                new Load(new Binary(BinOp.Add, statics, Expr.C(offset, 64), 64), 32), 64);
+            var flag = new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassCctorFinishedOrNoCctor, 64), 64), 32);
+            var guard = new Block(0) { Statements = [new Define(4, oldValue, Read(4))] };
+            var fastValue = oldValue;
+            if (stored is not null)
+            {
+                var incremented = new Variable(Storage.Gpr(2), 1);
+                guard.Statements.Add(new Define(6, incremented, new Cpp2CS.Ir.Convert(ConvKind.ZeroExtend,
+                    new Binary(BinOp.Add, new Use(oldValue, 32), Expr.C(1, 32), 32), 64)));
+                guard.Statements.Add(new Store(7, new Binary(BinOp.Add, statics, Expr.C(stored == "field" ? 8UL : 4UL, 64), 64),
+                    new Use(incremented, stored == "width" ? 64 : 32)));
+                if (stored != "value") fastValue = incremented;
+            }
+            if (sideEffect) guard.Statements.Add(new Store(8, statics, Expr.C(1, 32)));
+            guard.Statements.Add(new Branch(12, new Compare(Cond.Eq, flag, Expr.C(0, 32)), 16, 32));
+            var initialize = new Block(16) { Statements = [new Call(16, CallKind.Direct, Expr.C(0, 64))
+                { Op = new(OpKind.RunClassConstructor, type), Arguments = [klass] },
+                new Define(20, newValue, Read(changedField ? 8UL : 4UL)), new Jump(24, 32)] };
+            var merged = new Variable(Storage.Gpr(1), 3);
+            var done = new Block(32) { Statements = [new Phi(32, merged, [fastValue, newValue]), new Return(36) { Value = new Use(merged, 64) }] };
+            MachineFunction.AddEdge(guard, done); MachineFunction.AddEdge(guard, initialize); MachineFunction.AddEdge(initialize, done);
+            return Function(guard, initialize, done);
+        }
+        a.True(ClassInitializationReloads.Run(ExtendedReload()), "扩展到寄存器的同字段加载仍是已读取的快照");
+        a.True(!ClassInitializationReloads.Run(ExtendedReload(changedField: true)), "扩展加载不能证明不同字段已读取");
+        a.True(!ClassInitializationReloads.Run(ExtendedReload(sideEffect: true)), "扩展加载与守卫之间仍禁止写入");
+        a.True(ClassInitializationReloads.Run(ExtendedReload(stored: "exact")), "同字段同宽度写入后的重读与快路径写入值一致");
+        a.True(!ClassInitializationReloads.Run(ExtendedReload(stored: "field")), "写入其他字段不能证明重读值");
+        a.True(!ClassInitializationReloads.Run(ExtendedReload(stored: "width")), "写入宽度不匹配时保留原分支");
+        a.True(!ClassInitializationReloads.Run(ExtendedReload(stored: "value")), "已有同字段写入仍须核对快慢路径的合流值");
+        a.True(!ClassInitializationReloads.Run(ExtendedReload(stored: "exact", sideEffect: true)), "写入见证与守卫之间不能有其他写入");
         MachineFunction SharedGuard(bool differentValue = false, bool effect = false, bool otherType = false, bool handler = false)
         {
             var one = new Variable(Storage.Gpr(1), 0);

@@ -65,7 +65,7 @@ internal static class ClassInitializationReloads
                 if (!validPath || direct < 0 || initializedPath < 0 || merge.Statements.OfType<Phi>().Any(p =>
                     p.Sources.Length != merge.Predecessors.Count || Value(p.Sources[direct]) != Value(p.Sources[initializedPath]))) continue;
             }
-            bool PreviousRead(Expr value, bool check)
+            Expr? PreviousSnapshot(Expr value, bool check)
             {
                 value = Expand(value);
                 var visited = new HashSet<Block>();
@@ -74,29 +74,44 @@ internal static class ClassInitializationReloads
                 {
                     foreach (var statement in block.Statements.AsEnumerable().Reverse())
                     {
-                        if (check && statement is Call { Op.Kind: OpKind.NullCheck, Arguments: [var subject] } && Expand(subject) == value) return true;
-                        if (!check && statement is Define define && Expand(define.Value) == value) return true;
-                        if (statement is not (Define or Phi or Nop or Jump or Branch or Call { Op.Kind: OpKind.NullCheck })) return false;
+                        if (check && statement is Call { Op.Kind: OpKind.NullCheck, Arguments: [var subject] } && Expand(subject) == value) return subject;
+                        if (!check && statement is Define define && Strip(define.Value) == value) return new Use(define.Target, value.Width);
+                        if (!check && value is Load load && statement is Store store && store.Value.Width == load.Width
+                            && Expand(store.Target) == load.Address) return store.Value;
+                        if (statement is not (Define or Phi or Nop or Jump or Branch or Call { Op.Kind: OpKind.NullCheck })) return null;
                     }
-                    if (block.IsLandingPad || block.Predecessors.Count != 1) return false;
+                    if (block.IsLandingPad || block.Predecessors.Count != 1) return null;
                     block = block.Predecessors[0];
                 }
-                return false;
+                return null;
             }
             var initialized = false;
             var valid = true;
+            var snapshots = new Dictionary<Variable, Expr>();
             foreach (var statement in chain.SelectMany(b => b.Statements))
             {
                 if (statement is Nop or Jump || shared && statement is Phi) continue;
                 if (!initialized && statement is Call { Op: { Kind: OpKind.RunClassConstructor, Operand: DefinitionRef owner } }
                     && owner.Equals(type)) { initialized = true; continue; }
                 if (statement is Define d && ExprMap.Walk(d.Value).All(e => e is Use or Const or Symbol or Binary or Unary or Ir.Convert
-                    || initialized && e is Load load && PreviousRead(load, false))) continue;
-                if (initialized && statement is Call { Op.Kind: OpKind.NullCheck, Arguments: [var value] } && PreviousRead(value, true)) continue;
+                    || initialized && e is Load load && PreviousSnapshot(load, false) is not null))
+                {
+                    snapshots[d.Target] = ExprMap.Map(d.Value, e => e is Load load ? PreviousSnapshot(load, false) : null);
+                    continue;
+                }
+                if (initialized && statement is Call { Op.Kind: OpKind.NullCheck, Arguments: [var value] } && PreviousSnapshot(value, true) is not null) continue;
                 valid = false;
                 break;
             }
             if (!valid || !initialized) continue;
+            // 跳过类构造的路径也必须取得同一快照；不能仅凭曾读写过该字段就改变合流值。
+            Expr Snapshot(Expr value, bool useSnapshots, int depth = 0) => depth >= 32 ? value : Fold.Simplify(ExprMap.Map(value, e =>
+                e is Use use && (useSnapshots && snapshots.TryGetValue(use.Variable, out var source) || definitions.TryGetValue(use.Variable, out source))
+                    ? Fold.Convert(ConvKind.Truncate, Snapshot(source, useSnapshots, depth + 1), use.Width) : null));
+            var fast = merge.Predecessors.IndexOf(head);
+            var slow = merge.Predecessors.IndexOf(chain[^1]);
+            if (!shared && (fast < 0 || slow < 0 || merge.Statements.OfType<Phi>().Any(p => p.Sources.Length != merge.Predecessors.Count
+                || Snapshot(new Use(p.Sources[fast], p.Target.Width), false) != Snapshot(new Use(p.Sources[slow], p.Target.Width), true)))) continue;
             head.Statements[^1] = new Jump(branch.Address, enter.Start);
             MachineFunction.RemoveEdge(head, merge);
             return true;

@@ -27,6 +27,21 @@ internal static class SourceTypeTestsCheck
         var inspect = new MethodRef(new MethodDef { Index = -2, Owner = targetType, Name = "Inspect", Token = 0,
             Attributes = MethodAttributes.Public, ImplAttributes = 0, Slot = -1, ReturnType = types.Int32 }, [], []);
         var nullError = types.CorlibMethod("System.NullReferenceException", ".ctor")!;
+        var initialize = new ManagedCall(1, new(types.CorlibMethod("System.Runtime.CompilerServices.RuntimeHelpers", "RunClassConstructor", types.RuntimeTypeHandle)!,
+            null, [new TypeHandleValue(reference, types.RuntimeTypeHandle, 64)], false), null, false);
+        var staticField = new FieldRef(new FieldDef { Index = -3, Owner = targetType, Name = "shared", Type = types.Int32,
+            Attributes = FieldAttributes.Public | FieldAttributes.Static, Offset = 0 }, reference);
+        var staticRead = new ManagedReturn(2, new StaticFieldValue(staticField, types.Int32, 32));
+        var initialized = SourceRewriter.Rewrite(new(method, [new(0, [initialize, staticRead])]), types);
+        a.True(initialized.Blocks[0].Statements is [ManagedCall firstInit, ManagedReturn]
+            && firstInit.Invocation.Method == initialize.Invocation.Method
+            && firstInit.Invocation.Arguments.SequenceEqual(initialize.Invocation.Arguments),
+            "源码整理保留恢复阶段未安全吸收的显式类初始化");
+        var checkedBeforeInit = SourceRewriter.Rewrite(new(method, [new(0, [new ManagedCheck(0, new ComparisonValue(Cond.Eq, instance,
+            new ConstantValue(0, reference, 64), types.Boolean), nullError), initialize,
+            new ManagedReturn(2, new FieldValue(instance, field, types.Int32, 32))])]), types);
+        a.True(checkedBeforeInit.Blocks[0].Statements.Take(2).ToArray() is [ManagedCheck, ManagedCall],
+            "原先判空不能越过可能抛出的类构造推迟到字段读取");
         foreach (var checkedReceiver in new[] { false, true })
         {
             var statements = new List<ManagedStatement>();

@@ -849,13 +849,15 @@ public sealed partial class MethodRecovery
                     case Phi or Nop or Call { Op.Kind: OpKind.InitClass }:
                         continue;
                     case Define define:
-                        if (ExprMap.Walk(define.Value).OfType<Load>().Any(l => Static(l.Address))) return true;
+                        // 类构造可能改写其他字段或抛出；不能越过更早的业务读取推迟触发。
+                        if (ExprMap.Walk(define.Value).OfType<Load>().FirstOrDefault() is { } load) return Static(load.Address);
                         continue;
                     case Store store:
-                        return Static(store.Target);
+                        return !ExprMap.Walk(store.Value).Any(e => e is Load) && Static(store.Target);
                     // beforefieldinit 静态调用不保证触发初始化；原生显式初始化必须保留。
-                    case Call { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target }:
-                        return facts.EntriesAt(target.Value).Any(e => e.Method is { Method: var m } && m.Owner == type.Definition && (m.IsStatic && (m.Owner.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) == 0
+                    case Call { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target } call:
+                        return !call.Arguments.SelectMany(ExprMap.Walk).Any(e => e is Load)
+                            && facts.EntriesAt(target.Value).Any(e => e.Method is { Method: var m } && m.Owner == type.Definition && (m.IsStatic && (m.Owner.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) == 0
                             || m.Name == ".ctor" && !(m.Owner.IsValueType && (m.Owner.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) != 0)));
                     default:
                         return false;

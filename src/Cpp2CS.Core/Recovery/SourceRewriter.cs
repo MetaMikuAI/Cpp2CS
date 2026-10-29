@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 
 /// <summary>
 /// 只用于 C# 输出的整理（执行对照仍用原方法体）。每条规则在 C# 语义下等价：
-/// 1. 删去 RuntimeHelpers.RunClassConstructor（C# 访问静态成员时自动初始化类型）；
+/// 1. 保留恢复阶段未被安全吸收的显式类构造调用，维持字段读取与异常顺序；
 /// 2. 删去紧接着解引用同一对象的显式判空（C# 的成员访问本身对 null 抛 NullReferenceException）；
 /// 3. 位宽往返（截断回原位宽的零/符号扩展）与 bool 的 ?1:0、&amp;1 还原；只在截断中使用的扩展副本内联到使用处；
 /// 4. 只赋值一次、不取地址的局部变量之间的复制传播；删去结果不再使用的无副作用赋值。
@@ -267,14 +267,12 @@ public static class SourceRewriter
             {
                 var statement = block.Statements[i];
                 if (statement is ManagedCheck { Condition: ConstantValue { Bits: 0 } }) { drop.Add(statement); continue; }
-                if (statement is ManagedCall { Invocation.Method: { Method.Name: "RunClassConstructor" } method }
-                    && method.DeclaringType is DefinitionRef { Definition.FullName: "System.Runtime.CompilerServices.RuntimeHelpers" }) { drop.Add(statement); continue; }
                 if (statement is not ManagedCheck { Exception.DeclaringType: DefinitionRef { Definition.FullName: "System.NullReferenceException" },
                     Condition: ComparisonValue { Condition: Cond.Eq, Left: LocalValue or ArgumentValue, Right: ConstantValue { Bits: 0 } } condition }) continue;
                 foreach (var (_, _, next) in Straight(body, blocks, predecessors, block.Address, i + 1))
                 {
                     if (Dereferences(next, condition.Left)) { drop.Add(statement); break; }
-                    if (SideEffects(next) && next is not ManagedCall { Invocation.Method.Method.Name: "RunClassConstructor" }) break;
+                    if (SideEffects(next)) break;
                 }
             }
         return body with { Blocks = body.Blocks.Select(b => b with { Statements = b.Statements.Where(s => !drop.Contains(s)).ToArray() }).ToArray() };
