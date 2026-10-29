@@ -121,6 +121,7 @@ internal static class ConstructorInitialization
                         ManagedBranch b => !UsesThis(b.Condition),
                         ManagedSwitch w => !UsesThis(w.Index),
                         ManagedCheck k => !UsesThis(k.Condition),
+                        ManagedThrow t => !UsesThis(t.Exception),
                         ManagedReturn => false,
                         _ => false,
                     };

@@ -1,13 +1,14 @@
 using System.Reflection;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
+using Cpp2CS.Output;
 using Cpp2CS.Recovery;
 
 namespace Cpp2CS.Tests;
 
 internal static class BaseConstructorCheck
 {
-    [Command("base-constructors", "内联基类构造的参数、初始化顺序与副作用边界", Gate = Gate.Unit)]
+    [Command("base-constructors", "内联基类构造的参数、初始化路径与副作用边界", Gate = Gate.Unit)]
     public static int Run()
     {
         var index = 0;
@@ -55,6 +56,33 @@ internal static class BaseConstructorCheck
             "尾调用基类构造恢复成普通 base 调用后返回");
         var different = Body(defaultBase, Store(baseSelf, baseField, new ConstantValue(2, integer, 32)), Call(baseSelf, true));
         a.True(ReferenceEquals(tailCaller, BaseConstructorCalls.Rewrite(tailCaller, [different])), "字段常量不同不能视为同一基类构造");
+        var forwarding = Body(defaultBase, Call(baseSelf, true));
+        var allocated = new LocalValue(new Variable(Storage.Gpr(0), 1), rootType, 64);
+        var allocation = new ManagedAssignment(0, allocated, new NewObjectValue(rootConstructor, []));
+        var complex = Body(childConstructor, allocation, Call(self), Store(self, ownField, argument), new ManagedReturn(3, null));
+        var forwarded = BaseConstructorCalls.Rewrite(complex, [forwarding]);
+        a.True(forwarded.Blocks[0].Statements[0] == allocation && forwarded.Blocks[0].Statements[1] is ManagedCall { Inlined: true } restored
+            && restored.Invocation.Method == defaultBase && forwarded.Blocks[0].Statements[2] == complex.Blocks[0].Statements[2],
+            "纯转调原位恢复，不改动前面的分配和后面的字段写入");
+        var unrelated = Body(childConstructor, new ManagedCall(2, new(rootConstructor, allocated, [], false), null, false), new ManagedReturn(3, null));
+        a.True(ReferenceEquals(unrelated, BaseConstructorCalls.Rewrite(unrelated, [forwarding])), "其他对象上的构造调用不能认作 base");
+        a.True(ReferenceEquals(complex, BaseConstructorCalls.Rewrite(complex, [tailPattern])), "基类还有字段写入时不能仅替换转调");
+        var allocating = Body(childConstructor, allocation, Store(self, ownField, one), Store(self, baseField, one), Call(self, true));
+        var allocatingResult = BaseConstructorCalls.Rewrite(allocating, [tailPattern]);
+        a.True(allocatingResult.Blocks[0].Statements is [ManagedAssignment, ManagedStore, ManagedCall { Inlined: true }, ManagedReturn]
+            && allocatingResult.Blocks[0].Statements[0] == allocation, "分配保留在原顺序，随后完整基类初始化被认回");
+        var interrupted = Body(childConstructor, Store(self, baseField, one), allocation, Call(self, true));
+        a.True(ReferenceEquals(interrupted, BaseConstructorCalls.Rewrite(interrupted, [tailPattern])), "不能跨越分配的副作用拼接基类初始化");
+        var factory = new MethodRef(new MethodDef { Index = index++, Owner = root, Name = "Create", Token = 0,
+            Attributes = MethodAttributes.Public | MethodAttributes.Static, ImplAttributes = 0, Slot = -1, ReturnType = rootType }, [], []);
+        var factoryCall = new ManagedCall(0, new(factory, null, [], false), allocated, false);
+        var withFactory = allocating with { Blocks = [allocating.Blocks[0] with { Statements = [factoryCall, .. allocating.Blocks[0].Statements.Skip(1)] }] };
+        a.True(BaseConstructorCalls.Rewrite(withFactory, [tailPattern]).Blocks[0].Statements is [ManagedCall { Result: not null }, ManagedStore,
+            ManagedCall { Inlined: true }, ManagedReturn], "保留工厂调用的结果与顺序，再认回完整基类初始化");
+        var throws = Body(childConstructor, new ManagedThrow(1, new ConstantValue(0, rootType, 64)));
+        a.True(ConstructorInitialization.Check(throws, out _) is null, "构造在初始化前可以直接抛异常，不产生正常返回");
+        a.True(ConstructorInitialization.Check(Body(childConstructor, new ManagedThrow(1, self)), out _) is not null,
+            "抛异常不能泄漏未初始化的 this");
         a.True(before.Blocks[0].Statements.Count == 4, "输入方法体保持不变");
         return a.Finish("base-constructors");
     }
