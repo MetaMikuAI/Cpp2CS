@@ -130,10 +130,13 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     // 同地址的多个所有者取返回寄存器并集，不能把另一签名的返回输入误判为未用。
                     var returned = signatures.SelectMany(s => s!.Return?.Pieces ?? []).Distinct()
                         .Select(p => (Expr)new Read(p.Register, p.Width)).ToArray();
-                    reads = Lifting.NativeInputs.Reads(inputLifter.Lift(entry,
-                        returned.Length == 0 ? null : new Intrinsic("return", returned, 64), simplify: false),
-                        RecoverUnusedInputs ? (call, input) => call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target }
-                            && UnusedInput(target.Value, input) : null);
+                    var lifted = inputLifter.Lift(entry, returned.Length == 0 ? null : new Intrinsic("return", returned, 64), simplify: false);
+                    var delegates = RecoverUnusedInputs ? DelegateCallNormalizer.InputReads(facts, lifted.Function) : [];
+                    // 委托尾跳转沿用完整布局与 Invoke ABI 证明；原始字段读取仍参与入口依赖分析。
+                    reads = Lifting.NativeInputs.Reads(lifted,
+                        RecoverUnusedInputs ? (call, input) => delegates.TryGetValue(call, out var used) ? !used.Contains(input)
+                            : call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target } && UnusedInput(target.Value, input) : null,
+                        call => delegates.ContainsKey(call));
                 }
             }
             nativeInputs[entry] = reads;

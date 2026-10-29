@@ -23,6 +23,7 @@ public sealed partial class MethodRecovery
             && DirectInputProof(call, callee) && UnusedParameter(call, piece.Register);
 
         private bool MissingInput(Expr expression) => expression is Unknown or Use { Variable.Version: < 0 }
+            || expression is Use { Variable.Version: 0 } input && !arguments.ContainsKey(input.Variable.Storage)
             || expression is Use use && runtime.Contains(use.Variable);
 
         // 各入边已有的判空对象汇合后，可补回编译器省略的实例输入；不重新读取对象或新增判空。
@@ -66,7 +67,7 @@ public sealed partial class MethodRecovery
             }
         }
 
-        // 编译器可以省略未用输入。仅填补 Unknown 或不能表示成引用的残值，保留已有求值。
+        // 编译器可以省略未用输入。仅填补缺失输入或不能表示成目标标量的残值，保留已有求值。
         [ArgumentRule(30)]
         private RecoveryResult<ManagedValue?> UnusedArgument(AbiValue parameter, ArgumentSite site)
         {
@@ -81,12 +82,13 @@ public sealed partial class MethodRecovery
                     : declared.DefaultValue is ulong unsigned ? unsigned : unchecked((ulong)System.Convert.ToInt64(declared.DefaultValue));
                 return new ConstantValue(bits & Expr.Mask(piece.Width), parameter.Type, piece.Width);
             }
-            if (kind != TypeKind.Reference
+            if (kind is not (TypeKind.Reference or TypeKind.Int or TypeKind.Bool)
                 || expression is not (Use or Const) || expression is Use use && inlined.Contains(use.Variable)
                 || !DirectInputProof(site.Call, site.Callee)) return (ManagedValue?)null;
             if (!Recover(expression, null).TryGet(out var value, out var failure)) return failure;
             if (value is ConstantValue { Bits: 0 } || value is Fragment || types.IsAssignable(value.Type, parameter.Type)
                 || types.Kind(value.Type) is not (TypeKind.Reference or TypeKind.Int or TypeKind.Bool)
+                || Coerce(value, parameter.Type, site.Call.Address).TryGet(out _, out _)
                 || !UnusedParameter(site.Call, piece.Register)) return (ManagedValue?)null;
             return new ConstantValue(0, parameter.Type, piece.Width);
         }

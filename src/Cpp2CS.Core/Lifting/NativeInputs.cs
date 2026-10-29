@@ -6,12 +6,13 @@ namespace Cpp2CS.Lifting;
 /// <summary>未化简 SSA 的入口读取；未知指令或不完整控制流不能证明参数未用。</summary>
 internal static class NativeInputs
 {
-    public static HashSet<Storage>? Reads(LiftedFunction lifted, Func<Call, Storage, bool>? unused = null)
+    public static HashSet<Storage>? Reads(LiftedFunction lifted, Func<Call, Storage, bool>? unused = null, Func<Call, bool>? knownTail = null)
     {
         var statements = lifted.Function.Blocks.SelectMany(b => b.Statements).ToArray();
         var tails = statements.OfType<Call>().Where(c => c.Kind == CallKind.TailIndirect).ToArray();
         if (!lifted.Succeeded || lifted.Function.Problems.Count != 0
-            || lifted.Function.UnresolvedIndirectJumps != 0 && (lifted.Function.UnresolvedIndirectJumps != tails.Length || !tails.All(c => VirtualTail(c, statements)))
+            || lifted.Function.UnresolvedIndirectJumps != 0 && (lifted.Function.UnresolvedIndirectJumps != tails.Length
+                || !tails.All(c => VirtualTail(c, statements) || knownTail?.Invoke(c) == true))
             || statements.Any(s => s is Opaque or IndirectJump { Targets.Length: 0 })) return null;
         if (unused is null)
             return statements.SelectMany(s => ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable)

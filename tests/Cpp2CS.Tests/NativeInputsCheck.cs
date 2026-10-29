@@ -48,6 +48,13 @@ internal static class NativeInputsCheck
         a.True(NativeInputs.Reads(lifted) is null, "vtable 对象与接收者不一致仍拒绝证明");
         block.Statements = [tail with { Target = new Load(receiver, 64) }];
         a.True(NativeInputs.Reads(lifted) is null, "任意指针尾跳转不能视为 vtable 调用");
+        var provenTail = ((Call)block.Statements[0]) with { Arguments = [new Use(input, 64)] };
+        block.Statements = [provenTail];
+        a.True(NativeInputs.Reads(lifted, knownTail: c => ReferenceEquals(c, provenTail)) is { } provenReads
+            && provenReads.Contains(receiver.Variable.Storage) && provenReads.Contains(register), "外部完整尾调用证据仍保留目标和实参依赖");
+        a.True(NativeInputs.Reads(lifted, knownTail: _ => false) is null, "未获证据的尾调用仍拒绝未使用证明");
+        function.UnresolvedIndirectJumps++;
+        a.True(NativeInputs.Reads(lifted, knownTail: _ => true) is null, "证明一个尾调用不能覆盖额外未解析跳转");
         return a.Finish("native-inputs");
     }
 

@@ -60,6 +60,19 @@ internal sealed class DelegateCallNormalizer
             if (group.Select(p => p.Type).Distinct().ToArray() is [var type]) frameTypes[group.Key] = type;
     }
 
+    /// <summary>原始 SSA 中已有完整委托布局与 Invoke 签名证据的调用；不修改函数。</summary>
+    public static Dictionary<Call, HashSet<Storage>> InputReads(ProgramFacts facts, MachineFunction function)
+    {
+        var calls = function.Blocks.SelectMany(b => b.Statements.OfType<Call>().Where(c => c.Kind is CallKind.Indirect or CallKind.TailIndirect)
+            .Select(c => (Block: b, Call: c))).ToArray();
+        if (calls.Length == 0) return [];
+        var context = new DelegateCallNormalizer(facts, function);
+        var proven = new Dictionary<Call, HashSet<Storage>>(ReferenceEqualityComparer.Instance);
+        foreach (var (block, call) in calls)
+            if (context.Normalize(call, block) is { } normalized) proven.Add(call, normalized.Sources.ToHashSet());
+        return proven;
+    }
+
     public static bool Run(ProgramFacts facts, MachineFunction function, IdiomResult report)
     {
         static bool NeedsProof(Call call) => call.Op?.Kind == OpKind.CallDelegate
