@@ -40,6 +40,34 @@ public sealed partial class MethodRecovery
             return value;
         }
 
+        /// <summary>私有整数别名被同一显式布局中的公开整数分量完整覆盖时，使用互不重叠的公开分量。</summary>
+        private IEnumerable<(FieldRef[] Path, TypeRef Type, int Offset)> ScalarStructPaths(TypeRef type)
+        {
+            var leaves = StructPaths(type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
+            foreach (var leaf in leaves)
+            {
+                var field = leaf.Path[^1].Field;
+                var alias = (field.Attributes & System.Reflection.FieldAttributes.FieldAccessMask) == System.Reflection.FieldAttributes.Private
+                    && (field.Owner.Attributes & System.Reflection.TypeAttributes.LayoutMask) == System.Reflection.TypeAttributes.ExplicitLayout
+                    && types.Kind(leaf.Type) == TypeKind.Int;
+                if (alias)
+                {
+                    var cursor = leaf.Offset;
+                    var parts = leaves.Where(p => p.Path.Length == leaf.Path.Length && p.Path.SkipLast(1).SequenceEqual(leaf.Path.SkipLast(1))
+                        && (p.Path[^1].Field.Attributes & System.Reflection.FieldAttributes.FieldAccessMask) == System.Reflection.FieldAttributes.Public
+                        && types.Kind(p.Type) == TypeKind.Int && p.Offset >= leaf.Offset && p.Offset + types.Size(p.Type) <= leaf.Offset + types.Size(leaf.Type))
+                        .OrderBy(p => p.Offset).ToArray();
+                    foreach (var part in parts)
+                    {
+                        if (part.Offset != cursor) break;
+                        cursor += types.Size(part.Type);
+                    }
+                    if (cursor == leaf.Offset + types.Size(leaf.Type)) continue;
+                }
+                yield return leaf;
+            }
+        }
+
         private IReadOnlyList<TypeRef>? StructReceiverArguments(Expr? receiver, TypeDef owner)
         {
             if (receiver is null) return null;

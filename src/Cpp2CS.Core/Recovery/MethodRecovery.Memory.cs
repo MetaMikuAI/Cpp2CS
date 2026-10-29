@@ -268,7 +268,7 @@ public sealed partial class MethodRecovery
             // 标量帧区域：整体读写这个局部变量（bool 以字节读写）。
             if (types.Kind(region.Type) != TypeKind.Struct)
                 return offset == 0 && width == region.Local.Width ? region.Local : Fail(0, "栈 标量栈槽的访问宽度不符");
-            var leaves = StructPaths(region.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
+            var leaves = ScalarStructPaths(region.Type).ToArray();
             // 显式布局允许整数字段与字节字段重叠；精确字段访问不需要重建其他别名。
             if (leaves.Where(p => p.Offset == offset && types.Size(p.Type) * 8 == width).ToArray() is [var exact])
                 return PathValue(region.Local, exact.Path);
@@ -312,7 +312,7 @@ public sealed partial class MethodRecovery
         private RecoveryResult<ManagedValue?> StructLocation(Expr root, TypeRef type, long offset, int width)
         {
             if (type is not (ByRefRef or DefinitionRef)) return (ManagedValue?)null;
-            var matches = StructPaths(type).Where(p => p.Offset == offset && types.Kind(p.Type) is not (TypeKind.Struct or null)
+            var matches = ScalarStructPaths(type).Where(p => p.Offset == offset
                 && types.Size(p.Type) * 8 == width && (type is ByRefRef || p.Path.Length > 1)).ToArray();
             // 显式布局同址别名不能仅靠偏移选择一个托管字段。
             return matches.Length == 1 ? Recover(root, null).Map<ManagedValue?>(value => PathValue(value, matches[0].Path)) : (ManagedValue?)null;

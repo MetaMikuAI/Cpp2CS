@@ -78,8 +78,8 @@ public sealed partial class MethodRecovery
         private ManagedValue StructPiece(ManagedValue root, AbiPiece piece)
         {
             if (root.Type is GenericParameterRef { NativeAggregate: not null }) return new AggregatePiece(root, piece.Offset, piece.Width);
-            var paths = StructPaths(root.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)
-                && p.Offset >= piece.Offset && p.Offset + types.Size(p.Type) <= piece.Offset + piece.Width / 8).ToArray();
+            var paths = ScalarStructPaths(root.Type).Where(p => p.Offset >= piece.Offset
+                && p.Offset + types.Size(p.Type) <= piece.Offset + piece.Width / 8).ToArray();
             var parts = paths.Select(p => new Part((p.Offset - piece.Offset) * 8, PathValue(root, p.Path))).ToArray();
             return parts is [var one] && one.Low == 0 && one.Value.Width == piece.Width ? one.Value
                 : new Fragment(parts, types.UInt64, piece.Width);
@@ -111,7 +111,7 @@ public sealed partial class MethodRecovery
                 return Fail(0, "泛型聚合片未能完整重建同一个值");
             }
             var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
-            foreach (var path in StructPaths(value.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)))
+            foreach (var path in ScalarStructPaths(value.Type))
             {
                 var size = types.Size(path.Type);
                 var matches = pieces.Where(p => path.Offset >= p.Piece.Offset && path.Offset + size <= p.Piece.Offset + p.Piece.Width / 8).ToArray();

@@ -7,6 +7,29 @@ namespace Cpp2CS.Recovery;
 public sealed partial class MethodRecovery
 {
     private readonly Dictionary<TypeRef, MethodDef[]> conversionCopies = [];
+    private readonly Dictionary<ulong, MethodRef?> nativeConversions = [];
+    private ILookup<ulong, MethodDef>? nativeConversionCandidates;
+
+    private MethodRef? NativeConversion(ulong target)
+    {
+        if (nativeConversions.TryGetValue(target, out var known)) return known;
+        MethodRef? result = null;
+        if (facts.EntriesAt(target).Length == 0 && facts.Unregistered.At(target) is null
+            && facts.Code.At(target) is { Region: CodeRegion.Managed } copy && copy.Start == target)
+        {
+            // 静态运算符的实参可由向量计算生成，未必完整转传入口参数；用完整机器码确定唯一身份。
+            nativeConversionCandidates ??= facts.Model.Methods.Where(m => m.IsStatic && m.Address != 0
+                && m.Owner.GenericParameters.Count == 0 && m.GenericParameters.Count == 0
+                && m.Name is "op_Implicit" or "op_Explicit" && m.Parameters.Count == 1
+                && facts.Code.At(m.Address) is { Region: CodeRegion.Managed } original && original.Start == m.Address
+                && facts.EntriesAt(m.Address).Select(e => e.Method?.Method).Distinct().Count() == 1)
+                .ToLookup(m => facts.Code.At(m.Address)!.Size);
+            var matches = nativeConversionCandidates[copy.Size]
+                .Where(m => NativeCopy.Equal(copy, facts.Code.At(m.Address)!, facts.Code.Word)).Take(2).ToArray();
+            if (matches is [var only]) result = new(only, [], []);
+        }
+        return nativeConversions[target] = result;
+    }
 
     private MethodDef[] ConversionCandidates(TypeRef input)
     {
@@ -22,6 +45,7 @@ public sealed partial class MethodRecovery
         // 静态转换没有接收者；完整转传的结构体实参提供候选类型，方法身份仍由原生副本形状证明。
         private MethodRef? ConversionCopy(Call call, ulong target)
         {
+            if (owner.NativeConversion(target) is { } native) return native;
             (ArgumentValue Root, AbiPiece Piece)? Input(Expr expression)
             {
                 var seen = new HashSet<Variable>();

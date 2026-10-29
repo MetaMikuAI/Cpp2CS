@@ -9,11 +9,12 @@ internal sealed record StatementSite(Stmt Statement, Block Block, int Index);
 internal sealed record FrameSnapshotValue(MemoryVersion Version, Store Store, Use Value, IReadOnlyList<StatementSite> Reads);
 
 /// <summary>帧读写的共同索引；快照证明保留原 SSA 值及全部读取位置。</summary>
-internal sealed class FrameMemory(MachineFunction function)
+internal sealed class FrameMemory(MachineFunction function, Func<Expr, long?>? frameOffset = null)
 {
     public StatementSite[] Sites { get; } = function.Blocks
         .SelectMany(b => b.Statements.Select((s, i) => new StatementSite(s, b, i))).ToArray();
     private Dominators? dominators;
+    private Func<Store, Store, bool>? equalOverlap;
 
     public RewriteResult<FrameSnapshotValue> Snapshot(StatementSite site)
     {
@@ -27,7 +28,12 @@ internal sealed class FrameMemory(MachineFunction function)
             if (expression is Load { Address: FrameAddress from } load)
             {
                 if (!range.Overlaps(new(from.Offset, load.Width / 8))) return true;
-                if (from.Offset != frame.Offset || load.Width != value.Width) return false;
+                if (from.Offset != frame.Offset || load.Width != value.Width)
+                {
+                    if (!Sites.Select(s => s.Statement).OfType<Store>().Any(other => other.Target is FrameAddress target
+                        && target.Offset == from.Offset && other.Value.Width == load.Width
+                        && (equalOverlap ??= Recovery.FrameWritebacks.EqualOverlap(function, frameOffset))(store, other))) return false;
+                }
                 readCount++;
                 return true;
             }
@@ -41,7 +47,8 @@ internal sealed class FrameMemory(MachineFunction function)
             var before = readCount;
             if (use.Statement is Store { Target: FrameAddress target } other)
             {
-                if (range.Overlaps(new(target.Offset, other.Value.Width / 8)))
+                if (range.Overlaps(new(target.Offset, other.Value.Width / 8))
+                    && !(equalOverlap ??= Recovery.FrameWritebacks.EqualOverlap(function, frameOffset))(store, other))
                     return RewriteResult<FrameSnapshotValue>.Blocked("storage.overlapping-write", $"0x{other.Address:x} 存在重叠写入");
                 if (!Safe(other.Value)) return RewriteResult<FrameSnapshotValue>.Blocked("storage.escape", $"0x{other.Address:x} 地址逃逸或读取范围不符");
             }
@@ -57,6 +64,6 @@ internal sealed class FrameMemory(MachineFunction function)
         var storage = new FrameStorage(function.Entry, range, store.Address);
         return RewriteResult<FrameSnapshotValue>.Applied(new(new(storage, store.Address), store, value, reads),
             new("storage.single-write-snapshot", reads.Select(r => r.Statement.Address).Prepend(store.Address).ToArray(),
-                ["单次写入", "读取区间完整一致", "写入支配全部读取", "地址不逃逸", "复用原 SSA 值"]));
+                ["各起始位置单次写入", "重叠写入字节一致", "读取完整快照", "写入支配全部读取", "地址不逃逸", "复用原 SSA 值"]));
     }
 }

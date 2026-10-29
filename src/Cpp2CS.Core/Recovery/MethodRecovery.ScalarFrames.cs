@@ -10,7 +10,8 @@ public sealed partial class MethodRecovery
         [Analysis("帧快照", 32, After = ["帧区域"])]
         private void ForwardFrameSnapshots()
         {
-            var replacements = FrameSnapshots.Read(function, ruleTraces.Add);
+            var replacements = FrameSnapshots.Read(function, ruleTraces.Add,
+                expression => FrameAccess(expression) is { } frame ? frame.Region.Offset + frame.Offset : FrameOffset(expression));
             foreach (var block in blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {

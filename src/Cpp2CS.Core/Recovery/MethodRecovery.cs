@@ -1435,6 +1435,9 @@ public sealed partial class MethodRecovery
 
         private RecoveryResult<ManagedValue> Conversion(Convert c, TypeRef? hint)
         {
+            if (c.Kind == ConvKind.ZeroExtend && c.Operand is Use { Width: not (1 or 8 or 16 or 32 or 64) } narrow
+                && Fold.ScalarExtract(new Extract(new Use(narrow.Variable, narrow.Variable.Width), 0, narrow.Width), c.Width) is { } extended)
+                return Recover(extended, hint);
             if (c.Kind == ConvKind.ZeroExtend && c.Operand is Extract { Width: not (8 or 16 or 32 or 64) } extract
                 && Fold.ScalarExtract(extract, c.Width) is { } scalar) return Recover(scalar, hint);
             if (!Recover(c.Operand, null).TryGet(out var operand, out var failure)) return failure;

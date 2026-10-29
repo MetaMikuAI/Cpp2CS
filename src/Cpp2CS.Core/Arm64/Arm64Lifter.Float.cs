@@ -198,7 +198,11 @@ public static partial class Arm64Lifter
             }
             else if ((cmode & 1) == 1 && cmode < 0xC)
             {
-                Unsupported(op ? "bic.vector" : "orr.vector");
+                var size = cmode < 8 ? 32 : 16;
+                var shift = 8 * (int)((cmode >> 1) & (cmode < 8 ? 3u : 1u));
+                var immediate = (ulong)imm8 << shift;
+                SetLanes(width, size, i => Op(op ? BinOp.And : BinOp.Or, Lane(Rd, i, size),
+                    C(op ? ~immediate & Expr.Mask(size) : immediate, size)));
                 return;
             }
             else

@@ -44,21 +44,22 @@ public sealed partial class MethodRecovery
                 while (pending.TryPop(out var next))
                     if (web.Add(next)) foreach (var linked in links[next]) pending.Push(linked);
                 seen.UnionWith(web);
-                if (web.Any(v => v.Width != 64 || structPhiMembers.ContainsKey(v))) continue;
+                var width = phi.Target.Width;
+                if (width is not (64 or 128) || web.Any(v => v.Width != width || structPhiMembers.ContainsKey(v))) continue;
                 var fragments = new List<Fragment>();
                 var zeros = new List<Variable>();
                 var complete = true;
                 foreach (var source in web.Where(v => !targets.Contains(v)))
                 {
-                    if (values.GetValueOrDefault(source) is Const { Value: 0, Width: 64 }) { zeros.Add(source); continue; }
-                    if (!Variable(source, 64).TryGet(out var value, out _) || value is not Fragment fragment) { complete = false; break; }
+                    if (values.GetValueOrDefault(source) is Const { Value: 0 } zero && zero.Width == width) { zeros.Add(source); continue; }
+                    if (!Variable(source, width).TryGet(out var value, out _) || value is not Fragment fragment) { complete = false; break; }
                     fragments.Add(fragment);
                 }
                 if (!complete || fragments.Count == 0) continue;
                 var shape = fragments[0].Parts.Select(p => (p.Low, p.Value.Type, p.Value.Width)).ToArray();
                 if (fragments.Any(f => !f.Parts.Select(p => (p.Low, p.Value.Type, p.Value.Width)).SequenceEqual(shape))) continue;
                 foreach (var target in web.Where(targets.Contains))
-                    fragmentLocals[target] = new Fragment(shape.Select(p => new Part(p.Low, StructLocal(p.Type, p.Width))).ToArray(), types.UInt64, 64);
+                    fragmentLocals[target] = new Fragment(shape.Select(p => new Part(p.Low, StructLocal(p.Type, p.Width))).ToArray(), types.UInt64, width);
                 inlined.UnionWith(zeros);
             }
         }
@@ -66,7 +67,7 @@ public sealed partial class MethodRecovery
         private RecoveryResult<Fragment?> MemoryFragment(Expr root, TypeRef type, long offset, int width)
         {
             if (type is not (ByRefRef or DefinitionRef)) return (Fragment?)null;
-            var leaves = StructPaths(type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
+            var leaves = ScalarStructPaths(type).ToArray();
             if (leaves.Any(p => p.Offset < offset + width / 8 && offset < p.Offset + types.Size(p.Type)
                 && (p.Offset < offset || p.Offset + types.Size(p.Type) > offset + width / 8))) return (Fragment?)null;
             var paths = leaves.Where(p => p.Offset >= offset && p.Offset + types.Size(p.Type) <= offset + width / 8)
@@ -130,6 +131,34 @@ public sealed partial class MethodRecovery
         /// <summary>覆盖整个向量的逐道计算保留为独立叶子，按原定义顺序快照。</summary>
         private RecoveryResult<ManagedValue> InsertedFragment(Insert insert)
         {
+            var pieces = new List<(int Low, Expr Value)>();
+            Expr current = insert;
+            while (current is Insert part)
+            {
+                pieces.Add((part.Low, part.Value));
+                current = part.Base;
+            }
+            // 完整覆盖的逐道运算直接拆成叶子，避免恢复中间插入时生成 48/96 位的临时切片。
+            var cursor = 0;
+            var ordered = pieces.OrderBy(p => p.Low).ToArray();
+            var complete = true;
+            foreach (var piece in ordered)
+            {
+                complete &= piece.Low == cursor && piece.Value.Width is 8 or 16 or 32 or 64;
+                cursor += piece.Value.Width;
+            }
+            if (current is Const { Value: 0 } && insert.Width is 32 or 64 or 128
+                && complete && cursor == insert.Width)
+            {
+                var leaves = new List<Part>();
+                foreach (var piece in ordered)
+                {
+                    if (!Recover(piece.Value, null).TryGet(out var value, out var failure)) return failure;
+                    if (value is Fragment fragment) leaves.AddRange(fragment.Parts.Select(p => new Part(piece.Low + p.Low, p.Value)));
+                    else leaves.Add(new(piece.Low, value));
+                }
+                return new Fragment(leaves, types.UInt64, insert.Width);
+            }
             if (Recover(insert.Base, null).TryGet(out var original, out _) && Recover(insert.Value, null).TryGet(out var inserted, out _)
                 && (original is Fragment || inserted is Fragment))
             {
@@ -153,27 +182,10 @@ public sealed partial class MethodRecovery
                 }
                 return new Fragment(parts, types.UInt64, insert.Width);
             }
-            var pieces = new List<(int Low, Expr Value)>();
-            Expr current = insert;
-            while (current is Insert part)
-            {
-                pieces.Add((part.Low, part.Value));
-                current = part.Base;
-            }
             if ((current is not Const { Value: 0 } || pieces.Any(p => p.Value.Width is not (32 or 64)))
                 && Fold.ScalarInsert(insert) is { } scalar) return Recover(scalar, null);
             if (current is not Const { Value: 0 } || insert.Width is not (32 or 64 or 128)) return Fail(0, "向量 插入基值或位宽尚未支持");
-            var cursor = 0;
-            var leaves = new List<Part>();
-            foreach (var piece in pieces.OrderBy(p => p.Low))
-            {
-                if (piece.Low != cursor || piece.Value.Width is not (32 or 64)) return Fail(0, "向量 插入未完整覆盖独立叶子");
-                cursor += piece.Value.Width;
-                if (!Recover(piece.Value, null).TryGet(out var value, out var failure)) return failure;
-                leaves.Add(new(piece.Low, value));
-            }
-            if (cursor != insert.Width) return Fail(0, "向量 插入未覆盖整个向量");
-            return new Fragment(leaves, types.UInt64, insert.Width);
+            return Fail(0, "向量 插入未完整覆盖独立叶子");
         }
 
         private RecoveryResult<ManagedValue> Slice(ManagedValue value, int low, int width)

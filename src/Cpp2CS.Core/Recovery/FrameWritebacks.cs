@@ -19,7 +19,26 @@ internal static class FrameWritebacks
     }
 
     internal static int Run(MachineFunction function)
+        => Analyze(function, null);
+
+    internal static Func<Store, Store, bool> EqualOverlap(MachineFunction function, Func<Expr, long?>? frameOffset = null)
     {
+        var snapshots = new Dictionary<Store, ByteValue[]>();
+        Analyze(function, snapshots, frameOffset);
+        return (left, right) =>
+        {
+            if (left.Target is not FrameAddress a || right.Target is not FrameAddress b || a.Offset == b.Offset
+                || !snapshots.TryGetValue(left, out var first) || !snapshots.TryGetValue(right, out var second)) return false;
+            var start = Math.Max(a.Offset, b.Offset);
+            var end = Math.Min(a.Offset + first.Length, b.Offset + second.Length);
+            return start < end && Enumerable.Range(0, (int)(end - start))
+                .All(i => first[start - a.Offset + i] == second[start - b.Offset + i]);
+        };
+    }
+
+    private static int Analyze(MachineFunction function, Dictionary<Store, ByteValue[]>? snapshots, Func<Expr, long?>? frameOffset = null)
+    {
+        frameOffset ??= expression => expression is FrameAddress frame ? frame.Offset : null;
         var values = new Dictionary<Variable, ByteValue[]>();
         var exits = new Dictionary<Block, Dictionary<long, ByteValue>>();
         var removed = 0;
@@ -45,10 +64,10 @@ internal static class FrameWritebacks
                         return bytes[..size];
                     case Ir.Convert { Kind: ConvKind.ZeroExtend or ConvKind.Truncate } convert when Bytes(convert.Operand, site) is { } inner:
                         return Enumerable.Range(0, size).Select(i => i < inner.Length ? inner[i] : new ByteValue(null, 0, 0)).ToArray();
-                    case Load { Address: FrameAddress { Offset: < 0 } frame } when frame.Offset + size <= 0:
+                    case Load load when frameOffset(load.Address) is { } start && start < 0 && start + size <= 0:
                         return Enumerable.Range(0, size).Select(i =>
                         {
-                            var offset = frame.Offset + i;
+                            var offset = start + i;
                             if (!memory.TryGetValue(offset, out var value)) memory[offset] = value = new ByteValue(site, i);
                             return value;
                         }).ToArray();
@@ -67,7 +86,8 @@ internal static class FrameWritebacks
                     case Store { Target: FrameAddress { Offset: < 0 } frame } store
                         when store.Value.Width is >= 8 and <= 128 && store.Value.Width % 8 == 0 && frame.Offset + store.Value.Width / 8 <= 0:
                         var written = Bytes(store.Value, store);
-                        if (written is not null && written.Select((b, at) => memory.TryGetValue(frame.Offset + at, out var old) && old == b).All(equal => equal))
+                        if (written is not null && snapshots is not null) snapshots[store] = written;
+                        if (snapshots is null && written is not null && written.Select((b, at) => memory.TryGetValue(frame.Offset + at, out var old) && old == b).All(equal => equal))
                         {
                             block.Statements[i] = new Nop(store.Address, "栈原值写回");
                             removed++;

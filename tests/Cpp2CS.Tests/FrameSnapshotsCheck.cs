@@ -34,6 +34,30 @@ internal static class FrameSnapshotsCheck
             if (mode == "snapshot")
                 a.True(changes[store] is Nop && changes[read] is Define replacement && ReferenceEquals(replacement.Value, saved), "使用原寄存器快照，不再次读取原地址");
         }
+        foreach (var mode in new[] { "equal", "different", "changed-source", "partial", "escape-tail", "bypass" })
+        {
+            var first = new Variable(Storage.Vec(0), 1);
+            var second = new Variable(Storage.Vec(1), 1);
+            var entry = new Block(0x1000) { Statements = [new Define(0x1000, first, new Load(new FrameAddress(-64), 128))] };
+            if (mode == "changed-source") entry.Statements.Add(new Store(0x1004, new FrameAddress(-52), Expr.C(9, 32)));
+            entry.Statements.Add(new Define(0x1008, second, new Load(new FrameAddress(mode == "different" ? -48 : -52), 128)));
+            var firstStore = new Store(0x1010, new FrameAddress(-128), new Use(first, 128));
+            var secondStore = new Store(0x1014, new FrameAddress(-116), new Use(second, 128));
+            entry.Statements.Add(firstStore);
+            var write = new Block(0x1014) { Statements = [secondStore] };
+            var done = new Block(0x1020) { Statements = [
+                new Define(0x1020, new(Storage.Vec(2), 1), new Load(new FrameAddress(-128), 128)),
+                new Define(0x1024, new(Storage.Vec(3), 1), new Load(new FrameAddress(-116), 128))] };
+            if (mode == "partial") done.Statements.Add(new Define(0x1028, new(Storage.Gpr(0), 1), new Load(new FrameAddress(-104), 32)));
+            if (mode == "escape-tail") write.Statements.Add(new Call(0x1018, CallKind.Direct, Expr.C(0x3000, 64)) { Arguments = [new FrameAddress(-104)] });
+            MachineFunction.AddEdge(entry, write);
+            MachineFunction.AddEdge(write, done);
+            if (mode == "bypass") MachineFunction.AddEdge(entry, done);
+            var function = new MachineFunction { Entry = entry.Start, Range = new(0x1000, 0x1030, CodeRegion.Managed, default), Blocks = [entry, write, done] };
+            function.Renumber();
+            var changes = FrameSnapshots.Read(function);
+            a.Equal(mode == "equal" ? 4 : 0, changes.Count, $"重叠快照 {mode}");
+        }
         return a.Finish("frame-snapshots");
     }
 }
