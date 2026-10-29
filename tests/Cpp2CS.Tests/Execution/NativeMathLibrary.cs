@@ -20,6 +20,7 @@ internal static class NativeMathLibrary
         : OperatingSystem.IsMacOS() ? "/usr/lib/libSystem.B.dylib" : "libm.so.6");
     internal static readonly ModfFunction Modf = Marshal.GetDelegateForFunctionPointer<ModfFunction>(NativeLibrary.GetExport(Library, "modf"));
     internal static readonly SingleFunction Sinf = Marshal.GetDelegateForFunctionPointer<SingleFunction>(NativeLibrary.GetExport(Library, "sinf"));
+    internal static readonly SingleFunction Cosf = Marshal.GetDelegateForFunctionPointer<SingleFunction>(NativeLibrary.GetExport(Library, "cosf"));
     internal static readonly SingleBinaryFunction Fmodf = Marshal.GetDelegateForFunctionPointer<SingleBinaryFunction>(NativeLibrary.GetExport(Library, "fmodf"));
     internal static readonly SingleBinaryFunction Powf = Marshal.GetDelegateForFunctionPointer<SingleBinaryFunction>(NativeLibrary.GetExport(Library, "powf"));
     internal static readonly DoubleFunction Acos = Marshal.GetDelegateForFunctionPointer<DoubleFunction>(NativeLibrary.GetExport(Library, "acos"));

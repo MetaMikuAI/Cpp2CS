@@ -401,6 +401,19 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Call or Code.Callvirt:
                 {
                     if (instruction.OpCode.Code == Code.Call && ((MethodReference)operand).Resolve() is
+                        { IsStatic: true, IsPInvokeImpl: true, ReturnType.FullName: "System.Void",
+                            Parameters: [{ ParameterType.FullName: "System.Single" },
+                                { ParameterType.FullName: "System.Single&" }, { ParameterType.FullName: "System.Single&" }],
+                            PInvokeInfo: { EntryPoint: "sincosf", IsCallConvCdecl: true, Module.Name: "libm.so" or "libm.so.6" } })
+                    {
+                        var cosine = NotNull(Pop());
+                        var sine = NotNull(Pop());
+                        var value = (float)Pop().Double;
+                        WriteValue(side, Types.Single, sine, StackValue.F(NativeMathLibrary.Sinf(value)));
+                        WriteValue(side, Types.Single, cosine, StackValue.F(NativeMathLibrary.Cosf(value)));
+                        break;
+                    }
+                    if (instruction.OpCode.Code == Code.Call && ((MethodReference)operand).Resolve() is
                         { IsStatic: true, IsPInvokeImpl: true, ReturnType.FullName: "System.Single", Parameters: [{ ParameterType.FullName: "System.Single" }],
                             PInvokeInfo: { EntryPoint: "sinf" or "tanf", IsCallConvCdecl: true, Module.Name: "libm.so" or "libm.so.6" } } unaryImport)
                     {

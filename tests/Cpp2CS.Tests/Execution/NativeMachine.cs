@@ -480,6 +480,14 @@ internal sealed partial class NativeMachine : IDisposable
                 uc.SetReg(Unicorn.D(0), unchecked((ulong)BitConverter.DoubleToInt64Bits(fraction)));
                 break;
             }
+            case HelperKind.Import when helper.Detail == "sincosf":
+            {
+                var value = BitConverter.UInt32BitsToSingle((uint)uc.Reg(Unicorn.S(0)));
+                // 外部 libm 未包含在游戏映像中；以宿主 C 库核对 ABI，不据此证明目标平台的舍入实现。
+                side.Write(X(0), BitConverter.GetBytes(NativeMathLibrary.Sinf(value)));
+                side.Write(X(1), BitConverter.GetBytes(NativeMathLibrary.Cosf(value)));
+                break;
+            }
             case HelperKind.Import when helper.Detail is "sinf" or "tanf":
             {
                 var operation = helper.Detail == "sinf" ? NativeMathLibrary.Sinf : NativeMathLibrary.Tanf;
