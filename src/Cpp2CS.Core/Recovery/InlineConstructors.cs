@@ -17,7 +17,9 @@ internal static class InlineConstructors
     internal static Pattern? Create(MethodRef method, AbiSignature signature, MachineFunction function)
     {
         if (function.Range.ExceptionRegions.Any() || signature.This is not { Passing: Passing.Registers, Pieces.Length: 1 }
-            || signature.Parameters.Any(p => p.Passing != Passing.Registers || p.Pieces.Length != 1 || p.Pieces[0].Register.Bank != Bank.Gpr)) return null;
+            || signature.Parameters.Any(p => p.Passing != Passing.Registers || p.Pieces.Length != 1
+                || !(p.Pieces[0].Register.Bank == Bank.Gpr
+                    || p.Pieces[0] is { Register.Bank: Bank.Vec, Width: 32 or 64 }))) return null;
         var effects = new List<Stmt>();
         var definitions = new Dictionary<Variable, Expr>();
         foreach (var (_, statement) in AllocationPairing.Following(function.EntryBlock, -1))
@@ -27,8 +29,9 @@ internal static class InlineConstructors
                 case Nop: continue;
                 case Define d when Pure(d.Value): definitions[d.Target] = Expand(d.Value, definitions); continue;
                 // 提升器保留的序言存寄存器不属于构造行为。
-                case Store { Target: FrameAddress, Value: Use { Variable: { Version: 0 } v } }
-                    when v.Storage == Storage.Gpr(30) || v.Storage.Bank == Bank.Gpr && v.Storage.Index is >= 19 and <= 29: continue;
+                case Store { Target: FrameAddress, Value: Use { Width: 64, Variable: { Version: 0 } v } }
+                    when v.Storage.Bank == Bank.Gpr && v.Storage.Index is >= 19 and <= 30
+                        || v.Storage.Bank == Bank.Vec && v.Storage.Index is >= 8 and <= 15: continue;
                 case Return { Value: null }:
                 case Call { Kind: CallKind.Tail, Op.Kind: OpKind.WriteBarrier }:
                     // 尾部写屏障只通知 GC；调用点保留自身屏障及其返回语义。
@@ -77,6 +80,7 @@ internal static class InlineConstructors
             if (statement is Define d && Pure(d.Value)) { definitions[d.Target] = Expand(d.Value, definitions); continue; }
             var actual = ExprMap.MapOperands(statement, e => Expand(e, definitions));
             var expected = pattern.Effects[effect];
+            var consumed = 1;
             if (pattern.ReorderStores && actual is Store write && expected is Store)
             {
                 if (stores.Count == 0)
@@ -84,14 +88,12 @@ internal static class InlineConstructors
                     stores.AddRange(pattern.Effects.Skip(effect).TakeWhile(s => s is Store).Cast<Store>());
                     if (!DisjointStores(stores)) return null;
                 }
-                expected = stores.SingleOrDefault(s => s.Value.Width == write.Value.Width
-                    && Expression(s.Target, write.Target, bindings, widths));
-                if (expected is not Store selected) return null;
-                stores.Remove(selected);
+                consumed = MatchStores(write, stores, bindings, widths);
+                if (consumed == 0) return null;
             }
-            else if (stores.Count != 0) return null;
-            if (!Statement(expected, actual, bindings, widths)) return null;
-            if (++effect == pattern.Effects.Count) break;
+            else if (stores.Count != 0 || !Statement(expected, actual, bindings, widths)) return null;
+            effect += consumed;
+            if (effect == pattern.Effects.Count) break;
         }
         if (effect != pattern.Effects.Count) return null;
         var args = new List<Expr>();
@@ -108,6 +110,32 @@ internal static class InlineConstructors
             if (statement is Phi phi && phi.Sources.Any(locals.Contains)
                 || ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => locals.Contains(u.Variable))) return null;
         return new(pattern.Method, args, matched);
+    }
+
+    // 宽写入必须恰好覆盖连续字段；不允许跨过间隙、调用或尚未匹配的其他副作用。
+    private static int MatchStores(Store actual, List<Store> pending, Dictionary<Variable, Expr> bindings,
+        Dictionary<Variable, int> parameters)
+    {
+        if (actual.Target is not Binary { Op: BinOp.Add, Left: var root, Right: Const offset }
+            || actual.Value.Width % 8 != 0) return 0;
+        var end = offset.Signed + actual.Value.Width / 8;
+        var selected = pending.Where(s => ((Const)((Binary)s.Target).Right).Signed >= offset.Signed
+            && ((Const)((Binary)s.Target).Right).Signed < end)
+            .OrderBy(s => ((Const)((Binary)s.Target).Right).Signed).ToArray();
+        var cursor = offset.Signed;
+        foreach (var store in selected)
+        {
+            var target = (Binary)store.Target;
+            if (((Const)target.Right).Signed != cursor || store.Value.Width % 8 != 0
+                || cursor + store.Value.Width / 8 > end
+                || !Expression(target.Left, root, bindings, parameters)
+                || !Expression(store.Value, Fold.Extract(actual.Value, (int)(cursor - offset.Signed) * 8,
+                    store.Value.Width), bindings, parameters)) return 0;
+            cursor += store.Value.Width / 8;
+        }
+        if (cursor != end) return 0;
+        foreach (var store in selected) pending.Remove(store);
+        return selected.Length;
     }
 
     // 新对象尚未发布时，连续且互不重叠的纯字段写入允许交换；调用和屏障仍保持顺序。
@@ -173,7 +201,7 @@ internal static class InlineConstructors
         };
     }
 
-    private static bool Pure(Expr expression) => ExprMap.Walk(expression).All(e => e is Const or Use or Binary or Unary or Ir.Convert or Symbol);
+    private static bool Pure(Expr expression) => ExprMap.Walk(expression).All(e => e is Const or Use or Binary or Unary or Ir.Convert or Symbol or Extract or Insert);
     private static Expr Low(Expr value, int width) => value is Use u ? u with { Width = width }
         : Fold.Convert(value.Width < width ? ConvKind.ZeroExtend : ConvKind.Truncate, value, width);
     private static Expr Expand(Expr expression, IReadOnlyDictionary<Variable, Expr> definitions) => Fold.Simplify(ExprMap.Map(expression,

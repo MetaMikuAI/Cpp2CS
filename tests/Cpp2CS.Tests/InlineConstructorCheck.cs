@@ -82,6 +82,37 @@ internal static class InlineConstructorCheck
             Field(self, Expr.C(7, 64))] };
         a.True(InlineConstructors.Find(overlap, swapped, swapped.EntryBlock, 0, created) is null,
             "重叠字段不能交换写入顺序");
+        var floating = new PrimitiveRef("Single");
+        var floatSignature = signature with { Parameters = [
+            new(floating, Passing.Registers, [new(Storage.Vec(0), 32, 0)]),
+            new(floating, Passing.Registers, [new(Storage.Vec(1), 32, 0)])] };
+        Store At(Expr receiver, int offset, Expr source) => new(8,
+            new Binary(BinOp.Add, receiver, Expr.C((ulong)offset, 64), 64), source);
+        var save = new Store(0, new FrameAddress(-16), new Use(new(Storage.Vec(8), 0), 64));
+        var floats = InlineConstructors.Create(method, floatSignature, Function(save, Base(self),
+            At(self, 16, new Use(new(Storage.Vec(0), 0), 32)),
+            At(self, 20, new Use(new(Storage.Vec(1), 0), 32)), new Return(20)));
+        a.True(floats is not null, "浮点参数和向量寄存器低 64 位保存可生成构造模板");
+        var packed = new Use(new(Storage.Vec(8), 1), 64);
+        var combined = Function(new Call(0, CallKind.Direct, Expr.C(100, 64)), Base(new Use(created, 64)),
+            At(new Use(created, 64), 16, packed), new Return(20));
+        var floatPattern = floats! with { ReorderStores = true };
+        a.True(InlineConstructors.Find(floatPattern, combined, combined.EntryBlock, 0, created) is { } floatMatch
+            && floatMatch.Arguments.SequenceEqual([new Use(packed.Variable, 32), new Extract(packed, 32, 32)]),
+            "合并写入按字段偏移拆回两个浮点参数，保持位型和顺序");
+        var gap = floatPattern with { Effects = [floats!.Effects[0], floats.Effects[1],
+            At(self, 24, new Use(new(Storage.Vec(1), 0), 32))] };
+        a.True(InlineConstructors.Find(gap, combined, combined.EntryBlock, 0, created) is null,
+            "宽写入不能覆盖构造模板没有写入的间隙");
+        combined.EntryBlock.Statements[2] = At(new Use(created, 64), 16, new Use(packed.Variable, 128));
+        a.True(InlineConstructors.Find(floatPattern, combined, combined.EntryBlock, 0, created) is null,
+            "宽写入不能超出构造字段范围");
+        combined.EntryBlock.Statements[2] = At(new Use(new(Storage.Gpr(9), 1), 64), 16, packed);
+        a.True(InlineConstructors.Find(floatPattern, combined, combined.EntryBlock, 0, created) is null,
+            "合并写入必须仍然指向本次分配的对象");
+        a.True(InlineConstructors.Create(method, floatSignature, Function(save with {
+            Value = new Use(new(Storage.Vec(8), 0), 128) }, Base(self), floats.Effects[1], floats.Effects[2], new Return(20))) is null,
+            "向量高 64 位不属于 ABI 保存范围，不能当作序言忽略");
         return a.Finish("inline-constructors");
     }
 }
