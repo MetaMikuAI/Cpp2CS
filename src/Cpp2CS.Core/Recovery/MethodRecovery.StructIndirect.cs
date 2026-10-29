@@ -75,6 +75,20 @@ public sealed partial class MethodRecovery
             return true;
         }
 
+        [InvocationOutputRule(20)]
+        private RecoveryResult<bool> ConstructReturnBuffer(Call call, AbiSignature signature, Dictionary<Storage, Expr> registers,
+            ManagedInvocation invocation, List<ManagedStatement> output)
+        {
+            if (call.Kind != CallKind.Tail || ownReturnBuffer is null || signature.Return is not null
+                || invocation.Method.Method is not { Name: ".ctor", IsStatic: false, Owner.IsValueType: true }
+                || !invocation.Method.DeclaringType.Equals(returnType)
+                || invocation.Receiver is not AddressValue receiver || !receiver.Target.Equals(ownReturnBuffer)) return false;
+            // 构造器写入调用者提供的 x8 根；保留此前的初始化，完整性仍由返回缓冲区证明检查。
+            output.Add(new ManagedCall(call.Address, invocation, null, false));
+            output.Add(new ManagedReturn(call.Address, ownReturnBuffer));
+            return true;
+        }
+
         /// <summary>返回缓冲区没有隐含默认值。按 CFG 前驱交集证明每条正常返回路径都定义了全部叶子。</summary>
         [BodyProof(10)]
         private void ProveReturnBuffer(ManagedBody body)

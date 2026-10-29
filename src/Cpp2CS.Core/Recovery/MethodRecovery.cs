@@ -1751,7 +1751,8 @@ public sealed partial class MethodRecovery
                 case { Kind: OpKind.TypeCheck, Operand: TypeRef type } when typeChecks.TryGetValue(call, out var obj) && call.Defines.FirstOrDefault() is { } checkedValue:
                     return Assign(address, checkedValue, () => RecoverAs(obj, types.Object, address).Bind(value => Coerce(new ComparisonValue(Cond.Ne,
                         new IsInstValue(value, type), new ConstantValue(0, type, 64), types.Boolean), types.UInt64, address)), output);
-                case { Kind: OpKind.Unbox, Operand: TypeRef type } when (type is DefinitionRef { Definition.IsEnum: true } or GenericParameterRef { NativeScalar: not null }) && call.Defines.FirstOrDefault() is { } created:
+                case { Kind: OpKind.Unbox, Operand: TypeRef type } when (types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double
+                    || type is GenericParameterRef { NativeScalar: not null }) && call.Defines.FirstOrDefault() is { } created:
                     return Assign(address, created, () => RecoverAs(call.Arguments[0], types.Object, address).Map<ManagedValue>(value => new UnboxAddressValue(value, type)), output);
                 case { Kind: OpKind.IsInst, Operand: TypeRef type } when call.Kind == CallKind.Tail || call.Defines.FirstOrDefault() is not null:
                 {
@@ -1837,6 +1838,17 @@ public sealed partial class MethodRecovery
             if (handled) return null;
             if (call.Kind is CallKind.Tail or CallKind.TailIndirect)
             {
+                // 枚举与同宽整数共用返回寄存器；显式保留枚举转换，不能套用于 bool、窄整数或浮点。
+                if (!calledReturn.Equals(returnType) && types.Kind(calledReturn) == TypeKind.Int && types.Kind(returnType) == TypeKind.Int
+                    && (calledReturn is DefinitionRef { Definition.IsEnum: true } || returnType is DefinitionRef { Definition.IsEnum: true })
+                    && types.Bits(calledReturn) == types.Bits(returnType) && types.Bits(returnType) is 32 or 64
+                    && signature.Return is { Passing: Passing.Registers, Pieces.Length: 1 })
+                {
+                    var enumResult = StructLocal(calledReturn, types.Bits(calledReturn));
+                    output.Add(new ManagedCall(address, invocation, enumResult, false) { Inlined = copied });
+                    output.Add(new ManagedReturn(address, new ConversionValue(ConvKind.Bitcast, enumResult, returnType, types.Bits(returnType))));
+                    return null;
+                }
                 if (ManagedTypes.IsVoid(returnType) && signature.Return is { Passing: Passing.Registers } discarded
                     && (RegisterStruct(discarded) || discarded.Pieces.Length == 1 && types.Kind(calledReturn) is TypeKind.Bool or TypeKind.Int or TypeKind.Float or TypeKind.Double or TypeKind.Reference))
                 {

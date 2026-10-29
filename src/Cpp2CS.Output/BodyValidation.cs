@@ -119,7 +119,8 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                 break;
             case UnboxAddressValue unbox:
                 if (!CanAccess(unbox.Target)) return new(EmissionProblemKind.AccessDenied, $"访问权限 类型 {unbox.Target}");
-                if (unbox.Target is not (DefinitionRef { Definition.IsEnum: true } or GenericParameterRef { NativeScalar: not null })) return new(EmissionProblemKind.Unsupported, $"拆箱 类型 {unbox.Target} 尚未支持");
+                if (types.Kind(unbox.Target) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)
+                    && unbox.Target is not GenericParameterRef { NativeScalar: not null }) return new(EmissionProblemKind.Unsupported, $"拆箱 类型 {unbox.Target} 尚未支持");
                 break;
             case UnboxValue unbox:
                 if (!ManagedTypes.IsReferenceType(unbox.Operand.Type)) return new(EmissionProblemKind.Unsupported, "拆箱值需要对象来源");
