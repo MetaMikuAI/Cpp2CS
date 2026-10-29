@@ -103,6 +103,8 @@ public enum OpKind : byte
     UnboxGenericValue,
     /// <summary>共享受约束实例调用；Operand 为方法，参数为约束类型和接收者地址。</summary>
     InvokeConstrainedGeneric,
+    /// <summary>两个标量栈出参已显式化的外部调用；Operand 为符号名，Defines 按出参顺序保存结果。</summary>
+    ImportOutPair,
 }
 
 /// <summary>调用所表达的运行时操作。Operand：类型（TypeRef）、异常名、槽位号等，见 <see cref="OpKind"/>。</summary>

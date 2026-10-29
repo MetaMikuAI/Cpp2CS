@@ -3,7 +3,7 @@ using Cpp2CS.Ir;
 
 namespace Cpp2CS.Idioms;
 
-/// <summary>libm 的有界栈出参调用；modf 的两部分均保留输入符号，无穷的小数部分为带符号零。</summary>
+/// <summary>libm 的有界栈出参调用；显式保留输出值及写入顺序。</summary>
 internal static class MathImportNormalizer
 {
     // C11 / POSIX modf：https://man7.org/linux/man-pages/man3/modf.3.html
@@ -21,6 +21,22 @@ internal static class MathImportNormalizer
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
+                // Bionic math.h：void sincosf(float, float* sin, float* cos)。原导入保留，不拆成近似表达式。
+                if (block.Statements[i] is Call { Kind: CallKind.Direct, Op: { Kind: OpKind.Import, Operand: "sincosf" },
+                    Arguments: [FrameAddress { Offset: <= -4 } sine, FrameAddress { Offset: <= -4 } cosine, var angle],
+                    Results.Length: 0, Defines.Length: 0 } pair && angle.Width >= 32
+                    && Math.Abs(sine.Offset - cosine.Offset) >= 4)
+                {
+                    var sin = fresh(); var cos = fresh();
+                    block.Statements[i] = pair with { Op = new(OpKind.ImportOutPair, "sincosf"),
+                        Arguments = [Fold.Convert(ConvKind.Truncate, angle, 32)], Sources = [Storage.Vec(0)],
+                        Results = [sin.Storage, cos.Storage], Defines = [sin, cos] };
+                    block.Statements.InsertRange(i + 1, [new Store(pair.Address, sine, new Use(sin, 32)),
+                        new Store(pair.Address, cosine, new Use(cos, 32))]);
+                    i += 2;
+                    changed = true;
+                    continue;
+                }
                 if (block.Statements[i] is not Call { Kind: CallKind.Direct, Op: { Kind: OpKind.Import, Operand: "modf" },
                     Arguments: [FrameAddress { Offset: < 0 } frame, var operand],
                     Results: [var register], Defines: [{ } result] } call || register != Storage.Vec(0)

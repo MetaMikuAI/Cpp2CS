@@ -64,6 +64,7 @@ public sealed class FactsCallModel : ICallModel
         {
             "memcpy" or "memmove" or "memset" => new([X(0), X(1), X(2)], [X(0)], "libc"),
             "modf" => new([X(0), Storage.Vec(0)], [Storage.Vec(0)], "libm"),
+            "sincosf" => new([X(0), X(1), Storage.Vec(0)], [], "libm"),
             "sinf" or "tanf" or "acos" => new([Storage.Vec(0)], [Storage.Vec(0)], "libm"),
             "fmodf" or "powf" or "atan2f" or "atan2" => new([Storage.Vec(0), Storage.Vec(1)], [Storage.Vec(0)], "libm"),
             "__cxa_begin_catch" => new([X(0)], [X(0)], "libc++abi"),

@@ -58,6 +58,16 @@ internal static class NativeImportCheck
         Declare("tanf", types.Single, ["value"]);
         Declare("atan2f", types.Single, ["y", "x"]);
         Declare("atan2", types.Double, ["y", "x"]);
+        var sincos = new MethodDef { Index = -1, Owner = owner, Name = "sincosf", Token = 0,
+            Attributes = SR.MethodAttributes.Public | SR.MethodAttributes.Static, ImplAttributes = SR.MethodImplAttributes.PreserveSig,
+            Slot = -1, ReturnType = new PrimitiveRef("void"), NativeImport = new("libm.so", "sincosf"), Parameters = [
+                new("value", types.Single, 0, null, false),
+                new("sine", new ByRefRef(types.Single), SR.ParameterAttributes.Out, null, false),
+                new("cosine", new ByRefRef(types.Single), SR.ParameterAttributes.Out, null, false)] };
+        var sincosDeclaration = (MethodDefinition)skeleton.Reference(module, new MethodRef(sincos, [], []), null, null);
+        a.True(sincosDeclaration.ReturnType.FullName == "System.Void" && sincosDeclaration.Parameters is [
+            { ParameterType.FullName: "System.Single" }, { ParameterType.FullName: "System.Single&", IsOut: true },
+            { ParameterType.FullName: "System.Single&", IsOut: true }], "sincosf 保留 void、float 输入及两个 out float");
         a.True(powerDeclaration.Parameters.Count == 2 && powerDeclaration.ReturnType.FullName == "System.Single"
             && acosDeclaration.Parameters.Single().ParameterType.FullName == "System.Double" && acosDeclaration.ReturnType.FullName == "System.Double",
             "powf 保留单精度，acos 保留双精度");
@@ -67,6 +77,10 @@ internal static class NativeImportCheck
         using var saved = ModuleDefinition.ReadModule(stream);
         var savedType = saved.Types.Single(t => t.Name == "NativeImports");
         var savedMethod = savedType.Methods.Single(m => m.Name == "sinf");
+        var savedPair = savedType.Methods.Single(m => m.Name == "sincosf");
+        a.True(savedPair.PInvokeInfo.EntryPoint == "sincosf" && savedPair.PInvokeInfo.IsCallConvCdecl
+            && savedPair.Parameters[1].IsOut && savedPair.Parameters[2].IsOut
+            && savedPair.ReturnType.FullName == "System.Void", "双出参导入签名写盘不变");
         a.True(fingerprint.SequenceEqual(CilBodyFingerprint.Describe(savedType.Methods.Single(m => m.Name == "Call"))), "导入调用身份写盘不变");
         a.Equal("libm.so", savedMethod.PInvokeInfo.Module.Name, "写盘保留库名");
         a.Equal("sinf", savedMethod.PInvokeInfo.EntryPoint, "写盘保留符号");

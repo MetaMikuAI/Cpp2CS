@@ -466,7 +466,8 @@ public sealed class Skeleton
             PInvokeInfo = ImportInfo(module, imported),
         };
         foreach (var parameter in method.Parameters)
-            declaration.Parameters.Add(new ParameterDefinition(parameter.Name, 0, Reference(module, parameter.Type, null, null)));
+            declaration.Parameters.Add(new ParameterDefinition(parameter.Name, (ParameterAttributes)parameter.Attributes,
+                Reference(module, parameter.Type, null, null)));
         container.Methods.Add(declaration);
         nativeImports.Add((module, imported), declaration);
         return declaration;

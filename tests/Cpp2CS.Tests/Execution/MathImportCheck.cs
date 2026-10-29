@@ -8,10 +8,31 @@ namespace Cpp2CS.Tests.Execution;
 
 internal static class MathImportCheck
 {
-    [Command("math-import", "modf 与独立 C 数学库的位型对照", Gate = Gate.Unit)]
+    [Command("math-import", "数学栈出参边界与 modf 的独立 C 库位型对照", Gate = Gate.Unit)]
     public static int Run()
     {
         var a = new Assertions();
+        foreach (var (sin, cos, valid) in new (long, long, bool)[] { (-8, -4, true), (-4, -8, true),
+            (-8, -8, false), (-8, -6, false), (-2, -8, false), (-8, 0, false) })
+        {
+            var call = new Call(0x100, CallKind.Direct, Expr.C(0x200, 64)) { Op = new(OpKind.Import, "sincosf"),
+                Sources = [Storage.Gpr(0), Storage.Gpr(1), Storage.Vec(0)],
+                Arguments = [new FrameAddress(sin), new FrameAddress(cos), new Read(Storage.Vec(0), 128)] };
+            var block = new Block(0x100) { Statements = [call] };
+            var function = new MachineFunction { Entry = block.Start, Range = new(0x100, 0x104, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [block] };
+            var next = 1;
+            a.Equal(valid, MathImportNormalizer.Run(function, () => new(Storage.Temp(next++), 1)), "sincosf 两个完整且不重叠的栈出参");
+            if (valid)
+            {
+                a.True(block.Statements is [Call { Op.Kind: OpKind.ImportOutPair, Defines.Length: 2, Arguments: [{ Width: 32 }] },
+                    Store { Value.Width: 32 }, Store { Value.Width: 32 }], "保留原导入及两个单精度输出");
+                var normalized = (Call)block.Statements[0];
+                a.True(block.Statements[1] is Store { Target: FrameAddress s, Value: Use su } && s.Offset == sin && su.Variable == normalized.Defines[0]
+                    && block.Statements[2] is Store { Target: FrameAddress c, Value: Use cu } && c.Offset == cos && cu.Variable == normalized.Defines[1],
+                    "sin 与 cos 输出顺序不由栈地址高低决定");
+                a.True(!MathImportNormalizer.Run(function, () => new(Storage.Temp(next++), 1)), "双出参归一化幂等");
+            }
+        }
         foreach (var offset in new long[] { -8, -4, 0 })
         {
             var block = new Block(0x100) { Statements = [new Call(0x100, CallKind.Direct, Expr.C(0x200, 64))
