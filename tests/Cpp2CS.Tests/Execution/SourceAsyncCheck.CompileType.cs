@@ -16,6 +16,7 @@ internal static partial class SourceAsyncCheck
         var compilation = CSharpCompilation.Create("RecoveredScope", trees,
             CompilationReferences(Path.Combine(directory, "assemblies"), proof, includeVoidBuilder: true),
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true));
+        compilation = CompileCheck.WithFrameworkShims(compilation);
         var result = compilation.Emit(Path.Combine(proof, "Recovered.dll"));
         File.WriteAllLines(Path.Combine(proof, "compile.txt"), result.Diagnostics.Select(d => d.ToString()));
         var a = new Assertions();
@@ -40,6 +41,7 @@ internal static partial class SourceAsyncCheck
             ScopeCompilationReferences.Create(assemblies, assembly, new HashSet<string> { type }, sourceName, proof,
                 CompilationReferences(assemblies, proof, includeVoidBuilder: true)),
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true));
+        compilation = CompileCheck.WithFrameworkShims(compilation);
         var result = compilation.Emit(Path.Combine(proof, "Recovered.dll"));
         File.WriteAllLines(Path.Combine(proof, "compile.txt"), result.Diagnostics.Select(d => d.ToString()));
         var a = new Assertions();

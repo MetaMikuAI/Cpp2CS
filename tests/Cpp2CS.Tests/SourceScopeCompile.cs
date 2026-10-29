@@ -33,6 +33,7 @@ internal static class SourceScopeCompile
                 Execution.SourceAsyncCheck.CompilationReferences(assemblies, output, includeVoidBuilder: true));
             var compilation = CSharpCompilation.Create(sourceName, trees, references,
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true));
+            compilation = CompileCheck.WithFrameworkShims(compilation);
             var path = Path.Combine(output, sourceName + ".dll");
             var result = compilation.Emit(path);
             if (result.Success) Execution.SourceAsyncCheck.CheckCompiledAwait(path, trees.Sum(t =>

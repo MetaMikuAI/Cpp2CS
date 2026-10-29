@@ -61,13 +61,19 @@ internal static class CompileCheck
             .ToArray();
         var compilation = CSharpCompilation.Create(assemblyName, trees, references, new CSharpCompilationOptions(
             OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true, nullableContextOptions: NullableContextOptions.Disable));
-        var shims = Shims.Where(shim => compilation.GetTypeByMetadataName(shim.MetadataName) is null).ToArray();
-        if (shims.Length > 0)
-            compilation = compilation.AddSyntaxTrees(shims.Select(shim => CSharpSyntaxTree.ParseText(shim.Source, parseOptions, path: "<shim>" + shim.MetadataName)));
+        compilation = WithFrameworkShims(compilation);
         var errors = compilation.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error)
             .Select(d => (d, d.Location.SourceTree?.FilePath is { } p && isTarget.Contains(p))).ToList();
         Console.WriteLine($"  {assemblyName}: 反编译 {decompiled.TotalSeconds:F0} s，编译 {(watch.Elapsed - decompiled).TotalSeconds:F0} s，文件 {sources.Count}");
         return errors;
+    }
+
+    internal static CSharpCompilation WithFrameworkShims(CSharpCompilation compilation)
+    {
+        var shims = Shims.Where(shim => compilation.GetTypeByMetadataName(shim.MetadataName) is null);
+        var options = compilation.SyntaxTrees.FirstOrDefault()?.Options as CSharpParseOptions;
+        return compilation.AddSyntaxTrees(shims.Select(shim => CSharpSyntaxTree.ParseText(shim.Source,
+            options, path: "<shim>" + shim.MetadataName)));
     }
 
     /// <summary>反编译结果的 TypeName 是 ReflectionName（Namespace.Name`N）；取不带命名空间与泛型元数的顶层名。</summary>
