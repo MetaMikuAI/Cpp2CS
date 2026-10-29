@@ -25,6 +25,16 @@ public sealed partial class MethodRecovery
         [Analysis("帧快照", 32, After = ["帧区域"])]
         private void ForwardFrameSnapshots()
         {
+            var pieces = FramePieceSnapshots.Read(function, NoStackRead,
+                expression => FrameAccess(expression) is { } frame ? frame.Region.Offset + frame.Offset : FrameOffset(expression));
+            foreach (var block in blocks)
+            for (var i = 0; i < block.Statements.Count; i++)
+            {
+                var old = block.Statements[i];
+                if (!pieces.TryGetValue(old, out var mapped)) continue;
+                block.Statements[i] = mapped;
+                PreserveStatementAnalysis(old, mapped);
+            }
             var replacements = FrameSnapshots.Read(function, ruleTraces.Add,
                 expression => FrameAccess(expression) is { } frame ? frame.Region.Offset + frame.Offset : FrameOffset(expression));
             foreach (var block in blocks)
@@ -35,7 +45,7 @@ public sealed partial class MethodRecovery
                 block.Statements[i] = mapped;
                 PreserveStatementAnalysis(old, mapped);
             }
-            if (replacements.Count > 0) definitions = IndexDefinitions();
+            if (pieces.Count > 0 || replacements.Count > 0) definitions = IndexDefinitions();
         }
 
         /// <summary>结构体地址已绑定到有界区域后，恢复地址不逃逸的整数计数槽和已定型的引用槽。</summary>
