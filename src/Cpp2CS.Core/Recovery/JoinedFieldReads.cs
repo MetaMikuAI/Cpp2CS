@@ -38,10 +38,11 @@ internal static class JoinedFieldReads
                     if (statement is not Define define) continue;
                     var expression = define.Value;
                     while (expression is Ir.Convert conversion) expression = conversion.Operand;
-                    if (expression is Load { Width: 8 or 16 or 32 or 64 } load
-                        && (load.Address is Use address && selected.Contains(address.Variable)
-                            || load.Address is Binary { Op: BinOp.Add, Left: Use receiver, Right: Const { Value: > 0 } }
-                                && selected.Contains(receiver.Variable))) { read = define; break; }
+                    if (expression is not Load { Width: 8 or 16 or 32 or 64 } load) continue;
+                    var root = load.Address;
+                    while (root is Binary { Op: BinOp.Add, Width: 64, Left.Width: 64, Right: Const { Width: 64, Value: > 0 } } addition)
+                        root = addition.Left;
+                    if (root is Use address && selected.Contains(address.Variable)) { read = define; break; }
                 }
                 if (read is not null || prefix.Count > 16 || current.Statements.Any(s => s is not (Nop or Jump)
                     && !(current == block && s is Phi) && !prefix.Any(p => ReferenceEquals(p.Statement, s)))) break;

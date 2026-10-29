@@ -165,6 +165,21 @@ internal static class DelegateConstructorChoiceCheck
         a.True(JoinedFieldReads.Run(addressFunction, p => p.Target == receiver), "已证明的字段地址合流保持原分支来源");
         a.True(addressJoin.Predecessors.SelectMany(p => p.Statements).OfType<Define>().All(d => d.Value is Load { Address: Use u }
             && u.Variable.Storage.Index is 10 or 11), "共享地址读取沿原入边替换，未提前读取其他路径");
+        foreach (var nested in new[] { "constant", "dynamic", "narrow" })
+        {
+            var nestedFunction = Diamond();
+            var nestedJoin = nestedFunction.Blocks[3];
+            nestedJoin.Statements.Remove(constructor);
+            var width = nested == "narrow" ? 32 : 64;
+            Expr displacement = nested == "dynamic" ? new Use(identity, width) : Expr.C(4, width);
+            var inner = new Binary(BinOp.Add, new Use(receiver, width), Expr.C(28, width), width);
+            nestedJoin.Statements.Insert(2, fieldRead with { Value = new Load(new Binary(BinOp.Add, inner, displacement, width), 32) });
+            a.Equal(nested == "constant", JoinedFieldReads.Run(nestedFunction, p => p.Target == receiver), "只展开等宽常量字段地址链");
+            if (nested == "constant")
+                a.True(nestedJoin.Predecessors.SelectMany(p => p.Statements).OfType<Define>().All(d => d.Value is Load
+                    { Address: Binary { Left: Binary { Left: Use u, Right: Const { Value: 28 } }, Right: Const { Value: 4 } } }
+                    && u.Variable.Storage.Index is 10 or 11), "每条入边保留原地址运算与字节偏移");
+        }
         foreach (var effects in new[] { false, true })
         {
             var writing = Diamond(effects);
