@@ -285,7 +285,7 @@ public sealed partial class MethodRecovery
         {
             foreach (var block in blocks)
             {
-                var copies = new List<(long Offset, CopyRange Range, Store Store, int Width)>();
+                var copies = new List<(long Offset, CopyRange Range, Store Store, int Width, bool Writes)>();
                 foreach (var store in block.Statements.OfType<Store>())
                 {
                     if (store.Value is not Use use || !values.TryGetValue(use.Variable, out var value)
@@ -293,25 +293,30 @@ public sealed partial class MethodRecovery
                     if (FrameOffset(store.Target) is { } to && FrameOffset(load.Address) is null)
                         {
                         if (!CopyRanges(load.Address, load.Width).TryGet(out var ranges, out var failure)) return failure;
-                        copies.AddRange(ranges.Select(r => (to - r.Offset, r, store, load.Width)));
+                        copies.AddRange(ranges.Select(r => (to - r.Offset, r, store, load.Width, true)));
                     }
                     if (FrameOffset(load.Address) is { } from && FrameOffset(store.Target) is null)
                         {
                         if (!CopyRanges(store.Target, load.Width).TryGet(out var ranges, out var failure)) return failure;
-                        copies.AddRange(ranges.Select(r => (from - r.Offset, r, store, load.Width)));
+                        copies.AddRange(ranges.Select(r => (from - r.Offset, r, store, load.Width, false)));
                     }
                 }
-                foreach (var group in copies.GroupBy(c => (c.Offset, c.Range.Type, c.Range.Root)))
+                foreach (var group in copies.GroupBy(c => (c.Offset, c.Range.Type, c.Range.Root, c.Writes)))
                 {
-                    var (offset, type, _) = group.Key;
+                    var (offset, type, _, writes) = group.Key;
                     var size = types.Size(type);
-                    if (offset >= 0 || offset + size > 0 || witnesses.Any(w => w.Offset == offset && w.Type.Equals(type))) continue;
+                    if (offset >= 0 || offset + size > 0) continue;
+                    var first = group.First().Store;
+                    // 已有读取签名不能代替本次完整写入；连续复制的起点切断旧栈值的生命期。
+                    var definition = writes && FrameCopySpans.WriteStart(block.Statements, group.Select(c => c.Store)) is { } start ? start : null;
+                    if (witnesses.Any(w => w.Offset == offset && w.Type.Equals(type)
+                        && (definition is null || ReferenceEquals(w.Call, definition)))) continue;
                     var covered = group.SelectMany(c => Enumerable.Range(c.Range.Offset, c.Width / 8)).ToHashSet();
                     var leaves = StructPaths(type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
                     if (type is GenericParameterRef { NativeAggregate: not null }
                         ? Enumerable.Range(0, size).Any(b => !covered.Contains(b))
                         : leaves.Length == 0 || leaves.Any(p => Enumerable.Range(p.Offset, types.Size(p.Type)).Any(b => !covered.Contains(b)))) continue;
-                    witnesses.Add(new(offset, type, group.First().Store, false));
+                    witnesses.Add(new(offset, type, definition ?? first, definition is not null));
                 }
             }
             return null;
