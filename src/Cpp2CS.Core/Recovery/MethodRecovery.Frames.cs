@@ -29,8 +29,39 @@ public sealed partial class MethodRecovery
         private void PrepareFrameTypes()
         {
             InferTypes();
+            NormalizeCheckedObjects();
+            for (var round = 0; round < 8 && JoinedFieldReads.Run(function, phi =>
+                phi.Sources.All(v => known.TryGetValue(v, out var type) && types.Kind(type) == TypeKind.Reference)
+                    && phi.Sources.Select(v => known[v]).Distinct().Count() > 1
+                || phi.Sources.All(FieldAddress)); round++)
+            {
+                Ssa.Propagate.Run(function, Ssa.Dominators.Compute(function));
+                blocks = function.Blocks;
+                definitions = IndexDefinitions();
+                InferTypes();
+            }
             NormalizePinnedArrays(true);
             PrepareArrayCursors();
+        }
+
+        private bool FieldAddress(Variable variable)
+        {
+            Expr root = new Use(variable, 64);
+            long offset = 0;
+            var seen = new HashSet<Variable>();
+            for (var depth = 0; depth < 16; depth++)
+            {
+                if (root is Binary { Op: BinOp.Add, Right: Const displacement } addition)
+                { offset += displacement.Signed; root = addition.Left; continue; }
+                if (root is not Use use || !seen.Add(use.Variable)) break;
+                if (values.GetValueOrDefault(use.Variable) is Use or Symbol or Binary { Op: BinOp.Add, Right: Const })
+                { root = values[use.Variable]; continue; }
+                if (phis.GetValueOrDefault(use.Variable) is { Sources: [var source] })
+                { root = new Use(source, 64); continue; }
+                break;
+            }
+            return root is Symbol { Kind: SymbolKind.StaticFields or SymbolKind.ThreadStaticFields }
+                || offset > 0 && TypeOfAddressBase(root) is { } type && ManagedTypes.IsReferenceType(type);
         }
 
         [Analysis("帧后数组地址", 37, After = ["整数帧槽"])]

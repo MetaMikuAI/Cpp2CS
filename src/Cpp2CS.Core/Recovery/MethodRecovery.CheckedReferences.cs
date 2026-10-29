@@ -8,6 +8,25 @@ public sealed partial class MethodRecovery
 {
     private sealed partial class Context
     {
+        private void NormalizeCheckedObjects()
+        {
+            if (!PrepareTypeChecks()) return;
+            var changes = CheckedObjectAliases.Read(function, c => typeChecks.GetValueOrDefault(c));
+            foreach (var block in blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                {
+                    var old = block.Statements[i];
+                    if (!changes.TryGetValue(old, out var mapped)) continue;
+                    block.Statements[i] = mapped;
+                    PreserveStatementAnalysis(old, mapped);
+                    if (old is Call { Op.Kind: OpKind.TypeCheck } before && mapped is Call { Op.Kind: OpKind.IsInst } after)
+                    { typeChecks.Remove(before); typeChecks.Remove(after); }
+                }
+            if (changes.Count > 0) { RemoveDeadDefinitions(); definitions = IndexDefinitions(); }
+            MarkRuntime();
+            InferTypes();
+        }
+
         private bool CheckedReference(Use value, TypeRef target, ulong address)
         {
             if (CheckedNullableReference(value, target, address)) return true;
@@ -16,10 +35,22 @@ public sealed partial class MethodRecovery
             var dominators = Dominators.Compute(function);
             foreach (var block in blocks.Where(b => dominators.Dominates(b.Index, site.Index)))
             foreach (var check in block.Statements.Take(block == site ? block.Statements.FindIndex(s => s.Address == address) : block.Statements.Count).OfType<Call>())
+            {
+                // isinst 的原生继承检查返回 0/1；判空已排除失败路径，后续同一引用保留该类型。
+                if (check is { Op.Kind: OpKind.NullCheck, Arguments: [Use flag] }
+                    && results.TryGetValue(flag.Variable, out var source)
+                    && source.Call.Op is { Kind: OpKind.TypeCheck, Operand: TypeRef checkedTarget } && checkedTarget.Equals(target)
+                    && typeChecks.TryGetValue(source.Call, out var checkedObject) && checkedObject == value) return true;
+                if (check is { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException",
+                        Arguments: [Compare { Cond: Cond.Eq, Left: Use failedFlag, Right: Const { Value: 0 } }] }
+                    && results.TryGetValue(failedFlag.Variable, out var checkedSource)
+                    && checkedSource.Call.Op is { Kind: OpKind.TypeCheck, Operand: TypeRef checkedReference } && checkedReference.Equals(target)
+                    && typeChecks.TryGetValue(checkedSource.Call, out var original) && original == value) return true;
                 if (check is { Op.Kind: OpKind.ThrowIf, Arguments: [Compare { Cond: Cond.Ne } comparison] }
                     && SealedOperands(comparison) is var (klass, checkedType) && checkedType.Equals(target)
                     && objectClasses.TryGetValue(klass, out var checkedValue) && checkedValue == value)
                     return true;
+            }
             return false;
         }
 
