@@ -37,6 +37,9 @@ internal static class IrDump
                     Console.WriteLine($"  入口证据缺失 0x{statement.Address:x}: {statement}");
                 Console.WriteLine($"  入口读取: {(reads is null ? "未证明" : string.Join(",", reads))}");
                 Console.WriteLine($"  未解析间接跳转: {raw.Function.UnresolvedIndirectJumps}；间接尾调用: {raw.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Count(c => c.Kind == CallKind.TailIndirect)}");
+                var interfaceTails = InterfaceTailProof.Find(raw.Function, c => c.Target is Const target
+                    && facts.Helpers.At(target.Value)?.Kind == HelperKind.InterfaceLookup && facts.Code.RegionOf(target.Value) != CodeRegion.Managed);
+                Console.WriteLine($"  已证明接口尾调用: {string.Join(",", interfaceTails.Select(c => $"0x{c.Address:x}"))}");
                 Console.WriteLine($"  x0 未使用: {rewriter.UnusedInput(entry, Storage.Gpr(0))}");
             }
             if (!lifted.Succeeded) continue;
