@@ -45,7 +45,7 @@ internal static class SelectedAddressLoads
                 var rewritten = ExprMap.MapOperands(statement, operand => ExprMap.Map(operand, expression =>
                 {
                     if (expression is Use use && definitions.TryGetValue(use.Variable, out var definition)
-                        && definition is Select { True: Use or Const or Symbol, False: Use or Const or Symbol } alias
+                        && definition is Select { True: Use or Const or Symbol or FrameAddress, False: Use or Const or Symbol or FrameAddress } alias
                         && use.Width == alias.Width && KnownSide(block, alias.Condition) is { } aliasSide)
                         return aliasSide ? alias.True : alias.False;
                     if (expression is Select { True: Load, False: Load } selected

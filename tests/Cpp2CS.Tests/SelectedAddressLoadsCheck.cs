@@ -82,6 +82,22 @@ internal static class SelectedAddressLoadsCheck
             SelectedAddressLoads.Run(sample);
             a.Equal<Expr>(Expr.C(taken ? 16UL : 24UL, 64), ((Call)load.Statements[1]).Arguments[0], "调用使用路径上确定的同一引用，避免类指针与接收者身份分裂");
             load.Statements.RemoveAt(1);
+
+            var originalChoice = entry.Statements[0];
+            var frame = new FrameAddress(-32);
+            entry.Statements[0] = new Define(0, offset, choice with { Condition = condition, True = frame, False = Expr.C(0, 64) });
+            var store = new Store(24, new Use(offset, 64), Expr.C(7, 8));
+            load.Statements[0] = store;
+            SelectedAddressLoads.Run(sample);
+            a.Equal<Expr>(taken ? frame : Expr.C(0, 64), ((Store)load.Statements[0]).Target,
+                "栈地址选择只保留已走过的分支；空地址臂不能替换成栈地址");
+            load.Statements[0] = store;
+            other.Statements = [new Jump(20, 24)];
+            MachineFunction.AddEdge(other, load);
+            SelectedAddressLoads.Run(sample);
+            a.Equal<Expr>(new Use(offset, 64), ((Store)load.Statements[0]).Target, "栈地址选择在合流后不能使用单边事实");
+            MachineFunction.RemoveEdgeAt(other, 0);
+            entry.Statements[0] = originalChoice;
             load.Statements[0] = read;
             other.Statements = [new Jump(20, 24)];
             MachineFunction.AddEdge(other, load);
