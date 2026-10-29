@@ -76,14 +76,14 @@ internal sealed partial class NativeMachine
     {
         var world = side.World;
         var signature = world.Index.StructAbi.Signature(binding.Invoke);
-        if (signature.Parameters.Any(a => a.Indirect || a.StackOffset is not null)
+        if (signature.Parameters.Any(a => a.StackOffset is not null)
             || signature.MethodInfo.StackOffset is not null || signature.Return is { } r && (r.Indirect || r.StackOffset is not null || r.Pieces.Length != 1))
-            throw new Unsupported("委托间接/栈上传参或聚合返回尚未建模");
+            throw new Unsupported("委托栈上传参或聚合返回尚未建模");
         if (uc.Reg(Unicorn.X(0)) != (binding.Method.Method.IsStatic ? binding.Receiver : binding.Target)
             || StructAbi.Bits(ReadLocation(signature.MethodInfo)) != world.MethodInfo(binding.Method))
             throw new InvalidOperationException("委托陷阱收到的 method_code/method 与合成输入不一致");
         var ordinal = side.NextCall();
-        // Invoke 仍是单播边界；聚合实参按 AAPCS64 独立位置读取，按 ECMA 值字段记录，不能把填充当整数比较。
+        // Invoke 仍是单播边界；按 AAPCS64 读取寄存器或间接副本，按 ECMA 值字段记录，不比较填充。
         var parameterTypes = StructAbi.ArgumentTypes(binding.Invoke).Skip(1).ToArray();
         DelegateModel.Event(side, binding.Receiver, signature.Parameters.SelectMany((a, i) =>
             world.Index.StructAbi.ObservableArgument(side, parameterTypes[i], ReadLocation(a))));
@@ -103,9 +103,9 @@ internal sealed partial class CilInterpreter
     private StackValue? InvokeDelegate(CilSide side, MethodRef invoke, StackValue[] values)
     {
         var signature = index.StructAbi.Signature(invoke);
-        if (signature.Parameters.Any(a => a.Indirect || a.StackOffset is not null)
+        if (signature.Parameters.Any(a => a.StackOffset is not null)
             || signature.Return is { } r && (r.Indirect || r.StackOffset is not null || r.Pieces.Length != 1))
-            throw new Unsupported("委托间接/栈上传参或聚合返回尚未建模");
+            throw new Unsupported("委托栈上传参或聚合返回尚未建模");
         if (side.World.DelegateAt(values[0].Bits) is null) throw new Unsupported("委托调用接收者不是合成的单播输入");
         var ordinal = side.NextCall();
         side.Callees.Add(invoke);

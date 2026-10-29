@@ -30,17 +30,24 @@ internal static class DelegateStructCheck
         var counts = new Dictionary<string, int>();
         foreach (var method in methods)
         {
+            // 完全共享占位的值布局依赖 RGCTX，不是可直接合成输入的封闭 Invoke。
+            if (method.TypeArguments.Concat(method.MethodArguments).Any(FieldLayouts.IsFullyShared))
+            {
+                counts["共享占位"] = counts.GetValueOrDefault("共享占位") + 1;
+                rows.Add($"{method}\t共享占位\t未作执行对照\t");
+                continue;
+            }
             string category, parameters = "", result = "";
             try
             {
                 var signature = index.StructAbi.Signature(method);
                 var hasStruct = StructAbi.ArgumentTypes(method).Append(method.Method.ReturnType.Substitute(method.TypeArguments, method.MethodArguments))
                     .Any(t => types.Kind(t) == TypeKind.Struct);
-                var supported = signature.Parameters.All(p => !p.Indirect && p.StackOffset is null)
+                var supported = signature.Parameters.All(p => p.StackOffset is null)
                     && signature.MethodInfo.StackOffset is null
                     && (signature.Return is null || signature.Return is { Indirect: false, StackOffset: null, Pieces.Length: 1 }
                         && types.Kind(method.Method.ReturnType.Substitute(method.TypeArguments, method.MethodArguments)) != TypeKind.Struct);
-                category = hasStruct ? supported ? "结构体寄存器参数" : "结构体其他ABI" : "标量";
+                category = hasStruct ? supported ? signature.Parameters.Any(p => p.Indirect) ? "结构体间接参数" : "结构体寄存器参数" : "结构体其他ABI" : "标量";
                 parameters = string.Join(";", signature.Parameters.Select(p => p.ToString()));
                 result = signature.Return?.ToString() ?? "void";
                 if (hasStruct && supported && method.TypeArguments.Count == 0 && method.Method.Owner.GenericParameters.Count == 0
@@ -53,12 +60,14 @@ internal static class DelegateStructCheck
         Directory.CreateDirectory(output);
         File.WriteAllLines(Path.Combine(output, "delegate-signatures.tsv"), rows);
         Console.WriteLine($"全程序 Invoke 签名 {methods.Length}；" + string.Join("；", counts.OrderBy(p => p.Key).Select(p => $"{p.Key} {p.Value}")));
-        var samples = candidates.GroupBy(DelegateModel.Signature).Select(g => g.First()).OrderBy(m => m.Method.Address).Take(8).ToArray();
+        var samples = candidates.GroupBy(m => index.StructAbi.Signature(m).Parameters.Any(p => p.Indirect))
+            .SelectMany(g => g.GroupBy(DelegateModel.Signature).Select(s => s.First()).OrderBy(m => m.Method.Address).Take(8)).ToArray();
         File.WriteAllLines(Path.Combine(output, "samples.tsv"), samples.Select(m => $"0x{m.Method.Address:x}\t{m}"));
         foreach (var method in samples) Console.WriteLine($"样例 0x{method.Method.Address:x} {method}");
         if (censusOnly) return 0;
         var assertions = new Assertions();
-        assertions.Equal(8, samples.Length, "结构体 Invoke 独立签名样例数");
+        assertions.Equal(8, samples.Count(m => index.StructAbi.Signature(m).Parameters.All(p => !p.Indirect)), "寄存器结构体 Invoke 独立签名样例数");
+        assertions.True(samples.Any(m => index.StructAbi.Signature(m).Parameters.Any(p => p.Indirect)), "包含间接结构体 Invoke 独立签名");
         var skeleton = new Skeleton(facts.Model);
         var interpreter = new CilInterpreter(new CecilModel(facts.Model, skeleton), index);
         using var native = new NativeMachine(facts);
