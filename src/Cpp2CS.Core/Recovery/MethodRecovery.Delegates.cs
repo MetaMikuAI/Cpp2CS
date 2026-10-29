@@ -27,10 +27,14 @@ public sealed partial class MethodRecovery
             bool GenericIdentity(Call call, int argument, MethodRef target) => call.Target is Const address
                 && argument < call.Sources.Length && owner.abi.Classify(target, out _)?.MethodInfo?.Register == call.Sources[argument]
                 && facts.EntriesAt(address.Value).Any(e => e.Method?.Method == target.Method);
+            bool ObjectConstructor(Call call, DefinitionRef type) => !DelegateFacts.IsDelegate(type)
+                && call.Target is Const target && facts.EntriesAt(target.Value).Any(e => e.Method is
+                    { Method: { Name: ".ctor", IsStatic: false } method } && method.Owner == type.Definition);
             if (CallIdentityChoices.Split(function, Constructor, ExpandIdentity)
                 | CallIdentityChoices.SplitGeneric(function, GenericIdentity, ExpandIdentity)
                 | CallIdentityChoices.SplitIndirect(function)
-                | CallIdentityChoices.SplitStores(function))
+                | CallIdentityChoices.SplitStores(function)
+                | MergedAllocations.Run(function, ObjectConstructor))
                 Ssa.Propagate.Run(function, Ssa.Dominators.Compute(function));
         }
 
