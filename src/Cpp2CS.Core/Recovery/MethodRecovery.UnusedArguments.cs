@@ -11,16 +11,18 @@ public sealed partial class MethodRecovery
 {
     private sealed partial class Context
     {
-        private bool DirectInputProof(Call call, MethodRef callee) =>
+        private bool DirectInputProof(Call call, MethodRef callee, bool receiver = false) =>
             call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target }
-            && !virtualCalls.Contains(call) && facts.EntriesAt(target.Value).Any(e => e.Method is MethodRef candidate && candidate.Method == callee.Method);
+            // 非虚方法的 callvirt 只负责判空；普通参数仍可按固定目标证明未用，接收者不能据此替换。
+            && (!virtualCalls.Contains(call) || !receiver && !callee.Method.IsVirtual)
+            && facts.EntriesAt(target.Value).Any(e => e.Method is MethodRef candidate && candidate.Method == callee.Method);
 
         private bool UnusedParameter(Call call, Storage register) =>
             call.Target is Const target && owner.rewriter.UnusedInput(target.Value, register);
 
         private bool UnusedInput(Call call, MethodRef callee, AbiValue parameter) =>
             parameter is { Passing: Passing.Registers, Pieces: [var piece] }
-            && DirectInputProof(call, callee) && UnusedParameter(call, piece.Register);
+            && DirectInputProof(call, callee, receiver: true) && UnusedParameter(call, piece.Register);
 
         private bool MissingInput(Expr expression) => expression is Unknown or Use { Variable.Version: < 0 }
             || expression is Use { Variable.Version: 0 } input && !arguments.ContainsKey(input.Variable.Storage)
@@ -75,7 +77,7 @@ public sealed partial class MethodRecovery
                 || !site.Registers.TryGetValue(piece.Register, out var expression)) return (ManagedValue?)null;
             var kind = types.Kind(parameter.Type);
             if (MissingInput(expression) && kind is TypeKind.Reference or TypeKind.Int or TypeKind.Bool
-                && UnusedInput(site.Call, site.Callee, parameter))
+                && DirectInputProof(site.Call, site.Callee) && UnusedParameter(site.Call, piece.Register))
             {
                 var declared = site.Callee.Method.Parameters[site.Index];
                 var bits = kind == TypeKind.Reference || !declared.HasDefault || declared.DefaultValue is null ? 0UL
