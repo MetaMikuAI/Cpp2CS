@@ -8,6 +8,15 @@ internal static partial class SourceStructCopies
     /// <summary>连续读取完整结构体时保存整值，跨调用使用的叶子仍来自原位置的快照。</summary>
     internal static ManagedBody SnapshotReads(ManagedBody body)
     {
+        static (ManagedValue Root, IReadOnlyList<FieldRef> Path)? ReadPath(ManagedValue value)
+        {
+            if (value is not ChoiceValue choice) return FieldPath(value);
+            if (FieldPath(choice.True) is not { } first || FieldPath(choice.False) is not { } second
+                || !first.Root.Type.Equals(second.Root.Type) || !first.Path.SequenceEqual(second.Path)
+                || !ManagedValues.Walk(choice.Condition).All(v => v is LocalValue or ArgumentValue or ConstantValue
+                    or ConversionValue or ComparisonValue or BooleanValue or NegatedValue)) return null;
+            return (new ChoiceValue(choice.Condition, first.Root, second.Root, first.Root.Type, 0), first.Path);
+        }
         var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
         var definitions = statements.OfType<ManagedAssignment>().Select(a => a.Target.Variable)
             .Concat(statements.OfType<ManagedCall>().Where(c => c.Result is not null).Select(c => c.Result!.Variable))
@@ -27,21 +36,24 @@ internal static partial class SourceStructCopies
         foreach (var block in body.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
-                if (block.Statements[i] is not ManagedAssignment first || FieldPath(first.Value) is not { } initial
-                    || initial.Root is not (ArrayElementValue or FieldValue) || initial.Root.Type is not DefinitionRef type
+                if (block.Statements[i] is not ManagedAssignment first || ReadPath(first.Value) is not { } initial
+                    || initial.Root is not (ArrayElementValue or FieldValue or ChoiceValue) || initial.Root.Type is not DefinitionRef type
                     || LeafPaths(type) is not { Count: > 1 } expected) continue;
                 var reads = block.Statements.Skip(i).Take(expected.Count).OfType<ManagedAssignment>().ToArray();
-                if (reads.Length != expected.Count || reads.Any(a => FieldPath(a.Value) is not { } path || !path.Root.Equals(initial.Root)
+                if (reads.Length != expected.Count || reads.Any(a => ReadPath(a.Value) is not { } path || !path.Root.Equals(initial.Root)
                     || definitions.GetValueOrDefault(a.Target.Variable) != 1 || addressed.Contains(a.Target.Variable)
                     || !a.Target.Type.Equals(a.Value.Type)
                     || ManagedValues.Walk(initial.Root).OfType<LocalValue>().Any(l => l.Variable == a.Target.Variable))
-                    || !SamePaths(expected, reads.Select(a => FieldPath(a.Value)!.Value.Path))) continue;
+                    || !SamePaths(expected, reads.Select(a => ReadPath(a.Value)!.Value.Path))) continue;
                 var snapshot = new LocalValue(new(Storage.Temp(next++), 1), type, 0);
                 starts[first] = new(first.Address, snapshot, initial.Root);
                 foreach (var read in reads)
                 {
-                    ManagedValue ReplaceRoot(ManagedValue value) => value.Equals(initial.Root) ? snapshot : ManagedValues.Map(value, ReplaceRoot);
-                    replacements[read.Target.Variable] = ReplaceRoot(read.Value);
+                    // 全部字段使用同一条件选择同布局来源时，只选择并快照一次整个结构体。
+                    var leaf = read.Value is ChoiceValue choice ? choice.True : read.Value;
+                    var root = FieldPath(leaf)!.Value.Root;
+                    ManagedValue ReplaceRoot(ManagedValue value) => value.Equals(root) ? snapshot : ManagedValues.Map(value, ReplaceRoot);
+                    replacements[read.Target.Variable] = ReplaceRoot(leaf);
                     removed.Add(read);
                 }
                 i += reads.Length - 1;

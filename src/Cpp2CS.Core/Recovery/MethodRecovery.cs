@@ -1260,6 +1260,14 @@ public sealed partial class MethodRecovery
                     // 常量臂没有独立类型；先从另一臂取得引用或浮点类型，避免把 null 当成 long。
                     if (hint is null && s.True is Const && s.False is not Const) hint = TypeOfValue(s.False);
                     if (!Recover(s.True, hint).TryGet(out var whenTrue, out failure)) return failure;
+                    // 同布局结构体片逐叶子选择；条件只能读取稳定值，不能因拆片重复访存或分配。
+                    if (whenTrue is Fragment first && first.Width == s.Width
+                        && ManagedValues.Walk(condition).All(v => v is ArgumentValue or LocalValue or ConstantValue
+                            or ConversionValue or BinaryValue or ComparisonValue or UnaryValue or BooleanValue or NegatedValue)
+                        && Recover(s.False, hint).TryGet(out var alternative, out _) && alternative is Fragment second && second.Width == s.Width
+                        && first.Parts.Select(p => (p.Low, p.Value.Type, p.Value.Width)).SequenceEqual(second.Parts.Select(p => (p.Low, p.Value.Type, p.Value.Width))))
+                        return new Fragment(first.Parts.Zip(second.Parts, (a, b) => new Part(a.Low,
+                            new ChoiceValue(condition, a.Value, b.Value, a.Value.Type, a.Value.Width))).ToArray(), first.Type, s.Width);
                     if (whenTrue is Fragment f && !Pack(f).TryGet(out whenTrue, out failure)) return failure;
                     if (!Recover(s.False, whenTrue.Type).Bind(value => Coerce(value, whenTrue.Type, 0)).TryGet(out var whenFalse, out failure)) return failure;
                     if (whenTrue.Width != s.Width || whenFalse.Width != s.Width) return Fail(0, "选择 两侧位宽不一致");

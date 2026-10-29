@@ -94,7 +94,7 @@ public sealed partial class MethodRecovery
                 return ResizeFragment(cached, width).Map<Fragment?>(value => (Fragment)value);
             if (fragmentActive.Count == 0) fragmentSteps = 0;
             if (fragmentActive.Count >= 64 || ++fragmentSteps > 1024) return (Fragment?)null;
-            if (!values.TryGetValue(variable, out var expression) || expression is not (Load { Width: > 32 } or Use or Ir.Convert or Insert or Binary { Op: BinOp.LShr, Right: Const })
+            if (!values.TryGetValue(variable, out var expression) || expression is not (Load { Width: > 32 } or Use or Ir.Convert or Ir.Select or Insert or Binary { Op: BinOp.LShr, Right: Const })
                 || !fragmentActive.Add(variable)) return (Fragment?)null;
             var recovered = RecoverFragment();
             fragmentActive.Remove(variable);
@@ -278,13 +278,20 @@ public sealed partial class MethodRecovery
         [DefineRule(10)]
         private RecoveryResult<bool> DefineFragment(Define define, List<ManagedStatement> output)
         {
-            if (define.Value is not (Load { Width: > 32 } or Use or Ir.Convert or Insert or Binary { Op: BinOp.LShr, Right: Const })) return false;
+            if (define.Value is not (Load { Width: > 32 } or Use or Ir.Convert or Ir.Select or Insert or Binary { Op: BinOp.LShr, Right: Const })) return false;
             if (!Recover(define.Value, null).TryGet(out var value, out var failure)) return failure;
             if (value is not Fragment source) return false;
             if (!FragmentVariable(define.Target, source.Width).TryGet(out var target, out failure)) return failure;
             if (target is null) return Fail(define.Address, "结构体 片局部变量未建立");
+            if (!source.Parts.Select(p => (p.Low, p.Value.Width)).SequenceEqual(target.Parts.Select(p => (p.Low, p.Value.Width))))
+                return Fail(define.Address, "结构体 片快照与来源的叶子范围不一致");
             for (var i = 0; i < source.Parts.Count; i++)
-                output.Add(new ManagedAssignment(define.Address, (LocalValue)target.Parts[i].Value, source.Parts[i].Value));
+            {
+                // 合流分析可能细化来源类型；已建立的等宽整数快照仍须按位保存浮点叶子。
+                var local = (LocalValue)target.Parts[i].Value;
+                if (!Coerce(source.Parts[i].Value, local.Type, define.Address).TryGet(out var leaf, out failure)) return failure;
+                output.Add(new ManagedAssignment(define.Address, local, leaf));
+            }
             return true;
         }
 
@@ -292,6 +299,13 @@ public sealed partial class MethodRecovery
         private RecoveryResult<bool> StoreFragment(Store store, ManagedValue target, List<ManagedStatement> output)
         {
             if (target is not Fragment fragment) return false;
+            // 宽零写入覆盖的每个完整叶子均为该类型的零；无需把 128 位常量压成标量。
+            if (FrameZero(store.Value))
+            {
+                foreach (var part in fragment.Parts)
+                    output.Add(new ManagedStore(store.Address, part.Value, new ConstantValue(0, part.Value.Type, part.Value.Width)));
+                return true;
+            }
             if (!Recover(store.Value, null).TryGet(out var source, out var failure)) return failure;
             foreach (var part in fragment.Parts)
             {

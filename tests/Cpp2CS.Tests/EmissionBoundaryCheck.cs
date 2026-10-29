@@ -56,6 +56,17 @@ internal static class EmissionBoundaryCheck
         a.True(emitter.ExplicitInitializations.Count == 0 && emitter.AccessorCalls.Count == 0 && emitter.InlineCalls.Count == 0, "检查不写入证据");
         a.Equal(0, emitter.Check([forbidden], EmissionPolicy.Source).Count, "源码策略可检查原权限调用");
         a.Equal(1, emitter.Check([forbidden]).Count, "后续检查仍使用完整策略");
+        var floating = new ConstantValue(0x3fc00000, types.Single, 32);
+        var implicitScalar = firstBody with { Blocks = [new(0x100,
+            [new ManagedAssignment(0x100, local, floating), new ManagedReturn(0x104, local)])] };
+        a.Equal(1, emitter.Check([implicitScalar]).Count, "浮点栈值不能直接写入整数局部");
+        a.Equal(1, emitter.Check([implicitScalar], EmissionPolicy.Source).Count, "源码策略也不能放过错误标量复制");
+        var scalarEdge = firstBody with { Blocks = [new(0x100, [new ManagedJump(0x100, new(0x200, [new(local, floating)]))]),
+            new(0x200, [new ManagedReturn(0x200, local)])] };
+        a.Equal(1, emitter.Check([scalarEdge]).Count, "合流边上的复制同样核对栈类别");
+        var explicitScalar = firstBody with { Blocks = [new(0x100,
+            [new ManagedAssignment(0x100, local, new ConversionValue(ConvKind.Bitcast, floating, types.Int32, 32)), new ManagedReturn(0x104, local)])] };
+        a.Equal(0, emitter.Check([explicitScalar]).Count, "显式同宽位重解释允许写入");
         a.Equal(0, emitter.Emit([firstBody, secondBody]).Count, "同批方法可写出");
         a.True(!ReferenceEquals(skeleton.Method(first).Body.Variables[0], skeleton.Method(second).Body.Variables[0]), "相同 IR 局部身份按方法分配");
         a.Equal(1, emitter.Emit([forbidden]).Count, "失败写出不覆盖已有方法体");

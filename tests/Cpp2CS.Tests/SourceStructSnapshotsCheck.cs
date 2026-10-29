@@ -61,21 +61,42 @@ internal static class SourceStructSnapshotsCheck
             foreach (var values in new[] { new[] { 3, -2, 19 }, new[] { int.MinValue, 0, int.MaxValue } })
                 a.Equal(Execute(body, values), Execute(result, values), "源数组被中途调用改写后，目标仍保留原快照");
         }
+        var condition = new ArgumentValue(2, new PrimitiveRef("bool"), 1);
+        var otherElement = element with { Index = new ConstantValue(1, integer, 32) };
+        foreach (var mode in new[] { "valid", "different-condition", "different-path", "mutable-condition" })
+        {
+            var reads = locals.Select((l, i) => (ManagedStatement)new ManagedAssignment((ulong)i, l,
+                new ChoiceValue(mode == "mutable-condition" ? Leaf(element, 0)
+                    : mode == "different-condition" && i == 1 ? new NegatedValue(condition, condition.Type) : condition,
+                    Leaf(element, i), Leaf(otherElement, mode == "different-path" && i == 1 ? 0 : i), integer, 32))).ToList();
+            reads.Add(effect);
+            reads.Add(new ManagedJump(9, new(16, [])));
+            var writes = locals.Select((l, i) => (ManagedStatement)new ManagedStore((ulong)(16 + i), Leaf(destination, i), l)).ToArray();
+            var body = new ManagedBody(null!, [new(0, reads), new(16, writes)]);
+            var result = SourceStructCopies.SnapshotReads(body);
+            a.Equal(mode == "valid" ? 1 : 0, result.Blocks[0].Statements.OfType<ManagedAssignment>()
+                .Count(s => s.Value is ChoiceValue { Type: DefinitionRef }), "条件整值快照 " + mode);
+            if (mode != "valid") continue;
+            foreach (var chosen in new[] { false, true })
+                a.Equal(Execute(body, [3, -2, 19], chosen), Execute(result, [3, -2, 19], chosen), "两种选择均保留调用前的完整值");
+            a.Equal(1, result.Blocks[1].Statements.OfType<ManagedStore>().Count(s => s.Target == destination), "条件快照完整写入只读字段所在结构体");
+        }
         return a.Finish("source-struct-snapshots");
 
-        string Execute(ManagedBody body, int[] values)
+        string Execute(ManagedBody body, int[] values, bool chosen = true)
         {
             Dictionary<FieldDef, object> Record(int[] parts) => new() { [record.Fields[0]] = parts[0],
                 [record.Fields[1]] = new Dictionary<FieldDef, object> { [child.Fields[0]] = parts[1], [child.Fields[1]] = parts[2] } };
-            var items = new[] { Record(values) };
+            var items = new[] { Record(values), Record([-9, 17, 43]) };
             var target = new Dictionary<FieldDef, object> { [holder.Fields[0]] = Record([0, 0, 0]) };
             var variables = new Dictionary<Variable, object>();
             object Copy(object value) => value is Dictionary<FieldDef, object> fields
                 ? fields.ToDictionary(p => p.Key, p => p.Key.Type is DefinitionRef { Definition.IsValueType: true } ? Copy(p.Value) : p.Value) : value;
             object Read(ManagedValue value) => value switch
             {
-                ArgumentValue { Index: 0 } => items, ArgumentValue { Index: 1 } => target,
+                ArgumentValue { Index: 0 } => items, ArgumentValue { Index: 1 } => target, ArgumentValue { Index: 2 } => chosen ? 1 : 0,
                 ConstantValue c => unchecked((int)c.Bits), LocalValue l => variables[l.Variable], AddressValue p => Read(p.Target),
+                ChoiceValue c => Read((int)Read(c.Condition) != 0 ? c.True : c.False),
                 ArrayElementValue e => ((Dictionary<FieldDef, object>[])Read(e.Array))[(int)Read(e.Index)],
                 FieldValue f => ((Dictionary<FieldDef, object>)Read(f.Receiver))[f.Field.Field],
                 _ => throw new NotSupportedException(value.ToString()),
@@ -86,7 +107,7 @@ internal static class SourceStructSnapshotsCheck
                     case ManagedAssignment s: variables[s.Target.Variable] = Copy(Read(s.Value)); break;
                     case ManagedStore { Target: FieldValue f } s:
                         ((Dictionary<FieldDef, object>)Read(f.Receiver))[f.Field.Field] = Copy(Read(s.Value)); break;
-                    case ManagedCall: items[0] = Record([101, 102, 103]); break;
+                    case ManagedCall: items[0] = Record([101, 102, 103]); items[1] = Record([201, 202, 203]); break;
                     case ManagedJump or ManagedReturn: break;
                     default: throw new NotSupportedException(statement.ToString());
                 }

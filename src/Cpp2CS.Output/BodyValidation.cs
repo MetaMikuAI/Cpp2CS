@@ -38,6 +38,10 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
         foreach (var statement in recovered.Blocks.SelectMany(b => b.Statements))
         {
             address = statement.Address;
+            if (statement is ManagedAssignment assignment && ScalarCopyProblem(assignment.Target, assignment.Value) is { } assignmentProblem)
+                return assignmentProblem;
+            foreach (var copy in ManagedValues.Edges(statement).SelectMany(e => e.Copies))
+                if (ScalarCopyProblem(copy.Target, copy.Value) is { } copyProblem) return copyProblem;
             if (statement is ManagedCall { Invocation.Constraint: { } constraint } constrained
                 && (!constrained.Invocation.Virtual || constrained.Invocation.Method.Method.IsStatic
                     || constrained.Invocation.Receiver?.Type is not ByRefRef reference || !reference.Element.Equals(constraint)))
@@ -68,6 +72,15 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
             }
         }
         return null;
+    }
+
+    private EmissionProblem? ScalarCopyProblem(LocalValue target, ManagedValue value)
+    {
+        var to = types.Kind(target.Type);
+        var from = types.Kind(value.Type);
+        return to is TypeKind.Int or TypeKind.Bool && from is TypeKind.Float or TypeKind.Double
+            || from is TypeKind.Int or TypeKind.Bool && to is TypeKind.Float or TypeKind.Double
+            ? new(EmissionProblemKind.Unsupported, "局部赋值 整数与浮点之间缺少显式转换") : null;
     }
 
     private EmissionProblem? Problem(ManagedValue value)
