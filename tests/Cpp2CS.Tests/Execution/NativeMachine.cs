@@ -342,14 +342,16 @@ internal sealed partial class NativeMachine : IDisposable
             Back();
             return;
         }
-        if (callee.Method is { Name: "ToString", IsStatic: false, Parameters.Count: 0, Owner.FullName: "System.Enum" }
-            && arguments is [var receiver] && receiver >= World.StackBase
+        if (callee.Method is { IsStatic: false, Owner.FullName: "System.Enum" }
+            && (callee.Method is { Name: "ToString", Parameters.Count: 0 } && arguments.Length == 1
+                || callee.Method is { Name: "Equals", Parameters: [{ Type: DefinitionRef { Definition.FullName: "System.Object" } }] } && arguments.Length == 2)
+            && arguments[0] is var receiver && receiver >= World.StackBase
             && receiver + RuntimeLayout.ObjectHeaderSize + 8 <= World.StackBase + World.StackSize
             && side.Read64(receiver + RuntimeLayout.ObjectMonitor) == ulong.MaxValue
             && world.TypeOfKlass(side.Read64(receiver + RuntimeLayout.ObjectKlass)) is DefinitionRef { Definition.IsEnum: true } enumType)
         {
             // 原生栈临时对象的 klass、monitor=-1、枚举值构成 Il2CppFakeBox。
-            // 只把无参 Enum.ToString 的接收者映射为同值装箱对象；仍比较枚举类型、值、调用与后续内存。
+            // ToString/Equals 的栈上枚举接收者映射为同值装箱对象；保留类型、值、其他实参和后续内存比较。
             var size = world.StorageSize(enumType);
             var data = new byte[size];
             side.Read(receiver + RuntimeLayout.ObjectHeaderSize, data);
