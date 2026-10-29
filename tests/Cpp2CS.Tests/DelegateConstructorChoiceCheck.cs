@@ -88,6 +88,96 @@ internal static class DelegateConstructorChoiceCheck
         a.True(!SplitGeneric(absentResult), "缺失结果定义时保留调用，不生成无效 phi");
         methods.Remove(secondMethod);
         a.True(!Split(Diamond()), "任一方法身份不明时保留原状");
+        MachineFunction Indirect(bool effects = false, bool handler = false)
+        {
+            var function = Diamond(effects, handler);
+            var shared = function.Blocks[3];
+            var info = new Variable(Storage.Gpr(3), 1);
+            var call = constructor with { Kind = CallKind.Indirect, Target = new Use(identity, 64),
+                Arguments = [new Use(receiver, 64), new Use(info, 64)], Defines = [resultVariable], Results = [resultVariable.Storage] };
+            shared.Statements[shared.Statements.IndexOf(constructor)] = call;
+            shared.Statements.Insert(shared.Statements.IndexOf(call), new Define(19, info,
+                new Load(new Binary(BinOp.Add, new Use(receiver, 64), Expr.C(0x28, 64), 64), 64)));
+            return function;
+        }
+        var indirect = Indirect();
+        a.True(CallIdentityChoices.SplitIndirect(indirect), "不同函数指针的共用间接调用沿原入边拆分");
+        var returned = indirect.Blocks[3].Statements.OfType<Phi>().Single(p => p.Target == resultVariable);
+        for (var side = 0; side < 2; side++)
+        {
+            var load = indirect.Blocks[side + 1].Statements.OfType<Define>().Single();
+            var call = indirect.Blocks[side + 1].Statements.OfType<Call>().Single();
+            a.True(call.Target == new Use(side == 0 ? firstMethod : secondMethod, 64)
+                && call.Arguments[0] == new Use(new(Storage.Gpr(side + 10), 0), 64)
+                && call.Arguments[1] == new Use(load.Target, 64)
+                && call.Defines.Single() == returned.Sources[side], "每条入边的函数、实例、元数据与返回值不混用");
+            a.True(load.Value is Load { Address: Binary { Left: Use input } } && input.Variable.Storage.Index == side + 10,
+                "元数据只在原调用路径读取对应实例");
+        }
+        a.True(!CallIdentityChoices.SplitIndirect(Indirect(effects: true)), "间接调用不越过共享块中的其他调用");
+        a.True(!CallIdentityChoices.SplitIndirect(Indirect(handler: true)), "间接调用不跨异常区域");
+        var branching = Indirect();
+        MachineFunction.AddEdge(branching.Blocks[1], branching.Blocks[2]);
+        a.True(!CallIdentityChoices.SplitIndirect(branching), "前驱有其他出口时不能提前执行间接调用");
+        var fieldFunction = Diamond();
+        var fieldJoin = fieldFunction.Blocks[3];
+        fieldJoin.Statements.Remove(constructor);
+        var fieldRead = new Define(20, resultVariable, new Ir.Convert(ConvKind.ZeroExtend,
+            new Load(new Binary(BinOp.Add, new Use(receiver, 64), Expr.C(16, 64), 64), 32), 64));
+        fieldJoin.Statements.Insert(2, fieldRead);
+        var conditional = fieldFunction.Blocks[1];
+        var unrelated = fieldFunction.Blocks[2];
+        MachineFunction.AddEdge(conditional, unrelated);
+        conditional.Statements[^1] = new Branch(4, Expr.C(1, 32), fieldJoin.Start, unrelated.Start);
+        a.True(!JoinedFieldReads.Run(fieldFunction, _ => false), "缺少异型引用证据时不展开字段读取");
+        a.True(JoinedFieldReads.Run(fieldFunction, p => p.Target == receiver), "异型引用上的共用读取按原入边展开");
+        var fieldPhi = fieldJoin.Statements.OfType<Phi>().Single(p => p.Target == resultVariable);
+        a.True(conditional.Statements.All(s => s is not Define)
+            && conditional.Successors.Contains(unrelated), "条件前驱的其他路径不提前读取字段");
+        for (var side = 0; side < 2; side++)
+        {
+            var edge = fieldJoin.Predecessors[side];
+            a.True(edge.Statements[0] is Define d && d.Target == fieldPhi.Sources[side]
+                && ExprMap.Walk(d.Value).OfType<Use>().Single().Variable.Storage.Index == side + 10,
+                "字段结果与所选对象保持同一入边");
+        }
+        foreach (var guarded in new[] { true, false })
+        {
+            var delayed = Diamond();
+            var mergedBlock = delayed.Blocks[3];
+            mergedBlock.Statements.Remove(constructor);
+            mergedBlock.Statements.RemoveAll(s => s is Return);
+            var check = new Call(18, CallKind.Direct, Expr.C(400, 64))
+                { Op = guarded ? new(OpKind.NullCheck, null) : null, Arguments = [new Use(receiver, 64)] };
+            mergedBlock.Statements.Add(check);
+            var next = new Block(20) { Statements = [fieldRead, new Return(24)] };
+            MachineFunction.AddEdge(mergedBlock, next);
+            delayed.Blocks.Add(next);
+            a.Equal(guarded, JoinedFieldReads.Run(delayed, p => p.Target == receiver), "只跨唯一直线链的判空，不跨其他调用");
+            if (guarded)
+                a.True(mergedBlock.Predecessors.All(p => p.Statements is [Call { Op.Kind: OpKind.NullCheck }, Define, Jump]),
+                    "每条原入边均先判空再读取字段");
+        }
+        var addressFunction = Diamond();
+        var addressJoin = addressFunction.Blocks[3];
+        addressJoin.Statements.Remove(constructor);
+        addressJoin.Statements.Insert(2, fieldRead with { Value = new Load(new Use(receiver, 64), 32) });
+        a.True(JoinedFieldReads.Run(addressFunction, p => p.Target == receiver), "已证明的字段地址合流保持原分支来源");
+        a.True(addressJoin.Predecessors.SelectMany(p => p.Statements).OfType<Define>().All(d => d.Value is Load { Address: Use u }
+            && u.Variable.Storage.Index is 10 or 11), "共享地址读取沿原入边替换，未提前读取其他路径");
+        foreach (var effects in new[] { false, true })
+        {
+            var writing = Diamond(effects);
+            var shared = writing.Blocks[3];
+            var store = new Store(20, new Use(receiver, 64), new Use(identity, 64));
+            shared.Statements[shared.Statements.IndexOf(constructor)] = store;
+            a.Equal(!effects, CallIdentityChoices.SplitStores(writing), "共享写入只在没有前置副作用时按地址入边展开");
+            if (!effects)
+                for (var side = 0; side < 2; side++)
+                    a.True(writing.Blocks[side + 1].Statements.OfType<Store>().Single() is
+                        { Target: Use address, Value: Use value } && address.Variable.Storage.Index == side + 10
+                        && value.Variable == (side == 0 ? firstMethod : secondMethod), "写入地址与值沿同一原入边配对");
+        }
         return a.Finish("delegate-constructor-choices");
     }
 }

@@ -28,7 +28,9 @@ public sealed partial class MethodRecovery
                 && argument < call.Sources.Length && owner.abi.Classify(target, out _)?.MethodInfo?.Register == call.Sources[argument]
                 && facts.EntriesAt(address.Value).Any(e => e.Method?.Method == target.Method);
             if (CallIdentityChoices.Split(function, Constructor, ExpandIdentity)
-                | CallIdentityChoices.SplitGeneric(function, GenericIdentity, ExpandIdentity))
+                | CallIdentityChoices.SplitGeneric(function, GenericIdentity, ExpandIdentity)
+                | CallIdentityChoices.SplitIndirect(function)
+                | CallIdentityChoices.SplitStores(function))
                 Ssa.Propagate.Run(function, Ssa.Dominators.Compute(function));
         }
 

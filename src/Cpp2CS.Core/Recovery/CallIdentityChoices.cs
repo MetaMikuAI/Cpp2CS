@@ -5,7 +5,7 @@ using Cpp2CS.Model;
 namespace Cpp2CS.Recovery;
 
 /// <summary>方法身份随分支变化的共用调用，沿原入边保留身份、实参与结果的对应关系。</summary>
-internal static class CallIdentityChoices
+internal static partial class CallIdentityChoices
 {
     internal static bool SplitGeneric(MachineFunction function, Func<Call, int, MethodRef, bool> identity, Func<Expr, Expr> expand)
     {
