@@ -71,6 +71,10 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
         TypeRef Integer(int width, bool signed) => width == 1 ? context.Types.Boolean : context.Types.Integer(width, signed);
         foreach (var (expression, type, address, detail) in Sites(context, input).Concat(FloatContributor.Operands(context)))
             Hint(expression, type, address, detail);
+        // φ 的使用可先定型定义结果；继续向其表达式反传，避免常量控制标志停在上一层合流。
+        foreach (var define in context.Statements.OfType<Define>())
+            if (context.TypeOf(define.Target) is { } type)
+                Hint(define.Value, type, define.Address, "已定型定义的操作数");
     }
 
     internal static bool FloatingChoice(TypingContext context, Dictionary<Variable, Expr> values, Variable variable, TypeRef type)

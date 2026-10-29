@@ -12,7 +12,13 @@ internal sealed class FloatContributor(TypingInputs input) : ITypeContributor
         void Hint(Expr expression, TypeRef type, ulong address, string detail)
         {
             if (context.Types.Kind(type) is not (TypeKind.Float or TypeKind.Double)) return;
-            if (expression is Use use) constraints.Requires(use.Variable, type, new(Name, address, detail));
+            if (expression is Use use)
+            {
+                // 整数容器的低位切片在下降时按位解释，不要求整个宽变量具有浮点类型。
+                if (context.TypeOf(use.Variable) is { } source && context.Types.Kind(source) == TypeKind.Int
+                    && context.Types.Bits(source) > use.Width) return;
+                constraints.Requires(use.Variable, type, new(Name, address, detail));
+            }
             else if (expression is Select select)
             {
                 Hint(select.True, type, address, detail);

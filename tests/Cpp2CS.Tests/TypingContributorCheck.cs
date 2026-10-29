@@ -87,6 +87,18 @@ internal static class TypingContributorCheck
         block.Statements = [new Define(0x1000, phi, new Binary(BinOp.FAdd, selected, Expr.C(0, 32), 32))];
         var floating = new TypeConstraints(); new FloatContributor(input).Contribute(Context(), floating);
         a.Equal<TypeResult?>(new ManagedResult(types.Single), TypeSolver.Solve(floating, types).GetValueOrDefault(methodPointer), "F2 浮点使用穿过 Select 约束两侧，独立于 T1 适用范围");
+        var projectedBits = Context();
+        projectedBits.Solution[methodPointer] = new ManagedResult(types.UInt64);
+        foreach (var width in new[] { 32, 64 })
+        {
+            block.Statements = [new Define(0x1000, phi, new Binary(BinOp.FAdd, new Use(methodPointer, width), Expr.C(0, width), width))];
+            floating = new();
+            floating.Defines(methodPointer, types.UInt64, new("输入", 0x1000, "宽整数位容器"));
+            new FloatContributor(input).Contribute(projectedBits, floating);
+            var projected = TypeSolver.Solve(floating, types).GetValueOrDefault(methodPointer);
+            a.True(width == 32 ? projected == new ManagedResult(types.UInt64) : projected is ConflictResult,
+                "窄浮点读取只约束切片，整值整数与浮点冲突仍保留");
+        }
         var firstChoice = new Select(Expr.C(1, 1), Expr.C(0x3f000000, 32), Expr.C(0x3f800000, 32), 32);
         var nextChoice = new Select(Expr.C(1, 1), Expr.C(0x3e800000, 32), new Use(methodPointer, 32), 32);
         block.Statements = [new Define(0x1000, methodPointer, firstChoice), new Define(0x1004, beyond, nextChoice),
@@ -153,6 +165,33 @@ internal static class TypingContributorCheck
             var unproven = new TypeEngine([new PhiContributor(), new UseContributor(input), new PhiUseContributor()]).Run(Context());
             a.True(unproven.Converged && unproven.Solution.Count == 0, "无整数用途的循环不凭零初值猜类型");
         }
+        var initialFlag = V(20); var nextFlag = V(21); var loopFlag = V(22); var maskedFlag = V(23); var returnedFlag = V(24);
+        block.Statements =
+        [
+            new Define(0x1000, initialFlag, Expr.C(0, 64)),
+            new Define(0x1004, nextFlag, Expr.C(1, 64)),
+            new Phi(0x1008, loopFlag, [initialFlag, loopFlag, nextFlag]),
+            new Define(0x100c, maskedFlag, new Cpp2CS.Ir.Convert(ConvKind.ZeroExtend,
+                new Binary(BinOp.And, new Use(loopFlag, 32), Expr.C(1, 32), 32), 64)),
+            new Phi(0x1010, returnedFlag, [maskedFlag, nextFlag]),
+            new Call(0x1014, CallKind.Direct, Expr.C(0, 64))
+            { Op = new(OpKind.BoundsCheck, null), Arguments = [new Use(returnedFlag, 32), Expr.C(2, 32)] },
+        ];
+        var flagContributors = new ITypeContributor[] { new PhiContributor(), new UseContributor(input), new PhiUseContributor() };
+        var flagTypes = new TypeEngine(flagContributors).Run(Context());
+        a.True(flagTypes.Converged && new[] { initialFlag, nextFlag, loopFlag, maskedFlag, returnedFlag }
+            .All(v => flagTypes.Solution.GetValueOrDefault(v) is ManagedResult m && TypeSolver.Integral(types, m.Type)),
+            "合流结果的整数用途穿过已定型按位定义传回循环标志");
+        block.Statements[0] = new Define(0x1000, initialFlag, new Load(Expr.C(0x100, 64), 64));
+        block.Statements[3] = new Define(0x100c, maskedFlag, new Binary(BinOp.And, new Use(initialFlag, 64), Expr.C(1, 64), 64));
+        var loadedContext = Context();
+        loadedContext.Solution[maskedFlag] = new ManagedResult(types.UInt64);
+        restricted = new(); new UseContributor(input).Contribute(loadedContext, restricted);
+        a.True(!TypeSolver.Solve(restricted, types).ContainsKey(initialFlag), "反传不直接定型未知加载");
+        block.Statements.RemoveAt(block.Statements.Count - 1);
+        var untypedFlag = new TypeEngine(flagContributors).Run(Context());
+        a.True(untypedFlag.Converged && untypedFlag.Solution.Count == 0, "无外部整数用途时不凭常量与按位表达式猜控制标志类型");
+
         var receiverNull = V(17); var pointerResult = V(18); var pointerClobber = V(19);
         var pointerCall = new Call(0x1004, CallKind.Indirect, Expr.C(0, 64))
         {
