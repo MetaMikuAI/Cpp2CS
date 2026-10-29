@@ -7,6 +7,21 @@ public sealed partial class MethodRecovery
 {
     private sealed partial class Context
     {
+        [Analysis("分支帧快照", 29, After = ["帧前类型", "标量栈实参"])]
+        private void ForwardBranchFrameSnapshots()
+        {
+            var replacements = FrameBranchSnapshots.Read(function, NoStackRead);
+            foreach (var block in blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                {
+                    var old = block.Statements[i];
+                    if (!replacements.TryGetValue(old, out var mapped)) continue;
+                    block.Statements[i] = mapped;
+                    PreserveStatementAnalysis(old, mapped);
+                }
+            if (replacements.Count > 0) definitions = IndexDefinitions();
+        }
+
         [Analysis("帧快照", 32, After = ["帧区域"])]
         private void ForwardFrameSnapshots()
         {

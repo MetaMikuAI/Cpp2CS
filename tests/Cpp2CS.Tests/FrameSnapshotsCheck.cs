@@ -58,6 +58,67 @@ internal static class FrameSnapshotsCheck
             var changes = FrameSnapshots.Read(function);
             a.Equal(mode == "equal" ? 4 : 0, changes.Count, $"重叠快照 {mode}");
         }
+        foreach (var mode in new[] { "branches", "joined", "early", "partial", "escape", "call", "safe-call", "handler", "dead", "dead-call", "dead-escape", "dead-object-read" })
+        {
+            var slot = new FrameAddress(-96);
+            var first = new Use(new Variable(Storage.Vec(0), 1), 128);
+            var second = new Use(new Variable(Storage.Vec(0), 2), 128);
+            var entry = new Block(0x2000);
+            var left = new Block(0x2010) { Statements = [new Store(0x2010, slot, first)] };
+            var right = new Block(0x2020) { Statements = [new Store(0x2020, slot, second)] };
+            var leftRead = new Define(0x2030, new(Storage.Vec(1), 1), new Load(slot, 128));
+            var rightRead = new Define(0x2040, new(Storage.Vec(1), 2), new Load(slot, 128));
+            var leftUse = new Block(0x2030) { Statements = [leftRead] };
+            var rightUse = new Block(0x2040) { Statements = [rightRead] };
+            MachineFunction.AddEdge(entry, left); MachineFunction.AddEdge(entry, right);
+            MachineFunction.AddEdge(left, leftUse); MachineFunction.AddEdge(right, rightUse);
+            if (mode == "joined") MachineFunction.AddEdge(right, leftUse);
+            if (mode == "early") entry.Statements.Add(leftRead);
+            if (mode == "partial") left.Statements.Add(new Store(0x2014, new FrameAddress(-88), Expr.C(0, 64)));
+            if (mode is "escape" or "call" or "safe-call" or "dead-call" or "dead-escape") left.Statements.Add(new Call(0x2018, CallKind.Direct, Expr.C(0x3000, 64))
+                { Arguments = mode.EndsWith("escape", StringComparison.Ordinal) ? [slot] : [] });
+            if (mode.StartsWith("dead", StringComparison.Ordinal))
+            {
+                leftUse.Statements.Clear(); rightUse.Statements.Clear();
+                entry.Statements.Add(new Define(0x2000, first.Variable, new Load(mode == "dead-object-read" ? new Use(new(Storage.Gpr(0), 0), 64) : new FrameAddress(-32), 128)));
+                entry.Statements.Add(new Define(0x2004, second.Variable, new Load(new FrameAddress(-16), 128)));
+            }
+            var function = new MachineFunction { Entry = entry.Start, Range = new(0x2000, 0x2050, CodeRegion.Managed, default)
+                { ExceptionRegions = mode == "handler" ? [new(0x2000, 0x2044, 0x2060)] : [] }, Blocks = [entry, left, right, leftUse, rightUse] };
+            var changes = FrameBranchSnapshots.Read(function, (_, _, _) => mode is not ("call" or "dead-call"));
+            a.Equal(mode is "branches" or "safe-call" ? 4 : mode == "dead" ? 2 : 0, changes.Count, $"分支快照 {mode}");
+            if (mode == "branches")
+                a.True(changes[leftRead] is Define { Value: Use l } && l == first
+                    && changes[rightRead] is Define { Value: Use r } && r == second, "分支分别使用到达该读取的原快照");
+        }
+        foreach (var mode in new[] { "mixed", "wide-read", "overlap", "uninitialized", "phi" })
+        {
+            var slot = new FrameAddress(-80);
+            var input = new Use(new Variable(Storage.Vec(0), 0), 64);
+            var vector = new Use(new Variable(Storage.Vec(2), 1), 128);
+            var first = new Variable(Storage.Vec(1), 1);
+            var second = new Variable(Storage.Vec(3), 1);
+            var initialStore = new Store(0x3000, slot, input);
+            var firstRead = new Define(0x3010, first, new Load(slot, 128));
+            var vectorStore = new Store(0x3020, slot, vector);
+            var secondRead = new Define(0x3030, second, new Load(slot, 128));
+            var entry = new Block(0x3000) { Statements = [initialStore] };
+            var read = new Block(0x3010) { Statements = [firstRead,
+                new Define(0x3014, new(Storage.Vec(4), 1), new Use(first, mode == "wide-read" ? 128 : 32))] };
+            var later = new Block(0x3020) { Statements = [vectorStore, secondRead,
+                new Define(0x3034, new(Storage.Vec(5), 1), new Extract(new Use(second, 128), 32, 32))] };
+            MachineFunction.AddEdge(entry, read); MachineFunction.AddEdge(read, later);
+            if (mode == "uninitialized") entry.Statements.Clear();
+            if (mode == "overlap") read.Statements.Add(new Store(0x3018, new FrameAddress(-76), Expr.C(0, 32)));
+            if (mode == "phi") later.Statements.Add(new Phi(0x3038, new(Storage.Vec(6), 1), [first]));
+            var function = new MachineFunction { Entry = entry.Start, Range = new(0x3000, 0x3040, CodeRegion.Managed, default), Blocks = [entry, read, later] };
+            var changes = FrameBranchSnapshots.Read(function, (_, _, _) => true);
+            a.Equal(mode == "mixed" ? 4 : 0, changes.Count, $"栈槽不同宽度的生命期 {mode}");
+            if (mode == "mixed")
+                a.True(changes[firstRead] is Define { Value: Use low } && low.Variable == input.Variable && low.Width == 32
+                    && changes[secondRead] is Define { Value: Use full } && full == vector,
+                    "标量只恢复有证据的低位，后续向量仍保留完整快照");
+        }
         return a.Finish("frame-snapshots");
     }
 }

@@ -88,7 +88,7 @@ public sealed partial class MethodRecovery
         }
 
         /// <summary>只有精确调用签名提供类型；普通访存宽度不能定型。异型重叠先拒绝，嵌套字段见证合并到外根。</summary>
-        [Analysis("帧区域", 30, After = ["异常值", "栈上调用", "帧前类型"])]
+        [Analysis("帧区域", 30, After = ["异常值", "栈上调用", "帧前类型", "分支帧快照"])]
         private RecoveryFailure? PrepareFrames()
         {
             var witnesses = new List<FrameWitness>();
@@ -368,7 +368,9 @@ public sealed partial class MethodRecovery
                             .GroupBy(c => forward ? c.To - c.From : c.From - c.To))
                         {
                             var other = known.Offset + group.Key;
-                            if (witnesses.Any(w => w.Offset == other && w.Type.Equals(known.Type))) continue;
+                            // 调用上的同类型读取见证不能替代复制写入点；复用槽需要该定义切断旧生命期。
+                            if (witnesses.Any(w => w.Offset == other && w.Type.Equals(known.Type)
+                                && (!forward || ReferenceEquals(w.Call, group.First().Store)))) continue;
                             // 明确来源的正向复制也可能覆盖一个已被复用的槽；保留新类型见证，交给生命期分析拆分。
                             // 反向传播不能覆盖调用签名；正向只使用本次读取已经确定的类型。
                             if (witnesses.Any(w => w.Offset == other) && !forward) continue;
