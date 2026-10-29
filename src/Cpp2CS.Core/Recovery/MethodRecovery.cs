@@ -325,7 +325,7 @@ public sealed partial class MethodRecovery
             // 库内存操作归一后也可能产生新栈读写；普通方法与异常方法采用同一有界提升规则。
             FrameWritebacks.Run(function);
             var constantFrameIndices = FrameConstantIndices.Run(function) > 0;
-            ManagedFramePromotion.Run(facts, function, owner.abi, owner.lifter.Calls, owner.lifter.Machine.Convention.StackPointer);
+            ManagedFramePromotion.Run(facts, function, owner.abi, owner.lifter.Calls, owner.lifter.Machine.Convention.StackPointer, signature.Return);
             if (constantFrameIndices)
             {
                 Ssa.Propagate.Run(function, Ssa.Dominators.Compute(function));

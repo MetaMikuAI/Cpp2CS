@@ -44,7 +44,8 @@ public sealed partial class MethodRecovery
             Ssa.Propagate.Run(function, Ssa.Dominators.Compute(function));
             PromotePrivateFrameSlots();
             Ssa.Propagate.Run(function, Ssa.Dominators.Compute(function));
-            ManagedFramePromotion.Run(facts, function, owner.abi, owner.lifter.Calls, owner.lifter.Machine.Convention.StackPointer);
+            ManagedFramePromotion.Run(facts, function, owner.abi, owner.lifter.Calls, owner.lifter.Machine.Convention.StackPointer,
+                owner.abi.Classify(method, out _)?.Return);
             function.Problems.AddRange(Ssa.SsaCheck.Verify(function, Ssa.Dominators.Compute(function)));
         }
     }

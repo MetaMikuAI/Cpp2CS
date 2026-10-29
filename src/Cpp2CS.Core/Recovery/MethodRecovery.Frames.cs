@@ -139,6 +139,7 @@ public sealed partial class MethodRecovery
             }
             WitnessStoredArguments(witnesses);
             WitnessLoadedArguments(witnesses);
+            WitnessLoadedReturns(witnesses);
             if (WitnessStoredResults(witnesses) is { } resultFailure) return resultFailure;
             if (WitnessFieldCopies(witnesses) is { } fieldFailure) return fieldFailure;
             WitnessFrameCopies(witnesses);

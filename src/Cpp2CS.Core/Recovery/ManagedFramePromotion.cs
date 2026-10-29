@@ -9,7 +9,7 @@ namespace Cpp2CS.Recovery;
 /// <summary>托管调用已定型后，用 ref 参数的完整大小区分相邻的独立栈局部。</summary>
 internal static class ManagedFramePromotion
 {
-    public static void Run(ProgramFacts facts, MachineFunction function, ManagedAbi abi, ICallModel calls, Storage stackPointer)
+    public static void Run(ProgramFacts facts, MachineFunction function, ManagedAbi abi, ICallModel calls, Storage stackPointer, AbiValue? returned)
     {
         var frames = new ManagedCallFrames(facts, abi);
         var statements = function.Blocks.SelectMany(b => b.Statements).ToArray();
@@ -31,6 +31,12 @@ internal static class ManagedFramePromotion
         // 已定型结构体经逐片读写复制到另一段栈时，两侧都保留物理布局供后续整体恢复。
         var definitions = statements.OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
         var loadedDefinitions = statements.OfType<Define>().ToDictionary(d => d.Target);
+        // 自身返回签名同样要求完整布局，避免先把聚合中的引用字段拆成独立标量。
+        if (returned is { Passing: Passing.Registers } && abi.Kind(returned.Type) == ValueKind.Struct)
+            foreach (var statement in statements.OfType<Return>())
+                if (statement.Value is { } value && FrameArgumentSpan.ReturnLoads(value, returned.Pieces, abi.Size(returned.Type),
+                    loadedDefinitions, e => e is FrameAddress frame ? frame.Offset : null) is { } span)
+                    preserved.Add((span.Origin, abi.Size(returned.Type)));
         // 按值传参的结构体同样需要完整布局，不能先把其中的引用字段单独提升。
         foreach (var call in statements.OfType<Call>())
         {
