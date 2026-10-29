@@ -257,6 +257,24 @@ public static class InlineRecognition
                     Cond.Ult => l < r, Cond.Ule => l <= r, Cond.Ugt => l > r, _ => l >= r,
                 } ? 1UL : 0UL;
             }
+            case ComparisonValue c when c.Condition is >= Cond.FEq and <= Cond.FUne && c.Left.Width == c.Right.Width
+                && c.Left.Width is 32 or 64:
+            {
+                double Number(ManagedValue v) => v.Width == 32 ? BitConverter.Int32BitsToSingle(unchecked((int)Eval(v, valuation)))
+                    : BitConverter.Int64BitsToDouble(unchecked((long)Eval(v, valuation)));
+                var l = Number(c.Left);
+                var r = Number(c.Right);
+                var unordered = double.IsNaN(l) || double.IsNaN(r);
+                return (c.Condition switch
+                {
+                    Cond.FEq => l == r, Cond.FNe => !unordered && l != r,
+                    Cond.FLt => l < r, Cond.FLe => l <= r, Cond.FGt => l > r, Cond.FGe => l >= r,
+                    Cond.FUnordered => unordered, Cond.FOrdered => !unordered,
+                    Cond.FUlt => unordered || l < r, Cond.FUle => unordered || l <= r,
+                    Cond.FUgt => unordered || l > r, Cond.FUge => unordered || l >= r,
+                    Cond.FUeq => unordered || l == r, _ => unordered || l != r,
+                }) ? 1UL : 0UL;
+            }
             case ChoiceValue c: return Eval(c.Condition, valuation) != 0 ? Eval(c.True, valuation) & Mask(c.Width) : Eval(c.False, valuation) & Mask(c.Width);
             case BooleanValue b:
             {
@@ -349,20 +367,24 @@ public static class InlineRecognition
                 .Where(v => v is FieldValue f && Contains(f.Receiver, IsParameter)).Distinct().ToArray();
             if (calleeLeaves.Length == 0) return true;
             var layers = new List<List<ManagedValue>>();
+            var stores = new List<List<ManagedStore>>();
             var seen = new HashSet<ulong>();
             var frontier = new List<(ManagedBlock Block, int From)> { (start, index) };
             for (var depth = 0; depth <= 6 && frontier.Count > 0; depth++)
             {
                 var layer = new List<ManagedValue>();
+                var layerStores = new List<ManagedStore>();
                 var next = new List<(ManagedBlock, int)>();
                 foreach (var (block, from) in frontier)
                     foreach (var statement in block.Statements.Skip(from))
                     {
                         layer.AddRange(ManagedValues.Of(statement).SelectMany(ManagedValues.Walk).Where(v => v is FieldValue));
+                        if (statement is ManagedStore store) layerStores.Add(store);
                         foreach (var target in Targets(statement))
                             if (callerBlocks.TryGetValue(target, out var successor) && seen.Add(target)) next.Add((successor, 0));
                     }
                 layers.Add(layer.Distinct().ToList());
+                stores.Add(layerStores);
                 frontier = next;
             }
             foreach (var leaf in calleeLeaves)
@@ -378,6 +400,23 @@ public static class InlineRecognition
                     foreach (var (k, v) in bindings[0]) arguments[k] = v;
                     break;
                 }
+            // 内联可能已按常量 bool 消去被调方分支；同字段的唯一常量写入只用于绑定候选，仍须逐事件核对整个区域。
+            var copies = ArgumentCopies(callee.Pattern);
+            foreach (var store in callee.Pattern.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>())
+            {
+                if (BooleanCopies.Argument(store.Value, copies) is not { } parameter || !IsParameter(parameter)) continue;
+                var target = Substitute(store.Target, v => v is ArgumentValue argument && IsParameter(argument)
+                    && arguments.TryGetValue(argument.Index + Shift, out var bound) ? bound : null);
+                if (Contains(target, IsParameter)) continue;
+                foreach (var layer in stores)
+                {
+                    var constants = layer.Where(s => s.Target.Equals(target)).Select(s => s.Value)
+                        .OfType<ConstantValue>().Where(v => v.Type.Equals(parameter.Type) && v.Bits <= 1).Distinct().ToArray();
+                    if (constants.Length == 0) continue;
+                    if (constants is not [var constant] || !Unify(parameter, constant, arguments)) return false;
+                    break;
+                }
+            }
             return arguments.Count > 0;
         }
 
@@ -439,7 +478,10 @@ public static class InlineRecognition
                         if (c.Result is { } cv) results[cv.Variable] = d.Result ?? new LocalValue(new Variable(Storage.Temp(-1000 - cv.Variable.Version), 1), cv.Type, cv.Width);
                         break;
                     case (StoreItem c, StoreItem d):
-                        if (!Same(inner, outer, c.Target, d.Target, valuation, structural: true) || !Same(inner, outer, c.Value, d.Value, valuation)) return false;
+                        if (!Same(inner, outer, c.Target, d.Target, valuation, structural: true))
+                        { failure += $"（目标不同：{inner.Resolve(c.Target)} / {outer.Resolve(d.Target)}）"; return false; }
+                        if (!Same(inner, outer, c.Value, d.Value, valuation))
+                        { failure += $"（值不同：{inner.Resolve(c.Value)} / {outer.Resolve(d.Value)}）"; return false; }
                         break;
                     case (CheckItem c, CheckItem d):
                         if (!c.Exception.Equals(d.Exception) || Eval(inner.Resolve(c.Condition), valuation) != Eval(outer.Resolve(d.Condition), valuation)) return false;
@@ -475,6 +517,9 @@ public static class InlineRecognition
                 raw = parameter;
                 resolved = argument;
             }
+            // 已绑定的常量参数可在内联处折叠；先代入再比较，未绑定参数仍须结构统一。
+            raw = Substitute(raw, v => v is ArgumentValue parameter && IsParameter(parameter)
+                && arguments.TryGetValue(parameter.Index + Shift, out var bound) ? bound : null);
             if (Contains(raw, IsParameter))
             {
                 if (!Unify(raw, resolved, arguments)) return false;
@@ -493,6 +538,7 @@ public static class InlineRecognition
             private ManagedBlock block = isCallee ? owner.callee.Pattern.Blocks[0] : owner.start;
             private int position = isCallee ? 0 : owner.index;
             private int steps;
+            private readonly Queue<StoreItem> booleanStores = new();
 
             /// <summary>代入区域内（被调方法内）已求值的局部变量；被调方法的参数与调用结果换成调用者的值。</summary>
             public ManagedValue Resolve(ManagedValue value, bool bind = true) => Substitute(value, v => v switch
@@ -509,6 +555,7 @@ public static class InlineRecognition
             {
                 while (true)
                 {
+                    if (booleanStores.TryDequeue(out var pendingStore)) return pendingStore;
                     // 尾调用之后被调方法以调用结果返回。
                     if (tail) return new ReturnItem(tailResult);
                     if (++steps > StepLimit) return new FailItem("步数");
@@ -532,7 +579,26 @@ public static class InlineRecognition
                             if (c.Tail) { tail = true; tailResult = result; }
                             return item;
                         }
-                        case ManagedStore s: return new StoreItem(s.Target, s.Value);
+                        case ManagedStore s:
+                        {
+                            // 连续的常量 bool 字段写入可被原生编译器合成宽写入；只在同一接收者、字段不重叠时按偏移核对。
+                            var sequence = block.Statements.Skip(position - 1).TakeWhile(s => s is ManagedStore).Cast<ManagedStore>()
+                                .Take(8).Select(s => (Store: s, Target: Resolve(s.Target), Value: Resolve(s.Value))).ToArray();
+                            if (sequence.Length > 1 && sequence.All(s => s.Target is FieldValue
+                                    { Field.Field.Type: DefinitionRef { Definition.Keyword: "bool" }, Receiver: LocalValue or ArgumentValue }
+                                && ManagedValues.Walk(s.Value).All(v => v is ConstantValue or ConversionValue or BinaryValue { Op: BinOp.And }))
+                                && sequence.Select(s => ((FieldValue)s.Target).Receiver).Distinct().Count() == 1
+                                && sequence.Select(s => ((FieldValue)s.Target).Field.Field.Owner).Distinct().Count() == 1
+                                && sequence.Select(s => ((FieldValue)s.Target).Field.Field.Offset).Distinct().Count() == sequence.Length
+                                && sequence.All(s => Eval(s.Value, valuation) <= 1))
+                            {
+                                foreach (var store in sequence.OrderBy(s => ((FieldValue)s.Target).Field.Field.Offset))
+                                    booleanStores.Enqueue(new(store.Store.Target, store.Store.Value));
+                                position += sequence.Length - 1;
+                                return booleanStores.Dequeue();
+                            }
+                            return new StoreItem(s.Target, s.Value);
+                        }
                         case ManagedCheck check: return new CheckItem(check.Condition, check.Exception);
                         case ManagedReturn r when isCallee: return new ReturnItem(r.Value);
                         case ManagedJump j:
@@ -583,7 +649,13 @@ public static class InlineRecognition
             }
 
             private bool References(ulong target) => owner.callerBlocks.TryGetValue(target, out var next)
-                && next.Statements.SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).Any(Internal);
+                && (next.Statements.SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).Any(Internal)
+                    || owner.callee.ReturnsBool && next.Statements.All(s => s is ManagedAssignment or ManagedBranch or ManagedJump)
+                        && owner.callee.Pattern.Blocks.SelectMany(b => b.Statements)
+                            .All(s => s is ManagedAssignment or ManagedBranch or ManagedJump or ManagedReturn)
+                        && owner.arguments.TryGetValue(-1, out var receiver)
+                        && next.Statements.SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).OfType<FieldValue>()
+                            .Any(f => owner.callee.Fields.Contains(f.Field) && Resolve(f.Receiver).Equals(receiver)));
         }
 
         // ---------- 改写 ----------

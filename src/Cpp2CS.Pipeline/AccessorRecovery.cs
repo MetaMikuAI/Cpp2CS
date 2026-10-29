@@ -128,7 +128,7 @@ public sealed class AccessorRecovery
             foreach (var type in InaccessibleOwners(types, owner, result.Body!).Distinct())
                 foreach (var method in type.Methods.Where(m => m.Address != 0 && m.GenericParameters.Count == 0 && m.Name != ".cctor" && (m.Name != ".ctor" || type.IsValueType)
                     && rejected?.Contains(new MethodRef(m, [], []).ToString()) != true
-                    && m.Parameters.Count <= 3 && facts.Code.RegionOf(m.Address) == CodeRegion.Managed && ManagedAccess.Method(types, owner, new MethodRef(m, [], []), null)))
+                    && m.Parameters.Count <= 8 && facts.Code.RegionOf(m.Address) == CodeRegion.Managed && ManagedAccess.Method(types, owner, new MethodRef(m, [], []), null)))
                     if (InlineShape(method) is { } shape)
                     {
                         methods.Add(method);
