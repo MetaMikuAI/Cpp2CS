@@ -10,7 +10,7 @@ namespace Cpp2CS.Tests;
 /// <summary>诊断：打印一个函数提升并经 L2 归一之后的 IR（逐块，含前驱与 φ）。CPP2CS_FRAME_SLOTS=off 可对比帧槽提升之前的形态。</summary>
 internal static class IrDump
 {
-    [Command("ir-dump", "打印函数在提升与 L2 之后的 IR", Arguments = "<binary> <metadata> <入口地址…>")]
+    [Command("ir-dump", "打印提升与 L2 IR；raw: 前缀保留未化简 SSA", Arguments = "<binary> <metadata> <入口地址…>")]
     public static int Run(string binary, string metadata, string[] entries)
     {
         var facts = FactsBuilder.Build(binary, metadata);
@@ -18,12 +18,13 @@ internal static class IrDump
         var rewriter = new IdiomRewriter(facts) { RecordFilter = _ => false, RecoverUnusedInputs = true };
         foreach (var text in entries)
         {
-            var entry = System.Convert.ToUInt64(text, 16);
+            var rawView = text.StartsWith("raw:", StringComparison.Ordinal);
+            var entry = System.Convert.ToUInt64(rawView ? text[4..] : text, 16);
             var method = facts.EntriesAt(entry).FirstOrDefault(e => e.Kind is EntryKind.Method or EntryKind.GenericMethod && e.Method is not null)?.Method;
             var result = method is null ? null : new ManagedAbi(facts.Layouts).Classify(method, out _)?.Return;
             Expr? returned = result is null ? null : result.Pieces.Length == 1 ? new Read(result.Pieces[0].Register, result.Pieces[0].Width)
                 : new Intrinsic("diagnostic_return", result.Pieces.Select(p => (Expr)new Read(p.Register, p.Width)).ToArray(), 64);
-            var lifted = lifter.Lift(entry, returned);
+            var lifted = lifter.Lift(entry, returned, simplify: !rawView);
             Console.WriteLine($"== 0x{entry:x}{(lifted.Succeeded ? "" : "（提升失败：" + string.Join("；", lifted.Errors) + "）")}");
             if (Environment.GetEnvironmentVariable("CPP2CS_INPUT_TRACE") == "1")
             {
@@ -35,11 +36,15 @@ internal static class IrDump
                 foreach (var statement in raw.Function.Blocks.SelectMany(b => b.Statements).Where(s => s is Opaque or IndirectJump { Targets.Length: 0 }))
                     Console.WriteLine($"  入口证据缺失 0x{statement.Address:x}: {statement}");
                 Console.WriteLine($"  入口读取: {(reads is null ? "未证明" : string.Join(",", reads))}");
+                Console.WriteLine($"  未解析间接跳转: {raw.Function.UnresolvedIndirectJumps}；间接尾调用: {raw.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Count(c => c.Kind == CallKind.TailIndirect)}");
                 Console.WriteLine($"  x0 未使用: {rewriter.UnusedInput(entry, Storage.Gpr(0))}");
             }
             if (!lifted.Succeeded) continue;
-            var idioms = rewriter.Run(lifted.Function);
-            foreach (var error in idioms.Errors) Console.WriteLine($"  L2 错误 {error}");
+            if (!rawView)
+            {
+                var idioms = rewriter.Run(lifted.Function);
+                foreach (var error in idioms.Errors) Console.WriteLine($"  L2 错误 {error}");
+            }
             foreach (var block in lifted.Function.Blocks)
             {
                 Console.WriteLine($"B{block.Index}@0x{block.Start:x}{(block.IsLandingPad ? " 落地块" : "")} ← {string.Join(",", block.Predecessors.Select(p => $"B{p.Index}"))}");
