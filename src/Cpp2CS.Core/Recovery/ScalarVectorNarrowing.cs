@@ -22,7 +22,7 @@ internal static class ScalarVectorNarrowing
             .ToDictionary(d => d.Target, d => (Ir.Convert)d.Value);
         Expr? Project(Expr expression)
         {
-            if (expression is Intrinsic duplicate) return RepeatedConstant(duplicate);
+            if (expression is Intrinsic duplicate) return RepeatedConstant(duplicate) ?? RepeatedVariable(duplicate);
             if (expression is not Use original) return null;
             var current = original;
             var seen = new HashSet<Variable>();
@@ -162,5 +162,16 @@ internal static class ScalarVectorNarrowing
         for (var low = 0; low < 64; low += laneWidth) word |= (lane.Value & Expr.Mask(laneWidth)) << low;
         var half = Expr.C(word, 64);
         return duplicate.Width == 64 ? half : new Insert(new Insert(Expr.C(0, 128), half, 0), half, 64);
+    }
+
+    /// <summary>SSA 标量逐道复制保留同一快照；访存及其他表达式不重复求值。</summary>
+    internal static Expr? RepeatedVariable(Intrinsic duplicate)
+    {
+        var laneWidth = duplicate.Name switch { "vdup.8" => 8, "vdup.16" => 16, "vdup.32" => 32, "vdup.64" => 64, _ => 0 };
+        if (laneWidth == 0 || duplicate.Width is not (64 or 128) || duplicate.Arguments is not [Use { Variable.Version: >= 0 } lane]
+            || lane.Width != laneWidth) return null;
+        Expr result = Expr.C(0, duplicate.Width);
+        for (var low = 0; low < duplicate.Width; low += laneWidth) result = new Insert(result, lane, low);
+        return result;
     }
 }

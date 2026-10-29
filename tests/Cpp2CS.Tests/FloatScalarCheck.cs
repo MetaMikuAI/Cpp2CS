@@ -70,7 +70,7 @@ internal static class FloatScalarCheck
             new Ir.Convert(ConvKind.SignExtend, Expr.C(1, 32), 128),
             new Ir.Convert(ConvKind.ZeroExtend, Expr.C(1, 16), 128),
             new Intrinsic("dup", [Expr.C(1, 32)], 128),
-            new Ir.Convert(ConvKind.ZeroExtend, new Intrinsic("vdup.32", [new Use(v, 32)], 64), 128),
+            new Ir.Convert(ConvKind.ZeroExtend, new Intrinsic("vdup.32", [new Load(address, 32)], 64), 128),
         })
         {
             var block = new Block(0x1000) { Statements = [new Define(0x1000, v, original), new Return(0x1004) { Value = new Use(v, 32) }] };
@@ -146,6 +146,26 @@ internal static class FloatScalarCheck
             new Intrinsic("vdup.32", [Expr.C(1, 32)], 256),
             new Intrinsic("vdup.24", [Expr.C(1, 24)], 128),
         }) a.True(ScalarVectorNarrowing.RepeatedConstant(rejected) is null, "拒绝非恒定值、未知道宽与不匹配位宽");
+        foreach (var laneWidth in new[] { 8, 16, 32, 64 })
+        {
+            var duplicate = new Intrinsic($"vdup.{laneWidth}", [new Use(v, laneWidth)], 128);
+            var expanded = ScalarVectorNarrowing.RepeatedVariable(duplicate)!;
+            foreach (var bits in new ulong[] { 0x80000000, 0x7fc00123, ulong.MaxValue })
+            {
+                Expr Concrete(Expr expression) => ExprMap.Map(expression, e => e is Use ? Expr.C(bits, laneWidth) : null);
+                var evaluator = new Evaluator();
+                a.Equal(evaluator.Eval(Concrete(duplicate)), evaluator.Eval(Concrete(expanded)), "SSA 复制保留全部通道位型");
+                a.True(evaluator.Failure is null, "复制与逐道表达式均可独立求值");
+            }
+        }
+        a.True(ScalarVectorNarrowing.RepeatedVariable(new("vdup.32", [new Load(address, 32)], 128)) is null,
+            "不通过多次内存读取实现向量复制");
+        var halfDuplicate = new Block(0x5000) { Statements = [new Define(0x5000, v,
+            new Ir.Convert(ConvKind.ZeroExtend, new Intrinsic("vdup.32", [new Use(new(Storage.Vec(1), 0), 32)], 64), 128)),
+            new Return(0x5004) { Value = new Use(v, 32) }] };
+        a.Equal(0, ScalarVectorNarrowing.Run([halfDuplicate], Unknown), "复制后的宽值不能收窄为单个标量");
+        a.True(halfDuplicate.Statements[0] is Define { Value: Ir.Convert { Width: 128, Operand: Insert { Width: 64 } } },
+            "低半向量复制仍保留高半清零");
         return a.Finish("float-unit");
     }
 }
