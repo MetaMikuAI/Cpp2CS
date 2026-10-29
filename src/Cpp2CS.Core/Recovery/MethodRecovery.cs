@@ -345,6 +345,17 @@ public sealed partial class MethodRecovery
             if (function.Blocks.Any(b => b.IsLandingPad))
                 while (ExceptionNullBranches.Run(facts, function)) function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
             foreach (var residual in idioms.Residuals)
+            {
+                // 写屏障实参裁剪后，部分 Class 读取已被 SSA 证明无使用；旧 L2 诊断不再对应活语句。
+                if (residual.Category.StartsWith("load:Class+", StringComparison.Ordinal)
+                    && function.Dead.Any(p => p.Define.Address == residual.Address && ExprMap.Walk(p.Define.Value).OfType<Load>()
+                        .Any(l => ExprMap.Walk(l.Address).Any(e => e is Symbol { Kind: SymbolKind.Class })))
+                    && !function.Blocks.SelectMany(b => b.Statements).Any(s => s.Address == residual.Address))
+                {
+                    ruleTraces.Add(new("runtime.dead-class-read", residual.Address, RewriteStatus.Applied, "runtime.unused-class-metadata",
+                        "Class 读取的全部使用已由 SSA 消除，保留原诊断与死定义证据", new("ssa.dead-definition", [residual.Address], [residual.Category, residual.Detail])));
+                    continue;
+                }
                 // 没有身份证据的未注册调用交给 L3 的调用解析（方法的本地副本，CopyOf）；解析不了时在调用处留洞。
                 if (residual.Category is not ("helper:WriteBarrier" or "call:unregistered-managed") && !cleanupSites.Contains(residual.Address) && !sharedSites.Contains(residual.Address))
                 {
@@ -352,6 +363,7 @@ public sealed partial class MethodRecovery
                     foreach (var statement in function.Blocks.SelectMany(b => b.Statements).Where(s => s.Address == residual.Address))
                         ledger.Block(statement, hole);
                 }
+            }
             blocks = function.Blocks;
             if (function.Blocks.FirstOrDefault(b => b.IsLandingPad) is { } landing && !PrepareExceptionRegions())
             {
