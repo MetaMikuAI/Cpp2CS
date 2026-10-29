@@ -23,13 +23,15 @@ internal static partial class ExecutionCheck
 {
     private const int Cases = 32;
 
-    [Command("execute", "执行对照：原机器码（Unicorn）与写出的 CIL（解释执行）在同一合成内存上结果一致", Arguments = "<binary> <metadata> <竖切清单 或 recover 输出目录> [--mutants ...]")]
+    [Command("execute", "执行对照：原机器码（Unicorn）与写出的 CIL（解释执行）在同一合成内存上结果一致", Arguments = "<binary> <metadata> <竖切清单 或 recover 输出目录> [--cases N] [--mutants ...]")]
     public static int Run(string binary, string metadata, string slice, string[] options)
     {
         var mutate = options.Contains("--mutants");
         // 栈帧代表集合增加输入覆盖；同一组种子先验证未变异基线，再用于变异。
         // 多个布尔桩结果的合取可能遮蔽局部错误，不能只增加变异侧种子而误把模型差异算成检出。
-        var caseCount = options.Contains("--frame-mutants") ? 128 : Cases;
+        var caseCount = options.SkipWhile(o => o != "--cases").Skip(1).FirstOrDefault() is { } requestedCases
+            ? int.Parse(requestedCases) : options.Contains("--frame-mutants") ? 128 : Cases;
+        if (caseCount < 1) throw new ArgumentOutOfRangeException(nameof(options), "执行样例数必须大于零");
         // --shard k/n：只检查序号模 n 余 k 的方法（多进程并行，见 tests/execute_sharded.py）。恢复与写出 CIL 仍对全部方法进行：
         // 构造函数能否写出取决于同类型的其他构造函数（ConstructorInitialization），只写出一部分会改变被检查的方法体
         var (shard, shards) = options.SkipWhile(o => o != "--shard").Skip(1).FirstOrDefault() is { } spec
@@ -173,12 +175,12 @@ internal static partial class ExecutionCheck
             {
                 exceptionMethods++;
                 thrownCases += outcome.ThrowCases;
-                a.True(outcome.Verdict == "verified" && outcome.Matches == Cases, $"{name} 异常方法必须全部 {Cases} 个用例可比较且一致");
+                a.True(outcome.Verdict == "verified" && outcome.Matches == caseCount, $"{name} 异常方法必须全部 {caseCount} 个用例可比较且一致");
             }
             baselineNullCalls += interpreter.NullAccessorCalls - nullBefore;
-            if (outcome.Verdict == "verified" && outcome.Matches == Cases && candidates.TryGetValue(result.Method.Method, out var accessor))
+            if (outcome.Verdict == "verified" && outcome.Matches == caseCount && candidates.TryGetValue(result.Method.Method, out var accessor))
                 verifiedAccessors.Add(AccessorEvidence.Describe(facts, skeleton, accessor));
-            if (outcome.Verdict == "verified" && outcome.Matches == Cases && result.Method.Method.Address != 0 && inlineCandidates.Count > 0
+            if (outcome.Verdict == "verified" && outcome.Matches == caseCount && result.Method.Method.Address != 0 && inlineCandidates.Count > 0
                 && AccessorEvidence.Describe(facts, skeleton, result.Method) is var inlineEvidence && inlineCandidates.Contains(inlineEvidence))
                 verifiedAccessors.Add(inlineEvidence);
             var dependency = dependencyMethods.Contains((result.Entry, result.Method.ToString()));
@@ -215,7 +217,7 @@ internal static partial class ExecutionCheck
         }
         Console.WriteLine($"  F8 运行时身份核对通过 {machine.InferredIdentityChecks} 次");
         Console.WriteLine($"  原生泛型虚方法实例化 {machine.GenericVirtualResolutions} 次");
-        Console.WriteLine($"  F5 异常方法 {exceptionMethods}，两侧实际注入抛出 {thrownCases}/{exceptionMethods * Cases} 用例");
+        Console.WriteLine($"  F5 异常方法 {exceptionMethods}，两侧实际注入抛出 {thrownCases}/{exceptionMethods * caseCount} 用例");
         if (full)
         {
             long Size(string verdict) => verdictEntries.TryGetValue(verdict, out var entries) ? entries.Where(targetBytes.ContainsKey).Sum(e => targetBytes[e]) : 0;
