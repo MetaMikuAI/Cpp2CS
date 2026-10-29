@@ -402,19 +402,38 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 {
                     if (instruction.OpCode.Code == Code.Call && ((MethodReference)operand).Resolve() is
                         { IsStatic: true, IsPInvokeImpl: true, ReturnType.FullName: "System.Single", Parameters: [{ ParameterType.FullName: "System.Single" }],
-                            PInvokeInfo: { EntryPoint: "sinf", IsCallConvCdecl: true, Module.Name: "libm.so" or "libm.so.6" } })
+                            PInvokeInfo: { EntryPoint: "sinf" or "tanf", IsCallConvCdecl: true, Module.Name: "libm.so" or "libm.so.6" } } unaryImport)
                     {
-                        stack.Push(StackValue.F(NativeMathLibrary.Sinf((float)Pop().Double)));
+                        var operation = unaryImport.PInvokeInfo.EntryPoint == "sinf" ? NativeMathLibrary.Sinf : NativeMathLibrary.Tanf;
+                        stack.Push(StackValue.F(operation((float)Pop().Double)));
                         break;
                     }
                     if (instruction.OpCode.Code == Code.Call && ((MethodReference)operand).Resolve() is
                         { IsStatic: true, IsPInvokeImpl: true, ReturnType.FullName: "System.Single",
                             Parameters: [{ ParameterType.FullName: "System.Single" }, { ParameterType.FullName: "System.Single" }],
-                            PInvokeInfo: { EntryPoint: "fmodf", IsCallConvCdecl: true, Module.Name: "libm.so" or "libm.so.6" } })
+                            PInvokeInfo: { EntryPoint: "fmodf" or "powf" or "atan2f", IsCallConvCdecl: true, Module.Name: "libm.so" or "libm.so.6" } } binaryImport)
                     {
                         var divisor = (float)Pop().Double;
                         var value = (float)Pop().Double;
-                        stack.Push(StackValue.F(NativeMathLibrary.Fmodf(value, divisor)));
+                        var operation = binaryImport.PInvokeInfo.EntryPoint switch { "fmodf" => NativeMathLibrary.Fmodf,
+                            "powf" => NativeMathLibrary.Powf, _ => NativeMathLibrary.Atan2f };
+                        stack.Push(StackValue.F(operation(value, divisor)));
+                        break;
+                    }
+                    if (instruction.OpCode.Code == Code.Call && ((MethodReference)operand).Resolve() is
+                        { IsStatic: true, IsPInvokeImpl: true, ReturnType.FullName: "System.Double", Parameters: [{ ParameterType.FullName: "System.Double" }],
+                            PInvokeInfo: { EntryPoint: "acos", IsCallConvCdecl: true, Module.Name: "libm.so" or "libm.so.6" } })
+                    {
+                        stack.Push(StackValue.F(NativeMathLibrary.Acos(Pop().Double)));
+                        break;
+                    }
+                    if (instruction.OpCode.Code == Code.Call && ((MethodReference)operand).Resolve() is
+                        { IsStatic: true, IsPInvokeImpl: true, ReturnType.FullName: "System.Double",
+                            Parameters: [{ ParameterType.FullName: "System.Double" }, { ParameterType.FullName: "System.Double" }],
+                            PInvokeInfo: { EntryPoint: "atan2", IsCallConvCdecl: true, Module.Name: "libm.so" or "libm.so.6" } })
+                    {
+                        var x = Pop().Double;
+                        stack.Push(StackValue.F(NativeMathLibrary.Atan2(Pop().Double, x)));
                         break;
                     }
                     var target = model.Method((MethodReference)operand);

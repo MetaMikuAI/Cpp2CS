@@ -478,17 +478,32 @@ internal sealed partial class NativeMachine : IDisposable
                 uc.SetReg(Unicorn.D(0), unchecked((ulong)BitConverter.DoubleToInt64Bits(fraction)));
                 break;
             }
-            case HelperKind.Import when helper.Detail == "sinf":
+            case HelperKind.Import when helper.Detail is "sinf" or "tanf":
             {
-                var result = NativeMathLibrary.Sinf(BitConverter.UInt32BitsToSingle((uint)uc.Reg(Unicorn.S(0))));
+                var operation = helper.Detail == "sinf" ? NativeMathLibrary.Sinf : NativeMathLibrary.Tanf;
+                var result = operation(BitConverter.UInt32BitsToSingle((uint)uc.Reg(Unicorn.S(0))));
                 uc.SetReg(Unicorn.S(0), BitConverter.SingleToUInt32Bits(result));
                 break;
             }
-            case HelperKind.Import when helper.Detail == "fmodf":
+            case HelperKind.Import when helper.Detail is "fmodf" or "powf" or "atan2f":
             {
-                var result = NativeMathLibrary.Fmodf(BitConverter.UInt32BitsToSingle((uint)uc.Reg(Unicorn.S(0))),
+                var operation = helper.Detail switch { "fmodf" => NativeMathLibrary.Fmodf, "powf" => NativeMathLibrary.Powf, _ => NativeMathLibrary.Atan2f };
+                var result = operation(BitConverter.UInt32BitsToSingle((uint)uc.Reg(Unicorn.S(0))),
                     BitConverter.UInt32BitsToSingle((uint)uc.Reg(Unicorn.S(1))));
                 uc.SetReg(Unicorn.S(0), BitConverter.SingleToUInt32Bits(result));
+                break;
+            }
+            case HelperKind.Import when helper.Detail == "acos":
+            {
+                var result = NativeMathLibrary.Acos(BitConverter.Int64BitsToDouble(unchecked((long)uc.Reg(Unicorn.D(0)))));
+                uc.SetReg(Unicorn.D(0), unchecked((ulong)BitConverter.DoubleToInt64Bits(result)));
+                break;
+            }
+            case HelperKind.Import when helper.Detail == "atan2":
+            {
+                var result = NativeMathLibrary.Atan2(BitConverter.UInt64BitsToDouble(uc.Reg(Unicorn.D(0))),
+                    BitConverter.UInt64BitsToDouble(uc.Reg(Unicorn.D(1))));
+                uc.SetReg(Unicorn.D(0), BitConverter.DoubleToUInt64Bits(result));
                 break;
             }
             case HelperKind.Import when helper.Detail is "memcpy" or "memmove":

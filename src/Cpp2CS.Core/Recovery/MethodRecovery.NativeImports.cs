@@ -20,18 +20,20 @@ public sealed partial class MethodRecovery
             {
                 if (call is not { Kind: CallKind.Direct or CallKind.Tail, Op: { Kind: OpKind.Import, Operand: string symbol } }
                     || call.Kind == CallKind.Direct && (call.Results is not [var result] || result != Storage.Vec(0) || call.Defines.Length != 1)) continue;
-                string[]? parameters = symbol switch { "sinf" => ["value"], "fmodf" => ["value", "divisor"], _ => null };
+                string[]? parameters = symbol switch { "sinf" or "tanf" or "acos" => ["value"], "fmodf" => ["value", "divisor"],
+                    "powf" => ["value", "power"], "atan2" or "atan2f" => ["y", "x"], _ => null };
                 if (parameters is null || call.Arguments.Length != parameters.Length) continue;
-                // 保留 C 单精度导入及实参顺序，不替换成 double 运算或近似表达式。
+                var scalar = symbol is "acos" or "atan2" ? types.Double : types.Single;
+                // 保留导入的精度及实参顺序，不替换成另一精度或近似表达式。
                 var ownerType = new TypeDef { Index = -1, Assembly = method.Method.Owner.Assembly, Namespace = "Cpp2CS", Name = "NativeImports",
                     Token = 0, Attributes = TypeAttributes.Public | TypeAttributes.Abstract | TypeAttributes.Sealed | TypeAttributes.BeforeFieldInit,
                     IsValueType = false, IsEnum = false };
                 var imported = new MethodDef { Index = -1, Owner = ownerType, Name = symbol, Token = 0,
                     Attributes = MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.PinvokeImpl,
-                    ImplAttributes = MethodImplAttributes.PreserveSig, Slot = -1, ReturnType = types.Single,
-                    Parameters = parameters.Select(name => new ParameterDef(name, types.Single, 0, null, false)).ToArray(), NativeImport = new(libraries[0], symbol) };
+                    ImplAttributes = MethodImplAttributes.PreserveSig, Slot = -1, ReturnType = scalar,
+                    Parameters = parameters.Select(name => new ParameterDef(name, scalar, 0, null, false)).ToArray(), NativeImport = new(libraries[0], symbol) };
                 nativeImports.Add(call, new(imported, [], []));
-                if (call.Defines is [{ } output]) known[output] = types.Single;
+                if (call.Defines is [{ } output]) known[output] = scalar;
             }
         }
 
@@ -43,7 +45,8 @@ public sealed partial class MethodRecovery
             var arguments = new List<ManagedValue>();
             foreach (var operand in call.Arguments)
             {
-                if (!RecoverAs(ScalarVectorNarrowing.Low(operand, 32), types.Single, call.Address).TryGet(out var argument, out var failure)) return failure;
+                var type = imported.Method.Parameters[arguments.Count].Type;
+                if (!RecoverAs(ScalarVectorNarrowing.Low(operand, types.Bits(type)), type, call.Address).TryGet(out var argument, out var failure)) return failure;
                 arguments.Add(argument);
             }
             LocalValue? result = null;
