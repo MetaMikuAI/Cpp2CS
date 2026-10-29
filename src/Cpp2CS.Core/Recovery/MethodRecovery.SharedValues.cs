@@ -294,27 +294,7 @@ public sealed partial class MethodRecovery
 
         private void NormalizeStackCanary(Func<Expr, int, Expr> expand)
         {
-            var storesBySlot = function.Blocks.SelectMany(b => b.Statements).OfType<Store>()
-                .Where(s => s.Target is FrameAddress).GroupBy(s => (FrameAddress)s.Target)
-                .Where(g => g.Count() == 1).ToDictionary(g => g.Key, g => g.Single());
-            bool ThreadPointer(Expr e) => e is Intrinsic { Name: "sysreg_tpidr_el0" }
-                || e is Load { Width: 64, Address: FrameAddress slot } && storesBySlot.TryGetValue(slot, out var saved)
-                    && expand(saved.Value, 0) is Intrinsic { Name: "sysreg_tpidr_el0" };
-            bool Canary(Expr e) => expand(e, 0) is Load { Width: 64, Address: Binary { Op: BinOp.Add,
-                Left: var thread, Right: Const { Value: 0x28 } } } && ThreadPointer(thread);
-            foreach (var block in function.Blocks.ToArray())
-            {
-                if (block.Statements.LastOrDefault() is not Branch branch || expand(branch.Condition, 0) is not Compare
-                    { Cond: Cond.Ne, Left: var left, Right: Load { Width: 64, Address: FrameAddress slot } }
-                    || !Canary(left) || block.NormalSuccessors.ToArray() is not [var fail, var normal]
-                    || !fail.Statements.OfType<Call>().Any(c => c.Op is { Kind: OpKind.Import, Operand: "__stack_chk_fail" })) continue;
-                var stores = function.Blocks.SelectMany(b => b.Statements).OfType<Store>().Where(s => s.Target == slot).ToArray();
-                if (stores is not [var saved] || !Canary(saved.Value)) continue;
-                block.Statements[^1] = new Jump(branch.Address, normal.Start);
-                MachineFunction.RemoveEdgeAt(block, 0);
-                foreach (var ownerBlock in function.Blocks) ownerBlock.Statements.Remove(saved);
-            }
-            function.Problems.AddRange(Ssa.Lowering.Cleanup(function));
+            StackCanaryRecognition.Run(function, expand, new ManagedCallFrames(facts, owner.abi).ArgumentSize);
         }
 
         private RecoveryResult<ManagedValue> SharedValue(Expr address, TypeRef type)

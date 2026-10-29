@@ -91,6 +91,7 @@ internal sealed partial class NativeMachine : IDisposable
         uc.Map(World.HeapBase, World.HeapSize);
         uc.Map(World.ExceptionBase, World.ExceptionSize);
         uc.Map(World.StackBase, World.StackSize);
+        MapThread(uc, detail => failure ??= new Unsupported(detail));
         uc.Map(World.CodeBase, World.CodeSize);
         var trap = new byte[World.CodeSize];
         for (var i = 0; i < trap.Length; i += 4) BinaryPrimitives.WriteUInt32LittleEndian(trap.AsSpan(i), 0xD4200000); // brk #0
@@ -131,6 +132,7 @@ internal sealed partial class NativeMachine : IDisposable
         // 映像恢复原状；Heap 区不必清零：每次分配都先写 0
         Restore();
         InitializeRuntime(uc, world.RuntimeBytes);
+        InitializeThread(uc);
         world.Active = side;
         try
         {

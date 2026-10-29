@@ -8,7 +8,7 @@ namespace Cpp2CS.Tests.Execution;
 /// </summary>
 internal sealed class Unicorn : IDisposable
 {
-    public const int RegNzcv = 3, RegSp = 4, RegPc = 260;
+    public const int RegNzcv = 3, RegSp = 4, RegPc = 260, RegTpidrEl0 = 262;
     public const int HookCode = 4, HookBlock = 8, HookMemWrite = 2048, HookMemUnmapped = 112;
     public const uint ProtAll = 7;
 
@@ -85,6 +85,7 @@ internal sealed class Unicorn : IDisposable
     public void OnWrite(MemoryHook hook) => Add(HookMemWrite, hook);
     public void OnUnmapped(InvalidMemoryHook hook) => Add(HookMemUnmapped, hook);
     public void OnNullPage(MemoryHook hook) => Add(1024 | HookMemWrite, hook, 0, 0xfff);
+    public void OnAccess(ulong first, ulong last, MemoryHook hook) => Add(1024 | HookMemWrite, hook, first, last);
 
     private void Add(int type, Delegate hook, ulong begin = 1, ulong end = 0)
     {

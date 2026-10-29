@@ -269,6 +269,9 @@ public sealed partial class MethodRecovery
             if (types.Kind(region.Type) != TypeKind.Struct)
                 return offset == 0 && width == region.Local.Width ? region.Local : Fail(0, "栈 标量栈槽的访问宽度不符");
             var leaves = StructPaths(region.Type).Where(p => types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
+            // 显式布局允许整数字段与字节字段重叠；精确字段访问不需要重建其他别名。
+            if (leaves.Where(p => p.Offset == offset && types.Size(p.Type) * 8 == width).ToArray() is [var exact])
+                return PathValue(region.Local, exact.Path);
             if (leaves.Any(p => p.Offset < offset + width / 8 && offset < p.Offset + types.Size(p.Type)
                 && (p.Offset < offset || p.Offset + types.Size(p.Type) > offset + width / 8)))
                 return Fail(0, "栈 访存只覆盖部分叶子");

@@ -313,6 +313,7 @@ public sealed partial class MethodRecovery
                 PromotePrivateFrameSlots();
             NormalizeSharedFields();
             NormalizeSharedValues();
+            StackCanaryRecognition.Run(function, extent: new ManagedCallFrames(facts, owner.abi).ArgumentSize);
             NormalizeDelegateChoices();
             foreach (var error in idioms.Errors) Hole(entry, $"L2 {error}");
             if (idioms.Errors.Count > 0) return false;
@@ -322,6 +323,7 @@ public sealed partial class MethodRecovery
             TrimIndirectArguments();
             Ssa.Propagate.RemoveDead(function);
             // 库内存操作归一后也可能产生新栈读写；普通方法与异常方法采用同一有界提升规则。
+            FrameWritebacks.Run(function);
             var constantFrameIndices = FrameConstantIndices.Run(function) > 0;
             ManagedFramePromotion.Run(facts, function, owner.abi, owner.lifter.Calls, owner.lifter.Machine.Convention.StackPointer);
             if (constantFrameIndices)
@@ -630,6 +632,8 @@ public sealed partial class MethodRecovery
         [Analysis("帧槽", 60, After = ["帧区域", "栈上调用"])]
         private void FrameSlots()
         {
+            var callFrames = new ManagedCallFrames(facts, owner.abi);
+            var deadWrites = new HashSet<Stmt>(ReferenceEqualityComparer.Instance);
             var references = new Dictionary<long, List<Stmt>>();
             foreach (var block in blocks)
                 foreach (var statement in block.Statements)
@@ -644,6 +648,14 @@ public sealed partial class MethodRecovery
             foreach (var (offset, users) in references)
             {
                 var distinct = users.Distinct(ReferenceEqualityComparer.Instance).Cast<Stmt>().ToArray();
+                if (distinct.All(s => s is Store { Target: FrameAddress at, Value: Use or Const } && at.Offset == offset)
+                    && distinct.Cast<Store>().All(store => FrameWritebacks.Unread(blocks.SelectMany(b => b.Statements).Where(s => !dropped.Contains(s)),
+                        store, callFrames.ArgumentSize, NoStackRead)))
+                {
+                    dropped.UnionWith(distinct);
+                    deadWrites.UnionWith(distinct);
+                    continue;
+                }
                 if (distinct is [Store { Target: FrameAddress, Value: Use { Variable: { Version: 0 } saved } } spill] && CalleeSaved.Concat([Storage.Gpr(29), Storage.Gpr(30)]).Contains(saved.Storage))
                 {
                     dropped.Add(spill);
@@ -661,6 +673,14 @@ public sealed partial class MethodRecovery
                 {
                     ledger.Block(user, hole);
                 }
+            }
+            if (deadWrites.Count > 0)
+            {
+                foreach (var block in blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                    if (deadWrites.Contains(block.Statements[i])) block.Statements[i] = new Nop(block.Statements[i].Address, "未读取的栈快照");
+                RemoveDeadDefinitions();
+                definitions = IndexDefinitions();
             }
         }
 
