@@ -256,14 +256,16 @@ internal static class ValueRecovery
                 {
                     if (!ctx.Recover(s.Condition, ctx.types.Boolean).TryGet(out var condition, out failure))
                         return failure;
+                    ManagedValue? alternative = null;
                     // 常量臂没有独立类型；先从另一臂取得引用或浮点类型，避免把 null 当成 long。
-                    if (hint is null && s.True is Const && s.False is not Const)
-                        hint = ctx.TypeOfValue(s.False);
+                    if (hint is null && s.True is Const && s.False is not Const && ctx.Recover(s.False, null).TryGet(out alternative, out _))
+                        hint = alternative.Type;
                     if (!ctx.Recover(s.True, hint).TryGet(out var whenTrue, out failure))
                         return failure;
                     // 同布局结构体片逐叶子选择；条件只能读取稳定值，不能因拆片重复访存或分配。
-                    if (ManagedValues.Walk(condition).All(v => v is ArgumentValue or LocalValue or ConstantValue or ConversionValue or BinaryValue or ComparisonValue or UnaryValue or BooleanValue or NegatedValue)
-                        && ctx.Recover(s.False, hint).TryGet(out var alternative, out _))
+                    if ((whenTrue is Fragment || whenTrue is ConstantValue { Bits: 0 } && whenTrue.Width == s.Width)
+                        && ManagedValues.Walk(condition).All(v => v is ArgumentValue or LocalValue or ConstantValue or ConversionValue or BinaryValue or ComparisonValue or UnaryValue or BooleanValue or NegatedValue)
+                        && (alternative is not null || ctx.Recover(s.False, hint).TryGet(out alternative, out _)))
                     {
                         var first = whenTrue as Fragment;
                         var second = alternative as Fragment;
@@ -276,7 +278,10 @@ internal static class ValueRecovery
                     }
                     if (whenTrue is Fragment f && !ctx.Pack(f).TryGet(out whenTrue, out failure))
                         return failure;
-                    if (!ctx.Recover(s.False, whenTrue.Type).Bind(value => ctx.Coerce(value, whenTrue.Type, 0)).TryGet(out var whenFalse, out failure))
+                    // 提示类型一致时复用已恢复的分支，避免嵌套选择在每一层重复展开。
+                    RecoveryResult<ManagedValue> falseValue = alternative is not null && alternative.Type.Equals(whenTrue.Type)
+                        ? alternative : ctx.Recover(s.False, whenTrue.Type);
+                    if (!falseValue.Bind(value => ctx.Coerce(value, whenTrue.Type, 0)).TryGet(out var whenFalse, out failure))
                         return failure;
                     if (whenTrue.Width != s.Width || whenFalse.Width != s.Width)
                         return RecoveryDiagnostics.Fail(0, "选择 两侧位宽不一致", rule: "Recover");
