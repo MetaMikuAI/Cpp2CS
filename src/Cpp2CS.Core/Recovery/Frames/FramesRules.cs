@@ -93,7 +93,15 @@ internal static class FramesRules
         {
             // 结构体，以及按地址传递的基元/引用（基元值类型实例方法的 this，如 x.ToString()；out/ref 参数）：后者是一个该类型的局部变量。
             if ((ctx.types.Kind(type) is TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference || ManagedTypes.IsNativePointer(type)) && ctx.FrameOffset(expression) is { } offset && ctx.types.Size(type) > 0)
+            {
                 witnesses.Add(new(offset, type, call, writes));
+                if (!writes)
+                {
+                    var block = ctx.blocks.Single(b => b.Statements.Contains(call));
+                    if (ctx.ReachingStackStore(block, block.Statements.IndexOf(call), offset, [], ctx.types.Size(type) * 8) is { } store)
+                        witnesses.Add(new(offset, type, store, true));
+                }
+            }
         }
 
         foreach (var call in ctx.blocks.SelectMany(b => b.Statements).OfType<Call>())
@@ -130,12 +138,6 @@ internal static class FramesRules
             if (call.Op is { Kind: OpKind.Box, Operand: TypeRef boxedType } && call.Arguments.LastOrDefault() is { } data && ctx.types.Kind(boxedType) is TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)
             {
                 Bind(data, boxedType, call);
-                if (ctx.FrameOffset(data) is { } offset)
-                {
-                    var block = ctx.blocks.Single(b => b.Statements.Contains(call));
-                    if (ctx.ReachingStackStore(block, block.Statements.IndexOf(call), offset, [], ctx.types.Size(boxedType) * 8) is { } store)
-                        witnesses.Add(new(offset, boxedType, store, true));
-                }
             }
 
             if (ctx.Resolve(call) is not { } callee || ctx.owner.abi.Classify(callee, out _) is not { } signature)
