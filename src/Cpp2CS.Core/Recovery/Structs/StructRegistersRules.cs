@@ -42,6 +42,40 @@ internal static class StructRegistersRules
         return local;
     }
 
+    [InvocationOutputRule(30)]
+    internal static bool ProjectTailHfa(this LoweringScope ctx, Call call, AbiSignature signature, Dictionary<Storage, Expr> registers, ManagedInvocation invocation, List<ManagedStatement> output)
+    {
+        if (call.Kind is not (CallKind.Tail or CallKind.TailIndirect) || signature.Return is not { } source
+            || source.Type.Equals(ctx.State.Signature.returnType) || !ctx.Values.RegisterStruct(source)
+            || new ManagedAbi(ctx.facts.Layouts).ClassifyReturn(ctx.State.Signature.returnType, out _) is not { Passing: Passing.Registers } target
+            || source.Pieces.Any(p => p.Register.Bank != Bank.Vec) || target.Pieces.Length == 0
+            || target.Pieces.Any(p => !source.Pieces.Any(s => s.Register == p.Register && s.Width == p.Width)))
+            return false;
+        // HFA 的各叶子独占浮点返回寄存器；调用者只观察自己返回签名中的寄存器。
+        var sourcePaths = ctx.Values.StructPaths(source.Type).Where(p => ctx.types.Kind(p.Type) is TypeKind.Float or TypeKind.Double).ToArray();
+        if (source.Pieces.Any(p => sourcePaths.Count(s => s.Offset == p.Offset && ctx.types.Bits(s.Type) == p.Width) != 1))
+            return false;
+        var local = ctx.Values.CallStructLocal(call, source.Type);
+        ManagedValue Read(AbiPiece piece) => ctx.Values.PathValue(local, sourcePaths.Single(p => p.Offset == piece.Offset && ctx.types.Bits(p.Type) == piece.Width).Path);
+        ManagedValue result;
+        if (ctx.types.Kind(target.Type) is TypeKind.Float or TypeKind.Double)
+            result = Read(source.Pieces.Single(p => p.Register == target.Pieces[0].Register));
+        else
+        {
+            var paths = ctx.Values.StructPaths(target.Type).Where(p => ctx.types.Kind(p.Type) is TypeKind.Float or TypeKind.Double).ToArray();
+            if (paths.Length != target.Pieces.Length || paths.Any(p => target.Pieces.Count(t => t.Offset == p.Offset && t.Width == ctx.types.Bits(p.Type)) != 1))
+                return false;
+            result = new ComposedValue(target.Type, paths.Select(p =>
+            {
+                var register = target.Pieces.Single(t => t.Offset == p.Offset).Register;
+                return ((IReadOnlyList<FieldRef>)p.Path, Read(source.Pieces.Single(s => s.Register == register)));
+            }).ToArray());
+        }
+        output.Add(new ManagedCall(call.Address, invocation, local, false));
+        output.Add(new ManagedReturn(call.Address, result));
+        return true;
+    }
+
     internal static RecoveryResult<ManagedValue?> RegisterPiece(this RecoveryScope ctx, Variable variable, int width)
     {
         ManagedValue root;
