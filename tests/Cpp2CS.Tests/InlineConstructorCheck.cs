@@ -70,6 +70,13 @@ internal static class InlineConstructorCheck
         a.True(InlineConstructors.Find(fieldsFirst!, initialized, initialized.EntryBlock, 0, created) is null,
             "基类调用目标必须相同");
         Store NextField(Expr receiver, Expr value) => new(9, new Binary(BinOp.Add, receiver, Expr.C(24, 64), 64), value);
+        var beforeAndAfter = InlineConstructors.Create(method, signature,
+            Function(Field(self, argument), Base(self), NextField(self, Expr.C(1, 8)), new Return(20)));
+        var surrounding = Function(new Call(0, CallKind.Direct, Expr.C(100, 64)), Field(new Use(created, 64), value),
+            Base(new Use(created, 64)), NextField(new Use(created, 64), Expr.C(1, 8)), new Return(20));
+        a.True(beforeAndAfter is { Effects.Count: 3 } && InlineConstructors.Find(beforeAndAfter, surrounding,
+            surrounding.EntryBlock, 0, created) is { } surroundingMatch && surroundingMatch.Arguments.SequenceEqual([value]),
+            "基类调用前后的字段初始化均完整匹配");
         var ordered = InlineConstructors.Create(method, signature,
             Function(Base(self), Field(self, argument), NextField(self, Expr.C(7, 64)), tail))!;
         var swapped = Function(new Call(0, CallKind.Direct, Expr.C(100, 64)), Base(new Use(created, 64)),
