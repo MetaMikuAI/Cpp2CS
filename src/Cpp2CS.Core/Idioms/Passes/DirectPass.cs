@@ -11,8 +11,8 @@ internal static class DirectPass
         if (state.owner.HelperOf(call) is not { } helper)
             return null;
         var args = call.Arguments;
-        // 泛型虚方法：helper(klass->vtable[m.slot].method, m)，m 为泛型方法实例；按调用点形态识别（helper 本身没有字符串等证据）
-        if (args.Length >= 2 && state.defs.Expand(args[1]) is Symbol { Kind: SymbolKind.Method, Value: MethodRef generic } && generic.MethodArguments.Count > 0 && state.defs.Expand(args[0]) is Load { Width: 64 } slotMethod && SplitPass.Split(slotMethod.Address) is var (vtableBase, vtableOffset) && vtableBase is Load { Width: 64 } && vtableOffset == (ulong)RuntimeLayout.VtableMethodInfo(generic.Method.Slot) && call.Defines.FirstOrDefault() is { } resolved)
+        // 泛型虚方法：helper(vtable/接口槽的 method, m)，m 为封闭泛型方法；接口槽须匹配声明类型和槽号。
+        if (args.Length >= 2 && state.defs.Expand(args[1]) is Symbol { Kind: SymbolKind.Method, Value: MethodRef generic } && generic.MethodArguments.Count > 0 && state.GenericVirtualSlot(state.defs.Expand(args[0]), generic) && call.Defines.FirstOrDefault() is { } resolved)
         {
             state.genericVirtual[resolved] = generic;
             state.Result.Hit(Template.GenericVirtualCall);
@@ -76,5 +76,15 @@ internal static class DirectPass
             Arguments = found.Arguments,
             Sources = []
         };
+    }
+
+    private static bool GenericVirtualSlot(this IdiomState state, Expr value, MethodRef method)
+    {
+        if (value is not Load { Width: 64 } load) return false;
+        var (basis, offset) = SplitPass.Split(load.Address);
+        if (basis is Load { Width: 64 } && offset == (ulong)RuntimeLayout.VtableMethodInfo(method.Method.Slot))
+            return true;
+        return offset == 8 && basis is Use data && state.interfaceData.TryGetValue(data.Variable, out var operand)
+            && operand is ValueTuple<object?, int> slot && Equals(slot.Item1, method.DeclaringType) && slot.Item2 == method.Method.Slot;
     }
 }
