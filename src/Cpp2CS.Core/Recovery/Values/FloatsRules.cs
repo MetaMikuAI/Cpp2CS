@@ -19,6 +19,19 @@ internal static class FloatsRules
     internal static Dictionary<Storage, int> ScalarWidths(this RecoveryScope ctx, Call call, bool returned, bool typed = false)
     {
         var widths = new Dictionary<Storage, int>();
+        if (call.Op is { Kind: OpKind.Import, Operand: string symbol } && MathImportSignature.Find(symbol) is { } math
+            && call.Arguments.Length == math.Parameters.Length)
+        {
+            var width = math.Single ? 32 : 64;
+            if (returned) widths[Storage.Vec(0)] = width;
+            else for (var index = 0; index < math.Parameters.Length; index++) widths[Storage.Vec(index)] = width;
+            return widths;
+        }
+        if (call.Op is { Kind: OpKind.ImportOutPair, Operand: "sincosf" })
+        {
+            foreach (var register in returned ? call.Results : call.Sources) widths[register] = 32;
+            return widths;
+        }
         MethodRef[] methods;
         // 按已知间接调用签名投影；不是实参的向量寄存器只作透传（宽度 0），不算使用。
         if (call.Op is { Kind: OpKind.CallInterface or OpKind.CallVirtual or OpKind.CallGenericVirtual or OpKind.CallDelegate } && (typed ? ctx.Resolve(call) : ctx.Callee(call)) is { } indirect && ctx.owner.abi.Classify(indirect, out _) is { } indirectSignature)

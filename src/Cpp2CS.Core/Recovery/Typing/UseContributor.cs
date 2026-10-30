@@ -128,6 +128,9 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
         var expressions = input.Expressions(context);
         var abi = new ManagedAbi(context.Types.Layouts);
         foreach (var (value, type) in input.StackEnumValues) yield return (value, type, 0, "栈上枚举值");
+        foreach (var definition in context.Statements.OfType<Define>())
+            if (definition.Target.Storage.Bank == Bank.Vec && definition.Value is Convert { Kind: ConvKind.Bitcast, Width: 32 or 64, Operand: Use { Variable.Storage.Bank: Bank.Gpr } bits })
+                yield return (bits, context.Types.Integer(bits.Width, false), definition.Address, "FMOV 的整数位型输入");
         foreach (var statement in context.Statements)
             foreach (var conversion in ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Convert>())
                 if (conversion.Kind is ConvKind.SIntToFloat or ConvKind.UIntToFloat && conversion.Operand.Width is 32 or 64)
