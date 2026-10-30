@@ -6,6 +6,7 @@ namespace Cpp2CS.Recovery;
 internal sealed class StructsState : IStatementKeyed
 {
     internal readonly Dictionary<Variable, Fragment> fragmentLocals = new();
+    internal readonly Dictionary<Variable, Expr> fragmentDefinitions = new();
     internal readonly HashSet<Variable> fragmentActive = [];
     internal int fragmentSteps;
     internal readonly NameSupply Locals = new(-1, -1);

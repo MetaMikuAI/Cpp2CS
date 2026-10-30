@@ -342,9 +342,11 @@ internal static class FragmentsRules
     [DefineRule(10)]
     internal static RecoveryResult<bool> DefineFragment(this LoweringScope ctx, Define define, List<ManagedStatement> output)
     {
-        if (define.Value is not (Load { Width: > 8 } or Use or Ir.Convert or Ir.Select or Insert or Binary { Op: BinOp.LShr, Right: Const }))
+        // 晚期收窄不改变先前片快照的赋值；使用当时的定义保留真实低位及已证明的清高位。
+        var expression = ctx.State.Structs.fragmentDefinitions.GetValueOrDefault(define.Target) ?? define.Value;
+        if (expression is not (Load { Width: > 8 } or Use or Ir.Convert or Ir.Select or Insert or Binary { Op: BinOp.LShr, Right: Const }))
             return false;
-        if (!ctx.Values.Recover(define.Value, null).TryGet(out var value, out var failure))
+        if (!ctx.Values.Recover(expression, null).TryGet(out var value, out var failure))
             return failure;
         if (value is not Fragment source)
             return false;

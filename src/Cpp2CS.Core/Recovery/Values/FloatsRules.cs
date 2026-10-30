@@ -6,10 +6,25 @@ namespace Cpp2CS.Recovery;
 
 internal static class FloatsRules
 {
-    internal static void NormalizeScalarVectors(this RecoveryScope ctx) => ScalarVectorNarrowing.Run(ctx.function.Blocks, call => ctx.ScalarWidths(call, false), call => ctx.ScalarWidths(call, true), ctx.State.Signature.arguments.Where(p => p.Key.Bank == Bank.Vec && ctx.types.Kind(p.Value.Type) is TypeKind.Float or TypeKind.Double).ToDictionary(p => p.Key, p => p.Value.Width));
+    private static Dictionary<Storage, int> ScalarInputs(RecoveryScope ctx)
+    {
+        var widths = ctx.State.Signature.arguments.Where(p => p.Key.Bank == Bank.Vec
+            && ctx.types.Kind(p.Value.Type) is TypeKind.Float or TypeKind.Double).ToDictionary(p => p.Key, p => p.Value.Width);
+        // HFA 参数的每个分量也只占向量寄存器低位，与调用实参和返回分量使用同一 ABI 宽度。
+        foreach (var (register, argument) in ctx.State.Signature.structArguments)
+            if (register.Bank == Bank.Vec && argument.Piece.Width is 32 or 64) widths[register] = argument.Piece.Width;
+        return widths;
+    }
+
+    internal static void NormalizeScalarVectors(this RecoveryScope ctx) => ScalarVectorNarrowing.Run(ctx.function.Blocks, call => ctx.ScalarWidths(call, false), call => ctx.ScalarWidths(call, true), ScalarInputs(ctx));
     internal static void NarrowTypedScalars(this RecoveryScope ctx)
     {
-        var changed = ScalarVectorNarrowing.NarrowDefinitions(ctx.blocks, call => ctx.ScalarWidths(call, false, typed: true), call => ctx.ScalarWidths(call, true, typed: true), ctx.State.Signature.arguments.Where(p => p.Key.Bank == Bank.Vec && ctx.types.Kind(p.Value.Type) is TypeKind.Float or TypeKind.Double).ToDictionary(p => p.Key, p => p.Value.Width), (previous, replacement) => ctx.Rewriter.Preserve(previous, replacement));
+        var changed = ScalarVectorNarrowing.NarrowDefinitions(ctx.blocks, call => ctx.ScalarWidths(call, false, typed: true), call => ctx.ScalarWidths(call, true, typed: true), ScalarInputs(ctx), (previous, replacement) =>
+        {
+            if (ctx.State.Structs.fragmentLocals.ContainsKey(previous.Target))
+                ctx.State.Structs.fragmentDefinitions.TryAdd(previous.Target, previous.Value);
+            ctx.Rewriter.Preserve(previous, replacement);
+        });
         if (changed == 0)
             return;
         ctx.definitions = ctx.IndexDefinitions();

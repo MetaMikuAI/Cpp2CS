@@ -53,6 +53,11 @@ internal sealed class RecoveryEvidence(MethodState state)
         public IReadOnlyDictionary<Store, LocalValue> stackArgumentStores => state.stackArgumentStores;
         public IReadOnlyDictionary<(ulong Site, int Parameter), ManagedValue> stackArgumentValues => state.stackArgumentValues;
     }
+    public StructsView Structs { get; } = new(state.Structs);
+    internal sealed class StructsView(StructsState state)
+    {
+        public IReadOnlyDictionary<Variable, Expr> fragmentDefinitions => state.fragmentDefinitions;
+    }
     public ArraysView Arrays { get; } = new(state.Arrays);
     internal sealed class ArraysView(ArraysState state)
     {
