@@ -74,10 +74,26 @@ internal static class StackInputNormalizer
         var promoted = new HashSet<int>();
         Expr? Map(Expr expression)
         {
-            if (expression is not Load load || Offset(load.Address) is not { } at || at < 0 || at > int.MaxValue
-                || candidates.GetValueOrDefault((int)at) != load.Width) return null;
-            promoted.Add((int)at);
-            return new Use(new Variable(Storage.Slot((int)at), 0), load.Width);
+            if (expression is not Load load || Offset(load.Address) is not { } at || at < 0 || at > int.MaxValue)
+                return null;
+            var parts = new List<(int Offset, int Width)>();
+            for (var covered = 0; covered < load.Width;)
+            {
+                var offset = checked((int)at + covered / 8);
+                if (!candidates.TryGetValue(offset, out var width) || covered + width > load.Width)
+                    return null;
+                parts.Add((offset, width));
+                covered += width;
+            }
+            // 合并读取仍须完整覆盖连续的已知参数片，不读取对齐填充。
+            Expr result = new Const(0, load.Width);
+            foreach (var part in parts)
+            {
+                promoted.Add(part.Offset);
+                var value = new Use(new Variable(Storage.Slot(part.Offset), 0), part.Width);
+                result = parts.Count == 1 ? value : new Insert(result, value, checked((int)(part.Offset - at) * 8));
+            }
+            return result;
         }
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
