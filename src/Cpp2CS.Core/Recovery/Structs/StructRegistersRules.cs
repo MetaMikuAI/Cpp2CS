@@ -108,6 +108,9 @@ internal static class StructRegistersRules
     {
         if (!ctx.RegisterStruct(value))
             return RecoveryDiagnostics.Fail(0, $"结构体 {value.Type} 的寄存器形态尚未支持", rule: "Compose");
+        // 已知空布局没有可观察的实例字段，返回寄存器中的填充不参与值重组。
+        if (value.Type is DefinitionRef empty && ctx.facts.Layouts.Of(empty) is { Fields.Count: 0 })
+            return new ComposedValue(value.Type, []);
         var pieces = new List<(AbiPiece Piece, ManagedValue Value)>();
         foreach (var piece in value.Pieces)
         {
