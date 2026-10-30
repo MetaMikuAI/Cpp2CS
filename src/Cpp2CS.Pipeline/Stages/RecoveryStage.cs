@@ -15,9 +15,20 @@ internal static class RecoveryStage
         var recovery = new MethodRecovery(facts, types);
         var targets = new MethodRecoveryResult[methods.Length];
         var completed = 0;
+        var active = new System.Collections.Concurrent.ConcurrentDictionary<int, long>();
+        using var timer = new Timer(_ =>
+        {
+            foreach (var (index, started) in active.OrderBy(p => p.Key))
+            {
+                var elapsed = Stopwatch.GetElapsedTime(started).TotalSeconds;
+                if (elapsed >= 30) Log($"恢复中 {elapsed:F1} s：0x{selected[index].Entry:x} {selected[index].Instance}");
+            }
+        }, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
         void Recover(int i, MethodRecovery worker)
         {
+            active[i] = Stopwatch.GetTimestamp();
             targets[i] = selected[i].Recover(worker);
+            active.TryRemove(i, out _);
             var count = Interlocked.Increment(ref completed);
             if (count % 1000 == 0 || count == methods.Length)
                 Log($"恢复进度 {count}/{methods.Length}，{watch.Elapsed.TotalSeconds:F1} s");
