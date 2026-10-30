@@ -20,7 +20,8 @@ internal static class ManagedFramePromotion
             for (var i = 0; i < call.Arguments.Length; i++)
                 if (call.Arguments[i] is FrameAddress frame && frames.ArgumentSize(call, i) is { } size) preserved.Add((frame.Offset, size));
         foreach (var call in statements.OfType<Call>().Where(c => c.Defines.Any(v => v is not null && stores.Contains(v))))
-            if (frames.Signature(call)?.Return is { Passing: Passing.Registers } result && abi.Kind(result.Type) == ValueKind.Struct)
+            // HFA 的各寄存器本来就是独立浮点值；单个分量的暂存不代表整份聚合布局。
+            if (frames.Signature(call)?.Return is { Passing: Passing.Registers } result && abi.Kind(result.Type) == ValueKind.Struct && abi.Hfa(result.Type) is null)
                 foreach (var piece in result.Pieces)
                 {
                     var index = Array.IndexOf(call.Results, piece.Register);
