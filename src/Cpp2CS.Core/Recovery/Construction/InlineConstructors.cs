@@ -11,6 +11,7 @@ internal static class InlineConstructors
     internal sealed record Pattern(MethodRef Method, AbiSignature Signature, IReadOnlyList<Stmt> Effects)
     {
         public bool ReorderStores { get; init; }
+        public IReadOnlySet<(ulong Target, Storage Register)> UnusedCallInputs { get; init; } = new HashSet<(ulong, Storage)>();
     }
     internal sealed record Match(MethodRef Method, IReadOnlyList<Expr> Arguments, IReadOnlyList<Stmt> Statements);
 
@@ -91,7 +92,7 @@ internal static class InlineConstructors
                 consumed = MatchStores(write, stores, bindings, widths);
                 if (consumed == 0) return null;
             }
-            else if (stores.Count != 0 || !Statement(expected, actual, bindings, widths)) return null;
+            else if (stores.Count != 0 || !Statement(expected, actual, bindings, widths, pattern.UnusedCallInputs)) return null;
             effect += consumed;
             if (effect == pattern.Effects.Count) break;
         }
@@ -164,7 +165,8 @@ internal static class InlineConstructors
             && (first?.ActionOffset ?? 0) == (last?.ActionOffset ?? 0);
     }
 
-    private static bool Statement(Stmt pattern, Stmt actual, Dictionary<Variable, Expr> bindings, Dictionary<Variable, int> parameters)
+    private static bool Statement(Stmt pattern, Stmt actual, Dictionary<Variable, Expr> bindings, Dictionary<Variable, int> parameters,
+        IReadOnlySet<(ulong Target, Storage Register)> unused)
     {
         if (pattern is Store p && actual is Store a)
             return Expression(p.Target, a.Target, bindings, parameters) && Expression(p.Value, a.Value, bindings, parameters);
@@ -175,8 +177,11 @@ internal static class InlineConstructors
             || !pc.Sources.SequenceEqual(ac.Sources) || pc.Arguments.Length != ac.Arguments.Length
             || !pc.Results.SequenceEqual(ac.Results) || !Expression(pc.Target, ac.Target, bindings, parameters)) return false;
         for (var i = 0; i < pc.Arguments.Length; i++)
+        {
+            if (pc.Target is Const called && i < pc.Sources.Length && unused.Contains((called.Value, pc.Sources[i]))) continue;
             if (!Expression(pc.Arguments[i], pc.Arguments[i].Width < ac.Arguments[i].Width
                 ? Low(ac.Arguments[i], pc.Arguments[i].Width) : ac.Arguments[i], bindings, parameters)) return false;
+        }
         for (var i = 0; i < pc.Defines.Length; i++)
             if (pc.Defines[i] is { } result)
             {
@@ -265,6 +270,11 @@ public sealed partial class MethodRecovery
                         block.Statements[i] = call with { Arguments = arguments };
                     }
                 pattern = InlineConstructors.Create(method, signature, lifted.Function);
+                if (pattern is not null)
+                    pattern = pattern with { UnusedCallInputs = pattern.Effects.OfType<Call>()
+                        .Where(c => c.Op is null && c.Target is Const)
+                        .SelectMany(c => c.Sources.Where(r => rewriter.UnusedInput(((Const)c.Target).Value, r))
+                            .Select(r => (((Const)c.Target).Value, r))).ToHashSet() };
                 if (pattern is { Effects: [Call { Target: Const target }, ..] }
                     && pattern.Effects.Skip(1).All(s => s is Store or Call { Op.Kind: OpKind.WriteBarrier })
                     && facts.EntriesAt(target.Value).Any(e => e.Method is

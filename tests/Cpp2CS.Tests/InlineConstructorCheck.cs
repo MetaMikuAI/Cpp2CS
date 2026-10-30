@@ -46,6 +46,16 @@ internal static class InlineConstructorCheck
         clearedBarrier.EntryBlock.Statements[3] = barrier with { Op = null, Arguments = [] };
         a.True(InlineConstructors.Find(withBarrier, clearedBarrier, clearedBarrier.EntryBlock, 0, created) is null,
             "普通调用不能代替已证明的写屏障");
+        var hidden = new Use(new(Storage.Gpr(2), 0), 64);
+        var hiddenBase = Base(self) with { Sources = [Storage.Gpr(0), Storage.Gpr(2)], Arguments = [self, hidden] };
+        var hiddenPattern = InlineConstructors.Create(method, signature, Function(hiddenBase, Field(self, argument), new Return(20)))!;
+        var hiddenCaller = Function(caller.EntryBlock.Statements[0], hiddenBase with { Arguments = [new Use(created, 64), new Unknown("clobbered", 64)] },
+            Field(new Use(created, 64), value), new Return(20));
+        a.True(InlineConstructors.Find(hiddenPattern, hiddenCaller, hiddenCaller.EntryBlock, 0, created) is null,
+            "缺少原生未读取证据时不忽略未知实参");
+        a.True(InlineConstructors.Find(hiddenPattern with { UnusedCallInputs = new HashSet<(ulong, Storage)> { (200, Storage.Gpr(2)) } },
+            hiddenCaller, hiddenCaller.EntryBlock, 0, created) is { } hiddenMatch && hiddenMatch.Arguments.SequenceEqual([value]),
+            "已证明未读取的寄存器不参与构造匹配，字段实参仍保留");
         var ordinaryTail = InlineConstructors.Create(method, signature, Function(Base(self), Field(self, argument), tail with { Op = null }));
         a.True(ordinaryTail is { Effects.Count: 3 } && ordinaryTail.Effects[^1] is Call { Kind: CallKind.Direct, Op: null },
             "普通尾调用保留为必须匹配的副作用");
