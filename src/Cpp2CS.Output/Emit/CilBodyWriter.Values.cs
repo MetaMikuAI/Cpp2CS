@@ -312,7 +312,7 @@ internal sealed partial class CilBodyWriter
 
     private void Reinterpret(TypeRef from, TypeRef to)
     {
-        if (ManagedTypes.IsNativePointer(from) && ManagedTypes.IsNativePointer(to))
+        if ((ManagedTypes.IsNativePointer(from) || from is ByRefRef) && ManagedTypes.IsNativePointer(to))
         {
             il.Emit(ManagedTypes.IsSigned(to) ? OpCodes.Conv_I : OpCodes.Conv_U);
             return;

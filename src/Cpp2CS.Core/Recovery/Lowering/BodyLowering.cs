@@ -417,7 +417,7 @@ internal static class BodyLowering
                 continue;
             }
 
-            if (ctx.types.Kind(parameter.Type) is TypeKind.Struct or null || ctx.types.Kind(parameter.Type) == TypeKind.Pointer && !ManagedTypes.IsNativePointer(parameter.Type) && (parameter.Type is not ByRefRef parameterReference || ctx.types.Kind(parameterReference.Element) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference)))
+            if (ctx.types.Kind(parameter.Type) is TypeKind.Struct or null || ctx.types.Kind(parameter.Type) == TypeKind.Pointer && !ManagedTypes.IsNativePointer(parameter.Type) && (parameter.Type is not ByRefRef parameterReference || ctx.types.Kind(parameterReference.Element) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference) && !ManagedTypes.IsNativePointer(parameterReference.Element)))
                 return RecoveryDiagnostics.Fail(address, $"调用 {callee} 的参数类型 {parameter.Type} 尚未支持", rule: "Invocation");
             if (!Argument(parameter, definition.Parameters[i].Name).Bind(e => ctx.RecoverAs(e, parameter.Type, address)).TryGet(out var recovered, out failure))
                 return failure;

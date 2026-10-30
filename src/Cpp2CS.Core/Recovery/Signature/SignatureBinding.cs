@@ -39,7 +39,7 @@ internal static class SignatureBinding
                 continue;
             }
 
-            if (parameter.Passing != Passing.Registers || parameter.Pieces.Length != 1 || ctx.types.Kind(parameter.Type) is TypeKind.Struct or null || ctx.types.Kind(parameter.Type) == TypeKind.Pointer && !ManagedTypes.IsNativePointer(parameter.Type) && (parameter.Type is not ByRefRef parameterReference || ctx.types.Kind(parameterReference.Element) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference)))
+            if (parameter.Passing != Passing.Registers || parameter.Pieces.Length != 1 || ctx.types.Kind(parameter.Type) is TypeKind.Struct or null || ctx.types.Kind(parameter.Type) == TypeKind.Pointer && !ManagedTypes.IsNativePointer(parameter.Type) && (parameter.Type is not ByRefRef parameterReference || ctx.types.Kind(parameterReference.Element) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference) && !ManagedTypes.IsNativePointer(parameterReference.Element)))
             {
                 var hole = ctx.Hole(ctx.entry, $"参数 {definition.Parameters[i].Name} 的类型 {parameter.Type} 尚未支持", rule: "Prepare");
                 foreach (var piece in parameter.Pieces)

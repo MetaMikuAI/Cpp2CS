@@ -138,6 +138,9 @@ internal static class ValueRecovery
         switch (kind)
         {
             case TypeKind.Pointer when ManagedTypes.IsNativePointer(target):
+                if (target is PointerRef && value is AddressValue { Target: LocalValue local }
+                    && (ctx.types.Kind(local.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double || ManagedTypes.IsNativePointer(local.Type)))
+                    return new ConversionValue(ConvKind.Bitcast, value, target, 64);
                 if (value is ConstantValue { Bits: 0, Width: 64 })
                     return new ConstantValue(0, target, 64);
                 if (value.Width == 64 && ManagedTypes.IsNativePointer(value.Type))

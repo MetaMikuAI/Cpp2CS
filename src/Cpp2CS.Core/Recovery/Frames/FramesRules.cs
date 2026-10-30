@@ -91,7 +91,7 @@ internal static class FramesRules
         void Bind(Expr expression, TypeRef type, Call call, bool writes = false)
         {
             // 结构体，以及按地址传递的基元/引用（基元值类型实例方法的 this，如 x.ToString()；out/ref 参数）：后者是一个该类型的局部变量。
-            if (ctx.types.Kind(type) is TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference && ctx.FrameOffset(expression) is { } offset && ctx.types.Size(type) > 0)
+            if ((ctx.types.Kind(type) is TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference || ManagedTypes.IsNativePointer(type)) && ctx.FrameOffset(expression) is { } offset && ctx.types.Size(type) > 0)
                 witnesses.Add(new(offset, type, call, writes));
         }
 
@@ -139,6 +139,15 @@ internal static class FramesRules
                     continue;
                 if (argument.Type is ByRefRef reference)
                     Bind(expression, reference.Element, call);
+                else if (argument.Type is PointerRef && ctx.FrameOffset(expression) is { } pointerOffset)
+                {
+                    var stores = ctx.blocks.SelectMany(b => b.Statements).OfType<Store>().Where(s => ctx.FrameOffset(s.Target) == pointerOffset).ToArray();
+                    var storedTypes = stores.Where(s => s.Value is not Const).Select(s => ctx.TypeOfValue(s.Value)).Distinct().ToArray();
+                    // 原生指针传出基本类型局部的地址；声明类型来自真实写入，不把 byte* 误当成单字节局部。
+                    if (storedTypes is [{ } storedType] && (ctx.types.Kind(storedType) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double || ManagedTypes.IsNativePointer(storedType))
+                        && stores.All(s => s.Value.Width == ctx.types.Size(storedType) * 8))
+                        Bind(expression, storedType, call);
+                }
                 else if (argument.Passing == Passing.Indirect)
                     Bind(expression, argument.Type, call, ReferenceEquals(argument, signature.Return));
             }
