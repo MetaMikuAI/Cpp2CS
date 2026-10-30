@@ -10,9 +10,9 @@ internal static class ClassInitializationFacts
 {
     private sealed record Point(Block Block, int Index, Stmt Statement);
 
-    internal static bool Run(MachineFunction function)
+    internal static bool Run(MachineFunction function, Func<Expr, TypeRef?>? typeOf = null)
     {
-        if (ClassLayoutReloads.Run(function) || ClassInitializationReloads.Run(function)) return true;
+        if (ClassLayoutReloads.Run(function) || ClassInitializationReloads.Run(function, typeOf)) return true;
         var points = function.Blocks.SelectMany(b => b.Statements.Select((s, i) => new Point(b, i, s))).ToArray();
         var initializers = points.Where(p => p.Statement is Call { Op: { Kind: OpKind.InitClass or OpKind.RunClassConstructor, Operand: TypeRef } }).ToArray();
         if (initializers.Length == 0) return false;

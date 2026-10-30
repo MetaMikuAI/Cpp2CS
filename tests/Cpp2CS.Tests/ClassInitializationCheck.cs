@@ -81,6 +81,15 @@ internal static class ClassInitializationCheck
         a.True(!ClassInitializationReloads.Run(ReloadGuard(checkedBefore: false)), "缺少原先判空不能增加抛出点");
         a.True(!ClassInitializationReloads.Run(ReloadGuard(changedField: true)), "不能重读不同字段");
         a.True(!ClassInitializationReloads.Run(ReloadGuard(sideEffect: true)), "字段快照与守卫之间有写入时拒绝");
+        foreach (var mode in new[] { "disjoint", "overlap", "unknown" })
+        {
+            var fieldWrite = ReloadGuard();
+            var subject = new Use(new(Storage.Gpr(0), 0), 64);
+            fieldWrite.EntryBlock.Statements.Insert(1, new Store(6,
+                new Binary(BinOp.Add, subject, Expr.C(mode == "overlap" ? 20UL : 24UL, 64), 64), Expr.C(1, 32)));
+            a.Equal(mode == "disjoint", ClassInitializationReloads.Run(fieldWrite, e => mode != "unknown" && e == subject ? type : null),
+                $"托管字段写入与重读的范围证明 {mode}");
+        }
         var fastCalculation = ReloadGuard();
         var fastHead = fastCalculation.EntryBlock;
         var fastMerge = fastCalculation.Blocks[2];
@@ -129,9 +138,21 @@ internal static class ClassInitializationCheck
         a.True(!ClassInitializationReloads.Run(ExtendedReload(sideEffect: true)), "扩展加载与守卫之间仍禁止写入");
         a.True(ClassInitializationReloads.Run(ExtendedReload(stored: "exact")), "同字段同宽度写入后的重读与快路径写入值一致");
         a.True(!ClassInitializationReloads.Run(ExtendedReload(stored: "field")), "写入其他字段不能证明重读值");
-        a.True(!ClassInitializationReloads.Run(ExtendedReload(stored: "width")), "写入宽度不匹配时保留原分支");
+        a.True(ClassInitializationReloads.Run(ExtendedReload(stored: "width")), "整值写入覆盖低位字段时可提供重读快照");
         a.True(!ClassInitializationReloads.Run(ExtendedReload(stored: "value")), "已有同字段写入仍须核对快慢路径的合流值");
         a.True(!ClassInitializationReloads.Run(ExtendedReload(stored: "exact", sideEffect: true)), "写入见证与守卫之间不能有其他写入");
+        foreach (var width in new[] { 32, 64 })
+        {
+            var narrowed = ExtendedReload();
+            var old = (Define)narrowed.EntryBlock.Statements[0];
+            var address = ((Load)((Cpp2CS.Ir.Convert)old.Value).Operand).Address;
+            narrowed.EntryBlock.Statements[0] = old with { Value = new Use(new(Storage.Gpr(0), 0), 64) };
+            narrowed.EntryBlock.Statements.Insert(1, new Store(6, address, new Use(old.Target, 32)));
+            var done = narrowed.Blocks[^1];
+            var returned = (Return)done.Statements[^1];
+            done.Statements[^1] = returned with { Value = new Use(((Use)returned.Value!).Variable, width) };
+            a.Equal(width == 32, ClassInitializationReloads.Run(narrowed), "仅观察低位时允许与窄字段重读合流");
+        }
         MachineFunction SharedGuard(bool differentValue = false, bool effect = false, bool otherType = false, bool handler = false)
         {
             var one = new Variable(Storage.Gpr(1), 0);

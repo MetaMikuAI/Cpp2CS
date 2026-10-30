@@ -7,6 +7,12 @@ namespace Cpp2CS.Idioms;
 /// <summary>按同根的 invoke_impl/method_code/method 和具体 Invoke ABI 收窄保守间接调用。</summary>
 internal sealed class DelegateCallNormalizer
 {
+    internal static Func<Expr, TypeRef?> TypeQuery(ProgramFacts facts, MachineFunction function)
+    {
+        var inference = new DelegateCallNormalizer(facts, function);
+        return expression => inference.TypeOf(expression, []);
+    }
+
     private readonly ProgramFacts facts;
     private readonly ManagedAbi abi;
     private readonly Dictionary<Variable, Expr> definitions;

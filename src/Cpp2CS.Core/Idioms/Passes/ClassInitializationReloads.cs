@@ -7,9 +7,17 @@ namespace Cpp2CS.Idioms;
 /// <summary>类构造守卫中的字段重读：跳过初始化时已有相同快照，统一保留初始化后的读取。</summary>
 internal static class ClassInitializationReloads
 {
-    internal static bool Run(MachineFunction function)
+    internal static bool Run(MachineFunction function, Func<Expr, TypeRef?>? typeOf = null)
     {
         var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+        var phis = function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().ToArray();
+        var uses = function.Blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<Use>().ToLookup(u => u.Variable);
+        int ObservedWidth(Variable variable, HashSet<Variable> seen)
+        {
+            if (!seen.Add(variable)) return 0;
+            return Math.Max(uses[variable].Select(u => u.Width).DefaultIfEmpty(0).Max(),
+                phis.Where(p => p.Sources.Contains(variable)).Select(p => ObservedWidth(p.Target, seen)).DefaultIfEmpty(0).Max());
+        }
         Expr Expand(Expr value, int depth = 0) => depth >= 32 ? value : ExprMap.Map(value,
             e => e is Use u && definitions.TryGetValue(u.Variable, out var source) ? Expand(source, depth + 1) : null);
         Expr Strip(Expr value)
@@ -17,6 +25,18 @@ internal static class ClassInitializationReloads
             value = Expand(value);
             while (value is Ir.Convert c) value = c.Operand;
             return value;
+        }
+        bool Preserves(Store store, Expr value)
+        {
+            // 托管对象引用只能指向对象起点；不同偏移的字段不重叠，嵌套读取的每一级也须保留。
+            if (Expand(store.Target) is not Binary { Op: BinOp.Add, Left: var written, Right: Const { Value: >= RuntimeLayout.ObjectHeaderSize } displacement }
+                || typeOf?.Invoke(written) is not { } writeType || !ManagedTypes.IsReferenceType(writeType)) return false;
+            var reads = ExprMap.Walk(value).OfType<Load>().ToArray();
+            return reads.Length > 0 && reads.All(load => load.Address is Binary
+                { Op: BinOp.Add, Left: var read, Right: Const { Value: >= RuntimeLayout.ObjectHeaderSize } position }
+                && typeOf(read) is { } readType && ManagedTypes.IsReferenceType(readType)
+                && (position.Value + (ulong)load.Width / 8 <= displacement.Value
+                    || displacement.Value + (ulong)store.Value.Width / 8 <= position.Value));
         }
         foreach (var head in function.Blocks)
         {
@@ -95,6 +115,12 @@ internal static class ClassInitializationReloads
                         if (!check && statement is Define define && Strip(define.Value) == value) return new Use(define.Target, value.Width);
                         if (!check && value is Load load && statement is Store store && store.Value.Width == load.Width
                             && Expand(store.Target) == load.Address) return store.Value;
+                        if (!check && value is Load part && part.Address is Binary { Op: BinOp.Add, Left: var readRoot, Right: Const readAt }
+                            && statement is Store whole && Expand(whole.Target) is Binary { Op: BinOp.Add, Left: var writeRoot, Right: Const writeAt }
+                            && readRoot == writeRoot && readAt.Value >= writeAt.Value
+                            && readAt.Value - writeAt.Value + (ulong)part.Width / 8 <= (ulong)whole.Value.Width / 8)
+                            return Fold.Extract(whole.Value, checked((int)(readAt.Value - writeAt.Value) * 8), part.Width);
+                        if (statement is Store write && Preserves(write, value)) continue;
                         if (statement is not (Define or Phi or Nop or Jump or Branch or Call { Op.Kind: OpKind.NullCheck })) return null;
                     }
                     if (block.IsLandingPad || block.Predecessors.Count != 1) return null;
@@ -128,7 +154,8 @@ internal static class ClassInitializationReloads
             var fast = merge.Predecessors.IndexOf(fastPrevious);
             var slow = merge.Predecessors.IndexOf(chain[^1]);
             if (!shared && (fast < 0 || slow < 0 || merge.Statements.OfType<Phi>().Any(p => p.Sources.Length != merge.Predecessors.Count
-                || Snapshot(new Use(p.Sources[fast], p.Target.Width), false) != Snapshot(new Use(p.Sources[slow], p.Target.Width), true)))) continue;
+                || ObservedWidth(p.Target, []) is var observed && observed > 0
+                    && Snapshot(new Use(p.Sources[fast], observed), false) != Snapshot(new Use(p.Sources[slow], observed), true)))) continue;
             head.Statements[^1] = new Jump(branch.Address, enter.Start);
             MachineFunction.RemoveEdge(head, fastStart);
             return true;
