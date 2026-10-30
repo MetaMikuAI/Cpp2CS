@@ -71,24 +71,55 @@ internal static class SharedInterfaceTails
             if (slow.Handler is not null || slow.IsLandingPad || slow.Predecessors.Count < 2
                 || slow.Statements.OfType<Call>().ToArray() is not [var lookup] || !isLookup(lookup)
                 || lookup.Arguments.Length < 3 || lookup.Arguments[0] is not Use receiver
-                || slow.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == receiver.Variable) is not { } receiverPhi
                 || slow.NormalSuccessors.ToArray() is not [var merge] || merge.Handler is not null || merge.IsLandingPad
                 || merge.Predecessors.Count != 2
-                || merge.Statements.OfType<Call>().ToArray() is not [Call { Op: null, Kind: CallKind.Indirect } invoke]) continue;
+                || merge.Statements.OfType<Call>().ToArray() is not [Call { Op: null, Kind: CallKind.Indirect or CallKind.TailIndirect } invoke]) continue;
             var exits = merge.NormalSuccessors.ToArray();
-            if (exits.Length > 1 || exits.Length == 0 && merge.Statements.LastOrDefault() is not Return { Value: null }) continue;
+            if (exits.Length > 1 || exits.Length == 0 && merge.Statements.LastOrDefault() is not (Return { Value: null } or Call { Kind: CallKind.TailIndirect })) continue;
             var exit = exits.SingleOrDefault();
             var hit = merge.Predecessors.Single(p => p != slow);
             if (hit.Handler is not null || hit.IsLandingPad || hit.Predecessors.Count != 2
                 || hit.NormalSuccessors.ToArray() is not [var hitExit] || hitExit != merge
                 || hit.Statements.Any(s => s is not (Phi or Define or Jump or Nop))) continue;
-            var pair = merge.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources[merge.Predecessors.IndexOf(slow)] == receiverPhi.Target);
-            if (pair is null || hit.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == pair.Sources[merge.Predecessors.IndexOf(hit)]) is not { } hitReceiver) continue;
-            var groups = receiverPhi.Sources.Select((v, i) => (Value: v, Index: i)).GroupBy(p => p.Value).ToArray();
-            if (groups.Length != 2 || groups.Any(g => slow.Statements.OfType<Phi>().Any(p => g.Select(x => p.Sources[x.Index]).Distinct().Count() != 1))) continue;
-            var mapping = groups.Select(g => Array.IndexOf(hitReceiver.Sources, g.Key)).ToArray();
-            if (mapping.Any(i => i < 0) || mapping.Distinct().Count() != 2) continue;
             var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+            Expr Expanded(Variable variable)
+            {
+                Expr value = new Use(variable, variable.Width);
+                var seen = new HashSet<Variable>();
+                while (true)
+                {
+                    if (value is Ir.Convert { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend } converted) value = converted.Operand;
+                    else if (value is Use use && seen.Add(use.Variable) && definitions.TryGetValue(use.Variable, out var definition)) value = definition;
+                    else return value;
+                }
+            }
+            ulong? Slot(Variable variable, bool fast) => Expanded(variable) switch
+            {
+                Const { Value: <= 32 } slot when !fast => slot.Value,
+                Binary { Op: BinOp.Add, Width: 32, Right: Const { Value: <= 32 } slot } when fast => slot.Value,
+                _ => null,
+            };
+            var partition = slow.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == receiver.Variable);
+            var pair = partition is null ? null : merge.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources[merge.Predecessors.IndexOf(slow)] == partition.Target);
+            var hitPartition = pair is null ? null : hit.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == pair.Sources[merge.Predecessors.IndexOf(hit)]);
+            var bySlot = hitPartition is null;
+            if (bySlot)
+            {
+                // 同一接收者的不同接口槽也会共享尾部；以慢路径常量槽和快路径 offset + slot 对齐分支。
+                if (lookup.Arguments[2] is not Use slotUse
+                    || slow.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == slotUse.Variable) is not { } slots
+                    || slots.Sources.Any(v => Slot(v, false) is null)) continue;
+                var candidates = hit.Statements.OfType<Phi>().Where(p => p.Sources.All(v => Slot(v, true) is { } n
+                    && slots.Sources.Any(s => Slot(s, false) == n))).ToArray();
+                if (candidates is not [var fastSlots]) continue;
+                partition = slots;
+                hitPartition = fastSlots;
+            }
+            var groups = partition!.Sources.Select((v, i) => (Value: v, Index: i)).GroupBy(p => p.Value).ToArray();
+            if (groups.Length != 2 || groups.Any(g => slow.Statements.OfType<Phi>().Any(p => g.Select(x => p.Sources[x.Index]).Distinct().Count() != 1))) continue;
+            var mapping = groups.Select(g => bySlot ? Array.FindIndex(hitPartition!.Sources, v => Slot(v, true) == Slot(g.Key, false))
+                : Array.IndexOf(hitPartition!.Sources, g.Key)).ToArray();
+            if (mapping.Any(i => i < 0) || mapping.Distinct().Count() != 2) continue;
             var slotValid = lookup.Arguments[2] is Const { Value: <= 32 }
                 || lookup.Arguments[2] is Use slot && slow.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == slot.Variable) is { } slotPhi
                     && slotPhi.Sources.All(v => definitions.GetValueOrDefault(v) is Const { Value: <= 32 });

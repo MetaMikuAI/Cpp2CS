@@ -47,7 +47,7 @@ internal static class SharedInterfaceTailsCheck
             a.True(rightCall.Target == Use(rightPointer) && rightCall.Arguments.SequenceEqual([Use(rightReceiver), Use(rightArgument)]), "右分支保留自身接口槽位、接收者和实参");
             a.True(!function.Blocks.Contains(merge) && done.Predecessors.Count == 2, "共享尾部移出并保留两条出口边");
         }
-        foreach (var mode in new[] { "grouped", "different-input", "slot", "return-value" })
+        foreach (var mode in new[] { "grouped", "different-input", "slot", "return-value", "slot-grouped", "slot-tail", "slot-mismatch" })
         {
             var version = 0;
             Variable Fresh() => new(Storage.Temp(version++), 1);
@@ -71,6 +71,25 @@ internal static class SharedInterfaceTailsCheck
             var merge = Block(288, new Phi(288, mergedReceiver, [slowReceiver, hitReceiver]), new Phi(288, pointer, [slowData, hitData]),
                 new Call(292, CallKind.Indirect, Use(pointer)) { Arguments = [Use(mergedReceiver)] },
                 new Return(300) { Value = mode == "return-value" ? Use(pointer) : null });
+            var leftSlot = Fresh(); var rightSlot = Fresh();
+            if (mode.StartsWith("slot-", StringComparison.Ordinal))
+            {
+                var selectedSlot = Fresh(); var leftOffset = Fresh(); var rightOffset = Fresh(); var mergedOffset = Fresh();
+                leftCheck.Statements.Insert(0, new Define(32, leftSlot, Expr.C(6, 64)));
+                rightCheck.Statements.Insert(0, new Define(128, rightSlot, Expr.C(4, 64)));
+                leftScan.Statements.Insert(0, new Define(64, leftOffset, new Binary(BinOp.Add, new Use(other, 32), Expr.C(6, 32), 32)));
+                rightScan.Statements.Insert(0, new Define(160, rightOffset, new Binary(BinOp.Add, new Use(other, 32), Expr.C(mode == "slot-mismatch" ? 5UL : 4UL, 32), 32)));
+                slow.Statements[0] = new Phi(224, selectedSlot, [leftSlot, leftSlot, rightSlot, rightSlot]);
+                slow.Statements[2] = ((Call)slow.Statements[2]) with { Arguments = [Use(left), Expr.C(0, 64), Use(selectedSlot)] };
+                hit.Statements[0] = new Phi(256, mergedOffset, [leftOffset, rightOffset]);
+                merge.Statements.RemoveAt(0);
+                merge.Statements[1] = ((Call)merge.Statements[1]) with { Arguments = [Use(left)] };
+                if (mode == "slot-tail")
+                {
+                    merge.Statements[1] = ((Call)merge.Statements[1]) with { Kind = CallKind.TailIndirect };
+                    merge.Statements.RemoveAt(2);
+                }
+            }
             MachineFunction.AddEdge(start, leftCheck); MachineFunction.AddEdge(start, rightCheck);
             MachineFunction.AddEdge(leftCheck, slow); MachineFunction.AddEdge(leftCheck, leftScan);
             MachineFunction.AddEdge(leftScan, hit); MachineFunction.AddEdge(leftScan, leftFallback); MachineFunction.AddEdge(leftFallback, slow);
@@ -80,16 +99,19 @@ internal static class SharedInterfaceTailsCheck
             var function = new MachineFunction { Entry = 0, Range = new(0, 320, CodeRegion.Managed, BoundaryEvidence.EhFrame),
                 Blocks = [start, leftCheck, leftScan, leftFallback, rightCheck, rightScan, rightFallback, slow, hit, merge] };
             var changed = SharedInterfaceTails.Run(function, c => c.Target is Const { Value: 512 }, Fresh);
-            a.Equal(mode == "grouped", changed, $"查找入边按接收者分组 {mode}");
+            a.Equal(mode is "grouped" or "slot-grouped" or "slot-tail", changed, $"查找入边按接收者或槽位分组 {mode}");
             if (!changed) continue;
             var lookups = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Kind == CallKind.Direct).ToArray();
-            a.True(lookups.Select(c => c.Arguments[0]).SequenceEqual([Use(right), Use(left)])
+            if (mode is "slot-grouped" or "slot-tail")
+                a.True(lookups.All(c => c.Arguments[0] == Use(left)) && lookups.Select(c => c.Arguments[2]).ToHashSet().SetEquals([Use(leftSlot), Use(rightSlot)]),
+                    "同一接收者的两个查找保留各自槽位");
+            else a.True(lookups.Select(c => c.Arguments[0]).SequenceEqual([Use(right), Use(left)])
                 || lookups.Select(c => c.Arguments[0]).SequenceEqual([Use(left), Use(right)]), "两个查找分别保留接收者");
             a.True(leftCheck.Successors[0] == leftFallback.Successors[0] && rightCheck.Successors[0] == rightFallback.Successors[0]
                 && leftCheck.Successors[0] != rightCheck.Successors[0], "每个接收者的失败边汇入自身副本");
             a.True(new[] { leftCheck, leftScan, rightCheck, rightScan }.All(b => b.Statements[^1] is Branch branch
                 && branch.Target == b.Successors[0].Start && branch.Fallthrough == b.Successors[1].Start), "保留条件分支的后继位置");
-            a.Equal(2, function.Blocks.SelectMany(b => b.Statements).OfType<Return>().Count(), "两个调用各自返回 void");
+            a.Equal(2, function.Blocks.SelectMany(b => b.Statements).Count(s => mode == "slot-tail" ? s is Call { Kind: CallKind.TailIndirect } : s is Return), "两个调用各自保留返回方式");
         }
         return a.Finish("interface-tails");
     }
