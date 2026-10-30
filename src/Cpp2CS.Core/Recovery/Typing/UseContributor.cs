@@ -12,59 +12,76 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
     {
         var values = context.Statements.OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
         var phis = context.Statements.OfType<Phi>().Select(p => p.Target).ToHashSet();
-        var active = new HashSet<Variable>();
+        var pending = new Stack<(Expr Expression, TypeRef Type, bool Publish)>();
+        var visited = new HashSet<(Variable Variable, int Width, TypeRef Type)>();
         void Hint(Expr expression, TypeRef type, ulong address, string detail)
         {
-            if (context.Types.Kind(type) is not (TypeKind.Bool or TypeKind.Int or TypeKind.Reference or TypeKind.Float or TypeKind.Double)) return;
-            switch (expression)
+            // 同一用途中的共享定义只展开一次；显式栈保留左到右顺序，避免长定义链耗尽调用栈。
+            visited.Clear();
+            pending.Push((expression, type, false));
+            var evidence = new TypeEvidence(Name, address, detail);
+            while (pending.TryPop(out var next))
             {
-                case Use u when !context.IsRuntime(u.Variable):
-                    if (values.TryGetValue(u.Variable, out var value) && value is Const constant)
-                    {
-                        if (context.Types.Kind(type) == TypeKind.Reference)
+                (expression, type, _) = next;
+                if (next.Publish && expression is Use required)
+                {
+                    constraints.Requires(required.Variable, type, evidence);
+                    continue;
+                }
+                if (context.Types.Kind(type) is not (TypeKind.Bool or TypeKind.Int or TypeKind.Reference or TypeKind.Float or TypeKind.Double)) continue;
+                switch (expression)
+                {
+                    case Use u when !context.IsRuntime(u.Variable):
+                        if (!visited.Add((u.Variable, u.Width, type))) break;
+                        if (values.TryGetValue(u.Variable, out var value) && value is Const constant)
                         {
-                            if (constant.Value != 0 || constant.Width != 64 || u.Width != 64) return;
+                            if (context.Types.Kind(type) == TypeKind.Reference)
+                            {
+                                if (constant.Value != 0 || constant.Width != 64 || u.Width != 64) break;
+                            }
+                            else if (context.Types.Kind(type) is TypeKind.Float or TypeKind.Double)
+                            {
+                                if (constant.Width != context.Types.Bits(type) || u.Width != constant.Width) break;
+                            }
+                            else
+                            {
+                                if (constant.Width is not (1 or 8 or 16 or 32 or 64)) break;
+                                type = Integer(constant.Width, ManagedTypes.IsSigned(type));
+                            }
                         }
-                        else if (context.Types.Kind(type) is TypeKind.Float or TypeKind.Double)
+                        else if (context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
+                            && value is Convert or Binary)
                         {
-                            if (constant.Width != context.Types.Bits(type) || u.Width != constant.Width) return;
+                            // 窄整数运算及其寄存器扩展有明确的整数结果；用途同时约束中间值，避免长链每轮只前进一层。
+                            // 64 位加法仍可能是指针运算，不据此定型；未知加载也不接受反向猜测。
+                            if (ScalarIntegerResult(value))
+                                pending.Push((u, Integer(value.Width, ManagedTypes.IsSigned(type)), true));
+                            pending.Push((value, type, false));
+                            break;
                         }
-                        else
+                        else if (value is Select && (context.Types.Kind(type) == TypeKind.Reference || FloatingChoice(context, values, u.Variable, type)))
                         {
-                            if (constant.Width is not (1 or 8 or 16 or 32 or 64)) return;
-                            type = Integer(constant.Width, ManagedTypes.IsSigned(type));
+                            pending.Push((u, type, true));
+                            pending.Push((value, type, false));
+                            break;
                         }
-                    }
-                    else if (context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
-                        && value is Convert or Binary && active.Add(u.Variable))
-                    {
-                        Hint(value, type, address, detail);
-                        active.Remove(u.Variable);
-                        return;
-                    }
-                    else if (value is Select && (context.Types.Kind(type) == TypeKind.Reference || FloatingChoice(context, values, u.Variable, type)) && active.Add(u.Variable))
-                    {
-                        Hint(value, type, address, detail);
-                        active.Remove(u.Variable);
-                        constraints.Requires(u.Variable, type, new(Name, address, detail));
-                        return;
-                    }
-                    else if (!phis.Contains(u.Variable) && !FloatingChoice(context, values, u.Variable, type)) return;
-                    constraints.Requires(u.Variable, type, new(Name, address, detail));
-                    break;
-                case Convert c when context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
-                    && c.Kind is ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate && c.Operand.Width is 1 or 8 or 16 or 32 or 64:
-                    Hint(c.Operand, Integer(c.Operand.Width, c.Kind == ConvKind.SignExtend), address, detail); break;
-                case Select select:
-                    Hint(select.True, type, address, detail); Hint(select.False, type, address, detail); break;
-                case Binary binary when context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
-                    && binary.Op is BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor:
-                    Hint(binary.Left, type, address, detail); Hint(binary.Right, type, address, detail); break;
-                case Binary binary when context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
-                    && binary.Op is BinOp.Shl or BinOp.LShr or BinOp.AShr
-                    && binary.Left.Width is 8 or 16 or 32 or 64 && binary.Right.Width is 8 or 16 or 32 or 64:
-                    Hint(binary.Left, Integer(binary.Left.Width, binary.Op == BinOp.AShr || binary.Op == BinOp.Shl && ManagedTypes.IsSigned(type)), address, detail);
-                    Hint(binary.Right, Integer(binary.Right.Width, false), address, detail); break;
+                        else if (!phis.Contains(u.Variable) && !FloatingChoice(context, values, u.Variable, type)) break;
+                        constraints.Requires(u.Variable, type, evidence);
+                        break;
+                    case Convert c when context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
+                        && c.Kind is ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate && c.Operand.Width is 1 or 8 or 16 or 32 or 64:
+                        pending.Push((c.Operand, Integer(c.Operand.Width, c.Kind == ConvKind.SignExtend), false)); break;
+                    case Select select:
+                        pending.Push((select.False, type, false)); pending.Push((select.True, type, false)); break;
+                    case Binary binary when context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
+                        && binary.Op is BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor:
+                        pending.Push((binary.Right, type, false)); pending.Push((binary.Left, type, false)); break;
+                    case Binary binary when context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
+                        && binary.Op is BinOp.Shl or BinOp.LShr or BinOp.AShr
+                        && binary.Left.Width is 8 or 16 or 32 or 64 && binary.Right.Width is 8 or 16 or 32 or 64:
+                        pending.Push((binary.Right, Integer(binary.Right.Width, false), false));
+                        pending.Push((binary.Left, Integer(binary.Left.Width, binary.Op == BinOp.AShr || binary.Op == BinOp.Shl && ManagedTypes.IsSigned(type)), false)); break;
+                }
             }
         }
         TypeRef Integer(int width, bool signed) => width == 1 ? context.Types.Boolean : context.Types.Integer(width, signed);
@@ -75,6 +92,15 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
             if (context.TypeOf(define.Target) is { } type)
                 Hint(define.Value, type, define.Address, "已定型定义的操作数");
     }
+
+    private static bool ScalarIntegerResult(Expr expression) => expression switch
+    {
+        Convert { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate,
+            Width: 8 or 16 or 32 or 64, Operand.Width: 1 or 8 or 16 or 32 } conversion when conversion.Width != conversion.Operand.Width => true,
+        Binary { Width: 8 or 16 or 32,
+            Op: BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Shl or BinOp.LShr or BinOp.AShr } => true,
+        _ => false,
+    };
 
     internal static bool FloatingChoice(TypingContext context, Dictionary<Variable, Expr> values, Variable variable, TypeRef type)
     {

@@ -207,6 +207,43 @@ internal static class TypingContributorCheck
         block.Statements = [pointerCall with { Op = new(OpKind.Import, "unknown") }];
         var notManaged = new TypeEngine([new CallResultContributor()]).Run(new TypingContext(function, types, new Dictionary<Storage, TypeRef>(), _ => method));
         a.True(!notManaged.Solution.ContainsKey(pointerResult), "其他运行时操作不能套用托管调用返回规则");
+
+        const int depth = 20000;
+        Variable Chain(int i) => new(Storage.Temp(i), 1);
+        block.Statements = [new Define(0x1000, Chain(0), Expr.C(1, 32))];
+        for (var i = 1; i <= depth; i++)
+            block.Statements.Add(new Define((ulong)(0x1000 + i * 4), Chain(i),
+                new Binary(BinOp.Or, new Use(Chain(i - 1), 32), new Use(Chain(i - 1), 32), 32)));
+        block.Statements.Add(new Call(0x20000, CallKind.Direct, Expr.C(0, 64))
+        { Op = new(OpKind.BoundsCheck, null), Arguments = [new Use(Chain(depth), 32), Expr.C(2, 32)] });
+        block.Statements.Add(new Define(0x20004, Chain(depth + 1),
+            new Compare(Cond.Slt, new Use(Chain(depth), 32), Expr.C(2, 32))));
+        restricted = new(); new UseContributor(input).Contribute(Context(), restricted);
+        a.True(restricted.Uses[Chain(0)].Select(u => u.Type).ToHashSet().SetEquals([types.Int32, types.Integer(32, false)]),
+            "深层共享定义链保留不同用途的有符号与无符号约束");
+        a.True(restricted.Uses[Chain(0)].Select(u => u.Evidence.Address).ToHashSet().SetEquals([0x20000UL, 0x20004UL]),
+            "共享定义去重只作用于当前用途，保留各使用位置的证据");
+        a.Equal(depth + 1, restricted.Uses.Count, "已证实整数用途沿窄整数链一次约束全部中间值");
+        block.Statements = [new Define(0x1000, Chain(0), new Binary(BinOp.Or, new Use(Chain(1), 32), Expr.C(0, 32), 32)),
+            new Define(0x1004, Chain(1), new Binary(BinOp.Or, new Use(Chain(0), 32), Expr.C(0, 32), 32)),
+            new Call(0x1008, CallKind.Direct, Expr.C(0, 64))
+            { Op = new(OpKind.BoundsCheck, null), Arguments = [new Use(Chain(1), 32), Expr.C(2, 32)] }];
+        restricted = new(); new UseContributor(input).Contribute(Context(), restricted);
+        a.Equal(2, restricted.Uses.Count, "窄整数循环由外部用途约束，回溯能终止");
+        block.Statements.RemoveAt(2);
+        restricted = new(); new UseContributor(input).Contribute(Context(), restricted);
+        a.Equal(0, restricted.Uses.Count, "无外部用途时不凭循环自身猜类型");
+        block.Statements = [new Define(0x1000, Chain(0), new Load(Expr.C(0x100, 64), 64)),
+            new Define(0x1004, Chain(1), new Binary(BinOp.Add, new Use(Chain(0), 64), Expr.C(8, 64), 64)),
+            new Call(0x1008, CallKind.Direct, Expr.C(0, 64))
+            { Op = new(OpKind.BoundsCheck, null), Arguments = [new Use(Chain(1), 64), Expr.C(2, 64)] }];
+        restricted = new(); new UseContributor(input).Contribute(Context(), restricted);
+        a.Equal(0, restricted.Uses.Count, "64 位地址加法及未知加载不按窄整数运算定型");
+        block.Statements[1] = new Define(0x1004, Chain(1), new Cpp2CS.Ir.Convert(ConvKind.ZeroExtend, new Use(Chain(0), 32), 32));
+        block.Statements[2] = new Call(0x1008, CallKind.Direct, Expr.C(0, 64))
+        { Op = new(OpKind.BoundsCheck, null), Arguments = [new Use(Chain(1), 32), Expr.C(2, 32)] };
+        restricted = new(); new UseContributor(input).Contribute(Context(), restricted);
+        a.Equal(0, restricted.Uses.Count, "同宽转换可能保留浮点类型，不凭整数用途给结果定型");
         return a.Finish("typing-contributors");
     }
 }
