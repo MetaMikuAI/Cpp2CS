@@ -36,15 +36,14 @@ internal static class InlineConstructors
                 case Return { Value: null }:
                 case Call { Kind: CallKind.Tail, Op.Kind: OpKind.WriteBarrier }:
                     // 尾部写屏障只通知 GC；调用点保留自身屏障及其返回语义。
-                    return effects.Count > 1 && effects.Any(s => s is Store)
-                        && effects.Any(s => s is Call { Op: null, Kind: CallKind.Direct }) ? new(method, signature, effects) : null;
+                    return effects.Any(s => s is Call { Op: null, Kind: CallKind.Direct }) ? new(method, signature, effects) : null;
                 case Call { Kind: CallKind.Direct } call when call.Op is null or { Kind: OpKind.WriteBarrier }:
                     effects.Add(ExprMap.MapOperands(call, e => Expand(e, definitions)));
                     break;
                 case Call { Kind: CallKind.Tail, Op: null } tail:
                     // 内联后尾调用成为普通调用；它的实参和副作用仍须完整匹配，不能作为屏障删去。
                     effects.Add(ExprMap.MapOperands(tail with { Kind = CallKind.Direct }, e => Expand(e, definitions)));
-                    return effects.Any(s => s is Store) ? new(method, signature, effects) : null;
+                    return new(method, signature, effects);
                 case Store store:
                     var expanded = (Store)ExprMap.MapOperands(store, e => Expand(e, definitions));
                     if (expanded.Target is not Binary { Op: BinOp.Add, Left: Use { Variable.Version: 0 } self, Right: Const }

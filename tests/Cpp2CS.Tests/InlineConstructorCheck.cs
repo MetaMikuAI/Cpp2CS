@@ -149,6 +149,13 @@ internal static class InlineConstructorCheck
         vectorCaller.EntryBlock.Statements[1] = Field(new Use(created, 64), Expr.C(0, 128));
         a.True(vectorPattern is not null && InlineConstructors.Find(vectorPattern, vectorCaller, vectorCaller.EntryBlock, 0, created) is null,
             "向量初始化的位型必须匹配");
+        var forwarding = InlineConstructors.Create(method, signature with { Parameters = [] }, Function(Base(self) with { Kind = CallKind.Tail }));
+        var forwarded = Function(new Call(0, CallKind.Direct, Expr.C(100, 64)), Base(new Use(created, 64)), new Return(20));
+        a.True(forwarding is not null && InlineConstructors.Find(forwarding, forwarded, forwarded.EntryBlock, 0, created) is not null,
+            "仅转调基类的真实构造也能生成模板");
+        forwarded.EntryBlock.Statements[1] = Base(new Use(created, 64)) with { Target = Expr.C(201, 64) };
+        a.True(forwarding is not null && InlineConstructors.Find(forwarding, forwarded, forwarded.EntryBlock, 0, created) is null,
+            "转调构造仍精确匹配调用目标");
         return a.Finish("inline-constructors");
     }
 }
