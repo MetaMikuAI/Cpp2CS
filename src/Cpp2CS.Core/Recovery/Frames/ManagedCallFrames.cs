@@ -29,6 +29,10 @@ internal sealed class ManagedCallFrames(ProgramFacts facts, ManagedAbi abi)
     internal int? ArgumentSize(Call call, int index)
     {
         if (call.Op?.Kind == OpKind.WriteBarrier && index == 0) return 8;
+        if (call.Op is { Kind: OpKind.Box, Operand: TypeRef boxed } && index == 1 && abi.Size(boxed) is > 0 and var boxedSize)
+            return boxedSize;
+        if (call is { Op: { Kind: OpKind.Import, Operand: "memcpy" or "memmove" or "memset" }, Arguments: [_, _, Const { Value: > 0 and <= int.MaxValue } length] }
+            && (index == 0 || index == 1 && !Equals(call.Op.Operand, "memset"))) return (int)length.Value;
         if (index >= call.Sources.Length || Signature(call) is not { } signature) return null;
         var register = call.Sources[index];
         var argument = signature.Arguments.Concat(signature.Return is { Passing: Passing.Indirect } result ? [result] : [])
