@@ -78,6 +78,20 @@ internal static class ConstantDivisionCheck
         unrelated.EntryBlock.Statements[^1] = new Return(8) { Value = new Binary(BinOp.Add, new Use(shifted, 64),
             new Binary(BinOp.LShr, new Use(new(Storage.Gpr(3), 0), 64), Expr.C(63, 64), 64), 64) };
         a.True(!ConstantDivisionNormalizer.Run(unrelated), "符号修正必须来自同一个乘积");
+        var narrow = Function(0x8888888888888889, 7, compensate: true);
+        narrow.EntryBlock.Statements[2] = new Define(8, shifted,
+            new Binary(BinOp.LShr, new Use(adjusted, 64), Expr.C(7, 64), 64));
+        narrow.EntryBlock.Statements[^1] = new Return(12) { Value = new Binary(BinOp.Add,
+            new Use(shifted, 32), Fold.Convert(ConvKind.Truncate,
+                new Binary(BinOp.LShr, new Use(adjusted, 64), Expr.C(63, 64), 64), 32), 32) };
+        // 调用点的符号位通常先保存到寄存器，再以 32 位读取。
+        var sign = new Variable(Storage.Gpr(4), 1);
+        narrow.EntryBlock.Statements.Insert(3, new Define(10, sign,
+            new Binary(BinOp.LShr, new Use(adjusted, 64), Expr.C(63, 64), 64)));
+        narrow.EntryBlock.Statements[^1] = new Return(12) { Value = new Binary(BinOp.Add, new Use(shifted, 32), new Use(sign, 32), 32) };
+        a.True(ConstantDivisionNormalizer.Run(narrow) && narrow.EntryBlock.Statements[^1] is Return
+            { Value: Cpp2CS.Ir.Convert { Kind: ConvKind.Truncate, Width: 32, Operand: Binary { Op: BinOp.SDiv, Right: Const { Value: 240 } } } },
+            "逻辑右移后只取低 32 位恢复原 64 位除法再截断");
         return a.Finish("constant-division");
     }
 }

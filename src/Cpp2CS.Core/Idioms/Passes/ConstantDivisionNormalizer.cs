@@ -21,18 +21,20 @@ internal static class ConstantDivisionNormalizer
             {
                 var original = block.Statements[i];
                 block.Statements[i] = ExprMap.MapOperands(original, expression => ExprMap.Map(expression,
-                    value => value is Binary { Op: BinOp.Add, Width: 64 } add
-                        ? Quotient(add.Left, add.Right, Resolve) ?? Quotient(add.Right, add.Left, Resolve) : null));
+                    value => value is Binary { Op: BinOp.Add, Width: 32 or 64 } add
+                        ? Quotient(add.Left, add.Right, add.Width, Resolve) ?? Quotient(add.Right, add.Left, add.Width, Resolve) : null));
                 changed |= !ReferenceEquals(original, block.Statements[i]);
             }
         return changed;
     }
 
-    private static Expr? Quotient(Expr quotient, Expr correction, Func<Expr, Expr> resolve)
+    private static Expr? Quotient(Expr quotient, Expr correction, int width, Func<Expr, Expr> resolve)
     {
         quotient = resolve(quotient);
         var shift = 0;
-        if (quotient is Binary { Op: BinOp.AShr, Width: 64, Right: Const { Value: <= 62 } amount } shifted)
+        // 仅观察低位时，逻辑右移与算术右移在这些位上相同。
+        if (quotient is Binary { Op: BinOp.AShr or BinOp.LShr, Width: 64, Right: Const { Value: <= 62 } amount } shifted
+            && (shifted.Op == BinOp.AShr || width <= 64 - (int)amount.Value))
         {
             shift = (int)amount.Value;
             quotient = resolve(shifted.Left);
@@ -70,6 +72,6 @@ internal static class ConstantDivisionNormalizer
         // e<=2^(s+1) 使 |n|*e<=2^(64+s)：正数向下取整、负数加符号位后向零截断均等于 n/d。
         // e=0 时负整倍数会多加 1，因此必须拒绝；除数为正且大于 1，不引入除零或溢出异常。
         if (error == 0 || error >= divisor || error > UInt128.One << (shift + 1)) return null;
-        return new Binary(BinOp.SDiv, input, Expr.C((ulong)divisor, 64), 64);
+        return Fold.Convert(ConvKind.Truncate, new Binary(BinOp.SDiv, input, Expr.C((ulong)divisor, 64), 64), width);
     }
 }

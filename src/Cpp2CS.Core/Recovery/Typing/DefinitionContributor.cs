@@ -17,8 +17,9 @@ internal sealed class DefinitionContributor(TypingInputs input) : ITypeContribut
         foreach (var define in context.Statements.OfType<Define>())
         {
             // 标量 FMOV 写入浮点寄存器；结构体片投影可能已经返回对应的 float/double 叶子。
-            var projected = define is { Target.Storage.Bank: Bank.Vec, Value: Ir.Convert { Kind: ConvKind.Bitcast, Width: 32 or 64 } cast }
-                ? expressions.TypeOf(cast, cast.Width == 32 ? context.Types.Single : context.Types.Double) : null;
+            var projected = define.Target.Storage.Bank == Bank.Vec && define.Value is
+                Ir.Convert { Kind: ConvKind.Bitcast, Width: 32 or 64 } or Load { Width: 32 or 64 }
+                ? expressions.TypeOf(define.Value, define.Value.Width == 32 ? context.Types.Single : context.Types.Double) : null;
             if (!context.IsRuntime(define.Target) && (SealedCast(loads, define.Value) ?? projected ?? TypeOfDefinition(expressions, define.Value, definitions)) is { } type)
                 constraints.Defines(define.Target, type, new(Name, define.Address, $"{define.Value} : {type}"));
         }

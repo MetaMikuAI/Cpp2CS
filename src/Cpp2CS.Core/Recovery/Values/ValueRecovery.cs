@@ -224,7 +224,10 @@ internal static class ValueRecovery
             case Insert insert:
                 return ctx.InsertedFragment(insert);
             case Load load:
-                return ctx.Location(load.Address, load.Width);
+                return ctx.Location(load.Address, load.Width).Bind(value => hint is not null
+                    && ctx.types.Kind(hint) is TypeKind.Float or TypeKind.Double
+                    && value is IndirectValue && value.Width == ctx.types.Bits(hint)
+                    ? ctx.Coerce(value, hint, 0) : value);
             case Symbol { Kind: SymbolKind.String, Value: string text }:
                 return new StringValue(text, ctx.types.String);
             case Binary b:
