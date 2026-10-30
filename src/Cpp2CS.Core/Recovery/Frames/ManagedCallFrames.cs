@@ -28,6 +28,15 @@ internal sealed class ManagedCallFrames(ProgramFacts facts, ManagedAbi abi)
 
     internal int? ArgumentSize(Call call, int index)
     {
+        if (call.Op is { Kind: OpKind.InvokeGeneric, Operand: MethodRef invoked } && index > 0)
+        {
+            var invokedType = index == invoked.Method.Parameters.Count + 1 ? CallResolution.Concrete(invoked, invoked.Method.ReturnType)
+                : index <= invoked.Method.Parameters.Count ? CallResolution.Concrete(invoked, invoked.Method.Parameters[index - 1].Type) : null;
+            // invoker 的返回槽始终传址；引用入参仍直接传对象，值入参和 ref 入参传址。
+            if (invokedType is ByRefRef reference) invokedType = reference.Element;
+            else if (index <= invoked.Method.Parameters.Count && invokedType is not null && ManagedTypes.IsReferenceType(invokedType)) return null;
+            return invokedType is not null && abi.Size(invokedType) is > 0 and var invokedSize ? invokedSize : null;
+        }
         if (call.Op?.Kind == OpKind.WriteBarrier && index == 0) return 8;
         if (call.Op is { Kind: OpKind.Box, Operand: TypeRef boxed } && index == 1 && abi.Size(boxed) is > 0 and var boxedSize)
             return boxedSize;
