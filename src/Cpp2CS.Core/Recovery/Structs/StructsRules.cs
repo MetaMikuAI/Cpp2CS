@@ -44,6 +44,14 @@ internal static class StructsRules
 
     internal static IEnumerable<(FieldRef[] Path, TypeRef Type, int Offset)> ScalarStructPaths(this RecoveryScope ctx, TypeRef type)
     {
+        // 字段路径只依赖元数据和具体类型；同一方法的推断轮次共享展开结果。
+        if (!ctx.State.Structs.scalarPaths.TryGetValue(type, out var paths))
+            ctx.State.Structs.scalarPaths[type] = paths = BuildScalarStructPaths(ctx, type).ToArray();
+        return paths;
+    }
+
+    private static IEnumerable<(FieldRef[] Path, TypeRef Type, int Offset)> BuildScalarStructPaths(RecoveryScope ctx, TypeRef type)
+    {
         var leaves = ctx.StructPaths(type).Where(p => ctx.types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
         foreach (var leaf in leaves)
         {

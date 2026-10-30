@@ -12,6 +12,7 @@ internal sealed class StructsState : IStatementKeyed
     internal readonly Dictionary<Variable, (StructPhi Group, AbiPiece Piece)> structPhiMembers = new();
     internal readonly List<StructPhi> structPhis = [];
     internal readonly Dictionary<Call, LocalValue> structResults = new(ReferenceEqualityComparer.Instance);
+    internal readonly Dictionary<TypeRef, (FieldRef[] Path, TypeRef Type, int Offset)[]> scalarPaths = new();
 
     public void Replace(Stmt previous, Stmt? replacement)
     {
