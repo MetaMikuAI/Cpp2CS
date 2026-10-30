@@ -88,7 +88,7 @@ internal static class IdiomPipeline
         });
         state.Passes.Run("idioms.SharedInterfaceTails.SplitInvokes", () =>
         {
-            if (SharedInterfaceTails.SplitInvokes(state.function, e => state.defs.Expand(e), state.Fresh))
+            if (SharedInterfaceTails.SplitInvokes(state.function, e => state.defs.Expand(e)))
                 state.Cleanup();
         });
         state.Passes.Run("idioms.Calls", () =>
@@ -126,6 +126,12 @@ internal static class IdiomPipeline
                     SsaBuilder.Build(state.function, Dominators.Compute(state.function), s => s.Bank == Bank.Stack, state.owner.calls, state.owner.NativeCallees.Convention.StackPointer);
                 state.Cleanup();
             }
+        });
+        state.Passes.Run("idioms.FrameAddressTails", () =>
+        {
+            if (state.function.Range.ExceptionRegions.Length == 0 && TailDuplication.Run(state.function,
+                b => b.Statements.OfType<Phi>().Any(p => p.Sources.All(v => state.defs.Expand(new Use(v, 64)) is FrameAddress { Offset: < 0 }))))
+                state.Cleanup();
         });
         state.Passes.Run("idioms.FreshArrayElementClasses", () =>
         {

@@ -38,7 +38,7 @@ internal static class SharedInterfaceTailsCheck
             if (mode == "handler") left.Handler = merge;
             var function = new MachineFunction { Entry = start.Start, Range = new(start.Start, 0x1090, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [start, left, right, merge, done] };
             var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
-            var changed = SharedInterfaceTails.SplitInvokes(function, e => e is Use u ? definitions.GetValueOrDefault(u.Variable, e) : e, Fresh);
+            var changed = SharedInterfaceTails.SplitInvokes(function, e => e is Use u ? definitions.GetValueOrDefault(u.Variable, e) : e);
             a.Equal(mode == "split", changed, $"共享接口尾部 {mode}");
             if (!changed) continue;
             var leftCall = left.Statements.OfType<Call>().Single(c => c.Kind == CallKind.Indirect);
@@ -112,6 +112,25 @@ internal static class SharedInterfaceTailsCheck
             a.True(new[] { leftCheck, leftScan, rightCheck, rightScan }.All(b => b.Statements[^1] is Branch branch
                 && branch.Target == b.Successors[0].Start && branch.Fallthrough == b.Successors[1].Start), "保留条件分支的后继位置");
             a.Equal(2, function.Blocks.SelectMany(b => b.Statements).Count(s => mode == "slot-tail" ? s is Call { Kind: CallKind.TailIndirect } : s is Return), "两个调用各自保留返回方式");
+        }
+        {
+            var leftAddress = new Variable(Storage.Gpr(1), 1);
+            var rightAddress = leftAddress with { Version = 2 };
+            var selected = leftAddress with { Version = 3 };
+            var vector = new Variable(Storage.Vec(0), 1);
+            var start = new Block(0) { End = 16, Statements = [new Branch(0, Expr.C(1, 1), 16, 32)] };
+            var left = new Block(16) { End = 32, Statements = [new Define(16, leftAddress, new FrameAddress(-32)), new Jump(20, 48)] };
+            var right = new Block(32) { End = 48, Statements = [new Define(32, rightAddress, new FrameAddress(-64)), new Jump(36, 48)] };
+            var merge = new Block(48) { End = 80, Statements = [new Phi(48, selected, [leftAddress, rightAddress]),
+                new Define(52, vector, new Load(new Use(selected, 64), 128)), new Store(56, new FrameAddress(-16), new Use(vector, 128)),
+                new Return(60) { Value = new Use(vector, 32) }] };
+            MachineFunction.AddEdge(start, left); MachineFunction.AddEdge(start, right);
+            MachineFunction.AddEdge(left, merge); MachineFunction.AddEdge(right, merge);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 80, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [start, left, right, merge] };
+            a.True(Cpp2CS.Machine.Ssa.TailDuplication.Run(function, b => b == merge), "帧地址选择的终结尾部展开");
+            a.True(new[] { left, right }.All(b => b.Successors.Count == 0 && b.Statements[^1] is Return), "每条分支独立返回");
+            a.True(new[] { left, right }.All(b => b.Statements.OfType<Define>().Last().Target.Width == 128), "复制保持向量寄存器宽度");
+            a.True(left.Statements.OfType<Define>().Last().Target != right.Statements.OfType<Define>().Last().Target, "副本定义互不覆盖");
         }
         return a.Finish("interface-tails");
     }
