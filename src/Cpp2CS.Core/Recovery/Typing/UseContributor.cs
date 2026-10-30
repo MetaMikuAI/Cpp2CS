@@ -204,6 +204,10 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                         }
                         if (parameter is { Passing: Passing.Registers, Pieces.Length: 1 } && registers.TryGetValue(parameter.Pieces[0].Register, out var argument))
                         {
+                            // 未读取的参数可能携带另一种标量的寄存器残值，不反向污染实际使用处的类型。
+                            if (!ReferenceEquals(parameter, signature.This) && argument is Use unused
+                                && context.TypeOf(unused.Variable) is { } native && context.Types.Kind(native) != context.Types.Kind(parameter.Type)
+                                && input.UnusedInput(call, target, parameter)) continue;
                             if (ReferenceEquals(parameter, signature.This)
                                 && (argument is Unknown or Symbol || expressions.TypeOf(argument) is { } actual && !context.Types.IsAssignable(actual, parameter.Type))
                                 && input.UnusedInput(call, target, parameter)) continue;

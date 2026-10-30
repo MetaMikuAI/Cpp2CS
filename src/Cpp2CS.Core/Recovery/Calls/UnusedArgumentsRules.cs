@@ -66,17 +66,26 @@ internal static class UnusedArgumentsRules
         if (parameter.Passing != Passing.Registers || parameter.Pieces is not [var piece] || !site.Registers.TryGetValue(piece.Register, out var expression))
             return (ManagedValue?)null;
         var kind = ctx.types.Kind(parameter.Type);
-        if (ctx.Values.MissingInput(expression) && kind is TypeKind.Reference or TypeKind.Int or TypeKind.Bool && ctx.Values.DirectInputProof(site.Call, site.Callee) && ctx.Values.UnusedParameter(site.Call, piece.Register))
+        var scalar = kind is TypeKind.Reference or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double;
+        ManagedValue Default()
         {
             var declared = site.Callee.Method.Parameters[site.Index];
-            var bits = kind == TypeKind.Reference || !declared.HasDefault || declared.DefaultValue is null ? 0UL : declared.DefaultValue is ulong unsigned ? unsigned : unchecked((ulong)System.Convert.ToInt64(declared.DefaultValue));
+            var bits = kind == TypeKind.Reference || !declared.HasDefault || declared.DefaultValue is null ? 0UL : declared.DefaultValue switch
+            {
+                float value => BitConverter.SingleToUInt32Bits(value),
+                double value => BitConverter.DoubleToUInt64Bits(value),
+                ulong value => value,
+                var value => unchecked((ulong)System.Convert.ToInt64(value)),
+            };
             return new ConstantValue(bits & Expr.Mask(piece.Width), parameter.Type, piece.Width);
         }
+        if (ctx.Values.MissingInput(expression) && scalar && ctx.Values.DirectInputProof(site.Call, site.Callee) && ctx.Values.UnusedParameter(site.Call, piece.Register))
+            return Default();
 
-        if (kind is not (TypeKind.Reference or TypeKind.Int or TypeKind.Bool) || expression is not (Use or Const) || expression is Use use && ctx.State.Lowering.inlined.Contains(use.Variable) || !ctx.Values.DirectInputProof(site.Call, site.Callee))
+        if (!scalar || expression is not (Use or Const) || expression is Use use && ctx.State.Lowering.inlined.Contains(use.Variable) || !ctx.Values.DirectInputProof(site.Call, site.Callee))
             return (ManagedValue?)null;
         if (!ctx.Values.Recover(expression, null).TryGet(out var value, out var failure))
-            return failure;
+            return ctx.Values.UnusedParameter(site.Call, piece.Register) ? Default() : failure;
         if (value is ConstantValue { Bits: 0 } || value is Fragment || ctx.types.IsAssignable(value.Type, parameter.Type) || ctx.types.Kind(value.Type) is not (TypeKind.Reference or TypeKind.Int or TypeKind.Bool) || ctx.Values.Coerce(value, parameter.Type, site.Call.Address).TryGet(out _, out _) || !ctx.Values.UnusedParameter(site.Call, piece.Register))
             return (ManagedValue?)null;
         return new ConstantValue(0, parameter.Type, piece.Width);
