@@ -74,7 +74,7 @@ internal static class ManagedFramePromotion
                 for (var i = 0; i < call.Arguments.Length; i++)
                     if (ExprMap.Walk(call.Arguments[i]).Any(e => e is FrameAddress))
                         facts.Options.Diagnostics.Write("frame", function.Entry, $"[frame] 0x{call.Address:x} {call.Op} {call.Target} arg{i} {call.Arguments[i]} size={frames.ArgumentSize(call, i)}");
-        if (!facts.Options.PromoteFrameSlots || FrameSlotPromotion.Run(function, frames.ArgumentSize, ranges.ToArray()) == 0) return;
+        if (!facts.Options.PromoteFrameSlots || FrameSlotPromotion.Run(function, frames.ArgumentSize, ranges.ToArray(), overlapping: true) == 0) return;
         var slots = function.Blocks.SelectMany(b => b.Statements).OfType<Assign>().Select(a => a.Target).ToHashSet();
         var dominators = Dominators.Compute(function);
         SsaBuilder.Build(function, dominators, slots.Contains, calls, stackPointer);

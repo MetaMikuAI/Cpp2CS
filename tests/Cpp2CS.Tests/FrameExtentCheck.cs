@@ -66,7 +66,35 @@ internal static class FrameExtentCheck
         a.True(FrameUses.Touches(new Store(0x1000, Expr.C(0x2000, 64), new FrameAddress(-64)), -32, 8, (_, _) => null), "存入外部内存的地址保护后续分片");
         ManagedBounds(a);
         CallSpills(a);
+        OverlappingWrites(a);
         return a.Finish("frame-extents");
+    }
+
+    private static void OverlappingWrites(Assertions a)
+    {
+        foreach (var width in new[] { 64, 128 })
+        {
+            Expr initial = Expr.C(0x1122334455667788, width);
+            if (width == 128) initial = Fold.Insert(initial, Expr.C(0x99aabbccddeeff00, 64), 64);
+            var block = new Block(0x1000) { Statements = [
+                new Store(0x1000, new FrameAddress(-32), initial),
+                new Store(0x1004, new FrameAddress(-30), Expr.C(0xabcd, 16)),
+                new Return(0x1008) { Value = new Load(new FrameAddress(-32), width) }] };
+            var function = new MachineFunction { Entry = block.Start, Range = new(0x1000, 0x1010, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [block] };
+            a.Equal(0, FrameSlotPromotion.Run(function), "未核对托管范围前保留混合宽度访问");
+            if (width == 128)
+            {
+                a.Equal(0, FrameSlotPromotion.Run(function, overlapping: true), "混合向量聚合保留给结构体字段恢复");
+                continue;
+            }
+            a.Equal(1, FrameSlotPromotion.Run(function, overlapping: true), "混合宽度访问共用完整区域");
+            var evaluator = new Evaluator();
+            evaluator.Run(block.Statements.Take(2).ToArray(), 0x1000, 0x1008);
+            var value = evaluator.Eval(((Return)block.Statements[^1]).Value!);
+            UInt128 expected = 0x11223344abcd7788;
+            if (width == 128) expected |= (UInt128)0x99aabbccddeeff00 << 64;
+            a.True(evaluator.Failure is null && value == expected, "部分写入只改变指定字节并保留高位");
+        }
     }
 
     private static void CallSpills(Assertions a)
