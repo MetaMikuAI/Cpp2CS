@@ -25,6 +25,7 @@ internal static class Program
             ["idioms", var binary, var metadata, var output, .. var options] => Idioms(binary, metadata, output, options),
             ["recover", var binary, var metadata, var output, .. var options] => RecoverCommand.Run(binary, metadata, output, options),
             ["source-project", var assembly, var output] => SourceProject(assembly, output),
+            ["source-project", var assembly, var output, "--profile", "full"] => SourceProject(assembly, output, full: true),
             _ => Usage(),
         };
     }
@@ -47,15 +48,17 @@ internal static class Program
                                                                       --jobs N：方法恢复的最大并行度，默认 1；程序集写出按顺序执行。
                                                                       --profile core|full：核心链路或完整流程，默认 full。
                                                                       --fact-cache-file 文件：显式固定事实快照，输入变化仍会失效；用于重构前后对比。
-                  cpp2cs source-project <程序集.dll> <输出目录>          将已有程序集按项目目录导出 C#，依赖从程序集所在目录解析。
+                  cpp2cs source-project <程序集.dll> <输出目录> [--profile full]
+                                                                      将已有程序集按项目目录导出 C#；full 启用完整源码变换，依赖从程序集所在目录解析。
             """);
         return 2;
     }
 
-    private static int SourceProject(string assembly, string output)
+    private static int SourceProject(string assembly, string output, bool full = false)
     {
         var path = Path.GetFullPath(assembly);
-        var count = Output.SourceProject.Write(path, Path.GetDirectoryName(path)!, output, _ => true);
+        var count = Output.SourceProject.Write(path, Path.GetDirectoryName(path)!, output, _ => true,
+            full ? Cpp2CS.Extensions.Decompile.ReadabilityTransforms.Instance : null);
         Console.WriteLine($"C#：{count} 个类型文件，{Path.GetFullPath(output)}");
         return 0;
     }

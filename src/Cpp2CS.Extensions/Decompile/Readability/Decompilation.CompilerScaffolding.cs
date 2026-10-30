@@ -59,13 +59,18 @@ public sealed partial class ReadabilityTransforms
                 if (section.Attributes.Count == 0) section.Remove();
             }
             // 类实例的单一定义副本仍是同一个 this；按 IL 变量身份替换，包括 lambda 中的捕获。
+            // 本轮只用 this 替换已有标识符，不会产生其他局部变量引用。
+            var localReferences = rootNode.Descendants.OfType<IdentifierExpression>()
+                .Select(id => (Node: id, Variable: id.GetILVariable())).Where(p => p.Variable is not null)
+                .GroupBy(p => p.Variable!).ToDictionary(g => g.Key, g => g.Select(p => p.Node).ToArray());
             foreach (var declaration in rootNode.Descendants.OfType<VariableDeclarationStatement>().ToArray())
             {
                 if (declaration.Variables.ToArray() is not [var variable]
                     || variable.GetILVariable() is not { IsSingleDefinition: true, UsesInitialValue: false, Type.IsReferenceType: true } local
                     || local.AddressInstructions.Count != 0) continue;
-                var references = rootNode.Descendants.OfType<IdentifierExpression>().Where(id => id.GetILVariable() == local).ToArray();
                 var receiver = variable.Initializer as ThisReferenceExpression;
+                if (receiver is null && variable.Initializer is not null) continue;
+                var references = localReferences.GetValueOrDefault(local) ?? [];
                 ExpressionStatement? separateStore = null;
                 if (receiver is null && variable.Initializer is null)
                 {
@@ -81,6 +86,7 @@ public sealed partial class ReadabilityTransforms
                     || id.Parent is AssignmentExpression assignment && assignment.Left == id
                     || id.Ancestors.OfType<InvocationExpression>().Any(call => call.Target is IdentifierExpression { Identifier: "nameof" }))) continue;
                 foreach (var reference in references) reference.ReplaceWith(receiver.Clone());
+                localReferences.Remove(local);
                 separateStore?.Remove();
                 declaration.Remove();
             }
