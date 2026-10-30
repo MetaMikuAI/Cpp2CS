@@ -37,6 +37,15 @@ internal static class InlineConstructorCheck
         var match = InlineConstructors.Find(pattern!, caller, caller.EntryBlock, 0, created);
         a.True(match is { Statements.Count: 2 } && match.Arguments.SequenceEqual([value]), "字段值绑定成构造实参");
         a.True(!match!.Statements.Contains(tail), "调用点的尾部屏障保留返回语义");
+        var barrier = tail with { Kind = CallKind.Direct, Arguments = [self, argument] };
+        var withBarrier = InlineConstructors.Create(method, signature, Function(Base(self), Field(self, argument), barrier, new Return(20)))!;
+        var clearedBarrier = Function(caller.EntryBlock.Statements[0], Base(new Use(created, 64)), Field(new Use(created, 64), value),
+            barrier with { Arguments = [] }, new Return(20));
+        a.True(InlineConstructors.Find(withBarrier, clearedBarrier, clearedBarrier.EntryBlock, 0, created) is not null,
+            "已证明的屏障允许运行时实参被清除，字段值仍单独匹配");
+        clearedBarrier.EntryBlock.Statements[3] = barrier with { Op = null, Arguments = [] };
+        a.True(InlineConstructors.Find(withBarrier, clearedBarrier, clearedBarrier.EntryBlock, 0, created) is null,
+            "普通调用不能代替已证明的写屏障");
         var ordinaryTail = InlineConstructors.Create(method, signature, Function(Base(self), Field(self, argument), tail with { Op = null }));
         a.True(ordinaryTail is { Effects.Count: 3 } && ordinaryTail.Effects[^1] is Call { Kind: CallKind.Direct, Op: null },
             "普通尾调用保留为必须匹配的副作用");

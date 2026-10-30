@@ -168,6 +168,9 @@ internal static class InlineConstructors
     {
         if (pattern is Store p && actual is Store a)
             return Expression(p.Target, a.Target, bindings, parameters) && Expression(p.Value, a.Value, bindings, parameters);
+        // 两侧均已证明为 GC 写屏障；字段写入单独匹配，运行时地址参数在 L3 中可能已清除。
+        if (pattern is Call { Op.Kind: OpKind.WriteBarrier, Kind: CallKind.Direct }
+            && actual is Call { Op.Kind: OpKind.WriteBarrier, Kind: CallKind.Direct }) return true;
         if (pattern is not Call pc || actual is not Call ac || pc.Kind != ac.Kind || pc.Op != ac.Op
             || !pc.Sources.SequenceEqual(ac.Sources) || pc.Arguments.Length != ac.Arguments.Length
             || !pc.Results.SequenceEqual(ac.Results) || !Expression(pc.Target, ac.Target, bindings, parameters)) return false;
