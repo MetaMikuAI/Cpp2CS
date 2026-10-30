@@ -7,6 +7,15 @@ public sealed record StackAbiSignature(StackAbiValue[] Parameters, int? MethodIn
 
 public sealed partial class ManagedAbi
 {
+    public AbiPiece[] StackPieces(StackAbiValue value)
+    {
+        if (value.Indirect || Kind(value.Type) != ValueKind.Struct) return [];
+        if (Hfa(value.Type) is { } hfa)
+            return Enumerable.Range(0, hfa.Count).Select(i => new AbiPiece(Ir.Storage.Slot(value.Offset + i * hfa.Width / 8), hfa.Width, i * hfa.Width / 8)).ToArray();
+        if (value.Size is <= 0 or > 16) return [];
+        return Enumerable.Range(0, (value.Size + 7) / 8).Select(i => new AbiPiece(Ir.Storage.Slot(value.Offset + i * 8), Math.Min(8, value.Size - i * 8) * 8, i * 8)).ToArray();
+    }
+
     /// <summary>
     /// 补齐既有 Stack 分类未表达的存储位置。AAPCS64 B.4 先把大非 HFA 值替换为指针，
     /// C.6/C.17 按至少 8 字节对齐分配栈槽；隐藏 MethodInfo 是最后一个指针参数。

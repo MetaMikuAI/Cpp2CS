@@ -15,9 +15,10 @@ internal static class StructRegistersRules
         var pieces = parameter.Pieces;
         if (!ctx.RegisterStruct(parameter))
         {
-            if (parameter.Passing != Passing.Stack || ctx.owner.abi.Hfa(parameter.Type) is not { } hfa || ctx.owner.abi.Classify(ctx.method, out _) is not { } signature || ctx.owner.abi.StackArguments(signature).Parameters.FirstOrDefault(p => p.Index == index) is not { Indirect: false } stack)
+            if (parameter.Passing != Passing.Stack || ctx.owner.abi.Classify(ctx.method, out _) is not { } signature || ctx.owner.abi.StackArguments(signature).Parameters.FirstOrDefault(p => p.Index == index) is not { Indirect: false } stack)
                 return false;
-            pieces = Enumerable.Range(0, hfa.Count).Select(i => new AbiPiece(Storage.Slot(stack.Offset + i * hfa.Width / 8), hfa.Width, i * hfa.Width / 8)).ToArray();
+            pieces = ctx.owner.abi.StackPieces(stack);
+            if (pieces.Length == 0) return false;
         }
 
         foreach (var piece in pieces)

@@ -4,7 +4,7 @@ using Cpp2CS.Ir;
 
 namespace Cpp2CS.Idioms;
 
-/// <summary>AAPCS64 栈上传入的标量、浮点聚合分量及隐藏 MethodInfo：只读且不传址时改写成入口 SSA 值。</summary>
+/// <summary>AAPCS64 栈上传入的标量、聚合分片及隐藏 MethodInfo：只读且不传址时改写成入口 SSA 值。</summary>
 internal static class StackInputNormalizer
 {
     public static bool Run(MachineFunction function, ManagedAbi abi, AbiSignature[] signatures, out int? methodInfoOffset)
@@ -18,8 +18,7 @@ internal static class StackInputNormalizer
                 && abi.Kind(p.Type) is ValueKind.Integer or ValueKind.Reference or ValueKind.Float or ValueKind.Double)
                 .ToDictionary(p => p.Offset, p => p.Size * 8);
             foreach (var parameter in layout.Parameters.Where(p => !p.Indirect && abi.Kind(p.Type) == ValueKind.Struct))
-                if (abi.Hfa(parameter.Type) is { } hfa)
-                    for (var i = 0; i < hfa.Count; i++) slots.Add(parameter.Offset + i * hfa.Width / 8, hfa.Width);
+                foreach (var piece in abi.StackPieces(parameter)) slots.Add(parameter.Offset + piece.Offset, piece.Width);
             if (layout.MethodInfoOffset is { } hidden) slots.Add(hidden, 64);
             return slots;
         }
@@ -76,6 +75,13 @@ internal static class StackInputNormalizer
         {
             if (expression is not Load load || Offset(load.Address) is not { } at || at < 0 || at > int.MaxValue)
                 return null;
+            foreach (var (offset, width) in candidates)
+                if (at >= offset && at + load.Width / 8 <= offset + width / 8)
+                {
+                    promoted.Add(offset);
+                    var whole = new Use(new Variable(Storage.Slot(offset), 0), width);
+                    return at == offset && load.Width == width ? whole : new Extract(whole, checked((int)(at - offset) * 8), load.Width);
+                }
             var parts = new List<(int Offset, int Width)>();
             for (var covered = 0; covered < load.Width;)
             {
