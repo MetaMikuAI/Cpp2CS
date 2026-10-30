@@ -95,8 +95,18 @@ internal static class StackCallsRules
                 }
 
                 // 非泛型等调用可传空 MethodInfo；身份由调用目标解析，槽位仍按精确签名与 SP 核对。
-                if (ctx.Resolve(call) is { } direct && ctx.owner.abi.Classify(direct, out _) is { MethodInfo: null } directSignature && directSignature.Reads.ToHashSet().SetEquals(call.Sources) && ctx.owner.abi.StackArguments(directSignature).MethodInfoOffset is { } directHidden && ctx.ReachingStackStore(block, block.Statements.IndexOf(call), callSp + directHidden, []) is { Value: Const { Value: 0, Width: 64 } } zero)
-                    matches.Add((direct, zero));
+                if (ctx.Resolve(call) is { } direct && ctx.owner.abi.Classify(direct, out _) is { MethodInfo: null } directSignature && directSignature.Reads.ToHashSet().SetEquals(call.Sources) && ctx.owner.abi.StackArguments(directSignature).MethodInfoOffset is { } directHidden
+                    && ctx.ReachingStackStores(block, block.Statements.IndexOf(call), callSp + directHidden, []) is { Length: > 0 } zeros
+                    && zeros.All(s => s.Value is Const { Value: 0, Width: 64 }))
+                {
+                    ctx.State.Calls.callBindings.Commit(call, direct);
+                    foreach (var zero in zeros)
+                    {
+                        ctx.State.Lowering.dropped.Add(zero);
+                        ctx.owner.stackCalls.Add(new(ctx.entry, call.Address, zero.Address, callSp, callSp + directHidden, direct));
+                    }
+                    continue;
+                }
                 var unique = matches.Distinct().ToArray();
                 if (unique is not [var match])
                     continue;
@@ -115,6 +125,9 @@ internal static class StackCallsRules
     }
 
     internal static Store? ReachingStackStore(this RecoveryScope ctx, Block block, int before, long offset, HashSet<Block> active, int width = 64, bool allowWider = false)
+        => ctx.ReachingStackStores(block, before, offset, active, width, allowWider) is [var store] ? store : null;
+
+    internal static Store[]? ReachingStackStores(this RecoveryScope ctx, Block block, int before, long offset, HashSet<Block> active, int width = 64, bool allowWider = false)
     {
         if (!active.Add(block))
             return null;
@@ -128,13 +141,13 @@ internal static class StackCallsRules
             if (ctx.FrameOffset(store.Target) is not { } at)
                 return null;
             if (at < offset + width / 8 && offset < at + store.Value.Width / 8)
-                return at == offset && (store.Value.Width == width || allowWider && store.Value.Width > width && store.Value.Width <= 64) ? store : null;
+                return at == offset && (store.Value.Width == width || allowWider && store.Value.Width > width && store.Value.Width <= 64) ? [store] : null;
         }
 
         var parents = block.Predecessors.Where(p => ctx.blocks.Contains(p)).ToArray();
         if (parents.Length == 0)
             return null;
-        var sources = parents.Select(p => ctx.ReachingStackStore(p, p.Statements.Count, offset, new(active), width, allowWider)).ToArray();
-        return sources[0] is { } source && sources.All(s => ReferenceEquals(s, source)) ? source : null;
+        var sources = parents.Select(p => ctx.ReachingStackStores(p, p.Statements.Count, offset, new(active), width, allowWider)).ToArray();
+        return sources.All(s => s is not null) ? sources.SelectMany(s => s!).Distinct().ToArray() : null;
     }
 }
