@@ -243,9 +243,9 @@ internal static class ValueRecovery
                 return ctx.Comparison(c);
             case Convert c:
                 return ctx.Conversion(c, hint);
-            // klass == Class<T>（T sealed）? obj : null 即 obj as T，结果类型是 T。
+            // 精确类型检查后的引用选择；值类型仍保留装箱对象。
             case Ir.Select { Condition: Compare { Cond: Cond.Eq } test, False: Const { Value: 0 } } s when RuntimeRules.SealedOperands(test) is var (klass, sealedType) && ctx.State.Runtime.objectClasses.TryGetValue(klass, out var tested) && s.True == tested:
-                return ctx.Recover(tested, ctx.types.Object).Map<ManagedValue>(value => new IsInstValue(value, sealedType));
+                return ctx.Recover(tested, ctx.types.Object).Map<ManagedValue>(value => new IsInstValue(value, sealedType, sealedType.Definition.IsValueType ? ctx.types.Object : null));
             case Ir.Select s:
                 {
                     if (!ctx.Recover(s.Condition, ctx.types.Boolean).TryGet(out var condition, out failure))
@@ -469,7 +469,8 @@ internal static class ValueRecovery
     {
         RecoveryFailure failure;
         if (c.Cond is Cond.Eq or Cond.Ne && RuntimeRules.SealedOperands(c) is var (klass, sealedType) && ctx.State.Runtime.objectClasses.TryGetValue(klass, out var checkedObject))
-            return ctx.Recover(checkedObject, ctx.types.Object).Map<ManagedValue>(value => new ComparisonValue(c.Cond == Cond.Eq ? Cond.Ne : Cond.Eq, new IsInstValue(value, sealedType), new ConstantValue(0, sealedType, 64), ctx.types.Boolean));
+            return ctx.Recover(checkedObject, ctx.types.Object).Map<ManagedValue>(value => new ComparisonValue(c.Cond == Cond.Eq ? Cond.Ne : Cond.Eq,
+                new IsInstValue(value, sealedType, ctx.types.Object), new ConstantValue(0, ctx.types.Object, 64), ctx.types.Boolean));
         ManagedValue left, right;
         if (c.Left is Const && c.Right is not Const)
         {

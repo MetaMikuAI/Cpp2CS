@@ -41,13 +41,14 @@ internal static class RuntimeRules
         return found;
     }
 
-    /// <summary>比较的两侧是（类指针变量, sealed 引用类型的 Class 符号）时返回二者。</summary>
+    /// <summary>比较的两侧是类指针与无派生类型的 Class 符号时返回二者；Nullable 的装箱类型不同。</summary>
     internal static (Variable Klass, DefinitionRef Type)? SealedOperands(Compare c)
     {
         static bool Sealed(Expr e, out DefinitionRef type)
         {
             type = null!;
-            if (e is not Symbol { Kind: SymbolKind.Class, Value: DefinitionRef d } || d.Definition.IsInterface || d.Definition.IsValueType || (d.Definition.Attributes & System.Reflection.TypeAttributes.Sealed) == 0)
+            if (e is not Symbol { Kind: SymbolKind.Class, Value: DefinitionRef d } || d.Definition.IsInterface || d.Definition.FullName == "System.Nullable"
+                || !d.Definition.IsValueType && (d.Definition.Attributes & System.Reflection.TypeAttributes.Sealed) == 0)
                 return false;
             type = d;
             return true;

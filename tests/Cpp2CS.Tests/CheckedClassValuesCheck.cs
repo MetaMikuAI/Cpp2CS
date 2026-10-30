@@ -47,6 +47,26 @@ internal static class CheckedClassValuesCheck
                 a.True(checkedBlock.Statements[0] is Define { Value: Load { Address: Use original } } && original.Variable == value, "检查之前的类指针读取保持原值");
             }
         }
+        foreach (var mode in new[] { "equal", "not-equal", "wrong-object", "bypass" })
+        {
+            var type = new DefinitionRef(new TypeDef { Index = 2, Assembly = "Test", Namespace = "Test", Name = "Value", Token = 2,
+                Attributes = TypeAttributes.Public | TypeAttributes.Sealed, IsValueType = true, IsEnum = false }, []);
+            var value = new Use(new Variable(Storage.Gpr(0), 0), 64);
+            var klass = new Use(new Variable(Storage.Gpr(8), 1), 64);
+            var unequal = mode == "not-equal";
+            var entry = new Block(0x200) { Statements = [new Branch(0x204,
+                new Compare(unequal ? Cond.Ne : Cond.Eq, klass, new Symbol(SymbolKind.Class, type)), unequal ? 0x220UL : 0x210UL, unequal ? 0x210UL : 0x220UL)] };
+            var success = new Block(0x210) { Statements = [new Call(0x210, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.Unbox, null),
+                Arguments = [mode == "wrong-object" ? new Use(new Variable(Storage.Gpr(1), 0), 64) : value] }, new Return(0x214)] };
+            var failure = new Block(0x220) { Statements = [new Return(0x220)] };
+            MachineFunction.AddEdge(entry, success); MachineFunction.AddEdge(entry, failure);
+            if (mode == "bypass") MachineFunction.AddEdge(failure, success);
+            var function = new MachineFunction { Entry = entry.Start, Range = new(0x200, 0x224, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [entry, success, failure] };
+            function.Renumber();
+            var expected = mode is "equal" or "not-equal";
+            a.Equal(expected, CheckedClassValues.Run(function, _ => new Load(value, 64), () => new Variable(Storage.Temp(0), 1)), $"{mode} 的拆箱类型来源");
+            a.Equal(expected, Equals(((Call)success.Statements[0]).Op?.Operand, type), "仅成功入边的同一对象获得拆箱类型");
+        }
         return a.Finish("checked-class-values");
     }
 }

@@ -5,13 +5,30 @@ using Cpp2CS.Machine.Ssa;
 
 namespace Cpp2CS.Idioms;
 
-/// <summary>精确类指针检查成功后，同一 SSA 引用可按已检查的封闭引用类型使用。</summary>
+/// <summary>精确类指针检查成功后，细化同一 SSA 引用与后续拆箱的类型。</summary>
 internal static class CheckedClassValues
 {
     public static bool Run(MachineFunction function, Func<Use, Expr?> definition, Func<Variable> fresh)
     {
         var dominators = Dominators.Compute(function);
         var changed = false;
+        foreach (var block in function.Blocks)
+        {
+            if (block.Statements.LastOrDefault() is not Branch { Condition: Compare { Cond: Cond.Eq or Cond.Ne } compare } branch)
+                continue;
+            var (left, right) = compare.Left is Symbol ? (compare.Right, compare.Left) : (compare.Left, compare.Right);
+            if (left is not Use klass || right is not Symbol { Kind: SymbolKind.Class, Value: DefinitionRef { Definition.IsValueType: true } type }
+                || type.Definition.FullName == "System.Nullable" || definition(klass) is not Load { Width: 64, Address: Use value })
+                continue;
+            var success = block.NormalSuccessors.SingleOrDefault(b => b.Start == (compare.Cond == Cond.Eq ? branch.Target : branch.Fallthrough));
+            if (success is null || success.Predecessors.Count != 1) continue;
+            for (var index = 0; index < success.Statements.Count; index++)
+                if (success.Statements[index] is Call { Op: { Kind: OpKind.Unbox, Operand: null } op, Arguments: [var obj, ..] } unbox && obj == value)
+                {
+                    success.Statements[index] = unbox with { Op = op with { Operand = type } };
+                    changed = true;
+                }
+        }
         foreach (var block in function.Blocks)
             for (var index = 0; index < block.Statements.Count; index++)
             {
