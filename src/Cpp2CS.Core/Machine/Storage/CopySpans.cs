@@ -22,8 +22,14 @@ internal static class CopySpans
             var pieces = new List<(Expr Root, long Origin, int At, int Size)>();
             foreach (var store in block.Statements.OfType<Store>())
             {
-                if (store.Value is not Use use || !definitions.TryGetValue(use.Variable, out var value)
-                    || value is not Load { Width: 32 or 64 or 128 } load || load.Width != use.Width) continue;
+                if (store.Value is not Use use || !definitions.TryGetValue(use.Variable, out var value)) continue;
+                var load = value switch
+                {
+                    Load direct => direct,
+                    Ir.Convert { Kind: ConvKind.ZeroExtend, Operand: Load { Width: 8 or 16 or 32 } narrow } => narrow,
+                    _ => null,
+                };
+                if (load is not { Width: 8 or 16 or 32 or 64 or 128 } || load.Width != use.Width) continue;
                 if (store.Target is FrameAddress to && load.Address is not FrameAddress)
                 {
                     var source = Split(load.Address);

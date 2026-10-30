@@ -41,19 +41,22 @@ internal static class FrameExtentCheck
             && vector.Blocks[0].Statements[2] is Return { Value: Read { Storage.Width: 128 } }, "向量栈变量保留高 64 位");
         a.Equal(0, FrameSlotPromotion.Run(Function(-8, 128), (_, _) => 16), "跨入调用者帧的向量槽不能提升");
         foreach (var outward in new[] { false, true })
+        foreach (var tail in new[] { 32, 64 })
         {
             var block = new Block(0x1000);
             var root = new Use(new Variable(Storage.Gpr(0), 0), 64);
-            foreach (var (offset, width) in new[] { (0, 128), (16, 128), (32, 64) })
+            foreach (var (offset, width) in new[] { (0, 128), (16, 128), (32, tail) })
             {
                 var variable = new Variable(width == 128 ? Storage.Vec(offset / 16) : Storage.Gpr(1), 1);
                 Expr frame = new FrameAddress(-64 + offset);
                 Expr external = new Binary(BinOp.Add, root, Expr.C((ulong)offset, 64), 64);
-                block.Statements.Add(new Define((ulong)(0x1000 + offset), variable, new Load(outward ? frame : external, width)));
+                Expr load = new Load(outward ? frame : external, width);
+                if (width == 32) load = new Ir.Convert(ConvKind.ZeroExtend, load, 64);
+                block.Statements.Add(new Define((ulong)(0x1000 + offset), variable, load));
                 block.Statements.Add(new Store((ulong)(0x1004 + offset), outward ? external : frame, new Use(variable, width)));
             }
             var function = new MachineFunction { Entry = block.Start, Range = new(0x1000, 0x1040, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [block] };
-            a.True(FrameCopySpans.Read(function).SequenceEqual(new[] { (-64L, 40) }), "连续宽复制保留两侧标量尾部");
+            a.True(FrameCopySpans.Read(function).SequenceEqual(new[] { (-64L, 32 + tail / 8) }), "连续宽复制保留两侧标量尾部");
             block.Statements.Add(new Store(0x1030, new FrameAddress(-16), Expr.C(1, 64)));
             block.Statements.Add(new Return(0x1034) { Value = new Load(new FrameAddress(-16), 64) });
             a.Equal(1, FrameSlotPromotion.Run(function, preserved: FrameCopySpans.Read(function).ToArray()), "范围以外的独立标量仍可提升");
