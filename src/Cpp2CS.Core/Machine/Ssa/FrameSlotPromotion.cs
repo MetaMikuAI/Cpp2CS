@@ -114,6 +114,8 @@ public static class FrameSlotPromotion
         if (accesses.Count == 0) return 0;
 
         var promoted = new Dictionary<long, int>();
+        var splitZeros = new HashSet<Store>(ReferenceEqualityComparer.Instance);
+        var zeroVectors = statements.OfType<Define>().Where(d => d.Value is Const { Value: 0, Width: 128 }).Select(d => d.Target).ToHashSet();
         var groups = new List<List<Access>>();
         foreach (var access in accesses.OrderBy(a => a.Offset))
         {
@@ -131,6 +133,17 @@ public static class FrameSlotPromotion
             var mixed = group.Select(a => a.Offset).Distinct().Count() != 1 || group.Select(a => a.Width).Distinct().Count() != 1;
             if (escapes.Any(e => offset + width / 8 > e.Offset && (e.Size is not { } size || offset < e.Offset + size))) continue;
             if (preserved?.Any(r => offset + width / 8 > r.Offset && offset < r.Offset + r.Size) == true) continue;
+            // 向量清零可覆盖相邻独立局部。完整区域已通过逃逸/聚合检查，再拆成各自的存储单元。
+            if (overlapping && mixed && width == 128 && group.Any(a => !a.IsStore && a.Width == 64)
+                && group.All(a => a.IsStore && a.Width == 128 || a.Width <= 64 && (a.Offset - offset) % 8 + a.Width / 8 <= 8))
+            {
+                var wide = statements.OfType<Store>().Where(s => s.Value.Width == 128 && Resolve(s.Target) == offset).ToArray();
+                if (wide.Length > 0 && wide.All(s => s.Value is Const { Value: 0 } || s.Value is Use u && zeroVectors.Contains(u.Variable)))
+                {
+                    splitZeros.UnionWith(wide);
+                    continue;
+                }
+            }
             // 同起点暂存只观察低位，且每次写入都覆盖这些位：按读取宽度提升，保留完整区域的逃逸检查。
             if (overlapping && mixed && group.All(a => a.Offset == offset)
                 && group.Where(a => !a.IsStore).Select(a => a.Width).Distinct().ToArray() is [var observed and (32 or 64)]
@@ -140,6 +153,18 @@ public static class FrameSlotPromotion
                 && s.Value.Width < width && Resolve(s.Target) is { } at && at >= offset && at < offset + width / 8))) continue;
             if (!group.Any(a => a.IsStore) || !group.Any(a => !a.IsStore)) continue;
             promoted[offset] = width;
+        }
+        if (splitZeros.Count > 0)
+        {
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                    if (block.Statements[i] is Store store && splitZeros.Contains(store))
+                    {
+                        var offset = Resolve(store.Target)!.Value;
+                        block.Statements[i] = new Store(store.Address, new FrameAddress(offset), Expr.C(0, 64));
+                        block.Statements.Insert(++i, new Store(store.Address, new FrameAddress(offset + 8), Expr.C(0, 64)));
+                    }
+            return Run(function, argumentSize, preserved, overlapping);
         }
         if (promoted.Count == 0) return 0;
 

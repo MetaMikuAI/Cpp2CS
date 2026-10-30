@@ -110,6 +110,25 @@ internal static class FrameExtentCheck
 
     private static void OverlappingWrites(Assertions a)
     {
+        foreach (var mode in new[] { 0, 1, 2 })
+        {
+            var block = new Block(0x1000) { Statements = [
+                new Store(0x1000, new FrameAddress(-32), Expr.C(0, 128)),
+                new Store(0x1004, new FrameAddress(-24), Expr.C(7, 64)),
+                new Return(0x1008) { Value = new Binary(BinOp.Add, new Load(new FrameAddress(-32), 64), new Load(new FrameAddress(-24), 64), 64) }] };
+            if (mode == 2) block.Statements.Insert(2, new Call(0x1006, CallKind.Direct, Expr.C(0x2000, 64)) { Arguments = [new FrameAddress(-32)] });
+            var function = new MachineFunction { Entry = block.Start, Range = new(0x1000, 0x1010, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [block] };
+            var before = block.Statements.ToArray();
+            a.Equal(mode == 0 ? 2 : 0, FrameSlotPromotion.Run(function, preserved: mode == 1 ? [(-32, 16)] : [], overlapping: true), "向量清零只拆分不逃逸且无聚合要求的独立局部");
+            if (mode != 0)
+            {
+                a.True(before.SequenceEqual(block.Statements), "拒绝提升时不提前改写清零存储");
+                continue;
+            }
+            var evaluator = new Evaluator();
+            evaluator.Run(block.Statements.Take(3).ToArray(), 0x1000, 0x1008);
+            a.True(evaluator.Failure is null && evaluator.Eval(((Return)block.Statements[^1]).Value!) == 7, "两局部的初值和覆盖值保持一致");
+        }
         foreach (var width in new[] { 64, 128 })
         {
             Expr initial = Expr.C(0x1122334455667788, width);
