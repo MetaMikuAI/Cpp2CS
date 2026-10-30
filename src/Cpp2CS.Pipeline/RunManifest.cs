@@ -32,7 +32,8 @@ internal sealed class RunManifest
         foreach (var (key, file) in new[] { ("methods", request.Methods), ("verifiedAccessors", request.VerifiedAccessors), ("rejectedAccessors", request.RejectedAccessors) })
             if (file is not null) inputs[key] = Hash(file);
         foreach (var assembly in new[] { typeof(RunManifest).Assembly, typeof(Input.FactsBuilder).Assembly,
-            typeof(Recovery.MethodRecovery).Assembly, typeof(Output.BodyEmitter).Assembly, typeof(ICSharpCode.Decompiler.DecompilerSettings).Assembly })
+            typeof(Recovery.MethodRecovery).Assembly, typeof(Output.BodyEmitter).Assembly,
+            typeof(Cpp2CS.Extensions.Readability.FullBodyEmitter).Assembly, typeof(ICSharpCode.Decompiler.DecompilerSettings).Assembly })
             implementation[assembly.GetName().Name!] = Hash(assembly.Location);
         Save();
     }
@@ -74,14 +75,19 @@ internal sealed class RunManifest
             .Order(StringComparer.Ordinal).ToDictionary(f => Path.GetRelativePath(request.Output, f).Replace('\\', '/'), Hash) : null;
         var text = JsonSerializer.Serialize(new
         {
-            schema = 1, runId, status, request, inputs, implementation,
-            environment = new[] { "CPP2CS_READABILITY", "CPP2CS_FACT_CACHE", "CPP2CS_FRAME_SLOTS", "CPP2CS_EMIT_DEBUG",
-                "CPP2CS_EH_DEBUG", "CPP2CS_INLINE_DEBUG", "CPP2CS_FRAME_DEBUG", "CPP2CS_TYPING_TRACE", "CPP2CS_SOURCE_DUMP" }
-                .ToDictionary(k => k, Environment.GetEnvironmentVariable),
-            stages, seconds = elapsed.Elapsed.TotalSeconds,
+            schema = 1,
+            runId,
+            status,
+            request,
+            inputs,
+            implementation,
+            factSnapshot = request.Options.FactCacheFile is { } cache && File.Exists(cache) ? Hash(cache) : null,
+            stages,
+            seconds = elapsed.Elapsed.TotalSeconds,
             peakWorkingSet = Process.GetCurrentProcess().PeakWorkingSet64,
             outcome = result is null ? null : new { result.SelectedMethods, result.EmittedMethods, result.EmitFailures, result.PartialMethods },
-            validation = new { compile = "not-run", ilverify = "not-run", execution = "not-run" }, artifacts,
+            validation = new { compile = "not-run", ilverify = "not-run", execution = "not-run" },
+            artifacts,
         }, Json);
         var temporary = path + "." + runId + ".tmp";
         File.WriteAllText(temporary, text);

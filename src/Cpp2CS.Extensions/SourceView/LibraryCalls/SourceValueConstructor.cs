@@ -1,0 +1,77 @@
+using System.Reflection;
+using Cpp2CS.Ir;
+
+namespace Cpp2CS.Extensions.SourceView;
+
+/// <summary>仅按参数和常量初始化全部字段的值类型构造。</summary>
+internal sealed record SourceValueConstructor(MethodRef Method, IReadOnlyList<(FieldRef Field, ManagedValue Value)> Fields)
+{
+    internal static SourceValueConstructor? Create(MethodRef method, IReadOnlyList<ManagedStore> stores)
+    {
+        if (method.Method is not { Name: ".ctor", IsStatic: false, Owner.IsValueType: true }
+            || method.DeclaringType is not DefinitionRef type
+            || (type.Definition.Attributes & TypeAttributes.LayoutMask) == TypeAttributes.ExplicitLayout
+            || method.Method.Parameters.Any(p => p.Type is ByRefRef or PointerRef)) return null;
+        var expected = type.Definition.Fields.Where(f => !f.IsStatic).ToHashSet();
+        if (expected.Count == 0 || stores.Count != expected.Count) return null;
+        var fields = new List<(FieldRef, ManagedValue)>();
+        foreach (var store in stores)
+        {
+            if (store.Target is not FieldValue { Receiver: ArgumentValue { Index: -1 } } field
+                || !field.Field.DeclaringType.Equals(type) || !expected.Remove(field.Field.Field)
+                || !field.Type.Equals(store.Value.Type)) return null;
+            if (store.Value is ArgumentValue argument)
+            {
+                if (argument.Index < 0 || argument.Index >= method.Method.Parameters.Count
+                    || !argument.Type.Equals(method.Method.Parameters[argument.Index].Type.Substitute(method.TypeArguments, []))) return null;
+            }
+            else if (store.Value is not ConstantValue) return null;
+            fields.Add((field.Field, store.Value));
+        }
+        return new(method, fields);
+    }
+
+    internal NewObjectValue? Build(ComposedValue value)
+    {
+        static bool LocalStorage(ManagedValue v) => v switch
+        {
+            LocalValue { Type: DefinitionRef { Definition.IsValueType: true } } => true,
+            AddressValue address => LocalStorage(address.Target),
+            FieldValue { Accessor: null } field => LocalStorage(field.Receiver),
+            _ => false,
+        };
+        static bool Snapshot(ManagedValue v) => v switch
+        {
+            LocalValue or ArgumentValue or ConstantValue => true,
+            NewObjectValue { Transparent: true } created => created.Arguments.All(Snapshot),
+            FieldValue { Accessor: null } field => LocalStorage(field.Receiver),
+            BinaryValue { Op: BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv } binary => Snapshot(binary.Left) && Snapshot(binary.Right),
+            ConversionValue conversion => Snapshot(conversion.Operand),
+            _ => false,
+        };
+        if (!value.Type.Equals(Method.DeclaringType) || value.Leaves.Count != Fields.Count
+            || value.Leaves.Any(l => l.Path.Count != 1 || !Snapshot(l.Value))
+            || value.Leaves.Select(l => l.Path[0]).Distinct().Count() != Fields.Count) return null;
+        var arguments = new ManagedValue?[Method.Method.Parameters.Count];
+        foreach (var (field, expected) in Fields)
+        {
+            var actual = value.Leaves.FirstOrDefault(l => l.Path[0].Equals(field)).Value;
+            if (actual is null || !actual.Type.Equals(expected.Type)) return null;
+            if (expected is ArgumentValue parameter)
+            {
+                if (arguments[parameter.Index] is { } bound && !bound.Equals(actual)) return null;
+                arguments[parameter.Index] = actual;
+            }
+            else if (!expected.Equals(actual)) return null;
+        }
+        return arguments.Any(a => a is null) ? null : new NewObjectValue(Method, arguments!) { Transparent = true };
+    }
+
+    internal ComposedValue? Expand(IReadOnlyList<ManagedValue> arguments)
+    {
+        if (arguments.Count != Method.Method.Parameters.Count || arguments.Where((a, i) =>
+            !a.Type.Equals(Method.Method.Parameters[i].Type.Substitute(Method.TypeArguments, Method.MethodArguments))).Any()) return null;
+        return new(Method.DeclaringType, Fields.Select(f => ((IReadOnlyList<FieldRef>)new[] { f.Field },
+            f.Value is ArgumentValue parameter ? arguments[parameter.Index] : f.Value)).ToArray());
+    }
+}

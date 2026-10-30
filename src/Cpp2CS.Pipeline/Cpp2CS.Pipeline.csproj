@@ -3,5 +3,6 @@
     <InternalsVisibleTo Include="Cpp2CS.Tests" />
     <ProjectReference Include="../Cpp2CS.Input/Cpp2CS.Input.csproj" />
     <ProjectReference Include="../Cpp2CS.Output/Cpp2CS.Output.csproj" />
+    <ProjectReference Include="../Cpp2CS.Extensions/Cpp2CS.Extensions.csproj" />
   </ItemGroup>
 </Project>

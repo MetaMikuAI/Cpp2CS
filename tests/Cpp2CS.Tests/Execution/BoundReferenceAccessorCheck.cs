@@ -24,13 +24,13 @@ internal static class BoundReferenceAccessorCheck
             var concrete = entry.Method!;
             if (owners.Contains(concrete.Method.Owner)
                 || recovery.RecoverInstance(concrete, entry.Address).Body is not { } original
-                || FieldAccessor.Recognize(original, false, types) is not { ValueType: var valueType } || !valueType.Equals(types.Object)) continue;
+                || FieldAccessors.Recognize(original, false, types) is not { ValueType: var valueType } || !valueType.Equals(types.Object)) continue;
             owners.Add(concrete.Method.Owner);
             var parameter = new GenericParameterRef("TContext", true, 0) { Binding = new(NativeBindingKind.Reference, types.Object, entry.Address) };
             MethodRef Instance(TypeRef argument) => concrete with { TypeArguments = concrete.TypeArguments.Select(t => t.Equals(types.Object) ? argument : t).ToArray() };
             var bound = recovery.RecoverInstance(Instance(parameter), entry.Address);
             a.True(bound.Body is not null && bound.Holes.Count == 0, "已有引用布局的依赖访问器可恢复");
-            a.True(bound.Body is { } body && FieldAccessor.Recognize(body, false, types) is { ValueType: var actual } && actual.Equals(parameter),
+            a.True(bound.Body is { } body && FieldAccessors.Recognize(body, false, types) is { ValueType: var actual } && actual.Equals(parameter),
                 "访问器结果保留调用者的类型参数身份");
             foreach (var invalid in new[] { parameter with { Binding = null }, parameter with { Binding = new(NativeBindingKind.Shared) },
                 parameter with { Binding = new(NativeBindingKind.Reference, types.Object, 0) }, parameter with { Binding = new(NativeBindingKind.Scalar, types.Int32, entry.Address) } })

@@ -165,7 +165,7 @@ internal static class SourceIteratorCopiesCheck
             }
         }
         module.Write(input);
-        var source = Decompilation.Decompile(input, directory, t => t.ReflectionName == "Probe", false, true).Single().Source;
+        var source = FullDecompilation.Decompile(input, directory, t => t.ReflectionName == "Probe", false, true).Single().Source;
         File.WriteAllText(Path.Combine(directory, "Probe.cs"), source);
         var rebuilt = Compile(source, "IteratorCopies.Rebuilt");
         File.WriteAllBytes(Path.Combine(directory, "IteratorCopies.Rebuilt.dll"), rebuilt);
@@ -179,7 +179,7 @@ internal static class SourceIteratorCopiesCheck
             var system = new ICSharpCode.Decompiler.TypeSystem.DecompilerTypeSystem(file, resolver, Decompilation.Settings(true));
             var constructor = system.MainModule.TopLevelTypeDefinitions.Single(t => t.Name == "Probe").NestedTypes
                 .Single(t => t.Name == link.DeclaringType.Name).Methods.Single(m => m.IsConstructor && !m.IsStatic);
-            return (bool)typeof(Decompilation).GetNestedType("ClosureLinks", System.Reflection.BindingFlags.NonPublic)!
+            return (bool)typeof(ReadabilityTransforms).GetNestedType("ClosureLinks", System.Reflection.BindingFlags.NonPublic)!
                 .GetMethod("EmptyConstructor", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.Invoke(null, [constructor])!;
         }
         a.True(EmptyClosureConstructor(input), "普通闭包构造只调用 object 构造");

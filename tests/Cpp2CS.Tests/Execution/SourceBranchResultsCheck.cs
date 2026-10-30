@@ -146,7 +146,7 @@ internal static class SourceBranchResultsCheck
         orderIl.Append(orderIl.Create(OpCodes.Ldloc, right)); orderIl.Append(orderIl.Create(OpCodes.Add)); orderIl.Append(orderIl.Create(OpCodes.Ret));
         var input = Path.Combine(directory, "Input.dll");
         module.Write(input);
-        var source = Decompilation.Decompile(input, directory, t => t.Name == "Probe", false, true).Single().Source;
+        var source = FullDecompilation.Decompile(input, directory, t => t.Name == "Probe", false, true).Single().Source;
         File.WriteAllText(Path.Combine(directory, "Probe.cs"), source);
         var rebuilt = Compile(source, "BranchResults.Rebuilt");
         var a = new Assertions();

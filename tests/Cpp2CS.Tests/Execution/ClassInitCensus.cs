@@ -1,10 +1,10 @@
 using System.Reflection;
 using Cpp2CS.Facts;
-using Cpp2CS.Flow;
+using Cpp2CS.Machine.Flow;
 using Cpp2CS.Idioms;
 using Cpp2CS.Input;
 using Cpp2CS.Ir;
-using Cpp2CS.Lifting;
+using Cpp2CS.Machine.Lifting;
 using Cpp2CS.Model;
 
 namespace Cpp2CS.Tests.Execution;

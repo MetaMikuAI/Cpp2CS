@@ -1,5 +1,5 @@
 using System.Reflection;
-using Cpp2CS.Flow;
+using Cpp2CS.Machine.Flow;
 using Cpp2CS.Input;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -15,15 +15,13 @@ internal static class CheckedVirtualIdentityCheck
         var facts = FactsBuilder.Build(binary, metadata);
         var recovery = new MethodRecovery(facts, new ManagedTypes(facts.Model, facts.Layouts));
         var method = MethodRef.Open(facts.Model.Methods.Single(m => m.Owner.FullName == "Sekai.VirtualLiveSelectView" && m.Name == "OnInstantiate"));
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-        var contextType = typeof(MethodRecovery).GetNestedType("Context", BindingFlags.NonPublic)!;
         var a = new Assertions();
         foreach (var mode in new[] { "checked", "missing", "inverted", "other-flag", "other-exception" })
         {
-            var context = Activator.CreateInstance(contextType, flags, null, [recovery, method, method.Method.Address], null)!;
-            a.True((bool)contextType.GetMethod("Prepare", flags)!.Invoke(context, null)!, "准备实际强制转换入口");
-            a.True(contextType.GetMethod("Analyze", flags)!.Invoke(context, null) is null, "恢复分析成功");
-            var function = (MachineFunction)contextType.GetField("function", flags)!.GetValue(context)!;
+            var context = new RecoveryScope(recovery, method, method.Method.Address);
+            a.True(context.Prepare(), "准备实际强制转换入口");
+            a.True(context.Analyze() is null, "恢复分析成功");
+            var function = context.function;
             var call = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Single(c => c.Op?.Kind == OpKind.CallVirtual);
             var entry = ((Use)call.Target).Variable;
             var block = function.Blocks.Single(b => b.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.ThrowIf));
@@ -38,9 +36,9 @@ internal static class CheckedVirtualIdentityCheck
                 "other-exception" => guard with { Op = new(OpKind.ThrowIf, "System.Exception") },
                 _ => guard,
             };
-            var runtime = (HashSet<Variable>)contextType.GetField("runtime", flags)!.GetValue(context)!;
+            var runtime = context.State.Runtime.runtime;
             runtime.Clear();
-            contextType.GetMethod("MarkVtableLoads", flags)!.Invoke(context, null);
+            context.MarkVtableLoads();
             a.Equal(mode == "checked", runtime.Contains(entry), "仅同一对象的成功类型检查证明虚表身份：" + mode);
         }
         return a.Finish("checked-virtual-identity");

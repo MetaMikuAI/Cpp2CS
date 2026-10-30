@@ -76,7 +76,7 @@ internal static class FactsCacheCheck
         static object? Value(AbiValue? value) => value is null ? null : new { Type = value.Type.ToString(), value.Passing, value.Pieces };
         var manifest = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            Snapshot = facts.Unregistered.Capture(facts),
+            Snapshot = facts.Unregistered.Capture(facts.Base),
             Abi = facts.Unregistered.All.Select(m => new { m.Address, This = Value(m.Abi.This),
                 Parameters = m.Abi.Parameters.Select(Value), Return = Value(m.Abi.Return), m.Abi.MethodInfo }),
             Checks = facts.Checks.All,
@@ -98,7 +98,7 @@ internal static class FactsCacheCheck
         var types = new ManagedTypes(facts.Model, facts.Layouts);
         var recovery = new MethodRecovery(facts, types);
         var skeleton = new Skeleton(facts.Model);
-        var emitter = new BodyEmitter(skeleton, types);
+        var emitter = new FullBodyEmitter(skeleton, types);
         // 从当前输入选取实际调用未注册目标的函数。
         var addresses = facts.Unregistered.All.SelectMany(m => m.Witnesses)
             .Select(w => w.Caller).Where(c => facts.EntriesAt(c).Any(e => e.Method is not null)).Distinct().Take(12);

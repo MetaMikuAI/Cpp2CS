@@ -19,7 +19,7 @@ internal static class ExceptionOutputCheck
             && m.Owner.GenericParameters.Count == 0 && m.ReturnType.Equals(types.Int32) && m.Address != 0);
         var tested = new MethodRef(definition, [], []);
         var skeleton = new Skeleton(facts.Model);
-        var emitter = new BodyEmitter(skeleton, types);
+        var emitter = new FullBodyEmitter(skeleton, types);
         var index = new WorldIndex(facts, types);
         var model = new CecilModel(facts.Model, skeleton);
         var interpreter = new CilInterpreter(model, index);

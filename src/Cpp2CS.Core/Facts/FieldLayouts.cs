@@ -1,32 +1,6 @@
 using System.Reflection;
-using Cpp2CS.Model;
 
 namespace Cpp2CS.Facts;
-
-/// <summary>布局中的一个字段。Offset：实例字段相对对象起始（含 0x10 对象头，值类型同样按装箱布局），静态字段相对 static_fields。</summary>
-public sealed record FieldSlot(FieldDef Field, TypeRef Type, int Offset);
-
-/// <summary>
-/// 一个（可能是泛型实例的）类型的布局，与 libil2cpp Il2CppClass 中的同名字段一致：
-/// InstanceSize 含对象头；值类型的值大小为 InstanceSize - 0x10；MinimumAlignment 用于其作为字段时的对齐。
-/// </summary>
-public sealed class TypeLayout
-{
-    public required DefinitionRef Type { get; init; }
-    public required int InstanceSize { get; init; }
-    public required int ActualSize { get; init; }
-    public required int MinimumAlignment { get; init; }
-    public required bool HasReferences { get; init; }
-    public required IReadOnlyList<FieldSlot> Fields { get; init; }
-    public required IReadOnlyList<FieldSlot> Statics { get; init; }
-    public required int StaticSize { get; init; }
-    public required IReadOnlyList<FieldSlot> ThreadStatics { get; init; }
-    /// <summary>非泛型类型：偏移与实例大小取自元数据（运行时同样如此）；Computed 为按算法重算的结果，供核对。</summary>
-    public required bool FromMetadata { get; init; }
-    public bool IsValueType => Type.Definition.IsValueType;
-    public int ValueSize => InstanceSize - RuntimeLayout.ObjectHeaderSize;
-    public FieldSlot? Field(FieldDef field) => Fields.FirstOrDefault(f => f.Field == field) ?? Statics.FirstOrDefault(f => f.Field == field);
-}
 
 /// <summary>
 /// 按 libil2cpp 2022.3（vm/Class.cpp LayoutFieldsLocked、metadata/FieldLayout.cpp LayoutFields）计算字段布局。
@@ -35,7 +9,7 @@ public sealed class TypeLayout
 /// 要点：从父类的 actualSize（而非对齐后的 instance_size）开始排布（clang 复用尾部填充）；
 /// 含引用的类型忽略 packing；非泛型的显式布局取元数据偏移；无实例字段的值类型大小为 1。
 /// </summary>
-public sealed class FieldLayouts
+public sealed class FieldLayouts : ITypeLayouts
 {
     private const int EmptyStructSize = 1;
     private readonly ProgramModel model;
@@ -131,8 +105,16 @@ public sealed class FieldLayouts
             actualSize = generic || definition.ClassSizeIsDefault != false ? actualClassSize : instanceSize;
             provisional[((type, NativeBindings.Key(type)), preferMetadata)] = new TypeLayout
             {
-                Type = type, InstanceSize = instanceSize, ActualSize = actualSize, MinimumAlignment = minimumAlignment, HasReferences = hasReferences,
-                Fields = fields, Statics = [], StaticSize = 0, ThreadStatics = [], FromMetadata = false,
+                Type = type,
+                InstanceSize = instanceSize,
+                ActualSize = actualSize,
+                MinimumAlignment = minimumAlignment,
+                HasReferences = hasReferences,
+                Fields = fields,
+                Statics = [],
+                StaticSize = 0,
+                ThreadStatics = [],
+                FromMetadata = false,
             };
 
             var (statSize, _, _, statOffsets) = LayoutFields(statics, FieldType, 0, 0, 1, 0, null, preferMetadata);
@@ -202,15 +184,7 @@ public sealed class FieldLayouts
     /// 实参含完全共享占位类型的泛型实例：共享代码里的字段偏移、值大小由运行时经 RGCTX 读取，不是代码中的常量，
     /// 这类实例的布局只描述占位类型本身，不能用来解释共享代码的访存偏移。
     /// </summary>
-    public static bool IsFullyShared(TypeRef type) => type switch
-    {
-        DefinitionRef d => d.Definition.Namespace == "Unity.IL2CPP.Metadata" && d.Definition.Name.StartsWith("__Il2CppFullyShared", StringComparison.Ordinal)
-            || d.Arguments.Any(IsFullyShared),
-        ArrayRef a => IsFullyShared(a.Element),
-        PointerRef p => IsFullyShared(p.Element),
-        ByRefRef r => IsFullyShared(r.Element),
-        _ => false,
-    };
+    public static bool IsFullyShared(TypeRef type) => SharedTypes.IsFullyShared(type);
 
     /// <summary>
     /// 显式布局值类型的对齐：il2cpp.exe（生成元数据）与运行时 LayoutFields（对显式偏移再对齐、取字段最大对齐）结论不同，

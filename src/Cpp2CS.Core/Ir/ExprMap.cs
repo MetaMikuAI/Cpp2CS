@@ -1,3 +1,4 @@
+
 namespace Cpp2CS.Ir;
 
 /// <summary>表达式的通用遍历与重写。重写时子表达式不变则复用原对象。</summary>
@@ -10,82 +11,82 @@ public static class ExprMap
         switch (expr)
         {
             case Binary b:
-            {
-                var l = Map(b.Left, f); var r = Map(b.Right, f);
-                return ReferenceEquals(l, b.Left) && ReferenceEquals(r, b.Right) ? b : b with { Left = l, Right = r };
-            }
-            case Unary u:
-            {
-                var o = Map(u.Operand, f);
-                return ReferenceEquals(o, u.Operand) ? u : u with { Operand = o };
-            }
-            case Convert c:
-            {
-                var o = Map(c.Operand, f);
-                return ReferenceEquals(o, c.Operand) ? c : c with { Operand = o };
-            }
-            case Compare c:
-            {
-                var l = Map(c.Left, f); var r = Map(c.Right, f);
-                return ReferenceEquals(l, c.Left) && ReferenceEquals(r, c.Right) ? c : c with { Left = l, Right = r };
-            }
-            case Select s:
-            {
-                var c = Map(s.Condition, f); var t = Map(s.True, f); var e = Map(s.False, f);
-                return ReferenceEquals(c, s.Condition) && ReferenceEquals(t, s.True) && ReferenceEquals(e, s.False) ? s : s with { Condition = c, True = t, False = e };
-            }
-            case Logical l:
-            {
-                var a = Map(l.Left, f); var b = Map(l.Right, f);
-                return ReferenceEquals(a, l.Left) && ReferenceEquals(b, l.Right) ? l : l with { Left = a, Right = b };
-            }
-            case Not n:
-            {
-                var o = Map(n.Operand, f);
-                return ReferenceEquals(o, n.Operand) ? n : n with { Operand = o };
-            }
-            case Extract e:
-            {
-                var o = Map(e.Operand, f);
-                return ReferenceEquals(o, e.Operand) ? e : e with { Operand = o };
-            }
-            case Insert i:
-            {
-                var b = Map(i.Base, f); var v = Map(i.Value, f);
-                return ReferenceEquals(b, i.Base) && ReferenceEquals(v, i.Value) ? i : new Insert(b, v, i.Low);
-            }
-            case Load l:
-            {
-                var a = Map(l.Address, f);
-                return ReferenceEquals(a, l.Address) ? l : l with { Address = a };
-            }
-            case Flags fl:
-            {
-                var l = Map(fl.Left, f); var r = fl.Right is null ? null : Map(fl.Right, f);
-                return ReferenceEquals(l, fl.Left) && ReferenceEquals(r, fl.Right) ? fl : fl with { Left = l, Right = r };
-            }
-            case TestFlags t:
-            {
-                var o = Map(t.FlagsValue, f);
-                return ReferenceEquals(o, t.FlagsValue) ? t : t with { FlagsValue = o };
-            }
-            case ConditionalFlags c:
-            {
-                var a = Map(c.Condition, f); var b = Map(c.Taken, f);
-                return ReferenceEquals(a, c.Condition) && ReferenceEquals(b, c.Taken) ? c : c with { Condition = a, Taken = b };
-            }
-            case Intrinsic i:
-            {
-                Expr[]? args = null;
-                for (var k = 0; k < i.Arguments.Length; k++)
                 {
-                    var a = Map(i.Arguments[k], f);
-                    if (ReferenceEquals(a, i.Arguments[k])) continue;
-                    args ??= (Expr[])i.Arguments.Clone();
-                    args[k] = a;
+                    var l = Map(b.Left, f); var r = Map(b.Right, f);
+                    return ReferenceEquals(l, b.Left) && ReferenceEquals(r, b.Right) ? b : b with { Left = l, Right = r };
                 }
-                return args is null ? i : i with { Arguments = args };
-            }
+            case Unary u:
+                {
+                    var o = Map(u.Operand, f);
+                    return ReferenceEquals(o, u.Operand) ? u : u with { Operand = o };
+                }
+            case Convert c:
+                {
+                    var o = Map(c.Operand, f);
+                    return ReferenceEquals(o, c.Operand) ? c : c with { Operand = o };
+                }
+            case Compare c:
+                {
+                    var l = Map(c.Left, f); var r = Map(c.Right, f);
+                    return ReferenceEquals(l, c.Left) && ReferenceEquals(r, c.Right) ? c : c with { Left = l, Right = r };
+                }
+            case Select s:
+                {
+                    var c = Map(s.Condition, f); var t = Map(s.True, f); var e = Map(s.False, f);
+                    return ReferenceEquals(c, s.Condition) && ReferenceEquals(t, s.True) && ReferenceEquals(e, s.False) ? s : s with { Condition = c, True = t, False = e };
+                }
+            case Logical l:
+                {
+                    var a = Map(l.Left, f); var b = Map(l.Right, f);
+                    return ReferenceEquals(a, l.Left) && ReferenceEquals(b, l.Right) ? l : l with { Left = a, Right = b };
+                }
+            case Not n:
+                {
+                    var o = Map(n.Operand, f);
+                    return ReferenceEquals(o, n.Operand) ? n : n with { Operand = o };
+                }
+            case Extract e:
+                {
+                    var o = Map(e.Operand, f);
+                    return ReferenceEquals(o, e.Operand) ? e : e with { Operand = o };
+                }
+            case Insert i:
+                {
+                    var b = Map(i.Base, f); var v = Map(i.Value, f);
+                    return ReferenceEquals(b, i.Base) && ReferenceEquals(v, i.Value) ? i : new Insert(b, v, i.Low);
+                }
+            case Load l:
+                {
+                    var a = Map(l.Address, f);
+                    return ReferenceEquals(a, l.Address) ? l : l with { Address = a };
+                }
+            case Flags fl:
+                {
+                    var l = Map(fl.Left, f); var r = fl.Right is null ? null : Map(fl.Right, f);
+                    return ReferenceEquals(l, fl.Left) && ReferenceEquals(r, fl.Right) ? fl : fl with { Left = l, Right = r };
+                }
+            case TestFlags t:
+                {
+                    var o = Map(t.FlagsValue, f);
+                    return ReferenceEquals(o, t.FlagsValue) ? t : t with { FlagsValue = o };
+                }
+            case ConditionalFlags c:
+                {
+                    var a = Map(c.Condition, f); var b = Map(c.Taken, f);
+                    return ReferenceEquals(a, c.Condition) && ReferenceEquals(b, c.Taken) ? c : c with { Condition = a, Taken = b };
+                }
+            case Intrinsic i:
+                {
+                    Expr[]? args = null;
+                    for (var k = 0; k < i.Arguments.Length; k++)
+                    {
+                        var a = Map(i.Arguments[k], f);
+                        if (ReferenceEquals(a, i.Arguments[k])) continue;
+                        args ??= (Expr[])i.Arguments.Clone();
+                        args[k] = a;
+                    }
+                    return args is null ? i : i with { Arguments = args };
+                }
             default:
                 return expr;
         }
@@ -144,28 +145,28 @@ public static class ExprMap
             case Assign a: { var v = f(a.Value); return ReferenceEquals(v, a.Value) ? a : a with { Value = v }; }
             case Define d: { var v = f(d.Value); return ReferenceEquals(v, d.Value) ? d : d with { Value = v }; }
             case Store s:
-            {
-                var t = f(s.Target); var v = f(s.Value);
-                return ReferenceEquals(t, s.Target) && ReferenceEquals(v, s.Value) ? s : s with { Target = t, Value = v };
-            }
+                {
+                    var t = f(s.Target); var v = f(s.Value);
+                    return ReferenceEquals(t, s.Target) && ReferenceEquals(v, s.Value) ? s : s with { Target = t, Value = v };
+                }
             case Call c:
-            {
-                var t = f(c.Target);
-                var args = c.Arguments.Select(f).ToArray();
-                var receiver = c.DelegateReceiver is { } r ? f(r) : null;
-                return ReferenceEquals(t, c.Target) && ReferenceEquals(receiver, c.DelegateReceiver) && args.AsSpan().SequenceEqual(c.Arguments)
-                    ? c : c with { Target = t, Arguments = args, DelegateReceiver = receiver };
-            }
+                {
+                    var t = f(c.Target);
+                    var args = c.Arguments.Select(f).ToArray();
+                    var receiver = c.DelegateReceiver is { } r ? f(r) : null;
+                    return ReferenceEquals(t, c.Target) && ReferenceEquals(receiver, c.DelegateReceiver) && args.AsSpan().SequenceEqual(c.Arguments)
+                        ? c : c with { Target = t, Arguments = args, DelegateReceiver = receiver };
+                }
             case Branch b: { var v = f(b.Condition); return ReferenceEquals(v, b.Condition) ? b : b with { Condition = v }; }
             case IndirectJump j: { var v = f(j.Target); return ReferenceEquals(v, j.Target) ? j : j with { Target = v }; }
             case Return r:
-            {
-                var v = r.Value is null ? null : f(r.Value);
-                var b = r.Buffer is null ? null : f(r.Buffer);
-                var pieces = r.Pieces.Select(p => p with { Value = f(p.Value) }).ToArray();
-                return ReferenceEquals(v, r.Value) && ReferenceEquals(b, r.Buffer) && pieces.AsSpan().SequenceEqual(r.Pieces)
-                    ? r : r with { Value = v, Buffer = b, Pieces = pieces };
-            }
+                {
+                    var v = r.Value is null ? null : f(r.Value);
+                    var b = r.Buffer is null ? null : f(r.Buffer);
+                    var pieces = r.Pieces.Select(p => p with { Value = f(p.Value) }).ToArray();
+                    return ReferenceEquals(v, r.Value) && ReferenceEquals(b, r.Buffer) && pieces.AsSpan().SequenceEqual(r.Pieces)
+                        ? r : r with { Value = v, Buffer = b, Pieces = pieces };
+                }
             default: return stmt;
         }
     }

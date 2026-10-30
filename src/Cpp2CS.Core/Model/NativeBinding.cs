@@ -1,3 +1,4 @@
+
 namespace Cpp2CS.Model;
 
 public enum NativeBindingKind { Reference, Scalar, Aggregate, Shared }

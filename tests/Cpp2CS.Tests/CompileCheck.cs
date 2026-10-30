@@ -43,7 +43,7 @@ internal static class CompileCheck
     {
         var watch = Stopwatch.StartNew();
         var main = Path.Combine(directory, assemblyName + ".dll");
-        var sources = Decompilation.Decompile(main, directory, _ => true, assemblyAttributes: true, recoveringBodies: true);
+        var sources = FullDecompilation.Decompile(main, directory, _ => true, assemblyAttributes: true, recoveringBodies: true);
         var decompiled = watch.Elapsed;
         var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
         var trees = new SyntaxTree[sources.Count];

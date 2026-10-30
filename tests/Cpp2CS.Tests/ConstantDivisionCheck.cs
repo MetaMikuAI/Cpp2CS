@@ -1,7 +1,7 @@
 using System.Numerics;
 using Cpp2CS.Facts;
-using Cpp2CS.Flow;
-using Cpp2CS.Functions;
+using Cpp2CS.Machine.Flow;
+using Cpp2CS.Image;
 using Cpp2CS.Idioms;
 using Cpp2CS.Ir;
 

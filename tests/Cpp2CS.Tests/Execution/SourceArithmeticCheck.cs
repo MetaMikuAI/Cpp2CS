@@ -1,5 +1,5 @@
 using Cpp2CS.Facts;
-using Cpp2CS.Images;
+using Cpp2CS.Image;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;

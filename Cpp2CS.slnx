@@ -9,4 +9,5 @@
   <Folder Name="/tests/">
     <Project Path="tests/Cpp2CS.Tests/Cpp2CS.Tests.csproj" />
   </Folder>
+  <Project Path="src/Cpp2CS.Extensions/Cpp2CS.Extensions.csproj" />
 </Solution>

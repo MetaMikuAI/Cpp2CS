@@ -1,5 +1,4 @@
 using Cpp2CS.Ir;
-using Cpp2CS.Model;
 
 namespace Cpp2CS.Facts;
 
@@ -45,7 +44,7 @@ public enum ValueKind { Void, Integer, Reference, Float, Double, Struct }
 /// 完全共享的类型参数占一个整数寄存器；其返回缓冲区放在显式参数之后、MethodInfo 之前。
 /// 大小与成员布局取自 <see cref="FieldLayouts"/>；缺少原生实例见证的开放类型参数无法分类（返回 null）。
 /// </summary>
-public sealed partial class ManagedAbi(FieldLayouts layouts)
+public sealed partial class ManagedAbi(ITypeLayouts layouts)
 {
     private const int Registers = 8;
 
@@ -154,39 +153,39 @@ public sealed partial class ManagedAbi(FieldLayouts layouts)
                 if (vec >= Registers) return new AbiValue(type, Passing.Stack, []);
                 return new AbiValue(type, Passing.Registers, [new AbiPiece(Storage.Vec(vec++), Kind(type) == ValueKind.Float ? 32 : 64, 0)]);
             case ValueKind.Struct:
-            {
-                var size = Size(type);
-                if (size <= 0)
                 {
-                    problem = $"大小未知的结构 {type}";
-                    return null;
-                }
-                if (Hfa(type) is { } hfa)
-                {
-                    if (vec + hfa.Count > Registers)
+                    var size = Size(type);
+                    if (size <= 0)
                     {
-                        vec = Registers;
+                        problem = $"大小未知的结构 {type}";
+                        return null;
+                    }
+                    if (Hfa(type) is { } hfa)
+                    {
+                        if (vec + hfa.Count > Registers)
+                        {
+                            vec = Registers;
+                            return new AbiValue(type, Passing.Stack, []);
+                        }
+                        var pieces = new AbiPiece[hfa.Count];
+                        for (var k = 0; k < hfa.Count; k++) pieces[k] = new AbiPiece(Storage.Vec(vec++), hfa.Width, k * hfa.Width / 8);
+                        return new AbiValue(type, Passing.Registers, pieces);
+                    }
+                    if (size > 16)
+                    {
+                        if (gpr >= Registers) return new AbiValue(type, Passing.Stack, []);
+                        return new AbiValue(type, Passing.Indirect, [new AbiPiece(Storage.Gpr(gpr++), 64, 0)]);
+                    }
+                    var words = (size + 7) / 8;
+                    if (gpr + words > Registers)
+                    {
+                        gpr = Registers;
                         return new AbiValue(type, Passing.Stack, []);
                     }
-                    var pieces = new AbiPiece[hfa.Count];
-                    for (var k = 0; k < hfa.Count; k++) pieces[k] = new AbiPiece(Storage.Vec(vec++), hfa.Width, k * hfa.Width / 8);
-                    return new AbiValue(type, Passing.Registers, pieces);
+                    var parts = new AbiPiece[words];
+                    for (var k = 0; k < words; k++) parts[k] = new AbiPiece(Storage.Gpr(gpr++), Math.Min(64, (size - k * 8) * 8), k * 8);
+                    return new AbiValue(type, Passing.Registers, parts);
                 }
-                if (size > 16)
-                {
-                    if (gpr >= Registers) return new AbiValue(type, Passing.Stack, []);
-                    return new AbiValue(type, Passing.Indirect, [new AbiPiece(Storage.Gpr(gpr++), 64, 0)]);
-                }
-                var words = (size + 7) / 8;
-                if (gpr + words > Registers)
-                {
-                    gpr = Registers;
-                    return new AbiValue(type, Passing.Stack, []);
-                }
-                var parts = new AbiPiece[words];
-                for (var k = 0; k < words; k++) parts[k] = new AbiPiece(Storage.Gpr(gpr++), Math.Min(64, (size - k * 8) * 8), k * 8);
-                return new AbiValue(type, Passing.Registers, parts);
-            }
             case ValueKind.Void:
                 problem = "void 参数";
                 return null;
@@ -209,19 +208,19 @@ public sealed partial class ManagedAbi(FieldLayouts layouts)
             case ValueKind.Float or ValueKind.Double:
                 return new AbiValue(type, Passing.Registers, [new AbiPiece(Storage.Vec(0), Kind(type) == ValueKind.Float ? 32 : 64, 0)]);
             case ValueKind.Struct:
-            {
-                var size = Size(type);
-                if (size <= 0)
                 {
-                    problem = $"大小未知的结构 {type}";
-                    return null;
+                    var size = Size(type);
+                    if (size <= 0)
+                    {
+                        problem = $"大小未知的结构 {type}";
+                        return null;
+                    }
+                    if (Hfa(type) is { } hfa)
+                        return new AbiValue(type, Passing.Registers, Enumerable.Range(0, hfa.Count).Select(k => new AbiPiece(Storage.Vec(k), hfa.Width, k * hfa.Width / 8)).ToArray());
+                    if (size > 16) return new AbiValue(type, Passing.Indirect, [new AbiPiece(Storage.Gpr(8), 64, 0)]);
+                    return new AbiValue(type, Passing.Registers, Enumerable.Range(0, (size + 7) / 8)
+                        .Select(k => new AbiPiece(Storage.Gpr(k), Math.Min(64, (size - k * 8) * 8), k * 8)).ToArray());
                 }
-                if (Hfa(type) is { } hfa)
-                    return new AbiValue(type, Passing.Registers, Enumerable.Range(0, hfa.Count).Select(k => new AbiPiece(Storage.Vec(k), hfa.Width, k * hfa.Width / 8)).ToArray());
-                if (size > 16) return new AbiValue(type, Passing.Indirect, [new AbiPiece(Storage.Gpr(8), 64, 0)]);
-                return new AbiValue(type, Passing.Registers, Enumerable.Range(0, (size + 7) / 8)
-                    .Select(k => new AbiPiece(Storage.Gpr(k), Math.Min(64, (size - k * 8) * 8), k * 8)).ToArray());
-            }
             default:
                 return new AbiValue(type, Passing.Registers, [new AbiPiece(Storage.Gpr(0), Math.Max(8, Size(type) * 8), 0)]);
         }

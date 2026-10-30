@@ -61,7 +61,7 @@ internal static class SourceDelegateCacheCheck
             }
             var input = Path.Combine(directory, sideEffect ? "Effect.dll" : "Pure.dll");
             module.Write(input);
-            var source = Decompilation.Decompile(input, directory, t => t.ReflectionName == "Probe", false, true).Single().Source;
+            var source = FullDecompilation.Decompile(input, directory, t => t.ReflectionName == "Probe", false, true).Single().Source;
             File.WriteAllText(Path.ChangeExtension(input, ".cs"), source);
             a.Equal(sideEffect, source.Contains("_003C_003Ec", StringComparison.Ordinal), "只清除初始化无副作用且全部展开的缓存类");
             a.Equal(sideEffect, source.Contains("_ = _003C_003Ec", StringComparison.Ordinal), "有静态初始化副作用的读取必须保留");

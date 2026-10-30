@@ -1,3 +1,4 @@
+
 namespace Cpp2CS.Facts;
 
 public enum RefKind : byte

@@ -1,3 +1,4 @@
+
 namespace Cpp2CS.Ir;
 
 /// <summary>寄存器组。Stack 槽位在栈帧分析之后才出现，Temp 只在单条指令内部使用。</summary>

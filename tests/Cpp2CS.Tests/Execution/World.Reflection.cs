@@ -40,7 +40,7 @@ internal abstract partial class Side
             return type switch { ArrayRef a => World.RuntimeTypeObject(a.Element), ByRefRef r => World.RuntimeTypeObject(r.Element),
                 PointerRef p => World.RuntimeTypeObject(p.Element), _ => 0 };
         if (method.Method is { Name: "IsInstanceOfType", Parameters.Count: 1 } && arguments is [_, var instance]
-            && Cpp2CS.Recovery.ManagedTypes.IsReferenceType(type))
+            && Cpp2CS.Model.ManagedTypes.IsReferenceType(type))
             return instance != 0 && World.Types.IsAssignable(TypeOf(instance), type) ? 1UL : 0;
         return null;
     }

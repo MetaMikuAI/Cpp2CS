@@ -1,11 +1,10 @@
 using Cpp2CS.Calls;
-using Cpp2CS.Model;
 using Cpp2CS.Recovery;
 
 namespace Cpp2CS.Pipeline;
 
 /// <summary>会话拥有恢复器和摘要缓存；源码变换只读摘要，不启动恢复。</summary>
-public sealed class MethodSummaryService
+public sealed class MethodSummaryService : IMethodResults
 {
     private readonly Dictionary<MethodRequest, MethodRecoveryResult> summaries = [];
     private readonly Func<MethodRequest, MethodRecoveryResult> recover;
@@ -19,7 +18,8 @@ public sealed class MethodSummaryService
         RecoveryMode.Instance => recovery.RecoverInstance(request.Method, request.Entry),
         RecoveryMode.Shared => recovery.RecoverShared(request.Method, request.Entry),
         _ => throw new ArgumentOutOfRangeException(nameof(request)),
-    }) { }
+    })
+    { }
 
     internal MethodSummaryService(Func<MethodRequest, MethodRecoveryResult> recover) => this.recover = recover;
 

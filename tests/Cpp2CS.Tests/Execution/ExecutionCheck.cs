@@ -69,7 +69,7 @@ internal static partial class ExecutionCheck
                 if (recovered.PlatformImport is null) throw new InvalidDataException("原生导入声明未复现");
                 skeleton.ApplyDeclarations([recovered]);
             }
-        var emitter = new BodyEmitter(skeleton, types);
+        var emitter = new FullBodyEmitter(skeleton, types);
         var closure = new AccessorRecovery(facts, types, new MethodSummaryService(recovery), emitter, results, full ? AutoPropertyManifest.ReadRejected(Path.Combine(slice, "autoprop-rejected-input.tsv")) : null);
         skeleton.ApplyDeclarations(closure.All);
         var index = new WorldIndex(facts, types);

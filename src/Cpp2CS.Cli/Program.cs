@@ -45,6 +45,8 @@ internal static class Program
                                                                       --verified-accessors：使用 execute 生成的证据认回内联访问器。
                                                                       --source-layout project：按程序集/命名空间/类型导出，含范围内全部类型声明与 csproj。
                                                                       --jobs N：方法恢复的最大并行度，默认 1；程序集写出按顺序执行。
+                                                                      --profile core|full：核心链路或完整流程，默认 full。
+                                                                      --fact-cache-file 文件：显式固定事实快照，输入变化仍会失效；用于重构前后对比。
                   cpp2cs source-project <程序集.dll> <输出目录>          将已有程序集按项目目录导出 C#，依赖从程序集所在目录解析。
             """);
         return 2;
@@ -80,7 +82,7 @@ internal static class Program
     private static int Ssa(string binary, string metadata, ulong[] entries, bool idioms)
     {
         var facts = FactsBuilder.Build(binary, metadata);
-        var lifter = new Lifting.FunctionLifter(facts);
+        var lifter = new Cpp2CS.Machine.Lifting.FunctionLifter(facts);
         var rewriter = new Cpp2CS.Idioms.IdiomRewriter(facts);
         foreach (var entry in entries)
         {

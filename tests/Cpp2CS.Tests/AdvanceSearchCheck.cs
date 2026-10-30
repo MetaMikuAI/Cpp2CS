@@ -46,7 +46,7 @@ internal static class AdvanceSearchCheck
             outer.Statements.Add(new ReturnStatement(new BinaryOperatorExpression(new BinaryOperatorExpression(Id("carried"), BinaryOperatorType.BitwiseAnd,
                 new ConditionalExpression(new BinaryOperatorExpression(Id("state"), BinaryOperatorType.Equality, new PrimitiveExpression(found)), new PrimitiveExpression(1UL), new PrimitiveExpression(0UL))), BinaryOperatorType.InEquality, new PrimitiveExpression(0UL))));
             var original = tree.ToString();
-            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).Assembly.GetType("Cpp2CS.Output.RecoveredForeach")!, nonPublic: true)!;
+            var transform = (IAstTransform)Activator.CreateInstance(typeof(ReadabilityTransforms).Assembly.GetType("Cpp2CS.Extensions.Decompile.RecoveredForeach")!, nonPublic: true)!;
             transform.Run(tree, null!);
             var valid = mode is "valid" or "different-state";
             a.Equal(valid ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的查找边界");

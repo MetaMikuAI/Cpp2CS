@@ -1,4 +1,3 @@
-using Cpp2CS.Model;
 
 namespace Cpp2CS.Facts;
 
@@ -8,7 +7,7 @@ public sealed partial class UnregisteredMethods
     internal sealed record CachedMethod(ulong Address, int Definition, string Abi, CachedWitness[] Witnesses, ulong[] Matches, int[] Adjustors);
     internal sealed record Snapshot(CachedMethod[] Methods, OwnerDecision[] Decisions, FactCheck[] Checks);
 
-    internal Snapshot Capture(ProgramFacts facts)
+    internal Snapshot Capture(BaseFacts facts)
     {
         var specs = new Dictionary<MethodRef, int>();
         for (var i = 0; i < facts.Model.MethodSpecs.Count; i++) specs.TryAdd(facts.Model.MethodSpecs[i], i);
@@ -22,7 +21,7 @@ public sealed partial class UnregisteredMethods
             decisions.ToArray(), facts.Checks.All.Where(c => c.Name.StartsWith("unregistered.", StringComparison.Ordinal)).ToArray());
     }
 
-    internal static UnregisteredMethods Restore(Snapshot snapshot, ProgramFacts facts)
+    internal static UnregisteredMethods Restore(Snapshot snapshot, BaseFacts facts)
     {
         var result = new UnregisteredMethods();
         var abi = new ManagedAbi(facts.Layouts);

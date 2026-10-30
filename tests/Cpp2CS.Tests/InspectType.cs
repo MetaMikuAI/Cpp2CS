@@ -9,7 +9,7 @@ internal static class InspectType
     [Command("inspect-source", "用源码输出管线查看本地程序集中的指定类型", Arguments = "<assembly> <type> <output>")]
     public static int Source(string assembly, string type, string output)
     {
-        var sources = Cpp2CS.Output.Decompilation.Decompile(assembly, Path.GetDirectoryName(Path.GetFullPath(assembly))!,
+        var sources = Cpp2CS.Extensions.Decompile.FullDecompilation.Decompile(assembly, Path.GetDirectoryName(Path.GetFullPath(assembly))!,
             t => t.ReflectionName == type, assemblyAttributes: false, recoveringBodies: true);
         File.WriteAllText(output, sources.Single().Source);
         return 0;

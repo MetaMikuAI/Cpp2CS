@@ -1,7 +1,7 @@
 using Cpp2CS.Facts;
 using Cpp2CS.Idioms;
 using Cpp2CS.Ir;
-using Cpp2CS.Lifting;
+using Cpp2CS.Machine.Lifting;
 using Cpp2CS.Model;
 using Cpp2CS.Recovery;
 

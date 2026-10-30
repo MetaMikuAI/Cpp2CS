@@ -11,7 +11,7 @@ namespace Cpp2CS.Input
     /// <summary>从磁盘上的 libil2cpp.so 与 global-metadata.dat 建立 <see cref="ProgramFacts"/>，并运行全部不变式检查。</summary>
     public static class FactsBuilder
     {
-        public static ProgramFacts Build(string binaryPath, string metadataPath, Action<string>? log = null, bool inferUnregistered = true, string? cacheDirectory = null)
+        public static ProgramFacts Build(string binaryPath, string metadataPath, Action<string>? log = null, bool inferUnregistered = true, string? cacheDirectory = null, Cpp2CS.Options.RecoveryOptions? options = null)
         {
             var timings = new Dictionary<string, double>();
             var clock = Stopwatch.StartNew();
@@ -45,7 +45,7 @@ namespace Cpp2CS.Input
             checks.Info("generic.fully-shared", generic.Length,
                 $"泛型方法实例代码 {generic.Length} 个，其中实参含完全共享占位类型（偏移、大小经 RGCTX 在运行时取得）的 {shared.Length} 个；" +
                 $"共享实例所属 Assembly-CSharp 类型 {shared.Count(e => e.Method!.Method.Owner.Assembly == "Assembly-CSharp.dll")} 个方法");
-            ProgramFacts Create(UnregisteredMethods owners) => new ProgramFacts
+            var basis = new BaseFacts
             {
                 Model = model,
                 Code = map,
@@ -56,13 +56,13 @@ namespace Cpp2CS.Input
                 Layouts = layouts,
                 Checks = checks,
                 Timings = timings,
-                Unregistered = owners,
+                Options = options ?? new(),
             };
-            var registered = Create(UnregisteredMethods.Empty);
-            cacheDirectory ??= Environment.GetEnvironmentVariable("CPP2CS_FACT_CACHE") ?? Path.Combine(".cpp2cs", "unregistered");
+            var registered = new ProgramFacts(basis, new());
+            cacheDirectory ??= basis.Options.FactCacheDirectory ?? Path.Combine(".cpp2cs", "unregistered");
             var inferred = inferUnregistered ? Step("unregistered", () => UnregisteredFactsCache.GetOrBuild(registered, metadataPath, cacheDirectory, log)) : UnregisteredMethods.Empty;
             timings["total"] = Math.Round(clock.Elapsed.TotalSeconds, 3);
-            return Create(inferred);
+            return new ProgramFacts(basis, new() { Unregistered = inferred });
         }
 
         /// <summary>托管代码调用的、没有托管所有者的目标：运行时 helper、PLT 导入，以及 il2cpp 节中生成的无元数据函数。</summary>

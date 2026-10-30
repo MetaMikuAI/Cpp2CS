@@ -1,3 +1,4 @@
+
 namespace Cpp2CS.Recovery.Typing;
 
 internal static class TypingContributors

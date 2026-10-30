@@ -1,4 +1,4 @@
-using Cpp2CS.Functions;
+using Cpp2CS.Image;
 
 namespace Cpp2CS.Facts;
 

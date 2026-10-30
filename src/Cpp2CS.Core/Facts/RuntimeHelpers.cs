@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text;
-using Cpp2CS.Images;
+using Cpp2CS.Image;
 
 namespace Cpp2CS.Facts;
 

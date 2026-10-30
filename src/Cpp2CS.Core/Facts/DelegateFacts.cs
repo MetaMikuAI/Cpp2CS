@@ -1,4 +1,3 @@
-using Cpp2CS.Model;
 using System.Reflection;
 
 namespace Cpp2CS.Facts;
@@ -10,7 +9,7 @@ public static class DelegateFacts
     public static bool IsRuntimeMethod(MethodDef method)
     {
         static bool Core(TypeRef type, string name) => type is DefinitionRef
-            { Definition: { Assembly: "mscorlib.dll", Namespace: "System", DeclaringType: null } definition, Arguments.Count: 0 } && definition.Name == name;
+        { Definition: { Assembly: "mscorlib.dll", Namespace: "System", DeclaringType: null } definition, Arguments.Count: 0 } && definition.Name == name;
         static bool Runtime(MethodDef m) => !m.IsStatic && !m.IsAbstract && m.GenericParameters.Count == 0
             && (m.Attributes & MethodAttributes.PinvokeImpl) == 0
             && (m.ImplAttributes & (MethodImplAttributes.CodeTypeMask | MethodImplAttributes.ManagedMask)) == MethodImplAttributes.Runtime;

@@ -1,3 +1,4 @@
+
 namespace Cpp2CS.Ir;
 
 public enum BinOp : byte

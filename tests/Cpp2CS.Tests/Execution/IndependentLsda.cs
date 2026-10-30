@@ -1,5 +1,5 @@
 using System.Buffers.Binary;
-using Cpp2CS.Images;
+using Cpp2CS.Image;
 
 namespace Cpp2CS.Tests.Execution;
 

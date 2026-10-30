@@ -6,7 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Cpp2CS.Facts;
-using Cpp2CS.Lifting;
+using Cpp2CS.Machine.Lifting;
 
 namespace Cpp2CS.Input;
 
@@ -28,29 +28,30 @@ internal static class UnregisteredFactsCache
 
     public static UnregisteredMethods GetOrBuild(ProgramFacts facts, string metadata, string directory, Action<string>? log)
     {
-        if (directory.Length == 0 || directory.Equals("off", StringComparison.OrdinalIgnoreCase))
+        var fixedFile = facts.Options.FactCacheFile;
+        if (fixedFile is null && (directory.Length == 0 || directory.Equals("off", StringComparison.OrdinalIgnoreCase)))
         {
             log?.Invoke("未注册事实缓存：禁用");
-            return UnregisteredMethods.Build(facts, log);
+            return Cpp2CS.Facts.Derived.UnregisteredInference.Build(facts.Base, log);
         }
-        var key = Key(facts.Model.Image.Sha256, HashFile(metadata), Implementation.Value,
-            RuntimeInformation.FrameworkDescription + "/" + RuntimeInformation.ProcessArchitecture + "/frame-slots=" + FunctionLifter.PromoteFrameSlots);
-        var path = PathFor(directory, key);
+        var key = Key(facts.Model.Image.Sha256, HashFile(metadata), fixedFile is null ? Implementation.Value : "fixed-facts-v1",
+            RuntimeInformation.FrameworkDescription + "/" + RuntimeInformation.ProcessArchitecture + "/frame-slots=" + facts.Options.PromoteFrameSlots);
+        var path = fixedFile ?? PathFor(directory, key);
         var snapshot = File.Exists(path) ? Read(path, key, log) : null;
-        if (snapshot is null && File.Exists(Path.Combine(directory, "latest.cache")))
+        if (fixedFile is null && snapshot is null && File.Exists(Path.Combine(directory, "latest.cache")))
         {
             snapshot = Read(Path.Combine(directory, "latest.cache"), key, log);
             if (snapshot is not null) Write(path, key, snapshot, log);
         }
         if (snapshot is not null)
         {
-            var restored = UnregisteredMethods.Restore(snapshot, facts);
+            var restored = UnregisteredMethods.Restore(snapshot, facts.Base);
             log?.Invoke($"未注册事实缓存：命中，{restored.All.Count} 个接受项、{restored.Decisions.Count} 个判定");
             return restored;
         }
         log?.Invoke("未注册事实缓存：未命中，重新分析");
-        var result = UnregisteredMethods.Build(facts, log);
-        Write(path, key, result.Capture(facts), log);
+        var result = Cpp2CS.Facts.Derived.UnregisteredInference.Build(facts.Base, log);
+        Write(path, key, result.Capture(facts.Base), log);
         return result;
     }
 

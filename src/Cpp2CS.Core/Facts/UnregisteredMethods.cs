@@ -1,5 +1,4 @@
 using Cpp2CS.Ir;
-using Cpp2CS.Model;
 
 namespace Cpp2CS.Facts;
 
@@ -16,8 +15,8 @@ public sealed record OwnerDecision(ulong Address, string Reason, int Sites, int 
 public sealed partial class UnregisteredMethods
 {
     public static UnregisteredMethods Empty { get; } = new();
-    private readonly Dictionary<ulong, UnregisteredMethod> accepted = [];
-    private readonly List<OwnerDecision> decisions = [];
+    internal readonly Dictionary<ulong, UnregisteredMethod> accepted = [];
+    internal readonly List<OwnerDecision> decisions = [];
     public IReadOnlyCollection<UnregisteredMethod> All => accepted.Values;
     public IReadOnlyList<OwnerDecision> Decisions => decisions;
     public UnregisteredMethod? At(ulong address) => accepted.GetValueOrDefault(address);

@@ -1,3 +1,4 @@
+
 namespace Cpp2CS.Ir;
 
 /// <summary>SSA 变量：某个存储单元的一个版本。Version 0 表示函数入口值。</summary>

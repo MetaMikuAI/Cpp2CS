@@ -1,6 +1,6 @@
 using System.Buffers.Binary;
 using Cpp2CS.Facts;
-using Cpp2CS.Images;
+using Cpp2CS.Image;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
 using Cpp2CS.Recovery;

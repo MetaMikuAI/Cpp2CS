@@ -1,3 +1,4 @@
+
 namespace Cpp2CS.Ir;
 
 /// <summary>
@@ -259,19 +260,35 @@ public static class Fold
 
     public static Cond Invert(Cond cond) => cond switch
     {
-        Cond.Eq => Cond.Ne, Cond.Ne => Cond.Eq,
-        Cond.Slt => Cond.Sge, Cond.Sge => Cond.Slt, Cond.Sle => Cond.Sgt, Cond.Sgt => Cond.Sle,
-        Cond.Ult => Cond.Uge, Cond.Uge => Cond.Ult, Cond.Ule => Cond.Ugt, Cond.Ugt => Cond.Ule,
+        Cond.Eq => Cond.Ne,
+        Cond.Ne => Cond.Eq,
+        Cond.Slt => Cond.Sge,
+        Cond.Sge => Cond.Slt,
+        Cond.Sle => Cond.Sgt,
+        Cond.Sgt => Cond.Sle,
+        Cond.Ult => Cond.Uge,
+        Cond.Uge => Cond.Ult,
+        Cond.Ule => Cond.Ugt,
+        Cond.Ugt => Cond.Ule,
         // 浮点：取反后无序情况的真假也随之翻转
-        Cond.FEq => Cond.FUne, Cond.FUne => Cond.FEq,
-        Cond.FNe => Cond.FUeq, Cond.FUeq => Cond.FNe,
-        Cond.FLt => Cond.FUge, Cond.FUge => Cond.FLt,
-        Cond.FLe => Cond.FUgt, Cond.FUgt => Cond.FLe,
-        Cond.FGt => Cond.FUle, Cond.FUle => Cond.FGt,
-        Cond.FGe => Cond.FUlt, Cond.FUlt => Cond.FGe,
-        Cond.FUnordered => Cond.FOrdered, Cond.FOrdered => Cond.FUnordered,
-        Cond.Neg => Cond.NotNeg, Cond.NotNeg => Cond.Neg,
-        Cond.Overflow => Cond.NoOverflow, Cond.NoOverflow => Cond.Overflow,
+        Cond.FEq => Cond.FUne,
+        Cond.FUne => Cond.FEq,
+        Cond.FNe => Cond.FUeq,
+        Cond.FUeq => Cond.FNe,
+        Cond.FLt => Cond.FUge,
+        Cond.FUge => Cond.FLt,
+        Cond.FLe => Cond.FUgt,
+        Cond.FUgt => Cond.FLe,
+        Cond.FGt => Cond.FUle,
+        Cond.FUle => Cond.FGt,
+        Cond.FGe => Cond.FUlt,
+        Cond.FUlt => Cond.FGe,
+        Cond.FUnordered => Cond.FOrdered,
+        Cond.FOrdered => Cond.FUnordered,
+        Cond.Neg => Cond.NotNeg,
+        Cond.NotNeg => Cond.Neg,
+        Cond.Overflow => Cond.NoOverflow,
+        Cond.NoOverflow => Cond.Overflow,
         _ => throw new ArgumentOutOfRangeException(nameof(cond)),
     };
 
@@ -283,82 +300,92 @@ public static class Fold
         switch (flags)
         {
             case Flags { Kind: FlagKind.Sub, Right: { } right } sub:
-            {
-                Cond? cond = code switch
                 {
-                    FlagCondition.Eq => Cond.Eq, FlagCondition.Ne => Cond.Ne,
-                    FlagCondition.Hs => Cond.Uge, FlagCondition.Lo => Cond.Ult,
-                    FlagCondition.Hi => Cond.Ugt, FlagCondition.Ls => Cond.Ule,
-                    FlagCondition.Ge => Cond.Sge, FlagCondition.Lt => Cond.Slt,
-                    FlagCondition.Gt => Cond.Sgt, FlagCondition.Le => Cond.Sle,
-                    _ => null,
-                };
-                if (cond is { } c) return Compare(c, sub.Left, right);
-                if (code is FlagCondition.Mi or FlagCondition.Pl)
-                    return Compare(code == FlagCondition.Mi ? Cond.Slt : Cond.Sge, Binary(BinOp.Sub, sub.Left, right, sub.OperandWidth), C(0, sub.OperandWidth));
-                break;
-            }
+                    Cond? cond = code switch
+                    {
+                        FlagCondition.Eq => Cond.Eq,
+                        FlagCondition.Ne => Cond.Ne,
+                        FlagCondition.Hs => Cond.Uge,
+                        FlagCondition.Lo => Cond.Ult,
+                        FlagCondition.Hi => Cond.Ugt,
+                        FlagCondition.Ls => Cond.Ule,
+                        FlagCondition.Ge => Cond.Sge,
+                        FlagCondition.Lt => Cond.Slt,
+                        FlagCondition.Gt => Cond.Sgt,
+                        FlagCondition.Le => Cond.Sle,
+                        _ => null,
+                    };
+                    if (cond is { } c) return Compare(c, sub.Left, right);
+                    if (code is FlagCondition.Mi or FlagCondition.Pl)
+                        return Compare(code == FlagCondition.Mi ? Cond.Slt : Cond.Sge, Binary(BinOp.Sub, sub.Left, right, sub.OperandWidth), C(0, sub.OperandWidth));
+                    break;
+                }
             case Flags { Kind: FlagKind.Add, Right: { } right } add:
-            {
-                if (code is FlagCondition.Eq or FlagCondition.Ne)
-                    return Compare(code == FlagCondition.Eq ? Cond.Eq : Cond.Ne, Binary(BinOp.Add, add.Left, right, add.OperandWidth), C(0, add.OperandWidth));
-                if (right is Const amount && code is FlagCondition.Hs or FlagCondition.Lo or FlagCondition.Hi or FlagCondition.Ls)
                 {
-                    // 加 k 的进位边界为 2^width-k；k=0 时永不进位。
-                    if (amount.Value == 0) return C(code is FlagCondition.Lo or FlagCondition.Ls ? 1UL : 0, 1);
-                    var boundary = C(unchecked(0UL - amount.Value), add.OperandWidth);
-                    var condition = code switch { FlagCondition.Hs => Cond.Uge, FlagCondition.Lo => Cond.Ult, FlagCondition.Hi => Cond.Ugt, _ => Cond.Ule };
-                    return Compare(condition, add.Left, boundary);
+                    if (code is FlagCondition.Eq or FlagCondition.Ne)
+                        return Compare(code == FlagCondition.Eq ? Cond.Eq : Cond.Ne, Binary(BinOp.Add, add.Left, right, add.OperandWidth), C(0, add.OperandWidth));
+                    if (right is Const amount && code is FlagCondition.Hs or FlagCondition.Lo or FlagCondition.Hi or FlagCondition.Ls)
+                    {
+                        // 加 k 的进位边界为 2^width-k；k=0 时永不进位。
+                        if (amount.Value == 0) return C(code is FlagCondition.Lo or FlagCondition.Ls ? 1UL : 0, 1);
+                        var boundary = C(unchecked(0UL - amount.Value), add.OperandWidth);
+                        var condition = code switch { FlagCondition.Hs => Cond.Uge, FlagCondition.Lo => Cond.Ult, FlagCondition.Hi => Cond.Ugt, _ => Cond.Ule };
+                        return Compare(condition, add.Left, boundary);
+                    }
+                    // cmn x, #k 等价于 cmp x, #-k（-k 可表示时有符号条件一致）
+                    if (right is Const k && k.Value != 0 && k.Value != 1UL << (add.OperandWidth - 1) && code is FlagCondition.Ge or FlagCondition.Lt or FlagCondition.Gt or FlagCondition.Le)
+                    {
+                        var negated = C((ulong)-(long)k.Value, add.OperandWidth);
+                        var cond = code switch { FlagCondition.Ge => Cond.Sge, FlagCondition.Lt => Cond.Slt, FlagCondition.Gt => Cond.Sgt, _ => Cond.Sle };
+                        return Compare(cond, add.Left, negated);
+                    }
+                    break;
                 }
-                // cmn x, #k 等价于 cmp x, #-k（-k 可表示时有符号条件一致）
-                if (right is Const k && k.Value != 0 && k.Value != 1UL << (add.OperandWidth - 1) && code is FlagCondition.Ge or FlagCondition.Lt or FlagCondition.Gt or FlagCondition.Le)
-                {
-                    var negated = C((ulong)-(long)k.Value, add.OperandWidth);
-                    var cond = code switch { FlagCondition.Ge => Cond.Sge, FlagCondition.Lt => Cond.Slt, FlagCondition.Gt => Cond.Sgt, _ => Cond.Sle };
-                    return Compare(cond, add.Left, negated);
-                }
-                break;
-            }
             case Flags { Kind: FlagKind.Logic } logic:
-            {
-                var value = logic.Right is null ? logic.Left : Binary(BinOp.And, logic.Left, logic.Right, logic.OperandWidth);
-                var zero = C(0, logic.OperandWidth);
-                // 逻辑运算 C=V=0
-                return code switch
                 {
-                    FlagCondition.Eq => Compare(Cond.Eq, value, zero),
-                    FlagCondition.Ne => Compare(Cond.Ne, value, zero),
-                    FlagCondition.Mi or FlagCondition.Lt => Compare(Cond.Slt, value, zero),
-                    FlagCondition.Pl or FlagCondition.Ge => Compare(Cond.Sge, value, zero),
-                    FlagCondition.Gt => Compare(Cond.Sgt, value, zero),
-                    FlagCondition.Le => Compare(Cond.Sle, value, zero),
-                    FlagCondition.Hs or FlagCondition.Hi or FlagCondition.Vs => C(0, 1),
-                    FlagCondition.Lo or FlagCondition.Ls or FlagCondition.Vc => C(1, 1),
-                    _ => new TestFlags(flags, code),
-                };
-            }
+                    var value = logic.Right is null ? logic.Left : Binary(BinOp.And, logic.Left, logic.Right, logic.OperandWidth);
+                    var zero = C(0, logic.OperandWidth);
+                    // 逻辑运算 C=V=0
+                    return code switch
+                    {
+                        FlagCondition.Eq => Compare(Cond.Eq, value, zero),
+                        FlagCondition.Ne => Compare(Cond.Ne, value, zero),
+                        FlagCondition.Mi or FlagCondition.Lt => Compare(Cond.Slt, value, zero),
+                        FlagCondition.Pl or FlagCondition.Ge => Compare(Cond.Sge, value, zero),
+                        FlagCondition.Gt => Compare(Cond.Sgt, value, zero),
+                        FlagCondition.Le => Compare(Cond.Sle, value, zero),
+                        FlagCondition.Hs or FlagCondition.Hi or FlagCondition.Vs => C(0, 1),
+                        FlagCondition.Lo or FlagCondition.Ls or FlagCondition.Vc => C(1, 1),
+                        _ => new TestFlags(flags, code),
+                    };
+                }
             case Flags { Kind: FlagKind.FloatCompare, Right: { } right } fc:
-            {
-                Cond? cond = code switch
                 {
-                    FlagCondition.Eq => Cond.FEq, FlagCondition.Ne => Cond.FUne,
-                    FlagCondition.Mi or FlagCondition.Lo => Cond.FLt,
-                    FlagCondition.Pl or FlagCondition.Hs => Cond.FUge,
-                    FlagCondition.Ge => Cond.FGe, FlagCondition.Lt => Cond.FUlt,
-                    FlagCondition.Gt => Cond.FGt, FlagCondition.Le => Cond.FUle,
-                    FlagCondition.Hi => Cond.FUgt, FlagCondition.Ls => Cond.FLe,
-                    FlagCondition.Vs => Cond.FUnordered, FlagCondition.Vc => Cond.FOrdered,
-                    _ => null,
-                };
-                if (cond is { } c) return new Compare(c, fc.Left, right);
-                break;
-            }
+                    Cond? cond = code switch
+                    {
+                        FlagCondition.Eq => Cond.FEq,
+                        FlagCondition.Ne => Cond.FUne,
+                        FlagCondition.Mi or FlagCondition.Lo => Cond.FLt,
+                        FlagCondition.Pl or FlagCondition.Hs => Cond.FUge,
+                        FlagCondition.Ge => Cond.FGe,
+                        FlagCondition.Lt => Cond.FUlt,
+                        FlagCondition.Gt => Cond.FGt,
+                        FlagCondition.Le => Cond.FUle,
+                        FlagCondition.Hi => Cond.FUgt,
+                        FlagCondition.Ls => Cond.FLe,
+                        FlagCondition.Vs => Cond.FUnordered,
+                        FlagCondition.Vc => Cond.FOrdered,
+                        _ => null,
+                    };
+                    if (cond is { } c) return new Compare(c, fc.Left, right);
+                    break;
+                }
             case ConditionalFlags ccmp when ccmp.Condition is not Const:
-            {
-                var taken = TestFlags(ccmp.Taken, code);
-                var otherwise = Cpp2CS.Ir.Evaluator.Holds(code, ccmp.Nzcv);
-                return otherwise ? Logical(false, Not(ccmp.Condition), taken) : Logical(true, ccmp.Condition, taken);
-            }
+                {
+                    var taken = TestFlags(ccmp.Taken, code);
+                    var otherwise = Cpp2CS.Ir.Evaluator.Holds(code, ccmp.Nzcv);
+                    return otherwise ? Logical(false, Not(ccmp.Condition), taken) : Logical(true, ccmp.Condition, taken);
+                }
             case ConditionalFlags { Condition: Const c } ccmp:
                 return c.Value != 0 ? TestFlags(ccmp.Taken, code) : C(Cpp2CS.Ir.Evaluator.Holds(code, ccmp.Nzcv) ? 1UL : 0, 1);
         }

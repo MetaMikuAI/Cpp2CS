@@ -1,7 +1,7 @@
 using Cpp2CS.Facts;
 using Cpp2CS.Input;
 using Cpp2CS.Ir;
-using Cpp2CS.Lifting;
+using Cpp2CS.Machine.Lifting;
 using Cpp2CS.Model;
 
 namespace Cpp2CS.Tests;

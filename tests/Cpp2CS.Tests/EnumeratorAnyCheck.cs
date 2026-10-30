@@ -46,7 +46,7 @@ internal static class EnumeratorAnyCheck
                     new BinaryOperatorExpression(new CastExpression(new PrimitiveType("int"), Id("result")), BinaryOperatorType.BitwiseAnd, new PrimitiveExpression(1))), BinaryOperatorType.InEquality, new PrimitiveExpression(0))),
             } };
             var tree = new SyntaxTree(); var type = new TypeDeclaration { Name = "Subject" }; type.Members.Add(method); tree.Members.Add(type);
-            typeof(Decompilation).Assembly.GetType("Cpp2CS.Output.RecoveredForeach")!.GetMethod("RecoverAny", BindingFlags.NonPublic | BindingFlags.Static)!
+            typeof(ReadabilityTransforms).Assembly.GetType("Cpp2CS.Extensions.Decompile.RecoveredForeach")!.GetMethod("RecoverAny", BindingFlags.NonPublic | BindingFlags.Static)!
                 .Invoke(null, [tree, compilation]);
             var expected = mode is "list" or "values";
             a.Equal(expected ? 1 : 0, tree.Descendants.OfType<MemberReferenceExpression>().Count(m => m.MemberName == "Any"), $"{mode} 的库身份与清理边界");

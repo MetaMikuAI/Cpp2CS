@@ -1,25 +1,24 @@
-using Cpp2CS.Model;
+using Cpp2CS.Facts.Derived;
 
 namespace Cpp2CS.Facts;
 
-/// <summary>
-/// 程序级基础事实：代码地图、引用普查、元数据模型、注册表入口及各自的不变式检查。
-/// 后续层（提升、恢复）只查询这里，不重复做全局推断。
-/// </summary>
+/// <summary>基础事实与派生事实的只读组合；初始化转发保留构造兼容性。</summary>
 public sealed class ProgramFacts
 {
-    public required ProgramModel Model { get; init; }
-    public required CodeMap Code { get; init; }
-    public required CodeScan Scan { get; init; }
-    public required Registrations Registrations { get; init; }
-    public required UsageSlots Usages { get; init; }
-    public required RuntimeHelpers Helpers { get; init; }
-    public required FieldLayouts Layouts { get; init; }
-    public required FactChecks Checks { get; init; }
-    public required IReadOnlyDictionary<string, double> Timings { get; init; }
-
-    public UnregisteredMethods Unregistered { get; init; } = UnregisteredMethods.Empty;
-
-    /// <summary>函数入口上的全部注册表入口（ICF/共享代码的所有者集合）。</summary>
-    public CodeEntry[] EntriesAt(ulong address) => Registrations.At(address);
+    public BaseFacts Base { get; private set; } = new();
+    public DerivedFacts Derived { get; private set; } = new();
+    public ProgramFacts() { }
+    public ProgramFacts(BaseFacts basis, DerivedFacts derived) { Base = basis; Derived = derived; }
+    public ProgramModel Model { get => Base.Model; init => Base = Base with { Model = value }; }
+    public CodeMap Code { get => Base.Code; init => Base = Base with { Code = value }; }
+    public CodeScan Scan { get => Base.Scan; init => Base = Base with { Scan = value }; }
+    public Registrations Registrations { get => Base.Registrations; init => Base = Base with { Registrations = value }; }
+    public UsageSlots Usages { get => Base.Usages; init => Base = Base with { Usages = value }; }
+    public RuntimeHelpers Helpers { get => Base.Helpers; init => Base = Base with { Helpers = value }; }
+    public FieldLayouts Layouts { get => Base.Layouts; init => Base = Base with { Layouts = value }; }
+    public FactChecks Checks { get => Base.Checks; init => Base = Base with { Checks = value }; }
+    public IReadOnlyDictionary<string, double> Timings { get => Base.Timings; init => Base = Base with { Timings = value }; }
+    public Cpp2CS.Options.RecoveryOptions Options { get => Base.Options; init => Base = Base with { Options = value }; }
+    public UnregisteredMethods Unregistered { get => Derived.Unregistered; init => Derived = Derived with { Unregistered = value }; }
+    public CodeEntry[] EntriesAt(ulong address) => Base.EntriesAt(address);
 }

@@ -42,7 +42,7 @@ internal static class BitReinterpretCheck
             Fields = original.Fields, RuntimeTypes = original.RuntimeTypes, MethodSpecs = original.MethodSpecs, FieldRefs = original.FieldRefs,
             StringLiterals = original.StringLiterals, Code = original.Code };
         var skeleton = new Skeleton(model);
-        var emitter = new BodyEmitter(skeleton, types);
+        var emitter = new FullBodyEmitter(skeleton, types);
         var a = new Assertions();
         a.Equal(0, emitter.Emit(bodies).Count, "四种同宽浮点位重解释通过写出检查");
         foreach (var method in methods)

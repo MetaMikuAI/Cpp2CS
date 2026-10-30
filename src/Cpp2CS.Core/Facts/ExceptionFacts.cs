@@ -1,6 +1,5 @@
 using System.Text;
-using Cpp2CS.Arm64;
-using Cpp2CS.Images;
+using Cpp2CS.Image;
 using Cpp2CS.Ir;
 
 namespace Cpp2CS.Facts;
@@ -79,7 +78,7 @@ public static class ExceptionFacts
     private static ulong? AcrossBlocks(CodeMap map, CodeFunction function, ulong site)
     {
         var predecessors = new Dictionary<ulong, List<ulong>>();
-        var decoded = new Dictionary<ulong, List<Stmt>>();
+        var decoded = new Dictionary<ulong, IReadOnlyList<Stmt>>();
         void Edge(ulong from, ulong to)
         {
             if (!function.Contains(to)) return;
@@ -89,7 +88,7 @@ public static class ExceptionFacts
         for (var pc = function.Start; pc < function.End; pc += 4)
         {
             if (map.Word(pc) is not { } w || A64.IsBr(w)) return null;
-            var statements = new List<Stmt>(); Arm64Lifter.Lift(pc, w, statements); decoded[pc] = statements;
+            decoded[pc] = A64ValueFlow.Decode(pc, w);
             if (A64.IsB(w)) Edge(pc, A64.Imm26Target(w, pc));
             else if (!A64.IsRet(w) && !A64.IsTrap(w)) Edge(pc, pc + 4);
             if (A64.ConditionalTarget(w, pc) is { } branch) Edge(pc, branch);

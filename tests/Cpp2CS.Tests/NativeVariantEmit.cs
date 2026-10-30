@@ -19,7 +19,7 @@ internal static class NativeVariantEmit
         var types = new ManagedTypes(facts.Model, facts.Layouts);
         var recovery = new MethodRecovery(facts, types);
         var skeleton = new Skeleton(facts.Model);
-        var emitter = new BodyEmitter(skeleton, types);
+        var emitter = new FullBodyEmitter(skeleton, types);
         var selected = File.ReadLines(methodList).Where(l => l.Length > 0 && !l.StartsWith('#')).Select(l => l.Split('\t'))
             .Select(p => RecoveryTarget.Find(facts, Convert.ToUInt64(p[0], 16), p[1])).ToArray();
         var batches = selected.GroupBy(t => t.Instance.Method).SelectMany(g => g.Select((t, i) => (Target: t, Batch: i)))

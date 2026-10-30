@@ -1,6 +1,6 @@
 using System.Reflection;
 using Cpp2CS.Facts;
-using Cpp2CS.Flow;
+using Cpp2CS.Machine.Flow;
 using Cpp2CS.Input;
 using Cpp2CS.Ir;
 using Cpp2CS.Model;
@@ -23,23 +23,20 @@ internal static class StructCopyReturnCheck
             .DistinctBy(e => e.Method!.Method.Owner.IsValueType).Take(2).ToArray();
         var a = new Assertions();
         a.Equal(2, entries.Length, "覆盖引用与值类型接收者的实际复制入口");
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-        var contextType = typeof(MethodRecovery).GetNestedType("Context", BindingFlags.NonPublic)!;
         foreach (var entry in entries)
         {
             var method = entry.Method!;
             a.Equal(0, recovery.RecoverInstance(method, entry.Address).Holes.Count, "完整恢复实际原生入口");
-            var context = Activator.CreateInstance(contextType, flags, null, [recovery, method, entry.Address], null)!;
-            contextType.GetProperty("ClosedInstance", flags)!.SetValue(context, true);
-            a.True((bool)contextType.GetMethod("Prepare", flags)!.Invoke(context, null)!, "准备实际调用形态");
-            a.True(contextType.GetMethod("Analyze", flags)!.Invoke(context, null) is null, "实际地址类型分析成功");
-            var function = (MachineFunction)contextType.GetField("function", flags)!.GetValue(context)!;
+            var context = new RecoveryScope(recovery, method, entry.Address) { ClosedInstance = true };
+            a.True(context.Prepare(), "准备实际调用形态");
+            a.True(context.Analyze() is null, "实际地址类型分析成功");
+            var function = context.function;
             var call = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Single(c => c.Op is { Kind: OpKind.Import, Operand: "memcpy" });
             var count = (Const)call.Arguments[2];
             void Check(Call candidate, bool matched, bool failed = false)
             {
                 var output = new List<ManagedStatement>();
-                var result = (RecoveryResult<bool>)contextType.GetMethod("CopyStructReturn", flags)!.Invoke(context, [candidate, output])!;
+                var result = context.Lowering.CopyStructReturn(candidate, output);
                 a.Equal(!failed, result.TryGet(out var accepted, out _), "地址不明保留恢复失败");
                 if (!failed) a.Equal(matched, accepted, "仅完整返回复制被接受");
                 a.Equal(matched ? 2 : 0, output.Count, "拒绝时不写出部分结果");

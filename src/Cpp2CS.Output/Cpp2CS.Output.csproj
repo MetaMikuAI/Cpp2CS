@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Cpp2CS.Tests" />
+    <InternalsVisibleTo Include="Cpp2CS.Extensions" />
   </ItemGroup>
 
 </Project>

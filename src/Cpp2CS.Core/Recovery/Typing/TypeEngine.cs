@@ -1,7 +1,5 @@
-using Cpp2CS.Flow;
+using Cpp2CS.Machine.Flow;
 using Cpp2CS.Ir;
-using Cpp2CS.Model;
-using Cpp2CS.Analysis;
 
 namespace Cpp2CS.Recovery.Typing;
 

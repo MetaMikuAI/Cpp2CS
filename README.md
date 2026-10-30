@@ -25,6 +25,10 @@ dotnet run --project src/Cpp2CS.Cli -c Release -- recover <binary> <metadata> <o
 方法清单每行是十六进制入口地址和完整方法名，以制表符分隔，必须与输入映像匹配。
 `--assemblies A.dll,B.dll` 按程序集选择；`--all` 选择全部托管方法定义；`--limit N` 限制非清单模式的方法数量；`--no-source` 跳过 C# 文件生成。
 
+`--profile full` 为默认流程，包含访问器认回、源码整理和可读性变换。`--profile core` 只运行核心链路，直接从恢复的 CIL 生成 C#，不产生 `assemblies-src/`。
+
+`--fact-cache-file <文件>` 可在重构对比中显式固定事实快照；输入和运行选项变化仍会使它失效。默认缓存还会核对实现哈希，正式核对应包含冷启动。
+
 `--source-layout project` 按 `src/程序集.dll/命名空间/类型.cs` 导出，并为每个程序集生成 `.csproj`；泛型同名类型合并到同一文件。包含所选范围内的全部类型声明，未恢复成员仍为占位体。默认 `flat` 保持平铺输出；项目文件不代表源码已通过编译。
 
 `--jobs N` 设置方法恢复的最大并行度，默认 `1`。例如 `--jobs 8` 同时恢复最多八个方法，共享基础事实，每个工作线程使用独立恢复器；结果按原清单顺序汇总。依赖处理和程序集写出仍按顺序执行，最终 C# 按类型并行生成。
@@ -40,6 +44,7 @@ dotnet run --project src/Cpp2CS.Cli -c Release -- recover <binary> <metadata> <o
 | `assemblies-src/` | 为源码展示整理后的程序集 |
 | `src/` | C# 文件 |
 | `recovery.jsonl`、`emitted.tsv` | 逐方法诊断与完整写出清单 |
+| `publication.jsonl`、`run.json` | 方法发布体摘要与运行、产物清单 |
 | `holes.txt` | 未恢复原因与汇总 |
 
 部分方法可以输出可读片段，并以 `Cpp2CS.Unrecovered` 和原生地址标记缺口；完整原因见 `recovery.jsonl`，不嵌入程序集字符串堆。这些方法不计入完整写出清单。源码折叠和类型名称还原不等于整个工程可以编译或在 Unity 中运行。

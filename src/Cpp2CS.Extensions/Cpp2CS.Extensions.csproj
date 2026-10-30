@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../Cpp2CS.Core/Cpp2CS.Core.csproj" />
+    <ProjectReference Include="../Cpp2CS.Output/Cpp2CS.Output.csproj" />
+    <InternalsVisibleTo Include="Cpp2CS.Tests" />
+    <InternalsVisibleTo Include="Cpp2CS.Pipeline" />
+  </ItemGroup>
+</Project>

@@ -117,7 +117,7 @@ internal static class SourceForeachArgumentsCheck
         var original = Compile(inputSource, "ForeachArguments.Input");
         var input = Path.Combine(directory, "Input.dll");
         File.WriteAllBytes(input, original);
-        var source = Decompilation.Decompile(input, directory, t => t.Name == "Probe", false, true).Single().Source;
+        var source = FullDecompilation.Decompile(input, directory, t => t.Name == "Probe", false, true).Single().Source;
         File.WriteAllText(Path.Combine(directory, "Probe.cs"), source);
         var tree = CSharpSyntaxTree.ParseText(source).GetRoot();
         var a = new Assertions();

@@ -49,7 +49,7 @@ internal static class SourceIntegerComparisonCheck
         foreach (var policy in new[] { EmissionPolicy.Recovered, EmissionPolicy.Source })
         {
             var skeleton = new Skeleton(model);
-            a.Equal(0, new BodyEmitter(skeleton, types).Emit(bodies, policy).Count, "有无符号参数的比较均可写出");
+            a.Equal(0, new FullBodyEmitter(skeleton, types).Emit(bodies, policy).Count, "有无符号参数的比较均可写出");
             if (policy == EmissionPolicy.Source)
                 a.True(methods.All(m => skeleton.Method(m.Method).Body.Instructions.All(i => i.OpCode.Code is not (Code.Conv_I4 or Code.Conv_U4))),
                     "源码比较不依赖重复 int32 转换");
@@ -57,7 +57,7 @@ internal static class SourceIntegerComparisonCheck
             skeleton.Assembly(owner.Assembly).Write(path);
             loaded.Add(SR.Assembly.Load(File.ReadAllBytes(path)));
         }
-        var source = Decompilation.Decompile(Path.Combine(directory, "Source.dll"), directory, t => t.FullName == "Tests.Comparison", false, true).Single().Source;
+        var source = FullDecompilation.Decompile(Path.Combine(directory, "Source.dll"), directory, t => t.FullName == "Tests.Comparison", false, true).Single().Source;
         File.WriteAllText(Path.Combine(directory, "Comparison.cs"), source);
         var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator).Select(p => MetadataReference.CreateFromFile(p));
         var compilation = CSharpCompilation.Create("IntegerComparison.Rebuilt", [CSharpSyntaxTree.ParseText(source)], references,

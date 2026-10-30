@@ -37,7 +37,7 @@ internal static class EmissionBoundaryCheck
             Methods = [.. original.Methods, first, second, hidden], Fields = original.Fields, RuntimeTypes = original.RuntimeTypes,
             MethodSpecs = original.MethodSpecs, FieldRefs = original.FieldRefs, StringLiterals = original.StringLiterals, Code = original.Code };
         var skeleton = new Skeleton(model);
-        var emitter = new BodyEmitter(skeleton, types);
+        var emitter = new FullBodyEmitter(skeleton, types);
         var local = new LocalValue(new Variable(Storage.Gpr(0), 1), types.Int32, 32);
         ManagedBody Body(MethodDef method, ulong value) => new(MethodRef.Open(method), [new(0x100,
             [new ManagedAssignment(0x100, local, new ConstantValue(value, types.Int32, 32)), new ManagedReturn(0x104, local)])]);

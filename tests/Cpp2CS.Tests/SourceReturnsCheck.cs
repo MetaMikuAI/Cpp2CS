@@ -249,10 +249,10 @@ internal static class SourceReturnsCheck
             new(4, [new ManagedCall(4, new(dispose, new ArgumentValue(-1, type, 64), [], false), null, false), new ManagedThrow(4, exception)])])
         { Regions = [new([0, 1, 2, 3], 4, [4], exception, ManagedRegionKind.Catch),
             new([1], 2, [2], innerException, ManagedRegionKind.Catch) { CatchType = innerException.Type }] };
-        var fault = Cpp2CS.Structure.IteratorCleanup.Rewrite(nested);
+        var fault = Cpp2CS.Extensions.SourceView.IteratorCleanup.Rewrite(nested);
         a.True(fault.Regions is [{ Kind: ManagedRegionKind.Fault }, { Kind: ManagedRegionKind.Catch }]
             && fault.Blocks.Single(b => b.Address == 2).Statements is [ManagedThrow], "外层清理还原 fault 时保留内部 catch 和原抛出");
         var outside = nested with { Regions = [nested.Regions[0] with { Try = [0, 1, 3] }, nested.Regions[1]] };
-        a.Equal(outside, Cpp2CS.Structure.IteratorCleanup.Rewrite(outside), "内层 handler 不属于外层 try 时不合并清理范围");
+        a.Equal(outside, Cpp2CS.Extensions.SourceView.IteratorCleanup.Rewrite(outside), "内层 handler 不属于外层 try 时不合并清理范围");
     }
 }

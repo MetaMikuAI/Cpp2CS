@@ -26,7 +26,7 @@ internal static class SourceView
         Directory.CreateDirectory(output);
         var count = 0;
         foreach (var assembly in Directory.GetFiles(assemblies, "*.dll").Where(p => requested.Any(f => f.StartsWith(Path.GetFileName(p) + "_", StringComparison.Ordinal))))
-            foreach (var source in Decompilation.Decompile(assembly, assemblies,
+            foreach (var source in FullDecompilation.Decompile(assembly, assemblies,
                 t => requested.Contains(Path.GetFileName(assembly) + "_" + t.ReflectionName + ".cs"), false, recoveringBodies: true))
             {
                 File.WriteAllText(Path.Combine(output, Path.GetFileName(assembly) + "_" + source.TypeName + ".cs"), source.Source);
@@ -50,7 +50,7 @@ internal static class SourceView
         foreach (var group in rows.GroupBy(r => r[0]))
         {
             var wanted = group.Select(r => (r[1], r[2])).ToHashSet();
-            foreach (var source in Decompilation.Decompile(Path.Combine(assemblies, group.Key), assemblies,
+            foreach (var source in FullDecompilation.Decompile(Path.Combine(assemblies, group.Key), assemblies,
                 t => wanted.Contains((t.Namespace, t.Name)), false, recoveringBodies: true))
             {
                 var name = new string((group.Key + "_" + source.TypeName).Select(c => invalid.Contains(c) ? '_' : c).ToArray());

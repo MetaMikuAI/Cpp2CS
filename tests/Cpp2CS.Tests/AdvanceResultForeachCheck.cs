@@ -62,7 +62,7 @@ internal static class AdvanceResultForeachCheck
                 var wrapper = new TryCatchStatement { TryBlock = outer }; method.Body = new BlockStatement { wrapper };
                 wrapper.CatchClauses.Add(new CatchClause { Type = new SimpleType("Exception"), VariableName = "observed", Body = new BlockStatement { new ExpressionStatement(new InvocationExpression(Id("Use"), Id(mode == "outer-result" ? "result" : "sum"))) } });
             }
-            var transform = (IAstTransform)Activator.CreateInstance(typeof(Decompilation).Assembly.GetType("Cpp2CS.Output.RecoveredForeach")!, nonPublic: true)!;
+            var transform = (IAstTransform)Activator.CreateInstance(typeof(ReadabilityTransforms).Assembly.GetType("Cpp2CS.Extensions.Decompile.RecoveredForeach")!, nonPublic: true)!;
             transform.Run(tree, null!);
             a.Equal(mode is "valid" or "copies" ? 1 : 0, tree.Descendants.OfType<ForeachStatement>().Count(), $"{mode} 的结果和副作用边界");
             if (mode is not ("valid" or "copies")) continue;

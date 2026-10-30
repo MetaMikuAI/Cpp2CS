@@ -40,7 +40,7 @@ internal static class AutoPropertyCheck
             foreach (var (method, write) in new[] { (get, false), (set, true) })
             {
                 var accessor = new FieldAccessor(new(method, [], []), new(field, new DefinitionRef(field.Owner, [])), field.Type, 32, write) { LanguageDefined = true };
-                a.True(FieldAccessor.Recognize(AutoPropertyAccessor.Synthesize(accessor), write, types) is not null, "无原生地址也只合成严格单字段读写体");
+                a.True(FieldAccessors.Recognize(AutoPropertyAccessor.Synthesize(accessor), write, types) is not null, "无原生地址也只合成严格单字段读写体");
             }
             var wrongStatic = new FieldDef { Index = field.Index, Owner = field.Owner, Name = field.Name, Token = 0, Type = field.Type,
                 Offset = field.Offset, Attributes = field.Attributes ^ FieldAttributes.Static, CustomAttributes = generated };
@@ -70,7 +70,7 @@ internal static class AutoPropertyCheck
         foreach (var c in candidates.Values)
         {
             a.True(c.LanguageDefined && AutoPropertyAccessor.Problem(c.Field.Field, types) is null, "语言候选保留全部元数据证据");
-            a.True(FieldAccessor.Recognize(AutoPropertyAccessor.Synthesize(c), c.Write, types) is not null, "每个合成体符合 F9 单字段限制");
+            a.True(FieldAccessors.Recognize(AutoPropertyAccessor.Synthesize(c), c.Write, types) is not null, "每个合成体符合 F9 单字段限制");
         }
         return a.Finish("F9b 自动属性证据与合成边界");
     }

@@ -1,3 +1,4 @@
+
 namespace Cpp2CS.Facts;
 
 /// <summary>
@@ -10,7 +11,7 @@ public static class RuntimeLayout
     public const string UnityVersion = "2022.3.62f2";
 
     // Il2CppObject / Il2CppArray / Il2CppString
-    public const int ObjectKlass = 0x00, ObjectMonitor = 0x08, ObjectHeaderSize = 0x10;
+    public const int ObjectKlass = 0x00, ObjectMonitor = 0x08, ObjectHeaderSize = Cpp2CS.Model.TypeLayout.ObjectHeaderSize;
     public const int ArrayBounds = 0x10, ArrayMaxLength = 0x18, ArrayData = 0x20;
     public const int StringLength = 0x10, StringChars = 0x14;
 

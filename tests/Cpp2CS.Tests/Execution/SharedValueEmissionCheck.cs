@@ -43,7 +43,7 @@ internal static class SharedValueEmissionCheck
         var model = new ProgramModel { Image = original.Image, MetadataVersion = original.MetadataVersion, Assemblies = [.. original.Assemblies, assembly],
             Types = [.. original.Types, module, owner], Methods = [.. original.Methods, cast, describe, castInteger], Fields = original.Fields, RuntimeTypes = original.RuntimeTypes,
             MethodSpecs = original.MethodSpecs, FieldRefs = original.FieldRefs, StringLiterals = original.StringLiterals, Code = original.Code };
-        var skeleton = new Skeleton(model); var emitter = new BodyEmitter(skeleton, types); var a = new Assertions();
+        var skeleton = new Skeleton(model); var emitter = new FullBodyEmitter(skeleton, types); var a = new Assertions();
         var unboxers = facts.Code.Functions.Where(f => f.Size == 196 && SharedRuntimeHelpers.UnboxAny(facts, f.Start)).ToArray();
         var invokers = facts.Code.Functions.Where(f => f.Size == 272 && SharedRuntimeHelpers.ConstrainedInvoke(facts, f.Start)).ToArray();
         a.True(unboxers.Length > 0 && invokers.Length > 0, "运行时模板与内部调用身份完整匹配");

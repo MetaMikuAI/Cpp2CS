@@ -1,4 +1,3 @@
-using Cpp2CS.Model;
 
 namespace Cpp2CS.Facts;
 
@@ -74,7 +73,7 @@ public sealed class UsageSlots
         foreach (var section in writable)
         {
             var resolved = image.Resolve(section.Address);
-            if (resolved.Kind != Images.AddressKind.FileBacked) continue;
+            if (resolved.Kind != Cpp2CS.Image.AddressKind.FileBacked) continue;
             for (var a = (section.Address + 7) & ~7UL; a + 8 <= section.Address + section.Size; a += 8)
                 if (!slots.ContainsKey(a) && image.RelocatedPointer(a) is null && model.UsageAt(a) is { } usage)
                     unreferenced[a] = usage;

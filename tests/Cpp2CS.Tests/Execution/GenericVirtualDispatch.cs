@@ -1,5 +1,5 @@
 using Cpp2CS.Facts;
-using Cpp2CS.Images;
+using Cpp2CS.Image;
 using Cpp2CS.Model;
 
 namespace Cpp2CS.Tests.Execution;

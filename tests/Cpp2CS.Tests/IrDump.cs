@@ -3,7 +3,7 @@ using Cpp2CS.Facts;
 using Cpp2CS.Idioms;
 using Cpp2CS.Input;
 using Cpp2CS.Ir;
-using Cpp2CS.Lifting;
+using Cpp2CS.Machine.Lifting;
 
 namespace Cpp2CS.Tests;
 
@@ -65,7 +65,7 @@ internal static class RecoverDump
     public static int Run(string binary, string metadata, string[] entries)
     {
         var facts = FactsBuilder.Build(binary, metadata);
-        var types = new Cpp2CS.Recovery.ManagedTypes(facts.Model, facts.Layouts);
+        var types = new Cpp2CS.Model.ManagedTypes(facts.Model, facts.Layouts);
         var recovery = new Cpp2CS.Recovery.MethodRecovery(facts, types);
         foreach (var text in entries)
         {
@@ -91,7 +91,7 @@ internal static class RecoverDump
                 if (result.PlatformImport is { } imported) Console.WriteLine($"  {imported}");
                 if ((result.Body ?? result.Partial) is { } body)
                 {
-                    if (sourceView) body = new Cpp2CS.Pipeline.MethodSummaryService(recovery).Complete(summaries => new Cpp2CS.Output.SourceLibraryCalls(facts, types, summaries).Rewrite(Cpp2CS.Recovery.SourceRewriter.Rewrite(body, types)));
+                    if (sourceView) body = new Cpp2CS.Pipeline.MethodSummaryService(recovery).Complete(summaries => new Cpp2CS.Extensions.SourceView.SourceLibraryCalls(facts, types, summaries).Rewrite(Cpp2CS.Extensions.SourceView.SourceRewriter.Rewrite(body, types)));
                     foreach (var region in body.Regions) Console.WriteLine($"  {Show(region)}");
                     foreach (var block in body.Blocks)
                     {
@@ -109,15 +109,15 @@ internal static class RecoverDump
     {
         null => "null",
         string text => text,
-        Cpp2CS.Recovery.LocalValue local => $"{local.Variable}:{local.Type}",
-        Cpp2CS.Recovery.ArgumentValue argument => $"arg{argument.Index}",
-        Cpp2CS.Recovery.ConstantValue constant => $"0x{constant.Bits:x}:{constant.Type}",
-        Cpp2CS.Recovery.FieldValue field => $"{Show(field.Receiver)}.{field.Field.Field.Name}",
-        Cpp2CS.Recovery.AddressValue address => $"&{Show(address.Target)}",
-        Cpp2CS.Recovery.IndirectValue indirect => $"*{Show(indirect.Address)}",
+        Cpp2CS.Managed.LocalValue local => $"{local.Variable}:{local.Type}",
+        Cpp2CS.Managed.ArgumentValue argument => $"arg{argument.Index}",
+        Cpp2CS.Managed.ConstantValue constant => $"0x{constant.Bits:x}:{constant.Type}",
+        Cpp2CS.Managed.FieldValue field => $"{Show(field.Receiver)}.{field.Field.Field.Name}",
+        Cpp2CS.Managed.AddressValue address => $"&{Show(address.Target)}",
+        Cpp2CS.Managed.IndirectValue indirect => $"*{Show(indirect.Address)}",
         System.Collections.IEnumerable list => "[" + string.Join(", ", list.Cast<object?>().Select(Show)) + "]",
         _ when value.GetType().Namespace == "Cpp2CS.Recovery" && value.GetType().IsClass => value.GetType().Name.Replace("Managed", "").Replace("Value", "") + "("
-            + string.Join(", ", value.GetType().GetProperties().Where(p => p.Name is not ("Address" or "EqualityContract" or "Width") || value is Cpp2CS.Recovery.IndirectValue)
+            + string.Join(", ", value.GetType().GetProperties().Where(p => p.Name is not ("Address" or "EqualityContract" or "Width") || value is Cpp2CS.Managed.IndirectValue)
                 .Select(p => $"{p.Name}={Show(p.GetValue(value))}")) + ")",
         _ => value.ToString() ?? "",
     };
@@ -130,26 +130,26 @@ internal static class ClosureDump
     public static int Run(string binary, string metadata, string list)
     {
         var facts = FactsBuilder.Build(binary, metadata);
-        var types = new Cpp2CS.Recovery.ManagedTypes(facts.Model, facts.Layouts);
+        var types = new Cpp2CS.Model.ManagedTypes(facts.Model, facts.Layouts);
         var recovery = new Cpp2CS.Recovery.MethodRecovery(facts, types);
         var entries = File.ReadLines(list).Where(l => l.Length > 0 && !l.StartsWith('#')).Select(l => System.Convert.ToUInt64(l.Split('\t')[0], 16)).ToHashSet();
         var results = facts.Model.Methods.Where(m => entries.Contains(m.Address)).Select(m => recovery.Recover(new Cpp2CS.Model.MethodRef(m, [], []), m.Address)).ToArray();
         var skeleton = new Cpp2CS.Output.Skeleton(facts.Model);
         var emitter = new Cpp2CS.Output.BodyEmitter(skeleton, types);
-        var closure = new Cpp2CS.Pipeline.AccessorRecovery(facts, types, new MethodSummaryService(recovery), emitter, results);
+        var closure = new Cpp2CS.Extensions.Closure.AccessorRecovery(facts, types, new MethodSummaryService(recovery), emitter, results);
         var before = results.ToDictionary(r => r.Method.Method, r => r.Body is { } b ? closure.Problems.GetValueOrDefault(b)?.Message : "有洞");
         Console.WriteLine($"内联候选 {closure.InlineCandidates.Count}：{string.Join("，", closure.InlineCandidates.Keys.Select(m => m.ToString()))}");
         Console.WriteLine($"泛型访问器 {closure.GenericAccessors.Count}：{string.Join("，", closure.GenericAccessors.Select(a => a.Method.ToString()))}");
-        foreach (var access in closure.Accesses) Console.WriteLine($"  越权 {access.Value.GetType().Name} {Cpp2CS.Recovery.FieldAccessor.FieldOf(access.Value)} 写 {access.Write}：候选 {access.Candidates.Length}");
+        foreach (var access in closure.Accesses) Console.WriteLine($"  越权 {access.Value.GetType().Name} {Cpp2CS.Managed.FieldAccessor.FieldOf(access.Value)} 写 {access.Write}：候选 {access.Candidates.Length}");
         closure.Rewrite(types, emitter, _ => true, _ => true);
         foreach (var result in closure.Targets)
         {
             var owner = result.Method.Method.Owner;
-            Console.WriteLine($"== {result.Method}：认回前 {before[result.Method.Method]}；认回后 {(result.Body is { } b ? closure.Problems.GetValueOrDefault(b)?.Message ?? "可写出" : "有洞")}；内联调用 {result.Body?.Blocks.SelectMany(x => x.Statements).OfType<Cpp2CS.Recovery.ManagedCall>().Count(c => c.Inlined)}");
+            Console.WriteLine($"== {result.Method}：认回前 {before[result.Method.Method]}；认回后 {(result.Body is { } b ? closure.Problems.GetValueOrDefault(b)?.Message ?? "可写出" : "有洞")}；内联调用 {result.Body?.Blocks.SelectMany(x => x.Statements).OfType<Cpp2CS.Managed.ManagedCall>().Count(c => c.Inlined)}");
             if (result.Body is null) continue;
             foreach (var block in result.Body.Blocks)
                 foreach (var statement in block.Statements)
-                    if (Cpp2CS.Recovery.ManagedValues.Of(statement).SelectMany(Cpp2CS.Recovery.ManagedValues.Walk).Any(v => v is Cpp2CS.Recovery.FieldValue f && !Cpp2CS.Recovery.ManagedAccess.Field(types, owner, f.Field, f.Receiver.Type)))
+                    if (Cpp2CS.Managed.ManagedValues.Of(statement).SelectMany(Cpp2CS.Managed.ManagedValues.Walk).Any(v => v is Cpp2CS.Managed.FieldValue f && !Cpp2CS.Managed.ManagedAccess.Field(types, owner, f.Field, f.Receiver.Type)))
                         Console.WriteLine($"  B@0x{block.Address:x} 越权：{statement}");
         }
         return 0;

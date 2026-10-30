@@ -1,5 +1,5 @@
 using Cpp2CS.Facts;
-using Cpp2CS.Functions;
+using Cpp2CS.Image;
 
 namespace Cpp2CS.Tests;
 
@@ -19,10 +19,10 @@ internal static class UnregisteredExceptionShapeCheck
         };
         var first = Function(0x1000, 0x4000, 0x8000);
         var moved = Function(0x2000, 0x5000, 0x9000);
-        string Shape(CodeFunction f) => UnregisteredMethods.ExceptionShape(f, slot => slot is 0x8000 or 0x9000 ? 0xa000UL : slot == 0x9008 ? 0xb000UL : null);
+        string Shape(CodeFunction f) => Cpp2CS.Facts.Derived.UnregisteredInference.ExceptionShape(f, slot => slot is 0x8000 or 0x9000 ? 0xa000UL : slot == 0x9008 ? 0xb000UL : null);
         var expected = Shape(first);
         a.Equal(expected, Shape(moved), "代码和动作表位置变化但区间与 RTTI 相同时同形");
-        CodeFunction Region(Cpp2CS.Functions.ExceptionRegion region) => moved with { ExceptionRegions = [region] };
+        CodeFunction Region(Cpp2CS.Image.ExceptionRegion region) => moved with { ExceptionRegions = [region] };
         var original = moved.ExceptionRegions.Single();
         foreach (var region in new[]
         {

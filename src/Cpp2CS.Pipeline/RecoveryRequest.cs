@@ -1,8 +1,11 @@
+
 namespace Cpp2CS.Pipeline;
 
 /// <summary>一次恢复的显式输入、范围和输出策略。</summary>
 public sealed record RecoveryRequest(string Binary, string Metadata, string Output)
 {
+    public Cpp2CS.Options.RecoveryOptions Options { get; init; } = new();
+    public string Profile { get; init; } = "full";
     public bool All { get; init; }
     public string[] Namespaces { get; init; } = [];
     public string[]? Assemblies { get; init; }
@@ -19,6 +22,7 @@ public sealed record RecoveryRequest(string Binary, string Metadata, string Outp
 
     public void Validate()
     {
+        if (Profile is not ("core" or "full")) throw new ArgumentException("--profile 必须是 core 或 full");
         if (!HasScope) throw new ArgumentException("必须且只能指定一种恢复范围");
         if (Jobs < 1) throw new ArgumentException("--jobs 必须大于零");
         if (Limit < 1) throw new ArgumentException("--limit 必须大于零");
@@ -27,7 +31,7 @@ public sealed record RecoveryRequest(string Binary, string Metadata, string Outp
 
     public static RecoveryRequest Parse(string binary, string metadata, string output, string[] options)
     {
-        var request = new RecoveryRequest(binary, metadata, output);
+        var request = new RecoveryRequest(binary, metadata, output) { Options = RecoveryEnvironment.Read() };
         var scopes = 0;
         for (var i = 0; i < options.Length; i++)
         {
@@ -39,6 +43,8 @@ public sealed record RecoveryRequest(string Binary, string Metadata, string Outp
             if (option is "--namespaces" or "--assemblies" or "--methods") scopes++;
             request = option switch
             {
+                "--profile" => request with { Profile = value },
+                "--fact-cache-file" => request with { Options = request.Options with { FactCacheFile = Path.GetFullPath(value) } },
                 "--namespaces" => request with { Namespaces = Split(value) },
                 "--assemblies" => request with { Assemblies = Split(value) },
                 "--methods" => request with { Methods = value },

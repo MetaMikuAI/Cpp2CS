@@ -35,15 +35,15 @@ internal static class FieldAccessorCheck
         var setter = Method(true);
         var get = Body(getter, new ManagedReturn(0, read));
         var set = Body(setter, new ManagedStore(0, read, parameter), new ManagedReturn(1, null));
-        var recognized = FieldAccessor.Recognize(get, false, types)!;
+        var recognized = FieldAccessors.Recognize(get, false, types)!;
         a.True(recognized is not null, "单次实例读取");
-        a.True(FieldAccessor.Recognize(set, true, types) is not null, "单次实例写入");
-        a.True(FieldAccessor.Recognize(Body(getter, new ManagedAssignment(0, local, read), new ManagedReturn(1, local)), false, types) is not null, "局部复制保留单次读取");
+        a.True(FieldAccessors.Recognize(set, true, types) is not null, "单次实例写入");
+        a.True(FieldAccessors.Recognize(Body(getter, new ManagedAssignment(0, local, read), new ManagedReturn(1, local)), false, types) is not null, "局部复制保留单次读取");
         var wide = new LocalValue(local.Variable, types.UInt64, 64);
         var extended = new ManagedAssignment(0, wide, new ConversionValue(ConvKind.ZeroExtend, read, types.UInt64, 64));
-        a.True(FieldAccessor.Recognize(Body(getter, extended, new ManagedReturn(1,
+        a.True(FieldAccessors.Recognize(Body(getter, extended, new ManagedReturn(1,
             new ConversionValue(ConvKind.Truncate, wide, types.UInt32, 32))), false, types) is not null, "跨局部变量的 W/X 寄存器往返");
-        a.True(FieldAccessor.Recognize(Body(getter, extended, new ManagedReturn(1,
+        a.True(FieldAccessors.Recognize(Body(getter, extended, new ManagedReturn(1,
             new ConversionValue(ConvKind.Truncate, wide, types.UInt16, 16))), false, types) is null, "截断丢失字段高位不能认回");
         foreach (var body in new[]
         {
@@ -54,12 +54,12 @@ internal static class FieldAccessorCheck
             Body(getter, new ManagedCall(0, new(getter, receiver, [], false), local, false), new ManagedReturn(1, read)),
             Body(getter, new ManagedBranch(0, new ConstantValue(1, types.Boolean, 1), new(0, []), new(0, []))),
             Body(Method(false, MethodAttributes.Public | MethodAttributes.Virtual), new ManagedReturn(0, read)),
-        }) a.True(FieldAccessor.Recognize(body, false, types) is null, "拒绝额外读/算术/调用/分支/可覆写方法或类型位宽不符");
-        a.True(FieldAccessor.Recognize(Body(Method(false, MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.Final), new ManagedReturn(0, read)), false, types) is not null, "final 可直接调用");
-        a.True(FieldAccessor.Recognize(Body(setter, new ManagedStore(0, read, parameter), new ManagedStore(1, read, parameter), new ManagedReturn(2, null)), true, types) is null, "拒绝两次写入");
-        a.True(FieldAccessor.Recognize(Body(setter, new ManagedStore(0, read, new ConstantValue(0, types.Int32, 32)), new ManagedReturn(1, null)), true, types) is null, "setter 必须原样写入参数");
+        }) a.True(FieldAccessors.Recognize(body, false, types) is null, "拒绝额外读/算术/调用/分支/可覆写方法或类型位宽不符");
+        a.True(FieldAccessors.Recognize(Body(Method(false, MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.Final), new ManagedReturn(0, read)), false, types) is not null, "final 可直接调用");
+        a.True(FieldAccessors.Recognize(Body(setter, new ManagedStore(0, read, parameter), new ManagedStore(1, read, parameter), new ManagedReturn(2, null)), true, types) is null, "拒绝两次写入");
+        a.True(FieldAccessors.Recognize(Body(setter, new ManagedStore(0, read, new ConstantValue(0, types.Int32, 32)), new ManagedReturn(1, null)), true, types) is null, "setter 必须原样写入参数");
         a.True(recognized!.Matches(types, caller, read, false), "public getter 可替代 private 字段读取");
-        var privateGetter = FieldAccessor.Recognize(Body(Method(false, MethodAttributes.Private), new ManagedReturn(0, read)), false, types)!;
+        var privateGetter = FieldAccessors.Recognize(Body(Method(false, MethodAttributes.Private), new ManagedReturn(0, read)), false, types)!;
         a.True(!privateGetter.Matches(types, caller, read, false), "拒绝调用不可访问 getter");
         a.True(!recognized.Matches(types, caller, read with { Width = 64 }, false), "调用点位宽必须一致");
         a.True(!recognized.Matches(types, caller, read, true), "getter 不能用于写入");
@@ -67,10 +67,10 @@ internal static class FieldAccessorCheck
         var staticRead = new StaticFieldValue(new FieldRef(staticField, ownerType), types.Int32, 32);
         var staticGet = Method(false, MethodAttributes.Public | MethodAttributes.Static);
         var staticSet = Method(true, MethodAttributes.Public | MethodAttributes.Static);
-        a.True(FieldAccessor.Recognize(Body(staticGet, new ManagedReturn(0, staticRead)), false, types) is not null, "静态 getter");
-        a.True(FieldAccessor.Recognize(Body(staticSet, new ManagedStore(0, staticRead, parameter), new ManagedReturn(1, null)), true, types) is not null, "静态 setter");
-        a.True(FieldAccessor.Recognize(Body(Method(false, MethodAttributes.Public | MethodAttributes.Static, caller), new ManagedReturn(0, staticRead)), false, types) is null, "拒绝改变类初始化对象的跨类型静态访问器");
-        a.True(FieldAccessor.Recognize(Body(getter, new ManagedReturn(0, staticRead)), false, types) is null, "实例 getter 不能冒充静态 getter");
+        a.True(FieldAccessors.Recognize(Body(staticGet, new ManagedReturn(0, staticRead)), false, types) is not null, "静态 getter");
+        a.True(FieldAccessors.Recognize(Body(staticSet, new ManagedStore(0, staticRead, parameter), new ManagedReturn(1, null)), true, types) is not null, "静态 setter");
+        a.True(FieldAccessors.Recognize(Body(Method(false, MethodAttributes.Public | MethodAttributes.Static, caller), new ManagedReturn(0, staticRead)), false, types) is null, "拒绝改变类初始化对象的跨类型静态访问器");
+        a.True(FieldAccessors.Recognize(Body(getter, new ManagedReturn(0, staticRead)), false, types) is null, "实例 getter 不能冒充静态 getter");
         var choice = new ChoiceValue(new ConstantValue(0, types.Boolean, 1), read, new ConstantValue(0, types.Int32, 32), types.Int32, 32);
         var rewritten = AccessorRewriter.Rewrite(Body(getter, new ManagedReturn(0, choice)), (v, w) => v == read && !w ? recognized : null);
         a.True(rewritten.Blocks[0].Statements is [ManagedReturn { Value: ChoiceValue { True: FieldValue { Accessor: not null } } }], "getter 留在条件表达式原求值位置");
@@ -107,12 +107,12 @@ internal static class FieldAccessorCheck
         var method = new Mono.Cecil.MethodDefinition("Tests.IValue.get_Value", Mono.Cecil.MethodAttributes.Private | Mono.Cecil.MethodAttributes.Virtual, module.TypeSystem.Int32);
         implementation.Methods.Add(method);
         method.Overrides.Add(getter);
-        a.True(Cpp2CS.Output.AccessorDependencyEligibility.Problem(implementation) is not null, "拒绝缺少属性关联的显式接口访问器依赖");
+        a.True(Cpp2CS.Extensions.Closure.AccessorDependencyEligibility.Problem(implementation) is not null, "拒绝缺少属性关联的显式接口访问器依赖");
         implementation.Properties.Add(new Mono.Cecil.PropertyDefinition("Tests.IValue.Value", 0, module.TypeSystem.Int32) { GetMethod = method });
-        a.True(Cpp2CS.Output.AccessorDependencyEligibility.Problem(implementation) is null, "具有属性关联的显式实现可用");
+        a.True(Cpp2CS.Extensions.Closure.AccessorDependencyEligibility.Problem(implementation) is null, "具有属性关联的显式实现可用");
         implementation.Properties.Clear();
         contract.Properties.Clear();
-        a.True(Cpp2CS.Output.AccessorDependencyEligibility.Problem(implementation) is null, "普通方法即使名字含 get_ 也不误判为属性");
+        a.True(Cpp2CS.Extensions.Closure.AccessorDependencyEligibility.Problem(implementation) is null, "普通方法即使名字含 get_ 也不误判为属性");
     }
 
 }

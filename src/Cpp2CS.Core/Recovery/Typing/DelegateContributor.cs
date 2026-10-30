@@ -1,4 +1,3 @@
-using Cpp2CS.Ir;
 
 namespace Cpp2CS.Recovery.Typing;
 

@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using Cpp2CS.Images;
+using Cpp2CS.Image;
 using Cpp2CS.Model;
 using Il2CppDumper;
 
@@ -65,8 +65,8 @@ namespace Cpp2CS.Input
             var bytes = File.ReadAllBytes(binaryPath);
             Il2Cpp il2Cpp = image.Architecture switch
             {
-                Architecture.Arm64 => new Elf64(new MemoryStream(bytes)),
-                Architecture.X64 => new PE(new MemoryStream(bytes)),
+                Cpp2CS.Model.Architecture.Arm64 => new Elf64(new MemoryStream(bytes)),
+                Cpp2CS.Model.Architecture.X64 => new PE(new MemoryStream(bytes)),
                 _ => throw new NotSupportedException(image.Architecture.ToString()),
             };
             il2Cpp.SetProperties(metadata.Version, metadata.metadataUsagesCount);
@@ -393,7 +393,7 @@ namespace Cpp2CS.Input
             return owners.ToDictionary(p => p.Key, p => (IReadOnlyList<CodeOwner>)p.Value);
         }
 
-        private int ObjectHeaderSize => image.Architecture is Architecture.Arm64 or Architecture.X64 ? 16 : throw new NotSupportedException(image.Architecture.ToString());
+        private int ObjectHeaderSize => image.Architecture is Cpp2CS.Model.Architecture.Arm64 or Cpp2CS.Model.Architecture.X64 ? 16 : throw new NotSupportedException(image.Architecture.ToString());
 
         private IReadOnlyList<GenericParameterDef> GenericParameters(int containerIndex)
         {
@@ -407,7 +407,8 @@ namespace Cpp2CS.Input
             var parameter = metadata.genericParameters[index];
             var result = new GenericParameterDef
             {
-                Name = String(parameter.nameIndex), Position = parameter.num,
+                Name = String(parameter.nameIndex),
+                Position = parameter.num,
                 Attributes = (GenericParameterAttributes)parameter.flags,
             };
             genericParameters[index] = result;
@@ -500,11 +501,11 @@ namespace Cpp2CS.Input
             switch (blob.il2CppTypeEnum)
             {
                 case Il2CppTypeEnum.IL2CPP_TYPE_SZARRAY:
-                {
-                    var elements = (blob.Value as BlobValue[])?.Select(AttributeValueOf).ToArray();
-                    var elementType = elements is [var first, ..] && elements.All(e => e.Type == first.Type) ? first.Type : Corlib("System.Object");
-                    return new AttributeValue(new ArrayRef(elementType, 1), elements);
-                }
+                    {
+                        var elements = (blob.Value as BlobValue[])?.Select(AttributeValueOf).ToArray();
+                        var elementType = elements is [var first, ..] && elements.All(e => e.Type == first.Type) ? first.Type : Corlib("System.Object");
+                        return new AttributeValue(new ArrayRef(elementType, 1), elements);
+                    }
                 case Il2CppTypeEnum.IL2CPP_TYPE_IL2CPP_TYPE_INDEX:
                     return new AttributeValue(Corlib("System.Type"), blob.Value is Il2CppType t ? Convert(t) : null);
                 default:
@@ -597,7 +598,7 @@ namespace Cpp2CS.Input
             var parameter = executor.GetGenericParameteFromIl2CppType(type);
             var container = metadata.genericContainers[parameter.ownerIndex];
             return new GenericParameterRef(String(parameter.nameIndex), container.is_method != 0, parameter.num)
-                { Parameter = GenericParameter(container.genericParameterStart + parameter.num) };
+            { Parameter = GenericParameter(container.genericParameterStart + parameter.num) };
         }
     }
 }

@@ -1,4 +1,4 @@
-using Cpp2CS.Flow;
+using Cpp2CS.Machine.Flow;
 using Cpp2CS.Ir;
 
 namespace Cpp2CS.Recovery.Analysis;
@@ -75,5 +75,3 @@ internal sealed class MethodAnalyses
     public T Get<T>(IMethodAnalysis<T> analysis) where T : class =>
         (context ?? throw new InvalidOperationException("尚未建立方法快照")).Get(analysis);
 }
-
-public sealed record AnalysisStep(string Rule, int InputVersion, int OutputVersion, int InputTypes, int OutputTypes, double Milliseconds);

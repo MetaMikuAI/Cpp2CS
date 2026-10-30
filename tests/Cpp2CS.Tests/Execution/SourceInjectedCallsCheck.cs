@@ -68,7 +68,7 @@ internal static class SourceInjectedCallsCheck
             }
             module.Write(input);
         }
-        var source = Decompilation.Decompile(input, directory, t => t.ReflectionName == "Generated", false, true).Single().Source;
+        var source = FullDecompilation.Decompile(input, directory, t => t.ReflectionName == "Generated", false, true).Single().Source;
         File.WriteAllText(Path.Combine(directory, "Generated.cs"), source);
         var rebuilt = Compile(source, "Injected.Rebuilt", dependency: true);
         var original = System.Runtime.Loader.AssemblyLoadContext.Default.LoadFromAssemblyPath(input);

@@ -1,6 +1,5 @@
 using System.Buffers.Binary;
-using Cpp2CS.Functions;
-using Cpp2CS.Images;
+using Cpp2CS.Image;
 
 namespace Cpp2CS.Facts;
 
@@ -100,7 +99,7 @@ public sealed class CodeMap
 
     public static CodeMap Build(ImageDocument image)
     {
-        if (image.Architecture != Architecture.Arm64) throw new NotSupportedException("代码地图只支持 ARM64 ELF");
+        if (image.Architecture != Cpp2CS.Model.Architecture.Arm64) throw new NotSupportedException("代码地图只支持 ARM64 ELF");
         var code = image.Sections.Where(s => s.Executable).Select(s =>
         {
             var resolved = image.Resolve(s.Address);

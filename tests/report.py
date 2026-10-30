@@ -36,7 +36,7 @@ def load(directory):
 def buckets(targets):
     result = {}
     for r in targets:
-        names = {h["reason"].split(" ")[0] for h in r.get("holes") or [] if not h.get("derived")}
+        names = {h.get("category") or h["reason"].split(" ")[0] for h in r.get("holes") or [] if not h.get("derived")}
         if r.get("emitProblem"):
             names.add("CIL/" + r["emitProblem"].split(" ")[0])
         for name in names:

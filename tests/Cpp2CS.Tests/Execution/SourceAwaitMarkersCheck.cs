@@ -39,7 +39,7 @@ internal static class SourceAwaitMarkersCheck
                 public static Task<int> Read(Task<int> task) => Cpp2CS.Await.Result(Cpp2CS.Await.Of(task) + 1);
             }
             """, "AwaitMarkers.Input"));
-        var source = Decompilation.Decompile(input, directory, t => t.ReflectionName == "Probe", false, true).Single().Source;
+        var source = FullDecompilation.Decompile(input, directory, t => t.ReflectionName == "Probe", false, true).Single().Source;
         File.WriteAllText(Path.Combine(directory, "Probe.cs"), source);
         var rebuilt = Compile(source, "AwaitMarkers.Rebuilt");
         var read = System.Reflection.Assembly.Load(rebuilt).GetType("Probe")!.GetMethod("Read")!.CreateDelegate<Func<Task<int>, Task<int>>>();

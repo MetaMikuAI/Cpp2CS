@@ -1,7 +1,7 @@
-using Cpp2CS.Arm64;
+using Cpp2CS.Machine.Arm64;
 using Cpp2CS.Facts;
-using Cpp2CS.Flow;
-using Cpp2CS.Images;
+using Cpp2CS.Machine.Flow;
+using Cpp2CS.Image;
 using Cpp2CS.Ir;
 
 namespace Cpp2CS.Tests;
@@ -26,7 +26,7 @@ internal static class NoReturnCheck
 
     private sealed class Machine(uint[] words) : IMachine
     {
-        public Architecture Architecture => Architecture.Arm64;
+        public Cpp2CS.Model.Architecture Architecture => Cpp2CS.Model.Architecture.Arm64;
         public ImageDocument Image => throw new NotSupportedException();
         public CallingConvention Convention => throw new NotSupportedException();
         public int Lift(ulong address, List<Stmt> output)

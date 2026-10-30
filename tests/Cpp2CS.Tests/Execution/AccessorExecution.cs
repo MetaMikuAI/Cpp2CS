@@ -150,7 +150,7 @@ internal static partial class ExecutionCheck
         var automatic = AutoPropertyAccessor.Candidates(types);
         foreach (var result in results.Where(r => wanted.Contains((r.Entry, r.Method.ToString()))))
         {
-            var accessor = (result.Entry == 0 ? automatic.GetValueOrDefault(result.Method.Method) : null) ?? properties[result.Method.Method].Select(p => result.Body is { } b ? FieldAccessor.Recognize(b, p.Write, types) : null)
+            var accessor = (result.Entry == 0 ? automatic.GetValueOrDefault(result.Method.Method) : null) ?? properties[result.Method.Method].Select(p => result.Body is { } b ? FieldAccessors.Recognize(b, p.Write, types) : null)
                 .OfType<FieldAccessor>().SingleOrDefault() ?? automatic.GetValueOrDefault(result.Method.Method) ?? throw new InvalidDataException($"访问器候选不再满足严格形态：{result.Method}");
             if (!descriptions.Contains(AccessorEvidence.Describe(facts, skeleton, accessor)))
                 throw new InvalidDataException($"访问器候选 CIL 或原生字节已变：{result.Method}");

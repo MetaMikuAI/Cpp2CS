@@ -1,5 +1,5 @@
 using Cpp2CS.Ir;
-using Cpp2CS.Arm64;
+using Cpp2CS.Machine.Arm64;
 using Cpp2CS.Output;
 using Mono.Cecil;
 using Mono.Cecil.Cil;

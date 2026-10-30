@@ -1,4 +1,3 @@
-using Cpp2CS.Model;
 
 namespace Cpp2CS.Facts;
 

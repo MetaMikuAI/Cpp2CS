@@ -1,3 +1,4 @@
+
 namespace Cpp2CS.Ir;
 
 /// <summary>
@@ -58,13 +59,13 @@ public sealed class Evaluator
                 Registers[assign.Target] = Eval(assign.Value) & Mask(assign.Target.Width);
                 break;
             case Store store:
-            {
-                var address = (ulong)Eval(store.Target);
-                var value = Eval(store.Value);
-                for (var i = 0; i < store.Value.Width / 8; i++)
-                    Written[address + (ulong)i] = (byte)(value >> (i * 8));
-                break;
-            }
+                {
+                    var address = (ulong)Eval(store.Target);
+                    var value = Eval(store.Value);
+                    for (var i = 0; i < store.Value.Width / 8; i++)
+                        Written[address + (ulong)i] = (byte)(value >> (i * 8));
+                    break;
+                }
             case Branch branch:
                 NextPc = Eval(branch.Condition) != 0 ? branch.Target : branch.Fallthrough;
                 break;
@@ -134,13 +135,13 @@ public sealed class Evaluator
         switch (intrinsic.Name)
         {
             case "vdup.8" or "vdup.16" or "vdup.32" or "vdup.64":
-            {
-                var size = int.Parse(intrinsic.Name.AsSpan(5));
-                var element = Eval(args[0]) & Mask(size);
-                UInt128 result = 0;
-                for (var i = 0; i < intrinsic.Width; i += size) result |= element << i;
-                return result;
-            }
+                {
+                    var size = int.Parse(intrinsic.Name.AsSpan(5));
+                    var element = Eval(args[0]) & Mask(size);
+                    UInt128 result = 0;
+                    for (var i = 0; i < intrinsic.Width; i += size) result |= element << i;
+                    return result;
+                }
             default:
                 return Fail(intrinsic.Name);
         }
@@ -153,31 +154,31 @@ public sealed class Evaluator
             case Read { Storage.Bank: Bank.Flags }:
                 return Nzcv;
             case Flags flags:
-            {
-                var width = flags.OperandWidth;
-                var a = Eval(flags.Left) & Mask(width);
-                if (flags.Kind == FlagKind.FloatCompare)
                 {
-                    var b = Eval(flags.Right!) & Mask(width);
-                    var (x, y) = (ToDouble(a, width), ToDouble(b, width));
-                    if (double.IsNaN(x) || double.IsNaN(y)) return 0b0011;
-                    return x == y ? 0b0110 : x < y ? 0b1000 : 0b0010;
+                    var width = flags.OperandWidth;
+                    var a = Eval(flags.Left) & Mask(width);
+                    if (flags.Kind == FlagKind.FloatCompare)
+                    {
+                        var b = Eval(flags.Right!) & Mask(width);
+                        var (x, y) = (ToDouble(a, width), ToDouble(b, width));
+                        if (double.IsNaN(x) || double.IsNaN(y)) return 0b0011;
+                        return x == y ? 0b0110 : x < y ? 0b1000 : 0b0010;
+                    }
+                    if (flags.Kind == FlagKind.Logic)
+                    {
+                        var r = flags.Right is null ? a : a & Eval(flags.Right) & Mask(width);
+                        return Nz(r, width);
+                    }
+                    var right = Eval(flags.Right!) & Mask(width);
+                    var sub = flags.Kind == FlagKind.Sub;
+                    var result = (sub ? a - right : a + right) & Mask(width);
+                    var carry = sub ? a >= right : result < a;
+                    var sa = Signed(a, width);
+                    var sb = Signed(right, width);
+                    var sr = Signed(result, width);
+                    var overflow = sub ? (sa < 0) != (sb < 0) && (sr < 0) != (sa < 0) : (sa < 0) == (sb < 0) && (sr < 0) != (sa < 0);
+                    return Nz(result, width) | (carry ? 2 : 0) | (overflow ? 1 : 0);
                 }
-                if (flags.Kind == FlagKind.Logic)
-                {
-                    var r = flags.Right is null ? a : a & Eval(flags.Right) & Mask(width);
-                    return Nz(r, width);
-                }
-                var right = Eval(flags.Right!) & Mask(width);
-                var sub = flags.Kind == FlagKind.Sub;
-                var result = (sub ? a - right : a + right) & Mask(width);
-                var carry = sub ? a >= right : result < a;
-                var sa = Signed(a, width);
-                var sb = Signed(right, width);
-                var sr = Signed(result, width);
-                var overflow = sub ? (sa < 0) != (sb < 0) && (sr < 0) != (sa < 0) : (sa < 0) == (sb < 0) && (sr < 0) != (sa < 0);
-                return Nz(result, width) | (carry ? 2 : 0) | (overflow ? 1 : 0);
-            }
             case ConditionalFlags conditional:
                 return Eval(conditional.Condition) != 0 ? FlagsOf(conditional.Taken) : conditional.Nzcv;
             case Unknown:
@@ -233,27 +234,27 @@ public sealed class Evaluator
             case BinOp.Shl: return a << (int)(b % (uint)width);
             case BinOp.LShr: return (a & Mask(width)) >> (int)(b % (uint)width);
             case BinOp.AShr:
-            {
-                var count = (int)(b % (uint)width);
-                if (width > 64) return Fail("ashr128");
-                return (ulong)(Signed(a, width) >> count);
-            }
+                {
+                    var count = (int)(b % (uint)width);
+                    if (width > 64) return Fail("ashr128");
+                    return (ulong)(Signed(a, width) >> count);
+                }
             case BinOp.Ror:
-            {
-                var count = (int)(b % (uint)width);
-                a &= Mask(width);
-                return count == 0 ? a : (a >> count) | (a << (width - count));
-            }
+                {
+                    var count = (int)(b % (uint)width);
+                    a &= Mask(width);
+                    return count == 0 ? a : (a >> count) | (a << (width - count));
+                }
             case BinOp.UDiv: return b == 0 ? 0 : a / b;
             case BinOp.URem: return b == 0 ? 0 : a % b;
             case BinOp.SDiv or BinOp.SRem:
-            {
-                var x = Signed(a, width);
-                var y = Signed(b, width);
-                if (y == 0) return 0;
-                if (y == -1) return binary.Op == BinOp.SDiv ? (ulong)unchecked(-x) : 0;
-                return (ulong)(binary.Op == BinOp.SDiv ? x / y : x % y);
-            }
+                {
+                    var x = Signed(a, width);
+                    var y = Signed(b, width);
+                    if (y == 0) return 0;
+                    if (y == -1) return binary.Op == BinOp.SDiv ? (ulong)unchecked(-x) : 0;
+                    return (ulong)(binary.Op == BinOp.SDiv ? x / y : x % y);
+                }
             case BinOp.MulHighU: return ((UInt128)(ulong)a * (ulong)b) >> 64;
             case BinOp.MulHighS: return (UInt128)(ulong)(long)(((Int128)(long)(ulong)a * (long)(ulong)b) >> 64);
             default: return FloatBinary(binary.Op, a, b, width);
@@ -343,19 +344,19 @@ public sealed class Evaluator
             case UnOp.Not: return ~a;
             case UnOp.Clz: return UInt128.LeadingZeroCount(a) - (UInt128)(128 - width);
             case UnOp.Cls:
-            {
-                var sign = (a >> (width - 1)) & 1;
-                var count = 0;
-                for (var i = width - 2; i >= 0 && ((a >> i) & 1) == sign; i--) count++;
-                return (UInt128)count;
-            }
+                {
+                    var sign = (a >> (width - 1)) & 1;
+                    var count = 0;
+                    for (var i = width - 2; i >= 0 && ((a >> i) & 1) == sign; i--) count++;
+                    return (UInt128)count;
+                }
             case UnOp.PopCount: return UInt128.PopCount(a);
             case UnOp.Rbit:
-            {
-                UInt128 r = 0;
-                for (var i = 0; i < width; i++) r |= ((a >> i) & 1) << (width - 1 - i);
-                return r;
-            }
+                {
+                    UInt128 r = 0;
+                    for (var i = 0; i < width; i++) r |= ((a >> i) & 1) << (width - 1 - i);
+                    return r;
+                }
             case UnOp.Bswap: return SwapBytes(a, width, width);
             case UnOp.Bswap16: return SwapBytes(a, width, 16);
             case UnOp.Bswap32: return SwapBytes(a, width, 32);
@@ -470,22 +471,22 @@ public sealed class Evaluator
             case ConvKind.UIntToFloat: return FromInteger((double)(ulong)a, (float)(ulong)a, to);
             case ConvKind.FloatToFloat: return FromDouble(ToDouble(a, from), to);
             case ConvKind.FloatToSInt:
-            {
-                var x = ToDouble(a, from);
-                if (double.IsNaN(x)) return 0;
-                var min = -Math.Pow(2, to - 1);
-                var max = Math.Pow(2, to - 1);
-                if (x <= min) return (UInt128)(Int128)(long)min;
-                if (x >= max) return (ulong)(long)(max - 1 >= long.MaxValue ? long.MaxValue : (long)max - 1);
-                return (UInt128)(Int128)(long)Math.Truncate(x);
-            }
+                {
+                    var x = ToDouble(a, from);
+                    if (double.IsNaN(x)) return 0;
+                    var min = -Math.Pow(2, to - 1);
+                    var max = Math.Pow(2, to - 1);
+                    if (x <= min) return (UInt128)(Int128)(long)min;
+                    if (x >= max) return (ulong)(long)(max - 1 >= long.MaxValue ? long.MaxValue : (long)max - 1);
+                    return (UInt128)(Int128)(long)Math.Truncate(x);
+                }
             case ConvKind.FloatToUInt:
-            {
-                var x = ToDouble(a, from);
-                if (double.IsNaN(x) || x <= 0) return 0;
-                if (x >= Math.Pow(2, to)) return Mask(to);
-                return (ulong)Math.Truncate(x);
-            }
+                {
+                    var x = ToDouble(a, from);
+                    if (double.IsNaN(x) || x <= 0) return 0;
+                    if (x >= Math.Pow(2, to)) return Mask(to);
+                    return (ulong)Math.Truncate(x);
+                }
             default: return Fail(convert.Kind.ToString());
         }
     }

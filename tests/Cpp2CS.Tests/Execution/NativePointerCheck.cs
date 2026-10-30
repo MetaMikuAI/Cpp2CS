@@ -71,7 +71,7 @@ internal static class NativePointerCheck
             Fields = original.Fields, RuntimeTypes = original.RuntimeTypes, MethodSpecs = original.MethodSpecs, FieldRefs = original.FieldRefs,
             StringLiterals = original.StringLiterals, Code = original.Code };
         var skeleton = new Skeleton(model);
-        var emitter = new BodyEmitter(skeleton, types);
+        var emitter = new FullBodyEmitter(skeleton, types);
         var a = new Assertions();
         a.Equal(0, emitter.Emit(bodies).Count, "指针值通过实际写出管线");
         var invalid = bodies[3] with { Blocks = [new(0, [new ManagedReturn(0, new ConstantValue(1234, types.IntPtr, 64))])] };

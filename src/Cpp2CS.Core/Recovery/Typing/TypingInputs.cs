@@ -1,6 +1,5 @@
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
-using Cpp2CS.Model;
 
 namespace Cpp2CS.Recovery.Typing;
 

@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 using System.Reflection;
-using Cpp2CS.Images;
+using Cpp2CS.Image;
 
 namespace Cpp2CS.Model;
 
@@ -148,10 +148,24 @@ public sealed class TypeDef
     /// <summary>C# 内建类型关键字（int、string……），其余为 null。</summary>
     public string? Keyword => Namespace != "System" || DeclaringType is not null ? null : Name switch
     {
-        "Void" => "void", "Boolean" => "bool", "Char" => "char", "SByte" => "sbyte", "Byte" => "byte",
-        "Int16" => "short", "UInt16" => "ushort", "Int32" => "int", "UInt32" => "uint", "Int64" => "long", "UInt64" => "ulong",
-        "Single" => "float", "Double" => "double", "Decimal" => "decimal", "String" => "string", "Object" => "object",
-        "IntPtr" => "nint", "UIntPtr" => "nuint",
+        "Void" => "void",
+        "Boolean" => "bool",
+        "Char" => "char",
+        "SByte" => "sbyte",
+        "Byte" => "byte",
+        "Int16" => "short",
+        "UInt16" => "ushort",
+        "Int32" => "int",
+        "UInt32" => "uint",
+        "Int64" => "long",
+        "UInt64" => "ulong",
+        "Single" => "float",
+        "Double" => "double",
+        "Decimal" => "decimal",
+        "String" => "string",
+        "Object" => "object",
+        "IntPtr" => "nint",
+        "UIntPtr" => "nuint",
         _ => null,
     };
     public string SimpleName => Name.IndexOf('`') is var tick and >= 0 ? Name[..tick] : Name;
