@@ -31,7 +31,9 @@ internal static class SharedValueEmissionCheck
         var cast = Method("Cast", 0, generic, types.Object);
         var describe = Method("Describe", 1, types.String, new ByRefRef(generic));
         var castInteger = Method("CastInteger", 2, types.Int32, types.Object, shared: false);
-        owner.Methods = [cast, describe, castInteger];
+        var dateTime = types.Corlib("System.DateTime");
+        var castStruct = Method("CastStruct", 3, dateTime, types.Object, shared: false);
+        owner.Methods = [cast, describe, castInteger, castStruct];
         var contract = MethodRef.Open(types.CorlibDefinition("System.Object")!.Methods.Single(m => m.Name == "ToString" && m.Parameters.Count == 0));
         var local = new LocalValue(new(Storage.Temp(0), 1), types.String, 64);
         var receiver = new ArgumentValue(0, new ByRefRef(generic), 64);
@@ -39,9 +41,11 @@ internal static class SharedValueEmissionCheck
         var describeBody = new ManagedBody(MethodRef.Open(describe), [new(0, [new ManagedCall(0, new(contract, receiver, [], true) { Constraint = generic }, local, false), new ManagedReturn(4, local)])]);
         var integerBody = new ManagedBody(MethodRef.Open(castInteger), [new(0, [new ManagedReturn(0,
             new IndirectValue(new UnboxAddressValue(new ArgumentValue(0, types.Object, 64), types.Int32), types.Int32, 32))])]);
+        var structBody = new ManagedBody(MethodRef.Open(castStruct), [new(0, [new ManagedReturn(0,
+            new IndirectValue(new UnboxAddressValue(new ArgumentValue(0, types.Object, 64), dateTime), dateTime, 0))])]);
         var assembly = new AssemblyDef { Name = owner.Assembly, AssemblyName = "SharedValueCheck", Version = new(1, 0), Culture = "", PublicKey = [], Types = [module, owner] };
         var model = new ProgramModel { Image = original.Image, MetadataVersion = original.MetadataVersion, Assemblies = [.. original.Assemblies, assembly],
-            Types = [.. original.Types, module, owner], Methods = [.. original.Methods, cast, describe, castInteger], Fields = original.Fields, RuntimeTypes = original.RuntimeTypes,
+            Types = [.. original.Types, module, owner], Methods = [.. original.Methods, cast, describe, castInteger, castStruct], Fields = original.Fields, RuntimeTypes = original.RuntimeTypes,
             MethodSpecs = original.MethodSpecs, FieldRefs = original.FieldRefs, StringLiterals = original.StringLiterals, Code = original.Code };
         var skeleton = new Skeleton(model); var emitter = new FullBodyEmitter(skeleton, types); var a = new Assertions();
         var unboxers = facts.Code.Functions.Where(f => f.Size == 196 && SharedRuntimeHelpers.UnboxAny(facts, f.Start)).ToArray();
@@ -53,7 +57,7 @@ internal static class SharedValueEmissionCheck
             ("il2cpp_object_get_virtual_method", HelperKind.VirtualMethodLookup), ("il2cpp_runtime_class_init", HelperKind.ClassInit) })
             if (facts.Code.Image.Exports.TryGetValue(name, out var export) && facts.Code.Word(export) is { } jump && A64.IsB(jump))
                 a.Equal(kind, facts.Helpers.InternalCall(A64.Imm26Target(jump, export)).Kind, "导出直达实现保留身份");
-        a.Equal(0, emitter.Emit([castBody, describeBody, integerBody]).Count, "共享值与整数拆箱写出成功");
+        a.Equal(0, emitter.Emit([castBody, describeBody, integerBody, structBody]).Count, "共享值、整数与结构体拆箱写出成功");
         a.True(skeleton.Method(cast).Body.Instructions.Any(i => i.OpCode.Code == Code.Unbox_Any), "按值拆箱使用 unbox.any");
         a.True(skeleton.Method(describe).Body.Instructions.Any(i => i.OpCode.Code == Code.Constrained), "受约束前缀保留");
         var wrong = describeBody with { Blocks = [new(0, [new ManagedCall(0, new(contract, receiver, [], false) { Constraint = generic }, local, false), new ManagedReturn(4, local)])] };
@@ -62,6 +66,7 @@ internal static class SharedValueEmissionCheck
         var loaded = SR.Assembly.Load(stream.ToArray()).GetType("Tests.Values")!;
         Func<object, T> Cast<T>() => loaded.GetMethod("Cast")!.MakeGenericMethod(typeof(T)).CreateDelegate<Func<object, T>>();
         var integerCast = loaded.GetMethod("CastInteger")!.CreateDelegate<Func<object, int>>();
+        var structCast = loaded.GetMethod("CastStruct")!.CreateDelegate<Func<object, DateTime>>();
         Describe<T> Text<T>() => loaded.GetMethod("Describe")!.MakeGenericMethod(typeof(T)).CreateDelegate<Describe<T>>();
         a.Equal(42, Cast<int>()(42), "值类型拆箱");
         a.Equal("text", Cast<string>()("text"), "引用类型转换");
@@ -77,6 +82,10 @@ internal static class SharedValueEmissionCheck
         foreach (var value in new[] { int.MinValue, 0, int.MaxValue }) a.Equal(value, integerCast(value), "整数地址拆箱读取完整位型");
         Fails(() => integerCast(null!), typeof(NullReferenceException));
         Fails(() => integerCast(42L), typeof(InvalidCastException));
+        var date = new DateTime(638000000000000001, DateTimeKind.Utc);
+        a.Equal(date.ToBinary(), structCast(date).ToBinary(), "结构体地址拆箱保留字段位型");
+        Fails(() => structCast(null!), typeof(NullReferenceException));
+        Fails(() => structCast(42L), typeof(InvalidCastException));
         var number = 42; a.Equal("42", Text<int>()(ref number), "值类型受约束调用");
         var word = "text"; a.Equal("text", Text<string>()(ref word), "引用类型虚调用");
         int? nullable = null; a.Equal("", Text<int?>()(ref nullable), "Nullable 无值 ToString");

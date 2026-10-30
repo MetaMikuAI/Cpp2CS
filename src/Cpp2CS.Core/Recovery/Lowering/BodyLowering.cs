@@ -331,7 +331,7 @@ internal static class BodyLowering
                 return ctx.Assign(address, created, () => ctx.RecoverAs(content, type, address).Map<ManagedValue>(value => new BoxValue(value, type, ctx.types.Object)), output);
             case { Kind: OpKind.TypeCheck, Operand: TypeRef type } when ctx.State.Runtime.typeChecks.TryGetValue(call, out var obj) && call.Defines.FirstOrDefault() is { } checkedValue:
                 return ctx.Assign(address, checkedValue, () => ctx.RecoverAs(obj, ctx.types.Object, address).Bind(value => ctx.Coerce(new ComparisonValue(Cond.Ne, new IsInstValue(value, type), new ConstantValue(0, type, 64), ctx.types.Boolean), ctx.types.UInt64, address)), output);
-            case { Kind: OpKind.Unbox, Operand: TypeRef type } when (ctx.types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double || type is GenericParameterRef { NativeScalar: not null }) && call.Defines.FirstOrDefault() is { } created:
+            case { Kind: OpKind.Unbox, Operand: TypeRef type } when (ctx.types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Struct || type is GenericParameterRef { NativeScalar: not null }) && call.Defines.FirstOrDefault() is { } created:
                 return ctx.Assign(address, created, () => ctx.RecoverAs(call.Arguments[0], ctx.types.Object, address).Map<ManagedValue>(value => new UnboxAddressValue(value, type)), output);
             case { Kind: OpKind.IsInst, Operand: TypeRef type } when call.Kind == CallKind.Tail || call.Defines.FirstOrDefault() is not null:
                 {
