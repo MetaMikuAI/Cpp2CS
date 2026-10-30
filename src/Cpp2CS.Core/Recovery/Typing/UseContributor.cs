@@ -50,7 +50,7 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                             }
                         }
                         else if (context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
-                            && value is Convert or Binary)
+                            && value is Convert or Binary or Unary)
                         {
                             // 窄整数运算及其寄存器扩展有明确的整数结果；用途同时约束中间值，避免长链每轮只前进一层。
                             // 64 位加法仍可能是指针运算，不据此定型；未知加载也不接受反向猜测。
@@ -59,7 +59,7 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                             pending.Push((value, type, false));
                             break;
                         }
-                        else if (value is Select && (context.Types.Kind(type) == TypeKind.Reference || FloatingChoice(context, values, u.Variable, type)))
+                        else if (value is Select && (context.Types.Kind(type) is TypeKind.Reference or TypeKind.Int or TypeKind.Bool || FloatingChoice(context, values, u.Variable, type)))
                         {
                             pending.Push((u, type, true));
                             pending.Push((value, type, false));
@@ -73,6 +73,8 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                         pending.Push((c.Operand, Integer(c.Operand.Width, c.Kind == ConvKind.SignExtend), false)); break;
                     case Select select:
                         pending.Push((select.False, type, false)); pending.Push((select.True, type, false)); break;
+                    case Unary { Op: UnOp.Not or UnOp.Neg } unary when context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool:
+                        pending.Push((unary.Operand, Integer(unary.Operand.Width, unary.Op == UnOp.Neg || ManagedTypes.IsSigned(type)), false)); break;
                     case Binary binary when context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
                         && binary.Op is BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor or BinOp.SDiv or BinOp.UDiv or BinOp.MulHighS or BinOp.MulHighU:
                         pending.Push((binary.Right, type, false)); pending.Push((binary.Left, type, false)); break;
@@ -100,6 +102,7 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
         Binary { Width: 8 or 16 or 32,
             Op: BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Shl or BinOp.LShr or BinOp.AShr } => true,
         Binary { Width: 64, Op: BinOp.SDiv or BinOp.UDiv or BinOp.MulHighS or BinOp.MulHighU or BinOp.Shl or BinOp.LShr or BinOp.AShr or BinOp.And or BinOp.Or or BinOp.Xor } => true,
+        Unary { Width: 8 or 16 or 32 or 64, Op: UnOp.Not or UnOp.Neg } => true,
         _ => false,
     };
 
@@ -138,7 +141,8 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
         // 窄整数比较给控制标志与计数 φ 提供用途；64 位判空仍可能是引用，不能据此定为整数。
         foreach (var statement in context.Statements)
             foreach (var comparison in ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Compare>())
-                if (comparison.Cond is >= Cond.Eq and <= Cond.Uge && comparison.Left.Width is 8 or 16 or 32)
+                if (comparison.Cond is >= Cond.Eq and <= Cond.Uge && (comparison.Left.Width is 8 or 16 or 32
+                    || comparison.Left.Width == 64 && comparison.Cond is Cond.Slt or Cond.Sle or Cond.Sgt or Cond.Sge))
                 {
                     var integer = context.Types.Integer(comparison.Left.Width, comparison.Cond is Cond.Slt or Cond.Sle or Cond.Sgt or Cond.Sge);
                     yield return (comparison.Left, integer, statement.Address, "整数比较左值");
