@@ -566,7 +566,8 @@ internal static class FramesRules
     {
         if (ctx.State.Frames.frameRegions.Count == 0)
             return;
-        var all = ctx.State.Frames.frameRegions.SelectMany(r => ctx.StructPaths(r.Type).Where(p => ctx.types.Kind(p.Type) is not (TypeKind.Struct or null)).Select(p => ctx.PathValue(r.Local, p.Path))).ToHashSet();
+        // 与读写重组使用相同的叶子布局，重叠整数别名不另占一份初始化状态。
+        var all = ctx.State.Frames.frameRegions.SelectMany(r => ctx.ScalarStructPaths(r.Type).Select(p => ctx.PathValue(r.Local, p.Path))).ToHashSet();
         HashSet<ManagedValue> Under(ManagedValue value)
         {
             if (value is AddressValue a)
@@ -577,7 +578,7 @@ internal static class FramesRules
                 return [value];
             if (ctx.types.Kind(value.Type) != TypeKind.Struct)
                 return [];
-            return ctx.StructPaths(value.Type).Where(p => ctx.types.Kind(p.Type) is not (TypeKind.Struct or null)).Select(p => ctx.PathValue(value, p.Path)).Where(all.Contains).ToHashSet();
+            return ctx.ScalarStructPaths(value.Type).Select(p => ctx.PathValue(value, p.Path)).Where(all.Contains).ToHashSet();
         }
 
         foreach (var address in FrameInitialization.Uninitialized(body, all, Under))
