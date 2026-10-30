@@ -1,3 +1,4 @@
+using Cpp2CS.Facts;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Ir;
 using Cpp2CS.Recovery.Analysis;
@@ -290,25 +291,43 @@ internal static class FrameCopiesRules
 
     internal static void PrepareStoredResults(this RecoveryScope ctx)
     {
+        (ManagedValue Root, AbiPiece Piece, AbiPiece[] Pieces)? Source(Use use)
+        {
+            if (use.Variable.Version == 0 && ctx.State.Signature.structArguments.TryGetValue(use.Variable.Storage, out var argument))
+                return (argument.Root, argument.Piece, ctx.State.Signature.structArguments.Values.Where(a => a.Root.Equals(argument.Root)).Select(a => a.Piece).ToArray());
+            if (!ctx.results.TryGetValue(use.Variable, out var result) || ctx.Resolve(result.Call) is not { } callee
+                || ctx.owner.abi.Classify(callee, out _)?.Return is not { } returned || !ctx.RegisterStruct(returned)
+                || returned.Pieces.FirstOrDefault(p => p.Register == result.Call.Results[result.Index]) is not { } piece)
+                return null;
+            return (ctx.CallStructLocal(result.Call, returned.Type), piece, returned.Pieces);
+        }
+
+        CopyRange[] Ranges(Store store) => ctx.FrameAccess(store.Target) is { } access
+            ? [new(access.Region.Type, new AddressValue(access.Region.Local), (int)access.Offset)]
+            : ctx.CopyRanges(store.Target, store.Value.Width).TryGet(out var ranges, out _) ? ranges : [];
+
         foreach (var block in ctx.blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
-                if (block.Statements[i] is not Store { Value: Use first } store || ctx.State.Frames.frameCopies.ContainsKey(store) || ctx.FrameAccess(store.Target) is not { } access || !ctx.results.TryGetValue(first.Variable, out var result) || ctx.Resolve(result.Call) is not { } callee || ctx.owner.abi.Classify(callee, out _)?.Return is not { } returned || !ctx.RegisterStruct(returned) || !access.Region.Type.Equals(returned.Type))
+                if (block.Statements[i] is not Store { Value: Use first } store || ctx.State.Frames.frameCopies.ContainsKey(store)
+                    || Source(first) is not { } source || Ranges(store).FirstOrDefault(r => r.Type.Equals(source.Root.Type) && r.Offset == source.Piece.Offset) is not { } target)
                     continue;
                 var pieces = new List<Store>();
-                for (var j = i; j < block.Statements.Count && pieces.Count < returned.Pieces.Length; j++)
+                var offsets = new HashSet<int>();
+                for (var j = i; j < block.Statements.Count && pieces.Count < source.Pieces.Length; j++)
                 {
-                    if (block.Statements[j] is not Store { Value: Use piece } next || ctx.FrameAccess(next.Target) is not { } at || at.Region != access.Region || !ctx.results.TryGetValue(piece.Variable, out var r) || !ReferenceEquals(r.Call, result.Call))
-                        break;
-                    var abi = returned.Pieces.FirstOrDefault(p => p.Register == result.Call.Results[r.Index]);
-                    if (abi is null || abi.Offset != at.Offset || abi.Width != next.Value.Width)
+                    if (block.Statements[j] is not Store { Value: Use piece } next || ctx.State.Frames.frameCopies.ContainsKey(next)
+                        || Source(piece) is not { } copied || !copied.Root.Equals(source.Root) || copied.Piece.Width != next.Value.Width
+                        || !Ranges(next).Any(r => r.Type.Equals(target.Type) && r.Root.Equals(target.Root) && r.Offset == copied.Piece.Offset)
+                        || !offsets.Add(copied.Piece.Offset))
                         break;
                     pieces.Add(next);
                 }
 
-                if (pieces.Count != returned.Pieces.Length || pieces.Select(p => ctx.FrameAccess(p.Target)!.Value.Offset).Distinct().Count() != pieces.Count)
+                if (pieces.Count != source.Pieces.Length || !offsets.SetEquals(source.Pieces.Select(p => p.Offset)))
                     continue;
-                ctx.State.Frames.frameCopies[pieces[0]] = [new ManagedStore(pieces[0].Address, new IndirectValue(new AddressValue(access.Region.Local), access.Region.Type), ctx.CallStructLocal(result.Call, returned.Type))];
+                // 参数与调用结果都是稳定值；完整同偏移写入可直接复制到栈、字段或数组元素。
+                ctx.State.Frames.frameCopies[pieces[0]] = [new ManagedStore(pieces[0].Address, new IndirectValue(target.Root, target.Type), source.Root)];
                 foreach (var piece in pieces.Skip(1))
                     ctx.State.Frames.frameCopies[piece] = [];
                 i += pieces.Count - 1;
