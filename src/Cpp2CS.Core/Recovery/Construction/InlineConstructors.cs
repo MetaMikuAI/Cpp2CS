@@ -185,6 +185,18 @@ internal static class InlineConstructors
 
     private static bool Expression(Expr pattern, Expr actual, Dictionary<Variable, Expr> bindings, Dictionary<Variable, int> parameters)
     {
+        // 布尔参数在原生构造中常先取低一位；调用点传常量时该运算已经折叠。
+        var boolean = pattern;
+        while (boolean is Ir.Convert { Kind: ConvKind.Truncate or ConvKind.ZeroExtend } conversion) boolean = conversion.Operand;
+        if (boolean is Binary { Op: BinOp.And, Left: Use flag, Right: Const { Value: 1 } }
+            && actual is Const { Value: <= 1 } constant && parameters.TryGetValue(flag.Variable, out var parameterWidth))
+        {
+            var bound = bindings.GetValueOrDefault(flag.Variable) ?? Expr.C(constant.Value, parameterWidth);
+            var substituted = Fold.Simplify(ExprMap.Map(pattern, e => e is Use u && u.Variable == flag.Variable ? Low(bound, u.Width) : null));
+            if (substituted != actual) return false;
+            bindings[flag.Variable] = bound;
+            return true;
+        }
         if (pattern is Use use)
         {
             if (bindings.TryGetValue(use.Variable, out var bound)) return Low(bound, use.Width) == actual;
@@ -193,11 +205,14 @@ internal static class InlineConstructors
             return true;
         }
         if (pattern.Width != actual.Width) return false;
+        if (pattern == actual) return true;
         return (pattern, actual) switch
         {
             (Binary p, Binary a) => p.Op == a.Op && Expression(p.Left, a.Left, bindings, parameters) && Expression(p.Right, a.Right, bindings, parameters),
             (Unary p, Unary a) => p.Op == a.Op && Expression(p.Operand, a.Operand, bindings, parameters),
             (Ir.Convert p, Ir.Convert a) => p.Kind == a.Kind && Expression(p.Operand, a.Operand, bindings, parameters),
+            (Extract p, Extract a) => p.Low == a.Low && Expression(p.Operand, a.Operand, bindings, parameters),
+            (Insert p, Insert a) => p.Low == a.Low && Expression(p.Base, a.Base, bindings, parameters) && Expression(p.Value, a.Value, bindings, parameters),
             (Load p, Load a) => Expression(p.Address, a.Address, bindings, parameters),
             (Const or Symbol, _) => pattern == actual,
             _ => false
