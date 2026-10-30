@@ -164,7 +164,11 @@ internal static class FramesRules
             }
 
             if (!ctx.State.Frames.frameRegions.Any(outer => ctx.ContainsFrameType(outer, region.Offset, region.Type)))
+            {
+                // 单字段包装可能与内部字段同尺寸；外根后被发现时仍合并已登记的内层区域。
+                ctx.State.Frames.frameRegions.RemoveAll(inner => ctx.ContainsFrameType(region, inner.Offset, inner.Type));
                 ctx.State.Frames.frameRegions.Add(region);
+            }
         }
 
         ctx.PrepareColoredFrames(regions, witnesses);
