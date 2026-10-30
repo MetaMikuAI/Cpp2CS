@@ -82,7 +82,7 @@ internal static class InlineConstructors
             var actual = ExprMap.MapOperands(statement, e => Expand(e, definitions));
             var expected = pattern.Effects[effect];
             var consumed = 1;
-            if (pattern.ReorderStores && actual is Store write && expected is Store)
+            if ((pattern.ReorderStores || !pattern.Effects.Take(effect).Any(s => s is Call)) && actual is Store write && expected is Store)
             {
                 if (stores.Count == 0)
                 {

@@ -70,6 +70,12 @@ internal static class InlineConstructorCheck
         a.True(InlineConstructors.Find(fieldsFirst!, initialized, initialized.EntryBlock, 0, created) is null,
             "基类调用目标必须相同");
         Store NextField(Expr receiver, Expr value) => new(9, new Binary(BinOp.Add, receiver, Expr.C(24, 64), 64), value);
+        var beforeBase = InlineConstructors.Create(method, signature,
+            Function(Field(self, argument), NextField(self, Expr.C(7, 64)), Base(self) with { Kind = CallKind.Tail }));
+        var reversedBeforeBase = Function(new Call(0, CallKind.Direct, Expr.C(100, 64)), NextField(new Use(created, 64), Expr.C(7, 64)),
+            Field(new Use(created, 64), value), Base(new Use(created, 64)), new Return(20));
+        a.True(beforeBase is not null && InlineConstructors.Find(beforeBase, reversedBeforeBase, reversedBeforeBase.EntryBlock, 0, created)
+            is { } beforeMatch && beforeMatch.Arguments.SequenceEqual([value]), "首次调用前的新对象独立字段可交换");
         var beforeAndAfter = InlineConstructors.Create(method, signature,
             Function(Field(self, argument), Base(self), NextField(self, Expr.C(1, 8)), new Return(20)));
         var surrounding = Function(new Call(0, CallKind.Direct, Expr.C(100, 64)), Field(new Use(created, 64), value),
