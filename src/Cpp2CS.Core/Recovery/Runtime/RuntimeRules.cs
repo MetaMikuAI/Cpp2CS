@@ -118,22 +118,27 @@ internal static class RuntimeRules
             Add(ctx.Expand(entry.Address));
             if (terms.OfType<Use>().ToArray() is not [{ Variable: var klass }] || terms.Count(t => t is not Const) != 1)
                 continue;
-            var receiverValue = ctx.Expand(call.Arguments[0]);
             // 已通过同一引用的强制类型检查，isinst 结果与原对象身份相同。
-            if (receiverValue is Use cast && ctx.results.TryGetValue(cast.Variable, out var castResult) && castResult.Call is { Op.Kind: OpKind.IsInst, Op.Operand: TypeRef castType, Arguments: [Use original] } && ctx.CheckedReference(original, castType, call.Address))
-                receiverValue = ctx.Expand(original);
+            Expr Receiver(Expr expression)
+            {
+                var value = ctx.Expand(expression);
+                return value is Use cast && ctx.results.TryGetValue(cast.Variable, out var castResult)
+                    && castResult.Call is { Op.Kind: OpKind.IsInst, Op.Operand: TypeRef castType, Arguments: [Use original] }
+                    && ctx.CheckedReference(original, castType, call.Address) ? ctx.Expand(original) : value;
+            }
+            var receiverValue = Receiver(call.Arguments[0]);
             var joined = new List<Variable>();
             if (ctx.phis.TryGetValue(klass, out var klassPhi))
             {
                 if (!klassPhi.Sources.All(v => users[v].All(s => s is Phi p && p.Target == klassPhi.Target)))
                     continue;
-                var sameReceiver = klassPhi.Sources.All(v => ctx.values.GetValueOrDefault(v) is Load { Width: 64 } load && ctx.Expand(load.Address) == receiverValue);
+                var sameReceiver = klassPhi.Sources.All(v => ctx.values.GetValueOrDefault(v) is Load { Width: 64 } load && Receiver(load.Address) == receiverValue);
                 var pairedReceivers = call.Arguments[0] is Use receiver && ctx.phis.TryGetValue(receiver.Variable, out var objectPhi) && ctx.blocks.Any(b => b.Statements.OfType<Phi>().Any(p => p.Target == klassPhi.Target) && b.Statements.OfType<Phi>().Any(p => p.Target == objectPhi.Target)) && klassPhi.Sources.Length == objectPhi.Sources.Length && klassPhi.Sources.Zip(objectPhi.Sources).All(pair => ctx.values.GetValueOrDefault(pair.First) is Load { Width: 64, Address: Use obj } && obj.Variable == pair.Second);
                 if (!sameReceiver && !pairedReceivers)
                     continue;
                 joined.AddRange(klassPhi.Sources);
             }
-            else if (!ctx.values.TryGetValue(klass, out var klassValue) || klassValue is not Load { Width: 64, Address: var objectAddress } || ctx.Expand(objectAddress) != receiverValue)
+            else if (!ctx.values.TryGetValue(klass, out var klassValue) || klassValue is not Load { Width: 64, Address: var objectAddress } || Receiver(objectAddress) != receiverValue)
                 continue;
             // 类指针的使用：虚表项的读取，或作为调用实参（保守约定）。
             var entries = ctx.values.Where(p => p.Value is Load { Width: 64 } l && ctx.ReadsKlass(l.Address, klass)).Select(p => p.Key).ToHashSet();
