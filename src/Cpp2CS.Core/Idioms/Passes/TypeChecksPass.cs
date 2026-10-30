@@ -48,14 +48,22 @@ internal static class TypeChecksPass
                 Defines = [result],
             };
             var isType = new Compare(Cond.Ne, new Use(result, 64), Expr.C(0, 64));
+            var replaced = false;
+            Expr? Substitute(Expr e)
+            {
+                if (e is not Compare || !IsHierarchyTest(e, out var equal))
+                    return null;
+                replaced = true;
+                return equal ? isType : new Not(isType);
+            }
             // 形态一：next 以继承链比较分支到成功/失败 → 两块合成一个分支
             if (next.Statements.LastOrDefault() is Branch compare && IsHierarchyTest(compare.Condition, out var equalTaken) && next.Statements.Take(next.Statements.Count - 1).All(s => s is Define or Nop) && next.NormalSuccessors.ToArray() is [var a0, var a1] && a0 != a1 && (a0 == fail || a1 == fail) && (a0 == fail ? a1 : a0).Predecessors.Count == 1)
             {
                 var success = a0 == fail ? a1 : a0;
                 if ((compare.Target == success.Start) != equalTaken || success.Predecessors.Count != 1)
                     continue;
-                // next 中的定义（如转换后的对象）只在成功一侧可能被使用：移到成功块开头
-                var moved = next.Statements.OfType<Define>().Cast<Stmt>().ToList();
+                // 定义随成功边迁移，同一继承链条件也改用已恢复的类型检查结果。
+                var moved = next.Statements.OfType<Define>().Select(s => ExprMap.MapOperands(s, e => ExprMap.Map(e, Substitute))).ToList();
                 var at = state.recording ? state.Start(head) : default;
                 if (state.recording && state.Location(state.defs.Expand(klass), head, at) is { } klassAt && state.Location(type, head, at) is { } typeAt)
                     state.Record(Template.InlineTypeCheck, head, at, new() { ["fail"] = fail.Start, ["success"] = success.Start }, new() { ["klass"] = klassAt, ["type"] = typeAt });
@@ -67,16 +75,7 @@ internal static class TypeChecksPass
             // 形态二：next 中以继承链比较作条件（如 as 的 Select）→ 原位替换为 TypeCheck 的结果（next 中深度检查已通过，两者等价）
             else
             {
-                var replaced = false;
-                Expr? Substitute(Expr e)
-                {
-                    if (e is not Compare || !IsHierarchyTest(e, out var equal))
-                        return null;
-                    replaced = true;
-                    return equal ? isType : new Not(isType);
-                }
-
-                for (var i = 0; i < next.Statements.Count && !replaced; i++)
+                for (var i = 0; i < next.Statements.Count; i++)
                     next.Statements[i] = ExprMap.MapOperands(next.Statements[i], e => ExprMap.Map(e, Substitute));
                 if (!replaced)
                     continue;
