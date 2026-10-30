@@ -69,7 +69,7 @@ internal static class JoinedFieldReads
                 foreach (var (_, original) in prefix)
                 {
                     var mapped = ExprMap.MapOperands(original, OnEdge);
-                    edge.Statements.Add(mapped is Define define ? define with { Target = renamed[define.Target] } : mapped);
+                    edge.Statements.Add(mapped is Define define ? define with { Target = renamed[define.Target] } : mapped with { });
                 }
                 edge.Statements.Add(new Jump(read.Address, block.Start));
                 edge.Predecessors.Add(parent);

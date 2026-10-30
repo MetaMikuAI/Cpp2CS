@@ -116,7 +116,8 @@ internal static class AddressPhiLoads
                 var position = parent.Statements.Count - (parent.Statements.LastOrDefault() is Jump ? 1 : 0);
                 foreach (var (_, statement) in prefix)
                 {
-                    var copy = ExprMap.MapOperands(statement, OnEdge);
+                    // 操作数未变时改写器会返回原对象；每条入边仍需独立的语句身份。
+                    var copy = ExprMap.MapOperands(statement, OnEdge) with { };
                     if (copy is Define define)
                     {
                         var target = fresh();

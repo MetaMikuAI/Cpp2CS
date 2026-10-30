@@ -120,6 +120,11 @@ internal static class AddressPhiLoadsCheck
         a.True(Run(guarded), "检查链与地址合流读取沿原入边一起分配");
         a.True(guarded.Blocks.Single(b => b.Start == 0x1010).Statements is [Define, Call { Op.Kind: OpKind.NullCheck },
             Define { Value: Load }, Call { Op.Kind: OpKind.BoundsCheck }, Define { Value: Load }, Jump], "保留判空、读取长度、边界检查和读取值的原始顺序");
+        var checks = guarded.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Op?.Kind == OpKind.NullCheck).ToArray();
+        a.True(checks.Length == 2 && checks[0] == checks[1] && !ReferenceEquals(checks[0], checks[1]),
+            "不同分支的相同判空拥有独立语句身份");
+        a.Equal(0, Cpp2CS.Recovery.CheckedObjectAliases.Read(guarded, _ => null).Count,
+            "检查链展开后仍能建立唯一语句位置表");
         a.True(!Run(Guarded(otherEntry: true)), "读取块有其他入口时不移动检查链");
         a.True(!Run(Guarded(interveningCall: true)), "检查链中的普通调用阻止分配");
         return a.Finish("address-phi-loads");

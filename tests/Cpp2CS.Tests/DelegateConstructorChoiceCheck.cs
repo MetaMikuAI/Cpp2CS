@@ -149,14 +149,20 @@ internal static class DelegateConstructorChoiceCheck
             mergedBlock.Statements.RemoveAll(s => s is Return);
             var check = new Call(18, CallKind.Direct, Expr.C(400, 64))
                 { Op = guarded ? new(OpKind.NullCheck, null) : null, Arguments = [new Use(receiver, 64)] };
+            var independent = check with { Arguments = [new Use(new(Storage.Gpr(18), 0), 64)] };
+            if (guarded) mergedBlock.Statements.Add(independent);
             mergedBlock.Statements.Add(check);
             var next = new Block(20) { Statements = [fieldRead, new Return(24)] };
             MachineFunction.AddEdge(mergedBlock, next);
             delayed.Blocks.Add(next);
             a.Equal(guarded, JoinedFieldReads.Run(delayed, p => p.Target == receiver), "只跨唯一直线链的判空，不跨其他调用");
             if (guarded)
-                a.True(mergedBlock.Predecessors.All(p => p.Statements is [Call { Op.Kind: OpKind.NullCheck }, Define, Jump]),
+            {
+                a.True(mergedBlock.Predecessors.All(p => p.Statements is [Call { Op.Kind: OpKind.NullCheck }, Call { Op.Kind: OpKind.NullCheck }, Define, Jump]),
                     "每条原入边均先判空再读取字段");
+                a.True(!ReferenceEquals(mergedBlock.Predecessors[0].Statements[0], mergedBlock.Predecessors[1].Statements[0]),
+                    "不依赖合流值的判空也保留独立语句身份");
+            }
         }
         var addressFunction = Diamond();
         var addressJoin = addressFunction.Blocks[3];
