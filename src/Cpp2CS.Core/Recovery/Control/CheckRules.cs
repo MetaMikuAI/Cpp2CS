@@ -83,6 +83,10 @@ internal static class CheckRules
                     continue;
                 case Store store:
                     return !ExprMap.Walk(store.Value).Any(e => e is Load) && Static(store.Target);
+                case Call { Op: { Kind: OpKind.Import, Operand: "memcpy" or "memmove" } } copy:
+                    var copied = new List<ManagedStatement>();
+                    return ctx.Lowering.CopyStructValue(copy, copied).TryGet(out var accepted, out _) && accepted
+                        && copied is [ManagedStore { Value: StaticFieldValue field }] && field.Field.DeclaringType.Equals(type);
                 // beforefieldinit 静态调用不保证触发初始化；原生显式初始化必须保留。
                 case Call { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target } call:
                     return !call.Arguments.SelectMany(ExprMap.Walk).Any(e => e is Load) && ctx.facts.EntriesAt(target.Value).Any(e => e.Method is { Method: var m } && m.Owner == type.Definition && (m.IsStatic && (m.Owner.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) == 0 || m.Name == ".ctor" && !(m.Owner.IsValueType && (m.Owner.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) != 0)));

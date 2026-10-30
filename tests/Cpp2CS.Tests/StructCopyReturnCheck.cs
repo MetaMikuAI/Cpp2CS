@@ -50,6 +50,14 @@ internal static class StructCopyReturnCheck
             Check(call with { Arguments = [call.Arguments[0], Expr.C(0x1000, 64), count] }, false, failed: true);
             Check(call with { Kind = CallKind.Direct }, false);
             Check(call with { Op = new(OpKind.Import, "memmove") }, false);
+            foreach (var length in new[] { count.Value - 1, count.Value })
+            {
+                var output = new List<ManagedStatement>();
+                var direct = call with { Kind = CallKind.Direct, Arguments = [call.Arguments[0], call.Arguments[1], Expr.C(length, count.Width)] };
+                a.True(context.Lowering.CopyStructValue(direct, output).TryGet(out var accepted, out _), "定长复制匹配不产生部分诊断");
+                a.Equal(length == count.Value, accepted, "直接复制仍核对完整字段大小");
+                if (accepted) a.True(output is [ManagedAssignment], "返回局部直接接收完整值快照");
+            }
         }
         return a.Finish("struct-copy-return");
     }

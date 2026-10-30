@@ -9,16 +9,24 @@ internal static class StructCopiesRules
     [CallRule(22)]
     internal static RecoveryResult<bool> CopyStructValue(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
-        if (call is not { Kind: CallKind.Direct, Op: { Kind: OpKind.Import, Operand: "memcpy" or "memmove" }, Arguments: [var destination, var source, Const { Value: > 0 and <= 4096 } count] } || ctx.Values.TypeOfAddressBase(ctx.Values.AddressExpression(source)) is not ByRefRef reference || ctx.types.Kind(reference.Element) != TypeKind.Struct || (ulong)ctx.types.Size(reference.Element) != count.Value)
+        if (call is not { Kind: CallKind.Direct, Op: { Kind: OpKind.Import, Operand: "memcpy" or "memmove" }, Arguments: [var destination, var source, Const { Value: > 0 and <= 4096 } count] })
             return false;
         var used = ctx.blocks.SelectMany(b => b.Statements).SelectMany(s => s is Phi phi ? phi.Sources : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable)).ToHashSet();
         if (call.Defines.Any(used.Contains))
             return false;
-        if (!ctx.Values.StructAddress(source, reference.Element).TryGet(out var from, out _) || !ctx.Values.StructAddress(destination, reference.Element).TryGet(out var to, out _))
+        var width = (int)count.Value * 8;
+        if (!ctx.Values.CopyRanges(source, width).TryGet(out var sources, out _)
+            || !ctx.Values.CopyRanges(destination, width).TryGet(out var targets, out _))
             return false;
-        var snapshot = ctx.Values.StructLocal(reference.Element, 0);
-        output.Add(new ManagedAssignment(call.Address, snapshot, from is AddressValue sourceAddress ? sourceAddress.Target : new IndirectValue(from, reference.Element)));
-        output.Add(new ManagedStore(call.Address, to is AddressValue targetAddress ? targetAddress.Target : new IndirectValue(to, reference.Element), snapshot));
+        var pairs = (from fromValue in sources.Select(r => ctx.Values.WholeStructAt(r, width)).OfType<ManagedValue>().Distinct()
+                     from toValue in targets.Select(r => ctx.Values.WholeStructAt(r, width)).OfType<ManagedValue>().Distinct()
+                     where fromValue.Type.Equals(toValue.Type)
+                     select (From: fromValue, To: toValue)).ToArray();
+        if (pairs is not [var pair]) return false;
+        // 完整值的读取在 CIL 求值栈上形成快照，随后才写目标；无需引入额外构造前局部。
+        output.Add(pair.To is LocalValue local
+            ? new ManagedAssignment(call.Address, local, pair.From)
+            : new ManagedStore(call.Address, pair.To, pair.From));
         return true;
     }
 }
