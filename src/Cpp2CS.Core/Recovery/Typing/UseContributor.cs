@@ -74,7 +74,7 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                     case Select select:
                         pending.Push((select.False, type, false)); pending.Push((select.True, type, false)); break;
                     case Binary binary when context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
-                        && binary.Op is BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor:
+                        && binary.Op is BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor or BinOp.SDiv or BinOp.UDiv or BinOp.MulHighS or BinOp.MulHighU:
                         pending.Push((binary.Right, type, false)); pending.Push((binary.Left, type, false)); break;
                     case Binary binary when context.Types.Kind(type) is TypeKind.Int or TypeKind.Bool
                         && binary.Op is BinOp.Shl or BinOp.LShr or BinOp.AShr
@@ -99,6 +99,7 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
             Width: 8 or 16 or 32 or 64, Operand.Width: 1 or 8 or 16 or 32 } conversion when conversion.Width != conversion.Operand.Width => true,
         Binary { Width: 8 or 16 or 32,
             Op: BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Shl or BinOp.LShr or BinOp.AShr } => true,
+        Binary { Width: 64, Op: BinOp.SDiv or BinOp.UDiv or BinOp.MulHighS or BinOp.MulHighU or BinOp.Shl or BinOp.LShr or BinOp.AShr or BinOp.And or BinOp.Or or BinOp.Xor } => true,
         _ => false,
     };
 
@@ -127,6 +128,10 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
         var expressions = input.Expressions(context);
         var abi = new ManagedAbi(context.Types.Layouts);
         foreach (var (value, type) in input.StackEnumValues) yield return (value, type, 0, "栈上枚举值");
+        foreach (var statement in context.Statements)
+            foreach (var conversion in ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Convert>())
+                if (conversion.Kind is ConvKind.SIntToFloat or ConvKind.UIntToFloat && conversion.Operand.Width is 32 or 64)
+                    yield return (conversion.Operand, context.Types.Integer(conversion.Operand.Width, conversion.Kind == ConvKind.SIntToFloat), statement.Address, "整数转浮点输入");
         // 窄整数比较给控制标志与计数 φ 提供用途；64 位判空仍可能是引用，不能据此定为整数。
         foreach (var statement in context.Statements)
             foreach (var comparison in ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Compare>())

@@ -92,6 +92,13 @@ internal static class ConstantDivisionCheck
         a.True(ConstantDivisionNormalizer.Run(narrow) && narrow.EntryBlock.Statements[^1] is Return
             { Value: Cpp2CS.Ir.Convert { Kind: ConvKind.Truncate, Width: 32, Operand: Binary { Op: BinOp.SDiv, Right: Const { Value: 240 } } } },
             "逻辑右移后只取低 32 位恢复原 64 位除法再截断");
+        var offset = new Binary(BinOp.Add, input, Expr.C(32400000, 64), 64);
+        var offsetDivision = Function(0x20c49ba5e353f7cf, 7);
+        offsetDivision.EntryBlock.Statements[0] = new Define(0, high,
+            new Binary(BinOp.MulHighS, offset, Expr.C(0x20c49ba5e353f7cf, 64), 64));
+        a.True(ConstantDivisionNormalizer.Run(offsetDivision) && offsetDivision.EntryBlock.Statements[^1] is Return
+            { Value: Binary { Op: BinOp.SDiv, Left: var dividend, Right: Const { Value: 1000 } } } && dividend == offset,
+            "带偏移的被除数保留原始整数表达式及溢出语义");
         return a.Finish("constant-division");
     }
 }

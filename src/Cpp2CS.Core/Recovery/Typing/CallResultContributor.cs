@@ -12,6 +12,14 @@ internal sealed class CallResultContributor : ITypeContributor
         var abi = new ManagedAbi(context.Types.Layouts);
         foreach (var call in context.Statements.OfType<Call>())
         {
+            if (call is { Kind: CallKind.Direct, Op: { Kind: OpKind.Import, Operand: string symbol }, Results: [var output], Defines: [{ } imported] }
+                && output == Storage.Vec(0) && MathImportSignature.Find(symbol) is { } math && call.Arguments.Length == math.Parameters.Length)
+                constraints.Defines(imported, math.Single ? context.Types.Single : context.Types.Double, new(Name, call.Address, $"数学导入 {symbol} 返回值"));
+            if (call is { Op: { Kind: OpKind.ImportOutPair, Operand: "sincosf" }, Defines: [{ } sine, { } cosine] })
+            {
+                constraints.Defines(sine, context.Types.Single, new(Name, call.Address, "sincosf sine 出参"));
+                constraints.Defines(cosine, context.Types.Single, new(Name, call.Address, "sincosf cosine 出参"));
+            }
             if (call.Op is not (null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual or OpKind.CallMethodPointer })
                 || context.Resolve(call) is not { } method || abi.Classify(method, out _) is not { } signature) continue;
             var returned = signature.Return;

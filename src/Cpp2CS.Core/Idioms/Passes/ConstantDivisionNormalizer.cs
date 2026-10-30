@@ -56,9 +56,10 @@ internal static class ConstantDivisionNormalizer
         }
         if (product is not Binary
             {
-                Op: BinOp.MulHighS, Width: 64, Left: Use { Width: 64 } input,
+                Op: BinOp.MulHighS, Width: 64, Left: { Width: 64 } input,
                 Right: Const { Width: 64, Value: > 0 } magic
             }
+            || !ExprMap.Walk(input).All(e => e is Use or Const or Binary or Unary or Ir.Convert or Compare or Select or Extract or Insert)
             || (magic.Value <= long.MaxValue ? added is not null : added != input)) return null;
 
         // 负乘数 m 的高位积加 n 等于 floor(n*(m+2^64)/2^64)，结果仍在有符号范围内。
