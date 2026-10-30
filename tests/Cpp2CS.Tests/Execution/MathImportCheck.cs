@@ -3,6 +3,7 @@ using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Facts;
 using Cpp2CS.Image;
+using Cpp2CS.Model;
 
 namespace Cpp2CS.Tests.Execution;
 
@@ -12,6 +13,12 @@ internal static class MathImportCheck
     public static int Run()
     {
         var a = new Assertions();
+        a.True(MathImportSignature.Find("log10f") is { Single: true, Parameters: ["value"] }
+            && MathImportSignature.Find("log10") is { Single: false, Parameters: ["value"] }, "数学签名区分单精度和双精度");
+        a.True(MathImportSignature.Find("atan2f") is { Single: true, Parameters: ["y", "x"] }
+            && MathImportSignature.Find("fmod") is { Single: false, Parameters: ["value", "divisor"] }, "双参数顺序保持 C 原型");
+        a.True(new[] { "modf", "modff", "sincosf", "frexpf", "log10l", "customf" }.All(s => MathImportSignature.Find(s) is null),
+            "指针出参、扩展精度和未知符号不套用标量签名");
         foreach (var (sin, cos, valid) in new (long, long, bool)[] { (-8, -4, true), (-4, -8, true),
             (-8, -8, false), (-8, -6, false), (-2, -8, false), (-8, 0, false) })
         {

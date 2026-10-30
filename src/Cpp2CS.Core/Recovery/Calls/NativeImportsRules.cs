@@ -24,19 +24,11 @@ internal static class NativeImportsRules
 
             if (call is not { Kind: CallKind.Direct or CallKind.Tail, Op: { Kind: OpKind.Import, Operand: string symbol } } || call.Kind == CallKind.Direct && (call.Results is not [var result] || result != Storage.Vec(0) || call.Defines.Length != 1))
                 continue;
-            string[]? parameters = symbol switch
-            {
-                "sinf" or "tanf" or "acos" => ["value"],
-                "fmodf" => ["value", "divisor"],
-                "powf" => ["value", "power"],
-                "atan2" or "atan2f" => ["y", "x"],
-                _ => null
-            };
-            if (parameters is null || call.Arguments.Length != parameters.Length)
+            if (MathImportSignature.Find(symbol) is not { } signature || call.Arguments.Length != signature.Parameters.Length)
                 continue;
-            var scalar = symbol is "acos" or "atan2" ? ctx.types.Double : ctx.types.Single;
+            var scalar = signature.Single ? ctx.types.Single : ctx.types.Double;
             // 保留导入的精度及实参顺序，不替换成另一精度或近似表达式。
-            Register(call, symbol, scalar, parameters.Select(name => new ParameterDef(name, scalar, 0, null, false)).ToArray());
+            Register(call, symbol, scalar, signature.Parameters.Select(name => new ParameterDef(name, scalar, 0, null, false)).ToArray());
             if (call.Defines is [{ } output])
                 ctx.State.Types.known[output] = scalar;
         }
