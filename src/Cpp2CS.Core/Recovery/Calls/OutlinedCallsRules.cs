@@ -1,5 +1,6 @@
 using Cpp2CS.Ir;
 using Cpp2CS.Idioms;
+using Cpp2CS.Facts;
 
 namespace Cpp2CS.Recovery;
 
@@ -8,9 +9,19 @@ internal static class OutlinedCallsRules
     internal static void NormalizeOutlinedCalls(this RecoveryScope ctx, IdiomResult callerIdioms)
     {
         var changed = false;
-        foreach (var block in ctx.function.Blocks.ToArray())
+        foreach (var call in ctx.function.Blocks.SelectMany(b => b.Statements).OfType<Call>()
+            .Where(c => c is { Op: null, Kind: CallKind.Direct, Target: Const }).ToArray())
         {
-            if (block.Statements.LastOrDefault() is not Call { Op: null, Kind: CallKind.Direct, Target: Const target } call || !call.Arguments.Any(a => a is FrameAddress) || ctx.owner.NativeMethods.OutlinedCall(target.Value) is not { } helper || helper.Idioms.ReadSlots.Except(helper.Idioms.InitializedSlots).Except(callerIdioms.InitializedSlots).Any() || !OutlinedCallInlining.Run(ctx.function, block, call, helper.Function))
+            var target = (Const)call.Target;
+            if (ctx.facts.Helpers.At(target.Value)?.Kind != HelperKind.Unknown) continue;
+            var block = ctx.function.Blocks.Single(b => b.Statements.Contains(call));
+            var used = ctx.function.Blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands)
+                .SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable)
+                .Concat(ctx.function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().SelectMany(p => p.Sources)).ToHashSet();
+            var results = call.Defines.Where(v => v is not null && used.Contains(v)).ToArray();
+            if (results.Length > 1 || results.Length == 1 && results[0].Storage != Storage.Gpr(0)) continue;
+            var returned = results.Length == 1 ? new Read(Storage.Gpr(0), 64) : null;
+            if (ctx.owner.NativeMethods.OutlinedCall(target.Value, returned) is not { } helper || helper.Idioms.ReadSlots.Except(helper.Idioms.InitializedSlots).Except(callerIdioms.InitializedSlots).Any() || !OutlinedCallInlining.Run(ctx.function, block, call, helper.Function))
                 continue;
             ctx.State.Calls.cleanupSites.Add(call.Address);
             changed = true;

@@ -51,6 +51,19 @@ internal static class OutlinedCallCheck
             "包含 Nop 在内的语句都使用独立实例，重复展开不会共享位置键");
         var usedResult = Caller(true);
         a.True(!OutlinedCallInlining.Run(usedResult.Caller, usedResult.Block, usedResult.Call, Callee()), "返回值被使用时拒绝无返回展开");
+        var returned = Caller(true);
+        var valueHelper = Callee();
+        foreach (var b in valueHelper.Blocks.Where(b => b.Statements.Last() is Return))
+            b.Statements[^1] = new Return(b.Statements[^1].Address) { Value = Expr.C(b.Start, 64) };
+        a.True(OutlinedCallInlining.Run(returned.Caller, returned.Block, returned.Call, valueHelper), "各返回分支传回标量结果");
+        a.Equal(0, SsaCheck.Verify(returned.Caller, Dominators.Compute(returned.Caller)).Count, "返回值合流后 SSA 完整");
+        a.True(returned.Caller.Blocks.SelectMany(b => b.Statements).OfType<Phi>().Any(p => p.Target == output && p.Sources.Length == 2), "调用输出由两个实际返回值合流");
+        var middle = Caller(true);
+        MachineFunction.RemoveEdge(middle.Block, middle.Handler);
+        middle.Block.Handler = null;
+        middle.Block.Statements.Add(new Define(0x1006, new Variable(Storage.Gpr(2), 1), new Use(output, 64)));
+        a.True(OutlinedCallInlining.Run(middle.Caller, middle.Block, middle.Call, valueHelper), "普通基本块中间的调用也能展开");
+        a.Equal(0, SsaCheck.Verify(middle.Caller, Dominators.Compute(middle.Caller)).Count, "拆开基本块后保持返回值支配使用");
         var locals = Caller();
         a.True(!OutlinedCallInlining.Run(locals.Caller, locals.Block, locals.Call, Callee(true)), "存在独立栈局部时保留原调用");
         return a.Finish("outlined-calls");
