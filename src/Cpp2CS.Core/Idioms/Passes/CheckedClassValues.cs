@@ -17,11 +17,23 @@ internal static class CheckedClassValues
             if (block.Statements.LastOrDefault() is not Branch { Condition: Compare { Cond: Cond.Eq or Cond.Ne } compare } branch)
                 continue;
             var (left, right) = compare.Left is Symbol ? (compare.Right, compare.Left) : (compare.Left, compare.Right);
-            if (left is not Use klass || right is not Symbol { Kind: SymbolKind.Class, Value: DefinitionRef { Definition.IsValueType: true } type }
+            if (left is not Use klass || right is not Symbol { Kind: SymbolKind.Class, Value: DefinitionRef type }
                 || type.Definition.FullName == "System.Nullable" || definition(klass) is not Load { Width: 64, Address: Use value })
                 continue;
             var success = block.NormalSuccessors.SingleOrDefault(b => b.Start == (compare.Cond == Cond.Eq ? branch.Target : branch.Fallthrough));
             if (success is null || success.Predecessors.Count != 1) continue;
+            if (!type.Definition.IsValueType)
+            {
+                var position = success.Statements.TakeWhile(s => s is Phi).Count();
+                var cast = fresh();
+                if (!Refine(function, success, position, value, cast, dominators)) continue;
+                success.Statements.Insert(position, new Call(branch.Address, CallKind.Direct, Expr.C(0, 64))
+                {
+                    Op = new RuntimeOp(OpKind.IsInst, type), Arguments = [value], Results = [cast.Storage], Defines = [cast],
+                });
+                changed = true;
+                continue;
+            }
             for (var index = 0; index < success.Statements.Count; index++)
                 if (success.Statements[index] is Call { Op: { Kind: OpKind.Unbox, Operand: null } op, Arguments: [var obj, ..] } unbox && obj == value)
                 {
