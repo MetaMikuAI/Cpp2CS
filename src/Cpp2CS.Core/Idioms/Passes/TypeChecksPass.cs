@@ -1,5 +1,6 @@
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
+using Cpp2CS.Machine.Flow;
 
 namespace Cpp2CS.Idioms;
 
@@ -8,6 +9,7 @@ internal static class TypeChecksPass
     internal static bool TypeChecks(this IdiomState state)
     {
         var changed = false;
+        var reuseChecks = new List<Action>();
         foreach (var head in state.function.Blocks.ToArray())
         {
             if (state.removed.Contains(head) || head.Statements.LastOrDefault() is not Branch branch)
@@ -86,10 +88,28 @@ internal static class TypeChecksPass
                 };
             }
 
+            // 同一类继承表不会因字段写入改变；支配区域中的重复比较复用此次检查。
+            // 先识别其余完整检查，避免提前改掉它们的继承链条件而留下孤立深度检查。
+            reuseChecks.Add(() =>
+            {
+                var bypassed = new HashSet<Block>();
+                var pending = new Stack<Block>();
+                pending.Push(state.function.EntryBlock);
+                while (pending.TryPop(out var reachable))
+                {
+                    if (reachable == head || !bypassed.Add(reachable)) continue;
+                    foreach (var successor in reachable.Successors) pending.Push(successor);
+                }
+                foreach (var block in state.function.Blocks.Where(b => b != head && !state.removed.Contains(b) && !bypassed.Contains(b)))
+                    for (var i = 0; i < block.Statements.Count; i++)
+                        block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e, Substitute));
+            });
+
             state.Result.Hit(Template.InlineTypeCheck);
             changed = true;
         }
 
+        foreach (var reuse in reuseChecks) reuse();
         return changed;
     }
 }
