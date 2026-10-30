@@ -102,7 +102,7 @@ internal static class FragmentsRules
             ctx.State.Structs.fragmentSteps = 0;
         if (ctx.State.Structs.fragmentActive.Count >= 64 || ++ctx.State.Structs.fragmentSteps > 1024)
             return (Fragment?)null;
-        if (!ctx.values.TryGetValue(variable, out var expression) || expression is not (Load { Width: > 32 } or Use or Ir.Convert or Ir.Select or Insert or Binary { Op: BinOp.LShr, Right: Const }) || !ctx.State.Structs.fragmentActive.Add(variable))
+        if (!ctx.values.TryGetValue(variable, out var expression) || expression is not (Load { Width: > 8 } or Use or Ir.Convert or Ir.Select or Insert or Binary { Op: BinOp.LShr, Right: Const }) || !ctx.State.Structs.fragmentActive.Add(variable))
             return (Fragment?)null;
         var recovered = RecoverFragment();
         ctx.State.Structs.fragmentActive.Remove(variable);
@@ -342,7 +342,7 @@ internal static class FragmentsRules
     [DefineRule(10)]
     internal static RecoveryResult<bool> DefineFragment(this LoweringScope ctx, Define define, List<ManagedStatement> output)
     {
-        if (define.Value is not (Load { Width: > 32 } or Use or Ir.Convert or Ir.Select or Insert or Binary { Op: BinOp.LShr, Right: Const }))
+        if (define.Value is not (Load { Width: > 8 } or Use or Ir.Convert or Ir.Select or Insert or Binary { Op: BinOp.LShr, Right: Const }))
             return false;
         if (!ctx.Values.Recover(define.Value, null).TryGet(out var value, out var failure))
             return failure;

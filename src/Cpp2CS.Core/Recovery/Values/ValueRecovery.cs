@@ -262,8 +262,18 @@ internal static class ValueRecovery
                     if (!ctx.Recover(s.True, hint).TryGet(out var whenTrue, out failure))
                         return failure;
                     // 同布局结构体片逐叶子选择；条件只能读取稳定值，不能因拆片重复访存或分配。
-                    if (whenTrue is Fragment first && first.Width == s.Width && ManagedValues.Walk(condition).All(v => v is ArgumentValue or LocalValue or ConstantValue or ConversionValue or BinaryValue or ComparisonValue or UnaryValue or BooleanValue or NegatedValue) && ctx.Recover(s.False, hint).TryGet(out var alternative, out _) && alternative is Fragment second && second.Width == s.Width && first.Parts.Select(p => (p.Low, p.Value.Type, p.Value.Width)).SequenceEqual(second.Parts.Select(p => (p.Low, p.Value.Type, p.Value.Width))))
-                        return new Fragment(first.Parts.Zip(second.Parts, (a, b) => new Part(a.Low, new ChoiceValue(condition, a.Value, b.Value, a.Value.Type, a.Value.Width))).ToArray(), first.Type, s.Width);
+                    if (ManagedValues.Walk(condition).All(v => v is ArgumentValue or LocalValue or ConstantValue or ConversionValue or BinaryValue or ComparisonValue or UnaryValue or BooleanValue or NegatedValue)
+                        && ctx.Recover(s.False, hint).TryGet(out var alternative, out _))
+                    {
+                        var first = whenTrue as Fragment;
+                        var second = alternative as Fragment;
+                        Fragment Zero(Fragment shape) => shape with { Parts = shape.Parts.Select(p => new Part(p.Low, new ConstantValue(0, p.Value.Type, p.Value.Width))).ToArray() };
+                        if (first is null && whenTrue is ConstantValue { Bits: 0 } && whenTrue.Width == s.Width && second is not null) first = Zero(second);
+                        if (second is null && alternative is ConstantValue { Bits: 0 } && alternative.Width == s.Width && first is not null) second = Zero(first);
+                        if (first?.Width == s.Width && second?.Width == s.Width
+                            && first.Parts.Select(p => (p.Low, p.Value.Type, p.Value.Width)).SequenceEqual(second.Parts.Select(p => (p.Low, p.Value.Type, p.Value.Width))))
+                            return new Fragment(first.Parts.Zip(second.Parts, (a, b) => new Part(a.Low, new ChoiceValue(condition, a.Value, b.Value, a.Value.Type, a.Value.Width))).ToArray(), first.Type, s.Width);
+                    }
                     if (whenTrue is Fragment f && !ctx.Pack(f).TryGet(out whenTrue, out failure))
                         return failure;
                     if (!ctx.Recover(s.False, whenTrue.Type).Bind(value => ctx.Coerce(value, whenTrue.Type, 0)).TryGet(out var whenFalse, out failure))
