@@ -40,6 +40,9 @@ internal static class FrameArgumentSpanCheck
         a.True(ReturnSpan(new Use(copy, 64)) is null, "缺少返回寄存器不提供完整布局");
         a.True(ReturnSpan(new Intrinsic("diagnostic_return", [new Use(copy, 64), Expr.C(0, 64)], 64)) is null,
             "常量返回片不冒充栈读取证据");
+        definitions[first] = new Define(0x100, first, new Ir.Convert(ConvKind.ZeroExtend, new Load(new FrameAddress(-32), 32), 64));
+        a.True(FrameArgumentSpan.Loaded(new Use(copy, 32), definitions) is { Load.Width: 32 }, "窄读取保留扩展前的完整栈加载");
+        a.True(FrameArgumentSpan.Loaded(new Use(copy, 16), definitions) is null, "只读取原加载的一部分不提供完整证据");
         definitions[first] = new Define(0x100, first, new Use(copy, 64));
         a.True(FrameArgumentSpan.Loaded(new Use(copy, 64), definitions) is null, "循环定义没有栈证据");
         return a.Finish("frame-argument-span");

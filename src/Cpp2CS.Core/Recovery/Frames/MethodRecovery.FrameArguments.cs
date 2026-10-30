@@ -27,16 +27,16 @@ internal static class FrameArgumentSpan
     {
         var seen = new HashSet<Variable>();
         while (expression is Use use && seen.Add(use.Variable) && definitions.TryGetValue(use.Variable, out var define)
-            && use.Width == define.Value.Width)
+            && use.Width <= define.Value.Width)
         {
             var load = define.Value switch
             {
                 Load direct => direct,
-                Ir.Convert { Kind: ConvKind.ZeroExtend, Operand: Load { Width: 8 or 16 or 32 } narrow } => narrow,
+                Ir.Convert { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: Load { Width: 8 or 16 or 32 } narrow } => narrow,
                 _ => null,
             };
-            if (load is not null) return (load, define);
-            expression = define.Value;
+            if (load is not null) return load.Width <= use.Width ? (load, define) : null;
+            expression = define.Value is Use source ? new Use(source.Variable, Math.Min(source.Width, use.Width)) : define.Value;
         }
         return null;
     }

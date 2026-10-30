@@ -41,7 +41,9 @@ internal static class FrameArgumentsRules
 
     internal static void WitnessLoadedReturns(this RecoveryScope ctx, List<FrameWitness> witnesses)
     {
-        if (ctx.owner.abi.Classify(ctx.method, out _)?.Return is not { } returned || !ctx.RegisterStruct(returned))
+        if (ctx.owner.abi.Classify(ctx.method, out _)?.Return is not { } returned
+            || !ctx.RegisterStruct(returned) && !(returned.Passing == Facts.Passing.Registers && returned.Pieces.Length == 1
+                && ctx.types.Kind(returned.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Reference))
             return;
         var definitions = ctx.blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target);
         foreach (var statement in ctx.blocks.SelectMany(b => b.Statements).OfType<Return>())
