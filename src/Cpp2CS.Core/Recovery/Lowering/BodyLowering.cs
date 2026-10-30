@@ -366,8 +366,6 @@ internal static class BodyLowering
             return RecoveryDiagnostics.Fail(address, ctx.CallResolutionFailure(call), rule: "Invocation");
         if (ctx.owner.abi.Classify(callee, out var problem) is not { } signature)
             return RecoveryDiagnostics.Fail(address, $"调用 {callee} 的签名: {problem}", rule: "Invocation");
-        if (call.Op?.Kind == OpKind.CallDelegate && signature.Return is { } delegateReturn && (delegateReturn.Passing != Passing.Registers || delegateReturn.Pieces.Length != 1 || ctx.types.Kind(delegateReturn.Type) is TypeKind.Struct or null || ctx.types.Kind(delegateReturn.Type) == TypeKind.Pointer && !ManagedTypes.IsNativePointer(delegateReturn.Type)))
-            return RecoveryDiagnostics.Fail(address, $"委托 Invoke 返回值 {delegateReturn.Type} 的 ABI 尚未支持", rule: "Invocation");
         var registers = CallResolution.ArgumentsOf(call);
         RecoveryResult<Expr> Argument(AbiValue value, string name)
         {
