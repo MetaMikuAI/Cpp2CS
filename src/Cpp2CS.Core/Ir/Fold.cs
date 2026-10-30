@@ -322,6 +322,8 @@ public static class Fold
                 }
             case Flags { Kind: FlagKind.Add, Right: { } right } add:
                 {
+                    if (code is FlagCondition.Mi or FlagCondition.Pl)
+                        return Compare(code == FlagCondition.Mi ? Cond.Slt : Cond.Sge, Binary(BinOp.Add, add.Left, right, add.OperandWidth), C(0, add.OperandWidth));
                     if (code is FlagCondition.Eq or FlagCondition.Ne)
                         return Compare(code == FlagCondition.Eq ? Cond.Eq : Cond.Ne, Binary(BinOp.Add, add.Left, right, add.OperandWidth), C(0, add.OperandWidth));
                     if (right is Const amount && code is FlagCondition.Hs or FlagCondition.Lo or FlagCondition.Hi or FlagCondition.Ls)

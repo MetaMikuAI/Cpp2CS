@@ -7,13 +7,17 @@ internal static class FlagPhiConditionsPass
     internal static bool FlagPhiConditions(this IdiomState state)
     {
         var changed = false;
+        // 只展开标志定义，保留参与比较的寄存器快照，不能在后继边重新读取字段。
+        Expr ExpandFlags(Expr expression, int depth = 0) => depth >= 32 ? expression : Fold.Simplify(ExprMap.Map(expression,
+            e => e is Use { Variable.Storage.Bank: Bank.Flags } use && state.defs.Raw(use.Variable) is { } source
+                ? ExpandFlags(source, depth + 1) : null));
         foreach (var block in state.function.Blocks)
             foreach (var phi in block.Statements.OfType<Phi>().Where(p => p.Target.Storage.Bank == Bank.Flags).ToArray())
             {
                 var tests = state.All.SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<TestFlags>().Where(t => t.FlagsValue is Use u && u.Variable == phi.Target).Distinct().ToArray();
                 foreach (var test in tests)
                 {
-                    var conditions = phi.Sources.Select(v => Fold.TestFlags(state.defs.Expand(new Use(v, 0)), test.Code)).ToArray();
+                    var conditions = phi.Sources.Select(v => Fold.TestFlags(ExpandFlags(new Use(v, 0)), test.Code)).ToArray();
                     if (conditions.Any(c => ExprMap.Walk(c).Any(e => e is TestFlags or Flags or ConditionalFlags or Unknown or Load)))
                         continue;
                     var result = state.Fresh();

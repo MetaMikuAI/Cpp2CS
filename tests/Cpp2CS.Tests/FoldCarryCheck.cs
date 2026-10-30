@@ -12,6 +12,18 @@ internal static class FoldCarryCheck
         {
             var mask = Expr.Mask(width);
             var register = Storage.Gpr(0);
+            foreach (var condition in new[] { FlagCondition.Mi, FlagCondition.Pl })
+            foreach (var value in new[] { 0UL, mask / 2, mask / 2 + 1, mask })
+            {
+                var other = Storage.Gpr(1);
+                var expression = Fold.TestFlags(new Flags(FlagKind.Add, new Read(register, width), new Read(other, width), width), condition);
+                var evaluator = new Evaluator();
+                evaluator.Registers[register] = value;
+                evaluator.Registers[other] = 1;
+                var negative = ((unchecked(value + 1) & mask) & (1UL << (width - 1))) != 0;
+                a.Equal<UInt128>((condition == FlagCondition.Mi ? negative : !negative) ? 1u : 0u, evaluator.Eval(expression), "加法符号按回绕后的结果判断");
+                a.True(expression is not TestFlags && evaluator.Failure is null, "寄存器加法符号条件可求值");
+            }
             foreach (var amount in new[] { 0UL, 1UL, 4UL, mask / 2, mask / 2 + 1, mask })
             foreach (var condition in new[] { FlagCondition.Hs, FlagCondition.Lo, FlagCondition.Hi, FlagCondition.Ls })
             {
