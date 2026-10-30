@@ -263,7 +263,11 @@ internal static class IdiomPipeline
         state.Passes.Run("idioms.SelectedAddressLoads.Run", () =>
         {
             if (SelectedAddressLoads.Run(state.function))
+            {
                 state.Cleanup();
+                state.Symbols(rgctx: true);
+                state.ReadOnlyData();
+            }
         });
         state.Passes.Run("idioms.ConstantDivisionNormalizer.Run", () =>
         {

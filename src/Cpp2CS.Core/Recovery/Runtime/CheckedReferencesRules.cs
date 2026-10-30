@@ -42,6 +42,17 @@ internal static class CheckedReferencesRules
         if (sites is not [var site])
             return false;
         var dominators = Dominators.Compute(ctx.function);
+        foreach (var block in ctx.blocks)
+        {
+            if (block.Statements.LastOrDefault() is not Branch { Condition: Compare { Cond: Cond.Eq or Cond.Ne, Left: Use flag, Right: Const { Value: 0 } } test } branch
+                || !ctx.results.TryGetValue(flag.Variable, out var source)
+                || source.Call.Op is not { Kind: OpKind.TypeCheck, Operand: TypeRef checkedType } || !checkedType.Equals(target)
+                || !ctx.State.Runtime.typeChecks.TryGetValue(source.Call, out var original) || original != value)
+                continue;
+            var success = block.NormalSuccessors.FirstOrDefault(b => b.Start == (test.Cond == Cond.Ne ? branch.Target : branch.Fallthrough));
+            if (success is { Predecessors.Count: 1 } && dominators.Dominates(success.Index, site.Index))
+                return true;
+        }
         foreach (var block in ctx.blocks.Where(b => dominators.Dominates(b.Index, site.Index)))
             foreach (var check in block.Statements.Take(block == site ? block.Statements.FindIndex(s => s.Address == address) : block.Statements.Count).OfType<Call>())
             {
