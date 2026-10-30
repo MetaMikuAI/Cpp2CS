@@ -68,6 +68,14 @@ internal static class SharedValuesRules
             Use u when joins.TryGetValue(u.Variable, out var phi) && phi.Sources.Length > 0 && phi.Sources.Select(v => AddressType(new Use(v, v.Width), depth + 1)).Distinct().ToArray() is [TypeRef type] => type,
             _ => null,
         };
+        Expr? CopySource(Expr source, TypeRef type, Block block, int index)
+        {
+            if (Equals(AddressType(source), type)) return source;
+            // 同一 T 的运行时大小复制到 T 缓冲区，证明这里使用完全共享入参的值副本地址。
+            if (Incoming(source, block, index) is not { } incoming
+                || !ctx.State.Signature.sharedIncoming.TryGetValue(incoming.Storage, out var argument) || !Equals(argument.Type, type)) return null;
+            return new Intrinsic("managed_generic_argument", [new Symbol(SymbolKind.Type, type), Expr.C((ulong)incoming.Storage.Index, 64)], 64);
+        }
         Dictionary<long, Store> InvokerStores(Block block, int index)
         {
             var stores = new Dictionary<long, Store>();
@@ -249,8 +257,8 @@ internal static class SharedValuesRules
                 };
                 if (call is { Op.Kind: OpKind.Import, Op.Operand: "memset", Arguments: [var dest, Const { Value: 0 }, var size] } && SizeType(size) is { } cleared && Equals(AddressType(dest), cleared))
                     ctx.Rewriter.Replace(block, i, Operation(OpKind.ClearGenericValue, cleared, dest));
-                else if (call is { Op.Kind: OpKind.Import, Op.Operand: "memcpy", Arguments: [var to, var from, var bytes] } && SizeType(bytes) is { } copied && Equals(AddressType(to), copied) && Equals(AddressType(from), copied))
-                    ctx.Rewriter.Replace(block, i, Operation(OpKind.CopyGenericValue, copied, to, from));
+                else if (call is { Op.Kind: OpKind.Import, Op.Operand: "memcpy", Arguments: [var to, var from, var bytes] } && SizeType(bytes) is { } copied && Equals(AddressType(to), copied) && CopySource(from, copied, block, i) is { } copySource)
+                    ctx.Rewriter.Replace(block, i, Operation(OpKind.CopyGenericValue, copied, to, copySource));
                 else if (call is { Op: null, Target: Const target, Arguments: [var obj, Symbol { Kind: SymbolKind.Field, Value: FieldRef field } symbol, var value, var count, ..] } && ctx.owner.NativeMethods.SharedFieldSetter(target.Value) == -1 && SizeType(count) is { } stored && Equals(SharedFieldsRules.FieldType(field), stored) && Equals(AddressType(value), stored))
                     ctx.Rewriter.Replace(block, i, Operation(OpKind.CopyGenericValue, stored, SharedFieldsRules.FieldAddress(obj, symbol), value));
                 else if (call.Kind == CallKind.Indirect && call.Arguments.Length >= 5 && call.Arguments[3] is FrameAddress array && GenericInvokerIdentity.Match(ExpandValue(call.Target), ExpandValue(call.Arguments[0]), ExpandValue(call.Arguments[1])) is { } callee)
@@ -334,6 +342,13 @@ internal static class SharedValuesRules
     [CallRule(9)]
     internal static RecoveryResult<bool> LowerSharedValues(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
+        if (call is { Op: { Kind: OpKind.Box, Operand: GenericParameterRef { NativeShared: true } boxed }, Arguments: [_, var data], Defines: [var boxedResult] })
+        {
+            if (!ctx.Values.SharedValue(data, boxed).TryGet(out var value, out var failure)) return failure;
+            if (ctx.Values.Assign(call.Address, boxedResult, () => new BoxValue(value, boxed, ctx.types.Object), output) is { } assignmentFailure)
+                return assignmentFailure;
+            return true;
+        }
         if (call.Op is { Kind: OpKind.UnboxGenericValue, Operand: TypeRef unboxed })
         {
             if (!ctx.Values.SharedValue(call.Arguments[0], unboxed).TryGet(out var target, out var failure))
