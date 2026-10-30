@@ -32,7 +32,19 @@ internal static class ClassInitializationReloads
                 }) continue;
             var enterAddress = test.Cond == Cond.Eq ? branch.Target : branch.Fallthrough;
             var enter = head.NormalSuccessors.Single(b => b.Start == enterAddress);
-            var merge = head.NormalSuccessors.Single(b => b != enter);
+            var fastStart = head.NormalSuccessors.Single(b => b != enter);
+            var merge = fastStart;
+            var fastPrevious = head;
+            var fastChain = new HashSet<Block>();
+            // 快路径可在汇合前完成纯计算；加载仍由已有快照证明，不允许额外调用或写入。
+            while (fastChain.Count < 32 && merge.Predecessors.Count == 1 && !merge.IsLandingPad
+                && merge.Handler == head.Handler && merge.NormalSuccessors.ToArray() is [var fastNext]
+                && merge.Statements.All(s => s is Nop or Jump || s is Define d
+                    && !ExprMap.Walk(d.Value).Any(e => e is Load or Intrinsic or Unknown)) && fastChain.Add(merge))
+            {
+                fastPrevious = merge;
+                merge = fastNext;
+            }
             var chain = new List<Block>();
             var previous = head;
             var current = enter;
@@ -65,7 +77,7 @@ internal static class ClassInitializationReloads
                     }
                     previous = block;
                 }
-                var direct = merge.Predecessors.IndexOf(head);
+                var direct = merge.Predecessors.IndexOf(fastPrevious);
                 var initializedPath = merge.Predecessors.IndexOf(chain[^1]);
                 if (!validPath || direct < 0 || initializedPath < 0 || merge.Statements.OfType<Phi>().Any(p =>
                     p.Sources.Length != merge.Predecessors.Count || Value(p.Sources[direct]) != Value(p.Sources[initializedPath]))) continue;
@@ -113,12 +125,12 @@ internal static class ClassInitializationReloads
             Expr Snapshot(Expr value, bool useSnapshots, int depth = 0) => depth >= 32 ? value : Fold.Simplify(ExprMap.Map(value, e =>
                 e is Use use && (useSnapshots && snapshots.TryGetValue(use.Variable, out var source) || definitions.TryGetValue(use.Variable, out source))
                     ? Fold.Convert(ConvKind.Truncate, Snapshot(source, useSnapshots, depth + 1), use.Width) : null));
-            var fast = merge.Predecessors.IndexOf(head);
+            var fast = merge.Predecessors.IndexOf(fastPrevious);
             var slow = merge.Predecessors.IndexOf(chain[^1]);
             if (!shared && (fast < 0 || slow < 0 || merge.Statements.OfType<Phi>().Any(p => p.Sources.Length != merge.Predecessors.Count
                 || Snapshot(new Use(p.Sources[fast], p.Target.Width), false) != Snapshot(new Use(p.Sources[slow], p.Target.Width), true)))) continue;
             head.Statements[^1] = new Jump(branch.Address, enter.Start);
-            MachineFunction.RemoveEdge(head, merge);
+            MachineFunction.RemoveEdge(head, fastStart);
             return true;
         }
         return false;

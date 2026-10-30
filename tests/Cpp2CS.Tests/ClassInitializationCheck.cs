@@ -81,6 +81,20 @@ internal static class ClassInitializationCheck
         a.True(!ClassInitializationReloads.Run(ReloadGuard(checkedBefore: false)), "缺少原先判空不能增加抛出点");
         a.True(!ClassInitializationReloads.Run(ReloadGuard(changedField: true)), "不能重读不同字段");
         a.True(!ClassInitializationReloads.Run(ReloadGuard(sideEffect: true)), "字段快照与守卫之间有写入时拒绝");
+        var fastCalculation = ReloadGuard();
+        var fastHead = fastCalculation.EntryBlock;
+        var fastMerge = fastCalculation.Blocks[2];
+        var fastPhi = (Phi)fastMerge.Statements[0];
+        MachineFunction.RemoveEdge(fastHead, fastMerge);
+        var fastComputed = new Variable(Storage.Gpr(1), 4);
+        var fastBlock = new Block(64) { Statements = [new Define(64, fastComputed, new Use(fastPhi.Sources[0], 64)), new Jump(68, fastMerge.Start)] };
+        MachineFunction.AddEdge(fastHead, fastBlock);
+        MachineFunction.AddEdge(fastBlock, fastMerge);
+        fastMerge.Statements[0] = ((Phi)fastMerge.Statements[0]) with { Sources = [fastPhi.Sources[1], fastComputed] };
+        fastHead.Statements[^1] = ((Branch)fastHead.Statements[^1]) with { Target = fastBlock.Start };
+        fastCalculation.Blocks.Add(fastBlock);
+        fastCalculation.Renumber();
+        a.True(ClassInitializationReloads.Run(fastCalculation), "快路径经过纯计算后仍可比较最终汇合值");
         MachineFunction ExtendedReload(bool changedField = false, bool sideEffect = false, string? stored = null)
         {
             var oldValue = new Variable(Storage.Gpr(1), 1);
