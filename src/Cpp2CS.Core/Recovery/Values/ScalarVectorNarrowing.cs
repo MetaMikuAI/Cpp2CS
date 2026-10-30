@@ -54,7 +54,8 @@ internal static class ScalarVectorNarrowing
         Action<Define, Define>? replaced = null)
     {
         var candidates = blocks.SelectMany(b => b.Statements).OfType<Define>()
-            .Where(d => d.Target.Storage.Bank is Bank.Vec or Bank.Temp && d.Value is Ir.Convert { Kind: ConvKind.ZeroExtend, Width: 128, Operand.Width: 32 or 64 } c
+            .Where(d => (d.Target.Storage.Bank is Bank.Vec or Bank.Temp && d.Value.Width == 128 || d.Target.Storage.Bank == Bank.Stack && d.Value.Width == 64)
+                && d.Value is Ir.Convert { Kind: ConvKind.ZeroExtend, Operand.Width: 32 or 64 } c
                 && !ExprMap.Walk(c.Operand).Any(e => e is Insert or Intrinsic))
             .ToDictionary(d => d.Target, d => ((Ir.Convert)d.Value).Operand);
         // φ 网：经 φ 相连的向量寄存器值。网中每个非 φ 定义都是同宽标量的清高位、每个读取都恰好取这个宽度时，
@@ -82,6 +83,10 @@ internal static class ScalarVectorNarrowing
             .GroupBy(u => Find(u.Variable)).ToDictionary(g => g.Key, g => g.Select(u => u.Width).Distinct().ToArray());
         foreach (var definition in blocks.SelectMany(b => b.Statements).OfType<Define>())
         {
+            // 栈上的向量暂存可能只读取一个标量；收窄读取保留原位置，未观察的高位不参与后续栈合流。
+            if (definition.Target.Storage.Bank == Bank.Vec && definition.Value is Load { Width: 128, Address: FrameAddress } load
+                && observed.GetValueOrDefault(Find(definition.Target)) is [var readWidth and (32 or 64)])
+                candidates[definition.Target] = load with { Width = readWidth };
             var constant = definition.Value switch
             {
                 Const { Width: 64 } c => c,

@@ -129,11 +129,15 @@ public static class FrameSlotPromotion
             var width = checked((int)(group.Max(a => a.Offset + a.Width / 8) - offset) * 8);
             if (offset >= 0 || width is not (8 or 16 or 32 or 64 or 128) || group.Any(a => a.Width is not (8 or 16 or 32 or 64 or 128)) || offset + width / 8 > 0) continue;
             var mixed = group.Select(a => a.Offset).Distinct().Count() != 1 || group.Select(a => a.Width).Distinct().Count() != 1;
+            if (escapes.Any(e => offset + width / 8 > e.Offset && (e.Size is not { } size || offset < e.Offset + size))) continue;
+            if (preserved?.Any(r => offset + width / 8 > r.Offset && offset < r.Offset + r.Size) == true) continue;
+            // 同起点暂存只观察低位，且每次写入都覆盖这些位：按读取宽度提升，保留完整区域的逃逸检查。
+            if (overlapping && mixed && group.All(a => a.Offset == offset)
+                && group.Where(a => !a.IsStore).Select(a => a.Width).Distinct().ToArray() is [var observed and (32 or 64)]
+                && group.Where(a => a.IsStore).All(a => a.Width >= observed)) width = observed;
             // 向量聚合及部分浮点写入仍交给有类型的字段路径，避免把引用或浮点局部变成整数位段。
             if (mixed && (width == 128 || statements.OfType<Store>().Any(s => s.Value is Use { Variable.Storage.Bank: Bank.Vec }
                 && s.Value.Width < width && Resolve(s.Target) is { } at && at >= offset && at < offset + width / 8))) continue;
-            if (escapes.Any(e => offset + width / 8 > e.Offset && (e.Size is not { } size || offset < e.Offset + size))) continue;
-            if (preserved?.Any(r => offset + width / 8 > r.Offset && offset < r.Offset + r.Size) == true) continue;
             if (!group.Any(a => a.IsStore) || !group.Any(a => !a.IsStore)) continue;
             promoted[offset] = width;
         }
@@ -153,6 +157,7 @@ public static class FrameSlotPromotion
                 {
                     var slot = Slot(origin);
                     var value = ExprMap.Map(store.Value, Promote);
+                    if (o == origin && value.Width > promoted[origin]) value = Fold.Extract(value, 0, promoted[origin]);
                     block.Statements[i] = new Assign(store.Address, slot, o == origin && value.Width == promoted[origin]
                         ? value : Fold.Insert(new Read(slot, slot.Width), value, checked((int)(o - origin) * 8)));
                 }

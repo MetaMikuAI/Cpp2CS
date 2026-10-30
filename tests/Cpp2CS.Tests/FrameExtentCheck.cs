@@ -70,8 +70,26 @@ internal static class FrameExtentCheck
         ManagedBounds(a);
         CallSpills(a);
         OverlappingWrites(a);
+        ScalarSpills(a);
         StackInputs(a);
         return a.Finish("frame-extents");
+    }
+
+    private static void ScalarSpills(Assertions a)
+    {
+        MachineFunction Sample(int readWidth = 32)
+        {
+            var block = new Block(0x1000) { Statements = [
+                new Store(0x1000, new FrameAddress(-32), new Use(new(Storage.Vec(0), 1), 128)),
+                new Store(0x1004, new FrameAddress(-32), new Use(new(Storage.Vec(1), 1), 64)),
+                new Return(0x1008) { Value = new Load(new FrameAddress(-32), readWidth) }] };
+            return new() { Entry = block.Start, Range = new(0x1000, 0x1010, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [block] };
+        }
+        var scalar = Sample();
+        a.Equal(1, FrameSlotPromotion.Run(scalar, overlapping: true), "同起点宽写窄读的独占槽按低位提升");
+        a.True(scalar.Blocks[0].Statements.Take(2).All(s => s is Assign { Value.Width: 32 }), "不同写入宽度保留相同低位");
+        a.Equal(0, FrameSlotPromotion.Run(Sample(128), overlapping: true), "观察高位时保留向量存储");
+        a.Equal(0, FrameSlotPromotion.Run(Sample(), preserved: [(-24, 8)], overlapping: true), "收窄前按完整写入范围保护结构体");
     }
 
     private static void StackInputs(Assertions a)

@@ -79,6 +79,7 @@ internal static class PreparePipeline
         ctx.Passes.Run("prepare.ManagedFramePromotion.Run", () =>
         {
             ManagedFramePromotion.Run(ctx.facts, ctx.function, ctx.owner.abi, ctx.owner.lifter.Calls, ctx.owner.lifter.Machine.Convention.StackPointer, signature.Return);
+            ctx.NormalizeScalarVectors();
         });
         ctx.Passes.Run("prepare.Cpp2CS.Machine.Ssa.Propagate.Run", () =>
         {
