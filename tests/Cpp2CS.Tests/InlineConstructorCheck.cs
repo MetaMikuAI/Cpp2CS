@@ -156,6 +156,18 @@ internal static class InlineConstructorCheck
         forwarded.EntryBlock.Statements[1] = Base(new Use(created, 64)) with { Target = Expr.C(201, 64) };
         a.True(forwarding is not null && InlineConstructors.Find(forwarding, forwarded, forwarded.EntryBlock, 0, created) is null,
             "转调构造仍精确匹配调用目标");
+        var intArgument = new Use(argument.Variable, 32);
+        var intSignature = signature with { Parameters = [new(new PrimitiveRef("Int32"), Passing.Registers, [new(Storage.Gpr(1), 32, 0)])] };
+        var baseWithInt = Base(self) with { Sources = [Storage.Gpr(0), Storage.Gpr(1)], Arguments = [self, intArgument], Kind = CallKind.Tail };
+        var intPattern = InlineConstructors.Create(method, intSignature, Function(baseWithInt))!;
+        var input = new Use(new(Storage.Gpr(7), 1), 32);
+        var intCaller = Function(new Call(0, CallKind.Direct, Expr.C(100, 64)), baseWithInt with {
+            Kind = CallKind.Direct, Arguments = [new Use(created, 64), Fold.Convert(ConvKind.ZeroExtend, input, 64)] }, new Return(20));
+        a.True(InlineConstructors.Find(intPattern, intCaller, intCaller.EntryBlock, 0, created) is { } intMatch
+            && intMatch.Arguments.SequenceEqual([input]), "被调方只读取 int 时忽略调用寄存器高位");
+        var widePattern = InlineConstructors.Create(method, intSignature, Function(baseWithInt with { Arguments = [self, argument] }))!;
+        a.True(InlineConstructors.Find(widePattern, intCaller, intCaller.EntryBlock, 0, created) is null,
+            "被调方读取 64 位时不能用 int 参数解释高位");
         return a.Finish("inline-constructors");
     }
 }

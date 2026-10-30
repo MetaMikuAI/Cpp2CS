@@ -172,7 +172,8 @@ internal static class InlineConstructors
             || !pc.Sources.SequenceEqual(ac.Sources) || pc.Arguments.Length != ac.Arguments.Length
             || !pc.Results.SequenceEqual(ac.Results) || !Expression(pc.Target, ac.Target, bindings, parameters)) return false;
         for (var i = 0; i < pc.Arguments.Length; i++)
-            if (!Expression(pc.Arguments[i], ac.Arguments[i], bindings, parameters)) return false;
+            if (!Expression(pc.Arguments[i], pc.Arguments[i].Width < ac.Arguments[i].Width
+                ? Low(ac.Arguments[i], pc.Arguments[i].Width) : ac.Arguments[i], bindings, parameters)) return false;
         for (var i = 0; i < pc.Defines.Length; i++)
             if (pc.Defines[i] is { } result)
             {
@@ -243,6 +244,23 @@ public sealed partial class MethodRecovery
             var normalized = rewriter.Run(lifted.Function);
             if (normalized.Errors.Count == 0 && normalized.Residuals.Count == 0)
             {
+                // 构造模板中的直调按全部候选一致的 ABI 宽度观察参数，不把 x 寄存器高位当成 int 参数。
+                foreach (var block in lifted.Function.Blocks)
+                    for (var i = 0; i < block.Statements.Count; i++)
+                    {
+                        if (block.Statements[i] is not Call { Op: null, Target: Const called } call) continue;
+                        var signatures = facts.EntriesAt(called.Value).Where(e => e.Method is not null)
+                            .Select(e => abi.Classify(e.Method!, out _)).ToArray();
+                        if (signatures.Length == 0 || signatures.Any(s => s is null)) continue;
+                        var arguments = call.Arguments.ToArray();
+                        for (var k = 0; k < arguments.Length && k < call.Sources.Length; k++)
+                        {
+                            var pieces = signatures.Select(s => s!.Arguments.SelectMany(a => a.Pieces).SingleOrDefault(p => p.Register == call.Sources[k])).ToArray();
+                            if (pieces.All(p => p is not null) && pieces.Select(p => p!.Width).Distinct().ToArray() is [var width and (8 or 16 or 32 or 64)])
+                                arguments[k] = ScalarVectorNarrowing.Low(arguments[k], width);
+                        }
+                        block.Statements[i] = call with { Arguments = arguments };
+                    }
                 pattern = InlineConstructors.Create(method, signature, lifted.Function);
                 if (pattern is { Effects: [Call { Target: Const target }, ..] }
                     && pattern.Effects.Skip(1).All(s => s is Store or Call { Op.Kind: OpKind.WriteBarrier })
