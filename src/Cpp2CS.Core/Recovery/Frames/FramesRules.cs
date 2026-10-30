@@ -28,6 +28,7 @@ internal static class FramesRules
 
     internal static bool FieldAddress(this RecoveryScope ctx, Variable variable)
     {
+        if (ctx.FrameOffset(new Use(variable, 64)) is not null) return true;
         Expr root = new Use(variable, 64);
         long offset = 0;
         var seen = new HashSet<Variable>();
