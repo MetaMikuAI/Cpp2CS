@@ -67,6 +67,27 @@ internal static class CheckedClassValuesCheck
             a.Equal(expected, CheckedClassValues.Run(function, _ => new Load(value, 64), () => new Variable(Storage.Temp(0), 1)), $"{mode} 的拆箱类型来源");
             a.Equal(expected, Equals(((Call)success.Statements[0]).Op?.Operand, type), "仅成功入边的同一对象获得拆箱类型");
         }
+        foreach (var mode in new[] { "masked", "wrong-mask", "wrong-object" })
+        {
+            var type = new DefinitionRef(new TypeDef { Index = 3, Assembly = "Test", Namespace = "Test", Name = "Derived", Token = 3,
+                Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false }, []);
+            var obj = new Use(new(Storage.Gpr(0), 0), 64);
+            var klass = new Variable(Storage.Gpr(8), 1);
+            var flag = new Variable(Storage.Gpr(9), 1);
+            var masked = new Variable(Storage.Gpr(10), 1);
+            var result = new Variable(Storage.Gpr(11), 1);
+            var block = new Block(0x300) { Statements = [
+                new Define(0x300, klass, new Load(obj, 64)),
+                new Call(0x304, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.TypeCheck, type), Arguments = [new Use(klass, 64)], Results = [flag.Storage], Defines = [flag] },
+                new Define(0x308, masked, new Binary(BinOp.And, new Use(flag, 64), Expr.C(mode == "wrong-mask" ? 2UL : 1UL, 64), 64)),
+                new Define(0x30c, result, new Select(new Compare(Cond.Ne, new Use(masked, 64), Expr.C(0, 64)), mode == "wrong-object" ? new Use(new(Storage.Gpr(1), 0), 64) : obj, Expr.C(0, 64), 64)),
+                new Return(0x310) { Value = new Use(result, 64) }] };
+            var function = new MachineFunction { Entry = block.Start, Range = new(0x300, 0x314, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [block] };
+            function.Renumber();
+            var definitions = block.Statements.OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+            a.Equal(mode == "masked", SuccessfulTypeCheckValuesPass.Run(function, u => definitions.GetValueOrDefault(u.Variable), () => new(Storage.Temp(0), 1)), $"{mode} 的对象选择");
+            if (mode == "masked") a.True(block.Statements[3] is Call { Op.Kind: OpKind.IsInst, Defines: [var defined] } && defined == result, "选择结果保留变量身份并获得派生类型");
+        }
         return a.Finish("checked-class-values");
     }
 }
