@@ -126,11 +126,11 @@ internal static class FramesRules
                 continue;
             }
 
-            // 装箱提供精确值类型；标量的到达写入划出生命期，允许后续结构体复用同一物理槽。
+            // 装箱提供精确值类型；整值写入划出生命期，允许不同类型复用同一物理槽。
             if (call.Op is { Kind: OpKind.Box, Operand: TypeRef boxedType } && call.Arguments.LastOrDefault() is { } data && ctx.types.Kind(boxedType) is TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)
             {
                 Bind(data, boxedType, call);
-                if (ctx.types.Kind(boxedType) != TypeKind.Struct && ctx.FrameOffset(data) is { } offset)
+                if (ctx.FrameOffset(data) is { } offset)
                 {
                     var block = ctx.blocks.Single(b => b.Statements.Contains(call));
                     if (ctx.ReachingStackStore(block, block.Statements.IndexOf(call), offset, [], ctx.types.Size(boxedType) * 8) is { } store)
@@ -578,8 +578,6 @@ internal static class FramesRules
     {
         if (call is not { Op: { Kind: OpKind.Box, Operand: TypeRef type }, Arguments: [_, var data] } || ctx.types.Kind(type) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double) || ctx.Values.FrameAccess(data) is null)
             return false;
-        if (type is DefinitionRef { Definition.FullName: "System.Nullable" })
-            return RecoveryDiagnostics.Fail(call.Address, "装箱 Nullable 栈值尚未支持", rule: "BoxFrame");
         if (call.Defines.FirstOrDefault() is not { } created)
             return RecoveryDiagnostics.Fail(call.Address, "装箱 缺少结果变量", rule: "BoxFrame");
         if (!ctx.Values.StructAddress(data, type).TryGet(out var address, out var failure))

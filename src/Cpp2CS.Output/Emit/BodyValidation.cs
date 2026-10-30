@@ -114,7 +114,6 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
             case BoxValue box:
                 if (!CanAccess(box.Boxed)) return new(EmissionProblemKind.AccessDenied, $"访问权限 类型 {box.Boxed}");
                 if (box.Boxed is not GenericParameterRef && types.Kind(box.Boxed) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Struct)) return new(EmissionProblemKind.Unsupported, $"装箱 类型 {box.Boxed}");
-                if (box.Boxed is DefinitionRef { Definition.FullName: "System.Nullable" }) return new(EmissionProblemKind.Unsupported, "装箱 Nullable 尚未支持");
                 break;
             case UnboxAddressValue unbox:
                 if (!CanAccess(unbox.Target)) return new(EmissionProblemKind.AccessDenied, $"访问权限 类型 {unbox.Target}");
