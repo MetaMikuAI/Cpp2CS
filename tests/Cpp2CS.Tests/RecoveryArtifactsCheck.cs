@@ -40,7 +40,12 @@ internal static class RecoveryArtifactsCheck
     }
 
     [Command("artifact-consistency", "核对发布清单、逐方法磁盘 CIL 和运行产物摘要", Arguments = "<output>")]
-    public static int Consistency(string output)
+    public static int Consistency(string output) => Check(output, completeRun: true);
+
+    [Command("publication-consistency", "核对发布清单、状态与磁盘 CIL，不判断整个运行是否完成", Arguments = "<output>")]
+    public static int Publications(string output) => Check(output, completeRun: false);
+
+    private static int Check(string output, bool completeRun)
     {
         var a = new Assertions();
         var reports = Rows(output, "recovery.jsonl");
@@ -57,6 +62,7 @@ internal static class RecoveryArtifactsCheck
                 a.Equal(row.GetProperty("cil").GetString(), method.HasBody ? Convert.ToHexString(SHA256.HashData(CilBodyFingerprint.Describe(method))) : null, key + " / 发布体");
             }
         }
+        if (!completeRun) return a.Finish("publication-consistency");
         var manifest = JsonSerializer.Deserialize<JsonElement>(File.ReadAllText(Path.Combine(output, "run.json")));
         a.Equal("complete", manifest.GetProperty("status").GetString(), "运行完成");
         foreach (var artifact in manifest.GetProperty("artifacts").EnumerateObject())

@@ -80,31 +80,40 @@ internal static partial class ExecutionCheck
         var interpreter = new CilInterpreter(cecil, index);
         using var machine = new NativeMachine(facts);
         var a = new Assertions();
-        var candidates = full ? EvidenceCandidates(slice, facts, types, results, skeleton) : closure.Candidates;
+        // 候选验证使用独立预览；只读 Check 不会把骨架占位体替换为恢复体。
+        var preview = new Skeleton(facts.Model);
+        preview.ApplyDeclarations(closure.All);
+        var previewEmitter = new FullBodyEmitter(preview, types);
+        new BodyPublication(previewEmitter).Publish(closure.All.Where(r => r.Body is not null && !closure.Problems.ContainsKey(r.Body))
+            .Select(r => r.Body!), EmissionPolicy.Checked);
+        var previewCecil = new CecilModel(facts.Model, preview);
+        var previewInterpreter = new CilInterpreter(previewCecil, index);
+        var candidates = full ? EvidenceCandidates(slice, facts, types, results, preview) : closure.Candidates;
         var evidencePath = Path.Combine(slice, "accessor-evidence-input.tsv");
         var evidence = full && File.Exists(evidencePath) ? AccessorEvidence.Read(evidencePath) : new HashSet<string>();
         if (!full)
             foreach (var candidate in candidates.Values)
             {
                 if (candidate.LanguageDefined && candidate.Method.Method.Address == 0) continue;
-                var outcome = Check(candidate.Method, skeleton, cecil, interpreter, machine, index, false);
+                var outcome = Check(candidate.Method, preview, previewCecil, previewInterpreter, machine, index, false);
                 a.True(outcome.Verdict == "verified" && outcome.Matches == Cases, $"访问器先独立 verified：{candidate.Method} {outcome.Detail}");
-                if (outcome.Verdict == "verified" && outcome.Matches == Cases) evidence.Add(AccessorEvidence.Describe(facts, skeleton, candidate));
+                if (outcome.Verdict == "verified" && outcome.Matches == Cases) evidence.Add(AccessorEvidence.Describe(facts, preview, candidate));
             }
         // 内联认回的被调方法：全量时取 recover 写下的候选；竖切时先独立验证（同 F9 访问器）。
         var inlinePath = Path.Combine(slice, "inline-candidates.tsv");
         var inlineCandidates = full ? (File.Exists(inlinePath) ? File.ReadLines(inlinePath).Where(l => l.Length > 0).ToHashSet(StringComparer.Ordinal) : [])
-            : closure.InlineCandidates.Values.Select(r => AccessorEvidence.Describe(facts, skeleton, r.Method)).ToHashSet(StringComparer.Ordinal);
+            : closure.InlineCandidates.Values.Select(r => AccessorEvidence.Describe(facts, preview, r.Method)).ToHashSet(StringComparer.Ordinal);
         if (!full)
             foreach (var candidate in closure.InlineCandidates.Values)
             {
-                var outcome = Check(candidate.Method, skeleton, cecil, interpreter, machine, index, false);
+                var outcome = Check(candidate.Method, preview, previewCecil, previewInterpreter, machine, index, false);
                 Console.WriteLine($"  内联认回候选 {candidate.Method}：{outcome.Verdict} {outcome.Matches}/{Cases}{outcome.Detail}");
-                if (outcome.Verdict == "verified" && outcome.Matches == Cases) evidence.Add(AccessorEvidence.Describe(facts, skeleton, candidate.Method));
+                if (outcome.Verdict == "verified" && outcome.Matches == Cases) evidence.Add(AccessorEvidence.Describe(facts, preview, candidate.Method));
             }
-        closure.Rewrite(types, emitter, c => evidence.Contains(AccessorEvidence.Describe(facts, skeleton, c)),
-            m => evidence.Contains(AccessorEvidence.Describe(facts, skeleton, new MethodRef(m, [], []))));
+        closure.Rewrite(types, emitter, c => evidence.Contains(AccessorEvidence.Describe(facts, preview, c)),
+            m => evidence.Contains(AccessorEvidence.Describe(facts, preview, new MethodRef(m, [], []))));
         var problems = closure.Problems;
+        PublishStage.Run(closure.All.ToArray(), closure.Dependencies.Select(r => r.Method.Method).ToHashSet(), emitter, problems);
         if (Environment.GetEnvironmentVariable("CPP2CS_EMIT_DEBUG") == "1")
         {
             Console.Error.WriteLine($"  [写出] 结果 {closure.All.Count()}，有方法体 {closure.All.Count(r => r.Body is not null)}，问题 {problems.Count}；{string.Join(" ", closure.All.Select(r => $"0x{r.Entry:x}:{r.Body?.Regions.Count}:{skeleton.Method(r.Method.Method).Body.Instructions.Count}"))}");
