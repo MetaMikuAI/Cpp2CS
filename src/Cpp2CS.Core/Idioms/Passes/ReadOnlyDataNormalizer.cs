@@ -39,12 +39,18 @@ internal static class ReadOnlyDataNormalizer
                     if (index is Binary { Op: BinOp.Shl, Right: Const shift } scaled && (1UL << (int)shift.Value) == (ulong)load.Width / 8)
                         index = scaled.Left;
                     else if (load.Width != 8) return null;
-                    if (index is Ir.Convert { Kind: ConvKind.SignExtend or ConvKind.ZeroExtend } extension) index = extension.Operand;
+                    var signedWidth = 0;
+                    if (index is Ir.Convert { Kind: ConvKind.SignExtend or ConvKind.ZeroExtend } extension)
+                    {
+                        if (extension.Kind == ConvKind.SignExtend) signedWidth = extension.Operand.Width;
+                        index = extension.Operand;
+                    }
                     // 同一 SSA 快照的高位已由扩展确定；无符号上界排除了符号扩展的负数。
                     else if (index is Use { Width: 64 } use && definitions.TryGetValue(use.Variable, out var definition)
                         && definition is Ir.Convert { Kind: ConvKind.SignExtend or ConvKind.ZeroExtend, Width: 64, Operand.Width: 32 })
                         index = new Use(use.Variable, 32);
                     var count = Bound(index, block);
+                    if (signedWidth is > 0 and < 32 && count > 1 << (signedWidth - 1)) return null;
                     if (count is < 1 or > 256) return null;
                     var size = count * load.Width / 8;
                     var pointers = load.Width == 64 && (table.Value & 7) == 0 && ReadOnlyPointers(table.Value, size);
@@ -63,12 +69,34 @@ internal static class ReadOnlyDataNormalizer
 
         int Bound(Expr index, Block block)
         {
+            int Limit(Expr value, HashSet<Variable> active) => value switch
+            {
+                Const { Value: < 256 } c => (int)c.Value + 1,
+                Compare or Logical or Not => 2,
+                Select choice when Limit(choice.True, new(active)) is > 0 and var yes && Limit(choice.False, new(active)) is > 0 and var no => Math.Max(yes, no),
+                Binary { Op: BinOp.And, Right: Const { Value: < 256 } mask } => (int)mask.Value + 1,
+                Ir.Convert { Kind: ConvKind.ZeroExtend } convert => Limit(convert.Operand, active),
+                Use use when active.Add(use.Variable) && definitions.TryGetValue(use.Variable, out var definition) => Limit(definition, active),
+                _ => 0,
+            };
+            if (Limit(index, []) is > 0 and var intrinsic) return intrinsic;
+            bool SameIndex(Expr compared)
+            {
+                var checkedValue = IndexValue(compared, definitions);
+                var loadedValue = IndexValue(index, definitions);
+                if (checkedValue == loadedValue) return true;
+                // 无符号检查显式屏蔽高位时，与窄索引观察同一组位；不合并任意不同宽度快照。
+                if (checkedValue is Binary { Op: BinOp.And, Right: Const mask } masked && index.Width is 8 or 16
+                    && mask.Value == Expr.Mask(index.Width))
+                    return IndexValue(Fold.Convert(ConvKind.Truncate, masked.Left, index.Width), definitions) == loadedValue;
+                return false;
+            }
             foreach (var parent in function.Blocks)
             {
                 if (!dominators.Dominates(parent.Index, block.Index)
                     || parent.Statements.LastOrDefault() is not Branch { Condition: Compare { Left: var compared, Right: Const limit } condition } branch
                     || condition.Cond is not (Cond.Ult or Cond.Ule or Cond.Uge or Cond.Ugt)
-                    || IndexValue(compared, definitions) != IndexValue(index, definitions) || limit.Value > 256) continue;
+                    || !SameIndex(compared) || limit.Value > 256) continue;
                 var count = (int)limit.Value + (condition.Cond is Cond.Ule or Cond.Ugt ? 1 : 0);
                 if (count is < 1 or > 256) continue;
                 var destination = condition.Cond switch

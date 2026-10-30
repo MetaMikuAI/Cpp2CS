@@ -69,6 +69,22 @@ internal static class ReadOnlyDataCheck
         a.True(!ReadOnlyDataNormalizer.Run(Sample(ssa: true, snapshot: true), image, Slot), "只检查低位不能约束任意 64 位加载的高位");
         a.True(!ReadOnlyDataNormalizer.Run(Sample(ssa: true, loaded: true, condition: Cond.Sge), image, Slot), "扩展来源不能代替无符号范围检查");
         a.True(!ReadOnlyDataNormalizer.Run(Sample(ssa: true, loaded: true, bypass: true), image, Slot), "索引快照一致仍不能绕过范围检查");
+        foreach (var boolean in new Expr[] { new Compare(Cond.Eq, new Use(input, 32), Expr.C(7, 32)),
+            new Binary(BinOp.And, new Use(input, 32), Expr.C(1, 32), 32) })
+        {
+            var bounded = Sample(ssa: true);
+            bounded.EntryBlock.Statements[0] = new Define(0x1000, checkedIndex, new Cpp2CS.Ir.Convert(ConvKind.ZeroExtend, boolean, 64));
+            bounded.EntryBlock.Statements[^1] = new Jump(0x1004, 0x1010);
+            MachineFunction.RemoveEdgeAt(bounded.EntryBlock, 0);
+            bounded.Renumber();
+            a.True(ReadOnlyDataNormalizer.Run(bounded, image, Slot), "比较或低位掩码本身证明两个表项，无需额外条件分支");
+        }
+        var narrow = Sample(ssa: true, loaded: true);
+        narrow.EntryBlock.Statements[^1] = new Branch(0x1004, new Compare(Cond.Uge,
+            new Binary(BinOp.And, new Use(checkedIndex, 32), Expr.C(255, 32), 32), Expr.C(3, 32)), 0x1020, 0x1010);
+        narrow.Blocks[1].Statements[0] = new Define(0x1010, output, new Load(new Binary(BinOp.Add,
+            new Binary(BinOp.Shl, new Cpp2CS.Ir.Convert(ConvKind.SignExtend, new Use(checkedIndex, 8), 64), Expr.C(3, 64), 64), Expr.C(table, 64), 64), 64));
+        a.True(ReadOnlyDataNormalizer.Run(narrow, image, Slot), "低八位无符号上界与符号扩展索引对应同一有效范围");
         return a.Finish("readonly-data");
     }
 }
