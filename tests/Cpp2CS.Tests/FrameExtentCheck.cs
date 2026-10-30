@@ -67,7 +67,24 @@ internal static class FrameExtentCheck
         ManagedBounds(a);
         CallSpills(a);
         OverlappingWrites(a);
+        StackInputs(a);
         return a.Finish("frame-extents");
+    }
+
+    private static void StackInputs(Assertions a)
+    {
+        var integer = new TypeDef { Index = 1, Assembly = "mscorlib.dll", Namespace = "System", Name = "Int64", Token = 0,
+            Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false };
+        var abi = new ManagedAbi(new FieldLayouts(null!));
+        var signature = new AbiSignature(null, [new(new DefinitionRef(integer, []), Passing.Stack, [])], new(Storage.Gpr(0), 64, 0), null);
+        var block = new Block(0x1000) { Statements = [
+            new Define(0x1000, new(Storage.Gpr(1), 1), new Load(new FrameAddress(4), 32)),
+            new Store(0x1004, new FrameAddress(0), Expr.C(9, 64)),
+            new Return(0x1008) { Value = new Load(new FrameAddress(0), 64) }] };
+        var function = new MachineFunction { Entry = block.Start, Range = new(0x1000, 0x1010, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [block] };
+        a.True(Cpp2CS.Idioms.StackInputNormalizer.Run(function, abi, [signature], out _), "写回前读取入口栈参数");
+        a.True(block.Statements[0] is Define { Value: Extract { Low: 32, Width: 32, Operand: Use { Variable.Version: 0 } } }, "局部读取保留相应位段");
+        a.True(block.Statements[2] is Return { Value: Load }, "覆盖后的读取不能替换为入口值");
     }
 
     private static void OverlappingWrites(Assertions a)

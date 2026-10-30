@@ -99,6 +99,15 @@ internal static class FramesRules
         {
             if (ctx.State.Frames.stackEnums.ContainsKey(call))
                 continue;
+            if (ctx.State.Frames.callStackAreas.TryGetValue(call.Address, out var area)
+                && ctx.Resolve(call) is { } stackCallee && ctx.owner.abi.Classify(stackCallee, out _) is { } stackSignature)
+                foreach (var parameter in ctx.owner.abi.StackArguments(stackSignature).Parameters)
+                    if (!parameter.Indirect && ctx.types.Kind(parameter.Type) == TypeKind.Struct
+                        && !ctx.State.Frames.stackArgumentValues.ContainsKey((call.Address, parameter.Index)))
+                    {
+                        witnesses.Add(new(area.Offset + parameter.Offset, parameter.Type, call, false));
+                        ctx.State.Calls.callBindings.Commit(call, stackCallee);
+                    }
             if (!call.Arguments.Any(argument => ctx.FrameOffset(argument) is not null))
                 continue;
             if (call.Op is { Kind: OpKind.InvokeGeneric, Operand: MethodRef invoked })
@@ -212,6 +221,17 @@ internal static class FramesRules
 
         // IR 改写后，定义索引按新语句重建。
         ctx.definitions = ctx.IndexDefinitions();
+        foreach (var call in ctx.blocks.SelectMany(b => b.Statements).OfType<Call>())
+            if (ctx.State.Frames.callStackAreas.TryGetValue(call.Address, out var area)
+                && ctx.Resolve(call) is { } callee && ctx.owner.abi.Classify(callee, out _) is { } signature)
+                foreach (var parameter in ctx.owner.abi.StackArguments(signature).Parameters)
+                {
+                    if (parameter.Indirect || ctx.types.Kind(parameter.Type) != TypeKind.Struct
+                        || ctx.State.Frames.stackArgumentValues.ContainsKey((call.Address, parameter.Index))) continue;
+                    var matching = ctx.State.Frames.frameRegions.Where(r => r.Offset == area.Offset + parameter.Offset && r.Type.Equals(parameter.Type)
+                        && (!ctx.State.Frames.frameLives.TryGetValue(r, out var live) || live.Contains(call))).Take(2).ToArray();
+                    if (matching is [var region]) ctx.State.Frames.stackArgumentValues[(call.Address, parameter.Index)] = region.Local;
+                }
         ctx.PrepareFrameInitializers();
         return null;
     }

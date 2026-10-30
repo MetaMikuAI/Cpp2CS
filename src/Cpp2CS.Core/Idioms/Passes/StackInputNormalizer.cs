@@ -47,6 +47,7 @@ internal static class StackInputNormalizer
                 if (!aliases.ContainsKey(define.Target) && Offset(define.Value) is { } at) { aliases.Add(define.Target, at); changed = true; }
         }
         var escaped = new List<long>();
+        var writes = new Dictionary<int, List<Stmt>>();
         void Visit(Expr expression)
         {
             if (expression is Load load && Offset(load.Address) is not null) return;
@@ -59,7 +60,10 @@ internal static class StackInputNormalizer
             if (statement is Store store && Offset(store.Target) is { } at)
             {
                 foreach (var offset in candidates.Keys.Where(o => at < o + candidates[o] / 8 && o < at + store.Value.Width / 8).ToArray())
-                    candidates.Remove(offset);
+                {
+                    if (!writes.TryGetValue(offset, out var list)) writes.Add(offset, list = []);
+                    list.Add(store);
+                }
                 Visit(store.Value);
             }
             else if (statement is Phi phi)
@@ -71,12 +75,18 @@ internal static class StackInputNormalizer
         foreach (var offset in candidates.Keys.Where(o => escaped.Any(at => at <= o)).ToArray()) candidates.Remove(offset);
         if (candidates.Count == 0) return false;
         var promoted = new HashSet<int>();
+        var entryIndices = function.EntryBlock.Statements.Select((s, i) => (s, i)).ToDictionary(p => p.s, p => p.i);
+        Block? current = null;
+        var statementIndex = 0;
+        bool Available(int offset) => !writes.TryGetValue(offset, out var stores)
+            || current == function.EntryBlock && current.Predecessors.Count == 0
+                && stores.All(s => !entryIndices.TryGetValue(s, out var index) || index > statementIndex);
         Expr? Map(Expr expression)
         {
             if (expression is not Load load || Offset(load.Address) is not { } at || at < 0 || at > int.MaxValue)
                 return null;
             foreach (var (offset, width) in candidates)
-                if (at >= offset && at + load.Width / 8 <= offset + width / 8)
+                if (Available(offset) && at >= offset && at + load.Width / 8 <= offset + width / 8)
                 {
                     promoted.Add(offset);
                     var whole = new Use(new Variable(Storage.Slot(offset), 0), width);
@@ -86,7 +96,7 @@ internal static class StackInputNormalizer
             for (var covered = 0; covered < load.Width;)
             {
                 var offset = checked((int)at + covered / 8);
-                if (!candidates.TryGetValue(offset, out var width) || covered + width > load.Width)
+                if (!Available(offset) || !candidates.TryGetValue(offset, out var width) || covered + width > load.Width)
                     return null;
                 parts.Add((offset, width));
                 covered += width;
@@ -102,8 +112,14 @@ internal static class StackInputNormalizer
             return result;
         }
         foreach (var block in function.Blocks)
+        {
+            current = block;
             for (var i = 0; i < block.Statements.Count; i++)
+            {
+                statementIndex = i;
                 block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e, Map));
+            }
+        }
         if (layouts[0].MethodInfoOffset is { } hiddenOffset && promoted.Contains(hiddenOffset)
             && layouts.All(l => l.MethodInfoOffset == hiddenOffset)) methodInfoOffset = hiddenOffset;
         return promoted.Count > 0;
