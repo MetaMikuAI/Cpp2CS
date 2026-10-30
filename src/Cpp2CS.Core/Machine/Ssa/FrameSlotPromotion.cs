@@ -9,7 +9,7 @@ using Storage = Cpp2CS.Ir.Storage;
 /// 帧槽提升（mem2reg）：把不逃逸的标量栈槽改写成存储单元 <see cref="Storage.Slot"/> 的读写，
 /// 随后由 <see cref="SsaBuilder"/> 只对栈槽再构建一次 SSA。只提升满足下列全部条件的槽：
 /// 1. 槽在本帧内（相对入口 SP 的偏移为负）；正偏移是调用者的帧（栈传入的参数）。
-/// 2. 每次访问都是对这个偏移的直接读或写（地址是 FrameAddress、它与常量的加减，或定义为这两者的变量），位宽相同且不超过 64。
+/// 2. 每次访问都是对这个偏移的直接读或写（地址是 FrameAddress、它与常量的加减，或定义为这两者的变量），位宽相同且不超过 128。
 /// 3. 至少读一次、写一次。只写不读的槽可能是出参或隐藏的栈参数（被调用者隐式读取，调用模型不登记这种读取），保持原样。
 /// 4. 没有其他访问与它的字节区间重叠。
 /// 5. 没有地址逃逸到它的下方或它本身：逃逸的地址（作为实参、被存储、进入 φ、参与其他运算）可能被用来访问它之上的整块区域，
@@ -119,7 +119,7 @@ public static class FrameSlotPromotion
         {
             var offset = group.Key;
             var widths = group.Select(a => a.Width).Distinct().ToArray();
-            if (offset >= 0 || widths is not [var width and (8 or 16 or 32 or 64)]) continue;
+            if (offset >= 0 || widths is not [var width and (8 or 16 or 32 or 64 or 128)] || offset + width / 8 > 0) continue;
             if (escapes.Any(e => offset + width / 8 > e.Offset && (e.Size is not { } size || offset < e.Offset + size))) continue;
             if (preserved?.Any(r => offset + width / 8 > r.Offset && offset < r.Offset + r.Size) == true) continue;
             if (!group.Any(a => a.IsStore) || !group.Any(a => !a.IsStore)) continue;
@@ -130,13 +130,13 @@ public static class FrameSlotPromotion
         if (promoted.Count == 0) return 0;
 
         Expr? Promote(Expr e) => e is Load load && Resolve(load.Address) is { } o && promoted.ContainsKey(o)
-            ? new Read(Storage.Slot(checked((int)o)), load.Width) : null;
+            ? new Read(Storage.Slot(checked((int)o), Math.Max(64, promoted[o])), load.Width) : null;
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
                 var statement = block.Statements[i];
                 if (statement is Store store && Resolve(store.Target) is { } o && promoted.ContainsKey(o))
-                    block.Statements[i] = new Assign(store.Address, Storage.Slot(checked((int)o)), ExprMap.Map(store.Value, Promote));
+                    block.Statements[i] = new Assign(store.Address, Storage.Slot(checked((int)o), Math.Max(64, promoted[o])), ExprMap.Map(store.Value, Promote));
                 else if (ExprMap.Operands(statement).SelectMany(ExprMap.Walk).Any(e => e is Load l && Resolve(l.Address) is { } lo && promoted.ContainsKey(lo)))
                     block.Statements[i] = ExprMap.MapOperands(statement, e => ExprMap.Map(e, Promote));
             }

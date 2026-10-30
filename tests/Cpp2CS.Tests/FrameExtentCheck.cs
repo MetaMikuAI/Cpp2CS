@@ -35,6 +35,11 @@ internal static class FrameExtentCheck
         var promoted = Function(-40);
         FrameSlotPromotion.Run(promoted, (_, _) => 16);
         a.True(promoted.Blocks[0].Statements[0] is Assign && promoted.Blocks[0].Statements[2] is Return { Value: Read }, "成对替换标量写入与读取");
+        var vector = Function(-32, 128);
+        a.Equal(1, FrameSlotPromotion.Run(vector, (_, _) => 16), "独立向量槽可提升");
+        a.True(vector.Blocks[0].Statements[0] is Assign { Target.Width: 128 }
+            && vector.Blocks[0].Statements[2] is Return { Value: Read { Storage.Width: 128 } }, "向量栈变量保留高 64 位");
+        a.Equal(0, FrameSlotPromotion.Run(Function(-8, 128), (_, _) => 16), "跨入调用者帧的向量槽不能提升");
         foreach (var outward in new[] { false, true })
         {
             var block = new Block(0x1000);
