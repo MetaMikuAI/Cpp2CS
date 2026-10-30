@@ -27,7 +27,7 @@ internal static class InlineConstructors
             switch (statement)
             {
                 case Nop: continue;
-                case Define d when Pure(d.Value): definitions[d.Target] = Expand(d.Value, definitions); continue;
+                case Define d when Pure(Expand(d.Value, definitions)): definitions[d.Target] = Expand(d.Value, definitions); continue;
                 // 提升器保留的序言存寄存器不属于构造行为。
                 case Store { Target: FrameAddress, Value: Use { Width: 64, Variable: { Version: 0 } v } }
                     when v.Storage.Bank == Bank.Gpr && v.Storage.Index is >= 19 and <= 30
@@ -78,7 +78,7 @@ internal static class InlineConstructors
             if (statement is Call && !SameRegion(function, block, allocation, current, statement)) return null;
             matched.Add(statement);
             if (statement is Nop) continue;
-            if (statement is Define d && Pure(d.Value)) { definitions[d.Target] = Expand(d.Value, definitions); continue; }
+            if (statement is Define d && Pure(Expand(d.Value, definitions))) { definitions[d.Target] = Expand(d.Value, definitions); continue; }
             var actual = ExprMap.MapOperands(statement, e => Expand(e, definitions));
             var expected = pattern.Effects[effect];
             var consumed = 1;
@@ -222,8 +222,12 @@ internal static class InlineConstructors
     private static bool Pure(Expr expression) => ExprMap.Walk(expression).All(e => e is Const or Use or Binary or Unary or Ir.Convert or Symbol or Extract or Insert);
     private static Expr Low(Expr value, int width) => value is Use u ? u with { Width = width }
         : Fold.Convert(value.Width < width ? ConvKind.ZeroExtend : ConvKind.Truncate, value, width);
-    private static Expr Expand(Expr expression, IReadOnlyDictionary<Variable, Expr> definitions) => Fold.Simplify(ExprMap.Map(expression,
-        e => e is Use u && definitions.TryGetValue(u.Variable, out var value) ? Low(value, u.Width) : null));
+    private static Expr Expand(Expr expression, IReadOnlyDictionary<Variable, Expr> definitions)
+    {
+        var expanded = ExprMap.Map(expression, e => e is Use u && definitions.TryGetValue(u.Variable, out var value) ? Low(value, u.Width) : null);
+        return Fold.Simplify(ExprMap.Map(expanded, e => e is Intrinsic duplicate
+            ? ScalarVectorNarrowing.RepeatedConstant(duplicate) ?? ScalarVectorNarrowing.RepeatedVariable(duplicate) : null));
+    }
 }
 
 public sealed partial class MethodRecovery

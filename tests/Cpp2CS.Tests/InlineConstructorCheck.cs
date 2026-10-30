@@ -138,6 +138,17 @@ internal static class InlineConstructorCheck
             a.True(bit < 2 ? boolMatch is not null && boolMatch.Arguments.SequenceEqual([Expr.C(bit, 8)]) : boolMatch is null,
                 "布尔掩码只接受可由低一位生成的常量");
         }
+        var vector = new Variable(Storage.Vec(1), 1);
+        var duplicate = new Intrinsic("vdup.32", [Expr.C(0x3f800000, 32)], 128);
+        var vectorPattern = InlineConstructors.Create(method, signature with { Parameters = [] }, Function(
+            new Define(4, vector, duplicate), Field(self, new Use(vector, 128)), Base(self) with { Kind = CallKind.Tail }));
+        var vectorCaller = Function(new Call(0, CallKind.Direct, Expr.C(100, 64)),
+            Field(new Use(created, 64), ScalarVectorNarrowing.RepeatedConstant(duplicate)!), Base(new Use(created, 64)), new Return(20));
+        a.True(vectorPattern is not null && InlineConstructors.Find(vectorPattern, vectorCaller, vectorCaller.EntryBlock, 0, created) is not null,
+            "构造模板与调用点使用相同的向量复制位片");
+        vectorCaller.EntryBlock.Statements[1] = Field(new Use(created, 64), Expr.C(0, 128));
+        a.True(vectorPattern is not null && InlineConstructors.Find(vectorPattern, vectorCaller, vectorCaller.EntryBlock, 0, created) is null,
+            "向量初始化的位型必须匹配");
         return a.Finish("inline-constructors");
     }
 }
