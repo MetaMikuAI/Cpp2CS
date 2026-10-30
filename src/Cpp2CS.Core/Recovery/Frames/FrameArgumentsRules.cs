@@ -20,12 +20,17 @@ internal static class FrameArgumentsRules
                 foreach (var piece in argument.Pieces)
                 {
                     if (!registers.TryGetValue(piece.Register, out var expression) || Loaded(expression) is not { } read || read.Load.Width != piece.Width || ctx.FrameOffset(read.Load.Address) is not { } offset)
-                        break;
+                        continue;
                     pieces.Add((piece.Offset, piece.Width, offset));
                     reads.Add(read.Statement);
                 }
 
-                if (pieces.Count != argument.Pieces.Length || FrameArgumentSpan.Origin(ctx.types.Size(argument.Type), pieces) is not { } origin)
+                if (pieces.Count == 0)
+                    continue;
+                var origin = pieces[0].Frame - pieces[0].Offset;
+                var size = ctx.types.Size(argument.Type);
+                // 调用签名也能给部分栈片定型；其他分量可来自寄存器，不推断它们已写入栈。
+                if (origin >= 0 || origin + size > 0 || pieces.Any(p => p.Frame - p.Offset != origin || p.Offset < 0 || p.Offset + p.Width / 8 > size))
                     continue;
                 ctx.State.Calls.callBindings.Commit(call, callee);
                 foreach (var read in reads)
