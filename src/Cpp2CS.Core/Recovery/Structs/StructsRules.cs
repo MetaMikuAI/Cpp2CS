@@ -60,7 +60,10 @@ internal static class StructsRules
             if (alias)
             {
                 var cursor = leaf.Offset;
-                var parts = leaves.Where(p => p.Path.Length == leaf.Path.Length && p.Path.SkipLast(1).SequenceEqual(leaf.Path.SkipLast(1)) && (p.Path[^1].Field.Attributes & System.Reflection.FieldAttributes.FieldAccessMask) == System.Reflection.FieldAttributes.Public && ctx.types.Kind(p.Type) == TypeKind.Int && p.Offset >= leaf.Offset && p.Offset + ctx.types.Size(p.Type) <= leaf.Offset + ctx.types.Size(leaf.Type)).OrderBy(p => p.Offset).ToArray();
+                // 同级窄整数字段完整覆盖私有宽别名时，访问权限不影响其位布局证据。
+                var parts = leaves.Where(p => p.Path.Length == leaf.Path.Length && p.Path.SkipLast(1).SequenceEqual(leaf.Path.SkipLast(1))
+                    && ((p.Path[^1].Field.Attributes & System.Reflection.FieldAttributes.FieldAccessMask) == System.Reflection.FieldAttributes.Public || ctx.types.Size(p.Type) < ctx.types.Size(leaf.Type))
+                    && ctx.types.Kind(p.Type) == TypeKind.Int && p.Offset >= leaf.Offset && p.Offset + ctx.types.Size(p.Type) <= leaf.Offset + ctx.types.Size(leaf.Type)).OrderBy(p => p.Offset).ToArray();
                 foreach (var part in parts)
                 {
                     if (part.Offset != cursor)
