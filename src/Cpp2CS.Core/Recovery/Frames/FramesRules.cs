@@ -43,6 +43,7 @@ internal static class FramesRules
     internal static bool FieldAddress(this RecoveryScope ctx, Variable variable)
     {
         if (ctx.FrameOffset(new Use(variable, 64)) is not null) return true;
+        if (ctx.values.GetValueOrDefault(variable) is Binary { Op: BinOp.Add } arrayAddress && ctx.ArrayLocation(arrayAddress) is not null) return true;
         Expr root = new Use(variable, 64);
         long offset = 0;
         var seen = new HashSet<Variable>();
@@ -419,7 +420,11 @@ internal static class FramesRules
 
     internal static void WitnessFrameCopies(this RecoveryScope ctx, List<FrameWitness> witnesses)
     {
-        var sites = ctx.blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Block: b, Index: i))).Where(p => p.Statement is Define).ToDictionary(p => ((Define)p.Statement).Target);
+        var positions = ctx.blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Block: b, Index: i))).ToArray();
+        var sites = positions.Where(p => p.Statement is Define).ToDictionary(p => ((Define)p.Statement).Target);
+        var statements = positions.ToDictionary(p => p.Statement, (IEqualityComparer<Stmt>)ReferenceEqualityComparer.Instance);
+        bool Before(Stmt first, Stmt second) => statements.TryGetValue(first, out var from) && statements.TryGetValue(second, out var to)
+            && (from.Block == to.Block ? from.Index <= to.Index : ctx.Dominators.Dominates(from.Block.Index, to.Block.Index));
         TypeRef? ReachingType(Variable value, long offset)
         {
             if (!sites.TryGetValue(value, out var site))
@@ -456,7 +461,7 @@ internal static class FramesRules
         for (var round = 0; round < 8; round++)
         {
             var added = false;
-            foreach (var known in witnesses.DistinctBy(w => (w.Offset, w.Type)).ToArray())
+            foreach (var known in witnesses.ToArray())
             {
                 var size = ctx.types.Size(known.Type);
                 var leaves = ctx.StructPaths(known.Type).Where(p => ctx.types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
@@ -469,6 +474,8 @@ internal static class FramesRules
 
                 )
                     foreach (var group in copies.Where(c => (forward ? c.From : c.To) >= known.Offset && (forward ? c.From : c.To) < known.Offset + size)// 复用的源槽按本次读取前的完整写入定型，不能沿另一生命期的类型传播。
+                    // 类型见证与复制必须位于同一可证明路径，不能借用互斥分支中的同偏移类型。
+                    .Where(c => ReferenceEquals(known.Call, c.Store) || (forward ? Before(known.Call, sites[c.Value].Statement) : Before(c.Store, known.Call)))
                     .Where(c => !forward || !ambiguous || known.Type.Equals(ReachingType(c.Value, known.Offset))).GroupBy(c => forward ? c.To - c.From : c.From - c.To))
                     {
                         var other = known.Offset + group.Key;

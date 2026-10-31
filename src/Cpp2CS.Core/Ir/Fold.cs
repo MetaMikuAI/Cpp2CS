@@ -41,8 +41,8 @@ public static class Fold
         {
             if (op == BinOp.Add) return new FrameAddress(frame.Offset + (long)offset.Value);
             if (op == BinOp.Sub) return new FrameAddress(frame.Offset - (long)offset.Value);
-            // AAPCS64：函数入口 SP 16 字节对齐，所以 16 字节对齐的栈地址与小于 16 的常量按位或等于相加
-            if (op == BinOp.Or && (frame.Offset & 15) == 0 && offset.Value < 16) return new FrameAddress(frame.Offset + (long)offset.Value);
+            // AAPCS64：入口 SP 的低四位为零，栈地址低四位完全由帧偏移决定。
+            if (op == BinOp.Or && offset.Value < 16) return new FrameAddress(frame.Offset | (long)offset.Value);
         }
         if (right is Const r)
         {

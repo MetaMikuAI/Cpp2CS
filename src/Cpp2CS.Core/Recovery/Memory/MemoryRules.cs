@@ -268,9 +268,20 @@ internal static class MemoryRules
     {
         if (offset < 0 || offset + width / 8 > region.Size)
             return RecoveryDiagnostics.Fail(0, "栈 访存跨越结构体区域", rule: "FrameLocation");
-        // 标量帧区域：整体读写这个局部变量（bool 以字节读写）。
+        // 标量帧内的部分访问保留原始位型和字节偏移。
         if (ctx.types.Kind(region.Type) != TypeKind.Struct)
-            return offset == 0 && width == region.Local.Width ? region.Local : RecoveryDiagnostics.Fail(0, "栈 标量栈槽的访问宽度不符", rule: "FrameLocation");
+        {
+            if (offset == 0 && width == region.Local.Width)
+                return region.Local;
+            if (width is 8 or 16 or 32 or 64 && ctx.types.Kind(region.Type) is TypeKind.Int or TypeKind.Float or TypeKind.Double)
+            {
+                ManagedValue address = new ConversionValue(ConvKind.Bitcast, new AddressValue(region.Local), new PointerRef(ctx.types.Byte), 64);
+                if (offset != 0)
+                    address = new PointerOffsetValue(address, new ConstantValue((ulong)offset, ctx.types.Int64, 64));
+                return new IndirectValue(address, ctx.types.Integer(width, false), width);
+            }
+            return RecoveryDiagnostics.Fail(0, "栈 标量栈槽的访问宽度不符", rule: "FrameLocation");
+        }
         var leaves = ctx.ScalarStructPaths(region.Type).ToArray();
         if (region.Type is DefinitionRef empty && ctx.facts.Layouts.Of(empty) is { Fields.Count: 0 })
             return region.Local with { Width = width };

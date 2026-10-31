@@ -365,6 +365,8 @@ internal static class ValueRecovery
             return value with { Width = width };
         if (width == value.Width)
             return value;
+        if (width < value.Width && ctx.types.Kind(value.Type) is TypeKind.Float or TypeKind.Double)
+            return ctx.Slice(value, 0, width);
         if (value.Type is GenericParameterRef { NativeScalar: not null } && width >= ctx.types.Bits(value.Type))
             return new ConversionValue(ConvKind.ZeroExtend, value, value.Type, width);
         if (ctx.types.Kind(value.Type) is not (TypeKind.Int or TypeKind.Bool))
@@ -376,8 +378,19 @@ internal static class ValueRecovery
 
     internal static RecoveryResult<ManagedValue> Binary(this RecoveryScope ctx, Binary b)
     {
-        // C++ bool 传参取低一位；布局见证为 bool 的 T 在托管侧仍是同一个 T 值。
         RecoveryFailure failure;
+        // 128 位的两个 64 位半段互换保留叶子类型，不把聚合值当作整数运算。
+        if (b is { Op: BinOp.Or, Width: 128,
+            Left: Binary { Width: 128, Right: Const { Value: 64 } } first,
+            Right: Binary { Width: 128, Right: Const { Value: 64 } } second }
+            && first.Left == second.Left && (first.Op, second.Op) is (BinOp.LShr, BinOp.Shl) or (BinOp.Shl, BinOp.LShr))
+        {
+            if (!ctx.Recover(first.Left, null).TryGet(out var value, out failure)) return failure;
+            if (!ctx.Slice(value, 64, 64).TryGet(out var high, out failure)) return failure;
+            if (!ctx.Slice(value, 0, 64).TryGet(out var low, out failure)) return failure;
+            return new Fragment([new Part(0, high), new Part(64, low)], ctx.types.UInt64, 128);
+        }
+        // C++ bool 传参取低一位；布局见证为 bool 的 T 在托管侧仍是同一个 T 值。
         if (b is { Op: BinOp.And, Right: Const { Value: 1 } })
         {
             if (!ctx.Recover(b.Left, null).TryGet(out var boolean, out failure))

@@ -8,6 +8,21 @@ internal static class ScalarFramesRules
     internal static void ForwardBranchFrameSnapshots(this RecoveryScope ctx)
     {
         var calls = new ManagedCallFrames(ctx.facts, ctx.owner.abi);
+        bool NoCapture(Call call, int index) => index < call.Sources.Length && calls.Signature(call) is { } signature
+            && signature.Arguments.Concat(signature.Return is { Passing: Cpp2CS.Facts.Passing.Indirect } returned ? [returned] : [])
+                .Any(a => a.Passing == Cpp2CS.Facts.Passing.Indirect && a.Type is not (ByRefRef or PointerRef)
+                    && a.Pieces is [var piece] && piece.Register == call.Sources[index]);
+        // 提前绑定的装箱和栈实参仍通过原写入定义托管局部，机器调用中的帧地址可能已被替换。
+        var boundStores = new HashSet<Stmt>(ctx.State.Frames.stackEnumStorage, ReferenceEqualityComparer.Instance);
+        boundStores.UnionWith(ctx.State.Frames.stackArgumentStores.Keys);
+        boundStores.UnionWith(ctx.State.Construction.boxArgumentStores.Keys);
+        var unused = DeadFrameStores.Find(ctx.function, e => ctx.FrameOffset(e), ctx.NoStackRead, calls.ArgumentSize, NoCapture, boundStores);
+        foreach (var store in unused)
+            ctx.ruleTraces.Add(new("storage.dead-frame-write", store.Address, RewriteStatus.Applied, null, null,
+                new("storage.dead-frame-write", [store.Address], ["源为 SSA 快照", "地址未逃逸，传址仅限 ABI 按值副本或返回槽", "正常及异常后继均无读取"])));
+        foreach (var block in ctx.blocks)
+            for (var i = 0; i < block.Statements.Count; i++)
+                if (unused.Contains(block.Statements[i])) ctx.Rewriter.Replace(block, i, new Nop(block.Statements[i].Address, "后续路径未读取的栈复制"));
         // 聚合参数的分片读取仍用于划分类型生命期，不先拆走它们的初始化证据。
         var witnesses = new List<FrameWitness>();
         ctx.WitnessLoadedArguments(witnesses);

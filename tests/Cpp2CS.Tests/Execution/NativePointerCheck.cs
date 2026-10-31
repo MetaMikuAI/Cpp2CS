@@ -24,7 +24,7 @@ internal static class NativePointerCheck
     [Command("native-pointer", "真实 CLR 核对指针、数组固定及压缩 GC 后的非对齐访问", Arguments = "<binary> <metadata>", Gate = Gate.Image)]
     public static unsafe int Run(string binary, string metadata)
     {
-        var facts = FactsBuilder.Build(binary, metadata);
+        var facts = FactsBuilder.Build(binary, metadata, inferUnregistered: false);
         var original = facts.Model;
         var types = new ManagedTypes(original, facts.Layouts);
         var pointer = new PointerRef(types.Corlib("System.Char"));
@@ -64,6 +64,28 @@ internal static class NativePointerCheck
             new ManagedStore(0, location, new BinaryValue(BinOp.Xor, location, new ConstantValue(mask, types.UInt64, 64), types.UInt64, 64)),
             new ManagedReturn(0, location),
         ])]);
+        var a = new Assertions();
+        var scalar = new LocalValue(new Variable(Storage.Gpr(1), 1), types.Double, 64);
+        var scalarMethod = Add("ScalarBytes", types.UInt16, types.Double, new ConstantValue(0, types.UInt16, 16));
+        var ctx = new RecoveryScope(new MethodRecovery(facts, types), new(scalarMethod, [], []), 0);
+        var region = new FrameRegion(-8, types.Double, 8, scalar);
+        a.True(ctx.FrameLocation(region, 3, 16).TryGet(out var bytes, out _), "标量帧内允许非对齐部分访问");
+        a.True(ctx.FrameLocation(region, 7, 16).Failure is not null, "部分访问不得越过帧边界");
+        a.True(ctx.FrameLocation(region, -1, 8).Failure is not null, "部分访问不得位于帧之前");
+        var reference = new FrameRegion(-8, types.Object, 8, scalar with { Type = types.Object });
+        a.True(ctx.FrameLocation(reference, 0, 8).Failure is not null, "托管引用不按标量原始字节读取");
+        bodies[^1] = new(new(scalarMethod, [], []), [new(0,
+        [
+            new ManagedAssignment(0, scalar, new ArgumentValue(0, types.Double, 64)),
+            new ManagedReturn(0, bytes),
+        ])]);
+        var writeScalar = Add("WriteScalarBytes", types.Double, types.Double, scalar);
+        bodies[^1] = new(new(writeScalar, [], []), [new(0,
+        [
+            new ManagedAssignment(0, scalar, new ArgumentValue(0, types.Double, 64)),
+            new ManagedStore(0, bytes, new ConstantValue(0xa5c3, types.UInt16, 16)),
+            new ManagedReturn(0, scalar),
+        ])]);
         owner.Methods = methods;
         var assembly = new AssemblyDef { Name = owner.Assembly, AssemblyName = "PointerCheck", Version = new(1, 0), Culture = "", PublicKey = [], Types = [moduleType, owner] };
         var model = new ProgramModel { Image = original.Image, MetadataVersion = original.MetadataVersion,
@@ -72,7 +94,6 @@ internal static class NativePointerCheck
             StringLiterals = original.StringLiterals, Code = original.Code };
         var skeleton = new Skeleton(model);
         var emitter = new FullBodyEmitter(skeleton, types);
-        var a = new Assertions();
         a.Equal(0, emitter.Emit(bodies).Count, "指针值通过实际写出管线");
         var invalid = bodies[3] with { Blocks = [new(0, [new ManagedReturn(0, new ConstantValue(1234, types.IntPtr, 64))])] };
         a.Equal(1, emitter.Emit([invalid]).Count, "不把原生数值地址常量冒充可移植指针");
@@ -87,6 +108,14 @@ internal static class NativePointerCheck
         var zero = loaded.GetMethod("Zero")!.CreateDelegate<Func<nint>>();
         var pinnedZero = loaded.GetMethod("PinnedZero")!.CreateDelegate<Func<byte[]?, nint>>();
         var pinnedBits = loaded.GetMethod("PinnedBits")!.CreateDelegate<Func<byte[], long, Action, ulong>>();
+        var scalarBytes = loaded.GetMethod("ScalarBytes")!.CreateDelegate<Func<double, ushort>>();
+        var writeScalarBytes = loaded.GetMethod("WriteScalarBytes")!.CreateDelegate<Func<double, double>>();
+        foreach (var bits in new ulong[] { 0, 0x8000000000000000, 0x3ff0000000000000, 0x7ff0000000000000, 0x7ff8123456789abc, ulong.MaxValue })
+        {
+            var value = BitConverter.Int64BitsToDouble(unchecked((long)bits));
+            a.Equal((ushort)(bits >> 24), scalarBytes(value), "部分读取保持 double 原始位型");
+            a.Equal((bits & ~(0xffffUL << 24)) | (0xa5c3UL << 24), unchecked((ulong)BitConverter.DoubleToInt64Bits(writeScalarBytes(value))), "部分写入只修改目标字节");
+        }
         foreach (var bits in new ulong[] { 0, 1, 0x7fffffff, 0x80000000, 0xffffffff, 0x100000000, 0x7fffffffffffffff, 0x8000000000000000, ulong.MaxValue })
         {
             var value = unchecked((nint)bits);

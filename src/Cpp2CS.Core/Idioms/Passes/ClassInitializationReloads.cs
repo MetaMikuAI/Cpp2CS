@@ -60,16 +60,22 @@ internal static class ClassInitializationReloads
             var fastPrevious = head;
             var fastChain = new HashSet<Block>();
             var fastWrites = new List<Store>();
+            var fastReads = new HashSet<Load>();
             // 快路径的计算和写入须与初始化臂逐项匹配；不能跨其他调用。
             while (fastChain.Count < 32 && merge.Predecessors.Count == 1 && !merge.IsLandingPad
                 && merge.Handler == head.Handler && merge.NormalSuccessors.ToArray() is [var fastNext]
                 && merge.Statements.All(s => s is Nop or Jump || s is Define or Store
-                    && !ExprMap.Operands(s).SelectMany(ExprMap.Walk).Any(e => e is Load or Intrinsic or Unknown)) && fastChain.Add(merge))
+                    && !ExprMap.Operands(s).SelectMany(ExprMap.Walk).Any(e => e is Intrinsic or Unknown || s is Store && e is Load)) && fastChain.Add(merge))
             {
                 fastWrites.AddRange(merge.Statements.OfType<Store>());
+                fastReads.UnionWith(merge.Statements.OfType<Define>().SelectMany(d => ExprMap.Walk(d.Value)).OfType<Load>().Select(load => (Load)Expand(load)));
                 fastPrevious = merge;
                 merge = fastNext;
             }
+            // 已初始化臂与初始化后的同字段读取可以合流，但不跨写入移动快照。
+            if (fastReads.Count > 0 && fastWrites.Count > 0) continue;
+            if (fastReads.Any(load => load.Address is not Symbol { Kind: SymbolKind.StaticFields }
+                and not Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.StaticFields }, Right: Const })) continue;
             var chain = new List<Block>();
             var previous = head;
             var current = enter;
@@ -147,9 +153,9 @@ internal static class ClassInitializationReloads
                 { writes.Add(write); continue; }
                 if (statement is Define d && ExprMap.Walk(d.Value).All(e => e is Use or Const or Symbol or Binary or Unary or Ir.Convert
                     or Compare or Select or Logical or Not or Extract or Insert
-                    || initialized && writes.Count == 0 && e is Load load && PreviousSnapshot(load, false) is not null))
+                    || initialized && writes.Count == 0 && e is Load load && (fastReads.Contains((Load)Expand(load)) || PreviousSnapshot(load, false) is not null)))
                 {
-                    snapshots[d.Target] = ExprMap.Map(d.Value, e => e is Load load ? PreviousSnapshot(load, false) : null);
+                    snapshots[d.Target] = ExprMap.Map(d.Value, e => e is Load load && !fastReads.Contains((Load)Expand(load)) ? PreviousSnapshot(load, false) : null);
                     continue;
                 }
                 if (initialized && statement is Call { Op.Kind: OpKind.NullCheck, Arguments: [var value] } && PreviousSnapshot(value, true) is not null) continue;

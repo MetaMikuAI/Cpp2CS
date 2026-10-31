@@ -109,6 +109,24 @@ internal static class ClassInitializationCheck
         fastCalculation.Blocks.Add(fastBlock);
         fastCalculation.Renumber();
         a.True(ClassInitializationReloads.Run(fastCalculation), "快路径经过纯计算后仍可比较最终汇合值");
+        foreach (var mode in new[] { "same", "different", "write" })
+        {
+            var statics = new Symbol(SymbolKind.StaticFields, type);
+            Expr Read(ulong offset) => new Load(new Binary(BinOp.Add, statics, Expr.C(offset, 64), 64), 8);
+            var flag = new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassCctorFinishedOrNoCctor, 64), 64), 32);
+            var fast = new Variable(Storage.Gpr(1), 1);
+            var slow = fast with { Version = 2 };
+            var merged = fast with { Version = 3 };
+            var guard = new Block(0) { Statements = [new Branch(0, new Compare(Cond.Eq, flag, Expr.C(0, 32)), 16, 32)] };
+            var initialize = new Block(16) { Statements = [new Call(16, CallKind.Direct, Expr.C(0, 64))
+                { Op = new(OpKind.RunClassConstructor, type), Arguments = [klass] }, new Define(20, slow, Read(mode == "different" ? 8UL : 0)), new Jump(24, 48)] };
+            var skip = new Block(32) { Statements = [new Define(32, fast, Read(0)), new Jump(36, 48)] };
+            var done = new Block(48) { Statements = [new Phi(48, merged, [slow, fast]), new Return(52) { Value = new Use(merged, 8) }] };
+            MachineFunction.AddEdge(guard, initialize); MachineFunction.AddEdge(guard, skip);
+            MachineFunction.AddEdge(initialize, done); MachineFunction.AddEdge(skip, done);
+            if (mode == "write") skip.Statements.Insert(0, new Store(31, statics, Expr.C(1, 8)));
+            a.Equal(mode == "same", ClassInitializationReloads.Run(Function(guard, initialize, skip, done)), "分支内静态字段快照须相同且无交错写入");
+        }
         foreach (var mode in new[] { "same", "different", "repeat", "write", "other-write" })
         {
             var input = new Use(new(Storage.Vec(0), 0), 32);
