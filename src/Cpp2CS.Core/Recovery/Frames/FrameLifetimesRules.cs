@@ -199,7 +199,8 @@ internal static class FrameLifetimesRules
                         return null;
                 }
 
-                if (block.NormalSuccessors.ToArray() is not [var next] || next.Predecessors.Count != 1)
+                // 这里只追当前清零之后的唯一路径；汇合块的其他入边不影响下一次定义。
+                if (block.NormalSuccessors.ToArray() is not [var next])
                     return null;
                 block = next;
                 position = 0;
