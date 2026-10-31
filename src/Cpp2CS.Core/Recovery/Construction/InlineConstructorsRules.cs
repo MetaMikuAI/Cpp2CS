@@ -1,5 +1,6 @@
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Ir;
+using Cpp2CS.Idioms;
 
 namespace Cpp2CS.Recovery;
 
@@ -8,9 +9,14 @@ internal static class InlineConstructorsRules
     internal static bool InlineConstructor(this RecoveryScope ctx, Block block, int index, Call allocation, DefinitionRef type, Variable created)
     {
         InlineConstructors.Match? match = null;
+        Func<Expr, TypeRef?>? declaredType = null;
         foreach (var constructor in type.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic))
         {
-            if (ctx.owner.ConstructorPattern(new(constructor, type.Arguments, [])) is not { } pattern || InlineConstructors.Find(pattern, ctx.function, block, index, created) is not { } candidate)
+            if (ctx.owner.ConstructorPattern(new(constructor, type.Arguments, [])) is not { } pattern
+                || InlineConstructors.Find(pattern, ctx.function, block, index, created,
+                    e => ctx.TypeOfValue(e) is { } valueType && ctx.types.Kind(valueType) == TypeKind.Bool
+                        || (declaredType ??= DelegateCallNormalizer.TypeQuery(ctx.facts, ctx.function))(e) is { } declared
+                            && ctx.types.Kind(declared) == TypeKind.Bool) is not { } candidate)
                 continue;
             if (match is not null)
                 return false;

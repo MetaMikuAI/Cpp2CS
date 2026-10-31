@@ -58,7 +58,7 @@ internal static class InlineConstructors
         return null;
     }
 
-    internal static Match? Find(Pattern pattern, MachineFunction function, Block block, int index, Variable created)
+    internal static Match? Find(Pattern pattern, MachineFunction function, Block block, int index, Variable created, Func<Expr, bool>? isBoolean = null)
     {
         var allocation = block.Statements[index];
         var bindings = new Dictionary<Variable, Expr>
@@ -67,6 +67,15 @@ internal static class InlineConstructors
         };
         var parameters = pattern.Signature.Parameters.Select(p => p.Pieces[0]).ToArray();
         var widths = parameters.ToDictionary(p => new Variable(p.Register, 0), p => p.Width);
+        var booleanInputs = pattern.Signature.Parameters.Where(p => ManagedTypes.PrimitiveName(p.Type) == "Boolean" || p.Type is PrimitiveRef { Name: "Boolean" })
+            .Select(p => new Variable(p.Pieces[0].Register, 0)).ToHashSet();
+        var normalizedBooleans = new HashSet<Variable>();
+        var effects = pattern.Effects.Select(s => ExprMap.MapOperands(s, e => Fold.Simplify(ExprMap.Map(e, part =>
+        {
+            if (part is not Binary { Op: BinOp.And, Left: Use flag, Right: Const { Value: 1 } } || !booleanInputs.Contains(flag.Variable)) return null;
+            normalizedBooleans.Add(flag.Variable);
+            return flag;
+        })))).ToArray();
         var definitions = new Dictionary<Variable, Expr>();
         var matched = new List<Stmt>();
         var stores = new List<Store>();
@@ -80,13 +89,13 @@ internal static class InlineConstructors
             if (statement is Nop) continue;
             if (statement is Define d && Pure(Expand(d.Value, definitions))) { definitions[d.Target] = Expand(d.Value, definitions); continue; }
             var actual = ExprMap.MapOperands(statement, e => Expand(e, definitions));
-            var expected = pattern.Effects[effect];
+            var expected = effects[effect];
             var consumed = 1;
-            if ((pattern.ReorderStores || !pattern.Effects.Take(effect).Any(s => s is Call)) && actual is Store write && expected is Store)
+            if ((pattern.ReorderStores || !effects.Take(effect).Any(s => s is Call)) && actual is Store write && expected is Store)
             {
                 if (stores.Count == 0)
                 {
-                    stores.AddRange(pattern.Effects.Skip(effect).TakeWhile(s => s is Store).Cast<Store>());
+                    stores.AddRange(effects.Skip(effect).TakeWhile(s => s is Store).Cast<Store>());
                     if (!DisjointStores(stores)) return null;
                 }
                 consumed = MatchStores(write, stores, bindings, widths);
@@ -94,13 +103,15 @@ internal static class InlineConstructors
             }
             else if (stores.Count != 0 || !Statement(expected, actual, bindings, widths, pattern.UnusedCallInputs)) return null;
             effect += consumed;
-            if (effect == pattern.Effects.Count) break;
+            if (effect == effects.Length) break;
         }
-        if (effect != pattern.Effects.Count) return null;
+        if (effect != effects.Length) return null;
         var args = new List<Expr>();
         foreach (var parameter in parameters)
         {
             if (!bindings.TryGetValue(new(parameter.Register, 0), out var value) || !Pure(value)) return null;
+            if (normalizedBooleans.Contains(new(parameter.Register, 0)) && !CanonicalBoolean(value)
+                && isBoolean?.Invoke(value) != true) return null;
             args.Add(Low(value, parameter.Width));
         }
         var removed = matched.ToHashSet(ReferenceEqualityComparer.Instance);
@@ -228,6 +239,9 @@ internal static class InlineConstructors
     }
 
     private static bool Pure(Expr expression) => ExprMap.Walk(expression).All(e => e is Const or Use or Binary or Unary or Ir.Convert or Symbol or Extract or Insert);
+    private static bool CanonicalBoolean(Expr value) => value is Const { Value: <= 1 }
+        or Binary { Op: BinOp.And, Right: Const { Value: 1 } }
+        || value is Ir.Convert { Kind: ConvKind.Truncate or ConvKind.ZeroExtend } conversion && CanonicalBoolean(conversion.Operand);
     private static Expr Low(Expr value, int width) => value is Use u ? u with { Width = width }
         : Fold.Convert(value.Width < width ? ConvKind.ZeroExtend : ConvKind.Truncate, value, width);
     private static Expr Expand(Expr expression, IReadOnlyDictionary<Variable, Expr> definitions)
@@ -244,6 +258,7 @@ public sealed partial class MethodRecovery
     internal InlineConstructors.Pattern? ConstructorPattern(MethodRef method)
     {
         if (constructorPatterns.TryGetValue(method, out var cached)) return cached;
+        constructorPatterns[method] = null;
         InlineConstructors.Pattern? pattern = null;
         var entry = NativeMethods.ConstructorEntry(method);
         if (entry != 0 && facts.Code.RegionOf(entry) == CodeRegion.Managed
@@ -277,14 +292,27 @@ public sealed partial class MethodRecovery
                             .Select(r => (((Const)c.Target).Value, r))).ToHashSet() };
                 if (pattern is { Effects: [Call { Target: Const target }, ..] }
                     && pattern.Effects.Skip(1).All(s => s is Store or Call { Op.Kind: OpKind.WriteBarrier })
-                    && facts.EntriesAt(target.Value).Any(e => e.Method is
-                    {
-                        Method:
-                        { Name: ".ctor", IsStatic: false, Parameters.Count: 0, Owner.FullName: "System.Object" }
-                    }))
+                    && EmptyBaseConstructor(target.Value, []))
                     pattern = pattern with { ReorderStores = true };
             }
         }
         return constructorPatterns[method] = pattern;
+    }
+
+    // 无参基类只逐层转调 Object 构造时，不会发布 this；其后的独立字段仍可交换。
+    private bool EmptyBaseConstructor(ulong entry, HashSet<ulong> visited)
+    {
+        if (!visited.Add(entry) || visited.Count > 16) return false;
+        var methods = facts.EntriesAt(entry).Select(e => e.Method).OfType<MethodRef>().Distinct().ToArray();
+        if (methods.Length == 0) return false;
+        foreach (var method in methods)
+        {
+            if (method.Method is not { Name: ".ctor", IsStatic: false, Parameters.Count: 0 }) return false;
+            if (method.Method.Owner.FullName == "System.Object") continue;
+            if (ConstructorPattern(method) is not { Effects: [Call { Op: null, Target: Const target, Arguments: [Use receiver, ..] }] } parent
+                || receiver.Variable != new Variable(parent.Signature.This!.Pieces[0].Register, 0)
+                || !EmptyBaseConstructor(target.Value, new(visited))) return false;
+        }
+        return true;
     }
 }

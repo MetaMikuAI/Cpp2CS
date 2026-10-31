@@ -145,7 +145,9 @@ internal static class InlineConstructorCheck
         a.True(InlineConstructors.Create(method, floatSignature, Function(save with {
             Value = new Use(new(Storage.Vec(8), 0), 128) }, Base(self), floats.Effects[1], floats.Effects[2], new Return(20))) is null,
             "向量高 64 位不属于 ABI 保存范围，不能当作序言忽略");
-        var boolSignature = signature with { Parameters = [new(new PrimitiveRef("Boolean"), Passing.Registers, [new(Storage.Gpr(1), 8, 0)])] };
+        var booleanType = new DefinitionRef(new TypeDef { Index = -2, Assembly = "mscorlib.dll", Namespace = "System", Name = "Boolean",
+            Token = 0, Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false }, []);
+        var boolSignature = signature with { Parameters = [new(booleanType, Passing.Registers, [new(Storage.Gpr(1), 8, 0)])] };
         var mask = Fold.Convert(ConvKind.Truncate, new Binary(BinOp.And,
             new Use(new(Storage.Gpr(1), 0), 32), Expr.C(1, 32), 32), 8);
         var boolPattern = InlineConstructors.Create(method, boolSignature, Function(Base(self), Field(self, mask), new Return(20)))!;
@@ -157,6 +159,16 @@ internal static class InlineConstructorCheck
             a.True(bit < 2 ? boolMatch is not null && boolMatch.Arguments.SequenceEqual([Expr.C(bit, 8)]) : boolMatch is null,
                 "布尔掩码只接受可由低一位生成的常量");
         }
+        var boolValue = new Use(new(Storage.Gpr(7), 1), 8);
+        var knownBool = Function(new Call(0, CallKind.Direct, Expr.C(100, 64)), Base(new Use(created, 64)),
+            Field(new Use(created, 64), boolValue), new Return(20));
+        a.True(InlineConstructors.Find(boolPattern, knownBool, knownBool.EntryBlock, 0, created) is null,
+            "普通 byte 值不能默认视为规范布尔值");
+        a.True(InlineConstructors.Find(boolPattern, knownBool, knownBool.EntryBlock, 0, created, e => e == boolValue)
+            is { } knownBoolMatch && knownBoolMatch.Arguments.SequenceEqual([boolValue]), "已证明布尔值可匹配省略的低位掩码");
+        knownBool.EntryBlock.Statements[2] = Field(new Use(created, 64), new Binary(BinOp.And, boolValue, Expr.C(1, 8), 8));
+        a.True(InlineConstructors.Find(boolPattern, knownBool, knownBool.EntryBlock, 0, created) is not null,
+            "调用点仍保留低位掩码时也接受原有匹配");
         var vector = new Variable(Storage.Vec(1), 1);
         var duplicate = new Intrinsic("vdup.32", [Expr.C(0x3f800000, 32)], 128);
         var vectorPattern = InlineConstructors.Create(method, signature with { Parameters = [] }, Function(
