@@ -19,6 +19,10 @@ internal static class MathImportCheck
             && MathImportSignature.Find("fmod") is { Single: false, Parameters: ["value", "divisor"] }, "双参数顺序保持 C 原型");
         a.True(new[] { "modf", "modff", "sincosf", "frexpf", "log10l", "customf" }.All(s => MathImportSignature.Find(s) is null),
             "指针出参、扩展精度和未知符号不套用标量签名");
+        var scaled = MathImportSignature.Find("ldexpf")!;
+        a.True(scaled is { Single: true, IntegerExponent: true, Parameters: ["value", "exponent"] }
+            && scaled.Register(0) == Storage.Vec(0) && scaled.Register(1) == Storage.Gpr(0),
+            "二次幂缩放按 C 参数顺序读取浮点值及整数指数");
         foreach (var (sin, cos, valid) in new (long, long, bool)[] { (-8, -4, true), (-4, -8, true),
             (-8, -8, false), (-8, -6, false), (-2, -8, false), (-8, 0, false) })
         {

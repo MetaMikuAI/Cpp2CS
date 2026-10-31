@@ -70,7 +70,7 @@ public sealed class FactsCallModel : ICallModel
             "modf" => new([X(0), Storage.Vec(0)], [Storage.Vec(0)], "libm"),
             "sincosf" => new([X(0), X(1), Storage.Vec(0)], [], "libm"),
             var symbol when MathImportSignature.Find(symbol) is { } signature =>
-                new(Enumerable.Range(0, signature.Parameters.Length).Select(Storage.Vec).ToArray(), [Storage.Vec(0)], "libm"),
+                new(Enumerable.Range(0, signature.Parameters.Length).Select(signature.Register).ToArray(), [Storage.Vec(0)], "libm"),
             "__cxa_begin_catch" => new([X(0)], [X(0)], "libc++abi"),
             "__cxa_end_catch" => new([], [], "libc++abi"),
             _ => null,

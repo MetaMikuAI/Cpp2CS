@@ -28,7 +28,8 @@ internal static class NativeImportsRules
                 continue;
             var scalar = signature.Single ? ctx.types.Single : ctx.types.Double;
             // 保留导入的精度及实参顺序，不替换成另一精度或近似表达式。
-            Register(call, symbol, scalar, signature.Parameters.Select(name => new ParameterDef(name, scalar, 0, null, false)).ToArray());
+            Register(call, symbol, scalar, signature.Parameters.Select((name, i) => new ParameterDef(name,
+                signature.IsInteger(i) ? ctx.types.Int32 : scalar, 0, null, false)).ToArray());
             if (call.Defines is [{ } output])
                 ctx.State.Types.known[output] = scalar;
         }

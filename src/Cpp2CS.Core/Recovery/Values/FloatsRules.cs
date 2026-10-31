@@ -39,7 +39,8 @@ internal static class FloatsRules
         {
             var width = math.Single ? 32 : 64;
             if (returned) widths[Storage.Vec(0)] = width;
-            else for (var index = 0; index < math.Parameters.Length; index++) widths[Storage.Vec(index)] = width;
+            else for (var index = 0; index < math.Parameters.Length; index++)
+                if (!math.IsInteger(index)) widths[math.Register(index)] = width;
             return widths;
         }
         if (call.Op is { Kind: OpKind.ImportOutPair, Operand: "sincosf" })
