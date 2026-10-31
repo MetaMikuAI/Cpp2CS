@@ -12,5 +12,5 @@ public interface IExpressionTyping
     TypeRef? LocationType(Expr address, int width);
     Expr Expand(Expr expression);
     IReadOnlyList<TypeRef>? StructReceiverArguments(Expr? receiver, TypeDef owner);
-    IEnumerable<(Call Call, Use Klass)> TypeChecks();
+    IEnumerable<(Call Call, Expr Klass)> TypeChecks();
 }

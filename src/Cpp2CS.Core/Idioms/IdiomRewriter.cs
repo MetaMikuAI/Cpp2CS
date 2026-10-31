@@ -144,6 +144,16 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     var receiver = block.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources.SequenceEqual(objects!));
                     if (receiver is not null) values[klass.Target] = new Load(new Use(receiver.Target, 64), 64);
                 }
+            // 已知类指针上的层级长度和层级表不可变；相同来源的读取仍代表同一元数据值。
+            foreach (var phi in function.Blocks.SelectMany(b => b.Statements).OfType<Phi>())
+            {
+                var sources = phi.Sources.Select(v => Expand(new Use(v, 64))).Distinct().ToArray();
+                if (sources is not [var source]) continue;
+                var part = source is Ir.Convert { Kind: ConvKind.ZeroExtend } conversion ? conversion.Operand : source;
+                if (part is Load { Address: Binary { Op: BinOp.Add, Left: Load { Width: 64 }, Right: Const offset } } metadata
+                    && (metadata.Width == 8 && offset.Value == RuntimeLayout.ClassTypeHierarchyDepth
+                        || metadata.Width == 64 && offset.Value == RuntimeLayout.ClassTypeHierarchy)) values[phi.Target] = source;
+            }
         }
 
         /// <summary>变量的定义表达式（不展开）；不是 Define 定义的为 null。</summary>

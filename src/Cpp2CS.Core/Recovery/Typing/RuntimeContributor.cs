@@ -27,7 +27,8 @@ internal sealed class RuntimeContributor(TypingInputs input) : ITypeContributor
         foreach (var variable in input.Wrappers.Keys) marked.Add(variable);
         foreach (var define in definitions)
             if (input.HasExceptions && define.Value is Intrinsic { Name: "eh_exception" or "eh_selector" }) marked.Add(define.Target);
-        foreach (var (_, klass) in input.Expressions(context).TypeChecks()) marked.Add(klass.Variable);
+        foreach (var (_, klass) in input.Expressions(context).TypeChecks())
+            if (klass is Use use) marked.Add(use.Variable);
         Expr Expand(Expr expression) => expression is Use u && marked.Contains(u.Variable) && values.TryGetValue(u.Variable, out var value) ? Expand(value) : expression;
         for (var changed = true; changed;)
         {

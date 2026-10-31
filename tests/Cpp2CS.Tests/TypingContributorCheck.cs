@@ -22,7 +22,7 @@ internal static class TypingContributorCheck
         public TypeRef? LocationType(Expr address, int width) => null;
         public Expr Expand(Expr expression) => expression;
         public IReadOnlyList<TypeRef>? StructReceiverArguments(Expr? receiver, TypeDef owner) => null;
-        public IEnumerable<(Call Call, Use Klass)> TypeChecks() => [];
+        public IEnumerable<(Call Call, Expr Klass)> TypeChecks() => [];
     }
 
     [Command("typing-contributors", "T3 贡献者的迁移边界与反例", Arguments = "<binary> <metadata>", Gate = Gate.Image)]

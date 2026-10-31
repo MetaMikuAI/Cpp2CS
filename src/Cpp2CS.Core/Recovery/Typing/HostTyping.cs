@@ -24,5 +24,5 @@ internal sealed class HostTyping(RecoveryScope host, TypingContext typing) : IEx
         return host.StructReceiverArguments(receiver, owner);
     }
 
-    public IEnumerable<(Call Call, Use Klass)> TypeChecks() => host.State.Runtime.typeChecks.Keys.Where(c => c.Arguments.LastOrDefault() is Use).Select(c => (c, (Use)c.Arguments[^1])).ToArray();
+    public IEnumerable<(Call Call, Expr Klass)> TypeChecks() => host.State.Runtime.typeChecks.Keys.Select(c => (c, c.Arguments[^1])).ToArray();
 }

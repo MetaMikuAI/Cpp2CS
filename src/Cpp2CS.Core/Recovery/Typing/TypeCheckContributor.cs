@@ -9,7 +9,8 @@ internal sealed class TypeCheckContributor(TypingInputs input) : ITypeContributo
     {
         foreach (var (call, klass) in input.Expressions(context).TypeChecks())
         {
-            constraints.IsRuntime(klass.Variable, RuntimeContributor.Legacy, new(Name, call.Address, $"klass = {klass} 的已证托管对象类指针读取"));
+            if (klass is Use use)
+                constraints.IsRuntime(use.Variable, RuntimeContributor.Legacy, new(Name, call.Address, $"klass = {klass} 的已证托管对象类指针读取"));
             foreach (var variable in call.Defines.OfType<Variable>())
                 constraints.Defines(variable, context.Types.UInt64, new(Name, call.Address, "继承检查返回 0/1 的 UInt64"));
         }

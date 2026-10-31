@@ -134,6 +134,8 @@ internal static class CheckedClassValues
                     block.Statements[index] = ExprMap.MapOperands(block.Statements[index], expression => ExprMap.Map(expression,
                         part =>
                         {
+                            // 类型细化不改变对象身份；类指针继续使用原引用，便于跨成功分支合流。
+                            if (part is Load { Width: 64, Address: Use header } && header.Variable == value.Variable) return part;
                             if (part is not Use use || use.Variable != value.Variable) return null;
                             changed = true;
                             return new Use(cast, use.Width);

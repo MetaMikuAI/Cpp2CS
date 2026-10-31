@@ -137,15 +137,17 @@ internal static class CheckedClassValuesCheck
             var cast = new Variable(Storage.Temp(1), 1);
             var guard = new Call(0x604, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.NullCheck, null),
                 Arguments = [checkedFlag ? new Use(flag, 64) : obj] };
+            var headerRead = new Define(0x608, new(Storage.Gpr(10), 1), new Load(obj, 64));
             var block = new Block(0x600) { Statements = [
                 new Call(0x600, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.TypeCheck, type),
                     Arguments = [new Use(klass, 64)], Results = [flag.Storage], Defines = [flag] },
-                guard, new Return(0x608) { Value = obj }] };
+                guard, headerRead, new Return(0x60c) { Value = obj }] };
             var function = new MachineFunction { Entry = block.Start, Range = new(0x600, 0x610, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [block] };
             function.Renumber();
             a.Equal(checkedFlag, SuccessfulTypeCheckValuesPass.Run(function, u => u.Variable == klass ? new Load(obj, 64) : null, () => cast),
                 "仅检查类型结果非零才证明派生类型，原对象判空不足以证明");
             a.True(block.Statements.Contains(guard), "保留原来的异常类型与检查位置");
+            a.True(block.Statements.Contains(headerRead), "对象类指针保留原身份，字段和返回值仍可细化类型");
         }
         return a.Finish("checked-class-values");
     }

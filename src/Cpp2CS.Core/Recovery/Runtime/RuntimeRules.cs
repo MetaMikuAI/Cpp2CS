@@ -9,11 +9,16 @@ internal static class RuntimeRules
     {
         ctx.PrepareExceptionTypeChecks();
         foreach (var call in ctx.blocks.SelectMany(b => b.Statements).OfType<Call>())
-            if (call is { Op: { Kind: OpKind.TypeCheck, Operand: DefinitionRef { Definition: { IsValueType: false, IsInterface: false } } }, Arguments: [Use klass] } && ctx.values.TryGetValue(klass.Variable, out var value) && value is Load { Width: 64, Address: Use obj } && ctx.TypeOfValue(obj) is { } type && ManagedTypes.IsReferenceType(type))
+            if (call is { Op: { Kind: OpKind.TypeCheck, Operand: DefinitionRef { Definition: { IsValueType: false, IsInterface: false } } }, Arguments: [var argument] }
+                && (argument is Use use ? ctx.values.GetValueOrDefault(use.Variable) : argument) is Load { Width: 64, Address: Use obj }
+                && ctx.TypeOfValue(obj) is { } type && ManagedTypes.IsReferenceType(type))
             {
-                ctx.State.Runtime.objectClasses[klass.Variable] = obj;
+                if (argument is Use klass)
+                {
+                    ctx.State.Runtime.objectClasses[klass.Variable] = obj;
+                    ctx.State.Runtime.runtime.Add(klass.Variable);
+                }
                 ctx.State.Runtime.typeChecks[call] = obj;
-                ctx.State.Runtime.runtime.Add(klass.Variable);
                 ctx.State.Calls.callBindings.InvalidateTypes();
             }
 
