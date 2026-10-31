@@ -14,8 +14,13 @@ internal static class FramesRules
     {
         ctx.InferTypes();
         ctx.NormalizeCheckedObjects();
-        for (var round = 0; round < 8 && JoinedFieldReads.Run(ctx.function, phi => phi.Sources.All(v => ctx.State.Types.known.TryGetValue(v, out var type) && ctx.types.Kind(type) == TypeKind.Reference) || phi.Sources.All(ctx.FieldAddress)); round++)
+        for (var round = 0; round < 8; round++)
         {
+            var changed = ctx.function.Range.ExceptionRegions.Length == 0
+                && Cpp2CS.Machine.Ssa.TailDuplication.Run(ctx.function,
+                    block => block.Statements.OfType<Phi>().Any(phi => phi.Sources.All(ctx.FieldAddress)));
+            changed |= JoinedFieldReads.Run(ctx.function, phi => phi.Sources.All(v => ctx.State.Types.known.TryGetValue(v, out var type) && ctx.types.Kind(type) == TypeKind.Reference) || phi.Sources.All(ctx.FieldAddress));
+            if (!changed) break;
             Cpp2CS.Machine.Ssa.Propagate.Run(ctx.function, ctx.Dominators);
             ctx.blocks = ctx.function.Blocks;
             ctx.definitions = ctx.IndexDefinitions();
