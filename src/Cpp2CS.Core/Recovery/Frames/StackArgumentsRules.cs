@@ -8,7 +8,7 @@ namespace Cpp2CS.Recovery;
 internal static class StackArgumentsRules
 {
     /// <summary>按 AAPCS64 栈布局匹配到达写入，值在原写入位置快照；不把寄存器耗尽后的参数丢掉。</summary>
-    [Analysis("标量栈实参", 29, After = ["帧前类型"])]
+    [MachinePass("标量栈实参", 29, After = ["帧前类型"])]
     internal static void PrepareScalarStackArguments(this RecoveryScope ctx)
     {
         var definitions = ctx.values.Concat(ctx.function.Dead.Select(d => new KeyValuePair<Variable, Expr>(d.Define.Target, d.Define.Value))).GroupBy(p => p.Key).ToDictionary(g => g.Key, g => g.First().Value);
@@ -58,7 +58,7 @@ internal static class StackArgumentsRules
         }
         while (changed);
         foreach (var block in ctx.blocks)
-            foreach (var call in block.Statements.OfType<Call>())
+            foreach (var call in block.Statements.OfType<Call>().ToArray())
             {
                 if (ctx.Resolve(call) is not { } callee || ctx.owner.abi.Classify(callee, out _) is not { } signature)
                     continue;
@@ -72,6 +72,19 @@ internal static class StackArgumentsRules
                     continue;
                 var layout = ctx.owner.abi.StackArguments(signature);
                 ctx.State.Frames.callStackAreas[call.Address] = (callSp, layout.Size);
+                // 一次向量写入可装载两个独立标量栈实参；按真实 ABI 槽拆分，继续使用原有快照规则。
+                var scalarSlots = layout.Parameters.Where(p => !p.Indirect && ctx.types.Size(p.Type) is > 0 and <= 8
+                    && ctx.types.Kind(p.Type) is TypeKind.Float or TypeKind.Double or TypeKind.Int or TypeKind.Bool or TypeKind.Reference)
+                    .Select(p => p.Offset).ToHashSet();
+                foreach (var offset in scalarSlots.Where(o => scalarSlots.Contains(o + 8)))
+                {
+                    if (ctx.ReachingStackStore(block, block.Statements.IndexOf(call), callSp + offset, [], 128) is not { Value: Use } wide
+                        || ctx.State.Frames.stackArgumentStores.ContainsKey(wide) || !ctx.ExclusiveStackArgument(callSp + offset, 128)) continue;
+                    var owner = ctx.blocks.Single(b => b.Statements.Contains(wide));
+                    var at = owner.Statements.IndexOf(wide);
+                    ctx.Rewriter.Replace(owner, at, new Store(wide.Address, new FrameAddress(callSp + offset), new Extract(wide.Value, 0, 64)));
+                    ctx.InsertAnalysisStatement(owner, at + 1, new Store(wide.Address, new FrameAddress(callSp + offset + 8), new Extract(wide.Value, 64, 64)));
+                }
                 // 虚调用的隐藏 MethodInfo 与方法指针来自同一个 vtable 槽，寄存器耗尽时写入栈。
                 if (call.Op?.Kind == OpKind.CallVirtual && layout.MethodInfoOffset is { } hidden && ctx.ReachingStackStore(block, block.Statements.IndexOf(call), callSp + hidden, []) is { } metadata && Definition(metadata.Value) is Load { Width: 64 } info && Definition(call.Target) is Load { Width: 64 } pointer && ctx.Split(info.Address) is var infoAt && ctx.Split(pointer.Address) is var pointerAt && infoAt.Base == pointerAt.Base && infoAt.Offset == pointerAt.Offset + 8)
                     ctx.State.Lowering.dropped.Add(metadata);
