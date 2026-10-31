@@ -105,6 +105,13 @@ internal static class CallResolution
 
             case { Kind: OpKind.CallVirtual, Operand: int slot }:
                 // 接收者静态类型的 vtable 槽位：callvirt 按对象的实际类型在同一槽位分派
+                // 接口和引用型泛型参数也有 Object 虚方法；接口自身的方法通过 CallInterface 解析。
+                receiver = receiver switch
+                {
+                    DefinitionRef { Definition.IsInterface: true } or GenericParameterRef { IsReference: true } => ctx.types.Object,
+                    ArrayRef when ctx.types.CorlibDefinition("System.Array") is { } array => new DefinitionRef(array, []),
+                    _ => receiver,
+                };
                 if (receiver is not DefinitionRef { Definition: var type } || slot >= type.VTable.Count || type.VTable[slot] is not { } entry)
                     return null;
                 if (entry.Method.Owner.GenericParameters.Count == 0)
