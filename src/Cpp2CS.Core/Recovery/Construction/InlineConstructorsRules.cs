@@ -14,7 +14,9 @@ internal static class InlineConstructorsRules
         {
             if (ctx.owner.ConstructorPattern(new(constructor, type.Arguments, [])) is not { } pattern
                 || InlineConstructors.Find(pattern, ctx.function, block, index, created,
-                    e => ctx.TypeOfValue(e) is { } valueType && ctx.types.Kind(valueType) == TypeKind.Bool
+                    e => InlineConstructors.CanonicalBoolean(e, v => ctx.values.TryGetValue(v, out var value) ? [value]
+                            : ctx.phis.TryGetValue(v, out var phi) ? phi.Sources.Select(s => (Expr)new Use(s, s.Width)).ToArray() : [])
+                        || ctx.TypeOfValue(e) is { } valueType && ctx.types.Kind(valueType) == TypeKind.Bool
                         || (declaredType ??= DelegateCallNormalizer.TypeQuery(ctx.facts, ctx.function))(e) is { } declared
                             && ctx.types.Kind(declared) == TypeKind.Bool) is not { } candidate)
                 continue;

@@ -239,6 +239,17 @@ internal static class InlineConstructorCheck
         aggregateCaller.EntryBlock.Statements.RemoveAt(3);
         a.True(aggregatePattern is not null && InlineConstructors.Find(aggregatePattern, aggregateCaller, aggregateCaller.EntryBlock, 0, created) is null,
             "缺少一个结构体分量时不认回构造");
+        var booleanSources = new Dictionary<Variable, IReadOnlyList<Expr>> {
+            [selected] = [new Use(input.Variable, 32), Expr.C(0, 64)],
+            [input.Variable] = [new Binary(BinOp.And, boolValue, Expr.C(1, 8), 8)] };
+        a.True(InlineConstructors.CanonicalBoolean(new Use(selected, 8), v => booleanSources.GetValueOrDefault(v, [])),
+            "分配前的定义和合流来源均为 0/1 时保留布尔证明");
+        booleanSources[input.Variable] = [Expr.C(2, 32)];
+        a.True(!InlineConstructors.CanonicalBoolean(new Use(selected, 8), v => booleanSources.GetValueOrDefault(v, [])),
+            "任一合流来源不是 0/1 时拒绝规范布尔值");
+        booleanSources[input.Variable] = [new Use(selected, 8)];
+        a.True(!InlineConstructors.CanonicalBoolean(new Use(selected, 8), v => booleanSources.GetValueOrDefault(v, [])),
+            "循环来源不能仅凭另一条常量入边认定布尔值");
         return a.Finish("inline-constructors");
     }
 }

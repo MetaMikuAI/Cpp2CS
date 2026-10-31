@@ -260,10 +260,21 @@ internal static class InlineConstructors
     }
 
     private static bool Pure(Expr expression) => ExprMap.Walk(expression).All(e => e is Const or Use or Binary or Unary or Ir.Convert or Symbol or Extract or Insert or Compare or Select or Logical or Not);
-    private static bool CanonicalBoolean(Expr value) => value is Const { Value: <= 1 }
-        or Binary { Op: BinOp.And, Right: Const { Value: 1 } } or Compare or Logical or Not
-        or Select { True: Const { Value: <= 1 }, False: Const { Value: <= 1 } }
-        || value is Ir.Convert { Kind: ConvKind.Truncate or ConvKind.ZeroExtend } conversion && CanonicalBoolean(conversion.Operand);
+    internal static bool CanonicalBoolean(Expr value, Func<Variable, IReadOnlyList<Expr>>? sources = null,
+        HashSet<Variable>? path = null)
+    {
+        if (value is Const { Value: <= 1 } or Binary { Op: BinOp.And, Right: Const { Value: 1 } } or Compare or Logical or Not)
+            return true;
+        if (value is Ir.Convert { Kind: ConvKind.Truncate or ConvKind.ZeroExtend } conversion)
+            return CanonicalBoolean(conversion.Operand, sources, path);
+        if (value is Select select)
+            return CanonicalBoolean(select.True, sources, path) && CanonicalBoolean(select.False, sources, path);
+        if (value is not Use use || sources is null) return false;
+        var visited = path is null ? new HashSet<Variable>() : new(path);
+        if (!visited.Add(use.Variable) || visited.Count > 64) return false;
+        var incoming = sources(use.Variable);
+        return incoming.Count != 0 && incoming.All(e => CanonicalBoolean(e, sources, visited));
+    }
     private static Expr Low(Expr value, int width) => value is Use u ? u with { Width = width }
         : Fold.Convert(value.Width < width ? ConvKind.ZeroExtend : ConvKind.Truncate, value, width);
     private static Expr Expand(Expr expression, IReadOnlyDictionary<Variable, Expr> definitions)
