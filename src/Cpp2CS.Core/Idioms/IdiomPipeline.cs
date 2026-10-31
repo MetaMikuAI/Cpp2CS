@@ -201,6 +201,11 @@ internal static class IdiomPipeline
             while (FiniteConditions.Simplify(state.function))
                 state.Cleanup();
         });
+        state.Passes.Run("idioms.ZeroUnionConditions", () =>
+        {
+            if (state.ZeroUnionConditions())
+                state.Cleanup();
+        });
         state.Passes.Run("idioms.CheckedReferenceValues", () =>
         {
             if (state.CheckedReferenceValues())

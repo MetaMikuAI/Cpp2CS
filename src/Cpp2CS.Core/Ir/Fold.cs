@@ -234,6 +234,11 @@ public static class Fold
             return Compare(cond, z.Operand, C(k.Value, z.Operand.Width));
         if (cond is Cond.Eq or Cond.Ne && left is Convert { Kind: ConvKind.ZeroExtend } z1 && z1.Operand.Width == 1 && right is Const k1)
             return k1.Value == 0 == (cond == Cond.Ne) ? z1.Operand : Not(z1.Operand);
+        // 合并的零测试也适用于引用判空；只拆快照和常量，短路不能省略原有读取。
+        if (cond is Cond.Eq or Cond.Ne && right is Const { Value: 0 }
+            && left is Binary { Op: BinOp.Or, Left: Use or Const, Right: Use or Const } either)
+            return Logical(cond == Cond.Eq, Compare(cond, either.Left, C(0, either.Left.Width)),
+                Compare(cond, either.Right, C(0, either.Right.Width)));
         return new Compare(cond, left, right);
     }
 
