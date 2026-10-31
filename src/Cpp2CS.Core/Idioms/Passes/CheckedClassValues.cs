@@ -14,6 +14,21 @@ internal static class CheckedClassValues
         var changed = false;
         foreach (var block in function.Blocks.ToArray())
         {
+            for (var index = 0; index < block.Statements.Count; index++)
+            {
+                if (block.Statements[index] is not Define { Value: Select { Condition: Compare { Cond: Cond.Eq or Cond.Ne } test } select } selected) continue;
+                var (compared, expected) = test.Left is Symbol ? (test.Right, test.Left) : (test.Left, test.Right);
+                if (compared is not Use checkedClass || expected is not Symbol { Kind: SymbolKind.Class, Value: DefinitionRef { Definition.IsValueType: false } selectedType }
+                    || (selectedType.Definition.Attributes & TypeAttributes.Sealed) == 0
+                    || definition(checkedClass) is not Load { Width: 64, Address: Use original }
+                    || (test.Cond == Cond.Eq ? select.True : select.False) != original
+                    || (test.Cond == Cond.Eq ? select.False : select.True) is not Const { Value: 0 }) continue;
+                block.Statements[index] = new Call(selected.Address, CallKind.Direct, Expr.C(0, 64))
+                {
+                    Op = new(OpKind.IsInst, selectedType), Arguments = [original], Results = [selected.Target.Storage], Defines = [selected.Target],
+                };
+                changed = true;
+            }
             if (block.Statements.LastOrDefault() is not Branch { Condition: Compare { Cond: Cond.Eq or Cond.Ne } compare } branch)
                 continue;
             var (left, right) = compare.Left is Symbol ? (compare.Right, compare.Left) : (compare.Left, compare.Right);

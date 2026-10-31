@@ -111,6 +111,22 @@ internal static class CheckedClassValuesCheck
             a.True(exit.Statements[0] is Phi { Sources: var sources } && sources[0] == cast && sources[1] == alternative, "只替换成功边的对象来源");
             a.True(exit.Predecessors[0].Statements[0] is Call { Op.Kind: OpKind.IsInst, Defines: [var defined] } && defined == cast, "转换留在成功入边上");
         }
+        foreach (var mode in new[] { "sealed", "reverse", "open", "wrong-object" })
+        {
+            var type = new DefinitionRef(new TypeDef { Index = 5, Assembly = "Test", Namespace = "Test", Name = "Record", Token = 5,
+                Attributes = TypeAttributes.Public | (mode == "open" ? 0 : TypeAttributes.Sealed), IsValueType = false, IsEnum = false }, []);
+            var obj = new Use(new(Storage.Gpr(1), 0), 64);
+            var klass = new Use(new(Storage.Gpr(9), 1), 64);
+            var result = new Variable(Storage.Gpr(21), 1);
+            Expr source = mode == "wrong-object" ? new Use(new(Storage.Gpr(2), 0), 64) : obj;
+            var reverse = mode == "reverse";
+            var block = new Block(0x500) { Statements = [new Define(0x500, result,
+                new Select(new Compare(reverse ? Cond.Ne : Cond.Eq, klass, new Symbol(SymbolKind.Class, type)),
+                    reverse ? Expr.C(0, 64) : source, reverse ? source : Expr.C(0, 64), 64)), new Return(0x504)] };
+            var function = new MachineFunction { Entry = block.Start, Range = new(0x500, 0x508, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [block] };
+            function.Renumber();
+            a.Equal(mode is "sealed" or "reverse", CheckedClassValues.Run(function, u => u == klass ? new Load(obj, 64) : null, () => new(Storage.Temp(0), 1)), $"{mode} 精确类选择转换");
+        }
         return a.Finish("checked-class-values");
     }
 }
