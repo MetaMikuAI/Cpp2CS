@@ -416,59 +416,6 @@ internal static class ExceptionsRules
         var storage = phi.Target.Storage;
         if (storage.Bank != Bank.Stack && (storage.Bank != Bank.Gpr || storage.Index == 30 || !MethodRecovery.CalleeSaved.Contains(storage)))
             return null;
-        var dead = ctx.function.Dead.Where(d => d.Define.Target.Storage == storage).ToLookup(d => d.Block, d => d.Define);
-        var reaching = new Dictionary<(Block Block, int End, ulong Boundary), Variable?>();
-        var cycles = 0;
-        Variable? Reaching(Block block, int end, ulong boundary, HashSet<Block> active)
-        {
-            var key = (block, end, boundary);
-            if (reaching.TryGetValue(key, out var cached))
-                return cached;
-            var removed = dead[block].Where(d => d.Address < boundary).MaxBy(d => d.Address);
-            for (var i = end - 1; i >= 0; i--)
-            {
-                var statement = block.Statements[i];
-                if (removed is not null && removed.Address > statement.Address)
-                    return removed.Target;
-                if (statement is Define define && define.Target.Storage == storage)
-                    return define.Target;
-                if (statement is Phi merged && merged.Target.Storage == storage)
-                    return merged.Target;
-                if (statement is Call call && call.Defines.FirstOrDefault(v => v?.Storage == storage) is { } result)
-                    return result;
-            }
-
-            if (removed is not null)
-                return removed.Target;
-            if (block == ctx.function.EntryBlock)
-                return new(storage, 0);
-            if (!active.Add(block))
-            {
-                cycles++;
-                return null;
-            }
-
-            var before = cycles;
-            Variable? reached = null;
-            foreach (var parent in block.Predecessors.Distinct())
-            {
-                var incoming = Reaching(parent, parent.Statements.Count, ulong.MaxValue, active);
-                if (incoming is null || reached is not null && reached != incoming)
-                {
-                    reached = null;
-                    break;
-                }
-
-                reached = incoming;
-            }
-
-            active.Remove(block);
-            // 环上的拒绝依赖当前递归路径；只复用没有遇到回边的结果。
-            if (cycles == before)
-                reaching[key] = reached;
-            return reached;
-        }
-
         Expr Value(Variable variable)
         {
             var seen = new HashSet<Variable>();
@@ -487,10 +434,43 @@ internal static class ExceptionsRules
 
         var end = beforeCall ? from.First : from.Limit;
         var boundary = end < from.Block.Statements.Count ? from.Block.Statements[end].Address : ulong.MaxValue;
-        if (Reaching(from.Block, end, boundary, []) is not { } reached)
+        var values = ExceptionReachingDefinitions(ctx.function, from.Block, end, boundary, storage).Select(Value).Distinct().ToArray();
+        if (values is not [var expression])
             return null;
-        var expression = Value(reached);
         return phi.Sources.FirstOrDefault(source => Value(source) == expression);
+    }
+
+    /// <summary>反向收集每条路径的最近定义；没有写入的回边不贡献新来源，不能把它当作未定义值。</summary>
+    internal static Variable[] ExceptionReachingDefinitions(MachineFunction function, Block start, int end, ulong boundary, Storage storage)
+    {
+        var dead = function.Dead.Where(d => d.Define.Target.Storage == storage).ToLookup(d => d.Block, d => d.Define);
+        var seen = new HashSet<(Block, int, ulong)>();
+        var pending = new Stack<(Block, int, ulong)>();
+        var sources = new HashSet<Variable>();
+        pending.Push((start, end, boundary));
+        Variable? Nearest(Block block, int limit, ulong before)
+        {
+            var removed = dead[block].Where(d => d.Address < before).MaxBy(d => d.Address);
+            for (var i = limit - 1; i >= 0; i--)
+            {
+                var statement = block.Statements[i];
+                if (removed is not null && removed.Address > statement.Address) return removed.Target;
+                if (statement is Define define && define.Target.Storage == storage) return define.Target;
+                if (statement is Phi phi && phi.Target.Storage == storage) return phi.Target;
+                if (statement is Call call && call.Defines.FirstOrDefault(v => v?.Storage == storage) is { } result) return result;
+            }
+            return removed?.Target;
+        }
+        while (pending.TryPop(out var position))
+        {
+            if (!seen.Add(position)) continue;
+            var (block, limit, before) = position;
+            if (Nearest(block, limit, before) is { } source) sources.Add(source);
+            else if (block == function.EntryBlock) sources.Add(new(storage, 0));
+            else if (block.Predecessors.Count == 0) return [];
+            else foreach (var parent in block.Predecessors.Distinct()) pending.Push((parent, parent.Statements.Count, ulong.MaxValue));
+        }
+        return sources.ToArray();
     }
 
     /// <summary>异常筛选的类型判断：catch 的 IsAssignableFrom 写成 isinst 比较，结果补零到 64 位。</summary>
