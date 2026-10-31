@@ -311,7 +311,12 @@ internal static class ExceptionsRules
 
                 if (statements.LastOrDefault() is not (ManagedReturn or ManagedJump or ManagedBranch or ManagedSwitch or ManagedThrow or ManagedRethrow or ManagedEndFault or ManagedCall { Tail: true }))
                 {
-                    if (successors is [var only])
+                    if (successors.Length == 0 && fragment.Statements.LastOrDefault() is Call { Kind: CallKind.Tail, Op.Kind: OpKind.EndCatch }
+                        && ManagedTypes.IsVoid(ctx.State.Signature.returnType))
+                        statements.Add(new ManagedReturn(fragment.Block.End, null));
+                    else if (successors.Length == 0 && ctx.NonReturningManagedCall(fragment.Statements.LastOrDefault()))
+                        statements.Add(new ManagedThrow(fragment.Block.End, new ConstantValue(0, ctx.types.Corlib("System.Exception"), 64)));
+                    else if (successors is [var only])
                     {
                         if (BodyLowering.Emit(ctx.ExceptionEdge(fragment, only).Map(edge => new ManagedJump(fragment.Block.End, edge)), statements) is { } failure)
                             return failure;

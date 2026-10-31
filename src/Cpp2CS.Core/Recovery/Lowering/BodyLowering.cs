@@ -40,8 +40,7 @@ internal static class BodyLowering
                     {
                         Tail = true
                     };
-                else if (successors.Length == 0 && block.Statements.LastOrDefault() is Call { Kind: CallKind.Direct, Target: Const terminalTarget } terminalCall
-                    && ctx.Resolve(terminalCall) is not null && ctx.owner.lifter.NoReturn.IsNoReturn(terminalTarget.Value))
+                else if (successors.Length == 0 && ctx.NonReturningManagedCall(block.Statements.LastOrDefault()))
                     // 已证成不返回的托管调用仍需 CIL 终结；此保护语句在原生控制流中不可达。
                     statements.Add(new ManagedThrow(block.End, new ConstantValue(0, ctx.types.Corlib("System.Exception"), 64)));
                 else if (successors.Length == 1)
@@ -75,6 +74,9 @@ internal static class BodyLowering
     }
 
     internal static RecoveryResult<LocalValue> Local(this RecoveryScope ctx, Variable v) => ctx.LocalOf(v);
+    internal static bool NonReturningManagedCall(this RecoveryScope ctx, Stmt? statement) =>
+        statement is Call { Kind: CallKind.Direct, Target: Const target } call
+        && ctx.Resolve(call) is not null && ctx.owner.lifter.NoReturn.IsNoReturn(target.Value);
     internal static RecoveryResult<ManagedEdge> Edge(this RecoveryScope ctx, Block from, int successor, ulong target)
     {
         var to = from.NormalSuccessors.ElementAtOrDefault(successor);
