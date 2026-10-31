@@ -12,6 +12,10 @@ internal static class ReadOnlyDataNormalizer
     {
         var dominators = Dominators.Compute(function);
         var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+        Expr Address(Expr expression, int depth = 0) => depth >= 16 ? expression : Fold.Simplify(ExprMap.Map(expression, value =>
+            value is Use use && definitions.TryGetValue(use.Variable, out var definition) && definition.Width >= use.Width
+                && !ExprMap.Walk(definition).Any(e => e is Load or Ir.Read or Intrinsic or Unknown)
+                ? Address(Fold.Convert(ConvKind.Truncate, definition, use.Width), depth + 1) : null));
         var jumpLoads = new HashSet<Load>();
         var visited = new HashSet<Variable>();
         void JumpValues(Expr expression)
@@ -22,19 +26,23 @@ internal static class ReadOnlyDataNormalizer
         }
         foreach (var jump in function.Blocks.SelectMany(b => b.Statements).OfType<IndirectJump>()) JumpValues(jump.Target);
         var changed = false;
-        foreach (var block in function.Blocks)
-            for (var i = 0; i < block.Statements.Count; i++)
-            {
-                if (block.Statements[i] is IndirectJump) continue;
-                block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e, value =>
+        Expr Rewrite(Expr expression, Block block, Expr[] guards) => ExprMap.Map(expression, value =>
                 {
+                    // 条件地址拆成单臂读取后，上界只在被选中的那一臂有效。
+                    if (value is Select select)
+                    {
+                        var yes = Rewrite(select.True, block, [.. guards, select.Condition]);
+                        var no = Rewrite(select.False, block, [.. guards, Fold.Not(select.Condition)]);
+                        return ReferenceEquals(yes, select.True) && ReferenceEquals(no, select.False) ? select : select with { True = yes, False = no };
+                    }
                     if (value is not Load load || jumpLoads.Contains(load) || load.Width is not (8 or 16 or 32 or 64 or 128)) return null;
-                    if (load.Address is Const address && Readable(address.Value, load.Width / 8))
+                    var addressValue = Address(load.Address);
+                    if (addressValue is Const address && Readable(address.Value, load.Width / 8))
                     {
                         changed = true;
                         return Read(address.Value, load.Width);
                     }
-                    if (load.Width == 128 || load.Address is not Binary { Op: BinOp.Add, Right: Const table } sum) return null;
+                    if (load.Width == 128 || addressValue is not Binary { Op: BinOp.Add, Right: Const table } sum) return null;
                     Expr index = sum.Left;
                     if (index is Binary { Op: BinOp.Shl, Right: Const shift } scaled && (1UL << (int)shift.Value) == (ulong)load.Width / 8)
                         index = scaled.Left;
@@ -49,7 +57,7 @@ internal static class ReadOnlyDataNormalizer
                     else if (index is Use { Width: 64 } use && definitions.TryGetValue(use.Variable, out var definition)
                         && definition is Ir.Convert { Kind: ConvKind.SignExtend or ConvKind.ZeroExtend, Width: 64, Operand.Width: 32 })
                         index = new Use(use.Variable, 32);
-                    var count = Bound(index, block);
+                    var count = Bound(index, block, guards);
                     if (signedWidth is > 0 and < 32 && count > 1 << (signedWidth - 1)) return null;
                     if (count is < 1 or > 256) return null;
                     var size = count * load.Width / 8;
@@ -63,11 +71,14 @@ internal static class ReadOnlyDataNormalizer
                             Cell(k), result, load.Width);
                     changed = true;
                     return result;
-                }));
-            }
+                });
+        foreach (var block in function.Blocks)
+            for (var i = 0; i < block.Statements.Count; i++)
+                if (block.Statements[i] is not IndirectJump)
+                    block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => Rewrite(e, block, []));
         return changed;
 
-        int Bound(Expr index, Block block)
+        int Bound(Expr index, Block block, Expr[] guards)
         {
             int Limit(Expr value, HashSet<Variable> active) => value switch
             {
@@ -91,6 +102,10 @@ internal static class ReadOnlyDataNormalizer
                     return IndexValue(Fold.Convert(ConvKind.Truncate, masked.Left, index.Width), definitions) == loadedValue;
                 return false;
             }
+            foreach (var guard in guards)
+                if (guard is Compare { Cond: Cond.Ult or Cond.Ule, Left: var compared, Right: Const { Value: <= 256 } limit } test
+                    && SameIndex(compared))
+                    return (int)limit.Value + (test.Cond == Cond.Ule ? 1 : 0);
             foreach (var parent in function.Blocks)
             {
                 if (!dominators.Dominates(parent.Index, block.Index)

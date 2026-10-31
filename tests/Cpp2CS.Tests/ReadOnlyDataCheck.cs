@@ -85,6 +85,24 @@ internal static class ReadOnlyDataCheck
         narrow.Blocks[1].Statements[0] = new Define(0x1010, output, new Load(new Binary(BinOp.Add,
             new Binary(BinOp.Shl, new Cpp2CS.Ir.Convert(ConvKind.SignExtend, new Use(checkedIndex, 8), 64), Expr.C(3, 64), 64), Expr.C(table, 64), 64), 64));
         a.True(ReadOnlyDataNormalizer.Run(narrow, image, Slot), "低八位无符号上界与符号扩展索引对应同一有效范围");
+        foreach (var condition in new[] { Cond.Ult, Cond.Uge, Cond.Slt })
+        {
+            var selected = Sample();
+            var block = selected.Blocks[1];
+            var load = ((Define)block.Statements[0]).Value;
+            var guard = new Compare(condition, Index(), Expr.C(3, 32));
+            block.Statements[0] = new Define(0x1010, output, new Select(guard,
+                condition == Cond.Uge ? Expr.C(0, 64) : load, condition == Cond.Uge ? load : Expr.C(0, 64), 64));
+            selected.EntryBlock.Statements[^1] = new Jump(0x1004, block.Start);
+            MachineFunction.RemoveEdgeAt(selected.EntryBlock, 0);
+            selected.Renumber();
+            a.Equal(condition != Cond.Slt, ReadOnlyDataNormalizer.Run(selected, image, Slot),
+                "条件表达式只向对应分支提供无符号上界，有符号检查仍拒绝");
+            if (condition == Cond.Slt) continue;
+            var value = ((Define)block.Statements[0]).Value;
+            a.Equal<Expr>(Expr.C(0, 64), Fold.Simplify(ExprMap.Map(value,
+                e => e is Use use && use.Variable == input ? Expr.C(3, use.Width) : null)), "条件查表的越界路径保留默认值");
+        }
         return a.Finish("readonly-data");
     }
 }
