@@ -22,6 +22,9 @@ internal static class CallArgumentProjectionCheck
         a.Equal<Expr>(Expr.C(0, 32), CallArgumentProjection.Low(new Use(copied, 64), 32, definitions), "仅含填充位的副本恢复零值");
         a.Equal<Expr>(new Use(read, 32), CallArgumentProjection.Low(new Use(read, 64), 32, definitions), "内存读取保持原位置和快照");
         a.Equal<Expr>(new Use(masked, 64), CallArgumentProjection.Low(new Use(masked, 64), 64, definitions), "有效高位不丢弃");
+        definitions[copied] = new Binary(BinOp.Or, new Use(masked, 64), new Ir.Convert(ConvKind.ZeroExtend, new Use(read, 32), 64), 64);
+        a.Equal<Expr>(new Use(read, 32), CallArgumentProjection.Low(new Use(copied, 64), 32, definitions), "跨定义的高位残值不影响低位字段快照");
+        definitions[copied] = new Use(masked, 64);
         definitions[masked] = new Binary(BinOp.Or, Expr.C(0x123400000007, 64), Expr.C(0, 64), 64);
         a.Equal<Expr>(Expr.C(7, 32), CallArgumentProjection.Low(new Use(copied, 64), 32, definitions), "有效低位常量保留");
         definitions[masked] = new Use(copied, 64);

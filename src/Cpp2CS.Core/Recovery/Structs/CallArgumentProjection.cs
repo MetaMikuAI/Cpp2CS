@@ -3,22 +3,29 @@ using Cpp2CS.Ir;
 
 namespace Cpp2CS.Recovery;
 
-/// <summary>按调用签名保留有效低位；只折叠常量和副本，不移动内存读取。</summary>
+/// <summary>按调用签名保留有效低位；折叠掩码和副本，不移动内存读取。</summary>
 internal static class CallArgumentProjection
 {
     internal static Expr Low(Expr expression, int width, IReadOnlyDictionary<Variable, Expr> definitions)
     {
-        var original = Fold.Convert(ConvKind.Truncate, expression, width);
-        var current = original;
-        var seen = new HashSet<Variable>();
-        while (current is Use use && seen.Add(use.Variable) && definitions.TryGetValue(use.Variable, out var value))
+        var active = new HashSet<Variable>();
+        var budget = 128;
+        Expr Reduce(Expr value)
         {
             var narrowed = Fold.Convert(ConvKind.Truncate, value, width);
-            if (narrowed is Const) return narrowed;
-            if (narrowed is not Use) break;
-            current = narrowed;
+            if (--budget < 0) return narrowed;
+            if (narrowed is Use use && active.Add(use.Variable))
+            {
+                var reduced = definitions.TryGetValue(use.Variable, out var definition) ? Reduce(definition) : narrowed;
+                active.Remove(use.Variable);
+                // 只替换已归约到常量或现有快照的结果，避免展开复杂表达式。
+                return reduced is Const or Use ? reduced : narrowed;
+            }
+            if (narrowed is Binary { Op: BinOp.And or BinOp.Or or BinOp.Xor } binary)
+                return Fold.Binary(binary.Op, Reduce(binary.Left), Reduce(binary.Right), width);
+            return narrowed;
         }
-        return current;
+        return Reduce(expression);
     }
 
     public static void Run(IReadOnlyList<Block> blocks, Func<Call, IReadOnlyDictionary<Storage, int>> widths)
