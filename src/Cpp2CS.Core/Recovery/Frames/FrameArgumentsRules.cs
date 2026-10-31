@@ -34,6 +34,7 @@ internal static class FrameArgumentsRules
                     continue;
                 ctx.State.Calls.callBindings.Commit(call, callee);
                 if (ctx.TypedFrameRead(witnesses, origin, argument.Type, reads)) continue;
+                ctx.WitnessReadInitialization(witnesses, origin, argument.Type, reads);
                 foreach (var read in reads)
                     witnesses.Add(new(origin, argument.Type, read, false));
             }
@@ -56,6 +57,7 @@ internal static class FrameArgumentsRules
             if (ctx.types.Kind(returned.Type) == TypeKind.Reference && existing.Length != 0
                 && existing.All(w => ctx.types.Kind(w.Type) == TypeKind.Reference && ctx.types.IsAssignable(w.Type, returned.Type))) continue;
             if (ctx.RegisterStruct(returned) && ctx.TypedFrameRead(witnesses, span.Origin, returned.Type, span.Reads)) continue;
+            if (ctx.RegisterStruct(returned)) ctx.WitnessReadInitialization(witnesses, span.Origin, returned.Type, span.Reads);
             foreach (var read in span.Reads)
                 witnesses.Add(new(span.Origin, returned.Type, read, false));
         }
@@ -70,5 +72,27 @@ internal static class FrameArgumentsRules
             && w.Offset <= offset && offset + ctx.types.Size(type) <= w.Offset + ctx.types.Size(w.Type)
             && reads.All(read => ctx.SameBlockBefore(w.Call, read))
             && leaves.All(leaf => ctx.ScalarStructPaths(w.Type).Any(source => w.Offset + source.Offset == offset + leaf.Offset && source.Type.Equals(leaf.Type))));
+    }
+
+    internal static void WitnessReadInitialization(this RecoveryScope ctx, List<FrameWitness> witnesses, long offset, TypeRef type, IEnumerable<Define> reads)
+    {
+        var sites = ctx.blocks.SelectMany(b => b.Statements.Select((s, i) => (Block: b, Statement: s, Index: i)))
+            .Where(s => reads.Contains(s.Statement)).ToArray();
+        if (sites.Length == 0 || sites.Select(s => s.Block).Distinct().Count() != 1) return;
+        var block = sites[0].Block;
+        var prefix = block.Statements.Take(sites.Min(s => s.Index)).ToList();
+        var seen = new HashSet<Cpp2CS.Machine.Flow.Block> { block };
+        while (prefix.Count < 128 && block.Predecessors.ToArray() is [var parent]
+            && parent.NormalSuccessors.ToArray() is [var next] && next == block && seen.Add(parent))
+        {
+            prefix.InsertRange(0, parent.Statements);
+            block = parent;
+        }
+
+        // 判空和写屏障不读取这些局部字段；其他调用和地址读取仍由覆盖检查截断。
+        prefix.RemoveAll(s => s is Jump or Nop || s is Call { Op.Kind: OpKind.NullCheck or OpKind.WriteBarrier });
+        if (FrameCopySpans.FullWriteBefore(prefix, prefix.Count, offset, ctx.types.Size(type),
+            ctx.ScalarStructPaths(type).Select(p => (p.Offset, ctx.types.Size(p.Type))).ToArray(), e => ctx.FrameOffset(e)) is { } start)
+            witnesses.Add(new(offset, type, start, true));
     }
 }
