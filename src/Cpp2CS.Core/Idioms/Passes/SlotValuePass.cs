@@ -10,7 +10,7 @@ internal static class SlotValuePass
         var found = new List<UsageSlot>();
         Expr? Read(Expr value)
         {
-            if (value is Const constant && state.facts.Usages.At(constant.Value) is { } slot && slot.Usage.Kind is UsageKind.StringLiteral or UsageKind.MethodDef or UsageKind.MethodRef)
+            if (value is Const constant && state.facts.Usages.At(constant.Value) is { } slot && slot.Usage.Kind is UsageKind.StringLiteral or UsageKind.MethodDef or UsageKind.MethodRef or UsageKind.TypeInfo)
             {
                 found.Add(slot);
                 return new Symbol(SymbolOfPass.SymbolOf(slot.Usage.Kind), slot.Usage.Value);

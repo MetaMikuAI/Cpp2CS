@@ -20,7 +20,7 @@ internal sealed class RecoveryEvidence(MethodState state)
     {
         public IReadOnlyDictionary<Call, DefinitionRef> delegateCreations => state.delegateCreations;
         public IReadOnlyDictionary<Store, LocalValue> boxArgumentStores => state.boxArgumentStores;
-        public IReadOnlyDictionary<ulong, LocalValue> mergedBoxValues => state.mergedBoxValues;
+        public IReadOnlyDictionary<Variable, LocalValue> mergedBoxValues => state.mergedBoxValues;
         public IReadOnlyDictionary<Call, Variable> constructed => state.constructed;
     }
     public SignatureView Signature { get; } = new(state.Signature);

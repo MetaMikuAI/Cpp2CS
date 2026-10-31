@@ -12,7 +12,7 @@ internal static class SharedInterfaceTailsCheck
     public static int Run()
     {
         var a = new Assertions();
-        foreach (var mode in new[] { "split", "escaping", "handler", "unknown" })
+        foreach (var mode in new[] { "split", "merged-result", "escaping", "handler", "unknown" })
         {
             var version = 0;
             Variable Fresh() => new(Storage.Gpr(8), ++version);
@@ -34,18 +34,22 @@ internal static class SharedInterfaceTailsCheck
             var done = new Block(0x1080) { End = 0x1090, Statements = [new Return(0x1080)] };
             MachineFunction.AddEdge(start, left); MachineFunction.AddEdge(start, right);
             MachineFunction.AddEdge(left, merge); MachineFunction.AddEdge(right, merge); MachineFunction.AddEdge(merge, done);
+            var returned = Fresh();
+            if (mode == "merged-result") done.Statements = [new Phi(done.Start, returned, [result]), new Return(done.Start + 4) { Value = Use(returned) }];
             if (mode == "escaping") done.Statements.Insert(0, new Define(0x1080, Fresh(), Use(result)));
             if (mode == "handler") left.Handler = merge;
             var function = new MachineFunction { Entry = start.Start, Range = new(start.Start, 0x1090, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [start, left, right, merge, done] };
             var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
             var changed = SharedInterfaceTails.SplitInvokes(function, e => e is Use u ? definitions.GetValueOrDefault(u.Variable, e) : e);
-            a.Equal(mode == "split", changed, $"共享接口尾部 {mode}");
+            a.Equal(mode is "split" or "merged-result", changed, $"共享接口尾部 {mode}");
             if (!changed) continue;
             var leftCall = left.Statements.OfType<Call>().Single(c => c.Kind == CallKind.Indirect);
             var rightCall = right.Statements.OfType<Call>().Single(c => c.Kind == CallKind.Indirect);
             a.True(leftCall.Target == Use(leftPointer) && leftCall.Arguments.SequenceEqual([Use(leftReceiver), Use(leftArgument)]), "左分支保留自身接口槽位、接收者和实参");
             a.True(rightCall.Target == Use(rightPointer) && rightCall.Arguments.SequenceEqual([Use(rightReceiver), Use(rightArgument)]), "右分支保留自身接口槽位、接收者和实参");
             a.True(!function.Blocks.Contains(merge) && done.Predecessors.Count == 2, "共享尾部移出并保留两条出口边");
+            if (mode == "merged-result")
+                a.True(done.Statements[0] is Phi exit && exit.Sources.SequenceEqual(done.Predecessors.Select(p => p.Statements.OfType<Call>().Last().Defines[0])), "出口按实际前驱汇合各副本的返回值");
         }
         foreach (var mode in new[] { "grouped", "different-input", "slot", "return-value", "slot-grouped", "slot-tail", "slot-mismatch" })
         {

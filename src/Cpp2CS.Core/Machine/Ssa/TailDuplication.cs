@@ -3,7 +3,7 @@ using Cpp2CS.Ir;
 
 namespace Cpp2CS.Machine.Ssa;
 
-/// <summary>将无流出局部值的合并尾部放回入边，消除运行时地址选择，保留每条路径的操作次序。</summary>
+/// <summary>将合并尾部放回入边，流出结果经出口 φ 汇合，保留每条路径的操作次序。</summary>
 internal static class TailDuplication
 {
     internal static bool Run(MachineFunction function, Func<Block, bool> select)
@@ -28,9 +28,10 @@ internal static class TailDuplication
             if (incoming.Distinct().Count() != incoming.Length || incoming.Any(p => p == merge || p == exit || p.Handler is not null || p.IsLandingPad
                 || p.NormalSuccessors.ToArray() is not [var next] || next != merge || p.Statements.LastOrDefault() is Branch)) continue;
             var defined = merge.Statements.SelectMany(Defines).ToHashSet();
-            if (function.Blocks.Where(b => b != merge).SelectMany(b => b.Statements).Any(s => s is Phi phi && phi.Sources.Any(defined.Contains)
-                || ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => defined.Contains(u.Variable)))) continue;
             var exitIndex = exit?.Predecessors.IndexOf(merge) ?? -1;
+            if (function.Blocks.Where(b => b != merge).Any(b => b.Statements.Any(s => s is Phi phi
+                ? phi.Sources.Where((_, i) => b != exit || i != exitIndex).Any(defined.Contains)
+                : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => defined.Contains(u.Variable))))) continue;
             var exitValues = exit?.Statements.OfType<Phi>().ToDictionary(p => p.Target, p => p.Sources[exitIndex]);
             var statements = merge.Statements.ToArray();
             var phis = statements.OfType<Phi>().ToArray();
@@ -62,7 +63,10 @@ internal static class TailDuplication
                 MachineFunction.AddEdge(parent, exit);
                 parent.Statements.Add(new Jump(parent.End, exit.Start));
                 for (var i = 0; i < exit.Statements.Count && exit.Statements[i] is Phi phi; i++)
-                    exit.Statements[i] = phi with { Sources = [.. phi.Sources, exitValues![phi.Target]] };
+                {
+                    var source = exitValues![phi.Target];
+                    exit.Statements[i] = phi with { Sources = [.. phi.Sources, map.GetValueOrDefault(source, source)] };
+                }
             }
             function.Renumber();
             changed = true;

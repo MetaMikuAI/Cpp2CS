@@ -13,7 +13,7 @@ internal static class BoxArgumentsRules
         foreach (var block in ctx.blocks)
             foreach (var call in block.Statements.OfType<Call>().ToArray())
             {
-                if (call is not { Op: { Kind: OpKind.Box, Operand: TypeRef type }, Arguments: [_, var data] } || ctx.types.Kind(type) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double))
+                if (call is not { Op: { Kind: OpKind.Box, Operand: TypeRef type }, Arguments: [_, var data], Defines: [var result, ..] } || result is null || ctx.types.Kind(type) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double))
                     continue;
                 var width = ctx.types.Size(type) * 8;
                 Store?[] sources;
@@ -40,7 +40,7 @@ internal static class BoxArgumentsRules
                 var local = ctx.StructLocal(type, width);
                 foreach (var store in sources)
                     ctx.State.Construction.boxArgumentStores[store!] = local;
-                ctx.State.Construction.mergedBoxValues[call.Address] = local;
+                ctx.State.Construction.mergedBoxValues[result] = local;
                 var replacement = call with
                 {
                     Arguments = [call.Arguments[0], Expr.C(0, 64)]
@@ -70,7 +70,7 @@ internal static class BoxArgumentsRules
     [CallRule(9)]
     internal static RecoveryResult<bool> BoxMergedArgument(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
-        if (!ctx.State.Construction.mergedBoxValues.TryGetValue(call.Address, out var local) || call.Defines.FirstOrDefault() is not { } result)
+        if (call.Defines.FirstOrDefault() is not { } result || !ctx.State.Construction.mergedBoxValues.TryGetValue(result, out var local))
             return false;
         if (ctx.Values.Assign(call.Address, result, () => new BoxValue(local, local.Type, ctx.types.Object), output) is { } failure)
             return failure;

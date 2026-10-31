@@ -133,6 +133,16 @@ internal static class IdiomPipeline
                 b => b.Statements.OfType<Phi>().Any(p => p.Sources.All(v => state.defs.Expand(new Use(v, 64)) is FrameAddress { Offset: < 0 }))))
                 state.Cleanup();
         });
+        state.Passes.Run("idioms.ClassTails", () =>
+        {
+            if (state.function.Range.ExceptionRegions.Length != 0) return;
+            for (var round = 0; round < 8 && TailDuplication.Run(state.function,
+                b => b.Statements.OfType<Phi>().Any(p => p.Sources.All(v => state.defs.Expand(new Use(v, 64)) is Symbol { Kind: SymbolKind.Class }))); round++)
+            {
+                state.Cleanup();
+                state.RefreshOperands();
+            }
+        });
         state.Passes.Run("idioms.FreshArrayElementClasses", () =>
         {
             if (state.FreshArrayElementClasses())
