@@ -119,6 +119,25 @@ internal static class FrameSnapshotsCheck
                     && changes[secondRead] is Define { Value: Use full } && full == vector,
                     "标量只恢复有证据的低位，后续向量仍保留完整快照");
         }
+        foreach (var mode in new[] { "reuse", "escape", "bypass", "partial-read" })
+        {
+            var slot = new FrameAddress(-80);
+            var value = new Use(new(Storage.Vec(0), 1), 64);
+            var store = new Store(0x4000, slot, value);
+            var read = new Define(0x4010, new(Storage.Vec(1), 1), new Load(slot, 64));
+            var entry = new Block(0x3ff0);
+            var initial = new Block(0x4000) { Statements = [store] };
+            var use = new Block(0x4010) { Statements = [read, new Store(0x4014, slot, Expr.C(7, 32)),
+                new Call(0x4018, CallKind.Direct, Expr.C(0x5000, 64)) { Arguments = [slot] }] };
+            MachineFunction.AddEdge(entry, initial); MachineFunction.AddEdge(initial, use);
+            if (mode == "escape") initial.Statements.Add(new Call(0x4004, CallKind.Direct, Expr.C(0x5000, 64)) { Arguments = [slot] });
+            if (mode == "bypass") MachineFunction.AddEdge(entry, use);
+            if (mode == "partial-read") use.Statements.Add(new Define(0x401c, new(Storage.Vec(2), 1), new Load(slot, 64)));
+            var function = new MachineFunction { Entry = entry.Start, Range = new(0x3ff0, 0x4020, CodeRegion.Managed, default), Blocks = [entry, initial, use] };
+            function.Renumber();
+            var changes = FrameLifetimeSnapshots.Read(function, (_, _, _) => true, (_, _) => 4, e => (e as FrameAddress)?.Offset);
+            a.Equal(mode == "reuse" ? 2 : 0, changes.Count, $"局部快照与后续装箱生命期 {mode}");
+        }
         return a.Finish("frame-snapshots");
     }
 }

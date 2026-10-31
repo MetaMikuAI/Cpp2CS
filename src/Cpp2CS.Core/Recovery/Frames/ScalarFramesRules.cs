@@ -7,6 +7,16 @@ internal static class ScalarFramesRules
     [MachinePass("分支帧快照", 29, After = ["帧前类型", "标量栈实参"])]
     internal static void ForwardBranchFrameSnapshots(this RecoveryScope ctx)
     {
+        var calls = new ManagedCallFrames(ctx.facts, ctx.owner.abi);
+        // 聚合参数的分片读取仍用于划分类型生命期，不先拆走它们的初始化证据。
+        var witnesses = new List<FrameWitness>();
+        ctx.WitnessLoadedArguments(witnesses);
+        ctx.WitnessLoadedReturns(witnesses);
+        var preserved = witnesses.Where(w => ctx.types.Kind(w.Type) == TypeKind.Struct).Select(w => w.Call).ToHashSet();
+        var lifetimes = FrameLifetimeSnapshots.Read(ctx.function, ctx.NoStackRead, calls.ArgumentSize, e => ctx.FrameOffset(e), preserved);
+        foreach (var block in ctx.blocks)
+            for (var i = 0; i < block.Statements.Count; i++)
+                if (lifetimes.TryGetValue(block.Statements[i], out var mapped)) ctx.Rewriter.Replace(block, i, mapped);
         var replacements = FrameBranchSnapshots.Read(ctx.function, ctx.NoStackRead);
         foreach (var block in ctx.blocks)
             for (var i = 0; i < block.Statements.Count; i++)
@@ -17,7 +27,7 @@ internal static class ScalarFramesRules
                 ctx.Rewriter.Replace(block, i, mapped);
             }
 
-        if (replacements.Count > 0)
+        if (replacements.Count > 0 || lifetimes.Count > 0)
             ctx.definitions = ctx.IndexDefinitions();
     }
 
