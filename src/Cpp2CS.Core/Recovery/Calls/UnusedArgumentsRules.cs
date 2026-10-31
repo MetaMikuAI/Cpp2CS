@@ -121,6 +121,11 @@ internal static class UnusedArgumentsRules
         // 被调方不读取 this；可复用支配调用的同类型值，不额外引入字段读取或判空。
         var dominators = ctx.Dominators;
         foreach (var prior in ctx.blocks.Where(b => dominators.Dominates(b.Index, callBlock.Index)))
+            foreach (var check in prior.Statements.Take(prior == callBlock ? callBlock.Statements.IndexOf(call) : prior.Statements.Count).OfType<Call>())
+                if (check is { Op.Kind: OpKind.NullCheck, Arguments: [Use checkedValue] }
+                    && ctx.State.Types.known.TryGetValue(checkedValue.Variable, out var type) && ctx.types.IsAssignable(type, self.Type))
+                    return ctx.RecoverAs(checkedValue, self.Type, call.Address).Map<ManagedValue?>(value => value);
+        foreach (var prior in ctx.blocks.Where(b => dominators.Dominates(b.Index, callBlock.Index)))
             foreach (var define in prior.Statements.Take(prior == callBlock ? callBlock.Statements.IndexOf(call) : prior.Statements.Count).OfType<Define>())
                 if (ctx.State.Types.known.TryGetValue(define.Target, out var type) && ctx.types.IsAssignable(type, self.Type))
                     return ctx.RecoverAs(new Use(define.Target, define.Value.Width), self.Type, call.Address).Map<ManagedValue?>(value => value);
