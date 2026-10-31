@@ -302,9 +302,15 @@ internal static class BodyLowering
             case { Kind: OpKind.NewObject } when ctx.State.Construction.inlineConstructors.TryGetValue(call, out var constructor):
                 {
                     var arguments = new List<ManagedValue>();
-                    foreach (var (argument, i) in constructor.Arguments.Select((v, i) => (v, i)))
+                    var cursor = 0;
+                    foreach (var parameter in constructor.Parameters)
                     {
-                        if (!ctx.RecoverAs(argument, CallResolution.Concrete(constructor.Method, constructor.Method.Method.Parameters[i].Type), address).TryGet(out var value, out var failure))
+                        var pieces = constructor.Arguments.Skip(cursor).Take(parameter.Pieces.Length).ToArray();
+                        cursor += pieces.Length;
+                        var recovered = ctx.RegisterStruct(parameter)
+                            ? ctx.Compose(parameter, piece => pieces[Array.IndexOf(parameter.Pieces, piece)])
+                            : ctx.RecoverAs(pieces[0], parameter.Type, address);
+                        if (!recovered.TryGet(out var value, out var failure))
                             return failure;
                         arguments.Add(value);
                     }

@@ -13,7 +13,10 @@ internal static class InlineConstructors
         public bool ReorderStores { get; init; }
         public IReadOnlySet<(ulong Target, Storage Register)> UnusedCallInputs { get; init; } = new HashSet<(ulong, Storage)>();
     }
-    internal sealed record Match(MethodRef Method, IReadOnlyList<Expr> Arguments, IReadOnlyList<Stmt> Statements);
+    internal sealed record Match(MethodRef Method, IReadOnlyList<Expr> Arguments, IReadOnlyList<Stmt> Statements)
+    {
+        public IReadOnlyList<AbiValue> Parameters { get; init; } = [];
+    }
 
     // 每个候选均已逐项匹配实际副作用；常量实参可使不同重载产生相同原生代码。
     internal static Match Prefer(Match first, Match second) => second.Statements.Count > first.Statements.Count
@@ -30,9 +33,9 @@ internal static class InlineConstructors
                 [new(Storage.Slot(parameter.Offset), parameter.Size * 8, 0)]);
         signature = signature with { Parameters = parameters };
         if (function.Range.ExceptionRegions.Any() || signature.This is not { Passing: Passing.Registers, Pieces.Length: 1 }
-            || signature.Parameters.Any(p => p.Passing != Passing.Registers || p.Pieces.Length != 1
-                || !(p.Pieces[0].Register.Bank is Bank.Gpr or Bank.Stack
-                    || p.Pieces[0] is { Register.Bank: Bank.Vec, Width: 32 or 64 }))) return null;
+            || signature.Parameters.Any(p => p.Passing != Passing.Registers || p.Pieces.Length is < 1 or > 4
+                || p.Pieces.Any(piece => !(piece.Register.Bank is Bank.Gpr or Bank.Stack
+                    || piece is { Register.Bank: Bank.Vec, Width: 32 or 64 })))) return null;
         var effects = new List<Stmt>();
         var definitions = new Dictionary<Variable, Expr>();
         foreach (var (_, original) in AllocationPairing.Following(function.EntryBlock, -1))
@@ -83,7 +86,7 @@ internal static class InlineConstructors
         {
             [new(pattern.Signature.This!.Pieces[0].Register, 0)] = new Use(created, 64)
         };
-        var parameters = pattern.Signature.Parameters.Select(p => p.Pieces[0]).ToArray();
+        var parameters = pattern.Signature.Parameters.SelectMany(p => p.Pieces).ToArray();
         var widths = parameters.ToDictionary(p => new Variable(p.Register, 0), p => p.Width);
         var booleanInputs = pattern.Signature.Parameters.Where(p => ManagedTypes.PrimitiveName(p.Type) == "Boolean" || p.Type is PrimitiveRef { Name: "Boolean" })
             .Select(p => new Variable(p.Pieces[0].Register, 0)).ToHashSet();
@@ -139,7 +142,7 @@ internal static class InlineConstructors
         foreach (var statement in function.Blocks.SelectMany(b => b.Statements).Where(s => !removed.Contains(s)))
             if (statement is Phi phi && phi.Sources.Any(locals.Contains)
                 || ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => locals.Contains(u.Variable))) return null;
-        return new(pattern.Method, args, matched);
+        return new(pattern.Method, args, matched) { Parameters = pattern.Signature.Parameters };
     }
 
     // 宽写入必须恰好覆盖连续字段；不允许跨过间隙、调用或尚未匹配的其他副作用。

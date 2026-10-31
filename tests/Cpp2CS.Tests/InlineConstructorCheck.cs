@@ -227,6 +227,18 @@ internal static class InlineConstructorCheck
             "完整副作用相同时优先无参重载，不因遍历顺序拒绝恢复");
         var longer = parameterMatch with { Statements = [.. parameterMatch.Statements, new Nop(24, "完整前缀")] };
         a.True(InlineConstructors.Prefer(fixedMatch, longer) == longer, "先保留覆盖更多原生语句的完整构造");
+        var aggregate = signature with { Parameters = [new(reference, Passing.Registers,
+            [new(Storage.Vec(0), 32, 0), new(Storage.Vec(1), 32, 4), new(Storage.Vec(2), 32, 8)])] };
+        var aggregateStores = Enumerable.Range(0, 3).Select(i => At(self, 16 + i * 4, new Use(new(Storage.Vec(i), 0), 32))).ToArray();
+        var aggregatePattern = InlineConstructors.Create(method, aggregate, Function([Base(self), .. aggregateStores, new Return(24)]));
+        var aggregateCaller = Function([caller.EntryBlock.Statements[0], Base(new Use(created, 64)),
+            .. Enumerable.Range(0, 3).Select(i => At(new Use(created, 64), 16 + i * 4, Expr.C((ulong)i + 1, 32))), new Return(24)]);
+        a.True(aggregatePattern is not null && InlineConstructors.Find(aggregatePattern, aggregateCaller, aggregateCaller.EntryBlock, 0, created)
+            is { Arguments.Count: 3, Parameters.Count: 1 } aggregateMatch && aggregateMatch.Arguments.SequenceEqual([Expr.C(1, 32), Expr.C(2, 32), Expr.C(3, 32)]),
+            "多寄存器参数按 ABI 顺序保留全部分片和单一参数身份");
+        aggregateCaller.EntryBlock.Statements.RemoveAt(3);
+        a.True(aggregatePattern is not null && InlineConstructors.Find(aggregatePattern, aggregateCaller, aggregateCaller.EntryBlock, 0, created) is null,
+            "缺少一个结构体分量时不认回构造");
         return a.Finish("inline-constructors");
     }
 }
