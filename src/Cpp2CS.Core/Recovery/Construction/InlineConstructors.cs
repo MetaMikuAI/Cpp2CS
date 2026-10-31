@@ -274,7 +274,7 @@ internal static class InlineConstructors
         };
     }
 
-    private static bool Pure(Expr expression) => ExprMap.Walk(expression).All(e => e is Const or Use or Binary or Unary or Ir.Convert or Symbol or Extract or Insert or Compare or Select or Logical or Not);
+    internal static bool Pure(Expr expression) => ExprMap.Walk(expression).All(e => e is Const or Use or Binary or Unary or Ir.Convert or Symbol or Extract or Insert or Compare or Select or Logical or Not);
     private static bool ClassMetadata(Expr expression, Expr self, int slots) => expression is Load { Width: 64 } load
         && (load.Address == self || load.Address is Binary { Op: BinOp.Add, Left: Load { Width: 64, Address: var receiver }, Right: Const offset }
             && receiver == self && offset.Value >= (ulong)RuntimeLayout.ClassVtable
@@ -346,7 +346,7 @@ public sealed partial class MethodRecovery
                             .Select(r => (((Const)c.Target).Value, r))).ToHashSet() };
                 if (pattern is { Effects: [Call { Target: Const target }, ..] }
                     && pattern.Effects.Skip(1).All(s => s is Store or Call { Op.Kind: OpKind.WriteBarrier })
-                    && EmptyBaseConstructor(target.Value, []))
+                    && PrivateBaseConstructor(target.Value, []))
                     pattern = pattern with { ReorderStores = true };
             }
         }
@@ -367,19 +367,28 @@ public sealed partial class MethodRecovery
         }
     }
 
-    // 无参基类只逐层转调 Object 构造时，不会发布 this；其后的独立字段仍可交换。
-    private bool EmptyBaseConstructor(ulong entry, HashSet<ulong> visited)
+    // 基类只写自身字段并逐层调用基类构造时，不会发布 this；其后的独立字段仍可交换。
+    private bool PrivateBaseConstructor(ulong entry, HashSet<ulong> visited)
     {
         if (!visited.Add(entry) || visited.Count > 16) return false;
         var methods = facts.EntriesAt(entry).Select(e => e.Method).OfType<MethodRef>().Distinct().ToArray();
         if (methods.Length == 0) return false;
         foreach (var method in methods)
         {
-            if (method.Method is not { Name: ".ctor", IsStatic: false, Parameters.Count: 0 }) return false;
+            if (method.Method is not { Name: ".ctor", IsStatic: false }) return false;
             if (method.Method.Owner.FullName == "System.Object") continue;
-            if (ConstructorPattern(method) is not { Effects: [Call { Op: null, Target: Const target, Arguments: [Use receiver, ..] }] } parent
-                || receiver.Variable != new Variable(parent.Signature.This!.Pieces[0].Register, 0)
-                || !EmptyBaseConstructor(target.Value, new(visited))) return false;
+            if (ConstructorPattern(method) is not { } parent) return false;
+            var self = new Variable(parent.Signature.This!.Pieces[0].Register, 0);
+            foreach (var effect in parent.Effects)
+            {
+                if (effect is Store { Target: Binary { Op: BinOp.Add, Left: Use owner, Right: Const }, Value: var value }
+                    && owner.Variable == self && InlineConstructors.Pure(value)) continue;
+                if (effect is Call { Op.Kind: OpKind.WriteBarrier }) continue;
+                if (effect is not Call { Op: null, Target: Const target, Arguments: [Use receiver, ..] } call
+                    || receiver.Variable != self
+                    || call.Arguments.Skip(1).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => u.Variable == self)
+                    || !PrivateBaseConstructor(target.Value, new(visited))) return false;
+            }
         }
         return true;
     }
