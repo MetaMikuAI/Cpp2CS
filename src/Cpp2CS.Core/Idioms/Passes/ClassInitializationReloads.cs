@@ -11,6 +11,9 @@ internal static class ClassInitializationReloads
     {
         var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
         var phis = function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().ToArray();
+        foreach (var phi in phis)
+            if (phi.Sources.Distinct().ToArray() is [var source] && source != phi.Target)
+                definitions.Add(phi.Target, new Use(source, source.Width));
         var uses = function.Blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<Use>().ToLookup(u => u.Variable);
         int ObservedWidth(Variable variable, HashSet<Variable> seen)
         {

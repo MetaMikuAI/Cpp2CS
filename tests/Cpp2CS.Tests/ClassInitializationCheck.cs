@@ -129,6 +129,23 @@ internal static class ClassInitializationCheck
             a.Equal(mode is not ("different" or "other-write"), ClassInitializationReloads.Run(Function(guard, initialize, skip, done)),
                 "取整、重复初始化及写入逐项核对，保留无穷值分支和目标地址");
         }
+        foreach (var same in new[] { true, false })
+        {
+            var first = new Variable(Storage.Gpr(10), 1);
+            var other = new Variable(Storage.Gpr(11), 1);
+            var alias = first with { Version = 2 };
+            var copied = first with { Version = 3 };
+            var merged = first with { Version = 4 };
+            var input = new Block(0) { Statements = [new Define(0, first, new Use(new(Storage.Gpr(1), 0), 64)),
+                new Define(4, other, new Use(new(Storage.Gpr(2), 0), 64)), new Jump(8, 16)] };
+            var guard = new Block(16) { Statements = [new Phi(16, alias, [same ? first : other]),
+                new Branch(20, new Compare(Cond.Ne, new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassCctorFinishedOrNoCctor, 64), 64), 32), Expr.C(0, 32)), 48, 32)] };
+            var initialize = new Block(32) { Statements = [new Define(32, copied, new Cpp2CS.Ir.Convert(ConvKind.ZeroExtend, new Use(alias, 32), 64)),
+                new Call(36, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.RunClassConstructor, type), Arguments = [klass] }, new Jump(40, 48)] };
+            var done = new Block(48) { Statements = [new Phi(48, merged, [first, copied]), new Return(52) { Value = new Use(merged, 32) }] };
+            MachineFunction.AddEdge(input, guard); MachineFunction.AddEdge(guard, done); MachineFunction.AddEdge(guard, initialize); MachineFunction.AddEdge(initialize, done);
+            a.Equal(same, ClassInitializationReloads.Run(Function(input, guard, initialize, done)), "单来源合流仍须证明观察位上的值相同");
+        }
         MachineFunction ExtendedReload(bool changedField = false, bool sideEffect = false, string? stored = null)
         {
             var oldValue = new Variable(Storage.Gpr(1), 1);
