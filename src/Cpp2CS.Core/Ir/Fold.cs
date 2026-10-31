@@ -142,6 +142,10 @@ public static class Fold
                     return Convert(ext.Kind, ext.Operand, width);
                 case Convert { Kind: ConvKind.Truncate } inner:
                     return Convert(ConvKind.Truncate, inner.Operand, width);
+                case Insert { Low: 0 } insert when width <= insert.Value.Width:
+                    return Convert(ConvKind.Truncate, insert.Value, width);
+                case Insert insert when width <= insert.Low:
+                    return Convert(ConvKind.Truncate, insert.Base, width);
                 case Use use:
                     return use with { Width = width };
                 case Read read:

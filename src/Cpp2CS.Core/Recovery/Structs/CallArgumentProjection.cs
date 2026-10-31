@@ -36,7 +36,7 @@ internal static class CallArgumentProjection
             {
                 if (block.Statements[i] is not Call call || widths(call) is not { Count: > 0 } parameters) continue;
                 var arguments = call.Arguments.Select((e, k) => k < call.Sources.Length && parameters.TryGetValue(call.Sources[k], out var width)
-                    && width < e.Width ? Low(e, width, definitions) : e).ToArray();
+                    && width <= e.Width ? Low(e, width, definitions) : e).ToArray();
                 if (!arguments.AsSpan().SequenceEqual(call.Arguments)) block.Statements[i] = call with { Arguments = arguments };
             }
     }
