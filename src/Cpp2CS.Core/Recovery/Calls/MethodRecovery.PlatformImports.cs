@@ -14,8 +14,8 @@ public sealed partial class MethodRecovery
             || (definition.Attributes & SR.MethodAttributes.PinvokeImpl) == 0 || !definition.IsStatic
             || (definition.ImplAttributes & SR.MethodImplAttributes.PreserveSig) == 0
             || method.TypeArguments.Count != 0 || method.MethodArguments.Count != 0
-            || !definition.Parameters.All(p => BlittableScalar(p.Type) || p.Type is ByRefRef reference && BlittableScalar(reference.Element) || PlatformImportPattern.IsHandleRef(p.Type))
-            || types.Kind(definition.ReturnType) != TypeKind.Void && !BlittableScalar(definition.ReturnType)
+            || !definition.Parameters.All(p => BlittableScalar(p.Type) || types.Kind(p.Type) == TypeKind.Bool || p.Type is ByRefRef reference && BlittableScalar(reference.Element) || PlatformImportPattern.IsHandleRef(p.Type))
+            || types.Kind(definition.ReturnType) is not (TypeKind.Void or TypeKind.Bool) && !BlittableScalar(definition.ReturnType)
             || abi.Classify(method, out _) is not { } signature
             || signature.Arguments.Any(a => PlatformImportPattern.ForwardedPiece(a) is null)
             || signature.Return is { } ret && (ret.Passing != Passing.Registers || ret.Pieces.Length != 1)) return null;
