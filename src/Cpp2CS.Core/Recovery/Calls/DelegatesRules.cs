@@ -73,7 +73,7 @@ internal static class DelegatesRules
         bool LookupStep(Stmt statement) => lookup is not null && (statement is Define d && lookup.Metadata.Contains(d.Target) || statement is Call { Op.Kind: OpKind.NullCheck, Arguments: [var receiver] } && receiver == lookup.Receiver);
         // IL2CPP 将 new Action(receiver.Virtual) 拆为分配、判空、虚表查询、构造。
         // 只吸收此委托自身的查询；其他副作用与异常保护域仍由配对检查约束。
-        if (AllocationPairing.MotionProblem(ctx.function.Range, block, allocation, destination, constructor, middle.Where(s => !LookupStep(s)), created) is { } problem)
+        if (AllocationPairing.MotionProblem(ctx.function.Range, block, allocation, destination, constructor, middle.Where(s => !LookupStep(s) && !ctx.ConstructorArgumentInitializer(s, constructor)), created) is { } problem)
         {
             Reject(problem);
             return;

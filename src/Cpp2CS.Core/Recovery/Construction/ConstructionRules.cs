@@ -44,7 +44,7 @@ internal static class ConstructionRules
                     MethodDef? forwarded = null;
                     if (statement is Call call && ConstructionRules.Receiver(call) is Use { Variable: var receiver } && receiver == created && (call.Op is { Kind: OpKind.CallMethodPointer or OpKind.InvokeGeneric, Operand: MethodRef { Method: { Name: ".ctor", IsStatic: false } pointerCtor } } && pointerCtor.Owner == type.Definition || call is { Op: null, Kind: CallKind.Direct, Target: Const target } && (ctx.facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false } ctor } && ctor.Owner == type.Definition) || ctx.facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false, Parameters.Count: 0 } ctor } && ctor.Owner != type.Definition) && (forwarded = ctx.owner.NativeMethods.ForwardingConstructor(type, target.Value)) is not null)))
                     {
-                        if (current != block && AllocationPairing.MotionProblem(ctx.function.Range, block, allocation, current, call, middle.Where(s => !ctx.PrivateInvokerInitializer(s, call)), created) is { } problem)
+                        if (current != block && AllocationPairing.MotionProblem(ctx.function.Range, block, allocation, current, call, middle.Where(s => !ctx.ConstructorArgumentInitializer(s, call)), created) is { } problem)
                         {
                             failure = ctx.Hole(allocation.Address, $"分配 {type} {problem}", rule: "Allocations");
                             break;
@@ -76,8 +76,12 @@ internal static class ConstructionRules
     }
 
     internal static Expr? Receiver(Call call) => call.DelegateReceiver ?? (call.Op?.Kind == OpKind.InvokeGeneric || call.Sources.Length > 0 && call.Sources[0] == Storage.Gpr(0) ? call.Arguments[0] : null);
-    internal static bool PrivateInvokerInitializer(this RecoveryScope ctx, Stmt statement, Call constructor)
+    internal static bool ConstructorArgumentInitializer(this RecoveryScope ctx, Stmt statement, Call constructor)
     {
+        // 栈实参快照保留原求值位置；已吸收的隐藏 MethodInfo 写入不产生托管副作用。
+        if (statement is Store argument && ctx.FrameOffset(argument.Target) is < 0
+            && !ExprMap.Walk(argument.Value).Any(e => e is Load or Intrinsic or Unknown)
+            && (ctx.State.Frames.stackArgumentStores.ContainsKey(argument) || ctx.State.Lowering.dropped.Contains(argument))) return true;
         if (constructor.Op?.Kind != OpKind.InvokeGeneric || statement is not Store { Target: TypedFrame frame } store || frame.Region.Offset >= 0 || store.Value.Width != frame.Region.Size * 8)
             return false;
         return AllocationPairing.PrivateArgumentStore(store, constructor, ctx.blocks.SelectMany(b => b.Statements));
