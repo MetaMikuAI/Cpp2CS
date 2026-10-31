@@ -15,7 +15,7 @@ internal static class PlatformImportCheck
     [Command("platform-import", "导入包装实参、缓存和副作用边界检查", Arguments = "<binary> <metadata> <入口地址…>")]
     public static int Run(string binary, string metadata, string[] entries)
     {
-        var facts = FactsBuilder.Build(binary, metadata);
+        var facts = FactsBuilder.Build(binary, metadata, inferUnregistered: false);
         var types = new ManagedTypes(facts.Model, facts.Layouts);
         var recovery = new MethodRecovery(facts, types);
         var abi = new ManagedAbi(facts.Layouts);

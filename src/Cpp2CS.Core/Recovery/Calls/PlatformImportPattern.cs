@@ -7,11 +7,22 @@ using CallingConvention = System.Runtime.InteropServices.CallingConvention;
 
 namespace Cpp2CS.Recovery;
 
-/// <summary>IL2CPP 的缓存导入包装：PInvokeArguments、一次解析、参数原样转调；不处理封送。</summary>
+/// <summary>IL2CPP 的缓存导入包装：PInvokeArguments、一次解析、标量转发及 HandleRef 句柄投影。</summary>
 internal static class PlatformImportPattern
 {
+    internal static bool IsHandleRef(TypeRef type) => type is DefinitionRef
+    {
+        Definition: { Assembly: "mscorlib.dll", Namespace: "System.Runtime.InteropServices", Name: "HandleRef", DeclaringType: null, IsValueType: true }, Arguments.Count: 0
+    };
+
+    internal static AbiPiece? ForwardedPiece(AbiValue value) => value.Passing != Passing.Registers ? null
+        : IsHandleRef(value.Type) ? value.Pieces is [{ Register.Bank: Bank.Gpr, Width: 64, Offset: 0 }, { Register.Bank: Bank.Gpr, Width: 64, Offset: 8 } handle] ? handle : null
+        : value.Pieces is [var scalar] ? scalar : null;
+
     internal static NativeImport? Match(MachineFunction function, AbiSignature signature, Func<ulong, ulong, string?> readName, Func<ulong, bool> emptyCache)
     {
+        var forwarded = signature.Parameters.Select(ForwardedPiece).ToArray();
+        if (forwarded.Any(p => p is null)) return null;
         if (function.Problems.Count != 0 || function.Blocks.Count != 3 || function.Blocks.Any(b => b.Handler is not null || b.IsLandingPad)) return null;
         var entry = function.EntryBlock;
         if (entry.Statements.LastOrDefault() is not Branch { Condition: Compare { Cond: Cond.Ne, Left: Use cached, Right: Const { Value: 0 } } } branch
@@ -55,12 +66,14 @@ internal static class PlatformImportPattern
         var convention = BinaryPrimitives.ReadInt32LittleEndian(arguments[32..]);
         var charset = BinaryPrimitives.ReadInt32LittleEndian(arguments[36..]);
         if (library is null || symbol is null || convention is < 0 or > 4 || charset is < 0 or > 2 || arguments[44] > 1
-            || BinaryPrimitives.ReadInt32LittleEndian(arguments[40..]) != signature.Parameters.Sum(p => Math.Max(4, p.Pieces[0].Width / 8))) return null;
+            || BinaryPrimitives.ReadInt32LittleEndian(arguments[40..]) != forwarded.Sum(p => Math.Max(4, p!.Width / 8))) return null;
         var inputs = call.ArgumentsBySource();
-        foreach (var parameter in signature.Parameters)
+        var integer = 0;
+        var vector = 0;
+        foreach (var piece in forwarded)
         {
-            var piece = parameter.Pieces[0];
-            if (!inputs.TryGetValue(piece.Register, out var input)
+            var native = piece!.Register.Bank == Bank.Gpr ? Storage.Gpr(integer++) : Storage.Vec(vector++);
+            if (!inputs.TryGetValue(native, out var input)
                 || ScalarVectorNarrowing.Low(input, piece.Width) is not Use { Variable.Version: 0 } original
                 || original.Variable.Storage != piece.Register) return null;
         }

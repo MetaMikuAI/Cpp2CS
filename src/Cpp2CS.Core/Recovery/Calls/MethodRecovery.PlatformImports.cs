@@ -14,10 +14,10 @@ public sealed partial class MethodRecovery
             || (definition.Attributes & SR.MethodAttributes.PinvokeImpl) == 0 || !definition.IsStatic
             || (definition.ImplAttributes & SR.MethodImplAttributes.PreserveSig) == 0
             || method.TypeArguments.Count != 0 || method.MethodArguments.Count != 0
-            || !definition.Parameters.All(p => BlittableScalar(p.Type))
+            || !definition.Parameters.All(p => BlittableScalar(p.Type) || p.Type is ByRefRef reference && BlittableScalar(reference.Element) || PlatformImportPattern.IsHandleRef(p.Type))
             || types.Kind(definition.ReturnType) != TypeKind.Void && !BlittableScalar(definition.ReturnType)
             || abi.Classify(method, out _) is not { } signature
-            || signature.Arguments.Any(a => a.Passing != Passing.Registers || a.Pieces.Length != 1)
+            || signature.Arguments.Any(a => PlatformImportPattern.ForwardedPiece(a) is null)
             || signature.Return is { } ret && (ret.Passing != Passing.Registers || ret.Pieces.Length != 1)) return null;
         var resultRead = signature.Return is { } result ? new Read(result.Pieces[0].Register, result.Pieces[0].Width) : null;
         var lifted = lifter.Lift(entry, resultRead);
@@ -49,7 +49,7 @@ public sealed partial class MethodRecovery
         }
     }
 
-    internal static bool BlittableScalar(TypeRef type) => type is PointerRef || type is DefinitionRef
+    internal static bool BlittableScalar(TypeRef type) => type is PointerRef or DefinitionRef { Definition.IsEnum: true } || type is DefinitionRef
     {
         Definition:
         {
