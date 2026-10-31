@@ -40,6 +40,10 @@ internal static class BodyLowering
                     {
                         Tail = true
                     };
+                else if (successors.Length == 0 && block.Statements.LastOrDefault() is Call { Kind: CallKind.Direct, Target: Const terminalTarget } terminalCall
+                    && ctx.Resolve(terminalCall) is not null && ctx.owner.lifter.NoReturn.IsNoReturn(terminalTarget.Value))
+                    // 已证成不返回的托管调用仍需 CIL 终结；此保护语句在原生控制流中不可达。
+                    statements.Add(new ManagedThrow(block.End, new ConstantValue(0, ctx.types.Corlib("System.Exception"), 64)));
                 else if (successors.Length == 1)
                 {
                     if (ctx.Edge(block, 0, successors[0].Start).TryGet(out var edge, out var failure))
