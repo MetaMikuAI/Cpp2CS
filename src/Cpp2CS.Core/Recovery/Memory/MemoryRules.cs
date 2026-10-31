@@ -21,6 +21,7 @@ internal static class MemoryRules
     internal static TypeRef? TypeOfAddressBase(this RecoveryScope ctx, Expr e) => e switch
     {
         TypedFrame f => new ByRefRef(f.Region.Type),
+        Symbol { Kind: SymbolKind.String } => ctx.types.String,
         // 聚合参数的寄存器承载的是 ABI 片；引用叶子的类型由结构体贡献者写入 known。
         Use { Width: 64 } u when u.Variable.Version == 0 && !ctx.State.Signature.structArguments.ContainsKey(u.Variable.Storage) && ctx.State.Signature.arguments.TryGetValue(u.Variable.Storage, out var a) && a.Width == 64 => a.Type,
         Use { Width: 64 } u when ctx.State.Types.known.TryGetValue(u.Variable, out var t) && (ManagedTypes.IsReferenceType(t) || t is ByRefRef or PointerRef) => t,
