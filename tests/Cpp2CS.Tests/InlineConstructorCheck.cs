@@ -199,6 +199,23 @@ internal static class InlineConstructorCheck
         var widePattern = InlineConstructors.Create(method, intSignature, Function(baseWithInt with { Arguments = [self, argument] }))!;
         a.True(InlineConstructors.Find(widePattern, intCaller, intCaller.EntryBlock, 0, created) is null,
             "被调方读取 64 位时不能用 int 参数解释高位");
+        var stackSignature = intSignature with { Parameters = [new(new PrimitiveRef("Int32"), Passing.Stack, [])] };
+        var stackPattern = InlineConstructors.Create(method, stackSignature,
+            Function(Base(self), Field(self, new Load(new FrameAddress(0), 32)), new Return(20)),
+            [new(0, new PrimitiveRef("Int32"), 0, 4, false)]);
+        var stackCaller = Function(caller.EntryBlock.Statements[0], Base(new Use(created, 64)),
+            Field(new Use(created, 64), Expr.C(42, 32)), new Return(20));
+        a.True(stackPattern is not null && InlineConstructors.Find(stackPattern, stackCaller, stackCaller.EntryBlock, 0, created)
+            is { Arguments: [Const { Value: 42 }] }, "入口栈标量绑定成普通构造实参");
+        a.True(InlineConstructors.Create(method, stackSignature,
+            Function(Base(self), Field(self, new Load(new FrameAddress(0), 64)), new Return(20)),
+            [new(0, new PrimitiveRef("Int32"), 0, 4, false)]) is null, "栈参数宽读取不得吞入填充或其他参数");
+        var selected = new Variable(Storage.Gpr(20), 1);
+        var booleanCaller = Function(caller.EntryBlock.Statements[0],
+            new Define(2, selected, new Select(new Compare(Cond.Eq, input, Expr.C(0, 32)), Expr.C(1, 8), Expr.C(0, 8), 8)),
+            Base(new Use(created, 64)), Field(new Use(created, 64), new Use(selected, 8)), new Return(20));
+        a.True(InlineConstructors.Find(boolPattern, booleanCaller, booleanCaller.EntryBlock, 0, created) is not null,
+            "分配后的纯条件布尔计算可绑定构造参数");
         return a.Finish("inline-constructors");
     }
 }

@@ -15,16 +15,30 @@ internal static class InlineConstructors
     }
     internal sealed record Match(MethodRef Method, IReadOnlyList<Expr> Arguments, IReadOnlyList<Stmt> Statements);
 
-    internal static Pattern? Create(MethodRef method, AbiSignature signature, MachineFunction function)
+    internal static Pattern? Create(MethodRef method, AbiSignature signature, MachineFunction function,
+        IReadOnlyList<StackAbiValue>? stackParameters = null)
     {
+        var incoming = stackParameters?.ToDictionary(p => (long)p.Offset) ?? [];
+        if (incoming.Values.Any(p => p.Indirect || p.Size is not (1 or 2 or 4 or 8))) return null;
+        var parameters = signature.Parameters.ToArray();
+        foreach (var parameter in incoming.Values)
+            parameters[parameter.Index] = new(parameter.Type, Passing.Registers,
+                [new(Storage.Slot(parameter.Offset), parameter.Size * 8, 0)]);
+        signature = signature with { Parameters = parameters };
         if (function.Range.ExceptionRegions.Any() || signature.This is not { Passing: Passing.Registers, Pieces.Length: 1 }
             || signature.Parameters.Any(p => p.Passing != Passing.Registers || p.Pieces.Length != 1
-                || !(p.Pieces[0].Register.Bank == Bank.Gpr
+                || !(p.Pieces[0].Register.Bank is Bank.Gpr or Bank.Stack
                     || p.Pieces[0] is { Register.Bank: Bank.Vec, Width: 32 or 64 }))) return null;
         var effects = new List<Stmt>();
         var definitions = new Dictionary<Variable, Expr>();
-        foreach (var (_, statement) in AllocationPairing.Following(function.EntryBlock, -1))
+        foreach (var (_, original) in AllocationPairing.Following(function.EntryBlock, -1))
         {
+            // 入口栈参数与寄存器参数使用相同绑定；只读取 ABI 明确覆盖的位。
+            var statement = ExprMap.MapOperands(original, e => ExprMap.Map(e, part =>
+                part is Load { Address: FrameAddress at } load && incoming.TryGetValue(at.Offset, out var parameter)
+                    && load.Width <= parameter.Size * 8
+                    ? new Use(new(Storage.Slot(parameter.Offset), 0), load.Width) : null));
+            if (ExprMap.Operands(statement).SelectMany(ExprMap.Walk).Any(e => e is Load { Address: FrameAddress })) return null;
             switch (statement)
             {
                 case Nop: continue;
@@ -238,9 +252,10 @@ internal static class InlineConstructors
         };
     }
 
-    private static bool Pure(Expr expression) => ExprMap.Walk(expression).All(e => e is Const or Use or Binary or Unary or Ir.Convert or Symbol or Extract or Insert);
+    private static bool Pure(Expr expression) => ExprMap.Walk(expression).All(e => e is Const or Use or Binary or Unary or Ir.Convert or Symbol or Extract or Insert or Compare or Select or Logical or Not);
     private static bool CanonicalBoolean(Expr value) => value is Const { Value: <= 1 }
-        or Binary { Op: BinOp.And, Right: Const { Value: 1 } }
+        or Binary { Op: BinOp.And, Right: Const { Value: 1 } } or Compare or Logical or Not
+        or Select { True: Const { Value: <= 1 }, False: Const { Value: <= 1 } }
         || value is Ir.Convert { Kind: ConvKind.Truncate or ConvKind.ZeroExtend } conversion && CanonicalBoolean(conversion.Operand);
     private static Expr Low(Expr value, int width) => value is Use u ? u with { Width = width }
         : Fold.Convert(value.Width < width ? ConvKind.ZeroExtend : ConvKind.Truncate, value, width);
@@ -284,7 +299,9 @@ public sealed partial class MethodRecovery
                         }
                         block.Statements[i] = call with { Arguments = arguments };
                     }
-                pattern = InlineConstructors.Create(method, signature, lifted.Function);
+                var stack = abi.StackArguments(signature);
+                if (stack.Parameters.All(p => abi.Kind(p.Type) != ValueKind.Struct))
+                    pattern = InlineConstructors.Create(method, signature, lifted.Function, stack.Parameters);
                 if (pattern is not null)
                     pattern = pattern with { UnusedCallInputs = pattern.Effects.OfType<Call>()
                         .Where(c => c.Op is null && c.Target is Const)
