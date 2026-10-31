@@ -21,7 +21,8 @@ internal static class SwitchesRules
             var computation = new HashSet<Variable>();
             var expandedIndices = new Dictionary<Variable, Expr>();
             // 表项读取的地址只展开纯运算（不含访存）的定义；下标变量本身（例如读出的状态字段）保留。
-            Expr Shallow(Expr e) => ExprMap.Map(e, x => x is Use u && ctx.values.TryGetValue(u.Variable, out var v) && !ExprMap.Walk(v).Any(w => w is Load) ? ExpandIndex(u.Variable, Shallow(v)) : null);
+            Expr Shallow(Expr e) => ExprMap.Map(e, x => x is Use u && ctx.values.TryGetValue(u.Variable, out var v) && !ExprMap.Walk(v).Any(w => w is Load)
+                ? ExpandIndex(u.Variable, ScalarVectorNarrowing.Low(Shallow(v), u.Width)) : null);
             Expr ExpandIndex(Variable variable, Expr value)
             {
                 expandedIndices[variable] = value;
