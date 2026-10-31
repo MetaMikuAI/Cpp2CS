@@ -55,6 +55,15 @@ internal static class NativeInputsCheck
         a.True(NativeInputs.Reads(lifted, knownTail: _ => false) is null, "未获证据的尾调用仍拒绝未使用证明");
         function.UnresolvedIndirectJumps++;
         a.True(NativeInputs.Reads(lifted, knownTail: _ => true) is null, "证明一个尾调用不能覆盖额外未解析跳转");
+        function.UnresolvedIndirectJumps = 1;
+        Expr Field(Expr root, ulong offset) => new Load(new Binary(BinOp.Add, root, Expr.C(offset, 64), 64), 64);
+        var delegateTail = tail with { Target = Field(receiver, 0x18), Arguments = [Field(receiver, 0x40), Field(receiver, 0x28), new Use(input, 64)] };
+        block.Statements = [delegateTail];
+        a.True(NativeInputs.Reads(lifted) is { } delegateReads && delegateReads.Contains(register) && delegateReads.Contains(receiver.Variable.Storage), "委托布局证明尾调用时仍保留全部参数依赖");
+        block.Statements = [delegateTail with { Arguments = [Field(receiver, 0x40), Field(new Use(input, 64), 0x28)] }];
+        a.True(NativeInputs.Reads(lifted) is null, "不同对象的方法身份不能证明委托尾调用");
+        block.Statements = [delegateTail with { Arguments = [Field(receiver, 0x40), Expr.C(0, 64)] }];
+        a.True(NativeInputs.Reads(lifted) is null, "缺失方法身份仍保留未知尾跳转");
         return a.Finish("native-inputs");
     }
 

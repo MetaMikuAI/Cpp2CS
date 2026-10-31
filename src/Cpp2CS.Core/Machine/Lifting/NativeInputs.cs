@@ -14,7 +14,7 @@ internal static class NativeInputs
         var tails = statements.OfType<Call>().Where(c => c.Kind == CallKind.TailIndirect).ToArray();
         if (!lifted.Succeeded || lifted.Function.Problems.Count != 0
             || lifted.Function.UnresolvedIndirectJumps != 0 && (lifted.Function.UnresolvedIndirectJumps != tails.Length
-                || !tails.All(c => VirtualTail(c, statements) || knownTail?.Invoke(c) == true))
+                || !tails.All(c => VirtualTail(c, statements) || DelegateTail(c, statements) || knownTail?.Invoke(c) == true))
             || statements.Any(s => s is Opaque or IndirectJump { Targets.Length: 0 })) return null;
         if (unused is null)
             return statements.SelectMany(s => ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable)
@@ -59,6 +59,22 @@ internal static class NativeInputs
             if (definitions.TryGetValue(variable, out var inputs))
                 foreach (var input in inputs) if (roots.Add(input)) pending.Push(input);
         return roots.Where(v => v.Version == 0).Select(v => v.Storage).ToHashSet();
+    }
+
+    private static bool DelegateTail(Call call, Stmt[] statements)
+    {
+        var definitions = statements.OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+        Expr Top(Expr value, int depth = 32) => depth > 0 && value is Use use && definitions.TryGetValue(use.Variable, out var source) ? Top(source, depth - 1) : value;
+        (Expr? Root, long Offset) Field(Expr value)
+        {
+            if (Top(value) is not Load { Width: 64 } load) return (null, 0);
+            var form = AddressForm.Decompose(load.Address, new() { Expansion = AddressExpansion.BeforeSplit, Expand = e => Top(e), PreserveLeaf = true });
+            return (form.Root, form.Offset);
+        }
+        // invoke_impl、method_code 和 method 来自同一委托；这里只证明尾调用，不裁剪未知 Invoke 的实参。
+        return Field(call.Target) is { Root: { } root, Offset: 0x18 }
+            && call.Arguments.Length > 1 && Field(call.Arguments[0]) == (root, 0x40)
+            && call.Arguments.Skip(1).Any(a => Field(a) == (root, 0x28));
     }
 
     // 已知 vtable 取址及同一对象作为 this，足以证明该跳转是尾调用；所有实参仍参与入口读取分析。
