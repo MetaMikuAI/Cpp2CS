@@ -150,7 +150,12 @@ internal static class FramesRules
                 if (argument.Pieces.Length != 1 || !registers.TryGetValue(argument.Pieces[0].Register, out var expression))
                     continue;
                 if (argument.Type is ByRefRef reference)
-                    Bind(expression, reference.Element, call);
+                {
+                    var index = Array.IndexOf(signature.Parameters, argument);
+                    var writes = index >= 0 && (callee.Method.Parameters[index].Attributes
+                        & (System.Reflection.ParameterAttributes.In | System.Reflection.ParameterAttributes.Out)) == System.Reflection.ParameterAttributes.Out;
+                    Bind(expression, reference.Element, call, writes);
+                }
                 else if (argument.Type is PointerRef && ctx.FrameOffset(expression) is { } pointerOffset)
                 {
                     var stores = ctx.blocks.SelectMany(b => b.Statements).OfType<Store>().Where(s => ctx.FrameOffset(s.Target) == pointerOffset).ToArray();
