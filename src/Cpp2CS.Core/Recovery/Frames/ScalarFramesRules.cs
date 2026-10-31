@@ -12,7 +12,25 @@ internal static class ScalarFramesRules
         var witnesses = new List<FrameWitness>();
         ctx.WitnessLoadedArguments(witnesses);
         ctx.WitnessLoadedReturns(witnesses);
+        // 间接结构体实参及其整值复制来源仍需由帧区域分析定型，不能先拆掉部分字段的复制证据。
+        foreach (var call in ctx.blocks.SelectMany(b => b.Statements).OfType<Call>())
+        {
+            if (ctx.Resolve(call) is not { } callee || ctx.owner.abi.Classify(callee, out _) is not { } signature) continue;
+            var registers = CallResolution.ArgumentsOf(call);
+            foreach (var argument in signature.Arguments)
+                if (argument.Passing == Cpp2CS.Facts.Passing.Indirect && ctx.types.Kind(argument.Type) == TypeKind.Struct
+                    && argument.Pieces is [var piece] && registers.TryGetValue(piece.Register, out var expression)
+                    && ctx.FrameOffset(expression) is { } offset)
+                    witnesses.Add(new(offset, argument.Type, call, false));
+        }
+        ctx.WitnessFrameCopies(witnesses);
         var preserved = witnesses.Where(w => ctx.types.Kind(w.Type) == TypeKind.Struct).Select(w => w.Call).ToHashSet();
+        var aggregates = witnesses.Where(w => ctx.types.Kind(w.Type) == TypeKind.Struct)
+            .Select(w => (w.Offset, Size: ctx.types.Size(w.Type))).Distinct().ToArray();
+        foreach (var definition in ctx.blocks.SelectMany(b => b.Statements).OfType<Define>())
+            if (ExprMap.Walk(definition.Value).OfType<Load>().Any(load => ctx.FrameOffset(load.Address) is { } offset
+                && aggregates.Any(r => r.Offset < offset + load.Width / 8 && offset < r.Offset + r.Size)))
+                preserved.Add(definition);
         var lifetimes = FrameLifetimeSnapshots.Read(ctx.function, ctx.NoStackRead, calls.ArgumentSize, e => ctx.FrameOffset(e), preserved);
         foreach (var block in ctx.blocks)
             for (var i = 0; i < block.Statements.Count; i++)
