@@ -56,12 +56,14 @@ internal static class ClassInitializationReloads
             var merge = fastStart;
             var fastPrevious = head;
             var fastChain = new HashSet<Block>();
-            // 快路径可在汇合前完成纯计算；加载仍由已有快照证明，不允许额外调用或写入。
+            var fastWrites = new List<Store>();
+            // 快路径的计算和写入须与初始化臂逐项匹配；不能跨其他调用。
             while (fastChain.Count < 32 && merge.Predecessors.Count == 1 && !merge.IsLandingPad
                 && merge.Handler == head.Handler && merge.NormalSuccessors.ToArray() is [var fastNext]
-                && merge.Statements.All(s => s is Nop or Jump || s is Define d
-                    && !ExprMap.Walk(d.Value).Any(e => e is Load or Intrinsic or Unknown)) && fastChain.Add(merge))
+                && merge.Statements.All(s => s is Nop or Jump || s is Define or Store
+                    && !ExprMap.Operands(s).SelectMany(ExprMap.Walk).Any(e => e is Load or Intrinsic or Unknown)) && fastChain.Add(merge))
             {
+                fastWrites.AddRange(merge.Statements.OfType<Store>());
                 fastPrevious = merge;
                 merge = fastNext;
             }
@@ -131,13 +133,18 @@ internal static class ClassInitializationReloads
             var initialized = false;
             var valid = true;
             var snapshots = new Dictionary<Variable, Expr>();
+            var writes = new List<Store>();
             foreach (var statement in chain.SelectMany(b => b.Statements))
             {
                 if (statement is Nop or Jump || shared && statement is Phi) continue;
-                if (!initialized && statement is Call { Op: { Kind: OpKind.RunClassConstructor, Operand: DefinitionRef owner } }
+                if (statement is Call { Op: { Kind: OpKind.RunClassConstructor, Operand: DefinitionRef owner } }
                     && owner.Equals(type)) { initialized = true; continue; }
+                if (initialized && statement is Store write
+                    && !ExprMap.Operands(write).SelectMany(ExprMap.Walk).Any(e => e is Load or Intrinsic or Unknown))
+                { writes.Add(write); continue; }
                 if (statement is Define d && ExprMap.Walk(d.Value).All(e => e is Use or Const or Symbol or Binary or Unary or Ir.Convert
-                    || initialized && e is Load load && PreviousSnapshot(load, false) is not null))
+                    or Compare or Select or Logical or Not or Extract or Insert
+                    || initialized && writes.Count == 0 && e is Load load && PreviousSnapshot(load, false) is not null))
                 {
                     snapshots[d.Target] = ExprMap.Map(d.Value, e => e is Load load ? PreviousSnapshot(load, false) : null);
                     continue;
@@ -151,6 +158,9 @@ internal static class ClassInitializationReloads
             Expr Snapshot(Expr value, bool useSnapshots, int depth = 0) => depth >= 32 ? value : Fold.Simplify(ExprMap.Map(value, e =>
                 e is Use use && (useSnapshots && snapshots.TryGetValue(use.Variable, out var source) || definitions.TryGetValue(use.Variable, out source))
                     ? Fold.Convert(ConvKind.Truncate, Snapshot(source, useSnapshots, depth + 1), use.Width) : null));
+            if (fastWrites.Count != writes.Count || fastWrites.Where((write, i) =>
+                Snapshot(write.Target, false) != Snapshot(writes[i].Target, true)
+                || Snapshot(write.Value, false) != Snapshot(writes[i].Value, true)).Any()) continue;
             var fast = merge.Predecessors.IndexOf(fastPrevious);
             var slow = merge.Predecessors.IndexOf(chain[^1]);
             if (!shared && (fast < 0 || slow < 0 || merge.Statements.OfType<Phi>().Any(p => p.Sources.Length != merge.Predecessors.Count

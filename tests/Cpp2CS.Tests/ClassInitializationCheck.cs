@@ -104,6 +104,31 @@ internal static class ClassInitializationCheck
         fastCalculation.Blocks.Add(fastBlock);
         fastCalculation.Renumber();
         a.True(ClassInitializationReloads.Run(fastCalculation), "快路径经过纯计算后仍可比较最终汇合值");
+        foreach (var mode in new[] { "same", "different", "repeat", "write", "other-write" })
+        {
+            var input = new Use(new(Storage.Vec(0), 0), 32);
+            Expr Rounded(ulong fallback) => new Select(new Compare(Cond.FEq, new Unary(UnOp.FCeil, input, 32), Expr.C(0x7f800000, 32)),
+                Expr.C(fallback, 32), new Cpp2CS.Ir.Convert(ConvKind.FloatToSInt, new Unary(UnOp.FCeil, input, 32), 32), 32);
+            var flag = new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassCctorFinishedOrNoCctor, 64), 64), 32);
+            var fast = new Variable(Storage.Gpr(1), 1);
+            var slow = fast with { Version = 2 };
+            var merged = fast with { Version = 3 };
+            var guard = new Block(0) { Statements = [new Branch(0, new Compare(Cond.Eq, flag, Expr.C(0, 32)), 16, 32)] };
+            var initialize = new Block(16) { Statements = [new Call(16, CallKind.Direct, Expr.C(0, 64))
+                { Op = new(OpKind.RunClassConstructor, type), Arguments = [klass] }, new Define(20, slow, Rounded(mode == "different" ? 0UL : 0x80000000)), new Jump(24, 48)] };
+            var skip = new Block(32) { Statements = [new Define(32, fast, Rounded(0x80000000)), new Jump(36, 48)] };
+            var done = new Block(48) { Statements = [new Phi(48, merged, [slow, fast]), new Return(52) { Value = new Use(merged, 32) }] };
+            MachineFunction.AddEdge(guard, initialize); MachineFunction.AddEdge(guard, skip);
+            MachineFunction.AddEdge(initialize, done); MachineFunction.AddEdge(skip, done);
+            if (mode == "repeat") initialize.Statements.Insert(2, initialize.Statements[0] with { Address = 22 });
+            if (mode is "write" or "other-write")
+            {
+                initialize.Statements.Insert(2, new Store(22, Expr.C(128, 64), new Use(slow, 32)));
+                skip.Statements.Insert(1, new Store(34, Expr.C(mode == "other-write" ? 132UL : 128UL, 64), new Use(fast, 32)));
+            }
+            a.Equal(mode is not ("different" or "other-write"), ClassInitializationReloads.Run(Function(guard, initialize, skip, done)),
+                "取整、重复初始化及写入逐项核对，保留无穷值分支和目标地址");
+        }
         MachineFunction ExtendedReload(bool changedField = false, bool sideEffect = false, string? stored = null)
         {
             var oldValue = new Variable(Storage.Gpr(1), 1);
