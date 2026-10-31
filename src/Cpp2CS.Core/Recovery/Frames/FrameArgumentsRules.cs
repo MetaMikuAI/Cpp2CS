@@ -33,6 +33,7 @@ internal static class FrameArgumentsRules
                 if (origin >= 0 || origin + size > 0 || pieces.Any(p => p.Frame - p.Offset != origin || p.Offset < 0 || p.Offset + p.Width / 8 > size))
                     continue;
                 ctx.State.Calls.callBindings.Commit(call, callee);
+                if (ctx.TypedFrameRead(witnesses, origin, argument.Type, reads)) continue;
                 foreach (var read in reads)
                     witnesses.Add(new(origin, argument.Type, read, false));
             }
@@ -54,8 +55,20 @@ internal static class FrameArgumentsRules
             var existing = witnesses.Where(w => w.Offset == span.Origin).ToArray();
             if (ctx.types.Kind(returned.Type) == TypeKind.Reference && existing.Length != 0
                 && existing.All(w => ctx.types.Kind(w.Type) == TypeKind.Reference && ctx.types.IsAssignable(w.Type, returned.Type))) continue;
+            if (ctx.RegisterStruct(returned) && ctx.TypedFrameRead(witnesses, span.Origin, returned.Type, span.Reads)) continue;
             foreach (var read in span.Reads)
                 witnesses.Add(new(span.Origin, returned.Type, read, false));
         }
+    }
+
+    /// <summary>寄存器传参可按字段重新组装结构体；同块已有写入给出兼容叶子时，不再用目标结构体覆盖源区域。</summary>
+    internal static bool TypedFrameRead(this RecoveryScope ctx, List<FrameWitness> witnesses, long offset, TypeRef type, IEnumerable<Define> reads)
+    {
+        var leaves = ctx.ScalarStructPaths(type).ToArray();
+        if (leaves.Length == 0) return false;
+        return witnesses.Any(w => w.Writes && ctx.types.Kind(w.Type) == TypeKind.Struct
+            && w.Offset <= offset && offset + ctx.types.Size(type) <= w.Offset + ctx.types.Size(w.Type)
+            && reads.All(read => ctx.SameBlockBefore(w.Call, read))
+            && leaves.All(leaf => ctx.ScalarStructPaths(w.Type).Any(source => w.Offset + source.Offset == offset + leaf.Offset && source.Type.Equals(leaf.Type))));
     }
 }
