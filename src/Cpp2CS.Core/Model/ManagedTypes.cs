@@ -236,7 +236,7 @@ public sealed class ManagedTypes
         {
             if (Layouts.Of(c) is not { } layout) return null;
             foreach (var slot in layout.Fields)
-                if (slot.Offset == offset && Size(slot.Type) == bytes) return new(new FieldRef(slot.Field, c), slot.Type.Substitute(c.Arguments, []));
+                if (slot.Offset == offset && Size(slot.Type) == bytes) return new(new FieldRef(slot.Field, c), slot.Type);
             if (c.Definition.IsValueType) break;
         }
         return null;
@@ -247,8 +247,8 @@ public sealed class ManagedTypes
     {
         if (Layouts.Of(owner) is not { } layout) return null;
         foreach (var slot in layout.Statics)
-            // 泛型类型封闭实例的静态字段：字段类型代入类型实参（如 EmptyArray<X>.Value 是 X[]）。
-            if (slot.Offset == offset && Size(slot.Type) == bytes) return new(new FieldRef(slot.Field, owner), slot.Type.Substitute(owner.Arguments, []));
+            // 布局已代入实参；再次替换会把 List<Cell<T>> 的 T 错换成 Cell<T>。
+            if (slot.Offset == offset && Size(slot.Type) == bytes) return new(new FieldRef(slot.Field, owner), slot.Type);
         return null;
     }
 }

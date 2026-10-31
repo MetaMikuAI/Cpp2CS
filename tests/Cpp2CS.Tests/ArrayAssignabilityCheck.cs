@@ -60,6 +60,13 @@ internal static class ArrayAssignabilityCheck
             a.Equal(clr.IsInstanceOfType((object)1), types.IsBoxAssignable(types.Int32, target), "已有装箱对象的接口与基类转换符合 CLR");
             a.True(!types.IsAssignable(types.Int32, target), "未装箱值仍不能直接赋给引用");
         }
+        var openList = new DefinitionRef(list, [new GenericParameterRef("T", false, 0) { Parameter = list.GenericParameters[0] }]);
+        var nestedList = new DefinitionRef(list, [openList]);
+        var items = facts.Layouts.Of(nestedList)!.Fields.Single(f => f.Field.Name == "_items");
+        a.Equal<TypeRef>(new ArrayRef(openList, 1), types.InstanceField(nestedList, items.Offset, 8)!.Type, "实例字段不重复代入内部泛型参数");
+        var emptyArray = new DefinitionRef(types.CorlibDefinition("System.EmptyArray")!, [openList]);
+        var empty = facts.Layouts.Of(emptyArray)!.Statics.Single();
+        a.Equal<TypeRef>(new ArrayRef(openList, 1), types.StaticField(emptyArray, empty.Offset, 8)!.Type, "静态字段不重复代入内部泛型参数");
         return a.Finish("array-assignability");
     }
 }
