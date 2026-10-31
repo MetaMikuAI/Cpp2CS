@@ -20,12 +20,19 @@ internal static class FramesRules
         {
             var changed = ctx.function.Range.ExceptionRegions.Length == 0
                 && Cpp2CS.Machine.Ssa.TailDuplication.Run(ctx.function,
-                    block => block.Statements.OfType<Phi>().Any(phi => phi.Sources.All(ctx.FieldAddress)));
+                    block => block.Statements.OfType<Phi>().Any(phi => phi.Sources.All(ctx.FieldAddress)), keepResults: true);
             changed |= JoinedFieldReads.Run(ctx.function, phi => phi.Sources.All(v => ctx.State.Types.known.TryGetValue(v, out var type) && ctx.types.Kind(type) == TypeKind.Reference) || phi.Sources.All(ctx.FieldAddress));
             if (!changed) break;
             Cpp2CS.Machine.Ssa.Propagate.Run(ctx.function, ctx.Dominators);
             ctx.blocks = ctx.function.Blocks;
             ctx.definitions = ctx.IndexDefinitions();
+            foreach (var block in ctx.blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                    if (block.Statements[i] is Call call)
+                    {
+                        var refreshed = Cpp2CS.Idioms.RefreshOperandsPass.Refresh(call, e => ctx.Expand(e));
+                        if (!ReferenceEquals(call, refreshed)) ctx.Rewriter.Replace(block, i, refreshed);
+                    }
             ctx.InferTypes();
         }
 

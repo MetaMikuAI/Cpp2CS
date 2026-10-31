@@ -6,7 +6,7 @@ namespace Cpp2CS.Machine.Ssa;
 /// <summary>将合并尾部放回入边，流出结果经出口 φ 汇合，保留每条路径的操作次序。</summary>
 internal static class TailDuplication
 {
-    internal static bool Run(MachineFunction function, Func<Block, bool> select)
+    internal static bool Run(MachineFunction function, Func<Block, bool> select, bool keepResults = false)
     {
         static IEnumerable<Variable> Defines(Stmt statement) => statement switch
         {
@@ -20,6 +20,7 @@ internal static class TailDuplication
         {
             if (!function.Blocks.Contains(merge) || merge.Handler is not null || merge.IsLandingPad
                 || merge.Predecessors.Count is < 2 or > 16 || merge.Statements.Count > 96 || !select(merge)
+                || merge.Statements.All(s => s is Phi or Jump or Nop)
                 || merge.Statements.Any(s => s is not (Phi or Define or Store or Call or Jump or Nop or Return))) continue;
             var exits = merge.NormalSuccessors.ToArray();
             if (exits.Length > 1 || exits.Length == 0 && merge.Statements.LastOrDefault() is not (Return or Call { Kind: CallKind.Tail or CallKind.TailIndirect })) continue;
@@ -29,9 +30,15 @@ internal static class TailDuplication
                 || p.NormalSuccessors.ToArray() is not [var next] || next != merge || p.Statements.LastOrDefault() is Branch)) continue;
             var defined = merge.Statements.SelectMany(Defines).ToHashSet();
             var exitIndex = exit?.Predecessors.IndexOf(merge) ?? -1;
-            if (function.Blocks.Where(b => b != merge).Any(b => b.Statements.Any(s => s is Phi phi
+            var external = function.Blocks.Where(b => b != merge).SelectMany(b => b.Statements).SelectMany(s => s is Phi phi
+                ? phi.Sources : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable))
+                .Where(defined.Contains).Distinct().ToArray();
+            var keepJoin = function.Blocks.Where(b => b != merge).Any(b => b.Statements.Any(s => s is Phi phi
                 ? phi.Sources.Where((_, i) => b != exit || i != exitIndex).Any(defined.Contains)
-                : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => defined.Contains(u.Variable))))) continue;
+                : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => defined.Contains(u.Variable))));
+            if (keepJoin && (!keepResults || exit is null)) continue;
+            // 调用结果或其他合流值仍被后续使用时，原块只保留结果 φ，不复制后续业务语句。
+            var joined = (keepJoin ? external : []).ToDictionary(v => v, _ => new List<Variable>());
             var exitValues = exit?.Statements.OfType<Phi>().ToDictionary(p => p.Target, p => p.Sources[exitIndex]);
             var statements = merge.Statements.ToArray();
             var phis = statements.OfType<Phi>().ToArray();
@@ -58,6 +65,12 @@ internal static class TailDuplication
                     }
                     parent.Statements.Add(mapped);
                 }
+                if (joined.Count > 0)
+                {
+                    foreach (var (variable, sources) in joined) sources.Add(map.GetValueOrDefault(variable, variable));
+                    parent.Statements.Add(new Jump(parent.End, merge.Start));
+                    continue;
+                }
                 MachineFunction.RemoveEdgeAt(parent, parent.Successors.IndexOf(merge));
                 if (exit is null) continue;
                 MachineFunction.AddEdge(parent, exit);
@@ -68,6 +81,8 @@ internal static class TailDuplication
                     exit.Statements[i] = phi with { Sources = [.. phi.Sources, map.GetValueOrDefault(source, source)] };
                 }
             }
+            if (joined.Count > 0)
+                merge.Statements = [.. joined.Select(p => (Stmt)new Phi(merge.Start, p.Key, p.Value.ToArray())), new Jump(merge.End, exit!.Start)];
             function.Renumber();
             changed = true;
         }

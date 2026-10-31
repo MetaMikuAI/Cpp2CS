@@ -144,6 +144,7 @@ internal static class SharedInterfaceTailsCheck
                 && branch.Target == b.Successors[0].Start && branch.Fallthrough == b.Successors[1].Start), "保留条件分支的后继位置");
             a.Equal(2, function.Blocks.SelectMany(b => b.Statements).Count(s => mode == "slot-tail" ? s is Call { Kind: CallKind.TailIndirect } : s is Return), "两个调用各自保留返回方式");
         }
+        foreach (var following in new[] { false, true })
         {
             var leftAddress = new Variable(Storage.Gpr(1), 1);
             var rightAddress = leftAddress with { Version = 2 };
@@ -158,10 +159,20 @@ internal static class SharedInterfaceTailsCheck
             MachineFunction.AddEdge(start, left); MachineFunction.AddEdge(start, right);
             MachineFunction.AddEdge(left, merge); MachineFunction.AddEdge(right, merge);
             var function = new MachineFunction { Entry = 0, Range = new(0, 80, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [start, left, right, merge] };
-            a.True(Cpp2CS.Machine.Ssa.TailDuplication.Run(function, b => b == merge), "帧地址选择的终结尾部展开");
-            a.True(new[] { left, right }.All(b => b.Successors.Count == 0 && b.Statements[^1] is Return), "每条分支独立返回");
+            if (following)
+            {
+                var exit = new Block(80) { End = 96, Statements = [new Return(84) { Value = new Use(vector, 32) }] };
+                merge.Statements[^1] = new Jump(60, exit.Start);
+                MachineFunction.AddEdge(merge, exit);
+                function.Blocks.Add(exit);
+            }
+            a.True(Cpp2CS.Machine.Ssa.TailDuplication.Run(function, b => b == merge, keepResults: following), "帧地址选择的终结尾部展开");
+            a.True(following ? merge.Statements.First() is Phi { Target: var returned, Sources.Length: 2 } && returned == vector
+                && new[] { left, right }.All(b => b.Successors.SequenceEqual([merge]))
+                : new[] { left, right }.All(b => b.Successors.Count == 0 && b.Statements[^1] is Return), "独立返回或在原块汇合后续使用的结果");
             a.True(new[] { left, right }.All(b => b.Statements.OfType<Define>().Last().Target.Width == 128), "复制保持向量寄存器宽度");
             a.True(left.Statements.OfType<Define>().Last().Target != right.Statements.OfType<Define>().Last().Target, "副本定义互不覆盖");
+            if (following) a.True(!Cpp2CS.Machine.Ssa.TailDuplication.Run(function, b => b == merge), "只剩结果合流时不重复展开");
         }
         return a.Finish("interface-tails");
     }
