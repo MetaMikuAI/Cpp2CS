@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 /// <summary>对象或字段地址合流后的读取及前置判空沿原入边展开，保留访问次序。</summary>
 internal static class JoinedFieldReads
 {
-    internal static bool Run(MachineFunction function, Func<Phi, bool> differentReferences)
+    internal static bool Run(MachineFunction function, Func<Phi, bool> eligibleReferences)
     {
         if (function.Range.ExceptionRegions.Length != 0) return false;
         var changed = false;
@@ -24,7 +24,7 @@ internal static class JoinedFieldReads
                 || block.Predecessors.Any(p => p == block || p.Handler is not null || p.Successors.Count(s => s == block) != 1
                     || p.Successors.Count > 1 && p.Statements.LastOrDefault() is not Branch)) continue;
             var phis = block.Statements.OfType<Phi>().ToDictionary(p => p.Target);
-            var selected = phis.Values.Where(differentReferences).Select(p => p.Target).ToHashSet();
+            var selected = phis.Values.Where(eligibleReferences).Select(p => p.Target).ToHashSet();
             if (selected.Count == 0 || phis.Values.Any(p => p.Sources.Length != block.Predecessors.Count)) continue;
             var prefix = new List<(Block Block, Stmt Statement)>();
             Define? read = null;
