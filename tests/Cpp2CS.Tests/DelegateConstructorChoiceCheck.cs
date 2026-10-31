@@ -51,7 +51,18 @@ internal static class DelegateConstructorChoiceCheck
             "第二臂保持自身的接收者与方法配对");
         a.True(!Split(Diamond(effects: true)), "不跨越构造前的其他调用");
         a.True(!Split(Diamond(handler: true)), "异常区域尚未证明时不移动调用");
-        a.True(!Split(Diamond(extraPredecessor: true)), "分支带其他入口时不复制构造");
+        a.True(Split(Diamond(extraPredecessor: true)), "入边自身汇合不改变沿唯一出边放置构造的顺序");
+        var three = Diamond();
+        var third = new Block(12) { Statements = [new Jump(12, 16)] };
+        var thirdMethod = identity with { Version = 4 };
+        methods[thirdMethod] = new Symbol(SymbolKind.Method, Method("Third"));
+        three.Blocks[3].Statements[0] = new Phi(16, identity, [firstMethod, secondMethod, thirdMethod]);
+        three.Blocks[3].Statements[1] = new Phi(16, receiver, [new(Storage.Gpr(10), 0), new(Storage.Gpr(11), 0), new(Storage.Gpr(12), 0)]);
+        MachineFunction.AddEdge(three.Blocks[0], third);
+        MachineFunction.AddEdge(third, three.Blocks[3]);
+        three.Blocks.Add(third);
+        a.True(Split(three) && third.Statements[0] is Call { Arguments: [_, Use { Variable.Storage.Index: 12 }, Use selected] } && selected.Variable == thirdMethod,
+            "三个方法分支保持第三条入边的目标配对");
         var allocated = Diamond();
         var result = ((Use)constructor.Arguments[0]).Variable;
         var allocation = new Call(18, CallKind.Direct, Expr.C(400, 64))

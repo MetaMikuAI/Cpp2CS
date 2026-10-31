@@ -63,8 +63,9 @@ internal static partial class CallIdentityChoices
             var position = first + (allocation is null ? 0 : 1);
             if (position < 0 || position >= block.Statements.Count || block.Statements[position] is not Call call || !constructor(call)
                 || call.Arguments.Length < 3 || call.Arguments[2] is not Use identity || !phis.TryGetValue(identity.Variable, out var method)
-                || block.IsLandingPad || block.Predecessors.Count != 2 || block.Predecessors.Any(p => p.Handler is not null
-                    || p.NormalSuccessors.ToArray() is not [var next] || next != block || p.Predecessors.Count != 1)
+                || block.IsLandingPad || block.Predecessors.Count is < 2 or > 16 || method.Sources.Length != block.Predecessors.Count
+                || block.Predecessors.Any(p => p == block || p.Handler is not null
+                    || p.NormalSuccessors.ToArray() is not [var next] || next != block)
                 || method.Sources.Any(v => expand(new Use(v, 64)) is not Symbol { Kind: SymbolKind.Method, Value: MethodRef })) continue;
             if (allocation is not null && call.Arguments[0] != new Use(allocation.Defines[0], 64)) continue;
             var results = call.Defines.Where(v => v is not null).ToHashSet();
