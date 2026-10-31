@@ -112,6 +112,11 @@ internal static class FrameCopiesRules
 
         if (!ctx.Values.Recover(store.Value, null).TryGet(out var source, out _))
             return false;
+        if (whole.Type is DefinitionRef empty && ctx.facts.Layouts.Of(empty) is { Fields.Count: 0 } && source is Fragment { Parts.Count: 0 })
+        {
+            output.Add(new ManagedStore(store.Address, new IndirectValue(new AddressValue(whole), whole.Type), new ComposedValue(whole.Type, [])));
+            return true;
+        }
         // 写入的值：同类型结构体值的叶子（单叶子），或各片都是同一个结构体值的叶子（寄存器传递的结构体参数/结果）。
         var parts = source is Fragment fragment ? fragment.Parts.Select(p => p.Value).ToArray() : [source];
         foreach (var layer in candidates)

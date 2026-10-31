@@ -34,6 +34,8 @@ internal static class ValueRecovery
                 break;
             case TypeKind.Pointer when width == 64 && ManagedTypes.IsNativePointer(type):
                 break;
+            case TypeKind.Struct when type is DefinitionRef empty && ctx.facts.Layouts.Of(empty) is { Fields.Count: 0 }:
+                break;
             case TypeKind.Struct or TypeKind.Pointer or TypeKind.Void or null:
                 return RecoveryDiagnostics.Fail(0, $"变量 {v} 的类型 {type} 尚未支持", rule: "LocalOf");
         }
@@ -132,6 +134,9 @@ internal static class ValueRecovery
             return bitcast.Operand;
         // 已是目标类型的值（如寄存器结构体的 IntPtr 叶子 Playable.m_Handle.m_Handle）原样使用。
         if (value.Type.Equals(target) && ctx.types.Kind(target) == TypeKind.Pointer && target is DefinitionRef)
+            return value;
+        if (value.Type.Equals(target) && ctx.types.Kind(target) == TypeKind.Struct
+            && target is DefinitionRef empty && ctx.facts.Layouts.Of(empty) is { Fields.Count: 0 })
             return value;
         var kind = ctx.types.Kind(target);
         var width = kind is TypeKind.Bool ? 8 : ctx.types.Bits(target);
@@ -351,6 +356,9 @@ internal static class ValueRecovery
 
         if (value is Fragment inlineFragment)
             return width < value.Width ? ctx.Slice(inlineFragment, 0, width) : ctx.ResizeFragment(inlineFragment, width);
+        if (value.Type is DefinitionRef empty && ctx.types.Kind(empty) == TypeKind.Struct
+            && ctx.facts.Layouts.Of(empty) is { Fields.Count: 0 })
+            return value with { Width = width };
         if (width == value.Width)
             return value;
         if (value.Type is GenericParameterRef { NativeScalar: not null } && width >= ctx.types.Bits(value.Type))
@@ -535,6 +543,9 @@ internal static class ValueRecovery
             return ctx.Recover(scalar, hint);
         if (!ctx.Recover(c.Operand, null).TryGet(out var operand, out var failure))
             return failure;
+        if (c.Kind is ConvKind.Truncate or ConvKind.ZeroExtend && operand.Type is DefinitionRef empty && ctx.types.Kind(empty) == TypeKind.Struct
+            && ctx.facts.Layouts.Of(empty) is { Fields.Count: 0 })
+            return operand with { Width = c.Width };
         if (operand.Type is GenericParameterRef { NativeScalar: not null })
         {
             if (c.Kind is ConvKind.ZeroExtend or ConvKind.Truncate && c.Width >= ctx.types.Bits(operand.Type))

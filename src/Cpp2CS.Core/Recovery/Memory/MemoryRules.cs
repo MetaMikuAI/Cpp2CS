@@ -271,6 +271,8 @@ internal static class MemoryRules
         if (ctx.types.Kind(region.Type) != TypeKind.Struct)
             return offset == 0 && width == region.Local.Width ? region.Local : RecoveryDiagnostics.Fail(0, "栈 标量栈槽的访问宽度不符", rule: "FrameLocation");
         var leaves = ctx.ScalarStructPaths(region.Type).ToArray();
+        if (region.Type is DefinitionRef empty && ctx.facts.Layouts.Of(empty) is { Fields.Count: 0 })
+            return region.Local with { Width = width };
         // 显式布局允许整数字段与字节字段重叠；精确字段访问不需要重建其他别名。
         if (leaves.Where(p => p.Offset == offset && ctx.types.Size(p.Type) * 8 == width).ToArray() is [var exact])
             return ctx.PathValue(region.Local, exact.Path);
