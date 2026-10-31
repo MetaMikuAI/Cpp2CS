@@ -21,10 +21,20 @@ internal static class SharedInterfaceTails
             return terms.Where(e => e is not Const).ToArray() is [Load { Width: 64 }]
                 && offset >= RuntimeLayout.ClassVtable && (offset - RuntimeLayout.ClassVtable) % RuntimeLayout.VirtualInvokeDataSize == 0;
         }
+        bool MergedClass(Block merge, Expr target)
+        {
+            if (expand(target) is not Load { Width: 64 } load) return false;
+            var terms = TermsPass.Terms(load.Address);
+            var offset = terms.OfType<Const>().Aggregate(0UL, (sum, c) => sum + c.Value);
+            return offset >= RuntimeLayout.ClassVtable && (offset - RuntimeLayout.ClassVtable) % RuntimeLayout.VirtualInvokeDataSize == 0
+                && terms.Where(e => e is not Const).ToArray() is [Use klass]
+                && merge.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == klass.Variable) is { } classes
+                && classes.Sources.All(v => expand(new Use(v, 64)) is Load { Width: 64 });
+        }
         return Cpp2CS.Machine.Ssa.TailDuplication.Run(function, merge =>
-            merge.Statements.OfType<Call>().Any(call => call is { Op: null, Kind: CallKind.Indirect or CallKind.TailIndirect, Target: Use target }
-                && merge.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == target.Variable) is { } pointer
-                && pointer.Sources.All(Pointer)));
+            merge.Statements.OfType<Call>().Any(call => call is { Op: null, Kind: CallKind.Indirect or CallKind.TailIndirect }
+                && (call.Target is Use target && merge.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == target.Variable) is { } pointer
+                    && pointer.Sources.All(Pointer) || MergedClass(merge, call.Target))));
     }
 
     internal static bool Run(MachineFunction function, Func<Call, bool> isLookup, Func<Variable> fresh)

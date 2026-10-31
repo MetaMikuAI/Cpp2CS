@@ -57,6 +57,27 @@ internal static class SharedInterfaceTailsCheck
             if (mode == "merged-result")
                 a.True(done.Statements[0] is Phi exit && exit.Sources.SequenceEqual(done.Predecessors.Select(p => p.Statements.OfType<Call>().Last().Defines[0])), "出口按实际前驱汇合各副本的返回值");
         }
+        foreach (var offset in new[] { RuntimeLayout.ClassVtable, RuntimeLayout.ClassVtable + 8 })
+        {
+            var leftClass = new Variable(Storage.Gpr(8), 1);
+            var rightClass = leftClass with { Version = 2 };
+            var joinedClass = leftClass with { Version = 3 };
+            var receiver = new Use(new Variable(Storage.Gpr(0), 0), 64);
+            var left = new Block(0x2000) { End = 0x2010, Statements = [new Define(0x2000, leftClass, new Load(receiver, 64)), new Jump(0x2004, 0x2040)] };
+            var right = new Block(0x2020) { End = 0x2030, Statements = [new Define(0x2020, rightClass, new Load(receiver, 64)), new Jump(0x2024, 0x2040)] };
+            var merge = new Block(0x2040) { End = 0x2050, Statements = [new Phi(0x2040, joinedClass, [leftClass, rightClass]),
+                new Call(0x2044, CallKind.TailIndirect, new Load(new Binary(BinOp.Add, new Use(joinedClass, 64), Expr.C((ulong)offset, 64), 64), 64)) { Arguments = [receiver] }] };
+            var start = new Block(0x1ff0) { End = 0x2000, Statements = [new Branch(0x1ff0, Expr.C(1, 1), left.Start, right.Start)] };
+            MachineFunction.AddEdge(start, left); MachineFunction.AddEdge(start, right);
+            MachineFunction.AddEdge(left, merge); MachineFunction.AddEdge(right, merge);
+            var function = new MachineFunction { Entry = start.Start, Range = new(start.Start, 0x2050, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [start, left, right, merge] };
+            var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+            var changed = SharedInterfaceTails.SplitInvokes(function, e => e is Use u ? definitions.GetValueOrDefault(u.Variable, e) : e);
+            a.Equal(offset == RuntimeLayout.ClassVtable, changed, "类指针合流只按虚表方法指针槽拆分，不把 MethodInfo 槽当目标");
+            if (changed)
+                a.True(left.Statements[^1] is Call { Target: Load { Address: Binary { Left: Use klass } } } && klass.Variable == leftClass,
+                    "分支调用使用本路径已读取的类指针");
+        }
         foreach (var mode in new[] { "grouped", "different-input", "slot", "return-value", "slot-grouped", "slot-tail", "slot-mismatch" })
         {
             var version = 0;
