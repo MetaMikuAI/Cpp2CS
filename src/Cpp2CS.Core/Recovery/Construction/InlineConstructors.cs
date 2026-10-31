@@ -15,6 +15,10 @@ internal static class InlineConstructors
     }
     internal sealed record Match(MethodRef Method, IReadOnlyList<Expr> Arguments, IReadOnlyList<Stmt> Statements);
 
+    // 每个候选均已逐项匹配实际副作用；常量实参可使不同重载产生相同原生代码。
+    internal static Match Prefer(Match first, Match second) => second.Statements.Count > first.Statements.Count
+        || second.Statements.Count == first.Statements.Count && second.Arguments.Count < first.Arguments.Count ? second : first;
+
     internal static Pattern? Create(MethodRef method, AbiSignature signature, MachineFunction function,
         IReadOnlyList<StackAbiValue>? stackParameters = null)
     {

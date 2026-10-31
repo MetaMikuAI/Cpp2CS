@@ -216,6 +216,17 @@ internal static class InlineConstructorCheck
             Base(new Use(created, 64)), Field(new Use(created, 64), new Use(selected, 8)), new Return(20));
         a.True(InlineConstructors.Find(boolPattern, booleanCaller, booleanCaller.EntryBlock, 0, created) is not null,
             "分配后的纯条件布尔计算可绑定构造参数");
+        var fixedPattern = InlineConstructors.Create(method, signature with { Parameters = [] },
+            Function(Base(self), Field(self, value), new Return(20)))!;
+        var choiceCaller = Function(caller.EntryBlock.Statements[0], Base(new Use(created, 64)),
+            Field(new Use(created, 64), value), new Return(20));
+        var fixedMatch = InlineConstructors.Find(fixedPattern, choiceCaller, choiceCaller.EntryBlock, 0, created)!;
+        var parameterMatch = InlineConstructors.Find(pattern!, choiceCaller, choiceCaller.EntryBlock, 0, created)!;
+        a.True(InlineConstructors.Prefer(parameterMatch, fixedMatch) == fixedMatch
+            && InlineConstructors.Prefer(fixedMatch, parameterMatch) == fixedMatch,
+            "完整副作用相同时优先无参重载，不因遍历顺序拒绝恢复");
+        var longer = parameterMatch with { Statements = [.. parameterMatch.Statements, new Nop(24, "完整前缀")] };
+        a.True(InlineConstructors.Prefer(fixedMatch, longer) == longer, "先保留覆盖更多原生语句的完整构造");
         return a.Finish("inline-constructors");
     }
 }

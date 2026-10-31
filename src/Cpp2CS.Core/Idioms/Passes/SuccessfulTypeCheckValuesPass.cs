@@ -43,7 +43,7 @@ internal static class SuccessfulTypeCheckValuesPass
                         changed = true;
                     }
             }
-            foreach (var block in function.Blocks)
+            foreach (var block in function.Blocks.ToArray())
             {
                 var at = block.Statements.FindIndex(s => s is Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException", Arguments: [Compare { Cond: Cond.Eq, Left: var result, Right: Const { Value: 0 } }] } && Flag(result));
                 Block? start = at >= 0 ? block : null;
@@ -51,7 +51,8 @@ internal static class SuccessfulTypeCheckValuesPass
                 if (start is null && block.Statements.LastOrDefault() is Branch { Condition: Compare { Cond: Cond.Eq or Cond.Ne, Left: var result, Right: Const { Value: 0 } } test } branch && Flag(result))
                 {
                     var address = test.Cond == Cond.Eq ? branch.Fallthrough : branch.Target;
-                    start = block.NormalSuccessors.FirstOrDefault(b => b.Start == address && b.Predecessors.Count == 1);
+                    start = CheckedClassValues.SuccessEdge(function, block, branch, address, obj);
+                    if (start is not null) dominators = Dominators.Compute(function);
                     position = start?.Statements.TakeWhile(s => s is Phi).Count() ?? 0;
                 }
 

@@ -12,7 +12,7 @@ internal static class CheckedClassValues
     {
         var dominators = Dominators.Compute(function);
         var changed = false;
-        foreach (var block in function.Blocks)
+        foreach (var block in function.Blocks.ToArray())
         {
             if (block.Statements.LastOrDefault() is not Branch { Condition: Compare { Cond: Cond.Eq or Cond.Ne } compare } branch)
                 continue;
@@ -21,9 +21,12 @@ internal static class CheckedClassValues
                 || type.Definition.FullName == "System.Nullable" || definition(klass) is not Load { Width: 64, Address: Use value })
                 continue;
             var success = block.NormalSuccessors.SingleOrDefault(b => b.Start == (compare.Cond == Cond.Eq ? branch.Target : branch.Fallthrough));
-            if (success is null || success.Predecessors.Count != 1) continue;
+            if (success is null) continue;
             if (!type.Definition.IsValueType)
             {
+                success = SuccessEdge(function, block, branch, success.Start, value);
+                if (success is null) continue;
+                dominators = Dominators.Compute(function);
                 var position = success.Statements.TakeWhile(s => s is Phi).Count();
                 var cast = fresh();
                 if (!Refine(function, success, position, value, cast, dominators)) continue;
@@ -34,6 +37,7 @@ internal static class CheckedClassValues
                 changed = true;
                 continue;
             }
+            if (success.Predecessors.Count != 1) continue;
             for (var index = 0; index < success.Statements.Count; index++)
                 if (success.Statements[index] is Call { Op: { Kind: OpKind.Unbox, Operand: null } op, Arguments: [var obj, ..] } unbox && obj == value)
                 {
@@ -70,6 +74,32 @@ internal static class CheckedClassValues
                 changed = true;
             }
         return changed;
+    }
+
+    // 成功边直接进入合流时，转换只作用于该入边，不能覆盖其他来源。
+    internal static Block? SuccessEdge(MachineFunction function, Block parent, Branch branch, ulong address, Use value)
+    {
+        var target = parent.NormalSuccessors.FirstOrDefault(b => b.Start == address);
+        if (target is null || target.Predecessors.Count == 1) return target;
+        if (function.Range.ExceptionRegions.Length != 0 || parent.Handler is not null || target.IsLandingPad
+            || branch.Target == branch.Fallthrough || target.Predecessors.Count(p => p == parent) != 1
+            || parent.Successors.Count(b => b == target) != 1) return null;
+        var side = target.Predecessors.IndexOf(parent);
+        if (!target.Statements.OfType<Phi>().Any(p => p.Sources.Length == target.Predecessors.Count && p.Sources[side] == value.Variable)) return null;
+        var label = Math.Max(NameSupply.JoinedEdgeBase, function.Blocks.Max(b => b.Start) + 1);
+        var edge = new Block(label) { End = label + 1, Statements = [new Jump(branch.Address, target.Start)] };
+        edge.Predecessors.Add(parent);
+        edge.Successors.Add(target);
+        parent.Successors[parent.Successors.IndexOf(target)] = edge;
+        target.Predecessors[side] = edge;
+        parent.Statements[^1] = branch with
+        {
+            Target = branch.Target == address ? label : branch.Target,
+            Fallthrough = branch.Fallthrough == address ? label : branch.Fallthrough,
+        };
+        function.Blocks.Add(edge);
+        function.Renumber();
+        return edge;
     }
 
     internal static bool Refine(MachineFunction function, Block start, int position, Use value, Variable cast, Dominators dominators)

@@ -88,6 +88,29 @@ internal static class CheckedClassValuesCheck
             a.Equal(mode == "masked", SuccessfulTypeCheckValuesPass.Run(function, u => definitions.GetValueOrDefault(u.Variable), () => new(Storage.Temp(0), 1)), $"{mode} 的对象选择");
             if (mode == "masked") a.True(block.Statements[3] is Call { Op.Kind: OpKind.IsInst, Defines: [var defined] } && defined == result, "选择结果保留变量身份并获得派生类型");
         }
+        foreach (var equal in new[] { false, true })
+        {
+            var type = new DefinitionRef(new TypeDef { Index = 4, Assembly = "Test", Namespace = "Test", Name = "Argument", Token = 4,
+                Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false }, []);
+            var obj = new Use(new(Storage.Gpr(0), 0), 64);
+            var klass = new Variable(Storage.Gpr(8), 1);
+            var flag = new Variable(Storage.Gpr(9), 1);
+            var alternative = new Variable(Storage.Gpr(0), 1);
+            var merged = new Variable(Storage.Gpr(0), 2);
+            var cast = new Variable(Storage.Temp(0), 1);
+            var entry = new Block(0x400) { Statements = [
+                new Define(0x400, klass, new Load(obj, 64)),
+                new Call(0x404, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.TypeCheck, type), Arguments = [new Use(klass, 64)], Results = [flag.Storage], Defines = [flag] },
+                new Branch(0x408, new Compare(equal ? Cond.Eq : Cond.Ne, new Use(flag, 32), Expr.C(0, 32)), equal ? 0x410UL : 0x420UL, equal ? 0x420UL : 0x410UL)] };
+            var failure = new Block(0x410) { Statements = [new Define(0x410, alternative, Expr.C(0, 64)), new Jump(0x414, 0x420)] };
+            var exit = new Block(0x420) { Statements = [new Phi(0x420, merged, [obj.Variable, alternative]), new Return(0x424) { Value = new Use(merged, 64) }] };
+            MachineFunction.AddEdge(entry, exit); MachineFunction.AddEdge(entry, failure); MachineFunction.AddEdge(failure, exit);
+            var function = new MachineFunction { Entry = entry.Start, Range = new(0x400, 0x428, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [entry, failure, exit] };
+            function.Renumber();
+            a.True(SuccessfulTypeCheckValuesPass.Run(function, u => u.Variable == klass ? new Load(obj, 64) : null, () => cast), $"{equal} 成功合流边获得类型");
+            a.True(exit.Statements[0] is Phi { Sources: var sources } && sources[0] == cast && sources[1] == alternative, "只替换成功边的对象来源");
+            a.True(exit.Predecessors[0].Statements[0] is Call { Op.Kind: OpKind.IsInst, Defines: [var defined] } && defined == cast, "转换留在成功入边上");
+        }
         return a.Finish("checked-class-values");
     }
 }

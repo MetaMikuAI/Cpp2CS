@@ -18,9 +18,7 @@ internal static class InlineConstructorsRules
                         || (declaredType ??= DelegateCallNormalizer.TypeQuery(ctx.facts, ctx.function))(e) is { } declared
                             && ctx.types.Kind(declared) == TypeKind.Bool) is not { } candidate)
                 continue;
-            if (match is not null)
-                return false;
-            match = candidate;
+            match = match is null ? candidate : InlineConstructors.Prefer(match, candidate);
         }
 
         if (match is null)
