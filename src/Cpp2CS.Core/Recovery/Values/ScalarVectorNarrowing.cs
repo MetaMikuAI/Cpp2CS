@@ -20,10 +20,27 @@ internal static class ScalarVectorNarrowing
         var copies = blocks.SelectMany(b => b.Statements).OfType<Define>()
             .Where(d => d.Value is Ir.Convert { Kind: ConvKind.ZeroExtend or ConvKind.Truncate, Operand: Use })
             .ToDictionary(d => d.Target, d => (Ir.Convert)d.Value);
+        var inserts = blocks.SelectMany(b => b.Statements).OfType<Define>()
+            .Where(d => d.Value is Insert).ToDictionary(d => d.Target, d => (Insert)d.Value);
+        Expr? Lane(Use use, int low, int width, HashSet<Variable> seen)
+        {
+            if (!seen.Add(use.Variable) || !inserts.TryGetValue(use.Variable, out var insert)) return null;
+            Expr? part = low == insert.Low && width == insert.Value.Width ? insert.Value
+                : low + width <= insert.Low ? Fold.Extract(insert.Base, low, width) : null;
+            return part switch
+            {
+                Use next => Lane(next, 0, width, seen) ?? next,
+                Const c => c,
+                _ => null,
+            };
+        }
         Expr? Project(Expr expression)
         {
             if (expression is Intrinsic duplicate) return RepeatedConstant(duplicate) ?? RepeatedVariable(duplicate);
+            // 逐道插入的标量读取沿 SSA 引用投影，不内联计算或内存读取。
+            if (expression is Extract { Operand: Use vector } extract && Lane(vector, extract.Low, extract.Width, []) is { } lane) return lane;
             if (expression is not Use original) return null;
+            if (Lane(original, 0, original.Width, []) is { } low) return low;
             var current = original;
             var seen = new HashSet<Variable>();
             while (seen.Add(current.Variable) && copies.TryGetValue(current.Variable, out var copy)
@@ -45,7 +62,11 @@ internal static class ScalarVectorNarrowing
                     if (!args.AsSpan().SequenceEqual(call.Arguments)) block.Statements[i] = call with { Arguments = args };
                 }
 
-        return NarrowDefinitions(blocks, callWidths, resultWidths, inputWidths);
+        var changed = 0;
+        int narrowed;
+        // 逐道插入收窄后会暴露上游栈快照的实际读取宽度；每轮只减少位宽。
+        while ((narrowed = NarrowDefinitions(blocks, callWidths, resultWidths, inputWidths)) > 0) changed += narrowed;
+        return changed;
     }
 
     /// <summary>仅收窄已证明的定义；调用实参投影已完成时可在类型推断后复用。</summary>
@@ -83,6 +104,11 @@ internal static class ScalarVectorNarrowing
             .GroupBy(u => Find(u.Variable)).ToDictionary(g => g.Key, g => g.Select(u => u.Width).Distinct().ToArray());
         foreach (var definition in blocks.SelectMany(b => b.Statements).OfType<Define>())
         {
+            // 两个标量拼成低半向量时，不让插入操作隐含观察基值的全部 128 位。
+            if (definition.Target.Storage.Bank is Bank.Vec or Bank.Temp
+                && definition.Value is Insert { Width: 128, Base: Use, Low: 32, Value.Width: 32 } insert
+                && observed.GetValueOrDefault(Find(definition.Target)) is [64])
+                candidates[definition.Target] = new Insert(new Insert(Expr.C(0, 64), Low(insert.Base, 32), 0), insert.Value, 32);
             // 栈上的向量暂存可能只读取一个标量；收窄读取保留原位置，未观察的高位不参与后续栈合流。
             if (definition.Target.Storage.Bank == Bank.Vec && definition.Value is Load { Width: 128, Address: FrameAddress } load
                 && observed.GetValueOrDefault(Find(definition.Target)) is [var readWidth and (32 or 64)])

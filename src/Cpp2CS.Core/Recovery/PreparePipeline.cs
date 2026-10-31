@@ -78,6 +78,7 @@ internal static class PreparePipeline
         var constantFrameIndices = FrameConstantIndices.Run(ctx.function) > 0;
         ctx.Passes.Run("prepare.ManagedFramePromotion.Run", () =>
         {
+            ctx.NormalizeScalarVectors();
             ManagedFramePromotion.Run(ctx.facts, ctx.function, ctx.owner.abi, ctx.owner.lifter.Calls, ctx.owner.lifter.Machine.Convention.StackPointer, signature.Return);
             ctx.NormalizeScalarVectors();
         });

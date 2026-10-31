@@ -166,6 +166,26 @@ internal static class FloatScalarCheck
         a.Equal(0, ScalarVectorNarrowing.Run([halfDuplicate], Unknown), "复制后的宽值不能收窄为单个标量");
         a.True(halfDuplicate.Statements[0] is Define { Value: Ir.Convert { Width: 128, Operand: Insert { Width: 64 } } },
             "低半向量复制仍保留高半清零");
+        var packed = new Variable(Storage.Vec(2), 1);
+        foreach (var readWidth in new[] { 64, 128 })
+        {
+            var snapshot = new Block(0x6000) { Statements = [
+                new Define(0x6000, v, new Load(new FrameAddress(-32), 128)),
+                new Define(0x6004, packed, new Insert(new Use(v, 128), new Use(source, 32), 32)),
+                new Return(0x6008) { Value = new Use(packed, readWidth) }] };
+            a.Equal(readWidth == 64 ? 2 : 0, ScalarVectorNarrowing.Run([snapshot], Unknown), "低半插入投影沿 SSA 快照传播，全宽使用保留");
+            a.True(snapshot.Statements[0] is Define { Value: Load load } && load.Width == (readWidth == 64 ? 32 : 128),
+                "栈加载保留位置，只读取最终实际观察的通道");
+        }
+        var lanes = new Block(0x7000) { Statements = [
+            new Define(0x7000, packed, new Insert(new Use(v, 128), new Use(source, 32), 32)),
+            new Store(0x7004, address, new Use(packed, 32)),
+            new Return(0x7008) { Value = new Extract(new Use(packed, 128), 32, 32) }] };
+        ScalarVectorNarrowing.Run([lanes], Unknown);
+        a.True(lanes.Statements[1] is Store { Value: Use lo } && lo.Variable == v && lo.Width == 32,
+            "低通道直接读取原 SSA 快照");
+        a.True(lanes.Statements[2] is Return { Value: Use hi } && hi.Variable == source && hi.Width == 32,
+            "高通道直接读取插入值，不隐含观察基值的其他通道");
         return a.Finish("float-unit");
     }
 }
