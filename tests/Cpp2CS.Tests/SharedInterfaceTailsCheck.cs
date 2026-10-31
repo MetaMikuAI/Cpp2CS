@@ -12,7 +12,7 @@ internal static class SharedInterfaceTailsCheck
     public static int Run()
     {
         var a = new Assertions();
-        foreach (var mode in new[] { "split", "merged-result", "escaping", "handler", "unknown" })
+        foreach (var mode in new[] { "split", "merged-result", "virtual", "escaping", "handler", "unknown" })
         {
             var version = 0;
             Variable Fresh() => new(Storage.Gpr(8), ++version);
@@ -32,6 +32,12 @@ internal static class SharedInterfaceTailsCheck
                 new Phi(0x1060, argument, [leftArgument, rightArgument]),
                 new Call(0x1064, CallKind.Indirect, Use(target)) { Arguments = [Use(receiver), Use(argument)], Defines = [result] }, new Jump(0x1068, 0x1080)] };
             var done = new Block(0x1080) { End = 0x1090, Statements = [new Return(0x1080)] };
+            if (mode == "virtual")
+            {
+                left.Statements[1] = new Define(0x1024, leftPointer, new Load(new Binary(BinOp.Add, new Load(Use(leftReceiver), 64), Expr.C(RuntimeLayout.ClassVtable, 64), 64), 64));
+                right.Statements[1] = new Define(0x1044, rightPointer, new Load(new Binary(BinOp.Add, new Load(Use(rightReceiver), 64), Expr.C(RuntimeLayout.ClassVtable + RuntimeLayout.VirtualInvokeDataSize, 64), 64), 64));
+                merge.Statements.Insert(4, new Call(0x1066, CallKind.Direct, Expr.C(0x2000, 64)) { Arguments = [Use(result)] });
+            }
             MachineFunction.AddEdge(start, left); MachineFunction.AddEdge(start, right);
             MachineFunction.AddEdge(left, merge); MachineFunction.AddEdge(right, merge); MachineFunction.AddEdge(merge, done);
             var returned = Fresh();
@@ -41,7 +47,7 @@ internal static class SharedInterfaceTailsCheck
             var function = new MachineFunction { Entry = start.Start, Range = new(start.Start, 0x1090, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [start, left, right, merge, done] };
             var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
             var changed = SharedInterfaceTails.SplitInvokes(function, e => e is Use u ? definitions.GetValueOrDefault(u.Variable, e) : e);
-            a.Equal(mode is "split" or "merged-result", changed, $"共享接口尾部 {mode}");
+            a.Equal(mode is "split" or "merged-result" or "virtual", changed, $"共享接口尾部 {mode}");
             if (!changed) continue;
             var leftCall = left.Statements.OfType<Call>().Single(c => c.Kind == CallKind.Indirect);
             var rightCall = right.Statements.OfType<Call>().Single(c => c.Kind == CallKind.Indirect);

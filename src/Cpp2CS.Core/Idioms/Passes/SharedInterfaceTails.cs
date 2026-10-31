@@ -1,3 +1,4 @@
+using Cpp2CS.Facts;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Ir;
 
@@ -6,15 +7,24 @@ namespace Cpp2CS.Idioms;
 /// <summary>接口的不同槽位被尾合并时，按接收者来源拆回各自的查找和调用。</summary>
 internal static class SharedInterfaceTails
 {
-    /// <summary>已识别的接口查找在同一间接调用前合流时，把调用放回对应的入边。</summary>
+    /// <summary>接口查找或虚表读取在同一间接调用前合流时，把调用放回对应的入边。</summary>
     internal static bool SplitInvokes(MachineFunction function, Func<Expr, Expr> expand)
     {
         var data = function.Blocks.SelectMany(b => b.Statements).OfType<Call>()
             .Where(c => c.Op?.Kind == OpKind.InterfaceInvokeData).SelectMany(c => c.Defines).ToHashSet();
+        bool Pointer(Variable variable)
+        {
+            if (expand(new Use(variable, variable.Width)) is not Load { Width: 64 } load) return false;
+            if (load.Address is Use address && data.Contains(address.Variable)) return true;
+            var terms = TermsPass.Terms(load.Address).ToArray();
+            var offset = terms.OfType<Const>().Aggregate(0UL, (sum, c) => sum + c.Value);
+            return terms.Where(e => e is not Const).ToArray() is [Load { Width: 64 }]
+                && offset >= RuntimeLayout.ClassVtable && (offset - RuntimeLayout.ClassVtable) % RuntimeLayout.VirtualInvokeDataSize == 0;
+        }
         return Cpp2CS.Machine.Ssa.TailDuplication.Run(function, merge =>
-            merge.Statements.OfType<Call>().ToArray() is [Call { Op: null, Kind: CallKind.Indirect, Target: Use target }]
-            && merge.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == target.Variable) is { } pointer
-            && pointer.Sources.All(v => expand(new Use(v, v.Width)) is Load { Width: 64, Address: Use address } && data.Contains(address.Variable)));
+            merge.Statements.OfType<Call>().Any(call => call is { Op: null, Kind: CallKind.Indirect or CallKind.TailIndirect, Target: Use target }
+                && merge.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == target.Variable) is { } pointer
+                && pointer.Sources.All(Pointer)));
     }
 
     internal static bool Run(MachineFunction function, Func<Call, bool> isLookup, Func<Variable> fresh)
