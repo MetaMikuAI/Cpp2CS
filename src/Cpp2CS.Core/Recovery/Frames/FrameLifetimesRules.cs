@@ -195,6 +195,9 @@ internal static class FrameLifetimesRules
                 {
                     if (defining.TryGetValue(statement, out var own))
                         return own[0];
+                    if (statement is Store clear && ctx.FrameOffset(clear.Target) is { } at && at >= offset
+                        && at + clear.Value.Width / 8 <= offset + size && ctx.FrameZero(clear.Value))
+                        continue;
                     if (Touches(statement))
                         return null;
                 }
@@ -216,8 +219,10 @@ internal static class FrameLifetimesRules
                 if (!users.Contains(statement))
                     continue;
                 TypeRef? type;
-                // 构造前的整值清零属于新生命期；不同分支遗留的旧类型不参与这次写入。
-                if (statement is Store clear && ctx.FrameOffset(clear.Target) == offset && ctx.FrameZero(clear.Value) && FollowingDefinition(block, i + 1) is { } nextType && clear.Value.Width == ctx.types.Size(nextType) * 8)
+                // 构造前的连续分片清零属于新生命期；不同分支遗留的旧类型不参与这次写入。
+                if (statement is Store clear && ctx.FrameOffset(clear.Target) is { } clearOffset && clearOffset >= offset
+                    && ctx.FrameZero(clear.Value) && FollowingDefinition(block, i + 1) is { } nextType
+                    && clearOffset + clear.Value.Width / 8 <= offset + ctx.types.Size(nextType))
                     type = nextType;
                 else if (defining.TryGetValue(statement, out var own))
                     type = own[0];
