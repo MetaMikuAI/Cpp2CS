@@ -106,7 +106,25 @@ internal static class DelegatesRules
         if (!registers.TryGetValue(Storage.Gpr(1), out var target))
             return RecoveryDiagnostics.Fail(address, "委托 构造缺少绑定对象", rule: "CreateDelegate");
         var lookup = ctx.State.Calls.virtualDelegates.GetValueOrDefault(call);
-        var targetMethod = lookup is not null ? ctx.VirtualDelegateMethod(lookup) : registers.TryGetValue(Storage.Gpr(2), out var identity) && ctx.Expand(identity) is Symbol { Kind: SymbolKind.Method, Value: MethodRef direct } ? direct : null;
+        var identity = registers.GetValueOrDefault(Storage.Gpr(2));
+        return ctx.Assign(address, ctx.State.Construction.constructed[call],
+            () => ctx.DelegateChoice(type, invoke, target, identity, lookup, address), output);
+    }
+
+    private static RecoveryResult<ManagedValue> DelegateChoice(this RecoveryScope ctx, DefinitionRef type, MethodRef invoke,
+        Expr target, Expr? identity, VirtualDelegate? lookup, ulong address)
+    {
+        var seen = new HashSet<Variable>();
+        while (identity is Use use && seen.Add(use.Variable) && ctx.values.TryGetValue(use.Variable, out var value)) identity = value;
+        if (lookup is null && identity is Select choice)
+        {
+            if (!ctx.Recover(choice.Condition, ctx.types.Boolean).TryGet(out var condition, out var failure)) return failure;
+            if (!ctx.DelegateChoice(type, invoke, target, choice.True, null, address).TryGet(out var yes, out failure)) return failure;
+            if (!ctx.DelegateChoice(type, invoke, target, choice.False, null, address).TryGet(out var no, out failure)) return failure;
+            return new ChoiceValue(condition, yes, no, type, 64);
+        }
+        var targetMethod = lookup is not null ? ctx.VirtualDelegateMethod(lookup)
+            : identity is Symbol { Kind: SymbolKind.Method, Value: MethodRef direct } ? direct : null;
         if (targetMethod is null)
             return RecoveryDiagnostics.Fail(address, "委托 方法身份或虚表槽位未确定", rule: "CreateDelegate");
         if (!ctx.Bound(targetMethod.DeclaringType) || targetMethod.MethodArguments.Any(t => !ctx.Bound(t)) || targetMethod.Method.GenericParameters.Count != targetMethod.MethodArguments.Count)
@@ -138,7 +156,7 @@ internal static class DelegatesRules
                 return failure;
         }
 
-        return ctx.Assign(address, ctx.State.Construction.constructed[call], () => new DelegateValue(type, receiver, targetMethod, binding), output);
+        return new DelegateValue(type, receiver, targetMethod, binding);
     }
 
     internal static bool Bound(this RecoveryScope ctx, TypeRef type) => type switch
