@@ -283,7 +283,7 @@ internal static class IdiomPipeline
         });
         state.Passes.Run("idioms.SelectedAddressLoads.Run", () =>
         {
-            for (var round = 0; round < 8 && SelectedAddressLoads.Run(state.function); round++)
+            for (var round = 0; round < 32 && SelectedAddressLoads.Run(state.function); round++)
             {
                 state.Cleanup();
                 state.Symbols(rgctx: true);
