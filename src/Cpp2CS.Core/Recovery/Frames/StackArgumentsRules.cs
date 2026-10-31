@@ -85,8 +85,8 @@ internal static class StackArgumentsRules
                     ctx.Rewriter.Replace(owner, at, new Store(wide.Address, new FrameAddress(callSp + offset), new Extract(wide.Value, 0, 64)));
                     ctx.InsertAnalysisStatement(owner, at + 1, new Store(wide.Address, new FrameAddress(callSp + offset + 8), new Extract(wide.Value, 64, 64)));
                 }
-                // 虚调用的隐藏 MethodInfo 与方法指针来自同一个 vtable 槽，寄存器耗尽时写入栈。
-                if (call.Op?.Kind == OpKind.CallVirtual && layout.MethodInfoOffset is { } hidden && ctx.ReachingStackStore(block, block.Statements.IndexOf(call), callSp + hidden, []) is { } metadata && Definition(metadata.Value) is Load { Width: 64 } info && Definition(call.Target) is Load { Width: 64 } pointer && ctx.Split(info.Address) is var infoAt && ctx.Split(pointer.Address) is var pointerAt && infoAt.Base == pointerAt.Base && infoAt.Offset == pointerAt.Offset + 8)
+                // 虚调用与接口调用的隐藏 MethodInfo 紧随方法指针，寄存器耗尽时写入栈。
+                if (call.Op?.Kind is OpKind.CallVirtual or OpKind.CallInterface && layout.MethodInfoOffset is { } hidden && ctx.ReachingStackStore(block, block.Statements.IndexOf(call), callSp + hidden, []) is { } metadata && Definition(metadata.Value) is Load { Width: 64 } info && Definition(call.Target) is Load { Width: 64 } pointer && ctx.Split(info.Address) is var infoAt && ctx.Split(pointer.Address) is var pointerAt && infoAt.Base == pointerAt.Base && infoAt.Offset == pointerAt.Offset + 8)
                     ctx.State.Lowering.dropped.Add(metadata);
                 foreach (var parameter in layout.Parameters)
                 {
