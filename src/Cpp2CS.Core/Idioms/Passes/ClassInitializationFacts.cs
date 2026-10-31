@@ -10,16 +10,16 @@ internal static class ClassInitializationFacts
 {
     private sealed record Point(Block Block, int Index, Stmt Statement);
 
-    internal static bool Run(MachineFunction function, Func<Expr, TypeRef?>? typeOf = null)
+    internal static bool Run(MachineFunction function, Func<Expr, TypeRef?>? typeOf = null, bool constructorFacts = true)
     {
-        if (ClassLayoutReloads.Run(function) || ClassInitializationReloads.Run(function, typeOf)) return true;
+        if (ClassLayoutReloads.Run(function) || constructorFacts && ClassInitializationReloads.Run(function, typeOf)) return true;
         var points = function.Blocks.SelectMany(b => b.Statements.Select((s, i) => new Point(b, i, s))).ToArray();
         var initializers = points.Where(p => p.Statement is Call { Op: { Kind: OpKind.InitClass or OpKind.RunClassConstructor, Operand: TypeRef } }).ToArray();
         if (initializers.Length == 0) return false;
         var definitions = points.Where(p => p.Statement is Define).ToDictionary(p => ((Define)p.Statement).Target);
         var dominators = Dominators.Compute(function);
         bool Initialized(TypeRef type, OpKind kind, Point at) => initializers.Any(p => ((Call)p.Statement).Op is { } op
-            && op.Kind == kind && Equals(op.Operand, type) && dominators.Dominates(p.Block.Index, at.Block.Index)
+            && (constructorFacts || kind == OpKind.InitClass) && op.Kind == kind && Equals(op.Operand, type) && dominators.Dominates(p.Block.Index, at.Block.Index)
             && (p.Block != at.Block || p.Index < at.Index));
         bool InitializationBit(Expr value, Point at, HashSet<Variable> seen) => value switch
         {

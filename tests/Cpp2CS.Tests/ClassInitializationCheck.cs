@@ -41,6 +41,11 @@ internal static class ClassInitializationCheck
         a.True(ClassInitializationFacts.Run(Function(block)), "初始化之后的 16 位读取只按低位折叠");
         a.True(block.Statements[^1] is Branch { Condition: Const { Value: 1 } }, "低位已置位");
         a.True(block.Statements[2] is Define { Target: var target, Value: Symbol } && target == result, "重复初始化的返回类指针仍保留");
+        block.Statements = [Init(4), Init(8), new Call(12, CallKind.Direct, Expr.C(0, 64))
+            { Op = new(OpKind.RunClassConstructor, type), Arguments = [klass] },
+            new Define(16, flags, new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassCctorFinishedOrNoCctor, 64), 64), 32))];
+        a.True(ClassInitializationFacts.Run(Function(block), constructorFacts: false), "静态构造内部仍可消除重复布局初始化");
+        a.True(block.Statements[1] is Nop && block.Statements[3] is Define { Value: Cpp2CS.Ir.Load }, "布局初始化不代表静态构造已经完成");
         block.Statements = [read, Init(12), Test(1)];
         a.True(!ClassInitializationFacts.Run(Function(block)), "初始化之前的旧标志快照不可折叠");
         block.Statements = [Init(4), read, Test(0x100)];
