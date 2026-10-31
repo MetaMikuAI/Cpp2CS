@@ -18,8 +18,13 @@ internal static class FragmentsRules
     internal static void PrepareFragmentPhis(this RecoveryScope ctx)
     {
         var phis = ctx.blocks.SelectMany(b => b.Statements).OfType<Phi>().ToArray();
-        var targets = phis.Select(p => p.Target).ToHashSet();
-        var links = phis.SelectMany(p => p.Sources.SelectMany(s => new[] { (From: p.Target, To: s), (From: s, To: p.Target) })).ToLookup(p => p.From, p => p.To);
+        var forwarding = ctx.blocks.SelectMany(b => b.Statements).OfType<Define>()
+            .Where(d => d.Value.Width == d.Target.Width && (d.Value is Use
+                || d.Value is Select choice && new[] { choice.True, choice.False }.All(v => v is Use || v is Const { Value: 0 })))
+            .Select(d => (d.Target, Inputs: (d.Value is Select choice ? new[] { choice.True, choice.False } : [d.Value]).OfType<Use>().Select(u => u.Variable).ToArray())).ToArray();
+        var targets = phis.Select(p => p.Target).Concat(forwarding.Select(d => d.Target)).ToHashSet();
+        var links = phis.Select(p => (p.Target, Inputs: p.Sources)).Concat(forwarding)
+            .SelectMany(p => p.Inputs.SelectMany(s => new[] { (From: p.Target, To: s), (From: s, To: p.Target) })).ToLookup(p => p.From, p => p.To);
         var seen = new HashSet<Variable>();
         foreach (var phi in phis)
         {
@@ -47,13 +52,18 @@ internal static class FragmentsRules
                     continue;
                 }
 
-                if (!ctx.Variable(source, width).TryGet(out var value, out _) || value is not Fragment fragment)
+                if (!ctx.Variable(source, width).TryGet(out var value, out _))
                 {
                     complete = false;
                     break;
                 }
-
-                fragments.Add(fragment);
+                if (value is Fragment fragment) fragments.Add(fragment);
+                // 完整整数来源可逐叶子投影；片形状以结构体来源为准，填充仍不可被消费。
+                else if (value.Width != width || ctx.types.Kind(value.Type) is not (TypeKind.Int or TypeKind.Bool))
+                {
+                    complete = false;
+                    break;
+                }
             }
 
             if (!complete || fragments.Count == 0)
