@@ -33,7 +33,7 @@ internal static class FrameArgumentsRules
                 if (origin >= 0 || origin + size > 0 || pieces.Any(p => p.Frame - p.Offset != origin || p.Offset < 0 || p.Offset + p.Width / 8 > size))
                     continue;
                 ctx.State.Calls.callBindings.Commit(call, callee);
-                if (ctx.TypedFrameRead(witnesses, origin, argument.Type, reads)) continue;
+                if (ctx.TypedFrameRead(witnesses, origin, argument.Type, reads, pieces)) continue;
                 ctx.WitnessReadInitialization(witnesses, origin, argument.Type, reads);
                 foreach (var read in reads)
                     witnesses.Add(new(origin, argument.Type, read, false));
@@ -64,12 +64,16 @@ internal static class FrameArgumentsRules
     }
 
     /// <summary>寄存器传参可按字段重新组装结构体；同块已有写入给出兼容叶子时，不再用目标结构体覆盖源区域。</summary>
-    internal static bool TypedFrameRead(this RecoveryScope ctx, List<FrameWitness> witnesses, long offset, TypeRef type, IEnumerable<Define> reads)
+    internal static bool TypedFrameRead(this RecoveryScope ctx, List<FrameWitness> witnesses, long offset, TypeRef type, IEnumerable<Define> reads,
+        IReadOnlyList<(int Offset, int Width, long Frame)>? pieces = null)
     {
-        var leaves = ctx.ScalarStructPaths(type).ToArray();
+        // 部分寄存器分量只约束实际读取的字节，不能把较小的源结构体扩大为目标布局。
+        var spans = pieces ?? [(0, ctx.types.Size(type) * 8, offset)];
+        var leaves = ctx.ScalarStructPaths(type).Where(leaf => spans.Any(p =>
+            leaf.Offset < p.Offset + p.Width / 8 && p.Offset < leaf.Offset + ctx.types.Size(leaf.Type))).ToArray();
         if (leaves.Length == 0) return false;
         return witnesses.Any(w => w.Writes && ctx.types.Kind(w.Type) == TypeKind.Struct
-            && w.Offset <= offset && offset + ctx.types.Size(type) <= w.Offset + ctx.types.Size(w.Type)
+            && spans.All(p => w.Offset <= p.Frame && p.Frame + p.Width / 8 <= w.Offset + ctx.types.Size(w.Type))
             && reads.All(read => ctx.SameBlockBefore(w.Call, read))
             && leaves.All(leaf => ctx.ScalarStructPaths(w.Type).Any(source => w.Offset + source.Offset == offset + leaf.Offset && source.Type.Equals(leaf.Type))));
     }

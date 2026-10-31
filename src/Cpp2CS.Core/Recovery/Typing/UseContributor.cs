@@ -55,7 +55,8 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                             // 窄整数运算及其寄存器扩展有明确的整数结果；用途同时约束中间值，避免长链每轮只前进一层。
                             // 64 位加法仍可能是指针运算，不据此定型；未知加载也不接受反向猜测。
                             if (ScalarIntegerResult(value))
-                                pending.Push((u, Integer(value.Width, ManagedTypes.IsSigned(type)), true));
+                                // 低位读取不约束宽值的符号；否则窄副本与宽来源会交替反传 int/uint。
+                                pending.Push((u, Integer(value.Width, u.Width == value.Width && ManagedTypes.IsSigned(type)), true));
                             pending.Push((value, type, false));
                             break;
                         }

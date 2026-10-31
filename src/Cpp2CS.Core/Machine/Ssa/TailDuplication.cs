@@ -20,7 +20,6 @@ internal static class TailDuplication
         {
             if (!function.Blocks.Contains(merge) || merge.Handler is not null || merge.IsLandingPad
                 || merge.Predecessors.Count is < 2 or > 16 || merge.Statements.Count > 96 || !select(merge)
-                || merge.Statements.All(s => s is Phi or Jump or Nop)
                 || merge.Statements.Any(s => s is not (Phi or Define or Store or Call or Jump or Nop or Return))) continue;
             var exits = merge.NormalSuccessors.ToArray();
             if (exits.Length > 1 || exits.Length == 0 && merge.Statements.LastOrDefault() is not (Return or Call { Kind: CallKind.Tail or CallKind.TailIndirect })) continue;
@@ -37,6 +36,8 @@ internal static class TailDuplication
                 ? phi.Sources.Where((_, i) => b != exit || i != exitIndex).Any(defined.Contains)
                 : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => defined.Contains(u.Variable))));
             if (keepJoin && (!keepResults || exit is null)) continue;
+            // 保留的结果汇合不可重复展开；可消除的纯 φ 块仍需转接到出口，暴露各入边的类型身份。
+            if (keepJoin && merge.Statements.All(s => s is Phi or Jump or Nop)) continue;
             // 调用结果或其他合流值仍被后续使用时，原块只保留结果 φ，不复制后续业务语句。
             var joined = (keepJoin ? external : []).ToDictionary(v => v, _ => new List<Variable>());
             var exitValues = exit?.Statements.OfType<Phi>().ToDictionary(p => p.Target, p => p.Sources[exitIndex]);

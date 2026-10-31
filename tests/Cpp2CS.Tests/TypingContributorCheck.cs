@@ -28,7 +28,7 @@ internal static class TypingContributorCheck
     [Command("typing-contributors", "T3 贡献者的迁移边界与反例", Arguments = "<binary> <metadata>", Gate = Gate.Image)]
     public static int Run(string binary, string metadata)
     {
-        var facts = FactsBuilder.Build(binary, metadata);
+        var facts = FactsBuilder.Build(binary, metadata, inferUnregistered: false);
         var types = new ManagedTypes(facts.Model, facts.Layouts);
         var a = new Assertions();
         var method = types.CorlibMethod("System.Object", "MemberwiseClone")!;
@@ -244,6 +244,19 @@ internal static class TypingContributorCheck
         { Op = new(OpKind.BoundsCheck, null), Arguments = [new Use(Chain(1), 32), Expr.C(2, 32)] };
         restricted = new(); new UseContributor(input).Contribute(Context(), restricted);
         a.Equal(0, restricted.Uses.Count, "同宽转换可能保留浮点类型，不凭整数用途给结果定型");
+        foreach (var width in new[] { 32, 64 })
+        {
+            block.Statements = [new Define(0x1000, Chain(0), new Binary(BinOp.And,
+                    new Use(unknown, 64), Expr.C(uint.MaxValue, 64), 64)),
+                new Define(0x1004, Chain(1), new Use(Chain(0), width))];
+            var projected = Context();
+            projected.Solution[Chain(1)] = new ManagedResult(width == 32 ? types.Int32 : types.Int64);
+            restricted = new(); new UseContributor(input).Contribute(projected, restricted);
+            var solution = TypeSolver.Solve(restricted, types);
+            a.Equal<TypeResult?>(new ManagedResult(width == 32 ? types.UInt64 : types.Int64), solution.GetValueOrDefault(Chain(0)),
+                "低位有符号快照不反推宽来源的符号，整值用途仍保留符号");
+            a.True(!solution.ContainsKey(unknown), "位型用途仍不猜未知来源");
+        }
         return a.Finish("typing-contributors");
     }
 }

@@ -172,7 +172,24 @@ internal static class SharedInterfaceTailsCheck
                 : new[] { left, right }.All(b => b.Successors.Count == 0 && b.Statements[^1] is Return), "独立返回或在原块汇合后续使用的结果");
             a.True(new[] { left, right }.All(b => b.Statements.OfType<Define>().Last().Target.Width == 128), "复制保持向量寄存器宽度");
             a.True(left.Statements.OfType<Define>().Last().Target != right.Statements.OfType<Define>().Last().Target, "副本定义互不覆盖");
-            if (following) a.True(!Cpp2CS.Machine.Ssa.TailDuplication.Run(function, b => b == merge), "只剩结果合流时不重复展开");
+            if (following) a.True(!Cpp2CS.Machine.Ssa.TailDuplication.Run(function, b => b == merge, keepResults: true), "只剩结果合流时不重复展开");
+        }
+        {
+            var leftValue = new Variable(Storage.Gpr(0), 1);
+            var rightValue = leftValue with { Version = 2 };
+            var selected = leftValue with { Version = 3 };
+            var returned = leftValue with { Version = 4 };
+            var start = new Block(0) { Statements = [new Branch(0, Expr.C(1, 1), 16, 32)] };
+            var left = new Block(16) { Statements = [new Jump(16, 48)] };
+            var right = new Block(32) { Statements = [new Jump(32, 48)] };
+            var merge = new Block(48) { Statements = [new Phi(48, selected, [leftValue, rightValue]), new Jump(48, 64)] };
+            var exit = new Block(64) { Statements = [new Phi(64, returned, [selected]), new Return(64) { Value = new Use(returned, 64) }] };
+            MachineFunction.AddEdge(start, left); MachineFunction.AddEdge(start, right);
+            MachineFunction.AddEdge(left, merge); MachineFunction.AddEdge(right, merge); MachineFunction.AddEdge(merge, exit);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 80, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [start, left, right, merge, exit] };
+            a.True(Cpp2CS.Machine.Ssa.TailDuplication.Run(function, b => b == merge), "只用于出口 φ 的纯汇合块仍可展开");
+            a.True(!function.Blocks.Contains(merge) && exit.Predecessors.SequenceEqual([left, right])
+                && exit.Statements[0] is Phi phi && phi.Sources.SequenceEqual([leftValue, rightValue]), "转接保留出口前驱与值来源的对应关系");
         }
         return a.Finish("interface-tails");
     }
