@@ -7,13 +7,14 @@ using Cpp2CS.Machine.Lifting;
 
 namespace Cpp2CS.Tests;
 
-/// <summary>诊断：打印一个函数提升并经 L2 归一之后的 IR（逐块，含前驱与 φ）。CPP2CS_FRAME_SLOTS=off 可对比帧槽提升之前的形态。</summary>
+/// <summary>诊断：打印提升与 L2 IR。CPP2CS_FRAME_SLOTS=off 保留原栈槽；CPP2CS_FACT_CACHE_FILE 复用输入匹配的事实缓存。</summary>
 internal static class IrDump
 {
     [Command("ir-dump", "打印提升与 L2 IR；raw: 前缀保留未化简 SSA", Arguments = "<binary> <metadata> <入口地址…>")]
     public static int Run(string binary, string metadata, string[] entries)
     {
-        var facts = FactsBuilder.Build(binary, metadata);
+        var facts = FactsBuilder.Build(binary, metadata, options: new()
+            { FactCacheFile = Environment.GetEnvironmentVariable("CPP2CS_FACT_CACHE_FILE") });
         var lifter = new FunctionLifter(facts);
         var rewriter = new IdiomRewriter(facts) { RecordFilter = _ => false, RecoverUnusedInputs = true };
         foreach (var text in entries)

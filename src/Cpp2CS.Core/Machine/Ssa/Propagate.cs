@@ -101,25 +101,33 @@ public static class Propagate
         }));
         // 不同前驱可分别装载同一个常量或元数据符号；寄存器版本不同不代表值不同。
         var phis = function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().ToDictionary(p => p.Target);
-        foreach (var phi in phis.Values)
+        for (var added = true; added;)
         {
-            if (replace.ContainsKey(phi.Target)) continue;
-            // 循环可把不变的元数据地址传过多个 φ。只折叠所有外部来源相同的叶子，纯环没有常量证据。
-            var inputs = new HashSet<Expr>();
-            var pending = new Stack<Variable>(phi.Sources);
-            var seen = new HashSet<Variable>();
-            var valid = true;
-            while (pending.TryPop(out var source))
+            added = false;
+            foreach (var phi in phis.Values)
             {
-                if (!seen.Add(source)) continue;
-                var value = Resolve(new Use(source, phi.Target.Width));
-                if (value is Const or Symbol or FrameAddress) inputs.Add(value);
-                else if (value is Use use && use.Width == use.Variable.Width && phis.TryGetValue(use.Variable, out var next))
-                    foreach (var incoming in next.Sources) pending.Push(incoming);
-                else { valid = false; break; }
-                if (inputs.Count > 1) break;
+                if (replace.ContainsKey(phi.Target)) continue;
+                // 循环可把不变的元数据地址传过多个 φ。只折叠所有外部来源相同的叶子，纯环没有常量证据。
+                var inputs = new HashSet<Expr>();
+                var pending = new Stack<Variable>(phi.Sources);
+                var seen = new HashSet<Variable>();
+                var valid = true;
+                while (pending.TryPop(out var source))
+                {
+                    if (!seen.Add(source)) continue;
+                    var value = Resolve(new Use(source, phi.Target.Width));
+                    if (value is Const or Symbol or FrameAddress) inputs.Add(value);
+                    else if (value is Use use && use.Width == use.Variable.Width && phis.TryGetValue(use.Variable, out var next))
+                        foreach (var incoming in next.Sources) pending.Push(incoming);
+                    else { valid = false; break; }
+                    if (inputs.Count > 1) break;
+                }
+                if (!valid || inputs.Count != 1 || pending.Count != 0) continue;
+                replace[phi.Target] = inputs.Single();
+                // 新叶子可使已有地址计算成为常量；旧展开缓存不能阻断上游循环 φ 的再次求值。
+                resolved.Clear();
+                added = true;
             }
-            if (valid && inputs.Count == 1 && pending.Count == 0) replace[phi.Target] = inputs.Single();
         }
         bool Mentions(Expr expr) => ExprMap.Walk(expr).Any(e => e is Use u && replace.ContainsKey(u.Variable));
 
