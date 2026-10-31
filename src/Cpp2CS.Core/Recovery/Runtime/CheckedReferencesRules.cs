@@ -56,6 +56,9 @@ internal static class CheckedReferencesRules
         foreach (var block in ctx.blocks.Where(b => dominators.Dominates(b.Index, site.Index)))
             foreach (var check in block.Statements.Take(block == site ? block.Statements.FindIndex(s => s.Address == address) : block.Statements.Count).OfType<Call>())
             {
+                if (check is { Op.Kind: OpKind.NullCheck, Arguments: [Use nonnull] } && nonnull == value
+                    && ctx.TypeOfValue(value) is { } declared && ctx.types.IsAssignable(declared, target))
+                    return true;
                 // isinst 的原生继承检查返回 0/1；判空已排除失败路径，后续同一引用保留该类型。
                 if (check is { Op.Kind: OpKind.NullCheck, Arguments: [Use cast] }
                     && ctx.results.TryGetValue(cast.Variable, out var castSource)

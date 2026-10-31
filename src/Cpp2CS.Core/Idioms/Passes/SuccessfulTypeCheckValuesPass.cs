@@ -45,7 +45,8 @@ internal static class SuccessfulTypeCheckValuesPass
             }
             foreach (var block in function.Blocks.ToArray())
             {
-                var at = block.Statements.FindIndex(s => s is Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException", Arguments: [Compare { Cond: Cond.Eq, Left: var result, Right: Const { Value: 0 } }] } && Flag(result));
+                var at = block.Statements.FindIndex(s => s is Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException", Arguments: [Compare { Cond: Cond.Eq, Left: var result, Right: Const { Value: 0 } }] } && Flag(result)
+                    || s is Call { Op.Kind: OpKind.NullCheck, Arguments: [var required] } && Flag(required));
                 Block? start = at >= 0 ? block : null;
                 var position = at + 1;
                 if (start is null && block.Statements.LastOrDefault() is Branch { Condition: Compare { Cond: Cond.Eq or Cond.Ne, Left: var result, Right: Const { Value: 0 } } test } branch && Flag(result))

@@ -122,9 +122,11 @@ internal static class RuntimeRules
             Expr Receiver(Expr expression)
             {
                 var value = ctx.Expand(expression);
-                return value is Use cast && ctx.results.TryGetValue(cast.Variable, out var castResult)
+                var seen = new HashSet<Variable>();
+                while (value is Use cast && seen.Add(cast.Variable) && ctx.results.TryGetValue(cast.Variable, out var castResult)
                     && castResult.Call is { Op.Kind: OpKind.IsInst, Op.Operand: TypeRef castType, Arguments: [Use original] }
-                    && ctx.CheckedReference(original, castType, call.Address) ? ctx.Expand(original) : value;
+                    && ctx.CheckedReference(original, castType, call.Address)) value = ctx.Expand(original);
+                return value;
             }
             var receiverValue = Receiver(call.Arguments[0]);
             var joined = new List<Variable>();

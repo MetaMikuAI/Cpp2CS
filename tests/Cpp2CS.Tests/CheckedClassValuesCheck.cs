@@ -127,6 +127,26 @@ internal static class CheckedClassValuesCheck
             function.Renumber();
             a.Equal(mode is "sealed" or "reverse", CheckedClassValues.Run(function, u => u == klass ? new Load(obj, 64) : null, () => new(Storage.Temp(0), 1)), $"{mode} 精确类选择转换");
         }
+        foreach (var checkedFlag in new[] { false, true })
+        {
+            var type = new DefinitionRef(new TypeDef { Index = 6, Assembly = "Test", Namespace = "Test", Name = "Clip", Token = 6,
+                Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false }, []);
+            var obj = new Use(new(Storage.Gpr(0), 0), 64);
+            var klass = new Variable(Storage.Gpr(8), 1);
+            var flag = new Variable(Storage.Temp(0), 1);
+            var cast = new Variable(Storage.Temp(1), 1);
+            var guard = new Call(0x604, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.NullCheck, null),
+                Arguments = [checkedFlag ? new Use(flag, 64) : obj] };
+            var block = new Block(0x600) { Statements = [
+                new Call(0x600, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.TypeCheck, type),
+                    Arguments = [new Use(klass, 64)], Results = [flag.Storage], Defines = [flag] },
+                guard, new Return(0x608) { Value = obj }] };
+            var function = new MachineFunction { Entry = block.Start, Range = new(0x600, 0x610, CodeRegion.Managed, BoundaryEvidence.EhFrame), Blocks = [block] };
+            function.Renumber();
+            a.Equal(checkedFlag, SuccessfulTypeCheckValuesPass.Run(function, u => u.Variable == klass ? new Load(obj, 64) : null, () => cast),
+                "仅检查类型结果非零才证明派生类型，原对象判空不足以证明");
+            a.True(block.Statements.Contains(guard), "保留原来的异常类型与检查位置");
+        }
         return a.Finish("checked-class-values");
     }
 }
