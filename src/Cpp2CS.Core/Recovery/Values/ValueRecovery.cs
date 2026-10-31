@@ -440,6 +440,16 @@ internal static class ValueRecovery
             return failure;
         if (right is Fragment rf && !ctx.Pack(rf).TryGet(out right, out failure))
             return failure;
+        // 整数指令可处理浮点的位型（符号位、指数和散列），不进行数值转换。
+        if (b.Op is BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Shl or BinOp.LShr or BinOp.AShr)
+        {
+            if (ctx.types.Kind(left.Type) is TypeKind.Float or TypeKind.Double
+                && !ctx.Coerce(left, ctx.types.Integer(left.Width, false), 0).TryGet(out left, out failure))
+                return failure;
+            if (ctx.types.Kind(right.Type) is TypeKind.Float or TypeKind.Double
+                && !ctx.Coerce(right, ctx.types.Integer(right.Width, false), 0).TryGet(out right, out failure))
+                return failure;
+        }
         if (left.Type is GenericParameterRef { NativeScalar: not null } || right.Type is GenericParameterRef { NativeScalar: not null })
             return RecoveryDiagnostics.Fail(0, "泛型复制 不支持原生数值比较", rule: "Binary");
         foreach (var operand in new[]
