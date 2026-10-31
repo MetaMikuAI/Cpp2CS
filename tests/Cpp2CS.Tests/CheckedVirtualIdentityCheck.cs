@@ -12,7 +12,7 @@ internal static class CheckedVirtualIdentityCheck
     [Command("checked-virtual-identity", "强制转换后虚表接收者身份及失败分支边界", Arguments = "<binary> <metadata>", Gate = Gate.Image)]
     public static int Run(string binary, string metadata)
     {
-        var facts = FactsBuilder.Build(binary, metadata);
+        var facts = FactsBuilder.Build(binary, metadata, inferUnregistered: false);
         var recovery = new MethodRecovery(facts, new ManagedTypes(facts.Model, facts.Layouts));
         var method = MethodRef.Open(facts.Model.Methods.Single(m => m.Owner.FullName == "Sekai.VirtualLiveSelectView" && m.Name == "OnInstantiate"));
         var a = new Assertions();
@@ -40,6 +40,25 @@ internal static class CheckedVirtualIdentityCheck
             runtime.Clear();
             context.MarkVtableLoads();
             a.Equal(mode == "checked", runtime.Contains(entry), "仅同一对象的成功类型检查证明虚表身份：" + mode);
+        }
+        var normalized = MethodRef.Open(facts.Model.Methods.Single(m => m.Owner.FullName == "Sekai.ScreenLayerEventStorySelect" && m.Name == "OnCreateCell"));
+        foreach (var guarded in new[] { true, false })
+        {
+            var context = new RecoveryScope(recovery, normalized, normalized.Method.Address);
+            a.True(context.Prepare(), "准备已归一的类型检查入口");
+            a.True(context.Analyze() is null, "已归一类型检查分析成功");
+            var calls = context.blocks.SelectMany(b => b.Statements).OfType<Call>().ToArray();
+            var cast = calls.Single(c => c.Op?.Kind == OpKind.IsInst);
+            var call = calls.Single(c => c.Op?.Kind == OpKind.CallVirtual);
+            var guard = calls.Single(c => c is { Op.Kind: OpKind.NullCheck, Arguments: [Use u] } && u.Variable == cast.Defines[0]);
+            if (!guarded)
+            {
+                var block = context.blocks.Single(b => b.Statements.Contains(guard));
+                block.Statements[block.Statements.IndexOf(guard)] = new Nop(guard.Address, "缺少转换结果判空");
+            }
+            context.State.Runtime.runtime.Clear();
+            context.MarkVtableLoads();
+            a.Equal(guarded, context.State.Runtime.runtime.Contains(((Use)call.Target).Variable), "isinst 结果只有通过判空后才与原虚表身份相同");
         }
         return a.Finish("checked-virtual-identity");
     }

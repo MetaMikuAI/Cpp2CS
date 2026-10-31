@@ -57,6 +57,11 @@ internal static class CheckedReferencesRules
             foreach (var check in block.Statements.Take(block == site ? block.Statements.FindIndex(s => s.Address == address) : block.Statements.Count).OfType<Call>())
             {
                 // isinst 的原生继承检查返回 0/1；判空已排除失败路径，后续同一引用保留该类型。
+                if (check is { Op.Kind: OpKind.NullCheck, Arguments: [Use cast] }
+                    && ctx.results.TryGetValue(cast.Variable, out var castSource)
+                    && castSource.Call is { Op.Kind: OpKind.IsInst, Op.Operand: TypeRef castType, Arguments: [Use originalObject] }
+                    && castType.Equals(target) && originalObject == value)
+                    return true;
                 if (check is { Op.Kind: OpKind.NullCheck, Arguments: [Use flag] } && ctx.results.TryGetValue(flag.Variable, out var source) && source.Call.Op is { Kind: OpKind.TypeCheck, Operand: TypeRef checkedTarget } && checkedTarget.Equals(target) && ctx.State.Runtime.typeChecks.TryGetValue(source.Call, out var checkedObject) && checkedObject == value)
                     return true;
                 if (check is { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException", Arguments: [Compare { Cond: Cond.Eq, Left: Use failedFlag, Right: Const { Value: 0 } }] } && ctx.results.TryGetValue(failedFlag.Variable, out var checkedSource) && checkedSource.Call.Op is { Kind: OpKind.TypeCheck, Operand: TypeRef checkedReference } && checkedReference.Equals(target) && ctx.State.Runtime.typeChecks.TryGetValue(checkedSource.Call, out var original) && original == value)
