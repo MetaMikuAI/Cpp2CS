@@ -19,7 +19,7 @@ internal static class TailDuplication
         foreach (var merge in function.Blocks.ToArray())
         {
             if (!function.Blocks.Contains(merge) || merge.Handler is not null || merge.IsLandingPad
-                || merge.Predecessors.Count is < 2 or > 4 || merge.Statements.Count > 96 || !select(merge)
+                || merge.Predecessors.Count is < 2 or > 16 || merge.Statements.Count > 96 || !select(merge)
                 || merge.Statements.Any(s => s is not (Phi or Define or Store or Call or Jump or Nop or Return))) continue;
             var exits = merge.NormalSuccessors.ToArray();
             if (exits.Length > 1 || exits.Length == 0 && merge.Statements.LastOrDefault() is not (Return or Call { Kind: CallKind.Tail or CallKind.TailIndirect })) continue;
