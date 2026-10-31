@@ -25,6 +25,7 @@ public static partial class Arm64Lifter
         {
             var width = FloatWidth;
             if ((w & 0x5F20FC00) == 0x1E200000) { FloatInteger(); return; }
+            if ((w & 0x7F200000) == 0x1E000000) { FloatFixedInteger(); return; }
             if (width == 0) { Unsupported("fp.type"); return; }
             if ((w & 0x5F207C00) == 0x1E204000 && !Bit(31)) { FloatUnary(width); return; }
             if ((w & 0x5F203C00) == 0x1E202000 && !Bit(31))
@@ -119,6 +120,19 @@ public static partial class Arm64Lifter
                 _ => Op(BinOp.FSub, product, addend),
             };
             SetV(Rd, result);
+        }
+
+        private void FloatFixedInteger()
+        {
+            var width = FloatWidth;
+            var scale = (int)Bits(10, 6);
+            var opcode = Bits(16, 3);
+            if (width is not (32 or 64) || Bits(19, 2) != 3 || opcode > 1 || Sf == 32 && scale < 32)
+            { Unsupported("fcvt.fixed"); return; }
+            var exponent = 64 - scale;
+            var factor = width == 32 ? (ulong)(127 + exponent) << 23 : (ulong)(1023 + exponent) << 52;
+            var scaled = Op(BinOp.FMul, V(Rn, width), C(factor, width));
+            SetX(Rd, new Ir.Convert(opcode == 0 ? ConvKind.FloatToSInt : ConvKind.FloatToUInt, scaled, Sf));
         }
 
         private void FloatInteger()

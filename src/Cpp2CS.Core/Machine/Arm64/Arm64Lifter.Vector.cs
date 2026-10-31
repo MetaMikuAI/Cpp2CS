@@ -32,6 +32,7 @@ public static partial class Arm64Lifter
 
         private bool VectorDispatch()
         {
+            if ((w & 0xBF3FFC00) == 0x0E31B800) { AddAcross(); return true; }
             if ((w & 0x9F200400) == 0x0E200400) { VectorThreeSame(); return true; }
             if ((w & 0x9F3E0C00) == 0x0E200800) { VectorTwoMisc(); return true; }
             if ((w & 0xDF3E0C00) == 0x5E200800) { ScalarTwoMisc(); return true; }
@@ -43,6 +44,16 @@ public static partial class Arm64Lifter
             if ((w & 0xBFE08400) == 0x2E000000) { Ext(); return true; }
             if ((w & 0xBF208C00) == 0x0E000800) { Permute(); return true; }
             return false;
+        }
+
+        private void AddAcross()
+        {
+            var size = 8 << (int)Bits(22, 2);
+            var total = Bit(30) ? 128 : 64;
+            if (size == 64 || size == 32 && total == 64) { Unsupported("simd.addv.size"); return; }
+            Expr sum = Lane(Rn, 0, size);
+            for (var i = 1; i < total / size; i++) sum = Add(sum, Lane(Rn, i, size));
+            SetV(Rd, sum);
         }
 
         private void VectorThreeSame()
@@ -93,6 +104,10 @@ public static partial class Arm64Lifter
                     return;
                 case 0x13 when !u && lane < 64:
                     SetLanes(total, lane, i => Op(BinOp.Mul, Lane(Rn, i, lane), Lane(Rm, i, lane)));
+                    return;
+                case 0x0C or 0x0D when lane < 64:
+                    var comparison = opcode == 0x0C ? u ? Cond.Ugt : Cond.Sgt : u ? Cond.Ult : Cond.Slt;
+                    SetLanes(total, lane, i => new Select(new Compare(comparison, Lane(Rn, i, lane), Lane(Rm, i, lane)), Lane(Rn, i, lane), Lane(Rm, i, lane), lane));
                     return;
                 case 0x11:
                     // cmtst / cmeq
@@ -459,6 +474,18 @@ public static partial class Arm64Lifter
         /// <summary>LD1/ST1 单车道与 LD1R。返回 false 表示不是该类编码。</summary>
         private bool SingleStructure()
         {
+            // ST2 的交错存储；无回写，每个元素保留原位宽。
+            if ((w & 0xBFFFF000) == 0x0C008000)
+            {
+                var laneSize = 8 << (int)Bits(10, 2);
+                var total = Bit(30) ? 128 : 64;
+                if (laneSize == 64 && total == 64) { Unsupported("st2.size"); return true; }
+                var pairAddress = XSp(Rn, 64);
+                for (var i = 0; i < total / laneSize; i++)
+                    for (var j = 0; j < 2; j++)
+                        Emit(new Store(pc, Add(pairAddress, C((ulong)((i * 2 + j) * laneSize / 8), 64)), Lane((Rd + j) % 32, i, laneSize)));
+                return true;
+            }
             var postIndex = (w & 0xBF800000) == 0x0D800000;
             if (!postIndex && (w & 0xBF9F0000) != 0x0D000000) return false;
             if (Bit(21)) { Unsupported("ldst.structure.multi"); return true; }
