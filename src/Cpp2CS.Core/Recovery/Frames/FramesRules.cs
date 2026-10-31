@@ -7,7 +7,9 @@ namespace Cpp2CS.Recovery;
 
 internal static class FramesRules
 {
-    internal static bool ContainsFrameType(this RecoveryScope ctx, FrameRegion outer, long offset, TypeRef type) => outer.Offset == offset && outer.Type.Equals(type) || ctx.StructPaths(outer.Type).Any(p => outer.Offset + p.Offset == offset && p.Type.Equals(type));
+    internal static bool ContainsFrameType(this RecoveryScope ctx, FrameRegion outer, long offset, TypeRef type) => outer.Offset == offset && outer.Type.Equals(type)
+        || ctx.types.Kind(outer.Type) == TypeKind.Struct && offset >= outer.Offset && offset + ctx.types.Size(type) <= outer.Offset + outer.Size
+        && ctx.StructPaths(outer.Type).Any(p => outer.Offset + p.Offset == offset && p.Type.Equals(type));
     /// <summary>先解析接收者及虚调用返回类型，避免帧区域只看见直调签名而提前固定错误的栈槽类型。</summary>
     [MachinePass("帧前类型", 29, After = ["异常值", "栈上调用"])]
     internal static void PrepareFrameTypes(this RecoveryScope ctx)
