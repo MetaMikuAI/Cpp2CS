@@ -60,9 +60,15 @@ internal static class UnusedArgumentsRules
     }
 
     // 编译器可以省略未用输入。仅填补缺失输入或不能表示成目标标量的残值，保留已有求值。
-    [ArgumentRule(30)]
+    [ArgumentRule(8)]
     internal static RecoveryResult<ManagedValue?> UnusedArgument(this LoweringScope ctx, AbiValue parameter, ArgumentSite site)
     {
+        // 值类型也可能整体未使用；逐寄存器证明，不能只凭缺失片段补齐被消费的字段。
+        if (parameter.Passing == Passing.Registers && parameter.Pieces.Length > 0 && ctx.types.Kind(parameter.Type) == TypeKind.Struct
+            && parameter.Pieces.All(p => site.Registers.TryGetValue(p.Register, out var input) && ctx.Values.MissingInput(input))
+            && ctx.Values.DirectInputProof(site.Call, site.Callee)
+            && parameter.Pieces.All(p => ctx.Values.UnusedParameter(site.Call, p.Register)))
+            return new ComposedValue(parameter.Type, []);
         if (parameter.Passing != Passing.Registers || parameter.Pieces is not [var piece] || !site.Registers.TryGetValue(piece.Register, out var expression))
             return (ManagedValue?)null;
         var kind = ctx.types.Kind(parameter.Type);
