@@ -155,6 +155,10 @@ internal sealed class UseContributor(TypingInputs input) : ITypeContributor
                     yield return (addition.Right, context.Types.Int64, statement.Address, "原生指针字节偏移");
                 if (expressions.TypeOf(addition.Right) is PointerRef)
                     yield return (addition.Left, context.Types.Int64, statement.Address, "原生指针字节偏移");
+                var terms = Cpp2CS.Idioms.TermsPass.Terms(addition).ToArray();
+                if (terms.Where(t => expressions.TypeOf(t) is ArrayRef).ToArray() is [var array])
+                    foreach (var offset in terms.Where(t => t != array))
+                        yield return (offset, context.Types.Int64, statement.Address, "数组数据字节偏移");
             }
         foreach (var statement in context.Statements)
             switch (statement)
