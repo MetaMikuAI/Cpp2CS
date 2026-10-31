@@ -92,6 +92,10 @@ internal static class PlatformImportPattern
             // IL2CPP 的 bool 输入是 0/1；默认 P/Invoke BOOL 将其扩成 32 位。
             if (ManagedTypes.PrimitiveName(signature.Parameters[i].Type) == "Boolean"
                 && Strip(input) is Binary { Op: BinOp.And, Left: var boolean, Right: Const { Value: 1 } }) input = boolean;
+            if (signature.Parameters[i].Type is ArrayRef { IsVector: true }
+                && input is Select { Condition: Compare { Cond: Cond.Eq, Left: var array, Right: Const { Value: 0 } },
+                    True: Const { Value: 0 }, False: Binary { Op: BinOp.Add, Left: var data, Right: Const { Value: RuntimeLayout.ArrayData } } }
+                && array == data) input = array;
             if (ScalarVectorNarrowing.Low(input, piece.Width) is not Use { Variable.Version: 0 } original
                 || original.Variable.Storage != piece.Register) return null;
         }

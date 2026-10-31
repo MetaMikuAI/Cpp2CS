@@ -80,6 +80,15 @@ internal static class PlatformImportCheck
                     arguments[Array.IndexOf(call.Sources, signature.Parameters[0].Pieces[0].Register)] = Expr.C(0, 64);
                     block.Statements[index] = call with { Arguments = arguments };
                 }, "封送或改写参数不能当作原样转调");
+            if (signature.Parameters.Any(p => p.Type is ArrayRef))
+                Reject(f =>
+                {
+                    var block = f.Blocks.Single(b => b.Statements.OfType<Define>().Any(d => d.Value is Select));
+                    var index = block.Statements.FindIndex(s => s is Define { Value: Select });
+                    var define = (Define)block.Statements[index];
+                    var choice = (Select)define.Value;
+                    block.Statements[index] = define with { Value = choice with { False = ((Binary)choice.False) with { Right = Expr.C(RuntimeLayout.ArrayData + 8, 64) } } };
+                }, "数组地址必须指向首元素，不能错移一个槽");
             Console.WriteLine($"0x{entry:x} {imported}");
         }
         return a.Finish("platform-import");
