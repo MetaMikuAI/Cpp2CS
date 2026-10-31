@@ -54,6 +54,12 @@ internal static class ArrayAssignabilityCheck
                 types.IsAssignable(new DefinitionRef(list, [from]), new DefinitionRef(enumerable, [to])), "类实现接口后允许合法协变");
         a.True(types.IsAssignable(new DefinitionRef(enumerable, [new DefinitionRef(enumerable, [types.String])]),
             new DefinitionRef(enumerable, [new DefinitionRef(enumerable, [types.Object])])), "嵌套引用协变逐层核对");
+        foreach (var clr in new[] { typeof(object), typeof(ValueType), typeof(IComparable), typeof(System.Collections.IEnumerable) })
+        {
+            var target = types.Corlib(clr.FullName!);
+            a.Equal(clr.IsInstanceOfType((object)1), types.IsBoxAssignable(types.Int32, target), "已有装箱对象的接口与基类转换符合 CLR");
+            a.True(!types.IsAssignable(types.Int32, target), "未装箱值仍不能直接赋给引用");
+        }
         return a.Finish("array-assignability");
     }
 }

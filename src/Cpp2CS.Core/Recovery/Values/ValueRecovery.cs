@@ -158,6 +158,10 @@ internal static class ValueRecovery
                     return new BoxValue(value, generic, target);
                 if (ctx.types.Kind(value.Type) == TypeKind.Reference && ctx.types.IsAssignable(value.Type, target))
                     return value;
+                var boxed = value is BoxValue box ? box.Boxed
+                    : value is LocalValue boxedLocal && ctx.results.TryGetValue(boxedLocal.Variable, out var boxedResult) && boxedResult.Call.Op is { Kind: OpKind.Box, Operand: TypeRef source } ? source : null;
+                if (boxed is not null && ctx.types.IsBoxAssignable(boxed, target))
+                    return value is BoxValue directBox ? new BoxValue(directBox.Operand, boxed, target) : new CheckedCastValue(value, target);
                 return RecoveryDiagnostics.Fail(address, $"类型 {value.Type} 不能赋给 {target}", rule: "Coerce");
             case TypeKind.Bool or TypeKind.Int:
                 if (value is ConstantValue c)

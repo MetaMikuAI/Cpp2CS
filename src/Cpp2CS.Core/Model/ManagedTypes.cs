@@ -168,6 +168,20 @@ public sealed class ManagedTypes
                 && (array.Element.Equals(element) || IsReferenceType(array.Element) && IsReferenceType(element) && IsAssignable(array.Element, element))) return true;
             return CorlibDefinition("System.Array") is { } definition && IsAssignable(new DefinitionRef(definition, []), to);
         }
+        return DefinitionAssignable(from, to);
+    }
+
+    /// <summary>已有装箱对象的引用兼容性；值类型本身仍不允许隐式作为引用赋值。</summary>
+    public bool IsBoxAssignable(TypeRef boxed, TypeRef target)
+    {
+        if (!IsReferenceType(target)) return false;
+        if (target.Equals(Object)) return true;
+        return boxed is GenericParameterRef parameter ? parameter.Parameter?.Constraints.Any(c => IsAssignable(c, target)) == true
+            : DefinitionAssignable(boxed, target);
+    }
+
+    private bool DefinitionAssignable(TypeRef from, TypeRef to)
+    {
         for (TypeRef? current = from; current is DefinitionRef c; current = c.Definition.BaseType?.Substitute(c.Arguments, []))
         {
             if (current.Equals(to) || to is DefinitionRef target && VariantAssignable(c, target)) return true;
