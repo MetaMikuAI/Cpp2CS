@@ -20,7 +20,7 @@ internal static class JoinedFieldReads
         var label = Math.Max(NameSupply.JoinedEdgeBase, function.Blocks.Max(b => b.Start) + 1);
         foreach (var block in function.Blocks.ToArray())
         {
-            if (block.IsLandingPad || block.Predecessors.Count is < 2 or > 4 || block.Predecessors.Distinct().Count() != block.Predecessors.Count
+            if (block.IsLandingPad || block.Predecessors.Count is < 2 or > 16 || block.Predecessors.Distinct().Count() != block.Predecessors.Count
                 || block.Predecessors.Any(p => p == block || p.Handler is not null || p.Successors.Count(s => s == block) != 1
                     || p.Successors.Count > 1 && p.Statements.LastOrDefault() is not Branch)) continue;
             var phis = block.Statements.OfType<Phi>().ToDictionary(p => p.Target);

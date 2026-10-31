@@ -178,6 +178,24 @@ internal static class DelegateConstructorChoiceCheck
         a.True(JoinedFieldReads.Run(addressFunction, p => p.Target == receiver), "已证明的字段地址合流保持原分支来源");
         a.True(addressJoin.Predecessors.SelectMany(p => p.Statements).OfType<Define>().All(d => d.Value is Load { Address: Use u }
             && u.Variable.Storage.Index is 10 or 11), "共享地址读取沿原入边替换，未提前读取其他路径");
+        var five = Diamond();
+        var fiveJoin = five.Blocks[3];
+        fiveJoin.Statements.Remove(constructor);
+        fiveJoin.Statements.RemoveAll(s => s is Phi);
+        var fiveInputs = new List<Variable> { new(Storage.Gpr(10), 0), new(Storage.Gpr(11), 0) };
+        for (var side = 0; side < 3; side++)
+        {
+            var predecessor = new Block((ulong)(40 + side * 4)) { Statements = [new Jump(40, fiveJoin.Start)] };
+            five.Blocks.Add(predecessor);
+            MachineFunction.AddEdge(five.EntryBlock, predecessor);
+            MachineFunction.AddEdge(predecessor, fiveJoin);
+            fiveInputs.Add(new(Storage.Gpr(12 + side), 0));
+        }
+        fiveJoin.Statements.InsertRange(0, [new Phi(20, receiver, fiveInputs.ToArray()), fieldRead]);
+        a.True(JoinedFieldReads.Run(five, p => p.Target == receiver), "五路返回地址合流沿各自入边读取");
+        a.True(fiveJoin.Predecessors.SelectMany(p => p.Statements).OfType<Define>()
+            .SelectMany(d => ExprMap.Walk(d.Value).OfType<Use>()).Select(u => u.Variable).SequenceEqual(fiveInputs),
+            "多路合流的来源顺序保持不变");
         foreach (var nested in new[] { "constant", "dynamic", "narrow" })
         {
             var nestedFunction = Diamond();
