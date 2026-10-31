@@ -165,6 +165,13 @@ internal static class DelegateConstructorChoiceCheck
             }
         }
         var addressFunction = Diamond();
+        var framed = Diamond();
+        var framedJoin = framed.Blocks[3];
+        framedJoin.Statements.Remove(constructor);
+        var snapshot = new Define(18, new(Storage.Vec(0), 1), new Load(new FrameAddress(-32), 128));
+        framedJoin.Statements.InsertRange(2, [snapshot, fieldRead]);
+        a.True(!JoinedFieldReads.Run(framed, p => p.Target == receiver), "帧快照在定型前不随无关字段读取移动");
+        a.True(framedJoin.Statements.Contains(snapshot), "整值复制的栈读取仍位于原合流块");
         var addressJoin = addressFunction.Blocks[3];
         addressJoin.Statements.Remove(constructor);
         addressJoin.Statements.Insert(2, fieldRead with { Value = new Load(new Use(receiver, 64), 32) });

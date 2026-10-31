@@ -36,6 +36,8 @@ internal static class JoinedFieldReads
                 {
                     if (statement is Nop or Jump || current == block && statement is Phi) continue;
                     if (statement is not Define && statement is not Call { Op.Kind: OpKind.NullCheck, Defines.Length: 0 }) break;
+                    // 帧分析尚未完成；栈快照移到不同入边会丢失原有整值复制的类型见证。
+                    if (ExprMap.Operands(statement).SelectMany(ExprMap.Walk).Any(e => e is FrameAddress)) break;
                     prefix.Add((current, statement));
                     if (prefix.Count > 16) break;
                     if (statement is not Define define) continue;
