@@ -65,7 +65,8 @@ internal static class RecoverDump
     [Command("recover-dump", "只跑 L3，打印方法的洞或托管方法体", Arguments = "<binary> <metadata> <入口地址…>")]
     public static int Run(string binary, string metadata, string[] entries)
     {
-        var facts = FactsBuilder.Build(binary, metadata);
+        var facts = FactsBuilder.Build(binary, metadata, options: new()
+            { FactCacheFile = Environment.GetEnvironmentVariable("CPP2CS_FACT_CACHE_FILE") });
         var types = new Cpp2CS.Model.ManagedTypes(facts.Model, facts.Layouts);
         var recovery = new Cpp2CS.Recovery.MethodRecovery(facts, types);
         foreach (var text in entries)

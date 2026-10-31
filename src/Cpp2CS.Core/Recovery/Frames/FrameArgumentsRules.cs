@@ -50,6 +50,10 @@ internal static class FrameArgumentsRules
         {
             if (statement.Value is not { } value || FrameArgumentSpan.ReturnLoads(value, returned.Pieces, ctx.types.Size(returned.Type), definitions, e => ctx.FrameOffset(e)) is not { } span)
                 continue;
+            // 返回接口只是读取约束；已有兼容的引用写入类型不需要另建冲突区域。
+            var existing = witnesses.Where(w => w.Offset == span.Origin).ToArray();
+            if (ctx.types.Kind(returned.Type) == TypeKind.Reference && existing.Length != 0
+                && existing.All(w => ctx.types.Kind(w.Type) == TypeKind.Reference && ctx.types.IsAssignable(w.Type, returned.Type))) continue;
             foreach (var read in span.Reads)
                 witnesses.Add(new(span.Origin, returned.Type, read, false));
         }
