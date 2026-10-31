@@ -66,6 +66,10 @@ internal static class PreparePipeline
         {
             ctx.TrimIndirectArguments();
         });
+        ctx.Passes.Run("prepare.ScalarPhiProjection.Run", () =>
+        {
+            ScalarPhiProjection.Run(ctx.function);
+        });
         ctx.Passes.Run("prepare.Cpp2CS.Machine.Ssa.Propagate.RemoveDead", () =>
         {
             Cpp2CS.Machine.Ssa.Propagate.RemoveDead(ctx.function);
