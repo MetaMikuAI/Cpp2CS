@@ -100,6 +100,11 @@ internal static class FramesRules
                     var block = ctx.blocks.Single(b => b.Statements.Contains(call));
                     if (ctx.ReachingStackStore(block, block.Statements.IndexOf(call), offset, [], ctx.types.Size(type) * 8) is { } store)
                         witnesses.Add(new(offset, type, store, true));
+                    else if (ctx.types.Kind(type) == TypeKind.Struct
+                        && FrameCopySpans.FullWriteBefore(block.Statements, block.Statements.IndexOf(call), offset, ctx.types.Size(type),
+                            ctx.StructPaths(type).Where(p => ctx.types.Kind(p.Type) is not (TypeKind.Struct or null))
+                                .Select(p => (p.Offset, ctx.types.Size(p.Type))).ToArray(), e => ctx.FrameOffset(e)) is { } start)
+                        witnesses.Add(new(offset, type, start, true));
                 }
             }
         }
