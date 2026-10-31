@@ -136,6 +136,11 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     var objects = klass.Sources.Select(v => values.GetValueOrDefault(v) is Load { Width: 64, Address: Use { Width: 64 } obj }
                         ? obj.Variable : null).ToArray();
                     if (objects.Length == 0 || objects.Any(v => v is null)) continue;
+                    if (objects.Distinct().ToArray() is [var same])
+                    {
+                        values[klass.Target] = new Load(new Use(same!, 64), 64);
+                        continue;
+                    }
                     var receiver = block.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources.SequenceEqual(objects!));
                     if (receiver is not null) values[klass.Target] = new Load(new Use(receiver.Target, 64), 64);
                 }
