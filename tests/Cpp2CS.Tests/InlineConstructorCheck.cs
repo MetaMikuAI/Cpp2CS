@@ -250,6 +250,19 @@ internal static class InlineConstructorCheck
         booleanSources[input.Variable] = [new Use(selected, 8)];
         a.True(!InlineConstructors.CanonicalBoolean(new Use(selected, 8), v => booleanSources.GetValueOrDefault(v, [])),
             "循环来源不能仅凭另一条常量入边认定布尔值");
+        var setter = new Call(8, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.CallVirtual, 7),
+            Sources = [Storage.Gpr(0), Storage.Gpr(1)], Arguments = [self, intArgument] };
+        var virtualPattern = new InlineConstructors.Pattern(method, intSignature, [Base(self), setter]);
+        a.True(InlineConstructors.Create(method, intSignature, Function(Base(self), setter with { Kind = CallKind.TailIndirect }),
+            virtualCall: call => call) is { Effects: [Call, Call { Kind: CallKind.Direct }] }, "间接虚尾调用构成完整构造模板");
+        var virtualCaller = Function(caller.EntryBlock.Statements[0], Base(new Use(created, 64)),
+            setter with { Kind = CallKind.Indirect, Target = Expr.C(0x9000, 64), Sources = [Storage.Gpr(0), Storage.Gpr(1), Storage.Gpr(2)],
+                Arguments = [new Use(created, 64), Fold.Convert(ConvKind.ZeroExtend, input, 64), Expr.C(0x9100, 64)] }, new Return(20));
+        a.True(InlineConstructors.Find(virtualPattern, virtualCaller, virtualCaller.EntryBlock, 0, created)
+            is { } virtualMatch && virtualMatch.Arguments.SequenceEqual([input]), "虚构造调用按槽位和托管参数匹配，隐藏元数据寄存器可不同");
+        virtualCaller.EntryBlock.Statements[2] = ((Call)virtualCaller.EntryBlock.Statements[2]) with { Op = new(OpKind.CallVirtual, 8) };
+        a.True(InlineConstructors.Find(virtualPattern, virtualCaller, virtualCaller.EntryBlock, 0, created) is null,
+            "虚调用槽位不同不能匹配构造");
         return a.Finish("inline-constructors");
     }
 }

@@ -23,7 +23,7 @@ internal static class InlineConstructors
         || second.Statements.Count == first.Statements.Count && second.Arguments.Count < first.Arguments.Count ? second : first;
 
     internal static Pattern? Create(MethodRef method, AbiSignature signature, MachineFunction function,
-        IReadOnlyList<StackAbiValue>? stackParameters = null)
+        IReadOnlyList<StackAbiValue>? stackParameters = null, Func<Call, Call?>? virtualCall = null)
     {
         var incoming = stackParameters?.ToDictionary(p => (long)p.Offset) ?? [];
         if (incoming.Values.Any(p => p.Indirect || p.Size is not (1 or 2 or 4 or 8))) return null;
@@ -49,7 +49,9 @@ internal static class InlineConstructors
             switch (statement)
             {
                 case Nop: continue;
-                case Define d when Pure(Expand(d.Value, definitions)): definitions[d.Target] = Expand(d.Value, definitions); continue;
+                case Define d when Pure(Expand(d.Value, definitions)) || ClassMetadata(Expand(d.Value, definitions),
+                    new Use(new(signature.This.Pieces[0].Register, 0), 64), method.Method.Owner.VTable.Count):
+                    definitions[d.Target] = Expand(d.Value, definitions); continue;
                 // 提升器保留的序言存寄存器不属于构造行为。
                 case Store { Target: FrameAddress, Value: Use { Width: 64, Variable: { Version: 0 } v } }
                     when v.Storage.Bank == Bank.Gpr && v.Storage.Index is >= 19 and <= 30
@@ -61,6 +63,11 @@ internal static class InlineConstructors
                     return effects.Any(s => s is Call { Op: null, Kind: CallKind.Direct }) ? new(method, signature, effects) : null;
                 case Call { Kind: CallKind.Direct } call when call.Op is null or { Kind: OpKind.WriteBarrier }:
                     effects.Add(ExprMap.MapOperands(call, e => Expand(e, definitions)));
+                    break;
+                case Call { Op.Kind: OpKind.CallVirtual } call:
+                    if (virtualCall?.Invoke((Call)ExprMap.MapOperands(call, e => Expand(e, definitions))) is not { } invocation) return null;
+                    effects.Add(invocation with { Kind = CallKind.Direct });
+                    if (call.Kind is CallKind.Tail or CallKind.TailIndirect) return new(method, signature, effects);
                     break;
                 case Call { Kind: CallKind.Tail, Op: null } tail:
                     // 内联后尾调用成为普通调用；它的实参和副作用仍须完整匹配，不能作为屏障删去。
@@ -108,7 +115,8 @@ internal static class InlineConstructors
             if (statement is Call && !SameRegion(function, block, allocation, current, statement)) return null;
             matched.Add(statement);
             if (statement is Nop) continue;
-            if (statement is Define d && Pure(Expand(d.Value, definitions))) { definitions[d.Target] = Expand(d.Value, definitions); continue; }
+            if (statement is Define d && (Pure(Expand(d.Value, definitions)) || ClassMetadata(Expand(d.Value, definitions),
+                new Use(created, 64), pattern.Method.Method.Owner.VTable.Count))) { definitions[d.Target] = Expand(d.Value, definitions); continue; }
             var actual = ExprMap.MapOperands(statement, e => Expand(e, definitions));
             var expected = effects[effect];
             var consumed = 1;
@@ -205,6 +213,13 @@ internal static class InlineConstructors
         // 两侧均已证明为 GC 写屏障；字段写入单独匹配，运行时地址参数在 L3 中可能已清除。
         if (pattern is Call { Op.Kind: OpKind.WriteBarrier, Kind: CallKind.Direct }
             && actual is Call { Op.Kind: OpKind.WriteBarrier, Kind: CallKind.Direct }) return true;
+        if (pattern is Call { Op.Kind: OpKind.CallVirtual } virtualPattern && actual is Call { Op.Kind: OpKind.CallVirtual } virtualActual)
+        {
+            if (virtualPattern.Op != virtualActual.Op || virtualActual.Kind is not (CallKind.Direct or CallKind.Indirect)) return false;
+            var arguments = virtualActual.ArgumentsBySource();
+            return virtualPattern.Sources.Select((source, i) => arguments.TryGetValue(source, out var value)
+                && Expression(virtualPattern.Arguments[i], Low(value, virtualPattern.Arguments[i].Width), bindings, parameters)).All(matched => matched);
+        }
         if (pattern is not Call pc || actual is not Call ac || pc.Kind != ac.Kind || pc.Op != ac.Op
             || !pc.Sources.SequenceEqual(ac.Sources) || pc.Arguments.Length != ac.Arguments.Length
             || !pc.Results.SequenceEqual(ac.Results) || !Expression(pc.Target, ac.Target, bindings, parameters)) return false;
@@ -260,6 +275,10 @@ internal static class InlineConstructors
     }
 
     private static bool Pure(Expr expression) => ExprMap.Walk(expression).All(e => e is Const or Use or Binary or Unary or Ir.Convert or Symbol or Extract or Insert or Compare or Select or Logical or Not);
+    private static bool ClassMetadata(Expr expression, Expr self, int slots) => expression is Load { Width: 64 } load
+        && (load.Address == self || load.Address is Binary { Op: BinOp.Add, Left: Load { Width: 64, Address: var receiver }, Right: Const offset }
+            && receiver == self && offset.Value >= (ulong)RuntimeLayout.ClassVtable
+            && offset.Value < (ulong)(RuntimeLayout.ClassVtable + slots * RuntimeLayout.VirtualInvokeDataSize));
     internal static bool CanonicalBoolean(Expr value, Func<Variable, IReadOnlyList<Expr>>? sources = null,
         HashSet<Variable>? path = null)
     {
@@ -319,7 +338,7 @@ public sealed partial class MethodRecovery
                     }
                 var stack = abi.StackArguments(signature);
                 if (stack.Parameters.All(p => abi.Kind(p.Type) != ValueKind.Struct))
-                    pattern = InlineConstructors.Create(method, signature, lifted.Function, stack.Parameters);
+                    pattern = InlineConstructors.Create(method, signature, lifted.Function, stack.Parameters, VirtualCall);
                 if (pattern is not null)
                     pattern = pattern with { UnusedCallInputs = pattern.Effects.OfType<Call>()
                         .Where(c => c.Op is null && c.Target is Const)
@@ -332,6 +351,20 @@ public sealed partial class MethodRecovery
             }
         }
         return constructorPatterns[method] = pattern;
+
+        Call? VirtualCall(Call call)
+        {
+            if (call.Op is not { Kind: OpKind.CallVirtual, Operand: int slot } || slot < 0 || slot >= method.Method.Owner.VTable.Count
+                || method.Method.Owner.VTable[slot] is not { Method.Owner.GenericParameters.Count: 0, Method.GenericParameters.Count: 0 } target
+                || abi.Classify(target with { TypeArguments = [] }, out _) is not { Return: null } called
+                || call.Arguments.FirstOrDefault() is not Use { Variable.Version: 0, Variable.Storage: var receiver }
+                || receiver != Storage.Gpr(0)) return null;
+            var inputs = call.ArgumentsBySource();
+            var pieces = called.Arguments.SelectMany(a => a.Pieces).ToArray();
+            if (called.Arguments.Any(a => a.Passing != Passing.Registers) || pieces.Any(p => !inputs.ContainsKey(p.Register))) return null;
+            return call with { Target = Expr.C(0, 64), Sources = pieces.Select(p => p.Register).ToArray(),
+                Arguments = pieces.Select(p => ScalarVectorNarrowing.Low(inputs[p.Register], p.Width)).ToArray(), Results = [], Defines = [] };
+        }
     }
 
     // 无参基类只逐层转调 Object 构造时，不会发布 this；其后的独立字段仍可交换。
