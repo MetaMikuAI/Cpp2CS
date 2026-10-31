@@ -6,7 +6,7 @@ namespace Cpp2CS.Idioms;
 /// <summary>比较类初始化两臂的业务出口，空跳转不改变进入汇合块的值。</summary>
 internal static class ClassGuardExits
 {
-    public static bool Same(Block first, ulong firstTarget, Block second, ulong secondTarget)
+    public static bool Same(Block first, ulong firstTarget, Block second, ulong secondTarget, Func<Variable, Variable, bool>? sameValue = null)
     {
         static (Block From, Block To)? Follow(Block from, ulong address)
         {
@@ -24,6 +24,7 @@ internal static class ClassGuardExits
         if (first.Handler != second.Handler || Follow(first, firstTarget) is not { } left || Follow(second, secondTarget) is not { } right
             || left.To != right.To) return false;
         var a = left.To.Predecessors.IndexOf(left.From); var b = right.To.Predecessors.IndexOf(right.From);
-        return a >= 0 && b >= 0 && left.To.Statements.OfType<Phi>().All(p => p.Sources.Length == left.To.Predecessors.Count && p.Sources[a] == p.Sources[b]);
+        return a >= 0 && b >= 0 && left.To.Statements.OfType<Phi>().All(p => p.Sources.Length == left.To.Predecessors.Count
+            && (p.Sources[a] == p.Sources[b] || sameValue?.Invoke(p.Sources[a], p.Sources[b]) == true));
     }
 }

@@ -42,7 +42,12 @@ internal static class SplitClassGuardsPass
                 continue;
             var a = state.defs.Expand(after.Condition);
             var b = state.defs.Expand(normal.Condition);
-            if (!(a == b && ClassGuardExits.Same(end, after.Target, skip, normal.Target) && ClassGuardExits.Same(end, after.Fallthrough, skip, normal.Fallthrough)) && !(a == Fold.Simplify(new Not(b)) && ClassGuardExits.Same(end, after.Target, skip, normal.Fallthrough) && ClassGuardExits.Same(end, after.Fallthrough, skip, normal.Target)))
+            var local = prefix.Concat(skip.Statements).OfType<Define>().Select(d => d.Target).ToHashSet();
+            bool SameValue(Variable left, Variable right) => local.Contains(left) && local.Contains(right)
+                && state.defs.Expand(new Use(left, 64)) == state.defs.Expand(new Use(right, 64));
+            bool SameExit(ulong left, ulong right) => ClassGuardExits.Same(end, left, skip, right, SameValue);
+            if (!(a == b && SameExit(after.Target, normal.Target) && SameExit(after.Fallthrough, normal.Fallthrough))
+                && !(a == Fold.Simplify(new Not(b)) && SameExit(after.Target, normal.Fallthrough) && SameExit(after.Fallthrough, normal.Target)))
                 continue;
             // RunClassConstructor 自身处理已初始化状态；保留初始化臂及其后续业务分支。
             head.Statements[^1] = new Jump(guard.Address, init.Start);

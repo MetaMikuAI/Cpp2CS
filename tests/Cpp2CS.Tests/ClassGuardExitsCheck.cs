@@ -33,6 +33,11 @@ internal static class ClassGuardExitsCheck
                 exit.Statements.Insert(0, new Phi(exit.Start, source with { Version = 3 }, [source, mode == "same-phi" ? source : source with { Version = 2 }]));
             }
             a.Equal(mode is "direct" or "bridge" or "same-phi", ClassGuardExits.Same(left, exit.Start, right, mode == "direct" ? exit.Start : bridge.Start), $"{mode} 的出口一致性");
+            if (mode == "different-phi")
+            {
+                a.True(ClassGuardExits.Same(left, exit.Start, right, bridge.Start, (x, y) => x.Storage == y.Storage), "允许调用者证明两臂同值");
+                a.Equal(false, ClassGuardExits.Same(left, exit.Start, right, bridge.Start, (x, y) => false), "拒绝不同业务值");
+            }
         }
         return a.Finish("class-guard-exits");
     }
