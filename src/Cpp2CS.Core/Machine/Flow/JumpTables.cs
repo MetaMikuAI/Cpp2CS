@@ -53,11 +53,12 @@ internal static class JumpTables
         var load = loads[0];
         if (!Decompose(load.Address, out var tableBase, out var index, out var scale)) return null;
         var root = StripExtensions(index);
-        if (root is not Read { Storage.Bank: Bank.Gpr } read) return null;
+        if (root is not Read { Storage.Bank: Bank.Gpr }
+            && root is not Binary { Op: BinOp.And, Left: Read { Storage.Bank: Bank.Gpr }, Right: Const { Value: <= uint.MaxValue } }) return null;
 
         foreach (var predecessor in block.Predecessors)
         {
-            if (Bound(machine, predecessor, block, read) is not { } count) continue;
+            if (Bound(machine.Convention, predecessor, block, root) is not { } count) continue;
             if (count <= 0 || count > MaxEntries) return null;
             var targets = new ulong[count];
             for (var i = 0; i < count; i++)
@@ -117,16 +118,16 @@ internal static class JumpTables
     }
 
     /// <summary>前驱块以“index 超界则跳到别处”的分支结尾时，返回表项个数。</summary>
-    private static int? Bound(IMachine machine, Block predecessor, Block block, Read index)
+    internal static int? Bound(CallingConvention convention, Block predecessor, Block block, Expr index)
     {
         if (predecessor.Statements.LastOrDefault() is not Branch branch) return null;
-        var state = new SymbolicState(machine.Convention);
+        var state = new SymbolicState(convention);
         foreach (var stmt in predecessor.Statements.Take(predecessor.Statements.Count - 1)) state.Step(stmt);
         if (state.Eval(branch.Condition) is not Compare { Right: Const limit } compare) return null;
         var takenToBlock = branch.Target == block.Start;
         var fallToBlock = branch.Fallthrough == block.Start;
         if (takenToBlock == fallToBlock) return null;
-        var atEnd = state.Eval(new Read(index.Storage, index.Storage.Width));
+        var atEnd = state.Eval(index);
         if (Fold.Convert(ConvKind.Truncate, atEnd, compare.Left.Width) != compare.Left) return null;
         var n = limit.Value;
         ulong? count = (compare.Cond, takenToBlock) switch

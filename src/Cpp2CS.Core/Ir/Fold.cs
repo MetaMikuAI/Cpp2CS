@@ -151,7 +151,7 @@ public static class Fold
                 case Read read:
                     return read with { Width = width };
                 case Binary { Op: BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor } b
-                    when b.Left is Ir.Convert or Const or Use && b.Right is Ir.Convert or Const or Use:
+                    when b.Left is Ir.Convert or Const or Use or Read && b.Right is Ir.Convert or Const or Use or Read:
                     // 低位只依赖操作数低位
                     return Binary(b.Op, Convert(ConvKind.Truncate, b.Left, width), Convert(ConvKind.Truncate, b.Right, width), width);
             }
