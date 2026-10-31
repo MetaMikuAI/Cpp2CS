@@ -67,14 +67,14 @@ internal static class PlatformImportCheck
             Reject(f =>
             {
                 var block = f.Blocks.Single(b => b.Statements.OfType<Call>().Any(c => c.Kind == CallKind.Indirect));
-                var index = block.Statements.FindIndex(s => s is Call);
+                var index = block.Statements.FindIndex(s => s is Call { Kind: CallKind.Indirect });
                 block.Statements[index] = ((Call)block.Statements[index]) with { Target = Expr.C(1, 64) };
             }, "调用必须使用缓存与解析结果合流");
             if (signature.Parameters.Length > 0)
                 Reject(f =>
                 {
                     var block = f.Blocks.Single(b => b.Statements.OfType<Call>().Any(c => c.Kind == CallKind.Indirect));
-                    var index = block.Statements.FindIndex(s => s is Call);
+                    var index = block.Statements.FindIndex(s => s is Call { Kind: CallKind.Indirect });
                     var call = (Call)block.Statements[index];
                     var arguments = call.Arguments.ToArray();
                     arguments[Array.IndexOf(call.Sources, signature.Parameters[0].Pieces[0].Register)] = Expr.C(0, 64);
@@ -89,6 +89,14 @@ internal static class PlatformImportCheck
                     var choice = (Select)define.Value;
                     block.Statements[index] = define with { Value = choice with { False = ((Binary)choice.False) with { Right = Expr.C(RuntimeLayout.ArrayData + 8, 64) } } };
                 }, "数组地址必须指向首元素，不能错移一个槽");
+            if (signature.Parameters.Any(p => p.Type.Equals(types.String)))
+                Reject(f =>
+                {
+                    var block = f.Blocks.Single(b => b.Statements.OfType<Call>().Any(c => c.Op is { Kind: OpKind.Import, Operand: "free" }));
+                    var index = block.Statements.FindIndex(s => s is Call { Op: { Kind: OpKind.Import, Operand: "free" } });
+                    var free = (Call)block.Statements[index];
+                    block.Statements[index] = free with { Arguments = [Expr.C(0, 64), .. free.Arguments.Skip(1)] };
+                }, "临时字符串必须在调用后释放同一个指针");
             Console.WriteLine($"0x{entry:x} {imported}");
         }
         return a.Finish("platform-import");

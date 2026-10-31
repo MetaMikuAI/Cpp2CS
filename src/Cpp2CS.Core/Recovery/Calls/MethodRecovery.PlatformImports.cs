@@ -14,7 +14,7 @@ public sealed partial class MethodRecovery
             || (definition.Attributes & SR.MethodAttributes.PinvokeImpl) == 0 || !definition.IsStatic
             || (definition.ImplAttributes & SR.MethodImplAttributes.PreserveSig) == 0
             || method.TypeArguments.Count != 0 || method.MethodArguments.Count != 0
-            || !definition.Parameters.All(p => BlittableScalar(p.Type) || types.Kind(p.Type) == TypeKind.Bool
+            || !definition.Parameters.All(p => BlittableScalar(p.Type) || types.Kind(p.Type) == TypeKind.Bool || p.Type.Equals(types.String)
                 || p.Type is ByRefRef reference && (BlittableScalar(reference.Element) || reference.Element.Equals(types.Corlib("System.Decimal")))
                 || p.Type is ArrayRef { IsVector: true } array && BlittableScalar(array.Element) || PlatformImportPattern.IsHandleRef(p.Type))
             || types.Kind(definition.ReturnType) is not (TypeKind.Void or TypeKind.Bool) && !BlittableScalar(definition.ReturnType)

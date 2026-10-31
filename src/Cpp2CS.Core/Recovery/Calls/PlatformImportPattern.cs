@@ -7,7 +7,7 @@ using CallingConvention = System.Runtime.InteropServices.CallingConvention;
 
 namespace Cpp2CS.Recovery;
 
-/// <summary>IL2CPP 的缓存导入包装：PInvokeArguments、一次解析、标量转发及 HandleRef 句柄投影。</summary>
+/// <summary>IL2CPP 的缓存导入包装：解析记录、参数投影与成对的临时字符串封送。</summary>
 internal static class PlatformImportPattern
 {
     internal static bool IsHandleRef(TypeRef type) => type is DefinitionRef
@@ -33,12 +33,14 @@ internal static class PlatformImportPattern
         if (resolve is null || invoke is null || resolve == entry || invoke == entry || resolve == invoke
             || !resolve.Predecessors.SequenceEqual([entry]) || !resolve.NormalSuccessors.SequenceEqual([invoke]) || invoke.Successors.Count != 0
             || resolve.Statements.OfType<Call>().ToArray() is not [{ Kind: CallKind.Direct, Op: null, Target: Const, Arguments: [FrameAddress buffer, ..] } resolver]
-            || invoke.Statements.OfType<Call>().ToArray() is not [{ Kind: CallKind.Indirect, Op: null, Target: Use target } call]
-            || resolver.Defines.FirstOrDefault(v => v.Storage == Storage.Gpr(0)) is not { } resolved
-            || invoke.Statements.OfType<Phi>().SingleOrDefault(p => p.Target == target.Variable) is not { } targetPhi
-            || targetPhi.Sources.Length != 2 || targetPhi.Sources.Length != invoke.Predecessors.Count
+            || invoke.Statements.OfType<Call>().Where(c => c.Kind == CallKind.Indirect).ToArray() is not [{ Op: null, Target: Use target } call]
+            || resolver.Defines.FirstOrDefault(v => v.Storage == Storage.Gpr(0)) is not { } resolved) return null;
+        var reload = invoke.Statements.OfType<Define>().SingleOrDefault(d => d.Target == target.Variable
+            && d.Value is Load { Address: Const address, Width: 64 } && address == cache);
+        var targetPhi = invoke.Statements.OfType<Phi>().SingleOrDefault(p => p.Target == target.Variable);
+        if (reload is null && (targetPhi is null || targetPhi.Sources.Length != 2 || targetPhi.Sources.Length != invoke.Predecessors.Count
             || !invoke.Predecessors.Select((b, i) => b == entry ? targetPhi.Sources[i] == cached.Variable
-                : b == resolve && targetPhi.Sources[i] == resolved).All(v => v)) return null;
+                : b == resolve && targetPhi.Sources[i] == resolved).All(v => v))) return null;
         var stores = resolve.Statements.OfType<Store>().ToArray();
         if (stores.LastOrDefault() is not { Target: Const written, Value: Use pointer } cacheWrite
             || written != cache || pointer.Variable != resolved || pointer.Width != 64
@@ -70,6 +72,7 @@ internal static class PlatformImportPattern
         var inputs = call.ArgumentsBySource();
         var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target);
         var conversions = new HashSet<Define>();
+        var marshaling = new HashSet<Call>();
         Expr Expand(Expr expression, int depth = 12) => depth == 0 ? expression : Fold.Simplify(ExprMap.Map(expression, part =>
         {
             if (part is not Use use || !definitions.TryGetValue(use.Variable, out var define) || !InlineConstructors.Pure(define.Value)) return null;
@@ -96,6 +99,18 @@ internal static class PlatformImportPattern
                 && input is Select { Condition: Compare { Cond: Cond.Eq, Left: var array, Right: Const { Value: 0 } },
                     True: Const { Value: 0 }, False: Binary { Op: BinOp.Add, Left: var data, Right: Const { Value: RuntimeLayout.ArrayData } } }
                 && array == data) input = array;
+            if (signature.Parameters[i].Type is DefinitionRef { Definition: { Assembly: "mscorlib.dll", Namespace: "System", Name: "String" } })
+            {
+                if (charset == 1 || input is not Use { Variable.Storage.Bank: Bank.Gpr, Variable.Storage.Index: 0 } stringBuffer
+                    || invoke.Statements.OfType<Call>().Where(c => c.Defines.Contains(stringBuffer.Variable)).ToArray() is not [{ Kind: CallKind.Direct, Op: null, Target: Const } marshal]
+                    || invoke.Statements.IndexOf(marshal) >= invoke.Statements.IndexOf(call)
+                    || invoke.Statements.OfType<Call>().Where(c => c.Op is { Kind: OpKind.Import, Operand: "free" } && c.Arguments.FirstOrDefault() == input).ToArray() is not [var free]
+                    || invoke.Statements.IndexOf(free) <= invoke.Statements.IndexOf(call)
+                    || marshal.Arguments.FirstOrDefault() is not { } source) return null;
+                input = Expand(source);
+                marshaling.Add(marshal);
+                marshaling.Add(free);
+            }
             if (ScalarVectorNarrowing.Low(input, piece.Width) is not Use { Variable.Version: 0 } original
                 || original.Variable.Storage != piece.Register) return null;
         }
@@ -124,7 +139,8 @@ internal static class PlatformImportPattern
         foreach (var block in function.Blocks)
             foreach (var statement in block.Statements)
             {
-                if (statement == cacheRead || statement == branch || statement == resolver || statement == call || statement == returned || stores.Contains(statement)) continue;
+                if (statement == cacheRead || statement == reload || statement == branch || statement == resolver || statement == call || statement == returned || stores.Contains(statement)) continue;
+                if (statement is Call marshal && marshaling.Contains(marshal)) continue;
                 if (statement is Define conversion && conversions.Contains(conversion)) continue;
                 if (statement is Nop || block == invoke && statement is Phi || block == resolve && statement is Jump { Target: var destination } && destination == invoke.Start) continue;
                 if (block == entry && statement is Store { Target: FrameAddress saved, Value: Use { Variable.Version: 0 } register }
