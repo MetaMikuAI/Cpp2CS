@@ -186,8 +186,21 @@ internal sealed class BodyBuilder
             case Store store:
                 {
                     var location = oracle.Locate(operands[0], store.Value.Width);
+                    if (location is null && oracle.Split(operands[0], store.Value.Width) is { } leaves)
+                    {
+                        // 跨字段的写入按布局拆为逐字段写入（寄存器对、清零等一次写入多个字段）。
+                        foreach (var (leaf, bit) in leaves)
+                        {
+                            var leafTarget = LocationValue(leaf, store.Address, store: true);
+                            var leafValue = View(values.Syms.Slice(operands[1], bit, Width(leaf.Type)), leaf.Type, store.Address);
+                            output.Add(leafTarget is LocalValue leafLocal ? new ManagedAssignment(store.Address, leafLocal, leafValue) : new ManagedStore(store.Address, leafTarget, leafValue));
+                        }
+                        return null;
+                    }
                     if (location is null) { output.Add(new ManagedHole(store.Address, $"内存 写入位置 {operands[0]}", false)); holes.Add(new(store.Address, $"内存 写入位置 {operands[0]}")); return null; }
-                    output.Add(new ManagedStore(store.Address, LocationValue(location, store.Address), View(operands[1], location.Type, store.Address)));
+                    var target = LocationValue(location, store.Address, store: true);
+                    var stored = View(operands[1], location.Type, store.Address);
+                    output.Add(target is LocalValue whole ? new ManagedAssignment(store.Address, whole, stored) : new ManagedStore(store.Address, target, stored));
                     return null;
                 }
             case Call call:
@@ -421,6 +434,10 @@ internal sealed class BodyBuilder
             case Transfer.Reference:
                 {
                     var element = type is ByRefRef byRef ? byRef.Element : type;
+                    var elementBits = types.Kind(element) == TypeKind.Struct ? types.Size(element) * 8 : Math.Max(8, Width(element));
+                    if (SymTable.Resolve(content) is LocalSym escaped && analysis.Memory.Find(escaped.Space, escaped.Offset, 1) is { Promoted: false })
+                        return oracle.Locate(escaped, elementBits) is { } escapedLocation
+                            ? new AddressValue(LocationValue(escapedLocation, call.Address)) : Hole(call.Address, $"调用 ref 实参指向的可寻址局部 {escaped}", type);
                     if (SymTable.Resolve(content) is LocalSym)
                     {
                         var local = NewLocal(element);
@@ -559,6 +576,17 @@ internal sealed class BodyBuilder
     private Sym? ClassOwner(Sym klass) => SymTable.Resolve(klass) is ReadSym { Width: 64 } read
         && oracle.Decompose(read.Address) is (var root, 0, null, _) && oracle.TypeOf(root) is { } type && ManagedTypes.IsReferenceType(type) ? root : null;
 
+    /// <summary>地址逃逸的单元对应的可寻址局部。</summary>
+    private LocalValue CellLocal(LocalSym root)
+    {
+        if (!locals.TryGetValue(root, out var local))
+        {
+            var cell = analysis.Memory.Find(root.Space, root.Offset, 1)!;
+            locals[root] = local = NewLocal(oracle.CellType(cell)!);
+        }
+        return local;
+    }
+
     private LocalValue NewLocal(TypeRef type) => new(new Variable(Storage.Temp(1000 + nextLocal++), 1), type, Width(type));
 
     private LocalValue Local(Sym sym, TypeRef type)
@@ -579,46 +607,57 @@ internal sealed class BodyBuilder
         return LocationValue(location, address);
     }
 
-    private ManagedValue LocationValue(Location location, ulong address)
+    /// <summary>
+    /// 位置的托管值。写入目标（store）中值类型的根与中间字段以地址给出：stfld 需要对象引用或托管地址。
+    /// </summary>
+    private ManagedValue LocationValue(Location location, ulong address, bool store = false)
     {
-        ManagedValue value;
         var path = location.Path;
-        TypeRef Leaf(int i) => i == path.Count - 1 ? location.Type : path[i].Field.Type.Substitute(((DefinitionRef)path[i].DeclaringType).Arguments, []);
         switch (location.Kind)
         {
             case LocationKind.Static or LocationKind.ThreadStatic:
-                value = new StaticFieldValue(path[0], Leaf(0), Width(Leaf(0)));
-                path = path.Skip(1).ToArray();
-                return Nest(value, path, location.Type);
+                {
+                    var type = FieldType(path[0], path.Count == 1 ? location.Type : null);
+                    ManagedValue root = new StaticFieldValue(path[0], type, Width(type));
+                    return path.Count == 1 ? root : Nest(store ? new AddressValue(root) : root, path.Skip(1).ToArray(), location.Type, store);
+                }
             case LocationKind.Instance:
-                return Nest(View(location.Base!, oracle.TypeOf(location.Base!), address), path, location.Type);
+                return Nest(View(location.Base!, oracle.TypeOf(location.Base!), address), path, location.Type, store);
             case LocationKind.Reference:
                 {
                     var pointer = View(location.Base!, oracle.TypeOf(location.Base!), address);
-                    if (path.Count == 0) return new IndirectValue(pointer, location.Type, Width(location.Type));
-                    return Nest(pointer, path, location.Type);
+                    return path.Count == 0 ? new IndirectValue(pointer, location.Type, Width(location.Type)) : Nest(pointer, path, location.Type, store);
                 }
             case LocationKind.Element:
                 {
                     var array = View(location.Base!, oracle.TypeOf(location.Base!), address);
                     var index = location.Index is { } i ? View(i, types.Int32, address) : new ConstantValue((ulong)location.ConstantIndex, types.Int32, 32);
                     var element = array.Type is ArrayRef a ? a.Element : location.Type;
-                    value = new ArrayElementValue(array, index, element, Width(element));
-                    return Nest(value, path, location.Type);
+                    ManagedValue value = new ArrayElementValue(array, index, element, Width(element));
+                    return path.Count == 0 ? value : Nest(store ? new AddressValue(value) : value, path, location.Type, store);
                 }
             case LocationKind.Length:
                 return new ArrayLengthValue(View(location.Base!, oracle.TypeOf(location.Base!), address), types.Int32, 32);
+            case LocationKind.Local:
+                {
+                    var local = CellLocal((LocalSym)location.Base!);
+                    return path.Count == 0 ? local : Nest(store ? new AddressValue(local) : local, path, location.Type, store);
+                }
         }
         return Hole(address, $"内存 位置 {location.Kind} 尚未接入", location.Type);
     }
 
-    private ManagedValue Nest(ManagedValue receiver, IReadOnlyList<FieldRef> path, TypeRef leaf)
+    private TypeRef FieldType(FieldRef field, TypeRef? leaf) => leaf ?? field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
+
+    private ManagedValue Nest(ManagedValue receiver, IReadOnlyList<FieldRef> path, TypeRef leaf, bool store = false)
     {
         var value = receiver;
         for (var i = 0; i < path.Count; i++)
         {
-            var type = i == path.Count - 1 ? leaf : path[i].Field.Type.Substitute(((DefinitionRef)path[i].DeclaringType).Arguments, []);
+            var last = i == path.Count - 1;
+            var type = FieldType(path[i], last ? leaf : null);
             value = new FieldValue(value, path[i], type, Width(type));
+            if (store && !last && types.Kind(type) == TypeKind.Struct) value = new AddressValue(value);
         }
         return value;
     }
@@ -657,6 +696,8 @@ internal sealed class BodyBuilder
                 return Slice(slice, expected, address);
             case ConcatSym concat:
                 return Composite(concat, expected, address);
+            case LocalSym local when analysis.Memory.Find(local.Space, local.Offset, 1) is { Promoted: false } && oracle.Locate(local, 8) is { } place:
+                return new AddressValue(LocationValue(place, address));
             case UndefSym:
                 return Hole(address, "值 未定义", expected);
             case UnknownSym unknown:

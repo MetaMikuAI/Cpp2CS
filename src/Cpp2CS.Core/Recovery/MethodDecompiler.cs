@@ -87,7 +87,7 @@ public sealed class MethodDecompiler
     /// <summary>类型与下降。</summary>
     public MethodRecoveryResult Lower(MethodAnalysis analysis)
     {
-        var oracle = new TypeOracle(types, facts, analysis.Method, analysis.Environment.Shape, analysis.Values);
+        var oracle = new TypeOracle(types, facts, analysis.Method, analysis.Environment.Shape, analysis.Values, analysis.Memory);
         return BodyBuilder.Build(analysis, oracle);
     }
 

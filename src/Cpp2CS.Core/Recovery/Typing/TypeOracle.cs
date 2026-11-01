@@ -6,10 +6,11 @@ using Cpp2CS.Recovery.Values;
 
 namespace Cpp2CS.Recovery.Typing;
 
-public enum LocationKind : byte { Instance, Reference, Static, ThreadStatic, Element, Length, StringLength, StringChar }
+public enum LocationKind : byte { Instance, Reference, Static, ThreadStatic, Element, Length, StringLength, StringChar, Local }
 
 /// <summary>
-/// 一次读写指向的 IL 位置。Base：实例字段的对象、经引用访问的指针、数组或字符串；Index：元素下标（为 null 时下标为常量 ConstantIndex）；
+/// 一次读写指向的 IL 位置。Base：实例字段的对象、经引用访问的指针、数组或字符串，可寻址局部为单元起点的局部地址；
+/// Index：元素下标（为 null 时下标为常量 ConstantIndex）；
 /// Owner：静态字段所属类型；Path：从根位置进入值类型的字段链；Type：被访问值的类型。
 /// </summary>
 public sealed record Location(LocationKind Kind, Sym? Base, Sym? Index, long ConstantIndex, TypeRef? Owner, IReadOnlyList<FieldRef> Path, TypeRef Type);
@@ -28,14 +29,54 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
     private readonly HashSet<Sym> active = [];
     private readonly Dictionary<Call, MethodRef?> callees = new(ReferenceEqualityComparer.Instance);
     private readonly ValueModel values;
+    private readonly MemoryLayout memory;
+    private Dictionary<Cell, TypeRef?>? cellTypes;
 
-    public TypeOracle(ManagedTypes types, ProgramFacts facts, MethodRef method, Func<Call, CallShape> shapes, ValueModel values)
+    public TypeOracle(ManagedTypes types, ProgramFacts facts, MethodRef method, Func<Call, CallShape> shapes, ValueModel values, MemoryLayout? memory = null)
     {
         this.types = types;
         this.facts = facts;
         this.method = method;
         this.shapes = shapes;
         this.values = values;
+        this.memory = memory ?? new([]);
+    }
+
+    /// <summary>
+    /// 地址逃逸的单元作为可寻址的 IL 局部时的类型：取自把单元起点作为 ref、副本实参或结果缓冲区的调用签名，
+    /// 或以单元为装箱来源的类型；各处一致且大小覆盖单元时成立。
+    /// </summary>
+    public TypeRef? CellType(Cell cell)
+    {
+        if (cellTypes is null)
+        {
+            cellTypes = [];
+            var evidence = new Dictionary<Cell, HashSet<TypeRef>>();
+            void Note(Sym pointer, TypeRef? type)
+            {
+                if (type is null || SymTable.Resolve(pointer) is not LocalSym local || memory.Find(local.Space, local.Offset, 1) is not { Promoted: false } target
+                    || target.Start != local.Offset) return;
+                if (!evidence.TryGetValue(target, out var set)) evidence[target] = set = [];
+                set.Add(type);
+            }
+            foreach (var call in values.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>())
+            {
+                var operands = values.Operands(call);
+                if (call.Op is { Kind: OpKind.Box, Operand: TypeRef boxed } && operands.Count > 2) Note(operands[2], boxed);
+                if (shapes(call).Signature is not { } signature || Callee(call) is not { } callee) continue;
+                foreach (var value in signature.Indirections)
+                {
+                    var position = Array.IndexOf(call.Sources, value.Pieces[0].Register);
+                    if (position < 0) continue;
+                    var type = value.Index == MachineSignature.ReturnIndex ? Concrete(callee, callee.Method.ReturnType)
+                        : value.Index < 0 ? callee.DeclaringType : Concrete(callee, callee.Method.Parameters[value.Index].Type);
+                    Note(operands[1 + position], type is ByRefRef byRef ? byRef.Element : type);
+                }
+            }
+            foreach (var (noted, set) in evidence)
+                cellTypes[noted] = set.Count == 1 && set.First() is var t && (ManagedTypes.IsReferenceType(t) ? 8 : types.Size(t)) >= noted.Size ? t : null;
+        }
+        return cellTypes.GetValueOrDefault(cell);
     }
 
     public ManagedTypes Types => types;
@@ -261,6 +302,14 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
     public Location? Locate(Sym address, int width)
     {
         var (root, offset, index, scale) = Decompose(address);
+        if (root is LocalSym local && index is null && memory.Find(local.Space, local.Offset + offset, width / 8) is { Promoted: false } cell && CellType(cell) is { } cellType)
+        {
+            var at = (int)(local.Offset + offset - cell.Start);
+            var cellRoot = values.Syms.Local(cell.Space, cell.Start);
+            if (at == 0 && (types.Kind(cellType) != TypeKind.Struct || types.Size(cellType) * 8 == width)) return new(LocationKind.Local, cellRoot, null, 0, null, [], cellType);
+            return types.Kind(cellType) == TypeKind.Struct && FieldAt(cellType, at + RuntimeLayout.ObjectHeaderSize, width, false, false) is var (cellPath, fieldType)
+                ? new(LocationKind.Local, cellRoot, null, 0, null, cellPath, fieldType) : null;
+        }
         if (root is EntitySym { Symbol: { Kind: SymbolKind.StaticFields or SymbolKind.ThreadStaticFields, Value: TypeRef owner } entity } && index is null)
         {
             var thread = entity.Kind == SymbolKind.ThreadStaticFields;
@@ -299,6 +348,30 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
                 }
         }
         return null;
+    }
+
+    /// <summary>
+    /// 跨越多个标量字段的访问按布局拆成逐字段的位置：每段是从该处起恰为一个标量字段的位置，Bit 为段在访问中的位偏移。
+    /// 字段之间不能定位的字节按填充跳过；没有任何字段时返回 null。
+    /// </summary>
+    public IReadOnlyList<(Location Leaf, int Bit)>? Split(Sym address, int width)
+    {
+        var bytes = width / 8;
+        var leaves = new List<(Location, int)>();
+        for (var at = 0; at < bytes;)
+        {
+            var piece = at == 0 ? address : values.Syms.Binary(BinOp.Add, address, values.Syms.Const((ulong)at, 64), 64);
+            Location? found = null;
+            var size = 0;
+            foreach (var w in new[] { 64, 32, 16, 8 })
+                if (w / 8 <= bytes - at && Locate(piece, w) is { } location && types.Kind(location.Type) != TypeKind.Struct
+                    && (ManagedTypes.IsReferenceType(location.Type) ? 64 : types.Size(location.Type) * 8) == w)
+                { (found, size) = (location, w / 8); break; }
+            if (found is null) { at++; continue; }
+            leaves.Add((found, at * 8));
+            at += size;
+        }
+        return leaves.Count > 0 ? leaves : null;
     }
 
     private int ElementSize(TypeRef element) => ManagedTypes.IsReferenceType(element) ? 8 : types.Size(element);
