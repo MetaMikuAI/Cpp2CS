@@ -17,26 +17,9 @@ internal static class ExceptionsRules
     }
 
     internal static ulong FragmentLabel(ExceptionFragment fragment) => NameSupply.ExceptionLabelBase + (uint)fragment.Id;
-    internal static void RemoveDeadDefinitions(this RecoveryScope ctx)
-    {
-        var previous = ctx.State.Exceptions.exceptionLayout is { Succeeded: true } layout ? layout.Graph.Fragments.Select(f => f.Block).Distinct().ToDictionary(b => b, b => b.Statements.ToArray()) : null;
-        Cpp2CS.Machine.Ssa.Propagate.RemoveDead(ctx.function);
-        if (previous is null)
-            return;
-        foreach (var group in ctx.State.Exceptions.exceptionLayout!.Graph.Fragments.GroupBy(f => f.Block))
-        {
-            var retained = group.Key.Statements.ToHashSet(ReferenceEqualityComparer.Instance);
-            var old = previous[group.Key];
-            var positions = new int[old.Length + 1];
-            for (var i = 0; i < old.Length; i++)
-                positions[i + 1] = positions[i] + (retained.Contains(old[i]) ? 1 : 0);
-            foreach (var fragment in group)
-            {
-                fragment.First = positions[fragment.First];
-                fragment.Limit = positions[fragment.Limit];
-            }
-        }
-    }
+    /// <summary>异常布局已排好时的异常片段（删除语句后要据此重算片段位置）；未排好时为 null。</summary>
+    internal static IReadOnlyList<ExceptionFragment>? ArrangedFragments(this RecoveryScope ctx) =>
+        ctx.State.Exceptions.exceptionLayout is { Succeeded: true } layout ? layout.Graph.Fragments : null;
 
     internal static void InsertAnalysisStatement(this RecoveryScope ctx, Block block, int index, Stmt statement)
     {
@@ -110,7 +93,7 @@ internal static class ExceptionsRules
                     Sources = indices.Order().Select(i => phi.Sources[i]).ToArray()
                 };
         var kept = ctx.State.Exceptions.exceptionLayout.Kept.Concat(ctx.State.Exceptions.exceptionLayout.EntryPaths.SelectMany(p => p.Bridges)).Select(f => f.Block).ToHashSet();
-        ctx.blocks = ctx.function.Blocks.Where(kept.Contains).ToArray();
+        ctx.Maintain.Blocks(ctx.function.Blocks.Where(kept.Contains).ToArray(), "exceptions.regions");
         foreach (var region in ctx.State.Exceptions.exceptionLayout.Regions.Where(r => r.Kind == "catch"))
         {
             var exception = ctx.StructLocal(ctx.types.Corlib("System.Exception"), 64);

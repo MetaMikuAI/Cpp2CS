@@ -61,7 +61,7 @@ internal static class ScalarFramesRules
             }
 
         if (replacements.Count > 0 || lifetimes.Count > 0)
-            ctx.definitions = ctx.IndexDefinitions();
+            ctx.Maintain.Definitions("frames.branch-snapshots");
     }
 
     [MachinePass("帧快照", 32, After = ["帧区域"])]
@@ -88,14 +88,14 @@ internal static class ScalarFramesRules
             }
 
         if (pieces.Count > 0 || replacements.Count > 0)
-            ctx.definitions = ctx.IndexDefinitions();
+            ctx.Maintain.Definitions("frames.snapshots");
     }
 
     /// <summary>结构体地址已绑定到有界区域后，恢复地址不逃逸的整数计数槽和已定型的引用槽。</summary>
     [MachinePass("整数帧槽", 35, After = ["帧区域", "帧快照"])]
     internal static void PrepareScalarFrames(this RecoveryScope ctx)
     {
-        ctx.InferTypes();
+        ctx.Maintain.Types("frames.integer-slots.entry");
         var accesses = new List<(long Offset, int Width, Expr? Written)>();
         var escapes = new List<long>();
         void Visit(Expr expression)
@@ -178,7 +178,7 @@ internal static class ScalarFramesRules
                 ctx.Rewriter.Replace(block, i, mapped);
             }
 
-        ctx.definitions = ctx.IndexDefinitions();
+        ctx.Maintain.Definitions("frames.integer-slots");
     }
 
     internal static bool NoStackRead(this RecoveryScope ctx, Call call, long offset, int width)

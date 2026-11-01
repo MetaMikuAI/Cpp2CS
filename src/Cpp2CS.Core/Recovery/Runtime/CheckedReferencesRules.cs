@@ -31,12 +31,12 @@ internal static class CheckedReferencesRules
 
         if (changes.Count > 0)
         {
-            ctx.RemoveDeadDefinitions();
-            ctx.definitions = ctx.IndexDefinitions();
+            ctx.Edit.RemoveDeadDefinitions("runtime.checked-objects");
+            ctx.Maintain.Definitions("runtime.checked-objects");
         }
 
-        ctx.MarkRuntime();
-        ctx.InferTypes();
+        ctx.Maintain.Rerun(RuntimeRules.MarkRuntime, "runtime.checked-objects");
+        ctx.Maintain.Types("runtime.checked-objects");
     }
 
     internal static bool CheckedReference(this RecoveryScope ctx, Use value, TypeRef target, ulong address)
@@ -46,7 +46,7 @@ internal static class CheckedReferencesRules
         var sites = ctx.blocks.Where(b => b.Statements.Any(s => s.Address == address)).ToArray();
         if (sites is not [var site])
             return false;
-        var dominators = Dominators.Compute(ctx.function);
+        var dominators = ctx.Maintain.Dominators("runtime.checked-reference");
         foreach (var block in ctx.blocks)
         {
             if (block.Statements.LastOrDefault() is not Branch { Condition: Compare { Cond: Cond.Eq or Cond.Ne, Left: Use flag, Right: Const { Value: 0 } } test } branch
@@ -86,7 +86,7 @@ internal static class CheckedReferencesRules
         var uses = ctx.blocks.Where(b => b.Statements.Any(s => s.Address == address)).ToArray();
         if (uses is not [var site])
             return false;
-        var dominators = Dominators.Compute(ctx.function);
+        var dominators = ctx.Maintain.Dominators("runtime.checked-reference.joined");
         foreach (var use in ctx.blocks.Where(b => b.Predecessors.Count == 2 && dominators.Dominates(b.Index, site.Index)))
             foreach (var check in use.Predecessors)
             {

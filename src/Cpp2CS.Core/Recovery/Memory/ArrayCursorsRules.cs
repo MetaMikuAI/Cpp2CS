@@ -6,10 +6,9 @@ internal static class ArrayCursorsRules
 {
     internal static void PrepareArrayCursors(this RecoveryScope ctx)
     {
-        bool changed;
-        do
+        if (!ctx.Maintain.Fixpoint("memory.array-cursors", Maintenance.SafetyBudget, () =>
         {
-            changed = false;
+            var changed = false;
             foreach (var cursor in ArrayCursorRecognition.Read(ctx.function, expression => ctx.TypeOfAddressBase(expression) is ArrayRef { IsVector: true } array ? ctx.types.Size(array.Element) : null))
             {
                 // 归纳根保留为真实 SSA 值，避免两个等步长游标相互展开。
@@ -40,8 +39,9 @@ internal static class ArrayCursorsRules
             }
 
             if (changed)
-                ctx.InferTypes();
-        }
-        while (changed);
+                ctx.Maintain.Types("memory.array-cursors.round");
+            return changed;
+        }))
+            ctx.Hole(ctx.entry, $"不动点 数组游标超过 {Maintenance.SafetyBudget} 轮未收敛", rule: "Fixpoint");
     }
 }

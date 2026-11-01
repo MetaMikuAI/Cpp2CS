@@ -52,8 +52,8 @@ internal static class BoxArgumentsRules
 
         if (!changed)
             return;
-        ctx.RemoveDeadDefinitions();
-        ctx.definitions = ctx.IndexDefinitions();
+        ctx.Edit.RemoveDeadDefinitions("frames.merged-box-arguments");
+        ctx.Maintain.Definitions("frames.merged-box-arguments");
     }
 
     [StoreRule(2)]

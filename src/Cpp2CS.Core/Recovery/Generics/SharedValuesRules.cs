@@ -154,7 +154,7 @@ internal static class SharedValuesRules
 
         ctx.function.Renumber();
         ctx.NormalizeStackCanary(ExpandValue);
-        Cpp2CS.Machine.Ssa.Propagate.Run(ctx.function, ctx.Dominators);
+        ctx.Edit.Propagate(ctx.Dominators, "generics.shared-values");
         defs = ctx.function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
         joins = ctx.function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().ToDictionary(p => p.Target);
         foreach (var block in ctx.function.Blocks)
@@ -323,7 +323,7 @@ internal static class SharedValuesRules
 
         ctx.NormalizeStackCanary(ExpandValue);
         ctx.PromotePrivateFrameSlots();
-        Cpp2CS.Machine.Ssa.Propagate.RemoveDead(ctx.function);
+        ctx.Edit.RemoveDead("generics.shared-values");
         var remaining = ctx.function.Blocks.SelectMany(b => b.Statements).Select(s => s.Address).ToHashSet();
         foreach (var define in original.OfType<Define>())
             if (!remaining.Contains(define.Address) && ExprMap.Walk(ExpandValue(define.Value)).OfType<Load>().Any(l => l.Address is Binary { Left: Symbol { Kind: SymbolKind.Class or SymbolKind.Method } }))

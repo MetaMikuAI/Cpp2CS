@@ -102,7 +102,7 @@ internal static class StackEnumsRules
             }
 
         if (candidates.Count > 0)
-            ctx.definitions = ctx.IndexDefinitions();
+            ctx.Maintain.Definitions("frames.stack-enums.branches");
     }
 
     internal static bool StackBoxReadAfter(this RecoveryScope ctx, Call call, StackEnum box)

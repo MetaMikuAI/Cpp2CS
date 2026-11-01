@@ -52,9 +52,9 @@ internal static class CallTrimmingRules
 
         if (!changed)
             return;
-        ctx.RemoveDeadDefinitions();
+        ctx.Edit.RemoveDeadDefinitions("calls.trim-indirect-arguments");
         if (typed)
-            ctx.definitions = ctx.IndexDefinitions();
+            ctx.Maintain.Definitions("calls.trim-indirect-arguments.typed");
         Call Trimmed(Call call, Expr[] arguments, Storage[] sources)
         {
             var replacement = call with

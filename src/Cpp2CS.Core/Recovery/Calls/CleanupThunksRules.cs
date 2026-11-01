@@ -34,7 +34,7 @@ internal static class CleanupThunksRules
         if (ctx.State.Calls.cleanupCalls.Count == 0)
             return;
         ctx.PromotePrivateFrameSlots();
-        Cpp2CS.Machine.Ssa.Propagate.Run(ctx.function, ctx.Dominators);
+        ctx.Edit.Propagate(ctx.Dominators, "calls.cleanup-thunks");
         ctx.State.Calls.cleanupCalls.Clear();
         ctx.State.Calls.cleanupCalls.UnionWith(ctx.function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => ctx.State.Calls.cleanupSites.Contains(c.Address)));
     }
@@ -118,23 +118,24 @@ internal static class CleanupThunksRules
                 ctx.Rewriter.RemoveAll(block, s => s is Store store && writes.Contains(store));
         }
 
-        bool changed;
-        do
-        {
-            changed = false;
-            foreach (var block in ctx.function.Blocks)
-                foreach (var store in block.Statements.OfType<Store>().Where(s => s.Target is FrameAddress).ToArray())
-                {
-                    var frame = (FrameAddress)store.Target;
-                    if (ExprMap.Walk(store.Value).Any(e => e is Load or Intrinsic or Unknown))
-                        continue;
-                    if (ctx.function.Blocks.SelectMany(b => b.Statements).Where(s => !ReferenceEquals(s, store)).Any(s => Touches(s, frame.Offset, store.Value.Width / 8)))
-                        continue;
-                    ctx.Rewriter.Remove(block, store);
-                    changed = true;
-                }
-        }
-        while (changed);
+        // 删除不再被读取的局部写入，直到没有可删的写入
+        if (!ctx.Maintain.Fixpoint("calls.private-frame-slots", Maintenance.SafetyBudget, () =>
+            {
+                var changed = false;
+                foreach (var block in ctx.function.Blocks)
+                    foreach (var store in block.Statements.OfType<Store>().Where(s => s.Target is FrameAddress).ToArray())
+                    {
+                        var frame = (FrameAddress)store.Target;
+                        if (ExprMap.Walk(store.Value).Any(e => e is Load or Intrinsic or Unknown))
+                            continue;
+                        if (ctx.function.Blocks.SelectMany(b => b.Statements).Where(s => !ReferenceEquals(s, store)).Any(s => Touches(s, frame.Offset, store.Value.Width / 8)))
+                            continue;
+                        ctx.Rewriter.Remove(block, store);
+                        changed = true;
+                    }
+                return changed;
+            }))
+            ctx.Hole(ctx.entry, $"不动点 私有帧槽删除超过 {Maintenance.SafetyBudget} 轮未收敛", rule: "Fixpoint");
     }
 
     [CallRule(10)]

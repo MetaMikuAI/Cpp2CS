@@ -9,6 +9,7 @@ internal static class BodyLowering
 {
     internal static RecoveryResult<ManagedBody> Build(this RecoveryScope ctx)
     {
+        ctx.currentStep = "build";
         if (ctx.State.Exceptions.exceptionLayout is { Succeeded: true })
             return ctx.BuildExceptionBody();
         var managedBlocks = new List<ManagedBlock>();

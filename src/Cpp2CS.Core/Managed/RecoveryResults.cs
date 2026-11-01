@@ -14,6 +14,7 @@ public sealed record MethodRecoveryResult(MethodRef Method, ulong Entry, Managed
     public IReadOnlyList<PassStep> Passes { get; init; } = [];
     public IReadOnlyList<Cpp2CS.Diagnostics.AnalysisStep> Analyses { get; init; } = [];
     public IReadOnlyList<Cpp2CS.Diagnostics.RuleTrace> Rules { get; init; } = [];
+    public IReadOnlyList<Cpp2CS.Diagnostics.MaintenanceStep> Maintenance { get; init; } = [];
     public IReadOnlyList<Cpp2CS.Managed.CallResolution> Calls { get; init; } = [];
     /// <summary>已核验的运行时声明；没有恢复原生方法体，不计入方法体及字节覆盖率。</summary>
     public RuntimeDeclarationKind? Declaration { get; init; }

@@ -7,13 +7,15 @@ internal static class RecoveryAnalysis
 {
     internal static RecoveryFailure? Analyze(this RecoveryScope ctx)
     {
-        ctx.definitions = ctx.IndexDefinitions();
+        ctx.currentStep = "analyze";
+        ctx.Maintain.Definitions("kernel.analyze.entry");
         // 依赖边取改写前的数据流：帧改写把别名换成 TypedFrame，但值仍然来自原来的来源。
         foreach (var (source, target) in ctx.definitions.DataFlow)
             ctx.ledger.Dependency(source, target);
         ctx.ledger.PropagateExisting();
         foreach (var (name, run) in RuleRegistry.Analyses)
         {
+            ctx.currentStep = name;
             ctx.Rewriter.Attach(ctx.function);
             var version = ctx.analyses.Version;
             var inputTypes = ctx.State.Types.known.Count;
@@ -39,11 +41,11 @@ internal static class RecoveryAnalysis
     [MachinePass("类型", 90, After = ["运行时引用", "内联", "帧槽", "分配", "检查吸收"])]
     internal static void Typing(this RecoveryScope ctx)
     {
-        ctx.InferTypes();
+        ctx.Maintain.Types("typing.infer.main");
         if (ctx.PrepareTypeChecks())
         {
-            ctx.MarkRuntime();
-            ctx.InferTypes();
+            ctx.Maintain.Rerun(RuntimeRules.MarkRuntime, "typing.type-checks");
+            ctx.Maintain.Types("typing.infer.type-checks");
         }
 
         ctx.PrepareUnusedReceiverPhis();

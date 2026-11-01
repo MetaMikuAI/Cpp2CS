@@ -59,8 +59,8 @@ internal static class FrameSlotRules
                 for (var i = 0; i < block.Statements.Count; i++)
                     if (deadWrites.Contains(block.Statements[i]))
                         ctx.Rewriter.Replace(block, i, new Nop(block.Statements[i].Address, "未读取的栈快照"));
-            ctx.RemoveDeadDefinitions();
-            ctx.definitions = ctx.IndexDefinitions();
+            ctx.Edit.RemoveDeadDefinitions("frames.slots.unread");
+            ctx.Maintain.Definitions("frames.slots.unread");
         }
     }
 }

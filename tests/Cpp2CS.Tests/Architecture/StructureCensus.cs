@@ -32,7 +32,6 @@ internal sealed class StructureCensus
         ["Propagate.RemoveDead"] = "propagate-remove-dead",
         ["Lowering.Cleanup"] = "lowering-cleanup",
         ["ControlFlow.Simplify"] = "control-flow-simplify",
-        ["ExceptionsRules.RemoveDeadDefinitions"] = "remove-dead-definitions",
         ["Dominators.Compute"] = "dominators",
         ["SsaBuilder.Build"] = "ssa-build",
     };
@@ -215,7 +214,8 @@ internal sealed class StructureCensus
         if (semantic.GetOperation(syntax) is not IInvocationOperation invocation) return;
         var method = invocation.TargetMethod.ReducedFrom ?? invocation.TargetMethod;
         var target = Name(method.OriginalDefinition);
-        if (Maintenance.TryGetValue(target, out var item))
+        // 维护原语在内核中的调用是内核接口自身的实现，不计数
+        if (Maintenance.TryGetValue(target, out var item) && scope != "Recovery/Kernel")
         {
             Count(item, scope);
             if (recovery) Track(MaintenanceTag(semantic, syntax), target, file, syntax);
@@ -342,7 +342,7 @@ internal sealed class StructureCensus
     {
         if (semantic.GetOperation(syntax) is not IAssignmentOperation assignment) return;
         var target = Unwrap(assignment.Target);
-        if (target is IFieldReferenceOperation { Field: var field })
+        if (target is IFieldReferenceOperation { Field: var field } && scope != "Recovery/Kernel")
         {
             if (Declared(field, "RecoveryScope", "blocks")) Count("blocks-reset", scope);
             if (Declared(field, "RecoveryScope", "definitions")) Count("definitions-reset", scope);

@@ -30,7 +30,7 @@ internal static class OutlinedCallsRules
         if (!changed)
             return;
         // 展开后先消去捕获帧中的固定指针，再提升不再逃逸的标量。
-        Cpp2CS.Machine.Ssa.Propagate.Run(ctx.function, ctx.Dominators);
+        ctx.Edit.Propagate(ctx.Dominators, "calls.outlined-calls");
         // 辅助函数的 MethodInfo 实参在展开后才成为常量；沿用已有 RGCTX 与静态字段规则。
         var symbols = new IdiomState(ctx.owner.rewriter, ctx.function);
         symbols.Symbols(rgctx: true);
@@ -40,7 +40,7 @@ internal static class OutlinedCallsRules
             callerIdioms.Hits[template] = callerIdioms.Hits.GetValueOrDefault(template) + count;
         callerIdioms.ReadSlots.UnionWith(symbols.Result.ReadSlots);
         ctx.PromotePrivateFrameSlots();
-        Cpp2CS.Machine.Ssa.Propagate.Run(ctx.function, ctx.Dominators);
+        ctx.Edit.Propagate(ctx.Dominators, "calls.outlined-calls.promoted");
         ManagedFramePromotion.Run(ctx.facts, ctx.function, ctx.owner.abi, ctx.owner.lifter.Calls, ctx.owner.lifter.Machine.Convention.StackPointer, ctx.owner.abi.Classify(ctx.method, out _)?.Return);
         ctx.function.Problems.AddRange(Cpp2CS.Machine.Ssa.SsaCheck.Verify(ctx.function, ctx.Dominators));
     }

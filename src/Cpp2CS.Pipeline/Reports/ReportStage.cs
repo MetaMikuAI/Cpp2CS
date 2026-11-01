@@ -30,6 +30,7 @@ internal static class ReportStage
             method = r.Method.ToString(),
             steps = r.Analyses,
             passes = r.Passes,
+            maintenance = r.Maintenance,
         }, Json)));
         File.WriteAllLines(Path.Combine(output, "rules.jsonl"), targets.SelectMany(r => r.Rules.Select(rule => JsonSerializer.Serialize(new
         {

@@ -23,7 +23,7 @@ internal static class DelegatesRules
         bool GenericIdentity(Call call, int argument, MethodRef target) => call.Target is Const address && argument < call.Sources.Length && ctx.owner.abi.Classify(target, out _)?.MethodInfo?.Register == call.Sources[argument] && ctx.facts.EntriesAt(address.Value).Any(e => e.Method?.Method == target.Method);
         bool ObjectConstructor(Call call, DefinitionRef type) => !DelegateFacts.IsDelegate(type) && call.Target is Const target && ctx.facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false } method } && method.Owner == type.Definition);
         if (CallIdentityChoices.Split(ctx.function, Constructor, ExpandIdentity) | CallIdentityChoices.SplitGeneric(ctx.function, GenericIdentity, ExpandIdentity) | CallIdentityChoices.SplitIndirect(ctx.function) | CallIdentityChoices.SplitStores(ctx.function) | MergedAllocations.Run(ctx.function, ObjectConstructor))
-            Cpp2CS.Machine.Ssa.Propagate.Run(ctx.function, ctx.Dominators);
+            ctx.Edit.Propagate(ctx.Dominators, "calls.split-identity-choices");
     }
 
     internal static void DelegateAllocation(this RecoveryScope ctx, Block block, int index, Call allocation, DefinitionRef type, Variable created)

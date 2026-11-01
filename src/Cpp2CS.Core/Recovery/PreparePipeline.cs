@@ -72,7 +72,7 @@ internal static class PreparePipeline
         });
         ctx.Passes.Run("prepare.Cpp2CS.Machine.Ssa.Propagate.RemoveDead", () =>
         {
-            Cpp2CS.Machine.Ssa.Propagate.RemoveDead(ctx.function);
+            ctx.Edit.RemoveDead("kernel.remove-dead");
         });
         // 库内存操作归一后也可能产生新栈读写；普通方法与异常方法采用同一有界提升规则。
         ctx.Passes.Run("prepare.FrameWritebacks.Run", () =>
@@ -90,7 +90,7 @@ internal static class PreparePipeline
         {
             if (constantFrameIndices)
             {
-                Cpp2CS.Machine.Ssa.Propagate.Run(ctx.function, ctx.Dominators);
+                ctx.Edit.Propagate(ctx.Dominators, "kernel.propagate-constant-indices");
                 ctx.PromotePrivateFrameSlots();
             }
         });
@@ -107,16 +107,21 @@ internal static class PreparePipeline
         {
             if (DelegateCallNormalizer.Run(ctx.facts, ctx.function, idioms))
             {
-                ctx.function.Problems.AddRange(Cpp2CS.Machine.Ssa.Lowering.Cleanup(ctx.function));
+                ctx.Edit.Cleanup("kernel.delegate-calls");
                 var delegates = ctx.function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c is { Op.Kind: OpKind.CallDelegate, Target: Symbol { Kind: SymbolKind.Method }, DelegateReceiver: not null }).Select(c => c.Address).ToHashSet();
                 idioms.Residuals.RemoveAll(r => r.Category.StartsWith("indirect:", StringComparison.Ordinal) && delegates.Contains(r.Address));
             }
         });
         ctx.Passes.Run("prepare.function.Blocks.Any", () =>
         {
-            if (ctx.function.Blocks.Any(b => b.IsLandingPad))
-                while (ExceptionNullBranches.Run(ctx.facts, ctx.function))
-                    ctx.function.Problems.AddRange(Cpp2CS.Machine.Ssa.Lowering.Cleanup(ctx.function));
+            if (ctx.function.Blocks.Any(b => b.IsLandingPad)
+                && !ctx.Maintain.Fixpoint("exceptions.null-branches", Maintenance.SafetyBudget, () =>
+                {
+                    if (!ExceptionNullBranches.Run(ctx.facts, ctx.function)) return false;
+                    ctx.Edit.Cleanup("exceptions.null-branches");
+                    return true;
+                }))
+                ctx.Hole(ctx.entry, $"不动点 异常判空剪枝超过 {Maintenance.SafetyBudget} 轮未收敛", rule: "Fixpoint");
         });
         foreach (var residual in idioms.Residuals)
         {
@@ -136,7 +141,7 @@ internal static class PreparePipeline
             }
         }
 
-        ctx.blocks = ctx.function.Blocks;
+        ctx.Maintain.Blocks(ctx.function.Blocks, "kernel.blocks");
         if (ctx.function.Blocks.FirstOrDefault(b => b.IsLandingPad) is { } landing && !ctx.PrepareExceptionRegions())
         {
             var hole = ctx.Hole(landing.Start, $"异常区域 {ctx.State.Exceptions.exceptionLayout?.Reason ?? "尚未恢复"} {ctx.State.Exceptions.exceptionLayout?.Detail}", rule: "Prepare");
@@ -148,7 +153,7 @@ internal static class PreparePipeline
                 if (!block.IsLandingPad && normal.Add(block))
                     foreach (var successor in block.NormalSuccessors)
                         pending.Push(successor);
-            ctx.blocks = ctx.function.Blocks.Where(normal.Contains).ToArray();
+            ctx.Maintain.Blocks(ctx.function.Blocks.Where(normal.Contains).ToArray(), "exceptions.normal-closure");
             foreach (var statement in ctx.function.Blocks.Where(b => !normal.Contains(b)).SelectMany(b => b.Statements))
             {
                 ctx.Poison(statement, hole);

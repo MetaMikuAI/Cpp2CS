@@ -18,7 +18,16 @@ internal sealed class RecoveryScope(MethodRecovery owner, MethodRef method, ulon
     internal ValueRecoveryService Values => valueService ??= new(this);
     internal readonly List<PassStep> passSteps = [];
     private Cpp2CS.Machine.Algebra.PassList? passes;
-    internal Cpp2CS.Machine.Algebra.PassList Passes => passes ??= new(function, passSteps, Rewriter);
+    internal Cpp2CS.Machine.Algebra.PassList Passes => passes ??= new(function, passSteps, Rewriter, name => currentStep = name);
+    /// <summary>维护记录与当前步骤名（Prepare 的 PassList 步骤或 Analyze 的注册步骤），只用于追踪。</summary>
+    internal readonly List<MaintenanceStep> maintenanceSteps = [];
+    internal string currentStep = "prepare";
+    private Maintenance? maintenance;
+    /// <summary>维护动作的内核接口。</summary>
+    internal Maintenance Maintain => maintenance ??= new(this);
+    private Editing? editing;
+    /// <summary>IR 级维护动作的内核接口。</summary>
+    internal Editing Edit => editing ??= new(this, Maintain);
     private StatementRewriter? statementRewriter;
     internal StatementRewriter Rewriter => statementRewriter ??= new(State.StatementTables, ledger.Replace);
     internal readonly ManagedTypes types = owner.types;

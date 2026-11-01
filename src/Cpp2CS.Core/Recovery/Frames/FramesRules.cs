@@ -14,18 +14,18 @@ internal static class FramesRules
     [MachinePass("帧前类型", 29, After = ["异常值", "栈上调用"])]
     internal static void PrepareFrameTypes(this RecoveryScope ctx)
     {
-        ctx.InferTypes();
+        ctx.Maintain.Types("frames.pre-typing.entry");
         ctx.NormalizeCheckedObjects();
-        for (var round = 0; round < 8; round++)
+        ctx.Maintain.Fixpoint("frames.joined-addresses", 8, () =>
         {
             var changed = ctx.function.Range.ExceptionRegions.Length == 0
                 && Cpp2CS.Machine.Ssa.TailDuplication.Run(ctx.function,
                     block => block.Statements.OfType<Phi>().Any(phi => phi.Sources.All(ctx.FieldAddress)), keepResults: true);
             changed |= JoinedFieldReads.Run(ctx.function, phi => phi.Sources.All(v => ctx.State.Types.known.TryGetValue(v, out var type) && ctx.types.Kind(type) == TypeKind.Reference) || phi.Sources.All(ctx.FieldAddress));
-            if (!changed) break;
-            Cpp2CS.Machine.Ssa.Propagate.Run(ctx.function, ctx.Dominators);
-            ctx.blocks = ctx.function.Blocks;
-            ctx.definitions = ctx.IndexDefinitions();
+            if (!changed) return false;
+            ctx.Edit.Propagate(ctx.Dominators, "frames.joined-addresses.round");
+            ctx.Maintain.Blocks(ctx.function.Blocks, "frames.joined-addresses.round");
+            ctx.Maintain.Definitions("frames.joined-addresses.round");
             foreach (var block in ctx.blocks)
                 for (var i = 0; i < block.Statements.Count; i++)
                     if (block.Statements[i] is Call call)
@@ -33,8 +33,9 @@ internal static class FramesRules
                         var refreshed = Cpp2CS.Idioms.RefreshOperandsPass.Refresh(call, e => ctx.Expand(e));
                         if (!ReferenceEquals(call, refreshed)) ctx.Rewriter.Replace(block, i, refreshed);
                     }
-            ctx.InferTypes();
-        }
+            ctx.Maintain.Types("frames.joined-addresses.round");
+            return true;
+        });
 
         ctx.NormalizePinnedArrays(true);
         ctx.PrepareArrayCursors();
@@ -79,7 +80,7 @@ internal static class FramesRules
     [MachinePass("帧后数组地址", 37, After = ["整数帧槽"])]
     internal static void PrepareFrameArrayAddresses(this RecoveryScope ctx)
     {
-        ctx.InferTypes();
+        ctx.Maintain.Types("memory.post-frame-arrays.entry");
         ctx.NormalizePinnedArrays(false);
         ctx.PrepareArrayCursors();
     }
@@ -88,14 +89,19 @@ internal static class FramesRules
     {
         if (PinnedArrayRecognition.Run(ctx.function, e => ctx.TypeOfAddressBase(e) is ArrayRef { IsVector: true } array && ctx.types.Kind(array.Element) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double ? array : null) > 0)
         {
-            ctx.RemoveDeadDefinitions();
+            ctx.Edit.RemoveDeadDefinitions("memory.pinned-arrays");
             // 异常片段已绑定基本块；此处只删纯定义，不改变受保护控制流。
-            if (simplifyFlow && ctx.State.Exceptions.exceptionLayout is not { Succeeded: true })
-                while (Cpp2CS.Machine.Ssa.ControlFlow.Simplify(ctx.function))
-                    ctx.function.Problems.AddRange(Cpp2CS.Machine.Ssa.Lowering.Cleanup(ctx.function));
-            ctx.blocks = ctx.function.Blocks;
-            ctx.definitions = ctx.IndexDefinitions();
-            ctx.InferTypes();
+            if (simplifyFlow && ctx.State.Exceptions.exceptionLayout is not { Succeeded: true }
+                && !ctx.Maintain.Fixpoint("memory.pinned-arrays.simplify", Maintenance.SafetyBudget, () =>
+                {
+                    if (!ctx.Edit.Simplify("memory.pinned-arrays.simplify")) return false;
+                    ctx.Edit.Cleanup("memory.pinned-arrays.simplify");
+                    return true;
+                }))
+                ctx.Hole(ctx.entry, $"不动点 固定数组后的控制流化简超过 {Maintenance.SafetyBudget} 轮未收敛", rule: "Fixpoint");
+            ctx.Maintain.Blocks(ctx.function.Blocks, "memory.pinned-arrays");
+            ctx.Maintain.Definitions("memory.pinned-arrays");
+            ctx.Maintain.Types("memory.pinned-arrays");
         }
     }
 
@@ -248,7 +254,7 @@ internal static class FramesRules
             }
 
         // IR 改写后，定义索引按新语句重建。
-        ctx.definitions = ctx.IndexDefinitions();
+        ctx.Maintain.Definitions("frames.regions.typed");
         foreach (var call in ctx.blocks.SelectMany(b => b.Statements).OfType<Call>())
             if (ctx.State.Frames.callStackAreas.TryGetValue(call.Address, out var area)
                 && ctx.Resolve(call) is { } callee && ctx.owner.abi.Classify(callee, out _) is { } signature)
@@ -268,21 +274,27 @@ internal static class FramesRules
     {
         if (!witnesses.Any(w => w.Type is ArrayRef || ctx.StructPaths(w.Type).Any(p => p.Type is ArrayRef)))
             return null;
-        for (var round = 0; round < 8; round++)
+        RecoveryFailure? failure = null;
+        ctx.Maintain.Fixpoint("frames.discover-array-copies", 8, () =>
         {
             var candidates = witnesses.DistinctBy(w => (w.Offset, w.Type)).Select(w => new FrameRegion(w.Offset, w.Type, ctx.types.Size(w.Type), ctx.StructLocal(w.Type, ctx.ScalarWidth(w.Type)))).OrderByDescending(r => r.Size).ToArray();
             // 发现阶段只使用不冲突的精确布局；复用栈槽仍由最终生命期分析处理。
             ctx.State.Frames.discoveryFrames = candidates.Where(r => !candidates.Any(other => other != r && r.Offset < other.Offset + other.Size && other.Offset < r.Offset + r.Size && !ctx.ContainsFrameType(r, other.Offset, other.Type) && !ctx.ContainsFrameType(other, r.Offset, r.Type))).Where(r => !candidates.Any(outer => outer != r && ctx.ContainsFrameType(outer, r.Offset, r.Type))).ToArray();
             ctx.State.Structs.fragmentLocals.Clear();
-            ctx.InferTypes();
+            ctx.Maintain.Types("frames.discover-array-copies.round");
             ctx.PrepareArrayCursors();
             var count = witnesses.Count;
+            // 字段复制见证失败时立即返回，不清空发现阶段的布局（与改为不动点组之前相同）
             if (ctx.WitnessFieldCopies(witnesses) is { } fieldFailure)
-                return fieldFailure;
+            {
+                failure = fieldFailure;
+                return false;
+            }
             ctx.WitnessFrameCopies(witnesses);
-            if (witnesses.Count == count)
-                break;
-        }
+            return witnesses.Count != count;
+        });
+        if (failure is not null)
+            return failure;
 
         ctx.State.Frames.discoveryFrames = [];
         ctx.State.Structs.fragmentLocals.Clear();
@@ -464,7 +476,7 @@ internal static class FramesRules
                 copies.Add((from, to, load.Width, store, v));
         if (copies.Count == 0)
             return;
-        for (var round = 0; round < 8; round++)
+        ctx.Maintain.Fixpoint("frames.witness-frame-copies", 8, () =>
         {
             var added = false;
             foreach (var known in witnesses.ToArray())
@@ -503,9 +515,8 @@ internal static class FramesRules
                     }
             }
 
-            if (!added)
-                break;
-        }
+            return added;
+        });
     }
 
     internal static int ScalarWidth(this RecoveryScope ctx, TypeRef type) => ctx.types.Kind(type) switch

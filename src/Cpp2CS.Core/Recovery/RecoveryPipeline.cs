@@ -30,6 +30,7 @@ internal static class RecoveryPipeline
                     {
                         Passes = ctx.passSteps.ToArray(),
                         Analyses = ctx.analysisSteps.ToArray(),
+                        Maintenance = ctx.maintenanceSteps.ToArray(),
                         Calls = ctx.State.Calls.callBindings.Resolutions.ToArray(),
                         Rules = ctx.ruleTraces.ToArray()
                     };
@@ -42,6 +43,7 @@ internal static class RecoveryPipeline
             Partial = partial is null ? null : RecoveryPipeline.Summarized(partial, ctx.ledger.Holes),
             Passes = ctx.passSteps.ToArray(),
             Analyses = ctx.analysisSteps.ToArray(),
+            Maintenance = ctx.maintenanceSteps.ToArray(),
             Calls = ctx.State.Calls.callBindings.Resolutions.ToArray(),
             Rules = ctx.ruleTraces.ToArray()
         };

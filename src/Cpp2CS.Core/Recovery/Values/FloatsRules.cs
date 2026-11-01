@@ -27,8 +27,8 @@ internal static class FloatsRules
         });
         if (changed == 0)
             return;
-        ctx.definitions = ctx.IndexDefinitions();
-        ctx.InferTypes();
+        ctx.Maintain.Definitions("values.narrow-typed-scalars");
+        ctx.Maintain.Types("values.narrow-typed-scalars");
     }
 
     internal static Dictionary<Storage, int> ScalarWidths(this RecoveryScope ctx, Call call, bool returned, bool typed = false)

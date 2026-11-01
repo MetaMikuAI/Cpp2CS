@@ -40,8 +40,8 @@ internal static class UnusedArgumentsRules
 
         if (!changed)
             return;
-        ctx.definitions = ctx.IndexDefinitions();
-        ctx.InferTypes();
+        ctx.Maintain.Definitions("calls.unused-receiver-phis");
+        ctx.Maintain.Types("calls.unused-receiver-phis");
         Variable? CheckedOnPath(Block block, TypeRef type)
         {
             var seen = new HashSet<Block>();
