@@ -373,6 +373,15 @@ internal sealed class BodyBuilder
         // 分配之后的实例构造：合为 newobj（委托为委托构造），接收者不作为值出现。
         var construction = callee.Method.Name == ".ctor" && !callee.Method.IsStatic && contents.Length > 0
             && SymTable.Resolve(contents[0]) is ResultSym { Site.Op.Kind: OpKind.NewObject } allocated && constructions.ContainsKey(allocated) ? allocated : null;
+        // newobj 必须指名分配类型自己的构造函数；调用的是基类构造时，分配类型的构造函数被内联，需要单独证明，这里不冒充。
+        if (construction is not null && construction.Site.Op!.Operand is DefinitionRef allocatedType && callee.DeclaringType is DefinitionRef declaring
+            && allocatedType.Definition != declaring.Definition)
+        {
+            holes.Add(new(call.Address, $"构造 {allocatedType} 的构造函数被内联为 {callee}"));
+            output.Add(new ManagedHole(call.Address, $"构造 {allocatedType} 的构造函数被内联", false));
+            locals[construction] = NewLocal(allocatedType);
+            return call.Kind == CallKind.Tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
+        }
         var managed = new List<ManagedValue>();
         ManagedValue? receiver = null;
         for (var i = 0; i < signature.Arguments.Length; i++)
@@ -558,6 +567,8 @@ internal sealed class BodyBuilder
 
         public Sym? ClassOwner(Sym klass) => owner.ClassOwner(klass);
 
+        public bool InitializesNext(TypeRef type) => owner.Initializes(block, index + 1, type);
+
         public bool InCatchOf(Sym exception) => owner.regions.Any(r => r.IsCatch && r.Handler.Contains(block)
             && SymTable.Resolve(exception) is ReadSym read && owner.oracle.Decompose(read.Address) is (ResultSym { Site: var begin }, 0, null, _) && ReferenceEquals(begin, r.BeginCatch));
 
@@ -583,6 +594,41 @@ internal sealed class BodyBuilder
     private MethodRef? Constructor(string exception) => oracle.ExceptionType(exception) is { } type
         ? type.Definition.Methods.FirstOrDefault(m => m.Name == ".ctor" && !m.IsStatic && m.Parameters.Count == 0) is { } ctor ? new MethodRef(ctor, [], []) : null
         : null;
+
+    /// <summary>
+    /// 直线路径上随后第一个有副作用的语句按 IL 语义触发 owner 的类初始化（ECMA-335 II.10.5.3）：访问 owner 的静态字段；
+    /// 调用非 beforefieldinit 的 owner 的静态方法或构造函数。中间只允许无副作用的定义与不触发初始化的运行时操作。
+    /// </summary>
+    private bool Initializes(Block block, int index, TypeRef owner)
+    {
+        var precise = owner is DefinitionRef d && (d.Definition.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) == 0;
+        bool Static(Sym address, int width) => oracle.Locate(address, width) is { Kind: LocationKind.Static, Owner: { } o } && o.Equals(owner);
+        for (var steps = 0; steps < 64; steps++)
+        {
+            if (index >= block.Statements.Count)
+            {
+                if (block.Successors.Count != 1 || block.Successors[0].Predecessors.Count != 1 || block.Handler is not null) return false;
+                block = block.Successors[0];
+                index = 0;
+                continue;
+            }
+            var statement = block.Statements[index++];
+            if (statement is Nop or Phi or Ir.Jump) continue;
+            var reads = Reads(statement).ToArray();
+            if (reads.Length > 0) return Static(reads[0].Address, reads[0].Width);
+            switch (statement)
+            {
+                case Define: continue;
+                case Store store: return Static(values.Operands(store)[0], store.Value.Width);
+                case Call { Op.Kind: OpKind.InitClass or OpKind.RunClassConstructor or OpKind.WriteBarrier or OpKind.InitMethodRgctx }: continue;
+                case Call { Op.Kind: OpKind.NewObject }: continue;
+                case Call { Op: null } call when oracle.Callee(call) is { } callee:
+                    return precise && callee.DeclaringType.Equals(owner) && (callee.Method.IsStatic || callee.Method.Name == ".ctor");
+                default: return false;
+            }
+        }
+        return false;
+    }
 
     /// <summary>
     /// 判空被吸收：直线路径上判空之后第一个有副作用的语句经该对象访问字段、元素或调用其实例方法——

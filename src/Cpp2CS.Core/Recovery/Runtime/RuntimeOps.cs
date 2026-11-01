@@ -42,6 +42,8 @@ public interface IRuntimeLowering
     ManagedValue Hole(string reason, TypeRef? type);
     /// <summary>类指针所属的对象：对象偏移 0 处的读取（运行时布局中对象头的 klass）。</summary>
     Sym? ClassOwner(Sym klass);
+    /// <summary>直线路径上随后第一个有副作用的语句本身按 IL 语义触发 owner 的类初始化。</summary>
+    bool InitializesNext(TypeRef owner);
 }
 
 /// <summary>下降：返回 false 表示不支持（记为洞）；terminal 不为 null 时它结束所在的块。</summary>
@@ -73,9 +75,23 @@ public static class RuntimeOps
 
     private static IEnumerable<RuntimeOpRule> Build()
     {
-        // 没有托管可见效果：写屏障、内存屏障、类元数据初始化、类构造（ECMA-335 II.10.5.3：访问静态成员时由运行时触发）、RGCTX 初始化。
-        foreach (var kind in new[] { OpKind.WriteBarrier, OpKind.MemoryBarrier, OpKind.InitClass, OpKind.RunClassConstructor, OpKind.InitMethodRgctx })
+        // 没有托管可见效果：写屏障、内存屏障、类元数据初始化、RGCTX 初始化。
+        foreach (var kind in new[] { OpKind.WriteBarrier, OpKind.MemoryBarrier, OpKind.InitClass, OpKind.InitMethodRgctx })
             yield return new(kind) { Lower = None };
+        // 显式类构造：随后的第一个副作用按 ECMA-335 II.10.5.3 本身触发同一类型的初始化时省去（初始化点相同），
+        // 否则写成 RuntimeHelpers.RunClassConstructor(typeof(T).TypeHandle)，保持原生代码中的初始化时机。
+        yield return new(OpKind.RunClassConstructor)
+        {
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Op.Operand is not TypeRef owner) return false;
+                if (c.InitializesNext(owner)) return true;
+                if (c.Types.CorlibMethod("System.Runtime.CompilerServices.RuntimeHelpers", "RunClassConstructor", c.Types.RuntimeTypeHandle) is not { } run) return false;
+                c.Emit(new ManagedCall(c.Call.Address, new ManagedInvocation(run, null, [new TypeHandleValue(owner, c.Types.RuntimeTypeHandle, 64)], false), null, false));
+                return true;
+            },
+        };
         // 只服务于分派：结果流向调用目标与 MethodInfo，不是 IL 值。
         foreach (var kind in new[] { OpKind.InterfaceInvokeData, OpKind.ResolveGenericVirtual })
             yield return new(kind) { Lower = None };

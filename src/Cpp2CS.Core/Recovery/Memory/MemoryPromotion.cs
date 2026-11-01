@@ -206,10 +206,15 @@ internal sealed class MemoryPromotion
             effects.Add(new(position, value.Index, value.Size * 8, 0, space, offset, value.Size, value.Access));
         }
         if (call.StackPointer is { } sp && Resolve(sp) is (LocalSpace { Kind: LocalKind.Frame }, var spOffset))
+        {
             foreach (var value in callee.Arguments.Where(a => a.Transfer == Transfer.Value))
                 foreach (var piece in value.Pieces.Where(p => p.Register.Bank == Bank.Stack))
                     effects.Add(new(-1, value.Index, MethodEnvironment.ValueWidth(value), piece.Offset * 8, LocalSpace.Frame,
                         spOffset + piece.Register.Index, piece.Width / 8, MemoryAccess.Read));
+            // 栈上传递的隐藏 MethodInfo：共享泛型代码的调用由它指名确切实例。
+            if (callee.MethodInfo is { Register.Bank: Bank.Stack } info)
+                effects.Add(new(-1, MachineSignature.MethodInfoIndex, 64, 0, LocalSpace.Frame, spOffset + info.Register.Index, 8, MemoryAccess.Read));
+        }
         return effects;
     }
 

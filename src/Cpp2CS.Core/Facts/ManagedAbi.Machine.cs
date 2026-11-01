@@ -35,6 +35,8 @@ public sealed record MachineValue(int Index, TypeRef Type, Transfer Transfer, Ab
 public sealed record MachineSignature(MachineValue[] Arguments, MachineValue? Return, AbiPiece? MethodInfo, int StackSize)
 {
     public const int ReturnIndex = int.MaxValue;
+    /// <summary>隐藏的 MethodInfo 实参在内存效果中的值编号。</summary>
+    public const int MethodInfoIndex = int.MinValue;
 
     public MachineValue? This => Arguments.FirstOrDefault(a => a.Index == -1);
 

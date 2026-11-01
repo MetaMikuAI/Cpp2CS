@@ -105,7 +105,10 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
         if (candidates.Count == 0) return null;
         var operands = values.Operands(call);
         Sym? Register(Storage storage) => Array.IndexOf(call.Sources, storage) is var k and >= 0 && k + 1 < operands.Count ? operands[1 + k] : null;
-        if (shape.Signature?.MethodInfo is { } info && Register(info.Register) is { } infoSym
+        Sym? StackInfo() => call.Memory.FirstOrDefault(m => !m.Write && m.Value == MachineSignature.MethodInfoIndex) is { } access
+            && Array.IndexOf(call.Sources, access.Cell) is var cell and >= 0 && cell + 1 < operands.Count
+            ? values.Syms.Slice(operands[1 + cell], access.CellBit, access.Width) : null;
+        if (shape.Signature?.MethodInfo is { } info && (info.Register.Bank == Bank.Stack ? StackInfo() : Register(info.Register)) is { } infoSym
             && SymTable.Resolve(infoSym) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef exact } }
             && candidates.Any(c => c.Method == exact.Method))
             return callees[call] = exact;
@@ -114,10 +117,20 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
         if (receiverType is ByRefRef byRef) receiverType = byRef.Element;
         var arguments = shape.Signature?.Arguments.Select(a => a.Transfer == Transfer.Value && a.Pieces.Length == 1 && a.Pieces[0].Register.Bank != Bank.Stack
             ? Register(a.Pieces[0].Register) : null).ToArray() ?? [];
+        // 兼容的候选中取声明类型离接收者最近的（折叠的候选机器码相同，最派生的声明对接收者一定可用）。
         var chosen = candidates.Count == 1 ? candidates[0]
-            : candidates.FirstOrDefault(c => Compatible(c, receiverType, arguments)) ?? candidates[0];
+            : candidates.Where(c => Compatible(c, receiverType, arguments)).OrderBy(c => Distance(receiverType, c.DeclaringType)).FirstOrDefault() ?? candidates[0];
         if (receiverType is DefinitionRef owner && !chosen.Method.IsStatic) chosen = Specialize(chosen, owner);
         return callees[call] = chosen;
+    }
+
+    /// <summary>接收者类型沿基类链到声明类型的距离；不在链上时为最大。</summary>
+    private static int Distance(TypeRef? receiver, TypeRef owner)
+    {
+        var distance = 0;
+        for (TypeRef? current = receiver; current is DefinitionRef d; current = d.Definition.BaseType?.Substitute(d.Arguments, []), distance++)
+            if (d.Definition == (owner as DefinitionRef)?.Definition) return distance;
+        return int.MaxValue;
     }
 
     /// <summary>接收者的基类链上找到方法的声明类型时，以其类型实参代入。</summary>
