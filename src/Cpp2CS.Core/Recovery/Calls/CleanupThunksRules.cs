@@ -44,11 +44,6 @@ internal static class CleanupThunksRules
     {
         var all = ctx.function.Blocks.SelectMany(b => b.Statements).ToArray();
         var stores = all.OfType<Store>().Where(s => s.Target is FrameAddress).GroupBy(s => ((FrameAddress)s.Target).Offset).Where(g => g.Count() == 1 && g.Single().Value.Width == 64).ToDictionary(g => g.Key, g => g.Single());
-        if (SharedStatements.First(ctx.function.Blocks.SelectMany(b => b.Statements)) is { } shared)
-        {
-            ctx.Hole(shared.Address, $"复制共享 语句对象 {shared} 出现在多个块中，位置不唯一", rule: "PromotePrivateFrameSlots");
-            return;
-        }
         var positions = ctx.function.Blocks.SelectMany(b => b.Statements.Select((s, i) => (s, b, i))).ToDictionary(p => p.s, p => (p.b, p.i), (IEqualityComparer<Stmt>)ReferenceEqualityComparer.Instance);
         bool Dominates(Store store, Stmt use)
         {

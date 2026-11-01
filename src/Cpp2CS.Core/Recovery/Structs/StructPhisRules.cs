@@ -11,7 +11,7 @@ internal static class StructPhisRules
     /// 返回值各片的 φ 在每条入边上都来自同一个结构体值（同一次调用的结构体结果，或同一个结构体位置的逐片读取）时，
     /// 这组 φ 是一个结构体局部变量；φ 只被返回使用。逐片读取的定义并入入边上的整体读取。
     /// </summary>
-    [Step("structs.phis", StepPhase.Analyze, StepKind.Analysis, Order = 955, After = ["typing.infer", "memory.array-spans"], Name = "结构体汇合")]
+    [Step("structs.phis", StepPhase.Analyze, StepKind.Analysis, Order = 955, After = ["typing.infer"], Name = "结构体汇合")]
     internal static RecoveryFailure? StructPhis(this AnalysisScope ctx)
     {
         ctx.CallResultPhis();

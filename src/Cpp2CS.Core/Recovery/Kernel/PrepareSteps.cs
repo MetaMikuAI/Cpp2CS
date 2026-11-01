@@ -103,10 +103,6 @@ internal static class PrepareSteps
         }
     }
 
-    /// <summary>块视图重置为全部块。</summary>
-    [Step("kernel.blocks", StepPhase.Prepare, StepKind.Analysis)]
-    internal static void ResetBlocks(MethodSession scope) => scope.Maintain.Blocks(scope.function.Blocks, "kernel.blocks");
-
     /// <summary>控制流问题转洞。</summary>
     [Step("kernel.problem-holes", StepPhase.Prepare, StepKind.Analysis)]
     internal static void ProblemHoles(MethodSession scope)

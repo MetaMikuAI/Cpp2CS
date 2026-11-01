@@ -9,7 +9,7 @@ internal sealed class CallsState : IStatementKeyed
     internal readonly HashSet<ulong> cleanupSites = [];
     internal readonly HashSet<ulong> inlineCleanupSites = [];
     internal readonly CallBindingState callBindings = new();
-    internal readonly Dictionary<Call, MethodRef> nativeImports = new(ValueKeyProbe<Call>.Instance);
+    internal readonly Dictionary<Call, MethodRef> nativeImports = new(ReferenceEqualityComparer.Instance);
 
     public void Replace(Stmt previous, Stmt? replacement)
     {

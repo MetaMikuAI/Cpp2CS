@@ -23,7 +23,6 @@ internal static class FramesRules
             changed |= JoinedFieldReads.Run(ctx.function, phi => phi.Sources.All(v => ctx.State.Types.known.TryGetValue(v, out var type) && ctx.types.Kind(type) == TypeKind.Reference) || phi.Sources.All(ctx.FieldAddress));
             if (!changed) return false;
             ctx.Edit.Propagate(ctx.Dominators, "frames.joined-addresses.round");
-            ctx.Maintain.Blocks(ctx.function.Blocks, "frames.joined-addresses.round");
             ctx.Maintain.Definitions("frames.joined-addresses.round");
             foreach (var block in ctx.blocks)
                 for (var i = 0; i < block.Statements.Count; i++)
@@ -90,7 +89,6 @@ internal static class FramesRules
                     return true;
                 }))
                 ctx.Hole(ctx.entry, $"不动点 固定数组后的控制流化简超过 {Maintenance.SafetyBudget} 轮未收敛", rule: "Fixpoint");
-            ctx.Maintain.Blocks(ctx.function.Blocks, "memory.pinned-arrays");
             ctx.Maintain.Definitions("memory.pinned-arrays");
             ctx.Maintain.Types("memory.pinned-arrays");
         }
@@ -424,12 +422,6 @@ internal static class FramesRules
     internal static void WitnessFrameCopies(this AnalysisScope ctx, List<FrameWitness> witnesses)
     {
         var positions = ctx.blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Block: b, Index: i))).ToArray();
-        // 位置按语句对象索引；同一对象在多个块中时无法判定先后，留洞而不猜测
-        if (SharedStatements.First(positions.Select(p => p.Statement)) is { } shared)
-        {
-            ctx.Hole(shared.Address, $"复制共享 语句对象 {shared} 出现在多个块中，位置不唯一", rule: "WitnessFrameCopies");
-            return;
-        }
         var sites = positions.Where(p => p.Statement is Define).ToDictionary(p => ((Define)p.Statement).Target);
         var statements = positions.ToDictionary(p => p.Statement, (IEqualityComparer<Stmt>)ReferenceEqualityComparer.Instance);
         bool Before(Stmt first, Stmt second) => statements.TryGetValue(first, out var from) && statements.TryGetValue(second, out var to)
@@ -654,12 +646,12 @@ internal static class FramesRules
             ctx.Hole(address, "栈 结构体叶子未在所有路径初始化", rule: "ProveFrameInitialization");
     }
 
-    /// <summary>托管帧提升；步骤组，前后各收窄一次标量向量。</summary>
+    /// <summary>托管帧提升，前后各收窄一次标量向量。</summary>
     [Step("frames.managed-promotion", StepPhase.Prepare, StepKind.Rewrite)]
     internal static void PromoteManagedFrames(RewriteScope scope, PreparedMethod prepared)
     {
-        StepGroup.Run(scope, "frames.managed-promotion.narrow-before", () => scope.NormalizeScalarVectors());
-        StepGroup.Run(scope, "frames.managed-promotion.promote", () => ManagedFramePromotion.Run(scope.facts, scope.function, prepared.Abi, prepared.Calls, prepared.StackPointer, prepared.Signature.Return));
-        StepGroup.Run(scope, "frames.managed-promotion.narrow-after", () => scope.NormalizeScalarVectors());
+        scope.NormalizeScalarVectors();
+        ManagedFramePromotion.Run(scope.facts, scope.function, prepared.Abi, prepared.Calls, prepared.StackPointer, prepared.Signature.Return);
+        scope.NormalizeScalarVectors();
     }
 }

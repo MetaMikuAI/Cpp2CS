@@ -138,6 +138,13 @@ public static class ExprMap
     };
 
     /// <summary>重写语句中的全部表达式（不改变定义目标）。</summary>
+    /// <summary>把语句复制到另一个位置：映射操作数，并且总是返回新对象（操作数未变时也新建），同一语句对象不会出现在两个位置。</summary>
+    public static Stmt Copy(Stmt stmt, Func<Expr, Expr> f)
+    {
+        var mapped = MapOperands(stmt, f);
+        return ReferenceEquals(mapped, stmt) ? stmt with { } : mapped;
+    }
+
     public static Stmt MapOperands(Stmt stmt, Func<Expr, Expr> f)
     {
         switch (stmt)

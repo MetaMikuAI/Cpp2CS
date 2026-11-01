@@ -23,7 +23,7 @@ internal static class FrameTypedProjectionCheck
         var write = new Call(0x100, CallKind.Direct, Expr.C(0, 64));
         var read = new Define(0x104, new Variable(Storage.Vec(0), 1), new Load(new FrameAddress(-36), 32));
         var block = new Block(0x100) { Statements = [write, read] };
-        ctx.blocks = [block];
+        ctx.function = new() { Entry = block.Start, Range = new(0x100, 0x108, CodeRegion.Managed, default), Blocks = [block] };
         List<FrameWitness> witnesses = [new(-40, vector2, write, true)];
         var a = new Assertions();
         a.True(ctx.Analysis.TypedFrameRead(witnesses, -40, vector3, [read], [(4, 32, -36)]), "Vector2.y 可作为 Vector3.y，不扩大源区域");
@@ -45,7 +45,6 @@ internal static class FrameTypedProjectionCheck
         MachineFunction.AddEdge(entry, other);
         ctx.function = new() { Entry = entry.Start, Range = new(0x200, 0x240, CodeRegion.Managed, default), Blocks = [entry, first, other] };
         ctx.function.Renumber();
-        ctx.blocks = ctx.function.Blocks;
         ctx.definitions = ctx.IndexDefinitions();
         var copied = new List<FrameWitness> { new(-16, vector2, firstCall, false) };
         ctx.Analysis.WitnessFrameCopies(copied);

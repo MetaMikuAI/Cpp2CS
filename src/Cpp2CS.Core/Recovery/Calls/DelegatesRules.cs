@@ -23,15 +23,14 @@ internal static class DelegatesRules
         bool Constructor(Call call) => call is { Op: null, Kind: CallKind.Direct, Target: Const target } && ctx.facts.EntriesAt(target.Value).Any(e => e.Method is { Method.Name: ".ctor", DeclaringType: DefinitionRef type } && DelegateFacts.IsDelegate(type));
         bool GenericIdentity(Call call, int argument, MethodRef target) => call.Target is Const address && argument < call.Sources.Length && ctx.owner.abi.Classify(target, out _)?.MethodInfo?.Register == call.Sources[argument] && ctx.facts.EntriesAt(address.Value).Any(e => e.Method?.Method == target.Method);
         bool ObjectConstructor(Call call, DefinitionRef type) => !DelegateFacts.IsDelegate(type) && call.Target is Const target && ctx.facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false } method } && method.Owner == type.Definition);
-        // 步骤组：四次拆分与合并分配都要运行（原来以非短路 | 合并），有任一改动时传播
-        var changed = false;
-        StepGroup.Run(ctx, "calls.split-identity-choices.constructors", () => changed |= CallIdentityChoices.Split(ctx.function, Constructor, ExpandIdentity));
-        StepGroup.Run(ctx, "calls.split-identity-choices.generic", () => changed |= CallIdentityChoices.SplitGeneric(ctx.function, GenericIdentity, ExpandIdentity));
-        StepGroup.Run(ctx, "calls.split-identity-choices.indirect", () => changed |= CallIdentityChoices.SplitIndirect(ctx.function));
-        StepGroup.Run(ctx, "calls.split-identity-choices.stores", () => changed |= CallIdentityChoices.SplitStores(ctx.function));
-        StepGroup.Run(ctx, "calls.split-identity-choices.merged-allocations", () => changed |= MergedAllocations.Run(ctx.function, ObjectConstructor));
+        // 四种拆分与合并分配都要运行，有任一改动时传播
+        var changed = CallIdentityChoices.Split(ctx.function, Constructor, ExpandIdentity);
+        changed |= CallIdentityChoices.SplitGeneric(ctx.function, GenericIdentity, ExpandIdentity);
+        changed |= CallIdentityChoices.SplitIndirect(ctx.function);
+        changed |= CallIdentityChoices.SplitStores(ctx.function);
+        changed |= MergedAllocations.Run(ctx.function, ObjectConstructor);
         if (changed)
-            StepGroup.Run(ctx, "calls.split-identity-choices.propagate", () => ctx.Edit.Propagate(ctx.Dominators, "calls.split-identity-choices"));
+            ctx.Edit.Propagate(ctx.Dominators, "calls.split-identity-choices");
     }
 
     internal static void DelegateAllocation(this AnalysisScope ctx, Block block, int index, Call allocation, DefinitionRef type, Variable created)

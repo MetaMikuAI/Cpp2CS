@@ -257,20 +257,15 @@ internal static class GateDelta
         return log.Finish();
     }
 
-    /// <summary>
-    /// 门禁运行中常开的计数器。非零不判失败，但要先查明原因：
-    /// valueEqualStatementKeys 是值相等语句键的合并次数（O10 的依据）；baseHolesWithDerivedMarker 是原因文本带“（源于 ”标记的基础洞（4.13）。
-    /// </summary>
-    [Command("gate-counters", "读出一次 recover 的常开计数器（run.json 的 counters 与 recovery.jsonl 的洞原因）", Arguments = "<output>")]
+    /// <summary>门禁计数：原因文本带“（源于 ”标记的基础洞（派生原因的文本拼接，非零时先查明原因）。</summary>
+    [Command("gate-counters", "读出一次 recover 中原因带派生标记的基础洞", Arguments = "<output>")]
     public static int Counters(string output)
     {
-        var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(output, "run.json")))!;
         var marked = Jsonl.Read(output, "recovery.jsonl").SelectMany(row => row.Value["holes"]!.AsArray()
             .Where(h => h!["derived"]!.GetValue<bool>() == false && h["reason"]!.GetValue<string>().Contains("（源于 ", StringComparison.Ordinal))
             .Select(h => $"{row.Key} @ {h!["address"]}：{h["reason"]}")).ToArray();
         var counters = new JsonObject
         {
-            ["valueEqualStatementKeys"] = manifest["counters"]?["valueEqualStatementKeys"]?.DeepClone(),
             ["baseHolesWithDerivedMarker"] = marked.Length,
         };
         Console.WriteLine(Jsonl.Text(counters));

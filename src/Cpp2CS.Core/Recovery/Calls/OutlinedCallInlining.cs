@@ -64,7 +64,7 @@ internal static class OutlinedCallInlining
             var clone = clones[source];
             foreach (var original in source.Statements.Where(s => s is not Store store || !saved.Contains(store)))
             {
-                var mapped = ExprMap.MapOperands(original, Map);
+                var mapped = ExprMap.Copy(original, Map);
                 if (mapped is Return { Value: { } value } && output is not null)
                 {
                     var returned = new Variable(output.Storage, versions.GetValueOrDefault(output.Storage) + 1);

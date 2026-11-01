@@ -95,50 +95,12 @@ internal static class StatementKeys
     }
 }
 
-/// <summary>
-/// 复制块时，操作数未变的语句可能作为同一对象放进多个块；按引用为语句定位置的代码遇到这种语句时位置不唯一。
-/// </summary>
-internal static class SharedStatements
+/// <summary>“调用 + 参数序号”键：调用按引用比较。</summary>
+internal sealed class CallParameterKeys : IEqualityComparer<(Call Call, int Parameter)>
 {
-    /// <summary>序列中第一个重复出现的语句对象（按引用）；没有重复时为 null。</summary>
-    public static Stmt? First(IEnumerable<Stmt> statements)
-    {
-        var seen = new HashSet<Stmt>(ReferenceEqualityComparer.Instance);
-        foreach (var statement in statements)
-            if (!seen.Add(statement)) return statement;
-        return null;
-    }
-}
+    public static readonly CallParameterKeys Instance = new();
 
-/// <summary>
-/// 值相等的语句键比较器：比较结果与默认比较器完全相同，另外统计结构相同而对象不同的键被判为相等的次数
-/// （<see cref="Cpp2CS.Diagnostics.GateCounters.ValueEqualKeys"/>），作为改为引用相等之前的依据。
-/// </summary>
-internal sealed class ValueKeyProbe<T> : IEqualityComparer<T> where T : Stmt
-{
-    public static readonly ValueKeyProbe<T> Instance = new();
+    public bool Equals((Call Call, int Parameter) x, (Call Call, int Parameter) y) => ReferenceEquals(x.Call, y.Call) && x.Parameter == y.Parameter;
 
-    public bool Equals(T? x, T? y)
-    {
-        var equal = EqualityComparer<T>.Default.Equals(x, y);
-        if (equal && !ReferenceEquals(x, y)) Cpp2CS.Diagnostics.GateCounters.CountValueEqualKey();
-        return equal;
-    }
-
-    public int GetHashCode(T obj) => EqualityComparer<T>.Default.GetHashCode(obj);
-}
-
-/// <summary><see cref="ValueKeyProbe{T}"/> 的“调用 + 参数序号”元组版本，只统计调用对象不同的情形。</summary>
-internal sealed class CallParameterKeyProbe : IEqualityComparer<(Call Call, int Parameter)>
-{
-    public static readonly CallParameterKeyProbe Instance = new();
-
-    public bool Equals((Call Call, int Parameter) x, (Call Call, int Parameter) y)
-    {
-        var equal = EqualityComparer<(Call Call, int Parameter)>.Default.Equals(x, y);
-        if (equal && !ReferenceEquals(x.Call, y.Call)) Cpp2CS.Diagnostics.GateCounters.CountValueEqualKey();
-        return equal;
-    }
-
-    public int GetHashCode((Call Call, int Parameter) obj) => EqualityComparer<(Call Call, int Parameter)>.Default.GetHashCode(obj);
+    public int GetHashCode((Call Call, int Parameter) obj) => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj.Call), obj.Parameter);
 }

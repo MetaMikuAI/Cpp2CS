@@ -7,8 +7,6 @@ public enum TraceKind
     Pass,
     /// <summary>Analyze 的注册步骤：前后的定义版本与已知类型数。</summary>
     Step,
-    /// <summary>步骤组的子步骤：前后的定义版本、已知类型数与语句数；同组折叠后与父步骤一致。</summary>
-    SubStep,
     /// <summary>维护动作：所在步骤、原因 Id 与前后的定义版本。</summary>
     Maintenance,
     /// <summary>不动点组：轮数与收敛状态。</summary>

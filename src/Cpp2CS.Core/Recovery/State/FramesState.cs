@@ -13,10 +13,10 @@ internal sealed class FramesState : IStatementKeyed
     internal readonly Dictionary<Stmt, ManagedStatement[]> frameInitializers = new(ReferenceEqualityComparer.Instance);
     // ---------- 装箱子域 ----------
     internal readonly Dictionary<Variable, LocalValue> mergedBoxValues = [];
-    internal readonly Dictionary<Store, LocalValue> boxArgumentStores = new(ValueKeyProbe<Store>.Instance);
+    internal readonly Dictionary<Store, LocalValue> boxArgumentStores = new(ReferenceEqualityComparer.Instance);
     /// <summary>装箱调用 → 写入被装箱栈槽的值。</summary>
     internal readonly Dictionary<Call, Expr> boxed = new(ReferenceEqualityComparer.Instance);
-    internal readonly Dictionary<Store, LocalValue> stackArgumentStores = new(ValueKeyProbe<Store>.Instance);
+    internal readonly Dictionary<Store, LocalValue> stackArgumentStores = new(ReferenceEqualityComparer.Instance);
     internal readonly Dictionary<(ulong Site, int Parameter), ManagedValue> stackArgumentValues = [];
     internal readonly Dictionary<ulong, (long Offset, int Size)> callStackAreas = [];
     internal readonly Dictionary<Call, StackEnum> stackEnums = new(ReferenceEqualityComparer.Instance);

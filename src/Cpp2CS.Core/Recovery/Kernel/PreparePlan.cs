@@ -87,7 +87,6 @@ internal static class PreparePlan
         new("kernel.delegate-calls", Reads: F | PreparedData.Idioms),
         new("exceptions.null-branches", Reads: F, When: (scope, _) => scope.function.Blocks.Any(b => b.IsLandingPad)),
         new("kernel.residual-holes", Reads: F | PreparedData.Idioms),
-        new("kernel.blocks", Reads: F),
         new("exceptions.regions", Reads: F),
         new("kernel.problem-holes", Reads: F),
     ];

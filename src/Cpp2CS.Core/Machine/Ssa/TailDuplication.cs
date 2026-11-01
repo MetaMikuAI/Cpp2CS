@@ -51,7 +51,7 @@ internal static class TailDuplication
                 parent.Statements.RemoveAll(s => s is Jump);
                 foreach (var statement in statements.Where(s => s is not (Phi or Jump)))
                 {
-                    var mapped = ExprMap.MapOperands(statement, e => ExprMap.Map(e,
+                    var mapped = ExprMap.Copy(statement, e => ExprMap.Map(e,
                         value => value is Use u && map.TryGetValue(u.Variable, out var replacement) ? new Use(replacement, u.Width) : null));
                     if (mapped is Define d)
                     {

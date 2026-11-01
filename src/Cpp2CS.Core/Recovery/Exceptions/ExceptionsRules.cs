@@ -51,7 +51,7 @@ internal static class ExceptionsRules
             if (!block.IsLandingPad && normal.Add(block))
                 foreach (var successor in block.NormalSuccessors)
                     pending.Push(successor);
-        scope.Maintain.Blocks(scope.function.Blocks.Where(normal.Contains).ToArray(), "exceptions.normal-closure");
+        scope.Maintain.ScopeBlocks(normal, "exceptions.normal-closure");
         foreach (var statement in scope.function.Blocks.Where(b => !normal.Contains(b)).SelectMany(b => b.Statements))
         {
             scope.Poison(statement, hole);
@@ -118,7 +118,7 @@ internal static class ExceptionsRules
                     Sources = indices.Order().Select(i => phi.Sources[i]).ToArray()
                 };
         var kept = ctx.State.Exceptions.exceptionLayout.Kept.Concat(ctx.State.Exceptions.exceptionLayout.EntryPaths.SelectMany(p => p.Bridges)).Select(f => f.Block).ToHashSet();
-        ctx.Maintain.Blocks(ctx.function.Blocks.Where(kept.Contains).ToArray(), "exceptions.regions");
+        ctx.Maintain.ScopeBlocks(kept, "exceptions.regions");
         foreach (var region in ctx.State.Exceptions.exceptionLayout.Regions.Where(r => r.Kind == "catch"))
         {
             var exception = ctx.StructLocal(ctx.types.Corlib("System.Exception"), 64);

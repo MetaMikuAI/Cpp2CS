@@ -24,7 +24,7 @@ internal static partial class CallIdentityChoices
                     ? new Use(phi.Sources[side], use.Width) : null);
                 var parent = block.Predecessors[side];
                 var position = parent.Statements.Count - (parent.Statements.LastOrDefault() is Jump ? 1 : 0);
-                parent.Statements.Insert(position, ExprMap.MapOperands(store, OnEdge));
+                parent.Statements.Insert(position, ExprMap.Copy(store, OnEdge));
             }
             block.Statements.Remove(store);
             changed = true;

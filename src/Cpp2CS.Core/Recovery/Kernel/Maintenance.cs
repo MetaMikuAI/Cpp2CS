@@ -31,14 +31,11 @@ internal sealed class Maintenance(MethodSession ctx)
         Record("definitions", reason, () => ctx.definitions = ctx.IndexDefinitions());
     }
 
-    /// <summary>
-    /// 重置块视图。传入 <c>function.Blocks</c> 时记下的是这个列表对象本身：之后原地增加的块立即可见，
-    /// 列表被整体替换后视图仍指向旧列表，直到下一次重置；传入数组时是快照。
-    /// </summary>
-    public void Blocks(IReadOnlyList<Block> blocks, string reason)
+    /// <summary>把块视图限定在给定的块上（异常布局的正常闭包或保留块）。块视图总是按当前的块列表计算，不需要重置。</summary>
+    public void ScopeBlocks(IEnumerable<Block> kept, string reason)
     {
         Allowed("blocks");
-        Record("blocks", reason, () => ctx.blocks = blocks);
+        Record("blocks", reason, () => ctx.ScopeBlocks(kept));
     }
 
     /// <summary>
@@ -131,16 +128,6 @@ internal sealed class Editing(MethodSession ctx, Maintenance maintain)
                     fragment.Limit++;
             }
 
-        ctx.Rewriter.Insert(block, index, statement);
-    }
-
-    /// <summary>
-    /// 插入一条语句，不维护异常片段位置。只用于现有的一处绕过维护的路径（接收者 φ），疑似缺陷，见规划附录 D；
-    /// 修正属于受控差异。
-    /// </summary>
-    public void InsertWithoutFragments(Block block, int index, Stmt statement)
-    {
-        maintain.Check("insert");
         ctx.Rewriter.Insert(block, index, statement);
     }
 

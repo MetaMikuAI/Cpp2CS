@@ -71,7 +71,30 @@ internal sealed class MethodSession(MethodRecovery owner, MethodRef method, ulon
     internal IReadOnlyDictionary<Variable, (Call Call, int Index)> results => this.definitions.Results;
     internal IReadOnlyDictionary<Variable, IReadOnlyList<Phi>> phiUses => this.definitions.PhiUses;
 
-    internal IReadOnlyList<Block> blocks = null!;
+    /// <summary>
+    /// 块视图：按当前的块列表计算，总是最新的。范围为空时是全部块；异常布局给出范围时只含其中的块（正常闭包或保留块），
+    /// 之后新建的块不在范围内。
+    /// </summary>
+    internal IReadOnlyList<Block> blocks => blockScope is null ? function.Blocks : ScopedBlocks();
+    private HashSet<Block>? blockScope;
+    private (List<Block> List, int Count, Block[] View)? scopedView;
+
+    /// <summary>把块视图限定在给定的块上（由内核的维护动作调用）。</summary>
+    internal void ScopeBlocks(IEnumerable<Block> kept)
+    {
+        blockScope = kept.ToHashSet();
+        scopedView = null;
+    }
+
+    private Block[] ScopedBlocks()
+    {
+        var list = function.Blocks;
+        if (scopedView is { } cached && ReferenceEquals(cached.List, list) && cached.Count == list.Count)
+            return cached.View;
+        var view = list.Where(blockScope!.Contains).ToArray();
+        scopedView = (list, list.Count, view);
+        return view;
+    }
     internal MachineFunction function = null!;
     // ---------- 准备：签名、提升、L2 ----------
     /// <summary>允许具体实参或已有引用布局见证的泛型实例（RecoverInstance）。</summary>
