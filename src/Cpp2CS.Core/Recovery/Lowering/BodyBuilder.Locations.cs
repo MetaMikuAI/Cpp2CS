@@ -58,15 +58,15 @@ internal sealed partial class BodyBuilder
             case LocationKind.Static or LocationKind.ThreadStatic:
                 {
                     var type = FieldType(path[0], path.Count == 1 ? location.Type : null);
-                    ManagedValue root = new StaticFieldValue(path[0], type, Width(type));
-                    return path.Count == 1 ? root : Nest(store ? new AddressValue(root) : root, path.Skip(1).ToArray(), location.Type, store);
+                    var root = StaticFieldAccess(path[0], type, store && path.Count == 1, address);
+                    return path.Count == 1 ? root : Nest(store ? new AddressValue(root) : root, path.Skip(1).ToArray(), location.Type, store, address);
                 }
             case LocationKind.Instance:
-                return Nest(View(location.Base!, oracle.TypeOf(location.Base!), address), path, location.Type, store);
+                return Nest(View(location.Base!, oracle.TypeOf(location.Base!), address), path, location.Type, store, address);
             case LocationKind.Reference:
                 {
                     var pointer = View(location.Base!, oracle.TypeOf(location.Base!), address);
-                    return path.Count == 0 ? new IndirectValue(pointer, location.Type, Width(location.Type)) : Nest(pointer, path, location.Type, store);
+                    return path.Count == 0 ? new IndirectValue(pointer, location.Type, Width(location.Type)) : Nest(pointer, path, location.Type, store, address);
                 }
             case LocationKind.Element:
                 {
@@ -74,14 +74,14 @@ internal sealed partial class BodyBuilder
                     var index = location.Index is { } i ? View(i, types.Int32, address) : new ConstantValue((ulong)location.ConstantIndex, types.Int32, 32);
                     var element = array.Type is ArrayRef a ? a.Element : location.Type;
                     ManagedValue value = new ArrayElementValue(array, index, element, Width(element));
-                    return path.Count == 0 ? value : Nest(store ? new AddressValue(value) : value, path, location.Type, store);
+                    return path.Count == 0 ? value : Nest(store ? new AddressValue(value) : value, path, location.Type, store, address);
                 }
             case LocationKind.Length:
                 return new ArrayLengthValue(View(location.Base!, oracle.TypeOf(location.Base!), address), types.Int32, 32);
             case LocationKind.Local:
                 {
                     var local = CellLocal((LocalSym)location.Base!);
-                    return path.Count == 0 ? local : Nest(store ? new AddressValue(local) : local, path, location.Type, store);
+                    return path.Count == 0 ? local : Nest(store ? new AddressValue(local) : local, path, location.Type, store, address);
                 }
         }
         return Hole(address, $"内存 位置 {location.Kind} 尚未接入", location.Type);
@@ -89,14 +89,17 @@ internal sealed partial class BodyBuilder
 
     private TypeRef FieldType(FieldRef field, TypeRef? leaf) => leaf ?? field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
 
-    private ManagedValue Nest(ManagedValue receiver, IReadOnlyList<FieldRef> path, TypeRef leaf, bool store = false)
+    /// <summary>字段链：写入目标中值类型的中间字段以地址给出；每一级按可访问性取字段或被内联的访问器。</summary>
+    private ManagedValue Nest(ManagedValue receiver, IReadOnlyList<FieldRef> path, TypeRef leaf, bool store, ulong address)
     {
         var value = receiver;
         for (var i = 0; i < path.Count; i++)
         {
             var last = i == path.Count - 1;
             var type = FieldType(path[i], last ? leaf : null);
-            value = new FieldValue(value, path[i], type, Width(type));
+            if (store && !last && !Accessible(path[i].Field))
+                return Hole(address, $"内存 写入经过不可访问的值类型字段 {path[i].Field.Name}", leaf);
+            value = FieldAccess(value, path[i], type, store && last, address);
             if (store && !last && types.Kind(type) == TypeKind.Struct) value = new AddressValue(value);
         }
         return value;

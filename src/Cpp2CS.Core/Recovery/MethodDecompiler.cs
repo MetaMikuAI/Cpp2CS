@@ -35,6 +35,7 @@ public sealed class MethodDecompiler
     private readonly ManagedAbi abi;
     private readonly CallShapes shapes;
     private readonly Dictionary<(MethodRef, ulong), MethodRecoveryResult?> summaries = [];
+    private MethodEntries? entries;
 
     public MethodDecompiler(ProgramFacts facts, ManagedTypes types)
     {
@@ -92,16 +93,27 @@ public sealed class MethodDecompiler
         return BodyBuilder.Build(analysis, oracle, Summary);
     }
 
+    /// <summary>写出所需的依赖方法：按方法实例的原生入口恢复；泛型实例恢复为开放的共享体。</summary>
+    public MethodRecoveryResult RecoverDependency(MethodRef method)
+    {
+        entries ??= new MethodEntries(facts, types);
+        var entry = entries.Of(method);
+        if (entry == 0) return new(MethodRef.Open(method.Method), 0, null, [new(0, "依赖 没有原生入口")]);
+        return method.TypeArguments.Count + method.MethodArguments.Count > 0 ? RecoverShared(method, entry) : Recover(method, entry);
+    }
+
     /// <summary>
-    /// 另一个方法自身原生代码的恢复结果，作为内联证明的依据。按方法与入口缓存；递归恢复中的方法返回 null。
+    /// 另一个方法自身原生代码的恢复结果，作为内联证明的依据。入口取自方法实例索引（泛型实例可取共享实现）；
+    /// 按方法与入口缓存；递归恢复中的方法返回 null。
     /// </summary>
     public MethodRecoveryResult? Summary(MethodRef method)
     {
-        var entry = method.Method.Address;
+        entries ??= new MethodEntries(facts, types);
+        var entry = entries.Of(method);
         if (entry == 0) return null;
         if (summaries.TryGetValue((method, entry), out var known)) return known;
         summaries[(method, entry)] = null;
-        var result = Recover(method, entry);
+        var result = method.TypeArguments.Count + method.MethodArguments.Count > 0 ? RecoverInstance(method, entry) : Recover(method, entry);
         summaries[(method, entry)] = result;
         return result;
     }

@@ -1,7 +1,7 @@
 
 namespace Cpp2CS.Output;
 
-/// <summary>仅补齐透明构造与内联调用；不扩张普通调用。</summary>
+/// <summary>仅补齐透明构造、内联调用与被内联的访问器；不扩张普通调用。</summary>
 public static class DependencyClosure
 {
     public static void Complete(IEnumerable<MethodRecoveryResult> roots, List<MethodRecoveryResult> dependencies,
@@ -13,21 +13,28 @@ public static class DependencyClosure
         while (pending.TryDequeue(out var current))
         {
             if (current.Body is not { } body) continue;
-            foreach (var method in Required(body).Distinct().OrderBy(m => m.Index))
+            foreach (var method in Instances(body).DistinctBy(m => m.Method).OrderBy(m => m.Method.Index))
             {
-                if (!scheduled.Add(method)) continue;
-                if (!recovered.TryGetValue(method, out var dependency))
-                    recovered[method] = dependency = recovery.Recover(new MethodRef(method, [], []), method.Address);
+                if (!scheduled.Add(method.Method)) continue;
+                if (!recovered.TryGetValue(method.Method, out var dependency))
+                    recovered[method.Method] = dependency = recovery.RecoverDependency(method);
                 dependencies.Add(dependency);
                 pending.Enqueue(dependency);
             }
         }
     }
 
-    public static IEnumerable<MethodDef> Required(ManagedBody body) => body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of)
-        .SelectMany(ManagedValues.Walk).OfType<NewObjectValue>().Where(n => n.Transparent).Select(n => n.Constructor.Method)
-        .Concat(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Where(c => c.Inlined && c.Invocation.Method.MethodArguments.Count == 0
-            && c.Invocation.Method.TypeArguments.Count == 0).Select(c => c.Invocation.Method.Method));
+    /// <summary>方法体透明依赖的方法实例：透明构造、内联调用与被内联的访问器。</summary>
+    public static IEnumerable<MethodRef> Instances(ManagedBody body)
+    {
+        var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
+        var values = statements.SelectMany(ManagedValues.Of).Concat(statements.OfType<ManagedStore>().Select(s => s.Target)).SelectMany(ManagedValues.Walk).ToArray();
+        return values.OfType<NewObjectValue>().Where(n => n.Transparent).Select(n => n.Constructor)
+            .Concat(statements.OfType<ManagedCall>().Where(c => c.Inlined).Select(c => c.Invocation.Method))
+            .Concat(values.Select(v => v switch { FieldValue f => f.Accessor, StaticFieldValue f => f.Accessor, _ => null }).OfType<FieldAccessor>().Select(a => a.Method));
+    }
+
+    public static IEnumerable<MethodDef> Required(ManagedBody body) => Instances(body).Select(m => m.Method);
 
     public static void Validate(IEnumerable<MethodRecoveryResult> results, Dictionary<ManagedBody, EmissionProblem> problems)
     {

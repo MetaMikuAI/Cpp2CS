@@ -76,6 +76,7 @@ internal static partial class ExecutionCheck
     {
         public MethodRecoveryResult Recover(MethodRef method, ulong entry) => decompiler.Recover(method, entry);
         public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => decompiler.RecoverInstance(method, entry);
+        public MethodRecoveryResult RecoverDependency(MethodRef method) => decompiler.RecoverDependency(method);
     }
 
     /// <summary>Reason：不可检查时的主要原因（用例最多的一类，去掉具体类型与方法名以便汇总）。</summary>

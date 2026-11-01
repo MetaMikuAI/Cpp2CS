@@ -18,8 +18,12 @@ public sealed class MethodSummaryService : IMethodResults
         RecoveryMode.Instance => recovery.RecoverInstance(request.Method, request.Entry),
         RecoveryMode.Shared => recovery.RecoverShared(request.Method, request.Entry),
         _ => throw new ArgumentOutOfRangeException(nameof(request)),
-    })
-    { }
+    }) => dependency = recovery.RecoverDependency;
+
+    public MethodRecoveryResult RecoverDependency(MethodRef method) => dependency is not null ? dependency(method)
+        : throw new InvalidOperationException("摘要服务没有依赖恢复入口");
+
+    private readonly Func<MethodRef, MethodRecoveryResult>? dependency;
 
     internal MethodSummaryService(Func<MethodRequest, MethodRecoveryResult> recover) => this.recover = recover;
 

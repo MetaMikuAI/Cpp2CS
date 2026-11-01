@@ -6,4 +6,6 @@ public interface IMethodResults
 {
     MethodRecoveryResult Recover(MethodRef method, ulong entry);
     MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry);
+    /// <summary>写出所需的依赖方法：按方法实例的原生入口恢复；泛型实例恢复为开放的共享体。</summary>
+    MethodRecoveryResult RecoverDependency(MethodRef method);
 }
