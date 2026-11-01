@@ -92,10 +92,9 @@ internal static class ScalarFramesRules
     }
 
     /// <summary>结构体地址已绑定到有界区域后，恢复地址不逃逸的整数计数槽和已定型的引用槽。</summary>
-    [Step("frames.integer-slots", StepPhase.Analyze, StepKind.Rewrite, Order = 350, After = ["frames.regions", "frames.snapshots"], Name = "整数帧槽")]
+    [Step("frames.integer-slots", StepPhase.Analyze, StepKind.Rewrite, Order = 350, After = ["frames.regions", "frames.snapshots"], Name = "整数帧槽", Refresh = StepRefresh.Types)]
     internal static void PrepareScalarFrames(this RecoveryScope ctx)
     {
-        ctx.Maintain.Types("frames.integer-slots.entry");
         var accesses = new List<(long Offset, int Width, Expr? Written)>();
         var escapes = new List<long>();
         void Visit(Expr expression)

@@ -7,10 +7,9 @@ namespace Cpp2CS.Recovery;
 /// <summary>引用类型实例字段的地址：在支配位置已解引用接收者时，把“接收者 + 字段偏移”改写为字段地址。</summary>
 internal static class FieldAddressesRules
 {
-    [Step("memory.field-addresses", StepPhase.Analyze, StepKind.Rewrite, Order = 890, After = ["frames.slots", "control.absorb-checks"], Name = "字段地址")]
+    [Step("memory.field-addresses", StepPhase.Analyze, StepKind.Rewrite, Order = 890, After = ["frames.slots", "control.absorb-checks"], Name = "字段地址", Refresh = StepRefresh.Types)]
     internal static void PrepareFieldAddresses(this RecoveryScope ctx)
     {
-        ctx.Maintain.Types("memory.field-addresses.entry");
         var dominators = ctx.Dominators;
         Expr Alias(Expr value, int depth = 32) => depth > 0 && value is Use use && ctx.values.GetValueOrDefault(use.Variable) is Use source ? Alias(source, depth - 1) : value;
         bool Dereferenced(Stmt statement, Expr receiver) => statement is Call { Op.Kind: OpKind.NullCheck, Arguments: [var checkedValue] } && Alias(checkedValue) == receiver || ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Load>().Any(load => ctx.Split(load.Address) is var (root, offset, terms) && root is not null && Alias(root) == receiver && terms.Count == 0 && ctx.types.InstanceField(ctx.TypeOfValue(receiver)!, (int)offset, load.Width / 8) is not null);

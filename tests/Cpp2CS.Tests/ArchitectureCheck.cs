@@ -141,7 +141,7 @@ internal static class ArchitectureCheck
     }
 
     private static Dictionary<string, string> RegistryPairs(IEnumerable<string> lines) => lines.Where(l => l.Length > 0 && !l.StartsWith('#'))
-        .Select(l => l.Split('\t')).ToDictionary(f => f[2], f => $"{f[0]}/{f[1]} Order={f[3]} After={f[4]} Invalidates={f[5]} {f[6]} {f[7]}");
+        .Select(l => l.Split('\t')).ToDictionary(f => f[2], f => $"{f[0]}/{f[1]} Order={f[3]} After={f[4]} Invalidates={f[5]} {f[6]} {f[7]} Refresh={(f.Length > 8 ? f[8] : "")}");
 
     private static void WriteSnapshots(SourceModel model, List<Ledgers.Registration> registry, SortedDictionary<string, string> holeCodes,
         string families, string registryPath, string holeCodesPath)

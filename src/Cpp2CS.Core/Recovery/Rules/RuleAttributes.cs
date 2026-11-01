@@ -19,6 +19,15 @@ internal enum StepKind
     Rewrite,
 }
 
+/// <summary>步骤边界上由调度器执行的维护动作：在记录步骤的输入之后、调用步骤之前执行，原因 Id 为“步骤 Id.entry”。</summary>
+[Flags]
+internal enum StepRefresh
+{
+    None = 0,
+    /// <summary>类型推断。</summary>
+    Types = 1,
+}
+
 [Flags]
 internal enum AnalysisInvalidation
 {
@@ -46,6 +55,8 @@ internal sealed class StepAttribute(string id, StepPhase phase, StepKind kind) :
     public string Name { get; init; } = "";
     /// <summary>改写步骤声明的失效范围，只用于追踪。</summary>
     public AnalysisInvalidation Invalidates { get; init; } = AnalysisInvalidation.All;
+    /// <summary>步骤开始前由调度器执行的维护动作。</summary>
+    public StepRefresh Refresh { get; init; }
 }
 
 /// <summary>下降规则、参数绑定与方法体证明的类别；各类别有自己的委托形状，Order 在类别内唯一。</summary>

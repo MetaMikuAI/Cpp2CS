@@ -1,95 +1,95 @@
-# 类别	种类	Id	Order	After	Invalidates	声明类型.方法	中文名
-Analyze	Analysis	exceptions.values	100			ExceptionsRules.AnalyzeExceptionValues	异常值
-Analyze	Analysis	exceptions.pointer-slots	150	exceptions.values		ExceptionSlotsRules.ExceptionPointerSlots	异常指针栈槽
-Analyze	Analysis	frames.stack-calls	200			StackCallsRules.PrepareStackCalls	栈上调用
-Analyze	Rewrite	frames.stack-enums	280	exceptions.values,frames.stack-calls	All	StackEnumsRules.PrepareStackEnums	栈上枚举
-Analyze	Rewrite	frames.pre-typing	290	exceptions.values,frames.stack-calls,frames.stack-enums	All	FramesRules.PrepareFrameTypes	帧前类型
-Analyze	Rewrite	frames.scalar-stack-arguments	291	frames.pre-typing	All	StackArgumentsRules.PrepareScalarStackArguments	标量栈实参
-Analyze	Rewrite	frames.merged-box-arguments	292	frames.scalar-stack-arguments	All	BoxArgumentsRules.PrepareMergedBoxArguments	汇合装箱
-Analyze	Rewrite	frames.branch-snapshots	293	frames.pre-typing,frames.scalar-stack-arguments,frames.merged-box-arguments	All	ScalarFramesRules.ForwardBranchFrameSnapshots	分支帧快照
-Analyze	Rewrite	frames.regions	300	exceptions.values,frames.stack-calls,frames.pre-typing,frames.branch-snapshots	All	FramesRules.PrepareFrames	帧区域
-Analyze	Rewrite	frames.snapshots	320	frames.regions	All	ScalarFramesRules.ForwardFrameSnapshots	帧快照
-Analyze	Rewrite	frames.integer-slots	350	frames.regions,frames.snapshots	All	ScalarFramesRules.PrepareScalarFrames	整数帧槽
-Analyze	Rewrite	memory.post-frame-arrays	370	frames.integer-slots	All	ArrayCursorsRules.PrepareFrameArrayAddresses	帧后数组地址
-Analyze	Analysis	runtime.mark	400	frames.regions,exceptions.values		RuntimeRules.MarkRuntime	运行时引用
-Analyze	Analysis	control.jump-tables	450	runtime.mark		SwitchesRules.JumpTables	跳转表
-Analyze	Analysis	lowering.inline	500	runtime.mark		InliningRules.Inline	内联
-Analyze	Rewrite	frames.slots	600	frames.regions,frames.stack-calls,frames.integer-slots,frames.snapshots	All	FrameSlotRules.FrameSlots	帧槽
-Analyze	Analysis	calls.math-imports	610	frames.slots		NativeImportsRules.AnalyzeNativeImports	数学导入
-Analyze	Analysis	construction.allocations	700	runtime.mark		ConstructionRules.Allocations	分配
-Analyze	Analysis	control.absorb-checks	800	frames.regions		CheckRules.Checks	检查吸收
-Analyze	Rewrite	memory.field-addresses	890	frames.slots,control.absorb-checks	All	FieldAddressesRules.PrepareFieldAddresses	字段地址
-Analyze	Rewrite	typing.infer	900	runtime.mark,lowering.inline,frames.slots,construction.allocations,control.absorb-checks	All	TypingRules.Typing	类型
-Analyze	Analysis	memory.array-spans	950	typing.infer		ArraySpansRules.PrepareArraySpans	数组切片
-Analyze	Analysis	structs.phis	955	typing.infer,memory.array-spans		StructPhisRules.StructPhis	结构体汇合
-Analyze	Analysis	structs.stored-phis	960	structs.phis		StructPhisRules.StoredStructPhis	结构体写入汇合
-Analyze	Analysis	structs.fragment-phis	980	structs.stored-phis		FragmentsRules.PrepareFragmentPhis	片汇合
-Analyze	Analysis	frames.copies	1100	typing.infer		FrameCopiesRules.FrameCopies	帧拷贝
-Argument	Rule	frames.scalar-stack-argument	10			StackArgumentsRules.ScalarStackArgument	
-Argument	Rule	memory.array-span-argument	50			ArraySpansRules.ArraySpanArgument	
-Argument	Rule	structs.type-handle-argument	51			StructRegistersRules.TypeHandleArgument	
-Argument	Rule	memory.string-span-argument	60			StringSpansRules.StringSpanArgument	
-Argument	Rule	calls.unused-argument	80			UnusedArgumentsRules.UnusedArgument	
-Argument	Rule	structs.register-argument	100			StructRegistersRules.RegisterStructArgument	
-Argument	Rule	structs.indirect-argument	200			StructIndirectRules.IndirectStructArgument	
-BodyProof	Rule	structs.prove-return-buffer	100			StructIndirectRules.ProveReturnBuffer	
-BodyProof	Rule	values.floating-constructor-order	200			FloatsRules.CheckFloatingConstructorOrder	
-BodyProof	Rule	frames.prove-initialization	300			FramesRules.ProveFrameInitialization	
-Call	Rule	calls.start-state-machine	50			AsyncRules.StartStateMachine	
-Call	Rule	frames.box-merged-argument	90			BoxArgumentsRules.BoxMergedArgument	
-Call	Rule	generics.lower-shared-values	91			SharedValuesRules.LowerSharedValues	
-Call	Rule	frames.box	100			FramesRules.BoxFrame	
-Call	Rule	calls.lower-cleanup-thunk	101			CleanupThunksRules.LowerCleanupThunk	
-Call	Rule	exceptions.lower-type-target	200			ExceptionsRules.LowerExceptionTypeTarget	
-Call	Rule	calls.native-import	201			NativeImportsRules.NativeImportCall	
-Call	Rule	structs.copy-return	210			StructIndirectRules.CopyStructReturn	
-Call	Rule	structs.copy-value	220			StructCopiesRules.CopyStructValue	
-Define	Rule	structs.define-fragment	100			FragmentsRules.DefineFragment	
-Invocation	Rule	memory.constant-array	40			ArrayInitializersRules.InitializeConstantArray	
-Invocation	Rule	calls.delegate-creation	100			DelegatesRules.LowerDelegateCreation	
-InvocationOutput	Rule	structs.indirect-invocation	100			StructIndirectRules.IndirectInvocation	
-InvocationOutput	Rule	structs.construct-return-buffer	200			StructIndirectRules.ConstructReturnBuffer	
-InvocationOutput	Rule	structs.project-tail-hfa	300			StructRegistersRules.ProjectTailHfa	
-InvocationOutput	Rule	exceptions.throwing-invocation	900			ExceptionsRules.ThrowingInvocation	
-ParameterBinding	Rule	structs.bind-register-argument	100			StructRegistersRules.PrepareStructArgument	
-ParameterBinding	Rule	generics.bind-shared-argument	150			SharedValuesRules.PrepareSharedArgument	
-ParameterBinding	Rule	structs.bind-indirect-argument	200			StructIndirectRules.PrepareIndirectArgument	
-Prepare	Analysis	signature.bind	1			SignatureBinding.Bind	
-Prepare	Rewrite	kernel.lift	2		All	PrepareSteps.Lift	
-Prepare	Rewrite	kernel.idioms	3		All	PrepareSteps.RunIdioms	
-Prepare	Rewrite	generics.bind-shared-references	4		All	SharedReferencesRules.BindSharedReferences	
-Prepare	Rewrite	kernel.promote-private-frame-slots	5		All	PrepareSteps.PromotePrivateFrameSlots	
-Prepare	Rewrite	generics.shared-fields	6		All	SharedFieldsRules.NormalizeSharedFields	
-Prepare	Rewrite	generics.shared-values	7		All	SharedValuesRules.NormalizeSharedValues	
-Prepare	Rewrite	control.stack-canary	8		All	StackCanaryRules.RecognizeStackCanary	
-Prepare	Rewrite	calls.split-identity-choices	9		All	DelegatesRules.NormalizeDelegateChoices	
-Prepare	Analysis	kernel.idiom-errors	10			PrepareSteps.IdiomErrors	
-Prepare	Rewrite	values.narrow-scalar-vectors	11		All	FloatsRules.NormalizeScalarVectors	
-Prepare	Rewrite	structs.vector-phi-projection	12		All	ProjectionsRules.ProjectVectorPhis	
-Prepare	Rewrite	structs.call-argument-projection	13		All	ProjectionsRules.ProjectCallArguments	
-Prepare	Rewrite	calls.trim-indirect-arguments	14		All	CallTrimmingRules.TrimIndirectArguments	
-Prepare	Rewrite	structs.scalar-phi-projection	15		All	ProjectionsRules.ProjectScalarPhis	
-Prepare	Rewrite	kernel.remove-dead	16		All	PrepareSteps.RemoveDead	
-Prepare	Rewrite	kernel.frame-writebacks	17		All	PrepareSteps.RemoveFrameWritebacks	
-Prepare	Rewrite	kernel.frame-constant-indices	18		All	PrepareSteps.IndexConstantFrames	
-Prepare	Rewrite	frames.managed-promotion	19		All	FramesRules.PromoteManagedFrames	
-Prepare	Rewrite	kernel.propagate-constant-indices	20		All	PrepareSteps.PropagateConstantIndices	
-Prepare	Rewrite	calls.cleanup-thunks	21		All	CleanupThunksRules.NormalizeCleanupThunks	
-Prepare	Rewrite	calls.outlined-calls	22		All	OutlinedCallsRules.NormalizeOutlinedCalls	
-Prepare	Rewrite	kernel.delegate-calls	23		All	PrepareSteps.NormalizeDelegateCalls	
-Prepare	Rewrite	exceptions.null-branches	24		All	ExceptionsRules.PruneNullBranches	
-Prepare	Analysis	kernel.residual-holes	25			PrepareSteps.ResidualHoles	
-Prepare	Analysis	kernel.blocks	26			PrepareSteps.ResetBlocks	
-Prepare	Rewrite	exceptions.regions	27		All	ExceptionsRules.PrepareRegions	
-Prepare	Analysis	kernel.problem-holes	28			PrepareSteps.ProblemHoles	
-Result	Rule	structs.register-result	100			StructRegistersRules.RegisterStructResult	
-Statement	Rule	frames.lower-copy	100			FrameCopiesRules.LowerFrameCopy	
-Statement	Rule	frames.lower-initializer	200			FramesRules.LowerFrameInitializer	
-Statement	Rule	control.lower-switch	300			SwitchesRules.LowerSwitch	
-Store	Rule	frames.store-stack-argument	10			StackArgumentsRules.StoreStackArgument	
-Store	Rule	frames.store-box-argument	20			BoxArgumentsRules.StoreBoxArgument	
-Store	Rule	frames.store-zero	100			FramesRules.StoreFrameZero	
-Store	Rule	structs.store-zero	150			StructStoresRules.StoreStructZero	
-StoreTarget	Rule	frames.store-scalar	10			FramesRules.StoreScalarFrame	
-StoreTarget	Rule	structs.store-whole	50			StructStoresRules.StoreWholeStruct	
-StoreTarget	Rule	structs.store-fragment	100			FragmentsRules.StoreFragment	
+# 类别	种类	Id	Order	After	Invalidates	声明类型.方法	中文名	边界维护
+Analyze	Analysis	exceptions.values	100			ExceptionsRules.AnalyzeExceptionValues	异常值	
+Analyze	Analysis	exceptions.pointer-slots	150	exceptions.values		ExceptionSlotsRules.ExceptionPointerSlots	异常指针栈槽	
+Analyze	Analysis	frames.stack-calls	200			StackCallsRules.PrepareStackCalls	栈上调用	
+Analyze	Rewrite	frames.stack-enums	280	exceptions.values,frames.stack-calls	All	StackEnumsRules.PrepareStackEnums	栈上枚举	
+Analyze	Rewrite	frames.pre-typing	290	exceptions.values,frames.stack-calls,frames.stack-enums	All	FramesRules.PrepareFrameTypes	帧前类型	Types
+Analyze	Rewrite	frames.scalar-stack-arguments	291	frames.pre-typing	All	StackArgumentsRules.PrepareScalarStackArguments	标量栈实参	
+Analyze	Rewrite	frames.merged-box-arguments	292	frames.scalar-stack-arguments	All	BoxArgumentsRules.PrepareMergedBoxArguments	汇合装箱	
+Analyze	Rewrite	frames.branch-snapshots	293	frames.pre-typing,frames.scalar-stack-arguments,frames.merged-box-arguments	All	ScalarFramesRules.ForwardBranchFrameSnapshots	分支帧快照	
+Analyze	Rewrite	frames.regions	300	exceptions.values,frames.stack-calls,frames.pre-typing,frames.branch-snapshots	All	FramesRules.PrepareFrames	帧区域	
+Analyze	Rewrite	frames.snapshots	320	frames.regions	All	ScalarFramesRules.ForwardFrameSnapshots	帧快照	
+Analyze	Rewrite	frames.integer-slots	350	frames.regions,frames.snapshots	All	ScalarFramesRules.PrepareScalarFrames	整数帧槽	Types
+Analyze	Rewrite	memory.post-frame-arrays	370	frames.integer-slots	All	ArrayCursorsRules.PrepareFrameArrayAddresses	帧后数组地址	Types
+Analyze	Analysis	runtime.mark	400	frames.regions,exceptions.values		RuntimeRules.MarkRuntime	运行时引用	
+Analyze	Analysis	control.jump-tables	450	runtime.mark		SwitchesRules.JumpTables	跳转表	
+Analyze	Analysis	lowering.inline	500	runtime.mark		InliningRules.Inline	内联	
+Analyze	Rewrite	frames.slots	600	frames.regions,frames.stack-calls,frames.integer-slots,frames.snapshots	All	FrameSlotRules.FrameSlots	帧槽	
+Analyze	Analysis	calls.math-imports	610	frames.slots		NativeImportsRules.AnalyzeNativeImports	数学导入	
+Analyze	Analysis	construction.allocations	700	runtime.mark		ConstructionRules.Allocations	分配	
+Analyze	Analysis	control.absorb-checks	800	frames.regions		CheckRules.Checks	检查吸收	
+Analyze	Rewrite	memory.field-addresses	890	frames.slots,control.absorb-checks	All	FieldAddressesRules.PrepareFieldAddresses	字段地址	Types
+Analyze	Rewrite	typing.infer	900	runtime.mark,lowering.inline,frames.slots,construction.allocations,control.absorb-checks	All	TypingRules.Typing	类型	
+Analyze	Analysis	memory.array-spans	950	typing.infer		ArraySpansRules.PrepareArraySpans	数组切片	
+Analyze	Analysis	structs.phis	955	typing.infer,memory.array-spans		StructPhisRules.StructPhis	结构体汇合	
+Analyze	Analysis	structs.stored-phis	960	structs.phis		StructPhisRules.StoredStructPhis	结构体写入汇合	
+Analyze	Analysis	structs.fragment-phis	980	structs.stored-phis		FragmentsRules.PrepareFragmentPhis	片汇合	
+Analyze	Analysis	frames.copies	1100	typing.infer		FrameCopiesRules.FrameCopies	帧拷贝	
+Argument	Rule	frames.scalar-stack-argument	10			StackArgumentsRules.ScalarStackArgument		
+Argument	Rule	memory.array-span-argument	50			ArraySpansRules.ArraySpanArgument		
+Argument	Rule	structs.type-handle-argument	51			StructRegistersRules.TypeHandleArgument		
+Argument	Rule	memory.string-span-argument	60			StringSpansRules.StringSpanArgument		
+Argument	Rule	calls.unused-argument	80			UnusedArgumentsRules.UnusedArgument		
+Argument	Rule	structs.register-argument	100			StructRegistersRules.RegisterStructArgument		
+Argument	Rule	structs.indirect-argument	200			StructIndirectRules.IndirectStructArgument		
+BodyProof	Rule	structs.prove-return-buffer	100			StructIndirectRules.ProveReturnBuffer		
+BodyProof	Rule	values.floating-constructor-order	200			FloatsRules.CheckFloatingConstructorOrder		
+BodyProof	Rule	frames.prove-initialization	300			FramesRules.ProveFrameInitialization		
+Call	Rule	calls.start-state-machine	50			AsyncRules.StartStateMachine		
+Call	Rule	frames.box-merged-argument	90			BoxArgumentsRules.BoxMergedArgument		
+Call	Rule	generics.lower-shared-values	91			SharedValuesRules.LowerSharedValues		
+Call	Rule	frames.box	100			FramesRules.BoxFrame		
+Call	Rule	calls.lower-cleanup-thunk	101			CleanupThunksRules.LowerCleanupThunk		
+Call	Rule	exceptions.lower-type-target	200			ExceptionsRules.LowerExceptionTypeTarget		
+Call	Rule	calls.native-import	201			NativeImportsRules.NativeImportCall		
+Call	Rule	structs.copy-return	210			StructIndirectRules.CopyStructReturn		
+Call	Rule	structs.copy-value	220			StructCopiesRules.CopyStructValue		
+Define	Rule	structs.define-fragment	100			FragmentsRules.DefineFragment		
+Invocation	Rule	memory.constant-array	40			ArrayInitializersRules.InitializeConstantArray		
+Invocation	Rule	calls.delegate-creation	100			DelegatesRules.LowerDelegateCreation		
+InvocationOutput	Rule	structs.indirect-invocation	100			StructIndirectRules.IndirectInvocation		
+InvocationOutput	Rule	structs.construct-return-buffer	200			StructIndirectRules.ConstructReturnBuffer		
+InvocationOutput	Rule	structs.project-tail-hfa	300			StructRegistersRules.ProjectTailHfa		
+InvocationOutput	Rule	exceptions.throwing-invocation	900			ExceptionsRules.ThrowingInvocation		
+ParameterBinding	Rule	structs.bind-register-argument	100			StructRegistersRules.PrepareStructArgument		
+ParameterBinding	Rule	generics.bind-shared-argument	150			SharedValuesRules.PrepareSharedArgument		
+ParameterBinding	Rule	structs.bind-indirect-argument	200			StructIndirectRules.PrepareIndirectArgument		
+Prepare	Analysis	signature.bind	1			SignatureBinding.Bind		
+Prepare	Rewrite	kernel.lift	2		All	PrepareSteps.Lift		
+Prepare	Rewrite	kernel.idioms	3		All	PrepareSteps.RunIdioms		
+Prepare	Rewrite	generics.bind-shared-references	4		All	SharedReferencesRules.BindSharedReferences		
+Prepare	Rewrite	kernel.promote-private-frame-slots	5		All	PrepareSteps.PromotePrivateFrameSlots		
+Prepare	Rewrite	generics.shared-fields	6		All	SharedFieldsRules.NormalizeSharedFields		
+Prepare	Rewrite	generics.shared-values	7		All	SharedValuesRules.NormalizeSharedValues		
+Prepare	Rewrite	control.stack-canary	8		All	StackCanaryRules.RecognizeStackCanary		
+Prepare	Rewrite	calls.split-identity-choices	9		All	DelegatesRules.NormalizeDelegateChoices		
+Prepare	Analysis	kernel.idiom-errors	10			PrepareSteps.IdiomErrors		
+Prepare	Rewrite	values.narrow-scalar-vectors	11		All	FloatsRules.NormalizeScalarVectors		
+Prepare	Rewrite	structs.vector-phi-projection	12		All	ProjectionsRules.ProjectVectorPhis		
+Prepare	Rewrite	structs.call-argument-projection	13		All	ProjectionsRules.ProjectCallArguments		
+Prepare	Rewrite	calls.trim-indirect-arguments	14		All	CallTrimmingRules.TrimIndirectArguments		
+Prepare	Rewrite	structs.scalar-phi-projection	15		All	ProjectionsRules.ProjectScalarPhis		
+Prepare	Rewrite	kernel.remove-dead	16		All	PrepareSteps.RemoveDead		
+Prepare	Rewrite	kernel.frame-writebacks	17		All	PrepareSteps.RemoveFrameWritebacks		
+Prepare	Rewrite	kernel.frame-constant-indices	18		All	PrepareSteps.IndexConstantFrames		
+Prepare	Rewrite	frames.managed-promotion	19		All	FramesRules.PromoteManagedFrames		
+Prepare	Rewrite	kernel.propagate-constant-indices	20		All	PrepareSteps.PropagateConstantIndices		
+Prepare	Rewrite	calls.cleanup-thunks	21		All	CleanupThunksRules.NormalizeCleanupThunks		
+Prepare	Rewrite	calls.outlined-calls	22		All	OutlinedCallsRules.NormalizeOutlinedCalls		
+Prepare	Rewrite	kernel.delegate-calls	23		All	PrepareSteps.NormalizeDelegateCalls		
+Prepare	Rewrite	exceptions.null-branches	24		All	ExceptionsRules.PruneNullBranches		
+Prepare	Analysis	kernel.residual-holes	25			PrepareSteps.ResidualHoles		
+Prepare	Analysis	kernel.blocks	26			PrepareSteps.ResetBlocks		
+Prepare	Rewrite	exceptions.regions	27		All	ExceptionsRules.PrepareRegions		
+Prepare	Analysis	kernel.problem-holes	28			PrepareSteps.ProblemHoles		
+Result	Rule	structs.register-result	100			StructRegistersRules.RegisterStructResult		
+Statement	Rule	frames.lower-copy	100			FrameCopiesRules.LowerFrameCopy		
+Statement	Rule	frames.lower-initializer	200			FramesRules.LowerFrameInitializer		
+Statement	Rule	control.lower-switch	300			SwitchesRules.LowerSwitch		
+Store	Rule	frames.store-stack-argument	10			StackArgumentsRules.StoreStackArgument		
+Store	Rule	frames.store-box-argument	20			BoxArgumentsRules.StoreBoxArgument		
+Store	Rule	frames.store-zero	100			FramesRules.StoreFrameZero		
+Store	Rule	structs.store-zero	150			StructStoresRules.StoreStructZero		
+StoreTarget	Rule	frames.store-scalar	10			FramesRules.StoreScalarFrame		
+StoreTarget	Rule	structs.store-whole	50			StructStoresRules.StoreWholeStruct		
+StoreTarget	Rule	structs.store-fragment	100			FragmentsRules.StoreFragment		

@@ -154,7 +154,7 @@ internal static class Ledgers
     // ---------- 注册表快照 ----------
 
     /// <summary>一条注册：排序类别（阶段或规则类别）、种类、Id、中文名、Order、After、失效声明与“声明类型.方法”。</summary>
-    public sealed record Registration(string Category, string Kind, string Id, string Name, int Order, string After, string Invalidates, string Method);
+    public sealed record Registration(string Category, string Kind, string Id, string Name, int Order, string After, string Invalidates, string Method, string Refresh = "");
 
     /// <summary>读取已构建的 Core 程序集中的注册方法。同一阶段的分析步骤与改写步骤共用一个排序类别，规则按类别各自排序。</summary>
     public static List<Registration> Registry()
@@ -178,7 +178,7 @@ internal static class Ledgers
                     // Prepare 的顺序由计划表给出：记计划表中的位置（从 1 起），不在表中记 0
                     if (phase == "Prepare") order = Array.IndexOf(plan, id) + 1;
                     result.Add(new(phase, kind, id!, (string)Get(attribute, "Name")!, order, string.Join(",", (string[])Get(attribute, "After")!),
-                        kind == "Rewrite" ? Get(attribute, "Invalidates")!.ToString()! : "", declared));
+                        kind == "Rewrite" ? Get(attribute, "Invalidates")!.ToString()! : "", declared, Get(attribute, "Refresh")!.ToString() is "None" or null ? "" : Get(attribute, "Refresh")!.ToString()!));
                 }
                 else if (attribute.GetType().Name == "RuleAttribute")
                     result.Add(new(Get(attribute, "Kind")!.ToString()!, "Rule", id!, "", order, "", "", declared));
@@ -186,8 +186,8 @@ internal static class Ledgers
         return result.OrderBy(r => r.Category, StringComparer.Ordinal).ThenBy(r => r.Order).ThenBy(r => r.Id, StringComparer.Ordinal).ToList();
     }
 
-    public static IEnumerable<string> RegistryLines(IEnumerable<Registration> registry) => new[] { "# 类别\t种类\tId\tOrder\tAfter\tInvalidates\t声明类型.方法\t中文名" }
-        .Concat(registry.Select(r => $"{r.Category}\t{r.Kind}\t{r.Id}\t{r.Order}\t{r.After}\t{r.Invalidates}\t{r.Method}\t{r.Name}"));
+    public static IEnumerable<string> RegistryLines(IEnumerable<Registration> registry) => new[] { "# 类别\t种类\tId\tOrder\tAfter\tInvalidates\t声明类型.方法\t中文名\t边界维护" }
+        .Concat(registry.Select(r => $"{r.Category}\t{r.Kind}\t{r.Id}\t{r.Order}\t{r.After}\t{r.Invalidates}\t{r.Method}\t{r.Name}\t{r.Refresh}"));
 
     /// <summary>注册 Id 的前缀（第一个点之前）必须等于声明所在的族目录名（小写），例如 Recovery/Frames 中的步骤以 frames. 开头（I7a）。</summary>
     public static void CheckIdPrefixes(IEnumerable<Registration> registry, IReadOnlyDictionary<string, HashSet<string>> methods, List<string> failures)

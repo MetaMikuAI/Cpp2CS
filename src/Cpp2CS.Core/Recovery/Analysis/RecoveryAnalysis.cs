@@ -22,6 +22,8 @@ internal static class RecoveryAnalysis
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             var mutable = step.Kind == StepKind.Rewrite;
             var before = mutable ? null : new MethodSnapshot(0, ctx.blocks, new Dictionary<Variable, Phi>());
+            if (step.Refresh.HasFlag(StepRefresh.Types))
+                ctx.Maintain.Types($"{step.Id}.entry");
             var failure = step.Run(ctx);
             ctx.Rewriter.Attach(ctx.function);
             if (before is not null && !before.Matches(ctx.blocks, new Dictionary<Variable, Phi>()))

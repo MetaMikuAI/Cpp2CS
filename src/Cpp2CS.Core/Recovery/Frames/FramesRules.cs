@@ -11,10 +11,9 @@ internal static class FramesRules
         || ctx.types.Kind(outer.Type) == TypeKind.Struct && offset >= outer.Offset && offset + ctx.types.Size(type) <= outer.Offset + outer.Size
         && ctx.StructPaths(outer.Type).Any(p => outer.Offset + p.Offset == offset && p.Type.Equals(type));
     /// <summary>先解析接收者及虚调用返回类型，避免帧区域只看见直调签名而提前固定错误的栈槽类型。</summary>
-    [Step("frames.pre-typing", StepPhase.Analyze, StepKind.Rewrite, Order = 290, After = ["exceptions.values", "frames.stack-calls", "frames.stack-enums"], Name = "帧前类型")]
+    [Step("frames.pre-typing", StepPhase.Analyze, StepKind.Rewrite, Order = 290, After = ["exceptions.values", "frames.stack-calls", "frames.stack-enums"], Name = "帧前类型", Refresh = StepRefresh.Types)]
     internal static void PrepareFrameTypes(this RecoveryScope ctx)
     {
-        ctx.Maintain.Types("frames.pre-typing.entry");
         ctx.NormalizeCheckedObjects();
         ctx.Maintain.Fixpoint("frames.joined-addresses", 8, () =>
         {

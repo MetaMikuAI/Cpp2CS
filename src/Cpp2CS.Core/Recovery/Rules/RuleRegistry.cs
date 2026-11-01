@@ -8,7 +8,7 @@ using System.Linq.Expressions;
 namespace Cpp2CS.Recovery;
 
 /// <summary>一个已注册的步骤：Id、中文名、种类、失效声明与适配后的入口；<see cref="CanFail"/> 表示方法返回 RecoveryFailure?。</summary>
-internal sealed record RegisteredStep(string Id, string Name, StepKind Kind, AnalysisInvalidation Invalidates, bool CanFail, Func<RecoveryScope, RecoveryFailure?> Run);
+internal sealed record RegisteredStep(string Id, string Name, StepKind Kind, AnalysisInvalidation Invalidates, StepRefresh Refresh, bool CanFail, Func<RecoveryScope, RecoveryFailure?> Run);
 
 /// <summary>一个已注册的 Prepare 步骤；<see cref="CanStop"/> 表示方法返回 PrepareOutcome。</summary>
 internal sealed record RegisteredPrepareStep(string Id, StepKind Kind, bool CanStop, Func<RecoveryScope, PreparedMethod, PrepareOutcome> Run);
@@ -112,7 +112,7 @@ internal static class RuleRegistry
                 ?? throw new InvalidOperationException("步骤的依赖成环：" + string.Join("、", steps.Keys.Where(k => !done.Contains(k))));
             done.Add(next);
             var (attribute, method) = steps[next];
-            ordered.Add(new(next, attribute.Name, attribute.Kind, attribute.Invalidates, method.ReturnType != typeof(void),
+            ordered.Add(new(next, attribute.Name, attribute.Kind, attribute.Invalidates, attribute.Refresh, method.ReturnType != typeof(void),
                 Adapt<Func<RecoveryScope, RecoveryFailure?>>(method)));
         }
 
