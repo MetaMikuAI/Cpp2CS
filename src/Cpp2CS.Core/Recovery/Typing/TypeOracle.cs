@@ -1,0 +1,308 @@
+using Cpp2CS.Facts;
+using Cpp2CS.Ir;
+using Cpp2CS.Recovery.Calls;
+using Cpp2CS.Recovery.Memory;
+using Cpp2CS.Recovery.Values;
+
+namespace Cpp2CS.Recovery.Typing;
+
+public enum LocationKind : byte { Instance, Reference, Static, ThreadStatic, Element, Length, StringLength, StringChar }
+
+/// <summary>
+/// 一次读写指向的 IL 位置。Base：实例字段的对象、经引用访问的指针、数组或字符串；Index：元素下标（为 null 时下标为常量 ConstantIndex）；
+/// Owner：静态字段所属类型；Path：从根位置进入值类型的字段链；Type：被访问值的类型。
+/// </summary>
+public sealed record Location(LocationKind Kind, Sym? Base, Sym? Index, long ConstantIndex, TypeRef? Owner, IReadOnlyList<FieldRef> Path, TypeRef Type);
+
+/// <summary>
+/// 原子的类型与地址的位置。类型自下而上由定义给出：参数按签名，调用结果按被调用者，读取按位置，φ 取来源的汇合；
+/// 常量和拼接没有自然类型，由使用处的期望类型决定。地址分解为根、常量偏移与比例下标，再按运行时布局解释为字段、元素或长度。
+/// </summary>
+public sealed class TypeOracle
+{
+    private readonly ManagedTypes types;
+    private readonly ProgramFacts facts;
+    private readonly MethodRef method;
+    private readonly Func<Call, CallShape> shapes;
+    private readonly Dictionary<Sym, TypeRef?> memo = [];
+    private readonly HashSet<Sym> active = [];
+    private readonly Dictionary<Call, MethodRef?> callees = new(ReferenceEqualityComparer.Instance);
+
+    public TypeOracle(ManagedTypes types, ProgramFacts facts, MethodRef method, Func<Call, CallShape> shapes)
+    {
+        this.types = types;
+        this.facts = facts;
+        this.method = method;
+        this.shapes = shapes;
+    }
+
+    public ManagedTypes Types => types;
+
+    public TypeRef Substitute(TypeRef type) => type.Substitute(method.TypeArguments, method.MethodArguments);
+
+    public TypeRef? Parameter(int index) => index < 0
+        ? (method.Method.Owner.IsValueType ? new ByRefRef(method.DeclaringType) : method.DeclaringType)
+        : Substitute(method.Method.Parameters[index].Type);
+
+    public TypeRef ReturnType => Substitute(method.Method.ReturnType);
+
+    // ---- 调用目标 ----
+
+    /// <summary>调用的托管目标。相同代码折叠的多个候选按接收者与实参类型选择；无法区分时取第一个（折叠的候选机器码相同）。</summary>
+    public MethodRef? Callee(Call call, IReadOnlyList<Sym>? receiverAndArguments = null)
+    {
+        if (callees.TryGetValue(call, out var known)) return known;
+        var candidates = shapes(call).Candidates;
+        MethodRef? chosen = candidates.Count switch
+        {
+            0 => null,
+            1 => candidates[0],
+            _ => candidates.FirstOrDefault(c => receiverAndArguments is null || Compatible(c, receiverAndArguments)) ?? candidates[0],
+        };
+        return callees[call] = chosen;
+    }
+
+    private bool Compatible(MethodRef candidate, IReadOnlyList<Sym> values)
+    {
+        var offset = candidate.Method.IsStatic ? 0 : 1;
+        if (!candidate.Method.IsStatic && values.Count > 0 && TypeOf(values[0]) is { } receiver && ManagedTypes.IsReferenceType(receiver)
+            && !types.IsAssignable(receiver, candidate.DeclaringType)) return false;
+        for (var i = 0; i < candidate.Method.Parameters.Count && i + offset < values.Count; i++)
+            if (TypeOf(values[i + offset]) is { } actual && ManagedTypes.IsReferenceType(actual)
+                && candidate.Method.Parameters[i].Type.Substitute(candidate.TypeArguments, candidate.MethodArguments) is var expected
+                && ManagedTypes.IsReferenceType(expected) && !types.IsAssignable(actual, expected)) return false;
+        return true;
+    }
+
+    public static TypeRef Concrete(MethodRef callee, TypeRef type) => type.Substitute(callee.TypeArguments, callee.MethodArguments);
+
+    // ---- 原子的类型 ----
+
+    public TypeRef? TypeOf(Sym sym)
+    {
+        sym = SymTable.Resolve(sym);
+        if (memo.TryGetValue(sym, out var known)) return known;
+        if (!active.Add(sym)) return null;
+        var type = Natural(sym);
+        active.Remove(sym);
+        if (sym is not PhiSym || type is not null) memo[sym] = type;
+        return type;
+    }
+
+    private TypeRef? Natural(Sym sym)
+    {
+        switch (sym)
+        {
+            case ArgSym arg:
+                return Parameter(arg.Index);
+            case EntitySym { Symbol: { Kind: SymbolKind.String } }:
+                return types.String;
+            case ResultSym result when result.Index == 0:
+                return ResultType(result.Site);
+            case OutSym output when output.Site.Op is null && Callee(output.Site) is { } callee:
+                return output.Argument == MachineSignature.ReturnIndex ? Concrete(callee, callee.Method.ReturnType)
+                    : (output.Argument < 0 ? null : Concrete(callee, callee.Method.Parameters[output.Argument].Type)) is ByRefRef byRef ? byRef.Element : null;
+            case ReadSym read:
+                return Locate(read.Address, read.Width)?.Type;
+            case PhiSym phi:
+                {
+                    TypeRef? joined = null;
+                    foreach (var source in phi.Sources)
+                    {
+                        if (source is null || SymTable.Resolve(source) is var s && (ReferenceEquals(s, phi) || s is ConstSym or UndefSym)) continue;
+                        var t = TypeOf(source);
+                        if (t is null) continue;
+                        joined = joined is null ? t : Join(joined, t);
+                        if (joined is null) return null;
+                    }
+                    return joined;
+                }
+            case OpSym op:
+                return OperatorType(op) ?? (op.Width is 8 or 16 or 32 or 64 && op.Op.Kind is OperatorKind.Select or OperatorKind.Binary or OperatorKind.Unary
+                    ? types.Integer(op.Width, true) : null);
+            case SliceSym slice when TypeOf(slice.Base) is { } baseType:
+                return types.Kind(baseType) == TypeKind.Struct && FieldAt(baseType, slice.Low / 8 + RuntimeLayout.ObjectHeaderSize, slice.Width, false, false) is var (_, fieldType) ? fieldType
+                    : slice.Width == 1 ? types.Boolean : slice.Width is 8 or 16 or 32 or 64 ? types.Integer(slice.Width, false) : null;
+        }
+        return null;
+    }
+
+    private TypeRef? ResultType(Call call)
+    {
+        if (call.Op is { } op)
+            return op.Kind switch
+            {
+                OpKind.NewObject or OpKind.NewArray or OpKind.IsInst when op.Operand is TypeRef t => t,
+                OpKind.Box => types.Object,
+                OpKind.Unbox when op.Operand is TypeRef t => new ByRefRef(t),
+                OpKind.IsAssignableFrom => types.Boolean,
+                OpKind.NewException when op.Operand is string name && ExceptionType(name) is { } exception => exception,
+                _ => null,
+            };
+        return Callee(call) is { } callee && Concrete(callee, callee.Method.ReturnType) is var ret && !ManagedTypes.IsVoid(ret) ? ret : null;
+    }
+
+    public DefinitionRef? ExceptionType(string fullName) =>
+        (types.CorlibDefinition(fullName) ?? facts.Model.Types.FirstOrDefault(t => t.FullName == fullName && t.GenericParameters.Count == 0)) is { } definition
+            ? new DefinitionRef(definition, []) : null;
+
+    private TypeRef? OperatorType(OpSym op)
+    {
+        switch (op.Op.Kind)
+        {
+            case OperatorKind.Compare or OperatorKind.And or OperatorKind.Or or OperatorKind.Not:
+                return types.Boolean;
+            case OperatorKind.Select:
+                return TypeOf(op.Args[1]) is { } a ? (TypeOf(op.Args[2]) is { } b ? Join(a, b) : a) : TypeOf(op.Args[2]);
+            case OperatorKind.Binary when op.Op.Binary is BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv or BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber:
+                return op.Width == 32 ? types.Single : types.Double;
+            case OperatorKind.Unary when op.Op.Unary >= UnOp.FNeg:
+                return op.Width == 32 ? types.Single : types.Double;
+            case OperatorKind.Binary or OperatorKind.Unary:
+                {
+                    var operand = TypeOf(op.Args[0]);
+                    if (operand is not null && types.Kind(operand) is TypeKind.Int && types.Bits(operand) == op.Width) return operand;
+                    return op.Width is 8 or 16 or 32 or 64 ? types.Integer(op.Width, op.Op.Kind == OperatorKind.Binary && op.Op.Binary is BinOp.SDiv or BinOp.SRem or BinOp.AShr) : null;
+                }
+            case OperatorKind.Convert:
+                return op.Op.Conversion switch
+                {
+                    ConvKind.SIntToFloat or ConvKind.UIntToFloat or ConvKind.FloatToFloat => op.Width == 32 ? types.Single : types.Double,
+                    ConvKind.FloatToSInt or ConvKind.SignExtend when op.Width is 8 or 16 or 32 or 64 => types.Integer(op.Width, true),
+                    ConvKind.FloatToUInt when op.Width is 8 or 16 or 32 or 64 => types.Integer(op.Width, false),
+                    _ => null,
+                };
+        }
+        return null;
+    }
+
+    /// <summary>两个定义类型的汇合：相同取自身；引用类型沿基类链取最近公共超类；同宽整数取前者。</summary>
+    public TypeRef? Join(TypeRef a, TypeRef b)
+    {
+        if (a.Equals(b)) return a;
+        if (types.IsAssignable(a, b)) return b;
+        if (types.IsAssignable(b, a)) return a;
+        if (ManagedTypes.IsReferenceType(a) && ManagedTypes.IsReferenceType(b))
+        {
+            for (TypeRef? current = a; current is DefinitionRef d; current = d.Definition.BaseType?.Substitute(d.Arguments, []))
+                if (types.IsAssignable(b, current)) return current;
+            return types.Object;
+        }
+        if (types.Kind(a) is TypeKind.Int or TypeKind.Bool && types.Kind(b) is TypeKind.Int or TypeKind.Bool && types.Bits(a) == types.Bits(b)) return a;
+        return null;
+    }
+
+    // ---- 位置 ----
+
+    /// <summary>地址的根、常量偏移与比例下标。</summary>
+    public (Sym Root, long Offset, Sym? Index, int Scale) Decompose(Sym address)
+    {
+        address = SymTable.Resolve(address);
+        if (address is LocalSym local) return (local, 0, null, 0);
+        var terms = new List<Sym>();
+        Flatten(address, terms);
+        long offset = 0;
+        Sym? root = null, index = null;
+        var scale = 0;
+        foreach (var term in terms)
+        {
+            if (term is ConstSym c) { offset += c.Signed; continue; }
+            if (Scaled(term) is var (scaled, factor) && factor > 1 && index is null) { (index, scale) = (scaled, factor); continue; }
+            if (root is null && IsAddressRoot(term)) { root = term; continue; }
+            if (index is null) { (index, scale) = (term, 1); continue; }
+            root ??= term;
+        }
+        return (root ?? address, offset, index, scale);
+    }
+
+    private static void Flatten(Sym sym, List<Sym> terms)
+    {
+        sym = SymTable.Resolve(sym);
+        if (sym is OpSym { Op.Kind: OperatorKind.Binary } add && add.Op.Binary == BinOp.Add)
+        {
+            Flatten(add.Args[0], terms);
+            Flatten(add.Args[1], terms);
+        }
+        else terms.Add(sym);
+    }
+
+    /// <summary>左移或乘常量的下标：低位补零的拼接、或乘以常量。</summary>
+    private static (Sym Index, int Factor)? Scaled(Sym term) => term switch
+    {
+        ConcatSym { Parts: [ConstSym { Value: 0 } zero, var rest] } when zero.Width < 8 => (rest, 1 << zero.Width),
+        OpSym { Op.Kind: OperatorKind.Binary, Args: [var x, ConstSym { Value: > 1 and <= 4096 } factor] } mul when mul.Op.Binary == BinOp.Mul => (x, (int)factor.Value),
+        _ => null,
+    };
+
+    private bool IsAddressRoot(Sym term) => term is EntitySym or LocalSym || TypeOf(term) is { } t && (ManagedTypes.IsReferenceType(t) || t is ByRefRef or PointerRef);
+
+    public Location? Locate(Sym address, int width)
+    {
+        var (root, offset, index, scale) = Decompose(address);
+        if (root is EntitySym { Symbol: { Kind: SymbolKind.StaticFields or SymbolKind.ThreadStaticFields, Value: TypeRef owner } entity } && index is null)
+        {
+            var thread = entity.Kind == SymbolKind.ThreadStaticFields;
+            return FieldAt(owner, (int)offset, width, true, thread) is var (path, type)
+                ? new Location(thread ? LocationKind.ThreadStatic : LocationKind.Static, null, null, 0, owner, path, type) : null;
+        }
+        var rootType = TypeOf(root);
+        switch (rootType)
+        {
+            case ArrayRef array:
+                {
+                    if (index is null && offset == RuntimeLayout.ArrayMaxLength && width is 32 or 64) return new(LocationKind.Length, root, null, 0, null, [], types.Int32);
+                    var size = ElementSize(array.Element);
+                    if (size <= 0 || offset < RuntimeLayout.ArrayData || index is not null && scale != size) return null;
+                    var within = offset - RuntimeLayout.ArrayData;
+                    var (constant, inside) = (within / size, (int)(within % size));
+                    if (index is not null && constant != 0) return null;
+                    if (inside == 0 && (types.Kind(array.Element) != TypeKind.Struct || width == size * 8))
+                        return new(LocationKind.Element, root, index, constant, null, [], array.Element);
+                    return FieldAt(array.Element, inside + RuntimeLayout.ObjectHeaderSize, width, false, false) is var (path, fieldType)
+                        ? new(LocationKind.Element, root, index, constant, null, path, fieldType) : null;
+                }
+            case DefinitionRef { Definition.FullName: "System.String" }:
+                if (index is null && offset == RuntimeLayout.StringLength) return new(LocationKind.StringLength, root, null, 0, null, [], types.Int32);
+                if (offset >= RuntimeLayout.StringChars && (index is null || scale == 2 && offset == RuntimeLayout.StringChars))
+                    return new(LocationKind.StringChar, root, index, (offset - RuntimeLayout.StringChars) / 2, null, [], types.Char);
+                return null;
+            case DefinitionRef reference when ManagedTypes.IsReferenceType(reference) && index is null:
+                return FieldAt(reference, (int)offset, width, false, false) is var (fields, fieldType2) ? new(LocationKind.Instance, root, null, 0, null, fields, fieldType2) : null;
+            case ByRefRef or PointerRef when index is null:
+                {
+                    var element = rootType is ByRefRef r ? r.Element : ((PointerRef)rootType).Element;
+                    if (offset == 0 && (types.Kind(element) != TypeKind.Struct || types.Size(element) * 8 == width)) return new(LocationKind.Reference, root, null, 0, null, [], element);
+                    return types.Kind(element) == TypeKind.Struct && FieldAt(element, (int)offset + RuntimeLayout.ObjectHeaderSize, width, false, false) is var (inner, innerType)
+                        ? new(LocationKind.Reference, root, null, 0, null, inner, innerType) : null;
+                }
+        }
+        return null;
+    }
+
+    private int ElementSize(TypeRef element) => ManagedTypes.IsReferenceType(element) ? 8 : types.Size(element);
+
+    /// <summary>
+    /// 类型中 offset 处宽 width 位的字段链。offset 含对象头（值类型同样按装箱布局）；实例字段沿基类链查找。
+    /// 访问恰好覆盖一个字段（bool 按字节，枚举按基础类型）时得到该字段；落在值类型字段内部时进入该字段继续查找。
+    /// </summary>
+    public (IReadOnlyList<FieldRef> Path, TypeRef Type)? FieldAt(TypeRef owner, int offset, int width, bool statics, bool threadStatics)
+    {
+        for (TypeRef? current = owner; current is DefinitionRef d; current = statics ? null : d.Definition.BaseType?.Substitute(d.Arguments, []))
+        {
+            if (types.Layouts.Of(d) is not { } layout) return null;
+            var slots = threadStatics ? layout.ThreadStatics : statics ? layout.Statics : layout.Fields;
+            foreach (var slot in slots)
+            {
+                var size = ManagedTypes.IsReferenceType(slot.Type) ? 8 : types.Size(slot.Type);
+                if (size <= 0 || offset < slot.Offset || offset + width / 8 > slot.Offset + size) continue;
+                var field = new FieldRef(slot.Field, d);
+                if (offset == slot.Offset && width == size * 8) return ([field], slot.Type);
+                if (types.Kind(slot.Type) == TypeKind.Struct
+                    && FieldAt(slot.Type, offset - slot.Offset + RuntimeLayout.ObjectHeaderSize, width, false, false) is var (inner, innerType))
+                    return ([field, .. inner], innerType);
+                return null;
+            }
+        }
+        return null;
+    }
+}

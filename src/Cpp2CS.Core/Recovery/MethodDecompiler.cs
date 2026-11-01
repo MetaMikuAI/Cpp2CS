@@ -4,7 +4,9 @@ using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Lifting;
 using Cpp2CS.Recovery.Calls;
+using Cpp2CS.Recovery.Lowering;
 using Cpp2CS.Recovery.Memory;
+using Cpp2CS.Recovery.Typing;
 using Cpp2CS.Recovery.Values;
 
 namespace Cpp2CS.Recovery;
@@ -72,9 +74,16 @@ public sealed class MethodDecompiler
 
     private MethodRecoveryResult Run(MethodRef method, ulong entry)
     {
-        if (!Analyze(method, entry).TryGet(out _, out var failure))
+        if (!Analyze(method, entry).TryGet(out var analysis, out var failure))
             return new(method, entry, null, [new(failure.Address, failure.Reason)]);
-        return new(method, entry, null, [new(entry, "重写 下降尚未接入")]);
+        return Lower(analysis);
+    }
+
+    /// <summary>类型与下降。</summary>
+    public MethodRecoveryResult Lower(MethodAnalysis analysis)
+    {
+        var oracle = new TypeOracle(types, facts, analysis.Method, analysis.Environment.Shape);
+        return BodyBuilder.Build(analysis, oracle);
     }
 
     /// <summary>运行到符号值为止的各层。</summary>

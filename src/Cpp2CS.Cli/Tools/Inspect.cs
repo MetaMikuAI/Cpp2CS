@@ -17,6 +17,7 @@ internal static class Inspect
         for (var i = 0; i < options.Length; i++)
         {
             if (options[i] == "--fact-cache-file" && i + 1 < options.Length) cache = Path.GetFullPath(options[++i]);
+            else if (options[i] == "--brief") continue;
             else targets.Add(options[i]);
         }
         var facts = FactsBuilder.Build(binary, metadata, options: new Cpp2CS.Options.RecoveryOptions { FactCacheFile = cache });
@@ -31,7 +32,11 @@ internal static class Inspect
                 Console.WriteLine($"  ! 0x{failure.Address:x} {failure.Reason}");
                 continue;
             }
-            Print(analysis);
+            if (!options.Contains("--brief")) Print(analysis);
+            var result = decompiler.Lower(analysis);
+            foreach (var hole in result.Holes) Console.WriteLine($"  洞 0x{hole.Address:x} {hole.Reason}");
+            if ((result.Body ?? result.Partial) is { } body)
+                foreach (var line in ManagedPrinter.Lines(body)) Console.WriteLine(line);
         }
         return 0;
     }
