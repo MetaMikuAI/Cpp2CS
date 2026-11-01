@@ -490,6 +490,8 @@ internal sealed class BodyBuilder
 
         public bool InFault => owner.regions.Any(r => !r.IsCatch && r.Handler.Contains(block));
 
+        public Sym? ClassOwner(Sym klass) => owner.ClassOwner(klass);
+
         public bool InCatchOf(Sym exception) => owner.regions.Any(r => r.IsCatch && r.Handler.Contains(block)
             && SymTable.Resolve(exception) is ReadSym read && owner.oracle.Decompose(read.Address) is (ResultSym { Site: var begin }, 0, null, _) && ReferenceEquals(begin, r.BeginCatch));
 
@@ -552,6 +554,10 @@ internal sealed class BodyBuilder
     }
 
     // ---- 值 ----
+
+    /// <summary>类指针所属的对象：引用类型对象偏移 0 处的 64 位读取。</summary>
+    private Sym? ClassOwner(Sym klass) => SymTable.Resolve(klass) is ReadSym { Width: 64 } read
+        && oracle.Decompose(read.Address) is (var root, 0, null, _) && oracle.TypeOf(root) is { } type && ManagedTypes.IsReferenceType(type) ? root : null;
 
     private LocalValue NewLocal(TypeRef type) => new(new Variable(Storage.Temp(1000 + nextLocal++), 1), type, Width(type));
 
@@ -698,6 +704,12 @@ internal sealed class BodyBuilder
         var natural = oracle.TypeOf(op);
         switch (op.Op.Kind)
         {
+            case OperatorKind.Compare when op.Op.Cond is Cond.Eq or Cond.Ne && ClassIdentity(op.Args[0], op.Args[1]) is var (owner, sealedType):
+                {
+                    // 对象的类指针与密封类比较：等价于对象是否为该类型（读取类指针蕴含对象非空）。
+                    var instance = new IsInstValue(View(owner, types.Object, address), sealedType);
+                    return new ComparisonValue(op.Op.Cond == Cond.Eq ? Cond.Ne : Cond.Eq, instance, new ConstantValue(0, types.Object, 64), types.Boolean);
+                }
             case OperatorKind.Compare:
                 {
                     var hint = oracle.TypeOf(op.Args[0]) ?? oracle.TypeOf(op.Args[1]);
@@ -740,6 +752,15 @@ internal sealed class BodyBuilder
                 }
         }
         return Hole(address, $"运算 {op.Op} 尚未接入", expected);
+    }
+
+    private (Sym Owner, TypeRef Type)? ClassIdentity(Sym left, Sym right)
+    {
+        foreach (var (a, b) in new[] { (left, right), (right, left) })
+            if (ClassOwner(a) is { } owner && SymTable.Resolve(b) is EntitySym { Symbol: { Kind: SymbolKind.Class, Value: DefinitionRef type } }
+                && (type.Definition.Attributes & System.Reflection.TypeAttributes.Sealed) != 0)
+                return (owner, type);
+        return null;
     }
 
     /// <summary>原子的一段：值类型的字段；整数的低位截断；bool 的低位即自身。</summary>

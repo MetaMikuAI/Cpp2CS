@@ -30,6 +30,8 @@ public sealed class CallShapes(ProgramFacts facts, ManagedAbi abi, Func<ulong, S
         if (call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target })
         {
             var (candidates, signature) = Direct(target.Value);
+            if (signature is null && Named(call) is var (named, namedSignature))
+                (candidates, signature) = ([named], namedSignature);
             var ignored = signature?.Arguments.SelectMany(a => a.Pieces).Select(p => p.Register)
                 .Where(r => r.Bank is Bank.Gpr or Bank.Vec && unused(target.Value, r)).ToHashSet() ?? [];
             return new(call, candidates, signature) { Unused = ignored };
@@ -47,6 +49,23 @@ public sealed class CallShapes(ProgramFacts facts, ManagedAbi abi, Func<ulong, S
         var signature = signatures.Length > 0 && signatures.All(s => s is not null && SameShape(s, signatures[0]!)) ? signatures[0] : null;
         return direct[address] = (candidates, signature);
     }
+
+    /// <summary>
+    /// 共享泛型代码的调用传入确切实例的 MethodInfo：某个实参是方法实体，且该方法签名的 MethodInfo 正落在这个实参的寄存器上时，
+    /// 它就是被调用的方法（共享实例未登记在入口表中时由此得到签名）。
+    /// </summary>
+    private (MethodRef, MachineSignature)? Named(Call call)
+    {
+        for (var i = 0; i < call.Arguments.Length && i < call.Sources.Length; i++)
+            if (call.Arguments[i] is Symbol { Kind: SymbolKind.Method, Value: MethodRef method }
+                && abi.Machine(method, out _) is { MethodInfo: { } info } signature && info.Register == call.Sources[i])
+                return (method, signature);
+        return null;
+    }
+
+    /// <summary>直接调用目标的各候选及其机器签名（检查用）。</summary>
+    public IEnumerable<(MethodRef Method, MachineSignature? Signature, string? Problem)> Candidates(ulong address) =>
+        Direct(address).Item1.Select(c => (c, abi.Machine(c, out var problem), problem));
 
     /// <summary>两个签名占用相同的机器位置并有相同的内存效果。</summary>
     private static bool SameShape(MachineSignature a, MachineSignature b) =>

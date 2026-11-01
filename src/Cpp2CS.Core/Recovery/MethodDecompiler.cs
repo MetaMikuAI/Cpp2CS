@@ -47,6 +47,7 @@ public sealed class MethodDecompiler
 
     public ManagedTypes Types => types;
     public ProgramFacts Facts => facts;
+    public CallShapes Shapes => shapes;
 
     public MethodRecoveryResult Recover(MethodRef method, ulong entry) => Declaration(method, entry) ?? Run(method, entry);
 

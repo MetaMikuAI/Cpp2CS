@@ -17,7 +17,7 @@ internal static class Inspect
         for (var i = 0; i < options.Length; i++)
         {
             if (options[i] == "--fact-cache-file" && i + 1 < options.Length) cache = Path.GetFullPath(options[++i]);
-            else if (options[i] == "--brief") continue;
+            else if (options[i] is "--brief" or "--calls") continue;
             else targets.Add(options[i]);
         }
         var facts = FactsBuilder.Build(binary, metadata, options: new Cpp2CS.Options.RecoveryOptions { FactCacheFile = cache });
@@ -34,6 +34,11 @@ internal static class Inspect
             }
             Console.WriteLine(analysis.Splits > 0 ? $" 拆分 {analysis.Splits}" : "");
             if (!options.Contains("--brief")) Print(analysis);
+            if (options.Contains("--calls"))
+                foreach (var call in analysis.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c is { Op: null, Target: Const }))
+                    if (decompiler.Shapes.Of(call).Signature is null)
+                        foreach (var (candidate, signature, problem) in decompiler.Shapes.Candidates(((Const)call.Target).Value))
+                            Console.WriteLine($"  无签名调用 0x{call.Address:x} 候选 {candidate}：{(signature is null ? problem : string.Join(", ", signature.Arguments.Select(a => $"{a.Index}:{a.Transfer}/{a.Size}")))}");
             var result = decompiler.Lower(analysis);
             foreach (var hole in result.Holes) Console.WriteLine($"  洞 0x{hole.Address:x} {hole.Reason}");
             if ((result.Body ?? result.Partial) is { } body)

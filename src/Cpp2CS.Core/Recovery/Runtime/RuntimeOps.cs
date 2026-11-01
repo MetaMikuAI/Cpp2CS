@@ -40,6 +40,8 @@ public interface IRuntimeLowering
     bool InFault { get; }
     MethodRef? ExceptionConstructor(string fullName);
     ManagedValue Hole(string reason, TypeRef? type);
+    /// <summary>类指针所属的对象：对象偏移 0 处的读取（运行时布局中对象头的 klass）。</summary>
+    Sym? ClassOwner(Sym klass);
 }
 
 /// <summary>下降：返回 false 表示不支持（记为洞）；terminal 不为 null 时它结束所在的块。</summary>
@@ -149,6 +151,19 @@ public static class RuntimeOps
             },
         };
         yield return new(OpKind.IsAssignableFrom) { ResultType = (_, t) => t.Types.Boolean };
+        // 内联的继承检查：实参是对象的类指针，结果为对象是否为 Operand 类型（或其子类、实现）。
+        yield return new(OpKind.TypeCheck)
+        {
+            ResultType = (_, t) => t.Types.Boolean,
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Op.Operand is not TypeRef target || c.Arguments.Count != 1 || c.ClassOwner(c.Arguments[0]) is not { } owner) return false;
+                var test = new ComparisonValue(Cond.Ne, new IsInstValue(c.View(owner, c.Types.Object), target), new ConstantValue(0, c.Types.Object, 64), c.Types.Boolean);
+                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, c.Types.Boolean), test));
+                return true;
+            },
+        };
         yield return new(OpKind.Throw)
         {
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
