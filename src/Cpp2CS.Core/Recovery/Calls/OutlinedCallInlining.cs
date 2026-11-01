@@ -97,7 +97,7 @@ internal static class OutlinedCallInlining
             }
             block.Successors.Clear();
             block.Statements.RemoveRange(index + 1, block.Statements.Count - index - 1);
-            caller.Blocks.Add(continuation);
+            caller.AddBlock(continuation);
         }
         var normalValues = split ? [] : EdgeValues(block, continuation);
         var exceptionalValues = handler is null ? [] : EdgeValues(block, handler);
@@ -116,7 +116,7 @@ internal static class OutlinedCallInlining
                 clone.Handler = handler;
             }
         }
-        caller.Blocks.AddRange(clones.Values);
+        caller.AddBlocks(clones.Values);
         if (output is not null)
             continuation.Statements.Insert(0, new Phi(continuation.Start, output, continuation.Predecessors.Select(b => returns[b]).ToArray()));
         caller.Renumber();

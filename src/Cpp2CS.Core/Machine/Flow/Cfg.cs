@@ -8,7 +8,14 @@ namespace Cpp2CS.Machine.Flow;
 
 public sealed class Block
 {
-    internal Block(ulong start) => Start = start;
+    internal Block(ulong start)
+    {
+        Start = start;
+        statements.Owner = this;
+    }
+
+    /// <summary>所属的函数（块在其块列表中时）；语句写入经它的编辑器。</summary>
+    internal MachineFunction? Function { get; set; }
 
     public int Index { get; internal set; }
     public ulong Start { get; }
@@ -18,7 +25,20 @@ public sealed class Block
     public StatementList Statements
     {
         get => statements;
-        set { statements.Rewriter.Writing(); value.Rewriter = statements.Rewriter; statements = value; }
+        set
+        {
+            // 整体替换：新语句登记进入，旧语句登记离开；同一身份仍在时不通知
+            var editor = Function?.Editor;
+            editor?.Writing();
+            value.Owner = this;
+            if (editor is not null)
+            {
+                foreach (var statement in value) editor.Entered(statement);
+                foreach (var statement in statements) editor.Left(statement, null);
+            }
+            statements.Owner = null;
+            statements = value;
+        }
     }
     /// <summary>后继。以 Branch 结尾时 [0] 为跳转目标、[1] 为顺序后继；异常边（Handler）总在最后。</summary>
     public List<Block> Successors { get; } = [];
@@ -36,7 +56,53 @@ public sealed class MachineFunction
 {
     public required ulong Entry { get; init; }
     public required CodeFunction Range { get; init; }
-    public required List<Block> Blocks { get; set; }
+    /// <summary>函数的编辑器：语句与块的修改、写许可、IR 版本与证据通知。</summary>
+    internal MachineEditor Editor { get; } = new();
+
+    private List<Block> blocks = [];
+    /// <summary>块列表。整体赋值时绑定新加入的块、解除离开的块；增加块用 <see cref="AddBlock"/>。</summary>
+    public required List<Block> Blocks
+    {
+        get => blocks;
+        set
+        {
+            var kept = value.ToHashSet();
+            foreach (var block in value) Bind(block);
+            foreach (var block in blocks.Where(b => !kept.Contains(b) && b.Function == this)) Unbind(block);
+            blocks = value;
+        }
+    }
+
+    /// <summary>向块列表末尾加入块并绑定。</summary>
+    public void AddBlock(Block block)
+    {
+        blocks.Add(block);
+        Bind(block);
+    }
+
+    public void AddBlocks(IEnumerable<Block> added)
+    {
+        foreach (var block in added) AddBlock(block);
+    }
+
+    /// <summary>绑定块列表中尚未绑定的块（外部代码直接修改块列表时的补救）。</summary>
+    internal void Bind()
+    {
+        foreach (var block in blocks) Bind(block);
+    }
+
+    private void Bind(Block block)
+    {
+        if (block.Function == this) return;
+        block.Function = this;
+        foreach (var statement in block.Statements) Editor.Entered(statement);
+    }
+
+    private void Unbind(Block block)
+    {
+        foreach (var statement in block.Statements) Editor.Left(statement, null);
+        block.Function = null;
+    }
     public List<string> Problems { get; } = [];
     /// <summary>无法解析为跳转表、按尾调用处理的寄存器间接跳转数（推测）。</summary>
     public int UnresolvedIndirectJumps { get; internal set; }

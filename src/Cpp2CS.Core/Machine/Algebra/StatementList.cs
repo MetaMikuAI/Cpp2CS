@@ -1,25 +1,37 @@
 using System.Collections;
 using Cpp2CS.Ir;
+using Cpp2CS.Machine.Flow;
 
 namespace Cpp2CS.Machine.Algebra;
 
-/// <summary>语句序列的所有写入都先经改写器的写许可检查，再通知改写器，机器层辅助 pass 不会绕过身份键迁移。</summary>
+/// <summary>块的语句序列。所属块在函数中时，所有写入都经函数的编辑器：先检查写许可，再登记身份的进出。</summary>
 public sealed class StatementList : IList<Stmt>, IReadOnlyList<Stmt>
 {
     private readonly List<Stmt> items = [];
-    internal StatementRewriter Rewriter { get; set; } = new([], null);
+    /// <summary>所属的块；块在函数中时经它找到编辑器。</summary>
+    internal Block? Owner { get; set; }
+    private MachineEditor? Editor => Owner?.Function?.Editor;
     public Stmt this[int index]
     {
         get => items[index];
-        set { if (!ReferenceEquals(items[index], value)) { Rewriter.Writing(); Rewriter.Changed(items[index], value); items[index] = value; } }
+        set
+        {
+            if (ReferenceEquals(items[index], value)) return;
+            var editor = Editor;
+            editor?.Writing();
+            var previous = items[index];
+            editor?.Entered(value);
+            items[index] = value;
+            editor?.Left(previous, value);
+        }
     }
     public int Count => items.Count;
     public bool IsReadOnly => false;
-    public void Add(Stmt item) { Rewriter.Writing(); items.Add(item); Rewriter.Changed(null, item); }
+    public void Add(Stmt item) { var editor = Editor; editor?.Writing(); items.Add(item); editor?.Entered(item); }
     public void AddRange(IEnumerable<Stmt> values) { foreach (var item in values) Add(item); }
-    public void Insert(int index, Stmt item) { Rewriter.Writing(); items.Insert(index, item); Rewriter.Changed(null, item); }
+    public void Insert(int index, Stmt item) { var editor = Editor; editor?.Writing(); items.Insert(index, item); editor?.Entered(item); }
     public void InsertRange(int index, IEnumerable<Stmt> values) { foreach (var item in values) Insert(index++, item); }
-    public void RemoveAt(int index) { Rewriter.Writing(); var item = items[index]; items.RemoveAt(index); Rewriter.Changed(item, null); }
+    public void RemoveAt(int index) { var editor = Editor; editor?.Writing(); var item = items[index]; items.RemoveAt(index); editor?.Left(item, null); }
     public bool Remove(Stmt item) { var index = items.IndexOf(item); if (index < 0) return false; RemoveAt(index); return true; }
     public void RemoveRange(int index, int count) { for (var i = 0; i < count; i++) RemoveAt(index); }
     public int RemoveAll(Predicate<Stmt> predicate)

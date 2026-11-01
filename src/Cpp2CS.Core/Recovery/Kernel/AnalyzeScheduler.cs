@@ -19,7 +19,7 @@ internal static class AnalyzeScheduler
         foreach (var step in RuleRegistry.Analyses)
         {
             ctx.currentStep = step.Id;
-            ctx.Rewriter.Attach(ctx.function);
+            ctx.function.Bind();
             var version = ctx.analyses.Version;
             var inputTypes = ctx.State.Types.known.Count;
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -32,7 +32,6 @@ internal static class AnalyzeScheduler
                 (ctx.Rewriter.Closed, ctx.Maintain.ReadOnly) = (step.Id, step.Id);
             var failure = step.Run(ctx);
             (ctx.Rewriter.Closed, ctx.Maintain.ReadOnly) = (null, null);
-            ctx.Rewriter.Attach(ctx.function);
             if (before is not null && !before.Matches(ctx.function.Blocks, exceptionPhis))
                 throw new InvalidOperationException($"只读分析改写了机器 IR：{step.Id}");
             if (ctx.analyses.Refresh(ctx.blocks, exceptionPhis))

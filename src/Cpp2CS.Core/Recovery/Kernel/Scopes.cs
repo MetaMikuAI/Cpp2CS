@@ -54,7 +54,7 @@ internal class RewriteScope : AnalysisScope
 {
     internal RewriteScope(MethodSession session) : base(session) { }
 
-    internal StatementRewriter Rewriter => Session.Rewriter;
+    internal MachineEditor Rewriter => Session.Rewriter;
     internal Editing Edit => Session.Edit;
 }
 

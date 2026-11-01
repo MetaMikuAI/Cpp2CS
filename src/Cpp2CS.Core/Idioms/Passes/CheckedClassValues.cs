@@ -112,7 +112,7 @@ internal static class CheckedClassValues
             Target = branch.Target == address ? label : branch.Target,
             Fallthrough = branch.Fallthrough == address ? label : branch.Fallthrough,
         };
-        function.Blocks.Add(edge);
+        function.AddBlock(edge);
         function.Renumber();
         return edge;
     }

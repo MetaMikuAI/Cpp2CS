@@ -148,7 +148,7 @@ internal static class SharedInterfaceTails
                 Redirect(incoming[1][mapping[side]], hit, copies[side].Hit);
             }
             // 原块已不可达；Renumber 删除原出口及其 φ 输入。
-            function.Blocks.AddRange(copies.SelectMany(c => new[] { c.Slow, c.Hit, c.Merge }));
+            function.AddBlocks(copies.SelectMany(c => new[] { c.Slow, c.Hit, c.Merge }));
             function.Renumber();
             changed = true;
 

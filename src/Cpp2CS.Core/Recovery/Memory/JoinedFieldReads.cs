@@ -86,7 +86,7 @@ internal static class JoinedFieldReads
                     };
                 else if (parent.Statements.LastOrDefault() is Jump jump) parent.Statements[^1] = jump with { Target = edge.Start };
                 else parent.Statements.Add(new Jump(read.Address, edge.Start));
-                function.Blocks.Add(edge);
+                function.AddBlock(edge);
                 foreach (var variable in moved) results[variable].Add(renamed[variable]);
             }
             foreach (var (owner, statement) in prefix) owner.Statements.Remove(statement);

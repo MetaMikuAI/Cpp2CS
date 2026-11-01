@@ -5,18 +5,16 @@ using Cpp2CS.Ir;
 namespace Cpp2CS.Machine.Algebra;
 
 /// <summary>按声明顺序运行机器步骤；追踪不参与恢复判定。</summary>
-internal sealed class PassList(MachineFunction function, List<PassStep> steps, StatementRewriter? rewriter = null, Action<string>? onStep = null)
+internal sealed class PassList(MachineFunction function, List<PassStep> steps, Action<string>? onStep = null)
 {
     public void Run(string name, Action action) => Run(name, () => { action(); return 0; });
 
     public T Run<T>(string name, Func<T> action)
     {
         onStep?.Invoke(name);
-        rewriter?.Attach(function);
         var before = Statements();
         var started = Stopwatch.GetTimestamp();
         var result = action();
-        rewriter?.Attach(function);
         var after = Statements();
         steps.Add(new(name, !before.SequenceEqual(after, ReferenceEqualityComparer.Instance), before.Length, after.Length,
             1, PassConvergence.Single, Stopwatch.GetElapsedTime(started).TotalMilliseconds));

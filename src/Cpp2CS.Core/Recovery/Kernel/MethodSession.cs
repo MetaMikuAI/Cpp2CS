@@ -34,7 +34,7 @@ internal sealed class MethodSession(MethodRecovery owner, MethodRef method, ulon
     /// <summary>Prepare 步骤列表写入的 pass 记录；计划表在每步之后把它转入 <see cref="trace"/>。</summary>
     internal readonly List<PassStep> passSteps = [];
     private Cpp2CS.Machine.Algebra.PassList? passes;
-    internal Cpp2CS.Machine.Algebra.PassList Passes => passes ??= new(function, passSteps, Rewriter, name => currentStep = name);
+    internal Cpp2CS.Machine.Algebra.PassList Passes => passes ??= new(function, passSteps, name => currentStep = name);
     /// <summary>方法的追踪（按完成先后）与当前步骤名（Prepare 条目、Analyze 步骤或子步骤），只用于诊断。</summary>
     internal readonly List<TraceEntry> trace = [];
     internal string currentStep = "prepare";
@@ -46,8 +46,8 @@ internal sealed class MethodSession(MethodRecovery owner, MethodRef method, ulon
     private Editing? editing;
     /// <summary>IR 级维护动作的内核接口。</summary>
     internal Editing Edit => editing ??= new(this, Maintain);
-    private StatementRewriter? statementRewriter;
-    internal StatementRewriter Rewriter => statementRewriter ??= new(State.StatementTables, ledger.Replace);
+    /// <summary>机器函数的编辑器。</summary>
+    internal MachineEditor Rewriter => function.Editor;
     internal readonly ManagedTypes types = owner.types;
     internal readonly ProgramFacts facts = owner.facts;
     internal HoleLedger? ledgerStore;
@@ -95,7 +95,17 @@ internal sealed class MethodSession(MethodRecovery owner, MethodRef method, ulon
         scopedView = (list, list.Count, view);
         return view;
     }
-    internal MachineFunction function = null!;
+    private MachineFunction? machineFunction;
+    /// <summary>方法会话接管的机器函数；交给会话时登记证据表与洞账本为编辑器的观察者。</summary>
+    internal MachineFunction function
+    {
+        get => machineFunction!;
+        set
+        {
+            machineFunction = value;
+            value.Editor.Observe(State.StatementTables, ledger.Replace);
+        }
+    }
     // ---------- 准备：签名、提升、L2 ----------
     /// <summary>允许具体实参或已有引用布局见证的泛型实例（RecoverInstance）。</summary>
     public bool ClosedInstance { get; init; }
