@@ -734,7 +734,8 @@ internal sealed class BodyBuilder
                 return Hole(address, "构造 对象在构造函数调用前被使用", expected);
             case PhiSym phi:
                 {
-                    var type = oracle.TypeOf(phi) ?? expected;
+                    // 定义与使用都不给出类型的 φ（如只由常量合流的标志）按同宽整数解释，1 位为 bool。
+                    var type = oracle.TypeOf(phi) ?? expected ?? (phi.Width == 1 ? types.Boolean : phi.Width is 8 or 16 or 32 or 64 ? types.Integer(phi.Width, true) : null);
                     if (type is null) return Hole(address, "类型 φ 没有类型", expected);
                     phis.Add(phi);
                     return Coerce(Local(phi, type), expected);
