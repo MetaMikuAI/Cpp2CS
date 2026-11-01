@@ -28,15 +28,21 @@ internal static partial class ExecutionCheck
         var targets = ReadList(facts, list, 0, 1);
         var decompiler = new MethodDecompiler(facts, types);
         var results = targets.Select(t => t.Recover(decompiler)).ToArray();
+        // 依赖闭包与 recover 相同：透明构造（内联证明）的被调构造函数一并写出，对照时透明执行。
+        var dependencies = new List<MethodRecoveryResult>();
+        DependencyClosure.Complete(results, dependencies, results.GroupBy(r => r.Method.Method).ToDictionary(g => g.Key, g => g.First()), new Summaries(decompiler));
+        var all = results.Concat(dependencies).ToArray();
         var skeleton = new Skeleton(facts.Model);
-        skeleton.ApplyDeclarations(results);
+        skeleton.ApplyDeclarations(all);
         var emitter = new BodyEmitter(skeleton, types, diagnostics: runOptions.Diagnostics);
-        var bodies = results.Where(r => r.Body is not null).Select(r => r.Body!).ToArray();
+        var bodies = all.Where(r => r.Body is not null).Select(r => r.Body!).ToArray();
         var problems = emitter.Check(bodies, EmissionPolicy.Recovered);
+        DependencyClosure.Validate(all, problems);
         new BodyPublication(emitter).Publish(bodies.Where(b => !problems.ContainsKey(b)), EmissionPolicy.Recovered);
         var index = new WorldIndex(facts, types);
         var cecil = new CecilModel(facts.Model, skeleton);
         var interpreter = new CilInterpreter(cecil, index);
+        interpreter.SetInline(emitter, skeleton);
         using var machine = new NativeMachine(facts);
         var verdicts = new Dictionary<string, int>();
         var output = options.SkipWhile(o => o != "--output").Skip(1).FirstOrDefault();
@@ -65,6 +71,12 @@ internal static partial class ExecutionCheck
         return verdicts.GetValueOrDefault("mismatch") == 0 ? 0 : 1;
     }
 
+
+    private sealed class Summaries(MethodDecompiler decompiler) : IMethodResults
+    {
+        public MethodRecoveryResult Recover(MethodRef method, ulong entry) => decompiler.Recover(method, entry);
+        public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => decompiler.RecoverInstance(method, entry);
+    }
 
     /// <summary>Reason：不可检查时的主要原因（用例最多的一类，去掉具体类型与方法名以便汇总）。</summary>
     private sealed record Outcome(string Verdict, int Matches, double Coverage, string Detail, string Reason = "", int ThrowCases = 0);

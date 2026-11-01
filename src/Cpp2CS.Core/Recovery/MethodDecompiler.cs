@@ -34,6 +34,7 @@ public sealed class MethodDecompiler
     private readonly IdiomRewriter rewriter;
     private readonly ManagedAbi abi;
     private readonly CallShapes shapes;
+    private readonly Dictionary<(MethodRef, ulong), MethodRecoveryResult?> summaries = [];
 
     public MethodDecompiler(ProgramFacts facts, ManagedTypes types)
     {
@@ -88,7 +89,21 @@ public sealed class MethodDecompiler
     public MethodRecoveryResult Lower(MethodAnalysis analysis)
     {
         var oracle = new TypeOracle(types, facts, analysis.Method, analysis.Environment.Shape, analysis.Values, analysis.Memory);
-        return BodyBuilder.Build(analysis, oracle);
+        return BodyBuilder.Build(analysis, oracle, Summary);
+    }
+
+    /// <summary>
+    /// 另一个方法自身原生代码的恢复结果，作为内联证明的依据。按方法与入口缓存；递归恢复中的方法返回 null。
+    /// </summary>
+    public MethodRecoveryResult? Summary(MethodRef method)
+    {
+        var entry = method.Method.Address;
+        if (entry == 0) return null;
+        if (summaries.TryGetValue((method, entry), out var known)) return known;
+        summaries[(method, entry)] = null;
+        var result = Recover(method, entry);
+        summaries[(method, entry)] = result;
+        return result;
     }
 
     /// <summary>运行到符号值为止的各层。</summary>
