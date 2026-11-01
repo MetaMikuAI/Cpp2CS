@@ -13,6 +13,9 @@ public enum LocationKind : byte { Instance, Reference, Static, ThreadStatic, Ele
 /// Index：元素下标（为 null 时下标为常量 ConstantIndex）；
 /// Owner：静态字段所属类型；Path：从根位置进入值类型的字段链；Type：被访问值的类型。
 /// </summary>
+/// <summary>访问的一段：字段 Leaf 的 [FieldBit, FieldBit+Width) 位位于访问的第 Bit 位起。</summary>
+public sealed record AccessPart(Location Leaf, int Bit, int FieldBit, int Width);
+
 public sealed record Location(LocationKind Kind, Sym? Base, Sym? Index, long ConstantIndex, TypeRef? Owner, IReadOnlyList<FieldRef> Path, TypeRef Type);
 
 /// <summary>
@@ -421,42 +424,105 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
         return null;
     }
 
-    private readonly Dictionary<ReadSym, IReadOnlyList<(Location Leaf, int Bit)>?> parts = [];
+    private readonly Dictionary<ReadSym, IReadOnlyList<AccessPart>?> parts = [];
 
-    /// <summary>不能整体定位的读取（相邻字段合并的读取）按布局拆成的字段。</summary>
-    public IReadOnlyList<(Location Leaf, int Bit)>? Parts(ReadSym read)
+    /// <summary>不能整体定位的读取（相邻字段合并的读取）按布局拆成的整字段段；含部分段时不拆。</summary>
+    public IReadOnlyList<AccessPart>? Parts(ReadSym read)
     {
         if (!parts.TryGetValue(read, out var known))
-            parts[read] = known = Locate(read.Address, read.Width) is null ? Split(read.Address, read.Width) : null;
+            parts[read] = known = Locate(read.Address, read.Width) is null && Split(read.Address, read.Width) is { } split
+                && split.All(p => p.FieldBit == 0 && p.Width == (ManagedTypes.IsReferenceType(p.Leaf.Type) ? 64 : types.Size(p.Leaf.Type) * 8)) ? split : null;
         return known;
     }
 
     /// <summary>读取中恰为一个字段的一段。</summary>
-    public Location? Part(ReadSym read, int bit, int width) =>
-        Parts(read)?.FirstOrDefault(p => p.Bit == bit && (ManagedTypes.IsReferenceType(p.Leaf.Type) ? 64 : types.Size(p.Leaf.Type) * 8) == width).Leaf;
+    public Location? Part(ReadSym read, int bit, int width) => Parts(read)?.FirstOrDefault(p => p.Bit == bit && p.Width == width)?.Leaf;
 
     /// <summary>
-    /// 跨越多个标量字段的访问按布局拆成逐字段的位置：每段是从该处起恰为一个标量字段的位置，Bit 为段在访问中的位偏移。
-    /// 字段之间不能定位的字节按填充跳过；没有任何字段时返回 null。
+    /// 跨越多个标量字段的访问按布局拆成的段：每段是一个标量字段 Leaf 的 [FieldBit, FieldBit+Width) 位，位于访问的第 Bit 位起。
+    /// 段覆盖整个字段时 FieldBit 为 0 且 Width 为字段宽度；访问只覆盖字段一部分时为部分段。
+    /// 不属于任何字段的字节是填充；不能定位又不是填充时拆分不成立，返回 null。
     /// </summary>
-    public IReadOnlyList<(Location Leaf, int Bit)>? Split(Sym address, int width)
+    public IReadOnlyList<AccessPart>? Split(Sym address, int width)
     {
         var bytes = width / 8;
-        var leaves = new List<(Location, int)>();
+        var parts = new List<AccessPart>();
+        Sym At(long offset) => offset == 0 ? address : values.Syms.Binary(BinOp.Add, address, values.Syms.Const(unchecked((ulong)offset), 64), 64);
+        int Bits(Location location) => ManagedTypes.IsReferenceType(location.Type) ? 64 : types.Size(location.Type) * 8;
         for (var at = 0; at < bytes;)
         {
-            var piece = at == 0 ? address : values.Syms.Binary(BinOp.Add, address, values.Syms.Const((ulong)at, 64), 64);
-            Location? found = null;
-            var size = 0;
+            var piece = At(at);
+            AccessPart? part = null;
+            // 从此处开始的字段：整个落在访问内为整段，超出访问末尾为部分段。
             foreach (var w in new[] { 64, 32, 16, 8 })
-                if (w / 8 <= bytes - at && Locate(piece, w) is { } location && types.Kind(location.Type) != TypeKind.Struct
-                    && (ManagedTypes.IsReferenceType(location.Type) ? 64 : types.Size(location.Type) * 8) == w)
-                { (found, size) = (location, w / 8); break; }
-            if (found is null) { at++; continue; }
-            leaves.Add((found, at * 8));
-            at += size;
+                if (Locate(piece, w) is { } location && types.Kind(location.Type) != TypeKind.Struct && Bits(location) == w)
+                {
+                    part = new(location, at * 8, 0, Math.Min(w, (bytes - at) * 8));
+                    break;
+                }
+            // 此处落在字段中间：从字段内的位置起的部分段。
+            for (var k = 1; part is null && k < 8; k++)
+                foreach (var w in new[] { 64, 32, 16 })
+                    if (k < w / 8 && Locate(At(at - k), w) is { } containing && types.Kind(containing.Type) != TypeKind.Struct && Bits(containing) == w)
+                    {
+                        part = new(containing, at * 8, k * 8, Math.Min(w - k * 8, (bytes - at) * 8));
+                        break;
+                    }
+            if (part is null)
+            {
+                // 只有布局中不属于任何字段的字节才是填充。
+                if (!Padding(piece)) return null;
+                at++;
+                continue;
+            }
+            parts.Add(part);
+            at += part.Width / 8;
         }
-        return leaves.Count > 0 ? leaves : null;
+        return parts.Count > 0 ? parts : null;
+    }
+
+    /// <summary>地址处的字节在其容器类型的布局中不属于任何字段。容器不能确定时为 false。</summary>
+    public bool Padding(Sym address)
+    {
+        var (root, offset, index, scale) = Decompose(address);
+        (TypeRef Owner, long Offset, bool Statics, bool Thread)? container = null;
+        if (root is LocalSym local && index is null && memory.Find(local.Space, local.Offset + offset, 1) is { Promoted: false } cell
+            && CellType(cell) is { } cellType && types.Kind(cellType) == TypeKind.Struct)
+            container = (cellType, local.Offset + offset - cell.Start + RuntimeLayout.ObjectHeaderSize, false, false);
+        else if (root is EntitySym { Symbol: { Kind: SymbolKind.StaticFields or SymbolKind.ThreadStaticFields, Value: TypeRef owner } entity } && index is null)
+            container = (owner, offset, true, entity.Kind == SymbolKind.ThreadStaticFields);
+        else switch (TypeOf(root))
+        {
+            case ArrayRef array when types.Kind(array.Element) == TypeKind.Struct && ElementSize(array.Element) is var size and > 0 && offset >= RuntimeLayout.ArrayData
+                && (index is null || scale == size && offset - RuntimeLayout.ArrayData < size):
+                container = (array.Element, (offset - RuntimeLayout.ArrayData) % size + RuntimeLayout.ObjectHeaderSize, false, false);
+                break;
+            case DefinitionRef reference when ManagedTypes.IsReferenceType(reference) && index is null:
+                container = (reference, offset, false, false);
+                break;
+            case ByRefRef { Element: var element } when types.Kind(element) == TypeKind.Struct && index is null:
+                container = (element, offset + RuntimeLayout.ObjectHeaderSize, false, false);
+                break;
+        }
+        return container is var (o, at, statics, thread) && !Covered(o, at, statics, thread);
+    }
+
+    /// <summary>布局中有字段覆盖该字节（对象头视为覆盖；值类型字段内部按其自身布局继续判断）。</summary>
+    private bool Covered(TypeRef owner, long offset, bool statics, bool thread)
+    {
+        if (!statics && offset < RuntimeLayout.ObjectHeaderSize) return true;
+        for (TypeRef? current = owner; current is DefinitionRef d; current = statics ? null : d.Definition.BaseType?.Substitute(d.Arguments, []))
+        {
+            if (types.Layouts.Of(d) is not { } layout) return true;
+            foreach (var slot in thread ? layout.ThreadStatics : statics ? layout.Statics : layout.Fields)
+            {
+                var size = ManagedTypes.IsReferenceType(slot.Type) ? 8 : types.Size(slot.Type);
+                if (size <= 0) return true;
+                if (offset < slot.Offset || offset >= slot.Offset + size) continue;
+                return types.Kind(slot.Type) != TypeKind.Struct || Covered(slot.Type, offset - slot.Offset + RuntimeLayout.ObjectHeaderSize, false, false);
+            }
+        }
+        return false;
     }
 
     private int ElementSize(TypeRef element) => ManagedTypes.IsReferenceType(element) ? 8 : types.Size(element);

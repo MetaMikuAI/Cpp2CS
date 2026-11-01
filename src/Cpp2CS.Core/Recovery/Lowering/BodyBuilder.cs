@@ -232,11 +232,8 @@ internal sealed class BodyBuilder
             // 相邻字段合并的读取逐字段落成局部，以该段的切片为键。
             if (oracle.Parts(read) is { } leaves)
             {
-                foreach (var (leaf, bit) in leaves)
-                {
-                    var key = values.Syms.Slice(read, bit, Width(leaf.Type) == 0 ? types.Size(leaf.Type) * 8 : Width(leaf.Type));
-                    output.Add(new ManagedAssignment(statement.Address, Local(key, leaf.Type), LocationValue(leaf, statement.Address)));
-                }
+                foreach (var part in leaves)
+                    output.Add(new ManagedAssignment(statement.Address, Local(values.Syms.Slice(read, part.Bit, part.Width), part.Leaf.Type), LocationValue(part.Leaf, statement.Address)));
                 continue;
             }
             if (Read(read, statement.Address) is { } value)
@@ -251,11 +248,26 @@ internal sealed class BodyBuilder
                     var location = oracle.Locate(operands[0], store.Value.Width);
                     if (location is null && oracle.Split(operands[0], store.Value.Width) is { } leaves)
                     {
-                        // 跨字段的写入按布局拆为逐字段写入（寄存器对、清零等一次写入多个字段）。
-                        foreach (var (leaf, bit) in leaves)
+                        // 跨字段的写入按布局拆为逐字段写入（寄存器对、合并的清零等一次写入多个字段）；
+                        // 只覆盖字段一部分的段写为读改写：f = (f & ~掩码) | (段 << 位移)。
+                        foreach (var part in leaves)
                         {
+                            var leaf = part.Leaf;
                             var leafTarget = LocationValue(leaf, store.Address, store: true);
-                            var leafValue = View(values.Syms.Slice(operands[1], bit, Width(leaf.Type)), leaf.Type, store.Address);
+                            var slice = values.Syms.Slice(operands[1], part.Bit, part.Width);
+                            ManagedValue leafValue;
+                            if (part.FieldBit == 0 && part.Width == (ManagedTypes.IsReferenceType(leaf.Type) ? 64 : types.Size(leaf.Type) * 8))
+                                leafValue = View(slice, leaf.Type, store.Address);
+                            else if (types.Kind(leaf.Type) is TypeKind.Int or TypeKind.Bool && IntegerBits(slice, leaf.Type, store.Address) is { } bits)
+                            {
+                                var width = Width(leaf.Type);
+                                var mask = Expr.Mask(part.Width) << part.FieldBit;
+                                ManagedValue shifted = part.FieldBit == 0 ? bits : new BinaryValue(BinOp.Shl, bits, new ConstantValue((ulong)part.FieldBit, types.Int32, 32), leaf.Type, width);
+                                var kept = new BinaryValue(BinOp.And, LocationValue(leaf, store.Address), new ConstantValue(~mask & Expr.Mask(width), leaf.Type, width), leaf.Type, width);
+                                leafValue = new BinaryValue(BinOp.Or, kept, shifted, leaf.Type, width);
+                            }
+                            else
+                                leafValue = Hole(store.Address, $"内存 字段 {leaf.Type} 的部分写入", leaf.Type);
                             output.Add(leafTarget is LocalValue leafLocal ? new ManagedAssignment(store.Address, leafLocal, leafValue) : new ManagedStore(store.Address, leafTarget, leafValue));
                         }
                         return null;
