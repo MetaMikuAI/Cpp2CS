@@ -12,7 +12,9 @@ internal static class Ledgers
 
     // ---------- 棘轮 ----------
 
-    public static SortedDictionary<string, int> ReadRatchet(string path) => new(File.ReadLines(path)
+    public static SortedDictionary<string, int> ReadRatchet(string path) => ReadRatchetLines(File.ReadLines(path));
+
+    public static SortedDictionary<string, int> ReadRatchetLines(IEnumerable<string> lines) => new(lines
         .Where(l => l.Length > 0 && !l.StartsWith('#')).Select(l => l.Split('\t')).ToDictionary(f => f[0], f => int.Parse(f[1])), StringComparer.Ordinal);
 
     public static void WriteRatchet(string path, IReadOnlyDictionary<string, int> values) => File.WriteAllLines(path,
@@ -27,6 +29,52 @@ internal static class Ledgers
             var (was, now) = (recorded.GetValueOrDefault(key), current.GetValueOrDefault(key));
             if (now > was) failures.Add($"棘轮上升 {key}：{was} → {now}");
             else if (now < was) failures.Add($"棘轮下降未写回 {key}：{was} → {now}（运行 architecture <repo> --write）");
+        }
+    }
+
+    // ---------- 跨族转移清单 ----------
+
+    /// <summary>一条跨族转移：符号（声明类型.方法）从源键所在范围搬到目标键所在范围，带走的计数。</summary>
+    public sealed record Transfer(string Source, string Target, string Symbol, int Count, string Package)
+    {
+        public static string ScopeOf(string key) => key[(key.IndexOf('/') + 1)..];
+    }
+
+    public static List<Transfer> ReadTransfers(IEnumerable<string> lines) => lines.Where(l => l.Length > 0 && !l.StartsWith('#'))
+        .Select(l => l.Split('\t')).Select(f => new Transfer(f[0], f[1], f[2], int.Parse(f[3]), f[4])).ToList();
+
+    /// <summary>每条转移的符号必须在目标范围声明、且不再在源范围声明（按方法名，不论声明类型）。</summary>
+    public static void CheckTransfers(IReadOnlyList<Transfer> transfers, IReadOnlyDictionary<string, HashSet<string>> methods, List<string> failures)
+    {
+        foreach (var transfer in transfers)
+        {
+            var (source, target) = (Transfer.ScopeOf(transfer.Source), Transfer.ScopeOf(transfer.Target));
+            if (!methods.TryGetValue(transfer.Symbol, out var scopes) || !scopes.Contains(target))
+                failures.Add($"转移清单：{transfer.Symbol} 没有声明在目标范围 {target}");
+            var name = transfer.Symbol[(transfer.Symbol.LastIndexOf('.') + 1)..];
+            if (methods.Any(p => p.Key.EndsWith("." + name, StringComparison.Ordinal) && p.Value.Contains(source)))
+                failures.Add($"转移清单：源范围 {source} 中仍有方法 {name}");
+        }
+    }
+
+    /// <summary>
+    /// 与基准提交比较棘轮：上升的键必须由本次新增的转移条目覆盖（数量之和不少于上升量），且对应的源键下降不少于转移量；
+    /// 否则只能经用户确认（提交说明中的确认标记，由提交级检查核对）。
+    /// </summary>
+    public static void CheckRises(IReadOnlyDictionary<string, int> baseline, IReadOnlyDictionary<string, int> recorded,
+        IReadOnlyList<Transfer> baseTransfers, IReadOnlyList<Transfer> transfers, List<string> failures)
+    {
+        var added = transfers.Where(t => !baseTransfers.Contains(t)).ToList();
+        foreach (var key in recorded.Keys.Where(k => recorded[k] > baseline.GetValueOrDefault(k)))
+        {
+            var rise = recorded[key] - baseline.GetValueOrDefault(key);
+            var covered = added.Where(t => t.Target == key).Sum(t => t.Count);
+            if (covered < rise) failures.Add($"棘轮上调 {key}：{baseline.GetValueOrDefault(key)} → {recorded[key]}，转移清单只覆盖 {covered}（其余须经用户确认）");
+        }
+        foreach (var group in added.GroupBy(t => t.Source))
+        {
+            var drop = baseline.GetValueOrDefault(group.Key) - recorded.GetValueOrDefault(group.Key);
+            if (drop < group.Sum(t => t.Count)) failures.Add($"转移清单的源键 {group.Key} 只下降 {drop}，少于转出的 {group.Sum(t => t.Count)}");
         }
     }
 

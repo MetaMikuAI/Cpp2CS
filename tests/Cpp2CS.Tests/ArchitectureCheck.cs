@@ -18,9 +18,11 @@ internal static class ArchitectureCheck
     {
         var known = new[] { "--write", "--write-snapshots", "--bootstrap", "--deps" };
         string? milestone = null;
+        string? baseRevision = null;
         for (var i = 0; i < options.Length; i++)
         {
             if (options[i] == "--milestone" && i + 1 < options.Length) milestone = options[++i];
+            else if (options[i] == "--base" && i + 1 < options.Length) baseRevision = options[++i];
             else if (!known.Contains(options[i])) throw new ArgumentException($"未知参数 {options[i]}");
         }
         var model = SourceModel.Load(repository);
@@ -42,6 +44,7 @@ internal static class ArchitectureCheck
             Registry = Path.Combine(folder, "registry.tsv"),
             HoleCodes = Path.Combine(folder, "hole-codes.tsv"),
             SharedBodies = Path.Combine(folder, "shared-step-bodies.tsv"),
+            Transfers = Path.Combine(folder, "transfers.tsv"),
         };
         var holeCodes = Ledgers.HoleCodes(census.HoleCodes);
         if (options.Contains("--bootstrap"))
@@ -87,6 +90,14 @@ internal static class ArchitectureCheck
         Ledgers.CheckEntries("共享步骤体登记表", sharedBodies, registered, null, failures);
         if (registered.Count > 0) counts["shared-step-body-call-sites/I3"] = registered.Count;
         Ledgers.CheckRatchet(Ledgers.ReadRatchet(paths.Ratchet), counts, failures);
+        var transfers = File.Exists(paths.Transfers) ? Ledgers.ReadTransfers(File.ReadLines(paths.Transfers)) : [];
+        Ledgers.CheckTransfers(transfers, census.MethodScopes, failures);
+        if (baseRevision is not null)
+        {
+            string[] Show(string path) => Git(model.Repository, "show", $"{baseRevision}:{Path.GetRelativePath(model.Repository, path).Replace('\\', '/')}");
+            var baseline = new SortedDictionary<string, int>(Ledgers.ReadRatchetLines(Show(paths.Ratchet)), StringComparer.Ordinal);
+            Ledgers.CheckRises(baseline, Ledgers.ReadRatchet(paths.Ratchet), Ledgers.ReadTransfers(Show(paths.Transfers)), transfers, failures);
+        }
         Ledgers.CheckPairs("族归属快照", Ledgers.ReadPairs(paths.Families), Ledgers.CurrentFamilies(model), failures);
         Ledgers.CheckPairs("注册表快照", RegistryPairs(File.ReadLines(paths.Registry)), RegistryPairs(Ledgers.RegistryLines(registry)), failures);
         Ledgers.CheckPairs("洞编码清单", HoleCodeRows(paths.HoleCodes).ToDictionary(p => p.Key, p => p.Value.Counts), holeCodes, failures);
@@ -94,6 +105,17 @@ internal static class ArchitectureCheck
         foreach (var failure in failures) Console.WriteLine($"✗ {failure}");
         Console.WriteLine($"architecture：越层引用 {layers.Count}；计数项 {counts.Count}；白名单 {whitelist.Count} 条，豁免 {exemptions.Count} 条；失败 {failures.Count} 项");
         return failures.Count == 0 ? 0 : 1;
+    }
+
+    /// <summary>读取基准提交中的文件；文件在该提交中不存在时为空。</summary>
+    private static string[] Git(string repository, params string[] arguments)
+    {
+        var start = new System.Diagnostics.ProcessStartInfo("git") { WorkingDirectory = repository, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        using var process = System.Diagnostics.Process.Start(start)!;
+        var output = process.StandardOutput.ReadToEnd();
+        process.WaitForExit();
+        return process.ExitCode == 0 ? output.Split('\n') : [];
     }
 
     private static SortedDictionary<string, int> Counts(StructureCensus census, IEnumerable<Ledgers.Entry> whitelist, IEnumerable<Ledgers.Entry> exemptions)

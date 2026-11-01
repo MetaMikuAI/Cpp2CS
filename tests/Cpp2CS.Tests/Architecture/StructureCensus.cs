@@ -20,6 +20,8 @@ internal sealed class StructureCensus
     public List<(string Rule, string File, string Method)> HoleCodes { get; } = [];
     /// <summary>PassList.Run 的步骤名：（名称、范围、文件、行）。</summary>
     public List<(string Name, string Scope, string File, int Line)> PassNames { get; } = [];
+    /// <summary>方法声明（声明类型.方法名）→ 所在范围；核对跨族转移清单用。</summary>
+    public Dictionary<string, HashSet<string>> MethodScopes { get; } = new(StringComparer.Ordinal);
 
     private readonly SourceModel model;
 
@@ -168,8 +170,13 @@ internal sealed class StructureCensus
             }
         }
         foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
+        {
             if (semantic.GetDeclaredSymbol(method)?.GetAttributes().Any(a => a.AttributeClass?.Name == "MachinePassAttribute") == true)
                 Count("machine-pass-steps", scope);
+            var declared = $"{method.Ancestors().OfType<BaseTypeDeclarationSyntax>().FirstOrDefault()?.Identifier.Text}.{method.Identifier.Text}";
+            if (!MethodScopes.TryGetValue(declared, out var scopes)) MethodScopes[declared] = scopes = [];
+            scopes.Add(scope);
+        }
     }
 
     private static bool MentionsAdd(IOperation pattern) => pattern.DescendantsAndSelf().OfType<IFieldReferenceOperation>().Any(f => Declared(f.Field, "BinOp", "Add"));
