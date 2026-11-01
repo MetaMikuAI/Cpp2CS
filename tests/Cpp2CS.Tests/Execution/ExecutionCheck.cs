@@ -46,36 +46,42 @@ internal static partial class ExecutionCheck
         // 参数是 recover 的输出目录时取其中写出的全部方法，逐方法的结果写入该目录的 execution.tsv（分片时为 execution-k-of-n.tsv），控制台只列出未通过的方法
         var full = Directory.Exists(slice);
         var bytes = full ? ReadBytes(Path.Combine(slice, "recovery.jsonl")) : new Dictionary<ulong, long>();
-        // 与 recover 相同的运行选项：环境变量（帧槽提升、可读性、诊断）与可选的固定事实快照。
-        var runOptions = RecoveryEnvironment.Read();
-        if (options.SkipWhile(o => o != "--fact-cache-file").Skip(1).FirstOrDefault() is { } factCache)
+        // 目录模式：按 run.json 复原当初的请求（输入哈希与运行选项须与记录一致），用产物所属 profile 的阶段表重新写出；
+        // 写出结果与磁盘逐项一致之后再执行，core 与 full 的产物都可以对照。
+        var run = full ? RecoverySession.Emit(RunRequest.Read(slice), Console.Error.WriteLine) : null;
+        // 竖切模式：与 recover 相同的运行选项（环境变量与可选的固定事实快照）。
+        var runOptions = run?.Request.Options ?? RecoveryEnvironment.Read();
+        if (run is null && options.SkipWhile(o => o != "--fact-cache-file").Skip(1).FirstOrDefault() is { } factCache)
             runOptions = runOptions with { FactCacheFile = Path.GetFullPath(factCache) };
-        var facts = FactsBuilder.Build(binary, metadata, options: runOptions);
-        var types = new ManagedTypes(facts.Model, facts.Layouts);
+        var facts = run?.Facts ?? FactsBuilder.Build(binary, metadata, options: runOptions);
+        var types = run?.Types ?? new ManagedTypes(facts.Model, facts.Layouts);
         var methods = full ? ReadList(facts, Path.Combine(slice, "emitted.tsv"), 3, 4) : ReadList(facts, slice, 0, 1);
-        var recovery = new MethodRecovery(facts, types);
         var instances = methods.ToDictionary(t => t.Method.Method, t => t.Instance);
-        var results = methods.Select(t => t.Entry == 0 ? new MethodRecoveryResult(t.Method, 0, null, [new(0, "语言定义 待核对元数据证据")])
-            : t.Recover(recovery)).ToArray();
+        MethodRecoveryResult[] results;
+        Skeleton skeleton;
+        BodyEmitter emitter;
+        AccessorRecovery? closure;
+        if (run is not null)
+        {
+            var produced = run.Results.GroupBy(r => (r.Entry, r.Method.ToString())).ToDictionary(g => g.Key, g => g.First());
+            results = methods.Select(t => produced.TryGetValue((t.Entry, t.Method.ToString()), out var result) ? result
+                : throw new InvalidDataException($"0x{t.Entry:x} {t.Method}：按阶段表重新写出的结果中没有写出清单里的这个方法")).ToArray();
+            (skeleton, emitter, closure) = (run.Skeleton, run.Emitter, run.Closure);
+        }
+        else
+        {
+            var recovery = new MethodRecovery(facts, types);
+            results = methods.Select(t => t.Entry == 0 ? new MethodRecoveryResult(t.Method, 0, null, [new(0, "语言定义 待核对元数据证据")])
+                : t.Recover(recovery)).ToArray();
+            skeleton = new Skeleton(facts.Model);
+            skeleton.ApplyDeclarations(results);
+            var sliceEmitter = new FullBodyEmitter(skeleton, types, runOptions.Diagnostics, runOptions.Readability);
+            emitter = sliceEmitter;
+            closure = new AccessorRecovery(facts, types, new MethodSummaryService(recovery), sliceEmitter, results, null);
+            skeleton.ApplyDeclarations(closure.All);
+        }
         if (only is not null && only.Except(results.Select(r => (r.Entry, r.Method.ToString()))).Any())
             throw new InvalidDataException("--only 含未匹配方法；请使用写出清单中的入口与开放泛型方法名");
-        if (full) AutoPropertyManifest.RestoreSynthesized(slice, types, results);
-        var skeleton = new Skeleton(facts.Model);
-        skeleton.ApplyDeclarations(results);
-        if (full)
-            foreach (var line in File.ReadLines(Path.Combine(slice, "recovery.jsonl")))
-            {
-                using var declaration = JsonDocument.Parse(line);
-                var row = declaration.RootElement;
-                if (!row.TryGetProperty("declaration", out var kind) || kind.GetString() != "PlatformInvoke") continue;
-                var target = RecoveryTarget.Find(facts, Convert.ToUInt64(row.GetProperty("address").GetString(), 16), row.GetProperty("method").GetString()!);
-                var recovered = target.Recover(recovery);
-                if (recovered.PlatformImport is null) throw new InvalidDataException("原生导入声明未复现");
-                skeleton.ApplyDeclarations([recovered]);
-            }
-        var emitter = new FullBodyEmitter(skeleton, types, runOptions.Diagnostics, runOptions.Readability);
-        var closure = new AccessorRecovery(facts, types, new MethodSummaryService(recovery), emitter, results, full ? AutoPropertyManifest.ReadRejected(Path.Combine(slice, "autoprop-rejected-input.tsv")) : null);
-        skeleton.ApplyDeclarations(closure.All);
         var index = new WorldIndex(facts, types);
         if (options.Contains("--concrete-generics"))
             foreach (var result in results.Where(Selected))
@@ -84,45 +90,53 @@ internal static partial class ExecutionCheck
         var interpreter = new CilInterpreter(cecil, index);
         using var machine = new NativeMachine(facts);
         var a = new Assertions();
-        // 候选验证使用独立预览；只读 Check 不会把骨架占位体替换为恢复体。
-        var preview = new Skeleton(facts.Model);
-        preview.ApplyDeclarations(closure.All);
-        var previewEmitter = new FullBodyEmitter(preview, types, runOptions.Diagnostics, runOptions.Readability);
-        new BodyPublication(previewEmitter).Publish(closure.All.Where(r => r.Body is not null && !closure.Problems.ContainsKey(r.Body))
-            .Select(r => r.Body!), EmissionPolicy.Checked);
-        var previewCecil = new CecilModel(facts.Model, preview);
-        var previewInterpreter = new CilInterpreter(previewCecil, index);
-        var candidates = full ? EvidenceCandidates(slice, facts, types, results, preview) : closure.Candidates;
-        var evidencePath = Path.Combine(slice, "accessor-evidence-input.tsv");
-        var evidence = full && File.Exists(evidencePath) ? AccessorEvidence.Read(evidencePath) : new HashSet<string>();
-        if (!full)
-            foreach (var candidate in candidates.Values)
-            {
-                if (candidate.LanguageDefined && candidate.Method.Method.Address == 0) continue;
-                var outcome = Check(candidate.Method, preview, previewCecil, previewInterpreter, machine, index, false);
-                a.True(outcome.Verdict == "verified" && outcome.Matches == Cases, $"访问器先独立 verified：{candidate.Method} {outcome.Detail}");
-                if (outcome.Verdict == "verified" && outcome.Matches == Cases) evidence.Add(AccessorEvidence.Describe(facts, preview, candidate));
-            }
+        // 竖切模式的访问器候选先在预览骨架上独立验证；只读 Check 不会把骨架占位体替换为恢复体。
+        Skeleton? preview = null;
+        if (run is null)
+        {
+            preview = new Skeleton(facts.Model);
+            preview.ApplyDeclarations(closure!.All);
+            var previewEmitter = new FullBodyEmitter(preview, types, runOptions.Diagnostics, runOptions.Readability);
+            new BodyPublication(previewEmitter).Publish(closure.All.Where(r => r.Body is not null && !closure.Problems.ContainsKey(r.Body))
+                .Select(r => r.Body!), EmissionPolicy.Checked);
+        }
+        // 目录模式：访问器候选就是重新写出时的候选（core 没有），其描述必须与产物记录的 accessor-candidates.tsv 一致
+        var candidates = run is null ? closure!.Candidates : RecordedCandidates(slice, run);
         // 内联认回的被调方法：全量时取 recover 写下的候选；竖切时先独立验证（同 F9 访问器）。
         var inlinePath = Path.Combine(slice, "inline-candidates.tsv");
         var inlineCandidates = full ? (File.Exists(inlinePath) ? File.ReadLines(inlinePath).Where(l => l.Length > 0).ToHashSet(StringComparer.Ordinal) : [])
-            : closure.InlineCandidates.Values.Select(r => AccessorEvidence.Describe(facts, preview, r.Method)).ToHashSet(StringComparer.Ordinal);
-        if (!full)
-            foreach (var candidate in closure.InlineCandidates.Values)
+            : closure!.InlineCandidates.Values.Select(r => AccessorEvidence.Describe(facts, preview!, r.Method)).ToHashSet(StringComparer.Ordinal);
+        Dictionary<ManagedBody, EmissionProblem> problems;
+        if (run is not null) problems = run.Problems;
+        else
+        {
+            var previewCecil = new CecilModel(facts.Model, preview!);
+            var previewInterpreter = new CilInterpreter(previewCecil, index);
+            var evidence = new HashSet<string>();
+            foreach (var candidate in candidates.Values)
             {
-                var outcome = Check(candidate.Method, preview, previewCecil, previewInterpreter, machine, index, false);
-                Console.WriteLine($"  内联认回候选 {candidate.Method}：{outcome.Verdict} {outcome.Matches}/{Cases}{outcome.Detail}");
-                if (outcome.Verdict == "verified" && outcome.Matches == Cases) evidence.Add(AccessorEvidence.Describe(facts, preview, candidate.Method));
+                if (candidate.LanguageDefined && candidate.Method.Method.Address == 0) continue;
+                var outcome = Check(candidate.Method, preview!, previewCecil, previewInterpreter, machine, index, false);
+                a.True(outcome.Verdict == "verified" && outcome.Matches == Cases, $"访问器先独立 verified：{candidate.Method} {outcome.Detail}");
+                if (outcome.Verdict == "verified" && outcome.Matches == Cases) evidence.Add(AccessorEvidence.Describe(facts, preview!, candidate));
             }
-        closure.Rewrite(types, emitter, c => evidence.Contains(AccessorEvidence.Describe(facts, preview, c)),
-            m => evidence.Contains(AccessorEvidence.Describe(facts, preview, new MethodRef(m, [], []))));
-        var problems = closure.Problems;
-        PublishStage.Run(closure.All.ToArray(), closure.Dependencies.Select(r => r.Method.Method).ToHashSet(), emitter, problems);
+            foreach (var candidate in closure!.InlineCandidates.Values)
+            {
+                var outcome = Check(candidate.Method, preview!, previewCecil, previewInterpreter, machine, index, false);
+                Console.WriteLine($"  内联认回候选 {candidate.Method}：{outcome.Verdict} {outcome.Matches}/{Cases}{outcome.Detail}");
+                if (outcome.Verdict == "verified" && outcome.Matches == Cases) evidence.Add(AccessorEvidence.Describe(facts, preview!, candidate.Method));
+            }
+            closure.Rewrite(types, (FullBodyEmitter)emitter, c => evidence.Contains(AccessorEvidence.Describe(facts, preview!, c)),
+                m => evidence.Contains(AccessorEvidence.Describe(facts, preview!, new MethodRef(m, [], []))));
+            problems = closure.Problems;
+            PublishStage.Run(closure.All.ToArray(), closure.Dependencies.Select(r => r.Method.Method).ToHashSet(), emitter, problems);
+        }
         if (Environment.GetEnvironmentVariable("CPP2CS_EMIT_DEBUG") == "1")
         {
-            Console.Error.WriteLine($"  [写出] 结果 {closure.All.Count()}，有方法体 {closure.All.Count(r => r.Body is not null)}，问题 {problems.Count}；{string.Join(" ", closure.All.Select(r => $"0x{r.Entry:x}:{r.Body?.Regions.Count}:{skeleton.Method(r.Method.Method).Body.Instructions.Count}"))}");
-            foreach (var result in closure.All.Where(r => r.Body is null || problems.ContainsKey(r.Body)))
-                Console.Error.WriteLine($"  [未写出] 0x{result.Entry:x} {result.Method}：{(result.Body is null ? string.Join("；", result.Holes.Take(2).Select(h => h.Reason)) : problems[result.Body])}");
+            var all = closure?.All ?? results;
+            Console.Error.WriteLine($"  [写出] 结果 {all.Count()}，有方法体 {all.Count(r => r.Body is not null)}，问题 {problems.Count}；{string.Join(" ", all.Select(r => $"0x{r.Entry:x}:{r.Body?.Regions.Count}:{skeleton.Method(r.Method.Method).Body.Instructions.Count}"))}");
+            foreach (var result in all.Where(r => r.Body is null || problems.ContainsKey(r.Body)))
+                Console.Error.WriteLine($"  [未写出] 0x{result.Entry:x} {result.Method}：{(result.Body is null ? string.Join("；", result.Holes.Take(2).Select(h => h.Reason)) : problems[result.Body].Message)}");
         }
         interpreter.SetAccessors(emitter, skeleton);
         if (full) EmittedBodyCheck.AssertSame(slice, results.Where(Selected), skeleton);
@@ -284,6 +298,17 @@ internal static partial class ExecutionCheck
             }
         }
         return a.Finish("execute");
+    }
+
+    /// <summary>重新写出时的访问器候选；描述（含 CIL 指纹）与产物中 accessor-candidates.tsv 逐条一致才使用。</summary>
+    private static Dictionary<MethodDef, FieldAccessor> RecordedCandidates(string directory, RecoveryRun run)
+    {
+        if (run.Closure is null) return [];
+        var path = Path.Combine(directory, "accessor-candidates.tsv");
+        var recorded = File.Exists(path) ? File.ReadLines(path).Where(l => l.Length > 0).ToHashSet(StringComparer.Ordinal) : [];
+        if (!recorded.SetEquals(run.Descriptions.Values))
+            throw new InvalidDataException("重新写出的访问器候选与产物记录的 accessor-candidates.tsv 不一致");
+        return new(run.Closure.Candidates);
     }
 
     private static HashSet<ulong> TargetEntries(string path)
