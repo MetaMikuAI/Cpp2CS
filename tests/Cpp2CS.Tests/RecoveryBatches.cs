@@ -14,13 +14,7 @@ internal static class RecoveryBatches
         var limit = int.Parse(batchSize);
         if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(batchSize));
         var facts = FactsBuilder.Build(binary, metadata, Console.Error.WriteLine);
-        var ordinary = facts.Model.Methods.Where(m => m.Address != 0 && facts.Code.RegionOf(m.Address) == CodeRegion.Managed)
-            .Select(m => new RecoveryTarget(new(m, [], []), m.Address));
-        var shared = facts.Model.Code.SelectMany(p => p.Value.Where(o => o.IsInstance).Select(o => new RecoveryTarget(o.Method, p.Key)))
-            .Where(t => t.Instance.Method.Address == 0).GroupBy(t => t.Instance.Method)
-            .Select(g => g.OrderBy(t => t.Instance.TypeArguments.Concat(t.Instance.MethodArguments)
-                .Any(a => !ManagedTypes.IsReferenceType(a) || FieldLayouts.IsFullyShared(a))).ThenBy(t => t.Entry).First());
-        var selected = ordinary.Concat(shared).ToArray();
+        var selected = RecoveryTarget.Select(facts, _ => true).ToArray();
         if (selected.Select(t => t.Instance.Method).Distinct().Count() != selected.Length)
             throw new InvalidDataException("同一方法定义被选择多次");
         var batches = new List<List<RecoveryTarget>>();

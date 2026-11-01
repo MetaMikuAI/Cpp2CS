@@ -12,32 +12,37 @@ namespace Cpp2CS.Tests;
 internal static class RecoveryCensus
 {
     /// <summary>
-    /// 洞编码普查用：不写程序集与 publication.jsonl，不能用于零差异门禁。--skip N 从第 N 个方法续跑并追加到已有输出，
-    /// 已有输出的行数必须恰为 N；不带 --skip 时输出文件必须不存在。
+    /// 洞编码普查用：不写程序集与 publication.jsonl，不能用于零差异门禁。--skip N 从第 N 个目标续跑并追加到已有输出，
+    /// 已有输出的行数必须恰为 N；不带 --skip 时输出文件必须不存在。--shared 在有独立入口的方法之后，
+    /// 按 recover 的选择（<see cref="RecoveryTarget.Select"/>）加入只经共享实例取得入口的泛型方法。
     /// </summary>
-    [Command("recovery-audit", "全程序流式 L3 恢复普查；不把恢复成功当作执行验证", Arguments = "<binary> <metadata> <output> [--skip N]")]
+    [Command("recovery-audit", "全程序流式 L3 恢复普查；不把恢复成功当作执行验证", Arguments = "<binary> <metadata> <output> [--skip N] [--shared]")]
     public static int Audit(string binary, string metadata, string output, string[] options)
     {
         var facts = FactsBuilder.Build(binary, metadata, Console.Error.WriteLine);
         var recovery = new MethodRecovery(facts, new ManagedTypes(facts.Model, facts.Layouts));
         Directory.CreateDirectory(output);
         var json = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-        var skip = options.Length == 0 ? 0 : options is ["--skip", var number] ? int.Parse(number) : throw new ArgumentException("仅支持 --skip N");
+        var shared = options.Contains("--shared");
+        var rest = options.Where(o => o != "--shared").ToArray();
+        var skip = rest.Length == 0 ? 0 : rest is ["--skip", var number] ? int.Parse(number) : throw new ArgumentException("仅支持 --skip N 与 --shared");
         var path = Path.Combine(output, "recovery.jsonl");
         var existing = File.Exists(path) ? File.ReadLines(path).Count() : 0;
         if (skip == 0 && File.Exists(path)) throw new IOException($"输出已存在，续跑请用 --skip {existing}：{path}");
         if (skip != existing) throw new InvalidDataException($"--skip {skip} 与已有输出的 {existing} 行不符：{path}");
         using var writer = new StreamWriter(path, append: true) { AutoFlush = true };
         var count = skip; var recovered = 0;
-        foreach (var method in facts.Model.Methods.Where(m => m.Address != 0 && facts.Code.RegionOf(m.Address) == CodeRegion.Managed).Skip(skip))
+        foreach (var target in RecoveryTarget.Select(facts, _ => true).Where(t => shared || t.Instance.Method.Address != 0).Skip(skip))
         {
-            File.WriteAllText(Path.Combine(output, "current-method.tsv"), $"{count}\t0x{method.Address:x}\t{new MethodRef(method, [], [])}");
-            var result = recovery.Recover(new MethodRef(method, [], []), method.Address);
+            var method = target.Instance.Method;
+            File.WriteAllText(Path.Combine(output, "current-method.tsv"), $"{count}\t0x{target.Entry:x}\t{target.Instance}");
+            // 有独立入口的方法按定义恢复；共享实例按 recover 的方式以实例体恢复开放方法
+            var result = method.Address != 0 ? recovery.Recover(target.Instance, target.Entry) : target.Recover(recovery);
             if (result.Body is not null) recovered++;
-            writer.WriteLine(JsonSerializer.Serialize(new { address = $"0x{method.Address:x}", method = result.Method.ToString(), assembly = method.Owner.Assembly,
-                status = result.Body is null ? "hole" : "recovered", bytes = facts.Code.At(method.Address)?.Size,
+            writer.WriteLine(JsonSerializer.Serialize(new { address = $"0x{target.Entry:x}", method = result.Method.ToString(), assembly = method.Owner.Assembly,
+                status = result.Body is null ? "hole" : "recovered", bytes = facts.Code.At(target.Entry)?.Size,
                 holes = result.Holes.Select(h => new { address = $"0x{h.Address:x}", reason = h.Reason, derived = h.Derived, code = h.Code, id = h.Id, causeId = h.CauseId }) }, json));
-            if (++count % 1000 == 0) Console.Error.WriteLine($"L3 {count}，无洞 {recovered}；当前 {method}");
+            if (++count % 1000 == 0) Console.Error.WriteLine($"L3 {count}，无洞 {recovered}；当前 {target.Instance}");
         }
         Console.WriteLine($"L3 区间 [{skip}, {count}) 完成，无洞 {recovered}；尚未写出、编译或执行验证");
         return 0;

@@ -10,6 +10,22 @@ public sealed record RecoveryTarget(MethodRef Instance, ulong Entry)
     public MethodRecoveryResult Recover(MethodRecovery recovery) => Shared
         ? recovery.RecoverShared(Instance, Entry) : recovery.Recover(Instance, Entry);
 
+    /// <summary>
+    /// 范围内的恢复目标（recover 的范围选择、recovery-batches 与 type-scope-inventory 共用这一份）：
+    /// 先是有独立托管入口的方法定义，按定义次序；再是只经共享实例取得入口的泛型方法，每个定义取一个实例——
+    /// 优先全部实参为引用类型且不是完全共享的实例，其次入口地址最小。
+    /// </summary>
+    public static IEnumerable<RecoveryTarget> Select(ProgramFacts facts, Func<MethodDef, bool> included)
+    {
+        var ordinary = facts.Model.Methods.Where(m => m.Address != 0 && included(m)
+            && facts.Code.RegionOf(m.Address) == CodeRegion.Managed).Select(m => new RecoveryTarget(new(m, [], []), m.Address));
+        var shared = facts.Model.Code.SelectMany(p => p.Value.Where(o => o.IsInstance && included(o.Method.Method))
+            .Select(o => new RecoveryTarget(o.Method, p.Key))).Where(t => t.Instance.Method.Address == 0)
+            .GroupBy(t => t.Instance.Method).Select(g => g.OrderBy(t => t.Instance.TypeArguments.Concat(t.Instance.MethodArguments)
+                .Any(a => !ManagedTypes.IsReferenceType(a) || FieldLayouts.IsFullyShared(a))).ThenBy(t => t.Entry).First());
+        return ordinary.Concat(shared);
+    }
+
     public static RecoveryTarget Find(ProgramFacts facts, ulong entry, string name)
     {
         var definitions = entry == 0 ? facts.Model.Methods.Where(m => m.Address == 0)

@@ -39,13 +39,9 @@ internal static partial class StateMachineScope
             $"{Selected(m.Owner)}\t{Hex(m.Address)}\t{m}\t{(m.Name == "MoveNext" ? "MoveNext" : m.Owner.DeclaringType is null ? "ordinary" : "nested")}")));
         Console.WriteLine($"目标类型={roots.Count}；元数据方法={members.Length}；无独立入口={members.Count(m => m.Address == 0)}");
         Inventory(facts.Model.Methods, Selected, output, true);
-        var ordinary = members.Where(m => m.Address != 0 && facts.Code.RegionOf(m.Address) == CodeRegion.Managed)
-            .Select(m => new RecoveryTarget(new(m, [], []), m.Address));
-        var shared = facts.Model.Code.SelectMany(p => p.Value.Where(o => o.IsInstance && Selected(o.Method.Method.Owner).Length != 0)
-            .Select(o => new RecoveryTarget(o.Method, p.Key))).Where(t => t.Instance.Method.Address == 0)
-            .GroupBy(t => t.Instance.Method).Select(g => g.OrderBy(t => t.Instance.TypeArguments.Concat(t.Instance.MethodArguments)
-                .Any(a => !ManagedTypes.IsReferenceType(a) || FieldLayouts.IsFullyShared(a))).ThenBy(t => t.Entry).First());
-        var targets = ordinary.Concat(shared).OrderBy(t => t.Entry).ToArray();
+        var selection = RecoveryTarget.Select(facts, m => Selected(m.Owner).Length != 0).ToArray();
+        var ordinary = selection.Where(t => t.Instance.Method.Address != 0);
+        var targets = selection.OrderBy(t => t.Entry).ToArray();
         File.WriteAllLines(Path.Combine(output, "methods.tsv"), targets.Select(t => $"{Hex(t.Entry)}\t{t.Instance}"));
         var entries = facts.Model.Code.Where(p => p.Value.Any(o => Selected(o.Method.Method.Owner).Length != 0)).Select(p => p.Key)
             .Concat(ordinary.Select(t => t.Entry)).Where(e => facts.Code.RegionOf(e) == CodeRegion.Managed).Distinct().Order().ToArray();
