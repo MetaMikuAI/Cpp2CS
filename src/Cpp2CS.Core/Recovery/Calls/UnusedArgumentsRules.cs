@@ -27,7 +27,7 @@ internal static class UnusedArgumentsRules
                 if (receivers.Any(v => v is null))
                     continue;
                 var target = new Variable(Storage.Temp(ctx.State.Structs.Locals.Next()), 1);
-                ctx.Rewriter.Insert(block, 0, new Phi(block.Start, target, receivers.Select(v => v!).ToArray()));
+                ctx.Edit.InsertWithoutFragments(block, 0, new Phi(block.Start, target, receivers.Select(v => v!).ToArray()));
                 var args = call.Arguments.ToArray();
                 args[index] = new Use(target, piece.Width);
                 var replacement = call with

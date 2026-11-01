@@ -21,20 +21,6 @@ internal static class ExceptionsRules
     internal static IReadOnlyList<ExceptionFragment>? ArrangedFragments(this RecoveryScope ctx) =>
         ctx.State.Exceptions.exceptionLayout is { Succeeded: true } layout ? layout.Graph.Fragments : null;
 
-    internal static void InsertAnalysisStatement(this RecoveryScope ctx, Block block, int index, Stmt statement)
-    {
-        if (ctx.State.Exceptions.exceptionLayout is { Succeeded: true } layout)
-            foreach (var fragment in layout.Graph.Fragments.Where(f => f.Block == block))
-            {
-                if (fragment.First > index)
-                    fragment.First++;
-                if (fragment.Limit > index)
-                    fragment.Limit++;
-            }
-
-        ctx.Rewriter.Insert(block, index, statement);
-    }
-
     /// <summary>有落地块时反复剪除异常判空分支并清理，直到不再变化；超过安全上限时留洞。</summary>
     [Step("exceptions.null-branches", StepPhase.Prepare, StepKind.Rewrite)]
     internal static void PruneNullBranches(RecoveryScope scope)

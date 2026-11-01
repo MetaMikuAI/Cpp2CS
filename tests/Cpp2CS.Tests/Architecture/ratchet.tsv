@@ -78,7 +78,7 @@ scope-extension-methods/Recovery/Calls	26
 scope-extension-methods/Recovery/Construction	5
 scope-extension-methods/Recovery/Control	7
 scope-extension-methods/Recovery/Diagnostics	6
-scope-extension-methods/Recovery/Exceptions	11
+scope-extension-methods/Recovery/Exceptions	10
 scope-extension-methods/Recovery/Frames	45
 scope-extension-methods/Recovery/Generics	7
 scope-extension-methods/Recovery/Kernel	1
@@ -110,7 +110,7 @@ state-access/Recovery/Calls	44
 state-access/Recovery/Construction	9
 state-access/Recovery/Control	7
 state-access/Recovery/Diagnostics	1
-state-access/Recovery/Exceptions	71
+state-access/Recovery/Exceptions	70
 state-access/Recovery/Frames	120
 state-access/Recovery/Generics	18
 state-access/Recovery/Kernel	2

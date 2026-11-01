@@ -94,9 +94,9 @@ internal static class StackEnumsRules
                     continue;
                 var inputs = writes.Select(_ => new Variable(Storage.Temp(next++), 1)).ToArray();
                 for (var i = 0; i < writes.Count; i++)
-                    ctx.InsertAnalysisStatement(block.Predecessors[i], block.Predecessors[i].Statements.IndexOf(writes[i]), new Define(writes[i].Address, inputs[i], writes[i].Value));
+                    ctx.Edit.Insert(block.Predecessors[i], block.Predecessors[i].Statements.IndexOf(writes[i]), new Define(writes[i].Address, inputs[i], writes[i].Value));
                 var result = new Variable(Storage.Temp(next++), 1);
-                ctx.InsertAnalysisStatement(block, 0, new Phi(block.Start, result, inputs));
+                ctx.Edit.Insert(block, 0, new Phi(block.Start, result, inputs));
                 candidates[call] = new(type, new Use(result, ctx.types.Bits(type)), offset, [klass, monitor, .. writes]);
                 ctx.State.Calls.callBindings.Commit(call, callee);
             }

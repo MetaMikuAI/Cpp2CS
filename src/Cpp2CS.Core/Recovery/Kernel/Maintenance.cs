@@ -1,3 +1,4 @@
+using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Ssa;
 
@@ -11,6 +12,8 @@ internal sealed class Maintenance(RecoveryScope ctx)
 {
     /// <summary>非空时处于只读的分析步骤中（值为步骤 Id）：禁止重置块视图、刷新定义与 IR 编辑。</summary>
     internal string? ReadOnly { get; set; }
+
+    internal void Check(string action) => Allowed(action);
 
     private void Allowed(string action)
     {
@@ -111,6 +114,34 @@ internal sealed class Editing(RecoveryScope ctx, Maintenance maintain)
         var changed = false;
         maintain.Record("simplify", reason, () => changed = ControlFlow.Simplify(ctx.function));
         return changed;
+    }
+
+    /// <summary>
+    /// 插入一条语句；异常布局已排好时，同块中起止位置在插入点之后的异常片段随之后移。IR 编辑，不记入维护记录。
+    /// </summary>
+    public void Insert(Block block, int index, Stmt statement)
+    {
+        maintain.Check("insert");
+        if (ctx.ArrangedFragments() is { } fragments)
+            foreach (var fragment in fragments.Where(f => f.Block == block))
+            {
+                if (fragment.First > index)
+                    fragment.First++;
+                if (fragment.Limit > index)
+                    fragment.Limit++;
+            }
+
+        ctx.Rewriter.Insert(block, index, statement);
+    }
+
+    /// <summary>
+    /// 插入一条语句，不维护异常片段位置。只用于现有的一处绕过维护的路径（接收者 φ），疑似缺陷，见规划附录 D；
+    /// 修正属于受控差异。
+    /// </summary>
+    public void InsertWithoutFragments(Block block, int index, Stmt statement)
+    {
+        maintain.Check("insert");
+        ctx.Rewriter.Insert(block, index, statement);
     }
 
     /// <summary>删除死定义；异常布局已排好时按保留下来的语句重算各异常片段的起止位置。</summary>
