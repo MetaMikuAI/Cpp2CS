@@ -11,7 +11,7 @@ internal static class FramesRules
         || ctx.types.Kind(outer.Type) == TypeKind.Struct && offset >= outer.Offset && offset + ctx.types.Size(type) <= outer.Offset + outer.Size
         && ctx.StructPaths(outer.Type).Any(p => outer.Offset + p.Offset == offset && p.Type.Equals(type));
     /// <summary>先解析接收者及虚调用返回类型，避免帧区域只看见直调签名而提前固定错误的栈槽类型。</summary>
-    [MachinePass("帧前类型", 29, After = ["异常值", "栈上调用"])]
+    [Step("frames.pre-typing", StepPhase.Analyze, StepKind.Rewrite, Order = 290, After = ["exceptions.values", "frames.stack-calls", "frames.stack-enums"], Name = "帧前类型")]
     internal static void PrepareFrameTypes(this RecoveryScope ctx)
     {
         ctx.Maintain.Types("frames.pre-typing.entry");
@@ -98,7 +98,7 @@ internal static class FramesRules
     }
 
     /// <summary>只有精确调用签名提供类型；普通访存宽度不能定型。异型重叠先拒绝，嵌套字段见证合并到外根。</summary>
-    [MachinePass("帧区域", 30, After = ["异常值", "栈上调用", "帧前类型", "分支帧快照"])]
+    [Step("frames.regions", StepPhase.Analyze, StepKind.Rewrite, Order = 300, After = ["exceptions.values", "frames.stack-calls", "frames.pre-typing", "frames.branch-snapshots"], Name = "帧区域")]
     internal static RecoveryFailure? PrepareFrames(this RecoveryScope ctx)
     {
         var witnesses = new List<FrameWitness>();
@@ -560,7 +560,7 @@ internal static class FramesRules
     }
 
     /// <summary>帧区域的初始化语句（清零、拷贝入）替代原语句。</summary>
-    [StatementRule(20)]
+    [Rule(RuleKind.Statement, "frames.lower-initializer", Order = 200)]
     internal static bool LowerFrameInitializer(this LoweringScope ctx, Block block, Stmt statement, List<ManagedStatement> output)
     {
         if (!ctx.State.Frames.frameInitializers.TryGetValue(statement, out var initialization))
@@ -569,7 +569,7 @@ internal static class FramesRules
         return true;
     }
 
-    [StoreRule(10)]
+    [Rule(RuleKind.Store, "frames.store-zero", Order = 100)]
     internal static RecoveryResult<bool> StoreFrameZero(this LoweringScope ctx, Store store, List<ManagedStatement> output)
     {
         if (ctx.Values.FrameAccess(store.Target) is not { } frame || !ctx.Values.FrameZero(store.Value))
@@ -604,7 +604,7 @@ internal static class FramesRules
     /// <summary>写入存储位置；标量帧区域本身是局部变量，写入即赋值。</summary>
     internal static ManagedStatement StoreTo(ulong address, ManagedValue target, ManagedValue value) => target is LocalValue local ? new ManagedAssignment(address, local, value) : new ManagedStore(address, target, value);
     /// <summary>写入标量帧区域（局部变量）：赋值。</summary>
-    [StoreTargetRule(1)]
+    [Rule(RuleKind.StoreTarget, "frames.store-scalar", Order = 10)]
     internal static RecoveryResult<bool> StoreScalarFrame(this LoweringScope ctx, Store store, ManagedValue target, List<ManagedStatement> output)
     {
         if (target is not LocalValue local)
@@ -615,7 +615,7 @@ internal static class FramesRules
         return true;
     }
 
-    [CallRule(10)]
+    [Rule(RuleKind.Call, "frames.box", Order = 100)]
     internal static RecoveryResult<bool> BoxFrame(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
         if (call is not { Op: { Kind: OpKind.Box, Operand: TypeRef type }, Arguments: [_, var data] } || ctx.types.Kind(type) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double) || ctx.Values.FrameAccess(data) is null)
@@ -631,7 +631,7 @@ internal static class FramesRules
     }
 
     /// <summary>CLR 的 initlocals 不是原生帧初值证据；每次读叶子/传址之前必须在所有正常前驱上已定义，异常入口不继承普通回边的初值。</summary>
-    [BodyProof(30)]
+    [Rule(RuleKind.BodyProof, "frames.prove-initialization", Order = 300)]
     internal static void ProveFrameInitialization(this RecoveryScope ctx, ManagedBody body)
     {
         if (ctx.State.Frames.frameRegions.Count == 0)

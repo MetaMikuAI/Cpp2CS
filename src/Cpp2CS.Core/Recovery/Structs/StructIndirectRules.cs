@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery;
 internal static class StructIndirectRules
 {
     internal static bool IndirectStruct(this RecoveryScope ctx, AbiValue value) => value.Passing == Passing.Indirect && (ctx.types.Kind(value.Type) == TypeKind.Struct || ManagedAbi.SharedValue(value.Type));
-    [ParameterBinding(20)]
+    [Rule(RuleKind.ParameterBinding, "structs.bind-indirect-argument", Order = 200)]
     internal static bool PrepareIndirectArgument(this RecoveryScope ctx, AbiValue parameter, int index)
     {
         if (!ctx.IndirectStruct(parameter))
@@ -31,7 +31,7 @@ internal static class StructIndirectRules
     }
 
     // 尾部 memcpy 完整写入本方法返回根时，保留有类型的结构体读取与复制。
-    [CallRule(21)]
+    [Rule(RuleKind.Call, "structs.copy-return", Order = 210)]
     internal static RecoveryResult<bool> CopyStructReturn(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
         if (call is not { Kind: CallKind.Tail, Op: { Kind: OpKind.Import, Operand: "memcpy" }, Arguments: [var destination, var source, Const count] } || ctx.State.Signature.ownReturnBuffer is null || ctx.types.Kind(ctx.State.Signature.returnType) != TypeKind.Struct || ctx.types.Size(ctx.State.Signature.returnType) <= 0 || count.Value != (ulong)ctx.types.Size(ctx.State.Signature.returnType))
@@ -49,9 +49,9 @@ internal static class StructIndirectRules
         return true;
     }
 
-    [ArgumentRule(20)]
+    [Rule(RuleKind.Argument, "structs.indirect-argument", Order = 200)]
     internal static RecoveryResult<ManagedValue?> IndirectStructArgument(this LoweringScope ctx, AbiValue parameter, ArgumentSite site) => !ctx.Values.IndirectStruct(parameter) ? (ManagedValue?)null : site.Argument(new AbiValue(new ByRefRef(parameter.Type), Passing.Registers, parameter.Pieces), site.Name).Bind(expression => ctx.Values.StructAddress(expression, parameter.Type)).Map<ManagedValue?>(address => new IndirectValue(address, parameter.Type));
-    [InvocationOutputRule(10)]
+    [Rule(RuleKind.InvocationOutput, "structs.indirect-invocation", Order = 100)]
     internal static RecoveryResult<bool> IndirectInvocation(this LoweringScope ctx, Call call, AbiSignature signature, Dictionary<Storage, Expr> registers, ManagedInvocation invocation, List<ManagedStatement> output)
     {
         if (signature.Return is not { } returned || !ctx.Values.IndirectStruct(returned))
@@ -73,7 +73,7 @@ internal static class StructIndirectRules
         return true;
     }
 
-    [InvocationOutputRule(20)]
+    [Rule(RuleKind.InvocationOutput, "structs.construct-return-buffer", Order = 200)]
     internal static RecoveryResult<bool> ConstructReturnBuffer(this LoweringScope ctx, Call call, AbiSignature signature, Dictionary<Storage, Expr> registers, ManagedInvocation invocation, List<ManagedStatement> output)
     {
         if (call.Kind != CallKind.Tail || ctx.State.Signature.ownReturnBuffer is null || signature.Return is not null || invocation.Method.Method is not { Name: ".ctor", IsStatic: false, Owner.IsValueType: true } || !invocation.Method.DeclaringType.Equals(ctx.State.Signature.returnType) || invocation.Receiver is not AddressValue receiver || !receiver.Target.Equals(ctx.State.Signature.ownReturnBuffer))
@@ -85,7 +85,7 @@ internal static class StructIndirectRules
     }
 
     /// <summary>返回缓冲区没有隐含默认值。按 CFG 前驱交集证明每条正常返回路径都定义了全部叶子。</summary>
-    [BodyProof(10)]
+    [Rule(RuleKind.BodyProof, "structs.prove-return-buffer", Order = 100)]
     internal static void ProveReturnBuffer(this RecoveryScope ctx, ManagedBody body)
     {
         if (ctx.State.Signature.ownReturnBuffer is null)

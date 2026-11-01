@@ -13,23 +13,23 @@ internal static class RecoveryAnalysis
         foreach (var (source, target) in ctx.definitions.DataFlow)
             ctx.ledger.Dependency(source, target);
         ctx.ledger.PropagateExisting();
-        foreach (var (name, run) in RuleRegistry.Analyses)
+        foreach (var step in RuleRegistry.Analyses)
         {
-            ctx.currentStep = name;
+            ctx.currentStep = step.Id;
             ctx.Rewriter.Attach(ctx.function);
             var version = ctx.analyses.Version;
             var inputTypes = ctx.State.Types.known.Count;
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
-            var mutable = RuleRegistry.MachinePasses.TryGetValue(name, out var invalidates);
+            var mutable = step.Kind == StepKind.Rewrite;
             var before = mutable ? null : new MethodSnapshot(0, ctx.blocks, new Dictionary<Variable, Phi>());
-            var failure = run(ctx);
+            var failure = step.Run(ctx);
             ctx.Rewriter.Attach(ctx.function);
             if (before is not null && !before.Matches(ctx.blocks, new Dictionary<Variable, Phi>()))
-                throw new InvalidOperationException($"只读分析改写了机器 IR：{name}");
+                throw new InvalidOperationException($"只读分析改写了机器 IR：{step.Id}");
             if (ctx.analyses.Refresh(ctx.blocks, ctx.State.Exceptions.exceptionPhis))
                 ctx.definitions = ctx.analyses.Get(Definitions.Analysis);
-            ctx.analysisSteps.Add(new(name, version, ctx.analyses.Version, inputTypes, ctx.State.Types.known.Count, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds)
-            { Kind = mutable ? "machine-pass" : "analysis", Invalidates = mutable ? invalidates.ToString() : null });
+            ctx.analysisSteps.Add(new(step.Id, version, ctx.analyses.Version, inputTypes, ctx.State.Types.known.Count, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds)
+            { Kind = mutable ? "machine-pass" : "analysis", Invalidates = mutable ? step.Invalidates.ToString() : null });
             if (failure is not null)
                 return failure;
         }

@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery;
 internal static class ArraySpansRules
 {
     // 数组尾切片内联为 data + start、Length - start；保留原有空值与越界分支。
-    [Analysis("数组切片", 95, After = ["类型"])]
+    [Step("memory.array-spans", StepPhase.Analyze, StepKind.Analysis, Order = 950, After = ["typing.infer"], Name = "数组切片")]
     internal static void PrepareArraySpans(this RecoveryScope ctx)
     {
         foreach (var call in ctx.blocks.SelectMany(b => b.Statements).OfType<Call>())
@@ -115,7 +115,7 @@ internal static class ArraySpansRules
         }
     }
 
-    [ArgumentRule(5)]
+    [Rule(RuleKind.Argument, "memory.array-span-argument", Order = 50)]
     internal static RecoveryResult<ManagedValue?> ArraySpanArgument(this LoweringScope ctx, AbiValue parameter, ArgumentSite site)
     {
         if (!ctx.State.Arrays.arraySpans.TryGetValue((site.Call, site.Index), out var span))

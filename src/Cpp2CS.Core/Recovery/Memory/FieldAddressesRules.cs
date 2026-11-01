@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery;
 /// <summary>引用类型实例字段的地址：在支配位置已解引用接收者时，把“接收者 + 字段偏移”改写为字段地址。</summary>
 internal static class FieldAddressesRules
 {
-    [MachinePass("字段地址", 89, After = ["帧槽", "检查吸收"])]
+    [Step("memory.field-addresses", StepPhase.Analyze, StepKind.Rewrite, Order = 890, After = ["frames.slots", "control.absorb-checks"], Name = "字段地址")]
     internal static void PrepareFieldAddresses(this RecoveryScope ctx)
     {
         ctx.Maintain.Types("memory.field-addresses.entry");

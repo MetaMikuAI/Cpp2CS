@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 internal static class BoxArgumentsRules
 {
     /// <summary>标量写进临时栈槽后跨块装箱：在原写入处保存值，不把栈地址当托管值。</summary>
-    [MachinePass("汇合装箱", 23, After = ["标量栈实参"])]
+    [Step("frames.merged-box-arguments", StepPhase.Analyze, StepKind.Rewrite, Order = 292, After = ["frames.scalar-stack-arguments"], Name = "汇合装箱")]
     internal static void PrepareMergedBoxArguments(this RecoveryScope ctx)
     {
         var changed = false;
@@ -56,7 +56,7 @@ internal static class BoxArgumentsRules
         ctx.Maintain.Definitions("frames.merged-box-arguments");
     }
 
-    [StoreRule(2)]
+    [Rule(RuleKind.Store, "frames.store-box-argument", Order = 20)]
     internal static RecoveryResult<bool> StoreBoxArgument(this LoweringScope ctx, Store store, List<ManagedStatement> output)
     {
         if (!ctx.State.Construction.boxArgumentStores.TryGetValue(store, out var local))
@@ -67,7 +67,7 @@ internal static class BoxArgumentsRules
         return true;
     }
 
-    [CallRule(9)]
+    [Rule(RuleKind.Call, "frames.box-merged-argument", Order = 90)]
     internal static RecoveryResult<bool> BoxMergedArgument(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
         if (call.Defines.FirstOrDefault() is not { } result || !ctx.State.Construction.mergedBoxValues.TryGetValue(result, out var local))

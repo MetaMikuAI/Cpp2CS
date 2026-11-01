@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class ExceptionsRules
 {
-    [InvocationOutputRule(90)]
+    [Rule(RuleKind.InvocationOutput, "exceptions.throwing-invocation", Order = 900)]
     internal static bool ThrowingInvocation(this LoweringScope ctx, Call call, AbiSignature signature, Dictionary<Storage, Expr> registers, ManagedInvocation invocation, List<ManagedStatement> output)
     {
         if (!ctx.ExpandThrowCalls || call is not { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target } || invocation is not { Virtual: false, Receiver: null } || ctx.Values.ThrowingConstructor(invocation.Method, target.Value) is not { } created || !ManagedAccess.Method(ctx.types, ctx.method.Method.Owner, created.Constructor, created.Type))
@@ -108,7 +108,7 @@ internal static class ExceptionsRules
         return true;
     }
 
-    [Analysis("异常值", 10)]
+    [Step("exceptions.values", StepPhase.Analyze, StepKind.Analysis, Order = 100, Name = "异常值")]
     internal static void AnalyzeExceptionValues(this RecoveryScope ctx)
     {
         if (ctx.State.Exceptions.exceptionLayout is not { Succeeded: true })
@@ -464,7 +464,7 @@ internal static class ExceptionsRules
     }
 
     /// <summary>异常筛选的类型判断：catch 的 IsAssignableFrom 写成 isinst 比较，结果补零到 64 位。</summary>
-    [CallRule(20)]
+    [Rule(RuleKind.Call, "exceptions.lower-type-target", Order = 200)]
     internal static RecoveryResult<bool> LowerExceptionTypeTarget(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
         if (!ctx.State.Exceptions.exceptionTypeTargets.TryGetValue(call, out var exceptionType) || !ctx.State.Runtime.typeChecks.TryGetValue(call, out var exceptionObject) || call.Defines.FirstOrDefault() is not { } exceptionResult)

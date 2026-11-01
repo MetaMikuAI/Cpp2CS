@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery;
 internal static class StackEnumsRules
 {
     /// <summary>Il2CppFakeBox 的类指针、栈标记和枚举值组成临时装箱；仅接收不逃逸的 Enum 实例调用。</summary>
-    [MachinePass("栈上枚举", 28, After = ["异常值", "栈上调用"])]
+    [Step("frames.stack-enums", StepPhase.Analyze, StepKind.Rewrite, Order = 280, After = ["exceptions.values", "frames.stack-calls"], Name = "栈上枚举")]
     internal static void PrepareStackEnums(this RecoveryScope ctx)
     {
         var candidates = new Dictionary<Call, StackEnum>(ReferenceEqualityComparer.Instance);

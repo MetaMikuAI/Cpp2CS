@@ -8,7 +8,7 @@ namespace Cpp2CS.Recovery;
 internal static class StackArgumentsRules
 {
     /// <summary>按 AAPCS64 栈布局匹配到达写入，值在原写入位置快照；不把寄存器耗尽后的参数丢掉。</summary>
-    [MachinePass("标量栈实参", 29, After = ["帧前类型"])]
+    [Step("frames.scalar-stack-arguments", StepPhase.Analyze, StepKind.Rewrite, Order = 291, After = ["frames.pre-typing"], Name = "标量栈实参")]
     internal static void PrepareScalarStackArguments(this RecoveryScope ctx)
     {
         var definitions = ctx.values.Concat(ctx.function.Dead.Select(d => new KeyValuePair<Variable, Expr>(d.Define.Target, d.Define.Value))).GroupBy(p => p.Key).ToDictionary(g => g.Key, g => g.First().Value);
@@ -156,7 +156,7 @@ internal static class StackArgumentsRules
         return true;
     }
 
-    [StoreRule(1)]
+    [Rule(RuleKind.Store, "frames.store-stack-argument", Order = 10)]
     internal static RecoveryResult<bool> StoreStackArgument(this LoweringScope ctx, Store store, List<ManagedStatement> output)
     {
         if (!ctx.State.Frames.stackArgumentStores.TryGetValue(store, out var local))
@@ -167,7 +167,7 @@ internal static class StackArgumentsRules
         return true;
     }
 
-    [ArgumentRule(1)]
+    [Rule(RuleKind.Argument, "frames.scalar-stack-argument", Order = 10)]
     internal static ManagedValue? ScalarStackArgument(this LoweringScope ctx, AbiValue parameter, ArgumentSite site)
     {
         if (parameter.Passing != Passing.Stack)

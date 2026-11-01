@@ -124,7 +124,7 @@ internal static class FrameCopiesRules
         return null;
     }
 
-    [Analysis("帧拷贝", 110, After = ["类型"])]
+    [Step("frames.copies", StepPhase.Analyze, StepKind.Analysis, Order = 1100, After = ["typing.infer"], Name = "帧拷贝")]
     internal static RecoveryFailure? FrameCopies(this RecoveryScope ctx)
     {
         if (!ctx.PrepareFrameCopies().TryGet(out _, out var failure))
@@ -258,7 +258,7 @@ internal static class FrameCopiesRules
     }
 
     /// <summary>帧区域之间的整体拷贝替代原来的逐字访存。</summary>
-    [StatementRule(10)]
+    [Rule(RuleKind.Statement, "frames.lower-copy", Order = 100)]
     internal static bool LowerFrameCopy(this LoweringScope ctx, Block block, Stmt statement, List<ManagedStatement> output)
     {
         if (!ctx.State.Frames.frameCopies.TryGetValue(statement, out var copy))

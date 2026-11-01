@@ -38,7 +38,6 @@ dominators/Recovery/Frames	3
 dominators/Recovery/Memory	1
 dominators/Recovery/Runtime	2
 exemption-entries/I1b	22
-exemption-entries/I7a	7
 exemption-entries/I7b	4
 files-referencing-core-internals/Tests	63
 lowering-cleanup/Idioms	2

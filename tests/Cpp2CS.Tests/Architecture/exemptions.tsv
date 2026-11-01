@@ -21,13 +21,6 @@ I1b	Block.Predecessors[]=	src/Cpp2CS.Core/Recovery/Memory/JoinedFieldReads.cs	M1
 I1b	Block.Successors.Add	src/Cpp2CS.Core/Recovery/Memory/JoinedFieldReads.cs	M1	MS3	V2 建立时的现有访问
 I1b	Block.Successors[]=	src/Cpp2CS.Core/Recovery/Memory/JoinedFieldReads.cs	M1	MS3	V2 建立时的现有访问
 I1b	MachineFunction.Blocks.Add	src/Cpp2CS.Core/Recovery/Memory/JoinedFieldReads.cs	M1	MS3	V2 建立时的现有访问
-I7a	Analyze/Order=29：分支帧快照、帧前类型、标量栈实参	registry	K2	MS1	V2 建立时的现有访问
-I7a	Analyze/Order=60：帧槽、数学导入	registry	K2	MS1	V2 建立时的现有访问
-I7a	Analyze/Order=95：数组切片、结构体汇合	registry	K2	MS1	V2 建立时的现有访问
-I7a	ArgumentRule/Order=5：ArraySpanArgument、TypeHandleArgument	registry	K2	MS1	V2 建立时的现有访问
-I7a	CallRule/Order=10：BoxFrame、LowerCleanupThunk	registry	K2	MS1	V2 建立时的现有访问
-I7a	CallRule/Order=20：LowerExceptionTypeTarget、NativeImportCall	registry	K2	MS1	V2 建立时的现有访问
-I7a	CallRule/Order=9：BoxMergedArgument、LowerSharedValues	registry	K2	MS1	V2 建立时的现有访问
 I7b	L2/idioms.Calls×2	passes	M6	MS3	V2 建立时的现有访问
 I7b	L2/idioms.Normalize×2	passes	M6	MS3	V2 建立时的现有访问
 I7b	L2/idioms.StringSlotChoices×2	passes	M6	MS3	V2 建立时的现有访问

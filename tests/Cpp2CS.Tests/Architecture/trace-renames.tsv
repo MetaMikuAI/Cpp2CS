@@ -1,0 +1,27 @@
+# 追踪中的旧步骤名	新 Id。trace-delta --map 用它对齐 K2 之前的 analysis.jsonl 与 rules.jsonl。
+异常值	exceptions.values
+异常指针栈槽	exceptions.pointer-slots
+栈上调用	frames.stack-calls
+栈上枚举	frames.stack-enums
+帧前类型	frames.pre-typing
+标量栈实参	frames.scalar-stack-arguments
+汇合装箱	frames.merged-box-arguments
+分支帧快照	frames.branch-snapshots
+帧区域	frames.regions
+帧快照	frames.snapshots
+整数帧槽	frames.integer-slots
+帧后数组地址	memory.post-frame-arrays
+运行时引用	runtime.mark
+跳转表	control.jump-tables
+内联	lowering.inline
+帧槽	frames.slots
+数学导入	calls.math-imports
+分配	construction.allocations
+检查吸收	control.absorb-checks
+字段地址	memory.field-addresses
+类型	typing.infer
+数组切片	memory.array-spans
+结构体汇合	structs.phis
+结构体写入汇合	structs.stored-phis
+片汇合	structs.fragment-phis
+帧拷贝	frames.copies

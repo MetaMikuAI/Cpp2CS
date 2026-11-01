@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 internal static class StackCallsRules
 {
     /// <summary>隐藏栈参数需要同时证明调用时 SP、精确 ABI 槽位和未被覆盖的到达写入；附近同名符号不够。</summary>
-    [Analysis("栈上调用", 20)]
+    [Step("frames.stack-calls", StepPhase.Analyze, StepKind.Analysis, Order = 200, Name = "栈上调用")]
     internal static void PrepareStackCalls(this RecoveryScope ctx)
     {
         var statements = ctx.blocks.SelectMany(b => b.Statements).ToArray();

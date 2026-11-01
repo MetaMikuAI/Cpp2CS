@@ -4,7 +4,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class ScalarFramesRules
 {
-    [MachinePass("分支帧快照", 29, After = ["帧前类型", "标量栈实参"])]
+    [Step("frames.branch-snapshots", StepPhase.Analyze, StepKind.Rewrite, Order = 293, After = ["frames.pre-typing", "frames.scalar-stack-arguments", "frames.merged-box-arguments"], Name = "分支帧快照")]
     internal static void ForwardBranchFrameSnapshots(this RecoveryScope ctx)
     {
         var calls = new ManagedCallFrames(ctx.facts, ctx.owner.abi);
@@ -64,7 +64,7 @@ internal static class ScalarFramesRules
             ctx.Maintain.Definitions("frames.branch-snapshots");
     }
 
-    [MachinePass("帧快照", 32, After = ["帧区域"])]
+    [Step("frames.snapshots", StepPhase.Analyze, StepKind.Rewrite, Order = 320, After = ["frames.regions"], Name = "帧快照")]
     internal static void ForwardFrameSnapshots(this RecoveryScope ctx)
     {
         var pieces = FramePieceSnapshots.Read(ctx.function, ctx.NoStackRead, expression => ctx.FrameAccess(expression) is { } frame ? frame.Region.Offset + frame.Offset : ctx.FrameOffset(expression));
@@ -92,7 +92,7 @@ internal static class ScalarFramesRules
     }
 
     /// <summary>结构体地址已绑定到有界区域后，恢复地址不逃逸的整数计数槽和已定型的引用槽。</summary>
-    [MachinePass("整数帧槽", 35, After = ["帧区域", "帧快照"])]
+    [Step("frames.integer-slots", StepPhase.Analyze, StepKind.Rewrite, Order = 350, After = ["frames.regions", "frames.snapshots"], Name = "整数帧槽")]
     internal static void PrepareScalarFrames(this RecoveryScope ctx)
     {
         ctx.Maintain.Types("frames.integer-slots.entry");

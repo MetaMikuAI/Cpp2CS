@@ -10,7 +10,7 @@ internal static class AsyncRules
     /// 二进制中 Start&lt;T&gt; 的实例就是初始化 RGCTX 后尾调用 T.MoveNext(stateMachine)（普查 start-census）；状态机的 MoveNext 是显式接口实现，
     /// 不能直接调用。前面直线路径上紧邻的是这次 Start&lt;T&gt; 的 RGCTX 初始化、T 是状态机、接收者是 T 的帧区域时，写成在 builder 字段上调用 Start&lt;T&gt;。
     /// </summary>
-    [CallRule(5)]
+    [Rule(RuleKind.Call, "calls.start-state-machine", Order = 50)]
     internal static RecoveryResult<bool> StartStateMachine(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
         if (call is not { Op: null, Kind: CallKind.Direct, Target: Const target } || ConstructionRules.Receiver(call) is not { } receiver)

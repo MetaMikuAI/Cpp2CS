@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class NativeImportsRules
 {
-    [Analysis("数学导入", 60)]
+    [Step("calls.math-imports", StepPhase.Analyze, StepKind.Analysis, Order = 610, After = ["frames.slots"], Name = "数学导入")]
     internal static void AnalyzeNativeImports(this RecoveryScope ctx)
     {
         var libraries = ctx.facts.Model.Image.NeededLibraries.Where(n => n is "libm.so" or "libm.so.6").ToArray();
@@ -64,7 +64,7 @@ internal static class NativeImportsRules
         }
     }
 
-    [CallRule(20)]
+    [Rule(RuleKind.Call, "calls.native-import", Order = 201)]
     internal static RecoveryResult<bool> NativeImportCall(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
         if (!ctx.State.Calls.nativeImports.TryGetValue(call, out var imported))

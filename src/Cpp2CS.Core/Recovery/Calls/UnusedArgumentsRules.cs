@@ -60,7 +60,7 @@ internal static class UnusedArgumentsRules
     }
 
     // 编译器可以省略未用输入。仅填补缺失输入或不能表示成目标标量的残值，保留已有求值。
-    [ArgumentRule(8)]
+    [Rule(RuleKind.Argument, "calls.unused-argument", Order = 80)]
     internal static RecoveryResult<ManagedValue?> UnusedArgument(this LoweringScope ctx, AbiValue parameter, ArgumentSite site)
     {
         // 值类型也可能整体未使用；逐寄存器证明，不能只凭缺失片段补齐被消费的字段。

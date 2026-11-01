@@ -8,7 +8,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class SharedValuesRules
 {
-    [ParameterBinding(15)]
+    [Rule(RuleKind.ParameterBinding, "generics.bind-shared-argument", Order = 150)]
     internal static bool PrepareSharedArgument(this RecoveryScope ctx, AbiValue parameter, int index)
     {
         if (parameter.Passing != Passing.Shared)
@@ -344,7 +344,7 @@ internal static class SharedValuesRules
         return value is AddressValue direct ? direct.Target : new IndirectValue(value, type);
     }
 
-    [CallRule(9)]
+    [Rule(RuleKind.Call, "generics.lower-shared-values", Order = 91)]
     internal static RecoveryResult<bool> LowerSharedValues(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
         if (call is { Op: { Kind: OpKind.Box, Operand: GenericParameterRef { NativeShared: true } boxed }, Arguments: [_, var data], Defines: [var boxedResult] })

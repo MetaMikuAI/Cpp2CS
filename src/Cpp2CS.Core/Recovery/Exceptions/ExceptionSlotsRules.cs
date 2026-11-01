@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 internal static class ExceptionSlotsRules
 {
     /// <summary>仅供 BeginCatch/ResumeUnwind 使用的原生异常指针备份由托管异常区域接管。</summary>
-    [Analysis("异常指针栈槽", 15, After = ["异常值"])]
+    [Step("exceptions.pointer-slots", StepPhase.Analyze, StepKind.Analysis, Order = 150, After = ["exceptions.values"], Name = "异常指针栈槽")]
     internal static void ExceptionPointerSlots(this RecoveryScope ctx)
     {
         if (ctx.State.Exceptions.exceptionLayout is not { Succeeded: true })

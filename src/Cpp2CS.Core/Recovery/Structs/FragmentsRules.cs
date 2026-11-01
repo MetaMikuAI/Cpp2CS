@@ -14,7 +14,7 @@ internal static class FragmentsRules
 
     internal static LocalValue StructLocal(this RecoveryScope ctx, TypeRef type, int width) => new(new Variable(Storage.Temp(ctx.State.Structs.Locals.Next()), 1), type, width);
     /// <summary>循环中的结构体片按相同叶子汇合；填充仍没有值，不能借助零初值把填充变成整数。</summary>
-    [Analysis("片汇合", 98, After = ["结构体写入汇合"])]
+    [Step("structs.fragment-phis", StepPhase.Analyze, StepKind.Analysis, Order = 980, After = ["structs.stored-phis"], Name = "片汇合")]
     internal static void PrepareFragmentPhis(this RecoveryScope ctx)
     {
         var phis = ctx.blocks.SelectMany(b => b.Statements).OfType<Phi>().ToArray();
@@ -349,7 +349,7 @@ internal static class FragmentsRules
         return result;
     }
 
-    [DefineRule(10)]
+    [Rule(RuleKind.Define, "structs.define-fragment", Order = 100)]
     internal static RecoveryResult<bool> DefineFragment(this LoweringScope ctx, Define define, List<ManagedStatement> output)
     {
         // 晚期收窄不改变先前片快照的赋值；使用当时的定义保留真实低位及已证明的清高位。
@@ -378,7 +378,7 @@ internal static class FragmentsRules
         return true;
     }
 
-    [StoreTargetRule(10)]
+    [Rule(RuleKind.StoreTarget, "structs.store-fragment", Order = 100)]
     internal static RecoveryResult<bool> StoreFragment(this LoweringScope ctx, Store store, ManagedValue target, List<ManagedStatement> output)
     {
         if (target is not Fragment fragment)

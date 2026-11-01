@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 internal static class StructCopiesRules
 {
     /// <summary>完整值类型的定长复制先保存源值，再写入目标，保留 memmove 的重叠语义。</summary>
-    [CallRule(22)]
+    [Rule(RuleKind.Call, "structs.copy-value", Order = 220)]
     internal static RecoveryResult<bool> CopyStructValue(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
         if (call is not { Kind: CallKind.Direct, Op: { Kind: OpKind.Import, Operand: "memcpy" or "memmove" }, Arguments: [var destination, var source, Const { Value: > 0 and <= 4096 } count] })

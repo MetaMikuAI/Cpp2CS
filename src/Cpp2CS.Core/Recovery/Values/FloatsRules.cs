@@ -105,7 +105,7 @@ internal static class FloatsRules
         return ctx.RecoverAs(unary.Operand, type, 0).Map<ManagedValue>(value => new UnaryValue(unary.Op, value, type, unary.Width));
     }
 
-    [BodyProof(20)]
+    [Rule(RuleKind.BodyProof, "values.floating-constructor-order", Order = 200)]
     internal static void CheckFloatingConstructorOrder(this RecoveryScope ctx, ManagedBody body)
     {
         if (ctx.method.Method.Name != ".ctor")

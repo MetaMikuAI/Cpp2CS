@@ -153,42 +153,52 @@ internal static class Ledgers
 
     // ---------- 注册表快照 ----------
 
-    private static readonly string[] Kinds =
-    [
-        "AnalysisAttribute", "MachinePassAttribute", "StatementRuleAttribute", "DefineRuleAttribute", "StoreRuleAttribute", "StoreTargetRuleAttribute",
-        "CallRuleAttribute", "InvocationRuleAttribute", "InvocationOutputRuleAttribute", "ArgumentRuleAttribute", "ResultRuleAttribute",
-        "ParameterBindingAttribute", "BodyProofAttribute",
-    ];
+    /// <summary>一条注册：排序类别（阶段或规则类别）、种类、Id、中文名、Order、After、失效声明与“声明类型.方法”。</summary>
+    public sealed record Registration(string Category, string Kind, string Id, string Name, int Order, string After, string Invalidates, string Method);
 
-    public sealed record Registration(string Kind, string Category, string Name, int Order, string After, string Invalidates, string Method);
-
-    /// <summary>读取已构建的 Core 程序集中的注册方法。Analyze 的分析步骤与改写步骤共用一个排序类别，其余按种类各自排序。</summary>
+    /// <summary>读取已构建的 Core 程序集中的注册方法。同一阶段的分析步骤与改写步骤共用一个排序类别，规则按类别各自排序。</summary>
     public static List<Registration> Registry()
     {
         var assembly = typeof(Cpp2CS.Recovery.MethodRecovery).Assembly;
         const BindingFlags members = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
         var result = new List<Registration>();
+        // 按属性类型名经反射读取，不引用 Core 的内部类型
+        object? Get(Attribute attribute, string property) => attribute.GetType().GetProperty(property)!.GetValue(attribute);
         foreach (var method in assembly.GetTypes().SelectMany(t => t.GetMethods(members)))
-            foreach (var attribute in method.GetCustomAttributes().Where(a => Kinds.Contains(a.GetType().Name)))
+            foreach (var attribute in method.GetCustomAttributes())
             {
-                var type = attribute.GetType();
-                var kind = type.Name[..^"Attribute".Length];
-                var name = type.GetProperty("Name")?.GetValue(attribute) as string ?? method.Name;
-                var order = (int)type.GetProperty("Order")!.GetValue(attribute)!;
-                var after = type.GetProperty("After")?.GetValue(attribute) is string[] list ? string.Join(",", list) : "";
-                var invalidates = type.GetProperty("Invalidates")?.GetValue(attribute)?.ToString() ?? "";
-                var category = kind is "Analysis" or "MachinePass" ? "Analyze" : kind;
-                result.Add(new(kind, category, name, order, after, invalidates, $"{method.DeclaringType!.Name}.{method.Name}"));
+                var declared = $"{method.DeclaringType!.Name}.{method.Name}";
+                var (id, order) = attribute.GetType().Name is "StepAttribute" or "RuleAttribute" ? ((string)Get(attribute, "Id")!, (int)Get(attribute, "Order")!) : (null, 0);
+                if (attribute.GetType().Name == "StepAttribute")
+                {
+                    var kind = Get(attribute, "Kind")!.ToString()!;
+                    result.Add(new(Get(attribute, "Phase")!.ToString()!, kind, id!, (string)Get(attribute, "Name")!, order, string.Join(",", (string[])Get(attribute, "After")!),
+                        kind == "Rewrite" ? Get(attribute, "Invalidates")!.ToString()! : "", declared));
+                }
+                else if (attribute.GetType().Name == "RuleAttribute")
+                    result.Add(new(Get(attribute, "Kind")!.ToString()!, "Rule", id!, "", order, "", "", declared));
             }
-        return result.OrderBy(r => r.Category, StringComparer.Ordinal).ThenBy(r => r.Order).ThenBy(r => r.Name, StringComparer.Ordinal).ToList();
+        return result.OrderBy(r => r.Category, StringComparer.Ordinal).ThenBy(r => r.Order).ThenBy(r => r.Id, StringComparer.Ordinal).ToList();
     }
 
-    public static IEnumerable<string> RegistryLines(IEnumerable<Registration> registry) => new[] { "# 种类\t名称\tOrder\tAfter\tInvalidates\t声明类型.方法" }
-        .Concat(registry.Select(r => $"{r.Kind}\t{r.Name}\t{r.Order}\t{r.After}\t{r.Invalidates}\t{r.Method}"));
+    public static IEnumerable<string> RegistryLines(IEnumerable<Registration> registry) => new[] { "# 类别\t种类\tId\tOrder\tAfter\tInvalidates\t声明类型.方法\t中文名" }
+        .Concat(registry.Select(r => $"{r.Category}\t{r.Kind}\t{r.Id}\t{r.Order}\t{r.After}\t{r.Invalidates}\t{r.Method}\t{r.Name}"));
+
+    /// <summary>注册 Id 的前缀（第一个点之前）必须等于声明所在的族目录名（小写），例如 Recovery/Frames 中的步骤以 frames. 开头（I7a）。</summary>
+    public static void CheckIdPrefixes(IEnumerable<Registration> registry, IReadOnlyDictionary<string, HashSet<string>> methods, List<string> failures)
+    {
+        foreach (var registration in registry)
+        {
+            var prefix = registration.Id[..Math.Max(0, registration.Id.IndexOf('.'))];
+            var scopes = methods.GetValueOrDefault(registration.Method) ?? [];
+            if (!scopes.Any(scope => scope.StartsWith("Recovery/", StringComparison.Ordinal) && scope["Recovery/".Length..].ToLowerInvariant() == prefix))
+                failures.Add($"注册 Id {registration.Id} 的前缀与声明所在的族目录不一致：{registration.Method} 在 {string.Join("、", scopes)}");
+        }
+    }
 
     /// <summary>同一排序类别内 Order 重复的组（I7a）：按名字决定顺序，K2 之前以豁免清单登记。</summary>
     public static IEnumerable<Access> DuplicateOrders(IEnumerable<Registration> registry) => registry.GroupBy(r => (r.Category, r.Order))
-        .Where(g => g.Count() > 1).Select(g => new Access("I7a", $"{g.Key.Category}/Order={g.Key.Order}：{string.Join("、", g.Select(r => r.Name))}", "registry", 0));
+        .Where(g => g.Count() > 1).Select(g => new Access("I7a", $"{g.Key.Category}/Order={g.Key.Order}：{string.Join("、", g.Select(r => r.Id))}", "registry", 0));
 
     /// <summary>PassList.Run 的步骤名重复：L2 内部（I7b）、Prepare 内部与 Prepare 和 L2 之间（I7a）。</summary>
     public static IEnumerable<Access> DuplicatePasses(IEnumerable<(string Name, string Scope, string File, int Line)> passes)

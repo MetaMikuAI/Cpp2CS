@@ -8,7 +8,7 @@ namespace Cpp2CS.Recovery;
 internal static class CheckRules
 {
     /// <summary>判空与越界的吸收（见类注释第 4 条）。</summary>
-    [Analysis("检查吸收", 80, After = ["帧区域"])]
+    [Step("control.absorb-checks", StepPhase.Analyze, StepKind.Analysis, Order = 800, After = ["frames.regions"], Name = "检查吸收")]
     internal static void Checks(this RecoveryScope ctx)
     {
         // 现有吸收规则只证明普通 CFG；EH 的保护域按语句划分，不能跨界移动抛出点。

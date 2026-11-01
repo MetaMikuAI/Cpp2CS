@@ -86,7 +86,7 @@ internal static class DelegatesRules
         ctx.State.Construction.delegateCreations[constructor] = type;
     }
 
-    [InvocationRule(10)]
+    [Rule(RuleKind.Invocation, "calls.delegate-creation", Order = 100)]
     internal static RecoveryResult<bool> LowerDelegateCreation(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
         if (!ctx.State.Construction.delegateCreations.ContainsKey(call))

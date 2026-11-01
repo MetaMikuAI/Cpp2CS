@@ -138,7 +138,7 @@ internal static class CleanupThunksRules
             ctx.Hole(ctx.entry, $"不动点 私有帧槽删除超过 {Maintenance.SafetyBudget} 轮未收敛", rule: "Fixpoint");
     }
 
-    [CallRule(10)]
+    [Rule(RuleKind.Call, "calls.lower-cleanup-thunk", Order = 101)]
     internal static RecoveryResult<bool> LowerCleanupThunk(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
         if (!ctx.State.Calls.cleanupCalls.Contains(call))

@@ -35,7 +35,7 @@ internal static class CheckedReferencesRules
             ctx.Maintain.Definitions("runtime.checked-objects");
         }
 
-        ctx.Maintain.Rerun(RuntimeRules.MarkRuntime, "runtime.checked-objects");
+        ctx.Maintain.Rerun("runtime.mark", "runtime.checked-objects");
         ctx.Maintain.Types("runtime.checked-objects");
     }
 

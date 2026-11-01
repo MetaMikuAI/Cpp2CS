@@ -13,7 +13,7 @@ internal static class ConstructionRules
         return i >= 0 && j > i;
     });
     /// <summary>对象分配与直线链上的构造调用合并为 newobj；跨块时另证可观察顺序与异常去向。</summary>
-    [Analysis("分配", 70, After = ["运行时引用"])]
+    [Step("construction.allocations", StepPhase.Analyze, StepKind.Analysis, Order = 700, After = ["runtime.mark"], Name = "分配")]
     internal static void Allocations(this RecoveryScope ctx)
     {
         foreach (var block in ctx.blocks)

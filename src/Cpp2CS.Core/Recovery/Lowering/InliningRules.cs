@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class InliningRules
 {
-    [Analysis("内联", 50, After = ["运行时引用"])]
+    [Step("lowering.inline", StepPhase.Analyze, StepKind.Analysis, Order = 500, After = ["runtime.mark"], Name = "内联")]
     internal static void Inline(this RecoveryScope ctx)
     {
         var uses = new Dictionary<Variable, List<(Block Block, int Index)>>();

@@ -7,26 +7,56 @@ using System.Linq.Expressions;
 
 namespace Cpp2CS.Recovery;
 
+/// <summary>一个已注册的步骤：Id、中文名、种类、失效声明与适配后的入口；<see cref="CanFail"/> 表示方法返回 RecoveryFailure?。</summary>
+internal sealed record RegisteredStep(string Id, string Name, StepKind Kind, AnalysisInvalidation Invalidates, bool CanFail, Func<RecoveryScope, RecoveryFailure?> Run);
+
 internal static class RuleRegistry
 {
     private const BindingFlags Members = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
     private static readonly MethodInfo[] Methods = typeof(RecoveryScope).Assembly.GetTypes().SelectMany(t => t.GetMethods(Members)).ToArray();
-    public static readonly IReadOnlyDictionary<string, AnalysisInvalidation> MachinePasses = Methods
-        .Select(m => m.GetCustomAttribute<MachinePassAttribute>()).OfType<MachinePassAttribute>().ToDictionary(a => a.Name, a => a.Invalidates);
-    public static readonly (string Name, Func<RecoveryScope, RecoveryFailure?> Run)[] Analyses = OrderAnalyses();
-    public static readonly Func<LoweringScope, Block, Stmt, List<ManagedStatement>, RecoveryResult<bool>>[] Statements = Rules<StatementRuleAttribute, Func<LoweringScope, Block, Stmt, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
-    public static readonly Func<LoweringScope, Define, List<ManagedStatement>, RecoveryResult<bool>>[] Defines = Rules<DefineRuleAttribute, Func<LoweringScope, Define, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
-    public static readonly Func<LoweringScope, Store, List<ManagedStatement>, RecoveryResult<bool>>[] Stores = Rules<StoreRuleAttribute, Func<LoweringScope, Store, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
-    public static readonly Func<LoweringScope, Store, ManagedValue, List<ManagedStatement>, RecoveryResult<bool>>[] StoreTargets = Rules<StoreTargetRuleAttribute, Func<LoweringScope, Store, ManagedValue, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
-    public static readonly Func<LoweringScope, Call, List<ManagedStatement>, RecoveryResult<bool>>[] Calls = Rules<CallRuleAttribute, Func<LoweringScope, Call, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
-    public static readonly Func<LoweringScope, Call, List<ManagedStatement>, RecoveryResult<bool>>[] Invocations = Rules<InvocationRuleAttribute, Func<LoweringScope, Call, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
-    public static readonly Func<LoweringScope, Call, AbiSignature, Dictionary<Storage, Expr>, ManagedInvocation, List<ManagedStatement>, RecoveryResult<bool>>[] InvocationOutputs = Rules<InvocationOutputRuleAttribute, Func<LoweringScope, Call, AbiSignature, Dictionary<Storage, Expr>, ManagedInvocation, List<ManagedStatement>, RecoveryResult<bool>>>(a => a.Order);
-    public static readonly Func<LoweringScope, AbiValue, ArgumentSite, RecoveryResult<ManagedValue?>>[] Arguments = Rules<ArgumentRuleAttribute, Func<LoweringScope, AbiValue, ArgumentSite, RecoveryResult<ManagedValue?>>>(a => a.Order);
-    public static readonly Func<LoweringScope, Call, AbiValue, RecoveryResult<LocalValue?>>[] Results = Rules<ResultRuleAttribute, Func<LoweringScope, Call, AbiValue, RecoveryResult<LocalValue?>>>(a => a.Order);
-    public static readonly Func<RecoveryScope, AbiValue, int, bool>[] Parameters = Rules<ParameterBindingAttribute, Func<RecoveryScope, AbiValue, int, bool>>(a => a.Order);
-    public static readonly Action<RecoveryScope, ManagedBody>[] Proofs = Rules<BodyProofAttribute, Action<RecoveryScope, ManagedBody>>(a => a.Order);
-    private static TDelegate[] Rules<TAttribute, TDelegate>(Func<TAttribute, int> order)
-        where TAttribute : Attribute where TDelegate : Delegate => Methods.Select(m => (Method: m, Attribute: m.GetCustomAttribute<TAttribute>())).Where(p => p.Attribute is not null).OrderBy(p => order(p.Attribute!)).ThenBy(p => p.Method.Name, StringComparer.Ordinal).Select(p => Adapt<TDelegate>(p.Method)).ToArray();
+    public static readonly RegisteredStep[] Analyses = OrderSteps(StepPhase.Analyze);
+    private static readonly IReadOnlyDictionary<string, RegisteredStep> StepsById = Analyses.ToDictionary(s => s.Id, StringComparer.Ordinal);
+    public static readonly Func<LoweringScope, Block, Stmt, List<ManagedStatement>, RecoveryResult<bool>>[] Statements = Rules<Func<LoweringScope, Block, Stmt, List<ManagedStatement>, RecoveryResult<bool>>>(RuleKind.Statement);
+    public static readonly Func<LoweringScope, Define, List<ManagedStatement>, RecoveryResult<bool>>[] Defines = Rules<Func<LoweringScope, Define, List<ManagedStatement>, RecoveryResult<bool>>>(RuleKind.Define);
+    public static readonly Func<LoweringScope, Store, List<ManagedStatement>, RecoveryResult<bool>>[] Stores = Rules<Func<LoweringScope, Store, List<ManagedStatement>, RecoveryResult<bool>>>(RuleKind.Store);
+    public static readonly Func<LoweringScope, Store, ManagedValue, List<ManagedStatement>, RecoveryResult<bool>>[] StoreTargets = Rules<Func<LoweringScope, Store, ManagedValue, List<ManagedStatement>, RecoveryResult<bool>>>(RuleKind.StoreTarget);
+    public static readonly Func<LoweringScope, Call, List<ManagedStatement>, RecoveryResult<bool>>[] Calls = Rules<Func<LoweringScope, Call, List<ManagedStatement>, RecoveryResult<bool>>>(RuleKind.Call);
+    public static readonly Func<LoweringScope, Call, List<ManagedStatement>, RecoveryResult<bool>>[] Invocations = Rules<Func<LoweringScope, Call, List<ManagedStatement>, RecoveryResult<bool>>>(RuleKind.Invocation);
+    public static readonly Func<LoweringScope, Call, AbiSignature, Dictionary<Storage, Expr>, ManagedInvocation, List<ManagedStatement>, RecoveryResult<bool>>[] InvocationOutputs = Rules<Func<LoweringScope, Call, AbiSignature, Dictionary<Storage, Expr>, ManagedInvocation, List<ManagedStatement>, RecoveryResult<bool>>>(RuleKind.InvocationOutput);
+    public static readonly Func<LoweringScope, AbiValue, ArgumentSite, RecoveryResult<ManagedValue?>>[] Arguments = Rules<Func<LoweringScope, AbiValue, ArgumentSite, RecoveryResult<ManagedValue?>>>(RuleKind.Argument);
+    public static readonly Func<LoweringScope, Call, AbiValue, RecoveryResult<LocalValue?>>[] Results = Rules<Func<LoweringScope, Call, AbiValue, RecoveryResult<LocalValue?>>>(RuleKind.Result);
+    public static readonly Func<RecoveryScope, AbiValue, int, bool>[] Parameters = Rules<Func<RecoveryScope, AbiValue, int, bool>>(RuleKind.ParameterBinding);
+    public static readonly Action<RecoveryScope, ManagedBody>[] Proofs = Rules<Action<RecoveryScope, ManagedBody>>(RuleKind.BodyProof);
+
+    /// <summary>按 Id 取已注册的步骤（维护动作的重跑用）。</summary>
+    public static RegisteredStep Step(string id) => StepsById.TryGetValue(id, out var step) ? step : throw new InvalidOperationException($"未注册的步骤 {id}");
+
+    static RuleRegistry() => CheckIds();
+
+    /// <summary>Id 全局唯一（步骤与规则共用一个命名空间）；重复时启动即失败。</summary>
+    private static void CheckIds()
+    {
+        var ids = new Dictionary<string, MethodInfo>(StringComparer.Ordinal);
+        foreach (var method in Methods)
+        {
+            var id = method.GetCustomAttribute<StepAttribute>()?.Id ?? method.GetCustomAttribute<RuleAttribute>()?.Id;
+            if (id is null)
+                continue;
+            if (!ids.TryAdd(id, method))
+                throw new InvalidOperationException($"注册 Id 重复：{id}（{ids[id].DeclaringType!.Name}.{ids[id].Name}、{method.DeclaringType!.Name}.{method.Name}）");
+        }
+    }
+
+    /// <summary>一个类别的规则按 Order 排列；类别内 Order 重复时启动即失败。</summary>
+    private static TDelegate[] Rules<TDelegate>(RuleKind kind)
+        where TDelegate : Delegate
+    {
+        var rules = Methods.Select(m => (Method: m, Attribute: m.GetCustomAttribute<RuleAttribute>())).Where(p => p.Attribute?.Kind == kind).ToArray();
+        foreach (var group in rules.GroupBy(p => p.Attribute!.Order).Where(g => g.Count() > 1))
+            throw new InvalidOperationException($"{kind} 规则的 Order {group.Key} 重复：{string.Join("、", group.Select(p => p.Attribute!.Id))}");
+        return rules.OrderBy(p => p.Attribute!.Order).Select(p => Adapt<TDelegate>(p.Method)).ToArray();
+    }
+
     private static TDelegate Adapt<TDelegate>(MethodInfo method)
         where TDelegate : Delegate
     {
@@ -37,21 +67,30 @@ internal static class RuleRegistry
         return Expression.Lambda<TDelegate>(result, arguments).Compile();
     }
 
-    /// <summary>拓扑排序：After 中的步骤必须已经运行；可运行的步骤中先运行 Order 最小的。缺少依赖或成环时启动即失败。</summary>
-    private static (string, Func<RecoveryScope, RecoveryFailure?>)[] OrderAnalyses()
+    /// <summary>
+    /// 拓扑排序：After 中的步骤必须已经运行；可运行的步骤中先运行 Order 最小的。阶段内 Order 唯一，所以顺序完全由 Order 与 After 决定。
+    /// 缺少依赖、Order 重复或成环时启动即失败。
+    /// </summary>
+    private static RegisteredStep[] OrderSteps(StepPhase phase)
     {
-        var steps = Methods.Select(m => (Method: m, Attribute: m.GetCustomAttribute<AnalysisAttribute>())).Where(p => p.Attribute is not null).ToDictionary(p => p.Attribute!.Name, p => (p.Attribute!, Run: Adapt<Func<RecoveryScope, RecoveryFailure?>>(p.Method)));
-        foreach (var (name, (attribute, _)) in steps)
+        var steps = Methods.Select(m => (Method: m, Attribute: m.GetCustomAttribute<StepAttribute>())).Where(p => p.Attribute?.Phase == phase)
+            .ToDictionary(p => p.Attribute!.Id, p => (p.Attribute!, p.Method), StringComparer.Ordinal);
+        foreach (var group in steps.Values.GroupBy(s => s.Item1.Order).Where(g => g.Count() > 1))
+            throw new InvalidOperationException($"{phase} 阶段的步骤 Order {group.Key} 重复：{string.Join("、", group.Select(s => s.Item1.Id))}");
+        foreach (var (id, (attribute, _)) in steps)
             foreach (var dependency in attribute.After)
                 if (!steps.ContainsKey(dependency))
-                    throw new InvalidOperationException($"分析 {name} 依赖未注册的分析 {dependency}");
-        var done = new HashSet<string>();
-        var ordered = new List<(string, Func<RecoveryScope, RecoveryFailure?>)>();
+                    throw new InvalidOperationException($"步骤 {id} 依赖未注册的步骤 {dependency}");
+        var done = new HashSet<string>(StringComparer.Ordinal);
+        var ordered = new List<RegisteredStep>();
         while (ordered.Count < steps.Count)
         {
-            var next = steps.Where(p => !done.Contains(p.Key) && p.Value.Item1.After.All(done.Contains)).OrderBy(p => p.Value.Item1.Order).ThenBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Key).FirstOrDefault() ?? throw new InvalidOperationException("分析的依赖成环：" + string.Join("、", steps.Keys.Where(k => !done.Contains(k))));
+            var next = steps.Where(p => !done.Contains(p.Key) && p.Value.Item1.After.All(done.Contains)).OrderBy(p => p.Value.Item1.Order).Select(p => p.Key).FirstOrDefault()
+                ?? throw new InvalidOperationException("步骤的依赖成环：" + string.Join("、", steps.Keys.Where(k => !done.Contains(k))));
             done.Add(next);
-            ordered.Add((next, steps[next].Run));
+            var (attribute, method) = steps[next];
+            ordered.Add(new(next, attribute.Name, attribute.Kind, attribute.Invalidates, method.ReturnType != typeof(void),
+                Adapt<Func<RecoveryScope, RecoveryFailure?>>(method)));
         }
 
         return ordered.ToArray();

@@ -65,9 +65,7 @@ internal sealed class StructureCensus
 
     private static readonly HashSet<string> RuleAttributes = new(StringComparer.Ordinal)
     {
-        "AnalysisAttribute", "MachinePassAttribute", "StatementRuleAttribute", "DefineRuleAttribute", "StoreRuleAttribute",
-        "StoreTargetRuleAttribute", "CallRuleAttribute", "InvocationRuleAttribute", "InvocationOutputRuleAttribute",
-        "ArgumentRuleAttribute", "ResultRuleAttribute", "ParameterBindingAttribute", "BodyProofAttribute",
+        "StepAttribute", "RuleAttribute",
     };
 
     /// <summary>只做转调的注册方法 → 被转调的方法（视同注册方法，I3）。</summary>
@@ -171,7 +169,9 @@ internal sealed class StructureCensus
         }
         foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
         {
-            if (semantic.GetDeclaredSymbol(method)?.GetAttributes().Any(a => a.AttributeClass?.Name == "MachinePassAttribute") == true)
+            // 改写步骤：Step 属性的种类参数为 StepKind.Rewrite
+            if (semantic.GetDeclaredSymbol(method)?.GetAttributes().Any(a => a.AttributeClass?.Name == "StepAttribute"
+                    && a.ConstructorArguments.Any(c => c.Type?.Name == "StepKind" && c.Value is 1)) == true)
                 Count("machine-pass-steps", scope);
             var declared = $"{method.Ancestors().OfType<BaseTypeDeclarationSyntax>().FirstOrDefault()?.Identifier.Text}.{method.Identifier.Text}";
             if (!MethodScopes.TryGetValue(declared, out var scopes)) MethodScopes[declared] = scopes = [];

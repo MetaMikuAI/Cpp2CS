@@ -21,8 +21,17 @@ internal sealed class Maintenance(RecoveryScope ctx)
     /// </summary>
     public void Blocks(IReadOnlyList<Block> blocks, string reason) => Record("blocks", reason, () => ctx.blocks = blocks);
 
-    /// <summary>重跑一个已注册的分析：直接调用，不挂接改写器、不做只读快照、不刷新定义、不追加分析步骤记录。</summary>
-    public void Rerun(Action<RecoveryScope> step, string reason) => Record("rerun", reason, () => step(ctx));
+    /// <summary>
+    /// 按 Id 重跑一个已注册的步骤：直接调用，不挂接改写器、不做只读快照、不刷新定义、不追加分析步骤记录。
+    /// 只能重跑不会失败的步骤（方法返回 void），否则失败无处报告。
+    /// </summary>
+    public void Rerun(string id, string reason)
+    {
+        var step = RuleRegistry.Step(id);
+        if (step.CanFail)
+            throw new InvalidOperationException($"重跑的步骤 {id} 可能失败，不能经 Rerun 调用");
+        Record($"rerun:{id}", reason, () => step.Run(ctx));
+    }
 
     /// <summary>重新计算支配树（每次都重算，不经缓存）。</summary>
     public Dominators Dominators(string reason)

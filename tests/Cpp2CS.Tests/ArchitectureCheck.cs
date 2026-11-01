@@ -108,6 +108,7 @@ internal static class ArchitectureCheck
             Ledgers.CheckRises(baseline, Ledgers.ReadRatchet(paths.Ratchet), Ledgers.ReadTransfers(Show(paths.Transfers)), transfers, failures);
         }
         Ledgers.CheckPairs("族归属快照", Ledgers.ReadPairs(paths.Families), Ledgers.CurrentFamilies(model), failures);
+        Ledgers.CheckIdPrefixes(registry, census.MethodScopes, failures);
         Ledgers.CheckPairs("注册表快照", RegistryPairs(File.ReadLines(paths.Registry)), RegistryPairs(Ledgers.RegistryLines(registry)), failures);
         Ledgers.CheckPairs("洞编码清单", HoleCodeRows(paths.HoleCodes).ToDictionary(p => p.Key, p => p.Value.Counts), holeCodes, failures);
 
@@ -136,7 +137,7 @@ internal static class ArchitectureCheck
     }
 
     private static Dictionary<string, string> RegistryPairs(IEnumerable<string> lines) => lines.Where(l => l.Length > 0 && !l.StartsWith('#'))
-        .Select(l => l.Split('\t')).ToDictionary(f => $"{f[0]}\t{f[1]}\t{f[5]}", f => $"Order={f[2]} After={f[3]} Invalidates={f[4]}");
+        .Select(l => l.Split('\t')).ToDictionary(f => f[2], f => $"{f[0]}/{f[1]} Order={f[3]} After={f[4]} Invalidates={f[5]} {f[6]} {f[7]}");
 
     private static void WriteSnapshots(SourceModel model, List<Ledgers.Registration> registry, SortedDictionary<string, string> holeCodes,
         string families, string registryPath, string holeCodesPath)

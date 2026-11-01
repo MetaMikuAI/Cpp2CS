@@ -11,7 +11,7 @@ internal static class SwitchesRules
     /// 表基址 + ext(table[下标 × 项宽]) &lt; &lt; k，例如多个 await 的 MoveNext 按状态分派。地址计算中的定义（读常量表、移位、加基址）
     /// 只服务于这次跳转，标为运行时值不再翻译；下标保留为托管值，跳转翻译成 switch（越界由前驱中的上界检查排除，见 JumpTables）。
     /// </summary>
-    [Analysis("跳转表", 45, After = ["运行时引用"])]
+    [Step("control.jump-tables", StepPhase.Analyze, StepKind.Analysis, Order = 450, After = ["runtime.mark"], Name = "跳转表")]
     internal static void JumpTables(this RecoveryScope ctx)
     {
         foreach (var block in ctx.blocks)
@@ -87,7 +87,7 @@ internal static class SwitchesRules
         }
     }
 
-    [StatementRule(30)]
+    [Rule(RuleKind.Statement, "control.lower-switch", Order = 300)]
     internal static RecoveryResult<bool> LowerSwitch(this LoweringScope ctx, Block block, Stmt statement, List<ManagedStatement> output)
     {
         if (statement is not IndirectJump jump || !ctx.State.Calls.switchIndices.TryGetValue(jump, out var index))

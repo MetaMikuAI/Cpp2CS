@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery;
 internal static class StructRegistersRules
 {
     internal static bool RegisterStruct(this RecoveryScope ctx, AbiValue value) => ctx.types.Kind(value.Type) == TypeKind.Struct && value.Passing == Passing.Registers && value.Pieces.All(p => p.Register.Bank is Bank.Gpr or Bank.Vec);
-    [ParameterBinding(10)]
+    [Rule(RuleKind.ParameterBinding, "structs.bind-register-argument", Order = 100)]
     internal static bool PrepareStructArgument(this RecoveryScope ctx, AbiValue parameter, int index)
     {
         if (ctx.types.Kind(parameter.Type) != TypeKind.Struct)
@@ -30,11 +30,11 @@ internal static class StructRegistersRules
         return true;
     }
 
-    [ArgumentRule(5)]
+    [Rule(RuleKind.Argument, "structs.type-handle-argument", Order = 51)]
     internal static ManagedValue? TypeHandleArgument(this LoweringScope ctx, AbiValue parameter, ArgumentSite site) => parameter.Type.Equals(ctx.types.RuntimeTypeHandle) && parameter.Passing == Passing.Registers && parameter.Pieces is [{ Width: 64, Offset: 0 } piece] && site.Registers.TryGetValue(piece.Register, out var value) && ctx.Values.Expand(value) is Symbol { Kind: SymbolKind.Type, Value: TypeRef type } ? new TypeHandleValue(type, ctx.types.RuntimeTypeHandle, 64) : null;
-    [ArgumentRule(10)]
+    [Rule(RuleKind.Argument, "structs.register-argument", Order = 100)]
     internal static RecoveryResult<ManagedValue?> RegisterStructArgument(this LoweringScope ctx, AbiValue parameter, ArgumentSite site) => !ctx.Values.RegisterStruct(parameter) ? (ManagedValue?)null : ctx.Values.Compose(parameter, p => site.Registers.TryGetValue(p.Register, out var e) ? e : RecoveryDiagnostics.Fail(site.Call.Address, $"调用 缺少结构体片 {p.Register}", rule: "RegisterStructArgument")).Map<ManagedValue?>(value => value);
-    [ResultRule(10)]
+    [Rule(RuleKind.Result, "structs.register-result", Order = 100)]
     internal static LocalValue? RegisterStructResult(this LoweringScope ctx, Call call, AbiValue returned) => ctx.Values.RegisterStruct(returned) ? ctx.Values.CallStructLocal(call, returned.Type) : null;
     internal static LocalValue CallStructLocal(this RecoveryScope ctx, Call call, TypeRef type)
     {
@@ -43,7 +43,7 @@ internal static class StructRegistersRules
         return local;
     }
 
-    [InvocationOutputRule(30)]
+    [Rule(RuleKind.InvocationOutput, "structs.project-tail-hfa", Order = 300)]
     internal static bool ProjectTailHfa(this LoweringScope ctx, Call call, AbiSignature signature, Dictionary<Storage, Expr> registers, ManagedInvocation invocation, List<ManagedStatement> output)
     {
         if (call.Kind is not (CallKind.Tail or CallKind.TailIndirect) || signature.Return is not { } source

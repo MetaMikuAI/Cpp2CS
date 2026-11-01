@@ -73,7 +73,7 @@ internal static class RuntimeRules
     }
 
     /// <summary>运行时引用：值是类、方法等运行时结构（不是托管值）的变量。只能出现在运行时操作的参数中。</summary>
-    [Analysis("运行时引用", 40, After = ["帧区域", "异常值"])]
+    [Step("runtime.mark", StepPhase.Analyze, StepKind.Analysis, Order = 400, After = ["frames.regions", "exceptions.values"], Name = "运行时引用")]
     internal static void MarkRuntime(this RecoveryScope ctx)
     {
         ctx.MarkVtableLoads();

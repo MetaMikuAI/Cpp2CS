@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery;
 internal static class StringSpansRules
 {
     // AsSpan(string) 内联后以数据引用、长度两个寄存器传递；null 路径二者同时为零。
-    [ArgumentRule(6)]
+    [Rule(RuleKind.Argument, "memory.string-span-argument", Order = 60)]
     internal static RecoveryResult<ManagedValue?> StringSpanArgument(this LoweringScope ctx, AbiValue parameter, ArgumentSite site)
     {
         if (parameter is not { Type: DefinitionRef { Definition.FullName: "System.ReadOnlySpan", Arguments: [var element] }, Passing: Passing.Registers, Pieces: [var data, var length] } || !element.Equals(ctx.types.Char) || data.Offset != 0 || length.Offset != 8 || !site.Registers.TryGetValue(data.Register, out var pointer) || !site.Registers.TryGetValue(length.Register, out var count) || ctx.types.CorlibMethod("System.MemoryExtensions", "AsSpan", ctx.types.String) is not { } asSpan || !asSpan.Method.ReturnType.Equals(parameter.Type))
