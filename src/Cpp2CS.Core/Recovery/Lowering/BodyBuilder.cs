@@ -213,8 +213,20 @@ internal sealed class BodyBuilder
         var statement = block.Statements[index];
         var operands = values.Operands(statement);
         foreach (var read in Reads(statement).Where(materialized.Contains))
+        {
+            // 相邻字段合并的读取逐字段落成局部，以该段的切片为键。
+            if (oracle.Parts(read) is { } leaves)
+            {
+                foreach (var (leaf, bit) in leaves)
+                {
+                    var key = values.Syms.Slice(read, bit, Width(leaf.Type) == 0 ? types.Size(leaf.Type) * 8 : Width(leaf.Type));
+                    output.Add(new ManagedAssignment(statement.Address, Local(key, leaf.Type), LocationValue(leaf, statement.Address)));
+                }
+                continue;
+            }
             if (Read(read, statement.Address) is { } value)
                 output.Add(new ManagedAssignment(statement.Address, Local(read, value.Type), value));
+        }
         switch (statement)
         {
             case Define or Phi or Nop or Assign:
@@ -844,6 +856,11 @@ internal sealed class BodyBuilder
     /// <summary>原子的一段：值类型的字段；整数的低位截断；bool 的低位即自身。</summary>
     private ManagedValue Slice(SliceSym slice, TypeRef? expected, ulong address)
     {
+        if (slice.Base is ReadSym merged && oracle.Part(merged, slice.Low, slice.Width) is { } part)
+        {
+            Demand(merged);
+            return Coerce(LocationValue(part, address), expected);
+        }
         var baseType = oracle.TypeOf(slice.Base);
         if (baseType is null) return Hole(address, $"类型 切片的来源 {slice.Base}", expected);
         var source = View(slice.Base, baseType, address);

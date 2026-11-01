@@ -189,6 +189,8 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
             case OpSym op:
                 return OperatorType(op) ?? (op.Width is 8 or 16 or 32 or 64 && op.Op.Kind is OperatorKind.Select or OperatorKind.Binary or OperatorKind.Unary
                     ? types.Integer(op.Width, true) : null);
+            case SliceSym { Base: ReadSym read } slice when Part(read, slice.Low, slice.Width) is { } part:
+                return part.Type;
             case SliceSym slice when TypeOf(slice.Base) is { } baseType:
                 return types.Kind(baseType) == TypeKind.Struct && FieldAt(baseType, slice.Low / 8 + RuntimeLayout.ObjectHeaderSize, slice.Width, false, false) is var (_, fieldType) ? fieldType
                     : slice.Width == 1 ? types.Boolean : slice.Width is 8 or 16 or 32 or 64 ? types.Integer(slice.Width, false) : null;
@@ -349,6 +351,20 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
         }
         return null;
     }
+
+    private readonly Dictionary<ReadSym, IReadOnlyList<(Location Leaf, int Bit)>?> parts = [];
+
+    /// <summary>不能整体定位的读取（相邻字段合并的读取）按布局拆成的字段。</summary>
+    public IReadOnlyList<(Location Leaf, int Bit)>? Parts(ReadSym read)
+    {
+        if (!parts.TryGetValue(read, out var known))
+            parts[read] = known = Locate(read.Address, read.Width) is null ? Split(read.Address, read.Width) : null;
+        return known;
+    }
+
+    /// <summary>读取中恰为一个字段的一段。</summary>
+    public Location? Part(ReadSym read, int bit, int width) =>
+        Parts(read)?.FirstOrDefault(p => p.Bit == bit && (ManagedTypes.IsReferenceType(p.Leaf.Type) ? 64 : types.Size(p.Leaf.Type) * 8) == width).Leaf;
 
     /// <summary>
     /// 跨越多个标量字段的访问按布局拆成逐字段的位置：每段是从该处起恰为一个标量字段的位置，Bit 为段在访问中的位偏移。

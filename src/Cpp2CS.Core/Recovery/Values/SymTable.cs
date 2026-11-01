@@ -334,7 +334,14 @@ public sealed class SymTable
         };
     }
 
-    public Sym Intrinsic(string name, Sym[] args, int width) => Op(new Operator(OperatorKind.Intrinsic, 0, name), width, args);
+    /// <summary>机器内建操作；车道广播（vdup.N）只复制位，规范为拼接。</summary>
+    public Sym Intrinsic(string name, Sym[] args, int width)
+    {
+        if (name.StartsWith("vdup.", StringComparison.Ordinal) && int.TryParse(name.AsSpan(5), out var lane) && lane > 0 && width % lane == 0
+            && args is [var scalar] && scalar.Width >= lane)
+            return Concat(Enumerable.Repeat(Slice(scalar, 0, lane), width / lane));
+        return Op(new Operator(OperatorKind.Intrinsic, 0, name), width, args);
+    }
 
     private sealed class SiteComparer : IEqualityComparer<(Stmt Site, int Ordinal)>
     {
