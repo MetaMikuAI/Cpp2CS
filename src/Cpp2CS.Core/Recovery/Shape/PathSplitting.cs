@@ -125,8 +125,10 @@ internal static class PathSplitting
                 break;
             case Call call:
                 yield return operands[0];
+                // 局部地址的 φ（经指针的实参）与运行时操作的类元数据 φ（类操作数须为单一的类）。
                 for (var i = 0; i < call.Arguments.Length; i++)
-                    if (SymTable.Resolve(operands[1 + i]) is PhiSym phi && phi.Sources.All(s => s is not null && SymTable.Resolve(s) is LocalSym))
+                    if (SymTable.Resolve(operands[1 + i]) is PhiSym phi && phi.Sources.All(s => s is not null
+                        && SymTable.Resolve(s) is LocalSym || call.Op is not null && SymTable.Resolve(s!) is EntitySym { Symbol.Kind: SymbolKind.Class }))
                         yield return phi;
                 break;
         }

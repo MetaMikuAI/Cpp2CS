@@ -12,6 +12,8 @@ public interface IRuntimeTyping
 {
     ManagedTypes Types { get; }
     DefinitionRef? ExceptionType(string fullName);
+    /// <summary>操作的类操作数：L2 写入的 Operand，否则为实参中的类实体。</summary>
+    TypeRef? ClassOperand(Call call);
 }
 
 /// <summary>下降一个运行时操作所需的上下文，由下降实现提供。</summary>
@@ -20,6 +22,8 @@ public interface IRuntimeLowering
     ManagedTypes Types { get; }
     Call Call { get; }
     RuntimeOp Op { get; }
+    /// <summary>操作的类操作数：L2 写入的 Operand，否则为实参中的类实体。</summary>
+    TypeRef? ClassOperand { get; }
     IReadOnlyList<Sym> Arguments { get; }
     /// <summary>操作的结果（<see cref="ResultSym"/>，序号 0）。</summary>
     Sym Result { get; }
@@ -52,7 +56,7 @@ public delegate bool RuntimeLowering(IRuntimeLowering context, out ManagedStatem
 /// <summary>一种运行时操作的语义：结果类型、经指针的内存效果、下降。</summary>
 public sealed record RuntimeOpRule(OpKind Kind)
 {
-    public Func<RuntimeOp, IRuntimeTyping, TypeRef?>? ResultType { get; init; }
+    public Func<Call, IRuntimeTyping, TypeRef?>? ResultType { get; init; }
     public Func<Call, ManagedAbi, IEnumerable<PointerEffect>>? Effects { get; init; }
     public RuntimeLowering? Lower { get; init; }
 }
@@ -66,6 +70,10 @@ public static class RuntimeOps
     private static readonly Dictionary<OpKind, RuntimeOpRule> rules = Build().ToDictionary(r => r.Kind);
 
     public static RuntimeOpRule? Of(OpKind kind) => rules.GetValueOrDefault(kind);
+
+    /// <summary>机器层上的类操作数：L2 写入的 Operand，否则为实参中的类元数据符号。</summary>
+    public static TypeRef? ClassOperand(Call call) => call.Op?.Operand as TypeRef
+        ?? call.Arguments.OfType<Symbol>().FirstOrDefault(s => s.Kind == SymbolKind.Class)?.Value as TypeRef;
 
     private static bool None(IRuntimeLowering context, out ManagedStatement? terminal)
     {
@@ -85,7 +93,7 @@ public static class RuntimeOps
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
-                if (c.Op.Operand is not TypeRef owner) return false;
+                if (c.ClassOperand is not { } owner) return false;
                 if (c.InitializesNext(owner)) return true;
                 if (c.Types.CorlibMethod("System.Runtime.CompilerServices.RuntimeHelpers", "RunClassConstructor", c.Types.RuntimeTypeHandle) is not { } run) return false;
                 c.Emit(new ManagedCall(c.Call.Address, new ManagedInvocation(run, null, [new TypeHandleValue(owner, c.Types.RuntimeTypeHandle, 64)], false), null, false));
@@ -111,22 +119,22 @@ public static class RuntimeOps
         };
         yield return new(OpKind.NewObject)
         {
-            ResultType = (op, _) => op.Operand as TypeRef,
+            ResultType = (call, t) => t.ClassOperand(call),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
-                if (c.Op.Operand is not TypeRef) return false;
+                if (c.ClassOperand is null) return false;
                 c.AwaitConstruction();
                 return true;
             },
         };
         yield return new(OpKind.NewArray)
         {
-            ResultType = (op, _) => op.Operand as TypeRef,
+            ResultType = (call, t) => t.ClassOperand(call),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
-                if (c.Op.Operand is not ArrayRef array || c.Arguments.Count != 2) return false;
+                if (c.ClassOperand is not ArrayRef array || c.Arguments.Count != 2) return false;
                 c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, array), new NewArrayValue(array, c.View(c.Arguments[1], c.Types.Int32))));
                 return true;
             },
@@ -134,11 +142,11 @@ public static class RuntimeOps
         yield return new(OpKind.Box)
         {
             ResultType = (_, t) => t.Types.Object,
-            Effects = (call, abi) => call.Op!.Operand is TypeRef boxed && call.Arguments.Length == 2 ? [new PointerEffect(1, 1, abi.Size(boxed), MemoryAccess.Read)] : [],
+            Effects = (call, abi) => ClassOperand(call) is { } boxed && call.Arguments.Length == 2 ? [new PointerEffect(1, 1, abi.Size(boxed), MemoryAccess.Read)] : [],
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
-                if (c.Op.Operand is not TypeRef boxed || c.Arguments.Count != 2) return false;
+                if (c.ClassOperand is not { } boxed || c.Arguments.Count != 2) return false;
                 var operand = c.Pointee(1) is { } content ? c.View(content, boxed) : c.Location(1, boxed) ?? c.Hole("装箱 值的位置未知", boxed);
                 c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, c.Types.Object), new BoxValue(operand, boxed, c.Types.Object)));
                 return true;
@@ -146,22 +154,22 @@ public static class RuntimeOps
         };
         yield return new(OpKind.Unbox)
         {
-            ResultType = (op, _) => op.Operand is TypeRef t ? new ByRefRef(t) : null,
+            ResultType = (call, t) => t.ClassOperand(call) is { } unboxed ? new ByRefRef(unboxed) : null,
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
-                if (c.Op.Operand is not TypeRef unboxed || c.Arguments.Count != 2) return false;
+                if (c.ClassOperand is not { } unboxed || c.Arguments.Count != 2) return false;
                 c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, new ByRefRef(unboxed)), new UnboxAddressValue(c.View(c.Arguments[1], c.Types.Object), unboxed)));
                 return true;
             },
         };
         yield return new(OpKind.IsInst)
         {
-            ResultType = (op, _) => op.Operand as TypeRef,
+            ResultType = (call, t) => t.ClassOperand(call),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
-                if (c.Op.Operand is not TypeRef target || c.Arguments.Count < 1) return false;
+                if (c.ClassOperand is not { } target || c.Arguments.Count < 1) return false;
                 c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, target), new IsInstValue(c.View(c.Arguments[0], c.Types.Object), target)));
                 return true;
             },
@@ -220,7 +228,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.NewException)
         {
-            ResultType = (op, t) => op.Operand is string name ? t.ExceptionType(name) : null,
+            ResultType = (call, t) => call.Op!.Operand is string name ? t.ExceptionType(name) : null,
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;

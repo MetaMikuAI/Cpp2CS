@@ -273,9 +273,14 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
     private TypeRef? ResultType(Call call)
     {
         if (call.Op is { } op && !shapes(call).IsDispatch)
-            return Runtime.RuntimeOps.Of(op.Kind)?.ResultType?.Invoke(op, this);
+            return Runtime.RuntimeOps.Of(op.Kind)?.ResultType?.Invoke(call, this);
         return Callee(call) is { } callee && Concrete(callee, callee.Method.ReturnType) is var ret && !ManagedTypes.IsVoid(ret) ? ret : null;
     }
+
+    /// <summary>运行时操作的类操作数：L2 写入的 Operand，否则为实参符号值中的类实体。</summary>
+    public TypeRef? ClassOperand(Call call) => call.Op?.Operand as TypeRef
+        ?? values.Operands(call).Skip(1).Take(call.Arguments.Length).Select(SymTable.Resolve).OfType<EntitySym>()
+            .FirstOrDefault(e => e.Symbol.Kind == SymbolKind.Class)?.Symbol.Value as TypeRef;
 
     public DefinitionRef? ExceptionType(string fullName) =>
         (types.CorlibDefinition(fullName) ?? facts.Model.Types.FirstOrDefault(t => t.FullName == fullName && t.GenericParameters.Count == 0)) is { } definition

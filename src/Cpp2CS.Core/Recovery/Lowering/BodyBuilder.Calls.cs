@@ -39,7 +39,7 @@ internal sealed partial class BodyBuilder
             && SymTable.Resolve(contents[0]) is ResultSym { Site.Op.Kind: OpKind.NewObject } allocated && constructions.ContainsKey(allocated) ? allocated : null;
         // newobj 必须指名分配类型自己的构造函数。调用的是基类构造时，原生代码内联了分配类型的构造函数：
         // 以该构造函数自身原生代码的恢复体为证据，证明它只把参数原样转给这个基类构造，则调用点即 newobj 它。
-        if (construction is not null && construction.Site.Op!.Operand is DefinitionRef allocatedType && callee.DeclaringType is DefinitionRef declaring
+        if (construction is not null && oracle.ClassOperand(construction.Site) is DefinitionRef allocatedType && callee.DeclaringType is DefinitionRef declaring
             && allocatedType.Definition != declaring.Definition)
         {
             var (inlined, reason) = InlinedConstructor(allocatedType, callee);
@@ -254,6 +254,7 @@ internal sealed partial class BodyBuilder
         public ManagedTypes Types => owner.types;
         public Call Call => call;
         public RuntimeOp Op => op;
+        public TypeRef? ClassOperand => owner.oracle.ClassOperand(call);
         public IReadOnlyList<Sym> Arguments => arguments;
         public Sym Result => owner.values.Syms.Result(call, 0, 64);
         public ManagedValue View(Sym sym, TypeRef? expected) => owner.View(sym, expected, call.Address);
