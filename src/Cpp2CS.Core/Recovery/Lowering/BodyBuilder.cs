@@ -251,7 +251,7 @@ internal sealed class BodyBuilder
             return call.Kind is CallKind.Tail or CallKind.TailIndirect ? new Statement(new ManagedHole(call.Address, "调用 尾调用", true)) : null;
         }
         var contents = signature.Arguments.Select(v => Content(call, v, arguments)).ToArray();
-        var callee = oracle.Callee(call, contents);
+        var callee = oracle.Callee(call);
         if (callee is null)
         {
             holes.Add(new(call.Address, "调用 目标未知"));

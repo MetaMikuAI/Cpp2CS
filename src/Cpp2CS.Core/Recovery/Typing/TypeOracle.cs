@@ -27,13 +27,15 @@ public sealed class TypeOracle
     private readonly Dictionary<Sym, TypeRef?> memo = [];
     private readonly HashSet<Sym> active = [];
     private readonly Dictionary<Call, MethodRef?> callees = new(ReferenceEqualityComparer.Instance);
+    private readonly ValueModel values;
 
-    public TypeOracle(ManagedTypes types, ProgramFacts facts, MethodRef method, Func<Call, CallShape> shapes)
+    public TypeOracle(ManagedTypes types, ProgramFacts facts, MethodRef method, Func<Call, CallShape> shapes, ValueModel values)
     {
         this.types = types;
         this.facts = facts;
         this.method = method;
         this.shapes = shapes;
+        this.values = values;
     }
 
     public ManagedTypes Types => types;
@@ -48,27 +50,51 @@ public sealed class TypeOracle
 
     // ---- 调用目标 ----
 
-    /// <summary>调用的托管目标。相同代码折叠的多个候选按接收者与实参类型选择；无法区分时取第一个（折叠的候选机器码相同）。</summary>
-    public MethodRef? Callee(Call call, IReadOnlyList<Sym>? receiverAndArguments = null)
+    /// <summary>
+    /// 调用的托管目标。共享代码的地址对应多个实例：调用传入的 MethodInfo 实参指名确切的实例时取它；
+    /// 实例方法的接收者类型确定声明类型的类型实参时按接收者代入；相同代码折叠的候选按接收者与实参类型选择，
+    /// 无法区分时取第一个（折叠的候选机器码相同）。
+    /// </summary>
+    public MethodRef? Callee(Call call)
     {
         if (callees.TryGetValue(call, out var known)) return known;
-        var candidates = shapes(call).Candidates;
-        MethodRef? chosen = candidates.Count switch
-        {
-            0 => null,
-            1 => candidates[0],
-            _ => candidates.FirstOrDefault(c => receiverAndArguments is null || Compatible(c, receiverAndArguments)) ?? candidates[0],
-        };
+        callees[call] = null;
+        var shape = shapes(call);
+        var candidates = shape.Candidates;
+        if (candidates.Count == 0) return null;
+        var operands = values.Operands(call);
+        Sym? Register(Storage storage) => Array.IndexOf(call.Sources, storage) is var k and >= 0 && k + 1 < operands.Count ? operands[1 + k] : null;
+        if (shape.Signature?.MethodInfo is { } info && Register(info.Register) is { } infoSym
+            && SymTable.Resolve(infoSym) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef exact } }
+            && candidates.Any(c => c.Method == exact.Method))
+            return callees[call] = exact;
+        var receiver = shape.Signature?.This is { } self && self.Pieces[0].Register.Bank == Bank.Gpr ? Register(self.Pieces[0].Register) : null;
+        var receiverType = receiver is not null && call.Op?.Kind != OpKind.CallDelegate ? TypeOf(receiver) : null;
+        if (receiverType is ByRefRef byRef) receiverType = byRef.Element;
+        var arguments = shape.Signature?.Arguments.Select(a => a.Transfer == Transfer.Value && a.Pieces.Length == 1 && a.Pieces[0].Register.Bank != Bank.Stack
+            ? Register(a.Pieces[0].Register) : null).ToArray() ?? [];
+        var chosen = candidates.Count == 1 ? candidates[0]
+            : candidates.FirstOrDefault(c => Compatible(c, receiverType, arguments)) ?? candidates[0];
+        if (receiverType is DefinitionRef owner && !chosen.Method.IsStatic) chosen = Specialize(chosen, owner);
         return callees[call] = chosen;
     }
 
-    private bool Compatible(MethodRef candidate, IReadOnlyList<Sym> values)
+    /// <summary>接收者的基类链上找到方法的声明类型时，以其类型实参代入。</summary>
+    private static MethodRef Specialize(MethodRef candidate, DefinitionRef receiver)
+    {
+        if (candidate.Method.Owner.GenericParameters.Count == 0) return candidate;
+        for (TypeRef? current = receiver; current is DefinitionRef d; current = d.Definition.BaseType?.Substitute(d.Arguments, []))
+            if (d.Definition == candidate.Method.Owner) return candidate with { TypeArguments = d.Arguments };
+        return candidate;
+    }
+
+    private bool Compatible(MethodRef candidate, TypeRef? receiver, IReadOnlyList<Sym?> arguments)
     {
         var offset = candidate.Method.IsStatic ? 0 : 1;
-        if (!candidate.Method.IsStatic && values.Count > 0 && TypeOf(values[0]) is { } receiver && ManagedTypes.IsReferenceType(receiver)
+        if (!candidate.Method.IsStatic && receiver is not null && ManagedTypes.IsReferenceType(receiver)
             && !types.IsAssignable(receiver, candidate.DeclaringType)) return false;
-        for (var i = 0; i < candidate.Method.Parameters.Count && i + offset < values.Count; i++)
-            if (TypeOf(values[i + offset]) is { } actual && ManagedTypes.IsReferenceType(actual)
+        for (var i = 0; i < candidate.Method.Parameters.Count && i + offset < arguments.Count; i++)
+            if (arguments[i + offset] is { } argument && TypeOf(argument) is { } actual && ManagedTypes.IsReferenceType(actual)
                 && candidate.Method.Parameters[i].Type.Substitute(candidate.TypeArguments, candidate.MethodArguments) is var expected
                 && ManagedTypes.IsReferenceType(expected) && !types.IsAssignable(actual, expected)) return false;
         return true;
