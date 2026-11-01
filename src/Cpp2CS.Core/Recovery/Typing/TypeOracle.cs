@@ -18,7 +18,7 @@ public sealed record Location(LocationKind Kind, Sym? Base, Sym? Index, long Con
 /// 原子的类型与地址的位置。类型自下而上由定义给出：参数按签名，调用结果按被调用者，读取按位置，φ 取来源的汇合；
 /// 常量和拼接没有自然类型，由使用处的期望类型决定。地址分解为根、常量偏移与比例下标，再按运行时布局解释为字段、元素或长度。
 /// </summary>
-public sealed class TypeOracle
+public sealed class TypeOracle : Runtime.IRuntimeTyping
 {
     private readonly ManagedTypes types;
     private readonly ProgramFacts facts;
@@ -155,16 +155,8 @@ public sealed class TypeOracle
 
     private TypeRef? ResultType(Call call)
     {
-        if (call.Op is { } op)
-            return op.Kind switch
-            {
-                OpKind.NewObject or OpKind.NewArray or OpKind.IsInst when op.Operand is TypeRef t => t,
-                OpKind.Box => types.Object,
-                OpKind.Unbox when op.Operand is TypeRef t => new ByRefRef(t),
-                OpKind.IsAssignableFrom => types.Boolean,
-                OpKind.NewException when op.Operand is string name && ExceptionType(name) is { } exception => exception,
-                _ => null,
-            };
+        if (call.Op is { } op && !shapes(call).IsDispatch)
+            return Runtime.RuntimeOps.Of(op.Kind)?.ResultType?.Invoke(op, this);
         return Callee(call) is { } callee && Concrete(callee, callee.Method.ReturnType) is var ret && !ManagedTypes.IsVoid(ret) ? ret : null;
     }
 

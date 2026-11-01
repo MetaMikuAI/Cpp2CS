@@ -2,6 +2,7 @@ using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Recovery.Memory;
+using Cpp2CS.Recovery.Runtime;
 using Cpp2CS.Recovery.Typing;
 using Cpp2CS.Recovery.Values;
 
@@ -426,66 +427,48 @@ internal sealed class BodyBuilder
 
     private Terminator? LowerRuntime(Block block, int index, Call call, RuntimeOp op, IReadOnlyList<Sym> arguments, List<ManagedStatement> output)
     {
-        var result = values.Syms.Result(call, 0, 64);
         var tail = call.Kind is CallKind.Tail or CallKind.TailIndirect;
-        switch (op.Kind)
-        {
-            case OpKind.WriteBarrier or OpKind.MemoryBarrier or OpKind.InitClass or OpKind.RunClassConstructor or OpKind.InitMethodRgctx:
-                return tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
-            // 只服务于分派：结果只流向调用目标与 MethodInfo，不是 IL 值。
-            case OpKind.InterfaceInvokeData or OpKind.ResolveGenericVirtual:
-                return null;
-            case OpKind.NullCheck when arguments.Count == 1:
-                {
-                    var target = SymTable.Resolve(arguments[0]);
-                    if (Absorbed(block, index + 1, target)) { absorbedChecks.Add(target); return null; }
-                    if (types.CorlibMethod("System.NullReferenceException", ".ctor") is { } nre)
-                        output.Add(new ManagedCheck(call.Address, new ComparisonValue(Cond.Eq, View(target, types.Object, call.Address), new ConstantValue(0, types.Object, 64), types.Boolean), nre));
-                    else output.Add(new ManagedHole(call.Address, "检查 缺少 NullReferenceException", false));
-                    return null;
-                }
-            case OpKind.NewObject when op.Operand is TypeRef created:
-                constructions[result] = call;
-                return null;
-            case OpKind.NewArray when op.Operand is ArrayRef array && arguments.Count == 2:
-                output.Add(new ManagedAssignment(call.Address, Local(result, array), new NewArrayValue(array, View(arguments[1], types.Int32, call.Address))));
-                return null;
-            case OpKind.Box when op.Operand is TypeRef boxed && arguments.Count == 2:
-                {
-                    var content = call.Memory.Where(m => !m.Write && m.Value == 1).ToArray() is { Length: > 0 } reads
-                        ? values.Syms.Concat(reads.OrderBy(m => m.ValueBit).Select(m => values.Syms.Slice(arguments[Array.IndexOf(call.Sources, m.Cell)], m.CellBit, m.Width)))
-                        : null;
-                    var operand = content is not null ? View(content, boxed, call.Address)
-                        : oracle.Locate(arguments[1], Width(boxed)) is { } location ? LocationValue(location, call.Address) : Hole(call.Address, "装箱 值的位置未知", boxed);
-                    output.Add(new ManagedAssignment(call.Address, Local(result, types.Object), new BoxValue(operand, boxed, types.Object)));
-                    return null;
-                }
-            case OpKind.Unbox when op.Operand is TypeRef unboxed && arguments.Count == 2:
-                output.Add(new ManagedAssignment(call.Address, Local(result, new ByRefRef(unboxed)), new UnboxAddressValue(View(arguments[1], types.Object, call.Address), unboxed)));
-                return null;
-            case OpKind.IsInst when op.Operand is TypeRef target && arguments.Count >= 1:
-                output.Add(new ManagedAssignment(call.Address, Local(result, target), new IsInstValue(View(arguments[0], types.Object, call.Address), target)));
-                return null;
-            case OpKind.Throw when arguments.Count >= 1:
-                return new Statement(new ManagedThrow(call.Address, View(arguments[0], types.Object, call.Address)));
-            case OpKind.ThrowNew when op.Operand is string name && Constructor(name) is { } ctor:
-                return new Statement(new ManagedThrow(call.Address, new NewObjectValue(ctor, [])));
-            case OpKind.NewException when op.Operand is string name && Constructor(name) is { } ctor:
-                output.Add(new ManagedAssignment(call.Address, Local(result, ctor.DeclaringType), new NewObjectValue(ctor, [])));
-                return null;
-            case OpKind.ThrowIf when op.Operand is string name && arguments.Count == 1 && Constructor(name) is { } ctor:
-                output.Add(new ManagedCheck(call.Address, View(arguments[0], types.Boolean, call.Address), ctor));
-                return null;
-            case OpKind.BoundsCheck when arguments.Count == 2 && Constructor("System.IndexOutOfRangeException") is { } ctor:
-                output.Add(new ManagedCheck(call.Address, new ComparisonValue(Cond.Uge, View(arguments[0], types.Int32, call.Address), View(arguments[1], types.Int32, call.Address), types.Boolean), ctor));
-                return null;
-            case OpKind.Rethrow:
-                return new Statement(new ManagedRethrow(call.Address));
-        }
+        var context = new RuntimeContext(this, block, index, call, op, arguments, output);
+        if (RuntimeOps.Of(op.Kind)?.Lower is { } lower && lower(context, out var terminal))
+            return terminal is not null ? new Statement(terminal) : tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
         holes.Add(new(call.Address, $"运行时 {op.Kind}"));
         if (tail) return new Statement(new ManagedHole(call.Address, $"运行时 {op}", true));
         output.Add(new ManagedHole(call.Address, $"运行时 {op}", false));
         return null;
+    }
+
+    /// <summary>运行时操作下降的上下文。</summary>
+    private sealed class RuntimeContext(BodyBuilder owner, Block block, int index, Call call, RuntimeOp op, IReadOnlyList<Sym> arguments, List<ManagedStatement> output) : IRuntimeLowering
+    {
+        public ManagedTypes Types => owner.types;
+        public Call Call => call;
+        public RuntimeOp Op => op;
+        public IReadOnlyList<Sym> Arguments => arguments;
+        public Sym Result => owner.values.Syms.Result(call, 0, 64);
+        public ManagedValue View(Sym sym, TypeRef? expected) => owner.View(sym, expected, call.Address);
+        public LocalValue Local(Sym sym, TypeRef type) => owner.Local(sym, type);
+        public void Emit(ManagedStatement statement) => output.Add(statement);
+        public void AwaitConstruction() => owner.constructions[(ResultSym)Result] = call;
+        public MethodRef? ExceptionConstructor(string fullName) => owner.Constructor(fullName);
+        public ManagedValue Hole(string reason, TypeRef? type) => owner.Hole(call.Address, reason, type);
+
+        public bool Absorb(Sym target)
+        {
+            if (!owner.Absorbed(block, index + 1, target)) return false;
+            owner.absorbedChecks.Add(target);
+            return true;
+        }
+
+        public Sym? Pointee(int value)
+        {
+            var reads = call.Memory.Where(m => !m.Write && m.Value == value).OrderBy(m => m.ValueBit).ToArray();
+            if (reads.Length == 0) return null;
+            var syms = owner.values.Syms;
+            return syms.Concat(reads.Select(m => syms.Slice(arguments[Array.IndexOf(call.Sources, m.Cell)], m.CellBit, m.Width)));
+        }
+
+        public ManagedValue? Location(int argument, TypeRef type) =>
+            argument < arguments.Count && owner.oracle.Locate(arguments[argument], owner.Width(type)) is { } location ? owner.LocationValue(location, call.Address) : null;
     }
 
     private MethodRef? Constructor(string exception) => oracle.ExceptionType(exception) is { } type

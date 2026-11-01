@@ -192,20 +192,9 @@ internal sealed class MemoryPromotion
         var effects = new List<Effect>();
         if (call.Op is { } op && !shapes(call).IsDispatch)
         {
-            switch (op.Kind)
-            {
-                case OpKind.Box when op.Operand is TypeRef boxed && call.Arguments.Length == 2 && Resolve(call.Arguments[1]) is var (space, offset):
-                    var size = abi.Size(boxed);
-                    effects.Add(new(1, 1, size * 8, 0, space, offset, size, MemoryAccess.Read));
-                    break;
-                case OpKind.Import when op.Operand is "memcpy" or "memmove" && call.Arguments is [var to, var from, Const { Value: > 0 and <= 4096 } count]:
-                    if (Resolve(to) is var (toSpace, toOffset)) effects.Add(new(0, 0, (int)count.Value * 8, 0, toSpace, toOffset, (int)count.Value, MemoryAccess.Write));
-                    if (Resolve(from) is var (fromSpace, fromOffset)) effects.Add(new(1, 1, (int)count.Value * 8, 0, fromSpace, fromOffset, (int)count.Value, MemoryAccess.Read));
-                    break;
-                case OpKind.Import when op.Operand is "memset" && call.Arguments is [var target, _, Const { Value: > 0 and <= 4096 } length] && Resolve(target) is var (setSpace, setOffset):
-                    effects.Add(new(0, 0, (int)length.Value * 8, 0, setSpace, setOffset, (int)length.Value, MemoryAccess.Write));
-                    break;
-            }
+            foreach (var effect in Runtime.RuntimeOps.Of(op.Kind)?.Effects?.Invoke(call, abi) ?? [])
+                if (effect.Argument < call.Arguments.Length && Resolve(call.Arguments[effect.Argument]) is var (space, offset))
+                    effects.Add(new(effect.Argument, effect.Value, effect.Size * 8, 0, space, offset, effect.Size, effect.Access));
             return effects;
         }
         if (shapes(call).Signature is not { } callee) return effects;
