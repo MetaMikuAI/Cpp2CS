@@ -77,14 +77,6 @@ internal static class FramesRules
         return root is Symbol { Kind: SymbolKind.StaticFields or SymbolKind.ThreadStaticFields } || offset > 0 && ctx.TypeOfAddressBase(root) is { } type && ManagedTypes.IsReferenceType(type);
     }
 
-    [MachinePass("帧后数组地址", 37, After = ["整数帧槽"])]
-    internal static void PrepareFrameArrayAddresses(this RecoveryScope ctx)
-    {
-        ctx.Maintain.Types("memory.post-frame-arrays.entry");
-        ctx.NormalizePinnedArrays(false);
-        ctx.PrepareArrayCursors();
-    }
-
     internal static void NormalizePinnedArrays(this RecoveryScope ctx, bool simplifyFlow)
     {
         if (PinnedArrayRecognition.Run(ctx.function, e => ctx.TypeOfAddressBase(e) is ArrayRef { IsVector: true } array && ctx.types.Kind(array.Element) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double ? array : null) > 0)

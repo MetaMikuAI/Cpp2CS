@@ -10,7 +10,7 @@ MachinePass	标量栈实参	29	帧前类型	All	StackArgumentsRules.PrepareScala
 MachinePass	帧区域	30	异常值,栈上调用,帧前类型,分支帧快照	All	FramesRules.PrepareFrames
 MachinePass	帧快照	32	帧区域	All	ScalarFramesRules.ForwardFrameSnapshots
 MachinePass	整数帧槽	35	帧区域,帧快照	All	ScalarFramesRules.PrepareScalarFrames
-MachinePass	帧后数组地址	37	整数帧槽	All	FramesRules.PrepareFrameArrayAddresses
+MachinePass	帧后数组地址	37	整数帧槽	All	ArrayCursorsRules.PrepareFrameArrayAddresses
 Analysis	运行时引用	40	帧区域,异常值		RuntimeRules.MarkRuntime
 Analysis	跳转表	45	运行时引用		SwitchesRules.JumpTables
 Analysis	内联	50	运行时引用		InliningRules.Inline
@@ -18,8 +18,8 @@ MachinePass	帧槽	60	帧区域,栈上调用	All	FrameSlotRules.FrameSlots
 Analysis	数学导入	60			NativeImportsRules.AnalyzeNativeImports
 Analysis	分配	70	运行时引用		ConstructionRules.Allocations
 Analysis	检查吸收	80	帧区域		CheckRules.Checks
-MachinePass	字段地址	89	帧槽,检查吸收	All	SharedFieldsRules.PrepareFieldAddresses
-MachinePass	类型	90	运行时引用,内联,帧槽,分配,检查吸收	All	RecoveryAnalysis.Typing
+MachinePass	字段地址	89	帧槽,检查吸收	All	FieldAddressesRules.PrepareFieldAddresses
+MachinePass	类型	90	运行时引用,内联,帧槽,分配,检查吸收	All	TypingRules.Typing
 Analysis	数组切片	95	类型		ArraySpansRules.PrepareArraySpans
 Analysis	结构体汇合	95	类型		StructPhisRules.StructPhis
 Analysis	结构体写入汇合	96	结构体汇合		StructPhisRules.StoredStructPhis

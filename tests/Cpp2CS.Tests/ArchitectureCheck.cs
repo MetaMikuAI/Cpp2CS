@@ -77,8 +77,17 @@ internal static class ArchitectureCheck
             Ledgers.WriteEntries(paths.Whitelist, whitelist);
             Ledgers.WriteEntries(paths.Exemptions, exemptions);
             var recorded = Ledgers.ReadRatchet(paths.Ratchet);
+            // 只写回下降；给出 --base 时，被本次新增转移条目覆盖的上升也写回（覆盖与源键下降由下面的 CheckRises 核对）
+            var covered = new Dictionary<string, int>(StringComparer.Ordinal);
+            if (baseRevision is not null && File.Exists(paths.Transfers))
+            {
+                var baseTransfers = Ledgers.ReadTransfers(Git(model.Repository, "show", $"{baseRevision}:{Path.GetRelativePath(model.Repository, paths.Transfers).Replace('\\', '/')}"));
+                foreach (var transfer in Ledgers.ReadTransfers(File.ReadLines(paths.Transfers)).Where(t => !baseTransfers.Contains(t)))
+                    covered[transfer.Target] = covered.GetValueOrDefault(transfer.Target) + transfer.Count;
+            }
             var lowered = new SortedDictionary<string, int>(StringComparer.Ordinal);
-            foreach (var (key, value) in Counts(census, whitelist, exemptions)) lowered[key] = Math.Min(value, recorded.GetValueOrDefault(key, value));
+            foreach (var (key, value) in Counts(census, whitelist, exemptions))
+                lowered[key] = Math.Min(value, recorded.TryGetValue(key, out var was) ? was + covered.GetValueOrDefault(key) : covered.TryGetValue(key, out var rise) ? rise : value);
             foreach (var (key, value) in recorded.Where(p => !lowered.ContainsKey(p.Key))) lowered[key] = 0;
             Ledgers.WriteRatchet(paths.Ratchet, lowered.Where(p => p.Value > 0 || recorded.ContainsKey(p.Key) && recorded[p.Key] == 0).ToDictionary());
         }

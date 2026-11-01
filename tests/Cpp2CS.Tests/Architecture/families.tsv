@@ -296,6 +296,7 @@ src/Cpp2CS.Core/Recovery/Memory/ArrayElementChecksRules.cs	Recovery/Memory
 src/Cpp2CS.Core/Recovery/Memory/ArrayInitializersRules.cs	Recovery/Memory
 src/Cpp2CS.Core/Recovery/Memory/ArraySpan.cs	Recovery/Memory
 src/Cpp2CS.Core/Recovery/Memory/ArraySpansRules.cs	Recovery/Memory
+src/Cpp2CS.Core/Recovery/Memory/FieldAddressesRules.cs	Recovery/Memory
 src/Cpp2CS.Core/Recovery/Memory/JoinedFieldReads.cs	Recovery/Memory
 src/Cpp2CS.Core/Recovery/Memory/MemoryRules.cs	Recovery/Memory
 src/Cpp2CS.Core/Recovery/Memory/PinnedArrayRecognition.cs	Recovery/Memory

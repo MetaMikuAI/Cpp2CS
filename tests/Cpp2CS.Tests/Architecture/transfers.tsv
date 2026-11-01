@@ -1,1 +1,8 @@
 # 源键	目标键	符号（声明类型.方法）	数量	工作包。跨族搬移代码时与棘轮写回在同一提交中追加；architecture 核对符号已搬到目标范围，--base 核对上升量被覆盖。
+address-add-match/Recovery/Generics	address-add-match/Recovery/Memory	FieldAddressesRules.PrepareFieldAddresses	1	K2
+machine-pass-steps/Recovery/Generics	machine-pass-steps/Recovery/Memory	FieldAddressesRules.PrepareFieldAddresses	1	K2
+scope-extension-methods/Recovery/Generics	scope-extension-methods/Recovery/Memory	FieldAddressesRules.PrepareFieldAddresses	1	K2
+machine-pass-steps/Recovery/Frames	machine-pass-steps/Recovery/Memory	ArrayCursorsRules.PrepareFrameArrayAddresses	1	K2
+scope-extension-methods/Recovery/Frames	scope-extension-methods/Recovery/Memory	ArrayCursorsRules.PrepareFrameArrayAddresses	1	K2
+machine-pass-steps/Recovery/Analysis	machine-pass-steps/Recovery/Typing	TypingRules.Typing	1	K2
+scope-extension-methods/Recovery/Analysis	scope-extension-methods/Recovery/Typing	TypingRules.Typing	1	K2

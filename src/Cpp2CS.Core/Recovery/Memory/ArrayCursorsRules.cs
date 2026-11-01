@@ -44,4 +44,12 @@ internal static class ArrayCursorsRules
         }))
             ctx.Hole(ctx.entry, $"不动点 数组游标超过 {Maintenance.SafetyBudget} 轮未收敛", rule: "Fixpoint");
     }
+
+    [MachinePass("帧后数组地址", 37, After = ["整数帧槽"])]
+    internal static void PrepareFrameArrayAddresses(this RecoveryScope ctx)
+    {
+        ctx.Maintain.Types("memory.post-frame-arrays.entry");
+        ctx.NormalizePinnedArrays(false);
+        ctx.PrepareArrayCursors();
+    }
 }

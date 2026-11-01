@@ -50,4 +50,19 @@ internal static class TypingRules
             ctx.State.Types.known[variable] = type;
     }
 
+    /// <summary>类型推断；认出新的类型检查后（klass 加载成为运行时引用），标记运行时值再推断一次。</summary>
+    [MachinePass("类型", 90, After = ["运行时引用", "内联", "帧槽", "分配", "检查吸收"])]
+    internal static void Typing(this RecoveryScope ctx)
+    {
+        ctx.Maintain.Types("typing.infer.main");
+        if (ctx.PrepareTypeChecks())
+        {
+            ctx.Maintain.Rerun(RuntimeRules.MarkRuntime, "typing.type-checks");
+            ctx.Maintain.Types("typing.infer.type-checks");
+        }
+
+        ctx.PrepareUnusedReceiverPhis();
+        ctx.TrimIndirectArguments(typed: true);
+        ctx.NarrowTypedScalars();
+    }
 }
