@@ -8,7 +8,7 @@ internal static class StackEnumsRules
 {
     /// <summary>Il2CppFakeBox 的类指针、栈标记和枚举值组成临时装箱；仅接收不逃逸的 Enum 实例调用。</summary>
     [Step("frames.stack-enums", StepPhase.Analyze, StepKind.Rewrite, Order = 280, After = ["exceptions.values", "frames.stack-calls"], Name = "栈上枚举")]
-    internal static void PrepareStackEnums(this RecoveryScope ctx)
+    internal static void PrepareStackEnums(this RewriteScope ctx)
     {
         var candidates = new Dictionary<Call, StackEnum>(ReferenceEqualityComparer.Instance);
         ctx.BranchStackEnums(candidates);
@@ -64,7 +64,7 @@ internal static class StackEnumsRules
         }
     }
 
-    internal static void BranchStackEnums(this RecoveryScope ctx, Dictionary<Call, StackEnum> candidates)
+    internal static void BranchStackEnums(this RewriteScope ctx, Dictionary<Call, StackEnum> candidates)
     {
         var next = ctx.blocks.SelectMany(b => b.Statements).SelectMany(s => s switch
         {
@@ -105,7 +105,7 @@ internal static class StackEnumsRules
             ctx.Maintain.Definitions("frames.stack-enums.branches");
     }
 
-    internal static bool StackBoxReadAfter(this RecoveryScope ctx, Call call, StackEnum box)
+    internal static bool StackBoxReadAfter(this AnalysisScope ctx, Call call, StackEnum box)
     {
         var size = RuntimeLayout.ObjectHeaderSize + ctx.types.Size(box.Type);
         uint Bytes(long offset, int count)

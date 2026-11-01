@@ -289,6 +289,7 @@ src/Cpp2CS.Core/Recovery/Kernel/AnalyzeScheduler.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/Maintenance.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/PreparePlan.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/PrepareSteps.cs	Recovery/Kernel
+src/Cpp2CS.Core/Recovery/Kernel/Scopes.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/StepGroup.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Lowering/ArgumentSite.cs	Recovery/Lowering
 src/Cpp2CS.Core/Recovery/Lowering/BodyLowering.cs	Recovery/Lowering

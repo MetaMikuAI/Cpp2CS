@@ -82,7 +82,7 @@ scope-extension-methods/Recovery/Generics	7
 scope-extension-methods/Recovery/Kernel	2
 scope-extension-methods/Recovery/Lowering	12
 scope-extension-methods/Recovery/Memory	22
-scope-extension-methods/Recovery/Runtime	13
+scope-extension-methods/Recovery/Runtime	12
 scope-extension-methods/Recovery/Signature	1
 scope-extension-methods/Recovery/State	1
 scope-extension-methods/Recovery/Structs	28
@@ -113,8 +113,8 @@ state-access/Recovery/Generics	18
 state-access/Recovery/Kernel	5
 state-access/Recovery/Lowering	56
 state-access/Recovery/Memory	22
-state-access/Recovery/Rules	1
-state-access/Recovery/Runtime	35
+state-access/Recovery/Rules	2
+state-access/Recovery/Runtime	34
 state-access/Recovery/Signature	5
 state-access/Recovery/State	14
 state-access/Recovery/Structs	77

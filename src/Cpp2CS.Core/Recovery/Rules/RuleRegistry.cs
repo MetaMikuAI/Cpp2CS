@@ -32,8 +32,8 @@ internal static class RuleRegistry
     public static readonly Func<LoweringScope, Call, AbiSignature, Dictionary<Storage, Expr>, ManagedInvocation, List<ManagedStatement>, RecoveryResult<bool>>[] InvocationOutputs = Rules<Func<LoweringScope, Call, AbiSignature, Dictionary<Storage, Expr>, ManagedInvocation, List<ManagedStatement>, RecoveryResult<bool>>>(RuleKind.InvocationOutput);
     public static readonly Func<LoweringScope, AbiValue, ArgumentSite, RecoveryResult<ManagedValue?>>[] Arguments = Rules<Func<LoweringScope, AbiValue, ArgumentSite, RecoveryResult<ManagedValue?>>>(RuleKind.Argument);
     public static readonly Func<LoweringScope, Call, AbiValue, RecoveryResult<LocalValue?>>[] Results = Rules<Func<LoweringScope, Call, AbiValue, RecoveryResult<LocalValue?>>>(RuleKind.Result);
-    public static readonly Func<RecoveryScope, AbiValue, int, bool>[] Parameters = Rules<Func<RecoveryScope, AbiValue, int, bool>>(RuleKind.ParameterBinding);
-    public static readonly Action<RecoveryScope, ManagedBody>[] Proofs = Rules<Action<RecoveryScope, ManagedBody>>(RuleKind.BodyProof);
+    public static readonly Func<BindingScope, AbiValue, int, bool>[] Parameters = Rules<Func<BindingScope, AbiValue, int, bool>>(RuleKind.ParameterBinding);
+    public static readonly Action<ProofScope, ManagedBody>[] Proofs = Rules<Action<ProofScope, ManagedBody>>(RuleKind.BodyProof);
 
     /// <summary>按 Id 取已注册的步骤（维护动作的重跑用）。</summary>
     public static RegisteredStep Step(string id) => StepsById.TryGetValue(id, out var step) ? step : throw new InvalidOperationException($"未注册的步骤 {id}");
@@ -69,7 +69,9 @@ internal static class RuleRegistry
     {
         var scope = Expression.Parameter(typeof(RecoveryScope), "scope");
         var prepared = Expression.Parameter(typeof(PreparedMethod), "prepared");
-        var arguments = method.GetParameters().Select((p, i) => i == 0 && p.ParameterType == typeof(RecoveryScope) ? scope
+        if (method.GetParameters().FirstOrDefault()?.ParameterType is not { } first || first != typeof(RecoveryScope) && first != typeof(RewriteScope))
+            throw new InvalidOperationException($"Prepare 步骤 {method.DeclaringType!.Name}.{method.Name} 的第一个参数须为改写作用域（内核步骤为方法会话）");
+        var arguments = method.GetParameters().Select((p, i) => i == 0 ? ScopeOf(scope, p.ParameterType)
             : p.ParameterType == typeof(PreparedMethod) ? (Expression)prepared
             : p.HasDefaultValue ? Expression.Constant(p.DefaultValue, p.ParameterType)
             : throw new InvalidOperationException($"Prepare 步骤 {method.DeclaringType!.Name}.{method.Name} 的参数 {p.Name} 无法提供")).ToArray();
@@ -80,12 +82,22 @@ internal static class RuleRegistry
         return Expression.Lambda<Func<RecoveryScope, PreparedMethod, PrepareOutcome>>(body, scope, prepared).Compile();
     }
 
+    /// <summary>方法会话到规则作用域：参数类型为某个作用域时，由会话取对应的作用域对象。</summary>
+    private static Expression ScopeOf(Expression session, Type parameter) =>
+        parameter == typeof(RecoveryScope) ? session
+        : parameter == typeof(AnalysisScope) ? Expression.Property(session, nameof(RecoveryScope.Analysis))
+        : parameter == typeof(RewriteScope) ? Expression.Property(session, nameof(RecoveryScope.Rewrite))
+        : parameter == typeof(BindingScope) ? Expression.Property(session, nameof(RecoveryScope.Binding))
+        : parameter == typeof(ProofScope) ? Expression.Property(session, nameof(RecoveryScope.Proof))
+        : throw new InvalidOperationException($"步骤的作用域参数类型 {parameter.Name} 无法由方法会话提供");
+
     private static TDelegate Adapt<TDelegate>(MethodInfo method)
         where TDelegate : Delegate
     {
         var signature = typeof(TDelegate).GetMethod("Invoke")!;
         var arguments = signature.GetParameters().Select(p => Expression.Parameter(p.ParameterType, p.Name)).ToArray();
-        var call = Expression.Call(method, arguments);
+        var parameters = method.GetParameters();
+        var call = Expression.Call(method, arguments.Select((a, i) => a.Type == typeof(RecoveryScope) ? ScopeOf(a, parameters[i].ParameterType) : (Expression)a));
         Expression result = method.ReturnType == typeof(void) && signature.ReturnType != typeof(void) ? Expression.Block(call, Expression.Default(signature.ReturnType)) : method.ReturnType == signature.ReturnType ? call : Expression.Convert(call, signature.ReturnType);
         return Expression.Lambda<TDelegate>(result, arguments).Compile();
     }
@@ -112,6 +124,10 @@ internal static class RuleRegistry
                 ?? throw new InvalidOperationException("步骤的依赖成环：" + string.Join("、", steps.Keys.Where(k => !done.Contains(k))));
             done.Add(next);
             var (attribute, method) = steps[next];
+            // 分析步骤只拿到只读的分析作用域，改写步骤拿到改写作用域
+            var expected = attribute.Kind == StepKind.Analysis ? typeof(AnalysisScope) : typeof(RewriteScope);
+            if (method.GetParameters().FirstOrDefault()?.ParameterType != expected)
+                throw new InvalidOperationException($"步骤 {next} 的作用域参数须为 {expected.Name}");
             ordered.Add(new(next, attribute.Name, attribute.Kind, attribute.Invalidates, attribute.Refresh, method.ReturnType != typeof(void),
                 Adapt<Func<RecoveryScope, RecoveryFailure?>>(method)));
         }

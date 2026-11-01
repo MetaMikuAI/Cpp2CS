@@ -7,9 +7,8 @@ namespace Cpp2CS.Recovery;
 
 internal static class BodyLowering
 {
-    internal static RecoveryResult<ManagedBody> Build(this RecoveryScope ctx)
+    internal static RecoveryResult<ManagedBody> Build(this AnalysisScope ctx)
     {
-        ctx.currentStep = "build";
         if (ctx.State.Exceptions.exceptionLayout is { Succeeded: true })
             return ctx.BuildExceptionBody();
         var managedBlocks = new List<ManagedBlock>();
@@ -74,11 +73,11 @@ internal static class BodyLowering
         return new ManagedBody(ctx.method, managedBlocks);
     }
 
-    internal static RecoveryResult<LocalValue> Local(this RecoveryScope ctx, Variable v) => ctx.LocalOf(v);
-    internal static bool NonReturningManagedCall(this RecoveryScope ctx, Stmt? statement) =>
+    internal static RecoveryResult<LocalValue> Local(this AnalysisScope ctx, Variable v) => ctx.LocalOf(v);
+    internal static bool NonReturningManagedCall(this AnalysisScope ctx, Stmt? statement) =>
         statement is Call { Kind: CallKind.Direct, Target: Const target } call
         && ctx.Resolve(call) is not null && ctx.owner.lifter.NoReturn.IsNoReturn(target.Value);
-    internal static RecoveryResult<ManagedEdge> Edge(this RecoveryScope ctx, Block from, int successor, ulong target)
+    internal static RecoveryResult<ManagedEdge> Edge(this AnalysisScope ctx, Block from, int successor, ulong target)
     {
         var to = from.NormalSuccessors.ElementAtOrDefault(successor);
         if (to is null || to.Start != target)
@@ -176,8 +175,8 @@ internal static class BodyLowering
         return null;
     }
 
-    internal static RecoveryFailure? Assign(this RecoveryScope ctx, ulong address, Variable target, Func<RecoveryResult<ManagedValue>> value, List<ManagedStatement> output) => BodyLowering.Emit(ctx.Local(target).Bind(local => value().Map(v => new ManagedAssignment(address, local, v))), output);
-    internal static RecoveryFailure? Translate(this RecoveryScope ctx, Block block, Stmt statement, List<ManagedStatement> output)
+    internal static RecoveryFailure? Assign(this AnalysisScope ctx, ulong address, Variable target, Func<RecoveryResult<ManagedValue>> value, List<ManagedStatement> output) => BodyLowering.Emit(ctx.Local(target).Bind(local => value().Map(v => new ManagedAssignment(address, local, v))), output);
+    internal static RecoveryFailure? Translate(this AnalysisScope ctx, Block block, Stmt statement, List<ManagedStatement> output)
     {
         if (BodyLowering.Rules(RuleRegistry.Statements.Select(rule => rule(ctx.Lowering, block, statement, output)), out var handled) is { } ruleFailure)
             return ruleFailure;
@@ -251,7 +250,7 @@ internal static class BodyLowering
         }
     }
 
-    internal static RecoveryFailure? TranslateCall(this RecoveryScope ctx, Call call, List<ManagedStatement> output)
+    internal static RecoveryFailure? TranslateCall(this AnalysisScope ctx, Call call, List<ManagedStatement> output)
     {
         if (BodyLowering.Rules(RuleRegistry.Calls.Select(rule => rule(ctx.Lowering, call, output)), out var handled) is { } ruleFailure)
             return ruleFailure;
@@ -363,8 +362,8 @@ internal static class BodyLowering
         }
     }
 
-    internal static RecoveryResult<ManagedCheck> Check(this RecoveryScope ctx, ulong address, ManagedValue condition, string exception) => ctx.owner.ExceptionConstructor(exception) is { } constructor ? new ManagedCheck(address, condition, constructor) : RecoveryDiagnostics.Fail(address, $"异常 {exception} 没有无参构造函数", rule: "Check");
-    internal static RecoveryFailure? Invocation(this RecoveryScope ctx, Call call, List<ManagedStatement> output)
+    internal static RecoveryResult<ManagedCheck> Check(this AnalysisScope ctx, ulong address, ManagedValue condition, string exception) => ctx.owner.ExceptionConstructor(exception) is { } constructor ? new ManagedCheck(address, condition, constructor) : RecoveryDiagnostics.Fail(address, $"异常 {exception} 没有无参构造函数", rule: "Check");
+    internal static RecoveryFailure? Invocation(this AnalysisScope ctx, Call call, List<ManagedStatement> output)
     {
         var address = call.Address;
         if (BodyLowering.Rules(RuleRegistry.Invocations.Select(rule => rule(ctx.Lowering, call, output)), out var handled) is { } ruleFailure)

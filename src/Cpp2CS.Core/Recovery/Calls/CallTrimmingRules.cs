@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 internal static class CallTrimmingRules
 {
     [Step("calls.trim-indirect-arguments", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void TrimIndirectArguments(this RecoveryScope ctx, bool typed = false)
+    internal static void TrimIndirectArguments(this RewriteScope ctx, bool typed = false)
     {
         var changed = false;
         foreach (var block in ctx.function.Blocks)
@@ -70,7 +70,7 @@ internal static class CallTrimmingRules
         }
     }
 
-    internal static bool DiscardableReceiver(this RecoveryScope ctx, Expr value, HashSet<Variable> visited)
+    internal static bool DiscardableReceiver(this AnalysisScope ctx, Expr value, HashSet<Variable> visited)
     {
         if (value is Use use)
         {
@@ -84,8 +84,8 @@ internal static class CallTrimmingRules
         return value is Const or Unknown || value is Select select && ExprMap.Children(select).All(e => ctx.DiscardableReceiver(e, visited));
     }
 
-    internal static bool IsWriteBarrier(this RecoveryScope ctx, Call call) => call.Op?.Kind == OpKind.WriteBarrier || call.Op is null && call.Target is Const helper && ctx.facts.Helpers.At(helper.Value) is { Kind: HelperKind.WriteBarrier } && ctx.facts.Code.RegionOf(helper.Value) != CodeRegion.Managed;
-    internal static MethodRef? Callee(this RecoveryScope ctx, Call call)
+    internal static bool IsWriteBarrier(this AnalysisScope ctx, Call call) => call.Op?.Kind == OpKind.WriteBarrier || call.Op is null && call.Target is Const helper && ctx.facts.Helpers.At(helper.Value) is { Kind: HelperKind.WriteBarrier } && ctx.facts.Code.RegionOf(helper.Value) != CodeRegion.Managed;
+    internal static MethodRef? Callee(this AnalysisScope ctx, Call call)
     {
         switch (call.Op)
         {

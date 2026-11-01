@@ -8,9 +8,9 @@ internal static class CallResolution
 {
     // ---------- 调用目标（地址分解见 MethodRecovery.Memory.cs） ----------
     internal static Dictionary<Storage, Expr> ArgumentsOf(Call call) => call.ArgumentsBySource();
-    internal static MethodRef? Resolve(this RecoveryScope ctx, Call call)
+    internal static MethodRef? Resolve(this AnalysisScope ctx, Call call)
     {
-        if (ctx.State.Calls.callBindings.Cached(call, ctx.analyses.Version) is { } cached)
+        if (ctx.State.Calls.callBindings.Cached(call, ctx.AnalysisVersion) is { } cached)
             return cached;
         var result = ctx.ResolveOnce(call);
         // 封闭实例：经自身 MethodInfo/RGCTX 得到的方法保留泛型参数形式（如 IUniTaskSource<T>.GetResult），代入实例的实参。
@@ -20,11 +20,11 @@ internal static class CallResolution
                 TypeArguments = result.TypeArguments.Select(t => t.Substitute(ctx.method.TypeArguments, ctx.method.MethodArguments)).ToArray(),
                 MethodArguments = result.MethodArguments.Select(t => t.Substitute(ctx.method.TypeArguments, ctx.method.MethodArguments)).ToArray(),
             };
-        ctx.State.Calls.callBindings.Remember(call, result, ctx.analyses.Version);
+        ctx.State.Calls.callBindings.Remember(call, result, ctx.AnalysisVersion);
         return result;
     }
 
-    internal static MethodRef? ResolveOnce(this RecoveryScope ctx, Call call)
+    internal static MethodRef? ResolveOnce(this AnalysisScope ctx, Call call)
     {
         if (call.Op is null && call.Target is Const inferredTarget && ctx.facts.Unregistered.At(inferredTarget.Value) is { } identity)
             return UnregisteredMethods.Resolve(identity, call, ctx.Expand, ctx.owner.abi, out _);
@@ -138,7 +138,7 @@ internal static class CallResolution
         }
     }
 
-    internal static IEnumerable<TypeRef> ReceiverTypes(this RecoveryScope ctx, Call call, TypeRef? receiver)
+    internal static IEnumerable<TypeRef> ReceiverTypes(this AnalysisScope ctx, Call call, TypeRef? receiver)
     {
         if (receiver is ByRefRef { Element: var element })
             yield return element;

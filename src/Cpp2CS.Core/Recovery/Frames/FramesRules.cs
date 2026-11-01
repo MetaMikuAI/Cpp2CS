@@ -7,12 +7,12 @@ namespace Cpp2CS.Recovery;
 
 internal static class FramesRules
 {
-    internal static bool ContainsFrameType(this RecoveryScope ctx, FrameRegion outer, long offset, TypeRef type) => outer.Offset == offset && outer.Type.Equals(type)
+    internal static bool ContainsFrameType(this AnalysisScope ctx, FrameRegion outer, long offset, TypeRef type) => outer.Offset == offset && outer.Type.Equals(type)
         || ctx.types.Kind(outer.Type) == TypeKind.Struct && offset >= outer.Offset && offset + ctx.types.Size(type) <= outer.Offset + outer.Size
         && ctx.StructPaths(outer.Type).Any(p => outer.Offset + p.Offset == offset && p.Type.Equals(type));
     /// <summary>先解析接收者及虚调用返回类型，避免帧区域只看见直调签名而提前固定错误的栈槽类型。</summary>
     [Step("frames.pre-typing", StepPhase.Analyze, StepKind.Rewrite, Order = 290, After = ["exceptions.values", "frames.stack-calls", "frames.stack-enums"], Name = "帧前类型", Refresh = StepRefresh.Types)]
-    internal static void PrepareFrameTypes(this RecoveryScope ctx)
+    internal static void PrepareFrameTypes(this RewriteScope ctx)
     {
         ctx.NormalizeCheckedObjects();
         ctx.Maintain.Fixpoint("frames.joined-addresses", 8, () =>
@@ -40,7 +40,7 @@ internal static class FramesRules
         ctx.PrepareArrayCursors();
     }
 
-    internal static bool FieldAddress(this RecoveryScope ctx, Variable variable)
+    internal static bool FieldAddress(this AnalysisScope ctx, Variable variable)
     {
         if (ctx.FrameOffset(new Use(variable, 64)) is not null) return true;
         if (ctx.values.GetValueOrDefault(variable) is Binary { Op: BinOp.Add } arrayAddress && ctx.ArrayLocation(arrayAddress) is not null) return true;
@@ -76,7 +76,7 @@ internal static class FramesRules
         return root is Symbol { Kind: SymbolKind.StaticFields or SymbolKind.ThreadStaticFields } || offset > 0 && ctx.TypeOfAddressBase(root) is { } type && ManagedTypes.IsReferenceType(type);
     }
 
-    internal static void NormalizePinnedArrays(this RecoveryScope ctx, bool simplifyFlow)
+    internal static void NormalizePinnedArrays(this RewriteScope ctx, bool simplifyFlow)
     {
         if (PinnedArrayRecognition.Run(ctx.function, e => ctx.TypeOfAddressBase(e) is ArrayRef { IsVector: true } array && ctx.types.Kind(array.Element) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double ? array : null) > 0)
         {
@@ -98,7 +98,7 @@ internal static class FramesRules
 
     /// <summary>只有精确调用签名提供类型；普通访存宽度不能定型。异型重叠先拒绝，嵌套字段见证合并到外根。</summary>
     [Step("frames.regions", StepPhase.Analyze, StepKind.Rewrite, Order = 300, After = ["exceptions.values", "frames.stack-calls", "frames.pre-typing", "frames.branch-snapshots"], Name = "帧区域")]
-    internal static RecoveryFailure? PrepareFrames(this RecoveryScope ctx)
+    internal static RecoveryFailure? PrepareFrames(this RewriteScope ctx)
     {
         var witnesses = new List<FrameWitness>();
         void Bind(Expr expression, TypeRef type, Call call, bool writes = false)
@@ -261,7 +261,7 @@ internal static class FramesRules
         return null;
     }
 
-    internal static RecoveryFailure? DiscoverArrayFrameCopies(this RecoveryScope ctx, List<FrameWitness> witnesses)
+    internal static RecoveryFailure? DiscoverArrayFrameCopies(this AnalysisScope ctx, List<FrameWitness> witnesses)
     {
         if (!witnesses.Any(w => w.Type is ArrayRef || ctx.StructPaths(w.Type).Any(p => p.Type is ArrayRef)))
             return null;
@@ -292,7 +292,7 @@ internal static class FramesRules
         return null;
     }
 
-    internal static void WitnessStoredArguments(this RecoveryScope ctx, List<FrameWitness> witnesses)
+    internal static void WitnessStoredArguments(this AnalysisScope ctx, List<FrameWitness> witnesses)
     {
         var stores = ctx.blocks.SelectMany(b => b.Statements).OfType<Store>().Where(s => s.Value is Use { Variable.Version: 0 } && ctx.FrameOffset(s.Target) is not null).ToLookup(s => ((Use)s.Value).Variable.Storage);
         foreach (var group in ctx.State.Signature.structArguments.GroupBy(p => p.Value.Root))
@@ -325,7 +325,7 @@ internal static class FramesRules
         }
     }
 
-    internal static RecoveryFailure? WitnessStoredResults(this RecoveryScope ctx, List<FrameWitness> witnesses)
+    internal static RecoveryFailure? WitnessStoredResults(this AnalysisScope ctx, List<FrameWitness> witnesses)
     {
         var stores = ctx.blocks.SelectMany(b => b.Statements).OfType<Store>().Select(s => (Store: s, Offset: s.Value is Use ? ctx.FrameOffset(s.Target) : null)).Where(p => p.Offset is not null).ToLookup(p => ((Use)p.Store.Value).Variable);
         if (stores.Count == 0)
@@ -375,7 +375,7 @@ internal static class FramesRules
         return null;
     }
 
-    internal static RecoveryFailure? WitnessFieldCopies(this RecoveryScope ctx, List<FrameWitness> witnesses)
+    internal static RecoveryFailure? WitnessFieldCopies(this AnalysisScope ctx, List<FrameWitness> witnesses)
     {
         foreach (var block in ctx.blocks)
         {
@@ -421,7 +421,7 @@ internal static class FramesRules
         return null;
     }
 
-    internal static void WitnessFrameCopies(this RecoveryScope ctx, List<FrameWitness> witnesses)
+    internal static void WitnessFrameCopies(this AnalysisScope ctx, List<FrameWitness> witnesses)
     {
         var positions = ctx.blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Block: b, Index: i))).ToArray();
         // 位置按语句对象索引；同一对象在多个块中时无法判定先后，留洞而不猜测
@@ -510,14 +510,14 @@ internal static class FramesRules
         });
     }
 
-    internal static int ScalarWidth(this RecoveryScope ctx, TypeRef type) => ctx.types.Kind(type) switch
+    internal static int ScalarWidth(this AnalysisScope ctx, TypeRef type) => ctx.types.Kind(type) switch
     {
         TypeKind.Struct => 0,
         TypeKind.Bool => 8,
         TypeKind.Reference => 64,
         _ => ctx.types.Bits(type),
     };
-    internal static bool FrameZero(this RecoveryScope ctx, Expr expression, HashSet<Variable>? active = null)
+    internal static bool FrameZero(this AnalysisScope ctx, Expr expression, HashSet<Variable>? active = null)
     {
         active ??= [];
         return expression switch
@@ -530,7 +530,7 @@ internal static class FramesRules
         };
     }
 
-    internal static void PrepareFrameInitializers(this RecoveryScope ctx)
+    internal static void PrepareFrameInitializers(this AnalysisScope ctx)
     {
         foreach (var block in ctx.blocks)
             for (var i = 0; i < block.Statements.Count; i++)
@@ -631,7 +631,7 @@ internal static class FramesRules
 
     /// <summary>CLR 的 initlocals 不是原生帧初值证据；每次读叶子/传址之前必须在所有正常前驱上已定义，异常入口不继承普通回边的初值。</summary>
     [Rule(RuleKind.BodyProof, "frames.prove-initialization", Order = 300)]
-    internal static void ProveFrameInitialization(this RecoveryScope ctx, ManagedBody body)
+    internal static void ProveFrameInitialization(this ProofScope ctx, ManagedBody body)
     {
         if (ctx.State.Frames.frameRegions.Count == 0)
             return;
@@ -656,7 +656,7 @@ internal static class FramesRules
 
     /// <summary>托管帧提升；步骤组，前后各收窄一次标量向量。</summary>
     [Step("frames.managed-promotion", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void PromoteManagedFrames(RecoveryScope scope, PreparedMethod prepared)
+    internal static void PromoteManagedFrames(RewriteScope scope, PreparedMethod prepared)
     {
         StepGroup.Run(scope, "frames.managed-promotion.narrow-before", () => scope.NormalizeScalarVectors());
         StepGroup.Run(scope, "frames.managed-promotion.promote", () => ManagedFramePromotion.Run(scope.facts, scope.function, prepared.Abi, prepared.Calls, prepared.StackPointer, prepared.Signature.Return));

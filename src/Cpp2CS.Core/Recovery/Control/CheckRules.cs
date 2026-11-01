@@ -9,7 +9,7 @@ internal static class CheckRules
 {
     /// <summary>判空与越界的吸收（见类注释第 4 条）。</summary>
     [Step("control.absorb-checks", StepPhase.Analyze, StepKind.Analysis, Order = 800, After = ["frames.regions"], Name = "检查吸收")]
-    internal static void Checks(this RecoveryScope ctx)
+    internal static void Checks(this AnalysisScope ctx)
     {
         // 现有吸收规则只证明普通 CFG；EH 的保护域按语句划分，不能跨界移动抛出点。
         if (ctx.State.Exceptions.exceptionLayout is { Succeeded: true })
@@ -37,7 +37,7 @@ internal static class CheckRules
     internal static IEnumerable<Stmt> Following(Block block, int index) =>
         StraightLine.Following(block, index, StraightLinePolicy.Jump).Select(p => p.Statement);
 
-    internal static bool AbsorbNull(this RecoveryScope ctx, Block block, int index, Expr value)
+    internal static bool AbsorbNull(this AnalysisScope ctx, Block block, int index, Expr value)
     {
         foreach (var statement in CheckRules.Following(block, index))
         {
@@ -67,7 +67,7 @@ internal static class CheckRules
         return false;
     }
 
-    internal static bool Implied(this RecoveryScope ctx, Block block, int index, DefinitionRef type)
+    internal static bool Implied(this AnalysisScope ctx, Block block, int index, DefinitionRef type)
     {
         bool Static(Expr address) => ctx.Split(address).Base is Symbol { Kind: SymbolKind.StaticFields, Value: DefinitionRef owner } && owner.Equals(type);
         foreach (var statement in CheckRules.Following(block, index))
@@ -98,7 +98,7 @@ internal static class CheckRules
         return false;
     }
 
-    internal static bool AbsorbBounds(this RecoveryScope ctx, Block block, int index, Call check)
+    internal static bool AbsorbBounds(this AnalysisScope ctx, Block block, int index, Call check)
     {
         if (check.Arguments is not [var checkedIndex, var length] || ctx.BaseOf(ctx.StripLength(length)) is not { } array)
             return false;
@@ -122,7 +122,7 @@ internal static class CheckRules
         return false;
     }
 
-    internal static Expr StripLength(this RecoveryScope ctx, Expr length)
+    internal static Expr StripLength(this AnalysisScope ctx, Expr length)
     {
         if (length is Use u && ctx.values.TryGetValue(u.Variable, out var value))
             length = value;
@@ -131,7 +131,7 @@ internal static class CheckRules
         return length is Load { Address: var address } && ctx.Split(address).Offset == RuntimeLayout.ArrayMaxLength ? address : new Unknown("length", 64);
     }
 
-    internal static bool SameIndex(this RecoveryScope ctx, Expr element, Expr checkedIndex)
+    internal static bool SameIndex(this AnalysisScope ctx, Expr element, Expr checkedIndex)
     {
         Expr Strip(Expr e)
         {

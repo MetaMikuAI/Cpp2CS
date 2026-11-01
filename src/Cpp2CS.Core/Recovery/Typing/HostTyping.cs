@@ -3,7 +3,7 @@ using Cpp2CS.Recovery.Typing;
 
 namespace Cpp2CS.Recovery;
 
-internal sealed class HostTyping(RecoveryScope host, TypingContext typing) : IExpressionTyping
+internal sealed class HostTyping(AnalysisScope host, TypingContext typing) : IExpressionTyping
 {
     public TypeRef? TypeOf(Expr expression, TypeRef? hint = null)
     {

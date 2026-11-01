@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class FrameLifetimesRules
 {
-    internal static void PrepareColoredFrames(this RecoveryScope ctx, FrameRegion[] candidates, List<FrameWitness> witnesses)
+    internal static void PrepareColoredFrames(this AnalysisScope ctx, FrameRegion[] candidates, List<FrameWitness> witnesses)
     {
         var chains = new List<Stmt[]>();
         var visited = new HashSet<Block>();
@@ -78,7 +78,7 @@ internal static class FrameLifetimesRules
                 ctx.ReachingFrames(offset, candidates, witnesses);
     }
 
-    internal static void ReachingFrames(this RecoveryScope ctx, long offset, FrameRegion[] candidates, List<FrameWitness> witnesses)
+    internal static void ReachingFrames(this AnalysisScope ctx, long offset, FrameRegion[] candidates, List<FrameWitness> witnesses)
     {
         var at = witnesses.Where(w => w.Offset == offset).ToArray();
         if (at.Select(w => w.Type).Distinct().Count() < 2)

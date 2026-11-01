@@ -4,7 +4,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class FrameArgumentsRules
 {
-    internal static void WitnessLoadedArguments(this RecoveryScope ctx, List<FrameWitness> witnesses)
+    internal static void WitnessLoadedArguments(this AnalysisScope ctx, List<FrameWitness> witnesses)
     {
         var loads = ctx.blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target);
         (Load Load, Define Statement)? Loaded(Expr expression) => FrameArgumentSpan.Loaded(expression, loads);
@@ -41,7 +41,7 @@ internal static class FrameArgumentsRules
         }
     }
 
-    internal static void WitnessLoadedReturns(this RecoveryScope ctx, List<FrameWitness> witnesses)
+    internal static void WitnessLoadedReturns(this AnalysisScope ctx, List<FrameWitness> witnesses)
     {
         if (ctx.owner.abi.Classify(ctx.method, out _)?.Return is not { } returned
             || !ctx.RegisterStruct(returned) && !(returned.Passing == Facts.Passing.Registers && returned.Pieces.Length == 1
@@ -64,7 +64,7 @@ internal static class FrameArgumentsRules
     }
 
     /// <summary>寄存器传参可按字段重新组装结构体；同块已有写入给出兼容叶子时，不再用目标结构体覆盖源区域。</summary>
-    internal static bool TypedFrameRead(this RecoveryScope ctx, List<FrameWitness> witnesses, long offset, TypeRef type, IEnumerable<Define> reads,
+    internal static bool TypedFrameRead(this AnalysisScope ctx, List<FrameWitness> witnesses, long offset, TypeRef type, IEnumerable<Define> reads,
         IReadOnlyList<(int Offset, int Width, long Frame)>? pieces = null)
     {
         // 部分寄存器分量只约束实际读取的字节，不能把较小的源结构体扩大为目标布局。
@@ -78,7 +78,7 @@ internal static class FrameArgumentsRules
             && leaves.All(leaf => ctx.ScalarStructPaths(w.Type).Any(source => w.Offset + source.Offset == offset + leaf.Offset && source.Type.Equals(leaf.Type))));
     }
 
-    internal static void WitnessReadInitialization(this RecoveryScope ctx, List<FrameWitness> witnesses, long offset, TypeRef type, IEnumerable<Define> reads)
+    internal static void WitnessReadInitialization(this AnalysisScope ctx, List<FrameWitness> witnesses, long offset, TypeRef type, IEnumerable<Define> reads)
     {
         var sites = ctx.blocks.SelectMany(b => b.Statements.Select((s, i) => (Block: b, Statement: s, Index: i)))
             .Where(s => reads.Contains(s.Statement)).ToArray();

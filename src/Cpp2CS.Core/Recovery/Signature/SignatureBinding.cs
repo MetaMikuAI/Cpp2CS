@@ -7,7 +7,7 @@ internal static class SignatureBinding
 {
     /// <summary>签名绑定（参数绑定与返回缓冲）；失败时已记洞，中止。</summary>
     [Step("signature.bind", StepPhase.Prepare, StepKind.Analysis)]
-    internal static PrepareOutcome Bind(RecoveryScope scope, PreparedMethod prepared)
+    internal static PrepareOutcome Bind(RewriteScope scope, PreparedMethod prepared)
     {
         if (!scope.BindSignature(out var signature, out var returnValue))
             return PrepareOutcome.Stop;
@@ -16,7 +16,7 @@ internal static class SignatureBinding
         return PrepareOutcome.Continue;
     }
 
-    internal static bool BindSignature(this RecoveryScope ctx, out AbiSignature signature, out Expr? returnValue)
+    internal static bool BindSignature(this AnalysisScope ctx, out AbiSignature signature, out Expr? returnValue)
     {
         signature = null!;
         returnValue = null;
@@ -42,7 +42,7 @@ internal static class SignatureBinding
         for (var i = 0; i < signature.Parameters.Length; i++)
         {
             var parameter = signature.Parameters[i];
-            if (RuleRegistry.Parameters.Any(rule => rule(ctx, parameter, i)))
+            if (RuleRegistry.Parameters.Any(rule => rule(ctx.Binding, parameter, i)))
                 continue;
             if (incomingStack.Parameters.FirstOrDefault(p => p.Index == i) is { Indirect: false } stackParameter && (ctx.types.Kind(parameter.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Reference or TypeKind.Float or TypeKind.Double || ManagedTypes.IsNativePointer(parameter.Type)))
             {

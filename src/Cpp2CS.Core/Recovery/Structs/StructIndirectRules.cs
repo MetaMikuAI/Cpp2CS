@@ -6,9 +6,9 @@ namespace Cpp2CS.Recovery;
 
 internal static class StructIndirectRules
 {
-    internal static bool IndirectStruct(this RecoveryScope ctx, AbiValue value) => value.Passing == Passing.Indirect && (ctx.types.Kind(value.Type) == TypeKind.Struct || ManagedAbi.SharedValue(value.Type));
+    internal static bool IndirectStruct(this AnalysisScope ctx, AbiValue value) => value.Passing == Passing.Indirect && (ctx.types.Kind(value.Type) == TypeKind.Struct || ManagedAbi.SharedValue(value.Type));
     [Rule(RuleKind.ParameterBinding, "structs.bind-indirect-argument", Order = 200)]
-    internal static bool PrepareIndirectArgument(this RecoveryScope ctx, AbiValue parameter, int index)
+    internal static bool PrepareIndirectArgument(this BindingScope ctx, AbiValue parameter, int index)
     {
         if (!ctx.IndirectStruct(parameter))
             return false;
@@ -19,7 +19,7 @@ internal static class StructIndirectRules
         return true;
     }
 
-    internal static void PrepareReturnBuffer(this RecoveryScope ctx, AbiValue? value)
+    internal static void PrepareReturnBuffer(this AnalysisScope ctx, AbiValue? value)
     {
         if (value is null || !ctx.IndirectStruct(value))
             return;
@@ -86,7 +86,7 @@ internal static class StructIndirectRules
 
     /// <summary>返回缓冲区没有隐含默认值。按 CFG 前驱交集证明每条正常返回路径都定义了全部叶子。</summary>
     [Rule(RuleKind.BodyProof, "structs.prove-return-buffer", Order = 100)]
-    internal static void ProveReturnBuffer(this RecoveryScope ctx, ManagedBody body)
+    internal static void ProveReturnBuffer(this ProofScope ctx, ManagedBody body)
     {
         if (ctx.State.Signature.ownReturnBuffer is null)
             return;

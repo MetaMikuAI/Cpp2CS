@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class GenericVirtualRules
 {
-    internal static void MarkGenericVirtualLoads(this RecoveryScope ctx)
+    internal static void MarkGenericVirtualLoads(this AnalysisScope ctx)
     {
         Expr Instance(Expr expression)
         {

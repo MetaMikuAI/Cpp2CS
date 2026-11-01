@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 internal static class InliningRules
 {
     [Step("lowering.inline", StepPhase.Analyze, StepKind.Analysis, Order = 500, After = ["runtime.mark"], Name = "内联")]
-    internal static void Inline(this RecoveryScope ctx)
+    internal static void Inline(this AnalysisScope ctx)
     {
         var uses = new Dictionary<Variable, List<(Block Block, int Index)>>();
         foreach (var block in ctx.blocks)
@@ -31,7 +31,7 @@ internal static class InliningRules
         ctx.InlineStructArgumentLoads(uses);
     }
 
-    internal static void InlineStructArgumentLoads(this RecoveryScope ctx, Dictionary<Variable, List<(Block Block, int Index)>> uses)
+    internal static void InlineStructArgumentLoads(this AnalysisScope ctx, Dictionary<Variable, List<(Block Block, int Index)>> uses)
     {
         foreach (var block in ctx.blocks)
             for (var i = 0; i < block.Statements.Count; i++)
@@ -73,5 +73,5 @@ internal static class InliningRules
             }
     }
 
-    internal static Expr Expand(this RecoveryScope ctx, Expr e) => e is Use u && ctx.State.Runtime.runtime.Contains(u.Variable) && ctx.values.TryGetValue(u.Variable, out var value) ? ctx.Expand(value) : e;
+    internal static Expr Expand(this AnalysisScope ctx, Expr e) => e is Use u && ctx.State.Runtime.runtime.Contains(u.Variable) && ctx.values.TryGetValue(u.Variable, out var value) ? ctx.Expand(value) : e;
 }

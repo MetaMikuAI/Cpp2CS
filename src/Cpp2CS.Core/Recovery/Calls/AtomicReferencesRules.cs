@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class AtomicReferencesRules
 {
-    internal static RecoveryFailure? CompareExchangeReference(this RecoveryScope ctx, Call call, List<ManagedStatement> output)
+    internal static RecoveryFailure? CompareExchangeReference(this AnalysisScope ctx, Call call, List<ManagedStatement> output)
     {
         if (call.Arguments is not [var address, var value, var comparand] || call.Defines.FirstOrDefault() is not { } result)
             return RecoveryDiagnostics.Fail(call.Address, "原子交换 缺少位置、引用参数或返回值", rule: "CompareExchangeReference");

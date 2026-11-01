@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class CallDiagnosticsRules
 {
-    internal static string CallResolutionFailure(this RecoveryScope ctx, Call call)
+    internal static string CallResolutionFailure(this AnalysisScope ctx, Call call)
     {
         if (ctx.State.Calls.callBindings.Resolution(call) is { Status: "conflict" } conflict)
             return $"调用 多个兼容候选未消歧：{string.Join('；', conflict.Candidates.Where(c => c.Rejection is null).Select(c => c.Method))}";

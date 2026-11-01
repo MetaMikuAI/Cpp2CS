@@ -69,11 +69,11 @@ internal static class NativePointerCheck
         var scalarMethod = Add("ScalarBytes", types.UInt16, types.Double, new ConstantValue(0, types.UInt16, 16));
         var ctx = new RecoveryScope(new MethodRecovery(facts, types), new(scalarMethod, [], []), 0);
         var region = new FrameRegion(-8, types.Double, 8, scalar);
-        a.True(ctx.FrameLocation(region, 3, 16).TryGet(out var bytes, out _), "标量帧内允许非对齐部分访问");
-        a.True(ctx.FrameLocation(region, 7, 16).Failure is not null, "部分访问不得越过帧边界");
-        a.True(ctx.FrameLocation(region, -1, 8).Failure is not null, "部分访问不得位于帧之前");
+        a.True(ctx.Analysis.FrameLocation(region, 3, 16).TryGet(out var bytes, out _), "标量帧内允许非对齐部分访问");
+        a.True(ctx.Analysis.FrameLocation(region, 7, 16).Failure is not null, "部分访问不得越过帧边界");
+        a.True(ctx.Analysis.FrameLocation(region, -1, 8).Failure is not null, "部分访问不得位于帧之前");
         var reference = new FrameRegion(-8, types.Object, 8, scalar with { Type = types.Object });
-        a.True(ctx.FrameLocation(reference, 0, 8).Failure is not null, "托管引用不按标量原始字节读取");
+        a.True(ctx.Analysis.FrameLocation(reference, 0, 8).Failure is not null, "托管引用不按标量原始字节读取");
         bodies[^1] = new(new(scalarMethod, [], []), [new(0,
         [
             new ManagedAssignment(0, scalar, new ArgumentValue(0, types.Double, 64)),

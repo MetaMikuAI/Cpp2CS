@@ -9,7 +9,7 @@ namespace Cpp2CS.Recovery;
 internal static class DelegatesRules
 {
     [Step("calls.split-identity-choices", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void NormalizeDelegateChoices(this RecoveryScope ctx)
+    internal static void NormalizeDelegateChoices(this RewriteScope ctx)
     {
         var definitions = ctx.function.Blocks.SelectMany(b => b.Statements.OfType<Define>()).ToDictionary(d => d.Target, d => d.Value);
         Expr ExpandIdentity(Expr expression)
@@ -34,7 +34,7 @@ internal static class DelegatesRules
             StepGroup.Run(ctx, "calls.split-identity-choices.propagate", () => ctx.Edit.Propagate(ctx.Dominators, "calls.split-identity-choices"));
     }
 
-    internal static void DelegateAllocation(this RecoveryScope ctx, Block block, int index, Call allocation, DefinitionRef type, Variable created)
+    internal static void DelegateAllocation(this AnalysisScope ctx, Block block, int index, Call allocation, DefinitionRef type, Variable created)
     {
         bool Constructor(Call call) => call.Op is { Kind: OpKind.CallMethodPointer, Operand: MethodRef { Method: { Name: ".ctor", IsStatic: false } pointerCtor } } && pointerCtor.Owner == type.Definition || call is { Op: null, Kind: CallKind.Direct, Target: Const target } && ctx.facts.EntriesAt(target.Value).Any(e => e.Method is { Method: { Name: ".ctor", IsStatic: false } m } && m.Owner == type.Definition);
         var constructors = ctx.blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => Constructor(c) && ConstructionRules.Receiver(c) is Use u && u.Variable == created).ToArray();
@@ -104,7 +104,7 @@ internal static class DelegatesRules
         return true;
     }
 
-    internal static RecoveryFailure? CreateDelegate(this RecoveryScope ctx, Call call, List<ManagedStatement> output)
+    internal static RecoveryFailure? CreateDelegate(this AnalysisScope ctx, Call call, List<ManagedStatement> output)
     {
         var address = call.Address;
         var type = ctx.State.Construction.delegateCreations[call];
@@ -119,7 +119,7 @@ internal static class DelegatesRules
             () => ctx.DelegateChoice(type, invoke, target, identity, lookup, address), output);
     }
 
-    private static RecoveryResult<ManagedValue> DelegateChoice(this RecoveryScope ctx, DefinitionRef type, MethodRef invoke,
+    private static RecoveryResult<ManagedValue> DelegateChoice(this AnalysisScope ctx, DefinitionRef type, MethodRef invoke,
         Expr target, Expr? identity, VirtualDelegate? lookup, ulong address)
     {
         var seen = new HashSet<Variable>();
@@ -167,7 +167,7 @@ internal static class DelegatesRules
         return new DelegateValue(type, receiver, targetMethod, binding);
     }
 
-    internal static bool Bound(this RecoveryScope ctx, TypeRef type) => type switch
+    internal static bool Bound(this AnalysisScope ctx, TypeRef type) => type switch
     {
         GenericParameterRef parameter => ctx.SharedDefinition && ctx.method.TypeArguments.Concat(ctx.method.MethodArguments).Contains(parameter),
         DefinitionRef d => d.Arguments.Count == d.Definition.GenericParameters.Count && d.Arguments.All(ctx.Bound),

@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class CheckedReferencesRules
 {
-    internal static void NormalizeCheckedObjects(this RecoveryScope ctx)
+    internal static void NormalizeCheckedObjects(this RewriteScope ctx)
     {
         if (!ctx.PrepareTypeChecks())
             return;
@@ -39,7 +39,7 @@ internal static class CheckedReferencesRules
         ctx.Maintain.Types("runtime.checked-objects");
     }
 
-    internal static bool CheckedReference(this RecoveryScope ctx, Use value, TypeRef target, ulong address)
+    internal static bool CheckedReference(this AnalysisScope ctx, Use value, TypeRef target, ulong address)
     {
         if (ctx.CheckedNullableReference(value, target, address))
             return true;
@@ -81,7 +81,7 @@ internal static class CheckedReferencesRules
         return false;
     }
 
-    internal static bool CheckedNullableReference(this RecoveryScope ctx, Use value, TypeRef target, ulong address)
+    internal static bool CheckedNullableReference(this AnalysisScope ctx, Use value, TypeRef target, ulong address)
     {
         var uses = ctx.blocks.Where(b => b.Statements.Any(s => s.Address == address)).ToArray();
         if (uses is not [var site])

@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class MemoryRules
 {
-    internal static (Expr? Base, long Offset, List<Expr> Terms) Split(this RecoveryScope ctx, Expr address)
+    internal static (Expr? Base, long Offset, List<Expr> Terms) Split(this AnalysisScope ctx, Expr address)
     {
         var form = AddressForm.Decompose(ctx.AddressExpression(address), new()
         {
@@ -18,7 +18,7 @@ internal static class MemoryRules
         return (form.Root, form.Offset, form.Terms);
     }
 
-    internal static TypeRef? TypeOfAddressBase(this RecoveryScope ctx, Expr e) => e switch
+    internal static TypeRef? TypeOfAddressBase(this AnalysisScope ctx, Expr e) => e switch
     {
         TypedFrame f => new ByRefRef(f.Region.Type),
         Symbol { Kind: SymbolKind.String } => ctx.types.String,
@@ -29,10 +29,10 @@ internal static class MemoryRules
         Load { Width: 64 } load when ctx.TypeOfValue(load) is { } t && (ManagedTypes.IsReferenceType(t) || t is ByRefRef or PointerRef) => t,
         _ => null,
     };
-    internal static Expr? BaseOf(this RecoveryScope ctx, Expr address) => ctx.Split(address).Base;
-    internal static bool IsStatic(this RecoveryScope ctx, Expr address) => ctx.Split(address).Base is Symbol;
-    internal static (Expr Array, Expr Index)? ElementOf(this RecoveryScope ctx, Expr address) => ctx.ArrayLocation(address) is { Offset: 0 } location ? (location.Array, location.Index) : null;
-    internal static (Expr Array, Expr Index, ArrayRef Type, int Offset)? ArrayLocation(this RecoveryScope ctx, Expr address)
+    internal static Expr? BaseOf(this AnalysisScope ctx, Expr address) => ctx.Split(address).Base;
+    internal static bool IsStatic(this AnalysisScope ctx, Expr address) => ctx.Split(address).Base is Symbol;
+    internal static (Expr Array, Expr Index)? ElementOf(this AnalysisScope ctx, Expr address) => ctx.ArrayLocation(address) is { Offset: 0 } location ? (location.Array, location.Index) : null;
+    internal static (Expr Array, Expr Index, ArrayRef Type, int Offset)? ArrayLocation(this AnalysisScope ctx, Expr address)
     {
         var (array, offset, rest) = ctx.Split(address);
         if (array is null || ctx.TypeOfAddressBase(array) is not ArrayRef { IsVector: true } type || rest.Count == 0 && offset < RuntimeLayout.ArrayData)
@@ -66,7 +66,7 @@ internal static class MemoryRules
         return (array, index, type, (int)within);
     }
 
-    internal static RecoveryResult<ManagedValue> ArrayStructLocation(this RecoveryScope ctx, Expr array, Expr index, ArrayRef type, int offset, int width)
+    internal static RecoveryResult<ManagedValue> ArrayStructLocation(this AnalysisScope ctx, Expr array, Expr index, ArrayRef type, int offset, int width)
     {
         if (!ctx.Recover(array, null).TryGet(out var arrayValue, out var failure))
             return failure;
@@ -82,7 +82,7 @@ internal static class MemoryRules
         return parts is [var single] && single.Low == 0 && single.Value.Width == width ? single.Value : new Fragment(parts, ctx.types.UInt64, width);
     }
 
-    internal static RecoveryResult<ManagedValue> Location(this RecoveryScope ctx, Expr address, int width)
+    internal static RecoveryResult<ManagedValue> Location(this AnalysisScope ctx, Expr address, int width)
     {
         RecoveryFailure failure;
         if (ctx.AddressExpression(address) is Intrinsic { Name: "managed_field_address" } shared)
@@ -178,7 +178,7 @@ internal static class MemoryRules
         return ctx.Recover(baseTerm, null).Map<ManagedValue>(value => new FieldValue(value, instance.Field, instance.Type, width));
     }
 
-    internal static Fragment? StaticMemoryFragment(this RecoveryScope ctx, DefinitionRef owner, long offset, int width)
+    internal static Fragment? StaticMemoryFragment(this AnalysisScope ctx, DefinitionRef owner, long offset, int width)
     {
         var slots = ctx.facts.Layouts.Of(owner)?.Statics.Where(s => ctx.types.Kind(s.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Reference or TypeKind.Float or TypeKind.Double && s.Offset >= offset && s.Offset + ctx.types.Size(s.Type) <= offset + width / 8).OrderBy(s => s.Offset).ToArray();
         if (slots is null || slots.Length < 2)
@@ -186,7 +186,7 @@ internal static class MemoryRules
         return new Fragment(slots.Select(s => new Part((s.Offset - (int)offset) * 8, new StaticFieldValue(new FieldRef(s.Field, owner), s.Type, ctx.types.Size(s.Type) * 8))).ToArray(), ctx.types.UInt64, width);
     }
 
-    internal static ManagedValue? StaticStructLocation(this RecoveryScope ctx, DefinitionRef owner, long offset, int width)
+    internal static ManagedValue? StaticStructLocation(this AnalysisScope ctx, DefinitionRef owner, long offset, int width)
     {
         var slots = ctx.facts.Layouts.Of(owner)?.Statics.Where(s => ctx.types.Kind(s.Type) == TypeKind.Struct && s.Offset <= offset && offset + width / 8 <= s.Offset + ctx.types.Size(s.Type)).ToArray();
         if (slots is not [var slot])
@@ -207,7 +207,7 @@ internal static class MemoryRules
         return parts is [var one] && one.Low == 0 && one.Value.Width == width ? one.Value : new Fragment(parts, ctx.types.UInt64, width);
     }
 
-    internal static RecoveryResult<ManagedValue> Index(this RecoveryScope ctx, Expr index)
+    internal static RecoveryResult<ManagedValue> Index(this AnalysisScope ctx, Expr index)
     {
         while (index is Convert { Kind: ConvKind.SignExtend or ConvKind.ZeroExtend, Width: 64 } c && c.Operand.Width == 32)
             index = c.Operand;
@@ -218,7 +218,7 @@ internal static class MemoryRules
         return value.Width == 32 ? value : value.Width == 64 ? new ConversionValue(ConvKind.Truncate, value, ctx.types.Int32, 32) : RecoveryDiagnostics.Fail(0, $"数组 下标位宽 {value.Width}", rule: "Index");
     }
 
-    internal static long? FrameOffset(this RecoveryScope ctx, Expr expression, HashSet<Variable>? active = null)
+    internal static long? FrameOffset(this AnalysisScope ctx, Expr expression, HashSet<Variable>? active = null)
     {
         active ??= [];
         switch (expression)
@@ -252,7 +252,7 @@ internal static class MemoryRules
         }
     }
 
-    internal static (FrameRegion Region, long Offset)? FrameAccess(this RecoveryScope ctx, Expr address)
+    internal static (FrameRegion Region, long Offset)? FrameAccess(this AnalysisScope ctx, Expr address)
     {
         address = ctx.Expand(address);
         if (address is TypedFrame frame)
@@ -264,7 +264,7 @@ internal static class MemoryRules
         return null;
     }
 
-    internal static RecoveryResult<ManagedValue> FrameLocation(this RecoveryScope ctx, FrameRegion region, long offset, int width)
+    internal static RecoveryResult<ManagedValue> FrameLocation(this AnalysisScope ctx, FrameRegion region, long offset, int width)
     {
         if (offset < 0 || offset + width / 8 > region.Size)
             return RecoveryDiagnostics.Fail(0, "栈 访存跨越结构体区域", rule: "FrameLocation");
@@ -304,7 +304,7 @@ internal static class MemoryRules
         return parts is [var one] && one.Low == 0 && one.Value.Width == width ? one.Value : new Fragment(parts, ctx.types.UInt64, width);
     }
 
-    internal static Expr AddressExpression(this RecoveryScope ctx, Expr expression)
+    internal static Expr AddressExpression(this AnalysisScope ctx, Expr expression)
     {
         var seen = new HashSet<Variable>();
         Expr ExpandAddress(Expr e)
@@ -335,7 +335,7 @@ internal static class MemoryRules
         return ExpandAddress(expression);
     }
 
-    internal static RecoveryResult<ManagedValue?> StructLocation(this RecoveryScope ctx, Expr root, TypeRef type, long offset, int width)
+    internal static RecoveryResult<ManagedValue?> StructLocation(this AnalysisScope ctx, Expr root, TypeRef type, long offset, int width)
     {
         if (type is not (ByRefRef or DefinitionRef))
             return (ManagedValue?)null;
@@ -344,7 +344,7 @@ internal static class MemoryRules
         return matches.Length == 1 ? ctx.Recover(root, null).Map<ManagedValue?>(value => ctx.PathValue(value, matches[0].Path)) : (ManagedValue?)null;
     }
 
-    internal static RecoveryResult<ManagedValue> StructAddress(this RecoveryScope ctx, Expr expression, TypeRef expected)
+    internal static RecoveryResult<ManagedValue> StructAddress(this AnalysisScope ctx, Expr expression, TypeRef expected)
     {
         if (ctx.ArrayLocation(expression) is { } element && ctx.types.Kind(element.Type.Element) == TypeKind.Struct)
         {

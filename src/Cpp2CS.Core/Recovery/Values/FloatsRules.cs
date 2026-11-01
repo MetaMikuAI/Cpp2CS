@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class FloatsRules
 {
-    private static Dictionary<Storage, int> ScalarInputs(RecoveryScope ctx)
+    private static Dictionary<Storage, int> ScalarInputs(AnalysisScope ctx)
     {
         var widths = ctx.State.Signature.arguments.Where(p => p.Key.Bank == Bank.Vec
             && ctx.types.Kind(p.Value.Type) is TypeKind.Float or TypeKind.Double).ToDictionary(p => p.Key, p => p.Value.Width);
@@ -17,8 +17,8 @@ internal static class FloatsRules
     }
 
     [Step("values.narrow-scalar-vectors", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void NormalizeScalarVectors(this RecoveryScope ctx) => ScalarVectorNarrowing.Run(ctx.function.Blocks, call => ctx.ScalarWidths(call, false), call => ctx.ScalarWidths(call, true), ScalarInputs(ctx));
-    internal static void NarrowTypedScalars(this RecoveryScope ctx)
+    internal static void NormalizeScalarVectors(this RewriteScope ctx) => ScalarVectorNarrowing.Run(ctx.function.Blocks, call => ctx.ScalarWidths(call, false), call => ctx.ScalarWidths(call, true), ScalarInputs(ctx));
+    internal static void NarrowTypedScalars(this RewriteScope ctx)
     {
         var changed = ScalarVectorNarrowing.NarrowDefinitions(ctx.blocks, call => ctx.ScalarWidths(call, false, typed: true), call => ctx.ScalarWidths(call, true, typed: true), ScalarInputs(ctx), (previous, replacement) =>
         {
@@ -32,7 +32,7 @@ internal static class FloatsRules
         ctx.Maintain.Types("values.narrow-typed-scalars");
     }
 
-    internal static Dictionary<Storage, int> ScalarWidths(this RecoveryScope ctx, Call call, bool returned, bool typed = false)
+    internal static Dictionary<Storage, int> ScalarWidths(this AnalysisScope ctx, Call call, bool returned, bool typed = false)
     {
         var widths = new Dictionary<Storage, int>();
         if (call.Op is { Kind: OpKind.Import, Operand: string symbol } && MathImportSignature.Find(symbol) is { } math
@@ -98,7 +98,7 @@ internal static class FloatsRules
         return widths;
     }
 
-    internal static RecoveryResult<ManagedValue> FloatingNegation(this RecoveryScope ctx, Unary unary)
+    internal static RecoveryResult<ManagedValue> FloatingNegation(this AnalysisScope ctx, Unary unary)
     {
         if (unary.Width is not (32 or 64))
             return RecoveryDiagnostics.Fail(0, $"浮点 一元运算位宽 {unary.Width} 尚未支持", rule: "FloatingNegation");
@@ -107,7 +107,7 @@ internal static class FloatsRules
     }
 
     [Rule(RuleKind.BodyProof, "values.floating-constructor-order", Order = 200)]
-    internal static void CheckFloatingConstructorOrder(this RecoveryScope ctx, ManagedBody body)
+    internal static void CheckFloatingConstructorOrder(this ProofScope ctx, ManagedBody body)
     {
         if (ctx.method.Method.Name != ".ctor")
             return;

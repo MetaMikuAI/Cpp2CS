@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class RuntimeRules
 {
-    internal static bool PrepareTypeChecks(this RecoveryScope ctx)
+    internal static bool PrepareTypeChecks(this AnalysisScope ctx)
     {
         ctx.PrepareExceptionTypeChecks();
         foreach (var call in ctx.blocks.SelectMany(b => b.Statements).OfType<Call>())
@@ -25,7 +25,7 @@ internal static class RuntimeRules
         return ctx.PrepareSealedChecks() | ctx.State.Runtime.typeChecks.Count > 0;
     }
 
-    internal static bool PrepareSealedChecks(this RecoveryScope ctx)
+    internal static bool PrepareSealedChecks(this AnalysisScope ctx)
     {
         var found = false;
         var compares = ctx.blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<Compare>().ToArray();
@@ -66,15 +66,9 @@ internal static class RuntimeRules
         return null;
     }
 
-    internal static Definitions IndexDefinitions(this RecoveryScope ctx)
-    {
-        ctx.analyses.Refresh(ctx.blocks, ctx.State.Exceptions.exceptionPhis);
-        return ctx.analyses.Get(Definitions.Analysis);
-    }
-
     /// <summary>运行时引用：值是类、方法等运行时结构（不是托管值）的变量。只能出现在运行时操作的参数中。</summary>
     [Step("runtime.mark", StepPhase.Analyze, StepKind.Analysis, Order = 400, After = ["frames.regions", "exceptions.values"], Name = "运行时引用")]
-    internal static void MarkRuntime(this RecoveryScope ctx)
+    internal static void MarkRuntime(this AnalysisScope ctx)
     {
         ctx.MarkVtableLoads();
         ctx.MarkGenericVirtualLoads();
@@ -97,7 +91,7 @@ internal static class RuntimeRules
         ctx.State.Calls.callBindings.InvalidateTypes();
     }
 
-    internal static void MarkVtableLoads(this RecoveryScope ctx)
+    internal static void MarkVtableLoads(this AnalysisScope ctx)
     {
         var calls = ctx.blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Op?.Kind == OpKind.CallVirtual && c.Arguments.Length > 0).ToArray();
         if (calls.Length == 0)
@@ -158,7 +152,7 @@ internal static class RuntimeRules
         }
     }
 
-    internal static bool ReadsKlass(this RecoveryScope ctx, Expr address, Variable klass)
+    internal static bool ReadsKlass(this AnalysisScope ctx, Expr address, Variable klass)
     {
         var expanded = ctx.Expand(address);
         if (expanded is Use { Variable: var only } && only == klass)
@@ -166,7 +160,7 @@ internal static class RuntimeRules
         return expanded is Binary { Op: BinOp.Add } b && (b.Left is Use { Variable: var l } && l == klass && b.Right is Const || b.Left is Binary inner && ctx.ReadsKlass(inner, klass) && b.Right is Const);
     }
 
-    internal static bool IsInterfaceMetadataLoad(this RecoveryScope ctx, Expr value)
+    internal static bool IsInterfaceMetadataLoad(this AnalysisScope ctx, Expr value)
     {
         if (value is not Load { Width: 64 } load)
             return false;

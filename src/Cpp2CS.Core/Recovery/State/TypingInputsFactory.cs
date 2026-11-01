@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class TypingInputsFactory
 {
-    internal static (MachineFunction View, Dictionary<Storage, TypeRef> Entry, TypingInputs Input) TypingInputsFor(this RecoveryScope ctx)
+    internal static (MachineFunction View, Dictionary<Storage, TypeRef> Entry, TypingInputs Input) TypingInputsFor(this RewriteScope ctx)
     {
         // 不改原 CFG，Build 仍用原始边编号。
         var view = new MachineFunction

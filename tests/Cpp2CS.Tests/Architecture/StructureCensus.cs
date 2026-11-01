@@ -63,6 +63,9 @@ internal sealed class StructureCensus
         "Add", "AddRange", "Insert", "InsertRange", "Remove", "RemoveAt", "RemoveAll", "RemoveRange", "Clear", "Reverse", "Sort",
     };
 
+    /// <summary>方法会话与交给规则的作用域：以它们为接收者的扩展方法、经它们访问证据表与方法恢复器的成员一并计数。</summary>
+    private static readonly HashSet<string> Scopes = new(StringComparer.Ordinal) { "RecoveryScope", "AnalysisScope", "RewriteScope", "BindingScope", "ProofScope" };
+
     private static readonly HashSet<string> RuleAttributes = new(StringComparer.Ordinal)
     {
         "StepAttribute", "RuleAttribute",
@@ -118,11 +121,11 @@ internal sealed class StructureCensus
             switch (node)
             {
                 case MethodDeclarationSyntax method when method.ParameterList.Parameters.FirstOrDefault() is { } first
-                    && first.Modifiers.Any(SyntaxKind.ThisKeyword) && semantic.GetDeclaredSymbol(first)?.Type.Name == "RecoveryScope":
+                    && first.Modifiers.Any(SyntaxKind.ThisKeyword) && Scopes.Contains(semantic.GetDeclaredSymbol(first)?.Type.Name ?? ""):
                     Count("scope-extension-methods", scope);
                     break;
                 case MemberAccessExpressionSyntax access when semantic.GetSymbolInfo(access.Expression).Symbol is { } inner
-                    && (Declared(inner, "RecoveryScope", "State") || Declared(inner, "LoweringScope", "State")):
+                    && (Scopes.Any(s => Declared(inner, s, "State")) || Declared(inner, "LoweringScope", "State")):
                     Count("state-access", scope);
                     break;
                 case InvocationExpressionSyntax invocation:
@@ -287,9 +290,9 @@ internal sealed class StructureCensus
         // 不以作用域为参数的独立算法类内部的维护调用属于 I2c，其余（规则、Prepare 流程、以作用域为参数的辅助函数）属于 I2a
         var method = node.Ancestors().OfType<BaseMethodDeclarationSyntax>().FirstOrDefault();
         var symbol = method is null ? null : semantic.GetDeclaredSymbol(method) as IMethodSymbol;
-        var scoped = symbol is null || symbol.Parameters.Any(p => p.Type.Name is "RecoveryScope" or "LoweringScope")
-            || symbol.ContainingType.GetMembers().OfType<IFieldSymbol>().Any(f => f.Type.Name is "RecoveryScope" or "LoweringScope")
-            || symbol.ContainingType.Name is "RecoveryScope" or "LoweringScope";
+        var scoped = symbol is null || symbol.Parameters.Any(p => Scopes.Contains(p.Type.Name) || p.Type.Name == "LoweringScope")
+            || symbol.ContainingType.GetMembers().OfType<IFieldSymbol>().Any(f => Scopes.Contains(f.Type.Name) || f.Type.Name == "LoweringScope")
+            || Scopes.Contains(symbol.ContainingType.Name) || symbol.ContainingType.Name == "LoweringScope";
         return scoped ? "I2a" : "I2c";
     }
 
@@ -421,7 +424,7 @@ internal sealed class StructureCensus
         {
             var symbol = semantic.GetSymbolInfo(name).Symbol;
             if (symbol is null) continue;
-            if (Declared(symbol, "RecoveryScope", "owner")) Count("owner-access", scope);
+            if (Scopes.Any(s => Declared(symbol, s, "owner"))) Count("owner-access", scope);
             if (!symbol.IsStatic && symbol.ContainingType?.Name == "MethodRecovery" && symbol.Kind is SymbolKind.Field or SymbolKind.Property or SymbolKind.Method
                 && symbol.ContainingNamespace.ToDisplayString() == "Cpp2CS.Recovery" && !file.EndsWith("/Recovery/MethodRecovery.cs", StringComparison.Ordinal)
                 && name.Parent is MemberAccessExpressionSyntax access && access.Name == name)

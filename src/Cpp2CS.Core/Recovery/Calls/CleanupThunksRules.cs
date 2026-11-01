@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery;
 internal static class CleanupThunksRules
 {
     [Step("calls.cleanup-thunks", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void NormalizeCleanupThunks(this RecoveryScope ctx)
+    internal static void NormalizeCleanupThunks(this RewriteScope ctx)
     {
         foreach (var block in ctx.function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
@@ -40,7 +40,7 @@ internal static class CleanupThunksRules
         ctx.State.Calls.cleanupCalls.UnionWith(ctx.function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => ctx.State.Calls.cleanupSites.Contains(c.Address)));
     }
 
-    internal static void PromotePrivateFrameSlots(this RecoveryScope ctx)
+    internal static void PromotePrivateFrameSlots(this RewriteScope ctx)
     {
         var all = ctx.function.Blocks.SelectMany(b => b.Statements).ToArray();
         var stores = all.OfType<Store>().Where(s => s.Target is FrameAddress).GroupBy(s => ((FrameAddress)s.Target).Offset).Where(g => g.Count() == 1 && g.Single().Value.Width == 64).ToDictionary(g => g.Key, g => g.Single());

@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 internal static class ScalarFramesRules
 {
     [Step("frames.branch-snapshots", StepPhase.Analyze, StepKind.Rewrite, Order = 293, After = ["frames.pre-typing", "frames.scalar-stack-arguments", "frames.merged-box-arguments"], Name = "分支帧快照")]
-    internal static void ForwardBranchFrameSnapshots(this RecoveryScope ctx)
+    internal static void ForwardBranchFrameSnapshots(this RewriteScope ctx)
     {
         var calls = new ManagedCallFrames(ctx.facts, ctx.owner.abi);
         bool NoCapture(Call call, int index) => index < call.Sources.Length && calls.Signature(call) is { } signature
@@ -65,7 +65,7 @@ internal static class ScalarFramesRules
     }
 
     [Step("frames.snapshots", StepPhase.Analyze, StepKind.Rewrite, Order = 320, After = ["frames.regions"], Name = "帧快照")]
-    internal static void ForwardFrameSnapshots(this RecoveryScope ctx)
+    internal static void ForwardFrameSnapshots(this RewriteScope ctx)
     {
         var pieces = FramePieceSnapshots.Read(ctx.function, ctx.NoStackRead, expression => ctx.FrameAccess(expression) is { } frame ? frame.Region.Offset + frame.Offset : ctx.FrameOffset(expression));
         foreach (var block in ctx.blocks)
@@ -93,7 +93,7 @@ internal static class ScalarFramesRules
 
     /// <summary>结构体地址已绑定到有界区域后，恢复地址不逃逸的整数计数槽和已定型的引用槽。</summary>
     [Step("frames.integer-slots", StepPhase.Analyze, StepKind.Rewrite, Order = 350, After = ["frames.regions", "frames.snapshots"], Name = "整数帧槽", Refresh = StepRefresh.Types)]
-    internal static void PrepareScalarFrames(this RecoveryScope ctx)
+    internal static void PrepareScalarFrames(this RewriteScope ctx)
     {
         var accesses = new List<(long Offset, int Width, Expr? Written)>();
         var escapes = new List<long>();
@@ -180,7 +180,7 @@ internal static class ScalarFramesRules
         ctx.Maintain.Definitions("frames.integer-slots");
     }
 
-    internal static bool NoStackRead(this RecoveryScope ctx, Call call, long offset, int width)
+    internal static bool NoStackRead(this AnalysisScope ctx, Call call, long offset, int width)
     {
         if (call.Op?.Kind is OpKind.InitClass or OpKind.RunClassConstructor or OpKind.InitMethodRgctx or OpKind.NewObject or OpKind.NewArray or OpKind.Box or OpKind.Unbox or OpKind.IsInst or OpKind.IsAssignableFrom or OpKind.TypeCheck or OpKind.ThrowIf or OpKind.NullCheck or OpKind.BoundsCheck or OpKind.Throw or OpKind.ThrowNew or OpKind.NewException or OpKind.Rethrow or OpKind.WriteBarrier or OpKind.MemoryBarrier or OpKind.CompareExchangeReference or OpKind.InterfaceInvokeData or OpKind.ResolveGenericVirtual or OpKind.BeginCatch or OpKind.EndCatch or OpKind.ResumeUnwind or OpKind.Terminate or OpKind.ThrowManaged)
             return true;

@@ -6,7 +6,7 @@ internal static class ExceptionSlotsRules
 {
     /// <summary>仅供 BeginCatch/ResumeUnwind 使用的原生异常指针备份由托管异常区域接管。</summary>
     [Step("exceptions.pointer-slots", StepPhase.Analyze, StepKind.Analysis, Order = 150, After = ["exceptions.values"], Name = "异常指针栈槽")]
-    internal static void ExceptionPointerSlots(this RecoveryScope ctx)
+    internal static void ExceptionPointerSlots(this AnalysisScope ctx)
     {
         if (ctx.State.Exceptions.exceptionLayout is not { Succeeded: true })
             return;

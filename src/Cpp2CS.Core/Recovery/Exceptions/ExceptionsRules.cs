@@ -18,12 +18,12 @@ internal static class ExceptionsRules
 
     internal static ulong FragmentLabel(ExceptionFragment fragment) => NameSupply.ExceptionLabelBase + (uint)fragment.Id;
     /// <summary>异常布局已排好时的异常片段（删除语句后要据此重算片段位置）；未排好时为 null。</summary>
-    internal static IReadOnlyList<ExceptionFragment>? ArrangedFragments(this RecoveryScope ctx) =>
+    internal static IReadOnlyList<ExceptionFragment>? ArrangedFragments(this AnalysisScope ctx) =>
         ctx.State.Exceptions.exceptionLayout is { Succeeded: true } layout ? layout.Graph.Fragments : null;
 
     /// <summary>有落地块时反复剪除异常判空分支并清理，直到不再变化；超过安全上限时留洞。</summary>
     [Step("exceptions.null-branches", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void PruneNullBranches(RecoveryScope scope)
+    internal static void PruneNullBranches(RewriteScope scope)
     {
         if (!scope.Maintain.Fixpoint("exceptions.null-branches", Maintenance.SafetyBudget, () =>
             {
@@ -39,7 +39,7 @@ internal static class ExceptionsRules
     /// Handler 是受保护块的异常后继，不能把受保护块本身排除，因此只保留正常边闭包。
     /// </summary>
     [Step("exceptions.regions", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void PrepareRegions(RecoveryScope scope)
+    internal static void PrepareRegions(RewriteScope scope)
     {
         if (scope.function.Blocks.FirstOrDefault(b => b.IsLandingPad) is not { } landing || scope.PrepareExceptionRegions())
             return;
@@ -60,7 +60,7 @@ internal static class ExceptionsRules
         }
     }
 
-    internal static bool PrepareExceptionRegions(this RecoveryScope ctx)
+    internal static bool PrepareExceptionRegions(this AnalysisScope ctx)
     {
         ctx.State.Exceptions.exceptionLayout = ExceptionRegionBuilder.Build(ctx.facts, ctx.function);
         if (!ctx.State.Exceptions.exceptionLayout.Succeeded)
@@ -134,7 +134,7 @@ internal static class ExceptionsRules
     }
 
     [Step("exceptions.values", StepPhase.Analyze, StepKind.Analysis, Order = 100, Name = "异常值")]
-    internal static void AnalyzeExceptionValues(this RecoveryScope ctx)
+    internal static void AnalyzeExceptionValues(this AnalysisScope ctx)
     {
         if (ctx.State.Exceptions.exceptionLayout is not { Succeeded: true })
             return;
@@ -159,7 +159,7 @@ internal static class ExceptionsRules
                 ctx.State.Lowering.dropped.Add(store);
     }
 
-    internal static bool PrepareExceptionTypeChecks(this RecoveryScope ctx)
+    internal static bool PrepareExceptionTypeChecks(this AnalysisScope ctx)
     {
         if (ctx.State.Exceptions.exceptionLayout is not { Succeeded: true })
             return false;
@@ -176,7 +176,7 @@ internal static class ExceptionsRules
         return ctx.State.Exceptions.exceptionTypeTargets.Count != 0;
     }
 
-    internal static RecoveryResult<ManagedBody> BuildExceptionBody(this RecoveryScope ctx)
+    internal static RecoveryResult<ManagedBody> BuildExceptionBody(this AnalysisScope ctx)
     {
         var layout = ctx.State.Exceptions.exceptionLayout!;
         var byId = layout.Graph.Fragments.ToDictionary(f => f.Id);
@@ -354,7 +354,7 @@ internal static class ExceptionsRules
         return ctx.RouteExceptionSources(body, layout, order);
     }
 
-    internal static RecoveryResult<ManagedEdge> ExceptionEdge(this RecoveryScope ctx, ExceptionFragment from, ExceptionFragment to)
+    internal static RecoveryResult<ManagedEdge> ExceptionEdge(this AnalysisScope ctx, ExceptionFragment from, ExceptionFragment to)
     {
         if (from.Block == to.Block)
             return new ManagedEdge(ExceptionsRules.FragmentLabel(to), []);
@@ -364,7 +364,7 @@ internal static class ExceptionsRules
         return ctx.Edge(from.Block, successor, to.Block.Start).Map(edge => edge with { Target = ExceptionsRules.FragmentLabel(to) });
     }
 
-    internal static RecoveryFailure? ExceptionCopies(this RecoveryScope ctx, ExceptionEntryPath path, List<ManagedStatement> statements)
+    internal static RecoveryFailure? ExceptionCopies(this AnalysisScope ctx, ExceptionEntryPath path, List<ManagedStatement> statements)
     {
         var aliases = new Dictionary<Variable, Expr>();
         var copies = new List<ManagedCopy>();
@@ -426,7 +426,7 @@ internal static class ExceptionsRules
         return null;
     }
 
-    internal static Variable? ExceptionReachingSource(this RecoveryScope ctx, ExceptionFragment from, Phi phi, bool beforeCall)
+    internal static Variable? ExceptionReachingSource(this AnalysisScope ctx, ExceptionFragment from, Phi phi, bool beforeCall)
     {
         var storage = phi.Target.Storage;
         if (storage.Bank != Bank.Stack && (storage.Bank != Bank.Gpr || storage.Index == 30 || !MethodRecovery.CalleeSaved.Contains(storage)))

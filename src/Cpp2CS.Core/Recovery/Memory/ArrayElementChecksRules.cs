@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class ArrayElementChecksRules
 {
-    internal static RecoveryFailure? ArrayElementCheck(this RecoveryScope ctx, Call call, Variable created, List<ManagedStatement> output)
+    internal static RecoveryFailure? ArrayElementCheck(this AnalysisScope ctx, Call call, Variable created, List<ManagedStatement> output)
     {
         if (!ctx.Recover(call.Arguments[1], null).TryGet(out var array, out var failure))
             return failure;

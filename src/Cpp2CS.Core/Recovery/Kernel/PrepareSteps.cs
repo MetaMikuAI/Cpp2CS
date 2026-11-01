@@ -18,7 +18,7 @@ internal static class PrepareSteps
         var lifted = scope.owner.lifter.Lift(scope.entry, prepared.ReturnValue);
         if (!lifted.Succeeded)
         {
-            scope.Hole(scope.entry, $"提升 {lifted.Errors[0]}", rule: "Prepare");
+            scope.Analysis.Hole(scope.entry, $"提升 {lifted.Errors[0]}", rule: "Prepare");
             return PrepareOutcome.Stop;
         }
 
@@ -39,14 +39,14 @@ internal static class PrepareSteps
 
     /// <summary>私有帧槽提升（泛型实参含按值布局的聚合时）。</summary>
     [Step("kernel.promote-private-frame-slots", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void PromotePrivateFrameSlots(RecoveryScope scope) => scope.PromotePrivateFrameSlots();
+    internal static void PromotePrivateFrameSlots(RecoveryScope scope) => scope.Rewrite.PromotePrivateFrameSlots();
 
     /// <summary>L2 的错误转洞；有错误时中止。</summary>
     [Step("kernel.idiom-errors", StepPhase.Prepare, StepKind.Analysis)]
     internal static PrepareOutcome IdiomErrors(RecoveryScope scope, PreparedMethod prepared)
     {
         foreach (var error in prepared.Idioms.Errors)
-            scope.Hole(scope.entry, $"L2 {error}", rule: "Prepare");
+            scope.Analysis.Hole(scope.entry, $"L2 {error}", rule: "Prepare");
         return prepared.Idioms.Errors.Count > 0 ? PrepareOutcome.Stop : PrepareOutcome.Continue;
     }
 
@@ -66,7 +66,7 @@ internal static class PrepareSteps
     internal static void PropagateConstantIndices(RecoveryScope scope)
     {
         scope.Edit.Propagate(scope.Dominators, "kernel.propagate-constant-indices");
-        scope.PromotePrivateFrameSlots();
+        scope.Rewrite.PromotePrivateFrameSlots();
     }
 
     /// <summary>委托调用归一；有改写时清理，并删除对应的间接调用残余。</summary>
@@ -96,7 +96,7 @@ internal static class PrepareSteps
             // 没有身份证据的未注册调用交给 L3 的调用解析（方法的本地副本，CopyOf）；解析不了时在调用处留洞。
             if (residual.Category is not ("helper:WriteBarrier" or "call:unregistered-managed") && !scope.State.Calls.cleanupSites.Contains(residual.Address) && !scope.State.Calls.sharedSites.Contains(residual.Address))
             {
-                var hole = scope.Hole(residual.Address, $"残余 {residual.Category}", rule: "Prepare");
+                var hole = scope.Analysis.Hole(residual.Address, $"残余 {residual.Category}", rule: "Prepare");
                 foreach (var statement in scope.function.Blocks.SelectMany(b => b.Statements).Where(s => s.Address == residual.Address))
                     scope.ledger.Block(statement, hole);
             }
@@ -112,6 +112,6 @@ internal static class PrepareSteps
     internal static void ProblemHoles(RecoveryScope scope)
     {
         foreach (var problem in scope.function.Problems)
-            scope.Hole(scope.entry, $"控制流 {problem}", rule: "Prepare");
+            scope.Analysis.Hole(scope.entry, $"控制流 {problem}", rule: "Prepare");
     }
 }

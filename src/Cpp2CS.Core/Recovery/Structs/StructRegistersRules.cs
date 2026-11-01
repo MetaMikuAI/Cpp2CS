@@ -6,9 +6,9 @@ namespace Cpp2CS.Recovery;
 
 internal static class StructRegistersRules
 {
-    internal static bool RegisterStruct(this RecoveryScope ctx, AbiValue value) => ctx.types.Kind(value.Type) == TypeKind.Struct && value.Passing == Passing.Registers && value.Pieces.All(p => p.Register.Bank is Bank.Gpr or Bank.Vec);
+    internal static bool RegisterStruct(this AnalysisScope ctx, AbiValue value) => ctx.types.Kind(value.Type) == TypeKind.Struct && value.Passing == Passing.Registers && value.Pieces.All(p => p.Register.Bank is Bank.Gpr or Bank.Vec);
     [Rule(RuleKind.ParameterBinding, "structs.bind-register-argument", Order = 100)]
-    internal static bool PrepareStructArgument(this RecoveryScope ctx, AbiValue parameter, int index)
+    internal static bool PrepareStructArgument(this BindingScope ctx, AbiValue parameter, int index)
     {
         if (ctx.types.Kind(parameter.Type) != TypeKind.Struct)
             return false;
@@ -36,7 +36,7 @@ internal static class StructRegistersRules
     internal static RecoveryResult<ManagedValue?> RegisterStructArgument(this LoweringScope ctx, AbiValue parameter, ArgumentSite site) => !ctx.Values.RegisterStruct(parameter) ? (ManagedValue?)null : ctx.Values.Compose(parameter, p => site.Registers.TryGetValue(p.Register, out var e) ? e : RecoveryDiagnostics.Fail(site.Call.Address, $"调用 缺少结构体片 {p.Register}", rule: "RegisterStructArgument")).Map<ManagedValue?>(value => value);
     [Rule(RuleKind.Result, "structs.register-result", Order = 100)]
     internal static LocalValue? RegisterStructResult(this LoweringScope ctx, Call call, AbiValue returned) => ctx.Values.RegisterStruct(returned) ? ctx.Values.CallStructLocal(call, returned.Type) : null;
-    internal static LocalValue CallStructLocal(this RecoveryScope ctx, Call call, TypeRef type)
+    internal static LocalValue CallStructLocal(this AnalysisScope ctx, Call call, TypeRef type)
     {
         if (!ctx.State.Structs.structResults.TryGetValue(call, out var local))
             ctx.State.Structs.structResults.Add(call, local = ctx.StructLocal(type, 0));
@@ -77,7 +77,7 @@ internal static class StructRegistersRules
         return true;
     }
 
-    internal static RecoveryResult<ManagedValue?> RegisterPiece(this RecoveryScope ctx, Variable variable, int width)
+    internal static RecoveryResult<ManagedValue?> RegisterPiece(this AnalysisScope ctx, Variable variable, int width)
     {
         ManagedValue root;
         AbiPiece piece;
@@ -96,7 +96,7 @@ internal static class StructRegistersRules
         return fragment is Fragment f ? ctx.ResizeFragment(f, width).Map<ManagedValue?>(value => value) : new Fragment([new Part(0, fragment)], ctx.types.UInt64, width);
     }
 
-    internal static ManagedValue StructPiece(this RecoveryScope ctx, ManagedValue root, AbiPiece piece)
+    internal static ManagedValue StructPiece(this AnalysisScope ctx, ManagedValue root, AbiPiece piece)
     {
         if (root.Type is GenericParameterRef { NativeAggregate: not null })
             return new AggregatePiece(root, piece.Offset, piece.Width);
@@ -105,7 +105,7 @@ internal static class StructRegistersRules
         return parts is [var one] && one.Low == 0 && one.Value.Width == piece.Width ? one.Value : new Fragment(parts, ctx.types.UInt64, piece.Width);
     }
 
-    internal static RecoveryResult<ManagedValue> Compose(this RecoveryScope ctx, AbiValue value, Func<AbiPiece, RecoveryResult<Expr>> expression)
+    internal static RecoveryResult<ManagedValue> Compose(this AnalysisScope ctx, AbiValue value, Func<AbiPiece, RecoveryResult<Expr>> expression)
     {
         if (!ctx.RegisterStruct(value))
             return RecoveryDiagnostics.Fail(0, $"结构体 {value.Type} 的寄存器形态尚未支持", rule: "Compose");
@@ -178,7 +178,7 @@ internal static class StructRegistersRules
         return value;
     }
 
-    internal static bool StructOrigin(this RecoveryScope ctx, Expr expression)
+    internal static bool StructOrigin(this AnalysisScope ctx, Expr expression)
     {
         var seen = new HashSet<Variable>();
         bool Visit(Expr e)
@@ -203,7 +203,7 @@ internal static class StructRegistersRules
         return Visit(expression);
     }
 
-    internal static RecoveryResult<ManagedValue> StructReturn(this RecoveryScope ctx, Expr expression)
+    internal static RecoveryResult<ManagedValue> StructReturn(this AnalysisScope ctx, Expr expression)
     {
         var value = ctx.owner.abi.Classify(ctx.method, out _)!.Return!;
         if (ctx.IndirectStruct(value))

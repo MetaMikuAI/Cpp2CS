@@ -8,7 +8,7 @@ namespace Cpp2CS.Recovery;
 internal static class FieldAddressesRules
 {
     [Step("memory.field-addresses", StepPhase.Analyze, StepKind.Rewrite, Order = 890, After = ["frames.slots", "control.absorb-checks"], Name = "字段地址", Refresh = StepRefresh.Types)]
-    internal static void PrepareFieldAddresses(this RecoveryScope ctx)
+    internal static void PrepareFieldAddresses(this RewriteScope ctx)
     {
         var dominators = ctx.Dominators;
         Expr Alias(Expr value, int depth = 32) => depth > 0 && value is Use use && ctx.values.GetValueOrDefault(use.Variable) is Use source ? Alias(source, depth - 1) : value;

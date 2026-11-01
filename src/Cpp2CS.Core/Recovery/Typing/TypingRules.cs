@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class TypingRules
 {
-    internal static void InferTypes(this RecoveryScope ctx)
+    internal static void InferTypes(this RewriteScope ctx)
     {
         ctx.State.Types.typingSeeds ??= ctx.State.Types.known.ToDictionary();
         var (view, entryTypes, input) = ctx.TypingInputsFor();
@@ -25,7 +25,7 @@ internal static class TypingRules
         trace?.Print(result.Solution, result.Rounds);
     }
 
-    internal static void Sync(this RecoveryScope ctx, Dictionary<Variable, TypeResult> solution, bool final = false)
+    internal static void Sync(this AnalysisScope ctx, Dictionary<Variable, TypeResult> solution, bool final = false)
     {
         if (ReferenceEquals(ctx.State.Types.syncedSolution, solution))
             return;
@@ -52,7 +52,7 @@ internal static class TypingRules
 
     /// <summary>类型推断；认出新的类型检查后（klass 加载成为运行时引用），标记运行时值再推断一次。</summary>
     [Step("typing.infer", StepPhase.Analyze, StepKind.Rewrite, Order = 900, After = ["runtime.mark", "lowering.inline", "frames.slots", "construction.allocations", "control.absorb-checks"], Name = "类型")]
-    internal static void Typing(this RecoveryScope ctx)
+    internal static void Typing(this RewriteScope ctx)
     {
         ctx.Maintain.Types("typing.infer.main");
         if (ctx.PrepareTypeChecks())

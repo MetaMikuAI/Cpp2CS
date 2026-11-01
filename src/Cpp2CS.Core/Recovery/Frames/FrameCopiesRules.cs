@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class FrameCopiesRules
 {
-    internal static RecoveryResult<CopyRange[]> CopyRanges(this RecoveryScope ctx, Expr address, int width)
+    internal static RecoveryResult<CopyRange[]> CopyRanges(this AnalysisScope ctx, Expr address, int width)
     {
         var ranges = new List<CopyRange>();
         if (ctx.ArrayLocation(address) is { } element && ctx.types.Kind(element.Type.Element) == TypeKind.Struct && element.Offset + width / 8 <= ctx.types.Size(element.Type.Element))
@@ -49,7 +49,7 @@ internal static class FrameCopiesRules
         return ranges.ToArray();
     }
 
-    internal static ManagedBody RewriteAwaiters(this RecoveryScope ctx, ManagedBody body)
+    internal static ManagedBody RewriteAwaiters(this AnalysisScope ctx, ManagedBody body)
     {
         var changed = false;
         var blocks = body.Blocks.Select(block =>
@@ -79,7 +79,7 @@ internal static class FrameCopiesRules
         : body;
     }
 
-    internal static bool AwaiterOf(this RecoveryScope ctx, ulong address, ManagedValue layer, ManagedValue task, List<ManagedStatement> output)
+    internal static bool AwaiterOf(this AnalysisScope ctx, ulong address, ManagedValue layer, ManagedValue task, List<ManagedStatement> output)
     {
         if (layer is not FieldValue { Field: { Field.Name: "task" } field, Receiver: AddressValue { Target: var awaiter } } || (field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) == 0 || awaiter.Type is not DefinitionRef { Definition: { Name: "Awaiter", DeclaringType.FullName: "Cysharp.Threading.Tasks.UniTask" } } || task.Type is not DefinitionRef { Definition.FullName: "Cysharp.Threading.Tasks.UniTask", Arguments: [_] } unitask || unitask.Definition.Methods.FirstOrDefault(m => m is { Name: "GetAwaiter", IsStatic: false, Parameters.Count: 0, GenericParameters.Count: 0 }) is not { } getAwaiter)
             return false;
@@ -98,7 +98,7 @@ internal static class FrameCopiesRules
         return true;
     }
 
-    internal static ManagedValue? WholeStructAt(this RecoveryScope ctx, CopyRange range, int width)
+    internal static ManagedValue? WholeStructAt(this AnalysisScope ctx, CopyRange range, int width)
     {
         if (ctx.types.Kind(range.Type) == TypeKind.Struct && range.Offset == 0 && ctx.types.Size(range.Type) * 8 == width)
             return range.Root is AddressValue address ? address.Target : new IndirectValue(range.Root, range.Type);
@@ -125,7 +125,7 @@ internal static class FrameCopiesRules
     }
 
     [Step("frames.copies", StepPhase.Analyze, StepKind.Analysis, Order = 1100, After = ["typing.infer"], Name = "帧拷贝")]
-    internal static RecoveryFailure? FrameCopies(this RecoveryScope ctx)
+    internal static RecoveryFailure? FrameCopies(this AnalysisScope ctx)
     {
         if (!ctx.PrepareFrameCopies().TryGet(out _, out var failure))
             return failure;
@@ -136,7 +136,7 @@ internal static class FrameCopiesRules
         return null;
     }
 
-    internal static void PrepareFrameZeroes(this RecoveryScope ctx)
+    internal static void PrepareFrameZeroes(this AnalysisScope ctx)
     {
         foreach (var block in ctx.blocks)
             for (var i = 0; i < block.Statements.Count; i++)
@@ -164,7 +164,7 @@ internal static class FrameCopiesRules
             }
     }
 
-    internal static RecoveryFailure? PrepareStructZeroes(this RecoveryScope ctx)
+    internal static RecoveryFailure? PrepareStructZeroes(this AnalysisScope ctx)
     {
         foreach (var block in ctx.blocks)
             for (var i = 0; i < block.Statements.Count; i++)
@@ -212,7 +212,7 @@ internal static class FrameCopiesRules
         return null;
     }
 
-    internal static void PrepareStoredResults(this RecoveryScope ctx)
+    internal static void PrepareStoredResults(this AnalysisScope ctx)
     {
         (ManagedValue Root, AbiPiece Piece, AbiPiece[] Pieces)? Source(Use use)
         {
@@ -274,7 +274,7 @@ internal static class FrameCopiesRules
         Ir.Convert { Kind: ConvKind.ZeroExtend, Operand: Load { Width: 32 or 16 or 8 } inner } => inner,
         _ => null,
     };
-    internal static RecoveryResult<bool> PrepareFrameCopies(this RecoveryScope ctx)
+    internal static RecoveryResult<bool> PrepareFrameCopies(this AnalysisScope ctx)
     {
         var statements = ctx.blocks.SelectMany(b => b.Statements).ToArray();
         var uses = new Dictionary<Variable, List<Stmt>>();

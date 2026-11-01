@@ -10,7 +10,7 @@ internal static class SharedFieldsRules
     internal static TypeRef FieldType(FieldRef field) => field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
 
     [Step("generics.shared-fields", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void NormalizeSharedFields(this RecoveryScope ctx)
+    internal static void NormalizeSharedFields(this RewriteScope ctx)
     {
         foreach (var block in ctx.function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
@@ -41,7 +41,7 @@ internal static class SharedFieldsRules
             }
     }
 
-    internal static RecoveryResult<ManagedValue> SharedAddress(this RecoveryScope ctx, Intrinsic address) => address switch
+    internal static RecoveryResult<ManagedValue> SharedAddress(this AnalysisScope ctx, Intrinsic address) => address switch
     {
         { Name: "managed_generic_buffer", Arguments: [_, Const id] } => new AddressValue(ctx.State.Frames.sharedBuffers[id.Value]),
         { Name: "managed_generic_argument", Arguments: [_, Const register] } => new AddressValue(ctx.State.Signature.sharedIncoming[Storage.Gpr((int)register.Value)]),

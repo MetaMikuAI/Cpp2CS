@@ -6,12 +6,12 @@ namespace Cpp2CS.Recovery;
 
 internal static class ValueRecovery
 {
-    internal static TypeRef? TypeOfValue(this RecoveryScope ctx, Expr e)
+    internal static TypeRef? TypeOfValue(this AnalysisScope ctx, Expr e)
     {
         return ctx.Recover(e, null).TryGet(out var value, out _) ? value.Type : null;
     }
 
-    internal static RecoveryResult<LocalValue> LocalOf(this RecoveryScope ctx, Variable v)
+    internal static RecoveryResult<LocalValue> LocalOf(this AnalysisScope ctx, Variable v)
     {
         if (ctx.CheckPoison(v) is { } poison)
             return poison;
@@ -43,7 +43,7 @@ internal static class ValueRecovery
         return new LocalValue(v, type, width);
     }
 
-    internal static int LocalWidth(this RecoveryScope ctx, Variable v)
+    internal static int LocalWidth(this AnalysisScope ctx, Variable v)
     {
         if (ctx.values.TryGetValue(v, out var value))
             return value.Width;
@@ -97,7 +97,7 @@ internal static class ValueRecovery
         return v.Width;
     }
 
-    internal static RecoveryResult<ManagedValue> RecoverAs(this RecoveryScope ctx, Expr e, TypeRef target, ulong address)
+    internal static RecoveryResult<ManagedValue> RecoverAs(this AnalysisScope ctx, Expr e, TypeRef target, ulong address)
     {
         if (ctx.types.Kind(target) == TypeKind.Reference && e is Use { Width: 64 } && (ctx.State.Runtime.nullPaths ??= new NullPathFacts(ctx.function)).IsNull(e, address))
             return new ConstantValue(0, target, 64);
@@ -106,7 +106,7 @@ internal static class ValueRecovery
         return target is ByRefRef reference ? ctx.StructAddress(e, reference.Element) : ctx.Recover(e, target).Bind(value => ctx.Coerce(value, target, address));
     }
 
-    internal static RecoveryResult<ManagedValue> Coerce(this RecoveryScope ctx, ManagedValue value, TypeRef target, ulong address)
+    internal static RecoveryResult<ManagedValue> Coerce(this AnalysisScope ctx, ManagedValue value, TypeRef target, ulong address)
     {
         if (target is GenericParameterRef { NativeScalar: not null })
         {
@@ -190,8 +190,8 @@ internal static class ValueRecovery
         }
     }
 
-    internal static DefinitionRef IntegerOf(this RecoveryScope ctx, int width, bool signed) => width == 1 ? ctx.types.Boolean : ctx.types.Integer(width, signed);
-    internal static RecoveryResult<ManagedValue> Recover(this RecoveryScope ctx, Expr e, TypeRef? hint)
+    internal static DefinitionRef IntegerOf(this AnalysisScope ctx, int width, bool signed) => width == 1 ? ctx.types.Boolean : ctx.types.Integer(width, signed);
+    internal static RecoveryResult<ManagedValue> Recover(this AnalysisScope ctx, Expr e, TypeRef? hint)
     {
         RecoveryFailure failure;
         switch (e)
@@ -307,7 +307,7 @@ internal static class ValueRecovery
     }
 
     internal static RecoveryResult<ManagedValue> Truth(ManagedValue value) => value.Width == 1 ? value : RecoveryDiagnostics.Fail(0, "条件 不是一位的布尔值", rule: "Truth");
-    internal static RecoveryResult<ManagedValue> Variable(this RecoveryScope ctx, Variable v, int width)
+    internal static RecoveryResult<ManagedValue> Variable(this AnalysisScope ctx, Variable v, int width)
     {
         if (ctx.State.Exceptions.collectingExceptionDemand)
             ctx.State.Exceptions.exceptionDemand.Add(v);
@@ -376,7 +376,7 @@ internal static class ValueRecovery
         return new ConversionValue(width < value.Width ? ConvKind.Truncate : signed ? ConvKind.SignExtend : ConvKind.ZeroExtend, value, ctx.IntegerOf(width, ManagedTypes.IsSigned(value.Type)), width);
     }
 
-    internal static RecoveryResult<ManagedValue> Binary(this RecoveryScope ctx, Binary b)
+    internal static RecoveryResult<ManagedValue> Binary(this AnalysisScope ctx, Binary b)
     {
         RecoveryFailure failure;
         // 128 位的两个 64 位半段互换保留叶子类型，不把聚合值当作整数运算。
@@ -481,7 +481,7 @@ internal static class ValueRecovery
         return new BinaryValue(b.Op, left, right, ctx.IntegerOf(b.Width, b.Op == BinOp.SDiv || b.Op != BinOp.UDiv && ManagedTypes.IsSigned(left.Type)), b.Width);
     }
 
-    internal static RecoveryResult<Fragment?> MaskFragment(this RecoveryScope ctx, Fragment fragment, ulong mask, int width)
+    internal static RecoveryResult<Fragment?> MaskFragment(this AnalysisScope ctx, Fragment fragment, ulong mask, int width)
     {
         ulong Bits(int low, int bits) => mask & (Expr.Mask(bits) << low);
         var parts = new List<Part>();
@@ -521,7 +521,7 @@ internal static class ValueRecovery
         return new Fragment(parts, fragment.Type, width);
     }
 
-    internal static RecoveryResult<ManagedValue> Comparison(this RecoveryScope ctx, Compare c)
+    internal static RecoveryResult<ManagedValue> Comparison(this AnalysisScope ctx, Compare c)
     {
         RecoveryFailure failure;
         if (c.Cond is Cond.Eq or Cond.Ne && RuntimeRules.SealedOperands(c) is var (klass, sealedType) && ctx.State.Runtime.objectClasses.TryGetValue(klass, out var checkedObject))
@@ -562,7 +562,7 @@ internal static class ValueRecovery
         return new ComparisonValue(c.Cond, left, right, ctx.types.Boolean);
     }
 
-    internal static RecoveryResult<ManagedValue> Conversion(this RecoveryScope ctx, Convert c, TypeRef? hint)
+    internal static RecoveryResult<ManagedValue> Conversion(this AnalysisScope ctx, Convert c, TypeRef? hint)
     {
         if (c.Kind == ConvKind.ZeroExtend && c.Operand is Use { Width: not (1 or 8 or 16 or 32 or 64) } narrow && Fold.ScalarExtract(new Extract(new Use(narrow.Variable, narrow.Variable.Width), 0, narrow.Width), c.Width) is { } extended)
             return ctx.Recover(extended, hint);

@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class ArgumentProjectionRules
 {
-    internal static Dictionary<Storage, int> StructArgumentWidths(this RecoveryScope ctx, Call call)
+    internal static Dictionary<Storage, int> StructArgumentWidths(this AnalysisScope ctx, Call call)
     {
         var widths = new Dictionary<Storage, int>();
         var methods = ctx.Callee(call) is { } indirect ? [indirect] : call.Op is null && call.Target is Const target ? ctx.facts.EntriesAt(target.Value).Where(e => e.Kind is EntryKind.Method or EntryKind.GenericMethod && e.Method is not null).Select(e => e.Method!).Distinct().ToArray() : Array.Empty<MethodRef>();

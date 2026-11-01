@@ -6,7 +6,7 @@ using Cpp2CS.Recovery.Analysis;
 namespace Cpp2CS.Recovery;
 
 /// <summary>下降与表达式定型共用的值恢复入口；方法内缓存由恢复器持有。</summary>
-internal sealed class ValueRecoveryService(RecoveryScope host)
+internal sealed class ValueRecoveryService(AnalysisScope host)
 {
     public MethodRef? PrecedingStart(Call call) => host.PrecedingStart(call);
     public IEnumerable<(FieldRef[] Path, TypeRef Type, int Offset)> StructPaths(TypeRef type, int offset = 0, FieldRef[]? path = null) => host.StructPaths(type, offset, path);

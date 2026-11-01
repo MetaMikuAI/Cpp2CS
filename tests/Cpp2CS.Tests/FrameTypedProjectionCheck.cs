@@ -26,13 +26,13 @@ internal static class FrameTypedProjectionCheck
         ctx.blocks = [block];
         List<FrameWitness> witnesses = [new(-40, vector2, write, true)];
         var a = new Assertions();
-        a.True(ctx.TypedFrameRead(witnesses, -40, vector3, [read], [(4, 32, -36)]), "Vector2.y 可作为 Vector3.y，不扩大源区域");
-        a.True(!ctx.TypedFrameRead(witnesses, -40, vector3, [read]), "完整 Vector3 读取仍超出 Vector2");
-        a.True(!ctx.TypedFrameRead(witnesses, -40, vector3, [read], [(8, 32, -32)]), "实际读取越界仍拒绝");
-        a.True(!ctx.TypedFrameRead(witnesses, -40, vector2Int, [read], [(4, 32, -36)]), "同宽但字段类型不同仍拒绝");
-        a.True(ctx.TypedFrameRead(witnesses, -40, vector2, [read]), "原有完整同型读取继续接受");
+        a.True(ctx.Analysis.TypedFrameRead(witnesses, -40, vector3, [read], [(4, 32, -36)]), "Vector2.y 可作为 Vector3.y，不扩大源区域");
+        a.True(!ctx.Analysis.TypedFrameRead(witnesses, -40, vector3, [read]), "完整 Vector3 读取仍超出 Vector2");
+        a.True(!ctx.Analysis.TypedFrameRead(witnesses, -40, vector3, [read], [(8, 32, -32)]), "实际读取越界仍拒绝");
+        a.True(!ctx.Analysis.TypedFrameRead(witnesses, -40, vector2Int, [read], [(4, 32, -36)]), "同宽但字段类型不同仍拒绝");
+        a.True(ctx.Analysis.TypedFrameRead(witnesses, -40, vector2, [read]), "原有完整同型读取继续接受");
         block.Statements = [read, write];
-        a.True(!ctx.TypedFrameRead(witnesses, -40, vector3, [read], [(4, 32, -36)]), "读取之后的写入不能提供类型证据");
+        a.True(!ctx.Analysis.TypedFrameRead(witnesses, -40, vector3, [read], [(4, 32, -36)]), "读取之后的写入不能提供类型证据");
         var firstValue = new Variable(Storage.Gpr(1), 1);
         var otherValue = new Variable(Storage.Gpr(2), 1);
         var entry = new Block(0x200) { Statements = [new Branch(0x200, Expr.C(1, 1), 0x210, 0x230)] };
@@ -48,16 +48,16 @@ internal static class FrameTypedProjectionCheck
         ctx.blocks = ctx.function.Blocks;
         ctx.definitions = ctx.IndexDefinitions();
         var copied = new List<FrameWitness> { new(-16, vector2, firstCall, false) };
-        ctx.WitnessFrameCopies(copied);
+        ctx.Analysis.WitnessFrameCopies(copied);
         a.True(copied.Any(w => w.Offset == -64 && w.Type.Equals(vector2)), "复制类型沿到达调用的路径回传");
         a.True(copied.All(w => w.Offset != -96), "同一目标槽不能把类型回传到互斥分支的来源");
         var array = new Variable(Storage.Gpr(8), 1);
         var cursor = new Variable(Storage.Gpr(9), 1);
         first.Statements.Insert(0, new Define(0x20c, cursor, new Binary(BinOp.Add, new Use(array, 64), new Use(new(Storage.Gpr(10), 1), 64), 64)));
         ctx.definitions = ctx.IndexDefinitions();
-        a.True(!ctx.FieldAddress(cursor), "未知基址不作为可分离的数组地址");
+        a.True(!ctx.Analysis.FieldAddress(cursor), "未知基址不作为可分离的数组地址");
         ctx.State.Types.known[array] = new ArrayRef(types.Byte, 1) { IsVector = true };
-        a.True(ctx.FieldAddress(cursor), "已知字节数组的偏移地址可按合流入边分离");
+        a.True(ctx.Analysis.FieldAddress(cursor), "已知字节数组的偏移地址可按合流入边分离");
         var vector = new Variable(Storage.Vec(4), 1);
         var low = new ArgumentValue(0, types.String, 64);
         var high = new ArgumentValue(1, types.UInt64, 64);
@@ -67,11 +67,11 @@ internal static class FrameTypedProjectionCheck
         var right = new Binary(BinOp.Shl, value, Expr.C(64, 128), 128);
         foreach (var expression in new[] { new Binary(BinOp.Or, left, right, 128), new Binary(BinOp.Or, right, left, 128) })
         {
-            a.True(ctx.Binary(expression).TryGet(out var swapped, out _), "半段互换不要求 128 位整数常量类型");
+            a.True(ctx.Analysis.Binary(expression).TryGet(out var swapped, out _), "半段互换不要求 128 位整数常量类型");
             a.True(swapped is Fragment { Parts: [var firstPart, var lastPart] }
                 && firstPart.Low == 0 && firstPart.Value == high && lastPart.Low == 64 && lastPart.Value == low, "互换保持引用叶子和整数叶子的身份");
         }
-        a.True(ctx.Binary(new Binary(BinOp.Or, left with { Right = Expr.C(32, 128) }, right, 128)).Failure is not null,
+        a.True(ctx.Analysis.Binary(new Binary(BinOp.Or, left with { Right = Expr.C(32, 128) }, right, 128)).Failure is not null,
             "移位不互补时不能按半段互换恢复");
         return a.Finish("frame-typed-projection");
     }

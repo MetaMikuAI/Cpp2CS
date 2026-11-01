@@ -7,8 +7,8 @@ namespace Cpp2CS.Recovery;
 /// <summary>下降规则只读分析证据，通过值服务生成托管值与语句。</summary>
 internal sealed class LoweringScope
 {
-    public LoweringScope(RecoveryScope host) { State = new(host.State); Values = host.Values; this.host = host; }
-    private readonly RecoveryScope host;
+    public LoweringScope(AnalysisScope host) { State = new(host.State); Values = host.Values; this.host = host; }
+    private readonly AnalysisScope host;
     public RecoveryEvidence State { get; }
     public ValueRecoveryService Values { get; }
     public ProgramFacts facts => host.facts;

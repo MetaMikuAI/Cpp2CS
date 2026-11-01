@@ -7,7 +7,7 @@ internal static class StackCallsRules
 {
     /// <summary>隐藏栈参数需要同时证明调用时 SP、精确 ABI 槽位和未被覆盖的到达写入；附近同名符号不够。</summary>
     [Step("frames.stack-calls", StepPhase.Analyze, StepKind.Analysis, Order = 200, Name = "栈上调用")]
-    internal static void PrepareStackCalls(this RecoveryScope ctx)
+    internal static void PrepareStackCalls(this AnalysisScope ctx)
     {
         var statements = ctx.blocks.SelectMany(b => b.Statements).ToArray();
         var symbols = statements.OfType<Store>().Where(s => s.Value.Width == 64).Select(s => (Store: s, Symbol: ctx.StackSymbol(s.Value))).Where(p => p.Symbol is not null).ToArray();
@@ -116,7 +116,7 @@ internal static class StackCallsRules
             }
     }
 
-    internal static MethodRef? StackSymbol(this RecoveryScope ctx, Expr expression)
+    internal static MethodRef? StackSymbol(this AnalysisScope ctx, Expr expression)
     {
         var active = new HashSet<Variable>();
         while (expression is Use u && active.Add(u.Variable) && ctx.values.TryGetValue(u.Variable, out var value))
@@ -124,10 +124,10 @@ internal static class StackCallsRules
         return expression is Symbol { Kind: SymbolKind.Method, Value: MethodRef method } ? method : null;
     }
 
-    internal static Store? ReachingStackStore(this RecoveryScope ctx, Block block, int before, long offset, HashSet<Block> active, int width = 64, bool allowWider = false)
+    internal static Store? ReachingStackStore(this AnalysisScope ctx, Block block, int before, long offset, HashSet<Block> active, int width = 64, bool allowWider = false)
         => ctx.ReachingStackStores(block, before, offset, active, width, allowWider) is [var store] ? store : null;
 
-    internal static Store[]? ReachingStackStores(this RecoveryScope ctx, Block block, int before, long offset, HashSet<Block> active, int width = 64, bool allowWider = false)
+    internal static Store[]? ReachingStackStores(this AnalysisScope ctx, Block block, int before, long offset, HashSet<Block> active, int width = 64, bool allowWider = false)
     {
         if (!active.Add(block))
             return null;

@@ -31,7 +31,7 @@ internal static class AsyncRules
         return true;
     }
 
-    internal static MethodRef? PrecedingStart(this RecoveryScope ctx, Call call)
+    internal static MethodRef? PrecedingStart(this AnalysisScope ctx, Call call)
     {
         var block = ctx.blocks.FirstOrDefault(b => b.Statements.Contains(call));
         if (block is null)

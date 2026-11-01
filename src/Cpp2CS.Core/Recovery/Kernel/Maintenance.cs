@@ -22,7 +22,7 @@ internal sealed class Maintenance(RecoveryScope ctx)
     }
 
     /// <summary>类型推断。</summary>
-    public void Types(string reason) => Record("types", reason, ctx.InferTypes);
+    public void Types(string reason) => Record("types", reason, ctx.Rewrite.InferTypes);
 
     /// <summary>重建定义索引：一次快照刷新，快照变化时定义版本递增（调用解析缓存以这个版本为键）。</summary>
     public void Definitions(string reason)
@@ -122,7 +122,7 @@ internal sealed class Editing(RecoveryScope ctx, Maintenance maintain)
     public void Insert(Block block, int index, Stmt statement)
     {
         maintain.Check("insert");
-        if (ctx.ArrangedFragments() is { } fragments)
+        if (ctx.Analysis.ArrangedFragments() is { } fragments)
             foreach (var fragment in fragments.Where(f => f.Block == block))
             {
                 if (fragment.First > index)
@@ -147,7 +147,7 @@ internal sealed class Editing(RecoveryScope ctx, Maintenance maintain)
     /// <summary>删除死定义；异常布局已排好时按保留下来的语句重算各异常片段的起止位置。</summary>
     public void RemoveDeadDefinitions(string reason) => maintain.Record("remove-dead-definitions", reason, () =>
     {
-        var fragments = ctx.ArrangedFragments();
+        var fragments = ctx.Analysis.ArrangedFragments();
         var previous = fragments?.Select(f => f.Block).Distinct().ToDictionary(b => b, b => b.Statements.ToArray());
         Cpp2CS.Machine.Ssa.Propagate.RemoveDead(ctx.function);
         if (previous is null)

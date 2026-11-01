@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class VirtualDelegatesRules
 {
-    internal static void MarkVirtualDelegateLoads(this RecoveryScope ctx)
+    internal static void MarkVirtualDelegateLoads(this AnalysisScope ctx)
     {
         var statements = ctx.blocks.SelectMany(b => b.Statements).ToArray();
         var users = new UseIndex(statements.Where(s => s is not Phi));
@@ -28,7 +28,7 @@ internal static class VirtualDelegatesRules
         }
     }
 
-    internal static MethodRef? VirtualDelegateMethod(this RecoveryScope ctx, VirtualDelegate lookup)
+    internal static MethodRef? VirtualDelegateMethod(this AnalysisScope ctx, VirtualDelegate lookup)
     {
         if (ctx.TypeOfValue(lookup.Receiver) is not DefinitionRef receiver || receiver.Definition.IsValueType || lookup.Slot >= receiver.Definition.VTable.Count || receiver.Definition.VTable[lookup.Slot] is not { } entry || entry.Method.IsStatic || !entry.Method.IsVirtual || entry.Method.GenericParameters.Count != 0)
             return null;

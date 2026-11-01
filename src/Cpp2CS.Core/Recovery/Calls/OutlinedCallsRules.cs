@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery;
 internal static class OutlinedCallsRules
 {
     [Step("calls.outlined-calls", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void NormalizeOutlinedCalls(this RecoveryScope ctx, PreparedMethod prepared)
+    internal static void NormalizeOutlinedCalls(this RewriteScope ctx, PreparedMethod prepared)
     {
         var callerIdioms = prepared.Idioms;
         var changed = false;

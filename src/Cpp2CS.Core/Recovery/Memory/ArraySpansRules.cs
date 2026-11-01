@@ -8,7 +8,7 @@ internal static class ArraySpansRules
 {
     // 数组尾切片内联为 data + start、Length - start；保留原有空值与越界分支。
     [Step("memory.array-spans", StepPhase.Analyze, StepKind.Analysis, Order = 950, After = ["typing.infer"], Name = "数组切片")]
-    internal static void PrepareArraySpans(this RecoveryScope ctx)
+    internal static void PrepareArraySpans(this AnalysisScope ctx)
     {
         foreach (var call in ctx.blocks.SelectMany(b => b.Statements).OfType<Call>())
         {

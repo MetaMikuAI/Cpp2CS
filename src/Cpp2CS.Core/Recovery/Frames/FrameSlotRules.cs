@@ -6,7 +6,7 @@ internal static class FrameSlotRules
 {
     /// <summary>栈帧：序言保存的被调用者保存寄存器删去；只被写入一次再装箱的栈槽并入装箱。其余栈访问为洞。</summary>
     [Step("frames.slots", StepPhase.Analyze, StepKind.Rewrite, Order = 600, After = ["frames.regions", "frames.stack-calls", "frames.integer-slots", "frames.snapshots"], Name = "帧槽")]
-    internal static void FrameSlots(this RecoveryScope ctx)
+    internal static void FrameSlots(this RewriteScope ctx)
     {
         var callFrames = new ManagedCallFrames(ctx.facts, ctx.owner.abi);
         var deadWrites = new HashSet<Stmt>(ReferenceEqualityComparer.Instance);

@@ -12,7 +12,7 @@ internal static class SwitchesRules
     /// 只服务于这次跳转，标为运行时值不再翻译；下标保留为托管值，跳转翻译成 switch（越界由前驱中的上界检查排除，见 JumpTables）。
     /// </summary>
     [Step("control.jump-tables", StepPhase.Analyze, StepKind.Analysis, Order = 450, After = ["runtime.mark"], Name = "跳转表")]
-    internal static void JumpTables(this RecoveryScope ctx)
+    internal static void JumpTables(this AnalysisScope ctx)
     {
         foreach (var block in ctx.blocks)
         {

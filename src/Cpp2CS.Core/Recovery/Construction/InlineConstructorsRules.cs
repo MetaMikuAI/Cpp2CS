@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class InlineConstructorsRules
 {
-    internal static bool InlineConstructor(this RecoveryScope ctx, Block block, int index, Call allocation, DefinitionRef type, Variable created)
+    internal static bool InlineConstructor(this AnalysisScope ctx, Block block, int index, Call allocation, DefinitionRef type, Variable created)
     {
         InlineConstructors.Match? match = null;
         Func<Expr, TypeRef?>? declaredType = null;

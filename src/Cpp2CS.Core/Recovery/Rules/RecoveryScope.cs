@@ -12,10 +12,19 @@ internal sealed class RecoveryScope(MethodRecovery owner, MethodRef method, ulon
     internal readonly MethodRef method = method;
     internal readonly ulong entry = entry;
     internal readonly MethodState State = new();
+    private AnalysisScope? analysisScope;
+    private RewriteScope? rewriteScope;
+    private BindingScope? bindingScope;
+    private ProofScope? proofScope;
+    /// <summary>交给规则的作用域：分析（只读）、改写、参数绑定与证明。</summary>
+    internal AnalysisScope Analysis => analysisScope ??= new(this);
+    internal RewriteScope Rewrite => rewriteScope ??= new(this);
+    internal BindingScope Binding => bindingScope ??= new(this);
+    internal ProofScope Proof => proofScope ??= new(this);
     private LoweringScope? lowering;
-    internal LoweringScope Lowering => lowering ??= new(this);
+    internal LoweringScope Lowering => lowering ??= new(Analysis);
     private ValueRecoveryService? valueService;
-    internal ValueRecoveryService Values => valueService ??= new(this);
+    internal ValueRecoveryService Values => valueService ??= new(Analysis);
     /// <summary>Prepare 步骤列表写入的 pass 记录；计划表在每步之后把它转入 <see cref="trace"/>。</summary>
     internal readonly List<PassStep> passSteps = [];
     private Cpp2CS.Machine.Algebra.PassList? passes;
@@ -37,13 +46,20 @@ internal sealed class RecoveryScope(MethodRecovery owner, MethodRef method, ulon
     internal readonly ProgramFacts facts = owner.facts;
     internal HoleLedger? ledgerStore;
     /// <summary>洞账本（<see cref = "HoleLedger"/>）：独立洞、毒化、依赖边与已诊断的语句。</summary>
-    internal HoleLedger ledger => this.ledgerStore ??= new(this.DefinedBy);
+    internal HoleLedger ledger => this.ledgerStore ??= new(Analysis.DefinedBy);
 
     /// <summary>定义索引（<see cref = "Definitions"/>）；帧改写之后重建。</summary>
     internal Definitions definitions = Definitions.Empty;
     internal readonly MethodAnalyses analyses = new();
     private readonly DominanceCache dominance = new();
     internal Dominators Dominators => dominance.Get(function);
+
+    /// <summary>重建定义索引：一次快照刷新（快照变化时版本递增），返回当前的定义。</summary>
+    internal Definitions IndexDefinitions()
+    {
+        analyses.Refresh(blocks, State.Exceptions.exceptionPhis);
+        return analyses.Get(Definitions.Analysis);
+    }
     internal IReadOnlyDictionary<Variable, Expr> values => this.definitions.Values;
     internal IReadOnlyDictionary<Variable, Phi> phis => this.definitions.Phis;
     internal IReadOnlyDictionary<Variable, (Call Call, int Index)> results => this.definitions.Results;

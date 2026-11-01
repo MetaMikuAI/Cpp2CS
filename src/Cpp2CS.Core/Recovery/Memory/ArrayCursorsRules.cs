@@ -4,7 +4,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class ArrayCursorsRules
 {
-    internal static void PrepareArrayCursors(this RecoveryScope ctx)
+    internal static void PrepareArrayCursors(this AnalysisScope ctx)
     {
         if (!ctx.Maintain.Fixpoint("memory.array-cursors", Maintenance.SafetyBudget, () =>
         {
@@ -46,7 +46,7 @@ internal static class ArrayCursorsRules
     }
 
     [Step("memory.post-frame-arrays", StepPhase.Analyze, StepKind.Rewrite, Order = 370, After = ["frames.integer-slots"], Name = "帧后数组地址", Refresh = StepRefresh.Types)]
-    internal static void PrepareFrameArrayAddresses(this RecoveryScope ctx)
+    internal static void PrepareFrameArrayAddresses(this RewriteScope ctx)
     {
         ctx.NormalizePinnedArrays(false);
         ctx.PrepareArrayCursors();

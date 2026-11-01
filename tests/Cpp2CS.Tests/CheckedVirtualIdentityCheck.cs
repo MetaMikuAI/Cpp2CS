@@ -38,7 +38,7 @@ internal static class CheckedVirtualIdentityCheck
             };
             var runtime = context.State.Runtime.runtime;
             runtime.Clear();
-            context.MarkVtableLoads();
+            context.Analysis.MarkVtableLoads();
             a.Equal(mode == "checked", runtime.Contains(entry), "仅同一对象的成功类型检查证明虚表身份：" + mode);
         }
         var normalized = MethodRef.Open(facts.Model.Methods.Single(m => m.Owner.FullName == "Sekai.ScreenLayerEventStorySelect" && m.Name == "OnCreateCell"));
@@ -57,7 +57,7 @@ internal static class CheckedVirtualIdentityCheck
                 block.Statements[block.Statements.IndexOf(guard)] = new Nop(guard.Address, "缺少转换结果判空");
             }
             context.State.Runtime.runtime.Clear();
-            context.MarkVtableLoads();
+            context.Analysis.MarkVtableLoads();
             a.Equal(guarded, context.State.Runtime.runtime.Contains(((Use)call.Target).Variable), "isinst 结果只有通过判空后才与原虚表身份相同");
         }
         return a.Finish("checked-virtual-identity");

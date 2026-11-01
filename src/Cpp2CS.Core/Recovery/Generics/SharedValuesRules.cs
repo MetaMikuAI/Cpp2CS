@@ -9,7 +9,7 @@ namespace Cpp2CS.Recovery;
 internal static class SharedValuesRules
 {
     [Rule(RuleKind.ParameterBinding, "generics.bind-shared-argument", Order = 150)]
-    internal static bool PrepareSharedArgument(this RecoveryScope ctx, AbiValue parameter, int index)
+    internal static bool PrepareSharedArgument(this BindingScope ctx, AbiValue parameter, int index)
     {
         if (parameter.Passing != Passing.Shared)
             return false;
@@ -18,7 +18,7 @@ internal static class SharedValuesRules
     }
 
     [Step("generics.shared-values", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void NormalizeSharedValues(this RecoveryScope ctx)
+    internal static void NormalizeSharedValues(this RewriteScope ctx)
     {
         var original = ctx.function.Blocks.SelectMany(b => b.Statements).ToArray();
         if (!original.OfType<Define>().Any(d => ExprMap.Walk(d.Value).Any(e => e is Load { Address: Binary { Left: Symbol { Kind: SymbolKind.Class, Value: GenericParameterRef }, Right: Const { Value: RuntimeLayout.ClassStackSlotSize } } })))
@@ -331,12 +331,12 @@ internal static class SharedValuesRules
                 ctx.State.Calls.sharedSites.Add(define.Address);
     }
 
-    internal static void NormalizeStackCanary(this RecoveryScope ctx, Func<Expr, int, Expr> expand)
+    internal static void NormalizeStackCanary(this AnalysisScope ctx, Func<Expr, int, Expr> expand)
     {
         StackCanaryRecognition.Run(ctx.function, expand, new ManagedCallFrames(ctx.facts, ctx.owner.abi).ArgumentSize);
     }
 
-    internal static RecoveryResult<ManagedValue> SharedValue(this RecoveryScope ctx, Expr address, TypeRef type)
+    internal static RecoveryResult<ManagedValue> SharedValue(this AnalysisScope ctx, Expr address, TypeRef type)
     {
         if (!ctx.Recover(ctx.AddressExpression(address), null).TryGet(out var value, out var failure))
             return failure;

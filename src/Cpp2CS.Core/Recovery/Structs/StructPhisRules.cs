@@ -12,7 +12,7 @@ internal static class StructPhisRules
     /// 这组 φ 是一个结构体局部变量；φ 只被返回使用。逐片读取的定义并入入边上的整体读取。
     /// </summary>
     [Step("structs.phis", StepPhase.Analyze, StepKind.Analysis, Order = 955, After = ["typing.infer", "memory.array-spans"], Name = "结构体汇合")]
-    internal static RecoveryFailure? StructPhis(this RecoveryScope ctx)
+    internal static RecoveryFailure? StructPhis(this AnalysisScope ctx)
     {
         ctx.CallResultPhis();
         if (ctx.owner.abi.Classify(ctx.method, out _)?.Return is not { } returned || !ctx.RegisterStruct(returned) || returned.Pieces.Length < 2)
@@ -68,7 +68,7 @@ internal static class StructPhisRules
         return null;
     }
 
-    internal static void CallResultPhis(this RecoveryScope ctx)
+    internal static void CallResultPhis(this AnalysisScope ctx)
     {
         foreach (var block in ctx.blocks)
             foreach (var phi in block.Statements.OfType<Phi>())
@@ -94,7 +94,7 @@ internal static class StructPhisRules
     /// φ 是一个该类型的结构体局部变量；读取并入入边上的整体赋值。
     /// </summary>
     [Step("structs.stored-phis", StepPhase.Analyze, StepKind.Analysis, Order = 960, After = ["structs.phis"], Name = "结构体写入汇合")]
-    internal static RecoveryFailure? StoredStructPhis(this RecoveryScope ctx)
+    internal static RecoveryFailure? StoredStructPhis(this AnalysisScope ctx)
     {
         var statements = ctx.blocks.SelectMany(b => b.Statements).ToArray();
         var uses = new UseIndex(statements.Where(s => s is not Phi));
@@ -188,7 +188,7 @@ internal static class StructPhisRules
         return null;
     }
 
-    internal static RecoveryResult<ManagedValue?> StructPhiPiece(this RecoveryScope ctx, Variable variable, int width)
+    internal static RecoveryResult<ManagedValue?> StructPhiPiece(this AnalysisScope ctx, Variable variable, int width)
     {
         if (!ctx.State.Structs.structPhiMembers.TryGetValue(variable, out var member))
             return (ManagedValue?)null;

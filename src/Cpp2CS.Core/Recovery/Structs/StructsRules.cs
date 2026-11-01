@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class StructsRules
 {
-    internal static IEnumerable<(FieldRef[] Path, TypeRef Type, int Offset)> StructPaths(this RecoveryScope ctx, TypeRef type, int offset = 0, FieldRef[]? path = null)
+    internal static IEnumerable<(FieldRef[] Path, TypeRef Type, int Offset)> StructPaths(this AnalysisScope ctx, TypeRef type, int offset = 0, FieldRef[]? path = null)
     {
         path ??= [];
         if (type is ByRefRef b)
@@ -28,7 +28,7 @@ internal static class StructsRules
                 yield return inherited;
     }
 
-    internal static ManagedValue PathValue(this RecoveryScope ctx, ManagedValue root, IReadOnlyList<FieldRef> path)
+    internal static ManagedValue PathValue(this AnalysisScope ctx, ManagedValue root, IReadOnlyList<FieldRef> path)
     {
         var value = root;
         foreach (var field in path)
@@ -42,7 +42,7 @@ internal static class StructsRules
         return value;
     }
 
-    internal static IEnumerable<(FieldRef[] Path, TypeRef Type, int Offset)> ScalarStructPaths(this RecoveryScope ctx, TypeRef type)
+    internal static IEnumerable<(FieldRef[] Path, TypeRef Type, int Offset)> ScalarStructPaths(this AnalysisScope ctx, TypeRef type)
     {
         // 字段路径只依赖元数据和具体类型；同一方法的推断轮次共享展开结果。
         if (!ctx.State.Structs.scalarPaths.TryGetValue(type, out var paths))
@@ -50,7 +50,7 @@ internal static class StructsRules
         return paths;
     }
 
-    private static IEnumerable<(FieldRef[] Path, TypeRef Type, int Offset)> BuildScalarStructPaths(RecoveryScope ctx, TypeRef type)
+    private static IEnumerable<(FieldRef[] Path, TypeRef Type, int Offset)> BuildScalarStructPaths(AnalysisScope ctx, TypeRef type)
     {
         var leaves = ctx.StructPaths(type).Where(p => ctx.types.Kind(p.Type) is not (TypeKind.Struct or null)).ToArray();
         foreach (var leaf in leaves)
@@ -79,7 +79,7 @@ internal static class StructsRules
         }
     }
 
-    internal static IReadOnlyList<TypeRef>? StructReceiverArguments(this RecoveryScope ctx, Expr? receiver, TypeDef owner)
+    internal static IReadOnlyList<TypeRef>? StructReceiverArguments(this AnalysisScope ctx, Expr? receiver, TypeDef owner)
     {
         if (receiver is null)
             return null;

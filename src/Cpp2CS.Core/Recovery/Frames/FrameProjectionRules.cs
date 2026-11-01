@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class FrameProjectionRules
 {
-    internal static RecoveryResult<ManagedValue?> FrameShift(this RecoveryScope ctx, BinOp operation, ManagedValue left, ManagedValue right, int width)
+    internal static RecoveryResult<ManagedValue?> FrameShift(this AnalysisScope ctx, BinOp operation, ManagedValue left, ManagedValue right, int width)
     {
         if (operation is not (BinOp.AShr or BinOp.LShr) || right is not ConstantValue shift || width is not (32 or 64) || left is not Fragment && (ctx.State.Frames.frameRegions.Count == 0 || operation != BinOp.AShr))
             return (ManagedValue?)null;

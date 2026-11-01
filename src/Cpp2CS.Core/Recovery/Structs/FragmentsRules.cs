@@ -12,10 +12,10 @@ internal static class FragmentsRules
         return children.SelectMany(FragmentsRules.WalkRecoveryValue).Prepend(value);
     }
 
-    internal static LocalValue StructLocal(this RecoveryScope ctx, TypeRef type, int width) => new(new Variable(Storage.Temp(ctx.State.Structs.Locals.Next()), 1), type, width);
+    internal static LocalValue StructLocal(this AnalysisScope ctx, TypeRef type, int width) => new(new Variable(Storage.Temp(ctx.State.Structs.Locals.Next()), 1), type, width);
     /// <summary>循环中的结构体片按相同叶子汇合；填充仍没有值，不能借助零初值把填充变成整数。</summary>
     [Step("structs.fragment-phis", StepPhase.Analyze, StepKind.Analysis, Order = 980, After = ["structs.stored-phis"], Name = "片汇合")]
-    internal static void PrepareFragmentPhis(this RecoveryScope ctx)
+    internal static void PrepareFragmentPhis(this AnalysisScope ctx)
     {
         var phis = ctx.blocks.SelectMany(b => b.Statements).OfType<Phi>().ToArray();
         var forwarding = ctx.blocks.SelectMany(b => b.Statements).OfType<Define>()
@@ -77,7 +77,7 @@ internal static class FragmentsRules
         }
     }
 
-    internal static RecoveryResult<Fragment?> MemoryFragment(this RecoveryScope ctx, Expr root, TypeRef type, long offset, int width)
+    internal static RecoveryResult<Fragment?> MemoryFragment(this AnalysisScope ctx, Expr root, TypeRef type, long offset, int width)
     {
         if (type is not (ByRefRef or DefinitionRef))
             return (Fragment?)null;
@@ -104,7 +104,7 @@ internal static class FragmentsRules
         return new Fragment(paths.Select(p => new Part((p.Offset - (int)offset) * 8, ctx.PathValue(value, p.Path))).ToArray(), ctx.types.UInt64, width);
     }
 
-    internal static RecoveryResult<Fragment?> FragmentVariable(this RecoveryScope ctx, Variable variable, int width)
+    internal static RecoveryResult<Fragment?> FragmentVariable(this AnalysisScope ctx, Variable variable, int width)
     {
         if (!ctx.State.Lowering.inlined.Contains(variable) && ctx.State.Structs.fragmentLocals.TryGetValue(variable, out var cached))
             return ctx.ResizeFragment(cached, width).Map<Fragment?>(value => (Fragment)value);
@@ -132,7 +132,7 @@ internal static class FragmentsRules
         }
     }
 
-    internal static RecoveryResult<ManagedValue> ResizeFragment(this RecoveryScope ctx, Fragment fragment, int width)
+    internal static RecoveryResult<ManagedValue> ResizeFragment(this AnalysisScope ctx, Fragment fragment, int width)
     {
         if (width == fragment.Width)
             return fragment;
@@ -156,7 +156,7 @@ internal static class FragmentsRules
         return new Fragment(parts, fragment.Type, width);
     }
 
-    internal static RecoveryResult<ManagedValue> InsertedFragment(this RecoveryScope ctx, Insert insert)
+    internal static RecoveryResult<ManagedValue> InsertedFragment(this AnalysisScope ctx, Insert insert)
     {
         var pieces = new List<(int Low, Expr Value)>();
         Expr current = insert;
@@ -229,7 +229,7 @@ internal static class FragmentsRules
         return RecoveryDiagnostics.Fail(0, "向量 插入未完整覆盖独立叶子", rule: "InsertedFragment");
     }
 
-    internal static RecoveryResult<ManagedValue> Slice(this RecoveryScope ctx, ManagedValue value, int low, int width)
+    internal static RecoveryResult<ManagedValue> Slice(this AnalysisScope ctx, ManagedValue value, int low, int width)
     {
         if (low == 0 && width == value.Width && value is not Fragment)
             return value;
@@ -322,7 +322,7 @@ internal static class FragmentsRules
         ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate } c => FragmentsRules.ZeroLow(c.Operand, Math.Min(bits, c.Operand.Width)),
         _ => false,
     };
-    internal static RecoveryResult<ManagedValue> Pack(this RecoveryScope ctx, Fragment fragment)
+    internal static RecoveryResult<ManagedValue> Pack(this AnalysisScope ctx, Fragment fragment)
     {
         if (fragment.Parts is [var single] && single.Low == 0 && single.Value.Width == fragment.Width)
             return single.Value;

@@ -5,7 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class ConversionCopiesRules
 {
-    internal static MethodRef? ConversionCopy(this RecoveryScope ctx, Call call, ulong target)
+    internal static MethodRef? ConversionCopy(this AnalysisScope ctx, Call call, ulong target)
     {
         if (ctx.owner.NativeMethods.NativeConversion(target) is { } native)
             return native;

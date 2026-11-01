@@ -4,11 +4,11 @@ namespace Cpp2CS.Recovery;
 internal static class ProjectionsRules
 {
     [Step("structs.vector-phi-projection", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void ProjectVectorPhis(RecoveryScope scope) => VectorPhiProjection.Run(scope.function.Blocks);
+    internal static void ProjectVectorPhis(RewriteScope scope) => VectorPhiProjection.Run(scope.function.Blocks);
 
     [Step("structs.call-argument-projection", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void ProjectCallArguments(RecoveryScope scope) => CallArgumentProjection.Run(scope.function.Blocks, scope.StructArgumentWidths);
+    internal static void ProjectCallArguments(RewriteScope scope) => CallArgumentProjection.Run(scope.function.Blocks, scope.StructArgumentWidths);
 
     [Step("structs.scalar-phi-projection", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void ProjectScalarPhis(RecoveryScope scope) => ScalarPhiProjection.Run(scope.function);
+    internal static void ProjectScalarPhis(RewriteScope scope) => ScalarPhiProjection.Run(scope.function);
 }

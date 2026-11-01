@@ -4,7 +4,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class ExceptionRoutingRules
 {
-    internal static RecoveryResult<ManagedBody> RouteExceptionSources(this RecoveryScope ctx, ManagedBody body, ExceptionLayout layout, ExceptionFragment[] order)
+    internal static RecoveryResult<ManagedBody> RouteExceptionSources(this AnalysisScope ctx, ManagedBody body, ExceptionLayout layout, ExceptionFragment[] order)
     {
         var byEntry = layout.Regions.ToDictionary(r => r.Entry);
         var targets = layout.EntryPaths.ToDictionary(p => p.Source, p => byEntry.GetValueOrDefault(p.Entry));

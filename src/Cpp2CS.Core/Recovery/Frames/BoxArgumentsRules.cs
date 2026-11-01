@@ -7,7 +7,7 @@ internal static class BoxArgumentsRules
 {
     /// <summary>标量写进临时栈槽后跨块装箱：在原写入处保存值，不把栈地址当托管值。</summary>
     [Step("frames.merged-box-arguments", StepPhase.Analyze, StepKind.Rewrite, Order = 292, After = ["frames.scalar-stack-arguments"], Name = "汇合装箱")]
-    internal static void PrepareMergedBoxArguments(this RecoveryScope ctx)
+    internal static void PrepareMergedBoxArguments(this RewriteScope ctx)
     {
         var changed = false;
         foreach (var block in ctx.blocks)

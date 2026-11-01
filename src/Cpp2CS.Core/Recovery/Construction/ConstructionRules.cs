@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class ConstructionRules
 {
-    internal static bool SameBlockBefore(this RecoveryScope ctx, Stmt first, Stmt second) => ctx.blocks.Any(b =>
+    internal static bool SameBlockBefore(this AnalysisScope ctx, Stmt first, Stmt second) => ctx.blocks.Any(b =>
     {
         var i = b.Statements.IndexOf(first);
         var j = b.Statements.IndexOf(second);
@@ -14,7 +14,7 @@ internal static class ConstructionRules
     });
     /// <summary>对象分配与直线链上的构造调用合并为 newobj；跨块时另证可观察顺序与异常去向。</summary>
     [Step("construction.allocations", StepPhase.Analyze, StepKind.Analysis, Order = 700, After = ["runtime.mark"], Name = "分配")]
-    internal static void Allocations(this RecoveryScope ctx)
+    internal static void Allocations(this AnalysisScope ctx)
     {
         foreach (var block in ctx.blocks)
             for (var i = 0; i < block.Statements.Count; i++)
@@ -76,7 +76,7 @@ internal static class ConstructionRules
     }
 
     internal static Expr? Receiver(Call call) => call.DelegateReceiver ?? (call.Op?.Kind == OpKind.InvokeGeneric || call.Sources.Length > 0 && call.Sources[0] == Storage.Gpr(0) ? call.Arguments[0] : null);
-    internal static bool ConstructorArgumentInitializer(this RecoveryScope ctx, Stmt statement, Call constructor)
+    internal static bool ConstructorArgumentInitializer(this AnalysisScope ctx, Stmt statement, Call constructor)
     {
         // 栈实参快照保留原求值位置；已吸收的隐藏 MethodInfo 写入不产生托管副作用。
         if (statement is Store argument && ctx.FrameOffset(argument.Target) is < 0

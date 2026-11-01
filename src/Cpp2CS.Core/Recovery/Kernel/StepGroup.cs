@@ -11,15 +11,16 @@ namespace Cpp2CS.Recovery;
 internal static class StepGroup
 {
     /// <summary>运行一个子步骤。</summary>
-    internal static void Run(RecoveryScope scope, string id, Action body) => Run(scope, id, () =>
+    internal static void Run(RewriteScope scope, string id, Action body) => Run(scope, id, () =>
     {
         body();
         return null;
     });
 
     /// <summary>运行一个可失败的子步骤；返回失败时由父步骤终止整组并按原步骤的方式记录失败。</summary>
-    internal static RecoveryFailure? Run(RecoveryScope scope, string id, Func<RecoveryFailure?> body)
+    internal static RecoveryFailure? Run(RewriteScope rewrite, string id, Func<RecoveryFailure?> body)
     {
+        var scope = rewrite.Session;
         var parent = scope.currentStep;
         scope.currentStep = id;
         var (version, statements) = (scope.analyses.Version, Statements(scope));

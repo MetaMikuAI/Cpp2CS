@@ -6,7 +6,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class BranchAllocationsRules
 {
-    internal static bool BranchConstructors(this RecoveryScope ctx, Block source, int index, Call allocation, DefinitionRef type, Variable created)
+    internal static bool BranchConstructors(this AnalysisScope ctx, Block source, int index, Call allocation, DefinitionRef type, Variable created)
     {
         var middle = new List<Stmt>();
         foreach (var (block, statement) in AllocationPairing.Following(source, index))

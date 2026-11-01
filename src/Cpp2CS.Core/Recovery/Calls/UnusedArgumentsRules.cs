@@ -7,12 +7,12 @@ namespace Cpp2CS.Recovery;
 
 internal static class UnusedArgumentsRules
 {
-    internal static bool DirectInputProof(this RecoveryScope ctx, Call call, MethodRef callee, bool receiver = false) => call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target } // 非虚方法的 callvirt 只负责判空；普通参数仍可按固定目标证明未用，接收者不能据此替换。
+    internal static bool DirectInputProof(this AnalysisScope ctx, Call call, MethodRef callee, bool receiver = false) => call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target } // 非虚方法的 callvirt 只负责判空；普通参数仍可按固定目标证明未用，接收者不能据此替换。
     && (!ctx.State.Runtime.virtualCalls.Contains(call) || !receiver && !callee.Method.IsVirtual) && ctx.facts.EntriesAt(target.Value).Any(e => e.Method is MethodRef candidate && candidate.Method == callee.Method);
-    internal static bool UnusedParameter(this RecoveryScope ctx, Call call, Storage register) => call.Target is Const target && ctx.owner.rewriter.UnusedInput(target.Value, register);
-    internal static bool UnusedInput(this RecoveryScope ctx, Call call, MethodRef callee, AbiValue parameter) => parameter is { Passing: Passing.Registers, Pieces: [var piece] } && ctx.DirectInputProof(call, callee, receiver: true) && ctx.UnusedParameter(call, piece.Register);
-    internal static bool MissingInput(this RecoveryScope ctx, Expr expression) => expression is Unknown or Use { Variable.Version: < 0 } || expression is Use { Variable.Version: 0 } input && !ctx.State.Signature.arguments.ContainsKey(input.Variable.Storage) || expression is Use use && ctx.State.Runtime.runtime.Contains(use.Variable);
-    internal static void PrepareUnusedReceiverPhis(this RecoveryScope ctx)
+    internal static bool UnusedParameter(this AnalysisScope ctx, Call call, Storage register) => call.Target is Const target && ctx.owner.rewriter.UnusedInput(target.Value, register);
+    internal static bool UnusedInput(this AnalysisScope ctx, Call call, MethodRef callee, AbiValue parameter) => parameter is { Passing: Passing.Registers, Pieces: [var piece] } && ctx.DirectInputProof(call, callee, receiver: true) && ctx.UnusedParameter(call, piece.Register);
+    internal static bool MissingInput(this AnalysisScope ctx, Expr expression) => expression is Unknown or Use { Variable.Version: < 0 } || expression is Use { Variable.Version: 0 } input && !ctx.State.Signature.arguments.ContainsKey(input.Variable.Storage) || expression is Use use && ctx.State.Runtime.runtime.Contains(use.Variable);
+    internal static void PrepareUnusedReceiverPhis(this RewriteScope ctx)
     {
         var changed = false;
         foreach (var block in ctx.blocks.Where(b => b.Predecessors.Count > 1 && !b.IsLandingPad))
@@ -97,7 +97,7 @@ internal static class UnusedArgumentsRules
         return new ConstantValue(0, parameter.Type, piece.Width);
     }
 
-    internal static RecoveryResult<ManagedValue?> UnusedReceiver(this RecoveryScope ctx, Call call, MethodRef callee, AbiValue self, Expr expression)
+    internal static RecoveryResult<ManagedValue?> UnusedReceiver(this AnalysisScope ctx, Call call, MethodRef callee, AbiValue self, Expr expression)
     {
         if (ctx.types.Kind(self.Type) != TypeKind.Reference)
             return (ManagedValue?)null;
