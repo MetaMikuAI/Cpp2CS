@@ -59,6 +59,25 @@ internal sealed class MethodEnvironment(MethodRef method, MachineSignature signa
         return null;
     }
 
+    /// <summary>
+    /// 运行时元数据上的读取：类的虚表槽（Il2CppClass.vtable[slot] 的方法指针与 MethodInfo）为该类在此槽上的方法。
+    /// </summary>
+    public Sym? MetadataRead(SymTable syms, Sym address, int width)
+    {
+        if (width != 64) return null;
+        var (entity, offset) = SymTable.Resolve(address) switch
+        {
+            EntitySym e => (e, 0L),
+            OpSym { Op.Kind: OperatorKind.Binary, Args: [EntitySym e, ConstSym c] } add when add.Op.Binary == BinOp.Add => (e, c.Signed),
+            _ => (null, 0L),
+        };
+        if (entity is not { Symbol: { Kind: SymbolKind.Class, Value: DefinitionRef owner } } || offset < RuntimeLayout.ClassVtable) return null;
+        var within = offset - RuntimeLayout.ClassVtable;
+        if (within % RuntimeLayout.VirtualInvokeDataSize is not (0 or 8)) return null;
+        return DispatchResolution.Slot(owner, (int)(within / RuntimeLayout.VirtualInvokeDataSize), interfaceOnly: false) is { } method
+            ? syms.Entity(new Symbol(SymbolKind.Method, method)) : null;
+    }
+
     /// <summary>单元的入口内容：栈传入的实参、实参副本的对应字节，其余未定义。</summary>
     private Sym Initial(SymTable syms, Cell cell)
     {

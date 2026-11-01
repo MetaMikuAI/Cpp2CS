@@ -18,6 +18,14 @@ internal static class DispatchResolution
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
+                if (block.Statements[i] is Call { Op: null, Kind: CallKind.Indirect or CallKind.TailIndirect, Resolved: null } indirect
+                    && SymTable.Resolve(values.Operands(indirect)[0]) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef target } })
+                {
+                    // 目标取自已知类的虚表槽：确切类型上的虚调用。
+                    block.Statements[i] = indirect with { Resolved = target };
+                    resolved++;
+                    continue;
+                }
                 if (block.Statements[i] is not Call { Op: { } op, Resolved: null } call) continue;
                 MethodRef? method = op switch
                 {
@@ -40,7 +48,7 @@ internal static class DispatchResolution
     }
 
     /// <summary>类型（沿基类链）中占据虚表槽 slot 的虚方法，类型实参代入声明类型。</summary>
-    private static MethodRef? Slot(DefinitionRef type, int slot, bool interfaceOnly)
+    internal static MethodRef? Slot(DefinitionRef type, int slot, bool interfaceOnly)
     {
         for (TypeRef? current = type; current is DefinitionRef d; current = interfaceOnly ? null : d.Definition.BaseType?.Substitute(d.Arguments, []))
             if (d.Definition.Methods.FirstOrDefault(m => m.IsVirtual && m.Slot == slot && m.GenericParameters.Count == 0) is { } method)

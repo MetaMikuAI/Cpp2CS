@@ -13,6 +13,9 @@ public interface IValueEnvironment
 
     /// <summary>调用定义 Results[index] 的值；null 表示没有依据。</summary>
     Sym? CallResult(SymTable syms, Call call, int index, IReadOnlyList<Sym> arguments);
+
+    /// <summary>运行时元数据上的读取（地址为已知实体加常量）按事实得到的值；null 表示不是或没有依据。</summary>
+    Sym? MetadataRead(SymTable syms, Sym address, int width);
 }
 
 /// <summary>
@@ -180,6 +183,7 @@ public sealed class ValueModel
             case Load load:
                 {
                     var address = Eval(load.Address);
+                    if (environment.MetadataRead(Syms, address, load.Width) is { } known) return known;
                     return Syms.Read(site!, ordinal++, address, load.Width);
                 }
             case Binary b:

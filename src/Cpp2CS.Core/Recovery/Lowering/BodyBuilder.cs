@@ -387,7 +387,8 @@ internal sealed class BodyBuilder
             output.Add(new ManagedAssignment(call.Address, Local(construction, callee.DeclaringType), new NewObjectValue(callee, managed)));
             return call.Kind == CallKind.Tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
         }
-        var invocation = new ManagedInvocation(callee, receiver, managed, Virtual: receiver is not null && (shape.IsDispatch || absorbedChecks.Contains(contents[0])));
+        var dispatched = shape.IsDispatch || call.Resolved is not null && call.Kind is CallKind.Indirect or CallKind.TailIndirect;
+        var invocation = new ManagedInvocation(callee, receiver, managed, Virtual: receiver is not null && (dispatched || absorbedChecks.Contains(contents[0])));
         LocalValue? result = null;
         var returnType = TypeOracle.Concrete(callee, callee.Method.ReturnType);
         if (!ManagedTypes.IsVoid(returnType))
