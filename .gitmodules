@@ -1,0 +1,3 @@
+[submodule "third_party/Il2CppDumper"]
+	path = third_party/Il2CppDumper
+	url = git@github.com:MetaMikuAI/Il2CppDumper.git

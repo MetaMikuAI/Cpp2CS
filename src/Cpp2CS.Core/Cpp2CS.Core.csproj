@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Cpp2CS</RootNamespace>
+    <AssemblyName>Cpp2CS.Core</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Cpp2CS.Input" />
+    <InternalsVisibleTo Include="Cpp2CS.Tests" />
+  </ItemGroup>
+
+</Project>
