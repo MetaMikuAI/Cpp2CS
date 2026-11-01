@@ -240,9 +240,9 @@ internal sealed class BodyBuilder
     private Terminator? LowerCall(Block block, int index, Call call, IReadOnlyList<Sym> operands, List<ManagedStatement> output)
     {
         var arguments = operands.Skip(1).Take(call.Arguments.Length).ToArray();
-        if (call.Op is { } op)
-            return LowerRuntime(block, index, call, op, arguments, output);
         var shape = analysis.Environment.Shape(call);
+        if (call.Op is { } op && !shape.IsDispatch)
+            return LowerRuntime(block, index, call, op, arguments, output);
         var signature = shape.Signature;
         if (signature is null)
         {
@@ -276,7 +276,9 @@ internal sealed class BodyBuilder
                 output.Add(new ManagedAssignment(call.Address, Local(construction, callee.DeclaringType), created));
                 return call.Kind == CallKind.Tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
             }
-            var argument = Argument(call, value, type, contents[i], arguments, output);
+            var argument = value.Index < 0 && call.Op?.Kind == OpKind.CallDelegate && call.DelegateReceiver is not null
+                ? View(operands[1 + call.Arguments.Length], type, call.Address)
+                : Argument(call, value, type, contents[i], arguments, output);
             if (value.Index < 0) receiver = argument;
             else managed.Add(argument);
         }
@@ -285,14 +287,14 @@ internal sealed class BodyBuilder
             output.Add(new ManagedAssignment(call.Address, Local(construction, callee.DeclaringType), new NewObjectValue(callee, managed)));
             return call.Kind == CallKind.Tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
         }
-        var invocation = new ManagedInvocation(callee, receiver, managed, Virtual: receiver is not null && absorbedChecks.Contains(contents[0]));
+        var invocation = new ManagedInvocation(callee, receiver, managed, Virtual: receiver is not null && (shape.IsDispatch || absorbedChecks.Contains(contents[0])));
         LocalValue? result = null;
         var returnType = TypeOracle.Concrete(callee, callee.Method.ReturnType);
         if (!ManagedTypes.IsVoid(returnType))
             result = signature.Return?.Transfer == Transfer.ResultBuffer
                 ? Local(values.Syms.Out(call, MachineSignature.ReturnIndex, MethodEnvironment.ValueWidth(signature.Return)), returnType)
                 : Local(values.Syms.Result(call, 0, signature.Return is { } ret ? MethodEnvironment.ValueWidth(ret) : Width(returnType)), returnType);
-        var tail = call.Kind == CallKind.Tail;
+        var tail = call.Kind is CallKind.Tail or CallKind.TailIndirect;
         var lowered = new ManagedCall(call.Address, invocation, tail ? null : result, tail);
         if (tail) return new Statement(lowered);
         output.Add(lowered);
@@ -397,9 +399,13 @@ internal sealed class BodyBuilder
     private Terminator? LowerRuntime(Block block, int index, Call call, RuntimeOp op, IReadOnlyList<Sym> arguments, List<ManagedStatement> output)
     {
         var result = values.Syms.Result(call, 0, 64);
+        var tail = call.Kind is CallKind.Tail or CallKind.TailIndirect;
         switch (op.Kind)
         {
             case OpKind.WriteBarrier or OpKind.MemoryBarrier or OpKind.InitClass or OpKind.RunClassConstructor or OpKind.InitMethodRgctx:
+                return tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
+            // 只服务于分派：结果只流向调用目标与 MethodInfo，不是 IL 值。
+            case OpKind.InterfaceInvokeData or OpKind.ResolveGenericVirtual:
                 return null;
             case OpKind.NullCheck when arguments.Count == 1:
                 {
@@ -448,8 +454,9 @@ internal sealed class BodyBuilder
             case OpKind.Rethrow:
                 return new Statement(new ManagedRethrow(call.Address));
         }
-        output.Add(new ManagedHole(call.Address, $"运行时 {op}", false));
         holes.Add(new(call.Address, $"运行时 {op.Kind}"));
+        if (tail) return new Statement(new ManagedHole(call.Address, $"运行时 {op}", true));
+        output.Add(new ManagedHole(call.Address, $"运行时 {op}", false));
         return null;
     }
 

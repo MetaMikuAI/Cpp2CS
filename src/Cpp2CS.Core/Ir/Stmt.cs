@@ -140,6 +140,8 @@ public sealed record Call(ulong Address, CallKind Kind, Expr Target) : Stmt(Addr
     public Expr? StackPointer { get; init; }
     /// <summary>对已提升局部内存单元的访问。</summary>
     public CellAccess[] Memory { get; init; } = [];
+    /// <summary>虚调用、接口调用与委托调用经分派解析出的托管方法（委托调用为 Invoke）。</summary>
+    public Model.MethodRef? Resolved { get; init; }
     /// <summary>CallDelegate 的委托对象根；原生 x0 是 method_code，不能用作托管接收者。</summary>
     public Expr? DelegateReceiver { get; init; }
     /// <summary>条件抛出归一后 Address 是分支位置；这里保留真正的原生抛出调用点，供语句级 LSDA 查询。

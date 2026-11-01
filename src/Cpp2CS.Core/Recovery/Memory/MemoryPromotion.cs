@@ -159,7 +159,7 @@ internal sealed class MemoryPromotion
                         else Escape(effect.Space, effect.Offset, "调用访问范围未知");
                     var covered = effects.Select(e => e.Argument).ToHashSet();
                     for (var i = 0; i < call.Arguments.Length; i++)
-                        if (!covered.Contains(i)) Walk(call.Arguments[i], call.Op is null && shapes(call).Signature is null ? "未知调用的实参" : "调用实参");
+                        if (!covered.Contains(i)) Walk(call.Arguments[i], shapes(call) is { Signature: null, IsRuntime: false } ? "未知调用的实参" : "调用实参");
                     if (call.DelegateReceiver is { } receiver) Walk(receiver, "委托接收者");
                     break;
                 }
@@ -190,7 +190,7 @@ internal sealed class MemoryPromotion
     private List<Effect> Effects(Call call)
     {
         var effects = new List<Effect>();
-        if (call.Op is { } op)
+        if (call.Op is { } op && !shapes(call).IsDispatch)
         {
             switch (op.Kind)
             {

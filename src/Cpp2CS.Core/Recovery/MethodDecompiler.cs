@@ -105,6 +105,8 @@ public sealed class MethodDecompiler
             return RecoveryDiagnostics.Fail(entry, $"L2 {idioms.Errors[0]}", rule: "Prepare");
         var environment = new MethodEnvironment(method, signature, shapes);
         var splits = PathSplitting.Run(function, f => ValueModel.Build(f, environment), lifter.Calls, lifter.Machine.Convention.StackPointer);
+        // 分派在内存提升之前解析，使经指针的调用效果有签名可依。
+        DispatchResolution.Run(function, ValueModel.Build(function, environment), new TypeOracle(types, facts, method, environment.Shape));
         if (!MemoryPromotion.Run(function, signature, environment.Shape, abi, lifter.Calls, lifter.Machine.Convention.StackPointer).TryGet(out var layout, out var memoryFailure))
             return memoryFailure;
         environment.Layout = layout;
