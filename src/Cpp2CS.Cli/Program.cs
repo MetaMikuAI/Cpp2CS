@@ -38,7 +38,7 @@ internal static class Program
                   cpp2cs layout <libil2cpp.so> <global-metadata.dat> <类型全名>      打印类型（含泛型实例）的字段布局
                   cpp2cs ssa    <libil2cpp.so> <global-metadata.dat> <十六进制入口>... [--idioms]
                                                                       打印函数的寄存器 SSA（--idioms：L2 归一之后）
-                  cpp2cs idioms <libil2cpp.so> <global-metadata.dat> <输出目录> [--owner 前缀] [--limit N]
+                  cpp2cs idioms <libil2cpp.so> <global-metadata.dat> <输出目录> [--owner 前缀] [--limit N] [--threads N]
                                                                       对托管函数做 L2 模板普查，写出 idioms.txt 与 idiom-residuals.tsv
                   cpp2cs recover <libil2cpp.so> <global-metadata.dat> <输出目录> [--all | --assemblies A.dll,B.dll | --namespaces A,B] [--no-source] [--limit N] [--jobs N] [--methods 清单] [--verified-accessors 证据.tsv] [--source-layout flat|project]
                                                                       恢复范围必须显式指定，写出 CIL 与 C#；
@@ -107,22 +107,25 @@ internal static class Program
         return 0;
     }
 
-    /// <summary>L2 模板普查。选项：--owner 只取托管所有者全名以该前缀开头的函数；--limit 只取前 N 个。</summary>
+    /// <summary>L2 模板普查。选项：--owner 只取托管所有者全名以该前缀开头的函数；--limit 只取前 N 个；--threads 指定并行线程数（默认由运行时决定）。</summary>
     private static int Idioms(string binary, string metadata, string output, string[] options)
     {
         string? prefix = null;
         var limit = int.MaxValue;
+        int? threads = null;
         for (var i = 0; i + 1 < options.Length; i += 2)
         {
             if (options[i] == "--owner") prefix = options[i + 1];
             else if (options[i] == "--limit") limit = int.Parse(options[i + 1]);
+            else if (options[i] == "--threads") threads = int.Parse(options[i + 1]);
         }
+        if (threads is < 1) throw new ArgumentException("--threads 必须大于零");
         var facts = FactsBuilder.Build(binary, metadata, Console.Error.WriteLine);
         var functions = facts.Code.Functions.Where(f => f.Region == CodeRegion.Managed)
             .Where(f => prefix is null || facts.EntriesAt(f.Start).Any(e => e.Method is not null && e.Method.ToString().StartsWith(prefix, StringComparison.Ordinal)))
             .Take(limit).ToArray();
         Console.Error.WriteLine($"普查 {functions.Length} 个托管函数");
-        var census = Cpp2CS.Idioms.IdiomCensus.Run(facts, functions, Console.Error.WriteLine);
+        var census = Cpp2CS.Idioms.IdiomCensus.Run(facts, functions, Console.Error.WriteLine, threads);
         Directory.CreateDirectory(output);
         var report = IdiomReport.Write(facts, census, output);
         Console.Write(report);

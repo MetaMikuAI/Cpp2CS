@@ -85,6 +85,7 @@ internal sealed class RunManifest
             stages,
             seconds = elapsed.Elapsed.TotalSeconds,
             peakWorkingSet = Process.GetCurrentProcess().PeakWorkingSet64,
+            counters = new { valueEqualStatementKeys = Cpp2CS.Diagnostics.GateCounters.ValueEqualKeys },
             outcome = result is null ? null : new { result.SelectedMethods, result.EmittedMethods, result.EmitFailures, result.PartialMethods },
             validation = new { compile = "not-run", ilverify = "not-run", execution = "not-run" },
             artifacts,

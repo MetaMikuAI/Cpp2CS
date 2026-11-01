@@ -51,7 +51,7 @@ internal static class FrameLifetimesRules
                 var definition = ordered[i];
                 var start = Array.IndexOf(chain, definition.Call);
                 var end = i + 1 == ordered.Length ? chain.Length : Array.IndexOf(chain, ordered[i + 1].Call);
-                var live = chain[start..end].ToHashSet();
+                var live = chain[start..end].ToHashSet(ValueKeyProbe<Stmt>.Instance);
                 var region = new FrameRegion(offset, definition.Type, ctx.types.Size(definition.Type), ctx.StructLocal(definition.Type, ctx.ScalarWidth(definition.Type)));
                 if (related.Any(w => live.Contains(w.Call) && !ctx.ContainsFrameType(region, w.Offset, w.Type)))
                 {

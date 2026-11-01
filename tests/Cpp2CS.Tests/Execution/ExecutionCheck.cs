@@ -23,7 +23,7 @@ internal static partial class ExecutionCheck
 {
     private const int Cases = 32;
 
-    [Command("execute", "执行对照：原机器码（Unicorn）与写出的 CIL（解释执行）在同一合成内存上结果一致", Arguments = "<binary> <metadata> <竖切清单 或 recover 输出目录> [--cases N] [--mutants ...]")]
+    [Command("execute", "执行对照：原机器码（Unicorn）与写出的 CIL（解释执行）在同一合成内存上结果一致", Arguments = "<binary> <metadata> <竖切清单 或 recover 输出目录> [--cases N] [--mutants ...] [--fact-cache-file 快照]")]
     public static int Run(string binary, string metadata, string slice, string[] options)
     {
         var mutate = options.Contains("--mutants");
@@ -46,7 +46,11 @@ internal static partial class ExecutionCheck
         // 参数是 recover 的输出目录时取其中写出的全部方法，逐方法的结果写入该目录的 execution.tsv（分片时为 execution-k-of-n.tsv），控制台只列出未通过的方法
         var full = Directory.Exists(slice);
         var bytes = full ? ReadBytes(Path.Combine(slice, "recovery.jsonl")) : new Dictionary<ulong, long>();
-        var facts = FactsBuilder.Build(binary, metadata);
+        // 与 recover 相同的运行选项：环境变量（帧槽提升、可读性、诊断）与可选的固定事实快照。
+        var runOptions = RecoveryEnvironment.Read();
+        if (options.SkipWhile(o => o != "--fact-cache-file").Skip(1).FirstOrDefault() is { } factCache)
+            runOptions = runOptions with { FactCacheFile = Path.GetFullPath(factCache) };
+        var facts = FactsBuilder.Build(binary, metadata, options: runOptions);
         var types = new ManagedTypes(facts.Model, facts.Layouts);
         var methods = full ? ReadList(facts, Path.Combine(slice, "emitted.tsv"), 3, 4) : ReadList(facts, slice, 0, 1);
         var recovery = new MethodRecovery(facts, types);
@@ -69,7 +73,7 @@ internal static partial class ExecutionCheck
                 if (recovered.PlatformImport is null) throw new InvalidDataException("原生导入声明未复现");
                 skeleton.ApplyDeclarations([recovered]);
             }
-        var emitter = new FullBodyEmitter(skeleton, types);
+        var emitter = new FullBodyEmitter(skeleton, types, runOptions.Diagnostics, runOptions.Readability);
         var closure = new AccessorRecovery(facts, types, new MethodSummaryService(recovery), emitter, results, full ? AutoPropertyManifest.ReadRejected(Path.Combine(slice, "autoprop-rejected-input.tsv")) : null);
         skeleton.ApplyDeclarations(closure.All);
         var index = new WorldIndex(facts, types);
@@ -83,7 +87,7 @@ internal static partial class ExecutionCheck
         // 候选验证使用独立预览；只读 Check 不会把骨架占位体替换为恢复体。
         var preview = new Skeleton(facts.Model);
         preview.ApplyDeclarations(closure.All);
-        var previewEmitter = new FullBodyEmitter(preview, types);
+        var previewEmitter = new FullBodyEmitter(preview, types, runOptions.Diagnostics, runOptions.Readability);
         new BodyPublication(previewEmitter).Publish(closure.All.Where(r => r.Body is not null && !closure.Problems.ContainsKey(r.Body))
             .Select(r => r.Body!), EmissionPolicy.Checked);
         var previewCecil = new CecilModel(facts.Model, preview);
@@ -235,7 +239,9 @@ internal static partial class ExecutionCheck
             Console.WriteLine($"  已验证字节：{Size("verified")} / {targetBytes.Values.Sum()} = {(double)Size("verified") / Math.Max(1, targetBytes.Values.Sum()):P4}（范围与各判定均按入口去重）");
         }
         else Console.WriteLine($"  判定：{string.Join("，", verdicts.OrderBy(v => v.Key).Select(v => $"{v.Key} {v.Value}"))}（{clock.Elapsed.TotalMinutes:F1} 分钟）");
-        if (full) AccessorEvidence.Write(Path.Combine(slice, shards == 1 ? "accessor-verified.tsv" : $"accessor-verified-{shard}-of-{shards}.tsv"), verifiedAccessors);
+        // 定向检查（--only）的访问器证据单独写出，不覆盖全量证据。
+        var evidenceName = only is not null ? "accessor-verified-only" : "accessor-verified";
+        if (full) AccessorEvidence.Write(Path.Combine(slice, shards == 1 ? $"{evidenceName}.tsv" : $"{evidenceName}-{shard}-of-{shards}.tsv"), verifiedAccessors);
         Console.WriteLine($"  F9 基线透明调用 {baselineAccessorCalls} 次，其中 null 接收者 {baselineNullCalls} 次（不含变异）");
         foreach (var (reason, (count, example)) in reasons.OrderByDescending(r => r.Value.Count))
             Console.WriteLine($"    不可检查 {count,5}  {reason}（例 {example}）");

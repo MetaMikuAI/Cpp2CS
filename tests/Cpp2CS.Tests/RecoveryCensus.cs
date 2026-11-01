@@ -11,6 +11,10 @@ namespace Cpp2CS.Tests;
 
 internal static class RecoveryCensus
 {
+    /// <summary>
+    /// 洞编码普查用：不写程序集与 publication.jsonl，不能用于零差异门禁。--skip N 从第 N 个方法续跑并追加到已有输出，
+    /// 已有输出的行数必须恰为 N；不带 --skip 时输出文件必须不存在。
+    /// </summary>
     [Command("recovery-audit", "全程序流式 L3 恢复普查；不把恢复成功当作执行验证", Arguments = "<binary> <metadata> <output> [--skip N]")]
     public static int Audit(string binary, string metadata, string output, string[] options)
     {
@@ -18,8 +22,12 @@ internal static class RecoveryCensus
         var recovery = new MethodRecovery(facts, new ManagedTypes(facts.Model, facts.Layouts));
         Directory.CreateDirectory(output);
         var json = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-        using var writer = new StreamWriter(Path.Combine(output, "recovery.jsonl")) { AutoFlush = true };
         var skip = options.Length == 0 ? 0 : options is ["--skip", var number] ? int.Parse(number) : throw new ArgumentException("仅支持 --skip N");
+        var path = Path.Combine(output, "recovery.jsonl");
+        var existing = File.Exists(path) ? File.ReadLines(path).Count() : 0;
+        if (skip == 0 && File.Exists(path)) throw new IOException($"输出已存在，续跑请用 --skip {existing}：{path}");
+        if (skip != existing) throw new InvalidDataException($"--skip {skip} 与已有输出的 {existing} 行不符：{path}");
+        using var writer = new StreamWriter(path, append: true) { AutoFlush = true };
         var count = skip; var recovered = 0;
         foreach (var method in facts.Model.Methods.Where(m => m.Address != 0 && facts.Code.RegionOf(m.Address) == CodeRegion.Managed).Skip(skip))
         {
@@ -28,7 +36,7 @@ internal static class RecoveryCensus
             if (result.Body is not null) recovered++;
             writer.WriteLine(JsonSerializer.Serialize(new { address = $"0x{method.Address:x}", method = result.Method.ToString(), assembly = method.Owner.Assembly,
                 status = result.Body is null ? "hole" : "recovered", bytes = facts.Code.At(method.Address)?.Size,
-                holes = result.Holes.Select(h => new { address = $"0x{h.Address:x}", reason = h.Reason, derived = h.Derived }) }, json));
+                holes = result.Holes.Select(h => new { address = $"0x{h.Address:x}", reason = h.Reason, derived = h.Derived, code = h.Code, id = h.Id, causeId = h.CauseId }) }, json));
             if (++count % 1000 == 0) Console.Error.WriteLine($"L3 {count}，无洞 {recovered}；当前 {method}");
         }
         Console.WriteLine($"L3 区间 [{skip}, {count}) 完成，无洞 {recovered}；尚未写出、编译或执行验证");

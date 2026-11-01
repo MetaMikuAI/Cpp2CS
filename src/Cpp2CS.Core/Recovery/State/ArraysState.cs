@@ -6,7 +6,7 @@ internal sealed class ArraysState : IStatementKeyed
 {
     internal readonly Dictionary<Variable, Expr> arrayCursors = new();
     internal readonly Dictionary<Variable, Expr> arrayOffsets = new();
-    internal readonly Dictionary<(Call Call, int Parameter), ArraySpan> arraySpans = [];
+    internal readonly Dictionary<(Call Call, int Parameter), ArraySpan> arraySpans = new(CallParameterKeyProbe.Instance);
 
     public void Replace(Stmt previous, Stmt? replacement)
     {

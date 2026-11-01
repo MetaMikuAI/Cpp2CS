@@ -9,7 +9,7 @@ internal sealed class CallsState : IStatementKeyed
     internal readonly HashSet<ulong> cleanupSites = [];
     internal readonly HashSet<ulong> inlineCleanupSites = [];
     internal readonly CallBindingState callBindings = new();
-    internal readonly Dictionary<Call, MethodRef> nativeImports = new();
+    internal readonly Dictionary<Call, MethodRef> nativeImports = new(ValueKeyProbe<Call>.Instance);
     internal readonly HashSet<ulong> sharedSites = [];
     internal readonly Dictionary<IndirectJump, Expr> switchIndices = new(ReferenceEqualityComparer.Instance);
     internal readonly Dictionary<Call, VirtualDelegate> virtualDelegates = new(ReferenceEqualityComparer.Instance);

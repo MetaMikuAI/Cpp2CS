@@ -57,10 +57,23 @@ internal static class FactsCacheCheck
         return a.Finish("facts-cache-storage");
     }
 
-    [Command("facts-cache", "分进程核对真实缓存前后完整事实与样本 CIL", Arguments = "<binary> <metadata> <output> <cold|warm>")]
-    public static int Run(string binary, string metadata, string output, string phase)
+    /// <summary>
+    /// 冷启动与热启动分两个进程运行，比较完整事实与样本 CIL。--isolated：在 &lt;output&gt;/cwd 下运行（cold 时先清空），
+    /// 工作目录中的注册表位置缓存也从冷开始；跨提交比较 cold 输出用 facts-delta。
+    /// </summary>
+    [Command("facts-cache", "分进程核对真实缓存前后完整事实与样本 CIL", Arguments = "<binary> <metadata> <output> <cold|warm> [--isolated]")]
+    public static int Run(string binary, string metadata, string output, string phase, string[] options)
     {
         if (phase is not ("cold" or "warm")) throw new ArgumentException("phase 必须为 cold 或 warm");
+        if (options.Any(o => o != "--isolated")) throw new ArgumentException("仅支持 --isolated");
+        (binary, metadata, output) = (Path.GetFullPath(binary), Path.GetFullPath(metadata), Path.GetFullPath(output));
+        if (options.Contains("--isolated"))
+        {
+            var directory = Path.Combine(output, "cwd");
+            if (phase == "cold" && Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+            Directory.CreateDirectory(directory);
+            Environment.CurrentDirectory = directory;
+        }
         var messages = new List<string>();
         var facts = FactsBuilder.Build(binary, metadata, message => { messages.Add(message); Console.Error.WriteLine(message); },
             cacheDirectory: Path.Combine(output, "cache"));

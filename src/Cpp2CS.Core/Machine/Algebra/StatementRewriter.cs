@@ -81,3 +81,36 @@ internal static class StatementKeys
         if (replacement is null or Nop) set.Remove(key);
     }
 }
+
+/// <summary>
+/// 值相等的语句键比较器：比较结果与默认比较器完全相同，另外统计结构相同而对象不同的键被判为相等的次数
+/// （<see cref="Cpp2CS.Diagnostics.GateCounters.ValueEqualKeys"/>），作为改为引用相等之前的依据。
+/// </summary>
+internal sealed class ValueKeyProbe<T> : IEqualityComparer<T> where T : Stmt
+{
+    public static readonly ValueKeyProbe<T> Instance = new();
+
+    public bool Equals(T? x, T? y)
+    {
+        var equal = EqualityComparer<T>.Default.Equals(x, y);
+        if (equal && !ReferenceEquals(x, y)) Cpp2CS.Diagnostics.GateCounters.CountValueEqualKey();
+        return equal;
+    }
+
+    public int GetHashCode(T obj) => EqualityComparer<T>.Default.GetHashCode(obj);
+}
+
+/// <summary><see cref="ValueKeyProbe{T}"/> 的“调用 + 参数序号”元组版本，只统计调用对象不同的情形。</summary>
+internal sealed class CallParameterKeyProbe : IEqualityComparer<(Call Call, int Parameter)>
+{
+    public static readonly CallParameterKeyProbe Instance = new();
+
+    public bool Equals((Call Call, int Parameter) x, (Call Call, int Parameter) y)
+    {
+        var equal = EqualityComparer<(Call Call, int Parameter)>.Default.Equals(x, y);
+        if (equal && !ReferenceEquals(x.Call, y.Call)) Cpp2CS.Diagnostics.GateCounters.CountValueEqualKey();
+        return equal;
+    }
+
+    public int GetHashCode((Call Call, int Parameter) obj) => EqualityComparer<(Call Call, int Parameter)>.Default.GetHashCode(obj);
+}

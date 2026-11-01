@@ -3,19 +3,21 @@ using Mono.Cecil;
 
 namespace Cpp2CS.Tests;
 
-/// <summary>比较恢复产物的方法集合和 CIL；不要求附带 C# 文本，也不把新增方法视为回归。</summary>
+/// <summary>比较恢复产物的方法集合和 CIL；不要求附带 C# 文本。默认不把新增与变化视为回归；--strict（零差异门禁）下变化、新增、丢失任一非零即失败。</summary>
 internal static class CilDelta
 {
-    [Command("cil-delta", "比较两个恢复目录的新增、丢失及 CIL 变化，输出抽查清单", Arguments = "<before> <after> <output> [--source] [--partial] [--only 清单]")]
+    [Command("cil-delta", "比较两个恢复目录的新增、丢失及 CIL 变化，输出抽查清单", Arguments = "<before> <after> <output> [--source] [--partial] [--strict] [--only 清单]")]
     public static int Run(string before, string after, string output, string[] options)
     {
         var assemblies = "assemblies";
         var partial = false;
+        var strict = false;
         HashSet<string>? selected = null;
         for (var i = 0; i < options.Length; i++)
         {
             if (options[i] == "--source") assemblies = "assemblies-src";
             else if (options[i] == "--partial") partial = true;
+            else if (options[i] == "--strict") strict = true;
             else if (options[i] == "--only" && i + 1 < options.Length)
                 selected = File.ReadLines(options[++i]).Where(l => l.Length > 0 && !l.StartsWith('#')).ToHashSet(StringComparer.Ordinal);
             else throw new ArgumentException($"未知或不完整的参数：{options[i]}");
@@ -67,6 +69,11 @@ internal static class CilDelta
         Console.WriteLine(summary);
         var a = new Assertions();
         a.Equal(0, lost.Length, "原有写出方法没有丢失");
+        if (strict)
+        {
+            a.Equal(0, changed.Count, "零差异：CIL 没有变化");
+            a.Equal(0, added.Length, "零差异：没有新增写出方法");
+        }
         return a.Finish("cil-delta");
     }
 

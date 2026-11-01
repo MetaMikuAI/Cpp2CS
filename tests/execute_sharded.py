@@ -1,4 +1,8 @@
-"""对显式输入的恢复产物分片执行，合并判定与验证证据。"""
+"""对显式输入的恢复产物分片执行，合并判定与验证证据。
+
+额外参数（-- 之后）原样传给 execute；其中带 --only 清单时为定向检查：分片结果合并为 execution-only.tsv 与
+accessor-verified-only.tsv，覆盖率只核对清单内的方法，不改动全量的 execution.tsv。
+"""
 import argparse
 import json
 import concurrent.futures
@@ -24,6 +28,12 @@ def main(argv):
     directory, tests, shards, jobs = args.directory, args.tests, args.shards, args.jobs
     if not 1 <= jobs <= shards:
         raise ValueError("要求 1 <= jobs <= shards")
+    only = None
+    if "--only" in extra:
+        with open(extra[extra.index("--only") + 1], encoding="utf-8") as f:
+            only = {tuple(line.rstrip("\n").split("\t")[:2]) for line in f if line.strip() and not line.startswith("#")}
+    table = "execution-only" if only is not None else "execution"
+    evidence_name = "accessor-verified-only" if only is not None else "accessor-verified"
     logs = os.path.join(directory, "shards")
     os.makedirs(logs, exist_ok=True)
 
@@ -48,13 +58,13 @@ def main(argv):
 
     rows = []
     for k in range(shards):
-        path = os.path.join(directory, f"execution-{k}-of-{shards}.tsv")
+        path = os.path.join(directory, f"{table}-{k}-of-{shards}.tsv")
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 rows += [line.rstrip("\n").split("\t") for line in f if line.strip()]
             os.remove(path)
     rows.sort(key=lambda r: int(r[0], 16))
-    with open(os.path.join(directory, "execution.tsv"), "w", encoding="utf-8") as f:
+    with open(os.path.join(directory, f"{table}.tsv"), "w", encoding="utf-8") as f:
         f.writelines("\t".join(r) + "\n" for r in rows)
 
     scope = {}
@@ -65,9 +75,15 @@ def main(argv):
                 scope[record["address"]] = record["bytes"]
     with open(os.path.join(directory, "emitted.tsv"), encoding="utf-8") as f:
         expected = {(r[3], r[4]) for line in f if (r := line.rstrip("\n").split("\t"))}
+    if only is not None:
+        if not only <= expected:
+            raise ValueError("--only 清单含未写出的方法；请使用 emitted.tsv 的入口与方法名")
+        expected = only
+        entries_only = {entry for entry, _ in only}
+        scope = {address: size for address, size in scope.items() if address in entries_only}
     actual = {(r[0], r[1]) for r in rows}
     if actual != expected or len(actual) != len(rows):
-        raise ValueError("执行对照结果与全部写出方法不一致（含依赖）；不得漏检或重复")
+        raise ValueError("执行对照结果与应检查的方法不一致（含依赖）；不得漏检或重复")
     target_scope = scope
     total = sum(target_scope.values())
     entries, reasons = {}, {}
@@ -92,12 +108,12 @@ def main(argv):
         print(f"  F5 异常方法 {len(exceptions)}，两侧实际注入抛出 {injected}/{cases} 用例 = {injected / cases:.4%}")
     evidence = set()
     for k in range(shards):
-        path = os.path.join(directory, f"accessor-verified-{k}-of-{shards}.tsv")
+        path = os.path.join(directory, f"{evidence_name}-{k}-of-{shards}.tsv")
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 evidence.update(line.rstrip("\n") for line in f if line.strip() and not line.startswith("#"))
             os.remove(path)
-    with open(os.path.join(directory, "accessor-verified.tsv"), "w", encoding="utf-8") as f:
+    with open(os.path.join(directory, f"{evidence_name}.tsv"), "w", encoding="utf-8") as f:
         f.write("# F9：访问器自身全部 32 用例 verified；入口、身份、原生 SHA256、CIL SHA256\n")
         f.writelines(line + "\n" for line in sorted(evidence))
     mutants = [0, 0, 0, 0, 0]

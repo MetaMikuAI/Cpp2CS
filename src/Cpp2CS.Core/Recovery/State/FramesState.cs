@@ -12,7 +12,7 @@ internal sealed class FramesState : IStatementKeyed
     internal readonly Dictionary<FrameRegion, HashSet<Stmt>> frameLives = [];
     internal readonly Dictionary<Stmt, ManagedStatement[]> frameInitializers = new(ReferenceEqualityComparer.Instance);
     internal readonly Dictionary<ulong, LocalValue> sharedBuffers = [];
-    internal readonly Dictionary<Store, LocalValue> stackArgumentStores = [];
+    internal readonly Dictionary<Store, LocalValue> stackArgumentStores = new(ValueKeyProbe<Store>.Instance);
     internal readonly Dictionary<(ulong Site, int Parameter), ManagedValue> stackArgumentValues = [];
     internal readonly Dictionary<ulong, (long Offset, int Size)> callStackAreas = [];
     internal readonly Dictionary<Call, StackEnum> stackEnums = new(ReferenceEqualityComparer.Instance);

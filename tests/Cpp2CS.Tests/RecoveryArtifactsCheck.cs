@@ -10,33 +10,27 @@ internal static class RecoveryArtifactsCheck
     private static Dictionary<string, JsonElement> Rows(string directory, string file) => File.ReadLines(Path.Combine(directory, file))
         .Select(line => JsonSerializer.Deserialize<JsonElement>(line)).ToDictionary(r => r.GetProperty("address").GetString() + "\t" + r.GetProperty("method").GetString());
 
-    [Command("recovery-delta", "逐方法比较状态、洞和 C# 文件，忽略计时与新增诊断字段", Arguments = "<before> <after>")]
+    /// <summary>
+    /// 逐键比较 recovery.jsonl 的行集合、行次序与每行全部字段（新增字段自动纳入比较），并比较 src/**/*.cs 的 SHA256。
+    /// 洞按顺序随所在行一起比较（address、reason、derived、code、category、id、causeId）。
+    /// </summary>
+    [Command("recovery-delta", "逐方法比较 recovery.jsonl 的全部字段与行次序，以及 C# 文件", Arguments = "<before> <after>")]
     public static int Delta(string before, string after)
     {
-        var previous = Rows(before, "recovery.jsonl");
-        var current = Rows(after, "recovery.jsonl");
-        var a = new Assertions();
-        a.True(previous.Keys.ToHashSet().SetEquals(current.Keys), "方法集合相同");
-        foreach (var key in previous.Keys.Intersect(current.Keys))
-        {
-            var left = previous[key]; var right = current[key];
-            foreach (var field in new[] { "status", "bytes", "dependency", "bodySource", "declaration", "platformImport", "accessorProof", "emitProblem", "partial", "statements", "regions", "features" })
-                a.Equal(left.TryGetProperty(field, out var l) ? l.GetRawText() : "null", right.TryGetProperty(field, out var r) ? r.GetRawText() : "null", key + " / " + field);
-            string Holes(JsonElement row) => JsonSerializer.Serialize(row.GetProperty("holes").EnumerateArray().Select(h => new
-            {
-                address = h.GetProperty("address"), reason = h.GetProperty("reason"), derived = h.GetProperty("derived"),
-                code = h.GetProperty("code"), id = h.GetProperty("id"), causeId = h.GetProperty("causeId"),
-            }));
-            a.Equal(Holes(left), Holes(right), key + " / 洞");
-        }
+        var log = new DeltaLog("recovery-delta");
+        Jsonl.CompareKeyed(log, "recovery.jsonl", before, after);
         static Dictionary<string, string> Sources(string directory) => Directory.Exists(Path.Combine(directory, "src"))
             ? Directory.GetFiles(Path.Combine(directory, "src"), "*.cs", SearchOption.AllDirectories)
                 .ToDictionary(p => Path.GetRelativePath(directory, p), p => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(p)))) : [];
         var oldFiles = Sources(before); var newFiles = Sources(after);
-        a.True(oldFiles.Keys.ToHashSet().SetEquals(newFiles.Keys), "C# 文件集合相同");
-        foreach (var file in oldFiles.Keys.Intersect(newFiles.Keys)) a.Equal(oldFiles[file], newFiles[file], file);
-        Console.WriteLine($"恢复记录 {previous.Count}；C# 文件 {oldFiles.Count}");
-        return a.Finish("recovery-delta");
+        foreach (var file in oldFiles.Keys.Except(newFiles.Keys)) log.Fail("C# 文件丢失", file);
+        foreach (var file in newFiles.Keys.Except(oldFiles.Keys)) log.Fail("C# 文件新增", file);
+        foreach (var file in oldFiles.Keys.Intersect(newFiles.Keys).Order(StringComparer.Ordinal))
+        {
+            log.Compared++;
+            if (oldFiles[file] != newFiles[file]) log.Fail("C# 文件内容", file);
+        }
+        return log.Finish();
     }
 
     [Command("artifact-consistency", "核对发布清单、逐方法磁盘 CIL 和运行产物摘要", Arguments = "<output>")]

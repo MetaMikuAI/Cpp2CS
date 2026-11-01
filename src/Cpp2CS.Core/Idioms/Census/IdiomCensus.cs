@@ -75,7 +75,8 @@ public sealed class IdiomCensus
     public long ResidualCalls(HelperKind kind) => Residuals
         .Where(p => p.Key.StartsWith("helper:") && p.Key[7..].Split('(')[0] == kind.ToString()).Sum(p => p.Value.Count);
 
-    public static IdiomCensus Run(ProgramFacts facts, IReadOnlyList<CodeFunction> functions, Action<string>? log = null)
+    /// <param name="threads">并行线程数；为空时由运行时决定。每个线程一份提升器与改写器，结果按函数汇总。</param>
+    public static IdiomCensus Run(ProgramFacts facts, IReadOnlyList<CodeFunction> functions, Action<string>? log = null, int? threads = null)
     {
         var census = new IdiomCensus();
         var started = DateTime.UtcNow;
@@ -86,7 +87,8 @@ public sealed class IdiomCensus
         var lifters = new ThreadLocal<(FunctionLifter, IdiomRewriter)>(() => (new FunctionLifter(facts), new IdiomRewriter(facts) { RecordFilter = recordFilter }));
         var entryReads = new System.Collections.Concurrent.ConcurrentDictionary<ulong, int>();
         var unset = new System.Collections.Concurrent.ConcurrentBag<(ulong Callee, int Bit, string Sample)>();
-        Parallel.ForEach(System.Collections.Concurrent.Partitioner.Create(0, functions.Count, 500), range =>
+        Parallel.ForEach(System.Collections.Concurrent.Partitioner.Create(0, functions.Count, 500),
+            new ParallelOptions { MaxDegreeOfParallelism = threads ?? -1 }, range =>
         {
             var local = new IdiomCensus();
             var (lifter, rewriter) = lifters.Value;
