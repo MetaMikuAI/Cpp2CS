@@ -16,12 +16,15 @@ internal sealed class RecoveryScope(MethodRecovery owner, MethodRef method, ulon
     internal LoweringScope Lowering => lowering ??= new(this);
     private ValueRecoveryService? valueService;
     internal ValueRecoveryService Values => valueService ??= new(this);
+    /// <summary>Prepare 步骤列表写入的 pass 记录；计划表在每步之后把它转入 <see cref="trace"/>。</summary>
     internal readonly List<PassStep> passSteps = [];
     private Cpp2CS.Machine.Algebra.PassList? passes;
     internal Cpp2CS.Machine.Algebra.PassList Passes => passes ??= new(function, passSteps, Rewriter, name => currentStep = name);
-    /// <summary>维护记录与当前步骤名（Prepare 的 PassList 步骤或 Analyze 的注册步骤），只用于追踪。</summary>
-    internal readonly List<MaintenanceStep> maintenanceSteps = [];
+    /// <summary>方法的追踪（按完成先后）与当前步骤名（Prepare 条目、Analyze 步骤或子步骤），只用于诊断。</summary>
+    internal readonly List<TraceEntry> trace = [];
     internal string currentStep = "prepare";
+    /// <summary>记录一条规则追踪。</summary>
+    internal void TraceRule(RuleTrace rule) => trace.Add(new(TraceKind.Rule, rule.Rule, currentStep) { Rule = rule });
     private Maintenance? maintenance;
     /// <summary>维护动作的内核接口。</summary>
     internal Maintenance Maintain => maintenance ??= new(this);
@@ -41,8 +44,6 @@ internal sealed class RecoveryScope(MethodRecovery owner, MethodRef method, ulon
     internal readonly MethodAnalyses analyses = new();
     private readonly DominanceCache dominance = new();
     internal Dominators Dominators => dominance.Get(function);
-    internal readonly List<AnalysisStep> analysisSteps = [];
-    internal readonly List<RuleTrace> ruleTraces = [];
     internal IReadOnlyDictionary<Variable, Expr> values => this.definitions.Values;
     internal IReadOnlyDictionary<Variable, Phi> phis => this.definitions.Phis;
     internal IReadOnlyDictionary<Variable, (Call Call, int Index)> results => this.definitions.Results;

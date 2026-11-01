@@ -34,7 +34,7 @@ internal static class PrepareSteps
     internal static void RunIdioms(RecoveryScope scope, PreparedMethod prepared)
     {
         prepared.Idioms = scope.owner.rewriter.Run(scope.function);
-        scope.passSteps.AddRange(prepared.Idioms.Passes);
+        scope.trace.AddRange(prepared.Idioms.Passes.Select(pass => TraceEntry.Of(pass, "kernel.idioms")));
     }
 
     /// <summary>私有帧槽提升（泛型实参含按值布局的聚合时）。</summary>
@@ -89,7 +89,7 @@ internal static class PrepareSteps
             // 写屏障实参裁剪后，部分 Class 读取已被 SSA 证明无使用；旧 L2 诊断不再对应活语句。
             if (residual.Category.StartsWith("load:Class+", StringComparison.Ordinal) && scope.function.Dead.Any(p => p.Define.Address == residual.Address && ExprMap.Walk(p.Define.Value).OfType<Load>().Any(l => ExprMap.Walk(l.Address).Any(e => e is Symbol { Kind: SymbolKind.Class }))) && !scope.function.Blocks.SelectMany(b => b.Statements).Any(s => s.Address == residual.Address))
             {
-                scope.ruleTraces.Add(new("runtime.dead-class-read", residual.Address, RewriteStatus.Applied, "runtime.unused-class-metadata", "Class 读取的全部使用已由 SSA 消除，保留原诊断与死定义证据", new("ssa.dead-definition", [residual.Address], [residual.Category, residual.Detail])));
+                scope.TraceRule(new("runtime.dead-class-read", residual.Address, RewriteStatus.Applied, "runtime.unused-class-metadata", "Class 读取的全部使用已由 SSA 消除，保留原诊断与死定义证据", new("ssa.dead-definition", [residual.Address], [residual.Category, residual.Detail])));
                 continue;
             }
 

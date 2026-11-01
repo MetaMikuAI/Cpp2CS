@@ -11,10 +11,9 @@ public sealed record RecoveryHole(ulong Address, string Reason, bool Derived = f
 public enum RuntimeDeclarationKind { Delegate, PlatformInvoke }
 public sealed record MethodRecoveryResult(MethodRef Method, ulong Entry, ManagedBody? Body, IReadOnlyList<RecoveryHole> Holes)
 {
-    public IReadOnlyList<PassStep> Passes { get; init; } = [];
-    public IReadOnlyList<Cpp2CS.Diagnostics.AnalysisStep> Analyses { get; init; } = [];
-    public IReadOnlyList<Cpp2CS.Diagnostics.RuleTrace> Rules { get; init; } = [];
-    public IReadOnlyList<Cpp2CS.Diagnostics.MaintenanceStep> Maintenance { get; init; } = [];
+    /// <summary>恢复过程的追踪（pass、步骤、子步骤、维护动作、不动点与规则），按完成先后排列。</summary>
+    public IReadOnlyList<Cpp2CS.Diagnostics.TraceEntry> Trace { get; init; } = [];
+    public IEnumerable<Cpp2CS.Diagnostics.RuleTrace> Rules => Trace.Where(e => e.Kind == Cpp2CS.Diagnostics.TraceKind.Rule).Select(e => e.Rule!);
     public IReadOnlyList<Cpp2CS.Managed.CallResolution> Calls { get; init; } = [];
     /// <summary>已核验的运行时声明；没有恢复原生方法体，不计入方法体及字节覆盖率。</summary>
     public RuntimeDeclarationKind? Declaration { get; init; }

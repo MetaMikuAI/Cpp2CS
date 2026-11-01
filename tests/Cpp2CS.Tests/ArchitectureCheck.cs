@@ -61,7 +61,7 @@ internal static class ArchitectureCheck
             Ledgers.WriteEntries(paths.Exemptions, entries.Where(e => Ledgers.IsExemption(e.Tag)));
             Ledgers.WriteEntries(paths.SharedBodies, []);
             WriteSnapshots(model, registry, holeCodes, paths.Families, paths.Registry, paths.HoleCodes);
-            Ledgers.WriteRatchet(paths.Ratchet, Counts(census, Ledgers.ReadEntries(paths.Whitelist), Ledgers.ReadEntries(paths.Exemptions)));
+            Ledgers.WriteRatchet(paths.Ratchet, Counts(census, Ledgers.ReadEntries(paths.Whitelist), Ledgers.ReadEntries(paths.Exemptions), []));
             Console.WriteLine($"已建立账本：白名单 {entries.Count(e => !Ledgers.IsExemption(e.Tag))} 条，豁免 {entries.Count(e => Ledgers.IsExemption(e.Tag))} 条");
         }
         var whitelist = Ledgers.ReadEntries(paths.Whitelist);
@@ -86,18 +86,17 @@ internal static class ArchitectureCheck
                     covered[transfer.Target] = covered.GetValueOrDefault(transfer.Target) + transfer.Count;
             }
             var lowered = new SortedDictionary<string, int>(StringComparer.Ordinal);
-            foreach (var (key, value) in Counts(census, whitelist, exemptions))
+            foreach (var (key, value) in Counts(census, whitelist, exemptions, registered))
                 lowered[key] = Math.Min(value, recorded.TryGetValue(key, out var was) ? was + covered.GetValueOrDefault(key) : covered.TryGetValue(key, out var rise) ? rise : value);
             foreach (var (key, value) in recorded.Where(p => !lowered.ContainsKey(p.Key))) lowered[key] = 0;
             Ledgers.WriteRatchet(paths.Ratchet, lowered.Where(p => p.Value > 0 || recorded.ContainsKey(p.Key) && recorded[p.Key] == 0).ToDictionary());
         }
         if (options.Contains("--write-snapshots")) WriteSnapshots(model, registry, holeCodes, paths.Families, paths.Registry, paths.HoleCodes);
 
-        var counts = Counts(census, whitelist, exemptions);
+        var counts = Counts(census, whitelist, exemptions, registered);
         Ledgers.CheckEntries("白名单", whitelist, accesses.Where(a => !Ledgers.IsExemption(a.Tag)).ToList(), milestone, failures);
         Ledgers.CheckEntries("豁免清单", exemptions, accesses.Where(a => Ledgers.IsExemption(a.Tag)).ToList(), milestone, failures);
         Ledgers.CheckEntries("共享步骤体登记表", sharedBodies, registered, null, failures);
-        if (registered.Count > 0) counts["shared-step-body-call-sites/I3"] = registered.Count;
         Ledgers.CheckRatchet(Ledgers.ReadRatchet(paths.Ratchet), counts, failures);
         var transfers = File.Exists(paths.Transfers) ? Ledgers.ReadTransfers(File.ReadLines(paths.Transfers)) : [];
         Ledgers.CheckTransfers(transfers, census.MethodScopes, failures);
@@ -130,9 +129,12 @@ internal static class ArchitectureCheck
         return process.ExitCode == 0 ? output.Split('\n') : [];
     }
 
-    private static SortedDictionary<string, int> Counts(StructureCensus census, IEnumerable<Ledgers.Entry> whitelist, IEnumerable<Ledgers.Entry> exemptions)
+    /// <summary>棘轮的全部计数：语义计数、白名单与豁免清单按标签的条目数、登记的共享步骤体调用点数。</summary>
+    private static SortedDictionary<string, int> Counts(StructureCensus census, IEnumerable<Ledgers.Entry> whitelist, IEnumerable<Ledgers.Entry> exemptions,
+        IReadOnlyCollection<Access> registered)
     {
         var counts = new SortedDictionary<string, int>(census.Counts, StringComparer.Ordinal);
+        if (registered.Count > 0) counts["shared-step-body-call-sites/I3"] = registered.Count;
         foreach (var group in whitelist.GroupBy(e => e.Tag)) counts[$"whitelist-entries/{group.Key}"] = group.Count();
         foreach (var group in exemptions.GroupBy(e => e.Tag)) counts[$"exemption-entries/{group.Key}"] = group.Count();
         return counts;

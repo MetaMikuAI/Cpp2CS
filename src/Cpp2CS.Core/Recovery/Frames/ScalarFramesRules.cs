@@ -18,7 +18,7 @@ internal static class ScalarFramesRules
         boundStores.UnionWith(ctx.State.Construction.boxArgumentStores.Keys);
         var unused = DeadFrameStores.Find(ctx.function, e => ctx.FrameOffset(e), ctx.NoStackRead, calls.ArgumentSize, NoCapture, boundStores);
         foreach (var store in unused)
-            ctx.ruleTraces.Add(new("storage.dead-frame-write", store.Address, RewriteStatus.Applied, null, null,
+            ctx.TraceRule(new("storage.dead-frame-write", store.Address, RewriteStatus.Applied, null, null,
                 new("storage.dead-frame-write", [store.Address], ["源为 SSA 快照", "地址未逃逸，传址仅限 ABI 按值副本或返回槽", "正常及异常后继均无读取"])));
         foreach (var block in ctx.blocks)
             for (var i = 0; i < block.Statements.Count; i++)
@@ -77,7 +77,7 @@ internal static class ScalarFramesRules
                 ctx.Rewriter.Replace(block, i, mapped);
             }
 
-        var replacements = FrameSnapshots.Read(ctx.function, ctx.ruleTraces.Add, expression => ctx.FrameAccess(expression) is { } frame ? frame.Region.Offset + frame.Offset : ctx.FrameOffset(expression));
+        var replacements = FrameSnapshots.Read(ctx.function, ctx.TraceRule, expression => ctx.FrameAccess(expression) is { } frame ? frame.Region.Offset + frame.Offset : ctx.FrameOffset(expression));
         foreach (var block in ctx.blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {

@@ -55,7 +55,13 @@ internal sealed class Maintenance(RecoveryScope ctx)
             rounds++;
             if (!round()) { stable = true; break; }
         }
-        ctx.maintenanceSteps.Add(new(ctx.currentStep, "fixpoint", id, version, ctx.analyses.Version, rounds, stable ? "Stable" : "BudgetExhausted"));
+        ctx.trace.Add(new(TraceKind.Fixpoint, id, ctx.currentStep)
+        {
+            InputVersion = version,
+            OutputVersion = ctx.analyses.Version,
+            Rounds = rounds,
+            Convergence = stable ? "Stable" : "BudgetExhausted",
+        });
         return stable;
     }
 
@@ -66,7 +72,7 @@ internal sealed class Maintenance(RecoveryScope ctx)
     {
         var version = ctx.analyses.Version;
         run();
-        ctx.maintenanceSteps.Add(new(ctx.currentStep, action, reason, version, ctx.analyses.Version));
+        ctx.trace.Add(new(TraceKind.Maintenance, action, ctx.currentStep) { Reason = reason, InputVersion = version, OutputVersion = ctx.analyses.Version });
     }
 }
 

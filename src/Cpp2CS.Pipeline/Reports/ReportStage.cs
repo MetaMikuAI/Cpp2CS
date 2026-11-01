@@ -22,16 +22,22 @@ internal static class ReportStage
         }));
     }
 
+    /// <summary>追踪中不适用的字段为空，不写出。</summary>
+    private static readonly JsonSerializerOptions TraceJson = new(Json)
+    {
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+    };
+
     public static void WriteTraces(string output, MethodRecoveryResult[] targets)
     {
+        // analysis.jsonl 记录完整的时间线；规则的内容写在 rules.jsonl，这里只留位置
         File.WriteAllLines(Path.Combine(output, "analysis.jsonl"), targets.Select(r => JsonSerializer.Serialize(new
         {
             entry = $"0x{r.Entry:x}",
             method = r.Method.ToString(),
-            steps = r.Analyses,
-            passes = r.Passes,
-            maintenance = r.Maintenance,
-        }, Json)));
+            trace = r.Trace.Select(e => e with { Rule = null }),
+        }, TraceJson)));
         File.WriteAllLines(Path.Combine(output, "rules.jsonl"), targets.SelectMany(r => r.Rules.Select(rule => JsonSerializer.Serialize(new
         {
             entry = $"0x{r.Entry:x}",

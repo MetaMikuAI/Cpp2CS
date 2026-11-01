@@ -655,12 +655,12 @@ internal static class FramesRules
             ctx.Hole(address, "栈 结构体叶子未在所有路径初始化", rule: "ProveFrameInitialization");
     }
 
-    /// <summary>托管帧提升，前后各收窄一次标量向量。</summary>
+    /// <summary>托管帧提升；步骤组，前后各收窄一次标量向量。</summary>
     [Step("frames.managed-promotion", StepPhase.Prepare, StepKind.Rewrite)]
     internal static void PromoteManagedFrames(RecoveryScope scope, PreparedMethod prepared)
     {
-        scope.NormalizeScalarVectors();
-        ManagedFramePromotion.Run(scope.facts, scope.function, prepared.Abi, prepared.Calls, prepared.StackPointer, prepared.Signature.Return);
-        scope.NormalizeScalarVectors();
+        StepGroup.Run(scope, "frames.managed-promotion.narrow-before", () => scope.NormalizeScalarVectors());
+        StepGroup.Run(scope, "frames.managed-promotion.promote", () => ManagedFramePromotion.Run(scope.facts, scope.function, prepared.Abi, prepared.Calls, prepared.StackPointer, prepared.Signature.Return));
+        StepGroup.Run(scope, "frames.managed-promotion.narrow-after", () => scope.NormalizeScalarVectors());
     }
 }

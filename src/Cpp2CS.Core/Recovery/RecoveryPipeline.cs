@@ -28,11 +28,8 @@ internal static class RecoveryPipeline
                 if (ctx.ledger.Count == 0)
                     return new(ctx.method, ctx.entry, ctx.owner.RestoreBaseConstructor(body), ctx.ledger.Holes)
                     {
-                        Passes = ctx.passSteps.ToArray(),
-                        Analyses = ctx.analysisSteps.ToArray(),
-                        Maintenance = ctx.maintenanceSteps.ToArray(),
+                        Trace = ctx.trace.ToArray(),
                         Calls = ctx.State.Calls.callBindings.Resolutions.ToArray(),
-                        Rules = ctx.ruleTraces.ToArray()
                     };
                 ctx.ledger.Finish();
             }
@@ -41,11 +38,8 @@ internal static class RecoveryPipeline
         return new(ctx.method, ctx.entry, null, ctx.ledger.Holes)
         {
             Partial = partial is null ? null : RecoveryPipeline.Summarized(partial, ctx.ledger.Holes),
-            Passes = ctx.passSteps.ToArray(),
-            Analyses = ctx.analysisSteps.ToArray(),
-            Maintenance = ctx.maintenanceSteps.ToArray(),
+            Trace = ctx.trace.ToArray(),
             Calls = ctx.State.Calls.callBindings.Resolutions.ToArray(),
-            Rules = ctx.ruleTraces.ToArray()
         };
     }
 

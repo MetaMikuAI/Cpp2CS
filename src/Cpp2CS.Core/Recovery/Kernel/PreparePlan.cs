@@ -112,7 +112,10 @@ internal static class PreparePlan
             if (entry.Unattached)
                 Unattached(ctx, entry.Id, Run);
             else
+            {
                 ctx.Passes.Run(entry.Id, Run);
+                ctx.trace.Add(TraceEntry.Of(ctx.passSteps[^1], entry.Id));
+            }
             if (outcome == PrepareOutcome.Stop)
                 return false;
         }
@@ -128,8 +131,8 @@ internal static class PreparePlan
         var started = Stopwatch.GetTimestamp();
         run();
         var after = ctx.function?.Blocks.SelectMany(b => b.Statements).ToArray() ?? [];
-        ctx.passSteps.Add(new(id, !before.SequenceEqual(after, ReferenceEqualityComparer.Instance), before.Length, after.Length,
-            1, PassConvergence.Single, Stopwatch.GetElapsedTime(started).TotalMilliseconds));
+        ctx.trace.Add(TraceEntry.Of(new(id, !before.SequenceEqual(after, ReferenceEqualityComparer.Instance), before.Length, after.Length,
+            1, PassConvergence.Single, Stopwatch.GetElapsedTime(started).TotalMilliseconds), id));
     }
 
     private static RegisteredPrepareStep[] Check()

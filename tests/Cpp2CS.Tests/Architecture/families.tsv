@@ -1,12 +1,11 @@
 # 文件	所属范围（族）。跨族目录移动文件会改变这里，提交说明须带用户确认标记（主文 3.3）。
 src/Cpp2CS.Core/Calls/MethodSummaries.cs	Calls
-src/Cpp2CS.Core/Diagnostics/AnalysisStep.cs	Diagnostics
 src/Cpp2CS.Core/Diagnostics/DiagnosticOptions.cs	Diagnostics
 src/Cpp2CS.Core/Diagnostics/GateCounters.cs	Diagnostics
 src/Cpp2CS.Core/Diagnostics/Iteration.cs	Diagnostics
-src/Cpp2CS.Core/Diagnostics/MaintenanceStep.cs	Diagnostics
 src/Cpp2CS.Core/Diagnostics/PassStep.cs	Diagnostics
 src/Cpp2CS.Core/Diagnostics/RewriteResult.cs	Diagnostics
+src/Cpp2CS.Core/Diagnostics/TraceEntry.cs	Diagnostics
 src/Cpp2CS.Core/Facts/A64.ValueFlow.cs	Facts
 src/Cpp2CS.Core/Facts/A64.cs	Facts
 src/Cpp2CS.Core/Facts/BaseFacts.cs	Facts
@@ -172,6 +171,7 @@ src/Cpp2CS.Core/Machine/Flow/Cfg.cs	Machine
 src/Cpp2CS.Core/Machine/Flow/JumpTables.cs	Machine
 src/Cpp2CS.Core/Machine/Flow/Machine.cs	Machine
 src/Cpp2CS.Core/Machine/Flow/NoReturn.cs	Machine
+src/Cpp2CS.Core/Machine/Flow/StmtKey.cs	Machine
 src/Cpp2CS.Core/Machine/Lifting/FactsCallModel.cs	Machine
 src/Cpp2CS.Core/Machine/Lifting/FunctionLifter.cs	Machine
 src/Cpp2CS.Core/Machine/Lifting/NativeInputs.cs	Machine
@@ -289,6 +289,7 @@ src/Cpp2CS.Core/Recovery/Generics/SharedValuesRules.cs	Recovery/Generics
 src/Cpp2CS.Core/Recovery/Kernel/Maintenance.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/PreparePlan.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/PrepareSteps.cs	Recovery/Kernel
+src/Cpp2CS.Core/Recovery/Kernel/StepGroup.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Lowering/ArgumentSite.cs	Recovery/Lowering
 src/Cpp2CS.Core/Recovery/Lowering/BodyLowering.cs	Recovery/Lowering
 src/Cpp2CS.Core/Recovery/Lowering/InliningRules.cs	Recovery/Lowering

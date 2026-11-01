@@ -28,8 +28,16 @@ internal static class RecoveryAnalysis
                 throw new InvalidOperationException($"只读分析改写了机器 IR：{step.Id}");
             if (ctx.analyses.Refresh(ctx.blocks, ctx.State.Exceptions.exceptionPhis))
                 ctx.definitions = ctx.analyses.Get(Definitions.Analysis);
-            ctx.analysisSteps.Add(new(step.Id, version, ctx.analyses.Version, inputTypes, ctx.State.Types.known.Count, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds)
-            { Kind = mutable ? "machine-pass" : "analysis", Invalidates = mutable ? step.Invalidates.ToString() : null });
+            ctx.trace.Add(new(TraceKind.Step, step.Id, step.Id)
+            {
+                StepKind = mutable ? "machine-pass" : "analysis",
+                Invalidates = mutable ? step.Invalidates.ToString() : null,
+                InputVersion = version,
+                OutputVersion = ctx.analyses.Version,
+                InputTypes = inputTypes,
+                OutputTypes = ctx.State.Types.known.Count,
+                Milliseconds = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds,
+            });
             if (failure is not null)
                 return failure;
         }
