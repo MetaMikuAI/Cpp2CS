@@ -13,7 +13,7 @@ internal static class PrepareSteps
 {
     /// <summary>提升，并把机器函数与提升所用的机器模型交给后续步骤；失败时记洞并中止。</summary>
     [Step("kernel.lift", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static PrepareOutcome Lift(RecoveryScope scope, PreparedMethod prepared)
+    internal static PrepareOutcome Lift(MethodSession scope, PreparedMethod prepared)
     {
         var lifted = scope.owner.lifter.Lift(scope.entry, prepared.ReturnValue);
         if (!lifted.Succeeded)
@@ -31,7 +31,7 @@ internal static class PrepareSteps
 
     /// <summary>L2；它的步骤记在本步骤之前。</summary>
     [Step("kernel.idioms", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void RunIdioms(RecoveryScope scope, PreparedMethod prepared)
+    internal static void RunIdioms(MethodSession scope, PreparedMethod prepared)
     {
         prepared.Idioms = scope.owner.rewriter.Run(scope.function);
         scope.trace.AddRange(prepared.Idioms.Passes.Select(pass => TraceEntry.Of(pass, "kernel.idioms")));
@@ -39,11 +39,11 @@ internal static class PrepareSteps
 
     /// <summary>私有帧槽提升（泛型实参含按值布局的聚合时）。</summary>
     [Step("kernel.promote-private-frame-slots", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void PromotePrivateFrameSlots(RecoveryScope scope) => scope.Rewrite.PromotePrivateFrameSlots();
+    internal static void PromotePrivateFrameSlots(MethodSession scope) => scope.Rewrite.PromotePrivateFrameSlots();
 
     /// <summary>L2 的错误转洞；有错误时中止。</summary>
     [Step("kernel.idiom-errors", StepPhase.Prepare, StepKind.Analysis)]
-    internal static PrepareOutcome IdiomErrors(RecoveryScope scope, PreparedMethod prepared)
+    internal static PrepareOutcome IdiomErrors(MethodSession scope, PreparedMethod prepared)
     {
         foreach (var error in prepared.Idioms.Errors)
             scope.Analysis.Hole(scope.entry, $"L2 {error}", rule: "Prepare");
@@ -51,19 +51,19 @@ internal static class PrepareSteps
     }
 
     [Step("kernel.remove-dead", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void RemoveDead(RecoveryScope scope) => scope.Edit.RemoveDead("kernel.remove-dead");
+    internal static void RemoveDead(MethodSession scope) => scope.Edit.RemoveDead("kernel.remove-dead");
 
     /// <summary>原值写回删除。</summary>
     [Step("kernel.frame-writebacks", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void RemoveFrameWritebacks(RecoveryScope scope) => FrameWritebacks.Run(scope.function);
+    internal static void RemoveFrameWritebacks(MethodSession scope) => FrameWritebacks.Run(scope.function);
 
     /// <summary>帧常量下标；记下是否有改写，供传播步骤判断。</summary>
     [Step("kernel.frame-constant-indices", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void IndexConstantFrames(RecoveryScope scope, PreparedMethod prepared) => prepared.ConstantFrameIndices = FrameIndexAnalysis.Run(scope.function) > 0;
+    internal static void IndexConstantFrames(MethodSession scope, PreparedMethod prepared) => prepared.ConstantFrameIndices = FrameIndexAnalysis.Run(scope.function) > 0;
 
     /// <summary>有常量下标时：传播，再提升私有帧槽。</summary>
     [Step("kernel.propagate-constant-indices", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void PropagateConstantIndices(RecoveryScope scope)
+    internal static void PropagateConstantIndices(MethodSession scope)
     {
         scope.Edit.Propagate(scope.Dominators, "kernel.propagate-constant-indices");
         scope.Rewrite.PromotePrivateFrameSlots();
@@ -71,7 +71,7 @@ internal static class PrepareSteps
 
     /// <summary>委托调用归一；有改写时清理，并删除对应的间接调用残余。</summary>
     [Step("kernel.delegate-calls", StepPhase.Prepare, StepKind.Rewrite)]
-    internal static void NormalizeDelegateCalls(RecoveryScope scope, PreparedMethod prepared)
+    internal static void NormalizeDelegateCalls(MethodSession scope, PreparedMethod prepared)
     {
         if (!DelegateCallNormalizer.Run(scope.facts, scope.function, prepared.Idioms))
             return;
@@ -82,7 +82,7 @@ internal static class PrepareSteps
 
     /// <summary>L2 残余转洞；压制清理 thunk 与共享泛型站点，死的类元数据读取只记规则追踪。</summary>
     [Step("kernel.residual-holes", StepPhase.Prepare, StepKind.Analysis)]
-    internal static void ResidualHoles(RecoveryScope scope, PreparedMethod prepared)
+    internal static void ResidualHoles(MethodSession scope, PreparedMethod prepared)
     {
         foreach (var residual in prepared.Idioms.Residuals)
         {
@@ -105,11 +105,11 @@ internal static class PrepareSteps
 
     /// <summary>块视图重置为全部块。</summary>
     [Step("kernel.blocks", StepPhase.Prepare, StepKind.Analysis)]
-    internal static void ResetBlocks(RecoveryScope scope) => scope.Maintain.Blocks(scope.function.Blocks, "kernel.blocks");
+    internal static void ResetBlocks(MethodSession scope) => scope.Maintain.Blocks(scope.function.Blocks, "kernel.blocks");
 
     /// <summary>控制流问题转洞。</summary>
     [Step("kernel.problem-holes", StepPhase.Prepare, StepKind.Analysis)]
-    internal static void ProblemHoles(RecoveryScope scope)
+    internal static void ProblemHoles(MethodSession scope)
     {
         foreach (var problem in scope.function.Problems)
             scope.Analysis.Hole(scope.entry, $"控制流 {problem}", rule: "Prepare");

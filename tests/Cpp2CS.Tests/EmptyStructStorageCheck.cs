@@ -17,7 +17,7 @@ internal static class EmptyStructStorageCheck
         var recovery = new MethodRecovery(facts, types);
         const ulong entry = 0x4deac48;
         var method = facts.Registrations.Entries.First(e => e.Address == entry).Method!;
-        var context = new RecoveryScope(recovery, method, entry);
+        var context = recovery.Session(method, entry);
         var a = new Assertions();
         a.True(context.Prepare() && context.Analyze() is null, "实际异步方法分析成功");
         var frame = context.State.Frames.frameRegions.First(r => r.Type is DefinitionRef d

@@ -27,7 +27,7 @@ internal static class StructCopyReturnCheck
         {
             var method = entry.Method!;
             a.Equal(0, recovery.RecoverInstance(method, entry.Address).Holes.Count, "完整恢复实际原生入口");
-            var context = new RecoveryScope(recovery, method, entry.Address) { ClosedInstance = true };
+            var context = recovery.Session(method, entry.Address, closedInstance: true);
             a.True(context.Prepare(), "准备实际调用形态");
             a.True(context.Analyze() is null, "实际地址类型分析成功");
             var function = context.function;

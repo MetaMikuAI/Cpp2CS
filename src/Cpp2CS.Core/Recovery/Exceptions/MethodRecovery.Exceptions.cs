@@ -17,7 +17,7 @@ public sealed partial class MethodRecovery
             && !callee.Method.Owner.Methods.Any(m => m.Name == ".cctor")
             && facts.Code.At(address) is { Region: CodeRegion.Managed, Size: <= 256 }
             && lifter.NoReturn.IsNoReturn(address)
-            && new RecoveryScope(this, callee, address) { ExpandThrowCalls = false }.Run().Body is { } body
+            && Session(callee, address, expandThrowCalls: false).Run().Body is { } body
             && ThrowConstruction(body) is { } created && types.IsAssignable(created.Type, types.Corlib("System.Exception")))
             result = created;
         return throwingConstructors[request] = result;

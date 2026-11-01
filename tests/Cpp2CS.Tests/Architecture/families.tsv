@@ -287,6 +287,7 @@ src/Cpp2CS.Core/Recovery/Generics/SharedRuntimeHelpers.cs	Recovery/Generics
 src/Cpp2CS.Core/Recovery/Generics/SharedValuesRules.cs	Recovery/Generics
 src/Cpp2CS.Core/Recovery/Kernel/AnalyzeScheduler.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/Maintenance.cs	Recovery/Kernel
+src/Cpp2CS.Core/Recovery/Kernel/MethodSession.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/PreparePlan.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/PrepareSteps.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/Scopes.cs	Recovery/Kernel
@@ -309,7 +310,6 @@ src/Cpp2CS.Core/Recovery/MethodRecovery.cs	Recovery
 src/Cpp2CS.Core/Recovery/RecoveryPipeline.cs	Recovery
 src/Cpp2CS.Core/Recovery/RecoveryTarget.cs	Recovery
 src/Cpp2CS.Core/Recovery/Rules/LoweringScope.cs	Recovery/Rules
-src/Cpp2CS.Core/Recovery/Rules/RecoveryScope.cs	Recovery/Rules
 src/Cpp2CS.Core/Recovery/Rules/RuleAttributes.cs	Recovery/Rules
 src/Cpp2CS.Core/Recovery/Rules/RuleRegistry.cs	Recovery/Rules
 src/Cpp2CS.Core/Recovery/Runtime/CheckedObjectAliases.cs	Recovery/Runtime

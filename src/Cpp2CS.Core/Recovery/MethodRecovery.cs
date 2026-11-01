@@ -55,13 +55,17 @@ public sealed partial class MethodRecovery
     internal MethodRecoveryResult? RuntimeDeclaration(MethodRef method, ulong entry) => DelegateFacts.IsRuntimeMethod(method.Method)
         ? new(method, entry, null, []) { Declaration = RuntimeDeclarationKind.Delegate } : PlatformDeclaration(method, entry);
 
-    public MethodRecoveryResult Recover(MethodRef method, ulong entry) => RuntimeDeclaration(method, entry) ?? new RecoveryScope(this, method, entry).Run();
+    /// <summary>新建方法会话（恢复、嵌套恢复与测试共用的入口）。</summary>
+    internal MethodSession Session(MethodRef method, ulong entry, bool closedInstance = false, bool sharedDefinition = false, bool expandThrowCalls = true) =>
+        new(this, method, entry) { ClosedInstance = closedInstance, SharedDefinition = sharedDefinition, ExpandThrowCalls = expandThrowCalls };
+
+    public MethodRecoveryResult Recover(MethodRef method, ulong entry) => RuntimeDeclaration(method, entry) ?? Session(method, entry).Run();
 
     /// <summary>
     /// 恢复泛型类型或泛型方法的封闭实例，用于认出访问器等形态；
     /// 方法体以封闭类型表达，不写成泛型定义的 CIL。
     /// </summary>
-    public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => RuntimeDeclaration(method, entry) ?? new RecoveryScope(this, method, entry) { ClosedInstance = true }.Run();
+    public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => RuntimeDeclaration(method, entry) ?? Session(method, entry, closedInstance: true).Run();
 
     /// <summary>从已知原生实例恢复开放泛型体；标量实例只提供传参布局，输出保留类型参数。</summary>
     public MethodRecoveryResult RecoverShared(MethodRef instance, ulong entry)
@@ -78,7 +82,7 @@ public sealed partial class MethodRecovery
             TypeArguments = open.TypeArguments.Zip(instance.TypeArguments, Bind).ToArray(),
             MethodArguments = open.MethodArguments.Zip(instance.MethodArguments, Bind).ToArray(),
         };
-        return new RecoveryScope(this, open, entry) { SharedDefinition = true }.Run();
+        return Session(open, entry, sharedDefinition: true).Run();
         TypeRef Bind(TypeRef parameter, TypeRef instance) => parameter is GenericParameterRef g
             ? g with
             {

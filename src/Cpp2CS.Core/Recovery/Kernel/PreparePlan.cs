@@ -46,7 +46,7 @@ internal sealed class PreparedMethod
 /// <paramref name="Unattached"/> 的条目在机器函数交给步骤列表之前运行：不挂接改写器，只记录追踪。
 /// </summary>
 internal sealed record PrepareEntry(string Id, PreparedData Reads = PreparedData.None, PreparedData Writes = PreparedData.None,
-    Func<RecoveryScope, PreparedMethod, bool>? When = null, bool CanStop = false, bool Unattached = false);
+    Func<MethodSession, PreparedMethod, bool>? When = null, bool CanStop = false, bool Unattached = false);
 
 /// <summary>
 /// Prepare 的计划表：这张表就是 Prepare 的规格。步骤注册在各族（包装机器层与 L2 算法的步骤注册在 Kernel），
@@ -95,7 +95,7 @@ internal static class PreparePlan
     private static readonly RegisteredPrepareStep[] Steps = Check();
 
     /// <summary>按计划表运行 Prepare；某一步中止时返回 false。</summary>
-    internal static bool Prepare(this RecoveryScope ctx)
+    internal static bool Prepare(this MethodSession ctx)
     {
         var prepared = new PreparedMethod();
         for (var i = 0; i < Entries.Length; i++)
@@ -124,7 +124,7 @@ internal static class PreparePlan
     }
 
     /// <summary>不挂接改写器地运行一步并记录追踪（机器函数尚未交给步骤列表）。</summary>
-    private static void Unattached(RecoveryScope ctx, string id, Action run)
+    private static void Unattached(MethodSession ctx, string id, Action run)
     {
         ctx.currentStep = id;
         var before = ctx.function?.Blocks.SelectMany(b => b.Statements).ToArray() ?? [];

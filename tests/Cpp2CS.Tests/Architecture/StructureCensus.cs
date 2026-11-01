@@ -64,7 +64,7 @@ internal sealed class StructureCensus
     };
 
     /// <summary>方法会话与交给规则的作用域：以它们为接收者的扩展方法、经它们访问证据表与方法恢复器的成员一并计数。</summary>
-    private static readonly HashSet<string> Scopes = new(StringComparer.Ordinal) { "RecoveryScope", "AnalysisScope", "RewriteScope", "BindingScope", "ProofScope" };
+    private static readonly HashSet<string> Scopes = new(StringComparer.Ordinal) { "MethodSession", "AnalysisScope", "RewriteScope", "BindingScope", "ProofScope" };
 
     private static readonly HashSet<string> RuleAttributes = new(StringComparer.Ordinal)
     {
@@ -202,7 +202,7 @@ internal sealed class StructureCensus
             && (Maintenance.ContainsKey(Name((m.ReducedFrom ?? m).OriginalDefinition))
                 || m.ContainingType.Name is "StatementRewriter" or "StatementList" && m.Name is "Replace" or "Insert" or "Remove" or "RemoveAt" or "RemoveAll" or "Add" or "Clear"),
         AssignmentExpressionSyntax assignment => semantic.GetSymbolInfo(assignment.Left).Symbol is { } field
-            && (Declared(field, "RecoveryScope", "blocks") || Declared(field, "RecoveryScope", "definitions")),
+            && (Declared(field, "MethodSession", "blocks") || Declared(field, "MethodSession", "definitions")),
         _ => false,
     });
 
@@ -355,10 +355,10 @@ internal sealed class StructureCensus
         var target = Unwrap(assignment.Target);
         if (target is IFieldReferenceOperation { Field: var field } && scope != "Recovery/Kernel")
         {
-            if (Declared(field, "RecoveryScope", "blocks")) Count("blocks-reset", scope);
-            if (Declared(field, "RecoveryScope", "definitions")) Count("definitions-reset", scope);
-            if (recovery && (Declared(field, "RecoveryScope", "blocks") || Declared(field, "RecoveryScope", "definitions"))
-                && !file.EndsWith("/Rules/RecoveryScope.cs", StringComparison.Ordinal))
+            if (Declared(field, "MethodSession", "blocks")) Count("blocks-reset", scope);
+            if (Declared(field, "MethodSession", "definitions")) Count("definitions-reset", scope);
+            if (recovery && (Declared(field, "MethodSession", "blocks") || Declared(field, "MethodSession", "definitions"))
+                && !file.EndsWith("/Kernel/MethodSession.cs", StringComparison.Ordinal))
                 Track(MaintenanceTag(semantic, syntax), Name(field), file, syntax);
         }
         if (!file.StartsWith("src/Cpp2CS.Core/Machine/Flow/", StringComparison.Ordinal))
@@ -416,7 +416,7 @@ internal sealed class StructureCensus
         return null;
     }
 
-    /// <summary>对 MethodRecovery 实例成员的引用（I10）与 RecoveryScope.owner 的访问次数。终态允许 Recovery/Kernel 与 Recovery/Services 访问，不计。</summary>
+    /// <summary>对 MethodRecovery 实例成员的引用（I10）与 MethodSession.owner 的访问次数。终态允许 Recovery/Kernel 与 Recovery/Services 访问，不计。</summary>
     private void Members(SemanticModel semantic, SyntaxTree tree, string file, string scope)
     {
         if (scope is "Recovery/Kernel" or "Recovery/Services") return;
@@ -438,7 +438,7 @@ internal sealed class StructureCensus
         var internalReferences = 0;
         foreach (var node in tree.GetRoot().DescendantNodes())
         {
-            if (node is ObjectCreationExpressionSyntax or ImplicitObjectCreationExpressionSyntax && semantic.GetTypeInfo(node).Type?.Name == "RecoveryScope")
+            if (node is ObjectCreationExpressionSyntax or ImplicitObjectCreationExpressionSyntax && semantic.GetTypeInfo(node).Type?.Name == "MethodSession")
                 Count("scope-construction", "Tests");
             if (node is SimpleNameSyntax name && semantic.GetSymbolInfo(name).Symbol is INamedTypeSymbol type
                 && type.DeclaredAccessibility is Accessibility.Internal && type.ContainingAssembly?.Name == "Cpp2CS.Core")

@@ -16,7 +16,7 @@ call-binding-commit/Recovery/Frames	8
 cfg-mutation/Idioms	9
 cfg-mutation/Recovery/Calls	8
 cfg-mutation/Recovery/Memory	5
-core-internal-type-references/Tests	455
+core-internal-type-references/Tests	449
 cross-family-write/Recovery/Calls	9
 cross-family-write/Recovery/Construction	3
 cross-family-write/Recovery/Control	5
@@ -57,7 +57,6 @@ owner-access/Recovery/Frames	25
 owner-access/Recovery/Generics	3
 owner-access/Recovery/Lowering	10
 owner-access/Recovery/Memory	1
-owner-access/Recovery/Rules	3
 owner-access/Recovery/Signature	2
 owner-access/Recovery/Structs	10
 owner-access/Recovery/Values	8
@@ -70,7 +69,6 @@ propagate-run/Machine	4
 propagate-run/Recovery/Frames	1
 round-loops/Recovery/Calls	1
 round-loops/Recovery/Frames	1
-scope-construction/Tests	6
 scope-extension-methods/Recovery	1
 scope-extension-methods/Recovery/Calls	26
 scope-extension-methods/Recovery/Construction	5
@@ -110,10 +108,9 @@ state-access/Recovery/Diagnostics	1
 state-access/Recovery/Exceptions	70
 state-access/Recovery/Frames	120
 state-access/Recovery/Generics	18
-state-access/Recovery/Kernel	5
+state-access/Recovery/Kernel	7
 state-access/Recovery/Lowering	56
 state-access/Recovery/Memory	22
-state-access/Recovery/Rules	2
 state-access/Recovery/Runtime	34
 state-access/Recovery/Signature	5
 state-access/Recovery/State	14
@@ -147,7 +144,7 @@ use-scan/Recovery/Memory	5
 use-scan/Recovery/Runtime	3
 use-scan/Recovery/Structs	4
 use-scan/Recovery/Values	3
-whitelist-entries/I10	50
+whitelist-entries/I10	48
 whitelist-entries/I2b	44
 whitelist-entries/I2c	13
 whitelist-entries/I3	1

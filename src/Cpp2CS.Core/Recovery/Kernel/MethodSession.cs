@@ -6,7 +6,11 @@ using Cpp2CS.Machine.Ssa;
 
 namespace Cpp2CS.Recovery;
 
-internal sealed class RecoveryScope(MethodRecovery owner, MethodRef method, ulong entry)
+/// <summary>
+/// 方法会话：一个方法恢复期间的全部状态（机器函数与 IR 视图、证据表、分析缓存、洞账本、追踪），只对内核可见。
+/// 规则经 <see cref="Analysis"/>、<see cref="Rewrite"/>、<see cref="Binding"/>、<see cref="Proof"/> 等作用域访问它。
+/// </summary>
+internal sealed class MethodSession(MethodRecovery owner, MethodRef method, ulong entry)
 {
     internal readonly MethodRecovery owner = owner;
     internal readonly MethodRef method = method;

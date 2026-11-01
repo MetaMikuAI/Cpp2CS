@@ -8,7 +8,7 @@ namespace Cpp2CS.Recovery;
 /// 维护动作的内核接口：规则经它请求类型推断、重建定义、重置块视图与重跑已注册的分析。
 /// 每个请求立即执行，时机与次数和原来的直接调用相同，并记入方法的维护记录；记录只读取当前版本，不为记录而刷新。
 /// </summary>
-internal sealed class Maintenance(RecoveryScope ctx)
+internal sealed class Maintenance(MethodSession ctx)
 {
     /// <summary>非空时处于只读的分析步骤中（值为步骤 Id）：禁止重置块视图、刷新定义与 IR 编辑。</summary>
     internal string? ReadOnly { get; set; }
@@ -99,7 +99,7 @@ internal sealed class Maintenance(RecoveryScope ctx)
 }
 
 /// <summary>IR 级维护动作的内核接口：传播、删除死定义、清理、控制流化简与带异常片段维护的删除。立即执行并记录。</summary>
-internal sealed class Editing(RecoveryScope ctx, Maintenance maintain)
+internal sealed class Editing(MethodSession ctx, Maintenance maintain)
 {
     public void Propagate(Dominators dominators, string reason) =>
         maintain.Record("propagate", reason, () => Cpp2CS.Machine.Ssa.Propagate.Run(ctx.function, dominators));

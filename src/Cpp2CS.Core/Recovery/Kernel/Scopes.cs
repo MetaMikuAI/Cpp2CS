@@ -14,10 +14,10 @@ namespace Cpp2CS.Recovery;
 /// </summary>
 internal class AnalysisScope
 {
-    internal AnalysisScope(RecoveryScope session) => Session = session;
+    internal AnalysisScope(MethodSession session) => Session = session;
 
     /// <summary>方法会话，只供内核使用。</summary>
-    internal RecoveryScope Session { get; }
+    internal MethodSession Session { get; }
 
     internal MethodRecovery owner => Session.owner;
     internal MethodRef method => Session.method;
@@ -50,7 +50,7 @@ internal class AnalysisScope
 /// <summary>改写作用域：改写步骤、Prepare 步骤与它们的辅助函数使用；在分析作用域之外提供语句改写器与 IR 编辑。</summary>
 internal class RewriteScope : AnalysisScope
 {
-    internal RewriteScope(RecoveryScope session) : base(session) { }
+    internal RewriteScope(MethodSession session) : base(session) { }
 
     internal StatementRewriter Rewriter => Session.Rewriter;
     internal Editing Edit => Session.Edit;
@@ -59,11 +59,11 @@ internal class RewriteScope : AnalysisScope
 /// <summary>参数绑定作用域：入口参数的绑定规则使用。</summary>
 internal sealed class BindingScope : AnalysisScope
 {
-    internal BindingScope(RecoveryScope session) : base(session) { }
+    internal BindingScope(MethodSession session) : base(session) { }
 }
 
 /// <summary>证明作用域：方法体证明使用。</summary>
 internal sealed class ProofScope : AnalysisScope
 {
-    internal ProofScope(RecoveryScope session) : base(session) { }
+    internal ProofScope(MethodSession session) : base(session) { }
 }

@@ -39,8 +39,6 @@ I10	MethodRecovery.abi	src/Cpp2CS.Core/Recovery/Memory/ArraySpansRules.cs	O8	MS2
 I10	MethodRecovery.RestoreBaseConstructor	src/Cpp2CS.Core/Recovery/RecoveryPipeline.cs	O8	MS2	V2 建立时的现有访问
 I10	MethodRecovery.Recover	src/Cpp2CS.Core/Recovery/RecoveryTarget.cs	O8	MS2	V2 建立时的现有访问
 I10	MethodRecovery.RecoverShared	src/Cpp2CS.Core/Recovery/RecoveryTarget.cs	O8	MS2	V2 建立时的现有访问
-I10	MethodRecovery.facts	src/Cpp2CS.Core/Recovery/Rules/RecoveryScope.cs	O8	MS2	V2 建立时的现有访问
-I10	MethodRecovery.types	src/Cpp2CS.Core/Recovery/Rules/RecoveryScope.cs	O8	MS2	V2 建立时的现有访问
 I10	MethodRecovery.abi	src/Cpp2CS.Core/Recovery/Signature/SignatureBinding.cs	O8	MS2	V2 建立时的现有访问
 I10	MethodRecovery.abi	src/Cpp2CS.Core/Recovery/Structs/StructPhisRules.cs	O8	MS2	V2 建立时的现有访问
 I10	MethodRecovery.abi	src/Cpp2CS.Core/Recovery/Structs/StructRegistersRules.cs	O8	MS2	V2 建立时的现有访问

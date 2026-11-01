@@ -3,7 +3,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class RecoveryPipeline
 {
-    internal static MethodRecoveryResult Run(this RecoveryScope ctx)
+    internal static MethodRecoveryResult Run(this MethodSession ctx)
     {
         ManagedBody? partial = null;
         if (ctx.Prepare())

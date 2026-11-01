@@ -12,3 +12,4 @@ state-access/Recovery	state-access/Recovery/Kernel	PrepareSteps.ResidualHoles	2	
 scope-extension-methods/Recovery/Analysis	scope-extension-methods/Recovery/Kernel	AnalyzeScheduler.Analyze	1	K2
 state-access/Recovery/Analysis	state-access/Recovery/Kernel	AnalyzeScheduler.Analyze	3	K2
 state-access/Recovery/Runtime	state-access/Recovery/Rules	RecoveryScope.IndexDefinitions	1	K4
+state-access/Recovery/Rules	state-access/Recovery/Kernel	MethodSession.IndexDefinitions	2	K4

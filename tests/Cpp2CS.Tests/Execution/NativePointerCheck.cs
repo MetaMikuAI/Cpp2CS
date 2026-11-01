@@ -67,7 +67,7 @@ internal static class NativePointerCheck
         var a = new Assertions();
         var scalar = new LocalValue(new Variable(Storage.Gpr(1), 1), types.Double, 64);
         var scalarMethod = Add("ScalarBytes", types.UInt16, types.Double, new ConstantValue(0, types.UInt16, 16));
-        var ctx = new RecoveryScope(new MethodRecovery(facts, types), new(scalarMethod, [], []), 0);
+        var ctx = new MethodRecovery(facts, types).Session(new(scalarMethod, [], []), 0);
         var region = new FrameRegion(-8, types.Double, 8, scalar);
         a.True(ctx.Analysis.FrameLocation(region, 3, 16).TryGet(out var bytes, out _), "标量帧内允许非对齐部分访问");
         a.True(ctx.Analysis.FrameLocation(region, 7, 16).Failure is not null, "部分访问不得越过帧边界");

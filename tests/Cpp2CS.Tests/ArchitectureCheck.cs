@@ -99,10 +99,12 @@ internal static class ArchitectureCheck
         Ledgers.CheckEntries("共享步骤体登记表", sharedBodies, registered, null, failures);
         Ledgers.CheckRatchet(Ledgers.ReadRatchet(paths.Ratchet), counts, failures);
         var transfers = File.Exists(paths.Transfers) ? Ledgers.ReadTransfers(File.ReadLines(paths.Transfers)) : [];
-        Ledgers.CheckTransfers(transfers, census.MethodScopes, failures);
         if (baseRevision is not null)
         {
             string[] Show(string path) => Git(model.Repository, "show", $"{baseRevision}:{Path.GetRelativePath(model.Repository, path).Replace('\\', '/')}");
+            // 转移清单是历史记录：只核对本次新增的条目（之后同一代码再次搬移不影响旧条目）
+            var baseTransfers = Ledgers.ReadTransfers(Show(paths.Transfers));
+            Ledgers.CheckTransfers(transfers.Where(t => !baseTransfers.Contains(t)).ToList(), census.MethodScopes, failures);
             var baseline = new SortedDictionary<string, int>(Ledgers.ReadRatchetLines(Show(paths.Ratchet)), StringComparer.Ordinal);
             var unconfirmed = new List<string>();
             Ledgers.CheckRises(baseline, Ledgers.ReadRatchet(paths.Ratchet), Ledgers.ReadTransfers(Show(paths.Transfers)), transfers, failures, unconfirmed);

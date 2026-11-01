@@ -18,7 +18,7 @@ internal static class CheckedVirtualIdentityCheck
         var a = new Assertions();
         foreach (var mode in new[] { "checked", "missing", "inverted", "other-flag", "other-exception" })
         {
-            var context = new RecoveryScope(recovery, method, method.Method.Address);
+            var context = recovery.Session(method, method.Method.Address);
             a.True(context.Prepare(), "准备实际强制转换入口");
             a.True(context.Analyze() is null, "恢复分析成功");
             var function = context.function;
@@ -44,7 +44,7 @@ internal static class CheckedVirtualIdentityCheck
         var normalized = MethodRef.Open(facts.Model.Methods.Single(m => m.Owner.FullName == "Sekai.ScreenLayerEventStorySelect" && m.Name == "OnCreateCell"));
         foreach (var guarded in new[] { true, false })
         {
-            var context = new RecoveryScope(recovery, normalized, normalized.Method.Address);
+            var context = recovery.Session(normalized, normalized.Method.Address);
             a.True(context.Prepare(), "准备已归一的类型检查入口");
             a.True(context.Analyze() is null, "已归一类型检查分析成功");
             var calls = context.blocks.SelectMany(b => b.Statements).OfType<Call>().ToArray();

@@ -40,5 +40,5 @@ internal static class StepGroup
         return failure;
     }
 
-    private static Stmt[] Statements(RecoveryScope scope) => scope.function.Blocks.SelectMany(b => b.Statements).ToArray();
+    private static Stmt[] Statements(MethodSession scope) => scope.function.Blocks.SelectMany(b => b.Statements).ToArray();
 }

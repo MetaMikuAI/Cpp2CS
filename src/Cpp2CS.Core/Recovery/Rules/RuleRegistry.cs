@@ -8,15 +8,15 @@ using System.Linq.Expressions;
 namespace Cpp2CS.Recovery;
 
 /// <summary>一个已注册的步骤：Id、中文名、种类、失效声明与适配后的入口；<see cref="CanFail"/> 表示方法返回 RecoveryFailure?。</summary>
-internal sealed record RegisteredStep(string Id, string Name, StepKind Kind, AnalysisInvalidation Invalidates, StepRefresh Refresh, bool CanFail, Func<RecoveryScope, RecoveryFailure?> Run);
+internal sealed record RegisteredStep(string Id, string Name, StepKind Kind, AnalysisInvalidation Invalidates, StepRefresh Refresh, bool CanFail, Func<MethodSession, RecoveryFailure?> Run);
 
 /// <summary>一个已注册的 Prepare 步骤；<see cref="CanStop"/> 表示方法返回 PrepareOutcome。</summary>
-internal sealed record RegisteredPrepareStep(string Id, StepKind Kind, bool CanStop, Func<RecoveryScope, PreparedMethod, PrepareOutcome> Run);
+internal sealed record RegisteredPrepareStep(string Id, StepKind Kind, bool CanStop, Func<MethodSession, PreparedMethod, PrepareOutcome> Run);
 
 internal static class RuleRegistry
 {
     private const BindingFlags Members = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
-    private static readonly MethodInfo[] Methods = typeof(RecoveryScope).Assembly.GetTypes().SelectMany(t => t.GetMethods(Members)).ToArray();
+    private static readonly MethodInfo[] Methods = typeof(MethodSession).Assembly.GetTypes().SelectMany(t => t.GetMethods(Members)).ToArray();
     public static readonly RegisteredStep[] Analyses = OrderSteps(StepPhase.Analyze);
     private static readonly IReadOnlyDictionary<string, RegisteredStep> StepsById = Analyses.ToDictionary(s => s.Id, StringComparer.Ordinal);
     /// <summary>Prepare 阶段的步骤，按 Id；顺序由 <see cref="PreparePlan"/> 给出。</summary>
@@ -65,11 +65,11 @@ internal static class RuleRegistry
     }
 
     /// <summary>Prepare 步骤的适配：参数为作用域，可选地再接 PreparedMethod；其余可选参数取默认值；void 视为继续。</summary>
-    private static Func<RecoveryScope, PreparedMethod, PrepareOutcome> AdaptPrepare(MethodInfo method)
+    private static Func<MethodSession, PreparedMethod, PrepareOutcome> AdaptPrepare(MethodInfo method)
     {
-        var scope = Expression.Parameter(typeof(RecoveryScope), "scope");
+        var scope = Expression.Parameter(typeof(MethodSession), "scope");
         var prepared = Expression.Parameter(typeof(PreparedMethod), "prepared");
-        if (method.GetParameters().FirstOrDefault()?.ParameterType is not { } first || first != typeof(RecoveryScope) && first != typeof(RewriteScope))
+        if (method.GetParameters().FirstOrDefault()?.ParameterType is not { } first || first != typeof(MethodSession) && first != typeof(RewriteScope))
             throw new InvalidOperationException($"Prepare 步骤 {method.DeclaringType!.Name}.{method.Name} 的第一个参数须为改写作用域（内核步骤为方法会话）");
         var arguments = method.GetParameters().Select((p, i) => i == 0 ? ScopeOf(scope, p.ParameterType)
             : p.ParameterType == typeof(PreparedMethod) ? (Expression)prepared
@@ -79,16 +79,16 @@ internal static class RuleRegistry
         Expression body = method.ReturnType == typeof(PrepareOutcome) ? call
             : method.ReturnType == typeof(void) ? Expression.Block(call, Expression.Constant(PrepareOutcome.Continue))
             : throw new InvalidOperationException($"Prepare 步骤 {method.DeclaringType!.Name}.{method.Name} 的返回类型须为 void 或 PrepareOutcome");
-        return Expression.Lambda<Func<RecoveryScope, PreparedMethod, PrepareOutcome>>(body, scope, prepared).Compile();
+        return Expression.Lambda<Func<MethodSession, PreparedMethod, PrepareOutcome>>(body, scope, prepared).Compile();
     }
 
     /// <summary>方法会话到规则作用域：参数类型为某个作用域时，由会话取对应的作用域对象。</summary>
     private static Expression ScopeOf(Expression session, Type parameter) =>
-        parameter == typeof(RecoveryScope) ? session
-        : parameter == typeof(AnalysisScope) ? Expression.Property(session, nameof(RecoveryScope.Analysis))
-        : parameter == typeof(RewriteScope) ? Expression.Property(session, nameof(RecoveryScope.Rewrite))
-        : parameter == typeof(BindingScope) ? Expression.Property(session, nameof(RecoveryScope.Binding))
-        : parameter == typeof(ProofScope) ? Expression.Property(session, nameof(RecoveryScope.Proof))
+        parameter == typeof(MethodSession) ? session
+        : parameter == typeof(AnalysisScope) ? Expression.Property(session, nameof(MethodSession.Analysis))
+        : parameter == typeof(RewriteScope) ? Expression.Property(session, nameof(MethodSession.Rewrite))
+        : parameter == typeof(BindingScope) ? Expression.Property(session, nameof(MethodSession.Binding))
+        : parameter == typeof(ProofScope) ? Expression.Property(session, nameof(MethodSession.Proof))
         : throw new InvalidOperationException($"步骤的作用域参数类型 {parameter.Name} 无法由方法会话提供");
 
     private static TDelegate Adapt<TDelegate>(MethodInfo method)
@@ -97,7 +97,7 @@ internal static class RuleRegistry
         var signature = typeof(TDelegate).GetMethod("Invoke")!;
         var arguments = signature.GetParameters().Select(p => Expression.Parameter(p.ParameterType, p.Name)).ToArray();
         var parameters = method.GetParameters();
-        var call = Expression.Call(method, arguments.Select((a, i) => a.Type == typeof(RecoveryScope) ? ScopeOf(a, parameters[i].ParameterType) : (Expression)a));
+        var call = Expression.Call(method, arguments.Select((a, i) => a.Type == typeof(MethodSession) ? ScopeOf(a, parameters[i].ParameterType) : (Expression)a));
         Expression result = method.ReturnType == typeof(void) && signature.ReturnType != typeof(void) ? Expression.Block(call, Expression.Default(signature.ReturnType)) : method.ReturnType == signature.ReturnType ? call : Expression.Convert(call, signature.ReturnType);
         return Expression.Lambda<TDelegate>(result, arguments).Compile();
     }
@@ -129,7 +129,7 @@ internal static class RuleRegistry
             if (method.GetParameters().FirstOrDefault()?.ParameterType != expected)
                 throw new InvalidOperationException($"步骤 {next} 的作用域参数须为 {expected.Name}");
             ordered.Add(new(next, attribute.Name, attribute.Kind, attribute.Invalidates, attribute.Refresh, method.ReturnType != typeof(void),
-                Adapt<Func<RecoveryScope, RecoveryFailure?>>(method)));
+                Adapt<Func<MethodSession, RecoveryFailure?>>(method)));
         }
 
         return ordered.ToArray();

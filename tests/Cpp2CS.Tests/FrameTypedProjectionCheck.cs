@@ -19,7 +19,7 @@ internal static class FrameTypedProjectionCheck
         var vector3 = Type("UnityEngine.Vector3");
         var vector2Int = Type("UnityEngine.Vector2Int");
         var method = types.CorlibMethod("System.Object", "MemberwiseClone")!;
-        var ctx = new RecoveryScope(new MethodRecovery(facts, types), method, 0x100);
+        var ctx = new MethodRecovery(facts, types).Session(method, 0x100);
         var write = new Call(0x100, CallKind.Direct, Expr.C(0, 64));
         var read = new Define(0x104, new Variable(Storage.Vec(0), 1), new Load(new FrameAddress(-36), 32));
         var block = new Block(0x100) { Statements = [write, read] };
