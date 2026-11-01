@@ -169,38 +169,20 @@ internal static class GateDelta
         }
     }
 
-    /// <summary>
-    /// 读取 analysis.jsonl 的步骤与 pass 序列，规范成与格式无关的文本：新格式是一条按完成先后排列的 trace，
-    /// 旧格式是分开的 steps、passes。子步骤折叠进父步骤（父步骤的记录本身就是折叠后的值），不进入序列；
-    /// 维护动作、不动点与规则位置只在两边都是新格式时作为时间线比较（诊断）。
-    /// </summary>
+    /// <summary>读取 analysis.jsonl 的时间线：步骤与 pass 序列、步骤的类型数序列与完整时间线（不含毫秒）。</summary>
     private static void CompareAnalysis(DeltaLog log, string before, string after, IReadOnlyDictionary<string, string> map)
     {
         static string Renamed(IReadOnlyDictionary<string, string> map, string? name) => name is not null && map.TryGetValue(name, out var renamed) ? renamed : name ?? "";
-        string[] convergence = ["Single", "Stable", "BudgetExhausted"];
-        string Convergence(JsonNode? value) => value is JsonValue v && v.TryGetValue<int>(out var index) ? convergence[index] : value?.ToString() ?? "";
-        string Step(string? id, JsonObject s) => $"{Renamed(map, id)}|{s["InputVersion"]}|{s["OutputVersion"]}|{s["InputTypes"]}|{s["OutputTypes"]}|{s["StepKind"] ?? s["Kind"]}|{s["Invalidates"]}";
-        string Pass(string? id, JsonObject p) => $"{Renamed(map, id)}|{p["Changed"]}|{p["InputStatements"]}|{p["OutputStatements"]}|{p["Rounds"]}|{Convergence(p["Convergence"])}";
-        Dictionary<string, (string[] Steps, string[] Types, string[] Passes, string[]? Timeline)> Read(string directory) =>
+        Dictionary<string, (string[] Steps, string[] Types, string[] Passes, string[] Timeline)> Read(string directory) =>
             Jsonl.Read(directory, "analysis.jsonl", "entry").ToDictionary(row => row.Key, row =>
             {
-                if (row.Value["trace"] is JsonArray trace)
-                {
-                    var entries = trace.Select(e => e!.AsObject()).ToArray();
-                    var steps = entries.Where(e => e["Kind"]!.ToString() is "Step" or "1").ToArray();
-                    var passes = entries.Where(e => e["Kind"]!.ToString() is "Pass" or "0").ToArray();
-                    foreach (var entry in entries) entry.Remove("Milliseconds");
-                    return (steps.Select(s => Step(s["Id"]?.GetValue<string>(), s)).ToArray(),
-                        steps.Select(s => $"{s["InputTypes"]}/{s["OutputTypes"]}").ToArray(),
-                        passes.Select(p => Pass(p["Id"]?.GetValue<string>(), p)).ToArray(),
-                        entries.Select(e => Jsonl.Text(e)).ToArray());
-                }
-                var oldSteps = row.Value["steps"]!.AsArray().Select(s => s!.AsObject()).ToArray();
-                var oldPasses = row.Value["passes"]!.AsArray().Select(p => p!.AsObject()).ToArray();
-                return (oldSteps.Select(s => Step(s["Rule"]?.GetValue<string>(), s)).ToArray(),
-                    oldSteps.Select(s => $"{s["InputTypes"]}/{s["OutputTypes"]}").ToArray(),
-                    oldPasses.Select(p => Pass(p["Name"]?.GetValue<string>(), p)).ToArray(),
-                    (string[]?)null);
+                var entries = row.Value["trace"]!.AsArray().Select(e => e!.AsObject()).ToArray();
+                foreach (var entry in entries) { entry.Remove("Milliseconds"); entry["Id"] = Renamed(map, entry["Id"]?.GetValue<string>()); }
+                var steps = entries.Where(e => e["Kind"]?.ToString() == "Step").ToArray();
+                return (steps.Select(s => Jsonl.Text(s)).ToArray(),
+                    steps.Select(s => $"{s["InputTypes"]}/{s["OutputTypes"]}").ToArray(),
+                    entries.Where(e => e["Kind"]?.ToString() == "Pass").Select(p => Jsonl.Text(p)).ToArray(),
+                    entries.Select(e => Jsonl.Text(e)).ToArray());
             }, StringComparer.Ordinal);
         var left = Read(before);
         var right = Read(after);
@@ -214,7 +196,7 @@ internal static class GateDelta
                 log.Fail("analysis.jsonl InputTypes/OutputTypes 序列", $"{key}：{Jsonl.Clip(string.Join(' ', l.Types))} → {Jsonl.Clip(string.Join(' ', r.Types))}");
             if (!l.Steps.SequenceEqual(r.Steps)) log.Note("analysis.jsonl 步骤序列（诊断）", $"{key}：{l.Steps.Length} → {r.Steps.Length} 步");
             if (!l.Passes.SequenceEqual(r.Passes)) log.Note("analysis.jsonl pass 序列（诊断）", $"{key}：{l.Passes.Length} → {r.Passes.Length} 个");
-            if (l.Timeline is not null && r.Timeline is not null && !l.Timeline.SequenceEqual(r.Timeline))
+            if (!l.Timeline.SequenceEqual(r.Timeline))
                 log.Note("analysis.jsonl 时间线（诊断）", $"{key}：{l.Timeline.Length} → {r.Timeline.Length} 条");
         }
     }

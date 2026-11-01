@@ -1,164 +1,68 @@
 using Cpp2CS.Tests.Architecture;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Cpp2CS.Tests;
 
 /// <summary>
-/// 结构检查（G0）：按实际符号引用检查模块边界（别名、完整类型名、var 与目标类型的 new() 适用相同规则）；
-/// 语义计数与棘轮、访问白名单与豁免清单、族归属快照、注册表快照与洞编码清单（账本见 tests/Cpp2CS.Tests/Architecture）。
-/// --write：棘轮写回下降值并删除已无访问的白名单与豁免条目（不会上调或新增）；--write-snapshots：按代码重写族归属、注册表与洞编码快照；
-/// --bootstrap：账本不存在时按现状建立初值；--milestone MSn：检查到期条目已删除。
+/// 架构检查：按实际符号引用检查层次依赖（别名、完整类型名、var 与目标类型的 new() 适用相同规则）；
+/// 注册的步骤与规则的 Id 前缀等于所在族目录；方法会话只在内核中出现，规则经作用域访问它。
 /// </summary>
 internal static class ArchitectureCheck
 {
-    [Command("architecture", "检查依赖方向、语义计数棘轮、白名单与豁免清单、族归属与注册表快照、洞编码清单", Arguments = "<repository> [--write] [--write-snapshots] [--bootstrap] [--milestone MSn] [--deps]")]
+    [Command("architecture", "检查层次依赖、注册 Id 与族目录一致、方法会话只在内核中使用", Arguments = "<repository> [--deps]")]
     public static int Run(string repository, string[] options)
     {
-        var known = new[] { "--write", "--write-snapshots", "--bootstrap", "--deps" };
-        string? milestone = null;
-        string? baseRevision = null;
-        for (var i = 0; i < options.Length; i++)
-        {
-            if (options[i] == "--milestone" && i + 1 < options.Length) milestone = options[++i];
-            else if (options[i] == "--base" && i + 1 < options.Length) baseRevision = options[++i];
-            else if (!known.Contains(options[i])) throw new ArgumentException($"未知参数 {options[i]}");
-        }
         var model = SourceModel.Load(repository);
         if (options.Contains("--deps")) return Dependencies(model);
         var failures = new List<string>();
-        var layers = Layers(model);
-        failures.AddRange(layers);
-
-        var census = new StructureCensus(model);
-        var registry = Ledgers.Registry();
-        var accesses = census.Accesses.Concat(Ledgers.DuplicateOrders(registry)).Concat(Ledgers.DuplicatePasses(census.PassNames)).ToList();
-        var folder = Ledgers.Folder(model.Repository);
-        var paths = new
-        {
-            Ratchet = Path.Combine(folder, "ratchet.tsv"),
-            Whitelist = Path.Combine(folder, "whitelist.tsv"),
-            Exemptions = Path.Combine(folder, "exemptions.tsv"),
-            Families = Path.Combine(folder, "families.tsv"),
-            Registry = Path.Combine(folder, "registry.tsv"),
-            HoleCodes = Path.Combine(folder, "hole-codes.tsv"),
-            SharedBodies = Path.Combine(folder, "shared-step-bodies.tsv"),
-            Transfers = Path.Combine(folder, "transfers.tsv"),
-        };
-        var holeCodes = Ledgers.HoleCodes(census.HoleCodes);
-        if (options.Contains("--bootstrap"))
-        {
-            if (new[] { paths.Ratchet, paths.Whitelist, paths.Exemptions, paths.Families, paths.Registry, paths.HoleCodes }.Any(File.Exists))
-                throw new IOException("账本已存在；--bootstrap 只用于建立初值");
-            Directory.CreateDirectory(folder);
-            var entries = accesses.GroupBy(a => (a.Tag, a.Member, a.File)).Select(g =>
-            {
-                var (package, expiry) = Ledgers.Schedule(g.First());
-                return new Ledgers.Entry(g.Key.Tag, g.Key.Member, g.Key.File, package, expiry, "V2 建立时的现有访问");
-            }).ToList();
-            Ledgers.WriteEntries(paths.Whitelist, entries.Where(e => !Ledgers.IsExemption(e.Tag)));
-            Ledgers.WriteEntries(paths.Exemptions, entries.Where(e => Ledgers.IsExemption(e.Tag)));
-            Ledgers.WriteEntries(paths.SharedBodies, []);
-            WriteSnapshots(model, registry, holeCodes, paths.Families, paths.Registry, paths.HoleCodes);
-            Ledgers.WriteRatchet(paths.Ratchet, Counts(census, Ledgers.ReadEntries(paths.Whitelist), Ledgers.ReadEntries(paths.Exemptions), []));
-            Console.WriteLine($"已建立账本：白名单 {entries.Count(e => !Ledgers.IsExemption(e.Tag))} 条，豁免 {entries.Count(e => Ledgers.IsExemption(e.Tag))} 条");
-        }
-        var whitelist = Ledgers.ReadEntries(paths.Whitelist);
-        var exemptions = Ledgers.ReadEntries(paths.Exemptions);
-        // 共享步骤体（I3）：登记的调用点长期放行，不到期；登记表中的调用点数纳入棘轮
-        var sharedBodies = Ledgers.ReadEntries(paths.SharedBodies);
-        var registered = accesses.Where(a => a.Tag == "I3" && sharedBodies.Any(e => e.Covers(a))).ToList();
-        accesses = accesses.Except(registered).ToList();
-        if (options.Contains("--write"))
-        {
-            whitelist = whitelist.Where(e => accesses.Any(e.Covers)).ToList();
-            exemptions = exemptions.Where(e => accesses.Any(e.Covers)).ToList();
-            Ledgers.WriteEntries(paths.Whitelist, whitelist);
-            Ledgers.WriteEntries(paths.Exemptions, exemptions);
-            var recorded = Ledgers.ReadRatchet(paths.Ratchet);
-            // 只写回下降；给出 --base 时，被本次新增转移条目覆盖的上升也写回（覆盖与源键下降由下面的 CheckRises 核对）
-            var covered = new Dictionary<string, int>(StringComparer.Ordinal);
-            if (baseRevision is not null && File.Exists(paths.Transfers))
-            {
-                var baseTransfers = Ledgers.ReadTransfers(Git(model.Repository, "show", $"{baseRevision}:{Path.GetRelativePath(model.Repository, paths.Transfers).Replace('\\', '/')}"));
-                foreach (var transfer in Ledgers.ReadTransfers(File.ReadLines(paths.Transfers)).Where(t => !baseTransfers.Contains(t)))
-                    covered[transfer.Target] = covered.GetValueOrDefault(transfer.Target) + transfer.Count;
-            }
-            var lowered = new SortedDictionary<string, int>(StringComparer.Ordinal);
-            foreach (var (key, value) in Counts(census, whitelist, exemptions, registered))
-                lowered[key] = Math.Min(value, recorded.TryGetValue(key, out var was) ? was + covered.GetValueOrDefault(key) : covered.TryGetValue(key, out var rise) ? rise : value);
-            foreach (var (key, value) in recorded.Where(p => !lowered.ContainsKey(p.Key))) lowered[key] = 0;
-            Ledgers.WriteRatchet(paths.Ratchet, lowered.Where(p => p.Value > 0 || recorded.ContainsKey(p.Key) && recorded[p.Key] == 0).ToDictionary());
-        }
-        if (options.Contains("--write-snapshots")) WriteSnapshots(model, registry, holeCodes, paths.Families, paths.Registry, paths.HoleCodes);
-
-        var counts = Counts(census, whitelist, exemptions, registered);
-        Ledgers.CheckEntries("白名单", whitelist, accesses.Where(a => !Ledgers.IsExemption(a.Tag)).ToList(), milestone, failures);
-        Ledgers.CheckEntries("豁免清单", exemptions, accesses.Where(a => Ledgers.IsExemption(a.Tag)).ToList(), milestone, failures);
-        Ledgers.CheckEntries("共享步骤体登记表", sharedBodies, registered, null, failures);
-        Ledgers.CheckRatchet(Ledgers.ReadRatchet(paths.Ratchet), counts, failures);
-        var transfers = File.Exists(paths.Transfers) ? Ledgers.ReadTransfers(File.ReadLines(paths.Transfers)) : [];
-        if (baseRevision is not null)
-        {
-            string[] Show(string path) => Git(model.Repository, "show", $"{baseRevision}:{Path.GetRelativePath(model.Repository, path).Replace('\\', '/')}");
-            // 转移清单是历史记录：只核对本次新增的条目（之后同一代码再次搬移不影响旧条目）
-            var baseTransfers = Ledgers.ReadTransfers(Show(paths.Transfers));
-            Ledgers.CheckTransfers(transfers.Where(t => !baseTransfers.Contains(t)).ToList(), census.MethodScopes, failures);
-            var baseline = new SortedDictionary<string, int>(Ledgers.ReadRatchetLines(Show(paths.Ratchet)), StringComparer.Ordinal);
-            var unconfirmed = new List<string>();
-            Ledgers.CheckRises(baseline, Ledgers.ReadRatchet(paths.Ratchet), Ledgers.ReadTransfers(Show(paths.Transfers)), transfers, failures, unconfirmed);
-            foreach (var rise in unconfirmed) Console.WriteLine($"! 须经用户确认（提交说明带确认标记，由提交级检查核对）：{rise}");
-        }
-        Ledgers.CheckPairs("族归属快照", Ledgers.ReadPairs(paths.Families), Ledgers.CurrentFamilies(model), failures);
-        Ledgers.CheckIdPrefixes(registry, census.MethodScopes, failures);
-        Ledgers.CheckPairs("注册表快照", RegistryPairs(File.ReadLines(paths.Registry)), RegistryPairs(Ledgers.RegistryLines(registry)), failures);
-        Ledgers.CheckPairs("洞编码清单", HoleCodeRows(paths.HoleCodes).ToDictionary(p => p.Key, p => p.Value.Counts), holeCodes, failures);
-
+        failures.AddRange(Layers(model));
+        failures.AddRange(Registrations(model));
+        failures.AddRange(SessionUses(model));
         foreach (var failure in failures) Console.WriteLine($"✗ {failure}");
-        Console.WriteLine($"architecture：越层引用 {layers.Count}；计数项 {counts.Count}；白名单 {whitelist.Count} 条，豁免 {exemptions.Count} 条；失败 {failures.Count} 项");
+        Console.WriteLine($"architecture：失败 {failures.Count} 项");
         return failures.Count == 0 ? 0 : 1;
     }
 
-    /// <summary>读取基准提交中的文件；文件在该提交中不存在时为空。</summary>
-    private static string[] Git(string repository, params string[] arguments)
+    /// <summary>注册方法（Step、Rule）的 Id 前缀须等于声明所在的族目录名（小写），例如 Recovery/Frames 中的 Id 以 frames. 开头。</summary>
+    private static IEnumerable<string> Registrations(SourceModel model)
     {
-        var start = new System.Diagnostics.ProcessStartInfo("git") { WorkingDirectory = repository, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        using var process = System.Diagnostics.Process.Start(start)!;
-        var output = process.StandardOutput.ReadToEnd();
-        process.WaitForExit();
-        return process.ExitCode == 0 ? output.Split('\n') : [];
+        var core = model["Core"];
+        foreach (var tree in core.Trees)
+        {
+            var file = model.Relative(tree);
+            var parts = file.Split('/');
+            var family = parts.Length > 4 && parts[2] == "Recovery" ? parts[3].ToLowerInvariant() : null;
+            var semantic = core.Compilation.GetSemanticModel(tree);
+            foreach (var declaration in tree.GetRoot().DescendantNodes().OfType<MethodDeclarationSyntax>())
+            {
+                if (semantic.GetDeclaredSymbol(declaration) is not { } method) continue;
+                foreach (var attribute in method.GetAttributes().Where(a => a.AttributeClass?.Name is "StepAttribute" or "RuleAttribute"))
+                {
+                    var id = attribute.ConstructorArguments.Select(a => a.Value).OfType<string>().First();
+                    var prefix = id[..Math.Max(0, id.IndexOf('.'))];
+                    if (prefix != family)
+                        yield return $"注册 Id {id} 的前缀与族目录不一致：{file}:{SourceModel.Line(declaration)}";
+                }
+            }
+        }
     }
 
-    /// <summary>棘轮的全部计数：语义计数、白名单与豁免清单按标签的条目数、登记的共享步骤体调用点数。</summary>
-    private static SortedDictionary<string, int> Counts(StructureCensus census, IEnumerable<Ledgers.Entry> whitelist, IEnumerable<Ledgers.Entry> exemptions,
-        IReadOnlyCollection<Access> registered)
+    /// <summary>方法会话类型只在 Recovery/Kernel 中出现；注册表与恢复入口（MethodRecovery）是内核的门面，同样允许。</summary>
+    private static IEnumerable<string> SessionUses(SourceModel model)
     {
-        var counts = new SortedDictionary<string, int>(census.Counts, StringComparer.Ordinal);
-        if (registered.Count > 0) counts["shared-step-body-call-sites/I3"] = registered.Count;
-        foreach (var group in whitelist.GroupBy(e => e.Tag)) counts[$"whitelist-entries/{group.Key}"] = group.Count();
-        foreach (var group in exemptions.GroupBy(e => e.Tag)) counts[$"exemption-entries/{group.Key}"] = group.Count();
-        return counts;
+        string[] allowed = ["src/Cpp2CS.Core/Recovery/Kernel/", "src/Cpp2CS.Core/Recovery/Rules/RuleRegistry.cs", "src/Cpp2CS.Core/Recovery/MethodRecovery.cs"];
+        var core = model["Core"];
+        foreach (var tree in core.Trees)
+        {
+            var file = model.Relative(tree);
+            if (allowed.Any(a => file.StartsWith(a, StringComparison.Ordinal))) continue;
+            var semantic = core.Compilation.GetSemanticModel(tree);
+            foreach (var name in tree.GetRoot().DescendantNodes().OfType<IdentifierNameSyntax>().Where(n => n.Identifier.Text == "MethodSession"))
+                if (semantic.GetSymbolInfo(name).Symbol is INamedTypeSymbol { Name: "MethodSession" })
+                    yield return $"规则代码引用了方法会话：{file}:{SourceModel.Line(name)}";
+        }
     }
-
-    private static Dictionary<string, string> RegistryPairs(IEnumerable<string> lines) => lines.Where(l => l.Length > 0 && !l.StartsWith('#'))
-        .Select(l => l.Split('\t')).ToDictionary(f => f[2], f => $"{f[0]}/{f[1]} Order={f[3]} After={f[4]} Invalidates={f[5]} {f[6]} {f[7]} Refresh={(f.Length > 8 ? f[8] : "")}");
-
-    private static void WriteSnapshots(SourceModel model, List<Ledgers.Registration> registry, SortedDictionary<string, string> holeCodes,
-        string families, string registryPath, string holeCodesPath)
-    {
-        Ledgers.WritePairs(families, "# 文件\t所属范围（族）。跨族目录移动文件会改变这里，提交说明须带用户确认标记（主文 3.3）。", Ledgers.CurrentFamilies(model));
-        File.WriteAllLines(registryPath, Ledgers.RegistryLines(registry));
-        var notes = File.Exists(holeCodesPath) ? HoleCodeRows(holeCodesPath).ToDictionary(p => p.Key, p => p.Value.Note) : [];
-        File.WriteAllLines(holeCodesPath, new[] { "# rule\t次数\t所在范围\t与所在方法名不一致的次数\t说明。编码为 recovery.<rule>；新增编码先进清单（主文 4.13）。" }
-            .Concat(holeCodes.Select(p => $"{p.Key}\t{p.Value}\t{notes.GetValueOrDefault(p.Key, "")}")));
-    }
-
-    /// <summary>洞编码清单的一行：前三列（次数、所在范围、与所在方法名不一致的次数）由代码决定，第四列是说明。</summary>
-    private static Dictionary<string, (string Counts, string Note)> HoleCodeRows(string path) => File.ReadLines(path).Where(l => l.Length > 0 && !l.StartsWith('#'))
-        .Select(l => l.Split('\t')).ToDictionary(f => f[0], f => (string.Join('\t', f[1..4]), f.ElementAtOrDefault(4) ?? ""));
-
     /// <summary>命名空间依赖矩阵（诊断用）：源命名空间前两级 → 目标命名空间前两级，按引用次数。</summary>
     private static int Dependencies(SourceModel model)
     {

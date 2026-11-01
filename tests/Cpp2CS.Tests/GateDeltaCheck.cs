@@ -38,8 +38,6 @@ internal static class GateDeltaCheck
             a.Equal(0, Delta(new() { Milliseconds = 9.75 }, (l, r) => GateDelta.Trace(l, r, [])), "trace-delta：忽略毫秒");
             a.Equal(1, Delta(new() { OutputTypes = 3 }, (l, r) => GateDelta.Trace(l, r, [])), "trace-delta：OutputTypes 序列变化");
             a.Equal(0, Delta(new() { StepName = "renamed" }, (l, r) => GateDelta.Trace(l, r, [])), "trace-delta：步骤序列变化只作诊断");
-            a.Equal(0, Delta(new() { UnifiedTrace = true }, (l, r) => GateDelta.Trace(l, r, [])), "trace-delta：单一 trace 与分开的 steps、passes 等价（子步骤折叠）");
-            a.Equal(1, Delta(new() { UnifiedTrace = true, OutputTypes = 3 }, (l, r) => GateDelta.Trace(l, r, [])), "trace-delta：单一 trace 中 OutputTypes 序列变化");
             var map = Path.Combine(root, "map.tsv");
             File.WriteAllLines(map, ["# 旧名\t新名", "rule\trenamed"]);
             a.Equal(1, Delta(new() { RuleName = "renamed" }, (l, r) => GateDelta.Trace(l, r, [])), "trace-delta：规则记录改名");
@@ -104,8 +102,6 @@ internal static class GateDeltaCheck
         public bool AddedMethod { get; init; }
         public string RunId { get; init; } = "run";
         public bool SourceChanged { get; init; }
-        /// <summary>analysis.jsonl 写成按完成先后排列的单一 trace（含一条子步骤与一条维护记录）。</summary>
-        public bool UnifiedTrace { get; init; }
     }
 
     private static string Write(string directory, Sample s)
@@ -124,9 +120,8 @@ internal static class GateDeltaCheck
             [$$"""{"address":"0x10","method":"{{Method}}","assembly":"Sample.dll","token":100663297,"cil":"{{s.Cil}}"}"""]);
         File.WriteAllLines(Path.Combine(directory, "call-resolution.jsonl"),
             [$$"""{"entry":"0x10","method":"{{Method}}","site":"0x14","NativeEntry":32,"TypeVersion":{{s.TypeVersion}},"Status":"bound","selected":"{{s.Selected}}","candidates":[]}"""]);
-        File.WriteAllLines(Path.Combine(directory, "analysis.jsonl"), s.UnifiedTrace
-            ? [$$"""{"entry":"0x10","method":"{{Method}}","trace":[{"Kind":"SubStep","Id":"p.a","Step":"p","InputVersion":0,"OutputVersion":0,"Changed":true,"InputStatements":3,"OutputStatements":2},{"Kind":"Pass","Id":"p","Step":"p","Changed":true,"InputStatements":3,"OutputStatements":2,"Rounds":1,"Convergence":"Converged","Milliseconds":{{s.Milliseconds}}},{"Kind":"Maintenance","Id":"types","Step":"{{s.StepName}}","Reason":"r","InputVersion":0,"OutputVersion":0},{"Kind":"Step","Id":"{{s.StepName}}","Step":"{{s.StepName}}","StepKind":"analysis","InputVersion":0,"OutputVersion":1,"InputTypes":0,"OutputTypes":{{s.OutputTypes}},"Milliseconds":{{s.Milliseconds}}}]}"""]
-            : [$$"""{"entry":"0x10","method":"{{Method}}","steps":[{"Rule":"{{s.StepName}}","InputVersion":0,"OutputVersion":1,"InputTypes":0,"OutputTypes":{{s.OutputTypes}},"Milliseconds":{{s.Milliseconds}},"Kind":"analysis","Invalidates":null}],"passes":[{"Name":"p","Changed":true,"InputStatements":3,"OutputStatements":2,"Rounds":1,"Convergence":"Converged","Milliseconds":{{s.Milliseconds}}}]}"""]);
+        File.WriteAllLines(Path.Combine(directory, "analysis.jsonl"),
+            [$$"""{"entry":"0x10","method":"{{Method}}","trace":[{"Kind":"Pass","Id":"p","Step":"p","Changed":true,"InputStatements":3,"OutputStatements":2,"Rounds":1,"Convergence":"Single","Milliseconds":{{s.Milliseconds}}},{"Kind":"Step","Id":"{{s.StepName}}","Step":"{{s.StepName}}","StepKind":"analysis","InputVersion":0,"OutputVersion":1,"InputTypes":0,"OutputTypes":{{s.OutputTypes}},"Milliseconds":{{s.Milliseconds}}}]}"""]);
         File.WriteAllLines(Path.Combine(directory, "rules.jsonl"),
             [$$"""{"entry":"0x10","method":"{{Method}}","Rule":"{{s.RuleName}}","Site":20,"status":"Applied","Code":null,"Detail":null,"Evidence":null}"""]);
         File.WriteAllText(Path.Combine(directory, "run.json"), $$"""{"runId":"{{s.RunId}}"}""");

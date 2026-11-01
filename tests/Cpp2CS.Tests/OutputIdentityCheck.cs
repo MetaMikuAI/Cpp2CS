@@ -16,7 +16,7 @@ internal static class OutputIdentityCheck
     internal static readonly (string Pattern, string Reason)[] Ignored =
     [
         ("run.json", "runId、耗时、输出路径与峰值内存每次不同；产物哈希由 artifact-consistency 检查，事实快照单独核对"),
-        ("analysis.jsonl", "含毫秒字段，步骤在重构中按映射改名；由 trace-delta 比较"),
+        ("analysis.jsonl", "含毫秒字段；由 trace-delta 比较"),
         ("execution.tsv", "执行对照结果；判定由本工具另行逐方法比较"),
         ("execution-*.tsv", "执行对照的分片与定向结果"),
         ("accessor-verified*.tsv", "执行对照产生的访问器证据"),
