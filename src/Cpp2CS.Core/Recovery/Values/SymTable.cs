@@ -1,5 +1,6 @@
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
+using Cpp2CS.Recovery.Memory;
 using IrConst = Cpp2CS.Ir.Const;
 
 namespace Cpp2CS.Recovery.Values;
@@ -47,7 +48,7 @@ public sealed class SymTable
     public Sym Unknown(string reason, int width) => Intern(new UnknownSym(reason, width));
     public Sym Arg(int index, int width) => Intern(new ArgSym(index, width));
     public Sym Entity(Symbol symbol) => Intern(new EntitySym(symbol));
-    public Sym Frame(long offset) => Intern(new FrameSym(offset));
+    public Sym Local(LocalSpace space, long offset) => Intern(new LocalSym(space, offset));
 
     public ResultSym Result(Call site, int index, int width)
     {
@@ -224,8 +225,8 @@ public sealed class SymTable
                 return left;
             case BinOp.Sub when right is ConstSym c:
                 return Binary(BinOp.Add, left, Const(0 - c.Value, c.Width), width);
-            case BinOp.Add when right is ConstSym c && left is FrameSym frame:
-                return Frame(frame.Offset + c.Signed);
+            case BinOp.Add when right is ConstSym c && left is LocalSym local:
+                return Local(local.Space, local.Offset + c.Signed);
             case BinOp.Add when right is ConstSym c && left is OpSym { Op: { Kind: OperatorKind.Binary } inner, Args: [var x, ConstSym c0] } && inner.Binary == BinOp.Add:
                 return Binary(BinOp.Add, x, Const(c0.Value + c.Value, width), width);
             case BinOp.Mul when right is ConstSym { Value: 1 }:

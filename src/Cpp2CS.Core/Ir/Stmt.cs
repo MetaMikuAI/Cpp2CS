@@ -38,6 +38,13 @@ public sealed record Store(ulong Address, Expr Target, Expr Value) : Stmt(Addres
 
 public enum CallKind : byte { Direct, Indirect, Tail, TailIndirect }
 
+/// <summary>
+/// 调用经指针对局部内存单元的一次访问：宽 ValueWidth 位的值 Value（托管调用为机器签名中的序号，运行时操作为实参位置）的
+/// [ValueBit, ValueBit+Width) 位对应单元 Cell 的 [CellBit, CellBit+Width) 位。
+/// 读取的单元出现在 Arguments/Sources 中，写入的单元出现在 Results/Defines 中。
+/// </summary>
+public sealed record CellAccess(Storage Cell, int Value, int ValueWidth, int ValueBit, int CellBit, int Width, bool Write);
+
 /// <summary>运行时操作：L2 惯用法归一后，调用（或一段固定指令序列）所表达的托管语义。</summary>
 public enum OpKind : byte
 {
@@ -131,6 +138,8 @@ public sealed record Call(ulong Address, CallKind Kind, Expr Target) : Stmt(Addr
     public RuntimeOp? Op { get; init; }
     /// <summary>调用时的 SP；栈实参与被调用者的入口帧都相对它定位。提升时读取 SP，SSA 后为版本或帧地址。</summary>
     public Expr? StackPointer { get; init; }
+    /// <summary>对已提升局部内存单元的访问。</summary>
+    public CellAccess[] Memory { get; init; } = [];
     /// <summary>CallDelegate 的委托对象根；原生 x0 是 method_code，不能用作托管接收者。</summary>
     public Expr? DelegateReceiver { get; init; }
     /// <summary>条件抛出归一后 Address 是分支位置；这里保留真正的原生抛出调用点，供语句级 LSDA 查询。

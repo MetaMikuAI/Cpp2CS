@@ -4,13 +4,14 @@ using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Lifting;
 using Cpp2CS.Recovery.Calls;
+using Cpp2CS.Recovery.Memory;
 using Cpp2CS.Recovery.Values;
 
 namespace Cpp2CS.Recovery;
 
 /// <summary>一次方法分析的各层产物，供下降与检查使用。</summary>
 public sealed record MethodAnalysis(MethodRef Method, ulong Entry, MachineSignature Signature, MachineFunction Function,
-    IdiomResult Idioms, ValueModel Values)
+    IdiomResult Idioms, MemoryLayout Memory, ValueModel Values)
 {
     internal MethodEnvironment Environment { get; init; } = null!;
 }
@@ -91,7 +92,10 @@ public sealed class MethodDecompiler
         if (idioms.Errors.Count > 0)
             return RecoveryDiagnostics.Fail(entry, $"L2 {idioms.Errors[0]}", rule: "Prepare");
         var environment = new MethodEnvironment(method, signature, shapes);
+        if (!MemoryPromotion.Run(function, signature, environment.Shape, abi, lifter.Calls, lifter.Machine.Convention.StackPointer).TryGet(out var layout, out var memoryFailure))
+            return memoryFailure;
+        environment.Layout = layout;
         var values = ValueModel.Build(function, environment);
-        return new MethodAnalysis(method, entry, signature, function, idioms, values) { Environment = environment };
+        return new MethodAnalysis(method, entry, signature, function, idioms, layout, values) { Environment = environment };
     }
 }

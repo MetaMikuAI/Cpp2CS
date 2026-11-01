@@ -1,5 +1,6 @@
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
+using Cpp2CS.Recovery.Memory;
 
 namespace Cpp2CS.Recovery.Values;
 
@@ -64,13 +65,14 @@ public sealed class EntitySym(Symbol symbol) : Sym(64)
     public override string ToString() => Symbol.ToString();
 }
 
-/// <summary>相对入口 SP 的帧地址。</summary>
-public sealed class FrameSym(long offset) : Sym(64)
+/// <summary>方法私有内存中的地址：栈帧、结果缓冲区或实参副本内的字节偏移。</summary>
+public sealed class LocalSym(LocalSpace space, long offset) : Sym(64)
 {
+    public LocalSpace Space { get; } = space;
     public long Offset { get; } = offset;
-    public override bool Equals(object? obj) => obj is FrameSym o && o.Offset == Offset;
-    public override int GetHashCode() => HashCode.Combine(6, Offset);
-    public override string ToString() => Offset < 0 ? $"&frame-{-Offset:x}" : $"&frame+{Offset:x}";
+    public override bool Equals(object? obj) => obj is LocalSym o && o.Space == Space && o.Offset == Offset;
+    public override int GetHashCode() => HashCode.Combine(6, Space, Offset);
+    public override string ToString() => Offset < 0 ? $"&{Space}-{-Offset:x}" : $"&{Space}+{Offset:x}";
 }
 
 /// <summary>调用或运行时操作的结果。Index 0 是 IL 返回值整体；签名未知时按结果寄存器的序号区分。</summary>

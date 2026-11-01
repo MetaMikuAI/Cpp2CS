@@ -61,6 +61,7 @@ internal static class Inspect
         var values = analysis.Values;
         Console.WriteLine($"  签名: {string.Join(", ", analysis.Signature.Arguments.Select(a => $"{a.Index}:{a.Type} {a.Transfer} [{string.Join(" ", a.Pieces.Select(p => $"{p.Register}+{p.Offset}"))}]"))}"
             + (analysis.Signature.Return is { } r ? $" → {r.Type} {r.Transfer}" : ""));
+        foreach (var cell in analysis.Memory.Cells) Console.WriteLine($"  {cell}");
         Console.WriteLine($"  符号值求值 {values.Passes} 轮");
         foreach (var block in analysis.Function.Blocks)
         {

@@ -1,6 +1,7 @@
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
+using Cpp2CS.Recovery.Memory;
 
 namespace Cpp2CS.Recovery.Values;
 
@@ -209,7 +210,7 @@ public sealed class ValueModel
                     return Syms.Concat(parts);
                 }
             case FrameAddress f:
-                return Syms.Frame(f.Offset);
+                return Syms.Local(LocalSpace.Frame, f.Offset);
             case Entry e:
                 return environment.Entry(Syms, e.Storage) is { } entry ? Syms.Widen(entry, e.Width) : Syms.Unknown($"入口 {e.Storage}", e.Width);
             case Symbol s:
