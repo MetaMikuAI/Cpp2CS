@@ -63,10 +63,12 @@ internal static class ExceptionsRules
             var entries = region.Handler.SelectMany(f => f.Statements).OfType<Call>().Where(c => c.Op?.Kind == OpKind.BeginCatch).ToArray();
             if (entries is not [var begin])
             {
+                // 布局失败：状态必须同时置为不支持，否则以 Succeeded 作门控的后续步骤会把它当作已排好的 EH 方法
                 ctx.State.Exceptions.exceptionLayout = ctx.State.Exceptions.exceptionLayout with
                 {
                     Reason = "catch 入口未证明",
-                    Detail = $"BeginCatch 数量 {entries.Length}"
+                    Detail = $"BeginCatch 数量 {entries.Length}",
+                    Status = ExceptionLayoutStatus.Unsupported,
                 };
                 return false;
             }
