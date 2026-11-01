@@ -67,11 +67,13 @@ internal sealed class BodyBuilder
         foreach (var region in regions.Where(r => r.BeginCatch is not null))
             exceptions[region.BeginCatch!] = NewLocal(types.Corlib("System.Exception"));
         var lowered = new List<(Block Block, List<ManagedStatement> Statements, Terminator? Exit)>();
+        var holeRanges = new Dictionary<Block, (int From, int To)>();
         foreach (var block in order)
         {
             var output = new List<ManagedStatement>();
             Terminator? exit = null;
             currentBlock = block;
+            var holesBefore = holes.Count;
             for (var i = 0; i < block.Statements.Count && exit is null; i++)
             {
                 current = block.Statements[i];
@@ -81,7 +83,13 @@ internal sealed class BodyBuilder
             if (exit is null && output.LastOrDefault() is not (ManagedThrow or ManagedRethrow or ManagedReturn or ManagedEndFault or ManagedCall { Tail: true } or ManagedHole { Terminal: true }))
                 exit = normal.Length == 1 ? new Jump(block.End, normal[0].Start) : Fail(block.End, "控制 块没有终结语句", terminal: true);
             lowered.Add((block, output, exit));
+            holeRanges[block] = (holesBefore, holes.Count);
         }
+        // 托管终结语句（不返回的抛出等）之后的机器块在 IL 中不可达：删去它们及其中的洞。
+        var reachable = Reachable(lowered.Select(l => (l.Block, l.Exit)).ToArray());
+        foreach (var (block, (from, to)) in holeRanges.OrderByDescending(p => p.Value.From))
+            if (!reachable.Contains(block)) holes.RemoveRange(from, to - from);
+        lowered.RemoveAll(l => !reachable.Contains(l.Block));
         // φ 的闭包：入边赋值的来源可能用到新的 φ。
         var done = new HashSet<PhiSym>();
         var copies = new Dictionary<(Block From, Block To, int Index), List<ManagedCopy>>();
@@ -127,12 +135,40 @@ internal sealed class BodyBuilder
         }
         foreach (var (result, _) in constructions.Where(p => !locals.ContainsKey(p.Key)))
             holes.Add(new RecoveryHole(result.Site.Address, "构造 分配后没有构造函数调用"));
-        var managedRegions = regions.Select(r => new ManagedRegion(r.Try.Select(b => b.Start).ToArray(), r.Pad.Start, r.Handler.Select(b => b.Start).ToArray(),
+        var managedRegions = regions.Where(r => reachable.Contains(r.Pad) && r.Try.Any(reachable.Contains)).Select(r => new ManagedRegion(
+            r.Try.Where(reachable.Contains).Select(b => b.Start).ToArray(), r.Pad.Start, r.Handler.Where(reachable.Contains).Select(b => b.Start).ToArray(),
             r.BeginCatch is { } begin ? exceptions[begin] : null, r.IsCatch ? ManagedRegionKind.Catch : ManagedRegionKind.Fault)).ToArray();
         var body = new ManagedBody(analysis.Method, blocks) { Regions = managedRegions };
         return holes.Count == 0
             ? new(analysis.Method, analysis.Entry, body, [])
             : new(analysis.Method, analysis.Entry, null, holes.DistinctBy(h => (h.Address, h.Reason)).ToArray()) { Partial = body };
+    }
+
+    /// <summary>沿托管终结语句的出边与区域的处理入口可达的块。</summary>
+    private HashSet<Block> Reachable(IReadOnlyList<(Block Block, Terminator? Exit)> lowered)
+    {
+        var byStart = lowered.GroupBy(l => l.Block.Start).ToDictionary(g => g.Key, g => g.First());
+        var reached = new HashSet<Block>();
+        var work = new Stack<Block>();
+        void Visit(ulong address)
+        {
+            if (byStart.TryGetValue(address, out var entry) && reached.Add(entry.Block)) work.Push(entry.Block);
+        }
+        Visit(lowered[0].Block.Start);
+        while (work.Count > 0)
+        {
+            var block = work.Pop();
+            var exit = byStart[block.Start].Exit;
+            foreach (var target in exit switch
+            {
+                Jump j => [j.Target],
+                Branch b => [b.Target, b.Fallthrough],
+                Switch w => w.Targets,
+                _ => Array.Empty<ulong>(),
+            }) Visit(target);
+            foreach (var region in regions.Where(r => r.Try.Contains(block))) Visit(region.Pad.Start);
+        }
+        return reached;
     }
 
     // ---- 终结语句 ----
