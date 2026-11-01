@@ -128,6 +128,8 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
             case OutSym output when output.Site.Op is null && Callee(output.Site) is { } callee:
                 return output.Argument == MachineSignature.ReturnIndex ? Concrete(callee, callee.Method.ReturnType)
                     : (output.Argument < 0 ? null : Concrete(callee, callee.Method.Parameters[output.Argument].Type)) is ByRefRef byRef ? byRef.Element : null;
+            case ReadSym read when Decompose(read.Address) is (ResultSym { Site.Op.Kind: OpKind.BeginCatch }, 0, null, _):
+                return types.Corlib("System.Exception");
             case ReadSym read:
                 return Locate(read.Address, read.Width)?.Type;
             case PhiSym phi:
@@ -222,10 +224,12 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
         long offset = 0;
         Sym? root = null, index = null;
         var scale = 0;
+        var variable = terms.Where(t => t is not ConstSym).ToArray();
         foreach (var term in terms)
         {
             if (term is ConstSym c) { offset += c.Signed; continue; }
             if (Scaled(term) is var (scaled, factor) && factor > 1 && index is null) { (index, scale) = (scaled, factor); continue; }
+            if (variable.Length == 1) { root = term; continue; }
             if (root is null && IsAddressRoot(term)) { root = term; continue; }
             if (index is null) { (index, scale) = (term, 1); continue; }
             root ??= term;

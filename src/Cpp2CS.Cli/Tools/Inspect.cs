@@ -71,7 +71,8 @@ internal static class Inspect
         Console.WriteLine($"  符号值求值 {values.Passes} 轮");
         foreach (var block in analysis.Function.Blocks)
         {
-            Console.WriteLine($"  B{block.Index}@0x{block.Start:x} <- [{string.Join(", ", block.Predecessors.Select(p => "B" + p.Index))}]");
+            Console.WriteLine($"  B{block.Index}@0x{block.Start:x} <- [{string.Join(", ", block.Predecessors.Select(p => "B" + p.Index))}]"
+                + (block.IsLandingPad ? " 落地块" : "") + (block.Handler is { } handler ? $" 异常→B{handler.Index}" : ""));
             foreach (var statement in block.Statements)
             {
                 Console.WriteLine($"    {statement.Address:x}: {statement}");

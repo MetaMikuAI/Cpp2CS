@@ -4,6 +4,7 @@ using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Lifting;
 using Cpp2CS.Recovery.Calls;
+using Cpp2CS.Recovery.Control;
 using Cpp2CS.Recovery.Lowering;
 using Cpp2CS.Recovery.Memory;
 using Cpp2CS.Recovery.Shape;
@@ -41,7 +42,7 @@ public sealed class MethodDecompiler
         lifter = new FunctionLifter(facts);
         rewriter = new IdiomRewriter(facts) { RecordFilter = _ => false, RecoverUnusedInputs = true };
         abi = new ManagedAbi(facts.Layouts);
-        shapes = new CallShapes(facts, abi);
+        shapes = new CallShapes(facts, abi, rewriter.UnusedInput);
     }
 
     public ManagedTypes Types => types;
@@ -103,6 +104,7 @@ public sealed class MethodDecompiler
         var idioms = rewriter.Run(function);
         if (idioms.Errors.Count > 0)
             return RecoveryDiagnostics.Fail(entry, $"L2 {idioms.Errors[0]}", rule: "Prepare");
+        ExceptionNormalization.Run(function);
         var environment = new MethodEnvironment(method, signature, shapes);
         var splits = PathSplitting.Run(function, f => ValueModel.Build(f, environment), lifter.Calls, lifter.Machine.Convention.StackPointer);
         // 分派在内存提升之前解析，使经指针的调用效果有签名可依。

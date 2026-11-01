@@ -6,6 +6,8 @@ namespace Cpp2CS.Recovery.Calls;
 /// <summary>调用点的形状：可能的托管目标及其机器签名。运行时操作没有托管签名。</summary>
 public sealed record CallShape(Call Call, IReadOnlyList<MethodRef> Candidates, MachineSignature? Signature)
 {
+    /// <summary>被调方机器码不读取的输入寄存器：原生代码对这些位置的 IL 实参没有约束。</summary>
+    public IReadOnlySet<Storage> Unused { get; init; } = new HashSet<Storage>();
     /// <summary>经运行时分派的托管调用：按托管签名传参，以 callvirt 调用。</summary>
     public bool IsDispatch => Call.Op?.Kind is OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual;
     public bool IsRuntime => Call.Op is not null && !IsDispatch;
@@ -15,7 +17,7 @@ public sealed record CallShape(Call Call, IReadOnlyList<MethodRef> Candidates, M
 /// 按事实解析调用目标。直接调用的地址可能被多个方法共用（相同代码折叠），候选全部保留，由类型约束选择；
 /// 候选的机器签名不一致时签名为 null。
 /// </summary>
-public sealed class CallShapes(ProgramFacts facts, ManagedAbi abi)
+public sealed class CallShapes(ProgramFacts facts, ManagedAbi abi, Func<ulong, Storage, bool> unused)
 {
     private readonly Dictionary<ulong, (MethodRef[] Candidates, MachineSignature? Signature)> direct = [];
 
@@ -28,7 +30,9 @@ public sealed class CallShapes(ProgramFacts facts, ManagedAbi abi)
         if (call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target })
         {
             var (candidates, signature) = Direct(target.Value);
-            return new(call, candidates, signature);
+            var ignored = signature?.Arguments.SelectMany(a => a.Pieces).Select(p => p.Register)
+                .Where(r => r.Bank is Bank.Gpr or Bank.Vec && unused(target.Value, r)).ToHashSet() ?? [];
+            return new(call, candidates, signature) { Unused = ignored };
         }
         return new(call, [], null);
     }

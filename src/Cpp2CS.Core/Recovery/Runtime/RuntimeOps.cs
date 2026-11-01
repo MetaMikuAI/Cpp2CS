@@ -34,6 +34,10 @@ public interface IRuntimeLowering
     void AwaitConstruction();
     /// <summary>判空被随后对同一对象的访问吸收。</summary>
     bool Absorb(Sym target);
+    /// <summary>当前语句位于捕获了 exception 的 catch 处理块中。</summary>
+    bool InCatchOf(Sym exception);
+    /// <summary>当前语句位于 fault 处理块中。</summary>
+    bool InFault { get; }
     MethodRef? ExceptionConstructor(string fullName);
     ManagedValue Hole(string reason, TypeRef? type);
 }
@@ -192,11 +196,25 @@ public static class RuntimeOps
                 return true;
             },
         };
+        // C++ 异常机制：取得与结束捕获不是 IL 操作；托管异常由区域的异常局部表示。
+        foreach (var kind in new[] { OpKind.BeginCatch, OpKind.EndCatch })
+            yield return new(kind) { Lower = None };
+        // 继续展开：在 fault 处理块中即 endfault。
+        yield return new(OpKind.ResumeUnwind)
+        {
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = c.InFault ? new ManagedEndFault(c.Call.Address) : null;
+                return terminal is not null;
+            },
+        };
+        // 重新抛出：在捕获了同一异常的 catch 中为 rethrow，否则抛出该异常对象（IL 的 rethrow 只能出现在 catch 中）。
         yield return new(OpKind.Rethrow)
         {
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
-                terminal = new ManagedRethrow(c.Call.Address);
+                terminal = c.Arguments.Count == 0 || c.InCatchOf(c.Arguments[0]) ? new ManagedRethrow(c.Call.Address)
+                    : new ManagedThrow(c.Call.Address, c.View(c.Arguments[0], c.Types.Object));
                 return true;
             },
         };

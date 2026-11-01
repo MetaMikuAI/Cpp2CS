@@ -1,6 +1,7 @@
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
+using Cpp2CS.Recovery.Control;
 using Cpp2CS.Recovery.Memory;
 using Cpp2CS.Recovery.Runtime;
 using Cpp2CS.Recovery.Typing;
@@ -26,6 +27,10 @@ internal sealed class BodyBuilder
     private readonly List<RecoveryHole> holes = [];
     private readonly Dictionary<ResultSym, Call> constructions = [];
     private readonly HashSet<Sym> absorbedChecks = [];
+    private readonly Dictionary<Call, LocalValue> exceptions = new(ReferenceEqualityComparer.Instance);
+    private IReadOnlyList<ExceptionRegionPlan> regions = [];
+    private IReadOnlyList<Block> order = [];
+    private Block? currentBlock;
     private int nextLocal;
 
     private BodyBuilder(MethodAnalysis analysis, TypeOracle oracle)
@@ -41,8 +46,10 @@ internal sealed class BodyBuilder
     private MethodRecoveryResult Run()
     {
         var function = analysis.Function;
-        if (function.Blocks.Any(b => b.IsLandingPad))
-            return new(analysis.Method, analysis.Entry, null, [new(analysis.Entry, "异常 区域尚未接入")]);
+        if (!ExceptionRegions.Build(function).TryGet(out var plan, out var failure))
+            return new(analysis.Method, analysis.Entry, null, [new(failure.Address, failure.Reason)]);
+        regions = plan.Regions;
+        order = plan.Order;
         // 读取只在被所在语句之外的 IL 值用到时落成局部：先空跑一遍记录用途，再正式下降。
         demand = [];
         LowerBlocks();
@@ -50,25 +57,29 @@ internal sealed class BodyBuilder
         demand = null;
         foreach (var (read, set) in users)
             if (set.Any(user => !ReferenceEquals(user, read.Site))) materialized.Add(read);
-        locals.Clear(); phis.Clear(); holes.Clear(); constructions.Clear(); absorbedChecks.Clear(); nextLocal = 0;
+        locals.Clear(); phis.Clear(); holes.Clear(); constructions.Clear(); absorbedChecks.Clear(); exceptions.Clear(); nextLocal = 0;
         return LowerBlocks();
     }
 
     private MethodRecoveryResult LowerBlocks()
     {
         var function = analysis.Function;
+        foreach (var region in regions.Where(r => r.BeginCatch is not null))
+            exceptions[region.BeginCatch!] = NewLocal(types.Corlib("System.Exception"));
         var lowered = new List<(Block Block, List<ManagedStatement> Statements, Terminator? Exit)>();
-        foreach (var block in function.Blocks)
+        foreach (var block in order)
         {
             var output = new List<ManagedStatement>();
             Terminator? exit = null;
+            currentBlock = block;
             for (var i = 0; i < block.Statements.Count && exit is null; i++)
             {
                 current = block.Statements[i];
                 exit = Lower(block, i, output);
             }
-            if (exit is null && output.LastOrDefault() is not (ManagedThrow or ManagedRethrow or ManagedReturn or ManagedCall { Tail: true } or ManagedHole { Terminal: true }))
-                exit = block.Successors.Count == 1 ? new Jump(block.End, block.Successors[0].Start) : Fail(block.End, "控制 块没有终结语句", terminal: true);
+            var normal = block.NormalSuccessors.ToArray();
+            if (exit is null && output.LastOrDefault() is not (ManagedThrow or ManagedRethrow or ManagedReturn or ManagedEndFault or ManagedCall { Tail: true } or ManagedHole { Terminal: true }))
+                exit = normal.Length == 1 ? new Jump(block.End, normal[0].Start) : Fail(block.End, "控制 块没有终结语句", terminal: true);
             lowered.Add((block, output, exit));
         }
         // φ 的闭包：入边赋值的来源可能用到新的 φ。
@@ -98,6 +109,13 @@ internal sealed class BodyBuilder
         var blocks = new List<ManagedBlock>();
         foreach (var (block, statements, exit) in lowered)
         {
+            // 异常边的 φ 赋值放在可能抛出的调用之前：异常经调用离开时局部已持有入边的值。
+            if (block.Handler is { } pad && pad.Predecessors.IndexOf(block) is var padIndex and >= 0
+                && copies.TryGetValue((block, pad, padIndex), out var exceptional) && exceptional.Count > 0)
+            {
+                var at = statements.FindLastIndex(s => s is ManagedCall);
+                statements.InsertRange(at < 0 ? statements.Count : at, exceptional.Select(c => (ManagedStatement)new ManagedAssignment(block.End, c.Target, c.Value)));
+            }
             switch (exit)
             {
                 case Jump jump: statements.Add(new ManagedJump(jump.Address, Edge(block, jump.Target))); break;
@@ -109,7 +127,9 @@ internal sealed class BodyBuilder
         }
         foreach (var (result, _) in constructions.Where(p => !locals.ContainsKey(p.Key)))
             holes.Add(new RecoveryHole(result.Site.Address, "构造 分配后没有构造函数调用"));
-        var body = new ManagedBody(analysis.Method, blocks);
+        var managedRegions = regions.Select(r => new ManagedRegion(r.Try.Select(b => b.Start).ToArray(), r.Pad.Start, r.Handler.Select(b => b.Start).ToArray(),
+            r.BeginCatch is { } begin ? exceptions[begin] : null, r.IsCatch ? ManagedRegionKind.Catch : ManagedRegionKind.Fault)).ToArray();
+        var body = new ManagedBody(analysis.Method, blocks) { Regions = managedRegions };
         return holes.Count == 0
             ? new(analysis.Method, analysis.Entry, body, [])
             : new(analysis.Method, analysis.Entry, null, holes.DistinctBy(h => (h.Address, h.Reason)).ToArray()) { Partial = body };
@@ -201,8 +221,10 @@ internal sealed class BodyBuilder
             {
                 case ReadSym read:
                     if (found is not null) return null;
+                    // 表基址为常量：比例下标，或唯一的变量项（字节表的比例为 1）。
                     var (root, _, index, _) = oracle.Decompose(read.Address);
-                    if (index is null || root is not ConstSym && !ReferenceEquals(root, SymTable.Resolve(read.Address))) return null;
+                    index ??= root is ConstSym || ReferenceEquals(root, SymTable.Resolve(read.Address)) ? null : root;
+                    if (index is null) return null;
                     found = index;
                     break;
                 case SliceSym slice: stack.Push(slice.Base); break;
@@ -307,7 +329,7 @@ internal sealed class BodyBuilder
             }
             var argument = value.Index < 0 && call.Op?.Kind == OpKind.CallDelegate && call.DelegateReceiver is not null
                 ? View(operands[1 + call.Arguments.Length], type, call.Address)
-                : Argument(call, value, type, contents[i], arguments, output);
+                : Unconstrained(shape, value, type, contents[i]) ?? Argument(call, value, type, contents[i], arguments, output);
             if (value.Index < 0) receiver = argument;
             else managed.Add(argument);
         }
@@ -328,6 +350,20 @@ internal sealed class BodyBuilder
         if (tail) return new Statement(lowered);
         output.Add(lowered);
         return null;
+    }
+
+    /// <summary>
+    /// 被调方不读取的按值实参：原生代码不维护这些寄存器，内容与参数类型不兼容时，接收者取类型兼容的 this，其他取默认值。
+    /// 这是推断：被调方的行为与该实参无关，任何类型正确的值都等价。
+    /// </summary>
+    private ManagedValue? Unconstrained(Calls.CallShape shape, MachineValue value, TypeRef type, Sym content)
+    {
+        if (value.Transfer != Transfer.Value || value.Pieces.Length == 0 || !value.Pieces.All(p => shape.Unused.Contains(p.Register))) return null;
+        if (oracle.TypeOf(content) is { } actual && (actual.Equals(type) || types.IsAssignable(actual, type))) return null;
+        if (value.Index < 0 && oracle.Parameter(-1) is { } self && (self.Equals(type) || types.IsAssignable(self, type)))
+            return new ArgumentValue(-1, self, Width(self));
+        return ManagedTypes.IsReferenceType(type) || types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer
+            ? new ConstantValue(0, type, Width(type)) : null;
     }
 
     /// <summary>机器签名中一个值在调用处的内容：寄存器片与栈片按值中的位置拼接。</summary>
@@ -452,6 +488,11 @@ internal sealed class BodyBuilder
         public MethodRef? ExceptionConstructor(string fullName) => owner.Constructor(fullName);
         public ManagedValue Hole(string reason, TypeRef? type) => owner.Hole(call.Address, reason, type);
 
+        public bool InFault => owner.regions.Any(r => !r.IsCatch && r.Handler.Contains(block));
+
+        public bool InCatchOf(Sym exception) => owner.regions.Any(r => r.IsCatch && r.Handler.Contains(block)
+            && SymTable.Resolve(exception) is ReadSym read && owner.oracle.Decompose(read.Address) is (ResultSym { Site: var begin }, 0, null, _) && ReferenceEquals(begin, r.BeginCatch));
+
         public bool Absorb(Sym target)
         {
             if (!owner.Absorbed(block, index + 1, target)) return false;
@@ -526,6 +567,8 @@ internal sealed class BodyBuilder
 
     private ManagedValue? Read(ReadSym read, ulong address)
     {
+        if (oracle.Decompose(read.Address) is (ResultSym { Site: { Op.Kind: OpKind.BeginCatch } begin }, 0, null, _) && exceptions.TryGetValue(begin, out var exception))
+            return exception;
         if (oracle.Locate(read.Address, read.Width) is not { } location) return Hole(address, $"内存 读取位置 {read.Address}", null);
         return LocationValue(location, address);
     }
