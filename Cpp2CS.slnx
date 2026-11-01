@@ -6,4 +6,7 @@
     <Project Path="src/Cpp2CS.Pipeline/Cpp2CS.Pipeline.csproj" />
     <Project Path="src/Cpp2CS.Cli/Cpp2CS.Cli.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Cpp2CS.Tests/Cpp2CS.Tests.csproj" />
+  </Folder>
 </Solution>
