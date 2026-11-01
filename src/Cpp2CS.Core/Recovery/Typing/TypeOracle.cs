@@ -187,18 +187,7 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
             case ReadSym read:
                 return Locate(read.Address, read.Width)?.Type;
             case PhiSym phi:
-                {
-                    TypeRef? joined = null;
-                    foreach (var source in phi.Sources)
-                    {
-                        if (source is null || SymTable.Resolve(source) is var s && (ReferenceEquals(s, phi) || s is ConstSym or UndefSym)) continue;
-                        var t = TypeOf(source);
-                        if (t is null) continue;
-                        joined = joined is null ? t : Join(joined, t);
-                        if (joined is null) return null;
-                    }
-                    return joined;
-                }
+                return solution.TryGetValue(phi, out var solved) ? solved : Lower(phi);
             case OpSym op:
                 return OperatorType(op) ?? (op.Width is 8 or 16 or 32 or 64 && op.Op.Kind is OperatorKind.Select or OperatorKind.Binary or OperatorKind.Unary
                     ? types.Integer(op.Width, true) : null);
@@ -210,6 +199,73 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
         }
         return null;
     }
+
+    // ---- φ 的类型约束 ----
+
+    private Dictionary<PhiSym, HashSet<TypeRef>> uses = [];
+    private Dictionary<PhiSym, TypeRef?> solution = [];
+
+    /// <summary>φ 在使用处被要求的类型（下降空跑时记录）。</summary>
+    public void Use(PhiSym phi, TypeRef type)
+    {
+        if (!uses.TryGetValue(phi, out var set)) uses[phi] = set = [];
+        set.Add(type);
+    }
+
+    /// <summary>
+    /// 以记录的使用求解 φ 的类型：下界是来源定义类型的汇合；下界满足全部使用时取下界；
+    /// 否则取能容纳全部定义、又满足全部使用的最具体的使用类型；没有定义时取满足全部使用的最具体者；
+    /// 都不成立时保留下界，由使用处转换或报洞。求解后清除依赖类型的缓存，使用记录重新开始。
+    /// </summary>
+    public void Solve()
+    {
+        ClearCaches();
+        var next = new Dictionary<PhiSym, TypeRef?>();
+        foreach (var phi in uses.Keys.Concat(solution.Keys).Distinct().ToArray())
+            next[phi] = Resolve(Lower(phi), uses.GetValueOrDefault(phi) ?? [], phi.Width);
+        solution = next;
+        uses = [];
+        ClearCaches();
+    }
+
+    private void ClearCaches()
+    {
+        memo.Clear();
+        callees.Clear();
+        parts.Clear();
+        cellTypes = null;
+    }
+
+    /// <summary>φ 的下界：来源（除自身、常量与未定义外）定义类型的汇合；来源之间没有公共类型时为 null。</summary>
+    private TypeRef? Lower(PhiSym phi)
+    {
+        TypeRef? joined = null;
+        foreach (var source in phi.Sources)
+        {
+            if (source is null || SymTable.Resolve(source) is var s && (ReferenceEquals(s, phi) || s is ConstSym or UndefSym)) continue;
+            if (s is PhiSym && active.Contains(s)) continue;
+            var t = TypeOf(source);
+            if (t is null) continue;
+            joined = joined is null ? t : Join(joined, t);
+            if (joined is null) return null;
+        }
+        return joined;
+    }
+
+    private TypeRef? Resolve(TypeRef? lower, IReadOnlyCollection<TypeRef> used, int width)
+    {
+        if (used.Count == 0) return lower;
+        if (lower is not null && used.All(u => Fits(lower, u))) return lower;
+        var candidates = used.Where(u => (lower is null || Fits(lower, u)) && used.All(v => Fits(u, v))).ToArray();
+        return candidates.FirstOrDefault(c => candidates.All(d => Fits(c, d))) ?? lower;
+    }
+
+    /// <summary>a 的值可直接用作 b：相同、可赋值，或同宽的整数类（IL 栈上 bool、整数、枚举与 char 同为整数）。</summary>
+    private bool Fits(TypeRef a, TypeRef b) => a.Equals(b) || types.IsAssignable(a, b)
+        || types.Kind(a) is TypeKind.Int or TypeKind.Bool && types.Kind(b) is TypeKind.Int or TypeKind.Bool && types.Bits(a) == types.Bits(b);
+
+    /// <summary>定义与使用都不约束的值按 IL 栈语义解释为同宽整数，1 位为 bool。只在取值的类型时作缺省，不参与汇合。</summary>
+    public TypeRef? Unconstrained(int width) => width == 1 ? types.Boolean : width is 8 or 16 or 32 or 64 ? types.Integer(width, true) : null;
 
     private TypeRef? ResultType(Call call)
     {

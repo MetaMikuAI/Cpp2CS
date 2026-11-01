@@ -51,14 +51,25 @@ internal sealed class BodyBuilder
         regions = plan.Regions;
         order = plan.Order;
         // 读取只在被所在语句之外的 IL 值用到时落成局部：先空跑一遍记录用途，再正式下降。
+        // 两遍空跑：第一遍收集 φ 的使用约束并求解；第二遍在求得的类型下重新收集并求解，同时记录读取的用途。
         demand = [];
         LowerBlocks();
+        oracle.Solve();
+        Reset();
+        demand = [];
+        LowerBlocks();
+        oracle.Solve();
         var users = demand;
         demand = null;
         foreach (var (read, set) in users)
             if (set.Any(user => !ReferenceEquals(user, read.Site))) materialized.Add(read);
-        locals.Clear(); phis.Clear(); holes.Clear(); constructions.Clear(); absorbedChecks.Clear(); exceptions.Clear(); nextLocal = 0;
+        Reset();
         return LowerBlocks();
+    }
+
+    private void Reset()
+    {
+        locals.Clear(); phis.Clear(); holes.Clear(); constructions.Clear(); absorbedChecks.Clear(); exceptions.Clear(); nextLocal = 0;
     }
 
     private MethodRecoveryResult LowerBlocks()
@@ -780,8 +791,9 @@ internal sealed class BodyBuilder
                 return Hole(address, "构造 对象在构造函数调用前被使用", expected);
             case PhiSym phi:
                 {
-                    // 定义与使用都不给出类型的 φ（如只由常量合流的标志）按同宽整数解释，1 位为 bool。
-                    var type = oracle.TypeOf(phi) ?? expected ?? (phi.Width == 1 ? types.Boolean : phi.Width is 8 or 16 or 32 or 64 ? types.Integer(phi.Width, true) : null);
+                    // 空跑时记录使用处要求的类型，作为 φ 的类型约束。
+                    if (demand is not null && expected is not null) oracle.Use(phi, expected);
+                    var type = oracle.TypeOf(phi) ?? expected ?? oracle.Unconstrained(phi.Width);
                     if (type is null) return Hole(address, "类型 φ 没有类型", expected);
                     phis.Add(phi);
                     return Coerce(Local(phi, type), expected);
