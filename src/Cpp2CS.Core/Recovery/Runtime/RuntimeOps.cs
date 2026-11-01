@@ -150,7 +150,20 @@ public static class RuntimeOps
                 return true;
             },
         };
-        yield return new(OpKind.IsAssignableFrom) { ResultType = (_, t) => t.Types.Boolean };
+        // il2cpp_class_is_assignable_from(klass, oklass)：oklass 为对象的类指针时即对象是否为 klass 类型。
+        yield return new(OpKind.IsAssignableFrom)
+        {
+            ResultType = (_, t) => t.Types.Boolean,
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Arguments.Count != 2 || SymTable.Resolve(c.Arguments[0]) is not EntitySym { Symbol: { Kind: SymbolKind.Class, Value: TypeRef target } }
+                    || c.ClassOwner(c.Arguments[1]) is not { } owner) return false;
+                var test = new ComparisonValue(Cond.Ne, new IsInstValue(c.View(owner, c.Types.Object), target), new ConstantValue(0, c.Types.Object, 64), c.Types.Boolean);
+                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, c.Types.Boolean), test));
+                return true;
+            },
+        };
         // 内联的继承检查：实参是对象的类指针，结果为对象是否为 Operand 类型（或其子类、实现）。
         yield return new(OpKind.TypeCheck)
         {
@@ -165,6 +178,15 @@ public static class RuntimeOps
             },
         };
         yield return new(OpKind.Throw)
+        {
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = c.Arguments.Count >= 1 ? new ManagedThrow(c.Call.Address, c.View(c.Arguments[0], c.Types.Object)) : null;
+                return terminal is not null;
+            },
+        };
+        // 逐点证明的 allocate/wrapper/__cxa_throw：抛出唯一实参中的托管异常。
+        yield return new(OpKind.ThrowManaged)
         {
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {

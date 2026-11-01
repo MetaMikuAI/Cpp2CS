@@ -817,14 +817,14 @@ internal sealed class BodyBuilder
                     ? Coerce(Nest(source, path, type), expected) : Hole(address, $"值 结构体 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected);
             case TypeKind.Bool when slice.Low == 0:
                 return source;
-            case TypeKind.Int or TypeKind.Pointer when slice.Width is 8 or 16 or 32 or 64:
+            case TypeKind.Int or TypeKind.Pointer:
                 {
-                    var target = expected is not null && types.Kind(expected) is TypeKind.Int or TypeKind.Bool && Width(expected) == slice.Width ? expected : types.Integer(slice.Width, false);
-                    ManagedValue shifted = slice.Low == 0 ? source : new BinaryValue(BinOp.LShr, source, new ConstantValue((ulong)slice.Low, types.Int32, 32), baseType, Width(baseType));
-                    return new ConversionValue(ConvKind.Truncate, shifted, target, slice.Width);
+                    var target = expected is not null && types.Kind(expected) is TypeKind.Int or TypeKind.Bool && Width(expected) >= slice.Width ? expected
+                        : slice.Width is 8 or 16 or 32 or 64 ? types.Integer(slice.Width, false) : baseType;
+                    if (target.Equals(types.Boolean) || slice.Width == 1 && types.Kind(target) == TypeKind.Bool)
+                        return new ComparisonValue(Cond.Ne, IntegerBits(slice, baseType, address) ?? Hole(address, "值 位", baseType), new ConstantValue(0, baseType, Width(baseType)), types.Boolean);
+                    return IntegerBits(slice, target, address) ?? Hole(address, $"值 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected);
                 }
-            case TypeKind.Int when slice.Width == 1 && slice.Low == 0:
-                return new ComparisonValue(Cond.Ne, new BinaryValue(BinOp.And, source, new ConstantValue(1, baseType, Width(baseType)), baseType, Width(baseType)), new ConstantValue(0, baseType, Width(baseType)), types.Boolean);
         }
         return Hole(address, $"值 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected);
     }
@@ -853,23 +853,61 @@ internal sealed class BodyBuilder
                 {
                     var parts = concat.Parts;
                     var low = parts[0];
-                    var high = parts.Skip(1).ToArray();
-                    if (parts[0] is ConstSym { Value: 0 } && parts.Length == 2 && parts[1] is SliceSym { Low: 0 } shifted && shifted.Base.Width == concat.Width
-                        && oracle.TypeOf(shifted.Base) is { } shiftedType && types.Kind(shiftedType) is TypeKind.Int)
-                        return Coerce(new BinaryValue(BinOp.Shl, View(shifted.Base, shiftedType, address), new ConstantValue((ulong)parts[0].Width, types.Int32, 32), shiftedType, concat.Width), expected);
-                    if (high.All(p => p is ConstSym { Value: 0 } or UndefSym))
+                    // bool 的零扩展即自身（C++ bool 只用低位）。
+                    if (parts.Skip(1).All(p => p is ConstSym { Value: 0 } or UndefSym) && oracle.TypeOf(low) is { } lowType && types.Kind(lowType) == TypeKind.Bool)
+                        return View(low, expected, address);
+                    if (Width(expected) > 64 || Width(expected) < concat.Width && parts.Skip(1).Any(p => p is not (ConstSym { Value: 0 } or UndefSym))) break;
+                    // 位组合的一般形式：各段零扩展后左移到其位置再按位或。未定义的位不参与。
+                    ManagedValue? result = null;
+                    var at = 0;
+                    foreach (var part in parts)
                     {
-                        var lowType = oracle.TypeOf(low);
-                        if (lowType is not null && types.Kind(lowType) == TypeKind.Bool) return View(low, expected, address);
-                        var narrow = low.Width is 8 or 16 or 32 or 64 ? types.Integer(low.Width, false) : low.Width == 1 ? types.Boolean : null;
-                        if (narrow is null) return Hole(address, $"值 拼接的低段宽 {low.Width}", expected);
-                        var inner = View(low, lowType is not null && types.Kind(lowType) is TypeKind.Int ? lowType : narrow, address);
-                        return high.All(p => p is UndefSym) ? Coerce(inner, expected) : new ConversionValue(ConvKind.ZeroExtend, inner, expected, Width(expected));
+                        var bit = at;
+                        at += part.Width;
+                        if (part is ConstSym { Value: 0 } or UndefSym || bit >= Width(expected)) continue;
+                        if (IntegerBits(part, expected, address) is not { } bits) return Hole(address, $"值 拼接段 {part} 作为 {expected}", expected);
+                        if (bit > 0) bits = new BinaryValue(BinOp.Shl, bits, new ConstantValue((ulong)bit, types.Int32, 32), expected, Width(expected));
+                        result = result is null ? bits : new BinaryValue(BinOp.Or, result, bits, expected, Width(expected));
                     }
-                    break;
+                    return result ?? new ConstantValue(0, expected, Width(expected));
                 }
         }
         return Hole(address, $"值 拼接 {concat} 作为 {expected}", expected);
+    }
+
+    /// <summary>
+    /// 一段位作为整数类型 target 的值（零扩展）：常量；整数原子；整数原子的切片为右移与掩码。
+    /// 运算在来源的类型中进行，最后按宽度转换到 target。不能表达时为 null。
+    /// </summary>
+    private ManagedValue? IntegerBits(Sym part, TypeRef target, ulong address)
+    {
+        part = SymTable.Resolve(part);
+        var targetWidth = Width(target);
+        switch (part)
+        {
+            case ConstSym c:
+                return new ConstantValue(c.Value & Expr.Mask(targetWidth), target, targetWidth);
+            case SliceSym slice when oracle.TypeOf(slice.Base) is { } sourceType && types.Kind(sourceType) is TypeKind.Int or TypeKind.Pointer or TypeKind.Bool:
+                {
+                    var sourceWidth = Width(sourceType);
+                    var value = View(slice.Base, sourceType, address);
+                    if (slice.Low > 0) value = new BinaryValue(BinOp.LShr, value, new ConstantValue((ulong)slice.Low, types.Int32, 32), sourceType, sourceWidth);
+                    if (slice.Width < sourceWidth && slice.Low + slice.Width < sourceWidth)
+                        value = new BinaryValue(BinOp.And, value, new ConstantValue(Expr.Mask(slice.Width), sourceType, sourceWidth), sourceType, sourceWidth);
+                    return Resize(value, target);
+                }
+            case not (SliceSym or ConcatSym) when oracle.TypeOf(part) is { } atomType && types.Kind(atomType) is TypeKind.Int or TypeKind.Bool or TypeKind.Pointer:
+                return Resize(View(part, atomType, address), target);
+        }
+        return null;
+    }
+
+    /// <summary>整数值按宽度零扩展或截断到 target。</summary>
+    private ManagedValue Resize(ManagedValue value, TypeRef target)
+    {
+        var (from, to) = (Width(value.Type), Width(target));
+        if (from == to) return value.Type.Equals(target) ? value : Coerce(value, target);
+        return new ConversionValue(from < to ? ConvKind.ZeroExtend : ConvKind.Truncate, value, target, to);
     }
 
     /// <summary>值类型的标量叶子字段：路径、类型与相对值起点的字节偏移。</summary>
