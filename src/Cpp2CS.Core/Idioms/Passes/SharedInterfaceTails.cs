@@ -176,6 +176,9 @@ internal static class SharedInterfaceTails
                         for (var i = 0; i < variables.Length; i++) if (call.Defines[i] is { } old) map[old] = variables[i];
                         mapped = call with { Defines = variables };
                     }
+                    // 操作数未变时 MapOperands 返回原对象；每个副本都要新建语句，同一对象不能出现在两个块里
+                    else if (ReferenceEquals(mapped, statement))
+                        mapped = statement with { };
                     copy.Statements.Add(mapped);
                 }
             }
