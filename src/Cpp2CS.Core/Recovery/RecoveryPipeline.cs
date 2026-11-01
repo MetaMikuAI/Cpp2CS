@@ -10,28 +10,36 @@ internal static class RecoveryPipeline
         {
             if (ctx.Analyze() is { } analysisFailure)
                 ctx.Record(analysisFailure, ctx.entry);
-            else if (!ctx.Build().TryGet(out var built, out var buildFailure))
-                ctx.Record(buildFailure, ctx.entry);
             else
             {
-                var body = DeadCopiesRules.DropUnusedRegisterCopies(ctx.RewriteAwaiters(built));
-                bool Leftover(ManagedStatement s) => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)).Any(RecoveryDiagnostics.FragmentInside);
-                partial = body with
-                {
-                    Blocks = body.Blocks.Select(b => b with { Statements = b.Statements.Select(s => Leftover(s) ? new ManagedHole(s.Address, "结构体 片未拆回叶子", s is ManagedJump or ManagedBranch or ManagedSwitch or ManagedReturn or ManagedCall { Tail: true }) : s).ToArray() }).ToArray()
-                };
-                if (body.Blocks.SelectMany(b => b.Statements).FirstOrDefault(Leftover) is { } leftover)
-                    ctx.Record(RecoveryDiagnostics.Fail(leftover.Address, "结构体 片未拆回叶子", rule: "Run"), ctx.entry);
+                // 下降与证明期间关闭会话函数的写许可
+                ctx.Rewriter.Closed = "lowering";
+                if (!ctx.Build().TryGet(out var built, out var buildFailure))
+                    ctx.Record(buildFailure, ctx.entry);
                 else
-                    foreach (var proof in RuleRegistry.Proofs)
-                        proof(ctx, body);
-                if (ctx.ledger.Count == 0)
-                    return new(ctx.method, ctx.entry, ctx.owner.RestoreBaseConstructor(body), ctx.ledger.Holes)
+                {
+                    var body = DeadCopiesRules.DropUnusedRegisterCopies(ctx.RewriteAwaiters(built));
+                    bool Leftover(ManagedStatement s) => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)).Any(RecoveryDiagnostics.FragmentInside);
+                    partial = body with
                     {
-                        Trace = ctx.trace.ToArray(),
-                        Calls = ctx.State.Calls.callBindings.Resolutions.ToArray(),
+                        Blocks = body.Blocks.Select(b => b with { Statements = b.Statements.Select(s => Leftover(s) ? new ManagedHole(s.Address, "结构体 片未拆回叶子", s is ManagedJump or ManagedBranch or ManagedSwitch or ManagedReturn or ManagedCall { Tail: true }) : s).ToArray() }).ToArray()
                     };
-                ctx.ledger.Finish();
+                    if (body.Blocks.SelectMany(b => b.Statements).FirstOrDefault(Leftover) is { } leftover)
+                        ctx.Record(RecoveryDiagnostics.Fail(leftover.Address, "结构体 片未拆回叶子", rule: "Run"), ctx.entry);
+                    else
+                    {
+                        ctx.Rewriter.Closed = "proofs";
+                        foreach (var proof in RuleRegistry.Proofs)
+                            proof(ctx, body);
+                    }
+                    if (ctx.ledger.Count == 0)
+                        return new(ctx.method, ctx.entry, ctx.owner.RestoreBaseConstructor(body), ctx.ledger.Holes)
+                        {
+                            Trace = ctx.trace.ToArray(),
+                            Calls = ctx.State.Calls.callBindings.Resolutions.ToArray(),
+                        };
+                    ctx.ledger.Finish();
+                }
             }
         }
 

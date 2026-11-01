@@ -18,7 +18,7 @@ public sealed class Block
     public StatementList Statements
     {
         get => statements;
-        set { value.Rewriter = statements.Rewriter; statements = value; }
+        set { statements.Rewriter.Writing(); value.Rewriter = statements.Rewriter; statements = value; }
     }
     /// <summary>后继。以 Branch 结尾时 [0] 为跳转目标、[1] 为顺序后继；异常边（Handler）总在最后。</summary>
     public List<Block> Successors { get; } = [];

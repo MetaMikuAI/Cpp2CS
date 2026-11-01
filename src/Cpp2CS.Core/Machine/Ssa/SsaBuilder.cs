@@ -228,6 +228,8 @@ public sealed class SsaBuilder
             return new Use(new Variable(read.Storage, version), read.Width);
         });
 
+        // 各块的新语句序列在整个遍历结束、φ 的来源全部填好之后才发布，已发布的 φ 不再被原地修改
+        var outputs = new List<Stmt>?[blocks.Count];
         var walk = new Stack<(int Block, bool Exit)>();
         walk.Push((0, false));
         while (walk.Count > 0)
@@ -301,7 +303,7 @@ public sealed class SsaBuilder
                         break;
                 }
             }
-            block.Statements = output;
+            outputs[b] = output;
 
             foreach (var successor in block.Successors.Distinct())
             {
@@ -321,5 +323,9 @@ public sealed class SsaBuilder
             var children = dominators.Children[b];
             for (var c = children.Count - 1; c >= 0; c--) walk.Push((children[c], false));
         }
+
+        for (var b = 0; b < blocks.Count; b++)
+            if (outputs[b] is { } output)
+                blocks[b].Statements = output;
     }
 }

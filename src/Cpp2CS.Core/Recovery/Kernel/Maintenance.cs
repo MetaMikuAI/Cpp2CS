@@ -9,17 +9,34 @@ namespace Cpp2CS.Recovery;
 /// </summary>
 internal sealed class Maintenance(RecoveryScope ctx)
 {
+    /// <summary>非空时处于只读的分析步骤中（值为步骤 Id）：禁止重置块视图、刷新定义与 IR 编辑。</summary>
+    internal string? ReadOnly { get; set; }
+
+    private void Allowed(string action)
+    {
+        if (ReadOnly is not null)
+            throw new InvalidOperationException($"只读分析步骤 {ReadOnly} 不得执行维护动作 {action}");
+    }
+
     /// <summary>类型推断。</summary>
     public void Types(string reason) => Record("types", reason, ctx.InferTypes);
 
     /// <summary>重建定义索引：一次快照刷新，快照变化时定义版本递增（调用解析缓存以这个版本为键）。</summary>
-    public void Definitions(string reason) => Record("definitions", reason, () => ctx.definitions = ctx.IndexDefinitions());
+    public void Definitions(string reason)
+    {
+        Allowed("definitions");
+        Record("definitions", reason, () => ctx.definitions = ctx.IndexDefinitions());
+    }
 
     /// <summary>
     /// 重置块视图。传入 <c>function.Blocks</c> 时记下的是这个列表对象本身：之后原地增加的块立即可见，
     /// 列表被整体替换后视图仍指向旧列表，直到下一次重置；传入数组时是快照。
     /// </summary>
-    public void Blocks(IReadOnlyList<Block> blocks, string reason) => Record("blocks", reason, () => ctx.blocks = blocks);
+    public void Blocks(IReadOnlyList<Block> blocks, string reason)
+    {
+        Allowed("blocks");
+        Record("blocks", reason, () => ctx.blocks = blocks);
+    }
 
     /// <summary>
     /// 按 Id 重跑一个已注册的步骤：直接调用，不挂接改写器、不做只读快照、不刷新定义、不追加分析步骤记录。
@@ -70,6 +87,8 @@ internal sealed class Maintenance(RecoveryScope ctx)
 
     internal void Record(string action, string reason, Action run)
     {
+        if (action is "propagate" or "remove-dead" or "cleanup" or "simplify" or "remove-dead-definitions")
+            Allowed(action);
         var version = ctx.analyses.Version;
         run();
         ctx.trace.Add(new(TraceKind.Maintenance, action, ctx.currentStep) { Reason = reason, InputVersion = version, OutputVersion = ctx.analyses.Version });

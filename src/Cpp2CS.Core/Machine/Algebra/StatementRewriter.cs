@@ -15,6 +15,19 @@ internal sealed class StatementRewriter(IReadOnlyList<IStatementKeyed> tables, A
 {
     public int Version { get; private set; }
 
+    /// <summary>
+    /// 写许可：非空时，挂接到本改写器的语句序列禁止写入，值为关闭时所在的阶段或步骤。方法会话在分析步骤、下降与证明期间关闭；
+    /// 没有挂接的语句序列（会话之外的函数、尚未挂接的新块）不受影响。
+    /// </summary>
+    public string? Closed { get; set; }
+
+    /// <summary>写入之前的检查：写许可关闭时按内部错误抛出。</summary>
+    internal void Writing()
+    {
+        if (Closed is not null)
+            throw new InvalidOperationException($"写许可已关闭（{Closed}）：机器 IR 的语句在此期间不得写入");
+    }
+
     public void Preserve(Stmt previous, Stmt replacement)
     {
         foreach (var table in tables) table.Replace(previous, replacement);

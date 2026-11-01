@@ -13,6 +13,8 @@ internal static class RecoveryAnalysis
         foreach (var (source, target) in ctx.definitions.DataFlow)
             ctx.ledger.Dependency(source, target);
         ctx.ledger.PropagateExisting();
+        // 异常 φ 表在 Prepare 中建好，分析阶段只读（只读检查比对它）
+        var exceptionPhis = ctx.State.Exceptions.exceptionPhis;
         foreach (var step in RuleRegistry.Analyses)
         {
             ctx.currentStep = step.Id;
@@ -21,14 +23,18 @@ internal static class RecoveryAnalysis
             var inputTypes = ctx.State.Types.known.Count;
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             var mutable = step.Kind == StepKind.Rewrite;
-            var before = mutable ? null : new MethodSnapshot(0, ctx.blocks, new Dictionary<Variable, Phi>());
+            // 只读检查：全部块（不只块视图）与异常 φ；分析步骤期间关闭写许可，禁止重置块视图、刷新定义与 IR 编辑
+            var before = mutable ? null : new MethodSnapshot(0, ctx.function.Blocks, exceptionPhis);
             if (step.Refresh.HasFlag(StepRefresh.Types))
                 ctx.Maintain.Types($"{step.Id}.entry");
+            if (!mutable)
+                (ctx.Rewriter.Closed, ctx.Maintain.ReadOnly) = (step.Id, step.Id);
             var failure = step.Run(ctx);
+            (ctx.Rewriter.Closed, ctx.Maintain.ReadOnly) = (null, null);
             ctx.Rewriter.Attach(ctx.function);
-            if (before is not null && !before.Matches(ctx.blocks, new Dictionary<Variable, Phi>()))
+            if (before is not null && !before.Matches(ctx.function.Blocks, exceptionPhis))
                 throw new InvalidOperationException($"只读分析改写了机器 IR：{step.Id}");
-            if (ctx.analyses.Refresh(ctx.blocks, ctx.State.Exceptions.exceptionPhis))
+            if (ctx.analyses.Refresh(ctx.blocks, exceptionPhis))
                 ctx.definitions = ctx.analyses.Get(Definitions.Analysis);
             ctx.trace.Add(new(TraceKind.Step, step.Id, step.Id)
             {
