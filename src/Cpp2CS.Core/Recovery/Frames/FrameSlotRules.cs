@@ -13,7 +13,7 @@ internal static class FrameSlotRules
         var references = new Dictionary<long, List<Stmt>>();
         foreach (var block in ctx.blocks)
             foreach (var statement in block.Statements)
-                if (!ctx.State.Lowering.dropped.Contains(statement) && (statement is not Call enumCall || !ctx.State.Frames.stackEnums.ContainsKey(enumCall)) && (statement is not Store savedArgument || !ctx.State.Frames.stackArgumentStores.ContainsKey(savedArgument) && !ctx.State.Construction.boxArgumentStores.ContainsKey(savedArgument)))
+                if (!ctx.State.Lowering.dropped.Contains(statement) && (statement is not Call enumCall || !ctx.State.Frames.stackEnums.ContainsKey(enumCall)) && (statement is not Store savedArgument || !ctx.State.Frames.stackArgumentStores.ContainsKey(savedArgument) && !ctx.State.Frames.boxArgumentStores.ContainsKey(savedArgument)))
                     foreach (var e in ExprMap.Operands(statement).SelectMany(ExprMap.Walk))
                         if (e is FrameAddress frame)
                         {
@@ -41,7 +41,7 @@ internal static class FrameSlotRules
             if (distinct is [Store { Target: FrameAddress } store, Call { Op.Kind: OpKind.Box } box] && box.Arguments is [_, FrameAddress] && ctx.SameBlockBefore(store, box))
             {
                 ctx.State.Lowering.dropped.Add(store);
-                ctx.State.Construction.boxed[box] = store.Value;
+                ctx.State.Frames.boxed[box] = store.Value;
                 continue;
             }
 

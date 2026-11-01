@@ -54,7 +54,7 @@ internal static class CheckRules
                 case Call call when ConstructionRules.Receiver(call) == value:
                     if (call.Op is null or { Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual })
                     {
-                        ctx.State.Runtime.virtualCalls.Add(call);
+                        ctx.State.Control.virtualCalls.Add(call);
                         return true;
                     }
 

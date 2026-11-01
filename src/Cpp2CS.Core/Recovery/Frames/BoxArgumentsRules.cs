@@ -29,7 +29,7 @@ internal static class BoxArgumentsRules
                 }
                 else
                     continue;
-                if (sources.Any(s => s is null || ctx.State.Construction.boxArgumentStores.ContainsKey(s)))
+                if (sources.Any(s => s is null || ctx.State.Frames.boxArgumentStores.ContainsKey(s)))
                     continue;
                 // 栈槽只能由这些写入和地址定义访问；普通加载或其他调用继续交给帧区域恢复。
                 var offsets = sources.Select(s => ctx.FrameOffset(s!.Target)!.Value).ToHashSet();
@@ -39,8 +39,8 @@ internal static class BoxArgumentsRules
                     continue;
                 var local = ctx.StructLocal(type, width);
                 foreach (var store in sources)
-                    ctx.State.Construction.boxArgumentStores[store!] = local;
-                ctx.State.Construction.mergedBoxValues[result] = local;
+                    ctx.State.Frames.boxArgumentStores[store!] = local;
+                ctx.State.Frames.mergedBoxValues[result] = local;
                 var replacement = call with
                 {
                     Arguments = [call.Arguments[0], Expr.C(0, 64)]
@@ -59,7 +59,7 @@ internal static class BoxArgumentsRules
     [Rule(RuleKind.Store, "frames.store-box-argument", Order = 20)]
     internal static RecoveryResult<bool> StoreBoxArgument(this LoweringScope ctx, Store store, List<ManagedStatement> output)
     {
-        if (!ctx.State.Construction.boxArgumentStores.TryGetValue(store, out var local))
+        if (!ctx.State.Frames.boxArgumentStores.TryGetValue(store, out var local))
             return false;
         if (!ctx.Values.RecoverAs(store.Value, local.Type, store.Address).TryGet(out var value, out var failure))
             return failure;
@@ -70,7 +70,7 @@ internal static class BoxArgumentsRules
     [Rule(RuleKind.Call, "frames.box-merged-argument", Order = 90)]
     internal static RecoveryResult<bool> BoxMergedArgument(this LoweringScope ctx, Call call, List<ManagedStatement> output)
     {
-        if (call.Defines.FirstOrDefault() is not { } result || !ctx.State.Construction.mergedBoxValues.TryGetValue(result, out var local))
+        if (call.Defines.FirstOrDefault() is not { } result || !ctx.State.Frames.mergedBoxValues.TryGetValue(result, out var local))
             return false;
         if (ctx.Values.Assign(call.Address, result, () => new BoxValue(local, local.Type, ctx.types.Object), output) is { } failure)
             return failure;

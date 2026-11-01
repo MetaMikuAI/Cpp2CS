@@ -11,7 +11,11 @@ internal sealed class FramesState : IStatementKeyed
     internal readonly HashSet<long> conflictingFrames = [];
     internal readonly Dictionary<FrameRegion, HashSet<Stmt>> frameLives = [];
     internal readonly Dictionary<Stmt, ManagedStatement[]> frameInitializers = new(ReferenceEqualityComparer.Instance);
-    internal readonly Dictionary<ulong, LocalValue> sharedBuffers = [];
+    // ---------- 装箱子域 ----------
+    internal readonly Dictionary<Variable, LocalValue> mergedBoxValues = [];
+    internal readonly Dictionary<Store, LocalValue> boxArgumentStores = new(ValueKeyProbe<Store>.Instance);
+    /// <summary>装箱调用 → 写入被装箱栈槽的值。</summary>
+    internal readonly Dictionary<Call, Expr> boxed = new(ReferenceEqualityComparer.Instance);
     internal readonly Dictionary<Store, LocalValue> stackArgumentStores = new(ValueKeyProbe<Store>.Instance);
     internal readonly Dictionary<(ulong Site, int Parameter), ManagedValue> stackArgumentValues = [];
     internal readonly Dictionary<ulong, (long Offset, int Size)> callStackAreas = [];
@@ -20,6 +24,8 @@ internal sealed class FramesState : IStatementKeyed
 
     public void Replace(Stmt previous, Stmt? replacement)
     {
+        StatementKeys.Replace(boxArgumentStores, previous, replacement);
+        StatementKeys.Replace(boxed, previous, replacement);
         StatementKeys.Replace(frameCopies, previous, replacement);
         StatementKeys.Replace(frameInitializers, previous, replacement);
         StatementKeys.Replace(stackArgumentStores, previous, replacement);

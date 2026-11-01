@@ -77,7 +77,7 @@ internal static class DelegatesRules
             return;
         }
 
-        var lookup = ctx.State.Calls.virtualDelegates.GetValueOrDefault(constructor);
+        var lookup = ctx.State.Runtime.virtualDelegates.GetValueOrDefault(constructor);
         bool LookupStep(Stmt statement) => lookup is not null && (statement is Define d && lookup.Metadata.Contains(d.Target) || statement is Call { Op.Kind: OpKind.NullCheck, Arguments: [var receiver] } && receiver == lookup.Receiver);
         // IL2CPP 将 new Action(receiver.Virtual) 拆为分配、判空、虚表查询、构造。
         // 只吸收此委托自身的查询；其他副作用与异常保护域仍由配对检查约束。
@@ -113,7 +113,7 @@ internal static class DelegatesRules
             return RecoveryDiagnostics.Fail(address, "委托 具体分配类型没有标准构造与唯一 Invoke", rule: "CreateDelegate");
         if (!registers.TryGetValue(Storage.Gpr(1), out var target))
             return RecoveryDiagnostics.Fail(address, "委托 构造缺少绑定对象", rule: "CreateDelegate");
-        var lookup = ctx.State.Calls.virtualDelegates.GetValueOrDefault(call);
+        var lookup = ctx.State.Runtime.virtualDelegates.GetValueOrDefault(call);
         var identity = registers.GetValueOrDefault(Storage.Gpr(2));
         return ctx.Assign(address, ctx.State.Construction.constructed[call],
             () => ctx.DelegateChoice(type, invoke, target, identity, lookup, address), output);

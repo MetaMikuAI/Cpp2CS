@@ -287,7 +287,7 @@ internal static class ExceptionsRules
                         continue;
                     }
 
-                    if (statement is IndirectJump table && ctx.State.Calls.switchIndices.TryGetValue(table, out var index))
+                    if (statement is IndirectJump table && ctx.State.Control.switchIndices.TryGetValue(table, out var index))
                     {
                         var targets = successors.ToDictionary(f => f.Block.Start);
                         if (table.Targets.Any(t => !targets.ContainsKey(t)))

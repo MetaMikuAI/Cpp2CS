@@ -23,7 +23,7 @@ internal static class VirtualDelegatesRules
             // 运行时指针只服务于此查询；任意额外使用不能借此删除。
             if (metadata.Any(v => ctx.phis.Values.Any(p => p.Sources.Contains(v)) || users[v].Any(s => s is Define d ? !metadata.Contains(d.Target) : !ReferenceEquals(s, call))))
                 continue;
-            ctx.State.Calls.virtualDelegates[call] = new(receiver, (int)((offset.Value - start) / RuntimeLayout.VirtualInvokeDataSize), metadata);
+            ctx.State.Runtime.virtualDelegates[call] = new(receiver, (int)((offset.Value - start) / RuntimeLayout.VirtualInvokeDataSize), metadata);
             ctx.State.Runtime.runtime.UnionWith(metadata);
         }
     }

@@ -82,7 +82,7 @@ internal static class SwitchesRules
                 continue;
             foreach (var variable in computation)
                 ctx.State.Runtime.runtime.Add(variable);
-            ctx.State.Calls.switchIndices[jump] = index;
+            ctx.State.Control.switchIndices[jump] = index;
             ctx.State.Calls.callBindings.InvalidateTypes();
         }
     }
@@ -90,7 +90,7 @@ internal static class SwitchesRules
     [Rule(RuleKind.Statement, "control.lower-switch", Order = 300)]
     internal static RecoveryResult<bool> LowerSwitch(this LoweringScope ctx, Block block, Stmt statement, List<ManagedStatement> output)
     {
-        if (statement is not IndirectJump jump || !ctx.State.Calls.switchIndices.TryGetValue(jump, out var index))
+        if (statement is not IndirectJump jump || !ctx.State.Control.switchIndices.TryGetValue(jump, out var index))
             return false;
         var successors = block.NormalSuccessors.Select(b => b.Start).ToList();
         var cases = new List<ManagedEdge>();

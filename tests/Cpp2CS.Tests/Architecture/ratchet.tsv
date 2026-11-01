@@ -19,12 +19,12 @@ cfg-mutation/Recovery/Memory	5
 core-internal-type-references/Tests	449
 cross-family-write/Recovery/Calls	9
 cross-family-write/Recovery/Construction	3
-cross-family-write/Recovery/Control	5
+cross-family-write/Recovery/Control	3
 cross-family-write/Recovery/Exceptions	11
-cross-family-write/Recovery/Frames	23
-cross-family-write/Recovery/Generics	10
+cross-family-write/Recovery/Frames	20
+cross-family-write/Recovery/Generics	1
 cross-family-write/Recovery/Memory	4
-cross-family-write/Recovery/Runtime	4
+cross-family-write/Recovery/Runtime	3
 cross-family-write/Recovery/Structs	10
 cross-family-write/Recovery/Typing	1
 cross-family-write/Recovery/Values	5
@@ -107,8 +107,8 @@ state-access/Recovery/Control	7
 state-access/Recovery/Diagnostics	1
 state-access/Recovery/Exceptions	70
 state-access/Recovery/Frames	120
-state-access/Recovery/Generics	18
-state-access/Recovery/Kernel	7
+state-access/Recovery/Generics	10
+state-access/Recovery/Kernel	6
 state-access/Recovery/Lowering	56
 state-access/Recovery/Memory	22
 state-access/Recovery/Runtime	34
@@ -119,10 +119,10 @@ state-access/Recovery/Typing	12
 state-access/Recovery/Values	26
 state-write/Recovery/Calls	22
 state-write/Recovery/Construction	7
-state-write/Recovery/Control	5
+state-write/Recovery/Control	3
 state-write/Recovery/Exceptions	25
 state-write/Recovery/Frames	59
-state-write/Recovery/Generics	10
+state-write/Recovery/Generics	1
 state-write/Recovery/Lowering	3
 state-write/Recovery/Memory	9
 state-write/Recovery/Runtime	20
@@ -148,4 +148,4 @@ whitelist-entries/I10	48
 whitelist-entries/I2b	44
 whitelist-entries/I2c	13
 whitelist-entries/I3	1
-whitelist-entries/I4	54
+whitelist-entries/I4	45

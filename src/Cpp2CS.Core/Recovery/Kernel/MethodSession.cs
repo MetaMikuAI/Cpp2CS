@@ -16,6 +16,8 @@ internal sealed class MethodSession(MethodRecovery owner, MethodRef method, ulon
     internal readonly MethodRef method = method;
     internal readonly ulong entry = entry;
     internal readonly MethodState State = new();
+    /// <summary>L2 残余诊断的压制。</summary>
+    internal readonly ResidualSuppression Residuals = new();
     private AnalysisScope? analysisScope;
     private RewriteScope? rewriteScope;
     private BindingScope? bindingScope;

@@ -290,6 +290,7 @@ src/Cpp2CS.Core/Recovery/Kernel/Maintenance.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/MethodSession.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/PreparePlan.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/PrepareSteps.cs	Recovery/Kernel
+src/Cpp2CS.Core/Recovery/Kernel/ResidualSuppression.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/Scopes.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/StepGroup.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Lowering/ArgumentSite.cs	Recovery/Lowering
@@ -323,8 +324,10 @@ src/Cpp2CS.Core/Recovery/Signature/SignatureBinding.cs	Recovery/Signature
 src/Cpp2CS.Core/Recovery/State/ArraysState.cs	Recovery/State
 src/Cpp2CS.Core/Recovery/State/CallsState.cs	Recovery/State
 src/Cpp2CS.Core/Recovery/State/ConstructionState.cs	Recovery/State
+src/Cpp2CS.Core/Recovery/State/ControlState.cs	Recovery/State
 src/Cpp2CS.Core/Recovery/State/ExceptionsState.cs	Recovery/State
 src/Cpp2CS.Core/Recovery/State/FramesState.cs	Recovery/State
+src/Cpp2CS.Core/Recovery/State/GenericsState.cs	Recovery/State
 src/Cpp2CS.Core/Recovery/State/LoweringState.cs	Recovery/State
 src/Cpp2CS.Core/Recovery/State/MethodState.cs	Recovery/State
 src/Cpp2CS.Core/Recovery/State/RecoveryEvidence.cs	Recovery/State

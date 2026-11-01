@@ -13,14 +13,16 @@ internal sealed class RecoveryEvidence(MethodState state)
         public IReadOnlySet<Call> cleanupCalls => state.cleanupCalls;
         public IReadOnlySet<ulong> inlineCleanupSites => state.inlineCleanupSites;
         public IReadOnlyDictionary<Call, MethodRef> nativeImports => state.nativeImports;
+    }
+    public ControlView Control { get; } = new(state.Control);
+    internal sealed class ControlView(ControlState state)
+    {
         public IReadOnlyDictionary<IndirectJump, Expr> switchIndices => state.switchIndices;
     }
     public ConstructionView Construction { get; } = new(state.Construction);
     internal sealed class ConstructionView(ConstructionState state)
     {
         public IReadOnlyDictionary<Call, DefinitionRef> delegateCreations => state.delegateCreations;
-        public IReadOnlyDictionary<Store, LocalValue> boxArgumentStores => state.boxArgumentStores;
-        public IReadOnlyDictionary<Variable, LocalValue> mergedBoxValues => state.mergedBoxValues;
         public IReadOnlyDictionary<Call, Variable> constructed => state.constructed;
     }
     public SignatureView Signature { get; } = new(state.Signature);
@@ -51,6 +53,8 @@ internal sealed class RecoveryEvidence(MethodState state)
         public IReadOnlyDictionary<Stmt, ManagedStatement[]> frameInitializers => state.frameInitializers;
         public IReadOnlyList<FrameRegion> frameRegions => state.frameRegions;
         public IReadOnlyDictionary<Store, LocalValue> stackArgumentStores => state.stackArgumentStores;
+        public IReadOnlyDictionary<Store, LocalValue> boxArgumentStores => state.boxArgumentStores;
+        public IReadOnlyDictionary<Variable, LocalValue> mergedBoxValues => state.mergedBoxValues;
         public IReadOnlyDictionary<(ulong Site, int Parameter), ManagedValue> stackArgumentValues => state.stackArgumentValues;
     }
     public StructsView Structs { get; } = new(state.Structs);

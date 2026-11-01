@@ -29,21 +29,21 @@ internal static class SharedFieldsRules
                 if (call is { Op.Kind: OpKind.FieldAddress, Arguments: [var receiver, Symbol { Kind: SymbolKind.Field } field] } && call.Defines.FirstOrDefault() is { } result)
                 {
                     ctx.Rewriter.Replace(block, i, new Define(call.Address, result, SharedFieldsRules.FieldAddress(receiver, field)));
-                    ctx.State.Calls.sharedSites.Add(call.Address);
+                    ctx.Residuals.Suppress(call.Address, "generics.shared-fields");
                 }
                 else if (call is { Op: null, Target: Const target, Arguments: [var obj, Symbol { Kind: SymbolKind.Field, Value: FieldRef info } symbol, var value, ..] } && ctx.owner.NativeMethods.SharedFieldSetter(target.Value) is > 0 and var width && ctx.types.Bits(SharedFieldsRules.FieldType(info)) == width)
                 {
                     ctx.Rewriter.Replace(block, i, new Store(call.Address, SharedFieldsRules.FieldAddress(obj, symbol), value.Width == width ? value : new Ir.Convert(ConvKind.Truncate, value, width)));
                     if (call.Kind == CallKind.Tail)
                         ctx.Rewriter.Insert(block, ++i, new Return(call.Address));
-                    ctx.State.Calls.sharedSites.Add(call.Address);
+                    ctx.Residuals.Suppress(call.Address, "generics.shared-fields");
                 }
             }
     }
 
     internal static RecoveryResult<ManagedValue> SharedAddress(this AnalysisScope ctx, Intrinsic address) => address switch
     {
-        { Name: "managed_generic_buffer", Arguments: [_, Const id] } => new AddressValue(ctx.State.Frames.sharedBuffers[id.Value]),
+        { Name: "managed_generic_buffer", Arguments: [_, Const id] } => new AddressValue(ctx.State.Generics.sharedBuffers[id.Value]),
         { Name: "managed_generic_argument", Arguments: [_, Const register] } => new AddressValue(ctx.State.Signature.sharedIncoming[Storage.Gpr((int)register.Value)]),
         { Name: "managed_field_address", Arguments: [var receiver, Symbol { Value: FieldRef field }] } => ctx.RecoverAs(receiver, field.DeclaringType, 0).Map<ManagedValue>(value => new AddressValue(new FieldValue(value, field, SharedFieldsRules.FieldType(field), Math.Max(0, ctx.types.Bits(SharedFieldsRules.FieldType(field)))))),
         _ => RecoveryDiagnostics.Fail(0, $"共享地址 {address.Name} 尚未支持", rule: "SharedAddress"),

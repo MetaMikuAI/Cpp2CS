@@ -94,7 +94,7 @@ internal static class PrepareSteps
             }
 
             // 没有身份证据的未注册调用交给 L3 的调用解析（方法的本地副本，CopyOf）；解析不了时在调用处留洞。
-            if (residual.Category is not ("helper:WriteBarrier" or "call:unregistered-managed") && !scope.State.Calls.cleanupSites.Contains(residual.Address) && !scope.State.Calls.sharedSites.Contains(residual.Address))
+            if (residual.Category is not ("helper:WriteBarrier" or "call:unregistered-managed") && !scope.State.Calls.cleanupSites.Contains(residual.Address) && !scope.Residuals.Contains(residual.Address))
             {
                 var hole = scope.Analysis.Hole(residual.Address, $"残余 {residual.Category}", rule: "Prepare");
                 foreach (var statement in scope.function.Blocks.SelectMany(b => b.Statements).Where(s => s.Address == residual.Address))

@@ -13,5 +13,7 @@ internal sealed class MethodState
     internal readonly FramesState Frames = new();
     internal readonly ExceptionsState Exceptions = new();
     internal readonly StructsState Structs = new();
-    internal IStatementKeyed[] StatementTables => [Arrays, Calls, Construction, Exceptions, Frames, Lowering, Runtime, Structs];
+    internal readonly ControlState Control = new();
+    internal readonly GenericsState Generics = new();
+    internal IStatementKeyed[] StatementTables => [Arrays, Calls, Construction, Control, Exceptions, Frames, Lowering, Runtime, Structs];
 }

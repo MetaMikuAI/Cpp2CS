@@ -32,6 +32,8 @@ internal class AnalysisScope
     internal ValueRecoveryService Values => Session.Values;
     internal LoweringScope Lowering => Session.Lowering;
     internal HoleLedger ledger => Session.ledger;
+    /// <summary>内核的残余压制命令。</summary>
+    internal ResidualSuppression Residuals => Session.Residuals;
     internal Maintenance Maintain => Session.Maintain;
     internal IReadOnlyList<Block> blocks => Session.blocks;
     internal MachineFunction function => Session.function;

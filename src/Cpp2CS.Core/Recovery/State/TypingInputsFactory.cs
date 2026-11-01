@@ -21,7 +21,7 @@ internal static class TypingInputsFactory
             Arguments = ctx.State.Signature.arguments.ToDictionary(p => p.Key, p => new EntryArgument(p.Value.Index, p.Value.Type, p.Value.Width)),
             StructArguments = ctx.State.Signature.structArguments.ToDictionary(),
             Dropped = ctx.State.Lowering.dropped.ToHashSet(),
-            StoredArguments = ctx.State.Frames.stackArgumentStores.Concat(ctx.State.Construction.boxArgumentStores).Select(p => (p.Key, p.Value.Type)).Concat(ctx.State.Frames.stackEnums.Values.SelectMany(e => e.Stores.Where(s => s.Target is FrameAddress f && f.Offset == e.Offset + Facts.RuntimeLayout.ObjectHeaderSize).Select(s => (s, (TypeRef)e.Type)))).Distinct().ToDictionary(p => p.Item1, p => p.Item2),
+            StoredArguments = ctx.State.Frames.stackArgumentStores.Concat(ctx.State.Frames.boxArgumentStores).Select(p => (p.Key, p.Value.Type)).Concat(ctx.State.Frames.stackEnums.Values.SelectMany(e => e.Stores.Where(s => s.Target is FrameAddress f && f.Offset == e.Offset + Facts.RuntimeLayout.ObjectHeaderSize).Select(s => (s, (TypeRef)e.Type)))).Distinct().ToDictionary(p => p.Item1, p => p.Item2),
             Constructed = ctx.State.Construction.constructed.ToDictionary(),
             DelegateCreations = ctx.State.Construction.delegateCreations.ToDictionary(),
             StackEnumValues = ctx.State.Frames.stackEnums.Values.Select(e => (e.Value, (TypeRef)e.Type)).ToArray(),

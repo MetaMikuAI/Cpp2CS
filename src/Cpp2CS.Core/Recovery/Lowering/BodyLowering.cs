@@ -337,7 +337,7 @@ internal static class BodyLowering
                     return null;
                 }
 
-            case { Kind: OpKind.Box, Operand: TypeRef type } when call.Defines.FirstOrDefault() is { } created && ctx.State.Construction.boxed.TryGetValue(call, out var content):
+            case { Kind: OpKind.Box, Operand: TypeRef type } when call.Defines.FirstOrDefault() is { } created && ctx.State.Frames.boxed.TryGetValue(call, out var content):
                 if (ctx.types.Kind(type) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double) || type is DefinitionRef { Definition.FullName: "System.Nullable" })
                     return RecoveryDiagnostics.Fail(address, $"装箱 类型 {type} 尚未支持", rule: "TranslateCall");
                 return ctx.Assign(address, created, () => ctx.RecoverAs(content, type, address).Map<ManagedValue>(value => new BoxValue(value, type, ctx.types.Object)), output);
@@ -447,7 +447,7 @@ internal static class BodyLowering
         }
 
         var copied = call.Op is null && call.Target is Const copyTarget && ctx.facts.EntriesAt(copyTarget.Value).Length == 0 && ctx.facts.Unregistered.At(copyTarget.Value) is null;
-        var isVirtual = call.Op is not null || ctx.State.Runtime.virtualCalls.Contains(call) || definition.IsVirtual && (definition.Attributes & System.Reflection.MethodAttributes.Final) != 0 && receiver is not ArgumentValue { Index: -1 };
+        var isVirtual = call.Op is not null || ctx.State.Control.virtualCalls.Contains(call) || definition.IsVirtual && (definition.Attributes & System.Reflection.MethodAttributes.Final) != 0 && receiver is not ArgumentValue { Index: -1 };
         var invocation = new ManagedInvocation(callee, receiver, parameters, isVirtual && receiver is not null && receiver.Type is not ByRefRef);
         if (BodyLowering.Rules(RuleRegistry.InvocationOutputs.Select(rule => rule(ctx.Lowering, call, signature, registers, invocation, output)), out handled) is { } rejected)
             return rejected;

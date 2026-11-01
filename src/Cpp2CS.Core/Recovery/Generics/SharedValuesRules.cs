@@ -116,7 +116,7 @@ internal static class SharedValuesRules
                     continue;
                 var buffer = new Intrinsic(scratch ? "managed_box_scratch" : "managed_generic_buffer", [new Symbol(SymbolKind.Type, type), Expr.C(define.Address, 64)], 64);
                 if (!scratch)
-                    ctx.State.Frames.sharedBuffers[define.Address] = ctx.StructLocal(type, 0);
+                    ctx.State.Generics.sharedBuffers[define.Address] = ctx.StructLocal(type, 0);
                 ctx.Rewriter.Replace(block, i, define with
                 {
                     Value = buffer
@@ -124,7 +124,7 @@ internal static class SharedValuesRules
                 defs[define.Target] = buffer;
             }
 
-        if (ctx.State.Frames.sharedBuffers.Count == 0)
+        if (ctx.State.Generics.sharedBuffers.Count == 0)
             return;
         // 完全共享入参：值类型直接使用传入地址，引用类型使用寄存器的栈副本地址。
         foreach (var block in ctx.function.Blocks)
@@ -176,8 +176,8 @@ internal static class SharedValuesRules
                         Target = Expr.C(0, 64)
                     });
                     ctx.Rewriter.Replace(block, i + 1, copy.Defines is [var result] ? new Define(copy.Address, result, destination) : new Nop(copy.Address, "拆箱值复制"));
-                    ctx.State.Calls.sharedSites.Add(call.Address);
-                    ctx.State.Calls.sharedSites.Add(copy.Address);
+                    ctx.Residuals.Suppress(call.Address, "generics.shared-values");
+                    ctx.Residuals.Suppress(copy.Address, "generics.shared-values");
                 }
                 else if (call.Arguments is [Symbol { Kind: SymbolKind.Class, Value: GenericParameterRef constraint }, Symbol { Kind: SymbolKind.Constrained, Value: ValueTuple<TypeRef, MethodRef> dispatch }, var scratch, var receiver, Const { Value: 0 }, FrameAddress returned, ..] && Equals(dispatch.Item1, constraint) && Equals(AddressType(receiver), constraint) && ExpandValue(scratch) is Intrinsic { Name: "managed_box_scratch", Arguments: [Symbol { Value: TypeRef scratchType }, _] } && Equals(scratchType, constraint) && dispatch.Item2.Method is { IsStatic: false, Parameters.Count: 0 } && CallResolution.Concrete(dispatch.Item2, dispatch.Item2.Method.ReturnType) is { } resultType && ManagedTypes.IsReferenceType(resultType) && UnusedResultsExcept(null) && SharedRuntimeHelpers.ConstrainedInvoke(ctx.facts, target.Value))
                 {
@@ -192,7 +192,7 @@ internal static class SharedValuesRules
                         Target = Expr.C(0, 64)
                     });
                     ctx.Rewriter.Insert(block, ++i, new Store(call.Address, returned, new Use(result, 64)));
-                    ctx.State.Calls.sharedSites.Add(call.Address);
+                    ctx.Residuals.Suppress(call.Address, "generics.shared-values");
                 }
             }
 
@@ -244,7 +244,7 @@ internal static class SharedValuesRules
             ctx.Rewriter.Remove(block, call);
             foreach (var store in stores.Values.Where(s => ((FrameAddress)s.Target).Offset >= array.Offset && ((FrameAddress)s.Target).Offset < array.Offset + 8 * replacements.Max(p => ((MethodRef)p.Call.Op!.Operand!).Method.Parameters.Count)))
                 ctx.Rewriter.Remove(block, store);
-            ctx.State.Calls.sharedSites.Add(call.Address);
+            ctx.Residuals.Suppress(call.Address, "generics.shared-values");
         }
 
         foreach (var block in ctx.function.Blocks)
@@ -312,7 +312,7 @@ internal static class SharedValuesRules
 
                 if (!ReferenceEquals(block.Statements[i], call))
                 {
-                    ctx.State.Calls.sharedSites.Add(call.Address);
+                    ctx.Residuals.Suppress(call.Address, "generics.shared-values");
                     // memcpy/memset 返回目标地址；托管值复制不能丢失仍被使用的指针定义。
                     if (call is { Op: { Kind: OpKind.Import, Operand: "memcpy" or "memset" }, Defines: [var result] })
                     {
@@ -328,7 +328,7 @@ internal static class SharedValuesRules
         var remaining = ctx.function.Blocks.SelectMany(b => b.Statements).Select(s => s.Address).ToHashSet();
         foreach (var define in original.OfType<Define>())
             if (!remaining.Contains(define.Address) && ExprMap.Walk(ExpandValue(define.Value)).OfType<Load>().Any(l => l.Address is Binary { Left: Symbol { Kind: SymbolKind.Class or SymbolKind.Method } }))
-                ctx.State.Calls.sharedSites.Add(define.Address);
+                ctx.Residuals.Suppress(define.Address, "generics.shared-values");
     }
 
     internal static void NormalizeStackCanary(this AnalysisScope ctx, Func<Expr, int, Expr> expand)

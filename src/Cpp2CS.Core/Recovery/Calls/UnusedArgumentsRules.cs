@@ -8,7 +8,7 @@ namespace Cpp2CS.Recovery;
 internal static class UnusedArgumentsRules
 {
     internal static bool DirectInputProof(this AnalysisScope ctx, Call call, MethodRef callee, bool receiver = false) => call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target } // 非虚方法的 callvirt 只负责判空；普通参数仍可按固定目标证明未用，接收者不能据此替换。
-    && (!ctx.State.Runtime.virtualCalls.Contains(call) || !receiver && !callee.Method.IsVirtual) && ctx.facts.EntriesAt(target.Value).Any(e => e.Method is MethodRef candidate && candidate.Method == callee.Method);
+    && (!ctx.State.Control.virtualCalls.Contains(call) || !receiver && !callee.Method.IsVirtual) && ctx.facts.EntriesAt(target.Value).Any(e => e.Method is MethodRef candidate && candidate.Method == callee.Method);
     internal static bool UnusedParameter(this AnalysisScope ctx, Call call, Storage register) => call.Target is Const target && ctx.owner.rewriter.UnusedInput(target.Value, register);
     internal static bool UnusedInput(this AnalysisScope ctx, Call call, MethodRef callee, AbiValue parameter) => parameter is { Passing: Passing.Registers, Pieces: [var piece] } && ctx.DirectInputProof(call, callee, receiver: true) && ctx.UnusedParameter(call, piece.Register);
     internal static bool MissingInput(this AnalysisScope ctx, Expr expression) => expression is Unknown or Use { Variable.Version: < 0 } || expression is Use { Variable.Version: 0 } input && !ctx.State.Signature.arguments.ContainsKey(input.Variable.Storage) || expression is Use use && ctx.State.Runtime.runtime.Contains(use.Variable);

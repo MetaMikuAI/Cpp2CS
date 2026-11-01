@@ -15,7 +15,7 @@ internal static class ScalarFramesRules
         // 提前绑定的装箱和栈实参仍通过原写入定义托管局部，机器调用中的帧地址可能已被替换。
         var boundStores = new HashSet<Stmt>(ctx.State.Frames.stackEnumStorage, ReferenceEqualityComparer.Instance);
         boundStores.UnionWith(ctx.State.Frames.stackArgumentStores.Keys);
-        boundStores.UnionWith(ctx.State.Construction.boxArgumentStores.Keys);
+        boundStores.UnionWith(ctx.State.Frames.boxArgumentStores.Keys);
         var unused = DeadFrameStores.Find(ctx.function, e => ctx.FrameOffset(e), ctx.NoStackRead, calls.ArgumentSize, NoCapture, boundStores);
         foreach (var store in unused)
             ctx.TraceRule(new("storage.dead-frame-write", store.Address, RewriteStatus.Applied, null, null,
