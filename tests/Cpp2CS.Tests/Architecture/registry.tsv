@@ -1,0 +1,67 @@
+# 种类	名称	Order	After	Invalidates	声明类型.方法
+Analysis	异常值	10			ExceptionsRules.AnalyzeExceptionValues
+Analysis	异常指针栈槽	15	异常值		ExceptionSlotsRules.ExceptionPointerSlots
+Analysis	栈上调用	20			StackCallsRules.PrepareStackCalls
+MachinePass	汇合装箱	23	标量栈实参	All	BoxArgumentsRules.PrepareMergedBoxArguments
+MachinePass	栈上枚举	28	异常值,栈上调用	All	StackEnumsRules.PrepareStackEnums
+MachinePass	分支帧快照	29	帧前类型,标量栈实参	All	ScalarFramesRules.ForwardBranchFrameSnapshots
+MachinePass	帧前类型	29	异常值,栈上调用	All	FramesRules.PrepareFrameTypes
+MachinePass	标量栈实参	29	帧前类型	All	StackArgumentsRules.PrepareScalarStackArguments
+MachinePass	帧区域	30	异常值,栈上调用,帧前类型,分支帧快照	All	FramesRules.PrepareFrames
+MachinePass	帧快照	32	帧区域	All	ScalarFramesRules.ForwardFrameSnapshots
+MachinePass	整数帧槽	35	帧区域,帧快照	All	ScalarFramesRules.PrepareScalarFrames
+MachinePass	帧后数组地址	37	整数帧槽	All	FramesRules.PrepareFrameArrayAddresses
+Analysis	运行时引用	40	帧区域,异常值		RuntimeRules.MarkRuntime
+Analysis	跳转表	45	运行时引用		SwitchesRules.JumpTables
+Analysis	内联	50	运行时引用		InliningRules.Inline
+MachinePass	帧槽	60	帧区域,栈上调用	All	FrameSlotRules.FrameSlots
+Analysis	数学导入	60			NativeImportsRules.AnalyzeNativeImports
+Analysis	分配	70	运行时引用		ConstructionRules.Allocations
+Analysis	检查吸收	80	帧区域		CheckRules.Checks
+MachinePass	字段地址	89	帧槽,检查吸收	All	SharedFieldsRules.PrepareFieldAddresses
+MachinePass	类型	90	运行时引用,内联,帧槽,分配,检查吸收	All	RecoveryAnalysis.Typing
+Analysis	数组切片	95	类型		ArraySpansRules.PrepareArraySpans
+Analysis	结构体汇合	95	类型		StructPhisRules.StructPhis
+Analysis	结构体写入汇合	96	结构体汇合		StructPhisRules.StoredStructPhis
+Analysis	片汇合	98	结构体写入汇合		FragmentsRules.PrepareFragmentPhis
+Analysis	帧拷贝	110	类型		FrameCopiesRules.FrameCopies
+ArgumentRule	ScalarStackArgument	1			StackArgumentsRules.ScalarStackArgument
+ArgumentRule	ArraySpanArgument	5			ArraySpansRules.ArraySpanArgument
+ArgumentRule	TypeHandleArgument	5			StructRegistersRules.TypeHandleArgument
+ArgumentRule	StringSpanArgument	6			StringSpansRules.StringSpanArgument
+ArgumentRule	UnusedArgument	8			UnusedArgumentsRules.UnusedArgument
+ArgumentRule	RegisterStructArgument	10			StructRegistersRules.RegisterStructArgument
+ArgumentRule	IndirectStructArgument	20			StructIndirectRules.IndirectStructArgument
+BodyProof	ProveReturnBuffer	10			StructIndirectRules.ProveReturnBuffer
+BodyProof	CheckFloatingConstructorOrder	20			FloatsRules.CheckFloatingConstructorOrder
+BodyProof	ProveFrameInitialization	30			FramesRules.ProveFrameInitialization
+CallRule	StartStateMachine	5			AsyncRules.StartStateMachine
+CallRule	BoxMergedArgument	9			BoxArgumentsRules.BoxMergedArgument
+CallRule	LowerSharedValues	9			SharedValuesRules.LowerSharedValues
+CallRule	BoxFrame	10			FramesRules.BoxFrame
+CallRule	LowerCleanupThunk	10			CleanupThunksRules.LowerCleanupThunk
+CallRule	LowerExceptionTypeTarget	20			ExceptionsRules.LowerExceptionTypeTarget
+CallRule	NativeImportCall	20			NativeImportsRules.NativeImportCall
+CallRule	CopyStructReturn	21			StructIndirectRules.CopyStructReturn
+CallRule	CopyStructValue	22			StructCopiesRules.CopyStructValue
+DefineRule	DefineFragment	10			FragmentsRules.DefineFragment
+InvocationOutputRule	IndirectInvocation	10			StructIndirectRules.IndirectInvocation
+InvocationOutputRule	ConstructReturnBuffer	20			StructIndirectRules.ConstructReturnBuffer
+InvocationOutputRule	ProjectTailHfa	30			StructRegistersRules.ProjectTailHfa
+InvocationOutputRule	ThrowingInvocation	90			ExceptionsRules.ThrowingInvocation
+InvocationRule	InitializeConstantArray	4			ArrayInitializersRules.InitializeConstantArray
+InvocationRule	LowerDelegateCreation	10			DelegatesRules.LowerDelegateCreation
+ParameterBinding	PrepareStructArgument	10			StructRegistersRules.PrepareStructArgument
+ParameterBinding	PrepareSharedArgument	15			SharedValuesRules.PrepareSharedArgument
+ParameterBinding	PrepareIndirectArgument	20			StructIndirectRules.PrepareIndirectArgument
+ResultRule	RegisterStructResult	10			StructRegistersRules.RegisterStructResult
+StatementRule	LowerFrameCopy	10			FrameCopiesRules.LowerFrameCopy
+StatementRule	LowerFrameInitializer	20			FramesRules.LowerFrameInitializer
+StatementRule	LowerSwitch	30			SwitchesRules.LowerSwitch
+StoreRule	StoreStackArgument	1			StackArgumentsRules.StoreStackArgument
+StoreRule	StoreBoxArgument	2			BoxArgumentsRules.StoreBoxArgument
+StoreRule	StoreFrameZero	10			FramesRules.StoreFrameZero
+StoreRule	StoreStructZero	15			FrameCopiesRules.StoreStructZero
+StoreTargetRule	StoreScalarFrame	1			FramesRules.StoreScalarFrame
+StoreTargetRule	StoreWholeStruct	5			FrameCopiesRules.StoreWholeStruct
+StoreTargetRule	StoreFragment	10			FragmentsRules.StoreFragment

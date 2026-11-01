@@ -1,45 +1,167 @@
+using Cpp2CS.Tests.Architecture;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Cpp2CS.Tests;
 
-/// <summary>按实际符号引用检查模块边界，别名与完整类型名适用相同规则。</summary>
+/// <summary>
+/// 结构检查（G0）：按实际符号引用检查模块边界（别名、完整类型名、var 与目标类型的 new() 适用相同规则）；
+/// 语义计数与棘轮、访问白名单与豁免清单、族归属快照、注册表快照与洞编码清单（账本见 tests/Cpp2CS.Tests/Architecture）。
+/// --write：棘轮写回下降值并删除已无访问的白名单与豁免条目（不会上调或新增）；--write-snapshots：按代码重写族归属、注册表与洞编码快照；
+/// --bootstrap：账本不存在时按现状建立初值；--milestone MSn：检查到期条目已删除。
+/// </summary>
 internal static class ArchitectureCheck
 {
-    [Command("architecture", "检查核心、写出与扩展的依赖方向", Arguments = "<repository>")]
-    public static int Run(string repository)
+    [Command("architecture", "检查依赖方向、语义计数棘轮、白名单与豁免清单、族归属与注册表快照、洞编码清单", Arguments = "<repository> [--write] [--write-snapshots] [--bootstrap] [--milestone MSn] [--deps]")]
+    public static int Run(string repository, string[] options)
     {
-        var failures = new SortedSet<string>(StringComparer.Ordinal);
-        var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
-            .Concat(Directory.GetFiles(AppContext.BaseDirectory, "*.dll")).Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(p => MetadataReference.CreateFromFile(p)).ToArray();
-        foreach (var project in new[] { "Core", "Output", "Extensions", "Input", "Pipeline" })
+        var known = new[] { "--write", "--write-snapshots", "--bootstrap", "--deps" };
+        string? milestone = null;
+        for (var i = 0; i < options.Length; i++)
         {
-            var folder = Path.Combine(repository, "src", "Cpp2CS." + project);
-            var trees = Directory.EnumerateFiles(folder, "*.cs", SearchOption.AllDirectories)
-                .Where(p => !Path.GetRelativePath(folder, p).Split(Path.DirectorySeparatorChar).Any(s => s is "obj" or "bin"))
-                .Select(p => CSharpSyntaxTree.ParseText(File.ReadAllText(p), new(LanguageVersion.Preview), p)).ToArray();
-            var globals = CSharpSyntaxTree.ParseText("global using System; global using System.IO; global using System.Linq; global using System.Collections.Generic; global using System.Threading; global using System.Threading.Tasks;", new(LanguageVersion.Preview));
-            var compilation = CSharpCompilation.Create("Cpp2CS." + project, trees.Append(globals),
-                references.Where(r => Path.GetFileName(r.FilePath) != "Cpp2CS." + project + ".dll"), new(OutputKind.DynamicallyLinkedLibrary));
-            foreach (var tree in trees)
+            if (options[i] == "--milestone" && i + 1 < options.Length) milestone = options[++i];
+            else if (!known.Contains(options[i])) throw new ArgumentException($"未知参数 {options[i]}");
+        }
+        var model = SourceModel.Load(repository);
+        if (options.Contains("--deps")) return Dependencies(model);
+        var failures = new List<string>();
+        var layers = Layers(model);
+        failures.AddRange(layers);
+
+        var census = new StructureCensus(model);
+        var registry = Ledgers.Registry();
+        var accesses = census.Accesses.Concat(Ledgers.DuplicateOrders(registry)).Concat(Ledgers.DuplicatePasses(census.PassNames)).ToList();
+        var folder = Ledgers.Folder(model.Repository);
+        var paths = new
+        {
+            Ratchet = Path.Combine(folder, "ratchet.tsv"),
+            Whitelist = Path.Combine(folder, "whitelist.tsv"),
+            Exemptions = Path.Combine(folder, "exemptions.tsv"),
+            Families = Path.Combine(folder, "families.tsv"),
+            Registry = Path.Combine(folder, "registry.tsv"),
+            HoleCodes = Path.Combine(folder, "hole-codes.tsv"),
+            SharedBodies = Path.Combine(folder, "shared-step-bodies.tsv"),
+        };
+        var holeCodes = Ledgers.HoleCodes(census.HoleCodes);
+        if (options.Contains("--bootstrap"))
+        {
+            if (new[] { paths.Ratchet, paths.Whitelist, paths.Exemptions, paths.Families, paths.Registry, paths.HoleCodes }.Any(File.Exists))
+                throw new IOException("账本已存在；--bootstrap 只用于建立初值");
+            Directory.CreateDirectory(folder);
+            var entries = accesses.GroupBy(a => (a.Tag, a.Member, a.File)).Select(g =>
             {
-                var semantic = compilation.GetSemanticModel(tree);
-                var root = tree.GetRoot();
-                var source = root.DescendantNodes().OfType<BaseNamespaceDeclarationSyntax>().FirstOrDefault()?.Name.ToString() ?? "";
-                foreach (var name in root.DescendantNodes().OfType<SimpleNameSyntax>().Where(n => !n.Ancestors().Any(a => a is UsingDirectiveSyntax)))
-                {
-                    var symbol = semantic.GetSymbolInfo(name).Symbol;
-                    var target = symbol?.ContainingNamespace?.ToDisplayString() ?? "";
-                    if (!Forbidden(source, target)) continue;
-                    failures.Add($"{Path.GetRelativePath(repository, tree.FilePath)}:{name.GetLocation().GetLineSpan().StartLinePosition.Line + 1}: {source} → {target} ({symbol!.Name})");
-                }
+                var (package, expiry) = Ledgers.Schedule(g.First());
+                return new Ledgers.Entry(g.Key.Tag, g.Key.Member, g.Key.File, package, expiry, "V2 建立时的现有访问");
+            }).ToList();
+            Ledgers.WriteEntries(paths.Whitelist, entries.Where(e => !Ledgers.IsExemption(e.Tag)));
+            Ledgers.WriteEntries(paths.Exemptions, entries.Where(e => Ledgers.IsExemption(e.Tag)));
+            Ledgers.WriteEntries(paths.SharedBodies, []);
+            WriteSnapshots(model, registry, holeCodes, paths.Families, paths.Registry, paths.HoleCodes);
+            Ledgers.WriteRatchet(paths.Ratchet, Counts(census, Ledgers.ReadEntries(paths.Whitelist), Ledgers.ReadEntries(paths.Exemptions)));
+            Console.WriteLine($"已建立账本：白名单 {entries.Count(e => !Ledgers.IsExemption(e.Tag))} 条，豁免 {entries.Count(e => Ledgers.IsExemption(e.Tag))} 条");
+        }
+        var whitelist = Ledgers.ReadEntries(paths.Whitelist);
+        var exemptions = Ledgers.ReadEntries(paths.Exemptions);
+        // 共享步骤体（I3）：登记的调用点长期放行，不到期；登记表中的调用点数纳入棘轮
+        var sharedBodies = Ledgers.ReadEntries(paths.SharedBodies);
+        var registered = accesses.Where(a => a.Tag == "I3" && sharedBodies.Any(e => e.Covers(a))).ToList();
+        accesses = accesses.Except(registered).ToList();
+        if (options.Contains("--write"))
+        {
+            whitelist = whitelist.Where(e => accesses.Any(e.Covers)).ToList();
+            exemptions = exemptions.Where(e => accesses.Any(e.Covers)).ToList();
+            Ledgers.WriteEntries(paths.Whitelist, whitelist);
+            Ledgers.WriteEntries(paths.Exemptions, exemptions);
+            var recorded = Ledgers.ReadRatchet(paths.Ratchet);
+            var lowered = new SortedDictionary<string, int>(StringComparer.Ordinal);
+            foreach (var (key, value) in Counts(census, whitelist, exemptions)) lowered[key] = Math.Min(value, recorded.GetValueOrDefault(key, value));
+            foreach (var (key, value) in recorded.Where(p => !lowered.ContainsKey(p.Key))) lowered[key] = 0;
+            Ledgers.WriteRatchet(paths.Ratchet, lowered.Where(p => p.Value > 0 || recorded.ContainsKey(p.Key) && recorded[p.Key] == 0).ToDictionary());
+        }
+        if (options.Contains("--write-snapshots")) WriteSnapshots(model, registry, holeCodes, paths.Families, paths.Registry, paths.HoleCodes);
+
+        var counts = Counts(census, whitelist, exemptions);
+        Ledgers.CheckEntries("白名单", whitelist, accesses.Where(a => !Ledgers.IsExemption(a.Tag)).ToList(), milestone, failures);
+        Ledgers.CheckEntries("豁免清单", exemptions, accesses.Where(a => Ledgers.IsExemption(a.Tag)).ToList(), milestone, failures);
+        Ledgers.CheckEntries("共享步骤体登记表", sharedBodies, registered, null, failures);
+        if (registered.Count > 0) counts["shared-step-body-call-sites/I3"] = registered.Count;
+        Ledgers.CheckRatchet(Ledgers.ReadRatchet(paths.Ratchet), counts, failures);
+        Ledgers.CheckPairs("族归属快照", Ledgers.ReadPairs(paths.Families), Ledgers.CurrentFamilies(model), failures);
+        Ledgers.CheckPairs("注册表快照", RegistryPairs(File.ReadLines(paths.Registry)), RegistryPairs(Ledgers.RegistryLines(registry)), failures);
+        Ledgers.CheckPairs("洞编码清单", HoleCodeRows(paths.HoleCodes).ToDictionary(p => p.Key, p => p.Value.Counts), holeCodes, failures);
+
+        foreach (var failure in failures) Console.WriteLine($"✗ {failure}");
+        Console.WriteLine($"architecture：越层引用 {layers.Count}；计数项 {counts.Count}；白名单 {whitelist.Count} 条，豁免 {exemptions.Count} 条；失败 {failures.Count} 项");
+        return failures.Count == 0 ? 0 : 1;
+    }
+
+    private static SortedDictionary<string, int> Counts(StructureCensus census, IEnumerable<Ledgers.Entry> whitelist, IEnumerable<Ledgers.Entry> exemptions)
+    {
+        var counts = new SortedDictionary<string, int>(census.Counts, StringComparer.Ordinal);
+        foreach (var group in whitelist.GroupBy(e => e.Tag)) counts[$"whitelist-entries/{group.Key}"] = group.Count();
+        foreach (var group in exemptions.GroupBy(e => e.Tag)) counts[$"exemption-entries/{group.Key}"] = group.Count();
+        return counts;
+    }
+
+    private static Dictionary<string, string> RegistryPairs(IEnumerable<string> lines) => lines.Where(l => l.Length > 0 && !l.StartsWith('#'))
+        .Select(l => l.Split('\t')).ToDictionary(f => $"{f[0]}\t{f[1]}\t{f[5]}", f => $"Order={f[2]} After={f[3]} Invalidates={f[4]}");
+
+    private static void WriteSnapshots(SourceModel model, List<Ledgers.Registration> registry, SortedDictionary<string, string> holeCodes,
+        string families, string registryPath, string holeCodesPath)
+    {
+        Ledgers.WritePairs(families, "# 文件\t所属范围（族）。跨族目录移动文件会改变这里，提交说明须带用户确认标记（主文 3.3）。", Ledgers.CurrentFamilies(model));
+        File.WriteAllLines(registryPath, Ledgers.RegistryLines(registry));
+        var notes = File.Exists(holeCodesPath) ? HoleCodeRows(holeCodesPath).ToDictionary(p => p.Key, p => p.Value.Note) : [];
+        File.WriteAllLines(holeCodesPath, new[] { "# rule\t次数\t所在范围\t与所在方法名不一致的次数\t说明。编码为 recovery.<rule>；新增编码先进清单（主文 4.13）。" }
+            .Concat(holeCodes.Select(p => $"{p.Key}\t{p.Value}\t{notes.GetValueOrDefault(p.Key, "")}")));
+    }
+
+    /// <summary>洞编码清单的一行：前三列（次数、所在范围、与所在方法名不一致的次数）由代码决定，第四列是说明。</summary>
+    private static Dictionary<string, (string Counts, string Note)> HoleCodeRows(string path) => File.ReadLines(path).Where(l => l.Length > 0 && !l.StartsWith('#'))
+        .Select(l => l.Split('\t')).ToDictionary(f => f[0], f => (string.Join('\t', f[1..4]), f.ElementAtOrDefault(4) ?? ""));
+
+    /// <summary>命名空间依赖矩阵（诊断用）：源命名空间前两级 → 目标命名空间前两级，按引用次数。</summary>
+    private static int Dependencies(SourceModel model)
+    {
+        var edges = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        foreach (var project in model.Projects.Where(p => p.Name != "Tests"))
+            foreach (var (tree, source, target, _) in References(project))
+            {
+                static string Head(string ns) => string.Join('.', ns.Split('.').Take(2));
+                if (Head(source) != Head(target)) edges[$"{Head(source)} → {Head(target)}"] = edges.GetValueOrDefault($"{Head(source)} → {Head(target)}") + 1;
+            }
+        foreach (var (edge, count) in edges) Console.WriteLine($"{count,6}  {edge}");
+        return 0;
+    }
+
+    /// <summary>每个显式名称、var 声明与目标类型 new() 引用的类型或成员所在的命名空间。</summary>
+    private static IEnumerable<(SyntaxTree Tree, string Source, string Target, (SyntaxNode Node, string Symbol) Site)> References(SourceModel.Project project)
+    {
+        foreach (var tree in project.Trees)
+        {
+            var semantic = project.Compilation.GetSemanticModel(tree);
+            var root = tree.GetRoot();
+            var source = root.DescendantNodes().OfType<BaseNamespaceDeclarationSyntax>().FirstOrDefault()?.Name.ToString() ?? "";
+            foreach (var name in root.DescendantNodes().OfType<SimpleNameSyntax>().Where(n => !n.Ancestors().Any(a => a is UsingDirectiveSyntax)))
+                if (semantic.GetSymbolInfo(name).Symbol is { } symbol)
+                    yield return (tree, source, symbol.ContainingNamespace?.ToDisplayString() ?? "", (name, symbol.Name));
+            foreach (var node in root.DescendantNodes().Where(n => n is ImplicitObjectCreationExpressionSyntax || n is VariableDeclarationSyntax { Type.IsVar: true }))
+            {
+                var type = node is VariableDeclarationSyntax declaration ? semantic.GetTypeInfo(declaration.Type).Type : semantic.GetTypeInfo(node).Type;
+                if (type is not null) yield return (tree, source, type.ContainingNamespace?.ToDisplayString() ?? "", (node, type.Name));
             }
         }
-        foreach (var failure in failures) Console.WriteLine(failure);
-        Console.WriteLine($"architecture: {failures.Count} 个越层引用");
-        return failures.Count == 0 ? 0 : 1;
+    }
+
+    private static List<string> Layers(SourceModel model)
+    {
+        var failures = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var project in model.Projects.Where(p => p.Name != "Tests"))
+            foreach (var (tree, source, target, (node, symbol)) in References(project))
+                if (Forbidden(source, target))
+                    failures.Add($"越层引用 {model.Relative(tree)}:{SourceModel.Line(node)}: {source} → {target} ({symbol})");
+        return failures.ToList();
     }
 
     private static bool Within(string name, string layer) => name == "Cpp2CS." + layer || name.StartsWith("Cpp2CS." + layer + ".", StringComparison.Ordinal);
@@ -52,9 +174,16 @@ internal static class ArchitectureCheck
         if (Within(source, "Idioms") && new[] { "Managed", "Recovery" }.Any(l => Within(target, l))) return true;
         if (Within(source, "Managed") && new[] { "Machine", "Idioms", "Recovery" }.Any(l => Within(target, l))) return true;
         if (Within(source, "Model") && new[] { "Facts", "Machine", "Managed", "Recovery", "Idioms" }.Any(l => Within(target, l))) return true;
+        // 基础层：Image、Ir 只依赖 Model；Calls 只依赖 Ir、Managed、Model；Diagnostics 不依赖其他层；Options 只依赖 Diagnostics；Input 不依赖分析层
+        if (Within(source, "Image") && new[] { "Ir", "Facts", "Machine", "Idioms", "Managed", "Recovery", "Calls", "Diagnostics", "Options" }.Any(l => Within(target, l))) return true;
+        if (Within(source, "Ir") && new[] { "Image", "Facts", "Machine", "Idioms", "Managed", "Recovery", "Calls", "Diagnostics", "Options" }.Any(l => Within(target, l))) return true;
+        if (Within(source, "Calls") && new[] { "Image", "Facts", "Machine", "Idioms", "Recovery", "Diagnostics", "Options" }.Any(l => Within(target, l))) return true;
+        if (Within(source, "Diagnostics") && new[] { "Image", "Model", "Ir", "Facts", "Machine", "Idioms", "Managed", "Recovery", "Calls", "Options" }.Any(l => Within(target, l))) return true;
+        if (Within(source, "Options") && new[] { "Image", "Model", "Ir", "Facts", "Machine", "Idioms", "Managed", "Recovery", "Calls" }.Any(l => Within(target, l))) return true;
+        if (Within(source, "Input") && new[] { "Machine", "Idioms", "Managed", "Recovery", "Calls" }.Any(l => Within(target, l))) return true;
         if (Within(source, "Output") && new[] { "Recovery", "Extensions", "Pipeline" }.Any(l => Within(target, l))) return true;
         if (Within(source, "Extensions") && Within(target, "Pipeline")) return true;
-        return !new[] { "Output", "Extensions", "Input", "Pipeline" }.Any(l => Within(source, l))
-            && new[] { "Output", "Extensions", "Pipeline" }.Any(l => Within(target, l));
+        return !new[] { "Output", "Extensions", "Input", "Pipeline", "Cli" }.Any(l => Within(source, l))
+            && new[] { "Output", "Extensions", "Pipeline", "Cli" }.Any(l => Within(target, l));
     }
 }
