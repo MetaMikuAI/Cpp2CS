@@ -61,7 +61,7 @@ StatementRule	LowerSwitch	30			SwitchesRules.LowerSwitch
 StoreRule	StoreStackArgument	1			StackArgumentsRules.StoreStackArgument
 StoreRule	StoreBoxArgument	2			BoxArgumentsRules.StoreBoxArgument
 StoreRule	StoreFrameZero	10			FramesRules.StoreFrameZero
-StoreRule	StoreStructZero	15			FrameCopiesRules.StoreStructZero
+StoreRule	StoreStructZero	15			StructStoresRules.StoreStructZero
 StoreTargetRule	StoreScalarFrame	1			FramesRules.StoreScalarFrame
-StoreTargetRule	StoreWholeStruct	5			FrameCopiesRules.StoreWholeStruct
+StoreTargetRule	StoreWholeStruct	5			StructStoresRules.StoreWholeStruct
 StoreTargetRule	StoreFragment	10			FragmentsRules.StoreFragment

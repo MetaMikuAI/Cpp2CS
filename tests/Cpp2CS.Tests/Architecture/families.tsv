@@ -337,6 +337,7 @@ src/Cpp2CS.Core/Recovery/Structs/StructEvidence.cs	Recovery/Structs
 src/Cpp2CS.Core/Recovery/Structs/StructIndirectRules.cs	Recovery/Structs
 src/Cpp2CS.Core/Recovery/Structs/StructPhisRules.cs	Recovery/Structs
 src/Cpp2CS.Core/Recovery/Structs/StructRegistersRules.cs	Recovery/Structs
+src/Cpp2CS.Core/Recovery/Structs/StructStoresRules.cs	Recovery/Structs
 src/Cpp2CS.Core/Recovery/Structs/StructsRules.cs	Recovery/Structs
 src/Cpp2CS.Core/Recovery/Structs/VectorPhiProjection.cs	Recovery/Structs
 src/Cpp2CS.Core/Recovery/Typing/AllocationContributor.cs	Recovery/Typing
