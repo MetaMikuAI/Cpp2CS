@@ -127,12 +127,6 @@ internal static class IdiomPipeline
                 state.Cleanup();
             }
         });
-        state.Passes.Run("idioms.FrameAddressTails", () =>
-        {
-            if (state.function.Range.ExceptionRegions.Length == 0 && TailDuplication.Run(state.function,
-                b => b.Statements.OfType<Phi>().Any(p => p.Sources.All(v => state.defs.Expand(new Use(v, 64)) is FrameAddress { Offset: < 0 }))))
-                state.Cleanup();
-        });
         state.Passes.Run("idioms.ClassTails", () =>
         {
             if (state.function.Range.ExceptionRegions.Length != 0) return;

@@ -25,7 +25,7 @@ public readonly record struct Storage(Bank Bank, int Index, int StackWidth = 64)
         Bank.Gpr => 64,
         Bank.Vec => 128,
         Bank.Flags => 0,
-        Bank.Stack or Bank.Local => StackWidth,
+        Bank.Stack or Bank.Local or Bank.Temp => StackWidth,
         _ => 64,
     };
 

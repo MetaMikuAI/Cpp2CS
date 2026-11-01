@@ -25,13 +25,14 @@ internal static class Inspect
         var decompiler = new MethodDecompiler(facts, types);
         foreach (var target in Targets(facts, targets))
         {
-            Console.WriteLine($"== 0x{target.Entry:x} {target.Instance}");
+            Console.Write($"== 0x{target.Entry:x} {target.Instance}");
             var method = target.Shared ? target.Method : target.Instance;
             if (!decompiler.Analyze(method, target.Entry).TryGet(out var analysis, out var failure))
             {
-                Console.WriteLine($"  ! 0x{failure.Address:x} {failure.Reason}");
+                Console.WriteLine($"\n  ! 0x{failure.Address:x} {failure.Reason}");
                 continue;
             }
+            Console.WriteLine(analysis.Splits > 0 ? $" 拆分 {analysis.Splits}" : "");
             if (!options.Contains("--brief")) Print(analysis);
             var result = decompiler.Lower(analysis);
             foreach (var hole in result.Holes) Console.WriteLine($"  洞 0x{hole.Address:x} {hole.Reason}");

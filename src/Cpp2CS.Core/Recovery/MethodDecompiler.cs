@@ -6,6 +6,7 @@ using Cpp2CS.Machine.Lifting;
 using Cpp2CS.Recovery.Calls;
 using Cpp2CS.Recovery.Lowering;
 using Cpp2CS.Recovery.Memory;
+using Cpp2CS.Recovery.Shape;
 using Cpp2CS.Recovery.Typing;
 using Cpp2CS.Recovery.Values;
 
@@ -16,6 +17,8 @@ public sealed record MethodAnalysis(MethodRef Method, ulong Entry, MachineSignat
     IdiomResult Idioms, MemoryLayout Memory, ValueModel Values)
 {
     internal MethodEnvironment Environment { get; init; } = null!;
+    /// <summary>路径拆分复制的合流块数。</summary>
+    public int Splits { get; init; }
 }
 
 /// <summary>
@@ -101,10 +104,11 @@ public sealed class MethodDecompiler
         if (idioms.Errors.Count > 0)
             return RecoveryDiagnostics.Fail(entry, $"L2 {idioms.Errors[0]}", rule: "Prepare");
         var environment = new MethodEnvironment(method, signature, shapes);
+        var splits = PathSplitting.Run(function, f => ValueModel.Build(f, environment), lifter.Calls, lifter.Machine.Convention.StackPointer);
         if (!MemoryPromotion.Run(function, signature, environment.Shape, abi, lifter.Calls, lifter.Machine.Convention.StackPointer).TryGet(out var layout, out var memoryFailure))
             return memoryFailure;
         environment.Layout = layout;
         var values = ValueModel.Build(function, environment);
-        return new MethodAnalysis(method, entry, signature, function, idioms, layout, values) { Environment = environment };
+        return new MethodAnalysis(method, entry, signature, function, idioms, layout, values) { Environment = environment, Splits = splits };
     }
 }
