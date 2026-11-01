@@ -41,8 +41,10 @@ internal sealed class SourceModel
             var folder = Path.Combine(repository, layout.Folder);
             // Input 关闭默认编译项：只编译本目录顶层文件，另就地编译第三方 Il2CppDumper 源码（只参与绑定，不参与检查）
             var input = layout.Name == "Input";
+            // 本地文件（*.local.*）不进仓库，不参与检查
             var trees = Directory.EnumerateFiles(folder, "*.cs", input ? SearchOption.TopDirectoryOnly : SearchOption.AllDirectories)
-                .Where(p => !Path.GetRelativePath(folder, p).Split(Path.DirectorySeparatorChar).Any(s => s is "obj" or "bin"))
+                .Where(p => !Path.GetRelativePath(folder, p).Split(Path.DirectorySeparatorChar).Any(s => s is "obj" or "bin")
+                    && !Path.GetFileName(p).Contains(".local.", StringComparison.Ordinal))
                 .Order(StringComparer.Ordinal)
                 .Select(p => CSharpSyntaxTree.ParseText(File.ReadAllText(p), new(LanguageVersion.Preview), p)).ToArray();
             var dumper = Path.Combine(repository, "third_party", "Il2CppDumper", "Il2CppDumper");
