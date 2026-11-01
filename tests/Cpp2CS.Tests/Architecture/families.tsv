@@ -244,6 +244,7 @@ src/Cpp2CS.Core/Recovery/Construction/InlineConstructorsRules.cs	Recovery/Constr
 src/Cpp2CS.Core/Recovery/Construction/MergedAllocations.cs	Recovery/Construction
 src/Cpp2CS.Core/Recovery/Control/CheckRules.cs	Recovery/Control
 src/Cpp2CS.Core/Recovery/Control/StackCanaryRecognition.cs	Recovery/Control
+src/Cpp2CS.Core/Recovery/Control/StackCanaryRules.cs	Recovery/Control
 src/Cpp2CS.Core/Recovery/Control/SwitchesRules.cs	Recovery/Control
 src/Cpp2CS.Core/Recovery/Diagnostics/HoleLedger.cs	Recovery/Diagnostics
 src/Cpp2CS.Core/Recovery/Diagnostics/RecoveryDiagnostics.cs	Recovery/Diagnostics
@@ -261,7 +262,6 @@ src/Cpp2CS.Core/Recovery/Frames/DeadCopiesRules.cs	Recovery/Frames
 src/Cpp2CS.Core/Recovery/Frames/DeadFrameStores.cs	Recovery/Frames
 src/Cpp2CS.Core/Recovery/Frames/FrameArgumentsRules.cs	Recovery/Frames
 src/Cpp2CS.Core/Recovery/Frames/FrameBranchSnapshots.cs	Recovery/Frames
-src/Cpp2CS.Core/Recovery/Frames/FrameConstantIndices.cs	Recovery/Frames
 src/Cpp2CS.Core/Recovery/Frames/FrameCopiesRules.cs	Recovery/Frames
 src/Cpp2CS.Core/Recovery/Frames/FrameCopySpans.cs	Recovery/Frames
 src/Cpp2CS.Core/Recovery/Frames/FrameEvidence.cs	Recovery/Frames
@@ -287,6 +287,8 @@ src/Cpp2CS.Core/Recovery/Generics/SharedReferencesRules.cs	Recovery/Generics
 src/Cpp2CS.Core/Recovery/Generics/SharedRuntimeHelpers.cs	Recovery/Generics
 src/Cpp2CS.Core/Recovery/Generics/SharedValuesRules.cs	Recovery/Generics
 src/Cpp2CS.Core/Recovery/Kernel/Maintenance.cs	Recovery/Kernel
+src/Cpp2CS.Core/Recovery/Kernel/PreparePlan.cs	Recovery/Kernel
+src/Cpp2CS.Core/Recovery/Kernel/PrepareSteps.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Lowering/ArgumentSite.cs	Recovery/Lowering
 src/Cpp2CS.Core/Recovery/Lowering/BodyLowering.cs	Recovery/Lowering
 src/Cpp2CS.Core/Recovery/Lowering/InliningRules.cs	Recovery/Lowering
@@ -302,7 +304,6 @@ src/Cpp2CS.Core/Recovery/Memory/MemoryRules.cs	Recovery/Memory
 src/Cpp2CS.Core/Recovery/Memory/PinnedArrayRecognition.cs	Recovery/Memory
 src/Cpp2CS.Core/Recovery/Memory/StringSpansRules.cs	Recovery/Memory
 src/Cpp2CS.Core/Recovery/MethodRecovery.cs	Recovery
-src/Cpp2CS.Core/Recovery/PreparePipeline.cs	Recovery
 src/Cpp2CS.Core/Recovery/RecoveryPipeline.cs	Recovery
 src/Cpp2CS.Core/Recovery/RecoveryTarget.cs	Recovery
 src/Cpp2CS.Core/Recovery/Rules/LoweringScope.cs	Recovery/Rules
@@ -332,6 +333,7 @@ src/Cpp2CS.Core/Recovery/State/TypesState.cs	Recovery/State
 src/Cpp2CS.Core/Recovery/State/TypingInputsFactory.cs	Recovery/State
 src/Cpp2CS.Core/Recovery/Structs/CallArgumentProjection.cs	Recovery/Structs
 src/Cpp2CS.Core/Recovery/Structs/FragmentsRules.cs	Recovery/Structs
+src/Cpp2CS.Core/Recovery/Structs/ProjectionsRules.cs	Recovery/Structs
 src/Cpp2CS.Core/Recovery/Structs/ScalarPhiProjection.cs	Recovery/Structs
 src/Cpp2CS.Core/Recovery/Structs/StructCopiesRules.cs	Recovery/Structs
 src/Cpp2CS.Core/Recovery/Structs/StructEvidence.cs	Recovery/Structs

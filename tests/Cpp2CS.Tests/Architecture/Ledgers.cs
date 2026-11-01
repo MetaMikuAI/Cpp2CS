@@ -58,18 +58,18 @@ internal static class Ledgers
     }
 
     /// <summary>
-    /// 与基准提交比较棘轮：上升的键必须由本次新增的转移条目覆盖（数量之和不少于上升量），且对应的源键下降不少于转移量；
-    /// 否则只能经用户确认（提交说明中的确认标记，由提交级检查核对）。
+    /// 与基准提交比较棘轮：转移条目的源键下降必须不少于转出的数量，否则失败。上升量未被本次新增的转移条目覆盖的键
+    /// 列入 <paramref name="unconfirmed"/>：只能经用户确认，确认标记由提交级检查核对。
     /// </summary>
     public static void CheckRises(IReadOnlyDictionary<string, int> baseline, IReadOnlyDictionary<string, int> recorded,
-        IReadOnlyList<Transfer> baseTransfers, IReadOnlyList<Transfer> transfers, List<string> failures)
+        IReadOnlyList<Transfer> baseTransfers, IReadOnlyList<Transfer> transfers, List<string> failures, List<string> unconfirmed)
     {
         var added = transfers.Where(t => !baseTransfers.Contains(t)).ToList();
         foreach (var key in recorded.Keys.Where(k => recorded[k] > baseline.GetValueOrDefault(k)))
         {
             var rise = recorded[key] - baseline.GetValueOrDefault(key);
             var covered = added.Where(t => t.Target == key).Sum(t => t.Count);
-            if (covered < rise) failures.Add($"棘轮上调 {key}：{baseline.GetValueOrDefault(key)} → {recorded[key]}，转移清单只覆盖 {covered}（其余须经用户确认）");
+            if (covered < rise) unconfirmed.Add($"棘轮上调 {key}：{baseline.GetValueOrDefault(key)} → {recorded[key]}，转移清单只覆盖 {covered}");
         }
         foreach (var group in added.GroupBy(t => t.Source))
         {
@@ -163,6 +163,8 @@ internal static class Ledgers
         const BindingFlags members = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
         var result = new List<Registration>();
         // 按属性类型名经反射读取，不引用 Core 的内部类型
+        var plan = ((Array)assembly.GetType("Cpp2CS.Recovery.PreparePlan")!.GetField("Entries", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!)
+            .Cast<object>().Select(e => (string)e.GetType().GetProperty("Id")!.GetValue(e)!).ToArray();
         object? Get(Attribute attribute, string property) => attribute.GetType().GetProperty(property)!.GetValue(attribute);
         foreach (var method in assembly.GetTypes().SelectMany(t => t.GetMethods(members)))
             foreach (var attribute in method.GetCustomAttributes())
@@ -172,7 +174,10 @@ internal static class Ledgers
                 if (attribute.GetType().Name == "StepAttribute")
                 {
                     var kind = Get(attribute, "Kind")!.ToString()!;
-                    result.Add(new(Get(attribute, "Phase")!.ToString()!, kind, id!, (string)Get(attribute, "Name")!, order, string.Join(",", (string[])Get(attribute, "After")!),
+                    var phase = Get(attribute, "Phase")!.ToString()!;
+                    // Prepare 的顺序由计划表给出：记计划表中的位置（从 1 起），不在表中记 0
+                    if (phase == "Prepare") order = Array.IndexOf(plan, id) + 1;
+                    result.Add(new(phase, kind, id!, (string)Get(attribute, "Name")!, order, string.Join(",", (string[])Get(attribute, "After")!),
                         kind == "Rewrite" ? Get(attribute, "Invalidates")!.ToString()! : "", declared));
                 }
                 else if (attribute.GetType().Name == "RuleAttribute")
@@ -197,7 +202,7 @@ internal static class Ledgers
     }
 
     /// <summary>同一排序类别内 Order 重复的组（I7a）：按名字决定顺序，K2 之前以豁免清单登记。</summary>
-    public static IEnumerable<Access> DuplicateOrders(IEnumerable<Registration> registry) => registry.GroupBy(r => (r.Category, r.Order))
+    public static IEnumerable<Access> DuplicateOrders(IEnumerable<Registration> registry) => registry.Where(r => r.Category != "Prepare").GroupBy(r => (r.Category, r.Order))
         .Where(g => g.Count() > 1).Select(g => new Access("I7a", $"{g.Key.Category}/Order={g.Key.Order}：{string.Join("、", g.Select(r => r.Id))}", "registry", 0));
 
     /// <summary>PassList.Run 的步骤名重复：L2 内部（I7b）、Prepare 内部与 Prepare 和 L2 之间（I7a）。</summary>

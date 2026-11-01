@@ -16,6 +16,7 @@ internal static class FloatsRules
         return widths;
     }
 
+    [Step("values.narrow-scalar-vectors", StepPhase.Prepare, StepKind.Rewrite)]
     internal static void NormalizeScalarVectors(this RecoveryScope ctx) => ScalarVectorNarrowing.Run(ctx.function.Blocks, call => ctx.ScalarWidths(call, false), call => ctx.ScalarWidths(call, true), ScalarInputs(ctx));
     internal static void NarrowTypedScalars(this RecoveryScope ctx)
     {

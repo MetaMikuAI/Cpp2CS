@@ -6,6 +6,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class CleanupThunksRules
 {
+    [Step("calls.cleanup-thunks", StepPhase.Prepare, StepKind.Rewrite)]
     internal static void NormalizeCleanupThunks(this RecoveryScope ctx)
     {
         foreach (var block in ctx.function.Blocks)

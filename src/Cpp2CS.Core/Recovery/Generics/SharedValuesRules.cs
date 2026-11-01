@@ -17,6 +17,7 @@ internal static class SharedValuesRules
         return true;
     }
 
+    [Step("generics.shared-values", StepPhase.Prepare, StepKind.Rewrite)]
     internal static void NormalizeSharedValues(this RecoveryScope ctx)
     {
         var original = ctx.function.Blocks.SelectMany(b => b.Statements).ToArray();

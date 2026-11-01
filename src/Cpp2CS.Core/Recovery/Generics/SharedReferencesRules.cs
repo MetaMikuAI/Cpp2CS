@@ -4,6 +4,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class SharedReferencesRules
 {
+    [Step("generics.bind-shared-references", StepPhase.Prepare, StepKind.Rewrite)]
     internal static void BindSharedReferences(this RecoveryScope ctx)
     {
         TypeRef Type(TypeRef type) => type.Substitute(ctx.method.TypeArguments, ctx.method.MethodArguments);

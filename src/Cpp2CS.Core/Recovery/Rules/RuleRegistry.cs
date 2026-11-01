@@ -10,12 +10,19 @@ namespace Cpp2CS.Recovery;
 /// <summary>一个已注册的步骤：Id、中文名、种类、失效声明与适配后的入口；<see cref="CanFail"/> 表示方法返回 RecoveryFailure?。</summary>
 internal sealed record RegisteredStep(string Id, string Name, StepKind Kind, AnalysisInvalidation Invalidates, bool CanFail, Func<RecoveryScope, RecoveryFailure?> Run);
 
+/// <summary>一个已注册的 Prepare 步骤；<see cref="CanStop"/> 表示方法返回 PrepareOutcome。</summary>
+internal sealed record RegisteredPrepareStep(string Id, StepKind Kind, bool CanStop, Func<RecoveryScope, PreparedMethod, PrepareOutcome> Run);
+
 internal static class RuleRegistry
 {
     private const BindingFlags Members = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
     private static readonly MethodInfo[] Methods = typeof(RecoveryScope).Assembly.GetTypes().SelectMany(t => t.GetMethods(Members)).ToArray();
     public static readonly RegisteredStep[] Analyses = OrderSteps(StepPhase.Analyze);
     private static readonly IReadOnlyDictionary<string, RegisteredStep> StepsById = Analyses.ToDictionary(s => s.Id, StringComparer.Ordinal);
+    /// <summary>Prepare 阶段的步骤，按 Id；顺序由 <see cref="PreparePlan"/> 给出。</summary>
+    public static readonly IReadOnlyDictionary<string, RegisteredPrepareStep> Prepares = Methods
+        .Select(m => (Method: m, Attribute: m.GetCustomAttribute<StepAttribute>())).Where(p => p.Attribute?.Phase == StepPhase.Prepare)
+        .ToDictionary(p => p.Attribute!.Id, p => new RegisteredPrepareStep(p.Attribute!.Id, p.Attribute.Kind, p.Method.ReturnType == typeof(PrepareOutcome), AdaptPrepare(p.Method)), StringComparer.Ordinal);
     public static readonly Func<LoweringScope, Block, Stmt, List<ManagedStatement>, RecoveryResult<bool>>[] Statements = Rules<Func<LoweringScope, Block, Stmt, List<ManagedStatement>, RecoveryResult<bool>>>(RuleKind.Statement);
     public static readonly Func<LoweringScope, Define, List<ManagedStatement>, RecoveryResult<bool>>[] Defines = Rules<Func<LoweringScope, Define, List<ManagedStatement>, RecoveryResult<bool>>>(RuleKind.Define);
     public static readonly Func<LoweringScope, Store, List<ManagedStatement>, RecoveryResult<bool>>[] Stores = Rules<Func<LoweringScope, Store, List<ManagedStatement>, RecoveryResult<bool>>>(RuleKind.Store);
@@ -55,6 +62,22 @@ internal static class RuleRegistry
         foreach (var group in rules.GroupBy(p => p.Attribute!.Order).Where(g => g.Count() > 1))
             throw new InvalidOperationException($"{kind} 规则的 Order {group.Key} 重复：{string.Join("、", group.Select(p => p.Attribute!.Id))}");
         return rules.OrderBy(p => p.Attribute!.Order).Select(p => Adapt<TDelegate>(p.Method)).ToArray();
+    }
+
+    /// <summary>Prepare 步骤的适配：参数为作用域，可选地再接 PreparedMethod；其余可选参数取默认值；void 视为继续。</summary>
+    private static Func<RecoveryScope, PreparedMethod, PrepareOutcome> AdaptPrepare(MethodInfo method)
+    {
+        var scope = Expression.Parameter(typeof(RecoveryScope), "scope");
+        var prepared = Expression.Parameter(typeof(PreparedMethod), "prepared");
+        var arguments = method.GetParameters().Select((p, i) => i == 0 && p.ParameterType == typeof(RecoveryScope) ? scope
+            : p.ParameterType == typeof(PreparedMethod) ? (Expression)prepared
+            : p.HasDefaultValue ? Expression.Constant(p.DefaultValue, p.ParameterType)
+            : throw new InvalidOperationException($"Prepare 步骤 {method.DeclaringType!.Name}.{method.Name} 的参数 {p.Name} 无法提供")).ToArray();
+        var call = Expression.Call(method, arguments);
+        Expression body = method.ReturnType == typeof(PrepareOutcome) ? call
+            : method.ReturnType == typeof(void) ? Expression.Block(call, Expression.Constant(PrepareOutcome.Continue))
+            : throw new InvalidOperationException($"Prepare 步骤 {method.DeclaringType!.Name}.{method.Name} 的返回类型须为 void 或 PrepareOutcome");
+        return Expression.Lambda<Func<RecoveryScope, PreparedMethod, PrepareOutcome>>(body, scope, prepared).Compile();
     }
 
     private static TDelegate Adapt<TDelegate>(MethodInfo method)

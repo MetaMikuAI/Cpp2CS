@@ -54,6 +54,34 @@ InvocationOutput	Rule	exceptions.throwing-invocation	900			ExceptionsRules.Throw
 ParameterBinding	Rule	structs.bind-register-argument	100			StructRegistersRules.PrepareStructArgument	
 ParameterBinding	Rule	generics.bind-shared-argument	150			SharedValuesRules.PrepareSharedArgument	
 ParameterBinding	Rule	structs.bind-indirect-argument	200			StructIndirectRules.PrepareIndirectArgument	
+Prepare	Analysis	signature.bind	1			SignatureBinding.Bind	
+Prepare	Rewrite	kernel.lift	2		All	PrepareSteps.Lift	
+Prepare	Rewrite	kernel.idioms	3		All	PrepareSteps.RunIdioms	
+Prepare	Rewrite	generics.bind-shared-references	4		All	SharedReferencesRules.BindSharedReferences	
+Prepare	Rewrite	kernel.promote-private-frame-slots	5		All	PrepareSteps.PromotePrivateFrameSlots	
+Prepare	Rewrite	generics.shared-fields	6		All	SharedFieldsRules.NormalizeSharedFields	
+Prepare	Rewrite	generics.shared-values	7		All	SharedValuesRules.NormalizeSharedValues	
+Prepare	Rewrite	control.stack-canary	8		All	StackCanaryRules.RecognizeStackCanary	
+Prepare	Rewrite	calls.split-identity-choices	9		All	DelegatesRules.NormalizeDelegateChoices	
+Prepare	Analysis	kernel.idiom-errors	10			PrepareSteps.IdiomErrors	
+Prepare	Rewrite	values.narrow-scalar-vectors	11		All	FloatsRules.NormalizeScalarVectors	
+Prepare	Rewrite	structs.vector-phi-projection	12		All	ProjectionsRules.ProjectVectorPhis	
+Prepare	Rewrite	structs.call-argument-projection	13		All	ProjectionsRules.ProjectCallArguments	
+Prepare	Rewrite	calls.trim-indirect-arguments	14		All	CallTrimmingRules.TrimIndirectArguments	
+Prepare	Rewrite	structs.scalar-phi-projection	15		All	ProjectionsRules.ProjectScalarPhis	
+Prepare	Rewrite	kernel.remove-dead	16		All	PrepareSteps.RemoveDead	
+Prepare	Rewrite	kernel.frame-writebacks	17		All	PrepareSteps.RemoveFrameWritebacks	
+Prepare	Rewrite	kernel.frame-constant-indices	18		All	PrepareSteps.IndexConstantFrames	
+Prepare	Rewrite	frames.managed-promotion	19		All	FramesRules.PromoteManagedFrames	
+Prepare	Rewrite	kernel.propagate-constant-indices	20		All	PrepareSteps.PropagateConstantIndices	
+Prepare	Rewrite	calls.cleanup-thunks	21		All	CleanupThunksRules.NormalizeCleanupThunks	
+Prepare	Rewrite	calls.outlined-calls	22		All	OutlinedCallsRules.NormalizeOutlinedCalls	
+Prepare	Rewrite	kernel.delegate-calls	23		All	PrepareSteps.NormalizeDelegateCalls	
+Prepare	Rewrite	exceptions.null-branches	24		All	ExceptionsRules.PruneNullBranches	
+Prepare	Analysis	kernel.residual-holes	25			PrepareSteps.ResidualHoles	
+Prepare	Analysis	kernel.blocks	26			PrepareSteps.ResetBlocks	
+Prepare	Rewrite	exceptions.regions	27		All	ExceptionsRules.PrepareRegions	
+Prepare	Analysis	kernel.problem-holes	28			PrepareSteps.ProblemHoles	
 Result	Rule	structs.register-result	100			StructRegistersRules.RegisterStructResult	
 Statement	Rule	frames.lower-copy	100			FrameCopiesRules.LowerFrameCopy	
 Statement	Rule	frames.lower-initializer	200			FramesRules.LowerFrameInitializer	

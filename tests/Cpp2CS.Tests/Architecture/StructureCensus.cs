@@ -169,9 +169,9 @@ internal sealed class StructureCensus
         }
         foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
         {
-            // 改写步骤：Step 属性的种类参数为 StepKind.Rewrite
+            // Analyze 的改写步骤：Step(id, StepPhase.Analyze, StepKind.Rewrite)。Prepare 的步骤都改写 IR，没有只读检查，不计入
             if (semantic.GetDeclaredSymbol(method)?.GetAttributes().Any(a => a.AttributeClass?.Name == "StepAttribute"
-                    && a.ConstructorArguments.Any(c => c.Type?.Name == "StepKind" && c.Value is 1)) == true)
+                    && a.ConstructorArguments is [_, { Type.Name: "StepPhase", Value: 1 }, { Type.Name: "StepKind", Value: 1 }]) == true)
                 Count("machine-pass-steps", scope);
             var declared = $"{method.Ancestors().OfType<BaseTypeDeclarationSyntax>().FirstOrDefault()?.Identifier.Text}.{method.Identifier.Text}";
             if (!MethodScopes.TryGetValue(declared, out var scopes)) MethodScopes[declared] = scopes = [];
@@ -276,7 +276,8 @@ internal sealed class StructureCensus
                     ReturnStatementSyntax r => r.Expression,
                     _ => null,
                 } : null);
-            if (body is InvocationExpressionSyntax call && semantic.GetSymbolInfo(call).Symbol is IMethodSymbol callee)
+            // 内核的维护接口（Maintenance、Editing）不是步骤体，转调它不使它成为注册方法
+            if (body is InvocationExpressionSyntax call && semantic.GetSymbolInfo(call).Symbol is IMethodSymbol callee && callee.ContainingType.Name is not ("Maintenance" or "Editing"))
                 forwarded[method] = (callee.ReducedFrom ?? callee).OriginalDefinition;
         }
     }
@@ -412,9 +413,10 @@ internal sealed class StructureCensus
         return null;
     }
 
-    /// <summary>对 MethodRecovery 实例成员的引用（I10）与 RecoveryScope.owner 的访问次数。</summary>
+    /// <summary>对 MethodRecovery 实例成员的引用（I10）与 RecoveryScope.owner 的访问次数。终态允许 Recovery/Kernel 与 Recovery/Services 访问，不计。</summary>
     private void Members(SemanticModel semantic, SyntaxTree tree, string file, string scope)
     {
+        if (scope is "Recovery/Kernel" or "Recovery/Services") return;
         foreach (var name in tree.GetRoot().DescendantNodes().OfType<SimpleNameSyntax>())
         {
             var symbol = semantic.GetSymbolInfo(name).Symbol;

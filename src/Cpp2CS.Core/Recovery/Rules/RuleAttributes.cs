@@ -6,6 +6,9 @@ namespace Cpp2CS.Recovery;
 /// <summary>步骤所在的阶段。</summary>
 internal enum StepPhase
 {
+    /// <summary>Prepare：顺序由 Prepare 计划表给出，不使用 Order 与 After。</summary>
+    Prepare,
+    /// <summary>Analyze：按 After 拓扑排序，同时可运行的按 Order 从小到大。</summary>
     Analyze,
 }
 
@@ -27,8 +30,9 @@ internal enum AnalysisInvalidation
 }
 
 /// <summary>
-/// 步骤 <c>void M()</c> 或 <c>RecoveryFailure? M()</c>。Analyze 阶段按 After 拓扑排序，同时可运行的按 Order 从小到大；
+/// 步骤。Analyze 阶段的步骤为 <c>void M(scope)</c> 或 <c>RecoveryFailure? M(scope)</c>，按 After 拓扑排序，同时可运行的按 Order 从小到大；
 /// 同一阶段内 Order 唯一（分析步骤与改写步骤在同一个拓扑排序里，不分种类查重）。After 写依赖步骤的 Id。
+/// Prepare 阶段的步骤为 <c>void M(scope[, PreparedMethod])</c> 或 <c>PrepareOutcome M(scope[, PreparedMethod])</c>，顺序由计划表给出。
 /// </summary>
 [AttributeUsage(AttributeTargets.Method)]
 internal sealed class StepAttribute(string id, StepPhase phase, StepKind kind) : Attribute

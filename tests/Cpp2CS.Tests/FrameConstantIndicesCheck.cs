@@ -37,7 +37,7 @@ internal static class FrameConstantIndicesCheck
             MachineFunction.AddEdge(entry, left); MachineFunction.AddEdge(entry, right);
             MachineFunction.AddEdge(left, join); MachineFunction.AddEdge(right, join);
             var function = new MachineFunction { Entry = entry.Start, Range = new(entry.Start, 0x144, CodeRegion.Managed, default), Blocks = [entry, left, right, join] };
-            var changed = FrameConstantIndices.Run(function);
+            var changed = Cpp2CS.Machine.Storage.FrameIndexAnalysis.Run(function);
             a.Equal(mode is "same" or "snapshot" ? 1 : 0, changed, mode);
             if (changed != 0) a.Equal(new FrameAddress(-64), ((Store)join.Statements[^2]).Target, "使用读取时快照，保留实际栈写入");
         }

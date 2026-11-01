@@ -6,8 +6,10 @@ namespace Cpp2CS.Recovery;
 
 internal static class OutlinedCallsRules
 {
-    internal static void NormalizeOutlinedCalls(this RecoveryScope ctx, IdiomResult callerIdioms)
+    [Step("calls.outlined-calls", StepPhase.Prepare, StepKind.Rewrite)]
+    internal static void NormalizeOutlinedCalls(this RecoveryScope ctx, PreparedMethod prepared)
     {
+        var callerIdioms = prepared.Idioms;
         var changed = false;
         foreach (var call in ctx.function.Blocks.SelectMany(b => b.Statements).OfType<Call>()
             .Where(c => c is { Op: null, Kind: CallKind.Direct, Target: Const }).ToArray())

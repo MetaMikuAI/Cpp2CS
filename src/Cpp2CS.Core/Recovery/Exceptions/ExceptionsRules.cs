@@ -35,6 +35,45 @@ internal static class ExceptionsRules
         ctx.Rewriter.Insert(block, index, statement);
     }
 
+    /// <summary>有落地块时反复剪除异常判空分支并清理，直到不再变化；超过安全上限时留洞。</summary>
+    [Step("exceptions.null-branches", StepPhase.Prepare, StepKind.Rewrite)]
+    internal static void PruneNullBranches(RecoveryScope scope)
+    {
+        if (!scope.Maintain.Fixpoint("exceptions.null-branches", Maintenance.SafetyBudget, () =>
+            {
+                if (!ExceptionNullBranches.Run(scope.facts, scope.function)) return false;
+                scope.Edit.Cleanup("exceptions.null-branches");
+                return true;
+            }))
+            scope.Hole(scope.entry, $"不动点 异常判空剪枝超过 {Maintenance.SafetyBudget} 轮未收敛", rule: "Fixpoint");
+    }
+
+    /// <summary>
+    /// 异常区域。失败时记洞，块视图取入口的正常边闭包，毒化其余语句。
+    /// Handler 是受保护块的异常后继，不能把受保护块本身排除，因此只保留正常边闭包。
+    /// </summary>
+    [Step("exceptions.regions", StepPhase.Prepare, StepKind.Rewrite)]
+    internal static void PrepareRegions(RecoveryScope scope)
+    {
+        if (scope.function.Blocks.FirstOrDefault(b => b.IsLandingPad) is not { } landing || scope.PrepareExceptionRegions())
+            return;
+        var hole = scope.Hole(landing.Start, $"异常区域 {scope.State.Exceptions.exceptionLayout?.Reason ?? "尚未恢复"} {scope.State.Exceptions.exceptionLayout?.Detail}", rule: "Prepare");
+        var normal = new HashSet<Block>();
+        var pending = new Stack<Block>();
+        pending.Push(scope.function.EntryBlock);
+        while (pending.TryPop(out var block))
+            if (!block.IsLandingPad && normal.Add(block))
+                foreach (var successor in block.NormalSuccessors)
+                    pending.Push(successor);
+        scope.Maintain.Blocks(scope.function.Blocks.Where(normal.Contains).ToArray(), "exceptions.normal-closure");
+        foreach (var statement in scope.function.Blocks.Where(b => !normal.Contains(b)).SelectMany(b => b.Statements))
+        {
+            scope.Poison(statement, hole);
+            if (statement is Phi phi)
+                scope.Poison(phi.Target, hole);
+        }
+    }
+
     internal static bool PrepareExceptionRegions(this RecoveryScope ctx)
     {
         ctx.State.Exceptions.exceptionLayout = ExceptionRegionBuilder.Build(ctx.facts, ctx.function);

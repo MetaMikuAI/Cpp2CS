@@ -8,6 +8,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class DelegatesRules
 {
+    [Step("calls.split-identity-choices", StepPhase.Prepare, StepKind.Rewrite)]
     internal static void NormalizeDelegateChoices(this RecoveryScope ctx)
     {
         var definitions = ctx.function.Blocks.SelectMany(b => b.Statements.OfType<Define>()).ToDictionary(d => d.Target, d => d.Value);

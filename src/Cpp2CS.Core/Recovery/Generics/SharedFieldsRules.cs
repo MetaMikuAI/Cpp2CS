@@ -9,6 +9,7 @@ internal static class SharedFieldsRules
     internal static Intrinsic FieldAddress(Expr receiver, Symbol field) => new("managed_field_address", [receiver, field], 64);
     internal static TypeRef FieldType(FieldRef field) => field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
 
+    [Step("generics.shared-fields", StepPhase.Prepare, StepKind.Rewrite)]
     internal static void NormalizeSharedFields(this RecoveryScope ctx)
     {
         foreach (var block in ctx.function.Blocks)

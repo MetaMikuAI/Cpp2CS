@@ -654,4 +654,13 @@ internal static class FramesRules
         foreach (var address in FrameInitialization.Uninitialized(body, all, Under))
             ctx.Hole(address, "栈 结构体叶子未在所有路径初始化", rule: "ProveFrameInitialization");
     }
+
+    /// <summary>托管帧提升，前后各收窄一次标量向量。</summary>
+    [Step("frames.managed-promotion", StepPhase.Prepare, StepKind.Rewrite)]
+    internal static void PromoteManagedFrames(RecoveryScope scope, PreparedMethod prepared)
+    {
+        scope.NormalizeScalarVectors();
+        ManagedFramePromotion.Run(scope.facts, scope.function, prepared.Abi, prepared.Calls, prepared.StackPointer, prepared.Signature.Return);
+        scope.NormalizeScalarVectors();
+    }
 }

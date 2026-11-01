@@ -1,1 +1,8 @@
 # 约束标签	成员	位置（文件或目录）	工作包	到期里程碑	理由
+I3	CleanupThunksRules.PromotePrivateFrameSlots	src/Cpp2CS.Core/Recovery/Calls/CleanupThunksRules.cs	K2	常设	清理 thunk 归一后提升私有帧槽，再传播
+I3	CleanupThunksRules.PromotePrivateFrameSlots	src/Cpp2CS.Core/Recovery/Calls/OutlinedCallsRules.cs	K2	常设	外提调用展开并重跑 L2 符号化之后提升私有帧槽
+I3	CleanupThunksRules.PromotePrivateFrameSlots	src/Cpp2CS.Core/Recovery/Generics/SharedValuesRules.cs	K2	常设	共享值归一（重做栈保护识别之后）提升私有帧槽
+I3	CleanupThunksRules.PromotePrivateFrameSlots	src/Cpp2CS.Core/Recovery/Kernel/PrepareSteps.cs	K2	常设	帧常量下标传播之后提升私有帧槽
+I3	FloatsRules.NormalizeScalarVectors	src/Cpp2CS.Core/Recovery/Frames/FramesRules.cs	K2	常设	托管帧提升前后各收窄一次标量向量（2 处调用）
+I3	StackCanaryRecognition.Run	src/Cpp2CS.Core/Recovery/Generics/SharedValuesRules.cs	K2	常设	共享值归一以值展开函数重做栈保护识别
+I3	CallTrimmingRules.TrimIndirectArguments	src/Cpp2CS.Core/Recovery/Typing/TypingRules.cs	K2	常设	类型推断之后按已知类型再次裁剪间接实参（typed: true）

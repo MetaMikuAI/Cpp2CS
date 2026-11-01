@@ -105,7 +105,9 @@ internal static class ArchitectureCheck
         {
             string[] Show(string path) => Git(model.Repository, "show", $"{baseRevision}:{Path.GetRelativePath(model.Repository, path).Replace('\\', '/')}");
             var baseline = new SortedDictionary<string, int>(Ledgers.ReadRatchetLines(Show(paths.Ratchet)), StringComparer.Ordinal);
-            Ledgers.CheckRises(baseline, Ledgers.ReadRatchet(paths.Ratchet), Ledgers.ReadTransfers(Show(paths.Transfers)), transfers, failures);
+            var unconfirmed = new List<string>();
+            Ledgers.CheckRises(baseline, Ledgers.ReadRatchet(paths.Ratchet), Ledgers.ReadTransfers(Show(paths.Transfers)), transfers, failures, unconfirmed);
+            foreach (var rise in unconfirmed) Console.WriteLine($"! 须经用户确认（提交说明带确认标记，由提交级检查核对）：{rise}");
         }
         Ledgers.CheckPairs("族归属快照", Ledgers.ReadPairs(paths.Families), Ledgers.CurrentFamilies(model), failures);
         Ledgers.CheckIdPrefixes(registry, census.MethodScopes, failures);

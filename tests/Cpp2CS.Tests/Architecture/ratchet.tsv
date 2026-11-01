@@ -51,7 +51,7 @@ new-block/Machine	2
 new-block/Recovery/Calls	2
 new-block/Recovery/Memory	1
 new-block/Recovery/State	1
-owner-access/Recovery	7
+owner-access/Recovery	1
 owner-access/Recovery/Calls	20
 owner-access/Recovery/Construction	2
 owner-access/Recovery/Frames	25
@@ -72,7 +72,7 @@ propagate-run/Recovery/Frames	1
 round-loops/Recovery/Calls	1
 round-loops/Recovery/Frames	1
 scope-construction/Tests	6
-scope-extension-methods/Recovery	2
+scope-extension-methods/Recovery	1
 scope-extension-methods/Recovery/Analysis	1
 scope-extension-methods/Recovery/Calls	26
 scope-extension-methods/Recovery/Construction	5
@@ -81,6 +81,7 @@ scope-extension-methods/Recovery/Diagnostics	6
 scope-extension-methods/Recovery/Exceptions	11
 scope-extension-methods/Recovery/Frames	45
 scope-extension-methods/Recovery/Generics	7
+scope-extension-methods/Recovery/Kernel	1
 scope-extension-methods/Recovery/Lowering	12
 scope-extension-methods/Recovery/Memory	22
 scope-extension-methods/Recovery/Runtime	13
@@ -89,6 +90,7 @@ scope-extension-methods/Recovery/State	1
 scope-extension-methods/Recovery/Structs	28
 scope-extension-methods/Recovery/Typing	3
 scope-extension-methods/Recovery/Values	18
+shared-step-body-call-sites/I3	8
 single-successor-pattern/Idioms	22
 single-successor-pattern/Machine	2
 single-successor-pattern/Recovery/Calls	5
@@ -102,15 +104,16 @@ ssa-build/Facts	1
 ssa-build/Idioms	1
 ssa-build/Machine	3
 ssa-build/Recovery/Frames	1
-state-access/Recovery	6
+state-access/Recovery	2
 state-access/Recovery/Analysis	3
 state-access/Recovery/Calls	44
 state-access/Recovery/Construction	9
 state-access/Recovery/Control	7
 state-access/Recovery/Diagnostics	1
-state-access/Recovery/Exceptions	69
+state-access/Recovery/Exceptions	71
 state-access/Recovery/Frames	120
 state-access/Recovery/Generics	18
+state-access/Recovery/Kernel	2
 state-access/Recovery/Lowering	56
 state-access/Recovery/Memory	22
 state-access/Recovery/Rules	1
@@ -147,7 +150,7 @@ use-scan/Recovery/Memory	5
 use-scan/Recovery/Runtime	3
 use-scan/Recovery/Structs	4
 use-scan/Recovery/Values	3
-whitelist-entries/I10	53
+whitelist-entries/I10	50
 whitelist-entries/I2a	1
 whitelist-entries/I2b	44
 whitelist-entries/I2c	13

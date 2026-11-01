@@ -5,6 +5,7 @@ namespace Cpp2CS.Recovery;
 
 internal static class CallTrimmingRules
 {
+    [Step("calls.trim-indirect-arguments", StepPhase.Prepare, StepKind.Rewrite)]
     internal static void TrimIndirectArguments(this RecoveryScope ctx, bool typed = false)
     {
         var changed = false;
