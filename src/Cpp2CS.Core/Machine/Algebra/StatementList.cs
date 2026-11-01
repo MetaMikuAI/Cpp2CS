@@ -27,11 +27,26 @@ public sealed class StatementList : IList<Stmt>, IReadOnlyList<Stmt>
     }
     public int Count => items.Count;
     public bool IsReadOnly => false;
-    public void Add(Stmt item) { var editor = Editor; editor?.Writing(); items.Add(item); editor?.Entered(item); }
+    public void Add(Stmt item) => Insert(items.Count, item);
     public void AddRange(IEnumerable<Stmt> values) { foreach (var item in values) Add(item); }
-    public void Insert(int index, Stmt item) { var editor = Editor; editor?.Writing(); items.Insert(index, item); editor?.Entered(item); }
+    public void Insert(int index, Stmt item)
+    {
+        var editor = Editor;
+        editor?.Writing();
+        items.Insert(index, item);
+        editor?.Entered(item);
+        editor?.Positions?.Inserted(Owner!, index);
+    }
     public void InsertRange(int index, IEnumerable<Stmt> values) { foreach (var item in values) Insert(index++, item); }
-    public void RemoveAt(int index) { var editor = Editor; editor?.Writing(); var item = items[index]; items.RemoveAt(index); editor?.Left(item, null); }
+    public void RemoveAt(int index)
+    {
+        var editor = Editor;
+        editor?.Writing();
+        var item = items[index];
+        items.RemoveAt(index);
+        editor?.Left(item, null);
+        editor?.Positions?.Removed(Owner!, index);
+    }
     public bool Remove(Stmt item) { var index = items.IndexOf(item); if (index < 0) return false; RemoveAt(index); return true; }
     public void RemoveRange(int index, int count) { for (var i = 0; i < count; i++) RemoveAt(index); }
     public int RemoveAll(Predicate<Stmt> predicate)

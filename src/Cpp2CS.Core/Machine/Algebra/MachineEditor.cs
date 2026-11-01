@@ -9,6 +9,13 @@ internal interface IStatementKeyed
     void Replace(Stmt previous, Stmt? replacement);
 }
 
+/// <summary>按块内位置记录的区间（例如异常片段）：语句插入与删除时由编辑器通知，位置随之移动。</summary>
+internal interface IStatementPositions
+{
+    void Inserted(Block block, int index);
+    void Removed(Block block, int index);
+}
+
 /// <summary>以语句对象为键的证据表（随实例的证据，例如每个调用副本各自的解析结果）：每次对象被替换都由编辑器通知迁移。</summary>
 internal interface IStatementInstances
 {
@@ -25,6 +32,9 @@ internal sealed class MachineEditor
     private IReadOnlyList<IStatementKeyed> tables = [];
     private Action<Stmt, Stmt?>? diagnostics;
     private readonly Dictionary<long, int> live = [];
+
+    /// <summary>按块内位置记录的区间；插入与删除时通知。整体替换语句序列时位置不随之变化。</summary>
+    internal IStatementPositions? Positions { get; set; }
 
     /// <summary>IR 版本：语句或块每有一次变化递增。</summary>
     public int Version { get; private set; }

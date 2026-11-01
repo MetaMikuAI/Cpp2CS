@@ -87,7 +87,7 @@ internal sealed class Maintenance(MethodSession ctx)
 
     internal void Record(string action, string reason, Action run)
     {
-        if (action is "propagate" or "remove-dead" or "cleanup" or "simplify" or "remove-dead-definitions")
+        if (action is "propagate" or "remove-dead" or "cleanup" or "simplify")
             Allowed(action);
         var version = ctx.analyses.Version;
         run();
@@ -101,6 +101,7 @@ internal sealed class Editing(MethodSession ctx, Maintenance maintain)
     public void Propagate(Dominators dominators, string reason) =>
         maintain.Record("propagate", reason, () => Cpp2CS.Machine.Ssa.Propagate.Run(ctx.function, dominators));
 
+    /// <summary>删除死定义（异常片段的位置由编辑器维护）。</summary>
     public void RemoveDead(string reason) => maintain.Record("remove-dead", reason, () => Cpp2CS.Machine.Ssa.Propagate.RemoveDead(ctx.function));
 
     /// <summary>清理并把清理发现的问题追加到函数的问题列表。</summary>
@@ -113,44 +114,12 @@ internal sealed class Editing(MethodSession ctx, Maintenance maintain)
         return changed;
     }
 
-    /// <summary>
-    /// 插入一条语句；异常布局已排好时，同块中起止位置在插入点之后的异常片段随之后移。IR 编辑，不记入维护记录。
-    /// </summary>
+    /// <summary>插入一条语句（异常片段的位置由编辑器维护）。IR 编辑，不记入维护记录。</summary>
     public void Insert(Block block, int index, Stmt statement)
     {
         maintain.Check("insert");
-        if (ctx.Analysis.ArrangedFragments() is { } fragments)
-            foreach (var fragment in fragments.Where(f => f.Block == block))
-            {
-                if (fragment.First > index)
-                    fragment.First++;
-                if (fragment.Limit > index)
-                    fragment.Limit++;
-            }
-
         ctx.Rewriter.Insert(block, index, statement);
     }
 
-    /// <summary>删除死定义；异常布局已排好时按保留下来的语句重算各异常片段的起止位置。</summary>
-    public void RemoveDeadDefinitions(string reason) => maintain.Record("remove-dead-definitions", reason, () =>
-    {
-        var fragments = ctx.Analysis.ArrangedFragments();
-        var previous = fragments?.Select(f => f.Block).Distinct().ToDictionary(b => b, b => b.Statements.ToArray());
-        Cpp2CS.Machine.Ssa.Propagate.RemoveDead(ctx.function);
-        if (previous is null)
-            return;
-        foreach (var group in fragments!.GroupBy(f => f.Block))
-        {
-            var retained = group.Key.Statements.ToHashSet(ReferenceEqualityComparer.Instance);
-            var old = previous[group.Key];
-            var positions = new int[old.Length + 1];
-            for (var i = 0; i < old.Length; i++)
-                positions[i + 1] = positions[i] + (retained.Contains(old[i]) ? 1 : 0);
-            foreach (var fragment in group)
-            {
-                fragment.First = positions[fragment.First];
-                fragment.Limit = positions[fragment.Limit];
-            }
-        }
-    });
+
 }

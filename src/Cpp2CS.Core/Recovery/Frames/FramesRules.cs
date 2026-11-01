@@ -79,7 +79,7 @@ internal static class FramesRules
     {
         if (PinnedArrayRecognition.Run(ctx.function, e => ctx.TypeOfAddressBase(e) is ArrayRef { IsVector: true } array && ctx.types.Kind(array.Element) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double ? array : null) > 0)
         {
-            ctx.Edit.RemoveDeadDefinitions("memory.pinned-arrays");
+            ctx.Edit.RemoveDead("memory.pinned-arrays");
             // 异常片段已绑定基本块；此处只删纯定义，不改变受保护控制流。
             if (simplifyFlow && ctx.State.Exceptions.exceptionLayout is not { Succeeded: true }
                 && !ctx.Maintain.Fixpoint("memory.pinned-arrays.simplify", Maintenance.SafetyBudget, () =>

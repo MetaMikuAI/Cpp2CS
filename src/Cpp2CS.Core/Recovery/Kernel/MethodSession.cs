@@ -104,6 +104,7 @@ internal sealed class MethodSession(MethodRecovery owner, MethodRef method, ulon
         {
             machineFunction = value;
             value.Editor.Observe(State.StatementTables, ledger.Replace);
+            value.Editor.Positions = new FragmentPositions(this);
         }
     }
     // ---------- 准备：签名、提升、L2 ----------

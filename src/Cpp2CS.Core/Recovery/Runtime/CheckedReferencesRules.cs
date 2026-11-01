@@ -26,7 +26,7 @@ internal static class CheckedReferencesRules
 
         if (changes.Count > 0)
         {
-            ctx.Edit.RemoveDeadDefinitions("runtime.checked-objects");
+            ctx.Edit.RemoveDead("runtime.checked-objects");
             ctx.Maintain.Definitions("runtime.checked-objects");
         }
 
