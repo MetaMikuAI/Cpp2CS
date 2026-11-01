@@ -83,6 +83,21 @@ internal static class StatementKeys
 }
 
 /// <summary>
+/// 复制块时，操作数未变的语句可能作为同一对象放进多个块；按引用为语句定位置的代码遇到这种语句时位置不唯一。
+/// </summary>
+internal static class SharedStatements
+{
+    /// <summary>序列中第一个重复出现的语句对象（按引用）；没有重复时为 null。</summary>
+    public static Stmt? First(IEnumerable<Stmt> statements)
+    {
+        var seen = new HashSet<Stmt>(ReferenceEqualityComparer.Instance);
+        foreach (var statement in statements)
+            if (!seen.Add(statement)) return statement;
+        return null;
+    }
+}
+
+/// <summary>
 /// 值相等的语句键比较器：比较结果与默认比较器完全相同，另外统计结构相同而对象不同的键被判为相等的次数
 /// （<see cref="Cpp2CS.Diagnostics.GateCounters.ValueEqualKeys"/>），作为改为引用相等之前的依据。
 /// </summary>

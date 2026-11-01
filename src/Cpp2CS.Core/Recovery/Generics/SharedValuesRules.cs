@@ -27,6 +27,11 @@ internal static class SharedValuesRules
             defs[init.Defines[0]] = init.Arguments[0];
         var joins = original.OfType<Phi>().ToDictionary(p => p.Target);
         var singleStores = original.OfType<Store>().Where(s => s.Target is FrameAddress).GroupBy(s => ((FrameAddress)s.Target).Offset).Where(g => g.Count() == 1).ToDictionary(g => g.Key, g => g.Single());
+        if (SharedStatements.First(ctx.function.Blocks.SelectMany(b => b.Statements)) is { } shared)
+        {
+            ctx.Hole(shared.Address, $"复制共享 语句对象 {shared} 出现在多个块中，位置不唯一", rule: "NormalizeSharedValues");
+            return;
+        }
         var positions = ctx.function.Blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Block: b, Index: i))).ToDictionary(p => p.Statement, (IEqualityComparer<Stmt>)ReferenceEqualityComparer.Instance);
         var dominators = ctx.Dominators;
         Expr ExpandValue(Expr e, int depth = 0) => depth > 24 ? e : ExprMap.Map(e, p => p is Use u && defs.TryGetValue(u.Variable, out var value) ? ExpandValue(value, depth + 1) : null);

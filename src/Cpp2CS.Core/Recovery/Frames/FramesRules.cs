@@ -421,6 +421,12 @@ internal static class FramesRules
     internal static void WitnessFrameCopies(this RecoveryScope ctx, List<FrameWitness> witnesses)
     {
         var positions = ctx.blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Block: b, Index: i))).ToArray();
+        // 位置按语句对象索引；同一对象在多个块中时无法判定先后，留洞而不猜测
+        if (SharedStatements.First(positions.Select(p => p.Statement)) is { } shared)
+        {
+            ctx.Hole(shared.Address, $"复制共享 语句对象 {shared} 出现在多个块中，位置不唯一", rule: "WitnessFrameCopies");
+            return;
+        }
         var sites = positions.Where(p => p.Statement is Define).ToDictionary(p => ((Define)p.Statement).Target);
         var statements = positions.ToDictionary(p => p.Statement, (IEqualityComparer<Stmt>)ReferenceEqualityComparer.Instance);
         bool Before(Stmt first, Stmt second) => statements.TryGetValue(first, out var from) && statements.TryGetValue(second, out var to)

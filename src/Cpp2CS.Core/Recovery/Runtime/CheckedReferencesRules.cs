@@ -9,6 +9,11 @@ internal static class CheckedReferencesRules
     {
         if (!ctx.PrepareTypeChecks())
             return;
+        if (ctx.function.Range.ExceptionRegions.Length == 0 && SharedStatements.First(ctx.function.Blocks.SelectMany(b => b.Statements)) is { } shared)
+        {
+            ctx.Hole(shared.Address, $"复制共享 语句对象 {shared} 出现在多个块中，位置不唯一", rule: "NormalizeCheckedObjects");
+            return;
+        }
         var changes = CheckedObjectAliases.Read(ctx.function, c => ctx.State.Runtime.typeChecks.GetValueOrDefault(c));
         foreach (var block in ctx.blocks)
             for (var i = 0; i < block.Statements.Count; i++)

@@ -30,8 +30,11 @@ Invocation	8	Recovery/Lowering	0
 LocalOf	4	Recovery/Values	0	
 Location	7	Recovery/Memory	0	
 LowerSharedValues	1	Recovery/Generics	0	
+NormalizeCheckedObjects	1	Recovery/Runtime	0	复制共享：同一语句对象出现在多个块中，按引用定位不唯一，留洞
+NormalizeSharedValues	1	Recovery/Generics	0	复制共享：同一语句对象出现在多个块中，按引用定位不唯一，留洞
 Pack	3	Recovery/Structs	0	
 Prepare	9	Recovery,Recovery/Signature	4	
+PromotePrivateFrameSlots	1	Recovery/Calls	0	复制共享：同一语句对象出现在多个块中，按引用定位不唯一，留洞
 ProveFrameInitialization	1	Recovery/Frames	0	
 ProveReturnBuffer	1	Recovery/Structs	0	
 Recover	6	Recovery/Values	0	
@@ -47,3 +50,4 @@ Translate	2	Recovery/Lowering	0
 TranslateCall	7	Recovery/Lowering	0	
 Truth	1	Recovery/Values	0	
 Variable	4	Recovery/Values	0	
+WitnessFrameCopies	1	Recovery/Frames	0	复制共享：同一语句对象出现在多个块中，按引用定位不唯一，留洞
