@@ -24,6 +24,7 @@ internal static class Program
             ["ssa", var binary, var metadata, .. var addresses] when addresses.Length > 0 => Ssa(binary, metadata, addresses.Where(a => a != "--idioms").Select(a => Convert.ToUInt64(a, 16)).ToArray(), addresses.Contains("--idioms")),
             ["idioms", var binary, var metadata, var output, .. var options] => Idioms(binary, metadata, output, options),
             ["recover", var binary, var metadata, var output, .. var options] => RecoverCommand.Run(binary, metadata, output, options),
+            ["inspect", var binary, var metadata, .. var options] when options.Length > 0 => Inspect.Run(binary, metadata, options),
             ["source-project", var assembly, var output] => SourceProject(assembly, output),
             _ => Usage(),
         };
@@ -45,6 +46,8 @@ internal static class Program
                                                                       --source-layout project：按程序集/命名空间/类型导出，含范围内全部类型声明与 csproj。
                                                                       --jobs N：方法恢复的最大并行度，默认 1；程序集写出按顺序执行。
                                                                       --fact-cache-file 文件：显式固定事实快照，输入变化仍会失效；用于重构前后对比。
+                  cpp2cs inspect <libil2cpp.so> <global-metadata.dat> <十六进制入口|方法清单>... [--fact-cache-file 文件]
+                                                                      逐层打印方法的恢复产物
                   cpp2cs source-project <程序集.dll> <输出目录>
                                                                       将已有程序集按项目目录导出 C#，依赖从程序集所在目录解析。
             """);

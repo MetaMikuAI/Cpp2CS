@@ -129,6 +129,8 @@ public sealed record Call(ulong Address, CallKind Kind, Expr Target) : Stmt(Addr
     public Variable[] Defines { get; init; } = [];
     /// <summary>L2 识别出的运行时操作；null 表示普通调用。</summary>
     public RuntimeOp? Op { get; init; }
+    /// <summary>调用时的 SP；栈实参与被调用者的入口帧都相对它定位。提升时读取 SP，SSA 后为版本或帧地址。</summary>
+    public Expr? StackPointer { get; init; }
     /// <summary>CallDelegate 的委托对象根；原生 x0 是 method_code，不能用作托管接收者。</summary>
     public Expr? DelegateReceiver { get; init; }
     /// <summary>条件抛出归一后 Address 是分支位置；这里保留真正的原生抛出调用点，供语句级 LSDA 查询。

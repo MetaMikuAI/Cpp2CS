@@ -1,0 +1,343 @@
+using Cpp2CS.Ir;
+using Cpp2CS.Machine.Flow;
+using IrConst = Cpp2CS.Ir.Const;
+
+namespace Cpp2CS.Recovery.Values;
+
+/// <summary>
+/// 单个方法的符号值表：创建、驻留并规范化节点。规范化只依据位的来源，不依据类型：
+/// 移位、掩码、插入、提取、零扩展、截断与位转换只重排片；按位运算与低位算术可以推到片上；
+/// φ 的一段在至少一条入边上恰是一个 IL 值时，投影为该段的 φ。
+/// </summary>
+public sealed class SymTable
+{
+    private readonly Dictionary<Sym, Sym> interned = [];
+    private readonly Dictionary<(Call, int), ResultSym> results = [];
+    private readonly Dictionary<(Call, int), OutSym> outs = [];
+    private readonly Dictionary<(Stmt, int), ReadSym> reads = new(new SiteComparer());
+    private readonly Dictionary<object, PhiSym> phis = [];
+    private readonly Dictionary<(PhiSym, int, int), PhiSym> projections = [];
+    private readonly Dictionary<PhiSym, List<PhiSym>> projectionsOf = [];
+    private int next;
+
+    public IEnumerable<PhiSym> Phis => phis.Values.Concat(projections.Values);
+
+    private T Intern<T>(T candidate) where T : Sym
+    {
+        if (interned.TryGetValue(candidate, out var known)) return (T)known;
+        candidate.Id = ++next;
+        interned.Add(candidate, candidate);
+        return candidate;
+    }
+
+    private T Fresh<T>(T sym) where T : Sym
+    {
+        sym.Id = ++next;
+        return sym;
+    }
+
+    public Sym Const(ulong value, int width)
+    {
+        if (width <= 64) return Intern(new ConstSym(width == 64 ? value : value & Expr.Mask(width), width));
+        return Concat(Const(value, 64), Zero(width - 64));
+    }
+
+    public Sym Zero(int width) => Const(0, width);
+    public Sym Undef(int width) => Intern(new UndefSym(width));
+    public Sym Unknown(string reason, int width) => Intern(new UnknownSym(reason, width));
+    public Sym Arg(int index, int width) => Intern(new ArgSym(index, width));
+    public Sym Entity(Symbol symbol) => Intern(new EntitySym(symbol));
+    public Sym Frame(long offset) => Intern(new FrameSym(offset));
+
+    public ResultSym Result(Call site, int index, int width)
+    {
+        if (!results.TryGetValue((site, index), out var sym)) results[(site, index)] = sym = Fresh(new ResultSym(site, index, width));
+        return sym;
+    }
+
+    public OutSym Out(Call site, int argument, int width)
+    {
+        if (!outs.TryGetValue((site, argument), out var sym)) outs[(site, argument)] = sym = Fresh(new OutSym(site, argument, width));
+        return sym;
+    }
+
+    public ReadSym Read(Stmt site, int ordinal, Sym address, int width)
+    {
+        if (!reads.TryGetValue((site, ordinal), out var sym) || !ReferenceEquals(sym.Address, address) || sym.Width != width)
+            reads[(site, ordinal)] = sym = Fresh(new ReadSym(site, ordinal, address, width));
+        return sym;
+    }
+
+    /// <summary>以 Origin 为身份的 φ；同一 Origin 总是得到同一个节点。</summary>
+    public PhiSym Phi(Block block, object origin, int width)
+    {
+        if (!phis.TryGetValue(origin, out var phi)) phis[origin] = phi = Fresh(new PhiSym(block, origin, width));
+        return phi;
+    }
+
+    /// <summary>设置 φ 的一个来源，并同步到它的投影。</summary>
+    public void SetSource(PhiSym phi, int index, Sym value)
+    {
+        phi.Sources[index] = value;
+        if (projectionsOf.TryGetValue(phi, out var list))
+            foreach (var projection in list.ToArray())
+                projection.Sources[index] = Slice(value, projection.Projection!.Value.Low, projection.Width);
+    }
+
+    public static Sym Resolve(Sym sym)
+    {
+        while (sym is PhiSym { Forward: { } forward }) sym = forward;
+        return sym;
+    }
+
+    /// <summary>位视图：拼接的各部分，或单个节点。</summary>
+    public static IReadOnlyList<Sym> Segments(Sym sym) => Resolve(sym) is ConcatSym concat ? concat.Parts : [Resolve(sym)];
+
+    public static bool IsZero(Sym sym) => Resolve(sym) is ConstSym { Value: 0 };
+
+    public Sym Slice(Sym sym, int low, int width)
+    {
+        sym = Resolve(sym);
+        if (low < 0 || width <= 0 || low + width > sym.Width) throw new ArgumentOutOfRangeException(nameof(low), $"{sym}[{low}:{width}]");
+        if (low == 0 && width == sym.Width) return sym;
+        switch (sym)
+        {
+            case ConstSym c:
+                return Const(low >= 64 ? 0 : c.Value >> low, width);
+            case UndefSym:
+                return Undef(width);
+            case UnknownSym u:
+                return Unknown(u.Reason, width);
+            case SliceSym s:
+                return Slice(s.Base, s.Low + low, width);
+            case ConcatSym concat:
+                {
+                    var parts = new List<Sym>();
+                    var at = 0;
+                    foreach (var part in concat.Parts)
+                    {
+                        var from = Math.Max(low, at);
+                        var to = Math.Min(low + width, at + part.Width);
+                        if (from < to) parts.Add(Slice(part, from - at, to - from));
+                        at += part.Width;
+                    }
+                    return Concat(parts);
+                }
+            case OpSym { Op: { Kind: OperatorKind.Convert } op } convert when op.Conversion == ConvKind.SignExtend && low + width <= convert.Args[0].Width:
+                return Slice(convert.Args[0], low, width);
+            case OpSym { Op: { Kind: OperatorKind.Binary } op } binary when op.Binary is BinOp.And or BinOp.Or or BinOp.Xor
+                || low == 0 && op.Binary is BinOp.Add or BinOp.Sub or BinOp.Mul:
+                return Binary(op.Binary, Slice(binary.Args[0], low, width), Slice(binary.Args[1], low, width), width);
+            case OpSym { Op: { Kind: OperatorKind.Unary } op } unary when op.Unary == UnOp.Not || low == 0 && op.Unary == UnOp.Neg:
+                return Unary(op.Unary, Slice(unary.Args[0], low, width), width);
+            case PhiSym phi when ProjectPhi(phi, low, width) is { } projected:
+                return projected;
+        }
+        return Intern(new SliceSym(sym, low, width));
+    }
+
+    /// <summary>φ 的一段：至少一个已知来源的这一段不是切片（恰为 IL 值、常量或拼接）时投影为该段的 φ。</summary>
+    private PhiSym? ProjectPhi(PhiSym phi, int low, int width)
+    {
+        if (phi.Projection is { } outer) return ProjectPhi(outer.Whole, outer.Low + low, width);
+        if (projections.TryGetValue((phi, low, width), out var known)) return known;
+        var useful = false;
+        foreach (var source in phi.Sources)
+            if (source is not null && !ReferenceEquals(Resolve(source), phi) && Slice(source, low, width) is not SliceSym)
+                useful = true;
+        if (!useful) return null;
+        var projection = Fresh(new PhiSym(phi.Block, (phi.Origin, low, width), width) { Projection = (phi, low) });
+        projections[(phi, low, width)] = projection;
+        if (!projectionsOf.TryGetValue(phi, out var list)) projectionsOf[phi] = list = [];
+        list.Add(projection);
+        for (var i = 0; i < phi.Sources.Length; i++)
+            if (phi.Sources[i] is { } source) projection.Sources[i] = Slice(source, low, width);
+        return projection;
+    }
+
+    public Sym Concat(params Sym[] parts) => Concat((IEnumerable<Sym>)parts);
+
+    public Sym Concat(IEnumerable<Sym> parts)
+    {
+        var flat = new List<Sym>();
+        foreach (var part in parts)
+            foreach (var segment in Segments(part))
+                if (segment.Width > 0) Append(flat, segment);
+        return flat.Count switch
+        {
+            0 => throw new ArgumentException("空拼接"),
+            1 => flat[0],
+            _ => Intern(new ConcatSym(flat.ToArray())),
+        };
+    }
+
+    private void Append(List<Sym> parts, Sym next)
+    {
+        if (parts.Count == 0) { parts.Add(next); return; }
+        var last = parts[^1];
+        Sym? merged = (last, next) switch
+        {
+            (ConstSym a, ConstSym b) when a.Width + b.Width <= 64 => Const(a.Value | b.Value << a.Width, a.Width + b.Width),
+            (UndefSym a, UndefSym b) => Undef(a.Width + b.Width),
+            _ when Piece(last) is var (lb, ll, lw) && Piece(next) is var (nb, nl, nw) && ReferenceEquals(lb, nb) && ll + lw == nl => Slice(lb, ll, lw + nw),
+            _ => null,
+        };
+        if (merged is null) { parts.Add(next); return; }
+        parts.RemoveAt(parts.Count - 1);
+        Append(parts, merged);
+    }
+
+    private static (Sym Base, int Low, int Width) Piece(Sym sym) => sym is SliceSym s ? (s.Base, s.Low, s.Width) : (sym, 0, sym.Width);
+
+    public Sym ZeroExtend(Sym sym, int width) => sym.Width >= width ? Slice(sym, 0, width) : Concat(sym, Zero(width - sym.Width));
+
+    /// <summary>把值放到 width 位的存储中，高位未定义（ABI 不保证的位）。</summary>
+    public Sym Widen(Sym sym, int width) => sym.Width >= width ? Slice(sym, 0, width) : Concat(sym, Undef(width - sym.Width));
+
+    public Sym Op(Operator op, int width, params Sym[] args) => Intern(new OpSym(op, args.Select(Resolve).ToArray(), width));
+
+    public Sym Binary(BinOp op, Sym left, Sym right, int width)
+    {
+        left = Resolve(left);
+        right = Resolve(right);
+        if (left is ConstSym lc && right is ConstSym rc && left.Width <= 64 && right.Width <= 64
+            && Fold.Binary(op, new IrConst(lc.Value, lc.Width), new IrConst(rc.Value, rc.Width), width) is IrConst folded)
+            return Const(folded.Value, width);
+        if (left is ConstSym && op is BinOp.Add or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor)
+            (left, right) = (right, left);
+        var shift = right is ConstSym { Width: <= 64 } amount ? (int)Math.Min(amount.Value, int.MaxValue) : -1;
+        switch (op)
+        {
+            case BinOp.Shl when shift >= 0:
+                return shift >= width ? Zero(width) : Concat(Zero(shift), Slice(left, 0, width - shift));
+            case BinOp.LShr when shift >= 0:
+                return shift >= width ? Zero(width) : Concat(Slice(left, shift, width - shift), Zero(shift));
+            case BinOp.AShr when shift >= 0:
+                shift = Math.Min(shift, width - 1);
+                return shift == 0 ? left : Convert(ConvKind.SignExtend, Slice(left, shift, width - shift), width);
+            case BinOp.Ror when shift >= 0:
+                shift %= width;
+                return shift == 0 ? left : Concat(Slice(left, shift, width - shift), Slice(left, 0, shift));
+            case BinOp.And or BinOp.Or or BinOp.Xor when Bitwise(op, left, right, width) is { } bits:
+                return bits;
+            case BinOp.Add or BinOp.Sub when right is ConstSym { Value: 0 }:
+                return left;
+            case BinOp.Sub when right is ConstSym c:
+                return Binary(BinOp.Add, left, Const(0 - c.Value, c.Width), width);
+            case BinOp.Add when right is ConstSym c && left is FrameSym frame:
+                return Frame(frame.Offset + c.Signed);
+            case BinOp.Add when right is ConstSym c && left is OpSym { Op: { Kind: OperatorKind.Binary } inner, Args: [var x, ConstSym c0] } && inner.Binary == BinOp.Add:
+                return Binary(BinOp.Add, x, Const(c0.Value + c.Value, width), width);
+            case BinOp.Mul when right is ConstSym { Value: 1 }:
+                return left;
+        }
+        return Op(Operator.Of(op), width, left, right);
+    }
+
+    /// <summary>按位运算逐段化简：掩码保留或清零片，与零的或、异或保留另一侧。不能逐段确定时返回 null。</summary>
+    private Sym? Bitwise(BinOp op, Sym left, Sym right, int width)
+    {
+        if (left.Width != width || right.Width != width) return null;
+        var bounds = new SortedSet<int> { 0, width };
+        foreach (var side in new[] { left, right })
+        {
+            var at = 0;
+            foreach (var segment in Segments(side)) { at += segment.Width; bounds.Add(at); }
+        }
+        if (right is ConstSym mask)
+            for (var bit = 1; bit < width; bit++)
+                if ((mask.Value >> bit & 1) != (mask.Value >> (bit - 1) & 1)) bounds.Add(bit);
+        if (bounds.Count > 18) return null;
+        var parts = new List<Sym>();
+        var points = bounds.ToArray();
+        for (var k = 0; k + 1 < points.Length; k++)
+        {
+            var (low, size) = (points[k], points[k + 1] - points[k]);
+            var a = Slice(left, low, size);
+            var b = Slice(right, low, size);
+            var ones = Expr.Mask(size);
+            Sym? part = op switch
+            {
+                BinOp.And when IsZero(a) || IsZero(b) => Zero(size),
+                BinOp.And when b is ConstSym cb && cb.Value == ones => a,
+                BinOp.And when a is ConstSym ca && ca.Value == ones => b,
+                BinOp.Or or BinOp.Xor when IsZero(b) => a,
+                BinOp.Or or BinOp.Xor when IsZero(a) => b,
+                _ => null,
+            };
+            if (part is null) return null;
+            parts.Add(part);
+        }
+        return Concat(parts);
+    }
+
+    public Sym Unary(UnOp op, Sym operand, int width)
+    {
+        operand = Resolve(operand);
+        if (operand is ConstSym c && Fold.Unary(op, new IrConst(c.Value, c.Width), width) is IrConst folded) return Const(folded.Value, width);
+        if (op == UnOp.Not && operand is OpSym { Op: { Kind: OperatorKind.Unary } inner, Args: [var x] } && inner.Unary == UnOp.Not) return x;
+        return Op(Operator.Of(op), width, operand);
+    }
+
+    public Sym Convert(ConvKind kind, Sym operand, int width)
+    {
+        operand = Resolve(operand);
+        switch (kind)
+        {
+            case ConvKind.ZeroExtend: return ZeroExtend(operand, width);
+            case ConvKind.Truncate: return Slice(operand, 0, width);
+            case ConvKind.Bitcast when operand.Width == width: return operand;
+            case ConvKind.SignExtend when operand.Width >= width: return Slice(operand, 0, width);
+            case ConvKind.SignExtend when operand is ConstSym c: return Const(unchecked((ulong)c.Signed), width);
+        }
+        if (operand is ConstSym k && operand.Width <= 64 && Fold.Convert(kind, new IrConst(k.Value, k.Width), width) is IrConst folded)
+            return Const(folded.Value, width);
+        return Op(Operator.Of(kind), width, operand);
+    }
+
+    public Sym Compare(Cond cond, Sym left, Sym right)
+    {
+        left = Resolve(left);
+        right = Resolve(right);
+        if (left is ConstSym lc && right is ConstSym rc && Fold.Compare(cond, new IrConst(lc.Value, lc.Width), new IrConst(rc.Value, rc.Width)) is IrConst folded)
+            return Const(folded.Value, 1);
+        return Op(Operator.Of(cond), 1, left, right);
+    }
+
+    public Sym Select(Sym condition, Sym whenTrue, Sym whenFalse, int width)
+    {
+        condition = Resolve(condition);
+        if (condition is ConstSym c) return c.Value != 0 ? whenTrue : whenFalse;
+        if (ReferenceEquals(Resolve(whenTrue), Resolve(whenFalse))) return whenTrue;
+        return Op(new Operator(OperatorKind.Select, 0), width, condition, whenTrue, whenFalse);
+    }
+
+    public Sym Logical(bool isAnd, Sym left, Sym right)
+    {
+        left = Resolve(left);
+        right = Resolve(right);
+        if (left is ConstSym l) return (l.Value != 0) == isAnd ? right : left;
+        if (right is ConstSym r) return (r.Value != 0) == isAnd ? left : right;
+        return Op(new Operator(isAnd ? OperatorKind.And : OperatorKind.Or, 0), 1, left, right);
+    }
+
+    public Sym Not(Sym operand)
+    {
+        operand = Resolve(operand);
+        return operand switch
+        {
+            ConstSym c => Const(c.Value == 0 ? 1UL : 0UL, 1),
+            OpSym { Op.Kind: OperatorKind.Not, Args: [var inner] } => inner,
+            OpSym { Op.Kind: OperatorKind.Compare } compare => Op(Operator.Of(Fold.Invert(compare.Op.Cond)), 1, compare.Args),
+            _ => Op(new Operator(OperatorKind.Not, 0), 1, operand),
+        };
+    }
+
+    public Sym Intrinsic(string name, Sym[] args, int width) => Op(new Operator(OperatorKind.Intrinsic, 0, name), width, args);
+
+    private sealed class SiteComparer : IEqualityComparer<(Stmt Site, int Ordinal)>
+    {
+        public bool Equals((Stmt Site, int Ordinal) x, (Stmt Site, int Ordinal) y) => ReferenceEquals(x.Site, y.Site) && x.Ordinal == y.Ordinal;
+        public int GetHashCode((Stmt Site, int Ordinal) obj) => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj.Site), obj.Ordinal);
+    }
+}

@@ -50,11 +50,14 @@ public sealed class FunctionLifter
     public NoReturnOracle NoReturn => cfg.NoReturn;
 
     /// <summary>returnValue 为函数自身返回值所在的寄存器读取（按签名）；为 null 时返回语句不读取任何值，返回值的计算会作为死定义删去。</summary>
-    public LiftedFunction Lift(ulong entry, Expr? returnValue = null, bool simplify = true)
+    public LiftedFunction Lift(ulong entry, Expr? returnValue = null, bool simplify = true) => Lift(entry, returnValue, null, simplify, PromoteFrameSlots);
+
+    /// <summary>returnPieces 为聚合返回值各片所在的寄存器读取；promoteFrameSlots 为 false 时帧内存原样保留给恢复层的内存模型。</summary>
+    public LiftedFunction Lift(ulong entry, Expr? returnValue, ReturnPiece[]? returnPieces, bool simplify, bool promoteFrameSlots)
     {
         var function = cfg.Build(entry);
         var dominators = Dominators.Compute(function);
-        SsaBuilder.PrepareCalls(function, calls, returnValue);
+        SsaBuilder.PrepareCalls(function, calls, returnValue, Machine.Convention.StackPointer, returnPieces);
         SsaBuilder.Build(function, dominators, s => s.Bank is Bank.Gpr or Bank.Vec or Bank.Flags or Bank.Temp, calls, Machine.Convention.StackPointer);
         var errors = SsaCheck.Verify(function, dominators);
         if (errors.Count > 0) return new(function, errors.Select(e => "构建: " + e).ToList());
@@ -63,7 +66,7 @@ public sealed class FunctionLifter
         do Propagate.Run(function, dominators);
         while (FoldConstantMemory(function));
         // 帧槽提升：不逃逸的标量栈槽成为存储单元，只对栈槽再构建一次 SSA（FrameSlotPromotion 的条件）。
-        if (PromoteFrameSlots && FrameSlotPromotion.Run(function) > 0)
+        if (promoteFrameSlots && FrameSlotPromotion.Run(function) > 0)
         {
             SsaBuilder.Build(function, dominators, s => s.Bank == Bank.Stack, calls, Machine.Convention.StackPointer);
             do Propagate.Run(function, dominators);

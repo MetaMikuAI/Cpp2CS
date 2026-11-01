@@ -130,7 +130,7 @@ public static class ExprMap
         Assign a => [a.Value],
         Define d => [d.Value],
         Store s => [s.Target, s.Value],
-        Call c => [c.Target, .. c.Arguments, .. c.DelegateReceiver is { } receiver ? new[] { receiver } : []],
+        Call c => [c.Target, .. c.Arguments, .. c.DelegateReceiver is { } receiver ? new[] { receiver } : [], .. c.StackPointer is { } sp ? new[] { sp } : []],
         Branch b => [b.Condition],
         IndirectJump j => [j.Target],
         Return r => [.. r.Value is { } v ? new[] { v } : [], .. r.Pieces.Select(p => p.Value), .. r.Buffer is { } b ? new[] { b } : []],
@@ -154,8 +154,9 @@ public static class ExprMap
                     var t = f(c.Target);
                     var args = c.Arguments.Select(f).ToArray();
                     var receiver = c.DelegateReceiver is { } r ? f(r) : null;
-                    return ReferenceEquals(t, c.Target) && ReferenceEquals(receiver, c.DelegateReceiver) && args.AsSpan().SequenceEqual(c.Arguments)
-                        ? c : c with { Target = t, Arguments = args, DelegateReceiver = receiver };
+                    var sp = c.StackPointer is { } p ? f(p) : null;
+                    return ReferenceEquals(t, c.Target) && ReferenceEquals(receiver, c.DelegateReceiver) && ReferenceEquals(sp, c.StackPointer) && args.AsSpan().SequenceEqual(c.Arguments)
+                        ? c : c with { Target = t, Arguments = args, DelegateReceiver = receiver, StackPointer = sp };
                 }
             case Branch b: { var v = f(b.Condition); return ReferenceEquals(v, b.Condition) ? b : b with { Condition = v }; }
             case IndirectJump j: { var v = f(j.Target); return ReferenceEquals(v, j.Target) ? j : j with { Target = v }; }

@@ -60,7 +60,7 @@ public sealed class SsaBuilder
     }
 
     /// <summary>按调用模型填写调用读取的参数与结果存储，按签名填写返回值。只处理尚未填写的调用。</summary>
-    public static void PrepareCalls(MachineFunction function, ICallModel calls, Expr? returnValue)
+    public static void PrepareCalls(MachineFunction function, ICallModel calls, Expr? returnValue, Storage? stackPointer = null, ReturnPiece[]? returnPieces = null)
     {
         foreach (var block in function.Blocks)
         {
@@ -73,7 +73,9 @@ public sealed class SsaBuilder
                         Arguments = calls.Reads(call).Select(s => (Expr)new Read(s, s.Width)).ToArray(),
                         Sources = calls.Reads(call).ToArray(),
                         Results = calls.Results(call).ToArray(),
+                        StackPointer = stackPointer is { } sp ? new Read(sp, sp.Width) : null,
                     },
+                    Return { Value: null, Pieces.Length: 0, Buffer: null } ret when returnPieces is { Length: > 0 } => ret with { Pieces = returnPieces },
                     Return { Value: null, Pieces.Length: 0, Buffer: null } ret when returnValue is not null => ret with { Value = returnValue },
                     var other => other,
                 };

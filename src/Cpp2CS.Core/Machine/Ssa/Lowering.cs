@@ -12,7 +12,7 @@ public static class Lowering
     public static List<string> Registers(MachineFunction function, CallingConvention convention, ICallModel calls, Expr? returnValue)
     {
         var dominators = Dominators.Compute(function);
-        SsaBuilder.PrepareCalls(function, calls, returnValue);
+        SsaBuilder.PrepareCalls(function, calls, returnValue, convention.StackPointer);
         SsaBuilder.Build(function, dominators, s => s.Bank is Bank.Gpr or Bank.Vec or Bank.Flags or Bank.Temp, calls, convention.StackPointer);
         var errors = SsaCheck.Verify(function, dominators);
         if (errors.Count > 0) return errors.Select(e => "构建: " + e).ToList();
