@@ -11,7 +11,7 @@ internal sealed class ArraysState : IStatementKeyed
     public void Replace(Stmt previous, Stmt? replacement)
     {
         if (previous is not Call call) return;
-        foreach (var item in arraySpans.Where(p => ReferenceEquals(p.Key.Call, call)).ToArray())
+        foreach (var item in arraySpans.Where(p => StatementIdentity.Instance.Equals(p.Key.Call, call)).ToArray())
         {
             if (replacement is Call next) arraySpans[(next, item.Key.Parameter)] = item.Value;
             if (replacement is null or Nop) arraySpans.Remove(item.Key);

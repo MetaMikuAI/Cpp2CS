@@ -11,7 +11,7 @@ internal sealed class HoleLedger(Func<Stmt, IEnumerable<Variable>> definedBy)
     private readonly List<RecoveryHole> holes = [];
     private readonly Dictionary<Variable, RecoveryHole> poisoned = new();
     private readonly Dictionary<Variable, List<Variable>> dependents = new();
-    private readonly Dictionary<Stmt, RecoveryHole> diagnosed = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<Stmt, RecoveryHole> diagnosed = new(StatementIdentity.Instance);
     private readonly Dictionary<RecoveryHole, RecoveryHole> causes = new();
     private readonly List<(int Index, Variable Variable, Stmt? Statement)> unresolved = [];
 

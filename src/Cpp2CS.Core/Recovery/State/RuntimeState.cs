@@ -6,12 +6,12 @@ internal sealed class RuntimeState : IStatementKeyed
 {
     internal readonly HashSet<Variable> runtime = [];
     internal readonly Dictionary<Variable, Use> objectClasses = new();
-    internal readonly Dictionary<Call, Use> typeChecks = new(ReferenceEqualityComparer.Instance);
+    internal readonly Dictionary<Call, Use> typeChecks = new(StatementIdentity.Instance);
     /// <summary>经虚表读取得到的委托目标。</summary>
-    internal readonly Dictionary<Call, VirtualDelegate> virtualDelegates = new(ReferenceEqualityComparer.Instance);
+    internal readonly Dictionary<Call, VirtualDelegate> virtualDelegates = new(StatementIdentity.Instance);
     // ---------- 值恢复 ----------
     internal NullPathFacts? nullPaths;
-    internal readonly HashSet<Call> genericResolvers = new(ReferenceEqualityComparer.Instance);
+    internal readonly HashSet<Call> genericResolvers = new(StatementIdentity.Instance);
 
     public void Replace(Stmt previous, Stmt? replacement)
     {

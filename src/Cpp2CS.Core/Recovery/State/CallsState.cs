@@ -5,11 +5,11 @@ namespace Cpp2CS.Recovery;
 
 internal sealed class CallsState : IStatementKeyed
 {
-    internal readonly HashSet<Call> cleanupCalls = new(ReferenceEqualityComparer.Instance);
+    internal readonly HashSet<Call> cleanupCalls = new(StatementIdentity.Instance);
     internal readonly HashSet<ulong> cleanupSites = [];
     internal readonly HashSet<ulong> inlineCleanupSites = [];
     internal readonly CallBindingState callBindings = new();
-    internal readonly Dictionary<Call, MethodRef> nativeImports = new(ReferenceEqualityComparer.Instance);
+    internal readonly Dictionary<Call, MethodRef> nativeImports = new(StatementIdentity.Instance);
 
     public void Replace(Stmt previous, Stmt? replacement)
     {

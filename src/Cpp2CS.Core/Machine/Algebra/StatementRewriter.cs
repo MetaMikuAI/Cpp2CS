@@ -95,12 +95,12 @@ internal static class StatementKeys
     }
 }
 
-/// <summary>“调用 + 参数序号”键：调用按引用比较。</summary>
+/// <summary>“调用 + 参数序号”键：调用按稳定身份比较。</summary>
 internal sealed class CallParameterKeys : IEqualityComparer<(Call Call, int Parameter)>
 {
     public static readonly CallParameterKeys Instance = new();
 
-    public bool Equals((Call Call, int Parameter) x, (Call Call, int Parameter) y) => ReferenceEquals(x.Call, y.Call) && x.Parameter == y.Parameter;
+    public bool Equals((Call Call, int Parameter) x, (Call Call, int Parameter) y) => StatementIdentity.Instance.Equals(x.Call, y.Call) && x.Parameter == y.Parameter;
 
-    public int GetHashCode((Call Call, int Parameter) obj) => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj.Call), obj.Parameter);
+    public int GetHashCode((Call Call, int Parameter) obj) => HashCode.Combine(StatementIdentity.Instance.GetHashCode(obj.Call), obj.Parameter);
 }

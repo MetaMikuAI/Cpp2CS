@@ -4,7 +4,7 @@ namespace Cpp2CS.Recovery;
 
 internal sealed class LoweringState : IStatementKeyed
 {
-    internal readonly HashSet<Stmt> dropped = new(ReferenceEqualityComparer.Instance);
+    internal readonly HashSet<Stmt> dropped = new(StatementIdentity.Instance);
     /// <summary>内联到使用处的定义（见类注释第 8 条）。</summary>
     internal readonly HashSet<Variable> inlined = [];
 

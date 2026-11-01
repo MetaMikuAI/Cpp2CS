@@ -8,7 +8,7 @@ internal sealed class ExceptionsState : IStatementKeyed
     internal readonly Dictionary<ExceptionRegionPlan, LocalValue> caughtExceptions = [];
     internal readonly Dictionary<Variable, LocalValue> exceptionValues = [];
     internal readonly Dictionary<Variable, LocalValue> wrappers = [];
-    internal readonly Dictionary<Call, TypeRef> exceptionTypeTargets = new(ReferenceEqualityComparer.Instance);
+    internal readonly Dictionary<Call, TypeRef> exceptionTypeTargets = new(StatementIdentity.Instance);
     internal readonly Dictionary<Variable, Phi> exceptionPhis = [];
     internal readonly HashSet<Variable> exceptionDemand = [];
     internal bool collectingExceptionDemand;

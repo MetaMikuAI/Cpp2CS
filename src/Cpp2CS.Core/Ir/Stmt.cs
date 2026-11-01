@@ -10,8 +10,29 @@ public sealed record Variable(Storage Storage, int Version)
 
 /// <summary>
 /// 语句。每条机器指令提升为若干语句；Address 记录来源指令，便于回溯证据。
+/// <see cref="Id"/> 是语句的稳定身份：构造时分配，改写（<c>with</c>）与复制到别处时保留，表示同一个操作；
+/// 证据表以它为键，改写后不必迁移。它不参与相等比较与文本形式，相等仍按种类与内容。
 /// </summary>
-public abstract record Stmt(ulong Address);
+public abstract record Stmt(ulong Address)
+{
+    private static long next;
+
+    internal long Id { get; init; } = Interlocked.Increment(ref next);
+
+    public virtual bool Equals(Stmt? other) => ReferenceEquals(this, other) || other is not null && EqualityContract == other.EqualityContract && Address == other.Address;
+
+    public override int GetHashCode() => HashCode.Combine(EqualityContract, Address);
+}
+
+/// <summary>按稳定身份比较语句的键：同一操作的改写与副本视为同一个键。</summary>
+public sealed class StatementIdentity : IEqualityComparer<Stmt>
+{
+    public static readonly StatementIdentity Instance = new();
+
+    public bool Equals(Stmt? x, Stmt? y) => ReferenceEquals(x, y) || x is not null && y is not null && x.Id == y.Id;
+
+    public int GetHashCode(Stmt obj) => obj.Id.GetHashCode();
+}
 
 /// <summary>写存储单元。Value 窄于存储单元时高位清零（ARM64 W/S/D 写、x64 32 位写、VEX 标量写）；
 /// 需要保留高位的写入（x64 8/16 位写、SSE 标量写）由提升器显式构造 Insert 表达式。</summary>
