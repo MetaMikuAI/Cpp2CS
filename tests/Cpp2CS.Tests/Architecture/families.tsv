@@ -216,7 +216,6 @@ src/Cpp2CS.Core/Options/RecoveryOptions.cs	Options
 src/Cpp2CS.Core/Recovery/Analysis/AnalysisContext.cs	Recovery/Analysis
 src/Cpp2CS.Core/Recovery/Analysis/Definitions.cs	Recovery/Analysis
 src/Cpp2CS.Core/Recovery/Analysis/MethodSnapshot.cs	Recovery/Analysis
-src/Cpp2CS.Core/Recovery/Analysis/RecoveryAnalysis.cs	Recovery/Analysis
 src/Cpp2CS.Core/Recovery/Calls/ArgumentProjectionRules.cs	Recovery/Calls
 src/Cpp2CS.Core/Recovery/Calls/AsyncRules.cs	Recovery/Calls
 src/Cpp2CS.Core/Recovery/Calls/AtomicReferencesRules.cs	Recovery/Calls
@@ -286,6 +285,7 @@ src/Cpp2CS.Core/Recovery/Generics/SharedFieldsRules.cs	Recovery/Generics
 src/Cpp2CS.Core/Recovery/Generics/SharedReferencesRules.cs	Recovery/Generics
 src/Cpp2CS.Core/Recovery/Generics/SharedRuntimeHelpers.cs	Recovery/Generics
 src/Cpp2CS.Core/Recovery/Generics/SharedValuesRules.cs	Recovery/Generics
+src/Cpp2CS.Core/Recovery/Kernel/AnalyzeScheduler.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/Maintenance.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/PreparePlan.cs	Recovery/Kernel
 src/Cpp2CS.Core/Recovery/Kernel/PrepareSteps.cs	Recovery/Kernel

@@ -28,7 +28,6 @@ cross-family-write/Recovery/Runtime	4
 cross-family-write/Recovery/Structs	10
 cross-family-write/Recovery/Typing	1
 cross-family-write/Recovery/Values	5
-definitions-reset/Recovery/Analysis	1
 dominators/Facts	1
 dominators/Idioms	13
 dominators/Machine	5
@@ -73,7 +72,6 @@ round-loops/Recovery/Calls	1
 round-loops/Recovery/Frames	1
 scope-construction/Tests	6
 scope-extension-methods/Recovery	1
-scope-extension-methods/Recovery/Analysis	1
 scope-extension-methods/Recovery/Calls	26
 scope-extension-methods/Recovery/Construction	5
 scope-extension-methods/Recovery/Control	7
@@ -81,7 +79,7 @@ scope-extension-methods/Recovery/Diagnostics	6
 scope-extension-methods/Recovery/Exceptions	10
 scope-extension-methods/Recovery/Frames	45
 scope-extension-methods/Recovery/Generics	7
-scope-extension-methods/Recovery/Kernel	1
+scope-extension-methods/Recovery/Kernel	2
 scope-extension-methods/Recovery/Lowering	12
 scope-extension-methods/Recovery/Memory	22
 scope-extension-methods/Recovery/Runtime	13
@@ -105,7 +103,6 @@ ssa-build/Idioms	1
 ssa-build/Machine	3
 ssa-build/Recovery/Frames	1
 state-access/Recovery	2
-state-access/Recovery/Analysis	3
 state-access/Recovery/Calls	44
 state-access/Recovery/Construction	9
 state-access/Recovery/Control	7
@@ -113,7 +110,7 @@ state-access/Recovery/Diagnostics	1
 state-access/Recovery/Exceptions	70
 state-access/Recovery/Frames	120
 state-access/Recovery/Generics	18
-state-access/Recovery/Kernel	2
+state-access/Recovery/Kernel	5
 state-access/Recovery/Lowering	56
 state-access/Recovery/Memory	22
 state-access/Recovery/Rules	1
@@ -151,7 +148,6 @@ use-scan/Recovery/Runtime	3
 use-scan/Recovery/Structs	4
 use-scan/Recovery/Values	3
 whitelist-entries/I10	50
-whitelist-entries/I2a	1
 whitelist-entries/I2b	44
 whitelist-entries/I2c	13
 whitelist-entries/I3	1

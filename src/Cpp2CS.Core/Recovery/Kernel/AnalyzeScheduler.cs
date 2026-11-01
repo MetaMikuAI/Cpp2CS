@@ -3,7 +3,8 @@ using Cpp2CS.Recovery.Analysis;
 
 namespace Cpp2CS.Recovery;
 
-internal static class RecoveryAnalysis
+/// <summary>Analyze 的调度器：按注册表的顺序运行步骤，在步骤边界挂接改写器、执行声明的维护、只读检查与定义刷新，并记录追踪。</summary>
+internal static class AnalyzeScheduler
 {
     internal static RecoveryFailure? Analyze(this RecoveryScope ctx)
     {

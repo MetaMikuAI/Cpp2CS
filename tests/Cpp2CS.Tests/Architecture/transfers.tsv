@@ -9,3 +9,5 @@ scope-extension-methods/Recovery/Analysis	scope-extension-methods/Recovery/Typin
 scope-extension-methods/Recovery	scope-extension-methods/Recovery/Kernel	PreparePlan.Prepare	1	K2
 state-access/Recovery	state-access/Recovery/Exceptions	ExceptionsRules.PrepareRegions	2	K2
 state-access/Recovery	state-access/Recovery/Kernel	PrepareSteps.ResidualHoles	2	K2
+scope-extension-methods/Recovery/Analysis	scope-extension-methods/Recovery/Kernel	AnalyzeScheduler.Analyze	1	K2
+state-access/Recovery/Analysis	state-access/Recovery/Kernel	AnalyzeScheduler.Analyze	3	K2

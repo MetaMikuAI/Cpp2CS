@@ -49,7 +49,6 @@ I10	MethodRecovery.abi	src/Cpp2CS.Core/Recovery/Values/ConversionCopiesRules.cs	
 I10	MethodRecovery.abi	src/Cpp2CS.Core/Recovery/Values/FloatsRules.cs	O8	MS2	V2 建立时的现有访问
 I10	MethodRecovery.abi	src/Cpp2CS.Core/Recovery/Values/ValueRecovery.cs	O8	MS2	V2 建立时的现有访问
 I10	MethodRecovery.ThrowingConstructor	src/Cpp2CS.Core/Recovery/Values/ValueRecoveryService.cs	O8	MS2	V2 建立时的现有访问
-I2a	RecoveryScope.definitions	src/Cpp2CS.Core/Recovery/Analysis/RecoveryAnalysis.cs	K2	MS1	调度器每步之后的定义刷新（Refresh 有变化才取新定义），随 K2 调度器移入内核
 I2b	Dominators.Compute	src/Cpp2CS.Core/Idioms/IdiomPipeline.cs	M3	MS3	V2 建立时的现有访问
 I2b	Enumerable.OfType<Use>	src/Cpp2CS.Core/Idioms/Passes/AddressPhiLoads.cs	M3	MS3	V2 建立时的现有访问
 I2b	Dominators.Compute	src/Cpp2CS.Core/Idioms/Passes/ArrayPointerLoopsPass.cs	M3	MS3	V2 建立时的现有访问
