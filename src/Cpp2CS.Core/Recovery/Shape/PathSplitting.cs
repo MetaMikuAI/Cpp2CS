@@ -125,10 +125,11 @@ internal static class PathSplitting
                 break;
             case Call call:
                 yield return operands[0];
-                // 局部地址的 φ（经指针的实参）与运行时操作的类元数据 φ（类操作数须为单一的类）。
+                // 局部地址、方法实体及运行时操作的类元数据都要求单一实体。
                 for (var i = 0; i < call.Arguments.Length; i++)
                     if (SymTable.Resolve(operands[1 + i]) is PhiSym phi && phi.Sources.All(s => s is not null
-                        && SymTable.Resolve(s) is LocalSym || call.Op is not null && SymTable.Resolve(s!) is EntitySym { Symbol.Kind: SymbolKind.Class }))
+                        && (SymTable.Resolve(s) is LocalSym or EntitySym { Symbol.Kind: SymbolKind.Method }
+                            || call.Op is not null && SymTable.Resolve(s) is EntitySym { Symbol.Kind: SymbolKind.Class })))
                         yield return phi;
                 break;
         }
@@ -194,6 +195,13 @@ internal static class PathSplitting
         for (var j = 0; j < merge.Predecessors.Count; j++)
         {
             var from = merge.Predecessors[j];
+            // 机器块可通过隐式落空边进入后继；复制前把它写成显式跳转。
+            if (from.NormalSuccessors.ToArray() is [var only] && only == merge
+                && from.Statements.LastOrDefault() is not (Ir.Jump or Ir.Branch or IndirectJump or Return or Trap or Call { Kind: CallKind.Tail or CallKind.TailIndirect }))
+            {
+                from.Statements.Add(new Ir.Jump(from.End, merge.Start));
+                continue;
+            }
             if (from.Statements.LastOrDefault() is not Ir.Branch branch || branch.Target == branch.Fallthrough) continue;
             var address = SyntheticBase + (ulong)function.Blocks.Count(b => b.Start >= SyntheticBase);
             var middle = new Block(address) { End = address };
