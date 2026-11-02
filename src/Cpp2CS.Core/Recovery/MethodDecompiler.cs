@@ -134,7 +134,8 @@ public sealed class MethodDecompiler
             return RecoveryDiagnostics.Fail(entry, $"L2 {idioms.Errors[0]}", rule: "Prepare");
         ExceptionNormalization.Run(function, ExceptionFacts.WrapperWithoutDestructor(facts.Checks));
         var environment = new MethodEnvironment(method, signature, shapes);
-        var splits = PathSplitting.Run(function, f => ValueModel.Build(f, environment), lifter.Calls, lifter.Machine.Convention.StackPointer);
+        var splits = PathSplitting.Run(function, f => ValueModel.Build(f, environment),
+            v => new TypeOracle(types, facts, method, environment.Shape, v), lifter.Calls, lifter.Machine.Convention.StackPointer);
         // 分派在内存提升之前解析，使经指针的调用效果有签名可依。
         var preliminary = ValueModel.Build(function, environment);
         if (StackBoxing.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary)) > 0)

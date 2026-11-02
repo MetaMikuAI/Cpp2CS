@@ -1,6 +1,7 @@
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Ssa;
+using Cpp2CS.Recovery.Typing;
 using Cpp2CS.Recovery.Values;
 
 namespace Cpp2CS.Recovery.Shape;
@@ -21,13 +22,13 @@ internal static class PathSplitting
 
     private const int MaxStatements = 96;
 
-    public static int Run(MachineFunction function, Func<MachineFunction, ValueModel> evaluate, ICallModel calls, Storage stackPointer)
+    public static int Run(MachineFunction function, Func<MachineFunction, ValueModel> evaluate, Func<ValueModel, TypeOracle> typing, ICallModel calls, Storage stackPointer)
     {
         var split = 0;
         for (var round = 0; round < Rounds; round++)
         {
             var model = evaluate(function);
-            var merge = Demands(model).FirstOrDefault(b => b.Handler is null && !b.IsLandingPad && b.Predecessors.Count is >= 2 and <= 16
+            var merge = Demands(model, typing(model)).FirstOrDefault(b => b.Handler is null && !b.IsLandingPad && b.Predecessors.Count is >= 2 and <= 16
                 && b.Statements.Count <= MaxStatements && b.Predecessors.Distinct().Count() == b.Predecessors.Count && !b.Successors.Contains(b)
                 && b.Predecessors.All(p => p.Handler is null && !p.IsLandingPad));
             if (merge is null) break;
@@ -104,24 +105,24 @@ internal static class PathSplitting
     };
 
     /// <summary>需要拆分的合流块。</summary>
-    private static IEnumerable<Block> Demands(ValueModel model)
+    private static IEnumerable<Block> Demands(ValueModel model, TypeOracle oracle)
     {
         foreach (var block in model.Function.Blocks)
         {
             if (block.Predecessors.Count < 2 || !block.Statements.Any(s => s is Phi)) continue;
-            if (block.Statements.Any(statement => Singletons(model, statement).Any(sym => Distinct(sym, block))))
+            if (block.Statements.Any(statement => Singletons(model, oracle, statement).Any(sym => Distinct(sym, block))))
                 yield return block;
         }
     }
 
-    /// <summary>语句中要求单一实体的符号值：读写地址、调用目标、经指针访问的实参。</summary>
-    private static IEnumerable<Sym> Singletons(ValueModel model, Stmt statement)
+    /// <summary>语句中要求单一实体的符号值：尚不能表示为托管位置的地址、调用目标与经指针访问的实参。</summary>
+    private static IEnumerable<Sym> Singletons(ValueModel model, TypeOracle oracle, Stmt statement)
     {
         var operands = model.Operands(statement);
         switch (statement)
         {
-            case Store:
-                yield return operands[0];
+            case Store store:
+                if (oracle.Locate(operands[0], store.Value.Width) is null) yield return operands[0];
                 break;
             case Call call:
                 yield return operands[0];
@@ -134,7 +135,8 @@ internal static class PathSplitting
                 break;
         }
         foreach (var operand in operands)
-            foreach (var read in Reads(operand)) yield return read.Address;
+            foreach (var read in Reads(operand))
+                if (oracle.Locate(read.Address, read.Width) is null) yield return read.Address;
     }
 
     private static IEnumerable<ReadSym> Reads(Sym sym)
