@@ -44,6 +44,11 @@ internal static class ExceptionRegions
                 ?? handler.SelectMany(b => b.Statements).OfType<Call>().FirstOrDefault(c => c.Op?.Kind == OpKind.BeginCatch);
             regions.Add(new(pad, tryBlocks.OrderBy(b => index[b]).ToArray(), handler.OrderBy(b => index[b]).ToArray(), beginCatch));
         }
+        // 扩大 try 不得接管原本发往外层的异常。
+        foreach (var region in regions)
+            foreach (var block in region.Try)
+                if (block.Handler is { } actual && actual != region.Pad && !region.Try.Contains(actual))
+                    return RecoveryDiagnostics.Fail(block.Start, "异常 try 扩张覆盖了发往其他处理体的调用", rule: "Exceptions");
         // 区域之间只能嵌套（一个区域整体位于另一个的 try 或处理块中）或不相交。
         foreach (var a in regions)
             foreach (var b in regions)
