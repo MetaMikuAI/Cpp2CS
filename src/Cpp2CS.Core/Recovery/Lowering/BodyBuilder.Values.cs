@@ -342,7 +342,7 @@ internal sealed partial class BodyBuilder
                         value = new BinaryValue(BinOp.And, value, new ConstantValue(Expr.Mask(slice.Width), sourceType, sourceWidth), sourceType, sourceWidth);
                     return Resize(value, target);
                 }
-            case not (SliceSym or ConcatSym) when (oracle.TypeOf(part) ?? (part is PhiSym ? oracle.Unconstrained(part.Width) : null)) is { } atomType && types.Kind(atomType) is TypeKind.Int or TypeKind.Bool or TypeKind.Pointer:
+            case not ConcatSym when (oracle.TypeOf(part) ?? (part is PhiSym ? oracle.Unconstrained(part.Width) : null)) is { } atomType && types.Kind(atomType) is TypeKind.Int or TypeKind.Bool or TypeKind.Pointer:
                 return Resize(View(part, atomType, address), target);
             case not (SliceSym or ConcatSym) when oracle.TypeOf(part) is DefinitionRef structure && types.Kind(structure) == TypeKind.Struct && part.Width <= targetWidth:
                 {
