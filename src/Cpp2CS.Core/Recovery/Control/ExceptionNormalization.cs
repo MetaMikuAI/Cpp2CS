@@ -6,12 +6,16 @@ namespace Cpp2CS.Recovery.Control;
 /// <summary>
 /// C++ 异常机制到 IL 异常语义的规范化。IL2CPP 的托管异常总以 Il2CppExceptionWrapper 抛出：落地块中 selector 对托管异常
 /// 恒为 LSDA 里 catch(Il2CppExceptionWrapper&amp;) 动作的序号（没有 catch 动作时为 0，即只做清理），其余分支对 IL 不可达。
-/// 只调用 std::terminate 的落地块表示 noexcept 析构中再次抛出，IL 中异常照常向外传播，指向它的异常边删去。
-/// clang 为每个调用点生成的落地跳板（只含跳转）合并到跳转目标：异常边直接指向目标，目标成为落地块。
+/// 规范化由三部分组成：
+/// <list type="bullet">
+/// <item>不产生托管异常的抛出点没有异常边：wrapper 没有析构回调时，结束 catch 不会再次抛出。</item>
+/// <item>落地链收缩：落地块之后只传递值的直线路径在 IL 中没有对应，异常边直接指向链的目标（<see cref="ContractLandingChains"/>）。</item>
+/// <item>没有托管效果的处理体：只取异常后终止（noexcept 中再次抛出）或继续向外展开，IL 中异常照常向外传播，指向它的异常边删去。</item>
+/// </list>
 /// </summary>
 internal static class ExceptionNormalization
 {
-    public static void Run(MachineFunction function, bool wrapperHasNoDestructor)
+    public static void Run(MachineFunction function, bool wrapperWithoutDestructor)
     {
         if (!function.Blocks.Any(b => b.IsLandingPad)) return;
         foreach (var pad in function.Blocks.Where(b => b.IsLandingPad))
@@ -23,146 +27,175 @@ internal static class ExceptionNormalization
                     pad.Statements[i] = selector with { Value = Expr.C(unchecked((ulong)filter), selector.Value.Width) };
         }
         foreach (var block in function.Blocks.ToArray())
-            if (block.Handler is { } pad && (Terminates(pad) || wrapperHasNoDestructor
-                && block.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.EndCatch)
-                && block.Statements.OfType<Call>().All(c => c.Op?.Kind == OpKind.EndCatch)))
+            if (block.Handler is { } pad && (Inert(pad) || wrapperWithoutDestructor && EndsCatchOnly(block)))
                 MachineFunction.RemoveEdgeAt(block, block.Successors.Count - 1);
-        if (wrapperHasNoDestructor)
+        if (wrapperWithoutDestructor)
             foreach (var block in function.Blocks)
                 block.Statements.RemoveAll(s => s is Call { Op.Kind: OpKind.EndCatch, Defines.Length: 0 });
-        MergeTrampolines(function);
+        // selector 常量先折叠分支，再收缩落地链：收缩把链上的常量移到各抛出点，之后不再参与折叠。
         Machine.Ssa.Lowering.Cleanup(function);
         while (FoldBranches(function))
             Machine.Ssa.Lowering.Cleanup(function);
-        MergeLandingPaths(function);
-        MergeSharedEntries(function);
-        // 无效果的 cleanup 只继续向调用方展开；不在 IL 中制造跨多个 catch 的空 fault。
+        ContractLandingChains(function);
+        // 收缩后成为落地块的目标可能只是终止或继续展开。
         foreach (var block in function.Blocks.ToArray())
-            if (block.Handler is { } pad && pad.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.ResumeUnwind)
-                && pad.Statements.All(s => s is Nop or Define { Value: Intrinsic { Name: "eh_exception" } } or Call { Op.Kind: OpKind.ResumeUnwind }))
+            if (block.Handler is { } pad && Inert(pad))
                 MachineFunction.RemoveEdgeAt(block, block.Successors.Count - 1);
         var errors = Machine.Ssa.Lowering.Cleanup(function);
-        if (errors.Count > 0) throw new InvalidOperationException($"异常入口合并后 SSA 不成立：{errors[0]}");
+        if (errors.Count > 0) throw new InvalidOperationException($"异常入口规范化后 SSA 不成立：{errors[0]}");
     }
 
-    /// <summary>将落地入口后的单入、无效果直线路径并回入口，保留通向共同处理体的 φ 输入。</summary>
-    private static void MergeLandingPaths(MachineFunction function)
-    {
-        bool Simple(Stmt s) => s is Jump or Nop or Define { Value: Const or Intrinsic { Name: "eh_exception" } };
-        foreach (var pad in function.Blocks.Where(b => b.IsLandingPad).ToArray())
-            while (pad.Statements.All(Simple) && pad.Successors is [var next] && next != pad && !next.IsLandingPad
-                && next.Predecessors is [var from] && from == pad && next.Statements.All(Simple)
-                && next.Successors is [var target] && target != pad && target != next)
-            {
-                var through = target.Predecessors.IndexOf(next);
-                var sources = target.Statements.OfType<Phi>().Select(p => p.Sources[through]).ToArray();
-                MachineFunction.RemoveEdge(pad, next);
-                pad.Statements.RemoveAll(s => s is Jump);
-                pad.Statements.AddRange(next.Statements);
-                pad.End = next.End;
-                MachineFunction.AddEdge(pad, target);
-                for (var i = 0; i < sources.Length; i++)
-                {
-                    var phi = (Phi)target.Statements[i];
-                    target.Statements[i] = phi with { Sources = [.. phi.Sources, sources[i]] };
-                }
-                MachineFunction.RemoveEdge(next, target);
-                function.Blocks.Remove(next);
-            }
-        function.Renumber();
-    }
+    /// <summary>块中的调用都是结束 catch。</summary>
+    private static bool EndsCatchOnly(Block block) => block.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.EndCatch)
+        && block.Statements.OfType<Call>().All(c => c.Op?.Kind == OpKind.EndCatch);
 
-    /// <summary>只装载异常与常量的多个落地跳板，共用同一处理体；常量移到异常边之前，异常在共同入口取得。</summary>
-    private static void MergeSharedEntries(MachineFunction function)
+    /// <summary>
+    /// 没有托管效果的处理体：只取异常与 selector、装载常量，然后调用 std::terminate（noexcept 析构中再次抛出），
+    /// 或只取异常后继续向外展开。必须看到实际的终止或展开调用。
+    /// </summary>
+    private static bool Inert(Block pad) =>
+        pad.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.Terminate)
+            && pad.Statements.All(s => s is Nop or Define { Value: Const or Intrinsic { Name: "eh_exception" or "eh_selector" } }
+                or Call { Op.Kind: OpKind.Terminate or OpKind.BeginCatch })
+        || pad.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.ResumeUnwind)
+            && pad.Statements.All(s => s is Nop or Define { Value: Intrinsic { Name: "eh_exception" } } or Call { Op.Kind: OpKind.ResumeUnwind });
+
+    /// <summary>落地链上的语句：φ、跳转、空语句，常量或异常值的定义。</summary>
+    private static bool Passing(Stmt statement) => statement is Phi or Jump or Nop or Define { Value: Const or Intrinsic { Name: "eh_exception" } };
+
+    /// <summary>链上的值经某条异常入边到达目标时是什么：链外的变量、要在抛出点之前定义的常量，或异常值。</summary>
+    private abstract record Arrival;
+    private sealed record Outside(Variable? Variable) : Arrival;
+    private sealed record Constant(Define Definition) : Arrival;
+    private sealed record Thrown(Define Definition) : Arrival;
+
+    private sealed record Chain(Block[] Blocks, Block[] Throwers, Arrival[][] Values);
+
+    /// <summary>
+    /// 落地链：从落地块起，只含 φ、跳转、空语句与常量或异常值定义的直线路径，后续块只从前一块进入，止于第一个其他块（目标）。
+    /// clang 为调用点生成的跳板、在共享处理体之前装载常量的入口都是这样的链。收缩后抛出点的异常边直接指向目标：
+    /// 链上的 φ 按每条异常入边代入来源，常量在抛出点之前定义，异常值在目标入口取得。
+    /// 链上的定义只能作为目标 φ 的输入；目标中由异常值组成的 φ 要求目标的每个前驱都是给出异常值的链，否则不收缩。
+    /// </summary>
+    private static void ContractLandingChains(MachineFunction function)
     {
         var nextTemp = function.Blocks.SelectMany(b => b.Statements).SelectMany(s => s switch
             { Define d => new[] { d.Target }, Phi p => [p.Target], Call c => c.Defines.OfType<Variable>(), _ => [] })
+            .Concat(function.Dead.Select(d => d.Define.Target))
             .Where(v => v.Storage.Bank == Bank.Temp).Select(v => v.Storage.Index).DefaultIfEmpty(-1).Max() + 1;
         foreach (var target in function.Blocks.ToArray())
         {
-            var pads = target.Predecessors.ToArray();
-            if (pads.Length < 2 || pads.Distinct().Count() != pads.Length || pads.Any(p => !p.IsLandingPad || p.Successors is not [var to] || to != target
-                || p.Predecessors.Count == 0 || p.Predecessors.Any(b => b.Handler != p)
-                || p.Statements.Any(s => s is not (Jump or Nop or Define { Value: Const or Intrinsic { Name: "eh_exception" } })))) continue;
-            var definitions = pads.SelectMany(p => p.Statements.OfType<Define>()).ToDictionary(d => d.Target);
+            if (!function.Blocks.Contains(target)) continue;
             var phis = target.Statements.TakeWhile(s => s is Phi).Cast<Phi>().ToArray();
-            bool Exception(Variable v) => v is not null && definitions.GetValueOrDefault(v)?.Value is Intrinsic { Name: "eh_exception" };
-            if (phis.Any(p => p.Sources.Any(Exception) && !p.Sources.All(Exception))) continue;
-            // 跳板定义只能作为共同入口的 φ 输入，不能移动供其他路径使用的定义。
-            if (function.Blocks.Except(pads).SelectMany(b => b.Statements).Where(s => !phis.Contains(s))
-                .Any(s => s is Phi p ? p.Sources.Any(v => v is not null && definitions.ContainsKey(v))
-                    : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => definitions.ContainsKey(u.Variable)))) continue;
-            var ordinary = phis.Where(p => !p.Sources.All(Exception)).ToArray();
-            var exceptions = phis.Where(p => p.Sources.All(Exception)).Select(p => new Define(p.Address, p.Target, definitions[p.Sources[0]].Value)).ToArray();
-            for (var i = 0; i < phis.Length; i++) target.Statements.RemoveAt(0);
-            target.Statements.InsertRange(0, ordinary.Cast<Stmt>().Concat(exceptions));
-            for (var p = 0; p < pads.Length; p++)
+            var chains = new List<(int Predecessor, Chain Chain)>();
+            for (var k = 0; k < target.Predecessors.Count; k++)
+                if (Trace(function, target, k, phis) is { } chain) chains.Add((k, chain));
+            if (chains.Count == 0) continue;
+            // 由异常值组成的 φ：目标的每个前驱都是链，且在每个抛出点都给出异常值。
+            var thrown = Enumerable.Range(0, phis.Length).Where(i => chains.Any(c => c.Chain.Values.Any(v => v[i] is Thrown))).ToArray();
+            if (thrown.Length > 0 && (chains.Count != target.Predecessors.Count
+                || thrown.Any(i => chains.Any(c => c.Chain.Values.Any(v => v[i] is not Thrown))))) continue;
+            foreach (var (_, chain) in chains)
+                MachineFunction.RemoveEdge(chain.Blocks[^1], target);
+            var ordinary = Enumerable.Range(0, phis.Length).Except(thrown).ToArray();
+            if (thrown.Length > 0)
             {
-                var pad = pads[p];
-                foreach (var thrower in pad.Predecessors.ToArray())
+                var entries = thrown.Select(i => (Stmt)new Define(phis[i].Address, phis[i].Target, ((Thrown)chains[0].Chain.Values[0][i]).Definition.Value)).ToArray();
+                target.Statements.RemoveAll(s => s is Phi phi && thrown.Any(i => phis[i].Target == phi.Target));
+                target.Statements.InsertRange(ordinary.Length, entries);
+            }
+            foreach (var (_, chain) in chains)
+            {
+                for (var t = 0; t < chain.Throwers.Length; t++)
                 {
-                    var sources = ordinary.Select(phi => phi.Sources[p]).ToArray();
+                    var thrower = chain.Throwers[t];
                     var insert = thrower.Statements.FindLastIndex(s => s is Call);
                     if (insert < 0) insert = thrower.Statements.Count;
-                    for (var i = 0; i < sources.Length; i++)
-                        if (sources[i] is { } source && definitions.TryGetValue(source, out var constant))
+                    var sources = new Variable[ordinary.Length];
+                    for (var o = 0; o < ordinary.Length; o++)
+                        switch (chain.Values[t][ordinary[o]])
                         {
-                            var fresh = new Variable(new Storage(Bank.Temp, nextTemp++, source.Width), 1);
-                            thrower.Statements.Insert(insert++, new Define(constant.Address, fresh, constant.Value));
-                            sources[i] = fresh;
+                            case Outside outside: sources[o] = outside.Variable!; break;
+                            case Constant constant:
+                                var fresh = new Variable(new Storage(Bank.Temp, nextTemp++, constant.Definition.Target.Width), 1);
+                                thrower.Statements.Insert(insert++, new Define(constant.Definition.Address, fresh, constant.Definition.Value));
+                                sources[o] = fresh;
+                                break;
                         }
-                    MachineFunction.RemoveEdge(thrower, pad);
+                    MachineFunction.RemoveEdgeAt(thrower, thrower.Successors.Count - 1);
                     MachineFunction.AddEdge(thrower, target);
                     thrower.Handler = target;
-                    for (var i = 0; i < ordinary.Length; i++)
+                    for (var o = 0; o < ordinary.Length; o++)
                     {
-                        var phi = (Phi)target.Statements[i];
-                        target.Statements[i] = phi with { Sources = [.. phi.Sources, sources[i]] };
+                        var phi = (Phi)target.Statements[o];
+                        target.Statements[o] = phi with { Sources = [.. phi.Sources, sources[o]] };
                     }
                 }
+                for (var b = chain.Blocks.Length - 1; b > 0; b--)
+                    MachineFunction.RemoveEdge(chain.Blocks[b - 1], chain.Blocks[b]);
+                foreach (var block in chain.Blocks) function.Blocks.Remove(block);
             }
             target.IsLandingPad = true;
         }
         function.Renumber();
     }
 
-    /// <summary>只含 φ 与跳转的落地块：异常边改指目标，沿每条入边代入跳板的 φ 来源。</summary>
-    private static void MergeTrampolines(MachineFunction function)
+    /// <summary>目标第 k 个前驱所在的落地链及其值经每个抛出点到达目标时的来源；不是可收缩的链时为 null。</summary>
+    private static Chain? Trace(MachineFunction function, Block target, int k, Phi[] phis)
     {
-        foreach (var pad in function.Blocks.Where(b => b.IsLandingPad).ToArray())
+        var blocks = new List<Block> { target.Predecessors[k] };
+        while (true)
         {
-            if (pad.Statements.Any(s => s is not (Phi or Jump or Nop)) || pad.Successors is not [var target] || target == pad
-                || pad.Predecessors.Any(p => p.Handler != pad)) continue;
-            var through = target.Predecessors.IndexOf(pad);
-            var targetPhis = target.Statements.TakeWhile(s => s is Phi).Cast<Phi>().ToArray();
-            var aliases = pad.Statements.OfType<Phi>().ToDictionary(p => p.Target, p => p.Sources);
-            if (function.Blocks.Where(b => b != pad).SelectMany(b => b.Statements).Where(s => !targetPhis.Contains(s))
-                .Any(s => s is Phi p ? p.Sources.Any(v => v is not null && aliases.ContainsKey(v))
-                    : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => aliases.ContainsKey(u.Variable)))) continue;
-            var inputs = targetPhis.Select(p => p.Sources[through]).ToArray();
-            var throwers = pad.Predecessors.ToArray();
-            for (var p = 0; p < throwers.Length; p++)
+            var current = blocks[0];
+            if (current == target || current.Handler is not null || !current.Statements.All(Passing)
+                || current.Successors is not [var next] || next != (blocks.Count > 1 ? blocks[1] : target)) return null;
+            if (current.IsLandingPad && current.Predecessors.Count > 0 && current.Predecessors.All(p => p.Handler == current)) break;
+            if (blocks.Count >= 8 || current.Predecessors is not [var previous] || previous.Successors is not [_] || blocks.Contains(previous)) return null;
+            blocks.Insert(0, previous);
+        }
+        var pad = blocks[0];
+        var throwers = pad.Predecessors.ToArray();
+        var definitions = new Dictionary<Variable, Stmt>();
+        foreach (var statement in blocks.SelectMany(b => b.Statements))
+            switch (statement)
             {
-                var thrower = throwers[p];
-                var sources = inputs.Select(v => aliases.TryGetValue(v, out var incoming) ? incoming[p] : v).ToArray();
-                MachineFunction.RemoveEdgeAt(thrower, thrower.Successors.Count - 1);
-                MachineFunction.AddEdge(thrower, target);
-                thrower.Handler = target;
-                for (var i = 0; i < sources.Length; i++)
+                case Define d: definitions[d.Target] = d; break;
+                case Phi p: definitions[p.Target] = p; break;
+            }
+        // 链上的定义只能作为目标 φ 在这条入边上的输入。
+        foreach (var block in function.Blocks.Where(b => !blocks.Contains(b)))
+            foreach (var statement in block.Statements)
+            {
+                var used = statement is Phi phi
+                    ? phi.Sources.Where((v, j) => v is not null && !(block == target && j == k))
+                    : ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Use>().Select(u => u.Variable);
+                if (used.Any(v => v is not null && definitions.ContainsKey(v))) return null;
+            }
+        // 落地块的 φ 按抛出点取来源；链上后续块只有一个前驱，其 φ 等于唯一来源。
+        Arrival? Arrive(Variable? value, int thrower)
+        {
+            for (var step = 0; step <= blocks.Count; step++)
+            {
+                if (value is null || !definitions.TryGetValue(value, out var definition)) return new Outside(value);
+                switch (definition)
                 {
-                    var phi = (Phi)target.Statements[i];
-                    target.Statements[i] = phi with { Sources = [.. phi.Sources, sources[i]] };
+                    case Define { Value: Const } constant: return new Constant(constant);
+                    case Define exception: return new Thrown(exception);
+                    case Phi phi: value = pad.Statements.Contains(phi) ? phi.Sources[thrower] : phi.Sources[0]; break;
                 }
             }
-            target.IsLandingPad = true;
+            return null;
         }
-        function.Renumber();
+        var values = new Arrival[throwers.Length][];
+        for (var t = 0; t < throwers.Length; t++)
+        {
+            values[t] = new Arrival[phis.Length];
+            for (var i = 0; i < phis.Length; i++)
+                if (Arrive(phis[i].Sources[k], t) is { } arrival) values[t][i] = arrival;
+                else return null;
+        }
+        return new Chain(blocks.ToArray(), throwers, values);
     }
-
-    /// <summary>落地块只取异常并调用 std::terminate。</summary>
-    private static bool Terminates(Block pad) => pad.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.Terminate)
-        && pad.Statements.All(s => s is Define { Value: Intrinsic { Name: "eh_exception" or "eh_selector" } } or Define { Value: Const } or Nop
-        || s is Call { Op.Kind: OpKind.Terminate or OpKind.BeginCatch });
 
     /// <summary>条件为常量的分支改为跳转，删去不可达的边。</summary>
     private static bool FoldBranches(MachineFunction function)

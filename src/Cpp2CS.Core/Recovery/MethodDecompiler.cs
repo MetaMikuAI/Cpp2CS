@@ -132,9 +132,7 @@ public sealed class MethodDecompiler
         var idioms = rewriter.Run(function);
         if (idioms.Errors.Count > 0)
             return RecoveryDiagnostics.Fail(entry, $"L2 {idioms.Errors[0]}", rule: "Prepare");
-        // 已证明的托管 wrapper 没有析构回调，结束 catch 不会再次抛出托管异常。
-        ExceptionNormalization.Run(function, facts.Checks.All.Any(c => c.Name == "eh.E1.throw-wrapper" && c.Passed)
-            && facts.Checks.All.Any(c => c.Name == "eh.E2.selector-wrapper" && c.Passed));
+        ExceptionNormalization.Run(function, ExceptionFacts.WrapperWithoutDestructor(facts.Checks));
         var environment = new MethodEnvironment(method, signature, shapes);
         var splits = PathSplitting.Run(function, f => ValueModel.Build(f, environment), lifter.Calls, lifter.Machine.Convention.StackPointer);
         // 分派在内存提升之前解析，使经指针的调用效果有签名可依。

@@ -8,6 +8,15 @@ namespace Cpp2CS.Facts;
 public static class ExceptionFacts
 {
     public const string WrapperName = "22Il2CppExceptionWrapper";
+    public const string ThrowWrapperCheck = "eh.E1.throw-wrapper";
+    public const string SelectorWrapperCheck = "eh.E2.selector-wrapper";
+
+    /// <summary>
+    /// 托管异常总以析构回调为空的 Il2CppExceptionWrapper 抛出、以 wrapper catch 捕获（全映像检查 E1、E2 均通过）。
+    /// 成立时结束 catch 不会再次抛出托管异常。
+    /// </summary>
+    public static bool WrapperWithoutDestructor(FactChecks checks) =>
+        checks.All.Any(c => c.Name == ThrowWrapperCheck && c.Passed) && checks.All.Any(c => c.Name == SelectorWrapperCheck && c.Passed);
     public sealed record ThrowSite(ulong Entry, ulong Site, CodeRegion Region, bool CalledByManaged, bool ThrowHelperPath, ulong? TypeInfo, ulong? Destructor, string? Name);
 
     /// <summary>检查真正传给 __cxa_throw 的 x1，不能以“函数引用过 wrapper 名”替代实参证明。</summary>
@@ -134,7 +143,7 @@ public static class ExceptionFacts
         var errors = relevant.Where(s => s.Name != WrapperName || s.Destructor != 0)
             .Select(s => $"0x{s.Entry:x}@0x{s.Site:x} x1=0x{s.TypeInfo:x} destructor=0x{s.Destructor:x} RTTI={s.Name ?? "未解析"}").ToList();
         if (relevant.Length == 0) errors.Add("没有找到托管 __cxa_throw 见证");
-        checks.Add("eh.E1.throw-wrapper", "Error", relevant.Length, errors,
+        checks.Add(ThrowWrapperCheck, "Error", relevant.Length, errors,
             $"全映像 __cxa_throw {throws.Length} 处；托管直接抛出 {relevant.Count(s => s.Region == CodeRegion.Managed)} 处；" +
             $"抛出 helper 终端 {relevant.Count(s => s.Region != CodeRegion.Managed)} 处（含 Raise/Rethrow 唯一调用包装链）。逐点核验 x1 的 RTTI 名为 {WrapperName}，x2 析构器为空；不证明任意原生服务不会抛出外来异常。");
         var typed = new List<string>();
@@ -162,7 +171,7 @@ public static class ExceptionFacts
                 }
             }
         if (total == 0) typed.Add("没有找到托管 LSDA 类型见证");
-        checks.Add("eh.E2.selector-wrapper", "Error", total, typed,
+        checks.Add(SelectorWrapperCheck, "Error", total, typed,
             $"全托管 LSDA 正类型 action（按 call-site 计）；非空类型槽的序号必须为 1，重定位后的 RTTI 名必须为 {WrapperName}。" +
             $"cleanup {cleanup} 条；catch-all {catchAll} 条另计，不冒充 wrapper catch。");
     }
