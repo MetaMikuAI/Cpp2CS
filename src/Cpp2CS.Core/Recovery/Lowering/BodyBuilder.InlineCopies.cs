@@ -62,6 +62,8 @@ internal sealed partial class BodyBuilder
     private bool NonThrowingInlineValue(ManagedValue value) => value switch
     {
         LocalValue or ArgumentValue or ConstantValue => true,
+        Returned => true,
+        Observed observed => NonThrowingInlineValue(observed.Read),
         AddressValue { Target: LocalValue } => true,
         IndirectValue { Address: AddressValue { Target: LocalValue } } => true,
         FieldValue field when field.Receiver.Type is DefinitionRef { Definition.IsValueType: true }

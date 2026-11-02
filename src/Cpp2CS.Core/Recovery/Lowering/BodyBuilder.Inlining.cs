@@ -368,7 +368,9 @@ internal sealed partial class BodyBuilder
                 result = candidate;
                 break;
             }
-            if (result is null) return match.Fail("返回值没有承接的局部");
+            // 调用结果可被丢弃；额外求值的返回项不得引入异常或副作用。区域外使用仍由 Replace 检查。
+            if (result is null && !match.Ends.All(e => e.Result is { } value && NonThrowingInlineValue(value)))
+                return match.Fail("返回值没有承接的局部，且无法证明额外求值无副作用");
         }
         var rest = match.Ends.Select(e => e.Copies.Where(c => result is null || !c.Target.Variable.Equals(result.Variable)).ToArray()).ToArray();
         if (rest.Any(r => !r.SequenceEqual(rest[0]))) return match.Fail("出口复制在各路径上不同");
