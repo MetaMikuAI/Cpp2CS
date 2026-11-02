@@ -37,6 +37,8 @@ public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef T
 {
     /// <summary>F9 认回证明；保留原字段的求值位置，避免把条件表达式里的调用提前执行。</summary>
     public FieldAccessor? Accessor { get; init; }
+    /// <summary>对调用方不可访问、等待内联的逆证明的访问：原生地址与证明失败时的洞的原因。只在恢复过程中出现。</summary>
+    public (ulong Address, string Reason)? Pending { get; init; }
 }
 /// <summary>根或字段存储位置的托管地址；不把机器地址当整数。</summary>
 public sealed record AddressValue(ManagedValue Target) : ManagedValue(new ByRefRef(Target.Type), 64);

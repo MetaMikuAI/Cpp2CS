@@ -154,7 +154,10 @@ internal sealed partial class BodyBuilder
         var managedRegions = regions.Where(r => reachable.Contains(r.Pad) && r.Try.Any(reachable.Contains)).Select(r => new ManagedRegion(
             r.Try.Where(reachable.Contains).Select(b => b.Start).ToArray(), r.Pad.Start, r.Handler.Where(reachable.Contains).Select(b => b.Start).ToArray(),
             r.BeginCatch is { } begin ? exceptions[begin] : null, r.IsCatch ? ManagedRegionKind.Catch : ManagedRegionKind.Fault)).ToArray();
-        var body = LocalCoalescing.Run(new ManagedBody(analysis.Method, blocks) { Regions = managedRegions });
+        var body = new ManagedBody(analysis.Method, blocks) { Regions = managedRegions };
+        // 正式下降时证明多语句内联的逆（空跑只收集约束），之后合并复制。
+        if (demand is null) body = InlineInverse(body);
+        body = LocalCoalescing.Run(body);
         return holes.Count == 0
             ? new(analysis.Method, analysis.Entry, body, [])
             : new(analysis.Method, analysis.Entry, null, holes.DistinctBy(h => (h.Address, h.Reason)).ToArray()) { Partial = body };

@@ -94,13 +94,16 @@ internal sealed partial class BodyBuilder
         return accessors[(field.Field, write)] = found;
     }
 
-    /// <summary>字段访问：可访问时为字段本身，否则为被内联的访问器；都不成立时记为洞。</summary>
+    /// <summary>
+    /// 字段访问：可访问时为字段本身，否则为被内联的访问器；都不成立时留待多语句内联的逆证明（<see cref="InlineInverse"/>），
+    /// 证明不成立时记为洞。
+    /// </summary>
     private ManagedValue FieldAccess(ManagedValue receiver, FieldRef field, TypeRef type, bool write, ulong address)
     {
         var value = new FieldValue(receiver, field, type, Width(type));
         if (Accessible(field.Field)) return value;
         return Accessor(field, type, write) is { } accessor ? value with { Accessor = accessor }
-            : Hole(address, $"内存 字段 {field.Field.Owner.FullName}.{field.Field.Name} 对调用方不可访问，没有可证明的访问器（{accessorFailures.GetValueOrDefault((field.Field, write))}）", type);
+            : value with { Pending = (address, $"内存 字段 {field.Field.Owner.FullName}.{field.Field.Name} 对调用方不可访问，没有可证明的访问器（{accessorFailures.GetValueOrDefault((field.Field, write))}），也不在可证明的内联方法体中") };
     }
 
     private ManagedValue StaticFieldAccess(FieldRef field, TypeRef type, bool write, ulong address)
