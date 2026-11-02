@@ -57,10 +57,24 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
             var evidence = new Dictionary<Cell, HashSet<TypeRef>>();
             void Note(Sym pointer, TypeRef? type)
             {
-                if (type is null || SymTable.Resolve(pointer) is not LocalSym local || memory.Find(local.Space, local.Offset, 1) is not { Promoted: false } target
-                    || target.Start != local.Offset) return;
-                if (!evidence.TryGetValue(target, out var set)) evidence[target] = set = [];
-                set.Add(type);
+                if (type is null) return;
+                var pending = new Stack<Sym>();
+                var seen = new HashSet<Sym>();
+                pending.Push(pointer);
+                while (pending.Count > 0)
+                {
+                    var value = SymTable.Resolve(pending.Pop());
+                    if (!seen.Add(value)) continue;
+                    if (value is PhiSym phi)
+                        foreach (var source in phi.Sources.OfType<Sym>()) pending.Push(source);
+                    else if (value is OpSym { Op.Kind: OperatorKind.Select } select)
+                        foreach (var source in select.Args.Skip(1)) pending.Push(source);
+                    else if (value is LocalSym local && memory.Find(local.Space, local.Offset, 1) is { Promoted: false } target && target.Start == local.Offset)
+                    {
+                        if (!evidence.TryGetValue(target, out var set)) evidence[target] = set = [];
+                        set.Add(type);
+                    }
+                }
             }
             foreach (var call in values.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>())
             {
@@ -178,6 +192,9 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
         {
             case ArgSym arg:
                 return Parameter(arg.Index);
+            case LocalSym local when memory.Find(local.Space, local.Offset, 1) is { Promoted: false } cell
+                && cell.Start == local.Offset && CellType(cell) is { } cellType:
+                return new ByRefRef(cellType);
             case EntitySym { Symbol: { Kind: SymbolKind.String } }:
                 return types.String;
             case ResultSym result when result.Index == 0:

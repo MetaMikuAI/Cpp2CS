@@ -19,7 +19,7 @@ internal sealed partial class BodyBuilder
         if (expected is DefinitionRef structure && types.Kind(expected) == TypeKind.Struct && sym is not ConcatSym
             && (sym is ConstSym || oracle.TypeOf(sym) is { } natural && types.Kind(natural) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer))
             return StructBits(sym, structure, address);
-        if (locals.TryGetValue(sym, out var known)) return Coerce(known, expected);
+        if (sym is not LocalSym && locals.TryGetValue(sym, out var known)) return Coerce(known, expected);
         switch (sym)
         {
             case ArgSym arg:
@@ -51,6 +51,9 @@ internal sealed partial class BodyBuilder
                 return Slice(slice, expected, address);
             case ConcatSym concat:
                 return Composite(concat, expected, address);
+            case LocalSym local when analysis.Memory.Find(local.Space, local.Offset, 1) is { Promoted: false } cell
+                && cell.Start == local.Offset && oracle.CellType(cell) is not null:
+                return new AddressValue(CellLocal(local));
             case LocalSym local when analysis.Memory.Find(local.Space, local.Offset, 1) is { Promoted: false } && oracle.Locate(local, 8) is { } place:
                 return new AddressValue(LocationValue(place, address));
             case UndefSym:
