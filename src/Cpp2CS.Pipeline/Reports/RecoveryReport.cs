@@ -116,6 +116,7 @@ internal static class RecoveryReport
                     NewArrayValue => "newarr",
                     ArrayElementValue => "array-load",
                     ArrayLengthValue => "array-length",
+                    StringLengthValue => "string-length",
                     StringValue => "string",
                     BoxValue => "box",
                     IsInstValue => "isinst",

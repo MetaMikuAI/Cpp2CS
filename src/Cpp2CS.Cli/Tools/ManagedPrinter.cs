@@ -44,6 +44,7 @@ internal static class ManagedPrinter
         StaticFieldValue s => $"{Short(s.Field.DeclaringType)}.{s.Field.Field.Name}",
         ArrayElementValue e => $"{Value(e.Array)}[{Value(e.Index)}]",
         ArrayLengthValue l => $"{Value(l.Array)}.Length",
+        StringLengthValue l => $"{Value(l.String)}.Length",
         IndirectValue i => $"*{Value(i.Address)}",
         AddressValue a => $"&{Value(a.Target)}",
         BinaryValue b => $"({Value(b.Left)} {b.Op} {Value(b.Right)}):{Short(b.Type)}",

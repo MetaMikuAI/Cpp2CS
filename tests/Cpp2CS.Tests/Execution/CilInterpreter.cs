@@ -673,6 +673,11 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
             return null;
         }
         if (DelegateModel.IsInvoke(callee)) return InvokeDelegate(side, callee, values);
+        // String.Length 返回 UTF-16 单元数；原生侧仍读取实际字符串头部。
+        if (callee.Method is { Name: "get_Length", IsStatic: false, Owner.FullName: "System.String", Parameters.Count: 0 })
+        {
+            return ReadValue(side, Types.Int32, NotNull(values[0]) + RuntimeLayout.StringLength);
+        }
         // BitConverter 的四个按位转换由 BCL 契约定义；不产生原生调用事件，不做数值转换。
         if (callee.Method is { IsStatic: true, Owner.FullName: "System.BitConverter", Parameters.Count: 1 } conversion)
         {

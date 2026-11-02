@@ -40,6 +40,7 @@ public static class ManagedTypeMap
             IsInstValue v => new IsInstValue(Value(v.Operand), map(v.Target), v.BoxedType is { } boxed ? map(boxed) : null),
             CheckedCastValue v => new CheckedCastValue(Value(v.Operand), map(v.Target)),
             ArrayLengthValue v => v with { Array = Value(v.Array), Type = map(v.Type) },
+            StringLengthValue v => v with { String = Value(v.String), Type = map(v.Type) },
             ArrayElementValue v => v with { Array = Value(v.Array), Index = Value(v.Index), Type = map(v.Type), Width = W(v.Type, map(v.Type), v.Width) },
             FieldValue v => v with { Receiver = Value(v.Receiver), Field = Field(v.Field), Type = map(v.Type), Width = W(v.Type, map(v.Type), v.Width), Accessor = null },
             AddressValue v => new AddressValue(Value(v.Target)),

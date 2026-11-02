@@ -180,6 +180,7 @@ internal static class ConstructorInitialization
                 AddressValue a => Children("address", [a.Target]),
                 IndirectValue i => Children("indirect", [i.Address]),
                 ArrayLengthValue a => Children($"len {a.Type}/{a.Width}", [a.Array]),
+                StringLengthValue s => Children("string-len", [s.String]),
                 ArrayElementValue a => Children($"elem {a.Type}/{a.Width}", [a.Array, a.Index]),
                 BinaryValue b => Children($"{b.Op} {b.Type}/{b.Width}", [b.Left, b.Right]),
                 UnaryValue u => Children($"{u.Op} {u.Type}/{u.Width}", [u.Operand]),

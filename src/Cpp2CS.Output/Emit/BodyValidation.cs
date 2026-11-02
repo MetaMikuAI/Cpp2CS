@@ -130,6 +130,9 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
             case ArrayLengthValue length:
                 if (length.Array.Type is not ArrayRef { IsVector: true }) return new(EmissionProblemKind.Unsupported, "数组 长度需要一维向量类型");
                 break;
+            case StringLengthValue length:
+                if (!length.String.Type.Equals(types.String) || !length.Type.Equals(types.Int32)) return new(EmissionProblemKind.Unsupported, "字符串 长度类型不符");
+                break;
             case ArrayElementValue element:
                 if (element.Array.Type is not ArrayRef { IsVector: true } a || !element.Type.Equals(a.Element)) return new(EmissionProblemKind.Unsupported, "数组 元素类型不符");
                 break;

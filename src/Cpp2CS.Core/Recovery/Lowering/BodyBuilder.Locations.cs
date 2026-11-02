@@ -78,6 +78,8 @@ internal sealed partial class BodyBuilder
                 }
             case LocationKind.Length:
                 return new ArrayLengthValue(View(location.Base!, oracle.TypeOf(location.Base!), address), types.Int32, 32);
+            case LocationKind.StringLength:
+                return new StringLengthValue(View(location.Base!, types.String, address), types.Int32);
             case LocationKind.Local:
                 {
                     var local = CellLocal((LocalSym)location.Base!);

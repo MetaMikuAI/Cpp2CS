@@ -89,6 +89,11 @@ internal sealed partial class CilBodyWriter
                 Value(array.Length); il.Emit(OpCodes.Newarr, TypeReference(array.ArrayType.Element)); break;
             case ArrayLengthValue length:
                 Value(length.Array); il.Emit(OpCodes.Ldlen); il.Emit(OpCodes.Conv_U4); break;
+            case StringLengthValue length:
+                Value(length.String);
+                var stringLength = ((DefinitionRef)types.String).Definition.Methods.Single(m => m.Name == "get_Length" && !m.IsStatic && m.Parameters.Count == 0);
+                il.Emit(OpCodes.Callvirt, MethodReference(new MethodRef(stringLength, [], [])));
+                break;
             case ArrayElementValue element:
                 Value(element.Array); ElementIndex(element.Index); il.Emit(OpCodes.Ldelem_Any, TypeReference(element.Type)); break;
             case AddressValue a: Address(a.Target); break;

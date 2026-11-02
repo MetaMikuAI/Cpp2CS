@@ -32,6 +32,7 @@ public sealed record IsInstValue(ManagedValue Operand, TypeRef Target, TypeRef? 
 /// <summary>引用类型显式转换；null 原样通过，非兼容对象抛 InvalidCastException。</summary>
 public sealed record CheckedCastValue(ManagedValue Operand, TypeRef Target) : ManagedValue(Target, 64);
 public sealed record ArrayLengthValue(ManagedValue Array, TypeRef Type, int Width) : ManagedValue(Type, Width);
+public sealed record StringLengthValue(ManagedValue String, TypeRef Type) : ManagedValue(Type, 32);
 public sealed record ArrayElementValue(ManagedValue Array, ManagedValue Index, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width)
 {
