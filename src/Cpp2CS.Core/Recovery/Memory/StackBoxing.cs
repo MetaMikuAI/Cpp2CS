@@ -6,7 +6,12 @@ using Cpp2CS.Recovery.Values;
 
 namespace Cpp2CS.Recovery.Memory;
 
-/// <summary>IL2CPP 的栈上枚举对象：类指针、monitor=-1 与枚举值共同证明临时装箱。</summary>
+/// <summary>
+/// IL2CPP 的栈上临时装箱：对值类型调用其基类（Object、ValueType、Enum）上的实例方法时，codegen 不在堆上分配，
+/// 而在栈帧上依次写入类指针、monitor（-1，标记栈上临时对象）与值，以对象地址作为接收者调用，对象只在这次调用期间存在。
+/// 类指针、monitor 与值共同证明这是一次装箱；被调方法是引用类型上的实例方法，装箱对象可赋给其声明类型
+/// （装箱转换的结果是值类型基类链上的实例，ECMA-335 I.8.2.4）。成立时接收者换成对值的 box。
+/// </summary>
 internal static class StackBoxing
 {
     public static int Run(MachineFunction function, ValueModel values, TypeOracle oracle)
@@ -19,20 +24,19 @@ internal static class StackBoxing
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
-                if (block.Statements[i] is not Call call || oracle.Callee(call)?.Method is not { IsStatic: false, Owner.FullName: "System.Enum" } method
-                    || !(method is { Name: "ToString", Parameters.Count: 0 }
-                        || method is { Name: "Equals", Parameters: [{ Type: DefinitionRef { Definition.FullName: "System.Object" } }] })) continue;
+                if (block.Statements[i] is not Call call || oracle.Callee(call) is not { Method.IsStatic: false } callee
+                    || !ManagedTypes.IsReferenceType(callee.DeclaringType)) continue;
                 var position = call.ArgumentIndex(Storage.Gpr(0));
                 var operands = values.Operands(call);
                 if (position < 0 || position + 1 >= operands.Count || SymTable.Resolve(operands[position + 1]) is not LocalSym { Space.Kind: LocalKind.Frame } receiver) continue;
-                var writes = new List<(long Offset, int Width, Sym Value)>();
+                var writes = new List<(Store Store, long Offset, int Width, Sym Value)>();
                 for (var j = i - 1; j >= 0; j--)
                 {
                     if (block.Statements[j] is Call) break;
                     if (block.Statements[j] is not Store store) continue;
                     var data = values.Operands(store);
                     if (oracle.Decompose(data[0]) is (LocalSym { Space.Kind: LocalKind.Frame } local, var offset, null, _))
-                        writes.Add((local.Offset + offset - receiver.Offset, store.Value.Width, data[1]));
+                        writes.Add((store, local.Offset + offset - receiver.Offset, store.Value.Width, data[1]));
                 }
                 Sym? At(int offset, int width)
                 {
@@ -42,8 +46,10 @@ internal static class StackBoxing
                                 ? SymTable.Resolve(values.Syms.Slice(write.Value, (int)(offset - write.Offset) * 8, width)) : null;
                     return null;
                 }
-                if (At(RuntimeLayout.ObjectKlass, 64) is not EntitySym { Symbol: { Kind: SymbolKind.Class, Value: DefinitionRef { Definition.IsEnum: true } type } }
+                if (At(RuntimeLayout.ObjectKlass, 64) is not EntitySym { Symbol: { Kind: SymbolKind.Class, Value: DefinitionRef { Definition.IsValueType: true } type } }
+                    || type.Definition.BaseType?.Substitute(type.Arguments, []) is not { } boxed || !oracle.Types.IsAssignable(boxed, callee.DeclaringType)
                     || At(RuntimeLayout.ObjectMonitor, 64) is not ConstSym { Value: ulong.MaxValue }
+                    || oracle.Types.Size(type) <= 0
                     || At(RuntimeLayout.ObjectHeaderSize, oracle.Types.Size(type) * 8) is null) continue;
                 var temporary = new Variable(Storage.Temp(nextTemp++), 1);
                 var box = new Call(call.Address, CallKind.Direct, Expr.C(0, 64))
