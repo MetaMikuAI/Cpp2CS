@@ -11,8 +11,8 @@ namespace Cpp2CS.Recovery.Lowering;
 /// </summary>
 internal sealed partial class BodyBuilder
 {
-    private readonly Dictionary<(FieldDef, bool), FieldAccessor?> accessors = [];
-    private readonly Dictionary<(FieldDef, bool), string> accessorFailures = [];
+    private readonly Dictionary<(FieldRef, bool), FieldAccessor?> accessors = [];
+    private readonly Dictionary<(FieldRef, bool), string> accessorFailures = [];
 
     /// <summary>字段对当前方法所在类型可访问（ECMA-335 II.10.3 与 I.8.5.3.2）。</summary>
     private bool Accessible(FieldDef field)
@@ -48,8 +48,8 @@ internal sealed partial class BodyBuilder
     /// <summary>字段所在类型中，方法体恰为该字段单一读取（getter）或写入（setter）的方法。</summary>
     private FieldAccessor? Accessor(FieldRef field, TypeRef valueType, bool write)
     {
-        if (accessors.TryGetValue((field.Field, write), out var known)) return known;
-        accessors[(field.Field, write)] = null;
+        if (accessors.TryGetValue((field, write), out var known)) return known;
+        accessors[(field, write)] = null;
         var owner = (DefinitionRef)field.DeclaringType;
         var isStatic = (field.Field.Attributes & FieldAttributes.Static) != 0;
         FieldAccessor? found = null;
@@ -92,8 +92,8 @@ internal sealed partial class BodyBuilder
             found = new FieldAccessor(method, field, valueType, Width(valueType), write);
             break;
         }
-        accessorFailures[(field.Field, write)] = reasons.Count == 0 ? "没有签名匹配的方法" : string.Join("；", reasons.Distinct().Take(3));
-        return accessors[(field.Field, write)] = found;
+        accessorFailures[(field, write)] = reasons.Count == 0 ? "没有签名匹配的方法" : string.Join("；", reasons.Distinct().Take(3));
+        return accessors[(field, write)] = found;
     }
 
     /// <summary>
@@ -105,7 +105,7 @@ internal sealed partial class BodyBuilder
         var value = new FieldValue(receiver, field, type, Width(type));
         if (Accessible(field.Field)) return value;
         return Accessor(field, type, write) is { } accessor ? value with { Accessor = accessor }
-            : value with { Pending = (address, $"内存 字段 {field.Field.Owner.FullName}.{field.Field.Name} 对调用方不可访问，没有可证明的访问器（{accessorFailures.GetValueOrDefault((field.Field, write))}），也不在可证明的内联方法体中") };
+            : value with { Pending = (address, $"内存 字段 {field.Field.Owner.FullName}.{field.Field.Name} 对调用方不可访问，没有可证明的访问器（{accessorFailures.GetValueOrDefault((field, write))}），也不在可证明的内联方法体中") };
     }
 
     private ManagedValue StaticFieldAccess(FieldRef field, TypeRef type, bool write, ulong address)
@@ -113,6 +113,6 @@ internal sealed partial class BodyBuilder
         var value = new StaticFieldValue(field, type, Width(type));
         if (Accessible(field.Field)) return value;
         return Accessor(field, type, write) is { } accessor ? value with { Accessor = accessor }
-            : Hole(address, $"内存 静态字段 {field.Field.Owner.FullName}.{field.Field.Name} 对调用方不可访问，没有可证明的访问器（{accessorFailures.GetValueOrDefault((field.Field, write))}）", type);
+            : Hole(address, $"内存 静态字段 {field.Field.Owner.FullName}.{field.Field.Name} 对调用方不可访问，没有可证明的访问器（{accessorFailures.GetValueOrDefault((field, write))}）", type);
     }
 }
