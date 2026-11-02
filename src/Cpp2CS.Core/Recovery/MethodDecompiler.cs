@@ -137,6 +137,8 @@ public sealed class MethodDecompiler
         var splits = PathSplitting.Run(function, f => ValueModel.Build(f, environment), lifter.Calls, lifter.Machine.Convention.StackPointer);
         // 分派在内存提升之前解析，使经指针的调用效果有签名可依。
         var preliminary = ValueModel.Build(function, environment);
+        if (StackBoxing.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary)) > 0)
+            preliminary = ValueModel.Build(function, environment);
         DispatchResolution.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary));
         if (!MemoryPromotion.Run(function, signature, environment.Shape, abi, lifter.Calls, lifter.Machine.Convention.StackPointer).TryGet(out var layout, out var memoryFailure))
             return memoryFailure;
