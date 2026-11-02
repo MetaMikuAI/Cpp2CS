@@ -300,9 +300,17 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
                 return op.Width == 32 ? types.Single : types.Double;
             case OperatorKind.Binary or OperatorKind.Unary:
                 {
+                    // 补码的加减乘与按位运算不决定有无符号：操作数有同宽整数类型时沿用，否则不给定义类型，由使用处决定。
+                    // 只有带符号或无符号语义的运算给出类型。
                     var operand = TypeOf(op.Args[0]);
                     if (operand is not null && types.Kind(operand) is TypeKind.Int && types.Bits(operand) == op.Width) return operand;
-                    return op.Width is 8 or 16 or 32 or 64 ? types.Integer(op.Width, op.Op.Kind == OperatorKind.Binary && op.Op.Binary is BinOp.SDiv or BinOp.SRem or BinOp.AShr) : null;
+                    if (op.Width is not (8 or 16 or 32 or 64) || op.Op.Kind != OperatorKind.Binary) return null;
+                    return op.Op.Binary switch
+                    {
+                        BinOp.SDiv or BinOp.SRem or BinOp.AShr => types.Integer(op.Width, true),
+                        BinOp.UDiv or BinOp.URem or BinOp.LShr => types.Integer(op.Width, false),
+                        _ => null,
+                    };
                 }
             case OperatorKind.Convert:
                 return op.Op.Conversion switch

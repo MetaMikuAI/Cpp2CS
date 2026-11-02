@@ -122,13 +122,13 @@ internal sealed partial class BodyBuilder
                 }
             case OperatorKind.Binary:
                 {
-                    var type = expected is not null && types.Kind(expected) is TypeKind.Int && Width(expected) == op.Width ? expected : natural;
+                    var type = expected is not null && types.Kind(expected) is TypeKind.Int && Width(expected) == op.Width ? expected : natural ?? oracle.Unconstrained(op.Width);
                     if (type is null) return Hole(address, $"类型 运算 {op.Op}", expected);
                     return new BinaryValue(op.Op.Binary, View(op.Args[0], type, address), View(op.Args[1], op.Op.Binary is BinOp.Shl or BinOp.LShr or BinOp.AShr ? types.Int32 : type, address), type, op.Width);
                 }
             case OperatorKind.Unary:
                 {
-                    var type = natural ?? expected;
+                    var type = natural ?? (expected is not null && types.Kind(expected) is TypeKind.Int && Width(expected) == op.Width ? expected : oracle.Unconstrained(op.Width));
                     if (type is null) return Hole(address, $"类型 运算 {op.Op}", expected);
                     return new UnaryValue(op.Op.Unary, View(op.Args[0], type, address), type, op.Width);
                 }
