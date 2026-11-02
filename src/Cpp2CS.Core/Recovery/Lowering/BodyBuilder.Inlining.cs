@@ -752,9 +752,11 @@ internal sealed partial class BodyBuilder
         var region = internalBlocks.Append(startBlock).ToHashSet();
         foreach (var other in body.Blocks.Where(b => !region.Contains(b.Address)))
             if (other.Statements.SelectMany(ManagedValues.Edges).Any(e => internalBlocks.Contains(e.Target))) { failure = "区域内的块从区域外进入"; return null; }
-        // 调用保留起点的异常上下文；区域不能跨越 try/catch 边界，也不能删去处理入口。
+        // 纯跳转与局部复制不会抛出异常，尾部这类块可在 try 外；实际效果仍须保留起点的异常上下文。
+        bool Inert(ulong block) => blocks[block].Statements.All(s => s is ManagedJump jump
+            && jump.Edge.Copies.All(c => c.Value is LocalValue or ArgumentValue or ConstantValue));
         if (body.Regions.Any(r => internalBlocks.Contains(r.HandlerEntry)
-            || region.Any(b => r.Try.Contains(b) != r.Try.Contains(startBlock) || r.Handler.Contains(b) != r.Handler.Contains(startBlock))))
+            || region.Any(b => !Inert(b) && (r.Try.Contains(b) != r.Try.Contains(startBlock) || r.Handler.Contains(b) != r.Handler.Contains(startBlock)))))
         { failure = "区域跨越异常边界"; return null; }
         // 区域内定义的值不在区域外使用。
         var outside = body.Blocks.SelectMany(b => b.Statements.Select((s, i) => (b.Address, i, s)))
