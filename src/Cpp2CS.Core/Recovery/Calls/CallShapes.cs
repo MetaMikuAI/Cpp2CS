@@ -45,6 +45,7 @@ public sealed class CallShapes(ProgramFacts facts, ManagedAbi abi, Func<ulong, S
         var candidates = facts.EntriesAt(address)
             .Where(e => e.Kind is EntryKind.Method or EntryKind.GenericMethod && e.Method is not null)
             .Select(e => e.Method!).Distinct().ToArray();
+        if (candidates.Length == 0 && facts.AdjustorTargets.At(address) is { } adjusted) candidates = [adjusted.Method];
         // 未登记在方法指针表中的方法：事实层由调用证据推断出定义，实例取自见证。
         if (candidates.Length == 0 && facts.Unregistered.At(address) is { } inferred)
             candidates = inferred.Witnesses.Select(w => w.Instance).Distinct().DefaultIfEmpty(new MethodRef(inferred.Definition, [], [])).ToArray();

@@ -62,7 +62,7 @@ namespace Cpp2CS.Input
             cacheDirectory ??= basis.Options.FactCacheDirectory ?? Path.Combine(".cpp2cs", "unregistered");
             var inferred = inferUnregistered ? Step("unregistered", () => UnregisteredFactsCache.GetOrBuild(registered, metadataPath, cacheDirectory, log)) : UnregisteredMethods.Empty;
             timings["total"] = Math.Round(clock.Elapsed.TotalSeconds, 3);
-            return new ProgramFacts(basis, new() { Unregistered = inferred });
+            return new ProgramFacts(basis, new() { Unregistered = inferred, AdjustorTargets = Cpp2CS.Facts.Derived.AdjustorTargets.Build(basis) });
         }
 
         /// <summary>托管代码调用的、没有托管所有者的目标：运行时 helper、PLT 导入，以及 il2cpp 节中生成的无元数据函数。</summary>

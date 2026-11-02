@@ -245,7 +245,7 @@ internal sealed partial class NativeMachine : IDisposable
             FlushWrites();
             if (address == World.Sentinel) { Finish(); return; }
             if (side.World.DelegateAtTrap(address) is { } binding) { CallDelegate(binding); return; }
-            if (facts.Unregistered.At(address) is not null) Call(address);
+            if (facts.Unregistered.At(address) is not null || facts.AdjustorTargets.At(address) is not null) Call(address);
             else if (facts.Helpers.At(address) is { } helper)
             {
                 if (!genericVirtualHelpers.TryGetValue(address, out var genericVirtual))
@@ -319,7 +319,12 @@ internal sealed partial class NativeMachine : IDisposable
         var ordinal = side.CallOrdinal;
         var expected = ordinal < callees.Count ? callees[ordinal] : null;
         MethodRef callee;
-        if (facts.Unregistered.At(address) is { } identity)
+        if (facts.AdjustorTargets.At(address) is { } adjusted)
+        {
+            callee = adjusted.Method;
+            address = world.Index.CodeAddress(callee);
+        }
+        else if (facts.Unregistered.At(address) is { } identity)
         {
             var hidden = identity.Abi.MethodInfo is { } piece ? GetPiece(new Aapcs64Classifier.Piece(piece.Register, piece.Width, piece.Offset))
                 : throw new InferredCallError($"0x{address:x}：隐藏 MethodInfo 在栈上");

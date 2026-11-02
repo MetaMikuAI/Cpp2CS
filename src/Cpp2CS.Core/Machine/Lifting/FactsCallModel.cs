@@ -83,7 +83,9 @@ public sealed class FactsCallModel : ICallModel
     {
         if (cache.TryGetValue(target, out var cached)) return cached;
         CallSignature? signature = null;
-        if (facts.Unregistered.At(target) is { } identity)
+        if (facts.AdjustorTargets.At(target) is { } adjusted && abi.Classify(adjusted.Method, out _) is { } adjustedSignature)
+            signature = new(adjustedSignature.Reads, adjustedSignature.Results, "registered-adjustor-target") { MethodInfo = adjustedSignature.MethodInfo?.Register };
+        else if (facts.Unregistered.At(target) is { } identity)
             signature = new(identity.Abi.Reads, identity.Abi.Results, "inferred-definition") { MethodInfo = identity.Abi.MethodInfo?.Register };
         else if (facts.Helpers.At(target) is { } helper) signature = Helper(helper);
         else

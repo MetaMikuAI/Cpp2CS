@@ -20,5 +20,6 @@ public sealed class ProgramFacts
     public IReadOnlyDictionary<string, double> Timings { get => Base.Timings; init => Base = Base with { Timings = value }; }
     public Cpp2CS.Options.RecoveryOptions Options { get => Base.Options; init => Base = Base with { Options = value }; }
     public UnregisteredMethods Unregistered { get => Derived.Unregistered; init => Derived = Derived with { Unregistered = value }; }
+    public AdjustorTargets AdjustorTargets => Derived.AdjustorTargets;
     public CodeEntry[] EntriesAt(ulong address) => Base.EntriesAt(address);
 }
