@@ -10,13 +10,15 @@ public sealed record RecoveryRequest(string Binary, string Metadata, string Outp
     public string[] Namespaces { get; init; } = [];
     public string[]? Assemblies { get; init; }
     public string? Methods { get; init; }
+    /// <summary>顶层类型全名清单（每行一个，取制表符前的第一列）；选择这些类型及其嵌套类型的全部方法。</summary>
+    public string? Types { get; init; }
     public int Limit { get; init; } = int.MaxValue;
     public int Jobs { get; init; } = 1;
     public bool NoSource { get; init; }
     public string SourceLayout { get; init; } = "flat";
 
     public bool HasScope => (All ? 1 : 0) + (Namespaces.Length > 0 ? 1 : 0)
-        + (Assemblies is { Length: > 0 } ? 1 : 0) + (!string.IsNullOrWhiteSpace(Methods) ? 1 : 0) == 1;
+        + (Assemblies is { Length: > 0 } ? 1 : 0) + (!string.IsNullOrWhiteSpace(Methods) ? 1 : 0) + (!string.IsNullOrWhiteSpace(Types) ? 1 : 0) == 1;
 
     public void Validate()
     {
@@ -38,7 +40,7 @@ public sealed record RecoveryRequest(string Binary, string Metadata, string Outp
             if (option == "--no-source") { request = request with { NoSource = true }; continue; }
             if (++i == options.Length) throw new ArgumentException($"{option} 缺少参数");
             var value = options[i];
-            if (option is "--namespaces" or "--assemblies" or "--methods") scopes++;
+            if (option is "--namespaces" or "--assemblies" or "--methods" or "--types") scopes++;
             request = option switch
             {
                 "--profile" => request with { Profile = value },
@@ -46,15 +48,20 @@ public sealed record RecoveryRequest(string Binary, string Metadata, string Outp
                 "--namespaces" => request with { Namespaces = Split(value) },
                 "--assemblies" => request with { Assemblies = Split(value) },
                 "--methods" => request with { Methods = value },
+                "--types" => request with { Types = value },
                 "--limit" => request with { Limit = int.Parse(value) },
                 "--jobs" => request with { Jobs = int.Parse(value) },
                 "--source-layout" => request with { SourceLayout = value },
                 _ => throw new ArgumentException($"未知参数 {option}"),
             };
         }
-        if (scopes != 1) return request with { All = false, Namespaces = [], Assemblies = null, Methods = null };
+        if (scopes != 1) return request with { All = false, Namespaces = [], Assemblies = null, Methods = null, Types = null };
         return request;
     }
+
+    /// <summary>类型清单中的顶层类型全名。</summary>
+    public HashSet<string>? TypeNames() => Types is null ? null
+        : File.ReadLines(Types).Where(l => l.Length > 0 && !l.StartsWith('#')).Select(l => l.Split('\t')[0].Trim()).ToHashSet(StringComparer.Ordinal);
 
     private static string[] Split(string value) => value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 }

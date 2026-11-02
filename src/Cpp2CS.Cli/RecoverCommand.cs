@@ -9,7 +9,7 @@ internal static class RecoverCommand
         var request = RecoveryRequest.Parse(binary, metadata, output, options);
         if (!request.HasScope)
         {
-            Console.Error.WriteLine("必须且只能指定一种恢复范围：--all、--assemblies、--namespaces 或 --methods。");
+            Console.Error.WriteLine("必须且只能指定一种恢复范围：--all、--assemblies、--namespaces、--methods 或 --types。");
             return 2;
         }
         var result = RecoverySession.Run(request, Console.Error.WriteLine);

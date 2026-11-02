@@ -13,13 +13,14 @@ internal static class SelectionStage
     {
         var namespaces = request.Namespaces;
         var assembliesFilter = request.Assemblies;
+        var types = request.TypeNames();
         var all = request.All || assembliesFilter is not null;
         var list = request.Methods;
         var limit = request.Limit;
         RecoveryTarget[] selected;
         if (list is null)
         {
-            bool Included(MethodDef m) => (all || InNamespaces(m.Owner, namespaces))
+            bool Included(MethodDef m) => (all || (types is not null ? types.Contains(Top(m.Owner).FullName) : InNamespaces(m.Owner, namespaces)))
                 && (assembliesFilter is null || assembliesFilter.Contains(m.Owner.Assembly, StringComparer.Ordinal));
             var ordinary = facts.Model.Methods.Where(m => m.Address != 0 && Included(m)
                 && facts.Code.RegionOf(m.Address) == CodeRegion.Managed).Select(m => new RecoveryTarget(new(m, [], []), m.Address));
@@ -28,7 +29,7 @@ internal static class SelectionStage
                 .GroupBy(t => t.Instance.Method).Select(g => g.OrderBy(t => t.Instance.TypeArguments.Concat(t.Instance.MethodArguments)
                     .Any(a => !ManagedTypes.IsReferenceType(a) || FieldLayouts.IsFullyShared(a))).ThenBy(t => t.Entry).First());
             selected = ordinary.Concat(shared).Take(limit).ToArray();
-            Log($"恢复 {selected.Length} 个方法（{(all ? assembliesFilter is null ? "全程序方法定义" : string.Join(", ", assembliesFilter) : string.Join(", ", namespaces))}）");
+            Log($"恢复 {selected.Length} 个方法（{(all ? assembliesFilter is null ? "全程序方法定义" : string.Join(", ", assembliesFilter) : types is not null ? request.Types : string.Join(", ", namespaces))}）");
         }
         else
         {

@@ -29,7 +29,7 @@ internal sealed class RunManifest
         path = Path.Combine(request.Output, "run.json");
         inputs["binary"] = Hash(request.Binary);
         inputs["metadata"] = Hash(request.Metadata);
-        foreach (var (key, file) in new[] { ("methods", request.Methods) })
+        foreach (var (key, file) in new[] { ("methods", request.Methods), ("types", request.Types) })
             if (file is not null) inputs[key] = Hash(file);
         foreach (var assembly in new[] { typeof(RunManifest).Assembly, typeof(Input.FactsBuilder).Assembly,
             typeof(Recovery.MethodDecompiler).Assembly, typeof(Output.BodyEmitter).Assembly,

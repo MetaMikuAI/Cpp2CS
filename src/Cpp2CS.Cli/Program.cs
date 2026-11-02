@@ -40,9 +40,10 @@ internal static class Program
                                                                       打印函数的寄存器 SSA（--idioms：L2 归一之后）
                   cpp2cs idioms <libil2cpp.so> <global-metadata.dat> <输出目录> [--owner 前缀] [--limit N]
                                                                       对托管函数做 L2 模板普查，写出 idioms.txt 与 idiom-residuals.tsv
-                  cpp2cs recover <libil2cpp.so> <global-metadata.dat> <输出目录> [--all | --assemblies A.dll,B.dll | --namespaces A,B] [--no-source] [--limit N] [--jobs N] [--methods 清单] [--source-layout flat|project]
+                  cpp2cs recover <libil2cpp.so> <global-metadata.dat> <输出目录> [--all | --assemblies A.dll,B.dll | --namespaces A,B] [--no-source] [--limit N] [--jobs N] [--methods 清单 | --types 类型清单] [--source-layout flat|project]
                                                                       恢复范围必须显式指定，写出 CIL 与 C#；
                                                                       --methods：从外部方法清单选择目标；
+                                                                      --types：按顶层类型全名清单选择这些类型（含嵌套类型）的全部方法；
                                                                       --source-layout project：按程序集/命名空间/类型导出，含范围内全部类型声明与 csproj。
                                                                       --jobs N：方法恢复的最大并行度，默认 1；程序集写出按顺序执行。
                                                                       --fact-cache-file 文件：显式固定事实快照，输入变化仍会失效；用于重构前后对比。

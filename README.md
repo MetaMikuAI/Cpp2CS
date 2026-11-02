@@ -17,14 +17,14 @@ dotnet build Cpp2CS.slnx -c Release
 
 ## 使用
 
-恢复范围必须显式指定，可选命名空间、程序集、方法清单或 `--all`：
+恢复范围必须显式指定，可选命名空间、程序集、方法清单、类型清单或 `--all`：
 
 ```bash
 dotnet run --project src/Cpp2CS.Cli -c Release -- recover <binary> <metadata> <output> --namespaces Example
 dotnet run --project src/Cpp2CS.Cli -c Release -- recover <binary> <metadata> <output> --methods <methods.tsv>
 ```
 
-方法清单每行是十六进制入口地址和完整方法名，以制表符分隔，必须与输入映像匹配。
+方法清单每行是十六进制入口地址和完整方法名，以制表符分隔，必须与输入映像匹配。`--types <types.tsv>` 的清单每行是一个顶层类型全名，选择这些类型及其嵌套类型的全部方法。
 `--assemblies A.dll,B.dll` 按程序集选择；`--all` 选择全部托管方法定义；`--limit N` 限制非清单模式的方法数量；`--no-source` 跳过 C# 文件生成。
 
 `--fact-cache-file <文件>` 可在重构对比中显式固定事实快照；输入和运行选项变化仍会使它失效。默认缓存还会核对实现哈希，正式核对应包含冷启动。
