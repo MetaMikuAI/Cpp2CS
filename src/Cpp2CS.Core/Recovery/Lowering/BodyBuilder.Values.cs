@@ -68,14 +68,15 @@ internal sealed partial class BodyBuilder
     private ManagedValue Coerce(ManagedValue value, TypeRef? expected, ulong address = 0)
     {
         if (expected is null || value.Type.Equals(expected) || value is HoleValue) return value;
-        // 表示链上的同一段位：进入单字段结构体的字段；最内层为整数时按整数宽度一致的期望取值；外层由构造函数包成。
+        // 表示链上的同一段位：进入单字段结构体的字段；最内层为整数时按整数宽度一致的期望取值；外层按字段组成。
         if (oracle.Inside(value.Type, expected) is var (contained, _))
             return Nest(value, contained, expected, false, address);
         if (oracle.Representation(value.Type) is [_, _, ..] && oracle.Innermost(value.Type) is var (path, scalar)
-            && types.Kind(scalar) is TypeKind.Int or TypeKind.Bool && types.Kind(expected) is TypeKind.Int or TypeKind.Bool && types.Size(value.Type) == types.Size(expected))
+            && (types.Kind(scalar) is TypeKind.Int or TypeKind.Bool && types.Kind(expected) is TypeKind.Int or TypeKind.Bool && types.Size(value.Type) == types.Size(expected)
+                || ManagedTypes.IsReferenceType(scalar) && ManagedTypes.IsReferenceType(expected) && types.IsAssignable(scalar, expected)))
             return Coerce(Nest(value, path, scalar, false, address), expected, address);
-        if (expected is DefinitionRef wrapper && oracle.Inside(wrapper, value.Type) is var (wrapped, _)
-            && ValueConstructor(wrapper, [(wrapped, value)]) is { } constructed) return constructed;
+        if (expected is DefinitionRef wrapper && oracle.Inside(wrapper, value.Type) is var (wrapped, _))
+            return Composed(wrapper, [(wrapped, value)], address);
         if (ManagedTypes.IsReferenceType(value.Type) && ManagedTypes.IsReferenceType(expected)) return value;
         var (from, to) = (types.Kind(value.Type), types.Kind(expected));
         if (from is TypeKind.Int or TypeKind.Bool && to is TypeKind.Int or TypeKind.Bool)
