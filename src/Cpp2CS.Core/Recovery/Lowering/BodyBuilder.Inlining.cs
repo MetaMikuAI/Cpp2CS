@@ -494,11 +494,13 @@ internal sealed partial class BodyBuilder
     private bool Finish(Walker caller, InlineMatch match, ManagedValue? result)
     {
         var copies = new List<(LocalValue, ManagedValue)>();
+        var continuation = false;
         for (var steps = 0; steps < 16 && caller.Current is ManagedJump jump; steps++)
         {
-            // 多个入口共享的跳转块属于续接区域，不能吞入某一条内联路径。
-            if (caller.Index == 0 && caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) > 1) break;
-            Cover(caller, match);
+            // 共享续接中的空跳转可旁路，但不并入内联区域；其他入边仍保留原块。
+            continuation |= caller.Index == 0 && caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) > 1;
+            if (continuation && jump.Edge.Copies.Count > 0) break;
+            if (!continuation) Cover(caller, match);
             foreach (var copy in jump.Edge.Copies)
             {
                 if (Term(caller, copy.Value) is not { } value) return false;
@@ -509,6 +511,7 @@ internal sealed partial class BodyBuilder
             caller.Index = 0;
         }
         var returns = result is null && caller.Current is ManagedReturn { Value: null }
+            && !continuation
             && (caller.Index > 0 || caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) <= 1);
         if (returns) Cover(caller, match);
         match.Ends.Add(new InlineEnd((caller.Block, caller.Index), copies, new Dictionary<Variable, ManagedValue>(caller.Env), result, returns));
