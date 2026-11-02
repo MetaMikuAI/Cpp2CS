@@ -70,7 +70,7 @@ public sealed partial class TypeOracle
                 var ordered = members.OrderBy(m => m.Offset).ToArray();
                 var width = ordered.Sum(m => m.Value.Width);
                 if ((ordered[^1].Offset - ordered[0].Offset) * 8 + ordered[^1].Value.Width != width) continue;
-                if (Locate(ordered[0].Address, width) is not { Type: DefinitionRef type } location
+                if (Locate(ordered[0].Address, width) is not { Type: { } type } location
                     || types.Kind(type) != TypeKind.Struct || types.Size(type) * 8 != width) continue;
                 if (crossedReads.Count > 0 && (location.Kind is not (LocationKind.Instance or LocationKind.Reference)
                     || crossedReads.Any(r => AccessAddress(r.Address).Offset < ordered[0].Offset + width / 8
