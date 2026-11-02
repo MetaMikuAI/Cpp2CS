@@ -203,6 +203,8 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
                 return new ByRefRef(cellType);
             case EntitySym { Symbol: { Kind: SymbolKind.String } }:
                 return types.String;
+            case EntitySym { Symbol: { Kind: SymbolKind.Type } }:
+                return types.RuntimeTypeHandle;
             case ResultSym result when result.Index == 0:
                 return ResultType(result.Site);
             case OutSym output when output.Site.Op is null && Callee(output.Site) is { } callee:
