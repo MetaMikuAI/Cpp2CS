@@ -16,7 +16,7 @@ internal sealed partial class BodyBuilder
     {
         var statement = block.Statements[index];
         var operands = values.Operands(statement);
-        foreach (var read in Reads(statement).Where(materialized.Contains))
+        foreach (var read in Reads(statement).Concat(aggregateReadSites.GetValueOrDefault(statement) ?? []).Where(materialized.Contains))
         {
             // 相邻字段合并的读取逐字段落成局部，以该段的切片为键。
             if (oracle.Parts(read) is { } leaves)

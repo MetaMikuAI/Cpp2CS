@@ -241,6 +241,7 @@ internal sealed partial class BodyBuilder
     /// </summary>
     private ManagedValue StructBits(Sym bits, DefinitionRef structure, ulong address)
     {
+        if (AggregateRead(bits, structure) is { } whole) return View(whole, structure, address);
         var syms = values.Syms;
         var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
         foreach (var (path, type, offset) in Leaves(structure, 0))
