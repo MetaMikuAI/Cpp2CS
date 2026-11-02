@@ -128,7 +128,7 @@ public sealed record RuntimeOp(OpKind Kind, object? Operand)
 public sealed record Call(ulong Address, CallKind Kind, Expr Target) : Stmt(Address)
 {
     public Expr[] Arguments { get; init; } = [];
-    /// <summary>Arguments 各项读自的存储单元（一一对应；ABI 阶段填入）。</summary>
+    /// <summary>Arguments 尾部各项读自的存储单元；L2 运行时操作可省略原始实参的存储身份。</summary>
     public Storage[] Sources { get; init; } = [];
     /// <summary>返回值写入的存储单元（ABI 阶段确定）。</summary>
     public Storage[] Results { get; init; } = [];
@@ -148,11 +148,18 @@ public sealed record Call(ulong Address, CallKind Kind, Expr Target) : Stmt(Addr
     /// 只记录来源，不改变生产 CFG 或猜测已删除的异常 phi。</summary>
     public ulong? NativeExceptionSite { get; init; }
 
+    /// <summary>不含内存提升追加单元的原始实参数量。</summary>
+    public int OriginalArgumentCount => Arguments.Length - Sources.Count(s => s.Bank == Bank.Local);
+
+    /// <summary>存储单元对应的实参位置；无存储身份的运行时实参位于已登记来源之前。</summary>
+    public int ArgumentIndex(Storage source) => Array.IndexOf(Sources, source) is var index and >= 0
+        ? Arguments.Length - Sources.Length + index : -1;
+
     /// <summary>按读自的存储单元索引的实参。</summary>
     public Dictionary<Storage, Expr> ArgumentsBySource()
     {
         var map = new Dictionary<Storage, Expr>();
-        for (var i = 0; i < Sources.Length && i < Arguments.Length; i++) map[Sources[i]] = Arguments[i];
+        for (var i = 0; i < Sources.Length; i++) map[Sources[i]] = Arguments[Arguments.Length - Sources.Length + i];
         return map;
     }
 

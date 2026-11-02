@@ -157,14 +157,14 @@ internal sealed partial class BodyBuilder
         {
             foreach (var piece in value.Pieces)
             {
-                var position = Array.IndexOf(call.Sources, piece.Register);
+                var position = call.ArgumentIndex(piece.Register);
                 if (position >= 0) parts[piece.Offset * 8] = syms.Slice(arguments[position], 0, Math.Min(piece.Width, arguments[position].Width));
             }
             foreach (var access in call.Memory.Where(m => !m.Write && m.Value == value.Index))
-                if (Array.IndexOf(call.Sources, access.Cell) is var cell and >= 0)
+                if (call.ArgumentIndex(access.Cell) is var cell and >= 0)
                     parts[access.ValueBit] = syms.Slice(arguments[cell], access.CellBit, access.Width);
         }
-        else if (Array.IndexOf(call.Sources, value.Pieces[0].Register) is var pointer and >= 0)
+        else if (call.ArgumentIndex(value.Pieces[0].Register) is var pointer and >= 0)
             return arguments[pointer];
         if (parts.Count == 0) return syms.Unknown("实参缺失", width);
         var list = new List<Sym>();
@@ -237,7 +237,7 @@ internal sealed partial class BodyBuilder
         {
             if (access.ValueBit < at) continue;
             if (access.ValueBit > at) parts.Add(syms.Undef(access.ValueBit - at));
-            var position = Array.IndexOf(call.Sources, access.Cell);
+            var position = call.ArgumentIndex(access.Cell);
             if (position < 0) return null;
             parts.Add(syms.Slice(arguments[position], access.CellBit, access.Width));
             at = access.ValueBit + access.Width;
@@ -265,7 +265,7 @@ internal sealed partial class BodyBuilder
         public Call Call => call;
         public RuntimeOp Op => op;
         public TypeRef? ClassOperand => owner.oracle.ClassOperand(call);
-        public IReadOnlyList<Sym> Arguments => arguments;
+        public IReadOnlyList<Sym> Arguments { get; } = arguments.Take(call.OriginalArgumentCount).ToArray();
         public Sym Result => owner.values.Syms.Result(call, 0, 64);
         public ManagedValue View(Sym sym, TypeRef? expected) => owner.View(sym, expected, call.Address);
         public TypeRef? TypeOf(Sym sym) => owner.oracle.TypeOf(sym);
@@ -300,7 +300,7 @@ internal sealed partial class BodyBuilder
             var reads = call.Memory.Where(m => !m.Write && m.Value == value).OrderBy(m => m.ValueBit).ToArray();
             if (reads.Length == 0) return null;
             var syms = owner.values.Syms;
-            return syms.Concat(reads.Select(m => syms.Slice(arguments[Array.IndexOf(call.Sources, m.Cell)], m.CellBit, m.Width)));
+            return syms.Concat(reads.Select(m => syms.Slice(arguments[call.ArgumentIndex(m.Cell)], m.CellBit, m.Width)));
         }
 
         public ManagedValue? Location(int argument, TypeRef type) =>

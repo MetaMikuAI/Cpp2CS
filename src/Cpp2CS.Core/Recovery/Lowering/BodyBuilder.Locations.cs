@@ -97,6 +97,7 @@ internal sealed partial class BodyBuilder
         {
             index = SymTable.Resolve(index);
             if (index is SliceSym { Low: 0, Width: >= 32 } slice && slice.Base.Width > slice.Width) index = slice.Base;
+            else if (index is PhiSym { Projection: { Low: 0 } projection, Width: >= 32 } phi && projection.Whole.Width > phi.Width) index = projection.Whole;
             else if (index is OpSym { Op: { Kind: OperatorKind.Convert } op, Args: [{ Width: 32 } narrow] } && op.Conversion == ConvKind.SignExtend) index = narrow;
             else if (index is ConcatSym { Parts: [{ Width: 32 } low, ConstSym { Value: 0 }] }) index = low;
             else break;

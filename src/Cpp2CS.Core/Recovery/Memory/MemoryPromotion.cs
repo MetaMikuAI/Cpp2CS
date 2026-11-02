@@ -201,7 +201,7 @@ internal sealed class MemoryPromotion
         foreach (var value in callee.Indirections)
         {
             var pointer = value.Pieces[0].Register;
-            var position = Array.IndexOf(call.Sources, pointer);
+            var position = call.ArgumentIndex(pointer);
             if (position < 0 || Resolve(call.Arguments[position]) is not var (space, offset)) continue;
             effects.Add(new(position, value.Index, value.Size * 8, 0, space, offset, value.Size, value.Access));
         }

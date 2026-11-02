@@ -69,7 +69,7 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
                 if (shapes(call).Signature is not { } signature || Callee(call) is not { } callee) continue;
                 foreach (var value in signature.Indirections)
                 {
-                    var position = Array.IndexOf(call.Sources, value.Pieces[0].Register);
+                    var position = call.ArgumentIndex(value.Pieces[0].Register);
                     if (position < 0) continue;
                     var type = value.Index == MachineSignature.ReturnIndex ? Concrete(callee, callee.Method.ReturnType)
                         : value.Index < 0 ? callee.DeclaringType : Concrete(callee, callee.Method.Parameters[value.Index].Type);
@@ -107,9 +107,9 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
         var candidates = shape.Candidates;
         if (candidates.Count == 0) return null;
         var operands = values.Operands(call);
-        Sym? Register(Storage storage) => Array.IndexOf(call.Sources, storage) is var k and >= 0 && k + 1 < operands.Count ? operands[1 + k] : null;
+        Sym? Register(Storage storage) => call.ArgumentIndex(storage) is var k and >= 0 && k + 1 < operands.Count ? operands[1 + k] : null;
         Sym? StackInfo() => call.Memory.FirstOrDefault(m => !m.Write && m.Value == MachineSignature.MethodInfoIndex) is { } access
-            && Array.IndexOf(call.Sources, access.Cell) is var cell and >= 0 && cell + 1 < operands.Count
+            && call.ArgumentIndex(access.Cell) is var cell and >= 0 && cell + 1 < operands.Count
             ? values.Syms.Slice(operands[1 + cell], access.CellBit, access.Width) : null;
         if (shape.Signature?.MethodInfo is { } info && (info.Register.Bank == Bank.Stack ? StackInfo() : Register(info.Register)) is { } infoSym
             && SymTable.Resolve(infoSym) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef exact } }
@@ -184,6 +184,7 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
                 return ResultType(result.Site);
             case OutSym output when output.Site.Op is null && Callee(output.Site) is { } callee:
                 return output.Argument == MachineSignature.ReturnIndex ? Concrete(callee, callee.Method.ReturnType)
+                    : output.Argument == -1 && callee.Method.Owner.IsValueType ? callee.DeclaringType
                     : (output.Argument < 0 ? null : Concrete(callee, callee.Method.Parameters[output.Argument].Type)) is ByRefRef byRef ? byRef.Element : null;
             case ReadSym read when Decompose(read.Address) is (ResultSym { Site.Op.Kind: OpKind.BeginCatch }, 0, null, _):
                 return types.Corlib("System.Exception");

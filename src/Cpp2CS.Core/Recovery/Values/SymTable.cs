@@ -275,6 +275,7 @@ public sealed class SymTable
     public Sym Unary(UnOp op, Sym operand, int width)
     {
         operand = Resolve(operand);
+        if (op == UnOp.Not && width == 1 && operand.Width == 1) return Not(operand);
         if (operand is ConstSym c && Fold.Unary(op, new IrConst(c.Value, c.Width), width) is IrConst folded) return Const(folded.Value, width);
         if (op == UnOp.Not && operand is OpSym { Op: { Kind: OperatorKind.Unary } inner, Args: [var x] } && inner.Unary == UnOp.Not) return x;
         return Op(Operator.Of(op), width, operand);

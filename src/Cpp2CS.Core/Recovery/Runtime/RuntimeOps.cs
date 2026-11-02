@@ -24,6 +24,7 @@ public interface IRuntimeLowering
     RuntimeOp Op { get; }
     /// <summary>操作的类操作数：L2 写入的 Operand，否则为实参中的类实体。</summary>
     TypeRef? ClassOperand { get; }
+    /// <summary>原始实参；内存提升追加的单元由 Pointee 读取，不参与实参数量和位置。</summary>
     IReadOnlyList<Sym> Arguments { get; }
     /// <summary>操作的结果（<see cref="ResultSym"/>，序号 0）。</summary>
     Sym Result { get; }

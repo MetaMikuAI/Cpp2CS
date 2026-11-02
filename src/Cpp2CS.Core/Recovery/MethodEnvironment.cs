@@ -115,7 +115,7 @@ internal sealed class MethodEnvironment(MethodRef method, MachineSignature signa
     /// <summary>调用之后的单元内容：调用读取的原内容（没有时未定义）拼入各次写出的值。</summary>
     private static Sym Written(SymTable syms, Call call, Cell cell, IReadOnlyList<Sym> arguments)
     {
-        var position = Array.IndexOf(call.Sources, cell.Storage);
+        var position = call.ArgumentIndex(cell.Storage);
         var content = position >= 0 ? arguments[position] : syms.Undef(cell.Size * 8);
         foreach (var access in call.Memory.Where(m => m.Write && m.Cell == cell.Storage).OrderBy(m => m.CellBit))
         {

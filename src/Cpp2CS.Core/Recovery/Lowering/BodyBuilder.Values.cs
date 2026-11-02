@@ -138,6 +138,15 @@ internal sealed partial class BodyBuilder
                     var type = natural ?? (expected is not null && Width(expected) == op.Width ? expected : null);
                     if (type is null) return Hole(address, $"类型 转换 {op.Op}", expected);
                     var operandWidth = op.Args[0].Width;
+                    // 非标准宽度的片不能交给 conv.i*：先把该片的符号位移到 IL 整数最高位，再算术右移。
+                    if (op.Op.Conversion == ConvKind.SignExtend && operandWidth is not (8 or 16 or 32 or 64))
+                    {
+                        var integer = op.Width > 32 ? types.Int64 : types.Int32;
+                        var bits = Width(integer);
+                        var shift = new ConstantValue((ulong)(bits - operandWidth), types.Int32, 32);
+                        var aligned = new BinaryValue(BinOp.Shl, View(op.Args[0], integer, address), shift, integer, bits);
+                        return Coerce(new BinaryValue(BinOp.AShr, aligned, shift, integer, bits), type);
+                    }
                     var source = op.Op.Conversion switch
                     {
                         ConvKind.FloatToFloat or ConvKind.FloatToSInt or ConvKind.FloatToUInt => operandWidth == 32 ? types.Single : types.Double,
@@ -196,20 +205,10 @@ internal sealed partial class BodyBuilder
         if (expected is null && concat.Parts.Skip(1).All(p => p is ConstSym { Value: 0 }) && concat.Width is 8 or 16 or 32 or 64)
             expected = types.Integer(concat.Width, false);
         if (expected is null) return Hole(address, $"类型 拼接没有期望类型 {concat}", null);
-        var syms = values.Syms;
         switch (types.Kind(expected))
         {
             case TypeKind.Struct when expected is DefinitionRef structure:
-                {
-                    var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
-                    foreach (var (path, type, offset) in Leaves(structure, 0))
-                    {
-                        var width = Width(type);
-                        if (offset * 8 + width > concat.Width) return Hole(address, $"值 {expected} 超出拼接宽度", expected);
-                        leaves.Add((path, View(syms.Slice(concat, offset * 8, width), type, address)));
-                    }
-                    return Composed(structure, leaves, address);
-                }
+                return StructBits(concat, structure, address);
             case TypeKind.Int or TypeKind.Bool or TypeKind.Pointer:
                 {
                     var parts = concat.Parts;
