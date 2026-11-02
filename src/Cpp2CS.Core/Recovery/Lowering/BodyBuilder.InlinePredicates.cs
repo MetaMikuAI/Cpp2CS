@@ -8,7 +8,7 @@ internal sealed partial class BodyBuilder
     /// <summary>内联方法的返回值直接参与比较时，证明各路径分别到达同一对条件出口。</summary>
     private bool ConcludePredicate(InlineMatch match, MethodRef method, IReadOnlyDictionary<ulong, ManagedBlock> blocks)
     {
-        if (ManagedTypes.IsVoid(method.Method.ReturnType) || match.Ends.Count == 0) return false;
+        if (ManagedTypes.IsVoid(method.Method.ReturnType) || match.Ends.Count == 0 || match.Ends.Any(e => e.Returns)) return false;
         var returnType = TypeOracle.Concrete(method, method.Method.ReturnType);
         if (types.Kind(returnType) is not (TypeKind.Int or TypeKind.Bool)) return false;
         Walker At(InlineEnd end) => new() { Blocks = blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Env = new(end.Env) };

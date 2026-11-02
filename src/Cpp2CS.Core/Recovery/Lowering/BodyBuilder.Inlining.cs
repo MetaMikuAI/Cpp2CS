@@ -40,7 +40,7 @@ internal sealed partial class BodyBuilder
 
     /// <summary>模板的一条路径在调用方的终点：出口位置、出口边上的复制、此时的环境与模板的返回值。</summary>
     private sealed record InlineEnd((ulong Block, int Index) Exit, IReadOnlyList<(LocalValue Target, ManagedValue Value)> Copies,
-        IReadOnlyDictionary<Variable, ManagedValue> Env, ManagedValue? Result);
+        IReadOnlyDictionary<Variable, ManagedValue> Env, ManagedValue? Result, bool Returns = false);
 
     /// <summary>一次证明的结果：调用方区域的覆盖、各路径的终点，结论中的出口、出口复制与承接返回值的局部。</summary>
     private sealed class InlineMatch
@@ -63,6 +63,7 @@ internal sealed partial class BodyBuilder
         public Dictionary<Variable, ManagedValue> Defined { get; } = [];
         public Dictionary<Variable, LocalValue> Locals { get; } = [];
         public ManagedBranch? Continuation { get; set; }
+        public bool Returns { get; set; }
     }
 
     /// <summary>每个待证访问（按原生地址）第一次尝试的失败原因，写入洞的说明。</summary>
@@ -195,6 +196,14 @@ internal sealed partial class BodyBuilder
     /// </summary>
     private bool Conclude(InlineMatch match, MethodRef method)
     {
+        if (match.Ends.Count > 0 && match.Ends.All(e => e.Returns) && ManagedTypes.IsVoid(method.Method.ReturnType) && ManagedTypes.IsVoid(oracle.ReturnType))
+        {
+            match.Exit = match.Ends[0].Exit;
+            match.ExitCopies = [];
+            match.Returns = true;
+            return true;
+        }
+        if (match.Ends.Any(e => e.Returns)) return match.Fail("返回路径与续接路径混合");
         if (match.Ends.Count == 0 || match.Ends.Any(e => e.Exit != match.Ends[0].Exit)) return match.Fail("各路径在调用方的出口不同");
         LocalValue? result = null;
         if (!ManagedTypes.IsVoid(method.Method.ReturnType))
@@ -255,7 +264,7 @@ internal sealed partial class BodyBuilder
                         break;
                     }
                 // 模板中的尾调用即调用后返回。
-                case (ManagedCall mc, ManagedCall cc) when !cc.Tail && Instantiated(mc.Invocation.Method, match.TypeArguments).Equals(cc.Invocation.Method)
+                case (ManagedCall mc, ManagedCall cc) when (!cc.Tail || mc.Tail && ManagedTypes.IsVoid(mc.Invocation.Method.Method.ReturnType)) && Instantiated(mc.Invocation.Method, match.TypeArguments).Equals(cc.Invocation.Method)
                     && mc.Invocation.Arguments.Count == cc.Invocation.Arguments.Count && (mc.Tail || (mc.Result is null) == (cc.Result is null)):
                     {
                         if ((mc.Invocation.Receiver is null) != (cc.Invocation.Receiver is null)) return false;
@@ -279,6 +288,11 @@ internal sealed partial class BodyBuilder
                         callee.Stores.Clear(); caller.Stores.Clear();
                         if (mc.Tail)
                         {
+                            if (cc.Tail)
+                            {
+                                match.Ends.Add(new InlineEnd((caller.Block, caller.Index), [], new Dictionary<Variable, ManagedValue>(caller.Env), null, true));
+                                return true;
+                            }
                             caller.Index++;
                             return Finish(caller, match, tailResult);
                         }
@@ -332,7 +346,9 @@ internal sealed partial class BodyBuilder
             caller.Block = jump.Edge.Target;
             caller.Index = 0;
         }
-        match.Ends.Add(new InlineEnd((caller.Block, caller.Index), copies, new Dictionary<Variable, ManagedValue>(caller.Env), result));
+        var returns = result is null && caller.Current is ManagedReturn { Value: null };
+        if (returns) Cover(caller, match);
+        match.Ends.Add(new InlineEnd((caller.Block, caller.Index), copies, new Dictionary<Variable, ManagedValue>(caller.Env), result, returns));
         return true;
     }
 
@@ -568,15 +584,15 @@ internal sealed partial class BodyBuilder
             internalBlocks.Remove(continuation.Fallthrough.Target);
         }
         // 出口在区域内某块的中间时，该块余下的语句接在调用之后。
-        if (exit.Index > 0 && exit.Block != startBlock && !internalBlocks.Contains(exit.Block)) { failure = "出口不在区域内"; return null; }
-        if (exit.Index == 0) internalBlocks.Remove(exit.Block);
+        if (!match.Returns && exit.Index > 0 && exit.Block != startBlock && !internalBlocks.Contains(exit.Block)) { failure = "出口不在区域内"; return null; }
+        if (!match.Returns && exit.Index == 0) internalBlocks.Remove(exit.Block);
         foreach (var address in internalBlocks)
         {
             var count = blocks[address].Statements.Count;
-            var whole = Enumerable.Range(0, count).All(i => covered.Contains((address, i)) || address == exit.Block && i >= exit.Index);
+            var whole = Enumerable.Range(0, count).All(i => covered.Contains((address, i)) || !match.Returns && address == exit.Block && i >= exit.Index);
             if (!whole) { failure = "区域内的块含有区域外的语句"; return null; }
         }
-        if (Enumerable.Range(start, blocks[startBlock].Statements.Count - start).Any(i => !covered.Contains((startBlock, i)) && !(startBlock == exit.Block && i >= exit.Index))) { failure = "起点块含有区域外的语句"; return null; }
+        if (Enumerable.Range(start, blocks[startBlock].Statements.Count - start).Any(i => !covered.Contains((startBlock, i)) && !(!match.Returns && startBlock == exit.Block && i >= exit.Index))) { failure = "起点块含有区域外的语句"; return null; }
         var region = internalBlocks.Append(startBlock).ToHashSet();
         foreach (var other in body.Blocks.Where(b => !region.Contains(b.Address)))
             if (other.Statements.SelectMany(ManagedValues.Edges).Any(e => internalBlocks.Contains(e.Target))) { failure = "区域内的块从区域外进入"; return null; }
@@ -584,14 +600,14 @@ internal sealed partial class BodyBuilder
         if (body.Regions.Any(r => region.Contains(r.HandlerEntry) || r.Handler.Any(region.Contains))) { failure = "区域进入处理块"; return null; }
         // 区域内定义的值不在区域外使用。
         var outside = body.Blocks.SelectMany(b => b.Statements.Select((s, i) => (b.Address, i, s)))
-            .Where(p => !covered.Contains((p.Address, p.i)) && !(p.Address == exit.Block && exit.Index > 0 && p.i < exit.Index));
+            .Where(p => !covered.Contains((p.Address, p.i)) && !(!match.Returns && p.Address == exit.Block && exit.Index > 0 && p.i < exit.Index));
         var defined = match.Defined.Keys.Where(v => match.Result is null || !v.Equals(match.Result.Variable)).ToHashSet();
         foreach (var (_, _, statement) in outside)
             if (ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement)).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => defined.Contains(l.Variable)))
                 { failure = "区域内定义的值在区域外使用"; return null; }
         if (copies.Any(c => defined.Contains(c.Target.Variable))) { failure = "区域内定义的值在区域外使用"; return null; }
 
-        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, true), match.Result, false) { Inlined = true };
+        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, true), match.Result, match.Returns) { Inlined = true };
         var replacement = blocks[startBlock].Statements.Take(start).Append(call).ToList();
         if (match.Continuation is { } branch)
         {
@@ -607,9 +623,9 @@ internal sealed partial class BodyBuilder
             { failure = "条件出口复制不能写回"; return null; }
             replacement.Add(branch with { Address = at, Taken = taken, Fallthrough = fallthrough });
         }
-        else if (exit.Index == 0)
+        else if (!match.Returns && exit.Index == 0)
             replacement.Add(new ManagedJump(call.Address, new ManagedEdge(exit.Block, exitCopies)));
-        else
+        else if (!match.Returns)
         {
             if (exitCopies.Count > 0) { failure = "出口在块中间且带复制"; return null; }
             replacement.AddRange(blocks[exit.Block].Statements.Skip(exit.Index));
