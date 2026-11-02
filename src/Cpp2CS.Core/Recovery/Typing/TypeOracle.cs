@@ -466,9 +466,10 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     }
 
     /// <summary>左移或乘常量的下标：低位补零的拼接、或乘以常量。</summary>
-    private static (Sym Index, int Factor)? Scaled(Sym term) => term switch
+    private (Sym Index, int Factor)? Scaled(Sym term) => term switch
     {
-        ConcatSym { Parts: [ConstSym { Value: 0 } zero, var rest] } when zero.Width < 8 => (rest, 1 << zero.Width),
+        ConcatSym { Parts: [ConstSym { Value: 0 } zero, ..] } concat when zero.Width < 8
+            => (values.Syms.Slice(concat, zero.Width, concat.Width - zero.Width), 1 << zero.Width),
         OpSym { Op.Kind: OperatorKind.Binary, Args: [var x, ConstSym { Value: > 1 and <= 4096 } factor] } mul when mul.Op.Binary == BinOp.Mul => (x, (int)factor.Value),
         _ => null,
     };
