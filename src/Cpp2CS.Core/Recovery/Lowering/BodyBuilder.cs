@@ -74,7 +74,7 @@ internal sealed partial class BodyBuilder
 
     private void Reset()
     {
-        locals.Clear(); phis.Clear(); holes.Clear(); constructions.Clear(); absorbedChecks.Clear(); exceptions.Clear(); nextLocal = 0;
+        locals.Clear(); phis.Clear(); holes.Clear(); constructions.Clear(); absorbedChecks.Clear(); exceptions.Clear(); aggregateStores.Clear(); nextLocal = 0;
     }
 
     private MethodRecoveryResult LowerBlocks()

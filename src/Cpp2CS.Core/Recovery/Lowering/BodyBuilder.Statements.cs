@@ -34,6 +34,14 @@ internal sealed partial class BodyBuilder
                 return null;
             case Store store:
                 {
+                    if (aggregateStores.Contains(store)) return null;
+                    if (AggregateStore(block, index) is { } aggregate)
+                    {
+                        var destination = LocationValue(aggregate.Target, store.Address, store: true);
+                        var value = View(aggregate.Value, aggregate.Target.Type, store.Address);
+                        output.Add(destination is LocalValue local ? new ManagedAssignment(store.Address, local, value) : new ManagedStore(store.Address, destination, value));
+                        return null;
+                    }
                     var location = oracle.Locate(operands[0], store.Value.Width);
                     if (location is null && oracle.Split(operands[0], store.Value.Width) is { } leaves)
                     {
