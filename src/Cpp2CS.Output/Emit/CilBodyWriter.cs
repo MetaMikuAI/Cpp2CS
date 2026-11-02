@@ -22,8 +22,6 @@ internal sealed partial class CilBodyWriter(Skeleton skeleton, ManagedTypes type
     private FieldReference FieldReference(FieldRef field) => skeleton.Reference(destination.Module, field, destination.DeclaringType, destination);
     private MethodReference MethodReference(MethodRef method) => skeleton.Reference(destination.Module, method, destination.DeclaringType, destination);
 
-    public void Write(ManagedBody recovered, MethodDefinition method) => method.Body = Build(recovered, method);
-
     public MethodBody Build(ManagedBody recovered, MethodDefinition method)
     {
         destination = method;

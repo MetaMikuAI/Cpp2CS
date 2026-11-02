@@ -9,6 +9,7 @@ public enum EmissionPolicy { Checked, Partial, Source, Recovered }
 public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransforms? transforms = null, DiagnosticOptions? diagnostics = null)
 {
     private readonly EmissionSymbols symbols = new();
+    private readonly Dictionary<(ManagedBody, EmissionPolicy), MethodBody> built = new(new BuiltKey());
     public HashSet<Instruction> ExplicitInitializations => symbols.ExplicitInitializations;
     public Dictionary<Instruction, FieldAccessor> AccessorCalls => symbols.AccessorCalls;
     public Dictionary<Instruction, MethodRef> InlineCalls => symbols.InlineCalls;
@@ -25,7 +26,10 @@ public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransfo
         transforms?.DependencyProblem(skeleton.Type(method.Owner)) is { } problem
             ? new(EmissionProblemKind.Dependency, problem, MethodRef.Open(method)) : null;
 
-    /// <summary>只读检查；同一类型的构造函数仍按整批核对字段初始化器。</summary>
+    /// <summary>
+    /// 只读检查：恢复体的写出条件，以及写成的 CIL 的求值栈类型（<see cref="CilStackTypes"/>）；同一类型的构造函数仍按整批核对字段初始化器。
+    /// 检查时建成的 CIL 体留到写出时使用，不改动骨架上的方法。
+    /// </summary>
     public Dictionary<ManagedBody, EmissionProblem> Check(IEnumerable<ManagedBody> bodies, EmissionPolicy policy = EmissionPolicy.Checked)
     {
         var problems = new Dictionary<ManagedBody, EmissionProblem>(ReferenceEqualityComparer.Instance);
@@ -33,9 +37,18 @@ public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransfo
         foreach (var recovered in bodies)
         {
             var check = new BodyValidation(types, policy, recovered.Method, diagnostics);
-            if (check.Check(recovered, skeleton.Method(recovered.Method.Method).HasBody, out var shape) is { } problem)
+            var method = skeleton.Method(recovered.Method.Method);
+            if (check.Check(recovered, method.HasBody, out var shape) is { } problem)
+            {
                 problems.Add(recovered, problem);
-            else if (shape is not null) constructors.Add((recovered, shape));
+                continue;
+            }
+            if (Build(recovered, policy, method) is var body && CilStackTypes.Check(method, body) is { } stack)
+            {
+                problems.Add(recovered, new(EmissionProblemKind.StackType, stack, recovered.Method));
+                continue;
+            }
+            if (shape is not null) constructors.Add((recovered, shape));
         }
         foreach (var constructor in ConstructorInitialization.Inconsistent(constructors))
             problems.Add(constructor, new(EmissionProblemKind.Constructor,
@@ -50,8 +63,27 @@ public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransfo
         var problems = Check(selected, policy);
         foreach (var recovered in selected)
             if (!problems.ContainsKey(recovered))
-                new CilBodyWriter(skeleton, types, policy, symbols, transforms).Write(
-                    transforms?.Rewrite(recovered, types) ?? recovered, skeleton.Method(recovered.Method.Method));
+            {
+                var method = skeleton.Method(recovered.Method.Method);
+                method.Body = Build(recovered, policy, method);
+                built.Remove((recovered, policy));
+            }
         return problems;
+    }
+
+    private MethodBody Build(ManagedBody recovered, EmissionPolicy policy, Mono.Cecil.MethodDefinition method)
+    {
+        if (built.TryGetValue((recovered, policy), out var body)) return body;
+        body = new CilBodyWriter(skeleton, types, policy, symbols, transforms).Build(transforms?.Rewrite(recovered, types) ?? recovered, method);
+        built.Add((recovered, policy), body);
+        return body;
+    }
+
+    private sealed class BuiltKey : IEqualityComparer<(ManagedBody Body, EmissionPolicy Policy)>
+    {
+        public bool Equals((ManagedBody Body, EmissionPolicy Policy) x, (ManagedBody Body, EmissionPolicy Policy) y) =>
+            ReferenceEquals(x.Body, y.Body) && x.Policy == y.Policy;
+        public int GetHashCode((ManagedBody Body, EmissionPolicy Policy) key) =>
+            HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(key.Body), key.Policy);
     }
 }
