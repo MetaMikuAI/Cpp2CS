@@ -142,6 +142,8 @@ public sealed class MethodDecompiler
         DispatchResolution.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary));
         if (!MemoryPromotion.Run(function, signature, environment.Shape, abi, lifter.Calls, lifter.Machine.Convention.StackPointer).TryGet(out var layout, out var memoryFailure))
             return memoryFailure;
+        // 帧提升消去异常值的栈副本后，落地跳板可能才成为纯传值链。
+        ExceptionNormalization.Run(function, ExceptionFacts.WrapperWithoutDestructor(facts.Checks));
         environment.Layout = layout;
         var values = ValueModel.Build(function, environment);
         return new MethodAnalysis(method, entry, signature, function, idioms, layout, values) { Environment = environment, Splits = splits };
