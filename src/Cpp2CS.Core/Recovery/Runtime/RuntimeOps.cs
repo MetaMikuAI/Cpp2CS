@@ -14,6 +14,8 @@ public interface IRuntimeTyping
     DefinitionRef? ExceptionType(string fullName);
     /// <summary>操作的类操作数：L2 写入的 Operand，否则为实参中的类实体。</summary>
     TypeRef? ClassOperand(Call call);
+    /// <summary>原始指针实参指向位置的类型。</summary>
+    TypeRef? LocationType(Call call, int argument, int width);
 }
 
 /// <summary>下降一个运行时操作所需的上下文，由下降实现提供。</summary>
@@ -99,6 +101,25 @@ public static class RuntimeOps
 
     private static IEnumerable<RuntimeOpRule> Build()
     {
+        yield return new(OpKind.CompareExchangeReference)
+        {
+            ResultType = (call, typing) => typing.LocationType(call, 0, 64),
+            Effects = (_, _) => [new PointerEffect(0, 0, 8, MemoryAccess.ReadWrite)],
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Arguments.Count != 3 || c.Location(0, c.Types.Object) is not { } location || !ManagedTypes.IsReferenceType(location.Type)) return false;
+                var definition = c.Types.CorlibDefinition("System.Threading.Interlocked")?.Methods.FirstOrDefault(m => m.IsStatic
+                    && m.Name == "CompareExchange" && m.GenericParameters.Count == 1 && m.Parameters.Count == 3
+                    && m.Parameters[0].Type is ByRefRef { Element: GenericParameterRef } && m.Parameters[1].Type is GenericParameterRef
+                    && m.Parameters[2].Type.Equals(m.Parameters[1].Type) && m.ReturnType.Equals(m.Parameters[1].Type));
+                if (definition is null) return false;
+                var method = new MethodRef(definition, [], [location.Type]);
+                var arguments = new ManagedValue[] { new AddressValue(location), c.View(c.Arguments[1], location.Type), c.View(c.Arguments[2], location.Type) };
+                c.Emit(new ManagedCall(c.Call.Address, new ManagedInvocation(method, null, arguments, false), c.Local(c.Result, location.Type), false));
+                return true;
+            },
+        };
         // 没有托管可见效果：写屏障、内存屏障、类元数据初始化、RGCTX 初始化。
         foreach (var kind in new[] { OpKind.WriteBarrier, OpKind.MemoryBarrier, OpKind.InitClass, OpKind.InitMethodRgctx })
             yield return new(kind) { Lower = None };
