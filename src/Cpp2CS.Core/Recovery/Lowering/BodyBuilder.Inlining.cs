@@ -63,6 +63,7 @@ internal sealed partial class BodyBuilder
             return false;
         }
         public LocalValue? Result { get; set; }
+        public LocalValue? ResultStorage { get; set; }
         public required Dictionary<int, ManagedValue> Binding { get; init; }
         /// <summary>模板所属类型的实参：模板中的方法引用可能保留共享代码的开放形式，比较前代入。</summary>
         public required IReadOnlyList<TypeRef> TypeArguments { get; init; }
@@ -348,13 +349,17 @@ internal sealed partial class BodyBuilder
             var first = match.Ends[0];
             if (first.Result is null) return false;
             var candidates = first.Copies.Select(c => c.Target).Concat(first.Env.Keys.Where(match.Defined.ContainsKey).Select(v => LocalOf(match, v)).OfType<LocalValue>())
-                .Where(l => l.Type.Equals(returnType)).DistinctBy(l => l.Variable);
+                .Where(l => l.Type.Equals(returnType) || types.Kind(returnType) == TypeKind.Bool && types.Kind(l.Type) == TypeKind.Int).DistinctBy(l => l.Variable);
             foreach (var candidate in candidates)
             {
                 var trial = new Dictionary<int, ManagedValue>(match.Binding);
-                bool Carries(InlineEnd end) => end.Result is { } value
-                    && (end.Copies.FirstOrDefault(c => c.Target.Variable.Equals(candidate.Variable)) is { Target: not null } copy ? Unify(value, copy.Value, trial)
-                        : end.Env.TryGetValue(candidate.Variable, out var held) && Unify(value, held, trial));
+                bool Carries(InlineEnd end)
+                {
+                    var held = end.Copies.FirstOrDefault(c => c.Target.Variable.Equals(candidate.Variable)) is { Target: not null } copy
+                        ? copy.Value : end.Env.GetValueOrDefault(candidate.Variable);
+                    return held is not null && end.Result is { } value
+                        && Unify(candidate.Type.Equals(returnType) ? value : new ConversionValue(ConvKind.ZeroExtend, value, candidate.Type, candidate.Width), held, trial);
+                }
                 if (!match.Ends.All(Carries)) continue;
                 foreach (var (key, value) in trial) match.Binding[key] = value;
                 result = candidate;
@@ -367,6 +372,12 @@ internal sealed partial class BodyBuilder
         match.Exit = match.Ends[0].Exit;
         match.ExitCopies = rest[0];
         match.Result = result;
+        if (result is not null && !result.Type.Equals(TypeOracle.Concrete(method, method.Method.ReturnType)))
+        {
+            match.ResultStorage = result;
+            match.Result = NewLocal(TypeOracle.Concrete(method, method.Method.ReturnType));
+            match.ExitCopies = [.. rest[0], (result, new ConversionValue(ConvKind.ZeroExtend, match.Result, result.Type, result.Width))];
+        }
         return true;
     }
 
@@ -785,7 +796,8 @@ internal sealed partial class BodyBuilder
         // 区域内定义的值不在区域外使用。
         var outside = body.Blocks.SelectMany(b => b.Statements.Select((s, i) => (b.Address, i, s)))
             .Where(p => !covered.Contains((p.Address, p.i)) && !(!match.Returns && p.Address == exit.Block && exit.Index > 0 && p.i < exit.Index));
-        var defined = match.Defined.Keys.Where(v => match.Result is null || !v.Equals(match.Result.Variable)).ToHashSet();
+        var defined = match.Defined.Keys.Where(v => (match.Result is null || !v.Equals(match.Result.Variable))
+            && (match.ResultStorage is null || !v.Equals(match.ResultStorage.Variable))).ToHashSet();
         foreach (var (_, _, statement) in outside)
             if (ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement)).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => defined.Contains(l.Variable)))
                 { failure = "区域内定义的值在区域外使用"; return null; }
