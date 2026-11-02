@@ -22,6 +22,16 @@ internal sealed class CecilModel
         foreach (var field in model.Fields) fields.Add(skeleton.Field(field), field);
     }
 
+    private CecilModel(CecilModel source, MethodRef context)
+    {
+        types = source.types;
+        methods = source.methods;
+        fields = source.fields;
+        Context = context;
+    }
+
+    public CecilModel InContext(MethodRef context) => new(this, context);
+
     public TypeRef Type(TypeReference type) => type switch
     {
         GenericInstanceType g => new DefinitionRef(Definition(g.ElementType), g.GenericArguments.Select(Type).ToArray()),
@@ -142,11 +152,12 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
 
     private StackValue? Execute(CilSide side, MethodDefinition method, MethodRef tested, IReadOnlyList<StackValue> arguments, bool transparent = false)
     {
+        var context = model.InContext(tested);
         var world = side.World;
         var instructions = method.Body.Instructions;
         var positions = new Dictionary<Instruction, int>();
         for (var i = 0; i < instructions.Count; i++) positions.Add(instructions[i], i);
-        var localTypes = method.Body.Variables.Select(v => model.Type(v.VariableType)).ToArray();
+        var localTypes = method.Body.Variables.Select(v => context.Type(v.VariableType)).ToArray();
         var locals = localTypes.Select(t => FromBytes(t, new byte[world.StorageSize(t)])).ToArray();
         var localAddresses = new Dictionary<int, ulong>();
         var argumentTypes = StructAbi.ArgumentTypes(tested);
@@ -224,16 +235,16 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Ldloca or Code.Ldloca_S: stack.Push(StackValue.O(LocalAddress(((VariableDefinition)operand).Index))); break;
                 case Code.Ldarga or Code.Ldarga_S: stack.Push(StackValue.O(ArgumentAddress(ArgIndex(operand)))); break;
                 case Code.Ldobj:
-                    stack.Push(ReadValue(side, model.Type((TypeReference)operand), NotNull(Pop()))); break;
+                    stack.Push(ReadValue(side, context.Type((TypeReference)operand), NotNull(Pop()))); break;
                 case Code.Stobj:
                 {
                     var value = Pop();
-                    WriteValue(side, model.Type((TypeReference)operand), NotNull(Pop()), value);
+                    WriteValue(side, context.Type((TypeReference)operand), NotNull(Pop()), value);
                     break;
                 }
                 case Code.Initobj:
                 {
-                    var type = model.Type((TypeReference)operand);
+                    var type = context.Type((TypeReference)operand);
                     side.Write(NotNull(Pop()), new byte[world.StorageSize(type)]);
                     break;
                 }
@@ -246,13 +257,13 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Ldc_R8: stack.Push(StackValue.F((double)operand)); break;
                 case Code.Ldnull: stack.Push(StackValue.O(0)); break;
                 case Code.Ldstr: stack.Push(StackValue.O(world.String((string)operand))); break;
-                case Code.Ldtoken: stack.Push(StackValue.I8(world.TypePointer(model.Type((TypeReference)operand)))); break;
+                case Code.Ldtoken: stack.Push(StackValue.I8(world.TypePointer(context.Type((TypeReference)operand)))); break;
                 case Code.Pop: Pop(); break;
                 case Code.Dup: stack.Push(stack.Peek()); break;
 
                 case Code.Ldfld:
                 {
-                    var field = model.Field((FieldReference)operand);
+                    var field = context.Field((FieldReference)operand);
                     var receiver = Pop();
                     var type = world.FieldType(field);
                     if (receiver.Kind == StackKind.Struct)
@@ -262,20 +273,20 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 }
                 case Code.Ldflda:
                 {
-                    var field = model.Field((FieldReference)operand);
+                    var field = context.Field((FieldReference)operand);
                     stack.Push(StackValue.O(FieldAddress(world, field, Pop())));
                     break;
                 }
                 case Code.Stfld:
                 {
                     var value = Pop();
-                    var field = model.Field((FieldReference)operand);
+                    var field = context.Field((FieldReference)operand);
                     WriteValue(side, world.FieldType(field), FieldAddress(world, field, Pop()), value);
                     break;
                 }
                 case Code.Ldsfld:
                 {
-                    var field = model.Field((FieldReference)operand);
+                    var field = context.Field((FieldReference)operand);
                     side.RunClassConstructor(field.DeclaringType);
                     var type = world.FieldType(field);
                     // ECMA-335 III.4.15：值类型的静态字段整体读出（与 ldfld 相同的结构体表示）。
@@ -285,14 +296,14 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 // ECMA-335 III.4.14：静态字段的地址；与 ldsfld 一样先保证类型初始化。
                 case Code.Ldsflda:
                 {
-                    var field = model.Field((FieldReference)operand);
+                    var field = context.Field((FieldReference)operand);
                     side.RunClassConstructor(field.DeclaringType);
                     stack.Push(StackValue.O(world.StaticAddress(field)));
                     break;
                 }
                 case Code.Stsfld:
                 {
-                    var field = model.Field((FieldReference)operand);
+                    var field = context.Field((FieldReference)operand);
                     side.RunClassConstructor(field.DeclaringType);
                     var type = world.FieldType(field);
                     WriteValue(side, type, world.StaticAddress(field), Pop());
@@ -302,7 +313,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Newarr:
                 {
                     var length = Pop().Integer;
-                    stack.Push(StackValue.O(side.NewArray(new ArrayRef(model.Type((TypeReference)operand), 1), length)));
+                    stack.Push(StackValue.O(side.NewArray(new ArrayRef(context.Type((TypeReference)operand), 1), length)));
                     break;
                 }
                 case Code.Ldlen:
@@ -314,7 +325,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 // ECMA-335 III.4.9：ldelema 返回元素存储地址，仍检查 null、下标及精确元素类型。
                 case Code.Ldelema:
                 {
-                    var type = model.Type((TypeReference)operand);
+                    var type = context.Type((TypeReference)operand);
                     var position = Pop();
                     var array = Pop();
                     var address = Element(side, type, position, array);
@@ -326,7 +337,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 }
                 case Code.Ldelem_Any:
                 {
-                    var type = model.Type((TypeReference)operand);
+                    var type = context.Type((TypeReference)operand);
                     var address = Element(side, type, Pop(), Pop());
                     stack.Push(ReadValue(side, type, address));
                     side.ArrayAccesses?.Add(instruction);
@@ -334,7 +345,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 }
                 case Code.Stelem_Any:
                 {
-                    var type = model.Type((TypeReference)operand);
+                    var type = context.Type((TypeReference)operand);
                     var value = Pop();
                     var address = Element(side, type, Pop(), Pop());
                     if (ManagedTypes.IsReferenceType(type) && value.Bits != 0 && !Types.IsAssignable(side.TypeOf(value.Bits), type))
@@ -345,7 +356,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 }
                 case Code.Box:
                 {
-                    var type = model.Type((TypeReference)operand);
+                    var type = context.Type((TypeReference)operand);
                     if (type is DefinitionRef { Definition.FullName: "System.Nullable" }) throw new Unsupported("Nullable 装箱");
                     var value = Pop();
                     var size = world.StorageSize(type);
@@ -359,14 +370,14 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Isinst:
                 {
                     var value = Pop();
-                    var type = model.Type((TypeReference)operand);
+                    var type = context.Type((TypeReference)operand);
                     stack.Push(StackValue.O(value.Bits != 0 && Types.IsAssignable(side.TypeOf(value.Bits), type) ? value.Bits : 0));
                     break;
                 }
                 case Code.Unbox:
                 {
                     var instance = NotNull(Pop());
-                    var target = model.Type((TypeReference)operand);
+                    var target = context.Type((TypeReference)operand);
                     var actual = side.TypeOf(instance);
                     if (!ManagedTypes.Underlying(actual).Equals(ManagedTypes.Underlying(target)))
                         throw new CilThrow(Types.Corlib("System.InvalidCastException"));
@@ -375,20 +386,20 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 }
                 case Code.Ldftn:
                     // 原生委托 ctor 第三个参数为 Method<M>，与 ldftn 的方法身份一一对应。
-                    stack.Push(StackValue.I8(world.MethodInfo(model.Method((MethodReference)operand))));
+                    stack.Push(StackValue.I8(world.MethodInfo(context.Method((MethodReference)operand))));
                     break;
                 case Code.Ldvirtftn:
                 {
                     // ECMA-335 III.4.18：先判空，再按接收者的运行时类型解析虚方法。
                     var receiver = NotNull(Pop());
-                    var target = model.Method((MethodReference)operand);
+                    var target = context.Method((MethodReference)operand);
                     var implementation = target.Method.IsVirtual ? Dispatch(side, receiver, target) : target;
                     stack.Push(StackValue.I8(world.MethodInfo(implementation)));
                     break;
                 }
                 case Code.Newobj:
                 {
-                    var constructor = model.Method((MethodReference)operand);
+                    var constructor = context.Method((MethodReference)operand);
                     if (constructor.DeclaringType is not DefinitionRef type) throw new Unsupported("newobj 的声明类型");
                     var values = PopMany(constructor.Method.Parameters.Count);
                     if (type.Definition.IsValueType)
@@ -458,7 +469,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                         stack.Push(StackValue.F(NativeMathLibrary.Atan2(Pop().Double, x)));
                         break;
                     }
-                    var target = model.Method((MethodReference)operand);
+                    var target = context.Method((MethodReference)operand);
                     var values = PopMany(target.Method.Parameters.Count + (target.Method.IsStatic ? 0 : 1));
                     if (instruction.OpCode.Code == Code.Callvirt) NotNull(values[0]);
                     if (side.RuntimeTypeReturn(target, values.Select(v => v.Bits).ToArray()) is { } reflected)
@@ -569,7 +580,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 var exception = raised is CilThrow cil ? cil : new CilThrow(side.TypeOf(((PlannedThrow)raised).Object), ((PlannedThrow)raised).Object);
                 if (exception.Object == 0) exception.Object = side.ExceptionObject(exception.Type);
                 stack.Clear();
-                if (exceptionFlow?.Throw(at, exception, h => Types.IsAssignable(exception.Type, model.Type(h.CatchType))) is not { } transfer) throw exception;
+                if (exceptionFlow?.Throw(at, exception, h => Types.IsAssignable(exception.Type, context.Type(h.CatchType))) is not { } transfer) throw exception;
                 pc = transfer.Pc;
                 if (transfer.Object is { } caught) stack.Push(StackValue.O(caught));
             }
