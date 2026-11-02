@@ -284,6 +284,10 @@ internal sealed partial class BodyBuilder
         public bool InCatchOf(Sym exception) => owner.regions.Any(r => r.IsCatch && r.Handler.Contains(block)
             && SymTable.Resolve(exception) is ReadSym read && owner.oracle.Decompose(read.Address) is (ResultSym { Site: var begin }, 0, null, _) && ReferenceEquals(begin, r.BeginCatch));
 
+        public bool KnownNonNull(Sym target) => owner.KnownNonNull(block, index, target);
+
+        public bool AbsorbBounds(Sym position, Sym length) => owner.BoundsAbsorbed(block, index + 1, position, length);
+
         public bool Absorb(Sym target)
         {
             if (!owner.Absorbed(block, index + 1, target)) return false;

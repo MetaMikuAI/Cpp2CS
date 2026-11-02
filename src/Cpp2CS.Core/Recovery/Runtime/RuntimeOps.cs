@@ -40,6 +40,10 @@ public interface IRuntimeLowering
     void AwaitConstruction();
     /// <summary>判空被随后对同一对象的访问吸收。</summary>
     bool Absorb(Sym target);
+    /// <summary>对象在判空处已知非空（此前已判空、已经它访问、为分配结果或在分支的非空一侧）。</summary>
+    bool KnownNonNull(Sym target);
+    /// <summary>越界检查被随后对同一数组、同一下标的元素访问吸收；length 是数组长度的读取。</summary>
+    bool AbsorbBounds(Sym index, Sym length);
     /// <summary>当前语句位于捕获了 exception 的 catch 处理块中。</summary>
     bool InCatchOf(Sym exception);
     /// <summary>当前语句位于 fault 处理块中。</summary>
@@ -83,6 +87,15 @@ public static class RuntimeOps
         return true;
     }
 
+    /// <summary>越界条件的下标与长度：index >=u length、length <=u index，或 length == 0（下标 0）。</summary>
+    private static (Sym Index, Sym Length)? BoundsCondition(Sym condition) => SymTable.Resolve(condition) switch
+    {
+        OpSym { Op: { Kind: OperatorKind.Compare } c, Args: [var a, var b] } when c.Cond == Cond.Uge => (a, b),
+        OpSym { Op: { Kind: OperatorKind.Compare } c, Args: [var a, var b] } when c.Cond == Cond.Ule => (b, a),
+        OpSym { Op: { Kind: OperatorKind.Compare } c, Args: [var a, ConstSym { Value: 0 } zero] } when c.Cond == Cond.Eq => (zero, a),
+        _ => null,
+    };
+
     private static IEnumerable<RuntimeOpRule> Build()
     {
         // 没有托管可见效果：写屏障、内存屏障、类元数据初始化、RGCTX 初始化。
@@ -115,7 +128,7 @@ public static class RuntimeOps
                 terminal = null;
                 if (c.Arguments.Count != 1) return false;
                 var target = SymTable.Resolve(c.Arguments[0]);
-                if (c.Absorb(target)) return true;
+                if (c.KnownNonNull(target) || c.Absorb(target)) return true;
                 if (c.ExceptionConstructor("System.NullReferenceException") is not { } nre) return false;
                 var type = c.TypeOf(target) is { } natural && c.Types.Kind(natural) is TypeKind.Bool or TypeKind.Int ? natural : c.Types.Object;
                 c.Emit(new ManagedCheck(c.Call.Address, new ComparisonValue(Cond.Eq, c.View(target, type), new ConstantValue(0, type, c.Types.Kind(type) == TypeKind.Reference ? 64 : c.Types.Bits(type)), c.Types.Boolean), nre));
@@ -248,6 +261,8 @@ public static class RuntimeOps
             {
                 terminal = null;
                 if (c.Op.Operand is not string name || c.Arguments.Count != 1 || c.ExceptionConstructor(name) is not { } ctor) return false;
+                // 下标越界的条件：index >=u length；下标为常量 0 时 clang 化简为 length == 0。
+                if (name == "System.IndexOutOfRangeException" && BoundsCondition(c.Arguments[0]) is var (index, length) && c.AbsorbBounds(index, length)) return true;
                 c.Emit(new ManagedCheck(c.Call.Address, c.View(c.Arguments[0], c.Types.Boolean), ctor));
                 return true;
             },
@@ -257,7 +272,9 @@ public static class RuntimeOps
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
-                if (c.Arguments.Count != 2 || c.ExceptionConstructor("System.IndexOutOfRangeException") is not { } ctor) return false;
+                if (c.Arguments.Count != 2) return false;
+                if (c.AbsorbBounds(c.Arguments[0], c.Arguments[1])) return true;
+                if (c.ExceptionConstructor("System.IndexOutOfRangeException") is not { } ctor) return false;
                 c.Emit(new ManagedCheck(c.Call.Address, new ComparisonValue(Cond.Uge, c.View(c.Arguments[0], c.Types.Int32), c.View(c.Arguments[1], c.Types.Int32), c.Types.Boolean), ctor));
                 return true;
             },
