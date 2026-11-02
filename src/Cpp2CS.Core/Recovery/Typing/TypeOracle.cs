@@ -22,7 +22,7 @@ public sealed record Location(LocationKind Kind, Sym? Base, Sym? Index, long Con
 /// 原子的类型与地址的位置。类型自下而上由定义给出：参数按签名，调用结果按被调用者，读取按位置，φ 取来源的汇合；
 /// 常量和拼接没有自然类型，由使用处的期望类型决定。地址分解为根、常量偏移与比例下标，再按运行时布局解释为字段、元素或长度。
 /// </summary>
-public sealed class TypeOracle : Runtime.IRuntimeTyping
+public sealed partial class TypeOracle : Runtime.IRuntimeTyping
 {
     private readonly ManagedTypes types;
     private readonly ProgramFacts facts;
@@ -262,6 +262,7 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
         memo.Clear();
         callees.Clear();
         parts.Clear();
+        storeGroups.Clear();
         cellTypes = null;
     }
 
@@ -365,8 +366,9 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
     public TypeRef? Join(TypeRef a, TypeRef b)
     {
         if (a.Equals(b)) return a;
-        if (Wraps(a, b)) return a;
-        if (Wraps(b, a)) return b;
+        // 表示链上的两层是同一段位，合流处保留外层类型。
+        if (Inside(a, b) is not null) return a;
+        if (Inside(b, a) is not null) return b;
         if (types.IsAssignable(a, b)) return b;
         if (types.IsAssignable(b, a)) return a;
         if (ManagedTypes.IsReferenceType(a) && ManagedTypes.IsReferenceType(b))
@@ -379,11 +381,40 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
         return null;
     }
 
-    /// <summary>值类型恰好包住同宽的唯一字段；两种机器位型在合流处保留外层类型。</summary>
-    private bool Wraps(TypeRef outer, TypeRef inner) => outer is DefinitionRef definition && types.Kind(outer) == TypeKind.Struct
-        && types.Layouts.Of(definition) is { Fields.Count: 1 } layout && layout.Fields[0] is var field
-        && field.Offset == RuntimeLayout.ObjectHeaderSize && field.Type.Equals(inner)
-        && types.Size(outer) == (ManagedTypes.IsReferenceType(inner) ? 8 : types.Size(inner));
+    // ---- 表示 ----
+
+    private readonly Dictionary<TypeRef, IReadOnlyList<(IReadOnlyList<FieldRef> Path, TypeRef Type)>> representations = [];
+
+    /// <summary>
+    /// 类型的表示链：值类型恰由一个与自身同宽的实例字段组成（无填充、无其他字段）时，它与该字段的机器位型相同，
+    /// 同一段位可在任一层读写。链从类型自身开始，逐层进入唯一字段，Path 为相对类型自身的字段链；引用类型字段按指针宽度计。
+    /// </summary>
+    public IReadOnlyList<(IReadOnlyList<FieldRef> Path, TypeRef Type)> Representation(TypeRef type)
+    {
+        if (representations.TryGetValue(type, out var known)) return known;
+        var chain = new List<(IReadOnlyList<FieldRef> Path, TypeRef Type)> { ([], type) };
+        var current = type;
+        while (chain.Count < 16 && current is DefinitionRef definition && types.Kind(definition) == TypeKind.Struct
+            && types.Layouts.Of(definition) is { Fields: [var slot] } && slot.Offset == RuntimeLayout.ObjectHeaderSize
+            && types.Size(definition) == (ManagedTypes.IsReferenceType(slot.Type) ? 8 : types.Size(slot.Type)))
+        {
+            chain.Add(([.. chain[^1].Path, new FieldRef(slot.Field, definition)], slot.Type));
+            current = slot.Type;
+        }
+        return representations[type] = chain;
+    }
+
+    /// <summary>inner 是 outer 表示链上更内的一层时，从 outer 到它的字段链。</summary>
+    public (IReadOnlyList<FieldRef> Path, TypeRef Type)? Inside(TypeRef outer, TypeRef inner)
+    {
+        var chain = Representation(outer);
+        for (var i = 1; i < chain.Count; i++)
+            if (chain[i].Type.Equals(inner)) return chain[i];
+        return null;
+    }
+
+    /// <summary>表示链的最内层：值类型最终包住的标量或非单字段类型。</summary>
+    public (IReadOnlyList<FieldRef> Path, TypeRef Type) Innermost(TypeRef type) => Representation(type)[^1];
 
     // ---- 位置 ----
 

@@ -86,6 +86,30 @@ public sealed class ValueModel
 
     public Block BlockOf(Stmt statement) => blocks[statement];
 
+    /// <summary>语句自身进行的内存读取（按语句中的次序）；不含经操作数引用的其他语句的读取。</summary>
+    public IReadOnlyList<ReadSym> ReadsAt(Stmt statement)
+    {
+        var found = new List<ReadSym>();
+        var seen = new HashSet<Sym>();
+        var pending = new Stack<Sym>(Operands(statement));
+        while (pending.Count > 0)
+        {
+            var sym = SymTable.Resolve(pending.Pop());
+            if (!seen.Add(sym)) continue;
+            switch (sym)
+            {
+                case ReadSym read:
+                    pending.Push(read.Address);
+                    if (ReferenceEquals(read.Site, statement)) found.Add(read);
+                    break;
+                case SliceSym slice: pending.Push(slice.Base); break;
+                case ConcatSym concat: foreach (var part in concat.Parts) pending.Push(part); break;
+                case OpSym op: foreach (var arg in op.Args) pending.Push(arg); break;
+            }
+        }
+        return found.OrderBy(r => r.Ordinal).ToArray();
+    }
+
     private void Run()
     {
         for (Passes = 1; Passes <= MaxPasses; Passes++)

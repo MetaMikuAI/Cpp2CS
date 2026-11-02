@@ -34,38 +34,25 @@ internal sealed partial class BodyBuilder
                 : AddHole(output, new Statement(new ManagedHole(call.Address, "调用 目标未知", false)));
         }
         // 分配之后的实例构造：合为 newobj（委托为委托构造），接收者不作为值出现。
-        var transparent = false;
         var construction = callee.Method.Name == ".ctor" && !callee.Method.IsStatic && contents.Length > 0
             && SymTable.Resolve(contents[0]) is ResultSym { Site.Op.Kind: OpKind.NewObject } allocated && constructions.ContainsKey(allocated) ? allocated : null;
         // newobj 必须指名分配类型自己的构造函数。调用的是基类构造时，原生代码内联了分配类型的构造函数：
-        // 以该构造函数自身原生代码的恢复体为证据，证明它只把参数原样转给这个基类构造，则调用点即 newobj 它。
+        // 先写成新对象上的基类构造调用，由内联的逆以分配类型的构造函数为模板证明（InlineConstructions）。
+        LocalValue? pendingReceiver = null;
         if (construction is not null && oracle.ClassOperand(construction.Site) is DefinitionRef allocatedType && callee.DeclaringType is DefinitionRef declaring
             && allocatedType.Definition != declaring.Definition)
         {
-            if (ConstructorWithStores(block, index, construction, allocatedType, callee) is { } rebuilt)
-            {
-                output.Add(new ManagedAssignment(call.Address, Local(construction, allocatedType), rebuilt));
-                return null;
-            }
-            var (inlined, reason) = InlinedConstructor(allocatedType, callee);
-            if (inlined is not null)
-            {
-                callee = inlined;
-                transparent = true;
-                goto Constructed;
-            }
-            holes.Add(new(call.Address, $"构造 {allocatedType} 的构造函数被内联为 {callee}：{reason}"));
-            output.Add(new ManagedHole(call.Address, $"构造 {allocatedType} 的构造函数被内联", false));
-            locals[construction] = NewLocal(allocatedType);
-            return call.Kind == CallKind.Tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
+            pendingReceiver = Local(construction, allocatedType);
+            pendingConstructions[pendingReceiver.Variable] = new(call.Address, allocatedType, callee);
+            construction = null;
         }
-        Constructed:
         var managed = new List<ManagedValue>();
         ManagedValue? receiver = null;
         for (var i = 0; i < signature.Arguments.Length; i++)
         {
             var value = signature.Arguments[i];
             if (value.Index < 0 && construction is not null) continue;
+            if (value.Index < 0 && pendingReceiver is not null) { receiver = pendingReceiver; continue; }
             var type = value.Index < 0 ? (callee.Method.Owner.IsValueType ? new ByRefRef(callee.DeclaringType) : callee.DeclaringType)
                 : TypeOracle.Concrete(callee, callee.Method.Parameters[value.Index].Type);
             if (construction is not null && DelegateFacts.IsDelegate(callee.DeclaringType) && value.Index == 1
@@ -83,8 +70,7 @@ internal sealed partial class BodyBuilder
         }
         if (construction is not null)
         {
-            // 内联证明成立时标为透明：原生代码执行的是被内联的构造函数体。
-            output.Add(new ManagedAssignment(call.Address, Local(construction, callee.DeclaringType), new NewObjectValue(callee, managed) { Transparent = transparent }));
+            output.Add(new ManagedAssignment(call.Address, Local(construction, callee.DeclaringType), new NewObjectValue(callee, managed)));
             return call.Kind == CallKind.Tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
         }
         var dispatched = shape.IsDispatch || call.Resolved is not null && call.Kind is CallKind.Indirect or CallKind.TailIndirect;
@@ -111,32 +97,6 @@ internal sealed partial class BodyBuilder
         if (tail) return new Statement(lowered);
         output.Add(lowered);
         return null;
-    }
-
-    /// <summary>
-    /// 分配类型中与基类构造参数相同、且自身方法体只把参数原样转给该基类构造的构造函数（内联的逆：以被调方法的恢复体为证据）。
-    /// </summary>
-    private (MethodRef? Constructor, string Reason) InlinedConstructor(DefinitionRef allocated, MethodRef baseConstructor)
-    {
-        var reasons = new List<string>();
-        foreach (var definition in allocated.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic && m.Parameters.Count == baseConstructor.Method.Parameters.Count))
-        {
-            var candidate = new MethodRef(definition, allocated.Arguments, []);
-            if (summaries(candidate) is not { Body: { } body })
-            {
-                reasons.Add(definition.Address == 0 ? "构造函数没有原生代码" : "构造函数自身未能恢复");
-                continue;
-            }
-            var effects = body.Blocks.SelectMany(b => b.Statements).Where(s => s is not ManagedJump).ToArray();
-            var forwarded = effects is [ManagedCall { Tail: true } only] || effects is [ManagedCall { Tail: false, Result: null } first, ManagedReturn { Value: null }]
-                ? (ManagedCall)effects[0] : null;
-            if (forwarded is { Invocation: { Receiver: ArgumentValue { Index: -1 } } invocation }
-                && invocation.Method.Method == baseConstructor.Method
-                && invocation.Arguments.Select((a, i) => a is ArgumentValue { Index: var k } && k == i).All(x => x))
-                return (candidate, "");
-            reasons.Add("构造函数体不只是转给基类构造");
-        }
-        return (null, reasons.Count == 0 ? "没有参数相同的构造函数" : string.Join("；", reasons.Distinct()));
     }
 
     /// <summary>

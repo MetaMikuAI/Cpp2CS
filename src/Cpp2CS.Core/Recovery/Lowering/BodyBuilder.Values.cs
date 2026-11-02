@@ -16,8 +16,7 @@ internal sealed partial class BodyBuilder
     private ManagedValue View(Sym sym, TypeRef? expected, ulong address)
     {
         sym = SymTable.Resolve(sym);
-        if (expected is DefinitionRef structure && types.Kind(expected) == TypeKind.Struct && sym is not ConcatSym
-            && (sym is ConstSym || oracle.TypeOf(sym) is { } natural && types.Kind(natural) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer))
+        if (expected is DefinitionRef structure && types.Kind(expected) == TypeKind.Struct && sym is not ConcatSym && Bits(sym))
             return StructBits(sym, structure, address);
         if (sym is not LocalSym && locals.TryGetValue(sym, out var known)) return Coerce(known, expected, address);
         switch (sym)
@@ -69,14 +68,14 @@ internal sealed partial class BodyBuilder
     private ManagedValue Coerce(ManagedValue value, TypeRef? expected, ulong address = 0)
     {
         if (expected is null || value.Type.Equals(expected) || value is HoleValue) return value;
-        if (types.Kind(value.Type) == TypeKind.Struct && types.Size(value.Type) == (ManagedTypes.IsReferenceType(expected) ? 8 : types.Size(expected))
-            && oracle.FieldAt(value.Type, RuntimeLayout.ObjectHeaderSize, types.Size(value.Type) * 8, false, false) is var (contained, scalar)
-            && (scalar.Equals(expected) || types.Kind(scalar) is TypeKind.Int or TypeKind.Bool && types.Kind(expected) is TypeKind.Int or TypeKind.Bool))
-            return Coerce(Nest(value, contained, scalar, false, address), expected, address);
-        if (expected is DefinitionRef wrapper && types.Kind(wrapper) == TypeKind.Struct
-            && oracle.FieldAt(wrapper, RuntimeLayout.ObjectHeaderSize, (ManagedTypes.IsReferenceType(value.Type) ? 8 : types.Size(value.Type)) * 8, false, false) is var (path, inner)
-            && inner.Equals(value.Type) && types.Size(wrapper) == (ManagedTypes.IsReferenceType(value.Type) ? 8 : types.Size(value.Type))
-            && ValueConstructor(wrapper, [(path, value)]) is { } constructed) return constructed;
+        // 表示链上的同一段位：进入单字段结构体的字段；最内层为整数时按整数宽度一致的期望取值；外层由构造函数包成。
+        if (oracle.Inside(value.Type, expected) is var (contained, _))
+            return Nest(value, contained, expected, false, address);
+        if (oracle.Representation(value.Type) is [_, _, ..] && oracle.Innermost(value.Type) is var (path, scalar)
+            && types.Kind(scalar) is TypeKind.Int or TypeKind.Bool && types.Kind(expected) is TypeKind.Int or TypeKind.Bool && types.Size(value.Type) == types.Size(expected))
+            return Coerce(Nest(value, path, scalar, false, address), expected, address);
+        if (expected is DefinitionRef wrapper && oracle.Inside(wrapper, value.Type) is var (wrapped, _)
+            && ValueConstructor(wrapper, [(wrapped, value)]) is { } constructed) return constructed;
         if (ManagedTypes.IsReferenceType(value.Type) && ManagedTypes.IsReferenceType(expected)) return value;
         var (from, to) = (types.Kind(value.Type), types.Kind(expected));
         if (from is TypeKind.Int or TypeKind.Bool && to is TypeKind.Int or TypeKind.Bool)
@@ -121,11 +120,10 @@ internal sealed partial class BodyBuilder
                 }
             case OperatorKind.Compare:
                 {
+                    // 原生比较的是位型：两侧等宽且结构体的表示链最内层是整数时，按该整数比较。
                     var hint = oracle.TypeOf(op.Args[0]) ?? oracle.TypeOf(op.Args[1]);
-                    if (hint is not null && types.Kind(hint) == TypeKind.Struct && types.Size(hint) * 8 == op.Args[0].Width
-                        && op.Args[1].Width == op.Args[0].Width
-                        && oracle.FieldAt(hint, RuntimeLayout.ObjectHeaderSize, op.Args[0].Width, false, false) is var (_, scalar)
-                        && types.Kind(scalar) is TypeKind.Int or TypeKind.Bool)
+                    if (hint is not null && types.Kind(hint) == TypeKind.Struct && op.Args[1].Width == op.Args[0].Width
+                        && types.Size(hint) * 8 == op.Args[0].Width && oracle.Innermost(hint).Type is var scalar && types.Kind(scalar) is TypeKind.Int or TypeKind.Bool)
                         hint = scalar;
                     return new ComparisonValue(op.Op.Cond, View(op.Args[0], hint, address), View(op.Args[1], hint, address), types.Boolean);
                 }
@@ -265,18 +263,43 @@ internal sealed partial class BodyBuilder
     /// </summary>
     private ManagedValue StructBits(Sym bits, DefinitionRef structure, ulong address)
     {
-        if (AggregateRead(bits, structure) is { } whole) return View(whole, structure, address);
-        var syms = values.Syms;
+        if (oracle.WholeRead(bits, structure) is { } whole) return View(whole, structure, address);
+        return StructLeaves(bits, structure, address) is { } leaves ? Composed(structure, leaves, address)
+            : Hole(address, $"值 {structure} 超出位宽 {bits.Width}", structure);
+    }
+
+    /// <summary>没有自然结构体类型、按位片解释的值：拼接、常量与标量原子。</summary>
+    private bool Bits(Sym sym) => sym is ConcatSym or ConstSym
+        || oracle.TypeOf(sym) is { } natural && types.Kind(natural) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer;
+
+    /// <summary>位片组成的结构体值的非零叶子；位宽不足时为 null。为零的叶子由 initobj 给出。</summary>
+    private List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>? StructLeaves(Sym bits, DefinitionRef structure, ulong address)
+    {
         var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
         foreach (var (path, type, offset) in Leaves(structure, 0))
         {
             var width = Width(type);
-            if (offset * 8 + width > bits.Width) return Hole(address, $"值 {structure} 超出位宽 {bits.Width}", structure);
-            var part = syms.Slice(bits, offset * 8, width);
+            if (offset * 8 + width > bits.Width) return null;
+            var part = values.Syms.Slice(bits, offset * 8, width);
             if (SymTable.Resolve(part) is ConstSym { Value: 0 }) continue;
             leaves.Add((path, View(part, type, address)));
         }
-        return Composed(structure, leaves, address);
+        return leaves;
+    }
+
+    /// <summary>
+    /// 对位置的整体写入是否按字段分解：值由位片组成，非零叶子中有不可访问的字段，而该类型没有可能证明这个值的构造函数时
+    /// （<see cref="Composed"/> 不能成立），整体写入等于对每个字段的写入（结构体的全部字节都被覆盖，填充不可观察），
+    /// 每个字段按字段访问，可经访问器或内联证明。判定只看位片与类型，不求叶子的值，没有副作用。
+    /// </summary>
+    private bool Leafwise(Sym bits, TypeRef type)
+    {
+        bits = SymTable.Resolve(bits);
+        if (type is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct || !Bits(bits)
+            || types.Size(structure) * 8 > bits.Width || oracle.WholeRead(bits, structure) is not null) return false;
+        var hidden = oracle.Leaves(structure).Any(l => l.Path.Any(f => !Accessible(f.Field))
+            && SymTable.Resolve(values.Syms.Slice(bits, l.Offset * 8, oracle.LeafBits(l.Type))) is not ConstSym { Value: 0 });
+        return hidden && !Constructible(structure);
     }
 
     /// <summary>按叶子组成的结构体值：叶子字段都须对当前方法可访问，否则记为洞（被内联的构造函数尚无逆）。</summary>
@@ -345,17 +368,5 @@ internal sealed partial class BodyBuilder
         return new ConversionValue(from < to ? ConvKind.ZeroExtend : ConvKind.Truncate, value, target, to);
     }
 
-    /// <summary>值类型的标量叶子字段：路径、类型与相对值起点的字节偏移。</summary>
-    private IEnumerable<(IReadOnlyList<FieldRef> Path, TypeRef Type, int Offset)> Leaves(DefinitionRef structure, int at)
-    {
-        if (types.Layouts.Of(structure) is not { } layout) yield break;
-        foreach (var slot in layout.Fields.OrderBy(f => f.Offset))
-        {
-            var offset = at + slot.Offset - RuntimeLayout.ObjectHeaderSize;
-            var field = new FieldRef(slot.Field, structure);
-            if (types.Kind(slot.Type) == TypeKind.Struct && slot.Type is DefinitionRef inner)
-                foreach (var (path, type, leaf) in Leaves(inner, offset)) yield return ([field, .. path], type, leaf);
-            else yield return ([field], slot.Type, offset);
-        }
-    }
+    private IEnumerable<(IReadOnlyList<FieldRef> Path, TypeRef Type, int Offset)> Leaves(DefinitionRef structure, int at) => oracle.Leaves(structure, at);
 }

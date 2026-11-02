@@ -24,7 +24,7 @@ internal sealed partial class BodyBuilder
             output.Add(new ManagedAssignment(statement.Address, Local(selection, selected.Type), selected));
             return null;
         }
-        foreach (var read in Reads(statement).Concat(aggregateReadSites.GetValueOrDefault(statement) ?? []).Where(materialized.Contains))
+        foreach (var read in Reads(statement).Concat(oracle.WholeReadsAt(statement)).Where(materialized.Contains))
         {
             // 相邻字段合并的读取逐字段落成局部，以该段的切片为键。
             if (oracle.Parts(read) is { } leaves)
@@ -42,13 +42,11 @@ internal sealed partial class BodyBuilder
                 return null;
             case Store store:
                 {
-                    if (aggregateStores.Contains(store) || constructorStores.Contains(store)) return null;
-                    if (AggregateStore(block, index) is { } aggregate)
+                    // 写入组在第一个成员处写出整体值，其余成员不再单独写出。
+                    if (oracle.StoreGroupOf(store) is { } group)
                     {
-                        var place = StoreLocation(aggregate.Target, aggregate.Value);
-                        var destination = LocationValue(place, store.Address, store: true);
-                        var value = View(aggregate.Value, place.Type, store.Address);
-                        output.Add(destination is LocalValue local ? new ManagedAssignment(store.Address, local, value) : new ManagedStore(store.Address, destination, value));
+                        if (!ReferenceEquals(group.Members[0], store)) return null;
+                        StoreTo(StoreLocation(group.Target, group.Value), group.Value, store.Address, output);
                         return null;
                     }
                     var location = oracle.Locate(operands[0], store.Value.Width);
@@ -80,9 +78,7 @@ internal sealed partial class BodyBuilder
                         return null;
                     }
                     if (location is null) { output.Add(new ManagedHole(store.Address, $"内存 写入位置 {operands[0]}", false)); holes.Add(new(store.Address, $"内存 写入位置 {operands[0]}")); return null; }
-                    var target = LocationValue(location, store.Address, store: true);
-                    var stored = View(operands[1], location.Type, store.Address);
-                    output.Add(target is LocalValue whole ? new ManagedAssignment(store.Address, whole, stored) : new ManagedStore(store.Address, target, stored));
+                    StoreTo(location, operands[1], store.Address, output);
                     return null;
                 }
             case Call call:
@@ -136,28 +132,30 @@ internal sealed partial class BodyBuilder
         return null;
     }
 
-    private IEnumerable<ReadSym> Reads(Stmt statement)
+    private IReadOnlyList<ReadSym> Reads(Stmt statement) => values.ReadsAt(statement);
+
+    /// <summary>
+    /// 对位置的整体写入。值不能整体写出时（见 <see cref="Leafwise"/>）逐个字段写入对应的位段，
+    /// 每个字段再按同一规则整体写入或继续分解，因而值类型字段可经其访问器整体写入。
+    /// </summary>
+    private void StoreTo(Location place, Sym bits, ulong address, List<ManagedStatement> output)
     {
-        var found = new List<ReadSym>();
-        void Walk(Sym sym, HashSet<Sym> seen)
+        if (Leafwise(bits, place.Type))
         {
-            sym = SymTable.Resolve(sym);
-            if (!seen.Add(sym)) return;
-            switch (sym)
-            {
-                case ReadSym read:
-                    Walk(read.Address, seen);
-                    if (ReferenceEquals(read.Site, statement)) found.Add(read);
-                    break;
-                case SliceSym slice: Walk(slice.Base, seen); break;
-                case ConcatSym concat: foreach (var part in concat.Parts) Walk(part, seen); break;
-                case OpSym op: foreach (var arg in op.Args) Walk(arg, seen); break;
-            }
+            foreach (var (field, type, offset) in oracle.Fields((DefinitionRef)place.Type))
+                StoreTo(place with { Path = [.. place.Path, field], Type = type }, values.Syms.Slice(bits, offset * 8, oracle.StorageBits(type)), address, output);
+            return;
         }
-        var visited = new HashSet<Sym>();
-        foreach (var operand in values.Operands(statement)) Walk(operand, visited);
-        return found.OrderBy(r => r.Ordinal);
+        var destination = LocationValue(place, address, store: true);
+        var value = View(bits, place.Type, address);
+        output.Add(destination is LocalValue local ? new ManagedAssignment(address, local, value) : new ManagedStore(address, destination, value));
     }
+
+    /// <summary>表示链上的各层共享地址，写入的层级取值的定义类型；经过的值类型字段须可访问（写入目标以地址给出）。</summary>
+    private Location StoreLocation(Location location, Sym value) =>
+        oracle.TypeOf(value) is { } source && oracle.Inside(location.Type, source) is var (path, inner)
+        && path.Take(types.Kind(inner) == TypeKind.Struct ? path.Count : path.Count - 1).All(f => Accessible(f.Field))
+        ? location with { Path = [.. location.Path, .. path], Type = inner } : location;
 
     private ManagedValue? ReturnValue(Return ret, IReadOnlyList<Sym> operands)
     {

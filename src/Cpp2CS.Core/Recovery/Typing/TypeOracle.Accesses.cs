@@ -1,0 +1,151 @@
+using Cpp2CS.Facts;
+using Cpp2CS.Ir;
+using Cpp2CS.Machine.Flow;
+using Cpp2CS.Recovery.Values;
+
+namespace Cpp2CS.Recovery.Typing;
+
+/// <summary>一组机器写入共同构成的一次 IL 位置写入：成员按语句次序，值为按偏移拼接的各段。</summary>
+public sealed record StoreGroup(IReadOnlyList<Store> Members, Location Target, Sym Value);
+
+/// <summary>
+/// 位置的整体访问，即 SROA 与读写拆分的逆。clang 把结构体的复制拆成对各段的读写，并可能重排互不重叠的写入；
+/// 在未提升的位置（对象字段、元素、经引用、可寻址局部）上，这些段在 IL 中是对同一个结构体位置的一次读写。
+/// 写入：同一块中根与下标相同、互不重叠的写入恰好铺满一个结构体位置，之间只有不读内存的定义、空语句与写屏障时，
+/// 合成一次对该位置的写入，在第一个成员处写出。
+/// 读取：结构体的全部叶子来自同一块中同段内存的读取，之间只有不读其他内存的定义时，在第一次读取处读取整体。
+/// 两者都不跨越调用、其他写入或无关读取，原有的异常与副作用次序不变。
+/// </summary>
+public sealed partial class TypeOracle
+{
+    /// <summary>各块的写入组；依赖根的类型，求解 φ 后重算。</summary>
+    private readonly Dictionary<Block, Dictionary<Store, StoreGroup>> storeGroups = [];
+    /// <summary>整体读取按（读取处、地址、宽度）驻留，跨求解保持身份。</summary>
+    private readonly Dictionary<(Stmt Site, Sym Address, int Width), ReadSym> wholeReads = new(new WholeReadComparer());
+    private readonly Dictionary<Stmt, List<ReadSym>> wholeReadSites = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>写入所在的写入组；不属于任何组时为 null。</summary>
+    public StoreGroup? StoreGroupOf(Store store)
+    {
+        var block = values.BlockOf(store);
+        if (!storeGroups.TryGetValue(block, out var groups)) storeGroups[block] = groups = StoreGroups(block);
+        return groups.GetValueOrDefault(store);
+    }
+
+    private Dictionary<Store, StoreGroup> StoreGroups(Block block)
+    {
+        var result = new Dictionary<Store, StoreGroup>(ReferenceEqualityComparer.Instance);
+        var statements = block.Statements;
+        for (var i = 0; i < statements.Count; i++)
+        {
+            if (statements[i] is not Store leader || result.ContainsKey(leader)) continue;
+            var origin = AccessAddress(values.Operands(leader)[0]);
+            var members = new List<(Store Store, Sym Address, Sym Value, long Offset)>();
+            StoreGroup? found = null;
+            // 成员是语句次序上的前缀；取能铺满结构体位置的最长前缀。
+            for (var j = i; j < statements.Count; j++)
+            {
+                var statement = statements[j];
+                if (values.ReadsAt(statement).Count > 0) break;
+                if (statement is Define or Nop or Call { Op.Kind: OpKind.WriteBarrier }) continue;
+                if (statement is not Store store || result.ContainsKey(store)) break;
+                var operands = values.Operands(store);
+                var target = AccessAddress(operands[0]);
+                if (operands[1].Width % 8 != 0 || target with { Offset = origin.Offset } != origin) break;
+                var end = target.Offset + operands[1].Width / 8;
+                if (members.Any(m => m.Offset < end && target.Offset < m.Offset + m.Value.Width / 8)) break;
+                members.Add((store, operands[0], operands[1], target.Offset));
+                if (members.Count < 2) continue;
+                var ordered = members.OrderBy(m => m.Offset).ToArray();
+                var width = ordered.Sum(m => m.Value.Width);
+                if ((ordered[^1].Offset - ordered[0].Offset) * 8 + ordered[^1].Value.Width != width) continue;
+                if (Locate(ordered[0].Address, width) is not { Type: DefinitionRef type } location
+                    || types.Kind(type) != TypeKind.Struct || types.Size(type) * 8 != width) continue;
+                found = new StoreGroup(members.Select(m => m.Store).ToArray(), location, values.Syms.Concat(ordered.Select(m => m.Value)));
+            }
+            if (found is not null)
+                foreach (var member in found.Members) result[member] = found;
+        }
+        return result;
+    }
+
+    /// <summary>结构体值 bits 的全部叶子来自同段内存的读取时，在第一次读取处对该结构体位置的整体读取；不成立时为 null。</summary>
+    public ReadSym? WholeRead(Sym bits, DefinitionRef structure)
+    {
+        Sym? address = null;
+        var reads = new HashSet<ReadSym>();
+        foreach (var (_, type, offset) in Leaves(structure))
+        {
+            var width = LeafBits(type);
+            if (offset * 8 + width > bits.Width) return null;
+            var part = SymTable.Resolve(values.Syms.Slice(bits, offset * 8, width));
+            var (source, low) = part is SliceSym slice ? (slice.Base, slice.Low) : (part, 0);
+            if (source is not ReadSym read || low % 8 != 0) return null;
+            var start = values.Syms.Binary(BinOp.Add, read.Address, values.Syms.Const(unchecked((ulong)(low / 8 - offset)), 64), 64);
+            if (address is not null && Decompose(address) != Decompose(start)) return null;
+            address = start;
+            reads.Add(read);
+        }
+        var total = types.Size(structure) * 8;
+        if (address is null || Locate(address, total) is not { } location || !location.Type.Equals(structure)) return null;
+        var block = values.BlockOf(reads.First().Site);
+        var sites = reads.Select(r => block.Statements.FindIndex(s => ReferenceEquals(s, r.Site))).ToArray();
+        if (sites.Any(s => s < 0)) return null;
+        var first = sites.Min();
+        for (var i = first; i <= sites.Max(); i++)
+            if (block.Statements[i] is not Define || values.ReadsAt(block.Statements[i]).Any(r => !reads.Contains(r))) return null;
+        var site = block.Statements[first];
+        if (wholeReads.TryGetValue((site, address, total), out var whole)) return whole;
+        whole = values.Syms.Read(site, -1 - wholeReads.Count, address, total);
+        wholeReads[(site, address, total)] = whole;
+        if (!wholeReadSites.TryGetValue(site, out var at)) wholeReadSites[site] = at = [];
+        at.Add(whole);
+        return whole;
+    }
+
+    /// <summary>以该语句为读取处的整体读取。</summary>
+    public IReadOnlyList<ReadSym> WholeReadsAt(Stmt statement) => wholeReadSites.GetValueOrDefault(statement) ?? [];
+
+    /// <summary>值类型的标量叶子字段：路径、类型与相对值起点的字节偏移。</summary>
+    public IEnumerable<(IReadOnlyList<FieldRef> Path, TypeRef Type, int Offset)> Leaves(DefinitionRef structure, int at = 0)
+    {
+        if (types.Layouts.Of(structure) is not { } layout) yield break;
+        foreach (var slot in layout.Fields.OrderBy(f => f.Offset))
+        {
+            var offset = at + slot.Offset - RuntimeLayout.ObjectHeaderSize;
+            var field = new FieldRef(slot.Field, structure);
+            if (types.Kind(slot.Type) == TypeKind.Struct && slot.Type is DefinitionRef inner)
+                foreach (var (path, type, leaf) in Leaves(inner, offset)) yield return ([field, .. path], type, leaf);
+            else yield return ([field], slot.Type, offset);
+        }
+    }
+
+    /// <summary>值类型的直接实例字段：字段、类型与相对值起点的字节偏移。</summary>
+    public IEnumerable<(FieldRef Field, TypeRef Type, int Offset)> Fields(DefinitionRef structure) =>
+        types.Layouts.Of(structure) is { } layout
+            ? layout.Fields.OrderBy(f => f.Offset).Select(f => (new FieldRef(f.Field, structure), f.Type, f.Offset - RuntimeLayout.ObjectHeaderSize))
+            : [];
+
+    /// <summary>值在机器上的位宽：引用与指针为 64，值类型为其大小。</summary>
+    public int StorageBits(TypeRef type) => ManagedTypes.IsReferenceType(type) || type is ByRefRef or PointerRef ? 64
+        : types.Kind(type) == TypeKind.Struct ? types.Size(type) * 8 : Math.Max(1, types.Bits(type));
+
+    /// <summary>标量叶子的机器位宽。</summary>
+    public int LeafBits(TypeRef type) => ManagedTypes.IsReferenceType(type) || type is ByRefRef or PointerRef ? 64 : Math.Max(1, types.Bits(type));
+
+    /// <summary>访问地址的根、偏移与下标；局部地址以所在空间的起点为根，使同一单元内的访问可比较。</summary>
+    private (Sym Root, long Offset, Sym? Index, int Scale) AccessAddress(Sym address)
+    {
+        var location = Decompose(address);
+        return location.Root is LocalSym local
+            ? location with { Root = values.Syms.Local(local.Space, 0), Offset = location.Offset + local.Offset } : location;
+    }
+
+    private sealed class WholeReadComparer : IEqualityComparer<(Stmt Site, Sym Address, int Width)>
+    {
+        public bool Equals((Stmt Site, Sym Address, int Width) x, (Stmt Site, Sym Address, int Width) y) =>
+            ReferenceEquals(x.Site, y.Site) && ReferenceEquals(x.Address, y.Address) && x.Width == y.Width;
+        public int GetHashCode((Stmt Site, Sym Address, int Width) key) =>
+            HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(key.Site), key.Address.Id, key.Width);
+    }
+}

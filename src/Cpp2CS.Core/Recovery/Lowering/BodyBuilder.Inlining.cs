@@ -74,10 +74,10 @@ internal sealed partial class BodyBuilder
     private ManagedValue? hollow;
     private ManagedValue Hollow => hollow ??= new ConstantValue(0, types.Boolean, 0);
 
-    /// <summary>对方法体反复寻找可证明的内联区域，直到没有新的证明；之后把仍未覆盖的不可访问访问换成洞。</summary>
+    /// <summary>对方法体反复寻找可证明的内联区域，直到没有新的证明；之后把仍未覆盖的不可访问访问与未证明的构造换成洞。</summary>
     private ManagedBody InlineInverse(ManagedBody body)
     {
-        body = InlineBaseConstructor(body);
+        body = InlineConstructions(body);
         for (var round = 0; round < 16 && Pending(body).Any(); round++)
         {
             var replaced = false;
@@ -90,6 +90,7 @@ internal sealed partial class BodyBuilder
             }
             if (!replaced) break;
         }
+        body = DeadPendingReads(body);
         // 未证明的访问：值与写入目标都换成洞。
         ManagedValue Seal(ManagedValue value)
         {
@@ -101,7 +102,94 @@ internal sealed partial class BodyBuilder
             }
             return ManagedValues.Map(value, Seal);
         }
-        return ManagedValues.Map(body, Seal);
+        return SealConstructions(ManagedValues.Map(body, Seal));
+    }
+
+    /// <summary>新对象上等待证明的基类构造调用：分配类型、调用的基类构造与原生地址。</summary>
+    private sealed record PendingConstruction(ulong Address, DefinitionRef Allocated, MethodRef Base);
+
+    /// <summary>分配类型的构造函数被内联、等待以它为模板证明的构造，按承接新对象的局部。</summary>
+    private readonly Dictionary<Variable, PendingConstruction> pendingConstructions = [];
+    private readonly Dictionary<Variable, string> constructionFailures = [];
+
+    /// <summary>
+    /// 构造函数的内联，以构造函数自身的恢复体为模板，与调用方区域同步执行证明：
+    /// 新对象上的基类构造调用起的区域等于分配类型某个构造函数的执行时，写成对它的 newobj（透明）；
+    /// 本类构造中缺少直接基类初始化时，与直接基类构造函数吻合的区域写成 base(...) 调用。
+    /// </summary>
+    private ManagedBody InlineConstructions(ManagedBody body)
+    {
+        body = InlineBaseConstructor(body);
+        foreach (var (variable, pending) in pendingConstructions)
+        {
+            var failures = new List<string>();
+            foreach (var definition in pending.Allocated.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic))
+            {
+                var method = new MethodRef(definition, pending.Allocated.Arguments, []);
+                if (summaries(method) is not { Body: { } template }) { failures.Add(definition.Address == 0 ? "构造函数没有原生代码" : "构造函数自身未能恢复"); continue; }
+                if (template.Regions.Count > 0 || !Acyclic(template)) { failures.Add("构造函数体含异常区域或环"); continue; }
+                if (PendingCall(body, variable, pending) is not var (block, index, receiver)) break;
+                var blocks = body.Blocks.ToDictionary(b => b.Address);
+                var match = Match(blocks, block, index, template, receiver, pending.Allocated.Arguments, out var failure);
+                if (match is not null && Replace(body, blocks, block, index, method, template, match, out failure) is { } replaced)
+                {
+                    body = Constructed(replaced, variable, method);
+                    failures.Clear();
+                    break;
+                }
+                failures.Add($"{definition.Name}({definition.Parameters.Count})：{failure}");
+            }
+            if (failures.Count > 0 || PendingCall(body, variable, pending) is not null)
+                constructionFailures[variable] = failures.Count == 0 ? "没有构造函数" : string.Join("；", failures.Distinct().Take(3));
+        }
+        return body;
+    }
+
+    /// <summary>等待证明的基类构造调用的位置与接收者。</summary>
+    private static (ulong Block, int Index, LocalValue Receiver)? PendingCall(ManagedBody body, Variable variable, PendingConstruction pending)
+    {
+        foreach (var block in body.Blocks)
+            for (var i = 0; i < block.Statements.Count; i++)
+                if (block.Statements[i] is ManagedCall { Inlined: false, Invocation: { Receiver: LocalValue local } invocation }
+                    && local.Variable.Equals(variable) && invocation.Method.Equals(pending.Base))
+                    return (block.Address, i, local);
+        return null;
+    }
+
+    /// <summary>证明成立的构造：对新对象调用分配类型构造函数的内联调用写成 newobj。</summary>
+    private static ManagedBody Constructed(ManagedBody body, Variable variable, MethodRef constructor) => body with
+    {
+        Blocks = body.Blocks.Select(b => b with
+        {
+            Statements = b.Statements.SelectMany(s => s is ManagedCall { Inlined: true, Invocation: { Receiver: LocalValue local } invocation } call
+                && local.Variable.Equals(variable) && invocation.Method.Equals(constructor)
+                ? (call.Tail
+                    ? new ManagedStatement[] { new ManagedAssignment(call.Address, local, new NewObjectValue(constructor, invocation.Arguments) { Transparent = true }), new ManagedReturn(call.Address, null) }
+                    : [new ManagedAssignment(call.Address, local, new NewObjectValue(constructor, invocation.Arguments) { Transparent = true })])
+                : [s]).ToArray(),
+        }).ToArray(),
+    };
+
+    /// <summary>未证明的构造：基类构造调用换成洞。</summary>
+    private ManagedBody SealConstructions(ManagedBody body)
+    {
+        foreach (var (variable, pending) in pendingConstructions)
+        {
+            if (PendingCall(body, variable, pending) is not var (block, index, _)) continue;
+            var reason = $"构造 {pending.Allocated} 的构造函数被内联为 {pending.Base}：{constructionFailures.GetValueOrDefault(variable) ?? "没有构造函数"}";
+            holes.Add(new RecoveryHole(pending.Address, reason));
+            body = body with
+            {
+                Blocks = body.Blocks.Select(b => b.Address != block ? b : b with
+                {
+                    Statements = b.Statements.SelectMany((s, i) => i != index ? [s]
+                        : ((ManagedCall)s).Tail
+                            ? new ManagedStatement[] { new ManagedHole(pending.Address, $"构造 {pending.Allocated} 的构造函数被内联", false), new ManagedReturn(pending.Address, null) }
+                            : [new ManagedHole(pending.Address, $"构造 {pending.Allocated} 的构造函数被内联", false)]).ToArray(),
+                }).ToArray(),
+            };
+        }
+        return body;
     }
 
     /// <summary>本类构造中被内联的直接基类构造，仍以基类原生方法体逐条证明，再恢复初始化调用。</summary>
@@ -704,11 +792,14 @@ internal sealed partial class BodyBuilder
                 Handler = r.Handler.Where(a => !removed.Contains(a)).ToArray(),
             }).ToArray(),
         };
-        return RetainInlineReadChecks(rebuilt, match.Inputs.Select(i => i.Local.Variable).ToHashSet());
+        return rebuilt;
     }
 
-    /// <summary>内联合并后不再使用的普通字段读取仍保留原位置的判空，不留下无法访问的死值。</summary>
-    private ManagedBody RetainInlineReadChecks(ManagedBody body, IReadOnlySet<Variable> inputs)
+    /// <summary>
+    /// 结果不再使用的待证字段读取（内联区域换成调用后，区域之前读入的值常只剩这一用途）：读取没有副作用，
+    /// 可观察的只有接收者为空时的 NullReferenceException，写成原位置的判空，不留下不可访问的死值。
+    /// </summary>
+    private ManagedBody DeadPendingReads(ManagedBody body)
     {
         var used = body.Blocks.SelectMany(b => b.Statements)
             .SelectMany(s => (s is ManagedAssignment a ? [a.Value] : ManagedValues.Of(s)).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
@@ -717,7 +808,7 @@ internal sealed partial class BodyBuilder
             .Single(m => m.Name == ".ctor" && m.Parameters.Count == 0), [], []);
         ManagedStatement Rewrite(ManagedStatement statement) => statement is ManagedAssignment
             { Target: var target, Value: FieldValue { Pending: not null, Receiver: LocalValue or ArgumentValue } field }
-            && inputs.Contains(target.Variable) && !used.Contains(target.Variable) && ManagedTypes.IsReferenceType(field.Receiver.Type)
+            && !used.Contains(target.Variable) && ManagedTypes.IsReferenceType(field.Receiver.Type)
                 ? new ManagedCheck(statement.Address, new ComparisonValue(Cond.Eq, field.Receiver,
                     new ConstantValue(0, field.Receiver.Type, 64), types.Boolean), nullConstructor)
                 : statement;
