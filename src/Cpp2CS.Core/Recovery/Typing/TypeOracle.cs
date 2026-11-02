@@ -228,6 +228,8 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                 return types.Corlib("System.Exception");
             case ReadSym read:
                 return Locate(read.Address, read.Width)?.Type;
+            case ConcatSym concat when CompositeRead(concat) is { } whole:
+                return TypeOf(whole);
             case PhiSym phi:
                 return solution.TryGetValue(phi, out var solved) ? solved : Lower(phi);
             case OpSym op:

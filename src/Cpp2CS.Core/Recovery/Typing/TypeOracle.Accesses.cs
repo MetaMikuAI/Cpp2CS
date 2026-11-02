@@ -69,6 +69,24 @@ public sealed partial class TypeOracle
         return result;
     }
 
+    /// <summary>拼接中的读取指向完整结构体位置时，以整体读取证明其定义类型。</summary>
+    public ReadSym? CompositeRead(ConcatSym bits)
+    {
+        var at = 0;
+        foreach (var part in bits.Parts)
+        {
+            var (source, low) = part is SliceSym slice ? (SymTable.Resolve(slice.Base), slice.Low) : (SymTable.Resolve(part), 0);
+            if (source is ReadSym read && (low - at) % 8 == 0)
+            {
+                var address = values.Syms.Binary(BinOp.Add, read.Address, values.Syms.Const(unchecked((ulong)((low - at) / 8)), 64), 64);
+                if (Locate(address, bits.Width) is { Type: DefinitionRef structure } && types.Kind(structure) == TypeKind.Struct
+                    && types.Size(structure) * 8 == bits.Width && WholeRead(bits, structure) is { } whole) return whole;
+            }
+            at += part.Width;
+        }
+        return null;
+    }
+
     /// <summary>结构体值 bits 的全部叶子来自同段内存的读取时，在第一次读取处对该结构体位置的整体读取；不成立时为 null。</summary>
     public ReadSym? WholeRead(Sym bits, DefinitionRef structure)
     {

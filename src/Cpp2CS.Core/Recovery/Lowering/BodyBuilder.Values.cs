@@ -225,6 +225,7 @@ internal sealed partial class BodyBuilder
     /// <summary>拼接按期望类型解释：结构体按字段组成；整数为零扩展；bool 的零扩展即自身。</summary>
     private ManagedValue Composite(ConcatSym concat, TypeRef? expected, ulong address)
     {
+        if (oracle.CompositeRead(concat) is { } whole) return View(whole, expected, address);
         expected ??= oracle.Unconstrained(concat.Width);
         if (expected is null) return Hole(address, $"类型 拼接没有期望类型 {concat}", null);
         switch (types.Kind(expected))
