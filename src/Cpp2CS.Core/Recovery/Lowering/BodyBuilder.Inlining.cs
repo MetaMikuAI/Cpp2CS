@@ -29,12 +29,13 @@ internal sealed partial class BodyBuilder
         public HashSet<ulong> Visited { get; init; } = [];
         public int Epoch { get; set; }
         public int Calls { get; set; }
+        public List<(ManagedValue Condition, bool Value)> Assumptions { get; init; } = [];
 
         public ManagedStatement Current => Blocks[Block].Statements[Index];
 
         public Walker Clone() => new()
         {
-            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Visited = [.. Visited], Epoch = Epoch, Calls = Calls,
+            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions],
         };
     }
 
@@ -64,6 +65,7 @@ internal sealed partial class BodyBuilder
         public Dictionary<Variable, LocalValue> Locals { get; } = [];
         public ManagedBranch? Continuation { get; set; }
         public bool Returns { get; set; }
+        public List<(ManagedValue Value, LocalValue Local)> Inputs { get; } = [];
     }
 
     /// <summary>每个待证访问（按原生地址）第一次尝试的失败原因，写入洞的说明。</summary>
@@ -181,9 +183,15 @@ internal sealed partial class BodyBuilder
     {
         failure = "接收者不能表示";
         var caller = new Walker { Blocks = callerBlocks, Caller = true, Block = block, Index = start };
+        SeedPath(caller);
         caller.Visited.Add(block);
         // 模板的 this 在比对中绑定：可能是字段所在的对象，也可能是包含它的值（如嵌套类型的结构体）。
         var match = new InlineMatch { Binding = [], TypeArguments = arguments };
+        var entryLocals = callerBlocks.Values.SelectMany(b => b.Statements)
+            .SelectMany(s => (s is ManagedAssignment assignment ? new[] { assignment.Target } : []).Concat(ManagedValues.Edges(s).SelectMany(e => e.Copies.Select(c => c.Target))))
+            .DistinctBy(l => l.Variable).ToDictionary(l => l.Variable);
+        foreach (var (variable, value) in caller.Env)
+            if (entryLocals.TryGetValue(variable, out var local)) match.Inputs.Add((value, local));
         var callee = new Walker { Blocks = template.Blocks.ToDictionary(b => b.Address), Caller = false, Block = template.Blocks[0].Address, Index = 0 };
         if (Explore(callee, caller, match, 0) && (ConcludePredicate(match, template.Method, callerBlocks) || Conclude(match, template.Method))) return match;
         failure = match.Failure ?? "比对失败";
@@ -249,6 +257,14 @@ internal sealed partial class BodyBuilder
                 if (returned.Value is { } v && (value = Term(callee, v)) is null) return match.Fail("模板的返回值不能表示");
                 return Finish(caller, match, value);
             }
+            if (callee.Current is ManagedBranch specialized && Term(callee, specialized.Condition) is { } test
+                && KnownCondition(test, caller, match.Binding) is { } selected)
+            {
+                if (!Follow(callee, selected ? specialized.Taken : specialized.Fallthrough)) return false;
+                continue;
+            }
+            if (callee.Current is ManagedCheck check && Term(callee, check.Condition) is { } checkedValue
+                && KnownCondition(checkedValue, caller, match.Binding) == false) { callee.Index++; continue; }
             if (!Advance(caller, match)) return match.Fail($"调用方 0x{caller.Block:x} 的值不能表示或路径成环");
             var (m, c) = (callee.Current, caller.Current);
             Cover(caller, match);
@@ -315,6 +331,8 @@ internal sealed partial class BodyBuilder
                         foreach (var (key, value) in trial) match.Binding[key] = value;
                         var (mTaken, mFall) = (callee.Clone(), callee);
                         var (cTaken, cFall) = (caller.Clone(), caller);
+                        cTaken.Assumptions.Add((ccond, !crossed));
+                        cFall.Assumptions.Add((ccond, crossed));
                         if (!Follow(mTaken, mb.Taken) || !Follow(mFall, mb.Fallthrough)) return false;
                         if (!Follow(cTaken, crossed ? cb.Fallthrough : cb.Taken) || !Follow(cFall, crossed ? cb.Taken : cb.Fallthrough)) return false;
                         return Explore(mTaken, cTaken, match, depth + 1) && Explore(mFall, cFall, match, depth + 1);
@@ -472,7 +490,8 @@ internal sealed partial class BodyBuilder
                 return null;
             case Observed { Read: FieldValue field }:
                 {
-                    if (!(field.Receiver.Equals(self) || field.Receiver is ArgumentValue { Index: -1 } || field.Receiver is Observed)) return null;
+                    if (!(field.Receiver.Equals(self) || field.Receiver is ArgumentValue { Index: -1 } || field.Receiver is Observed
+                        || types.Kind(field.Receiver.Type) == TypeKind.Struct)) return null;
                     if (Materialize(field.Receiver, self, address) is not { } receiver) return null;
                     var access = new FieldValue(receiver, field.Field, field.Type, field.Width);
                     if (Accessible(field.Field.Field)) return access;
@@ -561,14 +580,22 @@ internal sealed partial class BodyBuilder
         if (match.Exit is not { } exit || match.ExitCopies is not { } copies) return null;
         var at = blocks[startBlock].Statements[start].Address;
         if (!match.Binding.TryGetValue(-1, out var self)) { failure = "模板没有用到 this"; return null; }
+        // 区域之前已保存的值沿用原局部，不把它重新展开为更晚时刻的内存读取。
+        ManagedValue Input(ManagedValue value)
+        {
+            foreach (var available in match.Inputs)
+                if (SameTerm(value, available.Value)) return available.Local;
+            return value is Observed observed ? observed with { Read = Input(observed.Read) } : ManagedValues.Map(value, Input);
+        }
+        self = Input(self);
         var parameters = method.Method.Parameters.Count;
         var arguments = new ManagedValue[parameters];
         for (var i = 0; i < parameters; i++)
-            if (!match.Binding.TryGetValue(i, out var bound) || Materialize(bound, self, at) is not { } argument) { failure = "实参不能写回调用之前"; return null; }
+            if (!match.Binding.TryGetValue(i, out var bound) || Materialize(Input(bound), self, at) is not { } argument) { failure = "实参不能写回调用之前"; return null; }
             else arguments[i] = argument;
         var exitCopies = new List<ManagedCopy>();
         foreach (var (target, value) in copies)
-            if (Materialize(value, self, at) is { } materialized) exitCopies.Add(new ManagedCopy(target, materialized));
+            if (Materialize(Input(value), self, at) is { } materialized) exitCopies.Add(new ManagedCopy(target, materialized));
             else { failure = "出口复制不能写回"; return null; }
         if (Materialize(self, self, at) is not { } receiver) { failure = "接收者不能写回"; return null; }
         if (method.DeclaringType is DefinitionRef { Definition.IsValueType: true })
@@ -615,7 +642,7 @@ internal sealed partial class BodyBuilder
             {
                 var converted = new List<ManagedCopy>();
                 foreach (var copy in edge.Copies)
-                    if (Materialize(copy.Value, self, at) is { } value) converted.Add(copy with { Value = value });
+                    if (Materialize(Input(copy.Value), self, at) is { } value) converted.Add(copy with { Value = value });
                     else return null;
                 return edge with { Copies = converted };
             }
