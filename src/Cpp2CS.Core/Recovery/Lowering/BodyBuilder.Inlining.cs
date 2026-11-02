@@ -801,13 +801,17 @@ internal sealed partial class BodyBuilder
             .Where(p => !covered.Contains((p.Address, p.i)) && !(!match.Returns && p.Address == exit.Block && exit.Index > 0 && p.i < exit.Index));
         var defined = match.Defined.Keys.Where(v => (match.Result is null || !v.Equals(match.Result.Variable))
             && (match.ResultStorage is null || !v.Equals(match.ResultStorage.Variable))).ToHashSet();
+        var escapingValues = outside.SelectMany(p => ReadValues(p.s)).SelectMany(ManagedValues.Walk).OfType<LocalValue>()
+            .Select(l => l.Variable).Where(defined.Contains).ToHashSet();
+        var savedCopies = InlineCopies(body, blocks, startBlock, start, match, escapingValues);
+        defined.ExceptWith(savedCopies.Select(a => a.Target.Variable));
         foreach (var (_, _, statement) in outside)
-            if (ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement)).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => defined.Contains(l.Variable)))
-                { failure = "区域内定义的值在区域外使用"; return null; }
+            if (ReadValues(statement).SelectMany(ManagedValues.Walk).OfType<LocalValue>().FirstOrDefault(l => defined.Contains(l.Variable)) is { } escaping)
+                { failure = $"区域内定义的值 {escaping.Variable} 在区域外 0x{statement.Address:x} 使用"; return null; }
         if (copies.Any(c => defined.Contains(c.Target.Variable))) { failure = "区域内定义的值在区域外使用"; return null; }
 
         var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, method.Method.Name != ".ctor"), match.Result, match.Returns) { Inlined = true };
-        var replacement = blocks[startBlock].Statements.Take(start).Append(call).ToList();
+        var replacement = blocks[startBlock].Statements.Take(start).Concat(savedCopies).Append(call).ToList();
         if (match.Continuation is { } branch)
         {
             ManagedEdge? MaterializeEdge(ManagedEdge edge)
