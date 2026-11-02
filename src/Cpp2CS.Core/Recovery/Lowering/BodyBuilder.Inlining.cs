@@ -87,12 +87,15 @@ internal sealed partial class BodyBuilder
     private ManagedBody InlineInverse(ManagedBody body)
     {
         body = InlineConstructions(body);
-        for (var round = 0; round < 16 && Pending(body).Any(); round++)
+        while (Pending(body).ToArray() is { Length: > 0 } pending)
         {
             var replaced = false;
-            foreach (var candidate in Pending(body).DistinctBy(p => (p.Block, p.Index)).ToArray())
+            foreach (var candidate in pending.DistinctBy(p => (p.Block, p.Index)))
             {
                 if (TryInline(body, candidate) is not { } next) continue;
+                next = DeadPendingReads(next);
+                // 每次证明必须减少待证访问，终止条件不依赖方法中内联调用的数量。
+                if (Pending(next).Count() >= pending.Length) continue;
                 body = next;
                 replaced = true;
                 break;
