@@ -205,8 +205,7 @@ internal sealed partial class BodyBuilder
     /// <summary>拼接按期望类型解释：结构体按字段组成；整数为零扩展；bool 的零扩展即自身。</summary>
     private ManagedValue Composite(ConcatSym concat, TypeRef? expected, ulong address)
     {
-        if (expected is null && concat.Parts.Skip(1).All(p => p is ConstSym { Value: 0 }) && concat.Width is 8 or 16 or 32 or 64)
-            expected = types.Integer(concat.Width, false);
+        expected ??= oracle.Unconstrained(concat.Width);
         if (expected is null) return Hole(address, $"类型 拼接没有期望类型 {concat}", null);
         switch (types.Kind(expected))
         {
@@ -290,6 +289,27 @@ internal sealed partial class BodyBuilder
                 }
             case not (SliceSym or ConcatSym) when oracle.TypeOf(part) is { } atomType && types.Kind(atomType) is TypeKind.Int or TypeKind.Bool or TypeKind.Pointer:
                 return Resize(View(part, atomType, address), target);
+            case not (SliceSym or ConcatSym) when oracle.TypeOf(part) is DefinitionRef structure && types.Kind(structure) == TypeKind.Struct && part.Width <= targetWidth:
+                {
+                    // 只有全部位都由整数叶子覆盖时，结构体的机器位型才能用字段移位与或表示；不猜测填充字节。
+                    var leaves = Leaves(structure, 0).OrderBy(l => l.Offset).ToArray();
+                    var covered = 0;
+                    foreach (var (_, type, offset) in leaves)
+                    {
+                        if (types.Kind(type) is not (TypeKind.Int or TypeKind.Bool) || offset * 8 != covered) return null;
+                        covered += Width(type);
+                    }
+                    if (covered != part.Width) return null;
+                    var source = View(part, structure, address);
+                    ManagedValue? packed = null;
+                    foreach (var (path, type, offset) in leaves)
+                    {
+                        var value = Resize(Nest(source, path, type, false, address), target);
+                        if (offset > 0) value = new BinaryValue(BinOp.Shl, value, new ConstantValue((ulong)(offset * 8), types.Int32, 32), target, targetWidth);
+                        packed = packed is null ? value : new BinaryValue(BinOp.Or, packed, value, target, targetWidth);
+                    }
+                    return packed;
+                }
         }
         return null;
     }
