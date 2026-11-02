@@ -16,6 +16,14 @@ internal sealed partial class BodyBuilder
     {
         var statement = block.Statements[index];
         var operands = values.Operands(statement);
+        // 地址选择分发成条件读取时，只能快照整个选择，不能提前读取未选中的字段。
+        if (statement is Define && operands is [OpSym { Op.Kind: OperatorKind.Select } selection]
+            && Reads(statement).Any(materialized.Contains))
+        {
+            var selected = View(selection, oracle.TypeOf(selection), statement.Address);
+            output.Add(new ManagedAssignment(statement.Address, Local(selection, selected.Type), selected));
+            return null;
+        }
         foreach (var read in Reads(statement).Concat(aggregateReadSites.GetValueOrDefault(statement) ?? []).Where(materialized.Contains))
         {
             // 相邻字段合并的读取逐字段落成局部，以该段的切片为键。
