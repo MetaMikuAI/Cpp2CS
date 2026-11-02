@@ -14,7 +14,8 @@ public sealed record StoreGroup(IReadOnlyList<Store> Members, Location Target, S
 /// 写入：同一块中根与下标相同、互不重叠的写入恰好铺满一个结构体位置，之间只有不读内存的定义、空语句与写屏障时，
 /// 合成一次对该位置的写入，在第一个成员处写出。
 /// 读取：结构体的全部叶子来自同一块中同段内存的读取，之间只有不读其他内存的定义时，在第一次读取处读取整体。
-/// 两者都不跨越调用、其他写入或无关读取，原有的异常与副作用次序不变。
+/// 常量写入可越过同一实例内不相交字段的读取；第一次写入已验证接收者，读取不产生新的异常。
+/// 其余情况不跨越调用、其他写入或无关读取，原有的异常与副作用次序不变。
 /// </summary>
 public sealed partial class TypeOracle
 {
@@ -41,15 +42,25 @@ public sealed partial class TypeOracle
             if (statements[i] is not Store leader || result.ContainsKey(leader)) continue;
             var origin = AccessAddress(values.Operands(leader)[0]);
             var members = new List<(Store Store, Sym Address, Sym Value, long Offset)>();
+            var crossedReads = new List<ReadSym>();
             StoreGroup? found = null;
+            static bool Constant(Sym value) => value is ConstSym || value is ConcatSym concat && concat.Parts.All(Constant);
             // 成员是语句次序上的前缀；取能铺满结构体位置的最长前缀。
             for (var j = i; j < statements.Count; j++)
             {
                 var statement = statements[j];
-                if (values.ReadsAt(statement).Count > 0) break;
+                var reads = values.ReadsAt(statement);
+                if (reads.Count > 0)
+                {
+                    if (origin.Index is not null || members.Any(m => !Constant(m.Value))
+                        || reads.Any(r => AccessAddress(r.Address) with { Offset = origin.Offset } != origin
+                            || Locate(r.Address, r.Width) is not { Kind: LocationKind.Instance or LocationKind.Reference })) break;
+                    crossedReads.AddRange(reads);
+                }
                 if (statement is Define or Nop or Call { Op.Kind: OpKind.WriteBarrier }) continue;
                 if (statement is not Store store || result.ContainsKey(store)) break;
                 var operands = values.Operands(store);
+                if (crossedReads.Count > 0 && !Constant(operands[1])) break;
                 var target = AccessAddress(operands[0]);
                 if (operands[1].Width % 8 != 0 || target with { Offset = origin.Offset } != origin) break;
                 var end = target.Offset + operands[1].Width / 8;
@@ -61,6 +72,9 @@ public sealed partial class TypeOracle
                 if ((ordered[^1].Offset - ordered[0].Offset) * 8 + ordered[^1].Value.Width != width) continue;
                 if (Locate(ordered[0].Address, width) is not { Type: DefinitionRef type } location
                     || types.Kind(type) != TypeKind.Struct || types.Size(type) * 8 != width) continue;
+                if (crossedReads.Count > 0 && (location.Kind is not (LocationKind.Instance or LocationKind.Reference)
+                    || crossedReads.Any(r => AccessAddress(r.Address).Offset < ordered[0].Offset + width / 8
+                        && ordered[0].Offset < AccessAddress(r.Address).Offset + r.Width / 8))) continue;
                 found = new StoreGroup(members.Select(m => m.Store).ToArray(), location, values.Syms.Concat(ordered.Select(m => m.Value)));
             }
             if (found is not null)
