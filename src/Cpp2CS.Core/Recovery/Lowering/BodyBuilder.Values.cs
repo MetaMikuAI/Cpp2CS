@@ -209,7 +209,7 @@ internal sealed partial class BodyBuilder
                 return oracle.FieldAt(baseType, slice.Low / 8 + RuntimeLayout.ObjectHeaderSize, slice.Width, false, false) is var (path, type) && slice.Low % 8 == 0
                     ? Coerce(Nest(source, path, type, false, address), expected) : Hole(address, $"值 结构体 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected);
             case TypeKind.Bool when slice.Low == 0:
-                return source;
+                return Coerce(source, expected, address);
             case TypeKind.Int or TypeKind.Pointer:
                 {
                     var target = expected is not null && types.Kind(expected) is TypeKind.Int or TypeKind.Bool && Width(expected) >= slice.Width ? expected
