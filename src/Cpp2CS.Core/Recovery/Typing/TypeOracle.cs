@@ -107,8 +107,8 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             || (offset - RuntimeLayout.ClassVtable) % RuntimeLayout.VirtualInvokeDataSize is not (0 or 8)
             || Decompose(klass.Address) is not (var instance, 0, null, _)
             || !ReferenceEquals(SymTable.Resolve(instance), SymTable.Resolve(receiver))
-            || TypeOf(receiver) is not DefinitionRef owner || !ManagedTypes.IsReferenceType(owner)) return null;
-        return DispatchResolution.Slot(owner, (int)((offset - RuntimeLayout.ClassVtable) / RuntimeLayout.VirtualInvokeDataSize), interfaceOnly: false);
+            || TypeOf(receiver) is not { } owner || !ManagedTypes.IsReferenceType(owner)) return null;
+        return DispatchResolution.VirtualSlot(owner, (int)((offset - RuntimeLayout.ClassVtable) / RuntimeLayout.VirtualInvokeDataSize), types);
     }
 
     public TypeRef? LocationType(Call call, int argument, int width) => argument < call.OriginalArgumentCount

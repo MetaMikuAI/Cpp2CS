@@ -31,7 +31,7 @@ internal static class DispatchResolution
                 {
                     { Kind: OpKind.CallDelegate, Operand: MethodRef invoke } => invoke,
                     { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } pair } => Slot((DefinitionRef)oracle.Substitute(itf), pair.Item2, interfaceOnly: true),
-                    { Kind: OpKind.CallVirtual, Operand: int slot } when Receiver(call, values) is { } receiver && oracle.TypeOf(receiver) is DefinitionRef owner => Slot(owner, slot, interfaceOnly: false),
+                    { Kind: OpKind.CallVirtual, Operand: int slot } when Receiver(call, values) is { } receiver => VirtualSlot(oracle.TypeOf(receiver), slot, oracle.Types),
                     _ => null,
                 };
                 if (method is null) continue;
@@ -45,6 +45,13 @@ internal static class DispatchResolution
     {
         var position = Array.IndexOf(call.Sources, Storage.Gpr(0));
         return position < 0 ? null : values.Operands(call)[1 + position];
+    }
+
+    /// <summary>类型（沿基类链）中占据虚表槽 slot 的虚方法，类型实参代入声明类型。</summary>
+    internal static MethodRef? VirtualSlot(TypeRef? type, int slot, ManagedTypes types)
+    {
+        if (type is ArrayRef) type = types.CorlibDefinition("System.Array") is { } array ? new DefinitionRef(array, []) : null;
+        return type is DefinitionRef owner ? Slot(owner, slot, interfaceOnly: false) : null;
     }
 
     /// <summary>类型（沿基类链）中占据虚表槽 slot 的虚方法，类型实参代入声明类型。</summary>
