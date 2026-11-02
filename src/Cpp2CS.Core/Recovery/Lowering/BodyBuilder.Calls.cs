@@ -88,7 +88,8 @@ internal sealed partial class BodyBuilder
             return call.Kind == CallKind.Tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
         }
         var dispatched = shape.IsDispatch || call.Resolved is not null && call.Kind is CallKind.Indirect or CallKind.TailIndirect;
-        var invocation = new ManagedInvocation(callee, receiver, managed, Virtual: receiver is not null && (dispatched || absorbedChecks.Contains(contents[0])));
+        var invocation = new ManagedInvocation(callee, receiver, managed, Virtual: receiver is not null
+            && (dispatched || !callee.Method.IsVirtual && absorbedChecks.Contains(contents[0])));
         LocalValue? result = null;
         var returnType = TypeOracle.Concrete(callee, callee.Method.ReturnType);
         if (!ManagedTypes.IsVoid(returnType))
