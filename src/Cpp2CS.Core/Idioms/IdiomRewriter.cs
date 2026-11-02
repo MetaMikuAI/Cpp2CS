@@ -144,11 +144,17 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     var receiver = block.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources.SequenceEqual(objects!));
                     if (receiver is not null) values[klass.Target] = new Load(new Use(receiver.Target, 64), 64);
                 }
-            // 已知类指针上的层级长度和层级表不可变；相同来源的读取仍代表同一元数据值。
+            // 各入边的相同纯表达式等价；内存读取仅允许已知不可变的类元数据。
             foreach (var phi in function.Blocks.SelectMany(b => b.Statements).OfType<Phi>())
             {
                 var sources = phi.Sources.Select(v => Expand(new Use(v, 64))).Distinct().ToArray();
                 if (sources is not [var source]) continue;
+                if (ExprMap.Walk(source).All(e => e is Const or Use or Symbol or FrameAddress or Binary or Unary or Compare or Ir.Convert or Select or Logical or Not or Extract or Insert)
+                    && !ExprMap.Walk(source).OfType<Use>().Any(u => u.Variable == phi.Target))
+                {
+                    values[phi.Target] = source;
+                    continue;
+                }
                 var part = source is Ir.Convert { Kind: ConvKind.ZeroExtend } conversion ? conversion.Operand : source;
                 if (part is Load { Address: Binary { Op: BinOp.Add, Left: Load { Width: 64 }, Right: Const offset } } metadata
                     && (metadata.Width == 8 && offset.Value == RuntimeLayout.ClassTypeHierarchyDepth
