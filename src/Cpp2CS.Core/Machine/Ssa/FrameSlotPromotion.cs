@@ -57,6 +57,13 @@ public static class FrameSlotPromotion
     /// <summary>改写可提升的槽，返回提升的个数（为 0 时函数不变）。</summary>
     public static int Run(MachineFunction function, Func<Call, int, int?>? argumentSize = null,
         IReadOnlyList<(long Offset, int Size)>? preserved = null, bool overlapping = false)
+        => Transform(function, argumentSize, preserved, overlapping, false);
+
+    /// <summary>转发独占标量槽中唯一且支配所有读取的保存值，保留原始写入供调用 ABI 使用。</summary>
+    internal static int ForwardSingleStores(MachineFunction function) => Transform(function, null, null, false, true);
+
+    private static int Transform(MachineFunction function, Func<Call, int, int?>? argumentSize,
+        IReadOnlyList<(long Offset, int Size)>? preserved, bool overlapping, bool forwardOnly)
     {
         var statements = function.Blocks.SelectMany(b => b.Statements).ToArray();
         var aliases = new Dictionary<Variable, long>();
@@ -167,6 +174,30 @@ public static class FrameSlotPromotion
             return Run(function, argumentSize, preserved, overlapping);
         }
         if (promoted.Count == 0) return 0;
+
+        if (forwardOnly)
+        {
+            var positions = function.Blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Block: b, Index: i)))
+                .ToDictionary(p => p.Statement, (IEqualityComparer<Stmt>)ReferenceEqualityComparer.Instance);
+            var dominators = Dominators.Compute(function);
+            var values = new Dictionary<long, Expr>();
+            foreach (var (offset, width) in promoted)
+            {
+                if (width > 64 || statements.OfType<Store>().Where(s => Resolve(s.Target) == offset).ToArray()
+                    is not [var store] || store.Value is not (Use or Const)) continue;
+                var written = positions[store];
+                var reads = positions.Values.Where(p => ExprMap.Operands(p.Statement).SelectMany(ExprMap.Walk)
+                    .Any(e => e is Load l && Resolve(l.Address) == offset));
+                if (reads.Any(p => p.Block == written.Block ? p.Index <= written.Index
+                    : !dominators.Dominates(written.Block.Index, p.Block.Index))) continue;
+                values[offset] = store.Value;
+            }
+            Expr? Forward(Expr e) => e is Load l && Resolve(l.Address) is { } offset && values.TryGetValue(offset, out var value) ? value : null;
+            foreach (var block in function.Blocks)
+                for (var i = 0; i < block.Statements.Count; i++)
+                    block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e, Forward));
+            return values.Count;
+        }
 
         var slots = accesses.Where(a => promoted.Any(p => a.Offset >= p.Key && a.Offset + a.Width / 8 <= p.Key + p.Value / 8))
             .Select(a => a.Offset).Distinct().ToDictionary(o => o, o => promoted.Single(p => o >= p.Key && o < p.Key + p.Value / 8).Key);
