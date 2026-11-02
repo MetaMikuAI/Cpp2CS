@@ -4,19 +4,20 @@ namespace Cpp2CS.Recovery.Lowering;
 
 internal sealed partial class BodyBuilder
 {
-    /// <summary>沿无副作用的唯一前驱链收集入口条件；字段读取不越过写入或调用。</summary>
+    /// <summary>沿唯一前驱链收集入口条件与已保存的读取；写入使可能别名的读取失效，调用截断链。</summary>
     private void SeedPath(Walker caller)
     {
         var chain = new List<ManagedBlock>();
         var seen = new HashSet<ulong> { caller.Block };
         var at = caller.Block;
-        bool Pure(ManagedStatement statement) => statement is ManagedJump or ManagedBranch or ManagedCheck
-            || statement is ManagedAssignment assignment && !ManagedValues.Walk(assignment.Value).Any(v => v is NewObjectValue or NewArrayValue or BoxValue or DelegateValue or HoleValue);
-        if (caller.Blocks[at].Statements.Take(caller.Index).Any(s => !Pure(s))) return;
+        bool Trackable(ManagedStatement statement) => statement is ManagedJump or ManagedBranch or ManagedCheck
+            || (statement is ManagedAssignment or ManagedStore { Target: FieldValue or StaticFieldValue or ArrayElementValue })
+            && !ManagedValues.Of(statement).SelectMany(ManagedValues.Walk).Any(v => v is NewObjectValue or NewArrayValue or BoxValue or DelegateValue or HoleValue);
+        if (caller.Blocks[at].Statements.Take(caller.Index).Any(s => !Trackable(s))) return;
         while (chain.Count < 16)
         {
             var predecessors = caller.Blocks.Values.Where(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == at)).ToArray();
-            if (predecessors is not [var predecessor] || !seen.Add(predecessor.Address) || predecessor.Statements.Any(s => !Pure(s))) break;
+            if (predecessors is not [var predecessor] || !seen.Add(predecessor.Address) || predecessor.Statements.Any(s => !Trackable(s))) break;
             chain.Add(predecessor);
             at = predecessor.Address;
         }
@@ -27,6 +28,11 @@ internal sealed partial class BodyBuilder
             var statements = block.Address == caller.Block ? block.Statements.Take(caller.Index) : block.Statements;
             foreach (var statement in statements)
             {
+                if (statement is ManagedStore store && Location(walker, store.Target) is { } location)
+                {
+                    foreach (var variable in walker.Env.Where(p => ReadsLocation(p.Value, location)).Select(p => p.Key).ToArray()) walker.Env.Remove(variable);
+                    caller.Assumptions.RemoveAll(p => ReadsLocation(p.Condition, location));
+                }
                 if (statement is ManagedAssignment assignment && Term(walker, assignment.Value) is { } value) walker.Env[assignment.Target.Variable] = value;
                 if (statement is ManagedCheck check && Term(walker, check.Condition) is { } passed) caller.Assumptions.Add((passed, false));
                 ManagedEdge? edge = null;

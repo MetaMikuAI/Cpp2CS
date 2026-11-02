@@ -244,10 +244,14 @@ internal sealed partial class BodyBuilder
         // 区域的起点：锚点之前、上一个有效果的语句之后的任一位置（之间只有赋值）。
         var earliest = anchor.Index;
         while (earliest > 0 && statements[earliest - 1] is ManagedAssignment) earliest--;
+        // 字段可先读入局部，再跨过无关写入使用；保留原读取，只在已保存值可用的位置尝试替换。
+        var latest = anchor.Index;
+        if (statements[anchor.Index] is ManagedAssignment)
+            while (latest + 1 < statements.Count && statements[latest] is ManagedAssignment or ManagedStore) latest++;
         var candidates = InlineCandidates(owner, anchor.Access.Field);
         var failures = new List<string>();
         foreach (var (method, template) in candidates)
-            for (var start = earliest; start <= anchor.Index; start++)
+            for (var start = earliest; start <= latest; start++)
             {
                 var match = Match(blocks, anchor.Block, start, template, anchor.Access.Receiver, owner.Arguments, out var failure);
                 if (match is not null && Replace(body, blocks, anchor.Block, start, method, template, match, out failure) is { } replaced)
@@ -591,16 +595,34 @@ internal sealed partial class BodyBuilder
         {
             var (stored, value) = walker.Stores[i];
             if (stored.Equals(location)) return value;
-            var alias = (stored, location) switch
-            {
-                (FieldValue a, FieldValue b) => a.Field.Equals(b.Field),
-                (ArrayElementValue, ArrayElementValue) => true,
-                _ => false,
-            };
-            if (alias) return null;
+            if (MayAlias(stored, location)) return null;
         }
         return new Observed(location, walker.Epoch);
     }
+
+    private static bool MayAlias(ManagedValue a, ManagedValue b) => a.Equals(b) || (a, b) switch
+    {
+        (FieldValue x, FieldValue y) => x.Field.Equals(y.Field) || x.Field.Field.Owner == y.Field.Field.Owner
+            && (x.Field.Field.Owner.Attributes & System.Reflection.TypeAttributes.LayoutMask) == System.Reflection.TypeAttributes.ExplicitLayout,
+        (ArrayElementValue, ArrayElementValue) => true,
+        _ => false,
+    };
+
+    private bool ReadsLocation(ManagedValue value, ManagedValue location) => value switch
+    {
+        Observed observed => MayAlias(observed.Read, location)
+            || types.Kind(observed.Type) == TypeKind.Struct && ContainsLocation(location, observed.Read)
+            || ReadsLocation(observed.Read, location),
+        Returned => false,
+        _ => ManagedValues.Children(value).Any(child => ReadsLocation(child, location)),
+    };
+
+    private static bool ContainsLocation(ManagedValue value, ManagedValue location) => value switch
+    {
+        Observed observed => MayAlias(observed.Read, location) || ContainsLocation(observed.Read, location),
+        Returned => false,
+        _ => ManagedValues.Children(value).Any(child => ContainsLocation(child, location)),
+    };
 
     /// <summary>
     /// 区域外使用的项（接收者、实参、出口复制）写回托管值。初代读取（此前没有经过调用）写成调用之前的读取，字段须可访问；
@@ -807,7 +829,7 @@ internal sealed partial class BodyBuilder
 
     /// <summary>
     /// 结果不再使用的待证字段读取（内联区域换成调用后，区域之前读入的值常只剩这一用途）：读取没有副作用，
-    /// 可观察的只有接收者为空时的 NullReferenceException，写成原位置的判空，不留下不可访问的死值。
+    /// 引用接收者保留原位置的判空，值类型接收者保留其求值；不留下不可访问的死字段。
     /// </summary>
     private ManagedBody DeadPendingReads(ManagedBody body)
     {
@@ -816,12 +838,17 @@ internal sealed partial class BodyBuilder
             .OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
         var nullConstructor = new MethodRef(types.Corlib("System.NullReferenceException").Definition.Methods
             .Single(m => m.Name == ".ctor" && m.Parameters.Count == 0), [], []);
-        ManagedStatement Rewrite(ManagedStatement statement) => statement is ManagedAssignment
-            { Target: var target, Value: FieldValue { Pending: not null, Receiver: LocalValue or ArgumentValue } field }
-            && !used.Contains(target.Variable) && ManagedTypes.IsReferenceType(field.Receiver.Type)
-                ? new ManagedCheck(statement.Address, new ComparisonValue(Cond.Eq, field.Receiver,
-                    new ConstantValue(0, field.Receiver.Type, 64), types.Boolean), nullConstructor)
-                : statement;
+        ManagedStatement Rewrite(ManagedStatement statement)
+        {
+            if (statement is not ManagedAssignment { Target: var target, Value: FieldValue { Pending: not null } field }
+                || used.Contains(target.Variable)) return statement;
+            var receiver = field.Receiver;
+            if (ManagedTypes.IsReferenceType(receiver.Type))
+                return new ManagedCheck(statement.Address, new ComparisonValue(Cond.Eq, receiver,
+                    new ConstantValue(0, receiver.Type, 64), types.Boolean), nullConstructor);
+            if (receiver.Type is ByRefRef reference) receiver = new IndirectValue(receiver, reference.Element, Width(reference.Element));
+            return new ManagedAssignment(statement.Address, NewLocal(receiver.Type), receiver);
+        }
         return body with { Blocks = body.Blocks.Select(b => b with { Statements = b.Statements.Select(Rewrite).ToArray() }).ToArray() };
     }
 }
