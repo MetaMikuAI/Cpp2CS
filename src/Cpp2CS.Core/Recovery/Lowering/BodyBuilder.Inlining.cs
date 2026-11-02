@@ -666,7 +666,7 @@ internal sealed partial class BodyBuilder
             if (exit.Block != startBlock) internalBlocks.Add(exit.Block);
         }
         var removed = internalBlocks;
-        return body with
+        var rebuilt = body with
         {
             Blocks = body.Blocks.Where(b => !removed.Contains(b.Address))
                 .Select(b => b.Address == startBlock ? b with { Statements = replacement } : b).ToArray(),
@@ -676,5 +676,23 @@ internal sealed partial class BodyBuilder
                 Handler = r.Handler.Where(a => !removed.Contains(a)).ToArray(),
             }).ToArray(),
         };
+        return RetainInlineReadChecks(rebuilt, match.Inputs.Select(i => i.Local.Variable).ToHashSet());
+    }
+
+    /// <summary>内联合并后不再使用的普通字段读取仍保留原位置的判空，不留下无法访问的死值。</summary>
+    private ManagedBody RetainInlineReadChecks(ManagedBody body, IReadOnlySet<Variable> inputs)
+    {
+        var used = body.Blocks.SelectMany(b => b.Statements)
+            .SelectMany(s => (s is ManagedAssignment a ? [a.Value] : ManagedValues.Of(s)).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
+            .OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
+        var nullConstructor = new MethodRef(types.Corlib("System.NullReferenceException").Definition.Methods
+            .Single(m => m.Name == ".ctor" && m.Parameters.Count == 0), [], []);
+        ManagedStatement Rewrite(ManagedStatement statement) => statement is ManagedAssignment
+            { Target: var target, Value: FieldValue { Pending: not null, Receiver: LocalValue or ArgumentValue } field }
+            && inputs.Contains(target.Variable) && !used.Contains(target.Variable) && ManagedTypes.IsReferenceType(field.Receiver.Type)
+                ? new ManagedCheck(statement.Address, new ComparisonValue(Cond.Eq, field.Receiver,
+                    new ConstantValue(0, field.Receiver.Type, 64), types.Boolean), nullConstructor)
+                : statement;
+        return body with { Blocks = body.Blocks.Select(b => b with { Statements = b.Statements.Select(Rewrite).ToArray() }).ToArray() };
     }
 }
