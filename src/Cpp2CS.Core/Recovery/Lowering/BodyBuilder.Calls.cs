@@ -55,12 +55,17 @@ internal sealed partial class BodyBuilder
             if (value.Index < 0 && pendingReceiver is not null) { receiver = pendingReceiver; continue; }
             var type = value.Index < 0 ? (callee.Method.Owner.IsValueType ? new ByRefRef(callee.DeclaringType) : callee.DeclaringType)
                 : TypeOracle.Concrete(callee, callee.Method.Parameters[value.Index].Type);
-            if (construction is not null && DelegateFacts.IsDelegate(callee.DeclaringType) && value.Index == 1
-                && SymTable.Resolve(contents[i]) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef target } } && managed.Count == 1)
+            if (construction is not null && DelegateFacts.IsDelegate(callee.DeclaringType) && value.Index == 1 && managed.Count == 1)
             {
-                var created = new DelegateValue((DefinitionRef)callee.DeclaringType, managed[0], target, target.Method.IsStatic ? DelegateBinding.Static : DelegateBinding.ClosedInstance);
-                output.Add(new ManagedAssignment(call.Address, Local(construction, callee.DeclaringType), created));
-                return call.Kind == CallKind.Tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
+                var direct = SymTable.Resolve(contents[i]) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef method } } ? method : null;
+                var target = direct ?? oracle.VirtualMethod(contents[i], contents[Array.FindIndex(signature.Arguments, a => a.Index == 0)]);
+                if (target is not null)
+                {
+                    var binding = direct is null ? DelegateBinding.VirtualInstance : target.Method.IsStatic ? DelegateBinding.Static : DelegateBinding.ClosedInstance;
+                    var created = new DelegateValue((DefinitionRef)callee.DeclaringType, managed[0], target, binding);
+                    output.Add(new ManagedAssignment(call.Address, Local(construction, callee.DeclaringType), created));
+                    return call.Kind == CallKind.Tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
+                }
             }
             var argument = value.Index < 0 && call.Op?.Kind == OpKind.CallDelegate && call.DelegateReceiver is not null
                 ? View(operands[1 + call.Arguments.Length], type, call.Address)

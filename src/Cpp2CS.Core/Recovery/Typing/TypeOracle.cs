@@ -98,6 +98,19 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
 
     public ManagedTypes Types => types;
 
+    /// <summary>从接收者运行时类的虚表读取的方法；绑定仍需虚分派，不能当作静态类型上的直接方法。</summary>
+    public MethodRef? VirtualMethod(Sym pointer, Sym receiver)
+    {
+        if (SymTable.Resolve(pointer) is not ReadSym { Width: 64 } read
+            || Decompose(read.Address) is not (ReadSym { Width: 64 } klass, var offset, null, _)
+            || offset < RuntimeLayout.ClassVtable
+            || (offset - RuntimeLayout.ClassVtable) % RuntimeLayout.VirtualInvokeDataSize is not (0 or 8)
+            || Decompose(klass.Address) is not (var instance, 0, null, _)
+            || !ReferenceEquals(SymTable.Resolve(instance), SymTable.Resolve(receiver))
+            || TypeOf(receiver) is not DefinitionRef owner || !ManagedTypes.IsReferenceType(owner)) return null;
+        return DispatchResolution.Slot(owner, (int)((offset - RuntimeLayout.ClassVtable) / RuntimeLayout.VirtualInvokeDataSize), interfaceOnly: false);
+    }
+
     public TypeRef? LocationType(Call call, int argument, int width) => argument < call.OriginalArgumentCount
         ? Locate(values.Operands(call)[argument + 1], width)?.Type : null;
 
