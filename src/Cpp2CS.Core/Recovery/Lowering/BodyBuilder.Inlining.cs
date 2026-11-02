@@ -668,6 +668,8 @@ internal sealed partial class BodyBuilder
 
     private bool Unify(ManagedValue m, ManagedValue c, Dictionary<int, ManagedValue> binding, bool bindArguments = true)
     {
+        m = NormalizeBit(m);
+        c = NormalizeBit(c);
         if (m is ArgumentValue argument)
         {
             if (!bindArguments) return m.Equals(c);
