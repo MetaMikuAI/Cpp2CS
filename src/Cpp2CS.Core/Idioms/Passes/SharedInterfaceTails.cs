@@ -44,14 +44,23 @@ internal static class SharedInterfaceTails
         {
             if (slow.Handler is not null || slow.IsLandingPad || slow.Predecessors.Count < 2
                 || slow.Statements.OfType<Call>().ToArray() is not [var lookup] || !isLookup(lookup)
-                || lookup.Arguments.Length < 3 || lookup.Arguments[0] is not Use receiver
-                || slow.NormalSuccessors.ToArray() is not [var merge] || merge.Handler is not null || merge.IsLandingPad
+                || lookup.Arguments.Length < 3 || lookup.Arguments[0] is not Use receiver) continue;
+            var bridges = new List<Block>();
+            var slowExit = slow;
+            while (slowExit.NormalSuccessors.ToArray() is [var bridge] && bridge != slow && !bridges.Contains(bridge)
+                && bridge.Predecessors.Count == 1 && bridge.Handler is null && !bridge.IsLandingPad
+                && bridge.Statements.All(s => s is Jump or Nop))
+            {
+                bridges.Add(bridge);
+                slowExit = bridge;
+            }
+            if (slowExit.NormalSuccessors.ToArray() is not [var merge] || merge.Handler is not null || merge.IsLandingPad
                 || merge.Predecessors.Count != 2
                 || merge.Statements.OfType<Call>().ToArray() is not [Call { Op: null, Kind: CallKind.Indirect or CallKind.TailIndirect } invoke]) continue;
             var exits = merge.NormalSuccessors.ToArray();
             if (exits.Length > 1 || exits.Length == 0 && merge.Statements.LastOrDefault() is not (Return { Value: null } or Call { Kind: CallKind.TailIndirect })) continue;
             var exit = exits.SingleOrDefault();
-            var hit = merge.Predecessors.Single(p => p != slow);
+            var hit = merge.Predecessors.Single(p => p != slowExit);
             if (hit.Handler is not null || hit.IsLandingPad || hit.Predecessors.Count != 2
                 || hit.NormalSuccessors.ToArray() is not [var hitExit] || hitExit != merge
                 || hit.Statements.Any(s => s is not (Phi or Define or Jump or Nop))) continue;
@@ -74,7 +83,7 @@ internal static class SharedInterfaceTails
                 _ => null,
             };
             var partition = slow.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == receiver.Variable);
-            var pair = partition is null ? null : merge.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources[merge.Predecessors.IndexOf(slow)] == partition.Target);
+            var pair = partition is null ? null : merge.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources[merge.Predecessors.IndexOf(slowExit)] == partition.Target);
             var hitPartition = pair is null ? null : hit.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == pair.Sources[merge.Predecessors.IndexOf(hit)]);
             var bySlot = hitPartition is null;
             if (bySlot)
@@ -98,10 +107,11 @@ internal static class SharedInterfaceTails
                 || lookup.Arguments[2] is Use slot && slow.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == slot.Variable) is { } slotPhi
                     && slotPhi.Sources.All(v => definitions.GetValueOrDefault(v) is Const { Value: <= 32 });
             if (!slotValid) continue;
-            var shared = new[] { slow, hit, merge };
-            if (shared.Any(b => b.End < b.Start + 8 || b.Statements.Any(s => s is not (Phi or Define or Call or Jump or Nop)
+            var split = new[] { slow, hit, merge };
+            var shared = split.Concat(bridges).ToArray();
+            if (split.Any(b => b.End < b.Start + 8 || b.Statements.Any(s => s is not (Phi or Define or Call or Jump or Nop)
                     && !(b == merge && s is Return { Value: null })))
-                || shared.Any(b => function.Blocks.Any(other => other != b && other.Start == b.Start + 4))) continue;
+                || split.Any(b => function.Blocks.Any(other => other != b && other.Start == b.Start + 4))) continue;
             var defined = shared.SelectMany(b => b.Statements).SelectMany(Defines).ToHashSet();
             // 此形态调用返回 void，合并尾部的临时寄存器不能流出；外部 φ 由原边的输入原样复制。
             if (function.Blocks.Except(shared).SelectMany(b => b.Statements).Any(s => s is Phi p && p.Sources.Any(defined.Contains)
@@ -123,7 +133,7 @@ internal static class SharedInterfaceTails
                 {
                     var target = fresh(phi.Target.Width);
                     merged[phi.Target] = target;
-                    var slowValue = phi.Sources[merge.Predecessors.IndexOf(slow)];
+                    var slowValue = phi.Sources[merge.Predecessors.IndexOf(slowExit)];
                     var hitValue = phi.Sources[merge.Predecessors.IndexOf(hit)];
                     mergeCopy.Statements.Add(new Phi(phi.Address, target, [slowMap.GetValueOrDefault(slowValue, slowValue), hitMap.GetValueOrDefault(hitValue, hitValue)]));
                 }
