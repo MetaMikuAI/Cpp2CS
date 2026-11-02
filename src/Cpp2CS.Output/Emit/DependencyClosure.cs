@@ -28,7 +28,8 @@ public static class DependencyClosure
     public static IEnumerable<MethodRef> Instances(ManagedBody body)
     {
         var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
-        var values = statements.SelectMany(ManagedValues.Of).Concat(statements.OfType<ManagedStore>().Select(s => s.Target)).SelectMany(ManagedValues.Walk).ToArray();
+        var values = statements.SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
+            .Concat(statements.OfType<ManagedStore>().Select(s => s.Target)).SelectMany(ManagedValues.Walk).ToArray();
         return values.OfType<NewObjectValue>().Where(n => n.Transparent).Select(n => n.Constructor)
             .Concat(statements.OfType<ManagedCall>().Where(c => c.Inlined).Select(c => c.Invocation.Method))
             .Concat(values.Select(v => v switch { FieldValue f => f.Accessor, StaticFieldValue f => f.Accessor, _ => null }).OfType<FieldAccessor>().Select(a => a.Method));
