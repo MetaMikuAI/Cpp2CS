@@ -73,8 +73,8 @@ internal sealed partial class BodyBuilder
             {
                 var canonical = Canonical(expected);
                 bool same;
-                if (canonical.Equals(Canonical(condition))) same = true;
-                else if (canonical.Equals(Canonical(Negate(condition)))) same = false;
+                if (Unify(canonical, Canonical(condition), match.Binding)) same = true;
+                else if (Unify(canonical, Canonical(Negate(condition)), match.Binding)) same = false;
                 else return match.Fail("返回值与调用方的比较不同");
                 covered.Add(end.Exit);
                 if (!Along(end, branch.Taken, same) || !Along(end, branch.Fallthrough, !same)) return false;
