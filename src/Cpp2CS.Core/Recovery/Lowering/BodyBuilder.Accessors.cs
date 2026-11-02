@@ -54,10 +54,17 @@ internal sealed partial class BodyBuilder
         var isStatic = (field.Field.Attributes & FieldAttributes.Static) != 0;
         FieldAccessor? found = null;
         var reasons = new List<string>();
-        foreach (var definition in owner.Definition.Methods.Where(m => m.IsStatic == isStatic && m.GenericParameters.Count == 0 && m.Name != ".ctor" && m.Name != ".cctor"
-            && (write ? m.Parameters.Count == 1 && ManagedTypes.IsVoid(m.ReturnType) : m.Parameters.Count == 0 && !ManagedTypes.IsVoid(m.ReturnType))))
+        var candidates = owner.Definition.Methods.Where(m => m.IsStatic == isStatic && m.GenericParameters.Count == 0 && m.Name != ".ctor" && m.Name != ".cctor"
+            && (write ? m.Parameters.Count == 1 && ManagedTypes.IsVoid(m.ReturnType) : m.Parameters.Count == 0 && !ManagedTypes.IsVoid(m.ReturnType)));
+        // 静态方法也可以只读取其第一个实参的字段；签名筛选之后仍以完整方法体证明。
+        if (!write && !isStatic && ManagedTypes.IsReferenceType(owner))
+            candidates = candidates.Concat(types.Model.Types.Where(t => t.Assembly == owner.Definition.Assembly && t.GenericParameters.Count == 0)
+                .SelectMany(t => t.Methods).Where(m => m.IsStatic && m.GenericParameters.Count == 0 && m.Parameters.Count == 1
+                    && m.Parameters[0].Type.Equals(owner) && m.ReturnType.Equals(valueType)));
+        foreach (var definition in candidates)
         {
-            var method = new MethodRef(definition, owner.Arguments, []);
+            var receiverParameter = definition.IsStatic && !isStatic;
+            var method = new MethodRef(definition, receiverParameter ? [] : owner.Arguments, []);
             var declared = write ? TypeOracle.Concrete(method, definition.Parameters[0].Type) : TypeOracle.Concrete(method, definition.ReturnType);
             if (!declared.Equals(valueType)) continue;
             if (summaries(method) is not { } summary) { reasons.Add($"{definition.Name} 没有原生入口"); continue; }
@@ -80,7 +87,8 @@ internal sealed partial class BodyBuilder
                     else break;
                 }
                 if (value is StaticFieldValue stat) fields.Insert(0, stat.Field.Field);
-                return value is ArgumentValue { Index: -1 } or StaticFieldValue && fields.SequenceEqual(new[] { field.Field }.Concat(path.Select(p => p.Field)));
+                return (value is ArgumentValue argument && argument.Index == (receiverParameter ? 0 : -1) || value is StaticFieldValue)
+                    && fields.SequenceEqual(new[] { field.Field }.Concat(path.Select(p => p.Field)));
             }
             // 整个字段：直接的字段值，或按该值类型全部叶子组成的结构体值（拆成叶子搬运的同一个字段）。
             bool Same(ManagedValue value) => Chain(value, [])
