@@ -276,13 +276,21 @@ internal sealed partial class BodyBuilder
     private List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>? StructLeaves(Sym bits, DefinitionRef structure, ulong address)
     {
         var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
-        foreach (var (path, type, offset) in Leaves(structure, 0))
+        foreach (var (field, type, offset) in oracle.Fields(structure))
         {
-            var width = Width(type);
+            var width = oracle.StorageBits(type);
             if (offset * 8 + width > bits.Width) return null;
             var part = values.Syms.Slice(bits, offset * 8, width);
             if (SymTable.Resolve(part) is ConstSym { Value: 0 }) continue;
-            leaves.Add((path, View(part, type, address)));
+            if (type is DefinitionRef nested && types.Kind(type) == TypeKind.Struct && Bits(SymTable.Resolve(part)))
+            {
+                // 已有整体值保留为字段值；其余位片仍按叶子交给构造函数证明。
+                if (oracle.WholeRead(part, nested) is { } whole) leaves.Add(([field], View(whole, type, address)));
+                else if (StructLeaves(part, nested, address) is { } inner)
+                    leaves.AddRange(inner.Select(l => ((IReadOnlyList<FieldRef>)[field, .. l.Path], l.Value)));
+                else return null;
+            }
+            else leaves.Add(([field], View(part, type, address)));
         }
         return leaves;
     }

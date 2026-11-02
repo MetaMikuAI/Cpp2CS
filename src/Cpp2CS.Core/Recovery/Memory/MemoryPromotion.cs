@@ -154,6 +154,12 @@ internal sealed class MemoryPromotion
                 {
                     Walk(call.Target, "调用目标");
                     var effects = Effects(call);
+                    // 同一次调用可观察 ref 实参之间的别名；重叠区间必须保留共同存储。
+                    var references = effects.Where(e => shapes(call).Signature?.Arguments.Any(a => a.Index == e.Value && a.Transfer == Transfer.Reference) == true).ToArray();
+                    foreach (var effect in references)
+                        if (references.Any(other => other.Argument != effect.Argument && other.Space == effect.Space
+                            && other.Offset < effect.Offset + effect.Size && effect.Offset < other.Offset + other.Size))
+                            Escape(effect.Space, effect.Offset, "调用的 ref 实参重叠");
                     foreach (var effect in effects)
                         if (effect.Size > 0) Add(effect.Space, effect.Offset, effect.Size);
                         else Escape(effect.Space, effect.Offset, "调用访问范围未知");

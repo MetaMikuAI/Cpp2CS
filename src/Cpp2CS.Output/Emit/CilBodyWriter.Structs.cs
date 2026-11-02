@@ -44,7 +44,11 @@ internal sealed partial class CilBodyWriter
             case ArgumentValue a when a.Index >= 0: il.Emit(OpCodes.Ldarga, destination.Parameters[a.Index]); break;
             case LocalValue l: il.Emit(OpCodes.Ldloca, Local(l)); break;
             case IndirectValue indirect: Value(indirect.Address); break;
-            case FieldValue f: Value(f.Receiver); il.Emit(OpCodes.Ldflda, FieldReference(f.Field)); break;
+            case FieldValue f:
+                if (types.Kind(f.Receiver.Type) == TypeKind.Struct) Address(f.Receiver);
+                else Value(f.Receiver);
+                il.Emit(OpCodes.Ldflda, FieldReference(f.Field));
+                break;
             case StaticFieldValue s: il.Emit(OpCodes.Ldsflda, FieldReference(s.Field)); break;
             case ArrayElementValue element:
                 Value(element.Array); ElementIndex(element.Index); il.Emit(OpCodes.Ldelema, TypeReference(element.Type)); break;
