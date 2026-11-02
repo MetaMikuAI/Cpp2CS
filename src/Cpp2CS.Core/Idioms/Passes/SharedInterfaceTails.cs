@@ -37,7 +37,7 @@ internal static class SharedInterfaceTails
                     && pointer.Sources.All(Pointer) || MergedClass(merge, call.Target))));
     }
 
-    internal static bool Run(MachineFunction function, Func<Call, bool> isLookup, Func<Variable> fresh)
+    internal static bool Run(MachineFunction function, Func<Call, bool> isLookup, Func<int, Variable> fresh)
     {
         var changed = false;
         foreach (var slow in function.Blocks.ToArray())
@@ -121,7 +121,7 @@ internal static class SharedInterfaceTails
                 var merged = new Dictionary<Variable, Variable>();
                 foreach (var phi in merge.Statements.OfType<Phi>())
                 {
-                    var target = fresh();
+                    var target = fresh(phi.Target.Width);
                     merged[phi.Target] = target;
                     var slowValue = phi.Sources[merge.Predecessors.IndexOf(slow)];
                     var hitValue = phi.Sources[merge.Predecessors.IndexOf(hit)];
@@ -167,12 +167,12 @@ internal static class SharedInterfaceTails
                         value => value is Use u && map.TryGetValue(u.Variable, out var replacement) ? new Use(replacement, u.Width) : null));
                     if (mapped is Define d)
                     {
-                        var variable = fresh(); map[d.Target] = variable;
+                        var variable = fresh(d.Target.Width); map[d.Target] = variable;
                         mapped = d with { Target = variable };
                     }
                     else if (mapped is Call call)
                     {
-                        var variables = call.Defines.Select(v => v is null ? null! : fresh()).ToArray();
+                        var variables = call.Defines.Select(v => v is null ? null! : fresh(v.Width)).ToArray();
                         for (var i = 0; i < variables.Length; i++) if (call.Defines[i] is { } old) map[old] = variables[i];
                         mapped = call with { Defines = variables };
                     }

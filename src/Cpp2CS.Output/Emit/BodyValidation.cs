@@ -176,6 +176,9 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                 if (b.Left.Width != b.Width || b.Right.Width != b.Width && b.Op is not (BinOp.Shl or BinOp.LShr or BinOp.AShr)) return new(EmissionProblemKind.Unsupported, "运算 位宽不一致");
                 break;
             case ComparisonValue c:
+                if ((c.Left.Width == 0 || c.Right.Width == 0)
+                    && !ManagedTypes.IsReferenceType(c.Left.Type) && !ManagedTypes.IsReferenceType(c.Right.Type))
+                    return new(EmissionProblemKind.Unsupported, "比较 非引用操作数缺少标量位宽");
                 if (c.Condition is not (Cond.Eq or Cond.Ne or Cond.Slt or Cond.Sle or Cond.Sgt or Cond.Sge or Cond.Ult or Cond.Ule or Cond.Ugt or Cond.Uge
                     or Cond.FEq or Cond.FNe or Cond.FUne or Cond.FLt or Cond.FLe or Cond.FGt or Cond.FGe or Cond.FUlt or Cond.FUle or Cond.FUgt or Cond.FUge
                     or Cond.FOrdered or Cond.FUnordered))

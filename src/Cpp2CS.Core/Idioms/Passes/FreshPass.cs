@@ -4,7 +4,9 @@ namespace Cpp2CS.Idioms;
 
 internal static class FreshPass
 {
-    internal static Variable Fresh(this IdiomState state)
+    internal static Variable Fresh(this IdiomState state) => state.Fresh(64);
+
+    internal static Variable Fresh(this IdiomState state, int width)
     {
         if (state.Names is null)
         {
@@ -18,6 +20,6 @@ internal static class FreshPass
             state.Names = new(variables.Where(v => v.Storage.Bank == Bank.Temp).Select(v => v.Storage.Index).DefaultIfEmpty(-1).Max() + 1);
         }
 
-        return new Variable(Storage.Temp(state.Names.Next()), 1);
+        return new Variable(new Storage(Bank.Temp, state.Names.Next(), width), 1);
     }
 }
