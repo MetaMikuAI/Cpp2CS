@@ -57,12 +57,23 @@ internal sealed partial class BodyBuilder
                 : TypeOracle.Concrete(callee, callee.Method.Parameters[value.Index].Type);
             if (construction is not null && DelegateFacts.IsDelegate(callee.DeclaringType) && value.Index == 1 && managed.Count == 1)
             {
-                var direct = SymTable.Resolve(contents[i]) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef method } } ? method : null;
-                var target = direct ?? oracle.VirtualMethod(contents[i], contents[Array.FindIndex(signature.Arguments, a => a.Index == 0)]);
-                if (target is not null)
+                if (oracle.DelegateTargetOf(contents[i], contents[Array.FindIndex(signature.Arguments, a => a.Index == 0)]) is { } target)
                 {
-                    var binding = direct is null ? DelegateBinding.VirtualInstance : target.Method.IsStatic ? DelegateBinding.Static : DelegateBinding.ClosedInstance;
-                    var created = new DelegateValue((DefinitionRef)callee.DeclaringType, managed[0], target, binding);
+                    var instance = managed[0];
+                    if (target is SelectedDelegateTarget && instance is not (LocalValue or ArgumentValue or ConstantValue))
+                    {
+                        var saved = NewLocal(instance.Type);
+                        output.Add(new ManagedAssignment(call.Address, saved, instance));
+                        instance = saved;
+                    }
+                    ManagedValue Create(DelegateTarget binding) => binding switch
+                    {
+                        BoundDelegateTarget bound => new DelegateValue((DefinitionRef)callee.DeclaringType, instance, bound.Method, bound.Binding),
+                        SelectedDelegateTarget selected => new ChoiceValue(View(selected.Condition, types.Boolean, call.Address),
+                            Create(selected.True), Create(selected.False), callee.DeclaringType, 64),
+                        _ => throw new NotSupportedException(binding.ToString()),
+                    };
+                    var created = Create(target);
                     output.Add(new ManagedAssignment(call.Address, Local(construction, callee.DeclaringType), created));
                     return call.Kind == CallKind.Tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
                 }
