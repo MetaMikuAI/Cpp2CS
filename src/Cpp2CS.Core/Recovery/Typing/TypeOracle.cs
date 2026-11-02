@@ -500,10 +500,19 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                 {
                     if (index is null && offset == RuntimeLayout.ArrayMaxLength && width is 32 or 64) return new(LocationKind.Length, root, null, 0, null, [], types.Int32);
                     var size = ElementSize(array.Element);
-                    if (size <= 0 || offset < RuntimeLayout.ArrayData || index is not null && scale != size) return null;
+                    if (size <= 0 || index is null && offset < RuntimeLayout.ArrayData || index is not null && scale != size) return null;
                     var within = offset - RuntimeLayout.ArrayData;
-                    var (constant, inside) = (within / size, (int)(within % size));
-                    if (index is not null && constant != 0) return null;
+                    var inside = (int)((within % size + size) % size);
+                    var constant = (within - inside) / size;
+                    if (index is not null && constant != 0)
+                    {
+                        // 比例下标可能已包含数组头或若干元素的常量偏移。
+                        while (index is SliceSym { Low: 0, Width: >= 32 } slice) index = SymTable.Resolve(slice.Base);
+                        if (index is PhiSym { Projection: { Low: 0 } projection, Width: >= 32 }) index = projection.Whole;
+                        index = values.Syms.Convert(ConvKind.SignExtend, index, 64);
+                        index = values.Syms.Binary(BinOp.Add, index, values.Syms.Const(unchecked((ulong)constant), 64), 64);
+                        constant = 0;
+                    }
                     if (inside == 0 && (types.Kind(array.Element) != TypeKind.Struct || width == size * 8))
                         return new(LocationKind.Element, root, index, constant, null, [], array.Element);
                     return FieldAt(array.Element, inside + RuntimeLayout.ObjectHeaderSize, width, false, false) is var (path, fieldType)
