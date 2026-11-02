@@ -8,9 +8,10 @@ internal static class ChainPass
     internal static List<Block>? Chain(Block start, Block merge)
     {
         var chain = new List<Block>();
+        var visited = new HashSet<Block>();
         for (var b = start; b != merge;)
         {
-            if (b.Predecessors.Count != 1 || b.IsLandingPad || chain.Count >= 64)
+            if (b.Predecessors.Count != 1 || b.IsLandingPad || !visited.Add(b))
                 return null;
             var next = b.NormalSuccessors.ToArray();
             if (next.Length != 1)
