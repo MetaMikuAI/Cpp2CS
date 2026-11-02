@@ -12,6 +12,12 @@ internal sealed partial class BodyBuilder
     private readonly Dictionary<(Sym, DefinitionRef), ReadSym> aggregateReads = [];
     private readonly Dictionary<Stmt, List<ReadSym>> aggregateReadSites = new(ReferenceEqualityComparer.Instance);
 
+    /// <summary>同宽的单字段结构体与其字段共享地址，来源类型决定本次写入的层级。</summary>
+    private Location StoreLocation(Location location, Sym value) => types.Kind(location.Type) == TypeKind.Struct
+        && oracle.TypeOf(value) is { } source && !source.Equals(location.Type)
+        && oracle.FieldAt(location.Type, RuntimeLayout.ObjectHeaderSize, value.Width, false, false) is var (path, inner) && inner.Equals(source)
+        ? location with { Path = [.. location.Path, .. path], Type = inner } : location;
+
     /// <summary>结构体的所有叶子来自同段内存的连续读取时，在第一次读取处保存整体值。</summary>
     private ReadSym? AggregateRead(Sym bits, DefinitionRef structure)
     {

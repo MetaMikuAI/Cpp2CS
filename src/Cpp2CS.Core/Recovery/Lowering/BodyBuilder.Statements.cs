@@ -37,12 +37,14 @@ internal sealed partial class BodyBuilder
                     if (aggregateStores.Contains(store)) return null;
                     if (AggregateStore(block, index) is { } aggregate)
                     {
-                        var destination = LocationValue(aggregate.Target, store.Address, store: true);
-                        var value = View(aggregate.Value, aggregate.Target.Type, store.Address);
+                        var place = StoreLocation(aggregate.Target, aggregate.Value);
+                        var destination = LocationValue(place, store.Address, store: true);
+                        var value = View(aggregate.Value, place.Type, store.Address);
                         output.Add(destination is LocalValue local ? new ManagedAssignment(store.Address, local, value) : new ManagedStore(store.Address, destination, value));
                         return null;
                     }
                     var location = oracle.Locate(operands[0], store.Value.Width);
+                    if (location is not null) location = StoreLocation(location, operands[1]);
                     if (location is null && oracle.Split(operands[0], store.Value.Width) is { } leaves)
                     {
                         // 跨字段的写入按布局拆为逐字段写入（寄存器对、合并的清零等一次写入多个字段）；

@@ -389,8 +389,17 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Newobj:
                 {
                     var constructor = model.Method((MethodReference)operand);
-                    if (constructor.DeclaringType is not DefinitionRef { Definition.IsValueType: false } type) throw new Unsupported("值类型的 newobj");
+                    if (constructor.DeclaringType is not DefinitionRef type) throw new Unsupported("newobj 的声明类型");
                     var values = PopMany(constructor.Method.Parameters.Count);
+                    if (type.Definition.IsValueType)
+                    {
+                        // newobj 为值类型创建零初始化的临时存储，以其地址调用构造，再把值压栈。
+                        var temporary = side.Temporary(world.StorageSize(type));
+                        side.RunClassConstructor(type);
+                        InvokeAt(side, instruction, constructor, [StackValue.O(temporary), .. values]);
+                        stack.Push(ReadValue(side, type, temporary));
+                        break;
+                    }
                     var layout = index.Facts.Layouts.Of(type) ?? throw new Unsupported($"对象 {type} 的布局");
                     var created = side.New(type, layout.InstanceSize);
                     side.RunClassConstructor(type);

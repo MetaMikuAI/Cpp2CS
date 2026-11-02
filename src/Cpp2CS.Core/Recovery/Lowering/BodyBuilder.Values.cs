@@ -69,6 +69,10 @@ internal sealed partial class BodyBuilder
     private ManagedValue Coerce(ManagedValue value, TypeRef? expected)
     {
         if (expected is null || value.Type.Equals(expected) || value is HoleValue) return value;
+        if (expected is DefinitionRef wrapper && types.Kind(wrapper) == TypeKind.Struct
+            && oracle.FieldAt(wrapper, RuntimeLayout.ObjectHeaderSize, (ManagedTypes.IsReferenceType(value.Type) ? 8 : types.Size(value.Type)) * 8, false, false) is var (path, inner)
+            && inner.Equals(value.Type) && types.Size(wrapper) == (ManagedTypes.IsReferenceType(value.Type) ? 8 : types.Size(value.Type))
+            && ValueConstructor(wrapper, [(path, value)]) is { } constructed) return constructed;
         if (ManagedTypes.IsReferenceType(value.Type) && ManagedTypes.IsReferenceType(expected)) return value;
         var (from, to) = (types.Kind(value.Type), types.Kind(expected));
         if (from is TypeKind.Int or TypeKind.Bool && to is TypeKind.Int or TypeKind.Bool)
@@ -262,6 +266,7 @@ internal sealed partial class BodyBuilder
     /// <summary>按叶子组成的结构体值：叶子字段都须对当前方法可访问，否则记为洞（被内联的构造函数尚无逆）。</summary>
     private ManagedValue Composed(DefinitionRef structure, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, ulong address)
     {
+        if (leaves.Any(l => l.Path.Any(f => !Accessible(f.Field))) && ValueConstructor(structure, leaves) is { } constructed) return constructed;
         foreach (var (path, _) in leaves)
             if (path.FirstOrDefault(f => !Accessible(f.Field)) is { } hidden)
                 return Hole(address, $"内存 字段 {hidden.Field.Owner.FullName}.{hidden.Field.Name} 对调用方不可访问，结构体值按叶子组成", structure);
