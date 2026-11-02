@@ -18,7 +18,7 @@ internal sealed partial class StructAbi
             var parameter = i - (method.Method.IsStatic ? 0 : 1);
             var writes = parameter < 0 ? method.Method.Name == ".ctor" && method.Method.Owner.IsValueType
                 : (method.Method.Parameters[parameter].Attributes & System.Reflection.ParameterAttributes.Out) != 0;
-            if (!writes || parameters[i] is not ByRefRef byref || !Aapcs64Classifier.IsStruct(byref.Element)) continue;
+            if (!writes || parameters[i] is not ByRefRef byref) continue;
             var address = Bits(arguments[i]);
             var value = side.World.CallWriteBytes(ordinal, i, byref.Element);
             foreach (var leaf in Classifier.Leaves(byref.Element))
@@ -28,10 +28,11 @@ internal sealed partial class StructAbi
 
     /// <summary>
     /// ECMA-335 I.12.1.6.1 / I.12.4.1.5.2：局部变量的地址由实现选择，ref 传递的是存储位置。
-    /// 方法级桩不保留 ref；在每次调用中比较全部输入叶子与别名关系，不能比较两台执行器的物理栈地址。
+    /// 方法级桩不保留 ref；比较输入叶子与别名关系，不能比较两台执行器的物理栈地址。
+    /// 显式 Out 且非 In 的参数不消费初值，保留位置身份并由 WriteBack 提供后值。
     /// 参数副本沿用既有逻辑身份；堆/静态地址保持精确比较。规则只依赖签名、实际地址和独立布局。
     /// </summary>
-    public ulong[] ObservableArguments(Side side, IReadOnlyList<TypeRef> types, IReadOnlyList<byte[]> bytes)
+    public ulong[] ObservableArguments(Side side, MethodRef method, IReadOnlyList<TypeRef> types, IReadOnlyList<byte[]> bytes)
     {
         var ranges = types.Select((t, i) => (Type: t, Index: i)).Where(v => v.Type is ByRefRef)
             .Select(v => (v.Type, v.Index, Address: Bits(bytes[v.Index])))
@@ -47,13 +48,23 @@ internal sealed partial class StructAbi
         var result = new List<ulong>();
         for (var i = 0; i < types.Count; i++)
         {
+            var parameter = i - (method.Method.IsStatic ? 0 : 1);
+            var outputOnly = parameter >= 0 && types[i] is ByRefRef
+                && (method.Method.Parameters[parameter].Attributes & (System.Reflection.ParameterAttributes.In | System.Reflection.ParameterAttributes.Out))
+                    == System.Reflection.ParameterAttributes.Out;
             var slot = Array.FindIndex(ranges, r => r.Index == i);
-            if (slot < 0) { result.AddRange(ObservableArgument(side, types[i], bytes[i])); continue; }
+            if (slot < 0)
+            {
+                if (outputOnly) result.Add(side.ArgumentPointer(Bits(bytes[i])));
+                else result.AddRange(ObservableArgument(side, types[i], bytes[i]));
+                continue;
+            }
             var root = Root(slot);
             var members = Enumerable.Range(0, ranges.Length).Where(j => Root(j) == root).ToArray();
             var first = members.Min(j => ranges[j].Index);
             var start = members.Min(j => ranges[j].Address);
             result.Add(0xf330000000000000UL | (ulong)first << 32 | (ranges[slot].Address - start));
+            if (outputOnly) continue;
             var type = ((ByRefRef)types[i]).Element;
             var content = new byte[side.World.StorageSize(type)];
             side.Read(ranges[slot].Address, content);

@@ -712,7 +712,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         var arguments = StructAbi.ArgumentTypes(callee);
         if (arguments.Length != values.Length) throw new Unsupported($"被调方法 {callee} 的实参个数");
         var rawArguments = arguments.Select((type, i) => ToBytes(type, values[i])).ToArray();
-        var bits = index.StructAbi.ObservableArguments(side, arguments, rawArguments);
+        var bits = index.StructAbi.ObservableArguments(side, callee, arguments, rawArguments);
         if (!(callee.Method is { Name: ".ctor", Parameters.Count: 0 } && Side.InExceptionRegion(values[0].Bits)))
         {
             try { side.CallEvent(index.CodeAddress(callee), index.StructAbi.CallInputs(callee, bits), Side.IsGenericInstance(callee) ? callee : null); }

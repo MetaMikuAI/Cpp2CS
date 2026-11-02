@@ -339,7 +339,7 @@ internal sealed partial class NativeMachine : IDisposable
         var types = StructAbi.ArgumentTypes(callee);
         var locations = StructAbi.Arguments(signature);
         var rawArguments = locations.Select(a => ReadLocation(a)).ToArray();
-        var arguments = world.Index.StructAbi.ObservableArguments(side, types, rawArguments);
+        var arguments = world.Index.StructAbi.ObservableArguments(side, callee, types, rawArguments);
         if (side.RuntimeTypeReturn(callee, arguments) is { } reflected)
         {
             var reflectionResult = signature.Return ?? throw new Unsupported("反射方法没有返回位置");
