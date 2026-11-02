@@ -122,6 +122,11 @@ internal sealed partial class BodyBuilder
             case OperatorKind.Compare:
                 {
                     var hint = oracle.TypeOf(op.Args[0]) ?? oracle.TypeOf(op.Args[1]);
+                    if (hint is not null && types.Kind(hint) == TypeKind.Struct && types.Size(hint) * 8 == op.Args[0].Width
+                        && op.Args[1].Width == op.Args[0].Width
+                        && oracle.FieldAt(hint, RuntimeLayout.ObjectHeaderSize, op.Args[0].Width, false, false) is var (_, scalar)
+                        && types.Kind(scalar) is TypeKind.Int or TypeKind.Bool)
+                        hint = scalar;
                     return new ComparisonValue(op.Op.Cond, View(op.Args[0], hint, address), View(op.Args[1], hint, address), types.Boolean);
                 }
             case OperatorKind.And or OperatorKind.Or:
