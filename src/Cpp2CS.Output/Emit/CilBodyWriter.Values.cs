@@ -90,7 +90,7 @@ internal sealed partial class CilBodyWriter
             case ArrayLengthValue length:
                 Value(length.Array); il.Emit(OpCodes.Ldlen); il.Emit(OpCodes.Conv_U4); break;
             case ArrayElementValue element:
-                Value(element.Array); Value(element.Index); il.Emit(OpCodes.Ldelem_Any, TypeReference(element.Type)); break;
+                Value(element.Array); ElementIndex(element.Index); il.Emit(OpCodes.Ldelem_Any, TypeReference(element.Type)); break;
             case AddressValue a: Address(a.Target); break;
             case PinnedArrayValue pinned:
                 PinArray(pinned); break;

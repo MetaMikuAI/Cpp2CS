@@ -16,6 +16,9 @@ internal sealed partial class BodyBuilder
     private ManagedValue View(Sym sym, TypeRef? expected, ulong address)
     {
         sym = SymTable.Resolve(sym);
+        if (expected is DefinitionRef structure && types.Kind(expected) == TypeKind.Struct && sym is not ConcatSym
+            && (sym is ConstSym || oracle.TypeOf(sym) is { } natural && types.Kind(natural) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer))
+            return StructBits(sym, structure, address);
         if (locals.TryGetValue(sym, out var known)) return Coerce(known, expected);
         switch (sym)
         {
@@ -204,7 +207,7 @@ internal sealed partial class BodyBuilder
                         if (offset * 8 + width > concat.Width) return Hole(address, $"值 {expected} 超出拼接宽度", expected);
                         leaves.Add((path, View(syms.Slice(concat, offset * 8, width), type, address)));
                     }
-                    return new ComposedValue(expected, leaves);
+                    return Composed(structure, leaves, address);
                 }
             case TypeKind.Int or TypeKind.Bool or TypeKind.Pointer:
                 {
@@ -230,6 +233,34 @@ internal sealed partial class BodyBuilder
                 }
         }
         return Hole(address, $"值 拼接 {concat} 作为 {expected}", expected);
+    }
+
+    /// <summary>
+    /// 结构体值由一段标量位给出（常量、寄存器中按值传递或返回的结构体）：按运行时布局，每个叶子是对应位置的位段；
+    /// 为零的叶子由 initobj 给出，全零即 default。
+    /// </summary>
+    private ManagedValue StructBits(Sym bits, DefinitionRef structure, ulong address)
+    {
+        var syms = values.Syms;
+        var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
+        foreach (var (path, type, offset) in Leaves(structure, 0))
+        {
+            var width = Width(type);
+            if (offset * 8 + width > bits.Width) return Hole(address, $"值 {structure} 超出位宽 {bits.Width}", structure);
+            var part = syms.Slice(bits, offset * 8, width);
+            if (SymTable.Resolve(part) is ConstSym { Value: 0 }) continue;
+            leaves.Add((path, View(part, type, address)));
+        }
+        return Composed(structure, leaves, address);
+    }
+
+    /// <summary>按叶子组成的结构体值：叶子字段都须对当前方法可访问，否则记为洞（被内联的构造函数尚无逆）。</summary>
+    private ManagedValue Composed(DefinitionRef structure, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, ulong address)
+    {
+        foreach (var (path, _) in leaves)
+            if (path.FirstOrDefault(f => !Accessible(f.Field)) is { } hidden)
+                return Hole(address, $"内存 字段 {hidden.Field.Owner.FullName}.{hidden.Field.Name} 对调用方不可访问，结构体值按叶子组成", structure);
+        return new ComposedValue(structure, leaves);
     }
 
     /// <summary>

@@ -28,6 +28,8 @@ public interface IRuntimeLowering
     /// <summary>操作的结果（<see cref="ResultSym"/>，序号 0）。</summary>
     Sym Result { get; }
     ManagedValue View(Sym sym, TypeRef? expected);
+    /// <summary>值的自然类型；不受约束时为 null。</summary>
+    TypeRef? TypeOf(Sym sym);
     LocalValue Local(Sym sym, TypeRef type);
     void Emit(ManagedStatement statement);
     /// <summary>经指针读取的值 value：已提升单元在调用前的内容；没有时为 null。</summary>
@@ -104,6 +106,8 @@ public static class RuntimeOps
         foreach (var kind in new[] { OpKind.InterfaceInvokeData, OpKind.ResolveGenericVirtual })
             yield return new(kind) { Lower = None };
 
+        // 判空：机器值为 0 时抛出 NullReferenceException。操作数通常是对象引用；clang 也会直接检验内联类型判断的结果
+        // （对象已知非空时 isinst 的结果为空即判断失败），这时与 0 比较的是该判断的 bool 值。
         yield return new(OpKind.NullCheck)
         {
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
@@ -113,7 +117,8 @@ public static class RuntimeOps
                 var target = SymTable.Resolve(c.Arguments[0]);
                 if (c.Absorb(target)) return true;
                 if (c.ExceptionConstructor("System.NullReferenceException") is not { } nre) return false;
-                c.Emit(new ManagedCheck(c.Call.Address, new ComparisonValue(Cond.Eq, c.View(target, c.Types.Object), new ConstantValue(0, c.Types.Object, 64), c.Types.Boolean), nre));
+                var type = c.TypeOf(target) is { } natural && c.Types.Kind(natural) is TypeKind.Bool or TypeKind.Int ? natural : c.Types.Object;
+                c.Emit(new ManagedCheck(c.Call.Address, new ComparisonValue(Cond.Eq, c.View(target, type), new ConstantValue(0, type, c.Types.Kind(type) == TypeKind.Reference ? 64 : c.Types.Bits(type)), c.Types.Boolean), nre));
                 return true;
             },
         };

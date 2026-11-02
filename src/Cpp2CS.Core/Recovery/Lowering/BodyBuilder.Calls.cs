@@ -91,6 +91,16 @@ internal sealed partial class BodyBuilder
                 ? Local(values.Syms.Out(call, MachineSignature.ReturnIndex, MethodEnvironment.ValueWidth(signature.Return)), returnType)
                 : Local(values.Syms.Result(call, 0, signature.Return is { } ret ? MethodEnvironment.ValueWidth(ret) : Width(returnType)), returnType);
         var tail = call.Kind is CallKind.Tail or CallKind.TailIndirect;
+        // 尾调用原样返回被调用者的结果寄存器；两者的返回类型不同（如按值返回的单字段结构体与其字段）时，返回值是同一段位在调用方返回类型下的值。
+        if (tail && result is not null && oracle.ReturnType is { } own && !ManagedTypes.IsVoid(own) && !own.Equals(returnType)
+            && !(ManagedTypes.IsReferenceType(own) && ManagedTypes.IsReferenceType(returnType))
+            && signature.Return is { Transfer: Transfer.Value } returned && analysis.Signature.Return is { Transfer: Transfer.Value } caller
+            && MethodEnvironment.ValueWidth(caller) <= MethodEnvironment.ValueWidth(returned))
+        {
+            output.Add(new ManagedCall(call.Address, invocation, result, false));
+            var bits = values.Syms.Result(call, 0, MethodEnvironment.ValueWidth(returned));
+            return new Statement(new ManagedReturn(call.Address, View(values.Syms.Slice(bits, 0, MethodEnvironment.ValueWidth(caller)), own, call.Address)));
+        }
         var lowered = new ManagedCall(call.Address, invocation, tail ? null : result, tail);
         if (tail) return new Statement(lowered);
         output.Add(lowered);
@@ -258,6 +268,7 @@ internal sealed partial class BodyBuilder
         public IReadOnlyList<Sym> Arguments => arguments;
         public Sym Result => owner.values.Syms.Result(call, 0, 64);
         public ManagedValue View(Sym sym, TypeRef? expected) => owner.View(sym, expected, call.Address);
+        public TypeRef? TypeOf(Sym sym) => owner.oracle.TypeOf(sym);
         public LocalValue Local(Sym sym, TypeRef type) => owner.Local(sym, type);
         public void Emit(ManagedStatement statement) => output.Add(statement);
         public void AwaitConstruction() => owner.constructions[(ResultSym)Result] = call;

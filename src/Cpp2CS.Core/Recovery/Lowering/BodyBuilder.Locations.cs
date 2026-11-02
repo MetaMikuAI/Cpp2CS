@@ -71,7 +71,7 @@ internal sealed partial class BodyBuilder
             case LocationKind.Element:
                 {
                     var array = View(location.Base!, oracle.TypeOf(location.Base!), address);
-                    var index = location.Index is { } i ? View(i, types.Int32, address) : new ConstantValue((ulong)location.ConstantIndex, types.Int32, 32);
+                    var index = location.Index is { } i ? ElementIndex(i, address) : new ConstantValue((ulong)location.ConstantIndex, types.Int32, 32);
                     var element = array.Type is ArrayRef a ? a.Element : location.Type;
                     ManagedValue value = new ArrayElementValue(array, index, element, Width(element));
                     return path.Count == 0 ? value : Nest(store ? new AddressValue(value) : value, path, location.Type, store, address);
@@ -85,6 +85,23 @@ internal sealed partial class BodyBuilder
                 }
         }
         return Hole(address, $"内存 位置 {location.Kind} 尚未接入", location.Type);
+    }
+
+    /// <summary>
+    /// 元素下标（ECMA-335 III.4.7）：下标是 int32 或 native int，int32 按符号扩展参与寻址，界外访问抛出 IndexOutOfRangeException。
+    /// 按比例寻址时丢弃的高位、32 位下标的符号或零扩展都只影响界外访问，下标取其来源；仍为 64 位时按 int64 写出，由写出转为 native int。
+    /// </summary>
+    private ManagedValue ElementIndex(Sym index, ulong address)
+    {
+        while (true)
+        {
+            index = SymTable.Resolve(index);
+            if (index is SliceSym { Low: 0, Width: >= 32 } slice && slice.Base.Width > slice.Width) index = slice.Base;
+            else if (index is OpSym { Op: { Kind: OperatorKind.Convert } op, Args: [{ Width: 32 } narrow] } && op.Conversion == ConvKind.SignExtend) index = narrow;
+            else if (index is ConcatSym { Parts: [{ Width: 32 } low, ConstSym { Value: 0 }] }) index = low;
+            else break;
+        }
+        return index.Width == 32 ? View(index, types.Int32, address) : View(index, types.Int64, address);
     }
 
     private TypeRef FieldType(FieldRef field, TypeRef? leaf) => leaf ?? field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);

@@ -8,6 +8,13 @@ internal sealed partial class CilBodyWriter
 {
     private ulong statementAddress;
 
+    /// <summary>元素下标：int32 原样，64 位下标转为 native int（ECMA-335 III.4.7）。</summary>
+    private void ElementIndex(ManagedValue index)
+    {
+        Value(index);
+        if (index.Width == 64) il.Emit(OpCodes.Conv_I);
+    }
+
     private void Statement(ManagedStatement statement)
     {
         statementAddress = statement.Address;
@@ -27,12 +34,17 @@ internal sealed partial class CilBodyWriter
                 Value(s.Value);
                 if (f.Accessor is { } staticSetter) AccessorCall(staticSetter); else il.Emit(OpCodes.Stsfld, FieldReference(f.Field)); break;
             case ManagedStore { Target: ArrayElementValue element } s:
-                Value(element.Array); Value(element.Index); Value(s.Value);
+                Value(element.Array); ElementIndex(element.Index); Value(s.Value);
                 il.Emit(OpCodes.Stelem_Any, TypeReference(element.Type)); break;
             case ManagedCall c:
                 var call = Invocation(c.Invocation);
                 if (c.Inlined) InlineCalls.Add(call, c.Invocation.Method);
-                if (c.Tail) ReturnFromBlock();
+                if (c.Tail)
+                {
+                    // 尾调用跳到被调用者，结果寄存器原样返回；调用方没有返回值时结果被丢弃。
+                    if (ManagedTypes.IsVoid(methodContext.Method.ReturnType) && !ManagedTypes.IsVoid(c.Invocation.Method.Method.ReturnType)) il.Emit(OpCodes.Pop);
+                    ReturnFromBlock();
+                }
                 else if (c.Result is { } result) il.Emit(OpCodes.Stloc, Local(result));
                 else if (!ManagedTypes.IsVoid(c.Invocation.Method.Method.ReturnType)) il.Emit(OpCodes.Pop);
                 break;
