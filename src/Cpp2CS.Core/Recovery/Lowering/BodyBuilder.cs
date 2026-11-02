@@ -12,7 +12,8 @@ namespace Cpp2CS.Recovery.Lowering;
 /// <summary>
 /// 机械下降：按块把机器语句的效果写成托管语句。值从符号值按期望类型得到视图——数据搬运不产生语句，
 /// 运算成为 IL 运算，读取按位置成为字段、元素或长度；读取只在被所在语句之外使用时落成局部；
-/// 调用按机器签名重组 IL 实参，经指针的 ref 实参与结果缓冲区成为局部；φ 成为局部并在入边上并行赋值。
+/// 调用按机器签名重组 IL 实参，经指针的 ref 实参与结果缓冲区成为局部；φ 成为局部并在入边上并行赋值，
+/// 不冲突的复制两端由 <see cref="LocalCoalescing"/> 合成同一个局部。
 /// 表达不了的值与语句记为洞，方法体作为部分体保留。
 /// </summary>
 internal sealed partial class BodyBuilder
@@ -153,7 +154,7 @@ internal sealed partial class BodyBuilder
         var managedRegions = regions.Where(r => reachable.Contains(r.Pad) && r.Try.Any(reachable.Contains)).Select(r => new ManagedRegion(
             r.Try.Where(reachable.Contains).Select(b => b.Start).ToArray(), r.Pad.Start, r.Handler.Where(reachable.Contains).Select(b => b.Start).ToArray(),
             r.BeginCatch is { } begin ? exceptions[begin] : null, r.IsCatch ? ManagedRegionKind.Catch : ManagedRegionKind.Fault)).ToArray();
-        var body = new ManagedBody(analysis.Method, blocks) { Regions = managedRegions };
+        var body = LocalCoalescing.Run(new ManagedBody(analysis.Method, blocks) { Regions = managedRegions });
         return holes.Count == 0
             ? new(analysis.Method, analysis.Entry, body, [])
             : new(analysis.Method, analysis.Entry, null, holes.DistinctBy(h => (h.Address, h.Reason)).ToArray()) { Partial = body };
