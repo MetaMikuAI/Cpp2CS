@@ -30,14 +30,13 @@ internal sealed partial class StructAbi
     /// ECMA-335 I.12.1.6.1 / I.12.4.1.5.2：局部变量的地址由实现选择，ref 传递的是存储位置。
     /// 方法级桩不保留 ref；比较输入叶子与别名关系，不能比较两台执行器的物理栈地址。
     /// 显式 Out 且非 In 的参数不消费初值，保留位置身份并由 WriteBack 提供后值。
-    /// 参数副本沿用既有逻辑身份；堆/静态地址保持精确比较。规则只依赖签名、实际地址和独立布局。
+    /// 按值参数副本同属私有栈存储，可被提升为新的局部；堆/静态地址保持精确比较。规则只依赖签名、实际地址和独立布局。
     /// </summary>
     public ulong[] ObservableArguments(Side side, MethodRef method, IReadOnlyList<TypeRef> types, IReadOnlyList<byte[]> bytes)
     {
         var ranges = types.Select((t, i) => (Type: t, Index: i)).Where(v => v.Type is ByRefRef)
             .Select(v => (v.Type, v.Index, Address: Bits(bytes[v.Index])))
-            .Where(v => v.Address - World.StackBase < World.StackSize
-                && side.ArgumentPointer(v.Address) == v.Address)
+            .Where(v => v.Address - World.StackBase < World.StackSize)
             .Select(v => (v.Index, v.Address, Size: side.World.StorageSize(((ByRefRef)v.Type).Element))).ToArray();
         var groups = ranges.Select((_, i) => i).ToArray();
         int Root(int i) => groups[i] == i ? i : groups[i] = Root(groups[i]);
