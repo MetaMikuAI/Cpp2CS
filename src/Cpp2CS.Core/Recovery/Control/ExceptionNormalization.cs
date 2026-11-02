@@ -27,13 +27,49 @@ internal static class ExceptionNormalization
                 && block.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.EndCatch)
                 && block.Statements.OfType<Call>().All(c => c.Op?.Kind == OpKind.EndCatch)))
                 MachineFunction.RemoveEdgeAt(block, block.Successors.Count - 1);
+        if (wrapperHasNoDestructor)
+            foreach (var block in function.Blocks)
+                block.Statements.RemoveAll(s => s is Call { Op.Kind: OpKind.EndCatch, Defines.Length: 0 });
         MergeTrampolines(function);
         Machine.Ssa.Lowering.Cleanup(function);
         while (FoldBranches(function))
             Machine.Ssa.Lowering.Cleanup(function);
+        MergeLandingPaths(function);
         MergeSharedEntries(function);
+        // 无效果的 cleanup 只继续向调用方展开；不在 IL 中制造跨多个 catch 的空 fault。
+        foreach (var block in function.Blocks.ToArray())
+            if (block.Handler is { } pad && pad.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.ResumeUnwind)
+                && pad.Statements.All(s => s is Nop or Define { Value: Intrinsic { Name: "eh_exception" } } or Call { Op.Kind: OpKind.ResumeUnwind }))
+                MachineFunction.RemoveEdgeAt(block, block.Successors.Count - 1);
         var errors = Machine.Ssa.Lowering.Cleanup(function);
         if (errors.Count > 0) throw new InvalidOperationException($"异常入口合并后 SSA 不成立：{errors[0]}");
+    }
+
+    /// <summary>将落地入口后的单入、无效果直线路径并回入口，保留通向共同处理体的 φ 输入。</summary>
+    private static void MergeLandingPaths(MachineFunction function)
+    {
+        bool Simple(Stmt s) => s is Jump or Nop or Define { Value: Const or Intrinsic { Name: "eh_exception" } };
+        foreach (var pad in function.Blocks.Where(b => b.IsLandingPad).ToArray())
+            while (pad.Statements.All(Simple) && pad.Successors is [var next] && next != pad && !next.IsLandingPad
+                && next.Predecessors is [var from] && from == pad && next.Statements.All(Simple)
+                && next.Successors is [var target] && target != pad && target != next)
+            {
+                var through = target.Predecessors.IndexOf(next);
+                var sources = target.Statements.OfType<Phi>().Select(p => p.Sources[through]).ToArray();
+                MachineFunction.RemoveEdge(pad, next);
+                pad.Statements.RemoveAll(s => s is Jump);
+                pad.Statements.AddRange(next.Statements);
+                pad.End = next.End;
+                MachineFunction.AddEdge(pad, target);
+                for (var i = 0; i < sources.Length; i++)
+                {
+                    var phi = (Phi)target.Statements[i];
+                    target.Statements[i] = phi with { Sources = [.. phi.Sources, sources[i]] };
+                }
+                MachineFunction.RemoveEdge(next, target);
+                function.Blocks.Remove(next);
+            }
+        function.Renumber();
     }
 
     /// <summary>只装载异常与常量的多个落地跳板，共用同一处理体；常量移到异常边之前，异常在共同入口取得。</summary>
@@ -124,7 +160,8 @@ internal static class ExceptionNormalization
     }
 
     /// <summary>落地块只取异常并调用 std::terminate。</summary>
-    private static bool Terminates(Block pad) => pad.Statements.All(s => s is Define { Value: Intrinsic { Name: "eh_exception" or "eh_selector" } } or Define { Value: Const } or Nop
+    private static bool Terminates(Block pad) => pad.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.Terminate)
+        && pad.Statements.All(s => s is Define { Value: Intrinsic { Name: "eh_exception" or "eh_selector" } } or Define { Value: Const } or Nop
         || s is Call { Op.Kind: OpKind.Terminate or OpKind.BeginCatch });
 
     /// <summary>条件为常量的分支改为跳转，删去不可达的边。</summary>
