@@ -42,6 +42,11 @@ internal sealed partial class BodyBuilder
         if (construction is not null && oracle.ClassOperand(construction.Site) is DefinitionRef allocatedType && callee.DeclaringType is DefinitionRef declaring
             && allocatedType.Definition != declaring.Definition)
         {
+            if (ConstructorWithStores(block, index, construction, allocatedType, callee) is { } rebuilt)
+            {
+                output.Add(new ManagedAssignment(call.Address, Local(construction, allocatedType), rebuilt));
+                return null;
+            }
             var (inlined, reason) = InlinedConstructor(allocatedType, callee);
             if (inlined is not null)
             {

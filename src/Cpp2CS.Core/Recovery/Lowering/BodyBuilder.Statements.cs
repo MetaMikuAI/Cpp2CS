@@ -34,7 +34,7 @@ internal sealed partial class BodyBuilder
                 return null;
             case Store store:
                 {
-                    if (aggregateStores.Contains(store)) return null;
+                    if (aggregateStores.Contains(store) || constructorStores.Contains(store)) return null;
                     if (AggregateStore(block, index) is { } aggregate)
                     {
                         var place = StoreLocation(aggregate.Target, aggregate.Value);
