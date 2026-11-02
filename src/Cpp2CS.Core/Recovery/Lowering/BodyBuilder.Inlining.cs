@@ -62,6 +62,7 @@ internal sealed partial class BodyBuilder
         public IReadOnlyList<(LocalValue Target, ManagedValue Value)>? ExitCopies { get; set; }
         public Dictionary<Variable, ManagedValue> Defined { get; } = [];
         public Dictionary<Variable, LocalValue> Locals { get; } = [];
+        public ManagedBranch? Continuation { get; set; }
     }
 
     /// <summary>每个待证访问（按原生地址）第一次尝试的失败原因，写入洞的说明。</summary>
@@ -183,7 +184,7 @@ internal sealed partial class BodyBuilder
         // 模板的 this 在比对中绑定：可能是字段所在的对象，也可能是包含它的值（如嵌套类型的结构体）。
         var match = new InlineMatch { Binding = [], TypeArguments = arguments };
         var callee = new Walker { Blocks = template.Blocks.ToDictionary(b => b.Address), Caller = false, Block = template.Blocks[0].Address, Index = 0 };
-        if (Explore(callee, caller, match, 0) && Conclude(match, template.Method)) return match;
+        if (Explore(callee, caller, match, 0) && (ConcludePredicate(match, template.Method, callerBlocks) || Conclude(match, template.Method))) return match;
         failure = match.Failure ?? "比对失败";
         return null;
     }
@@ -319,6 +320,8 @@ internal sealed partial class BodyBuilder
         var copies = new List<(LocalValue, ManagedValue)>();
         for (var steps = 0; steps < 16 && caller.Current is ManagedJump jump; steps++)
         {
+            // 多个入口共享的跳转块属于续接区域，不能吞入某一条内联路径。
+            if (caller.Index == 0 && caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) > 1) break;
             Cover(caller, match);
             foreach (var copy in jump.Edge.Copies)
             {
@@ -479,23 +482,32 @@ internal sealed partial class BodyBuilder
     }
 
     /// <summary>模板的项 m 与调用方的项 c 相同：形参绑定到调用方的项（首次出现时绑定，之后须一致），其余逐层同形。</summary>
-    private bool Unify(ManagedValue m, ManagedValue c, Dictionary<int, ManagedValue> binding)
+    private bool SameTerm(ManagedValue left, ManagedValue right) => Unify(left, right, [], false);
+
+    private bool Unify(ManagedValue m, ManagedValue c, Dictionary<int, ManagedValue> binding, bool bindArguments = true)
     {
         if (m is ArgumentValue argument)
         {
-            if (binding.TryGetValue(argument.Index, out var bound)) return bound.Equals(c);
+            if (!bindArguments) return m.Equals(c);
+            if (binding.TryGetValue(argument.Index, out var bound)) return SameTerm(bound, c);
             binding[argument.Index] = c;
             return true;
         }
         switch (m, c)
         {
-            case (Observed a, Observed b): return a.Epoch == b.Epoch && Unify(a.Read, b.Read, binding);
+            case (Observed a, Observed b): return a.Epoch == b.Epoch && Unify(a.Read, b.Read, binding, bindArguments);
             case (Returned a, Returned b): return a.Index == b.Index && a.Type.Equals(b.Type);
             case (Observed or Returned, _) or (_, Observed or Returned): return false;
         }
-        if (m.GetType() != c.GetType() || !ManagedValues.Map(m, _ => Hollow).Equals(ManagedValues.Map(c, _ => Hollow))) return false;
+        var sameShape = (m, c) switch
+        {
+            (NewObjectValue a, NewObjectValue b) => a.Constructor.Equals(b.Constructor) && a.Transparent == b.Transparent && a.Arguments.Count == b.Arguments.Count,
+            (ComposedValue a, ComposedValue b) => a.Type.Equals(b.Type) && a.Leaves.Count == b.Leaves.Count && a.Leaves.Zip(b.Leaves).All(p => p.First.Path.SequenceEqual(p.Second.Path)),
+            _ => m.GetType() == c.GetType() && ManagedValues.Map(m, _ => Hollow).Equals(ManagedValues.Map(c, _ => Hollow)),
+        };
+        if (!sameShape) return false;
         var (left, right) = (ManagedValues.Children(m).ToArray(), ManagedValues.Children(c).ToArray());
-        return left.Length == right.Length && left.Zip(right).All(p => Unify(p.First, p.Second, binding));
+        return left.Length == right.Length && left.Zip(right).All(p => Unify(p.First, p.Second, binding, bindArguments));
     }
 
     /// <summary>比较的规范形：大于、大于等于交换操作数写成小于、小于等于。</summary>
@@ -550,6 +562,11 @@ internal sealed partial class BodyBuilder
         }
         var covered = match.Covered;
         var internalBlocks = covered.Select(c => c.Block).Where(b => b != startBlock).Distinct().ToHashSet();
+        if (match.Continuation is { } continuation)
+        {
+            internalBlocks.Remove(continuation.Taken.Target);
+            internalBlocks.Remove(continuation.Fallthrough.Target);
+        }
         // 出口在区域内某块的中间时，该块余下的语句接在调用之后。
         if (exit.Index > 0 && exit.Block != startBlock && !internalBlocks.Contains(exit.Block)) { failure = "出口不在区域内"; return null; }
         if (exit.Index == 0) internalBlocks.Remove(exit.Block);
@@ -576,7 +593,21 @@ internal sealed partial class BodyBuilder
 
         var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, true), match.Result, false) { Inlined = true };
         var replacement = blocks[startBlock].Statements.Take(start).Append(call).ToList();
-        if (exit.Index == 0)
+        if (match.Continuation is { } branch)
+        {
+            ManagedEdge? MaterializeEdge(ManagedEdge edge)
+            {
+                var converted = new List<ManagedCopy>();
+                foreach (var copy in edge.Copies)
+                    if (Materialize(copy.Value, self, at) is { } value) converted.Add(copy with { Value = value });
+                    else return null;
+                return edge with { Copies = converted };
+            }
+            if (MaterializeEdge(branch.Taken) is not { } taken || MaterializeEdge(branch.Fallthrough) is not { } fallthrough)
+            { failure = "条件出口复制不能写回"; return null; }
+            replacement.Add(branch with { Address = at, Taken = taken, Fallthrough = fallthrough });
+        }
+        else if (exit.Index == 0)
             replacement.Add(new ManagedJump(call.Address, new ManagedEdge(exit.Block, exitCopies)));
         else
         {
