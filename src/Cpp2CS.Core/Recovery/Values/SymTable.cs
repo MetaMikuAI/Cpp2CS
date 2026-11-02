@@ -19,6 +19,7 @@ public sealed class SymTable
     private readonly Dictionary<object, PhiSym> phis = [];
     private readonly Dictionary<(PhiSym, int, int), PhiSym> projections = [];
     private readonly Dictionary<PhiSym, List<PhiSym>> projectionsOf = [];
+    private readonly HashSet<(PhiSym, int, int)> projecting = [];
     private int next;
 
     public IEnumerable<PhiSym> Phis => phis.Values.Concat(projections.Values);
@@ -142,10 +143,13 @@ public sealed class SymTable
     {
         if (phi.Projection is { } outer) return ProjectPhi(outer.Whole, outer.Low + low, width);
         if (projections.TryGetValue((phi, low, width), out var known)) return known;
+        // 环上的 φ 互为来源：正在判断的投影不再展开，它的片按普通切片计，不作为投影成立的依据。
+        if (!projecting.Add((phi, low, width))) return null;
         var useful = false;
         foreach (var source in phi.Sources)
             if (source is not null && !ReferenceEquals(Resolve(source), phi) && Slice(source, low, width) is not SliceSym)
                 useful = true;
+        projecting.Remove((phi, low, width));
         if (!useful) return null;
         var projection = Fresh(new PhiSym(phi.Block, (phi.Origin, low, width), width) { Projection = (phi, low) });
         projections[(phi, low, width)] = projection;
