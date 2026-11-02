@@ -215,7 +215,7 @@ public static class RuntimeOps
             {
                 terminal = null;
                 if (c.ClassOperand is not { } unboxed || c.Arguments.Count != 2) return false;
-                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, new ByRefRef(unboxed)), new UnboxAddressValue(c.View(c.Arguments[1], c.Types.Object), unboxed)));
+                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, new ByRefRef(unboxed)), new UnboxAddressValue(c.View(c.Arguments[0], c.Types.Object), unboxed)));
                 return true;
             },
         };
