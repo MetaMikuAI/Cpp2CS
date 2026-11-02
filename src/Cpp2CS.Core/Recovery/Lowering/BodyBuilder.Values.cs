@@ -117,7 +117,8 @@ internal sealed partial class BodyBuilder
                 return new NegatedValue(View(op.Args[0], types.Boolean, address), types.Boolean);
             case OperatorKind.Select:
                 {
-                    var type = natural ?? expected ?? types.Integer(op.Width is 8 or 16 or 32 or 64 ? op.Width : 64, true);
+                    // 各路都没有定义类型（常量之间的选择）时按期望类型解释，常量取其位型。
+                    var type = oracle.Defined(op) ?? expected ?? types.Integer(op.Width is 8 or 16 or 32 or 64 ? op.Width : 64, true);
                     return new ChoiceValue(View(op.Args[0], types.Boolean, address), View(op.Args[1], type, address), View(op.Args[2], type, address), type, Width(type));
                 }
             case OperatorKind.Binary:

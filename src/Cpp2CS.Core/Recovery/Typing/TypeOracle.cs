@@ -293,7 +293,7 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
             case OperatorKind.Compare or OperatorKind.And or OperatorKind.Or or OperatorKind.Not:
                 return types.Boolean;
             case OperatorKind.Select:
-                return TypeOf(op.Args[1]) is { } a ? (TypeOf(op.Args[2]) is { } b ? Join(a, b) : a) : TypeOf(op.Args[2]);
+                return Defined(op.Args[1]) is { } a ? (Defined(op.Args[2]) is { } b ? Join(a, b) : a) : Defined(op.Args[2]);
             case OperatorKind.Binary when op.Op.Binary is BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv or BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber:
                 return op.Width == 32 ? types.Single : types.Double;
             case OperatorKind.Unary when op.Op.Unary >= UnOp.FNeg:
@@ -323,6 +323,16 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
         }
         return null;
     }
+
+    /// <summary>
+    /// 选择的一路给出的定义类型：常量与未定义值不约束（同 φ 的下界）；运算只取由语义给出的类型，不取同宽整数的缺省。
+    /// </summary>
+    public TypeRef? Defined(Sym arm) => SymTable.Resolve(arm) switch
+    {
+        ConstSym or UndefSym => null,
+        OpSym op => OperatorType(op),
+        var other => TypeOf(other),
+    };
 
     /// <summary>两个定义类型的汇合：相同取自身；引用类型沿基类链取最近公共超类；同宽整数取前者。</summary>
     public TypeRef? Join(TypeRef a, TypeRef b)
