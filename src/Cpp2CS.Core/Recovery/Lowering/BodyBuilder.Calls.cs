@@ -305,6 +305,8 @@ internal sealed partial class BodyBuilder
 
         public ManagedValue? Location(int argument, TypeRef type) =>
             argument < arguments.Count && owner.oracle.Locate(arguments[argument], owner.Width(type)) is { } location ? owner.LocationValue(location, call.Address) : null;
+
+        public ManagedValue Field(Sym receiver, FieldRef field) => owner.FieldAccess(owner.View(receiver, owner.oracle.TypeOf(receiver), call.Address), field, owner.FieldType(field, null), true, call.Address);
     }
 
     private MethodRef? Constructor(string exception) => oracle.ExceptionType(exception) is { } type

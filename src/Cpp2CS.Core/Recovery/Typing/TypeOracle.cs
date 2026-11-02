@@ -101,6 +101,9 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
     public TypeRef? LocationType(Call call, int argument, int width) => argument < call.OriginalArgumentCount
         ? Locate(values.Operands(call)[argument + 1], width)?.Type : null;
 
+    public FieldRef? FieldOperand(Call call, int argument) => argument < call.OriginalArgumentCount
+        && SymTable.Resolve(values.Operands(call)[argument + 1]) is EntitySym { Symbol: { Kind: SymbolKind.Field, Value: FieldRef field } } ? field : null;
+
     public TypeRef Substitute(TypeRef type) => type.Substitute(method.TypeArguments, method.MethodArguments);
 
     public TypeRef? Parameter(int index) => index < 0

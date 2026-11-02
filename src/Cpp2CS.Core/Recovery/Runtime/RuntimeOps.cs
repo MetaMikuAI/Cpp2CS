@@ -16,6 +16,7 @@ public interface IRuntimeTyping
     TypeRef? ClassOperand(Call call);
     /// <summary>原始指针实参指向位置的类型。</summary>
     TypeRef? LocationType(Call call, int argument, int width);
+    FieldRef? FieldOperand(Call call, int argument);
 }
 
 /// <summary>下降一个运行时操作所需的上下文，由下降实现提供。</summary>
@@ -39,6 +40,8 @@ public interface IRuntimeLowering
     Sym? Pointee(int value);
     /// <summary>指针实参 argument 指向的非局部位置在 type 下的值；不能定位时为 null。</summary>
     ManagedValue? Location(int argument, TypeRef type);
+    /// <summary>元数据指名的字段位置，仍遵守字段访问约束。</summary>
+    ManagedValue Field(Sym receiver, FieldRef field);
     /// <summary>分配的对象等待随后的构造函数调用合为 newobj。</summary>
     void AwaitConstruction();
     /// <summary>判空被随后对同一对象的访问吸收。</summary>
@@ -101,6 +104,19 @@ public static class RuntimeOps
 
     private static IEnumerable<RuntimeOpRule> Build()
     {
+        yield return new(OpKind.FieldAddress)
+        {
+            ResultType = (call, typing) => typing.FieldOperand(call, 1) is { DeclaringType: DefinitionRef owner } field
+                ? new ByRefRef(field.Field.Type.Substitute(owner.Arguments, [])) : null,
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Arguments is not [var receiver, EntitySym { Symbol: { Kind: SymbolKind.Field, Value: FieldRef field } }]) return false;
+                var address = new AddressValue(c.Field(receiver, field));
+                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, address.Type), address));
+                return true;
+            },
+        };
         yield return new(OpKind.CompareExchangeReference)
         {
             ResultType = (call, typing) => typing.LocationType(call, 0, 64),
