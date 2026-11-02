@@ -220,7 +220,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                 return types.RuntimeTypeHandle;
             case ResultSym result when result.Index == 0:
                 return ResultType(result.Site);
-            case OutSym output when output.Site.Op is null && Callee(output.Site) is { } callee:
+            case OutSym output when !shapes(output.Site).IsRuntime && Callee(output.Site) is { } callee:
                 return output.Argument == MachineSignature.ReturnIndex ? Concrete(callee, callee.Method.ReturnType)
                     : output.Argument == -1 && callee.Method.Owner.IsValueType ? callee.DeclaringType
                     : (output.Argument < 0 ? null : Concrete(callee, callee.Method.Parameters[output.Argument].Type)) is ByRefRef byRef ? byRef.Element : null;
