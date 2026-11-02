@@ -11,7 +11,7 @@ namespace Cpp2CS.Recovery.Control;
 /// </summary>
 internal static class ExceptionNormalization
 {
-    public static void Run(MachineFunction function)
+    public static void Run(MachineFunction function, bool wrapperHasNoDestructor)
     {
         if (!function.Blocks.Any(b => b.IsLandingPad)) return;
         foreach (var pad in function.Blocks.Where(b => b.IsLandingPad))
@@ -23,7 +23,9 @@ internal static class ExceptionNormalization
                     pad.Statements[i] = selector with { Value = Expr.C(unchecked((ulong)filter), selector.Value.Width) };
         }
         foreach (var block in function.Blocks.ToArray())
-            if (block.Handler is { } pad && Terminates(pad))
+            if (block.Handler is { } pad && (Terminates(pad) || wrapperHasNoDestructor
+                && block.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.EndCatch)
+                && block.Statements.OfType<Call>().All(c => c.Op?.Kind == OpKind.EndCatch)))
                 MachineFunction.RemoveEdgeAt(block, block.Successors.Count - 1);
         MergeTrampolines(function);
         Machine.Ssa.Lowering.Cleanup(function);

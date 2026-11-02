@@ -184,8 +184,6 @@ public sealed class CfgBuilder
             return null;
         }
 
-        private bool HasLandingPad(ulong address) => RegionAt(address) is { LandingPad: not 0 };
-
         public MachineFunction Run()
         {
             var roots = new List<ulong> { entry };
@@ -255,7 +253,7 @@ public sealed class CfgBuilder
                     }
                     else
                     {
-                        if (insn.Ends || insn.IsCall && HasLandingPad(address)) leaders.Add(insn.Next);
+                        if (insn.Ends || insn.IsCall && range.ExceptionRegions.Length > 0) leaders.Add(insn.Next);
                         work.Push(insn.Next);
                     }
                 }
@@ -324,7 +322,8 @@ public sealed class CfgBuilder
                 var insn = insns[address];
                 var start = current is null || previous is null || leaders.Contains(address) || previous.Ends || !previous.FallsThrough
                     || previous.Next != address || RegionAt(previous.Address) != RegionAt(address)
-                    || previous.IsCall && HasLandingPad(previous.Address);
+                    // 后续判空可能取得另一处抛出路径的异常边，不能把前一个调用一并纳入其 catch。
+                    || previous.IsCall && range.ExceptionRegions.Length > 0;
                 if (start)
                 {
                     current = new Block(address);
