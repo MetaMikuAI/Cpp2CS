@@ -56,8 +56,9 @@ internal sealed partial class BodyBuilder
     /// <summary>连续写入完整覆盖同一结构体时，按布局拼回整体赋值；不跨越读取或其他副作用。</summary>
     private (Location Target, Sym Value)? AggregateStore(Block block, int index)
     {
+        if (ZeroAggregateStore(block, index) is { } cleared) return cleared;
         var first = values.Operands(block.Statements[index]);
-        var origin = oracle.Decompose(first[0]);
+        var origin = AggregateAddress(first[0]);
         var parts = new List<Sym> { first[1] };
         var stores = new List<Store>();
         var width = first[1].Width;
@@ -68,7 +69,7 @@ internal sealed partial class BodyBuilder
             if (next is Define or Nop) continue;
             if (next is not Store store || aggregateStores.Contains(store)) break;
             var operands = values.Operands(store);
-            var target = oracle.Decompose(operands[0]);
+            var target = AggregateAddress(operands[0]);
             if (width % 8 != 0 || target != origin with { Offset = origin.Offset + width / 8 }) break;
             parts.Add(operands[1]);
             stores.Add(store);
@@ -79,5 +80,44 @@ internal sealed partial class BodyBuilder
             return (location, values.Syms.Concat(parts));
         }
         return null;
+    }
+
+    private (Sym Root, long Offset, Sym? Index, int Scale) AggregateAddress(Sym address)
+    {
+        var location = oracle.Decompose(address);
+        return location.Root is LocalSym local
+            ? location with { Root = values.Syms.Local(local.Space, 0), Offset = location.Offset + local.Offset } : location;
+    }
+
+    /// <summary>清零指令可以乱序发出；仅合并无重叠、完整覆盖结构体且没有中间读取的写入。</summary>
+    private (Location Target, Sym Value)? ZeroAggregateStore(Block block, int index)
+    {
+        static bool Zero(Sym value) => value is ConstSym { Value: 0 } || value is ConcatSym concat && concat.Parts.All(Zero);
+        var origin = AggregateAddress(values.Operands(block.Statements[index])[0]);
+        var parts = new List<(Store Store, Sym Address, Sym Value, long Offset)>();
+        (Location Target, Sym Value)? result = null;
+        Store[] covered = [];
+        for (var i = index; i < block.Statements.Count; i++)
+        {
+            var statement = block.Statements[i];
+            if (Reads(statement).Any()) break;
+            if (statement is Define or Nop or Call { Op.Kind: OpKind.WriteBarrier }) continue;
+            if (statement is not Store store || aggregateStores.Contains(store)) break;
+            var operands = values.Operands(store);
+            var target = AggregateAddress(operands[0]);
+            if (!Zero(operands[1]) || operands[1].Width % 8 != 0 || target with { Offset = origin.Offset } != origin) break;
+            var end = target.Offset + operands[1].Width / 8;
+            if (parts.Any(p => p.Offset < end && target.Offset < p.Offset + p.Value.Width / 8)) break;
+            parts.Add((store, operands[0], operands[1], target.Offset));
+            var ordered = parts.OrderBy(p => p.Offset).ToArray();
+            var width = ordered.Sum(p => p.Value.Width);
+            if (ordered[^1].Offset + ordered[^1].Value.Width / 8 - ordered[0].Offset != width / 8) continue;
+            if (oracle.Locate(ordered[0].Address, width) is not { Type: DefinitionRef type } location
+                || types.Kind(type) != TypeKind.Struct || types.Size(type) * 8 != width) continue;
+            result = (location, values.Syms.Concat(ordered.Select(p => p.Value)));
+            covered = parts.Select(p => p.Store).ToArray();
+        }
+        if (result is not null) aggregateStores.UnionWith(covered);
+        return result;
     }
 }
