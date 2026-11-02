@@ -53,8 +53,7 @@ internal sealed partial class BodyBuilder
         ManagedValue Bind(ManagedValue value) => value switch
         {
             ArgumentValue argument when binding.TryGetValue(argument.Index, out var bound) => bound,
-            Observed observed => observed with { Read = Bind(observed.Read) },
-            _ => ManagedValues.Map(value, Bind),
+            _ => MapTerm(value, Bind),
         };
         var instantiated = Bind(condition);
         if (instantiated is ComparisonValue { Left: ConstantValue left, Right: ConstantValue right } comparison)

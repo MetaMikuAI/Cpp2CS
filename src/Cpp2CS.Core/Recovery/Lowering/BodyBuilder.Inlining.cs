@@ -18,6 +18,14 @@ internal sealed partial class BodyBuilder
     /// <summary>区域内第 Index 次调用的结果。</summary>
     private sealed record Returned(int Index, TypeRef Type, int Width) : ManagedValue(Type, Width);
 
+    /// <summary>证明项的子项：带代数的读取继续遍历，调用结果是原子；其余沿用托管值结构。</summary>
+    private static ManagedValue MapTerm(ManagedValue value, Func<ManagedValue, ManagedValue> map) => value switch
+    {
+        Observed observed => observed with { Read = map(observed.Read) },
+        Returned => value,
+        _ => ManagedValues.Map(value, map),
+    };
+
     private sealed class Walker
     {
         public required IReadOnlyDictionary<ulong, ManagedBlock> Blocks { get; init; }
@@ -706,7 +714,7 @@ internal sealed partial class BodyBuilder
         {
             foreach (var available in match.Inputs)
                 if (SameTerm(value, available.Value)) return available.Local;
-            return value is Observed observed ? observed with { Read = Input(observed.Read) } : ManagedValues.Map(value, Input);
+            return MapTerm(value, Input);
         }
         self = Input(self);
         var parameters = method.Method.Parameters.Count;
