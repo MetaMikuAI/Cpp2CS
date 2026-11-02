@@ -77,6 +77,7 @@ internal sealed partial class BodyBuilder
     /// <summary>对方法体反复寻找可证明的内联区域，直到没有新的证明；之后把仍未覆盖的不可访问访问换成洞。</summary>
     private ManagedBody InlineInverse(ManagedBody body)
     {
+        body = InlineBaseConstructor(body);
         for (var round = 0; round < 16 && Pending(body).Any(); round++)
         {
             var replaced = false;
@@ -101,6 +102,33 @@ internal sealed partial class BodyBuilder
             return ManagedValues.Map(value, Seal);
         }
         return ManagedValues.Map(body, Seal);
+    }
+
+    /// <summary>本类构造中被内联的直接基类构造，仍以基类原生方法体逐条证明，再恢复初始化调用。</summary>
+    private ManagedBody InlineBaseConstructor(ManagedBody body)
+    {
+        if (body.Method.Method is not { Name: ".ctor", IsStatic: false, Owner.IsValueType: false }
+            || body.Method.DeclaringType is not DefinitionRef owner
+            || owner.Definition.BaseType?.Substitute(owner.Arguments, []) is not DefinitionRef parent) return body;
+        if (body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Invocation is
+            { Method.Method.Name: ".ctor", Receiver: ArgumentValue { Index: -1 } }
+            && (c.Invocation.Method.DeclaringType.Equals(parent) || c.Invocation.Method.DeclaringType.Equals(owner)))) return body;
+        var blocks = body.Blocks.ToDictionary(b => b.Address);
+        var self = new ArgumentValue(-1, owner, 64);
+        foreach (var definition in parent.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic))
+        {
+            var method = new MethodRef(definition, parent.Arguments, []);
+            if (summaries(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
+            foreach (var block in body.Blocks)
+                for (var start = 0; start < block.Statements.Count; start++)
+                {
+                    if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
+                    var match = Match(blocks, block.Address, start, template, self, parent.Arguments, out _);
+                    if (match is not null && Replace(body, blocks, block.Address, start, method, template, match, out _) is { } replaced)
+                        return replaced;
+                }
+        }
+        return body;
     }
 
     /// <summary>方法体中待证的不可访问访问：所在块、语句位置与访问本身。</summary>
@@ -641,7 +669,7 @@ internal sealed partial class BodyBuilder
                 { failure = "区域内定义的值在区域外使用"; return null; }
         if (copies.Any(c => defined.Contains(c.Target.Variable))) { failure = "区域内定义的值在区域外使用"; return null; }
 
-        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, true), match.Result, match.Returns) { Inlined = true };
+        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, method.Method.Name != ".ctor"), match.Result, match.Returns) { Inlined = true };
         var replacement = blocks[startBlock].Statements.Take(start).Append(call).ToList();
         if (match.Continuation is { } branch)
         {
