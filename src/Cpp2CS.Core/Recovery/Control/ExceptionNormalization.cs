@@ -90,16 +90,25 @@ internal static class ExceptionNormalization
         function.Renumber();
     }
 
-    /// <summary>只含跳转的落地块：异常边改指跳转目标，目标 φ 的来源取跳板提供的值。</summary>
+    /// <summary>只含 φ 与跳转的落地块：异常边改指目标，沿每条入边代入跳板的 φ 来源。</summary>
     private static void MergeTrampolines(MachineFunction function)
     {
         foreach (var pad in function.Blocks.Where(b => b.IsLandingPad).ToArray())
         {
-            if (pad.Statements.Any(s => s is not (Jump or Nop)) || pad.Successors is not [var target] || target == pad) continue;
+            if (pad.Statements.Any(s => s is not (Phi or Jump or Nop)) || pad.Successors is not [var target] || target == pad
+                || pad.Predecessors.Any(p => p.Handler != pad)) continue;
             var through = target.Predecessors.IndexOf(pad);
-            var sources = target.Statements.TakeWhile(s => s is Phi).Cast<Phi>().Select(p => p.Sources[through]).ToArray();
-            foreach (var thrower in pad.Predecessors.Where(p => p.Handler == pad).ToArray())
+            var targetPhis = target.Statements.TakeWhile(s => s is Phi).Cast<Phi>().ToArray();
+            var aliases = pad.Statements.OfType<Phi>().ToDictionary(p => p.Target, p => p.Sources);
+            if (function.Blocks.Where(b => b != pad).SelectMany(b => b.Statements).Where(s => !targetPhis.Contains(s))
+                .Any(s => s is Phi p ? p.Sources.Any(v => v is not null && aliases.ContainsKey(v))
+                    : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => aliases.ContainsKey(u.Variable)))) continue;
+            var inputs = targetPhis.Select(p => p.Sources[through]).ToArray();
+            var throwers = pad.Predecessors.ToArray();
+            for (var p = 0; p < throwers.Length; p++)
             {
+                var thrower = throwers[p];
+                var sources = inputs.Select(v => aliases.TryGetValue(v, out var incoming) ? incoming[p] : v).ToArray();
                 MachineFunction.RemoveEdgeAt(thrower, thrower.Successors.Count - 1);
                 MachineFunction.AddEdge(thrower, target);
                 thrower.Handler = target;
