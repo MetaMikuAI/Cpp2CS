@@ -364,7 +364,8 @@ internal sealed partial class BodyBuilder
             caller.Block = jump.Edge.Target;
             caller.Index = 0;
         }
-        var returns = result is null && caller.Current is ManagedReturn { Value: null };
+        var returns = result is null && caller.Current is ManagedReturn { Value: null }
+            && (caller.Index > 0 || caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) <= 1);
         if (returns) Cover(caller, match);
         match.Ends.Add(new InlineEnd((caller.Block, caller.Index), copies, new Dictionary<Variable, ManagedValue>(caller.Env), result, returns));
         return true;
@@ -524,6 +525,10 @@ internal sealed partial class BodyBuilder
         if (m is ArgumentValue argument)
         {
             if (!bindArguments) return m.Equals(c);
+            // 值类型字段的读取与写入共享同一个位置；ref 形参统一绑定到该位置的地址。
+            if (argument.Type is ByRefRef reference && c.Type.Equals(reference.Element)
+                && c is Observed { Read: FieldValue or StaticFieldValue or ArrayElementValue } or LocalValue or ArgumentValue)
+                c = new AddressValue(c);
             if (binding.TryGetValue(argument.Index, out var bound)) return SameTerm(bound, c);
             binding[argument.Index] = c;
             return true;
@@ -598,7 +603,7 @@ internal sealed partial class BodyBuilder
             if (Materialize(Input(value), self, at) is { } materialized) exitCopies.Add(new ManagedCopy(target, materialized));
             else { failure = "出口复制不能写回"; return null; }
         if (Materialize(self, self, at) is not { } receiver) { failure = "接收者不能写回"; return null; }
-        if (method.DeclaringType is DefinitionRef { Definition.IsValueType: true })
+        if (method.DeclaringType is DefinitionRef { Definition.IsValueType: true } && receiver.Type is not ByRefRef)
         {
             if (receiver is not (LocalValue or FieldValue or StaticFieldValue or ArrayElementValue)) { failure = "值类型接收者不可取址"; return null; }
             receiver = new AddressValue(receiver);
@@ -623,8 +628,10 @@ internal sealed partial class BodyBuilder
         var region = internalBlocks.Append(startBlock).ToHashSet();
         foreach (var other in body.Blocks.Where(b => !region.Contains(b.Address)))
             if (other.Statements.SelectMany(ManagedValues.Edges).Any(e => internalBlocks.Contains(e.Target))) { failure = "区域内的块从区域外进入"; return null; }
-        // 区域不进入处理块；位于 try 中时调用留在起点块，仍受同一区域保护。
-        if (body.Regions.Any(r => region.Contains(r.HandlerEntry) || r.Handler.Any(region.Contains))) { failure = "区域进入处理块"; return null; }
+        // 调用保留起点的异常上下文；区域不能跨越 try/catch 边界，也不能删去处理入口。
+        if (body.Regions.Any(r => internalBlocks.Contains(r.HandlerEntry)
+            || region.Any(b => r.Try.Contains(b) != r.Try.Contains(startBlock) || r.Handler.Contains(b) != r.Handler.Contains(startBlock))))
+        { failure = "区域跨越异常边界"; return null; }
         // 区域内定义的值不在区域外使用。
         var outside = body.Blocks.SelectMany(b => b.Statements.Select((s, i) => (b.Address, i, s)))
             .Where(p => !covered.Contains((p.Address, p.i)) && !(!match.Returns && p.Address == exit.Block && exit.Index > 0 && p.i < exit.Index));
