@@ -365,6 +365,8 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
     public TypeRef? Join(TypeRef a, TypeRef b)
     {
         if (a.Equals(b)) return a;
+        if (Wraps(a, b)) return a;
+        if (Wraps(b, a)) return b;
         if (types.IsAssignable(a, b)) return b;
         if (types.IsAssignable(b, a)) return a;
         if (ManagedTypes.IsReferenceType(a) && ManagedTypes.IsReferenceType(b))
@@ -376,6 +378,12 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
         if (types.Kind(a) is TypeKind.Int or TypeKind.Bool && types.Kind(b) is TypeKind.Int or TypeKind.Bool && types.Bits(a) == types.Bits(b)) return a;
         return null;
     }
+
+    /// <summary>值类型恰好包住同宽的唯一字段；两种机器位型在合流处保留外层类型。</summary>
+    private bool Wraps(TypeRef outer, TypeRef inner) => outer is DefinitionRef definition && types.Kind(outer) == TypeKind.Struct
+        && types.Layouts.Of(definition) is { Fields.Count: 1 } layout && layout.Fields[0] is var field
+        && field.Offset == RuntimeLayout.ObjectHeaderSize && field.Type.Equals(inner)
+        && types.Size(outer) == (ManagedTypes.IsReferenceType(inner) ? 8 : types.Size(inner));
 
     // ---- 位置 ----
 

@@ -16,7 +16,7 @@ internal sealed partial class BodyBuilder
             if (summaries(method) is not { Body: { Regions.Count: 0 } body }) continue;
             var statements = body.Blocks.SelectMany(b => b.Statements).Where(s => s is not ManagedJump).ToArray();
             if (statements.LastOrDefault() is not ManagedReturn { Value: null }
-                || statements.Any(s => s is not (ManagedStore or ManagedReturn or ManagedAssignment { Value: ArgumentValue or ConstantValue or LocalValue }))) continue;
+                || statements.Any(s => s is not (ManagedStore or ManagedReturn or ManagedAssignment { Value: ArgumentValue or ConstantValue or LocalValue or IndirectValue { Address: ArgumentValue } }))) continue;
             var assignments = statements.OfType<ManagedAssignment>().GroupBy(a => a.Target.Variable).ToArray();
             if (assignments.Any(g => g.Count() != 1)) continue;
             var aliases = assignments.ToDictionary(g => g.Key, g => g.Single().Value);
@@ -61,6 +61,12 @@ internal sealed partial class BodyBuilder
                         arguments[argument.Index] = value;
                         break;
                     case ConstantValue constant when Coerce(desired, constant.Type).Equals(constant):
+                        break;
+                    case IndirectValue { Address: ArgumentValue { Index: >= 0 } argument } when argument.Index < arguments.Length
+                        && TypeOracle.Concrete(method, definition.Parameters[argument.Index].Type) is ByRefRef reference:
+                        var copied = new AddressValue(Coerce(desired, reference.Element));
+                        if (arguments[argument.Index] is { } previous && !previous.Equals(copied)) valid = false;
+                        arguments[argument.Index] = copied;
                         break;
                     default:
                         valid = false;

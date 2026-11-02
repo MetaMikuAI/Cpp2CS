@@ -16,6 +16,7 @@ internal sealed partial class BodyBuilder
     private Location StoreLocation(Location location, Sym value) => types.Kind(location.Type) == TypeKind.Struct
         && oracle.TypeOf(value) is { } source && !source.Equals(location.Type)
         && oracle.FieldAt(location.Type, RuntimeLayout.ObjectHeaderSize, value.Width, false, false) is var (path, inner) && inner.Equals(source)
+        && (types.Kind(source) != TypeKind.Struct || path.All(f => Accessible(f.Field)))
         ? location with { Path = [.. location.Path, .. path], Type = inner } : location;
 
     /// <summary>结构体的所有叶子来自同段内存的连续读取时，在第一次读取处保存整体值。</summary>
