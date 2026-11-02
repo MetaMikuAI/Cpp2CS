@@ -140,8 +140,28 @@ public sealed class MethodDecompiler
         if (StackBoxing.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary)) > 0)
             preliminary = ValueModel.Build(function, environment);
         DispatchResolution.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary));
-        if (!MemoryPromotion.Run(function, signature, environment.Shape, abi, lifter.Calls, lifter.Machine.Convention.StackPointer).TryGet(out var layout, out var memoryFailure))
-            return memoryFailure;
+        // 分派的接收者也可能来自局部内存。新签名确定后从原始读写重做提升，避免沿用未知调用的内存效果。
+        var unpromoted = function.Blocks.Select(b => b.Statements.Select(s => s is Phi phi ? phi with { Sources = [.. phi.Sources] } : s).ToArray()).ToArray();
+        var deadCount = function.Dead.Count;
+        MemoryLayout layout;
+        while (true)
+        {
+            if (!MemoryPromotion.Run(function, signature, environment.Shape, abi, lifter.Calls, lifter.Machine.Convention.StackPointer).TryGet(out layout, out var memoryFailure))
+                return memoryFailure;
+            environment.Layout = layout;
+            var promoted = ValueModel.Build(function, environment);
+            if (DispatchResolution.Run(function, promoted, new TypeOracle(types, facts, method, environment.Shape, promoted, layout)) == 0) break;
+            // 内存提升保持块与调用的次序；只带回已证明的分派目标，其他产物重新计算。
+            for (var b = 0; b < function.Blocks.Count; b++)
+            {
+                var calls = function.Blocks[b].Statements.OfType<Call>().ToArray();
+                var next = 0;
+                for (var i = 0; i < unpromoted[b].Length; i++)
+                    if (unpromoted[b][i] is Call call) unpromoted[b][i] = call with { Resolved = calls[next++].Resolved };
+                function.Blocks[b].Statements = [.. unpromoted[b].Select(s => s is Phi phi ? phi with { Sources = [.. phi.Sources] } : s)];
+            }
+            function.Dead.RemoveRange(deadCount, function.Dead.Count - deadCount);
+        }
         // 帧提升消去异常值的栈副本后，落地跳板可能才成为纯传值链。
         ExceptionNormalization.Run(function, ExceptionFacts.WrapperWithoutDestructor(facts.Checks));
         environment.Layout = layout;

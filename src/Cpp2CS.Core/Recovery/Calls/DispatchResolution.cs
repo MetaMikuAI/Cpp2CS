@@ -8,7 +8,7 @@ namespace Cpp2CS.Recovery.Calls;
 /// <summary>
 /// 分派解析：虚调用按接收者的静态类型与虚表槽号确定声明方法，接口调用按接口与槽号，委托调用取 Invoke。
 /// 解析结果记在调用上（<see cref="Call.Resolved"/>），之后的内存效果与下降按该方法的机器签名进行。
-/// 在内存提升之前运行，使用未提升内存的符号值。
+/// 内存提升前后均可查询；新增目标后由调用方按新签名重做内存提升。
 /// </summary>
 internal static class DispatchResolution
 {
