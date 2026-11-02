@@ -138,17 +138,21 @@ public sealed class SymTable
         return Intern(new SliceSym(sym, low, width));
     }
 
-    /// <summary>φ 的一段：至少一个已知来源的这一段不是切片（恰为 IL 值、常量或拼接）时投影为该段的 φ。</summary>
+    /// <summary>沿合流环存在完整片来源时投影 φ；先驻留投影身份，再连接来源，允许循环互相引用。</summary>
     private PhiSym? ProjectPhi(PhiSym phi, int low, int width)
     {
         if (phi.Projection is { } outer) return ProjectPhi(outer.Whole, outer.Low + low, width);
         if (projections.TryGetValue((phi, low, width), out var known)) return known;
-        // 环上的 φ 互为来源：正在判断的投影不再展开，它的片按普通切片计，不作为投影成立的依据。
         if (!projecting.Add((phi, low, width))) return null;
-        var useful = false;
-        foreach (var source in phi.Sources)
-            if (source is not null && !ReferenceEquals(Resolve(source), phi) && Slice(source, low, width) is not SliceSym)
-                useful = true;
+        // 沿合流环查找完整片来源，不能因先访问到回边就把另一条边上的证据丢掉。
+        var seen = new HashSet<PhiSym>();
+        bool Evidence(PhiSym current)
+        {
+            if (!seen.Add(current)) return false;
+            return current.Sources.OfType<Sym>().Select(Resolve).Any(source => source is PhiSym next
+                ? Evidence(next) : Slice(source, low, width) is not SliceSym);
+        }
+        var useful = Evidence(phi);
         projecting.Remove((phi, low, width));
         if (!useful) return null;
         var projection = Fresh(new PhiSym(phi.Block, (phi.Origin, low, width), width) { Projection = (phi, low) });
@@ -192,7 +196,12 @@ public sealed class SymTable
         Append(parts, merged);
     }
 
-    private static (Sym Base, int Low, int Width) Piece(Sym sym) => sym is SliceSym s ? (s.Base, s.Low, s.Width) : (sym, 0, sym.Width);
+    private static (Sym Base, int Low, int Width) Piece(Sym sym) => sym switch
+    {
+        SliceSym s => (s.Base, s.Low, s.Width),
+        PhiSym { Projection: { } p } phi => (p.Whole, p.Low, phi.Width),
+        _ => (sym, 0, sym.Width),
+    };
 
     public Sym ZeroExtend(Sym sym, int width) => sym.Width >= width ? Slice(sym, 0, width) : Concat(sym, Zero(width - sym.Width));
 
