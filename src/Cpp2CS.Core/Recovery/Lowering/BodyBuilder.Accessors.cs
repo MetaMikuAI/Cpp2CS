@@ -72,13 +72,15 @@ internal sealed partial class BodyBuilder
             {
                 var fields = new List<FieldDef>();
                 value = Through(value);
-                while (value is FieldValue f && !(f.Field.Field == field.Field && f.Receiver is ArgumentValue { Index: -1 } or AddressValue { Target: ArgumentValue { Index: -1 } }))
+                while (true)
                 {
-                    fields.Insert(0, f.Field.Field);
-                    value = Through(f.Receiver);
+                    if (value is FieldValue f) { fields.Insert(0, f.Field.Field); value = Through(f.Receiver); }
+                    else if (value is IndirectValue indirect) value = Through(indirect.Address);
+                    else if (value is AddressValue address) value = Through(address.Target);
+                    else break;
                 }
-                var rooted = value is FieldValue { Field: var own } && own.Field == field.Field || value is StaticFieldValue { Field: var stat } && stat.Field == field.Field;
-                return rooted && fields.SequenceEqual(path.Select(p => p.Field));
+                if (value is StaticFieldValue stat) fields.Insert(0, stat.Field.Field);
+                return value is ArgumentValue { Index: -1 } or StaticFieldValue && fields.SequenceEqual(new[] { field.Field }.Concat(path.Select(p => p.Field)));
             }
             // 整个字段：直接的字段值，或按该值类型全部叶子组成的结构体值（拆成叶子搬运的同一个字段）。
             bool Same(ManagedValue value) => Chain(value, [])

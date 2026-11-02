@@ -19,13 +19,13 @@ internal sealed partial class BodyBuilder
         if (expected is DefinitionRef structure && types.Kind(expected) == TypeKind.Struct && sym is not ConcatSym
             && (sym is ConstSym || oracle.TypeOf(sym) is { } natural && types.Kind(natural) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer))
             return StructBits(sym, structure, address);
-        if (sym is not LocalSym && locals.TryGetValue(sym, out var known)) return Coerce(known, expected);
+        if (sym is not LocalSym && locals.TryGetValue(sym, out var known)) return Coerce(known, expected, address);
         switch (sym)
         {
             case ArgSym arg:
                 {
                     var type = oracle.Parameter(arg.Index)!;
-                    return Coerce(new ArgumentValue(arg.Index, type, Width(type)), expected);
+                    return Coerce(new ArgumentValue(arg.Index, type, Width(type)), expected, address);
                 }
             case ConstSym constant:
                 return Constant(constant, expected);
@@ -35,7 +35,7 @@ internal sealed partial class BodyBuilder
                 return new TypeHandleValue(token, types.RuntimeTypeHandle, 64);
             case ReadSym read:
                 Demand(read);
-                return Read(read, address) is { } value ? Coerce(value, expected) : Hole(address, "内存 读取", expected);
+                return Read(read, address) is { } value ? Coerce(value, expected, address) : Hole(address, "内存 读取", expected);
             case ResultSym result when constructions.ContainsKey(result):
                 return Hole(address, "构造 对象在构造函数调用前被使用", expected);
             case PhiSym phi:
@@ -45,10 +45,10 @@ internal sealed partial class BodyBuilder
                     var type = oracle.TypeOf(phi) ?? expected ?? oracle.Unconstrained(phi.Width);
                     if (type is null) return Hole(address, "类型 φ 没有类型", expected);
                     phis.Add(phi);
-                    return Coerce(Local(phi, type), expected);
+                    return Coerce(Local(phi, type), expected, address);
                 }
             case OpSym op:
-                return Coerce(Operation(op, expected, address), expected);
+                return Coerce(Operation(op, expected, address), expected, address);
             case SliceSym slice:
                 return Slice(slice, expected, address);
             case ConcatSym concat:
@@ -66,9 +66,13 @@ internal sealed partial class BodyBuilder
         return Hole(address, $"值 {sym}", expected);
     }
 
-    private ManagedValue Coerce(ManagedValue value, TypeRef? expected)
+    private ManagedValue Coerce(ManagedValue value, TypeRef? expected, ulong address = 0)
     {
         if (expected is null || value.Type.Equals(expected) || value is HoleValue) return value;
+        if (types.Kind(value.Type) == TypeKind.Struct && types.Size(value.Type) == (ManagedTypes.IsReferenceType(expected) ? 8 : types.Size(expected))
+            && oracle.FieldAt(value.Type, RuntimeLayout.ObjectHeaderSize, types.Size(value.Type) * 8, false, false) is var (contained, scalar)
+            && (scalar.Equals(expected) || types.Kind(scalar) is TypeKind.Int or TypeKind.Bool && types.Kind(expected) is TypeKind.Int or TypeKind.Bool))
+            return Coerce(Nest(value, contained, scalar, false, address), expected, address);
         if (expected is DefinitionRef wrapper && types.Kind(wrapper) == TypeKind.Struct
             && oracle.FieldAt(wrapper, RuntimeLayout.ObjectHeaderSize, (ManagedTypes.IsReferenceType(value.Type) ? 8 : types.Size(value.Type)) * 8, false, false) is var (path, inner)
             && inner.Equals(value.Type) && types.Size(wrapper) == (ManagedTypes.IsReferenceType(value.Type) ? 8 : types.Size(value.Type))
@@ -132,6 +136,13 @@ internal sealed partial class BodyBuilder
                 }
             case OperatorKind.Binary:
                 {
+                    if (op.Width == 1 && op.Op.Binary is BinOp.And or BinOp.Or or BinOp.Xor)
+                    {
+                        var left = View(op.Args[0], types.Boolean, address);
+                        var right = View(op.Args[1], types.Boolean, address);
+                        return op.Op.Binary == BinOp.Xor ? new ComparisonValue(Cond.Ne, left, right, types.Boolean)
+                            : new BooleanValue(op.Op.Binary == BinOp.And, left, right, types.Boolean);
+                    }
                     var type = expected is not null && types.Kind(expected) is TypeKind.Int && Width(expected) == op.Width ? expected : natural ?? oracle.Unconstrained(op.Width);
                     if (type is null) return Hole(address, $"类型 运算 {op.Op}", expected);
                     return new BinaryValue(op.Op.Binary, View(op.Args[0], type, address), View(op.Args[1], op.Op.Binary is BinOp.Shl or BinOp.LShr or BinOp.AShr ? types.Int32 : type, address), type, op.Width);
@@ -186,7 +197,7 @@ internal sealed partial class BodyBuilder
             Demand(merged);
             return Coerce(LocationValue(part, address), expected);
         }
-        var baseType = oracle.TypeOf(slice.Base);
+        var baseType = oracle.TypeOf(slice.Base) ?? (slice.Base is PhiSym ? oracle.Unconstrained(slice.Base.Width) : null);
         if (baseType is null) return Hole(address, $"类型 切片的来源 {slice.Base}", expected);
         var source = View(slice.Base, baseType, address);
         switch (types.Kind(baseType))
@@ -285,7 +296,7 @@ internal sealed partial class BodyBuilder
         {
             case ConstSym c:
                 return new ConstantValue(c.Value & Expr.Mask(targetWidth), target, targetWidth);
-            case SliceSym slice when oracle.TypeOf(slice.Base) is { } sourceType && types.Kind(sourceType) is TypeKind.Int or TypeKind.Pointer or TypeKind.Bool:
+            case SliceSym slice when (oracle.TypeOf(slice.Base) ?? (slice.Base is PhiSym ? oracle.Unconstrained(slice.Base.Width) : null)) is { } sourceType && types.Kind(sourceType) is TypeKind.Int or TypeKind.Pointer or TypeKind.Bool:
                 {
                     var sourceWidth = Width(sourceType);
                     var value = View(slice.Base, sourceType, address);
@@ -294,7 +305,7 @@ internal sealed partial class BodyBuilder
                         value = new BinaryValue(BinOp.And, value, new ConstantValue(Expr.Mask(slice.Width), sourceType, sourceWidth), sourceType, sourceWidth);
                     return Resize(value, target);
                 }
-            case not (SliceSym or ConcatSym) when oracle.TypeOf(part) is { } atomType && types.Kind(atomType) is TypeKind.Int or TypeKind.Bool or TypeKind.Pointer:
+            case not (SliceSym or ConcatSym) when (oracle.TypeOf(part) ?? (part is PhiSym ? oracle.Unconstrained(part.Width) : null)) is { } atomType && types.Kind(atomType) is TypeKind.Int or TypeKind.Bool or TypeKind.Pointer:
                 return Resize(View(part, atomType, address), target);
             case not (SliceSym or ConcatSym) when oracle.TypeOf(part) is DefinitionRef structure && types.Kind(structure) == TypeKind.Struct && part.Width <= targetWidth:
                 {

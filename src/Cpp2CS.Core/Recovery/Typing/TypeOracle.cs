@@ -326,6 +326,7 @@ public sealed class TypeOracle : Runtime.IRuntimeTyping
                 return op.Width == 32 ? types.Single : types.Double;
             case OperatorKind.Binary or OperatorKind.Unary:
                 {
+                    if (op.Width == 1 && op.Op.Kind == OperatorKind.Binary && op.Op.Binary is BinOp.And or BinOp.Or or BinOp.Xor) return types.Boolean;
                     // 补码的加减乘与按位运算不决定有无符号：操作数有同宽整数类型时沿用，否则不给定义类型，由使用处决定。
                     // 只有带符号或无符号语义的运算给出类型。
                     var operand = TypeOf(op.Args[0]);
