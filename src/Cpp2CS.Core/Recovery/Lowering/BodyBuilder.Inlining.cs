@@ -142,7 +142,7 @@ internal sealed partial class BodyBuilder
                 if (template.Regions.Count > 0 || !Acyclic(template)) { failures.Add("构造函数体含异常区域或环"); continue; }
                 if (PendingCall(body, variable, pending) is not var (block, index, receiver)) break;
                 var blocks = body.Blocks.ToDictionary(b => b.Address);
-                var match = Match(blocks, block, index, template, receiver, pending.Allocated.Arguments, out var failure);
+                var match = Match(body, blocks, block, index, template, receiver, pending.Allocated.Arguments, out var failure);
                 if (match is not null && Replace(body, blocks, block, index, method, template, match, out failure) is { } replaced)
                 {
                     body = Constructed(replaced, variable, method);
@@ -223,7 +223,7 @@ internal sealed partial class BodyBuilder
                 for (var start = 0; start < block.Statements.Count; start++)
                 {
                     if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
-                    var match = Match(blocks, block.Address, start, template, self, parent.Arguments, out _);
+                    var match = Match(body, blocks, block.Address, start, template, self, parent.Arguments, out _);
                     if (match is not null && Replace(body, blocks, block.Address, start, method, template, match, out _) is { } replaced)
                         return replaced;
                 }
@@ -257,7 +257,7 @@ internal sealed partial class BodyBuilder
         foreach (var (method, template) in candidates)
             for (var start = earliest; start <= latest; start++)
             {
-                var match = Match(blocks, anchor.Block, start, template, anchor.Access.Receiver, owner.Arguments, out var failure);
+                var match = Match(body, blocks, anchor.Block, start, template, anchor.Access.Receiver, owner.Arguments, out var failure);
                 if (match is not null && Replace(body, blocks, anchor.Block, start, method, template, match, out failure) is { } replaced)
                     return replaced;
                 if (start == earliest) failures.Add($"{method.Method.Owner.Name}.{method.Method.Name}：{failure}");
@@ -311,7 +311,7 @@ internal sealed partial class BodyBuilder
     }
 
     /// <summary>以模板为准同步执行两边，返回调用方区域的覆盖与出口；不成立时为 null。</summary>
-    private InlineMatch? Match(IReadOnlyDictionary<ulong, ManagedBlock> callerBlocks, ulong block, int start, ManagedBody template, ManagedValue receiver, IReadOnlyList<TypeRef> arguments, out string failure)
+    private InlineMatch? Match(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> callerBlocks, ulong block, int start, ManagedBody template, ManagedValue receiver, IReadOnlyList<TypeRef> arguments, out string failure)
     {
         failure = "接收者不能表示";
         var caller = new Walker { Blocks = callerBlocks, Caller = true, Block = block, Index = start };
@@ -325,7 +325,7 @@ internal sealed partial class BodyBuilder
         foreach (var (variable, value) in caller.Env)
             if (entryLocals.TryGetValue(variable, out var local)) match.Inputs.Add((value, local));
         var callee = new Walker { Blocks = template.Blocks.ToDictionary(b => b.Address), Caller = false, Block = template.Blocks[0].Address, Index = 0 };
-        if (Explore(callee, caller, match, 0) && (ConcludePredicate(match, template.Method, callerBlocks) || Conclude(match, template.Method))) return match;
+        if (Explore(callee, caller, match, 0) && (ConcludePredicate(match, template.Method, body, callerBlocks) || Conclude(match, template.Method))) return match;
         failure = match.Failure ?? "比对失败";
         return null;
     }

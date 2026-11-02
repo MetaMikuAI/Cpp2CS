@@ -6,26 +6,48 @@ namespace Cpp2CS.Recovery.Lowering;
 internal sealed partial class BodyBuilder
 {
     /// <summary>内联方法的返回值直接参与比较时，证明各路径分别到达同一对条件出口。</summary>
-    private bool ConcludePredicate(InlineMatch match, MethodRef method, IReadOnlyDictionary<ulong, ManagedBlock> blocks)
+    private bool ConcludePredicate(InlineMatch match, MethodRef method, ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks)
     {
         if (ManagedTypes.IsVoid(method.Method.ReturnType) || match.Ends.Count == 0 || match.Ends.Any(e => e.Returns)) return false;
         var returnType = TypeOracle.Concrete(method, method.Method.ReturnType);
-        if (types.Kind(returnType) is not (TypeKind.Int or TypeKind.Bool)) return false;
+        if (types.Kind(returnType) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Reference)) return false;
         Walker At(InlineEnd end) => new() { Blocks = blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Env = new(end.Env) };
         ComparisonValue? predicate = null;
         var result = NewLocal(returnType);
+        ManagedValue? Carrier(ManagedValue value, ManagedValue returned) => value switch
+        {
+            _ when SameTerm(value, returned) => result,
+            ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate } conversion when Carrier(conversion.Operand, returned) is { } operand
+                => conversion with { Operand = operand },
+            _ => null,
+        };
         foreach (var end in match.Ends)
         {
             var walker = At(end);
             if (end.Result is not { } returned || returned is ConstantValue || walker.Current is not ManagedBranch branch || Term(walker, branch.Condition) is not ComparisonValue comparison) continue;
-            if (comparison.Left.Equals(returned) && comparison.Right is ConstantValue) predicate = comparison with { Left = result };
-            else if (comparison.Right.Equals(returned) && comparison.Left is ConstantValue) predicate = comparison with { Right = result };
+            if (Carrier(comparison.Left, returned) is { } left && comparison.Right is ConstantValue) predicate = comparison with { Left = left };
+            else if (Carrier(comparison.Right, returned) is { } right && comparison.Left is ConstantValue) predicate = comparison with { Right = right };
             if (predicate is not null) break;
         }
         if (predicate is null) return false;
-        ManagedValue Apply(ManagedValue value) => ManagedValues.Map(predicate, child => child.Equals(result) ? value : child);
+        if (types.Kind(returnType) == TypeKind.Reference && (predicate.Condition is not (Cond.Eq or Cond.Ne)
+            || predicate.Left is not ConstantValue { Bits: 0 } && predicate.Right is not ConstantValue { Bits: 0 })) return false;
+        ManagedValue Apply(ManagedValue value)
+        {
+            ManagedValue Substitute(ManagedValue child) => child.Equals(result) ? value : MapTerm(child, Substitute);
+            return Substitute(predicate);
+        }
         var exits = new Dictionary<bool, InlineEnd>();
         var covered = new HashSet<(ulong Block, int Index)>();
+        InlineEnd WithResult(InlineEnd end, ManagedValue returned)
+        {
+            ManagedValue ReplaceResult(ManagedValue value) => Unify(returned, value, new(match.Binding)) ? result : MapTerm(value, ReplaceResult);
+            return end with
+            {
+                Copies = end.Copies.Select(c => (c.Target, ReplaceResult(c.Value))).ToArray(),
+                Env = end.Env.ToDictionary(p => p.Key, p => ReplaceResult(p.Value)),
+            };
+        }
         bool Note(bool outcome, InlineEnd end)
         {
             if (end.Exit.Index != 0) return match.Fail("条件续接点位于块中间");
@@ -57,7 +79,7 @@ internal sealed partial class BodyBuilder
             if (!Finish(walker, trial, null) || trial.Ends.Count != 1) return false;
             covered.UnionWith(trial.Covered);
             var finish = trial.Ends[0];
-            return Note(outcome, finish with { Copies = copies.Concat(finish.Copies).ToArray() });
+            return Note(outcome, WithResult(finish with { Copies = copies.Concat(finish.Copies).ToArray() }, end.Result!));
         }
         foreach (var end in match.Ends)
         {
@@ -67,7 +89,7 @@ internal sealed partial class BodyBuilder
             if (expected is ComparisonValue { Left: ConstantValue left, Right: ConstantValue right } constant
                 && ConstantComparison(constant.Condition, left, right) is { } outcome)
             {
-                if (!Note(outcome, end)) return false;
+                if (!Note(outcome, WithResult(end, returned))) return false;
             }
             else if (walker.Current is ManagedBranch branch && Term(walker, branch.Condition) is { } condition)
             {
@@ -82,6 +104,18 @@ internal sealed partial class BodyBuilder
             else return match.Fail("返回路径不受同一条件支配");
         }
         if (!exits.TryGetValue(true, out var yes) || !exits.TryGetValue(false, out var no) || yes.Exit == no.Exit) return false;
+        foreach (var candidate in match.Locals.Values.Where(l => l.Type.Equals(returnType)))
+        {
+            ManagedValue? Held(InlineEnd end) => end.Copies.FirstOrDefault(c => c.Target.Variable == candidate.Variable).Value
+                ?? end.Env.GetValueOrDefault(candidate.Variable);
+            if (!new[] { yes, no }.Any(e => Held(e) == result)) continue;
+            if (!new[] { yes, no }.All(e => Held(e) == result || !LiveAt(body, blocks, e.Exit.Block, e.Exit.Index, candidate.Variable))) continue;
+            match.ResultStorage = candidate;
+            InlineEnd Carry(InlineEnd end) => end with { Copies = [.. end.Copies.Where(c => c.Target.Variable != candidate.Variable), (candidate, result)] };
+            yes = Carry(yes);
+            no = Carry(no);
+            break;
+        }
         ManagedEdge Edge(InlineEnd end) => new(end.Exit.Block, end.Copies.Select(c => new ManagedCopy(c.Target, c.Value)).ToArray());
         match.Covered.UnionWith(covered);
         match.Result = result;
