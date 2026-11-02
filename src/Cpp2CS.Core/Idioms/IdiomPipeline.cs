@@ -113,6 +113,11 @@ internal static class IdiomPipeline
         {
             state.RefreshOperands();
         });
+        // 初始化 helper 返回原类指针；调用归一后，重新识别依赖该类型的检查。
+        state.Passes.Run("idioms.Normalize", () =>
+        {
+            state.Normalize();
+        });
         state.Passes.Run("idioms.ThreadStaticBlocks", () =>
         {
             if (state.ThreadStaticBlocks())

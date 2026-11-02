@@ -128,6 +128,8 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         {
             foreach (var stmt in function.Blocks.SelectMany(b => b.Statements))
                 if (stmt is Define define) values[define.Target] = define.Value;
+                else if (stmt is Call { Op.Kind: OpKind.InitClass, Arguments: [var subject], Defines: [{ } result] })
+                    values[result] = subject;
             foreach (var (_, define) in function.Dead) values.TryAdd(define.Target, define.Value);
             // 对象与其不可变类指针同时汇合；每条边必须逐一对应同一对象，不能只比较静态类型。
             foreach (var block in function.Blocks)
