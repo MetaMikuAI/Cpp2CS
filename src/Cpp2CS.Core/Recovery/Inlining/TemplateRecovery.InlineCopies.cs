@@ -35,10 +35,50 @@ internal sealed partial class TemplateRecovery
             var value = writes[0].Value;
             if (!Stable(value) || writes.Any(a => a.Value != value)) continue;
             if (LiveAt(body, blocks, startBlock, start, variable)
-                && !match.Inputs.Any(input => input.Local.Variable == variable && SameTerm(input.Value, value))) continue;
+                && !match.Inputs.Any(input => input.Local.Variable == variable && SameTerm(input.Value, value))
+                && !SameCopyAt(body, blocks, startBlock, start, variable, value)) continue;
             copies.Add(writes[0] with { Address = blocks[startBlock].Statements[start].Address });
         }
         return copies;
+    }
+
+    /// <summary>沿全部入边查找最近赋值；未取址的局部可跨调用保值，表达式输入被改写或遇到异常入口时停止证明。</summary>
+    private bool SameCopyAt(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks,
+        ulong block, int index, Variable target, ManagedValue value)
+    {
+        var inputs = ManagedValues.Walk(value).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
+        var active = new HashSet<(ulong, int)>();
+        var known = new Dictionary<(ulong, int), bool>();
+        bool Visit(ulong at, int before)
+        {
+            var point = (at, before);
+            if (known.TryGetValue(point, out var result)) return result;
+            if (!active.Add(point)) return false;
+            result = Check(at, before);
+            active.Remove(point);
+            return known[point] = result;
+        }
+        bool Check(ulong at, int before)
+        {
+            for (var i = before - 1; i >= 0; i--)
+            {
+                var statement = blocks[at].Statements[i];
+                var written = statement switch { ManagedAssignment a => a.Target.Variable, ManagedCall c => c.Result?.Variable, _ => null };
+                if (written is not null && inputs.Contains(written)) return false;
+                if (written == target) return statement is ManagedAssignment assignment && SameTerm(assignment.Value, value);
+            }
+            if (at == body.Blocks[0].Address || body.Regions.Any(r => r.HandlerEntry == at)) return false;
+            var incoming = blocks.Values.SelectMany(b => b.Statements.SelectMany(ManagedValues.Edges)
+                .Where(e => e.Target == at).Select(e => (Block: b, Edge: e))).ToArray();
+            return incoming.Length > 0 && incoming.All(p =>
+            {
+                if (p.Edge.Copies.Any(c => inputs.Contains(c.Target.Variable))) return false;
+                if (p.Edge.Copies.FirstOrDefault(c => c.Target.Variable == target) is { } copy)
+                    return SameTerm(copy.Value, value);
+                return Visit(p.Block.Address, p.Block.Statements.Count);
+            });
+        }
+        return Visit(block, index);
     }
 
     /// <summary>从指定位置出发，在覆盖写入前是否可能读取旧值；包括异常出边及边上的并行复制。</summary>

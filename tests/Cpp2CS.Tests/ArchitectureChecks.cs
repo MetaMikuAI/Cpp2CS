@@ -669,15 +669,25 @@ internal static class ArchitectureChecks
             {
                 new ManagedAssignment(0, state, Read(new ArgumentValue(0, ownerRef, 64)) with { Pending = new(0, "待证字段", false) }),
             };
-            if (saved is not null) entry.Add(new ManagedAssignment(2, savedLocal, savedValue));
+            var acrossCall = saved is "entry-same" or "entry-different" or "entry-input-changed";
+            if (saved is not null && !acrossCall) entry.Add(new ManagedAssignment(2, savedLocal, savedValue));
             entry.Add(new ManagedBranch(4, Compare(state), new(8, []), new(16, [])));
             var body = new ManagedBody(caller,
             [
                 new(0, entry),
-                new(8, [call, new ManagedJump(12, new(24, [new(result, Compare(returned))]))]),
+                new(8, [.. acrossCall ? new ManagedStatement[] { new ManagedAssignment(8, savedLocal, savedValue) } : [],
+                    call, new ManagedJump(12, new(24, [new(result, Compare(returned))]))]),
                 new(16, [new ManagedJump(16, new(24, [new(result, new ConstantValue(consistent ? 1UL : 0UL, types.Boolean, 8))]))]),
                 new(24, [new ManagedReturn(24, saved is null ? result : new BooleanValue(true, result, savedLocal, types.Boolean))]),
             ]);
+            if (acrossCall)
+                body = body with
+                {
+                    Blocks = [new(100, [new ManagedAssignment(100, savedLocal, saved == "entry-different" ? new ConstantValue(0, types.Boolean, 8) : savedValue),
+                        call with { Address = 104, Result = saved == "entry-input-changed" ? external : returned }, new ManagedJump(108, new(0, []))]),
+                        .. body.Blocks, new(32, [new ManagedReturn(32, savedLocal)])],
+                    Regions = [new([0, 8, 16], 32, [32], null, ManagedRegionKind.Catch)],
+                };
             return new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary))
                 .Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
         }
@@ -687,6 +697,9 @@ internal static class ArchitectureChecks
         check.True(copied.Holes.Count == 0 && copied.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
             .Any(a => a.Value is ComparisonValue { Left: BinaryValue { Op: BinOp.LShr } }), "稳定整数表达式可提前保存，供内联区域外继续使用");
         check.True(Run(true, "changed").Holes.Count > 0, "依赖区域内定义的表达式不能提前保存");
+        check.True(Run(true, "entry-same").Holes.Count == 0, "跨调用证明入口局部已保存同值，异常读取不阻止内联");
+        check.True(Run(true, "entry-different").Holes.Count > 0, "异常路径可见的旧值不同，不得提前覆盖");
+        check.True(Run(true, "entry-input-changed").Holes.Count > 0, "入口表达式的输入已被调用改写，不能沿用旧值证明");
         var memory = Run(true, "memory");
         check.True(memory.Body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk)
             .OfType<FieldValue>().Any(f => f.Field.Field == field), "读取内存的表达式仍保留实际读取，不按稳定整数副本消除");
