@@ -659,7 +659,7 @@ internal static class ArchitectureChecks
             new(16, [new ManagedReturn(16, one)]),
         ]);
         MethodRecoveryResult? Summary(MethodRef requested) => requested == method ? new(method, 0, template, []) : null;
-        TemplateResult Run(bool consistent, string? saved = null)
+        TemplateResult Run(bool consistent, string? saved = null, bool sharedCopy = false)
         {
             var savedLocal = new LocalValue(new Variable(Storage.Temp(48), 1), types.Boolean, 8);
             var external = new LocalValue(new Variable(Storage.Temp(49), 1), types.Int32, 32);
@@ -688,11 +688,23 @@ internal static class ArchitectureChecks
                         .. body.Blocks, new(32, [new ManagedReturn(32, savedLocal)])],
                     Regions = [new([0, 8, 16], 32, [32], null, ManagedRegionKind.Catch)],
                 };
+            if (sharedCopy)
+                body = body with
+                {
+                    Blocks = [.. body.Blocks.Select(b => b.Address != 8 ? b : b with
+                        { Statements = [call, new ManagedJump(12, new(20, [new(savedLocal, Compare(returned))]))] }),
+                        new(20, [new ManagedJump(20, new(24, [new(result, savedLocal)]))]),
+                        new(32, [new ManagedJump(32, new(20, [new(savedLocal, new ConstantValue(0, types.Boolean, 8))]))])],
+                };
             return new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary))
                 .Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
         }
         check.True(Run(true).Holes.Count == 0, "返回值比较可在所有路径证明后承接到同一布尔局部");
         check.True(Run(false).Holes.Count > 0, "常量路径与同一返回值比较不一致时拒绝恢复");
+        var chained = Run(true, sharedCopy: true);
+        check.True(chained.Holes.Count == 0, "共享出口复制逐边组合后可承接同一返回值比较");
+        check.True(chained.Body.Blocks.Any(b => b.Address == 20), "仍有外部入边的共享复制块保留");
+        check.True(Run(false, sharedCopy: true).Holes.Count > 0, "复制链不能掩盖不同路径的结果差异");
         var copied = Run(true, "stable");
         check.True(copied.Holes.Count == 0 && copied.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
             .Any(a => a.Value is ComparisonValue { Left: BinaryValue { Op: BinOp.LShr } }), "稳定整数表达式可提前保存，供内联区域外继续使用");
