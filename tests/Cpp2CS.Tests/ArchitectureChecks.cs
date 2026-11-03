@@ -25,6 +25,10 @@ internal static class ArchitectureChecks
         var facts = FactsBuilder.Build(binary, metadata, options: new RecoveryOptions { FactCacheFile = Path.GetFullPath(cache) });
         var types = new ManagedTypes(facts.Model, facts.Layouts);
         var checks = new Assertions();
+        var sharedReference = facts.Model.RuntimeTypes.OfType<DefinitionRef>().First(d => !d.Definition.IsValueType && FieldLayouts.IsFullyShared(d));
+        var referenceShape = new Aapcs64Classifier(facts.Layouts).Describe(sharedReference);
+        checks.True(referenceShape.Kind == Aapcs64Classifier.Kind.Pointer && referenceShape.Size == 8,
+            "含共享类型参数的引用仍按 AAPCS64 指针传递");
         Convergence(checks, types);
         Identities(checks, types);
         EntryKinds(checks, facts, types);
