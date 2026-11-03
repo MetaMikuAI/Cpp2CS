@@ -48,6 +48,7 @@ internal static class ArchitectureChecks
         PackedPhiSlices(checks);
         JoinedPhiSlices(checks);
         CleanupDispatch(checks);
+        PromotedDelegates(checks, facts, types);
         ArrayIndices(checks);
         Barriers(checks, types);
         UnchangedBarriers(checks, facts);
@@ -442,6 +443,32 @@ internal static class ArchitectureChecks
                 check.True(result is PhiSym changed && changed.Sources[1] is ConcatSym,
                     "来源变化后整体合流保留真实拼接，不沿用失效的完整值证据");
             }
+        }
+    }
+
+    private static void PromotedDelegates(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var type = new DefinitionRef(types.CorlibDefinition("System.Action")!, []);
+        var root = new Use(new Variable(Storage.Local(0, 64), 1), 64);
+        var other = new Use(new Variable(Storage.Local(1, 64), 1), 64);
+        Expr Field(Expr receiver, ulong offset) => new Load(new Binary(BinOp.Add, receiver, Expr.C(offset, 64), 64), 64);
+        foreach (var variant in new[] { "proven", "unknown-type", "different-receiver", "different-method", "memory-effects" })
+        {
+            var call = new Call(4, CallKind.Indirect, Field(root, 0x18))
+            {
+                Op = new(OpKind.CallDelegate, null),
+                Sources = [Storage.Gpr(0), Storage.Gpr(1)],
+                Arguments = [Field(variant == "different-receiver" ? other : root, 0x40), Field(variant == "different-method" ? other : root, 0x28)],
+                Memory = variant == "memory-effects" ? [new CellAccess(Storage.Local(0, 64), 0, 64, 0, 0, 64, true)] : [],
+            };
+            var block = new Block(0) { Statements = [call, new Return(8)] };
+            var function = new MachineFunction { Entry = 0, Range = new(0, 12, CodeRegion.Managed, default), Blocks = [block] };
+            var report = new IdiomResult();
+            report.Hit(Template.DelegateCall);
+            DelegateCallNormalizer.Run(facts, function, report, e => variant != "unknown-type" && e == root ? type : null);
+            var result = block.Statements.OfType<Call>().Single();
+            check.Equal(variant == "proven", result.Resolved is not null && result.DelegateReceiver == root,
+                $"提升后委托类型仍须满足同根调用证据 {variant}");
         }
     }
 

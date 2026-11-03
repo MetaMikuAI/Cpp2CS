@@ -191,6 +191,9 @@ public sealed class MethodDecompiler
         ExceptionNormalization.Run(function, ExceptionFacts.WrapperWithoutDestructor(facts.Checks));
         environment.Layout = layout;
         var values = ValueModel.Build(function, environment);
+        var oracle = new TypeOracle(types, facts, method, environment.Shape, values, layout);
+        if (DelegateCallNormalizer.Run(facts, function, idioms, e => e is Use use ? oracle.TypeOf(values.Of(use.Variable)) : null))
+            values = ValueModel.Build(function, environment);
         return new MethodAnalysis(method, entry, signature, function, idioms, layout, values) { Environment = environment, Splits = splits };
     }
 }
