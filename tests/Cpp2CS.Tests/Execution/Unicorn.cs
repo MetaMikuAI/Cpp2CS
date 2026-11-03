@@ -93,8 +93,8 @@ internal sealed class Unicorn : IDisposable
         Check(uc_hook_add(handle, out _, type, Marshal.GetFunctionPointerForDelegate(hook), IntPtr.Zero, begin, end), "uc_hook_add");
     }
 
-    /// <summary>从 begin 执行，最多 count 条指令；返回错误码（0 为正常结束或被 Stop）。</summary>
-    public int Start(ulong begin, ulong count) => uc_emu_start(handle, begin, 0, 0, (nuint)count);
+    /// <summary>从 begin 执行，最多 count 条指令、timeout 微秒（0 为不限）；返回错误码（0 为正常结束、被 Stop 或超时）。</summary>
+    public int Start(ulong begin, ulong count, ulong timeout = 0) => uc_emu_start(handle, begin, 0, timeout, (nuint)count);
 
     public void Stop() => uc_emu_stop(handle);
 

@@ -204,6 +204,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 side.Diverge();
                 return null;
             }
+            if ((steps & 0xFFF) == 0) world.CheckDeadline();
             var at = pc;
             var instruction = instructions[pc++];
             var operand = instruction.Operand;

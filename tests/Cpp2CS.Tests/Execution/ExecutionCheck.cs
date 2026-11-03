@@ -24,6 +24,9 @@ internal static partial class ExecutionCheck
         if (options.SkipWhile(o => o != "--fact-cache-file").Skip(1).FirstOrDefault() is { } cache)
             runOptions = runOptions with { FactCacheFile = Path.GetFullPath(cache) };
         var verbose = options.Contains("--verbose");
+        // 每个方法的墙钟上限（秒）；超时的用例记为不可检查，不计入一致。
+        TimeSpan? timeLimit = options.SkipWhile(o => o != "--time-limit").Skip(1).FirstOrDefault() is { } seconds
+            ? TimeSpan.FromSeconds(double.Parse(seconds, System.Globalization.CultureInfo.InvariantCulture)) : null;
         var facts = FactsBuilder.Build(binary, metadata, options: runOptions);
         var types = new ManagedTypes(facts.Model, facts.Layouts);
         var targets = ReadList(facts, list, 0, 1);
@@ -56,7 +59,7 @@ internal static partial class ExecutionCheck
                 ? new Outcome(ExecutionVerdict.NotWritten, 0, 0, $"；{result.Holes.FirstOrDefault()?.Reason ?? "没有方法体"}")
                 : problems.TryGetValue(result.Body, out var problem)
                     ? new Outcome(ExecutionVerdict.NotWritten, 0, 0, $"；{problem}")
-                    : Check(targets[i].Instance, skeleton, cecil, interpreter, machine, index, verbose, caseCount, result.Entry);
+                    : Check(targets[i].Instance, skeleton, cecil, interpreter, machine, index, verbose, caseCount, result.Entry, timeLimit);
             verdicts[outcome.Verdict] = verdicts.GetValueOrDefault(outcome.Verdict) + 1;
             table?.WriteLine($"0x{result.Entry:x}\t{result.Method}\t{outcome.Verdict.Label()}\t{outcome.Matches}/{caseCount}\t{outcome.Coverage:F2}\t{outcome.Detail.TrimStart('；')}");
             if (outcome.Verdict != ExecutionVerdict.Verified) Console.WriteLine($"  {outcome.Verdict.Label()} {name}{outcome.Detail}");
@@ -77,8 +80,9 @@ internal static partial class ExecutionCheck
     /// <summary>Reason：不可检查时的主要原因（用例最多的一类，去掉具体类型与方法名以便汇总）。</summary>
     private sealed record Outcome(ExecutionVerdict Verdict, int Matches, double Coverage, string Detail, string Reason = "", int ThrowCases = 0);
 
-    private static Outcome Check(MethodRef tested, Skeleton skeleton, CecilModel cecil, CilInterpreter interpreter, NativeMachine machine, WorldIndex index, bool verbose, int caseCount = Cases, ulong? nativeEntry = null)
+    private static Outcome Check(MethodRef tested, Skeleton skeleton, CecilModel cecil, CilInterpreter interpreter, NativeMachine machine, WorldIndex index, bool verbose, int caseCount = Cases, ulong? nativeEntry = null, TimeSpan? timeLimit = null)
     {
+        var deadline = timeLimit is { } limit ? DateTime.UtcNow + limit : (DateTime?)null;
         cecil.Context = tested;
         var definition = skeleton.Method(tested.Method);
         var entry = nativeEntry ?? tested.Method.Address;
@@ -98,7 +102,12 @@ internal static partial class ExecutionCheck
         var returns = 0;
         for (var seed = 0; seed < caseCount; seed++)
         {
-            var world = new World(index, seed, hints, InitializedOwner(tested)) { ThrowPlan = throwPlans[seed] };
+            if (deadline is { } end && DateTime.UtcNow > end)
+            {
+                unsupported[World.TimeLimitReason] = unsupported.GetValueOrDefault(World.TimeLimitReason) + caseCount - seed;
+                break;
+            }
+            var world = new World(index, seed, hints, InitializedOwner(tested)) { ThrowPlan = throwPlans[seed], Deadline = deadline };
             try
             {
                 foreach (var field in statics) world.PrepareStatic(field);

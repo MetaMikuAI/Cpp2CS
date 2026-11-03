@@ -6,7 +6,8 @@ using Cpp2CS.Recovery;
 namespace Cpp2CS.Tests.Execution;
 
 /// <summary>可观察事件：分配、调用、抛出、返回。State 为事件发生时本侧写过的（受比较区域内）字节的当前值。</summary>
-internal sealed record TraceEvent(string Text, IReadOnlyDictionary<ulong, byte> State);
+/// <summary>事件与发生时写入日志的长度；比较时按日志重放出两侧当时写过的内存。</summary>
+internal sealed record TraceEvent(string Text, int Log);
 
 /// <summary>
 /// 一侧（原生或 CIL）的一次执行：内存读写、写入日志与事件序列。
@@ -16,6 +17,7 @@ internal sealed record TraceEvent(string Text, IReadOnlyDictionary<ulong, byte> 
 internal abstract partial class Side(World world)
 {
     private readonly Dictionary<ulong, byte> written = new();
+    private readonly List<(ulong Address, byte Value)> log = [];
     private ulong heapTop = World.HeapBase;
     private ulong exceptionTop = World.ExceptionBase;
     private int calls;
@@ -54,7 +56,12 @@ internal abstract partial class Side(World world)
     protected void Log(ulong address, ReadOnlySpan<byte> bytes)
     {
         for (var i = 0; i < bytes.Length; i++)
-            if (World.Observable(address + (ulong)i)) written[address + (ulong)i] = bytes[i];
+            if (World.Observable(address + (ulong)i))
+            {
+                written[address + (ulong)i] = bytes[i];
+                if (log.Count >= LogLimit) throw new Unsupported("写入记录超过上限");
+                log.Add((address + (ulong)i, bytes[i]));
+            }
     }
 
     public ulong Read64(ulong address) { Span<byte> b = stackalloc byte[8]; Read(address, b); return BinaryPrimitives.ReadUInt64LittleEndian(b); }
@@ -74,7 +81,13 @@ internal abstract partial class Side(World world)
         Write(address, b[..bytes]);
     }
 
-    public void Event(string text) => Events.Add(new TraceEvent(text, new Dictionary<ulong, byte>(written)));
+    /// <summary>写入日志的条数上限：长循环会使日志无界增长，超过时本例不可检查。</summary>
+    private const int LogLimit = 20_000_000;
+
+    /// <summary>按次序写入的可观察字节。</summary>
+    public IReadOnlyList<(ulong Address, byte Value)> WriteLog => log;
+
+    public void Event(string text) => Events.Add(new TraceEvent(text, log.Count));
 
     /// <summary>下一次调用的序号（两侧按同样的顺序取返回值）。</summary>
     public int NextCall() => calls++;
@@ -183,20 +196,37 @@ internal abstract partial class Side(World world)
 /// <summary>两侧执行结果的比较。</summary>
 internal static class Trace
 {
-    /// <summary>第一处不同；相同为 null。</summary>
+    /// <summary>
+    /// 第一处不同；相同为 null。每个事件发生时，两侧写过的内存（未写的字节取初值）须相同：按事件次序重放两侧的写入日志，
+    /// 增量维护取值不同的地址，等价于逐事件比较两侧当时的全部写入。
+    /// </summary>
     public static string? Difference(World world, Side native, Side cil)
     {
+        var (nState, cState) = (new Dictionary<ulong, byte>(), new Dictionary<ulong, byte>());
+        var differs = new SortedSet<ulong>();
+        var (nAt, cAt) = (0, 0);
+        byte Value(Dictionary<ulong, byte> state, ulong address) => state.TryGetValue(address, out var v) ? v : world.Initial(address);
+        void Replay(Side side, Dictionary<ulong, byte> state, ref int at, int end)
+        {
+            for (; at < end; at++)
+            {
+                var (address, value) = side.WriteLog[at];
+                state[address] = value;
+                if (Value(nState, address) != Value(cState, address)) differs.Add(address); else differs.Remove(address);
+            }
+        }
         var count = Math.Max(native.Events.Count, cil.Events.Count);
         for (var i = 0; i < count; i++)
         {
             var n = i < native.Events.Count ? native.Events[i] : null;
             var c = i < cil.Events.Count ? cil.Events[i] : null;
             if (n?.Text != c?.Text) return $"事件 {i}：原生 {n?.Text ?? "（无）"}，CIL {c?.Text ?? "（无）"}";
-            foreach (var address in n!.State.Keys.Union(c!.State.Keys).Order())
+            Replay(native, nState, ref nAt, n!.Log);
+            Replay(cil, cState, ref cAt, c!.Log);
+            if (differs.Count > 0)
             {
-                var a = n.State.TryGetValue(address, out var x) ? x : world.Initial(address);
-                var b = c.State.TryGetValue(address, out var y) ? y : world.Initial(address);
-                if (a != b) return $"事件 {i}（{n.Text}）时内存 0x{address:x}：原生 {a:x2}，CIL {b:x2}";
+                var address = differs.Min;
+                return $"事件 {i}（{n.Text}）时内存 0x{address:x}：原生 {Value(nState, address):x2}，CIL {Value(cState, address):x2}";
             }
         }
         return null;

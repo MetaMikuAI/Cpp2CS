@@ -220,6 +220,16 @@ internal sealed partial class World
     private FieldLayouts Layouts => Index.Facts.Layouts;
     /// <summary>当前执行侧：合成的字节同时写入它的内存。</summary>
     public Side? Active { get; set; }
+    /// <summary>本方法对照的墙钟截止时刻；超过时两侧都停止，本例记为不可检查。</summary>
+    public DateTime? Deadline { get; init; }
+
+    public const string TimeLimitReason = "执行超过方法时间上限";
+
+    /// <summary>超过截止时刻时抛出不可检查；不改变比较结果，只减少可检查的用例。</summary>
+    public void CheckDeadline()
+    {
+        if (Deadline is { } deadline && DateTime.UtcNow > deadline) throw new Unsupported(TimeLimitReason);
+    }
     public ulong RuntimeTop => top;
     public ReadOnlySpan<byte> RuntimeBytes => runtime.AsSpan(0, (int)(top - RuntimeBase));
 

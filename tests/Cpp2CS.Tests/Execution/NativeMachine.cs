@@ -168,8 +168,11 @@ internal sealed partial class NativeMachine : IDisposable
                 uc.Write(ReturnBuffer, new byte[world.StorageSize(testedReturnType)]);
                 uc.SetReg(Unicorn.X(8), ReturnBuffer);
             }
-            var error = uc.Start(start, InstructionLimit);
+            world.CheckDeadline();
+            var timeout = world.Deadline is { } deadline ? (ulong)Math.Max(1, (deadline - DateTime.UtcNow).TotalMicroseconds) : 0;
+            var error = uc.Start(start, InstructionLimit, timeout);
             if (failure is not null) throw failure is Unsupported or InferredCallError or InvalidDataException ? failure : new Unsupported($"原生侧出错：{failure.Message}");
+            if (side.Result is null) world.CheckDeadline();
             if (side.Result is null) throw new Unsupported(error != 0 ? $"原生执行出错：{Unicorn.Error(error)} @0x{uc.Reg(Unicorn.RegPc):x}" : "原生执行超过指令数上限");
             return side;
         }
