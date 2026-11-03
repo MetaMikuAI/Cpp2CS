@@ -319,6 +319,7 @@ namespace Cpp2CS.Input
                 StringLiterals = literals,
                 Code = CodeOwners(methods, methodSpecs),
             };
+            RegisterMetadataUsages(model);
 
             for (var i = 0; i < types.Length; i++)
             {
@@ -393,6 +394,25 @@ namespace Cpp2CS.Input
             foreach (var (spec, pointer) in il2Cpp.methodSpecGenericMethodPointers)
                 Add(pointer, new CodeOwner(methodSpecs[specIndex[spec]], true));
             return owners.ToDictionary(p => p.Key, p => (IReadOnlyList<CodeOwner>)p.Value);
+        }
+
+        /// <summary>
+        /// 元数据使用对给出每个槽的 (kind, decodedIndex)。旧版本的槽里存的是重定位后的对象指针，
+        /// 不能从槽值反推目标；这里按槽序号把 Il2CppDumper 解出的使用对登记到模型，供读取槽时使用。
+        /// </summary>
+        private void RegisterMetadataUsages(ProgramModel model)
+        {
+            if (il2Cpp.metadataUsages is not { } slots) return;
+            foreach (var (kind, entries) in metadata.metadataUsageDic)
+            {
+                if (kind == Il2CppMetadataUsage.kIl2CppMetadataUsageInvalid) continue;
+                foreach (var (slotIndex, decodedIndex) in entries)
+                {
+                    if (slotIndex >= slots.Length) continue;
+                    if (model.DecodeToken((uint)kind, decodedIndex) is { } usage)
+                        model.RegisterUsage(slots[slotIndex], usage);
+                }
+            }
         }
 
         private int ObjectHeaderSize => image.Architecture is Cpp2CS.Model.Architecture.Arm64 or Cpp2CS.Model.Architecture.X64 ? 16 : throw new NotSupportedException(image.Architecture.ToString());

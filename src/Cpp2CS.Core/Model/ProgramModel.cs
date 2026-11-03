@@ -307,12 +307,20 @@ public sealed class ProgramModel
     /// <summary>代码地址到托管所有者。</summary>
     public required IReadOnlyDictionary<ulong, IReadOnlyList<CodeOwner>> Code { get; init; }
     private readonly ConcurrentDictionary<ulong, Usage?> slots = new();
+    private readonly Dictionary<ulong, Usage> registeredUsages = new();
+
+    /// <summary>按元数据使用对登记过的槽地址与目标。</summary>
+    public IReadOnlyDictionary<ulong, Usage> RegisteredUsages => registeredUsages;
+
+    /// <summary>登记一个由元数据使用对确定的槽地址。</summary>
+    public void RegisterUsage(ulong slot, Usage usage) => registeredUsages[slot] = usage;
 
     /// <summary>
-    /// 读取元数据槽位（v27+：全局变量初值为编码令牌 ((kind&lt;&lt;29)|(index&lt;&lt;1))+1）。
-    /// 编码不合法或索引越界返回 null。
+    /// 解码元数据使用槽：优先使用元数据使用对给出的槽地址与索引；
+    /// 未登记的槽回退到 v27+ 的初值编码 ((kind&lt;&lt;29)|(index&lt;&lt;1))+1。
+    /// 无法解码或不是可识别的元数据对象时返回 null。
     /// </summary>
-    public Usage? UsageAt(ulong slot) => slots.GetOrAdd(slot, DecodeSlot);
+    public Usage? UsageAt(ulong slot) => registeredUsages.TryGetValue(slot, out var registered) ? registered : slots.GetOrAdd(slot, DecodeSlot);
 
     private Usage? DecodeSlot(ulong slot)
     {
