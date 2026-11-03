@@ -242,6 +242,20 @@ internal static class ArchitectureChecks
         var failure = recovery.Run(Body(new ConstantValue(7, types.Int32, 32)), new Dictionary<Variable, PendingConstruction>(), 0);
         check.True(failure.Holes.Count > 0, "写入不一致时保留缺口");
         check.True(!failure.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Inlined), "失败的证明不改写成调用");
+        var prepare = Method(Type("Preparation", 13), "Run", 13, MethodAttributes.Public | MethodAttributes.Static);
+        var prelude = new ManagedCall(0, new(new(prepare, [], []), null, [], false), null, false);
+        template = template with { Blocks = [new(0, new ManagedStatement[] { prelude }.Concat(template.Blocks[0].Statements).ToArray())] };
+        ManagedBody Split(bool changed) => new(caller,
+        [
+            new(0, [changed ? new ManagedCall(0, prelude.Invocation with { Arguments = [value] }, null, false) : prelude,
+                new ManagedJump(0, new(4, []))]),
+            new(4, [new ManagedJump(4, new(8, []))]),
+            new(8, Body(value).Blocks[0].Statements),
+        ]);
+        var split = new TemplateRecovery(types, caller, Summary, fields).Run(Split(false), new Dictionary<Variable, PendingConstruction>(), 0);
+        check.Equal(0, split.Holes.Count, "沿唯一前驱纳入模板的前导调用");
+        var changedPrelude = new TemplateRecovery(types, caller, Summary, fields).Run(Split(true), new Dictionary<Variable, PendingConstruction>(), 0);
+        check.True(changedPrelude.Holes.Count > 0, "前导调用不一致时不能跳过该效果");
         var inaccessible = new TypeDef { Index = 12, Name = "Hidden", Namespace = "Tests", Assembly = "Other.dll", Token = 0,
             Attributes = TypeAttributes.NotPublic, IsValueType = false, IsEnum = false };
         var exposed = new FieldDef { Index = 12, Owner = inaccessible, Name = "value", Type = types.Int32, Offset = 16, Attributes = FieldAttributes.Public };

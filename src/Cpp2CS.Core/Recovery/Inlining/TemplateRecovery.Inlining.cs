@@ -264,18 +264,31 @@ internal sealed partial class TemplateRecovery
         var latest = anchor.Index;
         if (statements[anchor.Index] is ManagedAssignment)
             while (latest + 1 < statements.Count && statements[latest] is ManagedAssignment or ManagedStore) latest++;
+        var starts = Enumerable.Range(earliest, latest - earliest + 1).Select(i => (Block: anchor.Block, Index: i)).ToList();
+        // 前导效果可能位于唯一前驱中，中间的空跳转不构成内联区域的边界。
+        var visited = new HashSet<ulong> { anchor.Block };
+        var current = anchor.Block;
+        while (visited.Count < 16)
+        {
+            var incoming = blocks.Values.Where(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == current)).ToArray();
+            if (incoming is not [var predecessor] || !visited.Add(predecessor.Address)) break;
+            current = predecessor.Address;
+            if (predecessor.Statements.All(s => s is ManagedJump { Edge.Copies.Count: 0 })) continue;
+            starts.AddRange(Enumerable.Range(0, predecessor.Statements.Count).Select(i => (current, i)));
+            break;
+        }
         var failures = new List<string>();
         foreach (var (method, template) in InlineCandidates(field, receiver))
         {
             if (fields.CallFailure(method, receiver, receiver is null ? field.DeclaringType : null) is { } illegal) { failures.Add(illegal); continue; }
             // 失败原因取离锚点最近的起点：块首等较早的起点通常与这次访问无关。
             string? nearest = null;
-            for (var start = earliest; start <= latest; start++)
+            foreach (var (block, start) in starts)
             {
-                var match = Match(body, blocks, anchor.Block, start, template, method.TypeArguments, out var failure);
-                if (match is not null && PlanReplacement(body, blocks, anchor.Block, start, method, match, out failure) is { } replaced)
+                var match = Match(body, blocks, block, start, template, method.TypeArguments, out var failure);
+                if (match is not null && PlanReplacement(body, blocks, block, start, method, match, out failure) is { } replaced)
                     return replaced.Apply(body);
-                if (start <= anchor.Index) nearest = failure;
+                if (block == anchor.Block && start <= anchor.Index) nearest = failure;
             }
             failures.Add($"{method.Method.Owner.Name}.{method.Method.Name}：{nearest}");
         }
