@@ -30,7 +30,7 @@ internal static class DispatchResolution
                 MethodRef? method = op switch
                 {
                     { Kind: OpKind.CallDelegate, Operand: MethodRef invoke } => invoke,
-                    { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } pair } => Slot((DefinitionRef)oracle.Substitute(itf), pair.Item2, interfaceOnly: true),
+                    { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } pair } => Slot(itf, pair.Item2, interfaceOnly: true),
                     { Kind: OpKind.CallVirtual, Operand: int slot } when Receiver(call, values) is { } receiver => VirtualSlot(oracle.TypeOf(receiver), slot, oracle.Types),
                     _ => null,
                 };

@@ -147,11 +147,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         if (shape.Signature?.MethodInfo is { } info && (info.Register.Bank == Bank.Stack ? StackInfo() : Register(info.Register)) is { } infoSym
             && SymTable.Resolve(infoSym) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef exact } }
             && candidates.Any(c => c.Method == exact.Method))
-            return callees[call] = exact with
-            {
-                TypeArguments = exact.TypeArguments.Select(Substitute).ToArray(),
-                MethodArguments = exact.MethodArguments.Select(Substitute).ToArray(),
-            };
+            return callees[call] = exact;
         var receiver = shape.Signature?.This is { } self && self.Pieces[0].Register.Bank == Bank.Gpr ? Register(self.Pieces[0].Register) : null;
         var receiverType = receiver is not null && call.Op?.Kind != OpKind.CallDelegate ? TypeOf(receiver) : null;
         if (receiverType is ByRefRef byRef) receiverType = byRef.Element;
@@ -324,9 +320,9 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     }
 
     /// <summary>运行时操作的类操作数：L2 写入的 Operand，否则为实参符号值中的类实体。</summary>
-    public TypeRef? ClassOperand(Call call) => (call.Op?.Operand as TypeRef
+    public TypeRef? ClassOperand(Call call) => call.Op?.Operand as TypeRef
         ?? values.Operands(call).Skip(1).Take(call.Arguments.Length).Select(SymTable.Resolve).OfType<EntitySym>()
-            .FirstOrDefault(e => e.Symbol.Kind == SymbolKind.Class)?.Symbol.Value as TypeRef) is { } type ? Substitute(type) : null;
+            .FirstOrDefault(e => e.Symbol.Kind == SymbolKind.Class)?.Symbol.Value as TypeRef;
 
     public DefinitionRef? ExceptionType(string fullName) =>
         (types.CorlibDefinition(fullName) ?? facts.Model.Types.FirstOrDefault(t => t.FullName == fullName && t.GenericParameters.Count == 0)) is { } definition
@@ -525,7 +521,6 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         }
         if (root is EntitySym { Symbol: { Kind: SymbolKind.StaticFields or SymbolKind.ThreadStaticFields, Value: TypeRef owner } entity } && index is null)
         {
-            owner = Substitute(owner);
             var thread = entity.Kind == SymbolKind.ThreadStaticFields;
             return FieldAt(owner, (int)offset, width, true, thread) is var (path, type)
                 ? new Location(thread ? LocationKind.ThreadStatic : LocationKind.Static, null, null, 0, owner, path, type) : null;
@@ -639,7 +634,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             && CellType(cell) is { } cellType && types.Kind(cellType) == TypeKind.Struct)
             container = (cellType, local.Offset + offset - cell.Start + RuntimeLayout.ObjectHeaderSize, false, false);
         else if (root is EntitySym { Symbol: { Kind: SymbolKind.StaticFields or SymbolKind.ThreadStaticFields, Value: TypeRef owner } entity } && index is null)
-            container = (Substitute(owner), offset, true, entity.Kind == SymbolKind.ThreadStaticFields);
+            container = (owner, offset, true, entity.Kind == SymbolKind.ThreadStaticFields);
         else switch (TypeOf(root))
         {
             case ArrayRef array when types.Kind(array.Element) == TypeKind.Struct && ElementSize(array.Element) is var size and > 0 && offset >= RuntimeLayout.ArrayData

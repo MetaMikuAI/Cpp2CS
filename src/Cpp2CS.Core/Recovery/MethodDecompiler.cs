@@ -93,12 +93,7 @@ public sealed class MethodDecompiler
     {
         var oracle = new TypeOracle(types, facts, analysis.Method, analysis.Environment.Shape, analysis.Values, analysis.Memory);
         var referenced = analysis.Function.Blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk)
-            .OfType<Symbol>().Where(s => s.Kind == SymbolKind.Method).Select(s => (MethodRef)s.Value)
-            .Select(m => m with
-            {
-                TypeArguments = m.TypeArguments.Select(analysis.Method.Concrete).ToArray(),
-                MethodArguments = m.MethodArguments.Select(analysis.Method.Concrete).ToArray(),
-            }).Distinct().ToArray();
+            .OfType<Symbol>().Where(s => s.Kind == SymbolKind.Method).Select(s => (MethodRef)s.Value).Distinct().ToArray();
         var fields = new FieldAccessModel(types, analysis.Method, Summary, referenced);
         var templates = new TemplateRecovery(types, analysis.Method, Summary, fields);
         var lowered = BodyBuilder.Build(analysis, oracle, fields, templates);
@@ -150,6 +145,7 @@ public sealed class MethodDecompiler
         var idioms = rewriter.Run(function);
         if (idioms.Errors.Count > 0)
             return RecoveryDiagnostics.Fail(entry, $"L2 {idioms.Errors[0]}", rule: "Prepare");
+        GenericContext.Instantiate(function, method);
         ExceptionNormalization.Run(function, ExceptionFacts.WrapperWithoutDestructor(facts.Checks));
         var environment = new MethodEnvironment(method, signature, shapes);
         var splits = PathSplitting.Run(function, f => ValueModel.Build(f, environment),
