@@ -36,6 +36,17 @@ internal static class ArrayPointerLoopsPass
             return value;
         }
         int Stride(Use array) => arrays.TryGetValue(Root(array).Variable, out var size) ? size : arrayStride?.Invoke(array) ?? 0;
+        int OffsetStride(Variable offset)
+        {
+            var strides = function.Blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk)
+                .OfType<Binary>().Where(b => b.Op == BinOp.Add).Select(b => b switch
+                {
+                    { Left: Use array, Right: Use index } when index.Variable == offset => Stride(array),
+                    { Left: Use index, Right: Use array } when index.Variable == offset => Stride(array),
+                    _ => 0,
+                }).Where(s => s > 0).Distinct().ToArray();
+            return strides is [var stride] ? stride : 0;
+        }
         var owners = function.Blocks.SelectMany(b => b.Statements.SelectMany(s => s switch
             { Define d => new[] { d.Target }, Phi p => [p.Target], Call c => c.Defines.Where(v => v is not null), _ => [] }).Select(v => (Variable: v, Block: b)))
             .ToDictionary(p => p.Variable, p => p.Block);
@@ -57,12 +68,13 @@ internal static class ArrayPointerLoopsPass
                 {
                     var initial = Expand(new Use(pointer.Sources[seed], 64));
                     var terms = TermsPass.Terms(initial);
-                    if (terms.OfType<Use>().Where(u => Stride(u) > 0).ToArray() is not [var array]
+                    var roots = terms.OfType<Use>().Where(u => Stride(u) > 0).ToArray();
+                    var stride = roots is [var array] ? Stride(array) : initial is Const ? OffsetStride(pointer.Target) : 0;
+                    if (stride <= 0
                         || terms.OfType<Const>().Aggregate(0L, (sum, c) => sum + c.Signed) < RuntimeLayout.ArrayData
                         || ExprMap.Walk(initial).OfType<Use>().Any(u => u.Variable.Version != 0
                             && (!owners.TryGetValue(u.Variable, out var owner) || owner == block || !dominators.Dominates(owner.Index, block.Index)))
-                        || Stride(array) is not (> 0 and var stride)
-                        || definition(new Use(pointer.Sources[1 - seed], 64)) is not Binary { Op: BinOp.Add, Left: Use previous, Right: Const step }
+                        || definition(new Use(pointer.Sources[1 - seed], 64)) is not Binary { Op: BinOp.Add, Width: 64, Left: Use previous, Right: Const step }
                         || step.Value != (ulong)stride || previous.Variable != pointer.Target
                         || function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().Any(p => p != pointer && p.Sources.Contains(pointer.Target)))
                         continue;

@@ -47,6 +47,7 @@ internal static class ArchitectureChecks
         UnchangedBarriers(checks, facts);
         CardMarkingBarriers(checks);
         AffineInductions(checks);
+        ArrayOffsetInductions(checks);
         PhiLoadWidths(checks, facts);
         FloatingOperands(checks, facts, types);
         StackGuards(checks, facts);
@@ -615,6 +616,29 @@ internal static class ArchitectureChecks
             var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
             check.Equal(variant == "aligned", AffineInductionPass.Run(function, e => e is Use use ? definitions.GetValueOrDefault(use.Variable) : null),
                 $"线性计数器 {variant}");
+        }
+    }
+
+    private static void ArrayOffsetInductions(Assertions check)
+    {
+        foreach (var variant in new[] { "matched", "wrong-stride", "narrow-offset" })
+        {
+            var array = new Variable(Storage.Gpr(0), 0);
+            var start = new Variable(Storage.Gpr(1), 1); var offset = start with { Version = 2 }; var next = start with { Version = 3 };
+            var entry = new Block(0); var loop = new Block(8); var back = new Block(16);
+            entry.Statements = [new Define(0, start, Expr.C(32, 64)), new Jump(4, 8)];
+            loop.Statements = [new Phi(8, offset, [start, next]),
+                new Store(8, new Binary(BinOp.Add, new Use(array, 64), new Use(offset, 64), 64), Expr.C(0, 64)), new Jump(12, 16)];
+            back.Statements = [new Define(16, next, new Binary(BinOp.Add, new Use(offset, 64), Expr.C(variant == "wrong-stride" ? 16UL : 8UL, 64),
+                variant == "narrow-offset" ? 32 : 64)), new Jump(20, 8)];
+            MachineFunction.AddEdge(entry, loop); MachineFunction.AddEdge(loop, back); MachineFunction.AddEdge(back, loop);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 24, CodeRegion.Managed, default), Blocks = [entry, loop, back] };
+            var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+            function.Renumber();
+            var serial = 0;
+            check.Equal(variant == "matched", ArrayPointerLoopsPass.Run(function, new Dictionary<Variable, int> { [array] = 8 },
+                e => e is Use use ? definitions.GetValueOrDefault(use.Variable) : null, () => new Variable(Storage.Temp(serial++), 1)),
+                $"数组字节偏移计数器 {variant}");
         }
     }
 
