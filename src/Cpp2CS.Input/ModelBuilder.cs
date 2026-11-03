@@ -307,11 +307,13 @@ namespace Cpp2CS.Input
             {
                 Image = image,
                 MetadataVersion = metadata.Version,
+                Il2CppVersion = il2Cpp.Version,
                 Assemblies = assemblies,
                 Types = types,
                 Methods = methods,
                 Fields = fields,
                 RuntimeTypes = runtimeTypes,
+                MetadataUsageSlots = il2Cpp.metadataUsages ?? Array.Empty<ulong>(),
                 MethodSpecs = methodSpecs,
                 FieldRefs = fieldRefs,
                 StringLiterals = literals,
@@ -423,7 +425,6 @@ namespace Cpp2CS.Input
         /// </summary>
         private void ReadCustomAttributes(AssemblyDef[] assemblies, MethodDef[] methods, FieldDef[] fields, PropertyDef[] properties)
         {
-            if (metadata.Version < 29) throw new NotSupportedException($"元数据版本 {metadata.Version} 的特性由生成函数构造，尚未支持");
             var byToken = new Dictionary<uint, Action<IReadOnlyList<CustomAttributeDef>>>();
             for (var a = 0; a < assemblies.Length; a++)
             {
@@ -444,6 +445,32 @@ namespace Cpp2CS.Input
                     }
                     foreach (var property in type.Properties) byToken[property.Token] = list => property.CustomAttributes = list;
                     foreach (var definition in type.Events) byToken[definition.Token] = list => definition.CustomAttributes = list;
+                }
+                if (metadata.Version < 29)
+                {
+                    // v24-v28 的属性只给出类型和构造器索引，不保存构造实参；只在类型只有一个无参构造器时恢复该属性，
+                    // 其余属性保持缺失，避免写出与元数据不一致的构造签名。
+                    for (var r = imageDef.customAttributeStart; r < imageDef.customAttributeStart + imageDef.customAttributeCount; r++)
+                    {
+                        var range = metadata.attributeTypeRanges[r];
+                        var list = new List<CustomAttributeDef>();
+                        for (var k = 0; k < range.count; k++)
+                        {
+                            var typeIndex = metadata.attributeTypes[range.start + k];
+                            if (typeIndex < 0 || typeIndex >= il2Cpp.types.Length)
+                                throw new InvalidDataException($"属性类型索引无效：{typeIndex}");
+                            var attributeType = il2Cpp.types[typeIndex];
+                            if (attributeType.type is not (Il2CppTypeEnum.IL2CPP_TYPE_CLASS or Il2CppTypeEnum.IL2CPP_TYPE_VALUETYPE))
+                                continue;
+                            var definition = DefinitionOf(attributeType);
+                            var constructors = definition.Methods.Where(m => m.Name == ".ctor").ToArray();
+                            if (constructors.Length != 1 || constructors[0].Parameters.Count != 0) continue;
+                            list.Add(new CustomAttributeDef(constructors[0], [], [], []));
+                        }
+                        if (list.Count == 0 || !byToken.TryGetValue(range.token, out var legacyAssign)) continue;
+                        legacyAssign(list);
+                    }
+                    continue;
                 }
                 for (var r = imageDef.customAttributeStart; r < imageDef.customAttributeStart + imageDef.customAttributeCount; r++)
                 {
@@ -589,7 +616,11 @@ namespace Cpp2CS.Input
         private TypeRef ConvertGenericInstance(Il2CppType type)
         {
             var genericClass = il2Cpp.MapVATR<Il2CppGenericClass>(type.data.generic_class);
-            var definition = Definition(Runtime(genericClass.type));
+            var definition = il2Cpp.Version >= 27
+                ? Definition(Runtime(genericClass.type))
+                : genericClass.typeDefinitionIndex is var index && index >= 0 && index < types.Length
+                    ? types[index]
+                    : throw new InvalidDataException($"泛型实例的类型定义索引无效：{genericClass.typeDefinitionIndex}");
             return new DefinitionRef(definition, Instantiation(genericClass.context.class_inst));
         }
 

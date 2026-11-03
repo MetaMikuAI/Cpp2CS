@@ -291,12 +291,16 @@ public sealed class ProgramModel
 {
     public required ImageDocument Image { get; init; }
     public required double MetadataVersion { get; init; }
+    /// <summary>Il2CppDumper 解析出的 IL2CPP 运行时版本；运行时结构布局按它选择。</summary>
+    public required double Il2CppVersion { get; init; }
     public required IReadOnlyList<AssemblyDef> Assemblies { get; init; }
     public required IReadOnlyList<TypeDef> Types { get; init; }
     public required IReadOnlyList<MethodDef> Methods { get; init; }
     public required IReadOnlyList<FieldDef> Fields { get; init; }
     /// <summary>运行时 Il2CppType 表（metadata registration types）对应的引用。</summary>
     public required IReadOnlyList<TypeRef> RuntimeTypes { get; init; }
+    /// <summary>注册表给出的元数据使用槽地址；数量以元数据使用对为准，旧版本注册表计数可能为 0。</summary>
+    public required IReadOnlyList<ulong> MetadataUsageSlots { get; init; }
     public required IReadOnlyList<MethodRef> MethodSpecs { get; init; }
     public required IReadOnlyList<FieldRef> FieldRefs { get; init; }
     public required IReadOnlyList<string> StringLiterals { get; init; }
