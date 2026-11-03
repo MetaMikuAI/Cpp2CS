@@ -50,7 +50,7 @@ internal sealed class MethodEnvironment(MethodRef method, MachineSignature signa
     {
         var storage = call.Results[index];
         if (Layout.Of(storage) is { } cell) return Written(syms, call, cell, arguments);
-        if (call.Op is not null && !Shape(call).IsDispatch)
+        if (Shape(call).IsRuntime)
             return storage == Storage.Gpr(0) || call.Results.Length == 1 ? syms.Result(call, 0, 64) : null;
         if (Shape(call).Signature?.Return is not { Transfer: Transfer.Value } result) return null;
         foreach (var piece in result.Pieces)

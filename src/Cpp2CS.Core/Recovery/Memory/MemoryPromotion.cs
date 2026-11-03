@@ -225,7 +225,7 @@ internal sealed class MemoryPromotion
     private List<Effect> Effects(Call call)
     {
         var effects = new List<Effect>();
-        if (call.Op is { } op && !shapes(call).IsDispatch)
+        if (call.Op is { } op && shapes(call).IsRuntime)
         {
             foreach (var effect in Runtime.RuntimeOps.Of(op.Kind)?.Effects?.Invoke(call, abi) ?? [])
                 if (effect.Argument < call.Arguments.Length && Resolve(call.Arguments[effect.Argument]) is var (space, offset))

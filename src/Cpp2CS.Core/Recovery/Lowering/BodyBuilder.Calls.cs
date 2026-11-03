@@ -16,7 +16,7 @@ internal sealed partial class BodyBuilder
     {
         var arguments = operands.Skip(1).Take(call.Arguments.Length).ToArray();
         var shape = analysis.Environment.Shape(call);
-        if (call.Op is { } op && !shape.IsDispatch)
+        if (call.Op is { } op && shape.IsRuntime)
             return LowerRuntime(block, index, call, op, arguments, output);
         var signature = shape.Signature;
         if (signature is null)

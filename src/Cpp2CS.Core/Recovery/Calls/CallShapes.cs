@@ -10,7 +10,8 @@ public sealed record CallShape(Call Call, IReadOnlyList<MethodRef> Candidates, M
     public IReadOnlySet<Storage> Unused { get; init; } = new HashSet<Storage>();
     /// <summary>经运行时分派的托管调用：按托管签名传参，以 callvirt 调用。</summary>
     public bool IsDispatch => Call.Op?.Kind is OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual;
-    public bool IsRuntime => Call.Op is not null && !IsDispatch;
+    public bool IsRuntime => Call.Op is not null && !IsDispatch
+        && !(Call.Op.Kind == OpKind.CallMethodPointer && Candidates.Count == 1);
 }
 
 /// <summary>
@@ -25,7 +26,7 @@ public sealed class CallShapes(ProgramFacts facts, ManagedAbi abi, Func<ulong, S
     {
         if (call.Resolved is { } resolved)
             return new(call, [resolved], abi.Machine(resolved, out _));
-        if (call.Op is { Operand: MethodRef method } && call.Op.Kind is OpKind.CallGenericVirtual or OpKind.InvokeGeneric or OpKind.InvokeConstrainedGeneric)
+        if (call.Op is { Operand: MethodRef method } && call.Op.Kind is OpKind.CallGenericVirtual or OpKind.InvokeGeneric or OpKind.InvokeConstrainedGeneric or OpKind.CallMethodPointer)
             return new(call, [method], abi.Machine(method, out _));
         if (call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target })
         {

@@ -317,7 +317,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
 
     private TypeRef? ResultType(Call call)
     {
-        if (call.Op is { } op && !shapes(call).IsDispatch)
+        if (call.Op is { } op && shapes(call).IsRuntime)
             return Runtime.RuntimeOps.Of(op.Kind)?.ResultType?.Invoke(call, this);
         return Callee(call) is { } callee && callee.Concrete(callee.Method.ReturnType) is var ret && !ManagedTypes.IsVoid(ret) ? ret : null;
     }
