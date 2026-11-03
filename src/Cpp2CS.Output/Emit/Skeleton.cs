@@ -76,13 +76,16 @@ public sealed class Skeleton
             if (methods[method.Index].HasBody) SetStubBody(method);
     }
 
-    /// <summary>把所有程序集写到 directory（文件名为映像名）。</summary>
+    /// <summary>没有扩展名的元数据映像按 DLL 输出，供程序集解析器查找。</summary>
+    public static string ImageFileName(string imageName) => Path.HasExtension(imageName) ? imageName : imageName + ".dll";
+
+    /// <summary>把所有程序集写到 directory。</summary>
     public void Write(string directory)
     {
         Directory.CreateDirectory(directory);
         foreach (var assembly in assemblies)
         {
-            var path = Path.Combine(directory, assembly.MainModule.Name);
+            var path = Path.Combine(directory, ImageFileName(assembly.MainModule.Name));
             assembly.Write(path);
             using var pe = new PEReader(File.OpenRead(path));
             var metadata = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader(pe);

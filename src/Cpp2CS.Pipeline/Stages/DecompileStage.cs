@@ -36,13 +36,13 @@ internal static class DecompileStage
             var wanted = sourceGroups.GetValueOrDefault(assemblyName) ?? [];
             if (sourceLayout == "project")
             {
-                var count = SourceProject.Write(Path.Combine(sourceAssemblies, assemblyName), sourceAssemblies, sources,
+                var count = SourceProject.Write(Path.Combine(sourceAssemblies, Skeleton.ImageFileName(assemblyName)), sourceAssemblies, sources,
                     t => all || wanted.Contains((t.Namespace, t.Name)), transforms);
                 files += count;
                 Log($"C# {assemblyName}：{count} 个类型文件，累计 {files}");
                 continue;
             }
-            foreach (var source in Decompilation.Decompile(Path.Combine(sourceAssemblies, assemblyName), sourceAssemblies,
+            foreach (var source in Decompilation.Decompile(Path.Combine(sourceAssemblies, Skeleton.ImageFileName(assemblyName)), sourceAssemblies,
                 t => wanted.Contains((t.Namespace, t.Name)) || t.FullName == "Cpp2CS.NativeImports", false, recoveringBodies: true, transforms: transforms))
             {
                 File.WriteAllText(Path.Combine(sources, new string((assemblyName + "_" + source.TypeName).Select(c => invalid.Contains(c) ? '_' : c).ToArray()) + ".cs"), source.Source);
