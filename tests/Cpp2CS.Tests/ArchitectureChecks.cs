@@ -38,6 +38,7 @@ internal static class ArchitectureChecks
         StaticAccessorReferences(checks, types);
         StaticGenericLocations(checks, facts, types);
         ReturnedTemplates(checks, types);
+        ReturnedPredicates(checks, types);
         NestedEnumStack(checks);
         InterfaceSlots(checks, types);
         RepresentationCopies(checks, facts, types);
@@ -560,6 +561,54 @@ internal static class ArchitectureChecks
         var interleaved = Run(true);
         check.True(interleaved.Body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk)
             .OfType<FieldValue>().Count(f => f.Field.Field == other) == 1, "无关对象上的读取必须保留，即使后续区域可以独立证明");
+    }
+
+    private static void ReturnedPredicates(Assertions check, ManagedTypes types)
+    {
+        var owner = Type("StatusStorage", 45);
+        var ownerRef = new DefinitionRef(owner, []);
+        var field = new FieldDef { Index = 45, Owner = owner, Name = "state", Type = types.Int32, Attributes = FieldAttributes.Private, Offset = 16 };
+        owner.Fields = [field];
+        var definition = Method(owner, "Read", 45);
+        definition.ReturnType = types.Int32;
+        owner.Methods = [definition];
+        var method = new MethodRef(definition, [], []);
+        var operation = Method(Type("StatusSource", 46), "Query", 46, MethodAttributes.Public | MethodAttributes.Static);
+        operation.ReturnType = types.Int32;
+        var query = new MethodRef(operation, [], []);
+        var callerDefinition = Method(Type("StatusConsumer", 47), "Run", 47);
+        callerDefinition.ReturnType = types.Boolean;
+        var caller = new MethodRef(callerDefinition, [], []);
+        var state = new LocalValue(new Variable(Storage.Temp(45), 1), types.Int32, 32);
+        var returned = new LocalValue(new Variable(Storage.Temp(46), 1), types.Int32, 32);
+        var result = new LocalValue(new Variable(Storage.Temp(47), 1), types.Boolean, 8);
+        var zero = new ConstantValue(0, types.Int32, 32);
+        var one = new ConstantValue(1, types.Int32, 32);
+        FieldValue Read(ManagedValue receiver) => new(receiver, new FieldRef(field, ownerRef), types.Int32, 32);
+        ManagedValue Compare(ManagedValue value) => new ComparisonValue(Cond.Ne, value, zero, types.Boolean);
+        var call = new ManagedCall(8, new ManagedInvocation(query, null, [], false), returned, false);
+        var template = new ManagedBody(method,
+        [
+            new(0, [new ManagedBranch(0, Compare(Read(new ArgumentValue(-1, ownerRef, 64))), new(8, []), new(16, []))]),
+            new(8, [call, new ManagedReturn(12, returned)]),
+            new(16, [new ManagedReturn(16, one)]),
+        ]);
+        MethodRecoveryResult? Summary(MethodRef requested) => requested == method ? new(method, 0, template, []) : null;
+        TemplateResult Run(bool consistent)
+        {
+            var body = new ManagedBody(caller,
+            [
+                new(0, [new ManagedAssignment(0, state, Read(new ArgumentValue(0, ownerRef, 64)) with { Pending = new(0, "待证字段", false) }),
+                    new ManagedBranch(4, Compare(state), new(8, []), new(16, []))]),
+                new(8, [call, new ManagedJump(12, new(24, [new(result, Compare(returned))]))]),
+                new(16, [new ManagedJump(16, new(24, [new(result, new ConstantValue(consistent ? 1UL : 0UL, types.Boolean, 8))]))]),
+                new(24, [new ManagedReturn(24, result)]),
+            ]);
+            return new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary))
+                .Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
+        }
+        check.True(Run(true).Holes.Count == 0, "返回值比较可在所有路径证明后承接到同一布尔局部");
+        check.True(Run(false).Holes.Count > 0, "常量路径与同一返回值比较不一致时拒绝恢复");
     }
 
     private static void NestedEnumStack(Assertions check)

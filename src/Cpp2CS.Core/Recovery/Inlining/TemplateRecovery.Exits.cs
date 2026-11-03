@@ -118,6 +118,8 @@ internal sealed partial class TemplateRecovery
         if (match.Ends.Any(e => e.Returns)) return match.Fail("返回路径与续接路径混合");
         if (match.Ends.Count == 0 || match.Ends.Any(e => e.Exit != match.Ends[0].Exit)) return match.Fail("各路径在调用方的出口不同");
         LocalValue? result = null;
+        LocalValue? returned = null;
+        ManagedValue? view = null;
         if (!ManagedTypes.IsVoid(method.Method.ReturnType))
         {
             var returnType = method.Concrete(method.Method.ReturnType);
@@ -140,6 +142,8 @@ internal sealed partial class TemplateRecovery
                 result = candidate;
                 break;
             }
+            if (result is null && JoinPredicate(match, returnType) is { } predicate)
+                (result, returned, view) = predicate;
             // 调用结果可被丢弃；额外求值的返回项不得引入异常或副作用。区域外使用仍由 Replace 检查。
             if (result is null && !match.Ends.All(e => e.Result is { } value && NonThrowingInlineValue(value)))
                 return match.Fail("返回值没有承接的局部，且无法证明额外求值无副作用");
@@ -149,13 +153,65 @@ internal sealed partial class TemplateRecovery
         match.Exit = match.Ends[0].Exit;
         match.ExitCopies = rest[0];
         match.Result = result;
-        if (result is not null && !result.Type.Equals(method.Concrete(method.Method.ReturnType)))
+        if (result is not null && view is not null)
+        {
+            match.ResultStorage = result;
+            match.Result = returned;
+            match.ExitCopies = [.. rest[0], (result, view)];
+        }
+        else if (result is not null && !result.Type.Equals(method.Concrete(method.Method.ReturnType)))
         {
             match.ResultStorage = result;
             match.Result = NewLocal(method.Concrete(method.Method.ReturnType));
             match.ExitCopies = [.. rest[0], (result, new ConversionValue(ConvKind.ZeroExtend, match.Result, result.Type, result.Width))];
         }
         return true;
+    }
+
+    /// <summary>合流可承接返回值的比较结果；用一条非常量路径提出表达式，再逐路径验证，包括已折叠成常量的路径。</summary>
+    private (LocalValue Storage, LocalValue Result, ManagedValue View)? JoinPredicate(InlineMatch match, TypeRef returnType)
+    {
+        var result = NewLocal(returnType);
+        ManagedValue? Held(InlineEnd end, LocalValue target) => end.Copies.FirstOrDefault(c => c.Target.Variable == target.Variable).Value
+            ?? end.Env.GetValueOrDefault(target.Variable);
+        foreach (var end in match.Ends.Where(e => e.Result is not null and not ConstantValue))
+        foreach (var target in end.Copies.Select(c => c.Target).Where(c => types.Kind(c.Type) == TypeKind.Bool))
+        {
+            if (Held(end, target) is not { } held || ReturnedPredicate(held, end.Result!, result) is not { } predicate) continue;
+            var trial = new Dictionary<int, ManagedValue>(match.Binding);
+            bool Carries(InlineEnd path)
+            {
+                if (path.Result is not { } value || Held(path, target) is not { } actual) return false;
+                ManagedValue Substitute(ManagedValue child) => child.Equals(result) ? value : MapTerm(child, Substitute);
+                var expected = (ComparisonValue)Substitute(predicate);
+                if (expected is { Left: ConstantValue left, Right: ConstantValue right }
+                    && ConstantComparison(expected.Condition, left, right) is { } constant)
+                    return Unify(new ConstantValue(constant ? 1UL : 0UL, types.Boolean, 8), actual, trial);
+                return Unify(expected, actual, trial);
+            }
+            if (!match.Ends.All(Carries)) continue;
+            foreach (var (key, value) in trial) match.Binding[key] = value;
+            return (target, result, predicate);
+        }
+        return null;
+    }
+
+    private ComparisonValue? ReturnedPredicate(ManagedValue tested, ManagedValue returned, LocalValue result)
+    {
+        if (types.Kind(result.Type) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Reference) || AsComparison(tested) is not { } comparison) return null;
+        ManagedValue? Carrier(ManagedValue value) => value switch
+        {
+            _ when SameTerm(value, returned) => result,
+            ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate } conversion when Carrier(conversion.Operand) is { } operand
+                => conversion with { Operand = operand },
+            _ => null,
+        };
+        ComparisonValue? predicate = null;
+        if (Carrier(comparison.Left) is { } left && comparison.Right is ConstantValue) predicate = comparison with { Left = left };
+        else if (Carrier(comparison.Right) is { } right && comparison.Left is ConstantValue) predicate = comparison with { Right = right };
+        if (predicate is not null && types.Kind(result.Type) == TypeKind.Reference && (predicate.Condition is not (Cond.Eq or Cond.Ne)
+            || predicate.Left is not ConstantValue { Bits: 0 } && predicate.Right is not ConstantValue { Bits: 0 })) return null;
+        return predicate;
     }
 
 
@@ -168,24 +224,14 @@ internal sealed partial class TemplateRecovery
         Walker At(InlineEnd end) => new() { Blocks = blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Env = new(end.Env) };
         ComparisonValue? predicate = null;
         var result = NewLocal(returnType);
-        ManagedValue? Carrier(ManagedValue value, ManagedValue returned) => value switch
-        {
-            _ when SameTerm(value, returned) => result,
-            ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate } conversion when Carrier(conversion.Operand, returned) is { } operand
-                => conversion with { Operand = operand },
-            _ => null,
-        };
         foreach (var end in match.Ends)
         {
             var walker = At(end);
-            if (end.Result is not { } returned || returned is ConstantValue || walker.Current is not ManagedBranch branch || Term(walker, branch.Condition) is not { } tested || AsComparison(tested) is not { } comparison) continue;
-            if (Carrier(comparison.Left, returned) is { } left && comparison.Right is ConstantValue) predicate = comparison with { Left = left };
-            else if (Carrier(comparison.Right, returned) is { } right && comparison.Left is ConstantValue) predicate = comparison with { Right = right };
+            if (end.Result is not { } returned || returned is ConstantValue || walker.Current is not ManagedBranch branch || Term(walker, branch.Condition) is not { } tested) continue;
+            predicate = ReturnedPredicate(tested, returned, result);
             if (predicate is not null) break;
         }
         if (predicate is null) return false;
-        if (types.Kind(returnType) == TypeKind.Reference && (predicate.Condition is not (Cond.Eq or Cond.Ne)
-            || predicate.Left is not ConstantValue { Bits: 0 } && predicate.Right is not ConstantValue { Bits: 0 })) return false;
         ManagedValue Apply(ManagedValue value)
         {
             ManagedValue Substitute(ManagedValue child) => child.Equals(result) ? value : MapTerm(child, Substitute);
