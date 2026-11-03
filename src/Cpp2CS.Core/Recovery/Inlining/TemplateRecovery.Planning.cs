@@ -60,9 +60,9 @@ internal sealed partial class TemplateRecovery
         var region = internalBlocks.Append(startBlock).ToHashSet();
         foreach (var other in body.Blocks.Where(b => !region.Contains(b.Address)))
             if (other.Statements.SelectMany(ManagedValues.Edges).Any(e => internalBlocks.Contains(e.Target))) { failure = "区域内的块从区域外进入"; return null; }
-        // 纯跳转与局部复制不会抛出异常，尾部这类块可在 try 外；实际效果仍须保留起点的异常上下文。
+        // 纯跳转与已证明不抛异常的复制可在 try 外；实际效果仍须保留起点的异常上下文。
         bool Inert(ulong block) => blocks[block].Statements.All(s => s is ManagedJump jump
-            && jump.Edge.Copies.All(c => c.Value is LocalValue or ArgumentValue or ConstantValue));
+            && jump.Edge.Copies.All(c => NonThrowingInlineValue(c.Value)));
         if (body.Regions.Any(r => internalBlocks.Contains(r.HandlerEntry)
             || region.Any(b => !Inert(b) && (r.Try.Contains(b) != r.Try.Contains(startBlock) || r.Handler.Contains(b) != r.Handler.Contains(startBlock)))))
         { failure = "区域跨越异常边界"; return null; }

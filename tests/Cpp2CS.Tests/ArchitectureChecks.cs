@@ -712,7 +712,7 @@ internal static class ArchitectureChecks
             new(16, [new ManagedReturn(16, one)]),
         ]);
         MethodRecoveryResult? Summary(MethodRef requested) => requested == method ? new(method, 0, template, []) : null;
-        TemplateResult Run(bool consistent, string? saved = null, bool sharedCopy = false)
+        TemplateResult Run(bool consistent, string? saved = null, bool sharedCopy = false, bool outsidePredicate = false, bool outsideCall = false)
         {
             var savedLocal = new LocalValue(new Variable(Storage.Temp(48), 1), types.Boolean, 8);
             var external = new LocalValue(new Variable(Storage.Temp(49), 1), types.Int32, 32);
@@ -749,6 +749,16 @@ internal static class ArchitectureChecks
                         new(20, [new ManagedJump(20, new(24, [new(result, savedLocal)]))]),
                         new(32, [new ManagedJump(32, new(20, [new(savedLocal, new ConstantValue(0, types.Boolean, 8))]))])],
                 };
+            if (outsidePredicate)
+                body = body with
+                {
+                    Blocks = [.. body.Blocks.Select(b => b.Address != 8 ? b : b with
+                        { Statements = [call, new ManagedJump(12, new(20, [new(external, returned)]))] }),
+                        new(20, [new ManagedJump(20, new(24, [new(result, Compare(external))]))]),
+                        new(40, [new ManagedReturn(40, new ConstantValue(0, types.Boolean, 8))])],
+                    Regions = [new([0, 8], 40, [40], null, ManagedRegionKind.Catch)],
+                };
+            if (outsideCall) body = body with { Regions = [new([0, 16], 24, [24], null, ManagedRegionKind.Catch)] };
             return new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary))
                 .Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
         }
@@ -758,6 +768,8 @@ internal static class ArchitectureChecks
         check.True(chained.Holes.Count == 0, "共享出口复制逐边组合后可承接同一返回值比较");
         check.True(chained.Body.Blocks.Any(b => b.Address == 20), "仍有外部入边的共享复制块保留");
         check.True(Run(false, sharedCopy: true).Holes.Count > 0, "复制链不能掩盖不同路径的结果差异");
+        check.Equal(0, Run(true, outsidePredicate: true).Holes.Count, "不抛异常的出口比较复制可以位于 try 外");
+        check.True(Run(true, outsideCall: true).Holes.Count > 0, "真实调用不能跨越异常上下文搬移");
         TemplateResult BooleanBranch(bool inverted, bool consistent)
         {
             definition.ReturnType = types.Boolean;
