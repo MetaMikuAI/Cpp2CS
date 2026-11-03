@@ -339,68 +339,9 @@ internal sealed partial class TemplateRecovery
         foreach (var (variable, value) in caller.Env)
             if (entryLocals.TryGetValue(variable, out var local)) match.Inputs.Add((value, local));
         var callee = new Walker { Blocks = template.Blocks.ToDictionary(b => b.Address), Caller = false, Block = template.Blocks[0].Address, Index = 0 };
-        if (Explore(callee, caller, match, 0) && (ConcludePredicate(match, template.Method, body, callerBlocks) || Conclude(match, template.Method))) return match;
+        if (Explore(callee, caller, match, 0) && ConcludeExit(match, template.Method, body, callerBlocks)) return match;
         failure = match.Failure ?? "比对失败";
         return null;
-    }
-
-    /// <summary>
-    /// 各路径须在同一点结束。有返回值时，承接它的是调用方在出口处的同一个局部：出口复制的目标（多路径时即合流处的 φ）或区域内定义的局部，
-    /// 在每条路径上都等于模板的返回值；其余出口复制在各路径上相同。
-    /// </summary>
-    private bool Conclude(InlineMatch match, MethodRef method)
-    {
-        var returnedType = method.Concrete(method.Method.ReturnType);
-        var callerReturn = caller.Concrete(caller.Method.ReturnType);
-        if (match.Ends.Count > 0 && match.Ends.All(e => e.Returns)
-            && (returnedType.Equals(callerReturn) || types.IsAssignable(returnedType, callerReturn)))
-        {
-            match.Exit = match.Ends[0].Exit;
-            match.ExitCopies = [];
-            match.Returns = true;
-            return true;
-        }
-        if (match.Ends.Any(e => e.Returns)) return match.Fail("返回路径与续接路径混合");
-        if (match.Ends.Count == 0 || match.Ends.Any(e => e.Exit != match.Ends[0].Exit)) return match.Fail("各路径在调用方的出口不同");
-        LocalValue? result = null;
-        if (!ManagedTypes.IsVoid(method.Method.ReturnType))
-        {
-            var returnType = method.Concrete(method.Method.ReturnType);
-            var first = match.Ends[0];
-            if (first.Result is null) return false;
-            var candidates = first.Copies.Select(c => c.Target).Concat(first.Env.Keys.Where(match.Defined.ContainsKey).Select(v => LocalOf(match, v)).OfType<LocalValue>())
-                .Where(l => l.Type.Equals(returnType) || types.Kind(returnType) == TypeKind.Bool && types.Kind(l.Type) == TypeKind.Int).DistinctBy(l => l.Variable);
-            foreach (var candidate in candidates)
-            {
-                var trial = new Dictionary<int, ManagedValue>(match.Binding);
-                bool Carries(InlineEnd end)
-                {
-                    var held = end.Copies.FirstOrDefault(c => c.Target.Variable.Equals(candidate.Variable)) is { Target: not null } copy
-                        ? copy.Value : end.Env.GetValueOrDefault(candidate.Variable);
-                    return held is not null && end.Result is { } value
-                        && Unify(candidate.Type.Equals(returnType) ? value : new ConversionValue(ConvKind.ZeroExtend, value, candidate.Type, candidate.Width), held, trial);
-                }
-                if (!match.Ends.All(Carries)) continue;
-                foreach (var (key, value) in trial) match.Binding[key] = value;
-                result = candidate;
-                break;
-            }
-            // 调用结果可被丢弃；额外求值的返回项不得引入异常或副作用。区域外使用仍由 Replace 检查。
-            if (result is null && !match.Ends.All(e => e.Result is { } value && NonThrowingInlineValue(value)))
-                return match.Fail("返回值没有承接的局部，且无法证明额外求值无副作用");
-        }
-        var rest = match.Ends.Select(e => e.Copies.Where(c => result is null || !c.Target.Variable.Equals(result.Variable)).ToArray()).ToArray();
-        if (rest.Any(r => !r.SequenceEqual(rest[0]))) return match.Fail("出口复制在各路径上不同");
-        match.Exit = match.Ends[0].Exit;
-        match.ExitCopies = rest[0];
-        match.Result = result;
-        if (result is not null && !result.Type.Equals(method.Concrete(method.Method.ReturnType)))
-        {
-            match.ResultStorage = result;
-            match.Result = NewLocal(method.Concrete(method.Method.ReturnType));
-            match.ExitCopies = [.. rest[0], (result, new ConversionValue(ConvKind.ZeroExtend, match.Result, result.Type, result.Width))];
-        }
-        return true;
     }
 
     /// <summary>区域内定义的局部（取赋值目标的类型）。</summary>
@@ -507,90 +448,6 @@ internal sealed partial class TemplateRecovery
             }
             callee.Index++;
             caller.Index++;
-        }
-        return false;
-    }
-
-    /// <summary>模板的一条路径返回：调用方从当前位置沿无条件跳转到达的点是这条路径的出口，连同出口边上的复制记为一个终点。</summary>
-    private bool Finish(Walker caller, InlineMatch match, ManagedValue? result)
-    {
-        if (result is not null && !CaptureReturnValue(caller, match, result)) return false;
-        var copies = new List<(LocalValue, ManagedValue)>();
-        var continuation = false;
-        for (var steps = 0; steps < 16 && caller.Current is ManagedJump jump; steps++)
-        {
-            // 共享续接中的空跳转可旁路，但不并入内联区域；其他入边仍保留原块。
-            continuation |= caller.Index == 0 && caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) > 1;
-            if (continuation && jump.Edge.Copies.Count > 0) break;
-            if (!continuation) Cover(caller, match);
-            foreach (var copy in jump.Edge.Copies)
-            {
-                if (Term(caller, copy.Value) is not { } value) return false;
-                copies.Add((copy.Target, value));
-            }
-            if (!caller.Blocks.ContainsKey(jump.Edge.Target)) return false;
-            caller.Block = jump.Edge.Target;
-            caller.Index = 0;
-        }
-        var returns = result is null && caller.Current is ManagedReturn { Value: null }
-            && !continuation
-            && (caller.Index > 0 || caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) <= 1);
-        if (result is not null && !continuation && caller.Current is ManagedReturn { Value: { } returned }
-            && Term(caller, returned) is { } actual)
-        {
-            var trial = new Dictionary<int, ManagedValue>(match.Binding);
-            if (Unify(result, actual, trial))
-            {
-                foreach (var (key, value) in trial) match.Binding[key] = value;
-                returns = true;
-            }
-        }
-        if (returns) Cover(caller, match);
-        match.Ends.Add(new InlineEnd((caller.Block, caller.Index), copies, new Dictionary<Variable, ManagedValue>(caller.Env), result, returns));
-        return true;
-    }
-
-    /// <summary>返回表达式的读取可拆成若干赋值；只纳入结果本身及其读取子项，不越过无关求值。</summary>
-    private bool CaptureReturnValue(Walker caller, InlineMatch match, ManagedValue result)
-    {
-        var terms = new List<ManagedValue>();
-        void Collect(ManagedValue value)
-        {
-            if (value is Observed) terms.Add(value);
-            MapTerm(value, child => { Collect(child); return child; });
-        }
-        Collect(result);
-        if (terms.Count == 0) return true;
-        for (var steps = 0; steps < 256; steps++)
-        {
-            if (caller.Index >= caller.Blocks[caller.Block].Statements.Count) return false;
-            if (caller.Current is ManagedJump jump)
-            {
-                if (caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == jump.Edge.Target)) > 1)
-                    return true;
-                Cover(caller, match);
-                if (!Follow(caller, jump.Edge)) return false;
-                continue;
-            }
-            if (caller.Current is not ManagedAssignment assignment || Term(caller, assignment.Value) is not { } value) return true;
-            Dictionary<int, ManagedValue>? binding = null;
-            var complete = false;
-            foreach (var expected in new[] { result }.Concat(terms))
-            {
-                var trial = new Dictionary<int, ManagedValue>(match.Binding);
-                if (!Unify(expected, value, trial)) continue;
-                binding = trial;
-                complete = ReferenceEquals(expected, result);
-                break;
-            }
-            if (binding is null) return true;
-            foreach (var (key, bound) in binding) match.Binding[key] = bound;
-            Cover(caller, match);
-            caller.Env[assignment.Target.Variable] = value;
-            match.Defined[assignment.Target.Variable] = value;
-            match.Locals[assignment.Target.Variable] = assignment.Target;
-            caller.Index++;
-            if (complete) return true;
         }
         return false;
     }
