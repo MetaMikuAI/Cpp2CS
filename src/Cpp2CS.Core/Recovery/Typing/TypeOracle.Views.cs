@@ -27,6 +27,27 @@ public sealed partial class TypeOracle
         && FieldAt(structure, low / 8 + RuntimeLayout.ObjectHeaderSize, phi.Width, false, false) is var (path, fieldType)
             ? (whole, structure, path, fieldType) : null;
 
+    /// <summary>标量合流的投影复用完整载体，避免为循环中的每一级截断建立新的合流。</summary>
+    public (PhiSym Whole, TypeRef Type, int Low)? ProjectedScalar(PhiSym phi) =>
+        phi.Width is > 1 and < 64 and not (8 or 16 or 32)
+        && phi.Projection is var (whole, low) && ScalarBits(whole, []) && IntegerRepresentation(whole) is var (source, integer)
+        && low + phi.Width <= types.Bits(integer) ? (whole, source, low) : null;
+
+    private bool ScalarBits(Sym value, HashSet<Sym> seen)
+    {
+        value = SymTable.Resolve(value);
+        if (!seen.Add(value)) return true;
+        return value switch
+        {
+            ConstSym => true,
+            PhiSym phi => phi.Sources.Length > 0 && phi.Sources.All(s => s is not null && ScalarBits(s, seen)),
+            ConcatSym concat => concat.Parts.All(p => ScalarBits(p, seen)),
+            SliceSym slice => ScalarBits(slice.Base, seen),
+            _ => TypeOf(value) is { } type
+                && types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer,
+        };
+    }
+
     /// <summary>标量位型的整数载体；浮点位片先按同宽整数解释，保留 NaN、符号与负零的原始位。</summary>
     public (TypeRef Source, TypeRef Integer)? IntegerRepresentation(Sym value)
     {

@@ -544,6 +544,17 @@ internal static class ArchitectureChecks
         var merge = new Block(8);
         MachineFunction.AddEdge(new Block(0), merge);
         var whole = values.Syms.Phi(merge, "typed-whole", 64);
+        var integerWhole = values.Syms.Phi(merge, "integer-whole", 64);
+        values.Syms.SetSource(integerWhole, 0, values.Syms.Const(1, 64));
+        var integerPiece = new PhiSym(merge, "integer-piece", 31) { Projection = (integerWhole, 0) };
+        check.True(oracle.ProjectedScalar(integerPiece) is { Low: 0, Type: var carrier } && carrier == types.Int64,
+            "非标准位宽的合流投影复用完整整数载体");
+        var vectorWhole = values.Syms.Phi(merge, "vector-whole", 128);
+        check.True(oracle.ProjectedScalar(new PhiSym(merge, "vector-piece", 31) { Projection = (vectorWhole, 0) }) is null,
+            "未知向量的投影不能假定为整数");
+        var unknownWhole = values.Syms.Phi(merge, "unknown-whole", 64);
+        check.True(oracle.ProjectedScalar(new PhiSym(merge, "unknown-piece", 31) { Projection = (unknownWhole, 0) }) is null,
+            "没有完整来源的合流不能借用整数载体");
         values.Syms.SetSource(whole, 0, values.Syms.Arg(0, 64));
         var field = new PhiSym(merge, "field", 32) { Projection = (whole, 32) };
         check.True(oracle.ProjectedField(field) is { } projected && projected.Whole == whole && projected.Type == types.Single

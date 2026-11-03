@@ -41,6 +41,9 @@ internal sealed partial class BodyBuilder
                 {
                     if (oracle.ProjectedField(phi) is var (whole, wholeType, path, fieldType))
                         return Coerce(Nest(View(whole, wholeType, address), path, fieldType, false, address), expected, address);
+                    if (oracle.ProjectedScalar(phi) is var (scalar, scalarType, low))
+                        return Coerce(IntegerSlice(View(scalar, scalarType, address), low, phi.Width,
+                            oracle.Unconstrained(phi.Width) ?? types.Integer(phi.Width <= 32 ? 32 : 64, false), address), expected, address);
                     // 空跑时记录使用处要求的类型，作为 φ 的类型约束。
                     if (demand is not null && expected is not null) oracle.Use(phi, expected);
                     var type = oracle.TypeOf(phi) ?? expected ?? oracle.Unconstrained(phi.Width);
@@ -370,6 +373,8 @@ internal sealed partial class BodyBuilder
                 return Composite(concat, target, address);
             case ConstSym c:
                 return new ConstantValue(c.Value & Expr.Mask(targetWidth), target, targetWidth);
+            case PhiSym phi when oracle.ProjectedScalar(phi) is var (scalar, scalarType, low):
+                return IntegerSlice(View(scalar, scalarType, address), low, phi.Width, target, address);
             case SliceSym slice when oracle.EnclosingScalar(slice) is var (scalar, scalarType, low):
                 return IntegerSlice(View(scalar, scalarType, address), low, slice.Width, target, address);
             case SliceSym slice when oracle.IntegerRepresentation(slice.Base) is var (sourceType, integerType):
