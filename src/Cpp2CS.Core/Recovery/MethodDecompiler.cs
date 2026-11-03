@@ -92,7 +92,14 @@ public sealed class MethodDecompiler
     public MethodRecoveryResult Lower(MethodAnalysis analysis)
     {
         var oracle = new TypeOracle(types, facts, analysis.Method, analysis.Environment.Shape, analysis.Values, analysis.Memory);
-        var fields = new FieldAccessModel(types, analysis.Method, Summary);
+        var referenced = analysis.Function.Blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk)
+            .OfType<Symbol>().Where(s => s.Kind == SymbolKind.Method).Select(s => (MethodRef)s.Value)
+            .Select(m => m with
+            {
+                TypeArguments = m.TypeArguments.Select(analysis.Method.Concrete).ToArray(),
+                MethodArguments = m.MethodArguments.Select(analysis.Method.Concrete).ToArray(),
+            }).Distinct().ToArray();
+        var fields = new FieldAccessModel(types, analysis.Method, Summary, referenced);
         var templates = new TemplateRecovery(types, analysis.Method, Summary, fields);
         var lowered = BodyBuilder.Build(analysis, oracle, fields, templates);
         if (lowered.Body is null) return new(analysis.Method, analysis.Entry, null, lowered.Holes);

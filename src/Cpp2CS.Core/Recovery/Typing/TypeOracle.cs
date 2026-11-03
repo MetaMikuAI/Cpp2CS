@@ -525,6 +525,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         }
         if (root is EntitySym { Symbol: { Kind: SymbolKind.StaticFields or SymbolKind.ThreadStaticFields, Value: TypeRef owner } entity } && index is null)
         {
+            owner = Substitute(owner);
             var thread = entity.Kind == SymbolKind.ThreadStaticFields;
             return FieldAt(owner, (int)offset, width, true, thread) is var (path, type)
                 ? new Location(thread ? LocationKind.ThreadStatic : LocationKind.Static, null, null, 0, owner, path, type) : null;
@@ -638,7 +639,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             && CellType(cell) is { } cellType && types.Kind(cellType) == TypeKind.Struct)
             container = (cellType, local.Offset + offset - cell.Start + RuntimeLayout.ObjectHeaderSize, false, false);
         else if (root is EntitySym { Symbol: { Kind: SymbolKind.StaticFields or SymbolKind.ThreadStaticFields, Value: TypeRef owner } entity } && index is null)
-            container = (owner, offset, true, entity.Kind == SymbolKind.ThreadStaticFields);
+            container = (Substitute(owner), offset, true, entity.Kind == SymbolKind.ThreadStaticFields);
         else switch (TypeOf(root))
         {
             case ArrayRef array when types.Kind(array.Element) == TypeKind.Struct && ElementSize(array.Element) is var size and > 0 && offset >= RuntimeLayout.ArrayData

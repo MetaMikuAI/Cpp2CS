@@ -29,6 +29,8 @@ internal static class ArchitectureChecks
         EntryKinds(checks, facts, types);
         Templates(checks, types);
         Accessors(checks, types);
+        StaticAccessorReferences(checks, types);
+        StaticGenericLocations(checks, facts, types);
         ReturnedTemplates(checks, types);
         NestedEnumStack(checks);
         InterfaceSlots(checks, types);
@@ -256,6 +258,66 @@ internal static class ArchitectureChecks
         var covariance = new FieldAccessModel(types, caller, Upcast);
         check.True(covariance.Accessor(reference, types.String, false, ownerRef) is not null, "直接返回字段的引用上转型可证明");
         check.True(covariance.Accessor(reference, types.Int64, false, ownerRef) is null, "上转型不能把引用解释成整数");
+    }
+
+    private static void StaticAccessorReferences(Assertions check, ManagedTypes types)
+    {
+        var storage = Type("CacheStorage", 80);
+        storage.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        var owner = new DefinitionRef(storage, [types.Int32]);
+        var field = new FieldDef { Index = 80, Owner = storage, Name = "value", Type = types.Object,
+            Attributes = FieldAttributes.Private | FieldAttributes.Static, Offset = 0 };
+        storage.Fields = [field];
+        var factory = Type("CacheAccess", 81);
+        var getter = Method(factory, "Read", 80, MethodAttributes.Public | MethodAttributes.Static);
+        getter.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        getter.ReturnType = types.Object;
+        var hidden = Method(factory, "Hidden", 81, MethodAttributes.Private | MethodAttributes.Static);
+        hidden.GenericParameters = getter.GenericParameters;
+        hidden.ReturnType = types.Object;
+        var caller = new MethodRef(Method(Type("CacheConsumer", 82), "Run", 82), [], []);
+        var referenced = new MethodRef(getter, [], [types.Int32]);
+        var target = new FieldRef(field, owner);
+        var extraRead = false;
+        MethodRecoveryResult Summary(MethodRef method)
+        {
+            var value = new StaticFieldValue(new(field, new DefinitionRef(storage, method.MethodArguments)), types.Object, 64);
+            var statements = new List<ManagedStatement>();
+            if (extraRead) statements.Add(new ManagedAssignment(0, new(new Variable(Storage.Temp(80), 1), types.Object, 64), value));
+            statements.Add(new ManagedReturn(4, value));
+            return new(method, 0, new(method, [new(0, statements)]), []);
+        }
+        FieldAccessor? Find(MethodRef[] references, bool write = false) => new FieldAccessModel(types, caller, Summary, references)
+            .Accessor(target, types.Object, write, null);
+        check.True(Find([]) is null, "没有方法元数据证据时不猜测外部静态入口");
+        check.Equal(referenced, Find([referenced])!.Method, "已引用的泛型入口可证明另一类型的静态字段读取");
+        check.True(Find([new(getter, [], [types.String])]) is null, "泛型字段定义相同也不能混用不同实例的缓存");
+        check.True(Find([new(hidden, [], [types.Int32])]) is null, "外部静态入口仍须满足调用权限");
+        check.True(Find([referenced], true) is null, "静态 getter 不能证明字段写入");
+        extraRead = true;
+        check.True(Find([referenced]) is null, "不能吞掉访问器中未用于返回值的额外读取");
+    }
+
+    private static void StaticGenericLocations(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var storage = Type("GenericStatics", 83);
+        storage.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        storage.Fields = [new() { Index = 83, Owner = storage, Name = "items",
+            Type = new ArrayRef(new GenericParameterRef("T", false, 0), 1),
+            Attributes = FieldAttributes.Public | FieldAttributes.Static, Offset = 0 }];
+        var definition = Method(Type("StaticConsumer", 84), "Read", 84, MethodAttributes.Public | MethodAttributes.Static);
+        definition.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        var method = new MethodRef(definition, [], [types.Int32]);
+        var function = new MachineFunction { Entry = 0, Range = new(0, 4, CodeRegion.Managed, default), Blocks = [new(0) { Statements = [new Return(0)] }] };
+        var values = ValueModel.Build(function, new EmptyEnvironment());
+        var oracle = new TypeOracle(types, facts, method, _ => throw new NotSupportedException(), values);
+        var symbol = values.Syms.Entity(new Symbol(SymbolKind.StaticFields,
+            new DefinitionRef(storage, [new GenericParameterRef("T", true, 0)])));
+        var location = oracle.Locate(symbol, 64);
+        check.True(location?.Owner?.Equals(new DefinitionRef(storage, [types.Int32])) == true,
+            "静态字段的元数据类型代入当前方法实参");
+        check.True(location?.Type.Equals(new ArrayRef(types.Int32, 1)) == true,
+            "封闭静态字段读取保留数组元素类型");
     }
 
     private static void LowBitArithmetic(Assertions check)

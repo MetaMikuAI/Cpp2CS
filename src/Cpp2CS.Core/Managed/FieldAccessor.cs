@@ -1,7 +1,7 @@
 
 namespace Cpp2CS.Managed;
 
-/// <summary>属性元数据中的单字段访问器：L3 严格形态或自动属性语言定义；写出和执行证据由恢复闭包另行检查。</summary>
+/// <summary>单字段访问器：完整方法体证明或自动属性语言定义；写出和执行证据由恢复闭包另行检查。</summary>
 public sealed record FieldAccessor(MethodRef Method, FieldRef Field, TypeRef ValueType, int Width, bool Write)
 {
     /// <summary>字段与访问器的编译器特性、属性关联和签名符合自动属性语言定义；不是执行验证标记。</summary>
