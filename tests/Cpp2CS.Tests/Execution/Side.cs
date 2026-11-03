@@ -104,7 +104,10 @@ internal abstract partial class Side(World world)
     public ulong NewArray(ArrayRef type, long length)
     {
         if (length < 0) throw new Unsupported("负的数组长度（OverflowException 尚未建模）");
-        var address = New(type, RuntimeLayout.ArrayData + (int)length * World.StorageSize(type.Element), $"[{length}]");
+        var elementSize = World.StorageSize(type.Element);
+        if (length > (long)(World.HeapSize - RuntimeLayout.ArrayData) / elementSize)
+            throw new Unsupported("数组超出验证堆容量");
+        var address = New(type, RuntimeLayout.ArrayData + (int)length * elementSize, $"[{length}]");
         WriteValue(address + RuntimeLayout.ArrayMaxLength, (ulong)length, 8);
         return address;
     }

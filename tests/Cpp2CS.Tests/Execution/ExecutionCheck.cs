@@ -182,7 +182,7 @@ internal static partial class ExecutionCheck
             {
                 TypeRef? type = instruction.Operand switch
                 {
-                    Mono.Cecil.TypeReference t when instruction.OpCode.Code is Code.Isinst or Code.Box or Code.Ldtoken => cecil.Type(t),
+                    Mono.Cecil.TypeReference t when instruction.OpCode.Code is Code.Isinst or Code.Castclass or Code.Box or Code.Ldtoken => cecil.Type(t),
                     Mono.Cecil.TypeReference t when instruction.OpCode.Code == Code.Newarr => new ArrayRef(cecil.Type(t), 1),
                     Mono.Cecil.MethodReference m when instruction.OpCode.Code == Code.Newobj => cecil.Method(m).DeclaringType,
                     _ => null,

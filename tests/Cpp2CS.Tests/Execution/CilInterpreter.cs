@@ -359,6 +359,8 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     var type = context.Type((TypeReference)operand);
                     if (type is DefinitionRef { Definition.FullName: "System.Nullable" }) throw new Unsupported("Nullable 装箱");
                     var value = Pop();
+                    // box !T 在 T 为引用类型时保留原引用，不创建装箱对象。
+                    if (ManagedTypes.IsReferenceType(type)) { stack.Push(StackValue.O(value.Bits)); break; }
                     var size = world.StorageSize(type);
                     var box = side.New(type, RuntimeLayout.ObjectHeaderSize + size);
                     side.RunClassConstructor(type);
@@ -367,11 +369,16 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     stack.Push(StackValue.O(box));
                     break;
                 }
+                case Code.Castclass:
                 case Code.Isinst:
+                case Code.Unbox_Any when ManagedTypes.IsReferenceType(context.Type((TypeReference)operand)):
                 {
                     var value = Pop();
                     var type = context.Type((TypeReference)operand);
-                    stack.Push(StackValue.O(value.Bits != 0 && Types.IsAssignable(side.TypeOf(value.Bits), type) ? value.Bits : 0));
+                    var compatible = value.Bits == 0 || Types.IsAssignable(side.TypeOf(value.Bits), type);
+                    if (!compatible && instruction.OpCode.Code != Code.Isinst)
+                        throw new CilThrow(Types.Corlib("System.InvalidCastException"));
+                    stack.Push(StackValue.O(compatible ? value.Bits : 0));
                     break;
                 }
                 case Code.Unbox:
