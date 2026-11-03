@@ -123,10 +123,15 @@ internal static class IdiomPipeline
             if (state.ThreadStaticBlocks())
                 state.Cleanup();
         });
-        state.Passes.Run("idioms.FrameMemoryNormalizer.Run", () =>
+        state.Passes.Run("idioms.ConstantMemoryNormalizer.Run", () =>
         {
-            if (FrameMemoryNormalizer.Run(state.function, state.Fresh))
+            if (ConstantMemoryNormalizer.Run(state.function, state.Fresh))
+            {
                 state.Cleanup();
+                // 复制的真实存储展开后，GC 屏障才能核对到对应的写入。
+                state.Calls();
+                state.Cleanup();
+            }
         });
         state.Passes.Run("idioms.MathImportNormalizer.Run", () =>
         {
