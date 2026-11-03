@@ -43,6 +43,7 @@ internal static class ArchitectureChecks
         RepresentationCopies(checks, facts, types);
         ConstructorStoreOrder(checks, types);
         LowBitArithmetic(checks);
+        ArrayIndices(checks);
         Barriers(checks, types);
         UnchangedBarriers(checks, facts);
         CardMarkingBarriers(checks);
@@ -599,6 +600,19 @@ internal static class ArchitectureChecks
         check.True(!RuntimeHelpers.CardMarkingBody(externalBranch), "跳出已证明函数体的实现不能归一");
     }
 
+    private static void ArrayIndices(Assertions check)
+    {
+        var syms = new SymTable();
+        var index = syms.Arg(0, 32);
+        check.True(ReferenceEquals(index, TypeOracle.ArrayIndex(syms.ZeroExtend(index, 64))), "数组访问与边界检查共用零扩展下标");
+        check.True(ReferenceEquals(index, TypeOracle.ArrayIndex(syms.Convert(ConvKind.SignExtend, index, 64))), "数组下标保留 32 位来源");
+        var whole = new PhiSym(new Block(0), new object(), 64);
+        var low = new PhiSym(whole.Block, new object(), 32) { Projection = (whole, 0) };
+        check.True(ReferenceEquals(whole, TypeOracle.ArrayIndex(low)), "数组下标的低位合流投影统一回到整体");
+        var narrow = syms.Slice(index, 0, 16);
+        check.True(ReferenceEquals(narrow, TypeOracle.ArrayIndex(narrow)), "不能丢弃 16 位下标的截断");
+    }
+
     private static void AffineInductions(Assertions check)
     {
         foreach (var variant in new[] { "aligned", "different-edges", "narrow-counter" })
@@ -614,7 +628,7 @@ internal static class ArchitectureChecks
             MachineFunction.AddEdge(entry, loop); MachineFunction.AddEdge(loop, back); MachineFunction.AddEdge(back, loop);
             var function = new MachineFunction { Entry = 0, Range = new(0, 24, CodeRegion.Managed, default), Blocks = [entry, loop, back] };
             var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
-            check.Equal(variant == "aligned", AffineInductionPass.Run(function, e => e is Use use ? definitions.GetValueOrDefault(use.Variable) : null),
+            check.Equal(variant == "aligned", AffineInduction.Run(function, e => e is Use use ? definitions.GetValueOrDefault(use.Variable) : null),
                 $"线性计数器 {variant}");
         }
     }

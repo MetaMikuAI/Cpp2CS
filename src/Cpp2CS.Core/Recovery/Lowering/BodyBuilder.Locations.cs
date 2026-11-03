@@ -12,10 +12,6 @@ namespace Cpp2CS.Recovery.Lowering;
 /// <summary>位置与局部：读取、字段链、可寻址局部与局部的分配。</summary>
 internal sealed partial class BodyBuilder
 {
-    /// <summary>类指针所属的对象：引用类型对象偏移 0 处的 64 位读取。</summary>
-    private Sym? ClassOwner(Sym klass) => SymTable.Resolve(klass) is ReadSym { Width: 64 } read
-        && oracle.Decompose(read.Address) is (var root, 0, null, _) && oracle.TypeOf(root) is { } type && ManagedTypes.IsReferenceType(type) ? root : null;
-
     /// <summary>地址逃逸的单元对应的可寻址局部。</summary>
     private LocalValue CellLocal(LocalSym root)
     {
@@ -103,15 +99,7 @@ internal sealed partial class BodyBuilder
     /// </summary>
     private ManagedValue ElementIndex(Sym index, ulong address)
     {
-        while (true)
-        {
-            index = SymTable.Resolve(index);
-            if (index is SliceSym { Low: 0, Width: >= 32 } slice && slice.Base.Width > slice.Width) index = slice.Base;
-            else if (index is PhiSym { Projection: { Low: 0 } projection, Width: >= 32 } phi && projection.Whole.Width > phi.Width) index = projection.Whole;
-            else if (index is OpSym { Op: { Kind: OperatorKind.Convert } op, Args: [{ Width: 32 } narrow] } && op.Conversion == ConvKind.SignExtend) index = narrow;
-            else if (index is ConcatSym { Parts: [{ Width: 32 } low, ConstSym { Value: 0 }] }) index = low;
-            else break;
-        }
+        index = TypeOracle.ArrayIndex(index);
         return index.Width == 32 ? View(index, types.Int32, address) : View(index, types.Int64, address);
     }
 

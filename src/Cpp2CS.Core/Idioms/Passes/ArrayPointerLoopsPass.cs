@@ -66,7 +66,8 @@ internal static class ArrayPointerLoopsPass
             {
                 for (var seed = 0; seed < 2; seed++)
                 {
-                    var initial = Expand(new Use(pointer.Sources[seed], 64));
+                    if (InductionVariables.Read(block, pointer, seed, definition) is not { Width: 64 } induction) continue;
+                    var initial = Expand(induction.Initial);
                     var terms = TermsPass.Terms(initial);
                     var roots = terms.OfType<Use>().Where(u => Stride(u) > 0).ToArray();
                     var stride = roots is [var array] ? Stride(array) : initial is Const ? OffsetStride(pointer.Target) : 0;
@@ -74,11 +75,10 @@ internal static class ArrayPointerLoopsPass
                         || terms.OfType<Const>().Aggregate(0L, (sum, c) => sum + c.Signed) < RuntimeLayout.ArrayData
                         || ExprMap.Walk(initial).OfType<Use>().Any(u => u.Variable.Version != 0
                             && (!owners.TryGetValue(u.Variable, out var owner) || owner == block || !dominators.Dominates(owner.Index, block.Index)))
-                        || definition(new Use(pointer.Sources[1 - seed], 64)) is not Binary { Op: BinOp.Add, Width: 64, Left: Use previous, Right: Const step }
-                        || step.Value != (ulong)stride || previous.Variable != pointer.Target
+                        || induction.Step != (ulong)stride
                         || function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().Any(p => p != pointer && p.Sources.Contains(pointer.Target)))
                         continue;
-                    var index = block.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources.Length == 2 && definition(new Use(p.Sources[seed], 64)) is Const { Value: 0 } && definition(new Use(p.Sources[1 - seed], 64)) is Binary { Op: BinOp.Add, Left: Use prior, Right: Const { Value: 1 }, Width: 64 } && prior.Variable == p.Target);
+                    var index = InductionVariables.UnitCounter(block, seed, induction.Width, definition);
                     if (index is null)
                     {
                         var advanceBlock = function.Blocks.FirstOrDefault(b => b.Statements.OfType<Define>().Any(d => d.Target == pointer.Sources[1 - seed]));

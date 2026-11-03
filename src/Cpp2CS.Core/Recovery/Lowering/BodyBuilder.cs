@@ -2,6 +2,7 @@ using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Recovery.Control;
+using Cpp2CS.Recovery.Effects;
 using Cpp2CS.Recovery.Inlining;
 using Cpp2CS.Recovery.Memory;
 using Cpp2CS.Recovery.Runtime;
@@ -31,6 +32,7 @@ internal sealed partial class BodyBuilder
     private readonly HashSet<Sym> absorbedChecks = [];
     private readonly Dictionary<Call, LocalValue> exceptions = new(ReferenceEqualityComparer.Instance);
     private IReadOnlyList<ExceptionRegionPlan> regions = [];
+    private EffectAnalysis effects = null!;
     private IReadOnlyList<Block> order = [];
     private Block? currentBlock;
     private int nextLocal;
@@ -58,6 +60,7 @@ internal sealed partial class BodyBuilder
         if (!ExceptionRegions.Build(function).TryGet(out var plan, out var failure))
             return new(null, [new(failure.Address, failure.Reason)], new Dictionary<Variable, PendingConstruction>(), 0);
         regions = plan.Regions;
+        effects = new(values, oracle, regions);
         order = plan.Order;
         // 使用约束与类型解相互影响：直到解稳定，才使用这一轮记录的读取用途。
         while (true)

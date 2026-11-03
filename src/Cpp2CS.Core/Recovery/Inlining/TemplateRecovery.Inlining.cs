@@ -595,7 +595,7 @@ internal sealed partial class TemplateRecovery
     /// <summary>模板的项 m 与调用方的项 c 相同：形参绑定到调用方的项（首次出现时绑定，之后须一致），其余逐层同形。</summary>
     private bool SameTerm(ManagedValue left, ManagedValue right) => Unify(left, right, [], false);
 
-    internal bool Unify(ManagedValue m, ManagedValue c, Dictionary<int, ManagedValue> binding, bool bindArguments = true)
+    private bool Unify(ManagedValue m, ManagedValue c, Dictionary<int, ManagedValue> binding, bool bindArguments = true)
     {
         m = NormalizeBit(m);
         c = NormalizeBit(c);

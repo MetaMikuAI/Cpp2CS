@@ -1,5 +1,6 @@
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
+using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Ssa;
 using static Cpp2CS.Idioms.IdiomRewriter;
 
@@ -247,7 +248,7 @@ internal static class IdiomPipeline
         });
         state.Passes.Run("idioms.AffineInduction", () =>
         {
-            if (AffineInductionPass.Run(state.function, state.RawDefinition))
+            if (AffineInduction.Run(state.function, state.RawDefinition))
                 state.Cleanup();
         });
         state.Passes.Run("idioms.ArrayPointerLoops", () =>

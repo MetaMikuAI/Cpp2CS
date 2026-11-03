@@ -198,7 +198,7 @@ internal sealed partial class BodyBuilder
     private (Sym Owner, TypeRef Type)? ClassIdentity(Sym left, Sym right)
     {
         foreach (var (a, b) in new[] { (left, right), (right, left) })
-            if (ClassOwner(a) is { } owner && SymTable.Resolve(b) is EntitySym { Symbol: { Kind: SymbolKind.Class, Value: DefinitionRef type } }
+            if (oracle.ClassOwner(a) is { } owner && SymTable.Resolve(b) is EntitySym { Symbol: { Kind: SymbolKind.Class, Value: DefinitionRef type } }
                 && (type.Definition.Attributes & System.Reflection.TypeAttributes.Sealed) != 0)
                 return (owner, type);
         return null;
@@ -320,13 +320,19 @@ internal sealed partial class BodyBuilder
             || types.Size(structure) * 8 > bits.Width || oracle.WholeRead(bits, structure) is not null) return false;
         var hidden = types.Leaves(structure).Any(l => l.Path.Any(f => !this.fields.Accessible(f, f.DeclaringType))
             && SymTable.Resolve(values.Syms.Slice(bits, l.Offset * 8, oracle.LeafBits(l.Type))) is not ConstSym { Value: 0 });
-        return hidden && !Constructible(structure);
+        return hidden && !templates.CanConstructValue(structure);
     }
 
-    /// <summary>按叶子组成的结构体值：叶子字段都须对当前方法可访问，否则记为洞（被内联的构造函数尚无逆）。</summary>
+    /// <summary>按叶子组成结构体值；不可访问的字段由模板层证明构造，失败则记为洞。</summary>
     private ManagedValue Composed(DefinitionRef structure, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, ulong address)
     {
-        if (leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType))) && ValueConstructor(structure, leaves) is { } constructed) return constructed;
+        if (leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType)))
+            && templates.ProveValueConstruction(structure, leaves) is { } construction)
+        {
+            var arguments = construction.Arguments.Select((value, i) => value is AddressValue ? value
+                : Coerce(value, construction.Constructor.Concrete(construction.Constructor.Method.Parameters[i].Type), address)).ToArray();
+            return new NewObjectValue(construction.Constructor, arguments) { Transparent = true };
+        }
         foreach (var (path, _) in leaves)
             if (path.FirstOrDefault(f => !fields.Accessible(f, f.DeclaringType)) is { } hidden)
                 return Hole(address, $"内存 字段 {hidden.Field.Owner.FullName}.{hidden.Field.Name} 对调用方不可访问，结构体值按叶子组成", structure);

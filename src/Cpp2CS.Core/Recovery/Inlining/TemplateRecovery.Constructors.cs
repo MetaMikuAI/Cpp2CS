@@ -61,7 +61,7 @@ internal sealed partial class TemplateRecovery
         return invocation;
     }
 
-    internal List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>? ConstructorWrites(MethodRef method) =>
+    private List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>? ConstructorWrites(MethodRef method) =>
         summaries(method) is { Body: { Regions.Count: 0 } template } && method.DeclaringType is DefinitionRef structure
             ? ConstructorWrites(template, structure) : null;
 
