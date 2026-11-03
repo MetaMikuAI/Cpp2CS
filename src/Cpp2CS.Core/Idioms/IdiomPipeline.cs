@@ -245,6 +245,11 @@ internal static class IdiomPipeline
             if (state.ArrayAddressPhis())
                 state.Cleanup();
         });
+        state.Passes.Run("idioms.AffineInduction", () =>
+        {
+            if (AffineInductionPass.Run(state.function, state.RawDefinition))
+                state.Cleanup();
+        });
         state.Passes.Run("idioms.ArrayPointerLoops", () =>
         {
             if (state.ArrayPointerLoops())

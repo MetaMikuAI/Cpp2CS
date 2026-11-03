@@ -46,6 +46,7 @@ internal static class ArchitectureChecks
         Barriers(checks, types);
         UnchangedBarriers(checks, facts);
         CardMarkingBarriers(checks);
+        AffineInductions(checks);
         PhiLoadWidths(checks, facts);
         FloatingOperands(checks, facts, types);
         StackGuards(checks, facts);
@@ -595,6 +596,26 @@ internal static class ArchitectureChecks
         var externalBranch = body.ToArray();
         externalBranch[2] = 0x34000208; // cbz w8, body end
         check.True(!RuntimeHelpers.CardMarkingBody(externalBranch), "跳出已证明函数体的实现不能归一");
+    }
+
+    private static void AffineInductions(Assertions check)
+    {
+        foreach (var variant in new[] { "aligned", "different-edges", "narrow-counter" })
+        {
+            var entry = new Block(0); var loop = new Block(8); var back = new Block(16);
+            var origin = new Variable(Storage.Gpr(0), 1); var index = origin with { Version = 2 }; var next = origin with { Version = 3 };
+            var start = new Variable(Storage.Gpr(1), 1); var offset = start with { Version = 2 }; var advance = start with { Version = 3 };
+            entry.Statements = [new Define(0, origin, Expr.C(0, 64)), new Define(4, start, Expr.C(32, 64))];
+            loop.Statements = [new Phi(8, index, [origin, next]),
+                new Phi(8, offset, variant == "different-edges" ? [advance, start] : [start, advance])];
+            back.Statements = [new Define(16, next, new Binary(BinOp.Add, new Use(index, 64), Expr.C(1, 64), variant == "narrow-counter" ? 32 : 64)),
+                new Define(20, advance, new Binary(BinOp.Add, new Use(offset, 64), Expr.C(8, 64), 64))];
+            MachineFunction.AddEdge(entry, loop); MachineFunction.AddEdge(loop, back); MachineFunction.AddEdge(back, loop);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 24, CodeRegion.Managed, default), Blocks = [entry, loop, back] };
+            var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
+            check.Equal(variant == "aligned", AffineInductionPass.Run(function, e => e is Use use ? definitions.GetValueOrDefault(use.Variable) : null),
+                $"线性计数器 {variant}");
+        }
     }
 
     private static void Verdicts(Assertions check)
