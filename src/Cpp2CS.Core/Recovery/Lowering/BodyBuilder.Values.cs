@@ -209,6 +209,12 @@ internal sealed partial class BodyBuilder
     /// <summary>原子的一段：值类型的字段；整数的低位截断；bool 的低位即自身。</summary>
     private ManagedValue Slice(SliceSym slice, TypeRef? expected, ulong address)
     {
+        if (oracle.EnclosingScalar(slice) is { } scalar)
+        {
+            var target = expected is not null && types.Kind(expected) is TypeKind.Int or TypeKind.Bool or TypeKind.Pointer ? expected
+                : types.Integer(oracle.StorageBits(scalar.Type), false);
+            return Coerce(IntegerBits(slice, target, address)!, expected, address);
+        }
         if (slice.Base is ReadSym merged && oracle.Part(merged, slice.Low, slice.Width) is { } part)
         {
             Demand(merged);
@@ -364,15 +370,10 @@ internal sealed partial class BodyBuilder
                 return Composite(concat, target, address);
             case ConstSym c:
                 return new ConstantValue(c.Value & Expr.Mask(targetWidth), target, targetWidth);
+            case SliceSym slice when oracle.EnclosingScalar(slice) is var (scalar, scalarType, low):
+                return IntegerSlice(View(scalar, scalarType, address), low, slice.Width, target, address);
             case SliceSym slice when oracle.IntegerRepresentation(slice.Base) is var (sourceType, integerType):
-                {
-                    var sourceWidth = Width(integerType);
-                    var value = Coerce(View(slice.Base, sourceType, address), integerType, address);
-                    if (slice.Low > 0) value = new BinaryValue(BinOp.LShr, value, new ConstantValue((ulong)slice.Low, types.Int32, 32), integerType, sourceWidth);
-                    if (slice.Width < sourceWidth && slice.Low + slice.Width < sourceWidth)
-                        value = new BinaryValue(BinOp.And, value, new ConstantValue(Expr.Mask(slice.Width), integerType, sourceWidth), integerType, sourceWidth);
-                    return Resize(value, target);
-                }
+                return IntegerSlice(Coerce(View(slice.Base, sourceType, address), integerType, address), slice.Low, slice.Width, target, address);
             case not ConcatSym when oracle.IntegerRepresentation(part) is var (atomType, integerType):
                 return Resize(Coerce(View(part, atomType, address), integerType, address), target);
             case not (SliceSym or ConcatSym) when oracle.TypeOf(part) is DefinitionRef structure && types.Kind(structure) == TypeKind.Struct && part.Width <= targetWidth:
@@ -398,6 +399,17 @@ internal sealed partial class BodyBuilder
                 }
         }
         return null;
+    }
+
+    private ManagedValue IntegerSlice(ManagedValue source, int low, int width, TypeRef target, ulong address)
+    {
+        var sourceWidth = Width(source.Type);
+        var integer = types.Kind(source.Type) is TypeKind.Float or TypeKind.Double ? types.Integer(sourceWidth, false) : source.Type;
+        var value = Coerce(source, integer, address);
+        if (low > 0) value = new BinaryValue(BinOp.LShr, value, new ConstantValue((ulong)low, types.Int32, 32), integer, sourceWidth);
+        if (width < sourceWidth && low + width < sourceWidth)
+            value = new BinaryValue(BinOp.And, value, new ConstantValue(Expr.Mask(width), integer, sourceWidth), integer, sourceWidth);
+        return Resize(value, target);
     }
 
     /// <summary>整数值按宽度零扩展或截断到 target。</summary>

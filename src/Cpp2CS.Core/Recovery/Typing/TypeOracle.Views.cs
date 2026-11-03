@@ -6,6 +6,21 @@ namespace Cpp2CS.Recovery.Typing;
 
 public sealed partial class TypeOracle
 {
+    /// <summary>字段内部的位片先回到完整标量字段，再做移位与掩码；不跨字段或读取填充。</summary>
+    public (Sym Value, TypeRef Type, int Low)? EnclosingScalar(SliceSym slice)
+    {
+        IEnumerable<(int Bit, int Width, TypeRef Type)> fields = slice.Base is ReadSym read && Parts(read) is { } parts
+            ? parts.Select(p => (p.Bit, p.Width, p.Leaf.Type))
+            : TypeOf(slice.Base) is DefinitionRef structure && types.Kind(structure) == TypeKind.Struct
+                ? types.Leaves(structure).Select(l => (l.Offset * 8, StorageBits(l.Type), l.Type)) : [];
+        foreach (var (bit, width, type) in fields)
+            if (types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double
+                && slice.Low >= bit && slice.Low + slice.Width <= bit + width
+                && (slice.Low != bit || slice.Width != width))
+                return (values.Syms.Slice(slice.Base, bit, width), type, slice.Low - bit);
+        return null;
+    }
+
     /// <summary>合流投影已有完整结构体载体时保留该整体，让后续字段访问共用同一接收者。</summary>
     public (PhiSym Whole, TypeRef WholeType, IReadOnlyList<FieldRef> Path, TypeRef Type)? ProjectedField(PhiSym phi) =>
         phi.Projection is var (whole, low) && low % 8 == 0 && TypeOf(whole) is { } structure && types.Kind(structure) == TypeKind.Struct

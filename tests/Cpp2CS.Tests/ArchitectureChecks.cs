@@ -536,6 +536,11 @@ internal static class ArchitectureChecks
         var oracle = new TypeOracle(types, facts, method, _ => throw new NotSupportedException(), values);
         var pair = Structure("Pair", 61, 8, false, (types.Single, 0), (types.Single, 4));
         method.Method.Parameters = [new("pair", pair, 0, null, false), new("scalar", types.Int64, 0, null, false)];
+        var packed = values.Syms.Arg(0, 64);
+        check.True(oracle.EnclosingScalar(new SliceSym(packed, 33, 31)) is { Low: 1, Type: var pieceType } && pieceType == types.Single,
+            "结构体字段内部的位片按完整浮点字段的位型解释");
+        check.True(oracle.EnclosingScalar(new SliceSym(packed, 24, 16)) is null, "跨字段位片不能假定为一个标量");
+        check.True(oracle.EnclosingScalar(new SliceSym(packed, 32, 32)) is null, "完整字段不重复拆成自身的位片");
         var merge = new Block(8);
         MachineFunction.AddEdge(new Block(0), merge);
         var whole = values.Syms.Phi(merge, "typed-whole", 64);
