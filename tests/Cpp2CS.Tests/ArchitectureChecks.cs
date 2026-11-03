@@ -594,21 +594,37 @@ internal static class ArchitectureChecks
             new(16, [new ManagedReturn(16, one)]),
         ]);
         MethodRecoveryResult? Summary(MethodRef requested) => requested == method ? new(method, 0, template, []) : null;
-        TemplateResult Run(bool consistent)
+        TemplateResult Run(bool consistent, string? saved = null)
         {
+            var savedLocal = new LocalValue(new Variable(Storage.Temp(48), 1), types.Boolean, 8);
+            var external = new LocalValue(new Variable(Storage.Temp(49), 1), types.Int32, 32);
+            ManagedValue savedValue = Compare(new BinaryValue(BinOp.LShr, saved == "changed" ? state : external, one, types.Int32, 32));
+            if (saved == "memory") savedValue = Compare(Read(new ArgumentValue(0, ownerRef, 64)));
+            var entry = new List<ManagedStatement>
+            {
+                new ManagedAssignment(0, state, Read(new ArgumentValue(0, ownerRef, 64)) with { Pending = new(0, "待证字段", false) }),
+            };
+            if (saved is not null) entry.Add(new ManagedAssignment(2, savedLocal, savedValue));
+            entry.Add(new ManagedBranch(4, Compare(state), new(8, []), new(16, [])));
             var body = new ManagedBody(caller,
             [
-                new(0, [new ManagedAssignment(0, state, Read(new ArgumentValue(0, ownerRef, 64)) with { Pending = new(0, "待证字段", false) }),
-                    new ManagedBranch(4, Compare(state), new(8, []), new(16, []))]),
+                new(0, entry),
                 new(8, [call, new ManagedJump(12, new(24, [new(result, Compare(returned))]))]),
                 new(16, [new ManagedJump(16, new(24, [new(result, new ConstantValue(consistent ? 1UL : 0UL, types.Boolean, 8))]))]),
-                new(24, [new ManagedReturn(24, result)]),
+                new(24, [new ManagedReturn(24, saved is null ? result : new BooleanValue(true, result, savedLocal, types.Boolean))]),
             ]);
             return new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary))
                 .Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
         }
         check.True(Run(true).Holes.Count == 0, "返回值比较可在所有路径证明后承接到同一布尔局部");
         check.True(Run(false).Holes.Count > 0, "常量路径与同一返回值比较不一致时拒绝恢复");
+        var copied = Run(true, "stable");
+        check.True(copied.Holes.Count == 0 && copied.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
+            .Any(a => a.Value is ComparisonValue { Left: BinaryValue { Op: BinOp.LShr } }), "稳定整数表达式可提前保存，供内联区域外继续使用");
+        check.True(Run(true, "changed").Holes.Count > 0, "依赖区域内定义的表达式不能提前保存");
+        var memory = Run(true, "memory");
+        check.True(memory.Body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk)
+            .OfType<FieldValue>().Any(f => f.Field.Field == field), "读取内存的表达式仍保留实际读取，不按稳定整数副本消除");
     }
 
     private static void NestedEnumStack(Assertions check)

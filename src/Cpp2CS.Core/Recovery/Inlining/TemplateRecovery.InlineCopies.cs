@@ -8,7 +8,7 @@ internal sealed partial class TemplateRecovery
         (statement is ManagedAssignment assignment ? [assignment.Value] : ManagedValues.Of(statement))
         .Concat(ManagedValues.CopiedValues(statement));
 
-    /// <summary>区域内写入同一外部值的局部副本：旧值在入口已死，源值在区域内稳定，故可提前保存。</summary>
+    /// <summary>区域内写入同一稳定值的局部副本：旧值在入口已死或已等于该值，故可提前保存。</summary>
     private IReadOnlyList<ManagedAssignment> InlineCopies(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks,
         ulong startBlock, int start, InlineMatch match, IReadOnlySet<Variable> escaping)
     {
@@ -17,15 +17,25 @@ internal sealed partial class TemplateRecovery
         var addressed = body.Blocks.SelectMany(b => b.Statements).SelectMany(ReadValues).SelectMany(ManagedValues.Walk)
             .OfType<AddressValue>().SelectMany(a => ManagedValues.Walk(a.Target)).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
         var copies = new List<ManagedAssignment>();
+        bool Stable(ManagedValue value) => value switch
+        {
+            ConstantValue or ArgumentValue => true,
+            LocalValue source => !match.Defined.ContainsKey(source.Variable) && !edgeTargets.Contains(source.Variable) && !addressed.Contains(source.Variable),
+            ComparisonValue or NegatedValue or BooleanValue => ManagedValues.Children(value).All(Stable),
+            BinaryValue { Op: BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Shl or BinOp.LShr or BinOp.AShr }
+                => ManagedValues.Children(value).All(Stable),
+            ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate } conversion => Stable(conversion.Operand),
+            _ => false,
+        };
         foreach (var variable in escaping)
         {
             if (edgeTargets.Contains(variable) || addressed.Contains(variable)) continue;
             var writes = statements.OfType<ManagedAssignment>().Where(a => a.Target.Variable == variable).ToArray();
             if (writes.Length == 0 || statements.OfType<ManagedCall>().Any(c => c.Result?.Variable == variable)) continue;
             var value = writes[0].Value;
-            if (value is not (LocalValue or ConstantValue) || writes.Any(a => a.Value != value)) continue;
-            if (value is LocalValue source && (match.Defined.ContainsKey(source.Variable) || edgeTargets.Contains(source.Variable) || addressed.Contains(source.Variable))) continue;
-            if (LiveAt(body, blocks, startBlock, start, variable)) continue;
+            if (!Stable(value) || writes.Any(a => a.Value != value)) continue;
+            if (LiveAt(body, blocks, startBlock, start, variable)
+                && !match.Inputs.Any(input => input.Local.Variable == variable && SameTerm(input.Value, value))) continue;
             copies.Add(writes[0] with { Address = blocks[startBlock].Statements[start].Address });
         }
         return copies;
