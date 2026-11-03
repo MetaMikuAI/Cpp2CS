@@ -379,6 +379,23 @@ public static class RuntimeOps
         };
         yield return new(OpKind.Import)
         {
+            ResultType = (call, typing) => typing.Types.MathImport(call.Op?.Operand as string)?.Method.ReturnType,
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Op.Operand is not string symbol || MathImportSignature.Find(symbol) is not { } signature
+                    || c.Types.MathImport(symbol) is not { } method) return false;
+                var arguments = new List<ManagedValue>();
+                for (var i = 0; i < signature.Parameters.Length; i++)
+                {
+                    var position = c.Call.ArgumentIndex(signature.Register(i));
+                    if (position < 0 || position >= c.Arguments.Count) return false;
+                    var type = method.Method.Parameters[i].Type;
+                    arguments.Add(c.View(c.Arguments[position], type));
+                }
+                c.Emit(new ManagedCall(c.Call.Address, new(method, null, arguments, false), c.Local(c.Result, method.Method.ReturnType), false));
+                return true;
+            },
             Effects = (call, _) => call switch
             {
                 { Op.Operand: "memcpy" or "memmove", Arguments: [_, _, Ir.Const { Value: > 0 and <= 4096 } count] } =>

@@ -76,7 +76,7 @@ internal static class DirectPass
         {
             Op = new RuntimeOp(found.Kind, found.Operand),
             Arguments = found.Arguments,
-            Sources = []
+            Sources = found.Kind == OpKind.Import ? call.Sources : []
         };
     }
 

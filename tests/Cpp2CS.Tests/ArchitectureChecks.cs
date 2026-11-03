@@ -49,6 +49,7 @@ internal static class ArchitectureChecks
         JoinedPhiSlices(checks);
         CleanupDispatch(checks);
         PromotedDelegates(checks, facts, types);
+        MathImports(checks, types);
         ArrayIndices(checks);
         Barriers(checks, types);
         UnchangedBarriers(checks, facts);
@@ -444,6 +445,28 @@ internal static class ArchitectureChecks
                     "来源变化后整体合流保留真实拼接，不沿用失效的完整值证据");
             }
         }
+    }
+
+    private static void MathImports(Assertions check, ManagedTypes types)
+    {
+        var sine = types.MathImport("sinf")!;
+        check.True(sine.Method.NativeImport?.EntryPoint == "sinf" && sine.Method.ReturnType == types.Single
+            && sine.Method.Parameters.Select(p => p.Type).SequenceEqual([types.Single]), "单精度导入保留精确入口与签名");
+        check.True(ReferenceEquals(sine, types.MathImport("sinf")), "同一数学导入共享方法身份");
+        check.True(types.MathImport("atan2")!.Method.Parameters.Select(p => p.Type).SequenceEqual([types.Double, types.Double]), "双精度二元导入不改变精度");
+        check.True(types.MathImport("ldexpf")!.Method.Parameters.Select(p => p.Type).SequenceEqual([types.Single, types.Int32]), "整数指数保留独立寄存器类型");
+        check.True(types.MathImport("unknown") is null && types.MathImport("sincosf") is null, "未知签名与指针出参不当作标量导入");
+        var call = new Call(0, CallKind.Direct, Expr.C(100, 64))
+        {
+            Op = new(OpKind.Import, "ldexpf"), Sources = [Storage.Gpr(0), Storage.Vec(0)],
+            Arguments = [new Use(new Variable(Storage.Gpr(0), 0), 64), new Use(new Variable(Storage.Vec(0), 0), 128)],
+        };
+        var block = new Block(0) { Statements = [call, new Return(4)] };
+        var function = new MachineFunction { Entry = 0, Range = new(0, 8, CodeRegion.Managed, default), Blocks = [block] };
+        MathImportNormalizer.Run(function, () => new Variable(Storage.Temp(0), 1));
+        var normalized = block.Statements.OfType<Call>().Single();
+        check.True(normalized.Sources.SequenceEqual([Storage.Vec(0), Storage.Gpr(0)]) && normalized.Arguments.All(a => a.Width == 32),
+            "浮点与整数参数按各自寄存器取有效位并恢复声明次序");
     }
 
     private static void PromotedDelegates(Assertions check, ProgramFacts facts, ManagedTypes types)
