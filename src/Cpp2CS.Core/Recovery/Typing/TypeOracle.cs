@@ -16,7 +16,10 @@ public enum LocationKind : byte { Instance, Reference, Static, ThreadStatic, Ele
 /// <summary>访问的一段：字段 Leaf 的 [FieldBit, FieldBit+Width) 位位于访问的第 Bit 位起。</summary>
 public sealed record AccessPart(Location Leaf, int Bit, int FieldBit, int Width);
 
-public sealed record Location(LocationKind Kind, Sym? Base, Sym? Index, long ConstantIndex, TypeRef? Owner, IReadOnlyList<FieldRef> Path, TypeRef Type);
+public sealed record Location(LocationKind Kind, Sym? Base, Sym? Index, long ConstantIndex, TypeRef? Owner, IReadOnlyList<FieldRef> Path, TypeRef Type)
+{
+    public Sym? ByteOffset { get; init; }
+}
 
 /// <summary>
 /// 原子的类型与地址的位置。类型自下而上由定义给出：参数按签名，调用结果按被调用者，读取按位置，φ 取来源的汇合；
@@ -557,6 +560,23 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                 return null;
             case DefinitionRef reference when ManagedTypes.IsReferenceType(reference) && index is null:
                 return FieldAt(reference, (int)offset, width, false, false) is var (fields, fieldType2) ? new(LocationKind.Instance, root, null, 0, null, fields, fieldType2) : null;
+            case PointerRef pointer when index is not null || offset != 0:
+                {
+                    var size = ElementSize(pointer.Element);
+                    if (size > 0 && offset % size == 0 && width == StorageBits(pointer.Element)
+                        && (index is null || scale == size))
+                    {
+                        // 比例下标可能只保留低位；先零扩展再乘比例，保留模 2^64 的字节地址。
+                        var displacement = values.Syms.Const(unchecked((ulong)offset), 64);
+                        if (index is not null)
+                            displacement = values.Syms.Binary(BinOp.Add,
+                                values.Syms.Binary(BinOp.Mul, values.Syms.ZeroExtend(index, 64), values.Syms.Const((ulong)scale, 64), 64), displacement, 64);
+                        return new Location(LocationKind.Reference, root, null, 0, null, [], pointer.Element) { ByteOffset = displacement };
+                    }
+                    return index is null && types.Kind(pointer.Element) == TypeKind.Struct
+                        && FieldAt(pointer.Element, (int)offset + RuntimeLayout.ObjectHeaderSize, width, false, false) is var (pointerFields, pointerFieldType)
+                        ? new(LocationKind.Reference, root, null, 0, null, pointerFields, pointerFieldType) : null;
+                }
             case ByRefRef or PointerRef when index is null:
                 {
                     var element = rootType is ByRefRef r ? r.Element : ((PointerRef)rootType).Element;

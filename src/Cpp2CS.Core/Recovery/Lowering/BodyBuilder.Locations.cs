@@ -65,6 +65,8 @@ internal sealed partial class BodyBuilder
             case LocationKind.Reference:
                 {
                     var pointer = View(location.Base!, oracle.TypeOf(location.Base!), address);
+                    if (location.ByteOffset is { } offset)
+                        pointer = new PointerOffsetValue(pointer, View(offset, types.Int64, address));
                     return path.Count == 0 ? new IndirectValue(pointer, location.Type, Width(location.Type)) : Nest(pointer, path, location.Type, store, address);
                 }
             case LocationKind.Element:
