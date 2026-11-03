@@ -5,13 +5,13 @@ namespace Cpp2CS.Recovery.Inlining;
 internal sealed partial class TemplateRecovery
 {
     /// <summary>
-    /// 连续写入同一接收者（参数或局部）的不同字段、写入值不读内存且两两不别名（<see cref="MayAlias"/>）时可交换：
-    /// 接收者为空时两种次序都在第一次写入处抛出，此前没有其他效果。按优先字段、再按布局偏移排出一种规范次序，
-    /// 使基类构造模板所需的写入与本类写入分开。
+    /// 连续写入 this 的不同字段、写入值为参数或常量且两两不别名（<see cref="MayAlias"/>）时可交换。按优先字段、再按布局偏移
+    /// 排出一种规范次序，使基类构造模板所需的写入与本类写入分开。值限于参数与常量：局部或表达式在模板与调用方中的表示
+    /// 可能不同（一侧是局部，另一侧是内联的表达式），规范次序须对两侧一致。
     /// </summary>
     private ManagedBody CommuteIndependentStores(ManagedBody body, IReadOnlySet<FieldDef> preferred)
     {
-        static bool Plain(ManagedValue value) => value is ArgumentValue or LocalValue or ConstantValue;
+        static bool Plain(ManagedValue value) => value is ArgumentValue or ConstantValue;
         int Offset(FieldRef field) => field.DeclaringType is DefinitionRef owner
             && types.Layouts.Of(owner)?.Fields.FirstOrDefault(f => f.Field == field.Field) is { } slot ? slot.Offset : int.MaxValue;
         return body with { Blocks = body.Blocks.Select(block =>
@@ -19,7 +19,7 @@ internal sealed partial class TemplateRecovery
             var statements = block.Statements.ToArray();
             for (var first = 0; first < statements.Length; first++)
             {
-                if (statements[first] is not ManagedStore { Target: FieldValue { Receiver: var receiver } head, Value: var value } || !Plain(receiver) || !Plain(value)) continue;
+                if (statements[first] is not ManagedStore { Target: FieldValue { Receiver: ArgumentValue { Index: -1 } receiver } head, Value: var value } || !Plain(value)) continue;
                 var run = new List<FieldValue> { head };
                 var end = first + 1;
                 while (end < statements.Length && statements[end] is ManagedStore { Target: FieldValue next, Value: var stored }
