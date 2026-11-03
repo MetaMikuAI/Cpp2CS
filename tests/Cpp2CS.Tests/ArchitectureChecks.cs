@@ -40,6 +40,7 @@ internal static class ArchitectureChecks
         StaticGenericLocations(checks, facts, types);
         ReturnedTemplates(checks, types);
         ReturnedPredicates(checks, types);
+        ReturnedFields(checks, types);
         NestedEnumStack(checks);
         InterfaceSlots(checks, types);
         RepresentationCopies(checks, facts, types);
@@ -679,6 +680,61 @@ internal static class ArchitectureChecks
         var interleaved = Run(true);
         check.True(interleaved.Body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk)
             .OfType<FieldValue>().Count(f => f.Field.Field == other) == 1, "无关对象上的读取必须保留，即使后续区域可以独立证明");
+    }
+
+    private static void ReturnedFields(Assertions check, ManagedTypes types)
+    {
+        var pairDefinition = new TypeDef { Index = 150, Name = "ReturnedPair", Namespace = "Tests", Assembly = "Tests.dll", Token = 0,
+            Attributes = TypeAttributes.Public | TypeAttributes.SequentialLayout, IsValueType = true, IsEnum = false, Size = 8 };
+        pairDefinition.Fields = Enumerable.Range(0, 2).Select(i => new FieldDef { Index = 1500 + i, Owner = pairDefinition,
+            Name = $"f{i}", Type = types.Int32, Offset = i * 4, Attributes = FieldAttributes.Public }).ToArray();
+        var pair = new DefinitionRef(pairDefinition, []);
+        var owner = Type("PairStorage", 151);
+        var ownerType = new DefinitionRef(owner, []);
+        var state = new FieldDef { Index = 151, Owner = owner, Name = "state", Type = types.Int32, Attributes = FieldAttributes.Private, Offset = 16 };
+        owner.Fields = [state];
+        var read = Method(owner, "Read", 151);
+        read.ReturnType = pair;
+        owner.Methods = [read];
+        var method = new MethodRef(read, [], []);
+        var query = Method(Type("PairSource", 152), "Query", 152, MethodAttributes.Public | MethodAttributes.Static);
+        query.ReturnType = pair;
+        var consumer = Method(Type("PairConsumer", 153), "Consume", 153, MethodAttributes.Public | MethodAttributes.Static);
+        consumer.Parameters = [new("pair", pair, 0, null, false)];
+        var caller = new MethodRef(Method(Type("PairCaller", 154), "Run", 154), [], []);
+        var returned = new LocalValue(new Variable(Storage.Temp(150), 1), pair, 64);
+        var first = new LocalValue(new Variable(Storage.Temp(151), 1), types.Int32, 32);
+        var second = new LocalValue(new Variable(Storage.Temp(152), 1), types.Int32, 32);
+        var paths = types.Leaves(pair).Select(l => l.Path).ToArray();
+        ManagedValue Field(int index) => new FieldValue(returned, paths[index][0], types.Int32, 32);
+        ComposedValue Pair(ManagedValue a, ManagedValue b) => new(pair, [(paths[0], a), (paths[1], b)]);
+        ManagedValue Test(ManagedValue receiver, bool pending) => new ComparisonValue(Cond.Ne,
+            new FieldValue(receiver, new(state, ownerType), types.Int32, 32) { Pending = pending ? new(0, "待证字段", false) : null },
+            new ConstantValue(0, types.Int32, 32), types.Boolean);
+        var call = new ManagedCall(8, new(new(query, [], []), null, [], false), returned, false);
+        var one = new ConstantValue(1, types.Int32, 32);
+        var two = new ConstantValue(2, types.Int32, 32);
+        var template = new ManagedBody(method,
+        [
+            new(0, [new ManagedBranch(0, Test(new ArgumentValue(-1, ownerType, 64), false), new(8, []), new(16, []))]),
+            new(8, [call, new ManagedReturn(12, Pair(Field(0), Field(1)))]),
+            new(16, [new ManagedReturn(16, Pair(one, two))]),
+        ]);
+        MethodRecoveryResult? Summary(MethodRef requested) => requested == method ? new(method, 0, template, []) : null;
+        TemplateResult Run(bool consistent, bool complete)
+        {
+            var body = new ManagedBody(caller,
+            [
+                new(0, [new ManagedBranch(0, Test(new ArgumentValue(0, ownerType, 64), true), new(8, []), new(16, []))]),
+                new(8, [call, new ManagedJump(12, new(24, complete ? [new(first, Field(0)), new(second, Field(1))] : [new(first, Field(0))]))]),
+                new(16, [new ManagedJump(16, new(24, complete ? [new(first, one), new(second, consistent ? two : one)] : [new(first, one)]))]),
+                new(24, [new ManagedCall(24, new(new(consumer, [], []), null, [Pair(first, complete ? second : one)], false), null, false), new ManagedReturn(28, null)]),
+            ]);
+            return new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary)).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
+        }
+        check.Equal(0, Run(true, true).Holes.Count, "结构体返回值由多个字段局部承接时仍可证明完整返回");
+        check.True(Run(false, true).Holes.Count > 0, "一个字段在常量路径不同则拒绝结构体返回证明");
+        check.True(Run(true, false).Holes.Count > 0, "缺少叶子承接时不猜测结构体返回的对应关系");
     }
 
     private static void ReturnedPredicates(Assertions check, ManagedTypes types)

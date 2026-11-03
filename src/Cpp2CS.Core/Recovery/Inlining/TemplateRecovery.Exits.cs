@@ -124,6 +124,7 @@ internal sealed partial class TemplateRecovery
         LocalValue? result = null;
         LocalValue? returned = null;
         ManagedValue? view = null;
+        IReadOnlyList<(LocalValue Target, ManagedValue Value)> projections = [];
         var copied = match.Covered.SelectMany(p => ManagedValues.Edges(blocks[p.Block].Statements[p.Index]))
             .SelectMany(e => e.Copies).Select(c => c.Target)
             .Concat(match.Ends.SelectMany(e => e.Copies.Select(c => c.Target))).DistinctBy(l => l.Variable).ToArray();
@@ -148,14 +149,17 @@ internal sealed partial class TemplateRecovery
                 result = candidate;
                 break;
             }
+            if (result is null && JoinFields(match, returnType, copied) is { } aggregate)
+                (result, projections) = aggregate;
             if (result is null && JoinPredicate(match, returnType, copied) is { } predicate)
                 (result, returned, view) = predicate;
             // 调用结果可被丢弃；额外求值的返回项不得引入异常或副作用。区域外使用仍由 Replace 检查。
             if (result is null && !match.Ends.All(e => e.Result is { } value && NonThrowingInlineValue(value)))
                 return match.Fail("返回值没有承接的局部，且无法证明额外求值无副作用");
         }
-        var rest = new List<(LocalValue Target, ManagedValue Value)>();
-        foreach (var target in copied.Where(c => result is null || c.Variable != result.Variable))
+        var rest = projections.ToList();
+        foreach (var target in copied.Where(c => (result is null || c.Variable != result.Variable)
+            && !projections.Any(p => p.Target.Variable == c.Variable)))
         {
             var exit = match.Ends[0].Exit;
             var held = match.Ends.Select(e => e.Env.GetValueOrDefault(target.Variable) ?? target).ToArray();
@@ -179,6 +183,44 @@ internal sealed partial class TemplateRecovery
             match.ExitCopies = [.. rest, (result, new ConversionValue(ConvKind.ZeroExtend, match.Result, result.Type, result.Width))];
         }
         return true;
+    }
+
+    /// <summary>结构体返回值可由多个字段局部承接；每条返回路径都须证明这些局部对应同一组完整叶子。</summary>
+    private (LocalValue Result, IReadOnlyList<(LocalValue Target, ManagedValue Value)> Copies)? JoinFields(
+        InlineMatch match, TypeRef returnType, IReadOnlyList<LocalValue> copied)
+    {
+        if (returnType is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct
+            || match.Ends.Any(e => e.Result is not ComposedValue)) return null;
+        var leaves = types.Leaves(structure).ToArray();
+        if (leaves.Length == 0) return null;
+        var result = NewLocal(returnType);
+        var projections = new List<(LocalValue Target, ManagedValue Value)>();
+        var trial = new Dictionary<int, ManagedValue>(match.Binding);
+        foreach (var (path, type, _) in leaves)
+        {
+            ManagedValue value = result;
+            foreach (var field in path)
+            {
+                if (!fields.Accessible(field, value.Type)) return null;
+                var fieldType = field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
+                value = new FieldValue(value, field, fieldType, Width(fieldType));
+            }
+            bool Carries(InlineEnd end, LocalValue local, Dictionary<int, ManagedValue> binding) =>
+                ((ComposedValue)end.Result!).Leaves.FirstOrDefault(l => l.Path.SequenceEqual(path)).Value is { } expected
+                && end.Env.GetValueOrDefault(local.Variable) is { } actual && Unify(expected, actual, binding);
+            var matches = 0;
+            foreach (var local in copied.Where(c => c.Type.Equals(type) && !projections.Any(p => p.Target.Variable == c.Variable)))
+            {
+                var binding = new Dictionary<int, ManagedValue>(trial);
+                if (!match.Ends.All(e => Carries(e, local, binding))) continue;
+                trial = binding;
+                projections.Add((local, value));
+                matches++;
+            }
+            if (matches == 0) return null;
+        }
+        foreach (var (key, value) in trial) match.Binding[key] = value;
+        return (result, projections);
     }
 
     /// <summary>合流可承接返回值的比较结果；用一条非常量路径提出表达式，再逐路径验证，包括已折叠成常量的路径。</summary>
