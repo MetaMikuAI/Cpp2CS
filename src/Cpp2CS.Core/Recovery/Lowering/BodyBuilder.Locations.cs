@@ -42,7 +42,14 @@ internal sealed partial class BodyBuilder
     {
         if (oracle.Decompose(read.Address) is (ResultSym { Site: { Op.Kind: OpKind.BeginCatch } begin }, 0, null, _) && exceptions.TryGetValue(begin, out var exception))
             return exception;
-        if (oracle.Locate(read.Address, read.Width) is not { } location) return Hole(address, $"内存 读取位置 {read.Address}", null);
+        if (oracle.Locate(read.Address, read.Width) is not { } location)
+        {
+            if (oracle.NarrowRead(read) is not { } part) return Hole(address, $"内存 读取位置 {read.Address}", null);
+            var value = LocationValue(part.Leaf, address);
+            if (part.FieldBit != 0)
+                value = new BinaryValue(BinOp.LShr, value, new ConstantValue((ulong)part.FieldBit, types.Int32, 32), value.Type, Width(value.Type));
+            return new ConversionValue(ConvKind.Truncate, value, types.Integer(read.Width, true), read.Width);
+        }
         return LocationValue(location, address);
     }
 

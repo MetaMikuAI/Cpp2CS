@@ -229,7 +229,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             case ReadSym read when Decompose(read.Address) is (ResultSym { Site.Op.Kind: OpKind.BeginCatch }, 0, null, _):
                 return types.Corlib("System.Exception");
             case ReadSym read:
-                return Locate(read.Address, read.Width)?.Type;
+                return Locate(read.Address, read.Width)?.Type ?? (NarrowRead(read) is not null ? types.Integer(read.Width, true) : null);
             case ConcatSym concat when CompositeRead(concat) is { } whole:
                 return TypeOf(whole);
             case PhiSym phi:
@@ -589,6 +589,11 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     }
 
     private readonly Dictionary<ReadSym, IReadOnlyList<AccessPart>?> parts = [];
+
+    /// <summary>较窄的机器读取完全位于一个整数字段内；按小端位偏移读取后截断。</summary>
+    public AccessPart? NarrowRead(ReadSym read) => read.Width is 8 or 16 or 32
+        && Split(read.Address, read.Width) is [{ Bit: 0 } part] && part.Width == read.Width
+        && types.Kind(part.Leaf.Type) == TypeKind.Int && read.Width < StorageBits(part.Leaf.Type) ? part : null;
 
     /// <summary>不能整体定位的读取（相邻字段合并的读取）按布局拆成的整字段段；含部分段时不拆。</summary>
     public IReadOnlyList<AccessPart>? Parts(ReadSym read)
