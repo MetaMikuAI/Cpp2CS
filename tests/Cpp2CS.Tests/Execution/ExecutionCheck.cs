@@ -9,8 +9,8 @@ namespace Cpp2CS.Tests.Execution;
 /// <summary>
 /// 执行对照（方法级差分）：恢复清单中的方法并写出 CIL，按若干种子合成输入与环境，在同一份合成内存上分别解释 CIL、
 /// 在 Unicorn 中执行原机器码，比较事件序列（分配、调用及实参、抛出、返回值）与事件发生时两侧写过的内存。
-/// verified：至少一个用例可比较且全部一致；mismatch：任一用例不一致；not-checkable：没有可比较的用例（附原因）。
-/// 只对完整写出的方法执行；未写出的方法不计入判定。
+/// verified：全部请求用例一致；partial：部分用例一致，其余不支持；mismatch：任一用例不一致。
+/// 没有可比较用例或方法未写出均为验证不完整；对照器内部异常直接暴露。
 /// </summary>
 internal static partial class ExecutionCheck
 {
@@ -19,6 +19,7 @@ internal static partial class ExecutionCheck
     public static int Run(string binary, string metadata, string list, string[] options)
     {
         var caseCount = options.SkipWhile(o => o != "--cases").Skip(1).FirstOrDefault() is { } requested ? int.Parse(requested) : Cases;
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(caseCount);
         var runOptions = new RecoveryOptions();
         if (options.SkipWhile(o => o != "--fact-cache-file").Skip(1).FirstOrDefault() is { } cache)
             runOptions = runOptions with { FactCacheFile = Path.GetFullPath(cache) };
@@ -44,31 +45,25 @@ internal static partial class ExecutionCheck
         var interpreter = new CilInterpreter(cecil, index);
         interpreter.SetInline(emitter, skeleton);
         using var machine = new NativeMachine(facts);
-        var verdicts = new Dictionary<string, int>();
+        var verdicts = new Dictionary<ExecutionVerdict, int>();
         var output = options.SkipWhile(o => o != "--output").Skip(1).FirstOrDefault();
         using var table = output is null ? null : new StreamWriter(output) { AutoFlush = true };
         for (var i = 0; i < results.Length; i++)
         {
             var result = results[i];
             var name = $"0x{result.Entry:x} {result.Method}";
-            if (result.Body is null || problems.ContainsKey(result.Body)) continue;
-            Outcome outcome;
-            try
-            {
-                outcome = Check(targets[i].Instance, skeleton, cecil, interpreter, machine, index, verbose, caseCount, result.Entry);
-            }
-            catch (Exception e) when (e is not Unsupported)
-            {
-                // 对照器自身的缺陷单独计数，不中断其余方法。
-                outcome = new Outcome("not-checkable", 0, 0, $"；对照器异常 {e.GetType().Name}：{e.Message}", $"对照器异常 {e.GetType().Name}");
-            }
+            var outcome = result.Body is null
+                ? new Outcome(ExecutionVerdict.NotWritten, 0, 0, $"；{result.Holes.FirstOrDefault()?.Reason ?? "没有方法体"}")
+                : problems.TryGetValue(result.Body, out var problem)
+                    ? new Outcome(ExecutionVerdict.NotWritten, 0, 0, $"；{problem}")
+                    : Check(targets[i].Instance, skeleton, cecil, interpreter, machine, index, verbose, caseCount, result.Entry);
             verdicts[outcome.Verdict] = verdicts.GetValueOrDefault(outcome.Verdict) + 1;
-            table?.WriteLine($"0x{result.Entry:x}\t{result.Method}\t{outcome.Verdict}\t{outcome.Matches}/{caseCount}\t{outcome.Coverage:F2}\t{outcome.Detail.TrimStart('；')}");
-            if (outcome.Verdict != "verified") Console.WriteLine($"  {outcome.Verdict} {name}{outcome.Detail}");
+            table?.WriteLine($"0x{result.Entry:x}\t{result.Method}\t{outcome.Verdict.Label()}\t{outcome.Matches}/{caseCount}\t{outcome.Coverage:F2}\t{outcome.Detail.TrimStart('；')}");
+            if (outcome.Verdict != ExecutionVerdict.Verified) Console.WriteLine($"  {outcome.Verdict.Label()} {name}{outcome.Detail}");
         }
         Console.WriteLine($"执行对照：写出 {results.Count(r => r.Body is not null && !problems.ContainsKey(r.Body))}/{results.Length}，"
-            + string.Join("，", verdicts.OrderBy(p => p.Key).Select(p => $"{p.Key} {p.Value}")));
-        return verdicts.GetValueOrDefault("mismatch") == 0 ? 0 : 1;
+            + string.Join("，", verdicts.OrderBy(p => p.Key).Select(p => $"{p.Key.Label()} {p.Value}")));
+        return ExecutionVerdicts.ExitCode(verdicts.Keys);
     }
 
 
@@ -76,11 +71,11 @@ internal static partial class ExecutionCheck
     {
         public MethodRecoveryResult Recover(MethodRef method, ulong entry) => decompiler.Recover(method, entry);
         public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => decompiler.RecoverInstance(method, entry);
-        public MethodRecoveryResult RecoverDependency(MethodRef method) => decompiler.RecoverDependency(method);
+        public MethodRecoveryResult RecoverDefinition(MethodDef method) => decompiler.RecoverDefinition(method);
     }
 
     /// <summary>Reason：不可检查时的主要原因（用例最多的一类，去掉具体类型与方法名以便汇总）。</summary>
-    private sealed record Outcome(string Verdict, int Matches, double Coverage, string Detail, string Reason = "", int ThrowCases = 0);
+    private sealed record Outcome(ExecutionVerdict Verdict, int Matches, double Coverage, string Detail, string Reason = "", int ThrowCases = 0);
 
     private static Outcome Check(MethodRef tested, Skeleton skeleton, CecilModel cecil, CilInterpreter interpreter, NativeMachine machine, WorldIndex index, bool verbose, int caseCount = Cases, ulong? nativeEntry = null)
     {
@@ -144,8 +139,8 @@ internal static partial class ExecutionCheck
         var coverage = (double)Math.Min(covered, (long)function.Size) / function.Size;
         var detail = (mismatches.Count > 0 ? $"；不一致 {mismatches.Count}，首例 {mismatches[0]}" : "")
             + (unsupported.Count > 0 ? $"；不可检查 {unsupported.Values.Sum()}（{string.Join("；", unsupported.OrderByDescending(u => u.Value).Take(3).Select(u => $"{u.Value}× {u.Key}"))}）" : "");
-        var verdict = mismatches.Count > 0 ? "mismatch" : matches > 0 ? "verified" : "not-checkable";
-        var reason = verdict == "not-checkable" && unsupported.Count > 0 ? Category(unsupported.MaxBy(u => u.Value).Key) : "";
+        var verdict = ExecutionVerdicts.Classify(caseCount, matches, mismatches.Count);
+        var reason = unsupported.Count > 0 ? Category(unsupported.MaxBy(u => u.Value).Key) : "";
         return new Outcome(verdict, matches, coverage, detail, reason, throwCases);
     }
 

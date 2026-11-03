@@ -13,11 +13,12 @@ public static class DependencyClosure
         while (pending.TryDequeue(out var current))
         {
             if (current.Body is not { } body) continue;
-            foreach (var method in Instances(body).DistinctBy(m => m.Method).OrderBy(m => m.Method.Index))
+            // 输出需要定义；实例只用于模板证明，不能用首先遍历到的实例决定定义体。
+            foreach (var method in Required(body).Distinct().OrderBy(m => m.Index))
             {
-                if (!scheduled.Add(method.Method)) continue;
-                if (!recovered.TryGetValue(method.Method, out var dependency))
-                    recovered[method.Method] = dependency = recovery.RecoverDependency(method);
+                if (!scheduled.Add(method)) continue;
+                if (!recovered.TryGetValue(method, out var dependency))
+                    recovered[method] = dependency = recovery.RecoverDefinition(method);
                 dependencies.Add(dependency);
                 pending.Enqueue(dependency);
             }
@@ -48,7 +49,7 @@ public static class DependencyClosure
                 foreach (var dependency in Required(result.Body!))
                     if (!written.ContainsKey(dependency))
                     {
-                        problems[result.Body!] = new(EmissionProblemKind.Dependency, $"构造函数 内联的 {dependency} 没有写出", result.Method);
+                        problems[result.Body!] = new(EmissionProblemKind.Dependency, $"依赖 内联的 {dependency} 没有写出", result.Method);
                         written.Remove(result.Method.Method);
                         changed = true;
                         break;

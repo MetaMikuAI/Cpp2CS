@@ -22,13 +22,9 @@ internal static class SelectionStage
         {
             bool Included(MethodDef m) => (all || (types is not null ? types.Contains(Top(m.Owner).FullName) : InNamespaces(m.Owner, namespaces)))
                 && (assembliesFilter is null || assembliesFilter.Contains(m.Owner.Assembly, StringComparer.Ordinal));
-            var ordinary = facts.Model.Methods.Where(m => m.Address != 0 && Included(m)
-                && facts.Code.RegionOf(m.Address) == CodeRegion.Managed).Select(m => new RecoveryTarget(new(m, [], []), m.Address));
-            var shared = facts.Model.Code.SelectMany(p => p.Value.Where(o => o.IsInstance && Included(o.Method.Method))
-                .Select(o => new RecoveryTarget(o.Method, p.Key))).Where(t => t.Instance.Method.Address == 0)
-                .GroupBy(t => t.Instance.Method).Select(g => g.OrderBy(t => t.Instance.TypeArguments.Concat(t.Instance.MethodArguments)
-                    .Any(a => !ManagedTypes.IsReferenceType(a) || FieldLayouts.IsFullyShared(a))).ThenBy(t => t.Entry).First());
-            selected = ordinary.Concat(shared).Take(limit).ToArray();
+            var entries = new MethodEntries(facts, new ManagedTypes(facts.Model, facts.Layouts));
+            selected = entries.Definitions.Where(e => Included(e.Instance.Method) && facts.Code.RegionOf(e.Address) == CodeRegion.Managed)
+                .Select(e => new RecoveryTarget(e.Instance, e.Address)).Take(limit).ToArray();
             Log($"恢复 {selected.Length} 个方法（{(all ? assembliesFilter is null ? "全程序方法定义" : string.Join(", ", assembliesFilter) : types is not null ? request.Types : string.Join(", ", namespaces))}）");
         }
         else

@@ -1,8 +1,8 @@
 using Cpp2CS.Ir;
 
-namespace Cpp2CS.Recovery.Lowering;
+namespace Cpp2CS.Recovery.Inlining;
 
-internal sealed partial class BodyBuilder
+internal sealed partial class TemplateRecovery
 {
     private static IEnumerable<ManagedValue> ReadValues(ManagedStatement statement) =>
         (statement is ManagedAssignment assignment ? [assignment.Value] : ManagedValues.Of(statement))

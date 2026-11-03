@@ -136,9 +136,19 @@ public static class RuntimeOps
                 return true;
             },
         };
-        // 没有托管可见效果：写屏障、内存屏障、类元数据初始化、RGCTX 初始化。
-        foreach (var kind in new[] { OpKind.WriteBarrier, OpKind.MemoryBarrier, OpKind.InitClass, OpKind.InitMethodRgctx })
+        // GC 写屏障由托管写入承担；元数据与 RGCTX 初始化不单独写出。
+        foreach (var kind in new[] { OpKind.WriteBarrier, OpKind.InitClass, OpKind.InitMethodRgctx })
             yield return new(kind) { Lower = None };
+        yield return new(OpKind.MemoryBarrier)
+        {
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Types.CorlibMethod("System.Threading.Thread", "MemoryBarrier") is not { Method.IsStatic: true } barrier) return false;
+                c.Emit(new ManagedCall(c.Call.Address, new ManagedInvocation(barrier, null, [], false), null, false));
+                return true;
+            },
+        };
         // 显式类构造：随后的第一个副作用按 ECMA-335 II.10.5.3 本身触发同一类型的初始化时省去（初始化点相同），
         // 否则写成 RuntimeHelpers.RunClassConstructor(typeof(T).TypeHandle)，保持原生代码中的初始化时机。
         yield return new(OpKind.RunClassConstructor)

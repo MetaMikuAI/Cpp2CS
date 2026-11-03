@@ -1,8 +1,8 @@
 using Cpp2CS.Ir;
 
-namespace Cpp2CS.Recovery.Lowering;
+namespace Cpp2CS.Recovery.Inlining;
 
-internal sealed partial class BodyBuilder
+internal sealed partial class TemplateRecovery
 {
     /// <summary>沿唯一前驱链收集入口条件与已保存的读取；写入使可能别名的读取失效，调用截断链。</summary>
     private void SeedPath(Walker caller)

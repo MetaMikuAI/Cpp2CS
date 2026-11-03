@@ -8,6 +8,7 @@ internal static class Program
         Console.OutputEncoding = System.Text.Encoding.UTF8;
         return args switch
         {
+            ["check-models", var binary, var metadata, var cache] => ArchitectureChecks.Run(binary, metadata, cache),
             ["execute", var binary, var metadata, var list, .. var options] => Execution.ExecutionCheck.Run(binary, metadata, list, options),
             _ => Usage(),
         };
@@ -16,6 +17,7 @@ internal static class Program
     private static int Usage()
     {
         Console.Error.WriteLine("用法: Cpp2CS.Tests execute <libil2cpp.so> <global-metadata.dat> <方法清单> [--fact-cache-file 文件] [--cases N] [--output 结果.tsv] [--verbose]");
+        Console.Error.WriteLine("      Cpp2CS.Tests check-models <libil2cpp.so> <global-metadata.dat> <事实缓存>");
         return 2;
     }
 }

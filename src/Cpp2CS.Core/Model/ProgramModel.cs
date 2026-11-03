@@ -267,6 +267,7 @@ public sealed record MethodRef(MethodDef Method, IReadOnlyList<TypeRef> TypeArgu
     public bool Equals(MethodRef? other) => other is not null && Method == other.Method && TypeArguments.SequenceEqual(other.TypeArguments) && MethodArguments.SequenceEqual(other.MethodArguments);
     public override int GetHashCode() => MethodArguments.Aggregate(TypeArguments.Aggregate(Method.Index, (h, a) => HashCode.Combine(h, a)), (h, a) => HashCode.Combine(h, a));
     public TypeRef DeclaringType => new DefinitionRef(Method.Owner, TypeArguments);
+    public TypeRef Concrete(TypeRef type) => type.Substitute(TypeArguments, MethodArguments);
     public override string ToString() => MethodArguments.Count == 0 ? $"{DeclaringType}.{Method.Name}" : $"{DeclaringType}.{Method.Name}<{string.Join(", ", MethodArguments)}>";
 }
 

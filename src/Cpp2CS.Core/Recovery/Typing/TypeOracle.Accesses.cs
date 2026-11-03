@@ -106,7 +106,7 @@ public sealed partial class TypeOracle
     {
         Sym? address = null;
         var reads = new HashSet<ReadSym>();
-        foreach (var (_, type, offset) in Leaves(structure))
+        foreach (var (_, type, offset) in types.Leaves(structure))
         {
             var width = LeafBits(type);
             if (offset * 8 + width > bits.Width) return null;
@@ -137,20 +137,6 @@ public sealed partial class TypeOracle
 
     /// <summary>以该语句为读取处的整体读取。</summary>
     public IReadOnlyList<ReadSym> WholeReadsAt(Stmt statement) => wholeReadSites.GetValueOrDefault(statement) ?? [];
-
-    /// <summary>值类型的标量叶子字段：路径、类型与相对值起点的字节偏移。</summary>
-    public IEnumerable<(IReadOnlyList<FieldRef> Path, TypeRef Type, int Offset)> Leaves(DefinitionRef structure, int at = 0)
-    {
-        if (types.Layouts.Of(structure) is not { } layout) yield break;
-        foreach (var slot in layout.Fields.OrderBy(f => f.Offset))
-        {
-            var offset = at + slot.Offset - RuntimeLayout.ObjectHeaderSize;
-            var field = new FieldRef(slot.Field, structure);
-            if (types.Kind(slot.Type) == TypeKind.Struct && slot.Type is DefinitionRef inner)
-                foreach (var (path, type, leaf) in Leaves(inner, offset)) yield return ([field, .. path], type, leaf);
-            else yield return ([field], slot.Type, offset);
-        }
-    }
 
     /// <summary>值类型的直接实例字段：字段、类型与相对值起点的字节偏移。</summary>
     public IEnumerable<(FieldRef Field, TypeRef Type, int Offset)> Fields(DefinitionRef structure) =>

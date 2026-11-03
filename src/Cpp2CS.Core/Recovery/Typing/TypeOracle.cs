@@ -85,8 +85,8 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                 {
                     var position = call.ArgumentIndex(value.Pieces[0].Register);
                     if (position < 0) continue;
-                    var type = value.Index == MachineSignature.ReturnIndex ? Concrete(callee, callee.Method.ReturnType)
-                        : value.Index < 0 ? callee.DeclaringType : Concrete(callee, callee.Method.Parameters[value.Index].Type);
+                    var type = value.Index == MachineSignature.ReturnIndex ? callee.Concrete(callee.Method.ReturnType)
+                        : value.Index < 0 ? callee.DeclaringType : callee.Concrete(callee.Method.Parameters[value.Index].Type);
                     Note(operands[1 + position], type is ByRefRef byRef ? byRef.Element : type);
                 }
             }
@@ -190,7 +190,6 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         return true;
     }
 
-    public static TypeRef Concrete(MethodRef callee, TypeRef type) => type.Substitute(callee.TypeArguments, callee.MethodArguments);
 
     // ---- 原子的类型 ----
 
@@ -221,9 +220,9 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             case ResultSym result when result.Index == 0:
                 return ResultType(result.Site);
             case OutSym output when !shapes(output.Site).IsRuntime && Callee(output.Site) is { } callee:
-                return output.Argument == MachineSignature.ReturnIndex ? Concrete(callee, callee.Method.ReturnType)
+                return output.Argument == MachineSignature.ReturnIndex ? callee.Concrete(callee.Method.ReturnType)
                     : output.Argument == -1 && callee.Method.Owner.IsValueType ? callee.DeclaringType
-                    : (output.Argument < 0 ? null : Concrete(callee, callee.Method.Parameters[output.Argument].Type)) is ByRefRef byRef ? byRef.Element : null;
+                    : (output.Argument < 0 ? null : callee.Concrete(callee.Method.Parameters[output.Argument].Type)) is ByRefRef byRef ? byRef.Element : null;
             case ReadSym read when Decompose(read.Address) is (ResultSym { Site.Op.Kind: OpKind.BeginCatch }, 0, null, _):
                 return types.Corlib("System.Exception");
             case ReadSym read:
@@ -231,7 +230,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             case ConcatSym concat when CompositeRead(concat) is { } whole:
                 return TypeOf(whole);
             case PhiSym phi:
-                return solution.TryGetValue(phi, out var solved) ? solved : Lower(phi);
+                return solution.Types.TryGetValue(phi, out var solved) ? solved : Lower(phi);
             case OpSym op:
                 return OperatorType(op) ?? (op.Width is 8 or 16 or 32 or 64 && op.Op.Kind is OperatorKind.Select or OperatorKind.Binary or OperatorKind.Unary
                     ? types.Integer(op.Width, true) : null);
@@ -247,7 +246,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     // ---- φ 的类型约束 ----
 
     private Dictionary<PhiSym, HashSet<TypeRef>> uses = [];
-    private Dictionary<PhiSym, TypeRef?> solution = [];
+    private readonly TypeSolution solution = new();
 
     /// <summary>φ 在使用处被要求的类型（下降空跑时记录）。</summary>
     public void Use(PhiSym phi, TypeRef type)
@@ -261,15 +260,16 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     /// 否则取能容纳全部定义、又满足全部使用的最具体的使用类型；没有定义时取满足全部使用的最具体者；
     /// 都不成立时保留下界，由使用处转换或报洞。求解后清除依赖类型的缓存，使用记录重新开始。
     /// </summary>
-    public void Solve()
+    internal TypeSolveState Solve()
     {
         ClearCaches();
         var next = new Dictionary<PhiSym, TypeRef?>();
-        foreach (var phi in uses.Keys.Concat(solution.Keys).Distinct().ToArray())
+        foreach (var phi in uses.Keys.Concat(solution.Types.Keys).Distinct().ToArray())
             next[phi] = Resolve(Lower(phi), uses.GetValueOrDefault(phi) ?? [], phi.Width);
-        solution = next;
+        var state = solution.Accept(next);
         uses = [];
         ClearCaches();
+        return state;
     }
 
     private void ClearCaches()
@@ -316,7 +316,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     {
         if (call.Op is { } op && !shapes(call).IsDispatch)
             return Runtime.RuntimeOps.Of(op.Kind)?.ResultType?.Invoke(call, this);
-        return Callee(call) is { } callee && Concrete(callee, callee.Method.ReturnType) is var ret && !ManagedTypes.IsVoid(ret) ? ret : null;
+        return Callee(call) is { } callee && callee.Concrete(callee.Method.ReturnType) is var ret && !ManagedTypes.IsVoid(ret) ? ret : null;
     }
 
     /// <summary>运行时操作的类操作数：L2 写入的 Operand，否则为实参符号值中的类实体。</summary>

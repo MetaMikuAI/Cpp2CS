@@ -1,8 +1,8 @@
 using Cpp2CS.Ir;
 
-namespace Cpp2CS.Recovery.Lowering;
+namespace Cpp2CS.Recovery.Inlining;
 
-internal sealed partial class BodyBuilder
+internal sealed partial class TemplateRecovery
 {
     /// <summary>证明项中的 0/1 等价：布尔值、保留低位的转换、条件选值及掩码表达同一个值。</summary>
     private ManagedValue NormalizeBit(ManagedValue value)

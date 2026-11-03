@@ -36,8 +36,7 @@ internal sealed partial class BodyBuilder
         return local;
     }
 
-    private int Width(TypeRef type) => ManagedTypes.IsReferenceType(type) || type is ByRefRef or PointerRef ? 64
-        : types.Kind(type) == TypeKind.Struct ? 0 : Math.Max(1, types.Bits(type));
+    private int Width(TypeRef type) => types.ValueWidth(type);
 
     private ManagedValue? Read(ReadSym read, ulong address)
     {
@@ -117,7 +116,7 @@ internal sealed partial class BodyBuilder
         {
             var last = i == path.Count - 1;
             var type = FieldType(path[i], last ? leaf : null);
-            if (store && !last && !Accessible(path[i].Field))
+            if (store && !last && !fields.Accessible(path[i], value.Type))
                 return Hole(address, $"内存 写入经过不可访问的值类型字段 {path[i].Field.Name}", leaf);
             value = FieldAccess(value, path[i], type, store && last, address);
             if (store && !last && types.Kind(type) == TypeKind.Struct) value = new AddressValue(value);

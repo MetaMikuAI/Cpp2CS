@@ -154,7 +154,7 @@ internal sealed partial class BodyBuilder
     /// <summary>表示链上的各层共享地址，写入的层级取值的定义类型；经过的值类型字段须可访问（写入目标以地址给出）。</summary>
     private Location StoreLocation(Location location, Sym value) =>
         oracle.TypeOf(value) is { } source && oracle.Inside(location.Type, source) is var (path, inner)
-        && path.Take(types.Kind(inner) == TypeKind.Struct ? path.Count : path.Count - 1).All(f => Accessible(f.Field))
+        && path.Take(types.Kind(inner) == TypeKind.Struct ? path.Count : path.Count - 1).All(f => fields.Accessible(f, f.DeclaringType))
         ? location with { Path = [.. location.Path, .. path], Type = inner } : location;
 
     private ManagedValue? ReturnValue(Return ret, IReadOnlyList<Sym> operands)

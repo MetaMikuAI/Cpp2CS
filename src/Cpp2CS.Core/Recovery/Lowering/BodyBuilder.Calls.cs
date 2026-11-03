@@ -54,7 +54,7 @@ internal sealed partial class BodyBuilder
             if (value.Index < 0 && construction is not null) continue;
             if (value.Index < 0 && pendingReceiver is not null) { receiver = pendingReceiver; continue; }
             var type = value.Index < 0 ? (callee.Method.Owner.IsValueType ? new ByRefRef(callee.DeclaringType) : callee.DeclaringType)
-                : TypeOracle.Concrete(callee, callee.Method.Parameters[value.Index].Type);
+                : callee.Concrete(callee.Method.Parameters[value.Index].Type);
             if (construction is not null && DelegateFacts.IsDelegate(callee.DeclaringType) && value.Index == 1 && managed.Count == 1)
             {
                 if (oracle.DelegateTargetOf(contents[i], contents[Array.FindIndex(signature.Arguments, a => a.Index == 0)]) is { } target)
@@ -93,7 +93,7 @@ internal sealed partial class BodyBuilder
         var invocation = new ManagedInvocation(callee, receiver, managed, Virtual: receiver is not null
             && (dispatched || !callee.Method.IsVirtual && absorbedChecks.Contains(contents[0])));
         LocalValue? result = null;
-        var returnType = TypeOracle.Concrete(callee, callee.Method.ReturnType);
+        var returnType = callee.Concrete(callee.Method.ReturnType);
         if (!ManagedTypes.IsVoid(returnType))
             result = signature.Return?.Transfer == Transfer.ResultBuffer
                 ? Local(values.Syms.Out(call, MachineSignature.ReturnIndex, MethodEnvironment.ValueWidth(signature.Return)), returnType)

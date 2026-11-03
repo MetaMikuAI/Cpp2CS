@@ -2,6 +2,7 @@ using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Recovery.Control;
+using Cpp2CS.Recovery.Inlining;
 using Cpp2CS.Recovery.Memory;
 using Cpp2CS.Recovery.Runtime;
 using Cpp2CS.Recovery.Typing;
@@ -34,37 +35,43 @@ internal sealed partial class BodyBuilder
     private Block? currentBlock;
     private int nextLocal;
 
-    private readonly Func<MethodRef, MethodRecoveryResult?> summaries;
+    private readonly FieldAccessModel fields;
+    private readonly TemplateRecovery templates;
+    private readonly Dictionary<Variable, PendingConstruction> pendingConstructions = [];
 
-    private BodyBuilder(MethodAnalysis analysis, TypeOracle oracle, Func<MethodRef, MethodRecoveryResult?> summaries)
+    private BodyBuilder(MethodAnalysis analysis, TypeOracle oracle, FieldAccessModel fields, TemplateRecovery templates)
     {
         this.analysis = analysis;
         this.oracle = oracle;
-        this.summaries = summaries;
+        this.fields = fields;
+        this.templates = templates;
         types = oracle.Types;
         values = analysis.Values;
     }
 
-    public static MethodRecoveryResult Build(MethodAnalysis analysis, TypeOracle oracle, Func<MethodRef, MethodRecoveryResult?> summaries) =>
-        new BodyBuilder(analysis, oracle, summaries).Run();
+    public static LoweredBody Build(MethodAnalysis analysis, TypeOracle oracle, FieldAccessModel fields, TemplateRecovery templates) =>
+        new BodyBuilder(analysis, oracle, fields, templates).Run();
 
-    private MethodRecoveryResult Run()
+    private LoweredBody Run()
     {
         var function = analysis.Function;
         if (!ExceptionRegions.Build(function).TryGet(out var plan, out var failure))
-            return new(analysis.Method, analysis.Entry, null, [new(failure.Address, failure.Reason)]);
+            return new(null, [new(failure.Address, failure.Reason)], new Dictionary<Variable, PendingConstruction>(), 0);
         regions = plan.Regions;
         order = plan.Order;
-        // 读取只在被所在语句之外的 IL 值用到时落成局部：先空跑一遍记录用途，再正式下降。
-        // 两遍空跑：第一遍收集 φ 的使用约束并求解；第二遍在求得的类型下重新收集并求解，同时记录读取的用途。
-        demand = [];
-        LowerBlocks();
-        oracle.Solve();
-        Reset();
-        demand = [];
-        LowerBlocks();
-        oracle.Solve();
-        var users = demand;
+        // 使用约束与类型解相互影响：直到解稳定，才使用这一轮记录的读取用途。
+        while (true)
+        {
+            Reset();
+            demand = [];
+            LowerBlocks();
+            var state = oracle.Solve();
+            if (state == TypeSolveState.Stable) break;
+            if (state is TypeSolveState.Cycle or TypeSolveState.BudgetExceeded)
+                return new(null, [new(analysis.Entry, state == TypeSolveState.Cycle ? "类型 φ 类型求解循环" : "类型 φ 类型求解超过预算")],
+                    new Dictionary<Variable, PendingConstruction>(), 0);
+        }
+        var users = demand!;
         demand = null;
         foreach (var (read, set) in users)
             if (set.Any(user => !ReferenceEquals(user, read.Site))) materialized.Add(read);
@@ -74,10 +81,10 @@ internal sealed partial class BodyBuilder
 
     private void Reset()
     {
-        locals.Clear(); phis.Clear(); holes.Clear(); constructions.Clear(); absorbedChecks.Clear(); exceptions.Clear(); pendingConstructions.Clear(); constructionFailures.Clear(); nextLocal = 0;
+        locals.Clear(); phis.Clear(); holes.Clear(); constructions.Clear(); absorbedChecks.Clear(); exceptions.Clear(); pendingConstructions.Clear(); nextLocal = 0;
     }
 
-    private MethodRecoveryResult LowerBlocks()
+    private LoweredBody LowerBlocks()
     {
         var function = analysis.Function;
         foreach (var region in regions.Where(r => r.BeginCatch is not null))
@@ -155,12 +162,7 @@ internal sealed partial class BodyBuilder
             r.Try.Where(reachable.Contains).Select(b => b.Start).ToArray(), r.Pad.Start, r.Handler.Where(reachable.Contains).Select(b => b.Start).ToArray(),
             r.BeginCatch is { } begin ? exceptions[begin] : null, r.IsCatch ? ManagedRegionKind.Catch : ManagedRegionKind.Fault)).ToArray();
         var body = new ManagedBody(analysis.Method, blocks) { Regions = managedRegions };
-        // 正式下降时证明多语句内联的逆（空跑只收集约束），之后合并复制。
-        if (demand is null) body = InlineInverse(body);
-        body = LocalCoalescing.Run(body);
-        return holes.Count == 0
-            ? new(analysis.Method, analysis.Entry, body, [])
-            : new(analysis.Method, analysis.Entry, null, holes.DistinctBy(h => (h.Address, h.Reason)).ToArray()) { Partial = body };
+        return new(body, holes.DistinctBy(h => (h.Address, h.Reason)).ToArray(), new Dictionary<Variable, PendingConstruction>(pendingConstructions), nextLocal);
     }
 
     /// <summary>沿托管终结语句的出边与区域的处理入口可达的块。</summary>

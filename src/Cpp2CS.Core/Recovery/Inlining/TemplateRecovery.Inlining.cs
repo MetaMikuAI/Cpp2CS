@@ -1,7 +1,6 @@
 using Cpp2CS.Ir;
-using Cpp2CS.Recovery.Typing;
 
-namespace Cpp2CS.Recovery.Lowering;
+namespace Cpp2CS.Recovery.Inlining;
 
 /// <summary>
 /// 多语句内联的逆。调用方中对不可访问字段的访问必然来自被内联的方法体；字段所在类型中访问该字段、方法体无环的实例方法是候选，
@@ -11,7 +10,7 @@ namespace Cpp2CS.Recovery.Lowering;
 /// 所有返回路径在调用方的同一点结束，区域内定义的值不在区域外使用，区域内的块只从区域内进入。
 /// 证明成立时这段区域换成一次调用（标为内联，执行对照按被调方法的 IL 执行）；仍未覆盖的不可访问访问记为洞。
 /// </summary>
-internal sealed partial class BodyBuilder
+internal sealed partial class TemplateRecovery
 {
     /// <summary>路径上的读取：Read 是归一后的位置，Epoch 是此前经过的调用数（调用可能改写任意位置）。</summary>
     private sealed record Observed(ManagedValue Read, int Epoch) : ManagedValue(Read.Type, Read.Width);
@@ -117,11 +116,7 @@ internal sealed partial class BodyBuilder
         return SealConstructions(ManagedValues.Map(body, Seal));
     }
 
-    /// <summary>新对象上等待证明的基类构造调用：分配类型、调用的基类构造与原生地址。</summary>
-    private sealed record PendingConstruction(ulong Address, DefinitionRef Allocated, MethodRef Base);
-
-    /// <summary>分配类型的构造函数被内联、等待以它为模板证明的构造，按承接新对象的局部。</summary>
-    private readonly Dictionary<Variable, PendingConstruction> pendingConstructions = [];
+    private IReadOnlyDictionary<Variable, PendingConstruction> pendingConstructions = new Dictionary<Variable, PendingConstruction>();
     private readonly Dictionary<Variable, string> constructionFailures = [];
 
     /// <summary>
@@ -143,9 +138,9 @@ internal sealed partial class BodyBuilder
                 if (PendingCall(body, variable, pending) is not var (block, index, receiver)) break;
                 var blocks = body.Blocks.ToDictionary(b => b.Address);
                 var match = Match(body, blocks, block, index, template, receiver, pending.Allocated.Arguments, out var failure);
-                if (match is not null && Replace(body, blocks, block, index, method, template, match, out failure) is { } replaced)
+                if (match is not null && PlanReplacement(body, blocks, block, index, method, match, out failure) is { } replaced)
                 {
-                    body = Constructed(replaced, variable, method);
+                    body = Constructed(replaced.Apply(body), variable, method);
                     failures.Clear();
                     break;
                 }
@@ -224,8 +219,8 @@ internal sealed partial class BodyBuilder
                 {
                     if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
                     var match = Match(body, blocks, block.Address, start, template, self, parent.Arguments, out _);
-                    if (match is not null && Replace(body, blocks, block.Address, start, method, template, match, out _) is { } replaced)
-                        return replaced;
+                    if (match is not null && PlanReplacement(body, blocks, block.Address, start, method, match, out _) is { } replaced)
+                        return replaced.Apply(body);
                 }
         }
         return body;
@@ -258,8 +253,8 @@ internal sealed partial class BodyBuilder
             for (var start = earliest; start <= latest; start++)
             {
                 var match = Match(body, blocks, anchor.Block, start, template, anchor.Access.Receiver, owner.Arguments, out var failure);
-                if (match is not null && Replace(body, blocks, anchor.Block, start, method, template, match, out failure) is { } replaced)
-                    return replaced;
+                if (match is not null && PlanReplacement(body, blocks, anchor.Block, start, method, match, out failure) is { } replaced)
+                    return replaced.Apply(body);
                 if (start == earliest) failures.Add($"{method.Method.Owner.Name}.{method.Method.Name}：{failure}");
             }
         inlineFailures.TryAdd(anchor.Access.Pending!.Value.Address, failures.Count == 0 ? "没有可作模板的方法" : string.Join("；", failures.Take(3)));
@@ -336,7 +331,7 @@ internal sealed partial class BodyBuilder
     /// </summary>
     private bool Conclude(InlineMatch match, MethodRef method)
     {
-        if (match.Ends.Count > 0 && match.Ends.All(e => e.Returns) && ManagedTypes.IsVoid(method.Method.ReturnType) && ManagedTypes.IsVoid(oracle.ReturnType))
+        if (match.Ends.Count > 0 && match.Ends.All(e => e.Returns) && ManagedTypes.IsVoid(method.Method.ReturnType) && ManagedTypes.IsVoid(caller.Concrete(caller.Method.ReturnType)))
         {
             match.Exit = match.Ends[0].Exit;
             match.ExitCopies = [];
@@ -348,7 +343,7 @@ internal sealed partial class BodyBuilder
         LocalValue? result = null;
         if (!ManagedTypes.IsVoid(method.Method.ReturnType))
         {
-            var returnType = TypeOracle.Concrete(method, method.Method.ReturnType);
+            var returnType = method.Concrete(method.Method.ReturnType);
             var first = match.Ends[0];
             if (first.Result is null) return false;
             var candidates = first.Copies.Select(c => c.Target).Concat(first.Env.Keys.Where(match.Defined.ContainsKey).Select(v => LocalOf(match, v)).OfType<LocalValue>())
@@ -377,10 +372,10 @@ internal sealed partial class BodyBuilder
         match.Exit = match.Ends[0].Exit;
         match.ExitCopies = rest[0];
         match.Result = result;
-        if (result is not null && !result.Type.Equals(TypeOracle.Concrete(method, method.Method.ReturnType)))
+        if (result is not null && !result.Type.Equals(method.Concrete(method.Method.ReturnType)))
         {
             match.ResultStorage = result;
-            match.Result = NewLocal(TypeOracle.Concrete(method, method.Method.ReturnType));
+            match.Result = NewLocal(method.Concrete(method.Method.ReturnType));
             match.ExitCopies = [.. rest[0], (result, new ConversionValue(ConvKind.ZeroExtend, match.Result, result.Type, result.Width))];
         }
         return true;
@@ -660,14 +655,14 @@ internal sealed partial class BodyBuilder
                         || types.Kind(field.Receiver.Type) == TypeKind.Struct)) return null;
                     if (Materialize(field.Receiver, self, address) is not { } receiver) return null;
                     var access = new FieldValue(receiver, field.Field, field.Type, field.Width);
-                    if (Accessible(field.Field.Field)) return access;
-                    return Accessor(field.Field, field.Type, false) is { } accessor ? access with { Accessor = accessor } : null;
+                    if (fields.Accessible(field.Field, receiver.Type)) return access;
+                    return fields.Accessor(field.Field, field.Type, false) is { } accessor ? access with { Accessor = accessor } : null;
                 }
             case Observed { Read: StaticFieldValue field }:
                 {
                     var access = new StaticFieldValue(field.Field, field.Type, field.Width);
-                    if (Accessible(field.Field.Field)) return access;
-                    return Accessor(field.Field, field.Type, false) is { } accessor ? access with { Accessor = accessor } : null;
+                    if (fields.Accessible(field.Field, null)) return access;
+                    return fields.Accessor(field.Field, field.Type, false) is { } accessor ? access with { Accessor = accessor } : null;
                 }
             case Observed:
                 return null;
@@ -685,7 +680,7 @@ internal sealed partial class BodyBuilder
     /// <summary>模板的项 m 与调用方的项 c 相同：形参绑定到调用方的项（首次出现时绑定，之后须一致），其余逐层同形。</summary>
     private bool SameTerm(ManagedValue left, ManagedValue right) => Unify(left, right, [], false);
 
-    private bool Unify(ManagedValue m, ManagedValue c, Dictionary<int, ManagedValue> binding, bool bindArguments = true)
+    internal bool Unify(ManagedValue m, ManagedValue c, Dictionary<int, ManagedValue> binding, bool bindArguments = true)
     {
         m = NormalizeBit(m);
         c = NormalizeBit(c);
@@ -741,117 +736,6 @@ internal sealed partial class BodyBuilder
         Cond.Ult => Cond.Uge, Cond.Uge => Cond.Ult, Cond.Ule => Cond.Ugt, Cond.Ugt => Cond.Ule,
         _ => null,
     };
-
-    /// <summary>
-    /// 把证明成立的区域换成一次调用：起点之前的语句保留，随后是调用与到出口的跳转（带出口边上的复制）；
-    /// 区域内的块须只从区域内进入、其中定义的值不在区域外使用，之后删去。
-    /// </summary>
-    private ManagedBody? Replace(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks, ulong startBlock, int start, MethodRef method, ManagedBody template, InlineMatch match, out string failure)
-    {
-        failure = "区域不能替换";
-        if (match.Exit is not { } exit || match.ExitCopies is not { } copies) return null;
-        var at = blocks[startBlock].Statements[start].Address;
-        if (!match.Binding.TryGetValue(-1, out var self)) { failure = "模板没有用到 this"; return null; }
-        // 区域之前已保存的值沿用原局部，不把它重新展开为更晚时刻的内存读取。
-        ManagedValue Input(ManagedValue value)
-        {
-            foreach (var available in match.Inputs)
-                if (SameTerm(value, available.Value)) return available.Local;
-            return MapTerm(value, Input);
-        }
-        self = Input(self);
-        var parameters = method.Method.Parameters.Count;
-        var arguments = new ManagedValue[parameters];
-        for (var i = 0; i < parameters; i++)
-            if (!match.Binding.TryGetValue(i, out var bound) || Materialize(Input(bound), self, at) is not { } argument) { failure = "实参不能写回调用之前"; return null; }
-            else arguments[i] = argument;
-        var exitCopies = new List<ManagedCopy>();
-        foreach (var (target, value) in copies)
-            if (Materialize(Input(value), self, at) is { } materialized) exitCopies.Add(new ManagedCopy(target, materialized));
-            else { failure = "出口复制不能写回"; return null; }
-        if (Materialize(self, self, at) is not { } receiver) { failure = "接收者不能写回"; return null; }
-        if (method.DeclaringType is DefinitionRef { Definition.IsValueType: true } && receiver.Type is not ByRefRef)
-        {
-            if (receiver is not (LocalValue or FieldValue or StaticFieldValue or ArrayElementValue)) { failure = "值类型接收者不可取址"; return null; }
-            receiver = new AddressValue(receiver);
-        }
-        var covered = match.Covered;
-        var internalBlocks = covered.Select(c => c.Block).Where(b => b != startBlock).Distinct().ToHashSet();
-        if (match.Continuation is { } continuation)
-        {
-            internalBlocks.Remove(continuation.Taken.Target);
-            internalBlocks.Remove(continuation.Fallthrough.Target);
-        }
-        // 出口在区域内某块的中间时，该块余下的语句接在调用之后。
-        if (!match.Returns && exit.Index > 0 && exit.Block != startBlock && !internalBlocks.Contains(exit.Block)) { failure = "出口不在区域内"; return null; }
-        if (!match.Returns && exit.Index == 0) internalBlocks.Remove(exit.Block);
-        foreach (var address in internalBlocks)
-        {
-            var count = blocks[address].Statements.Count;
-            var whole = Enumerable.Range(0, count).All(i => covered.Contains((address, i)) || !match.Returns && address == exit.Block && i >= exit.Index);
-            if (!whole) { failure = "区域内的块含有区域外的语句"; return null; }
-        }
-        if (Enumerable.Range(start, blocks[startBlock].Statements.Count - start).Any(i => !covered.Contains((startBlock, i)) && !(!match.Returns && startBlock == exit.Block && i >= exit.Index))) { failure = "起点块含有区域外的语句"; return null; }
-        var region = internalBlocks.Append(startBlock).ToHashSet();
-        foreach (var other in body.Blocks.Where(b => !region.Contains(b.Address)))
-            if (other.Statements.SelectMany(ManagedValues.Edges).Any(e => internalBlocks.Contains(e.Target))) { failure = "区域内的块从区域外进入"; return null; }
-        // 纯跳转与局部复制不会抛出异常，尾部这类块可在 try 外；实际效果仍须保留起点的异常上下文。
-        bool Inert(ulong block) => blocks[block].Statements.All(s => s is ManagedJump jump
-            && jump.Edge.Copies.All(c => c.Value is LocalValue or ArgumentValue or ConstantValue));
-        if (body.Regions.Any(r => internalBlocks.Contains(r.HandlerEntry)
-            || region.Any(b => !Inert(b) && (r.Try.Contains(b) != r.Try.Contains(startBlock) || r.Handler.Contains(b) != r.Handler.Contains(startBlock)))))
-        { failure = "区域跨越异常边界"; return null; }
-        // 区域内定义的值不在区域外使用。
-        var outside = body.Blocks.SelectMany(b => b.Statements.Select((s, i) => (b.Address, i, s)))
-            .Where(p => !covered.Contains((p.Address, p.i)) && !(!match.Returns && p.Address == exit.Block && exit.Index > 0 && p.i < exit.Index));
-        var defined = match.Defined.Keys.Where(v => (match.Result is null || !v.Equals(match.Result.Variable))
-            && (match.ResultStorage is null || !v.Equals(match.ResultStorage.Variable))).ToHashSet();
-        var escapingValues = outside.SelectMany(p => ReadValues(p.s)).SelectMany(ManagedValues.Walk).OfType<LocalValue>()
-            .Select(l => l.Variable).Where(defined.Contains).ToHashSet();
-        var savedCopies = InlineCopies(body, blocks, startBlock, start, match, escapingValues);
-        defined.ExceptWith(savedCopies.Select(a => a.Target.Variable));
-        foreach (var (_, _, statement) in outside)
-            if (ReadValues(statement).SelectMany(ManagedValues.Walk).OfType<LocalValue>().FirstOrDefault(l => defined.Contains(l.Variable)) is { } escaping)
-                { failure = $"区域内定义的值 {escaping.Variable} 在区域外 0x{statement.Address:x} 使用"; return null; }
-        if (copies.Any(c => defined.Contains(c.Target.Variable))) { failure = "区域内定义的值在区域外使用"; return null; }
-
-        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, method.Method.Name != ".ctor"), match.Result, match.Returns) { Inlined = true };
-        var replacement = blocks[startBlock].Statements.Take(start).Concat(savedCopies).Append(call).ToList();
-        if (match.Continuation is { } branch)
-        {
-            ManagedEdge? MaterializeEdge(ManagedEdge edge)
-            {
-                var converted = new List<ManagedCopy>();
-                foreach (var copy in edge.Copies)
-                    if (Materialize(Input(copy.Value), self, at) is { } value) converted.Add(copy with { Value = value });
-                    else return null;
-                return edge with { Copies = converted };
-            }
-            if (MaterializeEdge(branch.Taken) is not { } taken || MaterializeEdge(branch.Fallthrough) is not { } fallthrough)
-            { failure = "条件出口复制不能写回"; return null; }
-            replacement.Add(branch with { Address = at, Taken = taken, Fallthrough = fallthrough });
-        }
-        else if (!match.Returns && exit.Index == 0)
-            replacement.Add(new ManagedJump(call.Address, new ManagedEdge(exit.Block, exitCopies)));
-        else if (!match.Returns)
-        {
-            if (exitCopies.Count > 0) { failure = "出口在块中间且带复制"; return null; }
-            replacement.AddRange(blocks[exit.Block].Statements.Skip(exit.Index));
-            if (exit.Block != startBlock) internalBlocks.Add(exit.Block);
-        }
-        var removed = internalBlocks;
-        var rebuilt = body with
-        {
-            Blocks = body.Blocks.Where(b => !removed.Contains(b.Address))
-                .Select(b => b.Address == startBlock ? b with { Statements = replacement } : b).ToArray(),
-            Regions = body.Regions.Select(r => r with
-            {
-                Try = r.Try.Where(a => !removed.Contains(a)).ToArray(),
-                Handler = r.Handler.Where(a => !removed.Contains(a)).ToArray(),
-            }).ToArray(),
-        };
-        return rebuilt;
-    }
 
     /// <summary>
     /// 结果不再使用的待证字段读取（内联区域换成调用后，区域之前读入的值常只剩这一用途）：读取没有副作用，

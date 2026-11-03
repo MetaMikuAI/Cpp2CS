@@ -307,7 +307,7 @@ internal sealed partial class BodyBuilder
         bits = SymTable.Resolve(bits);
         if (type is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct || !Bits(bits)
             || types.Size(structure) * 8 > bits.Width || oracle.WholeRead(bits, structure) is not null) return false;
-        var hidden = oracle.Leaves(structure).Any(l => l.Path.Any(f => !Accessible(f.Field))
+        var hidden = types.Leaves(structure).Any(l => l.Path.Any(f => !this.fields.Accessible(f, f.DeclaringType))
             && SymTable.Resolve(values.Syms.Slice(bits, l.Offset * 8, oracle.LeafBits(l.Type))) is not ConstSym { Value: 0 });
         return hidden && !Constructible(structure);
     }
@@ -315,9 +315,9 @@ internal sealed partial class BodyBuilder
     /// <summary>按叶子组成的结构体值：叶子字段都须对当前方法可访问，否则记为洞（被内联的构造函数尚无逆）。</summary>
     private ManagedValue Composed(DefinitionRef structure, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, ulong address)
     {
-        if (leaves.Any(l => l.Path.Any(f => !Accessible(f.Field))) && ValueConstructor(structure, leaves) is { } constructed) return constructed;
+        if (leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType))) && ValueConstructor(structure, leaves) is { } constructed) return constructed;
         foreach (var (path, _) in leaves)
-            if (path.FirstOrDefault(f => !Accessible(f.Field)) is { } hidden)
+            if (path.FirstOrDefault(f => !fields.Accessible(f, f.DeclaringType)) is { } hidden)
                 return Hole(address, $"内存 字段 {hidden.Field.Owner.FullName}.{hidden.Field.Name} 对调用方不可访问，结构体值按叶子组成", structure);
         return new ComposedValue(structure, leaves);
     }
@@ -378,5 +378,5 @@ internal sealed partial class BodyBuilder
         return new ConversionValue(from < to ? ConvKind.ZeroExtend : ConvKind.Truncate, value, target, to);
     }
 
-    private IEnumerable<(IReadOnlyList<FieldRef> Path, TypeRef Type, int Offset)> Leaves(DefinitionRef structure, int at) => oracle.Leaves(structure, at);
+    private IEnumerable<(IReadOnlyList<FieldRef> Path, TypeRef Type, int Offset)> Leaves(DefinitionRef structure, int at) => types.Leaves(structure, at);
 }

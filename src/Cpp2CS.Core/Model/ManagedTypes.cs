@@ -11,7 +11,7 @@ public sealed record FieldAccess(FieldRef Field, TypeRef Type);
 /// <summary>
 /// L3 使用的托管类型视图：基元宽度与符号、枚举底层类型、可赋值关系，以及按运行时布局（<see cref="ITypeLayouts"/>）把访存偏移解释为字段。
 /// </summary>
-public sealed class ManagedTypes
+public sealed partial class ManagedTypes
 {
     private readonly Dictionary<string, TypeDef> corlib = new();
 
