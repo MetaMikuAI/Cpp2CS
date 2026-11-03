@@ -2,6 +2,7 @@ using System.Reflection;
 using Cpp2CS.Calls;
 using Cpp2CS.Facts;
 using Cpp2CS.Input;
+using Cpp2CS.Idioms;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Output;
@@ -10,6 +11,8 @@ using Cpp2CS.Recovery.Runtime;
 using Cpp2CS.Recovery.Typing;
 using Cpp2CS.Recovery.Values;
 using Cpp2CS.Tests.Execution;
+using Cecil = Mono.Cecil;
+using Cil = Mono.Cecil.Cil;
 
 namespace Cpp2CS.Tests;
 
@@ -25,9 +28,52 @@ internal static class ArchitectureChecks
         Identities(checks, types);
         EntryKinds(checks, facts, types);
         Templates(checks, types);
+        NestedEnumStack(checks);
         Barriers(checks, types);
+        FloatingOperands(checks, facts, types);
         Verdicts(checks);
         return checks.Finish("架构边界");
+    }
+
+    private static void FloatingOperands(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var owner = Type("Numeric", 20);
+        var definition = Method(owner, "Convert", 20);
+        definition.Parameters = [new ParameterDef("value", types.Single, 0, null, false)];
+        var method = new MethodRef(definition, [], []);
+        var structure = new DefinitionRef(new TypeDef { Index = 22, Name = "FloatStorage", Namespace = "Tests", Assembly = "Tests.dll",
+            Token = 0, Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false }, []);
+        EmissionProblem? Validate(ManagedValue value)
+        {
+            var body = new ManagedBody(method, [new(0, [new ManagedReturn(0, value)])]);
+            return new BodyValidation(types, EmissionPolicy.Recovered, method).Check(body, true, out _);
+        }
+        var unresolved = new ArgumentValue(0, structure, 0);
+        check.True(Validate(new ConversionValue(ConvKind.FloatToFloat, unresolved, types.Double, 64)) is
+            { Kind: EmissionProblemKind.Unsupported, Address: 0 }, "未解析结构体的浮点转换在写出前报错");
+        var wrongScalar = new ArgumentValue(0, structure, 32);
+        check.True(Validate(new UnaryValue(UnOp.FNeg, wrongScalar, types.Single, 32)) is not null, "相同位宽不能把结构体当作浮点标量");
+        check.True(Validate(new ComparisonValue(Cond.FEq, wrongScalar, wrongScalar, types.Boolean)) is not null, "浮点比较检查隐含位重解释");
+        check.True(Validate(new ConversionValue(ConvKind.FloatToFloat, new ArgumentValue(0, types.Int32, 32), types.Double, 64)) is null,
+            "同宽整数可经核心库位重解释后转换浮点");
+        check.True(Validate(new ConversionValue(ConvKind.FloatToFloat, new ArgumentValue(0, types.Single, 32), types.Double, 64)) is null,
+            "合法浮点扩展保留");
+        var integer = new ArgumentValue(0, types.UInt64, 64);
+        check.True(Validate(new BinaryValue(BinOp.MulHighU, integer, integer, types.UInt64, 64)) is
+            { Kind: EmissionProblemKind.Unsupported }, "未实现的高位乘法在写出前报错");
+        check.True(Validate(new UnaryValue(UnOp.Clz, integer, types.UInt64, 64)) is
+            { Kind: EmissionProblemKind.Unsupported }, "未实现的一元运算不能被写成取负");
+        check.True(Validate(new UnaryValue(UnOp.Neg, integer, types.UInt64, 64)) is null, "合法一元运算保留");
+        check.True(Validate(new ArgumentValue(1, types.Single, 32)) is not null, "不存在的参数在写出前报错");
+        var staticDefinition = new MethodDef
+        {
+            Index = 21, Owner = owner, Name = "Static", Token = 0, Attributes = MethodAttributes.Public | MethodAttributes.Static,
+            ImplAttributes = 0, Slot = -1,
+        };
+        var staticMethod = new MethodRef(staticDefinition, [], []);
+        var invalidThis = new ManagedBody(staticMethod, [new(0, [new ManagedReturn(0, new ArgumentValue(-1, types.Object, 64))])]);
+        check.True(new BodyValidation(types, EmissionPolicy.Partial, staticMethod).Check(invalidThis, true, out _) is
+            { Kind: EmissionProblemKind.Unsupported }, "静态方法的部分恢复体不能引用 this");
     }
 
     private static void Convergence(Assertions check, ManagedTypes types)
@@ -121,6 +167,28 @@ internal static class ArchitectureChecks
             Attributes = TypeAttributes.NotPublic, IsValueType = false, IsEnum = false };
         var exposed = new FieldDef { Index = 12, Owner = inaccessible, Name = "value", Type = types.Int32, Offset = 16, Attributes = FieldAttributes.Public };
         check.True(!fields.Accessible(new(exposed, new DefinitionRef(inaccessible, [])), null), "公共字段不能绕过声明类型的权限");
+    }
+
+    private static void NestedEnumStack(Assertions check)
+    {
+        using var module = Cecil.ModuleDefinition.CreateModule("EnumStack", Cecil.ModuleKind.Dll);
+        var owner = new Cecil.TypeDefinition("Tests", "Container`1", Cecil.TypeAttributes.Public, module.TypeSystem.Object);
+        owner.GenericParameters.Add(new Cecil.GenericParameter("T", owner));
+        module.Types.Add(owner);
+        var enumeration = new Cecil.TypeDefinition("", "State", Cecil.TypeAttributes.NestedPublic | Cecil.TypeAttributes.Sealed,
+            new Cecil.TypeReference("System", "Enum", module, module.TypeSystem.CoreLibrary));
+        enumeration.GenericParameters.Add(new Cecil.GenericParameter("T", enumeration));
+        enumeration.Fields.Add(new Cecil.FieldDefinition("value__", Cecil.FieldAttributes.Public | Cecil.FieldAttributes.SpecialName | Cecil.FieldAttributes.RTSpecialName, module.TypeSystem.Int32));
+        owner.NestedTypes.Add(enumeration);
+        var instance = new Cecil.GenericInstanceType(enumeration);
+        instance.GenericArguments.Add(module.TypeSystem.Int32);
+        var method = new Cecil.MethodDefinition("Read", Cecil.MethodAttributes.Public | Cecil.MethodAttributes.Static, instance);
+        owner.Methods.Add(method);
+        method.Body.Instructions.Add(Cil.Instruction.Create(Cil.OpCodes.Ldc_I4_0));
+        method.Body.Instructions.Add(Cil.Instruction.Create(Cil.OpCodes.Ret));
+        check.True(CilStackTypes.Check(method, method.Body) is null, "泛型声明中的嵌套枚举按底层整数检查栈");
+        method.Body.Instructions[0] = Cil.Instruction.Create(Cil.OpCodes.Ldc_I8, 0L);
+        check.True(CilStackTypes.Check(method, method.Body) is not null, "嵌套枚举仍拒绝错误位宽的返回值");
     }
 
     private static void EntryKinds(Assertions check, ProgramFacts facts, ManagedTypes types)

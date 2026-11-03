@@ -47,6 +47,9 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                 return new(EmissionProblemKind.Unsupported, "受约束调用需要同类型托管地址与实例 callvirt");
             if (statement is ManagedCall c && !CanAccess(c.Invocation.Method, c.Invocation.Receiver?.Type))
                 return new(EmissionProblemKind.AccessDenied, $"访问权限 调用 {c.Invocation.Method}");
+            if (statement is ManagedCall { Inlined: true } inlined
+                && !ManagedAccess.Method(types, accessContext, inlined.Invocation.Method, inlined.Invocation.Receiver?.Type))
+                return new(EmissionProblemKind.AccessDenied, $"访问权限 内联证明调用 {inlined.Invocation.Method}");
             if (statement is ManagedStore store && (StaticWriteProblem(store.Target) ?? ReadonlyWriteProblem(store.Target)) is { } writeProblem)
             {
                 if (diagnostics.Emit) diagnostics.Write("emit", statement.Address, $"  [写出问题] 0x{statement.Address:x} {statement}");
@@ -91,8 +94,16 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
         if (value.Width is not (1 or 8 or 16 or 32 or 64) && !(value.Width == 0 && (types.Kind(value.Type) == TypeKind.Struct || genericStorage))) return new(EmissionProblemKind.Unsupported, $"位宽 {value.Width} 尚未支持");
         // C# 里每个值的类型都可能要按名写出（局部变量声明、转换）
         if (!CanAccess(value.Type)) return new(EmissionProblemKind.AccessDenied, $"访问权限 类型 {value.Type}");
+        foreach (var operand in FloatingOperands(value))
+            if (operand.Width is not (32 or 64) || types.Bits(operand.Type) != operand.Width
+                || types.Kind(operand.Type) is not (TypeKind.Float or TypeKind.Double)
+                    && BitConversions.Find(types, operand.Type, operand.Width == 32 ? types.Single : types.Double) is null)
+                return new(EmissionProblemKind.Unsupported, $"浮点操作 类型 {operand.Type}/{operand.Width} 缺少同宽标量表示");
         switch (value)
         {
+            case ArgumentValue argument when argument.Index < -1 || argument.Index == -1 && methodContext.Method.IsStatic
+                || argument.Index >= methodContext.Method.Parameters.Count:
+                return new(EmissionProblemKind.Unsupported, $"参数 索引 {argument.Index} 不在方法签名中");
             case DelegateValue delegated:
                 if (DelegateProblem(delegated) is { } delegateProblem) return delegateProblem;
                 break;
@@ -113,11 +124,11 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                 break;
             case BoxValue box:
                 if (!CanAccess(box.Boxed)) return new(EmissionProblemKind.AccessDenied, $"访问权限 类型 {box.Boxed}");
-                if (box.Boxed is not GenericParameterRef && types.Kind(box.Boxed) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Struct)) return new(EmissionProblemKind.Unsupported, $"装箱 类型 {box.Boxed}");
+                if (box.Boxed is not GenericParameterRef && !Boxable(box.Boxed)) return new(EmissionProblemKind.Unsupported, $"装箱 类型 {box.Boxed}");
                 break;
             case UnboxAddressValue unbox:
                 if (!CanAccess(unbox.Target)) return new(EmissionProblemKind.AccessDenied, $"访问权限 类型 {unbox.Target}");
-                if (types.Kind(unbox.Target) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Struct)
+                if (!Boxable(unbox.Target)
                     && unbox.Target is not GenericParameterRef { NativeScalar: not null }) return new(EmissionProblemKind.Unsupported, $"拆箱 类型 {unbox.Target} 尚未支持");
                 break;
             case UnboxValue unbox:
@@ -159,6 +170,7 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                     }
                 break;
             case AddressValue takenAddress:
+                if (!Addressable(takenAddress.Target)) return new(EmissionProblemKind.Unsupported, "取址 需要托管存储位置");
                 if (ReadonlyWriteProblem(takenAddress.Target) is { } readonlyProblem) return readonlyProblem;
                 break;
             case FieldValue f:
@@ -176,8 +188,25 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                     return new(EmissionProblemKind.Unsupported, "转换 浮点位重解释缺少同宽核心库方法");
                 break;
             case BinaryValue b:
+                if (b.Width == 0 || b.Left.Width == 0 || b.Right.Width == 0)
+                    return new(EmissionProblemKind.Unsupported, "运算 缺少标量位宽");
+                if (CilOperators.Binary(b.Op) is null && !CilOperators.NativeArithmetic(b.Op))
+                    return new(EmissionProblemKind.Unsupported, $"运算 {b.Op} 尚未支持 CIL 写出");
+                if (CilOperators.NativeArithmetic(b.Op) && b.Width is not (32 or 64))
+                    return new(EmissionProblemKind.Unsupported, $"运算 {b.Op} 需要 32 或 64 位标量");
                 if (b.Left.Width != b.Width || b.Right.Width != b.Width && b.Op is not (BinOp.Shl or BinOp.LShr or BinOp.AShr)) return new(EmissionProblemKind.Unsupported, "运算 位宽不一致");
                 break;
+            case UnaryValue u:
+                if (u.Width == 0 || u.Operand.Width == 0)
+                    return new(EmissionProblemKind.Unsupported, "运算 缺少标量位宽");
+                if (CilOperators.Unary(u.Op) is null && CilOperators.Math(u.Op) is null)
+                    return new(EmissionProblemKind.Unsupported, $"运算 {u.Op} 尚未支持 CIL 写出");
+                break;
+            case ConversionValue { Kind: ConvKind.FloatToSInt or ConvKind.FloatToUInt, Width: not (32 or 64) }:
+                return new(EmissionProblemKind.Unsupported, "浮点转换 目标需要 32 或 64 位整数");
+            case ConversionValue c when c.Type is not GenericParameterRef { NativeScalar: not null }
+                && c.Kind != ConvKind.Bitcast && (c.Width == 0 || c.Operand.Width == 0):
+                return new(EmissionProblemKind.Unsupported, "转换 缺少标量位宽");
             case ComparisonValue c:
                 if ((c.Left.Width == 0 || c.Right.Width == 0)
                     && !ManagedTypes.IsReferenceType(c.Left.Type) && !ManagedTypes.IsReferenceType(c.Right.Type))
@@ -193,6 +222,25 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
         return null;
     }
 
+    private IEnumerable<ManagedValue> FloatingOperands(ManagedValue value) => value switch
+    {
+        ConversionValue { Type: GenericParameterRef { NativeScalar: not null } } => [],
+        ConversionValue { Kind: ConvKind.FloatToFloat or ConvKind.FloatToSInt or ConvKind.FloatToUInt } c => [c.Operand],
+        UnaryValue { Op: UnOp.FNeg or UnOp.FAbs or UnOp.FSqrt or UnOp.FFloor or UnOp.FCeil or UnOp.FTrunc or UnOp.FRoundEven } u => [u.Operand],
+        BinaryValue b when b.Op is BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber
+            || b.Op is not (BinOp.SDiv or BinOp.UDiv) && types.Kind(b.Type) is TypeKind.Float or TypeKind.Double => [b.Left, b.Right],
+        ComparisonValue { Condition: Cond.FEq or Cond.FNe or Cond.FUne or Cond.FLt or Cond.FLe or Cond.FGt or Cond.FGe
+            or Cond.FUlt or Cond.FUle or Cond.FUgt or Cond.FUge or Cond.FOrdered or Cond.FUnordered } c => [c.Left, c.Right],
+        _ => [],
+    };
+
+    private bool Addressable(ManagedValue value) => value switch
+    {
+        ArgumentValue { Index: >= 0 } or LocalValue or IndirectValue or StaticFieldValue or ArrayElementValue => true,
+        FieldValue field => types.Kind(field.Receiver.Type) != TypeKind.Struct || Addressable(field.Receiver),
+        _ => false,
+    };
+
     private EmissionProblem? StaticWriteProblem(ManagedValue target) =>
         !IgnoreAccess && target is StaticFieldValue storage && (storage.Field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
             && !(methodContext.Method is { Name: ".cctor", IsStatic: true } && methodContext.Method.Owner == storage.Field.Field.Owner)
@@ -204,6 +252,10 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
         if (accessor is null) return null;
         return accessor.Matches(types, accessContext, value, write) ? null : new(EmissionProblemKind.AccessDenied, "访问权限 访问器证明与字段访问不符");
     }
+
+    // IntPtr/UIntPtr 是可装箱的 CLR 值类型；裸指针与托管地址仍不可装箱。
+    private bool Boxable(TypeRef type) => types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Struct
+        || type.Equals(types.IntPtr) || type.Equals(types.Corlib("System.UIntPtr"));
 
     private EmissionProblem? DelegateProblem(DelegateValue value)
     {

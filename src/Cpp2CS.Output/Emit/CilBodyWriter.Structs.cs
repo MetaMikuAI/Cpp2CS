@@ -31,7 +31,7 @@ internal sealed partial class CilBodyWriter
             return;
         }
         if (single) il.Emit(OpCodes.Conv_R8);
-        var name = value.Op switch { UnOp.FSqrt => "Sqrt", UnOp.FFloor => "Floor", UnOp.FCeil => "Ceiling", UnOp.FTrunc => "Truncate", _ => "Round" };
+        var name = CilOperators.Math(value.Op) ?? throw new NotSupportedException(value.Op.ToString());
         var function = types.CorlibMethod("System.Math", name, types.Double) ?? throw new NotSupportedException($"核心库缺少 Math.{name}(double)");
         il.Emit(OpCodes.Call, MethodReference(function));
         if (single) il.Emit(OpCodes.Conv_R4);

@@ -118,7 +118,10 @@ internal static class CilStackTypes
             case PointerType or FunctionPointerType: return I;
             case ArrayType: return O;
             case GenericParameter or SentinelType: return Any;
-            case GenericInstanceType instance: return IsValueType(instance.ElementType) is { } value ? value ? new Slot(Kind.Value, instance.ElementType.FullName) : O : Any;
+            case GenericInstanceType instance:
+                if (instance.ElementType.Resolve() is { IsEnum: true } enumeration)
+                    return Classify(enumeration.Fields.First(f => !f.IsStatic).FieldType);
+                return IsValueType(instance.ElementType) is { } value ? value ? new Slot(Kind.Value, instance.ElementType.FullName) : O : Any;
         }
         switch (type.FullName)
         {

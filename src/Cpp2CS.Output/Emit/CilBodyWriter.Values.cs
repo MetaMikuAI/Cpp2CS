@@ -131,11 +131,11 @@ internal sealed partial class CilBodyWriter
                 if (f.Accessor is { } staticGetter) AccessorCall(staticGetter); else il.Emit(OpCodes.Ldsfld, FieldReference(f.Field)); break;
             case BinaryValue b: Binary(b); break;
             // 浮点的绝对值、平方根与取整写成 System.Math 的调用（float 经 double 计算：这些运算对 float 的值结果精确，转回 float 不再舍入）
-            case UnaryValue { Op: UnOp.FAbs or UnOp.FSqrt or UnOp.FFloor or UnOp.FCeil or UnOp.FTrunc or UnOp.FRoundEven } math:
+            case UnaryValue math when CilOperators.Math(math.Op) is not null:
                 MathCall(math); break;
             case UnaryValue u:
                 if (u.Op == UnOp.FNeg) Floating(u.Operand); else Integer(u.Operand, false);
-                il.Emit(u.Op == UnOp.Not ? OpCodes.Not : OpCodes.Neg);
+                il.Emit(CilOperators.Unary(u.Op) ?? throw new NotSupportedException(u.Op.ToString()));
                 Normalize(u); break;
             case ConversionValue { Type: GenericParameterRef { NativeScalar: not null } } copy:
                 Value(copy.Operand); break;
@@ -160,7 +160,7 @@ internal sealed partial class CilBodyWriter
 
     private void Binary(BinaryValue b)
     {
-        if (b.Op is BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber or BinOp.SDiv or BinOp.UDiv)
+        if (CilOperators.NativeArithmetic(b.Op))
         {
             if (b.Op is BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber) { Floating(b.Left); Floating(b.Right); }
             else { Integer(b.Left, b.Op == BinOp.SDiv); Integer(b.Right, b.Op == BinOp.SDiv); }
@@ -187,20 +187,7 @@ internal sealed partial class CilBodyWriter
                 il.Emit(OpCodes.Conv_I4); il.Emit(OpCodes.Ldc_I4, b.Width - 1); il.Emit(OpCodes.And);
             }
         }
-        il.Emit(b.Op switch
-        {
-            BinOp.Add or BinOp.FAdd => OpCodes.Add,
-            BinOp.Sub or BinOp.FSub => OpCodes.Sub,
-            BinOp.Mul or BinOp.FMul => OpCodes.Mul,
-            BinOp.FDiv => OpCodes.Div,
-            BinOp.And => OpCodes.And,
-            BinOp.Or => OpCodes.Or,
-            BinOp.Xor => OpCodes.Xor,
-            BinOp.Shl => OpCodes.Shl,
-            BinOp.LShr => OpCodes.Shr_Un,
-            BinOp.AShr => OpCodes.Shr,
-            _ => throw new NotSupportedException(b.Op.ToString()),
-        });
+        il.Emit(CilOperators.Binary(b.Op) ?? throw new NotSupportedException(b.Op.ToString()));
         Normalize(b);
     }
 
