@@ -210,6 +210,13 @@ internal sealed partial class TemplateRecovery
 
     private ComparisonValue? ReturnedPredicate(ManagedValue tested, ManagedValue returned, LocalValue result)
     {
+        if (types.Kind(result.Type) == TypeKind.Bool)
+        {
+            if (SameTerm(tested, returned))
+                return new ComparisonValue(Cond.Ne, result, new ConstantValue(0, result.Type, result.Width), types.Boolean);
+            if (SameTerm(Negate(tested), returned))
+                return new ComparisonValue(Cond.Eq, result, new ConstantValue(0, result.Type, result.Width), types.Boolean);
+        }
         if (types.Kind(result.Type) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Reference) || AsComparison(tested) is not { } comparison) return null;
         ManagedValue? Carrier(ManagedValue value) => value switch
         {

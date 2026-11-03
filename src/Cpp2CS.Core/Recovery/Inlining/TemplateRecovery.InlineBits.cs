@@ -11,11 +11,12 @@ internal sealed partial class TemplateRecovery
         {
             NegatedValue negated => negated.Operand,
             ConstantValue constant => new ConstantValue(constant.Bits == 0 ? 1UL : 0UL, types.Boolean, 8),
-            _ => new NegatedValue(bit, types.Boolean),
+            _ => Negate(bit),
         };
         ManagedValue? Bit(ManagedValue v) => v switch
         {
             ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate, Width: > 0 } conversion => Bit(conversion.Operand),
+            NegatedValue negated when Bit(negated.Operand) is { } bit => Not(bit),
             ChoiceValue { True: ConstantValue { Bits: 1 }, False: ConstantValue { Bits: 0 } } choice => Bit(choice.Condition),
             ChoiceValue { True: ConstantValue { Bits: 0 }, False: ConstantValue { Bits: 1 } } choice when Bit(choice.Condition) is { } condition => Not(condition),
             BinaryValue { Op: BinOp.And, Right: ConstantValue mask } binary when (mask.Bits & 1) != 0 => Bit(binary.Left),

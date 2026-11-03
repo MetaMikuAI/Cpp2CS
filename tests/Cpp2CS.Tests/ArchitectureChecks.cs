@@ -758,6 +758,30 @@ internal static class ArchitectureChecks
         check.True(chained.Holes.Count == 0, "共享出口复制逐边组合后可承接同一返回值比较");
         check.True(chained.Body.Blocks.Any(b => b.Address == 20), "仍有外部入边的共享复制块保留");
         check.True(Run(false, sharedCopy: true).Holes.Count > 0, "复制链不能掩盖不同路径的结果差异");
+        TemplateResult BooleanBranch(bool inverted, bool consistent)
+        {
+            definition.ReturnType = types.Boolean;
+            template = template with { Blocks = [template.Blocks[0], new(8, [call, new ManagedReturn(12, Compare(returned))]),
+                new(16, [new ManagedReturn(16, new ConstantValue(1, types.Boolean, 8))])] };
+            var yes = new ManagedEdge(24, []);
+            var no = new ManagedEdge(32, []);
+            var body = new ManagedBody(caller,
+            [
+                new(0, [new ManagedBranch(0, Compare(Read(new ArgumentValue(0, ownerRef, 64)) with { Pending = new(0, "待证字段", false) }), new(8, []), new(16, []))]),
+                new(8, [call, new ManagedBranch(12, inverted ? new NegatedValue(Compare(returned), types.Boolean) : Compare(returned), inverted ? no : yes, inverted ? yes : no)]),
+                new(16, [new ManagedJump(16, consistent ? yes : no)]),
+                new(24, [call with { Address = 24 }, new ManagedReturn(28, new ConstantValue(1, types.Boolean, 8))]),
+                new(32, [call with { Address = 32 }, new ManagedReturn(36, new ConstantValue(0, types.Boolean, 8))]),
+            ]);
+            var recovered = new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary)).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
+            definition.ReturnType = types.Int32;
+            template = template with { Blocks = [template.Blocks[0], new(8, [call, new ManagedReturn(12, returned)]), new(16, [new ManagedReturn(16, one)])] };
+            return recovered;
+        }
+        var directBranch = BooleanBranch(false, true);
+        check.True(directBranch.Holes.Count == 0, $"返回布尔谓词可直接承接调用方分支：{string.Join("；", directBranch.Holes.Select(h => h.Reason))}");
+        check.Equal(0, BooleanBranch(true, true).Holes.Count, "返回布尔谓词的取反可承接相反分支");
+        check.True(BooleanBranch(false, false).Holes.Count > 0, "常量路径去向不一致时拒绝布尔分支证明");
         var copied = Run(true, "stable");
         check.True(copied.Holes.Count == 0 && copied.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
             .Any(a => a.Value is ComparisonValue { Left: BinaryValue { Op: BinOp.LShr } }), "稳定整数表达式可提前保存，供内联区域外继续使用");
