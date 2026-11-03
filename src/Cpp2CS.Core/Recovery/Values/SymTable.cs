@@ -319,6 +319,13 @@ public sealed class SymTable
         right = Resolve(right);
         if (left is ConstSym lc && right is ConstSym rc && Fold.Compare(cond, new IrConst(lc.Value, lc.Width), new IrConst(rc.Value, rc.Width)) is IrConst folded)
             return Const(folded.Value, 1);
+        // 只取 0/1 的值与 0 或 1 的相等比较就是那一位或其否定。
+        if (cond is Cond.Eq or Cond.Ne)
+        {
+            var (value, constant) = left is ConstSym ? (right, left as ConstSym) : (left, right as ConstSym);
+            if (constant is { Value: 0 or 1 } && Bit(value) is { } bit)
+                return (cond == Cond.Ne) == (constant.Value == 0) ? bit : Not(bit);
+        }
         return Op(Operator.Of(cond), 1, left, right);
     }
 
@@ -327,7 +334,21 @@ public sealed class SymTable
         condition = Resolve(condition);
         if (condition is ConstSym c) return c.Value != 0 ? whenTrue : whenFalse;
         if (ReferenceEquals(Resolve(whenTrue), Resolve(whenFalse))) return whenTrue;
+        // 按条件选 1 或 0 就是条件位的零扩展。
+        if (condition.Width == 1 && Resolve(whenTrue) is ConstSym t && Resolve(whenFalse) is ConstSym f && t.Value + f.Value == 1)
+            return ZeroExtend(t.Value == 1 ? condition : Not(condition), width);
         return Op(new Operator(OperatorKind.Select, 0), width, condition, whenTrue, whenFalse);
+    }
+
+    /// <summary>只取 0/1 的值的那一位：1 位的值本身，或高位全为常量 0 的拼接的最低位；其余为 null。</summary>
+    public static Sym? Bit(Sym sym)
+    {
+        sym = Resolve(sym);
+        if (sym.Width == 1) return sym;
+        if (sym is not ConcatSym { Parts: [{ Width: 1 } low, ..] } concat) return null;
+        for (var i = 1; i < concat.Parts.Length; i++)
+            if (Resolve(concat.Parts[i]) is not ConstSym { Value: 0 }) return null;
+        return low;
     }
 
     public Sym Logical(bool isAnd, Sym left, Sym right)

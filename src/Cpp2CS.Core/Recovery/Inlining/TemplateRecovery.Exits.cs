@@ -178,7 +178,7 @@ internal sealed partial class TemplateRecovery
         foreach (var end in match.Ends)
         {
             var walker = At(end);
-            if (end.Result is not { } returned || returned is ConstantValue || walker.Current is not ManagedBranch branch || Term(walker, branch.Condition) is not ComparisonValue comparison) continue;
+            if (end.Result is not { } returned || returned is ConstantValue || walker.Current is not ManagedBranch branch || Term(walker, branch.Condition) is not { } tested || AsComparison(tested) is not { } comparison) continue;
             if (Carrier(comparison.Left, returned) is { } left && comparison.Right is ConstantValue) predicate = comparison with { Left = left };
             else if (Carrier(comparison.Right, returned) is { } right && comparison.Left is ConstantValue) predicate = comparison with { Right = right };
             if (predicate is not null) break;
@@ -278,6 +278,17 @@ internal sealed partial class TemplateRecovery
         match.Continuation = new ManagedBranch(0, predicate, Edge(yes), Edge(no));
         return true;
     }
+
+    /// <summary>分支条件的比较形式：布尔值 b 即 b != 0，其否定即 b == 0（0/1 归一后条件可以不带显式比较）。</summary>
+    private ComparisonValue? AsComparison(ManagedValue condition) => condition switch
+    {
+        ComparisonValue comparison => comparison,
+        NegatedValue { Operand: var operand } when types.Kind(operand.Type) == TypeKind.Bool
+            => new ComparisonValue(Cond.Eq, operand, new ConstantValue(0, operand.Type, operand.Width), types.Boolean),
+        _ when types.Kind(condition.Type) == TypeKind.Bool
+            => new ComparisonValue(Cond.Ne, condition, new ConstantValue(0, condition.Type, condition.Width), types.Boolean),
+        _ => null,
+    };
 
     private static bool? ConstantComparison(Cond condition, ConstantValue left, ConstantValue right)
     {

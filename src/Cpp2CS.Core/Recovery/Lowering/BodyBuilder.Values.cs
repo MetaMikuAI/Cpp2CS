@@ -90,7 +90,9 @@ internal sealed partial class BodyBuilder
         if (from is TypeKind.Int or TypeKind.Bool && to is TypeKind.Int or TypeKind.Bool)
         {
             var (a, b) = (Width(value.Type), Width(expected));
-            if (a == b || to == TypeKind.Bool && value.Width == 1) return value;
+            if (to == TypeKind.Bool && value.Width == 1) return value;
+            // 1 位的真值（比较、逻辑运算）作为整数使用时须显式零扩展，即使布尔与目标整数的存储宽度相同。
+            if (a == b && !(from == TypeKind.Bool && to == TypeKind.Int && value.Width < b)) return value;
             return new ConversionValue(a < b ? (ManagedTypes.IsSigned(value.Type) ? ConvKind.SignExtend : ConvKind.ZeroExtend) : ConvKind.Truncate, value, expected, b);
         }
         return value;
