@@ -258,6 +258,7 @@ internal sealed partial class BodyBuilder
         public ManagedValue View(Sym sym, TypeRef? expected) => owner.View(sym, expected, call.Address);
         public TypeRef? TypeOf(Sym sym) => owner.oracle.TypeOf(sym);
         public LocalValue Local(Sym sym, TypeRef type) => owner.Local(sym, type);
+        public LocalValue Temporary(TypeRef type) => owner.NewLocal(type);
         public void Emit(ManagedStatement statement) => output.Add(statement);
         public void AwaitConstruction() => owner.constructions[(ResultSym)Result] = call;
         public MethodRef? ExceptionConstructor(string fullName) => owner.Constructor(fullName);

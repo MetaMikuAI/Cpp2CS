@@ -644,6 +644,7 @@ internal static class ArchitectureChecks
         public ManagedValue View(Sym sym, TypeRef? expected) => throw new NotSupportedException();
         public TypeRef? TypeOf(Sym sym) => throw new NotSupportedException();
         public LocalValue Local(Sym sym, TypeRef type) => throw new NotSupportedException();
+        public LocalValue Temporary(TypeRef type) => throw new NotSupportedException();
         public Sym? Pointee(int value) => throw new NotSupportedException();
         public ManagedValue? Location(int argument, TypeRef type) => throw new NotSupportedException();
         public ManagedValue Field(Sym receiver, FieldRef field) => throw new NotSupportedException();

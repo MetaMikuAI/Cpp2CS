@@ -35,6 +35,8 @@ public interface IRuntimeLowering
     /// <summary>值的自然类型；不受约束时为 null。</summary>
     TypeRef? TypeOf(Sym sym);
     LocalValue Local(Sym sym, TypeRef type);
+    /// <summary>运行时操作展开为多个托管调用时使用的独立局部。</summary>
+    LocalValue Temporary(TypeRef type);
     void Emit(ManagedStatement statement);
     /// <summary>经指针读取的值 value：已提升单元在调用前的内容；没有时为 null。</summary>
     Sym? Pointee(int value);
@@ -239,6 +241,30 @@ public static class RuntimeOps
                 // isinst 总是返回对象引用或 null；值类型及开放泛型保留装箱状态，之后由显式拆箱读取值。
                 var boxed = ManagedTypes.IsReferenceType(target) ? null : c.Types.Object;
                 c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, boxed ?? target), new IsInstValue(c.View(c.Arguments[0], c.Types.Object), target, boxed)));
+                return true;
+            },
+        };
+        yield return new(OpKind.IsInstArrayElement)
+        {
+            ResultType = (_, t) => t.Types.Object,
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Arguments is not [var value, var array]
+                    || c.TypeOf(array) is not ArrayRef arrayType || !ManagedTypes.IsReferenceType(arrayType.Element)
+                    || c.Types.CorlibMethod("System.Object", "GetType") is not { } getType
+                    || c.Types.CorlibMethod("System.Type", "GetElementType") is not { } getElementType
+                    || c.Types.CorlibMethod("System.Type", "IsInstanceOfType", c.Types.Object) is not { } isInstance) return false;
+                var operand = c.Temporary(c.Types.Object);
+                var runtimeType = c.Temporary(getType.Method.ReturnType);
+                var elementType = c.Temporary(getElementType.Method.ReturnType);
+                var accepts = c.Temporary(c.Types.Boolean);
+                c.Emit(new ManagedAssignment(c.Call.Address, operand, c.View(value, c.Types.Object)));
+                c.Emit(new ManagedCall(c.Call.Address, new(getType, c.View(array, arrayType), [], false), runtimeType, false));
+                c.Emit(new ManagedCall(c.Call.Address, new(getElementType, runtimeType, [], true), elementType, false));
+                c.Emit(new ManagedCall(c.Call.Address, new(isInstance, elementType, [operand], true), accepts, false));
+                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, c.Types.Object),
+                    new ChoiceValue(accepts, operand, new ConstantValue(0, c.Types.Object, 64), c.Types.Object, 64)));
                 return true;
             },
         };
