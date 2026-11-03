@@ -41,8 +41,30 @@ internal static class ArchitectureChecks
         Barriers(checks, types);
         PhiLoadWidths(checks, facts);
         FloatingOperands(checks, facts, types);
+        StackGuards(checks, facts);
         Verdicts(checks);
         return checks.Finish("架构边界");
+    }
+
+    private static void StackGuards(Assertions check, ProgramFacts facts)
+    {
+        foreach (var variant in new[] { "paired", "different-slot", "modified-save", "other-failure" })
+        {
+            Expr Guard(ulong slot) => new Load(new Binary(BinOp.Add,
+                new Intrinsic("sysreg_tpidr_el0", [], 64), Expr.C(slot, 64), 64), 64);
+            var saved = variant == "modified-save" ? new Binary(BinOp.Add, Guard(40), Expr.C(1, 64), 64) : Guard(40);
+            var test = new Block(0);
+            var normal = new Block(4);
+            var failure = new Block(8);
+            test.Statements = [new Branch(0, new Compare(Cond.Ne, Guard(variant == "different-slot" ? 48UL : 40UL), saved), 8, 4)];
+            normal.Statements = [new Return(4)];
+            failure.Statements = [new Call(8, CallKind.Direct, Expr.C(0, 64))
+                { Op = new(OpKind.Import, variant == "other-failure" ? "abort" : "__stack_chk_fail") }];
+            var function = new MachineFunction { Entry = 0, Range = new(0, 12, CodeRegion.Managed, default), Blocks = [test, normal, failure] };
+            MachineFunction.AddEdge(test, failure);
+            MachineFunction.AddEdge(test, normal);
+            check.Equal(variant == "paired", StackGuardNormalizer.Run(function), $"栈保护配对 {variant}");
+        }
     }
 
     private static void PhiLoadWidths(Assertions check, ProgramFacts facts)
