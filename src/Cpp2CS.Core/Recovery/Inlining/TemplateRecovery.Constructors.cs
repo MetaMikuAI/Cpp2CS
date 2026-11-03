@@ -4,31 +4,30 @@ namespace Cpp2CS.Recovery.Inlining;
 
 internal sealed partial class TemplateRecovery
 {
-    /// <summary>同一 this 上互不重叠的简单字段写入可交换，优先排出基类模板所需的写入。</summary>
-    private ManagedBody OrderConstructorStores(ManagedBody body, IReadOnlySet<FieldDef> preferred)
+    /// <summary>
+    /// 连续写入同一接收者（参数或局部）的不同字段、写入值不读内存且两两不别名（<see cref="MayAlias"/>）时可交换：
+    /// 接收者为空时两种次序都在第一次写入处抛出，此前没有其他效果。按优先字段、再按布局偏移排出一种规范次序，
+    /// 使基类构造模板所需的写入与本类写入分开。
+    /// </summary>
+    private ManagedBody CommuteIndependentStores(ManagedBody body, IReadOnlySet<FieldDef> preferred)
     {
-        (int Offset, int Size, FieldDef Field)? Range(ManagedStatement statement)
-        {
-            if (statement is not ManagedStore { Target: FieldValue { Receiver: ArgumentValue { Index: -1 } } field,
-                    Value: ArgumentValue or ConstantValue } || field.Field.DeclaringType is not DefinitionRef owner
-                || owner.Definition.IsValueType || types.Layouts.Of(owner)?.Fields.FirstOrDefault(f => f.Field == field.Field.Field) is not { } slot)
-                return null;
-            var size = ManagedTypes.IsReferenceType(field.Type) ? 8 : types.Size(field.Type);
-            return size > 0 ? (slot.Offset, size, field.Field.Field) : null;
-        }
+        static bool Plain(ManagedValue value) => value is ArgumentValue or LocalValue or ConstantValue;
+        int Offset(FieldRef field) => field.DeclaringType is DefinitionRef owner
+            && types.Layouts.Of(owner)?.Fields.FirstOrDefault(f => f.Field == field.Field) is { } slot ? slot.Offset : int.MaxValue;
         return body with { Blocks = body.Blocks.Select(block =>
         {
             var statements = block.Statements.ToArray();
             for (var first = 0; first < statements.Length; first++)
             {
-                var end = first;
-                var ranges = new List<(int Offset, int Size, FieldDef Field)>();
-                while (end < statements.Length && Range(statements[end]) is { } next
-                    && ranges.All(r => r.Offset + r.Size <= next.Offset || next.Offset + next.Size <= r.Offset))
-                { ranges.Add(next); end++; }
-                if (end == first) continue;
-                var ordered = statements[first..end].Zip(ranges)
-                    .OrderByDescending(p => preferred.Contains(p.Second.Field)).ThenBy(p => p.Second.Offset).Select(p => p.First).ToArray();
+                if (statements[first] is not ManagedStore { Target: FieldValue { Receiver: var receiver } head, Value: var value } || !Plain(receiver) || !Plain(value)) continue;
+                var run = new List<FieldValue> { head };
+                var end = first + 1;
+                while (end < statements.Length && statements[end] is ManagedStore { Target: FieldValue next, Value: var stored }
+                    && next.Receiver.Equals(receiver) && Plain(stored) && run.All(r => !MayAlias(r, next)))
+                { run.Add(next); end++; }
+                if (run.Count < 2) continue;
+                var ordered = statements[first..end].Zip(run)
+                    .OrderByDescending(p => preferred.Contains(p.Second.Field.Field)).ThenBy(p => Offset(p.Second.Field)).Select(p => p.First).ToArray();
                 Array.Copy(ordered, 0, statements, first, ordered.Length);
                 first = end - 1;
             }

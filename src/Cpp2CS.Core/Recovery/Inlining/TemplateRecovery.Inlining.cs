@@ -216,16 +216,17 @@ internal sealed partial class TemplateRecovery
             if (summaries(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
             var preferred = template.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>()
                 .Select(s => s.Target).OfType<FieldValue>().Select(f => f.Field.Field).ToHashSet();
-            var candidate = OrderConstructorStores(body, preferred);
-            template = OrderConstructorStores(template, preferred);
+            var candidate = CommuteIndependentStores(body, preferred);
+            template = CommuteIndependentStores(template, preferred);
             var blocks = candidate.Blocks.ToDictionary(b => b.Address);
             foreach (var block in candidate.Blocks)
                 for (var start = 0; start < block.Statements.Count; start++)
                 {
                     if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
                     var match = Match(candidate, blocks, block.Address, start, template, parent.Arguments, out _);
+                    // 交换只为比对；区域外的块保持原次序。
                     if (match is not null && PlanReplacement(candidate, blocks, block.Address, start, method, match, out _) is { } replaced)
-                        return replaced.Apply(candidate);
+                        return replaced.Apply(body);
                 }
         }
         return body;
@@ -694,30 +695,6 @@ internal sealed partial class TemplateRecovery
         }
         return new Observed(location, walker.Epoch);
     }
-
-    private static bool MayAlias(ManagedValue a, ManagedValue b) => a.Equals(b) || (a, b) switch
-    {
-        (FieldValue x, FieldValue y) => x.Field.Equals(y.Field) || x.Field.Field.Owner == y.Field.Field.Owner
-            && (x.Field.Field.Owner.Attributes & System.Reflection.TypeAttributes.LayoutMask) == System.Reflection.TypeAttributes.ExplicitLayout,
-        (ArrayElementValue, ArrayElementValue) => true,
-        _ => false,
-    };
-
-    private bool ReadsLocation(ManagedValue value, ManagedValue location) => value switch
-    {
-        Observed observed => MayAlias(observed.Read, location)
-            || types.Kind(observed.Type) == TypeKind.Struct && ContainsLocation(location, observed.Read)
-            || ReadsLocation(observed.Read, location),
-        Returned => false,
-        _ => ManagedValues.Children(value).Any(child => ReadsLocation(child, location)),
-    };
-
-    private static bool ContainsLocation(ManagedValue value, ManagedValue location) => value switch
-    {
-        Observed observed => MayAlias(observed.Read, location) || ContainsLocation(observed.Read, location),
-        Returned => false,
-        _ => ManagedValues.Children(value).Any(child => ContainsLocation(child, location)),
-    };
 
     /// <summary>
     /// 区域外使用的项（接收者、实参、出口复制）写回托管值。初代读取（此前没有经过调用）写成调用之前的读取，字段须可访问；
