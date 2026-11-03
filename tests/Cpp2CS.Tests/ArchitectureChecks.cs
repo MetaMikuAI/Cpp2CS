@@ -30,6 +30,7 @@ internal static class ArchitectureChecks
         EntryKinds(checks, facts, types);
         Templates(checks, types);
         Accessors(checks, types);
+        ClosedGenericAccess(checks, types);
         StaticAccessorReferences(checks, types);
         StaticGenericLocations(checks, facts, types);
         ReturnedTemplates(checks, types);
@@ -285,6 +286,22 @@ internal static class ArchitectureChecks
         var covariance = new InlineEvidence(types, caller, Upcast);
         check.True(Prove(covariance, reference, types.String, false, ownerRef) is not null, "直接返回字段的引用上转型可证明");
         check.True(Prove(covariance, reference, types.Int64, false, ownerRef) is null, "上转型不能把引用解释成整数");
+    }
+
+    private static void ClosedGenericAccess(Assertions check, ManagedTypes types)
+    {
+        var storage = Type("GenericStorage", 120);
+        storage.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        var hidden = new TypeDef { Index = 121, Name = "Hidden", Namespace = "Tests", Assembly = "Other.dll", Token = 0,
+            Attributes = TypeAttributes.NotPublic, IsValueType = false, IsEnum = false };
+        var instance = new DefinitionRef(storage, [new DefinitionRef(hidden, [])]);
+        var field = new FieldRef(new FieldDef { Index = 120, Owner = storage, Name = "count", Type = types.Int32,
+            Attributes = FieldAttributes.Private, Offset = 16 }, instance);
+        var caller = new MethodRef(Method(storage, "Read", 120), instance.Arguments, []);
+        var outsider = new MethodRef(Method(Type("External", 122), "Read", 122), [], []);
+        check.True(!ManagedAccess.Type(types, storage, instance), "封闭实参在声明程序集外不可见");
+        check.True(ManagedAccess.Field(types, caller, field, instance), "封闭证据体保留定义内的字段权限");
+        check.True(!ManagedAccess.Field(types, outsider, field, instance), "外部调用方仍不能访问私有字段");
     }
 
     private static void StaticAccessorReferences(Assertions check, ManagedTypes types)

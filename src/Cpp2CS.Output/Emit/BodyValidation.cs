@@ -12,7 +12,7 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
     private ulong? address;
     private bool CanAccess(MethodRef method, TypeRef? receiver) => IgnoreAccess || ManagedAccess.Method(types, accessContext, method, receiver);
     private bool CanAccess(TypeRef type) => IgnoreAccess || ManagedAccess.Type(types, accessContext, type);
-    private bool CanAccess(FieldRef field, TypeRef? receiver) => IgnoreAccess || ManagedAccess.Field(types, accessContext, field, receiver);
+    private bool CanAccess(FieldRef field, TypeRef? receiver) => IgnoreAccess || ManagedAccess.Field(types, methodContext, field, receiver);
 
     public EmissionProblem? Check(ManagedBody recovered, bool hasBody, out ConstructorInitialization.Shape? shape)
     {

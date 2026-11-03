@@ -8,6 +8,11 @@ namespace Cpp2CS.Managed;
 /// </summary>
 public static class ManagedAccess
 {
+    /// <summary>泛型方法的封闭证据体仍可访问自身字段；实参的外部可见性不改变定义内的权限。</summary>
+    public static bool Field(ManagedTypes types, MethodRef caller, FieldRef field, TypeRef? receiver) =>
+        field.Field.Owner == caller.Method.Owner && field.DeclaringType.Equals(caller.DeclaringType)
+        || Field(types, caller.Method.Owner, field, receiver);
+
     public static bool Field(ManagedTypes types, TypeDef caller, FieldRef field, TypeRef? receiver) =>
         Type(types, caller, field.DeclaringType)
         && Allowed(types, caller, field.Field.Owner, field.DeclaringType, (int)(field.Field.Attributes & FieldAttributes.FieldAccessMask), receiver);

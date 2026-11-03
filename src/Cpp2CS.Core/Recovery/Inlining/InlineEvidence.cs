@@ -15,7 +15,7 @@ internal sealed class InlineEvidence(ManagedTypes types, MethodRef caller, Func<
     public MethodRef Caller => caller;
     public MethodRecoveryResult? Summary(MethodRef method) => summaries(method);
 
-    public bool Accessible(FieldRef field, TypeRef? receiver) => ManagedAccess.Field(types, caller.Method.Owner, field, receiver);
+    public bool Accessible(FieldRef field, TypeRef? receiver) => ManagedAccess.Field(types, caller, field, receiver);
 
     /// <summary>
     /// 调用方以 receiver 调用 method 的 IL 合法，且不引入原生代码中没有的效果；不成立时为原因。
