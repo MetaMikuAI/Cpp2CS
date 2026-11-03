@@ -1,5 +1,6 @@
 using Cpp2CS.Calls;
 using Cpp2CS.Facts;
+using Cpp2CS.Facts.Derived;
 using Cpp2CS.Idioms;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
@@ -36,6 +37,7 @@ public sealed class MethodDecompiler
     private readonly IdiomRewriter rewriter;
     private readonly ManagedAbi abi;
     private readonly CallShapes shapes;
+    private readonly NativeMethodFacts native;
     private readonly Dictionary<MethodRequest, MethodRecoveryResult?> summaries = [];
     private MethodEntries? entries;
 
@@ -47,6 +49,7 @@ public sealed class MethodDecompiler
         rewriter = new IdiomRewriter(facts) { RecordFilter = _ => false, RecoverUnusedInputs = true };
         abi = new ManagedAbi(facts.Layouts);
         shapes = new CallShapes(facts, abi, rewriter.UnusedInput);
+        native = new NativeMethodFacts(facts, lifter, rewriter);
     }
 
     public ManagedTypes Types => types;
@@ -146,6 +149,8 @@ public sealed class MethodDecompiler
         if (idioms.Errors.Count > 0)
             return RecoveryDiagnostics.Fail(entry, $"L2 {idioms.Errors[0]}", rule: "Prepare");
         GenericContext.Instantiate(function, method);
+        CleanupCalls.Run(function, address => facts.Helpers.At(address)?.Kind == HelperKind.Unknown
+            ? native.CleanupThunk(address, method.Method.Owner) : null);
         ExceptionNormalization.Run(function, ExceptionFacts.WrapperWithoutDestructor(facts.Checks));
         var environment = new MethodEnvironment(method, signature, shapes);
         var splits = PathSplitting.Run(function, f => ValueModel.Build(f, environment),

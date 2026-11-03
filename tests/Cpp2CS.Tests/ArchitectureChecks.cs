@@ -5,6 +5,7 @@ using Cpp2CS.Input;
 using Cpp2CS.Idioms;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
+using Cpp2CS.Machine.Algebra;
 using Cpp2CS.Output;
 using Cpp2CS.Recovery;
 using Cpp2CS.Recovery.Inlining;
@@ -46,6 +47,7 @@ internal static class ArchitectureChecks
         LowBitArithmetic(checks);
         PackedPhiSlices(checks);
         JoinedPhiSlices(checks);
+        CleanupDispatch(checks);
         ArrayIndices(checks);
         Barriers(checks, types);
         UnchangedBarriers(checks, facts);
@@ -441,6 +443,30 @@ internal static class ArchitectureChecks
                     "来源变化后整体合流保留真实拼接，不沿用失效的完整值证据");
             }
         }
+    }
+
+    private static void CleanupDispatch(Assertions check)
+    {
+        StateDispatch? Read(Cond comparison, ulong bound, ulong target = 100)
+        {
+            var receiver = new Use(new Variable(Storage.Gpr(0), 0), 64);
+            var state = new Load(new Binary(BinOp.Add, receiver, Expr.C(16, 64), 64), 32);
+            var condition = new Logical(true,
+                new Compare(comparison, new Binary(BinOp.Sub, state, Expr.C(1, 32), 32), Expr.C(bound, 32)),
+                new Compare(Cond.Ne, new Binary(BinOp.Add, state, Expr.C(3, 32), 32), Expr.C(0, 32)));
+            var entry = new Block(0) { Statements = [new Branch(0, condition, 8, 4)] };
+            var dispose = new Block(4) { Statements = [new Call(4, CallKind.Tail, Expr.C(target, 64))
+                { Arguments = [receiver], StackPointer = new FrameAddress(-32) }] };
+            var done = new Block(8) { Statements = [new Return(8)] };
+            var function = new MachineFunction { Entry = 0, Range = new(0, 12, CodeRegion.Managed, default), Blocks = [entry, dispose, done] };
+            return StateDispatch.Read(function, c => c);
+        }
+        var dispatch = Read(Cond.Uge, 4);
+        check.True(dispatch is not null && Read(Cond.Ugt, 3) is { } equivalent && dispatch.Same(equivalent), "有符号状态的无符号范围比较按精确分区证明清理分派等价");
+        check.True(dispatch is not null && dispatch.Otherwise.Length == 0 && new uint[] { 1, 4, unchecked((uint)-3) }
+            .All(s => dispatch.Cases[s].SequenceEqual(new ulong[] { 100 })), "范围端点及负状态均保留清理调用");
+        check.True(dispatch is not null && Read(Cond.Uge, 5) is { } wider && !dispatch.Same(wider), "清理状态范围不同不能视为等价");
+        check.True(dispatch is not null && Read(Cond.Uge, 4, 104) is { } other && !dispatch.Same(other), "清理调用目标不同不能视为等价");
     }
 
     private static void RepresentationCopies(Assertions check, ProgramFacts facts, ManagedTypes types)

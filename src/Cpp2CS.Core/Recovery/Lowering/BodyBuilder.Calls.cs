@@ -109,7 +109,7 @@ internal sealed partial class BodyBuilder
             var bits = values.Syms.Result(call, 0, MethodEnvironment.ValueWidth(returned));
             return new Statement(new ManagedReturn(call.Address, View(values.Syms.Slice(bits, 0, MethodEnvironment.ValueWidth(caller)), own, call.Address)));
         }
-        var lowered = new ManagedCall(call.Address, invocation, tail ? null : result, tail);
+        var lowered = new ManagedCall(call.Address, invocation, tail ? null : result, tail) { Inlined = call.Inlined };
         if (tail) return new Statement(lowered);
         output.Add(lowered);
         return null;

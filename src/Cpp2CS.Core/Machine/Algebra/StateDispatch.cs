@@ -24,6 +24,9 @@ internal sealed record StateDispatch(Expr Receiver, int Offset, IReadOnlyDiction
         if (normalized.Length == 0 || normalized.Any(c => c is not { Op: null, Target: Const, Arguments.Length: 1 })) return null;
         var receiver = normalized[0]!.Arguments[0];
         if (normalized.Any(c => c!.Arguments[0] != receiver)) return null;
+        // 证明只观察规范化后的托管实参；调用点保存的 SP 和隐藏 MethodInfo 不参与无参清理方法的行为。
+        var callMap = calls.Zip(normalized).ToDictionary(p => p.First, p => p.Second! with { StackPointer = null });
+        blocks = blocks.ToDictionary(p => p.Key, p => p.Value.Select(s => s is Call call ? callMap[call] : s).ToArray());
         var loads = blocks.Values.SelectMany(s => s).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<Load>()
             .Where(l => l is { Width: 32, Address: Binary { Op: BinOp.Add, Right: Const } b } && b.Left == receiver).Distinct().ToArray();
         if (loads is not [var field]) return null;
@@ -55,9 +58,10 @@ internal sealed record StateDispatch(Expr Receiver, int Offset, IReadOnlyDiction
             {
                 if (c.Cond is Cond.Eq or Cond.Ne)
                 { constants.Add(x == 1 ? unchecked(b - a) : unchecked(a - b)); return true; }
-                if (c.Cond is Cond.Ugt or Cond.Ule && x == 1 && y == 0 && b <= 256)
+                if (c.Cond is Cond.Ugt or Cond.Ule or Cond.Uge or Cond.Ult && x == 1 && y == 0 && b <= 256)
                 {
-                    for (uint i = 0; i <= b; i++) constants.Add(unchecked(i - a));
+                    var count = c.Cond is Cond.Uge or Cond.Ult ? b : b + 1;
+                    for (uint i = 0; i < count; i++) constants.Add(unchecked(i - a));
                     return true;
                 }
             }
