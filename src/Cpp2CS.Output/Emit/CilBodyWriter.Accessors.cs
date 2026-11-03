@@ -14,5 +14,8 @@ internal sealed partial class CilBodyWriter
         var instruction = Instruction.Create(OpCodes.Call, MethodReference(accessor.Method));
         il.Append(instruction);
         AccessorCalls.Add(instruction, accessor);
+        // 已证明 getter 直接返回该字段；公开接口类型可安全还原为字段的具体引用类型。
+        if (!accessor.Write && !accessor.Method.Concrete(accessor.Method.Method.ReturnType).Equals(accessor.ValueType))
+            il.Emit(OpCodes.Castclass, TypeReference(accessor.ValueType));
     }
 }

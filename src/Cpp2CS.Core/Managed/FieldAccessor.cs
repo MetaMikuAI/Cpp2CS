@@ -16,6 +16,9 @@ public sealed record FieldAccessor(MethodRef Method, FieldRef Field, TypeRef Val
     /// <summary>注解的签名、接收者和访问权限必须与当前字段操作一致。</summary>
     public bool Matches(ManagedTypes types, TypeDef caller, ManagedValue value, bool write) => Write == write
         && Field.Equals(FieldOf(value)) && ValueType.Equals(value.Type) && Width == value.Width
+        && (Method.Concrete(Write ? Method.Method.Parameters[0].Type : Method.Method.ReturnType).Equals(ValueType)
+            || !Write && ManagedTypes.IsReferenceType(ValueType)
+                && types.IsAssignable(ValueType, Method.Concrete(Method.Method.ReturnType)))
         && (value is StaticFieldValue ? Method.Method.IsStatic : value is FieldValue f && (ReceiverParameter
             ? !write && Method.Method.Parameters.Count == 1 && types.IsAssignable(f.Receiver.Type, Method.Method.Parameters[0].Type)
             : !Method.Method.IsStatic && (types.IsAssignable(f.Receiver.Type, Method.DeclaringType)

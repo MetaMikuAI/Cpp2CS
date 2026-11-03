@@ -28,9 +28,12 @@ internal static class ArchitectureChecks
         Identities(checks, types);
         EntryKinds(checks, facts, types);
         Templates(checks, types);
+        Accessors(checks, types);
+        ReturnedTemplates(checks, types);
         NestedEnumStack(checks);
         InterfaceSlots(checks, types);
         RepresentationCopies(checks, facts, types);
+        ConstructorStoreOrder(checks, types);
         LowBitArithmetic(checks);
         Barriers(checks, types);
         PhiLoadWidths(checks, facts);
@@ -203,6 +206,58 @@ internal static class ArchitectureChecks
         check.True(!fields.Accessible(new(exposed, new DefinitionRef(inaccessible, [])), null), "公共字段不能绕过声明类型的权限");
     }
 
+    private static void Accessors(Assertions check, ManagedTypes types)
+    {
+        var owner = Type("AccessStorage", 30);
+        var ownerRef = new DefinitionRef(owner, []);
+        var field = new FieldDef { Index = 30, Owner = owner, Name = "value", Type = types.Int32,
+            Attributes = FieldAttributes.Private, Offset = 16 };
+        owner.Fields = [field];
+        var fieldRef = new FieldRef(field, ownerRef);
+        var hidden = Method(owner, "HiddenRead", 30, MethodAttributes.Private);
+        var visible = Method(owner, "Read", 31);
+        var inherited = Method(owner, "InheritedRead", 32, MethodAttributes.Family);
+        hidden.ReturnType = visible.ReturnType = inherited.ReturnType = types.Int32;
+        MethodRecoveryResult Summary(MethodRef method) => new(method, 0, new ManagedBody(method,
+            [new(0, [new ManagedReturn(0, new FieldValue(new ArgumentValue(-1, ownerRef, 64), fieldRef, types.Int32, 32))])]), []);
+        var caller = new MethodRef(Method(Type("AccessConsumer", 31), "Run", 33), [], []);
+        owner.Methods = [hidden];
+        var privateOnly = new FieldAccessModel(types, caller, Summary);
+        check.True(privateOnly.Accessor(fieldRef, types.Int32, false, ownerRef) is null, "私有访问器不能证明外部字段读取");
+        var receiver = new ArgumentValue(0, ownerRef, 64);
+        var pendingRead = new ManagedBody(caller, [new(0, [new ManagedReturn(0,
+            new FieldValue(receiver, fieldRef, types.Int32, 32) { Pending = (0, "待证字段") })])]);
+        var privateTemplate = new TemplateRecovery(types, caller, Summary, privateOnly)
+            .Run(pendingRead, new Dictionary<Variable, PendingConstruction>(), 0);
+        check.True(privateTemplate.Holes.Count > 0, "多语句模板不能重新引入被拒绝的私有访问器");
+        var privateCall = new ManagedBody(caller, [new(0, [new ManagedCall(0,
+            new ManagedInvocation(new MethodRef(hidden, [], []), receiver, [], false), null, false) { Inlined = true }, new ManagedReturn(4, null)])]);
+        check.True(new BodyValidation(types, EmissionPolicy.Recovered, caller).Check(privateCall, true, out _) is
+            { Kind: EmissionProblemKind.AccessDenied }, "内联证明调用在写出策略下仍须满足权限");
+        owner.Methods = [hidden, visible];
+        var accessible = new FieldAccessModel(types, caller, Summary);
+        check.True(accessible.Accessor(fieldRef, types.Int64, false, ownerRef) is null, "访问器的字段值类型必须相符");
+        check.Equal(visible, accessible.Accessor(fieldRef, types.Int32, false, ownerRef)!.Method.Method,
+            "跳过私有候选并继续寻找公共访问器，类型不匹配缓存不干扰合法证明");
+        var derived = Type("DerivedStorage", 32);
+        derived.BaseType = ownerRef;
+        var derivedRef = new DefinitionRef(derived, []);
+        owner.Methods = [inherited];
+        var protectedAccess = new FieldAccessModel(types, new MethodRef(Method(derived, "Run", 34), [], []), Summary);
+        check.True(protectedAccess.Accessor(fieldRef, types.Int32, false, ownerRef) is null, "派生类不能通过基类接收者调用受保护访问器");
+        check.True(protectedAccess.Accessor(fieldRef, types.Int32, false, derivedRef) is not null,
+            "相同字段的派生类接收者独立证明受保护访问器");
+        var referenceField = new FieldDef { Index = 33, Owner = owner, Name = "text", Type = types.String, Attributes = FieldAttributes.Private, Offset = 24 };
+        var reference = new FieldRef(referenceField, ownerRef);
+        visible.ReturnType = types.Object;
+        owner.Methods = [visible];
+        MethodRecoveryResult Upcast(MethodRef method) => new(method, 0, new(method,
+            [new(0, [new ManagedReturn(0, new FieldValue(new ArgumentValue(-1, ownerRef, 64), reference, types.String, 64))])]), []);
+        var covariance = new FieldAccessModel(types, caller, Upcast);
+        check.True(covariance.Accessor(reference, types.String, false, ownerRef) is not null, "直接返回字段的引用上转型可证明");
+        check.True(covariance.Accessor(reference, types.Int64, false, ownerRef) is null, "上转型不能把引用解释成整数");
+    }
+
     private static void LowBitArithmetic(Assertions check)
     {
         var syms = new SymTable();
@@ -246,11 +301,94 @@ internal static class ArchitectureChecks
             "显式布局只将覆盖全部位的字段视为整体表示");
     }
 
+    private static void ConstructorStoreOrder(Assertions check, ManagedTypes types)
+    {
+        var parent = Type("BaseStorage", 70);
+        parent.BaseType = types.Object;
+        var parentRef = new DefinitionRef(parent, []);
+        var child = Type("ChildStorage", 71);
+        child.BaseType = parentRef;
+        var childRef = new DefinitionRef(child, []);
+        FieldDef Field(TypeDef owner, int index, int offset) => new() { Index = index, Owner = owner, Name = $"f{index}",
+            Type = types.Int32, Offset = offset, Attributes = FieldAttributes.Public };
+        var first = Field(parent, 70, 16);
+        var second = Field(parent, 71, 20);
+        var own = Field(child, 72, 24);
+        parent.Fields = [first, second];
+        child.Fields = [own];
+        var baseCtor = new MethodRef(Method(parent, ".ctor", 70), [], []);
+        parent.Methods = [baseCtor.Method];
+        var childCtor = new MethodRef(Method(child, ".ctor", 71), [], []);
+        child.Methods = [childCtor.Method];
+        var objectCtor = new MethodRef(types.Object.Definition.Methods.Single(m => m.Name == ".ctor" && m.Parameters.Count == 0), [], []);
+        ManagedCall Initialize(TypeRef owner) => new(0, new(objectCtor, new ArgumentValue(-1, owner, 64), [], false), null, false);
+        ManagedStore Store(TypeRef owner, FieldDef field, int value) => new((ulong)field.Index,
+            new FieldValue(new ArgumentValue(-1, owner, 64), new(field, field.Owner == parent ? parentRef : childRef), types.Int32, 32),
+            new ConstantValue((ulong)value, types.Int32, 32));
+        var template = new ManagedBody(baseCtor, [new(0, [Initialize(parentRef), Store(parentRef, first, 1), Store(parentRef, second, 2), new ManagedReturn(100, null)])]);
+        MethodRecoveryResult? Summary(MethodRef method) => method == baseCtor ? new(baseCtor, 0, template, []) : null;
+        ManagedBody Recover(bool interveningRead)
+        {
+            var middle = Store(childRef, own, 3);
+            if (interveningRead) middle = middle with { Value = new FieldValue(new ArgumentValue(-1, childRef, 64), new(second, parentRef), types.Int32, 32) };
+            var body = new ManagedBody(childCtor, [new(0, [Initialize(childRef), Store(childRef, first, 1), middle,
+                Store(childRef, second, 2), new ManagedReturn(100, null)])]);
+            return new TemplateRecovery(types, childCtor, Summary, new(types, childCtor, Summary))
+                .Run(body, new Dictionary<Variable, PendingConstruction>(), 0).Body;
+        }
+        bool CallsBase(ManagedBody body) => body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Inlined && c.Invocation.Method == baseCtor);
+        check.True(CallsBase(Recover(false)), "独立本类写入可移到完整基类构造之后");
+        check.True(!CallsBase(Recover(true)), "依赖字段读取的写入不得重排越过基类赋值");
+    }
+
     private sealed class EmptyEnvironment : IValueEnvironment
     {
         public Sym? Entry(SymTable syms, Storage storage) => null;
         public Sym? CallResult(SymTable syms, Call call, int index, IReadOnlyList<Sym> arguments) => null;
         public Sym? MetadataRead(SymTable syms, Sym address, int width) => null;
+    }
+
+    private static void ReturnedTemplates(Assertions check, ManagedTypes types)
+    {
+        var owner = Type("PairStorage", 40);
+        var ownerRef = new DefinitionRef(owner, []);
+        FieldDef Field(string name, int index) => new() { Index = index, Owner = owner, Name = name,
+            Type = types.Int32, Attributes = FieldAttributes.Private, Offset = 16 + (index - 40) * 4 };
+        var first = Field("first", 40);
+        var second = Field("second", 41);
+        var other = Field("other", 42);
+        owner.Fields = [first, second, other];
+        var definition = Method(owner, "Sum", 40);
+        definition.ReturnType = types.Int32;
+        owner.Methods = [definition];
+        var method = new MethodRef(definition, [], []);
+        var self = new ArgumentValue(-1, ownerRef, 64);
+        FieldValue Read(ManagedValue receiver, FieldDef field) => new(receiver, new FieldRef(field, ownerRef), types.Int32, 32);
+        var template = new ManagedBody(method, [new(0, [new ManagedReturn(0,
+            new BinaryValue(BinOp.Add, Read(self, first), Read(self, second), types.Int32, 32))])]);
+        MethodRecoveryResult? Summary(MethodRef requested) => requested == method ? new(method, 0, template, []) : null;
+        var callerDefinition = Method(Type("PairConsumer", 41), "Run", 41);
+        callerDefinition.ReturnType = types.Int32;
+        var caller = new MethodRef(callerDefinition, [], []);
+        var receiver = new ArgumentValue(0, ownerRef, 64);
+        var a = new LocalValue(new Variable(Storage.Temp(40), 1), types.Int32, 32);
+        var b = new LocalValue(new Variable(Storage.Temp(41), 1), types.Int32, 32);
+        var unused = new LocalValue(new Variable(Storage.Temp(42), 1), types.Int32, 32);
+        TemplateResult Run(bool unrelated)
+        {
+            var statements = new List<ManagedStatement> { new ManagedAssignment(0, a, Read(receiver, first) with { Pending = (0, "待证字段") }) };
+            if (unrelated) statements.Add(new ManagedAssignment(2, unused, Read(new ArgumentValue(1, ownerRef, 64), other)));
+            statements.Add(new ManagedAssignment(4, b, Read(receiver, second) with { Pending = (4, "待证字段") }));
+            statements.Add(new ManagedReturn(8, new BinaryValue(BinOp.Add, a, b, types.Int32, 32)));
+            var fields = new FieldAccessModel(types, caller, Summary);
+            return new TemplateRecovery(types, caller, Summary, fields).Run(new(caller, [new(0, statements)]), new Dictionary<Variable, PendingConstruction>(), 0);
+        }
+        var recovered = Run(false);
+        check.True(recovered.Holes.Count == 0 && recovered.Body.Blocks.SelectMany(b => b.Statements)
+            .OfType<ManagedCall>().Any(c => c.Inlined && c.Tail && c.Invocation.Method == method), "分段读取的返回表达式可证明为完整取值调用");
+        var interleaved = Run(true);
+        check.True(interleaved.Body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk)
+            .OfType<FieldValue>().Count(f => f.Field.Field == other) == 1, "无关对象上的读取必须保留，即使后续区域可以独立证明");
     }
 
     private static void NestedEnumStack(Assertions check)
@@ -327,9 +465,9 @@ internal static class ArchitectureChecks
         Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false,
     };
 
-    private static MethodDef Method(TypeDef owner, string name, int index) => new()
+    private static MethodDef Method(TypeDef owner, string name, int index, MethodAttributes attributes = MethodAttributes.Public) => new()
     {
-        Index = index, Owner = owner, Name = name, Token = 0, Attributes = MethodAttributes.Public, ImplAttributes = 0, Slot = -1,
+        Index = index, Owner = owner, Name = name, Token = 0, Attributes = attributes, ImplAttributes = 0, Slot = -1,
     };
 
     private sealed class MissingDefinitions : IMethodResults

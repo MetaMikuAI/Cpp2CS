@@ -10,18 +10,20 @@ namespace Cpp2CS.Recovery.Inlining;
 /// </summary>
 internal sealed class FieldAccessModel(ManagedTypes types, MethodRef caller, Func<MethodRef, MethodRecoveryResult?> summaries)
 {
-    private readonly Dictionary<(FieldRef, bool), FieldAccessor?> accessors = [];
-    private readonly Dictionary<(FieldRef, bool), string> accessorFailures = [];
+    private readonly Dictionary<(FieldRef, TypeRef, bool, TypeRef?), FieldAccessor?> accessors = [];
+    private readonly Dictionary<(FieldRef, TypeRef, bool, TypeRef?), string> accessorFailures = [];
 
     public bool Accessible(FieldRef field, TypeRef? receiver) => ManagedAccess.Field(types, caller.Method.Owner, field, receiver);
 
-    public string? Failure(FieldRef field, bool write) => accessorFailures.GetValueOrDefault((field, write));
+    public string? Failure(FieldRef field, TypeRef valueType, bool write, TypeRef? receiver) =>
+        accessorFailures.GetValueOrDefault((field, valueType, write, receiver));
 
     /// <summary>字段所在类型中，方法体恰为该字段单一读取（getter）或写入（setter）的方法。</summary>
-    public FieldAccessor? Accessor(FieldRef field, TypeRef valueType, bool write)
+    public FieldAccessor? Accessor(FieldRef field, TypeRef valueType, bool write, TypeRef? receiver)
     {
-        if (accessors.TryGetValue((field, write), out var known)) return known;
-        accessors[(field, write)] = null;
+        var key = (field, valueType, write, receiver);
+        if (accessors.TryGetValue(key, out var known)) return known;
+        accessors[key] = null;
         var owner = (DefinitionRef)field.DeclaringType;
         var isStatic = (field.Field.Attributes & FieldAttributes.Static) != 0;
         FieldAccessor? found = null;
@@ -38,7 +40,10 @@ internal sealed class FieldAccessModel(ManagedTypes types, MethodRef caller, Fun
             var receiverParameter = definition.IsStatic && !isStatic;
             var method = new MethodRef(definition, receiverParameter ? [] : owner.Arguments, []);
             var declared = method.Concrete(write ? definition.Parameters[0].Type : definition.ReturnType);
-            if (!declared.Equals(valueType)) continue;
+            if (!declared.Equals(valueType) && (write || !ManagedTypes.IsReferenceType(valueType)
+                || !ManagedTypes.IsReferenceType(declared) || !types.IsAssignable(valueType, declared))) continue;
+            if (!ManagedAccess.Method(types, caller.Method.Owner, method, definition.IsStatic ? null : receiver))
+            { reasons.Add($"{definition.Name} 对调用方不可访问"); continue; }
             if (summaries(method) is not { } summary) { reasons.Add($"{definition.Name} 没有原生入口"); continue; }
             if (summary.Body is not { } body) { reasons.Add($"{definition.Name} 未恢复：{summary.Holes.FirstOrDefault()?.Reason}"); continue; }
             // 单次赋值的局部代回其值：读取被落成局部时仍是同一次读取。
@@ -72,8 +77,8 @@ internal sealed class FieldAccessModel(ManagedTypes types, MethodRef caller, Fun
             found = new FieldAccessor(method, field, valueType, types.ValueWidth(valueType), write);
             break;
         }
-        accessorFailures[(field, write)] = reasons.Count == 0 ? "没有签名匹配的方法" : string.Join("；", reasons.Distinct().Take(3));
-        return accessors[(field, write)] = found;
+        accessorFailures[key] = reasons.Count == 0 ? "没有签名匹配的方法" : string.Join("；", reasons.Distinct().Take(3));
+        return accessors[key] = found;
     }
 
 }

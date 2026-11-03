@@ -4,6 +4,64 @@ namespace Cpp2CS.Recovery.Inlining;
 
 internal sealed partial class TemplateRecovery
 {
+    /// <summary>同一 this 上互不重叠的简单字段写入可交换，优先排出基类模板所需的写入。</summary>
+    private ManagedBody OrderConstructorStores(ManagedBody body, IReadOnlySet<FieldDef> preferred)
+    {
+        (int Offset, int Size, FieldDef Field)? Range(ManagedStatement statement)
+        {
+            if (statement is not ManagedStore { Target: FieldValue { Receiver: ArgumentValue { Index: -1 } } field,
+                    Value: ArgumentValue or ConstantValue } || field.Field.DeclaringType is not DefinitionRef owner
+                || owner.Definition.IsValueType || types.Layouts.Of(owner)?.Fields.FirstOrDefault(f => f.Field == field.Field.Field) is not { } slot)
+                return null;
+            var size = ManagedTypes.IsReferenceType(field.Type) ? 8 : types.Size(field.Type);
+            return size > 0 ? (slot.Offset, size, field.Field.Field) : null;
+        }
+        return body with { Blocks = body.Blocks.Select(block =>
+        {
+            var statements = block.Statements.ToArray();
+            for (var first = 0; first < statements.Length; first++)
+            {
+                var end = first;
+                var ranges = new List<(int Offset, int Size, FieldDef Field)>();
+                while (end < statements.Length && Range(statements[end]) is { } next
+                    && ranges.All(r => r.Offset + r.Size <= next.Offset || next.Offset + next.Size <= r.Offset))
+                { ranges.Add(next); end++; }
+                if (end == first) continue;
+                var ordered = statements[first..end].Zip(ranges)
+                    .OrderByDescending(p => preferred.Contains(p.Second.Field)).ThenBy(p => p.Second.Offset).Select(p => p.First).ToArray();
+                Array.Copy(ordered, 0, statements, first, ordered.Length);
+                first = end - 1;
+            }
+            return block with { Statements = statements };
+        }).ToArray() };
+    }
+
+    /// <summary>仅转发给另一构造函数的完整方法体，可按形参代入继续比较原生内联后的调用。</summary>
+    private ManagedInvocation ConstructorOrigin(ManagedInvocation invocation)
+    {
+        var seen = new HashSet<MethodRef>();
+        while (invocation is { Virtual: false, Method.Method.Name: ".ctor" } && seen.Add(invocation.Method)
+            && summaries(invocation.Method) is { Body: { Regions.Count: 0, Blocks: [var block] } })
+        {
+            var forward = block.Statements switch
+            {
+                [ManagedCall { Tail: true } call] => call,
+                [ManagedCall { Tail: false } call, ManagedReturn { Value: null }] => call,
+                _ => null,
+            };
+            if (forward?.Invocation is not { Virtual: false, Method.Method.Name: ".ctor", Receiver: ArgumentValue { Index: -1 } } next
+                || next.Arguments.Any(a => a is not (ArgumentValue { Index: >= 0 } or ConstantValue)
+                    || a is ArgumentValue argument && argument.Index >= invocation.Arguments.Count)) break;
+            invocation = next with
+            {
+                Method = Instantiated(next.Method, invocation.Method.TypeArguments),
+                Receiver = invocation.Receiver,
+                Arguments = next.Arguments.Select(a => a is ArgumentValue argument ? invocation.Arguments[argument.Index] : a).ToArray(),
+            };
+        }
+        return invocation;
+    }
+
     internal List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>? ConstructorWrites(MethodRef method) =>
         summaries(method) is { Body: { Regions.Count: 0 } template } && method.DeclaringType is DefinitionRef structure
             ? ConstructorWrites(template, structure) : null;

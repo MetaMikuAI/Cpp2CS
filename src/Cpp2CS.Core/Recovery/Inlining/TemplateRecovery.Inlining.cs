@@ -208,19 +208,23 @@ internal sealed partial class TemplateRecovery
         if (body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Invocation is
             { Method.Method.Name: ".ctor", Receiver: ArgumentValue { Index: -1 } }
             && (c.Invocation.Method.DeclaringType.Equals(parent) || c.Invocation.Method.DeclaringType.Equals(owner)))) return body;
-        var blocks = body.Blocks.ToDictionary(b => b.Address);
         var self = new ArgumentValue(-1, owner, 64);
         foreach (var definition in parent.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic))
         {
             var method = new MethodRef(definition, parent.Arguments, []);
             if (summaries(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
-            foreach (var block in body.Blocks)
+            var preferred = template.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>()
+                .Select(s => s.Target).OfType<FieldValue>().Select(f => f.Field.Field).ToHashSet();
+            var candidate = OrderConstructorStores(body, preferred);
+            template = OrderConstructorStores(template, preferred);
+            var blocks = candidate.Blocks.ToDictionary(b => b.Address);
+            foreach (var block in candidate.Blocks)
                 for (var start = 0; start < block.Statements.Count; start++)
                 {
                     if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
-                    var match = Match(body, blocks, block.Address, start, template, self, parent.Arguments, out _);
-                    if (match is not null && PlanReplacement(body, blocks, block.Address, start, method, match, out _) is { } replaced)
-                        return replaced.Apply(body);
+                    var match = Match(candidate, blocks, block.Address, start, template, self, parent.Arguments, out _);
+                    if (match is not null && PlanReplacement(candidate, blocks, block.Address, start, method, match, out _) is { } replaced)
+                        return replaced.Apply(candidate);
                 }
         }
         return body;
@@ -240,19 +244,22 @@ internal sealed partial class TemplateRecovery
         if (anchor.Access.Field.DeclaringType is not DefinitionRef owner) return null;
         var blocks = body.Blocks.ToDictionary(b => b.Address);
         var statements = blocks[anchor.Block].Statements;
-        // 区域的起点：锚点之前、上一个有效果的语句之后的任一位置（之间只有赋值）。
-        var earliest = anchor.Index;
-        while (earliest > 0 && statements[earliest - 1] is ManagedAssignment) earliest--;
+        // 模板可能先调用其他方法再访问字段；同块的前导效果也须纳入逐项证明。
+        var earliest = 0;
         // 字段可先读入局部，再跨过无关写入使用；保留原读取，只在已保存值可用的位置尝试替换。
         var latest = anchor.Index;
         if (statements[anchor.Index] is ManagedAssignment)
             while (latest + 1 < statements.Count && statements[latest] is ManagedAssignment or ManagedStore) latest++;
-        var candidates = InlineCandidates(owner, anchor.Access.Field);
+        var candidates = InlineCandidates(owner, anchor.Access.Field).AsEnumerable();
+        // 派生类可通过自己的公开方法暴露受保护成员，模板应从接收者类型向基类查找。
+        for (TypeRef? current = anchor.Access.Receiver.Type; current is DefinitionRef receiver && !receiver.Equals(owner);
+            current = receiver.Definition.BaseType?.Substitute(receiver.Arguments, []))
+            candidates = candidates.Concat(InlineCandidates(receiver, anchor.Access.Field));
         var failures = new List<string>();
-        foreach (var (method, template) in candidates)
+        foreach (var (method, template) in candidates.DistinctBy(c => c.Item1).Where(c => ManagedAccess.Method(types, caller.Method.Owner, c.Item1, anchor.Access.Receiver.Type)))
             for (var start = earliest; start <= latest; start++)
             {
-                var match = Match(body, blocks, anchor.Block, start, template, anchor.Access.Receiver, owner.Arguments, out var failure);
+                var match = Match(body, blocks, anchor.Block, start, template, anchor.Access.Receiver, method.TypeArguments, out var failure);
                 if (match is not null && PlanReplacement(body, blocks, anchor.Block, start, method, match, out failure) is { } replaced)
                     return replaced.Apply(body);
                 if (start == earliest) failures.Add($"{method.Method.Owner.Name}.{method.Method.Name}：{failure}");
@@ -284,7 +291,9 @@ internal sealed partial class TemplateRecovery
                 .Any(v => v is FieldValue f && f.Field.Field == field.Field);
             if (touches) found.Add((method, template));
         }
-        IReadOnlyList<(MethodRef, ManagedBody)> sorted = found.OrderBy(f => f.Item2.Blocks.Sum(b => b.Statements.Count)).ToArray();
+        IReadOnlyList<(MethodRef, ManagedBody)> sorted = found
+            .OrderByDescending(f => f.Item2.Blocks.SelectMany(b => b.Statements).Any(s => s is ManagedStore))
+            .ThenBy(f => f.Item2.Blocks.Sum(b => b.Statements.Count)).ToArray();
         return inlineCandidates[(field.Field, owner)] = sorted;
     }
 
@@ -331,7 +340,10 @@ internal sealed partial class TemplateRecovery
     /// </summary>
     private bool Conclude(InlineMatch match, MethodRef method)
     {
-        if (match.Ends.Count > 0 && match.Ends.All(e => e.Returns) && ManagedTypes.IsVoid(method.Method.ReturnType) && ManagedTypes.IsVoid(caller.Concrete(caller.Method.ReturnType)))
+        var returnedType = method.Concrete(method.Method.ReturnType);
+        var callerReturn = caller.Concrete(caller.Method.ReturnType);
+        if (match.Ends.Count > 0 && match.Ends.All(e => e.Returns)
+            && (returnedType.Equals(callerReturn) || types.IsAssignable(returnedType, callerReturn)))
         {
             match.Exit = match.Ends[0].Exit;
             match.ExitCopies = [];
@@ -406,6 +418,10 @@ internal sealed partial class TemplateRecovery
                 && KnownCondition(checkedValue, caller, match.Binding) == false) { callee.Index++; continue; }
             if (!Advance(caller, match)) return match.Fail($"调用方 0x{caller.Block:x} 的值不能表示或路径成环");
             var (m, c) = (callee.Current, caller.Current);
+            if (m is ManagedCall { Invocation.Method.Method.Name: ".ctor" } constructor)
+                m = constructor with { Invocation = ConstructorOrigin(constructor.Invocation) };
+            if (c is ManagedCall { Invocation.Method.Method.Name: ".ctor" } actual)
+                c = actual with { Invocation = ConstructorOrigin(actual.Invocation) };
             Cover(caller, match);
             switch (m, c)
             {
@@ -488,6 +504,7 @@ internal sealed partial class TemplateRecovery
     /// <summary>模板的一条路径返回：调用方从当前位置沿无条件跳转到达的点是这条路径的出口，连同出口边上的复制记为一个终点。</summary>
     private bool Finish(Walker caller, InlineMatch match, ManagedValue? result)
     {
+        if (result is not null && !CaptureReturnValue(caller, match, result)) return false;
         var copies = new List<(LocalValue, ManagedValue)>();
         var continuation = false;
         for (var steps = 0; steps < 16 && caller.Current is ManagedJump jump; steps++)
@@ -508,9 +525,64 @@ internal sealed partial class TemplateRecovery
         var returns = result is null && caller.Current is ManagedReturn { Value: null }
             && !continuation
             && (caller.Index > 0 || caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) <= 1);
+        if (result is not null && !continuation && caller.Current is ManagedReturn { Value: { } returned }
+            && Term(caller, returned) is { } actual)
+        {
+            var trial = new Dictionary<int, ManagedValue>(match.Binding);
+            if (Unify(result, actual, trial))
+            {
+                foreach (var (key, value) in trial) match.Binding[key] = value;
+                returns = true;
+            }
+        }
         if (returns) Cover(caller, match);
         match.Ends.Add(new InlineEnd((caller.Block, caller.Index), copies, new Dictionary<Variable, ManagedValue>(caller.Env), result, returns));
         return true;
+    }
+
+    /// <summary>返回表达式的读取可拆成若干赋值；只纳入结果本身及其读取子项，不越过无关求值。</summary>
+    private bool CaptureReturnValue(Walker caller, InlineMatch match, ManagedValue result)
+    {
+        var terms = new List<ManagedValue>();
+        void Collect(ManagedValue value)
+        {
+            if (value is Observed) terms.Add(value);
+            MapTerm(value, child => { Collect(child); return child; });
+        }
+        Collect(result);
+        if (terms.Count == 0) return true;
+        for (var steps = 0; steps < 256; steps++)
+        {
+            if (caller.Index >= caller.Blocks[caller.Block].Statements.Count) return false;
+            if (caller.Current is ManagedJump jump)
+            {
+                if (caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == jump.Edge.Target)) > 1)
+                    return true;
+                Cover(caller, match);
+                if (!Follow(caller, jump.Edge)) return false;
+                continue;
+            }
+            if (caller.Current is not ManagedAssignment assignment || Term(caller, assignment.Value) is not { } value) return true;
+            Dictionary<int, ManagedValue>? binding = null;
+            var complete = false;
+            foreach (var expected in new[] { result }.Concat(terms))
+            {
+                var trial = new Dictionary<int, ManagedValue>(match.Binding);
+                if (!Unify(expected, value, trial)) continue;
+                binding = trial;
+                complete = ReferenceEquals(expected, result);
+                break;
+            }
+            if (binding is null) return true;
+            foreach (var (key, bound) in binding) match.Binding[key] = bound;
+            Cover(caller, match);
+            caller.Env[assignment.Target.Variable] = value;
+            match.Defined[assignment.Target.Variable] = value;
+            match.Locals[assignment.Target.Variable] = assignment.Target;
+            caller.Index++;
+            if (complete) return true;
+        }
+        return false;
     }
 
     private static MethodRef Instantiated(MethodRef method, IReadOnlyList<TypeRef> arguments) => method with
@@ -656,13 +728,13 @@ internal sealed partial class TemplateRecovery
                     if (Materialize(field.Receiver, self, address) is not { } receiver) return null;
                     var access = new FieldValue(receiver, field.Field, field.Type, field.Width);
                     if (fields.Accessible(field.Field, receiver.Type)) return access;
-                    return fields.Accessor(field.Field, field.Type, false) is { } accessor ? access with { Accessor = accessor } : null;
+                    return fields.Accessor(field.Field, field.Type, false, receiver.Type) is { } accessor ? access with { Accessor = accessor } : null;
                 }
             case Observed { Read: StaticFieldValue field }:
                 {
                     var access = new StaticFieldValue(field.Field, field.Type, field.Width);
                     if (fields.Accessible(field.Field, null)) return access;
-                    return fields.Accessor(field.Field, field.Type, false) is { } accessor ? access with { Accessor = accessor } : null;
+                    return fields.Accessor(field.Field, field.Type, false, null) is { } accessor ? access with { Accessor = accessor } : null;
                 }
             case Observed:
                 return null;
