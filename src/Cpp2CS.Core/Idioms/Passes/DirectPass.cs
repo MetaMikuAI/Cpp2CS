@@ -59,7 +59,8 @@ internal static class DirectPass
             HelperKind.Import when helper.Detail == "__cxa_begin_catch" => (OpKind.BeginCatch, null, [Arg(0)]),
             HelperKind.Import when helper.Detail == "__cxa_end_catch" => (OpKind.EndCatch, null, []),
             HelperKind.Import => (OpKind.Import, helper.Detail, args),
-            HelperKind.WriteBarrier when state.PrecedingStore(block, index, Arg(0), Arg(1)) => (OpKind.WriteBarrier, null, [Arg(0), Arg(1)]),
+            HelperKind.WriteBarrier when state.PrecedingStore(block, index, Arg(0), Arg(1))
+                || state.UnchangedReference(block, index, Arg(0), Arg(1)) => (OpKind.WriteBarrier, null, [Arg(0), Arg(1)]),
             _ => null,
         };
         if (op is not { } found)

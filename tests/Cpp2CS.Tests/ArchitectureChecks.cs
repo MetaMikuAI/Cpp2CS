@@ -44,6 +44,7 @@ internal static class ArchitectureChecks
         ConstructorStoreOrder(checks, types);
         LowBitArithmetic(checks);
         Barriers(checks, types);
+        UnchangedBarriers(checks, facts);
         PhiLoadWidths(checks, facts);
         FloatingOperands(checks, facts, types);
         StackGuards(checks, facts);
@@ -561,6 +562,24 @@ internal static class ArchitectureChecks
         check.True(terminal is null && context.Statements is [ManagedCall { Invocation.Method.Method.Name: "MemoryBarrier" }], "内存屏障保留为托管调用");
         context.Statements.Clear();
         check.True(RuntimeOps.Of(OpKind.WriteBarrier)!.Lower!(context, out _) && context.Statements.Count == 0, "GC 写屏障由托管存储承担");
+    }
+
+    private static void UnchangedBarriers(Assertions check, ProgramFacts facts)
+    {
+        foreach (var variant in new[] { "unchanged", "different-location", "write", "call" })
+        {
+            var address = new Use(new Variable(Storage.Gpr(0), 0), 64);
+            var loaded = new Variable(Storage.Gpr(1), 1);
+            var block = new Block(0);
+            block.Statements.Add(new Define(0, loaded, new Load(address, 64)));
+            if (variant == "write") block.Statements.Add(new Store(4, address, Expr.C(0, 64)));
+            if (variant == "call") block.Statements.Add(new Call(4, CallKind.Direct, Expr.C(100, 64)));
+            var function = new MachineFunction { Entry = 0, Range = new(0, 12, CodeRegion.Managed, default), Blocks = [block] };
+            var state = new IdiomState(new IdiomRewriter(facts), function);
+            Expr target = variant == "different-location" ? new Binary(BinOp.Add, address, Expr.C(8, 64), 64) : address;
+            check.Equal(variant == "unchanged", state.UnchangedReference(block, block.Statements.Count, target, new Use(loaded, 64)),
+                $"未改变引用的屏障 {variant}");
+        }
     }
 
     private static void Verdicts(Assertions check)
