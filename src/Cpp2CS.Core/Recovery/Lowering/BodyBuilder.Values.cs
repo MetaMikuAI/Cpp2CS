@@ -251,8 +251,8 @@ internal sealed partial class BodyBuilder
                     // bool 的零扩展即自身（C++ bool 只用低位）。
                     if (parts.Skip(1).All(p => p is ConstSym { Value: 0 } or UndefSym) && oracle.TypeOf(low) is { } lowType && types.Kind(lowType) == TypeKind.Bool)
                         return View(low, expected, address);
-                    if (Width(expected) > 64 || Width(expected) < concat.Width && parts.Skip(1).Any(p => p is not (ConstSym { Value: 0 } or UndefSym))) break;
-                    // 位组合的一般形式：各段零扩展后左移到其位置再按位或。未定义的位不参与。
+                    if (Width(expected) > 64) break;
+                    // 各段零扩展、移位、按位或；运算按目标位宽截断，目标范围之外及未定义的位不参与。
                     ManagedValue? result = null;
                     var at = 0;
                     foreach (var part in parts)
