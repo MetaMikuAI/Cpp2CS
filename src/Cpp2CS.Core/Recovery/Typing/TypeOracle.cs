@@ -147,7 +147,11 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         if (shape.Signature?.MethodInfo is { } info && (info.Register.Bank == Bank.Stack ? StackInfo() : Register(info.Register)) is { } infoSym
             && SymTable.Resolve(infoSym) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef exact } }
             && candidates.Any(c => c.Method == exact.Method))
-            return callees[call] = exact;
+            return callees[call] = exact with
+            {
+                TypeArguments = exact.TypeArguments.Select(Substitute).ToArray(),
+                MethodArguments = exact.MethodArguments.Select(Substitute).ToArray(),
+            };
         var receiver = shape.Signature?.This is { } self && self.Pieces[0].Register.Bank == Bank.Gpr ? Register(self.Pieces[0].Register) : null;
         var receiverType = receiver is not null && call.Op?.Kind != OpKind.CallDelegate ? TypeOf(receiver) : null;
         if (receiverType is ByRefRef byRef) receiverType = byRef.Element;
@@ -320,9 +324,9 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     }
 
     /// <summary>运行时操作的类操作数：L2 写入的 Operand，否则为实参符号值中的类实体。</summary>
-    public TypeRef? ClassOperand(Call call) => call.Op?.Operand as TypeRef
+    public TypeRef? ClassOperand(Call call) => (call.Op?.Operand as TypeRef
         ?? values.Operands(call).Skip(1).Take(call.Arguments.Length).Select(SymTable.Resolve).OfType<EntitySym>()
-            .FirstOrDefault(e => e.Symbol.Kind == SymbolKind.Class)?.Symbol.Value as TypeRef;
+            .FirstOrDefault(e => e.Symbol.Kind == SymbolKind.Class)?.Symbol.Value as TypeRef) is { } type ? Substitute(type) : null;
 
     public DefinitionRef? ExceptionType(string fullName) =>
         (types.CorlibDefinition(fullName) ?? facts.Model.Types.FirstOrDefault(t => t.FullName == fullName && t.GenericParameters.Count == 0)) is { } definition
@@ -425,7 +429,37 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         var chain = Representation(outer);
         for (var i = 1; i < chain.Count; i++)
             if (chain[i].Type.Equals(inner)) return chain[i];
+        // 显式重叠布局可以同时提供整值字段和字节字段；整值字段仍覆盖同一段位。
+        if (outer is DefinitionRef definition
+            && (definition.Definition.Attributes & System.Reflection.TypeAttributes.LayoutMask) == System.Reflection.TypeAttributes.ExplicitLayout
+            && types.Layouts.Of(definition) is { } layout)
+            foreach (var field in layout.Fields)
+                if (field.Offset == RuntimeLayout.ObjectHeaderSize && field.Type.Equals(inner)
+                    && StorageBits(inner) == types.Size(outer) * 8)
+                    return ([new FieldRef(field.Field, definition)], inner);
         return null;
+    }
+
+    /// <summary>无填充、逐字段同宽的两个值类型可通过对应字段复制，不把不同类型直接当作同一个 IL 值。</summary>
+    public IReadOnlyList<(IReadOnlyList<FieldRef> Source, TypeRef SourceType, IReadOnlyList<FieldRef> Target, TypeRef TargetType)>?
+        FieldCopy(DefinitionRef source, DefinitionRef target)
+    {
+        if (types.Kind(source) != TypeKind.Struct || types.Kind(target) != TypeKind.Struct || types.Size(source) != types.Size(target)) return null;
+        var from = types.Leaves(source).OrderBy(l => l.Offset).ToArray();
+        var to = types.Leaves(target).OrderBy(l => l.Offset).ToArray();
+        if (from.Length == 0 || from.Length != to.Length) return null;
+        var copied = new List<(IReadOnlyList<FieldRef>, TypeRef, IReadOnlyList<FieldRef>, TypeRef)>();
+        var at = 0;
+        foreach (var (a, b) in from.Zip(to))
+        {
+            var width = StorageBits(a.Type);
+            if (a.Offset * 8 != at || b.Offset != a.Offset || width != StorageBits(b.Type) || width <= 0) return null;
+            if (!a.Type.Equals(b.Type) && !(types.Kind(a.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double
+                && types.Kind(b.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)) return null;
+            copied.Add((a.Path, a.Type, b.Path, b.Type));
+            at += width;
+        }
+        return at == types.Size(target) * 8 ? copied : null;
     }
 
     /// <summary>表示链的最内层：值类型最终包住的标量或非单字段类型。</summary>

@@ -29,10 +29,44 @@ internal static class ArchitectureChecks
         EntryKinds(checks, facts, types);
         Templates(checks, types);
         NestedEnumStack(checks);
+        InterfaceSlots(checks, types);
+        RepresentationCopies(checks, facts, types);
+        LowBitArithmetic(checks);
         Barriers(checks, types);
+        PhiLoadWidths(checks, facts);
         FloatingOperands(checks, facts, types);
         Verdicts(checks);
         return checks.Finish("架构边界");
+    }
+
+    private static void PhiLoadWidths(Assertions check, ProgramFacts facts)
+    {
+        foreach (var pass in new[] { "static", "address", "guarded" })
+        {
+            var first = new Block(0);
+            var second = new Block(4);
+            var merge = new Block(8);
+            var pointer = new Variable(Storage.Gpr(0), 1);
+            var result = new Variable(Storage.Vec(0), 1);
+            first.Statements = [new Jump(0, 8)];
+            second.Statements = [new Jump(4, 8)];
+            merge.Statements = [new Phi(8, pointer, [new(Storage.Gpr(1), 0), new(Storage.Gpr(2), 0)])];
+            if (pass == "guarded")
+                merge.Statements.Add(new Call(8, CallKind.Direct, Expr.C(0, 64))
+                { Op = new RuntimeOp(OpKind.NullCheck, null), Arguments = [new Use(pointer, 64)] });
+            merge.Statements.Add(new Define(12, result, new Load(new Use(pointer, 64), 128)));
+            var function = new MachineFunction
+            { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [first, second, merge] };
+            MachineFunction.AddEdge(first, merge);
+            MachineFunction.AddEdge(second, merge);
+            var state = new IdiomState(new IdiomRewriter(facts), function);
+            var changed = pass == "static" ? state.StaticFieldPhiLoads() : AddressPhiLoads.Run(function, state.Fresh);
+            check.True(changed, $"{pass} 拆分向量读取");
+            var reads = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().Where(d => d.Value is Load).ToArray();
+            check.True(reads.Length == 2 && reads.All(d => d.Target.Width == 128 && d.Value.Width == 128), $"{pass} 入边保留完整向量");
+            var phi = merge.Statements.OfType<Phi>().Single(p => p.Target.Width == 128);
+            check.True(phi.Sources.All(s => s.Width == phi.Target.Width), $"{pass} 合流来源位宽一致");
+        }
     }
 
     private static void FloatingOperands(Assertions check, ProgramFacts facts, ManagedTypes types)
@@ -169,6 +203,56 @@ internal static class ArchitectureChecks
         check.True(!fields.Accessible(new(exposed, new DefinitionRef(inaccessible, [])), null), "公共字段不能绕过声明类型的权限");
     }
 
+    private static void LowBitArithmetic(Assertions check)
+    {
+        var syms = new SymTable();
+        var a = syms.Arg(0, 32);
+        var b = syms.Arg(1, 32);
+        foreach (var (operation, expected) in new[] { (BinOp.Add, BinOp.Xor), (BinOp.Sub, BinOp.Xor), (BinOp.Mul, BinOp.And) })
+        {
+            var low = syms.Slice(syms.Binary(operation, a, b, 32), 0, 1);
+            check.True(low is OpSym { Width: 1 } op && op.Op.Binary == expected && op.Args.All(v => v.Width == 1),
+                $"{operation} 的低位保留模 2 运算与操作数宽度");
+        }
+    }
+
+    private static void RepresentationCopies(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        DefinitionRef Structure(string name, int index, int size, bool explicitLayout, params (TypeRef Type, int Offset)[] fields)
+        {
+            var owner = new TypeDef { Index = index, Name = name, Namespace = "Tests", Assembly = "Tests.dll", Token = 0,
+                Attributes = TypeAttributes.Public | (explicitLayout ? TypeAttributes.ExplicitLayout : TypeAttributes.SequentialLayout),
+                IsValueType = true, IsEnum = false, Size = size };
+            owner.Fields = fields.Select((f, i) => new FieldDef { Index = index * 10 + i, Owner = owner, Name = $"f{i}",
+                Type = f.Type, Offset = f.Offset, Attributes = FieldAttributes.Public }).ToArray();
+            return new(owner, []);
+        }
+        var function = new MachineFunction { Entry = 0, Range = new(0, 4, CodeRegion.Managed, default), Blocks = [new(0) { Statements = [new Return(0)] }] };
+        var values = ValueModel.Build(function, new EmptyEnvironment());
+        var method = new MethodRef(Method(Type("RepresentationConsumer", 60), "Run", 60), [], []);
+        var oracle = new TypeOracle(types, facts, method, _ => throw new NotSupportedException(), values);
+        var pair = Structure("Pair", 61, 8, false, (types.Single, 0), (types.Single, 4));
+        var target = Structure("Coordinates", 62, 8, false, (types.Single, 0), (types.Single, 4));
+        check.True(oracle.FieldCopy(pair, target)?.Count == 2, "完整同宽字段可复制到另一值类型");
+        var overlap = Structure("Overlap", 63, 8, true, (types.Single, 0), (types.Single, 0));
+        check.True(oracle.FieldCopy(pair, overlap) is null, "重叠字段不能冒充逐字段复制");
+        var padded = Structure("Padded", 64, 8, false, (types.Single, 0));
+        check.True(oracle.FieldCopy(padded, padded) is null, "复制证明不猜测尾部填充");
+        var reference = Structure("Reference", 65, 8, false, (types.Object, 0));
+        var integer = Structure("Integer", 66, 8, false, (types.Int64, 0));
+        check.True(oracle.FieldCopy(reference, integer) is null, "引用与整数不能按字段重解释");
+        var union = Structure("FloatUnion", 67, 4, true, (types.Single, 0), (types.Byte, 0));
+        check.True(oracle.Inside(union, types.Single) is not null && oracle.Inside(union, types.Byte) is null,
+            "显式布局只将覆盖全部位的字段视为整体表示");
+    }
+
+    private sealed class EmptyEnvironment : IValueEnvironment
+    {
+        public Sym? Entry(SymTable syms, Storage storage) => null;
+        public Sym? CallResult(SymTable syms, Call call, int index, IReadOnlyList<Sym> arguments) => null;
+        public Sym? MetadataRead(SymTable syms, Sym address, int width) => null;
+    }
+
     private static void NestedEnumStack(Assertions check)
     {
         using var module = Cecil.ModuleDefinition.CreateModule("EnumStack", Cecil.ModuleKind.Dll);
@@ -189,6 +273,20 @@ internal static class ArchitectureChecks
         check.True(CilStackTypes.Check(method, method.Body) is null, "泛型声明中的嵌套枚举按底层整数检查栈");
         method.Body.Instructions[0] = Cil.Instruction.Create(Cil.OpCodes.Ldc_I8, 0L);
         check.True(CilStackTypes.Check(method, method.Body) is not null, "嵌套枚举仍拒绝错误位宽的返回值");
+    }
+
+    private static void InterfaceSlots(Assertions check, ManagedTypes types)
+    {
+        var owner = new TypeDef { Index = 50, Name = "ISignal", Namespace = "Tests", Assembly = "Tests.dll", Token = 0,
+            Attributes = TypeAttributes.Public | TypeAttributes.Interface | TypeAttributes.Abstract, IsValueType = false, IsEnum = false };
+        var method = new MethodDef { Index = 50, Owner = owner, Name = "Notify", Token = 0,
+            Attributes = MethodAttributes.Public | MethodAttributes.Abstract | MethodAttributes.Virtual, ImplAttributes = 0, Slot = 0 };
+        owner.Methods = [method];
+        var reference = new DefinitionRef(owner, []);
+        check.Equal(Cpp2CS.Recovery.Calls.DispatchResolution.VirtualSlot(types.Object, 0, types)!,
+            Cpp2CS.Recovery.Calls.DispatchResolution.VirtualSlot(reference, 0, types)!, "接口引用上的对象虚表槽解析到 Object");
+        check.Equal(method, Cpp2CS.Recovery.Calls.DispatchResolution.Slot(reference, 0, true)!.Method,
+            "interface offset 分派继续使用接口自身槽号");
     }
 
     private static void EntryKinds(Assertions check, ProgramFacts facts, ManagedTypes types)

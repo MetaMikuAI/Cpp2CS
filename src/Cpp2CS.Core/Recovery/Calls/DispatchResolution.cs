@@ -51,6 +51,8 @@ internal static class DispatchResolution
     internal static MethodRef? VirtualSlot(TypeRef? type, int slot, ManagedTypes types)
     {
         if (type is ArrayRef) type = types.CorlibDefinition("System.Array") is { } array ? new DefinitionRef(array, []) : null;
+        // 接口自身的槽号只供 interface offset 分派；对象虚表上的槽属于 Object。
+        if (type is DefinitionRef { Definition.IsInterface: true }) type = types.Object;
         return type is DefinitionRef owner ? Slot(owner, slot, interfaceOnly: false) : null;
     }
 

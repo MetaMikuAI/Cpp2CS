@@ -77,8 +77,16 @@ internal sealed partial class BodyBuilder
             return Coerce(Nest(value, path, scalar, false, address), expected, address);
         if (expected is DefinitionRef wrapper && oracle.Inside(wrapper, value.Type) is var (wrapped, _))
             return Composed(wrapper, [(wrapped, value)], address);
+        if (value is ArgumentValue or LocalValue && value.Type is DefinitionRef source && expected is DefinitionRef target
+            && oracle.FieldCopy(source, target) is { } copy)
+            return Composed(target, copy.Select(f => (f.Target,
+                Coerce(Nest(value, f.Source, f.SourceType, false, address), f.TargetType, address))).ToList(), address);
         if (ManagedTypes.IsReferenceType(value.Type) && ManagedTypes.IsReferenceType(expected)) return value;
         var (from, to) = (types.Kind(value.Type), types.Kind(expected));
+        if (Width(value.Type) == Width(expected) && value.Width is 32 or 64
+            && (from == TypeKind.Int && to is TypeKind.Float or TypeKind.Double
+                || to == TypeKind.Int && from is TypeKind.Float or TypeKind.Double))
+            return new ConversionValue(ConvKind.Bitcast, value, expected, value.Width);
         if (from is TypeKind.Int or TypeKind.Bool && to is TypeKind.Int or TypeKind.Bool)
         {
             var (a, b) = (Width(value.Type), Width(expected));
@@ -121,10 +129,11 @@ internal sealed partial class BodyBuilder
                 }
             case OperatorKind.Compare:
                 {
-                    // 原生比较的是位型：两侧等宽且结构体的表示链最内层是整数时，按该整数比较。
+                    // 整段位的比较使用结构体所包住的标量或引用。
                     var hint = oracle.TypeOf(op.Args[0]) ?? oracle.TypeOf(op.Args[1]);
                     if (hint is not null && types.Kind(hint) == TypeKind.Struct && op.Args[1].Width == op.Args[0].Width
-                        && types.Size(hint) * 8 == op.Args[0].Width && oracle.Innermost(hint).Type is var scalar && types.Kind(scalar) is TypeKind.Int or TypeKind.Bool)
+                        && types.Size(hint) * 8 == op.Args[0].Width && oracle.Innermost(hint).Type is var scalar
+                        && (types.Kind(scalar) is TypeKind.Int or TypeKind.Bool || ManagedTypes.IsReferenceType(scalar)))
                         hint = scalar;
                     return new ComparisonValue(op.Op.Cond, View(op.Args[0], hint, address), View(op.Args[1], hint, address), types.Boolean);
                 }

@@ -6,7 +6,7 @@ namespace Cpp2CS.Idioms;
 /// <summary>合流后的首个地址读取分发到必经前驱，保留读取顺序和异常区域。</summary>
 internal static class AddressPhiLoads
 {
-    public static bool Run(MachineFunction function, Func<Variable> fresh)
+    public static bool Run(MachineFunction function, Func<int, Variable> fresh)
     {
         if (GuardedReads(function, fresh)) return true;
         var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
@@ -54,7 +54,7 @@ internal static class AddressPhiLoads
             for (var i = 0; i < sources.Length; i++)
             {
                 var parent = block.Predecessors[i];
-                sources[i] = fresh();
+                sources[i] = fresh(read.Target.Width);
                 var last = parent.Statements.LastOrDefault();
                 parent.Statements.Insert(parent.Statements.Count - (last is Jump ? 1 : 0),
                     new Define(read.Address, sources[i], ExprMap.Map(read.Value, e => ReferenceEquals(e, load) ? load with { Address = addresses[i] } : null)));
@@ -67,7 +67,7 @@ internal static class AddressPhiLoads
     }
 
     /// <summary>地址选择之后的判空、边界检查与读取一起移入原分支，不让读取越过检查。</summary>
-    private static bool GuardedReads(MachineFunction function, Func<Variable> fresh)
+    private static bool GuardedReads(MachineFunction function, Func<int, Variable> fresh)
     {
         if (function.Range.ExceptionRegions.Length != 0) return false;
         static Expr Unwrap(Expr value)
@@ -120,7 +120,7 @@ internal static class AddressPhiLoads
                     var copy = ExprMap.MapOperands(statement, OnEdge) with { };
                     if (copy is Define define)
                     {
-                        var target = fresh();
+                        var target = fresh(define.Target.Width);
                         mapped[define.Target] = target;
                         results[define.Target].Add(target);
                         copy = define with { Target = target };

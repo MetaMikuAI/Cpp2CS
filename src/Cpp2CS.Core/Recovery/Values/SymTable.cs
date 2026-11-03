@@ -214,6 +214,9 @@ public sealed class SymTable
     {
         left = Resolve(left);
         right = Resolve(right);
+        // 模 2 算术：低一位的加减等于异或，乘法等于与。
+        if (width == 1 && op is BinOp.Add or BinOp.Sub or BinOp.Mul)
+            return Binary(op == BinOp.Mul ? BinOp.And : BinOp.Xor, Slice(left, 0, 1), Slice(right, 0, 1), 1);
         if (left is ConstSym lc && right is ConstSym rc && left.Width <= 64 && right.Width <= 64
             && Fold.Binary(op, new IrConst(lc.Value, lc.Width), new IrConst(rc.Value, rc.Width), width) is IrConst folded)
             return Const(folded.Value, width);

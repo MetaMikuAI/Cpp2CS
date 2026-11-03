@@ -233,7 +233,13 @@ internal sealed partial class BodyBuilder
         var tail = call.Kind is CallKind.Tail or CallKind.TailIndirect;
         var context = new RuntimeContext(this, block, index, call, op, arguments, output);
         if (RuntimeOps.Of(op.Kind)?.Lower is { } lower && lower(context, out var terminal))
-            return terminal is not null ? new Statement(terminal) : tail ? new Statement(new ManagedReturn(call.Address, null)) : null;
+        {
+            if (terminal is not null) return new Statement(terminal);
+            if (!tail) return null;
+            // 运行时尾调用与普通尾调用相同：结果寄存器按当前方法的返回类型解释。
+            var returned = oracle.ReturnType is { } type && !ManagedTypes.IsVoid(type) ? View(context.Result, type, call.Address) : null;
+            return new Statement(new ManagedReturn(call.Address, returned));
+        }
         holes.Add(new(call.Address, $"运行时 {op.Kind}"));
         if (tail) return new Statement(new ManagedHole(call.Address, $"运行时 {op}", true));
         output.Add(new ManagedHole(call.Address, $"运行时 {op}", false));

@@ -231,12 +231,14 @@ public static class RuntimeOps
         };
         yield return new(OpKind.IsInst)
         {
-            ResultType = (call, t) => t.ClassOperand(call),
+            ResultType = (call, t) => t.ClassOperand(call) is { } target && ManagedTypes.IsReferenceType(target) ? target : t.Types.Object,
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
                 if (c.ClassOperand is not { } target || c.Arguments.Count < 1) return false;
-                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, target), new IsInstValue(c.View(c.Arguments[0], c.Types.Object), target)));
+                // isinst 总是返回对象引用或 null；值类型及开放泛型保留装箱状态，之后由显式拆箱读取值。
+                var boxed = ManagedTypes.IsReferenceType(target) ? null : c.Types.Object;
+                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, boxed ?? target), new IsInstValue(c.View(c.Arguments[0], c.Types.Object), target, boxed)));
                 return true;
             },
         };

@@ -93,7 +93,7 @@ public sealed partial class TypeOracle
             if (source is ReadSym read && (low - at) % 8 == 0)
             {
                 var address = values.Syms.Binary(BinOp.Add, read.Address, values.Syms.Const(unchecked((ulong)((low - at) / 8)), 64), 64);
-                if (Locate(address, bits.Width) is { Type: DefinitionRef structure } && types.Kind(structure) == TypeKind.Struct
+                if (Locate(address, bits.Width) is { Type: var structure } && types.Kind(structure) == TypeKind.Struct
                     && types.Size(structure) * 8 == bits.Width && WholeRead(bits, structure) is { } whole) return whole;
             }
             at += part.Width;
@@ -102,23 +102,32 @@ public sealed partial class TypeOracle
     }
 
     /// <summary>结构体值 bits 的全部叶子来自同段内存的读取时，在第一次读取处对该结构体位置的整体读取；不成立时为 null。</summary>
-    public ReadSym? WholeRead(Sym bits, DefinitionRef structure)
+    public ReadSym? WholeRead(Sym bits, TypeRef structure)
     {
+        var total = types.Size(structure) * 8;
+        if (total <= 0) return null;
         Sym? address = null;
         var reads = new HashSet<ReadSym>();
-        foreach (var (_, type, offset) in types.Leaves(structure))
+        // 开放值类型只证明整段复制，不借用原生实例的字段解释 T。
+        var ranges = structure is DefinitionRef definition
+            ? types.Leaves(definition).Select(l => (l.Offset, Width: StorageBits(l.Type)))
+            : [(Offset: 0, Width: total)];
+        foreach (var (offset, width) in ranges)
         {
-            var width = LeafBits(type);
-            if (offset * 8 + width > bits.Width) return null;
+            if (width <= 0 || offset * 8 + width > bits.Width) return null;
             var part = SymTable.Resolve(values.Syms.Slice(bits, offset * 8, width));
-            var (source, low) = part is SliceSym slice ? (slice.Base, slice.Low) : (part, 0);
-            if (source is not ReadSym read || low % 8 != 0) return null;
-            var start = values.Syms.Binary(BinOp.Add, read.Address, values.Syms.Const(unchecked((ulong)(low / 8 - offset)), 64), 64);
-            if (address is not null && Decompose(address) != Decompose(start)) return null;
-            address = start;
-            reads.Add(read);
+            var pieceOffset = offset;
+            foreach (var piece in part is ConcatSym concat ? concat.Parts : [part])
+            {
+                var (source, low) = piece is SliceSym slice ? (SymTable.Resolve(slice.Base), slice.Low) : (SymTable.Resolve(piece), 0);
+                if (source is not ReadSym read || low % 8 != 0 || piece.Width % 8 != 0) return null;
+                var start = values.Syms.Binary(BinOp.Add, read.Address, values.Syms.Const(unchecked((ulong)(low / 8 - pieceOffset)), 64), 64);
+                if (address is not null && Decompose(address) != Decompose(start)) return null;
+                address = start;
+                reads.Add(read);
+                pieceOffset += piece.Width / 8;
+            }
         }
-        var total = types.Size(structure) * 8;
         if (address is null || Locate(address, total) is not { } location || !location.Type.Equals(structure)) return null;
         var block = values.BlockOf(reads.First().Site);
         var sites = reads.Select(r => block.Statements.FindIndex(s => ReferenceEquals(s, r.Site))).ToArray();

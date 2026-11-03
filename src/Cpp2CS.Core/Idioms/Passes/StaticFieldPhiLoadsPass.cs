@@ -42,13 +42,13 @@ internal static class StaticFieldPhiLoadsPass
                         var values = phi.Sources.Select(v => ResolveMetadata(ExprMap.Map(expanded, part => part is Use use && use.Variable == phi.Target ? state.defs.Expand(new Use(v, v.Width)) : null))).ToArray();
                         if (values.Any(v => v is not Load l || SplitPass.Split(l.Address).Basis is not (Symbol { Kind: SymbolKind.StaticFields } or Use)))
                             continue;
-                        var target = state.Fresh();
+                        var target = state.Fresh(load.Width);
                         var incoming = new Variable[values.Length];
                         for (var i = 0; i < values.Length; i++)
                         {
                             var parent = block.Predecessors[i];
                             var last = parent.Statements.LastOrDefault();
-                            incoming[i] = state.Fresh();
+                            incoming[i] = state.Fresh(load.Width);
                             parent.Statements.Insert(parent.Statements.Count - (last is Jump or Branch or IndirectJump or Return ? 1 : 0), new Define(last?.Address ?? parent.Start, incoming[i], values[i]));
                         }
 

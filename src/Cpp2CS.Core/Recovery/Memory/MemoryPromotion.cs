@@ -277,7 +277,17 @@ internal sealed class MemoryPromotion
                     continue;
                 }
                 statement = ExprMap.MapOperands(statement, Loads);
-                if (statement is Call call) statement = WithEffects(call, Effects(call), layout);
+                if (statement is Call call)
+                {
+                    statement = WithEffects(call, Effects(call), layout);
+                    // 间接返回取自调用方的结果缓冲区，尾调用本身的返回类型可以是 void。
+                    // 先保留调用对单元的写入，再显式读取这些单元作为本方法的返回值。
+                    if (call.Kind is CallKind.Tail or CallKind.TailIndirect && signature.Return is { Transfer: Transfer.ResultBuffer })
+                    {
+                        statement = ((Call)statement) with { Kind = call.Kind == CallKind.Tail ? CallKind.Direct : CallKind.Indirect };
+                        block.Statements.Insert(i + 1, new Return(call.Address));
+                    }
+                }
                 if (statement is Return ret && signature.Return is { Transfer: Transfer.ResultBuffer })
                     statement = ret with
                     {
