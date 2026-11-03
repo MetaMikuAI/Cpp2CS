@@ -315,6 +315,11 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     /// <summary>定义与使用都不约束的值按 IL 栈语义解释为同宽整数，1 位为 bool。只在取值的类型时作缺省，不参与汇合。</summary>
     public TypeRef? Unconstrained(int width) => width == 1 ? types.Boolean : width is 8 or 16 or 32 or 64 ? types.Integer(width, true) : null;
 
+    /// <summary>非标准位宽的模整数运算用能容纳该位片的 IL 整数承载，结果须按原位宽掩码。</summary>
+    public TypeRef? ModularArithmetic(OpSym value) => value.Width is > 1 and < 64 and not (8 or 16 or 32)
+        && value.Op.Kind == OperatorKind.Binary && value.Op.Binary is BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor
+        ? value.Width <= 32 ? types.Int32 : types.Int64 : null;
+
     private TypeRef? ResultType(Call call)
     {
         if (call.Op is { } op && shapes(call).IsRuntime)

@@ -343,6 +343,16 @@ internal sealed partial class BodyBuilder
         var targetWidth = Width(target);
         switch (part)
         {
+            case OpSym operation when oracle.ModularArithmetic(operation) is { } carrier:
+                {
+                    if (IntegerBits(operation.Args[0], carrier, address) is not { } left
+                        || IntegerBits(operation.Args[1], carrier, address) is not { } right) return null;
+                    var computed = new BinaryValue(operation.Op.Binary, left, right, carrier, Width(carrier));
+                    var masked = new BinaryValue(BinOp.And, computed, new ConstantValue(Expr.Mask(operation.Width), carrier, Width(carrier)), carrier, Width(carrier));
+                    return Resize(masked, target);
+                }
+            case ConcatSym concat:
+                return Composite(concat, target, address);
             case ConstSym c:
                 return new ConstantValue(c.Value & Expr.Mask(targetWidth), target, targetWidth);
             case SliceSym slice when (oracle.TypeOf(slice.Base) ?? (slice.Base is PhiSym ? oracle.Unconstrained(slice.Base.Width) : null)) is { } sourceType && types.Kind(sourceType) is TypeKind.Int or TypeKind.Pointer or TypeKind.Bool:
