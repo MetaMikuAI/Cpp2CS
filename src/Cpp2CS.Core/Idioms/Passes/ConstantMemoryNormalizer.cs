@@ -40,6 +40,9 @@ internal static class ConstantMemoryNormalizer
                 }
                 writes.InsertRange(0, reads);
                 if (call.Defines.FirstOrDefault() is { } result) writes.Add(new Define(call.Address, result, start));
+                // 内存函数返回目标指针；尾调用展开后仍须保留终结点，供结果缓冲区提升收集写入。
+                if (call.Kind is CallKind.Tail or CallKind.TailIndirect)
+                    writes.Add(new Return(call.Address) { Pieces = [new(0, start)] });
                 block.Statements.RemoveAt(i);
                 block.Statements.InsertRange(i, writes);
                 i += writes.Count - 1;

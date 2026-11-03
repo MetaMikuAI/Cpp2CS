@@ -51,6 +51,7 @@ internal static class ArchitectureChecks
         CleanupDispatch(checks);
         PromotedDelegates(checks, facts, types);
         MathImports(checks, types);
+        ConstantMemoryCopies(checks, facts, types);
         ArrayIndices(checks);
         Barriers(checks, types);
         UnchangedBarriers(checks, facts);
@@ -680,6 +681,37 @@ internal static class ArchitectureChecks
         var interleaved = Run(true);
         check.True(interleaved.Body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk)
             .OfType<FieldValue>().Count(f => f.Field.Field == other) == 1, "无关对象上的读取必须保留，即使后续区域可以独立证明");
+    }
+
+    private static void ConstantMemoryCopies(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var destination = new FrameAddress(-24);
+        var source = new FrameAddress(-16);
+        MachineFunction Expand(CallKind kind, ulong size)
+        {
+            var call = new Call(0, kind, Expr.C(1, 64)) { Op = new(OpKind.Import, "memmove"), Arguments = [destination, source, Expr.C(size, 64)] };
+            var function = new MachineFunction { Entry = 0, Range = new(0, 4, CodeRegion.Managed, default), Blocks = [new(0) { Statements = [call] }] };
+            var next = 0;
+            ConstantMemoryNormalizer.Run(function, () => new Variable(Storage.Temp(next++), 1));
+            return function;
+        }
+        var tail = Expand(CallKind.Tail, 16).EntryBlock.Statements;
+        check.True(tail.LastOrDefault() is Return { Pieces: [{ Offset: 0, Value: var pointer }] } && pointer.Equals(destination),
+            "定长内存尾调用展开后仍返回目标指针");
+        check.True(tail.Take(2).All(s => s is Define { Value: Load }) && tail.Skip(2).Take(2).All(s => s is Store),
+            "重叠复制必须先读取全部源字节再写入");
+        check.True(!Expand(CallKind.Direct, 16).EntryBlock.Statements.Any(s => s is Return), "普通内存调用不能提前终结方法");
+        check.True(Expand(CallKind.Tail, 4097).EntryBlock.Statements.Single() is Call, "超过展开上限的尾调用保持原形");
+        var buffer = new Entry(Storage.Gpr(8));
+        var indirect = new MachineFunction { Entry = 0, Range = new(0, 8, CodeRegion.Managed, default), Blocks = [new(0)
+            { Statements = [new Store(0, buffer, Expr.C(7, 64)), new Return(4) { Pieces = [new(0, buffer)] }] }] };
+        var signature = new MachineSignature([], new(MachineSignature.ReturnIndex, types.Int64, Transfer.ResultBuffer,
+            [new(Storage.Gpr(8), 64, 0)], 8, MemoryAccess.Write), null, 0);
+        var lifter = new Cpp2CS.Machine.Lifting.FunctionLifter(facts);
+        var promoted = Cpp2CS.Recovery.Memory.MemoryPromotion.Run(indirect, signature, _ => throw new NotSupportedException(),
+            new ManagedAbi(facts.Layouts), lifter.Calls, lifter.Machine.Convention.StackPointer);
+        check.True(promoted.TryGet(out _, out _) && indirect.EntryBlock.Statements.LastOrDefault() is Return { Pieces: [{ Value: Const { Value: 7 } }] },
+            "间接返回按签名读取结果缓冲区，不让附带的目标指针返回值使地址逃逸");
     }
 
     private static void ReturnedFields(Assertions check, ManagedTypes types)

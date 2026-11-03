@@ -179,6 +179,9 @@ internal sealed class MemoryPromotion
             case Call { Op.Kind: OpKind.WriteBarrier or OpKind.MemoryBarrier }:
                 // 写屏障只通知 GC，对应的写入是紧邻其前的 Store。
                 break;
+            case Return when signature.Return is { Transfer: Transfer.ResultBuffer }:
+                // 间接返回只观察结果缓冲区；尾内存函数附带的目标指针返回值不属于托管返回签名。
+                break;
             case Call call:
                 {
                     Walk(call.Target, "调用目标");
