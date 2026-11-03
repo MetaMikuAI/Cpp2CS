@@ -85,6 +85,7 @@ internal sealed partial class TemplateRecovery
     /// <summary>对方法体反复寻找可证明的内联区域，直到没有新的证明；之后把仍未覆盖的不可访问访问与未证明的构造换成洞。</summary>
     private ManagedBody InlineInverse(ManagedBody body)
     {
+        body = ResolveAccessors(body);
         body = InlineConstructions(body);
         while (Pending(body).ToArray() is { Length: > 0 } pending)
         {
@@ -105,11 +106,12 @@ internal sealed partial class TemplateRecovery
         // 未证明的访问：值与写入目标都换成洞。
         ManagedValue Seal(ManagedValue value)
         {
-            if (value is FieldValue { Pending: var (address, pendingReason) } pending)
+            if (PendingOf(value) is { } pending)
             {
-                var reason = inlineFailures.TryGetValue(address, out var failure) ? $"{pendingReason}；内联证明：{failure}" : pendingReason;
-                holes.Add(new RecoveryHole(address, reason));
-                return new HoleValue(reason, pending.Type, pending.Width);
+                var reason = $"{pending.Reason}，也不在可证明的内联方法体中";
+                if (inlineFailures.TryGetValue(pending.Address, out var failure)) reason += $"；内联证明：{failure}";
+                holes.Add(new RecoveryHole(pending.Address, reason));
+                return new HoleValue(reason, value.Type, value.Width);
             }
             return ManagedValues.Map(value, Seal);
         }
@@ -135,9 +137,9 @@ internal sealed partial class TemplateRecovery
                 var method = new MethodRef(definition, pending.Allocated.Arguments, []);
                 if (summaries(method) is not { Body: { } template }) { failures.Add(definition.Address == 0 ? "构造函数没有原生代码" : "构造函数自身未能恢复"); continue; }
                 if (template.Regions.Count > 0 || !Acyclic(template)) { failures.Add("构造函数体含异常区域或环"); continue; }
-                if (PendingCall(body, variable, pending) is not var (block, index, receiver)) break;
+                if (PendingCall(body, variable, pending) is not var (block, index, _)) break;
                 var blocks = body.Blocks.ToDictionary(b => b.Address);
-                var match = Match(body, blocks, block, index, template, receiver, pending.Allocated.Arguments, out var failure);
+                var match = Match(body, blocks, block, index, template, pending.Allocated.Arguments, out var failure);
                 if (match is not null && PlanReplacement(body, blocks, block, index, method, match, out failure) is { } replaced)
                 {
                     body = Constructed(replaced.Apply(body), variable, method);
@@ -208,7 +210,6 @@ internal sealed partial class TemplateRecovery
         if (body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Invocation is
             { Method.Method.Name: ".ctor", Receiver: ArgumentValue { Index: -1 } }
             && (c.Invocation.Method.DeclaringType.Equals(parent) || c.Invocation.Method.DeclaringType.Equals(owner)))) return body;
-        var self = new ArgumentValue(-1, owner, 64);
         foreach (var definition in parent.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic))
         {
             var method = new MethodRef(definition, parent.Arguments, []);
@@ -222,7 +223,7 @@ internal sealed partial class TemplateRecovery
                 for (var start = 0; start < block.Statements.Count; start++)
                 {
                     if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
-                    var match = Match(candidate, blocks, block.Address, start, template, self, parent.Arguments, out _);
+                    var match = Match(candidate, blocks, block.Address, start, template, parent.Arguments, out _);
                     if (match is not null && PlanReplacement(candidate, blocks, block.Address, start, method, match, out _) is { } replaced)
                         return replaced.Apply(candidate);
                 }
@@ -230,18 +231,30 @@ internal sealed partial class TemplateRecovery
         return body;
     }
 
-    /// <summary>方法体中待证的不可访问访问：所在块、语句位置与访问本身。</summary>
-    private static IEnumerable<(ulong Block, int Index, FieldValue Access)> Pending(ManagedBody body)
+    private static PendingAccess? PendingOf(ManagedValue value) => value switch
+    {
+        FieldValue field => field.Pending,
+        StaticFieldValue field => field.Pending,
+        _ => null,
+    };
+
+    /// <summary>方法体中待证的不可访问访问：所在块、语句位置与访问本身（实例或静态字段）。</summary>
+    private static IEnumerable<(ulong Block, int Index, ManagedValue Access)> Pending(ManagedBody body)
     {
         foreach (var block in body.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
                 foreach (var value in ManagedValues.Of(block.Statements[i]).Concat(ManagedValues.CopiedValues(block.Statements[i])).SelectMany(ManagedValues.Walk))
-                    if (value is FieldValue { Pending: not null } access) yield return (block.Address, i, access);
+                    if (PendingOf(value) is not null) yield return (block.Address, i, value);
     }
 
-    private ManagedBody? TryInline(ManagedBody body, (ulong Block, int Index, FieldValue Access) anchor)
+    private ManagedBody? TryInline(ManagedBody body, (ulong Block, int Index, ManagedValue Access) anchor)
     {
-        if (anchor.Access.Field.DeclaringType is not DefinitionRef owner) return null;
+        var (field, receiver) = anchor.Access switch
+        {
+            FieldValue access => (access.Field, access.Receiver.Type),
+            StaticFieldValue access => (access.Field, (TypeRef?)null),
+            _ => throw new InvalidOperationException(anchor.Access.ToString()),
+        };
         var blocks = body.Blocks.ToDictionary(b => b.Address);
         var statements = blocks[anchor.Block].Statements;
         // 模板可能先调用其他方法再访问字段；同块的前导效果也须纳入逐项证明。
@@ -250,51 +263,47 @@ internal sealed partial class TemplateRecovery
         var latest = anchor.Index;
         if (statements[anchor.Index] is ManagedAssignment)
             while (latest + 1 < statements.Count && statements[latest] is ManagedAssignment or ManagedStore) latest++;
-        var candidates = InlineCandidates(owner, anchor.Access.Field).AsEnumerable();
-        // 派生类可通过自己的公开方法暴露受保护成员，模板应从接收者类型向基类查找。
-        for (TypeRef? current = anchor.Access.Receiver.Type; current is DefinitionRef receiver && !receiver.Equals(owner);
-            current = receiver.Definition.BaseType?.Substitute(receiver.Arguments, []))
-            candidates = candidates.Concat(InlineCandidates(receiver, anchor.Access.Field));
         var failures = new List<string>();
-        foreach (var (method, template) in candidates.DistinctBy(c => c.Item1).Where(c => ManagedAccess.Method(types, caller.Method.Owner, c.Item1, anchor.Access.Receiver.Type)))
+        foreach (var (method, template) in InlineCandidates(field, receiver))
+        {
+            if (fields.CallFailure(method, receiver, receiver is null ? field.DeclaringType : null) is { } illegal) { failures.Add(illegal); continue; }
+            // 失败原因取离锚点最近的起点：块首等较早的起点通常与这次访问无关。
+            string? nearest = null;
             for (var start = earliest; start <= latest; start++)
             {
-                var match = Match(body, blocks, anchor.Block, start, template, anchor.Access.Receiver, method.TypeArguments, out var failure);
+                var match = Match(body, blocks, anchor.Block, start, template, method.TypeArguments, out var failure);
                 if (match is not null && PlanReplacement(body, blocks, anchor.Block, start, method, match, out failure) is { } replaced)
                     return replaced.Apply(body);
-                if (start == earliest) failures.Add($"{method.Method.Owner.Name}.{method.Method.Name}：{failure}");
+                if (start <= anchor.Index) nearest = failure;
             }
-        inlineFailures.TryAdd(anchor.Access.Pending!.Value.Address, failures.Count == 0 ? "没有可作模板的方法" : string.Join("；", failures.Take(3)));
+            failures.Add($"{method.Method.Owner.Name}.{method.Method.Name}：{nearest}");
+        }
+        inlineFailures.TryAdd(PendingOf(anchor.Access)!.Address, failures.Count == 0 ? "没有可作模板的方法" : string.Join("；", failures.Take(3)));
         return null;
     }
 
-    private readonly Dictionary<(FieldDef, DefinitionRef), IReadOnlyList<(MethodRef, ManagedBody)>> inlineCandidates = [];
+    private readonly Dictionary<(FieldRef, TypeRef?), IReadOnlyList<(MethodRef, ManagedBody)>> inlineCandidates = [];
 
     /// <summary>
-    /// 候选：能访问该字段的类型（字段所在类型及其嵌套类型）中访问该字段、方法体无环且没有异常区域的实例方法，按方法体大小排序。
-    /// 嵌套类型沿用外层的类型实参。
+    /// 多语句模板：共同候选（<see cref="InlineEvidence.Candidates"/>）中访问该字段、方法体无环且没有异常区域的非泛型方法。
+    /// 次序是启发式：先试含写入的模板，再按方法体从小到大；任何证明成立的模板都与原生代码等价，次序只影响选中哪一个。
     /// </summary>
-    private IReadOnlyList<(MethodRef Method, ManagedBody Body)> InlineCandidates(DefinitionRef owner, FieldRef field)
+    private IReadOnlyList<(MethodRef Method, ManagedBody Body)> InlineCandidates(FieldRef field, TypeRef? receiver)
     {
-        if (inlineCandidates.TryGetValue((field.Field, owner), out var known)) return known;
-        inlineCandidates[(field.Field, owner)] = [];
+        if (inlineCandidates.TryGetValue((field, receiver), out var known)) return known;
+        inlineCandidates[(field, receiver)] = [];
         var found = new List<(MethodRef, ManagedBody)>();
-        var scope = new List<TypeDef> { owner.Definition };
-        for (var i = 0; i < scope.Count && scope.Count < 64; i++)
-            scope.AddRange(scope[i].NestedTypes);
-        foreach (var definition in scope.SelectMany(t => t.Methods).Where(m => !m.IsStatic && m.GenericParameters.Count == 0 && m.Name is not (".ctor" or ".cctor")))
+        foreach (var method in fields.Candidates(field, receiver).Where(m => m.MethodArguments.Count == 0))
         {
-            if (definition.Owner.GenericParameters.Count != owner.Arguments.Count) continue;
-            var method = new MethodRef(definition, owner.Arguments, []);
             if (summaries(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
             var touches = template.Blocks.SelectMany(b => b.Statements).SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
-                .Any(v => v is FieldValue f && f.Field.Field == field.Field);
+                .Any(v => FieldAccessor.FieldOf(v) is { } f && f.Field == field.Field);
             if (touches) found.Add((method, template));
         }
         IReadOnlyList<(MethodRef, ManagedBody)> sorted = found
             .OrderByDescending(f => f.Item2.Blocks.SelectMany(b => b.Statements).Any(s => s is ManagedStore))
             .ThenBy(f => f.Item2.Blocks.Sum(b => b.Statements.Count)).ToArray();
-        return inlineCandidates[(field.Field, owner)] = sorted;
+        return inlineCandidates[(field, receiver)] = sorted;
     }
 
     private static bool Acyclic(ManagedBody body)
@@ -315,7 +324,7 @@ internal sealed partial class TemplateRecovery
     }
 
     /// <summary>以模板为准同步执行两边，返回调用方区域的覆盖与出口；不成立时为 null。</summary>
-    private InlineMatch? Match(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> callerBlocks, ulong block, int start, ManagedBody template, ManagedValue receiver, IReadOnlyList<TypeRef> arguments, out string failure)
+    private InlineMatch? Match(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> callerBlocks, ulong block, int start, ManagedBody template, IReadOnlyList<TypeRef> arguments, out string failure)
     {
         failure = "接收者不能表示";
         var caller = new Walker { Blocks = callerBlocks, Caller = true, Block = block, Index = start };
@@ -715,7 +724,7 @@ internal sealed partial class TemplateRecovery
     /// 读取的接收者只接受调用方的 this 或被内联方法的接收者：前者非空，后者为空时两种写法都在任何效果之前抛出 NullReferenceException。
     /// 调用结果与经过调用之后的读取不能写回。
     /// </summary>
-    private ManagedValue? Materialize(ManagedValue term, ManagedValue self, ulong address)
+    private ManagedValue? Materialize(ManagedValue term, ManagedValue? self, ulong address)
     {
         switch (term)
         {
@@ -728,13 +737,13 @@ internal sealed partial class TemplateRecovery
                     if (Materialize(field.Receiver, self, address) is not { } receiver) return null;
                     var access = new FieldValue(receiver, field.Field, field.Type, field.Width);
                     if (fields.Accessible(field.Field, receiver.Type)) return access;
-                    return fields.Accessor(field.Field, field.Type, false, receiver.Type) is { } accessor ? access with { Accessor = accessor } : null;
+                    return Accessor(field.Field, field.Type, false, receiver.Type) is { } accessor ? access with { Accessor = accessor } : null;
                 }
             case Observed { Read: StaticFieldValue field }:
                 {
                     var access = new StaticFieldValue(field.Field, field.Type, field.Width);
                     if (fields.Accessible(field.Field, null)) return access;
-                    return fields.Accessor(field.Field, field.Type, false, null) is { } accessor ? access with { Accessor = accessor } : null;
+                    return Accessor(field.Field, field.Type, false, null) is { } accessor ? access with { Accessor = accessor } : null;
                 }
             case Observed:
                 return null;

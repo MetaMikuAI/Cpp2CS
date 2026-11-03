@@ -6,6 +6,7 @@ using Cpp2CS.Idioms;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Output;
+using Cpp2CS.Recovery;
 using Cpp2CS.Recovery.Inlining;
 using Cpp2CS.Recovery.Runtime;
 using Cpp2CS.Recovery.Typing;
@@ -190,11 +191,11 @@ internal static class ArchitectureChecks
         var value = new ArgumentValue(1, types.Int32, 32);
         ManagedBody Body(ManagedValue last) => new(caller, [new(0,
         [
-            new ManagedStore(0, Field(receiver, first) with { Pending = (0, "待证字段") }, value),
-            new ManagedStore(4, Field(receiver, second) with { Pending = (4, "待证字段") }, last),
+            new ManagedStore(0, Field(receiver, first) with { Pending = new(0, "待证字段", true) }, value),
+            new ManagedStore(4, Field(receiver, second) with { Pending = new(4, "待证字段", true) }, last),
             new ManagedReturn(8, null),
         ])]);
-        var fields = new FieldAccessModel(types, caller, Summary);
+        var fields = new InlineEvidence(types, caller, Summary);
         var recovery = new TemplateRecovery(types, caller, Summary, fields);
         var success = recovery.Run(Body(value), new Dictionary<Variable, PendingConstruction>(), 0);
         check.Equal(0, success.Holes.Count, "两次字段写入的模板证明成功");
@@ -207,6 +208,10 @@ internal static class ArchitectureChecks
         var exposed = new FieldDef { Index = 12, Owner = inaccessible, Name = "value", Type = types.Int32, Offset = 16, Attributes = FieldAttributes.Public };
         check.True(!fields.Accessible(new(exposed, new DefinitionRef(inaccessible, [])), null), "公共字段不能绕过声明类型的权限");
     }
+
+    /// <summary>访问器证明在模板层进行；每次以给定依据新建模板层。</summary>
+    private static FieldAccessor? Prove(InlineEvidence evidence, FieldRef field, TypeRef type, bool write, TypeRef? receiver) =>
+        new TemplateRecovery(evidence.Types, evidence.Caller, evidence.Summary, evidence).Accessor(field, type, write, receiver);
 
     private static void Accessors(Assertions check, ManagedTypes types)
     {
@@ -224,11 +229,11 @@ internal static class ArchitectureChecks
             [new(0, [new ManagedReturn(0, new FieldValue(new ArgumentValue(-1, ownerRef, 64), fieldRef, types.Int32, 32))])]), []);
         var caller = new MethodRef(Method(Type("AccessConsumer", 31), "Run", 33), [], []);
         owner.Methods = [hidden];
-        var privateOnly = new FieldAccessModel(types, caller, Summary);
-        check.True(privateOnly.Accessor(fieldRef, types.Int32, false, ownerRef) is null, "私有访问器不能证明外部字段读取");
+        var privateOnly = new InlineEvidence(types, caller, Summary);
+        check.True(Prove(privateOnly, fieldRef, types.Int32, false, ownerRef) is null, "私有访问器不能证明外部字段读取");
         var receiver = new ArgumentValue(0, ownerRef, 64);
         var pendingRead = new ManagedBody(caller, [new(0, [new ManagedReturn(0,
-            new FieldValue(receiver, fieldRef, types.Int32, 32) { Pending = (0, "待证字段") })])]);
+            new FieldValue(receiver, fieldRef, types.Int32, 32) { Pending = new(0, "待证字段", false) })])]);
         var privateTemplate = new TemplateRecovery(types, caller, Summary, privateOnly)
             .Run(pendingRead, new Dictionary<Variable, PendingConstruction>(), 0);
         check.True(privateTemplate.Holes.Count > 0, "多语句模板不能重新引入被拒绝的私有访问器");
@@ -237,17 +242,17 @@ internal static class ArchitectureChecks
         check.True(new BodyValidation(types, EmissionPolicy.Recovered, caller).Check(privateCall, true, out _) is
             { Kind: EmissionProblemKind.AccessDenied }, "内联证明调用在写出策略下仍须满足权限");
         owner.Methods = [hidden, visible];
-        var accessible = new FieldAccessModel(types, caller, Summary);
-        check.True(accessible.Accessor(fieldRef, types.Int64, false, ownerRef) is null, "访问器的字段值类型必须相符");
-        check.Equal(visible, accessible.Accessor(fieldRef, types.Int32, false, ownerRef)!.Method.Method,
+        var accessible = new InlineEvidence(types, caller, Summary);
+        check.True(Prove(accessible, fieldRef, types.Int64, false, ownerRef) is null, "访问器的字段值类型必须相符");
+        check.Equal(visible, Prove(accessible, fieldRef, types.Int32, false, ownerRef)!.Method.Method,
             "跳过私有候选并继续寻找公共访问器，类型不匹配缓存不干扰合法证明");
         var derived = Type("DerivedStorage", 32);
         derived.BaseType = ownerRef;
         var derivedRef = new DefinitionRef(derived, []);
         owner.Methods = [inherited];
-        var protectedAccess = new FieldAccessModel(types, new MethodRef(Method(derived, "Run", 34), [], []), Summary);
-        check.True(protectedAccess.Accessor(fieldRef, types.Int32, false, ownerRef) is null, "派生类不能通过基类接收者调用受保护访问器");
-        check.True(protectedAccess.Accessor(fieldRef, types.Int32, false, derivedRef) is not null,
+        var protectedAccess = new InlineEvidence(types, new MethodRef(Method(derived, "Run", 34), [], []), Summary);
+        check.True(Prove(protectedAccess, fieldRef, types.Int32, false, ownerRef) is null, "派生类不能通过基类接收者调用受保护访问器");
+        check.True(Prove(protectedAccess, fieldRef, types.Int32, false, derivedRef) is not null,
             "相同字段的派生类接收者独立证明受保护访问器");
         var referenceField = new FieldDef { Index = 33, Owner = owner, Name = "text", Type = types.String, Attributes = FieldAttributes.Private, Offset = 24 };
         var reference = new FieldRef(referenceField, ownerRef);
@@ -255,9 +260,9 @@ internal static class ArchitectureChecks
         owner.Methods = [visible];
         MethodRecoveryResult Upcast(MethodRef method) => new(method, 0, new(method,
             [new(0, [new ManagedReturn(0, new FieldValue(new ArgumentValue(-1, ownerRef, 64), reference, types.String, 64))])]), []);
-        var covariance = new FieldAccessModel(types, caller, Upcast);
-        check.True(covariance.Accessor(reference, types.String, false, ownerRef) is not null, "直接返回字段的引用上转型可证明");
-        check.True(covariance.Accessor(reference, types.Int64, false, ownerRef) is null, "上转型不能把引用解释成整数");
+        var covariance = new InlineEvidence(types, caller, Upcast);
+        check.True(Prove(covariance, reference, types.String, false, ownerRef) is not null, "直接返回字段的引用上转型可证明");
+        check.True(Prove(covariance, reference, types.Int64, false, ownerRef) is null, "上转型不能把引用解释成整数");
     }
 
     private static void StaticAccessorReferences(Assertions check, ManagedTypes types)
@@ -287,8 +292,8 @@ internal static class ArchitectureChecks
             statements.Add(new ManagedReturn(4, value));
             return new(method, 0, new(method, [new(0, statements)]), []);
         }
-        FieldAccessor? Find(MethodRef[] references, bool write = false) => new FieldAccessModel(types, caller, Summary, references)
-            .Accessor(target, types.Object, write, null);
+        FieldAccessor? Find(MethodRef[] references, bool write = false) => Prove(new InlineEvidence(types, caller, Summary, references),
+            target, types.Object, write, null);
         check.True(Find([]) is null, "没有方法元数据证据时不猜测外部静态入口");
         check.Equal(referenced, Find([referenced])!.Method, "已引用的泛型入口可证明另一类型的静态字段读取");
         check.True(Find([new(getter, [], [types.String])]) is null, "泛型字段定义相同也不能混用不同实例的缓存");
@@ -314,8 +319,9 @@ internal static class ArchitectureChecks
         var function = new MachineFunction { Entry = 0, Range = new(0, 4, CodeRegion.Managed, default), Blocks = [new(0) { Statements = [new Return(0)] }] };
         var values = ValueModel.Build(function, new EmptyEnvironment());
         var oracle = new TypeOracle(types, facts, method, _ => throw new NotSupportedException(), values);
+        // 元数据实体以定义的类型参数表达，L2 之后由泛型上下文代入当前实例。
         var symbol = values.Syms.Entity(new Symbol(SymbolKind.StaticFields,
-            new DefinitionRef(storage, [new GenericParameterRef("T", true, 0)])));
+            GenericContext.Instantiate(new DefinitionRef(storage, [new GenericParameterRef("T", true, 0)]), method)!));
         var location = oracle.Locate(symbol, 64);
         check.True(location?.Owner?.Equals(new DefinitionRef(storage, [types.Int32])) == true,
             "静态字段的元数据类型代入当前方法实参");
@@ -441,11 +447,11 @@ internal static class ArchitectureChecks
         var unused = new LocalValue(new Variable(Storage.Temp(42), 1), types.Int32, 32);
         TemplateResult Run(bool unrelated)
         {
-            var statements = new List<ManagedStatement> { new ManagedAssignment(0, a, Read(receiver, first) with { Pending = (0, "待证字段") }) };
+            var statements = new List<ManagedStatement> { new ManagedAssignment(0, a, Read(receiver, first) with { Pending = new(0, "待证字段", false) }) };
             if (unrelated) statements.Add(new ManagedAssignment(2, unused, Read(new ArgumentValue(1, ownerRef, 64), other)));
-            statements.Add(new ManagedAssignment(4, b, Read(receiver, second) with { Pending = (4, "待证字段") }));
+            statements.Add(new ManagedAssignment(4, b, Read(receiver, second) with { Pending = new(4, "待证字段", false) }));
             statements.Add(new ManagedReturn(8, new BinaryValue(BinOp.Add, a, b, types.Int32, 32)));
-            var fields = new FieldAccessModel(types, caller, Summary);
+            var fields = new InlineEvidence(types, caller, Summary);
             return new TemplateRecovery(types, caller, Summary, fields).Run(new(caller, [new(0, statements)]), new Dictionary<Variable, PendingConstruction>(), 0);
         }
         var recovered = Run(false);

@@ -13,7 +13,9 @@ internal sealed partial class TemplateRecovery
         failure = "区域不能替换";
         if (match.Exit is not { } exit || match.ExitCopies is not { } copies) return null;
         var at = blocks[startBlock].Statements[start].Address;
-        if (!match.Binding.TryGetValue(-1, out var self)) { failure = "模板没有用到 this"; return null; }
+        // 静态方法没有接收者；实例方法的 this 须在比对中绑定。
+        ManagedValue? self = null;
+        if (!method.Method.IsStatic && !match.Binding.TryGetValue(-1, out self)) { failure = "模板没有用到 this"; return null; }
         // 区域之前已保存的值沿用原局部，不把它重新展开为更晚时刻的内存读取。
         ManagedValue Input(ManagedValue value)
         {
@@ -21,7 +23,7 @@ internal sealed partial class TemplateRecovery
                 if (SameTerm(value, available.Value)) return available.Local;
             return MapTerm(value, Input);
         }
-        self = Input(self);
+        if (self is not null) self = Input(self);
         var parameters = method.Method.Parameters.Count;
         var arguments = new ManagedValue[parameters];
         for (var i = 0; i < parameters; i++)
@@ -31,8 +33,9 @@ internal sealed partial class TemplateRecovery
         foreach (var (target, value) in copies)
             if (Materialize(Input(value), self, at) is { } materialized) exitCopies.Add(new ManagedCopy(target, materialized));
             else { failure = "出口复制不能写回"; return null; }
-        if (Materialize(self, self, at) is not { } receiver) { failure = "接收者不能写回"; return null; }
-        if (method.DeclaringType is DefinitionRef { Definition.IsValueType: true } && receiver.Type is not ByRefRef)
+        ManagedValue? receiver = null;
+        if (self is not null && (receiver = Materialize(self, self, at)) is null) { failure = "接收者不能写回"; return null; }
+        if (receiver is not null && method.DeclaringType is DefinitionRef { Definition.IsValueType: true } && receiver.Type is not ByRefRef)
         {
             if (receiver is not (LocalValue or FieldValue or StaticFieldValue or ArrayElementValue)) { failure = "值类型接收者不可取址"; return null; }
             receiver = new AddressValue(receiver);
@@ -77,7 +80,7 @@ internal sealed partial class TemplateRecovery
                 { failure = $"区域内定义的值 {escaping.Variable} 在区域外 0x{statement.Address:x} 使用"; return null; }
         if (copies.Any(c => defined.Contains(c.Target.Variable))) { failure = "区域内定义的值在区域外使用"; return null; }
 
-        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, method.Method.Name != ".ctor"), match.Result, match.Returns) { Inlined = true };
+        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, !method.Method.IsStatic && method.Method.Name != ".ctor"), match.Result, match.Returns) { Inlined = true };
         var replacement = blocks[startBlock].Statements.Take(start).Concat(savedCopies).Append(call).ToList();
         if (match.Continuation is { } branch)
         {

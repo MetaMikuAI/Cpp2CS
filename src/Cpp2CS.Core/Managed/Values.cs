@@ -38,9 +38,10 @@ public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef T
 {
     /// <summary>F9 认回证明；保留原字段的求值位置，避免把条件表达式里的调用提前执行。</summary>
     public FieldAccessor? Accessor { get; init; }
-    /// <summary>对调用方不可访问、等待内联的逆证明的访问：原生地址与证明失败时的洞的原因。只在恢复过程中出现。</summary>
-    public (ulong Address, string Reason)? Pending { get; init; }
+    public PendingAccess? Pending { get; init; }
 }
+/// <summary>对调用方不可访问、等待内联的逆证明的访问：原生地址、证明失败时洞的原因与是否为写入。只在恢复过程中出现。</summary>
+public sealed record PendingAccess(ulong Address, string Reason, bool Write);
 /// <summary>根或字段存储位置的托管地址；不把机器地址当整数。</summary>
 public sealed record AddressValue(ManagedValue Target) : ManagedValue(new ByRefRef(Target.Type), 64);
 /// <summary>固定数组并取得首元素地址；null 或空数组返回空指针。</summary>
@@ -54,6 +55,7 @@ public sealed record IndirectValue(ManagedValue Address, TypeRef Type, int Width
 public sealed record StaticFieldValue(FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width)
 {
     public FieldAccessor? Accessor { get; init; }
+    public PendingAccess? Pending { get; init; }
 }
 public sealed record BinaryValue(BinOp Op, ManagedValue Left, ManagedValue Right, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record UnaryValue(UnOp Op, ManagedValue Operand, TypeRef Type, int Width) : ManagedValue(Type, Width);

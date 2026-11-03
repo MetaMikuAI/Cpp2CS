@@ -35,11 +35,11 @@ internal sealed partial class BodyBuilder
     private Block? currentBlock;
     private int nextLocal;
 
-    private readonly FieldAccessModel fields;
+    private readonly InlineEvidence fields;
     private readonly TemplateRecovery templates;
     private readonly Dictionary<Variable, PendingConstruction> pendingConstructions = [];
 
-    private BodyBuilder(MethodAnalysis analysis, TypeOracle oracle, FieldAccessModel fields, TemplateRecovery templates)
+    private BodyBuilder(MethodAnalysis analysis, TypeOracle oracle, InlineEvidence fields, TemplateRecovery templates)
     {
         this.analysis = analysis;
         this.oracle = oracle;
@@ -49,7 +49,7 @@ internal sealed partial class BodyBuilder
         values = analysis.Values;
     }
 
-    public static LoweredBody Build(MethodAnalysis analysis, TypeOracle oracle, FieldAccessModel fields, TemplateRecovery templates) =>
+    public static LoweredBody Build(MethodAnalysis analysis, TypeOracle oracle, InlineEvidence fields, TemplateRecovery templates) =>
         new BodyBuilder(analysis, oracle, fields, templates).Run();
 
     private LoweredBody Run()

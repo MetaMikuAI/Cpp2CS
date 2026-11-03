@@ -9,7 +9,7 @@ internal sealed record TemplateResult(ManagedBody Body, IReadOnlyList<RecoveryHo
 
 /// <summary>依据其他方法的托管恢复体证明内联；不读取机器状态或类型求解器。</summary>
 internal sealed partial class TemplateRecovery(ManagedTypes types, MethodRef caller,
-    Func<MethodRef, MethodRecoveryResult?> summaries, FieldAccessModel fields)
+    Func<MethodRef, MethodRecoveryResult?> summaries, InlineEvidence fields)
 {
     private readonly List<RecoveryHole> holes = [];
     private int nextLocal;
