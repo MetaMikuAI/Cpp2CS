@@ -18,8 +18,9 @@ internal static class ClassInitializationFlags
             Extract { Low: 0 } e => Low(e.Operand),
             _ => value,
         };
-        return mask.Right is Const { Value: 1 } && Low(mask.Left) == load
-            || mask.Left is Const { Value: 1 } && Low(mask.Right) == load;
+        // 2022 之前用 initialized 位（0x2），之后用 initialized_and_no_error 位（0x1）。
+        return mask.Right is Const { Value: 1 or 2 } && Low(mask.Left) == load
+            || mask.Left is Const { Value: 1 or 2 } && Low(mask.Right) == load;
     }
 
     internal static bool IsReload(Expr value, Load load) => value == load

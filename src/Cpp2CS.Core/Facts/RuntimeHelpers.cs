@@ -234,10 +234,11 @@ public sealed class RuntimeHelpers
         var wrapperCalls = CallsOf(wrapper).ToArray();
         if (wrapperWords.Length <= 32 && wrapperCalls.Length >= 1)
         {
-            if (LoadsOffset(wrapper, RuntimeLayout.ClassInitializationExceptionGCHandle, 12)
-                && LoadsOffset(wrapperCalls[0], RuntimeLayout.ClassBitflags1, 8))
+            var initializedOffset = new[] { RuntimeLayout.ClassBitflags1, RuntimeLayout.ClassBitflags1_2019, RuntimeLayout.ClassBitflags1_2019_4, RuntimeLayout.ClassBitflags1_2020 }
+                .FirstOrDefault(offset => LoadsOffset(wrapperCalls[0], offset, 8), -1);
+            if (LoadsOffset(wrapper, RuntimeLayout.ClassInitializationExceptionGCHandle, 12) && initializedOffset >= 0)
                 return (HelperKind.InitializedTypeInfo, null,
-                    $"调用 0x{wrapperCalls[0]:x}（检查 Il2CppClass+0x{RuntimeLayout.ClassBitflags1:x} 的 initialized 位）后读取 +0x{RuntimeLayout.ClassInitializationExceptionGCHandle:x} initializationExceptionGCHandle");
+                    $"调用 0x{wrapperCalls[0]:x}（检查 Il2CppClass+0x{initializedOffset:x} 的 initialized 位）后读取 +0x{RuntimeLayout.ClassInitializationExceptionGCHandle:x} initializationExceptionGCHandle");
             if (LoadsOffset(wrapperCalls[0], RuntimeLayout.MethodRgctxData, 4) && LoadsOffset(wrapperCalls[0], RuntimeLayout.MethodGenericMethod, 24)
                 && wrapperWords.Contains(0xAA1303E0u))   // mov x0, x19：返回原参数
                 return (HelperKind.InitMethodRgctx, null,

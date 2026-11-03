@@ -20,13 +20,19 @@ public static class RuntimeLayout
         ClassParent = 0x58, ClassGenericClass = 0x60, ClassTypeMetadataHandle = 0x68, ClassKlass = 0x78, ClassFields = 0x80, ClassMethods = 0x98,
         ClassNestedTypes = 0xA0, ClassImplementedInterfaces = 0xA8, ClassInterfaceOffsets = 0xB0, ClassStaticFields = 0xB8, ClassRgctxData = 0xC0,
         ClassTypeHierarchy = 0xC8, ClassUnityUserData = 0xD0, ClassInitializationExceptionGCHandle = 0xD8, ClassCctorStarted = 0xDC,
-        ClassCctorFinishedOrNoCctor = 0xE0, ClassCctorThread = 0xE8, ClassGenericContainerHandle = 0xF0, ClassInstanceSize = 0xF8,
+        ClassCctorFinishedOrNoCctor = 0xE0, ClassCctorFinishedOrNoCctor2023 = 0xE4, ClassCctorThread = 0xE8, ClassGenericContainerHandle = 0xF0, ClassInstanceSize = 0xF8,
         ClassStackSlotSize = 0xFC, ClassActualSize = 0x100, ClassElementSize = 0x104, ClassNativeSize = 0x108, ClassStaticFieldsSize = 0x10C,
         ClassThreadStaticFieldsSize = 0x110, ClassThreadStaticFieldsOffset = 0x114, ClassFlags = 0x118, ClassToken = 0x11C, ClassMethodCount = 0x120,
         ClassVtableCount = 0x12A, ClassInterfacesCount = 0x12C, ClassInterfaceOffsetsCount = 0x12E, ClassTypeHierarchyDepth = 0x130,
         ClassGenericRecursionDepth = 0x131, ClassRank = 0x132, ClassMinimumAlignment = 0x133, ClassPackingSize = 0x134,
         /// <summary>位域首字节：bit0 initialized_and_no_error，bit1 initialized，bit2 enumtype，bit3 nullabletype，bit4 is_generic，bit5 has_references，bit6 init_pending，bit7 size_init_pending。</summary>
         ClassBitflags1 = 0x135,
+        /// <summary>2019.x 的 initialized_and_no_error 位域字节。</summary>
+        ClassBitflags1_2019 = 0x12E,
+        /// <summary>2019.4 的 initialized 位域字节。</summary>
+        ClassBitflags1_2019_4 = 0x12F,
+        /// <summary>2020.3/2021.3 的 initialized_and_no_error 位域字节。</summary>
+        ClassBitflags1_2020 = 0x132,
         /// <summary>位域次字节：bit0 size_inited，bit1 has_finalize，bit2 has_cctor，bit3 is_blittable，bit4 is_import_or_windows_runtime，bit5 is_vtable_initialized，bit6 is_byref_like。</summary>
         ClassBitflags2 = 0x136,
         ClassVtable = 0x138;

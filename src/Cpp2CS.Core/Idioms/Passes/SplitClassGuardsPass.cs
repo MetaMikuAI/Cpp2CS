@@ -14,7 +14,7 @@ internal static class SplitClassGuardsPass
             if (head.Statements.LastOrDefault() is not Branch guard || head.NormalSuccessors.ToArray() is not [var first, var second])
                 continue;
             var condition = state.defs.Expand(guard.Condition);
-            if (TopLoadsPass.TopLoads(condition).Distinct().ToArray() is not [Load { Width: 32, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef type }, Right: Const { Value: RuntimeLayout.ClassCctorFinishedOrNoCctor } } } load])
+            if (TopLoadsPass.TopLoads(condition).Distinct().ToArray() is not [Load { Width: 32, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef type }, Right: Const { Value: RuntimeLayout.ClassCctorFinishedOrNoCctor or RuntimeLayout.ClassCctorFinishedOrNoCctor2023 } } } load])
                 continue;
             var side = DirectionPass.Direction(condition, ReplacePass.Replace(load, 0));
             if (side is not (0 or 1) || DirectionPass.Direction(condition, ReplacePass.Replace(load, 1)) != 1 - side)

@@ -149,20 +149,9 @@ public static class RuntimeOps
                 return true;
             },
         };
-        // 显式类构造：随后的第一个副作用按 ECMA-335 II.10.5.3 本身触发同一类型的初始化时省去（初始化点相同），
-        // 否则写成 RuntimeHelpers.RunClassConstructor(typeof(T).TypeHandle)，保持原生代码中的初始化时机。
-        yield return new(OpKind.RunClassConstructor)
-        {
-            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
-            {
-                terminal = null;
-                if (c.ClassOperand is not { } owner) return false;
-                if (c.InitializesNext(owner)) return true;
-                if (c.Types.CorlibMethod("System.Runtime.CompilerServices.RuntimeHelpers", "RunClassConstructor", c.Types.RuntimeTypeHandle) is not { } run) return false;
-                c.Emit(new ManagedCall(c.Call.Address, new ManagedInvocation(run, null, [new TypeHandleValue(owner, c.Types.RuntimeTypeHandle, 64)], false), null, false));
-                return true;
-            },
-        };
+        // 隐式类构造：IL2CPP 在静态访问和构造前插入的 il2cpp_runtime_class_init 是代码生成产物，
+        // 托管 IL 没有对应指令；下一次静态访问或 newobj 由 CLR 按 ECMA-335 II.10.5.3 触发同一初始化。
+        yield return new(OpKind.RunClassConstructor) { Lower = None };
         // 只服务于分派：结果流向调用目标与 MethodInfo，不是 IL 值。
         foreach (var kind in new[] { OpKind.InterfaceInvokeData, OpKind.ResolveGenericVirtual })
             yield return new(kind) { Lower = None };

@@ -20,7 +20,7 @@ internal static class ClassLayoutReloads
                 || flag.Address is not Binary
                 {
                     Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef type } klass,
-                    Right: Const { Value: RuntimeLayout.ClassBitflags1 }
+                    Right: Const { Value: RuntimeLayout.ClassBitflags1 or RuntimeLayout.ClassBitflags1_2019 or RuntimeLayout.ClassBitflags1_2019_4 or RuntimeLayout.ClassBitflags1_2020 }
                 }
                 || !ClassInitializationFlags.IsBitTest(condition, flag)) continue;
             var clear = Fold.Simplify(ExprMap.Map(condition, e => e == flag ? Expr.C(0, flag.Width) : null));

@@ -50,7 +50,7 @@ internal static class ClassInitializationReloads
                     Width: 32, Address: Binary
                     {
                         Op: BinOp.Add,
-                        Left: Symbol { Kind: SymbolKind.Class, Value: DefinitionRef type }, Right: Const { Value: RuntimeLayout.ClassCctorFinishedOrNoCctor }
+                        Left: Symbol { Kind: SymbolKind.Class, Value: DefinitionRef type }, Right: Const { Value: RuntimeLayout.ClassCctorFinishedOrNoCctor or RuntimeLayout.ClassCctorFinishedOrNoCctor2023 }
                     }
                 }) continue;
             var enterAddress = test.Cond == Cond.Eq ? branch.Target : branch.Fallthrough;
