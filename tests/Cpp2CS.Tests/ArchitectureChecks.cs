@@ -45,6 +45,7 @@ internal static class ArchitectureChecks
         LowBitArithmetic(checks);
         Barriers(checks, types);
         UnchangedBarriers(checks, facts);
+        CardMarkingBarriers(checks);
         PhiLoadWidths(checks, facts);
         FloatingOperands(checks, facts, types);
         StackGuards(checks, facts);
@@ -580,6 +581,20 @@ internal static class ArchitectureChecks
             check.Equal(variant == "unchanged", state.UnchangedReference(block, block.Statements.Count, target, new Use(loaded, 64)),
                 $"未改变引用的屏障 {variant}");
         }
+    }
+
+    private static void CardMarkingBarriers(Assertions check)
+    {
+        uint[] body = [0xf003aea8, 0xb941c908, 0x340001e8, 0x90039e2a, 0xd3528008, 0x9133014a,
+            0x528c9c0b, 0xd34cfc09, 0x72a0008b, 0x5280002c, 0x8b080d48, 0x8b0b0108,
+            0x9ac92189, 0xc85f7d0a, 0xaa09014a, 0xc80b7d0a, 0x35ffffab, 0xd65f03c0];
+        check.True(RuntimeHelpers.CardMarkingBody(body), "GC 位图通知完整指令证据");
+        var referenceWrite = body.ToArray();
+        referenceWrite[15] = 0xf9000001; // str x1, [x0]
+        check.True(!RuntimeHelpers.CardMarkingBody(referenceWrite), "写入对象引用的实现不是纯 GC 通知");
+        var externalBranch = body.ToArray();
+        externalBranch[2] = 0x34000208; // cbz w8, body end
+        check.True(!RuntimeHelpers.CardMarkingBody(externalBranch), "跳出已证明函数体的实现不能归一");
     }
 
     private static void Verdicts(Assertions check)
