@@ -299,14 +299,14 @@ internal static class IdiomPipeline
             if (state.FlagPhiConditions())
                 state.Cleanup();
         });
-        // 后续守卫归约可能才把对象和类指针的入边对齐。
+        // 后续守卫与地址归约可能才对齐分派接收者或直接调用的存储位置。
         state.Passes.Run("idioms.refresh", () =>
         {
             state.defs = new Defs(state.function);
         });
         state.Passes.Run("idioms.Calls", () =>
         {
-            state.Calls(indirectOnly: true);
+            state.Calls();
         });
         state.Passes.Run("idioms.Residuals", () =>
         {
