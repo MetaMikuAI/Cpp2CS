@@ -51,6 +51,11 @@ internal sealed class FieldAccessModel(ManagedTypes types, MethodRef caller, Fun
                 || !ManagedTypes.IsReferenceType(declared) || !types.IsAssignable(valueType, declared))) continue;
             if (!ManagedAccess.Method(types, caller.Method.Owner, method, definition.IsStatic ? null : receiver))
             { reasons.Add($"{definition.Name} 对调用方不可访问"); continue; }
+            // 恢复体不包含进入静态方法前的隐式类初始化；不能额外触发另一类型的精确静态构造。
+            if (definition.IsStatic && !method.DeclaringType.Equals(field.DeclaringType)
+                && (definition.Owner.Attributes & TypeAttributes.BeforeFieldInit) == 0
+                && definition.Owner.Methods.Any(m => m.Name == ".cctor"))
+            { reasons.Add($"{definition.Name} 会额外触发访问器所属类型的静态初始化"); continue; }
             if (summaries(method) is not { } summary) { reasons.Add($"{definition.Name} 没有原生入口"); continue; }
             if (summary.Body is not { } body) { reasons.Add($"{definition.Name} 未恢复：{summary.Holes.FirstOrDefault()?.Reason}"); continue; }
             // 单次赋值的局部代回其值：读取被落成局部时仍是同一次读取。

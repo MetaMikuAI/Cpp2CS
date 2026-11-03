@@ -296,6 +296,9 @@ internal static class ArchitectureChecks
         check.True(Find([referenced], true) is null, "静态 getter 不能证明字段写入");
         extraRead = true;
         check.True(Find([referenced]) is null, "不能吞掉访问器中未用于返回值的额外读取");
+        extraRead = false;
+        factory.Methods = [getter, Method(factory, ".cctor", 83, MethodAttributes.Private | MethodAttributes.Static)];
+        check.True(Find([referenced]) is null, "纯字段读取体不能证明另一类型的精确静态初始化");
     }
 
     private static void StaticGenericLocations(Assertions check, ProgramFacts facts, ManagedTypes types)
