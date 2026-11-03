@@ -698,7 +698,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
 
     /// <summary>
     /// 类型中 offset 处宽 width 位的字段链。offset 含对象头（值类型同样按装箱布局）；实例字段沿基类链查找。
-    /// 访问恰好覆盖一个字段（bool 按字节，枚举按基础类型）时得到该字段；落在值类型字段内部时进入该字段继续查找。
+    /// 访问恰好覆盖一个字段（bool 的最低位也等于自身，枚举按基础类型）时得到该字段；落在值类型字段内部时进入该字段继续查找。
     /// </summary>
     public (IReadOnlyList<FieldRef> Path, TypeRef Type)? FieldAt(TypeRef owner, int offset, int width, bool statics, bool threadStatics)
     {
@@ -709,9 +709,9 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             foreach (var slot in slots)
             {
                 var size = ManagedTypes.IsReferenceType(slot.Type) ? 8 : types.Size(slot.Type);
-                if (size <= 0 || offset < slot.Offset || offset + width / 8 > slot.Offset + size) continue;
+                if (size <= 0 || offset < slot.Offset || offset + (width + 7) / 8 > slot.Offset + size) continue;
                 var field = new FieldRef(slot.Field, d);
-                if (offset == slot.Offset && width == size * 8) return ([field], slot.Type);
+                if (offset == slot.Offset && (width == size * 8 || width == 1 && types.Kind(slot.Type) == TypeKind.Bool)) return ([field], slot.Type);
                 if (types.Kind(slot.Type) == TypeKind.Struct
                     && FieldAt(slot.Type, offset - slot.Offset + RuntimeLayout.ObjectHeaderSize, width, false, false) is var (inner, innerType))
                     return ([field, .. inner], innerType);
