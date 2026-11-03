@@ -27,12 +27,27 @@ internal sealed partial class CilInterpreter
             ? Execute(side, inlined, callee, values, transparent: true)
             : Invoke(side, callee, values);
 
-    /// <summary>执行时会解释的全部指令：方法体自身与透明执行的被调方法体。</summary>
-    public IEnumerable<Instruction> ExpandedInstructions(MethodDefinition method) => method.Body.Instructions.Concat(
-        method.Body.Instructions.Where(inlineSites.ContainsKey).Select(i => inlineSites[i].Method).Distinct()
-            .Where(transparentInline.ContainsKey).SelectMany(m => transparentInline[m].Body.Instructions));
-
-    /// <summary>执行前须准备的、经内建模型读写的静态字段：没有。</summary>
-    public IEnumerable<FieldRef> IntrinsicStatics(MethodDefinition method) => [];
+    /// <summary>按每个透明调用的泛型上下文收集静态字段；同一定义的不同实例分别准备输入。</summary>
+    public IEnumerable<FieldRef> StaticFields(MethodDefinition definition, MethodRef instance)
+    {
+        var pending = new Queue<(MethodDefinition, MethodRef)>();
+        var seen = new HashSet<MethodRef>();
+        pending.Enqueue((definition, instance));
+        while (pending.TryDequeue(out var next))
+        {
+            if (!seen.Add(next.Item2)) continue;
+            var context = model.InContext(next.Item2);
+            foreach (var instruction in next.Item1.Body.Instructions)
+            {
+                if (instruction.OpCode.Code is Code.Ldsfld or Code.Stsfld or Code.Ldsflda)
+                    yield return context.Field((FieldReference)instruction.Operand);
+                if (inlineSites.ContainsKey(instruction) && instruction.Operand is MethodReference called)
+                {
+                    var method = context.Method(called);
+                    if (transparentInline.TryGetValue(method.Method, out var body)) pending.Enqueue((body, method));
+                }
+            }
+        }
+    }
 
 }

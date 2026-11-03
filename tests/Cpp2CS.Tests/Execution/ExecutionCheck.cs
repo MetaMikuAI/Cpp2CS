@@ -84,9 +84,7 @@ internal static partial class ExecutionCheck
         var entry = nativeEntry ?? tested.Method.Address;
         var function = index.Facts.Code.At(entry)!;
         var signature = index.StructAbi.Signature(tested);
-        var statics = interpreter.ExpandedInstructions(definition)
-            .Where(i => i.OpCode.Code is Code.Ldsfld or Code.Stsfld or Code.Ldsflda).Select(i => cecil.Field((Mono.Cecil.FieldReference)i.Operand))
-            .Concat(interpreter.IntrinsicStatics(definition)).Distinct().ToArray();
+        var statics = interpreter.StaticFields(definition, tested).Distinct().ToArray();
         var hints = HintsOf(definition, cecil);
         machine.Covered.Clear();
         var throwPlans = ThrowPlans(tested, definition, cecil, interpreter, index, caseCount: caseCount);

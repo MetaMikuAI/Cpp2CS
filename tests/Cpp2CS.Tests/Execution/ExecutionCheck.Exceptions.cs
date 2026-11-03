@@ -19,8 +19,7 @@ internal static partial class ExecutionCheck
         var choices = hints.Types.Concat(new[] { exception, index.Types.Corlib("System.InvalidOperationException"), index.Types.Corlib("System.NullReferenceException") })
             .Where(t => t is DefinitionRef d && (d.Definition.Attributes & System.Reflection.TypeAttributes.Abstract) == 0 && index.Types.IsAssignable(t, exception)).Distinct().ToArray();
         var signature = index.StructAbi.Signature(tested);
-        var statics = interpreter.ExpandedInstructions(definition).Where(i => i.OpCode.Code is Mono.Cecil.Cil.Code.Ldsfld or Mono.Cecil.Cil.Code.Stsfld or Mono.Cecil.Cil.Code.Ldsflda)
-            .Select(i => cecil.Field((FieldReference)i.Operand)).Concat(interpreter.IntrinsicStatics(definition)).Distinct().ToArray();
+        var statics = interpreter.StaticFields(definition, tested).Distinct().ToArray();
         for (var seed = 1; seed < caseCount; seed += 2)
         {
             var world = new World(index, seed, hints, InitializedOwner(tested));
