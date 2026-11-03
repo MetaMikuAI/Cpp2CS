@@ -222,12 +222,13 @@ internal sealed partial class BodyBuilder
                     ? Coerce(Nest(source, path, type, false, address), expected) : Hole(address, $"值 结构体 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected);
             case TypeKind.Bool when slice.Low == 0:
                 return Coerce(source, expected, address);
-            case TypeKind.Int or TypeKind.Pointer:
+            case TypeKind.Int or TypeKind.Pointer or TypeKind.Float or TypeKind.Double:
                 {
+                    var carrier = oracle.IntegerRepresentation(slice.Base)!.Value.Integer;
                     var target = expected is not null && types.Kind(expected) is TypeKind.Int or TypeKind.Bool && Width(expected) >= slice.Width ? expected
-                        : slice.Width is 8 or 16 or 32 or 64 ? types.Integer(slice.Width, false) : baseType;
+                        : slice.Width is 8 or 16 or 32 or 64 ? types.Integer(slice.Width, false) : carrier;
                     if (target.Equals(types.Boolean) || slice.Width == 1 && types.Kind(target) == TypeKind.Bool)
-                        return new ComparisonValue(Cond.Ne, IntegerBits(slice, baseType, address) ?? Hole(address, "值 位", baseType), new ConstantValue(0, baseType, Width(baseType)), types.Boolean);
+                        return new ComparisonValue(Cond.Ne, IntegerBits(slice, carrier, address) ?? Hole(address, "值 位", carrier), new ConstantValue(0, carrier, Width(carrier)), types.Boolean);
                     return IntegerBits(slice, target, address) ?? Hole(address, $"值 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected);
                 }
         }
@@ -361,17 +362,17 @@ internal sealed partial class BodyBuilder
                 return Composite(concat, target, address);
             case ConstSym c:
                 return new ConstantValue(c.Value & Expr.Mask(targetWidth), target, targetWidth);
-            case SliceSym slice when (oracle.TypeOf(slice.Base) ?? (slice.Base is PhiSym ? oracle.Unconstrained(slice.Base.Width) : null)) is { } sourceType && types.Kind(sourceType) is TypeKind.Int or TypeKind.Pointer or TypeKind.Bool:
+            case SliceSym slice when oracle.IntegerRepresentation(slice.Base) is var (sourceType, integerType):
                 {
-                    var sourceWidth = Width(sourceType);
-                    var value = View(slice.Base, sourceType, address);
-                    if (slice.Low > 0) value = new BinaryValue(BinOp.LShr, value, new ConstantValue((ulong)slice.Low, types.Int32, 32), sourceType, sourceWidth);
+                    var sourceWidth = Width(integerType);
+                    var value = Coerce(View(slice.Base, sourceType, address), integerType, address);
+                    if (slice.Low > 0) value = new BinaryValue(BinOp.LShr, value, new ConstantValue((ulong)slice.Low, types.Int32, 32), integerType, sourceWidth);
                     if (slice.Width < sourceWidth && slice.Low + slice.Width < sourceWidth)
-                        value = new BinaryValue(BinOp.And, value, new ConstantValue(Expr.Mask(slice.Width), sourceType, sourceWidth), sourceType, sourceWidth);
+                        value = new BinaryValue(BinOp.And, value, new ConstantValue(Expr.Mask(slice.Width), integerType, sourceWidth), integerType, sourceWidth);
                     return Resize(value, target);
                 }
-            case not ConcatSym when (oracle.TypeOf(part) ?? (part is PhiSym ? oracle.Unconstrained(part.Width) : null)) is { } atomType && types.Kind(atomType) is TypeKind.Int or TypeKind.Bool or TypeKind.Pointer:
-                return Resize(View(part, atomType, address), target);
+            case not ConcatSym when oracle.IntegerRepresentation(part) is var (atomType, integerType):
+                return Resize(Coerce(View(part, atomType, address), integerType, address), target);
             case not (SliceSym or ConcatSym) when oracle.TypeOf(part) is DefinitionRef structure && types.Kind(structure) == TypeKind.Struct && part.Width <= targetWidth:
                 {
                     // 只有全部位都由整数叶子覆盖时，结构体的机器位型才能用字段移位与或表示；不猜测填充字节。
