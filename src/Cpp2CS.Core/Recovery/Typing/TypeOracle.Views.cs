@@ -1,3 +1,4 @@
+using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Recovery.Values;
 
@@ -5,6 +6,12 @@ namespace Cpp2CS.Recovery.Typing;
 
 public sealed partial class TypeOracle
 {
+    /// <summary>合流投影已有完整结构体载体时保留该整体，让后续字段访问共用同一接收者。</summary>
+    public (PhiSym Whole, TypeRef WholeType, IReadOnlyList<FieldRef> Path, TypeRef Type)? ProjectedField(PhiSym phi) =>
+        phi.Projection is var (whole, low) && low % 8 == 0 && TypeOf(whole) is { } structure && types.Kind(structure) == TypeKind.Struct
+        && FieldAt(structure, low / 8 + RuntimeLayout.ObjectHeaderSize, phi.Width, false, false) is var (path, fieldType)
+            ? (whole, structure, path, fieldType) : null;
+
     /// <summary>标量位型的整数载体；浮点位片先按同宽整数解释，保留 NaN、符号与负零的原始位。</summary>
     public (TypeRef Source, TypeRef Integer)? IntegerRepresentation(Sym value)
     {

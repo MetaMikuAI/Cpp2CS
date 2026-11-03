@@ -39,6 +39,8 @@ internal sealed partial class BodyBuilder
                 return Hole(address, "构造 对象在构造函数调用前被使用", expected);
             case PhiSym phi:
                 {
+                    if (oracle.ProjectedField(phi) is var (whole, wholeType, path, fieldType))
+                        return Coerce(Nest(View(whole, wholeType, address), path, fieldType, false, address), expected, address);
                     // 空跑时记录使用处要求的类型，作为 φ 的类型约束。
                     if (demand is not null && expected is not null) oracle.Use(phi, expected);
                     var type = oracle.TypeOf(phi) ?? expected ?? oracle.Unconstrained(phi.Width);

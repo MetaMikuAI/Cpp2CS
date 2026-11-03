@@ -459,6 +459,18 @@ internal static class ArchitectureChecks
         var method = new MethodRef(Method(Type("RepresentationConsumer", 60), "Run", 60), [], []);
         var oracle = new TypeOracle(types, facts, method, _ => throw new NotSupportedException(), values);
         var pair = Structure("Pair", 61, 8, false, (types.Single, 0), (types.Single, 4));
+        method.Method.Parameters = [new("pair", pair, 0, null, false), new("scalar", types.Int64, 0, null, false)];
+        var merge = new Block(8);
+        MachineFunction.AddEdge(new Block(0), merge);
+        var whole = values.Syms.Phi(merge, "typed-whole", 64);
+        values.Syms.SetSource(whole, 0, values.Syms.Arg(0, 64));
+        var field = new PhiSym(merge, "field", 32) { Projection = (whole, 32) };
+        check.True(oracle.ProjectedField(field) is { } projected && projected.Whole == whole && projected.Type == types.Single
+            && projected.Path.Count == 1, "结构体字段投影保留已知类型的整体合流");
+        var scalar = values.Syms.Phi(merge, "scalar-whole", 64);
+        values.Syms.SetSource(scalar, 0, values.Syms.Arg(1, 64));
+        check.True(oracle.ProjectedField(new PhiSym(merge, "scalar-piece", 32) { Projection = (scalar, 0) }) is null,
+            "标量投影不借用结构体整体视图");
         var target = Structure("Coordinates", 62, 8, false, (types.Single, 0), (types.Single, 4));
         check.True(oracle.FieldCopy(pair, target)?.Count == 2, "完整同宽字段可复制到另一值类型");
         var overlap = Structure("Overlap", 63, 8, true, (types.Single, 0), (types.Single, 0));
