@@ -48,7 +48,7 @@ internal sealed partial class TemplateRecovery
 
     /// <summary>模板的一条路径在调用方的终点：出口位置、出口边上的复制、此时的环境与模板的返回值。</summary>
     private sealed record InlineEnd((ulong Block, int Index) Exit, IReadOnlyList<(LocalValue Target, ManagedValue Value)> Copies,
-        IReadOnlyDictionary<Variable, ManagedValue> Env, ManagedValue? Result, bool Returns = false);
+        IReadOnlyDictionary<Variable, ManagedValue> Env, ManagedValue? Result, bool Returns = false, int Epoch = 0);
 
     /// <summary>一次证明的结果：调用方区域的覆盖、各路径的终点，结论中的出口、出口复制与承接返回值的局部。</summary>
     private sealed class InlineMatch

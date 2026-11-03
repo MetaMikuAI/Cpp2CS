@@ -752,9 +752,11 @@ internal static class ArchitectureChecks
             new(8, [call, new ManagedReturn(12, Pair(Field(0), Field(1)))]),
             new(16, [new ManagedReturn(16, Pair(one, two))]),
         ]);
-        MethodRecoveryResult? Summary(MethodRef requested) => requested == method ? new(method, 0, template, []) : null;
-        TemplateResult Run(bool consistent, bool complete)
+        TemplateResult Run(bool consistent, bool complete, bool whole = false, bool grouped = false)
         {
+            var selected = whole ? template with { Blocks = template.Blocks.Select(b => b.Address == 8
+                ? b with { Statements = [call, new ManagedReturn(12, returned)] } : b).ToArray() } : template;
+            MethodRecoveryResult? SelectedSummary(MethodRef requested) => requested == method ? new(method, 0, selected, []) : null;
             var body = new ManagedBody(caller,
             [
                 new(0, [new ManagedBranch(0, Test(new ArgumentValue(0, ownerType, 64), true), new(8, []), new(16, []))]),
@@ -762,11 +764,24 @@ internal static class ArchitectureChecks
                 new(16, [new ManagedJump(16, new(24, complete ? [new(first, one), new(second, consistent ? two : one)] : [new(first, one)]))]),
                 new(24, [new ManagedCall(24, new(new(consumer, [], []), null, [Pair(first, complete ? second : one)], false), null, false), new ManagedReturn(28, null)]),
             ]);
-            return new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary)).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
+            if (grouped)
+            {
+                var aggregate = new LocalValue(new Variable(Storage.Temp(153), 1), pair, 64);
+                body = body with { Blocks = body.Blocks.Select(b => b.Address == 8 || b.Address == 16
+                    ? b with { Statements = b.Statements.Select(s => s is ManagedJump jump
+                        ? jump with { Edge = jump.Edge with { Copies = [.. jump.Edge.Copies,
+                            new(aggregate, b.Address == 8 ? Pair(Field(0), Field(1)) : Pair(one, consistent ? two : one))] } } : s).ToArray() }
+                    : b.Address == 24 ? b with { Statements = [new ManagedCall(24, new(new(consumer, [], []), null, [aggregate], false), null, false), new ManagedReturn(28, null)] } : b).ToArray() };
+            }
+            return new TemplateRecovery(types, caller, SelectedSummary, new InlineEvidence(types, caller, SelectedSummary)).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
         }
         check.Equal(0, Run(true, true).Holes.Count, "结构体返回值由多个字段局部承接时仍可证明完整返回");
         check.True(Run(false, true).Holes.Count > 0, "一个字段在常量路径不同则拒绝结构体返回证明");
         check.True(Run(true, false).Holes.Count > 0, "缺少叶子承接时不猜测结构体返回的对应关系");
+        check.Equal(0, Run(true, true, true).Holes.Count, "完整结构体调用结果可按出口字段逐一证明");
+        check.True(Run(false, true, true).Holes.Count > 0, "完整结构体的字段证明仍须覆盖其他返回路径");
+        check.Equal(0, Run(true, true, true, true).Holes.Count, "出口同时组合已证明字段时使用同一完整返回值");
+        check.True(Run(false, true, true, true).Holes.Count > 0, "组合字段不掩盖不同返回路径中的值差异");
     }
 
     private static void ReturnedPredicates(Assertions check, ManagedTypes types)

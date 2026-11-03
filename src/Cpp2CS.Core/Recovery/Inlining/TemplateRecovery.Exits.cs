@@ -50,7 +50,7 @@ internal sealed partial class TemplateRecovery
             }
         }
         if (returns) Cover(caller, match);
-        match.Ends.Add(new InlineEnd((caller.Block, caller.Index), copies, new Dictionary<Variable, ManagedValue>(caller.Env), result, returns));
+        match.Ends.Add(new InlineEnd((caller.Block, caller.Index), copies, new Dictionary<Variable, ManagedValue>(caller.Env), result, returns, caller.Epoch));
         return true;
     }
 
@@ -158,12 +158,19 @@ internal sealed partial class TemplateRecovery
                 return match.Fail("返回值没有承接的局部，且无法证明额外求值无副作用");
         }
         var rest = projections.ToList();
+        ManagedValue Project(InlineEnd end, ManagedValue value)
+        {
+            foreach (var projection in projections)
+                if (end.Env.GetValueOrDefault(projection.Target.Variable) is { } leaf && SameTerm(value, leaf)) return projection.Value;
+            return MapTerm(value, child => Project(end, child));
+        }
         foreach (var target in copied.Where(c => (result is null || c.Variable != result.Variable)
             && !projections.Any(p => p.Target.Variable == c.Variable)))
         {
             var exit = match.Ends[0].Exit;
             var held = match.Ends.Select(e => e.Env.GetValueOrDefault(target.Variable) ?? target).ToArray();
             if (!LiveAt(body, blocks, exit.Block, exit.Index, target.Variable) && held.All(NonThrowingInlineValue)) continue;
+            if (projections.Count > 0) held = match.Ends.Select((end, i) => Project(end, held[i])).ToArray();
             if (held.Skip(1).Any(v => !SameTerm(v, held[0]))) return match.Fail("出口复制在各路径上不同");
             rest.Add((target, held[0]));
         }
@@ -190,7 +197,7 @@ internal sealed partial class TemplateRecovery
         InlineMatch match, TypeRef returnType, IReadOnlyList<LocalValue> copied)
     {
         if (returnType is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct
-            || match.Ends.Any(e => e.Result is not ComposedValue)) return null;
+            || match.Ends.Any(e => e.Result is null || !e.Result.Type.Equals(returnType))) return null;
         var leaves = types.Leaves(structure).ToArray();
         if (leaves.Length == 0) return null;
         var result = NewLocal(returnType);
@@ -206,7 +213,7 @@ internal sealed partial class TemplateRecovery
                 value = new FieldValue(value, field, fieldType, Width(fieldType));
             }
             bool Carries(InlineEnd end, LocalValue local, Dictionary<int, ManagedValue> binding) =>
-                ((ComposedValue)end.Result!).Leaves.FirstOrDefault(l => l.Path.SequenceEqual(path)).Value is { } expected
+                ReturnedField(end, path) is { } expected
                 && end.Env.GetValueOrDefault(local.Variable) is { } actual && Unify(expected, actual, binding);
             var matches = 0;
             foreach (var local in copied.Where(c => c.Type.Equals(type) && !projections.Any(p => p.Target.Variable == c.Variable)))
@@ -221,6 +228,20 @@ internal sealed partial class TemplateRecovery
         }
         foreach (var (key, value) in trial) match.Binding[key] = value;
         return (result, projections);
+    }
+
+    /// <summary>完整结构体项与分散承接的字段比较；字段读取沿用该返回路径的调用代数。</summary>
+    private ManagedValue? ReturnedField(InlineEnd end, IReadOnlyList<FieldRef> path)
+    {
+        if (end.Result is ComposedValue composed)
+            return composed.Leaves.FirstOrDefault(l => l.Path.SequenceEqual(path)).Value;
+        var value = end.Result!;
+        foreach (var field in path)
+        {
+            var type = field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
+            value = new Observed(new FieldValue(value, field, type, Width(type)), end.Epoch);
+        }
+        return value;
     }
 
     /// <summary>合流可承接返回值的比较结果；用一条非常量路径提出表达式，再逐路径验证，包括已折叠成常量的路径。</summary>
