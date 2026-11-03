@@ -150,7 +150,7 @@ public sealed class SymTable
         {
             if (!seen.Add(current)) return false;
             return current.Sources.OfType<Sym>().Select(Resolve).Any(source => source is PhiSym next
-                ? Evidence(next) : Slice(source, low, width) is not SliceSym);
+                ? Evidence(next) : Slice(source, low, width) is not SliceSym piece || !ReferenceEquals(piece.Base, source));
         }
         var useful = Evidence(phi);
         projecting.Remove((phi, low, width));

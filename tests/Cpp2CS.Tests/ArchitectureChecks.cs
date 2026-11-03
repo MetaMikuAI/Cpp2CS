@@ -43,6 +43,7 @@ internal static class ArchitectureChecks
         RepresentationCopies(checks, facts, types);
         ConstructorStoreOrder(checks, types);
         LowBitArithmetic(checks);
+        PackedPhiSlices(checks);
         ArrayIndices(checks);
         Barriers(checks, types);
         UnchangedBarriers(checks, facts);
@@ -388,6 +389,28 @@ internal static class ArchitectureChecks
             check.True(low is OpSym { Width: 1 } op && op.Op.Binary == expected && op.Args.All(v => v.Width == 1),
                 $"{operation} 的低位保留模 2 运算与操作数宽度");
         }
+    }
+
+    private static void PackedPhiSlices(Assertions check)
+    {
+        var syms = new SymTable();
+        var merge = new Block(8);
+        MachineFunction.AddEdge(new Block(0), merge);
+        MachineFunction.AddEdge(new Block(4), merge);
+        var first = syms.Arg(0, 96);
+        var second = syms.Arg(1, 96);
+        var phi = syms.Phi(merge, "packed", 128);
+        syms.SetSource(phi, 0, syms.Widen(syms.Slice(first, 32, 32), 128));
+        syms.SetSource(phi, 1, syms.Widen(syms.Slice(second, 32, 32), 128));
+        var projected = syms.Slice(phi, 0, 32);
+        check.True(projected is PhiSym { Width: 32 } p && p.Sources.SequenceEqual(new[] { syms.Slice(first, 32, 32), syms.Slice(second, 32, 32) }),
+            "合流的寄存器片还原为原结构体字段的同宽合流");
+        syms.SetSource(phi, 1, syms.Widen(syms.Slice(second, 64, 32), 128));
+        check.True(projected is PhiSym updated && updated.Sources[1] == syms.Slice(second, 64, 32), "后填入的合流来源同步更新片投影");
+        var scalar = syms.Phi(merge, "scalar", 64);
+        syms.SetSource(scalar, 0, syms.Arg(2, 64));
+        syms.SetSource(scalar, 1, syms.Arg(3, 64));
+        check.True(syms.Slice(scalar, 0, 16) is SliceSym, "没有搬运片证据时不额外拆分标量合流");
     }
 
     private static void RepresentationCopies(Assertions check, ProgramFacts facts, ManagedTypes types)
