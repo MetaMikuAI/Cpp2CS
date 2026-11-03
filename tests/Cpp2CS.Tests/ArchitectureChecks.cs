@@ -44,6 +44,7 @@ internal static class ArchitectureChecks
         ConstructorStoreOrder(checks, types);
         LowBitArithmetic(checks);
         PackedPhiSlices(checks);
+        JoinedPhiSlices(checks);
         ArrayIndices(checks);
         Barriers(checks, types);
         UnchangedBarriers(checks, facts);
@@ -411,6 +412,34 @@ internal static class ArchitectureChecks
         syms.SetSource(scalar, 0, syms.Arg(2, 64));
         syms.SetSource(scalar, 1, syms.Arg(3, 64));
         check.True(syms.Slice(scalar, 0, 16) is SliceSym, "没有搬运片证据时不额外拆分标量合流");
+    }
+
+    private static void JoinedPhiSlices(Assertions check)
+    {
+        foreach (var crossed in new[] { false, true })
+        {
+            var syms = new SymTable();
+            var merge = new Block(8);
+            MachineFunction.AddEdge(new Block(0), merge);
+            MachineFunction.AddEdge(new Block(4), merge);
+            var a = syms.Arg(0, 128);
+            var b = syms.Arg(1, 128);
+            var low = syms.Phi(merge, "low", 64);
+            var high = syms.Phi(merge, "high", 64);
+            syms.SetSource(low, 0, syms.Slice(a, 0, 64));
+            syms.SetSource(low, 1, syms.Slice(b, 0, 64));
+            syms.SetSource(high, 0, syms.Slice(crossed ? b : a, 64, 64));
+            syms.SetSource(high, 1, syms.Slice(crossed ? a : b, 64, 64));
+            var result = syms.Concat(low, high);
+            check.True(crossed ? result is ConcatSym : result is PhiSym phi && phi.Sources.SequenceEqual(new[] { a, b }),
+                crossed ? "不同入边的片不能冒充完整返回值" : "分段返回在对应入边上还原为整体合流");
+            if (!crossed)
+            {
+                syms.SetSource(high, 1, syms.Slice(a, 64, 64));
+                check.True(result is PhiSym changed && changed.Sources[1] is ConcatSym,
+                    "来源变化后整体合流保留真实拼接，不沿用失效的完整值证据");
+            }
+        }
     }
 
     private static void RepresentationCopies(Assertions check, ProgramFacts facts, ManagedTypes types)

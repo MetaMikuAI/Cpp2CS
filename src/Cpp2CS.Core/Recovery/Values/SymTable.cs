@@ -20,6 +20,8 @@ public sealed class SymTable
     private readonly Dictionary<(PhiSym, int, int), PhiSym> projections = [];
     private readonly Dictionary<PhiSym, List<PhiSym>> projectionsOf = [];
     private readonly HashSet<(PhiSym, int, int)> projecting = [];
+    private readonly Dictionary<ConcatSym, PhiSym> joins = [];
+    private readonly Dictionary<PhiSym, List<ConcatSym>> joinsOf = [];
     private int next;
 
     public IEnumerable<PhiSym> Phis => phis.Values.Concat(projections.Values);
@@ -83,7 +85,10 @@ public sealed class SymTable
         phi.Sources[index] = value;
         if (projectionsOf.TryGetValue(phi, out var list))
             foreach (var projection in list.ToArray())
-                projection.Sources[index] = Slice(value, projection.Projection!.Value.Low, projection.Width);
+                SetSource(projection, index, Slice(value, projection.Projection!.Value.Low, projection.Width));
+        if (joinsOf.TryGetValue(phi, out var combined))
+            foreach (var concat in combined.ToArray())
+                SetSource(joins[concat], index, Concat(concat.Parts.Cast<PhiSym>().Select(p => p.Sources[index]!)));
     }
 
     public static Sym Resolve(Sym sym)
@@ -176,8 +181,41 @@ public sealed class SymTable
         {
             0 => throw new ArgumentException("空拼接"),
             1 => flat[0],
-            _ => Intern(new ConcatSym(flat.ToArray())),
+            _ => JoinPhi(Intern(new ConcatSym(flat.ToArray()))),
         };
+    }
+
+    /// <summary>同一合流的各片在每条入边上都连续覆盖同一个整体时，直接合流整体；不混用不同边的片。</summary>
+    private Sym JoinPhi(ConcatSym concat)
+    {
+        if (joins.TryGetValue(concat, out var known)) return known;
+        if (concat.Parts[0] is not PhiSym first || concat.Parts.Any(p => p is not PhiSym phi || phi.Block != first.Block)) return concat;
+        var parts = concat.Parts.Cast<PhiSym>().ToArray();
+        var sources = new Sym[first.Sources.Length];
+        for (var edge = 0; edge < sources.Length; edge++)
+        {
+            Sym? whole = null;
+            var at = 0;
+            foreach (var part in parts)
+            {
+                if (part.Sources[edge] is not { } source) return concat;
+                var (value, low, width) = Piece(Resolve(source));
+                whole ??= value;
+                if (!ReferenceEquals(whole, value) || low != at) return concat;
+                at += width;
+            }
+            if (whole is null || at != whole.Width) return concat;
+            sources[edge] = whole;
+        }
+        var joined = Phi(first.Block, concat, concat.Width);
+        joins[concat] = joined;
+        foreach (var part in parts)
+        {
+            if (!joinsOf.TryGetValue(part, out var list)) joinsOf[part] = list = [];
+            list.Add(concat);
+        }
+        for (var edge = 0; edge < sources.Length; edge++) SetSource(joined, edge, sources[edge]);
+        return joined;
     }
 
     private void Append(List<Sym> parts, Sym next)
