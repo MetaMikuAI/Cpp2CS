@@ -115,6 +115,7 @@ public enum OpKind : byte
     ImportOutPair,
     /// <summary>经过判空与越界检查的字节数组读取；参数为数组与 32 位下标。</summary>
     ReadByteArray,
+    GenericHasValue,
 }
 
 /// <summary>调用所表达的运行时操作。Operand：类型（TypeRef）、异常名、槽位号等，见 <see cref="OpKind"/>。</summary>

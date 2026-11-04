@@ -38,6 +38,7 @@ internal static class DirectPass
             HelperKind.ObjectNew => (OpKind.NewObject, state.ClassOperand([Arg(0)]), [Arg(0)]),
             HelperKind.NewArray or HelperKind.NewArrayFull => (OpKind.NewArray, state.ClassOperand([Arg(0)]), [Arg(0), Arg(1)]),
             HelperKind.Box => (OpKind.Box, state.ClassOperand([Arg(0)]), [Arg(0), Arg(1)]),
+            HelperKind.GenericHasValue => (OpKind.GenericHasValue, state.ClassOperand([Arg(0)]), [Arg(0), Arg(1)]),
             HelperKind.Unbox => (OpKind.Unbox, state.ClassOperand([Arg(0), Arg(1)]), [Arg(0), Arg(1)]),
             HelperKind.IsInst => (OpKind.IsInst, state.ClassOperand([Arg(0), Arg(1)]), [Arg(0), Arg(1)]),
             HelperKind.IsAssignableFrom => (OpKind.IsAssignableFrom, null, [Arg(0), Arg(1)]),

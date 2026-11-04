@@ -13,49 +13,17 @@ internal static class SharedInvokerArguments
 
     internal static Proof? Prove(IdiomState state, Block block, Call invoke, Expr array, int parameter, TypeRef type)
     {
-        if (state.self is not { } self || state.owner.abi.Machine(self, out _) is not { } signature) return null;
+        if (state.self is not { } self) return null;
         Expr Expand(Expr value) => state.defs.Expand(value, 24);
-        var formal = MethodRef.Open(self.Method);
-        bool DirectInput(Expr value, TypeRef inputType) => signature.Arguments.Any(a => a.Index >= 0 && ManagedAbi.SharedValue(a.Type)
-            && formal.Concrete(self.Method.Parameters[a.Index].Type).Equals(inputType)
-            && a.Pieces is [{ Register: var register }] && value is Use { Variable.Version: 0 } use && use.Variable.Storage == register);
-        Expr? OriginalInput(Expr value, TypeRef inputType) => PrivateFrameInputs.Origin(state, value, source => DirectInput(source, inputType));
-        Store? Previous(Block at, int before, Expr address)
-        {
-            var seen = new HashSet<Block>();
-            while (seen.Add(at))
-            {
-                for (var i = before - 1; i >= 0; i--)
-                {
-                    if (at.Statements[i] is Store store)
-                    {
-                        var target = Expand(store.Target);
-                        if (target == address) return store.Value.Width == 64 ? store : null;
-                        if (target is not FrameAddress targetFrame || address is not FrameAddress sought
-                            || targetFrame.Offset < sought.Offset + 8 && sought.Offset < targetFrame.Offset + store.Value.Width / 8) return null;
-                    }
-                    if (at.Statements[i] is Call call && (address is not FrameAddress callSlot
-                        || call.Arguments.Select(Expand).Any(e => PrivateFrameInputs.Exposes(e, callSlot))))
-                    {
-                        if (call.Op is not { Kind: OpKind.InvokeGeneric, Operand: MethodRef invoked }
-                            || state.owner.abi.Invoker((MethodRef)GenericContext.Instantiate(invoked, self)!).Indirections
-                                .Any(a => a.Transfer != Transfer.Copy || a.Access != MemoryAccess.Read)) return null;
-                    }
-                }
-                if (at.IsLandingPad || at.Predecessors.ToArray() is not [var previous]) return null;
-                at = previous;
-                before = at.Statements.Count;
-            }
-            return null;
-        }
+        Expr? OriginalInput(Expr value, TypeRef inputType) => SharedValueCopies.OriginalInput(state, value, inputType);
+        Store? Previous(Block at, int before, Expr address) => SharedValueCopies.Previous(state, at, before, address);
         var address = Expand(parameter == 0 ? array : new Binary(BinOp.Add, array, Expr.C((ulong)parameter * 8, 64), 64));
         if (address is not FrameAddress argumentAddress || Previous(block, block.Statements.IndexOf(invoke), address) is not { } argument
             || Expand(argument.Value) is not Use selected) return null;
         var join = state.function.Blocks.FirstOrDefault(b => b.Statements.OfType<Phi>().Any(p => p.Target == selected.Variable));
         var phi = join?.Statements.OfType<Phi>().Single(p => p.Target == selected.Variable);
         if (join is null || phi is not { Sources.Length: 2 } || join.Predecessors.Count != 2) return null;
-        var flag = new Load(new Binary(BinOp.Add, new Symbol(SymbolKind.Class, type), Expr.C(RuntimeLayout.ClassByvalArg + 8, 64), 64), 32);
-        int? Direction(Expr condition, uint bits) => DirectionPass.Direction(Expand(condition), e => e == flag ? Expr.C(bits, 32) : null);
+        int? Direction(Expr condition, uint bits) => SharedValueCopies.Direction(state, type, condition, bits);
         Block? head = null;
         Block? referenceArm = null;
         Expr? destination = null;
@@ -87,14 +55,10 @@ internal static class SharedInvokerArguments
         if (DynamicStackRegion.Parse(destination) is not { } region || region.Root.Offset > argumentAddress.Offset || region.Sizes[^1] != size) return null;
         var copies = state.All.OfType<Call>().Where(c => c is { Op.Kind: OpKind.Import, Op.Operand: "memcpy", Arguments.Length: 3 }
             && Expand(c.Arguments[0]) == destination && Expand(c.Arguments[2]) == size).ToArray();
-        if (copies is not [var copy] || Expand(copy.Arguments[1]) is not Select source) return null;
-        var selectedValue = Direction(source.Condition, 0x80000000) == 0 ? source.True : source.False;
-        var selectedReference = Direction(source.Condition, 0) == 0 ? source.True : source.False;
-        if (Direction(source.Condition, 0x80000000) is not { } valueDirection || Direction(source.Condition, 0) != 1 - valueDirection
-            || OriginalInput(selectedValue, type) is not { } original || selectedReference is not FrameAddress) return null;
+        if (copies is not [var copy]) return null;
         var copyBlock = state.function.Blocks.Single(b => b.Statements.Contains(copy));
         if (!Dominators.Compute(state.function).Dominates(copyBlock.Index, block.Index)) return null;
-        if (Previous(copyBlock, copyBlock.Statements.IndexOf(copy), selectedReference) is not { } saved || OriginalInput(Expand(saved.Value), type) != original) return null;
+        if (SharedValueCopies.Source(state, copyBlock, copy, type) is not { } original) return null;
         // 空值检查不观察私有副本；其他调用可能改变原形参或使副本逃逸。
         var visited = new HashSet<Block>();
         bool ReachesCopy(Block current, int end)
@@ -130,8 +94,7 @@ internal static class SharedInvokerArguments
                 || Expand(call.Arguments[2]) != other.Sizes[^1] || Expand(call.Arguments[1]) is not Select selected
                 || other.Sizes[^1] is not Ir.Convert { Operand: Load { Address: Binary { Left: Symbol { Value: TypeRef otherType } } } }
                 || call.Defines.Any(v => v is not null && state.Used(v))) return false;
-            var otherFlag = new Load(new Binary(BinOp.Add, new Symbol(SymbolKind.Class, otherType), Expr.C(RuntimeLayout.ClassByvalArg + 8, 64), 64), 32);
-            int? Side(uint bits) => DirectionPass.Direction(selected.Condition, e => e == otherFlag ? Expr.C(bits, 32) : null);
+            int? Side(uint bits) => SharedValueCopies.Direction(state, otherType, selected.Condition, bits);
             if (Side(0x80000000) is not { } valueSide || Side(0) != 1 - valueSide) return false;
             var value = valueSide == 0 ? selected.True : selected.False;
             var reference = valueSide == 0 ? selected.False : selected.True;

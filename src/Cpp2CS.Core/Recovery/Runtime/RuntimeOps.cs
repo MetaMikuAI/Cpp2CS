@@ -246,6 +246,24 @@ public static class RuntimeOps
                 return true;
             },
         };
+        yield return new(OpKind.GenericHasValue)
+        {
+            Inputs = (call, a, t) => a.Count == 2 ? [new(a[1], t.ClassOperand(call), RuntimeInputKind.Pointee, 1)] : [],
+            ResultWidths = _ => [1],
+            ResultType = (_, t) => t.Types.Boolean,
+            Behavior = new(EffectKind.Read, ExceptionEffect.None),
+            PointerEffects = (call, abi) => ClassOperand(call) is { } type && call.Arguments.Length == 2
+                ? [new PointerEffect(1, 1, abi.Kind(type) is null ? -1 : abi.Size(type), MemoryAccess.Read)] : [],
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.ClassOperand is not { } type || c.Arguments.Count != 2) return false;
+                var boxed = new BoxValue(c.Input(0), type, c.Types.Object);
+                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, c.Types.Boolean),
+                    new ComparisonValue(Cond.Ne, boxed, new ConstantValue(0, c.Types.Object, 64), c.Types.Boolean)));
+                return true;
+            },
+        };
         yield return new(OpKind.Unbox)
         {
             Inputs = (_, a, t) => a.Count == 2 ? [new(a[0], t.Types.Object)] : [],

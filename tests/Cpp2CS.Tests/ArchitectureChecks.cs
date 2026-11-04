@@ -41,6 +41,7 @@ internal static class ArchitectureChecks
         SharedInterfacePartitions(checks);
         InvokerArguments(checks, facts, types);
         SharedInvokerCopies(checks, facts, types);
+        GenericValueChecks(checks, facts, types);
         MethodInfoSpills(checks, facts);
         StackBoxes(checks, facts, types);
         PartialScalarCells(checks, facts, types);
@@ -322,7 +323,7 @@ internal static class ArchitectureChecks
             var saved = new FrameAddress(-16);
             var array = new FrameAddress(-24);
             var entity = new Symbol(SymbolKind.Class, type);
-            var flag = new Load(new Binary(BinOp.Add, entity, Expr.C(RuntimeLayout.ClassByvalArg + 8, 64), 64), 32);
+            var flag = new Compare(Cond.Slt, new Load(new Binary(BinOp.Add, entity, Expr.C(RuntimeLayout.ClassByvalArg + 8, 64), 64), 32), Expr.C(0, 32));
             var size = new Ir.Convert(ConvKind.ZeroExtend, new Load(new Binary(BinOp.Add, entity,
                 Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32), 64);
             var destination = new Binary(BinOp.Sub, new FrameAddress(-64), new Binary(BinOp.And,
@@ -372,6 +373,45 @@ internal static class ArchitectureChecks
             var proof = SharedInvokerArguments.Prove(state, join, invoke, array, 0, type);
             check.Equal(variant is "private" or "null-check" or "nested" or "neighbor-copy" or "spilled-input" or "reuse-array",
                 proof?.Value == input, $"共享泛型私有副本证明：{variant}");
+        }
+    }
+
+    private static void GenericValueChecks(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        uint[] body = [0xb9402808, 0x37f800a8, 0xf9400028, 0xf100011f, 0x1a9f07e0, 0xd65f03c0,
+            0xf9403008, 0xb4000068, 0x3944d408, 0x37180068, 0x52800020, 0xd65f03c0, 0x39400028, 0x7100011f, 0x17fffff6];
+        check.True(RuntimeHelpers.GenericHasValueBody(body), "泛型空值检查保留引用、普通值及 Nullable 三条路径");
+        body[9] = 0x37200068;
+        check.True(!RuntimeHelpers.GenericHasValueBody(body), "其他类标志不能当作 nullabletype");
+        var owner = Type("SharedValueOwner", 875);
+        var method = Method(owner, "Check", 875, MethodAttributes.Public | MethodAttributes.Static);
+        var type = new GenericParameterRef("T", true, 0);
+        method.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        method.Parameters = [new("value", type, 0, null, false)];
+        method.ReturnType = types.Boolean;
+        var self = new MethodRef(method, [], [type with { Binding = new(NativeBindingKind.Shared) }]);
+        check.True(types.StorageBits(type) < 0, "泛型值的未知存储宽度不能退化为一位");
+        foreach (var variant in new[] { "copy", "modified", "wrong-size", "other-flags", "non-private" })
+        {
+            var input = new Use(new(Storage.Gpr(0), 0), 64);
+            var klass = new Symbol(SymbolKind.Class, type);
+            var size32 = new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32);
+            var size = new Ir.Convert(ConvKind.ZeroExtend, size32, 64);
+            Expr Allocate(Expr start, Expr bytes) => new Binary(BinOp.Sub, start,
+                new Binary(BinOp.And, new Binary(BinOp.Add, bytes, Expr.C(15, 64), 64), Expr.C(0x1fffffff0, 64), 64), 64);
+            var padded = new Ir.Convert(ConvKind.ZeroExtend, new Binary(BinOp.Add, size32, Expr.C(16, 32), 32), 64);
+            var destination = variant == "non-private" ? (Expr)input : Allocate(Allocate(new FrameAddress(-64), padded), size);
+            var flag = new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassByvalArg + 8, 64), 64), 32);
+            var condition = new Compare(variant == "other-flags" ? Cond.Ne : Cond.Slt, flag, Expr.C(0, 32));
+            var saved = new FrameAddress(-16);
+            var copy = new Call(4, CallKind.Direct, Expr.C(128, 64)) { Op = new(OpKind.Import, "memcpy"),
+                Arguments = [destination, new Select(condition, input, saved, 64), variant == "wrong-size" ? Expr.C(8, 64) : size] };
+            var read = new Call(8, CallKind.Direct, Expr.C(256, 64)) { Op = new(OpKind.GenericHasValue, type), Arguments = [klass, destination] };
+            var block = new Block(0) { Statements = [new Store(0, saved, input), copy, read, new Return(12)] };
+            if (variant == "modified") block.Statements.Insert(2, new Store(6, destination, Expr.C(0, 64)));
+            var function = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [block] };
+            var state = new IdiomState(new IdiomRewriter(facts), function) { self = self };
+            check.Equal(variant == "copy", SharedValueCopies.ForwardChecks(state), $"泛型判空的私有副本来源 {variant}");
         }
     }
 
