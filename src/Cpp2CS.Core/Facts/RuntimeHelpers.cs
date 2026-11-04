@@ -265,6 +265,8 @@ public sealed partial class RuntimeHelpers
         // cbz x0, ...（0xB4000000 | imm19 << 5 | Rt=0）出现在前 6 条：空对象直接返回
         if (calls.Length >= 1 && KindAt(calls[0]) == HelperKind.IsAssignableFrom && words.Take(6).Any(w => (w & 0xFF00001F) == 0xB4000000))
             return (HelperKind.IsInst, null, $"空对象直接返回，否则调用 is_assignable_from 实现 0x{calls[0]:x}");
+        if (SplitIsInst(body, out var assignable))
+            return (HelperKind.IsInst, null, $"空对象直接返回，非空路径调用 is_assignable_from 实现 0x{assignable:x}");
         if (LoadsOffset(body, RuntimeLayout.ClassElementSize, 8) && words.Any(w => A64.IsAddImmediate64(w) && A64.AddImmediate(w) == RuntimeLayout.ArrayData))
             return (HelperKind.ArrayElementAddress, null, $"读取 Il2CppClass+0x{RuntimeLayout.ClassElementSize:x} element_size，并加数组头 0x{RuntimeLayout.ArrayData:x}");
         if (words.Length <= 10 && LoadsOffset(body, RuntimeLayout.FieldParent, 4) && LoadsOffset(body, RuntimeLayout.FieldOffset, 4) && calls.Length == 0)
@@ -283,6 +285,22 @@ public sealed partial class RuntimeHelpers
         if (!named && body == target && calls.FirstOrDefault(IsRaiseCore) is var raise and not 0 && !CanReturn(body, 1))
             return (HelperKind.Raise, null, $"把异常转交给 0x{raise:x}");
         return null;
+    }
+
+    /// <summary>
+    /// 未内联的 isinst 常被拆成两个函数：入口只做空对象检查，非空路径在下一个函数中调用
+    /// is_assignable_from 并按结果返回对象或空。
+    /// </summary>
+    private bool SplitIsInst(ulong body, out ulong assignable)
+    {
+        assignable = 0;
+        var function = map.At(body);
+        if (function is null) return false;
+        var guarded = Words(body, 8).Any(x => A64.IsCbz(x.Word) && A64.Rd(x.Word) == 0
+            && A64.Imm19Target(x.Word, x.Pc) >= function.End);
+        if (!guarded || map.At(function.End) is not { } continuation) return false;
+        assignable = CallsOf(continuation.Start).FirstOrDefault(call => KindAt(call) == HelperKind.IsAssignableFrom);
+        return assignable != 0;
     }
 
     /// <summary>异常抛出核心：不返回、以 brk 结束，并调用读取异常对象 +0x38 展开头的辅助。</summary>
