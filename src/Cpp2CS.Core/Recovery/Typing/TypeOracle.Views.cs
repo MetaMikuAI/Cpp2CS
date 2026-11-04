@@ -12,7 +12,7 @@ public sealed partial class TypeOracle
         IEnumerable<(int Bit, int Width, TypeRef Type)> fields = slice.Base is ReadSym read && Parts(read) is { } parts
             ? parts.Select(p => (p.Bit, p.Width, p.Leaf.Type))
             : TypeOf(slice.Base) is DefinitionRef structure && types.Kind(structure) == TypeKind.Struct
-                ? types.Leaves(structure).Select(l => (l.Offset * 8, StorageBits(l.Type), l.Type)) : [];
+                ? types.Projections(structure).Select(p => (p.Bit, p.Width, p.Type)) : [];
         foreach (var (bit, width, type) in fields)
             if (types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double
                 && slice.Low >= bit && slice.Low + slice.Width <= bit + width
@@ -23,9 +23,9 @@ public sealed partial class TypeOracle
 
     /// <summary>合流投影已有完整结构体载体时保留该整体，让后续字段访问共用同一接收者。</summary>
     public (PhiSym Whole, TypeRef WholeType, IReadOnlyList<FieldRef> Path, TypeRef Type)? ProjectedField(PhiSym phi) =>
-        phi.Projection is var (whole, low) && low % 8 == 0 && TypeOf(whole) is { } structure && types.Kind(structure) == TypeKind.Struct
-        && FieldAt(structure, low / 8 + RuntimeLayout.ObjectHeaderSize, phi.Width, false, false) is var (path, fieldType)
-            ? (whole, structure, path, fieldType) : null;
+        phi.Projection is var (whole, low) && TypeOf(whole) is DefinitionRef structure
+        && types.Project(structure, low, phi.Width) is { } field
+            ? (whole, structure, field.Path, field.Type) : null;
 
     /// <summary>标量合流的投影复用完整载体，避免为循环中的每一级截断建立新的合流。</summary>
     public (PhiSym Whole, TypeRef Type, int Low)? ProjectedScalar(PhiSym phi) =>

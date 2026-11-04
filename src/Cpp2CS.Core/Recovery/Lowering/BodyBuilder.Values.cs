@@ -301,11 +301,12 @@ internal sealed partial class BodyBuilder
     private List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>? StructLeaves(Sym bits, DefinitionRef structure, ulong address)
     {
         var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
-        foreach (var (field, type, offset) in oracle.Fields(structure))
+        foreach (var projection in types.Fields(structure))
         {
-            var width = oracle.StorageBits(type);
-            if (offset * 8 + width > bits.Width) return null;
-            var part = values.Syms.Slice(bits, offset * 8, width);
+            var field = projection.Path[0];
+            var type = projection.Type;
+            if (!projection.Fits(bits.Width)) return null;
+            var part = values.Syms.Slice(bits, projection.Bit, projection.Width);
             if (SymTable.Resolve(part) is ConstSym { Value: 0 }) continue;
             if (type is DefinitionRef nested && types.Kind(type) == TypeKind.Struct && Bits(SymTable.Resolve(part)))
             {
@@ -384,20 +385,13 @@ internal sealed partial class BodyBuilder
             case not (SliceSym or ConcatSym) when oracle.TypeOf(part) is DefinitionRef structure && types.Kind(structure) == TypeKind.Struct && part.Width <= targetWidth:
                 {
                     // 只有全部位都由整数叶子覆盖时，结构体的机器位型才能用字段移位与或表示；不猜测填充字节。
-                    var leaves = Leaves(structure, 0).OrderBy(l => l.Offset).ToArray();
-                    var covered = 0;
-                    foreach (var (_, type, offset) in leaves)
-                    {
-                        if (types.Kind(type) is not (TypeKind.Int or TypeKind.Bool) || offset * 8 != covered) return null;
-                        covered += Width(type);
-                    }
-                    if (covered != part.Width) return null;
+                    if (types.StorageBits(structure) != part.Width || types.IntegerPieces(structure) is not { } leaves) return null;
                     var source = View(part, structure, address);
                     ManagedValue? packed = null;
-                    foreach (var (path, type, offset) in leaves)
+                    foreach (var leaf in leaves)
                     {
-                        var value = Resize(Nest(source, path, type, false, address), target);
-                        if (offset > 0) value = new BinaryValue(BinOp.Shl, value, new ConstantValue((ulong)(offset * 8), types.Int32, 32), target, targetWidth);
+                        var value = Resize(Nest(source, leaf.Path, leaf.Type, false, address), target);
+                        if (leaf.Bit > 0) value = new BinaryValue(BinOp.Shl, value, new ConstantValue((ulong)leaf.Bit, types.Int32, 32), target, targetWidth);
                         packed = packed is null ? value : new BinaryValue(BinOp.Or, packed, value, target, targetWidth);
                     }
                     return packed;
@@ -425,5 +419,4 @@ internal sealed partial class BodyBuilder
         return new ConversionValue(from < to ? ConvKind.ZeroExtend : ConvKind.Truncate, value, target, to);
     }
 
-    private IEnumerable<(IReadOnlyList<FieldRef> Path, TypeRef Type, int Offset)> Leaves(DefinitionRef structure, int at) => types.Leaves(structure, at);
 }

@@ -591,6 +591,21 @@ internal static class ArchitectureChecks
         var union = Structure("FloatUnion", 67, 4, true, (types.Single, 0), (types.Byte, 0));
         check.True(oracle.Inside(union, types.Single) is not null && oracle.Inside(union, types.Byte) is null,
             "显式布局只将覆盖全部位的字段视为整体表示");
+        var nested = Structure("Nested", 68, 16, false, (types.Int64, 0), (pair, 8));
+        var projection = types.Project(nested, 96, 32);
+        check.True(projection is { Bit: 96, Width: 32, Path.Count: 2 } && projection.Type.Equals(types.Single),
+            "嵌套字段的投影统一使用值起点的位偏移");
+        check.True(projection is not null && types.Project(nested, projection.Path) is { } byPath
+            && byPath.Bit == projection.Bit && byPath.Width == projection.Width && byPath.Type.Equals(projection.Type),
+            "路径投影与位范围投影得到相同字段");
+        check.True(types.Project(nested, 88, 16) is null && types.Project(padded, 32, 32) is null,
+            "字段投影拒绝跨字段和尾部填充");
+        check.True(types.Project(nested, 64, 64) is { Path.Count: 1, Type: var nestedType } && nestedType.Equals(pair),
+            "完整嵌套字段保留整体投影");
+        check.True(types.IntegerPieces(integer) is { Count: 1 } && types.IntegerPieces(reference) is null,
+            "整数打包的覆盖证明不将引用按整数位读取");
+        check.True(types.IntegerPieces(padded) is null && types.IntegerPieces(overlap) is null,
+            "整数打包拒绝填充与重叠字段");
     }
 
     private static void ConstructorStoreOrder(Assertions check, ManagedTypes types)

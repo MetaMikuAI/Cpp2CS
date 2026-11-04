@@ -707,6 +707,9 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     /// </summary>
     public (IReadOnlyList<FieldRef> Path, TypeRef Type)? FieldAt(TypeRef owner, int offset, int width, bool statics, bool threadStatics)
     {
+        if (!statics && owner is DefinitionRef structure && types.Kind(structure) == TypeKind.Struct)
+            return types.Project(structure, (offset - RuntimeLayout.ObjectHeaderSize) * 8, width) is { } projection
+                ? (projection.Path, projection.Type) : null;
         for (TypeRef? current = owner; current is DefinitionRef d; current = statics ? null : d.Definition.BaseType?.Substitute(d.Arguments, []))
         {
             if (types.Layouts.Of(d) is not { } layout) return null;

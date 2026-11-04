@@ -198,13 +198,15 @@ internal sealed partial class TemplateRecovery
     {
         if (returnType is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct
             || match.Ends.Any(e => e.Result is null || !e.Result.Type.Equals(returnType))) return null;
-        var leaves = types.Leaves(structure).ToArray();
+        var leaves = types.Projections(structure).ToArray();
         if (leaves.Length == 0) return null;
         var result = NewLocal(returnType);
         var projections = new List<(LocalValue Target, ManagedValue Value)>();
         var trial = new Dictionary<int, ManagedValue>(match.Binding);
-        foreach (var (path, type, _) in leaves)
+        foreach (var projection in leaves)
         {
+            var path = projection.Path;
+            var type = projection.Type;
             ManagedValue value = result;
             foreach (var field in path)
             {

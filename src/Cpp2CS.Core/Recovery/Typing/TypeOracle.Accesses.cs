@@ -149,13 +149,10 @@ public sealed partial class TypeOracle
 
     /// <summary>值类型的直接实例字段：字段、类型与相对值起点的字节偏移。</summary>
     public IEnumerable<(FieldRef Field, TypeRef Type, int Offset)> Fields(DefinitionRef structure) =>
-        types.Layouts.Of(structure) is { } layout
-            ? layout.Fields.OrderBy(f => f.Offset).Select(f => (new FieldRef(f.Field, structure), f.Type, f.Offset - RuntimeLayout.ObjectHeaderSize))
-            : [];
+        types.Fields(structure).Select(f => (f.Path[0], f.Type, f.Bit / 8));
 
-    /// <summary>值在机器上的位宽：引用与指针为 64，值类型为其大小。</summary>
-    public int StorageBits(TypeRef type) => ManagedTypes.IsReferenceType(type) || type is ByRefRef or PointerRef ? 64
-        : types.Kind(type) == TypeKind.Struct ? types.Size(type) * 8 : Math.Max(1, types.Bits(type));
+    /// <summary>值在机器上的存储位宽。</summary>
+    public int StorageBits(TypeRef type) => types.StorageBits(type);
 
     /// <summary>标量叶子的机器位宽。</summary>
     public int LeafBits(TypeRef type) => ManagedTypes.IsReferenceType(type) || type is ByRefRef or PointerRef ? 64 : Math.Max(1, types.Bits(type));

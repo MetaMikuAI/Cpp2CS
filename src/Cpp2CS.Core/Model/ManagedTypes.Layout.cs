@@ -1,5 +1,3 @@
-using Cpp2CS.Facts;
-
 namespace Cpp2CS.Model;
 
 public sealed partial class ManagedTypes
@@ -11,15 +9,7 @@ public sealed partial class ManagedTypes
     /// <summary>值类型的标量叶子字段：路径、类型与相对值起点的字节偏移。</summary>
     public IEnumerable<(IReadOnlyList<FieldRef> Path, TypeRef Type, int Offset)> Leaves(DefinitionRef structure, int at = 0)
     {
-        if (Layouts.Of(structure) is not { } layout) yield break;
-        foreach (var slot in layout.Fields.OrderBy(f => f.Offset))
-        {
-            var offset = at + slot.Offset - RuntimeLayout.ObjectHeaderSize;
-            var field = new FieldRef(slot.Field, structure);
-            if (Kind(slot.Type) == TypeKind.Struct && slot.Type is DefinitionRef inner)
-                foreach (var (path, type, leaf) in Leaves(inner, offset)) yield return ([field, .. path], type, leaf);
-            else yield return ([field], slot.Type, offset);
-        }
+        foreach (var field in Projections(structure)) yield return (field.Path, field.Type, at + field.Bit / 8);
     }
 
 }
