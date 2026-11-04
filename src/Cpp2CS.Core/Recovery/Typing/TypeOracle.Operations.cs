@@ -63,7 +63,7 @@ public sealed partial class TypeOracle
         if (value.Transfer != Transfer.Value || value.Pieces.Length == 0 || !value.Pieces.All(p => shape.Unused.Contains(p.Register))) return ArgumentSupply.Content;
         if (TypeOf(content) is { } actual && (actual.Equals(type) || types.IsAssignable(actual, type))) return ArgumentSupply.Content;
         if (value.Index < 0 && Parameter(-1) is { } self && (self.Equals(type) || types.IsAssignable(self, type))) return ArgumentSupply.This;
-        return ManagedTypes.IsReferenceType(type) || types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer
+        return ManagedTypes.IsReferenceType(type) || types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer or TypeKind.Struct
             ? ArgumentSupply.Default : ArgumentSupply.Content;
     }
 

@@ -13,7 +13,7 @@ internal sealed partial class StructAbi
     private readonly Dictionary<MethodRef, int[]> unusedInputs = new();
     private readonly Dictionary<ulong, HashSet<Storage>?> nativeInputReads = new();
 
-    // 调用事件只规范化被调原生代码完全不读的标量寄存器输入。
+    // 调用事件只规范化被调原生代码完全不读的寄存器输入（结构体要求所有片都不读）。
     // 证据来自未化简机器 SSA 和独立 ABI，不能取自恢复体；实参求值、调用及内存比较不变。
     public ulong[] CallInputs(MethodRef method, ulong[] arguments)
     {
@@ -47,9 +47,10 @@ internal sealed partial class StructAbi
             var reads = NativeInputReads(definition.Address);
             if (reads is null) return [];
             return Arguments(signature).Select((location, i) => (location, i))
-                .Where(p => index.Types.Kind(types[p.i]) is not (TypeKind.Struct or TypeKind.Pointer)
-                    && p.location is { StackOffset: null, Indirect: false, Pieces: [var piece] }
-                    && !reads.Contains(piece.Register)).Select(p => offsets[p.i]).ToArray();
+                .Where(p => index.Types.Kind(types[p.i]) is not TypeKind.Pointer
+                    && p.location is { StackOffset: null, Indirect: false, Pieces: { Length: > 0 } pieces }
+                    && pieces.All(piece => !reads.Contains(piece.Register)))
+                .SelectMany(p => Enumerable.Range(offsets[p.i], Classifier.Leaves(types[p.i]).Length)).ToArray();
         }
     }
 
