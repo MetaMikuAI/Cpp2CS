@@ -87,7 +87,9 @@ internal static partial class ExecutionCheck
         var definition = skeleton.Method(tested.Method);
         var entry = nativeEntry ?? tested.Method.Address;
         var function = index.Facts.Code.At(entry)!;
-        var signature = index.StructAbi.Signature(tested);
+        Aapcs64Classifier.Signature signature;
+        try { signature = index.StructAbi.Signature(tested); }
+        catch (Unsupported e) { return new Outcome(ExecutionVerdict.NotCheckable, 0, 0, $"；{e.Message}", e.Message); }
         var statics = interpreter.StaticFields(definition, tested).Distinct().ToArray();
         var hints = HintsOf(definition, cecil);
         machine.Covered.Clear();

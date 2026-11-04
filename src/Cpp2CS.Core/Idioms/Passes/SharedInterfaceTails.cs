@@ -177,23 +177,9 @@ internal static class SharedInterfaceTails
             }
             void Append(Block source, Block copy, Dictionary<Variable, Variable> map)
             {
+                var path = new PathCopy(v => fresh(v.Width), map);
                 foreach (var statement in source.Statements.Where(s => s is not Phi))
-                {
-                    var mapped = ExprMap.MapOperands(statement, e => ExprMap.Map(e,
-                        value => value is Use u && map.TryGetValue(u.Variable, out var replacement) ? new Use(replacement, u.Width) : null));
-                    if (mapped is Define d)
-                    {
-                        var variable = fresh(d.Target.Width); map[d.Target] = variable;
-                        mapped = d with { Target = variable };
-                    }
-                    else if (mapped is Call call)
-                    {
-                        var variables = call.Defines.Select(v => v is null ? null! : fresh(v.Width)).ToArray();
-                        for (var i = 0; i < variables.Length; i++) if (call.Defines[i] is { } old) map[old] = variables[i];
-                        mapped = call.Duplicate() with { Defines = variables };
-                    }
-                    copy.Statements.Add(mapped);
-                }
+                    copy.Statements.Add(path.Copy(statement));
             }
         }
         return changed;

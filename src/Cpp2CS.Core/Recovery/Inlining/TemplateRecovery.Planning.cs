@@ -41,6 +41,15 @@ internal sealed partial class TemplateRecovery
             receiver = new AddressValue(receiver);
         }
         var covered = match.Covered.ToHashSet();
+        // 模板写入之间的调用方写入与模板无关，移到调用之前或之后；它们原样保留，不能依赖区域内定义的局部。
+        if (match.Interleaved.Any(p => p.Block != startBlock)) { failure = "移出区域的写入不在起点块"; return null; }
+        if (match.Interleaved.Any(p => p.Effects > 0 && p.Effects < match.Effects)) { failure = "夹在调用之间的写入不能移出区域"; return null; }
+        var hoisted = match.Interleaved.Where(p => p.Effects == 0).Select(p => blocks[p.Block].Statements[p.Index]).ToArray();
+        var sunk = match.Interleaved.Where(p => p.Effects > 0).Select(p => blocks[p.Block].Statements[p.Index]).ToArray();
+        if (sunk.Length > 0 && match.Returns && !ManagedTypes.IsVoid(method.Method.ReturnType)) { failure = "返回值的尾调用之后不能再写入"; return null; }
+        if (hoisted.Concat(sunk).SelectMany(ReadValues).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => match.Defined.ContainsKey(l.Variable)))
+        { failure = "移出区域的写入依赖区域内定义的局部"; return null; }
+        covered.UnionWith(match.Interleaved.Select(p => (p.Block, p.Index)));
         var internalBlocks = covered.Select(c => c.Block).Where(b => b != startBlock).Distinct().ToHashSet();
         if (match.Continuation is { } continuation)
         {
@@ -82,7 +91,9 @@ internal sealed partial class TemplateRecovery
         var outside = body.Blocks.SelectMany(b => b.Statements.Select((s, i) => (b.Address, i, s)))
             .Where(p => !covered.Contains((p.Address, p.i)) && !(!match.Returns && p.Address == exit.Block && exit.Index > 0 && p.i < exit.Index));
         var defined = match.Defined.Keys.Where(v => (match.Result is null || !v.Equals(match.Result.Variable))
-            && (match.ResultStorage is null || !v.Equals(match.ResultStorage.Variable))).ToHashSet();
+            && copies.All(c => !c.Target.Variable.Equals(v))).ToHashSet();
+        if (match.Continuation is { } edges)
+            defined.ExceptWith(edges.Taken.Copies.Concat(edges.Fallthrough.Copies).Select(c => c.Target.Variable));
         var escapingValues = outside.SelectMany(p => ReadValues(p.s)).SelectMany(ManagedValues.Walk).OfType<LocalValue>()
             .Select(l => l.Variable).Where(defined.Contains).ToHashSet();
         var savedCopies = InlineCopies(body, blocks, startBlock, start, match, escapingValues);
@@ -90,10 +101,10 @@ internal sealed partial class TemplateRecovery
         foreach (var (_, _, statement) in outside)
             if (ReadValues(statement).SelectMany(ManagedValues.Walk).OfType<LocalValue>().FirstOrDefault(l => defined.Contains(l.Variable)) is { } escaping)
                 { failure = $"区域内定义的值 {escaping.Variable} 在区域外 0x{statement.Address:x} 使用"; return null; }
-        if (copies.Any(c => defined.Contains(c.Target.Variable))) { failure = "区域内定义的值在区域外使用"; return null; }
 
-        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, !method.Method.IsStatic && method.Method.Name != ".ctor"), match.Result, match.Returns) { Inlined = true };
-        var replacement = blocks[startBlock].Statements.Take(start).Concat(savedCopies).Append(call).ToList();
+        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, !method.Method.IsStatic && method.Method.Name != ".ctor"), match.Result, match.Returns && sunk.Length == 0) { Inlined = true };
+        var replacement = blocks[startBlock].Statements.Take(start).Concat(hoisted).Concat(savedCopies).Append(call).Concat(sunk).ToList();
+        if (match.Returns && sunk.Length > 0) replacement.Add(new ManagedReturn(at, null));
         if (match.Continuation is { } branch)
         {
             ManagedEdge? MaterializeEdge(ManagedEdge edge)
@@ -106,13 +117,14 @@ internal sealed partial class TemplateRecovery
             }
             if (MaterializeEdge(branch.Taken) is not { } taken || MaterializeEdge(branch.Fallthrough) is not { } fallthrough)
             { failure = "条件出口复制不能写回"; return null; }
-            replacement.Add(branch with { Address = at, Taken = taken, Fallthrough = fallthrough });
+            if (Materialize(Input(branch.Condition), self, at) is not { } condition) { failure = "条件出口的谓词不能写回"; return null; }
+            replacement.Add(branch with { Address = at, Condition = condition, Taken = taken, Fallthrough = fallthrough });
         }
         else if (!match.Returns && exit.Index == 0)
             replacement.Add(new ManagedJump(call.Address, new ManagedEdge(exit.Block, exitCopies)));
         else if (!match.Returns)
         {
-            if (exitCopies.Count > 0) { failure = "出口在块中间且带复制"; return null; }
+            replacement.AddRange(exitCopies.Select(c => new ManagedAssignment(call.Address, c.Target, c.Value)));
             replacement.AddRange(blocks[exit.Block].Statements.Skip(exit.Index));
             if (exit.Block != startBlock) internalBlocks.Add(exit.Block);
         }

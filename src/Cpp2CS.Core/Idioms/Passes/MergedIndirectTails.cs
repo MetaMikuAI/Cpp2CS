@@ -37,9 +37,8 @@ internal static class MergedIndirectTails
             for (var side = 0; side < incoming.Length; side++)
             {
                 var predecessor = incoming[side];
-                var map = phis.ToDictionary(p => p.Target, p => p.Sources[side]);
-                var mapped = ExprMap.MapOperands(call.Duplicate(), e => ExprMap.Map(e,
-                    value => value is Use use && map.TryGetValue(use.Variable, out var source) ? new Use(source, use.Width) : null));
+                // 尾调用没有后续使用，定义可以沿用。
+                var mapped = new PathCopy(v => v, phis.ToDictionary(p => p.Target, p => p.Sources[side])).Copy(call);
                 if (predecessor.Statements.LastOrDefault() is Jump) predecessor.Statements.RemoveAt(predecessor.Statements.Count - 1);
                 predecessor.Statements.Add(mapped);
                 MachineFunction.RemoveEdge(predecessor, merge);

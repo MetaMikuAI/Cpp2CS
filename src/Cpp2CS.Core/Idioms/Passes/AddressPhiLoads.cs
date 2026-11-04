@@ -109,24 +109,13 @@ internal static class AddressPhiLoads
             var results = definitions.ToDictionary(d => d.Target, _ => new List<Variable>());
             for (var side = 0; side < join.Predecessors.Count; side++)
             {
-                var mapped = phis.ToDictionary(p => p.Key, p => p.Value.Sources[side]);
-                Expr OnEdge(Expr expression) => ExprMap.Map(expression, e => e is Use use && mapped.TryGetValue(use.Variable, out var source)
-                    ? new Use(source, use.Width) : null);
+                var path = new PathCopy(v => fresh(v.Width), phis.ToDictionary(p => p.Key, p => p.Value.Sources[side]));
                 var parent = join.Predecessors[side];
                 var position = parent.Statements.Count - (parent.Statements.LastOrDefault() is Jump ? 1 : 0);
                 foreach (var (_, statement) in prefix)
                 {
-                    // 操作数未变时改写器会返回原对象；每条入边仍需独立的语句身份。
-                    var rewritten = ExprMap.MapOperands(statement, OnEdge);
-                    var copy = rewritten is Call call ? call.Duplicate() : rewritten with { };
-                    if (copy is Define define)
-                    {
-                        var target = fresh(define.Target.Width);
-                        mapped[define.Target] = target;
-                        results[define.Target].Add(target);
-                        copy = define with { Target = target };
-                    }
-                    parent.Statements.Insert(position++, copy);
+                    parent.Statements.Insert(position++, path.Copy(statement));
+                    if (statement is Define define) results[define.Target].Add(path.Map[define.Target]);
                 }
             }
             foreach (var (block, statement) in prefix) block.Statements.Remove(statement);

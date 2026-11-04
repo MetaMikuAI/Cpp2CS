@@ -4,39 +4,6 @@ namespace Cpp2CS.Recovery.Inlining;
 
 internal sealed partial class TemplateRecovery
 {
-    /// <summary>
-    /// 连续写入同一接收者的不同字段、写入值为参数或常量组成且两两不别名（<see cref="MayAlias"/>）时可交换。按优先字段、再按布局偏移
-    /// 排出一种规范次序，使构造模板所需的写入与其他写入分开。值限于参数与常量组成：局部或表达式在模板与调用方中的表示
-    /// 可能不同（一侧是局部，另一侧是内联的表达式），规范次序须对两侧一致。
-    /// </summary>
-    private ManagedBody CommuteIndependentStores(ManagedBody body, IReadOnlySet<FieldDef> preferred, bool preferredFirst = true)
-    {
-        static bool Plain(ManagedValue value) => value is ArgumentValue or ConstantValue
-            || value is ComposedValue composed && composed.Leaves.All(l => Plain(l.Value));
-        int Offset(FieldRef field) => field.DeclaringType is DefinitionRef owner
-            && types.Layouts.Of(owner)?.Fields.FirstOrDefault(f => f.Field == field.Field) is { } slot ? slot.Offset : int.MaxValue;
-        return body with { Blocks = body.Blocks.Select(block =>
-        {
-            var statements = block.Statements.ToArray();
-            for (var first = 0; first < statements.Length; first++)
-            {
-                if (statements[first] is not ManagedStore { Target: FieldValue { Receiver: ArgumentValue or LocalValue } head, Value: var value } || !Plain(value)) continue;
-                var receiver = head.Receiver;
-                var run = new List<FieldValue> { head };
-                var end = first + 1;
-                while (end < statements.Length && statements[end] is ManagedStore { Target: FieldValue next, Value: var stored }
-                    && next.Receiver.Equals(receiver) && Plain(stored) && run.All(r => !MayAlias(r, next)))
-                { run.Add(next); end++; }
-                if (run.Count < 2) continue;
-                var ordered = statements[first..end].Zip(run)
-                    .OrderBy(p => preferred.Contains(p.Second.Field.Field) == preferredFirst ? 0 : 1).ThenBy(p => Offset(p.Second.Field)).Select(p => p.First).ToArray();
-                Array.Copy(ordered, 0, statements, first, ordered.Length);
-                first = end - 1;
-            }
-            return block with { Statements = statements };
-        }).ToArray() };
-    }
-
     /// <summary>仅转发给另一构造函数的完整方法体，可按形参代入继续比较原生内联后的调用。</summary>
     private ManagedInvocation ConstructorOrigin(ManagedInvocation invocation)
     {

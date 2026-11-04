@@ -383,6 +383,15 @@ internal static class ArchitectureChecks
             if (variant == "overwritten")
                 check.True(function.Blocks[0].Statements.OfType<Define>().Any(d => d.Target == loaded && d.Value is Const { Value: 0 }), "转发取到达读取的写入");
         }
+        // 类操作数尚未确定的装箱仍会读取实参指向的栈槽，写入不能删除。
+        var value = new FrameAddress(-16);
+        var unresolved = new Variable(Storage.Temp(871), 1);
+        var boxing = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [new(0) { Statements = [
+            new Store(0, value, Expr.C(7, 32)),
+            new Call(4, CallKind.Direct, Expr.C(64, 64)) { Op = new(OpKind.Box, null), Arguments = [new Use(unresolved, 64), value] },
+            new Return(8)] }] };
+        FrameForwarding.Run(boxing, effects);
+        check.True(boxing.Blocks[0].Statements.OfType<Store>().Any(), "类操作数未确定的装箱保留它读取的栈写入");
         foreach (var variant in new[] { "conditional", "unknown-call", "escaped" })
         {
             var head = new Block(0);
@@ -1557,7 +1566,7 @@ internal static class ArchitectureChecks
         }
         check.Equal(0, Run(true, true).Holes.Count, "结构体返回值由多个字段局部承接时仍可证明完整返回");
         check.True(Run(false, true).Holes.Count > 0, "一个字段在常量路径不同则拒绝结构体返回证明");
-        check.True(Run(true, false).Holes.Count > 0, "缺少叶子承接时不猜测结构体返回的对应关系");
+        check.Equal(0, Run(true, false).Holes.Count, "未被观察的叶子不需要承接，已承接的字段仍逐路径证明");
         check.Equal(0, Run(true, true, true).Holes.Count, "完整结构体调用结果可按出口字段逐一证明");
         check.True(Run(false, true, true).Holes.Count > 0, "完整结构体的字段证明仍须覆盖其他返回路径");
         check.Equal(0, Run(true, true, true, true).Holes.Count, "出口同时组合已证明字段时使用同一完整返回值");
