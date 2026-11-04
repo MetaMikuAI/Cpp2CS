@@ -18,10 +18,27 @@ internal sealed partial class TemplateRecovery
         if (result is not null && !CaptureReturnValue(caller, match, result)) return false;
         var copies = new List<(LocalValue, ManagedValue)>();
         var continuation = false;
-        for (var steps = 0; steps < 16 && caller.Current is ManagedJump jump; steps++)
+        for (var steps = 0; steps < 16; steps++)
         {
+            if (caller.Current is not (ManagedJump or ManagedAssignment)) break;
             // 共享续接中的无副作用复制可旁路；复制逐边组合，其他入边仍保留原块。
             continuation |= caller.Index == 0 && caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) > 1;
+            if (caller.Current is ManagedAssignment assignment && NonThrowingInlineValue(assignment.Value)
+                && caller.Index == caller.Blocks[caller.Block].Statements.Count - 2
+                && caller.Blocks[caller.Block].Statements[^1] is ManagedJump
+                && caller.Env.TryGetValue(assignment.Target.Variable, out var previous)
+                && Term(caller, assignment.Value) is { } assigned && SameTerm(previous, assigned))
+            {
+                var locals = ManagedValues.Walk(assignment.Value).OfType<LocalValue>().Select(l => l.Variable)
+                    .Append(assignment.Target.Variable).ToHashSet();
+                var addressed = caller.Blocks.Values.SelectMany(b => b.Statements).SelectMany(ReadValues).SelectMany(ManagedValues.Walk)
+                    .OfType<AddressValue>().SelectMany(a => ManagedValues.Walk(a.Target)).OfType<LocalValue>().Any(l => locals.Contains(l.Variable));
+                if (addressed) break;
+                if (!continuation) Cover(caller, match);
+                caller.Index++;
+                continue;
+            }
+            if (caller.Current is not ManagedJump jump) break;
             if (continuation && jump.Edge.Copies.Any(c => !NonThrowingInlineValue(c.Value))) break;
             if (!continuation) Cover(caller, match);
             var edgeCopies = new List<(LocalValue Target, ManagedValue Value)>();

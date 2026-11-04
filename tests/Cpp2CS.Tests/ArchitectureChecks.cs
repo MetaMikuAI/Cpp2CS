@@ -45,6 +45,7 @@ internal static class ArchitectureChecks
         PartialScalarCells(checks, facts, types);
         EntryKinds(checks, facts, types);
         Templates(checks, types);
+        RepeatedExitCopies(checks, types);
         Accessors(checks, types);
         ClosedGenericAccess(checks, types);
         StaticAccessorReferences(checks, types);
@@ -637,6 +638,49 @@ internal static class ArchitectureChecks
         var problems = new Dictionary<ManagedBody, EmissionProblem>();
         DependencyClosure.Validate([root, .. dependencies], problems);
         check.True(problems.ContainsKey(body), "未写出的透明依赖阻止调用方发布");
+    }
+
+    private static void RepeatedExitCopies(Assertions check, ManagedTypes types)
+    {
+        var owner = Type("ExitStorage", 840);
+        var ownerRef = new DefinitionRef(owner, []);
+        var field = new FieldDef { Index = 840, Owner = owner, Name = "value", Type = types.Int32, Attributes = FieldAttributes.Private, Offset = 16 };
+        owner.Fields = [field];
+        var definition = Method(owner, "Set", 840);
+        definition.Parameters = [new("value", types.Int32, 0, null, false)];
+        owner.Methods = [definition];
+        var method = new MethodRef(definition, [], []);
+        var input = new ArgumentValue(0, types.Int32, 32);
+        var zero = new ConstantValue(0, types.Int32, 32);
+        FieldValue Field(ManagedValue receiver) => new(receiver, new(field, ownerRef), types.Int32, 32);
+        var self = new ArgumentValue(-1, ownerRef, 64);
+        ManagedBranch Branch(ManagedValue value) => new(4, new ComparisonValue(Cond.Eq, value, zero, types.Boolean), new(16, []), new(32, []));
+        var template = new ManagedBody(method, [new(0, [new ManagedStore(0, Field(self), input), Branch(input)]),
+            new(16, [new ManagedStore(16, Field(self), zero), new ManagedReturn(20, null)]),
+            new(32, [new ManagedStore(32, Field(self), input), new ManagedReturn(36, null)])]);
+        MethodRecoveryResult? Summary(MethodRef requested) => requested.Method == definition ? new(method, 0, template, []) : null;
+        var callerDefinition = Method(Type("ExitConsumer", 841), "Run", 841);
+        callerDefinition.ReturnType = types.Int32;
+        var caller = new MethodRef(callerDefinition, [], []);
+        var receiver = new ArgumentValue(0, ownerRef, 64);
+        var argument = new ArgumentValue(1, types.Int32, 32);
+        var saved = new LocalValue(new(Storage.Temp(840), 1), types.Int32, 32);
+        foreach (var variant in new[] { "same", "different", "addressed" })
+        {
+            var start = new List<ManagedStatement> { new ManagedAssignment(0, saved, argument) };
+            if (variant == "addressed") start.Add(new ManagedAssignment(0,
+                new(new(Storage.Temp(841), 1), new ByRefRef(types.Int32), 64), new AddressValue(saved)));
+            start.Add(new ManagedStore(0, Field(receiver) with { Pending = new(0, "待证字段", true) }, argument));
+            start.Add(Branch(argument));
+            var body = new ManagedBody(caller, [new(0, start),
+                new(16, [new ManagedStore(16, Field(receiver) with { Pending = new(16, "待证字段", true) }, zero), new ManagedJump(20, new(48, []))]),
+                new(32, [new ManagedStore(32, Field(receiver) with { Pending = new(32, "待证字段", true) }, argument), new ManagedJump(36, new(64, []))]),
+                new(48, [new ManagedAssignment(48, saved, variant == "different" ? zero : argument), new ManagedJump(52, new(64, []))]),
+                new(64, [new ManagedReturn(64, saved)])]);
+            var evidence = new InlineEvidence(types, caller, Summary);
+            var recovered = new TemplateRecovery(types, caller, Summary, evidence).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
+            check.Equal(variant == "same", recovered.Holes.Count == 0, $"出口重复局部赋值 {variant}");
+        }
     }
 
     private static void Templates(Assertions check, ManagedTypes types)
