@@ -259,7 +259,7 @@ internal sealed partial class TemplateRecovery
         return null;
     }
 
-    private ComparisonValue? ReturnedPredicate(ManagedValue tested, ManagedValue returned, LocalValue result)
+    private ComparisonValue? ReturnedPredicate(ManagedValue tested, ManagedValue returned, ManagedValue result)
     {
         if (types.Kind(result.Type) == TypeKind.Bool)
         {
@@ -290,28 +290,49 @@ internal sealed partial class TemplateRecovery
     {
         if (ManagedTypes.IsVoid(method.Method.ReturnType) || match.Ends.Count == 0 || match.Ends.Any(e => e.Returns)) return false;
         var returnType = method.Concrete(method.Method.ReturnType);
-        if (types.Kind(returnType) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Reference)) return false;
-        Walker At(InlineEnd end) => new() { Blocks = blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Env = new(end.Env) };
+        if (types.Kind(returnType) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Reference or TypeKind.Struct)) return false;
+        Walker At(InlineEnd end) => new() { Blocks = blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Env = new(end.Env), Epoch = end.Epoch };
         ComparisonValue? predicate = null;
         var result = NewLocal(returnType);
+        IEnumerable<(ManagedValue Actual, ManagedValue Carrier)> Carriers(InlineEnd end)
+        {
+            if (end.Result is not { } returned) yield break;
+            yield return (returned, result);
+            if (returnType is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct) yield break;
+            foreach (var projection in types.Projections(structure))
+            {
+                ManagedValue carrier = result;
+                var accessible = true;
+                foreach (var field in projection.Path)
+                {
+                    if (!fields.Accessible(field, carrier.Type)) { accessible = false; break; }
+                    var fieldType = field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
+                    carrier = new FieldValue(carrier, field, fieldType, Width(fieldType));
+                }
+                if (accessible && ManagedProjections.Project(types, returned, projection, field => new Observed(field, end.Epoch)) is { Value: var value })
+                    yield return (value, carrier);
+            }
+        }
         foreach (var end in match.Ends)
         {
             var walker = At(end);
             if (end.Result is not { } returned || returned is ConstantValue || walker.Current is not ManagedBranch branch || Term(walker, branch.Condition) is not { } tested) continue;
-            predicate = ReturnedPredicate(tested, returned, result);
+            predicate = Carriers(end).Select(p => ReturnedPredicate(tested, p.Actual, p.Carrier)).FirstOrDefault(p => p is not null);
             if (predicate is not null) break;
         }
         if (predicate is null) return false;
-        ManagedValue Apply(ManagedValue value)
+        ManagedValue Apply(InlineEnd end)
         {
-            ManagedValue Substitute(ManagedValue child) => child.Equals(result) ? value : MapTerm(child, Substitute);
+            var carriers = Carriers(end).ToArray();
+            ManagedValue Substitute(ManagedValue child) => carriers.FirstOrDefault(p => p.Carrier.Equals(child)).Actual ?? MapTerm(child, Substitute);
             return Substitute(predicate);
         }
         var exits = new Dictionary<bool, InlineEnd>();
         var covered = new HashSet<(ulong Block, int Index)>();
         InlineEnd WithResult(InlineEnd end, ManagedValue returned)
         {
-            ManagedValue ReplaceResult(ManagedValue value) => Unify(returned, value, new(match.Binding)) ? result : MapTerm(value, ReplaceResult);
+            var carriers = Carriers(end with { Result = returned }).ToArray();
+            ManagedValue ReplaceResult(ManagedValue value) => carriers.FirstOrDefault(p => Unify(p.Actual, value, new(match.Binding))).Carrier ?? MapTerm(value, ReplaceResult);
             return end with
             {
                 Copies = end.Copies.Select(c => (c.Target, ReplaceResult(c.Value))).ToArray(),
@@ -354,7 +375,7 @@ internal sealed partial class TemplateRecovery
         foreach (var end in match.Ends)
         {
             if (end.Result is not { } returned) return false;
-            var expected = Apply(returned);
+            var expected = Apply(end);
             var walker = At(end);
             if (expected is ComparisonValue { Left: ConstantValue left, Right: ConstantValue right } constant
                 && ConstantComparison(constant.Condition, left, right) is { } outcome)

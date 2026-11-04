@@ -1050,6 +1050,25 @@ internal static class ArchitectureChecks
         check.True(Run(false, true, true).Holes.Count > 0, "完整结构体的字段证明仍须覆盖其他返回路径");
         check.Equal(0, Run(true, true, true, true).Holes.Count, "出口同时组合已证明字段时使用同一完整返回值");
         check.True(Run(false, true, true, true).Holes.Count > 0, "组合字段不掩盖不同返回路径中的值差异");
+        TemplateResult Branched(bool consistent)
+        {
+            var selected = template with { Blocks = template.Blocks.Select(b => b.Address == 8
+                ? b with { Statements = [call, new ManagedReturn(12, returned)] } : b).ToArray() };
+            MethodRecoveryResult? Summary(MethodRef requested) => requested == method ? new(method, 0, selected, []) : null;
+            var copies = new ManagedCopy[] { new(first, Field(0)), new(second, Field(1)) };
+            var body = new ManagedBody(caller,
+            [
+                new(0, [new ManagedBranch(0, Test(new ArgumentValue(0, ownerType, 64), true), new(8, []), new(16, []))]),
+                new(8, [call, new ManagedBranch(12, new ComparisonValue(Cond.Ne, Field(1), two, types.Boolean), new(32, copies), new(40, copies))]),
+                new(16, [new ManagedJump(16, new(40, [new(first, consistent ? one : two), new(second, two)]))]),
+                new(32, [new ManagedCall(32, new(new(consumer, [], []), null, [Pair(first, second)], false), null, false), new ManagedReturn(36, null)]),
+                new(40, [new ManagedCall(40, new(new(consumer, [], []), null, [Pair(first, second)], false), null, false), new ManagedReturn(44, null)]),
+            ]);
+            return new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary)).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
+        }
+        var branched = Branched(true);
+        check.Equal(0, branched.Holes.Count, "结构体返回字段决定分支，其他字段仍经出口复制保留：" + string.Join("；", branched.Holes.Select(h => h.Reason)));
+        check.True(Branched(false).Holes.Count > 0, "条件出口的其他字段不同则拒绝内联替换");
     }
 
     private static void ReturnedPredicates(Assertions check, ManagedTypes types)
