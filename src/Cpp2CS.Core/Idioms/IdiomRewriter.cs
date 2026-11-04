@@ -115,9 +115,9 @@ public sealed class IdiomRewriter(ProgramFacts facts)
     /// <summary>恢复托管调用时清理未用输入的残值；事实推断仍保留原始调用参数。</summary>
     public bool RecoverUnusedInputs { get; init; }
 
-    public IdiomResult Run(MachineFunction function)
+    public IdiomResult Run(MachineFunction function, MethodRef? identity = null)
     {
-        IdiomState context = new IdiomState(this, function);
+        IdiomState context = new IdiomState(this, function) { self = identity };
         context.Run();
         return context.Result;
     }
