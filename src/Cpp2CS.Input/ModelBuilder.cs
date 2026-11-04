@@ -228,6 +228,9 @@ namespace Cpp2CS.Input
                 if (def.declaringTypeIndex >= 0) type.DeclaringType = Definition(il2Cpp.types[def.declaringTypeIndex]);
                 if (def.genericContainerIndex >= 0) type.GenericParameters = GenericParameters(def.genericContainerIndex);
                 if (def.parentIndex >= 0) type.BaseType = Convert(il2Cpp.types[def.parentIndex]);
+                // v106 的 enum 父类型可能指向底层类型；枚举在 IL 中的基类固定为 System.Enum。
+                if (type.IsEnum && types.FirstOrDefault(t => t is { Namespace: "System", Name: "Enum" }) is { } enumType)
+                    type.BaseType = new DefinitionRef(enumType, []);
                 type.Interfaces = Enumerable.Range(def.interfacesStart, def.interfaces_count)
                     .Select(k => Convert(il2Cpp.types[metadata.interfaceIndices[k]])).ToArray();
                 type.NestedTypes = Enumerable.Range(def.nestedTypesStart, def.nested_type_count)
