@@ -342,7 +342,8 @@ internal sealed partial class TemplateRecovery
         bool Note(bool outcome, InlineEnd end)
         {
             if (end.Exit.Index != 0) return match.Fail("条件续接点位于块中间");
-            var copies = end.Copies.GroupBy(c => c.Target.Variable).Select(g => g.Last()).ToArray();
+            var copies = end.Copies.GroupBy(c => c.Target.Variable).Select(g => g.Last())
+                .Where(c => LiveAt(body, blocks, end.Exit.Block, end.Exit.Index, c.Target.Variable) || !NonThrowingInlineValue(c.Value)).ToArray();
             end = end with { Copies = copies };
             if (exits.TryGetValue(outcome, out var prior))
             {

@@ -1245,21 +1245,27 @@ internal static class ArchitectureChecks
         check.True(Run(false, sharedCopy: true).Holes.Count > 0, "复制链不能掩盖不同路径的结果差异");
         check.Equal(0, Run(true, outsidePredicate: true).Holes.Count, "不抛异常的出口比较复制可以位于 try 外");
         check.True(Run(true, outsideCall: true).Holes.Count > 0, "真实调用不能跨越异常上下文搬移");
-        TemplateResult BooleanBranch(bool inverted, bool consistent)
+        TemplateResult BooleanBranch(bool inverted, bool consistent, string? copy = null, bool shared = false)
         {
             definition.ReturnType = types.Boolean;
+            var publicField = new FieldDef { Index = 48, Owner = owner, Name = "fallback", Type = types.Boolean, Attributes = FieldAttributes.Public, Offset = 20 };
+            ManagedValue Fallback(int argument) => new FieldValue(new ArgumentValue(argument, ownerRef, 64), new FieldRef(publicField, ownerRef), types.Boolean, 8);
             template = template with { Blocks = [template.Blocks[0], new(8, [call, new ManagedReturn(12, Compare(returned))]),
-                new(16, [new ManagedReturn(16, new ConstantValue(1, types.Boolean, 8))])] };
-            var yes = new ManagedEdge(24, []);
+                new(16, [new ManagedReturn(16, shared ? Fallback(-1) : new ConstantValue(1, types.Boolean, 8))])] };
+            var copied = new LocalValue(new Variable(Storage.Temp(50), 1), types.Int32, 32);
+            var yes = new ManagedEdge(24, copy is null ? [] : [new(copied, zero)]);
+            var alternate = yes with { Copies = copy is null ? [] : [new(copied, copy == "throwing" ? Read(new ArgumentValue(0, ownerRef, 64)) : one)] };
             var no = new ManagedEdge(32, []);
             var body = new ManagedBody(caller,
             [
                 new(0, [new ManagedBranch(0, Compare(Read(new ArgumentValue(0, ownerRef, 64)) with { Pending = new(0, "待证字段", false) }), new(8, []), new(16, []))]),
                 new(8, [call, new ManagedBranch(12, inverted ? new NegatedValue(Compare(returned), types.Boolean) : Compare(returned), inverted ? no : yes, inverted ? yes : no)]),
-                new(16, [new ManagedJump(16, consistent ? yes : no)]),
-                new(24, [call with { Address = 24 }, new ManagedReturn(28, new ConstantValue(1, types.Boolean, 8))]),
+                new(16, [new ManagedJump(16, shared ? new(20, []) : consistent ? alternate : no)]),
+                new(24, [call with { Address = 24 }, new ManagedReturn(28, copy == "live" ? Compare(copied) : new ConstantValue(1, types.Boolean, 8))]),
                 new(32, [call with { Address = 32 }, new ManagedReturn(36, new ConstantValue(0, types.Boolean, 8))]),
             ]);
+            if (shared) body = body with { Blocks = [.. body.Blocks,
+                new(20, [new ManagedBranch(20, Fallback(0), yes, no)]), new(40, [new ManagedJump(40, new(20, []))])] };
             var recovered = new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary)).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
             definition.ReturnType = types.Int32;
             template = template with { Blocks = [template.Blocks[0], new(8, [call, new ManagedReturn(12, returned)]), new(16, [new ManagedReturn(16, one)])] };
@@ -1269,6 +1275,13 @@ internal static class ArchitectureChecks
         check.True(directBranch.Holes.Count == 0, $"返回布尔谓词可直接承接调用方分支：{string.Join("；", directBranch.Holes.Select(h => h.Reason))}");
         check.Equal(0, BooleanBranch(true, true).Holes.Count, "返回布尔谓词的取反可承接相反分支");
         check.True(BooleanBranch(false, false).Holes.Count > 0, "常量路径去向不一致时拒绝布尔分支证明");
+        check.Equal(0, BooleanBranch(false, true, "dead").Holes.Count, "条件出口未使用的纯局部复制不要求各路径相同");
+        check.True(BooleanBranch(false, true, "live").Holes.Count > 0, "条件出口仍使用的局部复制必须相同");
+        check.True(BooleanBranch(false, true, "throwing").Holes.Count > 0, "条件出口可能抛异常的复制不能因无用而丢弃");
+        var sharedBranch = BooleanBranch(false, true, shared: true);
+        check.True(sharedBranch.Holes.Count == 0 && sharedBranch.Body.Blocks.Any(b => b.Address == 20)
+            && sharedBranch.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Invocation.Method == method),
+            "共享条件尾部可被已证明调用旁路，其他入口使用的原块仍保留：" + string.Join("；", sharedBranch.Holes.Select(h => h.Reason)));
         var copied = Run(true, "stable");
         check.True(copied.Holes.Count == 0 && copied.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
             .Any(a => a.Value is ComparisonValue { Left: BinaryValue { Op: BinOp.LShr } }), "稳定整数表达式可提前保存，供内联区域外继续使用");
