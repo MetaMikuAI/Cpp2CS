@@ -72,7 +72,7 @@ internal static class ArrayPointerLoopsPass
                     var roots = terms.OfType<Use>().Where(u => Stride(u) > 0).ToArray();
                     var stride = roots is [var array] ? Stride(array) : initial is Const ? OffsetStride(pointer.Target) : 0;
                     if (stride <= 0
-                        || terms.OfType<Const>().Aggregate(0L, (sum, c) => sum + c.Signed) < RuntimeLayout.ArrayData
+                        || terms.OfType<Const>().Aggregate(0L, (sum, c) => sum + c.Signed) < (roots.Length == 1 ? RuntimeLayout.ArrayData : 0)
                         || ExprMap.Walk(initial).OfType<Use>().Any(u => u.Variable.Version != 0
                             && (!owners.TryGetValue(u.Variable, out var owner) || owner == block || !dominators.Dominates(owner.Index, block.Index)))
                         || induction.Step != (ulong)stride
