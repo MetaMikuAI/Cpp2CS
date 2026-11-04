@@ -64,6 +64,7 @@ public sealed class FactsCallModel : ICallModel
         HelperKind.GetException => new([], [X(0)], "helper"),
         HelperKind.MemoryBarrier => new([], [], "helper"),
         HelperKind.CompareExchangeReference => new([X(0), X(1), X(2)], [X(0)], "helper"),
+        HelperKind.ReadByteArray => new([X(0), X(1)], [X(0)], "native-array-read"),
         HelperKind.Import => helper.Detail switch
         {
             "memcpy" or "memmove" or "memset" => new([X(0), X(1), X(2)], [X(0)], "libc"),

@@ -75,6 +75,7 @@ internal static class ArchitectureChecks
         Barriers(checks, types);
         UnchangedBarriers(checks, facts);
         CardMarkingBarriers(checks);
+        CheckedByteArrays(checks);
         AffineInductions(checks);
         ArrayOffsetInductions(checks);
         PhiLoadWidths(checks, facts);
@@ -1801,6 +1802,18 @@ internal static class ArchitectureChecks
         var externalBranch = body.ToArray();
         externalBranch[2] = 0x34000208; // cbz w8, body end
         check.True(!RuntimeHelpers.CardMarkingBody(externalBranch), "跳出已证明函数体的实现不能归一");
+    }
+
+    private static void CheckedByteArrays(Assertions check)
+    {
+        uint[] body = [0xf81f0ffe, 0xb9401808, 0x6b08003f, 0x540000a2, 0x8b010008, 0x39408100, 0xf84107fe, 0xd65f03c0, 0x94000004];
+        check.True(RuntimeHelpers.CheckedByteArrayBody(body), "字节读取包含完整的无符号边界检查");
+        var signed = body.ToArray();
+        signed[3] = 0x540000aa; // b.ge
+        check.True(!RuntimeHelpers.CheckedByteArrayBody(signed), "有符号比较不能替代数组下标边界检查");
+        var index = new Use(new Variable(Storage.Gpr(1), 0), 32);
+        check.True(DirectPass.ArrayIndex32(new Cpp2CS.Ir.Convert(ConvKind.SignExtend, index, 64)) == index
+            && DirectPass.ArrayIndex32(new Use(index.Variable, 64)) is null, "地址下标必须有完整的高位扩展证据");
     }
 
     private static void ArrayIndices(Assertions check)

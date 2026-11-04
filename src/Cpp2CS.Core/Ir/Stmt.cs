@@ -113,6 +113,8 @@ public enum OpKind : byte
     InvokeConstrainedGeneric,
     /// <summary>两个标量栈出参已显式化的外部调用；Operand 为符号名，Defines 按出参顺序保存结果。</summary>
     ImportOutPair,
+    /// <summary>经过判空与越界检查的字节数组读取；参数为数组与 32 位下标。</summary>
+    ReadByteArray,
 }
 
 /// <summary>调用所表达的运行时操作。Operand：类型（TypeRef）、异常名、槽位号等，见 <see cref="OpKind"/>。</summary>
