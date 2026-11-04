@@ -38,6 +38,8 @@ public interface IRuntimeLowering
     IReadOnlyList<Sym> Arguments { get; }
     /// <summary>操作的结果（<see cref="ResultSym"/>，序号 0）。</summary>
     Sym Result { get; }
+    /// <summary>具有显式结果位宽契约的多结果操作，按机器结果序号取值。</summary>
+    Sym ResultAt(int index);
     /// <summary>按本操作 Inputs 契约取得已定型的输入。</summary>
     ManagedValue Input(int index);
     /// <summary>值的自然类型；不受约束时为 null。</summary>
@@ -74,6 +76,7 @@ public delegate bool RuntimeLowering(IRuntimeLowering context, out ManagedStatem
 /// <summary>一种运行时操作的语义：输入用途、结果类型、可观察效果、指针访问和下降。</summary>
 public sealed record RuntimeOpRule(OpKind Kind)
 {
+    public IReadOnlyList<int>? ResultWidths { get; init; }
     public Func<Call, IRuntimeTyping, TypeRef?>? ResultType { get; init; }
     public Func<Call, ManagedAbi, IEnumerable<PointerEffect>>? PointerEffects { get; init; }
     public EffectSummary Behavior { get; init; } = EffectSummary.Unknown;
@@ -413,6 +416,23 @@ public static class RuntimeOps
             {
                 terminal = c.Arguments.Count == 0 || c.InCatchOf(c.Arguments[0]) ? new ManagedRethrow(c.Call.Address)
                     : new ManagedThrow(c.Call.Address, c.Input(0));
+                return true;
+            },
+        };
+        yield return new(OpKind.ImportOutPair)
+        {
+            ResultWidths = [32, 32],
+            Inputs = (_, a, t) => a.Count == 1 ? [new(a[0], t.Types.Single)] : [],
+            ResultType = (call, t) => call.Op?.Operand is "sincosf" ? t.Types.Single : null,
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Op.Operand is not "sincosf" || c.Arguments.Count != 1 || c.Call.Results.Length != 2
+                    || c.Types.SinCosImport() is not { } method) return false;
+                var sine = c.Local(c.ResultAt(0), c.Types.Single);
+                var cosine = c.Local(c.ResultAt(1), c.Types.Single);
+                c.Emit(new ManagedCall(c.Call.Address, new(method, null,
+                    [c.Input(0), new AddressValue(sine), new AddressValue(cosine)], false), null, false));
                 return true;
             },
         };

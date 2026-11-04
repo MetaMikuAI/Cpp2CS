@@ -32,4 +32,22 @@ public sealed partial class ManagedTypes
             return new(method, [], []);
         });
     }
+
+    /// <summary>保留 sincosf 的单次调用和两个 float 出参。</summary>
+    public MethodRef? SinCosImport()
+    {
+        if (MathImport("sinf") is not { } scalar) return null;
+        return mathImports.GetOrAdd("sincosf", _ =>
+        {
+            var method = new MethodDef
+            {
+                Index = -1, Owner = scalar.Method.Owner, Name = "sincosf", Token = 0, Slot = -1,
+                Attributes = scalar.Method.Attributes, ImplAttributes = scalar.Method.ImplAttributes,
+                NativeImport = new(scalar.Method.NativeImport!.Library, "sincosf"), ReturnType = Corlib("System.Void"),
+                Parameters = [new("value", Single, 0, null, false), new("sine", new ByRefRef(Single), 0, null, false),
+                    new("cosine", new ByRefRef(Single), 0, null, false)],
+            };
+            return new(method, [], []);
+        });
+    }
 }

@@ -568,6 +568,11 @@ internal static class ArchitectureChecks
         check.True(types.MathImport("atan2")!.Method.Parameters.Select(p => p.Type).SequenceEqual([types.Double, types.Double]), "双精度二元导入不改变精度");
         check.True(types.MathImport("ldexpf")!.Method.Parameters.Select(p => p.Type).SequenceEqual([types.Single, types.Int32]), "整数指数保留独立寄存器类型");
         check.True(types.MathImport("unknown") is null && types.MathImport("sincosf") is null, "未知签名与指针出参不当作标量导入");
+        var pair = types.SinCosImport()!;
+        check.True(ManagedTypes.IsVoid(pair.Method.ReturnType) && pair.Method.NativeImport?.EntryPoint == "sincosf"
+            && pair.Method.Parameters.Select(p => p.Type).SequenceEqual([types.Single, new ByRefRef(types.Single), new ByRefRef(types.Single)]),
+            "正余弦保留一个浮点输入和两个独立出参");
+        check.True(RuntimeOps.Of(OpKind.ImportOutPair)!.ResultWidths!.SequenceEqual([32, 32]), "正余弦结果各占 32 位，不读取寄存器未定义高位");
         var call = new Call(0, CallKind.Direct, Expr.C(100, 64))
         {
             Op = new(OpKind.Import, "ldexpf"), Sources = [Storage.Gpr(0), Storage.Vec(0)],
@@ -1359,6 +1364,7 @@ internal static class ArchitectureChecks
         public IReadOnlyList<Sym> Arguments => [];
         public TypeRef? ClassOperand => throw new NotSupportedException();
         public Sym Result => throw new NotSupportedException();
+        public Sym ResultAt(int index) => throw new NotSupportedException();
         public bool InFault => throw new NotSupportedException();
         public ManagedValue Input(int index) => throw new NotSupportedException();
         public TypeRef? TypeOf(Sym sym) => throw new NotSupportedException();
