@@ -35,6 +35,7 @@ internal static class ArchitectureChecks
         Convergence(checks, types);
         Identities(checks, types);
         CallIdentities(checks);
+        TailCallIdentities(checks, facts, types);
         EntryKinds(checks, facts, types);
         Templates(checks, types);
         Accessors(checks, types);
@@ -98,6 +99,41 @@ internal static class ArchitectureChecks
             "分析副本的控制边只引用副本块");
         check.True(ReferenceEquals(((Call)original.Copy().Blocks[0].Statements[0]).Site, call.Site),
             "同一调用在不同分析版本中保留逻辑身份");
+    }
+
+    private static void TailCallIdentities(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var owner = Type("TailTargets", 700);
+        var first = new MethodRef(Method(owner, "First", 700), [], []);
+        var second = new MethodRef(Method(owner, "Second", 701), [], []);
+        foreach (var sameTarget in new[] { false, true })
+        {
+            var leftTarget = new Variable(Storage.Gpr(9), 1);
+            var rightTarget = new Variable(Storage.Gpr(9), 2);
+            var mergedTarget = new Variable(Storage.Gpr(9), 3);
+            var head = new Block(0) { Statements = [new Branch(0, Expr.C(1, 1), 4, 8)] };
+            var left = new Block(4) { Statements = [new Define(4, leftTarget, new Symbol(SymbolKind.Method, first)), new Jump(4, 12)] };
+            var right = new Block(8) { Statements = [new Define(8, rightTarget, new Symbol(SymbolKind.Method, sameTarget ? first : second)), new Jump(8, 12)] };
+            var call = new Call(12, CallKind.Indirect, new Use(mergedTarget, 64));
+            var merge = new Block(12) { Statements = [new Phi(12, mergedTarget, [leftTarget, rightTarget]), call, new Return(16)] };
+            MachineFunction.AddEdge(head, left);
+            MachineFunction.AddEdge(head, right);
+            MachineFunction.AddEdge(left, merge);
+            MachineFunction.AddEdge(right, merge);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 20, CodeRegion.Managed, default), Blocks = [head, left, right, merge] };
+            check.True(Cpp2CS.Machine.Ssa.TailDuplication.Run(function, b => b == merge), "共享调用尾部可拆回两条入边");
+            var copies = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().ToArray();
+            check.True(copies.Length == 2 && copies.Select(c => c.Site).Distinct().Count() == 2,
+                "尾部拆分后的调用点身份互不相同");
+            check.True(copies.All(c => ReferenceEquals(c.Site.Origin, call.Site)), "尾部调用副本保留来源身份");
+            if (copies.Select(c => c.Site).Distinct().Count() != 2) continue;
+            var values = ValueModel.Build(function, new EmptyEnvironment());
+            var oracle = new TypeOracle(types, facts, first, _ => throw new NotSupportedException(), values);
+            var targets = DispatchResolution.Find(function, values, oracle);
+            check.Equal(first, targets[left.Statements.OfType<Call>().Single().Site], "左路径保留自身分派目标");
+            check.Equal(sameTarget ? first : second, targets[right.Statements.OfType<Call>().Single().Site],
+                "相同或不同的分派目标均按各自调用点登记");
+        }
     }
 
     private static void AssembledPieces(Assertions check)

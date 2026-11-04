@@ -184,7 +184,7 @@ internal static class SharedInterfaceTails
                     {
                         var variables = call.Defines.Select(v => v is null ? null! : fresh(v.Width)).ToArray();
                         for (var i = 0; i < variables.Length; i++) if (call.Defines[i] is { } old) map[old] = variables[i];
-                        mapped = call with { Defines = variables };
+                        mapped = call.Duplicate() with { Defines = variables };
                     }
                     copy.Statements.Add(mapped);
                 }
