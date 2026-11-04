@@ -38,18 +38,24 @@ internal sealed partial class TemplateRecovery
         public int Epoch { get; set; }
         public int Calls { get; set; }
         public List<(ManagedValue Condition, bool Value)> Assumptions { get; init; } = [];
+        /// <summary>这条路径上已经解引用过的项：它们非空，再次访问不会抛出。</summary>
+        public HashSet<ManagedValue> Dereferenced { get; init; } = [];
 
         public ManagedStatement Current => Blocks[Block].Statements[Index];
 
         public Walker Clone() => new()
         {
-            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions],
+            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions], Dereferenced = [.. Dereferenced],
         };
     }
 
     /// <summary>模板的一条路径在调用方的终点：出口位置、出口边上的复制、此时的环境与模板的返回值。</summary>
     private sealed record InlineEnd((ulong Block, int Index) Exit, IReadOnlyList<(LocalValue Target, ManagedValue Value)> Copies,
-        IReadOnlyDictionary<Variable, ManagedValue> Env, ManagedValue? Result, bool Returns = false, int Epoch = 0);
+        IReadOnlyDictionary<Variable, ManagedValue> Env, ManagedValue? Result, bool Returns = false, int Epoch = 0)
+    {
+        /// <summary>这条路径结束时的写入与事实。</summary>
+        public Walker? State { get; init; }
+    }
 
     /// <summary>一次证明的结果：调用方区域的覆盖、各路径的终点，结论中的出口、出口复制与承接返回值的局部。</summary>
     private sealed class InlineMatch
@@ -67,11 +73,15 @@ internal sealed partial class TemplateRecovery
         /// <summary>模板所属类型的实参：模板中的方法引用可能保留共享代码的开放形式，比较前代入。</summary>
         public required IReadOnlyList<TypeRef> TypeArguments { get; init; }
         public HashSet<(ulong Block, int Index)> Covered { get; } = [];
+        /// <summary>区域内可能抛出的语句所在的块：只有它们受异常区域约束。</summary>
+        public HashSet<ulong> Raising { get; } = [];
         /// <summary>夹在模板写入之间的调用方写入，以及它之前已比对过的调用与检查数。</summary>
         public List<(ulong Block, int Index, int Effects)> Interleaved { get; } = [];
         /// <summary>区域内已比对的调用与检查：夹在其间的写入不能越过它们。</summary>
         public int Effects { get; set; }
         public (ulong Block, int Index)? Exit { get; set; }
+        /// <summary>调用方区域的起点。</summary>
+        public (ulong Block, int Index) Start { get; init; }
         public IReadOnlyList<(LocalValue Target, ManagedValue Value)>? ExitCopies { get; set; }
         public Dictionary<Variable, ManagedValue> Defined { get; } = [];
         public Dictionary<Variable, LocalValue> Locals { get; } = [];
@@ -183,12 +193,10 @@ internal sealed partial class TemplateRecovery
     {
         Blocks = body.Blocks.Select(b => b with
         {
-            Statements = b.Statements.SelectMany(s => s is ManagedCall { Inlined: true, Invocation: { Receiver: LocalValue local } invocation } call
+            Statements = b.Statements.Select(s => s is ManagedCall { Inlined: true, Invocation: { Receiver: LocalValue local } invocation } call
                 && local.Variable.Equals(variable) && invocation.Method.Equals(constructor)
-                ? (call.Tail
-                    ? new ManagedStatement[] { new ManagedAssignment(call.Address, local, new NewObjectValue(constructor, invocation.Arguments) { Transparent = true }), new ManagedReturn(call.Address, null) }
-                    : [new ManagedAssignment(call.Address, local, new NewObjectValue(constructor, invocation.Arguments) { Transparent = true })])
-                : [s]).ToArray(),
+                ? new ManagedAssignment(call.Address, local, new NewObjectValue(constructor, invocation.Arguments) { Transparent = true })
+                : s).ToArray(),
         }).ToArray(),
     };
 
@@ -204,10 +212,8 @@ internal sealed partial class TemplateRecovery
             {
                 Blocks = body.Blocks.Select(b => b.Address != block ? b : b with
                 {
-                    Statements = b.Statements.SelectMany((s, i) => i != index ? [s]
-                        : ((ManagedCall)s).Tail
-                            ? new ManagedStatement[] { new ManagedHole(pending.Address, $"构造 {pending.Allocated} 的构造函数被内联", false), new ManagedReturn(pending.Address, null) }
-                            : [new ManagedHole(pending.Address, $"构造 {pending.Allocated} 的构造函数被内联", false)]).ToArray(),
+                    Statements = b.Statements.Select((s, i) => i != index ? s
+                        : new ManagedHole(pending.Address, $"构造 {pending.Allocated} 的构造函数被内联", false)).ToArray(),
                 }).ToArray(),
             };
             ManagedValue Uninitialized(ManagedValue value) => value is LocalValue local && local.Variable == variable
@@ -288,22 +294,24 @@ internal sealed partial class TemplateRecovery
             starts.AddRange(Enumerable.Range(0, predecessor.Statements.Count).Select(i => (current, i)));
             break;
         }
-        var failures = new List<string>();
+        var failures = new List<(string Reason, int Progress)>();
         foreach (var (method, template) in InlineCandidates(field, receiver))
         {
-            if (fields.CallFailure(method, receiver, receiver is null ? field.DeclaringType : null) is { } illegal) { failures.Add(illegal); continue; }
-            // 失败原因取离锚点最近的起点：块首等较早的起点通常与这次访问无关。
-            string? nearest = null;
+            if (fields.CallFailure(method, receiver, receiver is null ? field.DeclaringType : null) is { } illegal) { failures.Add((illegal, -1)); continue; }
+            // 失败原因取比对走得最远的起点：其他起点通常只是和这次访问无关。
+            var (nearest, progress) = ((string?)null, -1);
             foreach (var (block, start) in starts)
             {
                 var match = Match(body, blocks, block, start, template, method.TypeArguments, out var failure);
                 if (match is not null && PlanReplacement(body, blocks, block, start, method, match, out failure) is { } replaced)
                     return replaced.Apply(body);
-                if (block == anchor.Block && start <= anchor.Index) nearest = failure;
+                if (lastProgress > progress) (nearest, progress) = (failure, lastProgress);
             }
-            failures.Add($"{method.Method.Owner.Name}.{method.Method.Name}：{nearest}");
+            failures.Add(($"{method.Method.Owner.Name}.{method.Method.Name}：{nearest}", progress));
         }
-        inlineFailures.TryAdd(PendingOf(anchor.Access)!.Address, failures.Count == 0 ? "没有可作模板的方法" : string.Join("；", failures.Take(3)));
+        // 方法体随证明变化，留下最后一次尝试的原因。
+        inlineFailures[PendingOf(anchor.Access)!.Address] = failures.Count == 0 ? "没有可作模板的方法"
+            : string.Join("；", failures.OrderByDescending(f => f.Progress).Take(3).Select(f => f.Reason));
         return null;
     }
 
@@ -348,6 +356,9 @@ internal sealed partial class TemplateRecovery
         return Visit(body.Blocks[0].Address);
     }
 
+    /// <summary>最近一次比对覆盖的调用方语句数，用来挑选最接近成立的失败原因。</summary>
+    private int lastProgress;
+
     /// <summary>以模板为准同步执行两边，返回调用方区域的覆盖与出口；不成立时为 null。</summary>
     private InlineMatch? Match(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> callerBlocks, ulong block, int start, ManagedBody template, IReadOnlyList<TypeRef> arguments, out string failure)
     {
@@ -356,14 +367,16 @@ internal sealed partial class TemplateRecovery
         SeedPath(caller);
         caller.Visited.Add(block);
         // 模板的 this 在比对中绑定：可能是字段所在的对象，也可能是包含它的值（如嵌套类型的结构体）。
-        var match = new InlineMatch { Binding = [], TypeArguments = arguments };
+        var match = new InlineMatch { Binding = [], TypeArguments = arguments, Start = (block, start) };
         var entryLocals = callerBlocks.Values.SelectMany(b => b.Statements)
             .SelectMany(s => (s is ManagedAssignment assignment ? new[] { assignment.Target } : []).Concat(ManagedValues.Edges(s).SelectMany(e => e.Copies.Select(c => c.Target))))
             .DistinctBy(l => l.Variable).ToDictionary(l => l.Variable);
         foreach (var (variable, value) in caller.Env)
             if (entryLocals.TryGetValue(variable, out var local)) match.Inputs.Add((value, local));
         var callee = new Walker { Blocks = template.Blocks.ToDictionary(b => b.Address), Caller = false, Block = template.Blocks[0].Address, Index = 0 };
-        if (Explore(callee, caller, match, 0) && ConcludeExit(match, template.Method, body, callerBlocks)) return match;
+        var matched = Explore(callee, caller, match, 0) && ConcludeExit(match, template.Method, body, callerBlocks);
+        lastProgress = match.Covered.Count;
+        if (matched) return match;
         failure = match.Failure ?? "比对失败";
         return null;
     }
@@ -397,65 +410,62 @@ internal sealed partial class TemplateRecovery
                 m = constructor with { Invocation = ConstructorOrigin(constructor.Invocation) };
             if (c is ManagedCall { Invocation.Method.Method.Name: ".ctor" } actual)
                 c = actual with { Invocation = ConstructorOrigin(actual.Invocation) };
-            Cover(caller, match);
+            // 调用方的显式判空对应模板里随后的隐式解引用：两者抛出同样的异常，中间没有别的效果。
+            if (c is ManagedCheck nullCheck && m is not ManagedCheck && AbsorbedNullCheck(nullCheck, callee, caller, match))
+            {
+                Cover(caller, match);
+                caller.Index++;
+                steps--;
+                continue;
+            }
+            if (c is not ManagedStore) Cover(caller, match);
             switch (m, c)
             {
                 case (ManagedStore, ManagedStore):
                     if (!MatchStores(callee, caller, match)) return false;
                     continue;
-                // 模板中的尾调用即调用后返回。
-                case (ManagedCall mc, ManagedCall cc) when (!cc.Tail || mc.Tail && ManagedTypes.IsVoid(mc.Invocation.Method.Method.ReturnType)) && Instantiated(mc.Invocation.Method, match.TypeArguments).Equals(cc.Invocation.Method)
-                    && mc.Invocation.Arguments.Count == cc.Invocation.Arguments.Count && (mc.Tail || (mc.Result is null) == (cc.Result is null)):
+                case (ManagedCall mc, ManagedCall cc) when Instantiated(mc.Invocation.Method, match.TypeArguments).Equals(cc.Invocation.Method)
+                    && mc.Invocation.Arguments.Count == cc.Invocation.Arguments.Count:
                     {
                         if ((mc.Invocation.Receiver is null) != (cc.Invocation.Receiver is null)) return false;
                         var pairs = (mc.Invocation.Receiver is { } mr ? [(mr, cc.Invocation.Receiver!)] : Array.Empty<(ManagedValue, ManagedValue)>())
                             .Concat(mc.Invocation.Arguments.Zip(cc.Invocation.Arguments));
                         foreach (var (a, b) in pairs)
-                            if (Term(callee, a) is not { } ta || Term(caller, b) is not { } tb || !Unify(ta, tb, match.Binding)) return match.Fail($"调用 {cc.Invocation.Method.Method.Name} 的实参不同（0x{cc.Address:x}）");
+                            if (Term(callee, a) is not { } ta || Term(caller, b) is not { } tb || !Same(ta, tb, caller, match.Binding)) return match.Fail($"调用 {cc.Invocation.Method.Method.Name} 的实参不同（0x{cc.Address:x}）");
                         var index = callee.Calls++;
                         caller.Calls++;
                         match.Effects++;
-                        ManagedValue? tailResult = null;
-                        if (cc.Result is { } cres)
+                        if ((cc.Result ?? mc.Result) is { } kept)
                         {
-                            var shared = new Returned(index, cres.Type, cres.Width);
+                            var shared = new Returned(index, kept.Type, kept.Width);
                             if (mc.Result is { } mres) callee.Env[mres.Variable] = shared;
-                            tailResult = shared;
-                            caller.Env[cres.Variable] = shared;
-                            match.Defined[cres.Variable] = shared;
-                            match.Locals[cres.Variable] = cres;
+                            if (cc.Result is { } cres)
+                            {
+                                caller.Env[cres.Variable] = shared;
+                                match.Defined[cres.Variable] = shared;
+                                match.Locals[cres.Variable] = cres;
+                            }
                         }
                         if (ManagedEffects.Invocation(cc.Invocation).InvalidatesMemory)
                         {
                             callee.Epoch++; caller.Epoch++;
                             callee.Stores.Clear(); caller.Stores.Clear();
                         }
-                        if (mc.Tail)
-                        {
-                            if (cc.Tail)
-                            {
-                                match.Ends.Add(new InlineEnd((caller.Block, caller.Index), [], new Dictionary<Variable, ManagedValue>(caller.Env), null, true));
-                                return true;
-                            }
-                            caller.Index++;
-                            return Finish(caller, match, tailResult);
-                        }
                         break;
                     }
                 case (ManagedCheck mk, ManagedCheck ck) when mk.Exception.Equals(ck.Exception):
-                    if (Term(callee, mk.Condition) is not { } mtest || Term(caller, ck.Condition) is not { } ctest || !Unify(Canonical(mtest), Canonical(ctest), match.Binding)) return match.Fail($"检查条件不同（0x{ck.Address:x}）");
+                    if (Term(callee, mk.Condition) is not { } mtest || Term(caller, ck.Condition) is not { } ctest || !Same(mtest, ctest, caller, match.Binding)) return match.Fail($"检查条件不同（0x{ck.Address:x}）");
                     match.Effects++;
                     break;
                 case (ManagedThrow mt, ManagedThrow ct):
-                    return Term(callee, mt.Exception) is { } me && Term(caller, ct.Exception) is { } ce && Unify(me, ce, match.Binding);
+                    return Term(callee, mt.Exception) is { } me && Term(caller, ct.Exception) is { } ce && Same(me, ce, caller, match.Binding);
                 case (ManagedBranch mb, ManagedBranch cb):
                     {
                         if (Term(callee, mb.Condition) is not { } mcond || Term(caller, cb.Condition) is not { } ccond) return false;
-                        var (canonical, same, negated) = (Canonical(mcond), Canonical(ccond), Canonical(Negate(ccond)));
                         bool crossed;
                         var trial = new Dictionary<int, ManagedValue>(match.Binding);
-                        if (Unify(canonical, same, trial)) crossed = false;
-                        else if (Unify(canonical, negated, trial = new(match.Binding))) crossed = true;
+                        if (Same(mcond, ccond, caller, trial)) crossed = false;
+                        else if (Same(mcond, Negate(ccond), caller, trial = new(match.Binding))) crossed = true;
                         else return match.Fail($"分支条件不同（0x{cb.Address:x}）");
                         foreach (var (key, value) in trial) match.Binding[key] = value;
                         var (mTaken, mFall) = (callee.Clone(), callee);
@@ -490,6 +500,8 @@ internal sealed partial class TemplateRecovery
             callee.Index++;
             if (!Advance(callee, null)) return match.Fail("模板的值不能表示");
         }
+        // 这批写入涉及的对象：读取它们不会比写入先抛出空引用，不构成次序。
+        var receivers = remaining.Select(r => ReceiverOf(r.Location)).OfType<ManagedValue>().ToHashSet();
         while (remaining.Count > 0)
         {
             if (!Advance(caller, match)) return match.Fail($"调用方 0x{caller.Block:x} 的值不能表示或路径成环");
@@ -499,23 +511,23 @@ internal sealed partial class TemplateRecovery
             for (var i = 0; i < remaining.Count && found < 0; i++)
             {
                 var trial = new Dictionary<int, ManagedValue>(match.Binding);
-                if (!Unify(remaining[i].Location, target, trial) || !Unify(remaining[i].Value, stored, trial)) continue;
+                if (!Same(remaining[i].Location, target, caller, trial) || !Same(remaining[i].Value, stored, caller, trial)) continue;
                 foreach (var (key, value) in trial) match.Binding[key] = value;
                 found = i;
             }
+            Cover(caller, match);
             if (found >= 0)
             {
                 // 先于它完成的模板写入都要能交换到它之后。
-                if (found > 0 && (!Unordered(remaining[found].Value)
-                    || remaining.Take(found).Any(r => MayAlias(r.Location, remaining[found].Location) || !Unordered(r.Value))))
+                if (found > 0 && (!Unordered(remaining[found].Value, receivers)
+                    || remaining.Take(found).Any(r => MayAlias(r.Location, remaining[found].Location) || !Unordered(r.Value, receivers))))
                     return match.Fail($"写入次序不同（0x{written.Address:x}）");
                 remaining.RemoveAt(found);
-                Cover(caller, match);
                 caller.Stores.Add((target, stored));
             }
             else
             {
-                if (!Unordered(stored) || remaining.Any(r => MayAlias(r.Location, target) || !Unordered(r.Value))
+                if (!Independent(stored) || remaining.Any(r => MayAlias(r.Location, target) || !Unordered(r.Value, receivers))
                     || caller.Stores.Any(s => MayAlias(s.Location, target)))
                     return match.Fail($"写入不同（0x{written.Address:x}）");
                 match.Interleaved.Add((caller.Block, caller.Index, match.Effects));
@@ -527,9 +539,33 @@ internal sealed partial class TemplateRecovery
         return true;
     }
 
-    /// <summary>只有形参和常量组成的值没有求值次序：局部或表达式可能带分配、调用或读取，其次序就是可观察行为。</summary>
-    private static bool Unordered(ManagedValue value) => value is ArgumentValue or ConstantValue
-        || value is ComposedValue composed && composed.Leaves.All(l => Unordered(l.Value));
+    private static ManagedValue? ReceiverOf(ManagedValue location) => location switch
+    {
+        FieldValue field => field.Receiver,
+        ArrayElementValue element => element.Array,
+        _ => null,
+    };
+
+    /// <summary>
+    /// 写入的值和其他写入没有次序：它的项在写入之前已经确定（读取已按路径上的写入归一），求值本身也看不出先后。
+    /// 分配、调用或可能抛出其他异常的项不行；读取只接受这批写入涉及的对象，空引用在任何次序下都发生在第一次访问。
+    /// </summary>
+    private static bool Unordered(ManagedValue value, IReadOnlySet<ManagedValue> receivers) => value switch
+    {
+        ArgumentValue or ConstantValue or LocalValue or Returned => true,
+        Observed { Read: FieldValue field } => receivers.Contains(field.Receiver) || field.Receiver is Observed && Unordered(field.Receiver, receivers),
+        ComposedValue composed => composed.Leaves.All(l => Unordered(l.Value, receivers)),
+        BinaryValue { Op: BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Shl or BinOp.LShr or BinOp.AShr } binary
+            => Unordered(binary.Left, receivers) && Unordered(binary.Right, receivers),
+        ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate } conversion => Unordered(conversion.Operand, receivers),
+        ComparisonValue comparison => Unordered(comparison.Left, receivers) && Unordered(comparison.Right, receivers),
+        NegatedValue negated => Unordered(negated.Operand, receivers),
+        _ => false,
+    };
+
+    /// <summary>移出区域的调用方写入，只有形参、区域外的局部和常量组成的值：放到区域前后值都不变。</summary>
+    private static bool Independent(ManagedValue value) => value is ArgumentValue or ConstantValue or LocalValue
+        || value is ComposedValue composed && composed.Leaves.All(l => Independent(l.Value));
 
     private static MethodRef Instantiated(MethodRef method, IReadOnlyList<TypeRef> arguments) => method with
     {
@@ -537,7 +573,27 @@ internal sealed partial class TemplateRecovery
         MethodArguments = method.MethodArguments.Select(t => t.Substitute(arguments, [])).ToArray(),
     };
 
-    private static void Cover(Walker caller, InlineMatch match) => match.Covered.Add((caller.Block, caller.Index));
+    private bool AbsorbedNullCheck(ManagedCheck check, Walker callee, Walker caller, InlineMatch match)
+    {
+        if (check.Exception.DeclaringType is not DefinitionRef { Definition.FullName: "System.NullReferenceException" }
+            || check.Condition is not ComparisonValue { Condition: Cond.Eq, Right: ConstantValue { Bits: 0 }, Left: var tested }
+            || Term(caller, tested) is not { } actual) return false;
+        foreach (var dereferenced in callee.Dereferenced)
+        {
+            var trial = new Dictionary<int, ManagedValue>(match.Binding);
+            if (!Same(dereferenced, actual, caller, trial)) continue;
+            foreach (var (key, value) in trial) match.Binding[key] = value;
+            return true;
+        }
+        return false;
+    }
+
+    private void Cover(Walker caller, InlineMatch match)
+    {
+        match.Covered.Add((caller.Block, caller.Index));
+        if (Raises(caller, caller.Current)) match.Raising.Add(caller.Block);
+        NoteAccesses(caller, caller.Current);
+    }
 
     /// <summary>推进到下一个事件：赋值与跳转（含边上的并行复制）只改变环境。调用方的赋值记入覆盖与区域内定义。</summary>
     private bool Advance(Walker walker, InlineMatch? match)
@@ -549,10 +605,11 @@ internal sealed partial class TemplateRecovery
             {
                 case ManagedAssignment assignment:
                     if (Term(walker, assignment.Value) is not { } value) return false;
+                    if (match is not null) Cover(walker, match);
+                    else NoteAccesses(walker, assignment);
                     walker.Env[assignment.Target.Variable] = value;
                     if (match is not null)
                     {
-                        Cover(walker, match);
                         match.Defined[assignment.Target.Variable] = value;
                         match.Locals[assignment.Target.Variable] = assignment.Target;
                     }
@@ -641,6 +698,22 @@ internal sealed partial class TemplateRecovery
     {
         switch (term)
         {
+            // 区域结束之后的读取：写在调用之后，字段访问照常接受证明。
+            case Observed { Epoch: AfterRegion, Read: FieldValue field }:
+                {
+                    if (Materialize(field.Receiver, self, address) is not { } receiver) return null;
+                    var access = new FieldValue(receiver, field.Field, field.Type, field.Width);
+                    if (fields.Accessible(field.Field, receiver.Type)) return access;
+                    return Accessor(field.Field, field.Type, false, receiver.Type) is { } accessor ? access with { Accessor = accessor }
+                        : access with { Pending = new(address, $"内存 字段 {field.Field} 对调用方不可访问", false) };
+                }
+            case Observed { Epoch: AfterRegion, Read: StaticFieldValue field }:
+                {
+                    var access = new StaticFieldValue(field.Field, field.Type, field.Width);
+                    if (fields.Accessible(field.Field, null)) return access;
+                    return Accessor(field.Field, field.Type, false, null) is { } accessor ? access with { Accessor = accessor }
+                        : access with { Pending = new(address, $"内存 字段 {field.Field} 对调用方不可访问", false) };
+                }
             case Returned or Observed { Epoch: > 0 }:
                 return null;
             case Observed { Read: FieldValue field }:
@@ -706,6 +779,12 @@ internal sealed partial class TemplateRecovery
         return left.Length == right.Length && left.Zip(right).All(p => Unify(p.First, p.Second, binding, bindArguments));
     }
 
+    /// <summary>模板的项与调用方的项在调用方这条路径的事实下相同。</summary>
+    private bool Same(ManagedValue template, ManagedValue actual, Walker caller, Dictionary<int, ManagedValue> binding) =>
+        Unify(Canonical(Fold(Specialize(template, caller, binding))), Canonical(Fold(Specialize(actual, caller, NoBinding))), binding);
+
+    private static readonly Dictionary<int, ManagedValue> NoBinding = [];
+
     /// <summary>比较的规范形：大于、大于等于交换操作数写成小于、小于等于。</summary>
     private static ManagedValue Canonical(ManagedValue condition) => condition switch
     {
@@ -728,6 +807,11 @@ internal sealed partial class TemplateRecovery
         Cond.Eq => Cond.Ne, Cond.Ne => Cond.Eq,
         Cond.Slt => Cond.Sge, Cond.Sge => Cond.Slt, Cond.Sle => Cond.Sgt, Cond.Sgt => Cond.Sle,
         Cond.Ult => Cond.Uge, Cond.Uge => Cond.Ult, Cond.Ule => Cond.Ugt, Cond.Ugt => Cond.Ule,
+        // 浮点比较的取反把 NaN 归到另一侧。
+        Cond.FEq => Cond.FUne, Cond.FUne => Cond.FEq, Cond.FNe => Cond.FUeq, Cond.FUeq => Cond.FNe,
+        Cond.FLt => Cond.FUge, Cond.FUge => Cond.FLt, Cond.FLe => Cond.FUgt, Cond.FUgt => Cond.FLe,
+        Cond.FGt => Cond.FUle, Cond.FUle => Cond.FGt, Cond.FGe => Cond.FUlt, Cond.FUlt => Cond.FGe,
+        Cond.FOrdered => Cond.FUnordered, Cond.FUnordered => Cond.FOrdered,
         _ => null,
     };
 

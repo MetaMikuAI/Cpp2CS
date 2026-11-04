@@ -94,7 +94,7 @@ internal static class ConstructorSourceForm
                     ManagedAssignment a => Values("assign", [a.Value]),
                     ManagedStore s when values.IsOwnFieldStore(s) => Values(values.StorePath(s.Target), [s.Value]),
                     ManagedStore s => Values("store", [s.Target, s.Value]),
-                    ManagedCall c when !c.Tail => Values($"call#{c.Invocation.Method.Method.Index}:{c.Invocation.Method}:{c.Invocation.Virtual}",
+                    ManagedCall c => Values($"call#{c.Invocation.Method.Method.Index}:{c.Invocation.Method}:{c.Invocation.Virtual}",
                         c.Invocation.Receiver is { } receiver ? [receiver, .. c.Invocation.Arguments] : c.Invocation.Arguments),
                     ManagedCheck c => Values($"check#{c.Exception.Method.Index}", [c.Condition]),
                     _ => null,

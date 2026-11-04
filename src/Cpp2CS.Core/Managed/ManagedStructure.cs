@@ -25,7 +25,7 @@ public static class ManagedStructure
     {
         (ManagedAssignment x, ManagedAssignment y) => x.Target.Equals(y.Target) && Value(x.Value, y.Value),
         (ManagedStore x, ManagedStore y) => Value(x.Target, y.Target) && Value(x.Value, y.Value),
-        (ManagedCall x, ManagedCall y) => x.Tail == y.Tail && x.Inlined == y.Inlined && Equals(x.Result, y.Result)
+        (ManagedCall x, ManagedCall y) => x.Inlined == y.Inlined && Equals(x.Result, y.Result)
             && x.Invocation.Method.Equals(y.Invocation.Method) && x.Invocation.Virtual == y.Invocation.Virtual
             && Value(x.Invocation.Receiver, y.Invocation.Receiver) && Sequence(x.Invocation.Arguments, y.Invocation.Arguments, Value),
         (ManagedReturn x, ManagedReturn y) => Value(x.Value, y.Value),

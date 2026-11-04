@@ -43,30 +43,35 @@ internal sealed partial class TemplateRecovery
         return copies;
     }
 
-    /// <summary>沿全部入边查找最近赋值；未取址的局部可跨调用保值，表达式输入被改写或遇到异常入口时停止证明。</summary>
+    /// <summary>
+    /// 局部在给定位置是否一定持有 value：沿全部入边查找最近赋值，局部之间的复制继续追溯；未取址的局部可跨调用保值，
+    /// value 的输入被改写或遇到异常入口时不成立。环上按归纳假设成立：循环不变量由其他入边保证，只要有一条入边不成立结论就是否定。
+    /// </summary>
     private bool SameCopyAt(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks,
         ulong block, int index, Variable target, ManagedValue value)
     {
         var inputs = ManagedValues.Walk(value).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
-        var active = new HashSet<(ulong, int)>();
-        var known = new Dictionary<(ulong, int), bool>();
-        bool Visit(ulong at, int before)
+        var active = new HashSet<(Variable, ulong, int)>();
+        var known = new Dictionary<(Variable, ulong, int), bool>();
+        bool Visit(Variable holder, ulong at, int before)
         {
-            var point = (at, before);
+            var point = (holder, at, before);
             if (known.TryGetValue(point, out var result)) return result;
-            if (!active.Add(point)) return false;
-            result = Check(at, before);
+            if (!active.Add(point)) return true;
+            result = Check(holder, at, before);
             active.Remove(point);
             return known[point] = result;
         }
-        bool Check(ulong at, int before)
+        bool Holds(ManagedValue source, ulong at, int before) => source is LocalValue local && !SameTerm(source, value)
+            ? Visit(local.Variable, at, before) : SameTerm(source, value);
+        bool Check(Variable holder, ulong at, int before)
         {
             for (var i = before - 1; i >= 0; i--)
             {
                 var statement = blocks[at].Statements[i];
                 var written = statement switch { ManagedAssignment a => a.Target.Variable, ManagedCall c => c.Result?.Variable, _ => null };
                 if (written is not null && inputs.Contains(written)) return false;
-                if (written == target) return statement is ManagedAssignment assignment && SameTerm(assignment.Value, value);
+                if (written == holder) return statement is ManagedAssignment assignment && Holds(assignment.Value, at, i);
             }
             if (at == body.Blocks[0].Address || body.Regions.Any(r => r.HandlerEntry == at)) return false;
             var incoming = blocks.Values.SelectMany(b => b.Statements.SelectMany(ManagedValues.Edges)
@@ -74,13 +79,16 @@ internal sealed partial class TemplateRecovery
             return incoming.Length > 0 && incoming.All(p =>
             {
                 if (p.Edge.Copies.Any(c => inputs.Contains(c.Target.Variable))) return false;
-                if (p.Edge.Copies.FirstOrDefault(c => c.Target.Variable == target) is { } copy)
-                    return SameTerm(copy.Value, value);
-                return Visit(p.Block.Address, p.Block.Statements.Count);
+                var end = blocks[p.Block.Address].Statements.Count;
+                return p.Edge.Copies.FirstOrDefault(c => c.Target.Variable == holder) is { } copy
+                    ? Holds(copy.Value, p.Block.Address, end) : Visit(holder, p.Block.Address, end);
             });
         }
-        return Visit(block, index);
+        return Visit(target, block, index);
     }
+
+    /// <summary>数组一经创建长度不变，形参不被改写，它的长度在方法内是同一个值。</summary>
+    private static bool ImmutableValue(ManagedValue value) => value is ArrayLengthValue { Array: ArgumentValue };
 
     /// <summary>从指定位置出发，在覆盖写入前是否可能读取旧值；包括异常出边及边上的并行复制。</summary>
     private bool LiveAt(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks, ulong block, int index, Variable variable)

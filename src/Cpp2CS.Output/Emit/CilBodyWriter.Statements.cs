@@ -39,13 +39,7 @@ internal sealed partial class CilBodyWriter
             case ManagedCall c:
                 var call = Invocation(c.Invocation);
                 if (c.Inlined) InlineCalls.Add(call, c.Invocation.Method);
-                if (c.Tail)
-                {
-                    // 尾调用跳到被调用者，结果寄存器原样返回；调用方没有返回值时结果被丢弃。
-                    if (ManagedTypes.IsVoid(methodContext.Method.ReturnType) && !ManagedTypes.IsVoid(c.Invocation.Method.Method.ReturnType)) il.Emit(OpCodes.Pop);
-                    ReturnFromBlock();
-                }
-                else if (c.Result is { } result) il.Emit(OpCodes.Stloc, Local(result));
+                if (c.Result is { } result) il.Emit(OpCodes.Stloc, Local(result));
                 else if (!ManagedTypes.IsVoid(c.Invocation.Method.Method.ReturnType)) il.Emit(OpCodes.Pop);
                 break;
             case ManagedReturn r:

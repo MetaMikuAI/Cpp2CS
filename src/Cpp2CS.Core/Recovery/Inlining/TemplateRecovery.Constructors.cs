@@ -13,8 +13,7 @@ internal sealed partial class TemplateRecovery
         {
             var forward = block.Statements switch
             {
-                [ManagedCall { Tail: true } call] => call,
-                [ManagedCall { Tail: false } call, ManagedReturn { Value: null }] => call,
+                [ManagedCall call, ManagedReturn { Value: null }] => call,
                 _ => null,
             };
             if (forward?.Invocation is not { Virtual: false, Method.Method.Name: ".ctor", Receiver: ArgumentValue { Index: -1 } } next
