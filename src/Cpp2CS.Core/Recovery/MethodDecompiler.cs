@@ -56,16 +56,16 @@ public sealed class MethodDecompiler
     public ProgramFacts Facts => facts;
     public CallShapes Shapes => shapes;
 
-    public MethodRecoveryResult Recover(MethodRef method, ulong entry) => Declaration(method, entry) ?? Run(method, entry);
+    public MethodRecoveryResult Recover(MethodRef method, ulong entry) => Declaration(method, entry) ?? PlatformInvoke(method, entry) ?? Run(method, entry);
 
     /// <summary>恢复泛型类型或泛型方法的封闭实例，方法体以封闭类型表达。</summary>
-    public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => Declaration(method, entry) ?? Run(method, entry);
+    public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => Declaration(method, entry) ?? PlatformInvoke(method, entry) ?? Run(method, entry);
 
     /// <summary>从已知原生实例恢复开放泛型体：类型参数带上实例的原生绑定，输出保留类型参数。</summary>
     public MethodRecoveryResult RecoverShared(MethodRef instance, ulong entry)
     {
         var open = BindShared(instance, entry);
-        return Declaration(open, entry) ?? Run(open, entry);
+        return Declaration(open, entry) ?? PlatformInvoke(open, entry) ?? Run(open, entry);
     }
 
     /// <summary>开放泛型的托管身份及当前入口提供的原生布局见证。</summary>
@@ -88,6 +88,19 @@ public sealed class MethodDecompiler
 
     private static MethodRecoveryResult? Declaration(MethodRef method, ulong entry) => DelegateFacts.IsRuntimeMethod(method.Method)
         ? new(method, entry, null, []) { Declaration = RuntimeDeclarationKind.Delegate } : null;
+
+    /// <summary>extern 方法没有 CIL 方法体，原生入口只是解析并转发的桩：结果是一条带库名与入口的声明。</summary>
+    private MethodRecoveryResult? PlatformInvoke(MethodRef method, ulong entry)
+    {
+        if ((method.Method.Attributes & System.Reflection.MethodAttributes.PinvokeImpl) == 0) return null;
+        var lifted = lifter.Lift(entry, null, null, simplify: true, promoteFrameSlots: false);
+        if (!lifted.Succeeded) return new(method, entry, null, [new(entry, $"提升 {lifted.Errors[0]}")]);
+        rewriter.Run(lifted.Function);
+        var effects = new CallMemoryEffects(shapes.Of, abi);
+        return PlatformInvokeStub.Read(lifted.Function, facts.Model.Image, effects) is { } import
+            ? new(method, entry, null, []) { Declaration = RuntimeDeclarationKind.PlatformInvoke, PlatformImport = import }
+            : new(method, entry, null, [new(entry, "运行时 P/Invoke 桩的描述符不能识别")]);
+    }
 
     private MethodRecoveryResult Run(MethodRef method, ulong entry)
     {
