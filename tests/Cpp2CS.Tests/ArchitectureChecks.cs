@@ -78,6 +78,7 @@ internal static class ArchitectureChecks
         CheckedByteArrays(checks);
         AffineInductions(checks);
         ArrayOffsetInductions(checks);
+        ArrayElementTypes(checks, facts, types);
         PhiLoadWidths(checks, facts);
         FloatingOperands(checks, facts, types);
         StackGuards(checks, facts);
@@ -1874,6 +1875,24 @@ internal static class ArchitectureChecks
                 $"数组字节偏移计数器 {variant}");
             if (variant == "unit-counter") check.True(loop.Statements.OfType<Phi>().Any(p => p.Target == offset),
                 "已有单位计数器保留原定义，不能在自替换时删除");
+        }
+    }
+
+    private static void ArrayElementTypes(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var element = new ArrayRef(types.Byte, 1);
+        var array = new Variable(Storage.Gpr(0), 1);
+        var result = new Variable(Storage.Gpr(2), 1);
+        foreach (var variant in new[] { "element", "wrong-scale", "partial-read" })
+        {
+            var index = new Binary(BinOp.Shl, new Use(new(Storage.Gpr(1), 0), 64), Expr.C(variant == "wrong-scale" ? 2UL : 3UL, 64), 64);
+            var block = new Block(0) { Statements = [
+                new Call(0, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.NewArray, new ArrayRef(element, 1)), Defines = [array] },
+                new Define(4, result, new Load(new Binary(BinOp.Add, new Binary(BinOp.Add, new Use(array, 64), index, 64), Expr.C(32, 64), 64),
+                    variant == "partial-read" ? 32 : 64))] };
+            var function = new MachineFunction { Entry = 0, Range = new(0, 8, CodeRegion.Managed, default), Blocks = [block] };
+            check.Equal(variant == "element" ? element : null, DelegateCallNormalizer.TypeQuery(facts, function)(new Use(result, 64)),
+                $"机器数组元素类型 {variant}");
         }
     }
 

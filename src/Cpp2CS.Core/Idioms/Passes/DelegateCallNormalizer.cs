@@ -229,7 +229,7 @@ internal sealed class DelegateCallNormalizer
             }
             else if (results.TryGetValue(u.Variable, out var call))
             {
-                if (call.Op is { Kind: OpKind.NewObject or OpKind.IsInst, Operand: TypeRef t }) type = t;
+                if (call.Op is { Kind: OpKind.NewObject or OpKind.NewArray or OpKind.IsInst, Operand: TypeRef t }) type = t;
                 else if (call.Op is null && call.Target is Const target)
                 {
                     var methods = facts.EntriesAt(target.Value).Select(e => e.Method).OfType<MethodRef>().Distinct().ToArray();
@@ -256,7 +256,9 @@ internal sealed class DelegateCallNormalizer
                 .Distinct().ToArray();
             if (candidates is [var fieldType]) return fieldType;
         }
-        if (expression is not Load load || Split(load.Address) is not { Root: { } root } split) return null;
+        if (expression is not Load load) return null;
+        if (ArrayElementType(load, active) is { } element) return element;
+        if (Split(load.Address) is not { Root: { } root } split) return null;
         var statics = Top(root) as Symbol;
         var owner = statics is { Kind: SymbolKind.StaticFields, Value: DefinitionRef d } ? d : TypeOf(root, active);
         var fieldOffset = split.Offset;
@@ -274,6 +276,28 @@ internal sealed class DelegateCallNormalizer
             if (statics is { Kind: SymbolKind.StaticFields }) break;
         }
         return null;
+    }
+
+    private TypeRef? ArrayElementType(Load load, HashSet<Variable> active)
+    {
+        var form = AddressForm.Decompose(load.Address, new()
+        {
+            Expansion = AddressExpansion.BeforeSplit, Expand = e => Top(e), PreserveLeaf = true,
+            Root = e => TypeOf(e, new(active)) is ArrayRef { IsVector: true },
+        });
+        if (form.Root is null || TypeOf(form.Root, new(active)) is not ArrayRef array) return null;
+        var size = abi.Size(array.Element);
+        if (size <= 0 || size * 8 != load.Width || form.Offset < RuntimeLayout.ArrayData
+            || (form.Offset - RuntimeLayout.ArrayData) % size != 0) return null;
+        if (form.Terms.Count == 0) return array.Element;
+        if (form.Terms is not [var index]) return null;
+        var scale = Top(index) switch
+        {
+            Binary { Op: BinOp.Shl, Right: Const { Value: < 12 } shift } => 1 << (int)shift.Value,
+            Binary { Op: BinOp.Mul, Right: Const { Value: <= 4096 } factor } => (int)factor.Value,
+            _ => 1,
+        };
+        return scale == size ? array.Element : null;
     }
 
     // phi/条件选择的循环只合并引用来源；null 不提供类型，其他未知来源不能被忽略。

@@ -705,7 +705,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         else switch (TypeOf(root))
         {
             case ArrayRef array when types.Kind(array.Element) == TypeKind.Struct && ElementSize(array.Element) is var size and > 0 && offset >= RuntimeLayout.ArrayData
-                && (index is null || scale == size && offset - RuntimeLayout.ArrayData < size):
+                && (index is null || scale == size):
                 container = (array.Element, (offset - RuntimeLayout.ArrayData) % size + RuntimeLayout.ObjectHeaderSize, false, false);
                 break;
             case DefinitionRef reference when ManagedTypes.IsReferenceType(reference) && index is null:

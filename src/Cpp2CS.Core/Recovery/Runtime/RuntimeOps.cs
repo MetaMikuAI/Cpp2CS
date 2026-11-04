@@ -124,7 +124,7 @@ public static class RuntimeOps
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
-                if (c.Arguments.Count != 2 || c.TypeOf(c.Arguments[0]) is not ArrayRef { Rank: 1 } array
+                if (c.Arguments.Count != 2 || c.TypeOf(c.Arguments[0]) is not ArrayRef { IsVector: true } array
                     || !array.Element.Equals(c.Types.Byte)) return false;
                 c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, c.Types.Byte),
                     new ArrayElementValue(c.Input(0), c.Input(1), c.Types.Byte, 8)));
