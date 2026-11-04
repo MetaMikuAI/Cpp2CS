@@ -76,7 +76,7 @@ public delegate bool RuntimeLowering(IRuntimeLowering context, out ManagedStatem
 /// <summary>一种运行时操作的语义：输入用途、结果类型、可观察效果、指针访问和下降。</summary>
 public sealed record RuntimeOpRule(OpKind Kind)
 {
-    public IReadOnlyList<int>? ResultWidths { get; init; }
+    public Func<Call, IReadOnlyList<int>>? ResultWidths { get; init; }
     public Func<Call, IRuntimeTyping, TypeRef?>? ResultType { get; init; }
     public Func<Call, ManagedAbi, IEnumerable<PointerEffect>>? PointerEffects { get; init; }
     public EffectSummary Behavior { get; init; } = EffectSummary.Unknown;
@@ -421,7 +421,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.ImportOutPair)
         {
-            ResultWidths = [32, 32],
+            ResultWidths = _ => [32, 32],
             Inputs = (_, a, t) => a.Count == 1 ? [new(a[0], t.Types.Single)] : [],
             ResultType = (call, t) => call.Op?.Operand is "sincosf" ? t.Types.Single : null,
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
@@ -438,6 +438,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.Import)
         {
+            ResultWidths = call => MathImportSignature.Find(call.Op?.Operand as string) is { } signature ? [signature.Single ? 32 : 64] : [],
             Inputs = (call, a, t) => call.Op?.Operand is string symbol && MathImportSignature.Find(symbol) is { } signature
                 && t.Types.MathImport(symbol) is { } method ? signature.Parameters.Select((_, i) => (Index: call.ArgumentIndex(signature.Register(i)), Type: method.Method.Parameters[i].Type))
                     .Where(p => p.Index >= 0 && p.Index < a.Count).Select(p => new RuntimeInput(a[p.Index], p.Type)).ToArray() : [],

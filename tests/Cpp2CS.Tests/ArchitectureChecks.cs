@@ -572,7 +572,8 @@ internal static class ArchitectureChecks
         check.True(ManagedTypes.IsVoid(pair.Method.ReturnType) && pair.Method.NativeImport?.EntryPoint == "sincosf"
             && pair.Method.Parameters.Select(p => p.Type).SequenceEqual([types.Single, new ByRefRef(types.Single), new ByRefRef(types.Single)]),
             "正余弦保留一个浮点输入和两个独立出参");
-        check.True(RuntimeOps.Of(OpKind.ImportOutPair)!.ResultWidths!.SequenceEqual([32, 32]), "正余弦结果各占 32 位，不读取寄存器未定义高位");
+        check.True(RuntimeOps.Of(OpKind.ImportOutPair)!.ResultWidths!(new Call(0, CallKind.Direct, Expr.C(0, 64))).SequenceEqual([32, 32]),
+            "正余弦结果各占 32 位，不读取寄存器未定义高位");
         var call = new Call(0, CallKind.Direct, Expr.C(100, 64))
         {
             Op = new(OpKind.Import, "ldexpf"), Sources = [Storage.Gpr(0), Storage.Vec(0)],
@@ -582,6 +583,7 @@ internal static class ArchitectureChecks
         var function = new MachineFunction { Entry = 0, Range = new(0, 8, CodeRegion.Managed, default), Blocks = [block] };
         MathImportNormalizer.Run(function, () => new Variable(Storage.Temp(0), 1));
         var normalized = block.Statements.OfType<Call>().Single();
+        check.True(RuntimeOps.Of(OpKind.Import)!.ResultWidths!(normalized).SequenceEqual([32]), "单精度数学调用的结果只有低 32 位有效");
         check.True(normalized.Sources.SequenceEqual([Storage.Vec(0), Storage.Gpr(0)]) && normalized.Arguments.All(a => a.Width == 32),
             "浮点与整数参数按各自寄存器取有效位并恢复声明次序");
     }

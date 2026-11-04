@@ -194,8 +194,8 @@ internal sealed partial class BodyBuilder
         public RuntimeOp Op => op;
         public TypeRef? ClassOperand => owner.oracle.ClassOperand(call);
         public IReadOnlyList<Sym> Arguments { get; } = arguments.Take(call.OriginalArgumentCount).ToArray();
-        public Sym Result => owner.values.Syms.Result(call, 0, 64);
-        public Sym ResultAt(int result) => owner.values.Syms.Result(call, result + 1, RuntimeOps.Of(op.Kind)!.ResultWidths![result]);
+        public Sym Result => owner.values.Syms.Result(call, 0, RuntimeOps.Of(op.Kind)?.ResultWidths?.Invoke(call) is [var width] ? width : 64);
+        public Sym ResultAt(int result) => owner.values.Syms.Result(call, result + 1, RuntimeOps.Of(op.Kind)!.ResultWidths!(call)[result]);
         public ManagedValue Input(int index)
         {
             var input = RuntimeOps.Of(op.Kind)!.Inputs!(call, Arguments, owner.oracle)[index];
