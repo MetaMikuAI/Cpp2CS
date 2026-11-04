@@ -95,7 +95,7 @@ internal sealed partial class TemplateRecovery
             defined.ExceptWith(edges.Taken.Copies.Concat(edges.Fallthrough.Copies).Select(c => c.Target.Variable));
         var escapingValues = outside.SelectMany(p => ReadValues(p.s)).SelectMany(ManagedValues.Walk).OfType<LocalValue>()
             .Select(l => l.Variable).Where(defined.Contains).ToHashSet();
-        var savedCopies = InlineCopies(body, blocks, startBlock, start, match, escapingValues);
+        var savedCopies = InlineCopies(body, blocks, startBlock, start, match, escapingValues, self);
         defined.ExceptWith(savedCopies.Select(a => a.Target.Variable));
         foreach (var (_, _, statement) in outside)
             if (ReadValues(statement).SelectMany(ManagedValues.Walk).OfType<LocalValue>().FirstOrDefault(l => defined.Contains(l.Variable)) is { } escaping)

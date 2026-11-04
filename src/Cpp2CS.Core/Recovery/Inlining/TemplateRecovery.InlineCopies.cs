@@ -11,7 +11,7 @@ internal sealed partial class TemplateRecovery
 
     /// <summary>区域内写入同一稳定值的局部副本：旧值在入口已死或已等于该值，故可提前保存。</summary>
     private IReadOnlyList<ManagedAssignment> InlineCopies(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks,
-        ulong startBlock, int start, InlineMatch match, IReadOnlySet<Variable> escaping)
+        ulong startBlock, int start, InlineMatch match, IReadOnlySet<Variable> escaping, ManagedValue? self)
     {
         var statements = match.Covered.Select(p => blocks[p.Block].Statements[p.Index]).ToArray();
         var edgeTargets = statements.SelectMany(ManagedValues.Edges).SelectMany(e => e.Copies).Select(c => c.Target.Variable).ToHashSet();
@@ -34,6 +34,13 @@ internal sealed partial class TemplateRecovery
             var writes = statements.OfType<ManagedAssignment>().Where(a => a.Target.Variable == variable).ToArray();
             if (writes.Length == 0 || statements.OfType<ManagedCall>().Any(c => c.Result?.Variable == variable)) continue;
             var value = writes[0].Value;
+            // 夹在区域里的调用方读取，发生在第一个效果之前：提到调用之前读到的是同一个值。
+            if (writes.Length == 1 && match.Defined.GetValueOrDefault(variable) is Observed early && match.EarlyReads.Contains(early)
+                && !LiveAt(body, blocks, startBlock, start, variable) && Materialize(early, self, writes[0].Address, match) is { } read)
+            {
+                copies.Add(writes[0] with { Address = blocks[startBlock].Statements[start].Address, Value = read });
+                continue;
+            }
             if (!Stable(value) || writes.Any(a => a.Value != value)) continue;
             if (LiveAt(body, blocks, startBlock, start, variable)
                 && !match.Inputs.Any(input => input.Local.Variable == variable && SameTerm(input.Value, value))

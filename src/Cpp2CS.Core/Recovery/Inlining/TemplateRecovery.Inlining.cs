@@ -693,6 +693,7 @@ internal sealed partial class TemplateRecovery
         FieldValue field => Term(walker, field.Receiver) is { } receiver ? new FieldValue(receiver, field.Field, field.Type, field.Width) : null,
         StaticFieldValue field => new StaticFieldValue(field.Field, field.Type, field.Width),
         ArrayElementValue element => Term(walker, element.Array) is { } array && Term(walker, element.Index) is { } index ? element with { Array = array, Index = index } : null,
+        IndirectValue indirect => Term(walker, indirect.Address) is { } pointer ? indirect with { Address = pointer } : null,
         _ => null,
     };
 

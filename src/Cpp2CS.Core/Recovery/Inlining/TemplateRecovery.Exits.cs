@@ -189,6 +189,9 @@ internal sealed partial class TemplateRecovery
             // 布尔返回值的取反：调用方的条件常写成相反的比较。
             if (types.Kind(actual.Type) == TypeKind.Bool && Unify(Negate(actual), value, new(match.Binding)))
                 return new ComparisonValue(Cond.Eq, carrier, new ConstantValue(0, carrier.Type, carrier.Width), types.Boolean);
+            // 返回窄字段的扩展（int Y => _y）：调用方保留的窄值是结果的截断。
+            if (actual is ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: var narrow } && Unify(narrow, value, new(match.Binding)))
+                return new ConversionValue(ConvKind.Truncate, carrier, value.Type, value.Width);
         }
         return MapTerm(value, child => Abstract(child, carriers, match));
     }
@@ -206,6 +209,7 @@ internal sealed partial class TemplateRecovery
             NegatedValue { Operand: ConstantValue operand } => new ConstantValue(operand.Bits == 0 ? 1UL : 0UL, types.Boolean, 8),
             ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate, Operand: ConstantValue operand } conversion
                 => new ConstantValue(operand.Bits & Expr.Mask(conversion.Width), conversion.Type, conversion.Width),
+            ConversionValue { Kind: ConvKind.Truncate, Width: var width, Operand: ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: var narrow } } when narrow.Width == width => narrow,
             _ => mapped,
         };
     }
