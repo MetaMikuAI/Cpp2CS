@@ -81,6 +81,9 @@ public sealed partial class RuntimeHelpers
         ("il2cpp_runtime_class_init", HelperKind.ClassInit),
         ("il2cpp_raise_exception", HelperKind.Raise),
         ("il2cpp_gc_wbarrier_set_field", HelperKind.WriteBarrier),
+        // ARM64 生成的引用字段写入会把已完成的直接存储交给该入口做写屏障；
+        // DirectPass 只在紧邻存储与实参一致时把它归一为写屏障，其他调用保持原样。
+        ("il2cpp_field_set_value_object", HelperKind.WriteBarrier),
         ("il2cpp_class_is_assignable_from", HelperKind.IsAssignableFrom),
         ("il2cpp_object_get_virtual_method", HelperKind.VirtualMethodLookup),
         ("il2cpp_string_new_len", HelperKind.StringNew),
