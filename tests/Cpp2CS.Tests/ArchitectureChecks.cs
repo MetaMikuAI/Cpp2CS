@@ -8,6 +8,7 @@ using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Algebra;
 using Cpp2CS.Machine.Storage;
 using Cpp2CS.Output;
+using Cpp2CS.Recovery.Control;
 using Cpp2CS.Recovery;
 using Cpp2CS.Recovery.Inlining;
 using Cpp2CS.Recovery.Effects;
@@ -43,6 +44,7 @@ internal static class ArchitectureChecks
         InvokerArguments(checks, facts, types);
         SharedValueModel(checks, facts, types);
         FrameForwards(checks, facts);
+        ExceptionShapes(checks, types);
         StackBoxes(checks, facts, types);
         PartialScalarCells(checks, facts, types);
         UnusedCallStacks(checks, facts, types);
@@ -361,6 +363,47 @@ internal static class ArchitectureChecks
     }
 
     /// <summary>私有栈槽的保存与读回：每条路径都到达同值的完整写入才转发。</summary>
+    /// <summary>异常区域的规范形：多入口 try 收拢到分派块，分派只改写从外部进入的边。</summary>
+    private static void ExceptionShapes(Assertions check, ManagedTypes types)
+    {
+        var method = new MethodRef(types.Corlib("System.Object").Definition.Methods.First(), [], []);
+        ManagedBlock Goto(ulong at, ulong to) => new(at, [new ManagedJump(at, new ManagedEdge(to, []))]);
+        ManagedBlock Return(ulong at) => new(at, [new ManagedReturn(at, null)]);
+        var next = 0;
+        LocalValue NewLocal() => new(new Variable(Storage.Temp(next++), 1), types.Int32, 32);
+        ManagedBranch Choose(ulong at, ulong a, ulong b) => new(at, new ConstantValue(1, types.Boolean, 8), new ManagedEdge(a, []), new ManagedEdge(b, []));
+
+        // 入口 1 经 2 进入 try 开头，入口 1 也经 3 直接跳到 try 中间。
+        var entered = new ManagedBody(method, [new(1, [Choose(1, 2, 3)]), Goto(2, 4), Goto(3, 5), Goto(4, 5), Goto(5, 7), new(6, [new ManagedEndFault(6)]), Return(7)])
+        {
+            Regions = [new ManagedRegion([4, 5], 6, [6], null, ManagedRegionKind.Fault)],
+        };
+        var dispatched = ExceptionEntries.Run(entered, NewLocal);
+        var region = dispatched.Regions.Single();
+        var head = dispatched.Blocks.Single(b => b.Address == region.Try[0]);
+        check.True(head.Statements is [ManagedSwitch { Cases.Count: 2 }] && region.Try.Count == 3, "多入口 try 以分派块开头");
+        check.True(dispatched.Blocks.TakeWhile(b => b.Address != 4).Last().Address == head.Address, "分派块紧接在原来的 try 开头之前");
+        ManagedEdge Exit(ulong at) => ManagedValues.Edges(dispatched.Blocks.Single(b => b.Address == at).Statements[^1]).Single();
+        check.True(Exit(2).Target == head.Address && Exit(3).Target == head.Address && Exit(2).Copies.Count == 1 && Exit(3).Copies.Count == 1,
+            "从外部进入的边写入口序号后跳到分派块");
+        check.True(Exit(4).Target == 5 && Exit(4).Copies.Count == 0, "try 内部的边不变");
+
+        // 只有一个入口且位于开头时没有分派块。
+        var single = new ManagedBody(method, [Goto(1, 4), Goto(4, 5), Goto(5, 7), new(6, [new ManagedEndFault(6)]), Return(7)])
+        {
+            Regions = [new ManagedRegion([4, 5], 6, [6], null, ManagedRegionKind.Fault)],
+        };
+        check.True(ReferenceEquals(ExceptionEntries.Run(single, NewLocal), single), "单入口 try 不变");
+
+        // 内层入口被写进外层 try 时，分派块同时属于外层。
+        var nested = new ManagedBody(method, [new(1, [Choose(1, 3, 4)]), Goto(3, 4), new(4, [Choose(4, 5, 6)]), Goto(5, 6), Goto(6, 9), new(7, [new ManagedEndFault(7)]), new(8, [new ManagedEndFault(8)]), Return(9)])
+        {
+            Regions = [new ManagedRegion([5, 6], 7, [7], null, ManagedRegionKind.Fault), new ManagedRegion([3, 4, 5, 6, 7], 8, [8], null, ManagedRegionKind.Fault)],
+        };
+        var inner = ExceptionEntries.Run(nested, NewLocal).Regions;
+        check.True(inner[1].Try.Contains(inner[0].Try[0]), "内层的分派块属于外层 try");
+    }
+
     private static void FrameForwards(Assertions check, ProgramFacts facts)
     {
         var effects = new CallMemoryEffects(new CallShapes(facts, new ManagedAbi(facts.Layouts), (_, _) => false).Of, new ManagedAbi(facts.Layouts));

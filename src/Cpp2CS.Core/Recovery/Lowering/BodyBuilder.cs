@@ -120,11 +120,11 @@ internal sealed partial class BodyBuilder
         var blocks = new List<ManagedBlock>();
         foreach (var (block, statements, exit) in lowered)
         {
-            // 异常边的 φ 赋值放在可能抛出的调用之前：异常经调用离开时局部已持有入边的值。
+            // 异常边的 φ 赋值放在可能抛出的语句之前：异常离开时局部已持有入边的值。
             if (block.Handler is { } pad && pad.Predecessors.IndexOf(block) is var padIndex and >= 0
                 && copies.TryGetValue((block, pad, padIndex), out var exceptional) && exceptional.Count > 0)
             {
-                var at = statements.FindLastIndex(s => s is ManagedCall);
+                var at = statements.FindLastIndex(s => s is ManagedCall or ManagedCheck or ManagedThrow);
                 statements.InsertRange(at < 0 ? statements.Count : at, exceptional.Select(c => (ManagedStatement)new ManagedAssignment(block.End, c.Target, c.Value)));
             }
             switch (exit)
@@ -141,7 +141,7 @@ internal sealed partial class BodyBuilder
         var managedRegions = regions.Where(r => reachable.Contains(r.Pad) && r.Try.Any(reachable.Contains)).Select(r => new ManagedRegion(
             r.Try.Where(reachable.Contains).Select(b => b.Start).ToArray(), r.Pad.Start, r.Handler.Where(reachable.Contains).Select(b => b.Start).ToArray(),
             r.BeginCatch is { } begin ? exceptions[begin] : null, r.IsCatch ? ManagedRegionKind.Catch : ManagedRegionKind.Fault)).ToArray();
-        var body = new ManagedBody(analysis.Method, blocks) { Regions = managedRegions };
+        var body = ExceptionEntries.Run(new ManagedBody(analysis.Method, blocks) { Regions = managedRegions }, () => NewLocal(types.Int32));
         return new(body, holes.DistinctBy(h => (h.Address, h.Reason)).ToArray(), new Dictionary<Variable, PendingConstruction>(pendingConstructions), nextLocal);
     }
 
