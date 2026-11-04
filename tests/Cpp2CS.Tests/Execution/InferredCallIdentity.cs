@@ -16,10 +16,8 @@ internal static class InferredCallIdentity
     /// </summary>
     public static MethodRef Resolve(World world, UnregisteredMethod identity, ulong pointer, MethodRef? expected)
     {
-        // 非泛型方法的 inline 副本不传 MethodInfo：身份由事实层的机器码同形证明（ShapeMatches），这里只核对 CIL 调用的是这个定义。
-        if (identity.Witnesses.Count == 0)
-            return expected is { } called && called.Method == identity.Definition ? called
-                : throw new InferredCallError($"0x{identity.Address:x}：同形副本是 {identity.Definition}，CIL 调用 {expected}");
+        // 非泛型方法的 inline 副本不传 MethodInfo：身份由事实层的机器码同形证明（ShapeMatches）。CIL 这里调用的是否相同，由事件比较判定。
+        if (identity.Witnesses.Count == 0) return new MethodRef(identity.Definition, [], []);
         var actual = world.MethodOfInfo(pointer)
             ?? throw new InferredCallError($"0x{identity.Address:x}：实际 MethodInfo 0x{pointer:x} 没有元数据映射");
         if (actual.Method != identity.Definition || !UnregisteredMethods.IsClosed(actual))
