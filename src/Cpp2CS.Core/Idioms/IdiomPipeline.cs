@@ -110,7 +110,7 @@ internal static class IdiomPipeline
         });
         state.Passes.Run("idioms.InvokerCalls", () =>
         {
-            if (state.InvokerCalls())
+            while (state.InvokerCalls())
                 state.Cleanup();
         });
         state.Passes.Run("idioms.StackBoxing", () =>

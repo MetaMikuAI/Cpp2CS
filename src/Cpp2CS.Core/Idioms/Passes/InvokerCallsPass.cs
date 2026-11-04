@@ -10,7 +10,6 @@ internal static class InvokerCallsPass
 {
     internal static bool InvokerCalls(this IdiomState state)
     {
-        var changed = false;
         foreach (var block in state.function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
@@ -70,9 +69,8 @@ internal static class InvokerCallsPass
                     proof.Head.Statements[^1] = new Jump(branch.Address, next.Start);
                     MachineFunction.RemoveEdge(proof.Head, proof.Reference);
                 }
-                i += statements.Count - 1;
-                changed = true;
+                return true;
             }
-        return changed;
+        return false;
     }
 }

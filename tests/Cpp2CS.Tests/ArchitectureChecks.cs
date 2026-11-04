@@ -306,7 +306,8 @@ internal static class ArchitectureChecks
         var abi = new ManagedAbi(facts.Layouts);
         check.True(abi.Invoker(self).Arguments[0] is { Size: -1, Transfer: Transfer.Copy },
             "共享泛型副本保留未知尺寸，不能退化为指针宽度的值");
-        foreach (var variant in new[] { "private", "null-check", "wrong-size", "missing-input", "read-slot", "escape-slot", "intervening-call" })
+        foreach (var variant in new[] { "private", "null-check", "nested", "neighbor-copy", "overlap-copy", "spilled-input", "spilled-escape",
+            "reuse-array", "retained-slot", "wrong-size", "missing-input", "read-slot", "escape-slot", "intervening-call" })
         {
             var head = new Block(0);
             var reference = new Block(64);
@@ -320,12 +321,14 @@ internal static class ArchitectureChecks
                 Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32), 64);
             var destination = new Binary(BinOp.Sub, new FrameAddress(-64), new Binary(BinOp.And,
                 new Binary(BinOp.Add, size, Expr.C(15, 64), 64), Expr.C(0xfffffffffffffff0, 64), 64), 64);
+            if (variant == "nested") destination = destination with { Left = destination };
             var pointer = new Variable(Storage.Gpr(20), 1);
             var loaded = new Variable(Storage.Gpr(21), 1);
             var selected = new Variable(Storage.Gpr(22), 1);
             var copy = new Call(16, CallKind.Direct, Expr.C(0, 64))
             {
-                Op = new(OpKind.Import, "memcpy"), Arguments = [destination, new Select(flag, input, saved, 64),
+                Op = new(OpKind.Import, "memcpy"), Arguments = [destination, new Select(flag,
+                    variant is "spilled-input" or "spilled-escape" ? new Load(new FrameAddress(-32), 64) : input, saved, 64),
                     variant == "wrong-size" ? Expr.C(8, 64) : size],
             };
             head.Statements = [new Define(0, pointer, destination), new Store(4, saved,
@@ -338,12 +341,31 @@ internal static class ArchitectureChecks
             if (variant == "intervening-call") join.Statements.Insert(2, new Call(86, CallKind.Direct, Expr.C(0, 64)));
             if (variant == "null-check") join.Statements.Insert(2, new Call(86, CallKind.Direct, Expr.C(0, 64))
                 { Op = new(OpKind.NullCheck, null), Arguments = [Expr.C(1, 64)] });
+            if (variant is "spilled-input" or "spilled-escape") head.Statements.Insert(0, new Store(0, new FrameAddress(-32), input));
+            if (variant == "spilled-escape") head.Statements.Insert(1, new Store(0, input, new FrameAddress(-32)));
+            if (variant is "neighbor-copy" or "overlap-copy") join.Statements.Insert(3, copy with
+            {
+                Address = 90, Arguments = [variant == "neighbor-copy" ? destination with { Left = destination } : destination,
+                    new Select(flag, input, saved, 64), size],
+            });
+            if (variant is "reuse-array" or "retained-slot")
+            {
+                var called = new Symbol(SymbolKind.Method, MethodRef.Open(definition));
+                if (variant == "reuse-array") join.Statements.Insert(3, new Store(89, array, Expr.C(0, 64)));
+                join.Statements.Insert(join.Statements.Count - 1, new Call(90, CallKind.Indirect,
+                    new Load(new Binary(BinOp.Add, called, Expr.C(RuntimeLayout.MethodInvoker, 64), 64), 64))
+                {
+                    Arguments = [new Load(called, 64), called, Expr.C(0, 64), array, Expr.C(0, 64)],
+                    Sources = Enumerable.Range(0, 5).Select(Storage.Gpr).ToArray(),
+                });
+            }
             MachineFunction.AddEdge(head, join); MachineFunction.AddEdge(head, reference); MachineFunction.AddEdge(reference, join);
             var function = new MachineFunction { Entry = 0, Range = new(0, 100, CodeRegion.Managed, default), Blocks = [head, reference, join] };
             function.Renumber();
             var state = new IdiomState(new IdiomRewriter(facts), function) { self = self };
             var proof = SharedInvokerArguments.Prove(state, join, invoke, array, 0, type);
-            check.Equal(variant is "private" or "null-check", proof?.Value == input, $"共享泛型私有副本证明：{variant}");
+            check.Equal(variant is "private" or "null-check" or "nested" or "neighbor-copy" or "spilled-input" or "reuse-array",
+                proof?.Value == input, $"共享泛型私有副本证明：{variant}");
         }
     }
 
