@@ -35,8 +35,8 @@ namespace Cpp2CS.Input
                 var argumentCount = (int)reader.ReadCompressedUInt32();
                 var fieldCount = (int)reader.ReadCompressedUInt32();
                 var propertyCount = (int)reader.ReadCompressedUInt32();
-                // v106 的带实参/命名实参编码尚未接入；保留已解析的无参特性，避免错误解释后续字节。
-                if (argumentCount != 0 || fieldCount != 0 || propertyCount != 0) break;
+                // v106 的带实参/命名实参编码尚未接入；只保留构造器无参且实参为空的特性。
+                if (argumentCount != 0 || fieldCount != 0 || propertyCount != 0 || method.parameterCount != 0) break;
 
                 visitor.Arguments = new AttributeArgument[argumentCount];
                 for (var a = 0; a < argumentCount; a++)

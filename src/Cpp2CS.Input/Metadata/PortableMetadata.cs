@@ -240,7 +240,7 @@ namespace Cpp2CS.Input.Portable
             int interfaceOffsetWidth = Width(interfaceOffsets.Count);
             int eventWidth = Width(GetSection("events").Count);
             int propertyWidth = Width(GetSection("properties").Count);
-            int nestedWidth = Width(GetSection("nestedTypes").Count);
+            int nestedStartWidth = Width(GetSection("nestedTypes").Count);
             int methodWidth = Width(GetSection("methods").Count);
             int genericParameterWidth = Width(GetSection("genericParameters").Count);
             int fieldWidth = Width(GetSection("fields").Count);
@@ -248,11 +248,11 @@ namespace Cpp2CS.Input.Portable
             GenericParameterSize = genericContainerWidth + 4 + 2 + 2 + 2 + 2;
 
             ReadArrays(typeDefWidth, genericContainerWidth, parameterWidth, interfaceOffsetWidth, eventWidth, propertyWidth,
-                nestedWidth, methodWidth, genericParameterWidth, fieldWidth, defaultValueWidth);
+                nestedStartWidth, methodWidth, genericParameterWidth, fieldWidth, defaultValueWidth);
         }
 
         private void ReadArrays(int typeDefWidth, int genericContainerWidth, int parameterWidth, int interfaceOffsetWidth,
-            int eventWidth, int propertyWidth, int nestedWidth, int methodWidth, int genericParameterWidth, int fieldWidth,
+            int eventWidth, int propertyWidth, int nestedStartWidth, int methodWidth, int genericParameterWidth, int fieldWidth,
             int defaultValueWidth)
         {
             typeDefs = Read(GetSection("typeDefinitions"), r =>
@@ -271,7 +271,7 @@ namespace Cpp2CS.Input.Portable
                 d.methodStart = r.Var(methodWidth);
                 d.eventStart = r.Var(eventWidth);
                 d.propertyStart = r.Var(propertyWidth);
-                d.nestedTypesStart = r.Var(nestedWidth);
+                d.nestedTypesStart = r.Var(nestedStartWidth);
                 d.interfacesStart = r.Var(interfaceOffsetWidth);
                 d.vtableStart = r.I32();
                 d.interfaceOffsetsStart = r.Var(interfaceOffsetWidth);
@@ -425,7 +425,8 @@ namespace Cpp2CS.Input.Portable
             var constraints = GetSection("genericParameterConstraints");
             constraintIndices = ReadVariableArray(constraints, TypeIndexSize);
             var nested = GetSection("nestedTypes");
-            nestedTypeIndices = ReadVariableArray(nested, nestedWidth);
+            // nestedTypes 表项固定为 int32，与 typeDefinitions 中的 nestedTypesStart 宽度无关。
+            nestedTypeIndices = ReadVariableArray(nested, sizeof(int));
         }
 
         private void ReadDefaultValues(int fieldWidth, int defaultValueWidth)
