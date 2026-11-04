@@ -77,7 +77,7 @@ namespace Cpp2CS.Input
                     if (r.Kind is RefKind.Call or RefKind.TailCall && !registrations.ByAddress.ContainsKey(r.Target))
                         targets[r.Target] = targets.GetValueOrDefault(r.Target) + 1;
             }
-            var helpers = RuntimeHelpers.Identify(map, scan, targets, usages.SlotAddressBeforeCall);
+            var helpers = RuntimeHelpers.Identify(map, scan, targets, usages.MetadataSlotBeforeCall, usages.SlotAddressBeforeCall);
             var all = helpers.Helpers.Values.ToArray();
             string Census(IEnumerable<RuntimeHelper> list) => string.Join("，", list.GroupBy(h => h.Kind).OrderByDescending(g => g.Sum(h => h.CallSites))
                 .Select(g => $"{g.Key}={g.Count()}个/{g.Sum(h => h.CallSites)}次"));

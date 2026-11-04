@@ -107,18 +107,20 @@ public sealed partial class RuntimeHelpers
     public RuntimeHelper? At(ulong address) => helpers.GetValueOrDefault(address);
 
     /// <summary>运行时模板内部的调用也沿导出链和指令形态识别，不要求它被托管函数直接调用。</summary>
-    public RuntimeHelper InternalCall(ulong address) => helpers.GetOrAdd(address, a => Classify(a, 0, 0));
+    public RuntimeHelper InternalCall(ulong address) => helpers.GetOrAdd(address, a => Classify(a, 0, 0, 0));
 
     /// <summary>
     /// targets：托管代码调用的、没有托管所有者的目标及调用点数；slotAddressesBeforeCall：目标 → 调用点前紧邻构造了已解码元数据槽位地址的次数。
     /// </summary>
-    public static RuntimeHelpers Identify(CodeMap map, CodeScan scan, IReadOnlyDictionary<ulong, int> targets, IReadOnlyDictionary<ulong, int> slotAddressesBeforeCall)
+    public static RuntimeHelpers Identify(CodeMap map, CodeScan scan, IReadOnlyDictionary<ulong, int> targets,
+        IReadOnlyDictionary<ulong, int> metadataSlotBeforeCall, IReadOnlyDictionary<ulong, int> slotAddressBeforeCall)
     {
         var result = new RuntimeHelpers(map, scan);
         result.BuildExportChains();
         result.interfaceSlowPath = result.InterfaceSlowPath();
         foreach (var (target, count) in targets)
-            result.helpers[target] = result.Classify(target, count, slotAddressesBeforeCall.GetValueOrDefault(target));
+            result.helpers[target] = result.Classify(target, count,
+                metadataSlotBeforeCall.GetValueOrDefault(target), slotAddressBeforeCall.GetValueOrDefault(target));
         return result;
     }
 
@@ -286,7 +288,7 @@ public sealed partial class RuntimeHelpers
         return false;
     }
 
-    private RuntimeHelper Classify(ulong target, int calls, int slotCalls)
+    private RuntimeHelper Classify(ulong target, int calls, int slotCalls, int addressSlotCalls)
     {
         var function = map.At(target);
         if (function?.Region == CodeRegion.Plt)
@@ -311,9 +313,12 @@ public sealed partial class RuntimeHelpers
             return new(target, structural.Kind, structural.Detail, structural.Evidence, calls);
 
         var closure = Closure(target);
-        if (function is { Size: <= ExceptionWrapperLimit * 4 } && closure.Any(HasTokenDecode) && slotCalls * 2 > calls)
+        // 旧版以“闭包内有令牌解码 + 调用前引用槽位”识别惰性初始化；新版把解码放进被调方，
+        // 入口只转发槽位地址，因此另要求调用前 4 字节内是 ADRP+ADD 得到的槽位地址，排除传入槽位内容的情况。
+        if (function is { Size: <= ExceptionWrapperLimit * 4 }
+            && (closure.Any(HasTokenDecode) && slotCalls * 2 > calls || addressSlotCalls * 2 > calls))
             return new(target, HelperKind.InitMetadata, null,
-                $"闭包内有令牌解码（UBFX/LSR #29），{slotCalls}/{calls} 个调用点前紧邻构造已解码的元数据槽位地址", calls);
+                $"闭包令牌解码={closure.Any(HasTokenDecode)}，槽位引用 {slotCalls}/{calls}，槽位地址 {addressSlotCalls}/{calls}", calls);
 
         // 异常规则只用于小的包装函数：大函数的闭包会经由其中的抛出调用碰到异常名，那不代表它本身是抛出 helper。
         var exceptions = function is { Size: <= ExceptionWrapperLimit * 4 } ? closure.Select(ExceptionName).Where(n => n is not null).Distinct().ToArray() : [];

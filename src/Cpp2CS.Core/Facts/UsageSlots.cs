@@ -16,7 +16,9 @@ public sealed class UsageSlots
     public required IReadOnlyDictionary<ulong, UsageSlot> Slots { get; init; }
     /// <summary>可写数据中可解码、但没有托管代码引用的位置。</summary>
     public required IReadOnlyDictionary<ulong, Usage> UnreferencedDecodable { get; init; }
-    /// <summary>调用目标 → 调用点之前 4 条内以 ADRP+ADD 构造了槽位地址的调用点数（元数据初始化 helper 的证据）。</summary>
+    /// <summary>调用目标 → 调用点前 16 字节内引用了槽位（地址或内容）的调用点数，供旧版令牌解码规则使用。</summary>
+    public required IReadOnlyDictionary<ulong, int> MetadataSlotBeforeCall { get; init; }
+    /// <summary>调用目标 → 调用点前 4 字节内直接以 ADRP+ADD 构造了槽位地址的调用点数；实参是地址而非槽位内容。</summary>
     public required IReadOnlyDictionary<ulong, int> SlotAddressBeforeCall { get; init; }
 
     public UsageSlot? At(ulong address) => Slots.GetValueOrDefault(address);
@@ -36,9 +38,21 @@ public sealed class UsageSlots
             return null;
         }
 
+        // 调用实参是槽位地址而非槽位内容：直接 ADRP+ADD，或经 GOT 读取重定位后的槽位地址。
+        ulong? SlotAddressOf(CodeRef r)
+        {
+            if (r.Kind == RefKind.Address && r.Target % 8 == 0 && writable.Any(s => s.Contains(r.Target)) && model.UsageAt(r.Target) is not null)
+                return r.Target;
+            if (r.Kind == RefKind.Load && r.Size == 8 && got is not null && got.Contains(r.Target)
+                && image.RelocatedPointer(r.Target) is { } pointee && model.UsageAt(pointee) is not null)
+                return pointee;
+            return null;
+        }
+
         var loads = new Dictionary<ulong, HashSet<int>>();
         var addresses = new Dictionary<ulong, HashSet<int>>();
         var beforeCall = new Dictionary<ulong, int>();
+        var addressBeforeCall = new Dictionary<ulong, int>();
         for (var i = 0; i < map.Functions.Count; i++)
         {
             if (map.Functions[i].Region != CodeRegion.Managed) continue;
@@ -52,6 +66,12 @@ public sealed class UsageSlots
                         if (SlotOf(refs[j]) is not null)
                         {
                             beforeCall[r.Target] = beforeCall.GetValueOrDefault(r.Target) + 1;
+                            break;
+                        }
+                    for (var j = k - 1; j >= 0 && r.Site - refs[j].Site <= 4; j--)
+                        if (refs[j].Kind == RefKind.Address && SlotAddressOf(refs[j]) is not null)
+                        {
+                            addressBeforeCall[r.Target] = addressBeforeCall.GetValueOrDefault(r.Target) + 1;
                             break;
                         }
                     continue;
@@ -78,7 +98,13 @@ public sealed class UsageSlots
                 if (!slots.ContainsKey(a) && image.RelocatedPointer(a) is null && model.UsageAt(a) is { } usage)
                     unreferenced[a] = usage;
         }
-        return new UsageSlots { Slots = slots, UnreferencedDecodable = unreferenced, SlotAddressBeforeCall = beforeCall };
+        return new UsageSlots
+        {
+            Slots = slots,
+            UnreferencedDecodable = unreferenced,
+            MetadataSlotBeforeCall = beforeCall,
+            SlotAddressBeforeCall = addressBeforeCall,
+        };
     }
 
     public void Check(FactChecks checks, Registrations registrations)

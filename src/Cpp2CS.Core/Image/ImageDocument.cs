@@ -4,7 +4,7 @@ using System.Text;
 
 namespace Cpp2CS.Image;
 
-public sealed record ImageRange(string Name, ulong Address, long FileOffset, ulong FileSize, ulong MemorySize, bool Executable);
+public sealed record ImageRange(string Name, ulong Address, long FileOffset, ulong FileSize, ulong MemorySize, bool Executable, bool Writable = false);
 public enum AddressKind { FileBacked, ZeroFill, Unmapped }
 public enum ImageContainer { Elf, Pe }
 public sealed record AddressResolution(AddressKind Kind, ImageRange? Range, long? FileOffset, ulong AvailableBytes);
@@ -241,7 +241,7 @@ public sealed class ImageDocument
                 var alignment = reader.U64(p + 48);
                 if (alignment > 1 && ((alignment & (alignment - 1)) != 0 || address % alignment != (ulong)offset % alignment))
                     throw new InvalidDataException("ELF LOAD 对齐不一致");
-                ranges.Add(new($"LOAD[{i}]", address, offset, fileSize, memorySize, (reader.U32(p + 4) & 1) != 0));
+                ranges.Add(new($"LOAD[{i}]", address, offset, fileSize, memorySize, (reader.U32(p + 4) & 1) != 0, (reader.U32(p + 4) & 2) != 0));
             }
             if (type == 2 && fileSize != 0) dynamicRanges.Add((offset, fileSize));
             if (type == 0x6474e552 && memorySize != 0) relroRanges.Add((address, memorySize));
@@ -439,7 +439,9 @@ public sealed class ImageDocument
             if (memorySize == 0) continue;
             if (rva % sectionAlignment != 0 || (rawSize != 0 && rawOffset % fileAlignment != 0) || (ulong)rva + memorySize > imageSize)
                 throw new InvalidDataException($"PE section {name} 范围或对齐错误");
-            ranges.Add(new(name, checked(imageBase + rva), rawOffset, Math.Min(rawSize, memorySize), memorySize, (reader.U32(s + 36) & 0x20000000) != 0));
+            var characteristics = reader.U32(s + 36);
+            ranges.Add(new(name, checked(imageBase + rva), rawOffset, Math.Min(rawSize, memorySize), memorySize,
+                (characteristics & 0x20000000) != 0, (characteristics & 0x80000000) != 0));
         }
         ValidateRanges(reader, ranges);
         var directoryCount = reader.U32(optional + 108);
@@ -461,7 +463,8 @@ public sealed class ImageDocument
         return new(reader.Bytes, architecture, ImageContainer.Pe, imageBase, ranges, collector.Summaries, collector.CodeRelocations)
         {
             ExceptionDirectory = exceptionDirectory,
-            Sections = ranges.Skip(1).Select(r => new ImageSection(r.Name, r.Address, r.MemorySize, 0, 2UL | (r.Executable ? 4UL : 0))).ToArray(),
+            Sections = ranges.Skip(1).Select(r => new ImageSection(r.Name, r.Address, r.MemorySize, 0,
+                2UL | (r.Writable ? 1UL : 0) | (r.Executable ? 4UL : 0))).ToArray(),
             Exports = exports,
         };
     }
