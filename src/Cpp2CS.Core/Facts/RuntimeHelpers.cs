@@ -330,7 +330,8 @@ public sealed partial class RuntimeHelpers
         if (exceptions.Length == 1)
         {
             var raises = closure.Any(f => exportChains.TryGetValue(f, out var e) && e.Kind == HelperKind.Raise);
-            if (raises && CanReturn(target, 2))
+            var returns = CanReturn(target, 2);
+            if (raises && returns)
             {
                 var head = Words(target, 2).Select(x => x.Word).ToArray();
                 // cbz x0, 抛出路径；ret
@@ -339,8 +340,9 @@ public sealed partial class RuntimeHelpers
                 return new(target, HelperKind.Unknown, null,
                     $"闭包内以 C 字符串构造 {exceptions[0]} 并到达 il2cpp_raise_exception，但函数可以返回（条件抛出）", calls);
             }
-            return new(target, raises ? HelperKind.Throw : HelperKind.GetException, exceptions[0],
-                $"闭包内以 C 字符串 (\"System\", \"{exceptions[0]![7..]}\") 构造异常{(raises ? "并到达 il2cpp_raise_exception" : "")}", calls);
+            // 构造异常后没有返回路径：即使未走 il2cpp_raise_exception（例如经 C++ 异常展开），也按抛出处理。
+            return new(target, returns ? HelperKind.GetException : HelperKind.Throw, exceptions[0],
+                $"闭包内以 C 字符串 (\"System\", \"{exceptions[0]![7..]}\") 构造异常{(raises ? "并到达 il2cpp_raise_exception" : "")}{(returns ? "" : "，函数不返回")}", calls);
         }
         return new(target, HelperKind.Unknown, null,
             exceptions.Length > 1 ? $"闭包内有多个异常名：{string.Join("、", exceptions)}" : "没有可用证据", calls);
@@ -409,7 +411,8 @@ public sealed partial class RuntimeHelpers
     internal static string? CString(ImageDocument image, ulong address)
     {
         var section = image.SectionAt(address);
-        if (section is null || section.Name != ".rodata") return null;
+        // ELF 的只读字符串在 .rodata，PE 在 .rdata；异常类型名与导出名都从这里读取。
+        if (section is null || section.Name is not (".rodata" or ".rdata")) return null;
         var bytes = image.ReadUpTo(address, 128);
         var end = bytes.IndexOf((byte)0);
         if (end <= 0) return null;
