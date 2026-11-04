@@ -222,6 +222,11 @@ internal static class IdiomPipeline
             if (state.SplitClassGuards())
                 state.Cleanup();
         });
+        state.Passes.Run("idioms.SharedValueChecks", () =>
+        {
+            if (SharedValueCopies.ForwardChecks(state))
+                state.Cleanup();
+        });
         state.Passes.Run("idioms.FiniteConditions.Simplify", () =>
         {
             while (FiniteConditions.Simplify(state.function))

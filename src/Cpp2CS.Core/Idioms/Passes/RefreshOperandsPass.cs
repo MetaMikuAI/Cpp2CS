@@ -15,7 +15,7 @@ internal static class RefreshOperandsPass
     }
 
     internal static Call Refresh(Call call, Func<Expr, Expr> expand) =>
-        call.Op is { Operand: null, Kind: OpKind.InitClass or OpKind.RunClassConstructor or OpKind.NewObject or OpKind.NewArray or OpKind.Box or OpKind.Unbox or OpKind.IsInst } op
+        call.Op is { Operand: null, Kind: OpKind.InitClass or OpKind.RunClassConstructor or OpKind.NewObject or OpKind.NewArray or OpKind.Box or OpKind.Unbox or OpKind.IsInst or OpKind.GenericHasValue } op
             && call.Arguments.Select(expand).OfType<Symbol>().FirstOrDefault(s => s.Kind == SymbolKind.Class)?.Value is { } type
             ? call with { Op = op with { Operand = type } } : call;
 }

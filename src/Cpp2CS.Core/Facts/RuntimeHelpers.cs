@@ -48,6 +48,8 @@ public enum HelperKind
     CompareExchangeReference,
     /// <summary>按无符号下标检查长度后读取字节数组元素，返回零扩展的字节。</summary>
     ReadByteArray,
+    /// <summary>按类布局检查值缓冲区是否非空，Nullable 使用 hasValue。</summary>
+    GenericHasValue,
 }
 
 /// <summary>一个被托管代码调用的辅助函数。Evidence 说明依据；Callers 为托管调用点数。</summary>
@@ -218,6 +220,9 @@ public sealed partial class RuntimeHelpers
         if (interfaceSlowPath is { } slow && chain.Contains(slow))
             return (HelperKind.InterfaceLookup, null, $"il2cpp_object_get_virtual_method 在接口偏移扫描失败后调用 0x{slow:x}");
         var calls = CallsOf(body).ToArray();
+        if (map.At(body) is { ExceptionRegions.Length: 0 } valueRange && valueRange.Start == body
+            && valueRange.Size == 60 && GenericHasValueBody(words))
+            return (HelperKind.GenericHasValue, null, "完整函数按 byval_arg 值类型位、generic_class 和 nullabletype 位检查引用或 Nullable.hasValue");
         if (map.At(body) is { ExceptionRegions.Length: 0 } range && range.Start == body
             && CheckedByteArrayBody(words) && calls is [var bounds]
             && InternalCall(bounds) is { Kind: HelperKind.Throw, Detail: "System.IndexOutOfRangeException" })

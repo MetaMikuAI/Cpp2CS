@@ -266,7 +266,7 @@ internal sealed partial class NativeMachine : IDisposable
                 }
                 // 不属于运行时服务的 helper（未内联的判空、条件抛出等普通代码）照常执行，不按分类结论打桩，
                 // 免得两侧共用提升器的同一个分类结论而看不出它的错误
-                if (helper.Kind is HelperKind.NullCheck or HelperKind.Unknown or HelperKind.CompareExchangeReference or HelperKind.FieldAddress or HelperKind.ReadByteArray && facts.Code.At(address) is { } body && body.Start == address)
+                if (helper.Kind is HelperKind.NullCheck or HelperKind.Unknown or HelperKind.CompareExchangeReference or HelperKind.FieldAddress or HelperKind.ReadByteArray or HelperKind.GenericHasValue && facts.Code.At(address) is { } body && body.Start == address)
                 {
                     entered.Add(body);
                     EnterHelperFrame();

@@ -11,7 +11,7 @@ public sealed partial class ManagedTypes
 {
     /// <summary>存储位宽；与结构体不占标量栈位的 ValueWidth 分开。</summary>
     public int StorageBits(TypeRef type) => IsReferenceType(type) || type is ByRefRef or PointerRef ? 64
-        : Kind(type) == TypeKind.Struct ? Size(type) * 8 : Math.Max(1, Bits(type));
+        : Kind(type) is not { } kind ? -1 : kind == TypeKind.Struct ? Size(type) * 8 : Math.Max(1, Bits(type));
 
     /// <summary>直接字段投影，保留嵌套结构体整体。</summary>
     public IEnumerable<ValueProjection> Fields(DefinitionRef structure) => Layouts.Of(structure) is { } layout
