@@ -23,18 +23,20 @@ internal sealed partial class TemplateRecovery
                 if (SameTerm(value, available.Value)) return available.Local;
             return MapTerm(value, Input);
         }
+        // 下面按换成已保存局部之后的项查询。
+        match.EarlyReads.UnionWith(match.EarlyReads.Select(Input).ToArray());
         if (self is not null) self = Input(self);
         var parameters = method.Method.Parameters.Count;
         var arguments = new ManagedValue[parameters];
         for (var i = 0; i < parameters; i++)
-            if (!match.Binding.TryGetValue(i, out var bound) || Materialize(Input(bound), self, at) is not { } argument) { failure = "实参不能写回调用之前"; return null; }
+            if (!match.Binding.TryGetValue(i, out var bound) || Materialize(Input(bound), self, at, match) is not { } argument) { failure = "实参不能写回调用之前"; return null; }
             else arguments[i] = argument;
         var exitCopies = new List<ManagedCopy>();
         foreach (var (target, value) in copies)
-            if (Materialize(Input(value), self, at) is { } materialized) exitCopies.Add(new ManagedCopy(target, materialized));
+            if (Materialize(Input(value), self, at, match) is { } materialized) exitCopies.Add(new ManagedCopy(target, materialized));
             else { failure = $"出口复制 {target.Variable} 不能写回"; return null; }
         ManagedValue? receiver = null;
-        if (self is not null && (receiver = Materialize(self, self, at)) is null) { failure = "接收者不能写回"; return null; }
+        if (self is not null && (receiver = Materialize(self, self, at, match)) is null) { failure = "接收者不能写回"; return null; }
         if (receiver is not null && method.DeclaringType is DefinitionRef { Definition.IsValueType: true } && receiver.Type is not ByRefRef)
         {
             if (receiver is not (LocalValue or FieldValue or StaticFieldValue or ArrayElementValue)) { failure = "值类型接收者不可取址"; return null; }
@@ -108,13 +110,13 @@ internal sealed partial class TemplateRecovery
             {
                 var converted = new List<ManagedCopy>();
                 foreach (var copy in edge.Copies)
-                    if (Materialize(Input(copy.Value), self, at) is { } value) converted.Add(copy with { Value = value });
+                    if (Materialize(Input(copy.Value), self, at, match) is { } value) converted.Add(copy with { Value = value });
                     else return null;
                 return edge with { Copies = converted };
             }
             if (MaterializeEdge(branch.Taken) is not { } taken || MaterializeEdge(branch.Fallthrough) is not { } fallthrough)
             { failure = "条件出口复制不能写回"; return null; }
-            if (Materialize(Input(branch.Condition), self, at) is not { } condition) { failure = "条件出口的谓词不能写回"; return null; }
+            if (Materialize(Input(branch.Condition), self, at, match) is not { } condition) { failure = "条件出口的谓词不能写回"; return null; }
             replacement.Add(branch with { Address = at, Condition = condition, Taken = taken, Fallthrough = fallthrough });
         }
         else if (!match.Returns && exit.Index == 0)

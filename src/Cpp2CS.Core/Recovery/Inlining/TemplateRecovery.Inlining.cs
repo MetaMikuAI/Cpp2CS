@@ -77,6 +77,8 @@ internal sealed partial class TemplateRecovery
         public HashSet<ulong> Raising { get; } = [];
         /// <summary>调用方的显式判空：被判空的项与模板此刻解引用过的项。</summary>
         public List<(ManagedValue Actual, ManagedValue[] Dereferenced)> NullChecks { get; } = [];
+        /// <summary>区域的第一个效果之前发生的读取。</summary>
+        public HashSet<ManagedValue> EarlyReads { get; } = [];
         /// <summary>夹在模板写入之间的调用方写入，以及它之前已比对过的调用与检查数。</summary>
         public List<(ulong Block, int Index, int Effects)> Interleaved { get; } = [];
         /// <summary>区域内已比对的调用与检查：夹在其间的写入不能越过它们。</summary>
@@ -438,7 +440,10 @@ internal sealed partial class TemplateRecovery
                         var pairs = (mc.Invocation.Receiver is { } mr ? [(mr, cc.Invocation.Receiver!)] : Array.Empty<(ManagedValue, ManagedValue)>())
                             .Concat(mc.Invocation.Arguments.Zip(cc.Invocation.Arguments));
                         foreach (var (a, b) in pairs)
+                        {
                             if (Term(callee, a) is not { } ta || Term(caller, b) is not { } tb || !Same(ta, tb, caller, match.Binding)) return match.Fail($"调用 {cc.Invocation.Method.Method.Name} 的实参不同（0x{cc.Address:x}）");
+                            NoteEarlyReads(tb, caller, match);
+                        }
                         var index = callee.Calls++;
                         caller.Calls++;
                         match.Effects++;
@@ -590,6 +595,18 @@ internal sealed partial class TemplateRecovery
         return true;
     }
 
+    /// <summary>记下调用方在区域的第一个效果之前读取的项（判空不算效果：与读取抛出同样的异常）。</summary>
+    private static void NoteEarlyReads(ManagedValue term, Walker caller, InlineMatch match)
+    {
+        if (match.Effects > 0 || caller.Stores.Count > 0) return;
+        void Visit(ManagedValue value)
+        {
+            if (value is Observed) match.EarlyReads.Add(value);
+            MapTerm(value, child => { Visit(child); return child; });
+        }
+        Visit(term);
+    }
+
     private void Cover(Walker caller, InlineMatch match)
     {
         match.Covered.Add((caller.Block, caller.Index));
@@ -607,7 +624,7 @@ internal sealed partial class TemplateRecovery
             {
                 case ManagedAssignment assignment:
                     if (Term(walker, assignment.Value) is not { } value) return false;
-                    if (match is not null) Cover(walker, match);
+                    if (match is not null) { Cover(walker, match); NoteEarlyReads(value, walker, match); }
                     else NoteAccesses(walker, assignment);
                     walker.Env[assignment.Target.Variable] = value;
                     if (match is not null)
@@ -693,17 +710,18 @@ internal sealed partial class TemplateRecovery
 
     /// <summary>
     /// 区域外使用的项（接收者、实参、出口复制）写回托管值。初代读取（此前没有经过调用）写成调用之前的读取，字段须可访问；
-    /// 读取的接收者只接受调用方的 this 或被内联方法的接收者：前者非空，后者为空时两种写法都在任何效果之前抛出 NullReferenceException。
+    /// 读取的接收者只接受调用方的 this、被内联方法的接收者，或读取本身发生在区域的任何效果之前：
+    /// 前者非空，后两者为空时两种写法都在任何效果之前抛出 NullReferenceException。
     /// 调用结果与经过调用之后的读取不能写回。
     /// </summary>
-    private ManagedValue? Materialize(ManagedValue term, ManagedValue? self, ulong address)
+    private ManagedValue? Materialize(ManagedValue term, ManagedValue? self, ulong address, InlineMatch match)
     {
         switch (term)
         {
             // 区域结束之后的读取：写在调用之后，字段访问照常接受证明。
             case Observed { Epoch: AfterRegion, Read: FieldValue field }:
                 {
-                    if (Materialize(field.Receiver, self, address) is not { } receiver) return null;
+                    if (Materialize(field.Receiver, self, address, match) is not { } receiver) return null;
                     var access = new FieldValue(receiver, field.Field, field.Type, field.Width);
                     if (fields.Accessible(field.Field, receiver.Type)) return access;
                     return Accessor(field.Field, field.Type, false, receiver.Type) is { } accessor ? access with { Accessor = accessor }
@@ -721,8 +739,8 @@ internal sealed partial class TemplateRecovery
             case Observed { Read: FieldValue field }:
                 {
                     if (!(field.Receiver.Equals(self) || field.Receiver is ArgumentValue { Index: -1 } || field.Receiver is Observed
-                        || types.Kind(field.Receiver.Type) == TypeKind.Struct)) return null;
-                    if (Materialize(field.Receiver, self, address) is not { } receiver) return null;
+                        || types.Kind(field.Receiver.Type) == TypeKind.Struct || match.EarlyReads.Contains(term))) return null;
+                    if (Materialize(field.Receiver, self, address, match) is not { } receiver) return null;
                     var access = new FieldValue(receiver, field.Field, field.Type, field.Width);
                     if (fields.Accessible(field.Field, receiver.Type)) return access;
                     return Accessor(field.Field, field.Type, false, receiver.Type) is { } accessor ? access with { Accessor = accessor } : null;
@@ -739,7 +757,7 @@ internal sealed partial class TemplateRecovery
         var failed = false;
         var mapped = ManagedValues.Map(term, child =>
         {
-            if (Materialize(child, self, address) is { } value) return value;
+            if (Materialize(child, self, address, match) is { } value) return value;
             failed = true;
             return child;
         });
