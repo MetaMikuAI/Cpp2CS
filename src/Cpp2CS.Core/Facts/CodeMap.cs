@@ -97,9 +97,9 @@ public sealed class CodeMap
         _ => CodeRegion.Other,
     };
 
-    public static CodeMap Build(ImageDocument image)
+    public static CodeMap Build(ImageDocument image, IEnumerable<ulong>? registrationEntries = null)
     {
-        if (image.Architecture != Cpp2CS.Model.Architecture.Arm64) throw new NotSupportedException("代码地图只支持 ARM64 ELF");
+        if (image.Architecture != Cpp2CS.Model.Architecture.Arm64) throw new NotSupportedException("代码地图只支持 ARM64");
         var code = image.Sections.Where(s => s.Executable).Select(s =>
         {
             var resolved = image.Resolve(s.Address);
@@ -140,27 +140,28 @@ public sealed class CodeMap
         // 勘误补丁：空隙中成对出现的 "访存指令; b Site+4"，且 Site 处为 b 到该对。
         var patches = new Dictionary<ulong, ErratumPatch>();
         var gapRanges = Uncovered(code, list);
-        foreach (var (start, end) in gapRanges)
-            for (var pc = start; pc + 8 <= end; pc += 4)
-            {
-                uint first = Raw(pc), second = Raw(pc + 4);
-                if (!A64.IsB(second)) continue;
-                var back = A64.Imm26Target(second, pc + 4);
-                var site = back - 4;
-                if (!code.Any(c => c.s.Contains(site))) continue;
-                var at = Raw(site);
-                if (!A64.IsB(at) || A64.Imm26Target(at, site) != pc) continue;
-                if (!(A64.IsUnsignedOffsetAccess(first) || (first & 0x3B000000) == 0x38000000 || (first & 0x3A000000) == 0x28000000)) continue;
-                // 勘误序列以 ADRP 开头，被替换的访存指令在其后 1–3 条（记录最近 ADRP 的页内偏移供核对）。
-                int? adrpOffset = null;
-                for (var k = 1; k <= 4 && adrpOffset is null; k++)
+        if (image.Container == ImageContainer.Elf)
+            foreach (var (start, end) in gapRanges)
+                for (var pc = start; pc + 8 <= end; pc += 4)
                 {
-                    var adrp = site - 4UL * (ulong)k;
-                    if (A64.IsAdrp(Raw(adrp))) adrpOffset = (int)(adrp & 0xFFF);
+                    uint first = Raw(pc), second = Raw(pc + 4);
+                    if (!A64.IsB(second)) continue;
+                    var back = A64.Imm26Target(second, pc + 4);
+                    var site = back - 4;
+                    if (!code.Any(c => c.s.Contains(site))) continue;
+                    var at = Raw(site);
+                    if (!A64.IsB(at) || A64.Imm26Target(at, site) != pc) continue;
+                    if (!(A64.IsUnsignedOffsetAccess(first) || (first & 0x3B000000) == 0x38000000 || (first & 0x3A000000) == 0x28000000)) continue;
+                    // 勘误序列以 ADRP 开头，被替换的访存指令在其后 1–3 条（记录最近 ADRP 的页内偏移供核对）。
+                    int? adrpOffset = null;
+                    for (var k = 1; k <= 4 && adrpOffset is null; k++)
+                    {
+                        var adrp = site - 4UL * (ulong)k;
+                        if (A64.IsAdrp(Raw(adrp))) adrpOffset = (int)(adrp & 0xFFF);
+                    }
+                    patches[site] = new ErratumPatch(site, pc, first, adrpOffset);
+                    pc += 4;
                 }
-                patches[site] = new ErratumPatch(site, pc, first, adrpOffset);
-                pc += 4;
-            }
 
         // 没有 FDE、但被引用为入口的目标（BL/B 目标、ADRP+ADD/ADR 构造的代码指针、重定位指针）。
         var sortedStarts = list.Select(f => f.Start).ToArray();
@@ -203,6 +204,7 @@ public sealed class CodeMap
             }
         }
         foreach (var target in image.RelocatedPointerTargets()) Candidate(target, "reloc");
+        foreach (var target in registrationEntries ?? []) Candidate(target, "registration");
 
         // 终点取下一个已知入口（FDE 或其他被引用入口）、节尾或补丁桩，三者最近者。
         var allStarts = sortedStarts.Concat(referenced.Keys).Order().ToArray();
@@ -213,7 +215,7 @@ public sealed class CodeMap
             var section = code.First(c => c.s.Contains(entry)).s;
             var end = Math.Min(next, section.Address + section.Size);
             foreach (var p in patches.Values) if (p.Stub > entry && p.Stub < end) end = p.Stub;
-            list.Add(new(entry, end, Region(section), BoundaryEvidence.Reference));
+            list.Add(new(entry, end, Region(section), referenced[entry] == "registration" ? BoundaryEvidence.Registration : BoundaryEvidence.Reference));
         }
         list.Sort((a, b) => a.Start.CompareTo(b.Start));
         for (var i = 1; i < list.Count; i++)

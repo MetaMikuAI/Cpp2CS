@@ -62,11 +62,11 @@ namespace Cpp2CS.Input
         {
             var image = ImageDocument.Load(binaryPath);
             var bytes = File.ReadAllBytes(binaryPath);
-            Il2Cpp il2Cpp = image.Architecture switch
+            Il2Cpp il2Cpp = image.Container switch
             {
-                Cpp2CS.Model.Architecture.Arm64 => new Elf64(new MemoryStream(bytes)),
-                Cpp2CS.Model.Architecture.X64 => new PE(new MemoryStream(bytes)),
-                _ => throw new NotSupportedException(image.Architecture.ToString()),
+                ImageContainer.Elf => new Elf64(new MemoryStream(bytes)),
+                ImageContainer.Pe => new PE(new MemoryStream(bytes)),
+                _ => throw new NotSupportedException(image.Container.ToString()),
             };
             var metadataBytes = File.ReadAllBytes(metadataPath);
             var metadataVersion = metadataBytes.Length >= 8 ? BinaryPrimitives.ReadInt32LittleEndian(metadataBytes.AsSpan(4)) : 0;

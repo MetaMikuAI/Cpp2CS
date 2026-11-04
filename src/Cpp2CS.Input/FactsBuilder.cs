@@ -25,9 +25,10 @@ namespace Cpp2CS.Input
             }
 
             var (model, builder) = Step("model", () => ModelBuilder.Load(binaryPath, metadataPath));
-            var map = Step("codemap", () => CodeMap.Build(model.Image));
-            var scan = Step("scan", () => CodeScan.Run(map));
             var (registrations, problems) = Step("registrations", () => RegistrationReader.Read(model, builder.CodeRegistration, builder.MetadataRegistration));
+            // PE 的叶函数可能没有 .pdata；注册表入口本身就是可核实的函数起点，先纳入再扫描代码。
+            var map = Step("codemap", () => CodeMap.Build(model.Image, registrations.Entries.Select(e => e.Address)));
+            var scan = Step("scan", () => CodeScan.Run(map));
 
             var checks = new FactChecks();
             checks.Add("registrations.read", "Error", registrations.Entries.Count, (IReadOnlyCollection<string>)problems,
