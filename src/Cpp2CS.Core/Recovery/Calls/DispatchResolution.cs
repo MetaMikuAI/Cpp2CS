@@ -30,8 +30,8 @@ internal static class DispatchResolution
         {
             MethodRef? method = call.Op switch
             {
-                null when call.Kind is CallKind.Indirect or CallKind.TailIndirect
-                    && SymTable.Resolve(values.Operands(call)[0]) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef target } } => target,
+                null when call.Kind is CallKind.Indirect or CallKind.TailIndirect => MethodPointer(values.Operands(call)[0]),
+                { Kind: OpKind.CallMethodPointer } => MethodPointer(values.Operands(call)[0]),
                 { Kind: OpKind.CallDelegate, Operand: MethodRef invoke } => invoke,
                 { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } pair } => Slot(itf, pair.Item2, interfaceOnly: true),
                 { Kind: OpKind.CallVirtual, Operand: int slot } when Receiver(call, values) is { } receiver => VirtualSlot(oracle.TypeOf(receiver), slot, oracle.Types, oracle.Substitute),
@@ -41,6 +41,14 @@ internal static class DispatchResolution
         }
         return targets;
     }
+
+    /// <summary>符号求值已确定 MethodInfo 时，偏移零的 methodPointer 读取指向该方法。</summary>
+    private static MethodRef? MethodPointer(Sym value) => SymTable.Resolve(value) switch
+    {
+        EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef method } } => method,
+        ReadSym { Width: 64, Address: EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef method } } } => method,
+        _ => null,
+    };
 
     private static Sym? Receiver(Call call, ValueModel values)
     {

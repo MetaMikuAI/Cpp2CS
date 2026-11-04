@@ -37,6 +37,7 @@ internal static class ArchitectureChecks
         Identities(checks, types);
         CallIdentities(checks);
         TailCallIdentities(checks, facts, types);
+        MethodPointers(checks, facts, types);
         SharedInterfacePartitions(checks);
         InvokerArguments(checks, facts, types);
         SharedInvokerCopies(checks, facts, types);
@@ -77,6 +78,30 @@ internal static class ArchitectureChecks
         StackGuards(checks, facts);
         Verdicts(checks);
         return checks.Finish("架构边界");
+    }
+
+    private static void MethodPointers(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var owner = Type("PointerTargets", 820);
+        var first = MethodRef.Open(Method(owner, "First", 820));
+        var second = MethodRef.Open(Method(owner, "Second", 821));
+        Call Pointer(MethodRef method, int width = 64, int offset = 0) => new(4, CallKind.Indirect,
+            new Load(offset == 0 ? new Symbol(SymbolKind.Method, method)
+                : new Binary(BinOp.Add, new Symbol(SymbolKind.Method, method), Expr.C((ulong)offset, 64), 64), width))
+            { Op = new(OpKind.CallMethodPointer, null) };
+        var a = Pointer(first);
+        var b = Pointer(second);
+        var narrow = Pointer(first, 32);
+        var invoker = Pointer(first, 64, RuntimeLayout.MethodInvoker);
+        var block = new Block(0) { Statements = [a, b, narrow, invoker, new Return(8)] };
+        var function = new MachineFunction { Entry = 0, Range = new(0, 12, CodeRegion.Managed, default), Blocks = [block] };
+        var values = ValueModel.Build(function, new EmptyEnvironment());
+        var oracle = new TypeOracle(types, facts, first, c => new(c, [], null), values);
+        var targets = DispatchResolution.Find(function, values, oracle);
+        check.True(targets.GetValueOrDefault(a.Site) == first && targets.GetValueOrDefault(b.Site) == second,
+            "符号求值后的同地址调用按各自 MethodInfo 解析");
+        check.True(!targets.ContainsKey(narrow.Site) && !targets.ContainsKey(invoker.Site),
+            "非完整方法指针与 invoker 入口不使用普通调用签名");
     }
 
     private static void PartialScalarCells(Assertions check, ProgramFacts facts, ManagedTypes types)
