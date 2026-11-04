@@ -251,7 +251,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     private Dictionary<PhiSym, HashSet<TypeRef>> uses = [];
     private readonly TypeSolution solution = new();
 
-    /// <summary>φ 在使用处被要求的类型（下降空跑时记录）。</summary>
+    /// <summary>φ 在使用处被要求的类型，由独立用途分析记录。</summary>
     public void Use(PhiSym phi, TypeRef type)
     {
         if (!uses.TryGetValue(phi, out var set)) uses[phi] = set = [];

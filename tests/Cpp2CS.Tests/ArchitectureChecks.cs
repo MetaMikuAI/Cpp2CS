@@ -10,6 +10,7 @@ using Cpp2CS.Output;
 using Cpp2CS.Recovery;
 using Cpp2CS.Recovery.Inlining;
 using Cpp2CS.Recovery.Effects;
+using Cpp2CS.Recovery.Calls;
 using Cpp2CS.Recovery.Runtime;
 using Cpp2CS.Recovery.Typing;
 using Cpp2CS.Recovery.Values;
@@ -49,6 +50,7 @@ internal static class ArchitectureChecks
         ConstructorStoreOrder(checks, types);
         ConstructorContracts(checks, types);
         Effects(checks, types);
+        TypeUses(checks, facts, types);
         LowBitArithmetic(checks);
         PackedPhiSlices(checks);
         JoinedPhiSlices(checks);
@@ -797,6 +799,56 @@ internal static class ArchitectureChecks
             "静态读取的类初始化不能在内联证明中丢弃");
     }
 
+    private static void TypeUses(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var abi = new ManagedAbi(facts.Layouts);
+        var shapes = new CallShapes(facts, abi, (_, _) => false);
+        (TypeUsePlan Plan, TypeOracle Oracle, ValueModel Values) Analyze(MethodRef method, MachineFunction function)
+        {
+            var signature = abi.Machine(method, out _)!;
+            var environment = new MethodEnvironment(method, signature, shapes);
+            var values = ValueModel.Build(function, environment);
+            var oracle = new TypeOracle(types, facts, method, environment.Shape, values);
+            var analysis = new MethodAnalysis(method, 0, signature, function, new(), new([]), values) { Environment = environment };
+            return (new TypeUseAnalysis(analysis, oracle).Run(), oracle, values);
+        }
+        var method = MethodRef.Open(Method(Type("TypeUseConsumer", 200), "Choose", 200, MethodAttributes.Public | MethodAttributes.Static));
+        method.Method.ReturnType = types.Double;
+        var left = new Variable(Storage.Gpr(2), 1);
+        var right = new Variable(Storage.Gpr(2), 2);
+        var joined = new Variable(Storage.Gpr(2), 3);
+        var entry = new Block(0) { Statements = [new Branch(0, Expr.C(1, 1), 4, 8)] };
+        var a = new Block(4) { Statements = [new Define(4, left, Expr.C(0x3ff0000000000000, 64)), new Jump(4, 12)] };
+        var b = new Block(8) { Statements = [new Define(8, right, Expr.C(0x4000000000000000, 64)), new Jump(8, 12)] };
+        var end = new Block(12) { Statements = [new Phi(12, joined, [left, right]), new Return(16) { Pieces = [new(0, new Use(joined, 64))] }] };
+        MachineFunction.AddEdge(entry, a); MachineFunction.AddEdge(entry, b);
+        MachineFunction.AddEdge(a, end); MachineFunction.AddEdge(b, end);
+        var function = new MachineFunction { Entry = 0, Range = new(0, 20, CodeRegion.Managed, default), Blocks = [entry, a, b, end] };
+        var before = function.Blocks.SelectMany(block => block.Statements).ToArray();
+        var result = Analyze(method, function);
+        check.Equal(TypeSolveState.Stable, result.Plan.State, "类型用途分析独立收敛");
+        check.Equal(types.Double, result.Oracle.TypeOf(result.Values.Of(joined)), "返回签名将无自然类型的常量合流约束为 double");
+        check.True(before.SequenceEqual(function.Blocks.SelectMany(block => block.Statements)), "约束收集不改写机器图");
+
+        method.Method.ReturnType = types.Int32;
+        method.Method.Parameters = [new("source", new ByRefRef(types.Int32), 0, null, false)];
+        var loaded = new Variable(Storage.Gpr(2), 1);
+        var read = new Define(0, loaded, new Load(new Use(new Variable(Storage.Gpr(0), 0), 64), 32));
+        var unused = new Define(4, new Variable(Storage.Gpr(3), 1), new Load(Expr.C(64, 64), 32));
+        var block = new Block(0) { Statements = [read, unused, new Return(8) { Pieces = [new(0, new Use(loaded, 32))] }] };
+        var reads = Analyze(method, new() { Entry = 0, Range = new(0, 12, CodeRegion.Managed, default), Blocks = [block] });
+        check.True(reads.Plan.Materialized.Count == 1 && ReferenceEquals(reads.Plan.Materialized.Single().Site, read),
+            "读取落点来自实际值用途，不收集未使用读取");
+        var op = new OpSym(new Operator(OperatorKind.Binary, (byte)BinOp.Shl), [reads.Values.Syms.Arg(0, 64), reads.Values.Syms.Const(1, 32)], 64);
+        check.Equal(types.Int32, reads.Oracle.OperationTypes(op, types.Int64).Inputs[1], "移位量与结果类型分别约束");
+        var arrayCall = new Call(0, CallKind.Direct, Expr.C(0, 64)) { Op = new(OpKind.NewArray, new ArrayRef(types.Int32, 1)) };
+        var inputs = RuntimeOps.Of(OpKind.NewArray)!.Inputs!(arrayCall, [reads.Values.Syms.Const(0, 64), reads.Values.Syms.Const(3, 32)], reads.Oracle);
+        check.True(inputs.Count == 1 && inputs[0].Type == types.Int32, "运行时用途描述排除类元数据并约束数组长度");
+        var test = arrayCall with { Op = new(OpKind.IsInst, types.Object) };
+        check.True(RuntimeOps.Of(OpKind.IsInst)!.Inputs!(test, [reads.Values.Syms.Arg(0, 64)], reads.Oracle).Count == 1,
+            "类型实体已在操作数中时，isinst 的单个值实参仍有类型用途");
+    }
+
     private sealed class EmptyEnvironment : IValueEnvironment
     {
         public Sym? Entry(SymTable syms, Storage storage) => null;
@@ -1263,13 +1315,11 @@ internal static class ArchitectureChecks
         public TypeRef? ClassOperand => throw new NotSupportedException();
         public Sym Result => throw new NotSupportedException();
         public bool InFault => throw new NotSupportedException();
-        public ManagedValue View(Sym sym, TypeRef? expected) => throw new NotSupportedException();
+        public ManagedValue Input(int index) => throw new NotSupportedException();
         public TypeRef? TypeOf(Sym sym) => throw new NotSupportedException();
         public LocalValue Local(Sym sym, TypeRef type) => throw new NotSupportedException();
         public LocalValue Temporary(TypeRef type) => throw new NotSupportedException();
-        public Sym? Pointee(int value) => throw new NotSupportedException();
-        public ManagedValue? Location(int argument, TypeRef type) => throw new NotSupportedException();
-        public ManagedValue Field(Sym receiver, FieldRef field) => throw new NotSupportedException();
+        public ManagedValue Field(ManagedValue receiver, FieldRef field) => throw new NotSupportedException();
         public void AwaitConstruction() => throw new NotSupportedException();
         public bool Absorb(Sym target) => throw new NotSupportedException();
         public bool KnownNonNull(Sym target) => throw new NotSupportedException();

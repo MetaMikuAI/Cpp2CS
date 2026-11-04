@@ -24,9 +24,11 @@ public sealed partial class ValueModel
     }
 
     /// <summary>调用读取的单元中属于一个逻辑值的内容；缺失单元不提供来源。</summary>
-    public Sym? CellContent(Call call, MachineValue value, IReadOnlyList<Sym> arguments, bool write)
+    public Sym? CellContent(Call call, MachineValue value, IReadOnlyList<Sym> arguments, bool write) => CellContent(call, value.Index, arguments, write);
+
+    public Sym? CellContent(Call call, int value, IReadOnlyList<Sym> arguments, bool write)
     {
-        var accesses = call.Memory.Where(m => m.Write == write && m.Value == value.Index).ToArray();
+        var accesses = call.Memory.Where(m => m.Write == write && m.Value == value).ToArray();
         if (accesses.Length == 0) return null;
         var pieces = new List<(int Bit, Sym Value)>();
         foreach (var access in accesses)

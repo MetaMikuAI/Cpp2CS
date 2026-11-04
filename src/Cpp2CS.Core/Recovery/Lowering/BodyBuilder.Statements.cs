@@ -91,39 +91,13 @@ internal sealed partial class BodyBuilder
                 return new Statement(new ManagedReturn(ret.Address, ReturnValue(ret, operands)));
             case Trap trap:
                 return Fail(trap.Address, $"控制 陷入 {trap.Kind}", terminal: true);
-            case IndirectJump { Targets.Length: > 0 } jump when TableIndex(operands[0]) is { } tableIndex:
+            case IndirectJump { Targets.Length: > 0 } jump when oracle.TableIndex(operands[0]) is { } tableIndex:
                 return new Switch(jump.Address, View(tableIndex, types.Int32, jump.Address), jump.Targets);
             case IndirectJump jump:
                 return Fail(jump.Address, "控制 间接跳转的目标集合或下标未知", terminal: true);
             default:
                 return Fail(statement.Address, $"语句 {statement.GetType().Name}", terminal: false) is Statement s ? AddHole(output, s) : null;
         }
-    }
-
-    /// <summary>跳转表的下标：目标中唯一一次读取的地址为常量表基址加比例下标。</summary>
-    private Sym? TableIndex(Sym target)
-    {
-        var stack = new Stack<Sym>();
-        stack.Push(target);
-        Sym? found = null;
-        while (stack.Count > 0)
-        {
-            switch (SymTable.Resolve(stack.Pop()))
-            {
-                case ReadSym read:
-                    if (found is not null) return null;
-                    // 表基址为常量：比例下标，或唯一的变量项（字节表的比例为 1）。
-                    var (root, _, index, _) = oracle.Decompose(read.Address);
-                    index ??= root is ConstSym || ReferenceEquals(root, SymTable.Resolve(read.Address)) ? null : root;
-                    if (index is null) return null;
-                    found = index;
-                    break;
-                case SliceSym slice: stack.Push(slice.Base); break;
-                case ConcatSym concat: foreach (var part in concat.Parts) stack.Push(part); break;
-                case OpSym op: foreach (var arg in op.Args) stack.Push(arg); break;
-            }
-        }
-        return found;
     }
 
     private static Terminator? AddHole(List<ManagedStatement> output, Statement hole)

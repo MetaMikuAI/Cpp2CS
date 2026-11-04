@@ -33,7 +33,6 @@ internal sealed partial class BodyBuilder
             case EntitySym { Symbol: { Kind: SymbolKind.Type, Value: TypeRef token } }:
                 return new TypeHandleValue(token, types.RuntimeTypeHandle, 64);
             case ReadSym read:
-                Demand(read);
                 return Read(read, address) is { } value ? Coerce(value, expected, address) : Hole(address, "内存 读取", expected);
             case ResultSym result when constructions.ContainsKey(result):
                 return Hole(address, "构造 对象在构造函数调用前被使用", expected);
@@ -44,8 +43,6 @@ internal sealed partial class BodyBuilder
                     if (oracle.ProjectedScalar(phi) is var (scalar, scalarType, low))
                         return Coerce(IntegerSlice(View(scalar, scalarType, address), low, phi.Width,
                             oracle.Unconstrained(phi.Width) ?? types.Integer(phi.Width <= 32 ? 32 : 64, false), address), expected, address);
-                    // 空跑时记录使用处要求的类型，作为 φ 的类型约束。
-                    if (demand is not null && expected is not null) oracle.Use(phi, expected);
                     var type = oracle.TypeOf(phi) ?? expected ?? oracle.Unconstrained(phi.Width);
                     if (type is null) return Hole(address, "类型 φ 没有类型", expected);
                     phis.Add(phi);
@@ -125,10 +122,10 @@ internal sealed partial class BodyBuilder
 
     private ManagedValue Operation(OpSym op, TypeRef? expected, ulong address)
     {
-        var natural = oracle.TypeOf(op);
+        var typing = oracle.OperationTypes(op, expected);
         switch (op.Op.Kind)
         {
-            case OperatorKind.Compare when op.Op.Cond is Cond.Eq or Cond.Ne && ClassIdentity(op.Args[0], op.Args[1]) is var (owner, sealedType):
+            case OperatorKind.Compare when op.Op.Cond is Cond.Eq or Cond.Ne && oracle.ClassIdentity(op.Args[0], op.Args[1]) is var (owner, sealedType):
                 {
                     // 对象的类指针与密封类比较：等价于对象是否为该类型（读取类指针蕴含对象非空）。
                     var instance = new IsInstValue(View(owner, types.Object, address), sealedType);
@@ -137,11 +134,7 @@ internal sealed partial class BodyBuilder
             case OperatorKind.Compare:
                 {
                     // 整段位的比较使用结构体所包住的标量或引用。
-                    var hint = oracle.TypeOf(op.Args[0]) ?? oracle.TypeOf(op.Args[1]);
-                    if (hint is not null && types.Kind(hint) == TypeKind.Struct && op.Args[1].Width == op.Args[0].Width
-                        && types.Size(hint) * 8 == op.Args[0].Width && oracle.Innermost(hint).Type is var scalar
-                        && (types.Kind(scalar) is TypeKind.Int or TypeKind.Bool || ManagedTypes.IsReferenceType(scalar)))
-                        hint = scalar;
+                    var hint = typing.Inputs[0];
                     return new ComparisonValue(op.Op.Cond, View(op.Args[0], hint, address), View(op.Args[1], hint, address), types.Boolean);
                 }
             case OperatorKind.And or OperatorKind.Or:
@@ -151,7 +144,7 @@ internal sealed partial class BodyBuilder
             case OperatorKind.Select:
                 {
                     // 各路都没有定义类型（常量之间的选择）时按期望类型解释，常量取其位型。
-                    var type = oracle.Defined(op) ?? expected ?? types.Integer(op.Width is 8 or 16 or 32 or 64 ? op.Width : 64, true);
+                    var type = typing.Result!;
                     return new ChoiceValue(View(op.Args[0], types.Boolean, address), View(op.Args[1], type, address), View(op.Args[2], type, address), type, Width(type));
                 }
             case OperatorKind.Binary:
@@ -163,19 +156,19 @@ internal sealed partial class BodyBuilder
                         return op.Op.Binary == BinOp.Xor ? new ComparisonValue(Cond.Ne, left, right, types.Boolean)
                             : new BooleanValue(op.Op.Binary == BinOp.And, left, right, types.Boolean);
                     }
-                    var type = expected is not null && types.Kind(expected) is TypeKind.Int && Width(expected) == op.Width ? expected : natural ?? oracle.Unconstrained(op.Width);
+                    var type = typing.Result;
                     if (type is null) return Hole(address, $"类型 运算 {op.Op}", expected);
-                    return new BinaryValue(op.Op.Binary, View(op.Args[0], type, address), View(op.Args[1], op.Op.Binary is BinOp.Shl or BinOp.LShr or BinOp.AShr ? types.Int32 : type, address), type, op.Width);
+                    return new BinaryValue(op.Op.Binary, View(op.Args[0], type, address), View(op.Args[1], typing.Inputs[1], address), type, op.Width);
                 }
             case OperatorKind.Unary:
                 {
-                    var type = natural ?? (expected is not null && types.Kind(expected) is TypeKind.Int && Width(expected) == op.Width ? expected : oracle.Unconstrained(op.Width));
+                    var type = typing.Result;
                     if (type is null) return Hole(address, $"类型 运算 {op.Op}", expected);
                     return new UnaryValue(op.Op.Unary, View(op.Args[0], type, address), type, op.Width);
                 }
             case OperatorKind.Convert:
                 {
-                    var type = natural ?? (expected is not null && Width(expected) == op.Width ? expected : null);
+                    var type = typing.Result;
                     if (type is null) return Hole(address, $"类型 转换 {op.Op}", expected);
                     var operandWidth = op.Args[0].Width;
                     // 非标准宽度的片不能交给 conv.i*：先把该片的符号位移到 IL 整数最高位，再算术右移。
@@ -187,26 +180,11 @@ internal sealed partial class BodyBuilder
                         var aligned = new BinaryValue(BinOp.Shl, View(op.Args[0], integer, address), shift, integer, bits);
                         return Coerce(new BinaryValue(BinOp.AShr, aligned, shift, integer, bits), type);
                     }
-                    var source = op.Op.Conversion switch
-                    {
-                        ConvKind.FloatToFloat or ConvKind.FloatToSInt or ConvKind.FloatToUInt => operandWidth == 32 ? types.Single : types.Double,
-                        ConvKind.SIntToFloat or ConvKind.SignExtend when operandWidth is 8 or 16 or 32 or 64 => oracle.TypeOf(op.Args[0]) is { } t && types.Kind(t) is TypeKind.Int ? t : types.Integer(operandWidth, true),
-                        ConvKind.UIntToFloat when operandWidth is 8 or 16 or 32 or 64 => types.Integer(operandWidth, false),
-                        _ => oracle.TypeOf(op.Args[0]),
-                    };
+                    var source = typing.Inputs[0];
                     return new ConversionValue(op.Op.Conversion, View(op.Args[0], source, address), type, op.Width);
                 }
         }
         return Hole(address, $"运算 {op.Op} 尚未接入", expected);
-    }
-
-    private (Sym Owner, TypeRef Type)? ClassIdentity(Sym left, Sym right)
-    {
-        foreach (var (a, b) in new[] { (left, right), (right, left) })
-            if (oracle.ClassOwner(a) is { } owner && SymTable.Resolve(b) is EntitySym { Symbol: { Kind: SymbolKind.Class, Value: DefinitionRef type } }
-                && (type.Definition.Attributes & System.Reflection.TypeAttributes.Sealed) != 0)
-                return (owner, type);
-        return null;
     }
 
     /// <summary>原子的一段：值类型的字段；整数的低位截断；bool 的低位即自身。</summary>
@@ -220,7 +198,6 @@ internal sealed partial class BodyBuilder
         }
         if (slice.Base is ReadSym merged && oracle.Part(merged, slice.Low, slice.Width) is { } part)
         {
-            Demand(merged);
             return Coerce(LocationValue(part, address), expected);
         }
         var baseType = oracle.TypeOf(slice.Base) ?? (slice.Base is PhiSym ? oracle.Unconstrained(slice.Base.Width) : null);

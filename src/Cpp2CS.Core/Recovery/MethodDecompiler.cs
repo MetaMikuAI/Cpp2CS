@@ -95,11 +95,15 @@ public sealed class MethodDecompiler
     public MethodRecoveryResult Lower(MethodAnalysis analysis)
     {
         var oracle = new TypeOracle(types, facts, analysis.Method, analysis.Environment.Shape, analysis.Values, analysis.Memory);
+        var uses = new TypeUseAnalysis(analysis, oracle).Run();
+        if (uses.State != TypeSolveState.Stable)
+            return new(analysis.Method, analysis.Entry, null, [new(analysis.Entry,
+                uses.State == TypeSolveState.Cycle ? "类型 φ 类型求解循环" : "类型 φ 类型求解超过预算")]);
         var referenced = analysis.Function.Blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk)
             .OfType<Symbol>().Where(s => s.Kind == SymbolKind.Method).Select(s => (MethodRef)s.Value).Distinct().ToArray();
         var fields = new InlineEvidence(types, analysis.Method, Summary, referenced);
         var templates = new TemplateRecovery(types, analysis.Method, Summary, fields);
-        var lowered = BodyBuilder.Build(analysis, oracle, fields, templates);
+        var lowered = BodyBuilder.Build(analysis, oracle, uses, fields, templates);
         if (lowered.Body is null) return new(analysis.Method, analysis.Entry, null, lowered.Holes);
         var recovered = templates.Run(lowered.Body, lowered.Constructions, lowered.NextLocal);
         var body = LocalCoalescing.Run(recovered.Body);

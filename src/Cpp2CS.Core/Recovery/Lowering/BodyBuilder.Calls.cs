@@ -53,8 +53,7 @@ internal sealed partial class BodyBuilder
             var value = signature.Arguments[i];
             if (value.Index < 0 && construction is not null) continue;
             if (value.Index < 0 && pendingReceiver is not null) { receiver = pendingReceiver; continue; }
-            var type = value.Index < 0 ? (callee.Method.Owner.IsValueType ? new ByRefRef(callee.DeclaringType) : callee.DeclaringType)
-                : callee.Concrete(callee.Method.Parameters[value.Index].Type);
+            var type = TypeOracle.ArgumentType(callee, value.Index);
             if (construction is not null && DelegateFacts.IsDelegate(callee.DeclaringType) && value.Index == 1 && managed.Count == 1)
             {
                 if (oracle.DelegateTargetOf(contents[i], contents[Array.FindIndex(signature.Arguments, a => a.Index == 0)]) is { } target)
@@ -120,14 +119,12 @@ internal sealed partial class BodyBuilder
     /// 这是推断：被调方的行为与该实参无关，任何类型正确的值都等价。
     /// </summary>
     private ManagedValue? Unconstrained(Calls.CallShape shape, MachineValue value, TypeRef type, Sym content)
-    {
-        if (value.Transfer != Transfer.Value || value.Pieces.Length == 0 || !value.Pieces.All(p => shape.Unused.Contains(p.Register))) return null;
-        if (oracle.TypeOf(content) is { } actual && (actual.Equals(type) || types.IsAssignable(actual, type))) return null;
-        if (value.Index < 0 && oracle.Parameter(-1) is { } self && (self.Equals(type) || types.IsAssignable(self, type)))
-            return new ArgumentValue(-1, self, Width(self));
-        return ManagedTypes.IsReferenceType(type) || types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer
-            ? new ConstantValue(0, type, Width(type)) : null;
-    }
+        => oracle.Supply(shape, value, type, content) switch
+        {
+            ArgumentSupply.This => new ArgumentValue(-1, oracle.Parameter(-1)!, Width(oracle.Parameter(-1)!)),
+            ArgumentSupply.Default => new ConstantValue(0, type, Width(type)),
+            _ => null,
+        };
 
     /// <summary>
     /// 一个 IL 实参。按值传递时为内容的视图；按副本传递时为被指单元在调用前的内容；
@@ -198,7 +195,15 @@ internal sealed partial class BodyBuilder
         public TypeRef? ClassOperand => owner.oracle.ClassOperand(call);
         public IReadOnlyList<Sym> Arguments { get; } = arguments.Take(call.OriginalArgumentCount).ToArray();
         public Sym Result => owner.values.Syms.Result(call, 0, 64);
-        public ManagedValue View(Sym sym, TypeRef? expected) => owner.View(sym, expected, call.Address);
+        public ManagedValue Input(int index)
+        {
+            var input = RuntimeOps.Of(op.Kind)!.Inputs!(call, Arguments, owner.oracle)[index];
+            if (input.Kind == RuntimeInputKind.Value) return owner.View(input.Value, input.Type, call.Address);
+            if (input.Kind == RuntimeInputKind.Pointee && owner.values.CellContent(call, input.Pointee, arguments, false) is { } content)
+                return owner.View(content, input.Type, call.Address);
+            return input.Type is { } type && owner.oracle.Locate(input.Value, owner.types.StorageBits(type)) is { } location
+                ? owner.LocationValue(location, call.Address) : owner.Hole(call.Address, "运行时 输入位置未知", input.Type);
+        }
         public TypeRef? TypeOf(Sym sym) => owner.oracle.TypeOf(sym);
         public LocalValue Local(Sym sym, TypeRef type) => owner.Local(sym, type);
         public LocalValue Temporary(TypeRef type) => owner.NewLocal(type);
@@ -227,18 +232,7 @@ internal sealed partial class BodyBuilder
             return true;
         }
 
-        public Sym? Pointee(int value)
-        {
-            var reads = call.Memory.Where(m => !m.Write && m.Value == value).OrderBy(m => m.ValueBit).ToArray();
-            if (reads.Length == 0) return null;
-            var syms = owner.values.Syms;
-            return syms.Concat(reads.Select(m => syms.Slice(arguments[call.ArgumentIndex(m.Cell)], m.CellBit, m.Width)));
-        }
-
-        public ManagedValue? Location(int argument, TypeRef type) =>
-            argument < arguments.Count && owner.oracle.Locate(arguments[argument], owner.Width(type)) is { } location ? owner.LocationValue(location, call.Address) : null;
-
-        public ManagedValue Field(Sym receiver, FieldRef field) => owner.FieldAccess(owner.View(receiver, owner.oracle.TypeOf(receiver), call.Address), field, owner.FieldType(field, null), true, call.Address);
+        public ManagedValue Field(ManagedValue receiver, FieldRef field) => owner.FieldAccess(receiver, field, owner.FieldType(field, null), true, call.Address);
     }
 
     private MethodRef? Constructor(string exception) => oracle.ExceptionType(exception) is { } type
