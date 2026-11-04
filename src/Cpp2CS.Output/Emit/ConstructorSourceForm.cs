@@ -51,6 +51,7 @@ internal static class ConstructorSourceForm
                 ConstantValue c => $"{c.Type}:{c.Bits:x}/{c.Width}",
                 StringValue s => $"\"{s.Text.Replace("\\", "\\\\").Replace("\"", "\\\"")}\"",
                 TypeHandleValue t => $"typeof({t.Target})",
+                FieldHandleValue f => $"ldtoken({f.Field})",
                 StaticFieldValue f => $"{f.Field}",
                 NewObjectValue n => Children($"new#{n.Constructor.Method.Index} {n.Constructor}", n.Arguments),
                 NewArrayValue a => Children($"new {a.ArrayType}", [a.Length]),

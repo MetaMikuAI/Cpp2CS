@@ -12,6 +12,8 @@ public sealed record LocalValue(Variable Variable, TypeRef Type, int Width) : Ma
 public sealed record ConstantValue(ulong Bits, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record StringValue(string Text, TypeRef Type) : ManagedValue(Type, 64);
 public sealed record TypeHandleValue(TypeRef Target, TypeRef Type, int Width) : ManagedValue(Type, Width);
+/// <summary>ldtoken 字段：数组初始化器的 RuntimeFieldHandle。</summary>
+public sealed record FieldHandleValue(FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record NewArrayValue(ArrayRef ArrayType, ManagedValue Length) : ManagedValue(ArrayType, 64);
 public sealed record NewObjectValue(MethodRef Constructor, IReadOnlyList<ManagedValue> Arguments) : ManagedValue(Constructor.DeclaringType, 64)
 {

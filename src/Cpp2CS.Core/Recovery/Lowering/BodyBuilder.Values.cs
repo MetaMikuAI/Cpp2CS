@@ -32,6 +32,8 @@ internal sealed partial class BodyBuilder
                 return new StringValue(text, types.String);
             case EntitySym { Symbol: { Kind: SymbolKind.Type, Value: TypeRef token } }:
                 return new TypeHandleValue(token, types.RuntimeTypeHandle, 64);
+            case EntitySym { Symbol: { Kind: SymbolKind.Field, Value: FieldRef field } }:
+                return new FieldHandleValue(field, types.RuntimeFieldHandle, 64);
             case ReadSym read:
                 return Read(read, address) is { } value ? Coerce(value, expected, address) : Hole(address, "内存 读取", expected);
             case ResultSym result when constructions.ContainsKey(result):

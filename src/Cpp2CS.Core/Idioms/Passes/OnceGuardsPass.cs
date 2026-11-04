@@ -155,7 +155,9 @@ internal static class OnceGuardsPass
                     line.Merge = current;
                     return true;
                 }
-                if (!visited.Add(current) || current.IsLandingPad || current.Handler != head.Handler) { reason = "路径含异常边或环"; return false; }
+                // 没有异常边只说明块里没有原生抛出点，不说明它在 try 外：只有两处都有异常边且去向不同才算跨区域。
+                if (!visited.Add(current) || current.IsLandingPad || current.Handler is not null && head.Handler is not null && current.Handler != head.Handler)
+                { reason = "路径含异常边或环"; return false; }
                 line.Previous = previous;
                 var incoming = current.Predecessors.IndexOf(previous);
                 var shared = current.Predecessors.Count > 1;

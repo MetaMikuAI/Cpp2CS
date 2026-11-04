@@ -111,6 +111,8 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
             case TypeHandleValue handle:
                 if (!CanAccess(handle.Target)) return new(EmissionProblemKind.AccessDenied, $"访问权限 类型 {handle.Target}");
                 return handle.Type.Equals(types.RuntimeTypeHandle) ? null : new(EmissionProblemKind.Unsupported, "类型句柄的托管类型不符");
+            case FieldHandleValue handle:
+                return handle.Type.Equals(types.RuntimeFieldHandle) ? null : new(EmissionProblemKind.Unsupported, "字段句柄的托管类型不符");
             case NewObjectValue created:
                 var constructor = created.Constructor;
                 if (constructor.Method.Name != ".ctor" || constructor.Method.IsStatic || constructor.Method.Parameters.Count != created.Arguments.Count)

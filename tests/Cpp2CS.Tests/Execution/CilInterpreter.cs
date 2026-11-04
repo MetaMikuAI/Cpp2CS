@@ -259,7 +259,9 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Ldc_R8: stack.Push(StackValue.F((double)operand)); break;
                 case Code.Ldnull: stack.Push(StackValue.O(0)); break;
                 case Code.Ldstr: stack.Push(StackValue.O(world.String((string)operand))); break;
-                case Code.Ldtoken: stack.Push(StackValue.I8(world.TypePointer(context.Type((TypeReference)operand)))); break;
+                case Code.Ldtoken:
+                    stack.Push(StackValue.I8(operand is FieldReference token ? world.FieldInfo(context.Field(token)) : world.TypePointer(context.Type((TypeReference)operand))));
+                    break;
                 case Code.Pop: Pop(); break;
                 case Code.Dup: stack.Push(stack.Peek()); break;
 
@@ -745,7 +747,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
 
     // —— 值的表示 ——
 
-    private bool IsHandle(TypeRef type) => type.Equals(Types.RuntimeTypeHandle);
+    private bool IsHandle(TypeRef type) => type.Equals(Types.RuntimeTypeHandle) || type.Equals(Types.RuntimeFieldHandle);
 
     /// <summary>内存中的位型（零扩展到 64 位）→ 栈上的值。</summary>
     public StackValue Load(TypeRef type, ulong bits)
