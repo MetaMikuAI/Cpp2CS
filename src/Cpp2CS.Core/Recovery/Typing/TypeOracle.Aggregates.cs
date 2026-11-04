@@ -52,7 +52,9 @@ public sealed partial class TypeOracle
     {
         if (type is not DefinitionRef structure || types.Kind(type) != TypeKind.Struct || !BitRepresentation(bits)
             || types.StorageBits(type) > bits.Width || WholeRead(bits, structure) is not null) return null;
-        return types.Projections(structure)
-            .Where(p => SymTable.Resolve(values.Syms.Slice(bits, p.Bit, p.Width)) is not ConstSym { Value: 0 }).ToArray();
+        var leaves = types.Projections(structure).ToArray();
+        // 布局未知的叶子（共享泛型字段）没有位范围，整体不能按位分解。
+        if (leaves.Any(p => !p.Fits(bits.Width))) return null;
+        return leaves.Where(p => SymTable.Resolve(values.Syms.Slice(bits, p.Bit, p.Width)) is not ConstSym { Value: 0 }).ToArray();
     }
 }

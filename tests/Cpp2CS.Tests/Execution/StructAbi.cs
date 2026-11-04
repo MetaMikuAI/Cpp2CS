@@ -24,6 +24,9 @@ internal sealed partial class StructAbi(WorldIndex index)
         }
         var managed = index.Abi.Classify(method, out var problem)
             ?? throw new InvalidDataException($"对照器错误 ABI 单边分类：{method}：{problem}");
+        // 完全共享泛型的不透明值不是 AAPCS64 的取值，独立分类器无从核对。
+        if (managed.Parameters.Any(p => p.Passing == Passing.Shared) || managed.Return is { } opaque && ManagedAbi.SharedValue(opaque.Type))
+            throw new Unsupported("完全共享泛型的不透明值");
         void Check(AbiValue? a, Aapcs64Classifier.Location? b)
         {
             if (a is null && b is null) return;

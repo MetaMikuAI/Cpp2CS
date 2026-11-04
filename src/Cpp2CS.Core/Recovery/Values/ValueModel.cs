@@ -239,6 +239,10 @@ public sealed partial class ValueModel
                 }
             case FrameAddress f:
                 return Syms.Local(LocalSpace.Frame, f.Offset);
+            case StackAllocation a:
+                return Syms.Local(LocalSpace.Dynamic(a.Site, a.Element), 0);
+            case ClassProperty p:
+                return Syms.Unknown($"运行时 类属性 {p}", p.Width);
             case Entry e:
                 return environment.Entry(Syms, e.Storage) is { } entry ? Syms.Widen(entry, e.Width) : Syms.Unknown($"入口 {e.Storage}", e.Width);
             case Symbol s:

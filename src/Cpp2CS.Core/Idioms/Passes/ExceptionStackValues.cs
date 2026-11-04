@@ -4,29 +4,35 @@ using Convert = Cpp2CS.Ir.Convert;
 
 namespace Cpp2CS.Idioms;
 
-/// <summary>异常暂存栈的 push 后立即 peek 使用同一个 SSA 引用，不需要托管堆数组。</summary>
+/// <summary>异常暂存栈的 push 后立即 peek：下标相同的栈数组写入与读取之间没有其他写入时，读取即写入的 SSA 值。</summary>
 internal static class ExceptionStackValues
 {
     public static bool Run(MachineFunction function)
     {
         var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target);
-        Expr Expand(Expr expression) => ExprMap.Map(expression, e => e is Use use && definitions.TryGetValue(use.Variable, out var d) ? Expand(d.Value) : null);
+        // 读取保留为各自的 SSA 变量：同一位置的两次读取不一定相等。
+        Expr Expand(Expr expression) => ExprMap.Map(expression, e => e is Use use && definitions.TryGetValue(use.Variable, out var d)
+            && !ExprMap.Walk(d.Value).Any(part => part is Load) ? Expand(d.Value) : null);
         static Expr Strip(Expr value) => value is Convert c ? Strip(c.Operand) : value;
-        (long Buffer, Expr Index)? Slot(Expr address) => address is Binary
+        static Expr Index(Expr value)
+        {
+            value = Strip(value);
+            return value is Binary { Op: BinOp.Sub, Right: Const after } sub
+                && Strip(sub.Left) is Binary { Op: BinOp.Add, Right: Const before } add && before.Value == after.Value ? Index(add.Left) : value;
+        }
+        (long Buffer, Expr Index)? Slot(Expr address) => Expand(address) is Binary
         {
             Op: BinOp.Add, Left: FrameAddress frame,
             Right: Binary { Op: BinOp.Shl, Left: var index, Right: Const { Value: 3 } }
-        } ? (frame.Offset, Strip(Expand(index))) : null;
-        bool Escapes(Expr expression, long buffer, long counter)
+        } ? (frame.Offset, Index(index)) : null;
+        // 基址只能作为下标读写的基址出现。
+        bool Exposed(Expr expression, long buffer)
         {
-            if (expression is Load load && (load.Address is FrameAddress f && f.Offset == counter
-                    || Slot(load.Address) is { } slot && slot.Buffer == buffer)) return false;
-            if (expression is FrameAddress frame && frame.Offset >= buffer && frame.Offset < counter + 4) return true;
-            return ExprMap.Children(expression).Any(e => Escapes(e, buffer, counter));
+            if (expression is Load read && Slot(read.Address) is { } slot && slot.Buffer == buffer) return false;
+            return expression is FrameAddress frame ? frame.Offset == buffer : ExprMap.Children(expression).Any(e => Exposed(e, buffer));
         }
-        bool Private(long buffer, long counter) => !function.Blocks.SelectMany(b => b.Statements).Any(s =>
-            s is Store store && (store.Target is FrameAddress f && f.Offset == counter || Slot(store.Target) is { } slot && slot.Buffer == buffer)
-                ? Escapes(store.Value, buffer, counter) : ExprMap.Operands(s).Any(e => Escapes(e, buffer, counter)));
+        bool Private(long buffer) => !function.Blocks.SelectMany(b => b.Statements).Any(s => s is Store store && Slot(store.Target) is { } slot && slot.Buffer == buffer
+            ? Exposed(store.Value, buffer) : ExprMap.Operands(s).Any(e => Exposed(e, buffer)));
         var changed = false;
         var buffers = new HashSet<long>();
         foreach (var block in function.Blocks)
@@ -35,45 +41,22 @@ internal static class ExceptionStackValues
                 var statement = block.Statements[i];
                 foreach (var load in ExprMap.Operands(statement).SelectMany(ExprMap.Walk).OfType<Load>().ToArray())
                 {
-                    if (load.Width != 64 || Slot(load.Address) is not { } slot
-                        || slot.Index is not Binary { Op: BinOp.Sub, Left: var count, Right: Const { Value: 1 } }
-                        || Strip(count) is not Load { Width: 32, Address: FrameAddress counter }
-                        || counter.Offset <= slot.Buffer || counter.Offset - slot.Buffer > 64 || !Private(slot.Buffer, counter.Offset)) continue;
-                    var preceding = new List<Stmt>();
+                    if (load.Width != 64 || Slot(load.Address) is not { } slot || !Private(slot.Buffer)) continue;
                     var current = block;
                     var at = i - 1;
                     Store? push = null;
                     var seen = new HashSet<Block>();
-                    while (preceding.Count < 32 && seen.Add(current))
+                    var steps = 0;
+                    while (push is null && steps < 32 && seen.Add(current))
                     {
-                        for (; at >= 0; at--)
-                        {
-                            var item = current.Statements[at];
-                            preceding.Add(item);
-                            if (item is Store store && Slot(store.Target) is { } candidate && candidate.Buffer == slot.Buffer)
-                            {
-                                if (Strip(candidate.Index) == new Load(counter, 32)) push = store;
-                                break;
-                            }
-                        }
-                        if (at >= 0 || current.Predecessors is not [var pred] || !pred.NormalSuccessors.Contains(current)) break;
-                        current = pred;
+                        for (; at >= 0 && push is null; at--, steps++)
+                            if (current.Statements[at] is Store store && Slot(store.Target) is { } candidate && candidate.Buffer == slot.Buffer) push = store;
+                        if (push is not null || current.Predecessors is not [var previous] || !previous.NormalSuccessors.Contains(current)) break;
+                        current = previous;
                         at = current.Statements.Count - 1;
                     }
-                    if (push is null || push.Value.Width != 64) continue;
-                    var writes = preceding.OfType<Store>().Where(s => s.Target == counter).ToArray();
-                    if (writes is not [var increment]
-                        || Strip(Expand(increment.Value)) is not Binary { Op: BinOp.Add, Left: var oldCount, Right: Const { Value: 1 } }
-                        || Strip(oldCount) != new Load(counter, 32)) continue;
-                    // peek 的计数快照必须位于 ++count 之后，不能沿用 push 前的寄存器。
-                    var afterIncrement = preceding.TakeWhile(s => !ReferenceEquals(s, increment)).ToHashSet();
-                    bool FreshCount(Expr e)
-                    {
-                        if (e is Use u && definitions.TryGetValue(u.Variable, out var d))
-                            return (!ExprMap.Walk(d.Value).Any(x => x is Load l && l.Address == counter) || afterIncrement.Contains(d)) && FreshCount(d.Value);
-                        return ExprMap.Children(e).All(FreshCount);
-                    }
-                    if (!FreshCount(load.Address)) continue;
+                    if (push is not { Value.Width: 64 } || Slot(push.Target)!.Value.Index != slot.Index
+                        || ExprMap.Walk(push.Value).Any(e => e is Load)) continue;
                     statement = ExprMap.MapOperands(statement, e => ExprMap.Map(e, part => part == load ? push.Value : null));
                     block.Statements[i] = statement;
                     buffers.Add(slot.Buffer);

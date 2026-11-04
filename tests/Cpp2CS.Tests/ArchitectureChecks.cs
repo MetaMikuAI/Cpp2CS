@@ -6,6 +6,7 @@ using Cpp2CS.Idioms;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Algebra;
+using Cpp2CS.Machine.Storage;
 using Cpp2CS.Output;
 using Cpp2CS.Recovery;
 using Cpp2CS.Recovery.Inlining;
@@ -40,9 +41,8 @@ internal static class ArchitectureChecks
         MethodPointers(checks, facts, types);
         SharedInterfacePartitions(checks);
         InvokerArguments(checks, facts, types);
-        SharedInvokerCopies(checks, facts, types);
-        GenericValueChecks(checks, facts, types);
-        MethodInfoSpills(checks, facts);
+        SharedValueModel(checks, facts, types);
+        FrameForwards(checks, facts);
         StackBoxes(checks, facts, types);
         PartialScalarCells(checks, facts, types);
         UnusedCallStacks(checks, facts, types);
@@ -83,8 +83,7 @@ internal static class ArchitectureChecks
         PhiLoadWidths(checks, facts);
         FloatingOperands(checks, facts, types);
         StackGuards(checks, facts);
-        InitializationSnapshots(checks);
-        LayoutReloads(checks);
+        OnceGuards(checks, facts);
         Verdicts(checks);
         return checks.Finish("架构边界");
     }
@@ -150,7 +149,7 @@ internal static class ArchitectureChecks
     private static void StackBoxes(Assertions check, ProgramFacts facts, ManagedTypes types)
     {
         var definition = new TypeDef { Index = 800, Assembly = "Tests.dll", Namespace = "Tests", Name = "State", Token = 0,
-            Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = true };
+            Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = true, BaseType = new DefinitionRef(types.CorlibDefinition("System.Enum")!, []) };
         var type = new DefinitionRef(definition, []);
         var method = new MethodRef(types.CorlibDefinition("System.Enum")!.Methods.Single(m => m.Name == "ToString" && m.Parameters.Count == 0), [], []);
         var abi = new ManagedAbi(facts.Layouts);
@@ -171,8 +170,8 @@ internal static class ArchitectureChecks
             MachineFunction.AddEdge(entry, left); MachineFunction.AddEdge(entry, right);
             MachineFunction.AddEdge(left, last); MachineFunction.AddEdge(right, last);
             var function = new MachineFunction { Entry = 0, Range = new(0, 32, CodeRegion.Managed, default), Blocks = [entry, left, right, last] };
-            var changed = StackBoxingPass.Run(function, c => ReferenceEquals(c, call) ? [method] : [],
-                c => ReferenceEquals(c, call) ? abi.Machine(method, out _) : null, e => e, _ => 4, () => new(Storage.Temp(800), 1));
+            CallShape Shape(Call c) => new(c, ReferenceEquals(c, call) ? [method] : [], ReferenceEquals(c, call) ? abi.Machine(method, out _) : null);
+            var changed = StackBoxingPass.Run(function, new CallMemoryEffects(Shape, abi), Shape, _ => 4, () => new(Storage.Temp(800), 1));
             return changed && last.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.Box
                 && c.Arguments[1] == new FrameAddress(-16)) && last.Statements.OfType<Store>().Count() >= 2;
         }
@@ -301,132 +300,76 @@ internal static class ArchitectureChecks
             .Arguments[0] == new Use(receiver, 64), "invoker 接收者保留原值，不能跨调用重新读取字段");
     }
 
-    private static void SharedInvokerCopies(Assertions check, ProgramFacts facts, ManagedTypes types)
+    /// <summary>完全共享泛型的不透明值：表示转换归一为句柄，按 sizeof(T) 的复制成为位置操作。</summary>
+    private static void SharedValueModel(Assertions check, ProgramFacts facts, ManagedTypes types)
     {
-        var owner = Type("SharedInvokerOwner", 771);
-        var definition = Method(owner, "Forward", 771, MethodAttributes.Public | MethodAttributes.Static);
-        definition.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
-        var type = new GenericParameterRef("T", true, 0);
-        definition.Parameters = [new("value", type, 0, null, false)];
-        definition.ReturnType = new PrimitiveRef("void");
-        var self = new MethodRef(definition, [], [type with { Binding = new(NativeBindingKind.Shared) }]);
-        var abi = new ManagedAbi(facts.Layouts);
-        check.True(abi.Invoker(self).Arguments[0] is { Size: -1, Transfer: Transfer.Copy },
-            "共享泛型副本保留未知尺寸，不能退化为指针宽度的值");
-        foreach (var variant in new[] { "private", "null-check", "nested", "neighbor-copy", "overlap-copy", "spilled-input", "spilled-escape",
-            "reuse-array", "retained-slot", "wrong-size", "missing-input", "read-slot", "escape-slot", "intervening-call" })
+        var type = new GenericParameterRef("T", false, 0);
+        var klass = new Symbol(SymbolKind.Class, type);
+        Expr Field(int offset, int width) => new Load(new Binary(BinOp.Add, klass, Expr.C((ulong)offset, 64), 64), width);
+        var flag = new Compare(Cond.Slt, Field(RuntimeLayout.ClassByvalArg + 8, 32), Expr.C(0, 32));
+        var input = new Use(new Variable(Storage.Gpr(1), 0), 64);
+        var size = new Variable(Storage.Temp(900), 1);
+        var aligned = new Variable(Storage.Temp(901), 1);
+        var local = new Variable(Storage.Temp(902), 1);
+        var picked = new Variable(Storage.Temp(903), 1);
+        (Block Block, MachineFunction Function) Build(string variant)
+        {
+            Expr saved = new FrameAddress(-16);
+            var other = new Use(new Variable(Storage.Gpr(2), 0), 64);
+            var block = new Block(0) { Statements = [
+                new Store(0, saved, variant == "other-saved" ? other : input),
+                new Define(4, size, new Ir.Convert(ConvKind.ZeroExtend, Field(RuntimeLayout.ClassStackSlotSize, 32), 64)),
+                new Define(8, aligned, new Binary(BinOp.And, new Binary(BinOp.Add, new Use(size, 64), Expr.C(15, 64), 64), Expr.C(0x1fffffff0, 64), 64)),
+                new Define(12, local, new Binary(BinOp.Sub, new FrameAddress(-64), new Use(aligned, 64), 64)),
+                new Define(16, picked, new Select(flag, input, saved, 64)),
+                new Call(20, CallKind.Direct, Expr.C(128, 64)) { Op = new(OpKind.Import, "memcpy"),
+                    Arguments = [new Use(local, 64), new Use(picked, 64), variant == "wrong-size" ? Expr.C(8, 64) : new Use(size, 64)] },
+                new Return(24)] };
+            return (block, new MachineFunction { Entry = 0, Range = new(0, 28, CodeRegion.Managed, default), Blocks = [block] });
+        }
+        foreach (var variant in new[] { "copy", "other-saved", "wrong-size" })
+        {
+            var (block, function) = Build(variant);
+            var state = new IdiomState(new IdiomRewriter(facts), function);
+            check.True(state.SharedValues(), $"不透明值归一 {variant}");
+            var copy = block.Statements.OfType<Call>().Single();
+            check.Equal(variant != "wrong-size", copy.Op?.Kind == OpKind.CopyGenericValue, $"按 sizeof(T) 的复制成为位置操作 {variant}");
+            check.True(block.Statements.OfType<Define>().Any(d => d.Target == local && d.Value is StackAllocation), $"T 大小的动态分配是 T 的局部 {variant}");
+            var selection = block.Statements.OfType<Define>().Single(d => d.Target == picked).Value;
+            check.Equal(variant != "other-saved", selection == input, $"形参地址归一为句柄 {variant}");
+        }
+        // invoker 槽的两种表示合流：isValue(T) ? a : *a。
+        foreach (var variant in new[] { "repr", "different" })
         {
             var head = new Block(0);
-            var reference = new Block(64);
-            var join = new Block(80);
-            var input = new Use(new(Storage.Gpr(0), 0), 64);
-            var saved = new FrameAddress(-16);
-            var array = new FrameAddress(-24);
-            var entity = new Symbol(SymbolKind.Class, type);
-            var flag = new Compare(Cond.Slt, new Load(new Binary(BinOp.Add, entity, Expr.C(RuntimeLayout.ClassByvalArg + 8, 64), 64), 32), Expr.C(0, 32));
-            var size = new Ir.Convert(ConvKind.ZeroExtend, new Load(new Binary(BinOp.Add, entity,
-                Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32), 64);
-            var destination = new Binary(BinOp.Sub, new FrameAddress(-64), new Binary(BinOp.And,
-                new Binary(BinOp.Add, size, Expr.C(15, 64), 64), Expr.C(0xfffffffffffffff0, 64), 64), 64);
-            if (variant == "nested") destination = destination with { Left = destination };
-            var pointer = new Variable(Storage.Gpr(20), 1);
-            var loaded = new Variable(Storage.Gpr(21), 1);
-            var selected = new Variable(Storage.Gpr(22), 1);
-            var copy = new Call(16, CallKind.Direct, Expr.C(0, 64))
-            {
-                Op = new(OpKind.Import, "memcpy"), Arguments = [destination, new Select(flag,
-                    variant is "spilled-input" or "spilled-escape" ? new Load(new FrameAddress(-32), 64) : input, saved, 64),
-                    variant == "wrong-size" ? Expr.C(8, 64) : size],
-            };
-            head.Statements = [new Define(0, pointer, destination), new Store(4, saved,
-                variant == "missing-input" ? Expr.C(0, 64) : input), copy, new Branch(20, flag, join.Start, reference.Start)];
-            reference.Statements = [new Define(64, loaded, new Load(destination, 64)), new Jump(68, join.Start)];
-            var invoke = new Call(88, CallKind.Indirect, Expr.C(0, 64));
-            join.Statements = [new Phi(80, selected, [pointer, loaded]), new Store(84, array, new Use(selected, 64)), invoke, new Return(92)];
-            if (variant == "read-slot") join.Statements.Add(new Define(96, new(Storage.Gpr(23), 1), new Load(array, 64)));
-            if (variant == "escape-slot") join.Statements.Add(new Store(96, input, array));
-            if (variant == "intervening-call") join.Statements.Insert(2, new Call(86, CallKind.Direct, Expr.C(0, 64)));
-            if (variant == "null-check") join.Statements.Insert(2, new Call(86, CallKind.Direct, Expr.C(0, 64))
-                { Op = new(OpKind.NullCheck, null), Arguments = [Expr.C(1, 64)] });
-            if (variant is "spilled-input" or "spilled-escape") head.Statements.Insert(0, new Store(0, new FrameAddress(-32), input));
-            if (variant == "spilled-escape") head.Statements.Insert(1, new Store(0, input, new FrameAddress(-32)));
-            if (variant is "neighbor-copy" or "overlap-copy") join.Statements.Insert(3, copy with
-            {
-                Address = 90, Arguments = [variant == "neighbor-copy" ? destination with { Left = destination } : destination,
-                    new Select(flag, input, saved, 64), size],
-            });
-            if (variant is "reuse-array" or "retained-slot")
-            {
-                var called = new Symbol(SymbolKind.Method, MethodRef.Open(definition));
-                if (variant == "reuse-array") join.Statements.Insert(3, new Store(89, array, Expr.C(0, 64)));
-                join.Statements.Insert(join.Statements.Count - 1, new Call(90, CallKind.Indirect,
-                    new Load(new Binary(BinOp.Add, called, Expr.C(RuntimeLayout.MethodInvoker, 64), 64), 64))
-                {
-                    Arguments = [new Load(called, 64), called, Expr.C(0, 64), array, Expr.C(0, 64)],
-                    Sources = Enumerable.Range(0, 5).Select(Storage.Gpr).ToArray(),
-                });
-            }
-            MachineFunction.AddEdge(head, join); MachineFunction.AddEdge(head, reference); MachineFunction.AddEdge(reference, join);
-            var function = new MachineFunction { Entry = 0, Range = new(0, 100, CodeRegion.Managed, default), Blocks = [head, reference, join] };
+            var arm = new Block(4);
+            var join = new Block(8);
+            var loaded = new Variable(Storage.Temp(910), 1);
+            var slot = new Variable(Storage.Temp(911), 1);
+            head.Statements = [new Branch(0, flag, 8, 4)];
+            arm.Statements = [new Define(4, loaded, variant == "repr" ? new Load(input, 64) : new Load(new Binary(BinOp.Add, input, Expr.C(8, 64), 64), 64)), new Jump(4, 8)];
+            join.Statements = [new Phi(8, slot, [input.Variable, loaded]), new Return(12) { Pieces = [new(0, new Use(slot, 64))] }];
+            var function = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [head, arm, join] };
+            MachineFunction.AddEdge(head, join);
+            MachineFunction.AddEdge(head, arm);
+            MachineFunction.AddEdge(arm, join);
             function.Renumber();
-            var state = new IdiomState(new IdiomRewriter(facts), function) { self = self };
-            var proof = SharedInvokerArguments.Prove(state, join, invoke, array, 0, type);
-            check.Equal(variant is "private" or "null-check" or "nested" or "neighbor-copy" or "spilled-input" or "reuse-array",
-                proof?.Value == input, $"共享泛型私有副本证明：{variant}");
+            var state = new IdiomState(new IdiomRewriter(facts), function);
+            state.SharedValues();
+            check.Equal(variant == "repr", head.Statements[^1] is Jump, $"值类型分支的两种表示 {variant}");
         }
     }
 
-    private static void GenericValueChecks(Assertions check, ProgramFacts facts, ManagedTypes types)
+    /// <summary>私有栈槽的保存与读回：每条路径都到达同值的完整写入才转发。</summary>
+    private static void FrameForwards(Assertions check, ProgramFacts facts)
     {
-        uint[] body = [0xb9402808, 0x37f800a8, 0xf9400028, 0xf100011f, 0x1a9f07e0, 0xd65f03c0,
-            0xf9403008, 0xb4000068, 0x3944d408, 0x37180068, 0x52800020, 0xd65f03c0, 0x39400028, 0x7100011f, 0x17fffff6];
-        check.True(RuntimeHelpers.GenericHasValueBody(body), "泛型空值检查保留引用、普通值及 Nullable 三条路径");
-        body[9] = 0x37200068;
-        check.True(!RuntimeHelpers.GenericHasValueBody(body), "其他类标志不能当作 nullabletype");
-        var owner = Type("SharedValueOwner", 875);
-        var method = Method(owner, "Check", 875, MethodAttributes.Public | MethodAttributes.Static);
-        var type = new GenericParameterRef("T", true, 0);
-        method.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
-        method.Parameters = [new("value", type, 0, null, false)];
-        method.ReturnType = types.Boolean;
-        var self = new MethodRef(method, [], [type with { Binding = new(NativeBindingKind.Shared) }]);
-        check.True(types.StorageBits(type) < 0, "泛型值的未知存储宽度不能退化为一位");
-        foreach (var variant in new[] { "copy", "modified", "wrong-size", "other-flags", "non-private" })
+        var effects = new CallMemoryEffects(new CallShapes(facts, new ManagedAbi(facts.Layouts), (_, _) => false).Of, new ManagedAbi(facts.Layouts));
+        foreach (var variant in new[] { "private", "mutable-field", "overwritten", "escaped", "before-save" })
         {
-            var input = new Use(new(Storage.Gpr(0), 0), 64);
-            var klass = new Symbol(SymbolKind.Class, type);
-            var size32 = new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32);
-            var size = new Ir.Convert(ConvKind.ZeroExtend, size32, 64);
-            Expr Allocate(Expr start, Expr bytes) => new Binary(BinOp.Sub, start,
-                new Binary(BinOp.And, new Binary(BinOp.Add, bytes, Expr.C(15, 64), 64), Expr.C(0x1fffffff0, 64), 64), 64);
-            var padded = new Ir.Convert(ConvKind.ZeroExtend, new Binary(BinOp.Add, size32, Expr.C(16, 32), 32), 64);
-            var destination = variant == "non-private" ? (Expr)input : Allocate(Allocate(new FrameAddress(-64), padded), size);
-            var flag = new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassByvalArg + 8, 64), 64), 32);
-            var condition = new Compare(variant == "other-flags" ? Cond.Ne : Cond.Slt, flag, Expr.C(0, 32));
-            var saved = new FrameAddress(-16);
-            var copy = new Call(4, CallKind.Direct, Expr.C(128, 64)) { Op = new(OpKind.Import, "memcpy"),
-                Arguments = [destination, new Select(condition, input, saved, 64), variant == "wrong-size" ? Expr.C(8, 64) : size] };
-            var read = new Call(8, CallKind.Direct, Expr.C(256, 64)) { Op = new(OpKind.GenericHasValue, type), Arguments = [klass, destination] };
-            var block = new Block(0) { Statements = [new Store(0, saved, input), copy, read, new Return(12)] };
-            if (variant == "modified") block.Statements.Insert(2, new Store(6, destination, Expr.C(0, 64)));
-            var function = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [block] };
-            var state = new IdiomState(new IdiomRewriter(facts), function) { self = self };
-            check.Equal(variant == "copy", SharedValueCopies.ForwardChecks(state), $"泛型判空的私有副本来源 {variant}");
-        }
-    }
-
-    private static void MethodInfoSpills(Assertions check, ProgramFacts facts)
-    {
-        foreach (var variant in new[] { "private", "metadata-size", "mutable-field", "overwritten", "escaped", "before-save" })
-        {
-            var methodInfo = Storage.Gpr(3);
-            var input = new Use(new Variable(methodInfo, 0), 64);
+            var input = new Use(new Variable(Storage.Gpr(3), 0), 64);
             var slot = new FrameAddress(-16);
             var loaded = new Variable(Storage.Temp(870), 1);
-            Expr initial = variant == "metadata-size"
-                ? new Ir.Convert(ConvKind.ZeroExtend, new Load(new Binary(BinOp.Add,
-                    new Symbol(SymbolKind.Class, new GenericParameterRef("T", true, 0)), Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32), 64)
-                : variant == "mutable-field" ? new Load(new Binary(BinOp.Add, input, Expr.C(16, 64), 64), 64) : input;
+            Expr initial = variant == "mutable-field" ? new Load(new Binary(BinOp.Add, input, Expr.C(16, 64), 64), 64) : input;
             var saved = new Store(0, slot, initial);
             var read = new Define(8, loaded, new Load(slot, 64));
             var statements = new List<Stmt> { saved, read, new Return(12) { Pieces = [new(0, new Use(loaded, 64))] } };
@@ -434,8 +377,34 @@ internal static class ArchitectureChecks
             if (variant == "escaped") statements.Insert(1, new Store(4, new Use(new Variable(Storage.Gpr(1), 0), 64), slot));
             if (variant == "before-save") (statements[0], statements[1]) = (read, saved);
             var function = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [new(0) { Statements = statements }] };
-            var state = new IdiomState(new IdiomRewriter(facts), function) { selfMethodInfo = methodInfo };
-            check.Equal(variant is "private" or "metadata-size", PrivateFrameInputs.ForwardMetadata(state), $"不可变输入私有保存 {variant}");
+            var forwarded = FrameForwarding.Run(function, effects)
+                && function.Blocks[0].Statements.OfType<Define>().Any(d => d.Target == loaded && d.Value is not Load);
+            check.Equal(variant is "private" or "overwritten" ? 1 : 0, forwarded ? 1 : 0, $"私有栈槽转发 {variant}");
+            if (variant == "overwritten")
+                check.True(function.Blocks[0].Statements.OfType<Define>().Any(d => d.Target == loaded && d.Value is Const { Value: 0 }), "转发取到达读取的写入");
+        }
+        foreach (var variant in new[] { "conditional", "unknown-call", "escaped" })
+        {
+            var head = new Block(0);
+            var initialize = new Block(8);
+            var merge = new Block(16);
+            var input = new Variable(Storage.Vec(0), 0);
+            var result = new Variable(Storage.Vec(1), 1);
+            var frame = new FrameAddress(-32);
+            head.Statements = [new Store(0, frame, new Use(input, 128)), new Branch(4, Expr.C(1, 1), 8, 16)];
+            initialize.Statements = [new Call(8, CallKind.Direct, Expr.C(64, 64))
+            { Op = variant == "unknown-call" ? null : new(OpKind.RunClassConstructor, null), StackPointer = frame,
+                Arguments = variant == "escaped" ? [frame] : [] }, new Jump(12, 16)];
+            merge.Statements = [new Define(16, result, new Ir.Convert(ConvKind.ZeroExtend, new Load(frame, 32), 128)),
+                new Return(20) { Value = new Use(result, 32) }];
+            var function = new MachineFunction { Entry = 0, Range = new(0, 24, CodeRegion.Managed, default), Blocks = [head, initialize, merge] };
+            MachineFunction.AddEdge(head, initialize);
+            MachineFunction.AddEdge(head, merge);
+            MachineFunction.AddEdge(initialize, merge);
+            function.Renumber();
+            var forwarded = FrameForwarding.Run(function, effects);
+            // 栈地址没有传给调用时，未解析的调用也看不到私有槽。
+            check.Equal(variant != "escaped", forwarded, $"私有向量保存跨调用 {variant}");
         }
     }
 
@@ -522,8 +491,26 @@ internal static class ArchitectureChecks
             "组成值只观察目标范围内的位");
     }
 
-    private static void LayoutReloads(Assertions check)
+    /// <summary>幂等初始化守卫：两臂归一到守卫处的内存内容后相同，才只保留初始化一臂。</summary>
+    private static void OnceGuards(Assertions check, ProgramFacts facts)
     {
+        var type = new GenericParameterRef("T", true, 0);
+        var klass = new Symbol(SymbolKind.Class, type);
+        Expr Flag() => new Binary(BinOp.And, new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassBitflags1, 64), 64), 8), Expr.C(1, 8), 8);
+        var result = new Variable(Storage.Gpr(0), 1);
+        Call Initialize() => new(16, CallKind.Direct, Expr.C(128, 64))
+            { Op = new(OpKind.InitClass, type), Arguments = [klass], Defines = [result], Results = [Storage.Gpr(0)] };
+        bool Fold(Block head, Block initialize, Block? skip, Block merge)
+        {
+            var blocks = skip is null ? new List<Block> { head, initialize, merge } : [head, initialize, skip, merge];
+            MachineFunction.AddEdge(head, skip ?? merge);
+            MachineFunction.AddEdge(head, initialize);
+            if (skip is not null) MachineFunction.AddEdge(skip, merge);
+            MachineFunction.AddEdge(initialize, merge);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 56, CodeRegion.Managed, default), Blocks = blocks };
+            function.Renumber();
+            return new IdiomState(new IdiomRewriter(facts), function).OnceGuards();
+        }
         foreach (var variant in new[] { "diamond", "triangle", "different-size", "side-effect" })
         {
             var head = new Block(0);
@@ -531,36 +518,20 @@ internal static class ArchitectureChecks
             var skip = new Block(32);
             var merge = new Block(48);
             var triangle = variant != "diamond";
-            var type = new GenericParameterRef("T", true, 0);
-            var klass = new Symbol(SymbolKind.Class, type);
             var before = new Variable(Storage.Gpr(20), 1);
-            var result = new Variable(Storage.Gpr(0), 1);
             var after = new Variable(Storage.Gpr(21), 1);
             var joined = new Variable(Storage.Gpr(22), 1);
             Expr Size(Expr subject, int offset = RuntimeLayout.ClassStackSlotSize) => new Ir.Convert(ConvKind.ZeroExtend,
                 new Load(new Binary(BinOp.Add, subject, Expr.C((ulong)offset, 64), 64), 32), 64);
             var read = new Define(0, before, Size(klass, variant == "different-size" ? RuntimeLayout.ClassStackSlotSize + 4 : RuntimeLayout.ClassStackSlotSize));
-            var flag = new Binary(BinOp.And, new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassBitflags1, 64), 64), 8), Expr.C(1, 8), 8);
-            head.Statements = [new Branch(4, new Compare(Cond.Ne, flag, Expr.C(0, 8)), triangle ? merge.Start : skip.Start, initialize.Start)];
+            head.Statements = [new Branch(4, new Compare(Cond.Ne, Flag(), Expr.C(0, 8)), triangle ? merge.Start : skip.Start, initialize.Start)];
             if (triangle) head.Statements.Insert(0, read);
             else skip.Statements = [read, new Jump(36, merge.Start)];
-            initialize.Statements = [new Call(16, CallKind.Direct, Expr.C(128, 64))
-                { Op = new(OpKind.InitClass, type), Arguments = [klass], Defines = [result], Results = [Storage.Gpr(0)] },
-                new Define(20, after, Size(new Use(result, 64))), new Jump(24, merge.Start)];
+            initialize.Statements = [Initialize(), new Define(20, after, Size(new Use(result, 64))), new Jump(24, merge.Start)];
             if (variant == "side-effect") initialize.Statements.Insert(2, new Store(22, new FrameAddress(-8), Expr.C(1, 64)));
             merge.Statements = [new Phi(48, joined, [before, after]), new Return(52) { Value = new Use(joined, 64) }];
-            MachineFunction.AddEdge(head, triangle ? merge : skip);
-            MachineFunction.AddEdge(head, initialize);
-            if (!triangle) MachineFunction.AddEdge(skip, merge);
-            MachineFunction.AddEdge(initialize, merge);
-            var function = new MachineFunction { Entry = 0, Range = new(0, 56, CodeRegion.Managed, default),
-                Blocks = triangle ? [head, initialize, merge] : [head, initialize, skip, merge] };
-            check.Equal(variant is "diamond" or "triangle", ClassLayoutReloads.Run(function), $"类布局重读的合流路径 {variant}");
+            check.Equal(variant is "diamond" or "triangle", Fold(head, initialize, triangle ? null : skip, merge), $"类布局重读的合流路径 {variant}");
         }
-    }
-
-    private static void InitializationSnapshots(Assertions check)
-    {
         foreach (var variant in new[] { "low", "whole", "overwritten", "stale-alias" })
         {
             var head = new Block(0);
@@ -583,38 +554,11 @@ internal static class ArchitectureChecks
                 head.Statements.Add(new Define(2, alias, new Use(old, 128)));
                 fastValue = new Use(alias, 128);
             }
-            head.Statements.Add(new Branch(4, Expr.C(1, 1), 8, 16));
+            head.Statements.Add(new Branch(4, new Compare(Cond.Ne, Flag(), Expr.C(0, 8)), 8, 16));
             fast.Statements = [new Define(8, saved, fastValue), new Jump(12, 24)];
-            slow.Statements = [new Define(16, reloaded, new Ir.Convert(ConvKind.ZeroExtend, new Load(field, 32), 128)), new Jump(20, 24)];
+            slow.Statements = [Initialize(), new Define(16, reloaded, new Ir.Convert(ConvKind.ZeroExtend, new Load(field, 32), 128)), new Jump(20, 24)];
             merge.Statements = [new Phi(24, joined, [saved, reloaded]), new Return(28) { Value = new Use(joined, variant == "whole" ? 128 : 32) }];
-            var function = new MachineFunction { Entry = 0, Range = new(0, 32, CodeRegion.Managed, default), Blocks = [head, fast, slow, merge] };
-            MachineFunction.AddEdge(head, fast);
-            MachineFunction.AddEdge(head, slow);
-            MachineFunction.AddEdge(fast, merge);
-            MachineFunction.AddEdge(slow, merge);
-            check.Equal(variant == "low", MetadataGuardSnapshots.Equivalent(function, head, [slow], [fast], merge), $"初始化重读的观察位 {variant}");
-        }
-        foreach (var variant in new[] { "conditional", "unknown-call", "escaped" })
-        {
-            var head = new Block(0);
-            var initialize = new Block(8);
-            var merge = new Block(16);
-            var input = new Variable(Storage.Vec(0), 0);
-            var result = new Variable(Storage.Vec(1), 1);
-            var frame = new FrameAddress(-32);
-            head.Statements = [new Store(0, frame, new Use(input, 128)), new Branch(4, Expr.C(1, 1), 8, 16)];
-            initialize.Statements = [new Call(8, CallKind.Direct, Expr.C(64, 64))
-            { Op = variant == "unknown-call" ? null : new(OpKind.RunClassConstructor, null), StackPointer = frame,
-                Arguments = variant == "escaped" ? [frame] : [] }, new Jump(12, 16)];
-            merge.Statements = [new Define(16, result, new Ir.Convert(ConvKind.ZeroExtend, new Load(frame, 32), 128)),
-                new Return(20) { Value = new Use(result, 32) }];
-            var function = new MachineFunction { Entry = 0, Range = new(0, 24, CodeRegion.Managed, default), Blocks = [head, initialize, merge] };
-            MachineFunction.AddEdge(head, initialize);
-            MachineFunction.AddEdge(head, merge);
-            MachineFunction.AddEdge(initialize, merge);
-            function.Renumber();
-            check.Equal(variant == "conditional", Cpp2CS.Machine.Ssa.FrameSlotPromotion.ForwardCallSpills(function,
-                c => c.Op?.Kind == OpKind.RunClassConstructor), $"私有向量保存跨初始化路径 {variant}");
+            check.Equal(variant == "low", Fold(head, slow, fast, merge), $"初始化重读的观察位 {variant}");
         }
     }
 
@@ -1513,7 +1457,7 @@ internal static class ArchitectureChecks
             var signature = new MachineSignature([], null, null, 0);
             var result = Cpp2CS.Recovery.Memory.MemoryPromotion.Run(function, signature, c => new(c, [], callee),
                 new ManagedAbi(facts.Layouts), lifter.Calls, lifter.Machine.Convention.StackPointer);
-            check.True(result.TryGet(out var layout, out _) && layout.Cells.Single().Promoted == (variant == "registers")
+            check.True(result.TryGet(out var layout, out _) && layout.Cells.All(c => c.Promoted) == (variant == "registers")
                 && (function.EntryBlock.Statements.OfType<Call>().Single().StackPointer is null) == (variant == "registers"),
                 $"调用栈指针按完整签名保留 {variant}");
         }
@@ -2009,6 +1953,7 @@ internal static class ArchitectureChecks
 
     private sealed class BarrierContext(ManagedTypes types) : IRuntimeLowering
     {
+        public void Assign(int index, ManagedValue value) => throw new NotSupportedException();
         public ManagedTypes Types => types;
         public Call Call { get; } = new(0, CallKind.Direct, new Const(0, 64));
         public List<ManagedStatement> Statements { get; } = [];

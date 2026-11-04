@@ -42,6 +42,8 @@ public interface IRuntimeLowering
     Sym ResultAt(int index);
     /// <summary>按本操作 Inputs 契约取得已定型的输入。</summary>
     ManagedValue Input(int index);
+    /// <summary>把值写入第 index 个输入指向的位置。</summary>
+    void Assign(int index, ManagedValue value);
     /// <summary>值的自然类型；不受约束时为 null。</summary>
     TypeRef? TypeOf(Sym sym);
     LocalValue Local(Sym sym, TypeRef type);
@@ -115,6 +117,33 @@ public static class RuntimeOps
 
     private static IEnumerable<RuntimeOpRule> Build()
     {
+        // 不透明值只按位置操作：对值类型是整体复制，对引用类型是引用赋值。
+        yield return new(OpKind.CopyGenericValue)
+        {
+            Inputs = (call, a, t) => a.Count == 2 ? [new(a[0], t.ClassOperand(call), RuntimeInputKind.Location), new(a[1], t.ClassOperand(call), RuntimeInputKind.Location)] : [],
+            Behavior = new(EffectKind.Read | EffectKind.Write),
+            PointerEffects = (_, _) => [new PointerEffect(0, 0, -1, MemoryAccess.Write), new PointerEffect(1, 1, -1, MemoryAccess.Read)],
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.ClassOperand is null || c.Arguments.Count != 2) return false;
+                c.Assign(0, c.Input(1));
+                return true;
+            },
+        };
+        yield return new(OpKind.ClearGenericValue)
+        {
+            Inputs = (call, a, t) => a.Count == 1 ? [new(a[0], t.ClassOperand(call), RuntimeInputKind.Location)] : [],
+            Behavior = new(EffectKind.Write),
+            PointerEffects = (_, _) => [new PointerEffect(0, 0, -1, MemoryAccess.Write)],
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.ClassOperand is not { } type || c.Arguments.Count != 1) return false;
+                c.Assign(0, new ComposedValue(type, []));
+                return true;
+            },
+        };
         yield return new(OpKind.ReadByteArray)
         {
             Inputs = (_, a, t) => a.Count == 2 ? [new(a[0], t.TypeOf(a[0])), new(a[1], t.Types.Int32)] : [],
@@ -486,6 +515,10 @@ public static class RuntimeOps
                     [new PointerEffect(0, 0, (int)count.Value, MemoryAccess.Write), new PointerEffect(1, 1, (int)count.Value, MemoryAccess.Read)],
                 { Op.Operand: "memset", Arguments: [_, _, Ir.Const { Value: > 0 and <= 4096 } length] } =>
                     [new PointerEffect(0, 0, (int)length.Value, MemoryAccess.Write)],
+                // 长度未知的库函数只访问实参指向的内存，返回后不保留地址。
+                { Op.Operand: "memcpy" or "memmove", Arguments.Length: 3 } =>
+                    [new PointerEffect(0, 0, -1, MemoryAccess.Write), new PointerEffect(1, 1, -1, MemoryAccess.Read)],
+                { Op.Operand: "memset", Arguments.Length: 3 } => [new PointerEffect(0, 0, -1, MemoryAccess.Write)],
                 _ => [],
             },
         };

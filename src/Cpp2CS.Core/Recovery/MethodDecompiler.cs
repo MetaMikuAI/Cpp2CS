@@ -93,8 +93,12 @@ public sealed class MethodDecompiler
     {
         if (!Analyze(method, entry).TryGet(out var analysis, out var failure))
             return new(method, entry, null, [new(failure.Address, failure.Reason)]);
-        return Lower(analysis);
+        return Lower(analysis) with { Rejections = Attribution(analysis.Idioms) };
     }
+
+    /// <summary>L2 留下的归因线索：证明被拒绝的规则，以及没有归一的运行时痕迹。</summary>
+    private static Cpp2CS.Diagnostics.RuleRejection[] Attribution(IdiomResult idioms) => idioms.Rejections
+        .Concat(idioms.Residuals.Select(r => new Cpp2CS.Diagnostics.RuleRejection("residual", r.Address, r.Category))).ToArray();
 
     /// <summary>类型与下降。</summary>
     public MethodRecoveryResult Lower(MethodAnalysis analysis)
@@ -143,6 +147,15 @@ public sealed class MethodDecompiler
         return result;
     }
 
+    private static Func<Variable> FreshTemporaries(MachineFunction function)
+    {
+        var next = function.Blocks.SelectMany(b => b.Statements).SelectMany(s => s switch
+            { Define d => new[] { d.Target }, Phi p => [p.Target], Call c => c.Defines.OfType<Variable>(), _ => [] })
+            .Concat(function.Dead.Select(d => d.Define.Target)).Where(v => v.Storage.Bank == Bank.Temp)
+            .Select(v => v.Storage.Index).DefaultIfEmpty(-1).Max() + 1;
+        return () => new Variable(Storage.Temp(next++), 1);
+    }
+
     /// <summary>运行到符号值为止的各层。</summary>
     public RecoveryResult<MethodAnalysis> Analyze(MethodRef method, ulong entry)
     {
@@ -166,7 +179,8 @@ public sealed class MethodDecompiler
             v => new TypeOracle(types, facts, method, environment.Shape, v), lifter.Calls, lifter.Machine.Convention.StackPointer);
         // 分派在内存提升之前解析，使经指针的调用效果有签名可依。
         var preliminary = ValueModel.Build(function, environment);
-        if (StackBoxing.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary)) > 0)
+        // 路径拆分后才唯一确定的接收者。
+        if (StackBoxingPass.Run(function, new CallMemoryEffects(environment.Shape, abi), environment.Shape, abi.Size, FreshTemporaries(function)))
             preliminary = ValueModel.Build(function, environment);
         DispatchResolution.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary));
         // 每轮从稳定输入构建分析图，只累积已证明的调用目标，不回滚生产语句和 SSA。

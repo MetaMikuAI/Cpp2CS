@@ -214,6 +214,20 @@ public sealed record Symbol(SymbolKind Kind, object Value) : Expr(64)
     public override string ToString() => Kind == SymbolKind.String ? $"\"{Value}\"" : $"{Kind}<{Value}>";
 }
 
+/// <summary>运行时类元数据的只读属性：完全共享泛型的代码经它取得 T 的大小与种类。</summary>
+public enum ClassPropertyKind : byte { StackSlotSize, IsValueType }
+
+public sealed record ClassProperty(Model.TypeRef Type, ClassPropertyKind Kind, int Width) : Expr(Width)
+{
+    public override string ToString() => $"{Kind}<{Type}>";
+}
+
+/// <summary>向下的动态栈分配，大小为 stackslot_size(Element)：类型为 Element 的局部。Site 区分分配点。</summary>
+public sealed record StackAllocation(ulong Site, Model.TypeRef Element) : Expr(64)
+{
+    public override string ToString() => $"alloca<{Element}>@{Site:x}";
+}
+
 public sealed record Unknown(string Reason, int Width) : Expr(Width)
 {
     public override string ToString() => $"unknown<{Reason}>";

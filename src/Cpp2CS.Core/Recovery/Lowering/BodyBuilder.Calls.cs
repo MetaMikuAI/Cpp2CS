@@ -122,6 +122,18 @@ internal sealed partial class BodyBuilder
         var lowered = new ManagedCall(call.Address, invocation, tail ? null : result, tail) { Inlined = call.Inlined };
         if (tail) return new Statement(lowered);
         output.Add(lowered);
+        // 不透明返回值写入调用者给出的位置。
+        if (result is not null && signature.Return is { Transfer: Transfer.ResultBuffer, Size: < 0 } opaque)
+        {
+            var position = call.ArgumentIndex(opaque.Pieces[0].Register);
+            if (position < 0 || oracle.Locate(arguments[position], -1) is not { } home)
+            {
+                output.Add(new ManagedHole(call.Address, "调用 不透明返回值的位置未知", false));
+                holes.Add(new(call.Address, "调用 不透明返回值的位置未知"));
+            }
+            else if (LocationValue(home, call.Address, store: true) is var target)
+                output.Add(target is LocalValue local ? new ManagedAssignment(call.Address, local, result) : new ManagedStore(call.Address, target, result));
+        }
         if (call.DoesNotReturn && ManagedTypes.IsVoid(oracle.ReturnType))
             return new Statement(new ManagedReturn(call.Address, null));
         return null;
@@ -153,7 +165,7 @@ internal sealed partial class BodyBuilder
                 {
                     var stored = values.CellContent(call, value, arguments, write: false);
                     if (stored is not null) return View(stored, type, call.Address);
-                    return SymTable.Resolve(content) is var p && oracle.Locate(p, value.Size * 8) is { } location
+                    return SymTable.Resolve(content) is var p && oracle.Locate(p, value.Size < 0 ? -1 : value.Size * 8) is { } location
                         ? LocationValue(location, call.Address) : Hole(call.Address, "调用 副本实参的内容未知", type);
                 }
             case Transfer.Reference:
@@ -217,6 +229,18 @@ internal sealed partial class BodyBuilder
                 return owner.View(content, input.Type, call.Address);
             return input.Type is { } type && owner.oracle.Locate(input.Value, owner.types.StorageBits(type)) is { } location
                 ? owner.LocationValue(location, call.Address) : owner.Hole(call.Address, "运行时 输入位置未知", input.Type);
+        }
+        public void Assign(int index, ManagedValue value)
+        {
+            var input = RuntimeOps.Of(op.Kind)!.Inputs!(call, Arguments, owner.oracle)[index];
+            if (input.Type is not { } type || owner.oracle.Locate(input.Value, owner.types.StorageBits(type)) is not { } location)
+            {
+                output.Add(new ManagedHole(call.Address, "运行时 输出位置未知", false));
+                owner.holes.Add(new(call.Address, "运行时 输出位置未知"));
+                return;
+            }
+            var target = owner.LocationValue(location, call.Address, store: true);
+            output.Add(target is LocalValue local ? new ManagedAssignment(call.Address, local, value) : new ManagedStore(call.Address, target, value));
         }
         public TypeRef? TypeOf(Sym sym) => owner.oracle.TypeOf(sym);
         public LocalValue Local(Sym sym, TypeRef type) => owner.Local(sym, type);
