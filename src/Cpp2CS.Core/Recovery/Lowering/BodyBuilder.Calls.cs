@@ -111,6 +111,8 @@ internal sealed partial class BodyBuilder
         var lowered = new ManagedCall(call.Address, invocation, tail ? null : result, tail) { Inlined = call.Inlined };
         if (tail) return new Statement(lowered);
         output.Add(lowered);
+        if (call.DoesNotReturn && ManagedTypes.IsVoid(oracle.ReturnType))
+            return new Statement(new ManagedReturn(call.Address, null));
         return null;
     }
 

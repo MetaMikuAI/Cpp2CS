@@ -2,6 +2,8 @@ using System.Buffers.Binary;
 using Cpp2CS.Facts;
 using Cpp2CS.Image;
 using Cpp2CS.Ir;
+using Cpp2CS.Machine.Flow;
+using Cpp2CS.Machine.Lifting;
 using Cpp2CS.Model;
 using Cpp2CS.Recovery;
 
@@ -30,6 +32,7 @@ internal sealed partial class NativeMachine : IDisposable
     private static readonly byte[] emptyRuntime = new byte[World.RuntimeSize];
     private readonly Unicorn uc = new();
     private readonly ProgramFacts facts;
+    private readonly NoReturnOracle noReturn;
     private readonly HashSet<ulong> erratumStubs;
     private readonly Dictionary<ulong, byte> saved = new();
     private readonly Unicorn.CodeHook blockHook;
@@ -49,6 +52,7 @@ internal sealed partial class NativeMachine : IDisposable
     public NativeMachine(ProgramFacts facts)
     {
         this.facts = facts;
+        noReturn = new(new Arm64Machine(facts.Code), facts.Code);
         erratumStubs = facts.Code.Patches.Values.Select(p => p.Stub).ToHashSet();
         var image = facts.Model.Image;
         // 从 GC 导出符号追踪薄包装；内部调用的纯跳板不一定出现在托管调用目标表中。
@@ -318,6 +322,8 @@ internal sealed partial class NativeMachine : IDisposable
 
     private void Call(ulong address)
     {
+        // 普通调用桩只模拟正常返回；不能让不返回调用落入原生不可达的后续指令。
+        if (noReturn.IsNoReturn(address)) throw new Unsupported($"调用 0x{address:x} 没有正常返回路径，调用桩尚未建模");
         var world = side.World;
         var ordinal = side.CallOrdinal;
         var expected = ordinal < callees.Count ? callees[ordinal] : null;

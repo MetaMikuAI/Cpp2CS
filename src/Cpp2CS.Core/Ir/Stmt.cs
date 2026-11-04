@@ -153,6 +153,8 @@ public sealed record Call(ulong Address, CallKind Kind, Expr Target) : Stmt(Addr
     public Model.MethodRef? Resolved { get; init; }
     /// <summary>原生辅助函数与托管方法体等价；写出后按方法体透明执行。</summary>
     public bool Inlined { get; init; }
+    /// <summary>原生控制流证明此调用没有正常返回路径。</summary>
+    public bool DoesNotReturn { get; init; }
     /// <summary>CallDelegate 的委托对象根；原生 x0 是 method_code，不能用作托管接收者。</summary>
     public Expr? DelegateReceiver { get; init; }
     /// <summary>条件抛出归一后 Address 是分支位置；这里保留真正的原生抛出调用点，供语句级 LSDA 查询。

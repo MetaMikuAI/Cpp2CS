@@ -279,8 +279,11 @@ public sealed class CfgBuilder
                     {
                         insn.FallsThrough = false;
                         insn.Ends = true;
-                        if (insn.IsCall && statements[^1] is Call { Kind: CallKind.Direct, Target: Const callee })
+                        if (insn.IsCall && statements[^1] is Call { Kind: CallKind.Direct, Target: Const callee } terminalCall)
+                        {
                             owner.NoReturn.AddEvidence(callee.Value);
+                            statements[^1] = terminalCall with { DoesNotReturn = true };
+                        }
                         else problems.Add($"0x{address:x} 顺序执行越出函数范围");
                     }
                     else
@@ -333,7 +336,11 @@ public sealed class CfgBuilder
                     break;
                 case Call call:
                     insn.IsCall = true;
-                    if (call.Kind == CallKind.Direct && call.Target is Const callee && owner.NoReturn.IsNoReturn(callee.Value)) insn.Ends = true;
+                    if (call.Kind == CallKind.Direct && call.Target is Const callee && owner.NoReturn.IsNoReturn(callee.Value))
+                    {
+                        insn.Ends = true;
+                        statements[^1] = call with { DoesNotReturn = true };
+                    }
                     else insn.FallsThrough = true;
                     break;
                 default:
