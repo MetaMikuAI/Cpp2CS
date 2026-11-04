@@ -210,10 +210,17 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     public (Sym Allocation, MethodRef Constructor)? AllocatedConstructor(Call call)
     {
         var operands = values.Operands(call);
-        if (operands.Count < 2 || SymTable.Resolve(operands[1]) is not ResultSym result
-            || result.Site.Op is not { Kind: OpKind.NewObject, Operand: DefinitionRef type }) return null;
-        var constructors = type.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic && m.Parameters.Count == 0).ToArray();
-        return constructors.Length == 1 ? (result, new MethodRef(constructors[0], type.Arguments, [])) : null;
+        foreach (var operand in operands.Skip(1))
+        {
+            if (SymTable.Resolve(operand) is not ResultSym result
+                || result.Site.Op is not { Kind: OpKind.NewObject, Operand: DefinitionRef type }) continue;
+            var constructors = type.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic).ToArray();
+            var expected = Math.Max(0, call.Arguments.Length - 1);
+            var exact = constructors.Where(c => c.Parameters.Count == expected).ToArray();
+            var chosen = exact.Length == 1 ? exact[0] : constructors.Length == 1 ? constructors[0] : null;
+            if (chosen is not null) return (result, new MethodRef(chosen, type.Arguments, []));
+        }
+        return null;
     }
 
     public MethodRef? BaseConstructor(Call call)
