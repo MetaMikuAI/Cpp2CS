@@ -512,9 +512,10 @@ namespace Cpp2CS.Input.Portable
             if (literals.TryGetValue(index, out var cached)) return cached;
             var literal = stringLiterals[index];
             var at = (int)header.stringLiteralDataOffset + literal.dataIndex;
-            var end = at;
-            while (end < bytes.Length && bytes[end] != 0) end++;
-            var value = Encoding.UTF8.GetString(bytes, at, end - at);
+            // 字符串字面量按表中相邻 dataIndex 的差值定长；末尾可能带一个终止符，不能扫描到文件末尾。
+            var length = (int)Math.Min(literal.length, (uint)Math.Max(0, bytes.Length - at));
+            if (length > 0 && bytes[at + length - 1] == 0) length--;
+            var value = Encoding.UTF8.GetString(bytes, at, length);
             literals[index] = value;
             return value;
         }
