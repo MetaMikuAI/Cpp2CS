@@ -296,11 +296,41 @@ internal sealed partial class BodyBuilder
                 : Coerce(value, construction.Constructor.Concrete(construction.Constructor.Method.Parameters[i].Type), address)).ToArray();
             return new NewObjectValue(construction.Constructor, arguments) { Transparent = true };
         }
+        if (leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType))) && StructUpdate(structure, leaves, address) is { } updated) return updated;
         foreach (var (path, _) in leaves)
             if (path.FirstOrDefault(f => !fields.Accessible(f, f.DeclaringType)) is { } hidden)
                 return Hole(address, $"内存 字段 {hidden.Field.Owner.FullName}.{hidden.Field.Name} 对调用方不可访问，结构体值按叶子组成", structure);
         return new ComposedValue(structure, leaves);
     }
+
+    /// <summary>
+    /// 叶子取自同一个结构体时，不必逐个访问私有字段：全部相同就是整体复制；只有个别字段不同时，先整体复制再写这些字段（写入照常接受访问器证明）。
+    /// </summary>
+    private ManagedValue? StructUpdate(DefinitionRef structure, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, ulong address)
+    {
+        ManagedValue? source = null;
+        var changed = new List<(FieldRef Field, ManagedValue Value)>();
+        foreach (var (path, value) in leaves)
+        {
+            var root = value;
+            for (var i = path.Count - 1; i >= 0 && root is not null; i--)
+                root = root is FieldValue field && field.Field.Equals(path[i]) ? field.Receiver : null;
+            if (root is LocalValue or ArgumentValue && root.Type.Equals(structure) && (source is null || source.Equals(root))) source = root;
+            else if (path is [var direct]) changed.Add((direct, value));
+            else return null;
+        }
+        if (source is null) return null;
+        if (changed.Count == 0) return source;
+        // 边上的复制在块写完之后生成，那时不能再追加语句。
+        if (currentOutput is null) return null;
+        var copy = NewLocal(structure);
+        currentOutput.Add(new ManagedAssignment(address, copy, source));
+        foreach (var (field, value) in changed)
+            currentOutput.Add(new ManagedStore(address, FieldAccess(new AddressValue(copy), field, value.Type, true, address), value));
+        return copy;
+    }
+
+    private List<ManagedStatement>? currentOutput;
 
     /// <summary>
     /// 一段位作为整数类型 target 的值（零扩展）：常量；整数原子；整数原子的切片为右移与掩码。
