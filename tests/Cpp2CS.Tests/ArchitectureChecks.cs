@@ -106,6 +106,7 @@ internal static class ArchitectureChecks
         var owner = Type("TailTargets", 700);
         var first = new MethodRef(Method(owner, "First", 700), [], []);
         var second = new MethodRef(Method(owner, "Second", 701), [], []);
+        foreach (var tail in new[] { false, true })
         foreach (var sameTarget in new[] { false, true })
         {
             var leftTarget = new Variable(Storage.Gpr(9), 1);
@@ -114,14 +115,16 @@ internal static class ArchitectureChecks
             var head = new Block(0) { Statements = [new Branch(0, Expr.C(1, 1), 4, 8)] };
             var left = new Block(4) { Statements = [new Define(4, leftTarget, new Symbol(SymbolKind.Method, first)), new Jump(4, 12)] };
             var right = new Block(8) { Statements = [new Define(8, rightTarget, new Symbol(SymbolKind.Method, sameTarget ? first : second)), new Jump(8, 12)] };
-            var call = new Call(12, CallKind.Indirect, new Use(mergedTarget, 64));
-            var merge = new Block(12) { Statements = [new Phi(12, mergedTarget, [leftTarget, rightTarget]), call, new Return(16)] };
+            var call = new Call(12, tail ? CallKind.TailIndirect : CallKind.Indirect, new Use(mergedTarget, 64));
+            var merge = new Block(12) { Statements = [new Phi(12, mergedTarget, [leftTarget, rightTarget]), call] };
+            if (!tail) merge.Statements.Add(new Return(16));
             MachineFunction.AddEdge(head, left);
             MachineFunction.AddEdge(head, right);
             MachineFunction.AddEdge(left, merge);
             MachineFunction.AddEdge(right, merge);
             var function = new MachineFunction { Entry = 0, Range = new(0, 20, CodeRegion.Managed, default), Blocks = [head, left, right, merge] };
-            check.True(Cpp2CS.Machine.Ssa.TailDuplication.Run(function, b => b == merge), "共享调用尾部可拆回两条入边");
+            check.True(tail ? MergedIndirectTails.Run(function) : Cpp2CS.Machine.Ssa.TailDuplication.Run(function, b => b == merge),
+                "共享调用尾部可拆回两条入边");
             var copies = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().ToArray();
             check.True(copies.Length == 2 && copies.Select(c => c.Site).Distinct().Count() == 2,
                 "尾部拆分后的调用点身份互不相同");
@@ -200,6 +203,12 @@ internal static class ArchitectureChecks
             check.True(reads.Length == 2 && reads.All(d => d.Target.Width == 128 && d.Value.Width == 128), $"{pass} 入边保留完整向量");
             var phi = merge.Statements.OfType<Phi>().Single(p => p.Target.Width == 128);
             check.True(phi.Sources.All(s => s.Width == phi.Target.Width), $"{pass} 合流来源位宽一致");
+            if (pass == "guarded")
+            {
+                var checks = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().ToArray();
+                check.True(checks.Length == 2 && checks.Select(c => c.Site).Distinct().Count() == 2,
+                    "检查随读取拆到入边后，各路径拥有独立调用点身份");
+            }
         }
     }
 
