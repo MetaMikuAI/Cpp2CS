@@ -6,6 +6,16 @@ namespace Cpp2CS.Pipeline;
 
 internal static class ReportStage
 {
+    public static void WriteSourceProblems(string output, IReadOnlyDictionary<ManagedBody, EmissionProblem> problems)
+    {
+        File.WriteAllLines(Path.Combine(output, "source-diagnostics.jsonl"), problems.Select(p => JsonSerializer.Serialize(new
+        {
+            method = p.Key.Method.ToString(),
+            kind = p.Value.Kind.ToString(),
+            reason = p.Value.Message,
+        }, Json)));
+    }
+
     public static void WritePublications(string output, MethodRecoveryResult[] results, Skeleton skeleton)
     {
         File.WriteAllLines(Path.Combine(output, "publication.jsonl"), results.Select(result =>

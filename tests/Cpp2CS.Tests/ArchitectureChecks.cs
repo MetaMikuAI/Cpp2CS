@@ -46,6 +46,7 @@ internal static class ArchitectureChecks
         InterfaceSlots(checks, types);
         RepresentationCopies(checks, facts, types);
         ConstructorStoreOrder(checks, types);
+        ConstructorContracts(checks, types);
         LowBitArithmetic(checks);
         PackedPhiSlices(checks);
         JoinedPhiSlices(checks);
@@ -173,7 +174,7 @@ internal static class ArchitectureChecks
         EmissionProblem? Validate(ManagedValue value)
         {
             var body = new ManagedBody(method, [new(0, [new ManagedReturn(0, value)])]);
-            return new BodyValidation(types, EmissionPolicy.Recovered, method).Check(body, true, out _);
+            return new BodyValidation(types, EmissionPolicy.Recovered, method).Check(body, true);
         }
         var unresolved = new ArgumentValue(0, structure, 0);
         check.True(Validate(new ConversionValue(ConvKind.FloatToFloat, unresolved, types.Double, 64)) is
@@ -199,7 +200,7 @@ internal static class ArchitectureChecks
         };
         var staticMethod = new MethodRef(staticDefinition, [], []);
         var invalidThis = new ManagedBody(staticMethod, [new(0, [new ManagedReturn(0, new ArgumentValue(-1, types.Object, 64))])]);
-        check.True(new BodyValidation(types, EmissionPolicy.Partial, staticMethod).Check(invalidThis, true, out _) is
+        check.True(new BodyValidation(types, EmissionPolicy.Partial, staticMethod).Check(invalidThis, true) is
             { Kind: EmissionProblemKind.Unsupported }, "静态方法的部分恢复体不能引用 this");
     }
 
@@ -340,7 +341,7 @@ internal static class ArchitectureChecks
         check.True(privateTemplate.Holes.Count > 0, "多语句模板不能重新引入被拒绝的私有访问器");
         var privateCall = new ManagedBody(caller, [new(0, [new ManagedCall(0,
             new ManagedInvocation(new MethodRef(hidden, [], []), receiver, [], false), null, false) { Inlined = true }, new ManagedReturn(4, null)])]);
-        check.True(new BodyValidation(types, EmissionPolicy.Recovered, caller).Check(privateCall, true, out _) is
+        check.True(new BodyValidation(types, EmissionPolicy.Recovered, caller).Check(privateCall, true) is
             { Kind: EmissionProblemKind.AccessDenied }, "内联证明调用在写出策略下仍须满足权限");
         owner.Methods = [hidden, visible];
         var accessible = new InlineEvidence(types, caller, Summary);
@@ -723,6 +724,46 @@ internal static class ArchitectureChecks
         bool CallsBase(ManagedBody body) => body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Inlined && c.Invocation.Method == baseCtor);
         check.True(CallsBase(Recover(false)), "独立本类写入可移到完整基类构造之后");
         check.True(!CallsBase(Recover(true)), "依赖字段读取的写入不得重排越过基类赋值");
+    }
+
+    private static void ConstructorContracts(Assertions check, ManagedTypes types)
+    {
+        var owner = Type("ConstructorContracts", 180);
+        owner.BaseType = types.Object;
+        var ownerType = new DefinitionRef(owner, []);
+        var ctor = new MethodRef(Method(owner, ".ctor", 180), [], []);
+        ctor.Method.Parameters = [new("value", types.Int32, 0, null, false)];
+        owner.Methods = [ctor.Method];
+        var field = new FieldDef { Index = 180, Owner = owner, Name = "value", Type = types.Int32,
+            Offset = 16, Attributes = FieldAttributes.Public };
+        owner.Fields = [field];
+        var self = new ArgumentValue(-1, ownerType, 64);
+        var baseCtor = MethodRef.Open(types.Object.Definition.Methods.Single(m => m.Name == ".ctor" && m.Parameters.Count == 0));
+        var initialize = new ManagedCall(4, new(baseCtor, self, [], false), null, false);
+        var ret = new ManagedReturn(8, null);
+        ManagedBody Body(ManagedValue value) => new(ctor, [new(0, [
+            new ManagedStore(0, new FieldValue(self, new(field, ownerType), types.Int32, 32), value), initialize, ret])]);
+        EmissionProblem? Cil(ManagedBody body) => new BodyValidation(types, EmissionPolicy.Recovered, body.Method).Check(body, true);
+        var parameter = Body(new ArgumentValue(0, types.Int32, 32));
+        check.True(Cil(parameter) is null, "初始化前写本类字段可以依赖参数，CIL 检查不施加字段初始化器限制");
+        check.True(SourceSuitability.Check([parameter]).GetValueOrDefault(parameter)?.Kind == EmissionProblemKind.SourceForm,
+            "依赖参数的前导写入单独报告为源码形式限制");
+        var constant = Body(new ConstantValue(1, types.Int32, 32));
+        check.True(Cil(constant) is null && SourceSuitability.Check([constant]).Count == 0,
+            "普通字段初始化器同时通过两层检查");
+        var uninitialized = new ManagedBody(ctor, [new(0, [ret])]);
+        check.True(Cil(uninitialized)?.Kind == EmissionProblemKind.Constructor
+            && SourceSuitability.Check([uninitialized])[uninitialized].Kind == EmissionProblemKind.Constructor,
+            "分离源码限制不允许未初始化 this 的返回");
+        var twice = new ManagedBody(ctor, [new(0, [initialize, initialize, ret])]);
+        check.True(Cil(twice)?.Kind == EmissionProblemKind.Constructor, "重复初始化仍是 CIL 写出问题");
+        var read = Body(new FieldValue(self, new(field, ownerType), types.Int32, 32));
+        check.True(Cil(read)?.Kind == EmissionProblemKind.Constructor, "初始化前读取 this 仍被拒绝");
+        var other = new MethodRef(Method(owner, ".ctor", 181), [], []);
+        owner.Methods = [ctor.Method, other.Method];
+        var different = Body(new ConstantValue(2, types.Int32, 32)) with { Method = other };
+        check.True(Cil(constant) is null && Cil(different) is null, "不同构造体的前导写入不影响各自的 CIL 合法性");
+        check.True(SourceSuitability.Check([constant, different]).Count == 2, "跨构造函数的字段初始化器一致性属于源码检查");
     }
 
     private sealed class EmptyEnvironment : IValueEnvironment
