@@ -36,6 +36,17 @@ internal static class ArrayPointerLoopsPass
             return value;
         }
         int Stride(Use array) => arrays.TryGetValue(Root(array).Variable, out var size) ? size : arrayStride?.Invoke(array) ?? 0;
+        int OffsetStride(Variable offset)
+        {
+            var strides = function.Blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk)
+                .OfType<Binary>().Where(b => b.Op == BinOp.Add).Select(b => b switch
+                {
+                    { Left: Use array, Right: Use index } when index.Variable == offset => Stride(array),
+                    { Left: Use index, Right: Use array } when index.Variable == offset => Stride(array),
+                    _ => 0,
+                }).Where(s => s > 0).Distinct().ToArray();
+            return strides is [var stride] ? stride : 0;
+        }
         var owners = function.Blocks.SelectMany(b => b.Statements.SelectMany(s => s switch
             { Define d => new[] { d.Target }, Phi p => [p.Target], Call c => c.Defines.Where(v => v is not null), _ => [] }).Select(v => (Variable: v, Block: b)))
             .ToDictionary(p => p.Variable, p => p.Block);
@@ -55,18 +66,20 @@ internal static class ArrayPointerLoopsPass
             {
                 for (var seed = 0; seed < 2; seed++)
                 {
-                    var initial = Expand(new Use(pointer.Sources[seed], 64));
+                    if (InductionVariables.Read(block, pointer, seed, definition) is not { Width: 64 } induction) continue;
+                    var initial = Expand(induction.Initial);
                     var terms = TermsPass.Terms(initial);
-                    if (terms.OfType<Use>().Where(u => Stride(u) > 0).ToArray() is not [var array]
-                        || terms.OfType<Const>().Aggregate(0L, (sum, c) => sum + c.Signed) < RuntimeLayout.ArrayData
+                    var roots = terms.OfType<Use>().Where(u => Stride(u) > 0).ToArray();
+                    var stride = roots is [var array] ? Stride(array) : initial is Const ? OffsetStride(pointer.Target) : 0;
+                    if (stride <= 0
+                        || terms.OfType<Const>().Aggregate(0L, (sum, c) => sum + c.Signed) < (roots.Length == 1 ? RuntimeLayout.ArrayData : 0)
                         || ExprMap.Walk(initial).OfType<Use>().Any(u => u.Variable.Version != 0
                             && (!owners.TryGetValue(u.Variable, out var owner) || owner == block || !dominators.Dominates(owner.Index, block.Index)))
-                        || Stride(array) is not (> 0 and var stride)
-                        || definition(new Use(pointer.Sources[1 - seed], 64)) is not Binary { Op: BinOp.Add, Left: Use previous, Right: Const step }
-                        || step.Value != (ulong)stride || previous.Variable != pointer.Target
+                        || induction.Step != (ulong)stride
                         || function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().Any(p => p != pointer && p.Sources.Contains(pointer.Target)))
                         continue;
-                    var index = block.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources.Length == 2 && definition(new Use(p.Sources[seed], 64)) is Const { Value: 0 } && definition(new Use(p.Sources[1 - seed], 64)) is Binary { Op: BinOp.Add, Left: Use prior, Right: Const { Value: 1 }, Width: 64 } && prior.Variable == p.Target);
+                    var index = InductionVariables.UnitCounter(block, seed, induction.Width, definition);
+                    if (index == pointer) continue;
                     if (index is null)
                     {
                         var advanceBlock = function.Blocks.FirstOrDefault(b => b.Statements.OfType<Define>().Any(d => d.Target == pointer.Sources[1 - seed]));

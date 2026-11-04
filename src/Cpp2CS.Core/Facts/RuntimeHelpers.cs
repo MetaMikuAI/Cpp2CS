@@ -64,7 +64,7 @@ public sealed record RuntimeHelper(ulong Address, HelperKind Kind, string? Detai
 /// 4. 元数据槽位初始化：闭包内有令牌解码（取位 29–31 的 UBFX/LSR #29）且调用点前紧邻 ADRP+ADD 构造已解码槽位地址。
 /// 识别不出的目标保持 Unknown 并按调用点数排序报告，不按启发式强行命名。
 /// </summary>
-public sealed class RuntimeHelpers
+public sealed partial class RuntimeHelpers
 {
     private const int ThinLimit = 8;
     private const int ClosureDepth = 4;

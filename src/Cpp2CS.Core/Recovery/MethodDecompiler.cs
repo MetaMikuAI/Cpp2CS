@@ -1,5 +1,6 @@
 using Cpp2CS.Calls;
 using Cpp2CS.Facts;
+using Cpp2CS.Facts.Derived;
 using Cpp2CS.Idioms;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
@@ -36,6 +37,7 @@ public sealed class MethodDecompiler
     private readonly IdiomRewriter rewriter;
     private readonly ManagedAbi abi;
     private readonly CallShapes shapes;
+    private readonly NativeMethodFacts native;
     private readonly Dictionary<MethodRequest, MethodRecoveryResult?> summaries = [];
     private MethodEntries? entries;
 
@@ -47,6 +49,7 @@ public sealed class MethodDecompiler
         rewriter = new IdiomRewriter(facts) { RecordFilter = _ => false, RecoverUnusedInputs = true };
         abi = new ManagedAbi(facts.Layouts);
         shapes = new CallShapes(facts, abi, rewriter.UnusedInput);
+        native = new NativeMethodFacts(facts, lifter, rewriter);
     }
 
     public ManagedTypes Types => types;
@@ -61,14 +64,19 @@ public sealed class MethodDecompiler
     /// <summary>从已知原生实例恢复开放泛型体：类型参数带上实例的原生绑定，输出保留类型参数。</summary>
     public MethodRecoveryResult RecoverShared(MethodRef instance, ulong entry)
     {
+        var open = BindShared(instance, entry);
+        return Declaration(open, entry) ?? Run(open, entry);
+    }
+
+    /// <summary>开放泛型的托管身份及当前入口提供的原生布局见证。</summary>
+    public MethodRef BindShared(MethodRef instance, ulong entry)
+    {
         var open = MethodRef.Open(instance.Method);
-        if (Declaration(open, entry) is { } declaration) return declaration;
-        open = open with
+        return open with
         {
             TypeArguments = open.TypeArguments.Zip(instance.TypeArguments, Bind).ToArray(),
             MethodArguments = open.MethodArguments.Zip(instance.MethodArguments, Bind).ToArray(),
         };
-        return Run(open, entry);
         TypeRef Bind(TypeRef parameter, TypeRef actual) => parameter is GenericParameterRef g
             ? g with
             {
@@ -92,11 +100,15 @@ public sealed class MethodDecompiler
     public MethodRecoveryResult Lower(MethodAnalysis analysis)
     {
         var oracle = new TypeOracle(types, facts, analysis.Method, analysis.Environment.Shape, analysis.Values, analysis.Memory);
+        var uses = new TypeUseAnalysis(analysis, oracle).Run();
+        if (uses.State != TypeSolveState.Stable)
+            return new(analysis.Method, analysis.Entry, null, [new(analysis.Entry,
+                uses.State == TypeSolveState.Cycle ? "类型 φ 类型求解循环" : "类型 φ 类型求解超过预算")]);
         var referenced = analysis.Function.Blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk)
             .OfType<Symbol>().Where(s => s.Kind == SymbolKind.Method).Select(s => (MethodRef)s.Value).Distinct().ToArray();
         var fields = new InlineEvidence(types, analysis.Method, Summary, referenced);
         var templates = new TemplateRecovery(types, analysis.Method, Summary, fields);
-        var lowered = BodyBuilder.Build(analysis, oracle, fields, templates);
+        var lowered = BodyBuilder.Build(analysis, oracle, uses, fields, templates);
         if (lowered.Body is null) return new(analysis.Method, analysis.Entry, null, lowered.Holes);
         var recovered = templates.Run(lowered.Body, lowered.Constructions, lowered.NextLocal);
         var body = LocalCoalescing.Run(recovered.Body);
@@ -146,6 +158,8 @@ public sealed class MethodDecompiler
         if (idioms.Errors.Count > 0)
             return RecoveryDiagnostics.Fail(entry, $"L2 {idioms.Errors[0]}", rule: "Prepare");
         GenericContext.Instantiate(function, method);
+        CleanupCalls.Run(function, address => facts.Helpers.At(address)?.Kind == HelperKind.Unknown
+            ? native.CleanupThunk(address, method.Method.Owner) : null);
         ExceptionNormalization.Run(function, ExceptionFacts.WrapperWithoutDestructor(facts.Checks));
         var environment = new MethodEnvironment(method, signature, shapes);
         var splits = PathSplitting.Run(function, f => ValueModel.Build(f, environment),
@@ -155,32 +169,34 @@ public sealed class MethodDecompiler
         if (StackBoxing.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary)) > 0)
             preliminary = ValueModel.Build(function, environment);
         DispatchResolution.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary));
-        // 分派的接收者也可能来自局部内存。新签名确定后从原始读写重做提升，避免沿用未知调用的内存效果。
-        var unpromoted = function.Blocks.Select(b => b.Statements.Select(s => s is Phi phi ? phi with { Sources = [.. phi.Sources] } : s).ToArray()).ToArray();
-        var deadCount = function.Dead.Count;
+        // 每轮从稳定输入构建分析图，只累积已证明的调用目标，不回滚生产语句和 SSA。
+        var prepared = function;
+        var targets = new Dictionary<CallSite, MethodRef>();
         MemoryLayout layout;
         while (true)
         {
+            function = prepared.Copy(call => targets.TryGetValue(call.Site, out var target) ? call with { Resolved = target } : call);
+            environment = new MethodEnvironment(method, signature, shapes);
             if (!MemoryPromotion.Run(function, signature, environment.Shape, abi, lifter.Calls, lifter.Machine.Convention.StackPointer).TryGet(out layout, out var memoryFailure))
                 return memoryFailure;
             environment.Layout = layout;
             var promoted = ValueModel.Build(function, environment);
-            if (DispatchResolution.Run(function, promoted, new TypeOracle(types, facts, method, environment.Shape, promoted, layout)) == 0) break;
-            // 内存提升保持块与调用的次序；只带回已证明的分派目标，其他产物重新计算。
-            for (var b = 0; b < function.Blocks.Count; b++)
-            {
-                var calls = function.Blocks[b].Statements.OfType<Call>().ToArray();
-                var next = 0;
-                for (var i = 0; i < unpromoted[b].Length; i++)
-                    if (unpromoted[b][i] is Call call) unpromoted[b][i] = call with { Resolved = calls[next++].Resolved };
-                function.Blocks[b].Statements = [.. unpromoted[b].Select(s => s is Phi phi ? phi with { Sources = [.. phi.Sources] } : s)];
-            }
-            function.Dead.RemoveRange(deadCount, function.Dead.Count - deadCount);
+            var discovered = DispatchResolution.Find(function, promoted, new TypeOracle(types, facts, method, environment.Shape, promoted, layout));
+            if (discovered.Count == 0) break;
+            foreach (var (site, target) in discovered) targets.Add(site, target);
         }
         // 帧提升消去异常值的栈副本后，落地跳板可能才成为纯传值链。
+        if (StackGuardNormalizer.Run(function))
+        {
+            var errors = Cpp2CS.Machine.Ssa.Lowering.Cleanup(function);
+            if (errors.Count > 0) return RecoveryDiagnostics.Fail(entry, $"L2 {errors[0]}", rule: "StackGuard");
+        }
         ExceptionNormalization.Run(function, ExceptionFacts.WrapperWithoutDestructor(facts.Checks));
         environment.Layout = layout;
         var values = ValueModel.Build(function, environment);
+        var oracle = new TypeOracle(types, facts, method, environment.Shape, values, layout);
+        if (DelegateCallNormalizer.Run(facts, function, idioms, e => e is Use use ? oracle.TypeOf(values.Of(use.Variable)) : null))
+            values = ValueModel.Build(function, environment);
         return new MethodAnalysis(method, entry, signature, function, idioms, layout, values) { Environment = environment, Splits = splits };
     }
 }

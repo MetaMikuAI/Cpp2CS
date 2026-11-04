@@ -1,5 +1,6 @@
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
+using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Ssa;
 using static Cpp2CS.Idioms.IdiomRewriter;
 
@@ -53,6 +54,13 @@ internal static class IdiomPipeline
             if (state.StringSlotChoices())
                 state.Cleanup();
         });
+        state.Passes.Run("idioms.FrameSlotPromotion.ForwardInitializationSpills", () =>
+        {
+            if (FrameSlotPromotion.ForwardCallSpills(state.function, c => c.Op is null
+                && state.owner.HelperOf(c)?.Kind is HelperKind.InitMetadata or HelperKind.ClassInit or HelperKind.InitializedTypeInfo,
+                c => c is { Kind: CallKind.Direct or CallKind.Tail, Target: Const target } && state.owner.calls.Signature(target.Value) is not null))
+                state.Cleanup();
+        });
         state.Passes.Run("idioms.Normalize", () =>
         {
             state.Normalize();
@@ -65,11 +73,6 @@ internal static class IdiomPipeline
         state.Passes.Run("idioms.Normalize", () =>
         {
             state.Normalize();
-        });
-        state.Passes.Run("idioms.MergedIndirectTails.Run", () =>
-        {
-            if (MergedIndirectTails.Run(state.function))
-                state.Cleanup();
         });
         state.Passes.Run("idioms.FrameSlotPromotion.ForwardCallSpills", () =>
         {
@@ -86,6 +89,11 @@ internal static class IdiomPipeline
             if (SharedInterfaceTails.Run(state.function, c => c.Op is null && state.owner.HelperOf(c)?.Kind == HelperKind.InterfaceLookup, state.Fresh))
                 state.Cleanup();
         });
+        state.Passes.Run("idioms.MergedIndirectTails.Run", () =>
+        {
+            if (MergedIndirectTails.Run(state.function))
+                state.Cleanup();
+        });
         state.Passes.Run("idioms.InterfaceDispatch", () =>
         {
             if (state.InterfaceDispatch())
@@ -99,6 +107,16 @@ internal static class IdiomPipeline
         state.Passes.Run("idioms.Calls", () =>
         {
             state.Calls();
+        });
+        state.Passes.Run("idioms.InvokerCalls", () =>
+        {
+            if (state.InvokerCalls())
+                state.Cleanup();
+        });
+        state.Passes.Run("idioms.StackBoxing", () =>
+        {
+            if (state.StackBoxing())
+                state.Cleanup();
         });
         // 延迟值替换后才出现的 MethodInfo 符号（如内联 Array.Empty<T>() 的 MethodInfo+0x38 → RGCTX）：再符号化一次。
         state.Passes.Run("idioms.ReplaceLazy", () =>
@@ -123,10 +141,15 @@ internal static class IdiomPipeline
             if (state.ThreadStaticBlocks())
                 state.Cleanup();
         });
-        state.Passes.Run("idioms.FrameMemoryNormalizer.Run", () =>
+        state.Passes.Run("idioms.ConstantMemoryNormalizer.Run", () =>
         {
-            if (FrameMemoryNormalizer.Run(state.function, state.Fresh))
+            if (ConstantMemoryNormalizer.Run(state.function, state.Fresh))
+            {
                 state.Cleanup();
+                // 复制的真实存储展开后，GC 屏障才能核对到对应的写入。
+                state.Calls();
+                state.Cleanup();
+            }
         });
         state.Passes.Run("idioms.MathImportNormalizer.Run", () =>
         {
@@ -240,6 +263,11 @@ internal static class IdiomPipeline
             if (state.ArrayAddressPhis())
                 state.Cleanup();
         });
+        state.Passes.Run("idioms.AffineInduction", () =>
+        {
+            if (AffineInduction.Run(state.function, state.RawDefinition))
+                state.Cleanup();
+        });
         state.Passes.Run("idioms.ArrayPointerLoops", () =>
         {
             if (state.ArrayPointerLoops())
@@ -294,14 +322,14 @@ internal static class IdiomPipeline
             if (state.FlagPhiConditions())
                 state.Cleanup();
         });
-        // 后续守卫归约可能才把对象和类指针的入边对齐。
+        // 后续守卫与地址归约可能才对齐分派接收者或直接调用的存储位置。
         state.Passes.Run("idioms.refresh", () =>
         {
             state.defs = new Defs(state.function);
         });
         state.Passes.Run("idioms.Calls", () =>
         {
-            state.Calls(indirectOnly: true);
+            state.Calls();
         });
         state.Passes.Run("idioms.Residuals", () =>
         {

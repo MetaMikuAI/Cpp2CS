@@ -27,18 +27,19 @@ public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransfo
             ? new(EmissionProblemKind.Dependency, problem, MethodRef.Open(method)) : null;
 
     /// <summary>
-    /// 只读检查：恢复体的写出条件，以及写成的 CIL 的求值栈类型（<see cref="CilStackTypes"/>）；同一类型的构造函数仍按整批核对字段初始化器。
+    /// 只读检查：恢复体的写出条件，以及写成的 CIL 的求值栈类型（<see cref="CilStackTypes"/>）。
+    /// Source 策略另外按整批核对源码表达形式。
     /// 检查时建成的 CIL 体留到写出时使用，不改动骨架上的方法。
     /// </summary>
     public Dictionary<ManagedBody, EmissionProblem> Check(IEnumerable<ManagedBody> bodies, EmissionPolicy policy = EmissionPolicy.Checked)
     {
         var problems = new Dictionary<ManagedBody, EmissionProblem>(ReferenceEqualityComparer.Instance);
-        var constructors = new List<(ManagedBody, ConstructorInitialization.Shape)>();
+        var sourceBodies = new List<ManagedBody>();
         foreach (var recovered in bodies)
         {
             var check = new BodyValidation(types, policy, recovered.Method, diagnostics);
             var method = skeleton.Method(recovered.Method.Method);
-            if (check.Check(recovered, method.HasBody, out var shape) is { } problem)
+            if (check.Check(recovered, method.HasBody) is { } problem)
             {
                 problems.Add(recovered, problem);
                 continue;
@@ -48,11 +49,10 @@ public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransfo
                 problems.Add(recovered, new(EmissionProblemKind.StackType, stack, recovered.Method));
                 continue;
             }
-            if (shape is not null) constructors.Add((recovered, shape));
+            if (policy == EmissionPolicy.Source) sourceBodies.Add(recovered);
         }
-        foreach (var constructor in ConstructorInitialization.Inconsistent(constructors))
-            problems.Add(constructor, new(EmissionProblemKind.Constructor,
-                "构造函数 有字段初始化器，要求本类所有构造函数都已写出且初始化器相同", constructor.Method));
+        if (policy == EmissionPolicy.Source)
+            foreach (var (body, problem) in SourceSuitability.Check(sourceBodies)) problems.Add(body, problem);
         return problems;
     }
 

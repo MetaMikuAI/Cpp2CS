@@ -21,17 +21,27 @@ public static class FrameSlotPromotion
     private sealed record Access(long Offset, int Width, bool IsStore);
 
     /// <summary>调用前保存、调用后原位读回的独占帧槽；调用必须已证明不会访问调用者的栈。</summary>
-    internal static bool ForwardCallSpills(MachineFunction function, Func<Call, bool> safeCall)
+    internal static bool ForwardCallSpills(MachineFunction function, Func<Call, bool> safeCall, Func<Call, bool>? explicitInputs = null)
     {
         var changed = false;
+        var dominators = Dominators.Compute(function);
         foreach (var block in function.Blocks)
             foreach (var store in block.Statements.OfType<Store>().ToArray())
             {
                 if (store is not { Target: FrameAddress { Offset: <= -16 } frame, Value: Use or Const } || store.Value.Width != 128) continue;
                 var index = block.Statements.IndexOf(store);
-                var following = block.Statements.Skip(index + 1).TakeWhile(s => s is Nop || s is Call c && safeCall(c)).ToArray();
-                if (following.OfType<Call>().Count() != 1 || block.Statements.ElementAtOrDefault(index + following.Length + 1)
-                    is not Define { Value: Load { Width: 128, Address: FrameAddress read } } restore || read != frame) continue;
+                Load? Reload(Expr value) => value switch
+                {
+                    Load { Width: 32 or 64 or 128, Address: FrameAddress read } load when read == frame => load,
+                    Ir.Convert { Kind: ConvKind.ZeroExtend } conversion => Reload(conversion.Operand),
+                    _ => null,
+                };
+                var restores = function.Blocks.SelectMany(b => b.Statements.OfType<Define>().Select(d => (Block: b, Define: d)))
+                    .Where(p => Reload(p.Define.Value) is not null).ToArray();
+                if (restores is not [var restored]) continue;
+                var restore = restored.Define;
+                if (restored.Block == block ? block.Statements.IndexOf(restore) <= index
+                    : !dominators.Dominates(block.Index, restored.Block.Index)) continue;
                 bool Exposes(Expr e) => e switch
                 {
                     // 只接受没有别名或部分访存的独占区域；其他帧地址只允许直接读写不相交的区间。
@@ -44,10 +54,27 @@ public static class FrameSlotPromotion
                     if (ReferenceEquals(statement, store) || ReferenceEquals(statement, restore)) return false;
                     if (statement is Store { Target: FrameAddress at } write)
                         return at.Offset < frame.Offset + 16 && frame.Offset < at.Offset + write.Value.Width / 8 || Exposes(write.Value);
+                    // 已知签名的栈实参已展开在 Arguments 中；保存的 SP 仅记录调用位置。
+                    if (statement is Call call && (safeCall(call) || explicitInputs?.Invoke(call) == true))
+                        return Exposes(call.Target) || call.Arguments.Any(Exposes) || call.DelegateReceiver is { } receiver && Exposes(receiver);
                     return ExprMap.Operands(statement).Any(Exposes);
                 }
                 if (function.Blocks.SelectMany(b => b.Statements).Any(OtherAccess)) continue;
-                block.Statements[block.Statements.IndexOf(restore)] = restore with { Value = store.Value };
+                var visited = new HashSet<Block>();
+                bool SafePath(Block current, int begin)
+                {
+                    if (!visited.Add(current)) return false;
+                    foreach (var statement in current.Statements.Skip(begin))
+                    {
+                        if (ReferenceEquals(statement, restore)) return true;
+                        if (ReferenceEquals(statement, store) || statement is Call call && !safeCall(call)) return false;
+                    }
+                    return current.Successors.All(next => visited.Contains(next) && next != block || SafePath(next, 0));
+                }
+                if (!SafePath(block, index + 1)) continue;
+                var loaded = Reload(restore.Value)!;
+                restored.Block.Statements[restored.Block.Statements.IndexOf(restore)] = restore with
+                { Value = Fold.Simplify(ExprMap.Map(restore.Value, e => ReferenceEquals(e, loaded) ? Fold.Extract(store.Value, 0, loaded.Width) : null)) };
                 block.Statements.Remove(store);
                 changed = true;
             }

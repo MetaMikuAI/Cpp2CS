@@ -77,7 +77,7 @@ internal sealed class DelegateCallNormalizer
         return proven;
     }
 
-    public static bool Run(ProgramFacts facts, MachineFunction function, IdiomResult report)
+    public static bool Run(ProgramFacts facts, MachineFunction function, IdiomResult report, Func<Expr, TypeRef?>? typeOf = null)
     {
         static bool NeedsProof(Call call) => call.Op?.Kind == OpKind.CallDelegate
             ? call is not { Target: Symbol { Kind: SymbolKind.Method }, DelegateReceiver: not null }
@@ -89,7 +89,7 @@ internal sealed class DelegateCallNormalizer
             for (var i = 0; i < block.Statements.Count; i++)
             {
                 if (block.Statements[i] is not Call call || !NeedsProof(call)) continue;
-                var normalized = context.Normalize(call, block);
+                var normalized = context.Normalize(call, block, typeOf);
                 if (normalized is null)
                 {
                     if (call.Op?.Kind == OpKind.CallDelegate)
@@ -178,14 +178,16 @@ internal sealed class DelegateCallNormalizer
             new Use(receiver.Target, 64), Expr.C(unchecked((ulong)fields[0].Offset), 64), 64), 64);
     }
 
-    private Call? Normalize(Call call, Block block)
+    private Call? Normalize(Call call, Block block, Func<Expr, TypeRef?>? typeOf = null)
     {
+        // 已提升的调用内存效果依赖原签名，不能只收窄寄存器后继续沿用。
+        if (call.Memory.Length > 0) return null;
         if (JoinedField(call.Target, block, call) is not Load { Width: 64 } target || Split(target.Address) is not { Root: { } root, Offset: 0x18 }) return null;
         var registers = call.Sources.Select((r, i) => (r, e: call.Arguments[i])).ToDictionary(x => x.r, x => x.e);
         bool Field(Expr? value, long offset) => value is not null && JoinedField(value, block, call) is Load { Width: 64 } load
             // Load 定义不可展开后比较：同一字段在两次读取之间可能已被写过，只有同一个 SSA 根才是见证。
             && Split(load.Address) is { Root: { } other } split && split.Offset == offset && Equals(root, other);
-        if (!Field(registers.GetValueOrDefault(Storage.Gpr(0)), 0x40) || TypeOf(root, []) is not DefinitionRef type
+        if (!Field(registers.GetValueOrDefault(Storage.Gpr(0)), 0x40) || (typeOf?.Invoke(root) ?? TypeOf(root, [])) is not DefinitionRef type
             || DelegateFacts.Invoke(type) is not { } invoke || abi.Classify(invoke, out _) is not { MethodInfo: { } info } signature
             || !Field(registers.GetValueOrDefault(info.Register), 0x28)) return null;
         if (signature.Parameters.Any(a => a.Passing == Passing.Stack)) return null;
@@ -196,6 +198,7 @@ internal sealed class DelegateCallNormalizer
         return call with
         {
             Op = new RuntimeOp(OpKind.CallDelegate, invoke),
+            Resolved = invoke,
             DelegateReceiver = root,
             Target = new Symbol(SymbolKind.Method, invoke),
             Sources = sources,

@@ -24,7 +24,7 @@ public interface IValueEnvironment
 /// 平凡 φ 转发后重新求值，直到不再出现新的平凡 φ。
 /// 求值只读机器函数，不改写它。
 /// </summary>
-public sealed class ValueModel
+public sealed partial class ValueModel
 {
     private const int MaxPasses = 8;
 

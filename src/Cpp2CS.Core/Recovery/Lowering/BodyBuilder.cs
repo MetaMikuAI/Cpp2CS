@@ -2,6 +2,7 @@ using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Recovery.Control;
+using Cpp2CS.Recovery.Effects;
 using Cpp2CS.Recovery.Inlining;
 using Cpp2CS.Recovery.Memory;
 using Cpp2CS.Recovery.Runtime;
@@ -31,6 +32,7 @@ internal sealed partial class BodyBuilder
     private readonly HashSet<Sym> absorbedChecks = [];
     private readonly Dictionary<Call, LocalValue> exceptions = new(ReferenceEqualityComparer.Instance);
     private IReadOnlyList<ExceptionRegionPlan> regions = [];
+    private EffectAnalysis effects = null!;
     private IReadOnlyList<Block> order = [];
     private Block? currentBlock;
     private int nextLocal;
@@ -39,7 +41,7 @@ internal sealed partial class BodyBuilder
     private readonly TemplateRecovery templates;
     private readonly Dictionary<Variable, PendingConstruction> pendingConstructions = [];
 
-    private BodyBuilder(MethodAnalysis analysis, TypeOracle oracle, InlineEvidence fields, TemplateRecovery templates)
+    private BodyBuilder(MethodAnalysis analysis, TypeOracle oracle, TypeUsePlan uses, InlineEvidence fields, TemplateRecovery templates)
     {
         this.analysis = analysis;
         this.oracle = oracle;
@@ -47,10 +49,11 @@ internal sealed partial class BodyBuilder
         this.templates = templates;
         types = oracle.Types;
         values = analysis.Values;
+        materialized.UnionWith(uses.Materialized);
     }
 
-    public static LoweredBody Build(MethodAnalysis analysis, TypeOracle oracle, InlineEvidence fields, TemplateRecovery templates) =>
-        new BodyBuilder(analysis, oracle, fields, templates).Run();
+    public static LoweredBody Build(MethodAnalysis analysis, TypeOracle oracle, TypeUsePlan uses, InlineEvidence fields, TemplateRecovery templates) =>
+        new BodyBuilder(analysis, oracle, uses, fields, templates).Run();
 
     private LoweredBody Run()
     {
@@ -58,30 +61,9 @@ internal sealed partial class BodyBuilder
         if (!ExceptionRegions.Build(function).TryGet(out var plan, out var failure))
             return new(null, [new(failure.Address, failure.Reason)], new Dictionary<Variable, PendingConstruction>(), 0);
         regions = plan.Regions;
+        effects = new(values, oracle, regions);
         order = plan.Order;
-        // 使用约束与类型解相互影响：直到解稳定，才使用这一轮记录的读取用途。
-        while (true)
-        {
-            Reset();
-            demand = [];
-            LowerBlocks();
-            var state = oracle.Solve();
-            if (state == TypeSolveState.Stable) break;
-            if (state is TypeSolveState.Cycle or TypeSolveState.BudgetExceeded)
-                return new(null, [new(analysis.Entry, state == TypeSolveState.Cycle ? "类型 φ 类型求解循环" : "类型 φ 类型求解超过预算")],
-                    new Dictionary<Variable, PendingConstruction>(), 0);
-        }
-        var users = demand!;
-        demand = null;
-        foreach (var (read, set) in users)
-            if (set.Any(user => !ReferenceEquals(user, read.Site))) materialized.Add(read);
-        Reset();
         return LowerBlocks();
-    }
-
-    private void Reset()
-    {
-        locals.Clear(); phis.Clear(); holes.Clear(); constructions.Clear(); absorbedChecks.Clear(); exceptions.Clear(); pendingConstructions.Clear(); nextLocal = 0;
     }
 
     private LoweredBody LowerBlocks()
@@ -99,7 +81,6 @@ internal sealed partial class BodyBuilder
             var holesBefore = holes.Count;
             for (var i = 0; i < block.Statements.Count && exit is null; i++)
             {
-                current = block.Statements[i];
                 exit = Lower(block, i, output);
             }
             var normal = block.NormalSuccessors.ToArray();
@@ -116,7 +97,6 @@ internal sealed partial class BodyBuilder
         // φ 的闭包：入边赋值的来源可能用到新的 φ。
         var done = new HashSet<PhiSym>();
         var copies = new Dictionary<(Block From, Block To, int Index), List<ManagedCopy>>();
-        current = EdgeUse;
         while (phis.Except(done).ToArray() is { Length: > 0 } pending)
             foreach (var phi in pending)
             {
@@ -213,17 +193,4 @@ internal sealed partial class BodyBuilder
         return new HoleValue(reason, t, Width(t));
     }
 
-    // ---- 读取的落点 ----
-
-    /// <summary>空跑时记录：每个读取被哪些语句的 IL 值用到。</summary>
-    private Dictionary<ReadSym, HashSet<Stmt>>? demand;
-    private Stmt? current;
-    private static readonly Stmt EdgeUse = new Nop(0, "φ 入边");
-
-    private void Demand(ReadSym read)
-    {
-        if (demand is null || current is null) return;
-        if (!demand.TryGetValue(read, out var users)) demand[read] = users = new(ReferenceEqualityComparer.Instance);
-        users.Add(current);
-    }
 }

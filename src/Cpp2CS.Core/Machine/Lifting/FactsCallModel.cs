@@ -67,6 +67,7 @@ public sealed class FactsCallModel : ICallModel
         HelperKind.Import => helper.Detail switch
         {
             "memcpy" or "memmove" or "memset" => new([X(0), X(1), X(2)], [X(0)], "libc"),
+            "__stack_chk_fail" => new([], [], "libc"),
             "modf" => new([X(0), Storage.Vec(0)], [Storage.Vec(0)], "libm"),
             "sincosf" => new([X(0), X(1), Storage.Vec(0)], [], "libm"),
             var symbol when MathImportSignature.Find(symbol) is { } signature =>

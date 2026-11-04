@@ -40,6 +40,8 @@ internal static class SharedInterfaceTails
     internal static bool Run(MachineFunction function, Func<Call, bool> isLookup, Func<int, Variable> fresh)
     {
         var changed = false;
+        var nextAddress = function.Blocks.Max(b => b.End) + 4;
+        ulong Address() { var address = nextAddress; nextAddress += 4; return address; }
         foreach (var slow in function.Blocks.ToArray())
         {
             if (slow.Handler is not null || slow.IsLandingPad || slow.Predecessors.Count < 2
@@ -58,10 +60,10 @@ internal static class SharedInterfaceTails
                 || merge.Predecessors.Count != 2
                 || merge.Statements.OfType<Call>().ToArray() is not [Call { Op: null, Kind: CallKind.Indirect or CallKind.TailIndirect } invoke]) continue;
             var exits = merge.NormalSuccessors.ToArray();
-            if (exits.Length > 1 || exits.Length == 0 && merge.Statements.LastOrDefault() is not (Return { Value: null } or Call { Kind: CallKind.TailIndirect })) continue;
+            if (exits.Length > 1 || exits.Length == 0 && merge.Statements.LastOrDefault() is not (Return or Call { Kind: CallKind.TailIndirect })) continue;
             var exit = exits.SingleOrDefault();
             var hit = merge.Predecessors.Single(p => p != slowExit);
-            if (hit.Handler is not null || hit.IsLandingPad || hit.Predecessors.Count != 2
+            if (hit.Handler is not null || hit.IsLandingPad || hit.Predecessors.Count is < 2 or > 16
                 || hit.NormalSuccessors.ToArray() is not [var hitExit] || hitExit != merge
                 || hit.Statements.Any(s => s is not (Phi or Define or Jump or Nop))) continue;
             var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
@@ -99,35 +101,36 @@ internal static class SharedInterfaceTails
                 hitPartition = fastSlots;
             }
             var groups = partition!.Sources.Select((v, i) => (Value: v, Index: i)).GroupBy(p => p.Value).ToArray();
-            if (groups.Length != 2 || groups.Any(g => slow.Statements.OfType<Phi>().Any(p => g.Select(x => p.Sources[x.Index]).Distinct().Count() != 1))) continue;
+            if (groups.Length != hit.Predecessors.Count || groups.Any(g => slow.Statements.OfType<Phi>().Any(p => g.Select(x => p.Sources[x.Index]).Distinct().Count() != 1))) continue;
             var mapping = groups.Select(g => bySlot ? Array.FindIndex(hitPartition!.Sources, v => Slot(v, true) == Slot(g.Key, false))
                 : Array.IndexOf(hitPartition!.Sources, g.Key)).ToArray();
-            if (mapping.Any(i => i < 0) || mapping.Distinct().Count() != 2) continue;
+            if (mapping.Any(i => i < 0) || mapping.Distinct().Count() != groups.Length) continue;
             var slotValid = lookup.Arguments[2] is Const { Value: <= 32 }
                 || lookup.Arguments[2] is Use slot && slow.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == slot.Variable) is { } slotPhi
                     && slotPhi.Sources.All(v => definitions.GetValueOrDefault(v) is Const { Value: <= 32 });
             if (!slotValid) continue;
             var split = new[] { slow, hit, merge };
             var shared = split.Concat(bridges).ToArray();
-            if (split.Any(b => b.End < b.Start + 8 || b.Statements.Any(s => s is not (Phi or Define or Call or Jump or Nop)
-                    && !(b == merge && s is Return { Value: null })))
-                || split.Any(b => function.Blocks.Any(other => other != b && other.Start == b.Start + 4))) continue;
+            if (split.Any(b => b.Statements.Any(s => s is not (Phi or Define or Call or Jump or Nop)
+                    && !(b == merge && s is Return)))) continue;
             var defined = shared.SelectMany(b => b.Statements).SelectMany(Defines).ToHashSet();
-            // 此形态调用返回 void，合并尾部的临时寄存器不能流出；外部 φ 由原边的输入原样复制。
-            if (function.Blocks.Except(shared).SelectMany(b => b.Statements).Any(s => s is Phi p && p.Sources.Any(defined.Contains)
-                || ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => defined.Contains(u.Variable)))) continue;
+            var exitIndex = exit?.Predecessors.IndexOf(merge) ?? -1;
+            // 尾部结果只经原出口的对应 φ 入边流出，复制时按每条路径的变量映射续接。
+            if (function.Blocks.Except(shared).Any(b => b.Statements.Any(s => s is Phi p
+                ? p.Sources.Where((_, i) => b != exit || i != exitIndex).Any(defined.Contains)
+                : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => defined.Contains(u.Variable))))) continue;
             var incoming = new[] { slow.Predecessors.ToArray(), hit.Predecessors.ToArray() };
             if (incoming.SelectMany(p => p).Any(p => p.Handler is not null || p.IsLandingPad || shared.Contains(p)
                 || p.Successors.Distinct().Count() != p.Successors.Count
                 || p.NormalSuccessors.Count() != 1 && p.Statements.LastOrDefault() is not Branch)) continue;
             var copies = new List<(Block Slow, Block Hit, Block Merge)>();
-            var exitIndex = exit?.Predecessors.IndexOf(merge) ?? -1;
             var exitValues = exit?.Statements.OfType<Phi>().ToDictionary(p => p.Target, p => p.Sources[exitIndex]);
-            for (var side = 0; side < 2; side++)
+            for (var side = 0; side < groups.Length; side++)
             {
-                var (slowCopy, slowMap) = Copy(slow, groups[side].First().Index, slow.Start + (ulong)side * 4);
-                var (hitCopy, hitMap) = Copy(hit, mapping[side], hit.Start + (ulong)side * 4);
-                var mergeCopy = new Block(merge.Start + (ulong)side * 4) { End = merge.End };
+                var (slowCopy, slowMap) = Copy(slow, groups[side].First().Index, Address());
+                var (hitCopy, hitMap) = Copy(hit, mapping[side], Address());
+                var mergeAddress = Address();
+                var mergeCopy = new Block(mergeAddress) { End = mergeAddress };
                 var merged = new Dictionary<Variable, Variable>();
                 foreach (var phi in merge.Statements.OfType<Phi>())
                 {
@@ -148,11 +151,14 @@ internal static class SharedInterfaceTails
                 {
                     MachineFunction.AddEdge(mergeCopy, exit);
                     for (var i = 0; i < exit.Statements.Count && exit.Statements[i] is Phi phi; i++)
-                        exit.Statements[i] = phi with { Sources = [.. phi.Sources, exitValues![phi.Target]] };
+                    {
+                        var value = exitValues![phi.Target];
+                        exit.Statements[i] = phi with { Sources = [.. phi.Sources, merged.GetValueOrDefault(value, value)] };
+                    }
                 }
                 copies.Add((slowCopy, hitCopy, mergeCopy));
             }
-            for (var side = 0; side < 2; side++)
+            for (var side = 0; side < groups.Length; side++)
             {
                 foreach (var source in groups[side]) Redirect(incoming[0][source.Index], slow, copies[side].Slow);
                 Redirect(incoming[1][mapping[side]], hit, copies[side].Hit);
@@ -165,7 +171,7 @@ internal static class SharedInterfaceTails
             (Block, Dictionary<Variable, Variable>) Copy(Block source, int side, ulong address)
             {
                 var map = source.Statements.OfType<Phi>().ToDictionary(p => p.Target, p => p.Sources[side]);
-                var copy = new Block(address) { End = source.End };
+                var copy = new Block(address) { End = address };
                 Append(source, copy, map);
                 return (copy, map);
             }
@@ -184,7 +190,7 @@ internal static class SharedInterfaceTails
                     {
                         var variables = call.Defines.Select(v => v is null ? null! : fresh(v.Width)).ToArray();
                         for (var i = 0; i < variables.Length; i++) if (call.Defines[i] is { } old) map[old] = variables[i];
-                        mapped = call with { Defines = variables };
+                        mapped = call.Duplicate() with { Defines = variables };
                     }
                     copy.Statements.Add(mapped);
                 }

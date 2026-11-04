@@ -117,7 +117,8 @@ internal static class AddressPhiLoads
                 foreach (var (_, statement) in prefix)
                 {
                     // 操作数未变时改写器会返回原对象；每条入边仍需独立的语句身份。
-                    var copy = ExprMap.MapOperands(statement, OnEdge) with { };
+                    var rewritten = ExprMap.MapOperands(statement, OnEdge);
+                    var copy = rewritten is Call call ? call.Duplicate() : rewritten with { };
                     if (copy is Define define)
                     {
                         var target = fresh(define.Target.Width);

@@ -63,9 +63,9 @@ internal static class PathSplitting
                 from.Statements.Add(new Define(phi.Address, phi.Target, phi.Sources[j] is { } source ? new Use(source, phi.Target.Width) : new Unknown("φ 来源缺失", phi.Target.Width)));
             foreach (var statement in body)
             {
-                if (statement is not Call { Defines.Length: > 0 } call) { from.Statements.Add(statement); continue; }
+                if (statement is not Call call) { from.Statements.Add(statement); continue; }
                 var fresh = call.Defines.Select(d => d is null ? null! : d with { Version = versions[d.Storage]++ }).ToArray();
-                var copy = call with { Defines = fresh };
+                var copy = call.Duplicate() with { Defines = fresh };
                 from.Statements.Add(copy);
                 for (var r = 0; r < fresh.Length; r++)
                     if (call.Defines[r] is { } original)
@@ -110,7 +110,7 @@ internal static class PathSplitting
         foreach (var block in model.Function.Blocks)
         {
             if (block.Predecessors.Count < 2 || !block.Statements.Any(s => s is Phi)) continue;
-            if (block.Statements.Any(statement => Singletons(model, oracle, statement).Any(sym => Distinct(sym, block))))
+            if (block.Statements.Any(statement => Singletons(model, oracle, statement).Any(sym => Distinct(sym, block, oracle))))
                 yield return block;
         }
     }
@@ -159,11 +159,11 @@ internal static class PathSplitting
     }
 
     /// <summary>地址（或实体）由本块的 φ 选出，且各来源的身份不全相同。</summary>
-    private static bool Distinct(Sym sym, Block block)
+    private static bool Distinct(Sym sym, Block block, TypeOracle oracle)
     {
         var root = Root(SymTable.Resolve(sym));
         if (root is not PhiSym phi || !ReferenceEquals(phi.Block, block) || phi.Sources.Any(s => s is null)) return false;
-        var identities = phi.Sources.Select(s => Identity(SymTable.Resolve(s!))).ToArray();
+        var identities = phi.Sources.Select(s => Identity(SymTable.Resolve(s!), oracle)).ToArray();
         return identities.All(i => i is not null) && identities.Distinct().Count() > 1;
     }
 
@@ -175,8 +175,10 @@ internal static class PathSplitting
     }
 
     /// <summary>来源的身份：实体、局部地址，或去掉常量偏移后的根与偏移。</summary>
-    private static object? Identity(Sym sym)
+    private static object? Identity(Sym sym, TypeOracle oracle)
     {
+        var address = oracle.Decompose(sym);
+        if (address.Index is not null && oracle.TypeOf(address.Root) is ArrayRef or PointerRef) return address;
         long offset = 0;
         while (sym is OpSym { Op.Kind: OperatorKind.Binary, Args: [var left, ConstSym c] } add && add.Op.Binary == BinOp.Add)
         {

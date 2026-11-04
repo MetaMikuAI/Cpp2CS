@@ -40,7 +40,7 @@ internal sealed partial class TemplateRecovery
             if (receiver is not (LocalValue or FieldValue or StaticFieldValue or ArrayElementValue)) { failure = "值类型接收者不可取址"; return null; }
             receiver = new AddressValue(receiver);
         }
-        var covered = match.Covered;
+        var covered = match.Covered.ToHashSet();
         var internalBlocks = covered.Select(c => c.Block).Where(b => b != startBlock).Distinct().ToHashSet();
         if (match.Continuation is { } continuation)
         {
@@ -58,14 +58,26 @@ internal sealed partial class TemplateRecovery
         }
         if (Enumerable.Range(start, blocks[startBlock].Statements.Count - start).Any(i => !covered.Contains((startBlock, i)) && !(!match.Returns && startBlock == exit.Block && i >= exit.Index))) { failure = "起点块含有区域外的语句"; return null; }
         var region = internalBlocks.Append(startBlock).ToHashSet();
-        foreach (var other in body.Blocks.Where(b => !region.Contains(b.Address)))
-            if (other.Statements.SelectMany(ManagedValues.Edges).Any(e => internalBlocks.Contains(e.Target))) { failure = "区域内的块从区域外进入"; return null; }
-        // 纯跳转与局部复制不会抛出异常，尾部这类块可在 try 外；实际效果仍须保留起点的异常上下文。
+        // 多个内联点可以共享判断尾部；保留仍被外部入口使用的尾部及其后继。
+        var shared = new HashSet<ulong>();
+        var pending = new Queue<ulong>(body.Blocks.Where(b => !region.Contains(b.Address))
+            .SelectMany(b => b.Statements.SelectMany(ManagedValues.Edges)).Select(e => e.Target).Where(internalBlocks.Contains));
+        while (pending.TryDequeue(out var address))
+        {
+            if (!shared.Add(address)) continue;
+            if (blocks[address].Statements.Any(s => s is not (ManagedBranch or ManagedJump)))
+            { failure = "区域内的块从区域外进入"; return null; }
+            foreach (var edge in blocks[address].Statements.SelectMany(ManagedValues.Edges).Where(e => internalBlocks.Contains(e.Target)))
+                pending.Enqueue(edge.Target);
+        }
+        // 纯跳转与已证明不抛异常的复制可在 try 外；实际效果仍须保留起点的异常上下文。
         bool Inert(ulong block) => blocks[block].Statements.All(s => s is ManagedJump jump
-            && jump.Edge.Copies.All(c => c.Value is LocalValue or ArgumentValue or ConstantValue));
+            && jump.Edge.Copies.All(c => NonThrowingInlineValue(c.Value)));
         if (body.Regions.Any(r => internalBlocks.Contains(r.HandlerEntry)
             || region.Any(b => !Inert(b) && (r.Try.Contains(b) != r.Try.Contains(startBlock) || r.Handler.Contains(b) != r.Handler.Contains(startBlock)))))
         { failure = "区域跨越异常边界"; return null; }
+        internalBlocks.ExceptWith(shared);
+        covered.RemoveWhere(p => shared.Contains(p.Block));
         // 区域内定义的值不在区域外使用。
         var outside = body.Blocks.SelectMany(b => b.Statements.Select((s, i) => (b.Address, i, s)))
             .Where(p => !covered.Contains((p.Address, p.i)) && !(!match.Returns && p.Address == exit.Block && exit.Index > 0 && p.i < exit.Index));

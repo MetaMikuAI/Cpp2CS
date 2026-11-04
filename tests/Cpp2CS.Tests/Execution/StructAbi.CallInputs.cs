@@ -34,7 +34,7 @@ internal sealed partial class StructAbi
                 || definition.Owner.GenericParameters.Count != 0 || Side.IsGenericInstance(method)) return [];
             var types = ArgumentTypes(method);
             if (types.Any(t => index.Types.Kind(t) is not
-                (TypeKind.Reference or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Struct))) return [];
+                (TypeKind.Reference or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Struct or TypeKind.Pointer))) return [];
             var signature = Signature(method);
             var offsets = new int[types.Length];
             var total = 0;
@@ -47,7 +47,7 @@ internal sealed partial class StructAbi
             var reads = NativeInputReads(definition.Address);
             if (reads is null) return [];
             return Arguments(signature).Select((location, i) => (location, i))
-                .Where(p => index.Types.Kind(types[p.i]) != TypeKind.Struct
+                .Where(p => index.Types.Kind(types[p.i]) is not (TypeKind.Struct or TypeKind.Pointer)
                     && p.location is { StackOffset: null, Indirect: false, Pieces: [var piece] }
                     && !reads.Contains(piece.Register)).Select(p => offsets[p.i]).ToArray();
         }

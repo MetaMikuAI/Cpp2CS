@@ -16,7 +16,7 @@ internal sealed partial class BodyBuilder
     private ManagedValue View(Sym sym, TypeRef? expected, ulong address)
     {
         sym = SymTable.Resolve(sym);
-        if (expected is DefinitionRef structure && types.Kind(expected) == TypeKind.Struct && sym is not ConcatSym && Bits(sym))
+        if (expected is DefinitionRef structure && types.Kind(expected) == TypeKind.Struct && sym is not ConcatSym && oracle.BitRepresentation(sym))
             return StructBits(sym, structure, address);
         if (sym is not LocalSym && locals.TryGetValue(sym, out var known)) return Coerce(known, expected, address);
         // 以数组元素地址作为 ref 返回或传入：地址表达式按数组布局还原为 ldelema，而不是把数组引用当整数。
@@ -40,14 +40,16 @@ internal sealed partial class BodyBuilder
             case EntitySym { Symbol: { Kind: SymbolKind.Field, Value: FieldRef field } }:
                 return new FieldHandleValue(field, types.RuntimeFieldHandle, 64);
             case ReadSym read:
-                Demand(read);
                 return Read(read, address) is { } value ? Coerce(value, expected, address) : Hole(address, "内存 读取", expected);
             case ResultSym result when constructions.ContainsKey(result):
                 return Hole(address, "构造 对象在构造函数调用前被使用", expected);
             case PhiSym phi:
                 {
-                    // 空跑时记录使用处要求的类型，作为 φ 的类型约束。
-                    if (demand is not null && expected is not null) oracle.Use(phi, expected);
+                    if (oracle.ProjectedField(phi) is var (whole, wholeType, path, fieldType))
+                        return Coerce(Nest(View(whole, wholeType, address), path, fieldType, false, address), expected, address);
+                    if (oracle.ProjectedScalar(phi) is var (scalar, scalarType, low))
+                        return Coerce(IntegerSlice(View(scalar, scalarType, address), low, phi.Width,
+                            oracle.Unconstrained(phi.Width) ?? types.Integer(phi.Width <= 32 ? 32 : 64, false), address), expected, address);
                     var type = oracle.TypeOf(phi) ?? expected ?? oracle.Unconstrained(phi.Width);
                     if (type is null) return Hole(address, "类型 φ 没有类型", expected);
                     phis.Add(phi);
@@ -127,10 +129,10 @@ internal sealed partial class BodyBuilder
 
     private ManagedValue Operation(OpSym op, TypeRef? expected, ulong address)
     {
-        var natural = oracle.TypeOf(op);
+        var typing = oracle.OperationTypes(op, expected);
         switch (op.Op.Kind)
         {
-            case OperatorKind.Compare when op.Op.Cond is Cond.Eq or Cond.Ne && ClassIdentity(op.Args[0], op.Args[1]) is var (owner, sealedType):
+            case OperatorKind.Compare when op.Op.Cond is Cond.Eq or Cond.Ne && oracle.ClassIdentity(op.Args[0], op.Args[1]) is var (owner, sealedType):
                 {
                     // 对象的类指针与密封类比较：等价于对象是否为该类型（读取类指针蕴含对象非空）。
                     var instance = new IsInstValue(View(owner, types.Object, address), sealedType);
@@ -139,11 +141,7 @@ internal sealed partial class BodyBuilder
             case OperatorKind.Compare:
                 {
                     // 整段位的比较使用结构体所包住的标量或引用。
-                    var hint = oracle.TypeOf(op.Args[0]) ?? oracle.TypeOf(op.Args[1]);
-                    if (hint is not null && types.Kind(hint) == TypeKind.Struct && op.Args[1].Width == op.Args[0].Width
-                        && types.Size(hint) * 8 == op.Args[0].Width && oracle.Innermost(hint).Type is var scalar
-                        && (types.Kind(scalar) is TypeKind.Int or TypeKind.Bool || ManagedTypes.IsReferenceType(scalar)))
-                        hint = scalar;
+                    var hint = typing.Inputs[0];
                     return new ComparisonValue(op.Op.Cond, View(op.Args[0], hint, address), View(op.Args[1], hint, address), types.Boolean);
                 }
             case OperatorKind.And or OperatorKind.Or:
@@ -153,7 +151,7 @@ internal sealed partial class BodyBuilder
             case OperatorKind.Select:
                 {
                     // 各路都没有定义类型（常量之间的选择）时按期望类型解释，常量取其位型。
-                    var type = oracle.Defined(op) ?? expected ?? types.Integer(op.Width is 8 or 16 or 32 or 64 ? op.Width : 64, true);
+                    var type = typing.Result!;
                     return new ChoiceValue(View(op.Args[0], types.Boolean, address), View(op.Args[1], type, address), View(op.Args[2], type, address), type, Width(type));
                 }
             case OperatorKind.Binary:
@@ -165,19 +163,19 @@ internal sealed partial class BodyBuilder
                         return op.Op.Binary == BinOp.Xor ? new ComparisonValue(Cond.Ne, left, right, types.Boolean)
                             : new BooleanValue(op.Op.Binary == BinOp.And, left, right, types.Boolean);
                     }
-                    var type = expected is not null && types.Kind(expected) is TypeKind.Int && Width(expected) == op.Width ? expected : natural ?? oracle.Unconstrained(op.Width);
+                    var type = typing.Result;
                     if (type is null) return Hole(address, $"类型 运算 {op.Op}", expected);
-                    return new BinaryValue(op.Op.Binary, View(op.Args[0], type, address), View(op.Args[1], op.Op.Binary is BinOp.Shl or BinOp.LShr or BinOp.AShr ? types.Int32 : type, address), type, op.Width);
+                    return new BinaryValue(op.Op.Binary, View(op.Args[0], type, address), View(op.Args[1], typing.Inputs[1], address), type, op.Width);
                 }
             case OperatorKind.Unary:
                 {
-                    var type = natural ?? (expected is not null && types.Kind(expected) is TypeKind.Int && Width(expected) == op.Width ? expected : oracle.Unconstrained(op.Width));
+                    var type = typing.Result;
                     if (type is null) return Hole(address, $"类型 运算 {op.Op}", expected);
                     return new UnaryValue(op.Op.Unary, View(op.Args[0], type, address), type, op.Width);
                 }
             case OperatorKind.Convert:
                 {
-                    var type = natural ?? (expected is not null && Width(expected) == op.Width ? expected : null);
+                    var type = typing.Result;
                     if (type is null) return Hole(address, $"类型 转换 {op.Op}", expected);
                     var operandWidth = op.Args[0].Width;
                     // 非标准宽度的片不能交给 conv.i*：先把该片的符号位移到 IL 整数最高位，再算术右移。
@@ -189,34 +187,24 @@ internal sealed partial class BodyBuilder
                         var aligned = new BinaryValue(BinOp.Shl, View(op.Args[0], integer, address), shift, integer, bits);
                         return Coerce(new BinaryValue(BinOp.AShr, aligned, shift, integer, bits), type);
                     }
-                    var source = op.Op.Conversion switch
-                    {
-                        ConvKind.FloatToFloat or ConvKind.FloatToSInt or ConvKind.FloatToUInt => operandWidth == 32 ? types.Single : types.Double,
-                        ConvKind.SIntToFloat or ConvKind.SignExtend when operandWidth is 8 or 16 or 32 or 64 => oracle.TypeOf(op.Args[0]) is { } t && types.Kind(t) is TypeKind.Int ? t : types.Integer(operandWidth, true),
-                        ConvKind.UIntToFloat when operandWidth is 8 or 16 or 32 or 64 => types.Integer(operandWidth, false),
-                        _ => oracle.TypeOf(op.Args[0]),
-                    };
+                    var source = typing.Inputs[0];
                     return new ConversionValue(op.Op.Conversion, View(op.Args[0], source, address), type, op.Width);
                 }
         }
         return Hole(address, $"运算 {op.Op} 尚未接入", expected);
     }
 
-    private (Sym Owner, TypeRef Type)? ClassIdentity(Sym left, Sym right)
-    {
-        foreach (var (a, b) in new[] { (left, right), (right, left) })
-            if (ClassOwner(a) is { } owner && SymTable.Resolve(b) is EntitySym { Symbol: { Kind: SymbolKind.Class, Value: DefinitionRef type } }
-                && (type.Definition.Attributes & System.Reflection.TypeAttributes.Sealed) != 0)
-                return (owner, type);
-        return null;
-    }
-
     /// <summary>原子的一段：值类型的字段；整数的低位截断；bool 的低位即自身。</summary>
     private ManagedValue Slice(SliceSym slice, TypeRef? expected, ulong address)
     {
+        if (oracle.EnclosingScalar(slice) is { } scalar)
+        {
+            var target = expected is not null && types.Kind(expected) is TypeKind.Int or TypeKind.Bool or TypeKind.Pointer ? expected
+                : types.Integer(oracle.StorageBits(scalar.Type), false);
+            return Coerce(IntegerBits(slice, target, address)!, expected, address);
+        }
         if (slice.Base is ReadSym merged && oracle.Part(merged, slice.Low, slice.Width) is { } part)
         {
-            Demand(merged);
             return Coerce(LocationValue(part, address), expected);
         }
         var baseType = oracle.TypeOf(slice.Base) ?? (slice.Base is PhiSym ? oracle.Unconstrained(slice.Base.Width) : null);
@@ -229,12 +217,13 @@ internal sealed partial class BodyBuilder
                     ? Coerce(Nest(source, path, type, false, address), expected) : Hole(address, $"值 结构体 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected);
             case TypeKind.Bool when slice.Low == 0:
                 return Coerce(source, expected, address);
-            case TypeKind.Int or TypeKind.Pointer:
+            case TypeKind.Int or TypeKind.Pointer or TypeKind.Float or TypeKind.Double:
                 {
+                    var carrier = oracle.IntegerRepresentation(slice.Base)!.Value.Integer;
                     var target = expected is not null && types.Kind(expected) is TypeKind.Int or TypeKind.Bool && Width(expected) >= slice.Width ? expected
-                        : slice.Width is 8 or 16 or 32 or 64 ? types.Integer(slice.Width, false) : baseType;
+                        : slice.Width is 8 or 16 or 32 or 64 ? types.Integer(slice.Width, false) : carrier;
                     if (target.Equals(types.Boolean) || slice.Width == 1 && types.Kind(target) == TypeKind.Bool)
-                        return new ComparisonValue(Cond.Ne, IntegerBits(slice, baseType, address) ?? Hole(address, "值 位", baseType), new ConstantValue(0, baseType, Width(baseType)), types.Boolean);
+                        return new ComparisonValue(Cond.Ne, IntegerBits(slice, carrier, address) ?? Hole(address, "值 位", carrier), new ConstantValue(0, carrier, Width(carrier)), types.Boolean);
                     return IntegerBits(slice, target, address) ?? Hole(address, $"值 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected);
                 }
         }
@@ -258,8 +247,8 @@ internal sealed partial class BodyBuilder
                     // bool 的零扩展即自身（C++ bool 只用低位）。
                     if (parts.Skip(1).All(p => p is ConstSym { Value: 0 } or UndefSym) && oracle.TypeOf(low) is { } lowType && types.Kind(lowType) == TypeKind.Bool)
                         return View(low, expected, address);
-                    if (Width(expected) > 64 || Width(expected) < concat.Width && parts.Skip(1).Any(p => p is not (ConstSym { Value: 0 } or UndefSym))) break;
-                    // 位组合的一般形式：各段零扩展后左移到其位置再按位或。未定义的位不参与。
+                    if (Width(expected) > 64) break;
+                    // 各段零扩展、移位、按位或；运算按目标位宽截断，目标范围之外及未定义的位不参与。
                     ManagedValue? result = null;
                     var at = 0;
                     foreach (var part in parts)
@@ -283,36 +272,9 @@ internal sealed partial class BodyBuilder
     /// </summary>
     private ManagedValue StructBits(Sym bits, DefinitionRef structure, ulong address)
     {
-        if (oracle.WholeRead(bits, structure) is { } whole) return View(whole, structure, address);
-        return StructLeaves(bits, structure, address) is { } leaves ? Composed(structure, leaves, address)
-            : Hole(address, $"值 {structure} 超出位宽 {bits.Width}", structure);
-    }
-
-    /// <summary>没有自然结构体类型、按位片解释的值：拼接、常量与标量原子。</summary>
-    private bool Bits(Sym sym) => sym is ConcatSym or ConstSym
-        || oracle.TypeOf(sym) is { } natural && types.Kind(natural) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer;
-
-    /// <summary>位片组成的结构体值的非零叶子；位宽不足时为 null。为零的叶子由 initobj 给出。</summary>
-    private List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>? StructLeaves(Sym bits, DefinitionRef structure, ulong address)
-    {
-        var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
-        foreach (var (field, type, offset) in oracle.Fields(structure))
-        {
-            var width = oracle.StorageBits(type);
-            if (offset * 8 + width > bits.Width) return null;
-            var part = values.Syms.Slice(bits, offset * 8, width);
-            if (SymTable.Resolve(part) is ConstSym { Value: 0 }) continue;
-            if (type is DefinitionRef nested && types.Kind(type) == TypeKind.Struct && Bits(SymTable.Resolve(part)))
-            {
-                // 已有整体值保留为字段值；其余位片仍按叶子交给构造函数证明。
-                if (oracle.WholeRead(part, nested) is { } whole) leaves.Add(([field], View(whole, type, address)));
-                else if (StructLeaves(part, nested, address) is { } inner)
-                    leaves.AddRange(inner.Select(l => ((IReadOnlyList<FieldRef>)[field, .. l.Path], l.Value)));
-                else return null;
-            }
-            else leaves.Add(([field], View(part, type, address)));
-        }
-        return leaves;
+        if (oracle.Aggregate(bits, structure) is not { } plan) return Hole(address, $"值 {structure} 超出位宽 {bits.Width}", structure);
+        if (plan.Whole is { } whole) return View(whole, structure, address);
+        return Composed(structure, plan.Fields.Select(f => (f.Projection.Path, View(f.Value, f.Projection.Type, address))).ToList(), address);
     }
 
     /// <summary>
@@ -322,18 +284,21 @@ internal sealed partial class BodyBuilder
     /// </summary>
     private bool Leafwise(Sym bits, TypeRef type)
     {
-        bits = SymTable.Resolve(bits);
-        if (type is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct || !Bits(bits)
-            || types.Size(structure) * 8 > bits.Width || oracle.WholeRead(bits, structure) is not null) return false;
-        var hidden = types.Leaves(structure).Any(l => l.Path.Any(f => !this.fields.Accessible(f, f.DeclaringType))
-            && SymTable.Resolve(values.Syms.Slice(bits, l.Offset * 8, oracle.LeafBits(l.Type))) is not ConstSym { Value: 0 });
-        return hidden && !Constructible(structure);
+        if (type is not DefinitionRef structure || oracle.FieldStores(bits, type) is not { } leaves) return false;
+        var hidden = leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType)));
+        return hidden && !templates.CanConstructValue(structure);
     }
 
-    /// <summary>按叶子组成的结构体值：叶子字段都须对当前方法可访问，否则记为洞（被内联的构造函数尚无逆）。</summary>
+    /// <summary>按叶子组成结构体值；不可访问的字段由模板层证明构造，失败则记为洞。</summary>
     private ManagedValue Composed(DefinitionRef structure, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, ulong address)
     {
-        if (leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType))) && ValueConstructor(structure, leaves) is { } constructed) return constructed;
+        if (leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType)))
+            && templates.ProveValueConstruction(structure, leaves) is { } construction)
+        {
+            var arguments = construction.Arguments.Select((value, i) => value is AddressValue ? value
+                : Coerce(value, construction.Constructor.Concrete(construction.Constructor.Method.Parameters[i].Type), address)).ToArray();
+            return new NewObjectValue(construction.Constructor, arguments) { Transparent = true };
+        }
         foreach (var (path, _) in leaves)
             if (path.FirstOrDefault(f => !fields.Accessible(f, f.DeclaringType)) is { } hidden)
                 return Hole(address, $"内存 字段 {hidden.Field.Owner.FullName}.{hidden.Field.Name} 对调用方不可访问，结构体值按叶子组成", structure);
@@ -350,42 +315,53 @@ internal sealed partial class BodyBuilder
         var targetWidth = Width(target);
         switch (part)
         {
+            case OpSym operation when oracle.ModularArithmetic(operation) is { } carrier:
+                {
+                    if (IntegerBits(operation.Args[0], carrier, address) is not { } left
+                        || IntegerBits(operation.Args[1], carrier, address) is not { } right) return null;
+                    var computed = new BinaryValue(operation.Op.Binary, left, right, carrier, Width(carrier));
+                    var masked = new BinaryValue(BinOp.And, computed, new ConstantValue(Expr.Mask(operation.Width), carrier, Width(carrier)), carrier, Width(carrier));
+                    return Resize(masked, target);
+                }
+            case ConcatSym concat:
+                return Composite(concat, target, address);
             case ConstSym c:
                 return new ConstantValue(c.Value & Expr.Mask(targetWidth), target, targetWidth);
-            case SliceSym slice when (oracle.TypeOf(slice.Base) ?? (slice.Base is PhiSym ? oracle.Unconstrained(slice.Base.Width) : null)) is { } sourceType && types.Kind(sourceType) is TypeKind.Int or TypeKind.Pointer or TypeKind.Bool:
-                {
-                    var sourceWidth = Width(sourceType);
-                    var value = View(slice.Base, sourceType, address);
-                    if (slice.Low > 0) value = new BinaryValue(BinOp.LShr, value, new ConstantValue((ulong)slice.Low, types.Int32, 32), sourceType, sourceWidth);
-                    if (slice.Width < sourceWidth && slice.Low + slice.Width < sourceWidth)
-                        value = new BinaryValue(BinOp.And, value, new ConstantValue(Expr.Mask(slice.Width), sourceType, sourceWidth), sourceType, sourceWidth);
-                    return Resize(value, target);
-                }
-            case not ConcatSym when (oracle.TypeOf(part) ?? (part is PhiSym ? oracle.Unconstrained(part.Width) : null)) is { } atomType && types.Kind(atomType) is TypeKind.Int or TypeKind.Bool or TypeKind.Pointer:
-                return Resize(View(part, atomType, address), target);
+            case PhiSym phi when oracle.ProjectedScalar(phi) is var (scalar, scalarType, low):
+                return IntegerSlice(View(scalar, scalarType, address), low, phi.Width, target, address);
+            case SliceSym slice when oracle.EnclosingScalar(slice) is var (scalar, scalarType, low):
+                return IntegerSlice(View(scalar, scalarType, address), low, slice.Width, target, address);
+            case SliceSym slice when oracle.IntegerRepresentation(slice.Base) is var (sourceType, integerType):
+                return IntegerSlice(Coerce(View(slice.Base, sourceType, address), integerType, address), slice.Low, slice.Width, target, address);
+            case not ConcatSym when oracle.IntegerRepresentation(part) is var (atomType, integerType):
+                return Resize(Coerce(View(part, atomType, address), integerType, address), target);
             case not (SliceSym or ConcatSym) when oracle.TypeOf(part) is DefinitionRef structure && types.Kind(structure) == TypeKind.Struct && part.Width <= targetWidth:
                 {
                     // 只有全部位都由整数叶子覆盖时，结构体的机器位型才能用字段移位与或表示；不猜测填充字节。
-                    var leaves = Leaves(structure, 0).OrderBy(l => l.Offset).ToArray();
-                    var covered = 0;
-                    foreach (var (_, type, offset) in leaves)
-                    {
-                        if (types.Kind(type) is not (TypeKind.Int or TypeKind.Bool) || offset * 8 != covered) return null;
-                        covered += Width(type);
-                    }
-                    if (covered != part.Width) return null;
+                    if (types.StorageBits(structure) != part.Width || types.IntegerPieces(structure) is not { } leaves) return null;
                     var source = View(part, structure, address);
                     ManagedValue? packed = null;
-                    foreach (var (path, type, offset) in leaves)
+                    foreach (var leaf in leaves)
                     {
-                        var value = Resize(Nest(source, path, type, false, address), target);
-                        if (offset > 0) value = new BinaryValue(BinOp.Shl, value, new ConstantValue((ulong)(offset * 8), types.Int32, 32), target, targetWidth);
+                        var value = Resize(Nest(source, leaf.Path, leaf.Type, false, address), target);
+                        if (leaf.Bit > 0) value = new BinaryValue(BinOp.Shl, value, new ConstantValue((ulong)leaf.Bit, types.Int32, 32), target, targetWidth);
                         packed = packed is null ? value : new BinaryValue(BinOp.Or, packed, value, target, targetWidth);
                     }
                     return packed;
                 }
         }
         return null;
+    }
+
+    private ManagedValue IntegerSlice(ManagedValue source, int low, int width, TypeRef target, ulong address)
+    {
+        var sourceWidth = Width(source.Type);
+        var integer = types.Kind(source.Type) is TypeKind.Float or TypeKind.Double ? types.Integer(sourceWidth, false) : source.Type;
+        var value = Coerce(source, integer, address);
+        if (low > 0) value = new BinaryValue(BinOp.LShr, value, new ConstantValue((ulong)low, types.Int32, 32), integer, sourceWidth);
+        if (width < sourceWidth && low + width < sourceWidth)
+            value = new BinaryValue(BinOp.And, value, new ConstantValue(Expr.Mask(width), integer, sourceWidth), integer, sourceWidth);
+        return Resize(value, target);
     }
 
     /// <summary>整数值按宽度零扩展或截断到 target。</summary>
@@ -396,5 +372,4 @@ internal sealed partial class BodyBuilder
         return new ConversionValue(from < to ? ConvKind.ZeroExtend : ConvKind.Truncate, value, target, to);
     }
 
-    private IEnumerable<(IReadOnlyList<FieldRef> Path, TypeRef Type, int Offset)> Leaves(DefinitionRef structure, int at) => types.Leaves(structure, at);
 }

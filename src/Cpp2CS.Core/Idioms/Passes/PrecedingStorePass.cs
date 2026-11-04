@@ -5,6 +5,32 @@ namespace Cpp2CS.Idioms;
 
 internal static class PrecedingStorePass
 {
+    // 引用自赋值被消去后可只留下屏障；从同一位置读取到屏障之间不能有写入或其他调用。
+    internal static bool UnchangedReference(this IdiomState state, Block block, int index, Expr address, Expr value)
+    {
+        if (value is not Use source) return false;
+        var target = state.defs.Expand(address);
+        var visited = new HashSet<Block> { block };
+        for (var i = index - 1; ; i--)
+        {
+            if (i < 0)
+            {
+                if (block.Predecessors is not [var previous] || previous.NormalSuccessors.Count() != 1 || !visited.Add(previous))
+                    return false;
+                block = previous;
+                i = block.Statements.Count;
+                continue;
+            }
+            switch (block.Statements[i])
+            {
+                case Define define when define.Target == source.Variable:
+                    return state.defs.Expand(define.Value) is Load { Width: 64 } load && load.Address == target;
+                case Store or Call:
+                    return false;
+            }
+        }
+    }
+
     internal static bool PrecedingStore(this IdiomState state, Block block, int index, Expr address, Expr value)
         => PrecedingStore(state, block, index, address, value, []);
 

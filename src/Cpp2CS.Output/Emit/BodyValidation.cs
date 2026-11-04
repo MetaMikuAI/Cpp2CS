@@ -12,17 +12,16 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
     private ulong? address;
     private bool CanAccess(MethodRef method, TypeRef? receiver) => IgnoreAccess || ManagedAccess.Method(types, accessContext, method, receiver);
     private bool CanAccess(TypeRef type) => IgnoreAccess || ManagedAccess.Type(types, accessContext, type);
-    private bool CanAccess(FieldRef field, TypeRef? receiver) => IgnoreAccess || ManagedAccess.Field(types, accessContext, field, receiver);
+    private bool CanAccess(FieldRef field, TypeRef? receiver) => IgnoreAccess || ManagedAccess.Field(types, methodContext, field, receiver);
 
-    public EmissionProblem? Check(ManagedBody recovered, bool hasBody, out ConstructorInitialization.Shape? shape)
+    public EmissionProblem? Check(ManagedBody recovered, bool hasBody)
     {
-        var problem = Validate(recovered, hasBody, out shape);
+        var problem = Validate(recovered, hasBody);
         return problem is null ? null : problem with { Method = methodContext, Address = address };
     }
 
-    private EmissionProblem? Validate(ManagedBody recovered, bool hasBody, out ConstructorInitialization.Shape? shape)
+    private EmissionProblem? Validate(ManagedBody recovered, bool hasBody)
     {
-        shape = null;
         if (!hasBody) return new(EmissionProblemKind.Unsupported, "方法不允许 CIL 方法体");
         if (recovered.Blocks.Count == 0) return new(EmissionProblemKind.Unsupported, "空控制流图");
         var blockAddresses = recovered.Blocks.Select(b => b.Address).ToHashSet();
@@ -31,8 +30,7 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
             if (!blockAddresses.Contains(edge.Target)) return new(EmissionProblemKind.Unsupported, $"控制流 跳转目标 0x{edge.Target:x} 不在方法体中");
         if (methodContext.Method.Name == ".ctor" && !methodContext.Method.IsStatic && !methodContext.Method.Owner.IsValueType)
         {
-            if (ConstructorInitialization.Check(recovered, out var constructorShape) is { } initializationProblem) return new(EmissionProblemKind.Constructor, initializationProblem);
-            shape = constructorShape;
+            if (ConstructorInitialization.Check(recovered, out _) is { } initializationProblem) return new(EmissionProblemKind.Constructor, initializationProblem);
         }
         foreach (var statement in recovered.Blocks.SelectMany(b => b.Statements))
         {

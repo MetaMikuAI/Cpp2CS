@@ -10,7 +10,7 @@ namespace Cpp2CS.Recovery.Inlining;
 internal sealed partial class TemplateRecovery
 {
     private bool ConcludeExit(InlineMatch match, MethodRef method, ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks) =>
-        ConcludeBranch(match, method, body, blocks) || ConcludeReturn(match, method) || ConcludeJoin(match, method);
+        ConcludeBranch(match, method, body, blocks) || ConcludeReturn(match, method) || ConcludeJoin(match, method, body, blocks);
 
     /// <summary>模板的一条路径返回：调用方从当前位置沿无条件跳转到达的点是这条路径的出口，连同出口边上的复制记为一个终点。</summary>
     private bool Finish(Walker caller, InlineMatch match, ManagedValue? result)
@@ -18,17 +18,37 @@ internal sealed partial class TemplateRecovery
         if (result is not null && !CaptureReturnValue(caller, match, result)) return false;
         var copies = new List<(LocalValue, ManagedValue)>();
         var continuation = false;
-        for (var steps = 0; steps < 16 && caller.Current is ManagedJump jump; steps++)
+        for (var steps = 0; steps < 16; steps++)
         {
-            // 共享续接中的空跳转可旁路，但不并入内联区域；其他入边仍保留原块。
+            if (caller.Current is not (ManagedJump or ManagedAssignment)) break;
+            // 共享续接中的无副作用复制可旁路；复制逐边组合，其他入边仍保留原块。
             continuation |= caller.Index == 0 && caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) > 1;
-            if (continuation && jump.Edge.Copies.Count > 0) break;
+            if (caller.Current is ManagedAssignment assignment && NonThrowingInlineValue(assignment.Value)
+                && caller.Index == caller.Blocks[caller.Block].Statements.Count - 2
+                && caller.Blocks[caller.Block].Statements[^1] is ManagedJump
+                && caller.Env.TryGetValue(assignment.Target.Variable, out var previous)
+                && Term(caller, assignment.Value) is { } assigned && SameTerm(previous, assigned))
+            {
+                var locals = ManagedValues.Walk(assignment.Value).OfType<LocalValue>().Select(l => l.Variable)
+                    .Append(assignment.Target.Variable).ToHashSet();
+                var addressed = caller.Blocks.Values.SelectMany(b => b.Statements).SelectMany(ReadValues).SelectMany(ManagedValues.Walk)
+                    .OfType<AddressValue>().SelectMany(a => ManagedValues.Walk(a.Target)).OfType<LocalValue>().Any(l => locals.Contains(l.Variable));
+                if (addressed) break;
+                if (!continuation) Cover(caller, match);
+                caller.Index++;
+                continue;
+            }
+            if (caller.Current is not ManagedJump jump) break;
+            if (continuation && jump.Edge.Copies.Any(c => !NonThrowingInlineValue(c.Value))) break;
             if (!continuation) Cover(caller, match);
+            var edgeCopies = new List<(LocalValue Target, ManagedValue Value)>();
             foreach (var copy in jump.Edge.Copies)
             {
                 if (Term(caller, copy.Value) is not { } value) return false;
-                copies.Add((copy.Target, value));
+                edgeCopies.Add((copy.Target, value));
             }
+            foreach (var copy in edgeCopies) caller.Env[copy.Target.Variable] = copy.Value;
+            copies.AddRange(edgeCopies);
             if (!caller.Blocks.ContainsKey(jump.Edge.Target)) return false;
             caller.Block = jump.Edge.Target;
             caller.Index = 0;
@@ -47,7 +67,7 @@ internal sealed partial class TemplateRecovery
             }
         }
         if (returns) Cover(caller, match);
-        match.Ends.Add(new InlineEnd((caller.Block, caller.Index), copies, new Dictionary<Variable, ManagedValue>(caller.Env), result, returns));
+        match.Ends.Add(new InlineEnd((caller.Block, caller.Index), copies, new Dictionary<Variable, ManagedValue>(caller.Env), result, returns, caller.Epoch));
         return true;
     }
 
@@ -113,25 +133,31 @@ internal sealed partial class TemplateRecovery
     /// 汇合：各路径须在同一点结束。有返回值时，承接它的是调用方在出口处的同一个局部：出口复制的目标（多路径时即合流处的 φ）或区域内定义的局部，
     /// 在每条路径上都等于模板的返回值；其余出口复制在各路径上相同。返回值被丢弃时，额外求值的返回项不得引入异常或副作用。
     /// </summary>
-    private bool ConcludeJoin(InlineMatch match, MethodRef method)
+    private bool ConcludeJoin(InlineMatch match, MethodRef method, ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks)
     {
         if (match.Ends.Any(e => e.Returns)) return match.Fail("返回路径与续接路径混合");
-        if (match.Ends.Count == 0 || match.Ends.Any(e => e.Exit != match.Ends[0].Exit)) return match.Fail("各路径在调用方的出口不同");
+        if (match.Ends.Count == 0 || match.Ends.Any(e => e.Exit != match.Ends[0].Exit))
+            return match.Fail($"各路径在调用方的出口不同：{string.Join(", ", match.Ends.Select(e => $"0x{e.Exit.Block:x}+{e.Exit.Index}"))}");
         LocalValue? result = null;
+        LocalValue? returned = null;
+        ManagedValue? view = null;
+        IReadOnlyList<(LocalValue Target, ManagedValue Value)> projections = [];
+        var copied = match.Covered.SelectMany(p => ManagedValues.Edges(blocks[p.Block].Statements[p.Index]))
+            .SelectMany(e => e.Copies).Select(c => c.Target)
+            .Concat(match.Ends.SelectMany(e => e.Copies.Select(c => c.Target))).DistinctBy(l => l.Variable).ToArray();
         if (!ManagedTypes.IsVoid(method.Method.ReturnType))
         {
             var returnType = method.Concrete(method.Method.ReturnType);
             var first = match.Ends[0];
             if (first.Result is null) return false;
-            var candidates = first.Copies.Select(c => c.Target).Concat(first.Env.Keys.Where(match.Defined.ContainsKey).Select(v => LocalOf(match, v)).OfType<LocalValue>())
+            var candidates = copied.Concat(first.Env.Keys.Where(match.Defined.ContainsKey).Select(v => LocalOf(match, v)).OfType<LocalValue>())
                 .Where(l => l.Type.Equals(returnType) || types.Kind(returnType) == TypeKind.Bool && types.Kind(l.Type) == TypeKind.Int).DistinctBy(l => l.Variable);
             foreach (var candidate in candidates)
             {
                 var trial = new Dictionary<int, ManagedValue>(match.Binding);
                 bool Carries(InlineEnd end)
                 {
-                    var held = end.Copies.FirstOrDefault(c => c.Target.Variable.Equals(candidate.Variable)) is { Target: not null } copy
-                        ? copy.Value : end.Env.GetValueOrDefault(candidate.Variable);
+                    var held = end.Env.GetValueOrDefault(candidate.Variable);
                     return held is not null && end.Result is { } value
                         && Unify(candidate.Type.Equals(returnType) ? value : new ConversionValue(ConvKind.ZeroExtend, value, candidate.Type, candidate.Width), held, trial);
                 }
@@ -140,22 +166,139 @@ internal sealed partial class TemplateRecovery
                 result = candidate;
                 break;
             }
+            if (result is null && JoinFields(match, returnType, copied) is { } aggregate)
+                (result, projections) = aggregate;
+            if (result is null && JoinPredicate(match, returnType, copied) is { } predicate)
+                (result, returned, view) = predicate;
             // 调用结果可被丢弃；额外求值的返回项不得引入异常或副作用。区域外使用仍由 Replace 检查。
             if (result is null && !match.Ends.All(e => e.Result is { } value && NonThrowingInlineValue(value)))
                 return match.Fail("返回值没有承接的局部，且无法证明额外求值无副作用");
         }
-        var rest = match.Ends.Select(e => e.Copies.Where(c => result is null || !c.Target.Variable.Equals(result.Variable)).ToArray()).ToArray();
-        if (rest.Any(r => !r.SequenceEqual(rest[0]))) return match.Fail("出口复制在各路径上不同");
+        var rest = projections.ToList();
+        ManagedValue Project(InlineEnd end, ManagedValue value)
+        {
+            foreach (var projection in projections)
+                if (end.Env.GetValueOrDefault(projection.Target.Variable) is { } leaf && SameTerm(value, leaf)) return projection.Value;
+            return MapTerm(value, child => Project(end, child));
+        }
+        foreach (var target in copied.Where(c => (result is null || c.Variable != result.Variable)
+            && !projections.Any(p => p.Target.Variable == c.Variable)))
+        {
+            var exit = match.Ends[0].Exit;
+            var held = match.Ends.Select(e => e.Env.GetValueOrDefault(target.Variable) ?? target).ToArray();
+            if (!LiveAt(body, blocks, exit.Block, exit.Index, target.Variable) && held.All(NonThrowingInlineValue)) continue;
+            if (projections.Count > 0) held = match.Ends.Select((end, i) => Project(end, held[i])).ToArray();
+            if (held.Skip(1).Any(v => !SameTerm(v, held[0]))) return match.Fail("出口复制在各路径上不同");
+            rest.Add((target, held[0]));
+        }
         match.Exit = match.Ends[0].Exit;
-        match.ExitCopies = rest[0];
+        match.ExitCopies = rest;
         match.Result = result;
-        if (result is not null && !result.Type.Equals(method.Concrete(method.Method.ReturnType)))
+        if (result is not null && view is not null)
+        {
+            match.ResultStorage = result;
+            match.Result = returned;
+            match.ExitCopies = [.. rest, (result, view)];
+        }
+        else if (result is not null && !result.Type.Equals(method.Concrete(method.Method.ReturnType)))
         {
             match.ResultStorage = result;
             match.Result = NewLocal(method.Concrete(method.Method.ReturnType));
-            match.ExitCopies = [.. rest[0], (result, new ConversionValue(ConvKind.ZeroExtend, match.Result, result.Type, result.Width))];
+            match.ExitCopies = [.. rest, (result, new ConversionValue(ConvKind.ZeroExtend, match.Result, result.Type, result.Width))];
         }
         return true;
+    }
+
+    /// <summary>结构体返回值可由多个字段局部承接；每条返回路径都须证明这些局部对应同一组完整叶子。</summary>
+    private (LocalValue Result, IReadOnlyList<(LocalValue Target, ManagedValue Value)> Copies)? JoinFields(
+        InlineMatch match, TypeRef returnType, IReadOnlyList<LocalValue> copied)
+    {
+        if (returnType is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct
+            || match.Ends.Any(e => e.Result is null || !e.Result.Type.Equals(returnType))) return null;
+        var leaves = types.Projections(structure).ToArray();
+        if (leaves.Length == 0) return null;
+        var result = NewLocal(returnType);
+        var projections = new List<(LocalValue Target, ManagedValue Value)>();
+        var trial = new Dictionary<int, ManagedValue>(match.Binding);
+        foreach (var projection in leaves)
+        {
+            var path = projection.Path;
+            var type = projection.Type;
+            ManagedValue value = result;
+            foreach (var field in path)
+            {
+                if (!fields.Accessible(field, value.Type)) return null;
+                var fieldType = field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
+                value = new FieldValue(value, field, fieldType, Width(fieldType));
+            }
+            bool Carries(InlineEnd end, LocalValue local, Dictionary<int, ManagedValue> binding) =>
+                ManagedProjections.Project(types, end.Result!, projection, field => new Observed(field, end.Epoch)) is { Value: var expected }
+                && end.Env.GetValueOrDefault(local.Variable) is { } actual && Unify(expected, actual, binding);
+            var matches = 0;
+            foreach (var local in copied.Where(c => c.Type.Equals(type) && !projections.Any(p => p.Target.Variable == c.Variable)))
+            {
+                var binding = new Dictionary<int, ManagedValue>(trial);
+                if (!match.Ends.All(e => Carries(e, local, binding))) continue;
+                trial = binding;
+                projections.Add((local, value));
+                matches++;
+            }
+            if (matches == 0) return null;
+        }
+        foreach (var (key, value) in trial) match.Binding[key] = value;
+        return (result, projections);
+    }
+
+    /// <summary>合流可承接返回值的比较结果；用一条非常量路径提出表达式，再逐路径验证，包括已折叠成常量的路径。</summary>
+    private (LocalValue Storage, LocalValue Result, ManagedValue View)? JoinPredicate(InlineMatch match, TypeRef returnType, IReadOnlyList<LocalValue> copied)
+    {
+        var result = NewLocal(returnType);
+        ManagedValue? Held(InlineEnd end, LocalValue target) => end.Env.GetValueOrDefault(target.Variable);
+        foreach (var end in match.Ends.Where(e => e.Result is not null and not ConstantValue))
+        foreach (var target in copied.Where(c => types.Kind(c.Type) == TypeKind.Bool))
+        {
+            if (Held(end, target) is not { } held || ReturnedPredicate(held, end.Result!, result) is not { } predicate) continue;
+            var trial = new Dictionary<int, ManagedValue>(match.Binding);
+            bool Carries(InlineEnd path)
+            {
+                if (path.Result is not { } value || Held(path, target) is not { } actual) return false;
+                ManagedValue Substitute(ManagedValue child) => child.Equals(result) ? value : MapTerm(child, Substitute);
+                var expected = (ComparisonValue)Substitute(predicate);
+                if (expected is { Left: ConstantValue left, Right: ConstantValue right }
+                    && ConstantComparison(expected.Condition, left, right) is { } constant)
+                    return Unify(new ConstantValue(constant ? 1UL : 0UL, types.Boolean, 8), actual, trial);
+                return Unify(expected, actual, trial);
+            }
+            if (!match.Ends.All(Carries)) continue;
+            foreach (var (key, value) in trial) match.Binding[key] = value;
+            return (target, result, predicate);
+        }
+        return null;
+    }
+
+    private ComparisonValue? ReturnedPredicate(ManagedValue tested, ManagedValue returned, ManagedValue result)
+    {
+        if (types.Kind(result.Type) == TypeKind.Bool)
+        {
+            if (SameTerm(tested, returned))
+                return new ComparisonValue(Cond.Ne, result, new ConstantValue(0, result.Type, result.Width), types.Boolean);
+            if (SameTerm(Negate(tested), returned))
+                return new ComparisonValue(Cond.Eq, result, new ConstantValue(0, result.Type, result.Width), types.Boolean);
+        }
+        if (types.Kind(result.Type) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Reference) || AsComparison(tested) is not { } comparison) return null;
+        ManagedValue? Carrier(ManagedValue value) => value switch
+        {
+            _ when SameTerm(value, returned) => result,
+            ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate } conversion when Carrier(conversion.Operand) is { } operand
+                => conversion with { Operand = operand },
+            _ => null,
+        };
+        ComparisonValue? predicate = null;
+        if (Carrier(comparison.Left) is { } left && comparison.Right is ConstantValue) predicate = comparison with { Left = left };
+        else if (Carrier(comparison.Right) is { } right && comparison.Left is ConstantValue) predicate = comparison with { Right = right };
+        if (predicate is not null && types.Kind(result.Type) == TypeKind.Reference && (predicate.Condition is not (Cond.Eq or Cond.Ne)
+            || predicate.Left is not ConstantValue { Bits: 0 } && predicate.Right is not ConstantValue { Bits: 0 })) return null;
+        return predicate;
     }
 
 
@@ -164,38 +307,49 @@ internal sealed partial class TemplateRecovery
     {
         if (ManagedTypes.IsVoid(method.Method.ReturnType) || match.Ends.Count == 0 || match.Ends.Any(e => e.Returns)) return false;
         var returnType = method.Concrete(method.Method.ReturnType);
-        if (types.Kind(returnType) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Reference)) return false;
-        Walker At(InlineEnd end) => new() { Blocks = blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Env = new(end.Env) };
+        if (types.Kind(returnType) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Reference or TypeKind.Struct)) return false;
+        Walker At(InlineEnd end) => new() { Blocks = blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Env = new(end.Env), Epoch = end.Epoch };
         ComparisonValue? predicate = null;
         var result = NewLocal(returnType);
-        ManagedValue? Carrier(ManagedValue value, ManagedValue returned) => value switch
+        IEnumerable<(ManagedValue Actual, ManagedValue Carrier)> Carriers(InlineEnd end)
         {
-            _ when SameTerm(value, returned) => result,
-            ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate } conversion when Carrier(conversion.Operand, returned) is { } operand
-                => conversion with { Operand = operand },
-            _ => null,
-        };
+            if (end.Result is not { } returned) yield break;
+            yield return (returned, result);
+            if (returnType is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct) yield break;
+            foreach (var projection in types.Projections(structure))
+            {
+                ManagedValue carrier = result;
+                var accessible = true;
+                foreach (var field in projection.Path)
+                {
+                    if (!fields.Accessible(field, carrier.Type)) { accessible = false; break; }
+                    var fieldType = field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
+                    carrier = new FieldValue(carrier, field, fieldType, Width(fieldType));
+                }
+                if (accessible && ManagedProjections.Project(types, returned, projection, field => new Observed(field, end.Epoch)) is { Value: var value })
+                    yield return (value, carrier);
+            }
+        }
         foreach (var end in match.Ends)
         {
             var walker = At(end);
-            if (end.Result is not { } returned || returned is ConstantValue || walker.Current is not ManagedBranch branch || Term(walker, branch.Condition) is not { } tested || AsComparison(tested) is not { } comparison) continue;
-            if (Carrier(comparison.Left, returned) is { } left && comparison.Right is ConstantValue) predicate = comparison with { Left = left };
-            else if (Carrier(comparison.Right, returned) is { } right && comparison.Left is ConstantValue) predicate = comparison with { Right = right };
+            if (end.Result is not { } returned || returned is ConstantValue || walker.Current is not ManagedBranch branch || Term(walker, branch.Condition) is not { } tested) continue;
+            predicate = Carriers(end).Select(p => ReturnedPredicate(tested, p.Actual, p.Carrier)).FirstOrDefault(p => p is not null);
             if (predicate is not null) break;
         }
         if (predicate is null) return false;
-        if (types.Kind(returnType) == TypeKind.Reference && (predicate.Condition is not (Cond.Eq or Cond.Ne)
-            || predicate.Left is not ConstantValue { Bits: 0 } && predicate.Right is not ConstantValue { Bits: 0 })) return false;
-        ManagedValue Apply(ManagedValue value)
+        ManagedValue Apply(InlineEnd end)
         {
-            ManagedValue Substitute(ManagedValue child) => child.Equals(result) ? value : MapTerm(child, Substitute);
+            var carriers = Carriers(end).ToArray();
+            ManagedValue Substitute(ManagedValue child) => carriers.FirstOrDefault(p => p.Carrier.Equals(child)).Actual ?? MapTerm(child, Substitute);
             return Substitute(predicate);
         }
         var exits = new Dictionary<bool, InlineEnd>();
         var covered = new HashSet<(ulong Block, int Index)>();
         InlineEnd WithResult(InlineEnd end, ManagedValue returned)
         {
-            ManagedValue ReplaceResult(ManagedValue value) => Unify(returned, value, new(match.Binding)) ? result : MapTerm(value, ReplaceResult);
+            var carriers = Carriers(end with { Result = returned }).ToArray();
+            ManagedValue ReplaceResult(ManagedValue value) => carriers.FirstOrDefault(p => Unify(p.Actual, value, new(match.Binding))).Carrier ?? MapTerm(value, ReplaceResult);
             return end with
             {
                 Copies = end.Copies.Select(c => (c.Target, ReplaceResult(c.Value))).ToArray(),
@@ -205,7 +359,8 @@ internal sealed partial class TemplateRecovery
         bool Note(bool outcome, InlineEnd end)
         {
             if (end.Exit.Index != 0) return match.Fail("条件续接点位于块中间");
-            var copies = end.Copies.GroupBy(c => c.Target.Variable).Select(g => g.Last()).ToArray();
+            var copies = end.Copies.GroupBy(c => c.Target.Variable).Select(g => g.Last())
+                .Where(c => LiveAt(body, blocks, end.Exit.Block, end.Exit.Index, c.Target.Variable) || !NonThrowingInlineValue(c.Value)).ToArray();
             end = end with { Copies = copies };
             if (exits.TryGetValue(outcome, out var prior))
             {
@@ -238,7 +393,7 @@ internal sealed partial class TemplateRecovery
         foreach (var end in match.Ends)
         {
             if (end.Result is not { } returned) return false;
-            var expected = Apply(returned);
+            var expected = Apply(end);
             var walker = At(end);
             if (expected is ComparisonValue { Left: ConstantValue left, Right: ConstantValue right } constant
                 && ConstantComparison(constant.Condition, left, right) is { } outcome)

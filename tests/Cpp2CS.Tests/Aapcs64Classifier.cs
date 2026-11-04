@@ -61,9 +61,9 @@ internal sealed class Aapcs64Classifier(FieldLayouts layouts)
         {
             case PrimitiveRef { Name: "void" }: result = new(Kind.Void, 0, 1); break;
             case ByRefRef or PointerRef or ArrayRef: result = Pointer; break;
-            case DefinitionRef d when FieldLayouts.IsFullyShared(d): throw new NotSupportedException($"共享占位类型 {type}");
             case DefinitionRef d when Primitive(d) is { } p: result = p; break;
             case DefinitionRef { Definition.IsValueType: false }: result = Pointer; break;
+            case DefinitionRef d when FieldLayouts.IsFullyShared(d): throw new NotSupportedException($"共享占位类型 {type}");
             case DefinitionRef { Definition.IsEnum: true } d:
                 result = Describe(d.Definition.Fields.Single(f => !f.IsStatic).Type.Substitute(d.Arguments, [])); break;
             case DefinitionRef d:

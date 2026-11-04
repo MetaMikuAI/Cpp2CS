@@ -47,6 +47,33 @@ public sealed record MachineSignature(MachineValue[] Arguments, MachineValue? Re
 
 public sealed partial class ManagedAbi
 {
+    /// <summary>已拆包的 invoker：引用按值，值参数按地址，非 void 返回值写入最后一个存储。</summary>
+    public MachineSignature Invoker(MethodRef method)
+    {
+        var arguments = new List<MachineValue>();
+        AbiPiece Piece(int index) => new(Storage.Gpr(index), 64, 0);
+        if (!method.Method.IsStatic)
+        {
+            var type = method.DeclaringType;
+            var reference = ManagedTypes.IsReferenceType(type);
+            arguments.Add(new(-1, reference ? type : new ByRefRef(type), reference ? Transfer.Value : Transfer.Reference,
+                [Piece(0)], reference ? 8 : Size(type), reference ? MemoryAccess.None : MemoryAccess.ReadWrite));
+        }
+        for (var index = 0; index < method.Method.Parameters.Count; index++)
+        {
+            var type = method.Concrete(method.Method.Parameters[index].Type);
+            var piece = Piece(arguments.Count);
+            if (type is ByRefRef || ManagedTypes.IsReferenceType(type))
+                arguments.Add(Direct(index, type, [piece], method.Method.Parameters[index].Attributes));
+            else arguments.Add(new(index, type, Transfer.Copy, [piece], SharedValue(type) ? -1 : Size(type), MemoryAccess.Read));
+        }
+        var info = Piece(arguments.Count);
+        var returned = method.Concrete(method.Method.ReturnType);
+        var result = ManagedTypes.IsVoid(returned) ? null : new MachineValue(MachineSignature.ReturnIndex, returned,
+            Transfer.ResultBuffer, [Piece(arguments.Count + 1)], SharedValue(returned) ? -1 : Size(returned), MemoryAccess.Write);
+        return new(arguments.ToArray(), result, info, 0);
+    }
+
     /// <summary>方法的机器签名；无法分类时返回 null 并给出原因。</summary>
     public MachineSignature? Machine(MethodRef method, out string? problem)
     {

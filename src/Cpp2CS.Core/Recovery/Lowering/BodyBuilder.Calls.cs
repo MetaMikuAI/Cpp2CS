@@ -16,7 +16,7 @@ internal sealed partial class BodyBuilder
     {
         var arguments = operands.Skip(1).Take(call.Arguments.Length).ToArray();
         var shape = analysis.Environment.Shape(call);
-        if (call.Op is { } op && !shape.IsDispatch)
+        if (call.Op is { } op && shape.IsRuntime)
             return LowerRuntime(block, index, call, op, arguments, output);
         var signature = shape.Signature;
         if (signature is null)
@@ -25,7 +25,7 @@ internal sealed partial class BodyBuilder
             holes.Add(new(call.Address, "调用 目标或签名未知"));
             return call.Kind is CallKind.Tail or CallKind.TailIndirect ? new Statement(new ManagedHole(call.Address, "调用 尾调用", true)) : null;
         }
-        var contents = signature.Arguments.Select(v => Content(call, v, arguments)).ToArray();
+        var contents = signature.Arguments.Select(v => values.ArgumentContent(call, v, arguments)).ToArray();
         var callee = oracle.Callee(call);
         if (callee is null)
         {
@@ -53,8 +53,7 @@ internal sealed partial class BodyBuilder
             var value = signature.Arguments[i];
             if (value.Index < 0 && construction is not null) continue;
             if (value.Index < 0 && pendingReceiver is not null) { receiver = pendingReceiver; continue; }
-            var type = value.Index < 0 ? (callee.Method.Owner.IsValueType ? new ByRefRef(callee.DeclaringType) : callee.DeclaringType)
-                : callee.Concrete(callee.Method.Parameters[value.Index].Type);
+            var type = TypeOracle.ArgumentType(callee, value.Index);
             if (construction is not null && DelegateFacts.IsDelegate(callee.DeclaringType) && value.Index == 1 && managed.Count == 1)
             {
                 if (oracle.DelegateTargetOf(contents[i], contents[Array.FindIndex(signature.Arguments, a => a.Index == 0)]) is { } target)
@@ -109,9 +108,11 @@ internal sealed partial class BodyBuilder
             var bits = values.Syms.Result(call, 0, MethodEnvironment.ValueWidth(returned));
             return new Statement(new ManagedReturn(call.Address, View(values.Syms.Slice(bits, 0, MethodEnvironment.ValueWidth(caller)), own, call.Address)));
         }
-        var lowered = new ManagedCall(call.Address, invocation, tail ? null : result, tail);
+        var lowered = new ManagedCall(call.Address, invocation, tail ? null : result, tail) { Inlined = call.Inlined };
         if (tail) return new Statement(lowered);
         output.Add(lowered);
+        if (call.DoesNotReturn && ManagedTypes.IsVoid(oracle.ReturnType))
+            return new Statement(new ManagedReturn(call.Address, null));
         return null;
     }
 
@@ -120,49 +121,12 @@ internal sealed partial class BodyBuilder
     /// 这是推断：被调方的行为与该实参无关，任何类型正确的值都等价。
     /// </summary>
     private ManagedValue? Unconstrained(Calls.CallShape shape, MachineValue value, TypeRef type, Sym content)
-    {
-        if (value.Transfer != Transfer.Value || value.Pieces.Length == 0 || !value.Pieces.All(p => shape.Unused.Contains(p.Register))) return null;
-        if (oracle.TypeOf(content) is { } actual && (actual.Equals(type) || types.IsAssignable(actual, type))) return null;
-        if (value.Index < 0 && oracle.Parameter(-1) is { } self && (self.Equals(type) || types.IsAssignable(self, type)))
-            return new ArgumentValue(-1, self, Width(self));
-        return ManagedTypes.IsReferenceType(type) || types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer
-            ? new ConstantValue(0, type, Width(type)) : null;
-    }
-
-    /// <summary>机器签名中一个值在调用处的内容：寄存器片与栈片按值中的位置拼接。</summary>
-    private Sym Content(Call call, MachineValue value, IReadOnlyList<Sym> arguments)
-    {
-        var syms = values.Syms;
-        var width = value.Transfer == Transfer.Value ? MethodEnvironment.ValueWidth(value) : 64;
-        var parts = new SortedDictionary<int, Sym>();
-        if (value.Transfer == Transfer.Value)
+        => oracle.Supply(shape, value, type, content) switch
         {
-            foreach (var piece in value.Pieces)
-            {
-                var position = call.ArgumentIndex(piece.Register);
-                if (position >= 0) parts[piece.Offset * 8] = syms.Slice(arguments[position], 0, Math.Min(piece.Width, arguments[position].Width));
-            }
-            foreach (var access in call.Memory.Where(m => !m.Write && m.Value == value.Index))
-                if (call.ArgumentIndex(access.Cell) is var cell and >= 0)
-                    parts[access.ValueBit] = syms.Slice(arguments[cell], access.CellBit, access.Width);
-        }
-        else if (call.ArgumentIndex(value.Pieces[0].Register) is var pointer and >= 0)
-            return arguments[pointer];
-        if (parts.Count == 0) return syms.Unknown("实参缺失", width);
-        var list = new List<Sym>();
-        var at = 0;
-        foreach (var (bit, part) in parts)
-        {
-            if (bit < at) continue;
-            if (bit > at) list.Add(syms.Undef(bit - at));
-            var size = Math.Min(part.Width, width - bit);
-            if (size <= 0) break;
-            list.Add(syms.Slice(part, 0, size));
-            at = bit + size;
-        }
-        if (at < width) list.Add(syms.Undef(width - at));
-        return syms.Concat(list);
-    }
+            ArgumentSupply.This => new ArgumentValue(-1, oracle.Parameter(-1)!, Width(oracle.Parameter(-1)!)),
+            ArgumentSupply.Default => new ConstantValue(0, type, Width(type)),
+            _ => null,
+        };
 
     /// <summary>
     /// 一个 IL 实参。按值传递时为内容的视图；按副本传递时为被指单元在调用前的内容；
@@ -176,7 +140,7 @@ internal sealed partial class BodyBuilder
                 return View(content, type, call.Address);
             case Transfer.Copy:
                 {
-                    var stored = CellContent(call, value, arguments, write: false);
+                    var stored = values.CellContent(call, value, arguments, write: false);
                     if (stored is not null) return View(stored, type, call.Address);
                     return SymTable.Resolve(content) is var p && oracle.Locate(p, value.Size * 8) is { } location
                         ? LocationValue(location, call.Address) : Hole(call.Address, "调用 副本实参的内容未知", type);
@@ -191,7 +155,7 @@ internal sealed partial class BodyBuilder
                     if (SymTable.Resolve(content) is LocalSym)
                     {
                         var local = NewLocal(element);
-                        if (CellContent(call, value, arguments, write: false) is { } before)
+                        if (values.CellContent(call, value, arguments, write: false) is { } before)
                             output.Add(new ManagedAssignment(call.Address, local, View(before, element, call.Address)));
                         if (call.Memory.Any(m => m.Write && m.Value == value.Index))
                             locals[values.Syms.Out(call, value.Index, value.Size * 8)] = local;
@@ -204,28 +168,6 @@ internal sealed partial class BodyBuilder
             default:
                 return Hole(call.Address, $"调用 实参传递方式 {value.Transfer}", type);
         }
-    }
-
-    /// <summary>调用读取的单元中属于 value 的内容。</summary>
-    private Sym? CellContent(Call call, MachineValue value, IReadOnlyList<Sym> arguments, bool write)
-    {
-        var accesses = call.Memory.Where(m => m.Write == write && m.Value == value.Index).OrderBy(m => m.ValueBit).ToArray();
-        if (accesses.Length == 0) return null;
-        var syms = values.Syms;
-        var parts = new List<Sym>();
-        var at = 0;
-        var width = accesses[0].ValueWidth;
-        foreach (var access in accesses)
-        {
-            if (access.ValueBit < at) continue;
-            if (access.ValueBit > at) parts.Add(syms.Undef(access.ValueBit - at));
-            var position = call.ArgumentIndex(access.Cell);
-            if (position < 0) return null;
-            parts.Add(syms.Slice(arguments[position], access.CellBit, access.Width));
-            at = access.ValueBit + access.Width;
-        }
-        if (at < width) parts.Add(syms.Undef(width - at));
-        return syms.Concat(parts);
     }
 
     private Terminator? LowerRuntime(Block block, int index, Call call, RuntimeOp op, IReadOnlyList<Sym> arguments, List<ManagedStatement> output)
@@ -254,10 +196,20 @@ internal sealed partial class BodyBuilder
         public RuntimeOp Op => op;
         public TypeRef? ClassOperand => owner.oracle.ClassOperand(call);
         public IReadOnlyList<Sym> Arguments { get; } = arguments.Take(call.OriginalArgumentCount).ToArray();
-        public Sym Result => owner.values.Syms.Result(call, 0, 64);
-        public ManagedValue View(Sym sym, TypeRef? expected) => owner.View(sym, expected, call.Address);
+        public Sym Result => owner.values.Syms.Result(call, 0, RuntimeOps.Of(op.Kind)?.ResultWidths?.Invoke(call) is [var width] ? width : 64);
+        public Sym ResultAt(int result) => owner.values.Syms.Result(call, result + 1, RuntimeOps.Of(op.Kind)!.ResultWidths!(call)[result]);
+        public ManagedValue Input(int index)
+        {
+            var input = RuntimeOps.Of(op.Kind)!.Inputs!(call, Arguments, owner.oracle)[index];
+            if (input.Kind == RuntimeInputKind.Value) return owner.View(input.Value, input.Type, call.Address);
+            if (input.Kind == RuntimeInputKind.Pointee && owner.values.CellContent(call, input.Pointee, arguments, false) is { } content)
+                return owner.View(content, input.Type, call.Address);
+            return input.Type is { } type && owner.oracle.Locate(input.Value, owner.types.StorageBits(type)) is { } location
+                ? owner.LocationValue(location, call.Address) : owner.Hole(call.Address, "运行时 输入位置未知", input.Type);
+        }
         public TypeRef? TypeOf(Sym sym) => owner.oracle.TypeOf(sym);
         public LocalValue Local(Sym sym, TypeRef type) => owner.Local(sym, type);
+        public LocalValue Temporary(TypeRef type) => owner.NewLocal(type);
         public void Emit(ManagedStatement statement) => output.Add(statement);
         public void AwaitConstruction() => owner.constructions[(ResultSym)Result] = call;
         public MethodRef? ExceptionConstructor(string fullName) => owner.Constructor(fullName);
@@ -265,36 +217,25 @@ internal sealed partial class BodyBuilder
 
         public bool InFault => owner.regions.Any(r => !r.IsCatch && r.Handler.Contains(block));
 
-        public Sym? ClassOwner(Sym klass) => owner.ClassOwner(klass);
+        public Sym? ClassOwner(Sym klass) => owner.oracle.ClassOwner(klass);
 
-        public bool InitializesNext(TypeRef type) => owner.Initializes(block, index + 1, type);
+        public bool InitializesNext(TypeRef type) => owner.effects.Initializes(block, index + 1, type);
 
         public bool InCatchOf(Sym exception) => owner.regions.Any(r => r.IsCatch && r.Handler.Contains(block)
             && SymTable.Resolve(exception) is ReadSym read && owner.oracle.Decompose(read.Address) is (ResultSym { Site: var begin }, 0, null, _) && ReferenceEquals(begin, r.BeginCatch));
 
-        public bool KnownNonNull(Sym target) => owner.KnownNonNull(block, index, target);
+        public bool KnownNonNull(Sym target) => owner.effects.KnownNonNull(block, index, target);
 
-        public bool AbsorbBounds(Sym position, Sym length) => owner.BoundsAbsorbed(block, index + 1, position, length);
+        public bool AbsorbBounds(Sym position, Sym length) => owner.effects.BoundsAbsorbed(block, index + 1, position, length);
 
         public bool Absorb(Sym target)
         {
-            if (!owner.Absorbed(block, index + 1, target)) return false;
+            if (!owner.effects.Absorbed(block, index + 1, target)) return false;
             owner.absorbedChecks.Add(target);
             return true;
         }
 
-        public Sym? Pointee(int value)
-        {
-            var reads = call.Memory.Where(m => !m.Write && m.Value == value).OrderBy(m => m.ValueBit).ToArray();
-            if (reads.Length == 0) return null;
-            var syms = owner.values.Syms;
-            return syms.Concat(reads.Select(m => syms.Slice(arguments[call.ArgumentIndex(m.Cell)], m.CellBit, m.Width)));
-        }
-
-        public ManagedValue? Location(int argument, TypeRef type) =>
-            argument < arguments.Count && owner.oracle.Locate(arguments[argument], owner.Width(type)) is { } location ? owner.LocationValue(location, call.Address) : null;
-
-        public ManagedValue Field(Sym receiver, FieldRef field) => owner.FieldAccess(owner.View(receiver, owner.oracle.TypeOf(receiver), call.Address), field, owner.FieldType(field, null), true, call.Address);
+        public ManagedValue Field(ManagedValue receiver, FieldRef field) => owner.FieldAccess(receiver, field, owner.FieldType(field, null), true, call.Address);
     }
 
     private MethodRef? Constructor(string exception) => oracle.ExceptionType(exception) is { } type

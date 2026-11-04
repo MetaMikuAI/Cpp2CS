@@ -21,6 +21,20 @@ internal static class MathImportNormalizer
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
+                // 标量导入按 C ABI 取参数有效位；向量寄存器的其余位不是浮点实参。
+                if (block.Statements[i] is Call { Op: { Kind: OpKind.Import, Operand: string name } } scalar
+                    && MathImportSignature.Find(name) is { } signature)
+                {
+                    var sources = Enumerable.Range(0, signature.Parameters.Length).Select(signature.Register).ToArray();
+                    var positions = sources.Select(scalar.ArgumentIndex).ToArray();
+                    if (positions.Any(p => p < 0)) continue;
+                    var arguments = positions.Select((p, n) => Fold.Convert(ConvKind.Truncate, scalar.Arguments[p],
+                        signature.Single || signature.IsInteger(n) ? 32 : 64)).ToArray();
+                    if (scalar.Arguments.SequenceEqual(arguments) && scalar.Sources.SequenceEqual(sources)) continue;
+                    block.Statements[i] = scalar with { Sources = sources, Arguments = arguments };
+                    changed = true;
+                    continue;
+                }
                 // Bionic math.h：void sincosf(float, float* sin, float* cos)。原导入保留，不拆成近似表达式。
                 if (block.Statements[i] is Call
                     {

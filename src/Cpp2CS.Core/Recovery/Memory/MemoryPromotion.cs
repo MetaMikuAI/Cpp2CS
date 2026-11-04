@@ -179,6 +179,9 @@ internal sealed class MemoryPromotion
             case Call { Op.Kind: OpKind.WriteBarrier or OpKind.MemoryBarrier }:
                 // 写屏障只通知 GC，对应的写入是紧邻其前的 Store。
                 break;
+            case Return when signature.Return is { Transfer: Transfer.ResultBuffer }:
+                // 间接返回只观察结果缓冲区；尾内存函数附带的目标指针返回值不属于托管返回签名。
+                break;
             case Call call:
                 {
                     Walk(call.Target, "调用目标");
@@ -225,9 +228,9 @@ internal sealed class MemoryPromotion
     private List<Effect> Effects(Call call)
     {
         var effects = new List<Effect>();
-        if (call.Op is { } op && !shapes(call).IsDispatch)
+        if (call.Op is { } op && shapes(call).IsRuntime)
         {
-            foreach (var effect in Runtime.RuntimeOps.Of(op.Kind)?.Effects?.Invoke(call, abi) ?? [])
+            foreach (var effect in Runtime.RuntimeOps.Of(op.Kind)?.PointerEffects?.Invoke(call, abi) ?? [])
                 if (effect.Argument < call.Arguments.Length && Resolve(call.Arguments[effect.Argument]) is var (space, offset))
                     effects.Add(new(effect.Argument, effect.Value, effect.Size * 8, 0, space, offset, effect.Size, effect.Access));
             return effects;

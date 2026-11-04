@@ -43,12 +43,15 @@ internal static class CoreProfile
             _ => "native-recovery", _ => null);
         ReportStage.WriteTraces(output, targets);
         ReportStage.WriteEmitted(output, emitted, skeleton, dependencyMethods);
+        var sourceProblems = SourceSuitability.Check(emitted.Select(r => r.Body!).Concat(partialEmitted.Select(r => r.Partial!)));
+        ReportStage.WriteSourceProblems(output, sourceProblems);
         ReportStage.WriteUnselected(output, selection);
         var selectedSet = targets.ToHashSet();
         var report = Report(targets, emitted.Where(selectedSet.Contains).ToList(), emitProblems.Where(p => selectedSet.Contains(p.Key)).ToDictionary(),
             targets.Select(r => r.Entry).Distinct().ToDictionary(e => e, e => bytes[e]));
         var files = manifest.Step("decompile", () => DecompileStage.Write(request, facts, assemblies, emitted, partialEmitted, results, selection.Methods, Log));
         report.AppendLine($"core：依赖 {dependencies.Count}，部分体 {partialEmitted.Count}，C# {files} 个类型文件");
+        report.AppendLine($"源码形式限制 {sourceProblems.Count}（独立于 CIL 写出，不代表源码编译结果）");
         File.WriteAllText(Path.Combine(output, "holes.txt"), report.ToString());
         var outcome = new RecoveryRunResult(output, report.ToString(), targets.Length, emitted.Count(selectedSet.Contains),
             emitProblems.Count(p => selectedSet.Contains(p.Key)), partialEmitted.Count);
