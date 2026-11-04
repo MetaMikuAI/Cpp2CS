@@ -180,7 +180,13 @@ internal sealed partial class TemplateRecovery
     private ManagedValue Abstract(ManagedValue value, IReadOnlyList<(ManagedValue Actual, ManagedValue Carrier)> carriers, InlineMatch match)
     {
         foreach (var (actual, carrier) in carriers)
-            if (actual is not ConstantValue && Unify(actual, value, new(match.Binding))) return carrier;
+        {
+            if (actual is ConstantValue) continue;
+            if (Unify(actual, value, new(match.Binding))) return carrier;
+            // 布尔返回值的取反：调用方的条件常写成相反的比较。
+            if (types.Kind(actual.Type) == TypeKind.Bool && Unify(Negate(actual), value, new(match.Binding)))
+                return new ComparisonValue(Cond.Eq, carrier, new ConstantValue(0, carrier.Type, carrier.Width), types.Boolean);
+        }
         return MapTerm(value, child => Abstract(child, carriers, match));
     }
 
