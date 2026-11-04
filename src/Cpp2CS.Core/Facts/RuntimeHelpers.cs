@@ -221,7 +221,7 @@ public sealed partial class RuntimeHelpers
     {
         var body = chain[^1];
         var words = Words(body, 64).Select(x => x.Word).ToArray();
-        if (words is [0xD5033BBF, var ret] && A64.IsRet(ret)) return (HelperKind.MemoryBarrier, null, "函数体为 dmb ish; ret");
+        if (chain.Any(hop => Words(hop, 2).Select(x => x.Word).ToArray() is [0xD5033BBF, var ret] && A64.IsRet(ret))) return (HelperKind.MemoryBarrier, null, "函数体为 dmb ish; ret");
         if (interfaceSlowPath is { } slow && chain.Contains(slow))
             return (HelperKind.InterfaceLookup, null, $"il2cpp_object_get_virtual_method 在接口偏移扫描失败后调用 0x{slow:x}");
         var calls = CallsOf(body).ToArray();
@@ -266,7 +266,10 @@ public sealed partial class RuntimeHelpers
         if (LoadsOffset(body, RuntimeLayout.ClassElementSize, 8) && words.Any(w => A64.IsAddImmediate64(w) && A64.AddImmediate(w) == RuntimeLayout.ArrayData))
             return (HelperKind.ArrayElementAddress, null, $"读取 Il2CppClass+0x{RuntimeLayout.ClassElementSize:x} element_size，并加数组头 0x{RuntimeLayout.ArrayData:x}");
         if (words.Length <= 10 && LoadsOffset(body, RuntimeLayout.FieldParent, 4) && LoadsOffset(body, RuntimeLayout.FieldOffset, 4) && calls.Length == 0)
-            return (HelperKind.FieldAddress, null, $"读取 FieldInfo+0x{RuntimeLayout.FieldOffset:x} offset 加到对象地址（值类型扣除对象头）");
+            return (HelperKind.FieldAddress, null, $"?? FieldInfo+0x{RuntimeLayout.FieldOffset:x} offset ??????(????????)");
+        // il2cpp_codegen_object_new：读取 Il2CppClass.instance_size，调用 GC 分配并写入 klass。
+        if (LoadsOffset(body, RuntimeLayout.ClassInstanceSize, 64) && calls.Length >= 2)
+            return (HelperKind.ObjectNew, null, $"?? Il2CppClass+0x{RuntimeLayout.ClassInstanceSize:x} instance_size ??????");
         return null;
     }
 

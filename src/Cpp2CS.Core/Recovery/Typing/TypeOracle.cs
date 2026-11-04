@@ -204,6 +204,18 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     /// 共享空函数的目标候选包含基类无参构造函数时，按当前构造函数的接收者选它。
     /// 仅用于签名无法区分的调用；调用点还须位于入口块、且之前没有其他调用。
     /// </summary>
+    /// <summary>
+    /// 分配后的无参构造：无签名的直接调用常是共享空 ctor；从 NewObject 的类型和唯一无参 .ctor 还原。
+    /// </summary>
+    public (Sym Allocation, MethodRef Constructor)? AllocatedConstructor(Call call)
+    {
+        var operands = values.Operands(call);
+        if (operands.Count < 2 || SymTable.Resolve(operands[1]) is not ResultSym result
+            || result.Site.Op is not { Kind: OpKind.NewObject, Operand: DefinitionRef type }) return null;
+        var constructors = type.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic && m.Parameters.Count == 0).ToArray();
+        return constructors.Length == 1 ? (result, new MethodRef(constructors[0], type.Arguments, [])) : null;
+    }
+
     public MethodRef? BaseConstructor(Call call)
     {
         if (method.Method.Name != ".ctor" || method.Method.IsStatic || method.DeclaringType is not DefinitionRef owner) return null;

@@ -21,6 +21,13 @@ internal sealed partial class BodyBuilder
         var signature = shape.Signature;
         if (signature is null)
         {
+            // 共享空 ctor 没有独立签名：分配结果直接作为接收者时，按 NewObject 类型补出 newobj。
+            if (oracle.AllocatedConstructor(call) is { } created)
+            {
+                output.Add(new ManagedAssignment(call.Address,
+                    Local(created.Allocation, created.Constructor.DeclaringType), new NewObjectValue(created.Constructor, [])));
+                return call.Kind is CallKind.Tail or CallKind.TailIndirect ? new Statement(new ManagedReturn(call.Address, null)) : null;
+            }
             // 共享空函数没有可区分的机器签名：构造函数入口的第一条调用按基类无参构造函数恢复。
             if (block == analysis.Function.Blocks[0] && !block.Statements.Take(index).Any(s => s is Call)
                 && oracle.BaseConstructor(call) is { } baseCtor)
