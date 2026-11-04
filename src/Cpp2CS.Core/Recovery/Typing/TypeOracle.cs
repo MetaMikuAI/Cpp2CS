@@ -54,6 +54,9 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     /// </summary>
     public TypeRef? CellType(Cell cell)
     {
+        // 不透明局部的类型由分配点给出；不透明返回值存放在调用者的缓冲区。
+        if (cell.Space.Element is { } element) return element;
+        if (cell.Space == LocalSpace.Result && ManagedAbi.SharedValue(ReturnType)) return ReturnType;
         if (cellTypes is null)
         {
             cellTypes = [];
@@ -553,9 +556,14 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     public Location? Locate(Sym address, int width)
     {
         var (root, offset, index, scale) = Decompose(address);
-        if (width < 0 && root is LocalSym { Space.Kind: LocalKind.Argument, Offset: 0 } argument && offset == 0 && index is null
-            && Parameter(argument.Space.Argument) is { } parameter && ManagedAbi.SharedValue(parameter))
-            return new(LocationKind.Argument, values.Syms.Arg(argument.Space.Argument, 64), null, 0, null, [], parameter);
+        // 不透明值没有固定位宽，只按位置访问。
+        if (width < 0 && root is LocalSym opaque && opaque.Offset == 0 && offset == 0 && index is null)
+        {
+            if (opaque.Space.Kind == LocalKind.Argument && Parameter(opaque.Space.Argument) is { } parameter && ManagedAbi.SharedValue(parameter))
+                return new(LocationKind.Argument, values.Syms.Arg(opaque.Space.Argument, 64), null, 0, null, [], parameter);
+            if (memory.Find(opaque.Space, 0, 1) is { Promoted: false } home && CellType(home) is { } homeType)
+                return new(LocationKind.Local, values.Syms.Local(home.Space, home.Start), null, 0, null, [], homeType);
+        }
         if (root is LocalSym local && index is null && memory.Find(local.Space, local.Offset + offset, width / 8) is { Promoted: false } cell && CellType(cell) is { } cellType)
         {
             var at = (int)(local.Offset + offset - cell.Start);

@@ -41,8 +41,7 @@ internal static class ArchitectureChecks
         MethodPointers(checks, facts, types);
         SharedInterfacePartitions(checks);
         InvokerArguments(checks, facts, types);
-        SharedInvokerCopies(checks, facts, types);
-        GenericValueChecks(checks, facts, types);
+        SharedValueModel(checks, facts, types);
         FrameForwards(checks, facts);
         StackBoxes(checks, facts, types);
         PartialScalarCells(checks, facts, types);
@@ -302,117 +301,63 @@ internal static class ArchitectureChecks
             .Arguments[0] == new Use(receiver, 64), "invoker 接收者保留原值，不能跨调用重新读取字段");
     }
 
-    private static void SharedInvokerCopies(Assertions check, ProgramFacts facts, ManagedTypes types)
+    /// <summary>完全共享泛型的不透明值：表示转换归一为句柄，按 sizeof(T) 的复制成为位置操作。</summary>
+    private static void SharedValueModel(Assertions check, ProgramFacts facts, ManagedTypes types)
     {
-        var owner = Type("SharedInvokerOwner", 771);
-        var definition = Method(owner, "Forward", 771, MethodAttributes.Public | MethodAttributes.Static);
-        definition.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
-        var type = new GenericParameterRef("T", true, 0);
-        definition.Parameters = [new("value", type, 0, null, false)];
-        definition.ReturnType = new PrimitiveRef("void");
-        var self = new MethodRef(definition, [], [type with { Binding = new(NativeBindingKind.Shared) }]);
-        var abi = new ManagedAbi(facts.Layouts);
-        check.True(abi.Invoker(self).Arguments[0] is { Size: -1, Transfer: Transfer.Copy },
-            "共享泛型副本保留未知尺寸，不能退化为指针宽度的值");
-        foreach (var variant in new[] { "private", "null-check", "nested", "neighbor-copy", "overlap-copy", "spilled-input", "spilled-escape",
-            "reuse-array", "retained-slot", "wrong-size", "missing-input", "read-slot", "escape-slot", "intervening-call" })
+        var type = new GenericParameterRef("T", false, 0);
+        var klass = new Symbol(SymbolKind.Class, type);
+        Expr Field(int offset, int width) => new Load(new Binary(BinOp.Add, klass, Expr.C((ulong)offset, 64), 64), width);
+        var flag = new Compare(Cond.Slt, Field(RuntimeLayout.ClassByvalArg + 8, 32), Expr.C(0, 32));
+        var input = new Use(new Variable(Storage.Gpr(1), 0), 64);
+        var size = new Variable(Storage.Temp(900), 1);
+        var aligned = new Variable(Storage.Temp(901), 1);
+        var local = new Variable(Storage.Temp(902), 1);
+        var picked = new Variable(Storage.Temp(903), 1);
+        (Block Block, MachineFunction Function) Build(string variant)
+        {
+            Expr saved = new FrameAddress(-16);
+            var other = new Use(new Variable(Storage.Gpr(2), 0), 64);
+            var block = new Block(0) { Statements = [
+                new Store(0, saved, variant == "other-saved" ? other : input),
+                new Define(4, size, new Ir.Convert(ConvKind.ZeroExtend, Field(RuntimeLayout.ClassStackSlotSize, 32), 64)),
+                new Define(8, aligned, new Binary(BinOp.And, new Binary(BinOp.Add, new Use(size, 64), Expr.C(15, 64), 64), Expr.C(0x1fffffff0, 64), 64)),
+                new Define(12, local, new Binary(BinOp.Sub, new FrameAddress(-64), new Use(aligned, 64), 64)),
+                new Define(16, picked, new Select(flag, input, saved, 64)),
+                new Call(20, CallKind.Direct, Expr.C(128, 64)) { Op = new(OpKind.Import, "memcpy"),
+                    Arguments = [new Use(local, 64), new Use(picked, 64), variant == "wrong-size" ? Expr.C(8, 64) : new Use(size, 64)] },
+                new Return(24)] };
+            return (block, new MachineFunction { Entry = 0, Range = new(0, 28, CodeRegion.Managed, default), Blocks = [block] });
+        }
+        foreach (var variant in new[] { "copy", "other-saved", "wrong-size" })
+        {
+            var (block, function) = Build(variant);
+            var state = new IdiomState(new IdiomRewriter(facts), function);
+            check.True(state.SharedValues(), $"不透明值归一 {variant}");
+            var copy = block.Statements.OfType<Call>().Single();
+            check.Equal(variant != "wrong-size", copy.Op?.Kind == OpKind.CopyGenericValue, $"按 sizeof(T) 的复制成为位置操作 {variant}");
+            check.True(block.Statements.OfType<Define>().Any(d => d.Target == local && d.Value is StackAllocation), $"T 大小的动态分配是 T 的局部 {variant}");
+            var selection = block.Statements.OfType<Define>().Single(d => d.Target == picked).Value;
+            check.Equal(variant != "other-saved", selection == input, $"形参地址归一为句柄 {variant}");
+        }
+        // invoker 槽的两种表示合流：isValue(T) ? a : *a。
+        foreach (var variant in new[] { "repr", "different" })
         {
             var head = new Block(0);
-            var reference = new Block(64);
-            var join = new Block(80);
-            var input = new Use(new(Storage.Gpr(0), 0), 64);
-            var saved = new FrameAddress(-16);
-            var array = new FrameAddress(-24);
-            var entity = new Symbol(SymbolKind.Class, type);
-            var flag = new Compare(Cond.Slt, new Load(new Binary(BinOp.Add, entity, Expr.C(RuntimeLayout.ClassByvalArg + 8, 64), 64), 32), Expr.C(0, 32));
-            var size = new Ir.Convert(ConvKind.ZeroExtend, new Load(new Binary(BinOp.Add, entity,
-                Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32), 64);
-            var destination = new Binary(BinOp.Sub, new FrameAddress(-64), new Binary(BinOp.And,
-                new Binary(BinOp.Add, size, Expr.C(15, 64), 64), Expr.C(0xfffffffffffffff0, 64), 64), 64);
-            if (variant == "nested") destination = destination with { Left = destination };
-            var pointer = new Variable(Storage.Gpr(20), 1);
-            var loaded = new Variable(Storage.Gpr(21), 1);
-            var selected = new Variable(Storage.Gpr(22), 1);
-            var copy = new Call(16, CallKind.Direct, Expr.C(0, 64))
-            {
-                Op = new(OpKind.Import, "memcpy"), Arguments = [destination, new Select(flag,
-                    variant is "spilled-input" or "spilled-escape" ? new Load(new FrameAddress(-32), 64) : input, saved, 64),
-                    variant == "wrong-size" ? Expr.C(8, 64) : size],
-            };
-            head.Statements = [new Define(0, pointer, destination), new Store(4, saved,
-                variant == "missing-input" ? Expr.C(0, 64) : input), copy, new Branch(20, flag, join.Start, reference.Start)];
-            reference.Statements = [new Define(64, loaded, new Load(destination, 64)), new Jump(68, join.Start)];
-            var invoke = new Call(88, CallKind.Indirect, Expr.C(0, 64));
-            join.Statements = [new Phi(80, selected, [pointer, loaded]), new Store(84, array, new Use(selected, 64)), invoke, new Return(92)];
-            if (variant == "read-slot") join.Statements.Add(new Define(96, new(Storage.Gpr(23), 1), new Load(array, 64)));
-            if (variant == "escape-slot") join.Statements.Add(new Store(96, input, array));
-            if (variant == "intervening-call") join.Statements.Insert(2, new Call(86, CallKind.Direct, Expr.C(0, 64)));
-            if (variant == "null-check") join.Statements.Insert(2, new Call(86, CallKind.Direct, Expr.C(0, 64))
-                { Op = new(OpKind.NullCheck, null), Arguments = [Expr.C(1, 64)] });
-            if (variant is "spilled-input" or "spilled-escape") head.Statements.Insert(0, new Store(0, new FrameAddress(-32), input));
-            if (variant == "spilled-escape") head.Statements.Insert(1, new Store(0, input, new FrameAddress(-32)));
-            if (variant is "neighbor-copy" or "overlap-copy") join.Statements.Insert(3, copy with
-            {
-                Address = 90, Arguments = [variant == "neighbor-copy" ? destination with { Left = destination } : destination,
-                    new Select(flag, input, saved, 64), size],
-            });
-            if (variant is "reuse-array" or "retained-slot")
-            {
-                var called = new Symbol(SymbolKind.Method, MethodRef.Open(definition));
-                if (variant == "reuse-array") join.Statements.Insert(3, new Store(89, array, Expr.C(0, 64)));
-                join.Statements.Insert(join.Statements.Count - 1, new Call(90, CallKind.Indirect,
-                    new Load(new Binary(BinOp.Add, called, Expr.C(RuntimeLayout.MethodInvoker, 64), 64), 64))
-                {
-                    Arguments = [new Load(called, 64), called, Expr.C(0, 64), array, Expr.C(0, 64)],
-                    Sources = Enumerable.Range(0, 5).Select(Storage.Gpr).ToArray(),
-                });
-            }
-            MachineFunction.AddEdge(head, join); MachineFunction.AddEdge(head, reference); MachineFunction.AddEdge(reference, join);
-            var function = new MachineFunction { Entry = 0, Range = new(0, 100, CodeRegion.Managed, default), Blocks = [head, reference, join] };
+            var arm = new Block(4);
+            var join = new Block(8);
+            var loaded = new Variable(Storage.Temp(910), 1);
+            var slot = new Variable(Storage.Temp(911), 1);
+            head.Statements = [new Branch(0, flag, 8, 4)];
+            arm.Statements = [new Define(4, loaded, variant == "repr" ? new Load(input, 64) : new Load(new Binary(BinOp.Add, input, Expr.C(8, 64), 64), 64)), new Jump(4, 8)];
+            join.Statements = [new Phi(8, slot, [input.Variable, loaded]), new Return(12) { Pieces = [new(0, new Use(slot, 64))] }];
+            var function = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [head, arm, join] };
+            MachineFunction.AddEdge(head, join);
+            MachineFunction.AddEdge(head, arm);
+            MachineFunction.AddEdge(arm, join);
             function.Renumber();
-            var state = new IdiomState(new IdiomRewriter(facts), function) { self = self };
-            var proof = SharedInvokerArguments.Prove(state, join, invoke, array, 0, type);
-            check.Equal(variant is "private" or "null-check" or "nested" or "neighbor-copy" or "spilled-input" or "reuse-array",
-                proof?.Value == input, $"共享泛型私有副本证明：{variant}");
-        }
-    }
-
-    private static void GenericValueChecks(Assertions check, ProgramFacts facts, ManagedTypes types)
-    {
-        uint[] body = [0xb9402808, 0x37f800a8, 0xf9400028, 0xf100011f, 0x1a9f07e0, 0xd65f03c0,
-            0xf9403008, 0xb4000068, 0x3944d408, 0x37180068, 0x52800020, 0xd65f03c0, 0x39400028, 0x7100011f, 0x17fffff6];
-        check.True(RuntimeHelpers.GenericHasValueBody(body), "泛型空值检查保留引用、普通值及 Nullable 三条路径");
-        body[9] = 0x37200068;
-        check.True(!RuntimeHelpers.GenericHasValueBody(body), "其他类标志不能当作 nullabletype");
-        var owner = Type("SharedValueOwner", 875);
-        var method = Method(owner, "Check", 875, MethodAttributes.Public | MethodAttributes.Static);
-        var type = new GenericParameterRef("T", true, 0);
-        method.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
-        method.Parameters = [new("value", type, 0, null, false)];
-        method.ReturnType = types.Boolean;
-        var self = new MethodRef(method, [], [type with { Binding = new(NativeBindingKind.Shared) }]);
-        check.True(types.StorageBits(type) < 0, "泛型值的未知存储宽度不能退化为一位");
-        foreach (var variant in new[] { "copy", "modified", "wrong-size", "other-flags", "non-private" })
-        {
-            var input = new Use(new(Storage.Gpr(0), 0), 64);
-            var klass = new Symbol(SymbolKind.Class, type);
-            var size32 = new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32);
-            var size = new Ir.Convert(ConvKind.ZeroExtend, size32, 64);
-            Expr Allocate(Expr start, Expr bytes) => new Binary(BinOp.Sub, start,
-                new Binary(BinOp.And, new Binary(BinOp.Add, bytes, Expr.C(15, 64), 64), Expr.C(0x1fffffff0, 64), 64), 64);
-            var padded = new Ir.Convert(ConvKind.ZeroExtend, new Binary(BinOp.Add, size32, Expr.C(16, 32), 32), 64);
-            var destination = variant == "non-private" ? (Expr)input : Allocate(Allocate(new FrameAddress(-64), padded), size);
-            var flag = new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassByvalArg + 8, 64), 64), 32);
-            var condition = new Compare(variant == "other-flags" ? Cond.Ne : Cond.Slt, flag, Expr.C(0, 32));
-            var saved = new FrameAddress(-16);
-            var copy = new Call(4, CallKind.Direct, Expr.C(128, 64)) { Op = new(OpKind.Import, "memcpy"),
-                Arguments = [destination, new Select(condition, input, saved, 64), variant == "wrong-size" ? Expr.C(8, 64) : size] };
-            var read = new Call(8, CallKind.Direct, Expr.C(256, 64)) { Op = new(OpKind.GenericHasValue, type), Arguments = [klass, destination] };
-            var block = new Block(0) { Statements = [new Store(0, saved, input), copy, read, new Return(12)] };
-            if (variant == "modified") block.Statements.Insert(2, new Store(6, destination, Expr.C(0, 64)));
-            var function = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [block] };
-            var state = new IdiomState(new IdiomRewriter(facts), function) { self = self };
-            check.Equal(variant == "copy", SharedValueCopies.ForwardChecks(state), $"泛型判空的私有副本来源 {variant}");
+            var state = new IdiomState(new IdiomRewriter(facts), function);
+            state.SharedValues();
+            check.Equal(variant == "repr", head.Statements[^1] is Jump, $"值类型分支的两种表示 {variant}");
         }
     }
 
@@ -2012,6 +1957,7 @@ internal static class ArchitectureChecks
 
     private sealed class BarrierContext(ManagedTypes types) : IRuntimeLowering
     {
+        public void Assign(int index, ManagedValue value) => throw new NotSupportedException();
         public ManagedTypes Types => types;
         public Call Call { get; } = new(0, CallKind.Direct, new Const(0, 64));
         public List<ManagedStatement> Statements { get; } = [];

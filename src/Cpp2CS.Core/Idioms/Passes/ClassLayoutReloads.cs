@@ -40,7 +40,8 @@ internal static class ClassLayoutReloads
             bool Size(Expr value)
             {
                 value = Expand(value, result, klass);
-                return value == size || value is Ir.Convert { Kind: ConvKind.ZeroExtend, Width: 64, Operand: var operand } && operand == size;
+                if (value is Ir.Convert { Kind: ConvKind.ZeroExtend, Width: 64, Operand: var operand }) value = operand;
+                return value == size || value is ClassProperty { Kind: ClassPropertyKind.StackSlotSize } property && Equals(property.Type, type);
             }
             var after = initialize.Statements.Skip(initialize.Statements.IndexOf(call) + 1).ToArray();
             if (initialize.Statements.Take(initialize.Statements.IndexOf(call)).Any(s => s is not Nop)

@@ -13,7 +13,13 @@ internal static class GenericContext
     public static void Instantiate(MachineFunction function, MethodRef method)
     {
         if (method.TypeArguments.Count + method.MethodArguments.Count == 0) return;
-        Expr? Symbol(Expr e) => e is Symbol s && Instantiate(s.Value, method) is var value && !ReferenceEquals(value, s.Value) ? s with { Value = value! } : null;
+        Expr? Symbol(Expr e) => e switch
+        {
+            Symbol s when Instantiate(s.Value, method) is var value && !ReferenceEquals(value, s.Value) => s with { Value = value! },
+            ClassProperty p when Instantiate(p.Type, method) is TypeRef type && !ReferenceEquals(type, p.Type) => p with { Type = type },
+            StackAllocation a when Instantiate(a.Element, method) is TypeRef element && !ReferenceEquals(element, a.Element) => a with { Element = element },
+            _ => null,
+        };
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {

@@ -87,8 +87,8 @@ internal sealed class FrameModel
                 && !IndexedRoots(load.Address).Any(root => root < offset + bytes));
     }
 
-    /// <summary>第 index 条语句之前，[offset, offset+bytes) 的来源。</summary>
-    public FrameReach Reach(Block block, int index, long offset, int bytes)
+    /// <summary>第 index 条语句之前，[offset, offset+bytes) 的来源。throughCalls：已知调用不改写它，只看写入。</summary>
+    public FrameReach Reach(Block block, int index, long offset, int bytes, bool throughCalls = false)
     {
         var stores = new List<Store>();
         var fromEntry = false;
@@ -103,7 +103,7 @@ internal sealed class FrameModel
             {
                 if (++steps > ReachBudget) return new(stores, fromEntry, null, true);
                 var statement = current.Block.Statements[i];
-                if (Kill(statement, offset, bytes, out var store))
+                if ((!throughCalls || statement is not Call) && Kill(statement, offset, bytes, out var store))
                 {
                     if (store is null) return new(stores, fromEntry, statement, false);
                     if (!stores.Contains(store)) stores.Add(store);

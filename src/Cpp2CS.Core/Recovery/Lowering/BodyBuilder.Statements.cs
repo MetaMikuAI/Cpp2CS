@@ -135,6 +135,9 @@ internal sealed partial class BodyBuilder
     {
         var type = oracle.ReturnType;
         if (ManagedTypes.IsVoid(type)) return null;
+        // 不透明返回值存放在调用者的缓冲区，以局部承接。
+        if (analysis.Signature.Return is { Transfer: Transfer.ResultBuffer, Size: < 0 })
+            return analysis.Memory.Find(LocalSpace.Result, 0, 1) is { Promoted: false } ? CellLocal((LocalSym)values.Syms.Local(LocalSpace.Result, 0)) : Hole(ret.Address, "返回 不透明返回值未写入", type);
         if (ret.Pieces.Length == 0) return Hole(ret.Address, "返回 返回值缺失", type);
         var width = analysis.Signature.Return is { } r ? MethodEnvironment.ValueWidth(r) : Width(type);
         return View(values.ReturnContent(ret, operands, width), type, ret.Address);

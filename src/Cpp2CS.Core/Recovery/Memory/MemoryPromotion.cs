@@ -65,7 +65,7 @@ internal sealed class MemoryPromotion
         if (Machine.Storage.FrameForwarding.Run(function, new CallMemoryEffects(shapes, abi, settled: true))) Propagate.Run(function, Dominators.Compute(function));
         var layout = promotion.Partition();
         if (layout.Cells.Count == 0) return layout;
-        if (signature.Return is { Transfer: Transfer.ResultBuffer } && layout.Cells.Any(c => c.Space == LocalSpace.Result && !c.Promoted))
+        if (signature.Return is { Transfer: Transfer.ResultBuffer, Size: > 0 } && layout.Cells.Any(c => c.Space == LocalSpace.Result && !c.Promoted))
             return RecoveryDiagnostics.Fail(function.Entry, "内存 结果缓冲区的地址逃逸：" + string.Join("；", layout.Cells
                 .Where(c => c.Space == LocalSpace.Result && !c.Promoted).Select(c => $"+{c.Start:x} {c.Escape}")), rule: "Memory");
         promotion.Rewrite(layout);
@@ -102,6 +102,7 @@ internal sealed class MemoryPromotion
         return expression switch
         {
             FrameAddress f => (LocalSpace.Frame, f.Offset),
+            StackAllocation a => (LocalSpace.Dynamic(a.Site, a.Element), 0),
             Entry { Storage: var s } when pointers.TryGetValue(s, out var space) => (space, 0),
             Use { Variable: { Version: 0 } v } when pointers.TryGetValue(v.Storage, out var space) => (space, 0),
             Use { Variable: var v, Width: 64 } when definitions.TryGetValue(v, out var value) => Resolve(value, depth + 1),
@@ -283,7 +284,7 @@ internal sealed class MemoryPromotion
                         block.Statements.Insert(i + 1, new Return(call.Address));
                     }
                 }
-                if (statement is Return ret && signature.Return is { Transfer: Transfer.ResultBuffer })
+                if (statement is Return ret && signature.Return is { Transfer: Transfer.ResultBuffer, Size: > 0 })
                     statement = ret with
                     {
                         Pieces = layout.Cells.Where(c => c.Space == LocalSpace.Result).OrderBy(c => c.Start)

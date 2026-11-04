@@ -5,7 +5,7 @@ using Cpp2CS.Recovery;
 
 namespace Cpp2CS.Idioms;
 
-/// <summary>MethodInfo.invoker_method 的参数数组拆为独立实参，保留值参数与返回值的存储地址。</summary>
+/// <summary>MethodInfo.invoker_method 的参数数组拆为独立实参，保留值参数与返回值的存储地址；数组槽的内容由帧内存转发。</summary>
 internal static class InvokerCallsPass
 {
     internal static bool InvokerCalls(this IdiomState state)
@@ -19,37 +19,18 @@ internal static class InvokerCallsPass
                 Expr? Actual(int register) => call.ArgumentIndex(Storage.Gpr(register)) is var index && index >= 0 ? call.Arguments[index] : null;
                 Expr? Input(int register) => Actual(register) is { } input ? state.defs.Expand(input) : null;
                 if (Input(0) != new Load(entity, 64) || Input(1) != entity
-                    || Input(2) is not { } receiver || Input(3) is not { } arguments || Input(4) is not { } output) continue;
+                    || Input(2) is null || Actual(3) is not { } arguments || Actual(4) is not { } output) continue;
                 var native = state.self is { } self ? (MethodRef)GenericContext.Instantiate(method, self)! : method;
-                var signature = state.owner.abi.Invoker(native);
-                if (ManagedAbi.SharedValue(native.Concrete(native.Method.ReturnType))
-                    || signature.Indirections.Any(a => a.Size <= 0 && !ManagedAbi.SharedValue(a.Type)))
+                if (state.owner.abi.Invoker(native).Indirections.Any(a => a.Size <= 0 && !ManagedAbi.SharedValue(a.Type)))
                 {
-                    state.Reject("invoker.signature", call.Address, "返回值或按址实参的大小未知");
+                    state.Reject("invoker.signature", call.Address, "按址实参的大小未知");
                     continue;
                 }
                 Expr Offset(Expr value, int offset) => offset == 0 ? value : Fold.Simplify(new Binary(BinOp.Add, value, Expr.C((ulong)offset, 64), 64));
                 var inputs = new List<Expr>();
-                var proofs = new List<SharedInvokerArguments.Proof>();
-                var valid = true;
                 if (!method.Method.IsStatic) inputs.Add(Actual(2)!);
                 for (var parameter = 0; parameter < method.Method.Parameters.Count; parameter++)
-                {
-                    if (ManagedAbi.SharedValue(native.Concrete(native.Method.Parameters[parameter].Type)))
-                    {
-                        var proof = SharedInvokerArguments.Prove(state, block, call, arguments, parameter, method.Concrete(method.Method.Parameters[parameter].Type));
-                        if (proof is null)
-                        {
-                            state.Reject("invoker.shared-argument", call.Address, $"实参 {parameter} 的私有副本来源未证明");
-                            valid = false;
-                            break;
-                        }
-                        proofs.Add(proof);
-                        inputs.Add(proof.Value);
-                    }
-                    else inputs.Add(new Load(Offset(arguments, parameter * 8), 64));
-                }
-                if (!valid) continue;
+                    inputs.Add(new Load(Offset(arguments, parameter * 8), 64));
                 inputs.Add(entity);
                 if (!ManagedTypes.IsVoid(method.Method.ReturnType)) inputs.Add(output);
                 var replacement = call with
@@ -67,17 +48,6 @@ internal static class InvokerCallsPass
                 statements.AddRange(call.Defines.OfType<Variable>().Select(v => new Define(call.Address, v, new Unknown("invoker 未定义返回寄存器", v.Width))));
                 block.Statements.RemoveAt(i);
                 block.Statements.InsertRange(i, statements);
-                foreach (var proof in proofs)
-                {
-                    foreach (var owner in state.function.Blocks)
-                        for (var at = 0; at < owner.Statements.Count; at++)
-                            if (ReferenceEquals(owner.Statements[at], proof.Copy)) owner.Statements[at] = new Nop(proof.Copy.Address, "共享泛型实参副本");
-                            else if (ReferenceEquals(owner.Statements[at], proof.Argument)) owner.Statements[at] = proof.Argument with { Value = proof.Value };
-                    var branch = (Branch)proof.Head.Statements[^1];
-                    var next = proof.Head.NormalSuccessors.Single(b => b != proof.Reference);
-                    proof.Head.Statements[^1] = new Jump(branch.Address, next.Start);
-                    MachineFunction.RemoveEdge(proof.Head, proof.Reference);
-                }
                 return true;
             }
         return false;

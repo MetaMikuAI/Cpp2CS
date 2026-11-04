@@ -100,6 +100,11 @@ internal static class IdiomPipeline
             while (state.InvokerCalls())
                 state.Cleanup();
         });
+        state.Passes.Run("idioms.SharedValues", () =>
+        {
+            if (state.SharedValues())
+                state.Cleanup();
+        });
         state.Passes.Run("idioms.StackBoxing", () =>
         {
             if (state.StackBoxing())
@@ -198,11 +203,6 @@ internal static class IdiomPipeline
         state.Passes.Run("idioms.SplitClassGuards", () =>
         {
             if (state.SplitClassGuards())
-                state.Cleanup();
-        });
-        state.Passes.Run("idioms.SharedValueChecks", () =>
-        {
-            if (SharedValueCopies.ForwardChecks(state))
                 state.Cleanup();
         });
         state.Passes.Run("idioms.FiniteConditions.Simplify", () =>
