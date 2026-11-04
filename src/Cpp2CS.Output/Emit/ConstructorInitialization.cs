@@ -59,7 +59,7 @@ internal static class ConstructorInitialization
                     if (!initialized && edge.Copies.Any(c => !values.IsThis(c.Value) && values.UsesThis(c.Value))) return "构造函数的边赋值使用了未初始化的 this";
                     queue.Enqueue((edge.Target, initialized));
                 }
-                if (statement is ManagedReturn or ManagedCall { Tail: true })
+                if (statement is ManagedReturn)
                     if (!initialized) return "构造函数的返回路径没有初始化 this";
             }
         }

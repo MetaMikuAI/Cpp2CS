@@ -99,8 +99,11 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
                 if (Transparent(statement, nonNull)) continue;
                 return false;
             }
+            // 读对象头用于类型判断时，下降后不留下解引用（isinst 对 null 不抛出），不能吸收判空；用于分派时并入随后的 callvirt。
+            bool TypeTest(ReadSym read) => oracle.Decompose(read.Address) is (var root, 0, null, _) && oracle.TypeOf(root) is { } type && ManagedTypes.IsReferenceType(type)
+                && Following(block, index).Select(f => f.Statement).OfType<Call>().FirstOrDefault() is { Op.Kind: OpKind.ThrowIf or OpKind.TypeCheck or OpKind.IsInst };
             var reads = values.ReadsAt(statement).Select(r => semantics.Read(r, nonNull)).ToArray();
-            if (reads.Any(r => ReferenceEquals(r.Root, target))) return true;
+            if (values.ReadsAt(statement).Any(r => ReferenceEquals(semantics.Read(r, nonNull).Root, target) && !TypeTest(r))) return true;
             if (reads.Any(r => (r.Effects.Exceptions & ~ExceptionEffect.NullReference) != 0)) return false;
             switch (statement)
             {

@@ -46,7 +46,9 @@ internal static partial class ExecutionCheck
         var index = new WorldIndex(facts, types);
         var cecil = new CecilModel(facts.Model, skeleton);
         var interpreter = new CilInterpreter(cecil, index);
-        interpreter.SetInline(emitter, skeleton);
+        var written = all.GroupBy(r => r.Method.Method).ToDictionary(g => g.Key, g => g.First());
+        interpreter.SetInline(emitter, skeleton, method => decompiler.Summary(method) is { Body: { } own, Entry: var entry }
+            && written.GetValueOrDefault(method.Method)?.Entry != entry ? emitter.BuildInstance(own) : null);
         using var machine = new NativeMachine(facts);
         var verdicts = new Dictionary<ExecutionVerdict, int>();
         var output = options.SkipWhile(o => o != "--output").Skip(1).FirstOrDefault();

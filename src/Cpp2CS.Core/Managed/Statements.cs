@@ -4,8 +4,8 @@ public abstract record ManagedStatement(ulong Address);
 public sealed record ManagedAssignment(ulong Address, LocalValue Target, ManagedValue Value) : ManagedStatement(Address);
 /// <summary>写入字段、静态字段或数组元素。</summary>
 public sealed record ManagedStore(ulong Address, ManagedValue Target, ManagedValue Value) : ManagedStatement(Address);
-/// <summary>调用；Tail 为真时调用后立即以其结果返回。</summary>
-public sealed record ManagedCall(ulong Address, ManagedInvocation Invocation, LocalValue? Result, bool Tail) : ManagedStatement(Address)
+/// <summary>调用。原生的尾调用也写成调用加返回，只有一种形式。</summary>
+public sealed record ManagedCall(ulong Address, ManagedInvocation Invocation, LocalValue? Result) : ManagedStatement(Address)
 {
     /// <summary>由内联认回（内联认回）得到：原生代码在此处内联了被调方法，执行对照按被调方法的方法体透明执行。</summary>
     public bool Inlined { get; init; }

@@ -19,7 +19,7 @@ internal static class ManagedPrinter
     {
         ManagedAssignment a => $"{Value(a.Target)} = {Value(a.Value)}",
         ManagedStore s => $"{Value(s.Target)} := {Value(s.Value)}",
-        ManagedCall c => $"{(c.Result is { } r ? Value(r) + " = " : "")}{(c.Tail ? "tail " : "")}{Invocation(c.Invocation)}",
+        ManagedCall c => $"{(c.Result is { } r ? Value(r) + " = " : "")}{Invocation(c.Invocation)}",
         ManagedReturn r => $"return {(r.Value is { } v ? Value(v) : "")}",
         ManagedJump j => $"goto {Edge(j.Edge)}",
         ManagedBranch b => $"if {Value(b.Condition)} goto {Edge(b.Taken)} else {Edge(b.Fallthrough)}",

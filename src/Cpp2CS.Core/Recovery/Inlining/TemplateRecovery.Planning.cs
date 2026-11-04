@@ -32,7 +32,7 @@ internal sealed partial class TemplateRecovery
         var exitCopies = new List<ManagedCopy>();
         foreach (var (target, value) in copies)
             if (Materialize(Input(value), self, at) is { } materialized) exitCopies.Add(new ManagedCopy(target, materialized));
-            else { failure = "出口复制不能写回"; return null; }
+            else { failure = $"出口复制 {target.Variable} 不能写回"; return null; }
         ManagedValue? receiver = null;
         if (self is not null && (receiver = Materialize(self, self, at)) is null) { failure = "接收者不能写回"; return null; }
         if (receiver is not null && method.DeclaringType is DefinitionRef { Definition.IsValueType: true } && receiver.Type is not ByRefRef)
@@ -46,7 +46,6 @@ internal sealed partial class TemplateRecovery
         if (match.Interleaved.Any(p => p.Effects > 0 && p.Effects < match.Effects)) { failure = "夹在调用之间的写入不能移出区域"; return null; }
         var hoisted = match.Interleaved.Where(p => p.Effects == 0).Select(p => blocks[p.Block].Statements[p.Index]).ToArray();
         var sunk = match.Interleaved.Where(p => p.Effects > 0).Select(p => blocks[p.Block].Statements[p.Index]).ToArray();
-        if (sunk.Length > 0 && match.Returns && !ManagedTypes.IsVoid(method.Method.ReturnType)) { failure = "返回值的尾调用之后不能再写入"; return null; }
         if (hoisted.Concat(sunk).SelectMany(ReadValues).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => match.Defined.ContainsKey(l.Variable)))
         { failure = "移出区域的写入依赖区域内定义的局部"; return null; }
         covered.UnionWith(match.Interleaved.Select(p => (p.Block, p.Index)));
@@ -67,23 +66,21 @@ internal sealed partial class TemplateRecovery
         }
         if (Enumerable.Range(start, blocks[startBlock].Statements.Count - start).Any(i => !covered.Contains((startBlock, i)) && !(!match.Returns && startBlock == exit.Block && i >= exit.Index))) { failure = "起点块含有区域外的语句"; return null; }
         var region = internalBlocks.Append(startBlock).ToHashSet();
-        // 多个内联点可以共享判断尾部；保留仍被外部入口使用的尾部及其后继。
+        // 多个内联点可以共享判断尾部；保留仍被外部入口使用的尾部及其后继（只有控制转移的块，留下来不改变语义）。
         var shared = new HashSet<ulong>();
         var pending = new Queue<ulong>(body.Blocks.Where(b => !region.Contains(b.Address))
             .SelectMany(b => b.Statements.SelectMany(ManagedValues.Edges)).Select(e => e.Target).Where(internalBlocks.Contains));
         while (pending.TryDequeue(out var address))
         {
             if (!shared.Add(address)) continue;
-            if (blocks[address].Statements.Any(s => s is not (ManagedBranch or ManagedJump)))
+            if (blocks[address].Statements.Any(s => s is not (ManagedBranch or ManagedJump or ManagedReturn)))
             { failure = "区域内的块从区域外进入"; return null; }
             foreach (var edge in blocks[address].Statements.SelectMany(ManagedValues.Edges).Where(e => internalBlocks.Contains(e.Target)))
                 pending.Enqueue(edge.Target);
         }
-        // 纯跳转与已证明不抛异常的复制可在 try 外；实际效果仍须保留起点的异常上下文。
-        bool Inert(ulong block) => blocks[block].Statements.All(s => s is ManagedJump jump
-            && jump.Edge.Copies.All(c => NonThrowingInlineValue(c.Value)));
+        // 不会抛出的块可在 try 外（原生调用点表不覆盖它们）；可能抛出的语句须保留起点的异常上下文。
         if (body.Regions.Any(r => internalBlocks.Contains(r.HandlerEntry)
-            || region.Any(b => !Inert(b) && (r.Try.Contains(b) != r.Try.Contains(startBlock) || r.Handler.Contains(b) != r.Handler.Contains(startBlock)))))
+            || region.Any(b => match.Raising.Contains(b) && (r.Try.Contains(b) != r.Try.Contains(startBlock) || r.Handler.Contains(b) != r.Handler.Contains(startBlock)))))
         { failure = "区域跨越异常边界"; return null; }
         internalBlocks.ExceptWith(shared);
         covered.RemoveWhere(p => shared.Contains(p.Block));
@@ -102,9 +99,9 @@ internal sealed partial class TemplateRecovery
             if (ReadValues(statement).SelectMany(ManagedValues.Walk).OfType<LocalValue>().FirstOrDefault(l => defined.Contains(l.Variable)) is { } escaping)
                 { failure = $"区域内定义的值 {escaping.Variable} 在区域外 0x{statement.Address:x} 使用"; return null; }
 
-        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, !method.Method.IsStatic && method.Method.Name != ".ctor"), match.Result, match.Returns && sunk.Length == 0) { Inlined = true };
+        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, !method.Method.IsStatic && method.Method.Name != ".ctor"), match.Result) { Inlined = true };
         var replacement = blocks[startBlock].Statements.Take(start).Concat(hoisted).Concat(savedCopies).Append(call).Concat(sunk).ToList();
-        if (match.Returns && sunk.Length > 0) replacement.Add(new ManagedReturn(at, null));
+        if (match.Returns) replacement.Add(new ManagedReturn(at, match.Result));
         if (match.Continuation is { } branch)
         {
             ManagedEdge? MaterializeEdge(ManagedEdge edge)

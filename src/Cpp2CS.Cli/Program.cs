@@ -20,8 +20,8 @@ internal static class Program
         {
             ["facts", var binary, var metadata, var output] => Facts(binary, metadata, output),
             ["refs", var binary, var metadata, var address] => Refs(binary, metadata, Convert.ToUInt64(address, 16)),
-            ["layout", var binary, var metadata, var type] => Layout(binary, metadata, type),
-            ["ssa", var binary, var metadata, .. var addresses] when addresses.Length > 0 => Ssa(binary, metadata, addresses.Where(a => a != "--idioms").Select(a => Convert.ToUInt64(a, 16)).ToArray(), addresses.Contains("--idioms")),
+            ["layout", var binary, var metadata, var type, .. var options] => Layout(binary, metadata, type, options),
+            ["ssa", var binary, var metadata, .. var addresses] when addresses.Length > 0 => Ssa(binary, metadata, Hex(addresses), addresses.Contains("--idioms"), addresses),
             ["idioms", var binary, var metadata, var output, .. var options] => Idioms(binary, metadata, output, options),
             ["recover", var binary, var metadata, var output, .. var options] => RecoverCommand.Run(binary, metadata, output, options),
             ["inspect", var binary, var metadata, .. var options] when options.Length > 0 => Inspect.Run(binary, metadata, options),
@@ -36,8 +36,8 @@ internal static class Program
         Console.Error.WriteLine("""
             用法: cpp2cs facts  <libil2cpp.so> <global-metadata.dat> <输出目录>   建立基础事实，写出 summary.json 与 *.tsv
                   cpp2cs refs   <libil2cpp.so> <global-metadata.dat> <十六进制地址>  打印所在函数的所有者与引用
-                  cpp2cs layout <libil2cpp.so> <global-metadata.dat> <类型全名>      打印类型（含泛型实例）的字段布局
-                  cpp2cs ssa    <libil2cpp.so> <global-metadata.dat> <十六进制入口>... [--idioms]
+                  cpp2cs layout <libil2cpp.so> <global-metadata.dat> <类型全名> [--fact-cache-file 文件]  打印类型（含泛型实例）的字段布局
+                  cpp2cs ssa    <libil2cpp.so> <global-metadata.dat> <十六进制入口>... [--idioms] [--fact-cache-file 文件]
                                                                       打印函数的寄存器 SSA（--idioms：L2 归一之后）
                   cpp2cs idioms <libil2cpp.so> <global-metadata.dat> <输出目录> [--owner 前缀] [--limit N]
                                                                       对托管函数做 L2 模板普查，写出 idioms.txt 与 idiom-residuals.tsv
@@ -85,9 +85,17 @@ internal static class Program
     }
 
     /// <summary>打印函数入口的寄存器 SSA（调试用）；idioms 为真时打印 L2 归一之后的形式与残余。</summary>
-    private static int Ssa(string binary, string metadata, ulong[] entries, bool idioms)
+    /// <summary>--fact-cache-file 复用事实快照，定位问题时不必每次重建。</summary>
+    private static Cpp2CS.Options.RecoveryOptions CacheOptions(string[] options) =>
+        options.SkipWhile(o => o != "--fact-cache-file").Skip(1).FirstOrDefault() is { } cache
+            ? new Cpp2CS.Options.RecoveryOptions { FactCacheFile = Path.GetFullPath(cache) } : new();
+
+    private static ulong[] Hex(string[] options) => options.Where(o => o.StartsWith("0x", StringComparison.Ordinal) || !o.StartsWith("--", StringComparison.Ordinal) && !File.Exists(o))
+        .Select(a => System.Convert.ToUInt64(a.StartsWith("0x", StringComparison.Ordinal) ? a[2..] : a, 16)).ToArray();
+
+    private static int Ssa(string binary, string metadata, ulong[] entries, bool idioms, string[] options)
     {
-        var facts = FactsBuilder.Build(binary, metadata);
+        var facts = FactsBuilder.Build(binary, metadata, options: CacheOptions(options));
         var lifter = new Cpp2CS.Machine.Lifting.FunctionLifter(facts);
         var rewriter = new Cpp2CS.Idioms.IdiomRewriter(facts);
         foreach (var entry in entries)
@@ -133,9 +141,9 @@ internal static class Program
     }
 
     /// <summary>按全名查找类型（非泛型定义按 FullName，泛型实例按运行时类型的显示名）并打印布局。</summary>
-    private static int Layout(string binary, string metadata, string name)
+    private static int Layout(string binary, string metadata, string name, string[] options)
     {
-        var facts = FactsBuilder.Build(binary, metadata);
+        var facts = FactsBuilder.Build(binary, metadata, options: CacheOptions(options));
         var matches = facts.Model.Types.Where(t => t.FullName == name && t.GenericParameters.Count == 0).Select(t => new Model.DefinitionRef(t, []))
             .Concat(facts.Model.RuntimeTypes.OfType<Model.DefinitionRef>().Where(d => d.Arguments.Count > 0 && d.ToString() == name)).Distinct().ToArray();
         if (matches.Length == 0) { Console.Error.WriteLine($"没有名为 {name} 的封闭类型"); return 1; }
@@ -148,6 +156,7 @@ internal static class Program
             foreach (var f in layout.Fields) Console.WriteLine($"  +0x{f.Offset:x3} {f.Type} {f.Field.Name}");
             foreach (var f in layout.Statics) Console.WriteLine($"  static +0x{f.Offset:x3} {f.Type} {f.Field.Name}");
             foreach (var f in layout.ThreadStatics) Console.WriteLine($"  threadstatic +0x{f.Offset:x3} {f.Type} {f.Field.Name}");
+            foreach (var m in type.Definition.Methods) Console.WriteLine($"  method 0x{m.Address:x} {m.Name}({string.Join(", ", m.Parameters.Select(p => p.Type))}) : {m.ReturnType}");
         }
         return 0;
     }

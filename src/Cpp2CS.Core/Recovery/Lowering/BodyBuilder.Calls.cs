@@ -40,7 +40,7 @@ internal sealed partial class BodyBuilder
             {
                 var self = oracle.Parameter(-1)!;
                 output.Add(new ManagedCall(call.Address,
-                    new ManagedInvocation(baseCtor, new ArgumentValue(-1, self, Width(self)), [], false), null, false));
+                    new ManagedInvocation(baseCtor, new ArgumentValue(-1, self, Width(self)), [], false), null));
                 // 共享空构造函数以尾调用进入基类构造函数；托管体还需要同位置的 ret 结束块。
                 return call.Kind is CallKind.Tail or CallKind.TailIndirect
                     ? new Statement(new ManagedReturn(call.Address, null)) : null;
@@ -128,12 +128,19 @@ internal sealed partial class BodyBuilder
             && signature.Return is { Transfer: Transfer.Value } returned && analysis.Signature.Return is { Transfer: Transfer.Value } caller
             && MethodEnvironment.ValueWidth(caller) <= MethodEnvironment.ValueWidth(returned))
         {
-            output.Add(new ManagedCall(call.Address, invocation, result, false));
+            output.Add(new ManagedCall(call.Address, invocation, result));
             var bits = values.Syms.Result(call, 0, MethodEnvironment.ValueWidth(returned));
             return new Statement(new ManagedReturn(call.Address, View(values.Syms.Slice(bits, 0, MethodEnvironment.ValueWidth(caller)), own, call.Address)));
         }
-        var lowered = new ManagedCall(call.Address, invocation, tail ? null : result, tail) { Inlined = call.Inlined };
-        if (tail) return new Statement(lowered);
+        if (tail)
+        {
+            // 尾调用即调用后返回：结果寄存器原样返回，调用方没有返回值时丢弃。
+            var returnsValue = oracle.ReturnType is { } target && !ManagedTypes.IsVoid(target);
+            if (returnsValue && result is null) return new Statement(new ManagedHole(call.Address, "调用 尾调用的被调方法没有返回值", true));
+            output.Add(new ManagedCall(call.Address, invocation, returnsValue ? result : null) { Inlined = call.Inlined });
+            return new Statement(new ManagedReturn(call.Address, returnsValue ? result : null));
+        }
+        var lowered = new ManagedCall(call.Address, invocation, result) { Inlined = call.Inlined };
         output.Add(lowered);
         // 不透明返回值写入调用者给出的位置。
         if (result is not null && signature.Return is { Transfer: Transfer.ResultBuffer, Size: < 0 } opaque)

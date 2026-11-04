@@ -150,14 +150,15 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         return side;
     }
 
-    private StackValue? Execute(CilSide side, MethodDefinition method, MethodRef tested, IReadOnlyList<StackValue> arguments, bool transparent = false)
+    private StackValue? Execute(CilSide side, MethodDefinition method, MethodRef tested, IReadOnlyList<StackValue> arguments, bool transparent = false, MethodBody? ownBody = null)
     {
         var context = model.InContext(tested);
         var world = side.World;
-        var instructions = method.Body.Instructions;
+        var executed = ownBody ?? method.Body;
+        var instructions = executed.Instructions;
         var positions = new Dictionary<Instruction, int>();
         for (var i = 0; i < instructions.Count; i++) positions.Add(instructions[i], i);
-        var localTypes = method.Body.Variables.Select(v => context.Type(v.VariableType)).ToArray();
+        var localTypes = executed.Variables.Select(v => context.Type(v.VariableType)).ToArray();
         var locals = localTypes.Select(t => FromBytes(t, new byte[world.StorageSize(t)])).ToArray();
         var localAddresses = new Dictionary<int, ulong>();
         var argumentTypes = StructAbi.ArgumentTypes(tested);
@@ -195,7 +196,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         }
         var returnType = tested.Method.ReturnType.Substitute(tested.TypeArguments, tested.MethodArguments);
         var pc = 0;
-        var exceptionFlow = method.Body.HasExceptionHandlers ? new CilExceptionFlow(method.Body) : null;
+        var exceptionFlow = executed.HasExceptionHandlers ? new CilExceptionFlow(executed) : null;
         var escaping = false;
         for (var steps = 0; ; steps++)
         {
@@ -258,7 +259,9 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Ldc_R8: stack.Push(StackValue.F((double)operand)); break;
                 case Code.Ldnull: stack.Push(StackValue.O(0)); break;
                 case Code.Ldstr: stack.Push(StackValue.O(world.String((string)operand))); break;
-                case Code.Ldtoken: stack.Push(StackValue.I8(world.TypePointer(context.Type((TypeReference)operand)))); break;
+                case Code.Ldtoken:
+                    stack.Push(StackValue.I8(operand is FieldReference token ? world.FieldInfo(context.Field(token)) : world.TypePointer(context.Type((TypeReference)operand))));
+                    break;
                 case Code.Pop: Pop(); break;
                 case Code.Dup: stack.Push(stack.Peek()); break;
 
@@ -744,7 +747,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
 
     // —— 值的表示 ——
 
-    private bool IsHandle(TypeRef type) => type.Equals(Types.RuntimeTypeHandle);
+    private bool IsHandle(TypeRef type) => type.Equals(Types.RuntimeTypeHandle) || type.Equals(Types.RuntimeFieldHandle);
 
     /// <summary>内存中的位型（零扩展到 64 位）→ 栈上的值。</summary>
     public StackValue Load(TypeRef type, ulong bits)

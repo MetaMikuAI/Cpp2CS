@@ -71,6 +71,10 @@ public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransfo
         return problems;
     }
 
+    /// <summary>写成 CIL 但不放到骨架上：同一泛型定义的其他实例有自己的原生代码时，供执行对照使用。</summary>
+    public MethodBody BuildInstance(ManagedBody recovered) =>
+        new CilBodyWriter(skeleton, types, EmissionPolicy.Recovered, symbols, transforms).Build(recovered, skeleton.Method(recovered.Method.Method));
+
     private MethodBody Build(ManagedBody recovered, EmissionPolicy policy, Mono.Cecil.MethodDefinition method)
     {
         if (built.TryGetValue((recovered, policy), out var body)) return body;

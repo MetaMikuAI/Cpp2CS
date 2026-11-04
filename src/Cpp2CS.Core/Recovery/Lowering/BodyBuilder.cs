@@ -84,7 +84,7 @@ internal sealed partial class BodyBuilder
                 exit = Lower(block, i, output);
             }
             var normal = block.NormalSuccessors.ToArray();
-            if (exit is null && output.LastOrDefault() is not (ManagedThrow or ManagedRethrow or ManagedReturn or ManagedEndFault or ManagedCall { Tail: true } or ManagedHole { Terminal: true }))
+            if (exit is null && output.LastOrDefault() is not (ManagedThrow or ManagedRethrow or ManagedReturn or ManagedEndFault or ManagedHole { Terminal: true }))
                 exit = normal.Length == 1 ? new Jump(block.End, normal[0].Start) : Fail(block.End, "控制 块没有终结语句", terminal: true);
             lowered.Add((block, output, exit));
             holeRanges[block] = (holesBefore, holes.Count);

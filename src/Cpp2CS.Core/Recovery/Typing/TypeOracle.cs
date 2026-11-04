@@ -298,6 +298,8 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                 return types.String;
             case EntitySym { Symbol: { Kind: SymbolKind.Type } }:
                 return types.RuntimeTypeHandle;
+            case EntitySym { Symbol: { Kind: SymbolKind.Field } }:
+                return types.RuntimeFieldHandle;
             case ResultSym result when result.Index == 0:
                 return ResultType(result.Site);
             case OutSym output when !shapes(output.Site).IsRuntime && Callee(output.Site) is { } callee:
@@ -651,6 +653,9 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                 return null;
             case DefinitionRef reference when ManagedTypes.IsReferenceType(reference) && index is null:
                 return FieldAt(reference, (int)offset, width, false, false) is var (fields, fieldType2) ? new(LocationKind.Instance, root, null, 0, null, fields, fieldType2) : null;
+            // 约束到基类的类型参数：实例字段按基类的布局。
+            case GenericParameterRef { ReferenceBase: { } constraint } when index is null:
+                return FieldAt(Substitute(constraint), (int)offset, width, false, false) is var (bounded, boundedType) ? new(LocationKind.Instance, root, null, 0, null, bounded, boundedType) : null;
             case PointerRef pointer when index is not null || offset != 0:
                 {
                     var size = ElementSize(pointer.Element);

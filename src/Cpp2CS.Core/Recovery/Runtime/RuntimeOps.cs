@@ -191,7 +191,7 @@ public static class RuntimeOps
                 if (definition is null) return false;
                 var method = new MethodRef(definition, [], [location.Type]);
                 var arguments = new ManagedValue[] { new AddressValue(location), c.Input(1), c.Input(2) };
-                c.Emit(new ManagedCall(c.Call.Address, new ManagedInvocation(method, null, arguments, false), c.Local(c.Result, location.Type), false));
+                c.Emit(new ManagedCall(c.Call.Address, new ManagedInvocation(method, null, arguments, false), c.Local(c.Result, location.Type)));
                 return true;
             },
         };
@@ -205,7 +205,7 @@ public static class RuntimeOps
             {
                 terminal = null;
                 if (c.Types.CorlibMethod("System.Threading.Thread", "MemoryBarrier") is not { Method.IsStatic: true } barrier) return false;
-                c.Emit(new ManagedCall(c.Call.Address, new ManagedInvocation(barrier, null, [], false), null, false));
+                c.Emit(new ManagedCall(c.Call.Address, new ManagedInvocation(barrier, null, [], false), null));
                 return true;
             },
         };
@@ -339,9 +339,9 @@ public static class RuntimeOps
                 var elementType = c.Temporary(getElementType.Method.ReturnType);
                 var accepts = c.Temporary(c.Types.Boolean);
                 c.Emit(new ManagedAssignment(c.Call.Address, operand, c.Input(0)));
-                c.Emit(new ManagedCall(c.Call.Address, new(getType, c.Input(1), [], false), runtimeType, false));
-                c.Emit(new ManagedCall(c.Call.Address, new(getElementType, runtimeType, [], true), elementType, false));
-                c.Emit(new ManagedCall(c.Call.Address, new(isInstance, elementType, [operand], true), accepts, false));
+                c.Emit(new ManagedCall(c.Call.Address, new(getType, c.Input(1), [], false), runtimeType));
+                c.Emit(new ManagedCall(c.Call.Address, new(getElementType, runtimeType, [], true), elementType));
+                c.Emit(new ManagedCall(c.Call.Address, new(isInstance, elementType, [operand], true), accepts));
                 c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, c.Types.Object),
                     new ChoiceValue(accepts, operand, new ConstantValue(0, c.Types.Object, 64), c.Types.Object, 64)));
                 return true;
@@ -483,7 +483,7 @@ public static class RuntimeOps
                 var sine = c.Local(c.ResultAt(0), c.Types.Single);
                 var cosine = c.Local(c.ResultAt(1), c.Types.Single);
                 c.Emit(new ManagedCall(c.Call.Address, new(method, null,
-                    [c.Input(0), new AddressValue(sine), new AddressValue(cosine)], false), null, false));
+                    [c.Input(0), new AddressValue(sine), new AddressValue(cosine)], false), null));
                 return true;
             },
         };
@@ -506,7 +506,7 @@ public static class RuntimeOps
                     if (position < 0 || position >= c.Arguments.Count) return false;
                     arguments.Add(c.Input(i));
                 }
-                c.Emit(new ManagedCall(c.Call.Address, new(method, null, arguments, false), c.Local(c.Result, method.Method.ReturnType), false));
+                c.Emit(new ManagedCall(c.Call.Address, new(method, null, arguments, false), c.Local(c.Result, method.Method.ReturnType)));
                 return true;
             },
             PointerEffects = (call, _) => call switch

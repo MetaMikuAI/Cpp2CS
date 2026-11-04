@@ -45,12 +45,14 @@ internal static class ArchitectureChecks
         SharedValueModel(checks, facts, types);
         FrameForwards(checks, facts);
         ExceptionShapes(checks, types);
+        PlatformInvokeDeclarations(checks, facts, types);
         StackBoxes(checks, facts, types);
         PartialScalarCells(checks, facts, types);
         UnusedCallStacks(checks, facts, types);
         EntryKinds(checks, facts, types);
         Templates(checks, types);
         RepeatedExitCopies(checks, types);
+        DuplicatedInlineSuffix(checks, types);
         Accessors(checks, types);
         ClosedGenericAccess(checks, types);
         StaticAccessorReferences(checks, types);
@@ -363,6 +365,21 @@ internal static class ArchitectureChecks
     }
 
     /// <summary>私有栈槽的保存与读回：每条路径都到达同值的完整写入才转发。</summary>
+    /// <summary>extern 方法恢复成带库名与入口的声明，不恢复原生桩的方法体。</summary>
+    private static void PlatformInvokeDeclarations(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var decompiler = new MethodDecompiler(facts, types);
+        var methods = facts.Model.Methods.Where(m => m.Address != 0 && (m.Attributes & MethodAttributes.PinvokeImpl) != 0
+            && m.GenericParameters.Count == 0 && m.Owner.GenericParameters.Count == 0).Take(8).ToArray();
+        check.True(methods.Length > 0, "样本含 extern 方法");
+        foreach (var method in methods)
+        {
+            var result = decompiler.Recover(new MethodRef(method, [], []), method.Address);
+            check.True(result is { Declaration: RuntimeDeclarationKind.PlatformInvoke, Body: null, Holes.Count: 0, PlatformImport: { Library.Length: > 0, EntryPoint.Length: > 0 } },
+                $"{method.Name} 恢复成导入声明：{string.Join("；", result.Holes.Select(h => h.Reason))}");
+        }
+    }
+
     /// <summary>异常区域的规范形：多入口 try 收拢到分派块，分派只改写从外部进入的边。</summary>
     private static void ExceptionShapes(Assertions check, ManagedTypes types)
     {
@@ -765,6 +782,111 @@ internal static class ArchitectureChecks
         check.True(problems.ContainsKey(body), "未写出的透明依赖阻止调用方发布");
     }
 
+    /// <summary>
+    /// 内联证明的规范形：尾调用即调用加返回；调用之后被复制到各路径的代码按内存现状比较；路径事实使常量折叠后的代码仍能比较；
+    /// 显式判空等于模板随后的隐式解引用。
+    /// </summary>
+    private static void DuplicatedInlineSuffix(Assertions check, ManagedTypes types)
+    {
+        var owner = Type("Bag", 860);
+        var ownerRef = new DefinitionRef(owner, []);
+        FieldDef Field(string name, TypeRef type, int index) => new() { Index = index, Owner = owner, Name = name, Type = type, Attributes = FieldAttributes.Private, Offset = 16 + index % 8 * 8 };
+        var arrayType = new ArrayRef(types.Int32, 1);
+        var (versionField, sizeField, itemsField) = (Field("version", types.Int32, 860), Field("size", types.Int32, 861), Field("items", arrayType, 862));
+        owner.Fields = [versionField, sizeField, itemsField];
+        var grow = Method(owner, "Grow", 860, MethodAttributes.Public);
+        grow.Parameters = [new("value", types.Int32, 0, null, false)];
+        var add = Method(owner, "Add", 861);
+        add.Parameters = [new("value", types.Int32, 0, null, false)];
+        owner.Methods = [grow, add];
+        var (growRef, addRef) = (new MethodRef(grow, [], []), new MethodRef(add, [], []));
+        var nullConstructor = new MethodRef(types.Corlib("System.NullReferenceException").Definition.Methods.Single(m => m.Name == ".ctor" && m.Parameters.Count == 0), [], []);
+        var nextLocal = 860;
+        LocalValue Local(TypeRef type) => new(new Variable(Storage.Temp(nextLocal++), 1), type, types.ValueWidth(type));
+        var one = new ConstantValue(1, types.Int32, 32);
+        var zero = new ConstantValue(0, types.Int32, 32);
+        FieldValue Read(ManagedValue receiver, FieldDef field, bool pending = false) => new(receiver, new(field, ownerRef), field.Type, types.ValueWidth(field.Type))
+        {
+            Pending = pending ? new PendingAccess(1, "待证字段", false) : null,
+        };
+        ManagedValue Plus(ManagedValue left, ManagedValue right) => new BinaryValue(BinOp.Add, left, right, types.Int32, 32);
+        ManagedValue Length(ManagedValue array) => new ArrayLengthValue(array, types.Int32, 32);
+        ManagedValue Compare(Cond condition, ManagedValue left, ManagedValue right) => new ComparisonValue(condition, left, right, types.Boolean);
+        ManagedValue Element(ManagedValue array, ManagedValue index) => new ArrayElementValue(array, index, types.Int32, 32);
+        ManagedStatement Grow(ManagedValue receiver, ManagedValue value) => new ManagedCall(9, new(growRef, receiver, [value], false), null);
+
+        var self = new ArgumentValue(-1, ownerRef, 64);
+        var input = new ArgumentValue(0, types.Int32, 32);
+        var (tv, ti, ts, tl) = (Local(types.Int32), Local(arrayType), Local(types.Int32), Local(types.Int32));
+        var template = new ManagedBody(addRef, [
+            new(0, [new ManagedAssignment(0, tv, Read(self, versionField)), new ManagedAssignment(0, ti, Read(self, itemsField)),
+                new ManagedStore(0, Read(self, versionField), Plus(tv, one)), new ManagedAssignment(0, ts, Read(self, sizeField)), new ManagedAssignment(0, tl, Length(ti)),
+                new ManagedBranch(0, Compare(Cond.Uge, ts, tl), new(32, []), new(16, []))]),
+            new(16, [new ManagedStore(16, Read(self, sizeField), Plus(ts, one)), new ManagedStore(16, Element(ti, ts), input), new ManagedReturn(16, null)]),
+            new(32, [Grow(self, input), new ManagedReturn(32, null)])]);
+        MethodRecoveryResult? Summary(MethodRef requested) => requested.Method == add ? new(addRef, 0, template, []) : null;
+
+        var callerDefinition = Method(Type("BagUser", 861), "Fill", 862);
+        var caller = new MethodRef(callerDefinition, [], []);
+        var list = new ArgumentValue(0, ownerRef, 64);
+        var (first, second) = (new ArgumentValue(1, types.Int32, 32), new ArgumentValue(2, types.Int32, 32));
+        TemplateResult Run(IReadOnlyList<ManagedBlock> blocks)
+        {
+            var evidence = new InlineEvidence(types, caller, Summary);
+            return new TemplateRecovery(types, caller, Summary, evidence).Run(new(caller, blocks), new Dictionary<Variable, PendingConstruction>(), 0);
+        }
+        int Inlined(TemplateResult result) => result.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Count(c => c.Inlined && c.Invocation.Method == addRef);
+
+        // 尾调用路径与落到共享返回块的路径：都是调用后返回。
+        {
+            var (v, i, z, l) = (Local(types.Int32), Local(arrayType), Local(types.Int32), Local(types.Int32));
+            var result = Run([
+                new(0, [new ManagedAssignment(0, v, Read(list, versionField, true)), new ManagedAssignment(0, i, Read(list, itemsField, true)),
+                    new ManagedStore(0, Read(list, versionField, true), Plus(v, one)), new ManagedAssignment(0, z, Read(list, sizeField, true)), new ManagedAssignment(0, l, Length(i)),
+                    new ManagedBranch(0, Compare(Cond.Uge, z, l), new(32, []), new(16, []))]),
+                new(16, [new ManagedStore(16, Read(list, sizeField, true), Plus(z, one)), new ManagedStore(16, Element(i, z), first), new ManagedJump(16, new(48, []))]),
+                new(32, [Grow(list, first), new ManagedReturn(32, null)]),
+                new(48, [new ManagedReturn(48, null)])]);
+            check.True(result.Holes.Count == 0 && Inlined(result) == 1, "尾调用路径与共享返回块是同一个返回");
+        }
+
+        // 连续两次内联，第一次之后的代码被复制到两条路径：快路径沿用读过的数组，慢路径在调用之后重新读取并判空。
+        foreach (var different in new[] { false, true })
+        {
+            var (v, i, z, l, v2, v3, z2, l2) = (Local(types.Int32), Local(arrayType), Local(types.Int32), Local(types.Int32), Local(types.Int32), Local(types.Int32), Local(types.Int32), Local(types.Int32));
+            var result = Run([
+                new(0, [new ManagedAssignment(0, v, Read(list, versionField, true)), new ManagedAssignment(0, i, Read(list, itemsField, true)),
+                    new ManagedStore(0, Read(list, versionField, true), Plus(v, one)), new ManagedAssignment(0, z, Read(list, sizeField, true)), new ManagedAssignment(0, l, Length(i)),
+                    new ManagedBranch(0, Compare(Cond.Uge, z, l), new(32, []), new(16, []))]),
+                new(16, [new ManagedStore(16, Read(list, sizeField, true), Plus(z, one)), new ManagedStore(16, Element(i, z), first),
+                    new ManagedAssignment(16, v2, Read(list, versionField, true)), new ManagedStore(16, Read(list, versionField, true), Plus(v2, one)), new ManagedJump(16, new(48, []))]),
+                new(32, [Grow(list, first), new ManagedAssignment(32, v3, Read(list, versionField, true)), new ManagedAssignment(32, i, Read(list, itemsField, true)),
+                    new ManagedStore(32, Read(list, versionField, true), Plus(v3, different ? zero : one)),
+                    new ManagedCheck(32, Compare(Cond.Eq, i, new ConstantValue(0, arrayType, 64)), nullConstructor), new ManagedJump(32, new(48, []))]),
+                new(48, [new ManagedAssignment(48, z2, Read(list, sizeField, true)), new ManagedAssignment(48, l2, Length(i)),
+                    new ManagedBranch(48, Compare(Cond.Uge, z2, l2), new(72, []), new(56, []))]),
+                new(56, [new ManagedStore(56, Read(list, sizeField, true), Plus(z2, one)), new ManagedStore(56, Element(i, z2), second), new ManagedJump(56, new(88, []))]),
+                new(72, [Grow(list, second), new ManagedJump(72, new(88, []))]),
+                new(88, [new ManagedReturn(88, null)])]);
+            if (different) check.True(result.Holes.Count > 0, "复制到各路径的代码不同时不能合并");
+            else check.True(result.Holes.Count == 0 && Inlined(result) == 2, "调用之后被复制到各路径的代码只保留一份");
+        }
+
+        // 调用方判过 size == 0：内联后的代码按 0 折叠，长度比较也换了写法。
+        {
+            var (z, v, i, l) = (Local(types.Int32), Local(types.Int32), Local(arrayType), Local(types.Int32));
+            var result = Run([
+                new(0, [new ManagedAssignment(0, z, Read(list, sizeField, true)), new ManagedBranch(0, Compare(Cond.Eq, z, zero), new(8, []), new(96, []))]),
+                new(8, [new ManagedAssignment(8, v, Read(list, versionField, true)), new ManagedAssignment(8, i, Read(list, itemsField, true)),
+                    new ManagedStore(8, Read(list, versionField, true), Plus(v, one)), new ManagedAssignment(8, l, Length(i)),
+                    new ManagedBranch(8, Compare(Cond.Eq, l, zero), new(40, []), new(24, []))]),
+                new(24, [new ManagedStore(24, Read(list, sizeField, true), one), new ManagedStore(24, Element(i, zero), first), new ManagedJump(24, new(96, []))]),
+                new(40, [Grow(list, first), new ManagedJump(40, new(96, []))]),
+                new(96, [new ManagedReturn(96, null)])]);
+            check.True(Inlined(result) == 1 && !result.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>().Any(), "路径事实折叠后的内联仍可证明");
+        }
+    }
+
     private static void RepeatedExitCopies(Assertions check, ManagedTypes types)
     {
         var owner = Type("ExitStorage", 840);
@@ -845,11 +967,11 @@ internal static class ArchitectureChecks
         check.True(failure.Holes.Count > 0, "写入不一致时保留缺口");
         check.True(!failure.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Inlined), "失败的证明不改写成调用");
         var prepare = Method(Type("Preparation", 13), "Run", 13, MethodAttributes.Public | MethodAttributes.Static);
-        var prelude = new ManagedCall(0, new(new(prepare, [], []), null, [], false), null, false);
+        var prelude = new ManagedCall(0, new(new(prepare, [], []), null, [], false), null);
         template = template with { Blocks = [new(0, new ManagedStatement[] { prelude }.Concat(template.Blocks[0].Statements).ToArray())] };
         ManagedBody Split(bool changed) => new(caller,
         [
-            new(0, [changed ? new ManagedCall(0, prelude.Invocation with { Arguments = [value] }, null, false) : prelude,
+            new(0, [changed ? new ManagedCall(0, prelude.Invocation with { Arguments = [value] }, null) : prelude,
                 new ManagedJump(0, new(4, []))]),
             new(4, [new ManagedJump(4, new(8, []))]),
             new(8, Body(value).Blocks[0].Statements),
@@ -893,7 +1015,7 @@ internal static class ArchitectureChecks
             .Run(pendingRead, new Dictionary<Variable, PendingConstruction>(), 0);
         check.True(privateTemplate.Holes.Count > 0, "多语句模板不能重新引入被拒绝的私有访问器");
         var privateCall = new ManagedBody(caller, [new(0, [new ManagedCall(0,
-            new ManagedInvocation(new MethodRef(hidden, [], []), receiver, [], false), null, false) { Inlined = true }, new ManagedReturn(4, null)])]);
+            new ManagedInvocation(new MethodRef(hidden, [], []), receiver, [], false), null) { Inlined = true }, new ManagedReturn(4, null)])]);
         check.True(new BodyValidation(types, EmissionPolicy.Recovered, caller).Check(privateCall, true) is
             { Kind: EmissionProblemKind.AccessDenied }, "内联证明调用在写出策略下仍须满足权限");
         owner.Methods = [hidden, visible];
@@ -1266,7 +1388,7 @@ internal static class ArchitectureChecks
         var childCtor = new MethodRef(Method(child, ".ctor", 71), [], []);
         child.Methods = [childCtor.Method];
         var objectCtor = new MethodRef(types.Object.Definition.Methods.Single(m => m.Name == ".ctor" && m.Parameters.Count == 0), [], []);
-        ManagedCall Initialize(TypeRef owner) => new(0, new(objectCtor, new ArgumentValue(-1, owner, 64), [], false), null, false);
+        ManagedCall Initialize(TypeRef owner) => new(0, new(objectCtor, new ArgumentValue(-1, owner, 64), [], false), null);
         ManagedStore Store(TypeRef owner, FieldDef field, int value) => new((ulong)field.Index,
             new FieldValue(new ArgumentValue(-1, owner, 64), new(field, field.Owner == parent ? parentRef : childRef), types.Int32, 32),
             new ConstantValue((ulong)value, types.Int32, 32));
@@ -1302,7 +1424,7 @@ internal static class ArchitectureChecks
         var parent = new MethodRef(types.Object.Definition.Methods.Single(m => m.Name == ".ctor" && m.Parameters.Count == 0), [], []);
         ManagedStore Store(ManagedValue receiver, ulong value) => new(4, new FieldValue(receiver, new(field, type), types.Int32, 32), new ConstantValue(value, types.Int32, 32));
         ManagedStore Other(ManagedValue receiver) => new(5, new FieldValue(receiver, new(second, type), types.Int32, 32), new ConstantValue(9, types.Int32, 32));
-        ManagedCall Initialize(ManagedValue receiver) => new(8, new(parent, receiver, [], false), null, false);
+        ManagedCall Initialize(ManagedValue receiver) => new(8, new(parent, receiver, [], false), null);
         var self = new ArgumentValue(-1, type, 64);
         var template = new ManagedBody(constructor, [new(0, [Store(self, 7), Other(self), Initialize(self), new ManagedReturn(12, null)])]);
         MethodRecoveryResult? Summary(MethodRef method) => method == constructor ? new(method, 0, template, []) : null;
@@ -1334,7 +1456,7 @@ internal static class ArchitectureChecks
         owner.Fields = [field];
         var self = new ArgumentValue(-1, ownerType, 64);
         var baseCtor = MethodRef.Open(types.Object.Definition.Methods.Single(m => m.Name == ".ctor" && m.Parameters.Count == 0));
-        var initialize = new ManagedCall(4, new(baseCtor, self, [], false), null, false);
+        var initialize = new ManagedCall(4, new(baseCtor, self, [], false), null);
         var ret = new ManagedReturn(8, null);
         ManagedBody Body(ManagedValue value) => new(ctor, [new(0, [
             new ManagedStore(0, new FieldValue(self, new(field, ownerType), types.Int32, 32), value), initialize, ret])]);
@@ -1484,7 +1606,7 @@ internal static class ArchitectureChecks
         }
         var recovered = Run(false);
         check.True(recovered.Holes.Count == 0 && recovered.Body.Blocks.SelectMany(b => b.Statements)
-            .OfType<ManagedCall>().Any(c => c.Inlined && c.Tail && c.Invocation.Method == method), "分段读取的返回表达式可证明为完整取值调用");
+            .OfType<ManagedCall>().Any(c => c.Inlined && c.Invocation.Method == method), "分段读取的返回表达式可证明为完整取值调用");
         var interleaved = Run(true);
         check.True(interleaved.Body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk)
             .OfType<FieldValue>().Count(f => f.Field.Field == other) == 1, "无关对象上的读取必须保留，即使后续区域可以独立证明");
@@ -1575,7 +1697,7 @@ internal static class ArchitectureChecks
         ManagedValue Test(ManagedValue receiver, bool pending) => new ComparisonValue(Cond.Ne,
             new FieldValue(receiver, new(state, ownerType), types.Int32, 32) { Pending = pending ? new(0, "待证字段", false) : null },
             new ConstantValue(0, types.Int32, 32), types.Boolean);
-        var call = new ManagedCall(8, new(new(query, [], []), null, [], false), returned, false);
+        var call = new ManagedCall(8, new(new(query, [], []), null, [], false), returned);
         var one = new ConstantValue(1, types.Int32, 32);
         var two = new ConstantValue(2, types.Int32, 32);
         var template = new ManagedBody(method,
@@ -1594,7 +1716,7 @@ internal static class ArchitectureChecks
                 new(0, [new ManagedBranch(0, Test(new ArgumentValue(0, ownerType, 64), true), new(8, []), new(16, []))]),
                 new(8, [call, new ManagedJump(12, new(24, complete ? [new(first, Field(0)), new(second, Field(1))] : [new(first, Field(0))]))]),
                 new(16, [new ManagedJump(16, new(24, complete ? [new(first, one), new(second, consistent ? two : one)] : [new(first, one)]))]),
-                new(24, [new ManagedCall(24, new(new(consumer, [], []), null, [Pair(first, complete ? second : one)], false), null, false), new ManagedReturn(28, null)]),
+                new(24, [new ManagedCall(24, new(new(consumer, [], []), null, [Pair(first, complete ? second : one)], false), null), new ManagedReturn(28, null)]),
             ]);
             if (grouped)
             {
@@ -1603,7 +1725,7 @@ internal static class ArchitectureChecks
                     ? b with { Statements = b.Statements.Select(s => s is ManagedJump jump
                         ? jump with { Edge = jump.Edge with { Copies = [.. jump.Edge.Copies,
                             new(aggregate, b.Address == 8 ? Pair(Field(0), Field(1)) : Pair(one, consistent ? two : one))] } } : s).ToArray() }
-                    : b.Address == 24 ? b with { Statements = [new ManagedCall(24, new(new(consumer, [], []), null, [aggregate], false), null, false), new ManagedReturn(28, null)] } : b).ToArray() };
+                    : b.Address == 24 ? b with { Statements = [new ManagedCall(24, new(new(consumer, [], []), null, [aggregate], false), null), new ManagedReturn(28, null)] } : b).ToArray() };
             }
             return new TemplateRecovery(types, caller, SelectedSummary, new InlineEvidence(types, caller, SelectedSummary)).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
         }
@@ -1625,8 +1747,8 @@ internal static class ArchitectureChecks
                 new(0, [new ManagedBranch(0, Test(new ArgumentValue(0, ownerType, 64), true), new(8, []), new(16, []))]),
                 new(8, [call, new ManagedBranch(12, new ComparisonValue(Cond.Ne, Field(1), two, types.Boolean), new(32, copies), new(40, copies))]),
                 new(16, [new ManagedJump(16, new(40, [new(first, consistent ? one : two), new(second, two)]))]),
-                new(32, [new ManagedCall(32, new(new(consumer, [], []), null, [Pair(first, second)], false), null, false), new ManagedReturn(36, null)]),
-                new(40, [new ManagedCall(40, new(new(consumer, [], []), null, [Pair(first, second)], false), null, false), new ManagedReturn(44, null)]),
+                new(32, [new ManagedCall(32, new(new(consumer, [], []), null, [Pair(first, second)], false), null), new ManagedReturn(36, null)]),
+                new(40, [new ManagedCall(40, new(new(consumer, [], []), null, [Pair(first, second)], false), null), new ManagedReturn(44, null)]),
             ]);
             return new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary)).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
         }
@@ -1658,7 +1780,7 @@ internal static class ArchitectureChecks
         var one = new ConstantValue(1, types.Int32, 32);
         FieldValue Read(ManagedValue receiver) => new(receiver, new FieldRef(field, ownerRef), types.Int32, 32);
         ManagedValue Compare(ManagedValue value) => new ComparisonValue(Cond.Ne, value, zero, types.Boolean);
-        var call = new ManagedCall(8, new ManagedInvocation(query, null, [], false), returned, false);
+        var call = new ManagedCall(8, new ManagedInvocation(query, null, [], false), returned);
         var template = new ManagedBody(method,
         [
             new(0, [new ManagedBranch(0, Compare(Read(new ArgumentValue(-1, ownerRef, 64))), new(8, []), new(16, []))]),

@@ -60,6 +60,12 @@ internal static class Inspect
                 }
                 continue;
             }
+            if (target.StartsWith("name:", StringComparison.Ordinal))
+            {
+                foreach (var definition in facts.Model.Methods.Where(m => m.Address != 0 && $"{m.Owner.FullName}.{m.Name}" == target[5..]))
+                    yield return new RecoveryTarget(MethodRef.Open(definition), definition.Address);
+                continue;
+            }
             var entry = Convert.ToUInt64(target.StartsWith("0x", StringComparison.Ordinal) ? target[2..] : target, 16);
             var method = facts.EntriesAt(entry).FirstOrDefault(e => e.Method is not null && e.Kind is EntryKind.Method or EntryKind.GenericMethod)?.Method
                 ?? throw new InvalidDataException($"0x{entry:x} 处没有托管方法");
