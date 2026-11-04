@@ -139,14 +139,18 @@ internal sealed partial class TemplateRecovery
                 if (summaries(method) is not { Body: { } template }) { failures.Add(definition.Address == 0 ? "构造函数没有原生代码" : "构造函数自身未能恢复"); continue; }
                 if (template.Regions.Count > 0 || !Acyclic(template)) { failures.Add("构造函数体含异常区域或环"); continue; }
                 if (PendingCall(body, variable, pending) is not var (block, index, _)) break;
-                var blocks = body.Blocks.ToDictionary(b => b.Address);
+                var preferred = template.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>()
+                    .Select(s => s.Target).OfType<FieldValue>().Select(f => f.Field.Field).ToHashSet();
+                var candidate = CommuteIndependentStores(body, preferred);
+                template = CommuteIndependentStores(template, preferred);
+                var blocks = candidate.Blocks.ToDictionary(b => b.Address);
                 string? nearest = null;
                 var constructed = false;
                 for (var start = 0; start <= index; start++)
                 {
-                    var match = Match(body, blocks, block, start, template, pending.Allocated.Arguments, out var failure);
+                    var match = Match(candidate, blocks, block, start, template, pending.Allocated.Arguments, out var failure);
                     if (match is not null && match.Covered.Contains((block, index))
-                        && PlanReplacement(body, blocks, block, start, method, match, out failure) is { } replaced)
+                        && PlanReplacement(candidate, blocks, block, start, method, match, out failure) is { } replaced)
                     {
                         body = Constructed(replaced.Apply(body), variable, method);
                         failures.Clear();

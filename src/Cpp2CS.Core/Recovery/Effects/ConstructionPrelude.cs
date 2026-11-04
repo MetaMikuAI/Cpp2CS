@@ -1,13 +1,14 @@
 using Cpp2CS.Ir;
+using Cpp2CS.Machine.Algebra;
 using Cpp2CS.Recovery.Typing;
 using Cpp2CS.Recovery.Values;
 
 namespace Cpp2CS.Recovery.Effects;
 
-/// <summary>新对象在同块基类构造之前只接受字段初始化，保持私有身份供构造模板证明。</summary>
+/// <summary>新对象在直线路径的基类构造之前只接受字段初始化，保持私有身份供构造模板证明。</summary>
 internal static class ConstructionPrelude
 {
-    internal static (DefinitionRef Type, MethodRef Base, ulong Address)? Find(MethodAnalysis analysis, TypeOracle oracle, Call allocation)
+    internal static (DefinitionRef Type, MethodRef Base, ulong Address)? Find(MethodAnalysis analysis, TypeOracle oracle, EffectAnalysis effects, Call allocation)
     {
         if (oracle.ClassOperand(allocation) is not DefinitionRef allocated) return null;
         var values = analysis.Values;
@@ -22,8 +23,9 @@ internal static class ConstructionPrelude
             PhiSym => true,
             _ => false,
         });
-        foreach (var statement in block.Statements.Skip(block.Statements.IndexOf(allocation) + 1))
+        foreach (var (at, statement) in StraightLine.Following(block, block.Statements.IndexOf(allocation), StraightLinePolicy.Fallthrough))
         {
+            if (!effects.SameUnwind(block, at)) return null;
             var operands = values.Operands(statement);
             if (statement is Define && values.ReadsAt(statement).Count == 0 || statement is Nop) continue;
             if (statement is Store && oracle.Decompose(operands[0]).Root == result && !Contains(operands[1])) continue;

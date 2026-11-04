@@ -214,7 +214,7 @@ internal sealed partial class BodyBuilder
         public void AwaitConstruction()
         {
             owner.constructions[(ResultSym)Result] = call;
-            if (Cpp2CS.Recovery.Effects.ConstructionPrelude.Find(owner.analysis, owner.oracle, call) is { } prelude)
+            if (Cpp2CS.Recovery.Effects.ConstructionPrelude.Find(owner.analysis, owner.oracle, owner.effects, call) is { } prelude)
             {
                 var local = owner.Local(Result, prelude.Type);
                 owner.pendingConstructions[local.Variable] = new(prelude.Address, prelude.Type, prelude.Base);

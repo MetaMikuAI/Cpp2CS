@@ -1216,21 +1216,23 @@ internal static class ArchitectureChecks
         owner.BaseType = types.Object;
         var type = new DefinitionRef(owner, []);
         var field = new FieldDef { Index = 881, Owner = owner, Name = "value", Type = types.Int32, Offset = 16, Attributes = FieldAttributes.Public };
-        owner.Fields = [field];
+        var second = new FieldDef { Index = 882, Owner = owner, Name = "second", Type = types.Int32, Offset = 20, Attributes = FieldAttributes.Public };
+        owner.Fields = [field, second];
         var constructor = new MethodRef(Method(owner, ".ctor", 881), [], []);
         owner.Methods = [constructor.Method];
         var parent = new MethodRef(types.Object.Definition.Methods.Single(m => m.Name == ".ctor" && m.Parameters.Count == 0), [], []);
         ManagedStore Store(ManagedValue receiver, ulong value) => new(4, new FieldValue(receiver, new(field, type), types.Int32, 32), new ConstantValue(value, types.Int32, 32));
+        ManagedStore Other(ManagedValue receiver) => new(5, new FieldValue(receiver, new(second, type), types.Int32, 32), new ConstantValue(9, types.Int32, 32));
         ManagedCall Initialize(ManagedValue receiver) => new(8, new(parent, receiver, [], false), null, false);
         var self = new ArgumentValue(-1, type, 64);
-        var template = new ManagedBody(constructor, [new(0, [Store(self, 7), Initialize(self), new ManagedReturn(12, null)])]);
+        var template = new ManagedBody(constructor, [new(0, [Store(self, 7), Other(self), Initialize(self), new ManagedReturn(12, null)])]);
         MethodRecoveryResult? Summary(MethodRef method) => method == constructor ? new(method, 0, template, []) : null;
         var caller = new MethodRef(Method(Type("InitializedConsumer", 882), "Create", 882), [], []);
         caller.Method.ReturnType = type;
         var local = new LocalValue(new(Storage.Temp(881), 1), type, 64);
         foreach (var correct in new[] { true, false })
         {
-            var body = new ManagedBody(caller, [new(0, [Store(local, correct ? 7UL : 8UL), Initialize(local), new ManagedReturn(12, local)])]);
+            var body = new ManagedBody(caller, [new(0, [Other(local), Store(local, correct ? 7UL : 8UL), Initialize(local), new ManagedReturn(12, local)])]);
             var recovered = new TemplateRecovery(types, caller, Summary, new(types, caller, Summary)).Run(body,
                 new Dictionary<Variable, PendingConstruction> { [local.Variable] = new(8, type, parent) }, 0);
             check.Equal(correct, recovered.Holes.Count == 0 && recovered.Body.Blocks.SelectMany(b => b.Statements)
