@@ -140,10 +140,10 @@ internal sealed partial class BodyBuilder
     /// </summary>
     private void StoreTo(Location place, Sym bits, ulong address, List<ManagedStatement> output)
     {
-        if (Leafwise(bits, place.Type))
+        if (Leafwise(bits, place.Type) && oracle.FieldValues(bits, (DefinitionRef)place.Type) is { } fields)
         {
-            foreach (var (field, type, offset) in oracle.Fields((DefinitionRef)place.Type))
-                StoreTo(place with { Path = [.. place.Path, field], Type = type }, values.Syms.Slice(bits, offset * 8, oracle.StorageBits(type)), address, output);
+            foreach (var (projection, part) in fields)
+                StoreTo(place with { Path = [.. place.Path, .. projection.Path], Type = projection.Type }, part, address, output);
             return;
         }
         var destination = LocationValue(place, address, store: true);

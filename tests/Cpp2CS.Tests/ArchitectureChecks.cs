@@ -606,6 +606,13 @@ internal static class ArchitectureChecks
             "整数打包的覆盖证明不将引用按整数位读取");
         check.True(types.IntegerPieces(padded) is null && types.IntegerPieces(overlap) is null,
             "整数打包拒绝填充与重叠字段");
+        var assembled = oracle.Aggregate(values.Syms.Concat([values.Syms.Const(0, 64), values.Syms.Const(0x80000000_3f800000, 64)]), nested);
+        check.True(assembled is { Whole: null, Fields.Count: 2 } && assembled.Fields[0].Projection.Bit == 64
+            && assembled.Fields[1].Value is ConstSym { Value: 0x80000000 }, "结构体组合计划保留嵌套浮点位型与负零");
+        check.True(oracle.Aggregate(values.Syms.Const(1, 32), pair) is null, "不足的位不能组成完整字段");
+        var undefined = oracle.Aggregate(values.Syms.Concat([values.Syms.Const(0, 32), values.Syms.Undef(32)]), pair);
+        check.True(undefined is { Fields.Count: 1 } && undefined.Fields[0].Value is UndefSym,
+            "组合计划只省略已知零，未定义位继续交给下降报洞");
     }
 
     private static void ConstructorStoreOrder(Assertions check, ManagedTypes types)

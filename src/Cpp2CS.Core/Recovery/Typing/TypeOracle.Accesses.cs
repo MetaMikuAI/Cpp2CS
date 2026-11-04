@@ -147,10 +147,6 @@ public sealed partial class TypeOracle
     /// <summary>以该语句为读取处的整体读取。</summary>
     public IReadOnlyList<ReadSym> WholeReadsAt(Stmt statement) => wholeReadSites.GetValueOrDefault(statement) ?? [];
 
-    /// <summary>值类型的直接实例字段：字段、类型与相对值起点的字节偏移。</summary>
-    public IEnumerable<(FieldRef Field, TypeRef Type, int Offset)> Fields(DefinitionRef structure) =>
-        types.Fields(structure).Select(f => (f.Path[0], f.Type, f.Bit / 8));
-
     /// <summary>值在机器上的存储位宽。</summary>
     public int StorageBits(TypeRef type) => types.StorageBits(type);
 

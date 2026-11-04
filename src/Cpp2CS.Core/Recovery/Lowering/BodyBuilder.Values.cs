@@ -16,7 +16,7 @@ internal sealed partial class BodyBuilder
     private ManagedValue View(Sym sym, TypeRef? expected, ulong address)
     {
         sym = SymTable.Resolve(sym);
-        if (expected is DefinitionRef structure && types.Kind(expected) == TypeKind.Struct && sym is not ConcatSym && Bits(sym))
+        if (expected is DefinitionRef structure && types.Kind(expected) == TypeKind.Struct && sym is not ConcatSym && oracle.BitRepresentation(sym))
             return StructBits(sym, structure, address);
         if (sym is not LocalSym && locals.TryGetValue(sym, out var known)) return Coerce(known, expected, address);
         switch (sym)
@@ -288,37 +288,9 @@ internal sealed partial class BodyBuilder
     /// </summary>
     private ManagedValue StructBits(Sym bits, DefinitionRef structure, ulong address)
     {
-        if (oracle.WholeRead(bits, structure) is { } whole) return View(whole, structure, address);
-        return StructLeaves(bits, structure, address) is { } leaves ? Composed(structure, leaves, address)
-            : Hole(address, $"值 {structure} 超出位宽 {bits.Width}", structure);
-    }
-
-    /// <summary>没有自然结构体类型、按位片解释的值：拼接、常量与标量原子。</summary>
-    private bool Bits(Sym sym) => sym is ConcatSym or ConstSym
-        || oracle.TypeOf(sym) is { } natural && types.Kind(natural) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer;
-
-    /// <summary>位片组成的结构体值的非零叶子；位宽不足时为 null。为零的叶子由 initobj 给出。</summary>
-    private List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>? StructLeaves(Sym bits, DefinitionRef structure, ulong address)
-    {
-        var leaves = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
-        foreach (var projection in types.Fields(structure))
-        {
-            var field = projection.Path[0];
-            var type = projection.Type;
-            if (!projection.Fits(bits.Width)) return null;
-            var part = values.Syms.Slice(bits, projection.Bit, projection.Width);
-            if (SymTable.Resolve(part) is ConstSym { Value: 0 }) continue;
-            if (type is DefinitionRef nested && types.Kind(type) == TypeKind.Struct && Bits(SymTable.Resolve(part)))
-            {
-                // 已有整体值保留为字段值；其余位片仍按叶子交给构造函数证明。
-                if (oracle.WholeRead(part, nested) is { } whole) leaves.Add(([field], View(whole, type, address)));
-                else if (StructLeaves(part, nested, address) is { } inner)
-                    leaves.AddRange(inner.Select(l => ((IReadOnlyList<FieldRef>)[field, .. l.Path], l.Value)));
-                else return null;
-            }
-            else leaves.Add(([field], View(part, type, address)));
-        }
-        return leaves;
+        if (oracle.Aggregate(bits, structure) is not { } plan) return Hole(address, $"值 {structure} 超出位宽 {bits.Width}", structure);
+        if (plan.Whole is { } whole) return View(whole, structure, address);
+        return Composed(structure, plan.Fields.Select(f => (f.Projection.Path, View(f.Value, f.Projection.Type, address))).ToList(), address);
     }
 
     /// <summary>
@@ -328,11 +300,8 @@ internal sealed partial class BodyBuilder
     /// </summary>
     private bool Leafwise(Sym bits, TypeRef type)
     {
-        bits = SymTable.Resolve(bits);
-        if (type is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct || !Bits(bits)
-            || types.Size(structure) * 8 > bits.Width || oracle.WholeRead(bits, structure) is not null) return false;
-        var hidden = types.Leaves(structure).Any(l => l.Path.Any(f => !this.fields.Accessible(f, f.DeclaringType))
-            && SymTable.Resolve(values.Syms.Slice(bits, l.Offset * 8, oracle.LeafBits(l.Type))) is not ConstSym { Value: 0 });
+        if (type is not DefinitionRef structure || oracle.FieldStores(bits, type) is not { } leaves) return false;
+        var hidden = leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType)));
         return hidden && !templates.CanConstructValue(structure);
     }
 
