@@ -121,12 +121,21 @@ public sealed record RuntimeOp(OpKind Kind, object? Operand)
     public override string ToString() => Operand is null ? Kind.ToString() : $"{Kind}<{Operand}>";
 }
 
+/// <summary>调用点的逻辑身份；路径复制产生新身份，保留原身份作为来源。</summary>
+public sealed class CallSite(CallSite? origin = null)
+{
+    public CallSite? Origin { get; } = origin;
+}
+
 /// <summary>
 /// 调用。Arguments/Results 在提升时为空，由 ABI 阶段根据被调用者签名填入；
 /// 提升阶段只描述控制转移本身。
 /// </summary>
 public sealed record Call(ulong Address, CallKind Kind, Expr Target) : Stmt(Address)
 {
+    public CallSite Site { get; init; } = new();
+    /// <summary>同一次调用的改写保留 Site；复制到另一控制路径时使用独立身份。</summary>
+    public Call Duplicate() => this with { Site = new(Site) };
     public Expr[] Arguments { get; init; } = [];
     /// <summary>Arguments 尾部各项读自的存储单元；L2 运行时操作可省略原始实参的存储身份。</summary>
     public Storage[] Sources { get; init; } = [];

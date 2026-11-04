@@ -32,6 +32,7 @@ internal static class ArchitectureChecks
             "含共享类型参数的引用仍按 AAPCS64 指针传递");
         Convergence(checks, types);
         Identities(checks, types);
+        CallIdentities(checks);
         EntryKinds(checks, facts, types);
         Templates(checks, types);
         Accessors(checks, types);
@@ -64,6 +65,20 @@ internal static class ArchitectureChecks
         StackGuards(checks, facts);
         Verdicts(checks);
         return checks.Finish("架构边界");
+    }
+
+    private static void CallIdentities(Assertions check)
+    {
+        var call = new Call(0, CallKind.Direct, Expr.C(4, 64));
+        var other = new Call(0, CallKind.Direct, Expr.C(4, 64));
+        check.True(!ReferenceEquals(call.Site, other.Site), "来源地址和操作数相同不代表同一次调用");
+        check.True(ReferenceEquals(call.Site, (call with { Kind = CallKind.Indirect }).Site), "原调用的改写保留调用点身份");
+        var copy = call.Duplicate();
+        check.True(!ReferenceEquals(call.Site, copy.Site) && ReferenceEquals(copy.Site.Origin, call.Site),
+            "路径复制有独立身份并保留来源");
+        var syms = new SymTable();
+        check.True(!ReferenceEquals(syms.Result(call, 0, 64), syms.Result(other, 0, 64)),
+            "同地址的不同调用不能共享结果原子");
     }
 
     private static void AssembledPieces(Assertions check)

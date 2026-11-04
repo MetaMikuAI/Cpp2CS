@@ -63,9 +63,9 @@ internal static class PathSplitting
                 from.Statements.Add(new Define(phi.Address, phi.Target, phi.Sources[j] is { } source ? new Use(source, phi.Target.Width) : new Unknown("φ 来源缺失", phi.Target.Width)));
             foreach (var statement in body)
             {
-                if (statement is not Call { Defines.Length: > 0 } call) { from.Statements.Add(statement); continue; }
+                if (statement is not Call call) { from.Statements.Add(statement); continue; }
                 var fresh = call.Defines.Select(d => d is null ? null! : d with { Version = versions[d.Storage]++ }).ToArray();
-                var copy = call with { Defines = fresh };
+                var copy = call.Duplicate() with { Defines = fresh };
                 from.Statements.Add(copy);
                 for (var r = 0; r < fresh.Length; r++)
                     if (call.Defines[r] is { } original)

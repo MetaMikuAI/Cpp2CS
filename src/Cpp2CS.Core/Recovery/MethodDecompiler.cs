@@ -171,13 +171,14 @@ public sealed class MethodDecompiler
             environment.Layout = layout;
             var promoted = ValueModel.Build(function, environment);
             if (DispatchResolution.Run(function, promoted, new TypeOracle(types, facts, method, environment.Shape, promoted, layout)) == 0) break;
-            // 内存提升保持块与调用的次序；只带回已证明的分派目标，其他产物重新计算。
+            // 事实按调用点身份带回，不依赖改写后调用的排列次序。
+            var targets = function.Blocks.SelectMany(b => b.Statements).OfType<Call>()
+                .Where(c => c.Resolved is not null).ToDictionary(c => c.Site, c => c.Resolved);
             for (var b = 0; b < function.Blocks.Count; b++)
             {
-                var calls = function.Blocks[b].Statements.OfType<Call>().ToArray();
-                var next = 0;
                 for (var i = 0; i < unpromoted[b].Length; i++)
-                    if (unpromoted[b][i] is Call call) unpromoted[b][i] = call with { Resolved = calls[next++].Resolved };
+                    if (unpromoted[b][i] is Call call && targets.TryGetValue(call.Site, out var target))
+                        unpromoted[b][i] = call with { Resolved = target };
                 function.Blocks[b].Statements = [.. unpromoted[b].Select(s => s is Phi phi ? phi with { Sources = [.. phi.Sources] } : s)];
             }
             function.Dead.RemoveRange(deadCount, function.Dead.Count - deadCount);
