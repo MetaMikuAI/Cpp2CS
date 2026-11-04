@@ -200,9 +200,9 @@ internal static class IdiomPipeline
                 state.Symbols(rgctx: true);
             }
         });
-        state.Passes.Run("idioms.SplitClassGuards", () =>
+        state.Passes.Run("idioms.OnceGuards", () =>
         {
-            if (state.SplitClassGuards())
+            while (state.OnceGuards())
                 state.Cleanup();
         });
         state.Passes.Run("idioms.FiniteConditions.Simplify", () =>

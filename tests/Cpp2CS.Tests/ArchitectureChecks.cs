@@ -83,8 +83,7 @@ internal static class ArchitectureChecks
         PhiLoadWidths(checks, facts);
         FloatingOperands(checks, facts, types);
         StackGuards(checks, facts);
-        InitializationSnapshots(checks);
-        LayoutReloads(checks);
+        OnceGuards(checks, facts);
         Verdicts(checks);
         return checks.Finish("架构边界");
     }
@@ -492,8 +491,26 @@ internal static class ArchitectureChecks
             "组成值只观察目标范围内的位");
     }
 
-    private static void LayoutReloads(Assertions check)
+    /// <summary>幂等初始化守卫：两臂归一到守卫处的内存内容后相同，才只保留初始化一臂。</summary>
+    private static void OnceGuards(Assertions check, ProgramFacts facts)
     {
+        var type = new GenericParameterRef("T", true, 0);
+        var klass = new Symbol(SymbolKind.Class, type);
+        Expr Flag() => new Binary(BinOp.And, new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassBitflags1, 64), 64), 8), Expr.C(1, 8), 8);
+        var result = new Variable(Storage.Gpr(0), 1);
+        Call Initialize() => new(16, CallKind.Direct, Expr.C(128, 64))
+            { Op = new(OpKind.InitClass, type), Arguments = [klass], Defines = [result], Results = [Storage.Gpr(0)] };
+        bool Fold(Block head, Block initialize, Block? skip, Block merge)
+        {
+            var blocks = skip is null ? new List<Block> { head, initialize, merge } : [head, initialize, skip, merge];
+            MachineFunction.AddEdge(head, skip ?? merge);
+            MachineFunction.AddEdge(head, initialize);
+            if (skip is not null) MachineFunction.AddEdge(skip, merge);
+            MachineFunction.AddEdge(initialize, merge);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 56, CodeRegion.Managed, default), Blocks = blocks };
+            function.Renumber();
+            return new IdiomState(new IdiomRewriter(facts), function).OnceGuards();
+        }
         foreach (var variant in new[] { "diamond", "triangle", "different-size", "side-effect" })
         {
             var head = new Block(0);
@@ -501,36 +518,20 @@ internal static class ArchitectureChecks
             var skip = new Block(32);
             var merge = new Block(48);
             var triangle = variant != "diamond";
-            var type = new GenericParameterRef("T", true, 0);
-            var klass = new Symbol(SymbolKind.Class, type);
             var before = new Variable(Storage.Gpr(20), 1);
-            var result = new Variable(Storage.Gpr(0), 1);
             var after = new Variable(Storage.Gpr(21), 1);
             var joined = new Variable(Storage.Gpr(22), 1);
             Expr Size(Expr subject, int offset = RuntimeLayout.ClassStackSlotSize) => new Ir.Convert(ConvKind.ZeroExtend,
                 new Load(new Binary(BinOp.Add, subject, Expr.C((ulong)offset, 64), 64), 32), 64);
             var read = new Define(0, before, Size(klass, variant == "different-size" ? RuntimeLayout.ClassStackSlotSize + 4 : RuntimeLayout.ClassStackSlotSize));
-            var flag = new Binary(BinOp.And, new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassBitflags1, 64), 64), 8), Expr.C(1, 8), 8);
-            head.Statements = [new Branch(4, new Compare(Cond.Ne, flag, Expr.C(0, 8)), triangle ? merge.Start : skip.Start, initialize.Start)];
+            head.Statements = [new Branch(4, new Compare(Cond.Ne, Flag(), Expr.C(0, 8)), triangle ? merge.Start : skip.Start, initialize.Start)];
             if (triangle) head.Statements.Insert(0, read);
             else skip.Statements = [read, new Jump(36, merge.Start)];
-            initialize.Statements = [new Call(16, CallKind.Direct, Expr.C(128, 64))
-                { Op = new(OpKind.InitClass, type), Arguments = [klass], Defines = [result], Results = [Storage.Gpr(0)] },
-                new Define(20, after, Size(new Use(result, 64))), new Jump(24, merge.Start)];
+            initialize.Statements = [Initialize(), new Define(20, after, Size(new Use(result, 64))), new Jump(24, merge.Start)];
             if (variant == "side-effect") initialize.Statements.Insert(2, new Store(22, new FrameAddress(-8), Expr.C(1, 64)));
             merge.Statements = [new Phi(48, joined, [before, after]), new Return(52) { Value = new Use(joined, 64) }];
-            MachineFunction.AddEdge(head, triangle ? merge : skip);
-            MachineFunction.AddEdge(head, initialize);
-            if (!triangle) MachineFunction.AddEdge(skip, merge);
-            MachineFunction.AddEdge(initialize, merge);
-            var function = new MachineFunction { Entry = 0, Range = new(0, 56, CodeRegion.Managed, default),
-                Blocks = triangle ? [head, initialize, merge] : [head, initialize, skip, merge] };
-            check.Equal(variant is "diamond" or "triangle", ClassLayoutReloads.Run(function), $"类布局重读的合流路径 {variant}");
+            check.Equal(variant is "diamond" or "triangle", Fold(head, initialize, triangle ? null : skip, merge), $"类布局重读的合流路径 {variant}");
         }
-    }
-
-    private static void InitializationSnapshots(Assertions check)
-    {
         foreach (var variant in new[] { "low", "whole", "overwritten", "stale-alias" })
         {
             var head = new Block(0);
@@ -553,16 +554,11 @@ internal static class ArchitectureChecks
                 head.Statements.Add(new Define(2, alias, new Use(old, 128)));
                 fastValue = new Use(alias, 128);
             }
-            head.Statements.Add(new Branch(4, Expr.C(1, 1), 8, 16));
+            head.Statements.Add(new Branch(4, new Compare(Cond.Ne, Flag(), Expr.C(0, 8)), 8, 16));
             fast.Statements = [new Define(8, saved, fastValue), new Jump(12, 24)];
-            slow.Statements = [new Define(16, reloaded, new Ir.Convert(ConvKind.ZeroExtend, new Load(field, 32), 128)), new Jump(20, 24)];
+            slow.Statements = [Initialize(), new Define(16, reloaded, new Ir.Convert(ConvKind.ZeroExtend, new Load(field, 32), 128)), new Jump(20, 24)];
             merge.Statements = [new Phi(24, joined, [saved, reloaded]), new Return(28) { Value = new Use(joined, variant == "whole" ? 128 : 32) }];
-            var function = new MachineFunction { Entry = 0, Range = new(0, 32, CodeRegion.Managed, default), Blocks = [head, fast, slow, merge] };
-            MachineFunction.AddEdge(head, fast);
-            MachineFunction.AddEdge(head, slow);
-            MachineFunction.AddEdge(fast, merge);
-            MachineFunction.AddEdge(slow, merge);
-            check.Equal(variant == "low", MetadataGuardSnapshots.Equivalent(function, head, [slow], [fast], merge), $"初始化重读的观察位 {variant}");
+            check.Equal(variant == "low", Fold(head, slow, fast, merge), $"初始化重读的观察位 {variant}");
         }
     }
 

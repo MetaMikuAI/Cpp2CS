@@ -14,9 +14,8 @@ internal static class NormalizePass
             if (state.KnownMetadataGuards())
                 state.Cleanup();
             // 类型检查先于抛异常检查：castclass / as 后判空的失败一侧是只抛异常的块
-            var changed = state.SplitMetadataGuards();
-            changed |= state.Guards();
-            changed |= state.RetainMetadataPath();
+            var changed = state.Guards();
+            changed |= state.OnceGuards();
             changed |= state.TypeChecks();
             changed |= state.Checks();
             changed |= state.CheckedTypeChains();
