@@ -63,6 +63,8 @@ public sealed class IdiomResult
     public List<TemplateInstance> Instances { get; } = [];
     public Dictionary<Template, int> Hits { get; } = new();
     public List<Residual> Residuals { get; } = [];
+    /// <summary>形态已命中、但证明没有成立的规则，用于把下游的洞归因到第一处拒绝。</summary>
+    public List<Cpp2CS.Diagnostics.RuleRejection> Rejections { get; } = [];
     public List<string> Errors { get; } = [];
     public List<PassStep> Passes { get; } = [];
     /// <summary>本函数守卫中初始化的槽位、读取的槽位、守卫字节地址。</summary>

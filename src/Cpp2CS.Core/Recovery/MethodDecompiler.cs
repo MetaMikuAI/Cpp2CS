@@ -93,8 +93,12 @@ public sealed class MethodDecompiler
     {
         if (!Analyze(method, entry).TryGet(out var analysis, out var failure))
             return new(method, entry, null, [new(failure.Address, failure.Reason)]);
-        return Lower(analysis);
+        return Lower(analysis) with { Rejections = Attribution(analysis.Idioms) };
     }
+
+    /// <summary>L2 留下的归因线索：证明被拒绝的规则，以及没有归一的运行时痕迹。</summary>
+    private static Cpp2CS.Diagnostics.RuleRejection[] Attribution(IdiomResult idioms) => idioms.Rejections
+        .Concat(idioms.Residuals.Select(r => new Cpp2CS.Diagnostics.RuleRejection("residual", r.Address, r.Category))).ToArray();
 
     /// <summary>类型与下降。</summary>
     public MethodRecoveryResult Lower(MethodAnalysis analysis)

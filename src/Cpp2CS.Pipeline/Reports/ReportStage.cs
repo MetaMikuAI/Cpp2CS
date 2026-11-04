@@ -86,6 +86,7 @@ internal static class ReportStage
                     platformImport = result.PlatformImport,
                     accessorProof = accessorProof(result),
                     holes = result.Holes.Select(h => new { address = $"0x{h.Address:x}", reason = h.Reason, derived = h.Derived, code = h.Code, category = h.Category, id = h.Id, causeId = h.CauseId }),
+                    rejections = result.Body is null ? result.Rejections.Select(r => new { rule = r.Rule, address = $"0x{r.Address:x}", reason = r.Reason }) : null,
                     emitProblem = emitProblems.GetValueOrDefault(result),
                     partial = partialEmitted.Contains(result),
                     statements = result.Body?.Blocks.Sum(b => b.Statements.Count),

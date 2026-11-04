@@ -6,6 +6,9 @@ public enum RewriteStatus { NoMatch, Blocked, Applied, Conflict }
 /// <summary>规则证据只描述已检查的条件，不等同于执行验证。</summary>
 public sealed record RuleEvidence(string Rule, IReadOnlyList<ulong> Sources, IReadOnlyList<string> Conditions);
 
+/// <summary>规则已识别候选但证明不成立：规则名稳定，原因说明缺少的事实或失败的步骤。</summary>
+public sealed record RuleRejection(string Rule, ulong Address, string Reason);
+
 public sealed record RuleTrace(string Rule, ulong Site, RewriteStatus Status, string? Code, string? Detail, RuleEvidence? Evidence);
 
 /// <summary>候选识别与改写提交分开；拒绝携带稳定编号和具体说明。</summary>

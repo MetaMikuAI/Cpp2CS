@@ -29,6 +29,8 @@ internal sealed class IdiomState(IdiomRewriter owner, MachineFunction function)
     public IdiomResult Result { get; } = new();
     private Cpp2CS.Machine.Algebra.PassList? passes;
     internal Cpp2CS.Machine.Algebra.PassList Passes => passes ??= new(function, Result.Passes);
+    /// <summary>记录形态已命中、证明未成立的规则；不改变恢复结果。</summary>
+    internal void Reject(string rule, ulong address, string reason) => Result.Rejections.Add(new(rule, address, reason));
     internal IEnumerable<Stmt> All => this.function.Blocks.Where(b => !this.removed.Contains(b)).SelectMany(b => b.Statements);
 
     /// <summary>块内的一个执行位置：第 Index 条语句之前、地址 Address 的指令之前（传播删去的定义按地址排入）。</summary>

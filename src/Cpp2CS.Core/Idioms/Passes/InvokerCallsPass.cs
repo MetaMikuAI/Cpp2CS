@@ -23,7 +23,11 @@ internal static class InvokerCallsPass
                 var native = state.self is { } self ? (MethodRef)GenericContext.Instantiate(method, self)! : method;
                 var signature = state.owner.abi.Invoker(native);
                 if (ManagedAbi.SharedValue(native.Concrete(native.Method.ReturnType))
-                    || signature.Indirections.Any(a => a.Size <= 0 && !ManagedAbi.SharedValue(a.Type))) continue;
+                    || signature.Indirections.Any(a => a.Size <= 0 && !ManagedAbi.SharedValue(a.Type)))
+                {
+                    state.Reject("invoker.signature", call.Address, "返回值或按址实参的大小未知");
+                    continue;
+                }
                 Expr Offset(Expr value, int offset) => offset == 0 ? value : Fold.Simplify(new Binary(BinOp.Add, value, Expr.C((ulong)offset, 64), 64));
                 var inputs = new List<Expr>();
                 var proofs = new List<SharedInvokerArguments.Proof>();
@@ -34,7 +38,12 @@ internal static class InvokerCallsPass
                     if (ManagedAbi.SharedValue(native.Concrete(native.Method.Parameters[parameter].Type)))
                     {
                         var proof = SharedInvokerArguments.Prove(state, block, call, arguments, parameter, method.Concrete(method.Method.Parameters[parameter].Type));
-                        if (proof is null) { valid = false; break; }
+                        if (proof is null)
+                        {
+                            state.Reject("invoker.shared-argument", call.Address, $"实参 {parameter} 的私有副本来源未证明");
+                            valid = false;
+                            break;
+                        }
                         proofs.Add(proof);
                         inputs.Add(proof.Value);
                     }

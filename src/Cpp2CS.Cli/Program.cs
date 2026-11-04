@@ -26,6 +26,7 @@ internal static class Program
             ["recover", var binary, var metadata, var output, .. var options] => RecoverCommand.Run(binary, metadata, output, options),
             ["inspect", var binary, var metadata, .. var options] when options.Length > 0 => Inspect.Run(binary, metadata, options),
             ["source-project", var assembly, var output] => SourceProject(assembly, output),
+            ["holes", var run, .. var options] => HoleCensus.Run(run, options),
             _ => Usage(),
         };
     }
@@ -49,6 +50,8 @@ internal static class Program
                                                                       --fact-cache-file 文件：显式固定事实快照，输入变化仍会失效；用于重构前后对比。
                   cpp2cs inspect <libil2cpp.so> <global-metadata.dat> <十六进制入口|方法清单>... [--fact-cache-file 文件]
                                                                       逐层打印方法的恢复产物
+                  cpp2cs holes <恢复输出目录> [--top N]
+                                                                      按归一后的原因汇总未恢复方法，并统计拒绝规则与运行时痕迹
                   cpp2cs source-project <程序集.dll> <输出目录>
                                                                       将已有程序集按项目目录导出 C#，依赖从程序集所在目录解析。
             """);
