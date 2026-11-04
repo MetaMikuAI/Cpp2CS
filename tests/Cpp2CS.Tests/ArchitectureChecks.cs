@@ -274,6 +274,22 @@ internal static class ArchitectureChecks
             check.True(normalized.Op is { Kind: OpKind.InvokeGeneric, Operand: MethodRef } && normalized.Defines.Length == 0
                 && normalized.Arguments.Take(3).All(a => a is Load { Width: 64 }), "拆包读取参数槽，不提前读取标量内容或伪造返回寄存器");
         }
+        var instance = MethodRef.Open(Method(owner, "Instance", 772));
+        instance.Method.Parameters = definition.Parameters;
+        instance.Method.ReturnType = definition.ReturnType;
+        var instanceEntity = new Symbol(SymbolKind.Method, instance);
+        var receiver = new Variable(Storage.Gpr(20), 1);
+        var invocation = new Call(8, CallKind.Indirect, new Load(new Binary(BinOp.Add, instanceEntity, Expr.C(RuntimeLayout.MethodInvoker, 64), 64), 64))
+        {
+            Arguments = [new Load(instanceEntity, 64), instanceEntity, new Use(receiver, 64), new FrameAddress(-32), new FrameAddress(-8)],
+            Sources = Enumerable.Range(0, 5).Select(Storage.Gpr).ToArray(),
+        };
+        var retained = new Block(0) { Statements = [new Define(0, receiver, new Load(Expr.C(128, 64), 64)),
+            new Call(4, CallKind.Direct, Expr.C(256, 64)), invocation, new Return(12)] };
+        var receiverFunction = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [retained] };
+        var receiverState = new IdiomState(new IdiomRewriter(facts), receiverFunction);
+        check.True(receiverState.InvokerCalls() && retained.Statements.OfType<Call>().Single(c => c.Op?.Kind == OpKind.InvokeGeneric)
+            .Arguments[0] == new Use(receiver, 64), "invoker 接收者保留原值，不能跨调用重新读取字段");
     }
 
     private static void SharedInvokerCopies(Assertions check, ProgramFacts facts, ManagedTypes types)
@@ -288,7 +304,7 @@ internal static class ArchitectureChecks
         var abi = new ManagedAbi(facts.Layouts);
         check.True(abi.Invoker(self).Arguments[0] is { Size: -1, Transfer: Transfer.Copy },
             "共享泛型副本保留未知尺寸，不能退化为指针宽度的值");
-        foreach (var variant in new[] { "private", "wrong-size", "missing-input", "read-slot", "escape-slot", "intervening-call" })
+        foreach (var variant in new[] { "private", "null-check", "wrong-size", "missing-input", "read-slot", "escape-slot", "intervening-call" })
         {
             var head = new Block(0);
             var reference = new Block(64);
@@ -318,12 +334,14 @@ internal static class ArchitectureChecks
             if (variant == "read-slot") join.Statements.Add(new Define(96, new(Storage.Gpr(23), 1), new Load(array, 64)));
             if (variant == "escape-slot") join.Statements.Add(new Store(96, input, array));
             if (variant == "intervening-call") join.Statements.Insert(2, new Call(86, CallKind.Direct, Expr.C(0, 64)));
+            if (variant == "null-check") join.Statements.Insert(2, new Call(86, CallKind.Direct, Expr.C(0, 64))
+                { Op = new(OpKind.NullCheck, null), Arguments = [Expr.C(1, 64)] });
             MachineFunction.AddEdge(head, join); MachineFunction.AddEdge(head, reference); MachineFunction.AddEdge(reference, join);
             var function = new MachineFunction { Entry = 0, Range = new(0, 100, CodeRegion.Managed, default), Blocks = [head, reference, join] };
             function.Renumber();
             var state = new IdiomState(new IdiomRewriter(facts), function) { self = self };
             var proof = SharedInvokerArguments.Prove(state, join, invoke, array, 0, type);
-            check.Equal(variant == "private", proof?.Value == input, $"共享泛型私有副本证明：{variant}");
+            check.Equal(variant is "private" or "null-check", proof?.Value == input, $"共享泛型私有副本证明：{variant}");
         }
     }
 

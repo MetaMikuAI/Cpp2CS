@@ -17,8 +17,8 @@ internal static class InvokerCallsPass
                 if (block.Statements[i] is not Call { Op: null, Kind: CallKind.Indirect } call
                     || state.defs.Expand(call.Target) is not Load { Width: 64 } target
                     || SplitPass.Split(target.Address) is not (Symbol { Kind: SymbolKind.Method, Value: MethodRef method } entity, RuntimeLayout.MethodInvoker)) continue;
-                Expr? Input(int register) => call.ArgumentIndex(Storage.Gpr(register)) is var index && index >= 0
-                    ? state.defs.Expand(call.Arguments[index]) : null;
+                Expr? Actual(int register) => call.ArgumentIndex(Storage.Gpr(register)) is var index && index >= 0 ? call.Arguments[index] : null;
+                Expr? Input(int register) => Actual(register) is { } input ? state.defs.Expand(input) : null;
                 if (Input(0) != new Load(entity, 64) || Input(1) != entity
                     || Input(2) is not { } receiver || Input(3) is not { } arguments || Input(4) is not { } output) continue;
                 var native = state.self is { } self ? (MethodRef)GenericContext.Instantiate(method, self)! : method;
@@ -29,7 +29,7 @@ internal static class InvokerCallsPass
                 var inputs = new List<Expr>();
                 var proofs = new List<SharedInvokerArguments.Proof>();
                 var valid = true;
-                if (!method.Method.IsStatic) inputs.Add(receiver);
+                if (!method.Method.IsStatic) inputs.Add(Actual(2)!);
                 for (var parameter = 0; parameter < method.Method.Parameters.Count; parameter++)
                 {
                     if (ManagedAbi.SharedValue(native.Concrete(native.Method.Parameters[parameter].Type)))

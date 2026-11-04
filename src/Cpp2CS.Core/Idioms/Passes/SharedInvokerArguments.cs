@@ -90,7 +90,7 @@ internal static class SharedInvokerArguments
         var copyBlock = state.function.Blocks.Single(b => b.Statements.Contains(copy));
         if (!Dominators.Compute(state.function).Dominates(copyBlock.Index, block.Index)) return null;
         if (Previous(copyBlock, copyBlock.Statements.IndexOf(copy), selectedReference) is not { } saved || Expand(saved.Value) != selectedValue) return null;
-        // 副本之后到调用之间只允许局部搬运；其他调用可能改变原形参或使私有副本逃逸。
+        // 空值检查不观察私有副本；其他调用可能改变原形参或使副本逃逸。
         var visited = new HashSet<Block>();
         bool ReachesCopy(Block current, int end)
         {
@@ -99,7 +99,8 @@ internal static class SharedInvokerArguments
             {
                 var statement = current.Statements[i];
                 if (ReferenceEquals(statement, copy)) return true;
-                if (statement is Call || statement is Store store && Expand(store.Target) is not FrameAddress) return false;
+                if (statement is Call other && other.Op?.Kind != OpKind.NullCheck
+                    || statement is Store store && Expand(store.Target) is not FrameAddress) return false;
             }
             return current.Predecessors.Count > 0 && current.Predecessors.All(p => ReachesCopy(p, p.Statements.Count));
         }
