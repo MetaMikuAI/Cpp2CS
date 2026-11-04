@@ -217,7 +217,6 @@ internal sealed partial class TemplateRecovery
     private bool ConcludeContinuation(InlineMatch match, MethodRef method, ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks)
     {
         if (match.Ends.Count == 0) return match.Fail("模板没有返回路径");
-        if (match.Ends.Any(e => e.Returns)) return match.Fail("返回路径与续接路径混合");
         var isVoid = ManagedTypes.IsVoid(method.Method.ReturnType);
         var returnType = method.Concrete(method.Method.ReturnType);
         if (!isVoid && match.Ends.Any(e => e.Result is null)) return match.Fail("返回路径没有返回值");
@@ -250,14 +249,28 @@ internal sealed partial class TemplateRecovery
                 var evaluated = match.Covered.SelectMany(p => ManagedValues.Edges(blocks[p.Block].Statements[p.Index])).SelectMany(e => e.Copies)
                     .Where(c => c.Target.Variable == target.Variable).Select(c => c.Value);
                 if (!LiveAt(body, blocks, exit.Block, exit.Index, target.Variable) && (!isEdge || evaluated.All(NonThrowingInlineValue))) continue;
-                // 与返回值无关的部分表示成调用后的内存：一条路径沿用读过的值，另一条路径重新读取时是同一个项。
-                var function = Enumerable.Range(0, ends.Count).OrderBy(i => ends[i].Result is ConstantValue ? 1 : 0)
-                    .Select(i => Current(Abstract(held[i], Pairs(ends[i]), match), ends[i])).First();
+                var abstracted = Enumerable.Range(0, ends.Count).OrderBy(i => ends[i].Result is ConstantValue ? 1 : 0)
+                    .Select(i => Abstract(held[i], Pairs(ends[i]), match)).First();
                 // 与返回值无关的区域内定义由保存副本与区域外使用的检查处理。
-                if (!isEdge && (result is null || !Mentions(function, result)) && !ReadsCurrent(function)) continue;
+                var mentioned = result is not null && Mentions(abstracted, result);
                 var trial = new Dictionary<int, ManagedValue>(match.Binding);
-                for (var i = 0; i < ends.Count; i++)
-                    if (!Unify(Current(Instantiate(function, Pairs(ends[i])), ends[i]), Current(held[i], ends[i]), trial)) { match.Fail("出口复制在各路径上不同"); return null; }
+                bool Agree(ManagedValue candidate, Func<ManagedValue, InlineEnd, ManagedValue> view) =>
+                    Enumerable.Range(0, ends.Count).All(i => Unify(view(Instantiate(candidate, Pairs(ends[i])), ends[i]), view(held[i], ends[i]), trial));
+                var function = abstracted;
+                // 先按读到的值比较；不同时表示成调用后的内存：一条路径沿用读过的值，另一条路径重新读取时是同一个项。
+                if (!isEdge && !mentioned)
+                {
+                    var current = Enumerable.Range(0, ends.Count).OrderBy(i => ends[i].Result is ConstantValue ? 1 : 0).Select(i => Current(abstracted, ends[i])).First();
+                    var same = Enumerable.Range(0, ends.Count).All(i => SameTerm(held[i], held[0]));
+                    if (same || !ReadsCurrent(current) || !Agree(current, Current)) continue;
+                    function = current;
+                }
+                else if (!Agree(abstracted, (value, _) => value))
+                {
+                    trial = new(match.Binding);
+                    function = Enumerable.Range(0, ends.Count).OrderBy(i => ends[i].Result is ConstantValue ? 1 : 0).Select(i => Current(abstracted, ends[i])).First();
+                    if (!Agree(function, Current)) { match.Fail("出口复制在各路径上不同"); return null; }
+                }
                 foreach (var (key, value) in trial) match.Binding[key] = value;
                 if (result is not null && Mentions(function, result)) used = true;
                 copies.Add((target, function));
@@ -476,7 +489,6 @@ internal sealed partial class TemplateRecovery
         Func<InlineEnd, IReadOnlyList<(ManagedValue Actual, ManagedValue Carrier)>> pairs)
     {
         string Exits() => string.Join(", ", match.Ends.Select(e => $"0x{e.Exit.Block:x}+{e.Exit.Index}"));
-        if (match.Ends.Any(e => e.Returns)) return match.Fail("返回路径与续接路径混合");
         var kept = match.Ends.OrderByDescending(e => e.Epoch).First();
         var trails = match.Ends.ToDictionary(e => e, e => Trail(blocks, e.Exit));
         (ulong Block, int Index)? join = trails[kept].Select(p => ((ulong Block, int Index)?)p).FirstOrDefault(p => trails.Values.All(t => t.Contains(p!.Value)));

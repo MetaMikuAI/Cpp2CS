@@ -75,6 +75,8 @@ internal sealed partial class TemplateRecovery
         public HashSet<(ulong Block, int Index)> Covered { get; } = [];
         /// <summary>区域内可能抛出的语句所在的块：只有它们受异常区域约束。</summary>
         public HashSet<ulong> Raising { get; } = [];
+        /// <summary>调用方的显式判空：被判空的项与模板此刻解引用过的项。</summary>
+        public List<(ManagedValue Actual, ManagedValue[] Dereferenced)> NullChecks { get; } = [];
         /// <summary>夹在模板写入之间的调用方写入，以及它之前已比对过的调用与检查数。</summary>
         public List<(ulong Block, int Index, int Effects)> Interleaved { get; } = [];
         /// <summary>区域内已比对的调用与检查：夹在其间的写入不能越过它们。</summary>
@@ -375,6 +377,11 @@ internal sealed partial class TemplateRecovery
             if (entryLocals.TryGetValue(variable, out var local)) match.Inputs.Add((value, local));
         var callee = new Walker { Blocks = template.Blocks.ToDictionary(b => b.Address), Caller = false, Block = template.Blocks[0].Address, Index = 0 };
         var matched = Explore(callee, caller, match, 0) && ConcludeExit(match, template.Method, body, callerBlocks);
+        if (matched && match.NullChecks.Any(c => !c.Dereferenced.Any(d => SameTerm(Bind(d, match.Binding), c.Actual))))
+        {
+            matched = false;
+            match.Fail("调用方的判空对应不到模板的解引用");
+        }
         lastProgress = match.Covered.Count;
         if (matched) return match;
         failure = match.Failure ?? "比对失败";
@@ -573,19 +580,14 @@ internal sealed partial class TemplateRecovery
         MethodArguments = method.MethodArguments.Select(t => t.Substitute(arguments, [])).ToArray(),
     };
 
+    /// <summary>形参可能还没有绑定，这里只记下判空的项和模板此刻解引用过的项，比对结束后按最终绑定核对。</summary>
     private bool AbsorbedNullCheck(ManagedCheck check, Walker callee, Walker caller, InlineMatch match)
     {
         if (check.Exception.DeclaringType is not DefinitionRef { Definition.FullName: "System.NullReferenceException" }
             || check.Condition is not ComparisonValue { Condition: Cond.Eq, Right: ConstantValue { Bits: 0 }, Left: var tested }
             || Term(caller, tested) is not { } actual) return false;
-        foreach (var dereferenced in callee.Dereferenced)
-        {
-            var trial = new Dictionary<int, ManagedValue>(match.Binding);
-            if (!Same(dereferenced, actual, caller, trial)) continue;
-            foreach (var (key, value) in trial) match.Binding[key] = value;
-            return true;
-        }
-        return false;
+        match.NullChecks.Add((actual, callee.Dereferenced.ToArray()));
+        return true;
     }
 
     private void Cover(Walker caller, InlineMatch match)
