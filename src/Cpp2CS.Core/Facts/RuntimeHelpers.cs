@@ -28,6 +28,8 @@ public enum HelperKind
     IsInst,
     /// <summary>dmb ish：内存屏障（Thread.MemoryBarrier / volatile）。</summary>
     MemoryBarrier,
+    /// <summary>__chkstk 栈探测;不产生 IL</summary>
+    StackProbe,
     /// <summary>以 C++ 异常 Il2CppExceptionWrapper 抛出 x0 中的托管异常对象（重新抛出，不更新堆栈）。</summary>
     Rethrow,
     /// <summary>__clang_call_terminate：开始捕获后调用 std::terminate。</summary>
@@ -268,6 +270,8 @@ public sealed partial class RuntimeHelpers
         if (words.Length <= 10 && LoadsOffset(body, RuntimeLayout.FieldParent, 4) && LoadsOffset(body, RuntimeLayout.FieldOffset, 4) && calls.Length == 0)
             return (HelperKind.FieldAddress, null, $"?? FieldInfo+0x{RuntimeLayout.FieldOffset:x} offset ??????(????????)");
         // il2cpp_codegen_object_new：读取 Il2CppClass.instance_size，调用 GC 分配并写入 klass。
+        if (words is [0xf9400a51, 0xeb2f73f0, 0x9a9033f0, ..])
+            return (HelperKind.StackProbe, null, "__chkstk 风格栈探测");
         if (LoadsOffset(body, RuntimeLayout.ClassInstanceSize, 64) && calls.Length >= 2)
             return (HelperKind.ObjectNew, null, $"?? Il2CppClass+0x{RuntimeLayout.ClassInstanceSize:x} instance_size ??????");
         // __cxa_throw 一类异常核心：以 brk 结束且不返回；优先保留已有的异常类型字符串。

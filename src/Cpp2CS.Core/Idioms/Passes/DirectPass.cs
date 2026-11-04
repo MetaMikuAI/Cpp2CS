@@ -51,6 +51,7 @@ internal static class DirectPass
             HelperKind.GetException => (OpKind.NewException, helper.Detail, []),
             HelperKind.Rethrow => (OpKind.Rethrow, null, [Arg(0)]),
             HelperKind.MemoryBarrier => (OpKind.MemoryBarrier, null, []),
+            HelperKind.StackProbe => (OpKind.StackProbe, null, []),
             HelperKind.CompareExchangeReference => (OpKind.CompareExchangeReference, null, [Arg(0), Arg(1), Arg(2)]),
             HelperKind.Terminate => (OpKind.Terminate, null, []),
             HelperKind.UnwindResume => (OpKind.ResumeUnwind, null, [Arg(0)]),

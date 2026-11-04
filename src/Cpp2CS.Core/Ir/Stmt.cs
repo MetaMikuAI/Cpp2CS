@@ -75,6 +75,8 @@ public enum OpKind : byte
     /// <summary>托管引用写入后的写屏障；对应的 Store 紧邻其前。</summary>
     WriteBarrier,
     MemoryBarrier,
+    /// <summary>__chkstk 栈探测;不产生 IL</summary>
+    StackProbe,
     /// <summary>接口方法查找：Arguments 为（对象, 接口类, 槽位），结果为 VirtualInvokeData*。</summary>
     InterfaceInvokeData,
     /// <summary>经 vtable 槽位的虚调用；Operand 为槽位号。</summary>

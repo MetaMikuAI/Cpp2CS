@@ -196,7 +196,7 @@ public static class RuntimeOps
             },
         };
         // GC 写屏障由托管写入承担；元数据与 RGCTX 初始化不单独写出。
-        foreach (var kind in new[] { OpKind.WriteBarrier, OpKind.InitClass, OpKind.InitMethodRgctx })
+        foreach (var kind in new[] { OpKind.WriteBarrier, OpKind.InitClass, OpKind.InitMethodRgctx, OpKind.StackProbe })
             yield return new(kind) { Behavior = EffectSummary.None, Lower = None };
         yield return new(OpKind.MemoryBarrier)
         {
