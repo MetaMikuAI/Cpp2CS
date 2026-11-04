@@ -10,7 +10,7 @@ namespace Cpp2CS.Recovery.Values;
 /// 移位、掩码、插入、提取、零扩展、截断与位转换只重排片；按位运算与低位算术可以推到片上；
 /// φ 的一段在至少一条入边上恰是一个 IL 值时，投影为该段的 φ。
 /// </summary>
-public sealed class SymTable
+public sealed partial class SymTable
 {
     private readonly Dictionary<Sym, Sym> interned = [];
     private readonly Dictionary<(Call, int), ResultSym> results = [];

@@ -48,6 +48,7 @@ internal static class ArchitectureChecks
         LowBitArithmetic(checks);
         PackedPhiSlices(checks);
         JoinedPhiSlices(checks);
+        AssembledPieces(checks);
         CleanupDispatch(checks);
         PromotedDelegates(checks, facts, types);
         MathImports(checks, types);
@@ -63,6 +64,22 @@ internal static class ArchitectureChecks
         StackGuards(checks, facts);
         Verdicts(checks);
         return checks.Finish("架构边界");
+    }
+
+    private static void AssembledPieces(Assertions check)
+    {
+        var syms = new SymTable();
+        var whole = syms.Arg(0, 64);
+        check.True(ReferenceEquals(whole, syms.Assemble(64, [(32, syms.Slice(whole, 32, 32)), (0, syms.Slice(whole, 0, 32))])),
+            "ABI 位片按偏移重组，与枚举次序无关");
+        check.True(ReferenceEquals(whole, syms.Assemble(64, [(0, syms.Slice(whole, 0, 48)), (32, syms.Slice(whole, 32, 32))])),
+            "一致的重叠来源可以组成完整值");
+        check.True(syms.Assemble(64, [(0, whole), (32, syms.Arg(1, 32))]) is UnknownSym,
+            "重叠来源不一致时拒绝按次序覆盖");
+        var missing = syms.Assemble(64, [(32, syms.Slice(whole, 32, 32))]);
+        check.True(syms.Slice(missing, 0, 32) is UndefSym, "缺少的 ABI 位片保留未定义");
+        check.True(ReferenceEquals(syms.Slice(whole, 16, 32), syms.Assemble(32, [(-16, whole)])),
+            "组成值只观察目标范围内的位");
     }
 
     private static void StackGuards(Assertions check, ProgramFacts facts)

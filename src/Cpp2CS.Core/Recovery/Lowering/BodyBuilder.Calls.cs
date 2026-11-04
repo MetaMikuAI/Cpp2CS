@@ -25,7 +25,7 @@ internal sealed partial class BodyBuilder
             holes.Add(new(call.Address, "调用 目标或签名未知"));
             return call.Kind is CallKind.Tail or CallKind.TailIndirect ? new Statement(new ManagedHole(call.Address, "调用 尾调用", true)) : null;
         }
-        var contents = signature.Arguments.Select(v => Content(call, v, arguments)).ToArray();
+        var contents = signature.Arguments.Select(v => values.ArgumentContent(call, v, arguments)).ToArray();
         var callee = oracle.Callee(call);
         if (callee is null)
         {
@@ -129,41 +129,6 @@ internal sealed partial class BodyBuilder
             ? new ConstantValue(0, type, Width(type)) : null;
     }
 
-    /// <summary>机器签名中一个值在调用处的内容：寄存器片与栈片按值中的位置拼接。</summary>
-    private Sym Content(Call call, MachineValue value, IReadOnlyList<Sym> arguments)
-    {
-        var syms = values.Syms;
-        var width = value.Transfer == Transfer.Value ? MethodEnvironment.ValueWidth(value) : 64;
-        var parts = new SortedDictionary<int, Sym>();
-        if (value.Transfer == Transfer.Value)
-        {
-            foreach (var piece in value.Pieces)
-            {
-                var position = call.ArgumentIndex(piece.Register);
-                if (position >= 0) parts[piece.Offset * 8] = syms.Slice(arguments[position], 0, Math.Min(piece.Width, arguments[position].Width));
-            }
-            foreach (var access in call.Memory.Where(m => !m.Write && m.Value == value.Index))
-                if (call.ArgumentIndex(access.Cell) is var cell and >= 0)
-                    parts[access.ValueBit] = syms.Slice(arguments[cell], access.CellBit, access.Width);
-        }
-        else if (call.ArgumentIndex(value.Pieces[0].Register) is var pointer and >= 0)
-            return arguments[pointer];
-        if (parts.Count == 0) return syms.Unknown("实参缺失", width);
-        var list = new List<Sym>();
-        var at = 0;
-        foreach (var (bit, part) in parts)
-        {
-            if (bit < at) continue;
-            if (bit > at) list.Add(syms.Undef(bit - at));
-            var size = Math.Min(part.Width, width - bit);
-            if (size <= 0) break;
-            list.Add(syms.Slice(part, 0, size));
-            at = bit + size;
-        }
-        if (at < width) list.Add(syms.Undef(width - at));
-        return syms.Concat(list);
-    }
-
     /// <summary>
     /// 一个 IL 实参。按值传递时为内容的视图；按副本传递时为被指单元在调用前的内容；
     /// ref 实参指向已提升的单元时成为局部：调用前写入原内容，调用写出的值即该局部，再取其地址。
@@ -176,7 +141,7 @@ internal sealed partial class BodyBuilder
                 return View(content, type, call.Address);
             case Transfer.Copy:
                 {
-                    var stored = CellContent(call, value, arguments, write: false);
+                    var stored = values.CellContent(call, value, arguments, write: false);
                     if (stored is not null) return View(stored, type, call.Address);
                     return SymTable.Resolve(content) is var p && oracle.Locate(p, value.Size * 8) is { } location
                         ? LocationValue(location, call.Address) : Hole(call.Address, "调用 副本实参的内容未知", type);
@@ -191,7 +156,7 @@ internal sealed partial class BodyBuilder
                     if (SymTable.Resolve(content) is LocalSym)
                     {
                         var local = NewLocal(element);
-                        if (CellContent(call, value, arguments, write: false) is { } before)
+                        if (values.CellContent(call, value, arguments, write: false) is { } before)
                             output.Add(new ManagedAssignment(call.Address, local, View(before, element, call.Address)));
                         if (call.Memory.Any(m => m.Write && m.Value == value.Index))
                             locals[values.Syms.Out(call, value.Index, value.Size * 8)] = local;
@@ -204,28 +169,6 @@ internal sealed partial class BodyBuilder
             default:
                 return Hole(call.Address, $"调用 实参传递方式 {value.Transfer}", type);
         }
-    }
-
-    /// <summary>调用读取的单元中属于 value 的内容。</summary>
-    private Sym? CellContent(Call call, MachineValue value, IReadOnlyList<Sym> arguments, bool write)
-    {
-        var accesses = call.Memory.Where(m => m.Write == write && m.Value == value.Index).OrderBy(m => m.ValueBit).ToArray();
-        if (accesses.Length == 0) return null;
-        var syms = values.Syms;
-        var parts = new List<Sym>();
-        var at = 0;
-        var width = accesses[0].ValueWidth;
-        foreach (var access in accesses)
-        {
-            if (access.ValueBit < at) continue;
-            if (access.ValueBit > at) parts.Add(syms.Undef(access.ValueBit - at));
-            var position = call.ArgumentIndex(access.Cell);
-            if (position < 0) return null;
-            parts.Add(syms.Slice(arguments[position], access.CellBit, access.Width));
-            at = access.ValueBit + access.Width;
-        }
-        if (at < width) parts.Add(syms.Undef(width - at));
-        return syms.Concat(parts);
     }
 
     private Terminator? LowerRuntime(Block block, int index, Call call, RuntimeOp op, IReadOnlyList<Sym> arguments, List<ManagedStatement> output)

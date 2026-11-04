@@ -163,19 +163,6 @@ internal sealed partial class BodyBuilder
         if (ManagedTypes.IsVoid(type)) return null;
         if (ret.Pieces.Length == 0) return Hole(ret.Address, "返回 返回值缺失", type);
         var width = analysis.Signature.Return is { } r ? MethodEnvironment.ValueWidth(r) : Width(type);
-        var bits = new Sym?[width];
-        var parts = new List<Sym>();
-        var at = 0;
-        foreach (var (piece, sym) in ret.Pieces.Zip(operands.Skip(ret.Value is null ? 0 : 1)).OrderBy(p => p.First.Offset))
-        {
-            var start = piece.Offset * 8;
-            if (start > at) parts.Add(values.Syms.Undef(start - at));
-            if (start < at) continue;
-            var size = Math.Min(sym.Width, width - start);
-            parts.Add(values.Syms.Slice(sym, 0, size));
-            at = start + size;
-        }
-        if (at < width) parts.Add(values.Syms.Undef(width - at));
-        return View(values.Syms.Concat(parts), type, ret.Address);
+        return View(values.ReturnContent(ret, operands, width), type, ret.Address);
     }
 }
