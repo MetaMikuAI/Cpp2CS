@@ -62,8 +62,8 @@ internal sealed class MemoryPromotion
     {
         var promotion = new MemoryPromotion(function, signature, shapes, abi);
         promotion.TrimUnusedCallStacks();
+        if (Machine.Storage.FrameForwarding.Run(function, new CallMemoryEffects(shapes, abi, settled: true))) Propagate.Run(function, Dominators.Compute(function));
         var layout = promotion.Partition();
-        while (promotion.ForwardPointerSpills(layout)) layout = promotion.Partition();
         if (layout.Cells.Count == 0) return layout;
         if (signature.Return is { Transfer: Transfer.ResultBuffer } && layout.Cells.Any(c => c.Space == LocalSpace.Result && !c.Promoted))
             return RecoveryDiagnostics.Fail(function.Entry, "内存 结果缓冲区的地址逃逸：" + string.Join("；", layout.Cells
@@ -144,31 +144,6 @@ internal sealed class MemoryPromotion
             cells.Add(Make(cells.Count, group.Key, start, end, escape));
         }
         return new MemoryLayout(cells);
-    }
-
-    /// <summary>私有单写栈槽中的局部指针副本：写入支配全部读取且调用不访问该槽时，读回即原指针。</summary>
-    private bool ForwardPointerSpills(MemoryLayout layout)
-    {
-        var dominators = Dominators.Compute(function);
-        var sites = function.Blocks.SelectMany(b => b.Statements.Select((s, i) => (Block: b, Index: i, Statement: s))).ToArray();
-        foreach (var cell in layout.Cells.Where(c => c.Space == LocalSpace.Frame && c.Promoted && c.Size == 8))
-        {
-            bool At(Expr address) => Resolve(address) is var (space, offset) && space == cell.Space && offset == cell.Start;
-            var stores = sites.Where(s => s.Statement is Store store && At(store.Target)).ToArray();
-            if (stores is not [var site] || site.Statement is not Store { Value.Width: 64 } written || Resolve(written.Value) is null) continue;
-            if (sites.Select(s => s.Statement).OfType<Call>().SelectMany(Effects)
-                .Any(e => e.Space == cell.Space && e.Offset < cell.End && cell.Start < e.Offset + Math.Max(1, e.Size))) continue;
-            var reads = sites.SelectMany(s => ExprMap.Operands(s.Statement).SelectMany(ExprMap.Walk).OfType<Load>()
-                .Where(l => At(l.Address)).Select(l => (Site: s, Load: l))).ToArray();
-            if (reads.Any(r => r.Load.Width != 64 || !dominators.Dominates(site.Block.Index, r.Site.Block.Index)
-                || site.Block == r.Site.Block && site.Index >= r.Site.Index)) continue;
-            foreach (var block in function.Blocks)
-                for (var i = 0; i < block.Statements.Count; i++)
-                    block.Statements[i] = ReferenceEquals(block.Statements[i], written) ? new Nop(written.Address, "私有指针副本")
-                        : ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e, v => v is Load { Width: 64 } load && At(load.Address) ? written.Value : null));
-            return true;
-        }
-        return false;
     }
 
     private static Cell Make(int id, LocalSpace space, long start, long end, string? escape) =>

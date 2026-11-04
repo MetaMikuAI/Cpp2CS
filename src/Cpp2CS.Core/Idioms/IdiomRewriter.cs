@@ -97,6 +97,10 @@ public sealed class IdiomRewriter(ProgramFacts facts)
     internal readonly Cpp2CS.Machine.Lifting.FactsCallModel calls = new(facts, new Arm64Machine(facts.Code).Convention);
     private Cpp2CS.Facts.Derived.NativeCalleeFacts? nativeCallees;
     internal Cpp2CS.Facts.Derived.NativeCalleeFacts NativeCallees => nativeCallees ??= new(facts, RecoverUnusedInputs);
+    private Cpp2CS.Recovery.Calls.CallShapes? shapes;
+    internal Cpp2CS.Recovery.Calls.CallShapes Shapes => shapes ??= new(facts, abi, (_, _) => false);
+    private Cpp2CS.Recovery.Calls.CallMemoryEffects? callEffects;
+    internal Cpp2CS.Recovery.Calls.CallMemoryEffects CallEffects => callEffects ??= new(Shapes.Of, abi);
     internal bool UnusedInput(ulong entry, Storage register) => NativeCallees.UnusedInput(entry, register);
     internal bool UnusedResultBuffer(ulong entry) => NativeCallees.UnusedResultBuffer(entry);
 

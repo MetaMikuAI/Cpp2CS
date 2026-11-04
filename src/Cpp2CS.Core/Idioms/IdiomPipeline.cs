@@ -32,6 +32,10 @@ internal static class IdiomPipeline
             state.Cleanup();
         }
 
+        state.Passes.Run("idioms.FrameForwarding", () =>
+        {
+            state.Cleanup();
+        });
         state.Passes.Run("idioms.CountCalls", () =>
         {
             state.CountCalls();
@@ -54,13 +58,6 @@ internal static class IdiomPipeline
             if (state.StringSlotChoices())
                 state.Cleanup();
         });
-        state.Passes.Run("idioms.FrameSlotPromotion.ForwardInitializationSpills", () =>
-        {
-            if (FrameSlotPromotion.ForwardCallSpills(state.function, c => c.Op is null
-                && state.owner.HelperOf(c)?.Kind is HelperKind.InitMetadata or HelperKind.ClassInit or HelperKind.InitializedTypeInfo,
-                c => c is { Kind: CallKind.Direct or CallKind.Tail, Target: Const target } && state.owner.calls.Signature(target.Value) is not null))
-                state.Cleanup();
-        });
         state.Passes.Run("idioms.Normalize", () =>
         {
             state.Normalize();
@@ -73,25 +70,6 @@ internal static class IdiomPipeline
         state.Passes.Run("idioms.Normalize", () =>
         {
             state.Normalize();
-        });
-        state.Passes.Run("idioms.FrameSlotPromotion.ForwardCallSpills", () =>
-        {
-            if (FrameSlotPromotion.ForwardCallSpills(state.function, c => c.Op is null && state.owner.HelperOf(c)?.Kind == HelperKind.InterfaceLookup))
-                state.Cleanup();
-        });
-        state.Passes.Run("idioms.PrivateFrameInputs.ForwardMetadata", () =>
-        {
-            while (PrivateFrameInputs.ForwardMetadata(state))
-            {
-                state.Cleanup();
-                state.Symbols(rgctx: true);
-                state.Normalize();
-            }
-        });
-        state.Passes.Run("idioms.FrameSlotPromotion.ForwardSingleStores", () =>
-        {
-            if (FrameSlotPromotion.ForwardSingleStores(state.function) > 0)
-                state.Cleanup();
         });
         state.Passes.Run("idioms.SharedInterfaceTails.Run", () =>
         {

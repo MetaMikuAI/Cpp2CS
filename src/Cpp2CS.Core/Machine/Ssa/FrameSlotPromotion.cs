@@ -20,77 +20,9 @@ public static class FrameSlotPromotion
 {
     private sealed record Access(long Offset, int Width, bool IsStore);
 
-    /// <summary>调用前保存、调用后原位读回的独占帧槽；调用必须已证明不会访问调用者的栈。</summary>
-    internal static bool ForwardCallSpills(MachineFunction function, Func<Call, bool> safeCall, Func<Call, bool>? explicitInputs = null)
-    {
-        var changed = false;
-        var dominators = Dominators.Compute(function);
-        foreach (var block in function.Blocks)
-            foreach (var store in block.Statements.OfType<Store>().ToArray())
-            {
-                if (store is not { Target: FrameAddress { Offset: <= -16 } frame, Value: Use or Const } || store.Value.Width != 128) continue;
-                var index = block.Statements.IndexOf(store);
-                Load? Reload(Expr value) => value switch
-                {
-                    Load { Width: 32 or 64 or 128, Address: FrameAddress read } load when read == frame => load,
-                    Ir.Convert { Kind: ConvKind.ZeroExtend } conversion => Reload(conversion.Operand),
-                    _ => null,
-                };
-                var restores = function.Blocks.SelectMany(b => b.Statements.OfType<Define>().Select(d => (Block: b, Define: d)))
-                    .Where(p => Reload(p.Define.Value) is not null).ToArray();
-                if (restores is not [var restored]) continue;
-                var restore = restored.Define;
-                if (restored.Block == block ? block.Statements.IndexOf(restore) <= index
-                    : !dominators.Dominates(block.Index, restored.Block.Index)) continue;
-                bool Exposes(Expr e) => e switch
-                {
-                    // 只接受没有别名或部分访存的独占区域；其他帧地址只允许直接读写不相交的区间。
-                    Load { Address: FrameAddress at } load => at.Offset < frame.Offset + 16 && frame.Offset < at.Offset + load.Width / 8,
-                    FrameAddress at => at.Offset <= frame.Offset + 15,
-                    _ => ExprMap.Children(e).Any(Exposes),
-                };
-                bool OtherAccess(Stmt statement)
-                {
-                    if (ReferenceEquals(statement, store) || ReferenceEquals(statement, restore)) return false;
-                    if (statement is Store { Target: FrameAddress at } write)
-                        return at.Offset < frame.Offset + 16 && frame.Offset < at.Offset + write.Value.Width / 8 || Exposes(write.Value);
-                    // 已知签名的栈实参已展开在 Arguments 中；保存的 SP 仅记录调用位置。
-                    if (statement is Call call && (safeCall(call) || explicitInputs?.Invoke(call) == true))
-                        return Exposes(call.Target) || call.Arguments.Any(Exposes) || call.DelegateReceiver is { } receiver && Exposes(receiver);
-                    return ExprMap.Operands(statement).Any(Exposes);
-                }
-                if (function.Blocks.SelectMany(b => b.Statements).Any(OtherAccess)) continue;
-                var visited = new HashSet<Block>();
-                bool SafePath(Block current, int begin)
-                {
-                    if (!visited.Add(current)) return false;
-                    foreach (var statement in current.Statements.Skip(begin))
-                    {
-                        if (ReferenceEquals(statement, restore)) return true;
-                        if (ReferenceEquals(statement, store) || statement is Call call && !safeCall(call)) return false;
-                    }
-                    return current.Successors.All(next => visited.Contains(next) && next != block || SafePath(next, 0));
-                }
-                if (!SafePath(block, index + 1)) continue;
-                var loaded = Reload(restore.Value)!;
-                restored.Block.Statements[restored.Block.Statements.IndexOf(restore)] = restore with
-                { Value = Fold.Simplify(ExprMap.Map(restore.Value, e => ReferenceEquals(e, loaded) ? Fold.Extract(store.Value, 0, loaded.Width) : null)) };
-                block.Statements.Remove(store);
-                changed = true;
-            }
-        return changed;
-    }
-
     /// <summary>改写可提升的槽，返回提升的个数（为 0 时函数不变）。</summary>
     public static int Run(MachineFunction function, Func<Call, int, int?>? argumentSize = null,
         IReadOnlyList<(long Offset, int Size)>? preserved = null, bool overlapping = false)
-        => Transform(function, argumentSize, preserved, overlapping, false);
-
-    /// <summary>转发独占标量槽中唯一且支配所有读取的保存值，保留原始写入供调用 ABI 使用。</summary>
-    internal static int ForwardSingleStores(MachineFunction function) => Transform(function, null, null, false, true);
-
-    private static int Transform(MachineFunction function, Func<Call, int, int?>? argumentSize,
-        IReadOnlyList<(long Offset, int Size)>? preserved, bool overlapping, bool forwardOnly)
     {
         var statements = function.Blocks.SelectMany(b => b.Statements).ToArray();
         var aliases = new Dictionary<Variable, long>();
@@ -201,30 +133,6 @@ public static class FrameSlotPromotion
             return Run(function, argumentSize, preserved, overlapping);
         }
         if (promoted.Count == 0) return 0;
-
-        if (forwardOnly)
-        {
-            var positions = function.Blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Block: b, Index: i)))
-                .ToDictionary(p => p.Statement, (IEqualityComparer<Stmt>)ReferenceEqualityComparer.Instance);
-            var dominators = Dominators.Compute(function);
-            var values = new Dictionary<long, Expr>();
-            foreach (var (offset, width) in promoted)
-            {
-                if (width > 64 || statements.OfType<Store>().Where(s => Resolve(s.Target) == offset).ToArray()
-                    is not [var store] || store.Value is not (Use or Const)) continue;
-                var written = positions[store];
-                var reads = positions.Values.Where(p => ExprMap.Operands(p.Statement).SelectMany(ExprMap.Walk)
-                    .Any(e => e is Load l && Resolve(l.Address) == offset));
-                if (reads.Any(p => p.Block == written.Block ? p.Index <= written.Index
-                    : !dominators.Dominates(written.Block.Index, p.Block.Index))) continue;
-                values[offset] = store.Value;
-            }
-            Expr? Forward(Expr e) => e is Load l && Resolve(l.Address) is { } offset && values.TryGetValue(offset, out var value) ? value : null;
-            foreach (var block in function.Blocks)
-                for (var i = 0; i < block.Statements.Count; i++)
-                    block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e, Forward));
-            return values.Count;
-        }
 
         var slots = accesses.Where(a => promoted.Any(p => a.Offset >= p.Key && a.Offset + a.Width / 8 <= p.Key + p.Value / 8))
             .Select(a => a.Offset).Distinct().ToDictionary(o => o, o => promoted.Single(p => o >= p.Key && o < p.Key + p.Value / 8).Key);

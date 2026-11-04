@@ -6,6 +6,7 @@ using Cpp2CS.Idioms;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Algebra;
+using Cpp2CS.Machine.Storage;
 using Cpp2CS.Output;
 using Cpp2CS.Recovery;
 using Cpp2CS.Recovery.Inlining;
@@ -42,7 +43,7 @@ internal static class ArchitectureChecks
         InvokerArguments(checks, facts, types);
         SharedInvokerCopies(checks, facts, types);
         GenericValueChecks(checks, facts, types);
-        MethodInfoSpills(checks, facts);
+        FrameForwards(checks, facts);
         StackBoxes(checks, facts, types);
         PartialScalarCells(checks, facts, types);
         UnusedCallStacks(checks, facts, types);
@@ -150,7 +151,7 @@ internal static class ArchitectureChecks
     private static void StackBoxes(Assertions check, ProgramFacts facts, ManagedTypes types)
     {
         var definition = new TypeDef { Index = 800, Assembly = "Tests.dll", Namespace = "Tests", Name = "State", Token = 0,
-            Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = true };
+            Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = true, BaseType = new DefinitionRef(types.CorlibDefinition("System.Enum")!, []) };
         var type = new DefinitionRef(definition, []);
         var method = new MethodRef(types.CorlibDefinition("System.Enum")!.Methods.Single(m => m.Name == "ToString" && m.Parameters.Count == 0), [], []);
         var abi = new ManagedAbi(facts.Layouts);
@@ -171,8 +172,8 @@ internal static class ArchitectureChecks
             MachineFunction.AddEdge(entry, left); MachineFunction.AddEdge(entry, right);
             MachineFunction.AddEdge(left, last); MachineFunction.AddEdge(right, last);
             var function = new MachineFunction { Entry = 0, Range = new(0, 32, CodeRegion.Managed, default), Blocks = [entry, left, right, last] };
-            var changed = StackBoxingPass.Run(function, c => ReferenceEquals(c, call) ? [method] : [],
-                c => ReferenceEquals(c, call) ? abi.Machine(method, out _) : null, e => e, _ => 4, () => new(Storage.Temp(800), 1));
+            CallShape Shape(Call c) => new(c, ReferenceEquals(c, call) ? [method] : [], ReferenceEquals(c, call) ? abi.Machine(method, out _) : null);
+            var changed = StackBoxingPass.Run(function, new CallMemoryEffects(Shape, abi), Shape, _ => 4, () => new(Storage.Temp(800), 1));
             return changed && last.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.Box
                 && c.Arguments[1] == new FrameAddress(-16)) && last.Statements.OfType<Store>().Count() >= 2;
         }
@@ -415,18 +416,16 @@ internal static class ArchitectureChecks
         }
     }
 
-    private static void MethodInfoSpills(Assertions check, ProgramFacts facts)
+    /// <summary>私有栈槽的保存与读回：每条路径都到达同值的完整写入才转发。</summary>
+    private static void FrameForwards(Assertions check, ProgramFacts facts)
     {
-        foreach (var variant in new[] { "private", "metadata-size", "mutable-field", "overwritten", "escaped", "before-save" })
+        var effects = new CallMemoryEffects(new CallShapes(facts, new ManagedAbi(facts.Layouts), (_, _) => false).Of, new ManagedAbi(facts.Layouts));
+        foreach (var variant in new[] { "private", "mutable-field", "overwritten", "escaped", "before-save" })
         {
-            var methodInfo = Storage.Gpr(3);
-            var input = new Use(new Variable(methodInfo, 0), 64);
+            var input = new Use(new Variable(Storage.Gpr(3), 0), 64);
             var slot = new FrameAddress(-16);
             var loaded = new Variable(Storage.Temp(870), 1);
-            Expr initial = variant == "metadata-size"
-                ? new Ir.Convert(ConvKind.ZeroExtend, new Load(new Binary(BinOp.Add,
-                    new Symbol(SymbolKind.Class, new GenericParameterRef("T", true, 0)), Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32), 64)
-                : variant == "mutable-field" ? new Load(new Binary(BinOp.Add, input, Expr.C(16, 64), 64), 64) : input;
+            Expr initial = variant == "mutable-field" ? new Load(new Binary(BinOp.Add, input, Expr.C(16, 64), 64), 64) : input;
             var saved = new Store(0, slot, initial);
             var read = new Define(8, loaded, new Load(slot, 64));
             var statements = new List<Stmt> { saved, read, new Return(12) { Pieces = [new(0, new Use(loaded, 64))] } };
@@ -434,8 +433,34 @@ internal static class ArchitectureChecks
             if (variant == "escaped") statements.Insert(1, new Store(4, new Use(new Variable(Storage.Gpr(1), 0), 64), slot));
             if (variant == "before-save") (statements[0], statements[1]) = (read, saved);
             var function = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [new(0) { Statements = statements }] };
-            var state = new IdiomState(new IdiomRewriter(facts), function) { selfMethodInfo = methodInfo };
-            check.Equal(variant is "private" or "metadata-size", PrivateFrameInputs.ForwardMetadata(state), $"不可变输入私有保存 {variant}");
+            var forwarded = FrameForwarding.Run(function, effects)
+                && function.Blocks[0].Statements.OfType<Define>().Any(d => d.Target == loaded && d.Value is not Load);
+            check.Equal(variant is "private" or "overwritten" ? 1 : 0, forwarded ? 1 : 0, $"私有栈槽转发 {variant}");
+            if (variant == "overwritten")
+                check.True(function.Blocks[0].Statements.OfType<Define>().Any(d => d.Target == loaded && d.Value is Const { Value: 0 }), "转发取到达读取的写入");
+        }
+        foreach (var variant in new[] { "conditional", "unknown-call", "escaped" })
+        {
+            var head = new Block(0);
+            var initialize = new Block(8);
+            var merge = new Block(16);
+            var input = new Variable(Storage.Vec(0), 0);
+            var result = new Variable(Storage.Vec(1), 1);
+            var frame = new FrameAddress(-32);
+            head.Statements = [new Store(0, frame, new Use(input, 128)), new Branch(4, Expr.C(1, 1), 8, 16)];
+            initialize.Statements = [new Call(8, CallKind.Direct, Expr.C(64, 64))
+            { Op = variant == "unknown-call" ? null : new(OpKind.RunClassConstructor, null), StackPointer = frame,
+                Arguments = variant == "escaped" ? [frame] : [] }, new Jump(12, 16)];
+            merge.Statements = [new Define(16, result, new Ir.Convert(ConvKind.ZeroExtend, new Load(frame, 32), 128)),
+                new Return(20) { Value = new Use(result, 32) }];
+            var function = new MachineFunction { Entry = 0, Range = new(0, 24, CodeRegion.Managed, default), Blocks = [head, initialize, merge] };
+            MachineFunction.AddEdge(head, initialize);
+            MachineFunction.AddEdge(head, merge);
+            MachineFunction.AddEdge(initialize, merge);
+            function.Renumber();
+            var forwarded = FrameForwarding.Run(function, effects);
+            // 栈地址没有传给调用时，未解析的调用也看不到私有槽。
+            check.Equal(variant != "escaped", forwarded, $"私有向量保存跨调用 {variant}");
         }
     }
 
@@ -593,28 +618,6 @@ internal static class ArchitectureChecks
             MachineFunction.AddEdge(fast, merge);
             MachineFunction.AddEdge(slow, merge);
             check.Equal(variant == "low", MetadataGuardSnapshots.Equivalent(function, head, [slow], [fast], merge), $"初始化重读的观察位 {variant}");
-        }
-        foreach (var variant in new[] { "conditional", "unknown-call", "escaped" })
-        {
-            var head = new Block(0);
-            var initialize = new Block(8);
-            var merge = new Block(16);
-            var input = new Variable(Storage.Vec(0), 0);
-            var result = new Variable(Storage.Vec(1), 1);
-            var frame = new FrameAddress(-32);
-            head.Statements = [new Store(0, frame, new Use(input, 128)), new Branch(4, Expr.C(1, 1), 8, 16)];
-            initialize.Statements = [new Call(8, CallKind.Direct, Expr.C(64, 64))
-            { Op = variant == "unknown-call" ? null : new(OpKind.RunClassConstructor, null), StackPointer = frame,
-                Arguments = variant == "escaped" ? [frame] : [] }, new Jump(12, 16)];
-            merge.Statements = [new Define(16, result, new Ir.Convert(ConvKind.ZeroExtend, new Load(frame, 32), 128)),
-                new Return(20) { Value = new Use(result, 32) }];
-            var function = new MachineFunction { Entry = 0, Range = new(0, 24, CodeRegion.Managed, default), Blocks = [head, initialize, merge] };
-            MachineFunction.AddEdge(head, initialize);
-            MachineFunction.AddEdge(head, merge);
-            MachineFunction.AddEdge(initialize, merge);
-            function.Renumber();
-            check.Equal(variant == "conditional", Cpp2CS.Machine.Ssa.FrameSlotPromotion.ForwardCallSpills(function,
-                c => c.Op?.Kind == OpKind.RunClassConstructor), $"私有向量保存跨初始化路径 {variant}");
         }
     }
 
@@ -1513,7 +1516,7 @@ internal static class ArchitectureChecks
             var signature = new MachineSignature([], null, null, 0);
             var result = Cpp2CS.Recovery.Memory.MemoryPromotion.Run(function, signature, c => new(c, [], callee),
                 new ManagedAbi(facts.Layouts), lifter.Calls, lifter.Machine.Convention.StackPointer);
-            check.True(result.TryGet(out var layout, out _) && layout.Cells.Single().Promoted == (variant == "registers")
+            check.True(result.TryGet(out var layout, out _) && layout.Cells.All(c => c.Promoted) == (variant == "registers")
                 && (function.EntryBlock.Statements.OfType<Call>().Single().StackPointer is null) == (variant == "registers"),
                 $"调用栈指针按完整签名保留 {variant}");
         }

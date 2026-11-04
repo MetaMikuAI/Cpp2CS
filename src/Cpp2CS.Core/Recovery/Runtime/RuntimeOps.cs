@@ -498,6 +498,10 @@ public static class RuntimeOps
                     [new PointerEffect(0, 0, (int)count.Value, MemoryAccess.Write), new PointerEffect(1, 1, (int)count.Value, MemoryAccess.Read)],
                 { Op.Operand: "memset", Arguments: [_, _, Ir.Const { Value: > 0 and <= 4096 } length] } =>
                     [new PointerEffect(0, 0, (int)length.Value, MemoryAccess.Write)],
+                // 长度未知的库函数只访问实参指向的内存，返回后不保留地址。
+                { Op.Operand: "memcpy" or "memmove", Arguments.Length: 3 } =>
+                    [new PointerEffect(0, 0, -1, MemoryAccess.Write), new PointerEffect(1, 1, -1, MemoryAccess.Read)],
+                { Op.Operand: "memset", Arguments.Length: 3 } => [new PointerEffect(0, 0, -1, MemoryAccess.Write)],
                 _ => [],
             },
         };
