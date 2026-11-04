@@ -60,21 +60,25 @@ internal static class ExceptionNormalization
         || pad.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.ResumeUnwind)
             && pad.Statements.All(s => s is Nop or Define { Value: Intrinsic { Name: "eh_exception" } } or Call { Op.Kind: OpKind.ResumeUnwind });
 
-    /// <summary>落地链上的语句：φ、跳转、空语句，常量或异常值的定义。</summary>
-    private static bool Passing(Stmt statement) => statement is Phi or Jump or Nop or Define { Value: Const or Intrinsic { Name: "eh_exception" } };
+    /// <summary>落地链上的语句：φ、跳转、空语句，异常值或不读内存的计算。</summary>
+    private static bool Passing(Stmt statement) => statement is Phi or Jump or Nop or Define { Value: Intrinsic { Name: "eh_exception" } }
+        || statement is Define { Value: var value } && Computed(value);
 
-    /// <summary>链上的值经某条异常入边到达目标时是什么：链外的变量、要在抛出点之前定义的常量，或异常值。</summary>
+    /// <summary>只由变量和常量算出的值，在每个抛出点重新计算结果不变。</summary>
+    private static bool Computed(Expr value) => ExprMap.Walk(value).All(e => e is not (Load or Intrinsic or Unknown));
+
+    /// <summary>链上的值经某条异常入边到达目标时是什么：链外的变量、要在抛出点之前算出的值，或异常值。</summary>
     private abstract record Arrival;
     private sealed record Outside(Variable? Variable) : Arrival;
-    private sealed record Constant(Define Definition) : Arrival;
+    private sealed record Calculated(Define Definition) : Arrival;
     private sealed record Thrown(Define Definition) : Arrival;
 
     private sealed record Chain(Block[] Blocks, Block[] Throwers, Arrival[][] Values);
 
     /// <summary>
-    /// 落地链：从落地块起，只含 φ、跳转、空语句与常量或异常值定义的直线路径，后续块只从前一块进入，止于第一个其他块（目标）。
-    /// clang 为调用点生成的跳板、在共享处理体之前装载常量的入口都是这样的链。收缩后抛出点的异常边直接指向目标：
-    /// 链上的 φ 按每条异常入边代入来源，常量在抛出点之前定义，异常值在目标入口取得。
+    /// 落地链：从落地块起，只含 φ、跳转、空语句、异常值与纯计算的直线路径，后续块只从前一块进入，止于第一个其他块（目标）。
+    /// clang 为调用点生成的跳板、在共享处理体之前准备 φ 输入的入口（可以是另一个落地块的前驱）都是这样的链。收缩后抛出点的异常边直接指向目标：
+    /// 链上的 φ 按每条异常入边代入来源，计算在抛出点之前进行，异常值在目标入口取得。
     /// 链上的定义只能作为目标 φ 的输入；目标中由异常值组成的 φ 要求目标的每个前驱都是给出异常值的链，否则不收缩。
     /// </summary>
     private static void ContractLandingChains(MachineFunction function)
@@ -116,9 +120,9 @@ internal static class ExceptionNormalization
                         switch (chain.Values[t][ordinary[o]])
                         {
                             case Outside outside: sources[o] = outside.Variable!; break;
-                            case Constant constant:
-                                var fresh = new Variable(new Storage(Bank.Temp, nextTemp++, constant.Definition.Target.Width), 1);
-                                thrower.Statements.Insert(insert++, new Define(constant.Definition.Address, fresh, constant.Definition.Value));
+                            case Calculated calculated:
+                                var fresh = new Variable(new Storage(Bank.Temp, nextTemp++, calculated.Definition.Target.Width), 1);
+                                thrower.Statements.Insert(insert++, new Define(calculated.Definition.Address, fresh, calculated.Definition.Value));
                                 sources[o] = fresh;
                                 break;
                         }
@@ -179,8 +183,25 @@ internal static class ExceptionNormalization
                 if (value is null || !definitions.TryGetValue(value, out var definition)) return new Outside(value);
                 switch (definition)
                 {
-                    case Define { Value: Const } constant: return new Constant(constant);
-                    case Define exception: return new Thrown(exception);
+                    case Define { Value: Intrinsic } exception: return new Thrown(exception);
+                    case Define computed:
+                        // 操作数在抛出点之前可用：链上的值逐层代入，抛出调用自身的结果在异常边上不存在。
+                        var available = true;
+                        var expression = ExprMap.Map(computed.Value, e =>
+                        {
+                            if (e is not Use use) return null;
+                            switch (Arrive(use.Variable, thrower))
+                            {
+                                case Outside { Variable: { } outside } when !Results(throwers[thrower]).Contains(outside):
+                                    return use with { Variable = outside };
+                                case Calculated { Definition.Value: var inner }:
+                                    return inner;
+                                default:
+                                    available = false;
+                                    return null;
+                            }
+                        });
+                        return available ? new Calculated(computed with { Value = expression }) : null;
                     case Phi phi: value = pad.Statements.Contains(phi) ? phi.Sources[thrower] : phi.Sources[0]; break;
                 }
             }
@@ -196,6 +217,8 @@ internal static class ExceptionNormalization
         }
         return new Chain(blocks.ToArray(), throwers, values);
     }
+
+    private static IEnumerable<Variable> Results(Block thrower) => thrower.Statements.OfType<Call>().SelectMany(c => c.Defines.OfType<Variable>());
 
     /// <summary>条件为常量的分支改为跳转，删去不可达的边。</summary>
     private static bool FoldBranches(MachineFunction function)
