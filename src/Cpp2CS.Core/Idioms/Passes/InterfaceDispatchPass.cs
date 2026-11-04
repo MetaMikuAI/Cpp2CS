@@ -86,7 +86,9 @@ internal static class InterfaceDispatchPass
             if (constant != (ulong)RuntimeLayout.VtableMethodPointer((int)slot.Value) && !(constant == (ulong)RuntimeLayout.ClassVtable && slot.Value > 0 && ExprMap.Walk(shifted.Left).Contains(Expr.C(slot.Value, 32))))
                 continue;
             var iface = state.defs.Expand(call.Arguments[1]);
-            var operand = (iface is Symbol { Kind: SymbolKind.Class } c ? c.Value : null, (int)slot.Value);
+            var ifaceValue = iface is Symbol { Kind: SymbolKind.Class } c ? c.Value : null;
+            var ifaceType = ifaceValue is DefinitionRef type ? DirectPass.LocalInterface(state, type) : ifaceValue;
+            var operand = (ifaceType, (int)slot.Value);
             var data = state.Fresh();
             var op = new Call(call.Address, CallKind.Direct, call.Target)
             {

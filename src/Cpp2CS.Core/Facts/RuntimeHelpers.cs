@@ -194,6 +194,30 @@ public sealed partial class RuntimeHelpers
     private bool LoadsOffset(ulong address, int offset, int limit = 24) =>
         Words(address, limit).Any(x => A64.IsUnsignedOffsetAccess(x.Word) && !A64.IsStore(x.Word) && (int)A64.AccessOffset(x.Word) == offset);
 
+    /// <summary>
+    /// 沿无终结指令的冷热拆分继续扫描：.pdata 可能把入口和主体拆成两个连续函数。
+    /// </summary>
+    private bool LoadsOffsetAcrossSplit(ulong address, int offset, int limit = 32)
+    {
+        var seen = new HashSet<ulong>();
+        var function = map.At(address);
+        var left = limit;
+        while (function is not null && left > 0 && seen.Add(function.Start))
+        {
+            var last = 0u;
+            for (var pc = function.Start; pc < function.End && left > 0; pc += 4, left--)
+            {
+                if (map.Word(pc) is not { } word) continue;
+                last = word;
+                if (A64.IsUnsignedOffsetAccess(word) && !A64.IsStore(word) && (int)A64.AccessOffset(word) == offset)
+                    return true;
+            }
+            if (A64.IsB(last) || A64.IsRet(last)) break;
+            function = map.At(function.End);
+        }
+        return false;
+    }
+
     private IEnumerable<ulong> CallsOf(ulong address)
     {
         var index = map.EntryIndex(address);
@@ -269,6 +293,12 @@ public sealed partial class RuntimeHelpers
             return (HelperKind.IsInst, null, $"空对象直接返回，否则调用 is_assignable_from 实现 0x{calls[0]:x}");
         if (SplitIsInst(body, out var assignable))
             return (HelperKind.IsInst, null, $"空对象直接返回，非空路径调用 is_assignable_from 实现 0x{assignable:x}");
+        // 接口分派实现：调用扫描 interfaceOffsets 的查找函数，失败后再走虚表慢路径。
+        var interfaceScan = calls.FirstOrDefault(call => LoadsOffsetAcrossSplit(call, RuntimeLayout.ClassInterfaceOffsetsCount)
+            && (LoadsOffsetAcrossSplit(call, RuntimeLayout.ClassInterfaceOffsets) || LoadsOffsetAcrossSplit(call, RuntimeLayout.ClassMethods)));
+        if (interfaceScan != 0 && calls[0] == interfaceScan
+            && !words.Any(w => A64.IsUnsignedOffsetAccess(w) && A64.IsStore(w) && A64.Rd(w) == 31 && A64.Rn(w) == 31))
+            return (HelperKind.InterfaceLookup, null, $"调用扫描 Il2CppClass+0x{RuntimeLayout.ClassInterfaceOffsetsCount:x} interfaceOffsets 的查找函数 0x{interfaceScan:x}");
         if (LoadsOffset(body, RuntimeLayout.ClassElementSize, 8) && words.Any(w => A64.IsAddImmediate64(w) && A64.AddImmediate(w) == RuntimeLayout.ArrayData))
             return (HelperKind.ArrayElementAddress, null, $"读取 Il2CppClass+0x{RuntimeLayout.ClassElementSize:x} element_size，并加数组头 0x{RuntimeLayout.ArrayData:x}");
         if (words.Length <= 10 && LoadsOffset(body, RuntimeLayout.FieldParent, 4) && LoadsOffset(body, RuntimeLayout.FieldOffset, 4) && calls.Length == 0)
