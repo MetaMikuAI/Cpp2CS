@@ -17,8 +17,7 @@ internal sealed partial class TemplateRecovery
         if (caller.Blocks[at].Statements.Take(caller.Index).Any(s => !Trackable(s))) return;
         while (chain.Count < 16)
         {
-            var predecessors = caller.Blocks.Values.Where(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == at)).ToArray();
-            if (predecessors is not [var predecessor] || !seen.Add(predecessor.Address) || predecessor.Statements.Any(s => !Trackable(s))) break;
+            if (Predecessors(caller.Blocks, at) is not [var predecessor] || !seen.Add(predecessor.Address) || predecessor.Statements.Any(s => !Trackable(s))) break;
             chain.Add(predecessor);
             at = predecessor.Address;
         }

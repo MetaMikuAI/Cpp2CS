@@ -105,20 +105,31 @@ internal sealed partial class TemplateRecovery
     {
         body = ResolveAccessors(body);
         body = InlineConstructions(body);
-        while (Pending(body).ToArray() is { Length: > 0 } pending)
+        // 一轮里失败过的语句不再重试；有证明成立时再来一轮，方法体变了可能使它成立。
+        var failed = new HashSet<ManagedStatement>(ReferenceEqualityComparer.Instance);
+        var progressed = false;
+        while (true)
         {
-            var replaced = false;
-            foreach (var candidate in pending.DistinctBy(p => (p.Block, p.Index)))
+            var pending = Pending(body).ToArray();
+            var statements = body.Blocks.ToDictionary(b => b.Address, b => b.Statements);
+            var candidates = pending.Where(p => !failed.Contains(statements[p.Block][p.Index])).Take(1).ToArray();
+            if (candidates is not [var candidate])
             {
-                if (TryInline(body, candidate) is not { } next) continue;
-                next = DeadPendingReads(next);
-                // 每次证明必须减少待证访问，终止条件不依赖方法中内联调用的数量。
-                if (Pending(next).Count() >= pending.Length) continue;
-                body = next;
-                replaced = true;
-                break;
+                if (!progressed) break;
+                progressed = false;
+                failed.Clear();
+                continue;
             }
-            if (!replaced) break;
+            var next = TryInline(body, candidate);
+            if (next is not null) next = DeadPendingReads(next);
+            // 每次证明必须减少待证访问，终止条件不依赖方法中内联调用的数量。
+            if (next is null || Pending(next).Count() >= pending.Length)
+            {
+                failed.Add(statements[candidate.Block][candidate.Index]);
+                continue;
+            }
+            body = next;
+            progressed = true;
         }
         body = DeadPendingReads(body);
         // 未证明的访问：值与写入目标都换成洞。
@@ -291,8 +302,7 @@ internal sealed partial class TemplateRecovery
         var current = anchor.Block;
         while (visited.Count < 16)
         {
-            var incoming = blocks.Values.Where(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == current)).ToArray();
-            if (incoming is not [var predecessor] || !visited.Add(predecessor.Address)) break;
+            if (Predecessors(blocks, current) is not [var predecessor] || !visited.Add(predecessor.Address)) break;
             current = predecessor.Address;
             if (predecessor.Statements.All(s => s is ManagedJump { Edge.Copies.Count: 0 })) continue;
             starts.AddRange(Enumerable.Range(0, predecessor.Statements.Count).Select(i => (current, i)));
@@ -359,6 +369,13 @@ internal sealed partial class TemplateRecovery
         }
         return Visit(body.Blocks[0].Address);
     }
+
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<IReadOnlyDictionary<ulong, ManagedBlock>, Dictionary<ulong, ManagedBlock[]>> predecessors = new();
+
+    /// <summary>调用方块的前驱（重复的边算多个）；方法体大时比对会反复查询。</summary>
+    private ManagedBlock[] Predecessors(IReadOnlyDictionary<ulong, ManagedBlock> blocks, ulong address) =>
+        predecessors.GetValue(blocks, map => map.Values.SelectMany(b => b.Statements.SelectMany(ManagedValues.Edges).Select(e => e.Target).Distinct().Select(t => (t, b)))
+            .GroupBy(p => p.t).ToDictionary(g => g.Key, g => g.Select(p => p.b).ToArray())).GetValueOrDefault(address) ?? [];
 
     /// <summary>最近一次比对覆盖的调用方语句数，用来挑选最接近成立的失败原因。</summary>
     private int lastProgress;

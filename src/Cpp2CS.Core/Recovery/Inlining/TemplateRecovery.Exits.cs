@@ -24,7 +24,7 @@ internal sealed partial class TemplateRecovery
         {
             if (caller.Current is not (ManagedJump or ManagedAssignment)) break;
             // 共享续接保留赋值作为共同终点；跳转复制逐边组合，其他入边仍保留原块。
-            continuation |= caller.Index == 0 && caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) > 1;
+            continuation |= caller.Index == 0 && Predecessors(caller.Blocks, caller.Block).Length > 1;
             if (!continuation && caller.Current is ManagedAssignment assignment && NonThrowingInlineValue(assignment.Value)
                 && caller.Index == caller.Blocks[caller.Block].Statements.Count - 2
                 && caller.Blocks[caller.Block].Statements[^1] is ManagedJump
@@ -56,7 +56,7 @@ internal sealed partial class TemplateRecovery
             caller.Index = 0;
         }
         // 返回不分是否共享：共享的返回块不进入区域，调用之后写一条同样的返回。
-        continuation |= caller.Index == 0 && caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) > 1;
+        continuation |= caller.Index == 0 && Predecessors(caller.Blocks, caller.Block).Length > 1;
         var returns = result is null && caller.Current is ManagedReturn { Value: null };
         if (result is not null && caller.Current is ManagedReturn { Value: { } returned }
             && Term(caller, returned) is { } actual)
@@ -89,7 +89,7 @@ internal sealed partial class TemplateRecovery
             if (caller.Index >= caller.Blocks[caller.Block].Statements.Count) return false;
             if (caller.Current is ManagedJump jump)
             {
-                if (caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == jump.Edge.Target)) > 1)
+                if (Predecessors(caller.Blocks, jump.Edge.Target).Length > 1)
                     return true;
                 Cover(caller, match);
                 if (!Follow(caller, jump.Edge)) return false;
