@@ -30,11 +30,12 @@ internal static class ClassLayoutReloads
             var skip = zero.Value != 0 ? fallthrough : taken;
             if (initialize.Predecessors.ToArray() is not [var parent] || parent != head || initialize.Handler != head.Handler
                 || initialize.NormalSuccessors.ToArray() is not [var merge] || initialize.IsLandingPad
-                || skip == merge || skip.Predecessors.ToArray() is not [var skipParent] || skipParent != head
-                || skip.NormalSuccessors.ToArray() is not [var skipMerge] || skipMerge != merge || skip.Handler != head.Handler || skip.IsLandingPad
                 || initialize.Statements.OfType<Call>().ToArray() is not [var call]
                 || call is not { Op.Kind: OpKind.InitClass, Arguments: [var argument], Defines: [var result] }
                 || !Equals(call.Op.Operand, type) || Expand(argument) != klass) continue;
+            if (skip != merge && (skip.Predecessors.ToArray() is not [var skipParent] || skipParent != head
+                || skip.NormalSuccessors.ToArray() is not [var skipMerge] || skipMerge != merge
+                || skip.Handler != head.Handler || skip.IsLandingPad)) continue;
             var size = new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32);
             bool Size(Expr value)
             {
@@ -44,9 +45,9 @@ internal static class ClassLayoutReloads
             var after = initialize.Statements.Skip(initialize.Statements.IndexOf(call) + 1).ToArray();
             if (initialize.Statements.Take(initialize.Statements.IndexOf(call)).Any(s => s is not Nop)
                 || !after.OfType<Define>().Any() || after.Any(s => s is not (Nop or Jump) && !(s is Define d && Size(d.Value)))
-                || skip.Statements.Any(s => s is not (Nop or Jump) && !(s is Define d && Size(d.Value)))) continue;
+                || skip != merge && skip.Statements.Any(s => s is not (Nop or Jump) && !(s is Define d && Size(d.Value)))) continue;
             var initializedEdge = merge.Predecessors.IndexOf(initialize);
-            var skippedEdge = merge.Predecessors.IndexOf(skip);
+            var skippedEdge = merge.Predecessors.IndexOf(skip == merge ? head : skip);
             if (merge.Statements.OfType<Phi>().Any(p => p.Sources.Length != merge.Predecessors.Count
                 || Expand(new Use(p.Sources[initializedEdge], p.Target.Width), result, klass)
                     != Expand(new Use(p.Sources[skippedEdge], p.Target.Width)))) continue;

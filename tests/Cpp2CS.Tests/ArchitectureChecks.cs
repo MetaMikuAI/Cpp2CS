@@ -83,6 +83,7 @@ internal static class ArchitectureChecks
         FloatingOperands(checks, facts, types);
         StackGuards(checks, facts);
         InitializationSnapshots(checks);
+        LayoutReloads(checks);
         Verdicts(checks);
         return checks.Finish("架构边界");
     }
@@ -479,6 +480,43 @@ internal static class ArchitectureChecks
         check.True(syms.Slice(missing, 0, 32) is UndefSym, "缺少的 ABI 位片保留未定义");
         check.True(ReferenceEquals(syms.Slice(whole, 16, 32), syms.Assemble(32, [(-16, whole)])),
             "组成值只观察目标范围内的位");
+    }
+
+    private static void LayoutReloads(Assertions check)
+    {
+        foreach (var variant in new[] { "diamond", "triangle", "different-size", "side-effect" })
+        {
+            var head = new Block(0);
+            var initialize = new Block(16);
+            var skip = new Block(32);
+            var merge = new Block(48);
+            var triangle = variant != "diamond";
+            var type = new GenericParameterRef("T", true, 0);
+            var klass = new Symbol(SymbolKind.Class, type);
+            var before = new Variable(Storage.Gpr(20), 1);
+            var result = new Variable(Storage.Gpr(0), 1);
+            var after = new Variable(Storage.Gpr(21), 1);
+            var joined = new Variable(Storage.Gpr(22), 1);
+            Expr Size(Expr subject, int offset = RuntimeLayout.ClassStackSlotSize) => new Ir.Convert(ConvKind.ZeroExtend,
+                new Load(new Binary(BinOp.Add, subject, Expr.C((ulong)offset, 64), 64), 32), 64);
+            var read = new Define(0, before, Size(klass, variant == "different-size" ? RuntimeLayout.ClassStackSlotSize + 4 : RuntimeLayout.ClassStackSlotSize));
+            var flag = new Binary(BinOp.And, new Load(new Binary(BinOp.Add, klass, Expr.C(RuntimeLayout.ClassBitflags1, 64), 64), 8), Expr.C(1, 8), 8);
+            head.Statements = [new Branch(4, new Compare(Cond.Ne, flag, Expr.C(0, 8)), triangle ? merge.Start : skip.Start, initialize.Start)];
+            if (triangle) head.Statements.Insert(0, read);
+            else skip.Statements = [read, new Jump(36, merge.Start)];
+            initialize.Statements = [new Call(16, CallKind.Direct, Expr.C(128, 64))
+                { Op = new(OpKind.InitClass, type), Arguments = [klass], Defines = [result], Results = [Storage.Gpr(0)] },
+                new Define(20, after, Size(new Use(result, 64))), new Jump(24, merge.Start)];
+            if (variant == "side-effect") initialize.Statements.Insert(2, new Store(22, new FrameAddress(-8), Expr.C(1, 64)));
+            merge.Statements = [new Phi(48, joined, [before, after]), new Return(52) { Value = new Use(joined, 64) }];
+            MachineFunction.AddEdge(head, triangle ? merge : skip);
+            MachineFunction.AddEdge(head, initialize);
+            if (!triangle) MachineFunction.AddEdge(skip, merge);
+            MachineFunction.AddEdge(initialize, merge);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 56, CodeRegion.Managed, default),
+                Blocks = triangle ? [head, initialize, merge] : [head, initialize, skip, merge] };
+            check.Equal(variant is "diamond" or "triangle", ClassLayoutReloads.Run(function), $"类布局重读的合流路径 {variant}");
+        }
     }
 
     private static void InitializationSnapshots(Assertions check)
