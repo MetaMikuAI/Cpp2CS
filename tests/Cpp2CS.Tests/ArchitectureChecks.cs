@@ -687,7 +687,7 @@ internal static class ArchitectureChecks
         var receiver = new ArgumentValue(0, ownerRef, 64);
         var argument = new ArgumentValue(1, types.Int32, 32);
         var saved = new LocalValue(new(Storage.Temp(840), 1), types.Int32, 32);
-        foreach (var variant in new[] { "same", "different", "addressed" })
+        foreach (var variant in new[] { "same", "different", "addressed", "shared" })
         {
             var start = new List<ManagedStatement> { new ManagedAssignment(0, saved, argument) };
             if (variant == "addressed") start.Add(new ManagedAssignment(0,
@@ -696,12 +696,14 @@ internal static class ArchitectureChecks
             start.Add(Branch(argument));
             var body = new ManagedBody(caller, [new(0, start),
                 new(16, [new ManagedStore(16, Field(receiver) with { Pending = new(16, "待证字段", true) }, zero), new ManagedJump(20, new(48, []))]),
-                new(32, [new ManagedStore(32, Field(receiver) with { Pending = new(32, "待证字段", true) }, argument), new ManagedJump(36, new(64, []))]),
+                new(32, variant == "shared"
+                    ? [new ManagedAssignment(32, saved, zero), new ManagedStore(32, Field(receiver) with { Pending = new(32, "待证字段", true) }, argument), new ManagedJump(36, new(48, []))]
+                    : [new ManagedStore(32, Field(receiver) with { Pending = new(32, "待证字段", true) }, argument), new ManagedJump(36, new(64, []))]),
                 new(48, [new ManagedAssignment(48, saved, variant == "different" ? zero : argument), new ManagedJump(52, new(64, []))]),
                 new(64, [new ManagedReturn(64, saved)])]);
             var evidence = new InlineEvidence(types, caller, Summary);
             var recovered = new TemplateRecovery(types, caller, Summary, evidence).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
-            check.Equal(variant == "same", recovered.Holes.Count == 0, $"出口重复局部赋值 {variant}");
+            check.Equal(variant is "same" or "shared", recovered.Holes.Count == 0, $"出口重复局部赋值 {variant}");
         }
     }
 
