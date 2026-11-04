@@ -37,6 +37,18 @@ public static class RuntimeLayout
         ClassBitflags2 = 0x136,
         ClassVtable = 0x138;
     /// <summary>VirtualInvokeData { methodPtr; method }。</summary>
+    /// <summary>按元数据版本选择 static_fields 偏移：6000.5 为 0xA0，6000.6+ 为 0x98。</summary>
+    public static int StaticFields(int metadataVersion) =>
+        metadataVersion >= 108 ? 0x98 : metadataVersion >= 106 ? 0xA0 : ClassStaticFields;
+
+    /// <summary>按元数据版本选择 typeHierarchy 偏移。</summary>
+    public static int TypeHierarchyOffset(int metadataVersion) =>
+        metadataVersion >= 108 ? 0xA8 : metadataVersion >= 106 ? 0xB0 : ClassTypeHierarchy;
+
+    /// <summary>按元数据版本选择 typeHierarchyDepth 偏移。</summary>
+    public static int TypeHierarchyDepthOffset(int metadataVersion) =>
+        metadataVersion >= 108 ? 0x128 : metadataVersion >= 106 ? 0x130 : ClassTypeHierarchyDepth;
+
     public const int VirtualInvokeDataSize = 0x10;
     /// <summary>Il2CppRuntimeInterfaceOffsetPair { interfaceType; offset }。</summary>
     public const int InterfaceOffsetPairSize = 0x10;

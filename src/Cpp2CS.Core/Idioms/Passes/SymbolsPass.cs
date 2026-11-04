@@ -1,4 +1,4 @@
-using Cpp2CS.Facts;
+﻿using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Ssa;
 
@@ -67,7 +67,7 @@ internal static class SymbolsPass
                 var own = basis is Use { Variable: { Version: 0 } v } && v.Storage == state.selfMethodInfo && ownDefinition is not null;
                 Symbol? found = (basis, offset) switch
                 {
-                    (Symbol { Kind: SymbolKind.Class } c, RuntimeLayout.ClassStaticFields) => new Symbol(SymbolKind.StaticFields, c.Value),
+                    (Symbol { Kind: SymbolKind.Class } c, var o) when o == (ulong)RuntimeLayout.StaticFields((int)state.facts.Model.MetadataVersion) => new Symbol(SymbolKind.StaticFields, c.Value),
                     (Symbol { Kind: SymbolKind.Method, Value: MethodRef m }, RuntimeLayout.MethodKlass) => new Symbol(SymbolKind.Class, m.DeclaringType),
                     (_, RuntimeLayout.MethodKlass) when own => new Symbol(SymbolKind.Class, GenericFormPass.GenericForm(ownDefinition!.Owner)),
                     (Symbol { Kind: SymbolKind.Method, Value: MethodRef m }, RuntimeLayout.MethodRgctxData) when rgctx => new Symbol(SymbolKind.Rgctx, TablePass.Table(m)),
