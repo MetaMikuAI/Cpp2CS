@@ -10,12 +10,15 @@ internal static class CodeMapProbe
         var value = Convert.ToUInt64(address, 16);
         Console.WriteLine($"container {model.Image.Container}, architecture {model.Image.Architecture}");
         Console.WriteLine($"at {map.At(value)?.Start:x} entry {map.IsEntry(value)} index {map.IndexOf(value)}");
+        Console.WriteLine($"noreturn {new Cpp2CS.Machine.Flow.NoReturnOracle(new Cpp2CS.Machine.Flow.Arm64Machine(map), map).IsNoReturn(value)}");
         foreach (var function in map.Functions.Where(f => f.Start + 0x40 >= value && f.Start <= value + 0x40))
             Console.WriteLine($"  {function.Start:x}..{function.End:x} {function.Region} {function.Evidence}");
         var scan = CodeScan.Run(map);
         foreach (var reference in scan.All.Where(r => r.Target == value || r.Site == value))
             Console.WriteLine($"  ref {reference.Kind} site 0x{reference.Site:x} target 0x{reference.Target:x}");
         var (registrations, _) = RegistrationReader.Read(model, builder.CodeRegistration, builder.MetadataRegistration);
+        var registered = CodeMap.Build(model.Image, registrations.Entries.Select(e => e.Address));
+        Console.WriteLine($"registered entry {registered.IsEntry(value)} noreturn {new Cpp2CS.Machine.Flow.NoReturnOracle(new Cpp2CS.Machine.Flow.Arm64Machine(registered), registered).IsNoReturn(value)}");
         foreach (var entry in registrations.Entries.Where(e => e.Address + 0x40 >= value && e.Address <= value + 0x40))
             Console.WriteLine($"  entry {entry}");
         return 0;
