@@ -44,6 +44,7 @@ internal static class ArchitectureChecks
         MethodInfoSpills(checks, facts);
         StackBoxes(checks, facts, types);
         PartialScalarCells(checks, facts, types);
+        UnusedCallStacks(checks, facts, types);
         EntryKinds(checks, facts, types);
         Templates(checks, types);
         RepeatedExitCopies(checks, types);
@@ -1375,6 +1376,31 @@ internal static class ArchitectureChecks
         var interleaved = Run(true);
         check.True(interleaved.Body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk)
             .OfType<FieldValue>().Count(f => f.Field.Field == other) == 1, "无关对象上的读取必须保留，即使后续区域可以独立证明");
+    }
+
+    private static void UnusedCallStacks(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var lifter = new Cpp2CS.Machine.Lifting.FunctionLifter(facts);
+        foreach (var variant in new[] { "registers", "stack-argument", "stack-methodinfo", "unknown" })
+        {
+            var frame = new FrameAddress(-16);
+            var dynamicSp = new Variable(Storage.Temp(880), 1);
+            var entry = new Use(new Variable(Storage.Gpr(0), 0), 64);
+            var call = new Call(8, CallKind.Direct, Expr.C(1, 64)) { StackPointer = new Use(dynamicSp, 64) };
+            var function = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [new(0)
+                { Statements = [new Define(0, dynamicSp, new Binary(BinOp.Sub, frame, entry, 64)), new Store(4, frame, entry), call,
+                    new Return(12) { Pieces = [new(0, new Load(frame, 64))] }] }] };
+            var input = new MachineValue(0, types.Int64, Transfer.Value,
+                [new(variant == "stack-argument" ? Storage.Slot(0) : Storage.Gpr(1), 64, 0)], 8, MemoryAccess.None);
+            var callee = variant == "unknown" ? null : new MachineSignature([input], null,
+                variant == "stack-methodinfo" ? new(Storage.Slot(0), 64, 0) : null, variant.StartsWith("stack-") ? 8 : 0);
+            var signature = new MachineSignature([], null, null, 0);
+            var result = Cpp2CS.Recovery.Memory.MemoryPromotion.Run(function, signature, c => new(c, [], callee),
+                new ManagedAbi(facts.Layouts), lifter.Calls, lifter.Machine.Convention.StackPointer);
+            check.True(result.TryGet(out var layout, out _) && layout.Cells.Single().Promoted == (variant == "registers")
+                && (function.EntryBlock.Statements.OfType<Call>().Single().StackPointer is null) == (variant == "registers"),
+                $"调用栈指针按完整签名保留 {variant}");
+        }
     }
 
     private static void ConstantMemoryCopies(Assertions check, ProgramFacts facts, ManagedTypes types)

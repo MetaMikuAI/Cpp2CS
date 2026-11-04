@@ -61,6 +61,7 @@ internal sealed class MemoryPromotion
         ManagedAbi abi, ICallModel calls, Storage stackPointer)
     {
         var promotion = new MemoryPromotion(function, signature, shapes, abi);
+        promotion.TrimUnusedCallStacks();
         var layout = promotion.Partition();
         while (promotion.ForwardPointerSpills(layout)) layout = promotion.Partition();
         if (layout.Cells.Count == 0) return layout;
@@ -74,6 +75,22 @@ internal sealed class MemoryPromotion
             return RecoveryDiagnostics.Fail(function.Entry, $"内存 单元 SSA：{error}", rule: "Memory");
         Propagate.Run(function, dominators);
         return layout;
+    }
+
+    /// <summary>完整签名只读取寄存器时，调用不依赖保存的 SP；移除记录后清理失去用途的地址计算。</summary>
+    private void TrimUnusedCallStacks()
+    {
+        var changed = false;
+        foreach (var block in function.Blocks)
+            for (var i = 0; i < block.Statements.Count; i++)
+                if (block.Statements[i] is Call { StackPointer: not null } call && shapes(call).Signature is { } callee
+                    && callee.MethodInfo?.Register.Bank != Bank.Stack
+                    && callee.Arguments.Concat(callee.Indirections).SelectMany(a => a.Pieces).All(p => p.Register.Bank != Bank.Stack))
+                {
+                    block.Statements[i] = call with { StackPointer = null };
+                    changed = true;
+                }
+        if (changed) Propagate.RemoveDead(function);
     }
 
     // ---- 地址 ----
