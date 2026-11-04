@@ -1,5 +1,6 @@
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
+using Cpp2CS.Recovery.Effects;
 using Cpp2CS.Recovery.Values;
 
 namespace Cpp2CS.Recovery.Runtime;
@@ -71,7 +72,8 @@ public delegate bool RuntimeLowering(IRuntimeLowering context, out ManagedStatem
 public sealed record RuntimeOpRule(OpKind Kind)
 {
     public Func<Call, IRuntimeTyping, TypeRef?>? ResultType { get; init; }
-    public Func<Call, ManagedAbi, IEnumerable<PointerEffect>>? Effects { get; init; }
+    public Func<Call, ManagedAbi, IEnumerable<PointerEffect>>? PointerEffects { get; init; }
+    public EffectSummary Behavior { get; init; } = EffectSummary.Unknown;
     public RuntimeLowering? Lower { get; init; }
 }
 
@@ -121,8 +123,9 @@ public static class RuntimeOps
         };
         yield return new(OpKind.CompareExchangeReference)
         {
+            Behavior = new(EffectKind.Read | EffectKind.Write | EffectKind.Capture | EffectKind.Order, ExceptionEffect.Any),
             ResultType = (call, typing) => typing.LocationType(call, 0, 64),
-            Effects = (_, _) => [new PointerEffect(0, 0, 8, MemoryAccess.ReadWrite)],
+            PointerEffects = (_, _) => [new PointerEffect(0, 0, 8, MemoryAccess.ReadWrite)],
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
@@ -140,9 +143,10 @@ public static class RuntimeOps
         };
         // GC 写屏障由托管写入承担；元数据与 RGCTX 初始化不单独写出。
         foreach (var kind in new[] { OpKind.WriteBarrier, OpKind.InitClass, OpKind.InitMethodRgctx })
-            yield return new(kind) { Lower = None };
+            yield return new(kind) { Behavior = EffectSummary.None, Lower = None };
         yield return new(OpKind.MemoryBarrier)
         {
+            Behavior = new(EffectKind.Order),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
@@ -155,6 +159,7 @@ public static class RuntimeOps
         // 否则写成 RuntimeHelpers.RunClassConstructor(typeof(T).TypeHandle)，保持原生代码中的初始化时机。
         yield return new(OpKind.RunClassConstructor)
         {
+            Behavior = new(EffectKind.Initialize, ExceptionEffect.Any),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
@@ -167,12 +172,13 @@ public static class RuntimeOps
         };
         // 只服务于分派：结果流向调用目标与 MethodInfo，不是 IL 值。
         foreach (var kind in new[] { OpKind.InterfaceInvokeData, OpKind.ResolveGenericVirtual })
-            yield return new(kind) { Lower = None };
+            yield return new(kind) { Behavior = EffectSummary.None, Lower = None };
 
         // 判空：机器值为 0 时抛出 NullReferenceException。操作数通常是对象引用；clang 也会直接检验内联类型判断的结果
         // （对象已知非空时 isinst 的结果为空即判断失败），这时与 0 比较的是该判断的 bool 值。
         yield return new(OpKind.NullCheck)
         {
+            Behavior = new(EffectKind.None, ExceptionEffect.NullReference),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
@@ -187,6 +193,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.NewObject)
         {
+            Behavior = new(EffectKind.Allocate, ExceptionEffect.Any),
             ResultType = (call, t) => t.ClassOperand(call),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
@@ -198,6 +205,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.NewArray)
         {
+            Behavior = new(EffectKind.Allocate, ExceptionEffect.Any),
             ResultType = (call, t) => t.ClassOperand(call),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
@@ -209,8 +217,9 @@ public static class RuntimeOps
         };
         yield return new(OpKind.Box)
         {
+            Behavior = new(EffectKind.Read | EffectKind.Allocate, ExceptionEffect.Any),
             ResultType = (_, t) => t.Types.Object,
-            Effects = (call, abi) => ClassOperand(call) is { } boxed && call.Arguments.Length == 2 ? [new PointerEffect(1, 1, abi.Size(boxed), MemoryAccess.Read)] : [],
+            PointerEffects = (call, abi) => ClassOperand(call) is { } boxed && call.Arguments.Length == 2 ? [new PointerEffect(1, 1, abi.Size(boxed), MemoryAccess.Read)] : [],
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
@@ -222,6 +231,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.Unbox)
         {
+            Behavior = new(EffectKind.None, ExceptionEffect.Any),
             ResultType = (call, t) => t.ClassOperand(call) is { } unboxed ? new ByRefRef(unboxed) : null,
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
@@ -233,6 +243,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.IsInst)
         {
+            Behavior = EffectSummary.None,
             ResultType = (call, t) => t.ClassOperand(call) is { } target && ManagedTypes.IsReferenceType(target) ? target : t.Types.Object,
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
@@ -246,6 +257,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.IsInstArrayElement)
         {
+            Behavior = new(EffectKind.Read, ExceptionEffect.Any),
             ResultType = (_, t) => t.Types.Object,
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
@@ -285,6 +297,7 @@ public static class RuntimeOps
         // 内联的继承检查：实参是对象的类指针，结果为对象是否为 Operand 类型（或其子类、实现）。
         yield return new(OpKind.TypeCheck)
         {
+            Behavior = EffectSummary.None,
             ResultType = (_, t) => t.Types.Boolean,
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
@@ -297,6 +310,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.Throw)
         {
+            Behavior = new(EffectKind.None, ExceptionEffect.Any),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = c.Arguments.Count >= 1 ? new ManagedThrow(c.Call.Address, c.View(c.Arguments[0], c.Types.Object)) : null;
@@ -306,6 +320,7 @@ public static class RuntimeOps
         // 逐点证明的 allocate/wrapper/__cxa_throw：抛出唯一实参中的托管异常。
         yield return new(OpKind.ThrowManaged)
         {
+            Behavior = new(EffectKind.None, ExceptionEffect.Any),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = c.Arguments.Count >= 1 ? new ManagedThrow(c.Call.Address, c.View(c.Arguments[0], c.Types.Object)) : null;
@@ -314,6 +329,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.ThrowNew)
         {
+            Behavior = new(EffectKind.Allocate, ExceptionEffect.Any),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = c.Op.Operand is string name && c.ExceptionConstructor(name) is { } ctor ? new ManagedThrow(c.Call.Address, new NewObjectValue(ctor, [])) : null;
@@ -322,6 +338,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.NewException)
         {
+            Behavior = new(EffectKind.Allocate, ExceptionEffect.Any),
             ResultType = (call, t) => call.Op!.Operand is string name ? t.ExceptionType(name) : null,
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
@@ -333,6 +350,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.ThrowIf)
         {
+            Behavior = new(EffectKind.None, ExceptionEffect.Any),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
@@ -345,6 +363,7 @@ public static class RuntimeOps
         };
         yield return new(OpKind.BoundsCheck)
         {
+            Behavior = new(EffectKind.None, ExceptionEffect.Bounds),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
@@ -357,7 +376,7 @@ public static class RuntimeOps
         };
         // C++ 异常机制：取得与结束捕获不是 IL 操作；托管异常由区域的异常局部表示。
         foreach (var kind in new[] { OpKind.BeginCatch, OpKind.EndCatch })
-            yield return new(kind) { Lower = None };
+            yield return new(kind) { Behavior = EffectSummary.None, Lower = None };
         // 继续展开：在 fault 处理块中即 endfault。
         yield return new(OpKind.ResumeUnwind)
         {
@@ -396,7 +415,7 @@ public static class RuntimeOps
                 c.Emit(new ManagedCall(c.Call.Address, new(method, null, arguments, false), c.Local(c.Result, method.Method.ReturnType), false));
                 return true;
             },
-            Effects = (call, _) => call switch
+            PointerEffects = (call, _) => call switch
             {
                 { Op.Operand: "memcpy" or "memmove", Arguments: [_, _, Ir.Const { Value: > 0 and <= 4096 } count] } =>
                     [new PointerEffect(0, 0, (int)count.Value, MemoryAccess.Write), new PointerEffect(1, 1, (int)count.Value, MemoryAccess.Read)],

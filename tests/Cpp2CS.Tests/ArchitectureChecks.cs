@@ -9,6 +9,7 @@ using Cpp2CS.Machine.Algebra;
 using Cpp2CS.Output;
 using Cpp2CS.Recovery;
 using Cpp2CS.Recovery.Inlining;
+using Cpp2CS.Recovery.Effects;
 using Cpp2CS.Recovery.Runtime;
 using Cpp2CS.Recovery.Typing;
 using Cpp2CS.Recovery.Values;
@@ -47,6 +48,7 @@ internal static class ArchitectureChecks
         RepresentationCopies(checks, facts, types);
         ConstructorStoreOrder(checks, types);
         ConstructorContracts(checks, types);
+        Effects(checks, types);
         LowBitArithmetic(checks);
         PackedPhiSlices(checks);
         JoinedPhiSlices(checks);
@@ -764,6 +766,35 @@ internal static class ArchitectureChecks
         var different = Body(new ConstantValue(2, types.Int32, 32)) with { Method = other };
         check.True(Cil(constant) is null && Cil(different) is null, "不同构造体的前导写入不影响各自的 CIL 合法性");
         check.True(SourceSuitability.Check([constant, different]).Count == 2, "跨构造函数的字段初始化器一致性属于源码检查");
+    }
+
+    private static void Effects(Assertions check, ManagedTypes types)
+    {
+        check.True(!EffectSummary.Unknown.CanDiscard && EffectSummary.Unknown.InvalidatesMemory,
+            "未知效果同时阻止删除并使内存快照失效");
+        check.True(EffectSummary.Access(MemoryKind.Local).CanDiscard && !EffectSummary.Access(MemoryKind.Local).CanDuplicate,
+            "无异常读取可以丢弃，但不能跨写入重复求值");
+        check.True(!RuntimeOps.Of(OpKind.MemoryBarrier)!.Behavior.CanDiscard
+            && RuntimeOps.Of(OpKind.MemoryBarrier)!.Behavior.InvalidatesMemory, "内存屏障独立记录顺序效果");
+        check.True(RuntimeOps.Of(OpKind.RunClassConstructor)!.Behavior.InvalidatesMemory
+            && !RuntimeOps.Of(OpKind.NewObject)!.Behavior.CanDiscard, "初始化与分配不能当作纯操作");
+        var zero = new ConstantValue(0, types.Int32, 32);
+        var div = new BinaryValue(BinOp.SDiv, zero, zero, types.Int32, 32);
+        check.True(ManagedEffects.Value(div).MayThrow, "整数除法的异常参与效果合并");
+        var owner = Type("EffectStorage", 190);
+        var ownerType = new DefinitionRef(owner, []);
+        var field = new FieldDef { Index = 190, Owner = owner, Name = "child", Type = ownerType, Offset = 16, Attributes = FieldAttributes.Public };
+        var read = new FieldValue(new ArgumentValue(0, ownerType, 64), new(field, ownerType), ownerType, 64);
+        check.True(ManagedEffects.Value(read).Exceptions == ExceptionEffect.NullReference,
+            "托管字段读取与机器位置共用判空异常分类");
+        var address = new AddressValue(read with { Receiver = read });
+        check.True((ManagedEffects.Value(address).Kinds & EffectKind.Read) != 0,
+            "取址只免去目标读取，不能去掉接收者求值中的读取");
+        check.True(MemoryFootprint.MayAlias(null, MemoryFootprint.Of(read)), "未知位置不能证明不别名");
+        check.True(MemoryFootprint.MayAlias(MemoryFootprint.Of(read), MemoryFootprint.Of(read)), "同一字段位置可能别名");
+        var staticField = new StaticFieldValue(new(field, ownerType), ownerType, 64);
+        check.True(!ManagedEffects.Value(staticField).CanDiscard && ManagedEffects.Value(staticField).InvalidatesMemory,
+            "静态读取的类初始化不能在内联证明中丢弃");
     }
 
     private sealed class EmptyEnvironment : IValueEnvironment

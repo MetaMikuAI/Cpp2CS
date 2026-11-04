@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Effects;
 using Cpp2CS.Ir;
 
 namespace Cpp2CS.Recovery.Inlining;
@@ -419,8 +420,11 @@ internal sealed partial class TemplateRecovery
                             match.Defined[cres.Variable] = shared;
                             match.Locals[cres.Variable] = cres;
                         }
-                        callee.Epoch++; caller.Epoch++;
-                        callee.Stores.Clear(); caller.Stores.Clear();
+                        if (ManagedEffects.Invocation(cc.Invocation).InvalidatesMemory)
+                        {
+                            callee.Epoch++; caller.Epoch++;
+                            callee.Stores.Clear(); caller.Stores.Clear();
+                        }
                         if (mc.Tail)
                         {
                             if (cc.Tail)

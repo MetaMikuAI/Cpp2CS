@@ -230,7 +230,7 @@ internal sealed class MemoryPromotion
         var effects = new List<Effect>();
         if (call.Op is { } op && shapes(call).IsRuntime)
         {
-            foreach (var effect in Runtime.RuntimeOps.Of(op.Kind)?.Effects?.Invoke(call, abi) ?? [])
+            foreach (var effect in Runtime.RuntimeOps.Of(op.Kind)?.PointerEffects?.Invoke(call, abi) ?? [])
                 if (effect.Argument < call.Arguments.Length && Resolve(call.Arguments[effect.Argument]) is var (space, offset))
                     effects.Add(new(effect.Argument, effect.Value, effect.Size * 8, 0, space, offset, effect.Size, effect.Access));
             return effects;

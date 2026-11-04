@@ -16,8 +16,7 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
 {
     private static readonly StraightLinePolicy flow = new(_ => true, true, false);
 
-    /// <summary>读取可能抛出的异常。</summary>
-    private enum Fault : byte { None, NullReference, Other }
+    private readonly MachineEffects semantics = new(values, oracle);
 
     /// <summary>
     /// (block, index) 之后的直线路径：跨块只进入唯一的正常后继，且后继只有这一个前驱。
@@ -39,8 +38,7 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
     /// 不抛出、无副作用：纯定义（其中的读取都不抛出）与无 IL 效果的运行时操作。分派查找在 IL 中不存在（并入随后的 callvirt），也算在内。
     /// </summary>
     private bool Transparent(Stmt statement, IReadOnlySet<Sym> nonNull) =>
-        statement is Define or Call { Op.Kind: OpKind.WriteBarrier or OpKind.InitClass or OpKind.InitMethodRgctx or OpKind.InterfaceInvokeData or OpKind.ResolveGenericVirtual }
-        && values.ReadsAt(statement).All(r => ReadFault(r, nonNull).Fault == Fault.None);
+        semantics.Statement(statement, nonNull).CanDiscard;
 
     private bool SameUnwind(Block a, Block b)
     {
@@ -51,27 +49,6 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
         if (a.Handler is not { } pad) return true;
         var (i, j) = (pad.Predecessors.IndexOf(a), pad.Predecessors.IndexOf(b));
         return i >= 0 && j >= 0 && pad.Statements.OfType<Phi>().All(p => ReferenceEquals(values.Of(p.Sources[i]), values.Of(p.Sources[j])));
-    }
-
-    /// <summary>
-    /// 读取可能抛出的异常：局部单元、运行时分派数据（接口查找与泛型虚方法解析的结果）与类结构（对象头 klass 所指）不抛出；
-    /// 实例字段、数组长度、字符串长度与对象头的 klass 只在对象为 null 时抛出 NullReferenceException（对象已知非空时不抛出）；
-    /// 元素还可能越界，静态字段可能触发类初始化，不能定位的读取按任意异常。
-    /// </summary>
-    private (Fault Fault, Sym? Root) ReadFault(ReadSym read, IReadOnlySet<Sym> nonNull)
-    {
-        var location = oracle.Locate(read.Address, read.Width);
-        var (root, offset, index, _) = oracle.Decompose(read.Address);
-        root = SymTable.Resolve(root);
-        if (root is ResultSym { Site: Call { Op.Kind: OpKind.InterfaceInvokeData or OpKind.ResolveGenericVirtual } } || oracle.ClassOwner(root) is not null) return (Fault.None, root);
-        var header = location is null && offset == 0 && index is null && read.Width == 64 && oracle.TypeOf(root) is { } type && ManagedTypes.IsReferenceType(type);
-        return location?.Kind switch
-        {
-            LocationKind.Local => (Fault.None, null),
-            LocationKind.Instance or LocationKind.Length or LocationKind.StringLength => (nonNull.Contains(root) ? Fault.None : Fault.NullReference, root),
-            null when header => (nonNull.Contains(root) ? Fault.None : Fault.NullReference, root),
-            _ => (Fault.Other, root),
-        };
     }
 
     /// <summary>
@@ -122,12 +99,13 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
                 if (Transparent(statement, nonNull)) continue;
                 return false;
             }
-            var reads = values.ReadsAt(statement).Select(r => ReadFault(r, nonNull)).ToArray();
+            var reads = values.ReadsAt(statement).Select(r => semantics.Read(r, nonNull)).ToArray();
             if (reads.Any(r => ReferenceEquals(r.Root, target))) return true;
-            if (reads.Any(r => r.Fault == Fault.Other)) return false;
+            if (reads.Any(r => (r.Effects.Exceptions & ~ExceptionEffect.NullReference) != 0)) return false;
             switch (statement)
             {
-                case Define: continue;
+                case Define when (semantics.Statement(statement, nonNull).Exceptions & ~ExceptionEffect.NullReference) == 0
+                    && (semantics.Statement(statement, nonNull).Kinds & ~EffectKind.Read) == 0: continue;
                 case Store store: return ReferenceEquals(oracle.Decompose(values.Operands(store)[0]).Root, target);
                 case Call { Op: null } call:
                     // 直接调用虚方法可能是 base 调用，不能为了判空改成动态分派。
@@ -136,8 +114,8 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
                 // 分派调用在 IL 中是对接收者的 callvirt；分派查找并入其中，对象为 null 时只抛出 NullReferenceException。
                 case Call { Op.Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual or OpKind.CallDelegate } dispatch:
                     return dispatch.Arguments.Length > 0 && ReferenceEquals(SymTable.Resolve(values.Operands(dispatch)[1]), target);
-                case Call { Op.Kind: OpKind.InterfaceInvokeData or OpKind.ResolveGenericVirtual }: continue;
-                case Call { Op.Kind: OpKind.NullCheck or OpKind.WriteBarrier }: continue;
+                case Call call when (MachineEffects.Operation(call).Exceptions & ~ExceptionEffect.NullReference) == 0
+                    && (MachineEffects.Operation(call).Kinds & ~EffectKind.Read) == 0: continue;
                 default: return false;
             }
         }
@@ -168,12 +146,12 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
             }
             var reads = values.ReadsAt(statement).ToArray();
             if (reads.Any(r => Same(r.Address, r.Width))) return true;
-            if (reads.Any(r => ReadFault(r, nonNull).Fault != Fault.None)) return false;
+            if (reads.Any(r => semantics.Read(r, nonNull).Effects.MayThrow)) return false;
             switch (statement)
             {
-                case Define: continue;
+                case Define when Transparent(statement, nonNull): continue;
                 case Store store: return Same(values.Operands(store)[0], store.Value.Width);
-                case Call { Op.Kind: OpKind.WriteBarrier }: continue;
+                case Call call when MachineEffects.Operation(call).CanDiscard: continue;
                 default: return false;
             }
         }
@@ -198,13 +176,12 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
             }
             var reads = values.ReadsAt(statement).ToArray();
             if (reads.Length > 0 && Static(reads[0].Address, reads[0].Width)) return true;
-            if (reads.Any(r => ReadFault(r, nonNull).Fault != Fault.None)) return false;
+            if (reads.Any(r => semantics.Read(r, nonNull).Effects.MayThrow)) return false;
             switch (statement)
             {
-                case Define: continue;
+                case Define when Transparent(statement, nonNull): continue;
                 case Store store: return Static(values.Operands(store)[0], store.Value.Width);
-                case Call { Op.Kind: OpKind.InitClass or OpKind.RunClassConstructor or OpKind.WriteBarrier or OpKind.InitMethodRgctx }: continue;
-                case Call { Op.Kind: OpKind.NewObject }: continue;
+                case Call call when MachineEffects.Operation(call).CanDiscard: continue;
                 case Call { Op: null } call when oracle.Callee(call) is { } callee:
                     return precise && callee.DeclaringType.Equals(owner) && (callee.Method.IsStatic || callee.Method.Name == ".ctor");
                 default: return false;

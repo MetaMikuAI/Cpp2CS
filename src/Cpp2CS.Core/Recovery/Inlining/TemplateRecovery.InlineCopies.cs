@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Effects;
 using Cpp2CS.Ir;
 
 namespace Cpp2CS.Recovery.Inlining;
@@ -109,23 +110,17 @@ internal sealed partial class TemplateRecovery
         return false;
     }
 
-    private bool NonThrowingInlineValue(ManagedValue value) => value switch
+    private bool NonThrowingInlineValue(ManagedValue value) => InlineEffects(value).CanDiscard;
+
+    private EffectSummary InlineEffects(ManagedValue value) => ManagedEffects.Value(value, v => v switch
     {
-        LocalValue or ArgumentValue or ConstantValue => true,
-        Returned => true,
-        Observed observed => NonThrowingInlineValue(observed.Read),
-        AddressValue { Target: LocalValue } => true,
-        IndirectValue { Address: AddressValue { Target: LocalValue } } => true,
-        FieldValue field when field.Receiver.Type is DefinitionRef { Definition.IsValueType: true }
-            or ByRefRef { Element: DefinitionRef { Definition.IsValueType: true } }
-            => NonThrowingInlineValue(field.Receiver),
-        ComparisonValue or NegatedValue or BooleanValue => ManagedValues.Children(value).All(NonThrowingInlineValue),
-        ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate } conversion => NonThrowingInlineValue(conversion.Operand),
-        ComposedValue composed => composed.Leaves.All(l => NonThrowingInlineValue(l.Value)),
+        Returned => EffectSummary.None,
+        Observed observed => InlineEffects(observed.Read),
         NewObjectValue { Transparent: true, Type: DefinitionRef { Definition.IsValueType: true } structure } construction
-            => NonThrowingConstructor(construction.Constructor, structure) && construction.Arguments.All(NonThrowingInlineValue),
-        _ => false,
-    };
+            when NonThrowingConstructor(construction.Constructor, structure)
+            => construction.Arguments.Aggregate(EffectSummary.None, (effect, argument) => effect | InlineEffects(argument)),
+        _ => null,
+    });
 
     private readonly Dictionary<MethodRef, bool> nonThrowingConstructors = [];
 
