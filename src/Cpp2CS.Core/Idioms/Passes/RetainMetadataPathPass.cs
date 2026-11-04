@@ -21,7 +21,17 @@ internal static class RetainMetadataPathPass
                 continue;
             var init = side == 0 ? first : second;
             var skip = side == 0 ? second : first;
-            if (ChainPass.Chain(init, skip) is not { Count: > 0 } chain)
+            var merge = skip;
+            var fast = new List<Block>();
+            while (merge.Predecessors.Count == 1 && !merge.IsLandingPad && merge.Handler == head.Handler
+                && merge.NormalSuccessors.ToArray() is [var next] && !fast.Contains(merge)
+                && merge.Statements.All(s => s is Nop or Jump || s is Define d
+                    && !ExprMap.Walk(d.Value).Any(e => e is Load or Intrinsic or Unknown)))
+            {
+                fast.Add(merge);
+                merge = next;
+            }
+            if (ChainPass.Chain(init, merge) is not { Count: > 0 } chain)
                 continue;
             var statements = chain.SelectMany(b => b.Statements).ToArray();
             var calls = statements.OfType<Call>().ToArray();
@@ -30,6 +40,8 @@ internal static class RetainMetadataPathPass
                 continue;
             var slots = calls.Select(c => state.defs.Expand(c.Arguments.FirstOrDefault() ?? Expr.C(0, 64))).OfType<Const>().Select(c => c.Value).ToArray();
             if (slots.Length != calls.Length || slots.Any(s => state.facts.Usages.At(s) is null))
+                continue;
+            if (fast.Count > 0 && !MetadataGuardSnapshots.Equivalent(state.function, head, chain, fast, merge))
                 continue;
             var storeBlock = chain.Single(b => b.Statements.Contains(set));
             storeBlock.Statements[storeBlock.Statements.IndexOf(set)] = new Nop(set.Address, "MetadataInitGuard");

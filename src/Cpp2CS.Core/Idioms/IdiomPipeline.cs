@@ -54,6 +54,13 @@ internal static class IdiomPipeline
             if (state.StringSlotChoices())
                 state.Cleanup();
         });
+        state.Passes.Run("idioms.FrameSlotPromotion.ForwardInitializationSpills", () =>
+        {
+            if (FrameSlotPromotion.ForwardCallSpills(state.function, c => c.Op is null
+                && state.owner.HelperOf(c)?.Kind is HelperKind.InitMetadata or HelperKind.ClassInit or HelperKind.InitializedTypeInfo,
+                c => c is { Kind: CallKind.Direct or CallKind.Tail, Target: Const target } && state.owner.calls.Signature(target.Value) is not null))
+                state.Cleanup();
+        });
         state.Passes.Run("idioms.Normalize", () =>
         {
             state.Normalize();

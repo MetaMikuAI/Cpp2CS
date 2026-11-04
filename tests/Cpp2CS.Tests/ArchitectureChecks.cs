@@ -76,6 +76,7 @@ internal static class ArchitectureChecks
         PhiLoadWidths(checks, facts);
         FloatingOperands(checks, facts, types);
         StackGuards(checks, facts);
+        InitializationSnapshots(checks);
         Verdicts(checks);
         return checks.Finish("架构边界");
     }
@@ -426,6 +427,65 @@ internal static class ArchitectureChecks
         check.True(syms.Slice(missing, 0, 32) is UndefSym, "缺少的 ABI 位片保留未定义");
         check.True(ReferenceEquals(syms.Slice(whole, 16, 32), syms.Assemble(32, [(-16, whole)])),
             "组成值只观察目标范围内的位");
+    }
+
+    private static void InitializationSnapshots(Assertions check)
+    {
+        foreach (var variant in new[] { "low", "whole", "overwritten", "stale-alias" })
+        {
+            var head = new Block(0);
+            var fast = new Block(8);
+            var slow = new Block(16);
+            var merge = new Block(24);
+            var input = new Variable(Storage.Vec(0), 0);
+            var saved = new Variable(Storage.Vec(1), 1);
+            var reloaded = new Variable(Storage.Vec(2), 1);
+            var joined = new Variable(Storage.Vec(3), 1);
+            var field = new Binary(BinOp.Add, new Use(new(Storage.Gpr(0), 0), 64), Expr.C(16, 64), 64);
+            head.Statements = [new Store(0, field, new Use(input, 128))];
+            if (variant == "overwritten") head.Statements.Add(new Store(2, field, Expr.C(1, 32)));
+            var fastValue = new Use(input, 128);
+            if (variant == "stale-alias")
+            {
+                var old = new Variable(Storage.Vec(4), 1);
+                var alias = new Variable(Storage.Vec(5), 1);
+                head.Statements.Insert(0, new Define(0, old, new Ir.Convert(ConvKind.ZeroExtend, new Load(field, 32), 128)));
+                head.Statements.Add(new Define(2, alias, new Use(old, 128)));
+                fastValue = new Use(alias, 128);
+            }
+            head.Statements.Add(new Branch(4, Expr.C(1, 1), 8, 16));
+            fast.Statements = [new Define(8, saved, fastValue), new Jump(12, 24)];
+            slow.Statements = [new Define(16, reloaded, new Ir.Convert(ConvKind.ZeroExtend, new Load(field, 32), 128)), new Jump(20, 24)];
+            merge.Statements = [new Phi(24, joined, [saved, reloaded]), new Return(28) { Value = new Use(joined, variant == "whole" ? 128 : 32) }];
+            var function = new MachineFunction { Entry = 0, Range = new(0, 32, CodeRegion.Managed, default), Blocks = [head, fast, slow, merge] };
+            MachineFunction.AddEdge(head, fast);
+            MachineFunction.AddEdge(head, slow);
+            MachineFunction.AddEdge(fast, merge);
+            MachineFunction.AddEdge(slow, merge);
+            check.Equal(variant == "low", MetadataGuardSnapshots.Equivalent(function, head, [slow], [fast], merge), $"初始化重读的观察位 {variant}");
+        }
+        foreach (var variant in new[] { "conditional", "unknown-call", "escaped" })
+        {
+            var head = new Block(0);
+            var initialize = new Block(8);
+            var merge = new Block(16);
+            var input = new Variable(Storage.Vec(0), 0);
+            var result = new Variable(Storage.Vec(1), 1);
+            var frame = new FrameAddress(-32);
+            head.Statements = [new Store(0, frame, new Use(input, 128)), new Branch(4, Expr.C(1, 1), 8, 16)];
+            initialize.Statements = [new Call(8, CallKind.Direct, Expr.C(64, 64))
+            { Op = variant == "unknown-call" ? null : new(OpKind.RunClassConstructor, null), StackPointer = frame,
+                Arguments = variant == "escaped" ? [frame] : [] }, new Jump(12, 16)];
+            merge.Statements = [new Define(16, result, new Ir.Convert(ConvKind.ZeroExtend, new Load(frame, 32), 128)),
+                new Return(20) { Value = new Use(result, 32) }];
+            var function = new MachineFunction { Entry = 0, Range = new(0, 24, CodeRegion.Managed, default), Blocks = [head, initialize, merge] };
+            MachineFunction.AddEdge(head, initialize);
+            MachineFunction.AddEdge(head, merge);
+            MachineFunction.AddEdge(initialize, merge);
+            function.Renumber();
+            check.Equal(variant == "conditional", Cpp2CS.Machine.Ssa.FrameSlotPromotion.ForwardCallSpills(function,
+                c => c.Op?.Kind == OpKind.RunClassConstructor), $"私有向量保存跨初始化路径 {variant}");
+        }
     }
 
     private static void StackGuards(Assertions check, ProgramFacts facts)
