@@ -10,6 +10,8 @@ public enum Template
 {
     /// <summary>读取元数据槽位 → Symbol。</summary>
     MetadataSlot,
+    /// <summary>读取 il2cpp_defaults 的 corlib 类指针字段 → Symbol(Class)。</summary>
+    RuntimeDefaults,
     /// <summary>读取 Il2CppClass.static_fields → Symbol(StaticFields)。</summary>
     StaticFields,
     /// <summary>读取 MethodInfo.klass → Symbol(Class)。</summary>

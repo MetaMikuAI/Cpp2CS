@@ -15,6 +15,7 @@ public sealed class ProgramFacts
     public Registrations Registrations { get => Base.Registrations; init => Base = Base with { Registrations = value }; }
     public UsageSlots Usages { get => Base.Usages; init => Base = Base with { Usages = value }; }
     public RuntimeHelpers Helpers { get => Base.Helpers; init => Base = Base with { Helpers = value }; }
+    public RuntimeDefaults Defaults { get => Base.Defaults; init => Base = Base with { Defaults = value }; }
     public FieldLayouts Layouts { get => Base.Layouts; init => Base = Base with { Layouts = value }; }
     public FactChecks Checks { get => Base.Checks; init => Base = Base with { Checks = value }; }
     public IReadOnlyDictionary<string, double> Timings { get => Base.Timings; init => Base = Base with { Timings = value }; }

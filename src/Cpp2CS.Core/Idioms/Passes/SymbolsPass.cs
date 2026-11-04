@@ -56,6 +56,12 @@ internal static class SymbolsPass
                     state.symbolSlots.TryAdd(symbol, address.Value);
                     return symbol;
                 }
+                if (load.Address is Const defaultsAddress && state.facts.Defaults.At(defaultsAddress.Value) is { } defaultType)
+                {
+                    state.Result.Hit(Template.RuntimeDefaults);
+                    changed = true;
+                    return new Symbol(SymbolKind.Class, new DefinitionRef(defaultType, []));
+                }
 
                 var (basis, offset) = SplitPass.Split(load.Address);
                 var own = basis is Use { Variable: { Version: 0 } v } && v.Storage == state.selfMethodInfo && ownDefinition is not null;
