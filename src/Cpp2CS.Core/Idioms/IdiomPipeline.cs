@@ -67,11 +67,6 @@ internal static class IdiomPipeline
         {
             state.Normalize();
         });
-        state.Passes.Run("idioms.MergedIndirectTails.Run", () =>
-        {
-            if (MergedIndirectTails.Run(state.function))
-                state.Cleanup();
-        });
         state.Passes.Run("idioms.FrameSlotPromotion.ForwardCallSpills", () =>
         {
             if (FrameSlotPromotion.ForwardCallSpills(state.function, c => c.Op is null && state.owner.HelperOf(c)?.Kind == HelperKind.InterfaceLookup))
@@ -85,6 +80,11 @@ internal static class IdiomPipeline
         state.Passes.Run("idioms.SharedInterfaceTails.Run", () =>
         {
             if (SharedInterfaceTails.Run(state.function, c => c.Op is null && state.owner.HelperOf(c)?.Kind == HelperKind.InterfaceLookup, state.Fresh))
+                state.Cleanup();
+        });
+        state.Passes.Run("idioms.MergedIndirectTails.Run", () =>
+        {
+            if (MergedIndirectTails.Run(state.function))
                 state.Cleanup();
         });
         state.Passes.Run("idioms.InterfaceDispatch", () =>

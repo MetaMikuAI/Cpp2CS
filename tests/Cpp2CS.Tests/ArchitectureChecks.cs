@@ -36,6 +36,7 @@ internal static class ArchitectureChecks
         Identities(checks, types);
         CallIdentities(checks);
         TailCallIdentities(checks, facts, types);
+        SharedInterfacePartitions(checks);
         EntryKinds(checks, facts, types);
         Templates(checks, types);
         Accessors(checks, types);
@@ -136,6 +137,54 @@ internal static class ArchitectureChecks
             check.Equal(first, targets[left.Statements.OfType<Call>().Single().Site], "左路径保留自身分派目标");
             check.Equal(sameTarget ? first : second, targets[right.Statements.OfType<Call>().Single().Site],
                 "相同或不同的分派目标均按各自调用点登记");
+        }
+    }
+
+    private static void SharedInterfacePartitions(Assertions check)
+    {
+        foreach (var count in new[] { 2, 4 })
+        foreach (var consistent in new[] { true, false })
+        {
+            var version = 0;
+            Variable Fresh(int width = 64) => new(Storage.Gpr(20), ++version);
+            var receiver = new Use(new(Storage.Gpr(0), 0), 64);
+            var head = new Block(0);
+            var slow = new Block(1000) { End = 1008 };
+            var hit = new Block(1020) { End = 1028 };
+            var merge = new Block(1040) { End = 1048 };
+            var function = new MachineFunction { Entry = 0, Range = new(0, 1052, CodeRegion.Managed, default), Blocks = [head, slow, hit, merge] };
+            var slots = new List<Variable>();
+            var offsets = new List<Variable>();
+            for (var i = 0; i < count; i++)
+            {
+                var slot = Fresh(); slots.Add(slot);
+                var offset = Fresh(); offsets.Add(offset);
+                var branch = new Block((ulong)(4 + i * 12));
+                var left = new Block(branch.Start + 4) { Statements = [new Define(0, slot, Expr.C((ulong)i + 1, 64)), new Jump(0, slow.Start)] };
+                var right = new Block(branch.Start + 8) { Statements = [new Define(0, offset,
+                    new Ir.Convert(ConvKind.ZeroExtend, new Binary(BinOp.Add, new Use(new(Storage.Gpr(1), 0), 32), Expr.C((ulong)(consistent || i != count - 1 ? i + 1 : count + 1), 32), 32), 64)), new Jump(0, hit.Start)] };
+                branch.Statements.Add(new Branch(0, Expr.C(1, 1), left.Start, right.Start));
+                MachineFunction.AddEdge(head, branch);
+                MachineFunction.AddEdge(branch, left); MachineFunction.AddEdge(branch, right);
+                MachineFunction.AddEdge(left, slow); MachineFunction.AddEdge(right, hit);
+                function.Blocks.AddRange([branch, left, right]);
+            }
+            var slotPhi = Fresh();
+            var offsetPhi = Fresh();
+            var slowResult = Fresh();
+            var fastResult = Fresh();
+            var mergedResult = Fresh();
+            var lookup = new Call(1004, CallKind.Direct, Expr.C(2000, 64))
+                { Arguments = [receiver, Expr.C(3000, 64), new Use(slotPhi, 64)], Defines = [slowResult], Results = [Storage.Gpr(0)] };
+            slow.Statements = [new Phi(1000, slotPhi, slots.ToArray()), lookup, new Jump(1008, merge.Start)];
+            hit.Statements = [new Phi(1020, offsetPhi, offsets.ToArray()), new Define(1024, fastResult, new Use(offsetPhi, 64)), new Jump(1028, merge.Start)];
+            merge.Statements = [new Phi(1040, mergedResult, [slowResult, fastResult]), new Call(1044, CallKind.TailIndirect, new Use(mergedResult, 64))];
+            MachineFunction.AddEdge(slow, merge); MachineFunction.AddEdge(hit, merge);
+            function.Renumber();
+            var changed = SharedInterfaceTails.Run(function, c => ReferenceEquals(c, lookup), Fresh);
+            check.Equal(consistent, changed, "接口尾部逐一配对所有快慢路径槽位，缺少对应槽时拒绝拆分");
+            if (changed) check.Equal(count, function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Count(c => c.Kind == CallKind.TailIndirect),
+                "每个接口槽保留一个独立调用");
         }
     }
 
