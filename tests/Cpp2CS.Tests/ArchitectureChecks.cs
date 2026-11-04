@@ -11,6 +11,7 @@ using Cpp2CS.Recovery;
 using Cpp2CS.Recovery.Inlining;
 using Cpp2CS.Recovery.Effects;
 using Cpp2CS.Recovery.Calls;
+using Cpp2CS.Recovery.Memory;
 using Cpp2CS.Recovery.Runtime;
 using Cpp2CS.Recovery.Typing;
 using Cpp2CS.Recovery.Values;
@@ -40,6 +41,7 @@ internal static class ArchitectureChecks
         InvokerArguments(checks, facts, types);
         SharedInvokerCopies(checks, facts, types);
         StackBoxes(checks, facts, types);
+        PartialScalarCells(checks, facts, types);
         EntryKinds(checks, facts, types);
         Templates(checks, types);
         Accessors(checks, types);
@@ -75,6 +77,40 @@ internal static class ArchitectureChecks
         StackGuards(checks, facts);
         Verdicts(checks);
         return checks.Finish("架构边界");
+    }
+
+    private static void PartialScalarCells(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var owner = Type("ScalarStorage", 810);
+        var method = MethodRef.Open(Method(owner, "Fill", 810, MethodAttributes.Public | MethodAttributes.Static));
+        method.Method.ReturnType = types.Int32;
+        var sink = MethodRef.Open(Method(owner, "Consume", 811, MethodAttributes.Public | MethodAttributes.Static));
+        sink.Method.Parameters = [new("bytes", new PointerRef(types.Byte), 0, null, false)];
+        sink.Method.ReturnType = types.Int32;
+        var abi = new ManagedAbi(facts.Layouts);
+        var shapes = new CallShapes(facts, abi, (_, _) => false);
+        var cell = new Cell(0, LocalSpace.Frame, -8, 8, "调用实参");
+        TypeOracle Analyze(bool initialize, bool late = false)
+        {
+            var store = new Store(4, new FrameAddress(-7), Expr.C(0xab, 8));
+            var call = new Call(12, CallKind.Direct, Expr.C(1, 64))
+                { Resolved = sink, Arguments = [new FrameAddress(-8)], Sources = [Storage.Gpr(0)] };
+            var block = new Block(0) { Statements = [store, call, new Return(16)] };
+            if (initialize) block.Statements.Insert(late ? 1 : 0, new Store(0, new FrameAddress(-8), Expr.C(0, 64)));
+            var function = new MachineFunction { Entry = 0, Range = new(0, 20, CodeRegion.Managed, default), Blocks = [block] };
+            function.Renumber();
+            var environment = new MethodEnvironment(method, abi.Machine(method, out _)!, shapes);
+            return new(types, facts, method, environment.Shape, ValueModel.Build(function, environment), new([cell]));
+        }
+        var initialized = Analyze(true);
+        var start = new LocalSym(LocalSpace.Frame, -8);
+        check.True(initialized.CellType(cell) == types.UInt64, "完整初始化后的字节写入保留共同标量存储");
+        check.True(initialized.Locate(start, 8) is null && initialized.Split(start, 8) is [{ FieldBit: 0, Width: 8 }],
+            "首字节写入仍是部分更新，不能覆盖整个标量");
+        check.True(initialized.Split(new LocalSym(LocalSpace.Frame, -7), 8) is [{ FieldBit: 8, Width: 8 }],
+            "内部字节更新保留相邻位");
+        check.True(Analyze(false).CellType(cell) is null && Analyze(true, true).CellType(cell) is null,
+            "部分写入前没有完整初始化时不引入读改写");
     }
 
     private static void StackBoxes(Assertions check, ProgramFacts facts, ManagedTypes types)
