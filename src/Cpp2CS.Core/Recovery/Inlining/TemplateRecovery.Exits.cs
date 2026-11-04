@@ -215,7 +215,7 @@ internal sealed partial class TemplateRecovery
                 value = new FieldValue(value, field, fieldType, Width(fieldType));
             }
             bool Carries(InlineEnd end, LocalValue local, Dictionary<int, ManagedValue> binding) =>
-                ReturnedField(end, path) is { } expected
+                ManagedProjections.Project(types, end.Result!, projection, field => new Observed(field, end.Epoch)) is { Value: var expected }
                 && end.Env.GetValueOrDefault(local.Variable) is { } actual && Unify(expected, actual, binding);
             var matches = 0;
             foreach (var local in copied.Where(c => c.Type.Equals(type) && !projections.Any(p => p.Target.Variable == c.Variable)))
@@ -230,20 +230,6 @@ internal sealed partial class TemplateRecovery
         }
         foreach (var (key, value) in trial) match.Binding[key] = value;
         return (result, projections);
-    }
-
-    /// <summary>完整结构体项与分散承接的字段比较；字段读取沿用该返回路径的调用代数。</summary>
-    private ManagedValue? ReturnedField(InlineEnd end, IReadOnlyList<FieldRef> path)
-    {
-        if (end.Result is ComposedValue composed)
-            return composed.Leaves.FirstOrDefault(l => l.Path.SequenceEqual(path)).Value;
-        var value = end.Result!;
-        foreach (var field in path)
-        {
-            var type = field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
-            value = new Observed(new FieldValue(value, field, type, Width(type)), end.Epoch);
-        }
-        return value;
     }
 
     /// <summary>合流可承接返回值的比较结果；用一条非常量路径提出表达式，再逐路径验证，包括已折叠成常量的路径。</summary>

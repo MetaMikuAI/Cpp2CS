@@ -630,6 +630,23 @@ internal static class ArchitectureChecks
         var undefined = oracle.Aggregate(values.Syms.Concat([values.Syms.Const(0, 32), values.Syms.Undef(32)]), pair);
         check.True(undefined is { Fields.Count: 1 } && undefined.Fields[0].Value is UndefSym,
             "组合计划只省略已知零，未定义位继续交给下降报洞");
+        var pairFields = types.Projections(pair).ToArray();
+        var parentField = types.Fields(nested).Last();
+        var one = new ConstantValue(0x3f800000, types.Single, 32);
+        var two = new ConstantValue(0x40000000, types.Single, 32);
+        var innerValue = new ComposedValue(pair, [(pairFields[0].Path, one), (pairFields[1].Path, two)]);
+        var nestedValue = new ComposedValue(nested, [(parentField.Path, innerValue)]);
+        var selected = ManagedProjections.Project(types, nestedValue, types.Project(nested, 96, 32)!, f => f);
+        check.True(selected?.Value == two && selected.Discarded.SequenceEqual([one]),
+            "完整嵌套值与叶子组成共享字段投影，并保留其他字段的求值义务");
+        var zero = ManagedProjections.Project(types, new ComposedValue(pair, []), pairFields[0], f => f);
+        check.True(zero?.Value is ConstantValue { Bits: 0 }, "initobj 未覆盖的字段投影为已知默认值");
+        var flat = new ComposedValue(nested, types.Projections(nested).Skip(1).Select((p, i) => (p.Path, (ManagedValue)(i == 0 ? one : two))).ToArray());
+        check.True(ManagedProjections.Project(types, flat, parentField, f => f)?.Value is ComposedValue { Leaves.Count: 2 },
+            "分散叶子可以投影回嵌套整体");
+        var repeated = innerValue with { Leaves = [.. innerValue.Leaves, (pairFields[0].Path, two)] };
+        check.True(ManagedProjections.Project(types, repeated, pairFields[0], f => f) is null,
+            "重叠写入不能按字段集合推导值");
     }
 
     private static void ConstructorStoreOrder(Assertions check, ManagedTypes types)
