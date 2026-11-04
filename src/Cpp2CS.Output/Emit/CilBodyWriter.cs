@@ -30,6 +30,10 @@ internal sealed partial class CilBodyWriter(Skeleton skeleton, ManagedTypes type
         methodContext = recovered.Method;
         regions = recovered.Regions;
         var entryDefaults = transforms?.SkippedStatements(recovered, policy) ?? new HashSet<ManagedStatement>();
+        var reads = recovered.Blocks.SelectMany(b => b.Statements)
+            .SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
+            .SelectMany(ManagedValues.Walk).OfType<LocalValue>()
+            .GroupBy(l => l.Variable).ToDictionary(g => g.Key, g => g.Count());
         foreach (var pinned in recovered.Blocks.SelectMany(b => b.Statements).SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
             .SelectMany(ManagedValues.Walk).OfType<PinnedArrayValue>().Distinct())
         {
@@ -44,8 +48,26 @@ internal sealed partial class CilBodyWriter(Skeleton skeleton, ManagedTypes type
             il.Append(labels[block.Address]);
             foreach (var region in regions.Where(r => r.HandlerEntry == block.Address && r.Kind == ManagedRegionKind.Catch))
                 il.Emit(OpCodes.Stloc, Local(region.Exception!));
-            foreach (var statement in block.Statements)
-                if (!entryDefaults.Contains(statement)) Statement(statement);
+            for (var i = 0; i < block.Statements.Count; i++)
+            {
+                var statement = block.Statements[i];
+                if (entryDefaults.Contains(statement)) continue;
+                // 调用结果只用于紧随其后的返回：直接把调用结果留在栈上，避免多余的局部复制。
+                if (statement is ManagedCall { Result: { } result } call
+                    && i + 1 < block.Statements.Count
+                    && block.Statements[i + 1] is ManagedReturn { Value: LocalValue returned } returnedStatement
+                    && !entryDefaults.Contains(returnedStatement)
+                    && result.Variable.Equals(returned.Variable)
+                    && reads.GetValueOrDefault(result.Variable) == 1)
+                {
+                    var instruction = Invocation(call.Invocation);
+                    if (call.Inlined) InlineCalls.Add(instruction, call.Invocation.Method);
+                    ReturnFromBlock();
+                    i++;
+                    continue;
+                }
+                Statement(statement);
+            }
         }
         WriteExceptionTable(recovered);
         return body;
