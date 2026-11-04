@@ -25,6 +25,7 @@ internal sealed class IdiomState(IdiomRewriter owner, MachineFunction function)
     internal MethodRef? self;
     internal Storage? selfMethodInfo;
     internal bool foldedRuntimeGuards;
+    internal bool rgctxReady;
     internal readonly List<(Block End, ulong Guard)> initializedGuards = [];
     public IdiomResult Result { get; } = new();
     private Cpp2CS.Machine.Algebra.PassList? passes;
