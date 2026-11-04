@@ -118,6 +118,8 @@ public enum OpKind : byte
     /// <summary>经过判空与越界检查的字节数组读取；参数为数组与 32 位下标。</summary>
     ReadByteArray,
     GenericHasValue,
+    /// <summary>把零写入参数指向的局部存储；CIL 局部已零初始化，不产生指令。</summary>
+    ZeroField,
 }
 
 /// <summary>调用所表达的运行时操作。Operand：类型（TypeRef）、异常名、槽位号等，见 <see cref="OpKind"/>。</summary>

@@ -52,6 +52,8 @@ public enum HelperKind
     ReadByteArray,
     /// <summary>按类布局检查值缓冲区是否非空，Nullable 使用 hasValue。</summary>
     GenericHasValue,
+    /// <summary>把 32 位零写入参数指向的位置；用于初始化原生局部存储。</summary>
+    ZeroField,
 }
 
 /// <summary>一个被托管代码调用的辅助函数。Evidence 说明依据；Callers 为托管调用点数。</summary>
@@ -258,7 +260,7 @@ public sealed partial class RuntimeHelpers
                 return (HelperKind.InitializedTypeInfo, null,
                     $"调用 0x{wrapperCalls[0]:x}（检查 Il2CppClass+0x{initializedOffset:x} 的 initialized 位）后读取 +0x{RuntimeLayout.ClassInitializationExceptionGCHandle:x} initializationExceptionGCHandle");
             if (LoadsOffset(wrapperCalls[0], RuntimeLayout.MethodRgctxData, 4) && LoadsOffset(wrapperCalls[0], RuntimeLayout.MethodGenericMethod, 24)
-                && wrapperWords.Contains(0xAA1303E0u))   // mov x0, x19：返回原参数
+                && wrapperWords.Contains(0xAA1303E0u))   // mov x0, x19：返回原 MethodInfo
                 return (HelperKind.InitMethodRgctx, null,
                     $"调用 0x{wrapperCalls[0]:x}（读取 MethodInfo+0x{RuntimeLayout.MethodRgctxData:x} rgctx_data 与 +0x{RuntimeLayout.MethodGenericMethod:x} genericMethod）后返回原 MethodInfo");
         }
@@ -271,6 +273,10 @@ public sealed partial class RuntimeHelpers
             return (HelperKind.ArrayElementAddress, null, $"读取 Il2CppClass+0x{RuntimeLayout.ClassElementSize:x} element_size，并加数组头 0x{RuntimeLayout.ArrayData:x}");
         if (words.Length <= 10 && LoadsOffset(body, RuntimeLayout.FieldParent, 4) && LoadsOffset(body, RuntimeLayout.FieldOffset, 4) && calls.Length == 0)
             return (HelperKind.FieldAddress, null, $"?? FieldInfo+0x{RuntimeLayout.FieldOffset:x} offset ??????(????????)");
+        // 编译器把局部存储的零初始化外联为 str wzr, [x0, #off]; ret。
+        if (words.Length is >= 2 and <= 4 && A64.IsUnsignedOffsetAccess(words[0]) && A64.IsStore(words[0]) && A64.Rd(words[0]) == 31
+            && A64.IsRet(words[1]) && words.Skip(2).All(w => w == 0))
+            return (HelperKind.ZeroField, null, $"把零写入参数指向的 +0x{A64.AccessOffset(words[0]):x} 存储");
         // il2cpp_codegen_object_new：读取 Il2CppClass.instance_size，调用 GC 分配并写入 klass。
         if (words is [0xf9400a51, 0xeb2f73f0, 0x9a9033f0, ..])
             return (HelperKind.StackProbe, null, "__chkstk 风格栈探测");
