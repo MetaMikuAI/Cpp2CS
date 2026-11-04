@@ -211,7 +211,15 @@ internal sealed partial class BodyBuilder
         public LocalValue Local(Sym sym, TypeRef type) => owner.Local(sym, type);
         public LocalValue Temporary(TypeRef type) => owner.NewLocal(type);
         public void Emit(ManagedStatement statement) => output.Add(statement);
-        public void AwaitConstruction() => owner.constructions[(ResultSym)Result] = call;
+        public void AwaitConstruction()
+        {
+            owner.constructions[(ResultSym)Result] = call;
+            if (Cpp2CS.Recovery.Effects.ConstructionPrelude.Find(owner.analysis, owner.oracle, owner.effects, call) is { } prelude)
+            {
+                var local = owner.Local(Result, prelude.Type);
+                owner.pendingConstructions[local.Variable] = new(prelude.Address, prelude.Type, prelude.Base);
+            }
+        }
         public MethodRef? ExceptionConstructor(string fullName) => owner.Constructor(fullName);
         public ManagedValue Hole(string reason, TypeRef? type) => owner.Hole(call.Address, reason, type);
 

@@ -2,6 +2,7 @@ using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Ssa;
+using Cpp2CS.Recovery;
 
 namespace Cpp2CS.Idioms;
 
@@ -15,9 +16,10 @@ internal static class SharedInvokerArguments
         if (state.self is not { } self || state.owner.abi.Machine(self, out _) is not { } signature) return null;
         Expr Expand(Expr value) => state.defs.Expand(value, 24);
         var formal = MethodRef.Open(self.Method);
-        bool Input(Expr value) => signature.Arguments.Any(a => a.Index >= 0 && ManagedAbi.SharedValue(a.Type)
-            && formal.Concrete(self.Method.Parameters[a.Index].Type).Equals(type)
+        bool DirectInput(Expr value, TypeRef inputType) => signature.Arguments.Any(a => a.Index >= 0 && ManagedAbi.SharedValue(a.Type)
+            && formal.Concrete(self.Method.Parameters[a.Index].Type).Equals(inputType)
             && a.Pieces is [{ Register: var register }] && value is Use { Variable.Version: 0 } use && use.Variable.Storage == register);
+        Expr? OriginalInput(Expr value, TypeRef inputType) => PrivateFrameInputs.Origin(state, value, source => DirectInput(source, inputType));
         Store? Previous(Block at, int before, Expr address)
         {
             var seen = new HashSet<Block>();
@@ -32,7 +34,13 @@ internal static class SharedInvokerArguments
                         if (target is not FrameAddress targetFrame || address is not FrameAddress sought
                             || targetFrame.Offset < sought.Offset + 8 && sought.Offset < targetFrame.Offset + store.Value.Width / 8) return null;
                     }
-                    if (at.Statements[i] is Call call && call.Arguments.Select(Expand).SelectMany(ExprMap.Walk).Any(e => e is FrameAddress)) return null;
+                    if (at.Statements[i] is Call call && (address is not FrameAddress callSlot
+                        || call.Arguments.Select(Expand).Any(e => PrivateFrameInputs.Exposes(e, callSlot))))
+                    {
+                        if (call.Op is not { Kind: OpKind.InvokeGeneric, Operand: MethodRef invoked }
+                            || state.owner.abi.Invoker((MethodRef)GenericContext.Instantiate(invoked, self)!).Indirections
+                                .Any(a => a.Transfer != Transfer.Copy || a.Access != MemoryAccess.Read)) return null;
+                    }
                 }
                 if (at.IsLandingPad || at.Predecessors.ToArray() is not [var previous]) return null;
                 at = previous;
@@ -76,20 +84,17 @@ internal static class SharedInvokerArguments
             && Expand(new Use(p.Sources[0], p.Target.Width)) != Expand(new Use(p.Sources[1], p.Target.Width)))) return null;
         var size = new Ir.Convert(ConvKind.ZeroExtend,
             new Load(new Binary(BinOp.Add, new Symbol(SymbolKind.Class, type), Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32), 64);
-        if (destination is not Binary { Op: BinOp.Sub, Left: FrameAddress upper, Right: Binary { Op: BinOp.And, Left: Binary { Op: BinOp.Add } aligned, Right: Const mask } }
-            || upper.Offset > argumentAddress.Offset
-            || aligned.Left != size || aligned.Right is not Const { Value: 15 }
-            || mask.Value is not (0x1fffffff0 or 0xfffffffffffffff0)) return null;
+        if (DynamicStackRegion.Parse(destination) is not { } region || region.Root.Offset > argumentAddress.Offset || region.Sizes[^1] != size) return null;
         var copies = state.All.OfType<Call>().Where(c => c is { Op.Kind: OpKind.Import, Op.Operand: "memcpy", Arguments.Length: 3 }
             && Expand(c.Arguments[0]) == destination && Expand(c.Arguments[2]) == size).ToArray();
         if (copies is not [var copy] || Expand(copy.Arguments[1]) is not Select source) return null;
         var selectedValue = Direction(source.Condition, 0x80000000) == 0 ? source.True : source.False;
         var selectedReference = Direction(source.Condition, 0) == 0 ? source.True : source.False;
         if (Direction(source.Condition, 0x80000000) is not { } valueDirection || Direction(source.Condition, 0) != 1 - valueDirection
-            || !Input(selectedValue) || selectedReference is not FrameAddress) return null;
+            || OriginalInput(selectedValue, type) is not { } original || selectedReference is not FrameAddress) return null;
         var copyBlock = state.function.Blocks.Single(b => b.Statements.Contains(copy));
         if (!Dominators.Compute(state.function).Dominates(copyBlock.Index, block.Index)) return null;
-        if (Previous(copyBlock, copyBlock.Statements.IndexOf(copy), selectedReference) is not { } saved || Expand(saved.Value) != selectedValue) return null;
+        if (Previous(copyBlock, copyBlock.Statements.IndexOf(copy), selectedReference) is not { } saved || OriginalInput(Expand(saved.Value), type) != original) return null;
         // 空值检查不观察私有副本；其他调用可能改变原形参或使副本逃逸。
         var visited = new HashSet<Block>();
         bool ReachesCopy(Block current, int end)
@@ -105,16 +110,53 @@ internal static class SharedInvokerArguments
             return current.Predecessors.Count > 0 && current.Predecessors.All(p => ReachesCopy(p, p.Statements.Count));
         }
         if (!ReachesCopy(block, block.Statements.IndexOf(invoke))) return null;
-        bool Contains(Expr expression) => ExprMap.Walk(Expand(expression)).Any(e => e == destination);
-        bool FrameAlias(Expr expression) => expression is not Load && (expression is FrameAddress f
-            ? f.Offset <= argumentAddress.Offset + 7 : ExprMap.Children(expression).Any(FrameAlias));
+        bool Contains(Expr expression)
+        {
+            var value = Expand(expression);
+            return !(DynamicStackRegion.Parse(value) is { } other && region.Disjoint(other))
+                && (value == destination || ExprMap.Children(value).Any(Contains));
+        }
+        bool FrameAlias(Expr expression) => expression is not Load
+            && !(DynamicStackRegion.Parse(expression) is { } dynamic && dynamic.Root.Offset <= argumentAddress.Offset)
+            && (expression is FrameAddress f ? f.Offset <= argumentAddress.Offset + 7 : ExprMap.Children(expression).Any(FrameAlias));
         bool ReadsArgument(Expr expression) => ExprMap.Walk(Expand(expression)).OfType<Load>().Any(load =>
             load.Address != destination && (load.Address is FrameAddress f
                 ? f.Offset < argumentAddress.Offset + 8 && argumentAddress.Offset < f.Offset + load.Width / 8
                 : FrameAlias(load.Address)));
-        IEnumerable<Expr> Observed(Stmt statement) => statement is Call { Target: Const target } call
-            && state.owner.calls.Signature(target.Value) is { } known && known.Reads.All(r => r.Bank != Bank.Stack)
-            ? ExprMap.Operands(call with { StackPointer = null }) : ExprMap.Operands(statement);
+        bool OtherCopy(Call call)
+        {
+            if (call is not { Op.Kind: OpKind.Import, Op.Operand: "memcpy", Arguments.Length: 3 }
+                || DynamicStackRegion.Parse(Expand(call.Arguments[0])) is not { } other || !region.Disjoint(other)
+                || Expand(call.Arguments[2]) != other.Sizes[^1] || Expand(call.Arguments[1]) is not Select selected
+                || other.Sizes[^1] is not Ir.Convert { Operand: Load { Address: Binary { Left: Symbol { Value: TypeRef otherType } } } }
+                || call.Defines.Any(v => v is not null && state.Used(v))) return false;
+            var otherFlag = new Load(new Binary(BinOp.Add, new Symbol(SymbolKind.Class, otherType), Expr.C(RuntimeLayout.ClassByvalArg + 8, 64), 64), 32);
+            int? Side(uint bits) => DirectionPass.Direction(selected.Condition, e => e == otherFlag ? Expr.C(bits, 32) : null);
+            if (Side(0x80000000) is not { } valueSide || Side(0) != 1 - valueSide) return false;
+            var value = valueSide == 0 ? selected.True : selected.False;
+            var reference = valueSide == 0 ? selected.False : selected.True;
+            return OriginalInput(value, otherType) is not null && reference is FrameAddress savedReference
+                && savedReference.Offset >= region.Root.Offset
+                && (savedReference.Offset + 8 <= argumentAddress.Offset || savedReference.Offset >= argumentAddress.Offset + 8);
+        }
+        IEnumerable<Expr> Observed(Stmt statement)
+        {
+            if (statement is not Call call) return ExprMap.Operands(statement);
+            if (OtherCopy(call)) return [];
+            Expr? Register(int register) => call.ArgumentIndex(Storage.Gpr(register)) is var index && index >= 0 ? Expand(call.Arguments[index]) : null;
+            if (call.Kind == CallKind.Indirect && Expand(call.Target) is Load { Address: Binary { Op: BinOp.Add,
+                    Left: Symbol { Kind: SymbolKind.Method, Value: MethodRef called } entity, Right: Const { Value: RuntimeLayout.MethodInvoker } } }
+                && Register(0) == new Load(entity, 64) && Register(1) == entity && Register(3) == Expand(array)
+                && ManagedTypes.IsVoid(called.Method.ReturnType))
+            {
+                var owner = state.function.Blocks.Single(b => b.Statements.Contains(call));
+                // 参数数组可复用；本槽在另一调用前必须已由不同的写入覆盖。
+                if (Previous(owner, owner.Statements.IndexOf(call), address) is { } stored && !ReferenceEquals(stored, argument))
+                    return Register(2) is { } receiver ? [receiver] : ExprMap.Operands(statement);
+            }
+            return call.Target is Const target && state.owner.calls.Signature(target.Value) is { } known
+                && known.Reads.All(r => r.Bank != Bank.Stack) ? ExprMap.Operands(call with { StackPointer = null }) : ExprMap.Operands(statement);
+        }
         foreach (var statement in state.All)
         {
             if (ReferenceEquals(statement, copy) || ReferenceEquals(statement, argument) || ReferenceEquals(statement, invoke)) continue;
@@ -137,6 +179,7 @@ internal static class SharedInvokerArguments
             if (escaped.Select(Expand).Any(FrameAlias)) return null;
         }
         if (copy.Defines.Any(v => v is not null && state.Used(v))) return null;
-        return new(selectedValue, argument, copy, head, referenceArm);
+        return new(original, argument, copy, head, referenceArm);
     }
+
 }

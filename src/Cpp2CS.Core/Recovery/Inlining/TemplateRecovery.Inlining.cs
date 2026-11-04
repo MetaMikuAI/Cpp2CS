@@ -139,15 +139,28 @@ internal sealed partial class TemplateRecovery
                 if (summaries(method) is not { Body: { } template }) { failures.Add(definition.Address == 0 ? "构造函数没有原生代码" : "构造函数自身未能恢复"); continue; }
                 if (template.Regions.Count > 0 || !Acyclic(template)) { failures.Add("构造函数体含异常区域或环"); continue; }
                 if (PendingCall(body, variable, pending) is not var (block, index, _)) break;
-                var blocks = body.Blocks.ToDictionary(b => b.Address);
-                var match = Match(body, blocks, block, index, template, pending.Allocated.Arguments, out var failure);
-                if (match is not null && PlanReplacement(body, blocks, block, index, method, match, out failure) is { } replaced)
+                var preferred = template.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>()
+                    .Select(s => s.Target).OfType<FieldValue>().Select(f => f.Field.Field).ToHashSet();
+                var candidate = CommuteIndependentStores(body, preferred);
+                template = CommuteIndependentStores(template, preferred);
+                var blocks = candidate.Blocks.ToDictionary(b => b.Address);
+                string? nearest = null;
+                var constructed = false;
+                for (var start = 0; start <= index; start++)
                 {
-                    body = Constructed(replaced.Apply(body), variable, method);
-                    failures.Clear();
-                    break;
+                    var match = Match(candidate, blocks, block, start, template, pending.Allocated.Arguments, out var failure);
+                    if (match is not null && match.Covered.Contains((block, index))
+                        && PlanReplacement(candidate, blocks, block, start, method, match, out failure) is { } replaced)
+                    {
+                        body = Constructed(replaced.Apply(body), variable, method);
+                        failures.Clear();
+                        constructed = true;
+                        break;
+                    }
+                    nearest = failure;
                 }
-                failures.Add($"{definition.Name}({definition.Parameters.Count})：{failure}");
+                if (constructed) break;
+                failures.Add($"{definition.Name}({definition.Parameters.Count})：{nearest}");
             }
             if (failures.Count > 0 || PendingCall(body, variable, pending) is not null)
                 constructionFailures[variable] = failures.Count == 0 ? "没有构造函数" : string.Join("；", failures.Distinct().Take(3));
@@ -180,7 +193,7 @@ internal sealed partial class TemplateRecovery
         }).ToArray(),
     };
 
-    /// <summary>未证明的构造：基类构造调用换成洞。</summary>
+    /// <summary>未证明的构造：基类构造调用和接收者使用保留缺口。</summary>
     private ManagedBody SealConstructions(ManagedBody body)
     {
         foreach (var (variable, pending) in pendingConstructions)
@@ -198,6 +211,9 @@ internal sealed partial class TemplateRecovery
                             : [new ManagedHole(pending.Address, $"构造 {pending.Allocated} 的构造函数被内联", false)]).ToArray(),
                 }).ToArray(),
             };
+            ManagedValue Uninitialized(ManagedValue value) => value is LocalValue local && local.Variable == variable
+                ? new HoleValue(reason, local.Type, local.Width) : ManagedValues.Map(value, Uninitialized);
+            body = ManagedValues.Map(body, Uninitialized);
         }
         return body;
     }
@@ -217,18 +233,22 @@ internal sealed partial class TemplateRecovery
             if (summaries(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
             var preferred = template.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>()
                 .Select(s => s.Target).OfType<FieldValue>().Select(f => f.Field.Field).ToHashSet();
-            var candidate = CommuteIndependentStores(body, preferred);
-            template = CommuteIndependentStores(template, preferred);
-            var blocks = candidate.Blocks.ToDictionary(b => b.Address);
-            foreach (var block in candidate.Blocks)
-                for (var start = 0; start < block.Statements.Count; start++)
-                {
-                    if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
-                    var match = Match(candidate, blocks, block.Address, start, template, parent.Arguments, out _);
-                    // 交换只为比对；区域外的块保持原次序。
-                    if (match is not null && PlanReplacement(candidate, blocks, block.Address, start, method, match, out _) is { } replaced)
-                        return replaced.Apply(body);
-                }
+            // 基类字段可在其父类调用之前或之后初始化，两种次序分别保留模板与调用的邻接关系。
+            foreach (var preferredFirst in new[] { true, false })
+            {
+                var candidate = CommuteIndependentStores(body, preferred, preferredFirst);
+                var orderedTemplate = CommuteIndependentStores(template, preferred, preferredFirst);
+                var blocks = candidate.Blocks.ToDictionary(b => b.Address);
+                foreach (var block in candidate.Blocks)
+                    for (var start = 0; start < block.Statements.Count; start++)
+                    {
+                        if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
+                        var match = Match(candidate, blocks, block.Address, start, orderedTemplate, parent.Arguments, out _);
+                        // 交换只为比对；区域外的块保持原次序。
+                        if (match is not null && PlanReplacement(candidate, blocks, block.Address, start, method, match, out _) is { } replaced)
+                            return replaced.Apply(body);
+                    }
+            }
         }
         return body;
     }

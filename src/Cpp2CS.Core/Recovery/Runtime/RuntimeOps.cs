@@ -115,6 +115,22 @@ public static class RuntimeOps
 
     private static IEnumerable<RuntimeOpRule> Build()
     {
+        yield return new(OpKind.ReadByteArray)
+        {
+            Inputs = (_, a, t) => a.Count == 2 ? [new(a[0], t.TypeOf(a[0])), new(a[1], t.Types.Int32)] : [],
+            ResultWidths = _ => [8],
+            ResultType = (_, t) => t.Types.Byte,
+            Behavior = new(EffectKind.Read, ExceptionEffect.NullReference | ExceptionEffect.Bounds),
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Arguments.Count != 2 || c.TypeOf(c.Arguments[0]) is not ArrayRef { IsVector: true } array
+                    || !array.Element.Equals(c.Types.Byte)) return false;
+                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, c.Types.Byte),
+                    new ArrayElementValue(c.Input(0), c.Input(1), c.Types.Byte, 8)));
+                return true;
+            },
+        };
         yield return new(OpKind.FieldAddress)
         {
             Inputs = (call, a, t) => a.Count == 2 ? [new(a[0], t.TypeOf(a[0]) ?? t.FieldOperand(call, 1)?.DeclaringType)] : [],

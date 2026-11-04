@@ -55,6 +55,8 @@ internal static class DirectPass
             HelperKind.UnwindResume => (OpKind.ResumeUnwind, null, [Arg(0)]),
             HelperKind.FieldAddress => (OpKind.FieldAddress, null, [Arg(0), Arg(1)]),
             HelperKind.ArrayElementAddress => (OpKind.ArrayElementAddress, null, [Arg(0), Arg(1), Arg(2)]),
+            HelperKind.ReadByteArray when ArrayIndex32(state.defs.Expand(Arg(1))) is { } arrayIndex
+                => (OpKind.ReadByteArray, null, [Arg(0), arrayIndex]),
             HelperKind.Export => (OpKind.Export, helper.Detail, args),
             HelperKind.Import when helper.Detail == "__cxa_begin_catch" => (OpKind.BeginCatch, null, [Arg(0)]),
             HelperKind.Import when helper.Detail == "__cxa_end_catch" => (OpKind.EndCatch, null, []),
@@ -77,10 +79,18 @@ internal static class DirectPass
             Op = new RuntimeOp(found.Kind, found.Operand),
             Arguments = found.Arguments,
             Sources = found.Kind == OpKind.Import ? call.Sources : [],
-            StackPointer = found.Kind == OpKind.Import && state.owner.calls.Signature(helper.Address) is { } imported
-                && imported.Reads.All(r => r.Bank != Bank.Stack) ? null : call.StackPointer,
+            StackPointer = state.owner.calls.Signature(helper.Address) is { } native
+                && native.Reads.All(r => r.Bank != Bank.Stack) ? null : call.StackPointer,
         };
     }
+
+    // 原生地址相加使用 x1，边界比较使用 w1；仅在高位来自 32 位扩展时共享托管下标。
+    internal static Expr? ArrayIndex32(Expr value) => value switch
+    {
+        Ir.Convert { Kind: ConvKind.SignExtend or ConvKind.ZeroExtend, Width: 64, Operand.Width: 32 } converted => converted.Operand,
+        Const constant when constant.Value <= uint.MaxValue || constant.Signed is >= int.MinValue and < 0 => Expr.C(constant.Value, 32),
+        _ => null,
+    };
 
     private static bool GenericVirtualSlot(this IdiomState state, Expr value, MethodRef method)
     {

@@ -40,7 +40,7 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
     private bool Transparent(Stmt statement, IReadOnlySet<Sym> nonNull) =>
         semantics.Statement(statement, nonNull).CanDiscard;
 
-    private bool SameUnwind(Block a, Block b)
+    internal bool SameUnwind(Block a, Block b)
     {
         // 不含原生抛出点的块没有异常边；移动过去的 IL 检查仍处于相同的托管异常区域，处理入口的复制已在原抛出点保存。
         if (a.Handler is not null && b.Handler is null && regions.All(r => r.Try.Contains(a) == r.Try.Contains(b) && r.Handler.Contains(a) == r.Handler.Contains(b)))

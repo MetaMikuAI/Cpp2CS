@@ -21,9 +21,9 @@ internal sealed partial class TemplateRecovery
         for (var steps = 0; steps < 16; steps++)
         {
             if (caller.Current is not (ManagedJump or ManagedAssignment)) break;
-            // 共享续接中的无副作用复制可旁路；复制逐边组合，其他入边仍保留原块。
+            // 共享续接保留赋值作为共同终点；跳转复制逐边组合，其他入边仍保留原块。
             continuation |= caller.Index == 0 && caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) > 1;
-            if (caller.Current is ManagedAssignment assignment && NonThrowingInlineValue(assignment.Value)
+            if (!continuation && caller.Current is ManagedAssignment assignment && NonThrowingInlineValue(assignment.Value)
                 && caller.Index == caller.Blocks[caller.Block].Statements.Count - 2
                 && caller.Blocks[caller.Block].Statements[^1] is ManagedJump
                 && caller.Env.TryGetValue(assignment.Target.Variable, out var previous)

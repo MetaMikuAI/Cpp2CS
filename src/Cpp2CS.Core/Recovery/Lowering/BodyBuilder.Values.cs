@@ -129,6 +129,8 @@ internal sealed partial class BodyBuilder
 
     private ManagedValue Operation(OpSym op, TypeRef? expected, ulong address)
     {
+        if (oracle.ModularArithmetic(op) is { } carrier)
+            return IntegerBits(op, carrier, address) ?? Hole(address, $"值 模整数运算 {op.Op}", expected);
         var typing = oracle.OperationTypes(op, expected);
         switch (op.Op.Kind)
         {
