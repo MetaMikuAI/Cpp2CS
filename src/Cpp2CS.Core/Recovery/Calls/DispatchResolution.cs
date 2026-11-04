@@ -14,31 +14,32 @@ internal static class DispatchResolution
 {
     public static int Run(MachineFunction function, ValueModel values, TypeOracle oracle)
     {
-        var resolved = 0;
+        var targets = Find(function, values, oracle);
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
+                if (block.Statements[i] is Call call && targets.TryGetValue(call.Site, out var method))
+                    block.Statements[i] = call with { Resolved = method };
+        return targets.Count;
+    }
+
+    /// <summary>只读发现调用目标；事实与图改写分开，供内存与分派共同求解。</summary>
+    public static IReadOnlyDictionary<CallSite, MethodRef> Find(MachineFunction function, ValueModel values, TypeOracle oracle)
+    {
+        var targets = new Dictionary<CallSite, MethodRef>();
+        foreach (var call in function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Resolved is null))
+        {
+            MethodRef? method = call.Op switch
             {
-                if (block.Statements[i] is Call { Op: null, Kind: CallKind.Indirect or CallKind.TailIndirect, Resolved: null } indirect
-                    && SymTable.Resolve(values.Operands(indirect)[0]) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef target } })
-                {
-                    // 目标取自已知类的虚表槽：确切类型上的虚调用。
-                    block.Statements[i] = indirect with { Resolved = target };
-                    resolved++;
-                    continue;
-                }
-                if (block.Statements[i] is not Call { Op: { } op, Resolved: null } call) continue;
-                MethodRef? method = op switch
-                {
-                    { Kind: OpKind.CallDelegate, Operand: MethodRef invoke } => invoke,
-                    { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } pair } => Slot(itf, pair.Item2, interfaceOnly: true),
-                    { Kind: OpKind.CallVirtual, Operand: int slot } when Receiver(call, values) is { } receiver => VirtualSlot(oracle.TypeOf(receiver), slot, oracle.Types),
-                    _ => null,
-                };
-                if (method is null) continue;
-                block.Statements[i] = call with { Resolved = method };
-                resolved++;
-            }
-        return resolved;
+                null when call.Kind is CallKind.Indirect or CallKind.TailIndirect
+                    && SymTable.Resolve(values.Operands(call)[0]) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef target } } => target,
+                { Kind: OpKind.CallDelegate, Operand: MethodRef invoke } => invoke,
+                { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } pair } => Slot(itf, pair.Item2, interfaceOnly: true),
+                { Kind: OpKind.CallVirtual, Operand: int slot } when Receiver(call, values) is { } receiver => VirtualSlot(oracle.TypeOf(receiver), slot, oracle.Types),
+                _ => null,
+            };
+            if (method is not null) targets.Add(call.Site, method);
+        }
+        return targets;
     }
 
     private static Sym? Receiver(Call call, ValueModel values)

@@ -160,28 +160,21 @@ public sealed class MethodDecompiler
         if (StackBoxing.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary)) > 0)
             preliminary = ValueModel.Build(function, environment);
         DispatchResolution.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary));
-        // 分派的接收者也可能来自局部内存。新签名确定后从原始读写重做提升，避免沿用未知调用的内存效果。
-        var unpromoted = function.Blocks.Select(b => b.Statements.Select(s => s is Phi phi ? phi with { Sources = [.. phi.Sources] } : s).ToArray()).ToArray();
-        var deadCount = function.Dead.Count;
+        // 每轮从稳定输入构建分析图，只累积已证明的调用目标，不回滚生产语句和 SSA。
+        var prepared = function;
+        var targets = new Dictionary<CallSite, MethodRef>();
         MemoryLayout layout;
         while (true)
         {
+            function = prepared.Copy(call => targets.TryGetValue(call.Site, out var target) ? call with { Resolved = target } : call);
+            environment = new MethodEnvironment(method, signature, shapes);
             if (!MemoryPromotion.Run(function, signature, environment.Shape, abi, lifter.Calls, lifter.Machine.Convention.StackPointer).TryGet(out layout, out var memoryFailure))
                 return memoryFailure;
             environment.Layout = layout;
             var promoted = ValueModel.Build(function, environment);
-            if (DispatchResolution.Run(function, promoted, new TypeOracle(types, facts, method, environment.Shape, promoted, layout)) == 0) break;
-            // 事实按调用点身份带回，不依赖改写后调用的排列次序。
-            var targets = function.Blocks.SelectMany(b => b.Statements).OfType<Call>()
-                .Where(c => c.Resolved is not null).ToDictionary(c => c.Site, c => c.Resolved);
-            for (var b = 0; b < function.Blocks.Count; b++)
-            {
-                for (var i = 0; i < unpromoted[b].Length; i++)
-                    if (unpromoted[b][i] is Call call && targets.TryGetValue(call.Site, out var target))
-                        unpromoted[b][i] = call with { Resolved = target };
-                function.Blocks[b].Statements = [.. unpromoted[b].Select(s => s is Phi phi ? phi with { Sources = [.. phi.Sources] } : s)];
-            }
-            function.Dead.RemoveRange(deadCount, function.Dead.Count - deadCount);
+            var discovered = DispatchResolution.Find(function, promoted, new TypeOracle(types, facts, method, environment.Shape, promoted, layout));
+            if (discovered.Count == 0) break;
+            foreach (var (site, target) in discovered) targets.Add(site, target);
         }
         // 帧提升消去异常值的栈副本后，落地跳板可能才成为纯传值链。
         if (StackGuardNormalizer.Run(function))

@@ -45,6 +45,38 @@ public sealed class MachineFunction
     /// <summary>传播删去的死定义及其所在块：机器状态里这些寄存器仍被写过，追溯某条指令处寄存器的值时需要它们。</summary>
     public List<(Block Block, Define Define)> Dead { get; } = [];
 
+    /// <summary>分析用的独立图：复制可变块、边和 SSA 来源，保留调用身份与不可变表达式。</summary>
+    public MachineFunction Copy(Func<Call, Call>? rewriteCall = null)
+    {
+        var blocks = Blocks.Concat(Dead.Select(d => d.Block)).Distinct().ToDictionary(b => b,
+            b => new Block(b.Start) { End = b.End, Index = b.Index, IsLandingPad = b.IsLandingPad });
+        foreach (var block in Blocks)
+        {
+            var copy = blocks[block];
+            copy.Statements = [.. block.Statements.Select(s => s switch
+            {
+                Phi phi => phi with { Sources = [.. phi.Sources] },
+                Call call => CopyCall(call),
+                _ => s,
+            })];
+            copy.Successors.AddRange(block.Successors.Select(b => blocks[b]));
+            copy.Predecessors.AddRange(block.Predecessors.Select(b => blocks[b]));
+            copy.Handler = block.Handler is { } handler ? blocks[handler] : null;
+        }
+        var result = new MachineFunction { Entry = Entry, Range = Range, Blocks = Blocks.Select(b => blocks[b]).ToList(),
+            JumpTables = JumpTables, UnresolvedIndirectJumps = UnresolvedIndirectJumps };
+        result.Dead.AddRange(Dead.Select(d => (blocks[d.Block], d.Define)));
+        result.Problems.AddRange(Problems);
+        return result;
+
+        Call CopyCall(Call call)
+        {
+            var copy = call with { Arguments = [.. call.Arguments], Sources = [.. call.Sources], Results = [.. call.Results],
+                Defines = [.. call.Defines], Memory = [.. call.Memory] };
+            return rewriteCall?.Invoke(copy) ?? copy;
+        }
+    }
+
     /// <summary>重新按逆后序编号并删除不可达块（变换之后调用）。</summary>
     public void Renumber()
     {

@@ -79,6 +79,20 @@ internal static class ArchitectureChecks
         var syms = new SymTable();
         check.True(!ReferenceEquals(syms.Result(call, 0, 64), syms.Result(other, 0, 64)),
             "同地址的不同调用不能共享结果原子");
+        var first = new Block(0) { Statements = [call, new Jump(0, 4)] };
+        var variable = new Variable(Storage.Gpr(0), 1);
+        var last = new Block(4) { Statements = [new Phi(4, variable, [variable]), new Return(4)] };
+        MachineFunction.AddEdge(first, last);
+        var original = new MachineFunction { Entry = 0, Range = new(0, 8, CodeRegion.Managed, default), Blocks = [first, last] };
+        var analysis = original.Copy();
+        ((Phi)analysis.Blocks[1].Statements[0]).Sources[0] = new(Storage.Gpr(1), 0);
+        analysis.Blocks[0].Statements.RemoveAt(0);
+        check.True(first.Statements[0] == call && ((Phi)last.Statements[0]).Sources[0] == variable,
+            "分析副本的语句和合流来源不修改稳定输入");
+        check.True(analysis.Blocks[0].Successors[0] == analysis.Blocks[1] && analysis.Blocks[1].Predecessors[0] == analysis.Blocks[0],
+            "分析副本的控制边只引用副本块");
+        check.True(ReferenceEquals(((Call)original.Copy().Blocks[0].Statements[0]).Site, call.Site),
+            "同一调用在不同分析版本中保留逻辑身份");
     }
 
     private static void AssembledPieces(Assertions check)
