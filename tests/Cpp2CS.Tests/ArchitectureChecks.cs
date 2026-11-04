@@ -41,6 +41,7 @@ internal static class ArchitectureChecks
         SharedInterfacePartitions(checks);
         InvokerArguments(checks, facts, types);
         SharedInvokerCopies(checks, facts, types);
+        MethodInfoSpills(checks, facts);
         StackBoxes(checks, facts, types);
         PartialScalarCells(checks, facts, types);
         EntryKinds(checks, facts, types);
@@ -366,6 +367,30 @@ internal static class ArchitectureChecks
             var proof = SharedInvokerArguments.Prove(state, join, invoke, array, 0, type);
             check.Equal(variant is "private" or "null-check" or "nested" or "neighbor-copy" or "spilled-input" or "reuse-array",
                 proof?.Value == input, $"共享泛型私有副本证明：{variant}");
+        }
+    }
+
+    private static void MethodInfoSpills(Assertions check, ProgramFacts facts)
+    {
+        foreach (var variant in new[] { "private", "metadata-size", "mutable-field", "overwritten", "escaped", "before-save" })
+        {
+            var methodInfo = Storage.Gpr(3);
+            var input = new Use(new Variable(methodInfo, 0), 64);
+            var slot = new FrameAddress(-16);
+            var loaded = new Variable(Storage.Temp(870), 1);
+            Expr initial = variant == "metadata-size"
+                ? new Ir.Convert(ConvKind.ZeroExtend, new Load(new Binary(BinOp.Add,
+                    new Symbol(SymbolKind.Class, new GenericParameterRef("T", true, 0)), Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32), 64)
+                : variant == "mutable-field" ? new Load(new Binary(BinOp.Add, input, Expr.C(16, 64), 64), 64) : input;
+            var saved = new Store(0, slot, initial);
+            var read = new Define(8, loaded, new Load(slot, 64));
+            var statements = new List<Stmt> { saved, read, new Return(12) { Pieces = [new(0, new Use(loaded, 64))] } };
+            if (variant == "overwritten") statements.Insert(1, new Store(4, slot, Expr.C(0, 64)));
+            if (variant == "escaped") statements.Insert(1, new Store(4, new Use(new Variable(Storage.Gpr(1), 0), 64), slot));
+            if (variant == "before-save") (statements[0], statements[1]) = (read, saved);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [new(0) { Statements = statements }] };
+            var state = new IdiomState(new IdiomRewriter(facts), function) { selfMethodInfo = methodInfo };
+            check.Equal(variant is "private" or "metadata-size", PrivateFrameInputs.ForwardMetadata(state), $"不可变输入私有保存 {variant}");
         }
     }
 

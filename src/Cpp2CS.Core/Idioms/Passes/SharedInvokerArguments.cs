@@ -19,37 +19,7 @@ internal static class SharedInvokerArguments
         bool DirectInput(Expr value, TypeRef inputType) => signature.Arguments.Any(a => a.Index >= 0 && ManagedAbi.SharedValue(a.Type)
             && formal.Concrete(self.Method.Parameters[a.Index].Type).Equals(inputType)
             && a.Pieces is [{ Register: var register }] && value is Use { Variable.Version: 0 } use && use.Variable.Storage == register);
-        bool ExposesFrame(Expr expression, FrameAddress sought) => expression is not Load
-            && !(DynamicRegion(expression) is { } region && region.Root.Offset <= sought.Offset)
-            && (expression is FrameAddress frame ? frame.Offset < sought.Offset + 8 : ExprMap.Children(expression).Any(e => ExposesFrame(e, sought)));
-        Expr? OriginalInput(Expr value, TypeRef inputType)
-        {
-            if (DirectInput(value, inputType)) return value;
-            if (value is not Load { Width: 64, Address: FrameAddress slot }) return null;
-            var sites = state.function.Blocks.SelectMany(b => b.Statements.Select((s, i) => (Block: b, Index: i, Statement: s))).ToArray();
-            var stores = sites.Where(s => s.Statement is Store store && Expand(store.Target) is FrameAddress frame
-                && frame.Offset < slot.Offset + 8 && slot.Offset < frame.Offset + store.Value.Width / 8).ToArray();
-            if (stores is not [var written] || written.Statement is not Store { Value.Width: 64 } saved
-                || Expand(saved.Target) != slot || !DirectInput(Expand(saved.Value), inputType)) return null;
-            var dominators = Dominators.Compute(state.function);
-            foreach (var site in sites)
-            {
-                foreach (var load in ExprMap.Operands(site.Statement).SelectMany(ExprMap.Walk).OfType<Load>())
-                    if (Expand(load.Address) is FrameAddress frame && frame.Offset < slot.Offset + 8 && slot.Offset < frame.Offset + load.Width / 8
-                        && (frame != slot || load.Width != 64 || !dominators.Dominates(written.Block.Index, site.Block.Index)
-                            || written.Block == site.Block && written.Index >= site.Index)) return null;
-                IEnumerable<Expr> exposed = site.Statement switch
-                {
-                    Define => [],
-                    Store store when Expand(store.Target) is FrameAddress => [store.Value],
-                    Call call => call.Arguments,
-                    Phi phi => phi.Sources.Select(v => (Expr)new Use(v, v.Width)),
-                    _ => ExprMap.Operands(site.Statement),
-                };
-                if (exposed.Select(Expand).Any(e => ExposesFrame(e, slot))) return null;
-            }
-            return Expand(saved.Value);
-        }
+        Expr? OriginalInput(Expr value, TypeRef inputType) => PrivateFrameInputs.Origin(state, value, source => DirectInput(source, inputType));
         Store? Previous(Block at, int before, Expr address)
         {
             var seen = new HashSet<Block>();
@@ -65,7 +35,7 @@ internal static class SharedInvokerArguments
                             || targetFrame.Offset < sought.Offset + 8 && sought.Offset < targetFrame.Offset + store.Value.Width / 8) return null;
                     }
                     if (at.Statements[i] is Call call && (address is not FrameAddress callSlot
-                        || call.Arguments.Select(Expand).Any(e => ExposesFrame(e, callSlot))))
+                        || call.Arguments.Select(Expand).Any(e => PrivateFrameInputs.Exposes(e, callSlot))))
                     {
                         if (call.Op is not { Kind: OpKind.InvokeGeneric, Operand: MethodRef invoked }
                             || state.owner.abi.Invoker((MethodRef)GenericContext.Instantiate(invoked, self)!).Indirections
@@ -114,7 +84,7 @@ internal static class SharedInvokerArguments
             && Expand(new Use(p.Sources[0], p.Target.Width)) != Expand(new Use(p.Sources[1], p.Target.Width)))) return null;
         var size = new Ir.Convert(ConvKind.ZeroExtend,
             new Load(new Binary(BinOp.Add, new Symbol(SymbolKind.Class, type), Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32), 64);
-        if (DynamicRegion(destination) is not { } region || region.Root.Offset > argumentAddress.Offset || region.Sizes[^1] != size) return null;
+        if (DynamicStackRegion.Parse(destination) is not { } region || region.Root.Offset > argumentAddress.Offset || region.Sizes[^1] != size) return null;
         var copies = state.All.OfType<Call>().Where(c => c is { Op.Kind: OpKind.Import, Op.Operand: "memcpy", Arguments.Length: 3 }
             && Expand(c.Arguments[0]) == destination && Expand(c.Arguments[2]) == size).ToArray();
         if (copies is not [var copy] || Expand(copy.Arguments[1]) is not Select source) return null;
@@ -143,11 +113,11 @@ internal static class SharedInvokerArguments
         bool Contains(Expr expression)
         {
             var value = Expand(expression);
-            return !(DynamicRegion(value) is { } other && region.Disjoint(other))
+            return !(DynamicStackRegion.Parse(value) is { } other && region.Disjoint(other))
                 && (value == destination || ExprMap.Children(value).Any(Contains));
         }
         bool FrameAlias(Expr expression) => expression is not Load
-            && !(DynamicRegion(expression) is { } dynamic && dynamic.Root.Offset <= argumentAddress.Offset)
+            && !(DynamicStackRegion.Parse(expression) is { } dynamic && dynamic.Root.Offset <= argumentAddress.Offset)
             && (expression is FrameAddress f ? f.Offset <= argumentAddress.Offset + 7 : ExprMap.Children(expression).Any(FrameAlias));
         bool ReadsArgument(Expr expression) => ExprMap.Walk(Expand(expression)).OfType<Load>().Any(load =>
             load.Address != destination && (load.Address is FrameAddress f
@@ -156,7 +126,7 @@ internal static class SharedInvokerArguments
         bool OtherCopy(Call call)
         {
             if (call is not { Op.Kind: OpKind.Import, Op.Operand: "memcpy", Arguments.Length: 3 }
-                || DynamicRegion(Expand(call.Arguments[0])) is not { } other || !region.Disjoint(other)
+                || DynamicStackRegion.Parse(Expand(call.Arguments[0])) is not { } other || !region.Disjoint(other)
                 || Expand(call.Arguments[2]) != other.Sizes[^1] || Expand(call.Arguments[1]) is not Select selected
                 || other.Sizes[^1] is not Ir.Convert { Operand: Load { Address: Binary { Left: Symbol { Value: TypeRef otherType } } } }
                 || call.Defines.Any(v => v is not null && state.Used(v))) return false;
@@ -212,25 +182,4 @@ internal static class SharedInvokerArguments
         return new(original, argument, copy, head, referenceArm);
     }
 
-    private sealed record Region(FrameAddress Root, IReadOnlyList<Expr> Sizes)
-    {
-        public bool Disjoint(Region other) => Root == other.Root && Sizes.Count != other.Sizes.Count
-            && Sizes.Take(Math.Min(Sizes.Count, other.Sizes.Count)).SequenceEqual(other.Sizes.Take(Math.Min(Sizes.Count, other.Sizes.Count)));
-    }
-
-    /// <summary>按正的 stackslot_size 连续向下分配的区域，各段按 16 字节对齐。</summary>
-    private static Region? DynamicRegion(Expr expression)
-    {
-        var sizes = new List<Expr>();
-        while (expression is Binary { Op: BinOp.Sub, Left: var upper, Right: Binary { Op: BinOp.And,
-            Left: Binary { Op: BinOp.Add, Left: var size, Right: Const { Value: 15 } }, Right: Const mask } })
-        {
-            if (sizes.Count >= 16 || mask.Value is not (0x1fffffff0 or 0xfffffffffffffff0)
-                || size is not Ir.Convert { Kind: ConvKind.ZeroExtend, Width: 64, Operand: Load { Width: 32,
-                    Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef }, Right: Const { Value: RuntimeLayout.ClassStackSlotSize } } } }) return null;
-            sizes.Insert(0, size);
-            expression = upper;
-        }
-        return expression is FrameAddress root && sizes.Count > 0 ? new(root, sizes) : null;
-    }
 }

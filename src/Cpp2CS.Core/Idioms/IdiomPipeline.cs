@@ -79,6 +79,15 @@ internal static class IdiomPipeline
             if (FrameSlotPromotion.ForwardCallSpills(state.function, c => c.Op is null && state.owner.HelperOf(c)?.Kind == HelperKind.InterfaceLookup))
                 state.Cleanup();
         });
+        state.Passes.Run("idioms.PrivateFrameInputs.ForwardMetadata", () =>
+        {
+            while (PrivateFrameInputs.ForwardMetadata(state))
+            {
+                state.Cleanup();
+                state.Symbols(rgctx: true);
+                state.Normalize();
+            }
+        });
         state.Passes.Run("idioms.FrameSlotPromotion.ForwardSingleStores", () =>
         {
             if (FrameSlotPromotion.ForwardSingleStores(state.function) > 0)
