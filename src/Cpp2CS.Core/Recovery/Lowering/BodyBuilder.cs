@@ -87,7 +87,10 @@ internal sealed partial class BodyBuilder
             currentOutput = null;
             var normal = block.NormalSuccessors.ToArray();
             if (exit is null && output.LastOrDefault() is not (ManagedThrow or ManagedRethrow or ManagedReturn or ManagedEndFault or ManagedHole { Terminal: true }))
-                exit = normal.Length == 1 ? new Jump(block.End, normal[0].Start) : Fail(block.End, "控制 块没有终结语句", terminal: true);
+                exit = normal.Length == 1 ? new Jump(block.End, normal[0].Start)
+                    // 块止于不返回的调用（事实层已证明），之后不可达；IL 仍需要终结语句。
+                    : normal.Length == 0 && output.LastOrDefault() is ManagedCall ? new Statement(new ManagedThrow(block.End, new ConstantValue(0, types.Object, 64)))
+                    : Fail(block.End, "控制 块没有终结语句", terminal: true);
             lowered.Add((block, output, exit));
             holeRanges[block] = (holesBefore, holes.Count);
         }
