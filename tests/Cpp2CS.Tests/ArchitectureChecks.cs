@@ -270,6 +270,7 @@ internal static class ArchitectureChecks
     {
         foreach (var count in new[] { 2, 4 })
         foreach (var consistent in new[] { true, false })
+        foreach (var withResult in new[] { true, false })
         {
             var version = 0;
             Variable Fresh(int width = 64) => new(Storage.Gpr(20), ++version);
@@ -304,13 +305,31 @@ internal static class ArchitectureChecks
                 { Arguments = [receiver, Expr.C(3000, 64), new Use(slotPhi, 64)], Defines = [slowResult], Results = [Storage.Gpr(0)] };
             slow.Statements = [new Phi(1000, slotPhi, slots.ToArray()), lookup, new Jump(1008, merge.Start)];
             hit.Statements = [new Phi(1020, offsetPhi, offsets.ToArray()), new Define(1024, fastResult, new Use(offsetPhi, 64)), new Jump(1028, merge.Start)];
-            merge.Statements = [new Phi(1040, mergedResult, [slowResult, fastResult]), new Call(1044, CallKind.TailIndirect, new Use(mergedResult, 64))];
+            var callResult = Fresh();
+            var invocation = new Call(1044, withResult ? CallKind.Indirect : CallKind.TailIndirect, new Use(mergedResult, 64))
+                { Defines = withResult ? [callResult] : [], Results = withResult ? [Storage.Gpr(0)] : [] };
+            merge.Statements = [new Phi(1040, mergedResult, [slowResult, fastResult]), invocation];
             MachineFunction.AddEdge(slow, merge); MachineFunction.AddEdge(hit, merge);
+            if (withResult)
+            {
+                var returned = Fresh();
+                var exit = new Block(1060) { End = 1064, Statements = [new Phi(1060, returned, [callResult]), new Return(1064) { Value = new Use(returned, 64) }] };
+                merge.Statements.Add(new Jump(1048, exit.Start));
+                MachineFunction.AddEdge(merge, exit);
+                function.Blocks.Add(exit);
+            }
             function.Renumber();
             var changed = SharedInterfaceTails.Run(function, c => ReferenceEquals(c, lookup), Fresh);
             check.Equal(consistent, changed, "接口尾部逐一配对所有快慢路径槽位，缺少对应槽时拒绝拆分");
-            if (changed) check.Equal(count, function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Count(c => c.Kind == CallKind.TailIndirect),
+            if (changed) check.Equal(count, function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Count(c => c.Kind is CallKind.Indirect or CallKind.TailIndirect),
                 "每个接口槽保留一个独立调用");
+            if (changed && withResult)
+            {
+                var results = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Kind == CallKind.Indirect).SelectMany(c => c.Defines).ToHashSet();
+                var exit = function.Blocks.Single(b => b.Start == 1060);
+                check.True(exit.Statements.OfType<Phi>().Single().Sources.All(results.Contains) && exit.Predecessors.Count == count,
+                    "各分支调用结果经新入边汇合，出口不引用被删除的调用结果");
+            }
         }
     }
 
@@ -1509,24 +1528,26 @@ internal static class ArchitectureChecks
 
     private static void ArrayOffsetInductions(Assertions check)
     {
-        foreach (var variant in new[] { "matched", "zero-offset", "wrong-stride", "narrow-offset" })
+        foreach (var variant in new[] { "matched", "zero-offset", "wrong-stride", "narrow-offset", "unit-counter" })
         {
             var array = new Variable(Storage.Gpr(0), 0);
             var start = new Variable(Storage.Gpr(1), 1); var offset = start with { Version = 2 }; var next = start with { Version = 3 };
             var entry = new Block(0); var loop = new Block(8); var back = new Block(16);
-            entry.Statements = [new Define(0, start, Expr.C(variant == "zero-offset" ? 0UL : 32UL, 64)), new Jump(4, 8)];
+            entry.Statements = [new Define(0, start, Expr.C(variant is "zero-offset" or "unit-counter" ? 0UL : 32UL, 64)), new Jump(4, 8)];
             loop.Statements = [new Phi(8, offset, [start, next]),
                 new Store(8, new Binary(BinOp.Add, new Use(array, 64), new Use(offset, 64), 64), Expr.C(0, 64)), new Jump(12, 16)];
-            back.Statements = [new Define(16, next, new Binary(BinOp.Add, new Use(offset, 64), Expr.C(variant == "wrong-stride" ? 16UL : 8UL, 64),
+            back.Statements = [new Define(16, next, new Binary(BinOp.Add, new Use(offset, 64), Expr.C(variant == "wrong-stride" ? 16UL : variant == "unit-counter" ? 1UL : 8UL, 64),
                 variant == "narrow-offset" ? 32 : 64)), new Jump(20, 8)];
             MachineFunction.AddEdge(entry, loop); MachineFunction.AddEdge(loop, back); MachineFunction.AddEdge(back, loop);
             var function = new MachineFunction { Entry = 0, Range = new(0, 24, CodeRegion.Managed, default), Blocks = [entry, loop, back] };
             var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
             function.Renumber();
             var serial = 0;
-            check.Equal(variant is "matched" or "zero-offset", ArrayPointerLoopsPass.Run(function, new Dictionary<Variable, int> { [array] = 8 },
+            check.Equal(variant is "matched" or "zero-offset", ArrayPointerLoopsPass.Run(function, new Dictionary<Variable, int> { [array] = variant == "unit-counter" ? 1 : 8 },
                 e => e is Use use ? definitions.GetValueOrDefault(use.Variable) : null, () => new Variable(Storage.Temp(serial++), 1)),
                 $"数组字节偏移计数器 {variant}");
+            if (variant == "unit-counter") check.True(loop.Statements.OfType<Phi>().Any(p => p.Target == offset),
+                "已有单位计数器保留原定义，不能在自替换时删除");
         }
     }
 

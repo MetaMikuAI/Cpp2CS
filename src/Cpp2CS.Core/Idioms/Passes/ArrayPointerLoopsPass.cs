@@ -79,6 +79,7 @@ internal static class ArrayPointerLoopsPass
                         || function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().Any(p => p != pointer && p.Sources.Contains(pointer.Target)))
                         continue;
                     var index = InductionVariables.UnitCounter(block, seed, induction.Width, definition);
+                    if (index == pointer) continue;
                     if (index is null)
                     {
                         var advanceBlock = function.Blocks.FirstOrDefault(b => b.Statements.OfType<Define>().Any(d => d.Target == pointer.Sources[1 - seed]));

@@ -60,7 +60,7 @@ internal static class SharedInterfaceTails
                 || merge.Predecessors.Count != 2
                 || merge.Statements.OfType<Call>().ToArray() is not [Call { Op: null, Kind: CallKind.Indirect or CallKind.TailIndirect } invoke]) continue;
             var exits = merge.NormalSuccessors.ToArray();
-            if (exits.Length > 1 || exits.Length == 0 && merge.Statements.LastOrDefault() is not (Return { Value: null } or Call { Kind: CallKind.TailIndirect })) continue;
+            if (exits.Length > 1 || exits.Length == 0 && merge.Statements.LastOrDefault() is not (Return or Call { Kind: CallKind.TailIndirect })) continue;
             var exit = exits.SingleOrDefault();
             var hit = merge.Predecessors.Single(p => p != slowExit);
             if (hit.Handler is not null || hit.IsLandingPad || hit.Predecessors.Count is < 2 or > 16
@@ -112,17 +112,18 @@ internal static class SharedInterfaceTails
             var split = new[] { slow, hit, merge };
             var shared = split.Concat(bridges).ToArray();
             if (split.Any(b => b.Statements.Any(s => s is not (Phi or Define or Call or Jump or Nop)
-                    && !(b == merge && s is Return { Value: null })))) continue;
+                    && !(b == merge && s is Return)))) continue;
             var defined = shared.SelectMany(b => b.Statements).SelectMany(Defines).ToHashSet();
-            // 此形态调用返回 void，合并尾部的临时寄存器不能流出；外部 φ 由原边的输入原样复制。
-            if (function.Blocks.Except(shared).SelectMany(b => b.Statements).Any(s => s is Phi p && p.Sources.Any(defined.Contains)
-                || ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => defined.Contains(u.Variable)))) continue;
+            var exitIndex = exit?.Predecessors.IndexOf(merge) ?? -1;
+            // 尾部结果只经原出口的对应 φ 入边流出，复制时按每条路径的变量映射续接。
+            if (function.Blocks.Except(shared).Any(b => b.Statements.Any(s => s is Phi p
+                ? p.Sources.Where((_, i) => b != exit || i != exitIndex).Any(defined.Contains)
+                : ExprMap.Operands(s).SelectMany(ExprMap.Walk).OfType<Use>().Any(u => defined.Contains(u.Variable))))) continue;
             var incoming = new[] { slow.Predecessors.ToArray(), hit.Predecessors.ToArray() };
             if (incoming.SelectMany(p => p).Any(p => p.Handler is not null || p.IsLandingPad || shared.Contains(p)
                 || p.Successors.Distinct().Count() != p.Successors.Count
                 || p.NormalSuccessors.Count() != 1 && p.Statements.LastOrDefault() is not Branch)) continue;
             var copies = new List<(Block Slow, Block Hit, Block Merge)>();
-            var exitIndex = exit?.Predecessors.IndexOf(merge) ?? -1;
             var exitValues = exit?.Statements.OfType<Phi>().ToDictionary(p => p.Target, p => p.Sources[exitIndex]);
             for (var side = 0; side < groups.Length; side++)
             {
@@ -150,7 +151,10 @@ internal static class SharedInterfaceTails
                 {
                     MachineFunction.AddEdge(mergeCopy, exit);
                     for (var i = 0; i < exit.Statements.Count && exit.Statements[i] is Phi phi; i++)
-                        exit.Statements[i] = phi with { Sources = [.. phi.Sources, exitValues![phi.Target]] };
+                    {
+                        var value = exitValues![phi.Target];
+                        exit.Statements[i] = phi with { Sources = [.. phi.Sources, merged.GetValueOrDefault(value, value)] };
+                    }
                 }
                 copies.Add((slowCopy, hitCopy, mergeCopy));
             }
