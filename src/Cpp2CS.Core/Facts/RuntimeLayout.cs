@@ -41,6 +41,10 @@ public static class RuntimeLayout
     public static int StaticFields(int metadataVersion) =>
         metadataVersion >= 108 ? 0x98 : metadataVersion >= 106 ? 0xA0 : ClassStaticFields;
 
+    /// <summary>按版本选择 <c>rgctx_data</c>：6000.5 为 0xA8，6000.6+ 为 0xA0，旧版为 0xC0。</summary>
+    public static int RgctxData(int metadataVersion) =>
+        metadataVersion >= 108 ? 0xA0 : metadataVersion >= 106 ? 0xA8 : ClassRgctxData;
+
     /// <summary>按元数据版本选择 typeHierarchy 偏移。</summary>
     public static int TypeHierarchyOffset(int metadataVersion) =>
         metadataVersion >= 108 ? 0xA8 : metadataVersion >= 106 ? 0xB0 : ClassTypeHierarchy;
