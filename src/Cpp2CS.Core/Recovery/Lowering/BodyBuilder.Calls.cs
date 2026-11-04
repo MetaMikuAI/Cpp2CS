@@ -28,7 +28,9 @@ internal sealed partial class BodyBuilder
                 var self = oracle.Parameter(-1)!;
                 output.Add(new ManagedCall(call.Address,
                     new ManagedInvocation(baseCtor, new ArgumentValue(-1, self, Width(self)), [], false), null, false));
-                return null;
+                // 共享空构造函数以尾调用进入基类构造函数；托管体还需要同位置的 ret 结束块。
+                return call.Kind is CallKind.Tail or CallKind.TailIndirect
+                    ? new Statement(new ManagedReturn(call.Address, null)) : null;
             }
             output.Add(new ManagedHole(call.Address, "调用 目标或签名未知", false));
             holes.Add(new(call.Address, "调用 目标或签名未知"));
