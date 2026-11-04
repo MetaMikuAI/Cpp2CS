@@ -59,11 +59,18 @@ public static partial class UnregisteredInference
                     guardCandidates.Add(address);
                     descriptor = "guard-candidate";
                 }
+                else if (r.Kind == RefKind.Load && pointer is null && r.Size is > 0 and <= 16 && facts.Model.Image.SectionAt(address) is { Name: ".rodata" })
+                {
+                    // 只读常量池按翻译单元各有一份：比较内容，不比较地址。
+                    descriptor = "constant:" + System.Convert.ToHexString(facts.Model.Image.ReadUpTo(address, r.Size));
+                }
                 else
                 {
                     descriptor = function.Contains(address) ? $"local:{address - function.Start:x}" : $"exact:{address:x}";
                 }
-                if (!aliases.TryGetValue(address, out var alias)) aliases[address] = alias = aliases.Count;
+                // 内容相同的常量可能共用一个地址，也可能各有一份，不参与别名关系。
+                var alias = descriptor.StartsWith("constant:", StringComparison.Ordinal) ? -1
+                    : aliases.TryGetValue(address, out var known) ? known : aliases[address] = aliases.Count;
                 descriptors[r.Site] = $"{r.Kind}:{r.Size}:{descriptor}:alias{alias}";
                 if (r.Kind == RefKind.Adr) continue;
                 pairs[r.Site] = 0; // 找不到原始 ADRP 的配对必须在 SSA 证明阶段拒绝。
@@ -105,7 +112,7 @@ public static partial class UnregisteredInference
                     text.Append(masked.ToString("x8")).Append(':').Append(descriptor);
                 }
                 else if ((word & 0x3B000000) == 0x18000000)
-                    text.Append(word.ToString("x8")).Append(":literal:").Append(A64.Imm19Target(word, pc).ToString("x"));
+                    text.Append((word & 0xFF00001F).ToString("x8")).Append(":literal:").Append(System.Convert.ToHexString(facts.Model.Image.ReadUpTo(A64.Imm19Target(word, pc), 8)));
                 else text.Append(word.ToString("x8"));
                 text.Append(';');
             }

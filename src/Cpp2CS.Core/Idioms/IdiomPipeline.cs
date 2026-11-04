@@ -57,7 +57,7 @@ internal static class IdiomPipeline
         new("phi.array-addresses", s => s.ArrayAddressPhis()),
         new("loops.affine", s => AffineInduction.Run(s.function, s.RawDefinition)),
         new("loops.array-pointers", s => s.ArrayPointerLoops()),
-        new("exception.stack", s => ExceptionStackValues.Run(s.function)),
+        new("exception.stack", s => ExceptionStackValues.Run(s.function) | ExceptionStackValues.SelectedSlots(s.function, s.owner.CallEffects, s.Fresh)),
         Do("readonly.data", s => s.ReadOnlyData()),
         new("phi.address-loads", s => AddressPhiLoads.Run(s.function, s.Fresh)),
         new("phi.class-allocations", s => ClassPhiAllocations.Run(s.function,

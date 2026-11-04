@@ -36,7 +36,9 @@ internal static class Inspect
             if (!options.Contains("--brief")) Print(analysis);
             if (options.Contains("--calls"))
                 foreach (var call in analysis.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c is { Op: null, Target: Const }))
-                    if (decompiler.Shapes.Of(call).Signature is null)
+                    if (decompiler.Shapes.Of(call).Signature is null && facts.Unregistered.Decisions.FirstOrDefault(d => d.Address == ((Const)call.Target).Value) is { } decision)
+                        Console.WriteLine($"  未注册 0x{call.Address:x} → 0x{decision.Address:x}：{decision.Reason}");
+                    else if (decompiler.Shapes.Of(call).Signature is null)
                         foreach (var (candidate, signature, problem) in decompiler.Shapes.Candidates(((Const)call.Target).Value))
                             Console.WriteLine($"  无签名调用 0x{call.Address:x} 候选 {candidate}：{(signature is null ? problem : string.Join(", ", signature.Arguments.Select(a => $"{a.Index}:{a.Transfer}/{a.Size}")))}");
             var result = decompiler.Lower(analysis);

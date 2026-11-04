@@ -20,6 +20,7 @@ internal static class SharedValuesPass
         if (NameAllocations(state)) { changed = true; state.defs = new(state.function); }
         changed |= ValueSelections(state);
         changed |= ValueBranches(state);
+        changed |= FieldWrites(state);
         changed |= CopyOperations(state);
         return changed;
     }
@@ -175,6 +176,43 @@ internal static class SharedValuesPass
     }
 
     /// <summary>按 stackslot_size(T) 的复制与清零是对 T 位置的操作。</summary>
+    /// <summary>经 FieldInfo 写字段的模板展开成字段地址加写入，之后与内联的形式相同。</summary>
+    private static bool FieldWrites(IdiomState state)
+    {
+        var changed = false;
+        foreach (var block in state.function.Blocks)
+            for (var i = 0; i < block.Statements.Count; i++)
+            {
+                if (block.Statements[i] is not Call { Op: null, Target: Const target, Kind: CallKind.Direct or CallKind.Tail } call
+                    || SharedFieldTemplates.WriteWidth(state.facts, target.Value) is not (var width and not 0)) continue;
+                Expr? Argument(int register) => call.ArgumentIndex(Storage.Gpr(register)) is >= 0 and var at ? call.Arguments[at] : null;
+                if (Argument(0) is not { } receiver || Argument(1) is not { } field || Argument(2) is not { } value) continue;
+                var address = state.Fresh();
+                var writes = new List<Stmt>
+                {
+                    new Call(call.Address, CallKind.Direct, Expr.C(0, 64))
+                    {
+                        Op = new(OpKind.FieldAddress, null), Arguments = [receiver, field], Sources = [Storage.Gpr(0), Storage.Gpr(1)],
+                        Results = [address.Storage], Defines = [address],
+                    },
+                };
+                if (width > 0) writes.Add(new Store(call.Address, new Use(address, 64), Fold.Simplify(new Extract(value, 0, width))));
+                else if (Argument(3) is { } size)
+                    writes.Add(new Call(call.Address, CallKind.Direct, Expr.C(0, 64))
+                    {
+                        Op = new(OpKind.Import, "memcpy"), Arguments = [new Use(address, 64), value, size],
+                        Sources = [Storage.Gpr(0), Storage.Gpr(1), Storage.Gpr(2)],
+                    });
+                else continue;
+                if (call.Kind == CallKind.Tail) writes.Add(new Return(call.Address));
+                block.Statements.RemoveAt(i);
+                block.Statements.InsertRange(i, writes);
+                i += writes.Count - 1;
+                changed = true;
+            }
+        return changed;
+    }
+
     private static bool CopyOperations(IdiomState state)
     {
         var changed = false;
