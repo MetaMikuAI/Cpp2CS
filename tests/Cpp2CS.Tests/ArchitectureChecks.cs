@@ -647,6 +647,13 @@ internal static class ArchitectureChecks
         var repeated = innerValue with { Leaves = [.. innerValue.Leaves, (pairFields[0].Path, two)] };
         check.True(ManagedProjections.Project(types, repeated, pairFields[0], f => f) is null,
             "重叠写入不能按字段集合推导值");
+        var unavailable = Structure("UnboundLayout", 169, 8, false);
+        unavailable.Definition.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        check.True(oracle.Aggregate(values.Syms.Const(0, 64), unavailable) is null,
+            "没有布局的结构体不能因字段枚举为空而组成默认值");
+        var empty = Structure("EmptyValue", 170, 1, false);
+        check.True(oracle.Aggregate(values.Syms.Undef(8), empty) is { Fields.Count: 0 },
+            "已知布局的空结构体不观察填充位");
     }
 
     private static void ConstructorStoreOrder(Assertions check, ManagedTypes types)

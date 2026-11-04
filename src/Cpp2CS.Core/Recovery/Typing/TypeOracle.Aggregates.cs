@@ -41,6 +41,7 @@ public sealed partial class TypeOracle
     /// <summary>直接字段的位来源，供值组成与逐字段写入共用。</summary>
     public IReadOnlyList<ProjectedSym>? FieldValues(Sym bits, DefinitionRef structure)
     {
+        if (types.Kind(structure) != TypeKind.Struct || types.Layouts.Of(structure) is null) return null;
         var fields = types.Fields(structure).ToArray();
         return fields.Any(p => !p.Fits(bits.Width)) ? null
             : fields.Select(p => new ProjectedSym(p, values.Syms.Slice(bits, p.Bit, p.Width))).ToArray();
