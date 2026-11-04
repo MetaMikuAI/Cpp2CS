@@ -21,7 +21,7 @@
   <ItemGroup>
     <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/**/*.cs"
              Exclude="../../third_party/Il2CppDumper/Il2CppDumper/Program.cs;../../third_party/Il2CppDumper/Il2CppDumper/Resource1.Designer.cs;../../third_party/Il2CppDumper/Il2CppDumper/obj/**;../../third_party/Il2CppDumper/Il2CppDumper/bin/**" />
-    <Compile Include="*.cs" />
+    <Compile Include="**/*.cs" Exclude="bin/**;obj/**" />
     <EmbeddedResource Include="../../third_party/Il2CppDumper/Il2CppDumper/Libraries/Il2CppDummyDll.dll" LogicalName="Il2CppDummyDll" />
   </ItemGroup>
 
