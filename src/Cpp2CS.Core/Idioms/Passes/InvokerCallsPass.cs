@@ -1,5 +1,6 @@
 using Cpp2CS.Facts;
 using Cpp2CS.Ir;
+using Cpp2CS.Machine.Flow;
 using Cpp2CS.Recovery;
 
 namespace Cpp2CS.Idioms;
@@ -22,13 +23,25 @@ internal static class InvokerCallsPass
                     || Input(2) is not { } receiver || Input(3) is not { } arguments || Input(4) is not { } output) continue;
                 var native = state.self is { } self ? (MethodRef)GenericContext.Instantiate(method, self)! : method;
                 var signature = state.owner.abi.Invoker(native);
-                if (signature.Arguments.Select(a => a.Type).Append(native.Concrete(native.Method.ReturnType)).Any(ManagedAbi.SharedValue)
-                    || signature.Indirections.Any(a => a.Size <= 0)) continue;
+                if (ManagedAbi.SharedValue(native.Concrete(native.Method.ReturnType))
+                    || signature.Indirections.Any(a => a.Size <= 0 && !ManagedAbi.SharedValue(a.Type))) continue;
                 Expr Offset(Expr value, int offset) => offset == 0 ? value : Fold.Simplify(new Binary(BinOp.Add, value, Expr.C((ulong)offset, 64), 64));
                 var inputs = new List<Expr>();
+                var proofs = new List<SharedInvokerArguments.Proof>();
+                var valid = true;
                 if (!method.Method.IsStatic) inputs.Add(receiver);
                 for (var parameter = 0; parameter < method.Method.Parameters.Count; parameter++)
-                    inputs.Add(new Load(Offset(arguments, parameter * 8), 64));
+                {
+                    if (ManagedAbi.SharedValue(native.Concrete(native.Method.Parameters[parameter].Type)))
+                    {
+                        var proof = SharedInvokerArguments.Prove(state, block, call, arguments, parameter, method.Concrete(method.Method.Parameters[parameter].Type));
+                        if (proof is null) { valid = false; break; }
+                        proofs.Add(proof);
+                        inputs.Add(proof.Value);
+                    }
+                    else inputs.Add(new Load(Offset(arguments, parameter * 8), 64));
+                }
+                if (!valid) continue;
                 inputs.Add(entity);
                 if (!ManagedTypes.IsVoid(method.Method.ReturnType)) inputs.Add(output);
                 var replacement = call with
@@ -39,12 +52,24 @@ internal static class InvokerCallsPass
                     Sources = Enumerable.Range(0, inputs.Count).Select(Storage.Gpr).ToArray(),
                     Results = [],
                     Defines = [],
+                    StackPointer = null,
                 };
                 var statements = new List<Stmt> { replacement };
                 // invoker 自身返回 void，原保守 clobber 不能冒充目标方法的返回寄存器。
                 statements.AddRange(call.Defines.OfType<Variable>().Select(v => new Define(call.Address, v, new Unknown("invoker 未定义返回寄存器", v.Width))));
                 block.Statements.RemoveAt(i);
                 block.Statements.InsertRange(i, statements);
+                foreach (var proof in proofs)
+                {
+                    foreach (var owner in state.function.Blocks)
+                        for (var at = 0; at < owner.Statements.Count; at++)
+                            if (ReferenceEquals(owner.Statements[at], proof.Copy)) owner.Statements[at] = new Nop(proof.Copy.Address, "共享泛型实参副本");
+                            else if (ReferenceEquals(owner.Statements[at], proof.Argument)) owner.Statements[at] = proof.Argument with { Value = proof.Value };
+                    var branch = (Branch)proof.Head.Statements[^1];
+                    var next = proof.Head.NormalSuccessors.Single(b => b != proof.Reference);
+                    proof.Head.Statements[^1] = new Jump(branch.Address, next.Start);
+                    MachineFunction.RemoveEdge(proof.Head, proof.Reference);
+                }
                 i += statements.Count - 1;
                 changed = true;
             }

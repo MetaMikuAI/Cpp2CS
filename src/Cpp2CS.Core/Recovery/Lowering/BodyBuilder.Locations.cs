@@ -57,6 +57,8 @@ internal sealed partial class BodyBuilder
         var path = location.Path;
         switch (location.Kind)
         {
+            case LocationKind.Argument:
+                return View(location.Base!, location.Type, address);
             case LocationKind.Static or LocationKind.ThreadStatic:
                 {
                     var type = FieldType(path[0], path.Count == 1 ? location.Type : null);

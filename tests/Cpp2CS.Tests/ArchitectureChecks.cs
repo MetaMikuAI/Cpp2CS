@@ -38,6 +38,7 @@ internal static class ArchitectureChecks
         TailCallIdentities(checks, facts, types);
         SharedInterfacePartitions(checks);
         InvokerArguments(checks, facts, types);
+        SharedInvokerCopies(checks, facts, types);
         StackBoxes(checks, facts, types);
         EntryKinds(checks, facts, types);
         Templates(checks, types);
@@ -211,6 +212,57 @@ internal static class ArchitectureChecks
             var normalized = block.Statements.OfType<Call>().Single();
             check.True(normalized.Op is { Kind: OpKind.InvokeGeneric, Operand: MethodRef } && normalized.Defines.Length == 0
                 && normalized.Arguments.Take(3).All(a => a is Load { Width: 64 }), "拆包读取参数槽，不提前读取标量内容或伪造返回寄存器");
+        }
+    }
+
+    private static void SharedInvokerCopies(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var owner = Type("SharedInvokerOwner", 771);
+        var definition = Method(owner, "Forward", 771, MethodAttributes.Public | MethodAttributes.Static);
+        definition.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        var type = new GenericParameterRef("T", true, 0);
+        definition.Parameters = [new("value", type, 0, null, false)];
+        definition.ReturnType = new PrimitiveRef("void");
+        var self = new MethodRef(definition, [], [type with { Binding = new(NativeBindingKind.Shared) }]);
+        var abi = new ManagedAbi(facts.Layouts);
+        check.True(abi.Invoker(self).Arguments[0] is { Size: -1, Transfer: Transfer.Copy },
+            "共享泛型副本保留未知尺寸，不能退化为指针宽度的值");
+        foreach (var variant in new[] { "private", "wrong-size", "missing-input", "read-slot", "escape-slot", "intervening-call" })
+        {
+            var head = new Block(0);
+            var reference = new Block(64);
+            var join = new Block(80);
+            var input = new Use(new(Storage.Gpr(0), 0), 64);
+            var saved = new FrameAddress(-16);
+            var array = new FrameAddress(-24);
+            var entity = new Symbol(SymbolKind.Class, type);
+            var flag = new Load(new Binary(BinOp.Add, entity, Expr.C(RuntimeLayout.ClassByvalArg + 8, 64), 64), 32);
+            var size = new Ir.Convert(ConvKind.ZeroExtend, new Load(new Binary(BinOp.Add, entity,
+                Expr.C(RuntimeLayout.ClassStackSlotSize, 64), 64), 32), 64);
+            var destination = new Binary(BinOp.Sub, new FrameAddress(-64), new Binary(BinOp.And,
+                new Binary(BinOp.Add, size, Expr.C(15, 64), 64), Expr.C(0xfffffffffffffff0, 64), 64), 64);
+            var pointer = new Variable(Storage.Gpr(20), 1);
+            var loaded = new Variable(Storage.Gpr(21), 1);
+            var selected = new Variable(Storage.Gpr(22), 1);
+            var copy = new Call(16, CallKind.Direct, Expr.C(0, 64))
+            {
+                Op = new(OpKind.Import, "memcpy"), Arguments = [destination, new Select(flag, input, saved, 64),
+                    variant == "wrong-size" ? Expr.C(8, 64) : size],
+            };
+            head.Statements = [new Define(0, pointer, destination), new Store(4, saved,
+                variant == "missing-input" ? Expr.C(0, 64) : input), copy, new Branch(20, flag, join.Start, reference.Start)];
+            reference.Statements = [new Define(64, loaded, new Load(destination, 64)), new Jump(68, join.Start)];
+            var invoke = new Call(88, CallKind.Indirect, Expr.C(0, 64));
+            join.Statements = [new Phi(80, selected, [pointer, loaded]), new Store(84, array, new Use(selected, 64)), invoke, new Return(92)];
+            if (variant == "read-slot") join.Statements.Add(new Define(96, new(Storage.Gpr(23), 1), new Load(array, 64)));
+            if (variant == "escape-slot") join.Statements.Add(new Store(96, input, array));
+            if (variant == "intervening-call") join.Statements.Insert(2, new Call(86, CallKind.Direct, Expr.C(0, 64)));
+            MachineFunction.AddEdge(head, join); MachineFunction.AddEdge(head, reference); MachineFunction.AddEdge(reference, join);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 100, CodeRegion.Managed, default), Blocks = [head, reference, join] };
+            function.Renumber();
+            var state = new IdiomState(new IdiomRewriter(facts), function) { self = self };
+            var proof = SharedInvokerArguments.Prove(state, join, invoke, array, 0, type);
+            check.Equal(variant == "private", proof?.Value == input, $"共享泛型私有副本证明：{variant}");
         }
     }
 

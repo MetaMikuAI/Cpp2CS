@@ -76,7 +76,9 @@ internal static class DirectPass
         {
             Op = new RuntimeOp(found.Kind, found.Operand),
             Arguments = found.Arguments,
-            Sources = found.Kind == OpKind.Import ? call.Sources : []
+            Sources = found.Kind == OpKind.Import ? call.Sources : [],
+            StackPointer = found.Kind == OpKind.Import && state.owner.calls.Signature(helper.Address) is { } imported
+                && imported.Reads.All(r => r.Bank != Bank.Stack) ? null : call.StackPointer,
         };
     }
 

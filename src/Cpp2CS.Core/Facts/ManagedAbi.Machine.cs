@@ -65,12 +65,12 @@ public sealed partial class ManagedAbi
             var piece = Piece(arguments.Count);
             if (type is ByRefRef || ManagedTypes.IsReferenceType(type))
                 arguments.Add(Direct(index, type, [piece], method.Method.Parameters[index].Attributes));
-            else arguments.Add(new(index, type, Transfer.Copy, [piece], Size(type), MemoryAccess.Read));
+            else arguments.Add(new(index, type, Transfer.Copy, [piece], SharedValue(type) ? -1 : Size(type), MemoryAccess.Read));
         }
         var info = Piece(arguments.Count);
         var returned = method.Concrete(method.Method.ReturnType);
         var result = ManagedTypes.IsVoid(returned) ? null : new MachineValue(MachineSignature.ReturnIndex, returned,
-            Transfer.ResultBuffer, [Piece(arguments.Count + 1)], Size(returned), MemoryAccess.Write);
+            Transfer.ResultBuffer, [Piece(arguments.Count + 1)], SharedValue(returned) ? -1 : Size(returned), MemoryAccess.Write);
         return new(arguments.ToArray(), result, info, 0);
     }
 

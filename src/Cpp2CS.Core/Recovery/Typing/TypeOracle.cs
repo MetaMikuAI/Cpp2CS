@@ -6,7 +6,7 @@ using Cpp2CS.Recovery.Values;
 
 namespace Cpp2CS.Recovery.Typing;
 
-public enum LocationKind : byte { Instance, Reference, Static, ThreadStatic, Element, Length, StringLength, StringChar, Local }
+public enum LocationKind : byte { Instance, Reference, Static, ThreadStatic, Element, Length, StringLength, StringChar, Local, Argument }
 
 /// <summary>
 /// 一次读写指向的 IL 位置。Base：实例字段的对象、经引用访问的指针、数组或字符串，可寻址局部为单元起点的局部地址；
@@ -545,6 +545,9 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     public Location? Locate(Sym address, int width)
     {
         var (root, offset, index, scale) = Decompose(address);
+        if (width < 0 && root is LocalSym { Space.Kind: LocalKind.Argument, Offset: 0 } argument && offset == 0 && index is null
+            && Parameter(argument.Space.Argument) is { } parameter && ManagedAbi.SharedValue(parameter))
+            return new(LocationKind.Argument, values.Syms.Arg(argument.Space.Argument, 64), null, 0, null, [], parameter);
         if (root is LocalSym local && index is null && memory.Find(local.Space, local.Offset + offset, width / 8) is { Promoted: false } cell && CellType(cell) is { } cellType)
         {
             var at = (int)(local.Offset + offset - cell.Start);
