@@ -270,7 +270,23 @@ public sealed partial class RuntimeHelpers
         // il2cpp_codegen_object_new：读取 Il2CppClass.instance_size，调用 GC 分配并写入 klass。
         if (LoadsOffset(body, RuntimeLayout.ClassInstanceSize, 64) && calls.Length >= 2)
             return (HelperKind.ObjectNew, null, $"?? Il2CppClass+0x{RuntimeLayout.ClassInstanceSize:x} instance_size ??????");
+        // __cxa_throw 一类异常核心：以 brk 结束且不返回；优先保留已有的异常类型字符串。
+        var named = Closure(target).Any(f => ExceptionName(f) is not null);
+        if (!named && IsRaiseCore(body))
+            return (HelperKind.Raise, null, body == target
+                ? "以 brk 结束且调用展开异常头的异常抛出核心"
+                : $"把异常转交给异常核心 0x{body:x}");
+        if (!named && body == target && calls.FirstOrDefault(IsRaiseCore) is var raise and not 0 && !CanReturn(body, 1))
+            return (HelperKind.Raise, null, $"把异常转交给 0x{raise:x}");
         return null;
+    }
+
+    /// <summary>异常抛出核心：不返回、以 brk 结束，并调用读取异常对象 +0x38 展开头的辅助。</summary>
+    private bool IsRaiseCore(ulong address)
+    {
+        var words = Words(address, 64).Select(x => x.Word).ToArray();
+        if (CanReturn(address, 2) || !words.Any(w => (w & 0xFFE0001F) == 0xD4200000)) return false;
+        return CallsOf(address).Count() >= 4;
     }
 
     private ulong? interfaceSlowPath;
