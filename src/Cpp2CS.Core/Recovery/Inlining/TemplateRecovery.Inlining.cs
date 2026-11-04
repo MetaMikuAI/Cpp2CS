@@ -63,11 +63,14 @@ internal sealed partial class TemplateRecovery
             return false;
         }
         public LocalValue? Result { get; set; }
-        public LocalValue? ResultStorage { get; set; }
         public required Dictionary<int, ManagedValue> Binding { get; init; }
         /// <summary>模板所属类型的实参：模板中的方法引用可能保留共享代码的开放形式，比较前代入。</summary>
         public required IReadOnlyList<TypeRef> TypeArguments { get; init; }
         public HashSet<(ulong Block, int Index)> Covered { get; } = [];
+        /// <summary>夹在模板写入之间的调用方写入，以及它之前已比对过的调用与检查数。</summary>
+        public List<(ulong Block, int Index, int Effects)> Interleaved { get; } = [];
+        /// <summary>区域内已比对的调用与检查：夹在其间的写入不能越过它们。</summary>
+        public int Effects { get; set; }
         public (ulong Block, int Index)? Exit { get; set; }
         public IReadOnlyList<(LocalValue Target, ManagedValue Value)>? ExitCopies { get; set; }
         public Dictionary<Variable, ManagedValue> Defined { get; } = [];
@@ -139,18 +142,14 @@ internal sealed partial class TemplateRecovery
                 if (summaries(method) is not { Body: { } template }) { failures.Add(definition.Address == 0 ? "构造函数没有原生代码" : "构造函数自身未能恢复"); continue; }
                 if (template.Regions.Count > 0 || !Acyclic(template)) { failures.Add("构造函数体含异常区域或环"); continue; }
                 if (PendingCall(body, variable, pending) is not var (block, index, _)) break;
-                var preferred = template.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>()
-                    .Select(s => s.Target).OfType<FieldValue>().Select(f => f.Field.Field).ToHashSet();
-                var candidate = CommuteIndependentStores(body, preferred);
-                template = CommuteIndependentStores(template, preferred);
-                var blocks = candidate.Blocks.ToDictionary(b => b.Address);
+                var blocks = body.Blocks.ToDictionary(b => b.Address);
                 string? nearest = null;
                 var constructed = false;
                 for (var start = 0; start <= index; start++)
                 {
-                    var match = Match(candidate, blocks, block, start, template, pending.Allocated.Arguments, out var failure);
+                    var match = Match(body, blocks, block, start, template, pending.Allocated.Arguments, out var failure);
                     if (match is not null && match.Covered.Contains((block, index))
-                        && PlanReplacement(candidate, blocks, block, start, method, match, out failure) is { } replaced)
+                        && PlanReplacement(body, blocks, block, start, method, match, out failure) is { } replaced)
                     {
                         body = Constructed(replaced.Apply(body), variable, method);
                         failures.Clear();
@@ -231,24 +230,15 @@ internal sealed partial class TemplateRecovery
         {
             var method = new MethodRef(definition, parent.Arguments, []);
             if (summaries(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
-            var preferred = template.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>()
-                .Select(s => s.Target).OfType<FieldValue>().Select(f => f.Field.Field).ToHashSet();
-            // 基类字段可在其父类调用之前或之后初始化，两种次序分别保留模板与调用的邻接关系。
-            foreach (var preferredFirst in new[] { true, false })
-            {
-                var candidate = CommuteIndependentStores(body, preferred, preferredFirst);
-                var orderedTemplate = CommuteIndependentStores(template, preferred, preferredFirst);
-                var blocks = candidate.Blocks.ToDictionary(b => b.Address);
-                foreach (var block in candidate.Blocks)
-                    for (var start = 0; start < block.Statements.Count; start++)
-                    {
-                        if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
-                        var match = Match(candidate, blocks, block.Address, start, orderedTemplate, parent.Arguments, out _);
-                        // 交换只为比对；区域外的块保持原次序。
-                        if (match is not null && PlanReplacement(candidate, blocks, block.Address, start, method, match, out _) is { } replaced)
-                            return replaced.Apply(body);
-                    }
-            }
+            var blocks = body.Blocks.ToDictionary(b => b.Address);
+            foreach (var block in body.Blocks)
+                for (var start = 0; start < block.Statements.Count; start++)
+                {
+                    if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
+                    var match = Match(body, blocks, block.Address, start, template, parent.Arguments, out _);
+                    if (match is not null && PlanReplacement(body, blocks, block.Address, start, method, match, out _) is { } replaced)
+                        return replaced.Apply(body);
+                }
         }
         return body;
     }
@@ -410,15 +400,9 @@ internal sealed partial class TemplateRecovery
             Cover(caller, match);
             switch (m, c)
             {
-                case (ManagedStore ms, ManagedStore cs):
-                    {
-                        if (Location(callee, ms.Target) is not { } ml || Location(caller, cs.Target) is not { } cl) return false;
-                        if (Term(callee, ms.Value) is not { } mv || Term(caller, cs.Value) is not { } cv) return false;
-                        if (!Unify(ml, cl, match.Binding) || !Unify(mv, cv, match.Binding)) return match.Fail($"写入不同（0x{cs.Address:x}）");
-                        callee.Stores.Add((ml, mv));
-                        caller.Stores.Add((cl, cv));
-                        break;
-                    }
+                case (ManagedStore, ManagedStore):
+                    if (!MatchStores(callee, caller, match)) return false;
+                    continue;
                 // 模板中的尾调用即调用后返回。
                 case (ManagedCall mc, ManagedCall cc) when (!cc.Tail || mc.Tail && ManagedTypes.IsVoid(mc.Invocation.Method.Method.ReturnType)) && Instantiated(mc.Invocation.Method, match.TypeArguments).Equals(cc.Invocation.Method)
                     && mc.Invocation.Arguments.Count == cc.Invocation.Arguments.Count && (mc.Tail || (mc.Result is null) == (cc.Result is null)):
@@ -430,6 +414,7 @@ internal sealed partial class TemplateRecovery
                             if (Term(callee, a) is not { } ta || Term(caller, b) is not { } tb || !Unify(ta, tb, match.Binding)) return match.Fail($"调用 {cc.Invocation.Method.Method.Name} 的实参不同（0x{cc.Address:x}）");
                         var index = callee.Calls++;
                         caller.Calls++;
+                        match.Effects++;
                         ManagedValue? tailResult = null;
                         if (cc.Result is { } cres)
                         {
@@ -459,6 +444,7 @@ internal sealed partial class TemplateRecovery
                     }
                 case (ManagedCheck mk, ManagedCheck ck) when mk.Exception.Equals(ck.Exception):
                     if (Term(callee, mk.Condition) is not { } mtest || Term(caller, ck.Condition) is not { } ctest || !Unify(Canonical(mtest), Canonical(ctest), match.Binding)) return match.Fail($"检查条件不同（0x{ck.Address:x}）");
+                    match.Effects++;
                     break;
                 case (ManagedThrow mt, ManagedThrow ct):
                     return Term(callee, mt.Exception) is { } me && Term(caller, ct.Exception) is { } ce && Unify(me, ce, match.Binding);
@@ -488,6 +474,62 @@ internal sealed partial class TemplateRecovery
         }
         return false;
     }
+
+    /// <summary>
+    /// 一段连续写入按偏序比对：模板的写入两两不别名时没有先后，调用方可按任意次序完成。夹在其间的调用方自身写入移出区域：
+    /// 它之前没有调用或检查时提到区域之前，之后没有时留到区域之后，两者都不越过任何可观察的次序；否则证明不成立。
+    /// </summary>
+    private bool MatchStores(Walker callee, Walker caller, InlineMatch match)
+    {
+        var remaining = new List<(ManagedValue Location, ManagedValue Value)>();
+        while (callee.Current is ManagedStore store)
+        {
+            if (Location(callee, store.Target) is not { } location || Term(callee, store.Value) is not { } value) return match.Fail("模板的写入不能表示");
+            remaining.Add((location, value));
+            callee.Stores.Add((location, value));
+            callee.Index++;
+            if (!Advance(callee, null)) return match.Fail("模板的值不能表示");
+        }
+        while (remaining.Count > 0)
+        {
+            if (!Advance(caller, match)) return match.Fail($"调用方 0x{caller.Block:x} 的值不能表示或路径成环");
+            if (caller.Current is not ManagedStore written) return match.Fail($"模板的写入对应调用方的 {caller.Current.GetType().Name[7..]}（0x{caller.Current.Address:x}）");
+            if (Location(caller, written.Target) is not { } target || Term(caller, written.Value) is not { } stored) return match.Fail("调用方的写入不能表示");
+            var found = -1;
+            for (var i = 0; i < remaining.Count && found < 0; i++)
+            {
+                var trial = new Dictionary<int, ManagedValue>(match.Binding);
+                if (!Unify(remaining[i].Location, target, trial) || !Unify(remaining[i].Value, stored, trial)) continue;
+                foreach (var (key, value) in trial) match.Binding[key] = value;
+                found = i;
+            }
+            if (found >= 0)
+            {
+                // 先于它完成的模板写入都要能交换到它之后。
+                if (found > 0 && (!Unordered(remaining[found].Value)
+                    || remaining.Take(found).Any(r => MayAlias(r.Location, remaining[found].Location) || !Unordered(r.Value))))
+                    return match.Fail($"写入次序不同（0x{written.Address:x}）");
+                remaining.RemoveAt(found);
+                Cover(caller, match);
+                caller.Stores.Add((target, stored));
+            }
+            else
+            {
+                if (!Unordered(stored) || remaining.Any(r => MayAlias(r.Location, target) || !Unordered(r.Value))
+                    || caller.Stores.Any(s => MayAlias(s.Location, target)))
+                    return match.Fail($"写入不同（0x{written.Address:x}）");
+                match.Interleaved.Add((caller.Block, caller.Index, match.Effects));
+                // 后面的读取可能看到它，比对时仍按已写入处理。
+                caller.Stores.Add((target, stored));
+            }
+            caller.Index++;
+        }
+        return true;
+    }
+
+    /// <summary>只有形参和常量组成的值没有求值次序：局部或表达式可能带分配、调用或读取，其次序就是可观察行为。</summary>
+    private static bool Unordered(ManagedValue value) => value is ArgumentValue or ConstantValue
+        || value is ComposedValue composed && composed.Leaves.All(l => Unordered(l.Value));
 
     private static MethodRef Instantiated(MethodRef method, IReadOnlyList<TypeRef> arguments) => method with
     {

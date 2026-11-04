@@ -1557,7 +1557,7 @@ internal static class ArchitectureChecks
         }
         check.Equal(0, Run(true, true).Holes.Count, "结构体返回值由多个字段局部承接时仍可证明完整返回");
         check.True(Run(false, true).Holes.Count > 0, "一个字段在常量路径不同则拒绝结构体返回证明");
-        check.True(Run(true, false).Holes.Count > 0, "缺少叶子承接时不猜测结构体返回的对应关系");
+        check.Equal(0, Run(true, false).Holes.Count, "未被观察的叶子不需要承接，已承接的字段仍逐路径证明");
         check.Equal(0, Run(true, true, true).Holes.Count, "完整结构体调用结果可按出口字段逐一证明");
         check.True(Run(false, true, true).Holes.Count > 0, "完整结构体的字段证明仍须覆盖其他返回路径");
         check.Equal(0, Run(true, true, true, true).Holes.Count, "出口同时组合已证明字段时使用同一完整返回值");

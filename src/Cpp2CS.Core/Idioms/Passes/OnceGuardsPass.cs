@@ -63,6 +63,8 @@ internal static class OnceGuardsPass
     private sealed class Line
     {
         public Dictionary<Variable, Expr> Values { get; } = [];
+        /// <summary>守卫之前的定义归一后的结果。</summary>
+        public Dictionary<Variable, Expr> Expanded { get; } = [];
         public List<(Expr Target, Expr Value)> Stores { get; } = [];
         public Block Previous { get; set; } = null!;
         public Block? Merge { get; set; }
@@ -78,6 +80,7 @@ internal static class OnceGuardsPass
         private const int Depth = 32;
         private readonly Dictionary<Variable, Expr> definitions = state.function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target, d => d.Value);
         private readonly Dictionary<Variable, Block> owners = state.function.Blocks.SelectMany(b => b.Statements.OfType<Define>().Select(d => (d.Target, Block: b))).ToDictionary(p => p.Target, p => p.Block);
+        private readonly Dictionary<Variable, bool> unchanged = [];
         private Func<Expr, TypeRef?>? types;
         private bool loadAfterStore;
         private Line? slow;
@@ -230,14 +233,16 @@ internal static class OnceGuardsPass
                         {
                             Expr value;
                             if (line.Values.TryGetValue(use.Variable, out var known)) value = known;
+                            else if (line.Expanded.TryGetValue(use.Variable, out var expanded)) value = expanded;
                             else if (definitions.TryGetValue(use.Variable, out var source)
-                                && (!ExprMap.Walk(source).Any(e => e is Load) || Unchanged(use.Variable, source))) value = Normal(source, line, depth + 1);
+                                && (!ExprMap.Walk(source).Any(e => e is Load) || Unchanged(use.Variable, source)))
+                                value = line.Expanded[use.Variable] = Normal(source, line, depth + 1);
                             else return null;
                             return value.Width == use.Width ? value : Fold.Convert(ConvKind.Truncate, value, use.Width);
                         }
                     case Load load:
                         if (line.Stores.Count > 0) loadAfterStore = true;
-                        return Content(new Load(Normal(load.Address, line, depth + 1), load.Width), line);
+                        return Content(new Load(Normal(load.Address, line, depth + 1), load.Width), line, depth + 1);
                     default:
                         return null;
                 }
@@ -245,7 +250,7 @@ internal static class OnceGuardsPass
         }
 
         /// <summary>守卫之前覆盖这段内存的写入给出它的值；遇到可能改写的语句就停止转发。</summary>
-        private Expr Content(Load load, Line line)
+        private Expr Content(Load load, Line line, int depth)
         {
             var (root, offset) = SplitPass.Split(load.Address);
             var bytes = (ulong)load.Width / 8;
@@ -253,10 +258,10 @@ internal static class OnceGuardsPass
             {
                 if (statement is Store store)
                 {
-                    var (written, at) = SplitPass.Split(Normal(store.Target, line, Depth / 2));
+                    var (written, at) = SplitPass.Split(Normal(store.Target, line, depth + 1));
                     var size = (ulong)store.Value.Width / 8;
                     if (written == root && offset >= at && offset - at + bytes <= size)
-                        return Fold.Extract(Normal(store.Value, line, Depth / 2), checked((int)(offset - at) * 8), load.Width);
+                        return Fold.Extract(Normal(store.Value, line, depth + 1), checked((int)(offset - at) * 8), load.Width);
                     if (!Disjoint(written, at, size, root, offset, bytes)) return load;
                 }
                 else if (statement is Call call && !KeepsMemory(call)) return load;
@@ -266,6 +271,12 @@ internal static class OnceGuardsPass
 
         /// <summary>变量读取的内存从读取处到守卫，每条路径上都没有被改写。</summary>
         private bool Unchanged(Variable variable, Expr source)
+        {
+            if (unchanged.TryGetValue(variable, out var known)) return known;
+            return unchanged[variable] = Prove(variable, source);
+        }
+
+        private bool Prove(Variable variable, Expr source)
         {
             if (!owners.TryGetValue(variable, out var owner)) return false;
             var reads = ExprMap.Walk(source).OfType<Load>().Select(l => SplitPass.Split(state.defs.Expand(l.Address)) is var (root, offset) ? (Root: root, Offset: offset, Bytes: (ulong)l.Width / 8) : default).ToArray();
