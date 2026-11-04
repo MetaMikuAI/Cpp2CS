@@ -233,18 +233,22 @@ internal sealed partial class TemplateRecovery
             if (summaries(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
             var preferred = template.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>()
                 .Select(s => s.Target).OfType<FieldValue>().Select(f => f.Field.Field).ToHashSet();
-            var candidate = CommuteIndependentStores(body, preferred);
-            template = CommuteIndependentStores(template, preferred);
-            var blocks = candidate.Blocks.ToDictionary(b => b.Address);
-            foreach (var block in candidate.Blocks)
-                for (var start = 0; start < block.Statements.Count; start++)
-                {
-                    if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
-                    var match = Match(candidate, blocks, block.Address, start, template, parent.Arguments, out _);
-                    // 交换只为比对；区域外的块保持原次序。
-                    if (match is not null && PlanReplacement(candidate, blocks, block.Address, start, method, match, out _) is { } replaced)
-                        return replaced.Apply(body);
-                }
+            // 基类字段可在其父类调用之前或之后初始化，两种次序分别保留模板与调用的邻接关系。
+            foreach (var preferredFirst in new[] { true, false })
+            {
+                var candidate = CommuteIndependentStores(body, preferred, preferredFirst);
+                var orderedTemplate = CommuteIndependentStores(template, preferred, preferredFirst);
+                var blocks = candidate.Blocks.ToDictionary(b => b.Address);
+                foreach (var block in candidate.Blocks)
+                    for (var start = 0; start < block.Statements.Count; start++)
+                    {
+                        if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
+                        var match = Match(candidate, blocks, block.Address, start, orderedTemplate, parent.Arguments, out _);
+                        // 交换只为比对；区域外的块保持原次序。
+                        if (match is not null && PlanReplacement(candidate, blocks, block.Address, start, method, match, out _) is { } replaced)
+                            return replaced.Apply(body);
+                    }
+            }
         }
         return body;
     }

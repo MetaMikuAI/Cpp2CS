@@ -9,7 +9,7 @@ internal sealed partial class TemplateRecovery
     /// 排出一种规范次序，使构造模板所需的写入与其他写入分开。值限于参数与常量组成：局部或表达式在模板与调用方中的表示
     /// 可能不同（一侧是局部，另一侧是内联的表达式），规范次序须对两侧一致。
     /// </summary>
-    private ManagedBody CommuteIndependentStores(ManagedBody body, IReadOnlySet<FieldDef> preferred)
+    private ManagedBody CommuteIndependentStores(ManagedBody body, IReadOnlySet<FieldDef> preferred, bool preferredFirst = true)
     {
         static bool Plain(ManagedValue value) => value is ArgumentValue or ConstantValue
             || value is ComposedValue composed && composed.Leaves.All(l => Plain(l.Value));
@@ -29,7 +29,7 @@ internal sealed partial class TemplateRecovery
                 { run.Add(next); end++; }
                 if (run.Count < 2) continue;
                 var ordered = statements[first..end].Zip(run)
-                    .OrderByDescending(p => preferred.Contains(p.Second.Field.Field)).ThenBy(p => Offset(p.Second.Field)).Select(p => p.First).ToArray();
+                    .OrderBy(p => preferred.Contains(p.Second.Field.Field) == preferredFirst ? 0 : 1).ThenBy(p => Offset(p.Second.Field)).Select(p => p.First).ToArray();
                 Array.Copy(ordered, 0, statements, first, ordered.Length);
                 first = end - 1;
             }

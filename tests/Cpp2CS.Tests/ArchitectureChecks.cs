@@ -1197,18 +1197,21 @@ internal static class ArchitectureChecks
             new ConstantValue((ulong)value, types.Int32, 32));
         var template = new ManagedBody(baseCtor, [new(0, [Initialize(parentRef), Store(parentRef, first, 1), Store(parentRef, second, 2), new ManagedReturn(100, null)])]);
         MethodRecoveryResult? Summary(MethodRef method) => method == baseCtor ? new(baseCtor, 0, template, []) : null;
-        ManagedBody Recover(bool interveningRead)
+        ManagedBody Recover(bool interveningRead, bool prelude = false)
         {
             var middle = Store(childRef, own, 3);
             if (interveningRead) middle = middle with { Value = new FieldValue(new ArgumentValue(-1, childRef, 64), new(second, parentRef), types.Int32, 32) };
-            var body = new ManagedBody(childCtor, [new(0, [Initialize(childRef), Store(childRef, first, 1), middle,
-                Store(childRef, second, 2), new ManagedReturn(100, null)])]);
+            var body = new ManagedBody(childCtor, [new(0, prelude
+                ? [middle, Store(childRef, first, 1), Store(childRef, second, 2), Initialize(childRef), new ManagedReturn(100, null)]
+                : [Initialize(childRef), Store(childRef, first, 1), middle, Store(childRef, second, 2), new ManagedReturn(100, null)])]);
             return new TemplateRecovery(types, childCtor, Summary, new(types, childCtor, Summary))
                 .Run(body, new Dictionary<Variable, PendingConstruction>(), 0).Body;
         }
         bool CallsBase(ManagedBody body) => body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Inlined && c.Invocation.Method == baseCtor);
         check.True(CallsBase(Recover(false)), "独立本类写入可移到完整基类构造之后");
         check.True(!CallsBase(Recover(true)), "依赖字段读取的写入不得重排越过基类赋值");
+        template = new(baseCtor, [new(0, [Store(parentRef, first, 1), Store(parentRef, second, 2), Initialize(parentRef), new ManagedReturn(100, null)])]);
+        check.True(CallsBase(Recover(false, true)), "基类初始化在父类调用之前时，本类写入留在完整模板之前");
     }
 
     private static void ConstructorPreludeStores(Assertions check, ManagedTypes types)
