@@ -197,6 +197,18 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         return callees[call] = chosen;
     }
 
+    /// <summary>
+    /// 共享空函数的目标候选包含基类无参构造函数时，按当前构造函数的接收者选它。
+    /// 仅用于签名无法区分的调用；调用点还须位于入口块、且之前没有其他调用。
+    /// </summary>
+    public MethodRef? BaseConstructor(Call call)
+    {
+        if (method.Method.Name != ".ctor" || method.Method.IsStatic || method.DeclaringType is not DefinitionRef owner) return null;
+        if (owner.Definition.BaseType?.Substitute(owner.Arguments, []) is not DefinitionRef baseType) return null;
+        return shapes(call).Candidates.FirstOrDefault(c => c.Method.Name == ".ctor" && !c.Method.IsStatic
+            && c.Method.Parameters.Count == 0 && c.DeclaringType.Equals(baseType));
+    }
+
     /// <summary>接收者类型沿基类链到声明类型的距离；不在链上时为最大。</summary>
     private static int Distance(TypeRef? receiver, TypeRef owner)
     {

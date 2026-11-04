@@ -21,6 +21,15 @@ internal sealed partial class BodyBuilder
         var signature = shape.Signature;
         if (signature is null)
         {
+            // 共享空函数没有可区分的机器签名：构造函数入口的第一条调用按基类无参构造函数恢复。
+            if (block == analysis.Function.Blocks[0] && !block.Statements.Take(index).Any(s => s is Call)
+                && oracle.BaseConstructor(call) is { } baseCtor)
+            {
+                var self = oracle.Parameter(-1)!;
+                output.Add(new ManagedCall(call.Address,
+                    new ManagedInvocation(baseCtor, new ArgumentValue(-1, self, Width(self)), [], false), null, false));
+                return null;
+            }
             output.Add(new ManagedHole(call.Address, "调用 目标或签名未知", false));
             holes.Add(new(call.Address, "调用 目标或签名未知"));
             return call.Kind is CallKind.Tail or CallKind.TailIndirect ? new Statement(new ManagedHole(call.Address, "调用 尾调用", true)) : null;
