@@ -18,6 +18,15 @@ internal static class ModelProbe
             Console.WriteLine($"Assembly-CSharp types {app.Types.Count}, methods {app.Types.Sum(t => t.Methods.Count)}");
         foreach (var type in model.Types.Where(t => t.Assembly == "Assembly-CSharp.dll").Take(5))
             Console.WriteLine($"  {type.FullName}: fields {type.Fields.Count}, methods {type.Methods.Count}");
+        try
+        {
+            _ = new Cpp2CS.Output.Skeleton(model);
+            Console.WriteLine("skeleton ok");
+        }
+        catch (Exception exception)
+        {
+            Console.WriteLine($"skeleton failed: {exception.GetType().Name}: {exception.Message}");
+        }
         return 0;
     }
 }
