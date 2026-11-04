@@ -26,7 +26,7 @@ internal static class Inspect
         foreach (var target in Targets(facts, targets))
         {
             Console.Write($"== 0x{target.Entry:x} {target.Instance}");
-            var method = target.Shared ? target.Method : target.Instance;
+            var method = target.Shared ? decompiler.BindShared(target.Instance, target.Entry) : target.Instance;
             if (!decompiler.Analyze(method, target.Entry).TryGet(out var analysis, out var failure))
             {
                 Console.WriteLine($"\n  ! 0x{failure.Address:x} {failure.Reason}");

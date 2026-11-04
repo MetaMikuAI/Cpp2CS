@@ -64,14 +64,19 @@ public sealed class MethodDecompiler
     /// <summary>从已知原生实例恢复开放泛型体：类型参数带上实例的原生绑定，输出保留类型参数。</summary>
     public MethodRecoveryResult RecoverShared(MethodRef instance, ulong entry)
     {
+        var open = BindShared(instance, entry);
+        return Declaration(open, entry) ?? Run(open, entry);
+    }
+
+    /// <summary>开放泛型的托管身份及当前入口提供的原生布局见证。</summary>
+    public MethodRef BindShared(MethodRef instance, ulong entry)
+    {
         var open = MethodRef.Open(instance.Method);
-        if (Declaration(open, entry) is { } declaration) return declaration;
-        open = open with
+        return open with
         {
             TypeArguments = open.TypeArguments.Zip(instance.TypeArguments, Bind).ToArray(),
             MethodArguments = open.MethodArguments.Zip(instance.MethodArguments, Bind).ToArray(),
         };
-        return Run(open, entry);
         TypeRef Bind(TypeRef parameter, TypeRef actual) => parameter is GenericParameterRef g
             ? g with
             {

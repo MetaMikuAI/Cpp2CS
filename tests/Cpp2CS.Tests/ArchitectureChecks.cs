@@ -37,6 +37,7 @@ internal static class ArchitectureChecks
         CallIdentities(checks);
         TailCallIdentities(checks, facts, types);
         SharedInterfacePartitions(checks);
+        InvokerArguments(checks, facts, types);
         EntryKinds(checks, facts, types);
         Templates(checks, types);
         Accessors(checks, types);
@@ -137,6 +138,41 @@ internal static class ArchitectureChecks
             check.Equal(first, targets[left.Statements.OfType<Call>().Single().Site], "左路径保留自身分派目标");
             check.Equal(sameTarget ? first : second, targets[right.Statements.OfType<Call>().Single().Site],
                 "相同或不同的分派目标均按各自调用点登记");
+        }
+    }
+
+    private static void InvokerArguments(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var owner = Type("InvokerOwner", 770);
+        var definition = Method(owner, "Invoke", 770, MethodAttributes.Public | MethodAttributes.Static);
+        definition.Parameters = [new("number", types.Int32, 0, null, false), new("reference", types.Object, 0, null, false), new("output", new ByRefRef(types.Single), ParameterAttributes.Out, null, false)];
+        definition.ReturnType = types.String;
+        var method = new MethodRef(definition, [], []);
+        var abi = new ManagedAbi(facts.Layouts);
+        var signature = abi.Invoker(method);
+        check.True(signature.Arguments[0] is { Transfer: Transfer.Copy, Size: 4, Access: MemoryAccess.Read }
+            && signature.Arguments[1] is { Transfer: Transfer.Value, Size: 8 }
+            && signature.Arguments[2] is { Transfer: Transfer.Reference, Size: 4, Access: MemoryAccess.Write },
+            "invoker 分别保留标量指针、对象引用和 out 存储");
+        check.True(signature.Return is { Transfer: Transfer.ResultBuffer, Size: 8, Access: MemoryAccess.Write },
+            "invoker 的引用返回值同样写入返回存储");
+        var entity = new Symbol(SymbolKind.Method, method);
+        foreach (var samePointer in new[] { true, false })
+        {
+            var call = new Call(0, CallKind.Indirect, new Load(new Binary(BinOp.Add, entity, Expr.C(RuntimeLayout.MethodInvoker, 64), 64), 64))
+            {
+                Arguments = [samePointer ? new Load(entity, 64) : Expr.C(16, 64), entity, Expr.C(0, 64), new FrameAddress(-32), new FrameAddress(-8)],
+                Sources = Enumerable.Range(0, 5).Select(Storage.Gpr).ToArray(),
+                Defines = [new(Storage.Gpr(0), 1)], Results = [Storage.Gpr(0)],
+            };
+            var block = new Block(0) { End = 4, Statements = [call, new Return(4)] };
+            var function = new MachineFunction { Entry = 0, Range = new(0, 8, CodeRegion.Managed, default), Blocks = [block] };
+            var state = new IdiomState(new IdiomRewriter(facts), function);
+            check.Equal(samePointer, state.InvokerCalls(), "invoker 入口、MethodInfo 与实际方法指针须同源");
+            if (!samePointer) continue;
+            var normalized = block.Statements.OfType<Call>().Single();
+            check.True(normalized.Op is { Kind: OpKind.InvokeGeneric, Operand: MethodRef } && normalized.Defines.Length == 0
+                && normalized.Arguments.Take(3).All(a => a is Load { Width: 64 }), "拆包读取参数槽，不提前读取标量内容或伪造返回寄存器");
         }
     }
 
