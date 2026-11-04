@@ -30,11 +30,19 @@ internal static class ConstructionPrelude
             if (statement is Define && values.ReadsAt(statement).Count == 0 || statement is Nop) continue;
             if (statement is Store && oracle.Decompose(operands[0]).Root == result && !Contains(operands[1])) continue;
             if (statement is Call { Op.Kind: OpKind.WriteBarrier } && oracle.Decompose(operands[1]).Root == result && !Contains(operands[2])) continue;
-            if (statement is not Call call || analysis.Environment.Shape(call).Signature?.This is not { } receiver
-                || oracle.Callee(call) is not { Method: { Name: ".ctor", IsStatic: false }, DeclaringType: DefinitionRef declaring } constructor
-                || declaring.Definition == allocated.Definition) return null;
-            var content = values.ArgumentContent(call, receiver, operands.Skip(1).Take(call.Arguments.Length).ToArray());
-            return SymTable.Resolve(content) == result ? (allocated, constructor, call.Address) : null;
+            if (statement is not Call call) return null;
+            var shape = analysis.Environment.Shape(call);
+            if (shape.Signature?.This is { } receiver)
+            {
+                if (oracle.Callee(call) is not { Method: { Name: ".ctor", IsStatic: false }, DeclaringType: DefinitionRef declaring } constructor
+                    || declaring.Definition == allocated.Definition) return null;
+                var content = values.ArgumentContent(call, receiver, operands.Skip(1).Take(call.Arguments.Length).ToArray());
+                return SymTable.Resolve(content) == result ? (allocated, constructor, call.Address) : null;
+            }
+            // 共享空构造函数没有原生签名：用 NewObject 类型上唯一的构造函数承接前面的字段初始化。
+            if (oracle.AllocatedConstructor(call) is not { } inferred || operands.Count < 2
+                || SymTable.Resolve(operands[1]) != result) return null;
+            return (allocated, inferred.Constructor, call.Address);
         }
         return null;
     }

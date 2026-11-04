@@ -26,9 +26,9 @@ internal sealed partial class BodyBuilder
             {
                 var parameters = created.Constructor.Method.Parameters;
                 var supplied = arguments.Skip(1).ToArray();
-                if (supplied.Length >= parameters.Count && supplied.Take(parameters.Count).All(s => s is ConstSym))
+                if (supplied.Length >= parameters.Count)
                 {
-                    var values = parameters.Select((p, i) => Constant((ConstSym)supplied[i], created.Constructor.Concrete(p.Type))).ToArray();
+                    var values = parameters.Select((p, i) => View(supplied[i], created.Constructor.Concrete(p.Type), call.Address)).ToArray();
                     output.Add(new ManagedAssignment(call.Address,
                         Local(created.Allocation, created.Constructor.DeclaringType), new NewObjectValue(created.Constructor, values)));
                     return call.Kind is CallKind.Tail or CallKind.TailIndirect ? new Statement(new ManagedReturn(call.Address, null)) : null;
