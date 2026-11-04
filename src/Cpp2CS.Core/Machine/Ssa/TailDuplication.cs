@@ -49,23 +49,9 @@ internal static class TailDuplication
                 var parent = incoming[side];
                 var map = phis.ToDictionary(p => p.Target, p => p.Sources[side]);
                 parent.Statements.RemoveAll(s => s is Jump);
+                var path = new PathCopy(Fresh, map);
                 foreach (var statement in statements.Where(s => s is not (Phi or Jump)))
-                {
-                    var mapped = ExprMap.MapOperands(statement, e => ExprMap.Map(e,
-                        value => value is Use u && map.TryGetValue(u.Variable, out var replacement) ? new Use(replacement, u.Width) : null));
-                    if (mapped is Define d)
-                    {
-                        var variable = Fresh(d.Target); map[d.Target] = variable;
-                        mapped = d with { Target = variable };
-                    }
-                    else if (mapped is Call call)
-                    {
-                        var variables = call.Defines.Select(v => v is null ? null! : Fresh(v)).ToArray();
-                        for (var i = 0; i < variables.Length; i++) if (call.Defines[i] is { } old) map[old] = variables[i];
-                        mapped = call.Duplicate() with { Defines = variables };
-                    }
-                    parent.Statements.Add(mapped);
-                }
+                    parent.Statements.Add(path.Copy(statement));
                 if (joined.Count > 0)
                 {
                     foreach (var (variable, sources) in joined) sources.Add(map.GetValueOrDefault(variable, variable));
