@@ -1437,6 +1437,25 @@ internal static class ArchitectureChecks
             Cpp2CS.Recovery.Calls.DispatchResolution.VirtualSlot(reference, 0, types)!, "接口引用上的对象虚表槽解析到 Object");
         check.Equal(method, Cpp2CS.Recovery.Calls.DispatchResolution.Slot(reference, 0, true)!.Method,
             "interface offset 分派继续使用接口自身槽号");
+        var parent = Type("VirtualBase", 51);
+        parent.GenericParameters = [new() { Name = "TValue", Position = 0, Attributes = 0 }];
+        var callback = new MethodDef { Index = 51, Owner = parent, Name = "Read", Token = 0,
+            Attributes = MethodAttributes.Public | MethodAttributes.Virtual, ImplAttributes = 0, Slot = 7 };
+        parent.Methods = [callback];
+        var constraint = new DefinitionRef(parent, [new GenericParameterRef("TValue", false, 0)]);
+        var parameter = new GenericParameterRef("TReceiver", true, 0)
+        {
+            Parameter = new() { Name = "TReceiver", Position = 0, Attributes = 0, Constraints = [constraint] },
+        };
+        check.Equal(new MethodRef(callback, [types.Int32], []), DispatchResolution.VirtualSlot(parameter, 7, types,
+            t => t.Substitute([types.Int32], []))!, "基类约束提供虚表声明，并代入调用方的类型实参");
+        var shared = new GenericParameterRef("T", true, 0) { Binding = new(NativeBindingKind.Reference) };
+        check.Equal(DispatchResolution.VirtualSlot(types.Object, 0, types)!, DispatchResolution.VirtualSlot(shared, 0, types)!,
+            "引用共享形参使用 Object 的对象虚表槽");
+        check.True(DispatchResolution.VirtualSlot(shared, 7, types) is null,
+            "没有基类约束时不能推断额外虚表槽");
+        check.True(DispatchResolution.VirtualSlot(shared with { Binding = new(NativeBindingKind.Shared) }, 0, types) is null,
+            "未知值类型形参不能套用引用接收者约定");
     }
 
     private static void EntryKinds(Assertions check, ProgramFacts facts, ManagedTypes types)

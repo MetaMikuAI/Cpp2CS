@@ -34,7 +34,7 @@ internal static class DispatchResolution
                     && SymTable.Resolve(values.Operands(call)[0]) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef target } } => target,
                 { Kind: OpKind.CallDelegate, Operand: MethodRef invoke } => invoke,
                 { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } pair } => Slot(itf, pair.Item2, interfaceOnly: true),
-                { Kind: OpKind.CallVirtual, Operand: int slot } when Receiver(call, values) is { } receiver => VirtualSlot(oracle.TypeOf(receiver), slot, oracle.Types),
+                { Kind: OpKind.CallVirtual, Operand: int slot } when Receiver(call, values) is { } receiver => VirtualSlot(oracle.TypeOf(receiver), slot, oracle.Types, oracle.Substitute),
                 _ => null,
             };
             if (method is not null) targets.Add(call.Site, method);
@@ -49,8 +49,10 @@ internal static class DispatchResolution
     }
 
     /// <summary>类型（沿基类链）中占据虚表槽 slot 的虚方法，类型实参代入声明类型。</summary>
-    internal static MethodRef? VirtualSlot(TypeRef? type, int slot, ManagedTypes types)
+    internal static MethodRef? VirtualSlot(TypeRef? type, int slot, ManagedTypes types, Func<TypeRef, TypeRef>? substitute = null)
     {
+        if (type is GenericParameterRef { IsReference: true } parameter)
+            type = parameter.ReferenceBase is { } constraint ? substitute?.Invoke(constraint) ?? constraint : types.Object;
         if (type is ArrayRef) type = types.CorlibDefinition("System.Array") is { } array ? new DefinitionRef(array, []) : null;
         // 接口自身的槽号只供 interface offset 分派；对象虚表上的槽属于 Object。
         if (type is DefinitionRef { Definition.IsInterface: true }) type = types.Object;
