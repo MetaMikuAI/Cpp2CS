@@ -58,6 +58,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         {
             cellTypes = [];
             var evidence = new Dictionary<Cell, HashSet<TypeRef>>();
+            var pointerCells = new HashSet<Cell>();
             void Note(Sym pointer, TypeRef? type)
             {
                 if (type is null) return;
@@ -92,9 +93,34 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                         : value.Index < 0 ? callee.DeclaringType : callee.Concrete(callee.Method.Parameters[value.Index].Type);
                     Note(operands[1 + position], type is ByRefRef byRef ? byRef.Element : type);
                 }
+                foreach (var value in signature.Arguments.Where(a => a.Type is PointerRef))
+                {
+                    var position = call.ArgumentIndex(value.Pieces[0].Register);
+                    if (position >= 0 && SymTable.Resolve(operands[1 + position]) is LocalSym local
+                        && memory.Find(local.Space, local.Offset, 1) is { Promoted: false } target && target.Start == local.Offset)
+                        pointerCells.Add(target);
+                }
             }
             foreach (var (noted, set) in evidence)
                 cellTypes[noted] = set.Count == 1 && set.First() is var t && (ManagedTypes.IsReferenceType(t) ? 8 : types.Size(t)) >= noted.Size ? t : null;
+            bool ScalarBits(Sym value) => value is ConstSym || TypeOf(value) is { } type
+                && types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double
+                || value is SliceSym slice && ScalarBits(slice.Base)
+                || value is ConcatSym concat && concat.Parts.All(ScalarBits);
+            // 原生指针传递的标量栈槽保留共同存储；完整写入提供类型证据，不把指针元素宽度当成缓冲区大小。
+            foreach (var target in pointerCells.Where(c => !evidence.ContainsKey(c) && c.Size is 1 or 2 or 4 or 8))
+            {
+                bool InCell(Sym address) => Decompose(address) is (LocalSym l, var offset, null, _)
+                    && l.Space == target.Space && l.Offset + offset >= target.Start && l.Offset + offset < target.End;
+                bool FullCell(Sym address, int width) => Decompose(address) is (LocalSym l, var offset, null, _)
+                    && l.Space == target.Space && l.Offset + offset == target.Start && width == target.Size * 8;
+                var stores = values.Function.Blocks.SelectMany(b => b.Statements).OfType<Store>()
+                    .Where(s => InCell(values.Operands(s)[0])).ToArray();
+                if (stores.Length == 0 || stores.Any(s => !FullCell(values.Operands(s)[0], s.Value.Width) || !ScalarBits(values.Operands(s)[1]))) continue;
+                if (values.Function.Blocks.SelectMany(b => b.Statements).SelectMany(values.ReadsAt)
+                    .Any(r => InCell(r.Address) && !FullCell(r.Address, r.Width))) continue;
+                cellTypes[target] = types.Integer(target.Size * 8, false);
+            }
         }
         return cellTypes.GetValueOrDefault(cell);
     }
