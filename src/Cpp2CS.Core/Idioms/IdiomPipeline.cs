@@ -106,6 +106,11 @@ internal static class IdiomPipeline
             if (state.InvokerCalls())
                 state.Cleanup();
         });
+        state.Passes.Run("idioms.StackBoxing", () =>
+        {
+            if (state.StackBoxing())
+                state.Cleanup();
+        });
         // 延迟值替换后才出现的 MethodInfo 符号（如内联 Array.Empty<T>() 的 MethodInfo+0x38 → RGCTX）：再符号化一次。
         state.Passes.Run("idioms.ReplaceLazy", () =>
         {

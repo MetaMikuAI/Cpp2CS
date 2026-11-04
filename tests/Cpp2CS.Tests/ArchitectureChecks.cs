@@ -38,6 +38,7 @@ internal static class ArchitectureChecks
         TailCallIdentities(checks, facts, types);
         SharedInterfacePartitions(checks);
         InvokerArguments(checks, facts, types);
+        StackBoxes(checks, facts, types);
         EntryKinds(checks, facts, types);
         Templates(checks, types);
         Accessors(checks, types);
@@ -73,6 +74,43 @@ internal static class ArchitectureChecks
         StackGuards(checks, facts);
         Verdicts(checks);
         return checks.Finish("架构边界");
+    }
+
+    private static void StackBoxes(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var definition = new TypeDef { Index = 800, Assembly = "Tests.dll", Namespace = "Tests", Name = "State", Token = 0,
+            Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = true };
+        var type = new DefinitionRef(definition, []);
+        var method = new MethodRef(types.CorlibDefinition("System.Enum")!.Methods.Single(m => m.Name == "ToString" && m.Parameters.Count == 0), [], []);
+        var abi = new ManagedAbi(facts.Layouts);
+        bool Run(string? variant = null)
+        {
+            var entry = new Block(0) { Statements = [new Branch(0, Expr.C(1, 1), 4, 8)] };
+            var left = new Block(4) { Statements = [new Store(4, new FrameAddress(-16), Expr.C(1, 32)), new Jump(4, 12)] };
+            var right = new Block(8) { Statements = variant == "missing" ? [new Jump(8, 12)]
+                : [new Store(8, new FrameAddress(-16), Expr.C(2, 32)), new Jump(8, 12)] };
+            var call = new Call(24, CallKind.Direct, Expr.C(1, 64))
+                { Arguments = [new FrameAddress(-32), Expr.C(0, 64)], Sources = [Storage.Gpr(0), Storage.Gpr(1)] };
+            var last = new Block(12) { Statements = [
+                new Store(12, new FrameAddress(-32), new Symbol(SymbolKind.Class, type)),
+                new Store(16, new FrameAddress(-24), Expr.C(variant == "monitor" ? 0 : ulong.MaxValue, 64)), call, new Return(28)] };
+            if (variant is "alias" or "unrelated") last.Statements.Insert(2, new Call(20, CallKind.Indirect, Expr.C(2, 64))
+                { Arguments = variant == "alias" ? [new FrameAddress(-32)] : [], Sources = variant == "alias" ? [Storage.Gpr(0)] : [] });
+            if (variant == "partial") last.Statements.Insert(2, new Store(20, new FrameAddress(-15), Expr.C(0, 8)));
+            MachineFunction.AddEdge(entry, left); MachineFunction.AddEdge(entry, right);
+            MachineFunction.AddEdge(left, last); MachineFunction.AddEdge(right, last);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 32, CodeRegion.Managed, default), Blocks = [entry, left, right, last] };
+            var changed = StackBoxingPass.Run(function, c => ReferenceEquals(c, call) ? [method] : [],
+                c => ReferenceEquals(c, call) ? abi.Machine(method, out _) : null, e => e, _ => 4, () => new(Storage.Temp(800), 1));
+            return changed && last.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.Box
+                && c.Arguments[1] == new FrameAddress(-16)) && last.Statements.OfType<Store>().Count() >= 2;
+        }
+        check.True(Run(), "栈上枚举装箱保留两条路径的有效载荷，以原存储作为装箱来源");
+        check.True(Run("unrelated"), "未取得栈对象地址的调用不破坏对象头证明");
+        check.True(!Run("monitor"), "栈对象标志不匹配时拒绝装箱归一");
+        check.True(!Run("missing"), "任一路径缺少有效载荷写入时拒绝装箱归一");
+        check.True(!Run("alias"), "取得栈对象地址的未知调用阻断装箱证明");
+        check.True(!Run("partial"), "部分覆盖不能充当完整枚举载荷");
     }
 
     private static void CallIdentities(Assertions check)
