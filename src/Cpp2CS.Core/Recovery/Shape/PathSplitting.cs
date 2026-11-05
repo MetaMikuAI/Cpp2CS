@@ -138,15 +138,41 @@ internal static class PathSplitting
                 yield return operands[0];
                 // 局部地址、方法实体及运行时操作的类元数据都要求单一实体。
                 for (var i = 0; i < call.Arguments.Length; i++)
-                    if (SymTable.Resolve(operands[1 + i]) is PhiSym phi && phi.Sources.All(s => s is not null
+                    if (SymTable.Resolve(operands[1 + i]) is PhiSym phi && (phi.Sources.All(s => s is not null
                         && (SymTable.Resolve(s) is LocalSym or EntitySym { Symbol.Kind: SymbolKind.Method }
-                            || call.Op is not null && SymTable.Resolve(s) is EntitySym { Symbol.Kind: SymbolKind.Class })))
+                            || call.Op is not null && SymTable.Resolve(s) is EntitySym { Symbol.Kind: SymbolKind.Class }))
+                        || Entities(phi, call.Op is not null) is { Count: > 1 }))
                         yield return phi;
                 break;
         }
         foreach (var operand in operands)
             foreach (var read in Reads(operand))
                 if (oracle.Locate(read.Address, read.Width) is null) yield return read.Address;
+    }
+
+    /// <summary>
+    /// φ 选出的元数据实体，来源可以是同样的 φ（多层合流）；有来源不是实体时为 null。
+    /// 经回边转传的 φ 不增加实体：只有一个实体时各路径相同，不需要拆分。
+    /// </summary>
+    private static HashSet<Sym>? Entities(PhiSym phi, bool runtime)
+    {
+        var entities = new HashSet<Sym>();
+        var seen = new HashSet<PhiSym>();
+        var pending = new Stack<PhiSym>();
+        pending.Push(phi);
+        while (pending.TryPop(out var current))
+        {
+            if (!seen.Add(current)) continue;
+            foreach (var source in current.Sources)
+                switch (source is null ? null : SymTable.Resolve(source))
+                {
+                    case EntitySym { Symbol.Kind: SymbolKind.Method } entity: entities.Add(entity); break;
+                    case EntitySym { Symbol.Kind: SymbolKind.Class } entity when runtime: entities.Add(entity); break;
+                    case PhiSym nested: pending.Push(nested); break;
+                    default: return null;
+                }
+        }
+        return entities;
     }
 
     private static IEnumerable<ReadSym> Reads(Sym sym)
@@ -173,6 +199,8 @@ internal static class PathSplitting
     {
         var root = Root(SymTable.Resolve(sym));
         if (root is not PhiSym phi || !ReferenceEquals(phi.Block, block) || phi.Sources.Any(s => s is null)) return false;
+        // 多层合流的实体选择：先拆外层，φ 随之下移到前驱，下一轮再拆。
+        if (phi.Sources.Any(s => SymTable.Resolve(s!) is PhiSym) && Entities(phi, true) is { } entities) return entities.Count > 1;
         var identities = phi.Sources.Select(s => Identity(SymTable.Resolve(s!), oracle)).ToArray();
         return identities.All(i => i is not null) && identities.Distinct().Count() > 1;
     }
