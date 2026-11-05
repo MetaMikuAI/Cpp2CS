@@ -120,9 +120,34 @@ internal sealed partial class BodyBuilder
                 StoreTo(place with { Path = [.. place.Path, .. projection.Path], Type = projection.Type }, part, address, output);
             return;
         }
+        if (StoreThroughProperty(place, bits, address, output)) return;
         var destination = LocationValue(place, address, store: true);
         var value = View(bits, place.Type, address);
         output.Add(destination is LocalValue local ? new ManagedAssignment(address, local, value) : new ManagedStore(address, destination, value));
+    }
+
+    /// <summary>
+    /// 写入经过不可访问的值类型字段，而该字段有证明过的 getter 和 setter 时，是 var t = o.P; t.f = v; o.P = t 内联后只留下的那次写入：
+    /// 取值和写回都只访问这个字段，其余叶子写回原值，与只写一个叶子不可区分。
+    /// </summary>
+    private bool StoreThroughProperty(Location place, Sym bits, ulong address, List<ManagedStatement> output)
+    {
+        for (var i = 0; i + 1 < place.Path.Count; i++)
+        {
+            var type = FieldType(place.Path[i], null);
+            var holder = place with { Path = place.Path.Take(i + 1).ToArray(), Type = type };
+            if (LocationValue(holder, address) is not FieldValue { Pending: not null } read) continue;
+            if (LocationValue(holder, address, store: true) is not FieldValue { Pending: not null } written
+                || templates.Accessor(read.Field, type, false, read.Receiver.Type) is null
+                || templates.Accessor(written.Field, type, true, written.Receiver.Type) is null) return false;
+            var copy = NewLocal(type);
+            output.Add(new ManagedAssignment(address, copy, read));
+            var leaf = Nest(new AddressValue(copy), place.Path.Skip(i + 1).ToArray(), place.Type, true, address);
+            output.Add(new ManagedStore(address, leaf, View(bits, place.Type, address)));
+            output.Add(new ManagedStore(address, written, copy));
+            return true;
+        }
+        return false;
     }
 
     /// <summary>表示链上的各层共享地址，写入的层级取值的定义类型；经过的值类型字段须可访问（写入目标以地址给出）。</summary>
