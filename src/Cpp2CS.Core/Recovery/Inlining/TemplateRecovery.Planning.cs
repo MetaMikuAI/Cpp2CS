@@ -1,9 +1,38 @@
 using System.Collections.Frozen;
+using System.Reflection;
 
 namespace Cpp2CS.Recovery.Inlining;
 
 internal sealed partial class TemplateRecovery
 {
+    /// <summary>
+    /// 还原的调用是否写成 callvirt；不能写成调用时为 null。证明说的是这个方法体本身，调用不能分派到别的方法体：
+    /// 非虚方法的 callvirt 只多一次判空；接收者是调用方的 this 时写成非虚调用（base.M()）；其他接收者须没有重写。
+    /// </summary>
+    private bool? Dispatched(MethodRef method, ManagedValue? receiver)
+    {
+        var definition = method.Method;
+        if (definition.IsStatic || definition.Name == ".ctor") return false;
+        if (!definition.IsVirtual || (definition.Attributes & MethodAttributes.Final) != 0 || definition.Owner.IsValueType) return true;
+        if (receiver is ArgumentValue { Index: -1 }) return false;
+        return receiver?.Type is DefinitionRef type && !Overridden(definition, type.Definition) ? true : null;
+    }
+
+    /// <summary>从 receiver 类型分派 method 的槽位，可能到达别的方法体：receiver 到方法所在类型之间，或 receiver 的子类里有同槽位的虚方法。</summary>
+    private bool Overridden(MethodDef method, TypeDef receiver)
+    {
+        bool Reaches(TypeDef type, TypeDef ancestor)
+        {
+            for (TypeRef? at = type.BaseType; at is DefinitionRef definition; at = definition.Definition.BaseType)
+                if (ReferenceEquals(definition.Definition, ancestor)) return true;
+            return false;
+        }
+        bool Redefines(TypeDef type) => type.Methods.Any(m => m.IsVirtual && m.Slot == method.Slot);
+        for (var at = receiver; !ReferenceEquals(at, method.Owner); at = at.BaseType is DefinitionRef parent ? parent.Definition : method.Owner)
+            if (Redefines(at)) return true;
+        return types.Model.Types.Any(t => Reaches(t, receiver) && Redefines(t));
+    }
+
     /// <summary>
     /// 把证明成立的区域换成一次调用：起点之前的语句保留，随后是调用与到出口的跳转（带出口边上的复制）；
     /// 区域内的块须只从区域内进入、其中定义的值不在区域外使用，之后删去。
@@ -102,7 +131,8 @@ internal sealed partial class TemplateRecovery
                 { failure = $"区域内定义的值 {escaping.Variable} 在区域外 0x{statement.Address:x} 使用"; return null; }
 
         if (ArrivalCopies(body, match, blocks, at, out failure) is not { } arrivals) return null;
-        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, !method.Method.IsStatic && method.Method.Name != ".ctor"), match.Result) { Inlined = true };
+        if (Dispatched(method, receiver) is not { } dispatched) { failure = $"{method.Method.Name} 可能被重写，调用不一定到这个方法体"; return null; }
+        var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, dispatched), match.Result) { Inlined = true };
         var replacement = blocks[startBlock].Statements.Take(start).Concat(hoisted).Concat(savedCopies).Concat(arrivals).Append(call).Concat(sunk).ToList();
         if (match.Returns) replacement.Add(new ManagedReturn(at, match.Result));
         if (match.Continuation is { } branch)
