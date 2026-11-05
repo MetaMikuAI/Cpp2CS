@@ -417,9 +417,9 @@ internal sealed partial class TemplateRecovery
                         && Accepted(replaced) is { } accepted)
                         return accepted;
         }
-        // 方法体随证明变化，留下最后一次尝试的原因。
-        inlineFailures[PendingOf(anchor.Access)!.Address] = failures.Count == 0 ? "没有可作模板的方法"
-            : string.Join("；", failures.OrderByDescending(f => f.Progress).Take(3).Select(f => f.Reason));
+        // 留下第一次尝试的原因：之后方法体可能被别的证明改过，那时的失败只是连带结果。
+        inlineFailures.TryAdd(PendingOf(anchor.Access)!.Address, failures.Count == 0 ? "没有可作模板的方法"
+            : string.Join("；", failures.OrderByDescending(f => f.Progress).Take(3).Select(f => f.Reason)));
         return null;
     }
 
