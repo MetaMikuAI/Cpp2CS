@@ -379,6 +379,8 @@ internal sealed partial class TemplateRecovery
         }
         starts.AddRange(UsesOfPendingRead(blocks, anchor.Block, anchor.Index).Where(p => !starts.Contains(p)));
         var failures = new List<(string Reason, int Progress)>();
+        // 成立的证明都与原生代码等价，每个候选取第一个成立的起点，候选之间选覆盖语句最多的：较小的模板会拿走更大模板要比对的分支或读取，之后更大的模板就证不出来了。覆盖相同时保留候选次序。
+        var (best, bestCovered) = ((ManagedBody?)null, -1);
         foreach (var (method, template) in InlineCandidates(field, receiver))
         {
             if (fields.CallFailure(method, receiver, receiver is null ? field.DeclaringType : null) is { } illegal) { failures.Add((illegal, -1)); continue; }
@@ -389,13 +391,18 @@ internal sealed partial class TemplateRecovery
                 var match = Match(body, blocks, block, start, template, method.TypeArguments, out var failure);
                 if (match is not null && PlanReplacement(body, blocks, block, start, method, match, out failure) is { } replaced)
                 {
-                    if (Accepted(replaced) is { } accepted) return accepted;
+                    if (Accepted(replaced) is { } accepted)
+                    {
+                        if (match.Covered.Count > bestCovered) (best, bestCovered) = (accepted, match.Covered.Count);
+                        break;
+                    }
                     failure = "证明成立但待证访问没有减少";
                 }
                 if (lastProgress > progress) (nearest, progress) = (failure, lastProgress);
             }
             failures.Add(($"{method.Method.Owner.Name}.{method.Method.Name}：{nearest}", progress));
         }
+        if (best is not null) return best;
         // 模板按形参分支、调用方没有对应的分支：实参是常量，内联时按常量折叠了这个分支。
         foreach (var (method, template) in InlineCandidates(field, receiver))
         {
@@ -441,7 +448,7 @@ internal sealed partial class TemplateRecovery
 
     /// <summary>
     /// 多语句模板：共同候选（<see cref="InlineEvidence.Candidates"/>）中访问该字段、方法体无环且没有异常区域的非泛型方法。
-    /// 次序是启发式：先试含写入的模板，再按方法体从小到大；任何证明成立的模板都与原生代码等价，次序只影响选中哪一个。
+    /// 次序是启发式：先试含写入的模板，再按方法体从小到大；任何证明成立的模板都与原生代码等价，次序只决定覆盖相同时选中哪一个。
     /// </summary>
     private IReadOnlyList<(MethodRef Method, ManagedBody Body)> InlineCandidates(FieldRef field, TypeRef? receiver)
     {
