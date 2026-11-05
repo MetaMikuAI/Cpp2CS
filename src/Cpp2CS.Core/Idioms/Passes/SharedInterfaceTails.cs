@@ -8,17 +8,21 @@ namespace Cpp2CS.Idioms;
 /// <summary>接口的不同槽位被尾合并时，按接收者来源拆回各自的查找和调用。</summary>
 internal static class SharedInterfaceTails
 {
-    /// <summary>接口查找或虚表读取在同一间接调用前合流时，把调用放回对应的入边。</summary>
+    /// <summary>接口查找、虚表读取或委托的 invoke_impl 在同一间接调用前合流时，把调用放回对应的入边。尾合并可以多层，入边的值可能又是上一层的 φ。</summary>
     internal static bool SplitInvokes(MachineFunction function, Func<Expr, Expr> expand)
     {
         var data = function.Blocks.SelectMany(b => b.Statements).OfType<Call>()
             .Where(c => c.Op?.Kind == OpKind.InterfaceInvokeData).SelectMany(c => c.Defines).ToHashSet();
-        bool Pointer(Variable variable)
+        var joins = function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().ToDictionary(p => p.Target);
+        bool Pointer(Variable variable) => JoinedPointer(variable, []);
+        bool JoinedPointer(Variable variable, HashSet<Variable> visited)
         {
+            if (joins.TryGetValue(variable, out var join)) return !visited.Add(variable) || join.Sources.All(source => JoinedPointer(source, visited));
             if (expand(new Use(variable, variable.Width)) is not Load { Width: 64 } load) return false;
             if (load.Address is Use address && data.Contains(address.Variable)) return true;
             var terms = TermsPass.Terms(load.Address).ToArray();
             var offset = terms.OfType<Const>().Aggregate(0UL, (sum, c) => sum + c.Value);
+            if (offset == RuntimeLayout.DelegateInvokeImpl && terms.Count(e => e is not Const) == 1) return true;
             return terms.Where(e => e is not Const).ToArray() is [Load { Width: 64 }]
                 && offset >= RuntimeLayout.ClassVtable && (offset - RuntimeLayout.ClassVtable) % RuntimeLayout.VirtualInvokeDataSize == 0;
         }

@@ -18,7 +18,8 @@ using Storage = Cpp2CS.Ir.Storage;
 internal static class PathSplitting
 {
     private const ulong SyntheticBase = 0xffff_fff0_0000_0000;
-    private const int Rounds = 8;
+    /// <summary>每轮只拆一个合流块；switch 的各分支共用一条装箱或调用尾部时，每层合流各要一轮。</summary>
+    private const int Rounds = 32;
 
     private const int MaxStatements = 96;
 

@@ -169,6 +169,14 @@ public sealed class MethodDecompiler
         return () => new Variable(Storage.Temp(next++), 1);
     }
 
+    /// <summary>委托根的类型：委托常与结构体的其他字段一起放在宽寄存器里，取低位的根按值的位片定型。</summary>
+    private static Func<Expr, TypeRef?> RootType(TypeOracle oracle, ValueModel values) => e => e switch
+    {
+        Use { Width: var width, Variable: var variable } when width < variable.Width => oracle.TypeOf(values.Syms.Slice(values.Of(variable), 0, width)),
+        Use use => oracle.TypeOf(values.Of(use.Variable)),
+        _ => null,
+    };
+
     /// <summary>运行到符号值为止的各层。</summary>
     public RecoveryResult<MethodAnalysis> Analyze(MethodRef method, ulong entry)
     {
@@ -190,6 +198,7 @@ public sealed class MethodDecompiler
         var environment = new MethodEnvironment(method, signature, shapes);
         var splits = PathSplitting.Run(function, f => ValueModel.Build(f, environment),
             v => new TypeOracle(types, facts, method, environment.Shape, v), lifter.Calls, lifter.Machine.Convention.StackPointer);
+        InvokerCallsPass.AfterSplitting(function, method, rewriter);
         // 分派在内存提升之前解析，使经指针的调用效果有签名可依。
         var preliminary = ValueModel.Build(function, environment);
         // 路径拆分后才唯一确定的接收者。
@@ -198,7 +207,6 @@ public sealed class MethodDecompiler
         DispatchResolution.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary));
         // 每轮从稳定输入构建分析图，只累积已证明的调用目标，不回滚生产语句和 SSA。
         var prepared = function;
-        InvokerCallsPass.AfterSplitting(function, method, rewriter);
         var targets = new Dictionary<CallSite, MethodRef>();
         MemoryLayout layout;
         while (true)
@@ -211,7 +219,7 @@ public sealed class MethodDecompiler
             var promoted = ValueModel.Build(function, environment);
             var promotedOracle = new TypeOracle(types, facts, method, environment.Shape, promoted, layout);
             var discovered = DispatchResolution.Find(function, promoted, promotedOracle).ToDictionary();
-            foreach (var (site, invoke) in DelegateCallNormalizer.Discover(facts, function, e => e is Use use ? promotedOracle.TypeOf(promoted.Of(use.Variable)) : null))
+            foreach (var (site, invoke) in DelegateCallNormalizer.Discover(facts, function, RootType(promotedOracle, promoted)))
                 discovered.TryAdd(site, invoke);
             if (discovered.Count == 0) break;
             foreach (var (site, target) in discovered) targets.Add(site, target);
@@ -233,7 +241,7 @@ public sealed class MethodDecompiler
         environment.Layout = layout;
         var values = ValueModel.Build(function, environment);
         var oracle = new TypeOracle(types, facts, method, environment.Shape, values, layout);
-        if (DelegateCallNormalizer.Run(facts, function, idioms, e => e is Use use ? oracle.TypeOf(values.Of(use.Variable)) : null))
+        if (DelegateCallNormalizer.Run(facts, function, idioms, RootType(oracle, values)))
             values = ValueModel.Build(function, environment);
         return new MethodAnalysis(method, entry, signature, function, idioms, layout, values) { Environment = environment, Splits = splits };
     }
