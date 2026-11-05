@@ -53,6 +53,7 @@ internal static class ArchitectureChecks
         PlatformInvokeDeclarations(checks, facts, types);
         StackBoxes(checks, facts, types);
         ExceptionStacks(checks, facts);
+        FieldAvailability(checks, types);
         PartialScalarCells(checks, facts, types);
         UnusedCallStacks(checks, facts, types);
         EntryKinds(checks, facts, types);
@@ -193,6 +194,38 @@ internal static class ArchitectureChecks
         check.True(!Run("missing"), "任一路径缺少有效载荷写入时拒绝装箱归一");
         check.True(!Run("alias"), "取得栈对象地址的未知调用阻断装箱证明");
         check.True(!Run("partial"), "部分覆盖不能充当完整枚举载荷");
+    }
+
+    private static void FieldAvailability(Assertions check, ManagedTypes types)
+    {
+        var method = new MethodRef(types.Corlib("System.Object").Definition.Methods.First(), [], []);
+        var owner = types.Corlib("System.Text.StringBuilder");
+        var instance = owner.Definition.Fields.Where(f => !f.IsStatic).Take(2).Select(f => new FieldRef(f, owner)).ToArray();
+        ManagedValue Field(int index) => new FieldValue(new ArgumentValue(-1, owner, 64), instance[index], types.Int32, 32);
+        LocalValue Local(int id) => new(new Variable(Storage.Temp(960 + id), 1), types.Int32, 32);
+        var (saved, copied) = (Local(0), Local(1));
+        ManagedStatement Read(ulong at, int field = 0) => new ManagedAssignment(at, saved, Field(field));
+        ManagedBlock To(ulong at, ulong to, params ManagedStatement[] statements) => new(at, [.. statements, new ManagedJump(at, new ManagedEdge(to, []))]);
+        ManagedBlock End(ulong at) => new(at, [new ManagedReturn(at, null)]);
+        bool Holds(ManagedBody body, Variable variable, ulong at, int field = 0) =>
+            new AvailableFields(body).At(at, 0).GetValueOrDefault(variable) is FieldValue known && known.Field.Equals(instance[field]);
+        ManagedBody Body(params ManagedBlock[] blocks) => new(method, blocks);
+
+        check.True(Holds(Body(To(1, 2, Read(1)), End(2)), saved.Variable, 2), "读入局部之后，它就是字段的内容");
+        var other = new ManagedStore(1, Field(1), new ConstantValue(0, types.Int32, 32));
+        check.True(Holds(Body(To(1, 2, Read(1), other), End(2)), saved.Variable, 2), "写别的字段不影响");
+        var same = new ManagedStore(1, Field(0), new ConstantValue(0, types.Int32, 32));
+        check.True(!Holds(Body(To(1, 2, Read(1), same), End(2)), saved.Variable, 2), "写这个字段之后不再相等");
+        var call = new ManagedCall(1, new ManagedInvocation(method, null, [], false), null);
+        check.True(!Holds(Body(To(1, 2, Read(1), call), End(2)), saved.Variable, 2), "调用可能写任何字段");
+        var branch = new ManagedBranch(1, new ConstantValue(1, types.Boolean, 8), new ManagedEdge(2, []), new ManagedEdge(3, []));
+        check.True(Holds(Body(new(1, [branch]), To(2, 4, Read(2)), To(3, 4, Read(3)), End(4)), saved.Variable, 4), "每条入边都读同一个字段时，合流后仍相等");
+        check.True(!Holds(Body(new(1, [branch]), To(2, 4, Read(2)), To(3, 4, Read(3, 1)), End(4)), saved.Variable, 4), "入边读不同的字段时，合流后不知道");
+        check.True(!Holds(Body(new(1, [branch]), To(2, 4, Read(2)), To(3, 4), End(4)), saved.Variable, 4), "只有一条入边读过时，合流后不知道");
+        var copy = new ManagedJump(1, new ManagedEdge(2, [new ManagedCopy(copied, saved)]));
+        check.True(Holds(Body(new(1, [Read(1), copy]), End(2)), copied.Variable, 2), "边上的复制传递事实");
+        var loop = Body(To(1, 2, Read(1)), new(2, [new ManagedBranch(2, new ConstantValue(1, types.Boolean, 8), new ManagedEdge(3, []), new ManagedEdge(4, []))]), To(3, 2, same), End(4));
+        check.True(!Holds(loop, saved.Variable, 2), "回边上写过字段时，循环头不再相等");
     }
 
     private static void ExceptionStacks(Assertions check, ProgramFacts facts)
