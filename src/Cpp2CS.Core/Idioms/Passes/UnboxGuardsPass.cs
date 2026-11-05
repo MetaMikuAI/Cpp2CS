@@ -31,18 +31,36 @@ internal static class UnboxGuardsPass
                 // 内联 unbox.any 不调用 helper：检查之后直接从对象数据区读取值类型。
                 var load = first is Define { Value: Load direct } ? direct
                     : first is Define { Value: Ir.Convert { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: Load converted } } ? converted : null;
-                if (first is not Define data || load is not { Width: 32 or 64, Address: Binary { Op: BinOp.Add, Left: var source, Right: Const { Value: RuntimeLayout.ObjectHeaderSize } } }
-                    || type is not DefinitionRef { Definition.IsValueType: true }
-                    || !Equals(state.defs.Expand(source), obj)) continue;
-                var at = targetBlock.Statements.FindIndex(s => ReferenceEquals(s, first));
-                if (at < 0) continue;
-                targetBlock.Statements[at] = new Call(data.Address, CallKind.Direct, Expr.C(0, 64))
+                if (type is not DefinitionRef { Definition.IsValueType: true }) continue;
+                if (first is Define data && load is { Width: 32 or 64, Address: Binary { Op: BinOp.Add, Left: var source, Right: Const { Value: RuntimeLayout.ObjectHeaderSize } } }
+                    && Equals(state.defs.Expand(source), obj))
                 {
-                    Op = new RuntimeOp(OpKind.UnboxAny, type),
-                    Arguments = [source],
-                    Results = [data.Target.Storage],
-                    Defines = [data.Target],
-                };
+                    var at = targetBlock.Statements.FindIndex(s => ReferenceEquals(s, first));
+                    if (at < 0) continue;
+                    targetBlock.Statements[at] = new Call(data.Address, CallKind.Direct, Expr.C(0, 64))
+                    {
+                        Op = new RuntimeOp(OpKind.UnboxAny, type),
+                        Arguments = [source],
+                        Results = [data.Target.Storage],
+                        Defines = [data.Target],
+                    };
+                }
+                else
+                {
+                    // 值没有被使用：仍保留 unbox.any 的异常语义，结果在写出时作为未使用的局部丢弃。
+                    var result = state.Fresh();
+                    block.Statements[i] = new Nop(check.Address, "内联 unbox 空检查");
+                    block.Statements.Insert(i + 1, new Call(check.Address, CallKind.Direct, Expr.C(0, 64))
+                    {
+                        Op = new RuntimeOp(OpKind.UnboxAny, type),
+                        Arguments = [obj],
+                        Results = [result.Storage],
+                        Defines = [result],
+                    });
+                    i++;
+                    changed = true;
+                    continue;
+                }
                 block.Statements[i] = new Nop(check.Address, "内联 unbox 空检查");
                 changed = true;
             }
