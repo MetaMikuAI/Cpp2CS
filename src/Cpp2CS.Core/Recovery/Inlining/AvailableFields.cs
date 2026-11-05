@@ -5,7 +5,7 @@ using Cpp2CS.Recovery.Effects;
 namespace Cpp2CS.Recovery.Inlining;
 
 /// <summary>
-/// 局部变量此刻等于哪个字段的内容（前向必达数据流）：v = r.f 之后，到 v、r 被改写或这个字段可能被写之前，v 就是 r.f 的当前值。
+/// 局部变量此刻等于哪个字段的内容或数组、字符串的长度（前向必达数据流）：v = r.f 之后，到 v、r 被改写或这个字段可能被写之前，v 就是 r.f 的当前值。
 /// 编译器复用较早的读取、在不改内存的路径上省掉重读时，内联副本里看不到这次读取，比较要靠这个事实。
 /// 调用、未知写入和可能运行类构造的访问都清空事实；处理块入口没有事实。
 /// </summary>
@@ -105,6 +105,7 @@ internal sealed class AvailableFields
     private static ManagedValue? Closed(ManagedValue value, Dictionary<Variable, ManagedValue> facts) => value switch
     {
         FieldValue { Receiver: LocalValue or ArgumentValue } field => new FieldValue(field.Receiver, field.Field, field.Type, field.Width),
+        ArrayLengthValue { Array: LocalValue or ArgumentValue } or StringLengthValue { String: LocalValue or ArgumentValue } => value,
         LocalValue local => facts.GetValueOrDefault(local.Variable),
         ConversionValue conversion => Closed(conversion.Operand, facts) is { } operand ? conversion with { Operand = operand } : null,
         _ => null,

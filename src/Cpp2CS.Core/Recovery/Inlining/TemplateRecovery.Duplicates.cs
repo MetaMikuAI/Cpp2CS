@@ -424,11 +424,15 @@ internal sealed partial class TemplateRecovery
     /// 保存的局部还是字段的内容。留下的重读在这条路径上得到相同的值，这正是编译器省掉它的依据。
     /// 反过来不成立：保留沿用局部的路径时重读被删，调用之后读到的是旧值。
     /// </summary>
-    private bool Reloaded(ManagedValue saved, Trace on, ManagedValue reloaded, DuplicateProof proof) =>
-        saved is LocalValue local && reloaded is Observed { Read: FieldValue read } && on.End.Epoch == 0
-        && proof.Match.Available?.Value.GetValueOrDefault(local.Variable) is FieldValue known
-        && ReferenceEquals(read.Field.Field, known.Field.Field) && SameTerm(read.Receiver, known.Receiver)
-        && on.End.State is { } state && !state.Stores.Any(s => MayAlias(s.Location, known));
+    private bool Reloaded(ManagedValue saved, Trace on, ManagedValue reloaded, DuplicateProof proof)
+    {
+        if (saved is not LocalValue local || proof.Match.Available?.Value.GetValueOrDefault(local.Variable) is not { } known) return false;
+        // 长度不可变，只要是同一个数组或字符串。
+        if (known is ArrayLengthValue or StringLengthValue) return SameTerm(reloaded is Observed { Read: var length } ? length : reloaded, known);
+        return known is FieldValue field && reloaded is Observed { Read: FieldValue read } && on.End.Epoch == 0
+            && ReferenceEquals(read.Field.Field, field.Field.Field) && SameTerm(read.Receiver, field.Receiver)
+            && on.End.State is { } state && !state.Stores.Any(s => MayAlias(s.Location, field));
+    }
 
     /// <summary>项里读取时解引用的项（调用方的 this 除外）。</summary>
     private static List<ManagedValue> ReadReceivers(ManagedValue term)
