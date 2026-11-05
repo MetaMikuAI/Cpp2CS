@@ -545,6 +545,16 @@ internal static class ArchitectureChecks
                 check.True(exit.Statements.OfType<Phi>().Single().Sources.All(results.Contains) && exit.Predecessors.Count == count,
                     "各分支调用结果经新入边汇合，出口不引用被删除的调用结果");
             }
+        // 实参经私有栈槽转发后，语句换了对象但仍是同一次调用：它读取的另一个栈槽不能当作无人观察。
+        var box = new Call(8, CallKind.Direct, Expr.C(64, 64))
+        {
+            Op = new(OpKind.Box, null), Arguments = [Expr.C(0, 64), new Load(new FrameAddress(-32), 64)],
+        };
+        var viaSlot = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [new(0) { Statements = [
+            new Store(0, new FrameAddress(-16), Expr.C(7, 32)), new Store(4, new FrameAddress(-32), new FrameAddress(-16)), box, new Return(12)] }] };
+        FrameForwarding.Run(viaSlot, effects);
+        check.True(viaSlot.Blocks[0].Statements.OfType<Call>().Single() is { Arguments: [_, FrameAddress { Offset: -16 }] }
+            && viaSlot.Blocks[0].Statements.OfType<Store>().Any(s => s.Target is FrameAddress { Offset: -16 }), "转发改写实参后保留调用读取的写入");
         }
     }
 
