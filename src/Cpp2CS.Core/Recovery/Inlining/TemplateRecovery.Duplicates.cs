@@ -46,6 +46,8 @@ internal sealed partial class TemplateRecovery
         /// <summary>取过地址的局部：可能经引用改变，不能只按环境比较。</summary>
         public required IReadOnlySet<Variable> Addressed { get; init; }
         public required IReadOnlyDictionary<Variable, LocalValue> LocalTypes { get; init; }
+        /// <summary>只经整体赋值改变的结构体局部。</summary>
+        public required IReadOnlySet<Variable> FrozenLocals { get; init; }
         /// <summary>汇合时总要核对的局部：区域内定义的和出口边复制的。</summary>
         public required IReadOnlySet<Variable> Tracked { get; init; }
         /// <summary>返回值在一条路径上的项（已表示成调用后的内存）与结果局部的对应。</summary>
@@ -76,6 +78,8 @@ internal sealed partial class TemplateRecovery
             if (statement is ManagedCall { Result: { } called }) localTypes[called.Variable] = called;
             foreach (var copy in ManagedValues.Edges(statement).SelectMany(e => e.Copies)) localTypes[copy.Target.Variable] = copy.Target;
         }
+        var fieldStored = blocks.Values.SelectMany(b => b.Statements).OfType<ManagedStore>().Select(s => Root(s.Target)).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
+        var frozen = localTypes.Keys.Where(v => !addressed.Contains(v) && !fieldStored.Contains(v) && types.Kind(localTypes[v].Type) == TypeKind.Struct).ToHashSet();
         var tracked = match.Locals.Keys.Concat(match.Ends.SelectMany(e => e.Copies).Select(c => c.Target.Variable)).ToHashSet();
         var current = new Dictionary<InlineEnd, IReadOnlyList<(ManagedValue, ManagedValue)>>(ReferenceEqualityComparer.Instance);
         IReadOnlyList<(ManagedValue Actual, ManagedValue Carrier)> Pairs(InlineEnd end) =>
@@ -83,10 +87,10 @@ internal sealed partial class TemplateRecovery
         string? refusal = null;
         foreach (var kept in match.Ends.OrderByDescending(e => e.Epoch).ThenBy(e => e.Result is ConstantValue ? 1 : 0).DistinctBy(e => e.Exit))
         {
-            var proof = new DuplicateProof { Match = match, Body = body, Blocks = blocks, Addressed = addressed, LocalTypes = localTypes, Tracked = tracked, Pairs = Pairs };
+            var proof = new DuplicateProof { Match = match, Body = body, Blocks = blocks, Addressed = addressed, FrozenLocals = frozen, LocalTypes = localTypes, Tracked = tracked, Pairs = Pairs };
             var retained = new TraceLog();
             var removed = match.Ends.Where(e => !ReferenceEquals(e, kept)).Select(e => (End: e, Log: new TraceLog())).ToArray();
-            if (removed.All(other => SameOnward(BeginTrace(kept, blocks, retained), BeginTrace(other.End, blocks, other.Log), proof)))
+            if (removed.All(other => SameOnward(BeginTrace(kept, proof, retained), BeginTrace(other.End, proof, other.Log), proof)))
                 return Retain(match, proof, kept, retained, removed, result, pairs);
             refusal ??= proof.Refusal;
         }
@@ -132,7 +136,7 @@ internal sealed partial class TemplateRecovery
         return true;
     }
 
-    private Trace BeginTrace(InlineEnd end, IReadOnlyDictionary<ulong, ManagedBlock> blocks, TraceLog log)
+    private Trace BeginTrace(InlineEnd end, DuplicateProof proof, TraceLog log)
     {
         var state = end.State!;
         return new Trace
@@ -141,8 +145,9 @@ internal sealed partial class TemplateRecovery
             Log = log,
             Walker = new Walker
             {
-                Blocks = blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Epoch = AfterRegion, Calls = 1 << 16,
+                Blocks = proof.Blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Epoch = AfterRegion, Calls = 1 << 16,
                 Visited = [end.Exit.Block],
+                FrozenLocals = proof.FrozenLocals,
                 Env = end.Env.ToDictionary(p => p.Key, p => Current(p.Value, end)),
                 Assumptions = state.Assumptions.Select(a => (Current(a.Condition, end), a.Value)).ToList(),
                 Dereferenced = state.Dereferenced.Select(d => Current(d, end)).ToHashSet(),
@@ -340,8 +345,11 @@ internal sealed partial class TemplateRecovery
             Assigned(trace, result.Variable);
         }
         walker.Calls++;
-        walker.Epoch++;
-        walker.Stores.Clear();
+        if (ManagedEffects.Invocation(call.Invocation).InvalidatesMemory)
+        {
+            walker.Epoch++;
+            walker.Stores.Clear();
+        }
         trace.Recent.Clear();
         walker.Index++;
     }
@@ -431,7 +439,7 @@ internal sealed partial class TemplateRecovery
     /// <summary>结果局部形式的项在这条路径的出口已知非空，或这条路径紧接着就解引用它。</summary>
     private bool AccessKnownOn(ManagedValue receiver, InlineEnd end, TraceLog log, DuplicateProof proof)
     {
-        var start = BeginTrace(end, proof.Blocks, new TraceLog());
+        var start = BeginTrace(end, proof, new TraceLog());
         bool Same(ManagedValue accessed) => SameTerm(Normal(accessed, start, proof), receiver);
         if (start.Walker.Dereferenced.Any(Same) || (log.FirstAccesses?.Any(Same) ?? false)) return true;
         var moved = Canonical(Fold(Instantiate(receiver, proof.Pairs(end))));

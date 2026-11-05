@@ -40,12 +40,14 @@ internal sealed partial class TemplateRecovery
         public List<(ManagedValue Condition, bool Value)> Assumptions { get; init; } = [];
         /// <summary>这条路径上已经解引用过的项：它们非空，再次访问不会抛出。</summary>
         public HashSet<ManagedValue> Dereferenced { get; init; } = [];
+        /// <summary>只经整体赋值改变的结构体局部：读它的字段是对值的投影，调用改不了。</summary>
+        public IReadOnlySet<Variable>? FrozenLocals { get; init; }
 
         public ManagedStatement Current => Blocks[Block].Statements[Index];
 
         public Walker Clone() => new()
         {
-            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions], Dereferenced = [.. Dereferenced],
+            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions], Dereferenced = [.. Dereferenced], FrozenLocals = FrozenLocals,
         };
     }
 
@@ -808,7 +810,10 @@ internal sealed partial class TemplateRecovery
             case HoleValue:
                 return null;
             case FieldValue field:
-                return Term(walker, field.Receiver) is { } receiver ? Load(walker, new FieldValue(receiver, field.Field, field.Type, field.Width)) : null;
+                if (Term(walker, field.Receiver) is not { } receiver) return null;
+                var access = new FieldValue(receiver, field.Field, field.Type, field.Width);
+                return walker.FrozenLocals is { } frozen && Root(field.Receiver) is LocalValue held && frozen.Contains(held.Variable)
+                    ? new Observed(access, AfterRegion) : Load(walker, access);
             case StaticFieldValue field:
                 return Load(walker, new StaticFieldValue(field.Field, field.Type, field.Width));
             case ArrayElementValue element:
@@ -823,6 +828,9 @@ internal sealed partial class TemplateRecovery
         });
         return failed ? null : mapped;
     }
+
+    /// <summary>字段访问链的根。</summary>
+    private static ManagedValue Root(ManagedValue value) => value is FieldValue field ? Root(field.Receiver) : value;
 
     /// <summary>写入目标的位置项。</summary>
     private ManagedValue? Location(Walker walker, ManagedValue target) => target switch
