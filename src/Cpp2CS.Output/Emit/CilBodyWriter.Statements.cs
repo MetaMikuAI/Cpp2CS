@@ -87,6 +87,17 @@ internal sealed partial class CilBodyWriter
         }
     }
 
+    /// <summary>骨架的占位体以 ldnull; throw 结尾，前面可能有基类构造调用，那部分要留着才能编译。</summary>
+    internal void MarkUnrecovered(MethodDefinition method, ulong address)
+    {
+        if (method.Body?.Instructions is not { Count: >= 2 } instructions || instructions[^1].OpCode != OpCodes.Throw || instructions[^2].OpCode != OpCodes.Ldnull) return;
+        destination = method;
+        var il = method.Body.GetILProcessor();
+        var location = il.Create(OpCodes.Ldc_I8, unchecked((long)address));
+        il.Replace(instructions[^2], location);
+        il.InsertAfter(location, il.Create(OpCodes.Call, Unrecovered().Fail));
+    }
+
     /// <summary>洞标记只携带原生地址，完整原因留在 recovery.jsonl，避免诊断文本撑爆 #US 字符串堆。</summary>
     private (MethodReference At, MethodReference Fail, MethodDefinition Value) Unrecovered()
     {

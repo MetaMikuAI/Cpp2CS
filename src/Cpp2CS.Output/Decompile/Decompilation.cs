@@ -92,27 +92,46 @@ public static partial class Decompilation
     /// 依赖从 <paramref name="searchDirectory"/> 解析。共享一个类型系统，并行反编译各类型。
     /// </summary>
     public static IReadOnlyList<SourceFile> Decompile(string assemblyPath, string searchDirectory, Func<ITypeDefinition, bool> include, bool assemblyAttributes,
-        bool recoveringBodies = false, bool groupByName = false, IDecompileTransformProvider? transforms = null)
+        bool recoveringBodies = false, bool groupByName = false, IDecompileTransformProvider? transforms = null, Func<string>? stubs = null)
     {
         var file = new PEFile(assemblyPath);
         var resolver = new UniversalAssemblyResolver(assemblyPath, true, file.DetectTargetFrameworkId());
         resolver.AddSearchDirectory(searchDirectory);
         var settings = Settings(recoveringBodies);
         var typeSystem = new DecompilerTypeSystem(file, resolver, settings);
+        (string Namespace, string Name) Key(ITypeDefinition t) => (t.Namespace, groupByName ? t.Name.Split('`')[0] : t.ReflectionName);
+        (string Namespace, string Name) Named(ITypeDefinition t) => Key(t) is var (ns, name) ? (ns, groupByName && ns.Length > 0 ? ns + "." + name : name) : default;
         var types = typeSystem.MainModule.TopLevelTypeDefinitions
             .Where(t => t.Name != "<Module>" && include(t))
-            .GroupBy(t => (t.Namespace, Name: groupByName ? t.Name.Split('`')[0] : t.ReflectionName))
+            .GroupBy(t => Key(t))
             .Select(g => (Handles: g.Select(t => (TypeDefinitionHandle)t.MetadataToken).ToArray(), g.Key.Namespace,
                 Name: groupByName && g.Key.Namespace.Length > 0 ? g.Key.Namespace + "." + g.Key.Name : g.Key.Name))
             .ToArray();
         var results = new ConcurrentBag<(int Index, SourceFile File)>();
+        var failed = new ConcurrentBag<(string Namespace, string Name, string Reason)>();
         Parallel.For(0, types.Length, i =>
         {
             var (handles, ns, name) = types[i];
-            var tree = CreateDecompiler(typeSystem, settings, transforms).DecompileTypes(handles);
-            results.Add((i, new SourceFile(name, ns, Print(tree, settings))));
+            try
+            {
+                var tree = CreateDecompiler(typeSystem, settings, transforms).DecompileTypes(handles);
+                results.Add((i, new SourceFile(name, ns, Print(tree, settings))));
+            }
+            // 只有调用方提供了占位程序集才继续（--keep-going）；否则照常中断。
+            catch (Exception e) when (stubs is not null)
+            {
+                failed.Add((ns, name, e.GetType().Name));
+            }
         });
         var files = results.OrderBy(r => r.Index).Select(r => r.File).ToList();
+        if (!failed.IsEmpty)
+        {
+            // 反编译失败的类型退回成占位体，工程的结构仍然完整。
+            var directory = stubs!();
+            var wanted = failed.ToDictionary(f => (f.Namespace, f.Name), f => f.Reason);
+            foreach (var source in Decompile(Path.Combine(directory, Path.GetFileName(assemblyPath)), directory, t => wanted.ContainsKey(Named(t)), false, recoveringBodies, groupByName, transforms))
+                files.Add(source with { Source = $"// 反编译失败（{wanted[(source.Namespace, source.TypeName!)]}），这个类型只有占位体。\n{source.Source}" });
+        }
         if (assemblyAttributes)
         {
             var decompiler = CreateDecompiler(typeSystem, settings, transforms);

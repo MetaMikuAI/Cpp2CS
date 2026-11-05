@@ -32,6 +32,19 @@ public sealed class MethodSummaryService : IMethodResults
 
     internal MethodSummaryService(Func<MethodRequest, MethodRecoveryResult> recover) => this.recover = recover;
 
+    /// <summary>依赖方法的恢复同样受保护：失败的依赖没有方法体，用到它的方法按依赖缺失处理。</summary>
+    internal MethodSummaryService(MethodDecompiler recovery, MethodGuard guard) : this(request =>
+    {
+        var result = guard.Run(request.Method, request.Entry, ref recovery, worker => request.Mode switch
+        {
+            RecoveryMode.Definition => worker.Recover(request.Method, request.Entry),
+            RecoveryMode.Instance => worker.RecoverInstance(request.Method, request.Entry),
+            RecoveryMode.Shared => worker.RecoverShared(request.Method, request.Entry),
+            _ => throw new ArgumentOutOfRangeException(nameof(request)),
+        });
+        return result;
+    }) => definitionRecovery = method => guard.Run(MethodRef.Open(method), method.Address, ref recovery, worker => worker.RecoverDefinition(method));
+
     public void Seed(RecoveryTarget target, MethodRecoveryResult result) => summaries.TryAdd(
         new(target.Instance, target.Entry, target.Shared ? RecoveryMode.Shared : RecoveryMode.Definition), result);
 

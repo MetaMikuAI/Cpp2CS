@@ -56,6 +56,24 @@ public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransfo
         return problems;
     }
 
+    /// <summary>逐个检查，写出器崩溃也记为这个方法的问题（--keep-going）。</summary>
+    public Dictionary<ManagedBody, EmissionProblem> CheckEach(IEnumerable<ManagedBody> bodies, EmissionPolicy policy)
+    {
+        var problems = new Dictionary<ManagedBody, EmissionProblem>(ReferenceEqualityComparer.Instance);
+        foreach (var body in bodies)
+        {
+            try
+            {
+                foreach (var (checkedBody, problem) in Check([body], policy)) problems.Add(checkedBody, problem);
+            }
+            catch (Exception e)
+            {
+                problems.Add(body, new(EmissionProblemKind.Unsupported, $"写出 崩溃 {e.GetType().Name}：{e.Message}", body.Method));
+            }
+        }
+        return problems;
+    }
+
     /// <summary>检查通过的方法逐个写出；失败的方法保留原骨架或此前写出的体。</summary>
     public Dictionary<ManagedBody, EmissionProblem> Emit(IEnumerable<ManagedBody> bodies, EmissionPolicy policy = EmissionPolicy.Checked)
     {
@@ -72,6 +90,10 @@ public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransfo
     }
 
     /// <summary>写成 CIL 但不放到骨架上：同一泛型定义的其他实例有自己的原生代码时，供执行对照使用。</summary>
+    /// <summary>没有方法体的方法：占位体换成带原生地址的 Unrecovered 标记，原因在 recovery.jsonl。</summary>
+    public void MarkUnrecovered(MethodDef method, ulong address) =>
+        new CilBodyWriter(skeleton, types, EmissionPolicy.Partial, symbols, transforms).MarkUnrecovered(skeleton.Method(method), address);
+
     public MethodBody BuildInstance(ManagedBody recovered) =>
         new CilBodyWriter(skeleton, types, EmissionPolicy.Recovered, symbols, transforms).Build(recovered, skeleton.Method(recovered.Method.Method));
 

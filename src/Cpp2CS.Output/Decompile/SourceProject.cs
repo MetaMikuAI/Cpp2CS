@@ -7,14 +7,14 @@ namespace Cpp2CS.Output;
 public static class SourceProject
 {
     public static int Write(string assemblyPath, string searchDirectory, string output,
-        Func<ICSharpCode.Decompiler.TypeSystem.ITypeDefinition, bool> include, IDecompileTransformProvider? transforms = null)
+        Func<ICSharpCode.Decompiler.TypeSystem.ITypeDefinition, bool> include, IDecompileTransformProvider? transforms = null, Func<string>? stubs = null)
     {
         using var module = ModuleDefinition.ReadModule(assemblyPath);
         var directory = Path.Combine(output, FileName(Path.GetFileName(assemblyPath)));
         Directory.CreateDirectory(directory);
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var count = 0;
-        foreach (var source in Decompilation.Decompile(assemblyPath, searchDirectory, include, true, recoveringBodies: true, groupByName: true, transforms: transforms))
+        foreach (var source in Decompilation.Decompile(assemblyPath, searchDirectory, include, true, recoveringBodies: true, groupByName: true, transforms: transforms, stubs: stubs))
         {
             var relative = source.TypeName is null ? Path.Combine("Properties", "AssemblyInfo.cs")
                 : Path.Combine(source.Namespace.Length == 0 ? "" : FileName(source.Namespace),

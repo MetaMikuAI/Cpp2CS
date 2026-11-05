@@ -8,7 +8,7 @@ internal static class RecoveryStage
 {
     internal sealed record RecoveryBatch(MethodDecompiler Recovery, MethodRecoveryResult[] Targets);
 
-    internal static RecoveryBatch RecoverMethods(RecoveryTarget[] selected, ProgramFacts facts, ManagedTypes types, int jobs, Action<string> Log)
+    internal static RecoveryBatch RecoverMethods(RecoveryTarget[] selected, ProgramFacts facts, ManagedTypes types, int jobs, Action<string> Log, MethodGuard? guard = null)
     {
         var methods = selected;
         var watch = Stopwatch.StartNew();
@@ -24,23 +24,28 @@ internal static class RecoveryStage
                 if (elapsed >= 30) Log($"恢复中 {elapsed:F1} s：0x{selected[index].Entry:x} {selected[index].Instance}");
             }
         }, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
-        void Recover(int i, MethodDecompiler worker)
+        void Recover(int i, ref MethodDecompiler worker)
         {
             active[i] = Stopwatch.GetTimestamp();
-            targets[i] = selected[i].Recover(worker);
+            targets[i] = guard is null ? selected[i].Recover(worker) : guard.Run(selected[i].Method, selected[i].Entry, ref worker, selected[i].Recover);
             active.TryRemove(i, out _);
             var count = Interlocked.Increment(ref completed);
             if (count % 1000 == 0 || count == methods.Length)
                 Log($"恢复进度 {count}/{methods.Length}，{watch.Elapsed.TotalSeconds:F1} s");
         }
         Log($"方法恢复并行度：{jobs}");
-        if (jobs == 1)
-            for (var i = 0; i < methods.Length; i++) Recover(i, recovery);
+        if (jobs == 1 && guard is null)
+            for (var i = 0; i < methods.Length; i++) Recover(i, ref recovery);
         else
         {
             // 工作线程独享恢复器和分析缓存；结果按原清单索引汇总。
             using var workers = new ThreadLocal<MethodDecompiler>(() => new(facts, types), trackAllValues: true);
-            Parallel.For(0, methods.Length, new ParallelOptions { MaxDegreeOfParallelism = jobs }, i => Recover(i, workers.Value!));
+            Parallel.For(0, methods.Length, new ParallelOptions { MaxDegreeOfParallelism = jobs }, i =>
+            {
+                var worker = workers.Value!;
+                Recover(i, ref worker);
+                workers.Value = worker;
+            });
         }
         return new(recovery, targets);
     }

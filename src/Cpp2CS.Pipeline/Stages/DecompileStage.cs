@@ -18,6 +18,14 @@ internal static class DecompileStage
         var types = request.TypeNames();
         var all = request.All || assembliesFilter is not null;
         IDecompileTransformProvider? transforms = null;
+        // 占位程序集只在有类型反编译失败时才写出。
+        var stubDirectory = new Lazy<string>(() =>
+        {
+            var directory = Path.Combine(output, "assemblies-stubs");
+            new Skeleton(facts.Model).Write(directory);
+            return directory;
+        });
+        Func<string>? stubs = request.KeepGoing ? () => stubDirectory.Value : null;
         var sources = Path.Combine(output, "src");
         if (Directory.Exists(sources)) Directory.Delete(sources, true);
         Directory.CreateDirectory(sources);
@@ -37,17 +45,23 @@ internal static class DecompileStage
             if (sourceLayout == "project")
             {
                 var count = SourceProject.Write(Path.Combine(sourceAssemblies, Skeleton.ImageFileName(assemblyName)), sourceAssemblies, sources,
-                    t => all || wanted.Contains((t.Namespace, t.Name)), transforms);
+                    t => all || wanted.Contains((t.Namespace, t.Name)), transforms, stubs);
                 files += count;
                 Log($"C# {assemblyName}：{count} 个类型文件，累计 {files}");
                 continue;
             }
             foreach (var source in Decompilation.Decompile(Path.Combine(sourceAssemblies, Skeleton.ImageFileName(assemblyName)), sourceAssemblies,
-                t => wanted.Contains((t.Namespace, t.Name)) || t.FullName == "Cpp2CS.NativeImports", false, recoveringBodies: true, transforms: transforms))
+                t => wanted.Contains((t.Namespace, t.Name)) || t.FullName == "Cpp2CS.NativeImports", false, recoveringBodies: true, transforms: transforms, stubs: stubs))
             {
                 File.WriteAllText(Path.Combine(sources, new string((assemblyName + "_" + source.TypeName).Select(c => invalid.Contains(c) ? '_' : c).ToArray()) + ".cs"), source.Source);
                 files++;
             }
+        }
+        if (stubDirectory.IsValueCreated)
+        {
+            // 反编译器可能还映射着这些文件；留下目录不影响工程，引用的是 assemblies。
+            try { Directory.Delete(stubDirectory.Value, true); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log($"占位程序集目录留在 {stubDirectory.Value}：{e.Message}"); }
         }
         return files;
     }

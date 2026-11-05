@@ -30,9 +30,10 @@ internal static class CoreProfile
         var types = new ManagedTypes(facts.Model, facts.Layouts);
         var selection = manifest.Step("selection", () => SelectionStage.Select(request, facts, Log));
         if (request.StubsOnly) return Stubs(request, manifest, facts, selection, Log);
-        var batch = manifest.Step("recovery", () => RecoveryStage.RecoverMethods(selection.Targets, facts, types, request.Jobs, Log));
+        var guard = request.KeepGoing ? new MethodGuard(() => new(facts, types), TimeSpan.FromSeconds(request.MethodTimeoutSeconds), Log) : null;
+        var batch = manifest.Step("recovery", () => RecoveryStage.RecoverMethods(selection.Targets, facts, types, request.Jobs, Log, guard));
         var targets = batch.Targets;
-        var summaries = new MethodSummaryService(batch.Recovery);
+        var summaries = guard is null ? new MethodSummaryService(batch.Recovery) : new MethodSummaryService(batch.Recovery, guard);
         for (var i = 0; i < targets.Length; i++) summaries.Seed(selection.Targets[i], targets[i]);
         var dependencies = new List<MethodRecoveryResult>();
         manifest.Step("dependencies", () =>
@@ -45,9 +46,11 @@ internal static class CoreProfile
         var skeleton = new Skeleton(facts.Model);
         skeleton.ApplyDeclarations(results);
         var emitter = new BodyEmitter(skeleton, types, diagnostics: request.Options.Diagnostics);
-        var problems = emitter.Check(results.Where(r => r.Body is not null).Select(r => r.Body!), EmissionPolicy.Recovered);
+        var bodies = results.Where(r => r.Body is not null).Select(r => r.Body!);
+        var problems = request.KeepGoing ? emitter.CheckEach(bodies, EmissionPolicy.Recovered) : emitter.Check(bodies, EmissionPolicy.Recovered);
         DependencyClosure.Validate(results, problems);
-        var published = PublishStage.Run(results, dependencyMethods, emitter, problems);
+        var published = PublishStage.Run(results, dependencyMethods, emitter, problems, request.KeepGoing);
+        var marked = request.KeepGoing ? PublishStage.MarkUnrecovered(results, published, emitter) : 0;
         var emitted = published.Emitted;
         var partialEmitted = published.PartialEmitted;
         var emitProblems = published.Problems;
@@ -70,6 +73,7 @@ internal static class CoreProfile
         var files = manifest.Step("decompile", () => DecompileStage.Write(request, facts, assemblies, emitted, partialEmitted, results, selection.Methods, Log));
         report.AppendLine($"core：依赖 {dependencies.Count}，部分体 {partialEmitted.Count}，C# {files} 个类型文件");
         report.AppendLine($"源码形式限制 {sourceProblems.Count}（独立于 CIL 写出，不代表源码编译结果）");
+        if (guard is not null) report.AppendLine($"--keep-going：标记 Unrecovered 的方法 {marked}，恢复崩溃 {guard.Crashes}，超时 {guard.Timeouts}");
         File.WriteAllText(Path.Combine(output, "holes.txt"), report.ToString());
         var outcome = new RecoveryRunResult(output, report.ToString(), targets.Length, emitted.Count(selectedSet.Contains),
             emitProblems.Count(p => selectedSet.Contains(p.Key)), partialEmitted.Count);

@@ -17,6 +17,13 @@ public sealed record RecoveryRequest(string Binary, string Metadata, string Outp
     public bool NoSource { get; init; }
     /// <summary>只导出桩：不恢复方法体，每个方法都是占位体。类型、成员和签名与正常导出相同。</summary>
     public bool StubsOnly { get; init; }
+    /// <summary>
+    /// 单个方法失败不中断整轮：恢复崩溃或超时记为洞，所有没有方法体的方法写成 Unrecovered 标记。
+    /// 用来得到结构完整的工程；排查问题时不要开，崩溃的堆栈只留下第一行。
+    /// </summary>
+    public bool KeepGoing { get; init; }
+    /// <summary>--keep-going 时单个方法的恢复时限。</summary>
+    public int MethodTimeoutSeconds { get; init; } = 600;
     public string SourceLayout { get; init; } = "flat";
 
     public bool HasScope => (All ? 1 : 0) + (Namespaces.Length > 0 ? 1 : 0)
@@ -28,6 +35,7 @@ public sealed record RecoveryRequest(string Binary, string Metadata, string Outp
         if (!HasScope) throw new ArgumentException("必须且只能指定一种恢复范围");
         if (Jobs < 1) throw new ArgumentException("--jobs 必须大于零");
         if (Limit < 1) throw new ArgumentException("--limit 必须大于零");
+        if (MethodTimeoutSeconds < 1) throw new ArgumentException("--method-timeout 必须大于零");
         if (SourceLayout is not ("flat" or "project")) throw new ArgumentException("--source-layout 必须是 flat 或 project");
     }
 
@@ -41,6 +49,7 @@ public sealed record RecoveryRequest(string Binary, string Metadata, string Outp
             if (option == "--all") { request = request with { All = true }; scopes++; continue; }
             if (option == "--no-source") { request = request with { NoSource = true }; continue; }
             if (option == "--stubs-only") { request = request with { StubsOnly = true }; continue; }
+            if (option == "--keep-going") { request = request with { KeepGoing = true }; continue; }
             if (++i == options.Length) throw new ArgumentException($"{option} 缺少参数");
             var value = options[i];
             if (option is "--namespaces" or "--assemblies" or "--methods" or "--types") scopes++;
@@ -55,6 +64,7 @@ public sealed record RecoveryRequest(string Binary, string Metadata, string Outp
                 "--limit" => request with { Limit = int.Parse(value) },
                 "--jobs" => request with { Jobs = int.Parse(value) },
                 "--source-layout" => request with { SourceLayout = value },
+                "--method-timeout" => request with { MethodTimeoutSeconds = int.Parse(value) },
                 _ => throw new ArgumentException($"未知参数 {option}"),
             };
         }
