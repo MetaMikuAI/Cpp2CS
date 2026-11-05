@@ -94,7 +94,8 @@ internal static class OnceGuardsPass
             var merge = fast.Merge;
             if (merge is null && fast.Exit is null) { reason = "快路径没有终点"; return false; }
             if (!Walk(taken, guard.Initialize, true, merge, out reason)) return false;
-            if (!taken.Initialized) { reason = "慢路径没有初始化"; return false; }
+            // 同一标志的前一个守卫已经初始化时，这一臂的调用被清理掉，只剩写标志。
+            if (!taken.Initialized && taken.FlagStore is null) { reason = "慢路径没有初始化"; return false; }
             if (loadAfterStore) { reason = "写入之后还有读取"; return false; }
             if (fast.Stores.Count != taken.Stores.Count || !fast.Stores.SequenceEqual(taken.Stores)) { reason = "两臂的写入不同"; return false; }
             if (merge is not null)
@@ -106,7 +107,12 @@ internal static class OnceGuardsPass
                 {
                     var width = Observed(phi.Target, []);
                     if (width == 0 || phi.Sources.Length != merge.Predecessors.Count) continue;
-                    if (Normal(new Use(phi.Sources[a], width), fast, 0) != Normal(new Use(phi.Sources[b], width), taken, 0))
+                    var (skipped, initialized) = (Normal(new Use(phi.Sources[a], width), fast, 0), Normal(new Use(phi.Sources[b], width), taken, 0));
+                    // 生成代码在守卫里只做初始化，不给局部赋值：这种 φ 只能来自 clang 的部分冗余消除，
+                    // 快路径复用已有的值（不是读取），初始化可能改写内存的一臂重新读取。保留的正是重新读取的一臂。
+                    // 两臂都是读取而位置不同时不成立。初始化调用破坏的寄存器不会再被真正读取，这一臂的值没有意义。
+                    static bool Reads(Expr value) => ExprMap.Walk(value).Any(e => e is Load);
+                    if (skipped != initialized && (Reads(skipped) || !Reads(initialized)) && initialized is not Use { Variable.Version: -1 })
                     { reason = "两臂的合流值不同"; return false; }
                 }
                 reason = "";
@@ -161,6 +167,7 @@ internal static class OnceGuardsPass
                 line.Previous = previous;
                 var incoming = current.Predecessors.IndexOf(previous);
                 var shared = current.Predecessors.Count > 1;
+                Block? onward = null;
                 foreach (var statement in current.Statements)
                 {
                     switch (statement)
@@ -170,6 +177,11 @@ internal static class OnceGuardsPass
                         case Phi phi:
                             if (incoming < 0 || phi.Sources.Length != current.Predecessors.Count) { reason = "路径上的 φ 不明"; return false; }
                             line.Values[phi.Target] = Normal(new Use(phi.Sources[incoming], phi.Target.Width), line, 0);
+                            break;
+                        // 快路径直接到达汇合点，初始化一臂重新读取之后多一次抛出判断（判空、越界）：
+                        // 快路径的值已经判过，保留这一臂时判断照常执行，结果相同。
+                        case Branch when initializing && stop is not null && !shared && Survivor(current) is { } continuing:
+                            onward = continuing;
                             break;
                         case Branch exit when !shared:
                             line.Previous = current;
@@ -188,16 +200,27 @@ internal static class OnceGuardsPass
                         case Call call when initializing && Initializes(call, line):
                             line.Initialized = true;
                             break;
-                        case Call { Op.Kind: OpKind.NullCheck, Arguments: [var subject] } when !shared && Checked(Normal(subject, line, 0), line):
+                        case Call { Op.Kind: OpKind.NullCheck, Arguments: [var subject] } when !shared && (initializing || Checked(Normal(subject, line, 0), line)):
+                            // 初始化一臂重新读取之后再判空，快路径复用已判过的值：保留这一臂时判空照常执行，结果相同。
                             break;
                         default:
                             reason = $"路径上有其他语句 0x{statement.Address:x}";
                             return false;
                     }
                 }
+                if (onward is not null) { (previous, current) = (current, onward); continue; }
                 if (current.NormalSuccessors.ToArray() is not [var next]) { reason = "路径没有唯一后继"; return false; }
                 (previous, current) = (current, next);
             }
+        }
+
+        /// <summary>分支的一侧只抛出（以不返回的调用结束）时，另一侧是继续执行的路径。</summary>
+        private static Block? Survivor(Block block)
+        {
+            static bool Throws(Block target) => !target.NormalSuccessors.Any() && target.Statements.LastOrDefault() is Call { DoesNotReturn: true };
+            return block.NormalSuccessors.ToArray() is [var first, var second] && first != second
+                ? Throws(first) && !Throws(second) ? second : Throws(second) && !Throws(first) ? first : null
+                : null;
         }
 
         private bool Initializes(Call call, Line line)

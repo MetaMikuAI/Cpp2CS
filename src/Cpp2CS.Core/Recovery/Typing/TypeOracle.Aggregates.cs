@@ -23,7 +23,8 @@ public sealed partial class TypeOracle
         foreach (var (projection, part) in projected)
         {
             if (SymTable.Resolve(part) is ConstSym { Value: 0 }) continue;
-            if (projection.Type is DefinitionRef nested && types.Kind(nested) == TypeKind.Struct && BitRepresentation(part))
+            // 一次宽读取的一段正好是内层结构体（q 寄存器复制跨过嵌套结构体）时，同样按叶子取。
+            if (projection.Type is DefinitionRef nested && types.Kind(nested) == TypeKind.Struct && (BitRepresentation(part) || SymTable.Resolve(part) is SliceSym { Base: ReadSym }))
             {
                 if (Aggregate(part, nested) is not { } inner) return null;
                 if (inner.Whole is { } source) fields.Add(new(projection, source));

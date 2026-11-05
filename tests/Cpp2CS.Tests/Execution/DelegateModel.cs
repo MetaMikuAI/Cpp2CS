@@ -84,9 +84,9 @@ internal sealed partial class NativeMachine
             throw new InvalidOperationException("委托陷阱收到的 method_code/method 与合成输入不一致");
         var ordinal = side.NextCall();
         // Invoke 仍是单播边界；按 AAPCS64 读取寄存器或间接副本，按 ECMA 值字段记录，不比较填充。
-        var parameterTypes = StructAbi.ArgumentTypes(binding.Invoke).Skip(1).ToArray();
-        DelegateModel.Event(side, binding.Receiver, signature.Parameters.SelectMany((a, i) =>
-            world.Index.StructAbi.ObservableArgument(side, parameterTypes[i], ReadLocation(a))));
+        // ref 实参与普通调用同样比较内容和别名关系，不比较两台执行器的物理栈地址；第一项是接收者。
+        var inputs = new[] { BitConverter.GetBytes(binding.Receiver) }.Concat(signature.Parameters.Select(a => (byte[])ReadLocation(a))).ToArray();
+        DelegateModel.Event(side, binding.Receiver, world.Index.StructAbi.ObservableArguments(side, binding.Invoke, StructAbi.ArgumentTypes(binding.Invoke), inputs).Skip(1));
         if (signature.Return is { } result)
         {
             var returnType = binding.Invoke.Method.ReturnType.Substitute(binding.Invoke.TypeArguments, binding.Invoke.MethodArguments);
@@ -109,9 +109,9 @@ internal sealed partial class CilInterpreter
         if (side.World.DelegateAt(values[0].Bits) is null) throw new Unsupported("委托调用接收者不是合成的单播输入");
         var ordinal = side.NextCall();
         side.Callees.Add(invoke);
-        var parameterTypes = StructAbi.ArgumentTypes(invoke).Skip(1).ToArray();
-        DelegateModel.Event(side, values[0].Bits, parameterTypes.SelectMany((type, i) =>
-            index.StructAbi.ObservableArgument(side, type, ToBytes(type, values[i + 1]))));
+        var types = StructAbi.ArgumentTypes(invoke);
+        DelegateModel.Event(side, values[0].Bits, index.StructAbi.ObservableArguments(side, invoke, types,
+            types.Select((type, i) => ToBytes(type, values[i])).ToArray()).Skip(1));
         var returnType = invoke.Method.ReturnType.Substitute(invoke.TypeArguments, invoke.MethodArguments);
         return signature.Return is not null ? Load(returnType, side.World.ReturnValue(ordinal, returnType)) : null;
     }

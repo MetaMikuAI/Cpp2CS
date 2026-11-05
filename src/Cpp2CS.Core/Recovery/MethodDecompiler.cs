@@ -208,7 +208,10 @@ public sealed class MethodDecompiler
                 return memoryFailure;
             environment.Layout = layout;
             var promoted = ValueModel.Build(function, environment);
-            var discovered = DispatchResolution.Find(function, promoted, new TypeOracle(types, facts, method, environment.Shape, promoted, layout));
+            var promotedOracle = new TypeOracle(types, facts, method, environment.Shape, promoted, layout);
+            var discovered = DispatchResolution.Find(function, promoted, promotedOracle).ToDictionary();
+            foreach (var (site, invoke) in DelegateCallNormalizer.Discover(facts, function, e => e is Use use ? promotedOracle.TypeOf(promoted.Of(use.Variable)) : null))
+                discovered.TryAdd(site, invoke);
             if (discovered.Count == 0) break;
             foreach (var (site, target) in discovered) targets.Add(site, target);
         }
