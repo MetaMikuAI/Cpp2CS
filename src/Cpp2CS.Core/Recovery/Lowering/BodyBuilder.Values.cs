@@ -197,6 +197,7 @@ internal sealed partial class BodyBuilder
     /// <summary>原子的一段：值类型的字段；整数的低位截断；bool 的低位即自身。</summary>
     private ManagedValue Slice(SliceSym slice, TypeRef? expected, ulong address)
     {
+        if (oracle.UntypedWidePhiPiece(slice) is { } widePiece) return View(widePiece, expected, address);
         if (oracle.EnclosingScalar(slice) is { } scalar)
         {
             var target = expected is not null && types.Kind(expected) is TypeKind.Int or TypeKind.Bool or TypeKind.Pointer ? expected
@@ -401,6 +402,8 @@ internal sealed partial class BodyBuilder
                 return new ConstantValue(c.Value & Expr.Mask(targetWidth), target, targetWidth);
             case PhiSym phi when oracle.ProjectedScalar(phi) is var (scalar, scalarType, low):
                 return IntegerSlice(View(scalar, scalarType, address), low, phi.Width, target, address);
+            case SliceSym slice when oracle.UntypedWidePhiPiece(slice) is { } widePiece:
+                return IntegerBits(widePiece, target, address);
             case SliceSym slice when oracle.EnclosingScalar(slice) is var (scalar, scalarType, low):
                 return IntegerSlice(View(scalar, scalarType, address), low, slice.Width, target, address);
             case SliceSym slice when oracle.IntegerRepresentation(slice.Base) is var (sourceType, integerType):

@@ -163,7 +163,14 @@ public sealed partial class SymTable
         }
         var useful = Evidence(phi);
         projecting.Remove((phi, low, width));
-        if (!useful) return null;
+        return useful ? Projection(phi, low, width) : null;
+    }
+
+    /// <summary>φ 的一段，来源为各入边的同一段。</summary>
+    public PhiSym Projection(PhiSym phi, int low, int width)
+    {
+        if (phi.Projection is { } outer) return Projection(outer.Whole, outer.Low + low, width);
+        if (projections.TryGetValue((phi, low, width), out var known)) return known;
         var projection = Fresh(new PhiSym(phi.Block, (phi.Origin, low, width), width) { Projection = (phi, low) });
         projections[(phi, low, width)] = projection;
         if (!projectionsOf.TryGetValue(phi, out var list)) projectionsOf[phi] = list = [];
@@ -189,27 +196,32 @@ public sealed partial class SymTable
         };
     }
 
-    /// <summary>同一合流的各片在每条入边上都连续覆盖同一个整体时，直接合流整体；不混用不同边的片。</summary>
+    /// <summary>
+    /// 同一合流的各片在每条入边上都连续覆盖同一个整体时，直接合流整体；不混用不同边的片。
+    /// 错位复制把一个标量跨在两个寄存器 φ 上时，各片都只是 φ 的一部分，覆盖的是整体的连续一段，也合流这一段；
+    /// 更宽的值可以按字段逐个取片，不需要合流。
+    /// </summary>
     private Sym JoinPhi(ConcatSym concat)
     {
         if (joins.TryGetValue(concat, out var known)) return known;
         if (concat.Parts[0] is not PhiSym first || concat.Parts.Any(p => p is not PhiSym phi || phi.Block != first.Block)) return concat;
         var parts = concat.Parts.Cast<PhiSym>().ToArray();
+        var misaligned = concat.Width <= 64 && parts.All(p => p.Projection is not null);
         var sources = new Sym[first.Sources.Length];
         for (var edge = 0; edge < sources.Length; edge++)
         {
             Sym? whole = null;
-            var at = 0;
+            var (start, at) = (0, 0);
             foreach (var part in parts)
             {
                 if (part.Sources[edge] is not { } source) return concat;
                 var (value, low, width) = Piece(Resolve(source));
-                whole ??= value;
+                if (whole is null) (whole, start, at) = (value, low, low);
                 if (!ReferenceEquals(whole, value) || low != at) return concat;
                 at += width;
             }
-            if (whole is null || at != whole.Width) return concat;
-            sources[edge] = whole;
+            if (whole is null || !misaligned && (start != 0 || at != whole.Width)) return concat;
+            sources[edge] = Slice(whole, start, at - start);
         }
         var joined = Phi(first.Block, concat, concat.Width);
         joins[concat] = joined;

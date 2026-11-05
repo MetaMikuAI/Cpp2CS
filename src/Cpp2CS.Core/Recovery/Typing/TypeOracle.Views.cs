@@ -33,6 +33,12 @@ public sealed partial class TypeOracle
         && phi.Projection is var (whole, low) && ScalarBits(whole, []) && IntegerRepresentation(whole) is var (source, integer)
         && low + phi.Width <= types.Bits(integer) ? (whole, source, low) : null;
 
+    /// <summary>各入边都是相邻字段合并的宽读取、自身没有类型的合流只是搬运；它的片按各入边的片合流，类型由字段给出。</summary>
+    public PhiSym? UntypedWidePhiPiece(SliceSym slice) =>
+        slice.Base is PhiSym { Projection: null, Width: > 64 } phi && TypeOf(phi) is null
+        && phi.Sources.All(s => s is not null && SymTable.Resolve(s) is ReadSym read && Parts(read) is not null)
+            ? values.Syms.Projection(phi, slice.Low, slice.Width) : null;
+
     private bool ScalarBits(Sym value, HashSet<Sym> seen)
     {
         value = SymTable.Resolve(value);

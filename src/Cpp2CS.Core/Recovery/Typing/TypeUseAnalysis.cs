@@ -187,6 +187,7 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
                 for (var i = 0; i < op.Args.Length; i++) Use(op.Args[i], typing.Inputs[i], user);
                 break;
             case SliceSym slice:
+                if (oracle.UntypedWidePhiPiece(slice) is { } widePiece) { Use(widePiece, expected, user); break; }
                 if (oracle.EnclosingScalar(slice) is { } enclosing) { Use(enclosing.Value, enclosing.Type, user); break; }
                 if (slice.Base is ReadSym merged && oracle.Part(merged, slice.Low, slice.Width) is { } part)
                 {
