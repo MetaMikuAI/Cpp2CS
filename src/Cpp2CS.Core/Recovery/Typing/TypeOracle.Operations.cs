@@ -56,6 +56,12 @@ public sealed partial class TypeOracle
         }
     }
 
+    /// <summary>调用中实参的类型；受约束调用的接收者是约束类型的托管地址。</summary>
+    public static TypeRef ArgumentType(Call call, MethodRef callee, int index) => index < 0 && ConstraintOf(call) is { } constraint
+        ? new ByRefRef(constraint) : ArgumentType(callee, index);
+
+    public static TypeRef? ConstraintOf(Call call) => call.Op is { Kind: OpKind.InvokeConstrainedGeneric, Operand: ValueTuple<TypeRef, MethodRef> constrained } ? constrained.Item1 : null;
+
     public static TypeRef ArgumentType(MethodRef callee, int index) => index < 0
         ? callee.Method.Owner.IsValueType ? new ByRefRef(callee.DeclaringType) : callee.DeclaringType
         : callee.Concrete(callee.Method.Parameters[index].Type);

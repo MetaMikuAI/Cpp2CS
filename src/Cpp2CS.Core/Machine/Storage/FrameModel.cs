@@ -47,7 +47,8 @@ internal sealed class FrameModel
     /// <summary>以帧地址为基址、加变量下标得到的地址：只在作为读写地址时不算逃逸。</summary>
     private readonly Dictionary<Variable, HashSet<long>> indexed = [];
     private readonly HashSet<long> loaded = [];
-    private readonly Dictionary<Call, List<CallRange>> ranges = new(ReferenceEqualityComparer.Instance);
+    /// <summary>按调用身份记录：转发改写实参后仍是同一次调用，访问范围不变。</summary>
+    private readonly Dictionary<CallSite, List<CallRange>> ranges = [];
     private readonly List<(long Offset, int? Size)> escaped = [];
 
     public FrameModel(MachineFunction function, IFrameCallEffects calls)
@@ -79,7 +80,7 @@ internal sealed class FrameModel
         var spilled = loaded.Any(l => l >= offset && l < offset + bytes);
         foreach (var call in function.Blocks.SelectMany(b => b.Statements).OfType<Call>())
         {
-            if (ranges.TryGetValue(call, out var used) && used.Any(r => Overlaps(r.Offset, r.Size < 0 ? null : r.Size, offset, bytes))) return false;
+            if (ranges.TryGetValue(call.Site, out var used) && used.Any(r => Overlaps(r.Offset, r.Size < 0 ? null : r.Size, offset, bytes))) return false;
             if (!spilled && ReadsOnStack(call, offset, bytes)) return false;
         }
         return function.Blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<Load>()
@@ -141,7 +142,7 @@ internal sealed class FrameModel
                     return targets.Any(t => Overlaps(t, width, offset, bytes));
                 }
             case Call call:
-                if (ranges.TryGetValue(call, out var used)
+                if (ranges.TryGetValue(call.Site, out var used)
                     && used.Any(r => (r.Access & MemoryAccess.Write) != 0 && Overlaps(r.Offset, r.Size < 0 ? null : r.Size, offset, bytes))) return true;
                 return calls.WritesEscaped(call) && Escaped(offset, bytes);
             case Opaque:
@@ -269,7 +270,7 @@ internal sealed class FrameModel
                     var targets = Targets(call.Arguments[i]);
                     if (targets.Count == 0) { Walk(call.Arguments[i], true); continue; }
                     var use = calls.Argument(call, i);
-                    if (!ranges.TryGetValue(call, out var used)) ranges[call] = used = [];
+                    if (!ranges.TryGetValue(call.Site, out var used)) ranges[call.Site] = used = [];
                     foreach (var target in targets)
                     {
                         if (use.Retained) escaped.Add((target, use.Size < 0 ? null : use.Size));

@@ -114,7 +114,7 @@ public sealed partial class ManagedTypes
             case GenericParameterRef { NativeAggregate: not null }: return TypeKind.Struct;
             case PointerRef or ByRefRef: return TypeKind.Pointer;
             case DefinitionRef d:
-                if (SharedTypes.IsFullyShared(d) && d.Definition.IsValueType) return null;
+                if (SharedTypes.IsVariableSized(d)) return null;
                 return PrimitiveName(d) switch
                 {
                     "Boolean" => TypeKind.Bool,

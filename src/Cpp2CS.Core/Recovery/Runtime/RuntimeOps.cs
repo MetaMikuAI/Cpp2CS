@@ -318,6 +318,22 @@ public static class RuntimeOps
                 return true;
             },
         };
+        // unbox.any 的结果按值使用；运行时返回的地址指向盒内或 storage，这里统一为局部的地址。值类型的 null 与类型不符、引用类型的类型不符都在此抛出。
+        yield return new(OpKind.UnboxGenericValue)
+        {
+            Inputs = (_, a, t) => a.Count == 2 ? [new(a[0], t.Types.Object)] : [],
+            Behavior = new(EffectKind.None, ExceptionEffect.Any),
+            ResultType = (call, t) => t.ClassOperand(call) is { } unboxed ? new ByRefRef(unboxed) : null,
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.ClassOperand is not { } unboxed || c.Arguments.Count != 2) return false;
+                var value = c.Temporary(unboxed);
+                c.Emit(new ManagedAssignment(c.Call.Address, value, new UnboxValue(c.Input(0), unboxed, value.Width)));
+                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, new ByRefRef(unboxed)), new AddressValue(value)));
+                return true;
+            },
+        };
         yield return new(OpKind.IsInst)
         {
             Inputs = (_, a, t) => a.Count >= 1 ? [new(a[0], t.Types.Object)] : [],

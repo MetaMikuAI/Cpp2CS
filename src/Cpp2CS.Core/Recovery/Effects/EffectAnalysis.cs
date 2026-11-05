@@ -115,7 +115,7 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
                     return oracle.Callee(call) is { Method: { IsStatic: false, IsVirtual: false } }
                         && call.Arguments.Length > 0 && ReferenceEquals(SymTable.Resolve(values.Operands(call)[1]), target);
                 // 分派调用在 IL 中是对接收者的 callvirt；分派查找并入其中，对象为 null 时只抛出 NullReferenceException。
-                case Call { Op.Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual or OpKind.CallDelegate } dispatch:
+                case Call { Op.Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual or OpKind.CallDelegate or OpKind.InvokeVirtualGeneric } dispatch:
                     return dispatch.Arguments.Length > 0 && ReferenceEquals(SymTable.Resolve(values.Operands(dispatch)[1]), target);
                 case Call call when (MachineEffects.Operation(call).Exceptions & ~ExceptionEffect.NullReference) == 0
                     && (MachineEffects.Operation(call).Kinds & ~EffectKind.Read) == 0: continue;

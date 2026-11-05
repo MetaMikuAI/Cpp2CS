@@ -57,7 +57,7 @@ public sealed partial class ManagedAbi
             var type = method.DeclaringType;
             var reference = ManagedTypes.IsReferenceType(type);
             arguments.Add(new(-1, reference ? type : new ByRefRef(type), reference ? Transfer.Value : Transfer.Reference,
-                [Piece(0)], reference ? 8 : Size(type), reference ? MemoryAccess.None : MemoryAccess.ReadWrite));
+                [Piece(0)], reference ? 8 : SharedValue(type) ? -1 : Size(type), reference ? MemoryAccess.None : MemoryAccess.ReadWrite));
         }
         for (var index = 0; index < method.Method.Parameters.Count; index++)
         {
@@ -74,6 +74,17 @@ public sealed partial class ManagedAbi
         return new(arguments.ToArray(), result, info, 0);
     }
 
+    /// <summary>受约束的 invoker：实参形式与 invoker 相同，接收者是约束类型的位置（值类型的存储，或存放引用的位置）。</summary>
+    public MachineSignature ConstrainedInvoker(TypeRef constraint, MethodRef method)
+    {
+        var invoker = Invoker(method);
+        return invoker with
+        {
+            Arguments = invoker.Arguments.Select(a => a.Index != -1 ? a : new MachineValue(-1, new ByRefRef(constraint), Transfer.Reference, a.Pieces,
+                SharedValue(constraint) ? -1 : Size(constraint), MemoryAccess.ReadWrite)).ToArray(),
+        };
+    }
+
     /// <summary>方法的机器签名；无法分类时返回 null 并给出原因。</summary>
     public MachineSignature? Machine(MethodRef method, out string? problem)
     {
@@ -82,7 +93,7 @@ public sealed partial class ManagedAbi
         var arguments = new List<MachineValue>();
         if (signature.This is { } self)
             arguments.Add(self.Type is ByRefRef byRef
-                ? new(-1, self.Type, Transfer.Reference, self.Pieces, Size(byRef.Element), MemoryAccess.ReadWrite)
+                ? new(-1, self.Type, Transfer.Reference, self.Pieces, SharedValue(byRef.Element) ? -1 : Size(byRef.Element), MemoryAccess.ReadWrite)
                 : new(-1, self.Type, Transfer.Value, self.Pieces, 8, MemoryAccess.None));
         for (var i = 0; i < signature.Parameters.Length; i++)
         {
@@ -120,6 +131,6 @@ public sealed partial class ManagedAbi
         if (type is not ByRefRef byRef) return new(index, type, Transfer.Value, pieces, Size(type), MemoryAccess.None);
         var direction = attributes & (ParameterAttributes.In | ParameterAttributes.Out);
         var access = direction == ParameterAttributes.Out ? MemoryAccess.Write : direction == ParameterAttributes.In ? MemoryAccess.Read : MemoryAccess.ReadWrite;
-        return new(index, type, Transfer.Reference, pieces, Size(byRef.Element), access);
+        return new(index, type, Transfer.Reference, pieces, SharedValue(byRef.Element) ? -1 : Size(byRef.Element), access);
     }
 }

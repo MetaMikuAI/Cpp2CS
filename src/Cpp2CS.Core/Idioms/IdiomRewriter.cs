@@ -180,6 +180,8 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     values[phi.Target] = source;
                     continue;
                 }
+                // MethodInfo 的方法指针同样不可变：相同代码合并尾部后，指针读取经 φ 汇合。
+                if (source is Load { Width: 64, Address: Symbol { Kind: SymbolKind.Method } }) { values[phi.Target] = source; continue; }
                 var part = source is Ir.Convert { Kind: ConvKind.ZeroExtend } conversion ? conversion.Operand : source;
                 if (part is Load { Address: Binary { Op: BinOp.Add, Left: Load { Width: 64 } or Symbol { Kind: SymbolKind.Class }, Right: Const offset } } metadata
                     && (metadata.Width == 8 && offset.Value == RuntimeLayout.ClassTypeHierarchyDepth

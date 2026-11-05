@@ -31,7 +31,7 @@ public static class RuntimeLayout
         ClassBitflags2 = 0x136,
         ClassVtable = 0x138;
     /// <summary>VirtualInvokeData { methodPtr; method }。</summary>
-    public const int VirtualInvokeDataSize = 0x10;
+    public const int VirtualInvokeDataSize = 0x10, VirtualInvokeDataMethod = 0x08;
     /// <summary>Il2CppRuntimeInterfaceOffsetPair { interfaceType; offset }。</summary>
     public const int InterfaceOffsetPairSize = 0x10;
 

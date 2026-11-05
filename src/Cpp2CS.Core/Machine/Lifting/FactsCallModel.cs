@@ -66,6 +66,8 @@ public sealed class FactsCallModel : ICallModel
         HelperKind.CompareExchangeReference => new([X(0), X(1), X(2)], [X(0)], "helper"),
         HelperKind.ReadByteArray => new([X(0), X(1)], [X(0)], "native-array-read"),
         HelperKind.GenericHasValue => new([X(0), X(1)], [X(0)], "generic-value-check"),
+        HelperKind.ConstrainedCall => new([X(0), X(1), X(2), X(3), X(4), X(5)], [], "constrained-call"),
+        HelperKind.UnboxAny => new([X(0), X(1), X(2)], [X(0)], "unbox-any"),
         HelperKind.Import => helper.Detail switch
         {
             "memcpy" or "memmove" or "memset" => new([X(0), X(1), X(2)], [X(0)], "libc"),

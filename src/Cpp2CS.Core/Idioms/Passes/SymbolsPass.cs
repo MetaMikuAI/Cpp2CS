@@ -58,6 +58,8 @@ internal static class SymbolsPass
                 }
 
                 var (basis, offset) = SplitPass.Split(load.Address);
+                // InitClass 返回它的实参：经结果读 RGCTX 与直接读类元数据相同。
+                if (basis is Use initialized && state.defs.Raw(initialized.Variable) is Symbol { Kind: SymbolKind.Class } subject) basis = subject;
                 var own = basis is Use { Variable: { Version: 0 } v } && v.Storage == state.selfMethodInfo && ownDefinition is not null;
                 Symbol? found = (basis, offset) switch
                 {

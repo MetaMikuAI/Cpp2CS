@@ -48,8 +48,7 @@ public sealed partial class ManagedAbi(ITypeLayouts layouts)
 {
     private const int Registers = 8;
 
-    internal static bool SharedValue(TypeRef type) => type is GenericParameterRef { NativeShared: true }
-        || type is DefinitionRef { Definition: { Namespace: "Unity.IL2CPP.Metadata", Name: "__Il2CppFullySharedGenericType" or "__Il2CppFullySharedGenericStructType" } };
+    internal static bool SharedValue(TypeRef type) => SharedTypes.IsVariableSized(type);
 
     public ValueKind? Kind(TypeRef type)
     {
@@ -63,7 +62,7 @@ public sealed partial class ManagedAbi(ITypeLayouts layouts)
                 return generic.IsReference ? ValueKind.Reference : generic.NativeScalar is { } scalar ? Kind(scalar)
                     : generic.NativeAggregate is not null ? ValueKind.Struct : null;
             case DefinitionRef d:
-                if (FieldLayouts.IsFullyShared(d) && d.Definition.IsValueType) return null;
+                if (SharedValue(d)) return null;
                 var t = d.Definition;
                 if (t.Assembly == "mscorlib.dll" && t.Namespace == "System" && t.DeclaringType is null)
                     switch (t.Name)

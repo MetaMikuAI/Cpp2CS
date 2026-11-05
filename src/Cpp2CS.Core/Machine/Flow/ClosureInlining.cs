@@ -8,11 +8,13 @@ using Storage = Cpp2CS.Ir.Storage;
 /// IL2CPP 把 finally 写成按引用捕获局部的 lambda（<c>il2cpp::utils::Finally([&amp;]{...})</c>）。clang 不内联时，闭包留在调用方的栈上，
 /// 其中存着被捕获局部的地址，lambda 成为一个没有元数据的函数。这些局部因此看起来地址逃逸，方法里对它们的读写都无法恢复。
 /// 这里在 SSA 之前把这种调用展开回调用方：机器语义不变，SP 相对的访问落到调用方的帧下方，闭包内容经帧转发回到被捕获的局部。
-/// 被调函数里的调用抛出异常时进入调用点的落地块，它自身不能带异常表。
+/// 被调函数里的调用抛出异常时，在它自己的 try 内进入它的落地块（finally 体里的 catch），其余进入调用点的落地块。
 /// 展开器在异常离开被调函数时恢复 SP 和被调用者保存的寄存器，正常返回时被调函数自己恢复它们，
 /// 所以调用方在任何出口看到的都是调用前的值：副本里写这些寄存器的地方改用专属的临时存储，调用方的寄存器不变。
+/// codegen 头文件里的内联成员函数（Array::SetAt、ArrayElementTypeCheck）clang 不内联时同样成为没有元数据的函数，
+/// 展开方式相同；展开之后与内联的形式一致，由 L2 按运行时操作恢复。
 /// </summary>
-internal sealed class ClosureInlining(CfgBuilder cfg, Func<ulong, bool> isClosure, Storage firstArgument, Storage stackPointer, Storage framePointer, IReadOnlySet<Storage> preserved)
+internal sealed class ClosureInlining(CfgBuilder cfg, Func<ulong, bool> isClosure, Func<ulong, bool> isOutlined, Storage firstArgument, Storage stackPointer, Storage framePointer, IReadOnlySet<Storage> preserved)
 {
     /// <summary>展开产生的块用这个标记位的合成地址，不与代码地址和路径复制的合成地址相交。</summary>
     private const ulong Synthetic = 1UL << 62;
@@ -36,14 +38,14 @@ internal sealed class ClosureInlining(CfgBuilder cfg, Func<ulong, bool> isClosur
             var level = depth.GetValueOrDefault(block);
             if (level >= MaxDepth || added >= MaxBlocks) continue;
             bool Candidate(Stmt statement) => statement is Call { Kind: CallKind.Direct, DoesNotReturn: false, Target: Const target }
-                && target.Value != function.Entry && isClosure(target.Value);
+                && target.Value != function.Entry && (isOutlined(target.Value) || isClosure(target.Value));
             var index = block.Statements.FindIndex(Candidate);
-            while (index >= 0 && !StackAddressInFirstArgument(block, index))
+            while (index >= 0 && !isOutlined(((Const)((Call)block.Statements[index]).Target).Value) && !StackAddressInFirstArgument(block, index))
                 index = block.Statements.FindIndex(index + 1, Candidate);
             if (index < 0) continue;
             var call = (Call)block.Statements[index];
             var callee = cfg.Build(((Const)call.Target).Value);
-            if (callee.Problems.Count > 0 || callee.Range.ExceptionRegions.Length > 0) continue;
+            if (callee.Problems.Count > 0) continue;
             var (blocks, continuation) = Inline(block, index, callee);
             added += blocks.Count;
             changed = true;
@@ -57,7 +59,7 @@ internal sealed class ClosureInlining(CfgBuilder cfg, Func<ulong, bool> isClosur
         if (changed) function.Renumber();
     }
 
-    /// <summary>调用时第一个实参是栈地址：调用之前最近一次写入它的是 SP 或帧指针加常量。沿唯一前驱回溯，遇到调用为止。</summary>
+    /// <summary>调用时第一个实参是栈地址：调用之前最近一次写入它的是 SP 或帧指针加常量（可经同块的另一个寄存器）。沿唯一前驱回溯，遇到调用为止。</summary>
     private bool StackAddressInFirstArgument(Block block, int call)
     {
         var at = block;
@@ -67,7 +69,7 @@ internal sealed class ClosureInlining(CfgBuilder cfg, Func<ulong, bool> isClosur
             for (var i = end - 1; i >= 0; i--)
             {
                 if (at.Statements[i] is Call) return false;
-                if (at.Statements[i] is Assign assign && assign.Target == firstArgument) return IsStackAddress(assign.Value);
+                if (at.Statements[i] is Assign assign && assign.Target == firstArgument) return IsStackAddress(assign.Value, at, i);
             }
             if (at.Predecessors is not [var predecessor]) return false;
             at = predecessor;
@@ -76,12 +78,24 @@ internal sealed class ClosureInlining(CfgBuilder cfg, Func<ulong, bool> isClosur
         return false;
     }
 
-    private bool IsStackAddress(Expr value) => value switch
+    private bool IsStackAddress(Expr value, Block block, int before) => value switch
     {
-        Read { Storage: var storage } => storage == stackPointer || storage == framePointer,
-        Binary { Op: BinOp.Add or BinOp.Sub, Right: Const } binary => IsStackAddress(binary.Left),
+        Read { Storage: var storage } when storage == stackPointer || storage == framePointer => true,
+        Read { Storage: var storage } => Definition(storage, block, before) is var (source, at) && IsStackAddress(source, block, at),
+        Binary { Op: BinOp.Add or BinOp.Sub, Right: Const } binary => IsStackAddress(binary.Left, block, before),
         _ => false,
     };
+
+    /// <summary>同块内 before 之前对存储的最近一次写入；其间有调用时不成立。</summary>
+    private static (Expr Value, int Index)? Definition(Storage storage, Block block, int before)
+    {
+        for (var i = before - 1; i >= 0; i--)
+        {
+            if (block.Statements[i] is Call) return null;
+            if (block.Statements[i] is Assign assign && assign.Target == storage) return (assign.Value, i);
+        }
+        return null;
+    }
 
     /// <summary>把 block 中 index 处的调用换成 callee 的一份副本。返回新块与调用之后的续接块。</summary>
     private (List<Block> Blocks, Block Continuation) Inline(Block block, int index, MachineFunction callee)
@@ -117,31 +131,43 @@ internal sealed class ClosureInlining(CfgBuilder cfg, Func<ulong, bool> isClosur
             var copy = ((Call)Rename(original)).Duplicate();
             return movesStack ? copy with { StackPointer = new Read(stack, stack.Width) } : copy;
         }
-        var clones = callee.Blocks.ToDictionary(b => b, b => Fresh(b.End));
+        var clones = callee.Blocks.ToDictionary(b => b, b =>
+        {
+            var clone = Fresh(b.End);
+            clone.IsLandingPad = b.IsLandingPad;
+            return clone;
+        });
         var starts = callee.Blocks.ToDictionary(b => b.Start, b => clones[b].Start);
         var created = new List<Block>();
         foreach (var original in callee.Blocks)
         {
             var current = clones[original];
             created.Add(current);
+            var thrown = original.Handler is { } own ? clones[own] : handler;
             var statements = original.Statements.ToList();
             for (var i = 0; i < statements.Count; i++)
             {
                 switch (statements[i])
                 {
+                    // selector 的取值由 LSDA 决定，副本的落地块不在调用方的异常表里：这里按被调函数的表定下。
+                    case Assign { Value: Intrinsic { Name: "eh_selector" } } selector:
+                        var filter = callee.Range.ExceptionRegions.Where(r => r.LandingPad == original.Start).SelectMany(r => r.Actions)
+                            .FirstOrDefault(a => a.Kind == "typed-catch")?.Filter ?? 0;
+                        current.Statements.Add(Rename(selector with { Value = Expr.C(unchecked((ulong)filter), selector.Value.Width) }));
+                        break;
                     case Return:
                         Link(current, continuation);
                         break;
                     case Call { Kind: CallKind.Tail or CallKind.TailIndirect } tail:
                         // 尾调用返回到被调函数的调用者，也就是这里的续接点。
-                        current = Called(current, Copied(tail) with { Kind = tail.Kind == CallKind.Tail ? CallKind.Direct : CallKind.Indirect }, handler, created);
+                        current = Called(current, Copied(tail) with { Kind = tail.Kind == CallKind.Tail ? CallKind.Direct : CallKind.Indirect }, thrown, created);
                         Link(current, continuation);
                         break;
                     case Call inner:
                         // 落地块只接在块末尾的调用上：调用点在 try 内时，副本里的每个调用各自结束一个块。
                         current = i == statements.Count - 1 && inner.DoesNotReturn
-                            ? Terminal(current, Copied(inner), handler)
-                            : handler is null ? Append(current, Copied(inner)) : Called(current, Copied(inner), handler, created);
+                            ? Terminal(current, Copied(inner), thrown)
+                            : thrown is null ? Append(current, Copied(inner)) : Called(current, Copied(inner), thrown, created);
                         break;
                     case Jump jump:
                         current.Statements.Add(jump with { Target = starts[jump.Target] });

@@ -54,7 +54,7 @@ internal static class JumpTables
         if (!Decompose(load.Address, out var tableBase, out var index, out var scale)) return null;
         var root = StripExtensions(index);
         if (root is not Read { Storage.Bank: Bank.Gpr }
-            && root is not Binary { Op: BinOp.And, Left: Read { Storage.Bank: Bank.Gpr }, Right: Const { Value: <= uint.MaxValue } }) return null;
+            && !(root is Binary { Op: BinOp.And, Left: var masked, Right: Const { Value: <= uint.MaxValue } } && StripExtensions(masked) is Read { Storage.Bank: Bank.Gpr })) return null;
 
         foreach (var predecessor in block.Predecessors)
         {
@@ -117,6 +117,16 @@ internal static class JumpTables
         return expr;
     }
 
+    /// <summary>值的低 width 位。按位与和扩展移到截断之内，使宽度不同的同一计算（and x8, x0, #mask 与 and w8, w0, #mask）形式一致。</summary>
+    private static Expr LowBits(Expr value, int width) => value switch
+    {
+        _ when value.Width == width => value,
+        Binary { Op: BinOp.And, Left: var left, Right: Const mask } when value.Width > width
+            => Fold.Simplify(new Binary(BinOp.And, LowBits(left, width), Expr.C(mask.Value & (width >= 64 ? ulong.MaxValue : (1UL << width) - 1), width), width)),
+        Ir.Convert { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: var operand } when operand.Width >= width => LowBits(operand, width),
+        _ => Fold.Convert(ConvKind.Truncate, value, width),
+    };
+
     /// <summary>前驱块以“index 超界则跳到别处”的分支结尾时，返回表项个数。</summary>
     internal static int? Bound(CallingConvention convention, Block predecessor, Block block, Expr index)
     {
@@ -128,7 +138,7 @@ internal static class JumpTables
         var fallToBlock = branch.Fallthrough == block.Start;
         if (takenToBlock == fallToBlock) return null;
         var atEnd = state.Eval(index);
-        if (Fold.Convert(ConvKind.Truncate, atEnd, compare.Left.Width) != compare.Left) return null;
+        if (LowBits(atEnd, compare.Left.Width) != compare.Left) return null;
         var n = limit.Value;
         ulong? count = (compare.Cond, takenToBlock) switch
         {
@@ -143,55 +153,58 @@ internal static class JumpTables
 /// <summary>
 /// 寄存器在块入口的常量值：所有前驱末尾的取值（递归到前驱的入口）都是同一个常量时成立。
 /// 只在环上原样传递的前驱不提供约束（乐观处理，与稀疏条件常量传播一致）。
+/// 表基址可以在很远的前驱里算好（大方法里隔着很多块），这里按工作表逐块回溯，不受路径长度限制。
 /// </summary>
 internal sealed class EntryConstants(IMachine machine)
 {
-    private const int MaxDepth = 64;
-    /// <summary>只缓存确定的结论（常量或失败），依赖乐观环假设的结果不缓存。</summary>
+    private const int MaxNodes = 1 << 16;
     private readonly Dictionary<(Block, Storage), Const?> memo = new();
-    private readonly HashSet<(Block, Storage)> visiting = [];
+    private readonly Dictionary<Block, SymbolicState> ends = new();
 
     public Expr? Resolve(Read read, Block block) =>
-        read.Storage.Bank == Bank.Gpr && read.Storage != machine.Convention.StackPointer && Entry(block, read.Storage, 0, out _) is { } value
+        read.Storage.Bank == Bank.Gpr && read.Storage != machine.Convention.StackPointer && Entry(block, read.Storage) is { } value
             ? Fold.Convert(ConvKind.Truncate, value, read.Width)
             : null;
 
-    /// <param name="open">结果为 null 且只因所有前驱都在环上（尚无约束），而不是确定失败。</param>
-    private Const? Entry(Block block, Storage storage, int depth, out bool open)
+    private Const? Entry(Block block, Storage storage)
     {
-        open = false;
-        var key = (block, storage);
-        if (memo.TryGetValue(key, out var cached)) return cached;
-        if (visiting.Contains(key)) { open = true; return null; }
-        if (depth > MaxDepth || block.Predecessors.Count == 0) return null;
-        visiting.Add(key);
+        if (memo.TryGetValue((block, storage), out var known)) return known;
+        return memo[(block, storage)] = Solve(block, storage);
+    }
+
+    private Const? Solve(Block start, Storage storage)
+    {
+        var visited = new HashSet<(Block, Storage)> { (start, storage) };
+        var pending = new Stack<(Block Block, Storage Storage)>();
+        pending.Push((start, storage));
         Const? agreed = null;
-        bool failed = false, anyOpen = false;
-        foreach (var predecessor in block.Predecessors)
+        while (pending.TryPop(out var node))
         {
-            var state = new SymbolicState(machine.Convention);
-            // 异常边：调用会破坏调用者保存的寄存器，Step(Call) 已把它们置为未知
-            foreach (var stmt in predecessor.Statements) state.Step(stmt);
-            var value = state.Eval(new Read(storage, storage.Width));
-            Const? found = null;
-            if (value is Const c) found = c;
-            else if (value is Read { Storage.Bank: Bank.Gpr } r && r.Width == storage.Width)
+            if (node.Block.Predecessors.Count == 0 || visited.Count > MaxNodes) return null;
+            foreach (var predecessor in node.Block.Predecessors)
             {
-                found = Entry(predecessor, r.Storage, depth + 1, out var predecessorOpen);
-                if (found is null && predecessorOpen) { anyOpen = true; continue; }
+                // 异常边：调用会破坏调用者保存的寄存器，Step(Call) 已把它们置为未知
+                switch (End(predecessor).Eval(new Read(node.Storage, node.Storage.Width)))
+                {
+                    case Const c when agreed is null || agreed.Value == c.Value:
+                        agreed = c;
+                        break;
+                    case Read { Storage.Bank: Bank.Gpr } r when r.Width == node.Storage.Width:
+                        if (visited.Add((predecessor, r.Storage))) pending.Push((predecessor, r.Storage));
+                        break;
+                    default:
+                        return null;
+                }
             }
-            if (found is null || agreed is not null && agreed.Value != found.Value) { failed = true; break; }
-            agreed = found;
         }
-        visiting.Remove(key);
-        if (failed)
-        {
-            // 加入环上的取值只会更难一致，所以失败是确定的
-            memo[key] = null;
-            return null;
-        }
-        if (agreed is null) { open = true; return null; }
-        if (!anyOpen) memo[key] = agreed;
         return agreed;
+    }
+
+    private SymbolicState End(Block block)
+    {
+        if (ends.TryGetValue(block, out var known)) return known;
+        var state = new SymbolicState(machine.Convention);
+        foreach (var statement in block.Statements) state.Step(statement);
+        return ends[block] = state;
     }
 }

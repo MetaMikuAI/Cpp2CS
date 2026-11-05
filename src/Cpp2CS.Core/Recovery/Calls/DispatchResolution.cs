@@ -53,13 +53,15 @@ internal static class DispatchResolution
 
     /// <summary>
     /// L2 按模板识别虚调用和接口调用时目标还是合流值；路径拆分之后目标成为单一读取，这里按同样的形态解析：
-    /// 接口查找结果的方法指针，或接收者类指针上虚表槽的方法指针。
+    /// 接口查找结果的方法指针，泛型虚方法解析结果的虚方法指针，或接收者类指针上虚表槽的方法指针。
     /// </summary>
     private static MethodRef? SplitDispatch(Call call, ValueModel values, TypeOracle oracle)
     {
         if (SymTable.Resolve(values.Operands(call)[0]) is not ReadSym { Width: 64 } target) return null;
         if (SymTable.Resolve(target.Address) is ResultSym { Site: Call { Op: { Kind: OpKind.InterfaceInvokeData, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } lookup } } })
             return Slot(itf, lookup.Item2, interfaceOnly: true);
+        if (oracle.Decompose(target.Address) is (ResultSym { Site: Call { Op: { Kind: OpKind.ResolveGenericVirtual, Operand: MethodRef generic } } }, RuntimeLayout.MethodVirtualPointer, null, _))
+            return generic;
         return oracle.Decompose(target.Address) is (_, var offset, null, _) && offset >= RuntimeLayout.ClassVtable
             && (offset - RuntimeLayout.ClassVtable) % RuntimeLayout.VirtualInvokeDataSize == 0 && Receiver(call, values) is { } receiver
             ? oracle.VirtualMethod(target, receiver) : null;

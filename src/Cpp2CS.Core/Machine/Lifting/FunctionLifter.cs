@@ -50,6 +50,8 @@ public sealed class FunctionLifter
     public bool InlinesClosures { get; init; }
 
     private readonly Dictionary<ulong, bool> closures = [];
+    private readonly Dictionary<ulong, bool> outlined = [];
+    private const int OutlinedHelperBytes = 96;
     private static readonly HashSet<Storage> CalleeSaved = Enumerable.Range(19, 11).Select(Storage.Gpr).ToHashSet();
 
     /// <summary>
@@ -63,11 +65,36 @@ public sealed class FunctionLifter
         return closures[target] = ClosureShape(target);
     }
 
+    /// <summary>
+    /// codegen 内联成员函数的外提副本：没有任何元数据或运行时依据，不引用元数据或全局数据（没有 ADRP），很小，
+    /// 其中的调用只有写屏障、实例检查和抛出。真正的托管方法即使未注册也要读元数据槽或调用其他方法，不符合这个形态。
+    /// 经 FieldInfo 写字段的模板由 L2 按字段地址展开，不在这里处理。
+    /// </summary>
+    private bool IsOutlinedHelper(ulong target)
+    {
+        if (outlined.TryGetValue(target, out var known)) return known;
+        return outlined[target] = OutlinedHelperShape(target);
+    }
+
+    private bool OutlinedHelperShape(ulong target)
+    {
+        if (facts.Code.RegionOf(target) is not (CodeRegion.Managed or CodeRegion.Runtime) || facts.Helpers.At(target) is { Kind: not HelperKind.Unknown } || knownCalls.Signature(target) is not null
+            || facts.Code.At(target) is not { ExceptionRegions.Length: 0, Size: <= OutlinedHelperBytes } range || range.Start != target
+            || SharedFieldTemplates.WriteWidth(facts, target) != 0) return false;
+        for (var pc = range.Start; pc < range.End; pc += 4)
+            if (facts.Code.Word(pc) is not { } word || A64.IsAdrp(word)) return false;
+        var inner = cfg.Build(target);
+        if (inner.Problems.Count > 0) return false;
+        var called = inner.Blocks.SelectMany(b => b.Statements).OfType<Call>().ToArray();
+        return called.Length > 0 && called.All(c => c.Target is Const callee && facts.Helpers.At(callee.Value)?.Kind
+            is HelperKind.WriteBarrier or HelperKind.IsInst or HelperKind.Throw or HelperKind.GetException or HelperKind.Raise);
+    }
+
     private bool ClosureShape(ulong target)
     {
         // lambda 这类模板实例由 clang 放在 .text，与 libil2cpp 同段，不能按代码区区分；已知的 helper 和导入都不算。
         if (facts.Code.RegionOf(target) is not (CodeRegion.Managed or CodeRegion.Runtime) || facts.Helpers.At(target) is { Kind: not HelperKind.Unknown } || knownCalls.Signature(target) is not null
-            || facts.Code.At(target) is not { ExceptionRegions.Length: 0 } range || range.Start != target) return false;
+            || facts.Code.At(target) is not { } range || range.Start != target) return false;
         // 副本只重命名通用寄存器；改写 d8-d15 的函数不展开。
         if (cfg.Build(target).Blocks.SelectMany(b => b.Statements).OfType<Assign>().Any(a => a.Target.Bank == Bank.Vec && a.Target.Index is >= 8 and <= 15)) return false;
         var lifted = Lift(target);
@@ -118,7 +145,7 @@ public sealed class FunctionLifter
     public LiftedFunction Lift(ulong entry, Expr? returnValue, ReturnPiece[]? returnPieces, bool simplify, bool promoteFrameSlots)
     {
         var function = cfg.Build(entry);
-        if (InlinesClosures && !promoteFrameSlots) new ClosureInlining(cfg, IsClosure, Machine.Convention.IntegerArguments[0], Machine.Convention.StackPointer, Storage.Gpr(29), CalleeSaved).Run(function);
+        if (InlinesClosures && !promoteFrameSlots) new ClosureInlining(cfg, IsClosure, IsOutlinedHelper, Machine.Convention.IntegerArguments[0], Machine.Convention.StackPointer, Storage.Gpr(29), CalleeSaved).Run(function);
         var dominators = Dominators.Compute(function);
         SsaBuilder.PrepareCalls(function, calls, returnValue, Machine.Convention.StackPointer, returnPieces);
         SsaBuilder.Build(function, dominators, s => s.Bank is Bank.Gpr or Bank.Vec or Bank.Flags or Bank.Temp, calls, Machine.Convention.StackPointer);

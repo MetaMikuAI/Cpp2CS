@@ -53,7 +53,7 @@ internal sealed partial class BodyBuilder
             var value = signature.Arguments[i];
             if (value.Index < 0 && construction is not null) continue;
             if (value.Index < 0 && pendingReceiver is not null) { receiver = pendingReceiver; continue; }
-            var type = TypeOracle.ArgumentType(callee, value.Index);
+            var type = TypeOracle.ArgumentType(call, callee, value.Index);
             if (construction is not null && DelegateFacts.IsDelegate(callee.DeclaringType) && value.Index == 1 && managed.Count == 1)
             {
                 if (oracle.DelegateTargetOf(contents[i], contents[Array.FindIndex(signature.Arguments, a => a.Index == 0)]) is { } target)
@@ -92,7 +92,7 @@ internal sealed partial class BodyBuilder
         }
         var dispatched = shape.IsDispatch || call.Resolved is not null && call.Kind is CallKind.Indirect or CallKind.TailIndirect;
         var invocation = new ManagedInvocation(callee, receiver, managed, Virtual: receiver is not null
-            && (dispatched || !callee.Method.IsVirtual && absorbedChecks.Contains(contents[0])));
+            && (dispatched || !callee.Method.IsVirtual && absorbedChecks.Contains(contents[0]))) { Constraint = TypeOracle.ConstraintOf(call) };
         LocalValue? result = null;
         var returnType = callee.Concrete(callee.Method.ReturnType);
         if (!ManagedTypes.IsVoid(returnType))
@@ -185,7 +185,7 @@ internal sealed partial class BodyBuilder
                         return new AddressValue(local);
                     }
                     if (oracle.TypeOf(content) is ByRefRef or PointerRef) return View(content, type, call.Address);
-                    return oracle.Locate(content, Math.Max(8, value.Size * 8)) is { } target
+                    return oracle.Locate(content, value.Size < 0 ? -1 : Math.Max(8, value.Size * 8)) is { } target
                         ? new AddressValue(LocationValue(target, call.Address)) : Hole(call.Address, $"调用 ref 实参的位置 {content}", type);
                 }
             default:
