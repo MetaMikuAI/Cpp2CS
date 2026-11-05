@@ -246,7 +246,8 @@ public sealed partial class RuntimeHelpers
             && A64.IsBl(barrierCall) && calls is [var writeBarrier] && KindAt(writeBarrier) == HelperKind.WriteBarrier)
             return (HelperKind.CompareExchangeReference, null, "ldaxr/stlxr 比较交换重试；dmb ish；GC 写屏障；返回旧引用");
         var imports = calls.Select(ImportAt).Where(n => n is not null).ToArray();
-        if (imports.Contains("__cxa_allocate_exception") && imports.Contains("__cxa_throw") && ThrowsIl2CppWrapper(body))
+        // finally 的闭包也可能内联了同样的抛出序列（catch 里转抛），但它正常结束时要返回；重新抛出本身不返回。
+        if (imports.Contains("__cxa_allocate_exception") && imports.Contains("__cxa_throw") && ThrowsIl2CppWrapper(body) && !CanReturn(body, 2))
             return (HelperKind.Rethrow, null, "以 __cxa_allocate_exception/__cxa_throw 抛出 typeinfo 名含 Il2CppExceptionWrapper 的 C++ 异常");
         if (words.Length <= 4 && imports.Length == 2 && imports[0] == "__cxa_begin_catch" && imports[1]!.Contains("terminate", StringComparison.Ordinal))
             return (HelperKind.Terminate, null, "__cxa_begin_catch 之后调用 std::terminate");
