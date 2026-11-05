@@ -308,12 +308,23 @@ public sealed class ProgramModel
     public required IReadOnlyDictionary<ulong, IReadOnlyList<CodeOwner>> Code { get; init; }
     private readonly ConcurrentDictionary<ulong, Usage?> slots = new();
     private readonly Dictionary<ulong, Usage> registeredUsages = new();
+    private readonly ConcurrentDictionary<string, IReadOnlyList<FieldRef>> fieldRva = new();
 
     /// <summary>按元数据使用对登记过的槽地址与目标。</summary>
     public IReadOnlyDictionary<ulong, Usage> RegisteredUsages => registeredUsages;
 
     /// <summary>登记一个由元数据使用对确定的槽地址。</summary>
     public void RegisterUsage(ulong slot, Usage usage) => registeredUsages[slot] = usage;
+
+    /// <summary>按引用程序集取得带 RVA 初值的数据字段，顺序与元数据字段索引一致。</summary>
+    public IReadOnlyList<FieldRef> FieldRvaFields(string assembly) => fieldRva.GetOrAdd(assembly, name =>
+        Fields
+            .Where(field => field.Owner.Assembly == name
+                && (field.Attributes & FieldAttributes.HasFieldRVA) != 0
+                && field.InitialValue is { Length: > 0 })
+            .OrderBy(field => field.Index)
+            .Select(field => new FieldRef(field, new DefinitionRef(field.Owner, [])))
+            .ToArray());
 
     /// <summary>
     /// 解码元数据使用槽：优先使用元数据使用对给出的槽地址与索引；

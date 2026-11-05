@@ -122,6 +122,8 @@ public enum OpKind : byte
     ZeroField,
     /// <summary>内联的 unbox.any：从对象数据区取出指定值类型。</summary>
     UnboxAny,
+    /// <summary>用字段 RVA 数据初始化新建数组；Operand 为数据字段。</summary>
+    InitializeArray,
 }
 
 /// <summary>调用所表达的运行时操作。Operand：类型（TypeRef）、异常名、槽位号等，见 <see cref="OpKind"/>。</summary>

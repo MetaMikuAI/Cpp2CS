@@ -27,6 +27,7 @@ internal static class IdiomPipeline
         new("interface.dispatch", s => s.InterfaceDispatch()),
         new("interface.invokes", s => SharedInterfaceTails.SplitInvokes(s.function, e => s.defs.Expand(e))),
         Do("calls", s => s.Calls()),
+        new("array.rva-init", s => s.RvaArrayInit()),
         new("invoker", s => s.InvokerCalls()),
         new("shared.values", s => s.SharedValues()),
         new("stack.boxing", s => s.StackBoxing()),

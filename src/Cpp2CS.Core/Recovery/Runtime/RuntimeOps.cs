@@ -260,6 +260,35 @@ public static class RuntimeOps
                 return true;
             },
         };
+        yield return new(OpKind.InitializeArray)
+        {
+            Inputs = (_, a, t) => a.Count == 1 ? [new(a[0], t.TypeOf(a[0]))] : [],
+            Behavior = new(EffectKind.Write, ExceptionEffect.Any),
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Arguments.Count != 1 || c.Op.Operand is not FieldRef field) return false;
+                var arrayDefinition = c.Types.CorlibDefinition("System.Array");
+                var method = arrayDefinition is { } array
+                    ? c.Types.CorlibMethod("System.Runtime.CompilerServices.RuntimeHelpers", "InitializeArray",
+                        new DefinitionRef(array, []), c.Types.RuntimeFieldHandle)
+                    : null;
+                if (method is null)
+                {
+                    var owner = c.Types.CorlibDefinition("System.Runtime.CompilerServices.RuntimeHelpers")
+                        ?? c.Types.Model.Types.FirstOrDefault(t => t.FullName == "System.Runtime.CompilerServices.RuntimeHelpers");
+                    method = owner?.Methods.FirstOrDefault(m => m.IsStatic && m.Name == "InitializeArray"
+                        && m.Parameters.Count == 2
+                        && m.Parameters[0].Type is DefinitionRef { Definition.FullName: "System.Array" }
+                        && m.Parameters[1].Type is DefinitionRef handle && handle.Definition == c.Types.RuntimeFieldHandle.Definition)
+                        is { } found ? new MethodRef(found, [], []) : null;
+                }
+                if (method is not { } initialize) return false;
+                c.Emit(new ManagedCall(c.Call.Address, new ManagedInvocation(initialize, null,
+                    [c.Input(0), new FieldHandleValue(field, c.Types.RuntimeFieldHandle, 64)], false), null));
+                return true;
+            },
+        };
         yield return new(OpKind.Box)
         {
             Inputs = (call, a, t) => a.Count == 2 ? [new(a[1], t.ClassOperand(call), RuntimeInputKind.Pointee, 1)] : [],
