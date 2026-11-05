@@ -87,12 +87,20 @@ internal sealed partial class TemplateRecovery
         }
         var covered = match.Covered.ToHashSet();
         // 模板写入之间的调用方写入与模板无关，移到调用之前或之后；它们原样保留，不能依赖区域内定义的局部。
-        if (match.Interleaved.Any(p => p.Block != startBlock)) { failure = "移出区域的写入不在起点块"; return null; }
+        // 移出区域的语句要在每条路径上都执行：只接受从起点沿无条件跳转到达的块。
+        var straight = new HashSet<ulong> { startBlock };
+        for (var along = startBlock; blocks[along].Statements[^1] is ManagedJump { Edge.Target: var next } && covered.Contains((along, blocks[along].Statements.Count - 1)) && straight.Add(next); along = next) { }
+        if (match.Interleaved.Any(p => !straight.Contains(p.Block))) { failure = "移出区域的语句不在起点的直线路径上"; return null; }
         if (match.Interleaved.Any(p => p.Effects > 0 && p.Effects < match.Effects)) { failure = "夹在调用之间的写入不能移出区域"; return null; }
         var hoisted = match.Interleaved.Where(p => p.Effects == 0).Select(p => blocks[p.Block].Statements[p.Index]).ToArray();
         var sunk = match.Interleaved.Where(p => p.Effects > 0).Select(p => blocks[p.Block].Statements[p.Index]).ToArray();
         if (hoisted.Concat(sunk).SelectMany(ReadValues).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => match.Defined.ContainsKey(l.Variable)))
         { failure = "移出区域的写入依赖区域内定义的局部"; return null; }
+        // 提到调用之前的赋值不能改写调用要用的局部。
+        var hoistedTargets = hoisted.OfType<ManagedAssignment>().Select(a => a.Target.Variable).ToHashSet();
+        if (hoistedTargets.Count > 0 && arguments.Concat(receiver is null ? [] : [receiver]).Concat(exitCopies.Select(c => c.Value)).SelectMany(ManagedValues.Walk)
+            .OfType<LocalValue>().Any(l => hoistedTargets.Contains(l.Variable)))
+        { failure = "提到调用之前的赋值改写了调用要用的局部"; return null; }
         covered.UnionWith(match.Interleaved.Select(p => (p.Block, p.Index)));
         var internalBlocks = covered.Select(c => c.Block).Where(b => b != startBlock).Distinct().ToHashSet();
         if (match.Continuation is { } continuation)

@@ -106,7 +106,11 @@ internal sealed partial class TemplateRecovery
                 complete = ReferenceEquals(expected, result);
                 break;
             }
-            if (binding is null) return true;
+            if (binding is null)
+            {
+                if (!SkipUnrelatedReads(caller, match, result, terms)) return true;
+                continue;
+            }
             foreach (var (key, bound) in binding) match.Binding[key] = bound;
             Cover(caller, match);
             NoteEarlyReads(value, caller, match);
@@ -117,6 +121,48 @@ internal sealed partial class TemplateRecovery
             if (complete) return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// 返回项的读取之间夹着无关的读取（clang 重排了相邻的读取）：后面确实还有返回项时，无关读取移出区域。
+    /// 读取没有效果，和模板的读取交换不改变读到的值，接收者为空时都是空引用异常；这期间路径上不能已有写入。
+    /// </summary>
+    private bool SkipUnrelatedReads(Walker caller, InlineMatch match, ManagedValue result, IReadOnlyList<ManagedValue> terms)
+    {
+        if (caller.Stores.Count > 0) return false;
+        var probe = caller.Clone();
+        var passed = new List<ManagedValue?>();
+        for (var steps = 0; steps < 32; steps++)
+        {
+            if (probe.Index >= probe.Blocks[probe.Block].Statements.Count) return false;
+            if (probe.Current is ManagedJump jump)
+            {
+                if (jump.Edge.Copies.Count > 0 || Predecessors(probe.Blocks, jump.Edge.Target).Length > 1 || !Follow(probe, jump.Edge)) return false;
+                passed.Add(null);
+                continue;
+            }
+            if (probe.Current is not ManagedAssignment { ExceptionArrival: false } assignment || Term(probe, assignment.Value) is not { } value) return false;
+            if (new[] { result }.Concat(terms).Any(expected => Unify(expected, value, new(match.Binding)))) break;
+            if ((ManagedEffects.Value(assignment.Value).Kinds & ~EffectKind.Read) != 0) return false;
+            probe.Env[assignment.Target.Variable] = value;
+            probe.Index++;
+            passed.Add(value);
+        }
+        if (passed.Count == 0 || passed.Count >= 32) return false;
+        foreach (var value in passed)
+        {
+            Cover(caller, match);
+            if (value is null)
+            {
+                if (!Follow(caller, ((ManagedJump)caller.Current).Edge)) return false;
+                continue;
+            }
+            var assignment = (ManagedAssignment)caller.Current;
+            match.Interleaved.Add((caller.Block, caller.Index, match.Effects));
+            caller.Env[assignment.Target.Variable] = value;
+            caller.Index++;
+        }
+        return true;
     }
 
     /// <summary>返回：调用方在每条路径上直接返回模板的返回值（或都返回 void），返回类型可赋给调用方的返回类型。</summary>
