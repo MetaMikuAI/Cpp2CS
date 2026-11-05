@@ -68,6 +68,7 @@ internal sealed class MemoryPromotion
         if (signature.Return is { Transfer: Transfer.ResultBuffer, Size: > 0 } && layout.Cells.Any(c => c.Space == LocalSpace.Result && !c.Promoted))
             return RecoveryDiagnostics.Fail(function.Entry, "内存 结果缓冲区的地址逃逸：" + string.Join("；", layout.Cells
                 .Where(c => c.Space == LocalSpace.Result && !c.Promoted).Select(c => $"+{c.Start:x} {c.Escape}")), rule: "Memory");
+        layout = promotion.KeepThrowObservedCells(layout, calls, stackPointer);
         promotion.Rewrite(layout);
         var dominators = Dominators.Compute(function);
         SsaBuilder.Build(function, dominators, s => s.Bank == Bank.Local, calls, stackPointer);
@@ -249,6 +250,34 @@ internal sealed class MemoryPromotion
                 effects.Add(new(-1, MachineSignature.MethodInfoIndex, 64, 0, LocalSpace.Frame, spOffset + info.Register.Index, 8, MemoryAccess.Read));
         }
         return effects;
+    }
+
+    /// <summary>
+    /// 调用经 ref 改写单元时抛出，处理块读到的是被调方留下的内容。SSA 的版本只有调用前后两个完整状态，表达不了这个中间状态；
+    /// 这样的单元在机器和 IL 里都是同一块存储，留在内存里由可寻址局部承接。活跃性取自试构建的剪枝 SSA。
+    /// </summary>
+    private MemoryLayout KeepThrowObservedCells(MemoryLayout layout, ICallModel calls, Storage stackPointer)
+    {
+        var writers = new HashSet<(ulong Block, Storage Cell)>();
+        foreach (var block in function.Blocks.Where(b => b.Handler is not null))
+            foreach (var call in block.Statements.OfType<Call>())
+                foreach (var effect in Effects(call).Where(e => e.Size > 0 && (e.Access & MemoryAccess.Write) != 0
+                    && shapes(call).Signature?.Arguments.Any(a => a.Index == e.Value && a.Transfer == Transfer.Reference) == true))
+                    foreach (var cell in layout.Cells.Where(c => c.Promoted && c.Space == effect.Space && c.Start < effect.Offset + effect.Size && effect.Offset < c.End))
+                        writers.Add((block.Start, cell.Storage));
+        if (writers.Count == 0) return layout;
+        var probe = function.Copy();
+        var trial = new MemoryPromotion(probe, signature, shapes, abi);
+        trial.Partition();
+        trial.Rewrite(layout);
+        SsaBuilder.Build(probe, Dominators.Compute(probe), s => s.Bank == Bank.Local, calls, stackPointer);
+        var observed = new HashSet<int>();
+        foreach (var landing in probe.Blocks.Where(b => b.IsLandingPad))
+            foreach (var phi in landing.Statements.OfType<Phi>().Where(p => p.Target.Storage.Bank == Bank.Local))
+                for (var i = 0; i < phi.Sources.Length; i++)
+                    if (phi.Sources[i].Version < 0 && writers.Contains((landing.Predecessors[i].Start, phi.Target.Storage))) observed.Add(phi.Target.Storage.Index);
+        return observed.Count == 0 ? layout
+            : new MemoryLayout(layout.Cells.Select(c => observed.Contains(c.Id) ? c with { Escape = "异常路径观察 ref 调用写入的内容" } : c).ToList());
     }
 
     // ---- 改写 ----

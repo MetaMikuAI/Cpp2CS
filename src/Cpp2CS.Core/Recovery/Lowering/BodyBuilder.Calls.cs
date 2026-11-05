@@ -118,14 +118,15 @@ internal sealed partial class BodyBuilder
         }
         var lowered = new ManagedCall(call.Address, invocation, result) { Inlined = call.Inlined };
         output.Add(lowered);
-        // 不透明返回值写入调用者给出的位置。
-        if (result is not null && signature.Return is { Transfer: Transfer.ResultBuffer, Size: < 0 } opaque)
+        // 提升的单元由调用写出的版本承接；其他结果缓冲区（不透明返回值、未提升的可寻址局部、堆上的位置）要把结果写到调用者给出的位置。
+        if (result is not null && signature.Return is { Transfer: Transfer.ResultBuffer } buffer
+            && call.ArgumentIndex(buffer.Pieces[0].Register) is var position && (buffer.Size < 0 || position >= 0 && !IsPromotedCell(arguments[position])))
         {
-            var position = call.ArgumentIndex(opaque.Pieces[0].Register);
-            if (position < 0 || oracle.Locate(arguments[position], -1) is not { } home)
+            if (position < 0 || oracle.Locate(arguments[position], buffer.Size < 0 ? -1 : buffer.Size * 8) is not { } home)
             {
-                output.Add(new ManagedHole(call.Address, "调用 不透明返回值的位置未知", false));
-                holes.Add(new(call.Address, "调用 不透明返回值的位置未知"));
+                var reason = buffer.Size < 0 ? "调用 不透明返回值的位置未知" : $"调用 结果缓冲区的位置 {arguments[position]}";
+                output.Add(new ManagedHole(call.Address, reason, false));
+                holes.Add(new(call.Address, reason));
             }
             else if (LocationValue(home, call.Address, store: true) is var target)
                 output.Add(target is LocalValue local ? new ManagedAssignment(call.Address, local, result) : new ManagedStore(call.Address, target, result));
@@ -167,7 +168,8 @@ internal sealed partial class BodyBuilder
             case Transfer.Reference:
                 {
                     var element = type is ByRefRef byRef ? byRef.Element : type;
-                    var elementBits = types.Kind(element) == TypeKind.Struct ? types.Size(element) * 8 : Math.Max(8, Width(element));
+                    // 不透明值没有固定位宽，只按位置定位。
+                    var elementBits = ManagedAbi.SharedValue(element) ? -1 : types.Kind(element) == TypeKind.Struct ? types.Size(element) * 8 : Math.Max(8, Width(element));
                     if (SymTable.Resolve(content) is LocalSym escaped && analysis.Memory.Find(escaped.Space, escaped.Offset, 1) is { Promoted: false })
                         return oracle.Locate(escaped, elementBits) is { } escapedLocation
                             ? new AddressValue(LocationValue(escapedLocation, call.Address)) : Hole(call.Address, $"调用 ref 实参指向的可寻址局部 {escaped}", type);
@@ -188,6 +190,9 @@ internal sealed partial class BodyBuilder
                 return Hole(call.Address, $"调用 实参传递方式 {value.Transfer}", type);
         }
     }
+
+    private bool IsPromotedCell(Sym pointer) =>
+        SymTable.Resolve(pointer) is LocalSym local && analysis.Memory.Find(local.Space, local.Offset, 1) is { Promoted: true };
 
     private Terminator? LowerRuntime(Block block, int index, Call call, RuntimeOp op, IReadOnlyList<Sym> arguments, List<ManagedStatement> output)
     {
