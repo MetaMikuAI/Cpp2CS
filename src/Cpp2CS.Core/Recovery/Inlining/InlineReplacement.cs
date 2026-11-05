@@ -6,13 +6,18 @@ namespace Cpp2CS.Recovery.Inlining;
 internal sealed record InlineReplacement(ulong Start, IReadOnlyList<ManagedStatement> Statements, FrozenSet<ulong> Removed,
     IReadOnlyDictionary<(ulong Block, int Index), ManagedStatement>? Rewritten = null)
 {
+    /// <summary>起点块要并入 try 的区域：替换成的调用可能抛出，而起点块原来不在 try 里。</summary>
+    public IReadOnlySet<ManagedRegion> JoinedTry { get; init; } = new HashSet<ManagedRegion>();
+
     public ManagedBody Apply(ManagedBody body) => body with
     {
         Blocks = body.Blocks.Where(b => !Removed.Contains(b.Address))
             .Select(b => b.Address == Start ? b with { Statements = Statements } : Rewrite(b)).ToArray(),
         Regions = body.Regions.Select(r => r with
         {
-            Try = r.Try.Where(a => !Removed.Contains(a)).ToArray(),
+            Try = JoinedTry.Contains(r)
+                ? body.Blocks.Select(b => b.Address).Where(a => !Removed.Contains(a) && (a == Start || r.Try.Contains(a))).ToArray()
+                : r.Try.Where(a => !Removed.Contains(a)).ToArray(),
             Handler = r.Handler.Where(a => !Removed.Contains(a)).ToArray(),
         }).ToArray(),
     };

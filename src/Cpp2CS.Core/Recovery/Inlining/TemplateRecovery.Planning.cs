@@ -1,5 +1,6 @@
 using System.Collections.Frozen;
 using System.Reflection;
+using Cpp2CS.Recovery.Effects;
 
 namespace Cpp2CS.Recovery.Inlining;
 
@@ -131,9 +132,21 @@ internal sealed partial class TemplateRecovery
                 pending.Enqueue(edge.Target);
         }
         // 不会抛出的块可在 try 外（原生调用点表不覆盖它们）；可能抛出的语句须保留起点的异常上下文。
-        if (body.Regions.Any(r => internalBlocks.Contains(r.HandlerEntry)
-            || region.Any(b => match.Raising.Contains(b) && (r.Try.Contains(b) != r.Try.Contains(startBlock) || r.Handler.Contains(b) != r.Handler.Contains(startBlock)))))
-        { failure = "区域跨越异常边界"; return null; }
+        // 只看显式抛出的语句：隐式的判空和边界检查在原生里已经由判断排除，真会抛的话调用点表就覆盖它了。
+        // 起点不在 try 里而这些语句都在时，调用要进 try：起点块留下的语句都不抛出，把这个块并入 try 不改变它们。
+        var raising = region.Where(b => match.Raising.Contains(b) && blocks[b].Statements.Any(s => s is ManagedCall or ManagedThrow or ManagedCheck)).ToArray();
+        var kept = blocks[startBlock].Statements.Take(start)
+            .Concat(!match.Returns && exit.Index > 0 ? blocks[exit.Block].Statements.Skip(exit.Index) : []).ToArray();
+        var joined = new HashSet<ManagedRegion>(ReferenceEqualityComparer.Instance);
+        foreach (var r in body.Regions)
+        {
+            if (internalBlocks.Contains(r.HandlerEntry) || raising.Any(b => r.Handler.Contains(b) != r.Handler.Contains(startBlock)))
+            { failure = "区域跨越异常边界"; return null; }
+            if (raising.All(b => r.Try.Contains(b) == r.Try.Contains(startBlock))) continue;
+            if (r.Try.Contains(startBlock) || !raising.All(r.Try.Contains) || kept.Any(s => ManagedEffects.Statement(s).Exceptions != ExceptionEffect.None))
+            { failure = "区域跨越异常边界"; return null; }
+            joined.Add(r);
+        }
         internalBlocks.ExceptWith(shared);
         covered.RemoveWhere(p => shared.Contains(p.Block));
         // 区域内定义的值不在区域外使用。共享块里的读取，到达的值来自其他入口：这个入口不再进入，但其他入口要真的定义它。
@@ -184,6 +197,6 @@ internal sealed partial class TemplateRecovery
             replacement.AddRange(blocks[exit.Block].Statements.Skip(exit.Index));
             if (exit.Block != startBlock && !shared.Contains(exit.Block)) internalBlocks.Add(exit.Block);
         }
-        return new InlineReplacement(startBlock, replacement.ToArray(), internalBlocks.ToFrozenSet(), match.Rewritten);
+        return new InlineReplacement(startBlock, replacement.ToArray(), internalBlocks.ToFrozenSet(), match.Rewritten) { JoinedTry = joined };
     }
 }
