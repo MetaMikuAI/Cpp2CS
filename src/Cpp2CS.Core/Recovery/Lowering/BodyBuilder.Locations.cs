@@ -117,9 +117,37 @@ internal sealed partial class BodyBuilder
             var type = FieldType(path[i], last ? leaf : null);
             if (store && !last && !fields.Accessible(path[i], value.Type))
                 return Hole(address, $"内存 写入经过不可访问的值类型字段 {path[i].Field.Name}", leaf);
-            value = FieldAccess(value, path[i], type, store && last, address);
+            value = (store ? null : OverlappingPieces(value, path[i], type, address)) ?? FieldAccess(value, path[i], type, store && last, address);
             if (store && !last && types.Kind(type) == TypeKind.Struct) value = new AddressValue(value);
         }
         return value;
+    }
+
+    /// <summary>
+    /// 显式布局中不可访问的整数字段，其位同时由可访问的整数字段连续覆盖（联合体式的结构）时，读取它等于按小端把这些字段拼起来。
+    /// </summary>
+    private ManagedValue? OverlappingPieces(ManagedValue receiver, FieldRef field, TypeRef type, ulong address)
+    {
+        if (fields.Accessible(field, receiver.Type) || types.Kind(type) != TypeKind.Int || !ExplicitLayout(field, out var owner)) return null;
+        var slots = types.Fields(owner).ToArray();
+        if (slots.FirstOrDefault(f => f.Path[0].Equals(field)) is not { } self) return null;
+        var bit = self.Bit;
+        ManagedValue? packed = null;
+        foreach (var piece in slots.Where(f => !f.Path[0].Equals(field) && self.Contains(f.Bit, f.Width) && fields.Accessible(f.Path[0], receiver.Type)
+            && types.Kind(f.Type) is TypeKind.Int or TypeKind.Bool).OrderBy(f => f.Bit))
+        {
+            if (piece.Bit != bit) return null;
+            var part = Resize(FieldAccess(receiver, piece.Path[0], piece.Type, false, address), type);
+            if (bit > self.Bit) part = new BinaryValue(BinOp.Shl, part, new ConstantValue((ulong)(bit - self.Bit), types.Int32, 32), type, Width(type));
+            packed = packed is null ? part : new BinaryValue(BinOp.Or, packed, part, type, Width(type));
+            bit += piece.Width;
+        }
+        return bit == self.Bit + self.Width ? packed : null;
+    }
+
+    private static bool ExplicitLayout(FieldRef field, out DefinitionRef owner)
+    {
+        owner = (DefinitionRef)field.DeclaringType;
+        return (owner.Definition.Attributes & System.Reflection.TypeAttributes.LayoutMask) == System.Reflection.TypeAttributes.ExplicitLayout;
     }
 }
