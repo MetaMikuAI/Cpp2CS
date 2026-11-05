@@ -76,6 +76,7 @@ public sealed partial class TypeOracle
             PhiSym phi => phi.Sources.Length > 0 && phi.Sources.All(s => s is not null && ScalarBits(s, seen)),
             ConcatSym concat => concat.Parts.All(p => ScalarBits(p, seen)),
             SliceSym slice => ScalarBits(slice.Base, seen),
+            OpSym operation when ModularArithmetic(operation) is not null => operation.Args.All(a => ScalarBits(a, seen)),
             _ => TypeOf(value) is { } type
                 && types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer,
         };

@@ -419,9 +419,11 @@ internal sealed partial class BodyBuilder
         {
             case OpSym operation when oracle.ModularArithmetic(operation) is { } carrier:
                 {
-                    if (IntegerBits(operation.Args[0], carrier, address) is not { } left
-                        || IntegerBits(operation.Args[1], carrier, address) is not { } right) return null;
-                    var computed = new BinaryValue(operation.Op.Binary, left, right, carrier, Width(carrier));
+                    if (IntegerBits(operation.Args[0], carrier, address) is not { } left) return null;
+                    ManagedValue computed;
+                    if (operation.Op.Kind == OperatorKind.Unary) computed = new UnaryValue(operation.Op.Unary, left, carrier, Width(carrier));
+                    else if (IntegerBits(operation.Args[1], carrier, address) is { } right) computed = new BinaryValue(operation.Op.Binary, left, right, carrier, Width(carrier));
+                    else return null;
                     var masked = new BinaryValue(BinOp.And, computed, new ConstantValue(Expr.Mask(operation.Width), carrier, Width(carrier)), carrier, Width(carrier));
                     return Resize(masked, target);
                 }
