@@ -7,6 +7,8 @@ using Cpp2CS.Machine.Ssa;
 
 namespace Cpp2CS.Machine.Lifting;
 
+using Storage = Cpp2CS.Ir.Storage;
+
 
 
 /// <summary>一个函数的机器层提升结果：寄存器 SSA 形式的控制流图，以及构建过程中的问题。</summary>
@@ -26,6 +28,7 @@ public sealed class FunctionLifter
     private readonly ProgramFacts facts;
     private readonly CfgBuilder cfg;
     private readonly ICallModel calls;
+    private readonly FactsCallModel knownCalls;
     private readonly ImageSection? got;
     private readonly ImageSection[] constant;
 
@@ -36,10 +39,67 @@ public sealed class FunctionLifter
         this.facts = facts;
         Machine = new Arm64Machine(facts.Code);
         cfg = new CfgBuilder(Machine, facts.Code);
-        this.calls = calls ?? new FactsCallModel(facts, Machine.Convention);
+        knownCalls = new FactsCallModel(facts, Machine.Convention);
+        this.calls = calls ?? knownCalls;
         var image = facts.Model.Image;
         got = image.Section(".got");
         constant = image.Sections.Where(s => (s.Flags & 1) == 0 && !s.Executable && s.Type == 1 /* SHT_PROGBITS */ && s.Name != ".got").ToArray();
+    }
+
+    /// <summary>恢复方法体（帧内存交给恢复层时）把外提的闭包函数展开回调用方；事实层的分析只看函数本身，不展开。</summary>
+    public bool InlinesClosures { get; init; }
+
+    private readonly Dictionary<ulong, bool> closures = [];
+    private static readonly HashSet<Storage> CalleeSaved = Enumerable.Range(19, 11).Select(Storage.Gpr).ToHashSet();
+
+    /// <summary>
+    /// 闭包函数：没有任何元数据或运行时依据的函数，入口只读第一个实参，而且只把它当作基址访问内存。
+    /// 带额外实参的（如共享泛型的 MethodInfo）是普通方法，不算。
+    /// </summary>
+    private bool IsClosure(ulong target)
+    {
+        if (closures.TryGetValue(target, out var known)) return known;
+        closures[target] = false;
+        return closures[target] = ClosureShape(target);
+    }
+
+    private bool ClosureShape(ulong target)
+    {
+        // lambda 这类模板实例由 clang 放在 .text，与 libil2cpp 同段，不能按代码区区分；已知的 helper 和导入都不算。
+        if (facts.Code.RegionOf(target) is not (CodeRegion.Managed or CodeRegion.Runtime) || facts.Helpers.At(target) is { Kind: not HelperKind.Unknown } || knownCalls.Signature(target) is not null
+            || facts.Code.At(target) is not { ExceptionRegions.Length: 0 } range || range.Start != target) return false;
+        // 副本只重命名通用寄存器；改写 d8-d15 的函数不展开。
+        if (cfg.Build(target).Blocks.SelectMany(b => b.Statements).OfType<Assign>().Any(a => a.Target.Bank == Bank.Vec && a.Target.Index is >= 8 and <= 15)) return false;
+        var lifted = Lift(target);
+        if (!lifted.Succeeded) return false;
+        var convention = Machine.Convention;
+        var first = convention.IntegerArguments[0];
+        var others = convention.IntegerArguments.Skip(1).Concat(convention.FloatArguments).ToHashSet();
+        static Storage? Input(Expr value) => value switch
+        {
+            Entry entry => entry.Storage,
+            Use { Variable: { Version: 0 } variable } => variable.Storage,
+            _ => null,
+        };
+        bool IsBase(Expr value) => Input(value) == first || value is Binary { Op: BinOp.Add, Right: Const } offset && Input(offset.Left) == first;
+        var bases = 0;
+        var inputs = 0;
+        foreach (var block in lifted.Function.Blocks)
+            foreach (var statement in block.Statements)
+            {
+                // 保守约定的调用列出全部实参寄存器，不说明它真的读了。
+                var conservative = statement is Call call && (call.Target is not Const callee || knownCalls.Signature(callee.Value) is null);
+                var operands = conservative ? [((Call)statement).Target] : ExprMap.Operands(statement).ToArray();
+                if (statement is Store store && IsBase(store.Target)) bases++;
+                foreach (var node in operands.SelectMany(ExprMap.Walk))
+                {
+                    if (node is Load load && IsBase(load.Address)) bases++;
+                    if (Input(node) is not { } input) continue;
+                    if (others.Contains(input)) return false;
+                    if (input == first) inputs++;
+                }
+            }
+        return inputs > 0 && inputs == bases;
     }
 
     /// <summary>是否做帧槽提升（默认是）；环境变量 CPP2CS_FRAME_SLOTS=off 时关闭，用于对比与排查。</summary>
@@ -56,6 +116,7 @@ public sealed class FunctionLifter
     public LiftedFunction Lift(ulong entry, Expr? returnValue, ReturnPiece[]? returnPieces, bool simplify, bool promoteFrameSlots)
     {
         var function = cfg.Build(entry);
+        if (InlinesClosures && !promoteFrameSlots) new ClosureInlining(cfg, IsClosure, Machine.Convention.IntegerArguments[0], Machine.Convention.StackPointer, Storage.Gpr(29), CalleeSaved).Run(function);
         var dominators = Dominators.Compute(function);
         SsaBuilder.PrepareCalls(function, calls, returnValue, Machine.Convention.StackPointer, returnPieces);
         SsaBuilder.Build(function, dominators, s => s.Bank is Bank.Gpr or Bank.Vec or Bank.Flags or Bank.Temp, calls, Machine.Convention.StackPointer);

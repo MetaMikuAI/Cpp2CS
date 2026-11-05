@@ -45,7 +45,7 @@ public sealed class MethodDecompiler
     {
         this.facts = facts;
         this.types = types;
-        lifter = new FunctionLifter(facts);
+        lifter = new FunctionLifter(facts) { InlinesClosures = true };
         rewriter = new IdiomRewriter(facts) { RecordFilter = _ => false, RecoverUnusedInputs = true };
         abi = new ManagedAbi(facts.Layouts);
         shapes = new CallShapes(facts, abi, rewriter.UnusedInput);
