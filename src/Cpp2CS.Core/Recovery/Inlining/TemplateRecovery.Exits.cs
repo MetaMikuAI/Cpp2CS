@@ -15,6 +15,13 @@ internal sealed partial class TemplateRecovery
     {
         if (ConcludeReturn(match, method)) return true;
         var binding = new Dictionary<int, ManagedValue>(match.Binding);
+        // 不读内存的返回值用在好几个语句里：续接只把第一处接到结果上，其他用处还会引用区域内的局部。
+        var manyUses = match.Ends is [{ Exit: var exit }, ..] && match.Ends.All(e => e.State is not null && e.Exit == exit
+                && e.Result is { } result && !ReadsMemory(result) && result is not (ConstantValue or LocalValue or ArgumentValue))
+            && RewritePureUses(match.Ends, NewLocal(method.Concrete(method.Method.ReturnType)), match, blocks).Count > 1;
+        RestoreBinding(match, binding);
+        if (manyUses && ConcludeAtUses(match, method, body, blocks)) return true;
+        RestoreBinding(match, binding);
         if (ConcludeContinuation(match, method, body, blocks)) return true;
         RestoreBinding(match, binding);
         return ConcludeAtUses(match, method, body, blocks);
@@ -186,7 +193,8 @@ internal sealed partial class TemplateRecovery
     private bool ConcludeAtUses(InlineMatch match, MethodRef method, ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks)
     {
         var ends = match.Ends;
-        if (ends.Count == 0 || ends.Any(e => e.Result is null || e.State is null || e.Exit != ends[0].Exit) || !ends.Any(e => ReadsMemory(e.Result!))) return false;
+        if (ends.Count == 0 || ends.Any(e => e.Result is null || e.State is null || e.Exit != ends[0].Exit)) return false;
+        var memory = ends.Any(e => ReadsMemory(e.Result!));
         var returnType = method.Concrete(method.Method.ReturnType);
         if (ends.Any(e => e.Result is not ConstantValue && !e.Result!.Type.Equals(returnType))) return false;
         // 出口块还有区域外的入口时，它的语句不只属于这个区域。
@@ -195,7 +203,7 @@ internal sealed partial class TemplateRecovery
         var result = NewLocal(returnType);
         var failure = match.Failure;
         var binding = new Dictionary<int, ManagedValue>(match.Binding);
-        var rewritten = RewriteUses(ends, result, match, blocks);
+        var rewritten = memory ? RewriteUses(ends, result, match, blocks) : RewritePureUses(ends, result, match, blocks);
         if (rewritten.Count > 0)
         {
             var (rewrittenBody, rewrittenBlocks) = Rewritten(body, blocks, rewritten);
@@ -223,6 +231,54 @@ internal sealed partial class TemplateRecovery
             return child;
         });
         return found;
+    }
+
+    /// <summary>
+    /// 返回值不读内存时只取决于区域内定义的局部：这些局部在区域之外没有再赋值的话，出口之后任何位置上相同的子表达式都等于返回值，
+    /// 不用按路径分代。一个返回值参与多个分支比较（switch）时用处分布在好几个块里。
+    /// </summary>
+    private Dictionary<(ulong Block, int Index), ManagedStatement> RewritePureUses(IReadOnlyList<InlineEnd> ends, LocalValue result, InlineMatch match, IReadOnlyDictionary<ulong, ManagedBlock> blocks)
+    {
+        var rewritten = new Dictionary<(ulong Block, int Index), ManagedStatement>();
+        bool Outside((ulong Block, int Index) at) => !match.Covered.Contains(at);
+        foreach (var block in blocks.Values)
+            for (var i = 0; i < block.Statements.Count; i++)
+            {
+                var statement = block.Statements[i];
+                var assigned = (statement is ManagedAssignment assignment ? new[] { assignment.Target.Variable } : [])
+                    .Concat(statement is ManagedCall { Result: { } called } ? [called.Variable] : [])
+                    .Concat(ManagedValues.Edges(statement).SelectMany(e => e.Copies).Select(c => c.Target.Variable));
+                if (Outside((block.Address, i)) && assigned.Any(match.Defined.ContainsKey)) return rewritten;
+            }
+        var walkers = ends.Select(end => (End: end, Walker: new Walker { Blocks = blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Env = new(end.Env) })).ToArray();
+        var hit = false;
+        ManagedValue Rewrite(ManagedValue value)
+        {
+            if (value is LocalValue or ArgumentValue or ConstantValue) return value;
+            var trial = new Dictionary<int, ManagedValue>(match.Binding);
+            if (walkers.All(w => Term(w.Walker, value) is { } term && !ReadsMemory(term) && Same(w.End.Result!, term, w.Walker, trial)))
+            {
+                foreach (var (key, bound) in trial) match.Binding[key] = bound;
+                hit = true;
+                return result;
+            }
+            return ManagedValues.Map(value, Rewrite);
+        }
+        var seen = new HashSet<ulong>();
+        var pending = new Stack<(ulong Block, int Index)>([ends[0].Exit]);
+        while (pending.TryPop(out var at))
+        {
+            if (!seen.Add(at.Block)) continue;
+            var statements = blocks[at.Block].Statements;
+            for (var i = at.Index; i < statements.Count; i++)
+            {
+                hit = false;
+                var mapped = ManagedValues.Map(statements[i], Rewrite, target => target);
+                if (hit && Outside((at.Block, i))) rewritten[(at.Block, i)] = mapped;
+                foreach (var edge in ManagedValues.Edges(statements[i])) pending.Push((edge.Target, 0));
+            }
+        }
+        return rewritten;
     }
 
     /// <summary>从共同的出口沿直线往后，把每条路径上项都等于返回值的子表达式换成结果局部；进入有其他前驱的块或遇到分支之后，局部的值不再由这些路径决定。</summary>
@@ -423,7 +479,8 @@ internal sealed partial class TemplateRecovery
         Walker At(InlineEnd end) => new() { Blocks = blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Env = new(end.Env), Epoch = end.Epoch };
         // 谓词取自一条在续接点按返回值分支的路径。
         ManagedValue? predicate = null;
-        if (result is not null)
+        // 不读内存的返回值已经换成结果局部时，分支原地留在调用之后，不需要按返回值分析。
+        if (result is not null && !(match.ResultAtUses is not null && !match.Ends.Any(e => ReadsMemory(e.Result!))))
             foreach (var end in match.Ends.OrderBy(e => e.Result is ConstantValue ? 1 : 0))
             {
                 if (At(end).Current is not ManagedBranch branch || Term(At(end), branch.Condition) is not { } tested) continue;
