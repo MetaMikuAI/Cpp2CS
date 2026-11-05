@@ -283,6 +283,14 @@ internal sealed partial class NativeMachine : IDisposable
                 EnterHelperFrame();
                 return;
             }
+            // 委托的 Invoke 由运行时实现（ECMA-335 II.14.6），原生入口只转发到 invoke_impl：照常执行这段机器码，事件由陷阱记录，与内联的委托调用相同。
+            else if (facts.Code.At(address) is { } forwarder && forwarder.Start == address
+                && side.World.Index.MethodsAt(address).ToArray() is [_, ..] invokes && invokes.All(DelegateModel.IsInvoke))
+            {
+                entered.Add(forwarder);
+                EnterHelperFrame();
+                return;
+            }
             // GC 页标记不参与单线程托管语义；位置写入已由原始原子指令执行并记入内存对照。
             else if (writeBarrierBodies.Contains(address)
                 || facts.Code.Word(address) is { } branch && A64.IsB(branch) && writeBarrierBodies.Contains(A64.Imm26Target(branch, address))) Back();

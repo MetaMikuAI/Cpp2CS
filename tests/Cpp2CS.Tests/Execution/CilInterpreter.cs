@@ -362,6 +362,8 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 {
                     var type = context.Type((TypeReference)operand);
                     if (type is DefinitionRef { Definition.FullName: "System.Nullable" }) throw new Unsupported("Nullable 装箱");
+                    // ECMA-335 III.4.1：box 是否分配取决于 T 的确切类型，不透明的 T 只有运行时才知道，这里无从选择。
+                    if (ManagedAbi.SharedValue(type)) throw new Unsupported("完全共享泛型的不透明值");
                     var value = Pop();
                     // box !T 在 T 为引用类型时保留原引用，不创建装箱对象。
                     if (ManagedTypes.IsReferenceType(type)) { stack.Push(StackValue.O(value.Bits)); break; }
