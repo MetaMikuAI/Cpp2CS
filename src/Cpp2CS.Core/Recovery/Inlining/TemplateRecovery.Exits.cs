@@ -109,6 +109,7 @@ internal sealed partial class TemplateRecovery
             if (binding is null) return true;
             foreach (var (key, bound) in binding) match.Binding[key] = bound;
             Cover(caller, match);
+            NoteEarlyReads(value, caller, match);
             caller.Env[assignment.Target.Variable] = value;
             match.Defined[assignment.Target.Variable] = value;
             match.Locals[assignment.Target.Variable] = assignment.Target;
