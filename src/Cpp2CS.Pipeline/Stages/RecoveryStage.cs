@@ -18,7 +18,7 @@ internal static class RecoveryStage
         var active = new System.Collections.Concurrent.ConcurrentDictionary<int, long>();
         using var timer = new Timer(_ =>
         {
-            foreach (var (index, started) in active.OrderBy(p => p.Key))
+            foreach (var (index, started) in active.ToArray().OrderBy(p => p.Key))
             {
                 var elapsed = Stopwatch.GetElapsedTime(started).TotalSeconds;
                 if (elapsed >= 30) Log($"恢复中 {elapsed:F1} s：0x{selected[index].Entry:x} {selected[index].Instance}");
