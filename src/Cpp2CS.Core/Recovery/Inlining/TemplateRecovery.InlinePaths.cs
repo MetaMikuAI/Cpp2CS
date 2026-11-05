@@ -127,11 +127,11 @@ internal sealed partial class TemplateRecovery
         // 解引用过的项不为空。
         if (instantiated is ComparisonValue { Condition: Cond.Eq or Cond.Ne, Right: ConstantValue { Bits: 0 }, Left: var tested } nullTest && caller.Dereferenced.Contains(tested))
             return nullTest.Condition == Cond.Ne;
-        var canonical = CanonicalFact(instantiated);
+        var canonical = Canonical(instantiated);
         foreach (var assumption in caller.Assumptions)
         {
-            if (SameTerm(canonical, CanonicalFact(assumption.Condition))) return assumption.Value;
-            if (SameTerm(canonical, CanonicalFact(Negate(assumption.Condition)))) return !assumption.Value;
+            if (SameTerm(canonical, Canonical(assumption.Condition))) return assumption.Value;
+            if (SameTerm(canonical, Canonical(Negate(assumption.Condition)))) return !assumption.Value;
         }
         return null;
     }
@@ -175,23 +175,5 @@ internal sealed partial class TemplateRecovery
             _ => null,
         };
         return ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement)).Any(v => ManagedEffects.Value(v, Evidence).MayThrow);
-    }
-
-    /// <summary>整数边界 x&lt;k 与 x&lt;=k-1 归一；边界不可递减时保留原式。</summary>
-    private static ManagedValue CanonicalFact(ManagedValue value)
-    {
-        if (value is ComparisonValue { Right: ConstantValue constant } comparison && constant.Width is 8 or 16 or 32 or 64)
-        {
-            var bits = constant.Bits & Expr.Mask(constant.Width);
-            var signed = comparison.Condition is Cond.Slt or Cond.Sge;
-            if ((signed && bits != (1UL << (constant.Width - 1)) || !signed && bits != 0)
-                && comparison.Condition is Cond.Slt or Cond.Sge or Cond.Ult or Cond.Uge)
-                value = comparison with
-                {
-                    Condition = comparison.Condition switch { Cond.Slt => Cond.Sle, Cond.Sge => Cond.Sgt, Cond.Ult => Cond.Ule, _ => Cond.Ugt },
-                    Right = constant with { Bits = (bits - 1) & Expr.Mask(constant.Width) },
-                };
-        }
-        return Canonical(value);
     }
 }

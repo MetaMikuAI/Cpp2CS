@@ -984,15 +984,37 @@ internal sealed partial class TemplateRecovery
 
     private static readonly Dictionary<int, ManagedValue> NoBinding = [];
 
-    /// <summary>比较的规范形：大于、大于等于交换操作数写成小于、小于等于。</summary>
-    private static ManagedValue Canonical(ManagedValue condition) => condition switch
+    /// <summary>
+    /// 比较的规范形：大于、大于等于交换操作数写成小于、小于等于；和常量比较的严格小于写成小于等于。
+    /// 整数上 x&lt;k 即 x&lt;=k-1，k&lt;x 即 k+1&lt;=x，编译器按指令编码选其中一种。常量已到边界时不能换，保留原式。
+    /// </summary>
+    private static ManagedValue Canonical(ManagedValue condition)
     {
-        ComparisonValue { Condition: Cond.Sgt } c => c with { Condition = Cond.Slt, Left = c.Right, Right = c.Left },
-        ComparisonValue { Condition: Cond.Sge } c => c with { Condition = Cond.Sle, Left = c.Right, Right = c.Left },
-        ComparisonValue { Condition: Cond.Ugt } c => c with { Condition = Cond.Ult, Left = c.Right, Right = c.Left },
-        ComparisonValue { Condition: Cond.Uge } c => c with { Condition = Cond.Ule, Left = c.Right, Right = c.Left },
-        _ => condition,
-    };
+        var ordered = condition switch
+        {
+            ComparisonValue { Condition: Cond.Sgt } c => c with { Condition = Cond.Slt, Left = c.Right, Right = c.Left },
+            ComparisonValue { Condition: Cond.Sge } c => c with { Condition = Cond.Sle, Left = c.Right, Right = c.Left },
+            ComparisonValue { Condition: Cond.Ugt } c => c with { Condition = Cond.Ult, Left = c.Right, Right = c.Left },
+            ComparisonValue { Condition: Cond.Uge } c => c with { Condition = Cond.Ule, Left = c.Right, Right = c.Left },
+            _ => condition,
+        };
+        if (ordered is not ComparisonValue { Condition: Cond.Slt or Cond.Ult } strict) return ordered;
+        var signed = strict.Condition == Cond.Slt;
+        var inclusive = signed ? Cond.Sle : Cond.Ule;
+        if (strict.Right is ConstantValue { Width: 8 or 16 or 32 or 64 } upper)
+        {
+            var (bits, mask) = (upper.Bits & Expr.Mask(upper.Width), Expr.Mask(upper.Width));
+            if (bits != (signed ? 1UL << (upper.Width - 1) : 0))
+                return strict with { Condition = inclusive, Right = upper with { Bits = (bits - 1) & mask } };
+        }
+        if (strict.Left is ConstantValue { Width: 8 or 16 or 32 or 64 } lower)
+        {
+            var (bits, mask) = (lower.Bits & Expr.Mask(lower.Width), Expr.Mask(lower.Width));
+            if (bits != (signed ? mask >> 1 : mask))
+                return strict with { Condition = inclusive, Left = lower with { Bits = (bits + 1) & mask } };
+        }
+        return ordered;
+    }
 
     private ManagedValue Negate(ManagedValue condition) => condition switch
     {
