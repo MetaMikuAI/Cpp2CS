@@ -64,6 +64,7 @@ internal sealed partial class CilBodyWriter
             case StringValue text: il.Emit(OpCodes.Ldstr, text.Text); break;
             case TypeHandleValue handle: il.Emit(OpCodes.Ldtoken, TypeReference(handle.Target)); break;
             case FieldHandleValue handle: il.Emit(OpCodes.Ldtoken, FieldReference(handle.Field)); break;
+            case MethodHandleValue handle: il.Emit(OpCodes.Ldtoken, MethodReference(handle.Method)); break;
             case BoxValue box: Value(box.Operand); il.Emit(OpCodes.Box, TypeReference(box.Boxed)); break;
             case UnboxAddressValue unbox: Value(unbox.Operand); il.Emit(OpCodes.Unbox, TypeReference(unbox.Target)); break;
             case UnboxValue unbox: Value(unbox.Operand); il.Emit(OpCodes.Unbox_Any, TypeReference(unbox.Target)); break;

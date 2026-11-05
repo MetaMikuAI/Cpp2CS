@@ -30,6 +30,9 @@ internal sealed partial class BodyBuilder
                 return Constant(constant, expected);
             case EntitySym { Symbol: { Kind: SymbolKind.String, Value: string text } }:
                 return new StringValue(text, types.String);
+            // MethodInfo 指针在 IL 中只有作为方法句柄实参时才是值（表达式树的 ldtoken）。
+            case EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef handle } } when types.RuntimeMethodHandle.Equals(expected):
+                return new MethodHandleValue(handle, types.RuntimeMethodHandle, 64);
             case EntitySym { Symbol: { Kind: SymbolKind.Type, Value: TypeRef token } }:
                 return new TypeHandleValue(token, types.RuntimeTypeHandle, 64);
             case EntitySym { Symbol: { Kind: SymbolKind.Field, Value: FieldRef field } }:
