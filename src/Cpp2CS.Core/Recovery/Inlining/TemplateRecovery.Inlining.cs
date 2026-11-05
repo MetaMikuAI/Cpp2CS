@@ -42,12 +42,14 @@ internal sealed partial class TemplateRecovery
         public HashSet<ManagedValue> Dereferenced { get; init; } = [];
         /// <summary>只经整体赋值改变的结构体局部：读它的字段是对值的投影，调用改不了。</summary>
         public IReadOnlySet<Variable>? FrozenLocals { get; init; }
+        /// <summary>区域开始时局部等于哪个字段的内容。</summary>
+        public Lazy<IReadOnlyDictionary<Variable, ManagedValue>>? Available { get; init; }
 
         public ManagedStatement Current => Blocks[Block].Statements[Index];
 
         public Walker Clone() => new()
         {
-            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions], Dereferenced = [.. Dereferenced], FrozenLocals = FrozenLocals,
+            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions], Dereferenced = [.. Dereferenced], FrozenLocals = FrozenLocals, Available = Available,
         };
     }
 
@@ -63,6 +65,7 @@ internal sealed partial class TemplateRecovery
     private sealed class InlineMatch
     {
         public List<InlineEnd> Ends { get; } = [];
+        public Lazy<IReadOnlyDictionary<Variable, ManagedValue>>? Available { get; init; }
         /// <summary>证明不成立时第一处失败的说明。</summary>
         public string? Failure { get; set; }
         public bool Fail(string reason)
@@ -499,11 +502,12 @@ internal sealed partial class TemplateRecovery
     private InlineMatch? Match(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> callerBlocks, ulong block, int start, ManagedBody template, IReadOnlyList<TypeRef> arguments, out string failure, IReadOnlyDictionary<int, ManagedValue>? seed = null)
     {
         failure = "接收者不能表示";
-        var caller = new Walker { Blocks = callerBlocks, Caller = true, Block = block, Index = start };
+        var available = new Lazy<IReadOnlyDictionary<Variable, ManagedValue>>(() => AvailableIn(body).At(block, start));
+        var caller = new Walker { Blocks = callerBlocks, Caller = true, Block = block, Index = start, Available = available };
         SeedPath(caller);
         caller.Visited.Add(block);
         // 模板的 this 在比对中绑定：可能是字段所在的对象，也可能是包含它的值（如嵌套类型的结构体）。
-        var match = new InlineMatch { Binding = seed is null ? [] : new(seed), TypeArguments = arguments, Start = (block, start), Template = template };
+        var match = new InlineMatch { Binding = seed is null ? [] : new(seed), TypeArguments = arguments, Start = (block, start), Template = template, Available = available };
         var entryLocals = callerBlocks.Values.SelectMany(b => b.Statements)
             .SelectMany(s => (s is ManagedAssignment assignment ? new[] { assignment.Target } : []).Concat(ManagedValues.Edges(s).SelectMany(e => e.Copies.Select(c => c.Target))))
             .DistinctBy(l => l.Variable).ToDictionary(l => l.Variable);
@@ -979,8 +983,48 @@ internal sealed partial class TemplateRecovery
     }
 
     /// <summary>模板的项与调用方的项在调用方这条路径的事实下相同。</summary>
-    private bool Same(ManagedValue template, ManagedValue actual, Walker caller, Dictionary<int, ManagedValue> binding) =>
-        Unify(Canonical(Fold(Specialize(template, caller, binding))), Canonical(Fold(Specialize(actual, caller, NoBinding))), binding);
+    private bool Same(ManagedValue template, ManagedValue actual, Walker caller, Dictionary<int, ManagedValue> binding)
+    {
+        var expected = Canonical(Fold(Specialize(template, caller, binding)));
+        var specialized = Specialize(actual, caller, NoBinding);
+        var trial = new Dictionary<int, ManagedValue>(binding);
+        if (!Unify(expected, Canonical(Fold(specialized)), trial))
+        {
+            // 调用方沿用区域之前读到的局部，模板在这里读字段：比较的是区域开始时的内容。
+            if (caller.Available?.Value is not { Count: > 0 } available) return false;
+            var exposed = Exposed(specialized, caller, available);
+            trial = new(binding);
+            if (exposed.Equals(specialized) || !Unify(expected, Canonical(Fold(exposed)), trial)) return false;
+        }
+        foreach (var (key, value) in trial) binding[key] = value;
+        return true;
+    }
+
+    private static ManagedValue Exposed(ManagedValue value, Walker caller, IReadOnlyDictionary<Variable, ManagedValue> available) => value switch
+    {
+        LocalValue local when available.TryGetValue(local.Variable, out var known)
+            && !ManagedValues.Walk(known).OfType<LocalValue>().Any(l => caller.Env.ContainsKey(l.Variable)) => Snapshot(known),
+        Observed => value,
+        _ => MapTerm(value, child => Exposed(child, caller, available)),
+    };
+
+    private static ManagedValue Snapshot(ManagedValue known) => known switch
+    {
+        FieldValue field => new Observed(field, 0),
+        ConversionValue conversion => conversion with { Operand = Snapshot(conversion.Operand) },
+        _ => known,
+    };
+
+    private (ManagedBody Body, AvailableFields Fields)? availableFields;
+
+    /// <summary>方法体在两次证明成立之间不变，分析结果可以共用。</summary>
+    private AvailableFields AvailableIn(ManagedBody body)
+    {
+        if (availableFields is { } known && ReferenceEquals(known.Body, body)) return known.Fields;
+        var fields = new AvailableFields(body);
+        availableFields = (body, fields);
+        return fields;
+    }
 
     private static readonly Dictionary<int, ManagedValue> NoBinding = [];
 

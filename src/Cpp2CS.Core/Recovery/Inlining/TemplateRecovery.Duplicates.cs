@@ -412,12 +412,23 @@ internal sealed partial class TemplateRecovery
             var local = proof.LocalTypes[variable];
             var first = a.Walker.Env.GetValueOrDefault(variable) ?? local;
             var second = b.Walker.Env.GetValueOrDefault(variable) ?? local;
-            if (!Equal(first, a, second, b, proof) && !Saved(first, second) && !Saved(second, first))
+            if (!Equal(first, a, second, b, proof) && !Saved(first, second) && !Saved(second, first)
+                && !Reloaded(first, a, second, proof) && !Reloaded(second, b, first, proof))
                 return proof.Refuse($"汇合点的 {variable} 不同");
             proof.Verified.Add(variable);
         }
         return AccessesCovered(a, b, proof);
     }
+
+    /// <summary>
+    /// 另一条路径经过调用后重读字段，这条路径（on）沿用区域之前保存的局部：这条路径上内存没变过、也没写这个字段时，
+    /// 保存的局部还是字段的内容。留下的重读在这条路径上得到相同的值，这正是编译器省掉它的依据。
+    /// </summary>
+    private bool Reloaded(ManagedValue saved, Trace on, ManagedValue reloaded, DuplicateProof proof) =>
+        saved is LocalValue local && reloaded is Observed { Read: FieldValue read } && on.End.Epoch == 0
+        && proof.Match.Available?.Value.GetValueOrDefault(local.Variable) is FieldValue known
+        && ReferenceEquals(read.Field.Field, known.Field.Field) && SameTerm(read.Receiver, known.Receiver)
+        && on.End.State is { } state && !state.Stores.Any(s => MayAlias(s.Location, known));
 
     /// <summary>项里读取时解引用的项（调用方的 this 除外）。</summary>
     private static List<ManagedValue> ReadReceivers(ManagedValue term)

@@ -120,15 +120,13 @@ internal sealed partial class TemplateRecovery
         }
         if (Enumerable.Range(start, blocks[startBlock].Statements.Count - start).Any(i => !covered.Contains((startBlock, i)) && !(!match.Returns && startBlock == exit.Block && i >= exit.Index))) { failure = "起点块含有区域外的语句"; return null; }
         var region = internalBlocks.Append(startBlock).ToHashSet();
-        // 多个内联点可以共享判断尾部；保留仍被外部入口使用的尾部及其后继（只有控制转移的块，留下来不改变语义）。
+        // 多个内联点可以共享尾部（编译器合并了相同的代码）：这个入口改写成调用后不再进入它，仍被外部入口使用的块及其后继原样留下，轮到那些入口时再证明。
         var shared = new HashSet<ulong>();
         var pending = new Queue<ulong>(body.Blocks.Where(b => !region.Contains(b.Address))
             .SelectMany(b => b.Statements.SelectMany(ManagedValues.Edges)).Select(e => e.Target).Where(internalBlocks.Contains));
         while (pending.TryDequeue(out var address))
         {
             if (!shared.Add(address)) continue;
-            if (blocks[address].Statements.Any(s => s is not (ManagedBranch or ManagedJump or ManagedReturn)))
-            { failure = "区域内的块从区域外进入"; return null; }
             foreach (var edge in blocks[address].Statements.SelectMany(ManagedValues.Edges).Where(e => internalBlocks.Contains(e.Target)))
                 pending.Enqueue(edge.Target);
         }
@@ -138,19 +136,23 @@ internal sealed partial class TemplateRecovery
         { failure = "区域跨越异常边界"; return null; }
         internalBlocks.ExceptWith(shared);
         covered.RemoveWhere(p => shared.Contains(p.Block));
-        // 区域内定义的值不在区域外使用。
-        var outside = body.Blocks.SelectMany(b => b.Statements.Select((s, i) => (b.Address, i, s)))
-            .Where(p => !covered.Contains((p.Address, p.i)) && !(!match.Returns && p.Address == exit.Block && exit.Index > 0 && p.i < exit.Index));
+        // 区域内定义的值不在区域外使用。共享块里的读取，到达的值来自其他入口：这个入口不再进入，但其他入口要真的定义它。
+        var outsideAll = body.Blocks.SelectMany(b => b.Statements.Select((s, i) => (b.Address, i, s)))
+            .Where(p => !covered.Contains((p.Address, p.i)) && !(!match.Returns && p.Address == exit.Block && exit.Index > 0 && p.i < exit.Index)).ToArray();
+        var redefined = outsideAll.SelectMany(p => (p.s is ManagedAssignment assigned ? new[] { assigned.Target.Variable } : [])
+            .Concat(p.s is ManagedCall { Result: { } called } ? [called.Variable] : [])
+            .Concat(ManagedValues.Edges(p.s).SelectMany(e => e.Copies).Select(c => c.Target.Variable))).ToHashSet();
+        var outside = outsideAll.Select(p => (p.Address, p.i, s: p.s,
+            Reads: ReadValues(p.s).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Where(l => !shared.Contains(p.Address) || !redefined.Contains(l.Variable)).ToArray())).ToArray();
         var defined = match.Defined.Keys.Where(v => (match.Result is null || !v.Equals(match.Result.Variable))
             && copies.All(c => !c.Target.Variable.Equals(v))).ToHashSet();
         if (match.Continuation is { } edges)
             defined.ExceptWith(edges.Taken.Copies.Concat(edges.Fallthrough.Copies).Select(c => c.Target.Variable));
-        var escapingValues = outside.SelectMany(p => ReadValues(p.s)).SelectMany(ManagedValues.Walk).OfType<LocalValue>()
-            .Select(l => l.Variable).Where(defined.Contains).ToHashSet();
+        var escapingValues = outside.SelectMany(p => p.Reads).Select(l => l.Variable).Where(defined.Contains).ToHashSet();
         var savedCopies = InlineCopies(body, blocks, startBlock, start, match, escapingValues, self);
         defined.ExceptWith(savedCopies.Select(a => a.Target.Variable));
-        foreach (var (_, _, statement) in outside)
-            if (ReadValues(statement).SelectMany(ManagedValues.Walk).OfType<LocalValue>().FirstOrDefault(l => defined.Contains(l.Variable)) is { } escaping)
+        foreach (var (_, _, statement, reads) in outside)
+            if (reads.FirstOrDefault(l => defined.Contains(l.Variable)) is { } escaping)
                 { failure = $"区域内定义的值 {escaping.Variable} 在区域外 0x{statement.Address:x} 使用"; return null; }
 
         if (ArrivalCopies(body, match, blocks, at, out failure) is not { } arrivals) return null;
@@ -180,7 +182,7 @@ internal sealed partial class TemplateRecovery
         {
             replacement.AddRange(exitCopies.Select(c => new ManagedAssignment(call.Address, c.Target, c.Value)));
             replacement.AddRange(blocks[exit.Block].Statements.Skip(exit.Index));
-            if (exit.Block != startBlock) internalBlocks.Add(exit.Block);
+            if (exit.Block != startBlock && !shared.Contains(exit.Block)) internalBlocks.Add(exit.Block);
         }
         return new InlineReplacement(startBlock, replacement.ToArray(), internalBlocks.ToFrozenSet(), match.Rewritten);
     }
