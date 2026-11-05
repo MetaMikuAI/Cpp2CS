@@ -112,7 +112,10 @@ internal static class OnceGuardsPass
                     // 快路径复用已有的值（不是读取），初始化可能改写内存的一臂重新读取。保留的正是重新读取的一臂。
                     // 两臂都是读取而位置不同时不成立。初始化调用破坏的寄存器不会再被真正读取，这一臂的值没有意义。
                     static bool Reads(Expr value) => ExprMap.Walk(value).Any(e => e is Load);
-                    if (skipped != initialized && (Reads(skipped) || !Reads(initialized)) && initialized is not Use { Variable.Version: -1 })
+                    // 守卫自身的值在初始化臂固定为 1；合流后只会走向已初始化路径，允许这次差异。
+                    var guardFlag = initialized is Const { Value: 1 }
+                        && ExprMap.Walk(skipped).OfType<Load>().Any(load => load is { Width: 8, Address: Const address } && address.Value == guard.Flag);
+                    if (!guardFlag && skipped != initialized && (Reads(skipped) || !Reads(initialized)) && initialized is not Use { Variable.Version: -1 })
                     { reason = "两臂的合流值不同"; return false; }
                 }
                 reason = "";
