@@ -23,7 +23,17 @@ internal static class GenericContext
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
             {
-                var statement = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e, Symbol));
+                // 泛型参数的相等不比较原生绑定：实参只差绑定时 MapOperands 按值比较会保留原语句，调用直接重建。
+                Expr Bound(Expr e) => ExprMap.Map(e, Symbol);
+                var statement = block.Statements[i] is Call original
+                    ? original with
+                    {
+                        Target = Bound(original.Target),
+                        Arguments = original.Arguments.Select(Bound).ToArray(),
+                        DelegateReceiver = original.DelegateReceiver is { } receiver ? Bound(receiver) : null,
+                        StackPointer = original.StackPointer is { } pointer ? Bound(pointer) : null,
+                    }
+                    : ExprMap.MapOperands(block.Statements[i], Bound);
                 if (statement is Call { Op: { } op } call && Instantiate(op.Operand, method) is var operand && !ReferenceEquals(operand, op.Operand))
                     statement = call with { Op = op with { Operand = operand } };
                 block.Statements[i] = statement;
