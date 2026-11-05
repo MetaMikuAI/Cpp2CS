@@ -329,10 +329,44 @@ internal sealed partial class TemplateRecovery
             }
             failures.Add(($"{method.Method.Owner.Name}.{method.Method.Name}：{nearest}", progress));
         }
+        // 模板按形参分支、调用方没有对应的分支：实参是常量，内联时按常量折叠了这个分支。
+        foreach (var (method, template) in InlineCandidates(field, receiver))
+        {
+            if (fields.CallFailure(method, receiver, receiver is null ? field.DeclaringType : null) is not null) continue;
+            foreach (var seed in ParameterSeeds(template))
+                foreach (var (block, start) in starts)
+                    if (Match(body, blocks, block, start, template, method.TypeArguments, out var failure, seed) is { } match
+                        && PlanReplacement(body, blocks, block, start, method, match, out failure) is { } replaced)
+                        return replaced.Apply(body);
+        }
         // 方法体随证明变化，留下最后一次尝试的原因。
         inlineFailures[PendingOf(anchor.Access)!.Address] = failures.Count == 0 ? "没有可作模板的方法"
             : string.Join("；", failures.OrderByDescending(f => f.Progress).Take(3).Select(f => f.Reason));
         return null;
+    }
+
+    /// <summary>
+    /// 模板的分支条件可能折叠掉的形参取值：布尔形参的两个值，与常量比较相等的形参的那个常量；每个形参也可以不预先绑定。
+    /// 预先绑定只是一次假设，形参用到别处时仍要与调用方的值一致，所以任何成立的证明都与原生代码等价。
+    /// </summary>
+    private List<Dictionary<int, ManagedValue>> ParameterSeeds(ManagedBody template)
+    {
+        var values = new Dictionary<int, (ArgumentValue Argument, HashSet<ulong> Bits)>();
+        void Note(ArgumentValue argument, params ulong[] bits)
+        {
+            if (argument.Index < 0) return;
+            if (!values.TryGetValue(argument.Index, out var known)) values[argument.Index] = known = (argument, []);
+            known.Bits.UnionWith(bits);
+        }
+        foreach (var value in template.Blocks.SelectMany(b => b.Statements).OfType<ManagedBranch>().SelectMany(b => ManagedValues.Walk(b.Condition)))
+        {
+            if (value is ArgumentValue tested && types.Kind(tested.Type) == TypeKind.Bool) Note(tested, 0, 1);
+            if (value is ComparisonValue { Condition: Cond.Eq or Cond.Ne, Left: ArgumentValue compared, Right: ConstantValue constant }) Note(compared, constant.Bits);
+        }
+        var seeds = new List<Dictionary<int, ManagedValue>> { new() };
+        foreach (var (index, (argument, bits)) in values.OrderBy(v => v.Key).Take(3))
+            seeds.AddRange(seeds.ToArray().SelectMany(seed => bits.Select(b => new Dictionary<int, ManagedValue>(seed) { [index] = new ConstantValue(b, argument.Type, argument.Width) })));
+        return seeds.Skip(1).ToList();
     }
 
     private readonly Dictionary<(FieldRef, TypeRef?), IReadOnlyList<(MethodRef, ManagedBody)>> inlineCandidates = [];
@@ -387,14 +421,14 @@ internal sealed partial class TemplateRecovery
     private int lastProgress;
 
     /// <summary>以模板为准同步执行两边，返回调用方区域的覆盖与出口；不成立时为 null。</summary>
-    private InlineMatch? Match(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> callerBlocks, ulong block, int start, ManagedBody template, IReadOnlyList<TypeRef> arguments, out string failure)
+    private InlineMatch? Match(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> callerBlocks, ulong block, int start, ManagedBody template, IReadOnlyList<TypeRef> arguments, out string failure, IReadOnlyDictionary<int, ManagedValue>? seed = null)
     {
         failure = "接收者不能表示";
         var caller = new Walker { Blocks = callerBlocks, Caller = true, Block = block, Index = start };
         SeedPath(caller);
         caller.Visited.Add(block);
         // 模板的 this 在比对中绑定：可能是字段所在的对象，也可能是包含它的值（如嵌套类型的结构体）。
-        var match = new InlineMatch { Binding = [], TypeArguments = arguments, Start = (block, start), Template = template };
+        var match = new InlineMatch { Binding = seed is null ? [] : new(seed), TypeArguments = arguments, Start = (block, start), Template = template };
         var entryLocals = callerBlocks.Values.SelectMany(b => b.Statements)
             .SelectMany(s => (s is ManagedAssignment assignment ? new[] { assignment.Target } : []).Concat(ManagedValues.Edges(s).SelectMany(e => e.Copies.Select(c => c.Target))))
             .DistinctBy(l => l.Variable).ToDictionary(l => l.Variable);

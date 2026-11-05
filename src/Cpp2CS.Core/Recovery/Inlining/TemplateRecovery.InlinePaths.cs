@@ -98,6 +98,9 @@ internal sealed partial class TemplateRecovery
             BinaryValue { Op: BinOp.Add, Left: ConstantValue { Bits: 0 }, Right: var right } => right,
             ComparisonValue { Left: ConstantValue a, Right: ConstantValue b } c when ConstantComparison(c.Condition, a, b) is { } truth
                 => new ConstantValue(truth ? 1UL : 0UL, types.Boolean, 8),
+            NegatedValue { Operand: ConstantValue operand } => new ConstantValue(operand.Bits == 0 ? 1UL : 0UL, types.Boolean, 8),
+            ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate, Operand: ConstantValue operand } conversion
+                => new ConstantValue(operand.Bits & Expr.Mask(conversion.Width), conversion.Type, conversion.Width),
             ComparisonValue { Condition: Cond.Ule, Right: ConstantValue { Bits: 0 }, Left: var x } c => IsZero(c, x, Cond.Eq),
             ComparisonValue { Condition: Cond.Uge, Left: ConstantValue { Bits: 0 }, Right: var x } c => IsZero(c, x, Cond.Eq),
             ComparisonValue { Condition: Cond.Ult, Right: ConstantValue { Bits: 1 }, Left: var x } c => IsZero(c, x, Cond.Eq),
