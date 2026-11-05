@@ -17,8 +17,16 @@ internal static class InductionVariables
         var initial = definition(input) ?? input;
         if (initial.Width != width || definition(new Use(phi.Sources[1 - seed], width)) is not Binary
             { Op: BinOp.Add, Left: Use previous, Right: Const step } update
-            || update.Width != width || previous.Width != width || previous.Variable != phi.Target || step.Width != width) return null;
+            || update.Width != width || previous.Width != width || Copied(previous, definition) != phi.Target || step.Width != width) return null;
         return new(phi, seed, initial, step.Value & Expr.Mask(width), width);
+    }
+
+    /// <summary>递增的操作数可能是 φ 的一层或几层复制（寄存器分配留下的）。</summary>
+    private static Variable Copied(Use value, Func<Expr, Expr?> definition)
+    {
+        var seen = new HashSet<Variable>();
+        while (seen.Add(value.Variable) && definition(value) is Use { Width: var width } copy && width == value.Width) value = copy;
+        return value.Variable;
     }
 
     public static Phi? UnitCounter(Block block, int seed, int width, Func<Expr, Expr?> definition) =>
