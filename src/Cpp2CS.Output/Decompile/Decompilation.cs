@@ -37,6 +37,8 @@ public static partial class Decompilation
         decompiler.AstTransforms.Add(new StrippedMathConstants());
         decompiler.AstTransforms.Add(new WritableUnboxing());
         decompiler.AstTransforms.Add(new TupleInitializers());
+        decompiler.AstTransforms.Add(new InaccessibleAttributes());
+        decompiler.AstTransforms.Add(new InterfaceTupleNames());
         transforms?.Register(decompiler, DecompilePosition.AfterLegality);
         decompiler.AstTransforms.Add(new EventFieldNames());
         transforms?.Register(decompiler, DecompilePosition.AfterEvents);
