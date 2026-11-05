@@ -189,7 +189,7 @@ public sealed class MethodDecompiler
         ExceptionNormalization.Run(function, ExceptionFacts.WrapperWithoutDestructor(facts.Checks));
         var environment = new MethodEnvironment(method, signature, shapes);
         var splits = PathSplitting.Run(function, f => ValueModel.Build(f, environment),
-            v => new TypeOracle(types, facts, method, environment.Shape, v), lifter.Calls, lifter.Machine.Convention.StackPointer);
+            v => new TypeOracle(types, facts, method, environment.Shape, v), lifter.Calls, lifter.Machine.Convention.StackPointer, rewriter.RecognizeSplitTypeChecks);
         // 分派在内存提升之前解析，使经指针的调用效果有签名可依。
         var preliminary = ValueModel.Build(function, environment);
         // 路径拆分后才唯一确定的接收者。

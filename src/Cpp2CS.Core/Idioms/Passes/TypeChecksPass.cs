@@ -75,10 +75,15 @@ internal static class TypeChecksPass
                 state.Remove([next]);
             }
             // 形态二：next 中以继承链比较作条件（如 as 的 Select）→ 原位替换为 TypeCheck 的结果（next 中深度检查已通过，两者等价）
+            // 形态三：clang 可把无副作用的判断排到两次比较之间；这些判断的另一侧都是失败一侧时，失败提前到深度检查处不改变行为。
             else
             {
-                for (var i = 0; i < next.Statements.Count; i++)
-                    next.Statements[i] = ExprMap.MapOperands(next.Statements[i], e => ExprMap.Map(e, Substitute));
+                var testing = next.Statements.Any(s => ExprMap.Operands(s).Any(e => ExprMap.Walk(e).Any(x => x is Compare && IsHierarchyTest(x, out _))))
+                    ? next : HierarchyBlockAfterPureTests(state, next, fail, head, e => IsHierarchyTest(e, out _));
+                if (testing is null)
+                    continue;
+                for (var i = 0; i < testing.Statements.Count; i++)
+                    testing.Statements[i] = ExprMap.MapOperands(testing.Statements[i], e => ExprMap.Map(e, Substitute));
                 if (!replaced)
                     continue;
                 head.Statements.Insert(head.Statements.Count - 1, op);
@@ -111,5 +116,44 @@ internal static class TypeChecksPass
 
         foreach (var reuse in reuseChecks) reuse();
         return changed;
+    }
+
+    /// <summary>
+    /// 从 start 起沿单前驱的后继找到以继承链比较分支的块。途中的块只有不读内存的定义和不读内存的条件，另一侧都进入 fail；
+    /// fail 的 φ 在这些边与深度检查的边上取相同的值，否则提前失败会改变合流值。
+    /// </summary>
+    private static Block? HierarchyBlockAfterPureTests(IdiomState state, Block start, Block fail, Block head, Func<Expr, bool> isHierarchyTest)
+    {
+        const int MaxTests = 4;
+        static bool Pure(Expr e) => !ExprMap.Walk(e).Any(x => x is Load);
+        var edges = new List<Block>();
+        var current = start;
+        for (var step = 0; step <= MaxTests; step++)
+        {
+            if (current.Statements.LastOrDefault() is not Branch test || current.NormalSuccessors.ToArray() is not [var a, var b] || a == b || a != fail && b != fail)
+                return null;
+            edges.Add(current);
+            if (isHierarchyTest(test.Condition)) return SameFailureValues(state, fail, head, edges) ? current : null;
+            if (!Pure(test.Condition) || !current.Statements.SkipLast(1).All(s => s is Nop || s is Define define && Pure(define.Value))) return null;
+            current = a == fail ? b : a;
+            if (current.Predecessors.Count != 1 || current.IsLandingPad || current.Handler != start.Handler) return null;
+        }
+        return null;
+    }
+
+    private static bool SameFailureValues(IdiomState state, Block fail, Block head, IReadOnlyList<Block> edges)
+    {
+        // 相等判断成立的一侧，clang 会把值换成比较的常量（GVN）；沿这条边两者相同，换回被比较的值。
+        Expr Value(Phi phi, Block edge)
+        {
+            var value = state.defs.Expand(new Use(phi.Sources[fail.Predecessors.IndexOf(edge)], phi.Target.Width));
+            return edge.Statements.LastOrDefault() is Branch { Condition: var condition } test
+                && Fold.Simplify(condition) is Compare { Cond: Cond.Eq or Cond.Ne, Left: Use compared, Right: Const constant } comparison
+                && (comparison.Cond == Cond.Eq ? test.Target : test.Fallthrough) == fail.Start && value == constant
+                ? state.defs.Expand(compared) : value;
+        }
+        foreach (var phi in fail.Statements.TakeWhile(s => s is Phi).Cast<Phi>())
+            if (edges.Any(edge => Value(phi, edge) != Value(phi, head))) return false;
+        return true;
     }
 }
