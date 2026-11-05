@@ -28,7 +28,9 @@ internal static class PathSplitting
         for (var round = 0; round < Rounds; round++)
         {
             var model = evaluate(function);
-            var merge = Demands(model, typing(model)).FirstOrDefault(b => b.Handler is null && !b.IsLandingPad && b.Predecessors.Count is >= 2 and <= 16
+            var oracle = typing(model);
+            oracle.MergedAddresses = false;
+            var merge = Demands(model, oracle).FirstOrDefault(b => b.Handler is null && !b.IsLandingPad && b.Predecessors.Count is >= 2 and <= 16
                 && b.Statements.Count <= MaxStatements && b.Predecessors.Distinct().Count() == b.Predecessors.Count && !b.Successors.Contains(b)
                 && b.Predecessors.All(p => p.Handler is null && !p.IsLandingPad));
             if (merge is null) break;

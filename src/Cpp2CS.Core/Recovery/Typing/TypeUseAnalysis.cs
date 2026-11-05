@@ -158,6 +158,7 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
 
     private void Visit(Sym value, TypeRef? expected, Stmt? user)
     {
+        if (oracle.AddressArm(value, expected) is { } addressed) { Location(addressed, user); return; }
         if (expected is DefinitionRef structure && Types.Kind(expected) == TypeKind.Struct
             && (value is ConcatSym || oracle.BitRepresentation(value)) && oracle.Aggregate(value, structure) is { } aggregate)
         {
@@ -179,6 +180,11 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
                 if (expected is not null) oracle.Use(phi, expected);
                 var phiType = oracle.TypeOf(phi) ?? expected ?? oracle.Unconstrained(phi.Width);
                 foreach (var source in phi.Sources.OfType<Sym>()) Use(source, phiType, null);
+                break;
+            case OpSym op when oracle.PinnedArray(op) is var (array, arrayType):
+                // fixed 不读取长度也不判空，长度的读取保持在原处，空数组引用在那里抛出。
+                Use(array, arrayType, user);
+                Use(op.Args[0], Types.Boolean, user);
                 break;
             case OpSym op:
                 if (op.Op.Kind == OperatorKind.Compare && op.Op.Cond is Cond.Eq or Cond.Ne

@@ -16,6 +16,8 @@ internal sealed partial class BodyBuilder
     private ManagedValue View(Sym sym, TypeRef? expected, ulong address)
     {
         sym = SymTable.Resolve(sym);
+        // 取址须能写入该位置，不接受只读的访问器证明。
+        if (oracle.AddressArm(sym, expected) is { } addressed) return new AddressValue(LocationValue(addressed, address, store: true));
         if (expected is DefinitionRef structure && types.Kind(expected) == TypeKind.Struct && sym is not ConcatSym && oracle.BitRepresentation(sym))
             return StructBits(sym, structure, address);
         if (sym is not LocalSym && locals.TryGetValue(sym, out var known)) return Coerce(known, expected, address);
@@ -145,6 +147,8 @@ internal sealed partial class BodyBuilder
                 return new BooleanValue(op.Op.Kind == OperatorKind.And, View(op.Args[0], types.Boolean, address), View(op.Args[1], types.Boolean, address), types.Boolean);
             case OperatorKind.Not:
                 return new NegatedValue(View(op.Args[0], types.Boolean, address), types.Boolean);
+            case OperatorKind.Select when oracle.PinnedArray(op) is var (array, arrayType):
+                return new PinnedArrayValue(View(array, arrayType, address), arrayType);
             case OperatorKind.Select:
                 {
                     // 各路都没有定义类型（常量之间的选择）时按期望类型解释，常量取其位型。

@@ -41,7 +41,7 @@ internal sealed partial class CilBodyWriter
                     il.Emit(OpCodes.Ldloca, zero); il.Emit(OpCodes.Initobj, TypeReference(c.Type)); il.Emit(OpCodes.Ldloc, zero);
                 }
                 else if (ManagedTypes.IsReferenceType(c.Type)) il.Emit(OpCodes.Ldnull);
-                else if (ManagedTypes.IsNativePointer(c.Type))
+                else if (ManagedTypes.IsNativePointer(c.Type) || c.Type is ByRefRef)
                 {
                     il.Emit(OpCodes.Ldc_I4_0); il.Emit(OpCodes.Conv_U);
                 }

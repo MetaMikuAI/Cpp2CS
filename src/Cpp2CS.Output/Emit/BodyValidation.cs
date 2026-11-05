@@ -149,14 +149,14 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                 break;
             case PinnedArrayValue pinned:
                 if (!pinned.Array.Type.Equals(pinned.ArrayType) || !pinned.ArrayType.IsVector
-                    || types.Kind(pinned.ArrayType.Element) is not (TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)) return new(EmissionProblemKind.Unsupported, "固定地址 需要基元一维数组");
+                    || !types.Unmanaged(pinned.ArrayType.Element)) return new(EmissionProblemKind.Unsupported, "固定地址 需要非托管元素的一维数组");
                 break;
             case PointerOffsetValue pointer:
                 if (pointer.Pointer.Type is not PointerRef || pointer.Offset.Width != 64 || types.Kind(pointer.Offset.Type) != TypeKind.Int) return new(EmissionProblemKind.Unsupported, "指针偏移 类型或位宽不符");
                 break;
             case ConstantValue c:
                 if (!(types.Kind(c.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double
-                    || c.Bits == 0 && (ManagedTypes.IsReferenceType(c.Type) || ManagedTypes.IsNativePointer(c.Type))))
+                    || c.Bits == 0 && (ManagedTypes.IsReferenceType(c.Type) || ManagedTypes.IsNativePointer(c.Type) || c.Type is ByRefRef)))
                     return new(EmissionProblemKind.Unsupported, $"常量 类型 {c.Type}");
                 break;
             case ComposedValue c:
