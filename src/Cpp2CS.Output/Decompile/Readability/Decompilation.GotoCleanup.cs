@@ -7,13 +7,13 @@ public static partial class Decompilation
 {
     /// <summary>
     /// 在声明局部之前整理 goto。结构恢复放不进 if 和循环的跳转会写成 goto，其中不少只差一步：
-    /// 下一条就是目标；目标在循环之后；目标只有这一个入口；目标是很短的出口。这些改写都不改变 C# 语义，局部随后按新位置声明。
+    /// 下一条就是目标；目标在循环之后；目标只有这一个入口；目标是很短的出口；跳过的语句可以放进 else。这些改写都不改变 C# 语义，局部随后按新位置声明。
     /// </summary>
     private sealed class GotoCleanup : IAstTransform
     {
         private const int Rounds = 8;
         /// <summary>复制到各入口的短出口的大小上限（语法节点数）。</summary>
-        private const int ShortExit = 16;
+        private const int ShortExit = 24;
 
         public void Run(AstNode rootNode, TransformContext context)
         {
@@ -22,7 +22,7 @@ public static partial class Decompilation
                 {
                     var labels = Own(scope).OfType<LabelStatement>().GroupBy(l => l.Label).Where(g => g.Count() == 1).ToDictionary(g => g.Key, g => g.Single());
                     if (labels.Count == 0) break;
-                    var changed = RemoveFallthroughs(scope) | InlineSingleEntries(scope, labels) | CopyShortExits(scope, labels) | RemoveUnusedLabels(scope, labels);
+                    var changed = RemoveFallthroughs(scope) | InlineSingleEntries(scope, labels) | CopyShortExits(scope, labels) | SkipsToElse(scope) | RemoveUnusedLabels(scope, labels);
                     SimplifyEmptyBranches(scope);
                     if (!changed) break;
                 }
@@ -213,17 +213,61 @@ public static partial class Decompilation
             {
                 if (!jumps.Contains(label.Label) || label.Parent is not BlockStatement home) continue;
                 var segment = Segment(label);
-                if (segment.Count is 0 or > 2 || segment[^1] is not (ReturnStatement or ThrowStatement or GotoStatement)) continue;
+                if (segment.Count is 0 or > 2) continue;
+                // 最后一条是表达式、后面紧跟另一个标签时，等于先执行它再跳到那个标签（clang 的尾合并）。
+                var following = segment[^1] is ExpressionStatement ? Next(segment[^1]) as LabelStatement : null;
+                if (following is null && segment[^1] is not (ReturnStatement or ThrowStatement or GotoStatement)) continue;
                 if (segment.Count == 2 && segment[0] is not ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign, Left: IdentifierExpression } }) continue;
                 if (segment.Sum(s => s.DescendantsAndSelf.Count()) > ShortExit) continue;
+                // 未恢复的标记每个方法各占一处，不复制。
+                if (segment.SelectMany(s => s.DescendantsAndSelf).OfType<IdentifierExpression>().Any(i => i.Identifier == "Unrecovered")
+                    || segment.SelectMany(s => s.DescendantsAndSelf).OfType<SimpleType>().Any(t => t.Identifier == "Unrecovered")) continue;
                 foreach (var jump in jumps[label.Label])
                 {
                     if (jump.Parent is null || segment.Any(s => s == jump || s.Descendants.Contains(jump)) || !jump.Ancestors.Contains(home)) continue;
                     var (entersTry, _, blocked) = Path(jump, home);
                     if (blocked || entersTry && !segment.All(NoThrow)) continue;
-                    Replace(jump, segment.Select(s => s.Clone()).ToArray());
+                    var copied = segment.Select(s => s.Clone());
+                    Replace(jump, (following is null ? copied : copied.Append(new GotoStatement(following.Label))).ToArray());
                     changed = true;
                 }
+            }
+            return changed;
+        }
+
+        /// <summary>
+        /// if (c) { X; goto L; } S; L: 等于 if (c) { X; } else { S; } L:。S 里的标签只能从 S 里跳入，C# 不能跳进块。
+        /// </summary>
+        private static bool SkipsToElse(BlockStatement scope)
+        {
+            var changed = false;
+            foreach (var branch in Own(scope).OfType<IfElseStatement>().ToArray())
+            {
+                if (branch.FalseStatement is not null || branch.Parent is not BlockStatement) continue;
+                var jump = branch.TrueStatement switch
+                {
+                    GotoStatement direct => direct,
+                    BlockStatement { Statements.Count: > 0 } block => block.Statements.Last() as GotoStatement,
+                    _ => null,
+                };
+                if (jump?.Label is not { } label) continue;
+                var skipped = new List<Statement>();
+                var at = Next(branch);
+                for (; at is not null && !(at is LabelStatement mark && mark.Label == label); at = Next(at)) skipped.Add(at);
+                if (at is null || skipped.Count == 0) continue;
+                var inner = skipped.SelectMany(n => n.DescendantsAndSelf).OfType<LabelStatement>().Select(l => l.Label).ToHashSet();
+                var enclosed = skipped.SelectMany(n => n.DescendantsAndSelf).OfType<GotoStatement>().ToHashSet();
+                if (Own(scope).OfType<GotoStatement>().Any(g => g.Label is { } target && inner.Contains(target) && !enclosed.Contains(g))) continue;
+                if (branch.TrueStatement == jump) branch.TrueStatement = new BlockStatement();
+                else jump.Remove();
+                var otherwise = new BlockStatement();
+                foreach (var statement in skipped)
+                {
+                    statement.Remove();
+                    otherwise.Add(statement);
+                }
+                branch.FalseStatement = otherwise;
+                changed = true;
             }
             return changed;
         }

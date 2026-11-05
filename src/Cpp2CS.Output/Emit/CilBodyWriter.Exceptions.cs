@@ -44,7 +44,12 @@ internal sealed partial class CilBodyWriter
             return last + 1 == recovered.Blocks.Count ? end : labels[recovered.Blocks[last + 1].Address];
         }
         foreach (var region in regions)
-            body.ExceptionHandlers.Add(new ExceptionHandler(region.Kind == ManagedRegionKind.Catch ? ExceptionHandlerType.Catch : ExceptionHandlerType.Fault)
+            body.ExceptionHandlers.Add(new ExceptionHandler(region.Kind switch
+            {
+                ManagedRegionKind.Catch => ExceptionHandlerType.Catch,
+                ManagedRegionKind.Finally => ExceptionHandlerType.Finally,
+                _ => ExceptionHandlerType.Fault,
+            })
             {
                 TryStart = labels[region.Try[0]],
                 TryEnd = After(region.Try),

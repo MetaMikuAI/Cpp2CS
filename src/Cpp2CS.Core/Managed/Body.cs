@@ -4,7 +4,7 @@ namespace Cpp2CS.Managed;
 public sealed record ManagedCopy(LocalValue Target, ManagedValue Value);
 public sealed record ManagedEdge(ulong Target, IReadOnlyList<ManagedCopy> Copies);
 public sealed record ManagedBlock(ulong Address, IReadOnlyList<ManagedStatement> Statements);
-public enum ManagedRegionKind { Catch, Fault }
+public enum ManagedRegionKind { Catch, Fault, Finally }
 /// <summary>块序来自语句图见证；Exception 仅供 catch 的入口保存当前异常对象。</summary>
 public sealed record ManagedRegion(IReadOnlyList<ulong> Try, ulong HandlerEntry, IReadOnlyList<ulong> Handler,
     LocalValue? Exception, ManagedRegionKind Kind)

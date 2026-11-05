@@ -24,6 +24,7 @@ internal sealed partial class CilBodyWriter(Skeleton skeleton, ManagedTypes type
 
     public MethodBody Build(ManagedBody recovered, MethodDefinition method)
     {
+        recovered = Recovery.Control.FinallyRecovery.Run(recovered);
         destination = method;
         body = new MethodBody(method) { InitLocals = true };
         il = body.GetILProcessor();

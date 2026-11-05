@@ -1,4 +1,5 @@
 using Cpp2CS.Ir;
+using Cpp2CS.Recovery.Effects;
 
 namespace Cpp2CS.Recovery.Lowering;
 
@@ -6,8 +7,10 @@ namespace Cpp2CS.Recovery.Lowering;
 /// 退出 SSA 时的复制合并。φ 在每条入边上由并行复制赋值；复制两端类型相同且不冲突时合成同一个局部，复制成为恒等后删去。
 /// 冲突按活跃性判定：一个局部在另一个的定义点之后仍活跃即冲突。复制 t := s 本身不使两者冲突，
 /// 但在并行复制中 s 同时也是被写的目标时，复制之后 s 已不是原值，仍算冲突。
-/// 异常可能在 try 块的任一处发生，处理入口活跃的局部在整个 try 块内活跃。
-/// 取过地址的局部、在入口处活跃的局部（读取依赖 IL 的零初始化）不参与合并。
+/// 异常只在可能抛出的语句处发生，处理入口活跃的局部在这些语句之前活跃。
+/// 地址只交给调用的局部（结构体枚举器的 MoveNext）在调用时读写，调用返回后地址不再存在，可以合并；地址有其他去处的局部、
+/// 在入口处活跃的局部（读取依赖 IL 的零初始化）不参与合并。
+/// finally 的处理体在 leave 和目标之间运行：它定义的局部与各目标活跃的局部冲突。
 /// </summary>
 internal static class LocalCoalescing
 {
@@ -29,7 +32,11 @@ internal static class LocalCoalescing
         }
         foreach (var statement in blocks.SelectMany(b => b.Statements))
         {
-            foreach (var value in ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement))) Note(value);
+            foreach (var value in ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement)))
+            {
+                if (CallAddressed(statement, value)) Note(((AddressValue)value).Target);
+                else Note(value);
+            }
             foreach (var target in Definitions(statement).Concat(ManagedValues.Edges(statement).SelectMany(e => e.Copies).Select(c => c.Target)))
                 info.TryAdd(target.Variable, target);
         }
@@ -48,6 +55,17 @@ internal static class LocalCoalescing
             if (region.Exception is { } exception) caught[entry] = exception.Variable;
         }
 
+        // finally 的处理体定义的局部，与 leave 目标处活跃的局部冲突。
+        var finallyTargets = new List<(int[] Handler, int[] Targets)>();
+        foreach (var region in body.Regions.Where(r => r.Kind == ManagedRegionKind.Finally))
+        {
+            var inTry = region.Try.ToHashSet();
+            var targets = region.Try.SelectMany(a => index.TryGetValue(a, out var at) ? blocks[at].Statements : []).SelectMany(ManagedValues.Edges)
+                .Where(e => !inTry.Contains(e.Target)).Select(e => index.TryGetValue(e.Target, out var at) ? at : -1).Distinct().ToArray();
+            if (targets.Contains(-1)) return body;
+            finallyTargets.Add((region.Handler.Select(a => index[a]).ToArray(), targets));
+        }
+
         var liveIn = new HashSet<Variable>[blocks.Count];
         for (var i = 0; i < blocks.Count; i++) liveIn[i] = [];
         HashSet<Variable>? Out(int block)
@@ -60,7 +78,6 @@ internal static class LocalCoalescing
                 live.UnionWith(liveIn[target].Where(v => !written.Contains(v)));
                 foreach (var copy in edge.Copies) live.UnionWith(Uses(copy.Value));
             }
-            foreach (var handler in handlers[block]) live.UnionWith(liveIn[handler]);
             return live;
         }
         HashSet<Variable> Handling(int block) => handlers[block].SelectMany(h => liveIn[h]).ToHashSet();
@@ -76,7 +93,7 @@ internal static class LocalCoalescing
                 {
                     foreach (var defined in Definitions(statement)) live.Remove(defined.Variable);
                     live.UnionWith(StatementUses(statement));
-                    live.UnionWith(handling);
+                    if (ManagedEffects.Statement(statement).MayThrow) live.UnionWith(handling);
                 }
                 if (caught.TryGetValue(i, out var exception)) live.Remove(exception);
                 if (!live.SetEquals(liveIn[i])) { liveIn[i] = live; changed = true; }
@@ -90,6 +107,11 @@ internal static class LocalCoalescing
             (neighbors.TryGetValue(a, out var x) ? x : neighbors[a] = []).Add(b);
             (neighbors.TryGetValue(b, out var y) ? y : neighbors[b] = []).Add(a);
         }
+        foreach (var (handler, targets) in finallyTargets)
+            foreach (var statement in handler.SelectMany(h => blocks[h].Statements))
+                foreach (var defined in Definitions(statement).Select(d => d.Variable).Concat(Clobbered(statement)))
+                    foreach (var other in targets.SelectMany(t => liveIn[t]))
+                        Interfere(defined, other);
         for (var i = 0; i < blocks.Count; i++)
         {
             var statements = blocks[i].Statements;
@@ -110,9 +132,12 @@ internal static class LocalCoalescing
                     foreach (var other in live)
                         if (!(statement is ManagedAssignment { Value: LocalValue source } && source.Variable.Equals(other)))
                             Interfere(defined.Variable, other);
+                foreach (var clobbered in Clobbered(statement))
+                    foreach (var other in live)
+                        Interfere(clobbered, other);
                 foreach (var defined in Definitions(statement)) live.Remove(defined.Variable);
                 live.UnionWith(StatementUses(statement));
-                live.UnionWith(handling);
+                if (ManagedEffects.Statement(statement).MayThrow) live.UnionWith(handling);
             }
             if (caught.TryGetValue(i, out var exception))
                 foreach (var other in live) Interfere(exception, other);
@@ -176,6 +201,15 @@ internal static class LocalCoalescing
             Regions = body.Regions.Select(r => r.Exception is { } exception ? r with { Exception = Rename(exception) } : r).ToArray(),
         };
     }
+
+    /// <summary>值是这个调用的接收者或实参里某个局部的地址，并且调用不返回地址：地址在调用返回后不再存在。</summary>
+    private static bool CallAddressed(ManagedStatement statement, ManagedValue value) =>
+        value is AddressValue { Target: LocalValue } && statement is ManagedCall { Result: not { Type: ByRefRef or PointerRef } } call
+        && (ReferenceEquals(call.Invocation.Receiver, value) || call.Invocation.Arguments.Any(a => ReferenceEquals(a, value)));
+
+    /// <summary>调用经地址读写的局部。</summary>
+    private static IEnumerable<Variable> Clobbered(ManagedStatement statement) =>
+        ManagedValues.Of(statement).Where(v => CallAddressed(statement, v)).Select(v => ((LocalValue)((AddressValue)v).Target).Variable);
 
     private static IEnumerable<LocalValue> Definitions(ManagedStatement statement) => statement switch
     {

@@ -117,6 +117,13 @@ internal sealed partial class CilBodyWriter
                 // 值类型的访问器是实例方法：this 是该值的地址（ldloca/ldflda），不能先读出值。
                 if (f.Accessor is { Method.Method.Owner.IsValueType: true } structGetter)
                 {
+                    // 访问器已证明等于这次字段读取，直接在变量上调用，不需要副本。
+                    if (f.Receiver is LocalValue or ArgumentValue { Index: >= 0 })
+                    {
+                        Address(f.Receiver);
+                        AccessorCall(structGetter);
+                        break;
+                    }
                     Value(f.Receiver);
                     if (f.Receiver.Type is not ByRefRef)
                     {

@@ -198,6 +198,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         var pc = 0;
         var exceptionFlow = executed.HasExceptionHandlers ? new CilExceptionFlow(executed) : null;
         var escaping = false;
+        TypeRef? constraint = null;
         for (var steps = 0; ; steps++)
         {
             if (steps > StepLimit)
@@ -496,18 +497,24 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                         stack.Push(Load(target.Method.ReturnType, reflected));
                         break;
                     }
-                    // beforefieldinit 值类型的实例方法与构造函数不是初始化触发点（ECMA-335 II.10.5.3：只保证在首次访问静态字段之前）；
-                    // 原生代码在这些调用前的显式初始化由 L3 照原样写出（MethodRecovery.Implied 不再删去它）。
+                    // beforefieldinit 值类型的实例方法与构造函数不是初始化触发点（ECMA-335 II.10.5.3：只保证在首次访问静态字段之前）。
                     // System.Math 的浮点内建函数对应单条 FABS/FSQRT/FRINT 指令，不访问 Math 的静态字段，不是初始化触发点。
                     if (target.Method.IsStatic && (target.Method.Owner.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) == 0 && !(target.Method is { Owner.FullName: "System.Math", Name: "Abs" or "Sqrt" or "Floor" or "Ceiling" or "Truncate" or "Round", Parameters.Count: 1 }
                         or { Owner.FullName: "System.BitConverter", Name: "SingleToInt32Bits" or "Int32BitsToSingle" or "DoubleToInt64Bits" or "Int64BitsToDouble", Parameters.Count: 1 })
                         || target.Method.Name == ".ctor" && !BeforeFieldInitValue(target.DeclaringType)
                         || target.DeclaringType is DefinitionRef { Definition.IsValueType: true } && !BeforeFieldInitValue(target.DeclaringType))
                         side.RunClassConstructor(target.DeclaringType);
-                    var callee = instruction.OpCode.Code == Code.Callvirt && target.Method.IsVirtual ? Dispatch(side, values[0].Bits, target) : target;
+                    MethodRef callee;
+                    if (constraint is { } thisType)
+                    {
+                        callee = Constrained(side, thisType, target, values);
+                        constraint = null;
+                    }
+                    else callee = instruction.OpCode.Code == Code.Callvirt && target.Method.IsVirtual ? Dispatch(side, values[0].Bits, target) : target;
                     if (InvokeAt(side, instruction, callee, values) is { } result) stack.Push(result);
                     break;
                 }
+                case Code.Constrained: constraint = context.Type((TypeReference)operand); break;
 
                 case Code.Add: stack.Push(Arithmetic(Pop(), Pop(), (a, b) => a + b, (a, b) => a + b)); break;
                 case Code.Sub: stack.Push(Arithmetic(Pop(), Pop(), (a, b) => a - b, (a, b) => a - b)); break;
@@ -566,7 +573,10 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Brtrue or Code.Brtrue_S: if (Pop().Bits != 0) pc = positions[(Instruction)operand]; break;
                 case Code.Brfalse or Code.Brfalse_S: if (Pop().Bits == 0) pc = positions[(Instruction)operand]; break;
                 case Code.Leave or Code.Leave_S:
-                    stack.Clear(); pc = positions[(Instruction)operand]; exceptionFlow?.Leave(pc); break;
+                    stack.Clear();
+                    pc = positions[(Instruction)operand];
+                    if (exceptionFlow is not null) pc = exceptionFlow.Leave(at, pc);
+                    break;
                 case Code.Rethrow:
                     if (exceptionFlow is null) throw new InvalidProgramException("rethrow 没有异常处理表");
                     throw exceptionFlow.Rethrow(at);
@@ -578,7 +588,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                         pc = resumed.Pc;
                         if (resumed.Object is { } caught) stack.Push(StackValue.O(caught));
                     }
-                    else { escaping = true; throw pending; }
+                    else { escaping = true; throw pending!; }
                     break;
                 case Code.Ret:
                 {
@@ -664,6 +674,23 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
     }
 
     /// <summary>callvirt 按接收者的运行时类型选择实现（接口方法经 interface offsets）。</summary>
+    /// <summary>
+    /// ECMA-335 III.2.1 constrained. 前缀：引用类型解引用后按 callvirt 分派；值类型自己实现了方法时，this 仍是地址，直接调用该实现。
+    /// 值类型没有实现（要先装箱）的情形不支持。
+    /// </summary>
+    private MethodRef Constrained(CilSide side, TypeRef thisType, MethodRef target, IList<StackValue> values)
+    {
+        if (ManagedTypes.IsReferenceType(thisType))
+        {
+            values[0] = ReadValue(side, thisType, NotNull(values[0]));
+            return target.Method.IsVirtual ? Dispatch(side, values[0].Bits, target) : target;
+        }
+        if (thisType is not DefinitionRef { Definition.IsValueType: true } value) throw new Unsupported($"constrained {thisType}");
+        var implementation = target.Method.IsVirtual ? Slot(value, target) : target;
+        if (implementation.Method.Owner != value.Definition) throw new Unsupported($"constrained {thisType} 要装箱");
+        return implementation;
+    }
+
     private MethodRef Dispatch(CilSide side, ulong receiver, MethodRef target)
     {
         var type = side.TypeOf(receiver) switch
@@ -672,6 +699,11 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
             ArrayRef { IsVector: true } when target.Method.Owner.FullName is "System.Array" or "System.Object" => Types.Corlib("System.Array"),
             _ => throw new Unsupported("数组上的虚调用"),
         };
+        return Slot(type, target);
+    }
+
+    private static MethodRef Slot(DefinitionRef type, MethodRef target)
+    {
         var slot = target.Method.Slot;
         if (target.Method.Owner.IsInterface)
         {

@@ -77,7 +77,7 @@ internal static class RecoveryReport
     internal static string[] Features(ManagedBody body)
     {
         var features = new SortedSet<string>(StringComparer.Ordinal);
-        foreach (var region in body.Regions) features.Add(region.Kind == ManagedRegionKind.Catch ? "eh-catch" : "eh-fault");
+        foreach (var region in body.Regions) features.Add(region.Kind switch { ManagedRegionKind.Catch => "eh-catch", ManagedRegionKind.Finally => "eh-finally", _ => "eh-fault" });
         if (body.Method.Method.Name == ".ctor") features.Add("ctor");
         foreach (var statement in body.Blocks.SelectMany(b => b.Statements))
         {

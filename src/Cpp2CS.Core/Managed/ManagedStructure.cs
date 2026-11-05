@@ -38,7 +38,7 @@ public static class ManagedStructure
         _ => a.Equals(b),
     };
 
-    private static bool Value(ManagedValue? a, ManagedValue? b)
+    public static bool Value(ManagedValue? a, ManagedValue? b)
     {
         if (ReferenceEquals(a, b)) return true;
         if (a is null || b is null || a.GetType() != b.GetType() || a.Width != b.Width || !a.Type.Equals(b.Type)) return false;
