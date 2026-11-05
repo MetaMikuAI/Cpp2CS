@@ -133,6 +133,7 @@ internal static class ExceptionStackValues
                     changed = true;
                 }
             }
+        changed |= RemoveUnreadPushes(function, definitions, Slot);
         foreach (var buffer in buffers)
         {
             var writes = function.Blocks.SelectMany(b => b.Statements).OfType<Store>()
@@ -143,5 +144,48 @@ internal static class ExceptionStackValues
             foreach (var block in function.Blocks) block.Statements.RemoveAll(s => s is Store store && writes.Contains(store));
         }
         return changed;
+    }
+
+    /// <summary>
+    /// 活动异常栈只有 top() 才读取内容；没有重新抛出时 push 写入的内容不会被观察。下标取自紧随数组的长度字段，
+    /// 数组就是 [基址, 长度字段)。这段内存的地址没有别的用途（含 top() 折叠出的更低基址）时，下标写入可以删除。
+    /// </summary>
+    private static bool RemoveUnreadPushes(MachineFunction function, IReadOnlyDictionary<Variable, Define> definitions, Func<Expr, (long Buffer, Expr Index)?> slot)
+    {
+        static long? Length(Expr index, IReadOnlyDictionary<Variable, Define> definitions)
+        {
+            while (index is Convert convert) index = convert.Operand;
+            if (index is Use use && definitions.TryGetValue(use.Variable, out var definition)) index = definition.Value;
+            while (index is Convert inner) index = inner.Operand;
+            return index is Load { Address: FrameAddress field } ? field.Offset : null;
+        }
+        var removed = false;
+        var pushes = function.Blocks.SelectMany(b => b.Statements).OfType<Store>()
+            .Select(store => (Store: store, Slot: slot(store.Target))).Where(p => p.Slot is not null).ToArray();
+        foreach (var group in pushes.GroupBy(p => p.Slot!.Value.Buffer))
+        {
+            var buffer = group.Key;
+            var lengths = group.Select(p => Length(p.Slot!.Value.Index, definitions)).Distinct().ToArray();
+            if (lengths is not [{ } limit] || limit <= buffer) continue;
+            var writes = group.Select(p => p.Store).ToHashSet();
+            // top() 的下标是长度减一，基址可能被折叠到更低的地址；固定偏移的低地址是别的栈槽。
+            bool Reaches(Expr value) => value switch
+            {
+                FrameAddress frame => frame.Offset >= buffer && frame.Offset < limit,
+                Binary { Op: BinOp.Add, Left: FrameAddress frame, Right: not Const } => frame.Offset >= buffer - 16 && frame.Offset < limit,
+                _ => false,
+            };
+            // 长度已知为零时，clang 把下标写入折叠成固定偏移，同样算作 push。
+            bool Written(Store store) => writes.Contains(store) || store.Target is FrameAddress field && field.Offset >= buffer && field.Offset < limit;
+            IEnumerable<Expr> Uses(Stmt statement) => statement switch
+            {
+                Store store when Written(store) => [store.Value],
+                Call call => [call.Target, .. call.Arguments, .. call.DelegateReceiver is { } receiver ? [receiver] : Array.Empty<Expr>()],
+                _ => ExprMap.Operands(statement),
+            };
+            if (function.Blocks.SelectMany(b => b.Statements).SelectMany(Uses).SelectMany(ExprMap.Walk).Any(Reaches)) continue;
+            foreach (var block in function.Blocks) removed |= block.Statements.RemoveAll(s => s is Store store && Written(store)) > 0;
+        }
+        return removed;
     }
 }
