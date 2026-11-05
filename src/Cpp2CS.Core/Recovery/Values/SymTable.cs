@@ -277,6 +277,9 @@ public sealed partial class SymTable
                 return bits;
             case BinOp.Add or BinOp.Sub when right is ConstSym { Value: 0 }:
                 return left;
+            // InstCombine 把 sext(x + c) << k 写成 ((x << n) + (c << n)) asr (n - k)。低半部分全零的加减不产生进位，只作用于高半部分。
+            case BinOp.Add or BinOp.Sub when left.Width == width && right.Width == width && Math.Min(LowZeros(left), LowZeros(right)) is var zeros && zeros >= width / 2:
+                return Concat(Zero(zeros), Binary(op, Slice(left, zeros, width - zeros), Slice(right, zeros, width - zeros), width - zeros));
             case BinOp.Sub when right is ConstSym c:
                 return Binary(BinOp.Add, left, Const(0 - c.Value, c.Width), width);
             case BinOp.Add when right is ConstSym c && left is LocalSym local:
@@ -288,6 +291,14 @@ public sealed partial class SymTable
         }
         return Op(Operator.Of(op), width, left, right);
     }
+
+    /// <summary>已知为零的最低位数。</summary>
+    private static int LowZeros(Sym sym) => sym switch
+    {
+        ConstSym { Value: not 0, Width: <= 64 } c => System.Numerics.BitOperations.TrailingZeroCount(c.Value),
+        ConcatSym { Parts: [ConstSym { Value: 0 } zero, ..] } => zero.Width,
+        _ => 0,
+    };
 
     /// <summary>按位运算逐段化简：掩码保留或清零片，与零的或、异或保留另一侧。不能逐段确定时返回 null。</summary>
     private Sym? Bitwise(BinOp op, Sym left, Sym right, int width)
@@ -345,6 +356,9 @@ public sealed partial class SymTable
             case ConvKind.Bitcast when operand.Width == width: return operand;
             case ConvKind.SignExtend when operand.Width >= width: return Slice(operand, 0, width);
             case ConvKind.SignExtend when operand is ConstSym c: return Const(unchecked((ulong)c.Signed), width);
+            // 符号扩展只看最高位，低位的零片留在原位；形式与 sext(x) << k 的规范化相同。
+            case ConvKind.SignExtend when operand is ConcatSym { Parts: [ConstSym { Value: 0 } zero, ..] }:
+                return Concat(zero, Slice(Convert(ConvKind.SignExtend, Slice(operand, zero.Width, operand.Width - zero.Width), width), 0, width - zero.Width));
         }
         if (operand is ConstSym k && operand.Width <= 64 && Fold.Convert(kind, new IrConst(k.Value, k.Width), width) is IrConst folded)
             return Const(folded.Value, width);

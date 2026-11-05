@@ -136,6 +136,10 @@ internal static class PathSplitting
                 break;
             case Call call:
                 yield return operands[0];
+                // 没有解析的间接调用：目标从 φ 选出的对象上读取时也按路径处理（不同类型的委托合流后共用一次调用）。
+                if (call is { Op: null, Resolved: null, Kind: CallKind.Indirect or CallKind.TailIndirect })
+                    foreach (var read in Reads(operands[0]))
+                        yield return read.Address;
                 // 局部地址、方法实体及运行时操作的类元数据都要求单一实体。
                 for (var i = 0; i < call.Arguments.Length; i++)
                     if (SymTable.Resolve(operands[1 + i]) is PhiSym phi && (phi.Sources.All(s => s is not null

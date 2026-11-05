@@ -43,6 +43,7 @@ internal static class ArchitectureChecks
         MethodPointers(checks, facts, types);
         SharedInterfacePartitions(checks);
         SharedInterfaceContinuations(checks);
+        LowHalfArithmetic(checks);
         InvokerArguments(checks, facts, types);
         SharedValueModel(checks, facts, types);
         FrameForwards(checks, facts);
@@ -635,6 +636,24 @@ internal static class ArchitectureChecks
         check.True(syms.Slice(missing, 0, 32) is UndefSym, "缺少的 ABI 位片保留未定义");
         check.True(ReferenceEquals(syms.Slice(whole, 16, 32), syms.Assemble(32, [(-16, whole)])),
             "组成值只观察目标范围内的位");
+    }
+
+    /// <summary>低半部分全零的加减只作用于高半部分，((x &lt;&lt; 32) + (c &lt;&lt; 32)) asr 29 与 sext(x + c) &lt;&lt; 3 同形。</summary>
+    private static void LowHalfArithmetic(Assertions check)
+    {
+        var syms = new SymTable();
+        var x = syms.Arg(0, 32);
+        var shifted = syms.Binary(BinOp.Shl, syms.Concat(x, syms.Zero(32)), syms.Const(32, 64), 64);
+        var added = syms.Binary(BinOp.Add, shifted, syms.Const(0xffffffff00000000, 64), 64);
+        var decremented = syms.Binary(BinOp.Add, x, syms.Const(0xffffffff, 32), 32);
+        check.True(ReferenceEquals(added, syms.Concat(syms.Zero(32), decremented)), "低半部分全零的加法下推到高半部分");
+        check.True(ReferenceEquals(syms.Binary(BinOp.AShr, added, syms.Const(29, 64), 64),
+            syms.Binary(BinOp.Shl, syms.Convert(ConvKind.SignExtend, decremented, 64), syms.Const(3, 64), 64)), "移位写法与 sext(x + c) << k 同形");
+        // 进位可能越过低半部分的加法和普通的比例下标加偏移保持原形。
+        var whole = syms.Arg(1, 64);
+        check.True(syms.Binary(BinOp.Add, whole, syms.Const(0xffffffff00000000, 64), 64) is OpSym, "低半部分未知时不下推");
+        var scaled = syms.Binary(BinOp.Shl, whole, syms.Const(3, 64), 64);
+        check.True(syms.Binary(BinOp.Add, scaled, syms.Const(0x20, 64), 64) is OpSym, "比例下标加常量偏移保持原形");
     }
 
     /// <summary>幂等初始化守卫：两臂归一到守卫处的内存内容后相同，才只保留初始化一臂。</summary>
