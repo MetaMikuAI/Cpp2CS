@@ -682,6 +682,10 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         var implementation = WorldIndex.VTableEntry(type, slot) ?? throw new Unsupported($"{type} 的虚表槽位 {slot} 为空");
         if (implementation.Method.GenericParameters.Count != target.MethodArguments.Count)
             throw new Unsupported($"{implementation} 的泛型实参数量不匹配");
+        // 共享代码里 T 的见证只保证布局，世界模型可能选到不实现这个方法的类型，同一槽位是别的方法。
+        if (implementation.Method.Parameters.Count != target.Method.Parameters.Count
+            || ManagedTypes.IsVoid(implementation.Method.ReturnType) != ManagedTypes.IsVoid(target.Method.ReturnType))
+            throw new Unsupported($"{type} 的虚表槽位 {slot} 与 {target} 的签名不符");
         return implementation with { MethodArguments = target.MethodArguments };
     }
 
