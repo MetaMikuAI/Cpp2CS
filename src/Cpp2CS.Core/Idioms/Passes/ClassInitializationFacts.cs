@@ -10,6 +10,24 @@ internal static class ClassInitializationFacts
 {
     private sealed record Point(Block Block, int Index, Stmt Statement);
 
+    /// <summary>
+    /// beforefieldinit 类型的初始化时机不受约束（ECMA-335 II.10.5.3：首次访问静态字段之前的任意时刻），运行时在字段访问处自行保证。
+    /// IL2CPP 在调用这类类型的方法之前写的显式初始化没有对应的 IL，从这里起不再存在。
+    /// </summary>
+    internal static bool DropUnconstrained(MachineFunction function)
+    {
+        var changed = false;
+        foreach (var block in function.Blocks)
+            for (var i = 0; i < block.Statements.Count; i++)
+                if (block.Statements[i] is Call { Op: { Kind: OpKind.RunClassConstructor, Operand: DefinitionRef type }, Defines.Length: 0 } call
+                    && (type.Definition.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) != 0)
+                {
+                    block.Statements[i] = new Nop(call.Address, "beforefieldinit 类型的显式初始化");
+                    changed = true;
+                }
+        return changed;
+    }
+
     internal static bool Run(MachineFunction function, bool constructorFacts = true)
     {
         var points = function.Blocks.SelectMany(b => b.Statements.Select((s, i) => new Point(b, i, s))).ToArray();

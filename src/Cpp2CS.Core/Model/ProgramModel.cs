@@ -230,6 +230,8 @@ public sealed class MethodDef
     public bool IsStatic => (Attributes & MethodAttributes.Static) != 0;
     public bool IsVirtual => (Attributes & MethodAttributes.Virtual) != 0;
     public bool IsAbstract => (Attributes & MethodAttributes.Abstract) != 0;
+    /// <summary>派生类可以覆盖：虚方法，不是 final，所在类型也没有封闭。对其他方法 call 与 callvirt 进入同一方法体，callvirt 只多一次判空。</summary>
+    public bool IsOverridable => IsVirtual && (Attributes & MethodAttributes.Final) == 0 && (Owner.Attributes & System.Reflection.TypeAttributes.Sealed) == 0;
     public override string ToString() => $"{Owner.FullName}.{Name}";
 }
 

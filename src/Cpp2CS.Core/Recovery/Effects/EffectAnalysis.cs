@@ -111,8 +111,8 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
                     && (semantics.Statement(statement, nonNull).Kinds & ~EffectKind.Read) == 0: continue;
                 case Store store: return ReferenceEquals(oracle.Decompose(values.Operands(store)[0]).Root, target);
                 case Call { Op: null } call:
-                    // 直接调用虚方法可能是 base 调用，不能为了判空改成动态分派。
-                    return oracle.Callee(call) is { Method: { IsStatic: false, IsVirtual: false } }
+                    // 直接调用可覆盖的虚方法可能是 base 调用，不能为了判空改成动态分派；其他方法 IL 里本来就是 callvirt。
+                    return oracle.Callee(call) is { Method: { IsStatic: false, IsOverridable: false } }
                         && call.Arguments.Length > 0 && ReferenceEquals(SymTable.Resolve(values.Operands(call)[1]), target);
                 // 分派调用在 IL 中是对接收者的 callvirt；分派查找并入其中，对象为 null 时只抛出 NullReferenceException。
                 case Call { Op.Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual or OpKind.CallDelegate or OpKind.InvokeVirtualGeneric } dispatch:

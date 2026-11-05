@@ -30,6 +30,7 @@ public static partial class Decompilation
     private static CSharpDecompiler CreateDecompiler(DecompilerTypeSystem typeSystem, DecompilerSettings settings, IDecompileTransformProvider? transforms)
     {
         var decompiler = new CSharpDecompiler(typeSystem, settings);
+        decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new GotoCleanup());
         decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new DistinctLocalNames());
         transforms?.Register(decompiler, DecompilePosition.BeforeLegality);
         decompiler.AstTransforms.Add(new EscapeInvalidIdentifiers());
@@ -39,6 +40,7 @@ public static partial class Decompilation
         decompiler.AstTransforms.Add(new TupleInitializers());
         decompiler.AstTransforms.Add(new InaccessibleAttributes());
         decompiler.AstTransforms.Add(new InterfaceTupleNames());
+        decompiler.AstTransforms.Add(new ForwardingImplementations());
         transforms?.Register(decompiler, DecompilePosition.AfterLegality);
         decompiler.AstTransforms.Add(new EventFieldNames());
         transforms?.Register(decompiler, DecompilePosition.AfterEvents);

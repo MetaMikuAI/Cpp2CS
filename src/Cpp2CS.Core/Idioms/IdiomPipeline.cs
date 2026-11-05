@@ -42,6 +42,8 @@ internal static class IdiomPipeline
         Do("interface.operands", s => s.RefreshInterfaceOperands()),
         new("delegates", s => !s.owner.AuditLegacyDelegateCalls && DelegateCallNormalizer.Run(s.facts, s.function, s.Result)),
         new("managed.throws", s => !s.owner.AuditRawManagedThrows && ManagedThrowNormalizer.Run(s.facts, s.function, s.Result)),
+        new("class.beforefieldinit", s => ClassInitializationFacts.DropUnconstrained(s.function)),
+        new("catch.exception", s => CaughtExceptionChecks.Run(s.function, e => s.defs.Expand(e))),
         new("runtime.guards", RuntimeGuards),
         new("class.initialized", ClassInitialized),
         new("once.guards", s => s.OnceGuards()),

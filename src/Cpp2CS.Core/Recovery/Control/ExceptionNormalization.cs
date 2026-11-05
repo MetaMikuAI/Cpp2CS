@@ -51,14 +51,27 @@ internal static class ExceptionNormalization
 
     /// <summary>
     /// 没有托管效果的处理体：只取异常与 selector、装载常量，然后调用 std::terminate（noexcept 析构中再次抛出），
-    /// 或只取异常后继续向外展开。必须看到实际的终止或展开调用。
+    /// 或只取异常后继续向外展开（可以跨块）。必须看到实际的终止或展开调用。
     /// </summary>
     private static bool Inert(Block pad) =>
         pad.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.Terminate)
             && pad.Statements.All(s => s is Nop or Define { Value: Const or Intrinsic { Name: "eh_exception" or "eh_selector" } }
                 or Call { Op.Kind: OpKind.Terminate or OpKind.BeginCatch })
-        || pad.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.ResumeUnwind)
-            && pad.Statements.All(s => s is Nop or Define { Value: Intrinsic { Name: "eh_exception" } } or Call { Op.Kind: OpKind.ResumeUnwind });
+        || Resumes(pad);
+
+    /// <summary>从落地块沿唯一后继走到继续展开，途中只传递异常值：清理在结束 catch 被删去之后常常只剩这些。</summary>
+    private static bool Resumes(Block pad)
+    {
+        var visited = new HashSet<Block>();
+        for (var block = pad; visited.Add(block); block = block.Successors[0])
+        {
+            if (block.Statements.OfType<Call>().Any(c => c.Op?.Kind == OpKind.ResumeUnwind))
+                return block.Statements.All(s => s is Nop or Phi or Define { Value: Intrinsic { Name: "eh_exception" } or Use } or Call { Op.Kind: OpKind.ResumeUnwind });
+            if (block.Handler is not null || block.Successors.Count != 1
+                || !block.Statements.All(s => s is Nop or Phi or Jump or Define { Value: Intrinsic { Name: "eh_exception" } or Use })) return false;
+        }
+        return false;
+    }
 
     /// <summary>落地链上的语句：φ、跳转、空语句，异常值或不读内存的计算。</summary>
     private static bool Passing(Stmt statement) => statement is Phi or Jump or Nop or Define { Value: Intrinsic { Name: "eh_exception" } }

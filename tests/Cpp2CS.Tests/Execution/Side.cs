@@ -167,10 +167,11 @@ internal abstract partial class Side(World world)
     /// <summary>
     /// 运行静态构造：类尚未初始化时记一个 cctor 事件，并像运行时一样置 cctor_finished（两侧写同一地址）。
     /// 静态构造本身不执行（与被调方法一样作为外部行为）。
+    /// beforefieldinit 类型的初始化时机不受约束（ECMA-335 II.10.5.3），不构成可观察事件；原生侧的守卫可以反复进入 helper，两侧都没有效果。
     /// </summary>
     public void RunClassConstructor(TypeRef type)
     {
-        if (!World.Uninitialized(type) || !initialized.Add(type)) return;
+        if (!World.Precise(type) || !World.Uninitialized(type) || !initialized.Add(type)) return;
         var klass = World.Klass(type);
         Event($"cctor {type}");
         WriteValue(klass + RuntimeLayout.ClassCctorStarted, 1, 4);

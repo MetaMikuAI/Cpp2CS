@@ -92,7 +92,7 @@ internal sealed partial class BodyBuilder
         }
         var dispatched = shape.IsDispatch || call.Resolved is not null && call.Kind is CallKind.Indirect or CallKind.TailIndirect;
         var invocation = new ManagedInvocation(callee, receiver, managed, Virtual: receiver is not null
-            && (dispatched || !callee.Method.IsVirtual && absorbedChecks.Contains(contents[0]))) { Constraint = TypeOracle.ConstraintOf(call) };
+            && (dispatched || !callee.Method.IsOverridable && absorbedChecks.Contains(contents[0]))) { Constraint = TypeOracle.ConstraintOf(call) };
         LocalValue? result = null;
         var returnType = callee.Concrete(callee.Method.ReturnType);
         if (!ManagedTypes.IsVoid(returnType))
