@@ -115,10 +115,10 @@ internal sealed partial class BodyBuilder
             // 尾调用即调用后返回：结果寄存器原样返回，调用方没有返回值时丢弃。
             var returnsValue = oracle.ReturnType is { } target && !ManagedTypes.IsVoid(target);
             if (returnsValue && result is null) return new Statement(new ManagedHole(call.Address, "调用 尾调用的被调方法没有返回值", true));
-            output.Add(new ManagedCall(call.Address, invocation, returnsValue ? result : null) { Inlined = call.Inlined });
+            output.Add(new ManagedCall(call.Address, invocation, returnsValue ? result : null) { Inlined = call.Inlined || shape.LocalCopy });
             return new Statement(new ManagedReturn(call.Address, returnsValue ? result : null));
         }
-        var lowered = new ManagedCall(call.Address, invocation, result) { Inlined = call.Inlined };
+        var lowered = new ManagedCall(call.Address, invocation, result) { Inlined = call.Inlined || shape.LocalCopy };
         output.Add(lowered);
         // 提升的单元由调用写出的版本承接；其他结果缓冲区（不透明返回值、未提升的可寻址局部、堆上的位置）要把结果写到调用者给出的位置。
         if (result is not null && signature.Return is { Transfer: Transfer.ResultBuffer } buffer

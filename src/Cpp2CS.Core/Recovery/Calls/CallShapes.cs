@@ -8,6 +8,8 @@ public sealed record CallShape(Call Call, IReadOnlyList<MethodRef> Candidates, M
 {
     /// <summary>被调方机器码不读取的输入寄存器：原生代码对这些位置的 IL 实参没有约束。</summary>
     public IReadOnlySet<Storage> Unused { get; init; } = new HashSet<Storage>();
+    /// <summary>目标没有注册入口，由 MethodInfo 实参指名：原生调用的是这个方法的本地副本，执行对照按方法体透明执行。</summary>
+    public bool LocalCopy { get; init; }
     /// <summary>经运行时分派的托管调用：按托管签名传参，以 callvirt 调用。</summary>
     public bool IsDispatch => Call.Op?.Kind is OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual or OpKind.InvokeVirtualGeneric or OpKind.InvokeConstrainedGeneric;
     public bool IsRuntime => Call.Op is not null && !IsDispatch
@@ -36,11 +38,11 @@ public sealed class CallShapes(ProgramFacts facts, ManagedAbi abi, Func<ulong, S
         if (call is { Op: null, Kind: CallKind.Direct or CallKind.Tail, Target: Const target })
         {
             var (candidates, signature) = Direct(target.Value);
-            if (signature is null && Named(call) is var (named, namedSignature))
-                (candidates, signature) = ([named], namedSignature);
+            var named = signature is null ? Named(call) : null;
+            if (named is var (instance, namedSignature)) (candidates, signature) = ([instance], namedSignature);
             var ignored = signature?.Arguments.SelectMany(a => a.Pieces).Select(p => p.Register)
                 .Where(r => r.Bank is Bank.Gpr or Bank.Vec && unused(target.Value, r)).ToHashSet() ?? [];
-            return new(call, candidates, signature) { Unused = ignored };
+            return new(call, candidates, signature) { Unused = ignored, LocalCopy = named is not null };
         }
         return new(call, [], null);
     }
