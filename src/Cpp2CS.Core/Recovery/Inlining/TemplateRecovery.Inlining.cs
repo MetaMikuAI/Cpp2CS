@@ -77,6 +77,8 @@ internal sealed partial class TemplateRecovery
         public HashSet<ulong> Raising { get; } = [];
         /// <summary>调用方的显式判空：被判空的项与模板此刻解引用过的项。</summary>
         public List<(ManagedValue Actual, ManagedValue[] Dereferenced)> NullChecks { get; } = [];
+        /// <summary>模板的显式判空：被判空的项与调用方此刻解引用过的项。</summary>
+        public List<(ManagedValue Tested, ManagedValue[] Dereferenced)> TemplateNullChecks { get; } = [];
         /// <summary>区域的第一个效果之前发生的读取。</summary>
         public HashSet<ManagedValue> EarlyReads { get; } = [];
         /// <summary>夹在模板写入之间的调用方写入，以及它之前已比对过的调用与检查数。</summary>
@@ -403,6 +405,11 @@ internal sealed partial class TemplateRecovery
             matched = false;
             match.Fail("调用方的判空对应不到模板的解引用");
         }
+        if (matched && match.TemplateNullChecks.Any(c => !c.Dereferenced.Any(d => SameTerm(Bind(c.Tested, match.Binding), d))))
+        {
+            matched = false;
+            match.Fail("模板的判空对应不到调用方的解引用");
+        }
         lastProgress = match.Covered.Count;
         if (matched) return match;
         failure = match.Failure ?? "比对失败";
@@ -443,6 +450,12 @@ internal sealed partial class TemplateRecovery
             {
                 Cover(caller, match);
                 caller.Index++;
+                steps--;
+                continue;
+            }
+            if (m is ManagedCheck templateCheck && c is not ManagedCheck && AbsorbedTemplateCheck(templateCheck, callee, caller, match))
+            {
+                callee.Index++;
                 steps--;
                 continue;
             }
@@ -604,14 +617,38 @@ internal sealed partial class TemplateRecovery
         MethodArguments = method.MethodArguments.Select(t => t.Substitute(arguments, [])).ToArray(),
     };
 
-    /// <summary>形参可能还没有绑定，这里只记下判空的项和模板此刻解引用过的项，比对结束后按最终绑定核对。</summary>
+    /// <summary>
+    /// 调用方判空，模板不判空：形参可能还没有绑定，这里只记下判空的项和模板的解引用，比对结束后按最终绑定核对。
+    /// 模板下一条语句的解引用也算：它先于这条语句的效果发生，两边在此之间都没有别的效果。
+    /// </summary>
     private bool AbsorbedNullCheck(ManagedCheck check, Walker callee, Walker caller, InlineMatch match)
     {
-        if (check.Exception.DeclaringType is not DefinitionRef { Definition.FullName: "System.NullReferenceException" }
-            || check.Condition is not ComparisonValue { Condition: Cond.Eq, Right: ConstantValue { Bits: 0 }, Left: var tested }
-            || Term(caller, tested) is not { } actual) return false;
-        match.NullChecks.Add((actual, callee.Dereferenced.ToArray()));
+        if (NullTested(check, caller) is not { } actual) return false;
+        match.NullChecks.Add((actual, callee.Dereferenced.Concat(ImminentAccesses(callee)).ToArray()));
         return true;
+    }
+
+    /// <summary>模板判空，调用方不判空：调用方已经解引用过这个项，或它的下一条语句会解引用，同样在核对时按最终绑定比较。</summary>
+    private bool AbsorbedTemplateCheck(ManagedCheck check, Walker callee, Walker caller, InlineMatch match)
+    {
+        if (NullTested(check, callee) is not { } tested) return false;
+        match.TemplateNullChecks.Add((tested, caller.Dereferenced.Concat(ImminentAccesses(caller)).ToArray()));
+        return true;
+    }
+
+    /// <summary>检查是空引用判空时给出被判空的项。</summary>
+    private ManagedValue? NullTested(ManagedCheck check, Walker walker) =>
+        check.Exception.DeclaringType is DefinitionRef { Definition.FullName: "System.NullReferenceException" }
+        && check.Condition is ComparisonValue { Condition: Cond.Eq, Right: ConstantValue { Bits: 0 }, Left: var tested }
+            ? Term(walker, tested) : null;
+
+    /// <summary>路径下一条语句求值时解引用的项：字段、长度和元素访问的接收者，以及 callvirt 的接收者。</summary>
+    private IEnumerable<ManagedValue> ImminentAccesses(Walker walker)
+    {
+        var statement = walker.Current;
+        foreach (var value in ManagedValues.Of(statement).SelectMany(ManagedValues.Walk))
+            if (Accessed(value) is { } receiver && Term(walker, receiver) is { } term) yield return term;
+        if (statement is ManagedCall { Invocation: { Virtual: true, Receiver: { } target } } && Term(walker, target) is { } called) yield return called;
     }
 
     /// <summary>记下调用方在区域的第一个效果之前读取的项（判空不算效果：与读取抛出同样的异常）。</summary>
