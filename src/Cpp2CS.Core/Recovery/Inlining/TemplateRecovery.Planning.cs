@@ -156,6 +156,7 @@ internal sealed partial class TemplateRecovery
         if (ArrivalCopies(body, match, blocks, at, out failure) is not { } arrivals) return null;
         if (Dispatched(method, receiver) is not { } dispatched) { failure = $"{method.Method.Name} 可能被重写，调用不一定到这个方法体"; return null; }
         var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, dispatched), match.Result) { Inlined = true };
+        if (match.Effects == 0 && match.Ends.All(e => e.State is { Stores.Count: 0 })) pureInlines.Add(call);
         var replacement = blocks[startBlock].Statements.Take(start).Concat(hoisted).Concat(savedCopies).Concat(arrivals).Append(call).Concat(sunk).ToList();
         if (match.Returns) replacement.Add(new ManagedReturn(at, match.Result));
         if (match.Continuation is { } branch)

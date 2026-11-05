@@ -5,13 +5,16 @@ namespace Cpp2CS.Recovery.Inlining;
 
 internal sealed partial class TemplateRecovery
 {
+    /// <summary>区域里没有调用、检查和写入时还原的调用：不改变内存，路径事实可以跨过它。</summary>
+    private readonly HashSet<ManagedStatement> pureInlines = new(ReferenceEqualityComparer.Instance);
+
     /// <summary>沿唯一前驱链收集入口条件与已保存的读取；写入使可能别名的读取失效，调用截断链。</summary>
     private void SeedPath(Walker caller)
     {
         var chain = new List<ManagedBlock>();
         var seen = new HashSet<ulong> { caller.Block };
         var at = caller.Block;
-        bool Trackable(ManagedStatement statement) => statement is ManagedJump or ManagedBranch or ManagedCheck
+        bool Trackable(ManagedStatement statement) => statement is ManagedJump or ManagedBranch or ManagedCheck || pureInlines.Contains(statement)
             || (statement is ManagedAssignment or ManagedStore { Target: FieldValue or StaticFieldValue or ArrayElementValue })
             && !ManagedValues.Of(statement).SelectMany(ManagedValues.Walk).Any(v => v is NewObjectValue or NewArrayValue or BoxValue or DelegateValue or HoleValue);
         if (caller.Blocks[at].Statements.Take(caller.Index).Any(s => !Trackable(s))) return;
@@ -34,6 +37,7 @@ internal sealed partial class TemplateRecovery
                     caller.Assumptions.RemoveAll(p => ReadsLocation(p.Condition, location));
                 }
                 NoteAccesses(walker, statement);
+                if (statement is ManagedCall { Result: { } returned }) walker.Env.Remove(returned.Variable);
                 if (statement is ManagedAssignment assignment && Term(walker, assignment.Value) is { } value) walker.Env[assignment.Target.Variable] = value;
                 if (statement is ManagedCheck check && Term(walker, check.Condition) is { } passed) caller.Assumptions.Add((passed, false));
                 ManagedEdge? edge = null;
