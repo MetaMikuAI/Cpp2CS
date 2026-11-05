@@ -120,6 +120,8 @@ public enum OpKind : byte
     GenericHasValue,
     /// <summary>把零写入参数指向的局部存储；CIL 局部已零初始化，不产生指令。</summary>
     ZeroField,
+    /// <summary>内联的 unbox.any：从对象数据区取出指定值类型。</summary>
+    UnboxAny,
 }
 
 /// <summary>调用所表达的运行时操作。Operand：类型（TypeRef）、异常名、槽位号等，见 <see cref="OpKind"/>。</summary>

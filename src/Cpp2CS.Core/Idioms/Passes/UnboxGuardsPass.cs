@@ -13,13 +13,37 @@ internal static class UnboxGuardsPass
             {
                 if (block.Statements[i] is not Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException", Arguments: [Compare { Cond: Cond.Ne } compare] } check || state.defs.Expand(compare.Left) is not Load { Width: 64, Address: Binary { Op: BinOp.Add, Left: Load { Width: 64, Address: var obj }, Right: Const { Value: RuntimeLayout.ClassElementClass } } } || state.defs.Expand(compare.Right) is not Load { Width: 64, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef type }, Right: Const { Value: RuntimeLayout.ClassElementClass } } })
                     continue;
+                var targetBlock = block;
                 var following = block.Statements.Skip(i + 1).Where(s => s is not (Nop or Jump)).ToArray();
                 if (following.Length == 0 && block.NormalSuccessors.ToArray() is [var next] && next.Predecessors.Count == 1)
+                {
+                    targetBlock = next;
                     following = next.Statements.Where(s => s is not Nop).ToArray();
-                if (following.FirstOrDefault() is not Call { Op.Kind: OpKind.Unbox, Arguments: [var value, ..] } unbox || !Equals(unbox.Op.Operand, type) || !Equals(state.defs.Expand(value), obj))
+                }
+                var first = following.FirstOrDefault();
+                if (first is Call { Op.Kind: OpKind.Unbox, Arguments: [var value, ..] } unbox && Equals(unbox.Op.Operand, type) && Equals(state.defs.Expand(value), obj))
+                {
+                    // unbox 后的元素类检查是冗余的：isinst 已确认类型，空值路径也不会到达这里
+                    block.Statements[i] = new Nop(check.Address, "内联 unbox 空检查");
+                    changed = true;
                     continue;
-                // unbox 在同一位置执行类型与 null 检查，原生 element_class 检查不另造托管字段访问。
-                block.Statements[i] = new Nop(check.Address, "拆箱类型检查");
+                }
+                // 内联 unbox.any 不调用 helper：检查之后直接从对象数据区读取值类型。
+                var load = first is Define { Value: Load direct } ? direct
+                    : first is Define { Value: Ir.Convert { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: Load converted } } ? converted : null;
+                if (first is not Define data || load is not { Width: 32 or 64, Address: Binary { Op: BinOp.Add, Left: var source, Right: Const { Value: RuntimeLayout.ObjectHeaderSize } } }
+                    || type is not DefinitionRef { Definition.IsValueType: true }
+                    || !Equals(state.defs.Expand(source), obj)) continue;
+                var at = targetBlock.Statements.FindIndex(s => ReferenceEquals(s, first));
+                if (at < 0) continue;
+                targetBlock.Statements[at] = new Call(data.Address, CallKind.Direct, Expr.C(0, 64))
+                {
+                    Op = new RuntimeOp(OpKind.UnboxAny, type),
+                    Arguments = [source],
+                    Results = [data.Target.Storage],
+                    Defines = [data.Target],
+                };
+                block.Statements[i] = new Nop(check.Address, "内联 unbox 空检查");
                 changed = true;
             }
 

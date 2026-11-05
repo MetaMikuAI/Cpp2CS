@@ -306,6 +306,20 @@ public static class RuntimeOps
                 return true;
             },
         };
+        yield return new(OpKind.UnboxAny)
+        {
+            Inputs = (_, a, t) => a.Count == 1 ? [new(a[0], t.Types.Object)] : [],
+            ResultType = (call, _) => call.Op?.Operand as TypeRef,
+            Behavior = new(EffectKind.None, ExceptionEffect.Any),
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Op.Operand is not TypeRef target || c.Arguments.Count != 1) return false;
+                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, target),
+                    new UnboxValue(c.Input(0), target, c.Types.ValueWidth(target))));
+                return true;
+            },
+        };
         yield return new(OpKind.IsInst)
         {
             Inputs = (_, a, t) => a.Count >= 1 ? [new(a[0], t.Types.Object)] : [],
