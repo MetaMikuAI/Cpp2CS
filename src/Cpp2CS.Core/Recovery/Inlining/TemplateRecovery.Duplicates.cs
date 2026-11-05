@@ -462,10 +462,13 @@ internal sealed partial class TemplateRecovery
     {
         foreach (var accessed in a.Accessed)
         {
+            // this 不为空；区域之前读过字段、事实还在的接收者也不为空（否则那次读取就抛出了）。
+            if (accessed is ArgumentValue { Index: -1 }
+                || proof.Match.Available?.Value.Values.SelectMany(ManagedValues.Walk).OfType<FieldValue>().Any(f => SameTerm(f.Receiver, accessed)) == true) continue;
             var moved = Normal(accessed, a, proof);
             if (b.Walker.Dereferenced.Any(d => SameTerm(Normal(d, b, proof), moved))) continue;
             var nullTest = new ComparisonValue(Cond.Eq, accessed, new ConstantValue(0, accessed.Type, accessed.Width), types.Boolean);
-            if (KnownAcross(nullTest, a, b, proof) != false) return proof.Refuse("后续的解引用不同");
+            if (KnownAcross(nullTest, a, b, proof) != false) return proof.Refuse($"后续的解引用不同：{accessed}");
         }
         return true;
     }
