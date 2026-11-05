@@ -34,6 +34,20 @@ internal sealed partial class TemplateRecovery
     }
 
     /// <summary>
+    /// 模板没有比对到的形参：方法体根本不读它时，任何值的执行结果都相同，写成默认值。
+    /// 只比对到一部分路径时不能这样写：返回值的抽象可能用过它而没有留下绑定。引用形参没有默认值。
+    /// </summary>
+    private ManagedValue? UnreadArgument(InlineMatch match, MethodRef method, int index)
+    {
+        if (match.Template is not { } template) return null;
+        var mentioned = template.Blocks.SelectMany(b => b.Statements).SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
+            .Any(v => v is ArgumentValue argument && argument.Index == index);
+        var type = method.Concrete(method.Method.Parameters[index].Type);
+        if (mentioned || type is ByRefRef) return null;
+        return types.Kind(type) == TypeKind.Struct ? new ComposedValue(type, []) : new ConstantValue(0, type, Width(type));
+    }
+
+    /// <summary>
     /// 把证明成立的区域换成一次调用：起点之前的语句保留，随后是调用与到出口的跳转（带出口边上的复制）；
     /// 区域内的块须只从区域内进入、其中定义的值不在区域外使用，之后删去。
     /// </summary>
@@ -58,7 +72,7 @@ internal sealed partial class TemplateRecovery
         var parameters = method.Method.Parameters.Count;
         var arguments = new ManagedValue[parameters];
         for (var i = 0; i < parameters; i++)
-            if (!match.Binding.TryGetValue(i, out var bound) || Materialize(Input(bound), self, at, match) is not { } argument) { failure = "实参不能写回调用之前"; return null; }
+            if ((match.Binding.TryGetValue(i, out var bound) ? Materialize(Input(bound), self, at, match) : UnreadArgument(match, method, i)) is not { } argument) { failure = "实参不能写回调用之前"; return null; }
             else arguments[i] = argument;
         var exitCopies = new List<ManagedCopy>();
         foreach (var (target, value) in copies)

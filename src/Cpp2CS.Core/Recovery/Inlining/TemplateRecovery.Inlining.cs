@@ -70,6 +70,8 @@ internal sealed partial class TemplateRecovery
         }
         public LocalValue? Result { get; set; }
         public required Dictionary<int, ManagedValue> Binding { get; init; }
+        /// <summary>模板的方法体。</summary>
+        public ManagedBody? Template { get; init; }
         /// <summary>模板所属类型的实参：模板中的方法引用可能保留共享代码的开放形式，比较前代入。</summary>
         public required IReadOnlyList<TypeRef> TypeArguments { get; init; }
         public HashSet<(ulong Block, int Index)> Covered { get; } = [];
@@ -392,7 +394,7 @@ internal sealed partial class TemplateRecovery
         SeedPath(caller);
         caller.Visited.Add(block);
         // 模板的 this 在比对中绑定：可能是字段所在的对象，也可能是包含它的值（如嵌套类型的结构体）。
-        var match = new InlineMatch { Binding = [], TypeArguments = arguments, Start = (block, start) };
+        var match = new InlineMatch { Binding = [], TypeArguments = arguments, Start = (block, start), Template = template };
         var entryLocals = callerBlocks.Values.SelectMany(b => b.Statements)
             .SelectMany(s => (s is ManagedAssignment assignment ? new[] { assignment.Target } : []).Concat(ManagedValues.Edges(s).SelectMany(e => e.Copies.Select(c => c.Target))))
             .DistinctBy(l => l.Variable).ToDictionary(l => l.Variable);
