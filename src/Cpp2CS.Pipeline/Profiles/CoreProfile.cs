@@ -1,3 +1,4 @@
+using Cpp2CS.Facts;
 using Cpp2CS.Input;
 using static Cpp2CS.Pipeline.RecoveryReport;
 
@@ -5,6 +6,22 @@ namespace Cpp2CS.Pipeline;
 
 internal static class CoreProfile
 {
+    /// <summary>跳过恢复，骨架的占位体原样写出。没有方法体可以挑选，所以源码总按工程布局导出整个范围。</summary>
+    private static RecoveryRunResult Stubs(RecoveryRequest request, RunManifest manifest, ProgramFacts facts, SelectionStage.Selection selection, Action<string> Log)
+    {
+        var skeleton = new Skeleton(facts.Model);
+        Directory.CreateDirectory(request.Output);
+        var assemblies = Path.Combine(request.Output, "assemblies");
+        manifest.Step("publication", () => { skeleton.Write(assemblies); return 0; });
+        ReportStage.WriteUnselected(request.Output, selection);
+        var files = manifest.Step("decompile", () => DecompileStage.Write(request with { SourceLayout = "project" }, facts, assemblies, [], [], [], selection.Methods, Log));
+        var report = $"只导出桩：范围内方法 {selection.Targets.Length}，全部是占位体，没有恢复方法体；C# {files} 个类型文件\n";
+        File.WriteAllText(Path.Combine(request.Output, "holes.txt"), report);
+        var outcome = new RecoveryRunResult(request.Output, report, selection.Targets.Length, 0, 0, 0);
+        manifest.Complete(outcome);
+        return outcome;
+    }
+
     internal static RecoveryRunResult Run(RecoveryRequest request, Action<string>? progress)
     {
         void Log(string message) => progress?.Invoke(message);
@@ -12,6 +29,7 @@ internal static class CoreProfile
         var facts = manifest.Step("facts", () => FactsBuilder.Build(request.Binary, request.Metadata, Log, options: request.Options));
         var types = new ManagedTypes(facts.Model, facts.Layouts);
         var selection = manifest.Step("selection", () => SelectionStage.Select(request, facts, Log));
+        if (request.StubsOnly) return Stubs(request, manifest, facts, selection, Log);
         var batch = manifest.Step("recovery", () => RecoveryStage.RecoverMethods(selection.Targets, facts, types, request.Jobs, Log));
         var targets = batch.Targets;
         var summaries = new MethodSummaryService(batch.Recovery);

@@ -15,6 +15,8 @@ public sealed record RecoveryRequest(string Binary, string Metadata, string Outp
     public int Limit { get; init; } = int.MaxValue;
     public int Jobs { get; init; } = 1;
     public bool NoSource { get; init; }
+    /// <summary>只导出桩：不恢复方法体，每个方法都是占位体。类型、成员和签名与正常导出相同。</summary>
+    public bool StubsOnly { get; init; }
     public string SourceLayout { get; init; } = "flat";
 
     public bool HasScope => (All ? 1 : 0) + (Namespaces.Length > 0 ? 1 : 0)
@@ -38,6 +40,7 @@ public sealed record RecoveryRequest(string Binary, string Metadata, string Outp
             var option = options[i];
             if (option == "--all") { request = request with { All = true }; scopes++; continue; }
             if (option == "--no-source") { request = request with { NoSource = true }; continue; }
+            if (option == "--stubs-only") { request = request with { StubsOnly = true }; continue; }
             if (++i == options.Length) throw new ArgumentException($"{option} 缺少参数");
             var value = options[i];
             if (option is "--namespaces" or "--assemblies" or "--methods" or "--types") scopes++;
