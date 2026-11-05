@@ -140,7 +140,7 @@ internal sealed partial class TemplateRecovery
             body = next;
             progressed = true;
         }
-        body = DeadPendingReads(body);
+        body = DeadPendingReads(OverlaidReads(body));
         // 未证明的访问：值与写入目标都换成洞。
         ManagedValue Seal(ManagedValue value)
         {
@@ -154,6 +154,32 @@ internal sealed partial class TemplateRecovery
             return ManagedValues.Map(value, Seal);
         }
         return SealConstructions(ManagedValues.Map(body, Seal));
+    }
+
+    /// <summary>
+    /// 显式布局的结构体：不可访问字段的一段位片恰好是另一个可访问字段时，读的是同一块存储，写成那个字段。
+    /// 只处理没有证明的访问：模板自身仍按原字段比对。
+    /// </summary>
+    private ManagedBody OverlaidReads(ManagedBody body)
+    {
+        static (FieldValue Field, int Shift)? Slice(ManagedValue value, int width) => value switch
+        {
+            FieldValue { Pending: not null } field => (field, 0),
+            BinaryValue { Op: BinOp.And, Left: var left, Right: ConstantValue mask } when width < 64 && (mask.Bits & ((1UL << width) - 1)) == (1UL << width) - 1 => Slice(left, width),
+            BinaryValue { Op: BinOp.LShr, Left: FieldValue { Pending: not null } field, Right: ConstantValue shift } => (field, (int)shift.Bits),
+            _ => null,
+        };
+        ManagedValue Visit(ManagedValue value)
+        {
+            if (value is ConversionValue { Kind: ConvKind.Truncate } truncate && Slice(truncate.Operand, truncate.Width) is var (field, shift)
+                && field.Field.DeclaringType is DefinitionRef owner && types.Kind(owner) == TypeKind.Struct
+                && types.Fields(owner).FirstOrDefault(f => f.Path[0].Equals(field.Field)) is { } whole
+                && types.Project(owner, whole.Bit + shift, truncate.Width) is { Path: [var other] } overlaid && !other.Equals(field.Field)
+                && overlaid.Type.Equals(truncate.Type) && fields.Accessible(other, field.Receiver.Type))
+                return new FieldValue(field.Receiver, other, truncate.Type, truncate.Width);
+            return ManagedValues.Map(value, Visit);
+        }
+        return ManagedValues.Map(body, Visit);
     }
 
     private IReadOnlyDictionary<Variable, PendingConstruction> pendingConstructions = new Dictionary<Variable, PendingConstruction>();
