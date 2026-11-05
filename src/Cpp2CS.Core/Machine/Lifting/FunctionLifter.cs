@@ -87,9 +87,11 @@ public sealed class FunctionLifter
         foreach (var block in lifted.Function.Blocks)
             foreach (var statement in block.Statements)
             {
-                // 保守约定的调用列出全部实参寄存器，不说明它真的读了。
-                var conservative = statement is Call call && (call.Target is not Const callee || knownCalls.Signature(callee.Value) is null);
-                var operands = conservative ? [((Call)statement).Target] : ExprMap.Operands(statement).ToArray();
+                // 保守约定的调用列出全部实参寄存器，不说明它真的读了；隐藏 MethodInfo 的寄存器 codegen 常不设置，里面是残留的旧值。
+                var known = statement is Call { Target: Const callee } ? knownCalls.Signature(callee.Value) : null;
+                var operands = statement is not Call call ? ExprMap.Operands(statement).ToArray()
+                    : known is null ? [call.Target]
+                    : [.. call.Arguments.Where((_, i) => i >= call.Sources.Length || call.Sources[i] != known.MethodInfo), call.Target];
                 if (statement is Store store && IsBase(store.Target)) bases++;
                 foreach (var node in operands.SelectMany(ExprMap.Walk))
                 {
