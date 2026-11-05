@@ -69,6 +69,7 @@ internal static class OnceGuardsPass
         public Block Previous { get; set; } = null!;
         public Block? Merge { get; set; }
         public Branch? Exit { get; set; }
+        public Return? Returned { get; set; }
         public bool Initialized { get; set; }
         public List<ulong> Slots { get; } = [];
         public Store? FlagStore { get; set; }
@@ -92,7 +93,7 @@ internal static class OnceGuardsPass
             var taken = new Line();
             slow = taken;
             var merge = fast.Merge;
-            if (merge is null && fast.Exit is null) { reason = "快路径没有终点"; return false; }
+            if (merge is null && fast.Exit is null && fast.Returned is null) { reason = "快路径没有终点"; return false; }
             if (!Walk(taken, guard.Initialize, true, merge, out reason)) return false;
             // 同一标志的前一个守卫已经初始化时，这一臂的调用被清理掉，只剩写标志。
             if (!taken.Initialized && taken.FlagStore is null) { reason = "慢路径没有初始化"; return false; }
@@ -112,9 +113,18 @@ internal static class OnceGuardsPass
                     // 快路径复用已有的值（不是读取），初始化可能改写内存的一臂重新读取。保留的正是重新读取的一臂。
                     // 两臂都是读取而位置不同时不成立。初始化调用破坏的寄存器不会再被真正读取，这一臂的值没有意义。
                     static bool Reads(Expr value) => ExprMap.Walk(value).Any(e => e is Load);
-                    if (skipped != initialized && (Reads(skipped) || !Reads(initialized)) && initialized is not Use { Variable.Version: -1 })
+                    if (Plain(skipped) != Plain(initialized) && (Reads(skipped) || !Reads(initialized)) && initialized is not Use { Variable.Version: -1 })
                     { reason = "两臂的合流值不同"; return false; }
                 }
+                reason = "";
+                return true;
+            }
+            if (fast.Returned is { } finished)
+            {
+                if (taken.Returned is not { } returned) { reason = "两臂的终点不同"; return false; }
+                var (expected, actual) = (ExprMap.Operands(finished).ToArray(), ExprMap.Operands(returned).ToArray());
+                if (expected.Length != actual.Length || !expected.Zip(actual).All(p => Plain(Normal(p.First, fast, 0)) == Plain(Normal(p.Second, taken, 0))))
+                { reason = "两臂的返回值不同"; return false; }
                 reason = "";
                 return true;
             }
@@ -187,6 +197,10 @@ internal static class OnceGuardsPass
                             line.Previous = current;
                             line.Exit = exit;
                             return true;
+                        case Return finished when !shared:
+                            line.Previous = current;
+                            line.Returned = finished;
+                            return true;
                         case Define define when !shared && !ExprMap.Walk(define.Value).Any(e => e is Intrinsic or Unknown):
                             line.Values[define.Target] = Normal(define.Value, line, 0);
                             break;
@@ -199,7 +213,11 @@ internal static class OnceGuardsPass
                             break;
                         case Call call when initializing && Initializes(call, line):
                             line.Initialized = true;
-                            break;
+                            // 方法末尾的初始化是尾调用：它返回之后就是方法返回。
+                            if (call.Kind != CallKind.Tail) break;
+                            line.Previous = current;
+                            line.Returned = new Return(call.Address);
+                            return true;
                         case Call { Op.Kind: OpKind.NullCheck, Arguments: [var subject] } when !shared && (initializing || Checked(Normal(subject, line, 0), line)):
                             // 初始化一臂重新读取之后再判空，快路径复用已判过的值：保留这一臂时判空照常执行，结果相同。
                             break;
@@ -365,11 +383,27 @@ internal static class OnceGuardsPass
                 && types(written) is { } a && ManagedTypes.IsReferenceType(a) && types(root) is { } b && ManagedTypes.IsReferenceType(b);
         }
 
+        /// <summary>表达式观察变量的位数：与常量掩码相与时只观察掩码内的位（bool 结果常写成 x &amp; 0xff）。</summary>
+        private static int ObservedBits(Expr expression, Variable variable) => expression switch
+        {
+            Use use => use.Variable == variable ? use.Width : 0,
+            Binary { Op: BinOp.And, Left: Use { } masked, Right: Const mask } when masked.Variable == variable => System.Numerics.BitOperations.Log2(mask.Value | 1) + 1,
+            _ => ExprMap.Children(expression).Select(child => ObservedBits(child, variable)).DefaultIfEmpty(0).Max(),
+        };
+
+        /// <summary>同一个值的不同写法归一：走 fmov 还是直接读内存只差一层位重解释；取高位可以写成移位后截断，也可以写成取位段。</summary>
+        private static Expr Plain(Expr value) => Fold.Simplify(ExprMap.Map(value, part => part switch
+        {
+            Ir.Convert { Kind: ConvKind.Bitcast } cast => Plain(cast.Operand),
+            Ir.Convert { Kind: ConvKind.Truncate, Width: var width, Operand: Binary { Op: BinOp.LShr, Left: var whole, Right: Const shift } } => Fold.Extract(Plain(whole), (int)shift.Value, width),
+            _ => null,
+        }));
+
         private int Observed(Variable variable, HashSet<Variable> seen)
         {
             if (!seen.Add(variable)) return 0;
             var statements = state.function.Blocks.SelectMany(b => b.Statements).ToArray();
-            var used = statements.SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk).OfType<Use>().Where(u => u.Variable == variable).Select(u => u.Width).DefaultIfEmpty(0).Max();
+            var used = statements.SelectMany(ExprMap.Operands).Select(e => ObservedBits(e, variable)).DefaultIfEmpty(0).Max();
             return Math.Max(used, statements.OfType<Phi>().Where(p => p.Sources.Contains(variable)).Select(p => Observed(p.Target, seen)).DefaultIfEmpty(0).Max());
         }
     }

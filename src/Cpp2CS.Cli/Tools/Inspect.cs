@@ -42,6 +42,7 @@ internal static class Inspect
                         foreach (var (candidate, signature, problem) in decompiler.Shapes.Candidates(((Const)call.Target).Value))
                             Console.WriteLine($"  无签名调用 0x{call.Address:x} 候选 {candidate}：{(signature is null ? problem : string.Join(", ", signature.Arguments.Select(a => $"{a.Index}:{a.Transfer}/{a.Size}")))}");
             var result = decompiler.Lower(analysis);
+            foreach (var rejection in analysis.Idioms.Rejections) Console.WriteLine($"  拒绝 {rejection.Rule} 0x{rejection.Address:x} {rejection.Reason}");
             foreach (var hole in result.Holes) Console.WriteLine($"  洞 0x{hole.Address:x} {hole.Reason}");
             if ((result.Body ?? result.Partial) is { } body)
                 foreach (var line in ManagedPrinter.Lines(body)) Console.WriteLine(line);
