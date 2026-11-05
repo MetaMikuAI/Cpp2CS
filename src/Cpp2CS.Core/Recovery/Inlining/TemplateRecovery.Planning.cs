@@ -101,8 +101,9 @@ internal sealed partial class TemplateRecovery
             if (ReadValues(statement).SelectMany(ManagedValues.Walk).OfType<LocalValue>().FirstOrDefault(l => defined.Contains(l.Variable)) is { } escaping)
                 { failure = $"区域内定义的值 {escaping.Variable} 在区域外 0x{statement.Address:x} 使用"; return null; }
 
+        if (ArrivalCopies(body, match, blocks, at, out failure) is not { } arrivals) return null;
         var call = new ManagedCall(at, new ManagedInvocation(method, receiver, arguments, !method.Method.IsStatic && method.Method.Name != ".ctor"), match.Result) { Inlined = true };
-        var replacement = blocks[startBlock].Statements.Take(start).Concat(hoisted).Concat(savedCopies).Append(call).Concat(sunk).ToList();
+        var replacement = blocks[startBlock].Statements.Take(start).Concat(hoisted).Concat(savedCopies).Concat(arrivals).Append(call).Concat(sunk).ToList();
         if (match.Returns) replacement.Add(new ManagedReturn(at, match.Result));
         if (match.Continuation is { } branch)
         {

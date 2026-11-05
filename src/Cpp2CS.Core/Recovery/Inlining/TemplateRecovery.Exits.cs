@@ -144,13 +144,25 @@ internal sealed partial class TemplateRecovery
             var accessible = true;
             foreach (var field in projection.Path)
             {
-                if (!fields.Accessible(field, carrier.Type)) { accessible = false; break; }
                 var fieldType = field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
-                carrier = new FieldValue(carrier, field, fieldType, Width(fieldType));
+                var access = new FieldValue(carrier, field, fieldType, Width(fieldType));
+                if (fields.Accessible(field, carrier.Type)) carrier = access;
+                else if (Accessor(field, fieldType, false, carrier.Type) is { } getter) carrier = access with { Accessor = getter };
+                else { accessible = false; break; }
             }
-            if (accessible && ManagedProjections.Project(types, returned, projection, field => new Observed(field, end.Epoch)) is { Value: var value })
+            if (accessible && ManagedProjections.Project(types, Composed(returned), projection, field => new Observed(field, end.Epoch)) is { Value: var value })
                 yield return (value, carrier);
         }
+    }
+
+    /// <summary>透明构造的结构体就是构造函数写入的各个字段；写入值须是常量或形参，否则保持原样。</summary>
+    private ManagedValue Composed(ManagedValue value)
+    {
+        if (value is not NewObjectValue { Transparent: true, Constructor: { DeclaringType: DefinitionRef structure } constructor } construction
+            || ConstructorWrites(constructor) is not { } writes
+            || writes.Any(w => w.Value is not (ConstantValue or ArgumentValue { Index: >= 0 }))) return value;
+        var arguments = Enumerable.Range(0, construction.Arguments.Count).ToDictionary(i => i, i => construction.Arguments[i]);
+        return new ComposedValue(structure, writes.Select(w => (w.Path, Bind(w.Value, arguments))).ToArray());
     }
 
     /// <summary>项本身（不进入它的子项之外的结构）等于 part：字段投影的载体也算。</summary>

@@ -89,6 +89,8 @@ internal sealed partial class TemplateRecovery
         public IReadOnlyList<(LocalValue Target, ManagedValue Value)>? ExitCopies { get; set; }
         public Dictionary<Variable, ManagedValue> Defined { get; } = [];
         public Dictionary<Variable, LocalValue> Locals { get; } = [];
+        /// <summary>区域内异常边 φ 的赋值：与模板无关，换成调用时提到调用之前。</summary>
+        public List<ManagedAssignment> Arrivals { get; } = [];
         public ManagedBranch? Continuation { get; set; }
         public bool Returns { get; set; }
         public List<(ManagedValue Value, LocalValue Local)> Inputs { get; } = [];
@@ -639,6 +641,11 @@ internal sealed partial class TemplateRecovery
             if (walker.Index >= walker.Blocks[walker.Block].Statements.Count) return false;
             switch (walker.Current)
             {
+                case ManagedAssignment { ExceptionArrival: true } arrival when match is not null:
+                    Cover(walker, match);
+                    match.Arrivals.Add(arrival);
+                    walker.Index++;
+                    continue;
                 case ManagedAssignment assignment:
                     if (Term(walker, assignment.Value) is not { } value) return false;
                     if (match is not null) { Cover(walker, match); NoteEarlyReads(value, walker, match); }

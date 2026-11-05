@@ -130,7 +130,7 @@ internal sealed partial class BodyBuilder
                 && copies.TryGetValue((block, pad, padIndex), out var exceptional) && exceptional.Count > 0)
             {
                 var at = statements.FindLastIndex(s => s is ManagedCall or ManagedCheck or ManagedThrow);
-                statements.InsertRange(at < 0 ? statements.Count : at, exceptional.Select(c => (ManagedStatement)new ManagedAssignment(block.End, c.Target, c.Value)));
+                statements.InsertRange(at < 0 ? statements.Count : at, exceptional.Select(c => (ManagedStatement)new ManagedAssignment(block.End, c.Target, c.Value) { ExceptionArrival = true }));
             }
             switch (exit)
             {
