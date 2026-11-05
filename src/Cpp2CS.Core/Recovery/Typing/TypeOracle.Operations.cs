@@ -61,10 +61,19 @@ public sealed partial class TypeOracle
     public ArgumentSupply Supply(CallShape shape, MachineValue value, TypeRef type, Sym content)
     {
         if (value.Transfer != Transfer.Value || value.Pieces.Length == 0 || !value.Pieces.All(p => shape.Unused.Contains(p.Register))) return ArgumentSupply.Content;
-        if (TypeOf(content) is { } actual && (actual.Equals(type) || types.IsAssignable(actual, type))) return ArgumentSupply.Content;
-        if (value.Index < 0 && Parameter(-1) is { } self && (self.Equals(type) || types.IsAssignable(self, type))) return ArgumentSupply.This;
+        if (Interpretable(content, type, [])) return ArgumentSupply.Content;
+        if (value.Index < 0 && !method.Method.IsStatic && Parameter(-1) is { } self && (self.Equals(type) || types.IsAssignable(self, type))) return ArgumentSupply.This;
         return ManagedTypes.IsReferenceType(type) || types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer or TypeKind.Struct
             ? ArgumentSupply.Default : ArgumentSupply.Content;
+    }
+
+    /// <summary>值的每条路径都能按类型解释。φ 的下界略过没有类型的来源（寄存器里的残值），这里逐路径核对。</summary>
+    private bool Interpretable(Sym content, TypeRef type, HashSet<Sym> seen)
+    {
+        content = SymTable.Resolve(content);
+        if (!seen.Add(content) || content is UndefSym) return true;
+        if (content is PhiSym { Projection: null } phi) return phi.Sources.All(s => s is null || Interpretable(s, type, seen));
+        return TypeOf(content) is { } actual && (actual.Equals(type) || types.IsAssignable(actual, type));
     }
 
     public (Sym Owner, TypeRef Type)? ClassIdentity(Sym left, Sym right)
