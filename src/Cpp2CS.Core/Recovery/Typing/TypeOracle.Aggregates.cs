@@ -10,9 +10,10 @@ public sealed record AggregatePlan(Sym? Whole, IReadOnlyList<ProjectedSym> Field
 
 public sealed partial class TypeOracle
 {
-    /// <summary>没有自然结构体类型、按位解释的值。</summary>
+    /// <summary>没有自然结构体类型、按位解释的值；跨字段或非标准宽度的位片、相邻字段合并的读取没有自然类型，同样按位解释。</summary>
     public bool BitRepresentation(Sym value) => SymTable.Resolve(value) is ConcatSym or ConstSym
-        || TypeOf(value) is { } natural && types.Kind(natural) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer;
+        || TypeOf(value) is null && (SymTable.Resolve(value) is SliceSym || SymTable.Resolve(value) is ReadSym merged && Parts(merged) is not null)
+        || TypeOf(value) is { } scalar && types.Kind(scalar) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer;
 
     /// <summary>先证明整体读取，再按共享布局投影字段；只省略已知为零的位，不省略未知或未定义值。</summary>
     public AggregatePlan? Aggregate(Sym bits, DefinitionRef structure)

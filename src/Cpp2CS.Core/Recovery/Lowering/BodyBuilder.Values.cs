@@ -34,6 +34,13 @@ internal sealed partial class BodyBuilder
                 return new TypeHandleValue(token, types.RuntimeTypeHandle, 64);
             case EntitySym { Symbol: { Kind: SymbolKind.Field, Value: FieldRef field } }:
                 return new FieldHandleValue(field, types.RuntimeFieldHandle, 64);
+            // 相邻字段合并的读取作为一个整数使用（寄存器搬运之后才取其中的片）。
+            case ReadSym { Width: <= 64 } merged when oracle.Locate(merged.Address, merged.Width) is null && oracle.FieldPieces(merged, 0, merged.Width) is not null:
+                {
+                    var bits = expected is not null && types.Kind(expected) is TypeKind.Int or TypeKind.Pointer && Width(expected) >= merged.Width ? expected
+                        : types.Integer(merged.Width <= 32 ? 32 : 64, false);
+                    return Coerce(IntegerBits(merged, bits, address) ?? Hole(address, $"值 跨字段的读取 {merged}", bits), expected, address);
+                }
             case ReadSym read:
                 return Read(read, address) is { } value ? Coerce(value, expected, address) : Hole(address, "内存 读取", expected);
             case ResultSym result when constructions.ContainsKey(result):
@@ -81,7 +88,7 @@ internal sealed partial class BodyBuilder
             return Coerce(Nest(value, path, scalar, false, address), expected, address);
         if (expected is DefinitionRef wrapper && oracle.Inside(wrapper, value.Type) is var (wrapped, _))
             return Composed(wrapper, [(wrapped, value)], address);
-        if (value is ArgumentValue or LocalValue && value.Type is DefinitionRef source && expected is DefinitionRef target
+        if (Repeatable(value) && value.Type is DefinitionRef source && expected is DefinitionRef target
             && oracle.FieldCopy(source, target) is { } copy)
             return Composed(target, copy.Select(f => (f.Target,
                 Coerce(Nest(value, f.Source, f.SourceType, false, address), f.TargetType, address))).ToList(), address);
@@ -101,6 +108,16 @@ internal sealed partial class BodyBuilder
         }
         return value;
     }
+
+    /// <summary>重复求值不改变结果也没有副作用的值：局部、参数以及它们的字段或解引用。</summary>
+    private static bool Repeatable(ManagedValue value) => value switch
+    {
+        ArgumentValue or LocalValue => true,
+        FieldValue { Accessor: null } field => Repeatable(field.Receiver),
+        IndirectValue indirect => Repeatable(indirect.Address),
+        AddressValue address => Repeatable(address.Target),
+        _ => false,
+    };
 
     private ManagedValue Constant(ConstSym constant, TypeRef? expected)
     {
@@ -209,13 +226,22 @@ internal sealed partial class BodyBuilder
             return Coerce(LocationValue(part, address), expected);
         }
         var baseType = oracle.TypeOf(slice.Base) ?? (slice.Base is PhiSym ? oracle.Unconstrained(slice.Base.Width) : null);
+        if (slice.Low % 8 == 0 && baseType is not null && types.Kind(baseType) == TypeKind.Struct
+            && oracle.FieldAt(baseType, slice.Low / 8 + RuntimeLayout.ObjectHeaderSize, slice.Width, false, false) is var (path, type))
+            return Coerce(Nest(View(slice.Base, baseType, address), path, type, false, address), expected);
+        // 跨多个字段的位片（相邻字段合并的读取、按整数使用的结构体）按字段移位与或；模运算的片在载体整数上取。
+        if (slice.Width <= 64 && (oracle.FieldPieces(slice) is not null || slice.Base is OpSym modular && oracle.ModularArithmetic(modular) is not null))
+        {
+            var bits = expected is not null && types.Kind(expected) is TypeKind.Int or TypeKind.Pointer && Width(expected) >= slice.Width ? expected
+                : types.Integer(slice.Width <= 32 ? 32 : 64, false);
+            return Coerce(IntegerBits(slice, bits, address) ?? Hole(address, $"值 跨字段的片 {slice}", bits), expected, address);
+        }
         if (baseType is null) return Hole(address, $"类型 切片的来源 {slice.Base}", expected);
         var source = View(slice.Base, baseType, address);
         switch (types.Kind(baseType))
         {
             case TypeKind.Struct:
-                return oracle.FieldAt(baseType, slice.Low / 8 + RuntimeLayout.ObjectHeaderSize, slice.Width, false, false) is var (path, type) && slice.Low % 8 == 0
-                    ? Coerce(Nest(source, path, type, false, address), expected) : Hole(address, $"值 结构体 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected);
+                return Hole(address, $"值 结构体 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected);
             case TypeKind.Bool when slice.Low == 0:
                 return Coerce(source, expected, address);
             case TypeKind.Int or TypeKind.Pointer or TypeKind.Float or TypeKind.Double:
@@ -225,7 +251,7 @@ internal sealed partial class BodyBuilder
                         : slice.Width is 8 or 16 or 32 or 64 ? types.Integer(slice.Width, false) : carrier;
                     if (target.Equals(types.Boolean) || slice.Width == 1 && types.Kind(target) == TypeKind.Bool)
                         return new ComparisonValue(Cond.Ne, IntegerBits(slice, carrier, address) ?? Hole(address, "值 位", carrier), new ConstantValue(0, carrier, Width(carrier)), types.Boolean);
-                    return IntegerBits(slice, target, address) ?? Hole(address, $"值 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected);
+                    return Coerce(IntegerBits(slice, target, address) ?? Hole(address, $"值 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected), expected, address);
                 }
         }
         return Hole(address, $"值 {baseType} 的片 [{slice.Low}:{slice.Width}]", expected);
@@ -234,7 +260,10 @@ internal sealed partial class BodyBuilder
     /// <summary>拼接按期望类型解释：结构体按字段组成；整数为零扩展；bool 的零扩展即自身。</summary>
     private ManagedValue Composite(ConcatSym concat, TypeRef? expected, ulong address)
     {
-        if (oracle.CompositeRead(concat) is { } whole) return View(whole, expected, address);
+        // 整体读取的类型与期望的结构体不同（布局相同的另一个值类型）时，按字段组成。
+        if (oracle.CompositeRead(concat) is { } whole
+            && !(expected is not null && types.Kind(expected) == TypeKind.Struct && oracle.TypeOf(whole) is { } read && !read.Equals(expected) && oracle.Inside(read, expected) is null && oracle.Inside(expected, read) is null))
+            return View(whole, expected, address);
         expected ??= oracle.Unconstrained(concat.Width);
         if (expected is null) return Hole(address, $"类型 拼接没有期望类型 {concat}", null);
         switch (types.Kind(expected))
@@ -406,6 +435,12 @@ internal sealed partial class BodyBuilder
                 return IntegerBits(widePiece, target, address);
             case SliceSym slice when oracle.EnclosingScalar(slice) is var (scalar, scalarType, low):
                 return IntegerSlice(View(scalar, scalarType, address), low, slice.Width, target, address);
+            case SliceSym slice when oracle.FieldPieces(slice) is { } pieces:
+                return PackedFields(pieces, target, address);
+            case ReadSym merged when oracle.Locate(merged.Address, merged.Width) is null && oracle.FieldPieces(merged, 0, merged.Width) is { } parts:
+                return PackedFields(parts, target, address);
+            case SliceSym { Base: OpSym modular } slice when oracle.ModularArithmetic(modular) is { } wider:
+                return IntegerBits(modular, wider, address) is { } whole ? IntegerSlice(whole, slice.Low, slice.Width, target, address) : null;
             case SliceSym slice when oracle.IntegerRepresentation(slice.Base) is var (sourceType, integerType):
                 return IntegerSlice(Coerce(View(slice.Base, sourceType, address), integerType, address), slice.Low, slice.Width, target, address);
             case not ConcatSym when oracle.IntegerRepresentation(part) is var (atomType, integerType):
@@ -426,6 +461,21 @@ internal sealed partial class BodyBuilder
                 }
         }
         return null;
+    }
+
+    /// <summary>按字段分段的位作为整数类型 target 的值：各段移位后按位或。</summary>
+    private ManagedValue? PackedFields(IReadOnlyList<(int Bit, Sym Piece)> pieces, TypeRef target, ulong address)
+    {
+        var targetWidth = Width(target);
+        ManagedValue? packed = null;
+        foreach (var (bit, piece) in pieces)
+        {
+            if (bit >= targetWidth) break;
+            if (IntegerBits(piece, target, address) is not { } value) return null;
+            if (bit > 0) value = new BinaryValue(BinOp.Shl, value, new ConstantValue((ulong)bit, types.Int32, 32), target, targetWidth);
+            packed = packed is null ? value : new BinaryValue(BinOp.Or, packed, value, target, targetWidth);
+        }
+        return packed;
     }
 
     private ManagedValue IntegerSlice(ManagedValue source, int low, int width, TypeRef target, ulong address)

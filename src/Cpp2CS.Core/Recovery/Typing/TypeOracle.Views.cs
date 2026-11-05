@@ -21,6 +21,33 @@ public sealed partial class TypeOracle
         return null;
     }
 
+    /// <summary>
+    /// 跨多个字段的位片按字段边界分段：每段是一个字段内的位片，Bit 是它在位片中的位置。
+    /// 位片落到填充或布局未知时为 null，不解释没有字段的位。
+    /// </summary>
+    public IReadOnlyList<(int Bit, Sym Piece)>? FieldPieces(SliceSym slice) => FieldPieces(slice.Base, slice.Low, slice.Width);
+
+    /// <summary>值 source 的 [low, low+width) 位按字段边界分段；相邻字段合并的读取本身就是这种值。</summary>
+    public IReadOnlyList<(int Bit, Sym Piece)>? FieldPieces(Sym source, int low, int width)
+    {
+        IEnumerable<(int Bit, int Width)> fields = source is ReadSym read && Parts(read) is { } parts
+            ? parts.Select(p => (p.Bit, p.Width))
+            : TypeOf(source) is DefinitionRef structure && types.Kind(structure) == TypeKind.Struct
+                ? types.Projections(structure).Select(p => (p.Bit, p.Width)) : [];
+        var pieces = new List<(int, Sym)>();
+        var (at, end) = (low, low + width);
+        foreach (var (bit, size) in fields.OrderBy(f => f.Bit))
+        {
+            if (bit + size <= at) continue;
+            if (bit >= end) break;
+            if (bit > at) return null;
+            var stop = Math.Min(end, bit + size);
+            pieces.Add((at - low, values.Syms.Slice(source, at, stop - at)));
+            at = stop;
+        }
+        return at == end && pieces.Count > 1 ? pieces : null;
+    }
+
     /// <summary>合流投影已有完整结构体载体时保留该整体，让后续字段访问共用同一接收者。</summary>
     public (PhiSym Whole, TypeRef WholeType, IReadOnlyList<FieldRef> Path, TypeRef Type)? ProjectedField(PhiSym phi) =>
         phi.Projection is var (whole, low) && TypeOf(whole) is DefinitionRef structure
