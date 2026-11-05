@@ -215,6 +215,13 @@ public sealed class MethodDecompiler
             if (discovered.Count == 0) break;
             foreach (var (site, target) in discovered) targets.Add(site, target);
         }
+        // 活动异常栈的长度字段提升之后才是 SSA 值：栈顶可以按路径求出，读完之后 push 不再被观察。
+        // 读取换掉之后，下标地址的定义要清理掉，下一轮才能确认 push 没人读。
+        for (var round = 0; round < 3 && (ExceptionStackValues.TopValues(function, new CallMemoryEffects(environment.Shape, abi, settled: true), FreshTemporaries(function)) | ExceptionStackValues.Run(function)); round++)
+        {
+            var errors = Cpp2CS.Machine.Ssa.Lowering.Cleanup(function);
+            if (errors.Count > 0) return RecoveryDiagnostics.Fail(entry, $"L2 {errors[0]}", rule: "ExceptionStack");
+        }
         // 帧提升消去异常值的栈副本后，落地跳板可能才成为纯传值链。
         if (StackGuardNormalizer.Run(function))
         {

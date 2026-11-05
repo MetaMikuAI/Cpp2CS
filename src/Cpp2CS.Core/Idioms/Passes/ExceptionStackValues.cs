@@ -84,11 +84,13 @@ internal static class ExceptionStackValues
         Expr Expand(Expr expression) => ExprMap.Map(expression, e => e is Use use && definitions.TryGetValue(use.Variable, out var d)
             && !ExprMap.Walk(d.Value).Any(part => part is Load) ? Expand(d.Value) : null);
         static Expr Strip(Expr value) => value is Convert c ? Strip(c.Operand) : value;
-        static Expr Index(Expr value)
+        Expr Index(Expr value)
         {
             value = Strip(value);
-            return value is Binary { Op: BinOp.Sub, Right: Const after } sub
-                && Strip(sub.Left) is Binary { Op: BinOp.Add, Right: Const before } add && before.Value == after.Value ? Index(add.Left) : value;
+            if (value is Binary { Op: BinOp.Sub, Right: Const after } sub
+                && Strip(sub.Left) is Binary { Op: BinOp.Add, Right: Const before } add && before.Value == after.Value) return Index(add.Left);
+            // 长度字段放在栈槽时每次使用都重新读取：同一个槽的读取是同一个下标，前提是两次读取之间没有写它（见下面的回溯）。
+            return value is Use use && definitions.TryGetValue(use.Variable, out var read) && Strip(read.Value) is Load { Address: FrameAddress } field ? field : value;
         }
         (long Buffer, Expr Index)? Slot(Expr address) => Expand(address) is Binary
         {
@@ -101,7 +103,8 @@ internal static class ExceptionStackValues
             if (expression is Load read && Slot(read.Address) is { } slot && slot.Buffer == buffer) return false;
             return expression is FrameAddress frame ? frame.Offset == buffer : ExprMap.Children(expression).Any(e => Exposed(e, buffer));
         }
-        bool Private(long buffer) => !function.Blocks.SelectMany(b => b.Statements).Any(s => s is Store store && Slot(store.Target) is { } slot && slot.Buffer == buffer
+        // 固定偏移的写入（长度已知时折叠的 push）也只是写入，不暴露基址。
+        bool Private(long buffer) => !function.Blocks.SelectMany(b => b.Statements).Any(s => s is Store store && (Slot(store.Target) is { } slot && slot.Buffer == buffer || store.Target is FrameAddress)
             ? Exposed(store.Value, buffer) : ExprMap.Operands(s).Any(e => Exposed(e, buffer)));
         var changed = false;
         var buffers = new HashSet<long>();
@@ -117,10 +120,16 @@ internal static class ExceptionStackValues
                     Store? push = null;
                     var seen = new HashSet<Block>();
                     var steps = 0;
-                    while (push is null && steps < 32 && seen.Add(current))
+                    var stale = false;
+                    while (push is null && !stale && steps < 32 && seen.Add(current))
                     {
-                        for (; at >= 0 && push is null; at--, steps++)
-                            if (current.Statements[at] is Store store && Slot(store.Target) is { } candidate && candidate.Buffer == slot.Buffer) push = store;
+                        for (; at >= 0 && push is null && !stale; at--, steps++)
+                        {
+                            if (current.Statements[at] is not Store store) continue;
+                            if (Slot(store.Target) is { } candidate && candidate.Buffer == slot.Buffer) push = store;
+                            else if (slot.Index is Load { Address: FrameAddress length } && store.Target is FrameAddress written && written.Offset == length.Offset) stale = true;
+                        }
+                        if (stale) break;
                         if (push is not null || current.Predecessors is not [var previous] || !previous.NormalSuccessors.Contains(current)) break;
                         current = previous;
                         at = current.Statements.Count - 1;
@@ -133,59 +142,146 @@ internal static class ExceptionStackValues
                     changed = true;
                 }
             }
-        changed |= RemoveUnreadPushes(function, definitions, Slot);
-        foreach (var buffer in buffers)
-        {
-            var writes = function.Blocks.SelectMany(b => b.Statements).OfType<Store>()
-                .Where(s => Slot(s.Target) is { } slot && slot.Buffer == buffer).ToHashSet();
-            bool UsesBuffer(Expr e) => ExprMap.Walk(e).OfType<FrameAddress>().Any(f => f.Offset == buffer);
-            if (function.Blocks.SelectMany(b => b.Statements).Any(s => s is Store store && writes.Contains(store)
-                    ? UsesBuffer(store.Value) : ExprMap.Operands(s).Any(UsesBuffer))) continue;
-            foreach (var block in function.Blocks) block.Statements.RemoveAll(s => s is Store store && writes.Contains(store));
-        }
+        changed |= RemoveUnreadPushes(function, Slot);
         return changed;
     }
 
     /// <summary>
-    /// 活动异常栈只有 top() 才读取内容；没有重新抛出时 push 写入的内容不会被观察。下标取自紧随数组的长度字段，
-    /// 数组就是 [基址, 长度字段)。这段内存的地址没有别的用途（含 top() 折叠出的更低基址）时，下标写入可以删除。
+    /// 活动异常栈的内容只有 top() 才读取；所有读取都换成值或根本没有读取时，push 不再被观察。数组的范围取到它上方第一个被读取的位置。
+    /// 下标写入和长度已知时折叠成固定偏移的写入都算 push；top() 的下标是长度减一，基址可能被折叠到更低的地址，也算读取。
     /// </summary>
-    private static bool RemoveUnreadPushes(MachineFunction function, IReadOnlyDictionary<Variable, Define> definitions, Func<Expr, (long Buffer, Expr Index)?> slot)
+    private static bool RemoveUnreadPushes(MachineFunction function, Func<Expr, (long Buffer, Expr Index)?> slot, IEnumerable<long>? known = null)
     {
-        static long? Length(Expr index, IReadOnlyDictionary<Variable, Define> definitions)
+        var statements = function.Blocks.SelectMany(b => b.Statements).ToArray();
+        IEnumerable<Expr> Observations(Stmt statement) => statement switch
         {
-            while (index is Convert convert) index = convert.Operand;
-            if (index is Use use && definitions.TryGetValue(use.Variable, out var definition)) index = definition.Value;
-            while (index is Convert inner) index = inner.Operand;
-            return index is Load { Address: FrameAddress field } ? field.Offset : null;
-        }
+            Store store when slot(store.Target) is not null || store.Target is FrameAddress => [store.Value],
+            Call call => [call.Target, .. call.Arguments, .. call.DelegateReceiver is { } receiver ? [receiver] : Array.Empty<Expr>()],
+            _ => ExprMap.Operands(statement),
+        };
+        var observed = statements.SelectMany(Observations).SelectMany(ExprMap.Walk).ToArray();
+        var offsets = observed.OfType<FrameAddress>().Select(f => f.Offset).ToHashSet();
+        var indexedRoots = observed.OfType<Binary>().Where(b => b is { Op: BinOp.Add, Left: FrameAddress, Right: not Const }).Select(b => ((FrameAddress)b.Left).Offset).ToArray();
         var removed = false;
-        var pushes = function.Blocks.SelectMany(b => b.Statements).OfType<Store>()
-            .Select(store => (Store: store, Slot: slot(store.Target))).Where(p => p.Slot is not null).ToArray();
-        foreach (var group in pushes.GroupBy(p => p.Slot!.Value.Buffer))
+        foreach (var buffer in statements.OfType<Store>().Select(s => slot(s.Target)?.Buffer).OfType<long>().Concat(known ?? []).Distinct().ToArray())
         {
-            var buffer = group.Key;
-            var lengths = group.Select(p => Length(p.Slot!.Value.Index, definitions)).Distinct().ToArray();
-            if (lengths is not [{ } limit] || limit <= buffer) continue;
-            var writes = group.Select(p => p.Store).ToHashSet();
-            // top() 的下标是长度减一，基址可能被折叠到更低的地址；固定偏移的低地址是别的栈槽。
-            bool Reaches(Expr value) => value switch
-            {
-                FrameAddress frame => frame.Offset >= buffer && frame.Offset < limit,
-                Binary { Op: BinOp.Add, Left: FrameAddress frame, Right: not Const } => frame.Offset >= buffer - 16 && frame.Offset < limit,
-                _ => false,
-            };
-            // 长度已知为零时，clang 把下标写入折叠成固定偏移，同样算作 push。
-            bool Written(Store store) => writes.Contains(store) || store.Target is FrameAddress field && field.Offset >= buffer && field.Offset < limit;
-            IEnumerable<Expr> Uses(Stmt statement) => statement switch
-            {
-                Store store when Written(store) => [store.Value],
-                Call call => [call.Target, .. call.Arguments, .. call.DelegateReceiver is { } receiver ? [receiver] : Array.Empty<Expr>()],
-                _ => ExprMap.Operands(statement),
-            };
-            if (function.Blocks.SelectMany(b => b.Statements).SelectMany(Uses).SelectMany(ExprMap.Walk).Any(Reaches)) continue;
+            if (offsets.Contains(buffer) || indexedRoots.Any(r => r >= buffer - 16 && r < buffer)) continue;
+            var above = offsets.Where(o => o > buffer).DefaultIfEmpty(0).Min();
+            bool Written(Store store) => slot(store.Target)?.Buffer == buffer || store.Target is FrameAddress field && field.Offset >= buffer && field.Offset < above;
             foreach (var block in function.Blocks) removed |= block.Statements.RemoveAll(s => s is Store store && Written(store)) > 0;
         }
         return removed;
+    }
+
+    /// <summary>
+    /// 活动异常栈的 top()：data[size - 1]，size 沿路径由常量、push 后的加一和 φ 给出（不同路径上栈深不同）。沿 φ 网络求出每个到达路径上的栈顶值，
+    /// 读取换成这些值的 φ。追溯只接受这些形式，出现 pop（减一）就不成立；size 为零的路径上栈是空的，读到的是未定义内容，取 0。
+    /// 长度字段可能在栈槽里，所以放在内存提升之后运行。
+    /// </summary>
+    public static bool TopValues(MachineFunction function, IFrameCallEffects effects, Func<Variable> fresh)
+    {
+        var definitions = function.Blocks.SelectMany(b => b.Statements).OfType<Define>().ToDictionary(d => d.Target);
+        var phis = function.Blocks.SelectMany(b => b.Statements.OfType<Phi>().Select(p => (Phi: p, Block: b))).ToDictionary(p => p.Phi.Target);
+        var homes = function.Blocks.SelectMany(b => b.Statements.OfType<Define>().Select(d => (d.Target, Block: b))).ToDictionary(p => p.Target, p => p.Block);
+        var dominators = Dominators.Compute(function);
+        static Expr Strip(Expr value) => value is Convert c ? Strip(c.Operand) : value;
+        Expr Expand(Expr e) => ExprMap.Map(e, v => v is Use use && definitions.TryGetValue(use.Variable, out var d) && !ExprMap.Walk(d.Value).Any(p => p is Load) ? Expand(d.Value) : null);
+        Variable? Size(Expr value) => Strip(value) is Use use ? use.Variable : null;
+        (long Buffer, Variable Size)? Top(Expr address)
+        {
+            var terms = TermsPass.Terms(Expand(address)).ToArray();
+            var offset = terms.OfType<Const>().Aggregate(0L, (sum, c) => sum + unchecked((long)c.Value));
+            var rest = terms.Where(t => t is not Const).ToArray();
+            var frame = rest.OfType<FrameAddress>().ToArray();
+            var scaled = rest.OfType<Binary>().Where(b => b is { Op: BinOp.Shl, Right: Const { Value: 3 } }).ToArray();
+            if (rest.Length != 2 || frame is not [var root] || scaled is not [var shift]) return null;
+            // 下标写成 size - 1，或者 size 加上折叠到基址里的 -8。
+            if (Strip(shift.Left) is Binary { Op: BinOp.Add, Right: Const { Value: 0xffffffff or ulong.MaxValue } } or Binary { Op: BinOp.Sub, Right: Const { Value: 1 } })
+                return Size(((Binary)Strip(shift.Left)).Left) is { } counted ? (root.Offset + offset, counted) : null;
+            return Size(shift.Left) is { } size ? (root.Offset + offset + 8, size) : null;
+        }
+        (long Buffer, Variable Size)? Pushes(Expr address)
+        {
+            var terms = TermsPass.Terms(Expand(address)).ToArray();
+            var rest = terms.Where(t => t is not Const).ToArray();
+            return rest.Length == 2 && rest.OfType<FrameAddress>().ToArray() is [var root]
+                && rest.OfType<Binary>().ToArray() is [{ Op: BinOp.Shl, Right: Const { Value: 3 } } shift] && Size(shift.Left) is { } size
+                ? (root.Offset + terms.OfType<Const>().Aggregate(0L, (sum, c) => sum + unchecked((long)c.Value)), size) : null;
+        }
+        FrameModel? model = null;
+        var changed = false;
+        var buffers = new HashSet<long>();
+        foreach (var block in function.Blocks.ToArray())
+            for (var i = 0; i < block.Statements.Count; i++)
+            {
+                if (block.Statements[i] is not Define { Value: Load { Width: 64, Address: var address } } load || Top(address) is not var (buffer, size)) continue;
+                if (function.Blocks.SelectMany(b => b.Statements).OfType<Call>().SelectMany(c => c.Arguments).SelectMany(ExprMap.Walk).OfType<FrameAddress>().Any(f => f.Offset >= buffer && f.Offset < buffer + 16)) continue;
+                model ??= new FrameModel(function, effects);
+                var plannedPhis = new List<(Block Block, Phi Phi)>();
+                var plannedDefines = new List<(Block Block, Define Define)>();
+                var memo = new Dictionary<Variable, Variable?>();
+                Variable? Pushed(Variable before, Block at)
+                {
+                    // size + 1 的定义之前最近一次按 size 下标的写入。
+                    var visited = new HashSet<Block>();
+                    for (var current = at; current is not null && visited.Add(current); current = current.Predecessors is [var only] ? only : null)
+                        for (var k = current.Statements.Count - 1; k >= 0; k--)
+                            if (current.Statements[k] is Store store && Pushes(store.Target) is var (root, index) && root == buffer && index == before)
+                                return store.Value is Use { Width: 64 } value ? value.Variable : null;
+                    return null;
+                }
+                // size 取 value 时、在 pred 的末尾可用的栈顶值。
+                Variable? AtEnd(Variable value, Block pred, int depth)
+                {
+                    if (depth > 32) return null;
+                    if (memo.TryGetValue(value, out var known)) return known;
+                    if (phis.TryGetValue(value, out var source))
+                    {
+                        var top = fresh();
+                        memo[value] = top;
+                        var sources = new Variable?[source.Phi.Sources.Length];
+                        for (var k = 0; k < sources.Length; k++)
+                            if ((sources[k] = AtEnd(source.Phi.Sources[k], source.Block.Predecessors[k], depth + 1)) is null) return memo[value] = null;
+                        plannedPhis.Add((source.Block, new Phi(source.Phi.Address, top, sources!)));
+                        return top;
+                    }
+                    if (!definitions.TryGetValue(value, out var definition)) return null;
+                    switch (Strip(definition.Value))
+                    {
+                        case Use copy:
+                            return AtEnd(copy.Variable, pred, depth + 1);
+                        case Binary { Op: BinOp.Add, Right: Const { Value: 1 } } increment when Size(increment.Left) is { } before:
+                            return Pushed(before, homes[value]);
+                        case Const { Value: 0 }:
+                            {
+                                var undefined = fresh();
+                                plannedDefines.Add((pred, new Define(definition.Address, undefined, Expr.C(0, 64))));
+                                return undefined;
+                            }
+                        case Const { Value: var count and < 8 }:
+                            {
+                                // 数组的地址没有传给任何调用，调用改不了它。
+                                var reach = model.Reach(pred, pred.Statements.Count, buffer + (long)(count - 1) * 8, 8, throughCalls: true);
+                                return reach is { Complete: true, Stores: [{ Value: Use { Width: 64 } pushed }] } && Defining(pushed.Variable) is { } home && dominators.Dominates(home.Index, pred.Index)
+                                    ? pushed.Variable : null;
+                            }
+                        default:
+                            return null;
+                    }
+                }
+                Block? Defining(Variable variable) => function.Blocks.FirstOrDefault(b => b.Statements.Any(s => s is Define d && d.Target == variable || s is Phi p && p.Target == variable || s is Call c && c.Defines.Contains(variable)));
+                if (AtEnd(size, block, 0) is not { } value) continue;
+                foreach (var (target, define) in plannedDefines)
+                    target.Statements.Insert(target.Statements.LastOrDefault() is Jump or Branch or Call ? target.Statements.Count - 1 : target.Statements.Count, define);
+                foreach (var (target, phi) in plannedPhis) target.Statements.Insert(0, phi);
+                i = block.Statements.IndexOf(load);
+                block.Statements[i] = load with { Value = new Use(value, 64) };
+                buffers.Add(buffer);
+                changed = true;
+                model = null;
+            }
+        // 所有读取换掉之后，长度已知时折叠成固定偏移的 push 就没有下标写入可供识别了，按这里求出的数组删除。
+        if (changed) RemoveUnreadPushes(function, address => Pushes(address) is var (root, index) ? (root, new Use(index, 64)) : null, buffers);
+        return changed;
     }
 }
