@@ -23,7 +23,7 @@ internal static class Inspect
         var facts = FactsBuilder.Build(binary, metadata, options: new Cpp2CS.Options.RecoveryOptions { FactCacheFile = cache });
         var types = new ManagedTypes(facts.Model, facts.Layouts);
         var decompiler = new MethodDecompiler(facts, types);
-        foreach (var target in Targets(facts, targets))
+        foreach (var target in Targets(facts, types, targets))
         {
             Console.Write($"== 0x{target.Entry:x} {target.Instance}");
             var method = target.Shared ? decompiler.BindShared(target.Instance, target.Entry) : target.Instance;
@@ -50,7 +50,7 @@ internal static class Inspect
         return 0;
     }
 
-    private static IEnumerable<RecoveryTarget> Targets(ProgramFacts facts, List<string> targets)
+    private static IEnumerable<RecoveryTarget> Targets(ProgramFacts facts, ManagedTypes types, List<string> targets)
     {
         foreach (var target in targets)
         {
@@ -65,8 +65,10 @@ internal static class Inspect
             }
             if (target.StartsWith("name:", StringComparison.Ordinal))
             {
-                foreach (var definition in facts.Model.Methods.Where(m => m.Address != 0 && $"{m.Owner.FullName}.{m.Name}" == target[5..]))
-                    yield return new RecoveryTarget(MethodRef.Open(definition), definition.Address);
+                // 共享泛型定义没有自己的地址，按写出时选用的见证入口查找；名字可写开放形式（Owner<T>.Method<U>）。
+                foreach (var definition in new MethodEntries(facts, types).Definitions.Where(e => e.Instance.Method is var m
+                    && ($"{m.Owner.FullName}.{m.Name}" == target[5..] || MethodRef.Open(m).ToString() == target[5..])))
+                    yield return new RecoveryTarget(definition.Instance.Method.Address != 0 ? MethodRef.Open(definition.Instance.Method) : definition.Instance, definition.Address);
                 continue;
             }
             var entry = Convert.ToUInt64(target.StartsWith("0x", StringComparison.Ordinal) ? target[2..] : target, 16);
