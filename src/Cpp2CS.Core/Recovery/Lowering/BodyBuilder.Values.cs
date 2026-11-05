@@ -90,6 +90,8 @@ internal sealed partial class BodyBuilder
             && oracle.FieldCopy(source, target) is { } copy)
             return Composed(target, copy.Select(f => (f.Target,
                 Coerce(Nest(value, f.Source, f.SourceType, false, address), f.TargetType, address))).ToList(), address);
+        if (value.Type.Equals(types.Object) && expected is DefinitionRef && ManagedTypes.IsReferenceType(expected))
+            return new CheckedCastValue(value, expected);
         if (ManagedTypes.IsReferenceType(value.Type) && ManagedTypes.IsReferenceType(expected)) return value;
         var (from, to) = (types.Kind(value.Type), types.Kind(expected));
         if (Width(value.Type) == Width(expected) && value.Width is 32 or 64
