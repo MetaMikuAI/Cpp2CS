@@ -80,6 +80,7 @@ internal static class ArchitectureChecks
         MathImports(checks, types);
         ConstantMemoryCopies(checks, facts, types);
         ThrowObservedCells(checks, facts, types);
+        AddressableCellTypes(checks, facts, types);
         ArrayIndices(checks);
         Barriers(checks, types);
         UnchangedBarriers(checks, facts);
@@ -1737,14 +1738,18 @@ internal static class ArchitectureChecks
     private static void ThrowObservedCells(Assertions check, ProgramFacts facts, ManagedTypes types)
     {
         var lifter = new Cpp2CS.Machine.Lifting.FunctionLifter(facts);
-        foreach (var (name, transfer, handlerReads, promoted) in new[]
+        var slot = new FrameAddress(-16);
+        var high = new FrameAddress(-12);
+        Stmt ReadSlot() => new Return(56) { Pieces = [new(0, new Load(slot, 64))] };
+        foreach (var (name, transfer, handler, promoted) in new (string, Transfer, Stmt[], bool)[]
         {
-            ("处理块读取 ref 写入的单元", Transfer.Reference, true, false),
-            ("处理块不读取", Transfer.Reference, false, true),
-            ("按副本传递时调用不改写单元", Transfer.Copy, true, true),
+            ("处理块读取 ref 写入的单元", Transfer.Reference, [ReadSlot()], false),
+            ("处理块不读取", Transfer.Reference, [new Return(48)], true),
+            ("按副本传递时调用不改写单元", Transfer.Copy, [ReadSlot()], true),
+            ("处理块先用部分写入覆盖整个单元再读取", Transfer.Reference, [new Store(48, slot, Expr.C(1, 32)), new Store(52, high, Expr.C(2, 32)), ReadSlot()], true),
+            ("处理块的部分写入留下调用写入的字节", Transfer.Reference, [new Store(48, slot, Expr.C(1, 32)), ReadSlot()], false),
         })
         {
-            var slot = new FrameAddress(-16);
             var access = transfer == Transfer.Reference ? MemoryAccess.ReadWrite : MemoryAccess.Read;
             var callee = new MachineSignature([new MachineValue(0, new ByRefRef(types.Int64), transfer, [new(Storage.Gpr(0), 64, 0)], 8, access)], null, null, 0);
             // 两个调用共用落地块：只有一个前驱的落地块没有 φ，读到的就是调用写出的版本。
@@ -1752,11 +1757,11 @@ internal static class ArchitectureChecks
             var entry = new Block(0) { End = 12 };
             var second = new Block(16) { End = 24 };
             var next = new Block(32) { End = 36 };
-            var landing = new Block(48) { End = 52, IsLandingPad = true };
+            var landing = new Block(48) { End = 60, IsLandingPad = true };
             entry.Statements = [new Store(0, slot, Expr.C(0, 64)), Invoke(4), new Jump(8, second.Start)];
             second.Statements = [Invoke(16), new Jump(20, next.Start)];
             next.Statements = [new Return(32) { Pieces = [new(0, new Load(slot, 64))] }];
-            landing.Statements = [handlerReads ? new Return(48) { Pieces = [new(0, new Load(slot, 64))] } : new Return(48)];
+            landing.Statements = [.. handler];
             MachineFunction.AddEdge(entry, second);
             MachineFunction.AddEdge(second, next);
             foreach (var thrower in new[] { entry, second })
@@ -1765,12 +1770,65 @@ internal static class ArchitectureChecks
                 landing.Predecessors.Add(thrower);
                 thrower.Handler = landing;
             }
-            var function = new MachineFunction { Entry = 0, Range = new(0, 56, CodeRegion.Managed, default), Blocks = [entry, second, next, landing] };
+            var function = new MachineFunction { Entry = 0, Range = new(0, 64, CodeRegion.Managed, default), Blocks = [entry, second, next, landing] };
             function.Renumber();
             var result = Cpp2CS.Recovery.Memory.MemoryPromotion.Run(function, new MachineSignature([], null, null, 0), c => new(c, [], callee),
                 new ManagedAbi(facts.Layouts), lifter.Calls, lifter.Machine.Convention.StackPointer);
             check.True(result.TryGet(out var layout, out _) && layout.Cells.Single().Promoted == promoted, $"异常路径观察单元：{name}");
         }
+    }
+
+    /// <summary>可寻址单元的类型：RGCTX 项的类型参数带上当前入口的见证；收集证据期间经单元得到的类型不留用。</summary>
+    private static void AddressableCellTypes(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var abi = new ManagedAbi(facts.Layouts);
+        var shapes = new CallShapes(facts, abi, (_, _) => false);
+        var owner = Type("CellTypes", 830);
+        (TypeOracle Oracle, ValueModel Values) Analyze(Cell cell, MethodRef method, params Stmt[] statements)
+        {
+            var function = new MachineFunction { Entry = 0, Range = new(0, 32, CodeRegion.Managed, default),
+                Blocks = [new Block(0) { End = 32, Statements = [.. statements, new Return(28)] }] };
+            function.Renumber();
+            var environment = new MethodEnvironment(method, abi.Machine(method, out _)!, shapes);
+            var values = ValueModel.Build(function, environment);
+            return (new(types, facts, method, environment.Shape, values, new([cell])), values);
+        }
+
+        // 方法自身的 RGCTX 项写的是元数据里的 T；当前入口把它绑定为引用。
+        var parameter = new GenericParameterRef("T", true, 0);
+        var fill = Method(owner, "Fill", 830, MethodAttributes.Public | MethodAttributes.Static);
+        fill.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        var get = Method(owner, "Get", 831, MethodAttributes.Public | MethodAttributes.Static);
+        get.GenericParameters = fill.GenericParameters;
+        get.Parameters = [new("value", new ByRefRef(parameter), 0, null, false)];
+        var current = new MethodRef(fill, [], [parameter with { Binding = new(NativeBindingKind.Reference, types.Object, 1) }]);
+        var narrow = new Cell(0, LocalSpace.Frame, -8, 8, "异常路径观察 ref 调用写入的内容");
+        var (typed, _) = Analyze(narrow, current, new Call(4, CallKind.Direct, Expr.C(1, 64))
+        {
+            Resolved = new MethodRef(get, [], [parameter]),
+            Arguments = [new FrameAddress(-8), new Symbol(SymbolKind.Method, new MethodRef(get, [], [parameter]))],
+            Sources = [Storage.Gpr(0), Storage.Gpr(1)],
+        });
+        check.True(typed.CellType(narrow) is GenericParameterRef { SharedReference: true } && typed.Locate(new LocalSym(LocalSpace.Frame, -8), 64) is { Kind: LocationKind.Local },
+            "RGCTX 项的类型参数代入当前入口后，单元可以按引用定位");
+
+        // 证据来自 ref this；另一调用的接收者读自单元，它的类型在证据收集之后才可知。
+        var holder = new TypeDef { Index = 832, Name = "Holder", Namespace = "Tests", Assembly = "Tests.dll", Token = 0,
+            Attributes = TypeAttributes.Public | TypeAttributes.SequentialLayout, IsValueType = true, IsEnum = false, Size = 16 };
+        holder.Fields =
+        [
+            new FieldDef { Index = 832, Owner = holder, Name = "item", Type = types.String, Offset = 0, Attributes = FieldAttributes.Public },
+            new FieldDef { Index = 833, Owner = holder, Name = "count", Type = types.Int64, Offset = 8, Attributes = FieldAttributes.Public },
+        ];
+        var wide = new Cell(0, LocalSpace.Frame, -16, 16, "异常路径观察 ref 调用写入的内容");
+        var slot = new FrameAddress(-16);
+        var read = new Variable(Storage.Gpr(2), 1);
+        var (viaCell, values) = Analyze(wide, new MethodRef(Method(owner, "Run", 834, MethodAttributes.Public | MethodAttributes.Static), [], []),
+            new Define(4, read, new Load(slot, 64)),
+            new Call(8, CallKind.Direct, Expr.C(1, 64)) { Resolved = new MethodRef(Method(owner, "Use", 833), [], []), Arguments = [new Use(read, 64)], Sources = [Storage.Gpr(0)] },
+            new Call(12, CallKind.Direct, Expr.C(1, 64)) { Resolved = new MethodRef(Method(holder, "Advance", 832), [], []), Arguments = [slot], Sources = [Storage.Gpr(0)] });
+        check.True(viaCell.CellType(wide) == new DefinitionRef(holder, []) && viaCell.TypeOf(values.Of(read)) == types.String,
+            "收集证据时经单元读取的类型不留用");
     }
 
     private static void ConstantMemoryCopies(Assertions check, ProgramFacts facts, ManagedTypes types)

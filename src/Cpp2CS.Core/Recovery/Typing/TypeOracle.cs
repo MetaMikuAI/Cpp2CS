@@ -132,8 +132,11 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                     && (!WithinCell(r.Address, r.Width) || !FullCell(r.Address, r.Width) && !Initialized(r.Site)))) continue;
                 cellTypes[target] = types.Integer(target.Size * 8, false);
             }
-            // 收集证据时单元类型还不可用，这期间按接收者类型选出的调用目标不能留用。
+            // 收集证据时单元类型还不可用，这期间依赖单元类型得到的结果（按接收者选出的调用目标、经单元读取的类型）不能留用。
+            memo.Clear();
             callees.Clear();
+            parts.Clear();
+            storeGroups.Clear();
         }
         return cellTypes.GetValueOrDefault(cell);
     }
@@ -189,12 +192,12 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         if (shape.Signature?.MethodInfo is { } info && (info.Register.Bank == Bank.Stack ? StackInfo() : Register(info.Register)) is { } infoSym
             && SymTable.Resolve(infoSym) is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef exact } }
             && candidates.Any(c => c.Method == exact.Method))
-            return callees[call] = exact;
+            return callees[call] = InContext(exact);
         // 约束调用的 RGCTX 项指名接收者的确切类型，折叠的候选里取声明在该类型上的方法。
         if (shape.Signature?.MethodInfo is { Register.Bank: not Bank.Stack } constrainedInfo && Register(constrainedInfo.Register) is { } constrainedSym
             && SymTable.Resolve(constrainedSym) is EntitySym { Symbol: { Kind: SymbolKind.Constrained, Value: ValueTuple<TypeRef, MethodRef> { Item1: DefinitionRef constrained } } }
             && candidates.FirstOrDefault(c => c.Method.Owner == constrained.Definition) is { } implementation)
-            return callees[call] = implementation with { TypeArguments = constrained.Arguments };
+            return callees[call] = InContext(implementation with { TypeArguments = constrained.Arguments });
         var receiver = shape.Signature?.This is { } self && self.Pieces[0].Register.Bank == Bank.Gpr ? Register(self.Pieces[0].Register) : null;
         var receiverType = receiver is not null && call.Op?.Kind != OpKind.CallDelegate ? TypeOf(receiver) : null;
         if (receiverType is ByRefRef byRef) receiverType = byRef.Element;
@@ -206,6 +209,13 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         if (receiverType is DefinitionRef owner && !chosen.Method.IsStatic) chosen = Specialize(chosen, owner);
         return callees[call] = chosen;
     }
+
+    /// <summary>方法自身的 RGCTX 项写的是元数据里的类型参数，代入当前入口的实参后才带上原生布局见证。</summary>
+    private MethodRef InContext(MethodRef callee) => callee with
+    {
+        TypeArguments = callee.TypeArguments.Select(Substitute).ToArray(),
+        MethodArguments = callee.MethodArguments.Select(Substitute).ToArray(),
+    };
 
     /// <summary>接收者类型沿基类链到声明类型的距离；不在链上时为最大。</summary>
     private static int Distance(TypeRef? receiver, TypeRef owner)

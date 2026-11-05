@@ -47,7 +47,8 @@ internal static partial class ExecutionCheck
         var cecil = new CecilModel(facts.Model, skeleton);
         var interpreter = new CilInterpreter(cecil, index);
         var written = all.GroupBy(r => r.Method.Method).ToDictionary(g => g.Key, g => g.First());
-        interpreter.SetInline(emitter, skeleton, method => decompiler.Summary(method) is { Body: { } own, Entry: var entry }
+        // 内联目标的实参可能提到调用方的类型参数，而 CIL 的 VAR/MVAR 只引用所在类型和方法自己的参数（ECMA-335 II.7.1）：按原生见证闭合后才能写成实例体。
+        interpreter.SetInline(emitter, skeleton, method => decompiler.Summary(WithWitnesses(method)) is { Body: { } own, Entry: var entry }
             && written.GetValueOrDefault(method.Method)?.Entry != entry ? emitter.BuildInstance(own) : null);
         using var machine = new NativeMachine(facts);
         var verdicts = new Dictionary<ExecutionVerdict, int>();
@@ -228,6 +229,21 @@ internal static partial class ExecutionCheck
             values.Add(interpreter.FromBytes(type, bytes));
         }
         return (bits, values);
+    }
+
+    /// <summary>类型参数代入入口的原生见证；没有见证的参数保持原样。</summary>
+    private static MethodRef WithWitnesses(MethodRef method)
+    {
+        TypeRef Close(TypeRef type) => type switch
+        {
+            GenericParameterRef { Binding.Layout: { } layout } => layout,
+            DefinitionRef { Arguments.Count: > 0 } d => d with { Arguments = d.Arguments.Select(Close).ToArray() },
+            ArrayRef a => a with { Element = Close(a.Element) },
+            PointerRef p => p with { Element = Close(p.Element) },
+            ByRefRef r => r with { Element = Close(r.Element) },
+            _ => type,
+        };
+        return method with { TypeArguments = method.TypeArguments.Select(Close).ToArray(), MethodArguments = method.MethodArguments.Select(Close).ToArray() };
     }
 
     /// <summary>方法清单（制表符分隔，第 addressColumn 列为十六进制入口、第 nameColumn 列为方法名，两者都要对得上）。</summary>
