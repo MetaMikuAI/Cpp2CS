@@ -1,3 +1,4 @@
+using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Recovery.Typing;
@@ -30,7 +31,7 @@ internal static class DispatchResolution
         {
             MethodRef? method = call.Op switch
             {
-                null when call.Kind is CallKind.Indirect or CallKind.TailIndirect => MethodPointer(values.Operands(call)[0]),
+                null when call.Kind is CallKind.Indirect or CallKind.TailIndirect => MethodPointer(values.Operands(call)[0]) ?? SplitDispatch(call, values, oracle),
                 { Kind: OpKind.CallMethodPointer } => MethodPointer(values.Operands(call)[0]),
                 { Kind: OpKind.CallDelegate, Operand: MethodRef invoke } => invoke,
                 { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } pair } => Slot(itf, pair.Item2, interfaceOnly: true),
@@ -49,6 +50,20 @@ internal static class DispatchResolution
         ReadSym { Width: 64, Address: EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef method } } } => method,
         _ => null,
     };
+
+    /// <summary>
+    /// L2 按模板识别虚调用和接口调用时目标还是合流值；路径拆分之后目标成为单一读取，这里按同样的形态解析：
+    /// 接口查找结果的方法指针，或接收者类指针上虚表槽的方法指针。
+    /// </summary>
+    private static MethodRef? SplitDispatch(Call call, ValueModel values, TypeOracle oracle)
+    {
+        if (SymTable.Resolve(values.Operands(call)[0]) is not ReadSym { Width: 64 } target) return null;
+        if (SymTable.Resolve(target.Address) is ResultSym { Site: Call { Op: { Kind: OpKind.InterfaceInvokeData, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } lookup } } })
+            return Slot(itf, lookup.Item2, interfaceOnly: true);
+        return oracle.Decompose(target.Address) is (_, var offset, null, _) && offset >= RuntimeLayout.ClassVtable
+            && (offset - RuntimeLayout.ClassVtable) % RuntimeLayout.VirtualInvokeDataSize == 0 && Receiver(call, values) is { } receiver
+            ? oracle.VirtualMethod(target, receiver) : null;
+    }
 
     private static Sym? Receiver(Call call, ValueModel values)
     {
