@@ -79,6 +79,8 @@ internal sealed partial class BodyBuilder
             }
             var argument = value.Index < 0 && call.Op?.Kind == OpKind.CallDelegate && call.DelegateReceiver is not null
                 ? View(operands[1 + call.Arguments.Length], type, call.Address)
+                // 被吸收的判空要求接收者就是判过的值：换成默认值后 callvirt 必然抛出。
+                : value.Index < 0 && absorbedChecks.Contains(contents[i]) ? Argument(call, value, type, contents[i], arguments, output)
                 : Unconstrained(shape, value, type, contents[i]) ?? Argument(call, value, type, contents[i], arguments, output);
             if (value.Index < 0) receiver = argument;
             else managed.Add(argument);
