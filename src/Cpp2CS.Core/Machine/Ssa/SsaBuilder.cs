@@ -73,7 +73,7 @@ public sealed class SsaBuilder
                         Arguments = calls.Reads(call).Select(s => (Expr)new Read(s, s.Width)).ToArray(),
                         Sources = calls.Reads(call).ToArray(),
                         Results = calls.Results(call).ToArray(),
-                        StackPointer = stackPointer is { } sp ? new Read(sp, sp.Width) : null,
+                        StackPointer = call.StackPointer ?? (stackPointer is { } sp ? new Read(sp, sp.Width) : null),
                     },
                     Return { Value: null, Pieces.Length: 0, Buffer: null } ret when returnPieces is { Length: > 0 } => ret with { Pieces = returnPieces },
                     Return { Value: null, Pieces.Length: 0, Buffer: null } ret when returnValue is not null => ret with { Value = returnValue },

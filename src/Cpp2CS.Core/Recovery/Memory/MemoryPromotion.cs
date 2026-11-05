@@ -189,6 +189,8 @@ internal sealed class MemoryPromotion
                         if (effect.Size > 0) Add(effect.Space, effect.Offset, effect.Size);
                         else Escape(effect.Space, effect.Offset, "调用访问范围未知");
                     var covered = effects.Select(e => e.Argument).ToHashSet();
+                    // 隐藏 MethodInfo 的寄存器只传方法指针，里面残留的旧值不是实参。
+                    if (shapes(call).Signature?.MethodInfo is { } hidden && call.ArgumentIndex(hidden.Register) is >= 0 and var slot) covered.Add(slot);
                     for (var i = 0; i < call.Arguments.Length; i++)
                         if (!covered.Contains(i)) Walk(call.Arguments[i], shapes(call) is { Signature: null, IsRuntime: false } ? "未知调用的实参" : "调用实参");
                     if (call.DelegateReceiver is { } receiver) Walk(receiver, "委托接收者");

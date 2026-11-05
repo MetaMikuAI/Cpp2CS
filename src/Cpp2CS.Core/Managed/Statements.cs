@@ -1,7 +1,14 @@
 namespace Cpp2CS.Managed;
 
 public abstract record ManagedStatement(ulong Address);
-public sealed record ManagedAssignment(ulong Address, LocalValue Target, ManagedValue Value) : ManagedStatement(Address);
+public sealed record ManagedAssignment(ulong Address, LocalValue Target, ManagedValue Value) : ManagedStatement(Address)
+{
+    /// <summary>
+    /// 异常边上 φ 的赋值：局部只在异常到达处理块之后读取，而每个能到达的抛出点之前都有这样的赋值，
+    /// 所以它的值只有在紧随其后的语句抛出时才能被观察到。
+    /// </summary>
+    public bool ExceptionArrival { get; init; }
+}
 /// <summary>写入字段、静态字段或数组元素。</summary>
 public sealed record ManagedStore(ulong Address, ManagedValue Target, ManagedValue Value) : ManagedStatement(Address);
 /// <summary>调用。原生的尾调用也写成调用加返回，只有一种形式。</summary>

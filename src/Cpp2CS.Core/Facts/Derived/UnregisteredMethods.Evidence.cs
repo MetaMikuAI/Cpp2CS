@@ -60,6 +60,15 @@ public static partial class UnregisteredInference
                 AbiSignature? signature = null;
                 ulong[] matches = [];
                 var adjustors = Adjustors(group.Key, observations);
+                // IL2CPP 在调用方的翻译单元生成的 inline 副本：非泛型方法不传 MethodInfo，没有见证。
+                // 机器码（含引用的数据）与唯一一个注册的非泛型定义同形时，它就是这个方法的副本。
+                // 它的身份只由方法体决定，个别调用方分析不完整不影响结论。
+                var copied = definitions.Length == 0 ? UniqueCopy(functions[group.Key], shapes) : null;
+                if (copied is not null)
+                {
+                    definition = copied.Method;
+                    complete = [copied];
+                }
                 if (definitions.Length > 1) reason = "A/不同定义冲突";
                 else if (definition is not null && complete.Length == 0) reason = "A/不完整实例";
                 else if (definition is not null)
@@ -67,7 +76,7 @@ public static partial class UnregisteredInference
                     signature = Signature(complete[0])!;
                     var register = signature.MethodInfo!.Register;
                     reason = observations.Any(s => s.Symbols.TryGetValue(register, out var symbols) && symbols.Any(m => m.Method != definition)) ? "A/不同定义冲突"
-                        : observations.Any(s => s.Failed) ? "A/分析不完整"
+                        : copied is null && observations.Any(s => s.Failed) ? "A/分析不完整"
                         : complete.Any(m => Signature(m) is not { } sig || Shape(sig) != Shape(signature)) ? "ABI/正见证不吻合"
                         : "A/通过";
                     // 非单值符号也不能掩盖 ABI 冲突；它不给正见证，但有否决权。
@@ -99,6 +108,10 @@ public static partial class UnregisteredInference
             log?.Invoke($"未注册定义：{result.All.Count}/{functions.Count}；原始调用点 {sites.Length}");
             return result;
         }
+
+        private MethodRef? UniqueCopy(CodeFunction function, Dictionary<string, List<RegisteredShape>> shapes) =>
+            shapes.TryGetValue(Fingerprint(function).Hash, out var bucket) && bucket.Select(m => m.Method).Distinct().ToArray() is [var only]
+            && only.TypeArguments.Count + only.MethodArguments.Count == 0 && IsComplete(only) && Signature(only) is { MethodInfo: not null } ? only : null;
 
         private CodeEntry[] Adjustors(ulong target, Observation[] sites) => sites.Select(s => s.Caller).Distinct()
             .Where(entry => facts.Code.At(entry) is { Size: 8 } && facts.Code.Word(entry) == 0x91004000

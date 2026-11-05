@@ -110,8 +110,18 @@ internal static class PathSplitting
         foreach (var block in model.Function.Blocks)
         {
             if (block.Predecessors.Count < 2 || !block.Statements.Any(s => s is Phi)) continue;
-            if (block.Statements.Any(statement => Singletons(model, oracle, statement).Any(sym => Distinct(sym, block, oracle))))
-                yield return block;
+            // 访问可能在合流块之后的直线路径上（判空把块切开了）：先拆合流块，φ 随之下移，下一轮再拆。
+            var current = block;
+            for (var steps = 0; steps < 8; steps++)
+            {
+                if (current.Statements.Any(statement => Singletons(model, oracle, statement).Any(sym => Distinct(sym, block, oracle))))
+                {
+                    yield return block;
+                    break;
+                }
+                if (current.NormalSuccessors.ToArray() is not [var next] || next.Predecessors.Count != 1 || next == block) break;
+                current = next;
+            }
         }
     }
 

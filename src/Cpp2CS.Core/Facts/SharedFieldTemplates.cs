@@ -1,11 +1,13 @@
-using Cpp2CS.Facts;
+namespace Cpp2CS.Facts;
 
-namespace Cpp2CS.Facts.Derived;
-
-internal sealed partial class NativeMethodFacts
+/// <summary>
+/// IL2CPP 的共享字段写入模板 il2cpp_codegen_write_instance_field_data：(obj, FieldInfo, value[, size])。
+/// 偏移只在运行时可知，经 FieldInfo 求字段地址，再写入固定宽度的值或按运行时大小复制，随后通知 GC。
+/// </summary>
+public static class SharedFieldTemplates
 {
-    // IL2CPP 的共享字段写入模板：固定宽度存储或按运行时大小复制，随后通知 GC。
-    internal int SharedFieldSetter(ulong address)
+    /// <summary>写入位宽（64 或 32）；按指针复制时为 -1；不是这种模板时为 0。</summary>
+    public static int WriteWidth(ProgramFacts facts, ulong address)
     {
         uint W(int offset) => facts.Code.Word(address + (uint)offset) ?? 0;
         ulong Target(int offset) => A64.Imm26Target(W(offset), address + (uint)offset);

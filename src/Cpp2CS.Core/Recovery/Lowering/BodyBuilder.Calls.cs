@@ -167,7 +167,7 @@ internal sealed partial class BodyBuilder
         => oracle.Supply(shape, value, type, content) switch
         {
             ArgumentSupply.This => new ArgumentValue(-1, oracle.Parameter(-1)!, Width(oracle.Parameter(-1)!)),
-            ArgumentSupply.Default => new ConstantValue(0, type, Width(type)),
+            ArgumentSupply.Default => types.Kind(type) == TypeKind.Struct ? new ComposedValue(type, []) : new ConstantValue(0, type, Width(type)),
             _ => null,
         };
 

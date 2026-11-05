@@ -11,29 +11,27 @@ internal sealed partial class TemplateRecovery
 
     /// <summary>区域内写入同一稳定值的局部副本：旧值在入口已死或已等于该值，故可提前保存。</summary>
     private IReadOnlyList<ManagedAssignment> InlineCopies(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks,
-        ulong startBlock, int start, InlineMatch match, IReadOnlySet<Variable> escaping)
+        ulong startBlock, int start, InlineMatch match, IReadOnlySet<Variable> escaping, ManagedValue? self)
     {
         var statements = match.Covered.Select(p => blocks[p.Block].Statements[p.Index]).ToArray();
         var edgeTargets = statements.SelectMany(ManagedValues.Edges).SelectMany(e => e.Copies).Select(c => c.Target.Variable).ToHashSet();
         var addressed = body.Blocks.SelectMany(b => b.Statements).SelectMany(ReadValues).SelectMany(ManagedValues.Walk)
             .OfType<AddressValue>().SelectMany(a => ManagedValues.Walk(a.Target)).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
         var copies = new List<ManagedAssignment>();
-        bool Stable(ManagedValue value) => value switch
-        {
-            ConstantValue or ArgumentValue => true,
-            LocalValue source => !match.Defined.ContainsKey(source.Variable) && !edgeTargets.Contains(source.Variable) && !addressed.Contains(source.Variable),
-            ComparisonValue or NegatedValue or BooleanValue => ManagedValues.Children(value).All(Stable),
-            BinaryValue { Op: BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Shl or BinOp.LShr or BinOp.AShr }
-                => ManagedValues.Children(value).All(Stable),
-            ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate } conversion => Stable(conversion.Operand),
-            _ => false,
-        };
+        bool Stable(ManagedValue value) => StableInRegion(value, match, edgeTargets, addressed);
         foreach (var variable in escaping)
         {
             if (edgeTargets.Contains(variable) || addressed.Contains(variable)) continue;
             var writes = statements.OfType<ManagedAssignment>().Where(a => a.Target.Variable == variable).ToArray();
             if (writes.Length == 0 || statements.OfType<ManagedCall>().Any(c => c.Result?.Variable == variable)) continue;
             var value = writes[0].Value;
+            // 夹在区域里的调用方读取，发生在第一个效果之前：提到调用之前读到的是同一个值。
+            if (writes.Length == 1 && match.Defined.GetValueOrDefault(variable) is Observed early && match.EarlyReads.Contains(early)
+                && !LiveAt(body, blocks, startBlock, start, variable) && Materialize(early, self, writes[0].Address, match) is { } read)
+            {
+                copies.Add(writes[0] with { Address = blocks[startBlock].Statements[start].Address, Value = read });
+                continue;
+            }
             if (!Stable(value) || writes.Any(a => a.Value != value)) continue;
             if (LiveAt(body, blocks, startBlock, start, variable)
                 && !match.Inputs.Any(input => input.Local.Variable == variable && SameTerm(input.Value, value))
@@ -42,6 +40,41 @@ internal sealed partial class TemplateRecovery
         }
         return copies;
     }
+
+    /// <summary>
+    /// 区域内异常边 φ 的赋值提到调用之前：这些局部只在异常到达时读取，每个抛出点之前都会重新赋值，
+    /// 调用不抛出的路径上多写一次观察不到。同一局部须在区域内取同一个、不受区域影响的值，否则调用抛出时值不对。
+    /// </summary>
+    private IReadOnlyList<ManagedAssignment>? ArrivalCopies(ManagedBody body, InlineMatch match, IReadOnlyDictionary<ulong, ManagedBlock> blocks, ulong at, out string failure)
+    {
+        failure = "异常到达的赋值不能提前";
+        if (match.Arrivals.Count == 0) return [];
+        var statements = match.Covered.Select(p => blocks[p.Block].Statements[p.Index]).ToArray();
+        var edgeTargets = statements.SelectMany(ManagedValues.Edges).SelectMany(e => e.Copies).Select(c => c.Target.Variable).ToHashSet();
+        var addressed = body.Blocks.SelectMany(b => b.Statements).SelectMany(ReadValues).SelectMany(ManagedValues.Walk)
+            .OfType<AddressValue>().SelectMany(a => ManagedValues.Walk(a.Target)).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
+        var copies = new List<ManagedAssignment>();
+        foreach (var group in match.Arrivals.GroupBy(a => a.Target.Variable))
+        {
+            var value = group.First().Value;
+            if (group.Any(a => !SameTerm(a.Value, value))) { failure = $"{group.Key} 在区域内各抛出点的值不同"; return null; }
+            if (!StableInRegion(value, match, edgeTargets, addressed)) { failure = $"{group.Key} 的值依赖区域内的结果"; return null; }
+            copies.Add(group.First() with { Address = at });
+        }
+        return copies;
+    }
+
+    /// <summary>值在整个区域内不变：只依赖常量、形参和区域内没有写入、也没有被取址的局部。</summary>
+    private static bool StableInRegion(ManagedValue value, InlineMatch match, IReadOnlySet<Variable> edgeTargets, IReadOnlySet<Variable> addressed) => value switch
+    {
+        ConstantValue or ArgumentValue => true,
+        LocalValue source => !match.Defined.ContainsKey(source.Variable) && !edgeTargets.Contains(source.Variable) && !addressed.Contains(source.Variable),
+        ComparisonValue or NegatedValue or BooleanValue => ManagedValues.Children(value).All(v => StableInRegion(v, match, edgeTargets, addressed)),
+        BinaryValue { Op: BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor or BinOp.Shl or BinOp.LShr or BinOp.AShr }
+            => ManagedValues.Children(value).All(v => StableInRegion(v, match, edgeTargets, addressed)),
+        ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend or ConvKind.Truncate } conversion => StableInRegion(conversion.Operand, match, edgeTargets, addressed),
+        _ => false,
+    };
 
     /// <summary>
     /// 局部在给定位置是否一定持有 value：沿全部入边查找最近赋值，局部之间的复制继续追溯；未取址的局部可跨调用保值，

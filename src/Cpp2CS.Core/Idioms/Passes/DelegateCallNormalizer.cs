@@ -77,6 +77,20 @@ internal sealed class DelegateCallNormalizer
         return proven;
     }
 
+    /// <summary>
+    /// 类型求出之后才能证明的委托调用及其 Invoke；不修改函数。内存提升要按它重做：栈上传递的结构体的范围、
+    /// ref 实参的读写都来自 Invoke 的签名，否则超出已写入部分的字段会被当成无人读取。
+    /// </summary>
+    public static IEnumerable<(CallSite Site, MethodRef Invoke)> Discover(ProgramFacts facts, MachineFunction function, Func<Expr, TypeRef?> typeOf)
+    {
+        var calls = function.Blocks.SelectMany(b => b.Statements.OfType<Call>().Where(c => c is { Op: null, Resolved: null, Target: Use })
+            .Select(c => (Block: b, Call: c))).ToArray();
+        if (calls.Length == 0) yield break;
+        var context = new DelegateCallNormalizer(facts, function);
+        foreach (var (block, call) in calls)
+            if (context.Normalize(call, block, typeOf) is { Resolved: { } invoke }) yield return (call.Site, invoke);
+    }
+
     public static bool Run(ProgramFacts facts, MachineFunction function, IdiomResult report, Func<Expr, TypeRef?>? typeOf = null)
     {
         static bool NeedsProof(Call call) => call.Op?.Kind == OpKind.CallDelegate
@@ -180,8 +194,8 @@ internal sealed class DelegateCallNormalizer
 
     private Call? Normalize(Call call, Block block, Func<Expr, TypeRef?>? typeOf = null)
     {
-        // 已提升的调用内存效果依赖原签名，不能只收窄寄存器后继续沿用。
-        if (call.Memory.Length > 0) return null;
+        // 已提升的调用内存效果依赖原签名，不能只收窄寄存器后继续沿用；按 Invoke 签名做的提升除外。
+        if (call.Memory.Length > 0 && call.Resolved is null) return null;
         if (JoinedField(call.Target, block, call) is not Load { Width: 64 } target || Split(target.Address) is not { Root: { } root, Offset: 0x18 }) return null;
         var registers = call.Sources.Select((r, i) => (r, e: call.Arguments[i])).ToDictionary(x => x.r, x => x.e);
         bool Field(Expr? value, long offset) => value is not null && JoinedField(value, block, call) is Load { Width: 64 } load
@@ -191,10 +205,13 @@ internal sealed class DelegateCallNormalizer
             || DelegateFacts.Invoke(type) is not { } invoke || abi.Classify(invoke, out _) is not { MethodInfo: { } info } signature
             || !Field(registers.GetValueOrDefault(info.Register), 0x28)) return null;
         if (signature.Parameters.Any(a => a.Passing == Passing.Stack)) return null;
+        if (call.Memory.Length > 0 && !invoke.Equals(call.Resolved)) return null;
+        // 经指针访问的局部单元属于这次调用，随调用保留。
         var sources = signature.Parameters.SelectMany(a => a.Pieces).Select(p => p.Register)
-            .Concat(signature.Return is { Passing: Passing.Indirect } indirect ? indirect.Pieces.Select(p => p.Register) : []).Distinct().ToArray();
+            .Concat(signature.Return is { Passing: Passing.Indirect } indirect ? indirect.Pieces.Select(p => p.Register) : [])
+            .Concat(call.Sources.Where(r => r.Bank == Bank.Local)).Distinct().ToArray();
         if (sources.Any(r => !registers.ContainsKey(r))) return null;
-        var returns = call.Results.Select((r, i) => (r, i)).Where(x => signature.Results.Contains(x.r)).ToArray();
+        var returns = call.Results.Select((r, i) => (r, i)).Where(x => signature.Results.Contains(x.r) || x.r.Bank == Bank.Local).ToArray();
         return call with
         {
             Op = new RuntimeOp(OpKind.CallDelegate, invoke),

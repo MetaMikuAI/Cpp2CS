@@ -24,7 +24,7 @@ internal sealed partial class TemplateRecovery
         {
             if (caller.Current is not (ManagedJump or ManagedAssignment)) break;
             // 共享续接保留赋值作为共同终点；跳转复制逐边组合，其他入边仍保留原块。
-            continuation |= caller.Index == 0 && caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) > 1;
+            continuation |= caller.Index == 0 && Predecessors(caller.Blocks, caller.Block).Length > 1;
             if (!continuation && caller.Current is ManagedAssignment assignment && NonThrowingInlineValue(assignment.Value)
                 && caller.Index == caller.Blocks[caller.Block].Statements.Count - 2
                 && caller.Blocks[caller.Block].Statements[^1] is ManagedJump
@@ -56,7 +56,7 @@ internal sealed partial class TemplateRecovery
             caller.Index = 0;
         }
         // 返回不分是否共享：共享的返回块不进入区域，调用之后写一条同样的返回。
-        continuation |= caller.Index == 0 && caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == caller.Block)) > 1;
+        continuation |= caller.Index == 0 && Predecessors(caller.Blocks, caller.Block).Length > 1;
         var returns = result is null && caller.Current is ManagedReturn { Value: null };
         if (result is not null && caller.Current is ManagedReturn { Value: { } returned }
             && Term(caller, returned) is { } actual)
@@ -89,7 +89,7 @@ internal sealed partial class TemplateRecovery
             if (caller.Index >= caller.Blocks[caller.Block].Statements.Count) return false;
             if (caller.Current is ManagedJump jump)
             {
-                if (caller.Blocks.Values.Count(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == jump.Edge.Target)) > 1)
+                if (Predecessors(caller.Blocks, jump.Edge.Target).Length > 1)
                     return true;
                 Cover(caller, match);
                 if (!Follow(caller, jump.Edge)) return false;
@@ -144,13 +144,25 @@ internal sealed partial class TemplateRecovery
             var accessible = true;
             foreach (var field in projection.Path)
             {
-                if (!fields.Accessible(field, carrier.Type)) { accessible = false; break; }
                 var fieldType = field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
-                carrier = new FieldValue(carrier, field, fieldType, Width(fieldType));
+                var access = new FieldValue(carrier, field, fieldType, Width(fieldType));
+                if (fields.Accessible(field, carrier.Type)) carrier = access;
+                else if (Accessor(field, fieldType, false, carrier.Type) is { } getter) carrier = access with { Accessor = getter };
+                else { accessible = false; break; }
             }
-            if (accessible && ManagedProjections.Project(types, returned, projection, field => new Observed(field, end.Epoch)) is { Value: var value })
+            if (accessible && ManagedProjections.Project(types, Composed(returned), projection, field => new Observed(field, end.Epoch)) is { Value: var value })
                 yield return (value, carrier);
         }
+    }
+
+    /// <summary>透明构造的结构体就是构造函数写入的各个字段；写入值须是常量或形参，否则保持原样。</summary>
+    private ManagedValue Composed(ManagedValue value)
+    {
+        if (value is not NewObjectValue { Transparent: true, Constructor: { DeclaringType: DefinitionRef structure } constructor } construction
+            || ConstructorWrites(constructor) is not { } writes
+            || writes.Any(w => w.Value is not (ConstantValue or ArgumentValue { Index: >= 0 }))) return value;
+        var arguments = Enumerable.Range(0, construction.Arguments.Count).ToDictionary(i => i, i => construction.Arguments[i]);
+        return new ComposedValue(structure, writes.Select(w => (w.Path, Bind(w.Value, arguments))).ToArray());
     }
 
     /// <summary>项本身（不进入它的子项之外的结构）等于 part：字段投影的载体也算。</summary>
@@ -189,6 +201,9 @@ internal sealed partial class TemplateRecovery
             // 布尔返回值的取反：调用方的条件常写成相反的比较。
             if (types.Kind(actual.Type) == TypeKind.Bool && Unify(Negate(actual), value, new(match.Binding)))
                 return new ComparisonValue(Cond.Eq, carrier, new ConstantValue(0, carrier.Type, carrier.Width), types.Boolean);
+            // 返回窄字段的扩展（int Y => _y）：调用方保留的窄值是结果的截断。
+            if (actual is ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: var narrow } && Unify(narrow, value, new(match.Binding)))
+                return new ConversionValue(ConvKind.Truncate, carrier, value.Type, value.Width);
         }
         return MapTerm(value, child => Abstract(child, carriers, match));
     }
@@ -206,6 +221,7 @@ internal sealed partial class TemplateRecovery
             NegatedValue { Operand: ConstantValue operand } => new ConstantValue(operand.Bits == 0 ? 1UL : 0UL, types.Boolean, 8),
             ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate, Operand: ConstantValue operand } conversion
                 => new ConstantValue(operand.Bits & Expr.Mask(conversion.Width), conversion.Type, conversion.Width),
+            ConversionValue { Kind: ConvKind.Truncate, Width: var width, Operand: ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: var narrow } } when narrow.Width == width => narrow,
             _ => mapped,
         };
     }

@@ -676,6 +676,10 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             case ByRefRef or PointerRef when index is null:
                 {
                     var element = rootType is ByRefRef r ? r.Element : ((PointerRef)rootType).Element;
+                    // 只有一个引用字段的结构体：机器读取得到的引用就是这个字段，它随后被当作对象指针使用。
+                    if (offset == 0 && width == 64 && types.Kind(element) == TypeKind.Struct && types.Size(element) == 8
+                        && FieldAt(element, RuntimeLayout.ObjectHeaderSize, 64, false, false) is var (only, onlyType) && ManagedTypes.IsReferenceType(onlyType))
+                        return new(LocationKind.Reference, root, null, 0, null, only, onlyType);
                     if (offset == 0 && (types.Kind(element) != TypeKind.Struct || types.Size(element) * 8 == width)) return new(LocationKind.Reference, root, null, 0, null, [], element);
                     return types.Kind(element) == TypeKind.Struct && FieldAt(element, (int)offset + RuntimeLayout.ObjectHeaderSize, width, false, false) is var (inner, innerType)
                         ? new(LocationKind.Reference, root, null, 0, null, inner, innerType) : null;

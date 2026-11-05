@@ -77,6 +77,8 @@ internal sealed partial class TemplateRecovery
         public HashSet<ulong> Raising { get; } = [];
         /// <summary>调用方的显式判空：被判空的项与模板此刻解引用过的项。</summary>
         public List<(ManagedValue Actual, ManagedValue[] Dereferenced)> NullChecks { get; } = [];
+        /// <summary>区域的第一个效果之前发生的读取。</summary>
+        public HashSet<ManagedValue> EarlyReads { get; } = [];
         /// <summary>夹在模板写入之间的调用方写入，以及它之前已比对过的调用与检查数。</summary>
         public List<(ulong Block, int Index, int Effects)> Interleaved { get; } = [];
         /// <summary>区域内已比对的调用与检查：夹在其间的写入不能越过它们。</summary>
@@ -87,6 +89,8 @@ internal sealed partial class TemplateRecovery
         public IReadOnlyList<(LocalValue Target, ManagedValue Value)>? ExitCopies { get; set; }
         public Dictionary<Variable, ManagedValue> Defined { get; } = [];
         public Dictionary<Variable, LocalValue> Locals { get; } = [];
+        /// <summary>区域内异常边 φ 的赋值：与模板无关，换成调用时提到调用之前。</summary>
+        public List<ManagedAssignment> Arrivals { get; } = [];
         public ManagedBranch? Continuation { get; set; }
         public bool Returns { get; set; }
         public List<(ManagedValue Value, LocalValue Local)> Inputs { get; } = [];
@@ -103,20 +107,31 @@ internal sealed partial class TemplateRecovery
     {
         body = ResolveAccessors(body);
         body = InlineConstructions(body);
-        while (Pending(body).ToArray() is { Length: > 0 } pending)
+        // 一轮里失败过的语句不再重试；有证明成立时再来一轮，方法体变了可能使它成立。
+        var failed = new HashSet<ManagedStatement>(ReferenceEqualityComparer.Instance);
+        var progressed = false;
+        while (true)
         {
-            var replaced = false;
-            foreach (var candidate in pending.DistinctBy(p => (p.Block, p.Index)))
+            var pending = Pending(body).ToArray();
+            var statements = body.Blocks.ToDictionary(b => b.Address, b => b.Statements);
+            var candidates = pending.Where(p => !failed.Contains(statements[p.Block][p.Index])).Take(1).ToArray();
+            if (candidates is not [var candidate])
             {
-                if (TryInline(body, candidate) is not { } next) continue;
-                next = DeadPendingReads(next);
-                // 每次证明必须减少待证访问，终止条件不依赖方法中内联调用的数量。
-                if (Pending(next).Count() >= pending.Length) continue;
-                body = next;
-                replaced = true;
-                break;
+                if (!progressed) break;
+                progressed = false;
+                failed.Clear();
+                continue;
             }
-            if (!replaced) break;
+            var next = TryInline(body, candidate);
+            if (next is not null) next = DeadPendingReads(next);
+            // 每次证明必须减少待证访问，终止条件不依赖方法中内联调用的数量。
+            if (next is null || Pending(next).Count() >= pending.Length)
+            {
+                failed.Add(statements[candidate.Block][candidate.Index]);
+                continue;
+            }
+            body = next;
+            progressed = true;
         }
         body = DeadPendingReads(body);
         // 未证明的访问：值与写入目标都换成洞。
@@ -289,8 +304,7 @@ internal sealed partial class TemplateRecovery
         var current = anchor.Block;
         while (visited.Count < 16)
         {
-            var incoming = blocks.Values.Where(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == current)).ToArray();
-            if (incoming is not [var predecessor] || !visited.Add(predecessor.Address)) break;
+            if (Predecessors(blocks, current) is not [var predecessor] || !visited.Add(predecessor.Address)) break;
             current = predecessor.Address;
             if (predecessor.Statements.All(s => s is ManagedJump { Edge.Copies.Count: 0 })) continue;
             starts.AddRange(Enumerable.Range(0, predecessor.Statements.Count).Select(i => (current, i)));
@@ -357,6 +371,13 @@ internal sealed partial class TemplateRecovery
         }
         return Visit(body.Blocks[0].Address);
     }
+
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<IReadOnlyDictionary<ulong, ManagedBlock>, Dictionary<ulong, ManagedBlock[]>> predecessors = new();
+
+    /// <summary>调用方块的前驱（重复的边算多个）；方法体大时比对会反复查询。</summary>
+    private ManagedBlock[] Predecessors(IReadOnlyDictionary<ulong, ManagedBlock> blocks, ulong address) =>
+        predecessors.GetValue(blocks, map => map.Values.SelectMany(b => b.Statements.SelectMany(ManagedValues.Edges).Select(e => e.Target).Distinct().Select(t => (t, b)))
+            .GroupBy(p => p.t).ToDictionary(g => g.Key, g => g.Select(p => p.b).ToArray())).GetValueOrDefault(address) ?? [];
 
     /// <summary>最近一次比对覆盖的调用方语句数，用来挑选最接近成立的失败原因。</summary>
     private int lastProgress;
@@ -438,7 +459,10 @@ internal sealed partial class TemplateRecovery
                         var pairs = (mc.Invocation.Receiver is { } mr ? [(mr, cc.Invocation.Receiver!)] : Array.Empty<(ManagedValue, ManagedValue)>())
                             .Concat(mc.Invocation.Arguments.Zip(cc.Invocation.Arguments));
                         foreach (var (a, b) in pairs)
+                        {
                             if (Term(callee, a) is not { } ta || Term(caller, b) is not { } tb || !Same(ta, tb, caller, match.Binding)) return match.Fail($"调用 {cc.Invocation.Method.Method.Name} 的实参不同（0x{cc.Address:x}）");
+                            NoteEarlyReads(tb, caller, match);
+                        }
                         var index = callee.Calls++;
                         caller.Calls++;
                         match.Effects++;
@@ -590,6 +614,18 @@ internal sealed partial class TemplateRecovery
         return true;
     }
 
+    /// <summary>记下调用方在区域的第一个效果之前读取的项（判空不算效果：与读取抛出同样的异常）。</summary>
+    private static void NoteEarlyReads(ManagedValue term, Walker caller, InlineMatch match)
+    {
+        if (match.Effects > 0 || caller.Stores.Count > 0) return;
+        void Visit(ManagedValue value)
+        {
+            if (value is Observed) match.EarlyReads.Add(value);
+            MapTerm(value, child => { Visit(child); return child; });
+        }
+        Visit(term);
+    }
+
     private void Cover(Walker caller, InlineMatch match)
     {
         match.Covered.Add((caller.Block, caller.Index));
@@ -605,9 +641,14 @@ internal sealed partial class TemplateRecovery
             if (walker.Index >= walker.Blocks[walker.Block].Statements.Count) return false;
             switch (walker.Current)
             {
+                case ManagedAssignment { ExceptionArrival: true } arrival when match is not null:
+                    Cover(walker, match);
+                    match.Arrivals.Add(arrival);
+                    walker.Index++;
+                    continue;
                 case ManagedAssignment assignment:
                     if (Term(walker, assignment.Value) is not { } value) return false;
-                    if (match is not null) Cover(walker, match);
+                    if (match is not null) { Cover(walker, match); NoteEarlyReads(value, walker, match); }
                     else NoteAccesses(walker, assignment);
                     walker.Env[assignment.Target.Variable] = value;
                     if (match is not null)
@@ -676,6 +717,7 @@ internal sealed partial class TemplateRecovery
         FieldValue field => Term(walker, field.Receiver) is { } receiver ? new FieldValue(receiver, field.Field, field.Type, field.Width) : null,
         StaticFieldValue field => new StaticFieldValue(field.Field, field.Type, field.Width),
         ArrayElementValue element => Term(walker, element.Array) is { } array && Term(walker, element.Index) is { } index ? element with { Array = array, Index = index } : null,
+        IndirectValue indirect => Term(walker, indirect.Address) is { } pointer ? indirect with { Address = pointer } : null,
         _ => null,
     };
 
@@ -693,17 +735,18 @@ internal sealed partial class TemplateRecovery
 
     /// <summary>
     /// 区域外使用的项（接收者、实参、出口复制）写回托管值。初代读取（此前没有经过调用）写成调用之前的读取，字段须可访问；
-    /// 读取的接收者只接受调用方的 this 或被内联方法的接收者：前者非空，后者为空时两种写法都在任何效果之前抛出 NullReferenceException。
+    /// 读取的接收者只接受调用方的 this、被内联方法的接收者，或读取本身发生在区域的任何效果之前：
+    /// 前者非空，后两者为空时两种写法都在任何效果之前抛出 NullReferenceException。
     /// 调用结果与经过调用之后的读取不能写回。
     /// </summary>
-    private ManagedValue? Materialize(ManagedValue term, ManagedValue? self, ulong address)
+    private ManagedValue? Materialize(ManagedValue term, ManagedValue? self, ulong address, InlineMatch match)
     {
         switch (term)
         {
             // 区域结束之后的读取：写在调用之后，字段访问照常接受证明。
             case Observed { Epoch: AfterRegion, Read: FieldValue field }:
                 {
-                    if (Materialize(field.Receiver, self, address) is not { } receiver) return null;
+                    if (Materialize(field.Receiver, self, address, match) is not { } receiver) return null;
                     var access = new FieldValue(receiver, field.Field, field.Type, field.Width);
                     if (fields.Accessible(field.Field, receiver.Type)) return access;
                     return Accessor(field.Field, field.Type, false, receiver.Type) is { } accessor ? access with { Accessor = accessor }
@@ -721,8 +764,8 @@ internal sealed partial class TemplateRecovery
             case Observed { Read: FieldValue field }:
                 {
                     if (!(field.Receiver.Equals(self) || field.Receiver is ArgumentValue { Index: -1 } || field.Receiver is Observed
-                        || types.Kind(field.Receiver.Type) == TypeKind.Struct)) return null;
-                    if (Materialize(field.Receiver, self, address) is not { } receiver) return null;
+                        || types.Kind(field.Receiver.Type) == TypeKind.Struct || match.EarlyReads.Contains(term))) return null;
+                    if (Materialize(field.Receiver, self, address, match) is not { } receiver) return null;
                     var access = new FieldValue(receiver, field.Field, field.Type, field.Width);
                     if (fields.Accessible(field.Field, receiver.Type)) return access;
                     return Accessor(field.Field, field.Type, false, receiver.Type) is { } accessor ? access with { Accessor = accessor } : null;
@@ -739,7 +782,7 @@ internal sealed partial class TemplateRecovery
         var failed = false;
         var mapped = ManagedValues.Map(term, child =>
         {
-            if (Materialize(child, self, address) is { } value) return value;
+            if (Materialize(child, self, address, match) is { } value) return value;
             failed = true;
             return child;
         });

@@ -1,6 +1,7 @@
 using Cpp2CS.Facts;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Ir;
+using Cpp2CS.Machine.Ssa;
 
 namespace Cpp2CS.Idioms;
 
@@ -88,23 +89,45 @@ internal static class SharedInterfaceTails
             var pair = partition is null ? null : merge.Statements.OfType<Phi>().FirstOrDefault(p => p.Sources[merge.Predecessors.IndexOf(slowExit)] == partition.Target);
             var hitPartition = pair is null ? null : hit.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == pair.Sources[merge.Predecessors.IndexOf(hit)]);
             var bySlot = hitPartition is null;
-            if (bySlot)
+            // 每组：慢路径的入边序号，以及它对应的命中入边序号。
+            int[][] groups;
+            int[] mapping;
+            if (bySlot && lookup.Arguments[2] is Const)
             {
-                // 同一接收者的不同接口槽也会共享尾部；以慢路径常量槽和快路径 offset + slot 对齐分支。
-                if (lookup.Arguments[2] is not Use slotUse
-                    || slow.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == slotUse.Variable) is not { } slots
-                    || slots.Sources.Any(v => Slot(v, false) is null)) continue;
-                var candidates = hit.Statements.OfType<Phi>().Where(p => p.Sources.All(v => Slot(v, true) is { } n
-                    && slots.Sources.Any(s => Slot(s, false) == n))).ToArray();
-                if (candidates is not [var fastSlots]) continue;
-                partition = slots;
-                hitPartition = fastSlots;
+                // 同一接收者、同一接口槽的多次调用（如分支各调用一次）也会共享尾部：哪个查找循环到达慢路径由支配关系决定，
+                // 循环头之前的“没有接口”判断支配循环，循环的退出判断被循环支配。
+                var dominators = Dominators.Compute(function);
+                var loops = hit.Predecessors.ToArray();
+                var owners = slow.Predecessors.Select(p => Enumerable.Range(0, loops.Length)
+                    .Where(i => dominators.Dominates(p.Index, loops[i].Index) || dominators.Dominates(loops[i].Index, p.Index)).ToArray()).ToArray();
+                if (owners.Any(o => o.Length != 1)) continue;
+                groups = Enumerable.Range(0, loops.Length).Select(i => Enumerable.Range(0, owners.Length).Where(k => owners[k][0] == i).ToArray()).ToArray();
+                if (groups.Any(g => g.Length == 0)) continue;
+                mapping = Enumerable.Range(0, loops.Length).ToArray();
             }
-            var groups = partition!.Sources.Select((v, i) => (Value: v, Index: i)).GroupBy(p => p.Value).ToArray();
-            if (groups.Length != hit.Predecessors.Count || groups.Any(g => slow.Statements.OfType<Phi>().Any(p => g.Select(x => p.Sources[x.Index]).Distinct().Count() != 1))) continue;
-            var mapping = groups.Select(g => bySlot ? Array.FindIndex(hitPartition!.Sources, v => Slot(v, true) == Slot(g.Key, false))
-                : Array.IndexOf(hitPartition!.Sources, g.Key)).ToArray();
-            if (mapping.Any(i => i < 0) || mapping.Distinct().Count() != groups.Length) continue;
+            else
+            {
+                if (bySlot)
+                {
+                    // 同一接收者的不同接口槽也会共享尾部；以慢路径常量槽和快路径 offset + slot 对齐分支。
+                    if (lookup.Arguments[2] is not Use slotUse
+                        || slow.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == slotUse.Variable) is not { } slots
+                        || slots.Sources.Any(v => Slot(v, false) is null)) continue;
+                    var candidates = hit.Statements.OfType<Phi>().Where(p => p.Sources.All(v => Slot(v, true) is { } n
+                        && slots.Sources.Any(s => Slot(s, false) == n))).ToArray();
+                    if (candidates is not [var fastSlots]) continue;
+                    partition = slots;
+                    hitPartition = fastSlots;
+                }
+                var values = partition!.Sources.Select((v, i) => (Value: v, Index: i)).GroupBy(p => p.Value).ToArray();
+                if (values.Length != hit.Predecessors.Count) continue;
+                mapping = values.Select(g => bySlot ? Array.FindIndex(hitPartition!.Sources, v => Slot(v, true) == Slot(g.Key, false))
+                    : Array.IndexOf(hitPartition!.Sources, g.Key)).ToArray();
+                if (mapping.Any(i => i < 0) || mapping.Distinct().Count() != values.Length) continue;
+                groups = values.Select(g => g.Select(x => x.Index).ToArray()).ToArray();
+            }
+            // 同一组的入边在慢路径上取到的值必须相同，才能并成一份副本。
+            if (groups.Any(g => slow.Statements.OfType<Phi>().Any(p => g.Select(i => p.Sources[i]).Distinct().Count() != 1))) continue;
             var slotValid = lookup.Arguments[2] is Const { Value: <= 32 }
                 || lookup.Arguments[2] is Use slot && slow.Statements.OfType<Phi>().FirstOrDefault(p => p.Target == slot.Variable) is { } slotPhi
                     && slotPhi.Sources.All(v => definitions.GetValueOrDefault(v) is Const { Value: <= 32 });
@@ -127,7 +150,7 @@ internal static class SharedInterfaceTails
             var exitValues = exit?.Statements.OfType<Phi>().ToDictionary(p => p.Target, p => p.Sources[exitIndex]);
             for (var side = 0; side < groups.Length; side++)
             {
-                var (slowCopy, slowMap) = Copy(slow, groups[side].First().Index, Address());
+                var (slowCopy, slowMap) = Copy(slow, groups[side][0], Address());
                 var (hitCopy, hitMap) = Copy(hit, mapping[side], Address());
                 var mergeAddress = Address();
                 var mergeCopy = new Block(mergeAddress) { End = mergeAddress };
@@ -160,7 +183,7 @@ internal static class SharedInterfaceTails
             }
             for (var side = 0; side < groups.Length; side++)
             {
-                foreach (var source in groups[side]) Redirect(incoming[0][source.Index], slow, copies[side].Slow);
+                foreach (var source in groups[side]) Redirect(incoming[0][source], slow, copies[side].Slow);
                 Redirect(incoming[1][mapping[side]], hit, copies[side].Hit);
             }
             // 原块已不可达；Renumber 删除原出口及其 φ 输入。

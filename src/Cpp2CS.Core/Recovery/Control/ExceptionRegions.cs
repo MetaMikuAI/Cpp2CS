@@ -42,6 +42,7 @@ internal static class ExceptionRegions
                 ?? handler.SelectMany(b => b.Statements).OfType<Call>().FirstOrDefault(c => c.Op?.Kind == OpKind.BeginCatch);
             regions.Add(new(pad, tryBlocks.OrderBy(b => index[b]).ToArray(), handler.OrderBy(b => index[b]).ToArray(), beginCatch));
         }
+        EncloseInner(regions, index);
         // 扩大 try 不得接管原本发往外层的异常。
         foreach (var region in regions)
             foreach (var block in region.Try)
@@ -68,6 +69,28 @@ internal static class ExceptionRegions
         var y = b.Index;
         while (!dominators.Dominates(x, y)) x = dominators.Idom[x];
         return function.Blocks[x];
+    }
+
+    /// <summary>
+    /// 内层 try 位于外层 try 中时，内层的处理块也要整体在外层 try 中。处理块是落地块支配的块，末尾常有只跳回循环头的块：
+    /// 它们到不了外层的抛出点，不在外层的 try 里。这些块的异常不发往别处，并入外层 try 不改变语义。
+    /// </summary>
+    private static void EncloseInner(List<ExceptionRegionPlan> regions, IReadOnlyDictionary<Block, int> index)
+    {
+        for (var changed = true; changed;)
+        {
+            changed = false;
+            for (var i = 0; i < regions.Count; i++)
+                foreach (var inner in regions.ToArray())
+                {
+                    var outer = regions[i];
+                    if (ReferenceEquals(inner, outer) || !inner.Try.All(outer.Try.Contains)) continue;
+                    var missing = inner.Handler.Where(b => !outer.Try.Contains(b)).ToArray();
+                    if (missing.Length == 0 || missing.Any(b => outer.Handler.Contains(b) || b.Handler is { } pad && pad != outer.Pad)) continue;
+                    regions[i] = outer with { Try = outer.Try.Concat(missing).OrderBy(b => index[b]).ToArray() };
+                    changed = true;
+                }
+        }
     }
 
     /// <summary>块的异常发往这个 try 之外的处理体：它的处理体不嵌套在 try 中。</summary>
