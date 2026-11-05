@@ -703,6 +703,12 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                 return null;
             case DefinitionRef reference when ManagedTypes.IsReferenceType(reference) && index is null:
                 return FieldAt(reference, (int)offset, width, false, false) is var (fields, fieldType2) ? new(LocationKind.Instance, root, null, 0, null, fields, fieldType2) : null;
+            // 只有一个引用字段的结构体值：它的位就是这个引用，内联的取值方法化简后直接从它解引用。
+            case DefinitionRef wrapper when index is null && types.Kind(wrapper) == TypeKind.Struct && types.Size(wrapper) == 8
+                && FieldAt(wrapper, RuntimeLayout.ObjectHeaderSize, 64, false, false) is var (only, onlyType) && ManagedTypes.IsReferenceType(onlyType)
+                && onlyType is DefinitionRef { Definition.FullName: not "System.String" } wrapped
+                && FieldAt(wrapped, (int)offset, width, false, false) is var (wrappedPath, wrappedType):
+                return new(LocationKind.Instance, root, null, 0, null, [.. only, .. wrappedPath], wrappedType);
             // 约束到基类的类型参数：实例字段按基类的布局。
             case GenericParameterRef { ReferenceBase: { } constraint } when index is null:
                 return FieldAt(Substitute(constraint), (int)offset, width, false, false) is var (bounded, boundedType) ? new(LocationKind.Instance, root, null, 0, null, bounded, boundedType) : null;
