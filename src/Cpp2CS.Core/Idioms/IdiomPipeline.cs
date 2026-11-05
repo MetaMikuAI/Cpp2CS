@@ -94,7 +94,9 @@ internal static class IdiomPipeline
         var reported = rule.Apply(state);
         var after = state.function.Blocks.SelectMany(b => b.Statements).ToArray();
         var changed = before.Length != after.Length || !before.Zip(after).All(p => ReferenceEquals(p.First, p.Second) || p.First.ToString() == p.Second.ToString());
+        var reportedErrors = state.Result.Errors.Count;
         if (changed || reported) state.Cleanup();
+        if (state.Result.Errors.Count > reportedErrors) state.Result.Errors[reportedErrors] = $"{rule.Name}：{state.Result.Errors[reportedErrors]}";
         return changed;
     }
 

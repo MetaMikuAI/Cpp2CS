@@ -33,7 +33,10 @@ internal static class EqualAddressPhisPass
                 // 元数据实体是不可变的常量：初始化守卫两臂各读一次 RGCTX 表后合流，也是同一个值。
                 if (sources is not [var address and (Symbol or Binary { Op: BinOp.Add, Right: Const })] || ExprMap.Walk(address).Any(e => e is Load or Unknown or Intrinsic))
                     continue;
-                block.Statements[i] = new Define(phi.Address, phi.Target, address);
+                // φ 要留在块首，定义放在这一组 φ 之后。
+                block.Statements.RemoveAt(i);
+                block.Statements.Insert(block.Statements.TakeWhile(s => s is Phi).Count(), new Define(phi.Address, phi.Target, address));
+                i--;
                 changed = true;
             }
 

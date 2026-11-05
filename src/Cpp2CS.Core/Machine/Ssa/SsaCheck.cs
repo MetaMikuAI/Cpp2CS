@@ -38,7 +38,7 @@ public static class SsaCheck
                 var stmt = block.Statements[i];
                 if (stmt is Phi phi)
                 {
-                    if (i > 0 && block.Statements[i - 1] is not Phi) errors.Add($"{phi.Target} 不在块首");
+                    if (i > 0 && block.Statements[i - 1] is not Phi) errors.Add($"{phi.Target} 不在块首（块 0x{block.Start:x}，前一条 {block.Statements[i - 1]}）");
                     if (phi.Sources.Length != block.Predecessors.Count) errors.Add($"{phi.Target} 操作数个数与前驱不符");
                     for (var j = 0; j < phi.Sources.Length && j < block.Predecessors.Count; j++)
                     {
