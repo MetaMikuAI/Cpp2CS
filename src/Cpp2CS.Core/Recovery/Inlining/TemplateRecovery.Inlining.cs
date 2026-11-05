@@ -126,10 +126,7 @@ internal sealed partial class TemplateRecovery
                 failed.Clear();
                 continue;
             }
-            var next = TryInline(body, candidate);
-            if (next is not null) next = DeadPendingReads(next);
-            // 每次证明必须减少待证访问，终止条件不依赖方法中内联调用的数量。
-            if (next is null || Pending(next).Count() >= pending.Length)
+            if (TryInline(body, candidate) is not { } next)
             {
                 failed.Add(statements[candidate.Block][candidate.Index]);
                 continue;
@@ -286,8 +283,42 @@ internal sealed partial class TemplateRecovery
                     if (PendingOf(value) is not null) yield return (block.Address, i, value);
     }
 
+    /// <summary>
+    /// 证明的进展：待证访问数，其次是读入待证访问的局部的使用数，按词典序严格递减，终止条件不依赖方法中内联调用的数量。
+    /// 一次读取可能被多个内联共用（clang 消除了公共子表达式）：还原其中一个用处时待证访问数不变，还原完最后一个读取才死去。
+    /// </summary>
+    private static (int Pending, int Uses) Progress(ManagedBody body)
+    {
+        var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
+        var held = statements.OfType<ManagedAssignment>().Where(a => PendingOf(a.Value) is not null).Select(a => a.Target.Variable).ToHashSet();
+        return (Pending(body).Count(), statements.SelectMany(ReadValues).SelectMany(ManagedValues.Walk).Count(v => v is LocalValue local && held.Contains(local.Variable)));
+    }
+
+    /// <summary>待证访问读入的局部，在之后直线路径上的使用点：共用这次读取的内联从那里开始。</summary>
+    private IEnumerable<(ulong Block, int Index)> UsesOfPendingRead(IReadOnlyDictionary<ulong, ManagedBlock> blocks, ulong block, int index)
+    {
+        if (blocks[block].Statements[index] is not ManagedAssignment { Target.Variable: var held }) yield break;
+        var seen = new HashSet<ulong> { block };
+        var from = index + 1;
+        while (seen.Count <= 16)
+        {
+            var statements = blocks[block].Statements;
+            for (var i = from; i < statements.Count; i++)
+                if (ReadValues(statements[i]).SelectMany(ManagedValues.Walk).Any(v => v is LocalValue local && local.Variable.Equals(held))) yield return (block, i);
+            if (statements[^1] is not ManagedJump { Edge.Target: var next } || Predecessors(blocks, next).Length > 1 || !seen.Add(next)) yield break;
+            (block, from) = (next, 0);
+        }
+    }
+
     private ManagedBody? TryInline(ManagedBody body, (ulong Block, int Index, ManagedValue Access) anchor)
     {
+        var before = Progress(body);
+        ManagedBody? Accepted(InlineReplacement replaced)
+        {
+            var next = DeadPendingReads(replaced.Apply(body));
+            var after = Progress(next);
+            return after.Pending < before.Pending || after.Pending == before.Pending && after.Uses < before.Uses ? next : null;
+        }
         var (field, receiver) = anchor.Access switch
         {
             FieldValue access => (access.Field, access.Receiver.Type),
@@ -314,6 +345,7 @@ internal sealed partial class TemplateRecovery
             starts.AddRange(Enumerable.Range(0, predecessor.Statements.Count).Select(i => (current, i)));
             break;
         }
+        starts.AddRange(UsesOfPendingRead(blocks, anchor.Block, anchor.Index).Where(p => !starts.Contains(p)));
         var failures = new List<(string Reason, int Progress)>();
         foreach (var (method, template) in InlineCandidates(field, receiver))
         {
@@ -324,7 +356,10 @@ internal sealed partial class TemplateRecovery
             {
                 var match = Match(body, blocks, block, start, template, method.TypeArguments, out var failure);
                 if (match is not null && PlanReplacement(body, blocks, block, start, method, match, out failure) is { } replaced)
-                    return replaced.Apply(body);
+                {
+                    if (Accepted(replaced) is { } accepted) return accepted;
+                    failure = "证明成立但待证访问没有减少";
+                }
                 if (lastProgress > progress) (nearest, progress) = (failure, lastProgress);
             }
             failures.Add(($"{method.Method.Owner.Name}.{method.Method.Name}：{nearest}", progress));
@@ -336,8 +371,9 @@ internal sealed partial class TemplateRecovery
             foreach (var seed in ParameterSeeds(template))
                 foreach (var (block, start) in starts)
                     if (Match(body, blocks, block, start, template, method.TypeArguments, out var failure, seed) is { } match
-                        && PlanReplacement(body, blocks, block, start, method, match, out failure) is { } replaced)
-                        return replaced.Apply(body);
+                        && PlanReplacement(body, blocks, block, start, method, match, out failure) is { } replaced
+                        && Accepted(replaced) is { } accepted)
+                        return accepted;
         }
         // 方法体随证明变化，留下最后一次尝试的原因。
         inlineFailures[PendingOf(anchor.Access)!.Address] = failures.Count == 0 ? "没有可作模板的方法"
