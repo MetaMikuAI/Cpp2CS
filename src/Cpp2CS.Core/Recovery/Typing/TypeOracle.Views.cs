@@ -38,8 +38,8 @@ public sealed partial class TypeOracle
         var (at, end) = (low, low + width);
         foreach (var (bit, size) in fields.OrderBy(f => f.Bit))
         {
+            if (at == end || bit >= end) break;
             if (bit + size <= at) continue;
-            if (bit >= end) break;
             if (bit > at) return null;
             var stop = Math.Min(end, bit + size);
             pieces.Add((at - low, values.Syms.Slice(source, at, stop - at)));
