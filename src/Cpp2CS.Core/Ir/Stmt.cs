@@ -107,9 +107,11 @@ public enum OpKind : byte
     CopyGenericValue, ClearGenericValue,
     /// <summary>MethodInfo.invoker_method 的已拆包调用，Operand 为方法；最后一个参数为返回存储。</summary>
     InvokeGeneric,
-    /// <summary>对象经共享拆箱后按值复制；Operand 为类型，参数为目标存储、对象。</summary>
+    /// <summary>经分派查找得到 MethodInfo 的 invoker 调用（接口槽、泛型虚方法）；实参形式同 InvokeGeneric，是对接收者的 callvirt。</summary>
+    InvokeVirtualGeneric,
+    /// <summary>IL 的 unbox.any：Operand 为类型，参数为对象；结果是值所在位置的地址。</summary>
     UnboxGenericValue,
-    /// <summary>共享受约束实例调用；Operand 为方法，参数为约束类型和接收者地址。</summary>
+    /// <summary>IL 的 constrained. callvirt：Operand 为 (约束类型, 方法)；实参形式同 InvokeGeneric，接收者是约束类型的位置。</summary>
     InvokeConstrainedGeneric,
     /// <summary>两个标量栈出参已显式化的外部调用；Operand 为符号名，Defines 按出参顺序保存结果。</summary>
     ImportOutPair,

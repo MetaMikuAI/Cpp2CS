@@ -10,6 +10,8 @@ public sealed partial class RuntimeHelpers
     public bool IsNotificationOnlyBarrier(ulong address) => notificationBarriers.GetOrAdd(address, entry =>
     {
         if (InternalCall(entry).Kind != HelperKind.WriteBarrier) return false;
+        // il2cpp_codegen_write_barrier_for_class(klass, ptr)：丢弃 klass，把位置移到 x0 后进入同一个实现。
+        if (map.Word(entry) == 0xaa0103e0 && map.Word(entry + 4) is { } forward && A64.IsB(forward)) entry = A64.Imm26Target(forward, entry + 4);
         // 只穿过不改变参数、无其他操作的直接跳板。
         for (var hop = 0; hop < 6; hop++)
         {

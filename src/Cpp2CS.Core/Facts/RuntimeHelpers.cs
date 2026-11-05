@@ -50,6 +50,10 @@ public enum HelperKind
     ReadByteArray,
     /// <summary>按类布局检查值缓冲区是否非空，Nullable 使用 hasValue。</summary>
     GenericHasValue,
+    /// <summary>il2cpp_codegen_runtime_constrained_call(klass, method, boxBuffer, objBuffer, args, ret)：IL 的 constrained. callvirt。</summary>
+    ConstrainedCall,
+    /// <summary>UnBoxAny(obj, klass, storage)：IL 的 unbox.any，返回值所在位置（盒内或 storage）的地址。</summary>
+    UnboxAny,
 }
 
 /// <summary>一个被托管代码调用的辅助函数。Evidence 说明依据；Callers 为托管调用点数。</summary>
@@ -223,6 +227,14 @@ public sealed partial class RuntimeHelpers
         if (map.At(body) is { ExceptionRegions.Length: 0 } valueRange && valueRange.Start == body
             && valueRange.Size == 60 && GenericHasValueBody(words))
             return (HelperKind.GenericHasValue, null, "完整函数按 byval_arg 值类型位、generic_class 和 nullabletype 位检查引用或 Nullable.hasValue");
+        if (map.At(body) is { ExceptionRegions.Length: 0 } constrainedRange && constrainedRange.Start == body)
+        {
+            var longer = Words(body, 72).Select(x => x.Word).ToArray();
+            if (ConstrainedCallBody(longer))
+                return (HelperKind.ConstrainedCall, null, "按 byval_arg 值类型位分支：引用经 objBuffer 取对象并查找虚方法，值类型按声明类判断直接调用或装箱到 boxBuffer，最后尾调用 invoker_method");
+            if (UnboxAnyBody(longer))
+                return (HelperKind.UnboxAny, null, "按 byval_arg 值类型位分支：引用做实例检查后写入 storage，值类型比较 element_class 后取盒内地址，Nullable 写入 storage");
+        }
         if (map.At(body) is { ExceptionRegions.Length: 0 } range && range.Start == body
             && CheckedByteArrayBody(words) && calls is [var bounds]
             && InternalCall(bounds) is { Kind: HelperKind.Throw, Detail: "System.IndexOutOfRangeException" })

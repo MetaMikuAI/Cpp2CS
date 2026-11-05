@@ -204,7 +204,36 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         var chosen = candidates.Count == 1 ? candidates[0]
             : candidates.Where(c => Compatible(c, receiverType, arguments)).OrderBy(c => Distance(receiverType, c.DeclaringType)).FirstOrDefault() ?? candidates[0];
         if (receiverType is DefinitionRef owner && !chosen.Method.IsStatic) chosen = Specialize(chosen, owner);
-        return callees[call] = chosen;
+        return callees[call] = BindPlaceholders(chosen, arguments);
+    }
+
+    /// <summary>
+    /// 完全共享入口的候选以占位类型作类型实参。不读 MethodInfo 的被调方（如不用 RGCTX 的构造函数）调用点上没有实例实体，
+    /// 占位按实参的静态类型代入：原生代码相同，而 IL 要写确切的实例。没有实参能确定的占位保持原样。
+    /// </summary>
+    private MethodRef BindPlaceholders(MethodRef candidate, IReadOnlyList<Sym?> arguments)
+    {
+        if (!candidate.TypeArguments.Any(SharedTypes.IsFullyShared)) return candidate;
+        var bound = candidate.TypeArguments.ToArray();
+        void Unify(TypeRef formal, TypeRef actual)
+        {
+            switch (formal, actual)
+            {
+                case (GenericParameterRef { IsMethod: false } parameter, _) when parameter.Position < bound.Length && SharedTypes.IsFullyShared(bound[parameter.Position]):
+                    bound[parameter.Position] = actual;
+                    break;
+                case (ArrayRef a, ArrayRef b): Unify(a.Element, b.Element); break;
+                case (ByRefRef a, ByRefRef b): Unify(a.Element, b.Element); break;
+                case (PointerRef a, PointerRef b): Unify(a.Element, b.Element); break;
+                case (DefinitionRef a, DefinitionRef b) when a.Definition == b.Definition && a.Arguments.Count == b.Arguments.Count:
+                    foreach (var (x, y) in a.Arguments.Zip(b.Arguments)) Unify(x, y);
+                    break;
+            }
+        }
+        var offset = candidate.Method.IsStatic ? 0 : 1;
+        for (var i = 0; i < candidate.Method.Parameters.Count && i + offset < arguments.Count; i++)
+            if (arguments[i + offset] is { } argument && TypeOf(argument) is { } actual) Unify(candidate.Method.Parameters[i].Type, actual);
+        return candidate with { TypeArguments = bound };
     }
 
     /// <summary>接收者类型沿基类链到声明类型的距离；不在链上时为最大。</summary>
@@ -610,6 +639,10 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             case ArrayRef array:
                 {
                     if (index is null && offset == RuntimeLayout.ArrayMaxLength && width is 32 or 64) return new(LocationKind.Length, root, null, 0, null, [], types.Int32);
+                    // 可变大小的元素：codegen 按数组类的 element_size 计算下标，只按位置访问。
+                    if (width < 0 && ManagedAbi.SharedValue(array.Element) && offset == RuntimeLayout.ArrayData && scale == 1
+                        && RuntimeScaledIndex(root, index) is { } scaledIndex)
+                        return new(LocationKind.Element, root, scaledIndex, 0, null, [], array.Element);
                     var size = ElementSize(array.Element);
                     if (size <= 0 || index is null && offset < RuntimeLayout.ArrayData || index is not null && scale != size) return null;
                     var within = offset - RuntimeLayout.ArrayData;
@@ -669,6 +702,15 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                 }
         }
         return null;
+    }
+
+    /// <summary>下标乘以数组对象类的 element_size（[[array] + 0x104]）时的下标。</summary>
+    private Sym? RuntimeScaledIndex(Sym array, Sym? scaled)
+    {
+        if (SymTable.Resolve(scaled ?? array) is not OpSym { Op.Kind: OperatorKind.Binary, Args: [var size, var index] } mul || mul.Op.Binary != BinOp.Mul) return null;
+        var bits = SymTable.Resolve(size) is ConcatSym { Parts: [var low, ConstSym { Value: 0 }] } ? low : size;
+        return SymTable.Resolve(bits) is ReadSym { Width: 32 } read && Decompose(read.Address) is (var klass, RuntimeLayout.ClassElementSize, null, _)
+            && SymTable.Resolve(klass) is ReadSym { Width: 64 } header && ReferenceEquals(SymTable.Resolve(header.Address), SymTable.Resolve(array)) ? index : null;
     }
 
     private readonly Dictionary<ReadSym, IReadOnlyList<AccessPart>?> parts = [];

@@ -93,7 +93,7 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
             && SymTable.Resolve(contents[0]) is ResultSym { Site.Op.Kind: OpKind.NewObject };
         foreach (var (parameter, content) in signature.Arguments.Zip(contents))
         {
-            var type = TypeOracle.ArgumentType(callee, parameter.Index);
+            var type = TypeOracle.ArgumentType(call, callee, parameter.Index);
             if (construction && parameter.Index < 0) continue;
             if (construction && parameter.Index == 1 && DelegateFacts.IsDelegate(callee.DeclaringType)
                 && oracle.DelegateTargetOf(content, contents[Array.FindIndex(signature.Arguments, p => p.Index == 0)]) is { } target)
@@ -113,7 +113,7 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
             {
                 var element = type is ByRefRef byRef ? byRef.Element : type;
                 if (values.CellContent(call, parameter, arguments, false) is { } before) Use(before, element, call);
-                if (oracle.Locate(content, Math.Max(8, parameter.Size * 8)) is { } location) Location(location, call);
+                if (oracle.Locate(content, parameter.Size < 0 ? -1 : Math.Max(8, parameter.Size * 8)) is { } location) Location(location, call);
                 else Use(content, type is ByRefRef ? type : new ByRefRef(type), call);
             }
         }

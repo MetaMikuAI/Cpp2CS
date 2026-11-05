@@ -198,6 +198,7 @@ public sealed class MethodDecompiler
         DispatchResolution.Run(function, preliminary, new TypeOracle(types, facts, method, environment.Shape, preliminary));
         // 每轮从稳定输入构建分析图，只累积已证明的调用目标，不回滚生产语句和 SSA。
         var prepared = function;
+        InvokerCallsPass.AfterSplitting(function, method, rewriter);
         var targets = new Dictionary<CallSite, MethodRef>();
         MemoryLayout layout;
         while (true)

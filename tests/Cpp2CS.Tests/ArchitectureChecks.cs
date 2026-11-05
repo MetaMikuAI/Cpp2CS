@@ -45,6 +45,8 @@ internal static class ArchitectureChecks
         SharedInterfaceContinuations(checks);
         LowHalfArithmetic(checks);
         InvokerArguments(checks, facts, types);
+        DispatchedInvokers(checks, facts, types);
+        VariableSizedStorage(checks, facts, types);
         SharedValueModel(checks, facts, types);
         FrameForwards(checks, facts);
         ExceptionShapes(checks, types);
@@ -308,6 +310,102 @@ internal static class ArchitectureChecks
             .Arguments[0] == new Use(receiver, 64), "invoker 接收者保留原值，不能跨调用重新读取字段");
     }
 
+    /// <summary>分派查找得到 MethodInfo 的 invoker 是对接收者的 callvirt；查找的对象不是接收者时不成立。</summary>
+    private static void DispatchedInvokers(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var contract = Type("InvokerContract", 771);
+        var declared = new MethodDef
+        {
+            Index = 771, Owner = contract, Name = "Run", Token = 0, Slot = 1, ImplAttributes = 0,
+            Attributes = MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.Abstract,
+        };
+        declared.Parameters = [new("value", types.Int32, 0, null, false)];
+        declared.ReturnType = types.Int32;
+        contract.Methods = [declared];
+        var type = new DefinitionRef(contract, []);
+        foreach (var sameReceiver in new[] { true, false })
+        {
+            var receiver = new Variable(Storage.Gpr(19), 0);
+            var other = new Variable(Storage.Gpr(20), 0);
+            var data = new Variable(Storage.Temp(880), 1);
+            var slot = new Binary(BinOp.Add, new Use(data, 64), Expr.C(RuntimeLayout.VirtualInvokeDataMethod, 64), 64);
+            var entity = new Load(slot, 64);
+            var lookup = new Call(0, CallKind.Direct, Expr.C(0, 64))
+            {
+                Op = new(OpKind.InterfaceInvokeData, ((object?)type, 1)),
+                Arguments = [new Use(receiver, 64), new Symbol(SymbolKind.Class, type), Expr.C(1, 64)],
+                Results = [data.Storage], Defines = [data],
+            };
+            var invocation = new Call(4, CallKind.Indirect, new Load(new Binary(BinOp.Add, entity, Expr.C(RuntimeLayout.MethodInvoker, 64), 64), 64))
+            {
+                Arguments = [new Load(new Binary(BinOp.Add, entity, Expr.C(RuntimeLayout.MethodVirtualPointer, 64), 64), 64), entity,
+                    new Use(sameReceiver ? receiver : other, 64), new FrameAddress(-32), new FrameAddress(-8)],
+                Sources = Enumerable.Range(0, 5).Select(Storage.Gpr).ToArray(),
+            };
+            var block = new Block(0) { End = 8, Statements = [lookup, invocation, new Return(8)] };
+            var function = new MachineFunction { Entry = 0, Range = new(0, 12, CodeRegion.Managed, default), Blocks = [block] };
+            var state = new IdiomState(new IdiomRewriter(facts), function);
+            check.Equal(sameReceiver, state.InvokerCalls(), "invoker 的接收者必须是分派查找的对象");
+            if (!sameReceiver) continue;
+            var normalized = block.Statements.OfType<Call>().Single(c => c.Op?.Kind == OpKind.InvokeVirtualGeneric);
+            check.True(normalized.Op!.Operand is MethodRef { Method: var method } && method == declared, "接口槽按接口与槽号确定声明方法");
+            check.True(new CallShapes(facts, new ManagedAbi(facts.Layouts), (_, _) => false).Of(normalized) is { IsDispatch: true, IsRuntime: false, Signature.Return.Transfer: Transfer.ResultBuffer },
+                "分派的 invoker 按拆包后的签名以 callvirt 调用");
+        }
+    }
+
+    /// <summary>布局依赖完全共享类型参数的值类型是可变大小存储；只含数组或引用的实例布局固定。受约束调用与 unbox.any 的 helper 按完整指令证据识别。</summary>
+    private static void VariableSizedStorage(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var open = new GenericParameterRef("T", false, 0);
+        var shared = open with { Binding = new(NativeBindingKind.Shared, types.Object, 0) };
+        var reference = open with { Binding = new(NativeBindingKind.Reference, types.Object, 0) };
+        TypeDef Struct(string name, int index, params (string Name, TypeRef Type, FieldAttributes Attributes)[] fields)
+        {
+            var type = new TypeDef { Index = index, Name = name, Namespace = "Tests", Assembly = "Tests.dll", Token = 0, Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false };
+            type.Fields = fields.Select((f, i) => new FieldDef { Index = index * 10 + i, Owner = type, Name = f.Name, Type = f.Type, Attributes = f.Attributes, Offset = 16 + i * 8 }).ToArray();
+            return type;
+        }
+        var variable = Struct("VariableValue", 772, ("value", open, FieldAttributes.Private), ("count", types.Int32, FieldAttributes.Private));
+        var nested = Struct("VariableOuter", 773, ("inner", new DefinitionRef(variable, [open]), FieldAttributes.Private));
+        var fixedLayout = Struct("FixedValue", 774, ("items", new ArrayRef(open, 1), FieldAttributes.Private), ("count", types.Int32, FieldAttributes.Private));
+        var onlyStatic = Struct("StaticValue", 775, ("cached", open, FieldAttributes.Static));
+        check.True(SharedTypes.IsVariableSized(new DefinitionRef(variable, [shared])), "直接含共享类型参数的值类型可变大小");
+        check.True(SharedTypes.IsVariableSized(new DefinitionRef(nested, [shared])), "沿值类型字段递归");
+        check.True(!SharedTypes.IsVariableSized(new DefinitionRef(fixedLayout, [shared])), "只含数组的实例布局固定");
+        check.True(!SharedTypes.IsVariableSized(new DefinitionRef(onlyStatic, [shared])), "静态字段不影响实例布局");
+        check.True(!SharedTypes.IsVariableSized(new DefinitionRef(variable, [reference])) && !SharedTypes.IsVariableSized(new DefinitionRef(variable, [types.Int32])),
+            "引用共享和具体实例布局固定");
+        var holder = Type("VariableHolder", 776);
+        var returns = Method(holder, "Make", 776, MethodAttributes.Public | MethodAttributes.Static);
+        returns.Parameters = [new("value", types.Int32, 0, null, false)];
+        returns.ReturnType = new DefinitionRef(variable, [open]);
+        var signature = new ManagedAbi(facts.Layouts).Classify(new MethodRef(returns, [shared], []), out _);
+        check.True(signature is { Return: { Passing: Passing.Indirect, Pieces: [{ Register: var buffer }] }, MethodInfo.Register: var info } && buffer == Storage.Gpr(1) && info == Storage.Gpr(2),
+            "可变大小的返回缓冲区在显式参数之后、MethodInfo 之前");
+
+        uint[] constrained = [0xa9bd5ffe, 0xa90157f6, 0xa9024ff4, 0xb9402808, 0xaa0503f3, 0xaa0403f4, 0xaa0303f6, 0xaa0103f5, 0x37f80148, 0xf94002d6,
+            0xb4000736, 0xaa1603e0, 0xaa1503e1, 0x9400b9d9, 0xaa0003e1, 0xa9409400, 0xaa1603e2, 0x14000012, 0xf94012a8, 0xeb00011f,
+            0x540002a0, 0x39446109, 0x372800c9, 0x3940a908, 0x7100791f, 0x54000060, 0x71004d1f, 0x540002a1, 0xaa1603e1, 0x9400b949,
+            0xf94002a8, 0xf9400aa5, 0xaa0003e2, 0xaa1503e1, 0xaa0803e0, 0xaa1403e3, 0xaa1303e4, 0xa9424ff4, 0xa94157f6, 0xa8c35ffe,
+            0xd61f00a0, 0xb940e008, 0x35000048, 0x97ffed51, 0xf9400aa5, 0xf94002a0, 0xaa1503e1, 0x17ffffe1, 0xf9403008, 0xaa0203f7,
+            0xb40000c8, 0x3944d408, 0x36180088, 0x394002c8, 0x340001a8, 0xf9402000, 0x92800008, 0xa90022e0, 0xb940fc02, 0x910042e0,
+            0xaa1603e1, 0x959b4047, 0xf9400aa5, 0xf94002a0, 0xaa1503e1, 0xaa1703e2, 0x17ffffe1];
+        check.True(RuntimeHelpers.ConstrainedCallBody(constrained), "受约束调用的完整指令证据");
+        var skipsBox = constrained.ToArray();
+        skipsBox[57] = 0xd503201f; // nop：不写盒头
+        check.True(!RuntimeHelpers.ConstrainedCallBody(skipsBox), "不写盒头的实现不是受约束调用");
+        uint[] unbox = [0xa9be57fe, 0xa9014ff4, 0xb9402828, 0xaa0203f5, 0xaa0103f3, 0xaa0003f4, 0x37f800e8, 0xb4000294, 0xaa1403e0, 0xaa1303e1,
+            0x9400bc8d, 0xb5000220, 0x1400001f, 0xf9403268, 0xb4000068, 0x3944d668, 0x37180228, 0xb40003b4, 0xf9400288, 0xf9402269,
+            0xf9402108, 0xeb09011f, 0x540002a1, 0xaa1403e0, 0xa9414ff4, 0xa8c257fe, 0x1400bd11, 0xaa1f03e0, 0xf90002a0, 0xa9414ff4,
+            0xaa1503e0, 0xa8c257fe, 0xd65f03c0, 0xb40000b4, 0xf9400288, 0xf9402261, 0xeb01011f, 0x54000141, 0xaa1403e0, 0xaa1303e1,
+            0xaa1503e2, 0x9400bd04, 0x17fffff3, 0xaa1403e0, 0xaa1303e1, 0x940000fd, 0x94000015, 0xaa1403e0, 0x940000fa];
+        check.True(RuntimeHelpers.UnboxAnyBody(unbox), "unbox.any 的完整指令证据");
+        var unchecked_ = unbox.ToArray();
+        unchecked_[21] = 0xd503201f; // nop：不比较 element_class
+        check.True(!RuntimeHelpers.UnboxAnyBody(unchecked_), "不检查类型的实现不是 unbox.any");
+    }
+
     /// <summary>完全共享泛型的不透明值：表示转换归一为句柄，按 sizeof(T) 的复制成为位置操作。</summary>
     private static void SharedValueModel(Assertions check, ProgramFacts facts, ManagedTypes types)
     {
@@ -447,6 +545,16 @@ internal static class ArchitectureChecks
             if (variant == "overwritten")
                 check.True(function.Blocks[0].Statements.OfType<Define>().Any(d => d.Target == loaded && d.Value is Const { Value: 0 }), "转发取到达读取的写入");
         }
+        // 实参经私有栈槽转发后，语句换了对象但仍是同一次调用：它读取的另一个栈槽不能当作无人观察。
+        var box = new Call(8, CallKind.Direct, Expr.C(64, 64))
+        {
+            Op = new(OpKind.Box, null), Arguments = [Expr.C(0, 64), new Load(new FrameAddress(-32), 64)],
+        };
+        var viaSlot = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [new(0) { Statements = [
+            new Store(0, new FrameAddress(-16), Expr.C(7, 32)), new Store(4, new FrameAddress(-32), new FrameAddress(-16)), box, new Return(12)] }] };
+        FrameForwarding.Run(viaSlot, effects);
+        check.True(viaSlot.Blocks[0].Statements.OfType<Call>().Single() is { Arguments: [_, FrameAddress { Offset: -16 }] }
+            && viaSlot.Blocks[0].Statements.OfType<Store>().Any(s => s.Target is FrameAddress { Offset: -16 }), "转发改写实参后保留调用读取的写入");
         // 类操作数尚未确定的装箱仍会读取实参指向的栈槽，写入不能删除。
         var value = new FrameAddress(-16);
         var unresolved = new Variable(Storage.Temp(871), 1);
@@ -545,16 +653,6 @@ internal static class ArchitectureChecks
                 check.True(exit.Statements.OfType<Phi>().Single().Sources.All(results.Contains) && exit.Predecessors.Count == count,
                     "各分支调用结果经新入边汇合，出口不引用被删除的调用结果");
             }
-        // 实参经私有栈槽转发后，语句换了对象但仍是同一次调用：它读取的另一个栈槽不能当作无人观察。
-        var box = new Call(8, CallKind.Direct, Expr.C(64, 64))
-        {
-            Op = new(OpKind.Box, null), Arguments = [Expr.C(0, 64), new Load(new FrameAddress(-32), 64)],
-        };
-        var viaSlot = new MachineFunction { Entry = 0, Range = new(0, 16, CodeRegion.Managed, default), Blocks = [new(0) { Statements = [
-            new Store(0, new FrameAddress(-16), Expr.C(7, 32)), new Store(4, new FrameAddress(-32), new FrameAddress(-16)), box, new Return(12)] }] };
-        FrameForwarding.Run(viaSlot, effects);
-        check.True(viaSlot.Blocks[0].Statements.OfType<Call>().Single() is { Arguments: [_, FrameAddress { Offset: -16 }] }
-            && viaSlot.Blocks[0].Statements.OfType<Store>().Any(s => s.Target is FrameAddress { Offset: -16 }), "转发改写实参后保留调用读取的写入");
         }
     }
 

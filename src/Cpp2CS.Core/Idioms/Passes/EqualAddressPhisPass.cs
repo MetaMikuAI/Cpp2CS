@@ -30,7 +30,8 @@ internal static class EqualAddressPhisPass
                 var leaves = new HashSet<Expr>();
                 Leaves(new Use(phi.Target, phi.Target.Width), [], leaves);
                 var sources = leaves.ToArray();
-                if (sources is not [Binary { Op: BinOp.Add, Right: Const } address] || ExprMap.Walk(address).Any(e => e is Load or Unknown or Intrinsic))
+                // 元数据实体是不可变的常量：初始化守卫两臂各读一次 RGCTX 表后合流，也是同一个值。
+                if (sources is not [var address and (Symbol or Binary { Op: BinOp.Add, Right: Const })] || ExprMap.Walk(address).Any(e => e is Load or Unknown or Intrinsic))
                     continue;
                 block.Statements[i] = new Define(phi.Address, phi.Target, address);
                 changed = true;
