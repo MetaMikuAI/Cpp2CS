@@ -55,6 +55,7 @@ internal sealed partial class TemplateRecovery
     {
         failure = "区域不能替换";
         if (match.Exit is not { } exit || match.ExitCopies is not { } copies) return null;
+        if (match.Rewritten is { } rewritten) (body, blocks) = Rewritten(body, blocks, rewritten);
         var at = blocks[startBlock].Statements[start].Address;
         // 静态方法没有接收者；实例方法的 this 须在比对中绑定。
         ManagedValue? self = null;
@@ -180,6 +181,6 @@ internal sealed partial class TemplateRecovery
             replacement.AddRange(blocks[exit.Block].Statements.Skip(exit.Index));
             if (exit.Block != startBlock) internalBlocks.Add(exit.Block);
         }
-        return new InlineReplacement(startBlock, replacement.ToArray(), internalBlocks.ToFrozenSet());
+        return new InlineReplacement(startBlock, replacement.ToArray(), internalBlocks.ToFrozenSet(), match.Rewritten);
     }
 }

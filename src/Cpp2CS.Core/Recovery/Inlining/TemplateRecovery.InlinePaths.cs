@@ -99,6 +99,7 @@ internal sealed partial class TemplateRecovery
             ComparisonValue { Left: ConstantValue a, Right: ConstantValue b } c when ConstantComparison(c.Condition, a, b) is { } truth
                 => new ConstantValue(truth ? 1UL : 0UL, types.Boolean, 8),
             NegatedValue { Operand: ConstantValue operand } => new ConstantValue(operand.Bits == 0 ? 1UL : 0UL, types.Boolean, 8),
+            ChoiceValue { Condition: ConstantValue known } choice => known.Bits != 0 ? choice.True : choice.False,
             ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Truncate, Operand: ConstantValue operand } conversion
                 => new ConstantValue(operand.Bits & Expr.Mask(conversion.Width), conversion.Type, conversion.Width),
             ComparisonValue { Condition: Cond.Ule, Right: ConstantValue { Bits: 0 }, Left: var x } c => IsZero(c, x, Cond.Eq),

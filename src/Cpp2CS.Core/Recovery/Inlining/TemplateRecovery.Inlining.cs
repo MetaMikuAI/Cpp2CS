@@ -69,6 +69,10 @@ internal sealed partial class TemplateRecovery
             return false;
         }
         public LocalValue? Result { get; set; }
+        /// <summary>区域之后的语句里，子表达式换成结果局部后的样子。</summary>
+        public IReadOnlyDictionary<(ulong Block, int Index), ManagedStatement>? Rewritten { get; set; }
+        /// <summary>上述替换用的结果局部。</summary>
+        public LocalValue? ResultAtUses { get; set; }
         public required Dictionary<int, ManagedValue> Binding { get; init; }
         /// <summary>模板的方法体。</summary>
         public ManagedBody? Template { get; init; }

@@ -11,8 +11,21 @@ namespace Cpp2CS.Recovery.Inlining;
 /// </summary>
 internal sealed partial class TemplateRecovery
 {
-    private bool ConcludeExit(InlineMatch match, MethodRef method, ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks) =>
-        ConcludeReturn(match, method) || ConcludeContinuation(match, method, body, blocks);
+    private bool ConcludeExit(InlineMatch match, MethodRef method, ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks)
+    {
+        if (ConcludeReturn(match, method)) return true;
+        var binding = new Dictionary<int, ManagedValue>(match.Binding);
+        if (ConcludeContinuation(match, method, body, blocks)) return true;
+        RestoreBinding(match, binding);
+        return ConcludeAtUses(match, method, body, blocks);
+    }
+
+    /// <summary>失败的尝试不留下绑定。</summary>
+    private static void RestoreBinding(InlineMatch match, IReadOnlyDictionary<int, ManagedValue> binding)
+    {
+        match.Binding.Clear();
+        foreach (var (key, value) in binding) match.Binding[key] = value;
+    }
 
     /// <summary>模板的一条路径返回：调用方从当前位置沿无条件跳转到达的点是这条路径的出口，连同出口边上的复制记为一个终点。</summary>
     private bool Finish(Walker caller, InlineMatch match, ManagedValue? result)
@@ -165,6 +178,128 @@ internal sealed partial class TemplateRecovery
         return true;
     }
 
+    /// <summary>
+    /// 返回值没有落到局部里，而是整个作为子表达式用在区域之后（取值方法内联后结果直接参与计算）。各路径出口相同时，从出口沿直线往后
+    /// 找在每条路径上项都等于该路径返回值的子表达式，换成结果局部后再比对出口；读取按路径上的写入和调用分代，项相同就是同一个值。
+    /// 调用写在区域开头，所以返回值读取的接收者在各路径上必须已经解引用过或已知非空，否则空引用异常会提前。
+    /// </summary>
+    private bool ConcludeAtUses(InlineMatch match, MethodRef method, ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks)
+    {
+        var ends = match.Ends;
+        if (ends.Count == 0 || ends.Any(e => e.Result is null || e.State is null || e.Exit != ends[0].Exit) || !ends.Any(e => ReadsMemory(e.Result!))) return false;
+        var returnType = method.Concrete(method.Method.ReturnType);
+        if (ends.Any(e => e.Result is not ConstantValue && !e.Result!.Type.Equals(returnType))) return false;
+        // 出口块还有区域外的入口时，它的语句不只属于这个区域。
+        var exit = ends[0].Exit;
+        if (exit.Index == 0 && Predecessors(blocks, exit.Block).Any(p => !match.Covered.Contains((p.Address, p.Statements.Count - 1)))) return false;
+        var result = NewLocal(returnType);
+        var failure = match.Failure;
+        var binding = new Dictionary<int, ManagedValue>(match.Binding);
+        var rewritten = RewriteUses(ends, result, match, blocks);
+        if (rewritten.Count > 0)
+        {
+            var (rewrittenBody, rewrittenBlocks) = Rewritten(body, blocks, rewritten);
+            match.Failure = null;
+            match.Rewritten = rewritten;
+            match.ResultAtUses = result;
+            if (ConcludeContinuation(match, method, rewrittenBody, rewrittenBlocks) && ends.All(end => ReadReceivers(Bind(end.Result!, match.Binding)).All(receiver => end.State!.Dereferenced.Contains(receiver)
+                || KnownCondition(new ComparisonValue(Cond.Eq, receiver, new ConstantValue(0, receiver.Type, receiver.Width), types.Boolean), end.State, NoBinding) == false)))
+                return true;
+        }
+        RestoreBinding(match, binding);
+        match.Rewritten = null;
+        match.ResultAtUses = null;
+        match.Failure = failure;
+        return false;
+    }
+
+    private static bool ReadsMemory(ManagedValue term)
+    {
+        if (term is Observed) return true;
+        var found = false;
+        MapTerm(term, child =>
+        {
+            found |= ReadsMemory(child);
+            return child;
+        });
+        return found;
+    }
+
+    /// <summary>从共同的出口沿直线往后，把每条路径上项都等于返回值的子表达式换成结果局部；进入有其他前驱的块或遇到分支之后，局部的值不再由这些路径决定。</summary>
+    private Dictionary<(ulong Block, int Index), ManagedStatement> RewriteUses(IReadOnlyList<InlineEnd> ends, LocalValue result, InlineMatch match, IReadOnlyDictionary<ulong, ManagedBlock> blocks)
+    {
+        var rewritten = new Dictionary<(ulong Block, int Index), ManagedStatement>();
+        var walkers = ends.Select(end => (End: end, Walker: new Walker
+        {
+            Blocks = blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Env = new(end.Env), Epoch = end.Epoch,
+            Stores = [.. end.State!.Stores], Assumptions = [.. end.State.Assumptions], Calls = 1 << 16,
+        })).ToArray();
+        var hit = false;
+        ManagedValue Rewrite(ManagedValue value)
+        {
+            if (value is LocalValue or ArgumentValue or ConstantValue) return value;
+            var trial = new Dictionary<int, ManagedValue>(match.Binding);
+            if (walkers.All(w => Term(w.Walker, value) is { } term && Same(w.End.Result!, term, w.Walker, trial)))
+            {
+                foreach (var (key, bound) in trial) match.Binding[key] = bound;
+                hit = true;
+                return result;
+            }
+            return ManagedValues.Map(value, Rewrite);
+        }
+        var (block, index) = ends[0].Exit;
+        for (var steps = 0; steps < 64 && index < blocks[block].Statements.Count; steps++)
+        {
+            var statement = blocks[block].Statements[index];
+            hit = false;
+            var mapped = ManagedValues.Map(statement, Rewrite, target => target);
+            if (hit) rewritten[(block, index)] = mapped;
+            foreach (var (_, walker) in walkers)
+                switch (statement)
+                {
+                    case ManagedAssignment assignment:
+                        if (Term(walker, assignment.Value) is not { } value) return rewritten;
+                        walker.Env[assignment.Target.Variable] = value;
+                        break;
+                    case ManagedStore store:
+                        if (Location(walker, store.Target) is not { } location || Term(walker, store.Value) is not { } stored) return rewritten;
+                        walker.Stores.Add((location, stored));
+                        break;
+                    case ManagedCheck:
+                        break;
+                    case ManagedCall call:
+                        if (call.Result is { } kept) walker.Env[kept.Variable] = new Returned(walker.Calls, kept.Type, kept.Width);
+                        walker.Calls++;
+                        walker.Epoch++;
+                        walker.Stores.Clear();
+                        break;
+                    case ManagedJump jump:
+                        if (Predecessors(blocks, jump.Edge.Target).Length > 1 || !Follow(walker, jump.Edge)) return rewritten;
+                        break;
+                    default:
+                        return rewritten;
+                }
+            if (statement is ManagedJump next) (block, index) = (next.Edge.Target, 0);
+            else index++;
+            foreach (var (_, walker) in walkers) (walker.Block, walker.Index) = (block, index);
+        }
+        return rewritten;
+    }
+
+    /// <summary>应用用处替换后的方法体。</summary>
+    private static (ManagedBody Body, IReadOnlyDictionary<ulong, ManagedBlock> Blocks) Rewritten(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks,
+        IReadOnlyDictionary<(ulong Block, int Index), ManagedStatement> rewritten)
+    {
+        var result = blocks.ToDictionary(p => p.Key, p => p.Value);
+        foreach (var group in rewritten.GroupBy(r => r.Key.Block))
+        {
+            var statements = result[group.Key].Statements.ToArray();
+            foreach (var (position, statement) in group) statements[position.Index] = statement;
+            result[group.Key] = result[group.Key] with { Statements = statements };
+        }
+        return (body with { Blocks = body.Blocks.Select(b => result[b.Address]).ToArray() }, result);
+    }
+
     /// <summary>返回：调用方在每条路径上直接返回模板的返回值（或都返回 void），返回类型可赋给调用方的返回类型。</summary>
     private bool ConcludeReturn(InlineMatch match, MethodRef method)
     {
@@ -283,7 +418,7 @@ internal sealed partial class TemplateRecovery
         var isVoid = ManagedTypes.IsVoid(method.Method.ReturnType);
         var returnType = method.Concrete(method.Method.ReturnType);
         if (!isVoid && match.Ends.Any(e => e.Result is null)) return match.Fail("返回路径没有返回值");
-        var result = isVoid ? null : NewLocal(returnType);
+        var result = isVoid ? null : match.ResultAtUses ?? NewLocal(returnType);
         IReadOnlyList<(ManagedValue Actual, ManagedValue Carrier)> Pairs(InlineEnd end) => result is null ? [] : Carriers(end, returnType, result).ToArray();
         Walker At(InlineEnd end) => new() { Blocks = blocks, Caller = true, Block = end.Exit.Block, Index = end.Exit.Index, Env = new(end.Env), Epoch = end.Epoch };
         // 谓词取自一条在续接点按返回值分支的路径。
@@ -295,7 +430,7 @@ internal sealed partial class TemplateRecovery
                 var abstracted = Abstract(tested, Pairs(end), match);
                 if (Mentions(abstracted, result)) { predicate = abstracted; break; }
             }
-        var used = false;
+        var used = match.ResultAtUses is not null;
         // 一个续接点的局部复制：逐路径验证同一函数。
         IReadOnlyList<(LocalValue Target, ManagedValue Value)>? Copies(IReadOnlyList<InlineEnd> ends)
         {
@@ -351,7 +486,7 @@ internal sealed partial class TemplateRecovery
             if (!used && !match.Ends.All(e => e.Result is null || NonThrowingInlineValue(e.Result)))
                 return match.Fail("返回值没有承接的局部，且无法证明额外求值无副作用");
             // 只观察部分叶子时，其余叶子的求值也不能引入异常。
-            if (used && !joined.Any(c => Contains(c.Value, result!)))
+            if (used && match.ResultAtUses is null && !joined.Any(c => Contains(c.Value, result!)))
                 foreach (var end in match.Ends)
                     foreach (var (actual, carrier) in Pairs(end).Skip(1))
                         if (!joined.Any(c => Contains(c.Value, carrier)) && !NonThrowingInlineValue(actual))
@@ -362,8 +497,7 @@ internal sealed partial class TemplateRecovery
         var binding = new Dictionary<int, ManagedValue>(match.Binding);
         if (ConcludeBranch()) return true;
         if (!separate) return false;
-        match.Binding.Clear();
-        foreach (var (key, value) in binding) match.Binding[key] = value;
+        RestoreBinding(match, binding);
         match.Failure = null;
         return ConcludeDuplicated(match, body, blocks, result, Pairs);
 
