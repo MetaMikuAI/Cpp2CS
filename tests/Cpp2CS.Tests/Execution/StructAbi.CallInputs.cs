@@ -30,7 +30,7 @@ internal sealed partial class StructAbi
         int[] FindUnused()
         {
             var definition = method.Method;
-            if (definition.Address == 0 || definition.IsVirtual || definition.GenericParameters.Count != 0
+            if (definition.Address == 0 || Overridable(definition) || definition.GenericParameters.Count != 0
                 || definition.Owner.GenericParameters.Count != 0 || Side.IsGenericInstance(method)) return [];
             var types = ArgumentTypes(method);
             if (types.Any(t => index.Types.Kind(t) is not
@@ -54,13 +54,16 @@ internal sealed partial class StructAbi
         }
     }
 
+    // final 方法不能被重写（ECMA-335 II.15.4.2.2），入口的方法体就是调用到达的方法体；实现接口的方法通常是这种。
+    private static bool Overridable(MethodDef method) => method.IsVirtual && (method.Attributes & System.Reflection.MethodAttributes.Final) == 0;
+
     // 固定目标的转传输入逐层核对原始 SSA；递归与未知身份均不能证明未用。
     private HashSet<Storage>? NativeInputReads(ulong entry)
     {
         if (nativeInputReads.TryGetValue(entry, out var cached)) return cached;
         nativeInputReads[entry] = null;
         var methods = index.Facts.EntriesAt(entry).Select(e => e.Method).OfType<MethodRef>().Distinct().ToArray();
-        if (methods.Length == 0 || methods.Any(m => m.Method.IsVirtual || m.Method.GenericParameters.Count != 0
+        if (methods.Length == 0 || methods.Any(m => Overridable(m.Method) || m.Method.GenericParameters.Count != 0
             || m.Method.Owner.GenericParameters.Count != 0 || Side.IsGenericInstance(m)
             || m.Method.Address != entry && m.Method.Address != 0)) return null;
         var returned = methods.SelectMany(m => Signature(m).Return?.Pieces ?? []).Distinct()
