@@ -1778,7 +1778,7 @@ internal static class ArchitectureChecks
         }
     }
 
-    /// <summary>可寻址单元的类型：收集证据期间经单元得到的类型不留用。</summary>
+    /// <summary>可寻址单元的类型：RGCTX 项的类型参数带上当前入口的见证；收集证据期间经单元得到的类型不留用。</summary>
     private static void AddressableCellTypes(Assertions check, ProgramFacts facts, ManagedTypes types)
     {
         var abi = new ManagedAbi(facts.Layouts);
@@ -1793,6 +1793,24 @@ internal static class ArchitectureChecks
             var values = ValueModel.Build(function, environment);
             return (new(types, facts, method, environment.Shape, values, new([cell])), values);
         }
+
+        // 方法自身的 RGCTX 项写的是元数据里的 T；当前入口把它绑定为引用。
+        var parameter = new GenericParameterRef("T", true, 0);
+        var fill = Method(owner, "Fill", 830, MethodAttributes.Public | MethodAttributes.Static);
+        fill.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        var get = Method(owner, "Get", 831, MethodAttributes.Public | MethodAttributes.Static);
+        get.GenericParameters = fill.GenericParameters;
+        get.Parameters = [new("value", new ByRefRef(parameter), 0, null, false)];
+        var current = new MethodRef(fill, [], [parameter with { Binding = new(NativeBindingKind.Reference, types.Object, 1) }]);
+        var narrow = new Cell(0, LocalSpace.Frame, -8, 8, "异常路径观察 ref 调用写入的内容");
+        var (typed, _) = Analyze(narrow, current, new Call(4, CallKind.Direct, Expr.C(1, 64))
+        {
+            Resolved = new MethodRef(get, [], [parameter]),
+            Arguments = [new FrameAddress(-8), new Symbol(SymbolKind.Method, new MethodRef(get, [], [parameter]))],
+            Sources = [Storage.Gpr(0), Storage.Gpr(1)],
+        });
+        check.True(typed.CellType(narrow) is GenericParameterRef { SharedReference: true } && typed.Locate(new LocalSym(LocalSpace.Frame, -8), 64) is { Kind: LocationKind.Local },
+            "RGCTX 项的类型参数代入当前入口后，单元可以按引用定位");
 
         // 证据来自 ref this；另一调用的接收者读自单元，它的类型在证据收集之后才可知。
         var holder = new TypeDef { Index = 832, Name = "Holder", Namespace = "Tests", Assembly = "Tests.dll", Token = 0,
