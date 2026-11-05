@@ -6,6 +6,7 @@ using Cpp2CS.Idioms;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Algebra;
+using Cpp2CS.Machine.Ssa;
 using Cpp2CS.Machine.Storage;
 using Cpp2CS.Output;
 using Cpp2CS.Recovery.Control;
@@ -41,6 +42,7 @@ internal static class ArchitectureChecks
         TailCallIdentities(checks, facts, types);
         MethodPointers(checks, facts, types);
         SharedInterfacePartitions(checks);
+        SharedInterfaceContinuations(checks);
         InvokerArguments(checks, facts, types);
         SharedValueModel(checks, facts, types);
         FrameForwards(checks, facts);
@@ -541,6 +543,80 @@ internal static class ArchitectureChecks
                 check.True(exit.Statements.OfType<Phi>().Single().Sources.All(results.Contains) && exit.Predecessors.Count == count,
                     "各分支调用结果经新入边汇合，出口不引用被删除的调用结果");
             }
+        }
+    }
+
+    /// <summary>查找尾部只复制到消费查找结果的调用；之后的语句保留一份，命中计算可以各占一块。</summary>
+    private static void SharedInterfaceContinuations(Assertions check)
+    {
+        foreach (var separateHits in new[] { false, true })
+        foreach (var consumed in new[] { true, false })
+        {
+            const int count = 2;
+            var version = 0;
+            Variable Fresh(int width = 64) => new(Storage.Gpr(20), ++version);
+            var receiver = new Use(new(Storage.Gpr(0), 0), 64);
+            var head = new Block(0);
+            var slow = new Block(1000) { End = 1008 };
+            var merge = new Block(1040) { End = 1048 };
+            var after = new Block(1080) { End = 1084 };
+            var function = new MachineFunction { Entry = 0, Range = new(0, 1100, CodeRegion.Managed, default), Blocks = [head, slow, merge, after] };
+            var shared = separateHits ? null : new Block(1020) { End = 1028 };
+            if (shared is not null) function.Blocks.Add(shared);
+            var slowResult = Fresh();
+            var mergedResult = Fresh();
+            var unrelated = Fresh();
+            // φ 来源与合流块前驱同序：各自的命中块先接入，再接入慢路径和合成的命中块。
+            var mergeSources = new List<Variable>();
+            var sharedSources = new List<Variable>();
+            for (var i = 0; i < count; i++)
+            {
+                var branch = new Block((ulong)(4 + i * 12));
+                var left = new Block(branch.Start + 4) { Statements = [new Jump(0, slow.Start)] };
+                var hitValue = Fresh();
+                var right = new Block(branch.Start + 8) { Statements = [new Define(0, hitValue, Expr.C((ulong)i + 16, 64)),
+                    new Jump(0, separateHits ? merge.Start : shared!.Start)] };
+                branch.Statements.Add(new Branch(0, Expr.C(1, 1), left.Start, right.Start));
+                MachineFunction.AddEdge(head, branch);
+                MachineFunction.AddEdge(branch, left); MachineFunction.AddEdge(branch, right);
+                MachineFunction.AddEdge(left, slow); MachineFunction.AddEdge(right, separateHits ? merge : shared!);
+                function.Blocks.AddRange([branch, left, right]);
+                if (separateHits) mergeSources.Add(hitValue); else sharedSources.Add(hitValue);
+            }
+            var lookup = new Call(1004, CallKind.Direct, Expr.C(2000, 64))
+                { Arguments = [receiver, Expr.C(3000, 64), Expr.C(1, 64)], Defines = [slowResult], Results = [Storage.Gpr(0)] };
+            slow.Statements = [lookup, new Jump(1008, merge.Start)];
+            MachineFunction.AddEdge(slow, merge);
+            mergeSources.Add(slowResult);
+            if (shared is not null)
+            {
+                var sharedPhi = Fresh();
+                var fastResult = Fresh();
+                shared.Statements = [new Phi(1020, sharedPhi, sharedSources.ToArray()), new Define(1024, fastResult, new Use(sharedPhi, 64)), new Jump(1028, merge.Start)];
+                MachineFunction.AddEdge(shared, merge);
+                mergeSources.Add(fastResult);
+            }
+            var callResult = Fresh();
+            var later = Fresh();
+            var returned = new Call(1064, CallKind.Direct, Expr.C(2100, 64)) { Arguments = [new Use(callResult, 64)], Defines = [later], Results = [Storage.Gpr(0)] };
+            // 调用之后的直接调用与分支都不属于查找尾部。
+            merge.Statements = [new Phi(1040, mergedResult, mergeSources.ToArray()), new Define(1042, unrelated, Expr.C(7, 64)),
+                new Call(1044, CallKind.Indirect, consumed ? new Use(mergedResult, 64) : new Use(unrelated, 64)) { Defines = [callResult], Results = [Storage.Gpr(0)] },
+                returned, new Jump(1048, after.Start)];
+            MachineFunction.AddEdge(merge, after);
+            after.Statements = [new Return(1084) { Value = new Use(later, 64) }];
+            function.Renumber();
+            var changed = SharedInterfaceTails.Run(function, c => ReferenceEquals(c, lookup), Fresh);
+            check.Equal(consumed, changed, $"接口尾部 hits={separateHits}：只有调用目标消费查找结果时才拆分");
+            if (!changed) continue;
+            var calls = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().ToArray();
+            check.Equal(count, calls.Count(c => c.Kind == CallKind.Indirect), "每次查找保留一个独立调用");
+            check.Equal(count, calls.Count(c => c.Target is Const { Value: 2000 }), "每次查找保留一个独立慢路径");
+            check.Equal(1, calls.Count(c => c.Target is Const { Value: 2100 }), "调用之后的语句不复制");
+            var results = calls.Where(c => c.Kind == CallKind.Indirect).SelectMany(c => c.Defines).ToHashSet();
+            check.True(function.Blocks.SelectMany(b => b.Statements).OfType<Phi>().Any(p => p.Target == callResult && p.Sources.All(results.Contains)),
+                "调用结果在续接块入口按路径汇合，后续使用不改写");
+            check.True(SsaCheck.Verify(function, Dominators.Compute(function)).Count == 0, "拆分后 SSA 保持合法");
         }
     }
 

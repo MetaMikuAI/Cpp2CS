@@ -55,11 +55,21 @@ internal static class InterfaceDispatchPass
             if (selected.Count != 1)
                 continue;
             var regionDefined = DefinedPass.Defined(region);
-            // 其他 φ 在命中一侧取区域内部的值时，慢路径一侧必须是未定义值（或该 φ 没有实际使用），合并后改为未定义值
+            // 其他 φ 在命中一侧取区域内部的值时：clang 把与查找无关的纯计算下沉进两臂时，两臂的值相同，提到头块定义一次；
+            // 否则慢路径一侧必须是未定义值（或该 φ 没有实际使用），合并后改为未定义值
             var overrides = new Dictionary<Variable, Variable>();
+            var hoisted = new List<Stmt>();
             var consistent = true;
             foreach (var p in phis.Where(p => p != selected[0] && regionDefined.Contains(p.Sources[hitIndex])))
             {
+                if (SameInBothArms(state, p, slowIndex, hitIndex, regionDefined) is { } same)
+                {
+                    var value = state.Fresh(p.Target.Width);
+                    hoisted.Add(new Define(call.Address, value, same));
+                    overrides[p.Target] = value;
+                    continue;
+                }
+
                 if (p.Sources[slowIndex].Version >= 0 && state.Used(p.Target))
                 {
                     consistent = false;
@@ -99,7 +109,7 @@ internal static class InterfaceDispatchPass
             if (state.recording && state.Location(target, head, at) is { } objectAt && state.Location(iface, head, at) is { } ifaceAt && selected[0].Target.Storage.Bank == Bank.Gpr)
                 state.Record(Template.InterfaceDispatch, head, at, new() { ["merge"] = merge.Start }, new() { ["object"] = objectAt, ["interface"] = ifaceAt, ["slot"] = slot.Value, ["result"] = $"x{selected[0].Target.Storage.Index}", ["helper"] = ((Const)call.Target).Value, });
             overrides[selected[0].Target] = data;
-            CollapsePass.Collapse(head, merge, hit, [op], overrides, call.Address);
+            CollapsePass.Collapse(head, merge, hit, [.. hoisted, op], overrides, call.Address);
             state.Remove(region);
             state.interfaceData[data] = operand;
             state.Result.Hit(Template.InterfaceDispatch);
@@ -107,5 +117,15 @@ internal static class InterfaceDispatchPass
         }
 
         return changed;
+    }
+
+    /// <summary>φ 的两侧展开后是同一个不读内存、只依赖区域之外的值的表达式时返回它；查找本身不改变这样的值，所以与走哪一臂无关。</summary>
+    private static Expr? SameInBothArms(IdiomState state, Phi phi, int slowIndex, int hitIndex, HashSet<Variable> regionDefined)
+    {
+        var value = state.defs.Expand(new Use(phi.Sources[hitIndex], phi.Target.Width));
+        if (state.defs.Expand(new Use(phi.Sources[slowIndex], phi.Target.Width)) != value) return null;
+        foreach (var part in ExprMap.Walk(value))
+            if (part is Load || part is Use use && regionDefined.Contains(use.Variable)) return null;
+        return value;
     }
 }
