@@ -412,8 +412,7 @@ internal sealed partial class TemplateRecovery
             var local = proof.LocalTypes[variable];
             var first = a.Walker.Env.GetValueOrDefault(variable) ?? local;
             var second = b.Walker.Env.GetValueOrDefault(variable) ?? local;
-            if (!Equal(first, a, second, b, proof) && !Saved(first, second) && !Saved(second, first)
-                && !Reloaded(first, a, second, proof) && !Reloaded(second, b, first, proof))
+            if (!Equal(first, a, second, b, proof) && !Saved(first, second) && !Saved(second, first) && !Reloaded(second, b, first, proof))
                 return proof.Refuse($"汇合点的 {variable} 不同");
             proof.Verified.Add(variable);
         }
@@ -421,8 +420,9 @@ internal sealed partial class TemplateRecovery
     }
 
     /// <summary>
-    /// 另一条路径经过调用后重读字段，这条路径（on）沿用区域之前保存的局部：这条路径上内存没变过、也没写这个字段时，
+    /// 保留的路径经过调用后重读字段，被取代的路径（on）沿用区域之前保存的局部：这条路径上内存没变过、也没写这个字段时，
     /// 保存的局部还是字段的内容。留下的重读在这条路径上得到相同的值，这正是编译器省掉它的依据。
+    /// 反过来不成立：保留沿用局部的路径时重读被删，调用之后读到的是旧值。
     /// </summary>
     private bool Reloaded(ManagedValue saved, Trace on, ManagedValue reloaded, DuplicateProof proof) =>
         saved is LocalValue local && reloaded is Observed { Read: FieldValue read } && on.End.Epoch == 0
