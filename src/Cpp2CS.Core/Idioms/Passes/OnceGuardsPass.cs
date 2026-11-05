@@ -48,10 +48,10 @@ internal static class OnceGuardsPass
         {
             case { Width: 8, Address: Const address } when state.owner.guardSections.Any(s => s.Contains(address.Value)):
                 return new(Kind.Metadata, initialize, skip, null, address.Value);
-            case { Width: 32, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef type }, Right: Const { Value: RuntimeLayout.ClassCctorFinishedOrNoCctor } } }:
-                // 类自身的静态构造中，标志位的含义不同。
+            case { Width: 32, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef type }, Right: Const { Value: RuntimeLayout.ClassCctorFinishedOrNoCctor or RuntimeLayout.ClassCctorFinishedOrNoCctor2023 } } }:
+                // 类构造函数自身不按该标记判断，避免把它的初始化条件当成外部调用。
                 return state.self?.Method.Name == ".cctor" ? null : new(Kind.ClassConstructor, initialize, skip, type, 0);
-            case { Width: 8 or 16, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef type }, Right: Const { Value: RuntimeLayout.ClassBitflags1 } } }
+            case { Width: 8 or 16, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef type }, Right: Const { Value: RuntimeLayout.ClassBitflags1 or RuntimeLayout.ClassBitflags1_2019 or RuntimeLayout.ClassBitflags1_2019_4 or RuntimeLayout.ClassBitflags1_2020 } } }
                 when ClassInitializationFlags.IsBitTest(condition, flag):
                 return new(Kind.ClassLayout, initialize, skip, type, 0);
             default:
@@ -295,6 +295,7 @@ internal static class OnceGuardsPass
         /// <summary>守卫之前覆盖这段内存的写入给出它的值；遇到可能改写的语句就停止转发。</summary>
         private Expr Content(Load load, Line line, int depth)
         {
+            if (depth > Depth) return load;
             var (root, offset) = SplitPass.Split(load.Address);
             var bytes = (ulong)load.Width / 8;
             foreach (var statement in Before())

@@ -75,6 +75,8 @@ public enum OpKind : byte
     /// <summary>托管引用写入后的写屏障；对应的 Store 紧邻其前。</summary>
     WriteBarrier,
     MemoryBarrier,
+    /// <summary>__chkstk 栈探测;不产生 IL</summary>
+    StackProbe,
     /// <summary>接口方法查找：Arguments 为（对象, 接口类, 槽位），结果为 VirtualInvokeData*。</summary>
     InterfaceInvokeData,
     /// <summary>经 vtable 槽位的虚调用；Operand 为槽位号。</summary>
@@ -116,6 +118,8 @@ public enum OpKind : byte
     /// <summary>经过判空与越界检查的字节数组读取；参数为数组与 32 位下标。</summary>
     ReadByteArray,
     GenericHasValue,
+    /// <summary>把零写入参数指向的局部存储；CIL 局部已零初始化，不产生指令。</summary>
+    ZeroField,
 }
 
 /// <summary>调用所表达的运行时操作。Operand：类型（TypeRef）、异常名、槽位号等，见 <see cref="OpKind"/>。</summary>

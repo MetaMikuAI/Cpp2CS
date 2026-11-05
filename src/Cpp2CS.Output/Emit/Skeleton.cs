@@ -65,7 +65,12 @@ public sealed class Skeleton
         assemblies = model.Assemblies.Select(CreateAssembly).ToArray();
         MarkPrimitives();
         foreach (var type in model.Types)
-            foreach (var nested in type.NestedTypes) types[type.Index].NestedTypes.Add(types[nested.Index]);
+            foreach (var nested in type.NestedTypes)
+                try { types[type.Index].NestedTypes.Add(types[nested.Index]); }
+                catch (ArgumentException exception)
+                {
+                    throw new InvalidOperationException($"嵌套类型附加失败：父 {type.Index} {type.FullName}，子 {nested.Index} {nested.FullName}，子声明父 {nested.DeclaringType?.FullName ?? "无"}", exception);
+                }
         foreach (var type in model.Types)
             foreach (var parameter in type.GenericParameters) types[type.Index].GenericParameters.Add(CreateGenericParameter(parameter, types[type.Index]));
         foreach (var type in model.Types) DefineHierarchy(type);

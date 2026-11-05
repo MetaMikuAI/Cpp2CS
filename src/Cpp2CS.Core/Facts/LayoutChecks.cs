@@ -15,7 +15,7 @@ public static class LayoutChecks
     {
         var classInit = helpers.Helpers.Values.Where(h => h.Kind == HelperKind.ClassInit).Select(h => h.Address).ToHashSet();
         // 自带守卫的 ClassInit 入口（函数开头即读取 cctor_finished_or_no_cctor，相当于 il2cpp_codegen_runtime_class_init_inline 的外联版本）：调用者不再需要守卫
-        var selfGuarded = classInit.Where(a => map.At(a) is { } f && Linear(map, f, Math.Min(f.End, a + 4 * 4), 4, w => IsLoad(w, RuntimeLayout.ClassCctorFinishedOrNoCctor, 4))).ToHashSet();
+        var selfGuarded = classInit.Where(a => map.At(a) is { } f && Linear(map, f, Math.Min(f.End, a + 4 * 4), 4, IsCctorLoad)).ToHashSet();
         var interfaceLookup = helpers.Helpers.Values.Where(h => h.Kind == HelperKind.InterfaceLookup).Select(h => h.Address).ToHashSet();
         long initSites = 0, selfGuardedSites = 0, interfaceSites = 0, blr = 0, vtable = 0, interfaceHit = 0, invoke = 0, methodPointer = 0, other = 0;
         var initMissing = new List<string>();
@@ -32,7 +32,7 @@ public static class LayoutChecks
                 {
                     initSites++;
                     if (selfGuarded.Contains(r.Target)) { selfGuardedSites++; continue; }
-                    if (!Before(map, function, r.Site, 12, w => IsLoad(w, RuntimeLayout.ClassCctorFinishedOrNoCctor, 4)))
+                    if (!Before(map, function, r.Site, 12, IsCctorLoad))
                         initMissing.Add($"0x{r.Site:x}");
                 }
                 else if (interfaceLookup.Contains(r.Target))
@@ -71,6 +71,8 @@ public static class LayoutChecks
             $"托管代码 BLR {blr} 处：目标装载自 vtable 槽（+0x{RuntimeLayout.ClassVtable:x}+16n）{vtable}，接口命中（klass+16·(offset+slot)+0x{RuntimeLayout.ClassVtable:x}）{interfaceHit}，" +
             $"委托 invoke_impl（+0x{RuntimeLayout.DelegateInvokeImpl:x}）{invoke}，偏移 0 的方法指针（MethodInfo.methodPointer 等）{methodPointer}，其他 {other}（样例见下，非违例）");
     }
+
+    private static bool IsCctorLoad(uint w) => IsLoad(w, RuntimeLayout.ClassCctorFinishedOrNoCctor, 4) || IsLoad(w, RuntimeLayout.ClassCctorFinishedOrNoCctor2023, 4);
 
     private static bool IsLoad(uint w, int offset, int size) =>
         A64.IsUnsignedOffsetAccess(w) && !A64.IsStore(w) && A64.AccessSize(w) == size && (int)A64.AccessOffset(w) == offset;

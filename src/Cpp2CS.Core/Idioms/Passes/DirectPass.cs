@@ -51,6 +51,7 @@ internal static class DirectPass
             HelperKind.GetException => (OpKind.NewException, helper.Detail, []),
             HelperKind.Rethrow => (OpKind.Rethrow, null, [Arg(0)]),
             HelperKind.MemoryBarrier => (OpKind.MemoryBarrier, null, []),
+            HelperKind.StackProbe => (OpKind.StackProbe, null, []),
             HelperKind.CompareExchangeReference => (OpKind.CompareExchangeReference, null, [Arg(0), Arg(1), Arg(2)]),
             HelperKind.Terminate => (OpKind.Terminate, null, []),
             HelperKind.UnwindResume => (OpKind.ResumeUnwind, null, [Arg(0)]),
@@ -58,6 +59,12 @@ internal static class DirectPass
             HelperKind.ArrayElementAddress => (OpKind.ArrayElementAddress, null, [Arg(0), Arg(1), Arg(2)]),
             HelperKind.ReadByteArray when ArrayIndex32(state.defs.Expand(Arg(1))) is { } arrayIndex
                 => (OpKind.ReadByteArray, null, [Arg(0), arrayIndex]),
+            HelperKind.ZeroField when state.defs.Expand(Arg(0)) is FrameAddress
+                => (OpKind.ZeroField, null, [Arg(0)]),
+            HelperKind.InterfaceLookup when args.Length >= 3
+                && state.defs.Expand(Arg(1)) is Symbol { Kind: SymbolKind.Class, Value: DefinitionRef itf }
+                && state.defs.Expand(Arg(2)) is Const { Value: <= int.MaxValue } slotValue
+                => (OpKind.InterfaceInvokeData, (LocalInterface(state, itf), (int)slotValue.Value), [Arg(0), Arg(1), Arg(2)]),
             HelperKind.Export => (OpKind.Export, helper.Detail, args),
             HelperKind.Import when helper.Detail == "__cxa_begin_catch" => (OpKind.BeginCatch, null, [Arg(0)]),
             HelperKind.Import when helper.Detail == "__cxa_end_catch" => (OpKind.EndCatch, null, []),
@@ -69,6 +76,8 @@ internal static class DirectPass
         };
         if (op is not { } found)
             return null;
+        if (found.Kind == OpKind.InterfaceInvokeData && found.Operand is ValueTuple<object?, int> interfaceData && call.Defines.FirstOrDefault() is { } data)
+            state.interfaceData[data] = interfaceData;
         state.Result.Hit(helper.Kind switch
         {
             HelperKind.WriteBarrier => Template.WriteBarrier,
@@ -92,6 +101,16 @@ internal static class DirectPass
         Const constant when constant.Value <= uint.MaxValue || constant.Signed is >= int.MinValue and < 0 => Expr.C(constant.Value, 32),
         _ => null,
     };
+
+    /// <summary>共享泛型体可能带着另一个实例的嵌套接口令牌；优先按当前声明类型找同名嵌套接口。</summary>
+    internal static DefinitionRef LocalInterface(IdiomState state, DefinitionRef itf)
+    {
+        if (state.self is not { } self || self.DeclaringType is not DefinitionRef caller || itf.Definition.DeclaringType == caller.Definition)
+            return itf;
+        var nested = caller.Definition.NestedTypes.FirstOrDefault(type => type.Name == itf.Definition.Name
+            && type.GenericParameters.Count == itf.Definition.GenericParameters.Count);
+        return nested is null ? itf : new DefinitionRef(nested, itf.Arguments);
+    }
 
     private static bool GenericVirtualSlot(this IdiomState state, Expr value, MethodRef method)
     {

@@ -1,4 +1,4 @@
-using Cpp2CS.Facts;
+﻿using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 
@@ -10,6 +10,7 @@ internal static class TypeChecksPass
     {
         var changed = false;
         var reuseChecks = new List<Action>();
+        var hierarchyOffset = RuntimeLayout.TypeHierarchyOffset((int)state.facts.Model.MetadataVersion);
         foreach (var head in state.function.Blocks.ToArray())
         {
             if (state.removed.Contains(head) || head.Statements.LastOrDefault() is not Branch branch)
@@ -30,7 +31,7 @@ internal static class TypeChecksPass
             if (next.Predecessors.Count != 1 || next.IsLandingPad)
                 continue;
             // 继承链比较：*(klass->typeHierarchy + depth*8 - 8) == T
-            var hierarchy = Fold.Simplify(new Load(Fold.Simplify(new Binary(BinOp.Add, state.defs.Expand(klass), Expr.C(RuntimeLayout.ClassTypeHierarchy, 64), 64)), 64));
+            var hierarchy = Fold.Simplify(new Load(Fold.Simplify(new Binary(BinOp.Add, state.defs.Expand(klass), Expr.C((ulong)hierarchyOffset, 64), 64)), 64));
             bool IsHierarchyTest(Expr e, out bool equal)
             {
                 equal = false;

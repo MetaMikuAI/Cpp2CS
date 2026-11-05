@@ -19,6 +19,11 @@ internal sealed partial class BodyBuilder
         if (expected is DefinitionRef structure && types.Kind(expected) == TypeKind.Struct && sym is not ConcatSym && oracle.BitRepresentation(sym))
             return StructBits(sym, structure, address);
         if (sym is not LocalSym && locals.TryGetValue(sym, out var known)) return Coerce(known, expected, address);
+        // 以数组元素地址作为 ref 返回或传入：地址表达式按数组布局还原为 ldelema，而不是把数组引用当整数。
+        if (expected is ByRefRef reference && sym is not ReadSym
+            && oracle.Locate(sym, Width(reference.Element)) is { Kind: LocationKind.Element } location
+            && location.Path.Count == 0 && location.Type.Equals(reference.Element))
+            return new AddressValue(LocationValue(location, address));
         switch (sym)
         {
             case ArgSym arg:

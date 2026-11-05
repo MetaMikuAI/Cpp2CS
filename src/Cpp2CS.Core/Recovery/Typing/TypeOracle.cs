@@ -197,7 +197,48 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         var chosen = candidates.Count == 1 ? candidates[0]
             : candidates.Where(c => Compatible(c, receiverType, arguments)).OrderBy(c => Distance(receiverType, c.DeclaringType)).FirstOrDefault() ?? candidates[0];
         if (receiverType is DefinitionRef owner && !chosen.Method.IsStatic) chosen = Specialize(chosen, owner);
+        if (call.Op is { Kind: OpKind.CallMethodPointer } && receiverType is DefinitionRef receiverOwner
+            && chosen.Method is { IsVirtual: true, Slot: >= 0 } && chosen.DeclaringType is DefinitionRef declaredOwner
+            && declaredOwner.Definition != receiverOwner.Definition
+            && DispatchResolution.VirtualSlot(receiverOwner, chosen.Method.Slot, types, Substitute) is { } shared
+            && Tail(shared.Method.Name) == Tail(chosen.Method.Name))
+            chosen = shared;
         return callees[call] = chosen;
+    }
+
+    private static string Tail(string name) => name[(name.LastIndexOf('.') + 1)..];
+
+    /// <summary>
+    /// 共享空函数的目标候选包含基类无参构造函数时，按当前构造函数的接收者选它。
+    /// 仅用于签名无法区分的调用；调用点还须位于入口块、且之前没有其他调用。
+    /// </summary>
+    /// <summary>
+    /// 分配后的无参构造：无签名的直接调用常是共享空 ctor；从 NewObject 的类型和唯一无参 .ctor 还原。
+    /// </summary>
+    public (Sym Allocation, MethodRef Constructor)? AllocatedConstructor(Call call)
+    {
+        var operands = values.Operands(call);
+        foreach (var operand in operands.Skip(1))
+        {
+            if (SymTable.Resolve(operand) is not ResultSym result
+                || result.Site.Op is not { Kind: OpKind.NewObject, Operand: DefinitionRef type }) continue;
+            var constructors = type.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic).ToArray();
+            var expected = Math.Max(0, call.Arguments.Length - 1);
+            var exact = constructors.Where(c => c.Parameters.Count == expected).ToArray();
+            var chosen = exact.Length == 1 ? exact[0] : constructors.Length == 1 ? constructors[0] : null;
+            if (chosen is not null) return (result, new MethodRef(chosen, type.Arguments, []));
+        }
+        return null;
+    }
+
+    public MethodRef? BaseConstructor(Call call)
+    {
+        if (method.Method.Name != ".ctor" || method.Method.IsStatic || method.DeclaringType is not DefinitionRef owner) return null;
+        if (owner.Definition.BaseType?.Substitute(owner.Arguments, []) is not DefinitionRef baseType) return null;
+        return shapes(call).Candidates.FirstOrDefault(c => c.Method.Name == ".ctor" && !c.Method.IsStatic
+            && c.Method.Parameters.Count == 0 && c.DeclaringType.Equals(baseType))
+            ?? (baseType.Definition.Methods.FirstOrDefault(c => c.Name == ".ctor" && !c.IsStatic && c.Parameters.Count == 0) is { } constructor
+                ? new MethodRef(constructor, baseType.Arguments, []) : null);
     }
 
     /// <summary>接收者类型沿基类链到声明类型的距离；不在链上时为最大。</summary>

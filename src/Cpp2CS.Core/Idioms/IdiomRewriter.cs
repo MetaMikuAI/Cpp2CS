@@ -10,6 +10,8 @@ public enum Template
 {
     /// <summary>读取元数据槽位 → Symbol。</summary>
     MetadataSlot,
+    /// <summary>读取 il2cpp_defaults 的 corlib 类指针字段 → Symbol(Class)。</summary>
+    RuntimeDefaults,
     /// <summary>读取 Il2CppClass.static_fields → Symbol(StaticFields)。</summary>
     StaticFields,
     /// <summary>读取 MethodInfo.klass → Symbol(Class)。</summary>
@@ -113,9 +115,9 @@ public sealed class IdiomRewriter(ProgramFacts facts)
     /// <summary>恢复托管调用时清理未用输入的残值；事实推断仍保留原始调用参数。</summary>
     public bool RecoverUnusedInputs { get; init; }
 
-    public IdiomResult Run(MachineFunction function)
+    public IdiomResult Run(MachineFunction function, MethodRef? identity = null)
     {
-        IdiomState context = new IdiomState(this, function);
+        IdiomState context = new IdiomState(this, function) { self = identity };
         context.Run();
         return context.Result;
     }

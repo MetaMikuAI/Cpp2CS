@@ -117,7 +117,8 @@ public sealed class FunctionLifter
     /// <summary>returnPieces 为聚合返回值各片所在的寄存器读取；promoteFrameSlots 为 false 时帧内存原样保留给恢复层的内存模型。</summary>
     public LiftedFunction Lift(ulong entry, Expr? returnValue, ReturnPiece[]? returnPieces, bool simplify, bool promoteFrameSlots)
     {
-        var function = cfg.Build(entry);
+        var range = facts.Code.At(entry) ?? throw new InvalidOperationException($"0x{entry:x} 不在任何函数范围内");
+        var function = cfg.Build(entry, range);
         if (InlinesClosures && !promoteFrameSlots) new ClosureInlining(cfg, IsClosure, Machine.Convention.IntegerArguments[0], Machine.Convention.StackPointer, Storage.Gpr(29), CalleeSaved).Run(function);
         var dominators = Dominators.Compute(function);
         SsaBuilder.PrepareCalls(function, calls, returnValue, Machine.Convention.StackPointer, returnPieces);

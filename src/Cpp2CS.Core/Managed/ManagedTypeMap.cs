@@ -31,7 +31,7 @@ public static class ManagedTypeMap
             ConstantValue v => v with { Type = map(v.Type), Width = W(v.Type, map(v.Type), v.Width) },
             StringValue v => v,
             TypeHandleValue v => v with { Target = map(v.Target) },
-            FieldHandleValue v => v with { Field = Field(v.Field) },
+            FieldHandleValue v => v with { Field = Field(v.Field), Type = map(v.Type), Width = W(v.Type, map(v.Type), v.Width) },
             NewArrayValue v => new NewArrayValue((ArrayRef)map(v.ArrayType), Value(v.Length)),
             NewObjectValue v => new NewObjectValue(Method(v.Constructor), v.Arguments.Select(Value).ToArray()) { Transparent = v.Transparent },
             DelegateValue v => new DelegateValue((DefinitionRef)map(v.DelegateType), Value(v.Target), Method(v.Method), v.Binding),

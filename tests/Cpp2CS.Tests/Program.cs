@@ -9,6 +9,9 @@ internal static class Program
         return args switch
         {
             ["check-models", var binary, var metadata, var cache] => ArchitectureChecks.Run(binary, metadata, cache),
+            ["metadata", var metadata] => MetadataProbe.Run(metadata),
+            ["model", var binary, var metadata] => ModelProbe.Run(binary, metadata),
+            ["codemap", var binary, var metadata, var address] => CodeMapProbe.Run(binary, metadata, address),
             ["execute", var binary, var metadata, var list, .. var options] => Execution.ExecutionCheck.Run(binary, metadata, list, options),
             _ => Usage(),
         };

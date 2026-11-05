@@ -95,7 +95,7 @@ public sealed class MethodDecompiler
         if ((method.Method.Attributes & System.Reflection.MethodAttributes.PinvokeImpl) == 0) return null;
         var lifted = lifter.Lift(entry, null, null, simplify: true, promoteFrameSlots: false);
         if (!lifted.Succeeded) return new(method, entry, null, [new(entry, $"提升 {lifted.Errors[0]}")]);
-        rewriter.Run(lifted.Function);
+        rewriter.Run(lifted.Function, method);
         var effects = new CallMemoryEffects(shapes.Of, abi);
         return PlatformInvokeStub.Read(lifted.Function, facts.Model.Image, effects) is { } import
             ? new(method, entry, null, []) { Declaration = RuntimeDeclarationKind.PlatformInvoke, PlatformImport = import }
@@ -180,7 +180,7 @@ public sealed class MethodDecompiler
         if (!lifted.Succeeded)
             return RecoveryDiagnostics.Fail(entry, $"提升 {lifted.Errors[0]}", rule: "Prepare");
         var function = lifted.Function;
-        var idioms = rewriter.Run(function);
+        var idioms = rewriter.Run(function, method);
         if (idioms.Errors.Count > 0)
             return RecoveryDiagnostics.Fail(entry, $"L2 {idioms.Errors[0]}", rule: "Prepare");
         GenericContext.Instantiate(function, method);

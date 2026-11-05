@@ -73,8 +73,21 @@ internal static class GuardPass
             HelperKind.InitMethodRgctx => (OpKind.InitMethodRgctx, Template.MethodRgctxGuard, 0UL, 0x1000UL, RuntimeLayout.MethodRgctxData, 64, true),
             _ => default,
         };
-        if (width == 0 || load.Address != Field(offset) || !Decides(enter, skip))
-            return false;
+        if (width == 0) return false;
+        if (load.Address != Field(offset))
+        {
+            // 2023.1 起 cctor_finished_or_no_cctor 移到 0xE4；2019/2020 的 initialized 位字节也随版本移动。
+            if (kind == OpKind.RunClassConstructor && load.Address == Field(RuntimeLayout.ClassCctorFinishedOrNoCctor2023))
+                offset = RuntimeLayout.ClassCctorFinishedOrNoCctor2023;
+            else if (kind == OpKind.InitClass && load.Address == Field(RuntimeLayout.ClassBitflags1_2019))
+                offset = RuntimeLayout.ClassBitflags1_2019;
+            else if (kind == OpKind.InitClass && load.Address == Field(RuntimeLayout.ClassBitflags1_2019_4))
+                offset = RuntimeLayout.ClassBitflags1_2019_4;
+            else if (kind == OpKind.InitClass && load.Address == Field(RuntimeLayout.ClassBitflags1_2020))
+                offset = RuntimeLayout.ClassBitflags1_2020;
+            else return false;
+        }
+        if (!Decides(enter, skip)) return false;
         if (kind == OpKind.InitClass)
         {
             if (!ClassInitializationFlags.IsBitTest(condition, load))

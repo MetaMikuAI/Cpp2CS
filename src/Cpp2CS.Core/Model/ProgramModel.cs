@@ -291,24 +291,36 @@ public sealed class ProgramModel
 {
     public required ImageDocument Image { get; init; }
     public required double MetadataVersion { get; init; }
+    /// <summary>Il2CppDumper 解析出的 IL2CPP 运行时版本；运行时结构布局按它选择。</summary>
+    public required double Il2CppVersion { get; init; }
     public required IReadOnlyList<AssemblyDef> Assemblies { get; init; }
     public required IReadOnlyList<TypeDef> Types { get; init; }
     public required IReadOnlyList<MethodDef> Methods { get; init; }
     public required IReadOnlyList<FieldDef> Fields { get; init; }
     /// <summary>运行时 Il2CppType 表（metadata registration types）对应的引用。</summary>
     public required IReadOnlyList<TypeRef> RuntimeTypes { get; init; }
+    /// <summary>注册表给出的元数据使用槽地址；数量以元数据使用对为准，旧版本注册表计数可能为 0。</summary>
+    public required IReadOnlyList<ulong> MetadataUsageSlots { get; init; }
     public required IReadOnlyList<MethodRef> MethodSpecs { get; init; }
     public required IReadOnlyList<FieldRef> FieldRefs { get; init; }
     public required IReadOnlyList<string> StringLiterals { get; init; }
     /// <summary>代码地址到托管所有者。</summary>
     public required IReadOnlyDictionary<ulong, IReadOnlyList<CodeOwner>> Code { get; init; }
     private readonly ConcurrentDictionary<ulong, Usage?> slots = new();
+    private readonly Dictionary<ulong, Usage> registeredUsages = new();
+
+    /// <summary>按元数据使用对登记过的槽地址与目标。</summary>
+    public IReadOnlyDictionary<ulong, Usage> RegisteredUsages => registeredUsages;
+
+    /// <summary>登记一个由元数据使用对确定的槽地址。</summary>
+    public void RegisterUsage(ulong slot, Usage usage) => registeredUsages[slot] = usage;
 
     /// <summary>
-    /// 读取元数据槽位（v27+：全局变量初值为编码令牌 ((kind&lt;&lt;29)|(index&lt;&lt;1))+1）。
-    /// 编码不合法或索引越界返回 null。
+    /// 解码元数据使用槽：优先使用元数据使用对给出的槽地址与索引；
+    /// 未登记的槽回退到 v27+ 的初值编码 ((kind&lt;&lt;29)|(index&lt;&lt;1))+1。
+    /// 无法解码或不是可识别的元数据对象时返回 null。
     /// </summary>
-    public Usage? UsageAt(ulong slot) => slots.GetOrAdd(slot, DecodeSlot);
+    public Usage? UsageAt(ulong slot) => registeredUsages.TryGetValue(slot, out var registered) ? registered : slots.GetOrAdd(slot, DecodeSlot);
 
     private Usage? DecodeSlot(ulong slot)
     {

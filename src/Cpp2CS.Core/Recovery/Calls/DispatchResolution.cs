@@ -31,7 +31,8 @@ internal static class DispatchResolution
             MethodRef? method = call.Op switch
             {
                 null when call.Kind is CallKind.Indirect or CallKind.TailIndirect => MethodPointer(values.Operands(call)[0]),
-                { Kind: OpKind.CallMethodPointer } => MethodPointer(values.Operands(call)[0]),
+                { Kind: OpKind.CallMethodPointer } => MethodPointer(values.Operands(call)[0]) is { } target
+                    ? SharedTarget(target, call, values, oracle) : null,
                 { Kind: OpKind.CallDelegate, Operand: MethodRef invoke } => invoke,
                 { Kind: OpKind.CallInterface, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } pair } => Slot(itf, pair.Item2, interfaceOnly: true),
                 { Kind: OpKind.CallVirtual, Operand: int slot } when Receiver(call, values) is { } receiver => VirtualSlot(oracle.TypeOf(receiver), slot, oracle.Types, oracle.Substitute),
@@ -49,6 +50,23 @@ internal static class DispatchResolution
         ReadSym { Width: 64, Address: EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef method } } } => method,
         _ => null,
     };
+
+    /// <summary>
+    /// 共享泛型代码可能把同一方法指针用于多个泛型类型；接收者确定时，按虚表槽取接收者类型上的对应实现。
+    /// 仅在目标声明类型与接收者不同、方法是虚方法且槽号可用时替换。
+    /// </summary>
+    private static MethodRef? SharedTarget(MethodRef target, Call call, ValueModel values, TypeOracle oracle)
+    {
+        if (!target.Method.IsVirtual || target.Method.Slot < 0 || target.DeclaringType is not DefinitionRef declared) return target;
+        var receiver = Receiver(call, values);
+        var receiverType = receiver is null ? null : oracle.TypeOf(receiver);
+        if (receiverType is ByRefRef byRef) receiverType = byRef.Element;
+        if (receiverType is not DefinitionRef owner || owner.Definition == declared.Definition) return target;
+        if (VirtualSlot(owner, target.Method.Slot, oracle.Types, oracle.Substitute) is not { } mapped) return target;
+        static string Tail(string name) => name[(name.LastIndexOf('.') + 1)..];
+        return Tail(mapped.Method.Name) == Tail(target.Method.Name) ? mapped : target;
+    }
+
 
     private static Sym? Receiver(Call call, ValueModel values)
     {

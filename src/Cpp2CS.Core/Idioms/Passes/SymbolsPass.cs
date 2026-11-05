@@ -1,5 +1,6 @@
-using Cpp2CS.Facts;
+﻿using Cpp2CS.Facts;
 using Cpp2CS.Ir;
+using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Ssa;
 
 namespace Cpp2CS.Idioms;
@@ -20,6 +21,14 @@ internal static class SymbolsPass
                 {
                     changed = true;
                     return new Symbol(SymbolKind.Field, new FieldRef(fieldOwner.Definition.Fields[0], fieldOwner));
+                }
+
+                // 入口把隐藏的 MethodInfo* 溢写到栈槽后，后续读取仍指向本方法；共享泛型代码据此取得 klass 与 RGCTX。
+                if (e is Load { Width: 64, Address: FrameAddress frame } && state.self is { } selfMethod
+                    && SelfMethodInfoSpill(state.function, frame.Offset, state.selfMethodInfo))
+                {
+                    changed = true;
+                    return new Symbol(SymbolKind.Method, selfMethod);
                 }
 
                 if (e is Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Field, Value: FieldRef field }, Right: Const fieldOffset } && field.DeclaringType is DefinitionRef fieldType && fieldOffset.Value % RuntimeLayout.FieldInfoSize == 0 && fieldType.Definition.Fields.ToList().IndexOf(field.Field) + (long)fieldOffset.Value / RuntimeLayout.FieldInfoSize is var fieldIndex && fieldIndex >= 0 && fieldIndex < fieldType.Definition.Fields.Count)
@@ -56,17 +65,23 @@ internal static class SymbolsPass
                     state.symbolSlots.TryAdd(symbol, address.Value);
                     return symbol;
                 }
+                if (load.Address is Const defaultsAddress && state.facts.Defaults.At(defaultsAddress.Value) is { } defaultType)
+                {
+                    state.Result.Hit(Template.RuntimeDefaults);
+                    changed = true;
+                    return new Symbol(SymbolKind.Class, new DefinitionRef(defaultType, []));
+                }
 
                 var (basis, offset) = SplitPass.Split(load.Address);
                 var own = basis is Use { Variable: { Version: 0 } v } && v.Storage == state.selfMethodInfo && ownDefinition is not null;
                 Symbol? found = (basis, offset) switch
                 {
-                    (Symbol { Kind: SymbolKind.Class } c, RuntimeLayout.ClassStaticFields) => new Symbol(SymbolKind.StaticFields, c.Value),
+                    (Symbol { Kind: SymbolKind.Class } c, var o) when o == (ulong)RuntimeLayout.StaticFields((int)state.facts.Model.MetadataVersion) => new Symbol(SymbolKind.StaticFields, c.Value),
                     (Symbol { Kind: SymbolKind.Method, Value: MethodRef m }, RuntimeLayout.MethodKlass) => new Symbol(SymbolKind.Class, m.DeclaringType),
                     (_, RuntimeLayout.MethodKlass) when own => new Symbol(SymbolKind.Class, GenericFormPass.GenericForm(ownDefinition!.Owner)),
                     (Symbol { Kind: SymbolKind.Method, Value: MethodRef m }, RuntimeLayout.MethodRgctxData) when rgctx => new Symbol(SymbolKind.Rgctx, TablePass.Table(m)),
                     (_, RuntimeLayout.MethodRgctxData) when rgctx && own => new Symbol(SymbolKind.Rgctx, new RgctxTable(ownDefinition!.Owner.Assembly, ownDefinition.Token, ownDefinition.ToString(), null, null)),
-                    (Symbol { Kind: SymbolKind.Class, Value: DefinitionRef t }, RuntimeLayout.ClassRgctxData) when rgctx => new Symbol(SymbolKind.Rgctx, TablePass.Table(t)),
+                    (Symbol { Kind: SymbolKind.Class, Value: DefinitionRef t }, var o) when rgctx && o == (ulong)RuntimeLayout.RgctxData((int)state.facts.Model.MetadataVersion) => new Symbol(SymbolKind.Rgctx, TablePass.Table(t)),
                     (Symbol { Kind: SymbolKind.Rgctx, Value: RgctxTable table }, var o) when o % 8 == 0 => state.Entry(table, (int)(o / 8)),
                     _ => null,
                 };
@@ -90,5 +105,25 @@ internal static class SymbolsPass
                 break;
             Propagate.Run(state.function, dominators);
         }
+    }
+
+    /// <summary>入口栈槽只在入口块被写入隐藏的 MethodInfo*，且没有其他写入。</summary>
+    private static bool SelfMethodInfoSpill(MachineFunction function, long offset, Storage? self)
+    {
+        if (self is not { } expected) return false;
+        Store? only = null;
+        foreach (var store in function.Blocks.SelectMany(b => b.Statements).OfType<Store>())
+        {
+            if (store.Target is not FrameAddress frame || frame.Offset != offset) continue;
+            if (only is not null) return false;
+            only = store;
+        }
+        if (only is null || !function.EntryBlock.Statements.Contains(only)) return false;
+        return only.Value switch
+        {
+            Use { Variable.Storage: var storage } => storage == expected,
+            Load { Width: 64, Address: Use { Variable.Storage: var storage } } => storage == expected,
+            _ => false,
+        };
     }
 }

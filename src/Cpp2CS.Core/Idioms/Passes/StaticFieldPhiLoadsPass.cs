@@ -1,4 +1,4 @@
-using Cpp2CS.Facts;
+﻿using Cpp2CS.Facts;
 using Cpp2CS.Ir;
 
 namespace Cpp2CS.Idioms;
@@ -21,7 +21,10 @@ internal static class StaticFieldPhiLoadsPass
                     return Expr.C(pointer, 64);
             }
 
-            return SplitPass.Split(load.Address) is (Symbol { Kind: SymbolKind.Class } type, RuntimeLayout.ClassStaticFields) ? new Symbol(SymbolKind.StaticFields, type.Value) : mapped;
+            if (SplitPass.Split(load.Address) is (Symbol { Kind: SymbolKind.Class } type, var offset)
+                && offset == (ulong)RuntimeLayout.StaticFields((int)state.facts.Model.MetadataVersion))
+                return new Symbol(SymbolKind.StaticFields, type.Value);
+            return mapped;
         }
 
         var changed = false;

@@ -31,7 +31,7 @@ internal static class ClassInitializationFacts
                 Width: 8 or 16, Address: Binary
                 {
                     Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: TypeRef type },
-                    Right: Const { Value: RuntimeLayout.ClassBitflags1 }
+                    Right: Const { Value: RuntimeLayout.ClassBitflags1 or RuntimeLayout.ClassBitflags1_2019 or RuntimeLayout.ClassBitflags1_2019_4 or RuntimeLayout.ClassBitflags1_2020 }
                 }
             } => Initialized(type, OpKind.InitClass, at),
             _ => false,
@@ -56,14 +56,14 @@ internal static class ClassInitializationFacts
                             Width: 32, Address: Binary
                             {
                                 Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class, Value: DefinitionRef type },
-                                Right: Const { Value: RuntimeLayout.ClassCctorFinishedOrNoCctor }
+                                Right: Const { Value: RuntimeLayout.ClassCctorFinishedOrNoCctor or RuntimeLayout.ClassCctorFinishedOrNoCctor2023 }
                             }
                         }
                         && Initialized(type, OpKind.RunClassConstructor, point))
                     { changed = true; return Expr.C(1, 32); }
                     if (value is Binary { Op: BinOp.And } mask
-                        && (mask.Right is Const { Value: 1 } && InitializationBit(mask.Left, point, [])
-                            || mask.Left is Const { Value: 1 } && InitializationBit(mask.Right, point, [])))
+                        && (mask.Right is Const { Value: 1 or 2 } && InitializationBit(mask.Left, point, [])
+                            || mask.Left is Const { Value: 1 or 2 } && InitializationBit(mask.Right, point, [])))
                     { changed = true; return Expr.C(1, mask.Width); }
                     return null;
                 });

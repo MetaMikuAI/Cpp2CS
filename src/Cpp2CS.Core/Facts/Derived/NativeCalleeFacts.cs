@@ -16,6 +16,12 @@ internal sealed class NativeCalleeFacts(ProgramFacts facts, bool recoverUnusedIn
     {
         if (!unusedResultBuffers.TryGetValue(entry, out var unused))
         {
+            // 直接调用目标可能落在函数内部（共享尾部/备用入口），没有可核实的入口边界时不能提升。
+            if (!facts.Code.IsEntry(entry))
+            {
+                unusedResultBuffers[entry] = false;
+                return false;
+            }
             var convention = inputLifter.Machine.Convention;
             // 未知签名保留全部可能的返回寄存器，x8 只承担间接返回地址，不是托管参数寄存器。
             var returned = convention.IntegerResults.Concat(convention.FloatResults)

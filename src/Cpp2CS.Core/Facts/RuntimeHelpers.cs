@@ -28,6 +28,8 @@ public enum HelperKind
     IsInst,
     /// <summary>dmb ish：内存屏障（Thread.MemoryBarrier / volatile）。</summary>
     MemoryBarrier,
+    /// <summary>__chkstk 栈探测;不产生 IL</summary>
+    StackProbe,
     /// <summary>以 C++ 异常 Il2CppExceptionWrapper 抛出 x0 中的托管异常对象（重新抛出，不更新堆栈）。</summary>
     Rethrow,
     /// <summary>__clang_call_terminate：开始捕获后调用 std::terminate。</summary>
@@ -50,6 +52,8 @@ public enum HelperKind
     ReadByteArray,
     /// <summary>按类布局检查值缓冲区是否非空，Nullable 使用 hasValue。</summary>
     GenericHasValue,
+    /// <summary>把 32 位零写入参数指向的位置；用于初始化原生局部存储。</summary>
+    ZeroField,
 }
 
 /// <summary>一个被托管代码调用的辅助函数。Evidence 说明依据；Callers 为托管调用点数。</summary>
@@ -85,6 +89,9 @@ public sealed partial class RuntimeHelpers
         ("il2cpp_runtime_class_init", HelperKind.ClassInit),
         ("il2cpp_raise_exception", HelperKind.Raise),
         ("il2cpp_gc_wbarrier_set_field", HelperKind.WriteBarrier),
+        // ARM64 生成的引用字段写入会把已完成的直接存储交给该入口做写屏障；
+        // DirectPass 只在紧邻存储与实参一致时把它归一为写屏障，其他调用保持原样。
+        ("il2cpp_field_set_value_object", HelperKind.WriteBarrier),
         ("il2cpp_class_is_assignable_from", HelperKind.IsAssignableFrom),
         ("il2cpp_object_get_virtual_method", HelperKind.VirtualMethodLookup),
         ("il2cpp_string_new_len", HelperKind.StringNew),
@@ -106,18 +113,20 @@ public sealed partial class RuntimeHelpers
     public RuntimeHelper? At(ulong address) => helpers.GetValueOrDefault(address);
 
     /// <summary>运行时模板内部的调用也沿导出链和指令形态识别，不要求它被托管函数直接调用。</summary>
-    public RuntimeHelper InternalCall(ulong address) => helpers.GetOrAdd(address, a => Classify(a, 0, 0));
+    public RuntimeHelper InternalCall(ulong address) => helpers.GetOrAdd(address, a => Classify(a, 0, 0, 0));
 
     /// <summary>
     /// targets：托管代码调用的、没有托管所有者的目标及调用点数；slotAddressesBeforeCall：目标 → 调用点前紧邻构造了已解码元数据槽位地址的次数。
     /// </summary>
-    public static RuntimeHelpers Identify(CodeMap map, CodeScan scan, IReadOnlyDictionary<ulong, int> targets, IReadOnlyDictionary<ulong, int> slotAddressesBeforeCall)
+    public static RuntimeHelpers Identify(CodeMap map, CodeScan scan, IReadOnlyDictionary<ulong, int> targets,
+        IReadOnlyDictionary<ulong, int> metadataSlotBeforeCall, IReadOnlyDictionary<ulong, int> slotAddressBeforeCall)
     {
         var result = new RuntimeHelpers(map, scan);
         result.BuildExportChains();
         result.interfaceSlowPath = result.InterfaceSlowPath();
         foreach (var (target, count) in targets)
-            result.helpers[target] = result.Classify(target, count, slotAddressesBeforeCall.GetValueOrDefault(target));
+            result.helpers[target] = result.Classify(target, count,
+                metadataSlotBeforeCall.GetValueOrDefault(target), slotAddressBeforeCall.GetValueOrDefault(target));
         return result;
     }
 
@@ -185,6 +194,30 @@ public sealed partial class RuntimeHelpers
     private bool LoadsOffset(ulong address, int offset, int limit = 24) =>
         Words(address, limit).Any(x => A64.IsUnsignedOffsetAccess(x.Word) && !A64.IsStore(x.Word) && (int)A64.AccessOffset(x.Word) == offset);
 
+    /// <summary>
+    /// 沿无终结指令的冷热拆分继续扫描：.pdata 可能把入口和主体拆成两个连续函数。
+    /// </summary>
+    private bool LoadsOffsetAcrossSplit(ulong address, int offset, int limit = 32)
+    {
+        var seen = new HashSet<ulong>();
+        var function = map.At(address);
+        var left = limit;
+        while (function is not null && left > 0 && seen.Add(function.Start))
+        {
+            var last = 0u;
+            for (var pc = function.Start; pc < function.End && left > 0; pc += 4, left--)
+            {
+                if (map.Word(pc) is not { } word) continue;
+                last = word;
+                if (A64.IsUnsignedOffsetAccess(word) && !A64.IsStore(word) && (int)A64.AccessOffset(word) == offset)
+                    return true;
+            }
+            if (A64.IsB(last) || A64.IsRet(last)) break;
+            function = map.At(function.End);
+        }
+        return false;
+    }
+
     private IEnumerable<ulong> CallsOf(ulong address)
     {
         var index = map.EntryIndex(address);
@@ -216,7 +249,7 @@ public sealed partial class RuntimeHelpers
     {
         var body = chain[^1];
         var words = Words(body, 64).Select(x => x.Word).ToArray();
-        if (words is [0xD5033BBF, var ret] && A64.IsRet(ret)) return (HelperKind.MemoryBarrier, null, "函数体为 dmb ish; ret");
+        if (chain.Any(hop => Words(hop, 2).Select(x => x.Word).ToArray() is [0xD5033BBF, var ret] && A64.IsRet(ret))) return (HelperKind.MemoryBarrier, null, "函数体为 dmb ish; ret");
         if (interfaceSlowPath is { } slow && chain.Contains(slow))
             return (HelperKind.InterfaceLookup, null, $"il2cpp_object_get_virtual_method 在接口偏移扫描失败后调用 0x{slow:x}");
         var calls = CallsOf(body).ToArray();
@@ -245,23 +278,73 @@ public sealed partial class RuntimeHelpers
         var wrapperCalls = CallsOf(wrapper).ToArray();
         if (wrapperWords.Length <= 32 && wrapperCalls.Length >= 1)
         {
-            if (LoadsOffset(wrapper, RuntimeLayout.ClassInitializationExceptionGCHandle, 12)
-                && LoadsOffset(wrapperCalls[0], RuntimeLayout.ClassBitflags1, 8))
+            var initializedOffset = new[] { RuntimeLayout.ClassBitflags1, RuntimeLayout.ClassBitflags1_2019, RuntimeLayout.ClassBitflags1_2019_4, RuntimeLayout.ClassBitflags1_2020 }
+                .FirstOrDefault(offset => LoadsOffset(wrapperCalls[0], offset, 8), -1);
+            if (LoadsOffset(wrapper, RuntimeLayout.ClassInitializationExceptionGCHandle, 12) && initializedOffset >= 0)
                 return (HelperKind.InitializedTypeInfo, null,
-                    $"调用 0x{wrapperCalls[0]:x}（检查 Il2CppClass+0x{RuntimeLayout.ClassBitflags1:x} 的 initialized 位）后读取 +0x{RuntimeLayout.ClassInitializationExceptionGCHandle:x} initializationExceptionGCHandle");
+                    $"调用 0x{wrapperCalls[0]:x}（检查 Il2CppClass+0x{initializedOffset:x} 的 initialized 位）后读取 +0x{RuntimeLayout.ClassInitializationExceptionGCHandle:x} initializationExceptionGCHandle");
             if (LoadsOffset(wrapperCalls[0], RuntimeLayout.MethodRgctxData, 4) && LoadsOffset(wrapperCalls[0], RuntimeLayout.MethodGenericMethod, 24)
-                && wrapperWords.Contains(0xAA1303E0u))   // mov x0, x19：返回原参数
+                && wrapperWords.Contains(0xAA1303E0u))   // mov x0, x19：返回原 MethodInfo
                 return (HelperKind.InitMethodRgctx, null,
                     $"调用 0x{wrapperCalls[0]:x}（读取 MethodInfo+0x{RuntimeLayout.MethodRgctxData:x} rgctx_data 与 +0x{RuntimeLayout.MethodGenericMethod:x} genericMethod）后返回原 MethodInfo");
         }
         // cbz x0, ...（0xB4000000 | imm19 << 5 | Rt=0）出现在前 6 条：空对象直接返回
         if (calls.Length >= 1 && KindAt(calls[0]) == HelperKind.IsAssignableFrom && words.Take(6).Any(w => (w & 0xFF00001F) == 0xB4000000))
             return (HelperKind.IsInst, null, $"空对象直接返回，否则调用 is_assignable_from 实现 0x{calls[0]:x}");
+        if (SplitIsInst(body, out var assignable))
+            return (HelperKind.IsInst, null, $"空对象直接返回，非空路径调用 is_assignable_from 实现 0x{assignable:x}");
+        // 接口分派实现：调用扫描 interfaceOffsets 的查找函数，失败后再走虚表慢路径。
+        var interfaceScan = calls.FirstOrDefault(call => LoadsOffsetAcrossSplit(call, RuntimeLayout.ClassInterfaceOffsetsCount)
+            && (LoadsOffsetAcrossSplit(call, RuntimeLayout.ClassInterfaceOffsets) || LoadsOffsetAcrossSplit(call, RuntimeLayout.ClassMethods)));
+        if (interfaceScan != 0 && calls[0] == interfaceScan
+            && !words.Any(w => A64.IsUnsignedOffsetAccess(w) && A64.IsStore(w) && A64.Rd(w) == 31 && A64.Rn(w) == 31))
+            return (HelperKind.InterfaceLookup, null, $"调用扫描 Il2CppClass+0x{RuntimeLayout.ClassInterfaceOffsetsCount:x} interfaceOffsets 的查找函数 0x{interfaceScan:x}");
         if (LoadsOffset(body, RuntimeLayout.ClassElementSize, 8) && words.Any(w => A64.IsAddImmediate64(w) && A64.AddImmediate(w) == RuntimeLayout.ArrayData))
             return (HelperKind.ArrayElementAddress, null, $"读取 Il2CppClass+0x{RuntimeLayout.ClassElementSize:x} element_size，并加数组头 0x{RuntimeLayout.ArrayData:x}");
         if (words.Length <= 10 && LoadsOffset(body, RuntimeLayout.FieldParent, 4) && LoadsOffset(body, RuntimeLayout.FieldOffset, 4) && calls.Length == 0)
-            return (HelperKind.FieldAddress, null, $"读取 FieldInfo+0x{RuntimeLayout.FieldOffset:x} offset 加到对象地址（值类型扣除对象头）");
+            return (HelperKind.FieldAddress, null, $"?? FieldInfo+0x{RuntimeLayout.FieldOffset:x} offset ??????(????????)");
+        // 编译器把局部存储的零初始化外联为 str wzr, [x0, #off]; ret。
+        if (words.Length is >= 2 and <= 4 && A64.IsUnsignedOffsetAccess(words[0]) && A64.IsStore(words[0]) && A64.Rd(words[0]) == 31
+            && A64.IsRet(words[1]) && words.Skip(2).All(w => w == 0))
+            return (HelperKind.ZeroField, null, $"把零写入参数指向的 +0x{A64.AccessOffset(words[0]):x} 存储");
+        // il2cpp_codegen_object_new：读取 Il2CppClass.instance_size，调用 GC 分配并写入 klass。
+        if (words is [0xf9400a51, 0xeb2f73f0, 0x9a9033f0, ..])
+            return (HelperKind.StackProbe, null, "__chkstk 风格栈探测");
+        if (LoadsOffset(body, RuntimeLayout.ClassInstanceSize, 64) && calls.Length >= 2)
+            return (HelperKind.ObjectNew, null, $"?? Il2CppClass+0x{RuntimeLayout.ClassInstanceSize:x} instance_size ??????");
+        // __cxa_throw 一类异常核心：以 brk 结束且不返回；优先保留已有的异常类型字符串。
+        var named = Closure(target).Any(f => ExceptionName(f) is not null);
+        if (!named && IsRaiseCore(body))
+            return (HelperKind.Raise, null, body == target
+                ? "以 brk 结束且调用展开异常头的异常抛出核心"
+                : $"把异常转交给异常核心 0x{body:x}");
+        if (!named && body == target && calls.FirstOrDefault(IsRaiseCore) is var raise and not 0 && !CanReturn(body, 1))
+            return (HelperKind.Raise, null, $"把异常转交给 0x{raise:x}");
         return null;
+    }
+
+    /// <summary>
+    /// 未内联的 isinst 常被拆成两个函数：入口只做空对象检查，非空路径在下一个函数中调用
+    /// is_assignable_from 并按结果返回对象或空。
+    /// </summary>
+    private bool SplitIsInst(ulong body, out ulong assignable)
+    {
+        assignable = 0;
+        var function = map.At(body);
+        if (function is null) return false;
+        var guarded = Words(body, 8).Any(x => A64.IsCbz(x.Word) && A64.Rd(x.Word) == 0
+            && A64.Imm19Target(x.Word, x.Pc) >= function.End);
+        if (!guarded || map.At(function.End) is not { } continuation) return false;
+        assignable = CallsOf(continuation.Start).FirstOrDefault(call => KindAt(call) == HelperKind.IsAssignableFrom);
+        return assignable != 0;
+    }
+
+    /// <summary>异常抛出核心：不返回、以 brk 结束，并调用读取异常对象 +0x38 展开头的辅助。</summary>
+    private bool IsRaiseCore(ulong address)
+    {
+        var words = Words(address, 64).Select(x => x.Word).ToArray();
+        if (CanReturn(address, 2) || !words.Any(w => (w & 0xFFE0001F) == 0xD4200000)) return false;
+        return CallsOf(address).Count() >= 4;
     }
 
     private ulong? interfaceSlowPath;
@@ -287,7 +370,7 @@ public sealed partial class RuntimeHelpers
         return false;
     }
 
-    private RuntimeHelper Classify(ulong target, int calls, int slotCalls)
+    private RuntimeHelper Classify(ulong target, int calls, int slotCalls, int addressSlotCalls)
     {
         var function = map.At(target);
         if (function?.Region == CodeRegion.Plt)
@@ -312,16 +395,20 @@ public sealed partial class RuntimeHelpers
             return new(target, structural.Kind, structural.Detail, structural.Evidence, calls);
 
         var closure = Closure(target);
-        if (function is { Size: <= ExceptionWrapperLimit * 4 } && closure.Any(HasTokenDecode) && slotCalls * 2 > calls)
+        // 旧版以“闭包内有令牌解码 + 调用前引用槽位”识别惰性初始化；新版把解码放进被调方，
+        // 入口只转发槽位地址，因此另要求调用前 4 字节内是 ADRP+ADD 得到的槽位地址，排除传入槽位内容的情况。
+        if (function is { Size: <= ExceptionWrapperLimit * 4 }
+            && (closure.Any(HasTokenDecode) && slotCalls * 2 > calls || addressSlotCalls * 2 > calls))
             return new(target, HelperKind.InitMetadata, null,
-                $"闭包内有令牌解码（UBFX/LSR #29），{slotCalls}/{calls} 个调用点前紧邻构造已解码的元数据槽位地址", calls);
+                $"闭包令牌解码={closure.Any(HasTokenDecode)}，槽位引用 {slotCalls}/{calls}，槽位地址 {addressSlotCalls}/{calls}", calls);
 
         // 异常规则只用于小的包装函数：大函数的闭包会经由其中的抛出调用碰到异常名，那不代表它本身是抛出 helper。
         var exceptions = function is { Size: <= ExceptionWrapperLimit * 4 } ? closure.Select(ExceptionName).Where(n => n is not null).Distinct().ToArray() : [];
         if (exceptions.Length == 1)
         {
             var raises = closure.Any(f => exportChains.TryGetValue(f, out var e) && e.Kind == HelperKind.Raise);
-            if (raises && CanReturn(target, 2))
+            var returns = CanReturn(target, 2);
+            if (raises && returns)
             {
                 var head = Words(target, 2).Select(x => x.Word).ToArray();
                 // cbz x0, 抛出路径；ret
@@ -330,8 +417,9 @@ public sealed partial class RuntimeHelpers
                 return new(target, HelperKind.Unknown, null,
                     $"闭包内以 C 字符串构造 {exceptions[0]} 并到达 il2cpp_raise_exception，但函数可以返回（条件抛出）", calls);
             }
-            return new(target, raises ? HelperKind.Throw : HelperKind.GetException, exceptions[0],
-                $"闭包内以 C 字符串 (\"System\", \"{exceptions[0]![7..]}\") 构造异常{(raises ? "并到达 il2cpp_raise_exception" : "")}", calls);
+            // 构造异常后没有返回路径：即使未走 il2cpp_raise_exception（例如经 C++ 异常展开），也按抛出处理。
+            return new(target, returns ? HelperKind.GetException : HelperKind.Throw, exceptions[0],
+                $"闭包内以 C 字符串 (\"System\", \"{exceptions[0]![7..]}\") 构造异常{(raises ? "并到达 il2cpp_raise_exception" : "")}{(returns ? "" : "，函数不返回")}", calls);
         }
         return new(target, HelperKind.Unknown, null,
             exceptions.Length > 1 ? $"闭包内有多个异常名：{string.Join("、", exceptions)}" : "没有可用证据", calls);
@@ -400,7 +488,8 @@ public sealed partial class RuntimeHelpers
     internal static string? CString(ImageDocument image, ulong address)
     {
         var section = image.SectionAt(address);
-        if (section is null || section.Name != ".rodata") return null;
+        // ELF 的只读字符串在 .rodata，PE 在 .rdata；异常类型名与导出名都从这里读取。
+        if (section is null || section.Name is not (".rodata" or ".rdata")) return null;
         var bytes = image.ReadUpTo(address, 128);
         var end = bytes.IndexOf((byte)0);
         if (end <= 0) return null;

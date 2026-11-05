@@ -101,7 +101,11 @@ internal static class IdiomPipeline
     /// <summary>函数自身的托管身份与隐藏 MethodInfo 的位置；栈上传入的实参改写为入口值。</summary>
     private static void Identify(IdiomState state)
     {
-        if (state.facts.EntriesAt(state.function.Entry).FirstOrDefault(e => e.Method is not null && e.Kind is EntryKind.Method or EntryKind.GenericMethod) is { Method: { } method })
+        if (state.self is { } requested)
+        {
+            state.selfMethodInfo = state.owner.abi.Classify(requested, out _)?.MethodInfo?.Register;
+        }
+        else if (state.facts.EntriesAt(state.function.Entry).FirstOrDefault(e => e.Method is not null && e.Kind is EntryKind.Method or EntryKind.GenericMethod) is { Method: { } method })
         {
             state.self = method;
             state.selfMethodInfo = state.owner.abi.Classify(method, out _)?.MethodInfo?.Register;

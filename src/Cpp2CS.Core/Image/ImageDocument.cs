@@ -4,8 +4,9 @@ using System.Text;
 
 namespace Cpp2CS.Image;
 
-public sealed record ImageRange(string Name, ulong Address, long FileOffset, ulong FileSize, ulong MemorySize, bool Executable);
+public sealed record ImageRange(string Name, ulong Address, long FileOffset, ulong FileSize, ulong MemorySize, bool Executable, bool Writable = false);
 public enum AddressKind { FileBacked, ZeroFill, Unmapped }
+public enum ImageContainer { Elf, Pe }
 public sealed record AddressResolution(AddressKind Kind, ImageRange? Range, long? FileOffset, ulong AvailableBytes);
 public sealed record CodeRelocation(ulong Address, int Size, string Kind, long RecordFileOffset);
 /// <summary>节头表中的一节。Flags 为 ELF sh_flags（2 SHF_ALLOC，4 SHF_EXECINSTR）；PE 节以可执行位换算。</summary>
@@ -22,6 +23,7 @@ public sealed class ImageDocument
     public ReadOnlyMemory<byte> Bytes => bytes;
     public string Sha256 { get; }
     public Cpp2CS.Model.Architecture Architecture { get; }
+    public ImageContainer Container { get; }
     public ulong PreferredBase { get; }
     public IReadOnlyList<ImageRange> Ranges { get; }
     public IReadOnlyList<ImageRange> ExecutableRanges { get; }
@@ -68,12 +70,13 @@ public sealed class ImageDocument
     /// <summary>导出符号：ELF 动态符号表中已定义的函数，PE 导出表中的名称导出。</summary>
     public IReadOnlyDictionary<string, ulong> Exports { get; private init; } = new Dictionary<string, ulong>();
 
-    private ImageDocument(byte[] bytes, Cpp2CS.Model.Architecture architecture, ulong preferredBase, List<ImageRange> ranges,
-        List<RelocationTableSummary> tables, List<CodeRelocation> codeRelocations)
+    private ImageDocument(byte[] bytes, Cpp2CS.Model.Architecture architecture, ImageContainer container, ulong preferredBase,
+        List<ImageRange> ranges, List<RelocationTableSummary> tables, List<CodeRelocation> codeRelocations)
     {
         this.bytes = bytes;
         Sha256 = Convert.ToHexString(SHA256.HashData(bytes));
         Architecture = architecture;
+        Container = container;
         PreferredBase = preferredBase;
         Ranges = ranges.OrderBy(r => r.Address).ToArray();
         ExecutableRanges = Ranges.Where(r => r.Executable).ToArray();
@@ -89,7 +92,7 @@ public sealed class ImageDocument
         var reader = new ImageReader(bytes);
         if (reader.U32(0) == 0x464c457f) return LoadElf(reader);
         if (reader.U16(0) == 0x5a4d) return LoadPe(reader);
-        throw new InvalidDataException("需要 ELF64 AArch64 或 PE32+ AMD64 文件");
+        throw new InvalidDataException("需要 ELF64 AArch64 或 PE32+ AMD64/ARM64 文件");
     }
 
     public AddressResolution Resolve(ulong address)
@@ -238,7 +241,7 @@ public sealed class ImageDocument
                 var alignment = reader.U64(p + 48);
                 if (alignment > 1 && ((alignment & (alignment - 1)) != 0 || address % alignment != (ulong)offset % alignment))
                     throw new InvalidDataException("ELF LOAD 对齐不一致");
-                ranges.Add(new($"LOAD[{i}]", address, offset, fileSize, memorySize, (reader.U32(p + 4) & 1) != 0));
+                ranges.Add(new($"LOAD[{i}]", address, offset, fileSize, memorySize, (reader.U32(p + 4) & 1) != 0, (reader.U32(p + 4) & 2) != 0));
             }
             if (type == 2 && fileSize != 0) dynamicRanges.Add((offset, fileSize));
             if (type == 0x6474e552 && memorySize != 0) relroRanges.Add((address, memorySize));
@@ -337,7 +340,7 @@ public sealed class ImageDocument
             if (entry.Defined) fixups[address] = unchecked(entry.Value + (ulong)addend);
             else imports[address] = entry.Name;
         }
-        return new(reader.Bytes, Cpp2CS.Model.Architecture.Arm64, ranges.Min(r => r.Address), ranges, collector.Summaries, collector.CodeRelocations)
+        return new(reader.Bytes, Cpp2CS.Model.Architecture.Arm64, ImageContainer.Elf, ranges.Min(r => r.Address), ranges, collector.Summaries, collector.CodeRelocations)
         {
             EhFrameHeader = ehFrameHeader,
             RelroRanges = relroRanges,
@@ -396,7 +399,14 @@ public sealed class ImageDocument
         reader.Require(0, 64);
         var pe = (long)reader.U32(60);
         reader.Require(pe, 24);
-        if (pe < 64 || reader.U32(pe) != 0x4550 || reader.U16(pe + 4) != 0x8664) throw new InvalidDataException("需要 PE AMD64 文件");
+        if (pe < 64 || reader.U32(pe) != 0x4550) throw new InvalidDataException("需要 PE 文件");
+        var machine = reader.U16(pe + 4);
+        var architecture = machine switch
+        {
+            0x8664 => Cpp2CS.Model.Architecture.X64,
+            0xAA64 => Cpp2CS.Model.Architecture.Arm64,
+            _ => throw new InvalidDataException($"需要 PE AMD64/ARM64 文件，实际 machine 0x{machine:x4}"),
+        };
         var count = reader.U16(pe + 6);
         var optionalSize = reader.U16(pe + 20);
         var optional = checked(pe + 24);
@@ -429,7 +439,9 @@ public sealed class ImageDocument
             if (memorySize == 0) continue;
             if (rva % sectionAlignment != 0 || (rawSize != 0 && rawOffset % fileAlignment != 0) || (ulong)rva + memorySize > imageSize)
                 throw new InvalidDataException($"PE section {name} 范围或对齐错误");
-            ranges.Add(new(name, checked(imageBase + rva), rawOffset, Math.Min(rawSize, memorySize), memorySize, (reader.U32(s + 36) & 0x20000000) != 0));
+            var characteristics = reader.U32(s + 36);
+            ranges.Add(new(name, checked(imageBase + rva), rawOffset, Math.Min(rawSize, memorySize), memorySize,
+                (characteristics & 0x20000000) != 0, (characteristics & 0x80000000) != 0));
         }
         ValidateRanges(reader, ranges);
         var directoryCount = reader.U32(optional + 108);
@@ -448,10 +460,11 @@ public sealed class ImageDocument
         var exports = new Dictionary<string, ulong>(StringComparer.Ordinal);
         if (directoryCount > 0 && reader.U32(optional + 112) is var exportRva and not 0)
             ReadPeExports(reader, ranges, imageBase, exportRva, exports);
-        return new(reader.Bytes, Cpp2CS.Model.Architecture.X64, imageBase, ranges, collector.Summaries, collector.CodeRelocations)
+        return new(reader.Bytes, architecture, ImageContainer.Pe, imageBase, ranges, collector.Summaries, collector.CodeRelocations)
         {
             ExceptionDirectory = exceptionDirectory,
-            Sections = ranges.Skip(1).Select(r => new ImageSection(r.Name, r.Address, r.MemorySize, 0, 2UL | (r.Executable ? 4UL : 0))).ToArray(),
+            Sections = ranges.Skip(1).Select(r => new ImageSection(r.Name, r.Address, r.MemorySize, 0,
+                2UL | (r.Writable ? 1UL : 0) | (r.Executable ? 4UL : 0))).ToArray(),
             Exports = exports,
         };
     }

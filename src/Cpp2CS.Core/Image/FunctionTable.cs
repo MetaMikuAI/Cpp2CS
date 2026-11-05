@@ -26,6 +26,8 @@ public sealed class FunctionTable
 
     public static FunctionTable Build(ImageDocument image)
     {
+        if (image.Container == ImageContainer.Pe)
+            return image.Architecture == Cpp2CS.Model.Architecture.Arm64 ? Arm64Pe(image) : X64(image);
         if (image.Architecture == Cpp2CS.Model.Architecture.Arm64) return Arm64(image);
         return X64(image);
     }
@@ -164,6 +166,94 @@ public sealed class FunctionTable
 
     private static ulong PcRelative(ImageDocument image, ulong at, ulong origin) =>
         checked((ulong)((long)origin + image.ReadI32(at)));
+
+    // ARM64 PE 的 RUNTIME_FUNCTION 只有 8 字节：BeginAddress 与 UnwindData。
+    // UnwindData 低两位非零时是打包展开数据，不含可读的函数长度；为零时指向 .xdata，
+    // 其首 dword 的 FunctionLength（低 18 位）以 4 字节指令为单位。
+    private static FunctionTable Arm64Pe(ImageDocument image)
+    {
+        if (image.ExceptionDirectory is not { } directory)
+            throw new InvalidDataException("PE 没有异常目录（.pdata）；无法核实 ARM64 函数边界");
+        if (directory.Size % 8 != 0) throw new InvalidDataException($"PE 异常目录长度 {directory.Size} 不是 8 的倍数");
+        var count = checked((int)(directory.Size / 8));
+        var raw = image.Read(directory.Address, checked(count * 8));
+        var entries = new List<(ulong Start, uint Unwind)>(count);
+        var skipped = new List<string>();
+        for (var i = 0; i < count; i++)
+        {
+            var entry = raw.Slice(i * 8, 8);
+            var beginRva = BinaryPrimitives.ReadUInt32LittleEndian(entry);
+            var unwindRva = BinaryPrimitives.ReadUInt32LittleEndian(entry[4..]);
+            if (beginRva == 0) continue;
+            var start = checked(image.PreferredBase + beginRva);
+            if (!image.IsExecutable(start)) { skipped.Add($"0x{start:x}: 入口不在可执行映射内"); continue; }
+            entries.Add((start, unwindRva));
+        }
+        entries.Sort((a, b) => a.Start.CompareTo(b.Start));
+
+        var ranges = new List<FunctionRange>(entries.Count);
+        for (var i = 0; i < entries.Count; i++)
+        {
+            var (start, unwindRva) = entries[i];
+            if (i > 0 && start == entries[i - 1].Start)
+            {
+                skipped.Add($"0x{start:x}: .pdata 入口重复");
+                continue;
+            }
+            var section = image.SectionAt(start);
+            if (section is null) { skipped.Add($"0x{start:x}: 没有所属节"); continue; }
+            var sectionEnd = checked(section.Address + section.Size);
+            var nextStart = i + 1 < entries.Count ? entries[i + 1].Start : sectionEnd;
+            var boundary = Math.Min(nextStart, sectionEnd);
+            if (boundary <= start) { skipped.Add($"0x{start:x}: 范围终点 0x{boundary:x} 非正向"); continue; }
+
+            ulong end;
+            var flag = unwindRva & 3;
+            if (unwindRva == 0 || flag == 3)
+            {
+                // 缺失展开数据或链接记录：只能以相邻入口/节尾作为上界。
+                end = boundary;
+            }
+            else if (flag is 1 or 2)
+            {
+                // 打包展开数据：FunctionLength 位于 bit 2..12，单位为 4 字节。
+                var length = ((unwindRva >> 2) & 0x7FFu) * 4UL;
+                if (length == 0 || length > boundary - start)
+                {
+                    skipped.Add($"0x{start:x}: 打包展开长度 0x{length:x} 超出 0x{start:x}..0x{boundary:x}");
+                    end = boundary;
+                }
+                else end = start + length;
+            }
+            else
+            {
+                var unwind = checked(image.PreferredBase + unwindRva);
+                var mapping = image.Resolve(unwind);
+                if (mapping.Kind != AddressKind.FileBacked || mapping.AvailableBytes < 4)
+                {
+                    skipped.Add($"0x{start:x}: 展开数据 0x{unwind:x} 未映射");
+                    end = boundary;
+                }
+                else
+                {
+                    var header = BinaryPrimitives.ReadUInt32LittleEndian(image.Read(unwind, 4));
+                    var length = checked((header & 0x3FFFFu) * 4UL);
+                    if (length == 0 || length > boundary - start)
+                    {
+                        skipped.Add($"0x{start:x}: 展开长度 0x{length:x} 超出 0x{start:x}..0x{boundary:x}");
+                        end = boundary;
+                    }
+                    else end = start + length;
+                }
+            }
+            ranges.Add(new(start, end, BoundaryEvidence.Pdata, null));
+        }
+
+        for (var i = 1; i < ranges.Count; i++)
+            if (ranges[i].Start < ranges[i - 1].End)
+                throw new InvalidDataException($".pdata 范围重叠：{ranges[i - 1].Describe()} 与 {ranges[i].Describe()}");
+        return new(ranges.ToArray(), ".pdata") { Skipped = skipped };
+    }
 
     private sealed record PdataEntry(ulong Start, ulong End, ulong Unwind);
 

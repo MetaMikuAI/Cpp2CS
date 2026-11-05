@@ -54,7 +54,7 @@ public sealed class FactsCallModel : ICallModel
         // vm::MetadataCache::InitializeRuntimeMetadata(uintptr_t*) 返回槽位初始化之后的值；两个包装都保留 x0（一个加 dmb 后返回，一个直接尾调用）
         HelperKind.InitMetadata => new([X(0)], [X(0)], "helper"),
         HelperKind.InitializedTypeInfo or HelperKind.ObjectNew or HelperKind.InitMethodRgctx => new([X(0)], [X(0)], "helper"),
-        HelperKind.ClassInit or HelperKind.NullCheck => new([X(0)], [], "helper"),
+        HelperKind.ClassInit or HelperKind.NullCheck or HelperKind.ZeroField => new([X(0)], [], "helper"),
         HelperKind.NewArray or HelperKind.Box or HelperKind.IsInst or HelperKind.IsAssignableFrom => new([X(0), X(1)], [X(0)], "helper"),
         HelperKind.WriteBarrier => new([X(0), X(1)], [], "helper"),
         HelperKind.InterfaceLookup => new([X(0), X(1), X(2)], [X(0)], "helper"),

@@ -25,9 +25,10 @@ namespace Cpp2CS.Input
             }
 
             var (model, builder) = Step("model", () => ModelBuilder.Load(binaryPath, metadataPath));
-            var map = Step("codemap", () => CodeMap.Build(model.Image));
-            var scan = Step("scan", () => CodeScan.Run(map));
             var (registrations, problems) = Step("registrations", () => RegistrationReader.Read(model, builder.CodeRegistration, builder.MetadataRegistration));
+            // PE 的叶函数可能没有 .pdata；注册表入口本身就是可核实的函数起点，先纳入再扫描代码。
+            var map = Step("codemap", () => CodeMap.Build(model.Image, registrations.Entries.Select(e => e.Address)));
+            var scan = Step("scan", () => CodeScan.Run(map));
 
             var checks = new FactChecks();
             checks.Add("registrations.read", "Error", registrations.Entries.Count, (IReadOnlyCollection<string>)problems,
@@ -36,6 +37,9 @@ namespace Cpp2CS.Input
             var usages = Step("usages", () => UsageSlots.Build(model, map, scan));
             usages.Check(checks, registrations);
             var helpers = Step("helpers", () => IdentifyHelpers(map, scan, registrations, usages, checks));
+            var defaults = Step("defaults", () => RuntimeDefaults.Build(model));
+            checks.Info("defaults.base", defaults.Count,
+                defaults.BaseAddress == 0 ? "未识别 il2cpp_defaults 基址" : $"il2cpp_defaults 基址 0x{defaults.BaseAddress:x}，映射 {defaults.Count} 个 corlib 类型字段");
             Step("checks.exceptions", () => { ExceptionFacts.Check(checks, map, scan, helpers); return 0; });
             Step("checks.runtime-layout", () => { LayoutChecks.Run(checks, map, scan, helpers); return 0; });
             var layouts = new FieldLayouts(model);
@@ -53,6 +57,7 @@ namespace Cpp2CS.Input
                 Registrations = registrations,
                 Usages = usages,
                 Helpers = helpers,
+                Defaults = defaults,
                 Layouts = layouts,
                 Checks = checks,
                 Timings = timings,
@@ -76,7 +81,7 @@ namespace Cpp2CS.Input
                     if (r.Kind is RefKind.Call or RefKind.TailCall && !registrations.ByAddress.ContainsKey(r.Target))
                         targets[r.Target] = targets.GetValueOrDefault(r.Target) + 1;
             }
-            var helpers = RuntimeHelpers.Identify(map, scan, targets, usages.SlotAddressBeforeCall);
+            var helpers = RuntimeHelpers.Identify(map, scan, targets, usages.MetadataSlotBeforeCall, usages.SlotAddressBeforeCall);
             var all = helpers.Helpers.Values.ToArray();
             string Census(IEnumerable<RuntimeHelper> list) => string.Join("，", list.GroupBy(h => h.Kind).OrderByDescending(g => g.Sum(h => h.CallSites))
                 .Select(g => $"{g.Key}={g.Count()}个/{g.Sum(h => h.CallSites)}次"));

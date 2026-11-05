@@ -16,6 +16,9 @@ public enum BoundaryEvidence
     /// <summary>没有展开表条目、但被代码或重定位当作入口引用的目标；终点为下一个已知边界，需由控制流确认。</summary>
     Reference,
 
+    /// <summary>注册表给出的代码入口，但展开表没有对应边界；终点为下一个已知边界。</summary>
+    Registration,
+
     /// <summary>ELF PLT 桩（PLT0 之后每 16 字节一个），由桩的固定指令序列确认。</summary>
     PltStub,
 }

@@ -9,6 +9,7 @@ public sealed record BaseFacts
     public Registrations Registrations { get; init; } = null!;
     public UsageSlots Usages { get; init; } = null!;
     public RuntimeHelpers Helpers { get; init; } = null!;
+    public RuntimeDefaults Defaults { get; init; } = null!;
     public FieldLayouts Layouts { get; init; } = null!;
     public FactChecks Checks { get; init; } = null!;
     public IReadOnlyDictionary<string, double> Timings { get; init; } = null!;

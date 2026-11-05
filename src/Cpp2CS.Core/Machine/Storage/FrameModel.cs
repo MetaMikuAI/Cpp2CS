@@ -47,6 +47,8 @@ internal sealed class FrameModel
     /// <summary>以帧地址为基址、加变量下标得到的地址：只在作为读写地址时不算逃逸。</summary>
     private readonly Dictionary<Variable, HashSet<long>> indexed = [];
     private readonly HashSet<long> loaded = [];
+    private const int ValueLimit = 128;
+    private bool truncated;
     private readonly Dictionary<Call, List<CallRange>> ranges = new(ReferenceEqualityComparer.Instance);
     private readonly List<(long Offset, int? Size)> escaped = [];
 
@@ -65,7 +67,7 @@ internal sealed class FrameModel
     public IReadOnlyCollection<long> Targets(Expr address) => Points(address).Distinct().ToArray();
 
     /// <summary>地址唯一指向的帧偏移。</summary>
-    public long? Slot(Expr address) => Targets(address) is { Count: 1 } targets ? targets.First() : null;
+    public long? Slot(Expr address) => !truncated && Targets(address) is { Count: 1 } targets ? targets.First() : null;
 
     public bool Escaped(long offset, int bytes) => escaped.Any(e => Overlaps(e.Offset, e.Size, offset, bytes));
 
@@ -75,7 +77,7 @@ internal sealed class FrameModel
     /// </summary>
     public bool Unobserved(long offset, int bytes)
     {
-        if (Escaped(offset, bytes)) return false;
+        if (truncated || Escaped(offset, bytes)) return false;
         var spilled = loaded.Any(l => l >= offset && l < offset + bytes);
         foreach (var call in function.Blocks.SelectMany(b => b.Statements).OfType<Call>())
         {
@@ -159,9 +161,14 @@ internal sealed class FrameModel
     private void SolvePointers()
     {
         var statements = function.Blocks.SelectMany(b => b.Statements).ToArray();
-        for (var changed = true; changed;)
+        for (var round = 0; true; round++)
         {
-            changed = false;
+            if (round >= 64)
+            {
+                truncated = true;
+                break;
+            }
+            var changed = false;
             foreach (var statement in statements)
                 switch (statement)
                 {
@@ -179,15 +186,20 @@ internal sealed class FrameModel
                             foreach (var slot in Points(store.Target).ToArray()) changed |= Add(held, slot, values);
                         break;
                 }
+            if (!changed) break;
         }
     }
 
-    private static bool Add<TKey>(Dictionary<TKey, HashSet<long>> sets, TKey key, IEnumerable<long> values) where TKey : notnull
+    private bool Add<TKey>(Dictionary<TKey, HashSet<long>> sets, TKey key, IEnumerable<long> values) where TKey : notnull
     {
         var changed = false;
         foreach (var value in values)
         {
             if (!sets.TryGetValue(key, out var set)) sets[key] = set = [];
+            if (set.Contains(value)) continue;
+            // 循环中的指针运算可能产生无限递增的偏移；超过容量后停止扩张并把模型标记为不完整，
+            // 使依赖单值结论的转发和删除保守地放弃。
+            if (set.Count >= ValueLimit) { truncated = true; continue; }
             changed |= set.Add(value);
         }
         return changed;
