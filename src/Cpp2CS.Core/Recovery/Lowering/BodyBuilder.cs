@@ -102,7 +102,12 @@ internal sealed partial class BodyBuilder
         // φ 的闭包：入边赋值的来源可能用到新的 φ。
         var done = new HashSet<PhiSym>();
         var copies = new Dictionary<(Block From, Block To, int Index), List<ManagedCopy>>();
-        while (phis.Except(done).ToArray() is { Length: > 0 } pending)
+        var doneStructs = new HashSet<StructPhiPlan>();
+        while (true)
+        {
+            var pending = phis.Except(done).ToArray();
+            var pendingStructs = structPhis.Values.Except(doneStructs).ToArray();
+            if (pending.Length == 0 && pendingStructs.Length == 0) break;
             foreach (var phi in pending)
             {
                 done.Add(phi);
@@ -115,6 +120,17 @@ internal sealed partial class BodyBuilder
                     list.Add(new ManagedCopy(local, source));
                 }
             }
+            foreach (var plan in pendingStructs)
+            {
+                doneStructs.Add(plan);
+                for (var j = 0; j < plan.Block.Predecessors.Count; j++)
+                {
+                    var from = plan.Block.Predecessors[j];
+                    if (!copies.TryGetValue((from, plan.Block, j), out var list)) copies[(from, plan.Block, j)] = list = [];
+                    list.Add(new ManagedCopy(plan.Local, StructPhiSource(plan, j, from.End)));
+                }
+            }
+        }
         ManagedEdge Edge(Block from, ulong target)
         {
             var to = function.Blocks.FirstOrDefault(b => b.Start == target);

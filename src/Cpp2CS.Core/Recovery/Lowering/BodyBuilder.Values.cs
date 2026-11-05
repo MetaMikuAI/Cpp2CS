@@ -271,7 +271,49 @@ internal sealed partial class BodyBuilder
     {
         if (oracle.Aggregate(bits, structure) is not { } plan) return Hole(address, $"值 {structure} 超出位宽 {bits.Width}", structure);
         if (plan.Whole is { } whole) return View(whole, structure, address);
-        return Composed(structure, plan.Fields.Select(f => (f.Projection.Path, View(f.Value, f.Projection.Type, address))).ToList(), address);
+        return StructPhi(structure, plan) ?? Composed(structure, plan.Fields.Select(f => (f.Projection.Path, View(f.Value, f.Projection.Type, address))).ToList(), address);
+    }
+
+    /// <summary>叶子都是同一块的 φ 时还原出的结构体 φ。Leaves 是各叶子在 φ 中的位段。</summary>
+    private sealed record StructPhiPlan(LocalValue Local, DefinitionRef Structure, Block Block, IReadOnlyList<(ValueProjection Projection, PhiSym Phi, int Low)> Leaves);
+
+    private readonly Dictionary<string, StructPhiPlan> structPhis = [];
+
+    /// <summary>
+    /// clang 把结构体局部拆成叶子的 φ（SROA），之后按叶子组成时会碰到私有字段。叶子都是同一块的 φ 时还原成一个结构体 φ：
+    /// 每条入边上按这条边的叶子组成（默认值、整体复制或构造函数），不需要访问字段。只在有不可访问的叶子时这样做，其余情况逐字段写法同样成立。
+    /// </summary>
+    private LocalValue? StructPhi(DefinitionRef structure, AggregatePlan plan)
+    {
+        if (plan.Fields.Count == 0 || !plan.Fields.Any(f => f.Projection.Path.Any(p => !fields.Accessible(p, p.DeclaringType)))) return null;
+        var leaves = new List<(ValueProjection, PhiSym, int)>();
+        foreach (var field in plan.Fields)
+            switch (SymTable.Resolve(field.Value))
+            {
+                case PhiSym phi: leaves.Add((field.Projection, phi, 0)); break;
+                case SliceSym { Base: var root, Low: var low } when SymTable.Resolve(root) is PhiSym phi: leaves.Add((field.Projection, phi, low)); break;
+                default: return null;
+            }
+        var block = leaves[0].Item2.Block;
+        if (leaves.Any(l => l.Item2.Block != block)) return null;
+        var key = $"{structure}|{string.Join(",", leaves.Select(l => $"{l.Item2.Id}:{l.Item3}:{l.Item1.Bit}"))}";
+        if (!structPhis.TryGetValue(key, out var known)) structPhis[key] = known = new(NewLocal(structure), structure, block, leaves);
+        return known.Local;
+    }
+
+    /// <summary>结构体 φ 在第 index 条入边上的值：叶子取该边的来源，为零或未定义的叶子由默认值给出。</summary>
+    private ManagedValue StructPhiSource(StructPhiPlan plan, int index, ulong address)
+    {
+        var fields = new List<ProjectedSym>();
+        foreach (var (projection, phi, low) in plan.Leaves)
+        {
+            if (phi.Sources[index] is not { } source) continue;
+            var part = values.Syms.Slice(source, low, projection.Width);
+            if (SymTable.Resolve(part) is not (ConstSym { Value: 0 } or UndefSym)) fields.Add(new(projection, part));
+        }
+        // 来源还是一层 φ 时接着还原，不在这里展开成字段。
+        return StructPhi(plan.Structure, new AggregatePlan(null, fields))
+            ?? Composed(plan.Structure, fields.Select(f => (f.Projection.Path, View(f.Value, f.Projection.Type, address))).ToList(), address);
     }
 
     /// <summary>
