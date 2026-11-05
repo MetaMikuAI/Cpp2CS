@@ -1737,14 +1737,18 @@ internal static class ArchitectureChecks
     private static void ThrowObservedCells(Assertions check, ProgramFacts facts, ManagedTypes types)
     {
         var lifter = new Cpp2CS.Machine.Lifting.FunctionLifter(facts);
-        foreach (var (name, transfer, handlerReads, promoted) in new[]
+        var slot = new FrameAddress(-16);
+        var high = new FrameAddress(-12);
+        Stmt ReadSlot() => new Return(56) { Pieces = [new(0, new Load(slot, 64))] };
+        foreach (var (name, transfer, handler, promoted) in new (string, Transfer, Stmt[], bool)[]
         {
-            ("处理块读取 ref 写入的单元", Transfer.Reference, true, false),
-            ("处理块不读取", Transfer.Reference, false, true),
-            ("按副本传递时调用不改写单元", Transfer.Copy, true, true),
+            ("处理块读取 ref 写入的单元", Transfer.Reference, [ReadSlot()], false),
+            ("处理块不读取", Transfer.Reference, [new Return(48)], true),
+            ("按副本传递时调用不改写单元", Transfer.Copy, [ReadSlot()], true),
+            ("处理块先用部分写入覆盖整个单元再读取", Transfer.Reference, [new Store(48, slot, Expr.C(1, 32)), new Store(52, high, Expr.C(2, 32)), ReadSlot()], true),
+            ("处理块的部分写入留下调用写入的字节", Transfer.Reference, [new Store(48, slot, Expr.C(1, 32)), ReadSlot()], false),
         })
         {
-            var slot = new FrameAddress(-16);
             var access = transfer == Transfer.Reference ? MemoryAccess.ReadWrite : MemoryAccess.Read;
             var callee = new MachineSignature([new MachineValue(0, new ByRefRef(types.Int64), transfer, [new(Storage.Gpr(0), 64, 0)], 8, access)], null, null, 0);
             // 两个调用共用落地块：只有一个前驱的落地块没有 φ，读到的就是调用写出的版本。
@@ -1752,11 +1756,11 @@ internal static class ArchitectureChecks
             var entry = new Block(0) { End = 12 };
             var second = new Block(16) { End = 24 };
             var next = new Block(32) { End = 36 };
-            var landing = new Block(48) { End = 52, IsLandingPad = true };
+            var landing = new Block(48) { End = 60, IsLandingPad = true };
             entry.Statements = [new Store(0, slot, Expr.C(0, 64)), Invoke(4), new Jump(8, second.Start)];
             second.Statements = [Invoke(16), new Jump(20, next.Start)];
             next.Statements = [new Return(32) { Pieces = [new(0, new Load(slot, 64))] }];
-            landing.Statements = [handlerReads ? new Return(48) { Pieces = [new(0, new Load(slot, 64))] } : new Return(48)];
+            landing.Statements = [.. handler];
             MachineFunction.AddEdge(entry, second);
             MachineFunction.AddEdge(second, next);
             foreach (var thrower in new[] { entry, second })
@@ -1765,7 +1769,7 @@ internal static class ArchitectureChecks
                 landing.Predecessors.Add(thrower);
                 thrower.Handler = landing;
             }
-            var function = new MachineFunction { Entry = 0, Range = new(0, 56, CodeRegion.Managed, default), Blocks = [entry, second, next, landing] };
+            var function = new MachineFunction { Entry = 0, Range = new(0, 64, CodeRegion.Managed, default), Blocks = [entry, second, next, landing] };
             function.Renumber();
             var result = Cpp2CS.Recovery.Memory.MemoryPromotion.Run(function, new MachineSignature([], null, null, 0), c => new(c, [], callee),
                 new ManagedAbi(facts.Layouts), lifter.Calls, lifter.Machine.Convention.StackPointer);

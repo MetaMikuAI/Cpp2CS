@@ -254,7 +254,8 @@ internal sealed class MemoryPromotion
 
     /// <summary>
     /// 调用经 ref 改写单元时抛出，处理块读到的是被调方留下的内容。SSA 的版本只有调用前后两个完整状态，表达不了这个中间状态；
-    /// 这样的单元在机器和 IL 里都是同一块存储，留在内存里由可寻址局部承接。活跃性取自试构建的剪枝 SSA。
+    /// 这样的单元在机器和 IL 里都是同一块存储，留在内存里由可寻址局部承接。
+    /// 试构建的剪枝 SSA 给出哪些落地块 φ 有表达不了的来源；部分写入在 SSA 里读取整个单元，它的活跃性偏宽，处理块是否读到旧内容按字节判断。
     /// </summary>
     private MemoryLayout KeepThrowObservedCells(MemoryLayout layout, ICallModel calls, Storage stackPointer)
     {
@@ -266,6 +267,7 @@ internal sealed class MemoryPromotion
                     foreach (var cell in layout.Cells.Where(c => c.Promoted && c.Space == effect.Space && c.Start < effect.Offset + effect.Size && effect.Offset < c.End))
                         writers.Add((block.Start, cell.Storage));
         if (writers.Count == 0) return layout;
+        var live = LiveBytes(writers.Select(w => layout.Cells[w.Cell.Index]).Distinct().ToArray());
         var probe = function.Copy();
         var trial = new MemoryPromotion(probe, signature, shapes, abi);
         trial.Partition();
@@ -275,9 +277,74 @@ internal sealed class MemoryPromotion
         foreach (var landing in probe.Blocks.Where(b => b.IsLandingPad))
             foreach (var phi in landing.Statements.OfType<Phi>().Where(p => p.Target.Storage.Bank == Bank.Local))
                 for (var i = 0; i < phi.Sources.Length; i++)
-                    if (phi.Sources[i].Version < 0 && writers.Contains((landing.Predecessors[i].Start, phi.Target.Storage))) observed.Add(phi.Target.Storage.Index);
+                    if (phi.Sources[i].Version < 0 && writers.Contains((landing.Predecessors[i].Start, phi.Target.Storage))
+                        && live[landing.Start].Any(b => b.Cell == phi.Target.Storage.Index))
+                        observed.Add(phi.Target.Storage.Index);
         return observed.Count == 0 ? layout
             : new MemoryLayout(layout.Cells.Select(c => observed.Contains(c.Id) ? c with { Escape = "异常路径观察 ref 调用写入的内容" } : c).ToList());
+    }
+
+    /// <summary>
+    /// 各块入口按字节活跃的单元内容（后向数据流）：读取和调用的读效果产生活跃，写入只杀死写到的字节。
+    /// 调用可能抛出，处理块的活跃集在每个调用处并入，调用之前的写入不会遮住调用抛出时的处理块。
+    /// </summary>
+    private Dictionary<ulong, HashSet<(int Cell, long Byte)>> LiveBytes(IReadOnlyList<Cell> tracked)
+    {
+        var entry = function.Blocks.ToDictionary(b => b.Start, _ => new HashSet<(int Cell, long Byte)>());
+        void Mark(HashSet<(int Cell, long Byte)> live, LocalSpace space, long offset, int size, bool read)
+        {
+            foreach (var cell in tracked.Where(c => c.Space == space && c.Start < offset + size && offset < c.End))
+                for (var at = Math.Max(cell.Start, offset); at < Math.Min(cell.End, offset + size); at++)
+                    if (read) live.Add((cell.Id, at)); else live.Remove((cell.Id, at));
+        }
+        void Reads(HashSet<(int Cell, long Byte)> live, IEnumerable<Expr> operands)
+        {
+            foreach (var load in operands.SelectMany(ExprMap.Walk).OfType<Load>())
+                if (Resolve(load.Address) is var (space, offset)) Mark(live, space, offset, load.Width / 8, true);
+        }
+        void Returned(HashSet<(int Cell, long Byte)> live)
+        {
+            foreach (var cell in tracked.Where(c => c.Space == LocalSpace.Result)) Mark(live, cell.Space, cell.Start, cell.Size, true);
+        }
+        var resultBuffer = signature.Return is { Transfer: Transfer.ResultBuffer };
+        for (var changed = true; changed;)
+        {
+            changed = false;
+            foreach (var block in Enumerable.Reverse(function.Blocks))
+            {
+                var live = new HashSet<(int Cell, long Byte)>();
+                foreach (var successor in block.Successors) live.UnionWith(entry[successor.Start]);
+                foreach (var statement in Enumerable.Reverse(block.Statements))
+                    switch (statement)
+                    {
+                        case Store store:
+                            if (Resolve(store.Target) is var (space, offset)) Mark(live, space, offset, store.Value.Width / 8, false);
+                            Reads(live, ExprMap.Operands(store));
+                            break;
+                        case Return when resultBuffer:
+                            Returned(live);
+                            break;
+                        case Call call:
+                            if (resultBuffer && call.Kind is CallKind.Tail or CallKind.TailIndirect) Returned(live);
+                            var effects = Effects(call).Where(e => e.Size > 0).ToArray();
+                            foreach (var effect in effects.Where(e => (e.Access & MemoryAccess.Write) != 0)) Mark(live, effect.Space, effect.Offset, effect.Size, false);
+                            if (block.Handler is { } handler) live.UnionWith(entry[handler.Start]);
+                            foreach (var effect in effects.Where(e => (e.Access & MemoryAccess.Read) != 0)) Mark(live, effect.Space, effect.Offset, effect.Size, true);
+                            Reads(live, ExprMap.Operands(call));
+                            break;
+                        default:
+                            Reads(live, ExprMap.Operands(statement));
+                            break;
+                    }
+                // 活跃集只增不减，大小不变即不动点。
+                if (live.Count != entry[block.Start].Count)
+                {
+                    entry[block.Start] = live;
+                    changed = true;
+                }
+            }
+        }
+        return entry;
     }
 
     // ---- 改写 ----
