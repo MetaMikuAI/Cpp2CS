@@ -327,12 +327,25 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     private TypeRef? Lower(PhiSym phi)
     {
         TypeRef? joined = null;
+        var steps = new List<Sym>();
         foreach (var source in phi.Sources)
         {
             if (source is null || SymTable.Resolve(source) is var s && (ReferenceEquals(s, phi) || s is ConstSym or UndefSym)) continue;
             if (s is PhiSym && active.Contains(s)) continue;
-            // 循环里的 p = p + k 不约束类型：指针递增之后还是指针，不能因为运算结果按整数算就和指针冲突。
-            if (s is OpSym { Op: { Kind: OperatorKind.Binary, Binary: BinOp.Add or BinOp.Sub } } step && ReferenceEquals(SymTable.Resolve(step.Args[0]), phi) && SymTable.Resolve(step.Args[1]) is ConstSym) continue;
+            if (s is OpSym { Op: { Kind: OperatorKind.Binary, Binary: BinOp.Add or BinOp.Sub } } step && ReferenceEquals(SymTable.Resolve(step.Args[0]), phi) && SymTable.Resolve(step.Args[1]) is ConstSym)
+            {
+                steps.Add(source);
+                continue;
+            }
+            var t = TypeOf(source);
+            if (t is null) continue;
+            joined = joined is null ? t : Join(joined, t);
+            if (joined is null) return null;
+        }
+        // 循环里的 p = p + k：指针递增之后还是指针。这时求它的类型会因 φ 还在求解而按整数算，所以不看；整数计数器照常由它给出类型。
+        if (joined is PointerRef) return joined;
+        foreach (var source in steps)
+        {
             var t = TypeOf(source);
             if (t is null) continue;
             joined = joined is null ? t : Join(joined, t);
@@ -396,6 +409,8 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                     // 只有带符号或无符号语义的运算给出类型。
                     var operand = TypeOf(op.Args[0]);
                     if (operand is not null && types.Kind(operand) is TypeKind.Int && types.Bits(operand) == op.Width) return operand;
+                    // 指针加减常量还是指针。
+                    if (operand is PointerRef && op.Op is { Kind: OperatorKind.Binary, Binary: BinOp.Add or BinOp.Sub } && SymTable.Resolve(op.Args[1]) is ConstSym) return operand;
                     if (op.Width is not (8 or 16 or 32 or 64) || op.Op.Kind != OperatorKind.Binary) return null;
                     return op.Op.Binary switch
                     {

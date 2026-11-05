@@ -162,6 +162,9 @@ internal sealed partial class BodyBuilder
                     }
                     var type = typing.Result;
                     if (type is null) return Hole(address, $"类型 运算 {op.Op}", expected);
+                    // 指针加减常量：偏移按字节，写成指针偏移。
+                    if (type is PointerRef && op.Op.Binary is BinOp.Add or BinOp.Sub && SymTable.Resolve(op.Args[1]) is ConstSym step)
+                        return new PointerOffsetValue(View(op.Args[0], type, address), new ConstantValue(op.Op.Binary == BinOp.Add ? step.Value : unchecked(0 - step.Value), types.Int64, 64));
                     return new BinaryValue(op.Op.Binary, View(op.Args[0], type, address), View(op.Args[1], typing.Inputs[1], address), type, op.Width);
                 }
             case OperatorKind.Unary:
