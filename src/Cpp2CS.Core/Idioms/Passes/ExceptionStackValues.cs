@@ -163,14 +163,33 @@ internal static class ExceptionStackValues
         var offsets = observed.OfType<FrameAddress>().Select(f => f.Offset).ToHashSet();
         var indexedRoots = observed.OfType<Binary>().Where(b => b is { Op: BinOp.Add, Left: FrameAddress, Right: not Const }).Select(b => ((FrameAddress)b.Left).Offset).ToArray();
         var removed = false;
+        HashSet<Block>? normal = null;
         foreach (var buffer in statements.OfType<Store>().Select(s => slot(s.Target)?.Buffer).OfType<long>().Concat(known ?? []).Distinct().ToArray())
         {
             if (offsets.Contains(buffer) || indexedRoots.Any(r => r >= buffer - 16 && r < buffer)) continue;
             var above = offsets.Where(o => o > buffer).DefaultIfEmpty(0).Min();
             bool Written(Store store) => slot(store.Target)?.Buffer == buffer || store.Target is FrameAddress field && field.Offset >= buffer && field.Offset < above;
+            var writes = function.Blocks.SelectMany(b => b.Statements.OfType<Store>().Where(Written).Select(s => (Store: s, Block: b))).ToArray();
+            // 异常栈的 push 只在 catch 路径上，其余写入是清零长度；其他写法是普通的栈上数组，内容可能被固定偏移读取。
+            normal ??= NormalPaths(function);
+            if (writes.Any(w => w.Store.Value is not Const && normal.Contains(w.Block))) continue;
+            // 跨过上方被读取位置的宽写入，不只是这个数组的内容。
+            if (writes.Any(w => w.Store.Target is FrameAddress field && field.Offset + w.Store.Value.Width / 8 > above)) continue;
             foreach (var block in function.Blocks) removed |= block.Statements.RemoveAll(s => s is Store store && Written(store)) > 0;
         }
         return removed;
+    }
+
+    /// <summary>从入口不经过落地块就能到达的块。</summary>
+    private static HashSet<Block> NormalPaths(MachineFunction function)
+    {
+        var reached = new HashSet<Block>();
+        var pending = new Stack<Block>([function.Blocks[0]]);
+        while (pending.TryPop(out var block))
+            if (reached.Add(block))
+                foreach (var next in block.NormalSuccessors)
+                    if (!next.IsLandingPad) pending.Push(next);
+        return reached;
     }
 
     /// <summary>
@@ -216,20 +235,42 @@ internal static class ExceptionStackValues
                 var plannedDefines = new List<(Block Block, Define Define)>();
                 var memo = new Dictionary<(Variable, int), Variable?>();
                 // 在 at 之前最近一次按 index 下标的 push 写入的值。
-                Variable? Pushed(Expr pushedIndex, Block at)
+                Variable? Pushed(Expr pushedIndex, Block at, int end)
                 {
                     var visited = new HashSet<Block>();
                     for (var current = at; current is not null && visited.Add(current); current = current.Predecessors is [var only] ? only : null)
-                        for (var k = current.Statements.Count - 1; k >= 0; k--)
+                        for (var k = (ReferenceEquals(current, at) ? end : current.Statements.Count) - 1; k >= 0; k--)
                             if (current.Statements[k] is Store store && Pushes(store.Target) is var (pushRoot, pushIndex) && pushRoot == buffer && pushIndex == pushedIndex)
                                 return store.Value is Use { Width: 64 } value ? value.Variable : null;
                     return null;
                 }
-                // 下标取 value + delta 时、在 pred 的末尾可用的栈顶值。
-                Variable? AtEnd(Expr value, int delta, Block pred, int depth)
+                // 数组内容的写入。长度和下标按整数运算或常量写入，异常对象不是。
+                bool WritesData(Stmt statement) => statement is Store store
+                    && (Pushes(store.Target)?.Buffer == buffer || store.Target is FrameAddress field && field.Offset >= buffer && field.Offset < buffer + 72)
+                    && Strip(Expand(store.Value)) is not (Const or Binary { Op: BinOp.Add or BinOp.Sub });
+                // 从 from 的 φ 之后到 to 的第 end 条语句之前，某条路径上写了数组内容。
+                bool WrittenBetween(Block from, Block to, int end)
+                {
+                    HashSet<Block> Reach(Block start, Block stop, Func<Block, IEnumerable<Block>> next)
+                    {
+                        var reached = new HashSet<Block>();
+                        var pending = new Stack<Block>([start]);
+                        while (pending.TryPop(out var current))
+                            if (reached.Add(current) && !ReferenceEquals(current, stop))
+                                foreach (var following in next(current)) pending.Push(following);
+                        return reached;
+                    }
+                    var on = Reach(from, to, b => b.Successors);
+                    on.IntersectWith(Reach(to, from, b => b.Predecessors));
+                    return on.Any(b => (ReferenceEquals(b, to) ? b.Statements.Take(end) : b.Statements).Any(WritesData));
+                }
+                // 下标取 value + delta 时、在 pred 的第 end 条语句之前可用的栈顶值。
+                Variable? AtEnd(Expr value, int delta, Block pred, int end, int depth)
                 {
                     if (depth > 32) return null;
                     value = Strip(value);
+                    // φ 之后又写了数组时，入边上的内容不是这里的栈顶。
+                    if (value is Use merged && phis.TryGetValue(merged.Variable, out var merge) && WrittenBetween(merge.Block, pred, end)) return null;
                     switch (value)
                     {
                         case Const constant:
@@ -243,18 +284,18 @@ internal static class ExceptionStackValues
                                     return undefined;
                                 }
                                 // 数组的地址没有传给任何调用，调用改不了它。
-                                var reach = model.Reach(pred, pred.Statements.Count, buffer + slot * 8L, 8, throughCalls: true);
+                                var reach = model.Reach(pred, end, buffer + slot * 8L, 8, throughCalls: true);
                                 return reach is { Complete: true, Stores: [{ Value: Use { Width: 64 } pushed }] } && Defining(pushed.Variable) is { } home && dominators.Dominates(home.Index, pred.Index)
                                     ? pushed.Variable : null;
                             }
                         case Binary { Op: BinOp.Add, Right: Const { Value: 1 } } increment:
                             // 下标正好是这次 push 的位置：值就是 push 写入的值。
-                            if (delta == -1 && Pushed(Strip(Expand(increment.Left)), pred) is { } written) return written;
-                            return AtEnd(increment.Left, delta + 1, pred, depth + 1);
+                            if (delta == -1 && Pushed(Strip(Expand(increment.Left)), pred, end) is { } written) return written;
+                            return AtEnd(increment.Left, delta + 1, pred, end, depth + 1);
                         case Binary { Op: BinOp.Sub, Right: Const { Value: 1 } } decrement:
-                            return AtEnd(decrement.Left, delta - 1, pred, depth + 1);
+                            return AtEnd(decrement.Left, delta - 1, pred, end, depth + 1);
                         case Binary { Op: BinOp.Add, Right: Const { Value: 0xffffffff or ulong.MaxValue } } wrapped:
-                            return AtEnd(wrapped.Left, delta - 1, pred, depth + 1);
+                            return AtEnd(wrapped.Left, delta - 1, pred, end, depth + 1);
                         case Use use when memo.TryGetValue((use.Variable, delta), out var known):
                             return known;
                         case Use use when phis.TryGetValue(use.Variable, out var source):
@@ -263,18 +304,18 @@ internal static class ExceptionStackValues
                                 memo[(use.Variable, delta)] = top;
                                 var sources = new Variable?[source.Phi.Sources.Length];
                                 for (var k = 0; k < sources.Length; k++)
-                                    if ((sources[k] = AtEnd(new Use(source.Phi.Sources[k], use.Variable.Width), delta, source.Block.Predecessors[k], depth + 1)) is null) return memo[(use.Variable, delta)] = null;
+                                    if ((sources[k] = AtEnd(new Use(source.Phi.Sources[k], use.Variable.Width), delta, source.Block.Predecessors[k], source.Block.Predecessors[k].Statements.Count, depth + 1)) is null) return memo[(use.Variable, delta)] = null;
                                 plannedPhis.Add((source.Block, new Phi(source.Phi.Address, top, sources!)));
                                 return top;
                             }
                         case Use use when definitions.TryGetValue(use.Variable, out var definition):
-                            return AtEnd(definition.Value, delta, pred, depth + 1);
+                            return AtEnd(definition.Value, delta, pred, end, depth + 1);
                         default:
                             return null;
                     }
                 }
                 Block? Defining(Variable variable) => function.Blocks.FirstOrDefault(b => b.Statements.Any(s => s is Define d && d.Target == variable || s is Phi p && p.Target == variable || s is Call c && c.Defines.Contains(variable)));
-                if (AtEnd(index, initial, block, 0) is not { } value) continue;
+                if (AtEnd(index, initial, block, i, 0) is not { } value) continue;
                 foreach (var (target, define) in plannedDefines)
                     target.Statements.Insert(target.Statements.LastOrDefault() is Jump or Branch or Call ? target.Statements.Count - 1 : target.Statements.Count, define);
                 foreach (var (target, phi) in plannedPhis) target.Statements.Insert(0, phi);

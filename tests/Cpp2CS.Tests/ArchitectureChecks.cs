@@ -52,6 +52,7 @@ internal static class ArchitectureChecks
         ExceptionShapes(checks, types);
         PlatformInvokeDeclarations(checks, facts, types);
         StackBoxes(checks, facts, types);
+        ExceptionStacks(checks, facts);
         PartialScalarCells(checks, facts, types);
         UnusedCallStacks(checks, facts, types);
         EntryKinds(checks, facts, types);
@@ -192,6 +193,52 @@ internal static class ArchitectureChecks
         check.True(!Run("missing"), "任一路径缺少有效载荷写入时拒绝装箱归一");
         check.True(!Run("alias"), "取得栈对象地址的未知调用阻断装箱证明");
         check.True(!Run("partial"), "部分覆盖不能充当完整枚举载荷");
+    }
+
+    private static void ExceptionStacks(Assertions check, ProgramFacts facts)
+    {
+        static Variable V(int id) => new(Storage.Temp(900 + id), 1);
+        static Expr Slot(long buffer, Expr index) => new Binary(BinOp.Add, new FrameAddress(buffer), new Binary(BinOp.Shl, index, Expr.C(3, 64), 64), 64);
+
+        // 下标写入之后读固定偏移：写入不是 top() 的来源。catch 路径上是异常栈的 push，其他路径上是普通的栈上数组。
+        bool PushKept(bool inCatch)
+        {
+            var push = new Store(8, Slot(-32, new Use(V(0), 64)), new Use(V(1), 64));
+            var read = new Define(12, V(2), new Load(new FrameAddress(-16), 64));
+            var entry = new Block(0) { Statements = [new Jump(0, 8)] };
+            var body = new Block(8) { IsLandingPad = inCatch, Statements = [push, read, new Return(16)] };
+            MachineFunction.AddEdge(entry, body);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 20, CodeRegion.Managed, default), Blocks = [entry, body] };
+            ExceptionStackValues.Run(function);
+            return body.Statements.OfType<Store>().Any();
+        }
+        check.True(PushKept(inCatch: false), "不在 catch 路径上的下标写入是普通数组，内容可能被固定偏移读取，不能删");
+        check.True(!PushKept(inCatch: true), "catch 路径上的 push 没有 top() 读取时删去");
+
+        // 栈深是 φ，两条入边上栈顶已写入；variant 在 φ 之后、读取之前又写一次，入边上的内容就不再是栈顶。
+        bool TopReplaced(bool pushedAfterMerge)
+        {
+            var (first, second) = (V(0), V(1));
+            var left = new Block(4) { Statements = [new Define(4, V(2), Expr.C(0, 64)), new Define(4, first, Expr.C(0x11, 64)),
+                new Store(4, new FrameAddress(-24), new Use(first, 64)), new Jump(4, 12)] };
+            var right = new Block(8) { Statements = [new Define(8, V(3), Expr.C(0, 64)), new Define(8, second, Expr.C(0x22, 64)),
+                new Store(8, new FrameAddress(-24), new Use(second, 64)), new Jump(8, 12)] };
+            var entry = new Block(0) { Statements = [new Branch(0, Expr.C(1, 1), 4, 8)] };
+            var next = new Binary(BinOp.Add, new Use(V(4), 64), Expr.C(1, 64), 64);
+            var load = new Define(20, V(5), new Load(Slot(-32, next), 64));
+            var merge = new Block(12) { Statements = [new Phi(12, V(4), [V(2), V(3)]), load, new Return(24)] };
+            if (pushedAfterMerge) merge.Statements.Insert(1, new Store(16, Slot(-32, next), new Use(V(6), 64)));
+            MachineFunction.AddEdge(entry, left); MachineFunction.AddEdge(entry, right);
+            MachineFunction.AddEdge(left, merge); MachineFunction.AddEdge(right, merge);
+            var function = new MachineFunction { Entry = 0, Range = new(0, 28, CodeRegion.Managed, default), Blocks = [entry, left, right, merge] };
+            function.Renumber();
+            var fresh = 950;
+            CallShape Shape(Call c) => new(c, [], null);
+            ExceptionStackValues.TopValues(function, new CallMemoryEffects(Shape, new ManagedAbi(facts.Layouts)), () => new(Storage.Temp(fresh++), 1));
+            return !merge.Statements.OfType<Define>().Any(d => d.Target == V(5) && d.Value is Load);
+        }
+        check.True(TopReplaced(pushedAfterMerge: false), "栈深是 φ 时栈顶按入边取到达的写入");
+        check.True(!TopReplaced(pushedAfterMerge: true), "φ 之后又写了数组时不按入边取栈顶");
     }
 
     private static void CallIdentities(Assertions check)
