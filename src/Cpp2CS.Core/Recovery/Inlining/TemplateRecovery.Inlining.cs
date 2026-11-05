@@ -950,10 +950,15 @@ internal sealed partial class TemplateRecovery
     /// <summary>模板的项 m 与调用方的项 c 相同：形参绑定到调用方的项（首次出现时绑定，之后须一致），其余逐层同形。</summary>
     private bool SameTerm(ManagedValue left, ManagedValue right) => Unify(left, right, [], false);
 
+    /// <summary>数组下标的 32 位整数扩展不改变语义：边界检查按无符号比较，负数零扩展或符号扩展后同样越界。</summary>
+    private static ManagedValue NormalizeIndex(ManagedValue value) =>
+        value is ArrayElementValue { Index: ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.SignExtend, Operand: { Width: 32 } index } } element
+            ? element with { Index = index } : value;
+
     private bool Unify(ManagedValue m, ManagedValue c, Dictionary<int, ManagedValue> binding, bool bindArguments = true)
     {
-        m = NormalizeBit(m);
-        c = NormalizeBit(c);
+        m = NormalizeIndex(NormalizeBit(m));
+        c = NormalizeIndex(NormalizeBit(c));
         if (m is ArgumentValue argument)
         {
             if (!bindArguments) return m.Equals(c);
