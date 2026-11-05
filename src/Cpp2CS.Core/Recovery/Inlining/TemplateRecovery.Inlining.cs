@@ -959,6 +959,9 @@ internal sealed partial class TemplateRecovery
     {
         m = NormalizeIndex(NormalizeBit(m));
         c = NormalizeIndex(NormalizeBit(c));
+        // 布尔值只取 0 和 1，和 1 按位与不改变它：模板的形参是更宽的整数，调用方传布尔值时这次与运算被化简掉了。
+        if (m is BinaryValue { Op: BinOp.And, Right: ConstantValue { Bits: 1 } } masked && types.Kind(c.Type) == TypeKind.Bool)
+            return Unify(masked.Left, c, binding, bindArguments);
         if (m is ArgumentValue argument)
         {
             if (!bindArguments) return m.Equals(c);
