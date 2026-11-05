@@ -260,7 +260,13 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Ldnull: stack.Push(StackValue.O(0)); break;
                 case Code.Ldstr: stack.Push(StackValue.O(world.String((string)operand))); break;
                 case Code.Ldtoken:
-                    stack.Push(StackValue.I8(operand is FieldReference token ? world.FieldInfo(context.Field(token)) : world.TypePointer(context.Type((TypeReference)operand))));
+                    // ECMA-335 III.4.17：ldtoken 接受类型、字段与方法；IL2CPP 的 RuntimeMethodHandle 即 MethodInfo*，与 ldftn 取到的相同。
+                    stack.Push(StackValue.I8(operand switch
+                    {
+                        FieldReference token => world.FieldInfo(context.Field(token)),
+                        MethodReference target => world.MethodInfo(context.Method(target)),
+                        _ => world.TypePointer(context.Type((TypeReference)operand)),
+                    }));
                     break;
                 case Code.Pop: Pop(); break;
                 case Code.Dup: stack.Push(stack.Peek()); break;
@@ -749,7 +755,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
 
     // —— 值的表示 ——
 
-    private bool IsHandle(TypeRef type) => type.Equals(Types.RuntimeTypeHandle) || type.Equals(Types.RuntimeFieldHandle);
+    private bool IsHandle(TypeRef type) => type.Equals(Types.RuntimeTypeHandle) || type.Equals(Types.RuntimeFieldHandle) || type.Equals(Types.RuntimeMethodHandle);
 
     /// <summary>内存中的位型（零扩展到 64 位）→ 栈上的值。</summary>
     public StackValue Load(TypeRef type, ulong bits)
