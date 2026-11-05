@@ -11,7 +11,7 @@ internal static class NormalizePass
             state.defs = new Defs(state.function);
             if (state.owner.RecoverUnusedInputs)
                 state.DiscardUnusedInputs();
-            if (state.KnownMetadataGuards())
+            if (state.GuardFlagValues() | state.KnownMetadataGuards())
                 state.Cleanup();
             // 类型检查先于抛异常检查：castclass / as 后判空的失败一侧是只抛异常的块
             var changed = state.Guards();

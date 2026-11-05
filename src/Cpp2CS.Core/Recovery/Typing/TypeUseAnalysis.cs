@@ -193,11 +193,17 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
                 for (var i = 0; i < op.Args.Length; i++) Use(op.Args[i], typing.Inputs[i], user);
                 break;
             case SliceSym slice:
+                if (oracle.UntypedWidePhiPiece(slice) is { } widePiece) { Use(widePiece, expected, user); break; }
                 if (oracle.EnclosingScalar(slice) is { } enclosing) { Use(enclosing.Value, enclosing.Type, user); break; }
                 if (slice.Base is ReadSym merged && oracle.Part(merged, slice.Low, slice.Width) is { } part)
                 {
                     if (!ReferenceEquals(merged.Site, user)) materialized.Add(merged);
                     Location(part, user);
+                    break;
+                }
+                if (oracle.FieldPieces(slice) is { } pieces)
+                {
+                    foreach (var (_, piece) in pieces) Use(piece, oracle.TypeOf(piece) ?? oracle.Unconstrained(piece.Width), user);
                     break;
                 }
                 Use(slice.Base, oracle.TypeOf(slice.Base) ?? oracle.Unconstrained(slice.Base.Width), user);

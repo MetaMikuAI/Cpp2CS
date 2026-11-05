@@ -120,6 +120,23 @@ public sealed class IdiomRewriter(ProgramFacts facts)
         return context.Result;
     }
 
+    /// <summary>
+    /// 路径拆分把类元数据的合流分开之后，内联类型检查才有单一类型，这里按同样的证明识别。
+    /// 只改写语句，清理和 SSA 校验由拆分统一负责。
+    /// </summary>
+    internal bool RecognizeSplitTypeChecks(MachineFunction function)
+    {
+        var state = new IdiomState(this, function);
+        var known = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Op?.Kind == OpKind.TypeCheck).Select(c => c.Site).ToHashSet();
+        // 按位或而不是短路：分支形态与抛出形态可以同时存在。
+        if (!(state.TypeChecks() | state.CheckedTypeChains())) return false;
+        var errors = Cpp2CS.Machine.Ssa.Lowering.Cleanup(function);
+        if (errors.Count > 0) throw new InvalidOperationException($"类型检查识别后 SSA 不成立：{errors[0]}");
+        state.defs = new Defs(function);
+        SuccessfulTypeCheckValuesPass.Run(function, state.RawDefinition, state.Fresh, c => !known.Contains(c.Site));
+        return true;
+    }
+
     /// <summary>调用目标是运行时 helper（不含托管区域中没有注册表所有者的生成函数，它们按托管调用处理）。</summary>
     internal RuntimeHelper? HelperOf(Call call) =>
         call is { Kind: CallKind.Direct or CallKind.Tail, Target: Const target } && facts.Helpers.At(target.Value) is { } helper
@@ -164,7 +181,7 @@ public sealed class IdiomRewriter(ProgramFacts facts)
                     continue;
                 }
                 var part = source is Ir.Convert { Kind: ConvKind.ZeroExtend } conversion ? conversion.Operand : source;
-                if (part is Load { Address: Binary { Op: BinOp.Add, Left: Load { Width: 64 }, Right: Const offset } } metadata
+                if (part is Load { Address: Binary { Op: BinOp.Add, Left: Load { Width: 64 } or Symbol { Kind: SymbolKind.Class }, Right: Const offset } } metadata
                     && (metadata.Width == 8 && offset.Value == RuntimeLayout.ClassTypeHierarchyDepth
                         || metadata.Width == 64 && offset.Value == RuntimeLayout.ClassTypeHierarchy)) values[phi.Target] = source;
             }

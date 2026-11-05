@@ -37,6 +37,7 @@ public sealed partial class ManagedTypes
         IntPtr = Corlib("System.IntPtr");
         RuntimeTypeHandle = Corlib("System.RuntimeTypeHandle");
         RuntimeFieldHandle = Corlib("System.RuntimeFieldHandle");
+        RuntimeMethodHandle = Corlib("System.RuntimeMethodHandle");
     }
 
     public ProgramModel Model { get; }
@@ -58,6 +59,7 @@ public sealed partial class ManagedTypes
     public DefinitionRef IntPtr { get; }
     public DefinitionRef RuntimeTypeHandle { get; }
     public DefinitionRef RuntimeFieldHandle { get; }
+    public DefinitionRef RuntimeMethodHandle { get; }
 
     public DefinitionRef Corlib(string fullName) => new(corlib[fullName], []);
     public TypeDef? CorlibDefinition(string fullName) => corlib.GetValueOrDefault(fullName);

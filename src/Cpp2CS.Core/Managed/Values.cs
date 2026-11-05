@@ -14,6 +14,8 @@ public sealed record StringValue(string Text, TypeRef Type) : ManagedValue(Type,
 public sealed record TypeHandleValue(TypeRef Target, TypeRef Type, int Width) : ManagedValue(Type, Width);
 /// <summary>ldtoken 字段：数组初始化器的 RuntimeFieldHandle。</summary>
 public sealed record FieldHandleValue(FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width);
+/// <summary>ldtoken 方法：表达式树中的 RuntimeMethodHandle。</summary>
+public sealed record MethodHandleValue(MethodRef Method, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record NewArrayValue(ArrayRef ArrayType, ManagedValue Length) : ManagedValue(ArrayType, 64);
 public sealed record NewObjectValue(MethodRef Constructor, IReadOnlyList<ManagedValue> Arguments) : ManagedValue(Constructor.DeclaringType, 64)
 {

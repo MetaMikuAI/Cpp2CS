@@ -135,6 +135,10 @@ public sealed partial class SymTable
             case OpSym { Op: { Kind: OperatorKind.Binary } op } binary when op.Binary is BinOp.And or BinOp.Or or BinOp.Xor
                 || low == 0 && op.Binary is BinOp.Add or BinOp.Sub or BinOp.Mul:
                 return Binary(op.Binary, Slice(binary.Args[0], low, width), Slice(binary.Args[1], low, width), width);
+            // 一个加数的低 low 位全为零（减法时是减数）：低位不产生进位或借位，高段只由两侧的高段决定。
+            case OpSym { Op: { Kind: OperatorKind.Binary } op } carryless when low > 0 && op.Binary is BinOp.Add or BinOp.Sub
+                && (LowZeros(carryless.Args[1]) >= low || op.Binary == BinOp.Add && LowZeros(carryless.Args[0]) >= low):
+                return Binary(op.Binary, Slice(carryless.Args[0], low, width), Slice(carryless.Args[1], low, width), width);
             case OpSym { Op: { Kind: OperatorKind.Unary } op } unary when op.Unary == UnOp.Not || low == 0 && op.Unary == UnOp.Neg:
                 return Unary(op.Unary, Slice(unary.Args[0], low, width), width);
             case PhiSym phi when ProjectPhi(phi, low, width) is { } projected:
@@ -159,7 +163,14 @@ public sealed partial class SymTable
         }
         var useful = Evidence(phi);
         projecting.Remove((phi, low, width));
-        if (!useful) return null;
+        return useful ? Projection(phi, low, width) : null;
+    }
+
+    /// <summary>φ 的一段，来源为各入边的同一段。</summary>
+    public PhiSym Projection(PhiSym phi, int low, int width)
+    {
+        if (phi.Projection is { } outer) return Projection(outer.Whole, outer.Low + low, width);
+        if (projections.TryGetValue((phi, low, width), out var known)) return known;
         var projection = Fresh(new PhiSym(phi.Block, (phi.Origin, low, width), width) { Projection = (phi, low) });
         projections[(phi, low, width)] = projection;
         if (!projectionsOf.TryGetValue(phi, out var list)) projectionsOf[phi] = list = [];
@@ -185,27 +196,32 @@ public sealed partial class SymTable
         };
     }
 
-    /// <summary>同一合流的各片在每条入边上都连续覆盖同一个整体时，直接合流整体；不混用不同边的片。</summary>
+    /// <summary>
+    /// 同一合流的各片在每条入边上都连续覆盖同一个整体时，直接合流整体；不混用不同边的片。
+    /// 错位复制把一个标量跨在两个寄存器 φ 上时，各片都只是 φ 的一部分，覆盖的是整体的连续一段，也合流这一段；
+    /// 更宽的值可以按字段逐个取片，不需要合流。
+    /// </summary>
     private Sym JoinPhi(ConcatSym concat)
     {
         if (joins.TryGetValue(concat, out var known)) return known;
         if (concat.Parts[0] is not PhiSym first || concat.Parts.Any(p => p is not PhiSym phi || phi.Block != first.Block)) return concat;
         var parts = concat.Parts.Cast<PhiSym>().ToArray();
+        var misaligned = concat.Width <= 64 && parts.All(p => p.Projection is not null);
         var sources = new Sym[first.Sources.Length];
         for (var edge = 0; edge < sources.Length; edge++)
         {
             Sym? whole = null;
-            var at = 0;
+            var (start, at) = (0, 0);
             foreach (var part in parts)
             {
                 if (part.Sources[edge] is not { } source) return concat;
                 var (value, low, width) = Piece(Resolve(source));
-                whole ??= value;
+                if (whole is null) (whole, start, at) = (value, low, low);
                 if (!ReferenceEquals(whole, value) || low != at) return concat;
                 at += width;
             }
-            if (whole is null || at != whole.Width) return concat;
-            sources[edge] = whole;
+            if (whole is null || !misaligned && (start != 0 || at != whole.Width)) return concat;
+            sources[edge] = Slice(whole, start, at - start);
         }
         var joined = Phi(first.Block, concat, concat.Width);
         joins[concat] = joined;
@@ -260,7 +276,7 @@ public sealed partial class SymTable
             return Const(folded.Value, width);
         if (left is ConstSym && op is BinOp.Add or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor)
             (left, right) = (right, left);
-        var shift = right is ConstSym { Width: <= 64 } amount ? (int)Math.Min(amount.Value, int.MaxValue) : -1;
+        var shift = ConstantAmount(right);
         switch (op)
         {
             case BinOp.Shl when shift >= 0:
@@ -291,6 +307,14 @@ public sealed partial class SymTable
         }
         return Op(Operator.Of(op), width, left, right);
     }
+
+    /// <summary>常量移位量；向量宽度的常量是低 64 位与全零高位的拼接。其余为 -1。</summary>
+    private static int ConstantAmount(Sym amount) => amount switch
+    {
+        ConstSym { Width: <= 64 } constant => (int)Math.Min(constant.Value, int.MaxValue),
+        ConcatSym { Parts: [ConstSym { Width: <= 64 } low, ..] } wide when wide.Parts.Skip(1).All(IsZero) => (int)Math.Min(low.Value, int.MaxValue),
+        _ => -1,
+    };
 
     /// <summary>已知为零的最低位数。</summary>
     private static int LowZeros(Sym sym) => sym switch

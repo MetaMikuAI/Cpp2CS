@@ -397,7 +397,8 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
 
     /// <summary>非标准位宽的模整数运算用能容纳该位片的 IL 整数承载，结果须按原位宽掩码。</summary>
     public TypeRef? ModularArithmetic(OpSym value) => value.Width is > 1 and < 64 and not (8 or 16 or 32)
-        && value.Op.Kind == OperatorKind.Binary && value.Op.Binary is BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor
+        && (value.Op.Kind == OperatorKind.Binary && value.Op.Binary is BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor
+            || value.Op.Kind == OperatorKind.Unary && value.Op.Unary is UnOp.Not or UnOp.Neg)
         ? value.Width <= 32 ? types.Int32 : types.Int64 : null;
 
     private TypeRef? ResultType(Call call)

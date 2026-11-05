@@ -21,6 +21,33 @@ public sealed partial class TypeOracle
         return null;
     }
 
+    /// <summary>
+    /// 跨多个字段的位片按字段边界分段：每段是一个字段内的位片，Bit 是它在位片中的位置。
+    /// 位片落到填充或布局未知时为 null，不解释没有字段的位。
+    /// </summary>
+    public IReadOnlyList<(int Bit, Sym Piece)>? FieldPieces(SliceSym slice) => FieldPieces(slice.Base, slice.Low, slice.Width);
+
+    /// <summary>值 source 的 [low, low+width) 位按字段边界分段；相邻字段合并的读取本身就是这种值。</summary>
+    public IReadOnlyList<(int Bit, Sym Piece)>? FieldPieces(Sym source, int low, int width)
+    {
+        IEnumerable<(int Bit, int Width)> fields = source is ReadSym read && Parts(read) is { } parts
+            ? parts.Select(p => (p.Bit, p.Width))
+            : TypeOf(source) is DefinitionRef structure && types.Kind(structure) == TypeKind.Struct
+                ? types.Projections(structure).Select(p => (p.Bit, p.Width)) : [];
+        var pieces = new List<(int, Sym)>();
+        var (at, end) = (low, low + width);
+        foreach (var (bit, size) in fields.OrderBy(f => f.Bit))
+        {
+            if (bit + size <= at) continue;
+            if (bit >= end) break;
+            if (bit > at) return null;
+            var stop = Math.Min(end, bit + size);
+            pieces.Add((at - low, values.Syms.Slice(source, at, stop - at)));
+            at = stop;
+        }
+        return at == end && pieces.Count > 1 ? pieces : null;
+    }
+
     /// <summary>合流投影已有完整结构体载体时保留该整体，让后续字段访问共用同一接收者。</summary>
     public (PhiSym Whole, TypeRef WholeType, IReadOnlyList<FieldRef> Path, TypeRef Type)? ProjectedField(PhiSym phi) =>
         phi.Projection is var (whole, low) && TypeOf(whole) is DefinitionRef structure
@@ -33,6 +60,12 @@ public sealed partial class TypeOracle
         && phi.Projection is var (whole, low) && ScalarBits(whole, []) && IntegerRepresentation(whole) is var (source, integer)
         && low + phi.Width <= types.Bits(integer) ? (whole, source, low) : null;
 
+    /// <summary>各入边都是相邻字段合并的宽读取、自身没有类型的合流只是搬运；它的片按各入边的片合流，类型由字段给出。</summary>
+    public PhiSym? UntypedWidePhiPiece(SliceSym slice) =>
+        slice.Base is PhiSym { Projection: null, Width: > 64 } phi && TypeOf(phi) is null
+        && phi.Sources.All(s => s is not null && SymTable.Resolve(s) is ReadSym read && Parts(read) is not null)
+            ? values.Syms.Projection(phi, slice.Low, slice.Width) : null;
+
     private bool ScalarBits(Sym value, HashSet<Sym> seen)
     {
         value = SymTable.Resolve(value);
@@ -43,6 +76,7 @@ public sealed partial class TypeOracle
             PhiSym phi => phi.Sources.Length > 0 && phi.Sources.All(s => s is not null && ScalarBits(s, seen)),
             ConcatSym concat => concat.Parts.All(p => ScalarBits(p, seen)),
             SliceSym slice => ScalarBits(slice.Base, seen),
+            OpSym operation when ModularArithmetic(operation) is not null => operation.Args.All(a => ScalarBits(a, seen)),
             _ => TypeOf(value) is { } type
                 && types.Kind(type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer,
         };
@@ -62,9 +96,23 @@ public sealed partial class TypeOracle
         };
     }
 
-    /// <summary>类指针所属的对象：引用类型对象偏移 0 处的 64 位读取。</summary>
-    public Sym? ClassOwner(Sym klass) => SymTable.Resolve(klass) is ReadSym { Width: 64 } read
-        && Decompose(read.Address) is (var root, 0, null, _) && TypeOf(root) is { } type && ManagedTypes.IsReferenceType(type) ? root : null;
+    /// <summary>类指针所属的对象：引用类型对象偏移 0 处的 64 位读取；对象的类指针不可变，各入边读同一对象的合流仍是它。</summary>
+    public Sym? ClassOwner(Sym klass)
+    {
+        klass = SymTable.Resolve(klass);
+        if (klass is PhiSym { Projection: null } phi)
+        {
+            Sym? owner = null;
+            foreach (var source in phi.Sources)
+            {
+                if (source is null || SymTable.Resolve(source) is not ReadSym read || ClassOwner(read) is not { } root || owner is not null && !ReferenceEquals(owner, root)) return null;
+                owner = root;
+            }
+            return owner;
+        }
+        return klass is ReadSym { Width: 64 } direct && Decompose(direct.Address) is (var address, 0, null, _)
+            && TypeOf(address) is { } type && ManagedTypes.IsReferenceType(type) ? address : null;
+    }
 
     /// <summary>
     /// 托管数组下标的来源：去掉比例寻址丢弃的高位与 32 位扩展，供元素访问和边界检查共同使用。

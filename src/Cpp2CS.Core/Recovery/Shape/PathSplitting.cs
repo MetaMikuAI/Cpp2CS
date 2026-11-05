@@ -21,8 +21,11 @@ internal static class PathSplitting
     private const int Rounds = 8;
 
     private const int MaxStatements = 96;
+    /// <summary>复制的语句总量上限；分支很多的 switch 汇到短合流块也在此内。</summary>
+    private const int MaxCopiedStatements = 16 * MaxStatements;
 
-    public static int Run(MachineFunction function, Func<MachineFunction, ValueModel> evaluate, Func<ValueModel, TypeOracle> typing, ICallModel calls, Storage stackPointer)
+    public static int Run(MachineFunction function, Func<MachineFunction, ValueModel> evaluate, Func<ValueModel, TypeOracle> typing, ICallModel calls, Storage stackPointer,
+        Func<MachineFunction, bool>? recognize = null)
     {
         var split = 0;
         for (var round = 0; round < Rounds; round++)
@@ -30,8 +33,8 @@ internal static class PathSplitting
             var model = evaluate(function);
             var oracle = typing(model);
             oracle.MergedAddresses = false;
-            var merge = Demands(model, oracle).FirstOrDefault(b => b.Handler is null && !b.IsLandingPad && b.Predecessors.Count is >= 2 and <= 16
-                && b.Statements.Count <= MaxStatements && b.Predecessors.Distinct().Count() == b.Predecessors.Count && !b.Successors.Contains(b)
+            var merge = Demands(model, oracle).FirstOrDefault(b => b.Handler is null && !b.IsLandingPad && b.Predecessors.Count >= 2
+                && b.Statements.Count <= MaxStatements && b.Predecessors.Count * b.Statements.Count <= MaxCopiedStatements && b.Predecessors.Distinct().Count() == b.Predecessors.Count && !b.Successors.Contains(b)
                 && b.Predecessors.All(p => !p.IsLandingPad));
             if (merge is null) break;
             SplitCriticalEdges(function, merge);
@@ -39,6 +42,12 @@ internal static class PathSplitting
             split++;
             var errors = Machine.Ssa.Lowering.Cleanup(function);
             if (errors.Count > 0) throw new InvalidOperationException($"路径拆分后 SSA 不成立：{errors[0]}");
+            // 分开合流之后才完整的运行时惯用法。
+            if (recognize?.Invoke(function) == true)
+            {
+                errors = Machine.Ssa.Lowering.Cleanup(function);
+                if (errors.Count > 0) throw new InvalidOperationException($"路径拆分后 SSA 不成立：{errors[0]}");
+            }
         }
         return split;
     }

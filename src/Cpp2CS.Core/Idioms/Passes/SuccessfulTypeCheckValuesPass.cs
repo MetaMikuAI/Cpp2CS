@@ -8,10 +8,11 @@ internal static class SuccessfulTypeCheckValuesPass
 {
     internal static bool SuccessfulTypeCheckValues(this IdiomState state) => Run(state.function, state.RawDefinition, state.Fresh);
 
-    internal static bool Run(MachineFunction function, Func<Use, Expr?> definitionOf, Func<Variable> fresh)
+    /// <param name="scope">只处理这些检查；每次应用都会新增一次转换，已处理过的检查不能再来一次。</param>
+    internal static bool Run(MachineFunction function, Func<Use, Expr?> definitionOf, Func<Variable> fresh, Func<Call, bool>? scope = null)
     {
         var dominators = Dominators.Compute(function);
-        var checks = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Op?.Kind == OpKind.TypeCheck).ToArray();
+        var checks = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Op?.Kind == OpKind.TypeCheck && scope?.Invoke(c) != false).ToArray();
         var changed = false;
         foreach (var check in checks)
         {

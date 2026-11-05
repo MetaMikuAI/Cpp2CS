@@ -11,7 +11,7 @@ public static class ManagedEffects
         EffectSummary Read(MemoryKind kind) => EffectSummary.Access(kind);
         var own = value switch
         {
-            LocalValue or ArgumentValue or ConstantValue or StringValue or TypeHandleValue or FieldHandleValue => EffectSummary.None,
+            LocalValue or ArgumentValue or ConstantValue or StringValue or TypeHandleValue or FieldHandleValue or MethodHandleValue => EffectSummary.None,
             FieldValue { Accessor: not null } or StaticFieldValue { Accessor: not null } => EffectSummary.Unknown,
             FieldValue f => Read(f.Receiver.Type is DefinitionRef { Definition.IsValueType: true }
                 or ByRefRef { Element: DefinitionRef { Definition.IsValueType: true } } ? MemoryKind.Local : MemoryKind.Instance),
