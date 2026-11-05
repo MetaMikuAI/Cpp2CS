@@ -96,9 +96,23 @@ public sealed partial class TypeOracle
         };
     }
 
-    /// <summary>类指针所属的对象：引用类型对象偏移 0 处的 64 位读取。</summary>
-    public Sym? ClassOwner(Sym klass) => SymTable.Resolve(klass) is ReadSym { Width: 64 } read
-        && Decompose(read.Address) is (var root, 0, null, _) && TypeOf(root) is { } type && ManagedTypes.IsReferenceType(type) ? root : null;
+    /// <summary>类指针所属的对象：引用类型对象偏移 0 处的 64 位读取；对象的类指针不可变，各入边读同一对象的合流仍是它。</summary>
+    public Sym? ClassOwner(Sym klass)
+    {
+        klass = SymTable.Resolve(klass);
+        if (klass is PhiSym { Projection: null } phi)
+        {
+            Sym? owner = null;
+            foreach (var source in phi.Sources)
+            {
+                if (source is null || SymTable.Resolve(source) is not ReadSym read || ClassOwner(read) is not { } root || owner is not null && !ReferenceEquals(owner, root)) return null;
+                owner = root;
+            }
+            return owner;
+        }
+        return klass is ReadSym { Width: 64 } direct && Decompose(direct.Address) is (var address, 0, null, _)
+            && TypeOf(address) is { } type && ManagedTypes.IsReferenceType(type) ? address : null;
+    }
 
     /// <summary>
     /// 托管数组下标的来源：去掉比例寻址丢弃的高位与 32 位扩展，供元素访问和边界检查共同使用。
