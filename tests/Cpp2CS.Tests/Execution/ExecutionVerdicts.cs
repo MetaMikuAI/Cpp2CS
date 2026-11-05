@@ -1,6 +1,6 @@
 namespace Cpp2CS.Tests.Execution;
 
-internal enum ExecutionVerdict { Verified, Partial, Mismatch, NotCheckable, NotWritten }
+internal enum ExecutionVerdict { Verified, Partial, Mismatch, NotCheckable, NotWritten, CheckerFailed }
 
 internal static class ExecutionVerdicts
 {
@@ -15,6 +15,7 @@ internal static class ExecutionVerdicts
         ExecutionVerdict.Mismatch => "mismatch",
         ExecutionVerdict.NotCheckable => "not-checkable",
         ExecutionVerdict.NotWritten => "not-written",
+        ExecutionVerdict.CheckerFailed => "checker-failed",
         _ => throw new ArgumentOutOfRangeException(nameof(verdict)),
     };
 

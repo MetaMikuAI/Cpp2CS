@@ -62,7 +62,7 @@ internal static partial class ExecutionCheck
                 ? new Outcome(ExecutionVerdict.NotWritten, 0, 0, $"；{result.Holes.FirstOrDefault()?.Reason ?? "没有方法体"}")
                 : problems.TryGetValue(result.Body, out var problem)
                     ? new Outcome(ExecutionVerdict.NotWritten, 0, 0, $"；{problem}")
-                    : Check(targets[i].Instance, skeleton, cecil, interpreter, machine, index, verbose, caseCount, result.Entry, timeLimit);
+                    : Guarded(targets[i].Instance, skeleton, cecil, interpreter, machine, index, verbose, caseCount, result.Entry, timeLimit);
             verdicts[outcome.Verdict] = verdicts.GetValueOrDefault(outcome.Verdict) + 1;
             table?.WriteLine($"0x{result.Entry:x}\t{result.Method}\t{outcome.Verdict.Label()}\t{outcome.Matches}/{caseCount}\t{outcome.Coverage:F2}\t{outcome.Detail.TrimStart('；')}");
             if (outcome.Verdict != ExecutionVerdict.Verified) Console.WriteLine($"  {outcome.Verdict.Label()} {name}{outcome.Detail}");
@@ -82,6 +82,16 @@ internal static partial class ExecutionCheck
 
     /// <summary>Reason：不可检查时的主要原因（用例最多的一类，去掉具体类型与方法名以便汇总）。</summary>
     private sealed record Outcome(ExecutionVerdict Verdict, int Matches, double Coverage, string Detail, string Reason = "", int ThrowCases = 0);
+
+    /// <summary>对照器自身出错时这个方法没有结论，记为 checker-failed 并继续；一个方法不能让整轮对照中断。</summary>
+    private static Outcome Guarded(MethodRef tested, Skeleton skeleton, CecilModel cecil, CilInterpreter interpreter, NativeMachine machine, WorldIndex index, bool verbose, int caseCount = Cases, ulong? nativeEntry = null, TimeSpan? timeLimit = null)
+    {
+        try { return Check(tested, skeleton, cecil, interpreter, machine, index, verbose, caseCount, nativeEntry, timeLimit); }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            return new Outcome(ExecutionVerdict.CheckerFailed, 0, 0, $"；{e.GetType().Name}：{e.Message}（{e.StackTrace?.Split('\n').FirstOrDefault()?.Trim()}）");
+        }
+    }
 
     private static Outcome Check(MethodRef tested, Skeleton skeleton, CecilModel cecil, CilInterpreter interpreter, NativeMachine machine, WorldIndex index, bool verbose, int caseCount = Cases, ulong? nativeEntry = null, TimeSpan? timeLimit = null)
     {
