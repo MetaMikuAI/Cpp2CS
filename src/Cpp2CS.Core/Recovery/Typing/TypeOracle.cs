@@ -132,8 +132,11 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                     && (!WithinCell(r.Address, r.Width) || !FullCell(r.Address, r.Width) && !Initialized(r.Site)))) continue;
                 cellTypes[target] = types.Integer(target.Size * 8, false);
             }
-            // 收集证据时单元类型还不可用，这期间按接收者类型选出的调用目标不能留用。
+            // 收集证据时单元类型还不可用，这期间依赖单元类型得到的结果（按接收者选出的调用目标、经单元读取的类型）不能留用。
+            memo.Clear();
             callees.Clear();
+            parts.Clear();
+            storeGroups.Clear();
         }
         return cellTypes.GetValueOrDefault(cell);
     }

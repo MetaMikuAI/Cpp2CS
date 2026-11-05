@@ -80,6 +80,7 @@ internal static class ArchitectureChecks
         MathImports(checks, types);
         ConstantMemoryCopies(checks, facts, types);
         ThrowObservedCells(checks, facts, types);
+        AddressableCellTypes(checks, facts, types);
         ArrayIndices(checks);
         Barriers(checks, types);
         UnchangedBarriers(checks, facts);
@@ -1775,6 +1776,41 @@ internal static class ArchitectureChecks
                 new ManagedAbi(facts.Layouts), lifter.Calls, lifter.Machine.Convention.StackPointer);
             check.True(result.TryGet(out var layout, out _) && layout.Cells.Single().Promoted == promoted, $"异常路径观察单元：{name}");
         }
+    }
+
+    /// <summary>可寻址单元的类型：收集证据期间经单元得到的类型不留用。</summary>
+    private static void AddressableCellTypes(Assertions check, ProgramFacts facts, ManagedTypes types)
+    {
+        var abi = new ManagedAbi(facts.Layouts);
+        var shapes = new CallShapes(facts, abi, (_, _) => false);
+        var owner = Type("CellTypes", 830);
+        (TypeOracle Oracle, ValueModel Values) Analyze(Cell cell, MethodRef method, params Stmt[] statements)
+        {
+            var function = new MachineFunction { Entry = 0, Range = new(0, 32, CodeRegion.Managed, default),
+                Blocks = [new Block(0) { End = 32, Statements = [.. statements, new Return(28)] }] };
+            function.Renumber();
+            var environment = new MethodEnvironment(method, abi.Machine(method, out _)!, shapes);
+            var values = ValueModel.Build(function, environment);
+            return (new(types, facts, method, environment.Shape, values, new([cell])), values);
+        }
+
+        // 证据来自 ref this；另一调用的接收者读自单元，它的类型在证据收集之后才可知。
+        var holder = new TypeDef { Index = 832, Name = "Holder", Namespace = "Tests", Assembly = "Tests.dll", Token = 0,
+            Attributes = TypeAttributes.Public | TypeAttributes.SequentialLayout, IsValueType = true, IsEnum = false, Size = 16 };
+        holder.Fields =
+        [
+            new FieldDef { Index = 832, Owner = holder, Name = "item", Type = types.String, Offset = 0, Attributes = FieldAttributes.Public },
+            new FieldDef { Index = 833, Owner = holder, Name = "count", Type = types.Int64, Offset = 8, Attributes = FieldAttributes.Public },
+        ];
+        var wide = new Cell(0, LocalSpace.Frame, -16, 16, "异常路径观察 ref 调用写入的内容");
+        var slot = new FrameAddress(-16);
+        var read = new Variable(Storage.Gpr(2), 1);
+        var (viaCell, values) = Analyze(wide, new MethodRef(Method(owner, "Run", 834, MethodAttributes.Public | MethodAttributes.Static), [], []),
+            new Define(4, read, new Load(slot, 64)),
+            new Call(8, CallKind.Direct, Expr.C(1, 64)) { Resolved = new MethodRef(Method(owner, "Use", 833), [], []), Arguments = [new Use(read, 64)], Sources = [Storage.Gpr(0)] },
+            new Call(12, CallKind.Direct, Expr.C(1, 64)) { Resolved = new MethodRef(Method(holder, "Advance", 832), [], []), Arguments = [slot], Sources = [Storage.Gpr(0)] });
+        check.True(viaCell.CellType(wide) == new DefinitionRef(holder, []) && viaCell.TypeOf(values.Of(read)) == types.String,
+            "收集证据时经单元读取的类型不留用");
     }
 
     private static void ConstantMemoryCopies(Assertions check, ProgramFacts facts, ManagedTypes types)
