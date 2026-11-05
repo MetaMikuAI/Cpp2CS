@@ -32,7 +32,7 @@ internal static class PathSplitting
             oracle.MergedAddresses = false;
             var merge = Demands(model, oracle).FirstOrDefault(b => b.Handler is null && !b.IsLandingPad && b.Predecessors.Count is >= 2 and <= 16
                 && b.Statements.Count <= MaxStatements && b.Predecessors.Distinct().Count() == b.Predecessors.Count && !b.Successors.Contains(b)
-                && b.Predecessors.All(p => p.Handler is null && !p.IsLandingPad));
+                && b.Predecessors.All(p => !p.IsLandingPad));
             if (merge is null) break;
             SplitCriticalEdges(function, merge);
             if (!Duplicate(function, merge, calls, stackPointer)) break;
@@ -160,7 +160,7 @@ internal static class PathSplitting
     /// φ 选出的元数据实体，来源可以是同样的 φ（多层合流）；有来源不是实体时为 null。
     /// 经回边转传的 φ 不增加实体：只有一个实体时各路径相同，不需要拆分。
     /// </summary>
-    private static HashSet<Sym>? Entities(PhiSym phi, bool runtime)
+    private static HashSet<Sym>? Entities(PhiSym phi, bool runtime, bool addresses = false)
     {
         var entities = new HashSet<Sym>();
         var seen = new HashSet<PhiSym>();
@@ -174,6 +174,8 @@ internal static class PathSplitting
                 {
                     case EntitySym { Symbol.Kind: SymbolKind.Method } entity: entities.Add(entity); break;
                     case EntitySym { Symbol.Kind: SymbolKind.Class } entity when runtime: entities.Add(entity); break;
+                    case EntitySym { Symbol.Kind: SymbolKind.StaticFields } entity when addresses: entities.Add(entity); break;
+                    case ConstSym { Value: not 0 } constant when addresses: entities.Add(constant); break;
                     case PhiSym nested: pending.Push(nested); break;
                     default: return null;
                 }
@@ -206,7 +208,7 @@ internal static class PathSplitting
         var root = Root(SymTable.Resolve(sym));
         if (root is not PhiSym phi || !ReferenceEquals(phi.Block, block) || phi.Sources.Any(s => s is null)) return false;
         // 多层合流的实体选择：先拆外层，φ 随之下移到前驱，下一轮再拆。
-        if (phi.Sources.Any(s => SymTable.Resolve(s!) is PhiSym) && Entities(phi, true) is { } entities) return entities.Count > 1;
+        if (phi.Sources.Any(s => SymTable.Resolve(s!) is PhiSym) && Entities(phi, true, addresses: true) is { } entities) return entities.Count > 1;
         var identities = phi.Sources.Select(s => Identity(SymTable.Resolve(s!), oracle)).ToArray();
         return identities.All(i => i is not null) && identities.Distinct().Count() > 1;
     }
@@ -232,6 +234,8 @@ internal static class PathSplitting
         return sym switch
         {
             EntitySym or ArgSym or ReadSym or ResultSym or OutSym => (sym, offset),
+            // 非零常量是全局地址，如字符串字面量的槽。
+            ConstSym { Value: not 0 } => (sym, offset),
             LocalSym local => (local.Space, local.Offset + offset),
             _ => null,
         };
@@ -248,9 +252,11 @@ internal static class PathSplitting
                 && from.Statements.LastOrDefault() is not (Ir.Jump or Ir.Branch or IndirectJump or Return or Trap or Call { Kind: CallKind.Tail or CallKind.TailIndirect }))
             {
                 from.Statements.Add(new Ir.Jump(from.End, merge.Start));
-                continue;
+                if (from.Handler is null) continue;
             }
-            if (from.Statements.LastOrDefault() is not Ir.Branch branch || branch.Target == branch.Fallthrough) continue;
+            // 从 try 内进入合流块的边也要切开：复制的语句不属于 try，不能并入前驱。
+            var last = from.Statements.LastOrDefault();
+            if (!(last is Ir.Branch { Target: var target, Fallthrough: var fallthrough } && target != fallthrough || last is Ir.Jump && from.Handler is not null)) continue;
             var address = SyntheticBase + (ulong)function.Blocks.Count(b => b.Start >= SyntheticBase);
             var middle = new Block(address) { End = address };
             middle.Statements.Add(new Ir.Jump(address, merge.Start));
@@ -259,7 +265,12 @@ internal static class PathSplitting
             middle.Predecessors.Add(from);
             middle.Successors.Add(merge);
             merge.Predecessors[j] = middle;
-            from.Statements[^1] = branch.Target == merge.Start ? branch with { Target = address } : branch with { Fallthrough = address };
+            from.Statements[^1] = last switch
+            {
+                Ir.Branch branch => branch.Target == merge.Start ? branch with { Target = address } : branch with { Fallthrough = address },
+                Ir.Jump jump => jump with { Target = address },
+                _ => last!,
+            };
             function.Blocks.Add(middle);
         }
         function.Renumber();

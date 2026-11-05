@@ -20,6 +20,7 @@ public sealed record CallShape(Call Call, IReadOnlyList<MethodRef> Candidates, M
 /// </summary>
 public sealed class CallShapes(ProgramFacts facts, ManagedAbi abi, Func<ulong, Storage, bool> unused)
 {
+    public ProgramFacts Facts => facts;
     private readonly Dictionary<ulong, (MethodRef[] Candidates, MachineSignature? Signature)> direct = [];
 
     public CallShape Of(Call call)

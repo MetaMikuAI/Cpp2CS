@@ -62,11 +62,14 @@ internal sealed class MethodEnvironment(MethodRef method, MachineSignature signa
     }
 
     /// <summary>
-    /// 运行时元数据上的读取：类的虚表槽（Il2CppClass.vtable[slot] 的方法指针与 MethodInfo）为该类在此槽上的方法。
+    /// 运行时元数据上的读取：类的虚表槽（Il2CppClass.vtable[slot] 的方法指针与 MethodInfo）为该类在此槽上的方法；
+    /// 字符串字面量槽是该字面量（地址经路径拆分才成为常量时，L2 还没有机会识别）。
     /// </summary>
     public Sym? MetadataRead(SymTable syms, Sym address, int width)
     {
         if (width != 64) return null;
+        if (SymTable.Resolve(address) is ConstSym constant && shapes.Facts.Usages.At(constant.Value) is { Usage.Kind: UsageKind.StringLiteral } slot)
+            return syms.Entity(new Symbol(SymbolKind.String, slot.Usage.Value));
         var (entity, offset) = SymTable.Resolve(address) switch
         {
             EntitySym e => (e, 0L),
