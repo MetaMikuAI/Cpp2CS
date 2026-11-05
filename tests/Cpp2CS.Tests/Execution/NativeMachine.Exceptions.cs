@@ -12,6 +12,9 @@ internal sealed partial class NativeMachine
     private const ulong WrapperBase = World.StackBase + 0x1000;
     private (ulong Site, ulong Sp, ulong[] Saved, ulong[] Floats)? helperFrame;
 
+    /// <summary>这次展开的第一帧是 helper 自己的表，到第二帧（被测帧）时要恢复寄存器。</summary>
+    private bool helperUnwind;
+
     private void EnterHelperFrame() => helperFrame ??= (uc.Reg(Unicorn.X(30)) - 4, uc.Reg(Unicorn.RegSp),
         Enumerable.Range(19, 11).Select(i => uc.Reg(Unicorn.X(i))).ToArray(),
         Enumerable.Range(8, 8).Select(i => uc.Reg(Unicorn.D(i))).ToArray());
@@ -25,6 +28,7 @@ internal sealed partial class NativeMachine
         unwinder = new NativeUnwinder();
         exceptionObjects = new NativeExceptionObjects(WrapperBase, wrapperType);
         helperFrame = null;
+        helperUnwind = false;
     }
 
     private IReadOnlyList<UnwindFrame> ExceptionFrames()
@@ -32,13 +36,16 @@ internal sealed partial class NativeMachine
         var site = uc.Reg(Unicorn.X(30)) - 4;
         if (helperFrame is { } frame && !function.Contains(site))
         {
-            // AAPCS64 的 callee-saved 契约：从普通 helper 展开回被测帧，恢复调用时的保存寄存器和 SP。
-            // 仅捕获 helper 入口状态；不从被测方法的指令猜 CFI。
+            // 外提的函数可能带自己的 LSDA（finally 体里的 catch）：personality 逐帧查表（Itanium EH ABI 1.6），
+            // 调用点在它的表内时先进它的落地块，SP 和保存寄存器此时就是这一帧的；继续展开到被测帧时才恢复。
+            if (facts.Code.At(site) is { } body && unwindTables!.GetValueOrDefault(body.Start) is { Lsda: not 0 } own
+                && own.Sites.Any(s => s.Start <= site && site < s.End))
+            {
+                helperUnwind = true;
+                return [new(own, site), new(TestedTable, frame.Site)];
+            }
+            RestoreHelperCaller();
             site = frame.Site;
-            uc.SetReg(Unicorn.RegSp, frame.Sp);
-            for (var i = 0; i < frame.Saved.Length; i++) uc.SetReg(Unicorn.X(19 + i), frame.Saved[i]);
-            for (var i = 0; i < frame.Floats.Length; i++) uc.SetReg(Unicorn.D(8 + i), frame.Floats[i]);
-            helperFrame = null;
         }
         if (!function.Contains(site))
         {
@@ -46,7 +53,19 @@ internal sealed partial class NativeMachine
             if (site + 4 == World.Sentinel) return [];
             throw new Unsupported($"异常展开 调用点不在被测帧 0x{site:x}");
         }
-        return [new(unwindTables!.GetValueOrDefault(function.Start) ?? new UnwindTable(function.Start, function.End, 0, 0, []), site)];
+        return [new(TestedTable, site)];
+    }
+
+    private UnwindTable TestedTable => unwindTables!.GetValueOrDefault(function.Start) ?? new UnwindTable(function.Start, function.End, 0, 0, []);
+
+    /// <summary>AAPCS64 的 callee-saved 契约：从普通 helper 展开回被测帧，恢复调用时的保存寄存器和 SP。仅捕获 helper 入口状态；不从被测方法的指令猜 CFI。</summary>
+    private void RestoreHelperCaller()
+    {
+        if (helperFrame is not { } frame) return;
+        uc.SetReg(Unicorn.RegSp, frame.Sp);
+        for (var i = 0; i < frame.Saved.Length; i++) uc.SetReg(Unicorn.X(19 + i), frame.Saved[i]);
+        for (var i = 0; i < frame.Floats.Length; i++) uc.SetReg(Unicorn.D(8 + i), frame.Floats[i]);
+        helperFrame = null;
     }
 
     private void RaiseObject(ulong value)
@@ -61,6 +80,7 @@ internal sealed partial class NativeMachine
     private void Transfer(UnwindTransfer transfer)
     {
         if (transfer.Escaped) { side.ThrowObject(transfer.Exception.Object); uc.Stop(); return; }
+        if (helperUnwind && transfer.Frame > 0) { RestoreHelperCaller(); helperUnwind = false; }
         // Qn 的上半部同时置毒，Dn 的 callee-saved 下半部按 AAPCS64 保留。
         NativeUnwinder.Install(transfer, (i, v) => uc.SetReg(Unicorn.X(i), v),
             (i, v) => uc.SetReg(Unicorn.D(i), v), (i, v) => uc.SetVectorHigh(i, v),
