@@ -3,7 +3,7 @@ using Mono.Cecil.Cil;
 
 namespace Cpp2CS.Output;
 
-/// <summary>语句与边的 CIL 写法：每种语句一处；边先读出全部复制的值，再写入目标局部。</summary>
+/// <summary>语句与边的 CIL 写法：每种语句一处；边上的复制能排序时写成顺序赋值，否则先读出全部值再写入目标局部。</summary>
 internal sealed partial class CilBodyWriter
 {
     private ulong statementAddress;
@@ -161,9 +161,39 @@ internal sealed partial class CilBodyWriter
 
     private void Edge(ManagedEdge edge)
     {
-        foreach (var copy in edge.Copies) Value(copy.Value);
-        for (var i = edge.Copies.Count - 1; i >= 0; i--) il.Emit(OpCodes.Stloc, Local(edge.Copies[i].Target));
+        if (Sequential(edge.Copies) is { } order)
+            foreach (var copy in order)
+            {
+                Value(copy.Value);
+                il.Emit(OpCodes.Stloc, Local(copy.Target));
+            }
+        else
+        {
+            foreach (var copy in edge.Copies) Value(copy.Value);
+            for (var i = edge.Copies.Count - 1; i >= 0; i--) il.Emit(OpCodes.Stloc, Local(edge.Copies[i].Target));
+        }
         il.Emit(LeavesRegion(edge.Target) ? OpCodes.Leave : OpCodes.Br, labels[edge.Target]);
+    }
+
+    /// <summary>
+    /// 边上的复制是并行赋值。值不抛出、只读局部和常量时，可以排成顺序赋值：先写没有其他复制还要读的目标。有环时没有这样的次序。
+    /// 取过地址的局部可能经引用读到，值里没有引用读取就不受影响。
+    /// </summary>
+    private static List<ManagedCopy>? Sequential(IReadOnlyList<ManagedCopy> copies)
+    {
+        if (copies.Count == 1) return [copies[0]];
+        if (copies.Any(c => ManagedValues.Walk(c.Value).Any(v => v is not (LocalValue or ArgumentValue or ConstantValue or BinaryValue { Op: not (Cpp2CS.Ir.BinOp.SDiv or Cpp2CS.Ir.BinOp.UDiv or Cpp2CS.Ir.BinOp.SRem or Cpp2CS.Ir.BinOp.URem) } or ConversionValue)))) return null;
+        var reads = copies.Select(c => ManagedValues.Walk(c.Value).OfType<LocalValue>().Select(l => l.Variable).ToHashSet()).ToArray();
+        var pending = Enumerable.Range(0, copies.Count).ToList();
+        var order = new List<ManagedCopy>(copies.Count);
+        while (pending.Count > 0)
+        {
+            var next = pending.FindIndex(i => pending.All(j => j == i || !reads[j].Contains(copies[i].Target.Variable)));
+            if (next < 0) return null;
+            order.Add(copies[pending[next]]);
+            pending.RemoveAt(next);
+        }
+        return order;
     }
 
     private Instruction Invocation(ManagedInvocation invocation)

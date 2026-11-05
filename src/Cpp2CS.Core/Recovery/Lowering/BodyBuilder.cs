@@ -61,7 +61,7 @@ internal sealed partial class BodyBuilder
         if (!ExceptionRegions.Build(function).TryGet(out var plan, out var failure))
             return new(null, [new(failure.Address, failure.Reason)], new Dictionary<Variable, PendingConstruction>(), 0);
         regions = plan.Regions;
-        effects = new(values, oracle, regions);
+        effects = new(values, oracle, regions, function.Blocks);
         order = plan.Order;
         return LowerBlocks();
     }

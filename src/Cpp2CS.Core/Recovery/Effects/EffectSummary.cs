@@ -27,6 +27,8 @@ public readonly record struct EffectSummary(EffectKind Kinds, ExceptionEffect Ex
             MemoryKind.Local or MemoryKind.Metadata => ExceptionEffect.None,
             MemoryKind.Instance => nonNull ? ExceptionEffect.None : ExceptionEffect.NullReference,
             MemoryKind.Element => ExceptionEffect.Bounds | (nonNull ? ExceptionEffect.None : ExceptionEffect.NullReference),
+            // 经托管引用读写只会因地址无效抛出 NullReferenceException（ECMA-335 III.3.42、III.3.62）。
+            MemoryKind.Reference => nonNull ? ExceptionEffect.None : ExceptionEffect.NullReference,
             _ => ExceptionEffect.Any,
         });
 }

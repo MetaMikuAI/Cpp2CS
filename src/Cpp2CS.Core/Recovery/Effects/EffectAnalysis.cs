@@ -12,21 +12,34 @@ namespace Cpp2CS.Recovery.Effects;
 /// 没有副作用，且抛出的异常不改变结果。三种证明共用同一条直线路径、同一读取异常分类与非空事实：
 /// 判空被随后经同一对象的访问吸收；越界检查被随后对同一数组同一下标的元素访问吸收；显式类构造被随后按 IL 语义触发同一初始化的访问代替。
 /// </summary>
-internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IReadOnlyList<ExceptionRegionPlan> regions)
+internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IReadOnlyList<ExceptionRegionPlan> regions, IReadOnlyList<Block> blocks)
 {
-    private static readonly StraightLinePolicy flow = new(_ => true, true, false);
+    /// <summary>判空吸收最多走过的块数。</summary>
+    private const int AbsorptionBudget = 32;
 
     private readonly MachineEffects semantics = new(values, oracle);
+    private Dictionary<Block, int>? positions;
 
     /// <summary>
-    /// (block, index) 之后的直线路径：跨块只进入唯一的正常后继，且后继只有这一个前驱。
+    /// 边在逆后序上向前：任何环都含一条不向前的边。值的定义支配它的使用，从使用走到定义要经过环，
+    /// 所以只走向前的边时，一路上看到的同一个符号值就是起点的那一个，合流不改变这一点。
+    /// </summary>
+    private bool Forward(Block from, Block to)
+    {
+        positions ??= blocks.Select((block, i) => (block, i)).ToDictionary(p => p.block, p => p.i);
+        return positions[to] > positions[from];
+    }
+
+    /// <summary>
+    /// (block, index) 之后的直线路径：跨块只进入唯一的正常后继。去掉检查只关心从检查往后走的路径，别的前驱到合流点时不经过这个检查，
+    /// 它后面的访问照常执行，所以可以穿过向前的合流（clang 把判空提到循环之前时，第一次访问在循环头之后）。
     /// Guarded 表示该语句与起点的异常去向相同（同一处理入口，入口 φ 在两条异常边上取同一个值），在两处抛出的异常对处理块不可区分；
     /// 没有异常边的块也可经过，但其中的语句只能不抛出、无副作用（调用方按 Guarded 判断）。
     /// </summary>
     private IEnumerable<(Stmt Statement, bool Guarded)> Following(Block block, int index)
     {
         var origin = block;
-        foreach (var (next, statement) in StraightLine.Following(block, index - 1, flow))
+        foreach (var (next, statement) in StraightLine.Following(block, index - 1, new(_ => true, true, false) { Join = Forward }))
         {
             var guarded = next == origin || SameUnwind(origin, next);
             if (!guarded && next.Handler is not null) yield break;
@@ -86,43 +99,72 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
     }
 
     /// <summary>
-    /// 判空被吸收：直线路径上随后第一个经 target 的访问（字段、元素、实例调用的接收者、写入）对 null 抛出同一异常。
-    /// 两点之间只允许无副作用的语句与只可能抛出 NullReferenceException 的读取：无论哪个对象为 null，两种写法都在任何副作用之前抛出同一种异常。
+    /// 判空被吸收：从检查往后的每条路径上，第一个经 target 的访问（字段、元素、实例调用的接收者、写入）都对 null 抛出同一异常。
+    /// 两点之间只允许无副作用的语句、条件无副作用的分支与只可能抛出 NullReferenceException 的读取：无论哪个对象为 null，两种写法都在任何副作用之前抛出同一种异常。
+    /// target 经 φ 流到合流点时，φ 的值就是判过的值（clang 把合流后的判空提到各入边）。吸收成功时 receivers 得到这些值，它们上的调用要写成 callvirt。
     /// </summary>
-    public bool Absorbed(Block block, int index, Sym target)
+    public bool Absorbed(Block block, int index, Sym target, ISet<Sym> receivers)
     {
         var nonNull = NonNull(block, index);
-        foreach (var (statement, guarded) in Following(block, index))
+        var origin = block;
+        var reached = new HashSet<Sym> { target };
+        var budget = AbsorptionBudget;
+        bool Walk(Block at, int from, IReadOnlySet<Sym> aliases)
         {
-            if (!guarded)
+            if (--budget < 0) return false;
+            var guarded = at == origin || SameUnwind(origin, at);
+            if (!guarded && at.Handler is not null) return false;
+            for (var i = from; i < at.Statements.Count; i++)
             {
-                if (Transparent(statement, nonNull)) continue;
-                return false;
+                var statement = at.Statements[i];
+                if (statement is Nop or Phi or Ir.Jump) continue;
+                if (!guarded)
+                {
+                    if (Transparent(statement, nonNull)) continue;
+                    return false;
+                }
+                // 读对象头用于类型判断时，下降后不留下解引用（isinst 对 null 不抛出），不能吸收判空；用于分派时并入随后的 callvirt。
+                var position = i;
+                bool TypeTest(ReadSym read) => oracle.Decompose(read.Address) is (var root, 0, null, _) && oracle.TypeOf(root) is { } type && ManagedTypes.IsReferenceType(type)
+                    && Following(at, position).Select(f => f.Statement).OfType<Call>().FirstOrDefault() is { Op.Kind: OpKind.ThrowIf or OpKind.TypeCheck or OpKind.IsInst };
+                var reads = values.ReadsAt(statement).Select(r => semantics.Read(r, nonNull)).ToArray();
+                if (values.ReadsAt(statement).Any(r => semantics.Read(r, nonNull).Root is { } root && aliases.Contains(root) && !TypeTest(r))) return true;
+                if (reads.Any(r => (r.Effects.Exceptions & ~ExceptionEffect.NullReference) != 0)) return false;
+                bool Receiver(int operand) => aliases.Contains(SymTable.Resolve(values.Operands(statement)[operand]));
+                switch (statement)
+                {
+                    case Define or Branch when (semantics.Statement(statement, nonNull).Exceptions & ~ExceptionEffect.NullReference) == 0
+                        && (semantics.Statement(statement, nonNull).Kinds & ~EffectKind.Read) == 0: continue;
+                    case Store store: return aliases.Contains(oracle.Decompose(values.Operands(store)[0]).Root);
+                    case Call { Op: null } call:
+                        // 直接调用可覆盖的虚方法可能是 base 调用，不能为了判空改成动态分派；其他方法 IL 里本来就是 callvirt。
+                        return oracle.Callee(call) is { Method: { IsStatic: false, IsOverridable: false } } && call.Arguments.Length > 0 && Receiver(1);
+                    // 委托的接收者不在实参里，排在实参之后。
+                    case Call { Op.Kind: OpKind.CallDelegate, DelegateReceiver: not null } invoke:
+                        return Receiver(1 + invoke.Arguments.Length);
+                    // 分派调用在 IL 中是对接收者的 callvirt；分派查找并入其中，对象为 null 时只抛出 NullReferenceException。
+                    case Call { Op.Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual or OpKind.CallDelegate or OpKind.InvokeVirtualGeneric } dispatch:
+                        return dispatch.Arguments.Length > 0 && Receiver(1);
+                    case Call call when (MachineEffects.Operation(call).Exceptions & ~ExceptionEffect.NullReference) == 0
+                        && (MachineEffects.Operation(call).Kinds & ~EffectKind.Read) == 0: continue;
+                    default: return false;
+                }
             }
-            // 读对象头用于类型判断时，下降后不留下解引用（isinst 对 null 不抛出），不能吸收判空；用于分派时并入随后的 callvirt。
-            bool TypeTest(ReadSym read) => oracle.Decompose(read.Address) is (var root, 0, null, _) && oracle.TypeOf(root) is { } type && ManagedTypes.IsReferenceType(type)
-                && Following(block, index).Select(f => f.Statement).OfType<Call>().FirstOrDefault() is { Op.Kind: OpKind.ThrowIf or OpKind.TypeCheck or OpKind.IsInst };
-            var reads = values.ReadsAt(statement).Select(r => semantics.Read(r, nonNull)).ToArray();
-            if (values.ReadsAt(statement).Any(r => ReferenceEquals(semantics.Read(r, nonNull).Root, target) && !TypeTest(r))) return true;
-            if (reads.Any(r => (r.Effects.Exceptions & ~ExceptionEffect.NullReference) != 0)) return false;
-            switch (statement)
+            var successors = at.NormalSuccessors.Distinct().ToArray();
+            if (successors.Length == 0) return false;
+            foreach (var next in successors)
             {
-                case Define when (semantics.Statement(statement, nonNull).Exceptions & ~ExceptionEffect.NullReference) == 0
-                    && (semantics.Statement(statement, nonNull).Kinds & ~EffectKind.Read) == 0: continue;
-                case Store store: return ReferenceEquals(oracle.Decompose(values.Operands(store)[0]).Root, target);
-                case Call { Op: null } call:
-                    // 直接调用可覆盖的虚方法可能是 base 调用，不能为了判空改成动态分派；其他方法 IL 里本来就是 callvirt。
-                    return oracle.Callee(call) is { Method: { IsStatic: false, IsOverridable: false } }
-                        && call.Arguments.Length > 0 && ReferenceEquals(SymTable.Resolve(values.Operands(call)[1]), target);
-                // 分派调用在 IL 中是对接收者的 callvirt；分派查找并入其中，对象为 null 时只抛出 NullReferenceException。
-                case Call { Op.Kind: OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallGenericVirtual or OpKind.CallDelegate or OpKind.InvokeVirtualGeneric } dispatch:
-                    return dispatch.Arguments.Length > 0 && ReferenceEquals(SymTable.Resolve(values.Operands(dispatch)[1]), target);
-                case Call call when (MachineEffects.Operation(call).Exceptions & ~ExceptionEffect.NullReference) == 0
-                    && (MachineEffects.Operation(call).Kinds & ~EffectKind.Read) == 0: continue;
-                default: return false;
+                if (!Forward(at, next)) return false;
+                var side = next.Predecessors.IndexOf(at);
+                var extended = next.Statements.OfType<Phi>().Where(p => aliases.Contains(values.Of(p.Sources[side]))).Select(p => values.Of(p.Target)).ToArray();
+                reached.UnionWith(extended);
+                if (!Walk(next, 0, extended.Length == 0 ? aliases : aliases.Concat(extended).ToHashSet())) return false;
             }
+            return true;
         }
-        return false;
+        if (!Walk(block, index, reached.ToHashSet())) return false;
+        receivers.UnionWith(reached);
+        return true;
     }
 
     /// <summary>判空的对象在此处已知非空：检查不会失败。</summary>
@@ -134,12 +176,12 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
     /// </summary>
     public bool BoundsAbsorbed(Block block, int index, Sym position, Sym length)
     {
-        if (SymTable.Resolve(length) is not ReadSym lengthRead || oracle.Locate(lengthRead.Address, lengthRead.Width) is not { Kind: LocationKind.Length, Base: { } array }) return false;
+        if (LengthOf(length) is not { } array) return false;
         var wanted = TypeOracle.ArrayIndex(position);
-        bool Same(Sym address, int width) => oracle.Locate(address, width) is { Kind: LocationKind.Element } element && ReferenceEquals(SymTable.Resolve(element.Base!), SymTable.Resolve(array))
+        bool Same(Sym address, int width) => oracle.Locate(address, width) is { Kind: LocationKind.Element } element && ReferenceEquals(SymTable.Resolve(element.Base!), array)
             && (element.Index is { } at ? ReferenceEquals(TypeOracle.ArrayIndex(at), wanted) : wanted is ConstSym c && c.Value == (ulong)element.ConstantIndex);
         var nonNull = NonNull(block, index);
-        nonNull.Add(SymTable.Resolve(array));
+        nonNull.Add(array);
         foreach (var (statement, guarded) in Following(block, index))
         {
             if (!guarded)
@@ -159,6 +201,31 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// 值是哪个数组的长度：长度的读取，或者各入边都是同一数组长度的 φ（循环里每轮重读长度，再把比较提到循环头）。
+    /// </summary>
+    private Sym? LengthOf(Sym length, HashSet<PhiSym>? visiting = null)
+    {
+        switch (TypeOracle.ArrayIndex(length))
+        {
+            case ReadSym read when oracle.Locate(read.Address, read.Width) is { Kind: LocationKind.Length, Base: { } array }:
+                return SymTable.Resolve(array);
+            case PhiSym phi when (visiting ??= []).Add(phi):
+                Sym? common = null;
+                foreach (var source in phi.Sources)
+                {
+                    if (source is null) return null;
+                    if (SymTable.Resolve(source) is PhiSym inner && visiting.Contains(inner)) continue;
+                    var array = LengthOf(source, visiting);
+                    if (array is null || common is not null && !ReferenceEquals(common, array)) return null;
+                    common = array;
+                }
+                return common;
+            default:
+                return null;
+        }
     }
 
     /// <summary>

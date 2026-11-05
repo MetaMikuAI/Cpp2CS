@@ -276,9 +276,7 @@ internal sealed partial class BodyBuilder
 
         public bool Absorb(Sym target)
         {
-            if (!owner.effects.Absorbed(block, index + 1, target)) return false;
-            owner.absorbedChecks.Add(target);
-            return true;
+            return owner.effects.Absorbed(block, index + 1, target, owner.absorbedChecks);
         }
 
         public ManagedValue Field(ManagedValue receiver, FieldRef field) => owner.FieldAccess(receiver, field, owner.FieldType(field, null), true, call.Address);
