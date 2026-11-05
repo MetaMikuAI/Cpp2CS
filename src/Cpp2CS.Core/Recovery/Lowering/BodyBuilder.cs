@@ -103,6 +103,13 @@ internal sealed partial class BodyBuilder
         var done = new HashSet<PhiSym>();
         var copies = new Dictionary<(Block From, Block To, int Index), List<ManagedCopy>>();
         var doneStructs = new HashSet<StructPhiPlan>();
+        var outputs = lowered.ToDictionary(l => l.Block, l => l.Statements);
+        // 入边上的值需要语句时写在前驱末尾（终结语句尚未加入）；异常边的赋值另有位置，不接受语句。
+        void OnEdge(Block from, Block to)
+        {
+            currentOutput = from.Handler != to ? outputs.GetValueOrDefault(from) : null;
+            sharedEdge = from.NormalSuccessors.Skip(1).Any();
+        }
         while (true)
         {
             var pending = phis.Except(done).ToArray();
@@ -115,7 +122,7 @@ internal sealed partial class BodyBuilder
                 for (var j = 0; j < phi.Block.Predecessors.Count; j++)
                 {
                     var from = phi.Block.Predecessors[j];
-                    var source = phi.Sources[j] is { } s ? View(s, local.Type, from.End) : Hole(from.End, "φ 来源缺失", local.Type);
+                    var source = phi.Sources[j] is { } s ? View(local.Type is ByRefRef ? oracle.EdgeSource(phi, j) : s, local.Type, from.End) : Hole(from.End, "φ 来源缺失", local.Type);
                     if (!copies.TryGetValue((from, phi.Block, j), out var list)) copies[(from, phi.Block, j)] = list = [];
                     list.Add(new ManagedCopy(local, source));
                 }
@@ -126,11 +133,14 @@ internal sealed partial class BodyBuilder
                 for (var j = 0; j < plan.Block.Predecessors.Count; j++)
                 {
                     var from = plan.Block.Predecessors[j];
+                    OnEdge(from, plan.Block);
                     if (!copies.TryGetValue((from, plan.Block, j), out var list)) copies[(from, plan.Block, j)] = list = [];
                     list.Add(new ManagedCopy(plan.Local, StructPhiSource(plan, j, from.End)));
                 }
             }
         }
+        currentOutput = null;
+        sharedEdge = false;
         ManagedEdge Edge(Block from, ulong target)
         {
             var to = function.Blocks.FirstOrDefault(b => b.Start == target);

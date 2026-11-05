@@ -337,11 +337,20 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         callees.Clear();
         parts.Clear();
         storeGroups.Clear();
+        cursors.Clear();
+        offsetCursors.Clear();
         cellTypes = null;
     }
 
-    /// <summary>φ 的下界：来源（除自身、常量与未定义外）定义类型的汇合；来源之间没有公共类型时为 null。</summary>
+    /// <summary>φ 的下界：来源定义类型的汇合；没有引用、托管指针或指针类型时，来源可能都是位置的地址。</summary>
     private TypeRef? Lower(PhiSym phi)
+    {
+        var joined = Joined(phi);
+        return joined is null || types.Kind(joined) == TypeKind.Int ? AddressMerge(phi) ?? joined : joined;
+    }
+
+    /// <summary>来源（除自身、常量与未定义外）定义类型的汇合；来源之间没有公共类型时为 null。</summary>
+    private TypeRef? Joined(PhiSym phi)
     {
         TypeRef? joined = null;
         var steps = new List<Sym>();
@@ -413,6 +422,8 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         {
             case OperatorKind.Compare or OperatorKind.And or OperatorKind.Or or OperatorKind.Not:
                 return types.Boolean;
+            case OperatorKind.Select when PinnedArray(op) is var (_, pinned):
+                return new PointerRef(pinned.Element);
             case OperatorKind.Select:
                 return Defined(op.Args[1]) is { } a ? (Defined(op.Args[2]) is { } b ? Join(a, b) : a) : Defined(op.Args[2]);
             case OperatorKind.Binary when op.Op.Binary is BinOp.FAdd or BinOp.FSub or BinOp.FMul or BinOp.FDiv or BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber:
@@ -547,6 +558,16 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     /// <summary>地址的根、常量偏移与比例下标。</summary>
     public (Sym Root, long Offset, Sym? Index, int Scale) Decompose(Sym address)
     {
+        var terms = AddressTerms(address);
+        if (terms.Root is PhiSym phi && terms.Index is null && Cursor(phi) is { } cursor)
+            return (cursor.Array!, terms.Offset + cursor.Offset, cursor.Index, cursor.Size);
+        if (terms.Index is PhiSym bytes && terms.Scale == 1 && TypeOf(terms.Root) is ArrayRef array && OffsetCursor(bytes, ElementSize(array.Element)) is { } walked)
+            return (terms.Root, terms.Offset + walked.Offset, walked.Index, walked.Size);
+        return terms;
+    }
+
+    private (Sym Root, long Offset, Sym? Index, int Scale) AddressTerms(Sym address)
+    {
         address = SymTable.Resolve(address);
         if (address is LocalSym local) return (local, 0, null, 0);
         var terms = new List<Sym>();
@@ -634,6 +655,8 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                         index = values.Syms.Binary(BinOp.Add, index, values.Syms.Const(unchecked((ulong)constant), 64), 64);
                         constant = 0;
                     }
+                    // 自动向量化的宽读取跨越多个元素，不是一次元素访问。
+                    if (inside == 0 && types.Kind(array.Element) != TypeKind.Struct && width > StorageBits(array.Element)) return null;
                     if (inside == 0 && (types.Kind(array.Element) != TypeKind.Struct || width == size * 8))
                         return new(LocationKind.Element, root, index, constant, null, [], array.Element);
                     return FieldAt(array.Element, inside + RuntimeLayout.ObjectHeaderSize, width, false, false) is var (path, fieldType)
@@ -669,6 +692,8 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             case ByRefRef or PointerRef when index is null:
                 {
                     var element = rootType is ByRefRef r ? r.Element : ((PointerRef)rootType).Element;
+                    // 合流的托管指针只按被指类型的宽度访问，其他宽度不是这个位置。
+                    if (root is PhiSym && offset == 0 && types.Kind(element) != TypeKind.Struct && width > 1 && width != StorageBits(element)) return null;
                     // 只有一个引用字段的结构体：机器读取得到的引用就是这个字段，它随后被当作对象指针使用。
                     if (offset == 0 && width == 64 && types.Kind(element) == TypeKind.Struct && types.Size(element) == 8
                         && FieldAt(element, RuntimeLayout.ObjectHeaderSize, 64, false, false) is var (only, onlyType) && ManagedTypes.IsReferenceType(onlyType))

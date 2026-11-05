@@ -132,7 +132,7 @@ public sealed partial class ValueModel
         }
     }
 
-    /// <summary>来源（除自身外）只有一个值的 φ 等于该值。</summary>
+    /// <summary>来源（除自身外）只有一个值的 φ 等于该值；互相引用的一组 φ 之外只有一个值时，同样都等于它。</summary>
     private bool ForwardTrivial()
     {
         var changed = false;
@@ -140,11 +140,44 @@ public sealed partial class ValueModel
         {
             if (phi.Forward is not null || phi.Sources.Any(s => s is null)) continue;
             var distinct = phi.Sources.Select(s => SymTable.Resolve(s!)).Where(s => !ReferenceEquals(s, phi)).Distinct().ToArray();
-            if (distinct.Length > 1) continue;
+            if (distinct.Length > 1)
+            {
+                if (!distinct.Any(s => s is PhiSym) || SingleOutside(phi) is not { } value) continue;
+                phi.Forward = value;
+                changed = true;
+                continue;
+            }
             phi.Forward = distinct.Length == 1 ? distinct[0] : Syms.Undef(phi.Width);
             changed = true;
         }
         return changed;
+    }
+
+    /// <summary>
+    /// 循环里保存、恢复寄存器留下的 φ 网：沿 φ 来源可达的范围之外只有一个值时，φ 等于这个值。
+    /// 进入范围的每条路径都经过该值，范围内只有复制，因此它的定义支配这些 φ。
+    /// </summary>
+    private static Sym? SingleOutside(PhiSym start)
+    {
+        const int limit = 64;
+        Sym? value = null;
+        var seen = new HashSet<PhiSym> { start };
+        var pending = new Stack<PhiSym>();
+        pending.Push(start);
+        while (pending.TryPop(out var phi))
+            foreach (var source in phi.Sources)
+            {
+                if (source is null) return null;
+                var resolved = SymTable.Resolve(source);
+                if (resolved is PhiSym next)
+                {
+                    if (seen.Add(next)) pending.Push(next);
+                    if (seen.Count > limit) return null;
+                }
+                else if (value is null) value = resolved;
+                else if (!ReferenceEquals(value, resolved)) return null;
+            }
+        return value;
     }
 
     /// <summary>填入已求值前驱的 φ 来源。</summary>

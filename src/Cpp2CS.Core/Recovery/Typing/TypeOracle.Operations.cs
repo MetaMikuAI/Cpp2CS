@@ -29,6 +29,9 @@ public sealed partial class TypeOracle
                 return new(selected, [types.Boolean, selected, selected]);
             case OperatorKind.Binary when op.Width == 1 && op.Op.Binary is BinOp.And or BinOp.Or or BinOp.Xor:
                 return new(types.Boolean, [types.Boolean, types.Boolean]);
+            // 浮点运算的类型由运算决定：期望同宽整数时是结果的位重解释，运算本身仍是浮点的。
+            case OperatorKind.Binary when natural is not null && types.Kind(natural) is TypeKind.Float or TypeKind.Double:
+                return new(natural, [natural, natural]);
             case OperatorKind.Binary:
                 var binary = expected is not null && types.Kind(expected) == TypeKind.Int && types.ValueWidth(expected) == op.Width
                     ? expected : natural ?? Unconstrained(op.Width);

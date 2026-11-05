@@ -16,6 +16,8 @@ internal sealed partial class BodyBuilder
     private ManagedValue View(Sym sym, TypeRef? expected, ulong address)
     {
         sym = SymTable.Resolve(sym);
+        // 取址须能写入该位置，不接受只读的访问器证明。
+        if (oracle.AddressArm(sym, expected) is { } addressed) return new AddressValue(LocationValue(addressed, address, store: true));
         if (expected is DefinitionRef structure && types.Kind(expected) == TypeKind.Struct && sym is not ConcatSym && oracle.BitRepresentation(sym))
             return StructBits(sym, structure, address);
         if (sym is not LocalSym && locals.TryGetValue(sym, out var known)) return Coerce(known, expected, address);
@@ -145,6 +147,8 @@ internal sealed partial class BodyBuilder
                 return new BooleanValue(op.Op.Kind == OperatorKind.And, View(op.Args[0], types.Boolean, address), View(op.Args[1], types.Boolean, address), types.Boolean);
             case OperatorKind.Not:
                 return new NegatedValue(View(op.Args[0], types.Boolean, address), types.Boolean);
+            case OperatorKind.Select when oracle.PinnedArray(op) is var (array, arrayType):
+                return new PinnedArrayValue(View(array, arrayType, address), arrayType);
             case OperatorKind.Select:
                 {
                     // 各路都没有定义类型（常量之间的选择）时按期望类型解释，常量取其位型。
@@ -334,18 +338,58 @@ internal sealed partial class BodyBuilder
     /// <summary>按叶子组成结构体值；不可访问的字段由模板层证明构造，失败则记为洞。</summary>
     private ManagedValue Composed(DefinitionRef structure, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, ulong address)
     {
-        if (leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType)))
-            && templates.ProveValueConstruction(structure, leaves) is { } construction)
+        if (TryCompose(structure, leaves, address) is { } composed) return composed;
+        var hidden = leaves.SelectMany(l => l.Path).First(f => !fields.Accessible(f, f.DeclaringType));
+        return Hole(address, $"内存 字段 {hidden.Field.Owner.FullName}.{hidden.Field.Name} 对调用方不可访问，结构体值按叶子组成", structure);
+    }
+
+    /// <summary>
+    /// 结构体值的托管写法：字段都可访问时逐字段组成；否则依次尝试构造函数证明、同一结构体的复制，
+    /// 再把内层结构体的叶子收拢成直接字段的值后重试，最后是对象初始化器。不能写出时为 null，不记洞。
+    /// </summary>
+    private ManagedValue? TryCompose(DefinitionRef structure, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, ulong address)
+    {
+        if (!leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType)))) return new ComposedValue(structure, leaves);
+        // 显式布局中重叠的同一段位按可访问的字段组成，不可访问的字段不必再写。
+        if (leaves.Where(l => l.Path[^1] is var field && !fields.Accessible(field, field.DeclaringType) && ExplicitLayout(field, out var owner)
+            && types.Fields(owner).First(f => f.Path[0].Equals(field)) is var self
+            && types.Fields(owner).Where(f => !f.Path[0].Equals(field) && self.Contains(f.Bit, f.Width) && fields.Accessible(f.Path[0], f.Path[0].DeclaringType)).Sum(f => f.Width) == self.Width).ToArray() is { Length: > 0 } covered)
+            return TryCompose(structure, leaves.Except(covered).ToList(), address);
+        if (templates.ProveValueConstruction(structure, leaves) is { } construction)
         {
             var arguments = construction.Arguments.Select((value, i) => value is AddressValue ? value
                 : Coerce(value, construction.Constructor.Concrete(construction.Constructor.Method.Parameters[i].Type), address)).ToArray();
             return new NewObjectValue(construction.Constructor, arguments) { Transparent = true };
         }
-        if (leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType))) && StructUpdate(structure, leaves, address) is { } updated) return updated;
-        foreach (var (path, _) in leaves)
-            if (path.FirstOrDefault(f => !fields.Accessible(f, f.DeclaringType)) is { } hidden)
-                return Hole(address, $"内存 字段 {hidden.Field.Owner.FullName}.{hidden.Field.Name} 对调用方不可访问，结构体值按叶子组成", structure);
-        return new ComposedValue(structure, leaves);
+        if (StructUpdate(structure, leaves, address) is { } updated) return updated;
+        if (leaves.All(l => l.Path.Count == 1)) return StructInitializer(structure, leaves, address);
+        var direct = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
+        foreach (var group in leaves.GroupBy(l => l.Path[0]))
+        {
+            if (group.Count() == 1 && group.First().Path.Count == 1) { direct.Add(group.First()); continue; }
+            if (FieldType(group.Key, null) is not DefinitionRef nested || TryCompose(nested,
+                group.Select(l => ((IReadOnlyList<FieldRef>)l.Path.Skip(1).ToArray(), l.Value)).ToList(), address) is not { } whole) return null;
+            direct.Add(([group.Key], whole));
+        }
+        return TryCompose(structure, direct, address);
+    }
+
+    /// <summary>
+    /// 对象初始化器 new S { A = a, B = b } 的逆：initobj 之后逐个写字段，不可访问的字段经证明过的 setter。
+    /// setter 内联后只留下字段写入，因此逐个写入与按叶子组成等价；要在值之前写出语句，需要有当前语句序列。
+    /// </summary>
+    private ManagedValue? StructInitializer(DefinitionRef structure, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, ulong address)
+    {
+        if (!CanEmitBefore(leaves.Select(l => l.Value))) return null;
+        var receiver = new ByRefRef(structure);
+        var writes = leaves.Select(l => (Field: l.Path[0], Type: FieldType(l.Path[0], null), l.Value)).ToArray();
+        if (writes.Any(w => (w.Field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
+            || !fields.Accessible(w.Field, w.Field.DeclaringType) && templates.Accessor(w.Field, w.Type, true, receiver) is null)) return null;
+        var copy = NewLocal(structure);
+        currentOutput!.Add(new ManagedAssignment(address, copy, new ComposedValue(structure, [])));
+        foreach (var (field, type, value) in writes)
+            currentOutput.Add(new ManagedStore(address, FieldAccess(new AddressValue(copy), field, type, true, address), Coerce(value, type, address)));
+        return copy;
     }
 
     /// <summary>
@@ -365,16 +409,34 @@ internal sealed partial class BodyBuilder
             else return null;
         }
         if (source is null) return null;
+        // 没有列出的叶子为零或未定义，来源上的这些叶子不一定如此，不是一次复制。
+        if (types.Projections(structure).Any(p => !leaves.Any(l => p.Path.Take(l.Path.Count).SequenceEqual(l.Path)))) return null;
         if (changed.Count == 0) return source;
-        // 边上的复制在块写完之后生成，那时不能再追加语句。
-        if (currentOutput is null) return null;
+        if (!CanEmitBefore(changed.Select(c => c.Value))) return null;
         var copy = NewLocal(structure);
-        currentOutput.Add(new ManagedAssignment(address, copy, source));
+        currentOutput!.Add(new ManagedAssignment(address, copy, source));
         foreach (var (field, value) in changed)
             currentOutput.Add(new ManagedStore(address, FieldAccess(new AddressValue(copy), field, value.Type, true, address), value));
         return copy;
     }
 
+    /// <summary>
+    /// 能否在求值这个值之前写出语句。入边上的值在前驱末尾写出；前驱还有其他出边时，语句在那些路径上也会执行，
+    /// 写入的是新的局部，只要被写的值求值时没有效果就不可观察。
+    /// </summary>
+    private bool CanEmitBefore(IEnumerable<ManagedValue> values) =>
+        currentOutput is not null && (!sharedEdge || values.All(NoEffect));
+
+    private bool NoEffect(ManagedValue value) => value switch
+    {
+        LocalValue or ArgumentValue or ConstantValue or StringValue => true,
+        FieldValue { Receiver: var receiver } when types.Kind(receiver.Type) == TypeKind.Struct => NoEffect(receiver),
+        ComposedValue composed => composed.Leaves.All(l => NoEffect(l.Value)),
+        NewObjectValue { Transparent: true } created => created.Arguments.All(NoEffect),
+        _ => false,
+    };
+
+    private bool sharedEdge;
     private List<ManagedStatement>? currentOutput;
 
     /// <summary>
