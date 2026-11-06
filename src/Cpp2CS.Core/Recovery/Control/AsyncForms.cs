@@ -306,6 +306,7 @@ public static class AsyncForms
             ForwardReturns();
             num = StateLocal();
             if (!Tails()) return null;
+            StateBeforeCleanups(region);
             var sites = code.SelectMany(p => p.Value.Where(IsAwaitCall).Select(s => (p.Key, (ManagedCall)s))).ToArray();
             if (!Entries(sites.Select(s => s.Item2).ToArray())) return null;
             foreach (var (block, call) in sites)
@@ -692,6 +693,25 @@ public static class AsyncForms
             code[address] = canonical;
             tail = address;
             return true;
+        }
+
+        /// <summary>
+        /// 反编译器要求 catch 里先写 state = -2，再清理被提升的局部。clang 可能把两者换过来：它们写的是状态机的不同字段，顺序观察不到。
+        /// </summary>
+        private void StateBeforeCleanups(ManagedRegion main)
+        {
+            foreach (var address in main.Handler.Where(code.ContainsKey))
+            {
+                var statements = code[address];
+                var state = statements.FindIndex(s => StateStored(s) == -2);
+                if (state <= 0) continue;
+                var first = state;
+                while (first > 0 && statements[first - 1] is ManagedStore { Target: FieldValue { Receiver: ArgumentValue { Index: -1 } } }) first--;
+                if (first == state) continue;
+                var stored = statements[state];
+                statements.RemoveAt(state);
+                statements.Insert(first, stored);
+            }
         }
 
         private bool Returns(ulong block, int index)

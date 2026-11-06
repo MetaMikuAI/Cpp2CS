@@ -27,6 +27,9 @@ internal sealed partial class CilBodyWriter
                 il.Append(initialization); ExplicitInitializations.Add(initialization); break;
             case ManagedStore { Target: IndirectValue i } s:
                 Value(i.Address); Value(s.Value); il.Emit(OpCodes.Stobj, TypeReference(i.Type)); break;
+            // 结构体字段清零写成 ldflda; initobj，和 C# 编译器一样；反编译器认状态机清理被提升的局部时只认这个写法。
+            case ManagedStore { Target: FieldValue { Accessor: null } f, Value: ComposedValue { Leaves.Count: 0 } }:
+                Value(f.Receiver); il.Emit(OpCodes.Ldflda, FieldReference(f.Field)); il.Emit(OpCodes.Initobj, TypeReference(f.Type)); break;
             case ManagedStore { Target: FieldValue f } s:
                 Value(f.Receiver); Value(s.Value);
                 if (f.Accessor is { } setter) AccessorCall(setter); else il.Emit(OpCodes.Stfld, FieldReference(f.Field)); break;
