@@ -283,9 +283,9 @@ internal sealed partial class CilBodyWriter
             var signed = c.Condition is Cond.Slt or Cond.Sle or Cond.Sgt or Cond.Sge;
             void Operand(ManagedValue value)
             {
-                // 32 位整数已在 int32 栈上；比较符号由 clt/cgt 指令决定。
+                // 32 位整数已在 int32 栈上；比较符号由 clt/cgt 指令决定。反编译器追踪状态局部时不认它上面的转换。
                 if (value.Width == 32 && types.Kind(value.Type) == TypeKind.Int && (c.Condition is Cond.Eq or Cond.Ne
-                    || policy == EmissionPolicy.Source && types.Bits(value.Type) == 32)) Value(value);
+                    || (signed || policy == EmissionPolicy.Source) && types.Bits(value.Type) == 32)) Value(value);
                 else Integer(value, signed);
             }
             Operand(c.Left); Operand(c.Right);

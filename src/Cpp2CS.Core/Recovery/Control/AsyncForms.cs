@@ -41,7 +41,7 @@ public static class AsyncForms
             rejected = scope.Reason ?? "unknown";
             return null;
         }
-        var form = new MoveNextForm(FinallyRecovery.Run(scoped), types, summary);
+        var form = new MoveNextForm(FinallyRecovery.Run(scoped, scope.State, MoveNextForm.IsAwaitCall), types, summary);
         var result = form.Complete(scope.Rewritten);
         rejected = result is null ? form.Reason ?? "unknown" : null;
         return result;
@@ -209,6 +209,7 @@ public static class AsyncForms
         public string? Reason { get; private set; }
         /// <summary>入口读状态的局部，即 Roslyn 的 num。</summary>
         private LocalValue? num;
+        public Variable? State => num?.Variable;
         /// <summary>有代码按 num 的当前值判断，挂起和恢复时要写回。</summary>
         public bool Rewritten { get; private set; }
 
@@ -221,7 +222,7 @@ public static class AsyncForms
         private static bool IsField(ManagedValue? value, string name) => value is FieldValue { Receiver: ArgumentValue { Index: -1 } } field && field.Field.Field.Name == name;
         private static bool IsBuilderCall(ManagedStatement statement, string name) =>
             statement is ManagedCall { Invocation: { Receiver: AddressValue { Target: var target } } invocation } && invocation.Method.Method.Name == name && IsField(target, BuilderName);
-        private static bool IsAwaitCall(ManagedStatement statement) => IsBuilderCall(statement, "AwaitUnsafeOnCompleted") || IsBuilderCall(statement, "AwaitOnCompleted");
+        public static bool IsAwaitCall(ManagedStatement statement) => IsBuilderCall(statement, "AwaitUnsafeOnCompleted") || IsBuilderCall(statement, "AwaitOnCompleted");
         private static long? StateStored(ManagedStatement statement) =>
             statement is ManagedStore { Target: var target, Value: ConstantValue constant } && IsField(target, StateName) ? (int)constant.Bits : null;
 
@@ -461,39 +462,37 @@ public static class AsyncForms
                         statement = branch with { Condition = Compare(test.Negated) };
                     list[i] = statement;
                 }
-            Rewritten = flags.Count > 0;
+            Rewritten = true;
             return true;
         }
 
         /// <summary>
-        /// try 开头的分派块按入口序号选择。沿入口分派走每个状态值，得到它选中的项；其余进入的边是正常入口，只能走没有被状态选中的那一项。
-        /// 换成按 num 比较：恢复之后 num 是 -1，不会再选中恢复点。
+        /// try 开头的分派块按入口序号选择。沿入口分派走每个状态值，得到它选中的项；其余进入的边是正常入口。
+        /// 换成按 num 比较：恢复之后 num 是 -1，不会再选中恢复点。正常入口只有一个时直接跳过去，有几个时仍按序号选。
         /// </summary>
         private bool Entries(IReadOnlyList<ManagedCall> sites)
         {
-            var dispatchers = code.Where(p => ExceptionEntries.IsDispatch(p.Key) && p.Value is [ManagedSwitch { Index: LocalValue }]).Select(p => p.Key).ToArray();
-            if (dispatchers.Length == 0 || sites.Count == 0) return true;
+            var tables = code.Where(p => ExceptionEntries.IsDispatch(p.Key) && p.Value is [ManagedSwitch { Index: LocalValue }]).ToDictionary(p => p.Key, p => (ManagedSwitch)p.Value[0]);
+            if (tables.Count == 0 || sites.Count == 0) return true;
             if (num is not { } cached) return Fail("entries:no-state");
-            var selectors = dispatchers.Select(d => ((LocalValue)((ManagedSwitch)code[d][0]).Index).Variable).ToHashSet();
-            var chosen = dispatchers.ToDictionary(d => d, _ => new Dictionary<int, List<long>>());
+            var selectors = tables.Values.Select(t => ((LocalValue)t.Index).Variable).ToHashSet();
+            var tests = tables.Keys.ToDictionary(d => d, _ => new List<(long State, ManagedEdge Target)>());
             var used = new HashSet<ManagedEdge>(ReferenceEqualityComparer.Instance);
-            var states = code.Values.SelectMany(s => s).Select(StateStored).OfType<long>().Where(k => k >= 0).Distinct().ToArray();
+            foreach (var state in code.Values.SelectMany(s => s).Select(StateStored).OfType<long>().Where(k => k >= 0).Distinct().ToArray())
+            {
+                var entered = new List<(ulong Block, int Case)>();
+                if (Dispatch(state, selectors, entered, used) is not var (stop, position)) return Fail("entries:dispatch");
+                foreach (var (block, selected) in entered) tests[block].Add((state, tables[block].Cases[selected]));
+                if (!MoveResume(state, stop, position, tables, selectors, tests, used)) return false;
+            }
+            // 新进入方法时走过的边也是正常入口。
             var fresh = new List<(ulong Block, int Case)>();
             var freshEdges = new HashSet<ManagedEdge>(ReferenceEqualityComparer.Instance);
             if (Dispatch(-1, selectors, fresh, freshEdges) is null) return Fail("entries:dispatch");
-            foreach (var state in states)
-            {
-                var entered = new List<(ulong Block, int Case)>();
-                if (Dispatch(state, selectors, entered, used) is null) return Fail("entries:dispatch");
-                foreach (var (block, selected) in entered)
-                    (chosen[block].TryGetValue(selected, out var list) ? list : chosen[block][selected] = []).Add(state);
-            }
-            // 新进入方法时走过的边也是正常入口。
             used.ExceptWith(freshEdges);
             var kept = new HashSet<Variable>();
-            foreach (var dispatcher in dispatchers)
+            foreach (var (dispatcher, table) in tables)
             {
-                var table = (ManagedSwitch)code[dispatcher][0];
                 var selector = ((LocalValue)table.Index).Variable;
                 var normal = fresh.Where(f => f.Block == dispatcher).Select(f => f.Case).ToHashSet();
                 foreach (var edge in code.Values.SelectMany(s => s).SelectMany(ManagedValues.Edges).Where(e => e.Target == dispatcher && !used.Contains(e)))
@@ -501,28 +500,26 @@ public static class AsyncForms
                     if (edge.Copies.FirstOrDefault(c => c.Target.Variable.Equals(selector)) is not { Value: ConstantValue { } selected }) return Fail("entries:selector");
                     normal.Add((int)selected.Bits);
                 }
-                var cases = chosen[dispatcher];
-                // 状态值按 num 选择。正常入口只有一个时直接跳过去，有几个时仍按序号选。
+                var list = tests[dispatcher];
                 ManagedStatement otherwise;
                 if (normal.Count > 1)
                 {
                     otherwise = table;
                     kept.Add(selector);
                 }
+                else if (normal.Count == 1) otherwise = new ManagedJump(table.Address, new ManagedEdge(table.Cases[normal.Single()].Target, []));
                 else
                 {
-                    var target = normal.Count == 1 ? normal.Single() : cases.Count > 0 ? cases.Keys.Max() : -1;
-                    if (target < 0) return Fail("entries:empty");
-                    if (normal.Count == 0) cases.Remove(target);
-                    otherwise = new ManagedJump(table.Address, new ManagedEdge(table.Cases[target].Target, []));
+                    if (list.Count == 0) return Fail("entries:empty");
+                    otherwise = new ManagedJump(table.Address, new ManagedEdge(list[^1].Target.Target, []));
+                    list.RemoveAt(list.Count - 1);
                 }
-                var tests = cases.SelectMany(c => c.Value.Select(k => (State: k, Case: c.Key))).ToArray();
                 var at = dispatcher;
-                foreach (var (state, selected) in tests)
+                foreach (var (state, target) in list)
                 {
                     var next = FreshAfter(at);
                     var test = new ComparisonValue(Cond.Eq, cached, new ConstantValue((ulong)(uint)(int)state, cached.Type, cached.Width), types.Boolean);
-                    code[at] = [new ManagedBranch(table.Address, test, new ManagedEdge(table.Cases[selected].Target, []), new ManagedEdge(next, []))];
+                    code[at] = [new ManagedBranch(table.Address, test, new ManagedEdge(target.Target, []), new ManagedEdge(next, []))];
                     at = next;
                 }
                 code[at] = [otherwise];
@@ -531,6 +528,67 @@ public static class AsyncForms
                 for (var i = 0; i < list.Count; i++)
                     list[i] = ManagedValues.MapEdges(list[i], e => e with { Copies = e.Copies.Where(c => !selectors.Contains(c.Target.Variable) || kept.Contains(c.Target.Variable) && !used.Contains(e)).ToArray() });
             Rewritten = true;
+            return true;
+        }
+
+        private static bool IsAwaiterField(ManagedValue value) => value is FieldValue { Receiver: ArgumentValue { Index: -1 } } field && field.Field.Field.Name.StartsWith("<>u__", StringComparison.Ordinal);
+
+        /// <summary>
+        /// 恢复段在 try 外面，读完等待器才带着序号进入 try。Roslyn 的恢复段在 try 里，反编译器也只在同一个容器里找恢复点。
+        /// 把恢复段移到分派目标上，入口只负责进入 try。恢复段只读写等待器字段和状态字段，不会抛出，放进 try 不改变行为。
+        /// </summary>
+        private bool MoveResume(long state, ulong at, int index, Dictionary<ulong, ManagedSwitch> tables, HashSet<Variable> selectors, Dictionary<ulong, List<(long State, ManagedEdge Target)>> tests, HashSet<ManagedEdge> used)
+        {
+            var (start, startIndex) = (at, index);
+            var segment = new List<ManagedStatement>();
+            for (var steps = 0; steps < Budget; steps++)
+            {
+                switch (code[at].ElementAtOrDefault(index))
+                {
+                    case ManagedAssignment { Value: var value } assignment when IsAwaiterField(value):
+                        segment.Add(assignment);
+                        index++;
+                        break;
+                    case ManagedStore { Target: var target } store when IsAwaiterField(target) || StateStored(store) == -1:
+                        segment.Add(store);
+                        index++;
+                        break;
+                    case ManagedJump { Edge: { Copies.Count: 0 } edge } when !tables.ContainsKey(edge.Target):
+                        (at, index) = (edge.Target, 0);
+                        break;
+                    case ManagedJump { Edge: var edge } jump when tables.ContainsKey(edge.Target) && segment.Any(s => StateStored(s) == -1):
+                        var values = new Dictionary<Variable, int>();
+                        foreach (var copy in edge.Copies.Where(c => selectors.Contains(c.Target.Variable)))
+                        {
+                            if (copy.Value is not ConstantValue selected) return Fail("entries:selector");
+                            values[copy.Target.Variable] = (int)selected.Bits;
+                        }
+                        var enter = new ManagedEdge(edge.Target, []);
+                        used.Add(enter);
+                        code[start].RemoveRange(startIndex, code[start].Count - startIndex);
+                        code[start].Add(new ManagedJump(jump.Address, enter));
+                        for (var dispatcher = edge.Target; ;)
+                        {
+                            var table = tables[dispatcher];
+                            if (!values.TryGetValue(((LocalValue)table.Index).Variable, out var chosen) || chosen < 0 || chosen >= table.Cases.Count) return Fail("entries:selector");
+                            var destination = table.Cases[chosen].Target;
+                            if (tables.ContainsKey(destination))
+                            {
+                                var inner = new ManagedEdge(destination, []);
+                                used.Add(inner);
+                                tests[dispatcher].Add((state, inner));
+                                dispatcher = destination;
+                                continue;
+                            }
+                            var moved = FreshAfter(dispatcher);
+                            code[moved] = [.. segment, new ManagedJump(jump.Address, new ManagedEdge(destination, edge.Copies.Where(c => !selectors.Contains(c.Target.Variable)).ToArray()))];
+                            tests[dispatcher].Add((state, new ManagedEdge(moved, [])));
+                            return true;
+                        }
+                    default:
+                        return true;
+                }
+            }
             return true;
         }
 
@@ -749,6 +807,11 @@ public static class AsyncForms
                     case ManagedJump { Edge: { Copies.Count: 0 } edge }:
                         completed = edge.Target;
                         break;
+                    // 恢复路径和完成路径用不同的局部存等待器，在边上复制。读字段时直接写完成路径的局部。
+                    case ManagedJump { Edge: { Copies: [{ Value: LocalValue copied } only] } edge } when loaded is not null && restored is not null && copied.Variable.Equals(loaded.Variable) && !ReadElsewhere(loaded.Variable, statement):
+                        loaded = only.Target;
+                        completed = edge.Target;
+                        break;
                     case null:
                         return Fail("await:resume-end");
                     default:
@@ -860,7 +923,7 @@ public static class AsyncForms
 
         private bool ReadElsewhere(Variable variable, ManagedStatement except) =>
             code.Values.SelectMany(s => s).Where(s => !ReferenceEquals(s, except))
-                .SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk).Any(v => IsLocal(v, variable));
+                .SelectMany(s => (s is ManagedAssignment assignment ? [assignment.Value] : ManagedValues.Of(s)).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk).Any(v => IsLocal(v, variable));
 
         /// <summary>取得等待器：内联的 new Awaiter(in X) 写回 X.GetAwaiter()，已有调用就改写结果局部。</summary>
         private bool Acquire(List<ManagedStatement> before, ManagedValue value, LocalValue awaiter, ulong at)
