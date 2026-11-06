@@ -293,8 +293,55 @@ public static class AsyncForms
             MergeChains(region);
             ForwardReturns();
             num = StateLocal();
+            HoistStateTests();
             if (num is not null && !Flags(num)) return null;
             return Layout(region);
+        }
+
+        /// <summary>
+        /// clang 把几个恢复点相同的开头（取等待器、清字段、state = -1）合并，之后才按 num 分流。分支提到这些语句之前，每边复制一份：
+        /// num 是局部，这些语句不写它，每条路径执行的语句和顺序不变。反编译器按状态走分派，不提前就走不到恢复点。
+        /// </summary>
+        private void HoistStateTests()
+        {
+            if (num is not { } cached) return;
+            var work = new Queue<ulong>(code.Keys);
+            while (work.TryDequeue(out var at))
+            {
+                if (!code.TryGetValue(at, out var statements) || statements.Count < 2 || !statements.Any(s => StateStored(s) == -1) || statements.SkipLast(1).Any(s => Definitions(s).Any(d => d.Target.Variable.Equals(cached.Variable)))) continue;
+                // 分流可能在紧接着的下一个块。
+                if (statements[^1] is ManagedJump { Edge: { Copies.Count: 0, Target: var next } } && next != at && code.TryGetValue(next, out var following)
+                    && following is [ManagedBranch or ManagedSwitch] && Predecessors(next).Length == 1 && Trackable(following[0], cached.Variable))
+                {
+                    statements[^1] = following[0];
+                    code.Remove(next);
+                }
+                if (statements[^1] is not (ManagedBranch or ManagedSwitch) || !Trackable(statements[^1], cached.Variable)) continue;
+                var shared = statements.SkipLast(1).ToArray();
+                // 分支目标只是一条跳转时并进来：它在边上复制取出的等待器。
+                var terminator = ManagedValues.MapEdges(statements[^1], edge =>
+                {
+                    if (edge.Copies.Count > 0 || !code.TryGetValue(edge.Target, out var target) || target is not [ManagedJump jump] || Predecessors(edge.Target) is not [_]) return edge;
+                    code.Remove(edge.Target);
+                    return jump.Edge;
+                });
+                // 只在这里用的局部（取出的等待器）每边一个，后面按“别处没人读”判断。
+                var outside = code.Where(p => p.Key != at).SelectMany(p => p.Value)
+                    .SelectMany(s => (s is ManagedAssignment read ? [read.Value] : ManagedValues.Of(s)).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
+                    .OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
+                var temporaries = shared.OfType<ManagedAssignment>().Select(a => a.Target).Where(t => !outside.Contains(t.Variable)).ToArray();
+                code[at] = [ManagedValues.MapEdges(terminator, edge =>
+                {
+                    var arm = FreshAfter(at);
+                    var renamed = temporaries.GroupBy(t => t.Variable).ToDictionary(g => g.Key, g => FreshLocal(g.First().Type));
+                    ManagedValue Rename(ManagedValue value) => value is LocalValue local && renamed.TryGetValue(local.Variable, out var fresh) ? fresh : ManagedValues.Map(value, Rename);
+                    ManagedStatement Copy(ManagedStatement statement) => ManagedValues.Map(statement, Rename) is ManagedAssignment assignment && renamed.TryGetValue(assignment.Target.Variable, out var target)
+                        ? assignment with { Target = target } : ManagedValues.Map(statement, Rename);
+                    code[arm] = [.. shared.Select(Copy), Copy(new ManagedJump(shared[^1].Address, edge))];
+                    work.Enqueue(arm);
+                    return new ManagedEdge(arm, []);
+                })];
+            }
         }
 
         /// <summary>finally 还原之后：合并收尾，还原 try 的入口和 await。</summary>
