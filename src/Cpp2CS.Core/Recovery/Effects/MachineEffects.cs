@@ -27,6 +27,9 @@ internal sealed class MachineEffects(ValueModel values, TypeOracle oracle)
             _ when header => MemoryKind.Instance,
             _ => MemoryKind.Unknown,
         };
+        // beforefieldinit 类型的初始化可以在首次访问之前的任何时刻发生（ECMA-335 II.10.5.3.2），读取不构成时序约束。
+        if (location is { Kind: LocationKind.Static, Owner: DefinitionRef owner } && (owner.Definition.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) != 0)
+            return (new(EffectKind.Read), root);
         return (EffectSummary.Access(kind, nonNull: nonNull.Contains(root)), kind is MemoryKind.Local or MemoryKind.Metadata ? null : root);
     }
 
