@@ -352,6 +352,8 @@ public static class AsyncForms
             MergeChains(region);
             ForwardReturns();
             num = StateLocal();
+            // clang 留下 num 的写入，说明后面还要读它（循环回到 try 的分派）：每个挂起和恢复都写回，否则恢复后 num 还是旧状态。
+            Rewritten |= num is { } cached && code.Values.SelectMany(s => s).SelectMany(Definitions).Any(d => d.Target.Variable.Equals(cached.Variable) && d.Value is ConstantValue);
             if (!Tails()) return null;
             StateBeforeCleanups(region);
             var sites = code.SelectMany(p => p.Value.Where(IsAwaitCall).Select(s => (p.Key, (ManagedCall)s))).ToArray();
@@ -800,6 +802,8 @@ public static class AsyncForms
                 {
                     var statement = code[at][start - 1];
                     if (StateStored(statement) is not null) stateStore = statement;
+                    // 后面还要读 num 时挂起段写回它，下面统一写。
+                    else if (num is { } written && statement is ManagedAssignment { Value: ConstantValue } writeBack && writeBack.Target.Variable.Equals(written.Variable)) { }
                     else if (statement is ManagedStore { Target: FieldValue target, Value: var saved } && target.Field.Field.Name.StartsWith("<>u__", StringComparison.Ordinal)) (field, value) = (target, saved);
                     else if (statement is ManagedAssignment assignment && assignment.Target.Variable.Equals(passed.Variable)) value ??= assignment.Value;
                     else break;
@@ -835,6 +839,9 @@ public static class AsyncForms
                         break;
                     case not null when StateStored(statement) == -1:
                         restored = statement;
+                        position++;
+                        break;
+                    case ManagedAssignment { Value: ConstantValue reset1 } written when num is { } local && written.Target.Variable.Equals(local.Variable) && (int)reset1.Bits == -1:
                         position++;
                         break;
                     case ManagedJump { Edge: { Copies.Count: 0 } edge } when restored is null || reset is null:
