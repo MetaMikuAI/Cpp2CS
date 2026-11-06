@@ -131,6 +131,9 @@ public static class FinallyRecovery
         private readonly HashSet<Variable> dropped = [];
         private readonly HashSet<Variable> renamed = [];
         private readonly Dictionary<(ulong Block, int Index), ulong> remainders = [];
+        /// <summary>catch 路径经过的块，是处理体的来源。</summary>
+        private readonly HashSet<ulong> handlerSource = [];
+        private bool walking = true;
         private ulong? end;
         private int budget = Budget;
         /// <summary>包住整个 try 的其他区域。</summary>
@@ -149,6 +152,7 @@ public static class FinallyRecovery
             destinations = Destinations();
             var start = new Cursor(region.HandlerEntry, 0, ImmutableDictionary<Variable, ConstantValue?>.Empty.Add(caught.Variable, null));
             if (Build(start, []) is not { } entry || handler.Count <= 1) return null;
+            walking = false;
             // 丢弃的复制写的局部，处理体要读就不能丢。
             if (handler.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => dropped.Contains(l.Variable))) return null;
             if (Nested() is { } nested && Absorbing(nested, entry) is var (whole, all) && Rewrite(entry, whole, all) is { } rewritten) return rewritten;
@@ -305,6 +309,8 @@ public static class FinallyRecovery
             }
             if (!grown) return null;
             included.ExceptWith(region.Handler);
+            // catch 的正常出口和这个落地块可能共用处理体的副本，它在 try 之外。
+            included.ExceptWith(handlerSource);
             var targets = body.Blocks.SelectMany(b => b.Statements.SelectMany(ManagedValues.Edges).Select(e => (From: b.Address, e.Target))).ToArray();
             if (targets.Where(e => included.Contains(e.Target) && !included.Contains(e.From)).Select(e => e.Target).Distinct().ToArray() is not [var first]) return null;
             var positions = body.Blocks.Select((b, i) => (b.Address, i)).ToDictionary(p => p.Address, p => p.i);
@@ -483,6 +489,7 @@ public static class FinallyRecovery
             for (var steps = 0; steps < Budget; steps++)
             {
                 if (!blocks.TryGetValue(cursor.Block, out var block) || cursor.Index >= block.Statements.Count) return null;
+                if (walking) handlerSource.Add(cursor.Block);
                 var statement = block.Statements[cursor.Index];
                 switch (statement)
                 {
@@ -726,8 +733,8 @@ public static class FinallyRecovery
         {
             var inTry = tryBlocks.ToHashSet();
             // 和新 try 重叠的区域要么包住它，要么连处理块一起嵌在里面：处理块在外面时，它回到 try 的边进不了 IL 的 try，异常的去向也变了。
-            // 这个区域原来的处理块不再可达，不算在外面。
-            var replaced = region.Handler.ToHashSet();
+            // 这个区域原来的处理块和处理体的来源不再可达，不算在外面。
+            var replaced = region.Handler.Concat(handlerSource).ToHashSet();
             bool Inside(ManagedRegion other) => other.Try.All(inTry.Contains) && other.Handler.All(a => inTry.Contains(a) || replaced.Contains(a));
             foreach (var other in body.Regions.Where(r => !ReferenceEquals(r, region)))
                 if (other.Try.Any(inTry.Contains) && !tryBlocks.All(other.Try.Contains) && !Inside(other)
