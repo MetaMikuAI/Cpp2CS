@@ -59,6 +59,7 @@ public static class FinallyRecovery
         private readonly Dictionary<Variable, LocalValue> destinationLocals = [];
         private readonly HashSet<Variable> dropped = [];
         private readonly HashSet<Variable> renamed = [];
+        private readonly Dictionary<(ulong Block, int Index), ulong> remainders = [];
         private ulong? end;
         private int budget = Budget;
         /// <summary>包住整个 try 的其他区域。</summary>
@@ -127,7 +128,7 @@ public static class FinallyRecovery
                     var positions = body.Blocks.Select((b, i) => (b.Address, i)).ToDictionary(p => p.Address, p => p.i);
                     return (all.Where(a => a != first).OrderBy(a => positions[a]).Prepend(first).ToList(), exits);
                 }
-                if (failed is not { } target || !blocks.TryGetValue(target, out var block) || block.Statements.Any(Throws)) return null;
+                if (failed is not { } target || !blocks.TryGetValue(target, out var block) || block.Statements.Any(ThrowsExplicitly)) return null;
                 bool Consistent(IReadOnlyList<ulong> list) => list.Contains(region.Try[0]) == list.Contains(target);
                 if (body.Regions.Any(r => !Consistent(r.Handler) || !ReferenceEquals(r, region) && !Consistent(r.Try))) return null;
                 grown.Add(target);
@@ -279,11 +280,23 @@ public static class FinallyRecovery
             return all.Where(a => a != first).OrderBy(a => positions[a]).Prepend(first).ToList();
         }
 
+        /// <summary>
+        /// 能回到 try 的块还在 C++ 作用域里，又没有异常边，说明 clang 证明了其中的调用、分配和类初始化都不会抛出。
+        /// 只有显式的抛出和原生里带检查的操作才和这个结论矛盾，说明块实际在作用域之外。
+        /// </summary>
+        private static bool ThrowsExplicitly(ManagedStatement statement) => statement switch
+        {
+            ManagedThrow or ManagedRethrow or ManagedCheck or ManagedHole => true,
+            ManagedCall => false,
+            _ => ManagedValues.Of(statement).SelectMany(ManagedValues.Walk).Any(v => v is CheckedCastValue or UnboxValue or UnboxAddressValue or BinaryValue { Op: BinOp.SDiv or BinOp.UDiv or BinOp.SRem or BinOp.URem }),
+        };
+
         private static bool Throws(ManagedStatement statement) => statement switch
         {
             ManagedThrow or ManagedRethrow or ManagedCheck or ManagedHole => true,
             ManagedCall => false,
-            _ => (ManagedEffects.Statement(statement).Exceptions & ExceptionEffect.Other) != 0,
+            // 访问器已证明等于字段访问，和调用一样，留在原生里没有异常边。
+            _ => (ManagedEffects.Statement(statement, v => v is FieldValue { Accessor: not null, Receiver: LocalValue or ArgumentValue } ? EffectSummary.Access(MemoryKind.Instance) : null).Exceptions & ExceptionEffect.Other) != 0,
         };
 
         /// <summary>
@@ -498,6 +511,8 @@ public static class FinallyRecovery
             public readonly List<ManagedCopy> Before = [];
             public bool Started;
             public (ulong Block, ImmutableDictionary<Variable, ConstantValue?> Known)? Target;
+            /// <summary>leave 的目标在块中间时，目标从这条语句开始。</summary>
+            public int TargetIndex;
             /// <summary>出口路径上的局部对应处理体里的哪个局部。</summary>
             public readonly Dictionary<Variable, LocalValue> Renamed = [];
         }
@@ -551,7 +566,14 @@ public static class FinallyRecovery
             // 后面可能还要读去向局部，它们在原路径上的值写到出口上；处理体不读它们。
             var kept = target.Known.Where(p => destinations.Contains(p.Key) && p.Value is not null)
                 .Select(p => new ManagedCopy(destinationLocals[p.Key], p.Value!));
-            return new ManagedEdge(target.Block, before.Concat(kept).ToArray());
+            return new ManagedEdge(match.TargetIndex == 0 ? target.Block : Remainder(target.Block, match.TargetIndex), before.Concat(kept).ToArray());
+        }
+
+        /// <summary>块从这条语句往后的部分。原块留着：处理体的副本之前的语句可能还有别的入口。</summary>
+        private ulong Remainder(ulong block, int index)
+        {
+            if (remainders.TryGetValue((block, index), out var existing)) return existing;
+            return remainders[(block, index)] = fresh();
         }
 
         private bool Match(ulong at, Cursor cursor, ExitMatch match)
@@ -565,11 +587,12 @@ public static class FinallyRecovery
                         return Match(jump.Edge.Target, cursor, match);
                     case ManagedEndFault:
                     {
-                        if (Settle(cursor, real) is not var (final, _) || final.Index != 0) return false;
-                        if (match.Target is { } existing && existing.Block != final.Block) return false;
+                        if (Settle(cursor, real) is not var (final, _)) return false;
+                        if (match.Target is { } existing && (existing.Block != final.Block || match.TargetIndex != final.Index)) return false;
                         if (real.Any(c => !Movable(c))) return false;
                         match.Before.AddRange(real);
                         match.Target = (final.Block, final.Known);
+                        match.TargetIndex = final.Index;
                         return true;
                     }
                     case ManagedBranch branch when StateSign(branch.Condition, cursor.Known) is { } sign:
@@ -652,13 +675,17 @@ public static class FinallyRecovery
                     Statements = blocks[a].Statements.Select(s => ManagedValues.MapEdges(s, e => exits.TryGetValue(e, out var exit) ? exit : e)).ToArray(),
                 }));
                 rewritten.AddRange(handler);
+                // 目标在块中间时，后半部分单独成块，留在原块所在的区域里。
+                rewritten.AddRange(remainders.Select(p => new ManagedBlock(p.Value, blocks[p.Key.Block].Statements.Skip(p.Key.Index).ToArray())));
             }
             var added = handler.Select(b => b.Address).ToArray();
+            IReadOnlyList<ulong> WithRemainders(IReadOnlyList<ulong> list) =>
+                remainders.Where(p => list.Contains(p.Key.Block)).Select(p => p.Value).ToArray() is { Length: > 0 } extra ? list.Concat(extra).ToArray() : list;
             var regions = body.Regions.Select(r => ReferenceEquals(r, region)
                 ? new ManagedRegion(order, entry, added, null, ManagedRegionKind.Finally)
-                : tryBlocks.All(r.Try.Contains) ? r with { Try = Ordered(r.Try, order, added) }
-                : tryBlocks.All(r.Handler.Contains) ? r with { Handler = Ordered(r.Handler, order, added) }
-                : r).ToArray();
+                : tryBlocks.All(r.Try.Contains) ? r with { Try = WithRemainders(Ordered(r.Try, order, added)) }
+                : tryBlocks.All(r.Handler.Contains) ? r with { Handler = WithRemainders(Ordered(r.Handler, order, added)) }
+                : r with { Try = WithRemainders(r.Try), Handler = WithRemainders(r.Handler) }).ToArray();
             // 局部合并可能让几个 catch 共用保存异常的局部。出口路径上的值已经不写了，从 leave 的目标往后不能在重新赋值之前读它。
             var cleaned = Clean(body with { Blocks = rewritten, Regions = regions }, holders, destinations);
             return exits.Values.Select(e => e.Target).Distinct().Any(target => holders.Concat(renamed).Any(v => ReadBeforeWrite(cleaned, target, v))) ? null : cleaned;
