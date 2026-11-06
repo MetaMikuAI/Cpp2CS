@@ -43,7 +43,78 @@ public static class FinallyRecovery
             body = recovered;
             changed = true;
         }
-        return changed ? EnumeratorForms.Run(LocalCoalescing.Run(body)) : body;
+        return changed ? EnumeratorForms.Run(LocalCoalescing.Run(FoldZeroLocals(body))) : body;
+    }
+
+    /// <summary>
+    /// 只在异常路径上写非 0 的局部（异常是否逃出），还原之后只剩写 0 的路径。所有定义都是 0、只用作分支条件时按 0 折叠，
+    /// 没有赋值的路径读到的也是 0（方法体声明 InitLocals）。折叠后到不了的块删掉。
+    /// </summary>
+    private static ManagedBody FoldZeroLocals(ManagedBody body)
+    {
+        var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
+        var zero = new HashSet<Variable>();
+        var excluded = new HashSet<Variable>();
+        void Define(Variable variable, ManagedValue? value) => (value is ConstantValue { Bits: 0 } ? zero : excluded).Add(variable);
+        foreach (var statement in statements)
+        {
+            foreach (var copy in ManagedValues.Edges(statement).SelectMany(e => e.Copies)) Define(copy.Target.Variable, copy.Value);
+            if (statement is ManagedAssignment assignment) Define(assignment.Target.Variable, assignment.ExceptionArrival ? null : assignment.Value);
+            if (statement is ManagedCall { Result: { } result }) Define(result.Variable, null);
+        }
+        zero.ExceptWith(excluded);
+        bool IsZero(ManagedValue value) => value switch
+        {
+            LocalValue local => zero.Contains(local.Variable),
+            ConversionValue { Kind: ConvKind.ZeroExtend or ConvKind.Bitcast } conversion => IsZero(conversion.Operand),
+            BinaryValue { Op: BinOp.Shl, Right: ConstantValue } shift => IsZero(shift.Left),
+            _ => false,
+        };
+        bool? Truth(ManagedValue value) => value switch
+        {
+            NegatedValue negated => !Truth(negated.Operand),
+            ComparisonValue { Condition: Cond.Ne, Right: ConstantValue { Bits: 0 } } test when IsZero(test.Left) => false,
+            ComparisonValue { Condition: Cond.Eq, Right: ConstantValue { Bits: 0 } } test when IsZero(test.Left) => true,
+            _ => IsZero(value) ? false : null,
+        };
+        // 其他读取说明它不只是分支条件；排除一个局部可能让别的条件不再可折叠，到不动点。
+        for (var shrunk = zero.Count > 0; shrunk;)
+        {
+            var read = new HashSet<Variable>();
+            foreach (var statement in statements)
+            {
+                var skipped = statement is ManagedBranch branch && Truth(branch.Condition) is not null ? branch.Condition : null;
+                var values = statement is ManagedAssignment assignment ? [assignment.Value] : ManagedValues.Of(statement);
+                foreach (var value in values.Concat(ManagedValues.CopiedValues(statement)).Where(v => !ReferenceEquals(v, skipped)))
+                    read.UnionWith(ManagedValues.Walk(value).OfType<LocalValue>().Select(l => l.Variable));
+            }
+            shrunk = zero.RemoveWhere(read.Contains) > 0;
+        }
+        if (zero.Count == 0) return body;
+        var folded = body.Blocks.ToDictionary(b => b.Address, b => b with
+        {
+            Statements = b.Statements.Where(s => s is not ManagedAssignment assignment || !zero.Contains(assignment.Target.Variable)).Select(s =>
+            {
+                var kept = ManagedValues.MapEdges(s, e => e with { Copies = e.Copies.Where(c => !zero.Contains(c.Target.Variable)).ToArray() });
+                return kept is ManagedBranch branch && Truth(branch.Condition) is { } taken ? new ManagedJump(branch.Address, taken ? branch.Taken : branch.Fallthrough) : kept;
+            }).ToArray(),
+        });
+        var reachable = new HashSet<ulong>();
+        var work = new Stack<ulong>();
+        work.Push(body.Blocks[0].Address);
+        while (work.Count > 0)
+        {
+            var at = work.Pop();
+            if (!folded.TryGetValue(at, out var block) || !reachable.Add(at)) continue;
+            foreach (var edge in block.Statements.SelectMany(ManagedValues.Edges)) work.Push(edge.Target);
+            foreach (var region in body.Regions.Where(r => r.Try.Contains(at))) work.Push(region.HandlerEntry);
+        }
+        return body with
+        {
+            Blocks = body.Blocks.Where(b => reachable.Contains(b.Address)).Select(b => folded[b.Address]).ToArray(),
+            Regions = body.Regions.Where(r => r.Try.Any(reachable.Contains))
+                .Select(r => r with { Try = r.Try.Where(reachable.Contains).ToArray(), Handler = r.Handler.Where(reachable.Contains).ToArray() }).ToArray(),
+        };
     }
 
     /// <summary>路径上已知的局部：常量，或者 null 表示当前异常（非空，具体值无关）。</summary>
