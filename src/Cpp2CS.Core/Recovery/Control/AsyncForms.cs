@@ -209,7 +209,7 @@ public static class AsyncForms
         public string? Reason { get; private set; }
         /// <summary>入口读状态的局部，即 Roslyn 的 num。</summary>
         private LocalValue? num;
-        public Variable? State => num?.Variable;
+        public LocalValue? State => num;
         /// <summary>有代码按 num 的当前值判断，挂起和恢复时要写回。</summary>
         public bool Rewritten { get; private set; }
 
@@ -250,6 +250,7 @@ public static class AsyncForms
                 Fail($"main-region:{main.Length}");
                 return null;
             }
+            if (SharedTail() is { } shared) return shared;
             if (code.Values.SelectMany(s => s).Any(s => IsBuilderCall(s, "SetException")))
             {
                 Fail("main-region:other");
@@ -271,6 +272,50 @@ public static class AsyncForms
                 new ManagedReturn(result.Address, null),
             ];
             return new ManagedRegion([], handler, [handler], exception, ManagedRegionKind.Catch);
+        }
+
+        /// <summary>
+        /// clang 把 SetException 的收尾和别的路径合并时，收尾不被落地块支配，不在处理块里。
+        /// 别的路径用它自己的一份，收尾归到处理块。那条路径通常到不了（捕获的异常不是空），finally 还原时按路径折叠掉。
+        /// </summary>
+        private ManagedRegion? SharedTail()
+        {
+            foreach (var region in body.Regions.Where(r => r.Kind == ManagedRegionKind.Catch && r.CatchType is null && r.Exception is not null))
+            {
+                var handler = region.Handler.ToHashSet();
+                var targets = region.Handler.Where(code.ContainsKey).SelectMany(a => code[a]).SelectMany(ManagedValues.Edges).Select(e => e.Target).Where(t => !handler.Contains(t)).Distinct().ToArray();
+                if (targets is not [var start] || StraightToReturn(start) is not { } chain) continue;
+                var statements = chain.SelectMany(a => code[a]).Where(s => s is not ManagedJump).ToList();
+                if (!statements.Any(s => IsBuilderCall(s, "SetException") && s is ManagedCall { Invocation.Arguments: [var value] } && IsLocal(value, region.Exception!.Variable))) continue;
+                // 收尾的后续块只从收尾进入。
+                var members = chain.ToHashSet();
+                if (code.Any(p => !members.Contains(p.Key) && p.Value.SelectMany(ManagedValues.Edges).Any(e => e.Target != start && members.Contains(e.Target)))) continue;
+                var copy = FreshAfter(start);
+                code[copy] = statements;
+                foreach (var at in code.Keys.Where(a => a != copy && !handler.Contains(a)).ToArray())
+                    code[at] = code[at].Select(s => ManagedValues.MapEdges(s, e => e.Target == start ? e with { Target = copy } : e)).ToList();
+                var extended = region with { Handler = [.. region.Handler, .. chain] };
+                body = body with { Regions = body.Regions.Select(r => ReferenceEquals(r, region) ? extended : r).ToArray() };
+                return extended;
+            }
+            return null;
+        }
+
+        /// <summary>从这个块到 return 没有分支时返回沿途的块。</summary>
+        private List<ulong>? StraightToReturn(ulong start)
+        {
+            var chain = new List<ulong>();
+            for (var at = start; chain.Count < Budget; )
+            {
+                chain.Add(at);
+                switch (code[at].LastOrDefault())
+                {
+                    case ManagedReturn: return chain;
+                    case ManagedJump { Edge: { Copies.Count: 0 } edge } when !code[at].SkipLast(1).Any(s => ManagedValues.Edges(s).Count > 0) && !chain.Contains(edge.Target): at = edge.Target; break;
+                    default: return null;
+                }
+            }
+            return null;
         }
 
         private LocalValue? StateLocal()
@@ -311,11 +356,82 @@ public static class AsyncForms
             if (!Entries(sites.Select(s => s.Item2).ToArray())) return null;
             foreach (var (block, call) in sites)
                 if (!Await(block, call)) return null;
-            return StateReads() ? Layout(region) : null;
+            SignedRangeChecks();
+            return HoistThis() && StateReads() ? Layout(region) : null;
+        }
+
+        /// <summary>
+        /// 读 this 的语句可能夹在两次状态比较之间，反编译器追踪分派时走到别的语句就停下，后面的比较留在输出里。
+        /// 读这个字段没有副作用，也没有别的写入时，提到读状态之后。
+        /// </summary>
+        private bool HoistThis()
+        {
+            if (num is not { } cached) return true;
+            var (at, index) = (entry, 0);
+            var before = new HashSet<ulong>();
+            for (var steps = 0; steps < Budget; steps++)
+            {
+                var statement = code[at].ElementAtOrDefault(index);
+                if (statement is ManagedAssignment { Target: var target, Value: var value } && target.Variable.Equals(cached.Variable) && IsField(value, StateName)) break;
+                if (statement is ManagedAssignment { Value: var read } && IsField(read, ThisName)) index++;
+                else if (statement is ManagedJump { Edge: { Copies.Count: 0 } edge })
+                {
+                    before.Add(at);
+                    (at, index) = (edge.Target, 0);
+                }
+                else return true;
+            }
+            var dispatch = new HashSet<ulong>();
+            foreach (var state in code.Values.SelectMany(s => s).Select(StateStored).OfType<long>().Append(-1).Distinct())
+                if (state >= -1) Dispatch(state, visited: dispatch);
+            var insert = index + 1;
+            foreach (var address in dispatch.Where(a => !before.Contains(a)))
+                for (var i = address == at ? insert : 0; i < code[address].Count; i++)
+                {
+                    if (code[address][i] is not ManagedAssignment { Target: var target, Value: var value } assignment || !IsField(value, ThisName)) continue;
+                    if (address == at && i == insert) { insert++; continue; }
+                    if (!OnlyThis(target.Variable)) return Fail("num:this");
+                    code[address].RemoveAt(i--);
+                    code[at].Insert(insert++, assignment);
+                }
+            return true;
+        }
+
+        private bool OnlyThis(Variable variable) => code.Values.SelectMany(s => s).All(s => s switch
+        {
+            ManagedAssignment { Target: var target, Value: var value } when target.Variable.Equals(variable) => IsField(value, ThisName),
+            ManagedCall { Result: { } result } when result.Variable.Equals(variable) => false,
+            _ => !ManagedValues.Edges(s).SelectMany(e => e.Copies).Any(c => c.Target.Variable.Equals(variable)),
+        });
+
+        /// <summary>
+        /// clang 把 switch (num) 降级成无符号范围检查加跳转表。无符号比较写到 IL 上带转换，反编译器追踪状态局部时不认，也不是 Roslyn 的写法，拆成两个有符号比较。
+        /// </summary>
+        private void SignedRangeChecks()
+        {
+            if (num is not { } cached) return;
+            foreach (var at in code.Keys.ToArray())
+            {
+                if (code[at] is not [.., ManagedBranch { Condition: ComparisonValue { Left: var left, Right: ConstantValue bound } test } branch] || !IsLocal(left, cached.Variable)) continue;
+                var (inside, outside, limit) = test.Condition switch
+                {
+                    Cond.Ule => (branch.Taken, branch.Fallthrough, bound.Bits + 1),
+                    Cond.Ult => (branch.Taken, branch.Fallthrough, bound.Bits),
+                    Cond.Ugt => (branch.Fallthrough, branch.Taken, bound.Bits + 1),
+                    Cond.Uge => (branch.Fallthrough, branch.Taken, bound.Bits),
+                    _ => (null!, null!, 0UL),
+                };
+                if (inside is null) continue;
+                ComparisonValue Below(ulong value) => new(Cond.Slt, cached, new ConstantValue(value, cached.Type, cached.Width), test.Type);
+                var upper = FreshAfter(at);
+                code[upper] = [new ManagedBranch(branch.Address, Below(limit), inside, outside)];
+                code[at][^1] = new ManagedBranch(branch.Address, Below(0), outside, new ManagedEdge(upper, []));
+            }
         }
 
         /// <summary>
         /// 反编译器提升后 num 没有定义，只认两处读取：方法和 try 开头的分派，finally 开头的判断。其他读取留下来就读到未赋值的局部。
+        /// 它追踪状态局部时只认和常量的直接比较、switch 的下标。
         /// </summary>
         private bool StateReads()
         {
@@ -329,9 +445,26 @@ public static class AsyncForms
                 {
                     var values = statement is ManagedAssignment assignment ? [assignment.Value] : ManagedValues.Of(statement);
                     if (!values.Concat(ManagedValues.CopiedValues(statement)).SelectMany(ManagedValues.Walk).Any(v => IsLocal(v, cached.Variable))) continue;
-                    if (statement is not (ManagedBranch or ManagedSwitch) || !(dispatch.Contains(address) || guards.Contains(address))) return Fail("num:read");
+                    if (statement is not (ManagedBranch or ManagedSwitch) || !(dispatch.Contains(address) || guards.Contains(address))) return Fail($"num:read:{address:x}");
+                    if (!Trackable(statement, cached.Variable)) return Fail("num:form");
                 }
             return true;
+        }
+
+        private static bool Trackable(ManagedStatement statement, Variable variable)
+        {
+            static bool Direct(ManagedValue condition, Variable variable) => condition switch
+            {
+                NegatedValue negated => Direct(negated.Operand, variable),
+                ComparisonValue { Condition: not (Cond.Ule or Cond.Ult or Cond.Ugt or Cond.Uge), Left: var left, Right: ConstantValue } => IsLocal(left, variable),
+                _ => false,
+            };
+            return statement switch
+            {
+                ManagedBranch { Condition: var condition } => Direct(condition, variable),
+                ManagedSwitch { Index: var index } => IsLocal(index, variable),
+                _ => false,
+            };
         }
 
         /// <summary>值是否在测试一个布尔局部或 num 的符号位。Negated 表示值为真时测试的量为假。</summary>
@@ -596,7 +729,7 @@ public static class AsyncForms
         private void MergeChains(ManagedRegion main)
         {
             var inner = body.Regions.Where(r => !ReferenceEquals(r, main)).ToArray();
-            string Place(ulong block) => string.Join(",", inner.Select((r, i) => r.Try.Contains(block) ? $"t{i}" : r.Handler.Contains(block) ? $"h{i}" : "")) + (main.Handler.Contains(block) ? "m" : "");
+            string Place(ulong block) => string.Join(",", inner.Select((r, i) => r.Try.Contains(block) ? $"t{i}" : r.Handler.Contains(block) ? $"h{i}" : "")) + (main.Handler.Contains(block) ? "m" : main.Try.Contains(block) ? "t" : "");
             var entries = body.Regions.Select(r => r.HandlerEntry).ToHashSet();
             var predecessors = new Dictionary<ulong, int>();
             foreach (var edge in code.Values.SelectMany(s => s).SelectMany(ManagedValues.Edges))
@@ -1046,7 +1179,7 @@ public static class AsyncForms
             foreach (var at in inTry)
                 if (!(previous.Contains(at) || at == head && entered || inner.Any(r => r.Try.Contains(at))) && code[at].Any(s => s is ManagedThrow or ManagedRethrow or ManagedCheck or ManagedHole))
                 {
-                    Fail($"layout:throws:{code[at].First(s => s is ManagedThrow or ManagedRethrow or ManagedCheck or ManagedHole).GetType().Name}");
+                    Fail($"layout:throws:{code[at].First(s => s is ManagedThrow or ManagedRethrow or ManagedCheck or ManagedHole).GetType().Name}:{at:x}:{first:x}:{head:x}:{entered}");
                     return null;
                 }
 

@@ -16,7 +16,8 @@ namespace Cpp2CS.Recovery.Control;
 /// catch 路径上写给后续代码的复制在抛出之后没有读者，只要处理体不读它们就可以丢弃。
 /// 还原之后只为异常到达而赋值的局部不再有读者，局部可以再合并一次。
 /// 还原后处理体里的异常和重新抛出的异常都走 try 外层的区域，所以路径上能抛出的语句必须和 try 在同样的外层区域里。
-/// 异步状态机挂起时不运行 finally：处理体开头判断状态局部，挂起路径上 clang 把它折叠掉了，出口路径直接到目标。调用方说明哪些语句是挂起，这样的出口不比较处理体。
+/// 异步状态机挂起时不运行 finally：处理体开头判断状态局部。调用方说明哪些语句是挂起，挂起路径的出口不比较处理体，直接到目标；
+/// 其他路径上状态局部是负的（入口读到 -1，恢复时写回 -1），比较时只走运行处理体的那一支。这两种路径上 clang 都可能已经把判断折叠掉，也可能留着。
 /// </summary>
 public static class FinallyRecovery
 {
@@ -27,7 +28,7 @@ public static class FinallyRecovery
 
     /// <param name="state">挂起时写成非负值的状态局部。</param>
     /// <param name="suspends">语句是挂起调用。</param>
-    public static ManagedBody Run(ManagedBody body, Variable? state = null, Func<ManagedStatement, bool>? suspends = null)
+    public static ManagedBody Run(ManagedBody body, LocalValue? state = null, Func<ManagedStatement, bool>? suspends = null)
     {
         if (body.Regions.All(r => r.Kind != ManagedRegionKind.Catch)) return body;
         // 方法体可能已经还原过一轮，新块不能和已有的同址。
@@ -48,7 +49,7 @@ public static class FinallyRecovery
     /// <summary>路径上已知的局部：常量，或者 null 表示当前异常（非空，具体值无关）。</summary>
     private sealed record Cursor(ulong Block, int Index, ImmutableDictionary<Variable, ConstantValue?> Known);
 
-    private sealed class Recovery(ManagedBody body, ManagedRegion region, Func<ulong> fresh, Variable? state, Func<ManagedStatement, bool>? suspends)
+    private sealed class Recovery(ManagedBody body, ManagedRegion region, Func<ulong> fresh, LocalValue? state, Func<ManagedStatement, bool>? suspends)
     {
         private readonly Dictionary<ulong, ManagedBlock> blocks = body.Blocks.ToDictionary(b => b.Address);
         private readonly List<ManagedBlock> handler = [];
@@ -78,25 +79,55 @@ public static class FinallyRecovery
             if (Build(start, []) is not { } entry || handler.Count <= 1) return null;
             // 丢弃的复制写的局部，处理体要读就不能丢。
             if (handler.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => dropped.Contains(l.Variable))) return null;
-            if (Nested() is { } nested && Exits(nested, entry) is { } all && Rewrite(entry, nested, all) is { } whole) return whole;
-            if (Exits(region.Try, entry) is { } exits) return Rewrite(entry, region.Try, exits);
-            return Extended() is { } extended && Exits(extended, entry) is { } wider ? Rewrite(entry, extended, wider) : null;
+            if (Nested() is { } nested && Absorbing(nested, entry) is var (whole, all) && Rewrite(entry, whole, all) is { } rewritten) return rewritten;
+            if (Absorbing(region.Try, entry) is var (blocks1, exits)) return Rewrite(entry, blocks1, exits);
+            return Extended() is { } extended && Absorbing(extended, entry) is var (blocks2, wider) ? Rewrite(entry, blocks2, wider) : null;
         }
 
-        private Dictionary<ManagedEdge, ManagedEdge>? Exits(IReadOnlyList<ulong> tryBlocks, ulong entry)
+        /// <summary>
+        /// clang 把 try 末尾和 catch 末尾相同的语句下沉成共用的块，它在 try 之外、处理体之前。
+        /// 这样的块只从 try 进入，不会抛出，并入 try 不改变行为；出口仍然要和处理体比较，所以不会把处理体的副本吞进去。
+        /// </summary>
+        private (List<ulong> Blocks, Dictionary<ManagedEdge, ManagedEdge> Exits)? Absorbing(IReadOnlyList<ulong> tryBlocks, ulong entry)
         {
+            var grown = tryBlocks.ToList();
+            for (var steps = 0; steps < Budget; steps++)
+            {
+                if (Exits(grown, entry, out var failed) is { } exits) return (grown, exits);
+                if (failed is not { } target || !Absorbable(target, grown)) return null;
+                grown.Add(target);
+            }
+            return null;
+        }
+
+        private bool Absorbable(ulong address, List<ulong> tryBlocks)
+        {
+            if (region.Handler.Contains(address) || !blocks.TryGetValue(address, out var block) || !SameScope(address) || block.Statements.Any(Throws)) return false;
+            if (body.Regions.Any(r => r.Handler.Contains(address))) return false;
+            var inTry = tryBlocks.ToHashSet();
+            return body.Blocks.Where(b => b.Statements.SelectMany(ManagedValues.Edges).Any(e => e.Target == address)).All(b => inTry.Contains(b.Address));
+        }
+
+        private Dictionary<ManagedEdge, ManagedEdge>? Exits(IReadOnlyList<ulong> tryBlocks, ulong entry, out ulong? failed)
+        {
+            failed = null;
             var inTry = tryBlocks.ToHashSet();
             var exits = new Dictionary<ManagedEdge, ManagedEdge>(ReferenceEqualityComparer.Instance);
-            var skips = SkipsWhenSuspended(entry);
+            // 挂起之后直接离开 try 时才知道路径上的状态局部。
+            var skips = SkipsWhenSuspended(entry) && !tryBlocks.Where(Suspends).SelectMany(a => blocks[a].Statements).SelectMany(ManagedValues.Edges).Any(e => inTry.Contains(e.Target));
             foreach (var address in tryBlocks)
             {
-                var suspended = skips && suspends!= null && blocks[address].Statements.Any(suspends);
+                var suspended = skips && Suspends(address);
                 foreach (var statement in blocks[address].Statements)
                 {
                     if (statement is ManagedEndFault || statement is ManagedReturn && !suspended) return null;
                     foreach (var edge in ManagedValues.Edges(statement).Where(e => !inTry.Contains(e.Target)))
                     {
-                        if ((suspended ? Direct(edge) : Exit(edge, entry)) is not { } rewritten) return null;
+                        if ((suspended ? Direct(edge) : Exit(edge, entry, skips)) is not { } rewritten)
+                        {
+                            failed = edge.Target;
+                            return null;
+                        }
                         exits[edge] = rewritten;
                     }
                 }
@@ -104,10 +135,22 @@ public static class FinallyRecovery
             return exits.Count == 0 ? null : exits;
         }
 
+        private bool Suspends(ulong address) => suspends is not null && blocks[address].Statements.Any(suspends);
+
+        private bool IsState(LocalValue local) => state is { } s && local.Variable.Equals(s.Variable);
+
+        /// <summary>条件判断状态局部的符号。Sge 和 Slt 之外的比较不认。</summary>
+        private bool? StateSign(ManagedValue condition, ImmutableDictionary<Variable, ConstantValue?> known) => condition switch
+        {
+            ComparisonValue { Left: LocalValue left, Right: ConstantValue { Bits: 0 }, Condition: var cond and (Cond.Sge or Cond.Slt) } when IsState(left)
+                && known.TryGetValue(left.Variable, out var sign) => (sign is null) == (cond == Cond.Sge),
+            _ => null,
+        };
+
         /// <summary>处理体的第一条语句判断状态局部，非负时直接结束。</summary>
         private bool SkipsWhenSuspended(ulong entry)
         {
-            if (state is not { } variable || !built.TryGetValue(entry, out var first) || first.Statements is not [ManagedBranch { Condition: ComparisonValue { Left: LocalValue left, Right: ConstantValue { Bits: 0 } } guard } branch] || !left.Variable.Equals(variable)) return false;
+            if (state is not { } local || !built.TryGetValue(entry, out var first) || first.Statements is not [ManagedBranch { Condition: ComparisonValue { Left: LocalValue left, Right: ConstantValue { Bits: 0 } } guard } branch] || !left.Variable.Equals(local.Variable)) return false;
             var skipped = guard.Condition switch
             {
                 Cond.Sge => branch.Taken.Target,
@@ -122,7 +165,8 @@ public static class FinallyRecovery
         {
             var match = new ExitMatch();
             var real = new List<ManagedCopy>();
-            var known = Follow(edge, ImmutableDictionary<Variable, ConstantValue?>.Empty, real);
+            // 已知表里状态局部对应 null 表示挂起（非负），常量表示其他路径（负）。
+            var known = Follow(edge, ImmutableDictionary<Variable, ConstantValue?>.Empty, real).SetItem(state!.Variable, null);
             match.Before.AddRange(real);
             real = [];
             if (Settle(new(edge.Target, 0, known), real) is not var (final, _) || final.Index != 0 || real.Any(c => !Movable(c))) return null;
@@ -283,15 +327,17 @@ public static class FinallyRecovery
                 && walked.OfType<LocalValue>().Select(l => l.Variable).Distinct().Count() == 1;
         }
 
-        private static bool? Fold(ManagedValue condition, ImmutableDictionary<Variable, ConstantValue?> known) => condition switch
+        private bool? Fold(ManagedValue condition, ImmutableDictionary<Variable, ConstantValue?> known) => condition switch
         {
             NegatedValue negated => !Fold(negated.Operand, known),
+            // 状态局部只知道符号，不知道具体的值。
+            ComparisonValue { Left: LocalValue left } when IsState(left) => StateSign(condition, known),
             LocalValue local when known.TryGetValue(local.Variable, out var value) => value is null || value.Bits != 0,
             ComparisonValue { Condition: var cond and (Cond.Eq or Cond.Ne), Left: LocalValue left, Right: ConstantValue right } when known.TryGetValue(left.Variable, out var value) =>
                 // 当前异常不是空。和其他常量比较的不是保存异常的局部。
                 value is null ? (right.Bits == 0 ? cond == Cond.Ne : null) : (value.Bits == right.Bits) == (cond == Cond.Eq),
             ComparisonValue comparison when OverOneLocal(comparison) => ConstantConditions.Evaluate(comparison, leaf =>
-                leaf is LocalValue local && known.TryGetValue(local.Variable, out var value) && value is { Width: <= 32 } ? (int)value.Bits : null) is { } result ? result != 0 : null,
+                leaf is LocalValue local && !IsState(local) && known.TryGetValue(local.Variable, out var value) && value is { Width: <= 32 } ? (int)value.Bits : null) is { } result ? result != 0 : null,
             _ => null,
         };
 
@@ -446,11 +492,12 @@ public static class FinallyRecovery
         }
 
         /// <summary>出口路径和处理体同步走，得到 leave 的目标和要留在出口上的复制。</summary>
-        private ManagedEdge? Exit(ManagedEdge edge, ulong entry)
+        private ManagedEdge? Exit(ManagedEdge edge, ulong entry, bool notSuspended)
         {
             var match = new ExitMatch();
             var real = new List<ManagedCopy>();
             var known = Follow(edge, ImmutableDictionary<Variable, ConstantValue?>.Empty, real);
+            if (notSuspended) known = known.SetItem(state!.Variable, new ConstantValue(ulong.MaxValue, state.Type, state.Width));
             match.Before.AddRange(real);
             return Match(entry, new(edge.Target, 0, known), match) ? Finish(match) : null;
         }
@@ -488,6 +535,8 @@ public static class FinallyRecovery
                         match.Target = (final.Block, final.Known);
                         return true;
                     }
+                    case ManagedBranch branch when StateSign(branch.Condition, cursor.Known) is { } sign:
+                        return Match(sign ? branch.Taken.Target : branch.Fallthrough.Target, cursor, match);
                     case ManagedBranch branch:
                     {
                         if (Settle(cursor, real) is not var (position, current) || current is not ManagedBranch other) return false;
