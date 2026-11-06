@@ -107,7 +107,7 @@ public static class RuntimeOps
     }
 
     /// <summary>越界条件的下标与长度：index >=u length、length <=u index，或 length == 0（下标 0）。</summary>
-    private static (Sym Index, Sym Length)? BoundsCondition(Sym condition) => SymTable.Resolve(condition) switch
+    internal static (Sym Index, Sym Length)? BoundsCondition(Sym condition) => SymTable.Resolve(condition) switch
     {
         OpSym { Op: { Kind: OperatorKind.Compare } c, Args: [var a, var b] } when c.Cond == Cond.Uge => (a, b),
         OpSym { Op: { Kind: OperatorKind.Compare } c, Args: [var a, var b] } when c.Cond == Cond.Ule => (b, a),

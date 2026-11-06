@@ -30,6 +30,7 @@ internal sealed partial class BodyBuilder
     private readonly List<RecoveryHole> holes = [];
     private readonly Dictionary<ResultSym, Call> constructions = [];
     private readonly HashSet<Sym> absorbedChecks = [];
+    private readonly HashSet<ManagedStatement> omissibleReads = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<Call, LocalValue> exceptions = new(ReferenceEqualityComparer.Instance);
     private IReadOnlyList<ExceptionRegionPlan> regions = [];
     private EffectAnalysis effects = null!;
@@ -167,6 +168,11 @@ internal sealed partial class BodyBuilder
             }
             blocks.Add(new ManagedBlock(block.Start, statements));
         }
+        var readLocals = blocks.SelectMany(b => b.Statements)
+            .SelectMany(s => (s is ManagedAssignment a ? [a.Value] : ManagedValues.Of(s)).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
+            .OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
+        foreach (var block in blocks)
+            ((List<ManagedStatement>)block.Statements).RemoveAll(s => omissibleReads.Contains(s) && s is ManagedAssignment a && !readLocals.Contains(a.Target.Variable));
         foreach (var (result, _) in constructions.Where(p => !locals.ContainsKey(p.Key)))
             holes.Add(new RecoveryHole(result.Site.Address, "构造 分配后没有构造函数调用"));
         var managedRegions = regions.Where(r => reachable.Contains(r.Pad) && r.Try.Any(reachable.Contains)).Select(r => new ManagedRegion(

@@ -34,7 +34,13 @@ internal sealed partial class BodyBuilder
                 continue;
             }
             if (Read(read, statement.Address) is { } value)
-                output.Add(new ManagedAssignment(statement.Address, Local(read, value.Type), value));
+            {
+                var assignment = new ManagedAssignment(statement.Address, Local(read, value.Type), value);
+                output.Add(assignment);
+                // 只可能抛空引用，而且随后第一次访问同一对象时抛同样的异常：结果没人读就不用写。
+                if (value is ArrayLengthValue or StringLengthValue or FieldValue { Accessor: null, Pending: null }
+                    && effects.Absorbed(block, index + 1, oracle.Decompose(read.Address).Root, null)) omissibleReads.Add(assignment);
+            }
         }
         switch (statement)
         {

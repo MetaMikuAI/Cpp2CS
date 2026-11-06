@@ -2,6 +2,7 @@ using Cpp2CS.Ir;
 using Cpp2CS.Machine.Algebra;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Recovery.Control;
+using Cpp2CS.Recovery.Runtime;
 using Cpp2CS.Recovery.Typing;
 using Cpp2CS.Recovery.Values;
 
@@ -102,8 +103,9 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
     /// 判空被吸收：从检查往后的每条路径上，第一个经 target 的访问（字段、元素、实例调用的接收者、写入）都对 null 抛出同一异常。
     /// 两点之间只允许无副作用的语句、条件无副作用的分支与只可能抛出 NullReferenceException 的读取：无论哪个对象为 null，两种写法都在任何副作用之前抛出同一种异常。
     /// target 经 φ 流到合流点时，φ 的值就是判过的值（clang 把合流后的判空提到各入边）。吸收成功时 receivers 得到这些值，它们上的调用要写成 callvirt。
+    /// 不给 receivers 时直接调用不算访问：调用者无法要求它写成 callvirt。
     /// </summary>
-    public bool Absorbed(Block block, int index, Sym target, ISet<Sym> receivers)
+    public bool Absorbed(Block block, int index, Sym target, ISet<Sym>? receivers)
     {
         var nonNull = NonNull(block, index);
         var origin = block;
@@ -138,7 +140,7 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
                     case Store store: return aliases.Contains(oracle.Decompose(values.Operands(store)[0]).Root);
                     case Call { Op: null } call:
                         // 直接调用可覆盖的虚方法可能是 base 调用，不能为了判空改成动态分派；其他方法 IL 里本来就是 callvirt。
-                        return oracle.Callee(call) is { Method: { IsStatic: false, IsOverridable: false } } && call.Arguments.Length > 0 && Receiver(1);
+                        return receivers is not null && oracle.Callee(call) is { Method: { IsStatic: false, IsOverridable: false } } && call.Arguments.Length > 0 && Receiver(1);
                     // 委托的接收者不在实参里，排在实参之后。
                     case Call { Op.Kind: OpKind.CallDelegate, DelegateReceiver: not null } invoke:
                         return Receiver(1 + invoke.Arguments.Length);
@@ -147,6 +149,8 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
                         return dispatch.Arguments.Length > 0 && Receiver(1);
                     case Call call when (MachineEffects.Operation(call).Exceptions & ~ExceptionEffect.NullReference) == 0
                         && (MachineEffects.Operation(call).Kinds & ~EffectKind.Read) == 0: continue;
+                    // 被元素访问吸收的越界检查不写出，等于不存在。
+                    case Call call when BoundsCheckAbsorbed(at, i, call): continue;
                     default: return false;
                 }
             }
@@ -163,7 +167,7 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
             return true;
         }
         if (!Walk(block, index, reached.ToHashSet())) return false;
-        receivers.UnionWith(reached);
+        receivers?.UnionWith(reached);
         return true;
     }
 
@@ -201,6 +205,18 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
             }
         }
         return false;
+    }
+
+    private bool BoundsCheckAbsorbed(Block block, int index, Call call)
+    {
+        var operands = values.Operands(call);
+        return call.Op switch
+        {
+            { Kind: OpKind.BoundsCheck } when operands is [_, var position, var length, ..] => BoundsAbsorbed(block, index + 1, position, length),
+            { Kind: OpKind.ThrowIf, Operand: "System.IndexOutOfRangeException" } when operands is [_, var condition, ..] && RuntimeOps.BoundsCondition(condition) is var (position, length) =>
+                BoundsAbsorbed(block, index + 1, position, length),
+            _ => false,
+        };
     }
 
     /// <summary>
