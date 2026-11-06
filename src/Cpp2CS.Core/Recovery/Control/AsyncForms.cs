@@ -294,6 +294,7 @@ public static class AsyncForms
             ForwardReturns();
             num = StateLocal();
             HoistStateTests();
+            FoldStateTests();
             if (num is not null && !Flags(num)) return null;
             return Layout(region);
         }

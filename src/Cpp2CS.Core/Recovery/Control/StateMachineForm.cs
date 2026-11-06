@@ -146,6 +146,79 @@ internal abstract class StateMachineForm
         }
     }
 
+    /// <summary>
+    /// 分派之外还可能读 num：try 前面残留的 if (num == k)，走到这里的路径上状态 k 已经在入口分走了，clang 没有折叠。
+    /// 按路径求 num 可能的值，结果确定的分支改成跳转。反编译器只认分派和 finally 开头的读取。
+    /// </summary>
+    protected void FoldStateTests()
+    {
+        if (num is not { } cached) return;
+        var statements = code.Values.SelectMany(s => s).ToArray();
+        if (statements.SelectMany(s => (s is ManagedAssignment a ? [a.Value] : ManagedValues.Of(s)).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
+            .Any(v => v is AddressValue { Target: var target } && IsLocal(target, cached.Variable))) return;
+        var states = statements.Select(StateStored).OfType<long>().Where(k => k >= 0).ToHashSet();
+        var variable = new HashSet<Variable> { cached.Variable };
+        // null 表示不是任何挂起状态的值。
+        var everything = states.Select(k => (long?)k).Append(null).ToHashSet();
+        HashSet<long?> Written(ManagedValue value) => value is ConstantValue constant ? [states.Contains((int)constant.Bits) ? (int)constant.Bits : null] : everything;
+        bool? NotState(ManagedValue condition) => condition switch
+        {
+            NegatedValue negated => !NotState(negated.Operand),
+            ComparisonValue { Condition: Cond.Eq, Left: var left, Right: ConstantValue right } when IsLocal(left, cached.Variable) && states.Contains((int)right.Bits) => false,
+            ComparisonValue { Condition: Cond.Ne, Left: var left, Right: ConstantValue right } when IsLocal(left, cached.Variable) && states.Contains((int)right.Bits) => true,
+            _ => null,
+        };
+        bool? Truth(ManagedValue condition, long? value) => value is { } known ? Evaluate(condition, variable, known) is { } result ? result != 0 : null : NotState(condition);
+        HashSet<long?> After(ManagedEdge edge, HashSet<long?> values)
+        {
+            foreach (var copy in edge.Copies)
+                if (copy.Target.Variable.Equals(cached.Variable)) values = Written(copy.Value);
+            return values;
+        }
+        var origins = added.ToDictionary(a => a.Block, a => a.Origin);
+        ulong Home(ulong block)
+        {
+            while (origins.TryGetValue(block, out var origin)) block = origin;
+            return block;
+        }
+        var before = new Dictionary<ulong, HashSet<long?>>();
+        var atEnd = new Dictionary<ulong, HashSet<long?>>();
+        var work = new Queue<ulong>();
+        void Flow(ulong target, HashSet<long?> values)
+        {
+            if (!code.ContainsKey(target) || values.Count == 0) return;
+            if (!before.TryGetValue(target, out var known)) before[target] = known = [];
+            else if (known.IsSupersetOf(values)) return;
+            known.UnionWith(values);
+            work.Enqueue(target);
+        }
+        Flow(entry, everything);
+        while (work.TryDequeue(out var at))
+        {
+            var current = before[at];
+            var seen = new HashSet<long?>(current);
+            foreach (var statement in code[at])
+            {
+                if (statement is ManagedAssignment { Target: var target, Value: var value } && target.Variable.Equals(cached.Variable)) current = Written(value);
+                if (statement is ManagedCall { Result: { } result } && result.Variable.Equals(cached.Variable)) current = everything;
+                seen.UnionWith(current);
+                if (statement is ManagedBranch branch)
+                {
+                    atEnd[at] = current;
+                    var values = current;
+                    Flow(branch.Taken.Target, After(branch.Taken, values.Where(v => Truth(branch.Condition, v) != false).ToHashSet()));
+                    Flow(branch.Fallthrough.Target, After(branch.Fallthrough, values.Where(v => Truth(branch.Condition, v) != true).ToHashSet()));
+                }
+                else foreach (var edge in ManagedValues.Edges(statement)) Flow(edge.Target, After(edge, current));
+            }
+            foreach (var region in body.Regions.Where(r => r.Try.Contains(Home(at)))) Flow(region.HandlerEntry, seen);
+        }
+        foreach (var (at, values) in atEnd)
+            if (code[at] is [.., ManagedBranch branch] && ManagedValues.Walk(branch.Condition).Any(v => IsLocal(v, cached.Variable))
+                && values.Select(v => Truth(branch.Condition, v)).Distinct().ToArray() is [{ } taken])
+                code[at][^1] = new ManagedJump(branch.Address, taken ? branch.Taken : branch.Fallthrough);
+    }
+
     protected static long? Evaluate(ManagedValue value, HashSet<Variable> state, long known) =>
         ConstantConditions.Evaluate(value, leaf => leaf is LocalValue local && state.Contains(local.Variable) || IsField(leaf, StateName) ? known : null);
 
