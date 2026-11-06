@@ -38,6 +38,7 @@ public static partial class Decompilation
         transforms?.Register(decompiler, DecompilePosition.BeforeLegality);
         decompiler.AstTransforms.Add(new ConstructorCalls());
         decompiler.AstTransforms.Add(new StructConstructors());
+        decompiler.AstTransforms.Add(new LibraryInternals());
         decompiler.AstTransforms.Add(new ExpressionForms());
         decompiler.AstTransforms.Add(new ShadowedLocals());
         decompiler.AstTransforms.Add(new DefiniteAssignment());
@@ -187,7 +188,9 @@ public static partial class Decompilation
             var file = files.Find(f => f.TypeName == type.Name && f.Namespace == type.Namespace);
             if (file is null) continue;
             var closures = ClosureReference.Matches(file.Source).Select(m => m.Value).Distinct();
-            if (!closures.Any(c => !file.Source.Contains("class " + c, StringComparison.Ordinal)) && !ClosureThis.IsMatch(file.Source) && !LambdaMethod.IsMatch(file.Source)) continue;
+            var declared = DeclaredLambdaMethod.Matches(file.Source).Select(m => m.Groups[1].Value).ToHashSet();
+            if (!closures.Any(c => !file.Source.Contains("class " + c, StringComparison.Ordinal)) && !ClosureThis.IsMatch(file.Source)
+                && LambdaMethod.Matches(file.Source).All(m => declared.Contains(m.Value))) continue;
             Redo(type, s => { s.AnonymousMethods = false; s.AnonymousTypes = false; s.LocalFunctions = false; });
             visibleClosures.Add(type.Handles[0]);
         }
@@ -210,6 +213,7 @@ public static partial class Decompilation
     private static readonly System.Text.RegularExpressions.Regex HiddenReference = new(@"\b_003CPrivateImplementationDetails_003E\b|\b_003C_003Ef__AnonymousType\d+\b", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex ClosureThis = new(@"\(_003C_003Ec__DisplayClass\d+_\d+\)(\(object\))?this\b", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex LambdaMethod = new(@"\b_003C\w+?_003Eb__\d+(_\d+)?\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex DeclaredLambdaMethod = new(@"(?m)^\s*(?:public|internal|private|protected)\b[^=\r\n;]*?\b(_003C\w+?_003Eb__\d+(?:_\d+)?)(?:<[^>\r\n]*>)?\(", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex ClosureReference = new(@"\b_003C_003Ec__DisplayClass\d+_\d+\b", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     private static string Print(SyntaxTree tree, DecompilerSettings settings)

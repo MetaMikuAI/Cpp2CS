@@ -6,7 +6,8 @@ namespace Cpp2CS.Output;
 
 /// <summary>
 /// 源码工程引用和反编译所用的程序集。恢复的方法体带着内联留下的访问：别的类型的私有成员、构造函数之外写只读字段、
-/// 只有 get 的自动属性的后备字段。这些 CIL 能表达，C# 不能。这里在副本上按方法体的实际用法放宽声明，方法体不变；
+/// 只有 get 的自动属性的后备字段。这些 CIL 能表达，C# 不能。这里在副本上按方法体的实际用法放宽主程序集的声明，方法体不变；
+/// 外部程序集只补被裁掉、但真实库里存在的成员，访问外部私有成员的写法由反编译阶段折回公开写法。
 /// assemblies/ 保持原样，供底层检查和执行对照。
 /// </summary>
 public static class SourceReferences
@@ -18,7 +19,7 @@ public static class SourceReferences
         using var resolver = new DirectoryResolver(searchDirectory);
         var main = resolver.Resolve(Path.GetFileNameWithoutExtension(assemblyPath)).MainModule;
         var changed = new HashSet<ModuleDefinition>();
-        new Declarations(main, resolver.Modules, changed).Apply();
+        new Declarations(main, changed).Apply();
         AddStrippedBuilderMembers(resolver.Modules, changed);
         AddPlaceholderReference(main, changed);
         AddStrippedRuntimeMembers(resolver.Modules, changed);
@@ -131,8 +132,8 @@ public static class SourceReferences
         }
     }
 
-    /// <summary>按主程序集方法体的用法放宽声明。放宽到够用为止：同程序集写成 internal，跨程序集写成 public。</summary>
-    private sealed class Declarations(ModuleDefinition main, IReadOnlyList<ModuleDefinition> modules, HashSet<ModuleDefinition> changed)
+    /// <summary>按主程序集方法体的用法放宽它自己的声明，放宽到够用为止：写成 internal，虚方法族写成 public。</summary>
+    private sealed class Declarations(ModuleDefinition main, HashSet<ModuleDefinition> changed)
     {
         private readonly HashSet<FieldDefinition> demoted = [];
         private readonly HashSet<MethodDefinition> widened = [];
@@ -143,7 +144,7 @@ public static class SourceReferences
         {
             // 先定自动属性：退回普通属性后，后备字段按普通字段检查。
             foreach (var (method, instruction) in Instructions())
-                if (instruction.Operand is FieldReference reference && reference.Resolve() is { } field && Property(field) is { } property && RequiresField(field, property, method, instruction))
+                if (instruction.Operand is FieldReference reference && reference.Resolve() is { } field && field.Module == main && Property(field) is { } property && RequiresField(field, property, method, instruction))
                     demoted.Add(field);
             foreach (var type in main.GetTypes())
             {
@@ -191,6 +192,7 @@ public static class SourceReferences
 
         private void Field(FieldDefinition field, FieldReference reference, Instruction instruction, MethodDefinition method)
         {
+            if (field.Module != main) return;
             if (demoted.Contains(field)) demotedReferences.Add(reference);
             if (!demoted.Contains(field) && Property(field) is { } property)
             {
@@ -214,10 +216,9 @@ public static class SourceReferences
                 foreach (var attribute in attributes.Where(a => a.AttributeType.FullName == "System.Runtime.CompilerServices.IsReadOnlyAttribute").ToArray()) attributes.Remove(attribute);
             }
             if (Accessible(field.Attributes & FieldAttributes.FieldAccessMask, field.DeclaringType, field.IsStatic, instruction, method)) return;
-            var isPublic = field.Module != main;
-            field.Attributes = field.Attributes & ~FieldAttributes.FieldAccessMask | (isPublic ? FieldAttributes.Public : FieldAttributes.Assembly);
+            field.Attributes = field.Attributes & ~FieldAttributes.FieldAccessMask | FieldAttributes.Assembly;
             changed.Add(field.Module);
-            Raise(field.FieldType, isPublic);
+            Raise(field.FieldType, false);
         }
 
         /// <summary>成员的签名不能比成员本身更难访问（CS0050～CS0053）：放宽成员时连带放宽签名里的类型。</summary>
@@ -236,10 +237,11 @@ public static class SourceReferences
             }
             for (var definition = type.Resolve(); definition is not null; definition = definition.DeclaringType)
             {
+                if (definition.Module != main) continue;
                 var visibility = definition.Attributes & TypeAttributes.VisibilityMask;
                 var enough = definition.IsNested
-                    ? visibility == TypeAttributes.NestedPublic || !toPublic && definition.Module == main && visibility is TypeAttributes.NestedAssembly or TypeAttributes.NestedFamORAssem
-                    : visibility == TypeAttributes.Public || !toPublic && definition.Module == main;
+                    ? visibility == TypeAttributes.NestedPublic || !toPublic && visibility is TypeAttributes.NestedAssembly or TypeAttributes.NestedFamORAssem
+                    : visibility == TypeAttributes.Public || !toPublic;
                 if (enough) continue;
                 definition.Attributes = definition.Attributes & ~TypeAttributes.VisibilityMask | (definition.IsNested
                     ? toPublic ? TypeAttributes.NestedPublic : TypeAttributes.NestedAssembly
@@ -250,10 +252,11 @@ public static class SourceReferences
 
         private void Member(MethodDefinition target, Instruction instruction, MethodDefinition method)
         {
+            if (target.Module != main) return;
             var isFunctionPointer = instruction.OpCode.Code is Code.Ldftn or Code.Ldvirtftn;
             if (Accessible((FieldAttributes)(target.Attributes & MethodAttributes.MemberAccessMask), target.DeclaringType, target.IsStatic || isFunctionPointer, instruction, method)) return;
             if (target.IsVirtual) Family(target);
-            else Widen(target, target.Module == main ? MethodAttributes.Assembly : MethodAttributes.Public);
+            else Widen(target, MethodAttributes.Assembly);
         }
 
         private void Widen(MethodDefinition method, MethodAttributes access)
@@ -274,6 +277,8 @@ public static class SourceReferences
             if (!widened.Add(method)) return;
             var root = method;
             while (!root.IsNewSlot && Overridden(root) is { } above) root = above;
+            // 重写外部方法的访问级别跟外部声明一致，不能放宽。
+            if (root.Module != main) return;
             var pending = new Stack<TypeDefinition>([root.DeclaringType]);
             while (pending.TryPop(out var type))
             {
@@ -305,7 +310,7 @@ public static class SourceReferences
         {
             if (derived is not null) return derived;
             derived = [];
-            foreach (var type in modules.SelectMany(m => m.GetTypes()))
+            foreach (var type in main.GetTypes())
                 if (type.BaseType?.Resolve() is { } parent)
                 {
                     if (!derived.TryGetValue(parent, out var list)) derived[parent] = list = [];
@@ -348,10 +353,8 @@ public static class SourceReferences
             }
             for (var definition = type.Resolve(); definition is not null; definition = definition.DeclaringType)
             {
-                if (TypeAccessible(definition, from)) continue;
-                definition.Attributes = definition.Attributes & ~TypeAttributes.VisibilityMask | (definition.IsNested
-                    ? definition.Module == main ? TypeAttributes.NestedAssembly : TypeAttributes.NestedPublic
-                    : TypeAttributes.Public);
+                if (definition.Module != main || TypeAccessible(definition, from)) continue;
+                definition.Attributes = definition.Attributes & ~TypeAttributes.VisibilityMask | (definition.IsNested ? TypeAttributes.NestedAssembly : TypeAttributes.Public);
                 changed.Add(definition.Module);
             }
         }

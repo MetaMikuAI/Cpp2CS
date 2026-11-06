@@ -157,7 +157,9 @@ public static partial class Decompilation
             var inner = viaObject ? ((CastExpression)cast.Expression).Expression : cast.Expression;
             var target = cast.Annotation<ResolveResult>()?.Type ?? cast.Type.Annotation<ResolveResult>()?.Type;
             var source = StaticType(inner);
-            if (target?.GetDefinition() is not { } definition || source is null || !IsSharedInstance(target)) return;
+            if (target?.GetDefinition() is not { } definition || source is null) return;
+            // 具体化的代码把委托转换成实际实参的实例；委托的调用由 DelegateArguments 按原类型改写。
+            if (!IsSharedInstance(target) && !(viaObject && target.Kind == TypeKind.Delegate && MentionsTypeParameter(source))) return;
             // 作为泛型方法的实参时，共享实例的转换会让类型推断冲突（CS0411）。
             var isInferred = cast.Parent is InvocationExpression call && call.Target != cast && call.Annotation<ResolveResult>() is InvocationResolveResult { Member: IMethod { TypeArguments.Count: > 0 } };
             if (!viaObject && target.Kind != TypeKind.Delegate && !isInferred) return;
@@ -198,6 +200,11 @@ public static partial class Decompilation
                 if (arguments[i] is CastExpression { Type: PrimitiveType { Keyword: "object" }, Expression: var value } && parameter.Equals(StaticType(value)))
                 {
                     arguments[i].ReplaceWith(value.Clone());
+                    continue;
+                }
+                if (arguments[i] is CastExpression { Expression: CastExpression { Type: PrimitiveType { Keyword: "object" }, Expression: var specialized } } && parameter.Equals(StaticType(specialized)))
+                {
+                    arguments[i].ReplaceWith(specialized.Clone());
                     continue;
                 }
                 if (StaticType(arguments[i]) is not { Kind: not TypeKind.Unknown and not TypeKind.Null } argument) continue;
@@ -359,9 +366,12 @@ public static partial class Decompilation
             if (function is null) return;
             var isAsync = function is MethodDeclaration m && (m.HasModifier(Modifiers.Async) || m.Descendants.Any(d => d is YieldReturnStatement or YieldBreakStatement))
                 || function is LambdaExpression { IsAsync: true } || function is AnonymousMethodExpression { IsAsync: true };
-            if (!isAsync && value is not CastExpression) return;
             var uses = function.Descendants.OfType<IdentifierExpression>().Where(i => i.Identifier == variable.Name).ToArray();
             var rebinds = uses.Where(u => u.Parent is AssignmentExpression { Right: DirectionExpression } a && a.Left == u).ToArray();
+            // 只读字段不能按引用绑定（CS0198）。
+            var bindsReadOnly = rebinds.Select(r => ((AssignmentExpression)r.Parent!).Right).Prepend(variable.Initializer).OfType<DirectionExpression>()
+                .Any(d => d.Expression.Annotation<MemberResolveResult>()?.Member is IField { IsReadOnly: true });
+            if (!isAsync && !bindsReadOnly && value is not CastExpression) return;
             if (isAsync && value is not null && rebinds.Length == 0 && Stable(value, function))
             {
                 foreach (var use in uses) use.ReplaceWith(value.Clone());
