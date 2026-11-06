@@ -138,6 +138,15 @@ public sealed class MethodDecompiler
     /// <summary>写出的方法体还原成源码编译器的形态；内联证明用的方法体不经过这一步。</summary>
     public MethodRecoveryResult SourceForm(MethodRecoveryResult result)
     {
+        var formed = ControlForm(result);
+        if (formed.Body is not { } body) return formed;
+        var shared = SharedValues.Run(body, types, out var extracted);
+        return extracted == 0 ? formed
+            : formed with { Body = shared, Rules = [.. formed.Rules, new RuleTrace("shared.values", formed.Entry, RewriteStatus.Applied, "extracted", null, null)] };
+    }
+
+    private MethodRecoveryResult ControlForm(MethodRecoveryResult result)
+    {
         if (result.Body is not { } body) return result;
         var merged = AsReceivers.Run(body);
         if (!ReferenceEquals(merged, body)) result = result with { Rules = [.. result.Rules, new RuleTrace("as.receivers", result.Entry, RewriteStatus.Applied, "merged", null, null)] };
