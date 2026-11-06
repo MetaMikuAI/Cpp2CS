@@ -142,8 +142,13 @@ public sealed class MethodDecompiler
         var form = AsyncForms.Run(body, types, Summary, Definition, out var rejected);
         if (rejected is not null) return result with { Rules = [.. result.Rules, new RuleTrace("async.form", result.Entry, RewriteStatus.Blocked, rejected, null, null)] };
         form = IteratorForms.Run(form, out rejected);
-        return rejected is null ? result with { Body = form }
-            : result with { Rules = [.. result.Rules, new RuleTrace("iterator.form", result.Entry, RewriteStatus.Blocked, rejected, null, null)] };
+        if (rejected is null)
+        {
+            var joined = JoinCopies.Run(form, out var rewrites);
+            return rewrites == 0 ? result with { Body = joined }
+                : result with { Body = joined, Rules = [.. result.Rules, new RuleTrace("join.copies", result.Entry, RewriteStatus.Applied, "copied", null, null)] };
+        }
+        return result with { Rules = [.. result.Rules, new RuleTrace("iterator.form", result.Entry, RewriteStatus.Blocked, rejected, null, null)] };
     }
 
     private MethodRecoveryResult? Definition(MethodDef method)
