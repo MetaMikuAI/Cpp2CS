@@ -39,9 +39,10 @@ internal static class RecoveryStage
             for (var i = 0; i < methods.Length; i++) Recover(i, ref recovery);
         else
         {
-            // 工作线程独享恢复器和分析缓存；结果按原清单索引汇总。
+            // 工作线程独享恢复器和分析缓存，已完成的恢复跨线程共用；结果按原清单索引汇总。
             // 逐个分发：默认分块会把清单中相邻的大方法留在同一线程上串行，其他线程却已空闲。
-            using var workers = new ThreadLocal<MethodDecompiler>(() => new(facts, types), trackAllValues: true);
+            var finished = new ConcurrentDictionary<Cpp2CS.Calls.MethodRequest, MethodRecoveryResult>();
+            using var workers = new ThreadLocal<MethodDecompiler>(() => new(facts, types, finished), trackAllValues: true);
             Parallel.ForEach(Partitioner.Create(Enumerable.Range(0, methods.Length), EnumerablePartitionerOptions.NoBuffering), new ParallelOptions { MaxDegreeOfParallelism = jobs }, i =>
             {
                 var worker = workers.Value!;

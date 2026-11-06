@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Cpp2CS.Calls;
 using Cpp2CS.Diagnostics;
 using Cpp2CS.Facts;
@@ -39,13 +40,19 @@ public sealed class MethodDecompiler
     private readonly ManagedAbi abi;
     private readonly CallShapes shapes;
     private readonly NativeMethodFacts native;
+    /// <summary>已完成的恢复，可以跨线程共用：没有读到递归截断的结果只取决于方法和入口，与恢复的线程和次序无关。</summary>
+    private readonly ConcurrentDictionary<MethodRequest, MethodRecoveryResult> finished;
+    /// <summary>本线程恢复中的方法（值为 null），以及依赖递归截断、只在本线程有效的结果。</summary>
     private readonly Dictionary<MethodRequest, MethodRecoveryResult?> summaries = [];
+    /// <summary>读到 <see cref="summaries"/> 的次数。一次恢复期间没有增加，结果才可以放进 <see cref="finished"/>。</summary>
+    private int cuts;
     private MethodEntries? entries;
 
-    public MethodDecompiler(ProgramFacts facts, ManagedTypes types)
+    public MethodDecompiler(ProgramFacts facts, ManagedTypes types, ConcurrentDictionary<MethodRequest, MethodRecoveryResult>? finished = null)
     {
         this.facts = facts;
         this.types = types;
+        this.finished = finished ?? [];
         lifter = new FunctionLifter(facts) { InlinesClosures = true };
         rewriter = new IdiomRewriter(facts) { RecordFilter = _ => false, RecoverUnusedInputs = true };
         abi = new ManagedAbi(facts.Layouts);
@@ -57,16 +64,22 @@ public sealed class MethodDecompiler
     public ProgramFacts Facts => facts;
     public CallShapes Shapes => shapes;
 
-    public MethodRecoveryResult Recover(MethodRef method, ulong entry) => Declaration(method, entry) ?? PlatformInvoke(method, entry) ?? Run(method, entry);
+    public MethodRecoveryResult Recover(MethodRef method, ulong entry) => Reused(method, entry);
 
     /// <summary>恢复泛型类型或泛型方法的封闭实例，方法体以封闭类型表达。</summary>
-    public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => Declaration(method, entry) ?? PlatformInvoke(method, entry) ?? Run(method, entry);
+    public MethodRecoveryResult RecoverInstance(MethodRef method, ulong entry) => Reused(method, entry);
 
     /// <summary>从已知原生实例恢复开放泛型体：类型参数带上实例的原生绑定，输出保留类型参数。</summary>
-    public MethodRecoveryResult RecoverShared(MethodRef instance, ulong entry)
+    public MethodRecoveryResult RecoverShared(MethodRef instance, ulong entry) => Reused(BindShared(instance, entry), entry);
+
+    private MethodRecoveryResult Reused(MethodRef method, ulong entry)
     {
-        var open = BindShared(instance, entry);
-        return Declaration(open, entry) ?? PlatformInvoke(open, entry) ?? Run(open, entry);
+        var request = new MethodRequest(method, entry, RecoveryMode.Instance);
+        if (finished.TryGetValue(request, out var known)) return known;
+        var before = cuts;
+        var result = Declaration(method, entry) ?? PlatformInvoke(method, entry) ?? Run(method, entry);
+        if (cuts == before) finished.TryAdd(request, result);
+        return result;
     }
 
     /// <summary>开放泛型的托管身份及当前入口提供的原生布局见证。</summary>
@@ -179,7 +192,7 @@ public sealed class MethodDecompiler
 
     /// <summary>
     /// 另一个方法自身原生代码的恢复结果，作为内联证明的依据。入口取自方法实例索引（泛型实例可取共享实现）；
-    /// 按方法、入口与原生布局绑定缓存；递归恢复中的方法返回 null。
+    /// 按方法、入口与原生布局绑定缓存；递归恢复中的方法返回 null，调用方的结果因此依赖进入递归的位置，只留在本线程。
     /// </summary>
     public MethodRecoveryResult? Summary(MethodRef method)
     {
@@ -187,10 +200,17 @@ public sealed class MethodDecompiler
         var entry = entries.Of(method);
         if (entry == 0) return null;
         var request = new MethodRequest(method, entry, RecoveryMode.Instance);
-        if (summaries.TryGetValue(request, out var known)) return known;
+        if (summaries.TryGetValue(request, out var local))
+        {
+            cuts++;
+            return local;
+        }
+        if (finished.TryGetValue(request, out var known)) return known;
         summaries[request] = null;
-        var result = method.TypeArguments.Count + method.MethodArguments.Count > 0 ? RecoverInstance(method, entry) : Recover(method, entry);
-        summaries[request] = result;
+        var before = cuts;
+        var result = Reused(method, entry);
+        if (cuts == before) summaries.Remove(request);
+        else summaries[request] = result;
         return result;
     }
 
