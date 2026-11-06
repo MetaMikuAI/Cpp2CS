@@ -81,6 +81,7 @@ public static class FinallyRecovery
             if (handler.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => dropped.Contains(l.Variable))) return null;
             if (Nested() is { } nested && Absorbing(nested, entry) is var (whole, all) && Rewrite(entry, whole, all) is { } rewritten) return rewritten;
             if (Absorbing(region.Try, entry) is var (blocks1, exits)) return Rewrite(entry, blocks1, exits);
+            if (Growing(entry) is var (blocks3, grownExits)) return Rewrite(entry, blocks3, grownExits);
             return Extended() is { } extended && Absorbing(extended, entry) is var (blocks2, wider) ? Rewrite(entry, blocks2, wider) : null;
         }
 
@@ -95,6 +96,40 @@ public static class FinallyRecovery
             {
                 if (Exits(grown, entry, out var failed) is { } exits) return (grown, exits);
                 if (failed is not { } target || !Absorbable(target, grown)) return null;
+                grown.Add(target);
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 循环头不抛出时不在 try 里，try 的出口先回到循环头。只并入出口比较失败的目标：外层循环也能回到 try，但要先经过处理体的副本，那些块不并入。
+        /// 并入的块都要能回到 try，这样走到它们时还在作用域里（见 Extended）。结果的第一个块是唯一的外部入口。
+        /// </summary>
+        private (List<ulong> Blocks, Dictionary<ManagedEdge, ManagedEdge> Exits)? Growing(ulong entry)
+        {
+            var grown = region.Try.ToList();
+            for (var steps = 0; steps < Budget; steps++)
+            {
+                if (Exits(grown, entry, out var failed) is { } exits)
+                {
+                    if (grown.Count == region.Try.Count) return null;
+                    var all = grown.ToHashSet();
+                    var returning = region.Try.ToHashSet();
+                    for (var changed = true; changed;)
+                    {
+                        changed = false;
+                        foreach (var address in grown.Where(a => !returning.Contains(a)))
+                            if (blocks[address].Statements.SelectMany(ManagedValues.Edges).Any(e => returning.Contains(e.Target))) changed |= returning.Add(address);
+                    }
+                    if (!all.SetEquals(returning)) return null;
+                    var entries = body.Blocks.Where(b => !all.Contains(b.Address)).SelectMany(b => b.Statements.SelectMany(ManagedValues.Edges)).Select(e => e.Target).Where(all.Contains).Distinct().ToArray();
+                    if (entries is not [var first]) return null;
+                    var positions = body.Blocks.Select((b, i) => (b.Address, i)).ToDictionary(p => p.Address, p => p.i);
+                    return (all.Where(a => a != first).OrderBy(a => positions[a]).Prepend(first).ToList(), exits);
+                }
+                if (failed is not { } target || !blocks.TryGetValue(target, out var block) || block.Statements.Any(Throws)) return null;
+                bool Consistent(IReadOnlyList<ulong> list) => list.Contains(region.Try[0]) == list.Contains(target);
+                if (body.Regions.Any(r => !Consistent(r.Handler) || !ReferenceEquals(r, region) && !Consistent(r.Try))) return null;
                 grown.Add(target);
             }
             return null;
@@ -120,7 +155,9 @@ public static class FinallyRecovery
                 var suspended = skips && Suspends(address);
                 foreach (var statement in blocks[address].Statements)
                 {
-                    if (statement is ManagedEndFault || statement is ManagedReturn && !suspended) return null;
+                    // 已经还原的内层 finally 整个在 try 里时，它的 endfinally 不离开这个 try。
+                    if (statement is ManagedEndFault && !body.Regions.Any(r => r.Kind == ManagedRegionKind.Finally && r.Handler.Contains(address) && r.Handler.All(inTry.Contains))) return null;
+                    if (statement is ManagedReturn && !suspended) return null;
                     foreach (var edge in ManagedValues.Edges(statement).Where(e => !inTry.Contains(e.Target)))
                     {
                         if ((suspended ? Direct(edge) : Exit(edge, entry, skips)) is not { } rewritten)
