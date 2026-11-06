@@ -69,9 +69,9 @@ public static partial class Decompilation
             return type;
         }
 
-        private static Expression? Reflection(IMethod method, TransformContext context)
+        internal static Expression? Reflection(IMethod method, TransformContext context)
         {
-            var builder = context.TypeSystemAstBuilder;
+            var builder = QualifiedTypes;
             var parameters = method.Parameters.Select(p => p.Type).ToArray();
             if (parameters.Any(p => p.Kind is ICSharpCode.Decompiler.TypeSystem.TypeKind.ByReference or ICSharpCode.Decompiler.TypeSystem.TypeKind.Pointer)) return null;
             if (method.TypeArguments.Count > 0)

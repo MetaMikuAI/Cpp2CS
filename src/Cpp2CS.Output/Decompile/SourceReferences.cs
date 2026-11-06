@@ -20,6 +20,8 @@ public static class SourceReferences
         var changed = new HashSet<ModuleDefinition>();
         new Declarations(main, resolver.Modules, changed).Apply();
         AddStrippedBuilderMembers(resolver.Modules, changed);
+        AddPlaceholderReference(main, changed);
+        AddStrippedRuntimeMembers(resolver.Modules, changed);
         foreach (var file in Directory.GetFiles(searchDirectory, "*.dll"))
         {
             var destination = Path.Combine(target, Path.GetFileName(file));
@@ -55,6 +57,53 @@ public static class SourceReferences
                 changed.Add(module);
             }
         }
+    }
+
+    /// <summary>生成的源码要用到、但被裁掉的运行时成员：补占位声明，只为源码能绑定。</summary>
+    private static void AddStrippedRuntimeMembers(IReadOnlyList<ModuleDefinition> modules, HashSet<ModuleDefinition> changed)
+    {
+        foreach (var module in modules)
+        {
+            if (module.GetType("System.Runtime.CompilerServices", "Unsafe") is { IsPublic: true } unsafeType && unsafeType.Methods.All(m => m.Name != "AsPointer"))
+            {
+                var method = new MethodDefinition("AsPointer", MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, module.TypeSystem.Void);
+                var parameter = new GenericParameter("T", method);
+                method.GenericParameters.Add(parameter);
+                method.ReturnType = new PointerType(module.TypeSystem.Void);
+                method.Parameters.Add(new ParameterDefinition("value", ParameterAttributes.None, new ByReferenceType(parameter)));
+                Throwing(method);
+                unsafeType.Methods.Add(method);
+                changed.Add(module);
+            }
+            if (module.GetType("System", "RuntimeMethodHandle") is { } handle && handle.Methods.All(m => m.Name != "GetFunctionPointer"))
+            {
+                var method = new MethodDefinition("GetFunctionPointer", MethodAttributes.Public | MethodAttributes.HideBySig, module.TypeSystem.IntPtr);
+                Throwing(method);
+                handle.Methods.Add(method);
+                changed.Add(module);
+            }
+        }
+    }
+
+    private static void Throwing(MethodDefinition method)
+    {
+        var il = method.Body.GetILProcessor();
+        il.Emit(OpCodes.Ldnull);
+        il.Emit(OpCodes.Throw);
+    }
+
+    /// <summary>占位值的类型实参不能是按引用类型：按引用的占位写成 Unrecovered.Ref&lt;T&gt;。</summary>
+    private static void AddPlaceholderReference(ModuleDefinition main, HashSet<ModuleDefinition> changed)
+    {
+        if (main.GetType("Cpp2CS", "Unrecovered") is not { } type || type.Methods.FirstOrDefault(m => m.Name == "Value") is not { } value) return;
+        var method = new MethodDefinition("Ref", value.Attributes, main.TypeSystem.Void);
+        var parameter = new GenericParameter("T", method);
+        method.GenericParameters.Add(parameter);
+        method.ReturnType = new ByReferenceType(parameter);
+        method.Parameters.Add(new ParameterDefinition("address", ParameterAttributes.None, main.TypeSystem.UInt64));
+        Throwing(method);
+        type.Methods.Add(method);
+        changed.Add(main);
     }
 
     private sealed class DirectoryResolver : IAssemblyResolver
@@ -111,6 +160,9 @@ public static class SourceReferences
                 }
             }
             foreach (var field in demoted) Demote(field);
+            // 编译器生成的数据字段的类型是私有的嵌套结构体；只在元数据里合法。
+            if (main.GetType("<PrivateImplementationDetails>") is { } details)
+                foreach (var field in details.Fields) Raise(field.FieldType, false);
             foreach (var reference in demotedReferences)
                 if (reference is not FieldDefinition) reference.Name = PlainName(reference.Name);
         }
@@ -147,7 +199,13 @@ public static class SourceReferences
                 if (accessor is not null) Member(accessor, instruction, method);
                 return;
             }
-            if (field.IsInitOnly && Writes(instruction) && !(method.DeclaringType == field.DeclaringType && (field.IsStatic ? method.Name == ".cctor" : method.Name == ".ctor")))
+            // 反编译器把带 DecimalConstant 的只读字段写成 const；方法体里写它时就不是常量。
+            if (Writes(instruction) && field.CustomAttributes.Where(a => a.AttributeType.Name == "DecimalConstantAttribute").ToArray() is { Length: > 0 } constants)
+            {
+                foreach (var attribute in constants) field.CustomAttributes.Remove(attribute);
+                changed.Add(field.Module);
+            }
+            if (field.IsInitOnly && Writes(instruction) && !InOwnInitializer(field, method, instruction))
             {
                 field.IsInitOnly = false;
                 changed.Add(field.Module);
@@ -339,7 +397,18 @@ public static class SourceReferences
         {
             if (instruction.OpCode.Code is Code.Ldflda or Code.Ldsflda) return Writes(instruction);
             if (instruction.OpCode.Code is not (Code.Stfld or Code.Stsfld)) return property.GetMethod is null;
-            return property.SetMethod is null && !(method.DeclaringType == field.DeclaringType && method.Name == (field.IsStatic ? ".cctor" : ".ctor"));
+            return property.SetMethod is null && !InOwnInitializer(field, method, instruction);
+        }
+
+        /// <summary>只读字段和只有 get 的属性只能在本类构造函数里经 this 写入。</summary>
+        private static bool InOwnInitializer(FieldDefinition field, MethodDefinition method, Instruction instruction)
+        {
+            if (method.DeclaringType != field.DeclaringType) return false;
+            if (field.IsStatic) return method.Name == ".cctor";
+            if (method.Name != ".ctor" || !method.HasThis || ReceiverProducer(instruction, method) is not { } producer) return false;
+            if (producer is not ({ OpCode.Code: Code.Ldarg_0 } or { Operand: ParameterDefinition { Index: -1 } })) return false;
+            // 紧跟着汇合点时接收者来自条件表达式，不一定是 this。
+            return !method.Body.Instructions.Any(i => i.Operand == producer.Next || i.Operand is Instruction[] targets && targets.Contains(producer.Next));
         }
 
         private static bool Writes(Instruction instruction)
@@ -373,7 +442,10 @@ public static class SourceReferences
             backing.StartsWith('<') && backing.EndsWith(">k__BackingField", StringComparison.Ordinal) ? "_" + backing[1..backing.IndexOf('>')].Replace('.', '_') : backing;
 
         /// <summary>沿直线路径找压入接收者的指令，得到接收者的静态类型；找不到时返回空，按不可访问处理。</summary>
-        private static TypeDefinition? ReceiverType(Instruction instruction, MethodDefinition method)
+        private static TypeDefinition? ReceiverType(Instruction instruction, MethodDefinition method) =>
+            ReceiverProducer(instruction, method) is { } producer ? Pushed(producer, method)?.Resolve() : null;
+
+        private static Instruction? ReceiverProducer(Instruction instruction, MethodDefinition method)
         {
             var above = instruction.OpCode.Code switch
             {
@@ -387,7 +459,7 @@ public static class SourceReferences
             {
                 if (current.OpCode.FlowControl is FlowControl.Branch or FlowControl.Cond_Branch or FlowControl.Return or FlowControl.Throw) return null;
                 var (pop, push) = StackEffect(current);
-                if (above < push) return Pushed(current, method)?.Resolve();
+                if (above < push) return current;
                 above += pop - push;
             }
             return null;

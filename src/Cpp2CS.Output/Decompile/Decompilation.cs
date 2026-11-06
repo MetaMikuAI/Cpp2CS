@@ -36,6 +36,11 @@ public static partial class Decompilation
         decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new GotoCleanup());
         decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new DistinctLocalNames());
         transforms?.Register(decompiler, DecompilePosition.BeforeLegality);
+        decompiler.AstTransforms.Add(new ConstructorCalls());
+        decompiler.AstTransforms.Add(new StructConstructors());
+        decompiler.AstTransforms.Add(new ExpressionForms());
+        decompiler.AstTransforms.Add(new ShadowedLocals());
+        decompiler.AstTransforms.Add(new DefiniteAssignment());
         decompiler.AstTransforms.Add(new MemberTokens());
         decompiler.AstTransforms.Add(new NullConditionalReceivers());
         decompiler.AstTransforms.Add(new EscapeInvalidIdentifiers());
@@ -136,7 +141,7 @@ public static partial class Decompilation
             }
         });
         var files = results.OrderBy(r => r.Index).Select(r => r.File).ToList();
-        ReferencedAnonymousTypes(files, types, typeSystem, settings, transforms);
+        ReferencedHiddenTypes(files, types, typeSystem, settings, transforms);
         if (!failed.IsEmpty)
         {
             // 反编译失败的类型退回成占位体，工程的结构仍然完整。
@@ -161,24 +166,51 @@ public static partial class Decompilation
     }
 
     /// <summary>
-    /// 匿名类型的声明默认隐藏（用处写成 new { }）。查询表达式没还原时，lambda 的签名按名字引用它（透明标识符），
-    /// 这时才写出声明，其余仍保持隐藏。
+    /// 反编译器默认隐藏匿名类型、闭包和 PrivateImplementationDetails，用处还原成 new { }、lambda、数组初始化器和字符串 switch。
+    /// 没还原的地方仍按名字引用它们：这时单独写出被引用的声明；引用闭包的文件整个不折叠闭包，否则 lambda 和闭包类型对不上。
     /// </summary>
-    private static void ReferencedAnonymousTypes(List<SourceFile> files, (TypeDefinitionHandle[] Handles, string Namespace, string Name)[] types,
+    private static void ReferencedHiddenTypes(List<SourceFile> files, (TypeDefinitionHandle[] Handles, string Namespace, string Name)[] types,
         DecompilerTypeSystem typeSystem, DecompilerSettings settings, IDecompileTransformProvider? transforms)
     {
-        var anonymous = types.Where(t => t.Name.StartsWith("<>f__AnonymousType", StringComparison.Ordinal)).ToArray();
-        if (anonymous.Length == 0) return;
-        var used = new HashSet<string>(files.SelectMany(f => System.Text.RegularExpressions.Regex.Matches(f.Source, @"_003C_003Ef__AnonymousType\d+\b").Select(m => m.Value)));
-        var visible = settings.Clone();
-        visible.AnonymousTypes = false;
-        foreach (var (handles, ns, name) in anonymous.Where(t => used.Contains(t.Name.Replace("<", "_003C").Replace(">", "_003E"))))
+        void Redo((TypeDefinitionHandle[] Handles, string Namespace, string Name) type, Action<DecompilerSettings> configure)
         {
-            var index = files.FindIndex(f => f.TypeName == name && f.Namespace == ns);
-            var source = new SourceFile(name, ns, Print(CreateDecompiler(typeSystem, visible, transforms).DecompileTypes(handles), visible));
+            var visible = settings.Clone();
+            configure(visible);
+            var index = files.FindIndex(f => f.TypeName == type.Name && f.Namespace == type.Namespace);
+            var source = new SourceFile(type.Name, type.Namespace, Print(CreateDecompiler(typeSystem, visible, transforms).DecompileTypes(type.Handles), visible));
             if (index >= 0) files[index] = source; else files.Add(source);
         }
+        // 先处理闭包：不折叠闭包后，匿名类型也会按名字出现。局部函数同样是闭包折叠的结果，要一起关掉。
+        var visibleClosures = new HashSet<TypeDefinitionHandle>();
+        foreach (var type in types)
+        {
+            var file = files.Find(f => f.TypeName == type.Name && f.Namespace == type.Namespace);
+            if (file is null) continue;
+            var closures = ClosureReference.Matches(file.Source).Select(m => m.Value).Distinct();
+            if (!closures.Any(c => !file.Source.Contains("class " + c, StringComparison.Ordinal)) && !ClosureThis.IsMatch(file.Source) && !LambdaMethod.IsMatch(file.Source)) continue;
+            Redo(type, s => { s.AnonymousMethods = false; s.AnonymousTypes = false; s.LocalFunctions = false; });
+            visibleClosures.Add(type.Handles[0]);
+        }
+        // 按名字引用匿名类型的文件里，new { } 也要写成同一个类型。
+        foreach (var type in types)
+        {
+            if (type.Name.StartsWith("<>f__AnonymousType", StringComparison.Ordinal) || type.Name == "<PrivateImplementationDetails>" || visibleClosures.Contains(type.Handles[0])) continue;
+            var file = files.Find(f => f.TypeName == type.Name && f.Namespace == type.Namespace);
+            if (file is not null && file.Source.Contains("_003C_003Ef__AnonymousType", StringComparison.Ordinal)) Redo(type, s => s.AnonymousTypes = false);
+        }
+        var used = new HashSet<string>(files.SelectMany(f => HiddenReference.Matches(f.Source).Select(m => m.Value)));
+        foreach (var type in types)
+        {
+            var escaped = type.Name.Replace("<", "_003C").Replace(">", "_003E");
+            if (type.Name.StartsWith("<>f__AnonymousType", StringComparison.Ordinal) && used.Contains(escaped)) Redo(type, s => s.AnonymousTypes = false);
+            else if (type.Name == "<PrivateImplementationDetails>" && used.Contains(escaped)) Redo(type, s => s.ArrayInitializers = false);
+        }
     }
+
+    private static readonly System.Text.RegularExpressions.Regex HiddenReference = new(@"\b_003CPrivateImplementationDetails_003E\b|\b_003C_003Ef__AnonymousType\d+\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex ClosureThis = new(@"\(_003C_003Ec__DisplayClass\d+_\d+\)(\(object\))?this\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex LambdaMethod = new(@"\b_003C\w+?_003Eb__\d+(_\d+)?\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex ClosureReference = new(@"\b_003C_003Ec__DisplayClass\d+_\d+\b", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     private static string Print(SyntaxTree tree, DecompilerSettings settings)
     {

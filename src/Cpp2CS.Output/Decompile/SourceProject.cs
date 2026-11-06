@@ -33,6 +33,7 @@ public static class SourceProject
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, stripped);
         }
+        File.WriteAllText(Path.Combine(directory, "Properties", "AwaiterExtensions.cs"), AwaiterExtensions);
         var project = new XElement("Project", new XAttribute("Sdk", "Microsoft.NET.Sdk"),
             new XElement("PropertyGroup",
                 new XElement("AssemblyName", module.Assembly.Name.Name),
@@ -57,6 +58,18 @@ public static class SourceProject
         new XDocument(project).Save(Path.Combine(directory, FileName(module.Assembly.Name.Name) + ".csproj"));
         return count;
     }
+
+    /// <summary>
+    /// 内联的 GetAwaiter 把等待器直接交给 await，等待器自身没有 GetAwaiter。这个扩展把它原样返回，
+    /// await 仍按原来的等待器读 IsCompleted、GetResult。
+    /// </summary>
+    private const string AwaiterExtensions = """
+        internal static class AwaiterExtensions
+        {
+            public static TAwaiter GetAwaiter<TAwaiter>(this TAwaiter awaiter) where TAwaiter : struct, System.Runtime.CompilerServices.INotifyCompletion => awaiter;
+        }
+
+        """;
 
     private static readonly (string Namespace, string Name, string Declaration)[] PseudoAttributes =
     [
