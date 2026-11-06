@@ -412,7 +412,15 @@ public static class AsyncForms
             if (num is not { } cached) return;
             foreach (var at in code.Keys.ToArray())
             {
-                if (code[at] is not [.., ManagedBranch { Condition: ComparisonValue { Left: var left, Right: ConstantValue bound } test } branch] || !IsLocal(left, cached.Variable)) continue;
+                if (code[at] is not [.., ManagedBranch { Condition: ComparisonValue { Left: var left, Right: ConstantValue bound } test } branch]) continue;
+                // case 不从 0 开始时检查的是 num + 偏移。
+                int? offset = left switch
+                {
+                    BinaryValue { Op: BinOp.Add, Left: var added, Right: ConstantValue constant } when IsLocal(added, cached.Variable) => (int)constant.Bits,
+                    _ when IsLocal(left, cached.Variable) => 0,
+                    _ => null,
+                };
+                if (offset is not { } shift) continue;
                 var (inside, outside, limit) = test.Condition switch
                 {
                     Cond.Ule => (branch.Taken, branch.Fallthrough, bound.Bits + 1),
@@ -422,10 +430,10 @@ public static class AsyncForms
                     _ => (null!, null!, 0UL),
                 };
                 if (inside is null) continue;
-                ComparisonValue Below(ulong value) => new(Cond.Slt, cached, new ConstantValue(value, cached.Type, cached.Width), test.Type);
+                ComparisonValue Below(long value) => new(Cond.Slt, cached, new ConstantValue((uint)(int)value, cached.Type, cached.Width), test.Type);
                 var upper = FreshAfter(at);
-                code[upper] = [new ManagedBranch(branch.Address, Below(limit), inside, outside)];
-                code[at][^1] = new ManagedBranch(branch.Address, Below(0), outside, new ManagedEdge(upper, []));
+                code[upper] = [new ManagedBranch(branch.Address, Below((long)limit - shift), inside, outside)];
+                code[at][^1] = new ManagedBranch(branch.Address, Below(-(long)shift), outside, new ManagedEdge(upper, []));
             }
         }
 
@@ -919,7 +927,10 @@ public static class AsyncForms
             ulong? completed = null;
             for (var steps = 0; steps < Budget && completed is null; steps++)
             {
-                var statement = code[cursor].ElementAtOrDefault(position);
+                var original = code[cursor].ElementAtOrDefault(position);
+                // 后面还要读 num 时，clang 在恢复的边上写 -1。恢复段统一写 num。
+                var statement = original is ManagedJump { Edge: var outgoing } jump && outgoing.Copies.Any(IsStateReset)
+                    ? jump with { Edge = outgoing with { Copies = outgoing.Copies.Where(c => !IsStateReset(c)).ToArray() } } : original;
                 switch (statement)
                 {
                     case ManagedAssignment { Target: var target, Value: var read } when ManagedStructure.Value(read, field):
@@ -941,7 +952,7 @@ public static class AsyncForms
                         completed = edge.Target;
                         break;
                     // 恢复路径和完成路径用不同的局部存等待器，在边上复制。读字段时直接写完成路径的局部。
-                    case ManagedJump { Edge: { Copies: [{ Value: LocalValue copied } only] } edge } when loaded is not null && restored is not null && copied.Variable.Equals(loaded.Variable) && !ReadElsewhere(loaded.Variable, statement):
+                    case ManagedJump { Edge: { Copies: [{ Value: LocalValue copied } only] } edge } when loaded is not null && restored is not null && copied.Variable.Equals(loaded.Variable) && !ReadElsewhere(loaded.Variable, original!):
                         loaded = only.Target;
                         completed = edge.Target;
                         break;
@@ -983,6 +994,8 @@ public static class AsyncForms
             resumed.Add(new ManagedJump(restored.Address, new ManagedEdge(continuation, [])));
             return true;
         }
+
+        private bool IsStateReset(ManagedCopy copy) => num is { } cached && copy.Target.Variable.Equals(cached.Variable) && copy.Value is ConstantValue constant && (int)constant.Bits == -1;
 
         /// <summary>重写挂起段之前的判断，返回挂起段的新块。</summary>
         private bool Check(ulong block, int index, ManagedValue value, LocalValue awaiter, DefinitionRef awaiterType, ulong continuation, out ulong suspend)
@@ -1093,6 +1106,14 @@ public static class AsyncForms
         private bool Completion(ulong continuation, LocalValue awaiter, DefinitionRef awaiterType)
         {
             var at = Settle(continuation);
+            // 等待器复制到另一个局部再调用 GetResult。结构体的副本没有别的读者时，直接在等待器上调用。
+            if (code[at] is [ManagedAssignment { Target: var copy, Value: var source }, ManagedCall { Invocation: { Method.Method.Name: "GetResult", Receiver: AddressValue { Target: var copied } } invocation } getResultCall, ..]
+                && IsLocal(source, awaiter.Variable) && IsLocal(copied, copy.Variable) && !ReadElsewhere(copy.Variable, getResultCall))
+            {
+                code[at].RemoveAt(0);
+                code[at][0] = getResultCall with { Invocation = invocation with { Receiver = new AddressValue(awaiter) } };
+                return true;
+            }
             if (code[at].FirstOrDefault() is ManagedCall { Invocation: { Method.Method.Name: "GetResult", Receiver: AddressValue { Target: var receiver } } } && IsLocal(receiver, awaiter.Variable)) return true;
             if (Method(awaiterType, "GetResult", 0) is not { } getResult || Trivial(getResult, summary) is not { Value: null }) return Fail($"completion:{code[at].FirstOrDefault()?.GetType().Name}");
             code[at].Insert(0, new ManagedCall(at, new ManagedInvocation(getResult, new AddressValue(awaiter), [], false), null) { Inlined = true });
