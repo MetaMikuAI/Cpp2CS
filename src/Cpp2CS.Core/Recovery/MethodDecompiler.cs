@@ -140,8 +140,10 @@ public sealed class MethodDecompiler
     {
         if (result.Body is not { } body) return result;
         var form = AsyncForms.Run(body, types, Summary, Definition, out var rejected);
+        if (rejected is not null) return result with { Rules = [.. result.Rules, new RuleTrace("async.form", result.Entry, RewriteStatus.Blocked, rejected, null, null)] };
+        form = IteratorForms.Run(form, out rejected);
         return rejected is null ? result with { Body = form }
-            : result with { Rules = [.. result.Rules, new RuleTrace("async.form", result.Entry, RewriteStatus.Blocked, rejected, null, null)] };
+            : result with { Rules = [.. result.Rules, new RuleTrace("iterator.form", result.Entry, RewriteStatus.Blocked, rejected, null, null)] };
     }
 
     private MethodRecoveryResult? Definition(MethodDef method)

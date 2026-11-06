@@ -14,12 +14,9 @@ namespace Cpp2CS.Recovery.Control;
 /// </summary>
 public static class AsyncForms
 {
-    private const string StateName = "<>1__state";
+    private const string StateName = StateMachineForm.StateName;
     private const string BuilderName = "<>t__builder";
-    private const string ThisName = "<>4__this";
     private const int Budget = 64;
-    /// <summary>新块的地址不对应原生代码，取高位以免与原生块和 finally 的新块重合。</summary>
-    private const ulong SyntheticAddress = 5UL << 60;
 
     /// <param name="summary">内联证明用的方法体。</param>
     /// <param name="definition">定义的方法体，没有经过这一步。kickoff 只有在 MoveNext 也能还原时才改写：反编译器认出 kickoff 就会按 Roslyn 形态读 MoveNext，形态不符时结果是错的。</param>
@@ -91,7 +88,7 @@ public static class AsyncForms
     private static ManagedReturn? Trivial(MethodRef method, Func<MethodRef, MethodRecoveryResult?> summary) =>
         summary(method)?.Body is { Regions.Count: 0 } body && Linear(body) is [ManagedReturn only] ? only : null;
 
-    private static bool IsLocal(ManagedValue? value, Variable variable) => value is LocalValue local && local.Variable.Equals(variable);
+    private static bool IsLocal(ManagedValue? value, Variable variable) => StateMachineForm.IsLocal(value, variable);
 
     /// <summary>
     /// 写成 sm.field = 参数；sm.&lt;&gt;t__builder = Create()；sm.&lt;&gt;1__state = -1；sm.&lt;&gt;t__builder.Start(ref sm)；return sm.&lt;&gt;t__builder.Task。
@@ -196,47 +193,18 @@ public static class AsyncForms
         return body with { Blocks = [new ManagedBlock(body.Blocks[0].Address, result)] };
     }
 
-    private sealed class MoveNextForm(ManagedBody body, ManagedTypes types, Func<MethodRef, MethodRecoveryResult?> summary)
+    private sealed class MoveNextForm(ManagedBody source, ManagedTypes types, Func<MethodRef, MethodRecoveryResult?> summary) : StateMachineForm(source)
     {
-        private readonly Dictionary<ulong, List<ManagedStatement>> code = body.Blocks.ToDictionary(b => b.Address, b => b.Statements.ToList());
-        private readonly ulong entry = body.Blocks[0].Address;
-        /// <summary>方法体可能已经过一轮这里的改写，新块不能和已有的同址。</summary>
-        private ulong nextBlock = body.Blocks.Select(b => b.Address).Where(a => a >> 60 == SyntheticAddress >> 60).Select(a => ((a ^ SyntheticAddress) >> 40) + 1).DefaultIfEmpty(0UL).Max();
-        private int nextLocal = EnumeratorForms.NextLocal(body);
+        private int nextLocal = EnumeratorForms.NextLocal(source);
         private ulong? tail;
-        /// <summary>新块排在哪个原有块之后，并和它属于同样的内层区域。</summary>
-        private readonly List<(ulong Block, ulong Origin)> added = [];
-        public string? Reason { get; private set; }
-        /// <summary>入口读状态的局部，即 Roslyn 的 num。</summary>
-        private LocalValue? num;
         public LocalValue? State => num;
+        private LocalValue FreshLocal(TypeRef type) => new(new Variable(Storage.Temp(nextLocal++), 1), type, types.ValueWidth(type));
         /// <summary>有代码按 num 的当前值判断，挂起和恢复时要写回。</summary>
         public bool Rewritten { get; private set; }
 
-        private bool Fail(string reason)
-        {
-            Reason ??= reason;
-            return false;
-        }
-
-        private static bool IsField(ManagedValue? value, string name) => value is FieldValue { Receiver: ArgumentValue { Index: -1 } } field && field.Field.Field.Name == name;
         private static bool IsBuilderCall(ManagedStatement statement, string name) =>
             statement is ManagedCall { Invocation: { Receiver: AddressValue { Target: var target } } invocation } && invocation.Method.Method.Name == name && IsField(target, BuilderName);
         public static bool IsAwaitCall(ManagedStatement statement) => IsBuilderCall(statement, "AwaitUnsafeOnCompleted") || IsBuilderCall(statement, "AwaitOnCompleted");
-        private static long? StateStored(ManagedStatement statement) =>
-            statement is ManagedStore { Target: var target, Value: ConstantValue constant } && IsField(target, StateName) ? (int)constant.Bits : null;
-
-        private ulong Fresh() => SyntheticAddress | nextBlock++ << 40;
-        private ulong FreshAfter(ulong origin)
-        {
-            var block = Fresh();
-            added.Add((block, origin));
-            return block;
-        }
-        private LocalValue FreshLocal(TypeRef type) => new(new Variable(Storage.Temp(nextLocal++), 1), type, types.ValueWidth(type));
-        private ulong[] Predecessors(ulong target) =>
-            code.Where(p => p.Value.SelectMany(ManagedValues.Edges).Any(e => e.Target == target)).Select(p => p.Key).ToArray();
-
         /// <summary>
         /// 把异常交给 SetException 的 catch。方法体的调用都不会抛出时 clang 删掉了它：写回一个，处理块到不了，不改变行为。
         /// </summary>
@@ -318,20 +286,6 @@ public static class AsyncForms
             return null;
         }
 
-        private LocalValue? StateLocal()
-        {
-            var (at, index) = (entry, 0);
-            for (var steps = 0; steps < Budget; steps++)
-                switch (code[at].ElementAtOrDefault(index))
-                {
-                    case ManagedAssignment { Target: var target, Value: var value } when IsField(value, StateName): return target;
-                    case ManagedAssignment { Value: var value } when IsField(value, ThisName): index++; break;
-                    case ManagedJump { Edge: { Copies.Count: 0 } edge }: (at, index) = (edge.Target, 0); break;
-                    default: return null;
-                }
-            return null;
-        }
-
         /// <summary>finally 还原之前：去掉布尔局部，主 try 包住整个方法体。</summary>
         public ManagedBody? Prepare()
         {
@@ -358,83 +312,6 @@ public static class AsyncForms
                 if (!Await(block, call)) return null;
             SignedRangeChecks();
             return HoistThis() && StateReads() ? Layout(region) : null;
-        }
-
-        /// <summary>
-        /// 读 this 的语句可能夹在两次状态比较之间，反编译器追踪分派时走到别的语句就停下，后面的比较留在输出里。
-        /// 读这个字段没有副作用，也没有别的写入时，提到读状态之后。
-        /// </summary>
-        private bool HoistThis()
-        {
-            if (num is not { } cached) return true;
-            var (at, index) = (entry, 0);
-            var before = new HashSet<ulong>();
-            for (var steps = 0; steps < Budget; steps++)
-            {
-                var statement = code[at].ElementAtOrDefault(index);
-                if (statement is ManagedAssignment { Target: var target, Value: var value } && target.Variable.Equals(cached.Variable) && IsField(value, StateName)) break;
-                if (statement is ManagedAssignment { Value: var read } && IsField(read, ThisName)) index++;
-                else if (statement is ManagedJump { Edge: { Copies.Count: 0 } edge })
-                {
-                    before.Add(at);
-                    (at, index) = (edge.Target, 0);
-                }
-                else return true;
-            }
-            var dispatch = new HashSet<ulong>();
-            foreach (var state in code.Values.SelectMany(s => s).Select(StateStored).OfType<long>().Append(-1).Distinct())
-                if (state >= -1) Dispatch(state, visited: dispatch);
-            var insert = index + 1;
-            foreach (var address in dispatch.Where(a => !before.Contains(a)))
-                for (var i = address == at ? insert : 0; i < code[address].Count; i++)
-                {
-                    if (code[address][i] is not ManagedAssignment { Target: var target, Value: var value } assignment || !IsField(value, ThisName)) continue;
-                    if (address == at && i == insert) { insert++; continue; }
-                    if (!OnlyThis(target.Variable)) return Fail("num:this");
-                    code[address].RemoveAt(i--);
-                    code[at].Insert(insert++, assignment);
-                }
-            return true;
-        }
-
-        private bool OnlyThis(Variable variable) => code.Values.SelectMany(s => s).All(s => s switch
-        {
-            ManagedAssignment { Target: var target, Value: var value } when target.Variable.Equals(variable) => IsField(value, ThisName),
-            ManagedCall { Result: { } result } when result.Variable.Equals(variable) => false,
-            _ => !ManagedValues.Edges(s).SelectMany(e => e.Copies).Any(c => c.Target.Variable.Equals(variable)),
-        });
-
-        /// <summary>
-        /// clang 把 switch (num) 降级成无符号范围检查加跳转表。无符号比较写到 IL 上带转换，反编译器追踪状态局部时不认，也不是 Roslyn 的写法，拆成两个有符号比较。
-        /// </summary>
-        private void SignedRangeChecks()
-        {
-            if (num is not { } cached) return;
-            foreach (var at in code.Keys.ToArray())
-            {
-                if (code[at] is not [.., ManagedBranch { Condition: ComparisonValue { Left: var left, Right: ConstantValue bound } test } branch]) continue;
-                // case 不从 0 开始时检查的是 num + 偏移。
-                int? offset = left switch
-                {
-                    BinaryValue { Op: BinOp.Add, Left: var added, Right: ConstantValue constant } when IsLocal(added, cached.Variable) => (int)constant.Bits,
-                    _ when IsLocal(left, cached.Variable) => 0,
-                    _ => null,
-                };
-                if (offset is not { } shift) continue;
-                var (inside, outside, limit) = test.Condition switch
-                {
-                    Cond.Ule => (branch.Taken, branch.Fallthrough, bound.Bits + 1),
-                    Cond.Ult => (branch.Taken, branch.Fallthrough, bound.Bits),
-                    Cond.Ugt => (branch.Fallthrough, branch.Taken, bound.Bits + 1),
-                    Cond.Uge => (branch.Fallthrough, branch.Taken, bound.Bits),
-                    _ => (null!, null!, 0UL),
-                };
-                if (inside is null) continue;
-                ComparisonValue Below(long value) => new(Cond.Slt, cached, new ConstantValue((uint)(int)value, cached.Type, cached.Width), test.Type);
-                var upper = FreshAfter(at);
-                code[upper] = [new ManagedBranch(branch.Address, Below((long)limit - shift), inside, outside)];
-                code[at][^1] = new ManagedBranch(branch.Address, Below(-(long)shift), outside, new ManagedEdge(upper, []));
-            }
         }
 
         /// <summary>
@@ -829,58 +706,6 @@ public static class AsyncForms
             return false;
         }
 
-        private static long? Evaluate(ManagedValue value, HashSet<Variable> state, long known) =>
-            ConstantConditions.Evaluate(value, leaf => leaf is LocalValue local && state.Contains(local.Variable) || IsField(leaf, StateName) ? known : null);
-
-        /// <summary>
-        /// 按状态值走入口的分派，停在第一条不是分派的语句。selectors 是 try 入口的序号局部：
-        /// 走过的边写入序号，分派块按序号选择，选择记到 entered，经过的边记到 used。
-        /// </summary>
-        private (ulong Block, int Index)? Dispatch(long known, HashSet<Variable>? selectors = null, List<(ulong Block, int Case)>? entered = null, HashSet<ManagedEdge>? used = null, HashSet<ulong>? visited = null)
-        {
-            var state = new HashSet<Variable>();
-            var selected = new Dictionary<Variable, int>();
-            var (at, index) = (entry, 0);
-            bool Passes(ManagedEdge edge) => edge.Copies.All(c => selectors is not null && selectors.Contains(c.Target.Variable) && c.Value is ConstantValue);
-            void Take(ManagedEdge edge)
-            {
-                foreach (var copy in edge.Copies) selected[copy.Target.Variable] = (int)((ConstantValue)copy.Value).Bits;
-                if (edge.Copies.Count > 0) used?.Add(edge);
-                (at, index) = (edge.Target, 0);
-            }
-            for (var steps = 0; steps < Budget; steps++)
-            {
-                if (index >= code[at].Count) return null;
-                visited?.Add(at);
-                switch (code[at][index])
-                {
-                    case ManagedAssignment { Target: var target, Value: var value } when IsField(value, StateName):
-                        state.Add(target.Variable);
-                        index++;
-                        break;
-                    case ManagedAssignment { Value: var value } when IsField(value, ThisName):
-                        index++;
-                        break;
-                    case ManagedJump { Edge: var edge } when Passes(edge):
-                        Take(edge);
-                        break;
-                    case ManagedBranch branch when Evaluate(branch.Condition, state, known) is { } taken && Passes(taken != 0 ? branch.Taken : branch.Fallthrough):
-                        Take(taken != 0 ? branch.Taken : branch.Fallthrough);
-                        break;
-                    case ManagedSwitch { Index: LocalValue selector } choice when selected.TryGetValue(selector.Variable, out var chosen) && chosen >= 0 && chosen < choice.Cases.Count && Passes(choice.Cases[chosen]):
-                        entered?.Add((at, chosen));
-                        Take(choice.Cases[chosen]);
-                        break;
-                    case ManagedSwitch choice when Evaluate(choice.Index, state, known) is { } value && value >= 0 && value < choice.Cases.Count && Passes(choice.Cases[(int)value]):
-                        Take(choice.Cases[(int)value]);
-                        break;
-                    default:
-                        return (at, index);
-                }
-            }
-            return null;
-        }
-
         private ulong Settle(ulong block)
         {
             for (var steps = 0; steps < Budget && code[block] is [ManagedJump { Edge: { Copies.Count: 0 } edge }]; steps++) block = edge.Target;
@@ -1066,10 +891,6 @@ public static class AsyncForms
         /// <summary>IsCompleted 内联后留下的判断：直接调用 IsCompleted，或读 UniTask.Status。</summary>
         private static bool IsTest(ManagedCall call) =>
             call.Invocation.Method.Method.Name is "get_IsCompleted" or "get_Status" && call.Invocation.Arguments.Count == 0;
-
-        private bool ReadElsewhere(Variable variable, ManagedStatement except) =>
-            code.Values.SelectMany(s => s).Where(s => !ReferenceEquals(s, except))
-                .SelectMany(s => (s is ManagedAssignment assignment ? [assignment.Value] : ManagedValues.Of(s)).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk).Any(v => IsLocal(v, variable));
 
         /// <summary>取得等待器：内联的 new Awaiter(in X) 写回 X.GetAwaiter()，已有调用就改写结果局部。</summary>
         private bool Acquire(List<ManagedStatement> before, ManagedValue value, LocalValue awaiter, ulong at)
