@@ -9,7 +9,8 @@ namespace Cpp2CS.Recovery.Control;
 /// 两次判断之间隔着语句时，C# 的结构化控制流写不出这样的图，反编译器只能写 goto。
 /// 每条路径执行一份收尾的副本，语义不变，if/else 就能表达，反编译器的 ?. 和 ?? 也才有机会匹配。
 /// 判断之间没有语句时它能合并成 ||，循环的 continue 块它能认出 for，这两种不复制。
-/// 入口是无条件跳转、条件分支的另一边也回到这个块时，是普通的 if (c) { S } 之后的合流，也不复制。
+/// 入口是无条件跳转、条件分支的另一边也回到这个块时，是普通的 if (c) { S } 之后的合流，也不复制；
+/// 除非从它的直接支配者出发能绕过它到达它的后继：if (c) { if (d) goto L; S; } Y; L:，这时 Y 同样要按路径复制。
 /// async 和迭代器的 MoveNext 不处理：反编译器要求恢复路径和完成路径共用一个块。
 /// 收尾覆盖了刚判过空的局部时，那是 x = a?.b ?? c 被 clang 跳转穿透的结果：a 是空时直接接到 c，跳过了 x == null 的判断。
 /// 这时不复制，把判断还原回去：空路径把 x 写成空，和非空路径在判断前合流。写成空的值马上被覆盖，语义不变。
@@ -170,6 +171,7 @@ public static class JoinCopies
         var entries = body.Regions.Select(r => r.HandlerEntry).Append(body.Blocks[0].Address).ToHashSet();
         string Scope(ulong address) => string.Join(",", body.Regions.Select((r, i) => r.Try.Contains(address) ? $"t{i}" : r.Handler.Contains(address) ? $"h{i}" : ""));
 
+        var dominators = ImmediateDominators(blocks, incoming, entries);
         var next = body.Blocks.Select(b => b.Address).Where(a => a >> 60 == SyntheticAddress >> 60).Select(a => ((a ^ SyntheticAddress) >> 40) + 1).DefaultIfEmpty(0UL).Max();
         var retargets = new Dictionary<ManagedEdge, ulong>(ReferenceEqualityComparer.Instance);
         var copies = new List<(ulong Address, ulong Origin, ulong After)>();
@@ -187,8 +189,12 @@ public static class JoinCopies
             }
             var conditional = edges.Where(e => blocks[e.From].Statements[^1] is ManagedBranch).ToArray();
             var skipping = conditional.Length >= 1 && conditional.Length < edges.Length && conditional.All(e => SkipsOver(blocks, e, block.Address));
-            if (!skipping && (conditional.Length < 2 || !Separated(blocks, conditional, block.Address))) continue;
-            foreach (var edge in skipping ? edges.Where(e => !conditional.Contains(e)).Skip(1).Concat(conditional) : conditional.Skip(1))
+            var separated = conditional.Length >= 2 && Separated(blocks, conditional, block.Address);
+            // 全是条件分支而且之间没有语句时，反编译器能写成 ||，不算绕过。
+            var bypassed = (conditional.Length < edges.Length || separated) && block.Statements[^1] is ManagedJump { Edge.Target: var exit }
+                && dominators.TryGetValue(block.Address, out var head) && Bypasses(blocks, head, block.Address, exit);
+            if (!skipping && !bypassed && !separated) continue;
+            foreach (var edge in skipping ? edges.Where(e => !conditional.Contains(e)).Skip(1).Concat(conditional) : bypassed ? edges.Skip(1) : conditional.Skip(1))
             {
                 if (retargets.ContainsKey(edge.Edge)) continue;
                 var address = SyntheticAddress | next++ << 40;
@@ -217,6 +223,85 @@ public static class JoinCopies
     /// <summary>条件分支的另一边到不了这个块：它不是 if (c) { S } 的头，而是跳过这个块。</summary>
     private static bool SkipsOver(Dictionary<ulong, ManagedBlock> blocks, Incoming incoming, ulong shared) =>
         blocks[incoming.From].Statements[^1] is ManagedBranch branch && !Reaches(blocks, ReferenceEquals(branch.Taken, incoming.Edge) ? branch.Fallthrough.Target : branch.Taken.Target, shared);
+
+    /// <summary>从 start 出发不经过 shared 能到达 join。</summary>
+    private static bool Bypasses(Dictionary<ulong, ManagedBlock> blocks, ulong start, ulong shared, ulong join)
+    {
+        var seen = new HashSet<ulong>();
+        var work = new Stack<ulong>();
+        work.Push(start);
+        while (work.TryPop(out var at))
+        {
+            if (at == join) return true;
+            if (at == shared || !seen.Add(at) || !blocks.TryGetValue(at, out var block)) continue;
+            foreach (var edge in ManagedValues.Edges(block.Statements[^1])) work.Push(edge.Target);
+        }
+        return false;
+    }
+
+    /// <summary>直接支配者（Cooper–Harvey–Kennedy）。方法入口和处理入口都接虚拟根，直接支配者是虚拟根的块不在结果里。</summary>
+    private static Dictionary<ulong, ulong> ImmediateDominators(Dictionary<ulong, ManagedBlock> blocks, Dictionary<ulong, List<Incoming>> incoming, HashSet<ulong> roots)
+    {
+        var post = new List<ulong>();
+        var seen = new HashSet<ulong>();
+        foreach (var root in roots)
+        {
+            if (!seen.Add(root)) continue;
+            var stack = new Stack<(ulong Address, int Next)>();
+            stack.Push((root, 0));
+            while (stack.TryPop(out var top))
+            {
+                var edges = blocks.TryGetValue(top.Address, out var block) ? ManagedValues.Edges(block.Statements[^1]) : [];
+                if (top.Next >= edges.Count)
+                {
+                    post.Add(top.Address);
+                    continue;
+                }
+                stack.Push((top.Address, top.Next + 1));
+                if (seen.Add(edges[top.Next].Target)) stack.Push((edges[top.Next].Target, 0));
+            }
+        }
+        var number = new Dictionary<ulong, int>();
+        for (var i = 0; i < post.Count; i++) number[post[i]] = i;
+        var virtualRoot = post.Count;
+        var idom = new int[post.Count + 1];
+        Array.Fill(idom, -1);
+        idom[virtualRoot] = virtualRoot;
+        foreach (var root in roots) if (number.TryGetValue(root, out var at)) idom[at] = virtualRoot;
+        int Intersect(int a, int b)
+        {
+            while (a != b)
+            {
+                while (a < b) a = idom[a];
+                while (b < a) b = idom[b];
+            }
+            return a;
+        }
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (var i = post.Count - 1; i >= 0; i--)
+            {
+                if (roots.Contains(post[i]) || !incoming.TryGetValue(post[i], out var edges)) continue;
+                var best = -1;
+                foreach (var edge in edges)
+                {
+                    if (!number.TryGetValue(edge.From, out var from) || idom[from] < 0) continue;
+                    best = best < 0 ? from : Intersect(from, best);
+                }
+                if (best >= 0 && idom[i] != best)
+                {
+                    idom[i] = best;
+                    changed = true;
+                }
+            }
+        }
+        var result = new Dictionary<ulong, ulong>();
+        for (var i = 0; i < post.Count; i++)
+            if (idom[i] >= 0 && idom[i] != virtualRoot) result[post[i]] = post[idom[i]];
+        return result;
+    }
 
     private static bool Small(ManagedBlock block) =>
         block.Statements.Count is > 0 and <= StatementLimit + 1 && block.Statements[^1] is ManagedJump or ManagedReturn or ManagedThrow
