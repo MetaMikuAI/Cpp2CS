@@ -139,7 +139,9 @@ public sealed class MethodDecompiler
     public MethodRecoveryResult SourceForm(MethodRecoveryResult result)
     {
         if (result.Body is not { } body) return result;
-        var form = AsyncForms.Run(body, types, Summary, Definition, out var rejected);
+        var merged = AsReceivers.Run(body);
+        if (!ReferenceEquals(merged, body)) result = result with { Rules = [.. result.Rules, new RuleTrace("as.receivers", result.Entry, RewriteStatus.Applied, "merged", null, null)] };
+        var form = AsyncForms.Run(merged, types, Summary, Definition, out var rejected);
         if (rejected is not null) return result with { Rules = [.. result.Rules, new RuleTrace("async.form", result.Entry, RewriteStatus.Blocked, rejected, null, null)] };
         form = IteratorForms.Run(form, out rejected);
         if (rejected is null)
