@@ -51,7 +51,7 @@ internal static class DecompileStage
                 continue;
             }
             foreach (var source in Decompilation.Decompile(Path.Combine(sourceAssemblies, Skeleton.ImageFileName(assemblyName)), sourceAssemblies,
-                t => wanted.Contains((t.Namespace, t.Name)) || t.FullName == "Cpp2CS.NativeImports", false, recoveringBodies: true, transforms: transforms, stubs: stubs))
+                t => wanted.Contains((t.Namespace, t.Name)) || t.FullName == "Cpp2CS.NativeImports", false, transforms: transforms, stubs: stubs))
             {
                 File.WriteAllText(Path.Combine(sources, new string((assemblyName + "_" + source.TypeName).Select(c => invalid.Contains(c) ? '_' : c).ToArray()) + ".cs"), source.Source);
                 files++;

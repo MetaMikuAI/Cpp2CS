@@ -5,6 +5,7 @@ using ICSharpCode.Decompiler.CSharp;
 using ICSharpCode.Decompiler.CSharp.OutputVisitor;
 using ICSharpCode.Decompiler.CSharp.Syntax;
 using ICSharpCode.Decompiler.CSharp.Transforms;
+using ICSharpCode.Decompiler.IL.Transforms;
 using ICSharpCode.Decompiler.Metadata;
 using ICSharpCode.Decompiler.TypeSystem;
 
@@ -16,23 +17,27 @@ public sealed record SourceFile(string? TypeName, string Namespace, string Sourc
 /// <summary>用 ICSharpCode.Decompiler 把写出的程序集还原成 C#，按顶层类型分文件。</summary>
 public static partial class Decompilation
 {
-    public static DecompilerSettings Settings(bool recoveringBodies = false) => new()
+    /// <summary>目标语言版本：Unity 2022.3 的编译器支持到 C# 9.0。</summary>
+    public const string TargetLanguageVersion = "9.0";
+
+    public static DecompilerSettings Settings() => new(LanguageVersion.CSharp9_0)
     {
         ThrowOnAssemblyResolveErrors = true,
         AutomaticProperties = true,
         GetterOnlyAutomaticProperties = true,
         AggressiveInlining = true,
-        FieldKeyword = !recoveringBodies,
-        StructDefaultConstructorsAndFieldInitializers = !recoveringBodies,
     };
 
     /// <summary>与 ILSpy 导出工程（WholeProjectDecompiler）相同的附加变换：转义非法标识符（编译器生成的名字）、去掉 CLSCompliant。</summary>
     private static CSharpDecompiler CreateDecompiler(DecompilerTypeSystem typeSystem, DecompilerSettings settings, IDecompileTransformProvider? transforms)
     {
         var decompiler = new CSharpDecompiler(typeSystem, settings);
+        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ILInlining) + 1, new MergedArrayInitializers());
         decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new GotoCleanup());
         decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new DistinctLocalNames());
         transforms?.Register(decompiler, DecompilePosition.BeforeLegality);
+        decompiler.AstTransforms.Add(new MemberTokens());
+        decompiler.AstTransforms.Add(new NullConditionalReceivers());
         decompiler.AstTransforms.Add(new EscapeInvalidIdentifiers());
         decompiler.AstTransforms.Add(new RemoveCLSCompliantAttribute());
         decompiler.AstTransforms.Add(new StrippedMathConstants());
@@ -98,12 +103,12 @@ public static partial class Decompilation
     /// 依赖从 <paramref name="searchDirectory"/> 解析。共享一个类型系统，并行反编译各类型。
     /// </summary>
     public static IReadOnlyList<SourceFile> Decompile(string assemblyPath, string searchDirectory, Func<ITypeDefinition, bool> include, bool assemblyAttributes,
-        bool recoveringBodies = false, bool groupByName = false, IDecompileTransformProvider? transforms = null, Func<string>? stubs = null)
+        bool groupByName = false, IDecompileTransformProvider? transforms = null, Func<string>? stubs = null)
     {
         var file = new PEFile(assemblyPath);
         var resolver = new UniversalAssemblyResolver(assemblyPath, true, file.DetectTargetFrameworkId());
         resolver.AddSearchDirectory(searchDirectory);
-        var settings = Settings(recoveringBodies);
+        var settings = Settings();
         var typeSystem = new DecompilerTypeSystem(file, resolver, settings);
         (string Namespace, string Name) Key(ITypeDefinition t) => (t.Namespace, groupByName ? t.Name.Split('`')[0] : t.ReflectionName);
         (string Namespace, string Name) Named(ITypeDefinition t) => Key(t) is var (ns, name) ? (ns, groupByName && ns.Length > 0 ? ns + "." + name : name) : default;
@@ -131,12 +136,13 @@ public static partial class Decompilation
             }
         });
         var files = results.OrderBy(r => r.Index).Select(r => r.File).ToList();
+        ReferencedAnonymousTypes(files, types, typeSystem, settings, transforms);
         if (!failed.IsEmpty)
         {
             // 反编译失败的类型退回成占位体，工程的结构仍然完整。
             var directory = stubs!();
             var wanted = failed.ToDictionary(f => (f.Namespace, f.Name), f => f.Reason);
-            foreach (var source in Decompile(Path.Combine(directory, Path.GetFileName(assemblyPath)), directory, t => wanted.ContainsKey(Named(t)), false, recoveringBodies, groupByName, transforms))
+            foreach (var source in Decompile(Path.Combine(directory, Path.GetFileName(assemblyPath)), directory, t => wanted.ContainsKey(Named(t)), false, groupByName, transforms))
                 files.Add(source with { Source = $"// 反编译失败（{wanted[(source.Namespace, source.TypeName!)]}），这个类型只有占位体。\n{source.Source}" });
         }
         if (assemblyAttributes)
@@ -152,6 +158,26 @@ public static partial class Decompilation
             files.Add(new SourceFile(null, "", Print(tree, settings)));
         }
         return files;
+    }
+
+    /// <summary>
+    /// 匿名类型的声明默认隐藏（用处写成 new { }）。查询表达式没还原时，lambda 的签名按名字引用它（透明标识符），
+    /// 这时才写出声明，其余仍保持隐藏。
+    /// </summary>
+    private static void ReferencedAnonymousTypes(List<SourceFile> files, (TypeDefinitionHandle[] Handles, string Namespace, string Name)[] types,
+        DecompilerTypeSystem typeSystem, DecompilerSettings settings, IDecompileTransformProvider? transforms)
+    {
+        var anonymous = types.Where(t => t.Name.StartsWith("<>f__AnonymousType", StringComparison.Ordinal)).ToArray();
+        if (anonymous.Length == 0) return;
+        var used = new HashSet<string>(files.SelectMany(f => System.Text.RegularExpressions.Regex.Matches(f.Source, @"_003C_003Ef__AnonymousType\d+\b").Select(m => m.Value)));
+        var visible = settings.Clone();
+        visible.AnonymousTypes = false;
+        foreach (var (handles, ns, name) in anonymous.Where(t => used.Contains(t.Name.Replace("<", "_003C").Replace(">", "_003E"))))
+        {
+            var index = files.FindIndex(f => f.TypeName == name && f.Namespace == ns);
+            var source = new SourceFile(name, ns, Print(CreateDecompiler(typeSystem, visible, transforms).DecompileTypes(handles), visible));
+            if (index >= 0) files[index] = source; else files.Add(source);
+        }
     }
 
     private static string Print(SyntaxTree tree, DecompilerSettings settings)

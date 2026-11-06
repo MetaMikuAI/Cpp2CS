@@ -12,9 +12,11 @@ public static class SourceProject
         using var module = ModuleDefinition.ReadModule(assemblyPath);
         var directory = Path.Combine(output, FileName(Path.GetFileName(assemblyPath)));
         Directory.CreateDirectory(directory);
+        var references = Path.Combine(directory, "references");
+        SourceReferences.Prepare(assemblyPath, searchDirectory, references);
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var count = 0;
-        foreach (var source in Decompilation.Decompile(assemblyPath, searchDirectory, include, true, recoveringBodies: true, groupByName: true, transforms: transforms, stubs: stubs))
+        foreach (var source in Decompilation.Decompile(Path.Combine(references, Path.GetFileName(assemblyPath)), references, include, true, groupByName: true, transforms: transforms, stubs: stubs))
         {
             var relative = source.TypeName is null ? Path.Combine("Properties", "AssemblyInfo.cs")
                 : Path.Combine(source.Namespace.Length == 0 ? "" : FileName(source.Namespace),
@@ -37,7 +39,7 @@ public static class SourceProject
                 new XElement("TargetFramework", "net40"),
                 new XElement("GenerateAssemblyInfo", false),
                 new XElement("GenerateTargetFrameworkAttribute", false),
-                new XElement("LangVersion", "latest"),
+                new XElement("LangVersion", Decompilation.TargetLanguageVersion),
                 new XElement("AllowUnsafeBlocks", true),
                 new XElement("CheckForOverflowUnderflow", false),
                 // 工程可能放在别的工程目录下，不继承那里的编译设置。
@@ -47,9 +49,11 @@ public static class SourceProject
                 new XElement("WarningLevel", 0),
                 // 引用的程序集可能标了更高的目标框架（第三方库），它们都是骨架，不用按框架筛选。
                 new XElement("ResolveAssemblyReferenceIgnoreTargetFrameworkAttributeVersionMismatch", true)),
-            new XElement("ItemGroup", module.AssemblyReferences.Select(reference =>
-                new XElement("Reference", new XAttribute("Include", reference.Name),
-                    new XElement("HintPath", Path.GetRelativePath(directory, Path.GetFullPath(Path.Combine(searchDirectory, reference.Name + ".dll"))))))));
+            // 引用目录里的全部程序集：C# 还要解析间接引用（基类、约束所在的程序集）。
+            new XElement("ItemGroup", Directory.GetFiles(references, "*.dll").OrderBy(f => f, StringComparer.Ordinal)
+                .Where(f => !string.Equals(Path.GetFileName(f), Path.GetFileName(assemblyPath), StringComparison.OrdinalIgnoreCase))
+                .Select(file => new XElement("Reference", new XAttribute("Include", Path.GetFileNameWithoutExtension(file)),
+                    new XElement("HintPath", Path.Combine("references", Path.GetFileName(file)))))));
         new XDocument(project).Save(Path.Combine(directory, FileName(module.Assembly.Name.Name) + ".csproj"));
         return count;
     }

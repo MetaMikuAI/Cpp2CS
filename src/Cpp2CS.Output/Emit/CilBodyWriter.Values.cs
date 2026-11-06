@@ -123,7 +123,7 @@ internal sealed partial class CilBodyWriter
                 if (f.Accessor is { Method.Method.Owner.IsValueType: true } structGetter)
                 {
                     // 访问器已证明等于这次字段读取，直接在变量上调用，不需要副本。
-                    if (f.Receiver is LocalValue or ArgumentValue { Index: >= 0 })
+                    if (f.Receiver is LocalValue or ArgumentValue { Index: >= 0 } && f.Receiver.Type is not ByRefRef)
                     {
                         Address(f.Receiver);
                         AccessorCall(structGetter);
