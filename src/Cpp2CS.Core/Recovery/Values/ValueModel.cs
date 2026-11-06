@@ -35,6 +35,7 @@ public sealed partial class ValueModel
     private readonly Dictionary<Variable, Sym> values = [];
     private readonly Dictionary<Stmt, Sym[]> operands = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<Stmt, Block> blocks = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<Stmt, IReadOnlyList<ReadSym>> readsAt = new(ReferenceEqualityComparer.Instance);
     private Stmt? site;
     private int ordinal;
 
@@ -86,9 +87,10 @@ public sealed partial class ValueModel
 
     public Block BlockOf(Stmt statement) => blocks[statement];
 
-    /// <summary>语句自身进行的内存读取（按语句中的次序）；不含经操作数引用的其他语句的读取。</summary>
+    /// <summary>语句自身进行的内存读取（按语句中的次序）；不含经操作数引用的其他语句的读取。模型建成后结果不再变化，按语句缓存。</summary>
     public IReadOnlyList<ReadSym> ReadsAt(Stmt statement)
     {
+        if (readsAt.TryGetValue(statement, out var known)) return known;
         var found = new List<ReadSym>();
         var seen = new HashSet<Sym>();
         var pending = new Stack<Sym>(Operands(statement));
@@ -107,7 +109,7 @@ public sealed partial class ValueModel
                 case OpSym op: foreach (var arg in op.Args) pending.Push(arg); break;
             }
         }
-        return found.OrderBy(r => r.Ordinal).ToArray();
+        return readsAt[statement] = found.OrderBy(r => r.Ordinal).ToArray();
     }
 
     private void Run()
@@ -116,6 +118,7 @@ public sealed partial class ValueModel
         {
             values.Clear();
             operands.Clear();
+            readsAt.Clear();
             visited.Clear();
             foreach (var block in order)
             {

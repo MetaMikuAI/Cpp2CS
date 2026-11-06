@@ -70,8 +70,17 @@ public static class ManagedValues
         _ => throw new NotSupportedException(value.ToString()),
     };
 
-    public static IEnumerable<ManagedValue> Walk(ManagedValue value) =>
-        Children(value).SelectMany(Walk).Prepend(value);
+    /// <summary>先序枚举值及其全部子项。用显式栈，每个节点的枚举开销和调用栈都不随深度增长。</summary>
+    public static IEnumerable<ManagedValue> Walk(ManagedValue value)
+    {
+        var pending = new Stack<ManagedValue>();
+        pending.Push(value);
+        while (pending.TryPop(out var current))
+        {
+            yield return current;
+            foreach (var child in Children(current).Reverse()) pending.Push(child);
+        }
+    }
 
     public static IEnumerable<ManagedValue> Of(ManagedInvocation invocation) =>
         invocation.Receiver is { } receiver ? invocation.Arguments.Prepend(receiver) : invocation.Arguments;

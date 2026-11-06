@@ -50,13 +50,17 @@ public static partial class Decompilation
     /// <summary>unbox 得到的可写引用不能用 C# 强制转换作左值；目标库有对应接口时输出 Unsafe.Unbox。</summary>
     private sealed class WritableUnboxing : IAstTransform
     {
+        /// <summary>每个类型都运行这个变换，全模块查找的结果按类型系统缓存。</summary>
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IDecompilerTypeSystem, object> Availability = new();
+
+        private static object Available(IDecompilerTypeSystem typeSystem) => typeSystem.Modules.SelectMany(m => m.TopLevelTypeDefinitions)
+            .Where(t => t.FullName == "System.Runtime.CompilerServices.Unsafe")
+            .SelectMany(t => t.Methods).Any(m => m.Name == "Unbox" && m.IsStatic && m.Accessibility == Accessibility.Public && m.TypeParameters.Count == 1
+                && m.Parameters.Count == 1 && m.Parameters[0].Type.FullName == "System.Object" && m.ReturnType is ByReferenceType);
+
         public void Run(AstNode rootNode, TransformContext context)
         {
-            var available = context.TypeSystem.Modules.SelectMany(m => m.TopLevelTypeDefinitions)
-                .Where(t => t.FullName == "System.Runtime.CompilerServices.Unsafe")
-                .SelectMany(t => t.Methods).Any(m => m.Name == "Unbox" && m.IsStatic && m.Accessibility == Accessibility.Public && m.TypeParameters.Count == 1
-                    && m.Parameters.Count == 1 && m.Parameters[0].Type.FullName == "System.Object" && m.ReturnType is ByReferenceType);
-            if (!available) return;
+            if (!(bool)Availability.GetValue(context.TypeSystem, Available)) return;
             foreach (var assignment in rootNode.Descendants.OfType<AssignmentExpression>().ToArray())
             {
                 if (assignment.Operator != AssignmentOperatorType.Assign || assignment.Left is not CastExpression cast
@@ -111,7 +115,8 @@ public static partial class Decompilation
             .ToArray();
         var results = new ConcurrentBag<(int Index, SourceFile File)>();
         var failed = new ConcurrentBag<(string Namespace, string Name, string Reason)>();
-        Parallel.For(0, types.Length, i =>
+        // 逐个分发：默认分块会把相邻的大类型留在同一线程上串行。
+        Parallel.ForEach(Partitioner.Create(Enumerable.Range(0, types.Length), EnumerablePartitionerOptions.NoBuffering), i =>
         {
             var (handles, ns, name) = types[i];
             try

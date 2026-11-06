@@ -5,6 +5,8 @@
     <RootNamespace>Cpp2CS.Cli</RootNamespace>
     <AssemblyName>cpp2cs</AssemblyName>
     <ServerGarbageCollection>true</ServerGarbageCollection>
+    <!-- 恢复是一次性批处理，PGO 插桩的开销收不回来。 -->
+    <TieredPGO>false</TieredPGO>
   </PropertyGroup>
 
   <ItemGroup>

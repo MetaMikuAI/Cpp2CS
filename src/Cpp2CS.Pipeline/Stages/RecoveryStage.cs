@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using Cpp2CS.Facts;
 using Cpp2CS.Recovery;
@@ -15,7 +16,7 @@ internal static class RecoveryStage
         var recovery = new MethodDecompiler(facts, types);
         var targets = new MethodRecoveryResult[methods.Length];
         var completed = 0;
-        var active = new System.Collections.Concurrent.ConcurrentDictionary<int, long>();
+        var active = new ConcurrentDictionary<int, long>();
         using var timer = new Timer(_ =>
         {
             foreach (var (index, started) in active.ToArray().OrderBy(p => p.Key))
@@ -39,8 +40,9 @@ internal static class RecoveryStage
         else
         {
             // 工作线程独享恢复器和分析缓存；结果按原清单索引汇总。
+            // 逐个分发：默认分块会把清单中相邻的大方法留在同一线程上串行，其他线程却已空闲。
             using var workers = new ThreadLocal<MethodDecompiler>(() => new(facts, types), trackAllValues: true);
-            Parallel.For(0, methods.Length, new ParallelOptions { MaxDegreeOfParallelism = jobs }, i =>
+            Parallel.ForEach(Partitioner.Create(Enumerable.Range(0, methods.Length), EnumerablePartitionerOptions.NoBuffering), new ParallelOptions { MaxDegreeOfParallelism = jobs }, i =>
             {
                 var worker = workers.Value!;
                 Recover(i, ref worker);

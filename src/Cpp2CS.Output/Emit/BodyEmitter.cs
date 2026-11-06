@@ -10,6 +10,7 @@ public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransfo
 {
     private readonly EmissionSymbols symbols = new();
     private readonly Dictionary<(ManagedBody, EmissionPolicy), MethodBody> built = new(new BuiltKey());
+    private readonly HashSet<(ManagedBody, EmissionPolicy)> passed = new(new BuiltKey());
     public HashSet<Instruction> ExplicitInitializations => symbols.ExplicitInitializations;
     public Dictionary<Instruction, FieldAccessor> AccessorCalls => symbols.AccessorCalls;
     public Dictionary<Instruction, MethodRef> InlineCalls => symbols.InlineCalls;
@@ -30,6 +31,7 @@ public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransfo
     /// 只读检查：恢复体的写出条件，以及写成的 CIL 的求值栈类型（<see cref="CilStackTypes"/>）。
     /// Source 策略另外按整批核对源码表达形式。
     /// 检查时建成的 CIL 体留到写出时使用，不改动骨架上的方法。
+    /// 单个方法的检查只取决于恢复体和策略，通过后写出时不再重复；Source 策略的整批核对不缓存。
     /// </summary>
     public Dictionary<ManagedBody, EmissionProblem> Check(IEnumerable<ManagedBody> bodies, EmissionPolicy policy = EmissionPolicy.Checked)
     {
@@ -37,6 +39,7 @@ public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransfo
         var sourceBodies = new List<ManagedBody>();
         foreach (var recovered in bodies)
         {
+            if (passed.Contains((recovered, policy))) continue;
             var check = new BodyValidation(types, policy, recovered.Method, diagnostics);
             var method = skeleton.Method(recovered.Method.Method);
             if (check.Check(recovered, method.HasBody) is { } problem)
@@ -50,6 +53,7 @@ public class BodyEmitter(Skeleton skeleton, ManagedTypes types, IEmissionTransfo
                 continue;
             }
             if (policy == EmissionPolicy.Source) sourceBodies.Add(recovered);
+            else passed.Add((recovered, policy));
         }
         if (policy == EmissionPolicy.Source)
             foreach (var (body, problem) in SourceSuitability.Check(sourceBodies)) problems.Add(body, problem);
