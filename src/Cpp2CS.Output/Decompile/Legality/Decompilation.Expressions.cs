@@ -21,6 +21,7 @@ public static partial class Decompilation
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Reverse().ToArray()) SharedCast(cast);
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Reverse().ToArray()) GenericCast(cast);
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Reverse().ToArray()) FirstFieldCast(cast);
+            foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Where(c => c.Expression is NullReferenceExpression).ToArray()) GuardedReceiver(cast);
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Where(c => c.Expression is NullReferenceExpression).ToArray()) NullReceiver(cast);
             foreach (var call in rootNode.Descendants.OfType<InvocationExpression>().Reverse().ToArray())
             {
@@ -40,7 +41,7 @@ public static partial class Decompilation
 
         /// <summary>
         /// 结构体方法里的 lambda 不能访问 this（CS1673）。没提升的状态机把闭包对象存在字段里，lambda 只读这个字段：
-        /// 先复制到局部再捕获，闭包对象是同一个引用。
+        /// 先复制到局部再捕获，闭包对象是同一个引用。值类型字段的副本和原字段互不影响，lambda 写它时不改写。
         /// </summary>
         private static void StructCapture(AstNode lambda, TransformContext context)
         {
@@ -58,7 +59,7 @@ public static partial class Decompilation
                     MemberReferenceExpression { Target: ThisReferenceExpression } member => member.Annotation<MemberResolveResult>()?.Member as IField,
                     _ => null,
                 };
-                if (field is null || field.IsStatic) continue;
+                if (field is null || field.IsStatic || field.ReturnType.IsReferenceType != true && Written(use)) continue;
                 if (!fields.TryGetValue(field.Name, out var local))
                 {
                     var number = 1;
@@ -309,14 +310,47 @@ public static partial class Decompilation
         }
 
         /// <summary>
+        /// 被调方法不用 this 时 clang 去掉了接收者的计算，只留下 IL2CPP 的判空，CIL 是判空后接 ((T)null).M()。
+        /// C# 的实例调用会对接收者判空，这样写运行时必抛异常。前面判空的对象就是原来的接收者：写回去，紧邻的判空合并进调用。
+        /// </summary>
+        private static void GuardedReceiver(CastExpression cast)
+        {
+            if (cast.Parent is not MemberReferenceExpression member || member.Target != cast) return;
+            var target = (cast.Annotation<ResolveResult>()?.Type ?? cast.Type.Annotation<ResolveResult>()?.Type)?.GetDefinition();
+            var statement = cast.Ancestors.OfType<Statement>().FirstOrDefault(a => a.Parent is BlockStatement);
+            if (target is null || statement?.Parent is not BlockStatement block) return;
+            var before = block.Statements.TakeWhile(a => a != statement).Reverse().Take(8).ToArray();
+            for (var i = 0; i < before.Length; i++)
+            {
+                if (before[i] is not IfElseStatement { FalseStatement: null, TrueStatement: BlockStatement { Statements: { Count: 1 } thrown }, Condition: BinaryOperatorExpression { Operator: BinaryOperatorType.Equality, Left: { } left, Right: NullReferenceExpression } } guard
+                    || thrown.First() is not ThrowStatement { Expression: ObjectCreateExpression { Type: var exception } } || !exception.ToString().EndsWith("NullReferenceException", StringComparison.Ordinal)) continue;
+                var receiver = left is CastExpression { Type: PrimitiveType { Keyword: "object" }, Expression: { } inner } ? inner : left;
+                if (!IsStableRead(receiver)) continue;
+                var type = receiver is ThisReferenceExpression ? cast.GetParent<TypeDeclaration>()?.Annotation<TypeResolveResult>()?.Type : StaticType(receiver);
+                if (type is null || !type.GetAllBaseTypes().Any(b => target.Equals(b.GetDefinition()))) continue;
+                // 判空和使用之间改过这个对象时不能合并。
+                if (before.Take(i).Any(s => s.Descendants.OfType<IdentifierExpression>().Any(id => Written(id) && receiver.DescendantsAndSelf.OfType<IdentifierExpression>().Any(r => r.Identifier == id.Identifier)))) return;
+                cast.ReplaceWith(receiver.Clone());
+                if (i == 0) guard.Remove();
+                return;
+            }
+        }
+
+        private static bool IsStableRead(Expression expression) => expression switch
+        {
+            ThisReferenceExpression or IdentifierExpression => true,
+            MemberReferenceExpression { Target: { } target } member => member.Annotation<MemberResolveResult>()?.Member is IField && IsStableRead(target),
+            _ => false,
+        };
+
+        /// <summary>
         /// 被调方法不用 this 时 clang 不准备接收者，恢复成 ((T)null).M()。调用方自己是 T 或其派生类时，
         /// 接收者写成 this：原方法体用不到它，而空接收者在共享泛型上还写不出合法的类型实参。
         /// </summary>
         private static void NullReceiver(CastExpression cast)
         {
-            if (cast.Parent is not MemberReferenceExpression { Parent: InvocationExpression } member || member.Target != cast) return;
+            if (cast.Parent is not MemberReferenceExpression member || member.Target != cast) return;
             if (cast.GetParent<EntityDeclaration>() is not { } entity || entity.HasModifier(Modifiers.Static)) return;
-            if (cast.GetParent<LambdaExpression>() is not null || cast.GetParent<AnonymousMethodExpression>() is not null) return;
             var owner = cast.GetParent<TypeDeclaration>()?.Annotation<TypeResolveResult>()?.Type.GetDefinition();
             var target = (cast.Type.Annotation<ResolveResult>()?.Type ?? cast.Annotation<ResolveResult>()?.Type)?.GetDefinition();
             if (owner is null || target is null || owner.Kind == TypeKind.Struct) return;
@@ -409,7 +443,7 @@ public static partial class Decompilation
             _ => value,
         };
 
-        private static bool Written(IdentifierExpression use)
+        private static bool Written(Expression use)
         {
             AstNode node = use;
             while (node.Parent is MemberReferenceExpression member && member.Target == node) node = member;
