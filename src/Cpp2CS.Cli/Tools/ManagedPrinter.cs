@@ -13,6 +13,8 @@ internal static class ManagedPrinter
             yield return $"  M@0x{block.Address:x}";
             foreach (var statement in block.Statements) yield return "    " + Statement(statement);
         }
+        foreach (var region in body.Regions)
+            yield return $"  {region.Kind} entry=0x{region.HandlerEntry:x} try=[{string.Join(",", region.Try.Select(a => $"{a:x}"))}] handler=[{string.Join(",", region.Handler.Select(a => $"{a:x}"))}]";
     }
 
     private static string Statement(ManagedStatement statement) => statement switch

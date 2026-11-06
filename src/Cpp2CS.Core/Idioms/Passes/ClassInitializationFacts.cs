@@ -20,7 +20,9 @@ internal static class ClassInitializationFacts
         foreach (var block in function.Blocks)
             for (var i = 0; i < block.Statements.Count; i++)
                 if (block.Statements[i] is Call { Op: { Kind: OpKind.RunClassConstructor, Operand: DefinitionRef type }, Defines.Length: 0 } call
-                    && (type.Definition.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) != 0)
+                    && (type.Definition.Attributes & System.Reflection.TypeAttributes.BeforeFieldInit) != 0
+                    // 块止于这个调用时事实层证明它不返回，它是块的终结。
+                    && (i + 1 < block.Statements.Count || block.NormalSuccessors.Any()))
                 {
                     block.Statements[i] = new Nop(call.Address, "beforefieldinit 类型的显式初始化");
                     changed = true;

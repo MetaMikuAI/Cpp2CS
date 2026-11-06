@@ -15,6 +15,7 @@ namespace Cpp2CS.Recovery.Control;
 /// 区域的 try 只覆盖能抛出的块，循环里不抛出的块在 try 之外，出口又回到 try：这些块并入 try（异常不会从那里发生），于是 try 包住整个循环。
 /// catch 路径上写给后续代码的复制在抛出之后没有读者，只要处理体不读它们就可以丢弃。
 /// 还原之后只为异常到达而赋值的局部不再有读者，局部可以再合并一次。
+/// 还原后处理体里的异常和重新抛出的异常都走 try 外层的区域，所以路径上能抛出的语句必须和 try 在同样的外层区域里。
 /// </summary>
 public static class FinallyRecovery
 {
@@ -26,7 +27,8 @@ public static class FinallyRecovery
     public static ManagedBody Run(ManagedBody body)
     {
         if (body.Regions.All(r => r.Kind != ManagedRegionKind.Catch)) return body;
-        var next = 0UL;
+        // 方法体可能已经还原过一轮，新块不能和已有的同址。
+        var next = body.Blocks.Select(b => b.Address).Where(a => a >> 62 == SyntheticAddress >> 62).Select(a => ((a ^ SyntheticAddress) >> 40) + 1).DefaultIfEmpty(0UL).Max();
         var tried = new HashSet<ulong>();
         var changed = false;
         // 从内向外：外层的 try 里可能有已经还原的内层 finally。
@@ -55,6 +57,13 @@ public static class FinallyRecovery
         private readonly HashSet<Variable> renamed = [];
         private ulong? end;
         private int budget = Budget;
+        /// <summary>包住整个 try 的其他区域。</summary>
+        private readonly HashSet<ManagedRegion> outer = body.Regions.Where(r => !ReferenceEquals(r, region) && region.Try.All(r.Try.Contains)).ToHashSet();
+
+        private bool SameScope(ulong block) => body.Regions.Where(r => !ReferenceEquals(r, region) && r.Try.Contains(block)).ToHashSet().SetEquals(outer);
+
+        /// <summary>语句留在原位时异常的去向，和移进处理体之后相同。</summary>
+        private bool Portable(ManagedStatement statement, ulong block) => !ManagedEffects.Statement(statement).MayThrow || SameScope(block);
 
         public ManagedBody? Run()
         {
@@ -66,6 +75,7 @@ public static class FinallyRecovery
             if (Build(start, []) is not { } entry || handler.Count <= 1) return null;
             // 丢弃的复制写的局部，处理体要读就不能丢。
             if (handler.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Any(l => dropped.Contains(l.Variable))) return null;
+            if (Nested() is { } nested && Exits(nested, entry) is { } all && Rewrite(entry, nested, all) is { } whole) return whole;
             if (Exits(region.Try, entry) is { } exits) return Rewrite(entry, region.Try, exits);
             return Extended() is { } extended && Exits(extended, entry) is { } wider ? Rewrite(entry, extended, wider) : null;
         }
@@ -84,6 +94,33 @@ public static class FinallyRecovery
                 }
             }
             return exits.Count == 0 ? null : exits;
+        }
+
+        /// <summary>
+        /// try { try { X } catch (E) { H } } finally { F } 的落地块是串起来的：X 的异常到 E 的处理块，处理块里再抛出的才到这个 catch，
+        /// 所以这个区域的 try 只有 H。try 在别的 catch 的处理块里时，把那个 catch 整个算进 try：它的异常最后都经过这里，出口由 Exits 核对。
+        /// </summary>
+        private List<ulong>? Nested()
+        {
+            var included = region.Try.ToHashSet();
+            var grown = false;
+            for (var changed = true; changed;)
+            {
+                changed = false;
+                foreach (var other in body.Regions.Where(r => !ReferenceEquals(r, region) && r.Kind == ManagedRegionKind.Catch))
+                    if (included.All(other.Handler.Contains))
+                    {
+                        included.UnionWith(other.Try);
+                        included.UnionWith(other.Handler);
+                        changed = grown = true;
+                    }
+            }
+            if (!grown) return null;
+            included.ExceptWith(region.Handler);
+            var targets = body.Blocks.SelectMany(b => b.Statements.SelectMany(ManagedValues.Edges).Select(e => (From: b.Address, e.Target))).ToArray();
+            if (targets.Where(e => included.Contains(e.Target) && !included.Contains(e.From)).Select(e => e.Target).Distinct().ToArray() is not [var first]) return null;
+            var positions = body.Blocks.Select((b, i) => (b.Address, i)).ToDictionary(p => p.Address, p => p.i);
+            return included.Where(a => a != first && positions.ContainsKey(a)).OrderBy(a => positions[a]).Prepend(first).ToList();
         }
 
         /// <summary>
@@ -176,7 +213,7 @@ public static class FinallyRecovery
             _ => false,
         };
 
-        /// <summary>去向局部：只取常量，只和常量比较或作为 switch 的下标。</summary>
+        /// <summary>去向局部：只取常量，只在和常量的运算（switch 降级成范围检查和位测试）里比较，或作为 switch 的下标。</summary>
         private HashSet<Variable> Destinations()
         {
             var candidates = new HashSet<Variable>();
@@ -189,7 +226,7 @@ public static class FinallyRecovery
                     case ManagedAssignment { Target: var target, Value: ConstantValue }: candidates.Add(target.Variable); destinationLocals[target.Variable] = target; break;
                     case ManagedAssignment { Target: var target, Value: var value }: excluded.Add(target.Variable); Exclude(value); break;
                     case ManagedCall { Result: { } result } call: excluded.Add(result.Variable); foreach (var value in ManagedValues.Of(call)) Exclude(value); break;
-                    case ManagedBranch { Condition: ComparisonValue { Left: LocalValue, Right: ConstantValue } }: break;
+                    case ManagedBranch { Condition: ComparisonValue comparison } when OverOneLocal(comparison): break;
                     case ManagedSwitch { Index: LocalValue }: break;
                     default: foreach (var value in ManagedValues.Of(statement)) Exclude(value); break;
                 }
@@ -204,6 +241,13 @@ public static class FinallyRecovery
             return candidates;
         }
 
+        private static bool OverOneLocal(ManagedValue value)
+        {
+            var walked = ManagedValues.Walk(value).ToArray();
+            return walked.All(v => v is LocalValue or ConstantValue or BinaryValue or ComparisonValue or ConversionValue)
+                && walked.OfType<LocalValue>().Select(l => l.Variable).Distinct().Count() == 1;
+        }
+
         private static bool? Fold(ManagedValue condition, ImmutableDictionary<Variable, ConstantValue?> known) => condition switch
         {
             NegatedValue negated => !Fold(negated.Operand, known),
@@ -211,6 +255,8 @@ public static class FinallyRecovery
             ComparisonValue { Condition: var cond and (Cond.Eq or Cond.Ne), Left: LocalValue left, Right: ConstantValue right } when known.TryGetValue(left.Variable, out var value) =>
                 // 当前异常不是空。和其他常量比较的不是保存异常的局部。
                 value is null ? (right.Bits == 0 ? cond == Cond.Ne : null) : (value.Bits == right.Bits) == (cond == Cond.Eq),
+            ComparisonValue comparison when OverOneLocal(comparison) => ConstantConditions.Evaluate(comparison, leaf =>
+                leaf is LocalValue local && known.TryGetValue(local.Variable, out var value) && value is { Width: <= 32 } ? (int)value.Bits : null) is { } result ? result != 0 : null,
             _ => null,
         };
 
@@ -287,11 +333,11 @@ public static class FinallyRecovery
             {
                 case ManagedThrow { Exception: LocalValue thrown } when holders.Contains(thrown.Variable) && at.Known.TryGetValue(thrown.Variable, out var value) && value is null:
                 case ManagedRethrow:
-                    return Ending();
+                    return SameScope(at.Block) ? Ending() : null;
                 case ManagedReturn or ManagedThrow or ManagedEndFault or ManagedSwitch or ManagedHole:
                     return null;
             }
-            if (!open.Add(key)) return null;
+            if (!Portable(statement, at.Block) || !open.Add(key)) return null;
             var address = fresh();
             var slot = handler.Count;
             handler.Add(null!);
@@ -419,7 +465,7 @@ public static class FinallyRecovery
                     }
                     default:
                     {
-                        if (Settle(cursor, real) is not var (position, current) || !Keep(real, match) || !Equivalent(statement, current, match)) return false;
+                        if (Settle(cursor, real) is not var (position, current) || !Portable(current, position.Block) || !Keep(real, match) || !Equivalent(statement, current, match)) return false;
                         match.Started = true;
                         cursor = position with { Index = position.Index + 1 };
                         break;
@@ -459,6 +505,13 @@ public static class FinallyRecovery
         private ManagedBody? Rewrite(ulong entry, IReadOnlyList<ulong> tryBlocks, Dictionary<ManagedEdge, ManagedEdge> exits)
         {
             var inTry = tryBlocks.ToHashSet();
+            // 和新 try 重叠的区域要么包住它，要么连处理块一起嵌在里面：处理块在外面时，它回到 try 的边进不了 IL 的 try，异常的去向也变了。
+            // 这个区域原来的处理块不再可达，不算在外面。
+            var replaced = region.Handler.ToHashSet();
+            bool Inside(ManagedRegion other) => other.Try.All(inTry.Contains) && other.Handler.All(a => inTry.Contains(a) || replaced.Contains(a));
+            foreach (var other in body.Regions.Where(r => !ReferenceEquals(r, region)))
+                if (other.Try.Any(inTry.Contains) && !tryBlocks.All(other.Try.Contains) && !Inside(other)
+                    || other.Handler.Any(inTry.Contains) && !tryBlocks.All(other.Handler.Contains) && !Inside(other)) return null;
             var positions = body.Blocks.Select((b, i) => (b.Address, i)).ToDictionary(p => p.Address, p => p.i);
             var order = tryBlocks.Skip(1).OrderBy(a => positions[a]).Prepend(tryBlocks[0]).ToArray();
             var rewritten = new List<ManagedBlock>();
@@ -475,11 +528,10 @@ public static class FinallyRecovery
                 rewritten.AddRange(handler);
             }
             var added = handler.Select(b => b.Address).ToArray();
-            var first = region.Try[0];
             var regions = body.Regions.Select(r => ReferenceEquals(r, region)
                 ? new ManagedRegion(order, entry, added, null, ManagedRegionKind.Finally)
-                : r.Try.Contains(first) ? r with { Try = Ordered(r.Try, order, added) }
-                : r.Handler.Contains(first) ? r with { Handler = Ordered(r.Handler, order, added) }
+                : tryBlocks.All(r.Try.Contains) ? r with { Try = Ordered(r.Try, order, added) }
+                : tryBlocks.All(r.Handler.Contains) ? r with { Handler = Ordered(r.Handler, order, added) }
                 : r).ToArray();
             // 局部合并可能让几个 catch 共用保存异常的局部。出口路径上的值已经不写了，从 leave 的目标往后不能在重新赋值之前读它。
             var cleaned = Clean(body with { Blocks = rewritten, Regions = regions }, holders, destinations);

@@ -42,7 +42,6 @@ internal static class IdiomPipeline
         Do("interface.operands", s => s.RefreshInterfaceOperands()),
         new("delegates", s => !s.owner.AuditLegacyDelegateCalls && DelegateCallNormalizer.Run(s.facts, s.function, s.Result)),
         new("managed.throws", s => !s.owner.AuditRawManagedThrows && ManagedThrowNormalizer.Run(s.facts, s.function, s.Result)),
-        new("class.beforefieldinit", s => ClassInitializationFacts.DropUnconstrained(s.function)),
         new("catch.exception", s => CaughtExceptionChecks.Run(s.function, e => s.defs.Expand(e))),
         new("runtime.guards", RuntimeGuards),
         new("class.initialized", ClassInitialized),
@@ -76,17 +75,28 @@ internal static class IdiomPipeline
         state.Cleanup();
         state.Passes.Run("idioms.CountCalls", () => state.CountCalls());
         state.Passes.Run("idioms.TrimResultBuffers", () => state.TrimResultBuffers());
+        ToFixedPoint(state, first: true);
+        // 先做完不动点：类初始化的标志位判断要靠支配它的初始化才能折叠。
+        if (state.Passes.Run("idioms.class.beforefieldinit", () => ClassInitializationFacts.DropUnconstrained(state.function)))
+        {
+            state.Cleanup();
+            ToFixedPoint(state, first: false);
+        }
+        state.Passes.Run("idioms.Residuals", () => state.Residuals());
+    }
+
+    private static void ToFixedPoint(IdiomState state, bool first)
+    {
         var changed = new List<string>();
         for (var round = 0; round < Rounds; round++)
         {
             changed.Clear();
             foreach (var rule in Table)
-                if ((round == 0 || !rule.Once) && state.Passes.Run($"idioms.{rule.Name}", () => Apply(state, rule)))
+                if ((first && round == 0 || !rule.Once) && state.Passes.Run($"idioms.{rule.Name}", () => Apply(state, rule)))
                     changed.Add(rule.Name);
             if (changed.Count == 0) break;
         }
         if (changed.Count > 0) state.Reject("idioms.rounds", state.function.Entry, $"规则仍在改写：{string.Join("、", changed)}");
-        state.Passes.Run("idioms.Residuals", () => state.Residuals());
     }
 
     /// <summary>规则的自述只决定是否清理；是否算作改写看语句有没有变化，否则自述不准的规则会让不动点停不下来。</summary>

@@ -10,7 +10,7 @@ namespace Cpp2CS.Recovery.Lowering;
 /// 异常只在可能抛出的语句处发生，处理入口活跃的局部在这些语句之前活跃。
 /// 地址只交给调用的局部（结构体枚举器的 MoveNext）在调用时读写，调用返回后地址不再存在，可以合并；地址有其他去处的局部、
 /// 在入口处活跃的局部（读取依赖 IL 的零初始化）不参与合并。
-/// finally 的处理体在 leave 和目标之间运行：它定义的局部与各目标活跃的局部冲突。
+/// finally 的处理体在 leave 和目标之间运行：它读的局部在 leave 时活跃，它定义的局部与各目标活跃的局部冲突。
 /// </summary>
 internal static class LocalCoalescing
 {
@@ -57,9 +57,14 @@ internal static class LocalCoalescing
 
         // finally 的处理体定义的局部，与 leave 目标处活跃的局部冲突。
         var finallyTargets = new List<(int[] Handler, int[] Targets)>();
+        // 离开 try 的边（块，目标）运行的 finally 入口。
+        var leaving = new Dictionary<(int Block, int Target), List<int>>();
         foreach (var region in body.Regions.Where(r => r.Kind == ManagedRegionKind.Finally))
         {
             var inTry = region.Try.ToHashSet();
+            foreach (var address in region.Try.Where(index.ContainsKey))
+                foreach (var edge in blocks[index[address]].Statements.SelectMany(ManagedValues.Edges).Where(e => !inTry.Contains(e.Target) && index.ContainsKey(e.Target)))
+                    (leaving.TryGetValue((index[address], index[edge.Target]), out var list) ? list : leaving[(index[address], index[edge.Target])] = []).Add(index[region.HandlerEntry]);
             var targets = region.Try.SelectMany(a => index.TryGetValue(a, out var at) ? blocks[at].Statements : []).SelectMany(ManagedValues.Edges)
                 .Where(e => !inTry.Contains(e.Target)).Select(e => index.TryGetValue(e.Target, out var at) ? at : -1).Distinct().ToArray();
             if (targets.Contains(-1)) return body;
@@ -68,6 +73,9 @@ internal static class LocalCoalescing
 
         var liveIn = new HashSet<Variable>[blocks.Count];
         for (var i = 0; i < blocks.Count; i++) liveIn[i] = [];
+        /// <summary>边上的复制之后活跃的局部：目标处活跃的，加上这条边离开 try 时运行的 finally 读的。</summary>
+        IEnumerable<Variable> After(int block, int target) =>
+            leaving.TryGetValue((block, target), out var entries) ? liveIn[target].Concat(entries.SelectMany(e => liveIn[e])) : liveIn[target];
         HashSet<Variable>? Out(int block)
         {
             var live = new HashSet<Variable>();
@@ -75,7 +83,7 @@ internal static class LocalCoalescing
             {
                 if (!index.TryGetValue(edge.Target, out var target)) return null;
                 var written = edge.Copies.Select(c => c.Target.Variable).ToHashSet();
-                live.UnionWith(liveIn[target].Where(v => !written.Contains(v)));
+                live.UnionWith(After(block, target).Where(v => !written.Contains(v)));
                 foreach (var copy in edge.Copies) live.UnionWith(Uses(copy.Value));
             }
             return live;
@@ -117,7 +125,7 @@ internal static class LocalCoalescing
             var statements = blocks[i].Statements;
             foreach (var edge in ManagedValues.Edges(statements[^1]))
             {
-                var after = liveIn[index[edge.Target]];
+                var after = After(i, index[edge.Target]).ToHashSet();
                 var written = edge.Copies.Select(c => c.Target.Variable).ToHashSet();
                 foreach (var copy in edge.Copies)
                     foreach (var other in after)

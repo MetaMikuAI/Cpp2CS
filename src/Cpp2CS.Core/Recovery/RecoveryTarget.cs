@@ -7,7 +7,10 @@ public sealed record RecoveryTarget(MethodRef Instance, ulong Entry)
 {
     public bool Shared => Instance.Method.GenericParameters.Count > 0 || Instance.Method.Owner.GenericParameters.Count > 0;
     public MethodRef Method => Shared ? MethodRef.Open(Instance.Method) : Instance;
-    public MethodRecoveryResult Recover(MethodDecompiler recovery) => Shared
+    public MethodRecoveryResult Recover(MethodDecompiler recovery) => recovery.SourceForm(Lowered(recovery));
+
+    /// <summary>原生代码的恢复体，还没有还原成源码编译器的形态。</summary>
+    internal MethodRecoveryResult Lowered(MethodDecompiler recovery) => Shared
         ? recovery.RecoverShared(Instance, Entry) : recovery.Recover(Instance, Entry);
 
     public static RecoveryTarget Find(ProgramFacts facts, ulong entry, string name)

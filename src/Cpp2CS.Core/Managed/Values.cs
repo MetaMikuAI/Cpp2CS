@@ -16,6 +16,8 @@ public sealed record TypeHandleValue(TypeRef Target, TypeRef Type, int Width) : 
 public sealed record FieldHandleValue(FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width);
 /// <summary>ldtoken 方法：表达式树中的 RuntimeMethodHandle。</summary>
 public sealed record MethodHandleValue(MethodRef Method, TypeRef Type, int Width) : ManagedValue(Type, Width);
+/// <summary>表达式里的无参静态调用（async 的 sm.&lt;&gt;t__builder = Builder.Create()），Roslyn 不经过局部，反编译器按这个形态识别。Inlined 含义同 <see cref="ManagedCall.Inlined"/>。</summary>
+public sealed record StaticCallValue(MethodRef Method, TypeRef Type, int Width, bool Inlined) : ManagedValue(Type, Width);
 public sealed record NewArrayValue(ArrayRef ArrayType, ManagedValue Length) : ManagedValue(ArrayType, 64);
 public sealed record NewObjectValue(MethodRef Constructor, IReadOnlyList<ManagedValue> Arguments) : ManagedValue(Constructor.DeclaringType, 64)
 {

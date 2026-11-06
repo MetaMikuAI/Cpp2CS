@@ -10,15 +10,21 @@ namespace Cpp2CS.Recovery.Control;
 /// </summary>
 internal static class EnumeratorForms
 {
-    public static ManagedBody Run(ManagedBody body)
+    /// <summary>新局部不能和任何已有的局部同名，包括只写不读的调用结果和边上复制的目标。</summary>
+    internal static int NextLocal(ManagedBody body)
     {
-        // 新局部不能和任何已有的局部同名，包括只写不读的调用结果和边上复制的目标。
         var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
         var locals = statements.SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk).OfType<LocalValue>()
             .Concat(statements.OfType<ManagedCall>().Select(c => c.Result).OfType<LocalValue>())
+            .Concat(statements.OfType<ManagedAssignment>().Select(a => a.Target))
             .Concat(statements.SelectMany(ManagedValues.Edges).SelectMany(e => e.Copies).Select(c => c.Target))
             .Concat(body.Regions.Select(r => r.Exception).OfType<LocalValue>());
-        var nextLocal = locals.Where(l => l.Variable.Storage.Bank == Bank.Temp).Select(l => l.Variable.Storage.Index).DefaultIfEmpty(1000).Max() + 1;
+        return locals.Where(l => l.Variable.Storage.Bank == Bank.Temp).Select(l => l.Variable.Storage.Index).DefaultIfEmpty(1000).Max() + 1;
+    }
+
+    public static ManagedBody Run(ManagedBody body)
+    {
+        var nextLocal = NextLocal(body);
         foreach (var region in body.Regions.Where(r => r.Kind == ManagedRegionKind.Finally).ToArray())
         {
             body = Constrained(body, region);

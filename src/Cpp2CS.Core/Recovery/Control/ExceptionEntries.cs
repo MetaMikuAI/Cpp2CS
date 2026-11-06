@@ -12,6 +12,9 @@ internal static class ExceptionEntries
     /// <summary>分派块的地址不对应原生代码，取高位以免与原生块重合。</summary>
     private const ulong SyntheticAddress = 1UL << 63;
 
+    /// <summary>这个地址是分派块。其他步骤新建的块用不同的高位。</summary>
+    public static bool IsDispatch(ulong address) => address >> 62 == 2;
+
     public static ManagedBody Run(ManagedBody body, Func<LocalValue> newLocal)
     {
         var count = 0UL;

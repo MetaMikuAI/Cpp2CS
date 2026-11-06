@@ -12,7 +12,7 @@ public static class ManagedEffects
         var own = value switch
         {
             LocalValue or ArgumentValue or ConstantValue or StringValue or TypeHandleValue or FieldHandleValue or MethodHandleValue => EffectSummary.None,
-            FieldValue { Accessor: not null } or StaticFieldValue { Accessor: not null } => EffectSummary.Unknown,
+            FieldValue { Accessor: not null } or StaticFieldValue { Accessor: not null } or StaticCallValue => EffectSummary.Unknown,
             FieldValue f => Read(f.Receiver.Type is DefinitionRef { Definition.IsValueType: true }
                 or ByRefRef { Element: DefinitionRef { Definition.IsValueType: true } } ? MemoryKind.Local : MemoryKind.Instance),
             StaticFieldValue => Read(MemoryKind.Static),

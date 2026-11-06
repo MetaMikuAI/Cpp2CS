@@ -113,6 +113,8 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                 return handle.Type.Equals(types.RuntimeTypeHandle) ? null : new(EmissionProblemKind.Unsupported, "类型句柄的托管类型不符");
             case FieldHandleValue handle:
                 return handle.Type.Equals(types.RuntimeFieldHandle) ? null : new(EmissionProblemKind.Unsupported, "字段句柄的托管类型不符");
+            case StaticCallValue call:
+                return call.Method.Method is { IsStatic: true, Parameters.Count: 0 } && CanAccess(call.Method, null) ? null : new(EmissionProblemKind.Unsupported, $"静态调用 {call.Method}");
             case MethodHandleValue handle:
                 return handle.Type.Equals(types.RuntimeMethodHandle) ? null : new(EmissionProblemKind.Unsupported, "方法句柄的托管类型不符");
             case NewObjectValue created:

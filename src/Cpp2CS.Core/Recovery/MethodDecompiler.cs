@@ -1,4 +1,5 @@
 using Cpp2CS.Calls;
+using Cpp2CS.Diagnostics;
 using Cpp2CS.Facts;
 using Cpp2CS.Facts.Derived;
 using Cpp2CS.Idioms;
@@ -132,6 +133,21 @@ public sealed class MethodDecompiler
         var holes = lowered.Holes.Concat(recovered.Holes).DistinctBy(h => (h.Address, h.Reason)).ToArray();
         return holes.Length == 0 ? new(analysis.Method, analysis.Entry, body, [])
             : new(analysis.Method, analysis.Entry, null, holes) { Partial = body };
+    }
+
+    /// <summary>写出的方法体还原成源码编译器的形态；内联证明用的方法体不经过这一步。</summary>
+    public MethodRecoveryResult SourceForm(MethodRecoveryResult result)
+    {
+        if (result.Body is not { } body) return result;
+        var form = AsyncForms.Run(body, types, Summary, Definition, out var rejected);
+        return rejected is null ? result with { Body = form }
+            : result with { Rules = [.. result.Rules, new RuleTrace("async.form", result.Entry, RewriteStatus.Blocked, rejected, null, null)] };
+    }
+
+    private MethodRecoveryResult? Definition(MethodDef method)
+    {
+        entries ??= new MethodEntries(facts, types);
+        return entries.ForDefinition(method) is { } target ? new RecoveryTarget(target.Instance, target.Address).Lowered(this) : null;
     }
 
     /// <summary>写出定义：使用统一索引选择的原生见证；实例模板分析仍走 Summary。</summary>
