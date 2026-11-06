@@ -41,7 +41,7 @@ dotnet run --project src/Cpp2CS.Cli -c Release -- recover <binary> <metadata> <o
 | 路径 | 内容 |
 |---|---|
 | `assemblies/` | 元数据骨架与恢复的 CIL，供底层检查和执行对照 |
-| `src/` | C# 文件 |
+| `src/` | C# 文件；工程按 C# 9.0 编译，引用 `references/`（`assemblies/` 的副本，放宽了主程序集的声明） |
 | `recovery.jsonl`、`emitted.tsv` | 逐方法诊断与完整写出清单 |
 | `publication.jsonl`、`run.json` | 方法发布体摘要与运行、产物清单 |
 | `holes.txt` | 未恢复原因与汇总 |
