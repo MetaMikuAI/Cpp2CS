@@ -223,7 +223,7 @@ public static partial class Decompilation
             if (call.Target is not MemberReferenceExpression { MemberName: "Min" or "Max", Target: TypeReferenceExpression { Type: PrimitiveType { Keyword: "decimal" } } } target) return;
             var arguments = call.Arguments.ToArray();
             if (arguments.Length != 2 || !arguments.All(a => a is DirectionExpression)) return;
-            var math = new TypeReferenceExpression(new MemberType(new MemberType(new SimpleType("global"), "System") { IsDoubleColon = true }, "Math"));
+            var math = new TypeReferenceExpression(GlobalType("System", "Math"));
             call.ReplaceWith(new InvocationExpression(new MemberReferenceExpression(math, target.MemberName), arguments.Select(a => ((DirectionExpression)a).Expression.Clone())));
         }
 
@@ -384,7 +384,7 @@ public static partial class Decompilation
         private static void ThrowObject(ThrowStatement statement)
         {
             if (statement.Expression is null || statement.Expression.Annotation<ResolveResult>()?.Type is not { } type || !type.IsKnownType(KnownTypeCode.Object)) return;
-            statement.Expression = new CastExpression(new MemberType(new MemberType(new SimpleType("global"), "System") { IsDoubleColon = true }, "Exception"), statement.Expression.Clone());
+            statement.Expression = new CastExpression(GlobalType("System", "Exception"), statement.Expression.Clone());
         }
 
         /// <summary>
@@ -396,7 +396,7 @@ public static partial class Decompilation
             if (declaration.Type is not ComposedType { HasRefSpecifier: true } || declaration.Variables.Count != 1) return;
             var variable = declaration.Variables.First();
             var value = (variable.Initializer as DirectionExpression)?.Expression;
-            var function = declaration.Ancestors.FirstOrDefault(a => a is LambdaExpression or AnonymousMethodExpression or EntityDeclaration);
+            var function = EnclosingFunction(declaration);
             if (function is null) return;
             var isAsync = function is MethodDeclaration m && (m.HasModifier(Modifiers.Async) || m.Descendants.Any(d => d is YieldReturnStatement or YieldBreakStatement))
                 || function is LambdaExpression { IsAsync: true } || function is AnonymousMethodExpression { IsAsync: true };

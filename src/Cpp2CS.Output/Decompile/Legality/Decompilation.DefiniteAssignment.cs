@@ -25,7 +25,6 @@ public static partial class Decompilation
                     case OperatorDeclaration { Body: not null } @operator: new Flow(@operator.Body, @operator.Parameters).Apply(); break;
                     case DestructorDeclaration { Body: not null } destructor: new Flow(destructor.Body, []).Apply(); break;
                     case Accessor { Body: not null } accessor: new Flow(accessor.Body, []).Apply(); break;
-                    case PropertyDeclaration { ExpressionBody: not null }: break;
                 }
             }
             foreach (var declaration in rootNode.Descendants.OfType<VariableDeclarationStatement>().ToArray()) BindHolder(declaration);
@@ -57,7 +56,7 @@ public static partial class Decompilation
         /// <summary>ref 局部重新绑定到更窄作用域的局部（CS8374）：CIL 的局部只有一个存储位置，把目标提到和占位相同的作用域。</summary>
         private static void HoistBindingTargets(string name, VariableDeclarationStatement anchor)
         {
-            var function = anchor.Ancestors.First(a => a is LambdaExpression or AnonymousMethodExpression or EntityDeclaration);
+            var function = EnclosingFunction(anchor)!;
             var targets = function.Descendants.OfType<AssignmentExpression>()
                 .Where(a => a.Left is IdentifierExpression target && target.Identifier == name)
                 .Select(a => a.Right).OfType<DirectionExpression>().Select(d => d.Expression).OfType<IdentifierExpression>().Select(t => t.Identifier).Distinct().ToArray();

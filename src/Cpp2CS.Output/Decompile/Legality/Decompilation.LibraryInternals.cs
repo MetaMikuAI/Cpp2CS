@@ -54,18 +54,16 @@ public static partial class Decompilation
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().ToArray()) ComparerImplementation(cast);
         }
 
-        private static AstType System(string name) => new MemberType(new MemberType(new SimpleType("global"), "System") { IsDoubleColon = true }, name);
-
         private static void Throw(InvocationExpression call, string exception)
         {
-            if (call.Parent is ExpressionStatement statement) statement.ReplaceWith(new ThrowStatement(new ObjectCreateExpression(System(exception))));
+            if (call.Parent is ExpressionStatement statement) statement.ReplaceWith(new ThrowStatement(new ObjectCreateExpression(GlobalType("System", exception))));
         }
 
         /// <summary>string.AsSpan 展开后只取地址和长度，取到的地址没有用到时直接去掉。</summary>
         private static void UnusedReference(InvocationExpression call)
         {
             if (call.Parent is not DirectionExpression { Parent: VariableInitializer { Parent: VariableDeclarationStatement declaration } variable }) return;
-            var function = declaration.Ancestors.First(a => a is LambdaExpression or AnonymousMethodExpression or EntityDeclaration);
+            var function = EnclosingFunction(declaration)!;
             if (!function.Descendants.OfType<IdentifierExpression>().Any(i => i.Identifier == variable.Name)) declaration.Remove();
         }
 
@@ -94,7 +92,7 @@ public static partial class Decompilation
         private static void ToEuler(InvocationExpression call)
         {
             if (call.Parent is not VariableInitializer { Parent: VariableDeclarationStatement declaration } variable || call.Arguments.FirstOrDefault() is not { } quaternion) return;
-            var function = declaration.Ancestors.First(a => a is LambdaExpression or AnonymousMethodExpression or EntityDeclaration);
+            var function = EnclosingFunction(declaration)!;
             var uses = function.Descendants.OfType<IdentifierExpression>().Where(i => i.Identifier == variable.Name).ToArray();
             if (uses.Length != 3 || !uses.All(u => u.Parent is MemberReferenceExpression { Parent: BinaryOperatorExpression { Parent: NamedExpression { Parent: ArrayInitializerExpression { Parent: ObjectCreateExpression { Parent: InvocationExpression } } } } })) return;
             var positive = (InvocationExpression)uses[0].Ancestors.OfType<ObjectCreateExpression>().First().Parent!;

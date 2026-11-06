@@ -62,13 +62,6 @@ public static partial class Decompilation
             }
         }
 
-        private static AstType Global(params string[] path)
-        {
-            AstType type = new MemberType(new SimpleType("global"), path[0]) { IsDoubleColon = true };
-            foreach (var part in path.Skip(1)) type = new MemberType(type, part);
-            return type;
-        }
-
         internal static Expression? Reflection(IMethod method, TransformContext context)
         {
             var builder = QualifiedTypes;
@@ -80,16 +73,16 @@ public static partial class Decompilation
                 if (!method.IsStatic) return null;
                 var isAction = method.ReturnType.Kind == ICSharpCode.Decompiler.TypeSystem.TypeKind.Void;
                 if (isAction && parameters.Length == 0) return null;
-                var delegateType = (MemberType)Global("System", isAction ? "Action" : "Func");
+                var delegateType = (MemberType)GlobalType("System", isAction ? "Action" : "Func");
                 foreach (var parameter in parameters) delegateType.TypeArguments.Add(builder.ConvertType(parameter));
                 if (!isAction) delegateType.TypeArguments.Add(builder.ConvertType(method.ReturnType));
                 var target = new MemberReferenceExpression(new TypeReferenceExpression(builder.ConvertType(method.DeclaringType)), method.Name);
                 foreach (var argument in method.TypeArguments) target.TypeArguments.Add(builder.ConvertType(argument));
                 return new MemberReferenceExpression(new ObjectCreateExpression(delegateType, target), "Method");
             }
-            var types = new ArrayCreateExpression { Type = Global("System", "Type"), Initializer = new ArrayInitializerExpression(parameters.Select(p => (Expression)new TypeOfExpression(builder.ConvertType(p)))) };
+            var types = new ArrayCreateExpression { Type = GlobalType("System", "Type"), Initializer = new ArrayInitializerExpression(parameters.Select(p => (Expression)new TypeOfExpression(builder.ConvertType(p)))) };
             types.AdditionalArraySpecifiers.Add(new ArraySpecifier());
-            var flags = new CastExpression(Global("System", "Reflection", "BindingFlags"), new PrimitiveExpression(AnyMember));
+            var flags = new CastExpression(GlobalType("System", "Reflection", "BindingFlags"), new PrimitiveExpression(AnyMember));
             var owner = new TypeOfExpression(builder.ConvertType(method.DeclaringType));
             return method.IsConstructor
                 ? new InvocationExpression(new MemberReferenceExpression(owner, "GetConstructor"), flags, new NullReferenceExpression(), types, new NullReferenceExpression())

@@ -8,7 +8,18 @@ namespace Cpp2CS.Output;
 public static partial class Decompilation
 {
     /// <summary>变换阶段加入的类型不再经过 using 分析：一律写全名。</summary>
-    private static readonly ICSharpCode.Decompiler.CSharp.Syntax.TypeSystemAstBuilder QualifiedTypes = new();
+    private static TypeSystemAstBuilder QualifiedTypes => new();
+
+    private static AstType GlobalType(params string[] path)
+    {
+        AstType type = new MemberType(new SimpleType("global"), path[0]) { IsDoubleColon = true };
+        foreach (var part in path.Skip(1)) type = new MemberType(type, part);
+        return type;
+    }
+
+    /// <summary>节点所在的函数：lambda、匿名方法或成员。局部的作用域和 async 修饰都按它判断。</summary>
+    private static AstNode? EnclosingFunction(AstNode node) =>
+        node.Ancestors.FirstOrDefault(a => a is LambdaExpression or AnonymousMethodExpression or EntityDeclaration);
 
     /// <summary>不同的局部同名时，内层声明不能遮蔽外层（CS0136），同一作用域不能重复（CS0128）：给后者换名字。</summary>
     private sealed class ShadowedLocals : IAstTransform
