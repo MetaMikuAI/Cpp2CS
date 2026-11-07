@@ -425,10 +425,32 @@ internal sealed partial class TemplateRecovery
         Canonical(Fold(Instantiate(Normal(term, from, proof), proof.Pairs(on.End))));
 
     private bool Equal(ManagedValue x, Trace a, ManagedValue y, Trace b, DuplicateProof proof) =>
+        Same(x, a, y, b, proof) || Reloads(x, b, proof) is var reloaded && !ReferenceEquals(reloaded, x) && Same(reloaded, a, y, b, proof);
+
+    private bool Same(ManagedValue x, Trace a, ManagedValue y, Trace b, DuplicateProof proof) =>
         SameTerm(Normal(x, a, proof), Normal(y, b, proof)) || SameTerm(Transported(x, a, b, proof), Canonical(Fold(y)));
 
+    /// <summary>
+    /// 保留路径（a）的项里调用之后对字段的重读，换成被取代路径（on）上仍持有区域之前所存字段值的局部：
+    /// 按 <see cref="Reloaded"/>，保留的代码在 on 的状态上运行时这次重读得到的就是这个局部的值。没有可换的重读时返回原项。
+    /// </summary>
+    private ManagedValue Reloads(ManagedValue term, Trace on, DuplicateProof proof)
+    {
+        if (proof.Match.Available?.Value is not { } available) return term;
+        ManagedValue Replace(ManagedValue value)
+        {
+            if (value is Observed { Read: FieldValue })
+                foreach (var variable in available.Keys)
+                    if ((on.Walker.Env.GetValueOrDefault(variable) ?? proof.LocalTypes.GetValueOrDefault(variable)) is LocalValue saved
+                        && saved.Variable == variable && Reloaded(saved, on, value, proof))
+                        return saved;
+            return MapTerm(value, Replace);
+        }
+        return Replace(term);
+    }
+
     private bool? KnownAcross(ManagedValue condition, Trace from, Trace on, DuplicateProof proof) =>
-        KnownCondition(ReferenceEquals(from, on) ? condition : Transported(condition, from, on, proof), on.Walker, NoBinding);
+        KnownCondition(ReferenceEquals(from, on) ? condition : Transported(Reloads(condition, on, proof), from, on, proof), on.Walker, NoBinding);
 
     private static bool SameHandlers(Trace a, Trace b, DuplicateProof proof) =>
         proof.Body.Regions.All(r => r.Try.Contains(a.Walker.Block) == r.Try.Contains(b.Walker.Block) && r.Handler.Contains(a.Walker.Block) == r.Handler.Contains(b.Walker.Block));
