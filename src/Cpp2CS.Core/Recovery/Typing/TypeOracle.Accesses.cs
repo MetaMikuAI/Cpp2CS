@@ -64,23 +64,66 @@ public sealed partial class TypeOracle
                 var target = AccessAddress(operands[0]);
                 if (operands[1].Width % 8 != 0 || target with { Offset = origin.Offset } != origin) break;
                 var end = target.Offset + operands[1].Width / 8;
-                if (members.Any(m => m.Offset < end && target.Offset < m.Offset + m.Value.Width / 8)) break;
+                // 重叠只接受整段复制（clang 用两次重叠的宽写入复制不是 16 字节倍数的结构体）：重叠的字节两次写入同一个值。
+                // 先清零再写部分字段这类重叠是两次不同的写入，不合并。
+                if (members.Any(m => m.Offset < end && target.Offset < m.Offset + m.Value.Width / 8
+                    && (crossedReads.Count > 0 || !SameBytes(m.Value, m.Offset, operands[1], target.Offset)))) break;
                 members.Add((store, operands[0], operands[1], target.Offset));
                 if (members.Count < 2) continue;
-                var ordered = members.OrderBy(m => m.Offset).ToArray();
-                var width = ordered.Sum(m => m.Value.Width);
-                if ((ordered[^1].Offset - ordered[0].Offset) * 8 + ordered[^1].Value.Width != width) continue;
-                if (Locate(ordered[0].Address, width) is not { Type: { } type } location
+                var start = members.Min(m => m.Offset);
+                var width = (int)(members.Max(m => m.Offset + m.Value.Width / 8) - start) * 8;
+                if (Covering(members, start, width) is not { } pieces) continue;
+                var first = members.First(m => m.Offset == start);
+                if (Locate(first.Address, width) is not { Type: { } type } location
                     || types.Kind(type) != TypeKind.Struct || types.Size(type) * 8 != width) continue;
                 if (crossedReads.Count > 0 && (location.Kind is not (LocationKind.Instance or LocationKind.Reference)
-                    || crossedReads.Any(r => AccessAddress(r.Address).Offset < ordered[0].Offset + width / 8
-                        && ordered[0].Offset < AccessAddress(r.Address).Offset + r.Width / 8))) continue;
-                found = new StoreGroup(members.Select(m => m.Store).ToArray(), location, values.Syms.Concat(ordered.Select(m => m.Value)));
+                    || crossedReads.Any(r => AccessAddress(r.Address).Offset < start + width / 8
+                        && start < AccessAddress(r.Address).Offset + r.Width / 8))) continue;
+                found = new StoreGroup(members.Select(m => m.Store).ToArray(), location, values.Syms.Concat(pieces));
             }
             if (found is not null)
                 foreach (var member in found.Members) result[member] = found;
         }
         return result;
+    }
+
+    /// <summary>两次写入重叠的字节是否是同一个值。</summary>
+    private bool SameBytes(Sym first, long firstOffset, Sym second, long secondOffset)
+    {
+        var from = Math.Max(firstOffset, secondOffset);
+        var to = Math.Min(firstOffset + first.Width / 8, secondOffset + second.Width / 8);
+        return ReferenceEquals(SymTable.Resolve(values.Syms.Slice(first, (int)(from - firstOffset) * 8, (int)(to - from) * 8)),
+            SymTable.Resolve(values.Syms.Slice(second, (int)(from - secondOffset) * 8, (int)(to - from) * 8)));
+    }
+
+    /// <summary>
+    /// 写入组从低到高的各段：每个字节取语句次序上最后一次写入它的成员（重叠处两次写入的值相同），相邻且来自同一成员的字节合成一段。
+    /// 有字节没有被写入时为 null。
+    /// </summary>
+    private List<Sym>? Covering(List<(Store Store, Sym Address, Sym Value, long Offset)> members, long start, int width)
+    {
+        var pieces = new List<Sym>();
+        int? owner = null;
+        var from = 0L;
+        for (var at = start; at <= start + width / 8; at++)
+        {
+            int? current = null;
+            if (at < start + width / 8)
+            {
+                for (var k = members.Count - 1; k >= 0 && current is null; k--)
+                    if (members[k].Offset <= at && at < members[k].Offset + members[k].Value.Width / 8) current = k;
+                if (current is null) return null;
+            }
+            if (current == owner && at < start + width / 8) continue;
+            if (owner is { } previous)
+            {
+                var member = members[previous];
+                pieces.Add(values.Syms.Slice(member.Value, (int)(from - member.Offset) * 8, (int)(at - from) * 8));
+            }
+            owner = current;
+            from = at;
+        }
+        return pieces;
     }
 
     /// <summary>拼接中的读取指向完整结构体位置时，以整体读取证明其定义类型。</summary>
