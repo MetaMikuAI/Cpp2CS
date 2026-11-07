@@ -22,6 +22,7 @@ public static partial class Decompilation
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Reverse().ToArray()) SharedCast(cast);
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Reverse().ToArray()) GenericCast(cast);
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Reverse().ToArray()) FirstFieldCast(cast);
+            foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Reverse().ToArray()) UnrelatedCast(cast);
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Where(c => c.Expression is NullReferenceExpression).ToArray()) GuardedReceiver(cast);
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Where(c => c.Expression is NullReferenceExpression).ToArray()) NullReceiver(cast);
             foreach (var binary in rootNode.Descendants.OfType<BinaryOperatorExpression>().Reverse().ToArray()) FloatNegation(binary);
@@ -233,6 +234,31 @@ public static partial class Decompilation
         }
 
         /// <summary>类型参数和具体类型之间没有直接的强制转换（CS0030），经 object 转换：共享泛型的 CIL 本来就按实际类型读。</summary>
+        /// <summary>
+        /// 被调方法不用某个实参或接收者时，clang 不再准备那个寄存器，恢复出来的是寄存器里残留的对象。CIL 不检查类型，能运行；
+        /// C# 的 (T)(object)x 在两个类没有继承关系时必抛 InvalidCastException。
+        /// 接收者是当前类、方法又不是虚方法时写回 this，这是原来的写法；其余用 Unsafe.As，和 CIL 一样不检查。
+        /// </summary>
+        private static void UnrelatedCast(CastExpression cast)
+        {
+            if (cast.Expression is not CastExpression { Type: PrimitiveType { Keyword: "object" }, Expression: { } inner }) return;
+            var to = (cast.Type.Annotation<ResolveResult>()?.Type ?? cast.Annotation<ResolveResult>()?.Type)?.GetDefinition();
+            var from = StaticType(inner)?.GetDefinition();
+            if (to is not { Kind: TypeKind.Class } || from is not { Kind: TypeKind.Class } || to.Equals(from) || to.IsDerivedFrom(from) || from.IsDerivedFrom(to)) return;
+            var owner = cast.GetParent<TypeDeclaration>()?.Annotation<TypeResolveResult>()?.Type.GetDefinition();
+            if (cast.Parent is MemberReferenceExpression { Parent: InvocationExpression call } member && member.Target == cast
+                && call.Annotation<ResolveResult>() is InvocationResolveResult { Member: IMethod { IsStatic: false, IsVirtual: false, IsOverride: false, IsAbstract: false } }
+                && IsStableRead(inner) && owner is not null && (owner.Equals(to) || owner.IsDerivedFrom(to))
+                && cast.GetParent<EntityDeclaration>() is { } entity && !entity.HasModifier(Modifiers.Static))
+            {
+                cast.ReplaceWith(new ThisReferenceExpression());
+                return;
+            }
+            inner.Remove();
+            cast.ReplaceWith(new InvocationExpression(
+                new MemberReferenceExpression(new TypeReferenceExpression(GlobalType("System", "Runtime", "CompilerServices", "Unsafe")), "As", cast.Type.Clone()), inner));
+        }
+
         private static void GenericCast(CastExpression cast)
         {
             var from = StaticType(cast.Expression);

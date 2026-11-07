@@ -818,6 +818,8 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         {
             return ReadValue(side, Types.Int32, NotNull(values[0]) + RuntimeLayout.StringLength);
         }
+        // Unsafe.As<T>(object) 只改变静态类型，方法体就是返回实参，不产生原生调用事件。
+        if (callee.Method is { Name: "As", IsStatic: true, Owner.FullName: "System.Runtime.CompilerServices.Unsafe", Parameters.Count: 1 }) return values[0];
         // BitConverter 的四个按位转换由 BCL 契约定义；不产生原生调用事件，不做数值转换。
         if (callee.Method is { IsStatic: true, Owner.FullName: "System.BitConverter", Parameters.Count: 1 } conversion)
         {
