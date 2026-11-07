@@ -201,11 +201,24 @@ internal sealed partial class CilBodyWriter
 
     private Instruction Invocation(ManagedInvocation invocation)
     {
-        if (invocation.Receiver is { } receiver) Value(receiver);
+        // 虚调用的接收者是类型参数的值时走受约束调用（ECMA-335 III.2.1），CIL 才合法，C# 也不必转换。值在局部或参数里才有地址可取。
+        // 非虚调用不改：受约束调用要判空，原生的这类调用不判空。
+        var parameter = invocation is { Virtual: true, Constraint: null, Receiver: { Type: GenericParameterRef open } and (LocalValue or ArgumentValue) } ? open : null;
+        if (parameter is not null) Address(invocation.Receiver!);
+        else if (invocation.Receiver is { } receiver) Value(receiver);
         foreach (var argument in invocation.Arguments) Value(argument);
-        if (invocation.Constraint is { } constraint) il.Emit(OpCodes.Constrained, TypeReference(constraint));
-        var call = Instruction.Create(invocation.Virtual ? OpCodes.Callvirt : OpCodes.Call, MethodReference(invocation.Method));
+        if ((invocation.Constraint ?? parameter) is { } constraint) il.Emit(OpCodes.Constrained, TypeReference(constraint));
+        var call = Instruction.Create(invocation.Virtual ? OpCodes.Callvirt : OpCodes.Call, MethodReference(OnReceiverInstance(invocation)));
         il.Append(call);
         return call;
     }
+
+    /// <summary>
+    /// 泛型定义上的方法体来自某个实例，原生调用目标是实例上的方法（如 Action&lt;Int32Enum, int, bool&gt;.Invoke）。
+    /// 接收者的静态类型是同一泛型定义的开放实例时，调用写在接收者的实例上：对象是同一个，而共享占位类型在 C# 里写不出来。
+    /// </summary>
+    private static MethodRef OnReceiverInstance(ManagedInvocation invocation) =>
+        invocation.Receiver?.Type is DefinitionRef { Arguments: var open } receiver && receiver.Definition == invocation.Method.Method.Owner
+        && open.Any(a => a is GenericParameterRef) && !open.SequenceEqual(invocation.Method.TypeArguments)
+            ? invocation.Method with { TypeArguments = open } : invocation.Method;
 }
