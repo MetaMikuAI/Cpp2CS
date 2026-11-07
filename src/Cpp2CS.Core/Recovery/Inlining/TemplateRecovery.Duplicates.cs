@@ -259,6 +259,11 @@ internal sealed partial class TemplateRecovery
                             : SameOnward(aTaken, bTaken, proof) && SameOnward(a, b, proof);
                     }
             }
+            if (CheckAsBranch(a, b, proof) is { } absorbed)
+            {
+                if (!absorbed) return proof.Refuse("后续不能比较");
+                continue;
+            }
             // 被取代路径多出的判空：保留的代码不判空，靠这一段里的解引用抛出同样的异常。
             if (y is ManagedCheck extra && NullTested(extra, b.Walker) is { } tested && Term(b.Walker, extra.Condition) is { } condition
                 && a.Recent.Concat(ImminentAccesses(a.Walker)).Any(accessed => Equal(accessed, a, tested, b, proof)))
@@ -269,6 +274,34 @@ internal sealed partial class TemplateRecovery
             return proof.Refuse("后续不同");
         }
         return proof.Refuse("后续不能比较");
+    }
+
+    /// <summary>
+    /// 检查的两种写法：一边是检查语句，另一边是条件分支，其中一侧只经跳转就抛出同一异常类型的新实例，抛出条件与检查条件相同。
+    /// 两者在同样的条件下抛出同样的异常，否则都继续；clang 在不同路径上会选不同写法（判空分支与判空调用）。
+    /// 不是这种形态时为 null；分支沿不抛出的一侧继续。
+    /// </summary>
+    private bool? CheckAsBranch(Trace a, Trace b, DuplicateProof proof)
+    {
+        var (x, y) = (a.Walker.Current, b.Walker.Current);
+        var (checking, branching, check, branch) = (x, y) switch
+        {
+            (ManagedCheck c, ManagedBranch r) => (a, b, c, r),
+            (ManagedBranch r, ManagedCheck c) => (b, a, c, r),
+            _ => default,
+        };
+        if (check is null || branch is null || ThrowingSide(proof.Blocks, branch) is not { } side || !side.Exception.Equals(check.Exception)
+            || side.Arrivals.Count > 0) return null;
+        var throwsTaken = side.Taken;
+        if (Term(checking.Walker, check.Condition) is not { } tested || Term(branching.Walker, branch.Condition) is not { } condition) return false;
+        var raising = throwsTaken ? condition : Negate(condition);
+        var same = ReferenceEquals(checking, a) ? Equal(tested, a, raising, b, proof) : Equal(raising, a, tested, b, proof);
+        if (!same || !SameHandlers(a, b, proof)) return null;
+        Passed(checking, tested);
+        Pass(branching);
+        branching.Walker.Assumptions.Add((condition, !throwsTaken));
+        branching.Recent.Clear();
+        return Along(branching, throwsTaken ? branch.Fallthrough : branch.Taken);
     }
 
     /// <summary>把一条路径走到下一个事件：读取和计算只改变环境，分配之类的求值是事件；途中到达对方的位置就停下。</summary>

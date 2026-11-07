@@ -586,6 +586,12 @@ internal sealed partial class TemplateRecovery
                 steps--;
                 continue;
             }
+            if (c is ManagedBranch guard && m is not ManagedCheck && AbsorbedNullBranch(guard, callee, caller, match) is { } absorbed)
+            {
+                if (!absorbed) return false;
+                steps--;
+                continue;
+            }
             if (m is ManagedCheck templateCheck && c is not ManagedCheck && AbsorbedTemplateCheck(templateCheck, callee, caller, match))
             {
                 callee.Index++;
@@ -598,7 +604,7 @@ internal sealed partial class TemplateRecovery
                 case (ManagedStore, ManagedStore):
                     if (!MatchStores(callee, caller, match)) return false;
                     continue;
-                case (ManagedCall mc, ManagedCall cc) when Instantiated(mc.Invocation.Method, match.TypeArguments).Equals(cc.Invocation.Method)
+                case (ManagedCall mc, ManagedCall cc) when SharedCode(Instantiated(mc.Invocation.Method, match.TypeArguments), cc.Invocation.Method)
                     && mc.Invocation.Arguments.Count == cc.Invocation.Arguments.Count:
                     {
                         if ((mc.Invocation.Receiver is null) != (cc.Invocation.Receiver is null)) return false;
@@ -744,6 +750,18 @@ internal sealed partial class TemplateRecovery
     private static bool Independent(ManagedValue value) => value is ArgumentValue or ConstantValue or LocalValue
         || value is ComposedValue composed && composed.Leaves.All(l => Independent(l.Value));
 
+    /// <summary>
+    /// 两个方法引用调用同一份原生代码：同一定义，类型实参逐个相同或都是具体的引用类型（IL2CPP 对引用类型实参共享一份代码）。
+    /// 编译器合并不同实例内联后相同的尾部时，调用点的元数据只记其中一个实例。
+    /// </summary>
+    private static bool SharedCode(MethodRef a, MethodRef b)
+    {
+        static bool Shared(TypeRef x, TypeRef y) => x.Equals(y)
+            || x is ArrayRef or DefinitionRef && y is ArrayRef or DefinitionRef && ManagedTypes.IsReferenceType(x) && ManagedTypes.IsReferenceType(y);
+        return ReferenceEquals(a.Method, b.Method) && a.TypeArguments.Count == b.TypeArguments.Count && a.MethodArguments.Count == b.MethodArguments.Count
+            && a.TypeArguments.Zip(b.TypeArguments).All(p => Shared(p.First, p.Second)) && a.MethodArguments.Zip(b.MethodArguments).All(p => Shared(p.First, p.Second));
+    }
+
     private static MethodRef Instantiated(MethodRef method, IReadOnlyList<TypeRef> arguments) => method with
     {
         TypeArguments = method.TypeArguments.Select(t => t.Substitute(arguments, [])).ToArray(),
@@ -761,6 +779,67 @@ internal sealed partial class TemplateRecovery
         return true;
     }
 
+    /// <summary>
+    /// 调用方的判空写成分支（一侧只抛出新的空引用异常，try 里的判空常这样），模板不判空：与 <see cref="AbsorbedNullCheck"/> 相同，
+    /// 抛出的一侧并入区域，调用方沿另一侧继续。模板在这里也有同样条件的分支时不适用，按分支比对。不是这种形态时为 null。
+    /// </summary>
+    private bool? AbsorbedNullBranch(ManagedBranch guard, Walker callee, Walker caller, InlineMatch match)
+    {
+        if (ThrowingSide(caller.Blocks, guard) is not { } side || !IsNullReference(side.Exception) || Term(caller, guard.Condition) is not { } condition
+            || (side.Taken ? condition : Negate(condition)) is not ComparisonValue { Condition: Cond.Eq, Right: ConstantValue { Bits: 0 }, Left: var tested })
+            return null;
+        if (callee.Current is ManagedBranch branch && Term(callee, branch.Condition) is { } own
+            && (Same(own, condition, caller, new(match.Binding)) || Same(own, Negate(condition), caller, new(match.Binding))))
+            return null;
+        match.NullChecks.Add((tested, callee.Dereferenced.Concat(ImminentAccesses(callee)).ToArray()));
+        Cover(caller, match);
+        foreach (var block in side.Path)
+            for (var i = 0; i < caller.Blocks[block].Statements.Count; i++) match.Covered.Add((block, i));
+        match.Raising.Add(side.Path[^1]);
+        match.Arrivals.AddRange(side.Arrivals);
+        caller.Assumptions.Add((condition, !side.Taken));
+        return Follow(caller, side.Taken ? guard.Fallthrough : guard.Taken) || match.Fail($"调用方 0x{caller.Block:x} 的路径成环");
+    }
+
+    /// <summary>
+    /// 分支是检查的另一种写法：恰有一侧不带复制、只经跳转就到达抛出无参新建异常的块（抛出前只有异常到达的赋值）。
+    /// 给出抛出的一侧、异常的构造函数、途经的块和这些赋值。
+    /// </summary>
+    private static (bool Taken, MethodRef Exception, IReadOnlyList<ulong> Path, IReadOnlyList<ManagedAssignment> Arrivals)? ThrowingSide(
+        IReadOnlyDictionary<ulong, ManagedBlock> blocks, ManagedBranch branch)
+    {
+        (MethodRef Exception, List<ulong> Path, ManagedAssignment[] Arrivals)? Throws(ManagedEdge edge)
+        {
+            if (edge.Copies.Count > 0) return null;
+            var path = new List<ulong>();
+            for (var at = edge.Target; !path.Contains(at) && blocks.TryGetValue(at, out var block);)
+            {
+                path.Add(at);
+                switch (block.Statements)
+                {
+                    case [ManagedJump { Edge: { Copies.Count: 0 } next }]:
+                        at = next.Target;
+                        continue;
+                    case [.., ManagedThrow { Exception: NewObjectValue { Arguments.Count: 0 } created }]:
+                        var arrivals = block.Statements.Take(block.Statements.Count - 1).ToArray();
+                        if (!arrivals.All(s => s is ManagedAssignment { ExceptionArrival: true })) return null;
+                        return (created.Constructor, path, arrivals.Cast<ManagedAssignment>().ToArray());
+                }
+                return null;
+            }
+            return null;
+        }
+        return (Throws(branch.Taken), Throws(branch.Fallthrough)) switch
+        {
+            ({ } taken, null) => (true, taken.Exception, taken.Path, taken.Arrivals),
+            (null, { } fallthrough) => (false, fallthrough.Exception, fallthrough.Path, fallthrough.Arrivals),
+            _ => null,
+        };
+    }
+
+    private static bool IsNullReference(MethodRef exception) =>
+        exception.DeclaringType is DefinitionRef { Definition.FullName: "System.NullReferenceException" };
+
     /// <summary>模板判空，调用方不判空：调用方已经解引用过这个项，或它的下一条语句会解引用，同样在核对时按最终绑定比较。</summary>
     private bool AbsorbedTemplateCheck(ManagedCheck check, Walker callee, Walker caller, InlineMatch match)
     {
@@ -771,7 +850,7 @@ internal sealed partial class TemplateRecovery
 
     /// <summary>检查是空引用判空时给出被判空的项。</summary>
     private ManagedValue? NullTested(ManagedCheck check, Walker walker) =>
-        check.Exception.DeclaringType is DefinitionRef { Definition.FullName: "System.NullReferenceException" }
+        IsNullReference(check.Exception)
         && check.Condition is ComparisonValue { Condition: Cond.Eq, Right: ConstantValue { Bits: 0 }, Left: var tested }
             ? Term(walker, tested) : null;
 

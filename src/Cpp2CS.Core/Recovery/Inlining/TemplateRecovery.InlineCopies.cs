@@ -44,13 +44,16 @@ internal sealed partial class TemplateRecovery
     /// <summary>
     /// 区域内异常边 φ 的赋值提到调用之前：这些局部只在异常到达时读取，每个抛出点之前都会重新赋值，
     /// 调用不抛出的路径上多写一次观察不到。同一局部须在区域内取同一个、不受区域影响的值，否则调用抛出时值不对。
+    /// 离开区域的边上的复制成为调用之后的出口复制，晚于区域内的全部抛出点，不影响这些值。
     /// </summary>
-    private IReadOnlyList<ManagedAssignment>? ArrivalCopies(ManagedBody body, InlineMatch match, IReadOnlyDictionary<ulong, ManagedBlock> blocks, ulong at, out string failure)
+    private IReadOnlyList<ManagedAssignment>? ArrivalCopies(ManagedBody body, InlineMatch match, IReadOnlyDictionary<ulong, ManagedBlock> blocks,
+        IReadOnlySet<ulong> region, ulong at, out string failure)
     {
         failure = "异常到达的赋值不能提前";
         if (match.Arrivals.Count == 0) return [];
         var statements = match.Covered.Select(p => blocks[p.Block].Statements[p.Index]).ToArray();
-        var edgeTargets = statements.SelectMany(ManagedValues.Edges).SelectMany(e => e.Copies).Select(c => c.Target.Variable).ToHashSet();
+        var edgeTargets = statements.SelectMany(ManagedValues.Edges).Where(e => region.Contains(e.Target))
+            .SelectMany(e => e.Copies).Select(c => c.Target.Variable).ToHashSet();
         var addressed = body.Blocks.SelectMany(b => b.Statements).SelectMany(ReadValues).SelectMany(ManagedValues.Walk)
             .OfType<AddressValue>().SelectMany(a => ManagedValues.Walk(a.Target)).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
         var copies = new List<ManagedAssignment>();
