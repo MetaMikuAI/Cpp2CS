@@ -61,8 +61,16 @@ internal sealed partial class BodyBuilder
                     {
                         // 跨字段的写入按布局拆为逐字段写入（寄存器对、合并的清零等一次写入多个字段）；
                         // 只覆盖字段一部分的段写为读改写：f = (f & ~掩码) | (段 << 位移)，浮点字段在同宽整数的位型上改写。
+                        var wholeEnd = 0;
                         foreach (var part in leaves)
                         {
+                            if (part.Bit < wholeEnd) continue;
+                            if (WholeStruct(part, store.Value.Width) is var (place, bit, size))
+                            {
+                                StoreTo(place, values.Syms.Slice(operands[1], bit, size), store.Address, output);
+                                wholeEnd = bit + size;
+                                continue;
+                            }
                             var leaf = part.Leaf;
                             var leafTarget = LocationValue(leaf, store.Address, store: true);
                             var slice = values.Syms.Slice(operands[1], part.Bit, part.Width);
@@ -120,6 +128,29 @@ internal sealed partial class BodyBuilder
             default:
                 return Fail(statement.Address, $"语句 {statement.GetType().Name}", terminal: false) is Statement s ? AddHole(output, s) : null;
         }
+    }
+
+    /// <summary>
+    /// 段所在的值类型字段整个落在这次写入内、且含不可访问的叶子时，按整个字段写入（合并的清零跨过几个 Nullable 字段）：
+    /// 两种写法写的是同一段字节，整体写入不需要访问私有叶子。取最外层整个落在写入内的值类型字段。
+    /// </summary>
+    private (Location Place, int Bit, int Width)? WholeStruct(AccessPart part, int width)
+    {
+        var path = part.Leaf.Path;
+        for (var i = 1; i < path.Count; i++)
+        {
+            if (FieldType(path[i - 1], null) is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct) continue;
+            var inner = types.Projections(structure).ToArray();
+            if (inner.Length == 0 || inner.Any(p => !p.Fits(types.StorageBits(structure)))) return null;
+            var suffix = path.Skip(i).ToArray();
+            if (inner.FirstOrDefault(p => p.Path.SequenceEqual(suffix)) is not { } leaf) return null;
+            var bit = part.Bit - part.FieldBit - leaf.Bit;
+            var size = types.Size(structure) * 8;
+            if (size <= 0 || bit < 0 || bit + size > width) continue;
+            if (!inner.Any(p => p.Path.Any(f => !fields.Accessible(f, f.DeclaringType)))) return null;
+            return (part.Leaf with { Path = path.Take(i).ToArray(), Type = structure }, bit, size);
+        }
+        return null;
     }
 
     /// <summary>
