@@ -19,7 +19,8 @@ internal static class GuardPass
             return false;
         var load = loads[0];
         bool Decides(ulong enter, ulong skip) => DirectionPass.Direction(condition, ReplacePass.Replace(load, enter)) == side && DirectionPass.Direction(condition, ReplacePass.Replace(load, skip)) == 1 - side;
-        // s_Il2CppMethodInitialized：读 1 字节守卫，区域内只有 InitMetadata(槽位)、置位写入与纯定义
+        // s_Il2CppMethodInitialized：读 1 字节守卫，区域内只有 InitMetadata(槽位)、置位写入与纯定义。
+        // 纯定义包括跨调用保存恢复的寄存器（如按低位保存的实参），只经合并点的 φ 流出，由 Merge 检查两侧相同。
         if (helpers.All(k => k == HelperKind.InitMetadata))
         {
             if (load is not { Width: 8, Address: Const guard } || !state.owner.guardSections.Any(s => s.Contains(guard.Value)))
@@ -37,6 +38,8 @@ internal static class GuardPass
                         sets++;
                         break;
                     case Define { Value: Const or Symbol } or Nop or Jump:
+                        break;
+                    case Define define when !ExprMap.Walk(define.Value).Any(e => e is Load or Intrinsic or Unknown):
                         break;
                     default:
                         return false;
