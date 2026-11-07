@@ -13,6 +13,11 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
     private bool CanAccess(MethodRef method, TypeRef? receiver) => IgnoreAccess || ManagedAccess.Method(types, accessContext, method, receiver);
     private bool CanAccess(TypeRef type) => IgnoreAccess || ManagedAccess.Type(types, accessContext, type);
     private bool CanAccess(FieldRef field, TypeRef? receiver) => IgnoreAccess || ManagedAccess.Field(types, methodContext, field, receiver);
+    /// <summary>
+    /// 构造函数之外写只读字段（member 表示写的是这个字段里面的成员）：放宽访问时 CIL 照写，源码工程放宽主程序集自己的声明（SourceReferences）；
+    /// 别的程序集的只读字段整个写入时，源码层把覆盖全部字段的连续写入换回构造函数，写它里面的成员则写不出来（CS1648）。
+    /// </summary>
+    private bool WritesReadonly(FieldRef field, bool member) => !IgnoreAccess || member && field.Field.Owner.Assembly != methodContext.Method.Owner.Assembly;
 
     public EmissionProblem? Check(ManagedBody recovered, bool hasBody)
     {
@@ -175,7 +180,8 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                 break;
             case AddressValue takenAddress:
                 if (!Addressable(takenAddress.Target)) return new(EmissionProblemKind.Unsupported, "取址 需要托管存储位置");
-                if (ReadonlyWriteProblem(takenAddress.Target) is { } readonlyProblem) return readonlyProblem;
+                // 放宽访问时取只读字段的地址照写：只读的调用接收者在 C# 里由编译器做防御性复制，真正的写入在写入语句处检查。
+                if (!IgnoreAccess && ReadonlyWriteProblem(takenAddress.Target) is { } readonlyProblem) return readonlyProblem;
                 break;
             case FieldValue f:
                 if (f.Accessor is { } instanceAccessor ? !instanceAccessor.Matches(types, accessContext, f, instanceAccessor.Write) : !f.Unfolded && !CanAccess(f.Field, f.Receiver.Type)) return new(EmissionProblemKind.AccessDenied, $"访问权限 字段 {f.Field}");
@@ -273,15 +279,15 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
         return null;
     }
 
-    private EmissionProblem? ReadonlyWriteProblem(ManagedValue value)
+    private EmissionProblem? ReadonlyWriteProblem(ManagedValue value, bool member = false)
     {
-        if (value is AddressValue a) return ReadonlyWriteProblem(a.Target);
-        if (value is IndirectValue indirect) return ReadonlyWriteProblem(indirect.Address);
-        if (value is not FieldValue field || IgnoreAccess) return null;
-        if ((field.Field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
+        if (value is AddressValue a) return ReadonlyWriteProblem(a.Target, member);
+        if (value is IndirectValue indirect) return ReadonlyWriteProblem(indirect.Address, member);
+        if (value is not FieldValue field) return null;
+        if (WritesReadonly(field.Field, member) && (field.Field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
             && !(methodContext.Method.Name == ".ctor" && methodContext.Method.Owner == field.Field.Field.Owner))
             return new(EmissionProblemKind.ReadonlyInstanceField, $"只读实例字段 不能在所属类型构造函数之外取得可写地址：{field.Field}");
-        if (field.Receiver is AddressValue address) return ReadonlyWriteProblem(address.Target);
+        if (field.Receiver is AddressValue address) return ReadonlyWriteProblem(address.Target, true);
         return null;
     }
 
