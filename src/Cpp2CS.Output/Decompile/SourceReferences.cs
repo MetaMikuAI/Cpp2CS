@@ -26,7 +26,8 @@ public static class SourceReferences
         foreach (var file in Directory.GetFiles(searchDirectory, "*.dll"))
         {
             var destination = Path.Combine(target, Path.GetFileName(file));
-            var module = resolver.Modules.FirstOrDefault(m => string.Equals(m.FileName, Path.GetFullPath(file), StringComparison.OrdinalIgnoreCase));
+            // 模块按绝对路径对应：搜索目录可以是相对路径，这时模块记下的也是相对路径。
+            var module = resolver.Modules.FirstOrDefault(m => string.Equals(Path.GetFullPath(m.FileName), Path.GetFullPath(file), StringComparison.OrdinalIgnoreCase));
             if (module is not null && changed.Contains(module)) module.Assembly.Write(destination);
             else File.Copy(file, destination, true);
         }
