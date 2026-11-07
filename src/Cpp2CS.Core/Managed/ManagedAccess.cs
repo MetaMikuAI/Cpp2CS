@@ -23,7 +23,7 @@ public static class ManagedAccess
 
     /// <summary>
     /// 类型能否在 caller 中按名引用（C# 的规则）：顶层类型须为 public 或在同一程序集；嵌套类型按成员规则判定，并要求外层类型可访问；
-    /// 泛型实参、数组与指针元素同样要可访问。骨架不处理 InternalsVisibleTo，按不可见计。
+    /// 泛型实参、数组与指针元素同样要可访问。程序集内可见包括 InternalsVisibleTo 授权的程序集。
     /// </summary>
     public static bool Type(ManagedTypes types, TypeDef caller, TypeRef type) => type switch
     {
@@ -38,7 +38,7 @@ public static class ManagedAccess
     {
         var visibility = type.Definition.Attributes & TypeAttributes.VisibilityMask;
         if (type.Definition.DeclaringType is not { } outer)
-            return visibility == TypeAttributes.Public || type.Definition.Assembly == caller.Assembly;
+            return visibility == TypeAttributes.Public || types.Model.SharesInternals(type.Definition.Assembly, caller.Assembly);
         // 嵌套类型的实参按 CLR 规则以外层类型的实参开头
         var outerType = new DefinitionRef(outer, type.Arguments.Take(outer.GenericParameters.Count).ToArray());
         var access = visibility switch
@@ -57,7 +57,7 @@ public static class ManagedAccess
     // FieldAccessMask 与 MemberAccessMask 的 0..6 取值相同。Family 同时限制访问上下文与接收者类型。
     private static bool Allowed(ManagedTypes types, TypeDef caller, TypeDef owner, TypeRef declaringType, int access, TypeRef? receiver)
     {
-        var sameAssembly = owner.Assembly == caller.Assembly;
+        var sameAssembly = types.Model.SharesInternals(owner.Assembly, caller.Assembly);
         var privateAccess = false;
         var familyAccess = false;
         for (var context = caller; context is not null; context = context.DeclaringType)

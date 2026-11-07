@@ -109,6 +109,25 @@ public sealed class AssemblyDef
     public IReadOnlyList<CustomAttributeDef> CustomAttributes { get; internal set; } = [];
     public IReadOnlyList<TypeDef> Types { get; internal set; } = [];
     public override string ToString() => Name;
+
+    private (string Name, string? PublicKey)[]? friends;
+
+    /// <summary>
+    /// 程序集内可见的范围是否包括 <paramref name="other"/>：同一程序集，或本程序集用 InternalsVisibleTo 授权了它。
+    /// 授权按程序集名匹配（不区分大小写）；写了 PublicKey 时公钥也要相同。
+    /// </summary>
+    public bool SharesInternalsWith(AssemblyDef other)
+    {
+        if (other == this) return true;
+        friends ??= CustomAttributes
+            .Where(a => a.Constructor.Owner is { Namespace: "System.Runtime.CompilerServices", Name: "InternalsVisibleToAttribute" })
+            .Select(a => a.Arguments is [{ Value: string friend }] ? friend.Split(',') : null)
+            .OfType<string[]>()
+            .Select(parts => (parts[0].Trim(), parts.Skip(1).Select(p => p.Split('=', 2)).Where(p => p.Length == 2 && p[0].Trim() == "PublicKey").Select(p => p[1].Trim()).FirstOrDefault()))
+            .ToArray();
+        return friends.Any(f => string.Equals(f.Name, other.AssemblyName, StringComparison.OrdinalIgnoreCase)
+            && (f.PublicKey is null || string.Equals(f.PublicKey, Convert.ToHexString(other.PublicKey), StringComparison.OrdinalIgnoreCase)));
+    }
 }
 
 public sealed class TypeDef
@@ -305,6 +324,15 @@ public sealed class ProgramModel
     /// <summary>代码地址到托管所有者。</summary>
     public required IReadOnlyDictionary<ulong, IReadOnlyList<CodeOwner>> Code { get; init; }
     private readonly ConcurrentDictionary<ulong, Usage?> slots = new();
+    private Dictionary<string, AssemblyDef>? images;
+
+    /// <summary>映像名（TypeDef.Assembly）为 <paramref name="owner"/> 的程序集是否向 <paramref name="caller"/> 开放 internal 成员。</summary>
+    public bool SharesInternals(string owner, string caller)
+    {
+        if (owner == caller) return true;
+        images ??= Assemblies.ToDictionary(a => a.Name);
+        return images.TryGetValue(owner, out var granting) && images.TryGetValue(caller, out var friend) && granting.SharesInternalsWith(friend);
+    }
 
     /// <summary>
     /// 读取元数据槽位（v27+：全局变量初值为编码令牌 ((kind&lt;&lt;29)|(index&lt;&lt;1))+1）。
