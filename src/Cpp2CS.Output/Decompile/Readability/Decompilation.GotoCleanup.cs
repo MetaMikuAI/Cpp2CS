@@ -1,4 +1,6 @@
 using ICSharpCode.Decompiler.CSharp.Syntax;
+using ICSharpCode.Decompiler.CSharp;
+using ICSharpCode.Decompiler.Semantics;
 using ICSharpCode.Decompiler.CSharp.Transforms;
 
 namespace Cpp2CS.Output;
@@ -281,7 +283,8 @@ public static partial class Decompilation
             {
                 if (used.Contains(name) || label.Parent is null) continue;
                 if (Previous(label) is { } previous && !Completes(previous))
-                    foreach (var dead in Segment(label)) dead.Remove();
+                    foreach (var dead in Segment(label))
+                        if (dead is not LocalFunctionDeclarationStatement) dead.Remove();
                 label.Remove();
                 labels.Remove(name);
                 changed = true;
@@ -305,11 +308,13 @@ public static partial class Decompilation
             return node;
         }
 
-        private static Expression Negate(Expression condition) => condition switch
+        /// <summary>取反一个脱离了父节点的条件。重载的 == 和 != 是两个方法，不能互换，只交换内建的比较。</summary>
+        internal static Expression Negate(Expression condition) => condition switch
         {
             UnaryOperatorExpression { Operator: UnaryOperatorType.Not } not => Take(not.Expression!),
-            BinaryOperatorExpression { Operator: BinaryOperatorType.Equality } equal => new BinaryOperatorExpression(Take(equal.Left!), BinaryOperatorType.InEquality, Take(equal.Right!)),
-            BinaryOperatorExpression { Operator: BinaryOperatorType.InEquality } unequal => new BinaryOperatorExpression(Take(unequal.Left!), BinaryOperatorType.Equality, Take(unequal.Right!)),
+            BinaryOperatorExpression { Operator: BinaryOperatorType.Equality or BinaryOperatorType.InEquality } comparison
+                when comparison.GetResolveResult() is OperatorResolveResult { UserDefinedOperatorMethod: null } =>
+                new BinaryOperatorExpression(Take(comparison.Left!), comparison.Operator == BinaryOperatorType.Equality ? BinaryOperatorType.InEquality : BinaryOperatorType.Equality, Take(comparison.Right!)),
             _ => new UnaryOperatorExpression(UnaryOperatorType.Not, condition),
         };
 

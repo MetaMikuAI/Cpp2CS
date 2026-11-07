@@ -5,6 +5,7 @@ using ICSharpCode.Decompiler.CSharp;
 using ICSharpCode.Decompiler.CSharp.OutputVisitor;
 using ICSharpCode.Decompiler.CSharp.Syntax;
 using ICSharpCode.Decompiler.CSharp.Transforms;
+using ICSharpCode.Decompiler.IL.ControlFlow;
 using ICSharpCode.Decompiler.IL.Transforms;
 using ICSharpCode.Decompiler.Metadata;
 using ICSharpCode.Decompiler.TypeSystem;
@@ -33,6 +34,10 @@ public static partial class Decompilation
     {
         var decompiler = new CSharpDecompiler(typeSystem, settings);
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ILInlining) + 1, new MergedArrayInitializers());
+        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is MergedArrayInitializers) + 1, new ClosureValues());
+        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ClosureValues) + 1, new ImplicitChecks());
+        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is AsyncAwaitDecompiler) + 1, new ClosureValues());
+        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is AsyncAwaitDecompiler) + 2, new ImplicitChecks());
         decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new GotoCleanup());
         decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new DistinctLocalNames());
         transforms?.Register(decompiler, DecompilePosition.BeforeLegality);
@@ -41,10 +46,13 @@ public static partial class Decompilation
         decompiler.AstTransforms.Add(new StructConstructors());
         decompiler.AstTransforms.Add(new LibraryInternals());
         decompiler.AstTransforms.Add(new ExpressionForms());
+        decompiler.AstTransforms.Add(new BooleanIntegers());
+        decompiler.AstTransforms.Add(new CachedLambdas());
         decompiler.AstTransforms.Add(new ShadowedLocals());
         decompiler.AstTransforms.Add(new DefiniteAssignment());
         decompiler.AstTransforms.Add(new MemberTokens());
         decompiler.AstTransforms.Add(new NullConditionalReceivers());
+        decompiler.AstTransforms.Add(new ReferenceNullTests());
         decompiler.AstTransforms.Add(new EscapeInvalidIdentifiers());
         decompiler.AstTransforms.Add(new RemoveCLSCompliantAttribute());
         decompiler.AstTransforms.Add(new StrippedMathConstants());
@@ -54,6 +62,7 @@ public static partial class Decompilation
         decompiler.AstTransforms.Add(new InterfaceTupleNames());
         decompiler.AstTransforms.Add(new ForwardingImplementations());
         transforms?.Register(decompiler, DecompilePosition.AfterLegality);
+        decompiler.AstTransforms.Add(new FieldLikeEvents());
         decompiler.AstTransforms.Add(new EventFieldNames());
         transforms?.Register(decompiler, DecompilePosition.AfterEvents);
         return decompiler;
