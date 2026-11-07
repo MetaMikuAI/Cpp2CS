@@ -40,6 +40,12 @@ internal sealed partial class TemplateRecovery
             if (fields.CallFailure(method, receiver, isStatic ? field.DeclaringType : null) is { } illegal) { reasons.Add(illegal); continue; }
             if (Template(method) is not { } summary)
             {
+                // 总被内联的库访问器：方法体按库的源码给出。
+                if (!write && !receiverParameter && LibraryAccessors.IsRead(definition, field.Field))
+                {
+                    found = new FieldAccessor(method, field, valueType, types.ValueWidth(valueType), write);
+                    break;
+                }
                 reasons.Add(method.Method == caller.Method ? $"{definition.Name} 是调用方自身"
                     : summaries(method) is null ? $"{definition.Name} 没有原生入口" : $"{definition.Name} 是同程序集未证明的方法体，不作模板");
                 continue;
