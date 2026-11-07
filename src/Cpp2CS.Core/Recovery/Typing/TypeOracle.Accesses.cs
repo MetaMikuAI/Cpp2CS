@@ -133,8 +133,9 @@ public sealed partial class TypeOracle
         var sites = reads.Select(r => block.Statements.FindIndex(s => ReferenceEquals(s, r.Site))).ToArray();
         if (sites.Any(s => s < 0)) return null;
         var first = sites.Min();
+        // 各段之间只能是定义：其中对别处的读取不改内存；整体读取落在第一段处，后面的段读同一对象，提前读不改变异常。
         for (var i = first; i <= sites.Max(); i++)
-            if (block.Statements[i] is not Define || values.ReadsAt(block.Statements[i]).Any(r => !reads.Contains(r))) return null;
+            if (block.Statements[i] is not Define) return null;
         var site = block.Statements[first];
         if (wholeReads.TryGetValue((site, address, total), out var whole)) return whole;
         whole = values.Syms.Read(site, -1 - wholeReads.Count, address, total);
