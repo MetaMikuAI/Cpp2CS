@@ -609,7 +609,12 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         foreach (var term in terms)
         {
             if (term is ConstSym c) { offset += c.Signed; continue; }
-            if (Scaled(term) is var (scaled, factor) && factor > 1 && index is null) { (index, scale) = (scaled, factor); continue; }
+            if (Scaled(term) is var (scaled, factor) && factor > 1)
+            {
+                if (index is null) { (index, scale) = (scaled, factor); continue; }
+                // 同一下标的两个倍数分开相加（x*8 + x*4）：系数相加。
+                if (SameIndex(index, scaled)) { scale += factor; continue; }
+            }
             if (variable.Length == 1) { root = term; continue; }
             if (root is null && IsAddressRoot(term)) { root = term; continue; }
             if (index is null) { (index, scale) = (term, 1); continue; }
@@ -629,14 +634,38 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         else terms.Add(sym);
     }
 
-    /// <summary>左移或乘常量的下标：低位补零的拼接、或乘以常量。</summary>
-    private (Sym Index, int Factor)? Scaled(Sym term) => term switch
+    /// <summary>
+    /// 左移或乘常量的下标：低位补零的拼接、或乘以常量。被移位的部分本身是同一下标几个倍数之和时（x + (x &lt;&lt; 1)，
+    /// 编译器把乘 3、5、9 写成移位加），系数相乘，元素大小不是 2 的幂的数组也能按下标访问。
+    /// </summary>
+    private (Sym Index, int Factor)? Scaled(Sym term)
     {
-        ConcatSym { Parts: [ConstSym { Value: 0 } zero, ..] } concat when zero.Width < 8
-            => (values.Syms.Slice(concat, zero.Width, concat.Width - zero.Width), 1 << zero.Width),
-        OpSym { Op.Kind: OperatorKind.Binary, Args: [var x, ConstSym { Value: > 1 and <= 4096 } factor] } mul when mul.Op.Binary == BinOp.Mul => (x, (int)factor.Value),
-        _ => null,
-    };
+        (Sym Index, int Factor)? simple = SymTable.Resolve(term) switch
+        {
+            ConcatSym { Parts: [ConstSym { Value: 0 } zero, ..] } concat when zero.Width < 8
+                => (values.Syms.Slice(concat, zero.Width, concat.Width - zero.Width), 1 << zero.Width),
+            OpSym { Op.Kind: OperatorKind.Binary, Args: [var x, ConstSym { Value: > 1 and <= 4096 } factor] } mul when mul.Op.Binary == BinOp.Mul => (x, (int)factor.Value),
+            _ => null,
+        };
+        if (simple is var (inner, outer) && Multiple(inner) is var (index, times)) return (index, outer * times);
+        return simple;
+    }
+
+    /// <summary>同一下标几个倍数之和：x + x*k 或 x*j + x*k（含移位写法），返回下标和系数之和。</summary>
+    private (Sym Index, int Factor)? Multiple(Sym sum)
+    {
+        if (SymTable.Resolve(sum) is not OpSym { Op.Kind: OperatorKind.Binary, Args: [var left, var right] } add || add.Op.Binary != BinOp.Add) return null;
+        var (leftIndex, leftFactor) = Scaled(left) ?? (left, 1);
+        var (rightIndex, rightFactor) = Scaled(right) ?? (right, 1);
+        return SameIndex(leftIndex, rightIndex) && leftFactor + rightFactor is var total and > 1 and <= 4096 ? (leftIndex, total) : null;
+    }
+
+    /// <summary>两个下标是同一个值的低位截断（移位前先截到不同宽度），按模运算相同。</summary>
+    private static bool SameIndex(Sym left, Sym right)
+    {
+        static Sym Untruncated(Sym sym) => SymTable.Resolve(sym) is SliceSym { Low: 0 } slice ? Untruncated(slice.Base) : SymTable.Resolve(sym);
+        return Untruncated(left).Equals(Untruncated(right));
+    }
 
     private bool IsAddressRoot(Sym term) => term is EntitySym or LocalSym || TypeOf(term) is { } t && (ManagedTypes.IsReferenceType(t) || t is ByRefRef or PointerRef);
 
