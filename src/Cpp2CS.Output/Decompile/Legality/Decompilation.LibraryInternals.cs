@@ -49,6 +49,7 @@ public static partial class Decompilation
             {
                 NestedEnumerator(creation);
                 InlinedConstructor(creation);
+                SpanFromReference(creation);
             }
             foreach (var block in rootNode.Descendants.OfType<BlockStatement>().ToArray()) ReadOnlyFieldRuns(block);
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().ToArray()) ComparerImplementation(cast);
@@ -153,6 +154,30 @@ public static partial class Decompilation
             if (creation.Annotation<ResolveResult>() is not InvocationResolveResult { Member: IMethod { IsConstructor: true, DeclaringTypeDefinition: { Name: "Enumerator", DeclaringTypeDefinition: { } collection } } }) return;
             if (creation.Arguments.Count != 1 || creation.Arguments.First().Annotation<ResolveResult>()?.Type.GetDefinition() is not { } source || !source.Equals(collection)) return;
             creation.ReplaceWith(new InvocationExpression(new MemberReferenceExpression(creation.Arguments.First().Clone(), "GetEnumerator")));
+        }
+
+        /// <summary>
+        /// Span 和 ReadOnlySpan 按引用构造的构造函数不公开，是 string.AsSpan、栈上缓冲区之类展开后的形状：
+        /// new ReadOnlySpan&lt;char&gt;(ref s.GetRawStringData(), s.Length) 写成 MemoryExtensions.AsSpan(s, 0, s.Length)，
+        /// s 为 null 时同样在取长度处抛空引用异常；new Span&lt;T&gt;(ref *p, n) 写成指针构造函数 new Span&lt;T&gt;(p, n)，
+        /// 公开的构造函数多检查一次 n 不为负（不检查的构造函数要求调用方保证）。
+        /// </summary>
+        private static void SpanFromReference(ObjectCreateExpression creation)
+        {
+            if (creation.Annotation<ResolveResult>() is not InvocationResolveResult { Member: IMethod { IsConstructor: true, DeclaringTypeDefinition: { Namespace: "System", Name: "Span" or "ReadOnlySpan" } span } constructor }
+                || constructor.Parameters.Count != 2 || constructor.Parameters[0].Type.Kind != ICSharpCode.Decompiler.TypeSystem.TypeKind.ByReference
+                || creation.Arguments.ToArray() is not [DirectionExpression { FieldDirection: FieldDirection.Ref, Expression: var reference }, var length]) return;
+            if (span.Name == "ReadOnlySpan" && reference is InvocationExpression { Arguments.Count: 0, Target: MemberReferenceExpression { MemberName: "GetRawStringData", Target: { } text } } raw
+                && raw.Annotation<ResolveResult>() is InvocationResolveResult { Member.DeclaringTypeDefinition.KnownTypeCode: KnownTypeCode.String }
+                && length is MemberReferenceExpression { MemberName: "Length", Target: { } measured } && measured.ToString() == text.ToString()
+                && !text.DescendantsAndSelf.Any(n => n is InvocationExpression or AssignmentExpression or UnaryOperatorExpression { Operator: UnaryOperatorType.Await or UnaryOperatorType.Increment or UnaryOperatorType.Decrement or UnaryOperatorType.PostIncrement or UnaryOperatorType.PostDecrement }))
+            {
+                var asSpan = new MemberReferenceExpression(new TypeReferenceExpression(GlobalType("System", "MemoryExtensions")), "AsSpan");
+                creation.ReplaceWith(new InvocationExpression(asSpan, text.Clone(), new PrimitiveExpression(0), length.Clone()));
+                return;
+            }
+            if (reference is UnaryOperatorExpression { Operator: UnaryOperatorType.Dereference, Expression: var pointer })
+                creation.ReplaceWith(new ObjectCreateExpression(creation.Type.Clone(), pointer.Clone(), length.Clone()));
         }
 
         /// <summary>

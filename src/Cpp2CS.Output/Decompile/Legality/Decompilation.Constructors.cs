@@ -29,6 +29,10 @@ public static partial class Decompilation
                     case BaseReferenceExpression or ThisReferenceExpression:
                         Chain(call, statement, target.Target is BaseReferenceExpression);
                         break;
+                    case not null when !call.Arguments.Any() && call.Annotation<ResolveResult>() is InvocationResolveResult { Member.DeclaringType: var owner } && owner.IsKnownType(KnownTypeCode.Object):
+                        // object 的构造函数没有效果；对别的对象调用时写成 new object() 会换掉对象，直接去掉。
+                        statement.Remove();
+                        break;
                     case IdentifierExpression variable when call.Annotation<ResolveResult>() is InvocationResolveResult { Member: IMethod { DeclaringType: var type } }:
                         statement.Expression = new AssignmentExpression(variable.Clone(), new ObjectCreateExpression(QualifiedTypes.ConvertType(type), call.Arguments.Select(a => a.Clone())));
                         break;
