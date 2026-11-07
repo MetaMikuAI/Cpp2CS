@@ -38,7 +38,12 @@ internal sealed partial class TemplateRecovery
             if (!declared.Equals(valueType) && (write || !ManagedTypes.IsReferenceType(valueType)
                 || !ManagedTypes.IsReferenceType(declared) || !types.IsAssignable(valueType, declared))) continue;
             if (fields.CallFailure(method, receiver, isStatic ? field.DeclaringType : null) is { } illegal) { reasons.Add(illegal); continue; }
-            if (summaries(method) is not { } summary) { reasons.Add($"{definition.Name} 没有原生入口"); continue; }
+            if (Template(method) is not { } summary)
+            {
+                reasons.Add(method.Method == caller.Method ? $"{definition.Name} 是调用方自身"
+                    : summaries(method) is null ? $"{definition.Name} 没有原生入口" : $"{definition.Name} 是同程序集未证明的方法体，不作模板");
+                continue;
+            }
             if (summary.Body is not { } body) { reasons.Add($"{definition.Name} 未恢复：{summary.Holes.FirstOrDefault()?.Reason}"); continue; }
             if (!AccessorBody(body, field, write, receiverParameter)) { reasons.Add($"{definition.Name} 不是单一字段访问"); continue; }
             found = new FieldAccessor(method, field, valueType, types.ValueWidth(valueType), write);

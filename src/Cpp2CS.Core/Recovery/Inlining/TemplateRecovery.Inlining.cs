@@ -144,13 +144,18 @@ internal sealed partial class TemplateRecovery
             progressed = true;
         }
         body = DeadPendingReads(OverlaidReads(body));
-        // 未证明的访问：值与写入目标都换成洞。
+        // 未证明的访问：同程序集的字段按原生代码直接访问，记下没有折回的内联；其余的值与写入目标都换成洞。
         ManagedValue Seal(ManagedValue value)
         {
             if (PendingOf(value) is { } pending)
             {
                 var reason = $"{pending.Reason}，也不在可证明的内联方法体中";
                 if (inlineFailures.TryGetValue(pending.Address, out var failure)) reason += $"；内联证明：{failure}";
+                if (Unfold(value) is { } direct)
+                {
+                    unfolded.Add(new Cpp2CS.Diagnostics.RuleTrace(UnfoldedRule, pending.Address, Cpp2CS.Diagnostics.RewriteStatus.Applied, "same-assembly", reason, null));
+                    return ManagedValues.Map(direct, Seal);
+                }
                 holes.Add(new RecoveryHole(pending.Address, reason));
                 return new HoleValue(reason, value.Type, value.Width);
             }
@@ -202,7 +207,7 @@ internal sealed partial class TemplateRecovery
             foreach (var definition in pending.Allocated.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic))
             {
                 var method = new MethodRef(definition, pending.Allocated.Arguments, []);
-                if (summaries(method) is not { Body: { } template }) { failures.Add(definition.Address == 0 ? "构造函数没有原生代码" : "构造函数自身未能恢复"); continue; }
+                if (Template(method) is not { Body: { } template }) { failures.Add(definition.Address == 0 ? "构造函数没有原生代码" : "构造函数自身未能恢复"); continue; }
                 if (template.Regions.Count > 0 || !Acyclic(template)) { failures.Add("构造函数体含异常区域或环"); continue; }
                 if (PendingCall(body, variable, pending) is not var (block, index, _)) break;
                 var blocks = body.Blocks.ToDictionary(b => b.Address);
@@ -288,7 +293,7 @@ internal sealed partial class TemplateRecovery
         foreach (var definition in parent.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic))
         {
             var method = new MethodRef(definition, parent.Arguments, []);
-            if (summaries(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
+            if (Template(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
             var blocks = body.Blocks.ToDictionary(b => b.Address);
             foreach (var block in body.Blocks)
                 for (var start = 0; start < block.Statements.Count; start++)
@@ -301,6 +306,19 @@ internal sealed partial class TemplateRecovery
         }
         return body;
     }
+
+    /// <summary>
+    /// 调用方访问不到的字段只能来自被内联的方法。字段和调用方在同一程序集时，原生代码的直接访问就是内联展开后的语义：
+    /// CIL 照写，C# 由主程序集声明的放宽承接（<c>SourceReferences</c>）。别的程序集的字段不能放宽，仍然是洞。
+    /// </summary>
+    private ManagedValue? Unfold(ManagedValue value) => value switch
+    {
+        FieldValue field when field.Field.Field.Owner.Assembly == caller.Method.Owner.Assembly && !SharedArgument(caller, field.Field.DeclaringType)
+            => field with { Pending = null, Unfolded = true },
+        StaticFieldValue field when field.Field.Field.Owner.Assembly == caller.Method.Owner.Assembly && !SharedArgument(caller, field.Field.DeclaringType)
+            => field with { Pending = null, Unfolded = true },
+        _ => null,
+    };
 
     private static PendingAccess? PendingOf(ManagedValue value) => value switch
     {
@@ -460,7 +478,7 @@ internal sealed partial class TemplateRecovery
         var found = new List<(MethodRef, ManagedBody)>();
         foreach (var method in fields.Candidates(field, receiver).Where(m => m.MethodArguments.Count == 0))
         {
-            if (summaries(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
+            if (Template(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
             var touches = template.Blocks.SelectMany(b => b.Statements).SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
                 .Any(v => FieldAccessor.FieldOf(v) is { } f && f.Field == field.Field);
             if (touches) found.Add((method, template));

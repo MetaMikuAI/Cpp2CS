@@ -28,6 +28,7 @@ internal sealed partial class BodyBuilder
     private readonly HashSet<ReadSym> materialized = [];
     private readonly HashSet<PhiSym> phis = [];
     private readonly List<RecoveryHole> holes = [];
+    private readonly List<Cpp2CS.Diagnostics.RuleTrace> unfolded = [];
     private readonly Dictionary<ResultSym, Call> constructions = [];
     private readonly HashSet<Sym> absorbedChecks = [];
     private readonly HashSet<ManagedStatement> omissibleReads = new(ReferenceEqualityComparer.Instance);
@@ -179,7 +180,8 @@ internal sealed partial class BodyBuilder
             r.Try.Where(reachable.Contains).Select(b => b.Start).ToArray(), r.Pad.Start, r.Handler.Where(reachable.Contains).Select(b => b.Start).ToArray(),
             r.BeginCatch is { } begin ? exceptions[begin] : null, r.IsCatch ? ManagedRegionKind.Catch : ManagedRegionKind.Fault)).ToArray();
         var body = ExceptionEntries.Run(new ManagedBody(analysis.Method, blocks) { Regions = managedRegions }, () => NewLocal(types.Int32));
-        return new(body, holes.DistinctBy(h => (h.Address, h.Reason)).ToArray(), new Dictionary<Variable, PendingConstruction>(pendingConstructions), nextLocal);
+        return new(body, holes.DistinctBy(h => (h.Address, h.Reason)).ToArray(), new Dictionary<Variable, PendingConstruction>(pendingConstructions), nextLocal)
+            { Unfolded = unfolded.DistinctBy(u => (u.Site, u.Detail)).ToArray() };
     }
 
     /// <summary>沿托管终结语句的出边与区域的处理入口可达的块。</summary>

@@ -9,7 +9,7 @@ internal sealed partial class TemplateRecovery
     {
         var seen = new HashSet<MethodRef>();
         while (invocation is { Virtual: false, Method.Method.Name: ".ctor" } && seen.Add(invocation.Method)
-            && summaries(invocation.Method) is { Body: { Regions.Count: 0, Blocks: [var block] } })
+            && Template(invocation.Method) is { Body: { Regions.Count: 0, Blocks: [var block] } })
         {
             var forward = block.Statements switch
             {
@@ -30,7 +30,7 @@ internal sealed partial class TemplateRecovery
     }
 
     private List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>? ConstructorWrites(MethodRef method) =>
-        summaries(method) is { Body: { Regions.Count: 0 } template } && method.DeclaringType is DefinitionRef structure
+        Template(method) is { Body: { Regions.Count: 0 } template } && method.DeclaringType is DefinitionRef structure
             ? ConstructorWrites(template, structure) : null;
 
     /// <summary>

@@ -45,6 +45,8 @@ public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef T
     /// <summary>F9 认回证明；保留原字段的求值位置，避免把条件表达式里的调用提前执行。</summary>
     public FieldAccessor? Accessor { get; init; }
     public PendingAccess? Pending { get; init; }
+    /// <summary>内联的逆没有证明、按原生代码直接访问的同程序集字段；写出时不按访问权限拒绝，源码由主程序集声明的放宽承接。</summary>
+    public bool Unfolded { get; init; }
 }
 /// <summary>对调用方不可访问、等待内联的逆证明的访问：原生地址、证明失败时洞的原因与是否为写入。只在恢复过程中出现。</summary>
 public sealed record PendingAccess(ulong Address, string Reason, bool Write);
@@ -55,13 +57,19 @@ public sealed record PinnedArrayValue(ManagedValue Array, ArrayRef ArrayType) : 
 /// <summary>非托管指针按字节偏移，不增加数组边界检查。</summary>
 public sealed record PointerOffsetValue(ManagedValue Pointer, ManagedValue Offset) : ManagedValue(Pointer.Type, 64);
 /// <summary>叶子均已证明的结构体值；L4 用 initobj 和逐叶子写入构造。</summary>
-public sealed record ComposedValue(TypeRef StructType, IReadOnlyList<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> Leaves) : ManagedValue(StructType, 0);
+public sealed record ComposedValue(TypeRef StructType, IReadOnlyList<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> Leaves) : ManagedValue(StructType, 0)
+{
+    /// <summary>有同程序集的不可访问叶子、构造没有证明，按原生代码逐个写入；见 <see cref="FieldValue.Unfolded"/>。</summary>
+    public bool Unfolded { get; init; }
+}
 /// <summary>读取/写入已定型的结构体根，地址必须由托管存储位置证明。</summary>
 public sealed record IndirectValue(ManagedValue Address, TypeRef Type, int Width = 0) : ManagedValue(Type, Width);
 public sealed record StaticFieldValue(FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width)
 {
     public FieldAccessor? Accessor { get; init; }
     public PendingAccess? Pending { get; init; }
+    /// <summary>见 <see cref="FieldValue.Unfolded"/>。</summary>
+    public bool Unfolded { get; init; }
 }
 public sealed record BinaryValue(BinOp Op, ManagedValue Left, ManagedValue Right, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record UnaryValue(UnOp Op, ManagedValue Operand, TypeRef Type, int Width) : ManagedValue(Type, Width);

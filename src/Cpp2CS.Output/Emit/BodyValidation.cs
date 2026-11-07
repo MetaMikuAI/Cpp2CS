@@ -167,7 +167,7 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                 foreach (var leaf in c.Leaves)
                     foreach (var field in leaf.Path)
                     {
-                        if (!CanAccess(field, field.DeclaringType)) return new(EmissionProblemKind.AccessDenied, $"访问权限 字段 {field}");
+                        if (!c.Unfolded && !CanAccess(field, field.DeclaringType)) return new(EmissionProblemKind.AccessDenied, $"访问权限 字段 {field}");
                         if (!IgnoreAccess && (field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
                             && !(methodContext.Method.Name == ".ctor" && methodContext.Method.Owner == field.Field.Owner))
                             return new(EmissionProblemKind.ReadonlyInstanceField, $"只读实例字段 不能逐叶子合成 {field.DeclaringType}：{field}");
@@ -178,12 +178,12 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                 if (ReadonlyWriteProblem(takenAddress.Target) is { } readonlyProblem) return readonlyProblem;
                 break;
             case FieldValue f:
-                if (f.Accessor is { } instanceAccessor ? !instanceAccessor.Matches(types, accessContext, f, instanceAccessor.Write) : !CanAccess(f.Field, f.Receiver.Type)) return new(EmissionProblemKind.AccessDenied, $"访问权限 字段 {f.Field}");
+                if (f.Accessor is { } instanceAccessor ? !instanceAccessor.Matches(types, accessContext, f, instanceAccessor.Write) : !f.Unfolded && !CanAccess(f.Field, f.Receiver.Type)) return new(EmissionProblemKind.AccessDenied, $"访问权限 字段 {f.Field}");
                 return Problem(f.Receiver is AddressValue address ? address.Target : f.Receiver);
             case StaticFieldValue f:
                 if (!f.Field.Field.IsStatic || (f.Field.Field.Attributes & System.Reflection.FieldAttributes.Literal) != 0)
                     return new(EmissionProblemKind.Unsupported, "静态字段 存储类型不符");
-                if (f.Accessor is { } staticAccessor ? !staticAccessor.Matches(types, accessContext, f, staticAccessor.Write) : !CanAccess(f.Field, null)) return new(EmissionProblemKind.AccessDenied, $"访问权限 静态字段 {f.Field}");
+                if (f.Accessor is { } staticAccessor ? !staticAccessor.Matches(types, accessContext, f, staticAccessor.Write) : !f.Unfolded && !CanAccess(f.Field, null)) return new(EmissionProblemKind.AccessDenied, $"访问权限 静态字段 {f.Field}");
                 break;
             case ConversionValue { Kind: ConvKind.Bitcast } bitcast
                 when (types.Kind(bitcast.Operand.Type) is TypeKind.Float or TypeKind.Double) != (types.Kind(bitcast.Type) is TypeKind.Float or TypeKind.Double):

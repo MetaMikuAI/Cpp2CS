@@ -169,7 +169,7 @@ internal sealed partial class TemplateRecovery
     {
         if (nonThrowingConstructors.TryGetValue(method, out var known)) return known;
         nonThrowingConstructors[method] = false;
-        return nonThrowingConstructors[method] = summaries(method) is { Body: { Regions.Count: 0 } template }
+        return nonThrowingConstructors[method] = Template(method) is { Body: { Regions.Count: 0 } template }
             && ConstructorWrites(template, structure) is { } writes
             && writes.All(w => w.Value is ConstantValue or ArgumentValue or IndirectValue { Address: ArgumentValue { Type: ByRefRef } })
             && template.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()

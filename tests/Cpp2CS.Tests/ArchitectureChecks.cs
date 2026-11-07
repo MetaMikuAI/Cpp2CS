@@ -1111,7 +1111,7 @@ internal static class ArchitectureChecks
             new(32, [Grow(self, input), new ManagedReturn(32, null)])]);
         MethodRecoveryResult? Summary(MethodRef requested) => requested.Method == add ? new(addRef, 0, template, []) : null;
 
-        var callerDefinition = Method(Type("BagUser", 861), "Fill", 862);
+        var callerDefinition = Method(Type("BagUser", 861, CallerAssembly), "Fill", 862);
         var caller = new MethodRef(callerDefinition, [], []);
         var list = new ArgumentValue(0, ownerRef, 64);
         var (first, second) = (new ArgumentValue(1, types.Int32, 32), new ArgumentValue(2, types.Int32, 32));
@@ -1191,7 +1191,7 @@ internal static class ArchitectureChecks
             new(16, [new ManagedStore(16, Field(self), zero), new ManagedReturn(20, null)]),
             new(32, [new ManagedStore(32, Field(self), input), new ManagedReturn(36, null)])]);
         MethodRecoveryResult? Summary(MethodRef requested) => requested.Method == definition ? new(method, 0, template, []) : null;
-        var callerDefinition = Method(Type("ExitConsumer", 841), "Run", 841);
+        var callerDefinition = Method(Type("ExitConsumer", 841, CallerAssembly), "Run", 841);
         callerDefinition.ReturnType = types.Int32;
         var caller = new MethodRef(callerDefinition, [], []);
         var receiver = new ArgumentValue(0, ownerRef, 64);
@@ -1234,7 +1234,7 @@ internal static class ArchitectureChecks
         var template = new ManagedBody(method, [new(0, [new ManagedStore(0, Field(self, first), input),
             new ManagedStore(4, Field(self, second), input), new ManagedReturn(8, null)])]);
         MethodRecoveryResult? Summary(MethodRef requested) => requested.Method == definition ? new(method, 0, template, []) : null;
-        var caller = new MethodRef(Method(Type("Consumer", 11), "Write", 11), [], []);
+        var caller = new MethodRef(Method(Type("Consumer", 11, CallerAssembly), "Write", 11), [], []);
         var receiver = new ArgumentValue(0, ownerRef, 64);
         var value = new ArgumentValue(1, types.Int32, 32);
         ManagedBody Body(ManagedValue last) => new(caller, [new(0,
@@ -1250,6 +1250,12 @@ internal static class ArchitectureChecks
         check.True(success.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Inlined && c.Invocation.Method == method), "证明区域被替换成调用");
         var failure = recovery.Run(Body(new ConstantValue(7, types.Int32, 32)), new Dictionary<Variable, PendingConstruction>(), 0);
         check.True(failure.Holes.Count > 0, "写入不一致时保留缺口");
+        var local = new MethodRef(Method(Type("LocalConsumer", 14), "Write", 14), [], []);
+        var unfolded = new TemplateRecovery(types, local, Summary, new InlineEvidence(types, local, Summary)).Run(
+            Body(new ConstantValue(7, types.Int32, 32)) with { Method = local }, new Dictionary<Variable, PendingConstruction>(), 0);
+        check.True(unfolded.Holes.Count == 0 && unfolded.Unfolded.Count == 2
+            && unfolded.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>().All(s => s.Target is FieldValue { Unfolded: true, Pending: null }),
+            "同程序集的调用方在证明被拒绝时按原生代码写出字段");
         check.True(!failure.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Inlined), "失败的证明不改写成调用");
         var prepare = Method(Type("Preparation", 13), "Run", 13, MethodAttributes.Public | MethodAttributes.Static);
         var prelude = new ManagedCall(0, new(new(prepare, [], []), null, [], false), null);
@@ -1289,7 +1295,7 @@ internal static class ArchitectureChecks
         hidden.ReturnType = visible.ReturnType = inherited.ReturnType = types.Int32;
         MethodRecoveryResult Summary(MethodRef method) => new(method, 0, new ManagedBody(method,
             [new(0, [new ManagedReturn(0, new FieldValue(new ArgumentValue(-1, ownerRef, 64), fieldRef, types.Int32, 32))])]), []);
-        var caller = new MethodRef(Method(Type("AccessConsumer", 31), "Run", 33), [], []);
+        var caller = new MethodRef(Method(Type("AccessConsumer", 31, CallerAssembly), "Run", 33), [], []);
         owner.Methods = [hidden];
         var privateOnly = new InlineEvidence(types, caller, Summary);
         check.True(Prove(privateOnly, fieldRef, types.Int32, false, ownerRef) is null, "私有访问器不能证明外部字段读取");
@@ -2069,7 +2075,7 @@ internal static class ArchitectureChecks
         query.ReturnType = pair;
         var consumer = Method(Type("PairConsumer", 153), "Consume", 153, MethodAttributes.Public | MethodAttributes.Static);
         consumer.Parameters = [new("pair", pair, 0, null, false)];
-        var caller = new MethodRef(Method(Type("PairCaller", 154), "Run", 154), [], []);
+        var caller = new MethodRef(Method(Type("PairCaller", 154, CallerAssembly), "Run", 154), [], []);
         var returned = new LocalValue(new Variable(Storage.Temp(150), 1), pair, 64);
         var first = new LocalValue(new Variable(Storage.Temp(151), 1), types.Int32, 32);
         var second = new LocalValue(new Variable(Storage.Temp(152), 1), types.Int32, 32);
@@ -2152,7 +2158,7 @@ internal static class ArchitectureChecks
         var operation = Method(Type("StatusSource", 46), "Query", 46, MethodAttributes.Public | MethodAttributes.Static);
         operation.ReturnType = types.Int32;
         var query = new MethodRef(operation, [], []);
-        var callerDefinition = Method(Type("StatusConsumer", 47), "Run", 47);
+        var callerDefinition = Method(Type("StatusConsumer", 47, CallerAssembly), "Run", 47);
         callerDefinition.ReturnType = types.Boolean;
         var caller = new MethodRef(callerDefinition, [], []);
         var state = new LocalValue(new Variable(Storage.Temp(45), 1), types.Int32, 32);
@@ -2485,11 +2491,16 @@ internal static class ArchitectureChecks
         check.Equal(0, ExecutionVerdicts.ExitCode([ExecutionVerdict.Verified]), "全部请求用例通过才成功");
     }
 
-    private static TypeDef Type(string name, int index) => new()
+    /// <summary>
+    /// 夹具类型。证明被拒绝时，同程序集的调用方按原生代码直接写出访问（不留洞）；要从洞看出拒绝的检查把调用方放在 <see cref="CallerAssembly"/>。
+    /// </summary>
+    private static TypeDef Type(string name, int index, string assembly = "Tests.dll") => new()
     {
-        Index = index, Name = name, Namespace = "Tests", Assembly = "Tests.dll", Token = 0,
+        Index = index, Name = name, Namespace = "Tests", Assembly = assembly, Token = 0,
         Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false,
     };
+
+    private const string CallerAssembly = "Caller.dll";
 
     private static MethodDef Method(TypeDef owner, string name, int index, MethodAttributes attributes = MethodAttributes.Public) => new()
     {

@@ -144,8 +144,9 @@ public sealed class MethodDecompiler
         var recovered = templates.Run(lowered.Body, lowered.Constructions, lowered.NextLocal);
         var body = LocalCoalescing.Run(recovered.Body);
         var holes = lowered.Holes.Concat(recovered.Holes).DistinctBy(h => (h.Address, h.Reason)).ToArray();
-        return holes.Length == 0 ? new(analysis.Method, analysis.Entry, body, [])
-            : new(analysis.Method, analysis.Entry, null, holes) { Partial = body };
+        var unfolded = lowered.Unfolded.Concat(recovered.Unfolded).ToArray();
+        return holes.Length == 0 ? new(analysis.Method, analysis.Entry, body, []) { Rules = unfolded }
+            : new(analysis.Method, analysis.Entry, null, holes) { Partial = body, Rules = unfolded };
     }
 
     /// <summary>写出的方法体还原成源码编译器的形态；内联证明用的方法体不经过这一步。</summary>

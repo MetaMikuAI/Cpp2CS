@@ -107,7 +107,10 @@ internal sealed partial class BodyBuilder
 
     private TypeRef FieldType(FieldRef field, TypeRef? leaf) => leaf ?? field.Field.Type.Substitute(((DefinitionRef)field.DeclaringType).Arguments, []);
 
-    /// <summary>字段链：写入目标中值类型的中间字段以地址给出；每一级按可访问性取字段或被内联的访问器。</summary>
+    /// <summary>
+    /// 字段链：写入目标中值类型的中间字段以地址给出；每一级按可访问性取字段或被内联的访问器。
+    /// 写入经过的不可访问中间字段没有访问器可以代替（取不到它的地址）；和调用方同一程序集时按原生代码直接取址，见 <see cref="FieldValue.Unfolded"/>。
+    /// </summary>
     private ManagedValue Nest(ManagedValue receiver, IReadOnlyList<FieldRef> path, TypeRef leaf, bool store, ulong address)
     {
         var value = receiver;
@@ -116,7 +119,15 @@ internal sealed partial class BodyBuilder
             var last = i == path.Count - 1;
             var type = FieldType(path[i], last ? leaf : null);
             if (store && !last && !fields.Accessible(path[i], value.Type))
-                return Hole(address, $"内存 写入经过不可访问的值类型字段 {path[i].Field.Name}", leaf);
+            {
+                var reason = $"内存 写入经过不可访问的值类型字段 {path[i].Field.Name}";
+                if (path[i].Field.Owner.Assembly != analysis.Method.Method.Owner.Assembly
+                    || Inlining.TemplateRecovery.SharedArgument(analysis.Method, path[i].DeclaringType)) return Hole(address, reason, leaf);
+                unfolded.Add(new Cpp2CS.Diagnostics.RuleTrace(Inlining.TemplateRecovery.UnfoldedRule, address, Cpp2CS.Diagnostics.RewriteStatus.Applied, "same-assembly-path", reason, null));
+                value = new FieldValue(value, path[i], type, Width(type)) { Unfolded = true };
+                if (types.Kind(type) == TypeKind.Struct) value = new AddressValue(value);
+                continue;
+            }
             value = (store ? null : OverlappingPieces(value, path[i], type, address)) ?? FieldAccess(value, path[i], type, store && last, address);
             if (store && !last && types.Kind(type) == TypeKind.Struct) value = new AddressValue(value);
         }

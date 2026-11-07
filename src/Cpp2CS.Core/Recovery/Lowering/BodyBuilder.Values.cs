@@ -368,12 +368,22 @@ internal sealed partial class BodyBuilder
         return hidden && !templates.CanConstructValue(structure);
     }
 
-    /// <summary>按叶子组成结构体值；不可访问的字段由模板层证明构造，失败则记为洞。</summary>
+    /// <summary>
+    /// 按叶子组成结构体值；不可访问的字段由模板层证明构造。证明失败时，不可访问的字段都和调用方在同一程序集，
+    /// 按原生代码逐个写入（源码由主程序集声明的放宽承接）；否则记为洞。
+    /// </summary>
     private ManagedValue Composed(DefinitionRef structure, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, ulong address)
     {
         if (TryCompose(structure, leaves, address) is { } composed) return composed;
-        var hidden = leaves.SelectMany(l => l.Path).First(f => !fields.Accessible(f, f.DeclaringType));
-        return Hole(address, $"内存 字段 {hidden.Field.Owner.FullName}.{hidden.Field.Name} 对调用方不可访问，结构体值按叶子组成", structure);
+        var hidden = leaves.SelectMany(l => l.Path).Where(f => !fields.Accessible(f, f.DeclaringType)).ToArray();
+        var reason = $"内存 字段 {hidden[0].Field.Owner.FullName}.{hidden[0].Field.Name} 对调用方不可访问，结构体值按叶子组成";
+        if (hidden.All(f => f.Field.Owner.Assembly == analysis.Method.Method.Owner.Assembly)
+            && !Inlining.TemplateRecovery.SharedArgument(analysis.Method, [structure, .. leaves.SelectMany(l => l.Path).Select(f => f.DeclaringType)]))
+        {
+            unfolded.Add(new Cpp2CS.Diagnostics.RuleTrace(Inlining.TemplateRecovery.UnfoldedRule, address, Cpp2CS.Diagnostics.RewriteStatus.Applied, "same-assembly-leaves", reason, null));
+            return new ComposedValue(structure, leaves) { Unfolded = true };
+        }
+        return Hole(address, reason, structure);
     }
 
     /// <summary>

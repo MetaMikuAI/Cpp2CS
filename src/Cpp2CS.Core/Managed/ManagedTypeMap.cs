@@ -47,7 +47,7 @@ public static class ManagedTypeMap
             ArrayElementValue v => v with { Array = Value(v.Array), Index = Value(v.Index), Type = map(v.Type), Width = W(v.Type, map(v.Type), v.Width) },
             FieldValue v => v with { Receiver = Value(v.Receiver), Field = Field(v.Field), Type = map(v.Type), Width = W(v.Type, map(v.Type), v.Width), Accessor = null },
             AddressValue v => new AddressValue(Value(v.Target)),
-            ComposedValue v => new ComposedValue(map(v.StructType), v.Leaves.Select(l => ((IReadOnlyList<FieldRef>)l.Path.Select(Field).ToArray(), Value(l.Value))).ToArray()),
+            ComposedValue v => v with { StructType = map(v.StructType), Type = map(v.StructType), Leaves = v.Leaves.Select(l => ((IReadOnlyList<FieldRef>)l.Path.Select(Field).ToArray(), Value(l.Value))).ToArray() },
             // 结构体换成基元后，整体读取 *&x 就是 x 本身。
             IndirectValue { Address: AddressValue a } v when widthOf is not null && widthOf(map(v.Type)) != 0 => Value(a.Target),
             IndirectValue v => new IndirectValue(Value(v.Address), map(v.Type), widthOf?.Invoke(map(v.Type)) ?? v.Width),
