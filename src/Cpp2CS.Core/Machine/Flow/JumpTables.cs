@@ -38,9 +38,9 @@ internal static class JumpTables
 
     /// <summary>
     /// 解析以寄存器跳转结尾的块：目标形如 base + ext(table[index]) &lt;&lt; k（或 table[index] 本身），
-    /// 表项个数取自某个前驱块末尾对同一索引的无符号上界检查。任何一步不符合即放弃。
+    /// 表项个数取自某个前驱块末尾对同一索引的无符号上界检查，或由调用方给出（<paramref name="knownCount"/>，已在别处证明）。任何一步不符合即放弃。
     /// </summary>
-    public static ulong[]? Resolve(IMachine machine, Block block, Dictionary<ulong, Block> blockAt, Func<ulong, bool> inRange)
+    public static ulong[]? Resolve(IMachine machine, Block block, Dictionary<ulong, Block> blockAt, Func<ulong, bool> inRange, int? knownCount = null)
     {
         var state = new SymbolicState(machine.Convention);
         foreach (var stmt in block.Statements.Take(block.Statements.Count - 1)) state.Step(stmt);
@@ -48,17 +48,21 @@ internal static class JumpTables
         var resolver = new EntryConstants(machine);
         // 表基址常在循环外算好放在被调用者保存的寄存器里：把能沿前驱确定为常量的入口值代入
         var target = Fold.Simplify(ExprMap.Map(state.Eval(jump.Target), e => e is Read r ? resolver.Resolve(r, block) : null));
+        // 查表是最外层的读取；下标本身也可以来自读取（栈槽里的副本），嵌在查表地址里。
         var loads = ExprMap.Walk(target).OfType<Load>().ToList();
-        if (loads.Count != 1) return null;
-        var load = loads[0];
+        var outer = loads.Where(l => !loads.Any(o => !ReferenceEquals(o, l) && ExprMap.Walk(o.Address).Any(e => ReferenceEquals(e, l)))).ToList();
+        if (outer.Count != 1) return null;
+        var load = outer[0];
         if (!Decompose(load.Address, out var tableBase, out var index, out var scale)) return null;
         var root = StripExtensions(index);
-        if (root is not Read { Storage.Bank: Bank.Gpr }
+        // 上界由前驱的检查给出时，下标要是能和检查对上的寄存器；个数已在别处证明时不需要。
+        if (knownCount is null && root is not Read { Storage.Bank: Bank.Gpr }
             && !(root is Binary { Op: BinOp.And, Left: var masked, Right: Const { Value: <= uint.MaxValue } } && StripExtensions(masked) is Read { Storage.Bank: Bank.Gpr })) return null;
 
-        foreach (var predecessor in block.Predecessors)
+        IEnumerable<int?> counts = knownCount is { } given ? [given] : block.Predecessors.Select(predecessor => Bound(machine.Convention, predecessor, block, root));
+        foreach (var candidate in counts)
         {
-            if (Bound(machine.Convention, predecessor, block, root) is not { } count) continue;
+            if (candidate is not { } count) continue;
             if (count <= 0 || count > MaxEntries) return null;
             var targets = new ulong[count];
             for (var i = 0; i < count; i++)

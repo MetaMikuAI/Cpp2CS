@@ -142,9 +142,10 @@ public sealed class FunctionLifter
     public LiftedFunction Lift(ulong entry, Expr? returnValue = null, bool simplify = true) => Lift(entry, returnValue, null, simplify, PromoteFrameSlots);
 
     /// <summary>returnPieces 为聚合返回值各片所在的寄存器读取；promoteFrameSlots 为 false 时帧内存原样保留给恢复层的内存模型。</summary>
-    public LiftedFunction Lift(ulong entry, Expr? returnValue, ReturnPiece[]? returnPieces, bool simplify, bool promoteFrameSlots)
+    public LiftedFunction Lift(ulong entry, Expr? returnValue, ReturnPiece[]? returnPieces, bool simplify, bool promoteFrameSlots,
+        IReadOnlyDictionary<ulong, int>? tableCounts = null)
     {
-        var function = cfg.Build(entry);
+        var function = cfg.Build(entry, tableCounts);
         if (InlinesClosures && !promoteFrameSlots) new ClosureInlining(cfg, IsClosure, IsOutlinedHelper, Machine.Convention.IntegerArguments[0], Machine.Convention.StackPointer, Storage.Gpr(29), CalleeSaved).Run(function);
         var dominators = Dominators.Compute(function);
         SsaBuilder.PrepareCalls(function, calls, returnValue, Machine.Convention.StackPointer, returnPieces);

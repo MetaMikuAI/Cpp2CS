@@ -178,13 +178,15 @@ public sealed class CfgBuilder
     public IMachine Machine => machine;
     public CodeMap Functions => functions;
 
-    public MachineFunction Build(ulong entry)
+    /// <param name="tableCounts">已知的跳转表项数：间接跳转地址到表项个数。用于前驱里看不出上界、后续分析在 SSA 上证明了上界的跳转表；
+    /// 表本身仍按局部模式读出并核对。</param>
+    public MachineFunction Build(ulong entry, IReadOnlyDictionary<ulong, int>? tableCounts = null)
     {
         var range = functions.At(entry) is { } found && found.Start == entry ? found : throw new InvalidOperationException($"0x{entry:x} 不是函数入口");
-        return Build(entry, range);
+        return Build(entry, range, tableCounts);
     }
 
-    public MachineFunction Build(ulong entry, CodeFunction range) => new Exploration(this, entry, range).Run();
+    public MachineFunction Build(ulong entry, CodeFunction range, IReadOnlyDictionary<ulong, int>? tableCounts = null) => new Exploration(this, entry, range, tableCounts).Run();
 
     private sealed class Insn(ulong address, int size, List<Stmt> statements)
     {
@@ -198,7 +200,7 @@ public sealed class CfgBuilder
         public ulong Next => Address + (ulong)Size;
     }
 
-    private sealed class Exploration(CfgBuilder owner, ulong entry, CodeFunction range)
+    private sealed class Exploration(CfgBuilder owner, ulong entry, CodeFunction range, IReadOnlyDictionary<ulong, int>? knownCounts)
     {
         private readonly Dictionary<ulong, Insn> insns = new();
         private readonly HashSet<ulong> leaders = [];
@@ -233,7 +235,8 @@ public sealed class CfgBuilder
                 foreach (var block in blocks)
                 {
                     if (block.Statements.LastOrDefault() is not IndirectJump jump || tables.ContainsKey(jump.Address) || failedTables.Contains(jump.Address)) continue;
-                    var targets = JumpTables.Resolve(owner.machine, block, blockAt, InRange);
+                    var targets = JumpTables.Resolve(owner.machine, block, blockAt, InRange,
+                        knownCounts is not null && knownCounts.TryGetValue(jump.Address, out var known) ? known : null);
                     if (targets is null) { failedTables.Add(jump.Address); continue; }
                     tables[jump.Address] = targets;
                     resolvedTables++;

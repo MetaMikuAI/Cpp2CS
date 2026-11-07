@@ -232,13 +232,19 @@ public sealed class MethodDecompiler
     };
 
     /// <summary>运行到符号值为止的各层。</summary>
-    public RecoveryResult<MethodAnalysis> Analyze(MethodRef method, ulong entry)
+    public RecoveryResult<MethodAnalysis> Analyze(MethodRef method, ulong entry) => Analyze(method, entry, null);
+
+    /// <summary>重新提升的轮数上限：每轮至少多解析一张跳转表，表的目标里可能还有下一张表。</summary>
+    private const int MaxTableRounds = 8;
+
+    /// <param name="tableCounts">前几遍在 SSA 上证明了上界、而提升时没能解析的跳转表：跳转地址到表项个数。</param>
+    private RecoveryResult<MethodAnalysis> Analyze(MethodRef method, ulong entry, IReadOnlyDictionary<ulong, int>? tableCounts, int tableRound = 0)
     {
         if (abi.Machine(method, out var problem) is not { } signature)
             return RecoveryDiagnostics.Fail(entry, $"签名 {problem}", rule: "Prepare");
         var returnPieces = signature.Return is { Transfer: Transfer.Value } ret
             ? ret.Pieces.Select(p => new ReturnPiece(p.Offset, new Read(p.Register, p.Width))).ToArray() : null;
-        var lifted = lifter.Lift(entry, null, returnPieces, simplify: true, promoteFrameSlots: false);
+        var lifted = lifter.Lift(entry, null, returnPieces, simplify: true, promoteFrameSlots: false, tableCounts);
         if (!lifted.Succeeded)
             return RecoveryDiagnostics.Fail(entry, $"提升 {lifted.Errors[0]}", rule: "Prepare");
         var function = lifted.Function;
@@ -297,6 +303,61 @@ public sealed class MethodDecompiler
         var oracle = new TypeOracle(types, facts, method, environment.Shape, values, layout);
         if (DelegateCallNormalizer.Run(facts, function, idioms, RootType(oracle, values)))
             values = ValueModel.Build(function, environment);
+        // 提升时看不出上界的跳转表被当成了尾调用；SSA 上证明了上界时带着表项数重新提升，表的目标成为本函数的块。
+        // 新块里可能还有这样的表，直到没有新表为止。
+        if (tableRound < MaxTableRounds && JumpTableCounts(function, values) is var counts && counts.Keys.Any(k => tableCounts?.ContainsKey(k) != true))
+        {
+            foreach (var (address, count) in tableCounts ?? new Dictionary<ulong, int>()) counts.TryAdd(address, count);
+            return Analyze(method, entry, counts, tableRound + 1);
+        }
         return new MethodAnalysis(method, entry, signature, function, idioms, layout, values) { Environment = environment, Splits = splits };
+    }
+
+    /// <summary>
+    /// 尾间接调用的目标是只读查表折成的选择链 Select(i == 0, t0, Select(i == 1, t1, … t(n-1)))（ReadOnlyDataNormalizer 只在证明了 i &lt; n 时这样写），
+    /// 返回调用地址到 n。
+    /// </summary>
+    private static Dictionary<ulong, int> JumpTableCounts(MachineFunction function, ValueModel values)
+    {
+        var counts = new Dictionary<ulong, int>();
+        foreach (var call in function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Kind == CallKind.TailIndirect))
+            if (values.Operands(call) is [var target, ..] && Chain(target) is { } count) counts[call.Address] = count;
+        return counts;
+
+        // 目标里只能有一条选择链，否则说不清是哪张表的项数。
+        static int? Chain(Sym target)
+        {
+            var pending = new Stack<Sym>([target]);
+            OpSym? found = null;
+            while (pending.TryPop(out var next))
+                switch (SymTable.Resolve(next))
+                {
+                    case OpSym { Op.Kind: OperatorKind.Select } select:
+                        if (found is not null && !ReferenceEquals(found, select)) return null;
+                        found = select;
+                        break;
+                    case OpSym op: foreach (var argument in op.Args) pending.Push(argument); break;
+                    case ConcatSym concat: foreach (var part in concat.Parts) pending.Push(part); break;
+                    case SliceSym slice: pending.Push(slice.Base); break;
+                }
+            return found is null ? null : Length(found);
+        }
+
+        static int? Length(Sym chain)
+        {
+            Sym? index = null;
+            var k = 0;
+            while (SymTable.Resolve(chain) is OpSym { Op.Kind: OperatorKind.Select, Args: [var condition, var cell, var rest] })
+            {
+                if (SymTable.Resolve(condition) is not OpSym { Op.Kind: OperatorKind.Compare, Args: [var compared, var bound] } test || test.Op.Cond != Cond.Eq
+                    || SymTable.Resolve(bound) is not ConstSym { Value: var value } || value != (ulong)k || SymTable.Resolve(cell) is not ConstSym) return null;
+                var selector = SymTable.Resolve(compared);
+                if (index is null) index = selector;
+                else if (!index.Equals(selector)) return null;
+                k++;
+                chain = rest;
+            }
+            return k > 0 && SymTable.Resolve(chain) is ConstSym ? k + 1 : null;
+        }
     }
 }
