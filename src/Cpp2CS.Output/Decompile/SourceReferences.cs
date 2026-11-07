@@ -284,11 +284,36 @@ public static class SourceReferences
                     ? visibility == TypeAttributes.NestedPublic || !toPublic && visibility is TypeAttributes.NestedAssembly or TypeAttributes.NestedFamORAssem
                     : visibility == TypeAttributes.Public || !toPublic;
                 if (enough) continue;
-                definition.Attributes = definition.Attributes & ~TypeAttributes.VisibilityMask | (definition.IsNested
-                    ? toPublic ? TypeAttributes.NestedPublic : TypeAttributes.NestedAssembly
-                    : TypeAttributes.Public);
-                changed.Add(definition.Module);
+                Open(definition, toPublic);
             }
+        }
+
+        /// <summary>
+        /// 放宽类型：只扩大不缩小（protected 放宽为 protected internal）。类型的可访问范围变大后，它的非私有成员和嵌套类型的范围随之变大，
+        /// 基类、接口和这些成员签名里的类型要跟着放宽（CS0050～CS0053、CS0060、CS0061）。
+        /// </summary>
+        private void Open(TypeDefinition definition, bool toPublic)
+        {
+            var visibility = definition.Attributes & TypeAttributes.VisibilityMask;
+            definition.Attributes = definition.Attributes & ~TypeAttributes.VisibilityMask | (definition.IsNested
+                ? toPublic ? TypeAttributes.NestedPublic : visibility == TypeAttributes.NestedFamily ? TypeAttributes.NestedFamORAssem : TypeAttributes.NestedAssembly
+                : TypeAttributes.Public);
+            changed.Add(definition.Module);
+            Expose(definition);
+        }
+
+        private void Expose(TypeDefinition definition)
+        {
+            bool Public(bool isPublic, bool isFamily) => (definition.Attributes & TypeAttributes.VisibilityMask) is TypeAttributes.Public or TypeAttributes.NestedPublic
+                && (isPublic || isFamily);
+            if (definition.BaseType is { } baseType) Raise(baseType, Public(true, false));
+            foreach (var implementation in definition.Interfaces) Raise(implementation.InterfaceType, Public(true, false));
+            foreach (var field in definition.Fields.Where(f => !f.IsPrivate))
+                Raise(field.FieldType, Public(field.IsPublic, field.IsFamily || field.IsFamilyOrAssembly));
+            foreach (var method in definition.Methods.Where(m => !m.IsPrivate))
+                foreach (var signature in method.Parameters.Select(p => p.ParameterType).Prepend(method.ReturnType))
+                    Raise(signature, Public(method.IsPublic, method.IsFamily || method.IsFamilyOrAssembly));
+            foreach (var nested in definition.NestedTypes.Where(n => !n.IsNestedPrivate)) Expose(nested);
         }
 
         private void Member(MethodDefinition target, Instruction instruction, MethodDefinition method)
@@ -395,8 +420,7 @@ public static class SourceReferences
             for (var definition = type.Resolve(); definition is not null; definition = definition.DeclaringType)
             {
                 if (definition.Module != main || TypeAccessible(definition, from)) continue;
-                definition.Attributes = definition.Attributes & ~TypeAttributes.VisibilityMask | (definition.IsNested ? TypeAttributes.NestedAssembly : TypeAttributes.Public);
-                changed.Add(definition.Module);
+                Open(definition, false);
             }
         }
 
