@@ -7,7 +7,7 @@ namespace Cpp2CS.Recovery.Control;
 /// 迭代器的 MoveNext 还原成 Roslyn 降级后的形态，反编译器才能提升出 yield return。
 /// 它要求 yield 点依次是 current = 值；state = 常量；return true。clang 按路径合并了后两步：写状态的语句移到共用的块，状态值经局部传入；
 /// 返回值也经局部传入共用的 return。这里按路径复制回来，语义不变。分派和 async 一样处理。
-/// 带 try 的迭代器还要还原 finally 方法和 fault 块，这里不处理。形态不符时保持原样，反编译器也会放弃提升，不会输出错误的代码。
+/// 带 try 的迭代器还要还原 finally 方法和 fault 块，这里不处理。形态不符时保持原样；反编译器放弃或提升失败时留下状态机类。
 /// </summary>
 public static class IteratorForms
 {

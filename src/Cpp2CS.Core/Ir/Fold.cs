@@ -234,6 +234,9 @@ public static class Fold
             return Compare(cond, z.Operand, C(k.Value, z.Operand.Width));
         if (cond is Cond.Eq or Cond.Ne && left is Convert { Kind: ConvKind.ZeroExtend } z1 && z1.Operand.Width == 1 && right is Const k1)
             return k1.Value == 0 == (cond == Cond.Ne) ? z1.Operand : Not(z1.Operand);
+        // 模 2^n 下 x + k == c 等价于 x == c - k（cmn、add 后 cbz 都是这个形式）。64 位多半是地址，基址和偏移留给类型恢复。
+        if (cond is Cond.Eq or Cond.Ne && left is Binary { Op: BinOp.Add, Right: Const amount, Width: <= 32 } shifted && right is Const target)
+            return Compare(cond, shifted.Left, C(target.Value - amount.Value, shifted.Width));
         // 合并的零测试也适用于引用判空；只拆快照和常量，短路不能省略原有读取。
         if (cond is Cond.Eq or Cond.Ne && right is Const { Value: 0 }
             && left is Binary { Op: BinOp.Or, Left: Use or Const, Right: Use or Const } either)

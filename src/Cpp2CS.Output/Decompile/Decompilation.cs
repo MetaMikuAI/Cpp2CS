@@ -169,7 +169,7 @@ public static partial class Decompilation
 
     /// <summary>
     /// 反编译器默认隐藏匿名类型、闭包和 PrivateImplementationDetails，用处还原成 new { }、lambda、数组初始化器和字符串 switch。
-    /// 没还原的地方仍按名字引用它们：这时单独写出被引用的声明；引用闭包的文件整个不折叠闭包，否则 lambda 和闭包类型对不上。
+    /// 没还原的地方仍按名字引用它们：这时单独写出被引用的声明；引用闭包的成员不折叠闭包，否则 lambda 和闭包类型对不上。
     /// </summary>
     private static void ReferencedHiddenTypes(List<SourceFile> files, (TypeDefinitionHandle[] Handles, string Namespace, string Name)[] types,
         DecompilerTypeSystem typeSystem, DecompilerSettings settings, IDecompileTransformProvider? transforms)
@@ -184,14 +184,25 @@ public static partial class Decompilation
         }
         // 反编译器有时折叠不了某个方法的闭包，留下对隐藏类型的引用。只把这些成员换成不折叠的写法，再补上它们用到的闭包，其余成员保持折叠。
         // 不折叠后匿名类型也会按名字出现；局部函数同样是闭包折叠的结果，要一起关掉。
-        void ExposeClosures((TypeDefinitionHandle[] Handles, string Namespace, string Name) type)
+        // 迭代器同理：带 try 的 MoveNext 没有还原成 Roslyn 的形态，提升出来的 yield 丢了语义，这些成员保留状态机。
+        void Expose((TypeDefinitionHandle[] Handles, string Namespace, string Name) type, bool closures, bool iterators)
         {
-            var visible = settings.Clone();
-            visible.AnonymousMethods = false;
-            visible.AnonymousTypes = false;
-            visible.LocalFunctions = false;
             var folded = CreateDecompiler(typeSystem, settings, transforms).DecompileTypes(type.Handles);
-            MergeClosures(folded, CreateDecompiler(typeSystem, visible, transforms).DecompileTypes(type.Handles));
+            if (closures)
+            {
+                var visible = settings.Clone();
+                visible.AnonymousMethods = false;
+                visible.AnonymousTypes = false;
+                visible.LocalFunctions = false;
+                MergeHidden(folded, CreateDecompiler(typeSystem, visible, transforms).DecompileTypes(type.Handles),
+                    text => ClosureReference.IsMatch(text) || ClosureThis.IsMatch(text) || LambdaMethod.IsMatch(text));
+            }
+            if (iterators)
+            {
+                var visible = settings.Clone();
+                visible.YieldReturn = false;
+                MergeHidden(folded, CreateDecompiler(typeSystem, visible, transforms).DecompileTypes(type.Handles), BrokenIterator.IsMatch);
+            }
             files[files.FindIndex(f => f.TypeName == type.Name && f.Namespace == type.Namespace)] = new SourceFile(type.Name, type.Namespace, Print(folded, settings));
         }
         var visibleClosures = new HashSet<TypeDefinitionHandle>();
@@ -201,10 +212,12 @@ public static partial class Decompilation
             if (file is null) continue;
             var closures = ClosureReference.Matches(file.Source).Select(m => m.Value).Distinct();
             var declared = DeclaredLambdaMethod.Matches(file.Source).Select(m => m.Groups[1].Value).ToHashSet();
-            if (!closures.Any(c => !file.Source.Contains("class " + c, StringComparison.Ordinal)) && !ClosureThis.IsMatch(file.Source)
-                && LambdaMethod.Matches(file.Source).All(m => declared.Contains(m.Value))) continue;
-            ExposeClosures(type);
-            visibleClosures.Add(type.Handles[0]);
+            var hiddenClosures = closures.Any(c => !file.Source.Contains("class " + c, StringComparison.Ordinal)) || ClosureThis.IsMatch(file.Source)
+                || !LambdaMethod.Matches(file.Source).All(m => declared.Contains(m.Value));
+            var brokenIterators = BrokenIterator.IsMatch(file.Source);
+            if (!hiddenClosures && !brokenIterators) continue;
+            Expose(type, hiddenClosures, brokenIterators);
+            if (hiddenClosures) visibleClosures.Add(type.Handles[0]);
         }
         // 按名字引用匿名类型的文件里，new { } 也要写成同一个类型。
         foreach (var type in types)
@@ -223,10 +236,10 @@ public static partial class Decompilation
     }
 
     /// <summary>
-    /// folded 里引用隐藏闭包的成员换成 expanded 里对应的写法，再把用到的闭包类、lambda 方法和字段按需加进来。
+    /// folded 里 <paramref name="broken"/> 匹配的成员换成 expanded 里对应的写法，再把用到的闭包类、状态机、lambda 方法和字段按需加进来。
     /// 没提升的状态机是嵌套类型，它的成员用到的闭包声明在外层，所以名字要沿外层类型查找。
     /// </summary>
-    private static void MergeClosures(SyntaxTree folded, SyntaxTree expanded)
+    private static void MergeHidden(SyntaxTree folded, SyntaxTree expanded, Func<string, bool> broken)
     {
         const string Shared = "_003C_003Ec";
         static int Token(AstNode node) => node.GetSymbol() is IEntity entity ? System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(entity.MetadataToken) : 0;
@@ -249,9 +262,7 @@ public static partial class Decompilation
             foreach (var member in type.Members.ToArray())
             {
                 if (member is TypeDeclaration) continue;
-                var text = member.ToString();
-                if (!ClosureReference.IsMatch(text) && !ClosureThis.IsMatch(text) && !LambdaMethod.IsMatch(text)) continue;
-                if (!candidates.TryGetValue(Token(member), out var replacement)) continue;
+                if (!broken(member.ToString()) || !candidates.TryGetValue(Token(member), out var replacement)) continue;
                 Scan(replacement, twin);
                 member.ReplaceWith(replacement.Clone());
             }
@@ -303,6 +314,7 @@ public static partial class Decompilation
         }
     }
 
+    private static readonly System.Text.RegularExpressions.Regex BrokenIterator = new(@"/\*Error near IL_[0-9a-f]+: (stateMachine|Unexpected return in MoveNext\(\))\*/", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex HiddenName = new(@"\b_003C\w+", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex HiddenReference = new(@"\b_003CPrivateImplementationDetails_003E\b|\b_003C_003Ef__AnonymousType\d+\b", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex ClosureThis = new(@"\(_003C_003Ec__DisplayClass\d+_\d+\)(\(object\))?this\b", System.Text.RegularExpressions.RegexOptions.Compiled);
