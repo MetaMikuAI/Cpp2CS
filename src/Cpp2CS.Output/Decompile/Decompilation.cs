@@ -36,6 +36,7 @@ public static partial class Decompilation
         decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new GotoCleanup());
         decompiler.AstTransforms.Insert(decompiler.AstTransforms.ToList().FindIndex(t => t is DeclareVariables), new DistinctLocalNames());
         transforms?.Register(decompiler, DecompilePosition.BeforeLegality);
+        decompiler.AstTransforms.Add(new InitializerOrder());
         decompiler.AstTransforms.Add(new ConstructorCalls());
         decompiler.AstTransforms.Add(new StructConstructors());
         decompiler.AstTransforms.Add(new LibraryInternals());

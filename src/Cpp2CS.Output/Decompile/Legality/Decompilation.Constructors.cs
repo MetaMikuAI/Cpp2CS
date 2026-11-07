@@ -135,6 +135,47 @@ public static partial class Decompilation
     }
 
     /// <summary>
+    /// C# 按文字顺序执行字段初始化器，反编译器却把字段排在属性前面：后备字段在元数据里靠前的自动属性，初始化得比原来晚。
+    /// Roslyn 按声明顺序写出字段，元数据的顺序就是原来的文字顺序。初始化器的先后不对时，把声明挪到元数据顺序的位置。
+    /// </summary>
+    private sealed class InitializerOrder : IAstTransform
+    {
+        public void Run(AstNode rootNode, TransformContext context)
+        {
+            foreach (var type in rootNode.Descendants.OfType<TypeDeclaration>().ToArray())
+            {
+                if (type.Annotation<TypeResolveResult>()?.Type.GetDefinition() is not { } definition) continue;
+                var fields = definition.Fields.ToArray();
+                var initialized = new List<(EntityDeclaration Member, int Index, bool Static)>();
+                foreach (var member in type.Members)
+                {
+                    var name = member switch
+                    {
+                        FieldDeclaration field when field.Variables.Count == 1 && field.Variables.Single().Initializer is not null => field.Variables.Single().Name,
+                        PropertyDeclaration property when property.Initializer is not null => $"<{property.Name}>k__BackingField",
+                        _ => null,
+                    };
+                    var index = name is null ? -1 : Array.FindIndex(fields, f => f.Name == name);
+                    if (index >= 0) initialized.Add((member, index, member.HasModifier(Modifiers.Static)));
+                }
+                foreach (var group in initialized.GroupBy(i => i.Static))
+                {
+                    EntityDeclaration? last = null;
+                    foreach (var (member, _, _) in group.OrderBy(i => i.Index))
+                    {
+                        if (last is not null && type.Members.TakeWhile(m => m != last).Contains(member))
+                        {
+                            member.Remove();
+                            type.Members.InsertAfter(last, member);
+                        }
+                        last = member;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// 结构体构造函数在 C# 9 必须给全部字段赋值（CS0171、CS0188）。this = new T { ... } 在只读字段上不合法，拆成逐字段赋值；
     /// 字段没写全时先 this = default。CIL 里没写的字段是调用方的内容，这是 C# 的表达限制。
     /// </summary>

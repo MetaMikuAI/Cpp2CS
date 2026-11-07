@@ -2,6 +2,7 @@ using ICSharpCode.Decompiler.CSharp;
 using ICSharpCode.Decompiler.CSharp.Resolver;
 using ICSharpCode.Decompiler.CSharp.Syntax;
 using ICSharpCode.Decompiler.CSharp.Transforms;
+using ILInstruction = ICSharpCode.Decompiler.IL.ILInstruction;
 using ICSharpCode.Decompiler.Semantics;
 using ICSharpCode.Decompiler.TypeSystem;
 using TypeKind = ICSharpCode.Decompiler.TypeSystem.TypeKind;
@@ -23,8 +24,11 @@ public static partial class Decompilation
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Reverse().ToArray()) FirstFieldCast(cast);
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Where(c => c.Expression is NullReferenceExpression).ToArray()) GuardedReceiver(cast);
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Where(c => c.Expression is NullReferenceExpression).ToArray()) NullReceiver(cast);
+            foreach (var binary in rootNode.Descendants.OfType<BinaryOperatorExpression>().Reverse().ToArray()) FloatNegation(binary);
             foreach (var call in rootNode.Descendants.OfType<InvocationExpression>().Reverse().ToArray())
             {
+                ConstrainedCall(call);
+                NamedArgumentOrder(call);
                 Placeholder(call);
                 DecimalMinMax(call);
                 SharedTypeArguments(call);
@@ -37,6 +41,121 @@ public static partial class Decompilation
             foreach (var declaration in rootNode.Descendants.OfType<VariableDeclarationStatement>().ToArray()) ReferenceLocal(declaration);
             foreach (var lambda in rootNode.Descendants.Where(n => n is LambdaExpression or AnonymousMethodExpression).ToArray()) StructCapture(lambda, context);
             foreach (var text in rootNode.Descendants.OfType<InterpolatedStringExpression>().ToArray()) MultilineInterpolation(text);
+        }
+
+        /// <summary>
+        /// 反编译器把 neg 读成 0 - x，浮点这样写丢了负零和 NaN 的符号：x 为 +0 时 -x 是 -0，0 - x 是 +0。
+        /// 零没有 IL 位置，说明来自 neg，不是方法里原有的常量。
+        /// </summary>
+        private static void FloatNegation(BinaryOperatorExpression binary)
+        {
+            if (binary.Operator != BinaryOperatorType.Subtract || binary.Left is not PrimitiveExpression { Value: float or double } zero) return;
+            if (Convert.ToDouble(zero.Value) != 0 || zero.Annotation<ILInstruction>() is not { ILRangeIsEmpty: true }) return;
+            // 操作数是整数时 C# 靠隐式转换算成浮点，换成一元负号就成了整数取负。
+            if (binary.Right is not { } operand || operand.Annotation<ResolveResult>()?.Type.GetDefinition()?.KnownTypeCode is not (KnownTypeCode.Single or KnownTypeCode.Double)) return;
+            operand.Remove();
+            binary.ReplaceWith(new UnaryOperatorExpression(UnaryOperatorType.Minus, operand));
+        }
+
+        /// <summary>
+        /// 恢复的 CIL 先把实参存进局部，存的先后是原生代码的安排。反编译器据此写成乱序的命名实参，内联时还可能把后求值的排到前面。
+        /// C# 按文字顺序对实参求值，所以按 CIL 的位置判断：能交换的实参不计，形参顺序和求值顺序一致就写回按位置传参；
+        /// 不一致时保留命名实参，按 CIL 的位置排列。同名同参数个数的重载靠名字选中时，保留名字，只调顺序。
+        /// </summary>
+        private static void NamedArgumentOrder(InvocationExpression call)
+        {
+            var arguments = call.Arguments.ToArray();
+            var named = arguments.OfType<NamedArgumentExpression>().ToArray();
+            if (named.Length < 2 || !arguments.Skip(arguments.Length - named.Length).All(a => a is NamedArgumentExpression)) return;
+            if (call.Annotation<ResolveResult>() is not InvocationResolveResult { Member: IMethod method }) return;
+            var order = new List<(Expression Argument, Expression Value, int Parameter)>();
+            for (var i = 0; i < arguments.Length; i++)
+            {
+                var value = arguments[i] is NamedArgumentExpression { Expression: { } inner } ? inner : arguments[i];
+                var parameter = arguments[i] is NamedArgumentExpression argument ? method.Parameters.ToList().FindIndex(p => p.Name == argument.Name) : i;
+                if (parameter < 0) return;
+                order.Add((arguments[i], value, parameter));
+            }
+            // 已经按形参顺序的命名实参是反编译器给常量写的说明，留着。
+            if (order.Select(o => o.Parameter).SequenceEqual(order.Select(o => o.Parameter).Order())) return;
+            var evaluated = order.Select(o => (o.Argument, o.Value, o.Parameter, Kind: Evaluation(o.Value), Offset: LastOffset(o.Value))).ToArray();
+            if (evaluated.Any(e => e.Kind != EvaluationKind.Stable && e.Offset is null)) return;
+            var inParameterOrder = !evaluated.Any(a => evaluated.Any(b => a.Parameter < b.Parameter && a.Offset > b.Offset && !Commute(a.Kind, b.Kind)));
+            var dense = evaluated.Select(e => e.Parameter).Order().SequenceEqual(Enumerable.Range(0, evaluated.Length));
+            if (inParameterOrder && dense)
+            {
+                var values = evaluated.OrderBy(e => e.Parameter).Select(e => e.Value.Annotation<ResolveResult>()).ToArray();
+                var conversions = CSharpConversions.Get(method.Compilation);
+                var overloaded = values.Contains(null) || method.DeclaringType.GetMethods(m => m.Name == method.Name && m.Parameters.Count == method.Parameters.Count && !m.Equals(method))
+                    .Any(m => m.TypeParameters.Count > 0 || !values.Where((v, i) => !conversions.ImplicitConversion(v!, m.Parameters[i].Type).IsValid).Any());
+                foreach (var argument in arguments) argument.Remove();
+                foreach (var entry in evaluated.OrderBy(e => e.Parameter))
+                {
+                    if (overloaded || entry.Argument is not NamedArgumentExpression)
+                    {
+                        call.Arguments.Add(entry.Argument);
+                        continue;
+                    }
+                    entry.Value.Remove();
+                    call.Arguments.Add(entry.Value);
+                }
+                return;
+            }
+            // 命名实参之间按 CIL 的位置排，能交换的常量和局部不影响求值顺序，不用动。
+            var moving = evaluated.Where(e => e.Argument is NamedArgumentExpression && e.Kind != EvaluationKind.Stable).OrderBy(e => e.Offset).ToArray();
+            var slots = evaluated.Where(e => e.Argument is NamedArgumentExpression && e.Kind != EvaluationKind.Stable).ToArray();
+            if (moving.SequenceEqual(slots)) return;
+            var next = 0;
+            foreach (var argument in arguments) argument.Remove();
+            foreach (var entry in evaluated)
+                call.Arguments.Add(entry.Argument is NamedArgumentExpression && entry.Kind != EvaluationKind.Stable ? moving[next++].Argument : entry.Argument);
+        }
+
+        private enum EvaluationKind { Stable, Read, Effect }
+
+        /// <summary>只有常量和局部可以和任何东西交换；只读的表达式之间可以交换，判空的先后只影响同一种异常先由谁抛出。</summary>
+        private static bool Commute(EvaluationKind a, EvaluationKind b) =>
+            a == EvaluationKind.Stable || b == EvaluationKind.Stable || a == EvaluationKind.Read && b == EvaluationKind.Read;
+
+        private static EvaluationKind Evaluation(AstNode? node)
+        {
+            switch (node)
+            {
+                case null or PrimitiveExpression or NullReferenceExpression or ThisReferenceExpression or BaseReferenceExpression or TypeOfExpression or DefaultValueExpression or TypeReferenceExpression:
+                    return EvaluationKind.Stable;
+                case IdentifierExpression identifier:
+                    return identifier.GetILVariable() is not null ? EvaluationKind.Stable
+                        : identifier.Annotation<MemberResolveResult>()?.Member is IField ? EvaluationKind.Read : EvaluationKind.Effect;
+                case MemberReferenceExpression member when member.Annotation<MemberResolveResult>()?.Member is IField:
+                    return Max(EvaluationKind.Read, Evaluation(member.Target));
+                case ParenthesizedExpression or CastExpression or AsExpression or IsExpression:
+                case UnaryOperatorExpression { Operator: not (UnaryOperatorType.Increment or UnaryOperatorType.Decrement or UnaryOperatorType.PostIncrement or UnaryOperatorType.PostDecrement or UnaryOperatorType.Await) }:
+                case BinaryOperatorExpression or ConditionalExpression:
+                    return node.Children.Aggregate(EvaluationKind.Stable, (kind, child) => child is Expression or AstType ? Max(kind, child is Expression ? Evaluation(child) : EvaluationKind.Stable) : kind);
+                default:
+                    return EvaluationKind.Effect;
+            }
+        }
+
+        private static EvaluationKind Max(EvaluationKind a, EvaluationKind b) => a > b ? a : b;
+
+        /// <summary>实参求值结束的位置：内联进来的局部读取可能早得多，副作用的先后要看最后一步。</summary>
+        private static int? LastOffset(AstNode node) =>
+            node.DescendantsAndSelf.SelectMany(n => n.Annotations.OfType<ILInstruction>()).Where(i => !i.ILRangeIsEmpty).Select(i => (int?)i.StartILOffset).Max();
+
+        /// <summary>
+        /// 反编译器把 constrained. 调用写成转换到接口，C# 会先装箱，调用落在副本上。
+        /// 结构体有同名的公开方法时直接调用，C# 编译成不装箱的调用，和 constrained. 选中的实现相同。
+        /// </summary>
+        private static void ConstrainedCall(InvocationExpression call)
+        {
+            if (call.Target is not MemberReferenceExpression { Target: CastExpression cast } member) return;
+            if (!cast.TrailingTrivia.OfType<Comment>().Any(c => c.Content.Contains("constrained", StringComparison.Ordinal))) return;
+            if (cast.Expression is not { } receiver || receiver.Annotation<ResolveResult>()?.Type.GetDefinition() is not { Kind: TypeKind.Struct } type) return;
+            var count = call.Arguments.Count;
+            if (!type.Methods.Any(m => m.Name == member.MemberName && !m.IsStatic && m.Accessibility == Accessibility.Public && m.Parameters.Count == count)) return;
+            receiver.Remove();
+            cast.ReplaceWith(receiver);
         }
 
         /// <summary>
