@@ -59,8 +59,9 @@ public static partial class Decompilation
         }
 
         /// <summary>
-        /// 构造函数初始化器只能写表达式。实参用到前面的局部时，把定义它们的语句（赋值、两路分支、判空）求值成表达式代回实参；
+        /// 构造函数初始化器只能写表达式。实参用到前面的局部时，把定义它们的语句（赋值、两路分支、判空、新数组的逐元素写入）求值成表达式代回实参；
         /// 判空由随后的成员访问抛出同样的异常。求不出来或会重复求值有副作用的表达式时不改写。
+        /// 调用之后还用到的局部，值是常量或函数体里没有被写过的形参时，同样代回；求值结果和基类构造之前相同。
         /// </summary>
         private static bool InlinePrologue(BlockStatement body, ExpressionStatement call, Expression[] arguments)
         {
@@ -68,19 +69,42 @@ public static partial class Decompilation
             var locals = prologue.OfType<VariableDeclarationStatement>().SelectMany(d => d.Variables).Select(v => v.Name).ToHashSet();
             bool Mentions(AstNode node) => node.DescendantsAndSelf.OfType<IdentifierExpression>().Any(i => locals.Contains(i.Identifier));
             if (!arguments.Any(Mentions)) return true;
-            if (body.Statements.SkipWhile(s => s != call).Skip(1).Any(Mentions)) return false;
+            var later = body.Statements.SkipWhile(s => s != call).Skip(1).ToArray();
+            var reused = locals.Where(l => later.Any(s => s.DescendantsAndSelf.OfType<IdentifierExpression>().Any(i => i.Identifier == l))).ToArray();
             var values = new Dictionary<string, Expression?>();
             var consumed = prologue.Where(s => s is VariableDeclarationStatement || Mentions(s)).ToArray();
             if (!consumed.All(s => Evaluate(s, values, locals))) return false;
+            var parameters = body.GetParent<ConstructorDeclaration>()!.Parameters.Select(p => p.Name).ToHashSet();
+            bool Stable(Expression value) => value is PrimitiveExpression or NullReferenceExpression
+                || value is IdentifierExpression parameter && parameters.Contains(parameter.Identifier) && !Writes(body, parameter.Identifier);
+            if (reused.Any(name => values.GetValueOrDefault(name) is not { } value || !Stable(value) || later.Any(s => Writes(s, name)))) return false;
             for (var i = 0; i < arguments.Length; i++)
             {
                 if (Substitute(arguments[i], values) is not { } value) return false;
                 arguments[i] = value;
             }
-            var effects = arguments.SelectMany(a => a.DescendantsAndSelf).Where(n => n is InvocationExpression or ObjectCreateExpression).Select(n => n.ToString()).ToArray();
+            // 模式声明的变量只在留在函数体里的判断中定义，代回初始化器后就不在作用域内。
+            var patterns = prologue.SelectMany(s => s.Descendants.OfType<SingleVariableDesignation>()).Select(d => d.Identifier).ToHashSet();
+            if (arguments.Any(a => a.DescendantsAndSelf.OfType<IdentifierExpression>().Any(i => patterns.Contains(i.Identifier)))) return false;
+            var effects = arguments.SelectMany(a => a.DescendantsAndSelf).Where(n => n is InvocationExpression or ObjectCreateExpression or ArrayCreateExpression).Select(n => n.ToString()).ToArray();
             if (effects.Length != effects.Distinct().Count()) return false;
             foreach (var statement in consumed) statement.Remove();
+            foreach (var identifier in later.SelectMany(s => s.DescendantsAndSelf.OfType<IdentifierExpression>()).Where(i => reused.Contains(i.Identifier)).ToArray())
+                identifier.ReplaceWith(values[identifier.Identifier]!.Clone());
             return true;
+        }
+
+        /// <summary>局部或形参在节点内被赋值、自增减或按引用传出。</summary>
+        private static bool Writes(AstNode node, string name)
+        {
+            static bool Is(Expression e, string name) => e is IdentifierExpression identifier && identifier.Identifier == name;
+            return node.DescendantsAndSelf.Any(n => n switch
+            {
+                AssignmentExpression assignment => Is(assignment.Left, name),
+                UnaryOperatorExpression { Operator: UnaryOperatorType.Increment or UnaryOperatorType.Decrement or UnaryOperatorType.PostIncrement or UnaryOperatorType.PostDecrement or UnaryOperatorType.AddressOf } unary => Is(unary.Expression, name),
+                DirectionExpression direction => Is(direction.Expression, name),
+                _ => false,
+            });
         }
 
         private static bool Evaluate(Statement statement, Dictionary<string, Expression?> values, HashSet<string> locals)
@@ -97,10 +121,14 @@ public static partial class Decompilation
                     return true;
                 case ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign, Left: IdentifierExpression target, Right: var right } } when locals.Contains(target.Identifier):
                     return (values[target.Identifier] = Substitute(right, values)) is not null;
+                case ExpressionStatement { Expression: AssignmentExpression { Operator: AssignmentOperatorType.Assign, Left: IndexerExpression { Target: IdentifierExpression array, Arguments.Count: 1 } element, Right: var right } }
+                    when locals.Contains(array.Identifier) && values.GetValueOrDefault(array.Identifier) is ArrayCreateExpression creation:
+                    return (values[array.Identifier] = Store(creation, element.Arguments.Single(), Substitute(right, values))) is not null;
                 case BlockStatement block:
                     return block.Statements.All(s => Evaluate(s, values, locals));
-                case IfElseStatement { TrueStatement: BlockStatement { Statements: { Count: 1 } only }, FalseStatement: null } when only.First() is ThrowStatement:
-                    return true;
+                case IfElseStatement { TrueStatement: BlockStatement { Statements: { Count: 1 } only }, FalseStatement: null } conditional when only.First() is ThrowStatement:
+                    // 条件里的模式声明的变量在后面还会用到，删掉判断就没有定义了。
+                    return !conditional.Condition.DescendantsAndSelf.OfType<SingleVariableDesignation>().Any();
                 case IfElseStatement conditional when Substitute(conditional.Condition, values) is { } condition:
                 {
                     var whenTrue = new Dictionary<string, Expression?>(values);
@@ -118,6 +146,30 @@ public static partial class Decompilation
                 default:
                     return false;
             }
+        }
+
+        /// <summary>
+        /// 定长的新数组按下标递增逐个写入元素，写成数组初始化器；没写到的元素是 default，新数组本来就是零，写成 null 或 default 的元素也是零。
+        /// 元素按下标顺序求值，和逐条写入的次序相同。
+        /// </summary>
+        private static ArrayCreateExpression? Store(ArrayCreateExpression creation, Expression index, Expression? value)
+        {
+            if (value is null || creation.Type is not { } elementType || creation.Arguments.Count != 1 || creation.AdditionalArraySpecifiers.Count != 0
+                || creation.Arguments.Single() is not PrimitiveExpression { Value: int length } || index is not PrimitiveExpression { Value: int at } || at < 0 || at >= length)
+                return null;
+            var next = (ArrayCreateExpression)creation.Clone();
+            if (next.Initializer is not { Elements.Count: > 0 } initializer)
+            {
+                initializer = new ArrayInitializerExpression();
+                for (var i = 0; i < length; i++) initializer.Elements.Add(new DefaultValueExpression(elementType.Clone()));
+                next.Initializer = initializer;
+            }
+            if (initializer.Elements.Count != length) return null;
+            var elements = initializer.Elements.ToArray();
+            // 已写过的元素都在前面：写入次序就是初始化器的求值次序。反编译器只认出前几个元素时，其余写成 null。
+            if (elements.Skip(at).Any(e => e is not (DefaultValueExpression or NullReferenceExpression))) return null;
+            elements[at].ReplaceWith(value.Clone());
+            return next;
         }
 
         private static Expression? Substitute(Expression expression, Dictionary<string, Expression?> values)

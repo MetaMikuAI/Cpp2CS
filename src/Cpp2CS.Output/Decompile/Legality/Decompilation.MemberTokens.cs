@@ -45,6 +45,60 @@ public static partial class Decompilation
     }
 
     /// <summary>
+    /// clang 把各分支等长的数组分配提到分支之前，分支里只剩 InitializeArray。从分配到 InitializeArray 的每条路径上都没有读过数组时，
+    /// 它还没有别处引用，在 InitializeArray 前重新分配同样的数组语义不变，反编译器就能还原成数组初始化器。
+    /// 读到原数组的路径之后不能再有 InitializeArray；没有路径读到原数组时去掉原分配。
+    /// </summary>
+    private sealed class HoistedArrayInitializers : IILTransform
+    {
+        public void Run(ILFunction function, ILTransformContext context)
+        {
+            foreach (var container in function.Descendants.OfType<BlockContainer>().ToArray())
+                foreach (var block in container.Blocks.ToArray())
+                    for (var i = 0; i < block.Instructions.Count; i++)
+                        if (block.Instructions[i] is StLoc { Variable: { StoreCount: 1, AddressCount: 0 } array, Value: NewArr { Indices.Count: 1 } creation } allocation
+                            && creation.Indices[0].MatchLdcI4(out _) && Reallocate(container, allocation, array, creation)) i--;
+        }
+
+        /// <summary>改写成功且去掉了原分配时返回 true。</summary>
+        private static bool Reallocate(BlockContainer container, StLoc allocation, ILVariable array, NewArr creation)
+        {
+            var start = (Block)allocation.Parent!;
+            var initializers = new List<ILInstruction>();
+            var read = false;
+            var visited = new HashSet<(Block, bool)>();
+            var pending = new Stack<(Block Block, int Index, bool Read)>();
+            pending.Push((start, allocation.ChildIndex + 1, false));
+            while (pending.Count > 0)
+            {
+                var (block, index, escaped) = pending.Pop();
+                for (; index < block.Instructions.Count; index++)
+                {
+                    var statement = block.Instructions[index];
+                    if (statement == allocation) break;
+                    if (statement is Call { Method: { Name: "InitializeArray", DeclaringType.FullName: "System.Runtime.CompilerServices.RuntimeHelpers" }, Arguments: [var target, LdMemberToken { Member: IField }] }
+                        && target.MatchLdLoc(array))
+                    {
+                        if (escaped) return false;
+                        if (!initializers.Contains(statement)) initializers.Add(statement);
+                        break;
+                    }
+                    if (statement.Descendants.OfType<IInstructionWithVariableOperand>().Any(u => u.Variable == array)) read = escaped = true;
+                    foreach (var branch in statement.Descendants.OfType<Branch>().Where(b => b.TargetContainer == container))
+                        if (visited.Add((branch.TargetBlock, escaped))) pending.Push((branch.TargetBlock, 0, escaped));
+                }
+            }
+            // 紧跟在分配之后的 InitializeArray 就是反编译器认识的形式。
+            if (initializers.Count == 0 || initializers is [{ } only] && only.Parent == start && only.ChildIndex == allocation.ChildIndex + 1) return false;
+            foreach (var initializer in initializers)
+                ((Block)initializer.Parent!).Instructions.Insert(initializer.ChildIndex, new StLoc(array, creation.Clone()));
+            if (read) return false;
+            start.Instructions.RemoveAt(allocation.ChildIndex);
+            return true;
+        }
+    }
+
+    /// <summary>
     /// 表达式树留下的 GetMethodFromHandle(ldtoken 方法) 没有 C# 写法（反编译器写成 __ldtoken）。
     /// 改成按名称和形参类型的反射查找，得到同一个方法。
     /// </summary>

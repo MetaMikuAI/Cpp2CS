@@ -79,10 +79,12 @@ public static class SourceProject
         ("System.Runtime.InteropServices", "FieldOffsetAttribute", "internal sealed class FieldOffsetAttribute : global::System.Attribute { public FieldOffsetAttribute(int offset) { } }"),
         ("System.Runtime.CompilerServices", "MethodImplOptions", "internal enum MethodImplOptions { Unmanaged = 4, NoInlining = 8, ForwardRef = 16, Synchronized = 32, NoOptimization = 64, PreserveSig = 128, AggressiveInlining = 256, AggressiveOptimization = 512, InternalCall = 4096 }"),
         ("System.Runtime.CompilerServices", "MethodImplAttribute", "internal sealed class MethodImplAttribute : global::System.Attribute { public MethodImplAttribute() { } public MethodImplAttribute(short value) { } public MethodImplAttribute(MethodImplOptions methodImplOptions) { } }"),
+        // 程序集版本由编译器写进程序集表，不是特性实例；元数据里只剩版本号，类型本身被裁掉。
+        ("System.Reflection", "AssemblyVersionAttribute", "internal sealed class AssemblyVersionAttribute : global::System.Attribute { public AssemblyVersionAttribute(string version) { } }"),
     ];
 
     /// <summary>
-    /// IL2CPP 裁掉了只对运行时有意义的伪特性类型（类型布局、字段偏移、方法实现标志），反编译器仍按元数据的标志写出它们。
+    /// IL2CPP 裁掉了只对运行时有意义的伪特性类型（类型布局、字段偏移、方法实现标志、程序集版本），反编译器仍按元数据的标志写出它们。
     /// 核心库里没有时在工程内声明，只为源码能编译，不影响方法体。
     /// </summary>
     private static string StrippedAttributes(string searchDirectory)

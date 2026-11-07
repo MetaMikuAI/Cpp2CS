@@ -23,6 +23,7 @@ public static class SourceReferences
         AddStrippedBuilderMembers(resolver.Modules, changed);
         AddPlaceholderReference(main, changed);
         AddStrippedRuntimeMembers(resolver.Modules, changed);
+        AddReadOnlyModifiers(resolver.Modules, changed);
         foreach (var file in Directory.GetFiles(searchDirectory, "*.dll"))
         {
             var destination = Path.Combine(target, Path.GetFileName(file));
@@ -84,6 +85,31 @@ public static class SourceReferences
                 handle.Methods.Add(method);
                 changed.Add(module);
             }
+        }
+    }
+
+    /// <summary>
+    /// IL2CPP 的类型不带自定义修饰符。C# 读只读引用时要求返回只读引用的方法、虚方法（含接口方法和委托的 Invoke）的 in 形参
+    /// 在类型上带 modreq(InAttribute)；只有 IsReadOnlyAttribute 时不认这个成员（CS0570），span 的 fixed 也写不出来。按特性补回修饰符。
+    /// 方法体里对这些方法的引用仍不带修饰符；反编译器按擦除修饰符后的签名解析，不受影响。
+    /// </summary>
+    private static void AddReadOnlyModifiers(IReadOnlyList<ModuleDefinition> modules, HashSet<ModuleDefinition> changed)
+    {
+        if (modules.Select(m => m.GetType("System.Runtime.InteropServices", "InAttribute")).FirstOrDefault(t => t is not null) is not { } attribute) return;
+        static bool ReadOnly(Mono.Collections.Generic.Collection<CustomAttribute> attributes) =>
+            attributes.Any(a => a.AttributeType.FullName == "System.Runtime.CompilerServices.IsReadOnlyAttribute");
+        foreach (var module in modules)
+        {
+            TypeReference? modifier = null;
+            foreach (var method in module.GetTypes().SelectMany(t => t.Methods))
+            {
+                if (method.ReturnType is ByReferenceType && ReadOnly(method.MethodReturnType.CustomAttributes))
+                    method.MethodReturnType.ReturnType = new RequiredModifierType(modifier ??= module.ImportReference(attribute), method.ReturnType);
+                if (!method.IsVirtual) continue;
+                foreach (var parameter in method.Parameters.Where(p => p.ParameterType is ByReferenceType && ReadOnly(p.CustomAttributes)))
+                    parameter.ParameterType = new RequiredModifierType(modifier ??= module.ImportReference(attribute), parameter.ParameterType);
+            }
+            if (modifier is not null) changed.Add(module);
         }
     }
 
@@ -156,6 +182,9 @@ public static class SourceReferences
                 {
                     Reference(method.ReturnType, type);
                     foreach (var parameter in method.Parameters) Reference(parameter.ParameterType, type);
+                    // 编译器生成的方法（局部函数是 internal）签名里可以有更难访问的类型；反编译器折不回去时按普通成员写出，要满足 C# 的一致性。
+                    if (method.Name.StartsWith('<') && !method.IsPrivate)
+                        foreach (var signature in method.Parameters.Select(p => p.ParameterType).Prepend(method.ReturnType)) Raise(signature, method.IsPublic);
                     if (!method.HasBody) continue;
                     foreach (var variable in method.Body.Variables) Reference(variable.VariableType, type);
                     foreach (var instruction in method.Body.Instructions) Use(instruction, method);
@@ -172,9 +201,20 @@ public static class SourceReferences
         private IEnumerable<(MethodDefinition Method, Instruction Instruction)> Instructions() =>
             main.GetTypes().SelectMany(t => t.Methods).Where(m => m.HasBody).SelectMany(m => m.Body.Instructions.Select(i => (m, i)));
 
+        /// <summary>
+        /// 反编译器把闭包、lambda 和状态机折回外层方法：编译器生成的类型（名字以 &lt; 开头）里的方法体，在 C# 里写在外层的普通类型中，
+        /// 访问权按那个类型判定。闭包折不回去时代码留在生成的类型里，按外层判定只会多放宽，不会少。
+        /// </summary>
+        private static TypeDefinition SourceType(MethodDefinition method)
+        {
+            var type = method.DeclaringType;
+            while (type.Name.StartsWith('<') && type.DeclaringType is { } outer) type = outer;
+            return type;
+        }
+
         private void Use(Instruction instruction, MethodDefinition method)
         {
-            var from = method.DeclaringType;
+            var from = SourceType(method);
             switch (instruction.Operand)
             {
                 case TypeReference type: Reference(type, from); break;
@@ -323,7 +363,7 @@ public static class SourceReferences
         /// <summary>C# 的访问规则。受保护成员还要求接收者的类型是访问者本身或其派生类（CS1540）。</summary>
         private bool Accessible(FieldAttributes access, TypeDefinition owner, bool isStatic, Instruction instruction, MethodDefinition method)
         {
-            var from = method.DeclaringType;
+            var from = SourceType(method);
             var sameModule = owner.Module == from.Module;
             var family = access is FieldAttributes.Family or FieldAttributes.FamORAssem or FieldAttributes.FamANDAssem && Enclosing(from).Any(c => DerivesFrom(c, owner))
                 && (isStatic || ReceiverType(instruction, method) is { } receiver && Enclosing(from).Any(c => DerivesFrom(c, owner) && DerivesFrom(receiver, c)));

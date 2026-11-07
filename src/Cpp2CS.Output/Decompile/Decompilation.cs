@@ -34,7 +34,8 @@ public static partial class Decompilation
     {
         var decompiler = new CSharpDecompiler(typeSystem, settings);
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ILInlining) + 1, new MergedArrayInitializers());
-        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is MergedArrayInitializers) + 1, new ClosureValues());
+        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is MergedArrayInitializers) + 1, new HoistedArrayInitializers());
+        decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is HoistedArrayInitializers) + 1, new ClosureValues());
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is ClosureValues) + 1, new ImplicitChecks());
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is AsyncAwaitDecompiler) + 1, new ClosureValues());
         decompiler.ILTransforms.Insert(decompiler.ILTransforms.ToList().FindIndex(t => t is AsyncAwaitDecompiler) + 2, new ImplicitChecks());

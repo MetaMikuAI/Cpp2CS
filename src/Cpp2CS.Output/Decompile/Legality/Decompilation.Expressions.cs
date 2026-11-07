@@ -17,6 +17,9 @@ public static partial class Decompilation
         public void Run(AstNode rootNode, TransformContext context)
         {
             ExtensionAwaitUsings(rootNode);
+            // 状态机没有提升成 async lambda 时，反编译器把编译器加在 lambda 方法上的特性（AsyncStateMachine 等）写在 lambda 上，
+            // 这是 C# 10 的写法；这些特性只供调试器和反射读取，去掉不改变行为。
+            foreach (var section in rootNode.Descendants.OfType<LambdaExpression>().SelectMany(l => l.Attributes).ToArray()) section.Remove();
             foreach (var type in rootNode.Descendants.OfType<SimpleType>().ToArray()) SharedSelfType(type);
             // 改写时会复制子树：先处理内层，复制到的才是改好的节点。
             foreach (var cast in rootNode.Descendants.OfType<CastExpression>().Reverse().ToArray()) SharedCast(cast);
@@ -259,8 +262,12 @@ public static partial class Decompilation
                 new MemberReferenceExpression(new TypeReferenceExpression(GlobalType("System", "Runtime", "CompilerServices", "Unsafe")), "As", cast.Type.Clone()), inner));
         }
 
+        /// <summary>
+        /// 用户定义的转换（op_Implicit、op_Explicit）按约束的基类找到运算符，本来就能编译；插入 object 会把它变成拆箱或引用转换，运行时抛异常。
+        /// </summary>
         private static void GenericCast(CastExpression cast)
         {
+            if (cast.Annotation<ConversionResolveResult>() is { Conversion.IsUserDefined: true }) return;
             var from = StaticType(cast.Expression);
             if (from?.Kind == TypeKind.TypeParameter && cast.Type is PrimitiveType { Keyword: not "object" })
             {
