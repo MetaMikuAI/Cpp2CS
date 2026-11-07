@@ -46,6 +46,12 @@ internal static partial class ExecutionCheck
         var index = new WorldIndex(facts, types);
         var cecil = new CecilModel(facts.Model, skeleton);
         var interpreter = new CilInterpreter(cecil, index);
+        // 解释导出工程编译出的 C#，而不是恢复的 CIL；比较模型不变。
+        if (options.SkipWhile(o => o != "--csharp").Skip(1).FirstOrDefault() is { } compiled)
+        {
+            cecil.UseCompiled(compiled, Option(options, "--csharp-assembly"), Option(options, "--csharp-references"));
+            interpreter.SetAccessors(method => cecil.Compiled!.AutoAccessor(skeleton.Method(method)));
+        }
         var written = all.GroupBy(r => r.Method.Method).ToDictionary(g => g.Key, g => g.First());
         // 内联目标的实参可能提到调用方的类型参数，而 CIL 的 VAR/MVAR 只引用所在类型和方法自己的参数（ECMA-335 II.7.1）：按原生见证闭合后才能写成实例体。
         interpreter.SetInline(emitter, skeleton, method => decompiler.Summary(WithWitnesses(method)) is { Body: { } own, Entry: var entry }
@@ -72,6 +78,9 @@ internal static partial class ExecutionCheck
         return ExecutionVerdicts.ExitCode(verdicts.Keys);
     }
 
+
+    private static string Option(string[] options, string name) =>
+        options.SkipWhile(o => o != name).Skip(1).FirstOrDefault() ?? throw new ArgumentException($"缺少 {name}");
 
     private sealed class Summaries(MethodDecompiler decompiler) : IMethodResults
     {
@@ -103,10 +112,27 @@ internal static partial class ExecutionCheck
         Aapcs64Classifier.Signature signature;
         try { signature = index.StructAbi.Signature(tested); }
         catch (Unsupported e) { return new Outcome(ExecutionVerdict.NotCheckable, 0, 0, $"；{e.Message}", e.Message); }
-        var statics = interpreter.StaticFields(definition, tested).Distinct().ToArray();
+        // 世界按恢复体的提示生成，和 CIL 的对照用同一批输入。
         var hints = HintsOf(definition, cecil);
+        var executed = definition;
+        if (cecil.Compiled is { } compiled)
+        {
+            if (compiled.Body(definition) is not { } body) return new Outcome(ExecutionVerdict.NotCheckable, 0, 0, "；C# 编译结果里没有对应方法", "C# 编译结果里没有对应方法");
+            executed = body;
+            interpreter.UseCompiled(body, definition, tested);
+        }
+        FieldRef[] statics;
+        ThrowPlan?[] throwPlans;
         machine.Covered.Clear();
-        var throwPlans = ThrowPlans(tested, definition, cecil, interpreter, index, caseCount: caseCount);
+        try
+        {
+            statics = interpreter.StaticFields(executed, tested).Distinct().ToArray();
+            throwPlans = ThrowPlans(tested, executed, cecil, interpreter, index, caseCount: caseCount);
+        }
+        catch (Unsupported e) when (cecil.Compiled is not null)
+        {
+            return new Outcome(ExecutionVerdict.NotCheckable, 0, 0, $"；{e.Message}", e.Message);
+        }
         var throwCases = 0;
         var matches = 0;
         var mismatches = new List<string>();
@@ -127,7 +153,7 @@ internal static partial class ExecutionCheck
             {
                 foreach (var field in statics) world.PrepareStatic(field);
                 var (bits, values) = Arguments(world, interpreter, tested, signature);
-                var cil = interpreter.Run(world, definition, tested, values);
+                var cil = interpreter.Run(world, executed, tested, values);
                 var native = machine.Run(world, tested, signature, bits, cil.Callees, entry);
                 if (arrayAccesses is not null)
                 {

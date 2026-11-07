@@ -14,6 +14,7 @@ internal sealed class CecilModel
     private readonly Dictionary<MethodDefinition, MethodDef> methods = new();
     private readonly Dictionary<FieldDefinition, FieldDef> fields = new();
     public MethodRef? Context { get; set; }
+    public CompiledSource? Compiled { get; private set; }
 
     public CecilModel(ProgramModel model, Skeleton skeleton)
     {
@@ -27,8 +28,12 @@ internal sealed class CecilModel
         types = source.types;
         methods = source.methods;
         fields = source.fields;
+        Compiled = source.Compiled;
         Context = context;
     }
+
+    public void UseCompiled(string path, string assembly, string references) =>
+        Compiled = new CompiledSource(path, assembly, references, types, methods, fields);
 
     public CecilModel InContext(MethodRef context) => new(this, context);
 
@@ -39,36 +44,47 @@ internal sealed class CecilModel
         PointerType p => new PointerRef(Type(p.ElementType)),
         ByReferenceType r => new ByRefRef(Type(r.ElementType)),
         PinnedType p => Type(p.ElementType),
+        IModifierType m => Type(m.ElementType),
         GenericParameter p when Context is { } context => new GenericParameterRef(p.Name, p.Type == GenericParameterType.Method, p.Position)
             .Substitute(context.TypeArguments, context.MethodArguments),
         GenericParameter => throw new Unsupported($"泛型参数 {type}"),
         _ => new DefinitionRef(Definition(type), []),
     };
 
-    private TypeDef Definition(TypeReference type) =>
-        type.Resolve() is { } definition && types.TryGetValue(definition, out var found) ? found : throw new Unsupported($"无法解析类型 {type}");
+    private TypeDef Definition(TypeReference type)
+    {
+        if (Compiled is { } compiled && type.Module == compiled.Module)
+            return compiled.Type(type) ?? throw new Unsupported($"骨架里没有 C# 的类型 {type}");
+        return type.Resolve() is { } definition && types.TryGetValue(definition, out var found) ? found : throw new Unsupported($"无法解析类型 {type}");
+    }
 
     public MethodRef Method(MethodReference method)
     {
         var element = method is GenericInstanceMethod generic ? generic.ElementMethod : method;
-        var definition = element.Resolve() is { } d && methods.TryGetValue(d, out var found) ? found : throw new Unsupported($"无法解析方法 {method}");
+        var definition = Compiled is { } compiled && element.Module == compiled.Module
+            ? compiled.Method(element) ?? throw new Unsupported($"骨架里没有 C# 的方法 {method}")
+            : element.Resolve() is { } d && methods.TryGetValue(d, out var found) ? found : throw new Unsupported($"无法解析方法 {method}");
         TypeRef[] typeArguments = method.DeclaringType is GenericInstanceType g ? g.GenericArguments.Select(Type).ToArray() : [];
         TypeRef[] methodArguments = method is GenericInstanceMethod m ? m.GenericArguments.Select(Type).ToArray() : [];
         return new MethodRef(definition, typeArguments, methodArguments);
     }
 
     public FieldRef Field(FieldReference field) =>
-        new(field.Resolve() is { } d && fields.TryGetValue(d, out var found) ? found : throw new Unsupported($"无法解析字段 {field}"), Type(field.DeclaringType));
+        new(Compiled is { } compiled && field.Module == compiled.Module
+            ? compiled.Field(field) ?? throw new Unsupported($"骨架里没有 C# 的字段 {field}")
+            : field.Resolve() is { } d && fields.TryGetValue(d, out var found) ? found : throw new Unsupported($"无法解析字段 {field}"), Type(field.DeclaringType));
 }
 
 internal enum StackKind { I4, I8, F, O, Struct }
 
 /// <summary>求值栈上的值：I4 保存 32 位位型，I8 为 64 位（含 native int），F 为 double，O 为对象或托管指针地址，Struct 保存不可变的值类型字节。</summary>
-internal readonly record struct StackValue(StackKind Kind, ulong Bits, byte[]? Data = null)
+/// <summary>Single：F 上的 float32。双方都是 float32 的运算结果仍是 float32：IL2CPP 和 CLR 都这样编译，ECMA-335 只是允许更高精度。</summary>
+internal readonly record struct StackValue(StackKind Kind, ulong Bits, byte[]? Data = null, bool Single = false)
 {
     public static StackValue I4(long value) => new(StackKind.I4, (uint)value);
     public static StackValue I8(ulong value) => new(StackKind.I8, value);
     public static StackValue F(double value) => new(StackKind.F, BitConverter.DoubleToUInt64Bits(value));
+    public static StackValue F32(float value) => new(StackKind.F, BitConverter.DoubleToUInt64Bits(value), null, true);
     public static StackValue O(ulong address) => new(StackKind.O, address);
     public int Int32 => unchecked((int)(uint)Bits);
     public double Double => BitConverter.UInt64BitsToDouble(Bits);
@@ -221,6 +237,12 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Ldarg_2: stack.Push(Argument(2)); break;
                 case Code.Ldarg_3: stack.Push(Argument(3)); break;
                 case Code.Ldarg or Code.Ldarg_S: stack.Push(Argument(ArgIndex(operand))); break;
+                case Code.Starg or Code.Starg_S:
+                {
+                    var position = ArgIndex(operand);
+                    WriteValue(side, argumentTypes[position], ArgumentAddress(position), Pop());
+                    break;
+                }
                 case Code.Ldloc_0 or Code.Ldloc_1 or Code.Ldloc_2 or Code.Ldloc_3: stack.Push(Local(instruction.OpCode.Code - Code.Ldloc_0)); break;
                 case Code.Ldloc or Code.Ldloc_S: stack.Push(Local(((VariableDefinition)operand).Index)); break;
                 case Code.Stloc_0 or Code.Stloc_1 or Code.Stloc_2 or Code.Stloc_3:
@@ -245,6 +267,20 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     WriteValue(side, context.Type((TypeReference)operand), NotNull(Pop()), value);
                     break;
                 }
+                case Code.Ldind_I1 or Code.Ldind_U1 or Code.Ldind_I2 or Code.Ldind_U2 or Code.Ldind_I4 or Code.Ldind_U4 or Code.Ldind_I8
+                    or Code.Ldind_I or Code.Ldind_R4 or Code.Ldind_R8 or Code.Ldind_Ref:
+                    stack.Push(ReadValue(side, Primitive(instruction.OpCode.Code), NotNull(Pop()))); break;
+                case Code.Stind_I1 or Code.Stind_I2 or Code.Stind_I4 or Code.Stind_I8 or Code.Stind_I or Code.Stind_R4 or Code.Stind_R8 or Code.Stind_Ref:
+                {
+                    var value = Pop();
+                    WriteValue(side, Primitive(instruction.OpCode.Code), NotNull(Pop()), value);
+                    break;
+                }
+                case Code.Readonly or Code.Volatile: break;
+                case Code.Conv_Ovf_I when stack.Peek().Kind is StackKind.I4 or StackKind.I8:
+                    // ECMA-335 III.3.30：有符号整数转成 64 位 native int 不会溢出。
+                    stack.Push(StackValue.I8(unchecked((ulong)Pop().Integer))); break;
+                case Code.Sizeof: stack.Push(StackValue.I4(world.StorageSize(context.Type((TypeReference)operand)))); break;
                 case Code.Initobj:
                 {
                     var type = context.Type((TypeReference)operand);
@@ -256,7 +292,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Ldc_I4_S: stack.Push(StackValue.I4((sbyte)operand)); break;
                 case Code.Ldc_I4: stack.Push(StackValue.I4((int)operand)); break;
                 case Code.Ldc_I8: stack.Push(StackValue.I8(unchecked((ulong)(long)operand))); break;
-                case Code.Ldc_R4: stack.Push(StackValue.F((float)operand)); break;
+                case Code.Ldc_R4: stack.Push(StackValue.F32((float)operand)); break;
                 case Code.Ldc_R8: stack.Push(StackValue.F((double)operand)); break;
                 case Code.Ldnull: stack.Push(StackValue.O(0)); break;
                 case Code.Ldstr: stack.Push(StackValue.O(world.String((string)operand))); break;
@@ -280,6 +316,9 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     if (receiver.Kind == StackKind.Struct)
                         stack.Push(FromBytes(type, receiver.Data!.AsSpan(world.FieldOffset(field) - RuntimeLayout.ObjectHeaderSize, world.StorageSize(type)).ToArray()));
                     else stack.Push(ReadValue(side, type, FieldAddress(world, field, receiver)));
+                    // Roslyn 认定捕获的 this 和外层闭包不为空，不再判空（callvirt 换成 call）；这种输入在 C# 的语义里不会出现。
+                    if (compiledSites.Contains(instruction) && stack.Peek().Bits == 0 && field.Field.Name is "<>4__this" or ['C', 'S', '$', '<', '>', '8', ..])
+                        throw new Unsupported("闭包的捕获对象为空");
                     break;
                 }
                 case Code.Ldflda:
@@ -352,6 +391,33 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     var address = Element(side, type, Pop(), Pop());
                     stack.Push(ReadValue(side, type, address));
                     side.ArrayAccesses?.Add(instruction);
+                    break;
+                }
+                case Code.Ldelem_I1 or Code.Ldelem_U1 or Code.Ldelem_I2 or Code.Ldelem_U2 or Code.Ldelem_I4 or Code.Ldelem_U4 or Code.Ldelem_I8
+                    or Code.Ldelem_I or Code.Ldelem_R4 or Code.Ldelem_R8 or Code.Ldelem_Ref:
+                {
+                    var type = Primitive(instruction.OpCode.Code);
+                    stack.Push(ReadValue(side, type, Element(side, type, Pop(), Pop())));
+                    break;
+                }
+                case Code.Stelem_I1 or Code.Stelem_I2 or Code.Stelem_I4 or Code.Stelem_I8 or Code.Stelem_I or Code.Stelem_R4 or Code.Stelem_R8:
+                {
+                    var type = Primitive(instruction.OpCode.Code);
+                    var value = Pop();
+                    WriteValue(side, type, Element(side, type, Pop(), Pop()), value);
+                    break;
+                }
+                case Code.Stelem_Ref:
+                {
+                    // ECMA-335 III.4.27：按数组实际的元素类型检查。
+                    var type = Primitive(Code.Stelem_Ref);
+                    var value = Pop();
+                    var position = Pop();
+                    var array = Pop();
+                    var address = Element(side, type, position, array);
+                    if (value.Bits != 0 && side.TypeOf(array.Bits) is ArrayRef { Element: var element } && !Types.IsAssignable(side.TypeOf(value.Bits), element))
+                        throw new CilThrow(Types.Corlib("System.ArrayTypeMismatchException"));
+                    WriteValue(side, type, address, value);
                     break;
                 }
                 case Code.Stelem_Any:
@@ -449,8 +515,8 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                         var cosine = NotNull(Pop());
                         var sine = NotNull(Pop());
                         var value = (float)Pop().Double;
-                        WriteValue(side, Types.Single, sine, StackValue.F(NativeMathLibrary.Sinf(value)));
-                        WriteValue(side, Types.Single, cosine, StackValue.F(NativeMathLibrary.Cosf(value)));
+                        WriteValue(side, Types.Single, sine, StackValue.F32(NativeMathLibrary.Sinf(value)));
+                        WriteValue(side, Types.Single, cosine, StackValue.F32(NativeMathLibrary.Cosf(value)));
                         break;
                     }
                     if (instruction.OpCode.Code == Code.Call && ((MethodReference)operand).Resolve() is
@@ -458,7 +524,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                             PInvokeInfo: { EntryPoint: "sinf" or "tanf", IsCallConvCdecl: true, Module.Name: "libm.so" or "libm.so.6" } } unaryImport)
                     {
                         var operation = unaryImport.PInvokeInfo.EntryPoint == "sinf" ? NativeMathLibrary.Sinf : NativeMathLibrary.Tanf;
-                        stack.Push(StackValue.F(operation((float)Pop().Double)));
+                        stack.Push(StackValue.F32(operation((float)Pop().Double)));
                         break;
                     }
                     if (instruction.OpCode.Code == Code.Call && ((MethodReference)operand).Resolve() is
@@ -470,7 +536,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                         var value = (float)Pop().Double;
                         var operation = binaryImport.PInvokeInfo.EntryPoint switch { "fmodf" => NativeMathLibrary.Fmodf,
                             "powf" => NativeMathLibrary.Powf, _ => NativeMathLibrary.Atan2f };
-                        stack.Push(StackValue.F(operation(value, divisor)));
+                        stack.Push(StackValue.F32(operation(value, divisor)));
                         break;
                     }
                     if (instruction.OpCode.Code == Code.Call && ((MethodReference)operand).Resolve() is
@@ -539,7 +605,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     stack.Push(value.Kind switch
                     {
                         StackKind.I4 => StackValue.I4(-value.Int32), StackKind.I8 => StackValue.I8(unchecked((ulong)-(long)value.Bits)),
-                        StackKind.F => StackValue.F(-value.Double), _ => throw new Unsupported("neg 的操作数"),
+                        StackKind.F => value.Single ? StackValue.F32(-(float)value.Double) : StackValue.F(-value.Double), _ => throw new Unsupported("neg 的操作数"),
                     });
                     break;
                 }
@@ -568,6 +634,14 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     var targets = (Instruction[])operand;
                     var selector = (uint)Pop().Bits;
                     if (selector < targets.Length) pc = positions[targets[selector]];
+                    break;
+                }
+                case Code.Beq or Code.Beq_S or Code.Bne_Un or Code.Bne_Un_S or Code.Bge or Code.Bge_S or Code.Bgt or Code.Bgt_S or Code.Ble or Code.Ble_S or Code.Blt or Code.Blt_S
+                    or Code.Bge_Un or Code.Bge_Un_S or Code.Bgt_Un or Code.Bgt_Un_S or Code.Ble_Un or Code.Ble_Un_S or Code.Blt_Un or Code.Blt_Un_S:
+                {
+                    var right = Pop();
+                    var left = Pop();
+                    if (Branches(instruction.OpCode.Code, left, right)) pc = positions[(Instruction)operand];
                     break;
                 }
                 case Code.Brtrue or Code.Brtrue_S: if (Pop().Bits != 0) pc = positions[(Instruction)operand]; break;
@@ -647,7 +721,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
             _ => null,
         };
         // 负数开平方产生的 NaN 按 ARM64 的默认 NaN（ArmNaN），不用宿主 x86 的负号 NaN。
-        return result is { } r ? StackValue.F(single ? (float)ArmNaN(r, x, x) : ArmNaN(r, x, x)) : null;
+        return result is { } r ? single ? StackValue.F32((float)ArmNaN(r, x, x)) : StackValue.F(ArmNaN(r, x, x)) : null;
     }
 
     private static bool BeforeFieldInitValue(TypeRef type) => type is DefinitionRef { Definition: { IsValueType: true } d }
@@ -751,7 +825,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
             {
                 "SingleToInt32Bits" => StackValue.I4(BitConverter.SingleToInt32Bits((float)values[0].Double)),
                 "DoubleToInt64Bits" => StackValue.I8(values[0].Bits),
-                "Int32BitsToSingle" => StackValue.F(BitConverter.Int32BitsToSingle(values[0].Int32)),
+                "Int32BitsToSingle" => StackValue.F32(BitConverter.Int32BitsToSingle(values[0].Int32)),
                 "Int64BitsToDouble" => StackValue.F(BitConverter.UInt64BitsToDouble(values[0].Bits)),
                 _ => (StackValue?)null,
             };
@@ -808,7 +882,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 var value = signed ? (long)(bits << shift) >> shift : (long)(bits << shift >>> shift);
                 return StackValue.I4(value);
             }
-            case TypeKind.Float: return StackValue.F(BitConverter.UInt32BitsToSingle((uint)bits));
+            case TypeKind.Float: return StackValue.F32(BitConverter.UInt32BitsToSingle((uint)bits));
             case TypeKind.Double: return StackValue.F(BitConverter.UInt64BitsToDouble(bits));
             case TypeKind.Reference: return StackValue.O(bits);
             case TypeKind.Pointer: return StackValue.I8(bits);
@@ -839,6 +913,8 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         {
             StackKind.I4 => StackValue.I4((uint)integer(left.Bits, right.Bits)),
             StackKind.I8 => StackValue.I8(integer(left.Bits, right.Bits)),
+            // float32 的操作数在 double 里运算再舍入一次，加减乘除的结果和直接按 float32 运算相同（double 的精度超过 2p+2）。
+            StackKind.F when floating is not null && left.Single && right.Single => StackValue.F32((float)ArmNaN(floating(left.Double, right.Double), left.Double, right.Double)),
             StackKind.F when floating is not null => StackValue.F(ArmNaN(floating(left.Double, right.Double), left.Double, right.Double)),
             _ => throw new Unsupported($"{left.Kind} 上的运算"),
         };
@@ -852,6 +928,43 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
     /// </summary>
     private static double ArmNaN(double result, double left, double right) =>
         double.IsNaN(result) && !double.IsNaN(left) && !double.IsNaN(right) ? BitConverter.UInt64BitsToDouble(0x7ff8000000000000) : result;
+
+    /// <summary>ECMA-335 III.3.5–3.15：条件分支等于比较加 brtrue 或 brfalse；浮点的 bge、ble 和无序比较配对，整数的是带符号比较。</summary>
+    private static bool Branches(Code code, StackValue left, StackValue right)
+    {
+        var floating = left.Kind == StackKind.F || right.Kind == StackKind.F;
+        return code switch
+        {
+            Code.Beq or Code.Beq_S => Compare(Code.Ceq, left, right),
+            Code.Bne_Un or Code.Bne_Un_S => !Compare(Code.Ceq, left, right),
+            Code.Bgt or Code.Bgt_S => Compare(Code.Cgt, left, right),
+            Code.Bgt_Un or Code.Bgt_Un_S => Compare(Code.Cgt_Un, left, right),
+            Code.Blt or Code.Blt_S => Compare(Code.Clt, left, right),
+            Code.Blt_Un or Code.Blt_Un_S => Compare(Code.Clt_Un, left, right),
+            Code.Bge or Code.Bge_S => !Compare(floating ? Code.Clt_Un : Code.Clt, left, right),
+            Code.Ble or Code.Ble_S => !Compare(floating ? Code.Cgt_Un : Code.Cgt, left, right),
+            Code.Bge_Un or Code.Bge_Un_S => !Compare(floating ? Code.Clt : Code.Clt_Un, left, right),
+            Code.Ble_Un or Code.Ble_Un_S => !Compare(floating ? Code.Cgt : Code.Cgt_Un, left, right),
+            _ => throw new Unsupported(code.ToString()),
+        };
+    }
+
+    /// <summary>ldind、stind、ldelem、stelem 的简写形式对应的类型。</summary>
+    private TypeRef Primitive(Code code) => Types.Corlib(code switch
+    {
+        Code.Ldind_I1 or Code.Stind_I1 or Code.Ldelem_I1 or Code.Stelem_I1 => "System.SByte",
+        Code.Ldind_U1 or Code.Ldelem_U1 => "System.Byte",
+        Code.Ldind_I2 or Code.Stind_I2 or Code.Ldelem_I2 or Code.Stelem_I2 => "System.Int16",
+        Code.Ldind_U2 or Code.Ldelem_U2 => "System.UInt16",
+        Code.Ldind_I4 or Code.Stind_I4 or Code.Ldelem_I4 or Code.Stelem_I4 => "System.Int32",
+        Code.Ldind_U4 or Code.Ldelem_U4 => "System.UInt32",
+        Code.Ldind_I8 or Code.Stind_I8 or Code.Ldelem_I8 or Code.Stelem_I8 => "System.Int64",
+        Code.Ldind_I or Code.Stind_I or Code.Ldelem_I or Code.Stelem_I => "System.IntPtr",
+        Code.Ldind_R4 or Code.Stind_R4 or Code.Ldelem_R4 or Code.Stelem_R4 => "System.Single",
+        Code.Ldind_R8 or Code.Stind_R8 or Code.Ldelem_R8 or Code.Stelem_R8 => "System.Double",
+        Code.Ldind_Ref or Code.Stind_Ref or Code.Ldelem_Ref or Code.Stelem_Ref => "System.Object",
+        _ => throw new Unsupported(code.ToString()),
+    });
 
     private static bool Compare(Code code, StackValue left, StackValue right)
     {
@@ -887,7 +1000,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         if (value.Kind == StackKind.F)
             return code switch
             {
-                Code.Conv_R4 => StackValue.F((float)value.Double),
+                Code.Conv_R4 => StackValue.F32((float)value.Double),
                 Code.Conv_R8 => value,
                 Code.Conv_I4 when value.Double >= -2147483648d && value.Double < 2147483648d => StackValue.I4((int)value.Double),
                 Code.Conv_U4 when value.Double >= 0 && value.Double < 4294967296d => StackValue.I4(unchecked((int)(uint)value.Double)),
@@ -905,7 +1018,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
             Code.Conv_I4 or Code.Conv_U4 => StackValue.I4((int)integer),
             Code.Conv_I8 or Code.Conv_I => StackValue.I8(unchecked((ulong)integer)),
             Code.Conv_U8 or Code.Conv_U => StackValue.I8(unsigned),
-            Code.Conv_R4 => StackValue.F((float)integer),
+            Code.Conv_R4 => StackValue.F32((float)integer),
             Code.Conv_R8 => StackValue.F(integer),
             Code.Conv_R_Un => StackValue.F(unsigned),
             _ => throw new Unsupported(code.ToString()),
