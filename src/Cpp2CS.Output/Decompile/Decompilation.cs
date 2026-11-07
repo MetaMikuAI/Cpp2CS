@@ -182,7 +182,18 @@ public static partial class Decompilation
             var source = new SourceFile(type.Name, type.Namespace, Print(CreateDecompiler(typeSystem, visible, transforms).DecompileTypes(type.Handles), visible));
             if (index >= 0) files[index] = source; else files.Add(source);
         }
-        // 先处理闭包：不折叠闭包后，匿名类型也会按名字出现。局部函数同样是闭包折叠的结果，要一起关掉。
+        // 反编译器有时折叠不了某个方法的闭包，留下对隐藏类型的引用。只把这些成员换成不折叠的写法，再补上它们用到的闭包，其余成员保持折叠。
+        // 不折叠后匿名类型也会按名字出现；局部函数同样是闭包折叠的结果，要一起关掉。
+        void ExposeClosures((TypeDefinitionHandle[] Handles, string Namespace, string Name) type)
+        {
+            var visible = settings.Clone();
+            visible.AnonymousMethods = false;
+            visible.AnonymousTypes = false;
+            visible.LocalFunctions = false;
+            var folded = CreateDecompiler(typeSystem, settings, transforms).DecompileTypes(type.Handles);
+            MergeClosures(folded, CreateDecompiler(typeSystem, visible, transforms).DecompileTypes(type.Handles));
+            files[files.FindIndex(f => f.TypeName == type.Name && f.Namespace == type.Namespace)] = new SourceFile(type.Name, type.Namespace, Print(folded, settings));
+        }
         var visibleClosures = new HashSet<TypeDefinitionHandle>();
         foreach (var type in types)
         {
@@ -192,7 +203,7 @@ public static partial class Decompilation
             var declared = DeclaredLambdaMethod.Matches(file.Source).Select(m => m.Groups[1].Value).ToHashSet();
             if (!closures.Any(c => !file.Source.Contains("class " + c, StringComparison.Ordinal)) && !ClosureThis.IsMatch(file.Source)
                 && LambdaMethod.Matches(file.Source).All(m => declared.Contains(m.Value))) continue;
-            Redo(type, s => { s.AnonymousMethods = false; s.AnonymousTypes = false; s.LocalFunctions = false; });
+            ExposeClosures(type);
             visibleClosures.Add(type.Handles[0]);
         }
         // 按名字引用匿名类型的文件里，new { } 也要写成同一个类型。
@@ -211,6 +222,88 @@ public static partial class Decompilation
         }
     }
 
+    /// <summary>
+    /// folded 里引用隐藏闭包的成员换成 expanded 里对应的写法，再把用到的闭包类、lambda 方法和字段按需加进来。
+    /// 没提升的状态机是嵌套类型，它的成员用到的闭包声明在外层，所以名字要沿外层类型查找。
+    /// </summary>
+    private static void MergeClosures(SyntaxTree folded, SyntaxTree expanded)
+    {
+        const string Shared = "_003C_003Ec";
+        static int Token(AstNode node) => node.GetSymbol() is IEntity entity ? System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(entity.MetadataToken) : 0;
+        static string? Declared(EntityDeclaration member) => member is FieldDeclaration field ? field.Variables.FirstOrDefault()?.Name : member.Name;
+        // 换进来的成员按 expanded 的 using 写短名。
+        var imports = folded.Members.OfType<UsingDeclaration>().Select(u => u.ToString()).ToHashSet();
+        foreach (var import in expanded.Members.OfType<UsingDeclaration>())
+            if (imports.Add(import.ToString())) folded.Members.InsertBefore(folded.Members.First(), (UsingDeclaration)import.Clone());
+        var twins = expanded.Descendants.OfType<TypeDeclaration>().Where(t => Token(t) != 0).GroupBy(Token).ToDictionary(g => g.Key, g => g.First());
+        var targets = folded.Descendants.OfType<TypeDeclaration>().Where(t => Token(t) != 0).GroupBy(Token).ToDictionary(g => g.Key, g => g.First());
+        var pending = new Queue<(string Name, TypeDeclaration Scope)>();
+        void Scan(AstNode node, TypeDeclaration scope)
+        {
+            foreach (System.Text.RegularExpressions.Match token in HiddenName.Matches(node.ToString())) pending.Enqueue((token.Value, scope));
+        }
+        foreach (var type in targets.Values.ToArray())
+        {
+            if (!twins.TryGetValue(Token(type), out var twin)) continue;
+            var candidates = twin.Members.OfType<EntityDeclaration>().Where(m => Token(m) != 0).GroupBy(Token).ToDictionary(g => g.Key, g => g.First());
+            foreach (var member in type.Members.ToArray())
+            {
+                if (member is TypeDeclaration) continue;
+                var text = member.ToString();
+                if (!ClosureReference.IsMatch(text) && !ClosureThis.IsMatch(text) && !LambdaMethod.IsMatch(text)) continue;
+                if (!candidates.TryGetValue(Token(member), out var replacement)) continue;
+                Scan(replacement, twin);
+                member.ReplaceWith(replacement.Clone());
+            }
+        }
+        // <>c 里每个 lambda 是独立的方法，只留用到的；闭包类属于单个方法，整个写出。
+        var sharedLive = new Dictionary<TypeDeclaration, HashSet<EntityDeclaration>>();
+        var seen = new HashSet<(string, TypeDeclaration)>();
+        var added = new HashSet<EntityDeclaration>();
+        while (pending.TryDequeue(out var next))
+        {
+            if (!seen.Add(next)) continue;
+            foreach (var scope in next.Scope.AncestorsAndSelf.OfType<TypeDeclaration>())
+            {
+                var members = scope.Members.OfType<EntityDeclaration>().ToArray();
+                var shared = members.OfType<TypeDeclaration>().FirstOrDefault(t => t.Name == Shared);
+                if (shared?.Members.OfType<EntityDeclaration>().FirstOrDefault(m => Declared(m) == next.Name) is { } inner)
+                {
+                    if (!sharedLive.TryGetValue(shared, out var live)) sharedLive[shared] = live = [];
+                    if (live.Add(inner)) Scan(inner, shared);
+                    break;
+                }
+                if (next.Name == Shared && shared is not null)
+                {
+                    if (!sharedLive.ContainsKey(shared)) sharedLive[shared] = [];
+                    break;
+                }
+                if (members.FirstOrDefault(m => Declared(m) == next.Name) is not { } declaration) continue;
+                if (added.Add(declaration) && targets.TryGetValue(Token(scope), out var target))
+                {
+                    var existing = target.Members.OfType<EntityDeclaration>().FirstOrDefault(m => Declared(m) == next.Name);
+                    // 折叠时闭包类也可能写出来，但里面的局部函数是隐藏的，要换成不折叠的写法。
+                    if (existing is TypeDeclaration && next.Name.StartsWith("_003C_003Ec__DisplayClass", StringComparison.Ordinal))
+                        existing.ReplaceWith(declaration.Clone());
+                    else if (existing is null) target.Members.Add((EntityDeclaration)declaration.Clone());
+                    if (declaration is TypeDeclaration nested) Scan(nested, nested);
+                    else if (existing is null) Scan(declaration, scope);
+                }
+                break;
+            }
+        }
+        foreach (var (shared, live) in sharedLive)
+        {
+            if (shared.Parent is not TypeDeclaration scope || !targets.TryGetValue(Token(scope), out var target)) continue;
+            if (target.Members.OfType<TypeDeclaration>().Any(t => t.Name == Shared)) continue;
+            var partial = (TypeDeclaration)shared.Clone();
+            foreach (var (original, copy) in shared.Members.OfType<EntityDeclaration>().Zip(partial.Members.OfType<EntityDeclaration>()).ToArray())
+                if (!live.Contains(original) && original is MethodDeclaration or FieldDeclaration && Declared(original) != "_003C_003E9") copy.Remove();
+            target.Members.Add(partial);
+        }
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex HiddenName = new(@"\b_003C\w+", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex HiddenReference = new(@"\b_003CPrivateImplementationDetails_003E\b|\b_003C_003Ef__AnonymousType\d+\b", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex ClosureThis = new(@"\(_003C_003Ec__DisplayClass\d+_\d+\)(\(object\))?this\b", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex LambdaMethod = new(@"\b_003C\w+?_003Eb__\d+(_\d+)?\b", System.Text.RegularExpressions.RegexOptions.Compiled);
