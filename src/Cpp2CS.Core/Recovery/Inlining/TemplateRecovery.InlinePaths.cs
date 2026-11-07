@@ -98,6 +98,9 @@ internal sealed partial class TemplateRecovery
         return mapped switch
         {
             BinaryValue { Op: BinOp.Add, Left: ConstantValue a, Right: ConstantValue b } add => new ConstantValue((a.Bits + b.Bits) & Expr.Mask(add.Width), add.Type, add.Width),
+            // 同宽的模加可以结合：(x + a) + b = x + (a + b)。
+            BinaryValue { Op: BinOp.Add, Left: BinaryValue { Op: BinOp.Add, Right: ConstantValue a } inner, Right: ConstantValue b } add when inner.Width == add.Width
+                => Fold(add with { Left = inner.Left, Right = new ConstantValue((a.Bits + b.Bits) & Expr.Mask(add.Width), b.Type, add.Width) }),
             BinaryValue { Op: BinOp.Add, Left: var left, Right: ConstantValue { Bits: 0 } } => left,
             BinaryValue { Op: BinOp.Add, Left: ConstantValue { Bits: 0 }, Right: var right } => right,
             ComparisonValue { Left: ConstantValue a, Right: ConstantValue b } c when ConstantComparison(c.Condition, a, b) is { } truth
@@ -133,8 +136,87 @@ internal sealed partial class TemplateRecovery
             if (SameTerm(canonical, Canonical(assumption.Condition))) return assumption.Value;
             if (SameTerm(canonical, Canonical(Negate(assumption.Condition)))) return !assumption.Value;
         }
-        return null;
+        return RangeCondition(instantiated, caller);
     }
+
+    /// <summary>
+    /// 同一项与常量的比较按值域判定：路径上关于这一项的比较合成有符号区间和排除的值（如 x != 1 且 x &lt;= 1 得 x &lt;= 0）。
+    /// clang 按同样的值域删掉内联代码里已经确定的分支。无符号的上界在常量非负时折成区间，其余无符号事实不用；矛盾的路径不判定。
+    /// </summary>
+    private bool? RangeCondition(ManagedValue condition, Walker caller)
+    {
+        if (Bound(condition) is not var (term, query, constant)) return null;
+        var width = term.Width;
+        if (width is not (8 or 16 or 32 or 64)) return null;
+        var (min, max) = (-(1L << (width - 1)), (long)((1UL << (width - 1)) - 1));
+        var (lo, hi) = (min, max);
+        var excluded = new HashSet<long>();
+        var facts = 0;
+        foreach (var (assumed, truth) in caller.Assumptions)
+        {
+            if (Bound(Fold(assumed)) is not var (other, op, value) || !SameTerm(other, term)) continue;
+            if (!truth && Negated(op) is { } negated) op = negated;
+            else if (!truth) continue;
+            var v = Signed(value, width);
+            var unsigned = value & Expr.Mask(width);
+            facts++;
+            switch (op)
+            {
+                case Cond.Eq: lo = Math.Max(lo, v); hi = Math.Min(hi, v); break;
+                case Cond.Ne: excluded.Add(v); break;
+                case Cond.Slt: if (v == min) return null; hi = Math.Min(hi, v - 1); break;
+                case Cond.Sle: hi = Math.Min(hi, v); break;
+                case Cond.Sgt: if (v == max) return null; lo = Math.Max(lo, v + 1); break;
+                case Cond.Sge: lo = Math.Max(lo, v); break;
+                case Cond.Ult when unsigned is > 0 && unsigned <= (ulong)max + 1: lo = Math.Max(lo, 0); hi = Math.Min(hi, (long)unsigned - 1); break;
+                case Cond.Ule when unsigned <= (ulong)max: lo = Math.Max(lo, 0); hi = Math.Min(hi, (long)unsigned); break;
+                default: facts--; break;
+            }
+        }
+        if (facts == 0) return null;
+        while (lo <= hi && excluded.Contains(lo)) lo++;
+        while (lo <= hi && excluded.Contains(hi)) hi--;
+        if (lo > hi) return null;
+        var k = Signed(constant, width);
+        var ku = constant & Expr.Mask(width);
+        if (query is Cond.Ult or Cond.Ule or Cond.Ugt or Cond.Uge)
+        {
+            // 区间非负时无符号次序与有符号相同；常量超过有符号上界时，非负的项都比它小。
+            if (lo < 0) return null;
+            if (ku > (ulong)max) return query is Cond.Ult or Cond.Ule;
+            query = query switch { Cond.Ult => Cond.Slt, Cond.Ule => Cond.Sle, Cond.Ugt => Cond.Sgt, _ => Cond.Sge };
+            k = (long)ku;
+        }
+        return query switch
+        {
+            Cond.Eq => lo == hi && lo == k ? true : k < lo || k > hi || excluded.Contains(k) ? false : null,
+            Cond.Ne => lo == hi && lo == k ? false : k < lo || k > hi || excluded.Contains(k) ? true : null,
+            Cond.Slt => hi < k ? true : lo >= k ? false : null,
+            Cond.Sle => hi <= k ? true : lo > k ? false : null,
+            Cond.Sgt => lo > k ? true : hi <= k ? false : null,
+            Cond.Sge => lo >= k ? true : hi < k ? false : null,
+            _ => null,
+        };
+
+        static long Signed(ulong bits, int width) => width == 64 ? (long)bits : (long)(bits << (64 - width)) >> (64 - width);
+    }
+
+    /// <summary>项与常量的整数比较，常量在左侧时换到右侧。</summary>
+    private static (ManagedValue Term, Cond Condition, ulong Constant)? Bound(ManagedValue condition) => condition switch
+    {
+        ComparisonValue { Condition: > Cond.Uge } => null,
+        ComparisonValue { Left: ConstantValue, Right: ConstantValue } => null,
+        ComparisonValue { Right: ConstantValue right } c => (c.Left, c.Condition, right.Bits),
+        ComparisonValue { Left: ConstantValue left } c => (c.Right, Swapped(c.Condition), left.Bits),
+        _ => null,
+    };
+
+    private static Cond Swapped(Cond condition) => condition switch
+    {
+        Cond.Slt => Cond.Sgt, Cond.Sle => Cond.Sge, Cond.Sgt => Cond.Slt, Cond.Sge => Cond.Sle,
+        Cond.Ult => Cond.Ugt, Cond.Ule => Cond.Uge, Cond.Ugt => Cond.Ult, Cond.Uge => Cond.Ule,
+        _ => condition,
+    };
 
     /// <summary>解引用项的语句访问：读取或写入字段、数组元素和数组长度。</summary>
     private void NoteAccesses(Walker walker, ManagedStatement statement)

@@ -68,7 +68,7 @@ internal sealed class AvailableFields
                 break;
             case ManagedStore { Target: FieldValue written }:
                 foreach (var (variable, fact) in facts.ToArray())
-                    if (ManagedValues.Walk(fact).OfType<FieldValue>().Any(f => ReferenceEquals(f.Field.Field, written.Field.Field))) facts.Remove(variable);
+                    if (ManagedValues.Walk(fact).OfType<FieldValue>().Any(f => MayShare(f.Field, written.Field))) facts.Remove(variable);
                 break;
             case ManagedStore { Target: ArrayElementValue or StaticFieldValue }:
             case ManagedCheck or ManagedBranch or ManagedJump or ManagedSwitch or ManagedReturn or ManagedThrow:
@@ -78,6 +78,23 @@ internal sealed class AvailableFields
                 break;
         }
     }
+
+    /// <summary>
+    /// 两次访问可能是同一存储：同一字段定义，所在类型可能是同一个运行时类型。对象只有一个运行时类型，
+    /// 两个确定不同的实例化（如 List&lt;int&gt; 与 List&lt;float&gt; 的 _size）不会是同一对象。
+    /// </summary>
+    private static bool MayShare(FieldRef a, FieldRef b) => ReferenceEquals(a.Field, b.Field) && MaySameType(a.DeclaringType, b.DeclaringType);
+
+    /// <summary>
+    /// 两个类型引用可能指同一个运行时类型：相同、含类型形参，或一方是 object 而另一方是引用类型
+    /// （取自共享实例的方法体以 object 代替引用类型实参）；同一定义的实例逐个比较实参。
+    /// </summary>
+    private static bool MaySameType(TypeRef x, TypeRef y) => x.Equals(y) || x.ContainsGenericParameter() || y.ContainsGenericParameter()
+        || IsObject(x) && ManagedTypes.IsReferenceType(y) || IsObject(y) && ManagedTypes.IsReferenceType(x)
+        || x is DefinitionRef dx && y is DefinitionRef dy && ReferenceEquals(dx.Definition, dy.Definition) && dx.Arguments.Count == dy.Arguments.Count
+            && dx.Arguments.Zip(dy.Arguments).All(p => MaySameType(p.First, p.Second));
+
+    private static bool IsObject(TypeRef type) => type is DefinitionRef { Definition.FullName: "System.Object" };
 
     private static Dictionary<Variable, ManagedValue> Across(ManagedEdge edge, Dictionary<Variable, ManagedValue> facts)
     {

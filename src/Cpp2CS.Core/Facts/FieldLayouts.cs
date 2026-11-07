@@ -322,7 +322,7 @@ public sealed class FieldLayouts : ITypeLayouts
         checks.Add("layout.static-fields", "Error", staticCount, staticMismatch, "算法重算的静态字段偏移与元数据一致");
 
         // 泛型实例：元数据注册的全部运行时类型中出现的泛型实例
-        var instances = model.RuntimeTypes.OfType<DefinitionRef>().Where(d => d.Arguments.Count > 0 && !ContainsGenericParameter(d)).Distinct().ToArray();
+        var instances = model.RuntimeTypes.OfType<DefinitionRef>().Where(d => d.Arguments.Count > 0 && !d.ContainsGenericParameter()).Distinct().ToArray();
         var genericFailures = new List<string>();
         var valueTypes = 0;
         foreach (var instance in instances)
@@ -335,13 +335,4 @@ public sealed class FieldLayouts : ITypeLayouts
             $"元数据中全部封闭泛型实例类型均能计算布局（其中值类型 {valueTypes} 个；实参含完全共享占位类型、偏移需经 RGCTX 的 {instances.Count(IsFullyShared)} 个）");
     }
 
-    private static bool ContainsGenericParameter(TypeRef type) => type switch
-    {
-        GenericParameterRef => true,
-        DefinitionRef d => d.Arguments.Any(ContainsGenericParameter),
-        ArrayRef a => ContainsGenericParameter(a.Element),
-        PointerRef p => ContainsGenericParameter(p.Element),
-        ByRefRef r => ContainsGenericParameter(r.Element),
-        _ => false,
-    };
 }

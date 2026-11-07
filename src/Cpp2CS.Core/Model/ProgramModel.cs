@@ -62,6 +62,17 @@ public sealed record GenericParameterRef(string Name, bool IsMethod, int Positio
 
 public static class TypeRefs
 {
+    /// <summary>类型里出现类型形参（还没有代入实参）。</summary>
+    public static bool ContainsGenericParameter(this TypeRef type) => type switch
+    {
+        GenericParameterRef => true,
+        DefinitionRef d => d.Arguments.Any(ContainsGenericParameter),
+        ArrayRef a => ContainsGenericParameter(a.Element),
+        PointerRef p => ContainsGenericParameter(p.Element),
+        ByRefRef r => ContainsGenericParameter(r.Element),
+        _ => false,
+    };
+
     /// <summary>以类与方法实参代入泛型参数；实参不足的参数保持原样。</summary>
     public static TypeRef Substitute(this TypeRef type, IReadOnlyList<TypeRef> typeArguments, IReadOnlyList<TypeRef> methodArguments) => type switch
     {

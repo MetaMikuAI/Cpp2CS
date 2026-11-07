@@ -621,12 +621,20 @@ internal sealed partial class TemplateRecovery
     /// <summary>
     /// 路径结束时的值，表示成调用后的内存：之前读到的位置此后没有被覆盖时，它的值就是该位置现在的内容。
     /// 一条路径沿用读过的值，另一条路径在调用之后重新读取，这样两者才是同一个项。
+    /// 区域对这个位置只有一次写入、写的是这次读到的值加常量（如 _version++）时，读到的值等于现在的内容减去这个常量：
+    /// clang 把后一次内联的自增提进前一次的各条路径时，一条路径按已知值写 v+2，另一条路径在调用之后重读再加 1。
     /// </summary>
     private static ManagedValue Current(ManagedValue value, InlineEnd end)
     {
-        if (value is Observed { Epoch: var epoch, Read: var read } && epoch == end.Epoch
-            && end.State is { } state && !state.Stores.Any(s => MayAlias(s.Location, read)))
-            return new Observed(ManagedValues.Map(read, child => Current(child, end)), AfterRegion);
+        if (value is Observed { Epoch: var epoch, Read: var read } && epoch == end.Epoch && end.State is { } state)
+        {
+            var aliasing = state.Stores.Where(s => MayAlias(s.Location, read)).ToArray();
+            var now = new Observed(ManagedValues.Map(read, child => Current(child, end)), AfterRegion);
+            if (aliasing.Length == 0) return now;
+            if (aliasing is [(var location, BinaryValue { Op: BinOp.Add, Left: Observed incremented, Right: ConstantValue step })]
+                && incremented.Equals(value) && Unobserve(location).Equals(Unobserve(read)) && read.Width is 8 or 16 or 32 or 64)
+                return new BinaryValue(BinOp.Add, now, step with { Bits = (0 - step.Bits) & Expr.Mask(read.Width) }, read.Type, read.Width);
+        }
         return MapTerm(value, child => Current(child, end));
     }
 
