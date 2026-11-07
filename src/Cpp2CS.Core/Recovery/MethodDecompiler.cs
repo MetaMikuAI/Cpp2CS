@@ -165,7 +165,7 @@ public sealed class MethodDecompiler
         if (!ReferenceEquals(merged, body)) result = result with { Rules = [.. result.Rules, new RuleTrace("as.receivers", result.Entry, RewriteStatus.Applied, "merged", null, null)] };
         var form = AsyncForms.Run(merged, types, Summary, Definition, out var rejected);
         if (rejected is not null) return result with { Rules = [.. result.Rules, new RuleTrace("async.form", result.Entry, RewriteStatus.Blocked, rejected, null, null)] };
-        form = IteratorForms.Run(form, out rejected);
+        form = IteratorForms.Run(form, types.Boolean, method => Summary(method)?.Body, out rejected);
         if (rejected is null)
         {
             var joined = JoinCopies.Run(form, out var rewrites);
