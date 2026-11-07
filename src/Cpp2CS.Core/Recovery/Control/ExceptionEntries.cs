@@ -11,6 +11,7 @@ internal static class ExceptionEntries
 {
     /// <summary>分派块的地址不对应原生代码，取高位以免与原生块重合。</summary>
     private const ulong SyntheticAddress = 1UL << 63;
+    private const ulong NativeAddressMask = (1UL << 48) - 1;
 
     /// <summary>这个地址是分派块。其他步骤新建的块用不同的高位。</summary>
     public static bool IsDispatch(ulong address) => address >> 62 == 2;
@@ -19,15 +20,15 @@ internal static class ExceptionEntries
     {
         var count = 0UL;
         // 从内向外：外层可能因此以内层的分派块作为入口，再次收拢时结构不变。
-        foreach (var size in body.Regions.Select(r => r.Try.Count).Distinct().Order().ToArray())
-            for (var i = 0; i < body.Regions.Count; i++)
-            {
-                if (body.Regions[i].Try.Count != size) continue;
-                var address = SyntheticAddress | count << 48 | body.Regions[i].Try[0];
-                if (Collapse(body, body.Regions[i], address, newLocal) is not { } collapsed) continue;
-                body = collapsed;
-                count++;
-            }
+        // 次序在开始前定下：收拢内层后，外层的成员会多出分派块。
+        foreach (var i in Enumerable.Range(0, body.Regions.Count).OrderBy(i => body.Regions[i].Try.Count).ToArray())
+        {
+            // 开头可能已经是内层的分派块，只取原生地址部分，编号才不会重叠。
+            var address = SyntheticAddress | count << 48 | body.Regions[i].Try[0] & NativeAddressMask;
+            if (Collapse(body, body.Regions[i], address, newLocal) is not { } collapsed) continue;
+            body = collapsed;
+            count++;
+        }
         return body;
     }
 

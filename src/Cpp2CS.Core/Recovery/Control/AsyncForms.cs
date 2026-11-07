@@ -564,10 +564,12 @@ public static class AsyncForms
             {
                 var selector = ((LocalValue)table.Index).Variable;
                 var normal = fresh.Where(f => f.Block == dispatcher).Select(f => f.Case).ToHashSet();
-                foreach (var edge in code.Values.SelectMany(s => s).SelectMany(ManagedValues.Edges).Where(e => e.Target == dispatcher && !used.Contains(e)))
+                // 嵌套时内层的序号写在进入外层的边上，外层分派转到内层的边不带序号。
+                foreach (var (source, edge) in code.SelectMany(p => p.Value.SelectMany(ManagedValues.Edges).Select(e => (Source: p.Key, Edge: e))).Where(p => !used.Contains(p.Edge)))
                 {
-                    if (edge.Copies.FirstOrDefault(c => c.Target.Variable.Equals(selector)) is not { Value: ConstantValue { } selected }) return Fail("entries:selector");
-                    normal.Add((int)selected.Bits);
+                    var copy = edge.Copies.FirstOrDefault(c => c.Target.Variable.Equals(selector));
+                    if (copy is { Value: ConstantValue selected }) normal.Add((int)selected.Bits);
+                    else if (copy is not null || edge.Target == dispatcher && !tables.ContainsKey(source)) return Fail("entries:selector");
                 }
                 var list = tests[dispatcher];
                 ManagedStatement otherwise;
