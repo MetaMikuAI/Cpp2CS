@@ -60,22 +60,38 @@ internal sealed partial class BodyBuilder
                     if (location is null && oracle.Split(operands[0], store.Value.Width) is { } leaves)
                     {
                         // 跨字段的写入按布局拆为逐字段写入（寄存器对、合并的清零等一次写入多个字段）；
-                        // 只覆盖字段一部分的段写为读改写：f = (f & ~掩码) | (段 << 位移)。
+                        // 只覆盖字段一部分的段写为读改写：f = (f & ~掩码) | (段 << 位移)，浮点字段在同宽整数的位型上改写。
                         foreach (var part in leaves)
                         {
                             var leaf = part.Leaf;
                             var leafTarget = LocationValue(leaf, store.Address, store: true);
                             var slice = values.Syms.Slice(operands[1], part.Bit, part.Width);
+                            var width = Width(leaf.Type);
+                            var mask = Expr.Mask(part.Width) << part.FieldBit;
+                            ManagedValue Merged(ManagedValue current, ManagedValue bits, TypeRef type)
+                            {
+                                ManagedValue shifted = part.FieldBit == 0 ? bits : new BinaryValue(BinOp.Shl, bits, new ConstantValue((ulong)part.FieldBit, types.Int32, 32), type, width);
+                                var kept = new BinaryValue(BinOp.And, current, new ConstantValue(~mask & Expr.Mask(width), type, width), type, width);
+                                return new BinaryValue(BinOp.Or, kept, shifted, type, width);
+                            }
+                            var carrier = types.Kind(leaf.Type) is TypeKind.Float or TypeKind.Double ? types.Integer(width, signed: false) : leaf.Type;
                             ManagedValue leafValue;
                             if (part.FieldBit == 0 && part.Width == (ManagedTypes.IsReferenceType(leaf.Type) ? 64 : types.Size(leaf.Type) * 8))
                                 leafValue = View(slice, leaf.Type, store.Address);
-                            else if (types.Kind(leaf.Type) is TypeKind.Int or TypeKind.Bool && IntegerBits(slice, leaf.Type, store.Address) is { } bits)
+                            else if (types.Kind(leaf.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double && IntegerBits(slice, carrier, store.Address) is { } bits)
                             {
-                                var width = Width(leaf.Type);
-                                var mask = Expr.Mask(part.Width) << part.FieldBit;
-                                ManagedValue shifted = part.FieldBit == 0 ? bits : new BinaryValue(BinOp.Shl, bits, new ConstantValue((ulong)part.FieldBit, types.Int32, 32), leaf.Type, width);
-                                var kept = new BinaryValue(BinOp.And, LocationValue(leaf, store.Address), new ConstantValue(~mask & Expr.Mask(width), leaf.Type, width), leaf.Type, width);
-                                leafValue = new BinaryValue(BinOp.Or, kept, shifted, leaf.Type, width);
+                                if (bits is ConstantValue constant && KnownConstant(output, leafTarget) is { } known)
+                                {
+                                    // 字段刚写过常量，中间没有别的写入：按位合并出新常量；值不变时这次写入不改变任何状态。
+                                    var merged = known.Bits & ~mask | (constant.Bits & Expr.Mask(part.Width)) << part.FieldBit;
+                                    if ((merged & Expr.Mask(width)) == (known.Bits & Expr.Mask(width))) continue;
+                                    leafValue = known with { Bits = merged & Expr.Mask(width) };
+                                }
+                                else if (carrier == leaf.Type)
+                                    leafValue = Merged(LocationValue(leaf, store.Address), bits, leaf.Type);
+                                else
+                                    leafValue = new ConversionValue(ConvKind.Bitcast,
+                                        Merged(new ConversionValue(ConvKind.Bitcast, LocationValue(leaf, store.Address), carrier, width), bits, carrier), leaf.Type, width);
                             }
                             else
                                 leafValue = Hole(store.Address, $"内存 字段 {leaf.Type} 的部分写入", leaf.Type);
@@ -104,6 +120,27 @@ internal sealed partial class BodyBuilder
             default:
                 return Fail(statement.Address, $"语句 {statement.GetType().Name}", terminal: false) is Statement s ? AddHole(output, s) : null;
         }
+    }
+
+    /// <summary>
+    /// 本块里 <paramref name="target"/> 最近一次写入的常量。其后只能是对其他字段的常量写入（合并的清零序列）：
+    /// 字段不同就不会是同一位置；同一字段经别的接收者写入可能是别名，其余语句可能改写它，都不算已知。
+    /// </summary>
+    private static ConstantValue? KnownConstant(List<ManagedStatement> output, ManagedValue target)
+    {
+        var field = target switch { FieldValue f => f.Field, StaticFieldValue s => s.Field, _ => null };
+        if (field is null) return null;
+        for (var i = output.Count - 1; i >= 0; i--)
+            switch (output[i])
+            {
+                case ManagedStore { Target: var written, Value: ConstantValue value } when written.Equals(target):
+                    return value;
+                case ManagedStore { Target: var written, Value: ConstantValue } when written switch { FieldValue f => f.Field, StaticFieldValue s => s.Field, _ => null } is { } other && !other.Equals(field):
+                    continue;
+                default:
+                    return null;
+            }
+        return null;
     }
 
     private static Terminator? AddHole(List<ManagedStatement> output, Statement hole)
