@@ -557,7 +557,16 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                     }
                     var target = context.Method((MethodReference)operand);
                     var values = PopMany(target.Method.Parameters.Count + (target.Method.IsStatic ? 0 : 1));
+                    // 前缀只作用于这一条调用（ECMA-335 III.2.1）。先取走：下面可能抛异常，处理块里的调用不能再受它影响。
+                    var constrainedTo = constraint;
+                    constraint = null;
                     if (instruction.OpCode.Code == Code.Callvirt) NotNull(values[0]);
+                    // 约束到引用类型时，指针先解引用，再按 callvirt 调用，空引用要抛异常（ECMA-335 III.2.1、III.4.2）。
+                    if (constrainedTo is { } dereferenced && ManagedTypes.IsReferenceType(dereferenced))
+                    {
+                        values[0] = ReadValue(side, dereferenced, values[0].Bits);
+                        NotNull(values[0]);
+                    }
                     if (side.RuntimeTypeReturn(target, values.Select(v => v.Bits).ToArray()) is { } reflected)
                     {
                         stack.Push(Load(target.Method.ReturnType, reflected));
@@ -571,11 +580,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                         || target.DeclaringType is DefinitionRef { Definition.IsValueType: true } && !BeforeFieldInitValue(target.DeclaringType))
                         side.RunClassConstructor(target.DeclaringType);
                     MethodRef callee;
-                    if (constraint is { } thisType)
-                    {
-                        callee = Constrained(side, thisType, target, values);
-                        constraint = null;
-                    }
+                    if (constrainedTo is { } thisType) callee = Constrained(side, thisType, target, values);
                     else callee = instruction.OpCode.Code == Code.Callvirt && target.Method.IsVirtual ? Dispatch(side, values[0].Bits, target) : target;
                     if (InvokeAt(side, instruction, callee, values) is { } result) stack.Push(result);
                     break;
@@ -756,7 +761,6 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
     {
         if (ManagedTypes.IsReferenceType(thisType))
         {
-            values[0] = ReadValue(side, thisType, NotNull(values[0]));
             return target.Method.IsVirtual ? Dispatch(side, values[0].Bits, target) : target;
         }
         if (thisType is not DefinitionRef { Definition.IsValueType: true } value) throw new Unsupported($"constrained {thisType}");
