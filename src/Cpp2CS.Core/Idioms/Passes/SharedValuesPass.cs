@@ -204,6 +204,8 @@ internal static class SharedValuesPass
                         Sources = [Storage.Gpr(0), Storage.Gpr(1), Storage.Gpr(2)],
                     });
                 else continue;
+                // 模板返回 void，原调用保守定义的寄存器只是被破坏，后续调用仍按寄存器状态引用它们。
+                writes.AddRange(call.Defines.OfType<Variable>().Select(v => new Define(call.Address, v, new Unknown("字段写入模板未定义返回寄存器", v.Width))));
                 if (call.Kind == CallKind.Tail) writes.Add(new Return(call.Address));
                 block.Statements.RemoveAt(i);
                 block.Statements.InsertRange(i, writes);
