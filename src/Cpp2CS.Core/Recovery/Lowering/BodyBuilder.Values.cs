@@ -398,6 +398,8 @@ internal sealed partial class BodyBuilder
             && types.Fields(owner).First(f => f.Path[0].Equals(field)) is var self
             && types.Fields(owner).Where(f => !f.Path[0].Equals(field) && self.Contains(f.Bit, f.Width) && fields.Accessible(f.Path[0], f.Path[0].DeclaringType)).Sum(f => f.Width) == self.Width).ToArray() is { Length: > 0 } covered)
             return TryCompose(structure, leaves.Except(covered).ToList(), address);
+        // 叶子全部取自同一个结构体时就是整体复制，先于构造函数证明：后者的实参仍要逐个读私有字段。
+        if (StructUpdate(structure, leaves, address, copyOnly: true) is { } copied) return copied;
         if (templates.ProveValueConstruction(structure, leaves) is { } construction)
         {
             var arguments = construction.Arguments.Select((value, i) => value is AddressValue ? value
@@ -438,7 +440,7 @@ internal sealed partial class BodyBuilder
     /// <summary>
     /// 叶子取自同一个结构体时，不必逐个访问私有字段：全部相同就是整体复制；只有个别字段不同时，先整体复制再写这些字段（写入照常接受访问器证明）。
     /// </summary>
-    private ManagedValue? StructUpdate(DefinitionRef structure, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, ulong address)
+    private ManagedValue? StructUpdate(DefinitionRef structure, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, ulong address, bool copyOnly = false)
     {
         ManagedValue? source = null;
         var changed = new List<(FieldRef Field, ManagedValue Value)>();
@@ -447,15 +449,23 @@ internal sealed partial class BodyBuilder
             var root = value;
             for (var i = path.Count - 1; i >= 0 && root is not null; i--)
                 root = root is FieldValue field && field.Field.Equals(path[i]) ? field.Receiver : null;
-            if (root is LocalValue or ArgumentValue && root.Type.Equals(structure) && (source is null || source.Equals(root))) source = root;
+            // 来源是同一个结构体位置（局部、形参、静态或实例字段、元素）：在这里整体读取和在这里逐个读叶子读到的是同一组值。
+            if (root is LocalValue or ArgumentValue or StaticFieldValue or FieldValue or ArrayElementValue && root.Type.Equals(structure) && (source is null || source.Equals(root))) source = root;
             else if (path is [var direct]) changed.Add((direct, value));
             else return null;
         }
         if (source is null) return null;
-        // 没有列出的叶子为零或未定义，来源上的这些叶子不一定如此，不是一次复制。
-        if (types.Projections(structure).Any(p => !leaves.Any(l => p.Path.Take(l.Path.Count).SequenceEqual(l.Path)))) return null;
+        // 没有列出的叶子为零（或未定义，按默认值写出），来源上的这些叶子不一定如此：整个直接字段都没列出时，复制后把它写成零；
+        // 只缺一部分叶子时不是一次复制加字段写入。
+        foreach (var missing in types.Projections(structure).Where(p => !leaves.Any(l => p.Path.Take(l.Path.Count).SequenceEqual(l.Path))).GroupBy(p => p.Path[0]))
+        {
+            var field = missing.Key;
+            var type = FieldType(field, null);
+            if (leaves.Any(l => l.Path[0].Equals(field))) return null;
+            changed.Add((field, types.Kind(type) == TypeKind.Struct ? new ComposedValue(type, []) : new ConstantValue(0, type, Width(type))));
+        }
         if (changed.Count == 0) return source;
-        if (!CanEmitBefore(changed.Select(c => c.Value))) return null;
+        if (copyOnly || !CanEmitBefore(changed.Select(c => c.Value))) return null;
         var copy = NewLocal(structure);
         currentOutput!.Add(new ManagedAssignment(address, copy, source));
         foreach (var (field, value) in changed)
