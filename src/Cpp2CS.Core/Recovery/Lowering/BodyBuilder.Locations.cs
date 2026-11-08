@@ -57,7 +57,7 @@ internal sealed partial class BodyBuilder
     }
 
     /// <summary>异常包装对象之上的托管异常对象的字段：包装里的指针是被捕获的对象，类型由 catch 的类型判断给出。</summary>
-    private ManagedValue? CaughtFieldRead(ReadSym read)
+    private ManagedValue? CaughtFieldRead(ReadSym read, ulong address)
     {
         if (oracle.Decompose(read.Address) is not (ReadSym holder, var offset, null, _)
             || oracle.Decompose(holder.Address) is not (ResultSym { Site: { Op.Kind: OpKind.BeginCatch } begin }, 0, null, _)
@@ -68,15 +68,15 @@ internal sealed partial class BodyBuilder
             .Where(m => m.Field is { Path.Count: 1 }).ToArray();
         if (matches.Length != 1) return null;
         var (caught, (path, fieldType)) = (matches[0].Type, matches[0].Field!.Value);
-        return new FieldValue(new CheckedCastValue(exception, caught), path[0], fieldType, read.Width);
+        return FieldAccess(new CheckedCastValue(exception, caught), path[0], fieldType, false, address);
     }
 
     private ManagedValue? Read(ReadSym read, ulong address)
     {
         if (oracle.Decompose(read.Address) is (ResultSym { Site: { Op.Kind: OpKind.BeginCatch } begin }, 0, null, _) && exceptions.TryGetValue(begin, out var exception))
             return exception;
-        if (CaughtFieldRead(read) is { } caught) return caught;
-        if (oracle.Locate(read.Address, read.Width) is not { } location)
+        if (CaughtFieldRead(read, address) is { } caught) return caught;
+        if ((oracle.Locate(read.Address, read.Width) ?? oracle.ViewLocate(read.Address, read.Width, read.Site)) is not { } location)
         {
             if (oracle.NarrowRead(read) is not { } part) return Hole(address, $"内存 读取位置 {read.Address}", null);
             var value = LocationValue(part.Leaf, address);
@@ -104,7 +104,11 @@ internal sealed partial class BodyBuilder
                     return path.Count == 1 ? root : Nest(store ? new AddressValue(root) : root, path.Skip(1).ToArray(), location.Type, store, address);
                 }
             case LocationKind.Instance:
-                return Nest(View(location.Base!, oracle.TypeOf(location.Base!), address), path, location.Type, store, address);
+                {
+                    var receiver = View(location.Base!, oracle.TypeOf(location.Base!), address);
+                    if (location.View is { } viewed) receiver = new CheckedCastValue(receiver, viewed);
+                    return Nest(receiver, path, location.Type, store, address);
+                }
             case LocationKind.Reference:
                 {
                     var pointer = View(location.Base!, oracle.TypeOf(location.Base!), address);

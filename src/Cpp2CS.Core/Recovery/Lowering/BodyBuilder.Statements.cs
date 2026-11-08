@@ -55,7 +55,7 @@ internal sealed partial class BodyBuilder
                         StoreTo(StoreLocation(group.Target, group.Value), group.Value, store.Address, output);
                         return null;
                     }
-                    var location = oracle.Locate(operands[0], store.Value.Width);
+                    var location = oracle.Locate(operands[0], store.Value.Width) ?? oracle.ViewLocate(operands[0], store.Value.Width, store);
                     if (location is not null) location = StoreLocation(location, operands[1]);
                     if (location is null && oracle.Split(operands[0], store.Value.Width) is { } leaves)
                     {

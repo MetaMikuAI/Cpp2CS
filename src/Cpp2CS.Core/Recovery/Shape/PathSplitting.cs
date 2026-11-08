@@ -121,18 +121,28 @@ internal static class PathSplitting
     {
         foreach (var block in model.Function.Blocks)
         {
-            if (block.Predecessors.Count < 2 || !block.Statements.Any(s => s is Phi)) continue;
-            // 访问可能在合流块之后的直线路径上（判空把块切开了）：先拆合流块，φ 随之下移，下一轮再拆。
-            var current = block;
-            for (var steps = 0; steps < 8; steps++)
+            // φ 选出的实体要求本块有 φ；类型判断的视图不要求。
+            if (block.Predecessors.Count < 2) continue;
+            var phis = block.Statements.Any(s => s is Phi);
+            // 访问可能在合流块之后的直线路径上（判空把块切开了），或在按本块 φ 判空的分支之后（x?.f）：先拆合流块，φ 随之下移，下一轮再拆。
+            // 只沿唯一前驱的后继查找，这些块都只经合流块到达；判空分支之后只认经 φ 的字段读写（x?.f 本身）。
+            var pending = new Queue<(Block Block, bool Guarded)>([(block, false)]);
+            for (var steps = 0; steps < 8 && pending.TryDequeue(out var entry); steps++)
             {
-                if (current.Statements.Any(statement => Singletons(model, oracle, statement).Any(sym => Distinct(sym, block, oracle))))
+                var (current, guarded) = entry;
+                if (current.Statements.Any(statement => phis && (guarded
+                        ? FieldAccesses(model, oracle, statement).Any(sym => DistinctTypes(sym, block, oracle))
+                        : Singletons(model, oracle, statement).Any(sym => Distinct(sym, block, oracle)))
+                    || Viewed(model, oracle, statement, block)))
                 {
                     yield return block;
                     break;
                 }
-                if (current.NormalSuccessors.ToArray() is not [var next] || next.Predecessors.Count != 1 || next == block) break;
-                current = next;
+                var successors = current.NormalSuccessors.Distinct().ToArray();
+                var tested = successors.Length > 1;
+                if (tested && !(current.Statements.LastOrDefault() is Branch branch && NullTestOfPhi(model, branch, block))) continue;
+                foreach (var next in successors)
+                    if (next.Predecessors.Count == 1 && next != block) pending.Enqueue((next, guarded || tested));
             }
         }
     }
@@ -210,6 +220,45 @@ internal static class PathSplitting
                 case OpSym op: foreach (var arg in op.Args) stack.Push(arg); break;
             }
         }
+    }
+
+    /// <summary>语句中定位不到的对象字段读写的地址（根加对象头之后的常量偏移）；不含类指针等偏移 0 的读取。</summary>
+    private static IEnumerable<Sym> FieldAccesses(ValueModel model, TypeOracle oracle, Stmt statement)
+    {
+        var accesses = model.ReadsAt(statement).Select(r => (r.Address, r.Width))
+            .Concat(statement is Store store ? [(model.Operands(store)[0], store.Value.Width)] : []);
+        foreach (var (address, width) in accesses)
+            if (oracle.Decompose(address) is (_, >= Facts.RuntimeLayout.ObjectHeaderSize, null, _) && oracle.Locate(address, width) is null)
+                yield return address;
+    }
+
+    /// <summary>地址的根是本块的 φ，各来源的类型都已知且不全相同（不同类型的对象合流，合流值上的字段访问没有单一解释）。</summary>
+    private static bool DistinctTypes(Sym address, Block block, TypeOracle oracle)
+    {
+        if (Root(SymTable.Resolve(address)) is not PhiSym phi || !ReferenceEquals(phi.Block, block) || phi.Sources.Any(s => s is null)) return false;
+        var sources = phi.Sources.Select(s => oracle.TypeOf(SymTable.Resolve(s!))).ToArray();
+        return sources.All(t => t is not null) && sources.Distinct().Count() > 1;
+    }
+
+    /// <summary>分支条件是本块 φ（或其上加常量的地址）与零的比较。</summary>
+    private static bool NullTestOfPhi(ValueModel model, Branch branch, Block merge) =>
+        model.Operands(branch) is [OpSym { Op.Kind: OperatorKind.Compare, Args: [var tested, ConstSym { Value: 0 }] } compare]
+        && compare.Op.Cond is Cond.Eq or Cond.Ne
+        && Root(SymTable.Resolve(tested)) is PhiSym phi && ReferenceEquals(phi.Block, merge);
+
+    /// <summary>
+    /// 定位不到的读写在合流块之后没有共同的类型判断视图，而在每个前驱的末尾都能经视图定位（<see cref="TypeOracle.ViewLocate(Sym, int, Stmt)"/>）：
+    /// 各条判断路径的尾部被合并，拆开后每条路径上的访问各自按自己的判断类型解释。
+    /// </summary>
+    private static bool Viewed(ValueModel model, TypeOracle oracle, Stmt statement, Block merge)
+    {
+        var accesses = model.ReadsAt(statement).Select(r => (r.Address, r.Width))
+            .Concat(statement is Store store ? [(model.Operands(store)[0], store.Value.Width)] : []);
+        foreach (var (address, width) in accesses)
+            if (oracle.Locate(address, width) is null && oracle.ViewLocate(address, width, statement) is null
+                && merge.Predecessors.All(p => oracle.ViewLocate(address, width, p, p.Statements.Count) is not null))
+                return true;
+        return false;
     }
 
     /// <summary>地址（或实体）由本块的 φ 选出，且各来源的身份不全相同。</summary>

@@ -19,6 +19,8 @@ public sealed record AccessPart(Location Leaf, int Bit, int FieldBit, int Width)
 public sealed record Location(LocationKind Kind, Sym? Base, Sym? Index, long ConstantIndex, TypeRef? Owner, IReadOnlyList<FieldRef> Path, TypeRef Type)
 {
     public Sym? ByteOffset { get; init; }
+    /// <summary>实例位置的根按这个类型看待（类型判断成立之后的对象，写出为 castclass）。</summary>
+    public TypeRef? View { get; init; }
 }
 
 /// <summary>
