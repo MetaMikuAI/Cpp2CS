@@ -426,7 +426,37 @@ internal sealed partial class TemplateRecovery
         Canonical(Fold(Instantiate(Normal(term, from, proof), proof.Pairs(on.End))));
 
     private bool Equal(ManagedValue x, Trace a, ManagedValue y, Trace b, DuplicateProof proof) =>
-        Same(x, a, y, b, proof) || Reloads(x, b, proof) is var reloaded && !ReferenceEquals(reloaded, x) && Same(reloaded, a, y, b, proof);
+        Same(x, a, y, b, proof) || Reloads(x, b, proof) is var reloaded && !ReferenceEquals(reloaded, x) && Same(reloaded, a, y, b, proof)
+        || Rewritten(x, a, y, b, proof);
+
+    /// <summary>
+    /// 保留路径（a）在出口之后、任何写入和调用之前重读字段，被取代路径（b）在区域内对它最后一次可能别名的写入正是这个字段，
+    /// 之后 b 也没有写入和调用：保留的代码在 b 的状态上重读，得到的就是 b 写入的值。项里这样的重读换成写入的值后与 b 的项比较。
+    /// clang 把下一次内联开头的读取提到前一次内联的汇合点：经过调用的路径重读，没有调用的路径直接沿用刚写入的值（List.Clear 之后的 Add）。
+    /// 反过来不成立：保留沿用写入值的路径时，经过调用的路径读到的可能是调用改过的内容。
+    /// </summary>
+    private bool Rewritten(ManagedValue x, Trace a, ManagedValue y, Trace b, DuplicateProof proof)
+    {
+        if (a.Walker.Epoch != AfterRegion || b.Walker.Epoch != AfterRegion || b.End.State is not { Deferred.Count: 0 } state) return false;
+        var replaced = false;
+        ManagedValue Replace(ManagedValue value)
+        {
+            if (value is Observed { Epoch: AfterRegion, Read: FieldValue read }
+                && !a.Walker.Stores.Concat(b.Walker.Stores).Any(s => MayAlias(s.Location, read))
+                && state.Stores.LastOrDefault(s => MayAlias(s.Location, read)) is (FieldValue written, var stored)
+                && ReferenceEquals(written.Field.Field, read.Field.Field) && written.Width == read.Width
+                && SameTerm(Normal(read.Receiver, a, proof), Normal(Current(written.Receiver, b.End), b, proof)))
+            {
+                replaced = true;
+                return Normal(Current(stored, b.End), b, proof);
+            }
+            return MapTerm(value, Replace);
+        }
+        var moved = Replace(Normal(x, a, proof));
+        if (!replaced || !SameTerm(Canonical(Fold(moved)), Normal(y, b, proof))) return false;
+        proof.Match.Forms.Add("rewritten");
+        return true;
+    }
 
     private bool Same(ManagedValue x, Trace a, ManagedValue y, Trace b, DuplicateProof proof) =>
         SameTerm(Normal(x, a, proof), Normal(y, b, proof)) || SameTerm(Transported(x, a, b, proof), Canonical(Fold(y)));

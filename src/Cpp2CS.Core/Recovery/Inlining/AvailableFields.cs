@@ -173,14 +173,42 @@ internal sealed class AvailableFields
         };
     }
 
+    /// <summary>
+    /// 边上的复制是并行的：到达后目标持有来源原来的值。同一条边把局部 s 复制给 t 时，复制值的事实里的 s 写成 t，
+    /// 循环头上接收者和它的字段读取一起成为 φ 时（v = r.f 与 r 各自经边复制），各入边的事实才能一致。
+    /// </summary>
     private static State Across(ManagedEdge edge, State facts)
     {
         var result = facts.Copy();
-        var copies = edge.Copies.Select(c => (Target: c.Target.Variable, Value: Closed(c.Value, facts))).ToArray();
+        var renamed = new Dictionary<Variable, LocalValue>();
+        foreach (var copy in edge.Copies)
+            if (copy.Value is LocalValue source && source.Type.Equals(copy.Target.Type) && source.Width == copy.Target.Width)
+                renamed.TryAdd(source.Variable, copy.Target);
+        var targets = edge.Copies.Select(c => c.Target.Variable).ToHashSet();
+        var copies = edge.Copies.Select(c => (Target: c.Target.Variable, Value: Closed(c.Value, facts) is { } closed ? Renamed(closed, renamed, targets) : null)).ToArray();
         foreach (var (target, _) in copies) Kill(target, result);
         foreach (var (target, value) in copies)
-            if (value is not null && !copies.Any(c => Mentions(value, c.Target))) result.Vars[target] = value;
+            if (value is not null) result.Vars[target] = value;
         return result;
+    }
+
+    /// <summary>事实里经边复制的局部换成复制目标；仍提到其他被改写的目标时不成立。</summary>
+    private static ManagedValue? Renamed(ManagedValue value, IReadOnlyDictionary<Variable, LocalValue> renamed, IReadOnlySet<Variable> targets)
+    {
+        var failed = false;
+        var mapped = ManagedValues.Map(value, child => Rename(child));
+        ManagedValue Rename(ManagedValue child)
+        {
+            if (child is LocalValue local)
+            {
+                if (renamed.TryGetValue(local.Variable, out var target)) return target;
+                failed |= targets.Contains(local.Variable);
+                return child;
+            }
+            return ManagedValues.Map(child, Rename);
+        }
+        if (value is LocalValue whole) mapped = Rename(whole);
+        return failed ? null : mapped;
     }
 
     private static bool Narrowed(State known, State arriving)
