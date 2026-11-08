@@ -46,12 +46,14 @@ internal sealed partial class TemplateRecovery
         public IReadOnlySet<Variable>? FrozenLocals { get; init; }
         /// <summary>区域开始时局部等于哪个字段的内容。</summary>
         public Lazy<IReadOnlyDictionary<Variable, ManagedValue>>? Available { get; init; }
+        /// <summary>区域开始时字段的已知内容（<see cref="AvailableFields.HeldAt"/>）。</summary>
+        public Lazy<IReadOnlyList<(FieldValue Location, ManagedValue Value)>>? Held { get; init; }
 
         public ManagedStatement Current => Blocks[Block].Statements[Index];
 
         public Walker Clone() => new()
         {
-            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Deferred = [.. Deferred], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions], Dereferenced = [.. Dereferenced], FrozenLocals = FrozenLocals, Available = Available,
+            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Deferred = [.. Deferred], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions], Dereferenced = [.. Dereferenced], FrozenLocals = FrozenLocals, Available = Available, Held = Held,
         };
     }
 
@@ -607,7 +609,7 @@ internal sealed partial class TemplateRecovery
         failure = "接收者不能表示";
         var available = new Lazy<IReadOnlyDictionary<Variable, ManagedValue>>(() => AvailableIn(body).At(block, start));
         var held = new Lazy<IReadOnlyList<(FieldValue Location, ManagedValue Value)>>(() => AvailableIn(body).HeldAt(block, start));
-        var caller = new Walker { Blocks = callerBlocks, Caller = true, Block = block, Index = start, Available = available };
+        var caller = new Walker { Blocks = callerBlocks, Caller = true, Block = block, Index = start, Available = available, Held = held };
         SeedPath(caller);
         caller.Visited.Add(block);
         // 模板的 this 在比对中绑定：可能是字段所在的对象，也可能是包含它的值（如嵌套类型的结构体）。
@@ -1295,19 +1297,47 @@ internal sealed partial class TemplateRecovery
     /// <summary>模板的项与调用方的项在调用方这条路径的事实下相同。</summary>
     private bool Same(ManagedValue template, ManagedValue actual, Walker caller, Dictionary<int, ManagedValue> binding)
     {
-        var expected = Canonical(Fold(Specialize(template, caller, binding)));
         var specialized = Specialize(actual, caller, NoBinding);
-        var trial = new Dictionary<int, ManagedValue>(binding);
-        if (!Unify(expected, Canonical(Fold(specialized)), trial))
+        // 调用方沿用区域之前读到的局部，模板在这里读字段：比较的是区域开始时的内容。
+        var exposed = caller.Available?.Value is { Count: > 0 } available ? Exposed(specialized, caller, available) : specialized;
+        var actuals = exposed.Equals(specialized) ? [specialized] : new[] { specialized, exposed };
+        // 调用方按区域开始时字段的已知内容写出了模板的读取（如 Clear 之后的 Add 按 _size == 0 折叠）。
+        var held = RegionStart(template, caller, binding);
+        foreach (var form in ReferenceEquals(held, template) ? [template] : new[] { template, held })
         {
-            // 调用方沿用区域之前读到的局部，模板在这里读字段：比较的是区域开始时的内容。
-            if (caller.Available?.Value is not { Count: > 0 } available) return false;
-            var exposed = Exposed(specialized, caller, available);
-            trial = new(binding);
-            if (exposed.Equals(specialized) || !Unify(expected, Canonical(Fold(exposed)), trial)) return false;
+            var expected = Canonical(Fold(Specialize(form, caller, binding)));
+            foreach (var candidate in actuals)
+            {
+                var trial = new Dictionary<int, ManagedValue>(binding);
+                if (!Unify(expected, Canonical(Fold(candidate)), trial)) continue;
+                foreach (var (key, value) in trial) binding[key] = value;
+                return true;
+            }
         }
-        foreach (var (key, value) in trial) binding[key] = value;
-        return true;
+        return false;
+    }
+
+    /// <summary>
+    /// 模板在区域的任何调用之前读取的字段，换成区域开始时它的已知内容（<see cref="Walker.Held"/>）；接收者先代入已绑定的形参。
+    /// 没有可换的读取时返回原项。
+    /// </summary>
+    private ManagedValue RegionStart(ManagedValue term, Walker caller, IReadOnlyDictionary<int, ManagedValue> binding)
+    {
+        if (caller.Held?.Value is not { Count: > 0 } held) return term;
+        ManagedValue Visit(ManagedValue value)
+        {
+            if (value is Observed { Epoch: 0, Read: FieldValue read })
+            {
+                var receiver = Bind(read.Receiver, binding);
+                foreach (var (location, content) in held)
+                    if (ReferenceEquals(location.Field.Field, read.Field.Field) && location.Width == read.Width
+                        && (SameTerm(receiver, location.Receiver) || SameTerm(receiver, Snapshot(location.Receiver))))
+                        return content;
+            }
+            var mapped = MapTerm(value, Visit);
+            return mapped.Equals(value) ? value : mapped;
+        }
+        return Visit(term);
     }
 
     private static ManagedValue Exposed(ManagedValue value, Walker caller, IReadOnlyDictionary<Variable, ManagedValue> available) => value switch

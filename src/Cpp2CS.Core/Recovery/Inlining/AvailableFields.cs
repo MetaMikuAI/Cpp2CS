@@ -69,13 +69,16 @@ internal sealed class AvailableFields
         return facts.Vars;
     }
 
-    /// <summary>第 index 条语句之前，字段持有的形参或局部：存入后到字段可能被写、该值被改写之前，读这个字段得到的就是它。</summary>
+    /// <summary>
+    /// 第 index 条语句之前字段的已知内容：存入的形参或局部、已知的常量，或调用前的值经调用加上常量。
+    /// 到字段可能被写、该值被改写之前，读这个字段得到的就是它。
+    /// </summary>
     public IReadOnlyList<(FieldValue Location, ManagedValue Value)> HeldAt(ulong block, int index)
     {
         if (!entries.TryGetValue(block, out var entry)) return [];
         var facts = entry.Copy();
         foreach (var statement in blocks[block].Statements.Take(index)) Apply(statement, facts);
-        return [.. facts.Held.Values];
+        return [.. facts.Held.Values, .. facts.Known.Values.Where(k => k.Value.Width == k.Location.Width).Select(k => (k.Location, (ManagedValue)k.Value))];
     }
 
     private void Apply(ManagedStatement statement, State facts)
@@ -88,6 +91,7 @@ internal sealed class AvailableFields
         {
             // 方法体已知时，调用只使它可能写的字段上的事实失效，并留下每条返回路径上都成立的常量写入。
             case ManagedCall { Invocation: var invocation } call when callEffects(invocation) is { } effect:
+                var advanced = Advanced(effect, facts);
                 foreach (var (variable, fact) in facts.Vars.ToArray())
                     if (ManagedValues.Walk(fact).OfType<FieldValue>().Any(f => effect.Writes.Any(w => HeapAlias.MayShare(f.Field, w)))) facts.Vars.Remove(variable);
                 foreach (var key in facts.Known.Keys.ToArray())
@@ -97,6 +101,11 @@ internal sealed class AvailableFields
                 if (call.Result is { } result) Kill(result.Variable, facts);
                 foreach (var (location, stored) in effect.Stores)
                     if (Rooted(location.Receiver)) facts.Known[(location.Receiver, location.Field.Field)] = (location, stored);
+                foreach (var (location, content) in advanced)
+                {
+                    if (content is ConstantValue known) facts.Known[(location.Receiver, location.Field.Field)] = (location, known);
+                    else if (call.Result is not { } returned || !Mentions(content, returned.Variable)) facts.Held[(location.Receiver, location.Field.Field)] = (location, content);
+                }
                 break;
             case ManagedAssignment assignment:
                 var value = Closed(assignment.Value, facts);
@@ -131,6 +140,38 @@ internal sealed class AvailableFields
         }
     }
 
+
+    /// <summary>
+    /// 调用把字段加上常量（<see cref="CallSummary.Increments"/>）时，调用之后的内容：调用前已知的常量、持有的值或读入的局部加上这个常量。
+    /// </summary>
+    private static List<(FieldValue Location, ManagedValue Value)> Advanced(CallSummary effect, State facts)
+    {
+        var result = new List<(FieldValue, ManagedValue)>();
+        foreach (var (location, step) in effect.Increments)
+        {
+            if (!Rooted(location.Receiver)) continue;
+            var key = (location.Receiver, location.Field.Field);
+            var plain = Plain(location);
+            ManagedValue? before = facts.Known.TryGetValue(key, out var known) && known.Value.Width == location.Width ? known.Value
+                : facts.Held.TryGetValue(key, out var held) ? held.Value
+                : facts.Vars.Where(v => v.Value.Equals(plain)).Select(v => new LocalValue(v.Key, location.Type, location.Width)).FirstOrDefault();
+            if (before is not null) result.Add((plain, Plus(before, step)));
+        }
+        return result;
+    }
+
+    /// <summary>值加常量（按宽度取模）；常量与已有的加常量合并。</summary>
+    private static ManagedValue Plus(ManagedValue value, ConstantValue step)
+    {
+        ulong Sum(ulong a) => (a + step.Bits) & Expr.Mask(value.Width);
+        return value switch
+        {
+            ConstantValue constant => constant with { Bits = Sum(constant.Bits) },
+            BinaryValue { Op: BinOp.Add, Right: ConstantValue inner } add when Sum(inner.Bits) == 0 => add.Left,
+            BinaryValue { Op: BinOp.Add, Right: ConstantValue inner } add => add with { Right = inner with { Bits = Sum(inner.Bits) } },
+            _ => new BinaryValue(BinOp.Add, value, step with { Type = value.Type }, value.Type, value.Width),
+        };
+    }
 
     private static State Across(ManagedEdge edge, State facts)
     {

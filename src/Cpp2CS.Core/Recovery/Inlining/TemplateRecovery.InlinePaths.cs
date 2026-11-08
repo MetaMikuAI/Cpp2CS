@@ -117,8 +117,40 @@ internal sealed partial class TemplateRecovery
             ComparisonValue { Condition: Cond.Ult, Left: ConstantValue { Bits: 0 }, Right: var x } c => IsZero(c, x, Cond.Ne),
             ComparisonValue { Condition: Cond.Uge, Right: ConstantValue { Bits: 1 }, Left: var x } c => IsZero(c, x, Cond.Ne),
             ComparisonValue { Condition: Cond.Ule, Left: ConstantValue { Bits: 1 }, Right: var x } c => IsZero(c, x, Cond.Ne),
+            ComposedValue composed when Whole(composed) is { } whole => whole,
             _ => mapped,
         };
+    }
+
+    /// <summary>
+    /// 按叶子组成的结构体值，各叶子恰是同一结构体值的对应叶子时，就是这个值（模板逐字段读出再组成，调用方整体复制）。
+    /// 叶子是同一代对堆、静态或间接位置的读取，或对同一代整体读取的投影。
+    /// </summary>
+    private ManagedValue? Whole(ComposedValue composed)
+    {
+        if (composed.StructType is not DefinitionRef structure || composed.Leaves.Count == 0) return null;
+        var expected = types.Leaves(structure).Select(l => l.Path).ToArray();
+        if (expected.Length != composed.Leaves.Count) return null;
+        ManagedValue? whole = null;
+        for (var i = 0; i < expected.Length; i++)
+        {
+            var (path, value) = composed.Leaves[i];
+            if (!path.SequenceEqual(expected[i]) || value is not Observed { Read: var read, Epoch: var epoch }) return null;
+            for (var k = path.Count - 1; k >= 0; k--)
+            {
+                if (read is not FieldValue field || !field.Field.Equals(path[k])) return null;
+                read = field.Receiver;
+            }
+            ManagedValue? source = read switch
+            {
+                Observed observed when observed.Epoch == epoch => observed,
+                FieldValue or StaticFieldValue or ArrayElementValue or IndirectValue => new Observed(read, epoch),
+                _ => null,
+            };
+            if (source is null || !source.Type.Equals(structure) || whole is not null && !whole.Equals(source)) return null;
+            whole = source;
+        }
+        return whole;
     }
 
     private bool? KnownCondition(ManagedValue condition, Walker caller, IReadOnlyDictionary<int, ManagedValue> binding)
