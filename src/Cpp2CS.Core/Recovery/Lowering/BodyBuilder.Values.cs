@@ -543,6 +543,9 @@ internal sealed partial class BodyBuilder
                 return Composite(concat, target, address);
             case ConstSym c:
                 return new ConstantValue(c.Value & Expr.Mask(targetWidth), target, targetWidth);
+            // 已落成局部的读取（位置可能来自类型判断之后的视图，与位置无关的类型推断看不到）：按局部的类型取整数位。
+            case ReadSym read when locals.TryGetValue(read, out var known) && types.Kind(known.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Pointer:
+                return Resize(known, target);
             case PhiSym phi when oracle.ProjectedScalar(phi) is var (scalar, scalarType, low):
                 return IntegerSlice(View(scalar, scalarType, address), low, phi.Width, target, address);
             case SliceSym slice when oracle.UntypedWidePhiPiece(slice) is { } widePiece:
