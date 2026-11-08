@@ -161,7 +161,14 @@ internal sealed partial class BodyBuilder
                 {
                     // 整段位的比较使用结构体所包住的标量或引用。
                     var hint = typing.Inputs[0];
-                    return new ComparisonValue(op.Op.Cond, View(op.Args[0], hint, address), View(op.Args[1], hint, address), types.Boolean);
+                    var (left, right) = (View(op.Args[0], hint, address), View(op.Args[1], hint, address));
+                    // 机器按操作数的位宽比较：一边的局部类型比操作数窄（另一边带着显式扩展）时，按操作数位宽取值，两边位宽一致。
+                    if (types.Kind(left.Type) == TypeKind.Int && types.Kind(right.Type) == TypeKind.Int && Width(left.Type) != Width(right.Type) && op.Args[0].Width is 32 or 64)
+                    {
+                        var wide = types.Integer(op.Args[0].Width, ManagedTypes.IsSigned(hint ?? left.Type));
+                        (left, right) = (Coerce(left, wide, address), Coerce(right, wide, address));
+                    }
+                    return new ComparisonValue(op.Op.Cond, left, right, types.Boolean);
                 }
             case OperatorKind.And or OperatorKind.Or:
                 return new BooleanValue(op.Op.Kind == OperatorKind.And, View(op.Args[0], types.Boolean, address), View(op.Args[1], types.Boolean, address), types.Boolean);
