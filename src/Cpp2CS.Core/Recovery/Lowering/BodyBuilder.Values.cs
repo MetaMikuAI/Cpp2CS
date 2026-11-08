@@ -388,9 +388,14 @@ internal sealed partial class BodyBuilder
     private bool Leafwise(Sym bits, TypeRef type)
     {
         if (type is not DefinitionRef structure || oracle.FieldStores(bits, type) is not { } leaves) return false;
-        var hidden = leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType)));
+        var hidden = leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType) && !Overlapped(f)));
         return hidden && !templates.CanConstructValue(structure);
     }
+
+    /// <summary>显式布局中的字段，它的每一位都被可访问的其他字段覆盖：写这些字段就写全了它，组成值时不必再写它。</summary>
+    private bool Overlapped(FieldRef field) =>
+        ExplicitLayout(field, out var owner) && types.Fields(owner).FirstOrDefault(f => f.Path[0].Equals(field)) is { } self
+        && types.Fields(owner).Where(f => !f.Path[0].Equals(field) && self.Contains(f.Bit, f.Width) && fields.Accessible(f.Path[0], f.Path[0].DeclaringType)).Sum(f => f.Width) == self.Width;
 
     /// <summary>
     /// 按叶子组成结构体值；不可访问的字段由模板层证明构造。证明失败时，不可访问的字段都和调用方在同一程序集，
@@ -418,9 +423,7 @@ internal sealed partial class BodyBuilder
     {
         if (!leaves.Any(l => l.Path.Any(f => !fields.Accessible(f, f.DeclaringType)))) return new ComposedValue(structure, leaves);
         // 显式布局中重叠的同一段位按可访问的字段组成，不可访问的字段不必再写。
-        if (leaves.Where(l => l.Path[^1] is var field && !fields.Accessible(field, field.DeclaringType) && ExplicitLayout(field, out var owner)
-            && types.Fields(owner).First(f => f.Path[0].Equals(field)) is var self
-            && types.Fields(owner).Where(f => !f.Path[0].Equals(field) && self.Contains(f.Bit, f.Width) && fields.Accessible(f.Path[0], f.Path[0].DeclaringType)).Sum(f => f.Width) == self.Width).ToArray() is { Length: > 0 } covered)
+        if (leaves.Where(l => l.Path[^1] is var field && !fields.Accessible(field, field.DeclaringType) && Overlapped(field)).ToArray() is { Length: > 0 } covered)
             return TryCompose(structure, leaves.Except(covered).ToList(), address);
         // 叶子全部取自同一个结构体时就是整体复制，先于构造函数证明：后者的实参仍要逐个读私有字段。
         if (StructUpdate(structure, leaves, address, copyOnly: true) is { } copied) return copied;
