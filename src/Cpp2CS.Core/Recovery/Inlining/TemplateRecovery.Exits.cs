@@ -446,6 +446,31 @@ internal sealed partial class TemplateRecovery
         return MapTerm(value, child => Abstract(child, carriers, match));
     }
 
+    /// <summary>
+    /// 出口复制的候选与这条路径保存的值都是调用方的项，只有代入的返回值是模板的项。先按模板的项合一；
+    /// 不成立且返回值的形参都已绑定时，再把它们代回调用方，两边按调用方的项逐一比较，调用方自己的实参不当作模板形参去绑定。
+    /// </summary>
+    private bool AgreeAt(ManagedValue candidate, Func<ManagedValue, InlineEnd, ManagedValue> view, InlineEnd end,
+        IReadOnlyList<(ManagedValue Actual, ManagedValue Carrier)> pairs, ManagedValue held, Dictionary<int, ManagedValue> binding)
+    {
+        var trial = new Dictionary<int, ManagedValue>(binding);
+        if (Unify(view(Instantiate(candidate, pairs), end), view(held, end), trial))
+        {
+            foreach (var (key, value) in trial) binding[key] = value;
+            return true;
+        }
+        bool Bound(ManagedValue value)
+        {
+            if (value is ArgumentValue argument) return binding.ContainsKey(argument.Index);
+            var bound = true;
+            MapTerm(value, child => { bound &= Bound(child); return child; });
+            return bound;
+        }
+        if (!pairs.All(p => Bound(p.Actual))) return false;
+        var actual = pairs.Select(p => (Bind(p.Actual, binding), p.Carrier)).ToArray();
+        return Unify(view(Instantiate(candidate, actual), end), view(held, end), binding, bindArguments: false);
+    }
+
     /// <summary>把结果局部代入这条路径的返回值，并折叠常量。</summary>
     private ManagedValue Instantiate(ManagedValue value, IReadOnlyList<(ManagedValue Actual, ManagedValue Carrier)> carriers)
     {
@@ -510,7 +535,7 @@ internal sealed partial class TemplateRecovery
                 var mentioned = result is not null && Mentions(abstracted, result);
                 var trial = new Dictionary<int, ManagedValue>(match.Binding);
                 bool Agree(ManagedValue candidate, Func<ManagedValue, InlineEnd, ManagedValue> view) =>
-                    Enumerable.Range(0, ends.Count).All(i => Unify(view(Instantiate(candidate, Pairs(ends[i])), ends[i]), view(held[i], ends[i]), trial));
+                    Enumerable.Range(0, ends.Count).All(i => AgreeAt(candidate, view, ends[i], Pairs(ends[i]), held[i], trial));
                 var function = abstracted;
                 // 先按读到的值比较；不同时表示成调用后的内存：一条路径沿用读过的值，另一条路径重新读取时是同一个项。
                 if (!isEdge && !mentioned)

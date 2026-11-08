@@ -285,30 +285,48 @@ internal sealed partial class TemplateRecovery
         return body;
     }
 
-    /// <summary>本类构造中被内联的直接基类构造，仍以基类原生方法体逐条证明，再恢复初始化调用。</summary>
+    /// <summary>
+    /// 本类构造中被内联的直接基类构造，仍以基类原生方法体逐条证明，再恢复初始化调用。
+    /// 多层基类构造都被内联时，先把更远祖先的构造折回成对它的调用，近一层的模板随后就能比对。
+    /// </summary>
     private ManagedBody InlineBaseConstructor(ManagedBody body)
     {
         if (body.Method.Method is not { Name: ".ctor", IsStatic: false, Owner.IsValueType: false }
             || body.Method.DeclaringType is not DefinitionRef owner
             || owner.Definition.BaseType?.Substitute(owner.Arguments, []) is not DefinitionRef parent) return body;
-        if (body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Invocation is
-            { Method.Method.Name: ".ctor", Receiver: ArgumentValue { Index: -1 } }
-            && (c.Invocation.Method.DeclaringType.Equals(parent) || c.Invocation.Method.DeclaringType.Equals(owner)))) return body;
-        foreach (var definition in parent.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic))
+        var ancestors = new List<DefinitionRef>();
+        for (DefinitionRef? ancestor = parent; ancestor is not null && ancestor.Definition.FullName != "System.Object" && ancestors.Count < 8;
+             ancestor = ancestor.Definition.BaseType?.Substitute(ancestor.Arguments, []) as DefinitionRef)
+            ancestors.Add(ancestor);
+        for (var round = 0; round <= ancestors.Count; round++)
         {
-            var method = new MethodRef(definition, parent.Arguments, []);
+            if (body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Invocation is
+                { Method.Method.Name: ".ctor", Receiver: ArgumentValue { Index: -1 } }
+                && (c.Invocation.Method.DeclaringType.Equals(parent) || c.Invocation.Method.DeclaringType.Equals(owner)))) return body;
+            if (ancestors.Select(a => FoldConstructor(body, a)).FirstOrDefault(f => f is not null) is not { } folded) return body;
+            body = folded;
+        }
+        return body;
+    }
+
+    /// <summary>与 ancestor 某个构造函数的恢复体吻合的区域写成对它的调用。</summary>
+    private ManagedBody? FoldConstructor(ManagedBody body, DefinitionRef ancestor)
+    {
+        foreach (var definition in ancestor.Definition.Methods.Where(m => m.Name == ".ctor" && !m.IsStatic))
+        {
+            var method = new MethodRef(definition, ancestor.Arguments, []);
             if (Template(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
             var blocks = body.Blocks.ToDictionary(b => b.Address);
             foreach (var block in body.Blocks)
                 for (var start = 0; start < block.Statements.Count; start++)
                 {
                     if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
-                    var match = Match(body, blocks, block.Address, start, template, parent.Arguments, out _);
+                    var match = Match(body, blocks, block.Address, start, template, ancestor.Arguments, out _);
                     if (match is not null && PlanReplacement(body, blocks, block.Address, start, method, match, out _) is { } replaced)
                         return replaced.Apply(body);
                 }
         }
-        return body;
+        return null;
     }
 
     /// <summary>
@@ -700,7 +718,8 @@ internal sealed partial class TemplateRecovery
                 case (ManagedStore, ManagedStore):
                     if (!MatchStores(callee, caller, match)) return false;
                     continue;
-                case (ManagedCall mc, ManagedCall cc) when SharedCode(Instantiated(mc.Invocation.Method, match.TypeArguments), cc.Invocation.Method)
+                case (ManagedCall mc, ManagedCall cc) when (SharedCode(Instantiated(mc.Invocation.Method, match.TypeArguments), cc.Invocation.Method)
+                        || mc.Invocation.Virtual && cc.Invocation.Virtual && SameSlot(mc.Invocation.Method.Method, cc.Invocation.Method.Method))
                     && mc.Invocation.Arguments.Count == cc.Invocation.Arguments.Count:
                     {
                         if ((mc.Invocation.Receiver is null) != (cc.Invocation.Receiver is null)) return false;
@@ -924,6 +943,25 @@ internal sealed partial class TemplateRecovery
             || x is ArrayRef or DefinitionRef && y is ArrayRef or DefinitionRef && ManagedTypes.IsReferenceType(x) && ManagedTypes.IsReferenceType(y);
         return ReferenceEquals(a.Method, b.Method) && a.TypeArguments.Count == b.TypeArguments.Count && a.MethodArguments.Count == b.MethodArguments.Count
             && a.TypeArguments.Zip(b.TypeArguments).All(p => Shared(p.First, p.Second)) && a.MethodArguments.Zip(b.MethodArguments).All(p => Shared(p.First, p.Second));
+    }
+
+    /// <summary>
+    /// 类继承链上占同一虚表槽的同名方法（重写不新开槽）：同一接收者上 callvirt 按运行时类型的同一槽分派，进入同一方法体。
+    /// 调用方按接收者的静态类型把槽解析成重写方法，模板按自己的类型解析成被重写的方法。
+    /// </summary>
+    private static bool SameSlot(MethodDef a, MethodDef b)
+    {
+        static bool Derives(TypeDef type, TypeDef ancestor)
+        {
+            for (TypeDef? t = type; t is not null; t = (t.BaseType as DefinitionRef)?.Definition)
+                if (t == ancestor) return true;
+            return false;
+        }
+        const System.Reflection.TypeAttributes Interface = System.Reflection.TypeAttributes.Interface;
+        return a.IsVirtual && b.IsVirtual && a.Slot >= 0 && a.Slot == b.Slot && a.Name == b.Name && !a.IsStatic && !b.IsStatic
+            && a.Parameters.Count == b.Parameters.Count && a.GenericParameters.Count == 0 && b.GenericParameters.Count == 0
+            && (a.Owner.Attributes & Interface) == 0 && (b.Owner.Attributes & Interface) == 0
+            && (Derives(a.Owner, b.Owner) || Derives(b.Owner, a.Owner));
     }
 
     private static MethodRef Instantiated(MethodRef method, IReadOnlyList<TypeRef> arguments) => method with
