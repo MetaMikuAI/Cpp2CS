@@ -43,6 +43,7 @@ internal sealed class MemoryPromotion
     private readonly ManagedAbi abi;
     private readonly Dictionary<Variable, Expr> definitions = [];
     private readonly Dictionary<Storage, LocalSpace> pointers = [];
+    private readonly Dictionary<long, LocalSpace> stackPointers = [];
     private readonly List<Access> accesses = [];
 
     private MemoryPromotion(MachineFunction function, MachineSignature signature, Func<Call, CallShape> shapes, ManagedAbi abi)
@@ -55,7 +56,17 @@ internal sealed class MemoryPromotion
             pointers[value.Pieces[0].Register] = LocalSpace.Copy(value.Index);
         if (signature.Return is { Transfer: Transfer.ResultBuffer } result && result.Pieces[0].Register.Bank == Bank.Gpr)
             pointers[result.Pieces[0].Register] = LocalSpace.Result;
+        // 实参副本的指针经栈槽传入：槽里的 64 位值就是副本地址，只要函数不改写这个槽。
+        foreach (var value in signature.Arguments.Where(a => a.Transfer == Transfer.Copy && a.Pieces[0].Register.Bank == Bank.Stack))
+        {
+            var slot = (long)value.Pieces[0].Register.Index;
+            if (!WritesFrame(slot, 8)) stackPointers[slot] = LocalSpace.Copy(value.Index);
+        }
     }
+
+    /// <summary>入口栈槽 [slot, slot+size) 是否被函数自己写入过。</summary>
+    private bool WritesFrame(long slot, int size) => function.Blocks.SelectMany(b => b.Statements).OfType<Store>()
+        .Any(s => s.Target is FrameAddress f && f.Offset < slot + size && slot < f.Offset + s.Value.Width / 8);
 
     public static RecoveryResult<MemoryLayout> Run(MachineFunction function, MachineSignature signature, Func<Call, CallShape> shapes,
         ManagedAbi abi, ICallModel calls, Storage stackPointer)
@@ -105,6 +116,7 @@ internal sealed class MemoryPromotion
             FrameAddress f => (LocalSpace.Frame, f.Offset),
             StackAllocation a => (LocalSpace.Dynamic(a.Site, a.Element), 0),
             Entry { Storage: var s } when pointers.TryGetValue(s, out var space) => (space, 0),
+            Load { Address: FrameAddress slot, Width: 64 } when stackPointers.TryGetValue(slot.Offset, out var space) => (space, 0),
             Use { Variable: { Version: 0 } v } when pointers.TryGetValue(v.Storage, out var space) => (space, 0),
             Use { Variable: var v, Width: 64 } when definitions.TryGetValue(v, out var value) => Resolve(value, depth + 1),
             Binary { Op: BinOp.Add, Right: Const c } b when Resolve(b.Left, depth + 1) is var (space, offset) => (space, offset + unchecked((long)c.Value)),
@@ -128,6 +140,13 @@ internal sealed class MemoryPromotion
         var cells = new List<Cell>();
         foreach (var group in accesses.GroupBy(a => a.Space))
         {
+            // 范围已知的对象（实参副本、结果缓冲区）的地址逃逸时，接收方可以访问整个对象：它是一个单元，不按已见访问切开。
+            if (group.FirstOrDefault(a => a.Escape is not null) is { } escaped && ObjectSize(group.Key) is > 0 and var objectSize
+                && group.All(a => a.Offset >= 0 && a.Offset + Math.Max(1, a.Size) <= objectSize))
+            {
+                cells.Add(Make(cells.Count, group.Key, 0, objectSize, escaped.Escape));
+                continue;
+            }
             var ordered = group.OrderBy(a => a.Offset).ToList();
             var start = ordered[0].Offset;
             var end = start + Math.Max(1, ordered[0].Size);
@@ -147,6 +166,11 @@ internal sealed class MemoryPromotion
         }
         return new MemoryLayout(cells);
     }
+
+    /// <summary>空间所代表对象的字节数；范围不由访问决定的空间（实参副本、结果缓冲区）才有。</summary>
+    private int ObjectSize(LocalSpace space) => space.Kind == LocalKind.Argument
+        ? signature.Arguments.FirstOrDefault(a => a.Index == space.Argument && a.Transfer == Transfer.Copy)?.Size ?? 0
+        : space == LocalSpace.Result ? signature.Return?.Size ?? 0 : 0;
 
     private static Cell Make(int id, LocalSpace space, long start, long end, string? escape) =>
         new(id, space, start, checked((int)(end - start)), escape ?? (end - start > 4096 ? "单元超过 4096 字节" : null));
@@ -192,8 +216,10 @@ internal sealed class MemoryPromotion
                     var covered = effects.Select(e => e.Argument).ToHashSet();
                     // 隐藏 MethodInfo 的寄存器只传方法指针，里面残留的旧值不是实参。
                     if (shapes(call).Signature?.MethodInfo is { } hidden && call.ArgumentIndex(hidden.Register) is >= 0 and var slot) covered.Add(slot);
+                    // 签名已知时，输入只有签名占用的寄存器；其余寄存器里是调用前残留的值，被调方不读取，不是实参。
+                    var live = shapes(call).Signature is { } known ? InputRegisters(known) : null;
                     for (var i = 0; i < call.Arguments.Length; i++)
-                        if (!covered.Contains(i)) Walk(call.Arguments[i], shapes(call) is { Signature: null, IsRuntime: false } ? "未知调用的实参" : "调用实参");
+                        if (!covered.Contains(i) && (live is null || i >= call.Sources.Length || live.Contains(call.Sources[i]))) Walk(call.Arguments[i], shapes(call) is { Signature: null, IsRuntime: false } ? "未知调用的实参" : "调用实参");
                     if (call.DelegateReceiver is { } receiver) Walk(receiver, "委托接收者");
                     break;
                 }
@@ -201,6 +227,15 @@ internal sealed class MemoryPromotion
                 foreach (var operand in ExprMap.Operands(statement)) Walk(operand, "语句操作数");
                 break;
         }
+    }
+
+    /// <summary>机器签名读取的输入寄存器：实参、隐藏的 MethodInfo 与结果缓冲区指针。</summary>
+    private static HashSet<Storage> InputRegisters(MachineSignature signature)
+    {
+        var registers = signature.Arguments.SelectMany(a => a.Pieces).Select(p => p.Register).ToHashSet();
+        if (signature.MethodInfo is { } info) registers.Add(info.Register);
+        if (signature.Return is { Transfer: Transfer.ResultBuffer } result) registers.Add(result.Pieces[0].Register);
+        return registers;
     }
 
     /// <summary>表达式中的读取是访问；其余位置出现的局部地址是逃逸。</summary>

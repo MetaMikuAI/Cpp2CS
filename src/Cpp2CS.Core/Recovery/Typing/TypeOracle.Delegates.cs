@@ -14,7 +14,9 @@ public sealed partial class TypeOracle
     {
         pointer = SymTable.Resolve(pointer);
         if (pointer is EntitySym { Symbol: { Kind: SymbolKind.Method, Value: MethodRef method } })
-            return new BoundDelegateTarget(method, method.Method.IsStatic ? DelegateBinding.Static : DelegateBinding.ClosedInstance);
+            // 接口方法没有自己的代码，委托指针只能来自接口分发，等价于对接收者的虚绑定。
+            return new BoundDelegateTarget(method, method.Method.IsStatic ? DelegateBinding.Static
+                : method.DeclaringType is DefinitionRef { Definition.IsInterface: true } ? DelegateBinding.VirtualInstance : DelegateBinding.ClosedInstance);
         if (pointer is OpSym { Op.Kind: OperatorKind.Select, Args: [var condition, var yes, var no] }
             && DelegateTargetOf(yes, receiver) is { } taken && DelegateTargetOf(no, receiver) is { } fallthrough)
             return new SelectedDelegateTarget(condition, taken, fallthrough);

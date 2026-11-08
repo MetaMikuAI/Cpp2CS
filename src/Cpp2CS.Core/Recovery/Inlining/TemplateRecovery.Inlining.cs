@@ -68,6 +68,8 @@ internal sealed partial class TemplateRecovery
     {
         public List<InlineEnd> Ends { get; } = [];
         public Lazy<IReadOnlyDictionary<Variable, ManagedValue>>? Available { get; init; }
+        /// <summary>区域开始时字段持有的形参或局部。</summary>
+        public Lazy<IReadOnlyList<(FieldValue Location, ManagedValue Value)>>? Held { get; init; }
         /// <summary>证明不成立时第一处失败的说明。</summary>
         public string? Failure { get; set; }
         public bool Fail(string reason)
@@ -586,11 +588,12 @@ internal sealed partial class TemplateRecovery
     {
         failure = "接收者不能表示";
         var available = new Lazy<IReadOnlyDictionary<Variable, ManagedValue>>(() => AvailableIn(body).At(block, start));
+        var held = new Lazy<IReadOnlyList<(FieldValue Location, ManagedValue Value)>>(() => AvailableIn(body).HeldAt(block, start));
         var caller = new Walker { Blocks = callerBlocks, Caller = true, Block = block, Index = start, Available = available };
         SeedPath(caller);
         caller.Visited.Add(block);
         // 模板的 this 在比对中绑定：可能是字段所在的对象，也可能是包含它的值（如嵌套类型的结构体）。
-        var match = new InlineMatch { Binding = seed is null ? [] : new(seed), TypeArguments = arguments, Start = (block, start), Template = template, Available = available };
+        var match = new InlineMatch { Binding = seed is null ? [] : new(seed), TypeArguments = arguments, Start = (block, start), Template = template, Available = available, Held = held };
         var entryLocals = callerBlocks.Values.SelectMany(b => b.Statements)
             .SelectMany(s => (s is ManagedAssignment assignment ? new[] { assignment.Target } : []).Concat(ManagedValues.Edges(s).SelectMany(e => e.Copies.Select(c => c.Target))))
             .DistinctBy(l => l.Variable).ToDictionary(l => l.Variable);
@@ -1199,10 +1202,16 @@ internal sealed partial class TemplateRecovery
 
     private static ManagedValue Snapshot(ManagedValue known) => known switch
     {
-        FieldValue field => new Observed(field, 0),
+        // 字段链上的每一层读取都是已观察的值，与调用方自己读出的形式一致。
+        FieldValue field => new Observed(field.Receiver is FieldValue ? field with { Receiver = Snapshot(field.Receiver) } : field, 0),
         ConversionValue conversion => conversion with { Operand = Snapshot(conversion.Operand) },
         _ => known,
     };
+
+    private CallSummaries? summaries;
+
+    /// <summary>调用摘要：方法体取自可作模板的方法。</summary>
+    private CallSummaries Summaries => summaries ??= new(method => Template(method)?.Body);
 
     private (ManagedBody Body, AvailableFields Fields)? availableFields;
 
@@ -1210,7 +1219,7 @@ internal sealed partial class TemplateRecovery
     private AvailableFields AvailableIn(ManagedBody body)
     {
         if (availableFields is { } known && ReferenceEquals(known.Body, body)) return known.Fields;
-        var fields = new AvailableFields(body);
+        var fields = new AvailableFields(body, Summaries.Of);
         availableFields = (body, fields);
         return fields;
     }

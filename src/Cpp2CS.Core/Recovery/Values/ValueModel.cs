@@ -239,7 +239,11 @@ public sealed partial class ValueModel
             case Const c:
                 return c.Width <= 64 ? Syms.Const(c.Value, c.Width) : Syms.ZeroExtend(Syms.Const(c.Value, 64), c.Width);
             case Use u:
-                return Syms.Slice(Value(u.Variable), 0, u.Width);
+                {
+                    // 标量浮点写入清零向量寄存器的其余位（A64）：比定义更宽的向量寄存器读取是零扩展。
+                    var defined = Value(u.Variable);
+                    return defined.Width < u.Width && u.Variable.Storage.Bank == Bank.Vec ? Syms.ZeroExtend(defined, u.Width) : Syms.Slice(defined, 0, u.Width);
+                }
             case Load load:
                 {
                     var address = Eval(load.Address);

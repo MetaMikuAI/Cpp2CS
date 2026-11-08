@@ -208,7 +208,7 @@ internal static class ArchitectureChecks
         ManagedBlock To(ulong at, ulong to, params ManagedStatement[] statements) => new(at, [.. statements, new ManagedJump(at, new ManagedEdge(to, []))]);
         ManagedBlock End(ulong at) => new(at, [new ManagedReturn(at, null)]);
         bool Holds(ManagedBody body, Variable variable, ulong at, int field = 0) =>
-            new AvailableFields(body).At(at, 0).GetValueOrDefault(variable) is FieldValue known && known.Field.Equals(instance[field]);
+            new AvailableFields(body, _ => null).At(at, 0).GetValueOrDefault(variable) is FieldValue known && known.Field.Equals(instance[field]);
         ManagedBody Body(params ManagedBlock[] blocks) => new(method, blocks);
 
         check.True(Holds(Body(To(1, 2, Read(1)), End(2)), saved.Variable, 2), "读入局部之后，它就是字段的内容");
@@ -226,6 +226,13 @@ internal static class ArchitectureChecks
         check.True(Holds(Body(new(1, [Read(1), copy]), End(2)), copied.Variable, 2), "边上的复制传递事实");
         var loop = Body(To(1, 2, Read(1)), new(2, [new ManagedBranch(2, new ConstantValue(1, types.Boolean, 8), new ManagedEdge(3, []), new ManagedEdge(4, []))]), To(3, 2, same), End(4));
         check.True(!Holds(loop, saved.Variable, 2), "回边上写过字段时，循环头不再相等");
+        // 写入常量之后，被赋予同一常量的局部就是这个字段的当前值；与读取汇合时仍相等，写别的值或调用后失效。
+        ManagedStatement Zero(ManagedValue field) => new ManagedStore(1, field, new ConstantValue(0, types.Int32, 32));
+        ManagedStatement Const(ulong at) => new ManagedAssignment(at, saved, new ConstantValue(0, types.Int32, 32));
+        check.True(Holds(Body(To(1, 2, Zero(Field(0)), Const(1)), End(2)), saved.Variable, 2), "写入常量之后，同一常量的局部等于该字段");
+        check.True(!Holds(Body(To(1, 2, Zero(Field(0)), new ManagedStore(1, Field(0), new ConstantValue(1, types.Int32, 32)), Const(1)), End(2)), saved.Variable, 2), "字段已改写成别的常量时不相等");
+        check.True(!Holds(Body(To(1, 2, Zero(Field(0)), call, Const(1)), End(2)), saved.Variable, 2), "调用之后不再知道字段的内容");
+        check.True(Holds(Body(new(1, [branch]), To(2, 4, Read(2)), To(3, 4, Zero(Field(0)), Const(3)), End(4)), saved.Variable, 4), "读取与常量写入汇合后仍等于该字段");
     }
 
     private static void ExceptionStacks(Assertions check, ProgramFacts facts)

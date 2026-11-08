@@ -34,10 +34,48 @@ internal sealed partial class BodyBuilder
 
     private int Width(TypeRef type) => types.ValueWidth(type);
 
+    private Dictionary<Call, HashSet<TypeRef>>? caughtTypes;
+
+    /// <summary>
+    /// 每个 catch 的异常类型：处理块里对异常对象的类型判断（il2cpp_class_is_assignable_from）的目标类型；
+    /// 判断通过后的字段读取按其中在该偏移处有字段的类型解释；没有判断的 catch 不在其中。
+    /// </summary>
+    private Dictionary<Call, HashSet<TypeRef>> CaughtTypes()
+    {
+        if (caughtTypes is not null) return caughtTypes;
+        var found = new Dictionary<Call, HashSet<TypeRef>>();
+        foreach (var call in analysis.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Op?.Kind == OpKind.IsAssignableFrom))
+        {
+            var operands = values.Operands(call);
+            if (operands.Count < 3 || SymTable.Resolve(operands[1]) is not EntitySym { Symbol: { Kind: SymbolKind.Class, Value: TypeRef target } }
+                || oracle.ClassOwner(operands[2]) is not { } owner || SymTable.Resolve(owner) is not ReadSym holder
+                || oracle.Decompose(holder.Address) is not (ResultSym { Site: { Op.Kind: OpKind.BeginCatch } begin }, 0, null, _)) continue;
+            if (!found.TryGetValue(begin, out var set)) found[begin] = set = [];
+            set.Add(target);
+        }
+        return caughtTypes = found;
+    }
+
+    /// <summary>异常包装对象之上的托管异常对象的字段：包装里的指针是被捕获的对象，类型由 catch 的类型判断给出。</summary>
+    private ManagedValue? CaughtFieldRead(ReadSym read)
+    {
+        if (oracle.Decompose(read.Address) is not (ReadSym holder, var offset, null, _)
+            || oracle.Decompose(holder.Address) is not (ResultSym { Site: { Op.Kind: OpKind.BeginCatch } begin }, 0, null, _)
+            || !exceptions.TryGetValue(begin, out var exception) || !CaughtTypes().TryGetValue(begin, out var tested)) return null;
+        // 被判断的类型中，只有一个在这个偏移处恰有一个字段时，读取按它解释。
+        var matches = tested.OfType<DefinitionRef>()
+            .Select(t => (Type: t, Field: oracle.FieldAt(t, (int)offset, read.Width, false, false)))
+            .Where(m => m.Field is { Path.Count: 1 }).ToArray();
+        if (matches.Length != 1) return null;
+        var (caught, (path, fieldType)) = (matches[0].Type, matches[0].Field!.Value);
+        return new FieldValue(new CheckedCastValue(exception, caught), path[0], fieldType, read.Width);
+    }
+
     private ManagedValue? Read(ReadSym read, ulong address)
     {
         if (oracle.Decompose(read.Address) is (ResultSym { Site: { Op.Kind: OpKind.BeginCatch } begin }, 0, null, _) && exceptions.TryGetValue(begin, out var exception))
             return exception;
+        if (CaughtFieldRead(read) is { } caught) return caught;
         if (oracle.Locate(read.Address, read.Width) is not { } location)
         {
             if (oracle.NarrowRead(read) is not { } part) return Hole(address, $"内存 读取位置 {read.Address}", null);

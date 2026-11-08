@@ -33,7 +33,7 @@ internal static class ExceptionRegions
             var entry = throwing.Aggregate((a, b) => CommonDominator(dominators, function, a, b));
             var handler = function.Blocks.Where(b => dominators.Dominates(pad.Index, b.Index)).ToHashSet();
             var tryBlocks = Reaching(throwing, entry, dominators).Where(b => !handler.Contains(b)).ToHashSet();
-            if (tryBlocks.Any(b => Foreign(b, pad, tryBlocks))) tryBlocks = Between(throwing, handler);
+            if (tryBlocks.Any(b => Foreign(b, pad, tryBlocks))) tryBlocks = Between(throwing, handler, pad);
             foreach (var block in handler)
                 foreach (var predecessor in block.Predecessors)
                     if (block != pad && !handler.Contains(predecessor))
@@ -97,8 +97,11 @@ internal static class ExceptionRegions
     private static bool Foreign(Block block, Block pad, IReadOnlyCollection<Block> tryBlocks) =>
         block.Handler is { } actual && actual != pad && !tryBlocks.Contains(actual);
 
-    /// <summary>位于两个抛出块之间的块：从抛出块出发可达，又能到达抛出块；不经过这个 try 的处理体。</summary>
-    private static HashSet<Block> Between(IReadOnlyCollection<Block> throwing, IReadOnlySet<Block> handler)
+    /// <summary>
+    /// 位于两个抛出块之间的块：从抛出块出发可达，又能到达抛出块；不经过这个 try 的处理体。
+    /// 循环把发往其他处理体的块也带进两个抛出块之间；这些块不属于 try，去掉后在余下的块里重新求闭包，直到没有越界的块。
+    /// </summary>
+    private static HashSet<Block> Between(IReadOnlyCollection<Block> throwing, IReadOnlySet<Block> handler, Block pad)
     {
         static HashSet<Block> Closure(IEnumerable<Block> from, Func<Block, IEnumerable<Block>> next, IReadOnlySet<Block> excluded)
         {
@@ -109,9 +112,15 @@ internal static class ExceptionRegions
                     if (!excluded.Contains(other) && seen.Add(other)) work.Push(other);
             return seen;
         }
-        var forward = Closure(throwing, b => b.Successors, handler);
-        forward.IntersectWith(Closure(throwing, b => b.Predecessors, handler));
-        return forward;
+        var excluded = new HashSet<Block>(handler);
+        while (true)
+        {
+            var forward = Closure(throwing, b => b.Successors, excluded);
+            forward.IntersectWith(Closure(throwing, b => b.Predecessors, excluded));
+            var foreign = forward.Where(b => !throwing.Contains(b) && Foreign(b, pad, forward)).ToArray();
+            if (foreign.Length == 0) return forward;
+            excluded.UnionWith(foreign);
+        }
     }
 
     /// <summary>入口支配的、能到达任一抛出块的块。</summary>

@@ -57,6 +57,9 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         // 不透明局部的类型由分配点给出；不透明返回值存放在调用者的缓冲区。
         if (cell.Space.Element is { } element) return element;
         if (cell.Space == LocalSpace.Result && ManagedAbi.SharedValue(ReturnType)) return ReturnType;
+        // 实参副本就是形参的值：单元覆盖整个对象时，类型由签名给出，不靠用法推断。
+        if (cell.Space.Kind == LocalKind.Argument && cell.Start == 0 && Parameter(cell.Space.Argument) is { } parameter
+            && types.Kind(parameter) == TypeKind.Struct && types.Size(parameter) == cell.Size) return parameter;
         if (cellTypes is null)
         {
             cellTypes = [];

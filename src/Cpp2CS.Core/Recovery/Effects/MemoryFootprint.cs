@@ -78,7 +78,7 @@ public sealed record MemoryFootprint(MemoryKind Kind, TypeRef? Statics, TypeRef?
     {
         for (var i = 0; i < Math.Min(x.Count, y.Count); i++)
         {
-            if (x[i].Equals(y[i])) continue;
+            if (HeapAlias.MayShare(x[i], y[i])) continue;
             var owner = x[i].Field.Owner;
             return owner == y[i].Field.Owner && (owner.Attributes & TypeAttributes.LayoutMask) == TypeAttributes.ExplicitLayout;
         }

@@ -70,7 +70,19 @@ internal sealed class MethodEnvironment(MethodRef method, MachineSignature signa
         if (width != 64) return null;
         if (SymTable.Resolve(address) is ConstSym constant && shapes.Facts.Usages.At(constant.Value) is { Usage.Kind: UsageKind.StringLiteral } slot)
             return syms.Entity(new Symbol(SymbolKind.String, slot.Usage.Value));
-        var (entity, offset) = SymTable.Resolve(address) switch
+        // 接口分派的查找结果是 VirtualInvokeData { methodPtr; method }：偏移 8 处是该槽接口方法的 MethodInfo。
+        var resolved = SymTable.Resolve(address);
+        var (lookup, lookupOffset) = resolved switch
+        {
+            ResultSym r => (r, 0L),
+            OpSym { Op.Kind: OperatorKind.Binary, Args: [ResultSym r, ConstSym c] } add when add.Op.Binary == BinOp.Add => (r, c.Signed),
+            _ => (null, 0L),
+        };
+        if (lookup is { Site: Call { Op: { Kind: OpKind.InterfaceInvokeData, Operand: ValueTuple<object?, int> { Item1: DefinitionRef itf } slotOperand } } }
+            && lookupOffset == RuntimeLayout.VirtualInvokeDataMethod)
+            return DispatchResolution.Slot(itf, slotOperand.Item2, interfaceOnly: true) is { } interfaceMethod
+                ? syms.Entity(new Symbol(SymbolKind.Method, interfaceMethod)) : null;
+        var (entity, offset) = resolved switch
         {
             EntitySym e => (e, 0L),
             OpSym { Op.Kind: OperatorKind.Binary, Args: [EntitySym e, ConstSym c] } add when add.Op.Binary == BinOp.Add => (e, c.Signed),

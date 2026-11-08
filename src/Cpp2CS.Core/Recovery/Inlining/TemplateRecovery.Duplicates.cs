@@ -437,8 +437,14 @@ internal sealed partial class TemplateRecovery
     private ManagedValue Reloads(ManagedValue term, Trace on, DuplicateProof proof)
     {
         if (proof.Match.Available?.Value is not { } available) return term;
+        var held = proof.Match.Held?.Value ?? [];
         ManagedValue Replace(ManagedValue value)
         {
+            if (value is Observed { Read: FieldValue heldRead })
+                foreach (var (location, stored) in held)
+                    if (ReferenceEquals(heldRead.Field.Field, location.Field.Field) && SameTerm(heldRead.Receiver, location.Receiver) && heldRead.Width == location.Width
+                        && on.End.Epoch == 0 && on.End.State is { } state && !state.Stores.Any(s => MayAlias(s.Location, location)))
+                        return stored;
             if (value is Observed { Read: FieldValue })
                 foreach (var variable in available.Keys)
                     if ((on.Walker.Env.GetValueOrDefault(variable) ?? proof.LocalTypes.GetValueOrDefault(variable)) is LocalValue saved
