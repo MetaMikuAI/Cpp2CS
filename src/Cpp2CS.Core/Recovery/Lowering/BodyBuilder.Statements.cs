@@ -16,6 +16,8 @@ internal sealed partial class BodyBuilder
     {
         var statement = block.Statements[index];
         var operands = values.Operands(statement);
+        if (statement is Store && oracle.Decided(operands[0], block) is var decided && !ReferenceEquals(decided, operands[0]))
+            operands = [decided, .. operands.Skip(1)];
         // 地址选择分发成条件读取时，只能快照整个选择，不能提前读取未选中的字段。
         if (statement is Define && operands is [OpSym { Op.Kind: OperatorKind.Select } selection]
             && Reads(statement).Any(materialized.Contains))

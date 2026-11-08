@@ -67,6 +67,42 @@ public sealed partial class TypeOracle
         }
     }
 
+    /// <summary>
+    /// 地址里的选择在 block 处已由支配它的分支决定条件时取决定的一路（clang 把按条件取对象或空的选择外提到分支之前）。
+    /// 条件值是 SSA 值：支配 block 的块只有一个前驱、经条件分支的一侧进入时，到 block 的每条路径上条件都取这一侧的真假。
+    /// </summary>
+    public Sym Decided(Sym address, Block block)
+    {
+        address = SymTable.Resolve(address);
+        switch (address)
+        {
+            case OpSym { Op.Kind: OperatorKind.Select, Args: [var condition, var first, var second] } when Known(condition, block) is { } known:
+                return Decided(known ? first : second, block);
+            case OpSym { Op: { Kind: OperatorKind.Binary } op, Args: [var left, var right] } binary when op.Binary is BinOp.Add or BinOp.Sub:
+                {
+                    var (l, r) = (Decided(left, block), Decided(right, block));
+                    return ReferenceEquals(l, SymTable.Resolve(left)) && ReferenceEquals(r, SymTable.Resolve(right)) ? binary : values.Syms.Binary(op.Binary, l, r, binary.Width);
+                }
+            default:
+                return address;
+        }
+    }
+
+    /// <summary>由支配 block 的条件分支决定的 condition 真假；沿支配树找不到时为 null。</summary>
+    private bool? Known(Sym condition, Block block)
+    {
+        viewDominators ??= Dominators.Compute(values.Function);
+        for (var current = block; ;)
+        {
+            if (current.Predecessors is [var predecessor] && predecessor.Statements.LastOrDefault() is Branch branch && branch.Target != branch.Fallthrough
+                && Implied(values.Operands(branch)[0], branch.Target == current.Start, condition) is { } known)
+                return known;
+            var parent = viewDominators.Idom[current.Index];
+            if (parent < 0 || parent == current.Index) return null;
+            current = values.Function.Blocks[parent];
+        }
+    }
+
     /// <summary>predecessor 以继承检查 TypeCheck&lt;T&gt;(root 的类) 的结果分支、successor 是检查成立的一侧时为 T。</summary>
     private TypeRef? Checked(Block predecessor, Block successor, Sym root)
     {
