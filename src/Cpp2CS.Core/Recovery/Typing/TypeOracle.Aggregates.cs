@@ -12,7 +12,9 @@ public sealed partial class TypeOracle
 {
     /// <summary>没有自然结构体类型、按位解释的值；跨字段或非标准宽度的位片、相邻字段合并的读取没有自然类型，同样按位解释。</summary>
     public bool BitRepresentation(Sym value) => SymTable.Resolve(value) is ConcatSym or ConstSym
-        || TypeOf(value) is null && (SymTable.Resolve(value) is SliceSym || SymTable.Resolve(value) is ReadSym merged && Parts(merged) is not null)
+        || TypeOf(value) is null && (SymTable.Resolve(value) is SliceSym || SymTable.Resolve(value) is ReadSym merged && Parts(merged) is not null
+            // 非标准宽度的运算结果不是 IL 标量（按位打包在寄存器里返回的小结构体），只能按位段取用。
+            || SymTable.Resolve(value) is OpSym { Width: not (1 or 8 or 16 or 32 or 64) })
         || TypeOf(value) is { } scalar && types.Kind(scalar) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer;
 
     /// <summary>先证明整体读取，再按共享布局投影字段；只省略已知为零的位，不省略未知或未定义值。</summary>

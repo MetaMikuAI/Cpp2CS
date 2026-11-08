@@ -148,6 +148,9 @@ public sealed partial class SymTable
                 return Unary(op.Unary, Slice(unary.Args[0], low, width), width);
             case PhiSym phi when ProjectPhi(phi, low, width) is { } projected:
                 return projected;
+            // 选择逐位取一侧：片取两侧的同一段。只用于两侧都是常量的选择（按位打包的结构体由几个这样的选择按位或成），切片后仍是常量。
+            case OpSym { Op.Kind: OperatorKind.Select, Args: [var condition, var whenTrue, var whenFalse] } when Resolve(whenTrue) is ConstSym && Resolve(whenFalse) is ConstSym:
+                return Select(condition, Slice(whenTrue, low, width), Slice(whenFalse, low, width), width);
         }
         return Intern(new SliceSym(sym, low, width));
     }
