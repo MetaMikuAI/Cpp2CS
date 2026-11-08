@@ -28,17 +28,18 @@ public sealed partial class ManagedTypes
             else yield return field;
     }
 
-    /// <summary>位范围恰好对应一个字段；不跨字段、不解释填充。布尔最低位可代表整个布尔字段。</summary>
+    /// <summary>
+    /// 位范围恰好对应一个字段；不跨字段、不解释填充。布尔最低位可代表整个布尔字段。
+    /// 显式布局中同一段位可能既是直接字段又在重叠的结构体字段之内，取直接字段；布局不重叠时两者不会同时成立。
+    /// </summary>
     public ValueProjection? Project(DefinitionRef structure, int bit, int width)
     {
         if (Kind(structure) != TypeKind.Struct || bit < 0 || width <= 0 || (long)bit + width > StorageBits(structure)) return null;
-        foreach (var field in Fields(structure))
-        {
-            if (!field.Contains(bit, width)) continue;
-            if (bit == field.Bit && (width == field.Width || width == 1 && Kind(field.Type) == TypeKind.Bool)) return field;
+        var fields = Fields(structure).Where(f => f.Contains(bit, width)).ToArray();
+        if (fields.FirstOrDefault(f => bit == f.Bit && (width == f.Width || width == 1 && Kind(f.Type) == TypeKind.Bool)) is { } exact) return exact;
+        foreach (var field in fields)
             if (field.Type is DefinitionRef inner && Kind(inner) == TypeKind.Struct && Project(inner, bit - field.Bit, width) is { } leaf)
                 return leaf with { Path = [.. field.Path, .. leaf.Path], Bit = field.Bit + leaf.Bit };
-        }
         return null;
     }
 
