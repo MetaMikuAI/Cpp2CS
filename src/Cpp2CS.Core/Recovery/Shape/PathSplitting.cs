@@ -131,7 +131,7 @@ internal static class PathSplitting
             {
                 var (current, guarded) = entry;
                 if (current.Statements.Any(statement => phis && (guarded
-                        ? FieldAccesses(model, oracle, statement).Any(sym => DistinctTypes(sym, block, oracle))
+                        ? FieldAccesses(model, oracle, statement).Any(access => LocatedPerSource(access.Address, access.Width, block, oracle))
                         : Singletons(model, oracle, statement).Any(sym => Distinct(sym, block, oracle)))
                     || Viewed(model, oracle, statement, block)))
                 {
@@ -222,22 +222,26 @@ internal static class PathSplitting
         }
     }
 
-    /// <summary>语句中定位不到的对象字段读写的地址（根加对象头之后的常量偏移）；不含类指针等偏移 0 的读取。</summary>
-    private static IEnumerable<Sym> FieldAccesses(ValueModel model, TypeOracle oracle, Stmt statement)
+    /// <summary>语句中定位不到的对象字段读写（根加对象头之后的常量偏移）；不含类指针等偏移 0 的读取。</summary>
+    private static IEnumerable<(Sym Address, int Width)> FieldAccesses(ValueModel model, TypeOracle oracle, Stmt statement)
     {
         var accesses = model.ReadsAt(statement).Select(r => (r.Address, r.Width))
             .Concat(statement is Store store ? [(model.Operands(store)[0], store.Value.Width)] : []);
         foreach (var (address, width) in accesses)
             if (oracle.Decompose(address) is (_, >= Facts.RuntimeLayout.ObjectHeaderSize, null, _) && oracle.Locate(address, width) is null)
-                yield return address;
+                yield return (address, width);
     }
 
-    /// <summary>地址的根是本块的 φ，各来源的类型都已知且不全相同（不同类型的对象合流，合流值上的字段访问没有单一解释）。</summary>
-    private static bool DistinctTypes(Sym address, Block block, TypeOracle oracle)
+    /// <summary>
+    /// 拆分能让这次访问定位：地址是本块 φ 加常量偏移，各来源的类型都已知、在这个偏移处都有字段，且类型不全相同
+    /// （不同类型的对象合流，合流值上的访问没有单一解释，拆开后各自按来源的类型解释）。
+    /// </summary>
+    private static bool LocatedPerSource(Sym address, int width, Block block, TypeOracle oracle)
     {
-        if (Root(SymTable.Resolve(address)) is not PhiSym phi || !ReferenceEquals(phi.Block, block) || phi.Sources.Any(s => s is null)) return false;
-        var sources = phi.Sources.Select(s => oracle.TypeOf(SymTable.Resolve(s!))).ToArray();
-        return sources.All(t => t is not null) && sources.Distinct().Count() > 1;
+        if (oracle.Decompose(address) is not (var root, var offset, null, _) || root is not PhiSym phi
+            || !ReferenceEquals(phi.Block, block) || phi.Sources.Any(s => s is null)) return false;
+        var types = phi.Sources.Select(s => oracle.TypeOf(SymTable.Resolve(s!))).ToArray();
+        return types.Distinct().Count() > 1 && types.All(t => t is not null && oracle.FieldAt(t, (int)offset, width, false, false) is not null);
     }
 
     /// <summary>分支条件是本块 φ（或其上加常量的地址）与零的比较。</summary>
