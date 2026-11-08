@@ -53,6 +53,7 @@ internal static class IdiomPipeline
         new("checked.types", s => s.SuccessfulTypeCheckValues(), Once: true),
         new("checked.classes", s => CheckedClassValues.Run(s.function, s.RawDefinition, s.Fresh), Once: true),
         new("phi.zero-sources", s => s.ZeroPhiSources()),
+        new("phi.class-sources", s => s.ClassPhiSources()),
         new("phi.equal-addresses", s => s.EqualAddressPhis()),
         new("phi.static-fields", s => s.StaticFieldPhiLoads()),
         new("phi.strings", s => s.StringSlotChoices()),
