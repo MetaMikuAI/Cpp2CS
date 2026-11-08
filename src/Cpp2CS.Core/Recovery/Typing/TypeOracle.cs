@@ -609,6 +609,13 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         if (address is LocalSym local) return (local, 0, null, 0);
         var terms = new List<Sym>();
         Flatten(address, terms);
+        // 低位是非零常量的拼接（比例下标与元素内偏移按位或成）：拆成常量偏移和低位为零的比例下标，两者不重叠，和与或相同。
+        for (var i = terms.Count - 1; i >= 0; i--)
+            if (terms[i] is ConcatSym { Parts: [ConstSym { Value: not 0 } inside, _, ..] } packed && inside.Width < 8)
+            {
+                terms[i] = values.Syms.Concat(values.Syms.Const(0, inside.Width), values.Syms.Slice(packed, inside.Width, packed.Width - inside.Width));
+                terms.Add(values.Syms.Const(inside.Value, 64));
+            }
         long offset = 0;
         Sym? root = null, index = null;
         var scale = 0;

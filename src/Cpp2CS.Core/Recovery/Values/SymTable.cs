@@ -144,6 +144,10 @@ public sealed partial class SymTable
             case OpSym { Op: { Kind: OperatorKind.Binary } op } carryless when low > 0 && op.Binary is BinOp.Add or BinOp.Sub
                 && (LowZeros(carryless.Args[1]) >= low || op.Binary == BinOp.Add && LowZeros(carryless.Args[0]) >= low):
                 return Binary(op.Binary, Slice(carryless.Args[0], low, width), Slice(carryless.Args[1], low, width), width);
+            // 乘 2 的幂等于左移：低位为零，其上是乘数的低段；不在最低位开始的片按这个拼接取。
+            case OpSym { Op: { Kind: OperatorKind.Binary } op, Args: [var factor, ConstSym { Value: not 0 } power] } product when low > 0 && op.Binary == BinOp.Mul
+                && System.Numerics.BitOperations.IsPow2(power.Value) && System.Numerics.BitOperations.TrailingZeroCount(power.Value) is var shift && shift < product.Width:
+                return Slice(Concat(Const(0, shift), Slice(factor, 0, product.Width - shift)), low, width);
             case OpSym { Op: { Kind: OperatorKind.Unary } op } unary when op.Unary == UnOp.Not || low == 0 && op.Unary == UnOp.Neg:
                 return Unary(op.Unary, Slice(unary.Args[0], low, width), width);
             case PhiSym phi when ProjectPhi(phi, low, width) is { } projected:
