@@ -652,10 +652,50 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             ConcatSym { Parts: [ConstSym { Value: 0 } zero, ..] } concat when zero.Width < 8
                 => (values.Syms.Slice(concat, zero.Width, concat.Width - zero.Width), 1 << zero.Width),
             OpSym { Op.Kind: OperatorKind.Binary, Args: [var x, ConstSym { Value: > 1 and <= 4096 } factor] } mul when mul.Op.Binary == BinOp.Mul => (x, (int)factor.Value),
+            OpSym { Op: { Kind: OperatorKind.Convert, Conversion: ConvKind.SignExtend }, Args: [var x] } extend when SymTable.Resolve(x) is PhiSym phi => ShiftedPhi(phi, extend.Width),
             _ => null,
         };
         if (simple is var (inner, outer) && (Multiple(inner) ?? Scaled(inner)) is var (index, times) && outer * times <= 4096) return (index, outer * times);
         return simple;
+    }
+
+    /// <summary>
+    /// 符号扩展的 φ 低位恒为零（强度削减的游标每次加 k &lt;&lt; 32，用时算术右移）：扩展值等于去掉低位零后的标准宽度整数
+    /// 先扩展再左移，即按这个整数下标乘 2 的幂。
+    /// </summary>
+    private (Sym Index, int Factor)? ShiftedPhi(PhiSym phi, int width)
+    {
+        var zeros = LowZeros(phi);
+        foreach (var rest in new[] { 32, 16, 8 })
+            if (phi.Width - rest is var shift and >= 1 and <= 12 && shift <= zeros)
+                return (values.Syms.Convert(ConvKind.SignExtend, values.Syms.Slice(phi, shift, rest), width), 1 << shift);
+        return null;
+    }
+
+    /// <summary>
+    /// φ 在每条入边上低位恒为零的位数：初值与环上的增量都只由低位为零的常量、拼接和加减组成。
+    /// 各值按最小值合并，环上再次到达的 φ 按归纳假设不限制，结果是整个环共同的下界。
+    /// </summary>
+    private static int LowZeros(PhiSym start)
+    {
+        var active = new HashSet<PhiSym>();
+        int Zeros(Sym? sym)
+        {
+            if (sym is null) return 0;
+            switch (SymTable.Resolve(sym))
+            {
+                case ConstSym { Value: 0 } zero: return zero.Width;
+                case ConstSym c: return Math.Min(c.Width, System.Numerics.BitOperations.TrailingZeroCount(c.Value));
+                case ConcatSym { Parts: [ConstSym { Value: 0 } low, ..] }: return low.Width;
+                case OpSym { Op.Kind: OperatorKind.Binary, Args: [var left, var right] } sum when sum.Op.Binary is BinOp.Add or BinOp.Sub:
+                    return Math.Min(Zeros(left), Zeros(right));
+                case PhiSym phi:
+                    if (!active.Add(phi)) return int.MaxValue;
+                    return active.Count > 32 ? 0 : phi.Sources.Select(Zeros).DefaultIfEmpty(0).Min();
+                default: return 0;
+            }
+        }
+        return Math.Min(start.Width, Zeros(start));
     }
 
     /// <summary>同一下标几个倍数之和：x + x*k 或 x*j + x*k（含移位写法），返回下标和系数之和。</summary>
