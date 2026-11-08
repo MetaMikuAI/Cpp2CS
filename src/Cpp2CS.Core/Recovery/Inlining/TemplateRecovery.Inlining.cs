@@ -34,6 +34,8 @@ internal sealed partial class TemplateRecovery
         public int Index { get; set; }
         public Dictionary<Variable, ManagedValue> Env { get; init; } = [];
         public List<(ManagedValue Location, ManagedValue Value)> Stores { get; init; } = [];
+        /// <summary>模板中已执行、调用方尚未写出的写入：调用方把它们沉到了随后的分支之后。</summary>
+        public List<(ManagedValue Location, ManagedValue Value)> Deferred { get; init; } = [];
         public HashSet<ulong> Visited { get; init; } = [];
         public int Epoch { get; set; }
         public int Calls { get; set; }
@@ -49,7 +51,7 @@ internal sealed partial class TemplateRecovery
 
         public Walker Clone() => new()
         {
-            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions], Dereferenced = [.. Dereferenced], FrozenLocals = FrozenLocals, Available = Available,
+            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Deferred = [.. Deferred], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions], Dereferenced = [.. Dereferenced], FrozenLocals = FrozenLocals, Available = Available,
         };
     }
 
@@ -390,14 +392,20 @@ internal sealed partial class TemplateRecovery
         // 前导效果可能位于唯一前驱中，中间的空跳转不构成内联区域的边界。
         var visited = new HashSet<ulong> { anchor.Block };
         var current = anchor.Block;
+        var merge = false;
         while (visited.Count < 16)
         {
-            if (Predecessors(blocks, current) is not [var predecessor] || !visited.Add(predecessor.Address)) break;
+            var incoming = Predecessors(blocks, current);
+            merge = incoming.Length > 1;
+            if (incoming is not [var predecessor] || !visited.Add(predecessor.Address)) break;
             current = predecessor.Address;
             if (predecessor.Statements.All(s => s is ManagedJump { Edge.Copies.Count: 0 })) continue;
             starts.AddRange(Enumerable.Range(0, predecessor.Statements.Count).Select(i => (current, i)));
             break;
         }
+        // 模板先分支、汇合后才访问字段（如写入前先求 Vector3.normalized）：区域从汇合点的直接支配块开始。
+        if (merge && ImmediateDominator(body, blocks, current) is { } dominator && visited.Add(dominator))
+            starts.AddRange(Enumerable.Range(0, blocks[dominator].Statements.Count).Select(i => (dominator, i)));
         starts.AddRange(UsesOfPendingRead(blocks, anchor.Block, anchor.Index).Where(p => !starts.Contains(p)));
         var failures = new List<(string Reason, int Progress)>();
         // 成立的证明都与原生代码等价，每个候选取第一个成立的起点，候选之间选覆盖语句最多的：较小的模板会拿走更大模板要比对的分支或读取，之后更大的模板就证不出来了。覆盖相同时保留候选次序。
@@ -476,7 +484,13 @@ internal sealed partial class TemplateRecovery
         if (inlineCandidates.TryGetValue((field, receiver), out var known)) return known;
         inlineCandidates[(field, receiver)] = [];
         var found = new List<(MethodRef, ManagedBody)>();
-        foreach (var method in fields.Candidates(field, receiver).Where(m => m.MethodArguments.Count == 0))
+        var methods = fields.Candidates(field, receiver).Where(m => m.MethodArguments.Count == 0);
+        // 值类型的构造函数是对 this 所指位置的一次实例调用（源码中为 x = new T(...)），内联后和 setter 一样只剩字段写入；
+        // 引用类型的构造函数只能经 newobj 或构造链调用，不作候选。
+        if (field.DeclaringType is DefinitionRef owner && types.Kind(owner) == TypeKind.Struct && (field.Field.Attributes & System.Reflection.FieldAttributes.Static) == 0)
+            methods = methods.Concat(owner.Definition.Methods.Where(m => m.Name == ".ctor" && m.GenericParameters.Count == 0 && m.Parameters.Count > 0)
+                .Select(m => new MethodRef(m, owner.Arguments, [])));
+        foreach (var method in methods)
         {
             if (Template(method) is not { Body: { } template } || template.Regions.Count > 0 || !Acyclic(template)) continue;
             var touches = template.Blocks.SelectMany(b => b.Statements).SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk)
@@ -512,6 +526,57 @@ internal sealed partial class TemplateRecovery
     private ManagedBlock[] Predecessors(IReadOnlyDictionary<ulong, ManagedBlock> blocks, ulong address) =>
         predecessors.GetValue(blocks, map => map.Values.SelectMany(b => b.Statements.SelectMany(ManagedValues.Edges).Select(e => e.Target).Distinct().Select(t => (t, b)))
             .GroupBy(p => p.t).ToDictionary(g => g.Key, g => g.Select(p => p.b).ToArray())).GetValueOrDefault(address) ?? [];
+
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<IReadOnlyDictionary<ulong, ManagedBlock>, Dictionary<ulong, ulong>> dominators = new();
+
+    /// <summary>调用方块的直接支配块（Cooper–Harvey–Kennedy，从方法入口出发）；入口与从入口不可达的块没有。</summary>
+    private ulong? ImmediateDominator(ManagedBody body, IReadOnlyDictionary<ulong, ManagedBlock> blocks, ulong address)
+    {
+        var tree = dominators.GetValue(blocks, map =>
+        {
+            var post = new List<ulong>();
+            var seen = new HashSet<ulong> { body.Blocks[0].Address };
+            var stack = new Stack<(ulong Address, int Next)>();
+            stack.Push((body.Blocks[0].Address, 0));
+            while (stack.TryPop(out var top))
+            {
+                var edges = map.TryGetValue(top.Address, out var block) ? block.Statements.SelectMany(ManagedValues.Edges).ToArray() : [];
+                if (top.Next >= edges.Length) { post.Add(top.Address); continue; }
+                stack.Push((top.Address, top.Next + 1));
+                if (seen.Add(edges[top.Next].Target)) stack.Push((edges[top.Next].Target, 0));
+            }
+            var number = new Dictionary<ulong, int>();
+            for (var i = 0; i < post.Count; i++) number[post[i]] = i;
+            var idom = new int[post.Count];
+            Array.Fill(idom, -1);
+            idom[^1] = post.Count - 1;
+            int Intersect(int a, int b)
+            {
+                while (a != b)
+                {
+                    while (a < b) a = idom[a];
+                    while (b < a) b = idom[b];
+                }
+                return a;
+            }
+            for (var changed = true; changed;)
+            {
+                changed = false;
+                for (var i = post.Count - 2; i >= 0; i--)
+                {
+                    var best = -1;
+                    foreach (var from in Predecessors(map, post[i]))
+                        if (number.TryGetValue(from.Address, out var at) && idom[at] >= 0) best = best < 0 ? at : Intersect(at, best);
+                    if (best >= 0 && idom[i] != best) { idom[i] = best; changed = true; }
+                }
+            }
+            var result = new Dictionary<ulong, ulong>();
+            for (var i = 0; i < post.Count - 1; i++)
+                if (idom[i] >= 0) result[post[i]] = post[idom[i]];
+            return result;
+        });
+        return tree.TryGetValue(address, out var dominator) ? dominator : null;
+    }
 
     /// <summary>最近一次比对覆盖的调用方语句数，用来挑选最接近成立的失败原因。</summary>
     private int lastProgress;
@@ -560,6 +625,7 @@ internal sealed partial class TemplateRecovery
             if (!Advance(callee, null)) return match.Fail("模板的值不能表示");
             if (callee.Current is ManagedReturn returned)
             {
+                if (callee.Deferred.Count > 0) return match.Fail("模板的写入在调用方没有对应");
                 ManagedValue? value = null;
                 if (returned.Value is { } v && (value = Term(callee, v)) is null) return match.Fail("模板的返回值不能表示");
                 return Finish(caller, match, value);
@@ -598,6 +664,19 @@ internal sealed partial class TemplateRecovery
                 steps--;
                 continue;
             }
+            // 调用方把模板的写入沉到了随后的分支之后（如构造函数先写一个字段再求另一个字段的值）：写入的值已经确定、
+            // 接收者是这次写入涉及的对象时，模板先记下这次写入，到下一批写入时一起按偏序比对；之前不能经过调用、检查或抛出。
+            if (m is ManagedStore sunk && c is ManagedBranch)
+            {
+                if (Location(callee, sunk.Target) is not { } sunkAt || Term(callee, sunk.Value) is not { } sunkValue
+                    || !Unordered(sunkValue, ReceiverOf(sunkAt) is { } sunkReceiver ? new HashSet<ManagedValue> { sunkReceiver } : []))
+                    return match.Fail($"模板的写入对应调用方的分支（0x{c.Address:x}）");
+                callee.Deferred.Add((sunkAt, sunkValue));
+                callee.Stores.Add((sunkAt, sunkValue));
+                callee.Index++;
+                continue;
+            }
+            if (callee.Deferred.Count > 0 && m is not (ManagedStore or ManagedBranch)) return match.Fail($"写入次序不同（0x{c.Address:x}）");
             if (c is not ManagedStore) Cover(caller, match);
             switch (m, c)
             {
@@ -674,7 +753,9 @@ internal sealed partial class TemplateRecovery
     /// </summary>
     private bool MatchStores(Walker callee, Walker caller, InlineMatch match)
     {
-        var remaining = new List<(ManagedValue Location, ManagedValue Value)>();
+        // 先前沉下来的模板写入排在这批之前。
+        var remaining = new List<(ManagedValue Location, ManagedValue Value)>(callee.Deferred);
+        callee.Deferred.Clear();
         while (callee.Current is ManagedStore store)
         {
             if (Location(callee, store.Target) is not { } location || Term(callee, store.Value) is not { } value) return match.Fail("模板的写入不能表示");
@@ -952,6 +1033,9 @@ internal sealed partial class TemplateRecovery
                 return Load(walker, new StaticFieldValue(field.Field, field.Type, field.Width));
             case ArrayElementValue element:
                 return Term(walker, element.Array) is { } array && Term(walker, element.Index) is { } index ? Load(walker, element with { Array = array, Index = index }) : null;
+            case AddressValue { Target: FieldValue or StaticFieldValue or ArrayElementValue } address:
+                // 取地址不读这个位置：路径上对它或其中字段的写入不改变地址。与 ref 形参的绑定同形（见 Unify）。
+                return Location(walker, address.Target) is { } place ? new AddressValue(new Observed(place, walker.Epoch)) : null;
         }
         var failed = false;
         var mapped = ManagedValues.Map(value, child =>
