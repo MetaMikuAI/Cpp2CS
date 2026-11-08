@@ -9,7 +9,7 @@ namespace Cpp2CS.Recovery.Typing;
 /// 类型判断之后的视图。对象 o 通过类型判断之后，clang 仍可能经 o 本身访问判断类型的字段
 /// （模式变量 o is T t 之后读 t.f，或几条判断路径的尾部合并后共用一次读取）。
 /// 读写在 o 的静态类型上定位不到时，沿支配树由近及远取对 o 的判断：isinst&lt;T&gt;(o) 的结果（按它定位），
-/// 或内联继承检查 TypeCheck&lt;T&gt;(o 的类) 成立的分支、类指针不是密封类 T 就抛出的检查之后（位置带上视图类型 T，写出为 castclass）。
+/// 或内联继承检查 TypeCheck&lt;T&gt;(o 的类) 成立的分支、类指针等于密封类 T 的分支、类指针不是密封类 T 就抛出的检查之后（位置带上视图类型 T，写出为 castclass）。
 /// isinst 的结果按启发式使用：假定原生代码只在已知 o 是 T 的路径上按 T 的布局访问 o。
 /// </summary>
 public sealed partial class TypeOracle
@@ -110,15 +110,17 @@ public sealed partial class TypeOracle
         }
     }
 
-    /// <summary>predecessor 以继承检查 TypeCheck&lt;T&gt;(root 的类) 的结果分支、successor 是检查成立的一侧时为 T。</summary>
+    /// <summary>predecessor 以继承检查 TypeCheck&lt;T&gt;(root 的类) 的结果或 root 的类指针与密封类 T 的比较分支、successor 是检查成立的一侧时为 T。</summary>
     private TypeRef? Checked(Block predecessor, Block successor, Sym root)
     {
         if (predecessor.Statements.LastOrDefault() is not Branch branch || branch.Target == branch.Fallthrough
-            || values.Operands(branch) is not [OpSym { Op.Kind: OperatorKind.Compare, Args: [var tested, ConstSym { Value: 0 }] } compare]
-            || compare.Op.Cond is not (Cond.Eq or Cond.Ne)
-            || SymTable.Resolve(tested) is not ResultSym { Site: { Op.Kind: OpKind.TypeCheck } check }
-            || values.Operands(check) is not [_, var klass] || ClassOwner(klass) is not { } owner
-            || !ReferenceEquals(SymTable.Resolve(owner), root) || check.Op.Operand is not TypeRef type) return null;
+            || values.Operands(branch) is not [OpSym { Op.Kind: OperatorKind.Compare, Op.Cond: Cond.Eq or Cond.Ne, Args: [var left, var right] } compare]) return null;
+        // 类指针等于密封类的一侧：o 就是这个类。
+        if (ClassIdentity(left, right) is var (owner, exact) && ReferenceEquals(SymTable.Resolve(owner), root))
+            return successor.Start == (compare.Op.Cond == Cond.Eq ? branch.Target : branch.Fallthrough) ? exact : null;
+        if (right is not ConstSym { Value: 0 } || SymTable.Resolve(left) is not ResultSym { Site: { Op.Kind: OpKind.TypeCheck } check }
+            || values.Operands(check) is not [_, var klass] || ClassOwner(klass) is not { } checkedOwner
+            || !ReferenceEquals(SymTable.Resolve(checkedOwner), root) || check.Op.Operand is not TypeRef type) return null;
         var passed = compare.Op.Cond == Cond.Ne ? branch.Target : branch.Fallthrough;
         return successor.Start == passed ? type : null;
     }
