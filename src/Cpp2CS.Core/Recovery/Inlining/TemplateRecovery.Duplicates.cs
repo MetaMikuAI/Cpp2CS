@@ -50,6 +50,8 @@ internal sealed partial class TemplateRecovery
         public required IReadOnlyDictionary<ulong, ManagedBlock> Blocks { get; init; }
         /// <summary>取过地址的局部：可能经引用改变，不能只按环境比较。</summary>
         public required IReadOnlySet<Variable> Addressed { get; init; }
+        /// <summary>地址存进了局部或内存的取址局部：别名可能在任何时候写它，从一开始就不按环境比较。</summary>
+        public IReadOnlySet<Variable> Aliased { get; init; } = new HashSet<Variable>();
         public required IReadOnlyDictionary<Variable, LocalValue> LocalTypes { get; init; }
         /// <summary>只经整体赋值改变的结构体局部。</summary>
         public required IReadOnlySet<Variable> FrozenLocals { get; init; }
@@ -76,6 +78,9 @@ internal sealed partial class TemplateRecovery
     {
         var addressed = blocks.Values.SelectMany(b => b.Statements).SelectMany(ReadValues).SelectMany(ManagedValues.Walk)
             .OfType<AddressValue>().SelectMany(a => ManagedValues.Walk(a.Target)).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
+        static ManagedValue? Stored(ManagedStatement statement) => statement switch { ManagedAssignment a => a.Value, ManagedStore s => s.Value, _ => null };
+        var aliased = blocks.Values.SelectMany(b => b.Statements).Select(Stored).OfType<AddressValue>()
+            .SelectMany(a => ManagedValues.Walk(a.Target)).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
         var localTypes = new Dictionary<Variable, LocalValue>();
         foreach (var statement in body.Blocks.SelectMany(b => b.Statements))
         {
@@ -92,7 +97,7 @@ internal sealed partial class TemplateRecovery
         string? refusal = null;
         foreach (var kept in match.Ends.OrderByDescending(e => e.Epoch).ThenBy(e => e.Result is ConstantValue ? 1 : 0).DistinctBy(e => e.Exit))
         {
-            var proof = new DuplicateProof { Match = match, Body = body, Blocks = blocks, Addressed = addressed, FrozenLocals = frozen, LocalTypes = localTypes, Tracked = tracked, Pairs = Pairs };
+            var proof = new DuplicateProof { Match = match, Body = body, Blocks = blocks, Addressed = addressed, Aliased = aliased, FrozenLocals = frozen, LocalTypes = localTypes, Tracked = tracked, Pairs = Pairs };
             var retained = new TraceLog();
             var removed = match.Ends.Where(e => !ReferenceEquals(e, kept)).Select(e => (End: e, Log: new TraceLog())).ToArray();
             if (removed.All(other => SameOnward(BeginTrace(kept, proof, retained), BeginTrace(other.End, proof, other.Log), proof)))
@@ -158,6 +163,7 @@ internal sealed partial class TemplateRecovery
                 Assumptions = state.Assumptions.Select(a => (Current(a.Condition, end), a.Value)).ToList(),
                 Dereferenced = state.Dereferenced.Select(d => Current(d, end)).ToHashSet(),
             },
+            Escaped = [.. proof.Aliased],
         };
     }
 
