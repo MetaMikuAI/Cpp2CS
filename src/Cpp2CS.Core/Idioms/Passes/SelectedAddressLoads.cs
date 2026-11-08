@@ -13,14 +13,15 @@ internal static class SelectedAddressLoads
             or Binary { Op: BinOp.SDiv or BinOp.UDiv or BinOp.SRem or BinOp.URem });
         static bool? KnownSide(Block block, Expr condition)
         {
-            // 只沿唯一前驱追踪同一 SSA 条件；可重读的内存和未转换的寄存器不能作为路径事实。
+            // 只沿唯一前驱追踪同一 SSA 条件（或它的否定）；可重读的内存和未转换的寄存器不能作为路径事实。
             if (!Pure(condition) || ExprMap.Walk(condition).Any(e => e is Read or Use { Variable.Version: < 0 })) return null;
+            var negated = Fold.Not(condition);
             var seen = new HashSet<Block> { block };
             while (block.Predecessors.ToArray() is [var parent] && seen.Add(parent))
             {
-                if (parent.Statements.LastOrDefault() is Branch branch && branch.Condition == condition
+                if (parent.Statements.LastOrDefault() is Branch branch && (branch.Condition == condition || branch.Condition == negated)
                     && branch.Target != branch.Fallthrough && parent.NormalSuccessors.Contains(block))
-                    return block.Start == branch.Target;
+                    return (block.Start == branch.Target) == (branch.Condition == condition);
                 block = parent;
             }
             return null;
