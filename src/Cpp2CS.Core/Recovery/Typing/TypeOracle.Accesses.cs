@@ -75,7 +75,8 @@ public sealed partial class TypeOracle
                 if (Covering(members, start, width) is not { } pieces) continue;
                 var first = members.First(m => m.Offset == start);
                 var value = values.Syms.Concat(pieces);
-                if ((Locate(first.Address, width) ?? (TypeOf(value) is { } valueType && types.Size(valueType) * 8 == width ? PointerElement(first.Address, valueType) : null))
+                if ((Locate(first.Address, width) ?? (TypeOf(value) is { } valueType && types.Size(valueType) * 8 == width ? PointerElement(first.Address, valueType) : null)
+                    ?? (BufferElement(first.Address) is { } bufferType && types.Size(bufferType) * 8 == width ? PointerElement(first.Address, bufferType) : null))
                     is not { Type: { } type } location
                     || types.Kind(type) != TypeKind.Struct || types.Size(type) * 8 != width) continue;
                 if (crossedReads.Count > 0 && (location.Kind is not (LocationKind.Instance or LocationKind.Reference)

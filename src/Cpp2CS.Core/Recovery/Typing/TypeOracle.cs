@@ -854,11 +854,13 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     /// <summary>
     /// 无类型指针上按值类型 T 的大小步进、整段读写 T 的访问：*(T*)((byte*)p + i * sizeof(T))，即 UnsafeUtility.ReadArrayElement/WriteArrayElement
     /// 内联后的形态。指针本身不带元素类型，由读写的值按 T 使用确定：步长和访问宽度都等于 T 的大小。成立后同一地址与宽度的访问都按这个元素定位。
+    /// T 是结构体或标量；单字节的访问已按 void 的字节定位，不经这里。
     /// </summary>
     public Location? PointerElement(Sym address, TypeRef element)
     {
         var size = ElementSize(element);
-        if (size <= 0 || ManagedTypes.IsReferenceType(element) || types.Kind(element) != TypeKind.Struct) return null;
+        if (size <= 0 || ManagedTypes.IsReferenceType(element) || ManagedTypes.IsVoid(element)
+            || types.Kind(element) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)) return null;
         var (root, offset, index, scale) = Decompose(address);
         if (TypeOf(root) is not PointerRef { Element: var pointee } || !ManagedTypes.IsVoid(pointee) || index is null || offset != 0) return null;
         (index, scale) = Rescaled(index, scale, size);
@@ -867,6 +869,26 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         pointerElements[(SymTable.Resolve(address), size * 8)] = location;
         return location;
     }
+
+    /// <summary>
+    /// 无类型指针按库的约定确定的元素类型：Unity.Collections.NativeArray&lt;T&gt; 的 m_Buffer 只经 UnsafeUtility.ReadArrayElement/WriteArrayElement&lt;T&gt;
+    /// 按 T 步进访问。指针是这个字段的读取或结构体值里这个字段的片时为 T。
+    /// </summary>
+    public TypeRef? BufferElement(Sym address)
+    {
+        var (field, holder) = SymTable.Resolve(Decompose(address).Root) switch
+        {
+            ReadSym read when Locate(read.Address, read.Width) is { Path: [.., var last] } => (last, last.DeclaringType),
+            SliceSym { Low: var low, Width: var width } slice when TypeOf(slice.Base) is DefinitionRef owner && types.Kind(owner) == TypeKind.Struct
+                && types.Project(owner, low, width) is { Path: [var only] } => (only, owner),
+            _ => ((FieldRef?)null, (TypeRef?)null),
+        };
+        return field is { Field.Name: "m_Buffer" } && holder is DefinitionRef { Definition.FullName: "Unity.Collections.NativeArray", Arguments: [var element] }
+            && element is not GenericParameterRef ? element : null;
+    }
+
+    /// <summary>步进访问的比例恰等于元素大小（不经比例换算）。</summary>
+    public bool ExactStride(Sym address, TypeRef element) => Decompose(address) is (_, 0, not null, var scale) && scale == ElementSize(element);
 
     /// <summary>比例是元素大小的整数倍：下标是 index 乘以倍数（如 float 数组按 i * 8 + k 访问）。其他情况不变。</summary>
     /// <summary>多维数组的 bounds 指针（Il2CppArray.bounds 的读取）所属的数组与维数。</summary>

@@ -44,8 +44,12 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
                 if (oracle.StoreGroupOf(store) is { } group)
                 {
                     if (ReferenceEquals(group.Members[0], store)) Store(group.Target, group.Value, store);
+                    break;
                 }
-                else if (oracle.Locate(operands[0], store.Value.Width) is { } location) Store(location, operands[1], store);
+                // 缓冲区约定了元素类型的单个写入：与同一位置的读取按同一元素定位。
+                if (Untyped(operands[0], store.Value.Width) && oracle.BufferElement(operands[0]) is { } element
+                    && Types.StorageBits(element) == store.Value.Width && oracle.ExactStride(operands[0], element)) oracle.PointerElement(operands[0], element);
+                if (oracle.Locate(operands[0], store.Value.Width) is { } location) Store(location, operands[1], store);
                 else if (oracle.Split(operands[0], store.Value.Width) is { } parts)
                     foreach (var part in parts) Store(part.Leaf, values.Syms.Slice(operands[1], part.Bit, part.Width), store);
                 break;
@@ -150,6 +154,9 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
         if (location.ByteOffset is { } offset) Use(offset, Types.Int64, user);
     }
 
+    /// <summary>访问没有位置，或只按无类型指针的字节定位。</summary>
+    private bool Untyped(Sym address, int width) => oracle.Locate(address, width) is not { } located || ManagedTypes.IsVoid(located.Type);
+
     private void Read(ReadSym read, Stmt? user)
     {
         if (!ReferenceEquals(read.Site, user)) materialized.Add(read);
@@ -176,6 +183,10 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
         switch (value)
         {
             case ReadSym read:
+                // 无类型指针上的步进读取：元素按缓冲区的约定，没有约定时按使用的类型（与下降、模板的同一读取一致）；步长须恰为元素大小。
+                if (Untyped(read.Address, read.Width)
+                    && (oracle.BufferElement(read.Address) ?? (expected is not null && Types.Kind(expected) != TypeKind.Struct ? expected : null)) is { } element
+                    && Types.StorageBits(element) == read.Width && oracle.ExactStride(read.Address, element)) oracle.PointerElement(read.Address, element);
                 Read(read, user);
                 break;
             case PhiSym phi:
