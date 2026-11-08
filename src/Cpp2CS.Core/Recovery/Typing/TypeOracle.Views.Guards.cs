@@ -9,7 +9,7 @@ namespace Cpp2CS.Recovery.Typing;
 /// 类型判断之后的视图。对象 o 通过类型判断之后，clang 仍可能经 o 本身访问判断类型的字段
 /// （模式变量 o is T t 之后读 t.f，或几条判断路径的尾部合并后共用一次读取）。
 /// 读写在 o 的静态类型上定位不到时，沿支配树由近及远取对 o 的判断：isinst&lt;T&gt;(o) 的结果（按它定位），
-/// 或内联继承检查 TypeCheck&lt;T&gt;(o 的类) 成立的分支（位置带上视图类型 T，写出为 castclass）。
+/// 或内联继承检查 TypeCheck&lt;T&gt;(o 的类) 成立的分支、类指针不是密封类 T 就抛出的检查之后（位置带上视图类型 T，写出为 castclass）。
 /// isinst 的结果按启发式使用：假定原生代码只在已知 o 是 T 的路径上按 T 的布局访问 o。
 /// </summary>
 public sealed partial class TypeOracle
@@ -59,6 +59,13 @@ public sealed partial class TypeOracle
             foreach (var call in casts.Where(c => values.BlockOf(c) == current && current.Statements.IndexOf(c) < limit)
                 .OrderByDescending(c => current.Statements.IndexOf(c)))
                 yield return (ClassOperand(call)!, values.Syms.Result(call, 0, 64));
+            // 类指针与密封类不同时抛出（as 之后访问成员的空引用检查）：之后 o 就是这个类。
+            for (var i = Math.Min(limit, current.Statements.Count) - 1; i >= 0; i--)
+                if (current.Statements[i] is Call { Op.Kind: OpKind.ThrowIf } guard
+                    && values.Operands(guard).Skip(1).FirstOrDefault() is { } condition
+                    && SymTable.Resolve(condition) is OpSym { Op: { Kind: OperatorKind.Compare, Cond: Cond.Ne }, Args: [var left, var right] }
+                    && ClassIdentity(left, right) is var (owner, exact) && ReferenceEquals(SymTable.Resolve(owner), root))
+                    yield return (exact, null);
             if (current.Predecessors is [var predecessor] && Checked(predecessor, current, root) is { } tested)
                 yield return (tested, null);
             var parent = viewDominators.Idom[current.Index];
