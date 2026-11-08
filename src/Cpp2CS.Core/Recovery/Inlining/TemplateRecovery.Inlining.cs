@@ -855,8 +855,7 @@ internal sealed partial class TemplateRecovery
                     var whole = Same(remaining[i].Value, composed, caller, trial);
                     // 形参已绑定到整体构造出的值（透明构造函数）：展开成叶子后逐个比对。
                     if (!whole && remaining[i].Value is ArgumentValue { Index: >= 0 } argument && match.Binding.TryGetValue(argument.Index, out var bound)
-                        && Composed(bound) is ComposedValue built && built.Leaves.Count == leaves.Count
-                        && built.Leaves.All(b => leaves.Any(l => l.Path.SequenceEqual(b.Path) && SameTerm(b.Value, l.Value))))
+                        && Composed(bound) is ComposedValue built && SameLeaves(built.Leaves, leaves))
                         whole = true;
                     if (!whole) break;
                     foreach (var (key, value) in trial) match.Binding[key] = value;
@@ -891,6 +890,16 @@ internal sealed partial class TemplateRecovery
             caller.Index++;
         }
         return true;
+    }
+
+    /// <summary>
+    /// 两组叶子组成同一个结构体值：同一路径上的值相同；只在一边列出的叶子必须是零（组成值里没有列出的叶子由 initobj 置零）。
+    /// </summary>
+    private bool SameLeaves(IReadOnlyList<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> a, IReadOnlyList<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> b)
+    {
+        bool Covered(IReadOnlyList<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves, (IReadOnlyList<FieldRef> Path, ManagedValue Value) leaf) =>
+            leaves.FirstOrDefault(l => l.Path.SequenceEqual(leaf.Path)) is { Path: not null } other ? SameTerm(other.Value, leaf.Value) : leaf.Value is ConstantValue { Bits: 0 };
+        return a.All(l => Covered(b, l)) && b.All(l => Covered(a, l));
     }
 
     /// <summary>写入结构体局部的字段：局部与字段路径。</summary>
