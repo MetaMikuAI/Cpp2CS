@@ -10,6 +10,8 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
     private TypeDef accessContext => methodContext.Method.Owner;
     private bool IgnoreAccess => policy != EmissionPolicy.Checked;
     private ulong? address;
+    /// <summary>方法体从不写 this 也不取它的地址：ldarg.0 读到的始终是调用者传入的对象。</summary>
+    private bool thisUnmodified;
     private bool CanAccess(MethodRef method, TypeRef? receiver) => IgnoreAccess || ManagedAccess.Method(types, accessContext, method, receiver);
     private bool CanAccess(TypeRef type) => IgnoreAccess || ManagedAccess.Type(types, accessContext, type);
     private bool CanAccess(FieldRef field, TypeRef? receiver) => IgnoreAccess || ManagedAccess.Field(types, methodContext, field, receiver);
@@ -37,6 +39,10 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
         {
             if (ConstructorInitialization.Check(recovered, out _) is { } initializationProblem) return new(EmissionProblemKind.Constructor, initializationProblem);
         }
+        thisUnmodified = !methodContext.Method.IsStatic && !recovered.Blocks.SelectMany(b => b.Statements).Any(statement =>
+            statement is ManagedStore { Target: ArgumentValue { Index: -1 } }
+            || ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement)).SelectMany(ManagedValues.Walk)
+                .Any(v => v is AddressValue { Target: ArgumentValue { Index: -1 } }));
         foreach (var statement in recovered.Blocks.SelectMany(b => b.Statements))
         {
             address = statement.Address;
@@ -276,9 +282,11 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
         if (DelegateFacts.Constructor(value.DelegateType) is not { } constructor) return new(EmissionProblemKind.Unsupported, "委托 缺少标准构造");
         if (!CanAccess(constructor, value.Type)) return new(EmissionProblemKind.AccessDenied, $"访问权限 委托构造 {constructor}");
         if (!CanAccess(value.Method, value.Binding == DelegateBinding.Static ? null : value.Target.Type)) return new(EmissionProblemKind.AccessDenied, $"访问权限 委托方法 {value.Method}");
-        // 直接 Method 符号不能换成 ldvirtftn。非 final 的虚方法只有接收者类型封闭时才采用此序列。
+        // 直接 Method 符号不能换成 ldvirtftn。非 final 的虚方法用 ldftn 绑定时，CLI 验证要求接收者类型封闭，
+        // 或接收者是未被修改的 this（引用类型中 ldarg.0 后 ldftn 基类方法，即 C# 的 base.M 委托）。
         if (value.Binding != DelegateBinding.VirtualInstance && value.Method.Method.IsVirtual && (value.Method.Method.Attributes & System.Reflection.MethodAttributes.Final) == 0
-            && value.Target.Type is Cpp2CS.Model.DefinitionRef d && (d.Definition.Attributes & System.Reflection.TypeAttributes.Sealed) == 0)
+            && value.Target.Type is Cpp2CS.Model.DefinitionRef d && (d.Definition.Attributes & System.Reflection.TypeAttributes.Sealed) == 0
+            && !(value.Target is ArgumentValue { Index: -1 } && thisUnmodified && !methodContext.Method.Owner.IsValueType))
             return new(EmissionProblemKind.Unsupported, "委托 直接虚方法绑定的验证条件未证明");
         return null;
     }
