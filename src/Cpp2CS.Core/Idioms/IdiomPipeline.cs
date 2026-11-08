@@ -48,6 +48,7 @@ internal static class IdiomPipeline
         new("once.guards", s => s.OnceGuards()),
         new("conditions.finite", s => FiniteConditions.Simplify(s.function)),
         new("conditions.zero-union", s => s.ZeroUnionConditions()),
+        new("branches.empty-arms", s => EmptyArmBranches.Run(s.function)),
         new("checked.references", s => s.CheckedReferenceValues(), Once: true),
         new("checked.types", s => s.SuccessfulTypeCheckValues(), Once: true),
         new("checked.classes", s => CheckedClassValues.Run(s.function, s.RawDefinition, s.Fresh), Once: true),
