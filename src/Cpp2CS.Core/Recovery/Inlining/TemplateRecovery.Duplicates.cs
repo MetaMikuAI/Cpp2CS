@@ -11,6 +11,9 @@ namespace Cpp2CS.Recovery.Inlining;
 /// </summary>
 internal sealed partial class TemplateRecovery
 {
+    /// <summary>地址交出后的局部内容的代号：每次取新的，与任何项都不相等。</summary>
+    private int opaqueContents = int.MinValue;
+
     /// <summary>全部分叉的记录：走过的位置、其中可能抛出的位置和赋值过的局部。</summary>
     private sealed class TraceLog
     {
@@ -33,8 +36,10 @@ internal sealed partial class TemplateRecovery
         public HashSet<ManagedValue> Accessed { get; init; } = [];
         /// <summary>上一个事件以来解引用的项（已知非空的也算）。</summary>
         public HashSet<ManagedValue> Recent { get; init; } = [];
+        /// <summary>地址已经交出（作为调用的实参或写入内存）的取址局部：之后可能经引用改变，内容不再可比。</summary>
+        public HashSet<Variable> Escaped { get; init; } = [];
         public (ulong Block, int Index) Position => (Walker.Block, Walker.Index);
-        public Trace Fork() => new() { End = End, Walker = Walker.Clone(), Log = Log, Assigned = [.. Assigned], Accessed = [.. Accessed], Recent = [.. Recent] };
+        public Trace Fork() => new() { End = End, Walker = Walker.Clone(), Log = Log, Assigned = [.. Assigned], Accessed = [.. Accessed], Recent = [.. Recent], Escaped = [.. Escaped] };
     }
 
     /// <summary>一次比较的上下文。</summary>
@@ -317,7 +322,8 @@ internal sealed partial class TemplateRecovery
             {
                 case ManagedAssignment assignment:
                     if (Term(walker, assignment.Value) is not { } value) return false;
-                    if (proof.Addressed.Contains(assignment.Target.Variable)
+                    // 取址局部在地址交出之前只经赋值改变，按环境比较；交出之后不再比较。
+                    if (trace.Escaped.Contains(assignment.Target.Variable)
                         || ManagedValues.Walk(assignment.Value).OfType<LocalValue>().Any(l => proof.Addressed.Contains(l.Variable))) return false;
                     if ((ManagedEffects.Value(assignment.Value).Kinds & ~EffectKind.Read) != 0) return true;
                     Assign(trace, assignment, value);
@@ -333,10 +339,16 @@ internal sealed partial class TemplateRecovery
         return false;
     }
 
-    /// <summary>经过当前语句：记下位置、可能抛出与新解引用的项。</summary>
+    /// <summary>经过当前语句：记下位置、可能抛出与新解引用的项；语句交出了取址局部的地址时，此后它的内容不可比。</summary>
     private void Pass(Trace trace)
     {
         var walker = trace.Walker;
+        foreach (var local in ManagedValues.Of(walker.Current).SelectMany(ManagedValues.Walk).OfType<AddressValue>().Select(a => a.Target).OfType<LocalValue>())
+            if (trace.Escaped.Add(local.Variable))
+            {
+                walker.Env[local.Variable] = new Observed(local, opaqueContents++);
+                Assigned(trace, local.Variable);
+            }
         trace.Log.Passed.Add(trace.Position);
         if (Raises(walker, walker.Current)) trace.Log.Raising.Add(trace.Position);
         foreach (var value in ManagedValues.Of(walker.Current).Concat(ManagedValues.CopiedValues(walker.Current)).SelectMany(ManagedValues.Walk))
