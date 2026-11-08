@@ -88,6 +88,9 @@ internal sealed class MethodEnvironment(MethodRef method, MachineSignature signa
             OpSym { Op.Kind: OperatorKind.Binary, Args: [EntitySym e, ConstSym c] } add when add.Op.Binary == BinOp.Add => (e, c.Signed),
             _ => (null, 0L),
         };
+        // 类的 static_fields 指针即该类的静态字段区（与 L2 的元数据符号规则相同）；路径拆分之后类才成为常量时在这里补上。
+        if (entity is { Symbol: { Kind: SymbolKind.Class, Value: TypeRef staticOwner } } && offset == RuntimeLayout.ClassStaticFields)
+            return syms.Entity(new Symbol(SymbolKind.StaticFields, staticOwner));
         if (entity is not { Symbol: { Kind: SymbolKind.Class, Value: DefinitionRef owner } } || offset < RuntimeLayout.ClassVtable) return null;
         var within = offset - RuntimeLayout.ClassVtable;
         if (within % RuntimeLayout.VirtualInvokeDataSize is not (0 or 8)) return null;

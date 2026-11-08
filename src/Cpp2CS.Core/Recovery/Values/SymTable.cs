@@ -132,6 +132,11 @@ public sealed partial class SymTable
                 }
             case OpSym { Op: { Kind: OperatorKind.Convert } op } convert when op.Conversion == ConvKind.SignExtend && low + width <= convert.Args[0].Width:
                 return Slice(convert.Args[0], low, width);
+            // 跨过原值最高位的片：原值从 low 起的高段，再按其最高位（即原值的符号位）扩展。只改写成标准宽度的整数，
+            // 其余宽度的片仍按整体的切片下降。
+            case OpSym { Op: { Kind: OperatorKind.Convert } op } convert when op.Conversion == ConvKind.SignExtend && low > 0 && low < convert.Args[0].Width
+                && width is 16 or 32 or 64 && convert.Args[0].Width - low is 8 or 16 or 32:
+                return Convert(ConvKind.SignExtend, Slice(convert.Args[0], low, convert.Args[0].Width - low), width);
             case OpSym { Op: { Kind: OperatorKind.Binary } op } binary when op.Binary is BinOp.And or BinOp.Or or BinOp.Xor
                 || low == 0 && op.Binary is BinOp.Add or BinOp.Sub or BinOp.Mul:
                 return Binary(op.Binary, Slice(binary.Args[0], low, width), Slice(binary.Args[1], low, width), width);
