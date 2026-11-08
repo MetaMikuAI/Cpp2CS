@@ -21,8 +21,9 @@ internal static class CilOperators
         _ => null,
     };
 
+    /// <summary>需要按原生语义展开的运算。取余只来自常量除法的还原，除数是非零常量（有符号时也不是 -1）。</summary>
     public static bool NativeArithmetic(BinOp op) => op is
-        BinOp.SDiv or BinOp.UDiv or BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber;
+        BinOp.SDiv or BinOp.UDiv or BinOp.SRem or BinOp.URem or BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber;
 
     public static OpCode? Unary(UnOp op) => op switch
     {

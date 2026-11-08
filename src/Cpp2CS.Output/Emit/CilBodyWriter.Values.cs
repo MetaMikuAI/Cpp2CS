@@ -177,7 +177,7 @@ internal sealed partial class CilBodyWriter
         if (CilOperators.NativeArithmetic(b.Op))
         {
             if (b.Op is BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber) { Floating(b.Left); Floating(b.Right); }
-            else { Integer(b.Left, b.Op == BinOp.SDiv); Integer(b.Right, b.Op == BinOp.SDiv); }
+            else { Integer(b.Left, b.Op is BinOp.SDiv or BinOp.SRem); Integer(b.Right, b.Op is BinOp.SDiv or BinOp.SRem); }
             NativeArithmetic.Emit(il, b.Op, b.Width, name => TypeReference(types.Corlib(name)), name => MethodReference(
                 types.CorlibMethod("System.BitConverter", name, name switch
                 {

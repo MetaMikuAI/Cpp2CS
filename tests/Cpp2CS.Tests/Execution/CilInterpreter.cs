@@ -591,6 +591,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 case Code.Sub: stack.Push(Arithmetic(Pop(), Pop(), (a, b) => a - b, (a, b) => a - b)); break;
                 case Code.Mul: stack.Push(Arithmetic(Pop(), Pop(), (a, b) => a * b, (a, b) => a * b)); break;
                 case Code.Div or Code.Div_Un: stack.Push(Divide(Pop(), Pop(), instruction.OpCode.Code == Code.Div_Un)); break;
+                case Code.Rem or Code.Rem_Un: stack.Push(Divide(Pop(), Pop(), instruction.OpCode.Code == Code.Rem_Un, remainder: true)); break;
                 case Code.And: stack.Push(Arithmetic(Pop(), Pop(), (a, b) => a & b, null)); break;
                 case Code.Or: stack.Push(Arithmetic(Pop(), Pop(), (a, b) => a | b, null)); break;
                 case Code.Xor: stack.Push(Arithmetic(Pop(), Pop(), (a, b) => a ^ b, null)); break;
@@ -700,13 +701,13 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         }
     }
 
-    // ECMA-335 III.3.31/3.32：整数除零及有符号溢出抛出；与 ARM64 原生除法的语义不同。
-    private StackValue Divide(StackValue right, StackValue left, bool unsigned)
+    // ECMA-335 III.3.31/3.32、III.3.55/3.56：整数除零及有符号溢出抛出；与 ARM64 原生除法的语义不同。浮点取余未接入。
+    private StackValue Divide(StackValue right, StackValue left, bool unsigned, bool remainder = false)
     {
-        if (left.Kind == StackKind.F && right.Kind == StackKind.F && !unsigned)
+        if (left.Kind == StackKind.F && right.Kind == StackKind.F && !unsigned && !remainder)
             return Arithmetic(right, left, (_, _) => throw new InvalidOperationException(), (a, b) => a / b);
         if (left.Kind != right.Kind || left.Kind is not (StackKind.I4 or StackKind.I8)) throw new Unsupported("div 操作数类型");
-        var result = CilIntegerDivision.Evaluate(left, right, unsigned);
+        var result = CilIntegerDivision.Evaluate(left, right, unsigned, remainder);
         return result.Value ?? throw new CilThrow(Types.Corlib(result.Exception!));
     }
 

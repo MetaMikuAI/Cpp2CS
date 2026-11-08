@@ -204,6 +204,10 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                     return new(EmissionProblemKind.Unsupported, $"运算 {b.Op} 尚未支持 CIL 写出");
                 if (CilOperators.NativeArithmetic(b.Op) && b.Width is not (32 or 64))
                     return new(EmissionProblemKind.Unsupported, $"运算 {b.Op} 需要 32 或 64 位标量");
+                // CIL rem 对零除数和 MinValue rem -1 抛出，ARM64 没有对应的取余指令，只写出不会抛出的常量除数。
+                if (b.Op is BinOp.SRem or BinOp.URem && (b.Right is not ConstantValue { Bits: var divisor }
+                    || (divisor & Expr.Mask(b.Width)) == 0 || b.Op == BinOp.SRem && (divisor & Expr.Mask(b.Width)) == Expr.Mask(b.Width)))
+                    return new(EmissionProblemKind.Unsupported, $"运算 {b.Op} 需要不会抛出的常量除数");
                 if (b.Left.Width != b.Width || b.Right.Width != b.Width && b.Op is not (BinOp.Shl or BinOp.LShr or BinOp.AShr)) return new(EmissionProblemKind.Unsupported, "运算 位宽不一致");
                 break;
             case UnaryValue u:

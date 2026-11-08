@@ -54,6 +54,14 @@ public static class NativeArithmetic
         Func<string, MethodReference>? bitConverter = null, ulong? rightConstant = null)
     {
         if (width is not (32 or 64)) throw new ArgumentOutOfRangeException(nameof(width));
+        if (operation is BinOp.SRem or BinOp.URem)
+        {
+            // 写出检查保证除数是非零常量，有符号时也不是 -1：rem 不会抛出，结果与截断除法的余数相同。
+            if (rightConstant is not { } divisor || (divisor & Expr.Mask(width)) == 0
+                || operation == BinOp.SRem && (divisor & Expr.Mask(width)) == Expr.Mask(width)) throw new ArgumentOutOfRangeException(nameof(rightConstant));
+            il.Emit(operation == BinOp.SRem ? OpCodes.Rem : OpCodes.Rem_Un);
+            return;
+        }
         // 已知非零且不会触发有符号溢出的除数不需要原生异常行为的保护分支。
         if (operation is BinOp.SDiv or BinOp.UDiv && rightConstant is { } constant
             && (constant & Expr.Mask(width)) != 0
