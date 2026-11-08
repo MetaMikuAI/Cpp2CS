@@ -55,7 +55,18 @@ internal sealed partial class BodyBuilder
                         StoreTo(StoreLocation(group.Target, group.Value), group.Value, store.Address, output);
                         return null;
                     }
+                    // 清零序列盖满的值类型字段：第一个触及它的写入整体写 default，其余写入里落在它里面的部分不再写。
+                    var zeroed = ZeroPlan(store);
+                    var own = zeroed.Count > 0 ? oracle.ZeroRun(store)!.First(m => ReferenceEquals(m.Store, store)) : default;
+                    bool Planned(long from, long to, ulong address)
+                    {
+                        if (zeroed.FirstOrDefault(z => z.Start <= from && to <= z.End) is not { Place: not null } entry) return false;
+                        if (ReferenceEquals(entry.Emitter, store) && emittedZeros.Add(entry.Place))
+                            StoreTo(entry.Place, values.Syms.Zero((int)(entry.End - entry.Start) * 8), address, output);
+                        return true;
+                    }
                     var location = oracle.Locate(operands[0], store.Value.Width) ?? oracle.ViewLocate(operands[0], store.Value.Width, store);
+                    if (location is not null && zeroed.Count > 0 && Planned(own.Start, own.End, store.Address)) return null;
                     if (location is not null) location = StoreLocation(location, operands[1]);
                     if (location is null && oracle.Split(operands[0], store.Value.Width) is { } leaves)
                     {
@@ -65,6 +76,7 @@ internal sealed partial class BodyBuilder
                         foreach (var part in leaves)
                         {
                             if (part.Bit < wholeEnd) continue;
+                            if (zeroed.Count > 0 && Planned(own.Start + part.Bit / 8, own.Start + (part.Bit + part.Width + 7) / 8, store.Address)) continue;
                             if (WholeStruct(part, store.Value.Width) is var (place, bit, size))
                             {
                                 StoreTo(place, values.Syms.Slice(operands[1], bit, size), store.Address, output);
@@ -151,6 +163,57 @@ internal sealed partial class BodyBuilder
             return (part.Leaf with { Path = path.Take(i).ToArray(), Type = structure }, bit, size);
         }
         return null;
+    }
+
+    /// <summary>
+    /// 清零序列（<see cref="TypeOracle.ZeroRun"/>）盖满的值类型字段：取各写入拆出的叶子所在的最外层、含不可访问叶子的值类型字段，
+    /// 序列的字节区间盖满它时整体写 default，写在序列中第一个触及它的写入处。序列都是零、之间没有读取，提前写零不改变结果，也不需要访问私有叶子。
+    /// 区间相对序列的根，序列中各写入共用同一份计划。
+    /// </summary>
+    private List<(Location? Place, long Start, long End, Store? Emitter)> ZeroPlan(Store store)
+    {
+        if (zeroPlans.TryGetValue(store, out var known)) return known;
+        var plan = new List<(Location? Place, long Start, long End, Store? Emitter)>();
+        if (oracle.ZeroRun(store) is { Count: > 1 } run)
+        {
+            bool Covered(long start, long end)
+            {
+                var at = start;
+                foreach (var (_, _, from, to) in run.OrderBy(m => m.Start))
+                    if (from <= at && to > at) at = to;
+                return at >= end;
+            }
+            foreach (var (member, address, offset, _) in run)
+                foreach (var part in oracle.Split(address, values.Operands(member)[1].Width) ?? [])
+                {
+                    var path = part.Leaf.Path;
+                    for (var i = 1; i < path.Count; i++)
+                    {
+                        if (FieldType(path[i - 1], null) is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct) continue;
+                        var inner = types.Projections(structure).ToArray();
+                        var suffix = path.Skip(i).ToArray();
+                        if (inner.Length == 0 || inner.FirstOrDefault(p => p.Path.SequenceEqual(suffix)) is not { } leaf) break;
+                        if (!inner.Any(p => p.Path.Any(f => !fields.Accessible(f, f.DeclaringType)))) break;
+                        var bit = part.Bit - part.FieldBit - leaf.Bit;
+                        if (bit % 8 != 0) break;
+                        var start = offset + bit / 8;
+                        var end = start + types.Size(structure);
+                        if (plan.Any(z => z.Start == start && z.End == end)) break;
+                        if (!Covered(start, end)) continue;
+                        // 触及它的写入要么整个落在里面，要么按字段拆开写：否则那次写入按定位整体写出，跳不过这一段。
+                        if (run.Any(m => m.Start < end && start < m.End && !(start <= m.Start && m.End <= end)
+                            && (oracle.Locate(m.Address, (int)(m.End - m.Start) * 8) ?? oracle.ViewLocate(m.Address, (int)(m.End - m.Start) * 8, m.Store)) is not null)) break;
+                        var emitter = run.First(m => m.Start < end && start < m.End).Store;
+                        plan.Add((part.Leaf with { Path = path.Take(i).ToArray(), Type = structure }, start, end, emitter));
+                        break;
+                    }
+                }
+            // 计划之间不能相交：相交说明同一段字节有两种解释。
+            if (plan.Any(a => plan.Any(b => !ReferenceEquals(a.Place, b.Place) && a.Start < b.End && b.Start < a.End))) plan.Clear();
+            foreach (var (member, _, _, _) in run) zeroPlans[member] = plan;
+        }
+        zeroPlans[store] = plan;
+        return plan;
     }
 
     /// <summary>

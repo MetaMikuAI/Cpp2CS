@@ -135,6 +135,39 @@ public sealed partial class TypeOracle
         return null;
     }
 
+    /// <summary>
+    /// store 所在的清零序列：同一块中相邻、与它同根且无下标、值为零的写入，之间只有不读内存的定义、空语句与写屏障。
+    /// 按语句次序给出各写入的地址与相对根的字节区间；store 不是这样的写入时为 null。clang 用几次宽写入清零相邻字段，单次写入可能跨过值类型字段的边界。
+    /// </summary>
+    public IReadOnlyList<(Store Store, Sym Address, long Start, long End)>? ZeroRun(Store store)
+    {
+        static bool Zero(Sym value) => SymTable.Resolve(value) switch { ConstSym { Value: 0 } => true, ConcatSym concat => concat.Parts.All(Zero), _ => false };
+        var operands = values.Operands(store);
+        var origin = AccessAddress(operands[0]);
+        if (origin.Index is not null || operands[1].Width % 8 != 0 || !Zero(operands[1])) return null;
+        bool Member(Stmt statement) => statement is Store other && values.Operands(other) is var o && o[1].Width % 8 == 0 && Zero(o[1])
+            && AccessAddress(o[0]) with { Offset = origin.Offset } == origin;
+        bool Passable(Stmt statement) => values.ReadsAt(statement).Count == 0 && statement is Define or Nop or Call { Op.Kind: OpKind.WriteBarrier };
+        var statements = values.BlockOf(store).Statements;
+        var index = -1;
+        for (var k = 0; k < statements.Count; k++)
+            if (ReferenceEquals(statements[k], store)) index = k;
+        var (first, last) = (index, index);
+        for (var j = index - 1; j >= 0 && (Passable(statements[j]) || Member(statements[j]) && values.ReadsAt(statements[j]).Count == 0); j--)
+            if (statements[j] is Store) first = j;
+        for (var j = index + 1; j < statements.Count && (Passable(statements[j]) || Member(statements[j]) && values.ReadsAt(statements[j]).Count == 0); j++)
+            if (statements[j] is Store) last = j;
+        var run = new List<(Store, Sym, long, long)>();
+        for (var j = first; j <= last; j++)
+            if (statements[j] is Store member)
+            {
+                var o = values.Operands(member);
+                var start = AccessAddress(o[0]).Offset;
+                run.Add((member, o[0], start, start + o[1].Width / 8));
+            }
+        return run;
+    }
+
     /// <summary>两次写入重叠的字节是否是同一个值。</summary>
     private bool SameBytes(Sym first, long firstOffset, Sym second, long secondOffset)
     {

@@ -32,6 +32,9 @@ internal sealed partial class BodyBuilder
     private readonly Dictionary<ResultSym, Call> constructions = [];
     private readonly HashSet<Sym> absorbedChecks = [];
     private readonly HashSet<ManagedStatement> omissibleReads = new(ReferenceEqualityComparer.Instance);
+    /// <summary>清零序列的整体写入计划（<see cref="ZeroPlan"/>）与已经写出的位置。</summary>
+    private readonly Dictionary<Store, List<(Location? Place, long Start, long End, Store? Emitter)>> zeroPlans = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<Location> emittedZeros = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<Call, LocalValue> exceptions = new(ReferenceEqualityComparer.Instance);
     private IReadOnlyList<ExceptionRegionPlan> regions = [];
     private EffectAnalysis effects = null!;
