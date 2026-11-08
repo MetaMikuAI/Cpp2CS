@@ -81,10 +81,58 @@ public sealed partial class TypeOracle
                         && start < AccessAddress(r.Address).Offset + r.Width / 8))) continue;
                 found = new StoreGroup(members.Select(m => m.Store).ToArray(), location, values.Syms.Concat(pieces));
             }
+            found ??= RegionGroup(statements, i, result);
             if (found is not null)
                 foreach (var member in found.Members) result[member] = found;
         }
         return result;
+    }
+
+    /// <summary>
+    /// clang 拆开结构体局部（SROA）后写回对象字段：各叶子的写入和同一对象其他字段的写入交错，填充字节不再写入。
+    /// 领头写入落在含不可访问叶子的值类型字段内时，由外向内取这样的字段：从领头写入起、到第一个读取、调用或别的根的写入为止，
+    /// 同根且落在该字段内的写入盖满它的全部叶子（填充不计），同根的其余写入都和它不相交，就合成一次整体写入，填充为未定义。
+    /// 这些写入互不相交、之间没有读取，提前到第一个成员处不改变结果；第一个成员已验证接收者。
+    /// </summary>
+    private StoreGroup? RegionGroup(IReadOnlyList<Stmt> statements, int i, Dictionary<Store, StoreGroup> result)
+    {
+        var leader = (Store)statements[i];
+        var operands = values.Operands(leader);
+        var origin = AccessAddress(operands[0]);
+        if (origin.Index is not null || operands[1].Width % 8 != 0 || Locate(operands[0], operands[1].Width) is not { Path.Count: > 1 } leaf) return null;
+        for (var k = 1; k < leaf.Path.Count; k++)
+        {
+            var field = leaf.Path[k - 1];
+            if (field.DeclaringType is not DefinitionRef owner || field.Field.Type.Substitute(owner.Arguments, []) is not DefinitionRef structure
+                || types.Kind(structure) != TypeKind.Struct || types.Size(structure) is not (> 0 and var size)
+                || types.Project(structure, leaf.Path.Skip(k).ToArray()) is not { Bit: var bit } || bit % 8 != 0) continue;
+            var leaves = types.Projections(structure).ToArray();
+            if (!leaves.Any(l => l.Path.Any(f => !ManagedAccess.Field(types, method, f, f.DeclaringType)))) continue;
+            var start = origin.Offset - bit / 8;
+            var end = start + size;
+            var members = new List<(Store Store, Sym Address, Sym Value, long Offset)>();
+            for (var j = i; j < statements.Count; j++)
+            {
+                var statement = statements[j];
+                if (values.ReadsAt(statement).Count > 0) break;
+                if (statement is Define or Nop or Call { Op.Kind: OpKind.WriteBarrier }) continue;
+                if (statement is not Store store) break;
+                var storeOperands = values.Operands(store);
+                var target = AccessAddress(storeOperands[0]);
+                if (target with { Offset = origin.Offset } != origin || storeOperands[1].Width % 8 != 0) break;
+                var to = target.Offset + storeOperands[1].Width / 8;
+                if (to <= start || target.Offset >= end) continue;
+                if (target.Offset < start || to > end || result.ContainsKey(store)
+                    || members.Any(m => m.Offset < to && target.Offset < m.Offset + m.Value.Width / 8 && !SameBytes(m.Value, m.Offset, storeOperands[1], target.Offset))) break;
+                members.Add((store, storeOperands[0], storeOperands[1], target.Offset));
+            }
+            bool Padding(long at) => !leaves.Any(l => l.Bit / 8 <= at - start && at - start < (l.Bit + l.Width + 7) / 8);
+            if (members.Count == 0 || members.FirstOrDefault(m => m.Offset == start) is not { Store: not null } first
+                || Covering(members, start, size * 8, Padding) is not { } pieces
+                || Locate(first.Address, size * 8) is not { } location || !location.Type.Equals(structure)) continue;
+            return new StoreGroup(members.Select(m => m.Store).ToArray(), location, values.Syms.Concat(pieces));
+        }
+        return null;
     }
 
     /// <summary>两次写入重叠的字节是否是同一个值。</summary>
@@ -98,10 +146,11 @@ public sealed partial class TypeOracle
 
     /// <summary>
     /// 写入组从低到高的各段：每个字节取语句次序上最后一次写入它的成员（重叠处两次写入的值相同），相邻且来自同一成员的字节合成一段。
-    /// 有字节没有被写入时为 null。
+    /// 没有被写入的字节是填充时为未定义，否则为 null。
     /// </summary>
-    private List<Sym>? Covering(List<(Store Store, Sym Address, Sym Value, long Offset)> members, long start, int width)
+    private List<Sym>? Covering(List<(Store Store, Sym Address, Sym Value, long Offset)> members, long start, int width, Func<long, bool>? padding = null)
     {
+        const int Undefined = -1;
         var pieces = new List<Sym>();
         int? owner = null;
         var from = 0L;
@@ -112,10 +161,12 @@ public sealed partial class TypeOracle
             {
                 for (var k = members.Count - 1; k >= 0 && current is null; k--)
                     if (members[k].Offset <= at && at < members[k].Offset + members[k].Value.Width / 8) current = k;
+                if (current is null && padding?.Invoke(at) == true) current = Undefined;
                 if (current is null) return null;
             }
             if (current == owner && at < start + width / 8) continue;
-            if (owner is { } previous)
+            if (owner is Undefined) pieces.Add(values.Syms.Undef((int)(at - from) * 8));
+            else if (owner is { } previous)
             {
                 var member = members[previous];
                 pieces.Add(values.Syms.Slice(member.Value, (int)(from - member.Offset) * 8, (int)(at - from) * 8));
