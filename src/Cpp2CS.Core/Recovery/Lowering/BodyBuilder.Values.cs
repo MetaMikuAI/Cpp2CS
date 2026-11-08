@@ -282,6 +282,10 @@ internal sealed partial class BodyBuilder
         if (expected is null) return Hole(address, $"类型 拼接没有期望类型 {concat}", null);
         if (oracle.OpenWholeRead(concat, expected) is { } entire) return View(entire, expected, address);
         if (types.Kind(expected) == TypeKind.Struct && oracle.JoinedSelect(concat) is { } selected) return View(selected, expected, address);
+        // 无类型指针上的字节访问（位置为 void）：bool 的零扩展即自身，按 bool 写出。
+        if (ManagedTypes.IsVoid(expected) && concat.Parts.Skip(1).All(p => p is ConstSym { Value: 0 } or UndefSym)
+            && oracle.TypeOf(concat.Parts[0]) is { } boolType && types.Kind(boolType) == TypeKind.Bool)
+            return View(concat.Parts[0], boolType, address);
         switch (types.Kind(expected))
         {
             case TypeKind.Struct when expected is DefinitionRef structure:
