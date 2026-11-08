@@ -74,7 +74,10 @@ internal sealed partial class TemplateRecovery
         var parameters = method.Method.Parameters.Count;
         var arguments = new ManagedValue[parameters];
         for (var i = 0; i < parameters; i++)
-            if ((match.Binding.TryGetValue(i, out var bound) ? Materialize(Input(bound), self, at, match) : UnreadArgument(match, method, i)) is not { } argument) { failure = "实参不能写回调用之前"; return null; }
+            if (match.Binding.ContainsKey(LeafBound - i) && !(match.Binding[i] is ComposedValue { Type: DefinitionRef structure } leaves
+                && types.Leaves(structure).All(l => leaves.Leaves.Any(b => b.Path.SequenceEqual(l.Path)))))
+            { failure = "结构体形参的字段没有全部比对到"; return null; }
+            else if ((match.Binding.TryGetValue(i, out var bound) ? Materialize(Input(bound), self, at, match) : UnreadArgument(match, method, i)) is not { } argument) { failure = "实参不能写回调用之前"; return null; }
             else arguments[i] = argument;
         var exitCopies = new List<ManagedCopy>();
         foreach (var (target, value) in copies)

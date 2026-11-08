@@ -1299,8 +1299,19 @@ internal sealed partial class TemplateRecovery
         if (m is ArgumentValue argument) return bindArguments ? BindFormal(argument.Index, argument.Type, c, binding) : m.Equals(c);
         switch (m, c)
         {
-            case (Observed a, Observed b): return a.Epoch == b.Epoch && Unify(a.Read, b.Read, binding, bindArguments);
+            case (Observed a, Observed b) when !bindArguments || FormalField(a) is null: return a.Epoch == b.Epoch && Unify(a.Read, b.Read, binding, bindArguments);
+            case (Observed a, Observed b):
+                {
+                    var trial = new Dictionary<int, ManagedValue>(binding);
+                    if (a.Epoch == b.Epoch && Unify(a.Read, b.Read, trial, bindArguments))
+                    {
+                        foreach (var (key, value) in trial) binding[key] = value;
+                        return true;
+                    }
+                    return BindFormalLeaf(FormalField(a)!.Value, c, binding);
+                }
             case (Returned a, Returned b): return a.Index == b.Index && a.Type.Equals(b.Type);
+            case (Observed a, _) when bindArguments && FormalField(a) is { } leaf: return BindFormalLeaf(leaf, c, binding);
             case (Observed or Returned, _) or (_, Observed or Returned): return false;
         }
         var sameShape = (m, c) switch
@@ -1312,6 +1323,35 @@ internal sealed partial class TemplateRecovery
         if (!sameShape) return false;
         var (left, right) = (ManagedValues.Children(m).ToArray(), ManagedValues.Children(c).ToArray());
         return left.Length == right.Length && left.Zip(right).All(p => Unify(p.First, p.Second, binding, bindArguments));
+    }
+
+    /// <summary>形参按字段绑定时，在这个键减去形参序号处记一个标记；写回实参时须每个字段都已绑定。</summary>
+    private const int LeafBound = -1000;
+
+    /// <summary>按值传入的结构体形参的直接字段读取：形参与字段。</summary>
+    private (ArgumentValue Formal, FieldValue Read)? FormalField(Observed observed) =>
+        observed.Read is FieldValue { Receiver: ArgumentValue { Index: >= 0, Type: DefinitionRef structure } formal } read
+        && types.Kind(structure) == TypeKind.Struct ? (formal, read) : null;
+
+    /// <summary>
+    /// 模板只读按值传入的结构体形参的字段，调用方没有这个结构体值（实参由几个局部组成，如 new Vector2(x, y) 的两个分量）：
+    /// 每个字段分别绑定到调用方的项，组成实参；同一字段之后须相同。形参已整体绑定时不这样绑定。
+    /// </summary>
+    private bool BindFormalLeaf((ArgumentValue Formal, FieldValue Read) leaf, ManagedValue c, Dictionary<int, ManagedValue> binding)
+    {
+        var (formal, read) = leaf;
+        var structure = (DefinitionRef)formal.Type;
+        if (!c.Type.Equals(read.Type)) return false;
+        if (binding.TryGetValue(formal.Index, out var bound))
+        {
+            if (!binding.ContainsKey(LeafBound - formal.Index) || bound is not ComposedValue partial) return false;
+            if (partial.Leaves.FirstOrDefault(l => l.Path is [var field] && field.Equals(read.Field)) is { Path: not null } known) return SameTerm(known.Value, c);
+            binding[formal.Index] = new ComposedValue(structure, OrderedLeaves(structure, [.. partial.Leaves, ([read.Field], c)]));
+            return true;
+        }
+        binding[formal.Index] = new ComposedValue(structure, [([read.Field], c)]);
+        binding[LeafBound - formal.Index] = new ConstantValue(1, types.Boolean, 1);
+        return true;
     }
 
     /// <summary>形参首次出现时绑定到调用方的项，之后须相同。值类型字段的读取与写入共享同一个位置；ref 形参统一绑定到该位置的地址。</summary>
