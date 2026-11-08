@@ -169,6 +169,15 @@ internal sealed partial class TemplateRecovery
         // 未证明的访问：同程序集的字段按原生代码直接访问，记下没有折回的内联；其余的值与写入目标都换成洞。
         ManagedValue Seal(ManagedValue value)
         {
+            // 写入经过的不可访问值类型字段没有证明：取不到它的地址，经过它的整个位置是洞。
+            if (PendingOf(value) is null && ManagedValues.Walk(value).OfType<AddressValue>().Select(a => a.Target)
+                .OfType<FieldValue>().FirstOrDefault(f => f.Pending is { Write: true } && Unfold(f) is null) is { Pending: { } through })
+            {
+                var throughReason = $"{through.Reason}，也不在可证明的内联方法体中";
+                if (inlineFailures.TryGetValue(through.Address, out var throughFailure)) throughReason += $"；内联证明：{throughFailure}";
+                holes.Add(new RecoveryHole(through.Address, throughReason));
+                return new HoleValue(throughReason, value.Type, value.Width);
+            }
             if (PendingOf(value) is { } pending)
             {
                 var reason = $"{pending.Reason}，也不在可证明的内联方法体中";
@@ -762,7 +771,15 @@ internal sealed partial class TemplateRecovery
                             .Concat(mc.Invocation.Arguments.Zip(cc.Invocation.Arguments));
                         foreach (var (a, b) in pairs)
                         {
-                            if (Term(callee, a) is not { } ta || Term(caller, b) is not { } tb || !Same(ta, tb, caller, match.Binding)) return match.Fail($"调用 {cc.Invocation.Method.Method.Name} 的实参不同（0x{cc.Address:x}）");
+                            if (Term(callee, a) is not { } ta || Term(caller, b) is not { } tb) return match.Fail($"调用 {cc.Invocation.Method.Method.Name} 的实参不同（0x{cc.Address:x}）");
+                            if (!Same(ta, tb, caller, match.Binding))
+                            {
+                                // 形参已在逐叶子的写入处绑定到组成的值，这里调用方以透明构造给出：展开构造后叶子相同就是同一个值，改绑为构造（可以写回）。
+                                if (ta is ArgumentValue { Index: >= 0 } formal && match.Binding.GetValueOrDefault(formal.Index) is ComposedValue bound
+                                    && Composed(tb) is ComposedValue constructed && SameLeaves(constructed.Leaves, bound.Leaves))
+                                    match.Binding[formal.Index] = tb;
+                                else return match.Fail($"调用 {cc.Invocation.Method.Method.Name} 的实参不同（0x{cc.Address:x}）");
+                            }
                             NoteEarlyReads(tb, caller, match);
                         }
                         var index = callee.Calls++;
@@ -852,10 +869,10 @@ internal sealed partial class TemplateRecovery
                 found = i;
             }
             Cover(caller, match);
-            // 模板整体写入结构体元素（如数组元素、字段），调用方逐个叶子写入：叶子齐全后按整体比对。
-            if (found < 0 && StructLeafTarget(target) is { } leafTarget)
+            // 模板整体写入结构体元素（如数组元素、字段），调用方逐个叶子写入：叶子齐全后按整体比对。整体可以是叶子外的任一层值类型。
+            foreach (var (leafRoot, leafPath) in found < 0 ? StructLeafTargets(target) : [])
             {
-                var (leafRoot, leafPath) = leafTarget;
+                if (found != -1) break;
                 for (var i = 0; i < remaining.Count && found < 0; i++)
                 {
                     if (remaining[i].Value.Type is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct
@@ -936,8 +953,8 @@ internal sealed partial class TemplateRecovery
         return leaves.OrderBy(l => Rank(l.Path)).ToArray();
     }
 
-    /// <summary>值类型字段的写入：落在哪个存储位置的哪条字段路径上（接收者是该位置的地址）。</summary>
-    private (ManagedValue Root, IReadOnlyList<FieldRef> Path)? StructLeafTarget(ManagedValue target)
+    /// <summary>值类型字段的写入：由内向外，每一层包含它的存储位置与其中的字段路径（接收者是该位置的地址）。</summary>
+    private IEnumerable<(ManagedValue Root, IReadOnlyList<FieldRef> Path)> StructLeafTargets(ManagedValue target)
     {
         var path = new List<FieldRef>();
         while (target is FieldValue field && (field.Receiver is AddressValue || types.Kind(field.Receiver.Type) == TypeKind.Struct))
@@ -945,8 +962,8 @@ internal sealed partial class TemplateRecovery
             path.Insert(0, field.Field);
             target = field.Receiver is AddressValue address ? address.Target : field.Receiver;
             if (target is Observed { Read: var read }) target = read;
+            yield return (target, path.ToArray());
         }
-        return path.Count > 0 ? (target, path) : null;
     }
 
     /// <summary>访问位置实际解引用的对象：沿值类型字段向外，直到引用类型的接收者。</summary>
