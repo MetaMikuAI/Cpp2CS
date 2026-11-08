@@ -667,6 +667,20 @@ internal sealed partial class TemplateRecovery
                 steps--;
                 continue;
             }
+            // 调用方在区域内建立结构体局部：逐字段写入并入局部当前的值，局部随后作为整体使用。
+            if (c is ManagedStore structStore && StructLocalLeaf(structStore.Target) is { } built && match.Defined.ContainsKey(built.Variable)
+                && caller.Env.TryGetValue(built.Variable, out var current) && current is ComposedValue { StructType: DefinitionRef builtType } composedLocal
+                && Term(caller, structStore.Value) is { } leafValue)
+            {
+                Cover(caller, match);
+                var leaves = composedLocal.Leaves.Where(l => !l.Path.SequenceEqual(built.Path)).Append((built.Path, leafValue)).ToArray();
+                var updated = composedLocal with { Leaves = OrderedLeaves(builtType, leaves) };
+                caller.Env[built.Variable] = updated;
+                match.Defined[built.Variable] = updated;
+                caller.Index++;
+                steps--;
+                continue;
+            }
             // 调用方把模板的写入沉到了随后的分支之后（如构造函数先写一个字段再求另一个字段的值）：写入的值已经确定、
             // 接收者是这次写入涉及的对象时，模板先记下这次写入，到下一批写入时一起按偏序比对；之前不能经过调用、检查或抛出。
             if (m is ManagedStore sunk && c is ManagedBranch)
@@ -769,6 +783,7 @@ internal sealed partial class TemplateRecovery
         }
         // 这批写入涉及的对象：读取它们不会比写入先抛出空引用，不构成次序。
         var receivers = remaining.Select(r => ReceiverOf(r.Location)).OfType<ManagedValue>().ToHashSet();
+        var partial = new Dictionary<int, List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>>();
         while (remaining.Count > 0)
         {
             if (!Advance(caller, match)) return match.Fail($"调用方 0x{caller.Block:x} 的值不能表示或路径成环");
@@ -783,6 +798,38 @@ internal sealed partial class TemplateRecovery
                 found = i;
             }
             Cover(caller, match);
+            // 模板整体写入结构体元素（如数组元素、字段），调用方逐个叶子写入：叶子齐全后按整体比对。
+            if (found < 0 && StructLeafTarget(target) is { } leafTarget)
+            {
+                var (leafRoot, leafPath) = leafTarget;
+                for (var i = 0; i < remaining.Count && found < 0; i++)
+                {
+                    if (remaining[i].Value.Type is not DefinitionRef structure || types.Kind(structure) != TypeKind.Struct
+                        || !Same(remaining[i].Location, leafRoot, caller, new Dictionary<int, ManagedValue>(match.Binding))) continue;
+                    var leaves = partial.TryGetValue(i, out var known) ? known : partial[i] = [];
+                    leaves.RemoveAll(l => l.Path.SequenceEqual(leafPath));
+                    leaves.Add((leafPath, stored));
+                    if (!types.Leaves(structure).All(l => leaves.Any(w => FieldPrefix(w.Path, l.Path)))) { found = -2; break; }
+                    var trial = new Dictionary<int, ManagedValue>(match.Binding);
+                    var composed = new ComposedValue(structure, OrderedLeaves(structure, leaves));
+                    var whole = Same(remaining[i].Value, composed, caller, trial);
+                    // 形参已绑定到整体构造出的值（透明构造函数）：展开成叶子后逐个比对。
+                    if (!whole && remaining[i].Value is ArgumentValue { Index: >= 0 } argument && match.Binding.TryGetValue(argument.Index, out var bound)
+                        && Composed(bound) is ComposedValue built && built.Leaves.Count == leaves.Count
+                        && built.Leaves.All(b => leaves.Any(l => l.Path.SequenceEqual(b.Path) && SameTerm(b.Value, l.Value))))
+                        whole = true;
+                    if (!whole) break;
+                    foreach (var (key, value) in trial) match.Binding[key] = value;
+                    found = i;
+                    partial.Clear();
+                }
+            }
+            if (found == -2)
+            {
+                caller.Stores.Add((target, stored));
+                caller.Index++;
+                continue;
+            }
             if (found >= 0)
             {
                 // 先于它完成的模板写入都要能交换到它之后。
@@ -804,6 +851,39 @@ internal sealed partial class TemplateRecovery
             caller.Index++;
         }
         return true;
+    }
+
+    /// <summary>写入结构体局部的字段：局部与字段路径。</summary>
+    private static (Variable Variable, IReadOnlyList<FieldRef> Path)? StructLocalLeaf(ManagedValue target)
+    {
+        var path = new List<FieldRef>();
+        while (target is FieldValue field)
+        {
+            path.Insert(0, field.Field);
+            target = field.Receiver is AddressValue { Target: var inner } ? inner : field.Receiver;
+        }
+        return path.Count > 0 && target is LocalValue local ? (local.Variable, path) : null;
+    }
+
+    /// <summary>叶子按结构体的布局次序排列，使同一值的不同写入次序得到同一形式。</summary>
+    private IReadOnlyList<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> OrderedLeaves(DefinitionRef structure, IReadOnlyList<(IReadOnlyList<FieldRef> Path, ManagedValue Value)> leaves)
+    {
+        var order = types.Leaves(structure).Select(l => l.Path).ToList();
+        int Rank(IReadOnlyList<FieldRef> path) { var at = order.FindIndex(o => FieldPrefix(path, o)); return at < 0 ? int.MaxValue : at; }
+        return leaves.OrderBy(l => Rank(l.Path)).ToArray();
+    }
+
+    /// <summary>值类型字段的写入：落在哪个存储位置的哪条字段路径上（接收者是该位置的地址）。</summary>
+    private (ManagedValue Root, IReadOnlyList<FieldRef> Path)? StructLeafTarget(ManagedValue target)
+    {
+        var path = new List<FieldRef>();
+        while (target is FieldValue field && (field.Receiver is AddressValue || types.Kind(field.Receiver.Type) == TypeKind.Struct))
+        {
+            path.Insert(0, field.Field);
+            target = field.Receiver is AddressValue address ? address.Target : field.Receiver;
+            if (target is Observed { Read: var read }) target = read;
+        }
+        return path.Count > 0 ? (target, path) : null;
     }
 
     private static ManagedValue? ReceiverOf(ManagedValue location) => location switch
