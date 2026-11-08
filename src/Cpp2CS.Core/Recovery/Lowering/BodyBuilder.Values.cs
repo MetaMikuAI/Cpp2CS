@@ -281,6 +281,7 @@ internal sealed partial class BodyBuilder
         expected ??= oracle.Unconstrained(concat.Width);
         if (expected is null) return Hole(address, $"类型 拼接没有期望类型 {concat}", null);
         if (oracle.OpenWholeRead(concat, expected) is { } entire) return View(entire, expected, address);
+        if (types.Kind(expected) == TypeKind.Struct && oracle.JoinedSelect(concat) is { } selected) return View(selected, expected, address);
         switch (types.Kind(expected))
         {
             case TypeKind.Struct when expected is DefinitionRef structure:

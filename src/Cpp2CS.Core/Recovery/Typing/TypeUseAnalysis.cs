@@ -159,6 +159,9 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
     private void Visit(Sym value, TypeRef? expected, Stmt? user)
     {
         if (oracle.AddressArm(value, expected) is { } addressed) { Location(addressed, user); return; }
+        // 与下降一致：拼接不是整体读取、各段是同一条件下的选择时，按两路整体选择。
+        if (value is ConcatSym parts && expected is not null && Types.Kind(expected) == TypeKind.Struct && oracle.CompositeRead(parts) is null
+            && oracle.OpenWholeRead(parts, expected) is null && oracle.JoinedSelect(parts) is { } selected) { Use(selected, expected, user); return; }
         if (expected is DefinitionRef structure && Types.Kind(expected) == TypeKind.Struct
             && (value is ConcatSym || oracle.BitRepresentation(value)) && oracle.Aggregate(value, structure) is { } aggregate)
         {

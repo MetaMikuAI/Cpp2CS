@@ -17,6 +17,24 @@ public sealed partial class TypeOracle
             || SymTable.Resolve(value) is OpSym { Width: not (1 or 8 or 16 or 32 or 64) })
         || TypeOf(value) is { } scalar && types.Kind(scalar) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer;
 
+    /// <summary>
+    /// 各段都是同一条件下的选择时，拼接就是按该条件在两路拼接之间选择（clang 把结构体值的条件选择拆到每一段上）；不成立时为 null。
+    /// </summary>
+    public Sym? JoinedSelect(ConcatSym bits)
+    {
+        Sym? condition = null;
+        var (chosen, other) = (new List<Sym>(), new List<Sym>());
+        foreach (var part in bits.Parts)
+        {
+            if (SymTable.Resolve(part) is not OpSym { Op.Kind: OperatorKind.Select, Args: [var test, var yes, var no] }
+                || condition is not null && !ReferenceEquals(SymTable.Resolve(test), condition)) return null;
+            condition = SymTable.Resolve(test);
+            chosen.Add(yes);
+            other.Add(no);
+        }
+        return condition is null ? null : values.Syms.Select(condition, values.Syms.Concat(chosen), values.Syms.Concat(other), bits.Width);
+    }
+
     /// <summary>先证明整体读取，再按共享布局投影字段；只省略已知为零的位，不省略未知或未定义值。</summary>
     public AggregatePlan? Aggregate(Sym bits, DefinitionRef structure)
     {
