@@ -800,15 +800,19 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             case PointerRef pointer when index is not null || offset != 0:
                 {
                     var size = ElementSize(pointer.Element);
-                    if (size > 0 && index is not null) (index, scale) = Rescaled(index, scale, size);
                     if (size > 0 && offset % size == 0 && width == StorageBits(pointer.Element)
-                        && (index is null || scale == size))
+                        && (index is null || scale >= size && scale % size == 0))
                     {
-                        // 比例下标可能只保留低位；先零扩展再乘比例，保留模 2^64 的字节地址。
+                        // 比例下标可能只保留低位；先零扩展再乘原比例，保留模 2^64 的字节地址。
+                        // 截掉的高位乘比例后都会溢出时，直接用未截断的值。
                         var displacement = values.Syms.Const(unchecked((ulong)offset), 64);
                         if (index is not null)
+                        {
+                            var bits = SymTable.Resolve(index) is SliceSym { Low: 0, Base.Width: 64 } kept
+                                && System.Numerics.BitOperations.TrailingZeroCount((uint)scale) >= 64 - kept.Width ? kept.Base : index;
                             displacement = values.Syms.Binary(BinOp.Add,
-                                values.Syms.Binary(BinOp.Mul, values.Syms.ZeroExtend(index, 64), values.Syms.Const((ulong)scale, 64), 64), displacement, 64);
+                                values.Syms.Binary(BinOp.Mul, values.Syms.ZeroExtend(bits, 64), values.Syms.Const((ulong)scale, 64), 64), displacement, 64);
+                        }
                         return new Location(LocationKind.Reference, root, null, 0, null, [], pointer.Element) { ByteOffset = displacement };
                     }
                     return index is null && types.Kind(pointer.Element) == TypeKind.Struct
