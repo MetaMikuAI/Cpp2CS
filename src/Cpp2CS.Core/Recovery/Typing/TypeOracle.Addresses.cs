@@ -134,7 +134,7 @@ public sealed partial class TypeOracle
             return index is null ? SlotTypes(owner, offset, statics.Kind == SymbolKind.ThreadStaticFields ? SlotKind.ThreadStatic : SlotKind.Static) : null;
         switch (TypeOf(root))
         {
-            case ArrayRef array when ElementSize(array.Element) is var size and > 0 && offset >= RuntimeLayout.ArrayData && (index is null || scale == size):
+            case ArrayRef array when ElementSize(array.Element) is var size and > 0 && offset >= RuntimeLayout.ArrayData && (index is null || scale % size == 0):
                 return ValueTypes(array.Element, (offset - RuntimeLayout.ArrayData) % size);
             case DefinitionRef reference when ManagedTypes.IsReferenceType(reference) && index is null:
                 return SlotTypes(reference, offset, SlotKind.Instance);

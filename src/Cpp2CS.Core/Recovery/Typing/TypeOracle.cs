@@ -641,7 +641,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
 
     /// <summary>
     /// 左移或乘常量的下标：低位补零的拼接、或乘以常量。被移位的部分本身是同一下标几个倍数之和时（x + (x &lt;&lt; 1)，
-    /// 编译器把乘 3、5、9 写成移位加），系数相乘，元素大小不是 2 的幂的数组也能按下标访问。
+    /// 编译器把乘 3、5、9 写成移位加），或本身又乘了常量时（(x * 8) &lt;&lt; 2），系数相乘，元素大小不是 2 的幂的数组也能按下标访问。
     /// </summary>
     private (Sym Index, int Factor)? Scaled(Sym term)
     {
@@ -652,7 +652,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             OpSym { Op.Kind: OperatorKind.Binary, Args: [var x, ConstSym { Value: > 1 and <= 4096 } factor] } mul when mul.Op.Binary == BinOp.Mul => (x, (int)factor.Value),
             _ => null,
         };
-        if (simple is var (inner, outer) && Multiple(inner) is var (index, times)) return (index, outer * times);
+        if (simple is var (inner, outer) && (Multiple(inner) ?? Scaled(inner)) is var (index, times) && outer * times <= 4096) return (index, outer * times);
         return simple;
     }
 
@@ -710,6 +710,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                         && RuntimeScaledIndex(root, index) is { } scaledIndex)
                         return new(LocationKind.Element, root, scaledIndex, 0, null, [], array.Element);
                     var size = ElementSize(array.Element);
+                    if (size > 0 && index is not null) (index, scale) = Rescaled(index, scale, size);
                     if (size <= 0 || index is null && offset < RuntimeLayout.ArrayData || index is not null && scale != size) return null;
                     var within = offset - RuntimeLayout.ArrayData;
                     var inside = (int)((within % size + size) % size);
@@ -749,6 +750,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             case PointerRef pointer when index is not null || offset != 0:
                 {
                     var size = ElementSize(pointer.Element);
+                    if (size > 0 && index is not null) (index, scale) = Rescaled(index, scale, size);
                     if (size > 0 && offset % size == 0 && width == StorageBits(pointer.Element)
                         && (index is null || scale == size))
                     {
@@ -779,6 +781,12 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         }
         return null;
     }
+
+    /// <summary>比例是元素大小的整数倍：下标是 index 乘以倍数（如 float 数组按 i * 8 + k 访问）。其他情况不变。</summary>
+    private (Sym Index, int Scale) Rescaled(Sym index, int scale, int size) =>
+        scale > size && scale % size == 0
+            ? (values.Syms.Binary(BinOp.Mul, index, values.Syms.Const((ulong)(scale / size), index.Width), index.Width), size)
+            : (index, scale);
 
     /// <summary>下标乘以数组对象类的 element_size（[[array] + 0x104]）时的下标。</summary>
     private Sym? RuntimeScaledIndex(Sym array, Sym? scaled)
@@ -864,7 +872,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         else switch (TypeOf(root))
         {
             case ArrayRef array when types.Kind(array.Element) == TypeKind.Struct && ElementSize(array.Element) is var size and > 0 && offset >= RuntimeLayout.ArrayData
-                && (index is null || scale == size):
+                && (index is null || scale % size == 0):
                 container = (array.Element, (offset - RuntimeLayout.ArrayData) % size + RuntimeLayout.ObjectHeaderSize, false, false);
                 break;
             case DefinitionRef reference when ManagedTypes.IsReferenceType(reference) && index is null:
