@@ -13,6 +13,8 @@ public static class RuntimeLayout
     // Il2CppObject / Il2CppArray / Il2CppString
     public const int ObjectKlass = 0x00, ObjectMonitor = 0x08, ObjectHeaderSize = Cpp2CS.Model.TypeLayout.ObjectHeaderSize;
     public const int ArrayBounds = 0x10, ArrayMaxLength = 0x18, ArrayData = 0x20;
+    // Il2CppArrayBounds：多维数组每维一项，长度为 il2cpp_array_size_t，下界为 int32
+    public const int ArrayBoundSize = 0x10, ArrayBoundLength = 0x00, ArrayBoundLowerBound = 0x08;
     public const int StringLength = 0x10, StringChars = 0x14;
 
     // Il2CppClass

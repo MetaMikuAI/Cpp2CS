@@ -42,6 +42,12 @@ public sealed record CheckedCastValue(ManagedValue Operand, TypeRef Target) : Ma
 public sealed record ArrayLengthValue(ManagedValue Array, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record StringLengthValue(ManagedValue String, TypeRef Type) : ManagedValue(Type, 32);
 public sealed record ArrayElementValue(ManagedValue Array, ManagedValue Index, TypeRef Type, int Width) : ManagedValue(Type, Width);
+/// <summary>多维数组的元素：读写与取址写出为数组类型的 Get、Set、Address（ECMA-335 II.14.2），各维下标为 int32，越界抛出 IndexOutOfRangeException。</summary>
+public sealed record MultiArrayElementValue(ManagedValue Array, IReadOnlyList<ManagedValue> Indices, TypeRef Type, int Width) : ManagedValue(Type, Width);
+/// <summary>分配多维数组：newobj 数组类型的构造函数，各维长度为 int32。</summary>
+public sealed record NewMultiArrayValue(ArrayRef ArrayType, IReadOnlyList<ManagedValue> Lengths) : ManagedValue(ArrayType, 64);
+/// <summary>数组一维的长度或下界（System.Array.GetLength / GetLowerBound，int32）。</summary>
+public sealed record ArrayBoundValue(ManagedValue Array, int Dimension, bool Lower, TypeRef Type) : ManagedValue(Type, 32);
 public sealed record FieldValue(ManagedValue Receiver, FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width)
 {
     /// <summary>F9 认回证明；保留原字段的求值位置，避免把条件表达式里的调用提前执行。</summary>

@@ -52,6 +52,9 @@ internal sealed partial class CilBodyWriter
             case StaticFieldValue s: il.Emit(OpCodes.Ldsflda, FieldReference(s.Field)); break;
             case ArrayElementValue element:
                 Value(element.Array); ElementIndex(element.Index); il.Emit(OpCodes.Ldelema, TypeReference(element.Type)); break;
+            case MultiArrayElementValue element:
+                Value(element.Array); foreach (var index in element.Indices) Value(index);
+                il.Emit(OpCodes.Call, ArrayMethod((ArrayRef)element.Array.Type, "Address")); break;
             default: throw new NotSupportedException($"没有可取地址的存储位置：{value}");
         }
     }

@@ -177,35 +177,58 @@ internal sealed class EffectAnalysis(ValueModel values, TypeOracle oracle, IRead
     /// <summary>
     /// 越界检查被吸收：直线路径上随后第一个有副作用或可能抛出的语句是对同一数组、同一下标的元素读写（ldelem/stelem 自行检查下标，III.4.7）。
     /// 两点之间只允许不抛出的语句。length 是该数组长度的读取。
+    /// 多维数组的一维长度来自 bounds：codegen 依次检查各维再访问元素（GetAt/SetAt），这一维的检查由随后同一数组、这一维同一下标的元素访问吸收，
+    /// 其间可以有同一数组其他维的检查。
     /// </summary>
     public bool BoundsAbsorbed(Block block, int index, Sym position, Sym length)
     {
-        if (LengthOf(length) is not { } array) return false;
         var wanted = TypeOracle.ArrayIndex(position);
-        bool Same(Sym address, int width) => oracle.Locate(address, width) is { Kind: LocationKind.Element } element && ReferenceEquals(SymTable.Resolve(element.Base!), array)
-            && (element.Index is { } at ? ReferenceEquals(TypeOracle.ArrayIndex(at), wanted) : wanted is ConstSym c && c.Value == (ulong)element.ConstantIndex);
+        Sym array;
+        Func<Sym, int, bool> same;
+        Func<Stmt, bool> sibling = _ => false;
+        if (DimensionOf(length) is var (multi, dimension))
+        {
+            array = multi;
+            same = (address, width) => oracle.Locate(address, width) is { Kind: LocationKind.MultiElement, Indices: { } indices } element
+                && ReferenceEquals(SymTable.Resolve(element.Base!), multi) && ReferenceEquals(SymTable.Resolve(indices[dimension]), wanted);
+            sibling = statement => statement is Call { Op.Kind: OpKind.BoundsCheck } check && values.Operands(check) is [_, _, var other, ..]
+                && DimensionOf(other) is var (owner, _) && ReferenceEquals(owner, multi);
+        }
+        else if (LengthOf(length) is { } vector)
+        {
+            array = vector;
+            same = (address, width) => oracle.Locate(address, width) is { Kind: LocationKind.Element } element && ReferenceEquals(SymTable.Resolve(element.Base!), vector)
+                && (element.Index is { } at ? ReferenceEquals(TypeOracle.ArrayIndex(at), wanted) : wanted is ConstSym c && c.Value == (ulong)element.ConstantIndex);
+        }
+        else return false;
         var nonNull = NonNull(block, index);
         nonNull.Add(array);
         foreach (var (statement, guarded) in Following(block, index))
         {
+            if (sibling(statement)) continue;
             if (!guarded)
             {
                 if (Transparent(statement, nonNull)) continue;
                 return false;
             }
             var reads = values.ReadsAt(statement).ToArray();
-            if (reads.Any(r => Same(r.Address, r.Width))) return true;
+            if (reads.Any(r => same(r.Address, r.Width))) return true;
             if (reads.Any(r => semantics.Read(r, nonNull).Effects.MayThrow)) return false;
             switch (statement)
             {
                 case Define when Transparent(statement, nonNull): continue;
-                case Store store: return Same(values.Operands(store)[0], store.Value.Width);
+                case Store store: return same(values.Operands(store)[0], store.Value.Width);
                 case Call call when MachineEffects.Operation(call).CanDiscard: continue;
                 default: return false;
             }
         }
         return false;
     }
+
+    /// <summary>值是哪个多维数组哪一维的长度（bounds 中长度的读取）。</summary>
+    private (Sym Array, int Dimension)? DimensionOf(Sym length) =>
+        TypeOracle.ArrayIndex(length) is ReadSym read && oracle.Locate(read.Address, read.Width) is { Kind: LocationKind.Dimension, Base: { } array } bound
+            ? (SymTable.Resolve(array), (int)bound.ConstantIndex) : null;
 
     private bool BoundsCheckAbsorbed(Block block, int index, Call call)
     {

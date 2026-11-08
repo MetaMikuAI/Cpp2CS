@@ -229,7 +229,7 @@ internal sealed partial class BodyBuilder
             var input = RuntimeOps.Of(op.Kind)!.Inputs!(call, Arguments, owner.oracle)[index];
             if (input.Kind == RuntimeInputKind.Value) return owner.View(input.Value, input.Type, call.Address);
             if (input.Kind == RuntimeInputKind.Pointee && owner.values.CellContent(call, input.Pointee, arguments, false) is { } content)
-                return owner.View(content, input.Type, call.Address);
+                return owner.View(input.Width > 0 ? owner.values.Syms.Slice(content, input.Low, input.Width) : content, input.Type, call.Address);
             return input.Type is { } type && owner.oracle.Locate(input.Value, owner.types.StorageBits(type)) is { } location
                 ? owner.LocationValue(location, call.Address) : owner.Hole(call.Address, "运行时 输入位置未知", input.Type);
         }

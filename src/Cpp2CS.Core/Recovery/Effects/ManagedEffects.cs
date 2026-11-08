@@ -18,12 +18,13 @@ public static class ManagedEffects
                 or ByRefRef { Element: DefinitionRef { Definition.IsValueType: true } } ? MemoryKind.Local : MemoryKind.Instance),
             StaticFieldValue => Read(MemoryKind.Static),
             ArrayLengthValue or StringLengthValue => Read(MemoryKind.Instance),
-            ArrayElementValue => Read(MemoryKind.Element),
+            ArrayElementValue or MultiArrayElementValue => Read(MemoryKind.Element),
+            ArrayBoundValue => Read(MemoryKind.Instance),
             IndirectValue { Address: AddressValue { Target: LocalValue } } => Read(MemoryKind.Local),
             IndirectValue => Read(MemoryKind.Reference),
             AddressValue address => Address(address.Target, evidence),
             NewObjectValue => EffectSummary.Unknown,
-            NewArrayValue or BoxValue or DelegateValue => new(EffectKind.Allocate, ExceptionEffect.Any),
+            NewArrayValue or NewMultiArrayValue or BoxValue or DelegateValue => new(EffectKind.Allocate, ExceptionEffect.Any),
             CheckedCastValue or UnboxAddressValue or UnboxValue => new(EffectKind.None, ExceptionEffect.Any),
             BinaryValue { Op: BinOp.SDiv or BinOp.UDiv or BinOp.SRem or BinOp.URem } => new(EffectKind.None, ExceptionEffect.Other),
             BinaryValue or UnaryValue or ConversionValue or ComparisonValue or BooleanValue or NegatedValue
@@ -48,6 +49,7 @@ public static class ManagedEffects
                 or ByRefRef { Element: DefinitionRef { Definition.IsValueType: true } } ? MemoryKind.Local : MemoryKind.Instance),
             StaticFieldValue => Access(MemoryKind.Static),
             ArrayElementValue a => Value(a.Array, evidence) | Value(a.Index, evidence) | Access(MemoryKind.Element),
+            MultiArrayElementValue a => a.Indices.Aggregate(Value(a.Array, evidence), (sum, index) => sum | Value(index, evidence)) | Access(MemoryKind.Element),
             IndirectValue i => Value(i.Address, evidence),
             _ => EffectSummary.Unknown,
         };

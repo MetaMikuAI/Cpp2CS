@@ -127,6 +127,17 @@ internal sealed partial class BodyBuilder
                     ManagedValue value = new ArrayElementValue(array, index, element, Width(element));
                     return path.Count == 0 ? value : Nest(store ? new AddressValue(value) : value, path, location.Type, store, address);
                 }
+            case LocationKind.MultiElement:
+                {
+                    var array = View(location.Base!, oracle.TypeOf(location.Base!), address);
+                    var indices = location.Indices!.Select(i => View(i, types.Int32, address)).ToArray();
+                    var element = array.Type is ArrayRef a ? a.Element : location.Type;
+                    ManagedValue value = new MultiArrayElementValue(array, indices, element, Width(element));
+                    return path.Count == 0 ? value : Nest(store ? new AddressValue(value) : value, path, location.Type, store, address);
+                }
+            case LocationKind.Dimension or LocationKind.LowerBound:
+                return new ArrayBoundValue(View(location.Base!, oracle.TypeOf(location.Base!), address), (int)location.ConstantIndex,
+                    location.Kind == LocationKind.LowerBound, types.Int32);
             case LocationKind.Length:
                 return new ArrayLengthValue(View(location.Base!, oracle.TypeOf(location.Base!), address), types.Int32, 32);
             case LocationKind.StringLength:

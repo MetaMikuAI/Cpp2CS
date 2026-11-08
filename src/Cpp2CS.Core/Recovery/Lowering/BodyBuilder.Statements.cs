@@ -39,9 +39,10 @@ internal sealed partial class BodyBuilder
             {
                 var assignment = new ManagedAssignment(statement.Address, Local(read, value.Type), value);
                 output.Add(assignment);
-                // 只可能抛空引用，而且随后第一次访问同一对象时抛同样的异常：结果没人读就不用写。
-                if (value is ArrayLengthValue or StringLengthValue or FieldValue { Accessor: null, Pending: null }
-                    && effects.Absorbed(block, index + 1, oracle.Decompose(read.Address).Root, null)) omissibleReads.Add(assignment);
+                // 只可能抛空引用，而且随后第一次访问同一对象时抛同样的异常：结果没人读就不用写。维长经 bounds 读取，判空的是所属数组。
+                var receiver = value is ArrayBoundValue && oracle.Locate(read.Address, read.Width) is { Base: { } array } ? array : oracle.Decompose(read.Address).Root;
+                if (value is ArrayLengthValue or ArrayBoundValue or StringLengthValue or FieldValue { Accessor: null, Pending: null }
+                    && effects.Absorbed(block, index + 1, receiver, null)) omissibleReads.Add(assignment);
             }
         }
         switch (statement)

@@ -82,7 +82,7 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
             {
                 if (input.Kind == RuntimeInputKind.Value) Use(input.Value, input.Type, call);
                 else if (input.Kind == RuntimeInputKind.Pointee && values.CellContent(call, input.Pointee, arguments, false) is { } content)
-                    Use(content, input.Type, call);
+                    Use(input.Width > 0 ? values.Syms.Slice(content, input.Low, input.Width) : content, input.Type, call);
                 else if (input.Type is { } type && oracle.Locate(input.Value, Types.StorageBits(type)) is { } location) Location(location, call);
             }
             return;
@@ -146,6 +146,7 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
             index = TypeOracle.ArrayIndex(index);
             Use(index, index.Width == 32 ? Types.Int32 : Types.Int64, user);
         }
+        foreach (var at in location.Indices ?? []) Use(at, Types.Int32, user);
         if (location.ByteOffset is { } offset) Use(offset, Types.Int64, user);
     }
 

@@ -6,11 +6,11 @@ using Cpp2CS.Recovery.Values;
 
 namespace Cpp2CS.Recovery.Typing;
 
-public enum LocationKind : byte { Instance, Reference, Static, ThreadStatic, Element, Length, StringLength, StringChar, Local, Argument }
+public enum LocationKind : byte { Instance, Reference, Static, ThreadStatic, Element, Length, StringLength, StringChar, Local, Argument, MultiElement, Dimension, LowerBound }
 
 /// <summary>
 /// 一次读写指向的 IL 位置。Base：实例字段的对象、经引用访问的指针、数组或字符串，可寻址局部为单元起点的局部地址；
-/// Index：元素下标（为 null 时下标为常量 ConstantIndex）；
+/// Index：元素下标（为 null 时下标为常量 ConstantIndex）；多维数组的元素由 Indices 给出各维下标，维长与下界的维号为 ConstantIndex；
 /// Owner：静态字段所属类型；Path：从根位置进入值类型的字段链；Type：被访问值的类型。
 /// </summary>
 /// <summary>访问的一段：字段 Leaf 的 [FieldBit, FieldBit+Width) 位位于访问的第 Bit 位起。</summary>
@@ -23,6 +23,8 @@ public sealed record Location(LocationKind Kind, Sym? Base, Sym? Index, long Con
     public bool Strided { get; init; }
     /// <summary>实例位置的根按这个类型看待（类型判断成立之后的对象，写出为 castclass）。</summary>
     public TypeRef? View { get; init; }
+    /// <summary>多维数组元素各维的 int32 下标（Kind 为 MultiElement）。</summary>
+    public IReadOnlyList<Sym>? Indices { get; init; }
 }
 
 /// <summary>
@@ -749,12 +751,23 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             return FieldAt(owner, (int)offset, width, true, thread) is var (path, type)
                 ? new Location(thread ? LocationKind.ThreadStatic : LocationKind.Static, null, null, 0, owner, path, type) : null;
         }
+        if (index is null && BoundsOf(root) is var (multiArray, rank) && offset >= 0 && offset / RuntimeLayout.ArrayBoundSize < rank)
+        {
+            var dimension = offset / RuntimeLayout.ArrayBoundSize;
+            return (offset % RuntimeLayout.ArrayBoundSize, width) switch
+            {
+                (RuntimeLayout.ArrayBoundLength, 32 or 64) => new(LocationKind.Dimension, multiArray, null, dimension, null, [], types.Int32),
+                (RuntimeLayout.ArrayBoundLowerBound, 32) => new(LocationKind.LowerBound, multiArray, null, dimension, null, [], types.Int32),
+                _ => null,
+            };
+        }
         var rootType = TypeOf(root);
         switch (rootType)
         {
             case ArrayRef array:
                 {
                     if (index is null && offset == RuntimeLayout.ArrayMaxLength && width is 32 or 64) return new(LocationKind.Length, root, null, 0, null, [], types.Int32);
+                    if (!array.IsVector) return MultiElement(root, array, offset, index, scale, width);
                     // 可变大小的元素：codegen 按数组类的 element_size 计算下标，只按位置访问。
                     if (width < 0 && ManagedAbi.SharedValue(array.Element) && offset == RuntimeLayout.ArrayData && scale == 1
                         && RuntimeScaledIndex(root, index) is { } scaledIndex)
@@ -856,6 +869,105 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     }
 
     /// <summary>比例是元素大小的整数倍：下标是 index 乘以倍数（如 float 数组按 i * 8 + k 访问）。其他情况不变。</summary>
+    /// <summary>多维数组的 bounds 指针（Il2CppArray.bounds 的读取）所属的数组与维数。</summary>
+    private (Sym Array, int Rank)? BoundsOf(Sym root) =>
+        SymTable.Resolve(root) is ReadSym { Width: 64 } read && Decompose(read.Address) is (var array, RuntimeLayout.ArrayBounds, null, _)
+            && TypeOf(array) is ArrayRef { IsVector: false } type ? (SymTable.Resolve(array), type.Rank) : null;
+
+    /// <summary>
+    /// 多维数组的元素：元素按行优先存放，codegen 的 GetAt/SetAt 不减下界，线性下标为 ((i0·n1 + i1)·n2 + i2)…，
+    /// 每层的乘数是同一数组下一维长度的读取。逐层拆出各维下标，都要是 int32（或其扩展）。
+    /// </summary>
+    private Location? MultiElement(Sym root, ArrayRef array, long offset, Sym? index, int scale, int width)
+    {
+        if (index is null) return null;
+        Sym linear;
+        IReadOnlyList<FieldRef> path = [];
+        var type = array.Element;
+        if (width < 0 && ManagedAbi.SharedValue(array.Element) && offset == RuntimeLayout.ArrayData && scale == 1
+            && (RuntimeScaledIndex(root, index) ?? RuntimeScaledIndex(root, Commuted(index))) is { } scaled)
+            linear = scaled;
+        else
+        {
+            var size = ElementSize(array.Element);
+            if (size <= 0) return null;
+            (index, scale) = Rescaled(index, scale, size);
+            if (scale != size || offset < RuntimeLayout.ArrayData) return null;
+            var within = offset - RuntimeLayout.ArrayData;
+            var inside = (int)(within % size);
+            linear = within / size == 0 ? index : values.Syms.Binary(BinOp.Add, index, values.Syms.Const(unchecked((ulong)(within / size)), index.Width), index.Width);
+            if (inside != 0 || types.Kind(array.Element) == TypeKind.Struct && width != size * 8)
+            {
+                if (FieldAt(array.Element, inside + RuntimeLayout.ObjectHeaderSize, width, false, false) is not var (fields, fieldType)) return null;
+                (path, type) = (fields, fieldType);
+            }
+            else if (width > StorageBits(array.Element)) return null;
+        }
+        var indices = new Sym[array.Rank];
+        for (var dimension = array.Rank - 1; dimension >= 0; dimension--)
+        {
+            Sym at;
+            if (dimension == 0) at = linear;
+            else if (OuterIndex(root, linear, dimension) is var (inner, outer)) (at, linear) = (inner, outer);
+            else return null;
+            if (Index32(at) is not { } narrow) return null;
+            indices[dimension] = narrow;
+        }
+        return new Location(LocationKind.MultiElement, root, null, 0, null, path, type) { Indices = indices };
+    }
+
+    /// <summary>乘积交换两个因子（运行时元素大小可能在任一侧）。</summary>
+    private Sym Commuted(Sym product) => SymTable.Resolve(product) is OpSym { Op.Kind: OperatorKind.Binary, Args: [var left, var right] } mul && mul.Op.Binary == BinOp.Mul
+        ? values.Syms.Binary(BinOp.Mul, right, left, mul.Width) : product;
+
+    /// <summary>linear = i + n·rest，n 是数组第 dimension 维长度的读取：给出 (i, rest)；没有其他加数时 i 为 0。</summary>
+    private (Sym Inner, Sym Outer)? OuterIndex(Sym array, Sym linear, int dimension)
+    {
+        var terms = new List<Sym>();
+        Flatten(linear, terms);
+        for (var t = 0; t < terms.Count; t++)
+        {
+            if (terms[t] is not OpSym { Op.Kind: OperatorKind.Binary, Args: [var left, var right] } product || product.Op.Binary != BinOp.Mul) continue;
+            foreach (var (length, rest) in new[] { (left, right), (right, left) })
+            {
+                if (DimensionRead(length) is not { } read || Locate(read.Address, read.Width) is not { Kind: LocationKind.Dimension } bound
+                    || !ReferenceEquals(SymTable.Resolve(bound.Base!), SymTable.Resolve(array)) || bound.ConstantIndex != dimension) continue;
+                var others = terms.Where((_, k) => k != t).ToArray();
+                var inner = others.Length == 0 ? values.Syms.Const(0, 32)
+                    : others.Aggregate((sum, term) => values.Syms.Binary(BinOp.Add, sum, term, sum.Width));
+                return (inner, rest);
+            }
+        }
+        return null;
+    }
+
+    /// <summary>维长的读取：整个读取、32 位读取的零扩展，或比例下标里只保留低位的读取。</summary>
+    private static ReadSym? DimensionRead(Sym length) => SymTable.Resolve(length) switch
+    {
+        ReadSym read => read,
+        ConcatSym { Parts: [ReadSym low, ConstSym { Value: 0 }] } => low,
+        SliceSym { Low: 0, Base: ReadSym kept } => kept,
+        _ => null,
+    };
+
+    /// <summary>
+    /// int32 的下标：32 位的值，它的符号扩展或零扩展（只保留低位时看被截取的值），或可表示为 int32 的常量。
+    /// 零扩展与符号扩展只在负下标上不同，负下标两种寻址都越界。
+    /// </summary>
+    private Sym? Index32(Sym index)
+    {
+        var value = SymTable.Resolve(index);
+        if (value is SliceSym { Low: 0, Width: > 32 } kept) value = SymTable.Resolve(kept.Base);
+        return value switch
+        {
+            { Width: 32 } narrow => narrow,
+            OpSym { Op: { Kind: OperatorKind.Convert } op, Args: [{ Width: 32 } narrow] } when op.Conversion == ConvKind.SignExtend => narrow,
+            ConcatSym { Parts: [{ Width: 32 } low, ConstSym { Value: 0 }] } => low,
+            ConstSym c when c.Signed is >= int.MinValue and <= int.MaxValue => values.Syms.Const(unchecked((ulong)(uint)(int)c.Signed), 32),
+            _ => null,
+        };
+    }
+
     private (Sym Index, int Scale) Rescaled(Sym index, int scale, int size) =>
         scale > size && scale % size == 0
             ? (values.Syms.Binary(BinOp.Mul, index, values.Syms.Const((ulong)(scale / size), index.Width), index.Width), size)

@@ -9,8 +9,8 @@ namespace Cpp2CS.Recovery.Runtime;
 public sealed record PointerEffect(int Argument, int Value, int Size, MemoryAccess Access);
 
 public enum RuntimeInputKind { Value, Location, Pointee }
-/// <summary>运行时操作实际使用的值与期望类型；Pointee 指名提升单元中的逻辑值编号。</summary>
-public sealed record RuntimeInput(Sym Value, TypeRef? Type, RuntimeInputKind Kind = RuntimeInputKind.Value, int Pointee = 0);
+/// <summary>运行时操作实际使用的值与期望类型；Pointee 指名提升单元中的逻辑值编号，Width 不为 0 时只取逻辑值从 Low 位起的一段。</summary>
+public sealed record RuntimeInput(Sym Value, TypeRef? Type, RuntimeInputKind Kind = RuntimeInputKind.Value, int Pointee = 0, int Low = 0, int Width = 0);
 
 /// <summary>运行时操作的类型查询。</summary>
 public interface IRuntimeTyping
@@ -259,16 +259,23 @@ public static class RuntimeOps
                 return true;
             },
         };
+        // 向量的第二个实参是长度；其他数组（GenArrayNew）是栈上各维长度（il2cpp_array_size_t）的数组，取每项的低 32 位作 int32 长度。
         yield return new(OpKind.NewArray)
         {
-            Inputs = (_, a, t) => a.Count == 2 ? [new(a[1], t.Types.Int32)] : [],
+            Inputs = (call, a, t) => a.Count != 2 ? [] : t.ClassOperand(call) is ArrayRef { IsVector: false } multi
+                ? Enumerable.Range(0, multi.Rank).Select(d => new RuntimeInput(a[1], t.Types.Int32, RuntimeInputKind.Pointee, 1, d * 64, 32)).ToArray()
+                : [new(a[1], t.Types.Int32)],
+            PointerEffects = (call, abi) => ClassOperand(call) is ArrayRef { IsVector: false } multi && call.Arguments.Length == 2
+                ? [new PointerEffect(1, 1, 8 * multi.Rank, MemoryAccess.Read)] : [],
             Behavior = new(EffectKind.Allocate, ExceptionEffect.Any),
             ResultType = (call, t) => t.ClassOperand(call),
             Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
             {
                 terminal = null;
                 if (c.ClassOperand is not ArrayRef array || c.Arguments.Count != 2) return false;
-                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, array), new NewArrayValue(array, c.Input(0))));
+                ManagedValue created = array.IsVector ? new NewArrayValue(array, c.Input(0))
+                    : new NewMultiArrayValue(array, Enumerable.Range(0, array.Rank).Select(c.Input).ToArray());
+                c.Emit(new ManagedAssignment(c.Call.Address, c.Local(c.Result, array), created));
                 return true;
             },
         };

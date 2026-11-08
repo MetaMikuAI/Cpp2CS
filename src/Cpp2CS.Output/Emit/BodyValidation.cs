@@ -64,7 +64,7 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                 if (diagnostics.Emit) diagnostics.Write("emit", statement.Address, $"  [写出问题] 0x{statement.Address:x} {statement}");
                 return writeProblem;
             }
-            if (statement is ManagedStore { Target: not (FieldValue or StaticFieldValue or ArrayElementValue or IndirectValue) }) return new(EmissionProblemKind.Unsupported, "写入位置不是字段或数组元素");
+            if (statement is ManagedStore { Target: not (FieldValue or StaticFieldValue or ArrayElementValue or MultiArrayElementValue or IndirectValue) }) return new(EmissionProblemKind.Unsupported, "写入位置不是字段或数组元素");
             if (statement is ManagedCheck check && !CanAccess(check.Exception, null)) return new(EmissionProblemKind.AccessDenied, $"访问权限 异常构造 {check.Exception}");
             var values = ManagedValues.Of(statement).Concat(statement switch
             {
@@ -157,7 +157,19 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                     return new(EmissionProblemKind.Unsupported, "引用转换 需要引用类型的来源与目标");
                 break;
             case ArrayLengthValue length:
-                if (length.Array.Type is not ArrayRef { IsVector: true }) return new(EmissionProblemKind.Unsupported, "数组 长度需要一维向量类型");
+                if (length.Array.Type is not ArrayRef) return new(EmissionProblemKind.Unsupported, "数组 长度需要数组类型");
+                break;
+            case NewMultiArrayValue array:
+                if (array.ArrayType.IsVector || array.ArrayType.Rank != array.Lengths.Count || array.Lengths.Any(l => l.Width != 32 || types.Kind(l.Type) != TypeKind.Int))
+                    return new(EmissionProblemKind.Unsupported, "多维数组 分配的维数或长度类型不符");
+                break;
+            case MultiArrayElementValue element:
+                if (element.Array.Type is not ArrayRef { IsVector: false } multi || multi.Rank != element.Indices.Count || !element.Type.Equals(multi.Element)
+                    || element.Indices.Any(i => i.Width != 32 || types.Kind(i.Type) != TypeKind.Int)) return new(EmissionProblemKind.Unsupported, "多维数组 元素的维数或类型不符");
+                break;
+            case ArrayBoundValue bound:
+                if (bound.Array.Type is not ArrayRef bounded || bound.Dimension < 0 || bound.Dimension >= bounded.Rank || !bound.Type.Equals(types.Int32))
+                    return new(EmissionProblemKind.Unsupported, "数组 维数或长度类型不符");
                 break;
             case StringLengthValue length:
                 if (!length.String.Type.Equals(types.String) || !length.Type.Equals(types.Int32)) return new(EmissionProblemKind.Unsupported, "字符串 长度类型不符");
@@ -259,7 +271,7 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
 
     private bool Addressable(ManagedValue value) => value switch
     {
-        ArgumentValue { Index: >= 0 } or LocalValue or IndirectValue or StaticFieldValue or ArrayElementValue => true,
+        ArgumentValue { Index: >= 0 } or LocalValue or IndirectValue or StaticFieldValue or ArrayElementValue or MultiArrayElementValue => true,
         FieldValue field => types.Kind(field.Receiver.Type) != TypeKind.Struct || Addressable(field.Receiver),
         _ => false,
     };

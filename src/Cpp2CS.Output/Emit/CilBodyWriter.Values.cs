@@ -95,8 +95,20 @@ internal sealed partial class CilBodyWriter
                 EmitDelegate(delegated); break;
             case NewArrayValue array:
                 Value(array.Length); il.Emit(OpCodes.Newarr, TypeReference(array.ArrayType.Element)); break;
+            case NewMultiArrayValue array:
+                foreach (var length in array.Lengths) Value(length);
+                il.Emit(OpCodes.Newobj, ArrayMethod(array.ArrayType, ".ctor")); break;
+            // ldlen 只用于一维向量；其他数组经 System.Array 的实例方法取总长度。
+            case ArrayLengthValue { Array.Type: ArrayRef { IsVector: false } } length:
+                Value(length.Array); il.Emit(OpCodes.Callvirt, ArrayInstanceMethod("get_Length", 0)); break;
             case ArrayLengthValue length:
                 Value(length.Array); il.Emit(OpCodes.Ldlen); il.Emit(OpCodes.Conv_U4); break;
+            case ArrayBoundValue bound:
+                Value(bound.Array); il.Emit(OpCodes.Ldc_I4, bound.Dimension);
+                il.Emit(OpCodes.Callvirt, ArrayInstanceMethod(bound.Lower ? "GetLowerBound" : "GetLength", 1)); break;
+            case MultiArrayElementValue element:
+                Value(element.Array); foreach (var index in element.Indices) Value(index);
+                il.Emit(OpCodes.Call, ArrayMethod((ArrayRef)element.Array.Type, "Get")); break;
             case StringLengthValue length:
                 Value(length.String);
                 var stringLength = ((DefinitionRef)types.String).Definition.Methods.Single(m => m.Name == "get_Length" && !m.IsStatic && m.Parameters.Count == 0);
@@ -357,4 +369,22 @@ internal sealed partial class CilBodyWriter
     }
 
     private void Invert() { il.Emit(OpCodes.Ldc_I4_0); il.Emit(OpCodes.Ceq); }
+
+    /// <summary>多维数组类型由运行时提供的方法（ECMA-335 II.14.2）：.ctor 与 Get、Address 取各维 int32 下标，Set 再取元素值。</summary>
+    private MethodReference ArrayMethod(ArrayRef array, string name)
+    {
+        var module = destination.Module;
+        var element = TypeReference(array.Element);
+        TypeReference returned = name switch { ".ctor" or "Set" => module.TypeSystem.Void, "Address" => new ByReferenceType(element), _ => element };
+        var method = new MethodReference(name, returned, TypeReference(array)) { HasThis = true };
+        for (var i = 0; i < array.Rank; i++) method.Parameters.Add(new ParameterDefinition(module.TypeSystem.Int32));
+        if (name == "Set") method.Parameters.Add(new ParameterDefinition(element));
+        return method;
+    }
+
+    private MethodReference ArrayInstanceMethod(string name, int parameters)
+    {
+        var array = types.CorlibDefinition("System.Array") ?? throw new InvalidOperationException("corlib 没有 System.Array");
+        return MethodReference(new MethodRef(array.Methods.Single(m => m.Name == name && !m.IsStatic && m.Parameters.Count == parameters), [], []));
+    }
 }

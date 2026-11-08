@@ -39,6 +39,9 @@ internal sealed partial class CilBodyWriter
             case ManagedStore { Target: ArrayElementValue element } s:
                 Value(element.Array); ElementIndex(element.Index); Value(s.Value);
                 il.Emit(OpCodes.Stelem_Any, TypeReference(element.Type)); break;
+            case ManagedStore { Target: MultiArrayElementValue element } s:
+                Value(element.Array); foreach (var index in element.Indices) Value(index); Value(s.Value);
+                il.Emit(OpCodes.Call, ArrayMethod((ArrayRef)element.Array.Type, "Set")); break;
             case ManagedCall c:
                 var call = Invocation(c.Invocation);
                 if (c.Inlined) InlineCalls.Add(call, c.Invocation.Method);
