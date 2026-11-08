@@ -196,7 +196,7 @@ internal sealed partial class TemplateRecovery
         if (ends.Count == 0 || ends.Any(e => e.Result is null || e.State is null || e.Exit != ends[0].Exit)) return false;
         var memory = ends.Any(e => ReadsMemory(e.Result!));
         var returnType = method.Concrete(method.Method.ReturnType);
-        if (ends.Any(e => e.Result is not ConstantValue && !e.Result!.Type.Equals(returnType))) return false;
+        if (ends.Any(e => e.Result is not ConstantValue && !e.Result!.Type.Equals(returnType) && !UntypedRead(e.Result, returnType))) return false;
         // 出口块还有区域外的入口时，它的语句不只属于这个区域。
         var exit = ends[0].Exit;
         if (exit.Index == 0 && Predecessors(blocks, exit.Block).Any(p => !match.Covered.Contains((p.Address, p.Statements.Count - 1)))) return false;
@@ -220,6 +220,13 @@ internal sealed partial class TemplateRecovery
         match.Failure = failure;
         return false;
     }
+
+    /// <summary>
+    /// 经 void* 的读取没有元素类型（如 UnsafeUtility.ReadArrayElement 内联后的 *(T*)p）：位宽等于返回类型的存储宽度时，
+    /// 它就是把这段内存按返回类型解释。
+    /// </summary>
+    private bool UntypedRead(ManagedValue result, TypeRef returnType) =>
+        result is IndirectValue indirect && types.Kind(indirect.Type) == TypeKind.Void && indirect.Width == Width(returnType);
 
     private static bool ReadsMemory(ManagedValue term)
     {
