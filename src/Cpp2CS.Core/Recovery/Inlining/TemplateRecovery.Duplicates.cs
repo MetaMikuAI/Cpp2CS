@@ -124,6 +124,7 @@ internal sealed partial class TemplateRecovery
         match.Exit = kept.Exit;
         match.ExitCopies = copies;
         match.Result = used ? result : null;
+        match.Forms.Add("duplicated");
         // 保留的代码不进入区域，即使另一条路径也走到了那里。
         match.Covered.UnionWith(removed.SelectMany(r => r.Log.Passed).Except(retained.Passed));
         match.Raising.UnionWith(removed.SelectMany(r => r.Log.Raising).Except(retained.Passed).Select(p => p.Block));

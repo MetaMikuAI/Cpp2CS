@@ -59,6 +59,7 @@ internal static class ArchitectureChecks
         EntryKinds(checks, facts, types);
         Templates(checks, types);
         RepeatedExitCopies(checks, types);
+        CallerArgumentsAtExit(checks, types);
         DuplicatedInlineSuffix(checks, types);
         Accessors(checks, types);
         ClosedGenericAccess(checks, types);
@@ -1224,6 +1225,51 @@ internal static class ArchitectureChecks
         }
     }
 
+    /// <summary>
+    /// 出口复制保存的是调用方自己的实参，序号恰与模板的形参相同、那个形参绑定的是别的值：复制按调用方的项比较，
+    /// 不把调用方的实参当作模板形参。
+    /// </summary>
+    private static void CallerArgumentsAtExit(Assertions check, ManagedTypes types)
+    {
+        var owner = Type("ExitArguments", 850);
+        var ownerRef = new DefinitionRef(owner, []);
+        var field = new FieldDef { Index = 850, Owner = owner, Name = "value", Type = types.Int32, Attributes = FieldAttributes.Private, Offset = 16 };
+        owner.Fields = [field];
+        var definition = Method(owner, "Set", 850);
+        definition.Parameters = [new("value", types.Int32, 0, null, false)];
+        owner.Methods = [definition];
+        var method = new MethodRef(definition, [], []);
+        var input = new ArgumentValue(0, types.Int32, 32);
+        var zero = new ConstantValue(0, types.Int32, 32);
+        FieldValue Field(ManagedValue receiver) => new(receiver, new(field, ownerRef), types.Int32, 32);
+        var self = new ArgumentValue(-1, ownerRef, 64);
+        ManagedBranch Branch(ManagedValue value) => new(4, new ComparisonValue(Cond.Eq, value, zero, types.Boolean), new(16, []), new(32, []));
+        var template = new ManagedBody(method, [new(0, [new ManagedStore(0, Field(self), input), Branch(input)]),
+            new(16, [new ManagedStore(16, Field(self), zero), new ManagedReturn(20, null)]),
+            new(32, [new ManagedStore(32, Field(self), input), new ManagedReturn(36, null)])]);
+        MethodRecoveryResult? Summary(MethodRef requested) => requested.Method == definition ? new(method, 0, template, []) : null;
+        var callerDefinition = Method(Type("ExitArgumentUser", 851, CallerAssembly), "Run", 851);
+        callerDefinition.ReturnType = ownerRef;
+        var caller = new MethodRef(callerDefinition, [], []);
+        // 调用方的实参 0 是接收者，模板的形参 0 绑定到调用方的实参 1。
+        var receiver = new ArgumentValue(0, ownerRef, 64);
+        var argument = new ArgumentValue(1, types.Int32, 32);
+        var kept = new LocalValue(new(Storage.Temp(850), 1), ownerRef, 64);
+        var other = new ArgumentValue(2, ownerRef, 64);
+        foreach (var same in new[] { true, false })
+        {
+            var body = new ManagedBody(caller, [
+                new(0, [new ManagedStore(0, Field(receiver) with { Pending = new(0, "待证字段", true) }, argument), Branch(argument)]),
+                new(16, [new ManagedStore(16, Field(receiver) with { Pending = new(16, "待证字段", true) }, zero), new ManagedJump(20, new(64, [new ManagedCopy(kept, receiver)]))]),
+                new(32, [new ManagedStore(32, Field(receiver) with { Pending = new(32, "待证字段", true) }, argument), new ManagedJump(36, new(64, [new ManagedCopy(kept, same ? receiver : other)]))]),
+                new(64, [new ManagedReturn(64, kept)])]);
+            var evidence = new InlineEvidence(types, caller, Summary);
+            var recovered = new TemplateRecovery(types, caller, Summary, evidence).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
+            check.Equal(same, recovered.Holes.Count == 0, same ? "出口复制保存调用方自己的实参" : "各路径保存的调用方实参不同");
+            if (same) check.True(recovered.Rules.Any(r => r.Rule == TemplateRecovery.ProofRule && r.Code!.Contains("caller-argument")), "内联证明记下出口复制用到调用方实参");
+        }
+    }
+
     private static void Templates(Assertions check, ManagedTypes types)
     {
         var owner = Type("Storage", 10);
@@ -1260,7 +1306,7 @@ internal static class ArchitectureChecks
         var local = new MethodRef(Method(Type("LocalConsumer", 14), "Write", 14), [], []);
         var unfolded = new TemplateRecovery(types, local, Summary, new InlineEvidence(types, local, Summary)).Run(
             Body(new ConstantValue(7, types.Int32, 32)) with { Method = local }, new Dictionary<Variable, PendingConstruction>(), 0);
-        check.True(unfolded.Holes.Count == 0 && unfolded.Unfolded.Count == 2
+        check.True(unfolded.Holes.Count == 0 && unfolded.Rules.Count(r => r.Rule == TemplateRecovery.UnfoldedRule) == 2
             && unfolded.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>().All(s => s.Target is FieldValue { Unfolded: true, Pending: null }),
             "同程序集的调用方在证明被拒绝时按原生代码写出字段");
         check.True(!failure.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Inlined), "失败的证明不改写成调用");

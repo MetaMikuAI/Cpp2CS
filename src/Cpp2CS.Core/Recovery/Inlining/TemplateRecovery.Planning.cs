@@ -197,6 +197,10 @@ internal sealed partial class TemplateRecovery
             replacement.AddRange(blocks[exit.Block].Statements.Skip(exit.Index));
             if (exit.Block != startBlock && !shared.Contains(exit.Block)) internalBlocks.Add(exit.Block);
         }
-        return new InlineReplacement(startBlock, replacement.ToArray(), internalBlocks.ToFrozenSet(), match.Rewritten) { JoinedTry = joined };
+        var form = match.Continuation is not null ? "branch" : match.ResultAtUses is not null ? "uses" : match.Returns ? "return" : "exit";
+        if (copies.Count > 0) form += "+copies";
+        var proof = new Cpp2CS.Diagnostics.RuleTrace(ProofRule, at, Cpp2CS.Diagnostics.RewriteStatus.Applied,
+            string.Join("+", match.Forms.Prepend(form)), $"{method.Method.Owner.FullName}.{method.Method.Name}", null);
+        return new InlineReplacement(startBlock, replacement.ToArray(), internalBlocks.ToFrozenSet(), match.Rewritten) { JoinedTry = joined, Proof = proof };
     }
 }

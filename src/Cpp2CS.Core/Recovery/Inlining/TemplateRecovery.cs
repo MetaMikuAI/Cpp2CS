@@ -5,26 +5,27 @@ namespace Cpp2CS.Recovery.Inlining;
 /// <summary>新对象的基类构造已下降，分配类型的构造仍待模板证明。</summary>
 internal sealed record PendingConstruction(ulong Address, DefinitionRef Allocated, MethodRef Base);
 
-internal sealed record TemplateResult(ManagedBody Body, IReadOnlyList<RecoveryHole> Holes, IReadOnlyList<Cpp2CS.Diagnostics.RuleTrace> Unfolded);
+/// <summary>模板证明的结果；Rules 是按原生代码直接写出的访问（inline.unfolded）与成立的内联证明（inline.proof）。</summary>
+internal sealed record TemplateResult(ManagedBody Body, IReadOnlyList<RecoveryHole> Holes, IReadOnlyList<Cpp2CS.Diagnostics.RuleTrace> Rules);
 
 /// <summary>依据其他方法的托管恢复体证明内联；不读取机器状态或类型求解器。</summary>
 internal sealed partial class TemplateRecovery(ManagedTypes types, MethodRef caller,
     Func<MethodRef, MethodRecoveryResult?> summaries, InlineEvidence fields)
 {
     private readonly List<RecoveryHole> holes = [];
-    private readonly List<Cpp2CS.Diagnostics.RuleTrace> unfolded = [];
+    private readonly List<Cpp2CS.Diagnostics.RuleTrace> rules = [];
     private int nextLocal;
 
     public TemplateResult Run(ManagedBody body, IReadOnlyDictionary<Variable, PendingConstruction> constructions, int firstLocal)
     {
         holes.Clear();
-        unfolded.Clear();
+        rules.Clear();
         inlineFailures.Clear();
         constructionFailures.Clear();
         pendingConstructions = constructions;
         nextLocal = firstLocal;
         var recovered = InlineInverse(body);
-        return new(recovered, holes.ToArray(), unfolded.ToArray());
+        return new(recovered, holes.ToArray(), rules.ToArray());
     }
 
     /// <summary>
@@ -38,6 +39,19 @@ internal sealed partial class TemplateRecovery(ManagedTypes types, MethodRef cal
         || method.Method.Owner.Assembly == caller.Method.Owner.Assembly && summary.Rules.Any(r => r.Rule == UnfoldedRule) ? null : summary;
 
     internal const string UnfoldedRule = "inline.unfolded";
+
+    /// <summary>
+    /// 成立并采用的内联证明：Code 是出口的形式（exit、return、branch、uses）加上证明用到的比较形式，Detail 是模板方法。
+    /// 只作诊断与按形式抽样，不影响写出。
+    /// </summary>
+    internal const string ProofRule = "inline.proof";
+
+    /// <summary>采用一次替换，记下它的证明。</summary>
+    private ManagedBody Adopt(InlineReplacement replaced, ManagedBody applied)
+    {
+        if (replaced.Proof is { } proof) rules.Add(proof);
+        return applied;
+    }
 
     /// <summary>
     /// 泛型定义的方法体取自共享实例，类型里可能还留着共享实参 object，没有代回类型形参。按原生代码直接写出的访问不经过证明，

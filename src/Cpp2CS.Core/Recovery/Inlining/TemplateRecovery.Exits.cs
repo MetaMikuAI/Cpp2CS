@@ -447,29 +447,28 @@ internal sealed partial class TemplateRecovery
     }
 
     /// <summary>
-    /// 出口复制的候选与这条路径保存的值都是调用方的项，只有代入的返回值是模板的项。先按模板的项合一；
-    /// 不成立且返回值的形参都已绑定时，再把它们代回调用方，两边按调用方的项逐一比较，调用方自己的实参不当作模板形参去绑定。
+    /// 出口复制的候选与这条路径保存的值都是调用方的项，只有代入的返回值是模板的项：返回值中的形参写成 <see cref="FormalValue"/>，
+    /// 合一时只绑定它们，调用方自己的实参按原样比较。
     /// </summary>
     private bool AgreeAt(ManagedValue candidate, Func<ManagedValue, InlineEnd, ManagedValue> view, InlineEnd end,
         IReadOnlyList<(ManagedValue Actual, ManagedValue Carrier)> pairs, ManagedValue held, Dictionary<int, ManagedValue> binding)
     {
         var trial = new Dictionary<int, ManagedValue>(binding);
-        if (Unify(view(Instantiate(candidate, pairs), end), view(held, end), trial))
-        {
-            foreach (var (key, value) in trial) binding[key] = value;
-            return true;
-        }
-        bool Bound(ManagedValue value)
-        {
-            if (value is ArgumentValue argument) return binding.ContainsKey(argument.Index);
-            var bound = true;
-            MapTerm(value, child => { bound &= Bound(child); return child; });
-            return bound;
-        }
-        if (!pairs.All(p => Bound(p.Actual))) return false;
-        var actual = pairs.Select(p => (Bind(p.Actual, binding), p.Carrier)).ToArray();
-        return Unify(view(Instantiate(candidate, actual), end), view(held, end), binding, bindArguments: false);
+        if (!Unify(view(Instantiate(candidate, Formal(pairs)), end), view(held, end), trial, bindArguments: false)) return false;
+        foreach (var (key, value) in trial) binding[key] = value;
+        return true;
     }
+
+    private static bool MentionsArgument(ManagedValue value)
+    {
+        if (value is ArgumentValue) return true;
+        var found = false;
+        MapTerm(value, child => { found |= MentionsArgument(child); return child; });
+        return found;
+    }
+
+    private static (ManagedValue Actual, ManagedValue Carrier)[] Formal(IReadOnlyList<(ManagedValue Actual, ManagedValue Carrier)> pairs) =>
+        pairs.Select(p => (Formal(p.Actual), p.Carrier)).ToArray();
 
     /// <summary>把结果局部代入这条路径的返回值，并折叠常量。</summary>
     private ManagedValue Instantiate(ManagedValue value, IReadOnlyList<(ManagedValue Actual, ManagedValue Carrier)> carriers)
@@ -544,14 +543,17 @@ internal sealed partial class TemplateRecovery
                     var same = Enumerable.Range(0, ends.Count).All(i => SameTerm(held[i], held[0]));
                     if (same || !ReadsCurrent(current) || !Agree(current, Current)) continue;
                     function = current;
+                    match.Forms.Add("current");
                 }
                 else if (!Agree(abstracted, (value, _) => value))
                 {
                     trial = new(match.Binding);
                     function = Enumerable.Range(0, ends.Count).OrderBy(i => ends[i].Result is ConstantValue ? 1 : 0).Select(i => Current(abstracted, ends[i])).First();
                     if (!Agree(function, Current)) { match.Fail("出口复制在各路径上不同"); return null; }
+                    match.Forms.Add("current");
                 }
                 foreach (var (key, value) in trial) match.Binding[key] = value;
+                if (MentionsArgument(function)) match.Forms.Add("caller-argument");
                 if (result is not null && Mentions(function, result)) used = true;
                 copies.Add((target, function));
             }
@@ -605,7 +607,9 @@ internal sealed partial class TemplateRecovery
         }
         foreach (var end in match.Ends)
         {
-            var expected = Instantiate(predicate, Pairs(end));
+            // 谓词是调用方的项，代入的返回值是模板的项（见 AgreeAt）。
+            var expected = Instantiate(predicate, Formal(Pairs(end)));
+            if (MentionsArgument(predicate)) match.Forms.Add("caller-argument");
             if (expected is ConstantValue constant)
             {
                 if (end.Exit.Index != 0) return match.Fail("条件续接点位于块中间");
@@ -616,8 +620,8 @@ internal sealed partial class TemplateRecovery
                 return match.Fail("返回路径不受同一条件支配");
             var canonical = Canonical(expected);
             bool same;
-            if (Unify(canonical, Canonical(condition), match.Binding)) same = true;
-            else if (Unify(canonical, Canonical(Negate(condition)), match.Binding)) same = false;
+            if (Unify(canonical, Canonical(condition), match.Binding, bindArguments: false)) same = true;
+            else if (Unify(canonical, Canonical(Negate(condition)), match.Binding, bindArguments: false)) same = false;
             else return match.Fail("返回值与调用方的比较不同");
             covered.Add(end.Exit);
             if (!Along(end, branch.Taken, same) || !Along(end, branch.Fallthrough, !same)) return false;

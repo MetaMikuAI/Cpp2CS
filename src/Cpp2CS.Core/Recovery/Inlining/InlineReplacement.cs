@@ -9,6 +9,9 @@ internal sealed record InlineReplacement(ulong Start, IReadOnlyList<ManagedState
     /// <summary>起点块要并入 try 的区域：替换成的调用可能抛出，而起点块原来不在 try 里。</summary>
     public IReadOnlySet<ManagedRegion> JoinedTry { get; init; } = new HashSet<ManagedRegion>();
 
+    /// <summary>这次替换的证明（<c>inline.proof</c>）。</summary>
+    public Cpp2CS.Diagnostics.RuleTrace? Proof { get; init; }
+
     public ManagedBody Apply(ManagedBody body) => body with
     {
         Blocks = body.Blocks.Where(b => !Removed.Contains(b.Address))

@@ -60,11 +60,23 @@ internal sealed partial class TemplateRecovery
         caller.Dereferenced.UnionWith(walker.Dereferenced);
     }
 
-    private static ManagedValue Bind(ManagedValue value, IReadOnlyDictionary<int, ManagedValue> binding) => value switch
+    /// <summary>
+    /// 代入已绑定的形参。ref 形参绑定的是位置的地址（见 <see cref="BindFormal"/>），经它读写字段时与调用方直接访问该位置的形式相同。
+    /// </summary>
+    private static ManagedValue Bind(ManagedValue value, IReadOnlyDictionary<int, ManagedValue> binding)
     {
-        ArgumentValue argument when binding.TryGetValue(argument.Index, out var bound) => bound,
-        _ => MapTerm(value, child => Bind(child, binding)),
-    };
+        switch (value)
+        {
+            case ArgumentValue argument when binding.TryGetValue(argument.Index, out var bound):
+                return bound;
+            case FormalValue formal when binding.TryGetValue(formal.Index, out var bound):
+                return bound;
+            case FieldValue { Receiver: ArgumentValue or FormalValue } field when Bind(field.Receiver, binding) is AddressValue { Target: var location }:
+                return field with { Receiver = location };
+            default:
+                return MapTerm(value, child => Bind(child, binding));
+        }
+    }
 
     /// <summary>路径事实给出的常量：条件 x == k 成立或 x != k 不成立时，x 就是 k。</summary>
     private ConstantValue? KnownValue(ManagedValue term, Walker caller)

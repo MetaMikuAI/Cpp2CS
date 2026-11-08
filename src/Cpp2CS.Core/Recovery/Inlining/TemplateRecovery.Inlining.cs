@@ -17,13 +17,25 @@ internal sealed partial class TemplateRecovery
     private sealed record Observed(ManagedValue Read, int Epoch) : ManagedValue(Read.Type, Read.Width);
     /// <summary>区域内第 Index 次调用的结果。</summary>
     private sealed record Returned(int Index, TypeRef Type, int Width) : ManagedValue(Type, Width);
+    /// <summary>
+    /// 放进调用方项中比较的模板形参。出口复制、续接谓词和区域起点的内容是调用方的项，其中的 <see cref="ArgumentValue"/>
+    /// 是调用方自己的实参；代入的模板项把形参写成这个，合一时只有它参与绑定（见 <see cref="Formal"/>）。
+    /// </summary>
+    private sealed record FormalValue(int Index, TypeRef Type, int Width) : ManagedValue(Type, Width);
 
-    /// <summary>证明项的子项：带代数的读取继续遍历，调用结果是原子；其余沿用托管值结构。</summary>
+    /// <summary>证明项的子项：带代数的读取继续遍历，调用结果与形参是原子；其余沿用托管值结构。</summary>
     private static ManagedValue MapTerm(ManagedValue value, Func<ManagedValue, ManagedValue> map) => value switch
     {
         Observed observed => observed with { Read = map(observed.Read) },
-        Returned => value,
+        Returned or FormalValue => value,
         _ => ManagedValues.Map(value, map),
+    };
+
+    /// <summary>模板的项要和调用方的项拼在一起比较时，把其中的形参写成 <see cref="FormalValue"/>。</summary>
+    private static ManagedValue Formal(ManagedValue value) => value switch
+    {
+        ArgumentValue argument => new FormalValue(argument.Index, argument.Type, argument.Width),
+        _ => MapTerm(value, Formal),
     };
 
     private sealed class Walker
@@ -48,12 +60,14 @@ internal sealed partial class TemplateRecovery
         public Lazy<IReadOnlyDictionary<Variable, ManagedValue>>? Available { get; init; }
         /// <summary>区域开始时字段的已知内容（<see cref="AvailableFields.HeldAt"/>）。</summary>
         public Lazy<IReadOnlyList<(FieldValue Location, ManagedValue Value)>>? Held { get; init; }
+        /// <summary>证明用到的比较形式，与 <see cref="InlineMatch.Forms"/> 是同一个集合。</summary>
+        public SortedSet<string>? Forms { get; init; }
 
         public ManagedStatement Current => Blocks[Block].Statements[Index];
 
         public Walker Clone() => new()
         {
-            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Deferred = [.. Deferred], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions], Dereferenced = [.. Dereferenced], FrozenLocals = FrozenLocals, Available = Available, Held = Held,
+            Blocks = Blocks, Caller = Caller, Block = Block, Index = Index, Env = new(Env), Stores = [.. Stores], Deferred = [.. Deferred], Visited = [.. Visited], Epoch = Epoch, Calls = Calls, Assumptions = [.. Assumptions], Dereferenced = [.. Dereferenced], FrozenLocals = FrozenLocals, Available = Available, Held = Held, Forms = Forms,
         };
     }
 
@@ -80,6 +94,8 @@ internal sealed partial class TemplateRecovery
             return false;
         }
         public LocalValue? Result { get; set; }
+        /// <summary>证明用到的比较形式（诊断用，见 <see cref="ProofRule"/>）；尝试过但未采用的分支也可能留下记录。</summary>
+        public SortedSet<string> Forms { get; init; } = new(StringComparer.Ordinal);
         /// <summary>区域之后的语句里，子表达式换成结果局部后的样子。</summary>
         public IReadOnlyDictionary<(ulong Block, int Index), ManagedStatement>? Rewritten { get; set; }
         /// <summary>上述替换用的结果局部。</summary>
@@ -159,7 +175,7 @@ internal sealed partial class TemplateRecovery
                 if (inlineFailures.TryGetValue(pending.Address, out var failure)) reason += $"；内联证明：{failure}";
                 if (Unfold(value) is { } direct)
                 {
-                    unfolded.Add(new Cpp2CS.Diagnostics.RuleTrace(UnfoldedRule, pending.Address, Cpp2CS.Diagnostics.RewriteStatus.Applied, "same-assembly", reason, null));
+                    rules.Add(new Cpp2CS.Diagnostics.RuleTrace(UnfoldedRule, pending.Address, Cpp2CS.Diagnostics.RewriteStatus.Applied, "same-assembly", reason, null));
                     return ManagedValues.Map(direct, Seal);
                 }
                 holes.Add(new RecoveryHole(pending.Address, reason));
@@ -225,7 +241,7 @@ internal sealed partial class TemplateRecovery
                     if (match is not null && match.Covered.Contains((block, index))
                         && PlanReplacement(body, blocks, block, start, method, match, out failure) is { } replaced)
                     {
-                        body = Constructed(replaced.Apply(body), variable, method);
+                        body = Constructed(Adopt(replaced, replaced.Apply(body)), variable, method);
                         failures.Clear();
                         constructed = true;
                         break;
@@ -325,7 +341,7 @@ internal sealed partial class TemplateRecovery
                     if (block.Statements[start] is not (ManagedStore or ManagedCall or ManagedAssignment)) continue;
                     var match = Match(body, blocks, block.Address, start, template, ancestor.Arguments, out _);
                     if (match is not null && PlanReplacement(body, blocks, block.Address, start, method, match, out _) is { } replaced)
-                        return replaced.Apply(body);
+                        return Adopt(replaced, replaced.Apply(body));
                 }
         }
         return null;
@@ -431,7 +447,7 @@ internal sealed partial class TemplateRecovery
         starts.AddRange(UsesOfPendingRead(blocks, anchor.Block, anchor.Index).Where(p => !starts.Contains(p)));
         var failures = new List<(string Reason, int Progress)>();
         // 成立的证明都与原生代码等价，每个候选取第一个成立的起点，候选之间选覆盖语句最多的：较小的模板会拿走更大模板要比对的分支或读取，之后更大的模板就证不出来了。覆盖相同时保留候选次序。
-        var (best, bestCovered) = ((ManagedBody?)null, -1);
+        var (best, bestCovered, bestReplacement) = ((ManagedBody?)null, -1, (InlineReplacement?)null);
         foreach (var (method, template) in InlineCandidates(field, receiver))
         {
             if (fields.CallFailure(method, receiver, receiver is null ? field.DeclaringType : null) is { } illegal) { failures.Add((illegal, -1)); continue; }
@@ -444,7 +460,7 @@ internal sealed partial class TemplateRecovery
                 {
                     if (Accepted(replaced) is { } accepted)
                     {
-                        if (match.Covered.Count > bestCovered) (best, bestCovered) = (accepted, match.Covered.Count);
+                        if (match.Covered.Count > bestCovered) (best, bestCovered, bestReplacement) = (accepted, match.Covered.Count, replaced);
                         break;
                     }
                     failure = "证明成立但待证访问没有减少";
@@ -453,7 +469,7 @@ internal sealed partial class TemplateRecovery
             }
             failures.Add(($"{method.Method.Owner.Name}.{method.Method.Name}：{nearest}", progress));
         }
-        if (best is not null) return best;
+        if (best is not null) return Adopt(bestReplacement!, best);
         // 模板按形参分支、调用方没有对应的分支：实参是常量，内联时按常量折叠了这个分支。
         foreach (var (method, template) in InlineCandidates(field, receiver))
         {
@@ -463,7 +479,7 @@ internal sealed partial class TemplateRecovery
                     if (Match(body, blocks, block, start, template, method.TypeArguments, out var failure, seed) is { } match
                         && PlanReplacement(body, blocks, block, start, method, match, out failure) is { } replaced
                         && Accepted(replaced) is { } accepted)
-                        return accepted;
+                        return Adopt(replaced, accepted);
         }
         // 留下第一次尝试的原因：之后方法体可能被别的证明改过，那时的失败只是连带结果。
         inlineFailures.TryAdd(PendingOf(anchor.Access)!.Address, failures.Count == 0 ? "没有可作模板的方法"
@@ -609,11 +625,13 @@ internal sealed partial class TemplateRecovery
         failure = "接收者不能表示";
         var available = new Lazy<IReadOnlyDictionary<Variable, ManagedValue>>(() => AvailableIn(body).At(block, start));
         var held = new Lazy<IReadOnlyList<(FieldValue Location, ManagedValue Value)>>(() => AvailableIn(body).HeldAt(block, start));
-        var caller = new Walker { Blocks = callerBlocks, Caller = true, Block = block, Index = start, Available = available, Held = held };
+        var forms = new SortedSet<string>(StringComparer.Ordinal);
+        if (seed is not null) forms.Add("seed");
+        var caller = new Walker { Blocks = callerBlocks, Caller = true, Block = block, Index = start, Available = available, Held = held, Forms = forms };
         SeedPath(caller);
         caller.Visited.Add(block);
         // 模板的 this 在比对中绑定：可能是字段所在的对象，也可能是包含它的值（如嵌套类型的结构体）。
-        var match = new InlineMatch { Binding = seed is null ? [] : new(seed), TypeArguments = arguments, Start = (block, start), Template = template, Available = available, Held = held };
+        var match = new InlineMatch { Binding = seed is null ? [] : new(seed), TypeArguments = arguments, Start = (block, start), Template = template, Available = available, Held = held, Forms = forms };
         var entryLocals = callerBlocks.Values.SelectMany(b => b.Statements)
             .SelectMany(s => (s is ManagedAssignment assignment ? new[] { assignment.Target } : []).Concat(ManagedValues.Edges(s).SelectMany(e => e.Copies.Select(c => c.Target))))
             .DistinctBy(l => l.Variable).ToDictionary(l => l.Variable);
@@ -725,6 +743,7 @@ internal sealed partial class TemplateRecovery
                     && mc.Invocation.Arguments.Count == cc.Invocation.Arguments.Count:
                     {
                         if ((mc.Invocation.Receiver is null) != (cc.Invocation.Receiver is null)) return false;
+                        if (!SharedCode(Instantiated(mc.Invocation.Method, match.TypeArguments), cc.Invocation.Method)) match.Forms.Add("slot");
                         var pairs = (mc.Invocation.Receiver is { } mr ? [(mr, cc.Invocation.Receiver!)] : Array.Empty<(ManagedValue, ManagedValue)>())
                             .Concat(mc.Invocation.Arguments.Zip(cc.Invocation.Arguments));
                         foreach (var (a, b) in pairs)
@@ -1266,17 +1285,9 @@ internal sealed partial class TemplateRecovery
         // 布尔值只取 0 和 1，和 1 按位与不改变它：模板的形参是更宽的整数，调用方传布尔值时这次与运算被化简掉了。
         if (m is BinaryValue { Op: BinOp.And, Right: ConstantValue { Bits: 1 } } masked && types.Kind(c.Type) == TypeKind.Bool)
             return Unify(masked.Left, c, binding, bindArguments);
-        if (m is ArgumentValue argument)
-        {
-            if (!bindArguments) return m.Equals(c);
-            // 值类型字段的读取与写入共享同一个位置；ref 形参统一绑定到该位置的地址。
-            if (argument.Type is ByRefRef reference && c.Type.Equals(reference.Element)
-                && c is Observed { Read: FieldValue or StaticFieldValue or ArrayElementValue } or LocalValue or ArgumentValue)
-                c = new AddressValue(c);
-            if (binding.TryGetValue(argument.Index, out var bound)) return SameTerm(bound, c);
-            binding[argument.Index] = c;
-            return true;
-        }
+        // 不绑定实参时，项里的 ArgumentValue 属于调用方，只与自身相同；模板的形参写成 FormalValue。
+        if (m is FormalValue formal) return BindFormal(formal.Index, formal.Type, c, binding);
+        if (m is ArgumentValue argument) return bindArguments ? BindFormal(argument.Index, argument.Type, c, binding) : m.Equals(c);
         switch (m, c)
         {
             case (Observed a, Observed b): return a.Epoch == b.Epoch && Unify(a.Read, b.Read, binding, bindArguments);
@@ -1294,6 +1305,17 @@ internal sealed partial class TemplateRecovery
         return left.Length == right.Length && left.Zip(right).All(p => Unify(p.First, p.Second, binding, bindArguments));
     }
 
+    /// <summary>形参首次出现时绑定到调用方的项，之后须相同。值类型字段的读取与写入共享同一个位置；ref 形参统一绑定到该位置的地址。</summary>
+    private bool BindFormal(int index, TypeRef type, ManagedValue c, Dictionary<int, ManagedValue> binding)
+    {
+        if (type is ByRefRef reference && c.Type.Equals(reference.Element)
+            && c is Observed { Read: FieldValue or StaticFieldValue or ArrayElementValue } or LocalValue or ArgumentValue)
+            c = new AddressValue(c);
+        if (binding.TryGetValue(index, out var bound)) return SameTerm(bound, c);
+        binding[index] = c;
+        return true;
+    }
+
     /// <summary>模板的项与调用方的项在调用方这条路径的事实下相同。</summary>
     private bool Same(ManagedValue template, ManagedValue actual, Walker caller, Dictionary<int, ManagedValue> binding)
     {
@@ -1301,15 +1323,19 @@ internal sealed partial class TemplateRecovery
         // 调用方沿用区域之前读到的局部，模板在这里读字段：比较的是区域开始时的内容。
         var exposed = caller.Available?.Value is { Count: > 0 } available ? Exposed(specialized, caller, available) : specialized;
         var actuals = exposed.Equals(specialized) ? [specialized] : new[] { specialized, exposed };
-        // 调用方按区域开始时字段的已知内容写出了模板的读取（如 Clear 之后的 Add 按 _size == 0 折叠）。
-        var held = RegionStart(template, caller, binding);
-        foreach (var form in ReferenceEquals(held, template) ? [template] : new[] { template, held })
+        // 调用方按区域开始时字段的已知内容写出了模板的读取（如 Clear 之后的 Add 按 _size == 0 折叠）。已知内容是调用方的项，
+        // 这一形式里模板的形参写成 FormalValue。
+        var formal = Formal(template);
+        var held = RegionStart(formal, caller, binding);
+        var forms = ReferenceEquals(held, formal) ? [(template, true)] : new[] { (template, true), (held, false) };
+        foreach (var (form, plain) in forms)
         {
             var expected = Canonical(Fold(Specialize(form, caller, binding)));
             foreach (var candidate in actuals)
             {
                 var trial = new Dictionary<int, ManagedValue>(binding);
-                if (!Unify(expected, Canonical(Fold(candidate)), trial)) continue;
+                if (!Unify(expected, Canonical(Fold(candidate)), trial, bindArguments: plain)) continue;
+                if (!plain) caller.Forms?.Add("region-start");
                 foreach (var (key, value) in trial) binding[key] = value;
                 return true;
             }

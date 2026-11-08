@@ -144,7 +144,7 @@ public sealed class MethodDecompiler
         var recovered = templates.Run(lowered.Body, lowered.Constructions, lowered.NextLocal);
         var body = LocalCoalescing.Run(recovered.Body);
         var holes = lowered.Holes.Concat(recovered.Holes).DistinctBy(h => (h.Address, h.Reason)).ToArray();
-        var unfolded = lowered.Unfolded.Concat(recovered.Unfolded).ToArray();
+        var unfolded = lowered.Unfolded.Concat(recovered.Rules).ToArray();
         return holes.Length == 0 ? new(analysis.Method, analysis.Entry, body, []) { Rules = unfolded }
             : new(analysis.Method, analysis.Entry, null, holes) { Partial = body, Rules = unfolded };
     }
