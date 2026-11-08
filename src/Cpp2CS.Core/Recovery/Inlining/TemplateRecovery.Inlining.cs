@@ -731,6 +731,20 @@ internal sealed partial class TemplateRecovery
                 callee.Index++;
                 continue;
             }
+            // 调用方把区域外的写入排进了区域开头的读取与第一个效果之间（先读构建器字段，再写状态，然后才判断）：
+            // 写入的值与区域无关、与区域此前的读取不别名、解引用的对象此前已被区域读取（空引用不会提前）时，它与这些读取没有次序，移到区域之前。
+            if (c is ManagedStore foreign && m is not ManagedStore && callee.Deferred.Count == 0 && match.Effects == 0
+                && Location(caller, foreign.Target) is { } foreignAt && Term(caller, foreign.Value) is { } foreignValue && Independent(foreignValue)
+                && Dereferenced(foreignAt) is { } foreignObject && match.EarlyReads.OfType<Observed>().Any(r => Equals(Dereferenced(r.Read), foreignObject))
+                && !match.EarlyReads.Concat(match.Defined.Values).Any(v => ReadsLocation(v, foreignAt)) && !caller.Stores.Any(st => MayAlias(st.Location, foreignAt)))
+            {
+                Cover(caller, match);
+                match.Interleaved.Add((caller.Block, caller.Index, match.Effects));
+                caller.Stores.Add((foreignAt, foreignValue));
+                caller.Index++;
+                steps--;
+                continue;
+            }
             if (callee.Deferred.Count > 0 && m is not (ManagedStore or ManagedBranch)) return match.Fail($"写入次序不同（0x{c.Address:x}）");
             if (c is not ManagedStore) Cover(caller, match);
             switch (m, c)
@@ -933,6 +947,19 @@ internal sealed partial class TemplateRecovery
             if (target is Observed { Read: var read }) target = read;
         }
         return path.Count > 0 ? (target, path) : null;
+    }
+
+    /// <summary>访问位置实际解引用的对象：沿值类型字段向外，直到引用类型的接收者。</summary>
+    private ManagedValue? Dereferenced(ManagedValue location)
+    {
+        for (var depth = 0; depth < 16; depth++)
+        {
+            if (Unobserve(location) is not FieldValue field) return null;
+            var receiver = Unobserve(field.Receiver is AddressValue address ? address.Target : field.Receiver);
+            if (types.Kind(receiver.Type) != TypeKind.Struct) return receiver;
+            location = receiver;
+        }
+        return null;
     }
 
     private static ManagedValue? ReceiverOf(ManagedValue location) => location switch
