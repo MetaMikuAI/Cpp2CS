@@ -63,6 +63,7 @@ internal sealed partial class CilBodyWriter
                 break;
             case StringValue text: il.Emit(OpCodes.Ldstr, text.Text); break;
             case TypeHandleValue handle: il.Emit(OpCodes.Ldtoken, TypeReference(handle.Target)); break;
+            case SizeOfValue size: il.Emit(OpCodes.Sizeof, TypeReference(size.Target)); break;
             case FieldHandleValue handle: il.Emit(OpCodes.Ldtoken, FieldReference(handle.Field)); break;
             case StaticCallValue call:
                 var factory = Instruction.Create(OpCodes.Call, MethodReference(call.Method));

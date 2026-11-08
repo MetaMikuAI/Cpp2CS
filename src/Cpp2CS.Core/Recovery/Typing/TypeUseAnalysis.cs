@@ -209,7 +209,7 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
                 Use(slice.Base, oracle.TypeOf(slice.Base) ?? oracle.Unconstrained(slice.Base.Width), user);
                 break;
             case ConcatSym concat:
-                if (oracle.CompositeRead(concat) is { } joined) { Use(joined, expected, user); break; }
+                if ((oracle.CompositeRead(concat) ?? oracle.OpenWholeRead(concat, expected)) is { } joined) { Use(joined, expected, user); break; }
                 foreach (var piece in concat.Parts)
                     Use(piece, oracle.TypeOf(piece) ?? oracle.Unconstrained(piece.Width) ?? expected, user);
                 break;

@@ -74,12 +74,14 @@ public sealed partial class TypeOracle
                 var width = (int)(members.Max(m => m.Offset + m.Value.Width / 8) - start) * 8;
                 if (Covering(members, start, width) is not { } pieces) continue;
                 var first = members.First(m => m.Offset == start);
-                if (Locate(first.Address, width) is not { Type: { } type } location
+                var value = values.Syms.Concat(pieces);
+                if ((Locate(first.Address, width) ?? (TypeOf(value) is { } valueType && types.Size(valueType) * 8 == width ? PointerElement(first.Address, valueType) : null))
+                    is not { Type: { } type } location
                     || types.Kind(type) != TypeKind.Struct || types.Size(type) * 8 != width) continue;
                 if (crossedReads.Count > 0 && (location.Kind is not (LocationKind.Instance or LocationKind.Reference)
                     || crossedReads.Any(r => AccessAddress(r.Address).Offset < start + width / 8
                         && start < AccessAddress(r.Address).Offset + r.Width / 8))) continue;
-                found = new StoreGroup(members.Select(m => m.Store).ToArray(), location, values.Syms.Concat(pieces));
+                found = new StoreGroup(members.Select(m => m.Store).ToArray(), location, value);
             }
             found ??= RegionGroup(statements, i, result);
             if (found is not null)
@@ -228,6 +230,10 @@ public sealed partial class TypeOracle
         return null;
     }
 
+    /// <summary>期望的值类型没有自己的定义（类型参数）时，各段来自对同一段内存的读取就是对该位置的整体读取。</summary>
+    public ReadSym? OpenWholeRead(ConcatSym bits, TypeRef? expected) =>
+        expected is not null and not DefinitionRef && types.Kind(expected) == TypeKind.Struct ? WholeRead(bits, expected) : null;
+
     /// <summary>结构体值 bits 的全部叶子来自同段内存的读取时，在第一次读取处对该结构体位置的整体读取；不成立时为 null。</summary>
     public ReadSym? WholeRead(Sym bits, TypeRef structure)
     {
@@ -255,7 +261,7 @@ public sealed partial class TypeOracle
                 pieceOffset += piece.Width / 8;
             }
         }
-        if (address is null || Locate(address, total) is not { } location || !location.Type.Equals(structure)) return null;
+        if (address is null || (Locate(address, total) is { } located && located.Type.Equals(structure) ? located : PointerElement(address, structure)) is null) return null;
         var block = values.BlockOf(reads.First().Site);
         var sites = reads.Select(r => block.Statements.FindIndex(s => ReferenceEquals(s, r.Site))).ToArray();
         if (sites.Any(s => s < 0)) return null;

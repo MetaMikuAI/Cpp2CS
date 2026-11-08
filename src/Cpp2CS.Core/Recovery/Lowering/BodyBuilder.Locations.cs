@@ -114,6 +114,9 @@ internal sealed partial class BodyBuilder
                     var pointer = View(location.Base!, oracle.TypeOf(location.Base!), address);
                     if (location.ByteOffset is { } offset)
                         pointer = new PointerOffsetValue(pointer, View(offset, types.Int64, address));
+                    if (location is { Strided: true, Index: { } stride })
+                        pointer = new PointerOffsetValue(pointer, new BinaryValue(BinOp.Mul, View(stride, types.Int64, address),
+                            new ConversionValue(ConvKind.ZeroExtend, new SizeOfValue(location.Type, types.Int32), types.Int64, 64), types.Int64, 64));
                     return path.Count == 0 ? new IndirectValue(pointer, location.Type, Width(location.Type)) : Nest(pointer, path, location.Type, store, address);
                 }
             case LocationKind.Element:

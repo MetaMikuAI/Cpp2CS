@@ -31,7 +31,7 @@ public static class ManagedValues
         BooleanValue b => [b.Left, b.Right],
         NegatedValue n => [n.Operand],
         AsyncResultValue r => r.Value is { } result ? [result] : [],
-        ArgumentValue or LocalValue or ConstantValue or StringValue or TypeHandleValue or FieldHandleValue or StaticCallValue or MethodHandleValue or StaticFieldValue or HoleValue => [],
+        ArgumentValue or LocalValue or ConstantValue or StringValue or TypeHandleValue or SizeOfValue or FieldHandleValue or StaticCallValue or MethodHandleValue or StaticFieldValue or HoleValue => [],
         _ => throw new NotSupportedException(value.ToString()),
     };
 
@@ -66,7 +66,7 @@ public static class ManagedValues
         BooleanValue v => v with { Left = f(v.Left), Right = f(v.Right) },
         NegatedValue v => v with { Operand = f(v.Operand) },
         AsyncResultValue v => v with { Value = v.Value is { } result ? f(result) : null },
-        ArgumentValue or LocalValue or ConstantValue or StringValue or TypeHandleValue or FieldHandleValue or StaticCallValue or MethodHandleValue or StaticFieldValue or HoleValue => value,
+        ArgumentValue or LocalValue or ConstantValue or StringValue or TypeHandleValue or SizeOfValue or FieldHandleValue or StaticCallValue or MethodHandleValue or StaticFieldValue or HoleValue => value,
         _ => throw new NotSupportedException(value.ToString()),
     };
 

@@ -31,6 +31,7 @@ public static class ManagedTypeMap
             ConstantValue v => v with { Type = map(v.Type), Width = W(v.Type, map(v.Type), v.Width) },
             StringValue v => v,
             TypeHandleValue v => v with { Target = map(v.Target) },
+            SizeOfValue v => v with { Target = map(v.Target) },
             FieldHandleValue v => v with { Field = Field(v.Field) },
             MethodHandleValue v => v with { Method = Method(v.Method) },
             StaticCallValue v => v with { Method = Method(v.Method) },

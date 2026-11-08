@@ -12,6 +12,8 @@ public sealed record LocalValue(Variable Variable, TypeRef Type, int Width) : Ma
 public sealed record ConstantValue(ulong Bits, TypeRef Type, int Width) : ManagedValue(Type, Width);
 public sealed record StringValue(string Text, TypeRef Type) : ManagedValue(Type, 64);
 public sealed record TypeHandleValue(TypeRef Target, TypeRef Type, int Width) : ManagedValue(Type, Width);
+/// <summary>值类型的存储大小（IL sizeof，int32）。泛型定义里随类型实参变化。</summary>
+public sealed record SizeOfValue(TypeRef Target, TypeRef Type) : ManagedValue(Type, 32);
 /// <summary>ldtoken 字段：数组初始化器的 RuntimeFieldHandle。</summary>
 public sealed record FieldHandleValue(FieldRef Field, TypeRef Type, int Width) : ManagedValue(Type, Width);
 /// <summary>ldtoken 方法：表达式树中的 RuntimeMethodHandle。</summary>

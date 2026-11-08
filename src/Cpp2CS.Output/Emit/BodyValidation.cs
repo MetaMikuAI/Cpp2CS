@@ -122,6 +122,9 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
             case TypeHandleValue handle:
                 if (!CanAccess(handle.Target)) return new(EmissionProblemKind.AccessDenied, $"访问权限 类型 {handle.Target}");
                 return handle.Type.Equals(types.RuntimeTypeHandle) ? null : new(EmissionProblemKind.Unsupported, "类型句柄的托管类型不符");
+            case SizeOfValue size:
+                if (!CanAccess(size.Target)) return new(EmissionProblemKind.AccessDenied, $"访问权限 类型 {size.Target}");
+                return size.Type.Equals(types.Int32) && !ManagedTypes.IsReferenceType(size.Target) ? null : new(EmissionProblemKind.Unsupported, "sizeof 的类型不符");
             case FieldHandleValue handle:
                 return handle.Type.Equals(types.RuntimeFieldHandle) ? null : new(EmissionProblemKind.Unsupported, "字段句柄的托管类型不符");
             case StaticCallValue call:

@@ -11,7 +11,7 @@ public static class ManagedEffects
         EffectSummary Read(MemoryKind kind) => EffectSummary.Access(kind);
         var own = value switch
         {
-            LocalValue or ArgumentValue or ConstantValue or StringValue or TypeHandleValue or FieldHandleValue or MethodHandleValue => EffectSummary.None,
+            LocalValue or ArgumentValue or ConstantValue or StringValue or TypeHandleValue or SizeOfValue or FieldHandleValue or MethodHandleValue => EffectSummary.None,
             StaticCallValue => EffectSummary.Unknown,
             // 经访问器的读取按非虚调用写出，被调方法体已证明恰为读取这个字段（或按库的源码如此），效果与直接读取相同。
             FieldValue f => Read(f.Receiver.Type is DefinitionRef { Definition.IsValueType: true }

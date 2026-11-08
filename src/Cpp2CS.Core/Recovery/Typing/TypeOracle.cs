@@ -19,6 +19,8 @@ public sealed record AccessPart(Location Leaf, int Bit, int FieldBit, int Width)
 public sealed record Location(LocationKind Kind, Sym? Base, Sym? Index, long ConstantIndex, TypeRef? Owner, IReadOnlyList<FieldRef> Path, TypeRef Type)
 {
     public Sym? ByteOffset { get; init; }
+    /// <summary>无类型指针上的元素：字节偏移是 Index 乘以 sizeof(Type)（Kind 为 Reference）。</summary>
+    public bool Strided { get; init; }
     /// <summary>实例位置的根按这个类型看待（类型判断成立之后的对象，写出为 castclass）。</summary>
     public TypeRef? View { get; init; }
 }
@@ -676,6 +678,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
 
     public Location? Locate(Sym address, int width)
     {
+        if (pointerElements.TryGetValue((SymTable.Resolve(address), width), out var viewed)) return viewed;
         var (root, offset, index, scale) = Decompose(address);
         // 不透明值没有固定位宽，只按位置访问。
         if (width < 0 && root is LocalSym opaque && opaque.Offset == 0 && offset == 0 && index is null)
@@ -780,6 +783,25 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                 }
         }
         return null;
+    }
+
+    private readonly Dictionary<(Sym Address, int Width), Location> pointerElements = [];
+
+    /// <summary>
+    /// 无类型指针上按值类型 T 的大小步进、整段读写 T 的访问：*(T*)((byte*)p + i * sizeof(T))，即 UnsafeUtility.ReadArrayElement/WriteArrayElement
+    /// 内联后的形态。指针本身不带元素类型，由读写的值按 T 使用确定：步长和访问宽度都等于 T 的大小。成立后同一地址与宽度的访问都按这个元素定位。
+    /// </summary>
+    public Location? PointerElement(Sym address, TypeRef element)
+    {
+        var size = ElementSize(element);
+        if (size <= 0 || ManagedTypes.IsReferenceType(element) || types.Kind(element) != TypeKind.Struct) return null;
+        var (root, offset, index, scale) = Decompose(address);
+        if (TypeOf(root) is not PointerRef { Element: var pointee } || !ManagedTypes.IsVoid(pointee) || index is null || offset != 0) return null;
+        (index, scale) = Rescaled(index, scale, size);
+        if (scale != size) return null;
+        var location = new Location(LocationKind.Reference, root, index, 0, null, [], element) { Strided = true };
+        pointerElements[(SymTable.Resolve(address), size * 8)] = location;
+        return location;
     }
 
     /// <summary>比例是元素大小的整数倍：下标是 index 乘以倍数（如 float 数组按 i * 8 + k 访问）。其他情况不变。</summary>
