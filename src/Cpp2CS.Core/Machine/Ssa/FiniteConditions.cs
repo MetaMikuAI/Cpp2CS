@@ -36,6 +36,19 @@ internal sealed class FiniteConditions(MachineFunction function)
         ulong[]? result = null;
         if (statement is Define { Value: Const constant }) result = [constant.Value];
         else if (statement is Define { Value: Use use } && use.Width == variable.Width) result = Values(use.Variable, active);
+        // 只读一个变量的纯运算（如 finally 去向标志的 x | 8）：逐个代入该变量的可能值，各自折叠成常量。
+        else if (statement is Define { Value: Binary or Unary or Ir.Convert } computed && Single(computed.Value) is { } operand
+            && Values(operand, active) is { } inputs)
+        {
+            var merged = new HashSet<ulong>();
+            foreach (var input in inputs)
+            {
+                var folded = Fold.Simplify(ExprMap.Map(computed.Value, e => e is Use u && u.Variable == operand ? Expr.C(input, u.Width) : null));
+                if (folded is not Const c) { merged.Clear(); break; }
+                merged.Add(c.Value & Expr.Mask(variable.Width));
+            }
+            if (merged.Count > 0) result = merged.ToArray();
+        }
         else if (statement is Phi phi)
         {
             var merged = new HashSet<ulong>();
@@ -50,6 +63,22 @@ internal sealed class FiniteConditions(MachineFunction function)
         }
         active.Remove(variable);
         return values[variable] = result;
+    }
+
+    /// <summary>表达式只由常量和同一个变量的读取组成、由纯运算构成时为该变量。</summary>
+    private static Variable? Single(Expr expr)
+    {
+        Variable? found = null;
+        bool Pure(Expr e) => e switch
+        {
+            Const => true,
+            Use u => (found ??= u.Variable) == u.Variable,
+            Binary b => Pure(b.Left) && Pure(b.Right),
+            Unary u => Pure(u.Operand),
+            Ir.Convert c => Pure(c.Operand),
+            _ => false,
+        };
+        return Pure(expr) ? found : null;
     }
 
     private int? Side(Block block, Branch branch)
