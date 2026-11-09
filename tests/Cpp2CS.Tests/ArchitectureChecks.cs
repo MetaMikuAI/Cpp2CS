@@ -170,7 +170,8 @@ internal static class ArchitectureChecks
         bool Run(string? variant = null)
         {
             var entry = new Block(0) { Statements = [new Branch(0, Expr.C(1, 1), 4, 8)] };
-            var left = new Block(4) { Statements = [new Store(4, new FrameAddress(-16), Expr.C(1, 32)), new Jump(4, 12)] };
+            var left = new Block(4) { Statements = variant == "fragment" ? [new Store(4, new FrameAddress(-15), Expr.C(1, 8)), new Jump(4, 12)]
+                : [new Store(4, new FrameAddress(-16), Expr.C(1, 32)), new Jump(4, 12)] };
             var right = new Block(8) { Statements = variant == "missing" ? [new Jump(8, 12)]
                 : [new Store(8, new FrameAddress(-16), Expr.C(2, 32)), new Jump(8, 12)] };
             var call = new Call(24, CallKind.Direct, Expr.C(1, 64))
@@ -194,7 +195,8 @@ internal static class ArchitectureChecks
         check.True(!Run("monitor"), "栈对象标志不匹配时拒绝装箱归一");
         check.True(!Run("missing"), "任一路径缺少有效载荷写入时拒绝装箱归一");
         check.True(!Run("alias"), "取得栈对象地址的未知调用阻断装箱证明");
-        check.True(!Run("partial"), "部分覆盖不能充当完整枚举载荷");
+        check.True(Run("partial"), "载荷可以由完整写入与之后的部分改写拼成");
+        check.True(!Run("fragment"), "任一路径只写了载荷的部分字节时拒绝装箱归一");
     }
 
     private static void FieldAvailability(Assertions check, ManagedTypes types)
@@ -1221,7 +1223,10 @@ internal static class ArchitectureChecks
                 new(64, [new ManagedReturn(64, saved)])]);
             var evidence = new InlineEvidence(types, caller, Summary);
             var recovered = new TemplateRecovery(types, caller, Summary, evidence).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
-            check.Equal(variant is "same" or "shared", recovered.Holes.Count == 0, $"出口重复局部赋值 {variant}");
+            // 出口的局部赋值不同时不能把两臂合成一次调用；Store 前缀下沉到两臂后，各臂可以各自证成一次调用。
+            var calls = recovered.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Count(c => c.Inlined);
+            check.Equal(variant is "same" or "shared", recovered.Holes.Count == 0 && calls == 1, $"出口重复局部赋值 {variant}");
+            if (variant is "different" or "addressed") check.True(recovered.Holes.Count == 0 && calls == 2, $"出口重复局部赋值 {variant}：前缀下沉后两臂各自证成调用");
         }
     }
 
@@ -1265,7 +1270,10 @@ internal static class ArchitectureChecks
                 new(64, [new ManagedReturn(64, kept)])]);
             var evidence = new InlineEvidence(types, caller, Summary);
             var recovered = new TemplateRecovery(types, caller, Summary, evidence).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
-            check.Equal(same, recovered.Holes.Count == 0, same ? "出口复制保存调用方自己的实参" : "各路径保存的调用方实参不同");
+            // 各路径保存的值不同时不能合成一次调用；Store 前缀下沉到两臂后，各臂可以各自证成一次调用。
+            var calls = recovered.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Count(c => c.Inlined);
+            check.Equal(same, recovered.Holes.Count == 0 && calls == 1, same ? "出口复制保存调用方自己的实参" : "各路径保存的调用方实参不同");
+            if (!same) check.True(recovered.Holes.Count == 0 && calls == 2, "各路径保存的调用方实参不同：前缀下沉后两臂各自证成调用");
             if (same) check.True(recovered.Rules.Any(r => r.Rule == TemplateRecovery.ProofRule && r.Code!.Contains("caller-argument")), "内联证明记下出口复制用到调用方实参");
         }
     }
