@@ -129,6 +129,7 @@ internal sealed partial class BodyBuilder
         if (expected is not null)
         {
             if ((ManagedTypes.IsReferenceType(expected) || expected is PointerRef or ByRefRef) && constant.Value == 0) return new ConstantValue(0, expected, 64);
+            if (expected is GenericParameterRef && constant.Value == 0) return new ComposedValue(expected, []);
             switch (types.Kind(expected))
             {
                 case TypeKind.Bool: return new ConstantValue(constant.Value != 0 ? 1UL : 0UL, expected, 8);
@@ -282,6 +283,9 @@ internal sealed partial class BodyBuilder
         if (expected is null) return Hole(address, $"类型 拼接没有期望类型 {concat}", null);
         if (oracle.OpenWholeRead(concat, expected) is { } entire) return View(entire, expected, address);
         if (types.Kind(expected) == TypeKind.Struct && oracle.JoinedSelect(concat) is { } selected) return View(selected, expected, address);
+        // 全零的位是任何类型的默认值：泛型参数的实例在这里有确定的大小，但写出时仍按泛型参数，即 default(T)。
+        if (expected is GenericParameterRef && concat.Parts.Any(p => p is ConstSym { Value: 0 }) && concat.Parts.All(p => p is ConstSym { Value: 0 } or UndefSym))
+            return new ComposedValue(expected, []);
         // 无类型指针上的字节访问（位置为 void）：bool 的零扩展即自身，按 bool 写出。
         if (ManagedTypes.IsVoid(expected) && concat.Parts.Skip(1).All(p => p is ConstSym { Value: 0 } or UndefSym)
             && oracle.TypeOf(concat.Parts[0]) is { } boolType && types.Kind(boolType) == TypeKind.Bool)
