@@ -65,6 +65,42 @@ public sealed partial class TypeOracle
         return new(null, fields);
     }
 
+    /// <summary>
+    /// clang 把结构体局部拆成叶子的 φ（SROA）后按叶子组成：字段都是同一块的 φ 或其片、其中有不可访问的字段时，下降还原成一个结构体 φ。
+    /// 给出各字段对应的 φ 与片的低位；不成立时为 null。类型使用分析与下降共用这一判定。
+    /// </summary>
+    public IReadOnlyList<(ValueProjection Projection, PhiSym Phi, int Low)>? StructPhiLeaves(AggregatePlan plan)
+    {
+        if (plan.Fields.Count == 0 || !plan.Fields.Any(f => f.Projection.Path.Any(p => !ManagedAccess.Field(types, method, p, p.DeclaringType)))) return null;
+        var leaves = new List<(ValueProjection, PhiSym, int)>();
+        foreach (var field in plan.Fields)
+            switch (SymTable.Resolve(field.Value))
+            {
+                case PhiSym phi: leaves.Add((field.Projection, phi, 0)); break;
+                case SliceSym { Base: var root, Low: var low } when SymTable.Resolve(root) is PhiSym phi: leaves.Add((field.Projection, phi, low)); break;
+                default: return null;
+            }
+        return leaves.All(l => l.Item2.Block == leaves[0].Item2.Block) ? leaves : null;
+    }
+
+    /// <summary>结构体 φ 在第 index 条入边上的整个值：各叶子 φ 在这条边上的来源按布局拼接，叶子之间的空位未定义。</summary>
+    public Sym? StructPhiEdge(IReadOnlyList<(ValueProjection Projection, PhiSym Phi, int Low)> leaves, DefinitionRef structure, int index)
+    {
+        var total = types.Size(structure) * 8;
+        var parts = new List<Sym>();
+        var at = 0;
+        foreach (var (projection, phi, low) in leaves.OrderBy(l => l.Projection.Bit))
+        {
+            if (phi.Sources[index] is not { } source || projection.Bit < at) return null;
+            if (projection.Bit > at) parts.Add(values.Syms.Undef(projection.Bit - at));
+            parts.Add(values.Syms.Slice(source, low, projection.Width));
+            at = projection.Bit + projection.Width;
+        }
+        if (total <= 0 || at > total) return null;
+        if (at < total) parts.Add(values.Syms.Undef(total - at));
+        return values.Syms.Concat(parts);
+    }
+
     /// <summary>直接字段的位来源，供值组成与逐字段写入共用。</summary>
     public IReadOnlyList<ProjectedSym>? FieldValues(Sym bits, DefinitionRef structure)
     {
@@ -74,11 +110,11 @@ public sealed partial class TypeOracle
             : fields.Select(p => new ProjectedSym(p, values.Syms.Slice(bits, p.Bit, p.Width))).ToArray();
     }
 
-    /// <summary>整体位写入可分解的非零叶子；整体读取仍保留为整体复制。</summary>
+    /// <summary>整体位写入可分解的非零叶子；整体读取、快照改写与结构体 φ 仍保留为整体复制。</summary>
     public IReadOnlyList<ValueProjection>? FieldStores(Sym bits, TypeRef type)
     {
         if (type is not DefinitionRef structure || types.Kind(type) != TypeKind.Struct || !BitRepresentation(bits)
-            || types.StorageBits(type) > bits.Width || WholeRead(bits, structure) is not null || UpdatedRead(bits, structure) is not null) return null;
+            || types.StorageBits(type) > bits.Width || Aggregate(bits, structure) is { } plan && (plan.Whole is not null || plan.Snapshot is not null || StructPhiLeaves(plan) is not null)) return null;
         var leaves = types.Projections(structure).ToArray();
         // 布局未知的叶子（共享泛型字段）没有位范围，整体不能按位分解。
         if (leaves.Any(p => !p.Fits(bits.Width))) return null;

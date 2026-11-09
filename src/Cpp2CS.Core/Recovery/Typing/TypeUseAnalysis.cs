@@ -177,6 +177,18 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
             if (aggregate.Whole is null)
             {
                 if (aggregate.Snapshot is { } snapshot) Use(snapshot, structure, user);
+                // 结构体 φ（与下降相同的判定）：入边上的整个值是一次整体读取时只用这次读取，叶子的读取不单独落成局部。
+                if (aggregate.Snapshot is null && oracle.StructPhiLeaves(aggregate) is { } leaves)
+                {
+                    for (var j = 0; j < leaves[0].Phi.Sources.Length; j++)
+                    {
+                        if (oracle.StructPhiEdge(leaves, structure, j) is { } edge && oracle.WholeRead(edge, structure) is { } entire) Use(entire, structure, null);
+                        else
+                            foreach (var (projection, phi, low) in leaves)
+                                if (phi.Sources[j] is { } source) Use(values.Syms.Slice(source, low, projection.Width), projection.Type, null);
+                    }
+                    return;
+                }
                 foreach (var field in aggregate.Fields) Use(field.Value, field.Projection.Type, user);
                 return;
             }

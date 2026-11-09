@@ -355,17 +355,8 @@ internal sealed partial class BodyBuilder
     /// </summary>
     private LocalValue? StructPhi(DefinitionRef structure, AggregatePlan plan)
     {
-        if (plan.Fields.Count == 0 || !plan.Fields.Any(f => f.Projection.Path.Any(p => !fields.Accessible(p, p.DeclaringType)))) return null;
-        var leaves = new List<(ValueProjection, PhiSym, int)>();
-        foreach (var field in plan.Fields)
-            switch (SymTable.Resolve(field.Value))
-            {
-                case PhiSym phi: leaves.Add((field.Projection, phi, 0)); break;
-                case SliceSym { Base: var root, Low: var low } when SymTable.Resolve(root) is PhiSym phi: leaves.Add((field.Projection, phi, low)); break;
-                default: return null;
-            }
-        var block = leaves[0].Item2.Block;
-        if (leaves.Any(l => l.Item2.Block != block)) return null;
+        if (oracle.StructPhiLeaves(plan) is not { } leaves) return null;
+        var block = leaves[0].Phi.Block;
         var key = $"{structure}|{string.Join(",", leaves.Select(l => $"{l.Item2.Id}:{l.Item3}:{l.Item1.Bit}"))}";
         if (!structPhis.TryGetValue(key, out var known)) structPhis[key] = known = new(NewLocal(structure), structure, block, leaves);
         return known.Local;
@@ -389,6 +380,9 @@ internal sealed partial class BodyBuilder
             whole = root;
         }
         if (whole is not null) return View(whole, plan.Structure, address);
+        // 入边上的叶子是对同一结构体位置的相邻读取：整体读取它（类型使用分析已按同一判定让它落成局部）。
+        if (oracle.StructPhiEdge(plan.Leaves, plan.Structure, index) is { } edge && oracle.WholeRead(edge, plan.Structure) is { } read)
+            return View(read, plan.Structure, address);
         var fields = new List<ProjectedSym>();
         foreach (var (projection, phi, low) in plan.Leaves)
         {
