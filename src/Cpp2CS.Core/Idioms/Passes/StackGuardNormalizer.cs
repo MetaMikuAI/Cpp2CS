@@ -27,6 +27,9 @@ internal static class StackGuardNormalizer
                 || !Guard(definitions.Expand(comparison.Left)) || !Guard(definitions.Expand(comparison.Right))) continue;
             var failureAddress = comparison.Cond == Cond.Ne ? branch.Target : branch.Fallthrough;
             var failure = block.NormalSuccessors.FirstOrDefault(b => b.Start == failureAddress);
+            // 失败一侧可能先经只有跳转的块（尾部合并后的落地块）。
+            for (var hops = 0; hops < 4 && failure is { Statements: [Jump], NormalSuccessors: var next } && next.Count() == 1; hops++)
+                failure = next.First();
             if (failure is null || failure.Statements.OfType<Call>().ToArray() is not
                 [{ Op: { Kind: OpKind.Import, Operand: "__stack_chk_fail" } }]
                 || failure.Statements.Any(s => s is not (Define or Nop or Call))) continue;
