@@ -113,6 +113,11 @@ internal sealed partial class TemplateRecovery
             internalBlocks.Remove(continuation.Taken.Target);
             internalBlocks.Remove(continuation.Fallthrough.Target);
         }
+        // 出口在起点块中且不在起点之后：出口正是起点、起点块没有语句被覆盖时区域为空（模板只用到已有的值），调用之后接起点块余下的语句；
+        // 否则区域经回边回到了起点或更早，替换会重复或丢掉语句。
+        var empty = !match.Returns && exit.Block == startBlock && exit.Index == start;
+        if (!match.Returns && exit.Block == startBlock && exit.Index <= start && (!empty || covered.Any(c => c.Block == startBlock && c.Index >= start)))
+        { failure = "出口回到起点"; return null; }
         // 出口在区域内某块的中间时，该块余下的语句接在调用之后。
         if (!match.Returns && exit.Index > 0 && exit.Block != startBlock && !internalBlocks.Contains(exit.Block)) { failure = "出口不在区域内"; return null; }
         if (!match.Returns && exit.Index == 0) internalBlocks.Remove(exit.Block);
@@ -192,7 +197,7 @@ internal sealed partial class TemplateRecovery
             if (Materialize(Input(branch.Condition), self, at, match) is not { } condition) { failure = "条件出口的谓词不能写回"; return null; }
             replacement.Add(branch with { Address = at, Condition = condition, Taken = taken, Fallthrough = fallthrough });
         }
-        else if (!match.Returns && exit.Index == 0)
+        else if (!match.Returns && exit.Index == 0 && !empty)
             replacement.Add(new ManagedJump(call.Address, new ManagedEdge(exit.Block, exitCopies)));
         else if (!match.Returns)
         {
