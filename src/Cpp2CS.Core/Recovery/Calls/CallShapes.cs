@@ -11,7 +11,7 @@ public sealed record CallShape(Call Call, IReadOnlyList<MethodRef> Candidates, M
     /// <summary>目标没有注册入口，由 MethodInfo 实参指名：原生调用的是这个方法的本地副本，执行对照按方法体透明执行。</summary>
     public bool LocalCopy { get; init; }
     /// <summary>经运行时分派的托管调用：按托管签名传参，以 callvirt 调用。</summary>
-    public bool IsDispatch => Call.Op?.Kind is OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual or OpKind.InvokeVirtualGeneric or OpKind.InvokeConstrainedGeneric;
+    public bool IsDispatch => Call.Op?.Kind is OpKind.CallVirtual or OpKind.CallInterface or OpKind.CallDelegate or OpKind.CallGenericVirtual or OpKind.InvokeVirtualGeneric or OpKind.InvokeConstrainedGeneric or OpKind.CallConstrained;
     public bool IsRuntime => Call.Op is not null && !IsDispatch
         && !(Call.Op.Kind is OpKind.CallMethodPointer or OpKind.InvokeGeneric && Candidates.Count == 1);
 }
@@ -31,6 +31,8 @@ public sealed class CallShapes(ProgramFacts facts, ManagedAbi abi, Func<ulong, S
             return new(call, [invoked], abi.Invoker(invoked));
         if (call.Op is { Kind: OpKind.InvokeConstrainedGeneric, Operand: ValueTuple<TypeRef, MethodRef> constrained })
             return new(call, [constrained.Item2], abi.ConstrainedInvoker(constrained.Item1, constrained.Item2));
+        if (call.Op is { Kind: OpKind.CallConstrained, Operand: ValueTuple<TypeRef, MethodRef> direct })
+            return new(call, [direct.Item2], abi.ConstrainedMachine(direct.Item1, direct.Item2));
         if (call.Resolved is { } resolved)
             return new(call, [resolved], abi.Machine(resolved, out _));
         if (call.Op is { Operand: MethodRef method } && call.Op.Kind is OpKind.CallGenericVirtual or OpKind.InvokeGeneric or OpKind.CallMethodPointer)

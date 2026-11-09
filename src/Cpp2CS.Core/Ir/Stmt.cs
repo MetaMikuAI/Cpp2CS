@@ -118,6 +118,11 @@ public enum OpKind : byte
     /// <summary>经过判空与越界检查的字节数组读取；参数为数组与 32 位下标。</summary>
     ReadByteArray,
     GenericHasValue,
+    /// <summary>
+    /// IL 的 constrained. callvirt 的直接形式：约束类型在生成代码时已确定，直接调用实现方法，MethodInfo 位传约束解析项。
+    /// Operand 同 <see cref="InvokeConstrainedGeneric"/>；实参按方法的机器签名，接收者是约束类型的位置。
+    /// </summary>
+    CallConstrained,
 }
 
 /// <summary>调用所表达的运行时操作。Operand：类型（TypeRef）、异常名、槽位号等，见 <see cref="OpKind"/>。</summary>

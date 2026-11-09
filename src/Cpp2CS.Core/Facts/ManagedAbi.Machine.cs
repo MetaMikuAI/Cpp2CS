@@ -85,6 +85,15 @@ public sealed partial class ManagedAbi
         };
     }
 
+    /// <summary>受约束调用的直接形式：方法的机器签名，接收者换成约束类型的位置。</summary>
+    public MachineSignature? ConstrainedMachine(TypeRef constraint, MethodRef method) => Machine(method, out _) is { } signature
+        ? signature with
+        {
+            Arguments = signature.Arguments.Select(a => a.Index != -1 ? a : new MachineValue(-1, new ByRefRef(constraint), Transfer.Reference, a.Pieces,
+                SharedValue(constraint) ? -1 : Size(constraint), MemoryAccess.ReadWrite)).ToArray(),
+        }
+        : null;
+
     /// <summary>方法的机器签名；无法分类时返回 null 并给出原因。</summary>
     public MachineSignature? Machine(MethodRef method, out string? problem)
     {

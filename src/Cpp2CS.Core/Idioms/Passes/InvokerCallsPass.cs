@@ -13,17 +13,23 @@ namespace Cpp2CS.Idioms;
 /// </summary>
 internal static class InvokerCallsPass
 {
-    internal static bool InvokerCalls(this IdiomState state) => Run(state.function, state.defs, state.self, state.owner.abi, IsConstrainedCall(state.owner), state.Reject);
+    internal static bool InvokerCalls(this IdiomState state) => Run(state.function, state.defs, state.self, state.owner.abi, IsConstrainedCall(state.owner), Unnamed(state.owner), state.Reject);
 
     /// <summary>路径拆分之后 MethodInfo 才成为单一实体的调用；规则与 L2 相同，实体已代入当前实例。</summary>
     internal static void AfterSplitting(MachineFunction function, MethodRef self, IdiomRewriter rewriter)
     {
-        while (Run(function, new IdiomRewriter.Defs(function), self, rewriter.abi, IsConstrainedCall(rewriter), null)) { }
+        while (Run(function, new IdiomRewriter.Defs(function), self, rewriter.abi, IsConstrainedCall(rewriter), Unnamed(rewriter), null)) { }
     }
 
     private static Func<Call, bool> IsConstrainedCall(IdiomRewriter owner) => call => owner.HelperOf(call)?.Kind == HelperKind.ConstrainedCall;
 
-    private static bool Run(MachineFunction function, IdiomRewriter.Defs defs, MethodRef? self, ManagedAbi abi, Func<Call, bool> isConstrained, Action<string, ulong, string>? reject)
+    /// <summary>直接调用的目标既不是登记的托管方法，也不是运行时 helper。</summary>
+    private static Func<Call, bool> Unnamed(IdiomRewriter owner) => call => call is { Kind: CallKind.Direct or CallKind.Tail, Target: Const target }
+        && owner.HelperOf(call) is null && !owner.facts.EntriesAt(target.Value).Any(e => e.Method is not null)
+        && owner.facts.AdjustorTargets.At(target.Value) is null && owner.facts.Unregistered.At(target.Value) is null;
+
+    private static bool Run(MachineFunction function, IdiomRewriter.Defs defs, MethodRef? self, ManagedAbi abi, Func<Call, bool> isConstrained, Func<Call, bool> unnamed,
+        Action<string, ulong, string>? reject)
     {
         Dictionary<Variable, Call>? lookups = null;
         foreach (var block in function.Blocks)
@@ -33,6 +39,12 @@ internal static class InvokerCallsPass
                 Expr? Actual(int register) => call.ArgumentIndex(Storage.Gpr(register)) is var index && index >= 0 ? call.Arguments[index] : null;
                 Expr? Input(int register) => Actual(register) is { } input ? defs.Expand(input) : null;
                 Call? replacement = null;
+                // 约束类型在生成代码时已确定：直接调用实现方法，MethodInfo 位上是约束解析项（目标没有登记，由这一项指名）。
+                if (unnamed(call) && Constrained(call, defs, self, abi) is { } constrainedDirect)
+                {
+                    block.Statements[i] = call with { Op = new(OpKind.CallConstrained, constrainedDirect) };
+                    return true;
+                }
                 if (call.Kind == CallKind.Direct)
                 {
                     // il2cpp_codegen_runtime_constrained_call(klass, 约束项, boxBuffer, objBuffer, args, ret)；boxBuffer 只服务于运行时的装箱路径。
@@ -85,6 +97,18 @@ internal static class InvokerCallsPass
                 return true;
             }
         return false;
+    }
+
+    /// <summary>某个实参是约束解析项，且该方法签名的 MethodInfo 正落在这个实参的寄存器上。</summary>
+    private static (TypeRef, MethodRef)? Constrained(Call call, IdiomRewriter.Defs defs, MethodRef? self, ManagedAbi abi)
+    {
+        for (var i = 0; i < call.Arguments.Length && i < call.Sources.Length; i++)
+            if (defs.Expand(call.Arguments[i]) is Symbol { Kind: SymbolKind.Constrained, Value: ValueTuple<TypeRef, MethodRef> constrained }
+                && abi.ConstrainedMachine(self is not null ? (TypeRef)GenericContext.Instantiate(constrained.Item1, self)! : constrained.Item1,
+                    self is not null ? (MethodRef)GenericContext.Instantiate(constrained.Item2, self)! : constrained.Item2) is { MethodInfo: { } info } signature
+                && info.Register == call.Sources[i] && !Unsized(signature))
+                return constrained;
+        return null;
     }
 
     private static bool Unsized(MachineSignature signature) => signature.Indirections.Any(a => a.Size <= 0 && !ManagedAbi.SharedValue(a.Type is ByRefRef byRef ? byRef.Element : a.Type));
