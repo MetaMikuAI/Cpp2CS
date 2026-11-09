@@ -211,7 +211,16 @@ internal sealed partial class CilBodyWriter
             ?? (invocation is { Virtual: true, Constraint: null, Receiver: { Type: GenericParameterRef open } and (LocalValue or ArgumentValue) } ? open : null);
         if (parameter is not null && invocation.Receiver!.Type is GenericParameterRef) Address(invocation.Receiver);
         else if (invocation.Receiver is { } receiver) Value(receiver);
-        foreach (var argument in invocation.Arguments) Value(argument);
+        for (var i = 0; i < invocation.Arguments.Count; i++)
+        {
+            var argument = invocation.Arguments[i];
+            Value(argument);
+            // 类型参数的值传给引用类型的形参要装箱（引用类型的实例上是空操作），CIL 才合法。
+            if (argument.Type is GenericParameterRef { IsReferenceConstrained: false } argumentType && i < invocation.Method.Method.Parameters.Count
+                && invocation.Method.Concrete(invocation.Method.Method.Parameters[i].Type) is var formal && formal is not (GenericParameterRef or ByRefRef or PointerRef)
+                && ManagedTypes.IsReferenceType(formal))
+                il.Emit(OpCodes.Box, TypeReference(argumentType));
+        }
         if ((invocation.Constraint ?? parameter) is { } constraint) il.Emit(OpCodes.Constrained, TypeReference(constraint));
         var call = Instruction.Create(invocation.Virtual || through is not null ? OpCodes.Callvirt : OpCodes.Call, MethodReference(through?.Method ?? OnReceiverInstance(invocation)));
         il.Append(call);
