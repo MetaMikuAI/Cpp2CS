@@ -7,6 +7,7 @@ namespace Cpp2CS.Idioms;
 /// <summary>
 /// 对象的类指针与类常量比较相等之后，编译器在这一侧按相等传播，把常量传给 φ。
 /// 被比较相等支配的入边上两者是同一个值：换回读取的类指针，合流后的类判断仍是对同一对象的类型检查，类常量不再作为值出现。
+/// 只改只用于比较的 φ：作为运行时操作的类实参（装箱、分配）时，类常量正是操作的类。
 /// </summary>
 internal static class ClassPhiSourcesPass
 {
@@ -24,6 +25,7 @@ internal static class ClassPhiSourcesPass
         foreach (var block in state.function.Blocks)
             for (var index = 0; index < block.Statements.Count && block.Statements[index] is Phi phi; index++)
             {
+                if (!OnlyCompared(state.function, phi.Target)) continue;
                 var sources = phi.Sources.ToArray();
                 for (var i = 0; i < sources.Length; i++)
                 {
@@ -39,5 +41,21 @@ internal static class ClassPhiSourcesPass
                 block.Statements[index] = phi with { Sources = sources };
             }
         return changed;
+    }
+
+    /// <summary>变量的每次使用都是比较的一侧（不作其他运算的操作数、调用实参或 φ 来源）。</summary>
+    private static bool OnlyCompared(MachineFunction function, Variable variable)
+    {
+        var (uses, compared) = (0, 0);
+        foreach (var statement in function.Blocks.SelectMany(b => b.Statements))
+        {
+            if (statement is Phi { Sources: var sources } && sources.Contains(variable)) return false;
+            foreach (var node in ExprMap.Operands(statement).SelectMany(ExprMap.Walk))
+            {
+                if (node is Use use && use.Variable.Equals(variable)) uses++;
+                if (node is Compare test) compared += new[] { test.Left, test.Right }.Count(e => e is Use use && use.Variable.Equals(variable));
+            }
+        }
+        return uses == compared;
     }
 }
