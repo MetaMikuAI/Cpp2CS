@@ -272,8 +272,40 @@ internal static class PathSplitting
         if (root is not PhiSym phi || !ReferenceEquals(phi.Block, block) || phi.Sources.Any(s => s is null)) return false;
         // 多层合流的实体选择：先拆外层，φ 随之下移到前驱，下一轮再拆。
         if (phi.Sources.Any(s => SymTable.Resolve(s!) is PhiSym) && Entities(phi, true, addresses: true) is { } entities) return entities.Count > 1;
-        var identities = phi.Sources.Select(s => Identity(SymTable.Resolve(s!), oracle)).ToArray();
+        // 来源是另一个合流的 φ（多层合流）时，它是一个运行时值，自成一个身份：先拆外层，φ 随之下移，下一轮再看内层。
+        // 经回边依赖本 φ 的（循环中的步进）不算，它们与本 φ 是同一个循环变量。
+        var identities = phi.Sources.Select(s => SymTable.Resolve(s!) is var source && Root(source) is PhiSym nested
+            && !ReferenceEquals(nested, phi) && !DependsOn(nested, phi) ? (object)(nested, Offset(source)) : Identity(source, oracle)).ToArray();
         return identities.All(i => i is not null) && identities.Distinct().Count() > 1;
+    }
+
+    /// <summary>φ 经其他 φ 与加常量是否取到 target。</summary>
+    private static bool DependsOn(PhiSym phi, PhiSym target)
+    {
+        var seen = new HashSet<PhiSym>();
+        var pending = new Stack<PhiSym>([phi]);
+        while (pending.TryPop(out var current))
+        {
+            if (!seen.Add(current)) continue;
+            foreach (var source in current.Sources)
+                if (source is not null && Root(SymTable.Resolve(source)) is PhiSym next)
+                {
+                    if (ReferenceEquals(next, target)) return true;
+                    pending.Push(next);
+                }
+        }
+        return false;
+    }
+
+    private static long Offset(Sym sym)
+    {
+        long offset = 0;
+        while (sym is OpSym { Op.Kind: OperatorKind.Binary, Args: [var left, ConstSym c] } add && add.Op.Binary == BinOp.Add)
+        {
+            offset += c.Signed;
+            sym = SymTable.Resolve(left);
+        }
+        return offset;
     }
 
     /// <summary>地址的根：去掉加常量。</summary>
