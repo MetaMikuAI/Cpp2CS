@@ -142,7 +142,7 @@ public sealed class MethodDecompiler
         var lowered = BodyBuilder.Build(analysis, oracle, uses, fields, templates);
         if (lowered.Body is null) return new(analysis.Method, analysis.Entry, null, lowered.Holes);
         var recovered = templates.Run(lowered.Body, lowered.Constructions, lowered.NextLocal);
-        var body = LocalCoalescing.Run(recovered.Body);
+        var body = LeafCopies.Run(LocalCoalescing.Run(recovered.Body), types);
         var holes = lowered.Holes.Concat(recovered.Holes).DistinctBy(h => (h.Address, h.Reason)).ToArray();
         var unfolded = lowered.Unfolded.Concat(recovered.Rules).ToArray();
         return holes.Length == 0 ? new(analysis.Method, analysis.Entry, body, []) { Rules = unfolded }
