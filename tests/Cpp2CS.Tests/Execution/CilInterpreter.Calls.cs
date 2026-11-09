@@ -25,7 +25,8 @@ internal sealed partial class CilInterpreter
     /// 泛型定义只按一个见证写出，而值类型实例有单独编译的原生代码（只对引用类型成立的分支已被折叠）。
     /// 被内联的是这个实例，所以按它自己的恢复体执行。
     /// </summary>
-    public void SetInline(Output.BodyEmitter emitter, Output.Skeleton skeleton, Func<MethodRef, MethodBody?> ownBody)
+    /// <param name="closed">把写出时带原生布局绑定的泛型参数闭合为运行时实例：执行时的被调方法是闭合的实例，实例体按两种写法都能查到。</param>
+    public void SetInline(Output.BodyEmitter emitter, Output.Skeleton skeleton, Func<MethodRef, MethodBody?> ownBody, Func<MethodRef, MethodRef>? closed = null)
     {
         transparentInline.Clear();
         instanceBodies.Clear();
@@ -35,7 +36,11 @@ internal sealed partial class CilInterpreter
             foreach (var method in methods)
             {
                 transparentInline[method.Method] = skeleton.Method(method.Method);
-                if (ownBody(method) is { } body) instanceBodies[method] = body;
+                if (ownBody(method) is { } body)
+                {
+                    instanceBodies[method] = body;
+                    if (closed?.Invoke(method) is { } instance) instanceBodies.TryAdd(instance, body);
+                }
             }
         var sites = new Dictionary<Instruction, MethodRef>(emitter.InlineCalls);
         foreach (var (instruction, accessor) in emitter.AccessorCalls) sites[instruction] = accessor.Method;

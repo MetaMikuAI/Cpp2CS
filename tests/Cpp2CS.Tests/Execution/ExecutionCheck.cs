@@ -55,7 +55,7 @@ internal static partial class ExecutionCheck
         var written = all.GroupBy(r => r.Method.Method).ToDictionary(g => g.Key, g => g.First());
         // 内联目标的实参可能提到调用方的类型参数，而 CIL 的 VAR/MVAR 只引用所在类型和方法自己的参数（ECMA-335 II.7.1）：按原生见证闭合后才能写成实例体。
         interpreter.SetInline(emitter, skeleton, method => decompiler.Summary(WithWitnesses(method)) is { Body: { } own, Entry: var entry }
-            && written.GetValueOrDefault(method.Method)?.Entry != entry ? emitter.BuildInstance(own) : null);
+            && written.GetValueOrDefault(method.Method)?.Entry != entry ? emitter.BuildInstance(own) : null, WithWitnesses);
         using var machine = new NativeMachine(facts);
         var verdicts = new Dictionary<ExecutionVerdict, int>();
         var output = options.SkipWhile(o => o != "--output").Skip(1).FirstOrDefault();
