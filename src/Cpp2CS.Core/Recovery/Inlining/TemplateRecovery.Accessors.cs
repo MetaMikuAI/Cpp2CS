@@ -40,8 +40,8 @@ internal sealed partial class TemplateRecovery
             if (fields.CallFailure(method, receiver, isStatic ? field.DeclaringType : null) is { } illegal) { reasons.Add(illegal); continue; }
             if (Template(method) is not { } summary)
             {
-                // 总被内联的库访问器：方法体按库的源码给出。
-                if (!write && !receiverParameter && LibraryAccessors.IsRead(definition, field.Field))
+                // 总被内联的库访问器：方法体按库的源码给出；自动属性的访问器按编译器的生成方式给出。
+                if (!receiverParameter && (LibraryAccessors.IsAutoProperty(definition, field.Field, write) || !write && LibraryAccessors.IsRead(definition, field.Field)))
                 {
                     found = new FieldAccessor(method, field, valueType, types.ValueWidth(valueType), write);
                     break;
