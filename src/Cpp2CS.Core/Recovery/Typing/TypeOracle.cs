@@ -19,8 +19,10 @@ public sealed record AccessPart(Location Leaf, int Bit, int FieldBit, int Width)
 public sealed record Location(LocationKind Kind, Sym? Base, Sym? Index, long ConstantIndex, TypeRef? Owner, IReadOnlyList<FieldRef> Path, TypeRef Type)
 {
     public Sym? ByteOffset { get; init; }
-    /// <summary>无类型指针上的元素：字节偏移是 Index 乘以 sizeof(Type)（Kind 为 Reference）。</summary>
+    /// <summary>无类型指针上的元素：字节偏移是 Index 乘以 sizeof(Type)（Kind 为 Reference）；访问元素的字段时按 sizeof(Element)，Path 从元素进入字段。</summary>
     public bool Strided { get; init; }
+    /// <summary>Strided 访问元素中的字段时元素的类型（Type 是字段的类型）。</summary>
+    public TypeRef? Element { get; init; }
     /// <summary>实例位置的根按这个类型看待（类型判断成立之后的对象，写出为 castclass）。</summary>
     public TypeRef? View { get; init; }
     /// <summary>多维数组元素各维的 int32 下标（Kind 为 MultiElement）。</summary>
@@ -884,6 +886,23 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         if (scale != size) return null;
         var location = new Location(LocationKind.Reference, root, index, 0, null, [], element) { Strided = true };
         pointerElements[(SymTable.Resolve(address), size * 8)] = location;
+        return location;
+    }
+
+    /// <summary>
+    /// 按约定元素类型（<see cref="BufferElement"/>）为结构体 T 的缓冲区上，按 T 的大小步进、只读写 T 的一个字段的访问：
+    /// clang 把元素的整体读写拆成各字段的读写，位置是第 i 个元素的这个字段。成立后同一地址与宽度的访问都按它定位。
+    /// </summary>
+    public Location? PointerElementField(Sym address, TypeRef element, int width)
+    {
+        var size = ElementSize(element);
+        if (size <= 0 || types.Kind(element) != TypeKind.Struct || width >= size * 8) return null;
+        var (root, offset, index, scale) = Decompose(address);
+        if (TypeOf(root) is not PointerRef { Element: var pointee } || !ManagedTypes.IsVoid(pointee) || index is null || offset < 0 || offset >= size) return null;
+        (index, scale) = Rescaled(index, scale, size);
+        if (scale != size || FieldAt(element, (int)offset + RuntimeLayout.ObjectHeaderSize, width, false, false) is not var (path, type)) return null;
+        var location = new Location(LocationKind.Reference, root, index, 0, null, path, type) { Strided = true, Element = element };
+        pointerElements[(SymTable.Resolve(address), width)] = location;
         return location;
     }
 

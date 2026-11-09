@@ -47,8 +47,11 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
                     break;
                 }
                 // 缓冲区约定了元素类型的单个写入：与同一位置的读取按同一元素定位。
-                if (Untyped(operands[0], store.Value.Width) && oracle.BufferElement(operands[0]) is { } element
-                    && Types.StorageBits(element) == store.Value.Width && oracle.ExactStride(operands[0], element)) oracle.PointerElement(operands[0], element);
+                if (Untyped(operands[0], store.Value.Width) && oracle.BufferElement(operands[0]) is { } element)
+                {
+                    if (Types.StorageBits(element) == store.Value.Width && oracle.ExactStride(operands[0], element)) oracle.PointerElement(operands[0], element);
+                    else oracle.PointerElementField(operands[0], element, store.Value.Width);
+                }
                 if (oracle.Locate(operands[0], store.Value.Width) is { } location) Store(location, operands[1], store);
                 else if (oracle.Split(operands[0], store.Value.Width) is { } parts)
                     foreach (var part in parts) Store(part.Leaf, values.Syms.Slice(operands[1], part.Bit, part.Width), store);
@@ -194,6 +197,8 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
                 if (Untyped(read.Address, read.Width)
                     && (oracle.BufferElement(read.Address) ?? (expected is not null && Types.Kind(expected) != TypeKind.Struct ? expected : null)) is { } element
                     && Types.StorageBits(element) == read.Width && oracle.ExactStride(read.Address, element)) oracle.PointerElement(read.Address, element);
+                // 约定元素是结构体、只读它的一个字段（元素的整体读取被拆成各字段的读取）。
+                else if (Untyped(read.Address, read.Width) && oracle.BufferElement(read.Address) is { } buffered) oracle.PointerElementField(read.Address, buffered, read.Width);
                 Read(read, user);
                 break;
             case PhiSym phi:

@@ -116,7 +116,13 @@ internal sealed partial class BodyBuilder
                         pointer = new PointerOffsetValue(pointer, View(offset, types.Int64, address));
                     if (location is { Strided: true, Index: { } stride })
                         pointer = new PointerOffsetValue(pointer, new BinaryValue(BinOp.Mul, View(stride, types.Int64, address),
-                            new ConversionValue(ConvKind.ZeroExtend, new SizeOfValue(location.Type, types.Int32), types.Int64, 64), types.Int64, 64));
+                            new ConversionValue(ConvKind.ZeroExtend, new SizeOfValue(location.Element ?? location.Type, types.Int32), types.Int64, 64), types.Int64, 64));
+                    // 无类型指针上元素的字段：先按元素类型解引用，再进入字段。
+                    if (location is { Strided: true, Element: { } element } && path.Count > 0)
+                    {
+                        ManagedValue item = new IndirectValue(pointer, element, Width(element));
+                        return Nest(store ? new AddressValue(item) : item, path, location.Type, store, address);
+                    }
                     return path.Count == 0 ? new IndirectValue(pointer, location.Type, Width(location.Type)) : Nest(pointer, path, location.Type, store, address);
                 }
             case LocationKind.Element:
