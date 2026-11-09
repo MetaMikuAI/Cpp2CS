@@ -18,7 +18,8 @@ public sealed partial class TypeOracle
     public bool BitRepresentation(Sym value) => SymTable.Resolve(value) is ConcatSym or ConstSym
         || TypeOf(value) is null && (SymTable.Resolve(value) is SliceSym || SymTable.Resolve(value) is ReadSym merged && Parts(merged) is not null
             // 非标准宽度的运算结果不是 IL 标量（按位打包在寄存器里返回的小结构体），只能按位段取用。
-            || SymTable.Resolve(value) is OpSym { Width: not (1 or 8 or 16 or 32 or 64) })
+            // 选择除外：两路整个值之间的选择（JoinedSelect）按期望的结构体类型选择两路，不拆成位段。
+            || SymTable.Resolve(value) is OpSym { Width: not (1 or 8 or 16 or 32 or 64), Op.Kind: not OperatorKind.Select })
         || TypeOf(value) is { } scalar && types.Kind(scalar) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double or TypeKind.Pointer;
 
     /// <summary>
