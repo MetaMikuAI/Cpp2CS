@@ -16,7 +16,20 @@ internal sealed partial class TemplateRecovery(ManagedTypes types, MethodRef cal
     private readonly List<Cpp2CS.Diagnostics.RuleTrace> rules = [];
     private int nextLocal;
 
+    /// <summary>
+    /// 证明内联。仍有洞且有被提到分支之前的内联前缀时，从原方法体把前缀下沉到两臂再证一次（<see cref="SinkHoistedPrefixes"/>），
+    /// 洞更少才采用；两种方法体语义相同，没有洞的方法不受影响。
+    /// </summary>
     public TemplateResult Run(ManagedBody body, IReadOnlyDictionary<Variable, PendingConstruction> constructions, int firstLocal)
+    {
+        var result = RunOnce(body, constructions, firstLocal);
+        var next = firstLocal;
+        if (result.Holes.Count == 0 || SinkHoistedPrefixes(body, ref next) is not { } sunk) return result;
+        var retried = RunOnce(sunk, constructions, next);
+        return retried.Holes.Count < result.Holes.Count ? retried : result;
+    }
+
+    private TemplateResult RunOnce(ManagedBody body, IReadOnlyDictionary<Variable, PendingConstruction> constructions, int firstLocal)
     {
         holes.Clear();
         rules.Clear();
