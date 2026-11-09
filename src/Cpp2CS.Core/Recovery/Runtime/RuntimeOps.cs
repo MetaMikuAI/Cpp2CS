@@ -198,6 +198,18 @@ public static class RuntimeOps
         // GC 写屏障由托管写入承担；元数据与 RGCTX 初始化不单独写出。
         foreach (var kind in new[] { OpKind.WriteBarrier, OpKind.InitClass, OpKind.InitMethodRgctx })
             yield return new(kind) { Behavior = EffectSummary.None, Lower = None };
+        yield return new(OpKind.ExecutingAssembly)
+        {
+            ResultType = (_, t) => t.Types.CorlibDefinition("System.Reflection.Assembly") is { } assembly ? new DefinitionRef(assembly, []) : null,
+            Behavior = new(EffectKind.Allocate),
+            Lower = (IRuntimeLowering c, out ManagedStatement? terminal) =>
+            {
+                terminal = null;
+                if (c.Types.CorlibMethod("System.Reflection.Assembly", "GetExecutingAssembly") is not { Method.IsStatic: true } executing) return false;
+                c.Emit(new ManagedCall(c.Call.Address, new ManagedInvocation(executing, null, [], false), c.Local(c.Result, executing.Method.ReturnType)));
+                return true;
+            },
+        };
         yield return new(OpKind.MemoryBarrier)
         {
             Behavior = new(EffectKind.Order),

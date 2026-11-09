@@ -123,6 +123,8 @@ public enum OpKind : byte
     /// Operand 同 <see cref="InvokeConstrainedGeneric"/>；实参按方法的机器签名，接收者是约束类型的位置。
     /// </summary>
     CallConstrained,
+    /// <summary>Assembly.GetExecutingAssembly()：调用方所在程序集的反射对象。</summary>
+    ExecutingAssembly,
 }
 
 /// <summary>调用所表达的运行时操作。Operand：类型（TypeRef）、异常名、槽位号等，见 <see cref="OpKind"/>。</summary>

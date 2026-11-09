@@ -54,6 +54,8 @@ public enum HelperKind
     ConstrainedCall,
     /// <summary>UnBoxAny(obj, klass, storage)：IL 的 unbox.any，返回值所在位置（盒内或 storage）的地址。</summary>
     UnboxAny,
+    /// <summary>il2cpp_codegen_get_executing_assembly(method)：method→klass→image→assembly 的反射对象，IL 的 Assembly.GetExecutingAssembly()。</summary>
+    ExecutingAssembly,
 }
 
 /// <summary>一个被托管代码调用的辅助函数。Evidence 说明依据；Callers 为托管调用点数。</summary>
@@ -224,6 +226,9 @@ public sealed partial class RuntimeHelpers
         if (interfaceSlowPath is { } slow && chain.Contains(slow))
             return (HelperKind.InterfaceLookup, null, $"il2cpp_object_get_virtual_method 在接口偏移扫描失败后调用 0x{slow:x}");
         var calls = CallsOf(body).ToArray();
+        if (ExecutingAssemblyBody(target))
+            return (HelperKind.ExecutingAssembly, null,
+                $"读取 MethodInfo+0x{RuntimeLayout.MethodKlass:x} klass、Il2CppClass+0x{RuntimeLayout.ClassImage:x} image、Il2CppImage+0x{RuntimeLayout.ImageAssembly:x} assembly 后尾调用取反射对象");
         if (map.At(body) is { ExceptionRegions.Length: 0 } valueRange && valueRange.Start == body
             && valueRange.Size == 60 && GenericHasValueBody(words))
             return (HelperKind.GenericHasValue, null, "完整函数按 byval_arg 值类型位、generic_class 和 nullabletype 位检查引用或 Nullable.hasValue");
@@ -278,6 +283,17 @@ public sealed partial class RuntimeHelpers
     }
 
     private ulong? interfaceSlowPath;
+
+    /// <summary>ldr xA, [x0, #klass]; ldr xB, [xA, #image]; ldr x0, [xB, #assembly]; b 实现。</summary>
+    private bool ExecutingAssemblyBody(ulong address)
+    {
+        if (map.Word(address) is not { } klass || map.Word(address + 4) is not { } image || map.Word(address + 8) is not { } assembly
+            || map.Word(address + 12) is not { } tail) return false;
+        static bool Load(uint w, int from, int offset) => A64.IsUnsignedOffsetAccess(w) && (w & 0x04000000) == 0 && !A64.IsStore(w)
+            && A64.AccessSize(w) == 8 && A64.Rn(w) == from && (int)A64.AccessOffset(w) == offset;
+        return Load(klass, 0, RuntimeLayout.MethodKlass) && Load(image, A64.Rd(klass), RuntimeLayout.ClassImage)
+            && Load(assembly, A64.Rd(image), RuntimeLayout.ImageAssembly) && A64.Rd(assembly) == 0 && A64.IsB(tail);
+    }
 
     /// <summary>函数中以 ADRP+ADD 取得的 typeinfo 对象，其名称指针（+8）指向含 Il2CppExceptionWrapper 的字符串。</summary>
     private bool ThrowsIl2CppWrapper(ulong address)

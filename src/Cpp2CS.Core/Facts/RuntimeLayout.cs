@@ -42,6 +42,9 @@ public static class RuntimeLayout
         MethodReturnType = 0x28, MethodParameters = 0x30, MethodRgctxData = 0x38, MethodGenericMethod = 0x40, MethodToken = 0x48,
         MethodFlags = 0x4C, MethodIflags = 0x4E, MethodSlot = 0x50, MethodParametersCount = 0x52, MethodBitflags = 0x53, MethodInfoSize = 0x58;
 
+    // Il2CppImage { name; nameNoExt; assembly; ... }
+    public const int ImageAssembly = 0x10;
+
     // FieldInfo { name; type; parent; offset; token }
     public const int FieldName = 0x00, FieldType = 0x08, FieldParent = 0x10, FieldOffset = 0x18, FieldToken = 0x1C;
     public const int FieldInfoSize = 0x20;

@@ -60,6 +60,11 @@ internal static class DirectPass
             HelperKind.ReadByteArray when ArrayIndex32(state.defs.Expand(Arg(1))) is { } arrayIndex
                 => (OpKind.ReadByteArray, null, [Arg(0), arrayIndex]),
             HelperKind.Export => (OpKind.Export, helper.Detail, args),
+            // 参数是执行中方法的 MethodInfo：自身（符号或入口传入的隐藏参数），或同一程序集里的方法，结果都是当前程序集。
+            HelperKind.ExecutingAssembly when state.self is { } self && (state.defs.Expand(Arg(0)) is Symbol { Kind: SymbolKind.Method, Value: MethodRef executing }
+                    && executing.Method.Owner.Assembly == self.Method.Owner.Assembly
+                || state.defs.Expand(Arg(0)) is Use { Variable: { Version: 0 } entry } && entry.Storage == state.selfMethodInfo)
+                => (OpKind.ExecutingAssembly, null, []),
             HelperKind.Import when helper.Detail == "__cxa_begin_catch" => (OpKind.BeginCatch, null, [Arg(0)]),
             HelperKind.Import when helper.Detail == "__cxa_end_catch" => (OpKind.EndCatch, null, []),
             HelperKind.Import => (OpKind.Import, helper.Detail, args),
