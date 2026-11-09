@@ -326,12 +326,25 @@ public sealed partial class TypeOracle
                 hiddenKept |= Hidden(group);
                 continue;
             }
-            if (direct.FirstOrDefault(d => d.Projection.Path is [var field] && field.Equals(group.Key)) is not { } own) return null;
+            if (direct.FirstOrDefault(d => d.Projection.Path is [var field] && field.Equals(group.Key)) is not { } own || !Writable(group.Key, own.Projection.Type)) return null;
             changed.Add(own);
         }
         if (!hiddenKept || changed.Count == 0) return null;
         if (whole is not null) return (whole, changed);
         return Snapshot(address, reads, structure, total) is { } snapshot ? (snapshot, changed) : null;
+    }
+
+    /// <summary>
+    /// 快照改写的字段写得出：对调用方可访问、与调用方同程序集（按原生代码直接写），或所在类型有参数恰为字段类型的 setter 形方法（可能是被内联的访问器）。
+    /// 都不成立时（如别的程序集值类型的私有字段且没有 setter）改写只能是洞，不按快照改写。
+    /// </summary>
+    private bool Writable(FieldRef field, TypeRef type)
+    {
+        if (ManagedAccess.Field(types, method, field, field.DeclaringType) || field.Field.Owner.Assembly == method.Method.Owner.Assembly) return true;
+        var isStatic = (field.Field.Attributes & System.Reflection.FieldAttributes.Static) != 0;
+        return field.DeclaringType is DefinitionRef owner && owner.Definition.Methods.Any(m => m.Name is not (".ctor" or ".cctor")
+            && m.GenericParameters.Count == 0 && m.IsStatic == isStatic && m.Parameters.Count == 1 && ManagedTypes.IsVoid(m.ReturnType)
+            && new MethodRef(m, owner.Arguments, []).Concrete(m.Parameters[0].Type).Equals(type));
     }
 
     /// <summary>位段 [offset, offset + width)（字节偏移、位宽）的各片都是同一个整体值 whole 在相同位置的片；whole 的位宽为 total。</summary>
