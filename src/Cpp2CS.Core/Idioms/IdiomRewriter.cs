@@ -121,6 +121,17 @@ public sealed class IdiomRewriter(ProgramFacts facts)
     }
 
     /// <summary>
+    /// 隐藏 MethodInfo 溢出到栈上时，内存提升之后才是入口值；经它读出的类、RGCTX 与条目按同样的规则识别。
+    /// 只改写语句，调用方负责清理。
+    /// </summary>
+    internal bool ResolvePromotedMetadata(MachineFunction function)
+    {
+        var state = new IdiomState(this, function);
+        IdiomPipeline.IdentifySelf(state);
+        return state.selfMethodInfo is not null && state.Symbols(rgctx: true);
+    }
+
+    /// <summary>
     /// 路径拆分把类元数据的合流分开之后，内联类型检查才有单一类型，这里按同样的证明识别。
     /// 只改写语句，清理和 SSA 校验由拆分统一负责。
     /// </summary>

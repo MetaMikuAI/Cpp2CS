@@ -117,6 +117,18 @@ internal static class IdiomPipeline
     /// <summary>函数自身的托管身份与隐藏 MethodInfo 的位置；栈上传入的实参改写为入口值。</summary>
     private static void Identify(IdiomState state)
     {
+        IdentifySelf(state);
+        var signatures = state.facts.EntriesAt(state.function.Entry).Select(e => e.Method).OfType<MethodRef>().Distinct().Select(m => state.owner.abi.Classify(m, out _)).ToArray();
+        if (signatures.Length == 0 && state.facts.Unregistered.At(state.function.Entry) is { } stackIdentity)
+            signatures = [stackIdentity.Abi];
+        if (signatures.All(s => s is not null) && StackInputNormalizer.Run(state.function, state.owner.abi, signatures.Select(s => s!).ToArray(), out var hiddenStack)
+            && hiddenStack is { } offset)
+            state.selfMethodInfo = Storage.Slot(offset);
+    }
+
+    /// <summary>函数自身的托管身份与隐藏 MethodInfo 所在的寄存器。</summary>
+    internal static void IdentifySelf(IdiomState state)
+    {
         if (state.facts.EntriesAt(state.function.Entry).FirstOrDefault(e => e.Method is not null && e.Kind is EntryKind.Method or EntryKind.GenericMethod) is { Method: { } method })
         {
             state.self = method;
@@ -128,12 +140,6 @@ internal static class IdiomPipeline
             state.self = new MethodRef(identity.Definition, [], []);
             state.selfMethodInfo = identity.Abi.MethodInfo?.Register;
         }
-        var signatures = state.facts.EntriesAt(state.function.Entry).Select(e => e.Method).OfType<MethodRef>().Distinct().Select(m => state.owner.abi.Classify(m, out _)).ToArray();
-        if (signatures.Length == 0 && state.facts.Unregistered.At(state.function.Entry) is { } stackIdentity)
-            signatures = [stackIdentity.Abi];
-        if (signatures.All(s => s is not null) && StackInputNormalizer.Run(state.function, state.owner.abi, signatures.Select(s => s!).ToArray(), out var hiddenStack)
-            && hiddenStack is { } offset)
-            state.selfMethodInfo = Storage.Slot(offset);
     }
 
     /// <summary>元数据符号与守卫。RGCTX 数组只在其守卫（InitMethodRgctx）归一之后才当作已初始化的值。</summary>

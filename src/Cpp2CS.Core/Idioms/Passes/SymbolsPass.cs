@@ -6,10 +6,12 @@ namespace Cpp2CS.Idioms;
 
 internal static class SymbolsPass
 {
-    internal static void Symbols(this IdiomState state, bool rgctx)
+    /// <summary>改写元数据读取为符号；有改写时为 true。</summary>
+    internal static bool Symbols(this IdiomState state, bool rgctx)
     {
         var dominators = Dominators.Compute(state.function);
         var ownDefinition = state.self?.Method;
+        var any = false;
         while (true)
         {
             var changed = false;
@@ -90,7 +92,9 @@ internal static class SymbolsPass
                     block.Statements[i] = ExprMap.MapOperands(block.Statements[i], e => ExprMap.Map(e, Map));
             if (!changed)
                 break;
+            any = true;
             Propagate.Run(state.function, dominators);
         }
+        return any;
     }
 }

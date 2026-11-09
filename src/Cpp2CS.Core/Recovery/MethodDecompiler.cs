@@ -276,6 +276,8 @@ public sealed class MethodDecompiler
             environment = new MethodEnvironment(method, signature, shapes);
             if (!MemoryPromotion.Run(function, signature, environment.Shape, abi, lifter.Calls, lifter.Machine.Convention.StackPointer).TryGet(out layout, out var memoryFailure))
                 return memoryFailure;
+            if (rewriter.ResolvePromotedMetadata(function) && Cpp2CS.Machine.Ssa.Lowering.Cleanup(function) is [var promotedError, ..])
+                return RecoveryDiagnostics.Fail(entry, $"L2 {promotedError}", rule: "PromotedMetadata");
             environment.Layout = layout;
             var promoted = ValueModel.Build(function, environment);
             var promotedOracle = new TypeOracle(types, facts, method, environment.Shape, promoted, layout);
