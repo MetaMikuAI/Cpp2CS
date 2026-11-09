@@ -105,13 +105,13 @@ internal sealed partial class BodyBuilder
                 }
             case LocationKind.Instance:
                 {
-                    var receiver = View(location.Base!, oracle.TypeOf(location.Base!), address);
+                    var receiver = View(location.Base!, location.Through ?? oracle.TypeOf(location.Base!), address);
                     if (location.View is { } viewed) receiver = new CheckedCastValue(receiver, viewed);
                     return Nest(receiver, path, location.Type, store, address);
                 }
             case LocationKind.Reference:
                 {
-                    var pointer = View(location.Base!, oracle.TypeOf(location.Base!), address);
+                    var pointer = View(location.Base!, location.Through ?? oracle.TypeOf(location.Base!), address);
                     if (location.ByteOffset is { } offset)
                         pointer = new PointerOffsetValue(pointer, View(offset, types.Int64, address));
                     if (location is { Strided: true, Index: { } stride })
@@ -121,7 +121,7 @@ internal sealed partial class BodyBuilder
                 }
             case LocationKind.Element:
                 {
-                    var array = View(location.Base!, oracle.TypeOf(location.Base!), address);
+                    var array = View(location.Base!, location.Through ?? oracle.TypeOf(location.Base!), address);
                     var index = location.Index is { } i ? ElementIndex(i, address) : new ConstantValue((ulong)location.ConstantIndex, types.Int32, 32);
                     var element = array.Type is ArrayRef a ? a.Element : location.Type;
                     ManagedValue value = new ArrayElementValue(array, index, element, Width(element));
@@ -129,17 +129,17 @@ internal sealed partial class BodyBuilder
                 }
             case LocationKind.MultiElement:
                 {
-                    var array = View(location.Base!, oracle.TypeOf(location.Base!), address);
+                    var array = View(location.Base!, location.Through ?? oracle.TypeOf(location.Base!), address);
                     var indices = location.Indices!.Select(i => View(i, types.Int32, address)).ToArray();
                     var element = array.Type is ArrayRef a ? a.Element : location.Type;
                     ManagedValue value = new MultiArrayElementValue(array, indices, element, Width(element));
                     return path.Count == 0 ? value : Nest(store ? new AddressValue(value) : value, path, location.Type, store, address);
                 }
             case LocationKind.Dimension or LocationKind.LowerBound:
-                return new ArrayBoundValue(View(location.Base!, oracle.TypeOf(location.Base!), address), (int)location.ConstantIndex,
+                return new ArrayBoundValue(View(location.Base!, location.Through ?? oracle.TypeOf(location.Base!), address), (int)location.ConstantIndex,
                     location.Kind == LocationKind.LowerBound, types.Int32);
             case LocationKind.Length:
-                return new ArrayLengthValue(View(location.Base!, oracle.TypeOf(location.Base!), address), types.Int32, 32);
+                return new ArrayLengthValue(View(location.Base!, location.Through ?? oracle.TypeOf(location.Base!), address), types.Int32, 32);
             case LocationKind.StringLength:
                 return new StringLengthValue(View(location.Base!, types.String, address), types.Int32);
             case LocationKind.Local:

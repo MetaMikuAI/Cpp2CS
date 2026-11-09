@@ -25,6 +25,8 @@ public sealed record Location(LocationKind Kind, Sym? Base, Sym? Index, long Con
     public TypeRef? View { get; init; }
     /// <summary>多维数组元素各维的 int32 下标（Kind 为 MultiElement）。</summary>
     public IReadOnlyList<Sym>? Indices { get; init; }
+    /// <summary>根是只包住一个数组引用的结构体值：按这个数组类型看待根（经表示链进入字段）。</summary>
+    public TypeRef? Through { get; init; }
 }
 
 /// <summary>
@@ -589,6 +591,14 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         return at == types.Size(target) * 8 ? copied : null;
     }
 
+    /// <summary>按数组访问的值的数组类型：数组本身，或只包住一个数组引用的结构体值（它的位就是这个引用）。</summary>
+    private ArrayRef? ArrayView(Sym value) => TypeOf(value) switch
+    {
+        ArrayRef array => array,
+        DefinitionRef wrapper when types.Kind(wrapper) == TypeKind.Struct && Representation(wrapper) is [_, _, ..] && Innermost(wrapper).Type is ArrayRef inner => inner,
+        _ => null,
+    };
+
     /// <summary>表示链的最内层：值类型最终包住的标量或非单字段类型。</summary>
     public (IReadOnlyList<FieldRef> Path, TypeRef Type) Innermost(TypeRef type) => Representation(type)[^1];
 
@@ -600,7 +610,7 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         var terms = AddressTerms(address);
         if (terms.Root is PhiSym phi && terms.Index is null && Cursor(phi) is { } cursor)
             return (cursor.Array!, terms.Offset + cursor.Offset, cursor.Index, cursor.Size);
-        if (terms.Index is PhiSym bytes && terms.Scale == 1 && TypeOf(terms.Root) is ArrayRef array && OffsetCursor(bytes, ElementSize(array.Element)) is { } walked)
+        if (terms.Index is PhiSym bytes && terms.Scale == 1 && ArrayView(terms.Root) is { } array && OffsetCursor(bytes, ElementSize(array.Element)) is { } walked)
             return (terms.Root, terms.Offset + walked.Offset, walked.Index, walked.Size);
         return terms;
     }
@@ -762,16 +772,20 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
             };
         }
         var rootType = TypeOf(root);
+        // 只包住一个数组引用的结构体值：它的位就是这个引用，内联的取值化简后直接按数组访问。
+        TypeRef? through = null;
+        if (rootType is not ArrayRef && ArrayView(root) is { } wrappedArray) rootType = through = wrappedArray;
+        Location? Through(Location? located) => located is null || through is null ? located : located with { Through = through };
         switch (rootType)
         {
             case ArrayRef array:
                 {
-                    if (index is null && offset == RuntimeLayout.ArrayMaxLength && width is 32 or 64) return new(LocationKind.Length, root, null, 0, null, [], types.Int32);
-                    if (!array.IsVector) return MultiElement(root, array, offset, index, scale, width);
+                    if (index is null && offset == RuntimeLayout.ArrayMaxLength && width is 32 or 64) return Through(new(LocationKind.Length, root, null, 0, null, [], types.Int32));
+                    if (!array.IsVector) return Through(MultiElement(root, array, offset, index, scale, width));
                     // 可变大小的元素：codegen 按数组类的 element_size 计算下标，只按位置访问。
                     if (width < 0 && ManagedAbi.SharedValue(array.Element) && offset == RuntimeLayout.ArrayData && scale == 1
                         && RuntimeScaledIndex(root, index) is { } scaledIndex)
-                        return new(LocationKind.Element, root, scaledIndex, 0, null, [], array.Element);
+                        return Through(new(LocationKind.Element, root, scaledIndex, 0, null, [], array.Element));
                     var size = ElementSize(array.Element);
                     if (size > 0 && index is not null) (index, scale) = Rescaled(index, scale, size);
                     if (size <= 0 || index is null && offset < RuntimeLayout.ArrayData || index is not null && scale != size) return null;
@@ -790,9 +804,9 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
                     // 自动向量化的宽读取跨越多个元素，不是一次元素访问。
                     if (inside == 0 && types.Kind(array.Element) != TypeKind.Struct && width > StorageBits(array.Element)) return null;
                     if (inside == 0 && (types.Kind(array.Element) != TypeKind.Struct || width == size * 8))
-                        return new(LocationKind.Element, root, index, constant, null, [], array.Element);
+                        return Through(new(LocationKind.Element, root, index, constant, null, [], array.Element));
                     return FieldAt(array.Element, inside + RuntimeLayout.ObjectHeaderSize, width, false, false) is var (path, fieldType)
-                        ? new(LocationKind.Element, root, index, constant, null, path, fieldType) : null;
+                        ? Through(new(LocationKind.Element, root, index, constant, null, path, fieldType)) : null;
                 }
             case DefinitionRef { Definition.FullName: "System.String" }:
                 if (index is null && offset == RuntimeLayout.StringLength) return new(LocationKind.StringLength, root, null, 0, null, [], types.Int32);

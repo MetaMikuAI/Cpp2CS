@@ -224,7 +224,7 @@ public sealed partial class TypeOracle
             {
                 if (root is PhiSym outer && index is null && Cursor(outer) is { } nested)
                     (root, offset, index, scale) = (nested.Array!, offset + nested.Offset, nested.Index, nested.Size);
-                if (TypeOf(root) is not ArrayRef type || ElementSize(type.Element) is not (var bytes and > 0)
+                if (ArrayView(root) is not { } type || ElementSize(type.Element) is not (var bytes and > 0)
                     || array is not null && !ReferenceEquals(array, root)) return null;
                 (array, size) = (root, bytes);
             }
