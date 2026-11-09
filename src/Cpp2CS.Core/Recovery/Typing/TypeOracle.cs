@@ -997,14 +997,41 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
     {
         var value = SymTable.Resolve(index);
         if (value is SliceSym { Low: 0, Width: > 32 } kept) value = SymTable.Resolve(kept.Base);
+        // φ 的低位投影（值模型为切片建的 φ）：看整个 φ。
+        if (value is PhiSym { Projection: (var projected, 0), Width: > 32 }) value = SymTable.Resolve(projected);
         return value switch
         {
             { Width: 32 } narrow => narrow,
             OpSym { Op: { Kind: OperatorKind.Convert } op, Args: [{ Width: 32 } narrow] } when op.Conversion == ConvKind.SignExtend => narrow,
             ConcatSym { Parts: [{ Width: 32 } low, ConstSym { Value: 0 }] } => low,
             ConstSym c when c.Signed is >= int.MinValue and <= int.MaxValue => values.Syms.Const(unchecked((ulong)(uint)(int)c.Signed), 32),
+            PhiSym { Width: 64 } counter when WidenedCounter(counter) => values.Syms.Slice(counter, 0, 32),
             _ => null,
         };
+    }
+
+    /// <summary>
+    /// clang 把 int 循环变量加宽成 64 位（indvars）：φ 的初值是非负的 int 常量，回边上是 φ + 1，且回边只在 φ + 1 小于某个 int 的符号扩展时走。
+    /// 这样的 φ 恒在 [0, int.MaxValue] 内，低 32 位就是原来的 int。
+    /// </summary>
+    private bool WidenedCounter(PhiSym phi)
+    {
+        var stepped = false;
+        for (var edge = 0; edge < phi.Sources.Length; edge++)
+        {
+            if (phi.Sources[edge] is not { } source) return false;
+            var value = SymTable.Resolve(source);
+            if (value is ConstSym { Signed: >= 0 and <= int.MaxValue }) continue;
+            if (value is not OpSym { Op.Kind: OperatorKind.Binary, Args: [var self, ConstSym { Value: 1 }] } next || next.Op.Binary != BinOp.Add
+                || !ReferenceEquals(SymTable.Resolve(self), phi)) return false;
+            var latch = phi.Block.Predecessors[edge];
+            if (latch.Statements.LastOrDefault() is not Branch branch || branch.Target != phi.Block.Start || branch.Fallthrough == phi.Block.Start
+                || SymTable.Resolve(values.Operands(branch)[0]) is not OpSym { Op.Kind: OperatorKind.Compare, Args: [var left, var right] } test
+                || test.Op.Cond != Cond.Slt || !ReferenceEquals(SymTable.Resolve(left), value)
+                || SymTable.Resolve(right) is not OpSym { Op: { Kind: OperatorKind.Convert, Conversion: ConvKind.SignExtend }, Args: [{ Width: 32 }] }) return false;
+            stepped = true;
+        }
+        return stepped;
     }
 
     private (Sym Index, int Scale) Rescaled(Sym index, int scale, int size) =>
