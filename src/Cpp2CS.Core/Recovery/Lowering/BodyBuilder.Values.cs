@@ -333,7 +333,7 @@ internal sealed partial class BodyBuilder
     }
 
     /// <summary>快照改写（<see cref="TypeOracle.UpdatedRead"/>）：复制快照，再写改动的直接字段。</summary>
-    private ManagedValue SnapshotUpdate(DefinitionRef structure, ReadSym snapshot, IReadOnlyList<ProjectedSym> changed, ulong address)
+    private ManagedValue SnapshotUpdate(DefinitionRef structure, Sym snapshot, IReadOnlyList<ProjectedSym> changed, ulong address)
     {
         var writes = changed.Select(c => (Field: c.Projection.Path[0], Value: View(c.Value, c.Projection.Type, address))).ToArray();
         if (!CanEmitBefore(writes.Select(w => w.Value))) return Hole(address, $"值 {structure} 由快照改写，改写语句不能写在值之前", structure);
@@ -534,6 +534,11 @@ internal sealed partial class BodyBuilder
         FieldValue { Receiver: var receiver } when types.Kind(receiver.Type) == TypeKind.Struct => NoEffect(receiver),
         ComposedValue composed => composed.Leaves.All(l => NoEffect(l.Value)),
         NewObjectValue { Transparent: true } created => created.Arguments.All(NoEffect),
+        // 不检查溢出的算术、比较与转换不抛异常（ECMA-335 III.3）；除法和取余会抛 DivideByZero/Arithmetic。
+        BinaryValue { Op: not (BinOp.SDiv or BinOp.UDiv or BinOp.SRem or BinOp.URem or BinOp.MulHighS or BinOp.MulHighU) } binary => NoEffect(binary.Left) && NoEffect(binary.Right),
+        UnaryValue unary => NoEffect(unary.Operand),
+        ConversionValue conversion => NoEffect(conversion.Operand),
+        ComparisonValue comparison => NoEffect(comparison.Left) && NoEffect(comparison.Right),
         _ => false,
     };
 

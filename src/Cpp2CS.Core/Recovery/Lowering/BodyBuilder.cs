@@ -127,6 +127,7 @@ internal sealed partial class BodyBuilder
                 for (var j = 0; j < phi.Block.Predecessors.Count; j++)
                 {
                     var from = phi.Block.Predecessors[j];
+                    OnEdge(from, phi.Block);
                     var source = phi.Sources[j] is { } s ? View(local.Type is ByRefRef ? oracle.EdgeSource(phi, j) : s, local.Type, from.End) : Hole(from.End, "φ 来源缺失", local.Type);
                     if (!copies.TryGetValue((from, phi.Block, j), out var list)) copies[(from, phi.Block, j)] = list = [];
                     list.Add(new ManagedCopy(local, source));

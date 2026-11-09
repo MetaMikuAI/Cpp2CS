@@ -9,7 +9,7 @@ public sealed record ProjectedSym(ValueProjection Projection, Sym Value);
 public sealed record AggregatePlan(Sym? Whole, IReadOnlyList<ProjectedSym> Fields)
 {
     /// <summary>不为 null 时，值是这次整体读取（快照）改写 Fields 中的直接字段（<see cref="TypeOracle.UpdatedRead"/>）。</summary>
-    public ReadSym? Snapshot { get; init; }
+    public Sym? Snapshot { get; init; }
 }
 
 public sealed partial class TypeOracle
