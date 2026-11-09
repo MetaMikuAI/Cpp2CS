@@ -202,6 +202,14 @@ public enum SymbolKind : byte
 /// </summary>
 public sealed record RgctxTable(string Image, uint Token, string Owner, IReadOnlyList<Model.TypeRef>? TypeArguments, IReadOnlyList<Model.TypeRef>? MethodArguments)
 {
+    /// <summary>实参按序列比较：同一张表可由不同的类型引用实例构造。</summary>
+    public bool Equals(RgctxTable? other) => other is not null && Image == other.Image && Token == other.Token
+        && Same(TypeArguments, other.TypeArguments) && Same(MethodArguments, other.MethodArguments);
+
+    public override int GetHashCode() => HashCode.Combine(Image, Token, TypeArguments?.Count ?? -1, MethodArguments?.Count ?? -1);
+
+    private static bool Same(IReadOnlyList<Model.TypeRef>? a, IReadOnlyList<Model.TypeRef>? b) => a is null ? b is null : b is not null && a.SequenceEqual(b);
+
     public override string ToString() => TypeArguments is null && MethodArguments is null ? $"{Owner}（自身）" : Owner;
 }
 
