@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Cpp2CS.Ir;
 using Cpp2CS.Machine.Flow;
 using Cpp2CS.Machine.Ssa;
@@ -272,29 +273,38 @@ internal static class PathSplitting
         if (root is not PhiSym phi || !ReferenceEquals(phi.Block, block) || phi.Sources.Any(s => s is null)) return false;
         // 多层合流的实体选择：先拆外层，φ 随之下移到前驱，下一轮再拆。
         if (phi.Sources.Any(s => SymTable.Resolve(s!) is PhiSym) && Entities(phi, true, addresses: true) is { } entities) return entities.Count > 1;
-        // 来源是另一个合流的 φ（多层合流）时，它是一个运行时值，自成一个身份：先拆外层，φ 随之下移，下一轮再看内层。
-        // 经回边依赖本 φ 的（循环中的步进）不算，它们与本 φ 是同一个循环变量。
-        var identities = phi.Sources.Select(s => SymTable.Resolve(s!) is var source && Root(source) is PhiSym nested
-            && !ReferenceEquals(nested, phi) && !DependsOn(nested, phi) ? (object)(nested, Offset(source)) : Identity(source, oracle)).ToArray();
-        return identities.All(i => i is not null) && identities.Distinct().Count() > 1;
+        // 来源是另一个合流的 φ（多层合流）时展开到它的各个来源：确有不同的来源才拆，先拆外层，φ 随之下移，下一轮再看内层。
+        // 经回边回到本 φ（循环中的步进）时身份未知，与不展开时相同；重复到达同一个内层 φ 不增加身份。
+        // 内层来源是读取时身份未知：不同时刻对同一位置的读取（如溢出到栈上的 this 重新读回）多半是同一个值，不能据此拆分。
+        var identities = new HashSet<object>();
+        var expanded = new HashSet<PhiSym>();
+        return phi.Sources.All(s => Leaves(SymTable.Resolve(s!), 0, phi, oracle, expanded, identities)) && identities.Count > 1;
     }
 
-    /// <summary>φ 经其他 φ 与加常量是否取到 target。</summary>
-    private static bool DependsOn(PhiSym phi, PhiSym target)
+    /// <summary>把来源的身份（经嵌套 φ 展开，计入沿途的常量偏移）加入 identities；有来源的身份未知时为 false。</summary>
+    private static bool Leaves(Sym source, long offset, PhiSym outer, TypeOracle oracle, HashSet<PhiSym> expanded, HashSet<object> identities, bool inner = false)
     {
-        var seen = new HashSet<PhiSym>();
-        var pending = new Stack<PhiSym>([phi]);
-        while (pending.TryPop(out var current))
+        if (Root(source) is PhiSym nested)
         {
-            if (!seen.Add(current)) continue;
-            foreach (var source in current.Sources)
-                if (source is not null && Root(SymTable.Resolve(source)) is PhiSym next)
-                {
-                    if (ReferenceEquals(next, target)) return true;
-                    pending.Push(next);
-                }
+            if (ReferenceEquals(nested, outer)) return false;
+            if (!expanded.Add(nested)) return true;
+            var shifted = offset + Offset(source);
+            return nested.Sources.All(s => s is not null && Leaves(SymTable.Resolve(s), shifted, outer, oracle, expanded, identities, inner: true));
         }
-        return false;
+        if (inner && Root(source) is ReadSym) return false;
+        switch (Identity(source, oracle))
+        {
+            case null:
+                return false;
+            case ITuple { Length: 2 } pair when pair[1] is long at:
+                identities.Add((pair[0], at + offset));
+                return true;
+            case { } other when offset == 0:
+                identities.Add(other);
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static long Offset(Sym sym)
