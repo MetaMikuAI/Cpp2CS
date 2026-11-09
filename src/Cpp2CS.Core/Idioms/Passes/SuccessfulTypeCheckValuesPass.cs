@@ -46,7 +46,8 @@ internal static class SuccessfulTypeCheckValuesPass
             }
             foreach (var block in function.Blocks.ToArray())
             {
-                var at = block.Statements.FindIndex(s => s is Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException", Arguments: [Compare { Cond: Cond.Eq, Left: var result, Right: Const { Value: 0 } }] } && Flag(result)
+                // 类型不符即抛出（castclass 的 InvalidCast，或 (x as T).M() 合成的空引用）之后，x 就是 T。
+                var at = block.Statements.FindIndex(s => s is Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException" or "System.NullReferenceException", Arguments: [Compare { Cond: Cond.Eq, Left: var result, Right: Const { Value: 0 } }] } && Flag(result)
                     || s is Call { Op.Kind: OpKind.NullCheck, Arguments: [var required] } && Flag(required));
                 Block? start = at >= 0 ? block : null;
                 var position = at + 1;

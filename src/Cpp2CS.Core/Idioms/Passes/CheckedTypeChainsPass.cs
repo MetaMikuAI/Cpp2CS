@@ -3,6 +3,10 @@ using Cpp2CS.Ir;
 
 namespace Cpp2CS.Idioms;
 
+/// <summary>
+/// 抛出形式的内联继承检查：先比层级深度，再比该层的类，不成立即抛出。castclass 抛 InvalidCast；
+/// (x as T).M() 的 isinst 失败得到 null，随后的访问抛空引用，clang 把两者合成同样的检查链。两次抛出必须是同一种异常。
+/// </summary>
 internal static class CheckedTypeChainsPass
 {
     internal static bool CheckedTypeChains(this IdiomState state)
@@ -11,7 +15,7 @@ internal static class CheckedTypeChainsPass
         foreach (var head in state.function.Blocks)
             for (var index = 0; index < head.Statements.Count; index++)
             {
-                if (head.Statements[index] is not Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException", Arguments: [Compare { Cond: Cond.Ult } depth] } first || StripConversionsPass.StripConversions(state.defs.Expand(depth.Left)) is not Load { Width: 8, Address: Binary { Op: BinOp.Add, Right: Const { Value: RuntimeLayout.ClassTypeHierarchyDepth } } objectDepth } || StripConversionsPass.StripConversions(state.defs.Expand(depth.Right)) is not Load { Width: 8, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class } type, Right: Const { Value: RuntimeLayout.ClassTypeHierarchyDepth } } })
+                if (head.Statements[index] is not Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException" or "System.NullReferenceException", Arguments: [Compare { Cond: Cond.Ult } depth] } first || StripConversionsPass.StripConversions(state.defs.Expand(depth.Left)) is not Load { Width: 8, Address: Binary { Op: BinOp.Add, Right: Const { Value: RuntimeLayout.ClassTypeHierarchyDepth } } objectDepth } || StripConversionsPass.StripConversions(state.defs.Expand(depth.Right)) is not Load { Width: 8, Address: Binary { Op: BinOp.Add, Left: Symbol { Kind: SymbolKind.Class } type, Right: Const { Value: RuntimeLayout.ClassTypeHierarchyDepth } } })
                     continue;
                 var klass = StripConversionsPass.StripConversions(state.RawDefinition(StripConversionsPass.StripConversions(depth.Left)) ?? depth.Left);
                 var objectClass = klass is Load { Address: Binary { Left: var basis } } ? basis : objectDepth.Left;
@@ -20,7 +24,7 @@ internal static class CheckedTypeChainsPass
                 {
                     if (statement is Define or Nop)
                         continue;
-                    if (statement is not Call { Op.Kind: OpKind.ThrowIf, Op.Operand: "System.InvalidCastException", Arguments: [Compare { Cond: Cond.Ne } compare] } second)
+                    if (statement is not Call { Op.Kind: OpKind.ThrowIf, Arguments: [Compare { Cond: Cond.Ne } compare] } second || !Equals(second.Op!.Operand, first.Op!.Operand))
                         break;
                     var expanded = state.defs.Expand(compare);
                     if (expanded is not Compare test || test.Right != type || test.Left is not Load { Width: 64 } item || !TermsPass.Terms(item.Address).Contains(hierarchy))
