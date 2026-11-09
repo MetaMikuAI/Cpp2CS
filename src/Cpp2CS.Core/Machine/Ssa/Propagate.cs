@@ -108,6 +108,7 @@ public static class Propagate
             {
                 if (replace.ContainsKey(phi.Target)) continue;
                 // 循环可把不变的元数据地址传过多个 φ。只折叠所有外部来源相同的叶子，纯环没有常量证据。
+                // 入口值（版本 0）在整个函数中不变且支配所有块，同样可作叶子（共享泛型的隐藏方法参数经循环传递）。
                 var inputs = new HashSet<Expr>();
                 var pending = new Stack<Variable>(phi.Sources);
                 var seen = new HashSet<Variable>();
@@ -116,7 +117,7 @@ public static class Propagate
                 {
                     if (!seen.Add(source)) continue;
                     var value = Resolve(new Use(source, phi.Target.Width));
-                    if (value is Const or Symbol or FrameAddress) inputs.Add(value);
+                    if (value is Const or Symbol or FrameAddress || value is Use { Variable.Version: 0 } entry && entry.Width == entry.Variable.Width) inputs.Add(value);
                     else if (value is Use use && use.Width == use.Variable.Width && phis.TryGetValue(use.Variable, out var next))
                         foreach (var incoming in next.Sources) pending.Push(incoming);
                     else { valid = false; break; }
