@@ -365,24 +365,8 @@ internal sealed partial class BodyBuilder
     /// <summary>结构体 φ 在第 index 条入边上的值：叶子取该边的来源，为零或未定义的叶子由默认值给出。</summary>
     private ManagedValue StructPhiSource(StructPhiPlan plan, int index, ulong address)
     {
-        // 各叶子是同一个值在布局对应位置上的位段：入边上就是这个值的整体复制，不逐个求叶子（求叶子要读私有字段）。
-        Sym? whole = null;
-        foreach (var (projection, phi, low) in plan.Leaves)
-        {
-            var part = phi.Sources[index] is { } piece ? SymTable.Resolve(values.Syms.Slice(piece, low, projection.Width)) : null;
-            var (root, bit) = part switch
-            {
-                SliceSym slice => (SymTable.Resolve(slice.Base), slice.Low),
-                { } entire when projection.Bit == 0 => (entire, 0),
-                _ => (null, -1),
-            };
-            if (root is null || bit != projection.Bit || root.Width != types.Size(plan.Structure) * 8 || whole is not null && !ReferenceEquals(whole, root)) { whole = null; break; }
-            whole = root;
-        }
-        if (whole is not null) return View(whole, plan.Structure, address);
-        // 入边上的叶子是对同一结构体位置的相邻读取：整体读取它（类型使用分析已按同一判定让它落成局部）。
-        if (oracle.StructPhiEdge(plan.Leaves, plan.Structure, index) is { } edge && oracle.WholeRead(edge, plan.Structure) is { } read)
-            return View(read, plan.Structure, address);
+        // 入边上的值能整体取得（同一个值的对应位段，或对同一位置的相邻读取）时整体复制，不逐个求叶子（求叶子要读私有字段）。
+        if (oracle.StructPhiWhole(plan.Leaves, plan.Structure, index) is { } whole) return View(whole, plan.Structure, address);
         var fields = new List<ProjectedSym>();
         foreach (var (projection, phi, low) in plan.Leaves)
         {

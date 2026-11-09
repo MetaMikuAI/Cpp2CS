@@ -102,6 +102,32 @@ public sealed partial class TypeOracle
         return values.Syms.Concat(parts);
     }
 
+    /// <summary>
+    /// 结构体 φ 在第 index 条入边上能整体取得的值：各叶子是同一个值在布局对应位置上的位段时就是这个值；
+    /// 各叶子是对同一结构体位置的相邻读取时是对它的整体读取。都不成立时为 null，入边上的值只能按叶子组成。
+    /// </summary>
+    public Sym? StructPhiWhole(IReadOnlyList<(ValueProjection Projection, PhiSym Phi, int Low)> leaves, DefinitionRef structure, int index)
+    {
+        Sym? whole = null;
+        foreach (var (projection, phi, low) in leaves)
+        {
+            var part = phi.Sources[index] is { } piece ? SymTable.Resolve(values.Syms.Slice(piece, low, projection.Width)) : null;
+            var (root, bit) = part switch
+            {
+                SliceSym slice => (SymTable.Resolve(slice.Base), slice.Low),
+                { } entire when projection.Bit == 0 => (entire, 0),
+                _ => (null, -1),
+            };
+            if (root is null || bit != projection.Bit || root.Width != types.Size(structure) * 8 || whole is not null && !ReferenceEquals(whole, root)) { whole = null; break; }
+            whole = root;
+        }
+        return whole ?? (StructPhiEdge(leaves, structure, index) is { } edge ? WholeRead(edge, structure) : null);
+    }
+
+    /// <summary>结构体 φ 的每条入边都能整体取得：值与写入都整体进行，不需要逐个访问叶子。</summary>
+    public IReadOnlyList<(ValueProjection Projection, PhiSym Phi, int Low)>? WholeStructPhi(AggregatePlan plan, DefinitionRef structure) =>
+        StructPhiLeaves(plan) is { } leaves && Enumerable.Range(0, leaves[0].Phi.Sources.Length).All(j => StructPhiWhole(leaves, structure, j) is not null) ? leaves : null;
+
     /// <summary>直接字段的位来源，供值组成与逐字段写入共用。</summary>
     public IReadOnlyList<ProjectedSym>? FieldValues(Sym bits, DefinitionRef structure)
     {
@@ -111,11 +137,11 @@ public sealed partial class TypeOracle
             : fields.Select(p => new ProjectedSym(p, values.Syms.Slice(bits, p.Bit, p.Width))).ToArray();
     }
 
-    /// <summary>整体位写入可分解的非零叶子；整体读取、快照改写与结构体 φ 仍保留为整体复制。</summary>
+    /// <summary>整体位写入可分解的非零叶子；整体读取、快照改写与各入边都能整体取得的结构体 φ 仍保留为整体复制。</summary>
     public IReadOnlyList<ValueProjection>? FieldStores(Sym bits, TypeRef type)
     {
         if (type is not DefinitionRef structure || types.Kind(type) != TypeKind.Struct || !BitRepresentation(bits)
-            || types.StorageBits(type) > bits.Width || Aggregate(bits, structure) is { } plan && (plan.Whole is not null || plan.Snapshot is not null || StructPhiLeaves(plan) is not null)) return null;
+            || types.StorageBits(type) > bits.Width || Aggregate(bits, structure) is { } plan && (plan.Whole is not null || plan.Snapshot is not null || WholeStructPhi(plan, structure) is not null)) return null;
         var leaves = types.Projections(structure).ToArray();
         // 布局未知的叶子（共享泛型字段）没有位范围，整体不能按位分解。
         if (leaves.Any(p => !p.Fits(bits.Width))) return null;
