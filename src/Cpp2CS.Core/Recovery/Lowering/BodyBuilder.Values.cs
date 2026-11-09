@@ -328,7 +328,20 @@ internal sealed partial class BodyBuilder
     {
         if (oracle.Aggregate(bits, structure) is not { } plan) return Hole(address, $"值 {structure} 超出位宽 {bits.Width}", structure);
         if (plan.Whole is { } whole) return View(whole, structure, address);
+        if (plan.Snapshot is { } snapshot) return SnapshotUpdate(structure, snapshot, plan.Fields, address);
         return StructPhi(structure, plan) ?? Composed(structure, plan.Fields.Select(f => (f.Projection.Path, View(f.Value, f.Projection.Type, address))).ToList(), address);
+    }
+
+    /// <summary>快照改写（<see cref="TypeOracle.UpdatedRead"/>）：复制快照，再写改动的直接字段。</summary>
+    private ManagedValue SnapshotUpdate(DefinitionRef structure, ReadSym snapshot, IReadOnlyList<ProjectedSym> changed, ulong address)
+    {
+        var writes = changed.Select(c => (Field: c.Projection.Path[0], Value: View(c.Value, c.Projection.Type, address))).ToArray();
+        if (!CanEmitBefore(writes.Select(w => w.Value))) return Hole(address, $"值 {structure} 由快照改写，改写语句不能写在值之前", structure);
+        var copy = NewLocal(structure);
+        currentOutput!.Add(new ManagedAssignment(address, copy, View(snapshot, structure, address)));
+        foreach (var (field, value) in writes)
+            currentOutput.Add(new ManagedStore(address, FieldAccess(new AddressValue(copy), field, value.Type, true, address), value));
+        return copy;
     }
 
     /// <summary>叶子都是同一块的 φ 时还原出的结构体 φ。Leaves 是各叶子在 φ 中的位段。</summary>

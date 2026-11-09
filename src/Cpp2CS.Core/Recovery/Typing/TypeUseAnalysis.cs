@@ -176,6 +176,7 @@ internal sealed class TypeUseAnalysis(MethodAnalysis analysis, TypeOracle oracle
             if (aggregate.Whole is { } whole && !ReferenceEquals(whole, value)) { Use(whole, structure, user); return; }
             if (aggregate.Whole is null)
             {
+                if (aggregate.Snapshot is { } snapshot) Use(snapshot, structure, user);
                 foreach (var field in aggregate.Fields) Use(field.Value, field.Projection.Type, user);
                 return;
             }

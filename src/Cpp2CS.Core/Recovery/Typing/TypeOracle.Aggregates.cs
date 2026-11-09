@@ -6,7 +6,11 @@ namespace Cpp2CS.Recovery.Typing;
 public sealed record ProjectedSym(ValueProjection Projection, Sym Value);
 
 /// <summary>结构体表示计划：优先使用完整读取，否则由非零字段组成，未列出的字段由 initobj 初始化。</summary>
-public sealed record AggregatePlan(Sym? Whole, IReadOnlyList<ProjectedSym> Fields);
+public sealed record AggregatePlan(Sym? Whole, IReadOnlyList<ProjectedSym> Fields)
+{
+    /// <summary>不为 null 时，值是这次整体读取（快照）改写 Fields 中的直接字段（<see cref="TypeOracle.UpdatedRead"/>）。</summary>
+    public ReadSym? Snapshot { get; init; }
+}
 
 public sealed partial class TypeOracle
 {
@@ -39,6 +43,7 @@ public sealed partial class TypeOracle
     public AggregatePlan? Aggregate(Sym bits, DefinitionRef structure)
     {
         if (WholeRead(bits, structure) is { } whole) return new(whole, []);
+        if (UpdatedRead(bits, structure) is var (snapshot, changed)) return new(null, changed) { Snapshot = snapshot };
         if (FieldValues(bits, structure) is not { } projected) return null;
         var fields = new List<ProjectedSym>();
         foreach (var (projection, part) in projected)
@@ -73,7 +78,7 @@ public sealed partial class TypeOracle
     public IReadOnlyList<ValueProjection>? FieldStores(Sym bits, TypeRef type)
     {
         if (type is not DefinitionRef structure || types.Kind(type) != TypeKind.Struct || !BitRepresentation(bits)
-            || types.StorageBits(type) > bits.Width || WholeRead(bits, structure) is not null) return null;
+            || types.StorageBits(type) > bits.Width || WholeRead(bits, structure) is not null || UpdatedRead(bits, structure) is not null) return null;
         var leaves = types.Projections(structure).ToArray();
         // 布局未知的叶子（共享泛型字段）没有位范围，整体不能按位分解。
         if (leaves.Any(p => !p.Fits(bits.Width))) return null;

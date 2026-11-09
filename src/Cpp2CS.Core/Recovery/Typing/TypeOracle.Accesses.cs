@@ -247,21 +247,79 @@ public sealed partial class TypeOracle
             ? types.Leaves(definition).Select(l => (l.Offset, Width: StorageBits(l.Type)))
             : [(Offset: 0, Width: total)];
         foreach (var (offset, width) in ranges)
+            if (width <= 0 || offset * 8 + width > bits.Width || !FromReads(bits, offset, width, ref address, reads)) return null;
+        return Snapshot(address, reads, structure, total);
+    }
+
+    /// <summary>位段 [offset, offset + width)（字节偏移、位宽）的各片都读自同段内存时，记下这些读取并给出或核对整体的起点。</summary>
+    private bool FromReads(Sym bits, int offset, int width, ref Sym? address, HashSet<ReadSym> reads)
+    {
+        var part = SymTable.Resolve(values.Syms.Slice(bits, offset * 8, width));
+        var pieceOffset = offset;
+        foreach (var piece in part is ConcatSym concat ? concat.Parts : [part])
         {
-            if (width <= 0 || offset * 8 + width > bits.Width) return null;
-            var part = SymTable.Resolve(values.Syms.Slice(bits, offset * 8, width));
-            var pieceOffset = offset;
-            foreach (var piece in part is ConcatSym concat ? concat.Parts : [part])
+            var (source, low) = piece is SliceSym slice ? (SymTable.Resolve(slice.Base), slice.Low) : (SymTable.Resolve(piece), 0);
+            if (source is not ReadSym read || low % 8 != 0 || piece.Width % 8 != 0) return false;
+            var start = values.Syms.Binary(BinOp.Add, read.Address, values.Syms.Const(unchecked((ulong)(low / 8 - pieceOffset)), 64), 64);
+            if (address is not null && Decompose(address) != Decompose(start)) return false;
+            address = start;
+            reads.Add(read);
+            pieceOffset += piece.Width / 8;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// var s = p.S; s.F = v; p.S = s 拆开后写回的值：一部分直接字段原样来自同一结构体位置的读取，其余是新值，原样的字段里有不可访问的叶子。
+    /// 在这些读取的第一处整体读取该位置（快照），再改写其余直接字段；快照多读的字节属于同一位置，提前读取不改变异常。
+    /// 位置由读自该结构体类型位置的字段定下；改写的字段照常按字段访问（不可访问的经访问器）。
+    /// </summary>
+    public (ReadSym Snapshot, IReadOnlyList<ProjectedSym> Changed)? UpdatedRead(Sym bits, DefinitionRef structure)
+    {
+        var total = types.Size(structure) * 8;
+        if (total <= 0 || total > bits.Width || FieldValues(bits, structure) is not { } direct) return null;
+        var groups = types.Leaves(structure).GroupBy(l => l.Path[0]).ToArray();
+        bool Hidden(IEnumerable<(IReadOnlyList<FieldRef> Path, TypeRef Type, int Offset)> leaves) =>
+            leaves.Any(l => l.Path.Any(f => !ManagedAccess.Field(types, method, f, f.DeclaringType)));
+        bool Kept(IEnumerable<(IReadOnlyList<FieldRef> Path, TypeRef Type, int Offset)> leaves, ref Sym? at, HashSet<ReadSym> found)
+        {
+            foreach (var leaf in leaves)
+                if (StorageBits(leaf.Type) is not (> 0 and var width) || leaf.Offset * 8 + width > bits.Width || !FromReads(bits, leaf.Offset, width, ref at, found)) return false;
+            return true;
+        }
+        Sym? address = null;
+        foreach (var group in groups)
+        {
+            Sym? start = null;
+            if (Kept(group, ref start, []) && start is not null && Locate(start, total) is { } located && located.Type.Equals(structure))
             {
-                var (source, low) = piece is SliceSym slice ? (SymTable.Resolve(slice.Base), slice.Low) : (SymTable.Resolve(piece), 0);
-                if (source is not ReadSym read || low % 8 != 0 || piece.Width % 8 != 0) return null;
-                var start = values.Syms.Binary(BinOp.Add, read.Address, values.Syms.Const(unchecked((ulong)(low / 8 - pieceOffset)), 64), 64);
-                if (address is not null && Decompose(address) != Decompose(start)) return null;
                 address = start;
-                reads.Add(read);
-                pieceOffset += piece.Width / 8;
+                break;
             }
         }
+        if (address is null) return null;
+        var reads = new HashSet<ReadSym>();
+        var changed = new List<ProjectedSym>();
+        var hiddenKept = false;
+        foreach (var group in groups)
+        {
+            var at = address;
+            var found = new HashSet<ReadSym>();
+            if (Kept(group, ref at, found))
+            {
+                reads.UnionWith(found);
+                hiddenKept |= Hidden(group);
+                continue;
+            }
+            if (direct.FirstOrDefault(d => d.Projection.Path is [var field] && field.Equals(group.Key)) is not { } own) return null;
+            changed.Add(own);
+        }
+        return hiddenKept && changed.Count > 0 && Snapshot(address, reads, structure, total) is { } snapshot ? (snapshot, changed) : null;
+    }
+
+    /// <summary>在这些读取的第一处对 address 处结构体位置的整体读取；各读取之间只能是定义。</summary>
+    private ReadSym? Snapshot(Sym? address, HashSet<ReadSym> reads, TypeRef structure, int total)
+    {
         if (address is null || (Locate(address, total) is { } located && located.Type.Equals(structure) ? located : PointerElement(address, structure)) is null) return null;
         var block = values.BlockOf(reads.First().Site);
         var sites = reads.Select(r => block.Statements.FindIndex(s => ReferenceEquals(s, r.Site))).ToArray();
