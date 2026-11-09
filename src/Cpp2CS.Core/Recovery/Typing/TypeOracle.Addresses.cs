@@ -182,7 +182,7 @@ public sealed partial class TypeOracle
     private sealed record ElementCursor(Sym? Array, PhiSym Index, long Offset, int Size);
 
     private readonly Dictionary<PhiSym, ElementCursor?> cursors = [];
-    private readonly Dictionary<(PhiSym, int), ElementCursor?> offsetCursors = [];
+    private readonly Dictionary<(PhiSym, int, long), ElementCursor?> offsetCursors = [];
 
     private ElementCursor? Cursor(PhiSym phi)
     {
@@ -191,19 +191,22 @@ public sealed partial class TypeOracle
         return cursors[phi] = FindCursor(phi, 0);
     }
 
-    /// <summary>数组之外单独递推的字节偏移（array + φ）：同样按元素大小 size 的下标解释。</summary>
-    private ElementCursor? OffsetCursor(PhiSym phi, int size)
+    /// <summary>
+    /// 基址之外单独递推的字节偏移（base + φ）：同样按元素大小 size 的下标解释。start 是第一个元素相对基址的偏移：
+    /// 数组为数据区起点，无类型指针缓冲区为 0。
+    /// </summary>
+    private ElementCursor? OffsetCursor(PhiSym phi, int size, long start = RuntimeLayout.ArrayData)
     {
-        if (offsetCursors.TryGetValue((phi, size), out var known)) return known;
-        offsetCursors[(phi, size)] = null;
-        return offsetCursors[(phi, size)] = size > 0 ? FindCursor(phi, size) : null;
+        if (offsetCursors.TryGetValue((phi, size, start), out var known)) return known;
+        offsetCursors[(phi, size, start)] = null;
+        return offsetCursors[(phi, size, start)] = size > 0 ? FindCursor(phi, size, start) : null;
     }
 
     /// <summary>
     /// φ 的每条边是自身加步长，或一个初值：数组上（可带比例下标）或外层游标上的地址；elementSize 不为零时初值没有数组，只是字节偏移。
     /// 步长是元素大小的倍数，各初值落在元素内的同一偏移。
     /// </summary>
-    private ElementCursor? FindCursor(PhiSym phi, int elementSize)
+    private ElementCursor? FindCursor(PhiSym phi, int elementSize, long start = RuntimeLayout.ArrayData)
     {
         if (phi.Width != 64 || phi.Projection is not null || phi.Sources.Any(s => s is null)) return null;
         var edges = phi.Sources.Select(s => AddressTerms(s!)).ToArray();
@@ -228,8 +231,8 @@ public sealed partial class TypeOracle
                     || array is not null && !ReferenceEquals(array, root)) return null;
                 (array, size) = (root, bytes);
             }
-            if (offset < RuntimeLayout.ArrayData || index is not null && scale != size) return null;
-            var within = offset - RuntimeLayout.ArrayData;
+            if (offset < start || index is not null && scale != size) return null;
+            var within = offset - start;
             if (inside is { } previous && previous != within % size) return null;
             inside = within % size;
             seeds[edge] = (index, within / size);
@@ -244,12 +247,12 @@ public sealed partial class TypeOracle
                 syms.SetSource(counter, edge, syms.Binary(BinOp.Add, counter, syms.Const(unchecked((ulong)(edges[edge].Offset / size)) & Expr.Mask(32), 32), 32));
                 continue;
             }
-            var start = syms.Const(unchecked((ulong)seed.Element) & Expr.Mask(32), 32);
-            if (seed.Index is not { } position) { syms.SetSource(counter, edge, start); continue; }
+            var first = syms.Const(unchecked((ulong)seed.Element) & Expr.Mask(32), 32);
+            if (seed.Index is not { } position) { syms.SetSource(counter, edge, first); continue; }
             var bits = ArrayIndex(position);
             if (bits.Width < 32) return null;
-            syms.SetSource(counter, edge, syms.Binary(BinOp.Add, syms.Slice(bits, 0, 32), start, 32));
+            syms.SetSource(counter, edge, syms.Binary(BinOp.Add, syms.Slice(bits, 0, 32), first, 32));
         }
-        return new(array, counter, RuntimeLayout.ArrayData + inside.Value, size);
+        return new(array, counter, start + inside.Value, size);
     }
 }

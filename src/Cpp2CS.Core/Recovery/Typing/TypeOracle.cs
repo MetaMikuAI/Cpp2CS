@@ -876,6 +876,9 @@ public sealed partial class TypeOracle : Runtime.IRuntimeTyping
         if (size <= 0 || ManagedTypes.IsReferenceType(element) || ManagedTypes.IsVoid(element)
             || types.Kind(element) is not (TypeKind.Struct or TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double)) return null;
         var (root, offset, index, scale) = Decompose(address);
+        // 缓冲区上单独递推的字节偏移（ptr + φ，φ 从 0 起按元素大小步进）按元素下标解释。
+        if (index is PhiSym bytes && scale == 1 && OffsetCursor(bytes, size, 0) is { } walked)
+            (offset, index, scale) = (offset + walked.Offset, walked.Index, walked.Size);
         if (TypeOf(root) is not PointerRef { Element: var pointee } || !ManagedTypes.IsVoid(pointee) || index is null || offset != 0) return null;
         (index, scale) = Rescaled(index, scale, size);
         if (scale != size) return null;
