@@ -119,6 +119,26 @@ internal sealed class FrameModel
         return new(stores, fromEntry, null, false);
     }
 
+    /// <summary>
+    /// 第 index 条语句之前，[offset, offset+bytes) 在每条路径上都被写入覆盖，可以由多条写入拼成（如 stp 成对写入）。
+    /// 从区间起点逐段推进：每段取到达它的各条写入中最早的终点，保证每条路径都覆盖这一段。
+    /// </summary>
+    public bool Written(Block block, int index, long offset, int bytes)
+    {
+        for (var at = offset; at < offset + bytes;)
+        {
+            var reach = Reach(block, index, at, 1);
+            if (!reach.Complete) return false;
+            var end = offset + bytes;
+            foreach (var store in reach.Stores)
+                if (Slot(store.Target) is { } start) end = Math.Min(end, start + store.Value.Width / 8);
+                else return false;
+            if (end <= at) return false;
+            at = end;
+        }
+        return true;
+    }
+
     private bool Kill(Stmt statement, long offset, int bytes, out Store? definite)
     {
         definite = null;

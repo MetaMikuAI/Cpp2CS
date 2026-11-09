@@ -9,7 +9,7 @@ namespace Cpp2CS.Idioms;
 /// <summary>
 /// IL2CPP 的栈上临时装箱：对值类型调用其基类（Object、ValueType、Enum）上的实例方法时，codegen 不在堆上分配，
 /// 而在栈帧上写入类指针、monitor（-1，标记栈上临时对象）与值，以对象地址作为接收者调用，对象只在这次调用期间存在。
-/// 三项写入在每条路径上都到达调用时，接收者换成对值的 box（ECMA-335 I.8.2.4）；值保留在原栈槽中，由内存模型处理。
+/// 三项写入在每条路径上都到达调用时（值可以由多条写入拼成），接收者换成对值的 box（ECMA-335 I.8.2.4）；值保留在原栈槽中，由内存模型处理。
 /// </summary>
 internal static class StackBoxingPass
 {
@@ -37,7 +37,7 @@ internal static class StackBoxingPass
                 if (bytes <= 0) continue;
                 var monitors = model.Reach(block, i, frame + RuntimeLayout.ObjectMonitor, 8);
                 if (!monitors.Complete || monitors.Stores.Any(s => Bits(model, s, frame + RuntimeLayout.ObjectMonitor, 64) is not Const { Value: ulong.MaxValue })
-                    || !model.Reach(block, i, frame + RuntimeLayout.ObjectHeaderSize, bytes).Complete) continue;
+                    || !model.Written(block, i, frame + RuntimeLayout.ObjectHeaderSize, bytes)) continue;
                 var result = fresh();
                 block.Statements.Insert(i++, new Call(call.Address, CallKind.Direct, Expr.C(0, 64))
                 {
