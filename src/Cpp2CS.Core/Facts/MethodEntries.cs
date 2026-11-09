@@ -43,9 +43,28 @@ public sealed class MethodEntries
         .ThenBy(e => e.Address).ThenBy(e => NativeBindings.Key(e.Instance), StringComparer.Ordinal).First();
 
     /// <summary>方法实例的原生入口；没有时为 0。</summary>
-    public ulong Of(MethodRef method) =>
+    public ulong Of(MethodRef method) => Lookup(method) is var address and not 0 ? address : Witnessed(method) is { } witnessed ? Lookup(witnessed) : 0;
+
+    private ulong Lookup(MethodRef method) =>
         addresses.TryGetValue((method, NativeBindings.Key(method)), out var address)
         || Shared(method) is { } shared && addresses.TryGetValue((shared, NativeBindings.Key(shared)), out address) ? address : 0;
+
+    /// <summary>
+    /// 实参里绑定了原生布局的泛型参数换成布局类型：调用方由某个实例的原生代码恢复时，内联进来的被调方法也是这个实例的代码。
+    /// 只用于查入口；恢复仍按带绑定的托管身份进行。
+    /// </summary>
+    private static MethodRef? Witnessed(MethodRef method)
+    {
+        var witnessed = method with { TypeArguments = method.TypeArguments.Select(Layout).ToArray(), MethodArguments = method.MethodArguments.Select(Layout).ToArray() };
+        return NativeBindings.Key(witnessed) == NativeBindings.Key(method) ? null : witnessed;
+        static TypeRef Layout(TypeRef type) => type switch
+        {
+            GenericParameterRef { Binding.Layout: { } layout } => layout,
+            DefinitionRef { Arguments.Count: > 0 } generic => generic with { Arguments = generic.Arguments.Select(Layout).ToArray() },
+            ArrayRef array => array with { Element = Layout(array.Element) },
+            _ => type,
+        };
+    }
 
     private MethodRef? Shared(MethodRef method)
     {
