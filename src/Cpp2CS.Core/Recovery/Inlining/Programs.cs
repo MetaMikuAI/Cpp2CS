@@ -89,6 +89,53 @@ internal sealed class Program
         return predecessors.GetValueOrDefault(block) ?? [];
     }
 
+    private Dictionary<ulong, ulong>? dominators;
+
+    /// <summary>块的直接支配者：沿正常的边从方法入口出发；入口与只经异常进入的块没有。</summary>
+    public ulong? Dominator(ulong block)
+    {
+        dominators ??= ComputeDominators();
+        return dominators.TryGetValue(block, out var dominator) && block != Entry ? dominator : null;
+    }
+
+    private Dictionary<ulong, ulong> ComputeDominators()
+    {
+        IEnumerable<ulong> Next(ulong block) => Blocks[block].Statements.SelectMany(ManagedValues.Edges).Select(e => e.Target).Where(Blocks.ContainsKey).Distinct();
+        var post = new List<ulong>();
+        var seen = new HashSet<ulong> { Entry };
+        var stack = new Stack<(ulong Block, IEnumerator<ulong> Next)>();
+        stack.Push((Entry, Next(Entry).GetEnumerator()));
+        while (stack.TryPeek(out var top))
+        {
+            if (!top.Next.MoveNext()) { stack.Pop(); post.Add(top.Block); }
+            else if (seen.Add(top.Next.Current)) stack.Push((top.Next.Current, Next(top.Next.Current).GetEnumerator()));
+        }
+        var order = post.Select((b, i) => (b, i)).ToDictionary(p => p.b, p => p.i);
+        var idom = new Dictionary<ulong, ulong> { [Entry] = Entry };
+        ulong Meet(ulong a, ulong b)
+        {
+            while (a != b)
+            {
+                while (order[a] < order[b]) a = idom[a];
+                while (order[b] < order[a]) b = idom[b];
+            }
+            return a;
+        }
+        for (var changed = true; changed;)
+        {
+            changed = false;
+            for (var i = post.Count - 2; i >= 0; i--)
+            {
+                var block = post[i];
+                ulong? meet = null;
+                foreach (var p in Predecessors(block))
+                    if (idom.ContainsKey(p)) meet = meet is { } m ? Meet(p, m) : p;
+                if (meet is { } d && (!idom.TryGetValue(block, out var old) || old != d)) { idom[block] = d; changed = true; }
+            }
+        }
+        return idom;
+    }
+
     /// <summary>语句读到的局部（含边上复制的源值；赋值目标不算）。</summary>
     public static IEnumerable<Variable> Uses(ManagedStatement statement) =>
         (statement is ManagedAssignment a ? [a.Value] : ManagedValues.Of(statement)).Concat(ManagedValues.CopiedValues(statement))

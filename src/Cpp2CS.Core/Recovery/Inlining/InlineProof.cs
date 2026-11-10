@@ -219,7 +219,8 @@ internal sealed class InlineProof
     }
 
     /// <summary>
-    /// 锚点的候选起点：锚点所在块中锚点及之前的语句（从后往前）、唯一前驱链上的块、读入待证访问的局部之后的使用点。
+    /// 锚点的候选起点：锚点所在块中锚点及之前的语句（从后往前）、支配链上的块、读入待证访问的局部之后的使用点。
+    /// 唯一前驱就是直接支配者；合流块往回到直接支配者，两者之间的块都在区域里，各路径由共同执行探索。
     /// Covered 是起点到锚点之间含待证访问或使用其读入值的语句数（使用点为 0）。起点只影响能否找到证明，不影响正确性。
     /// </summary>
     private static List<(ulong Block, int Index, int Covered)> Starts(Program program, ulong block, int index, int events, Func<ManagedStatement, bool>? possible = null)
@@ -245,8 +246,15 @@ internal sealed class InlineProof
                 if (seen.Add((current, i))) starts.Add((current, i, covered));
                 if (!anchor) crossed += program.EventsAt(current, i);
             }
-            if (crossed > events || starts.Count >= 40 || program.Predecessors(current) is not [var predecessor] || !visited.Add(predecessor)) break;
-            current = predecessor;
+            if (crossed > events || starts.Count >= 40) break;
+            if (program.Predecessors(current) is [var predecessor]) { if (!visited.Add(predecessor)) break; current = predecessor; }
+            else if (Between(program, current, possible, holding) is var (dominator, least, inside) && visited.Add(dominator))
+            {
+                crossed += least;
+                covered += inside;
+                current = dominator;
+            }
+            else break;
             i = program.Blocks[current].Statements.Count - 1;
         }
         // 共用的读取：读入局部之后的使用点。
@@ -257,6 +265,50 @@ internal sealed class InlineProof
                 if (Program.Uses(statements[i]).Contains(held) && seen.Add((block, i))) starts.Add((block, i, 0));
         }
         return starts.Take(48).ToList();
+    }
+
+    /// <summary>
+    /// 合流块与它的直接支配者之间：返回支配者、各路径中最少跨过的事件数（含模板不可能做的调用的块不可走）、中间含待证访问或其读入值使用的语句数。
+    /// 中间有环（区域里不能有调用方自己的循环）、合流块也可从支配者以外进入、或每条路径都跨过模板不可能做的调用时为 null。
+    /// </summary>
+    private static (ulong Dominator, int Events, int Covered)? Between(Program program, ulong block, Func<ManagedStatement, bool>? possible, HashSet<Variable> holding)
+    {
+        if (program.Dominator(block) is not { } dominator) return null;
+        var inside = new HashSet<ulong>();
+        var stack = new Stack<ulong>(program.Predecessors(block));
+        while (stack.TryPop(out var b))
+        {
+            if (b == block || program.Predecessors(b).Count == 0 && b != dominator) return null;
+            if (b == dominator || !inside.Add(b)) continue;
+            foreach (var p in program.Predecessors(b)) stack.Push(p);
+        }
+        const int blocked = 1 << 20;
+        int Cost(ulong b)
+        {
+            var statements = program.Blocks[b].Statements;
+            var events = 0;
+            for (var i = 0; i < statements.Count; i++)
+            {
+                if (possible?.Invoke(statements[i]) == false) return blocked;
+                events += program.EventsAt(b, i);
+            }
+            return events;
+        }
+        // 按拓扑序求从支配者出口到各块入口最少的事件数；排不出拓扑序即有环。
+        var least = new Dictionary<ulong, int>();
+        var waiting = inside.ToDictionary(b => b, b => program.Predecessors(b).Count(inside.Contains));
+        var ready = new Queue<ulong>(waiting.Where(w => w.Value == 0).Select(w => w.Key));
+        while (ready.TryDequeue(out var b))
+        {
+            least[b] = program.Predecessors(b).Min(p => p == dominator ? 0 : Math.Min(blocked, least[p] + Cost(p)));
+            foreach (var target in program.Blocks[b].Statements.SelectMany(ManagedValues.Edges).Select(e => e.Target).Distinct())
+                if (waiting.ContainsKey(target) && --waiting[target] == 0) ready.Enqueue(target);
+        }
+        if (least.Count < inside.Count) return null;
+        var events = program.Predecessors(block).Min(p => p == dominator ? 0 : Math.Min(blocked, least[p] + Cost(p)));
+        if (events >= blocked) return null;
+        var covered = inside.Sum(b => program.Blocks[b].Statements.Count(s => HasPending(s) || Program.Uses(s).Any(holding.Contains)));
+        return (dominator, events, covered);
     }
 
     /// <summary>读入待证访问的局部：区域覆盖它的使用也是进展（读取随之成为死代码）。</summary>

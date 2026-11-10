@@ -324,7 +324,7 @@ internal sealed class Interpreter(ManagedTypes types, Solver solver, InlineEvide
             if (other.Root != RootKind.Reference && Private(side, other)) return false;
             if (x.Root == RootKind.Reference && y.Root == RootKind.Reference && ReferenceEquals(x.Args[0], y.Args[0]))
                 return FieldsOverlap(px, py);
-            return true;
+            return x.Root == RootKind.Reference && Within(px, py) || y.Root == RootKind.Reference && Within(py, px);
         }
         if (x.Root != y.Root) return false;
         switch (x.Root)
@@ -345,6 +345,15 @@ internal sealed class Interpreter(ManagedTypes types, Solver solver, InlineEvide
                 return true;
         }
     }
+
+    /// <summary>
+    /// 经引用、引用之后路径为 inner 的标量叶子可能落在路径为 outer 的标量叶子里：outer 的某一层接上 inner。
+    /// 引用只指向被引用类型的存储，存储按类型嵌套，被引用的值要么就是 outer 某一层的值，要么与它不相交。
+    /// inner 为空（不知道被引用的类型）或含显式布局（按字节重叠）时不作判断。
+    /// </summary>
+    private static bool Within(FieldPath inner, FieldPath outer) =>
+        inner.Count == 0 || inner.Fields.Concat(outer.Fields).Any(Explicit)
+        || Enumerable.Range(0, outer.Count).Any(k => Effects.MemoryFootprint.Overlap(inner.Fields, outer.Fields[k..]));
 
     private static bool HeapAliasShare(FieldRef a, FieldRef b) => Effects.HeapAlias.MayShare(a, b);
     private static bool Explicit(FieldRef field) => (field.Field.Owner.Attributes & TypeAttributes.LayoutMask) == TypeAttributes.ExplicitLayout;
