@@ -256,8 +256,29 @@ internal sealed class TermTable
         ? Append(address.Location, path)
         : Intern(TermKind.Location, (byte)RootKind.Reference, 0, 0, path, [address], false);
 
+    /// <summary>位置的前缀：只保留路径的前 keep 个字段。</summary>
+    public Term? Truncate(Term location, int keep)
+    {
+        var prefix = Prefix(PathOf(location), keep);
+        return location.Root switch
+        {
+            RootKind.Field when keep >= 1 => FieldRoot(location.Args[0], prefix),
+            RootKind.Static when keep >= 1 => StaticRoot(prefix),
+            RootKind.Element => ElementRoot(location.Args[0], location.Args[1], prefix),
+            RootKind.Cell => CellRoot(location.Aux, CellVariable(location), prefix),
+            RootKind.Reference => ReferenceRoot(location.Args[0], prefix),
+            _ => null,
+        };
+    }
+
     /// <summary>可取址局部的键：路径与变量。</summary>
     internal sealed record CellKey(FieldPath Path, Variable Variable);
+
+    /// <summary>结构体值的叶子原子的键：根（形参序号、实参序号或局部）与叶子路径的 Id。</summary>
+    internal readonly record struct LeafKey(object Root, int Path)
+    {
+        public override string ToString() => $"({Root}, {Path})";
+    }
 
     public static FieldPath PathOf(Term location) => location.Key is CellKey cell ? cell.Path : (FieldPath)location.Key!;
     public static Variable CellVariable(Term location) => ((CellKey)location.Key!).Variable;
@@ -310,7 +331,9 @@ internal sealed class TermTable
     // ---- 运算 ----
 
     public Term Operation(OpCode op, int aux, int width, object? extra, params Term[] args) =>
-        InternMany(TermKind.Operation, (byte)op, aux, width, extra, args, op is OpCode.Compare or OpCode.Not or OpCode.And or OpCode.Or or OpCode.ToBit or OpCode.CastFails or OpCode.UnboxFails or OpCode.DivOverflow);
+        // null 的类型转换与数组存储永远成立。
+        op == OpCode.CastFails && args[^1] is { IsConstant: true, Bits: 0 } ? False
+        : InternMany(TermKind.Operation, (byte)op, aux, width, extra, args, op is OpCode.Compare or OpCode.Not or OpCode.And or OpCode.Or or OpCode.ToBit or OpCode.CastFails or OpCode.UnboxFails or OpCode.DivOverflow);
 
     private static bool Commutative(BinOp op) => op is BinOp.Add or BinOp.Mul or BinOp.And or BinOp.Or or BinOp.Xor
         or BinOp.MulHighS or BinOp.MulHighU or BinOp.FAdd or BinOp.FMul or BinOp.FMin or BinOp.FMax or BinOp.FMinNumber or BinOp.FMaxNumber;
@@ -648,6 +671,7 @@ internal sealed class TermTable
                 OpCode.And => And(args[0], args[1]),
                 OpCode.Or => Or(args[0], args[1]),
                 OpCode.ToBit => ToBit(args[0]),
+                OpCode.CastFails => Operation(OpCode.CastFails, term.Aux, term.Width, term.Key, args),
                 _ => InternMany(TermKind.Operation, term.Code, term.Aux, term.Width, term.Key, args, term.Bit),
             },
             TermKind.Read => Read(term.Aux, args[0], term.Width, term.Bit),

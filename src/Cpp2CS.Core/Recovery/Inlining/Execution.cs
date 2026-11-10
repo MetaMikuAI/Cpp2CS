@@ -192,7 +192,7 @@ internal sealed class Interpreter(ManagedTypes types, Solver solver, InlineEvide
 
     public Term Atom(AtomKind kind, object key, TypeRef type) => Shape(type, l =>
     {
-        var atom = Terms.Atom(kind, l.Path.Count == 0 ? key : (key, l.Path.Id), l.Width, l.Bit);
+        var atom = Terms.Atom(kind, l.Path.Count == 0 ? key : new TermTable.LeafKey(key, l.Path.Id), l.Width, l.Bit);
         atom.Hint ??= kind is AtomKind.Entry or AtomKind.Argument or AtomKind.Formal ? l.Type : null;
         return atom;
     });
@@ -676,7 +676,9 @@ internal sealed class Interpreter(ManagedTypes types, Solver solver, InlineEvide
                         var (location, stop) = Locate(side, frame, store.Place, phi);
                         if (stop is not null) return stop;
                         var value = Temp(frame, store.Value);
-                        if (store.Place.Root == RootKind.Element && ManagedTypes.IsReferenceType(store.Place.Type) && !(value.IsConstant && value.Bits == 0))
+                        // 引用类型数组元素的存储检查（数组协变）；元素类型是 sealed 类时数组的运行时类型只能正好是它的数组，存入不会失败。
+                        if (store.Place.Root == RootKind.Element && ManagedTypes.IsReferenceType(store.Place.Type) && !(value.IsConstant && value.Bits == 0)
+                            && !(store.Place.Type is DefinitionRef { Definition.Attributes: var attributes } && (attributes & System.Reflection.TypeAttributes.Sealed) != 0))
                         {
                             var mismatch = Terms.Operation(OpCode.CastFails, 1, 1, "array-store", location!.Args[0], value);
                             if (Check(phi, mismatch, "System.ArrayTypeMismatchException") is { } wrong) return wrong;
@@ -818,6 +820,8 @@ internal sealed class Interpreter(ManagedTypes types, Solver solver, InlineEvide
                 return Terms.Binary(BinOp.Add, o[0], o[1].Width == 64 ? o[1] : Terms.Convert(ConvKind.SignExtend, o[1], 64), 64);
             case ComposedValue composed:
                 {
+                    // 没有叶子的组成值是类型的零值（default(T)，T 可以是类型形参）。
+                    if (composed.Leaves.Count == 0) return Zero(composed.StructType);
                     if (composed.StructType is not DefinitionRef structure) return null;
                     var value = Zero(structure);
                     for (var i = 0; i < composed.Leaves.Count; i++)

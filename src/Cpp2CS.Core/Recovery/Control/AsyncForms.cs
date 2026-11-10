@@ -255,9 +255,17 @@ public static class AsyncForms
                 if (targets is not [var start] || StraightToReturn(start) is not { } chain) continue;
                 var statements = chain.SelectMany(a => code[a]).Where(s => s is not ManagedJump).ToList();
                 if (!statements.Any(s => IsBuilderCall(s, "SetException") && s is ManagedCall { Invocation.Arguments: [var value] } && IsLocal(value, region.Exception!.Variable))) continue;
-                // 收尾的后续块只从收尾进入。
+                // 收尾的后续块只从收尾进入；只有 return 的末块可以与别的路径共用（clang 合并了返回），收尾改用自己的一份。
                 var members = chain.ToHashSet();
-                if (code.Any(p => !members.Contains(p.Key) && p.Value.SelectMany(ManagedValues.Edges).Any(e => e.Target != start && members.Contains(e.Target)))) continue;
+                ulong? returning = chain.Count > 1 && code[chain[^1]] is [ManagedReturn { Value: null }] ? chain[^1] : null;
+                if (code.Any(p => !members.Contains(p.Key) && p.Value.SelectMany(ManagedValues.Edges).Any(e => e.Target != start && e.Target != returning && members.Contains(e.Target)))) continue;
+                if (returning is { } shared && code.Any(p => !members.Contains(p.Key) && p.Value.SelectMany(ManagedValues.Edges).Any(e => e.Target == shared)))
+                {
+                    var own = FreshAfter(chain[^2]);
+                    code[own] = [.. code[shared]];
+                    code[chain[^2]] = code[chain[^2]].Select(s => ManagedValues.MapEdges(s, e => e.Target == shared ? e with { Target = own } : e)).ToList();
+                    chain[^1] = own;
+                }
                 var copy = FreshAfter(start);
                 code[copy] = statements;
                 foreach (var at in code.Keys.Where(a => a != copy && !handler.Contains(a)).ToArray())
@@ -993,6 +1001,13 @@ public static class AsyncForms
                     default:
                         return Fail($"acquire:definition:{before[definition].GetType().Name}");
                 }
+            }
+            // 经已证明的 getter 读等待器字段：getter 就是 GetAwaiter（如 ConfiguredTaskAwaitable 返回它保存的等待器）。
+            if (value is FieldValue { Accessor: { Write: false, Method: { Method.Name: "GetAwaiter", Method.IsStatic: false } getAwaiter }, Receiver: var holder })
+            {
+                var receiver = holder is AddressValue || ManagedTypes.IsReferenceType(holder.Type) ? holder : new AddressValue(holder);
+                before.Add(new ManagedCall(at, new ManagedInvocation(getAwaiter, receiver, [], false), awaiter) { Inlined = true });
+                return true;
             }
             if (value is not NewObjectValue { Transparent: true, Arguments: [AddressValue { Target: var awaitable }], Constructor.DeclaringType: var constructed }) return Fail($"acquire:value:{value.GetType().Name}");
             if (awaitable.Type is not DefinitionRef owner || Method(owner, "GetAwaiter", 0) is not { } getter || !getter.Concrete(getter.Method.ReturnType).Equals(constructed)) return Fail("acquire:no-get-awaiter");

@@ -25,9 +25,29 @@ internal sealed class Solver(TermTable terms, ManagedTypes? types = null)
     {
         foreach (var (formal, value) in trial)
         {
+            trail.Add((formal, theta.GetValueOrDefault(formal)));
             theta[formal] = value;
             Version++;
         }
+        memo = new(ReferenceEqualityComparer.Instance);
+    }
+
+    /// <summary>绑定的记录，用于撤销到某个标记。</summary>
+    private readonly List<(Term Formal, Term? Previous)> trail = [];
+
+    public int Mark => trail.Count;
+
+    /// <summary>撤销标记之后的绑定。</summary>
+    public void Undo(int mark)
+    {
+        for (var i = trail.Count - 1; i >= mark; i--)
+        {
+            var (formal, previous) = trail[i];
+            if (previous is null) theta.Remove(formal);
+            else theta[formal] = previous;
+        }
+        trail.RemoveRange(mark, trail.Count - mark);
+        Version++;
         memo = new(ReferenceEqualityComparer.Instance);
     }
 
@@ -35,6 +55,7 @@ internal sealed class Solver(TermTable terms, ManagedTypes? types = null)
 
     public void Reset(IReadOnlyDictionary<Term, Term> seed)
     {
+        trail.Clear();
         theta.Clear();
         foreach (var (k, v) in seed) theta[k] = v;
         Version++;
@@ -54,6 +75,42 @@ internal sealed class Solver(TermTable terms, ManagedTypes? types = null)
         if (!Match(template, caller, trial)) return false;
         if (trial.Count > 0) Bind(trial);
         return true;
+    }
+
+    /// <summary>
+    /// Φ 下的试探合一：比较按 Φ 的规范形，绑定取调用方未折叠的项。先按原项合一并核对两侧在 Φ 下相同；原项对不上时按折叠后的项合一，
+    /// 但不接受折叠才得到的常量绑定：那个常量只在这条路径上成立，θ 却在各路径间共享。
+    /// </summary>
+    public bool MatchUnder(ImmutableList<Term> phi, Term template, Term caller, Dictionary<Term, Term> trial)
+    {
+        var plain = new Dictionary<Term, Term>(trial, ReferenceEqualityComparer.Instance);
+        if (Match(template, caller, plain) && ReferenceEquals(Fold(phi, With(template, plain)), Fold(phi, caller)))
+        {
+            foreach (var (formal, value) in plain) trial[formal] = value;
+            return true;
+        }
+        var folded = new Dictionary<Term, Term>(trial, ReferenceEqualityComparer.Instance);
+        if (!Match(Fold(phi, template), Fold(phi, caller), folded)) return false;
+        if (folded.Any(b => !trial.ContainsKey(b.Key) && b.Value.IsConstant)) return false;
+        foreach (var (formal, value) in folded) trial[formal] = value;
+        return true;
+    }
+
+    /// <summary>Φ 下合一，成功时提交绑定。</summary>
+    public bool UnifyUnder(ImmutableList<Term> phi, Term template, Term caller)
+    {
+        var trial = new Dictionary<Term, Term>(ReferenceEqualityComparer.Instance);
+        if (!MatchUnder(phi, template, caller, trial)) return false;
+        if (trial.Count > 0) Bind(trial);
+        return true;
+    }
+
+    /// <summary>代入当前绑定与试探绑定。</summary>
+    private Term With(Term term, Dictionary<Term, Term> trial)
+    {
+        var applied = Apply(term);
+        return trial.Count == 0 || !applied.HasFormal ? applied
+            : terms.Substitute(applied, t => t.IsAtom(AtomKind.Formal) ? trial.GetValueOrDefault(t) : null, new(ReferenceEqualityComparer.Instance));
     }
 
     /// <summary>试探合一，不提交。</summary>

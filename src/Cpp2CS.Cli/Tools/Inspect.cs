@@ -45,6 +45,8 @@ internal static class Inspect
             {
                 Cpp2CS.Recovery.Inlining.InlineTrace.Sink = Console.WriteLine;
                 Cpp2CS.Recovery.Inlining.InlineTrace.Method = method.Method;
+                Cpp2CS.Recovery.Inlining.InlineTrace.Print = body => { foreach (var line in ManagedPrinter.Lines(body)) Console.WriteLine(line); };
+                Cpp2CS.Recovery.Inlining.InlineTrace.Lines = ManagedPrinter.Lines;
                 Cpp2CS.Recovery.Inlining.InlineTrace.Before = body =>
                 {
                     Console.WriteLine("  -- 内联证明之前");
@@ -54,6 +56,8 @@ internal static class Inspect
             }
             var result = decompiler.Lower(analysis);
             Cpp2CS.Recovery.Inlining.InlineTrace.Sink = null;
+            Cpp2CS.Recovery.Inlining.InlineTrace.Print = null;
+            Cpp2CS.Recovery.Inlining.InlineTrace.Lines = null;
             Cpp2CS.Recovery.Inlining.InlineTrace.Before = null;
             foreach (var rejection in analysis.Idioms.Rejections) Console.WriteLine($"  拒绝 {rejection.Rule} 0x{rejection.Address:x} {rejection.Reason}");
             foreach (var hole in result.Holes) Console.WriteLine($"  洞 0x{hole.Address:x} {hole.Reason}");

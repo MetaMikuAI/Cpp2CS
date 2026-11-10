@@ -73,27 +73,38 @@ internal sealed class InlineProof
 
     private LocalValue NewLocal(TypeRef type) => new(new Variable(Storage.Temp(1000 + nextLocal++), 1), type, types.ValueWidth(type));
 
-    private RegionProver Prover() => new(types, evidence, Template, NewLocal, Accessor);
+    private RegionProver Prover() => new(types, evidence, Template, NewLocal, Accessor) { ValueConstruction = ProveValueConstruction };
 
     // ---- 预算 ----
 
     /// <summary>
-    /// 一个方法的证明搜索总步数上限（各次尝试的步数之和）。尝试数是待证访问、候选、起点与重试轮数之积，单次尝试另有上限；
-    /// 用尽后不再尝试，剩下的待证内容记为预算用尽。按步数而非时间计，结果可复现。
+    /// 一个方法的证明搜索总步数上限（各次尝试的步数之和）。尝试数是待证内容、候选、起点与重试轮数之积，单次尝试另有上限；
+    /// 每项待证内容（访问与构造）分得同样的步数，方法至少有 MethodSteps。用尽后不再尝试，剩下的待证内容记为预算用尽。
+    /// 按步数而非时间计，结果可复现。
     /// </summary>
     private const long MethodSteps = 1_000_000;
+    private const long ItemSteps = 30_000;
     private const string Exhausted = "内联证明的步数预算用尽";
     private long spent;
+    private long budget = MethodSteps;
 
-    private bool Spent => spent >= MethodSteps;
+    private bool Spent => spent >= budget;
 
     private RegionProver.Outcome Prove(RegionProver prover, Program program, EntryFacts facts, ulong block, int index, Candidate candidate, Func<TracePoint, bool> anchor,
         Func<ManagedBody, bool>? useful = null)
     {
+        // 与锚点无关的失败在同一方法体上换锚点时复用（只省计算，不改变结果）。
+        if (!ReferenceEquals(memoBody, program.Body)) { memo.Clear(); memoBody = program.Body; }
+        var key = (candidate.Method, candidate.Kind, candidate.Constructed?.Variable, block, index);
+        if (memo.TryGetValue(key, out var known)) return known with { Steps = 0 };
         var outcome = prover.Prove(program, facts, block, index, candidate, anchor, useful);
         spent += outcome.Steps;
+        if (outcome.AnchorFree) memo[key] = outcome;
         return outcome;
     }
+
+    private ManagedBody? memoBody;
+    private readonly Dictionary<(MethodRef, ReplacementKind, Variable?, ulong, int), RegionProver.Outcome> memo = [];
 
     // ---- 入口 ----
 
@@ -103,6 +114,7 @@ internal sealed class InlineProof
         rules.Clear();
         failures.Clear();
         spent = 0;
+        budget = Math.Max(MethodSteps, ItemSteps * (Pending(body).Count() + constructions.Count));
         nextLocal = firstLocal;
         if (InlineTrace.For(caller.Method)) InlineTrace.Before?.Invoke(body);
         body = ResolveAccessors(body);
@@ -210,7 +222,7 @@ internal sealed class InlineProof
     /// 锚点的候选起点：锚点所在块中锚点及之前的语句（从后往前）、唯一前驱链上的块、读入待证访问的局部之后的使用点。
     /// Covered 是起点到锚点之间含待证访问或使用其读入值的语句数（使用点为 0）。起点只影响能否找到证明，不影响正确性。
     /// </summary>
-    private static List<(ulong Block, int Index, int Covered)> Starts(Program program, ulong block, int index, int events)
+    private static List<(ulong Block, int Index, int Covered)> Starts(Program program, ulong block, int index, int events, Func<ManagedStatement, bool>? possible = null)
     {
         // 区域里的调用方事件都要与模板的事件对应：往回跨过的事件多于模板可能的事件数时，更早的起点不可能成立。
         var starts = new List<(ulong, int, int)>();
@@ -225,6 +237,8 @@ internal sealed class InlineProof
             for (; i >= 0 && crossed <= events; i--)
             {
                 var statement = program.Blocks[current].Statements[i];
+                // 区域里调用方的事件都要对应模板的事件：跨过模板不可能做的调用后，更早的起点都不成立。
+                if (possible?.Invoke(statement) == false) { crossed = int.MaxValue; break; }
                 if (HasPending(statement) || Program.Uses(statement).Any(holding.Contains)) covered++;
                 if (seen.Add((current, i))) starts.Add((current, i, covered));
                 crossed += program.EventsAt(current, i);
@@ -296,10 +310,16 @@ internal sealed class InlineProof
             if (evidence.CallFailure(method, receiver, receiver is null ? field.DeclaringType : null) is { } illegal) { reasons.Add((illegal, -1)); continue; }
             var (nearest, distance) = ((string?)null, -1);
             var reached = -1;
-            foreach (var (block, index, covered) in Starts(program, anchor.Block, anchor.Index, template.EventBound))
+            var (starts, impossible) = (0, 0);
+            var calls = template.Reach(Template);
+            var silent = template.Silent(Template);
+            foreach (var (block, index, covered) in Starts(program, anchor.Block, anchor.Index, template.EventBound, s => Possible(s, calls)))
             {
+                starts++;
                 // 已有成立的区域时，更远的起点只有多含待证访问才可能更优。
                 if (covered <= reached) continue;
+                // 模板一定发出事件时，调用方从起点出发的第一个事件要能对应模板的事件。
+                if (!silent && program.FirstEventsImpossible(block, index, op => Matchable(op, calls))) { impossible++; continue; }
                 if (Spent) break;
                 if (InlineTrace.For(caller.Method) && traced.Add((body, block, index)))
                 {
@@ -318,6 +338,7 @@ internal sealed class InlineProof
                         gained = (next, (after.Pending, after.Uses, -outcome.Progress));
                     else outcome = outcome with { Failure = $"证明成立但待证访问没有减少（{before.Pending}/{before.Uses} → {after.Pending}/{after.Uses}）" };
                 }
+                InlineTrace.Template(caller.Method, template.Body);
                 if (InlineTrace.For(caller.Method))
                     InlineTrace.Write($"  内联 {field.Field.Name}@0x{anchor.Block:x}:{anchor.Index} {method.Method.Owner.Name}.{method.Method.Name} 起点 0x{block:x}:{index} 进度 {outcome.Progress} 步 {outcome.Steps} {System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms（{outcome.Profile}）：{outcome.Failure ?? outcome.Form}");
                 foreach (var note in InlineTrace.For(caller.Method) ? outcome.Plans : []) InlineTrace.Write($"    方案 {note}");
@@ -330,6 +351,8 @@ internal sealed class InlineProof
                 }
                 if (outcome.Progress > distance) (nearest, distance) = (outcome.Failure, outcome.Progress);
             }
+            nearest ??= starts == 0 ? "没有起点（锚点语句含模板不可能发出的调用）"
+                : impossible > 0 ? $"{impossible} 个起点的第一个事件都不能对应模板的事件" : null;
             reasons.Add(($"{method.Method.Owner.Name}.{method.Method.Name}：{nearest}", distance));
         }
         var result = best is { } chosen ? new Replacement(chosen.Body, chosen.Key, chosen.Form, chosen.Method, chosen.At, chosen.Key.Item1 < before.Pending) : null;
@@ -338,6 +361,24 @@ internal sealed class InlineProof
                 : string.Join("；", reasons.OrderByDescending(r => r.Progress).Take(3).Select(r => r.Reason)));
         return result;
     }
+
+    /// <summary>调用方语句里的调用模板都可能做（或可展开、或是虚调用）。</summary>
+    /// <summary>调用方的事件能否对应模板的事件：调用方内联的调用（可展开）、可重写的虚调用、模板可能发出的调用，以及非调用的事件。</summary>
+    private static bool Matchable(MicroOp op, HashSet<MethodRef> calls)
+    {
+        bool In(MethodRef method) => calls.Any(m => m.Equals(method) || Joint.SharedCode(m, method));
+        return op switch
+        {
+            CallOp call => call.Call.Inlined || call.Call.Invocation.Virtual && call.Call.Invocation.Method.Method.IsOverridable || In(call.Call.Invocation.Method),
+            ValueEventOp { Node: StaticCallValue value } => value.Inlined || In(value.Method),
+            ValueEventOp { Node: NewObjectValue created } => created.Transparent || In(created.Constructor),
+            _ => true,
+        };
+    }
+
+    private static bool Possible(ManagedStatement statement, HashSet<MethodRef> calls) =>
+        statement is not ManagedCall { Inlined: false } call || call.Invocation.Virtual && call.Invocation.Method.Method.IsOverridable
+        || calls.Any(m => m.Equals(call.Invocation.Method) || Joint.SharedCode(m, call.Invocation.Method));
 
     private readonly Dictionary<(FieldRef, TypeRef?), IReadOnlyList<(MethodRef, Program)>> candidates = [];
 
@@ -405,7 +446,11 @@ internal sealed class InlineProof
                     var outcome = Prove(prover, program, facts, block, start, new Candidate(method, template, ReplacementKind.Construct, local),
                         point => point.Block == block && point.Statement == index);
                     if (InlineTrace.For(caller.Method))
+                    {
+                        InlineTrace.Template(caller.Method, template.Body);
                         InlineTrace.Write($"  构造 {pending.Allocated} {definition.Name}({definition.Parameters.Count}) 起点 0x{block:x}:{start} 进度 {outcome.Progress} 步 {outcome.Steps}：{outcome.Failure ?? outcome.Form}");
+                        foreach (var note in outcome.Plans) InlineTrace.Write($"    方案 {note}");
+                    }
                     if (outcome.Body is { } replaced)
                     {
                         body = Adopt(replaced, statements[start].Address, $"construct+{outcome.Form}", method);
@@ -448,6 +493,17 @@ internal sealed class InlineProof
     /// 构造函数中缺少直接基类（或本类）的构造调用：基类构造被内联了。与直接基类某个构造函数等价的区域写成 base(...)；
     /// 更远祖先的构造在比较中按模板展开。
     /// </summary>
+    /// <summary>
+    /// 构造函数的每条路径恰好调用一次本类或直接基类的构造函数：替换后对 this 调用的更上层祖先的构造函数（被内联的父类构造留下的）
+    /// 必须已被区域吸收，否则 this 会被初始化两次。
+    /// </summary>
+    private static bool Single(ManagedBody replaced)
+    {
+        if (replaced.Method.DeclaringType is not DefinitionRef owner || owner.Definition.BaseType?.Substitute(owner.Arguments, []) is not DefinitionRef parent) return true;
+        return !replaced.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Invocation is { Method.Method.Name: ".ctor", Receiver: ArgumentValue { Index: -1 } }
+            && !c.Invocation.Method.DeclaringType.Equals(parent) && !c.Invocation.Method.DeclaringType.Equals(owner));
+    }
+
     private ManagedBody BaseConstructor(ManagedBody body)
     {
         if (body.Method.Method is not { Name: ".ctor", IsStatic: false, Owner.IsValueType: false }
@@ -474,9 +530,13 @@ internal sealed class InlineProof
             foreach (var (block, index) in starts)
             {
                 if (Spent) return body;
-                var outcome = Prove(prover, program, facts, block, index, new Candidate(method, template, ReplacementKind.BaseConstructor), _ => true);
+                var outcome = Prove(prover, program, facts, block, index, new Candidate(method, template, ReplacementKind.BaseConstructor), _ => true, Single);
                 if (InlineTrace.For(caller.Method))
+                {
+                    InlineTrace.Template(caller.Method, template.Body);
                     InlineTrace.Write($"  基类构造 {parent} {definition.Parameters.Count} 起点 0x{block:x}:{index} 进度 {outcome.Progress} 步 {outcome.Steps}：{outcome.Failure ?? outcome.Form}");
+                    foreach (var note in outcome.Plans) InlineTrace.Write($"    方案 {note}");
+                }
                 if (outcome.Body is { } replaced) return Adopt(replaced, program.Blocks[block].Statements[index].Address, $"base+{outcome.Form}", method);
             }
         }

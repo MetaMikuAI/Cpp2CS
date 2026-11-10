@@ -51,11 +51,15 @@ internal sealed class Program
     /// <summary>方法体中可能产生事件的微指令数：无环方法体每条路径上的事件数不超过它。</summary>
     public int EventBound => Units.Sum(u => u.Ops.Count(o => o is CallOp or ValueEventOp));
     public required IReadOnlyDictionary<ulong, ManagedBlock> Blocks { get; init; }
-    /// <summary>取过地址的局部：值放在单元里，按位置读写。</summary>
     /// <summary>以存储单元建模的局部：取址的局部与结构体局部。</summary>
     public required IReadOnlySet<Variable> Cells { get; init; }
     /// <summary>取过地址的局部：可能经地址被调用改写，不能按定义推断它的值。</summary>
     public required IReadOnlySet<Variable> AddressTaken { get; init; }
+    /// <summary>
+    /// 地址逃出语句的局部：地址赋给局部、存入位置、参与运算后可能在别处经它读到，活跃性上一直活跃。
+    /// 字段访问的接收者、解引用、调用的接收者与实参只在语句内用到地址，按这条语句的使用计算。
+    /// </summary>
+    public required IReadOnlySet<Variable> Escaped { get; init; }
     public required int Temps { get; init; }
     public MethodRef Method => Body.Method;
     public ulong Entry => Body.Blocks[0].Address;
@@ -97,7 +101,7 @@ internal sealed class Program
         _ => [],
     };
 
-    /// <summary>块入口处活跃的局部（取址的局部视为一直活跃）。</summary>
+    /// <summary>块入口处活跃的局部。地址逃出语句的局部视为一直活跃（可能经地址读到）；其余局部（含结构体局部）按使用与定义计算。</summary>
     public IReadOnlySet<Variable> LiveIn(ulong block)
     {
         if (liveIn is null) ComputeLiveness();
@@ -120,7 +124,7 @@ internal sealed class Program
         if (liveIn is null) ComputeLiveness();
         var statements = Blocks[block].Statements;
         if (index < statements.Count - 1) return LiveBefore(block, index + 1);
-        var live = new HashSet<Variable>(Cells);
+        var live = new HashSet<Variable>(Escaped);
         foreach (var edge in ManagedValues.Edges(statements[index]))
         {
             var target = new HashSet<Variable>(liveIn!.GetValueOrDefault(edge.Target) ?? []);
@@ -133,7 +137,7 @@ internal sealed class Program
 
     private HashSet<Variable> LiveOut(ulong block)
     {
-        var live = new HashSet<Variable>(Cells);
+        var live = new HashSet<Variable>(Escaped);
         var last = Blocks[block].Statements.LastOrDefault();
         if (last is null) return live;
         foreach (var edge in ManagedValues.Edges(last))
@@ -148,11 +152,18 @@ internal sealed class Program
         return live;
     }
 
-    private static void Transfer(ManagedStatement statement, HashSet<Variable> live)
+    private void Transfer(ManagedStatement statement, HashSet<Variable> live)
     {
         foreach (var defined in Definitions(statement)) live.Remove(defined);
         live.UnionWith(Uses(statement));
+        if (Allocations.Contains(statement)) live.Remove(((LocalValue)((ManagedCall)statement).Invocation.Receiver!).Variable);
     }
+
+    /// <summary>
+    /// 隐式分配：对方法体中没有任何定义的局部调用构造函数（待证构造，分配不在方法体里）。分配在调用之前定义这个局部，
+    /// 活跃性按“先定义、后使用”计算，否则构造调用像是读了未定义的局部，使它一路活跃到方法入口与处理块入口。
+    /// </summary>
+    public required IReadOnlySet<ManagedStatement> Allocations { get; init; }
 
     private void ComputeLiveness()
     {
@@ -169,6 +180,128 @@ internal sealed class Program
         }
     }
 
+    // ---- 事件的静态概况（展开与起点的必要条件） ----
+
+    private HashSet<MethodRef>? reach;
+    private bool? silent;
+
+    /// <summary>共同执行展开调用的最大深度。</summary>
+    public const int UnfoldDepth = 5;
+
+    /// <summary>事件微指令调用或构造的方法，与原生代码是否在此处内联了它（共同执行中只展开这种）。</summary>
+    private static (MethodRef Method, bool Inlined)? Callee(MicroOp op) => op switch
+    {
+        CallOp call => (call.Call.Invocation.Method, call.Call.Inlined),
+        ValueEventOp { Node: StaticCallValue value } => (value.Method, value.Inlined),
+        ValueEventOp { Node: NewObjectValue created } => (created.Constructor, created.Transparent),
+        _ => null,
+    };
+
+    /// <summary>
+    /// 方法体可能发出的调用与构造：方法体中的，以及展开深度之内内联调用的模板中的（共同执行中它们可以展开）。按层计算，是上近似。
+    /// </summary>
+    public HashSet<MethodRef> Reach(Func<MethodRef, Program?> templates)
+    {
+        if (reach is not null) return reach;
+        var result = new HashSet<MethodRef>();
+        var seen = new HashSet<Program>(ReferenceEqualityComparer.Instance) { this };
+        var level = new List<Program> { this };
+        for (var depth = 0; depth <= UnfoldDepth && level.Count > 0; depth++)
+        {
+            var next = new List<Program>();
+            foreach (var program in level)
+                foreach (var (method, inlined) in program.Units.SelectMany(u => u.Ops).Select(Callee).OfType<(MethodRef, bool)>())
+                {
+                    result.Add(method);
+                    if (inlined && depth < UnfoldDepth && templates(method) is { } inner && seen.Add(inner)) next.Add(inner);
+                }
+            level = next;
+        }
+        return reach = result;
+    }
+
+    /// <summary>
+    /// 可能不发出事件就返回：存在一条到达返回的路径，途中的事件都是可展开的内联调用、且被调方法本身可能不发出事件就返回。
+    /// 递归中的方法按可能处理（上近似）。
+    /// </summary>
+    public bool Silent(Func<MethodRef, Program?> templates)
+    {
+        if (silent is { } known) return known;
+        if (silencing) return true;
+        silencing = true;
+        var result = SilentPath(templates);
+        silencing = false;
+        return (silent = result).Value;
+    }
+
+    private bool silencing;
+
+    private bool SilentPath(Func<MethodRef, Program?> templates)
+    {
+        var visited = new HashSet<int>();
+        var queue = new Queue<int>([BlockUnits[Entry]]);
+        while (queue.TryDequeue(out var index))
+        {
+            if (!visited.Add(index)) continue;
+            foreach (var op in Units[index].Ops)
+            {
+                if (op is CallOp or ValueEventOp && (Callee(op) is not (var callee, true) || templates(callee) is not { } inner || !inner.Silent(templates))) goto blocked;
+                switch (op)
+                {
+                    case ReturnOp: return true;
+                    case BranchOp branch: queue.Enqueue(branch.Taken); queue.Enqueue(branch.Fallthrough); break;
+                    case SwitchOp cases: foreach (var target in cases.Cases) queue.Enqueue(target); break;
+                    case JumpOp jump: queue.Enqueue(jump.Unit); break;
+                    case GotoOp go: queue.Enqueue(BlockUnits[go.Block]); break;
+                }
+            }
+        blocked:;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 方法体不可能抛出：只有局部之间的计算、赋值与控制流，没有读写存储（隐式判空、界检）、检查、抛出与事件。
+    /// </summary>
+    public bool Total => total ??= Units.SelectMany(u => u.Ops).All(op => op is PureOp or LocalOp or AssignOp or CopyOp or JumpOp or GotoOp or BranchOp or SwitchOp or ReturnOp);
+    private bool? total;
+
+    /// <summary>
+    /// 从（块，语句）出发，各条路径上第一个事件是否都不可能对应：possible 判定一个事件能否对应。
+    /// 不经事件到达返回或抛出的路径算作可能；不经事件绕回的路径不可能（区域里不能有调用方自己的循环）。
+    /// </summary>
+    public bool FirstEventsImpossible(ulong block, int index, Func<MicroOp, bool> possible)
+    {
+        var visited = new HashSet<int>();
+        var stack = new Stack<(int Unit, int Statement)>();
+        stack.Push((BlockUnits[block], index));
+        while (stack.TryPop(out var at))
+        {
+            if (at.Statement == 0 && !visited.Add(at.Unit)) continue;
+            foreach (var op in Units[at.Unit].Ops)
+            {
+                if (op.Statement < at.Statement) continue;
+                if (op is CallOp or ValueEventOp)
+                {
+                    if (possible(op)) return false;
+                    goto next;
+                }
+                switch (op)
+                {
+                    case ReturnOp or ThrowOp or UnsupportedOp: return false;
+                    case BranchOp branch: stack.Push((branch.Taken, 0)); stack.Push((branch.Fallthrough, 0)); goto next;
+                    case SwitchOp cases: foreach (var target in cases.Cases) stack.Push((target, 0)); goto next;
+                    case JumpOp jump: stack.Push((jump.Unit, 0)); goto next;
+                    case GotoOp go: stack.Push((BlockUnits[go.Block], 0)); goto next;
+                }
+            }
+            // 单元没有控制转移就结束（总是失败的检查即运行时抛出）：路径以抛出结束。
+            return false;
+        next:;
+        }
+        return true;
+    }
+
     // ---- 编译 ----
 
     public static Program Compile(ManagedBody body, ManagedTypes types)
@@ -179,6 +312,11 @@ internal sealed class Program
         var addressTaken = values.OfType<AddressValue>().Select(a => a.Target).OfType<LocalValue>().Select(l => l.Variable).ToHashSet();
         // 结构体局部也是存储单元：内联的实例方法经 ref this 访问它，两侧须是同一种位置。
         var cells = values.OfType<LocalValue>().Where(l => types.Kind(l.Type) == TypeKind.Struct).Select(l => l.Variable).Concat(addressTaken).ToHashSet();
+        var statements = body.Blocks.SelectMany(b => b.Statements).ToArray();
+        var defined = statements.SelectMany(Definitions)
+            .Concat(statements.SelectMany(ManagedValues.Edges).SelectMany(e => e.Copies).Select(c => c.Target.Variable)).ToHashSet();
+        var allocations = new HashSet<ManagedStatement>(statements.Where(st => st is ManagedCall { Invocation: { Method.Method.Name: ".ctor", Receiver: LocalValue receiver } }
+            && !defined.Contains(receiver.Variable) && ManagedTypes.IsReferenceType(receiver.Type)), ReferenceEqualityComparer.Instance);
         var compiler = new Compiler(types, cells);
         var blockUnits = new Dictionary<ulong, int>();
         foreach (var block in body.Blocks) blockUnits[block.Address] = compiler.Reserve(block.Address, false);
@@ -191,8 +329,46 @@ internal sealed class Program
             Blocks = body.Blocks.ToDictionary(b => b.Address),
             Cells = cells,
             AddressTaken = addressTaken,
+            Escaped = EscapedLocals(statements),
+            Allocations = allocations,
             Temps = compiler.MaxTemps,
         };
+    }
+
+    private static HashSet<Variable> EscapedLocals(IEnumerable<ManagedStatement> statements)
+    {
+        var escaped = new HashSet<Variable>();
+        static Variable? Storage(ManagedValue target) => target switch
+        {
+            LocalValue local => local.Variable,
+            FieldValue { Receiver: AddressValue inner } => Storage(inner.Target),
+            FieldValue { Receiver: LocalValue or FieldValue } field => Storage(field.Receiver),
+            _ => null,
+        };
+        // consumed：所在位置在语句内直接用掉这个地址。
+        void Scan(ManagedValue value, bool consumed)
+        {
+            if (value is AddressValue taken && !consumed && Storage(taken.Target) is { } root) escaped.Add(root);
+            switch (value)
+            {
+                case FieldValue field: Scan(field.Receiver, true); return;
+                case IndirectValue indirect: Scan(indirect.Address, true); return;
+                case AddressValue address: Scan(address.Target, true); return;
+                case NewObjectValue created: foreach (var argument in created.Arguments) Scan(argument, true); return;
+            }
+            foreach (var child in ManagedValues.Children(value)) Scan(child, false);
+        }
+        foreach (var statement in statements)
+        {
+            switch (statement)
+            {
+                case ManagedCall call: foreach (var value in ManagedValues.Of(call.Invocation)) Scan(value, true); break;
+                case ManagedStore store: Scan(store.Target, true); Scan(store.Value, false); break;
+                default: foreach (var value in ManagedValues.Of(statement)) Scan(value, false); break;
+            }
+            foreach (var value in ManagedValues.CopiedValues(statement)) Scan(value, false);
+        }
+        return escaped;
     }
 
     private sealed class Compiler(ManagedTypes types, HashSet<Variable> cells)
@@ -269,6 +445,10 @@ internal sealed class Program
                     }
                 case ManagedReturn r:
                     ops.Add(new ReturnOp(statement, r.Value is { } v ? Value(v) : -1));
+                    break;
+                // 运行时抛出的异常（IL2CPP 的 raise，降成 throw new E()）与运行时检查是同一形式：新的、默认构造的 E。
+                case ManagedThrow { Exception: NewObjectValue { Transparent: false, Arguments.Count: 0 } raised }:
+                    ops.Add(new CheckOp(statement, Value(new ConstantValue(1, types.Boolean, 1)), raised.Constructor));
                     break;
                 case ManagedThrow t:
                     ops.Add(new ThrowOp(statement, Value(t.Exception)));

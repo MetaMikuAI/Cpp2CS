@@ -36,6 +36,18 @@ internal static class ArchitectureChecks
         var referenceShape = new Aapcs64Classifier(facts.Layouts).Describe(sharedReference);
         checks.True(referenceShape.Kind == Aapcs64Classifier.Kind.Pointer && referenceShape.Size == 8,
             "含共享类型参数的引用仍按 AAPCS64 指针传递");
+        // 环境变量 CHECKS_ONLY 给出逗号分隔的检查方法名时只运行这些检查（定向验证用）。
+        if (Environment.GetEnvironmentVariable("CHECKS_ONLY") is { Length: > 0 } only)
+        {
+            foreach (var name in only.Split(','))
+            {
+                var method = typeof(ArchitectureChecks).GetMethod(name, BindingFlags.NonPublic | BindingFlags.Static)
+                    ?? throw new ArgumentException($"没有检查 {name}");
+                method.Invoke(null, method.GetParameters().Select(p => p.ParameterType == typeof(Assertions) ? checks
+                    : p.ParameterType == typeof(ManagedTypes) ? (object)types : facts).ToArray());
+            }
+            return checks.Finish("架构边界");
+        }
         Convergence(checks, types);
         Identities(checks, types);
         CallIdentities(checks);
@@ -60,6 +72,7 @@ internal static class ArchitectureChecks
         Templates(checks, types);
         RepeatedExitCopies(checks, types);
         CallerArgumentsAtExit(checks, types);
+        PriorExitLocals(checks, types);
         DuplicatedInlineSuffix(checks, types);
         Accessors(checks, types);
         ClosedGenericAccess(checks, types);
@@ -1287,6 +1300,52 @@ internal static class ArchitectureChecks
             if (!same) check.True(statements.OfType<ManagedBranch>().Any(b => b.Taken.Copies.Count == 1 && b.Fallthrough.Copies.Count == 1
                 && !ManagedStructure.Value(b.Taken.Copies[0].Value, b.Fallthrough.Copies[0].Value)), "各路径保存的调用方实参不同：分派的两条边各带自己的复制");
         }
+    }
+
+    /// <summary>
+    /// 出口处活跃的局部在区域内读了调用方自己的字段，之后模板的调用是屏障，调用后读到的不再是原来的值：写成调用前的赋值。
+    /// </summary>
+    private static void PriorExitLocals(Assertions check, ManagedTypes types)
+    {
+        var owner = Type("Model", 870);
+        var ownerRef = new DefinitionRef(owner, []);
+        var config = new FieldDef { Index = 870, Owner = owner, Name = "config", Type = types.Int32, Attributes = FieldAttributes.Private, Offset = 16 };
+        owner.Fields = [config];
+        var notify = Method(owner, "Notify", 870);
+        notify.Parameters = [new("value", types.Int32, 0, null, false)];
+        var get = Method(owner, "Get", 871);
+        get.ReturnType = types.Int32;
+        owner.Methods = [notify, get];
+        var (notifyRef, getRef) = (new MethodRef(notify, [], []), new MethodRef(get, [], []));
+        FieldValue Config(ManagedValue receiver, bool pending) => new(receiver, new(config, ownerRef), types.Int32, 32)
+        {
+            Pending = pending ? new PendingAccess(0, "待证字段", false) : null,
+        };
+        var self = new ArgumentValue(-1, ownerRef, 64);
+        var kept = new LocalValue(new(Storage.Temp(870), 1), types.Int32, 32);
+        var template = new ManagedBody(getRef, [new(0, [new ManagedAssignment(0, kept, Config(self, false)),
+            new ManagedCall(4, new(notifyRef, self, [kept], false), null), new ManagedReturn(8, kept)])]);
+        MethodRecoveryResult? Summary(MethodRef requested) => requested.Method == get ? new(getRef, 0, template, []) : null;
+
+        var viewer = Type("Viewer", 871, CallerAssembly);
+        var viewerRef = new DefinitionRef(viewer, []);
+        var view = new FieldDef { Index = 871, Owner = viewer, Name = "view", Type = types.Int32, Attributes = FieldAttributes.Private, Offset = 16 };
+        viewer.Fields = [view];
+        var callerDefinition = Method(viewer, "Show", 872);
+        callerDefinition.ReturnType = types.Int32;
+        viewer.Methods = [callerDefinition];
+        var caller = new MethodRef(callerDefinition, [], []);
+        var model = new ArgumentValue(0, ownerRef, 64);
+        var shown = new FieldValue(new ArgumentValue(-1, viewerRef, 64), new(view, viewerRef), types.Int32, 32);
+        var (read, saved) = (new LocalValue(new(Storage.Temp(871), 1), types.Int32, 32), new LocalValue(new(Storage.Temp(872), 1), types.Int32, 32));
+        var body = new ManagedBody(caller, [new(0, [new ManagedAssignment(0, read, Config(model, true)), new ManagedAssignment(4, saved, shown),
+            new ManagedCall(8, new(notifyRef, model, [read], false), null), new ManagedReturn(12, new BinaryValue(BinOp.Add, saved, read, types.Int32, 32))])]);
+        var evidence = new InlineEvidence(types, caller, Summary);
+        var recovered = new InlineProof(types, caller, Summary, evidence).Run(Declared(body), new Dictionary<Variable, PendingConstruction>(), 0);
+        var statements = recovered.Body.Blocks.SelectMany(b => b.Statements).ToList();
+        var call = statements.FindIndex(s => s is ManagedCall { Inlined: true } c && c.Invocation.Method == getRef);
+        var assigned = statements.FindIndex(s => s is ManagedAssignment a && a.Target == saved && ManagedStructure.Value(a.Value, shown));
+        check.True(recovered.Holes.Count == 0 && call >= 0 && assigned >= 0 && assigned < call, "出口处活跃、调用后读不到的局部在调用前赋值");
     }
 
     private static void Templates(Assertions check, ManagedTypes types)

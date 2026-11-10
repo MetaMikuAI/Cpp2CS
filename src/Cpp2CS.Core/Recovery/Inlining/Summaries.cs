@@ -145,7 +145,7 @@ internal sealed class TemplateSummaries(ManagedTypes types, InlineEvidence evide
     private static int? FormalIndex(Term atom) => atom.IsAtom(AtomKind.Formal) ? atom.Key switch
     {
         int k when k >= 0 => k,
-        ValueTuple<int, int> p when p.Item1 >= 0 => p.Item1,
+        TermTable.LeafKey { Root: int k } when k >= 0 => k,
         _ => null,
     } : null;
 
@@ -195,7 +195,7 @@ internal sealed class TemplateSummaries(ManagedTypes types, InlineEvidence evide
                 if (leaf.IsConstant) valid = desired is ConstantValue c && (c.Bits & Mask(leaf.Width)) == leaf.Bits;
                 else if (leaf.IsAtom(AtomKind.Formal) && leaf.Key is int index)
                     valid = Bind(binding, index, desired);
-                else if (leaf.IsAtom(AtomKind.Formal) && leaf.Key is ValueTuple<int, int> (var structIndex, var pathId))
+                else if (leaf.IsAtom(AtomKind.Formal) && leaf.Key is TermTable.LeafKey { Root: int structIndex, Path: var pathId })
                 {
                     var type = candidate.Method.Concrete(parameters[structIndex].Type);
                     var formalLeaf = candidate.Interpreter.Leaves(type).FirstOrDefault(l => l.Path.Id == pathId);
