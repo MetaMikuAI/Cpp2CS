@@ -184,14 +184,14 @@ internal sealed partial class BodyBuilder
             {
                 var reason = $"内存 写入经过不可访问的值类型字段 {path[i].Field.Name}";
                 if (path[i].Field.Owner.Assembly != analysis.Method.Method.Owner.Assembly
-                    || Inlining.TemplateRecovery.SharedArgument(analysis.Method, path[i].DeclaringType))
+                    || Inlining.InlineProof.SharedArgument(analysis.Method, path[i].DeclaringType))
                 {
                     // 只能来自被内联的方法（如构建器写自己的字段）：待内联的逆证明覆盖，证明不成立时记为洞。
                     value = new FieldValue(value, path[i], type, Width(type)) { Pending = new(address, reason, true) };
                     if (types.Kind(type) == TypeKind.Struct) value = new AddressValue(value);
                     continue;
                 }
-                unfolded.Add(new Cpp2CS.Diagnostics.RuleTrace(Inlining.TemplateRecovery.UnfoldedRule, address, Cpp2CS.Diagnostics.RewriteStatus.Applied, "same-assembly-path", reason, null));
+                unfolded.Add(new Cpp2CS.Diagnostics.RuleTrace(Inlining.InlineProof.UnfoldedRule, address, Cpp2CS.Diagnostics.RewriteStatus.Applied, "same-assembly-path", reason, null));
                 value = new FieldValue(value, path[i], type, Width(type)) { Unfolded = true };
                 if (types.Kind(type) == TypeKind.Struct) value = new AddressValue(value);
                 continue;

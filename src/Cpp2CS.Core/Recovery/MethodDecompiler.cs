@@ -138,7 +138,7 @@ public sealed class MethodDecompiler
         var referenced = analysis.Function.Blocks.SelectMany(b => b.Statements).SelectMany(ExprMap.Operands).SelectMany(ExprMap.Walk)
             .OfType<Symbol>().Where(s => s.Kind == SymbolKind.Method).Select(s => (MethodRef)s.Value).Distinct().ToArray();
         var fields = new InlineEvidence(types, analysis.Method, Summary, referenced);
-        var templates = new TemplateRecovery(types, analysis.Method, Summary, fields);
+        var templates = new InlineProof(types, analysis.Method, Template, fields);
         var lowered = BodyBuilder.Build(analysis, oracle, uses, fields, templates);
         if (lowered.Body is null) return new(analysis.Method, analysis.Entry, null, lowered.Holes);
         var recovered = templates.Run(lowered.Body, lowered.Constructions, lowered.NextLocal);
@@ -213,6 +213,18 @@ public sealed class MethodDecompiler
         if (cuts == before) summaries.Remove(request);
         else summaries[request] = result;
         return result;
+    }
+
+    /// <summary>
+    /// 内联证明的模板：只取已完成、没有读到递归截断的结果。这样的结果只取决于方法与入口，就是写出的方法体；
+    /// 用了模板 B 的 A 若也已完成，B 必在 A 之前完成，因此模板的使用关系无环（写出的程序不会因证明而多出递归）。
+    /// 读到递归中的方法照常记为截断。
+    /// </summary>
+    public MethodRecoveryResult? Template(MethodRef method)
+    {
+        if (Summary(method) is null) return null;
+        var request = new MethodRequest(method, entries!.Of(method), RecoveryMode.Instance);
+        return finished.GetValueOrDefault(request);
     }
 
     private static Func<Variable> FreshTemporaries(MachineFunction function)

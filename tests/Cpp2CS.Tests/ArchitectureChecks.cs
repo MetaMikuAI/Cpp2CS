@@ -210,8 +210,9 @@ internal static class ArchitectureChecks
         ManagedStatement Read(ulong at, int field = 0) => new ManagedAssignment(at, saved, Field(field));
         ManagedBlock To(ulong at, ulong to, params ManagedStatement[] statements) => new(at, [.. statements, new ManagedJump(at, new ManagedEdge(to, []))]);
         ManagedBlock End(ulong at) => new(at, [new ManagedReturn(at, null)]);
+        var evidence = new InlineEvidence(types, method, _ => null);
         bool Holds(ManagedBody body, Variable variable, ulong at, int field = 0) =>
-            new AvailableFields(body, _ => null).At(at, 0).GetValueOrDefault(variable) is FieldValue known && known.Field.Equals(instance[field]);
+            RegionProver.SameAtEntry(types, evidence, body, at, 0, variable == saved.Variable ? saved : copied, Field(field));
         ManagedBody Body(params ManagedBlock[] blocks) => new(method, blocks);
 
         check.True(Holds(Body(To(1, 2, Read(1)), End(2)), saved.Variable, 2), "读入局部之后，它就是字段的内容");
@@ -1128,7 +1129,7 @@ internal static class ArchitectureChecks
         TemplateResult Run(IReadOnlyList<ManagedBlock> blocks)
         {
             var evidence = new InlineEvidence(types, caller, Summary);
-            return new TemplateRecovery(types, caller, Summary, evidence).Run(new(caller, blocks), new Dictionary<Variable, PendingConstruction>(), 0);
+            return new InlineProof(types, caller, Summary, evidence).Run(Declared(new(caller, blocks)), new Dictionary<Variable, PendingConstruction>(), 0);
         }
         int Inlined(TemplateResult result) => result.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Count(c => c.Inlined && c.Invocation.Method == addRef);
 
@@ -1219,14 +1220,23 @@ internal static class ArchitectureChecks
                 new(32, variant == "shared"
                     ? [new ManagedAssignment(32, saved, zero), new ManagedStore(32, Field(receiver) with { Pending = new(32, "待证字段", true) }, argument), new ManagedJump(36, new(48, []))]
                     : [new ManagedStore(32, Field(receiver) with { Pending = new(32, "待证字段", true) }, argument), new ManagedJump(36, new(64, []))]),
-                new(48, [new ManagedAssignment(48, saved, variant == "different" ? zero : argument), new ManagedJump(52, new(64, []))]),
+                // different：argument 为 0 的这条路径上保存 1，与 argument 真正不同。
+                new(48, [new ManagedAssignment(48, saved, variant == "different" ? new ConstantValue(1, types.Int32, 32) : argument), new ManagedJump(52, new(64, []))]),
                 new(64, [new ManagedReturn(64, saved)])]);
             var evidence = new InlineEvidence(types, caller, Summary);
-            var recovered = new TemplateRecovery(types, caller, Summary, evidence).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
-            // 出口的局部赋值不同时不能把两臂合成一次调用；Store 前缀下沉到两臂后，各臂可以各自证成一次调用。
-            var calls = recovered.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Count(c => c.Inlined);
-            check.Equal(variant is "same" or "shared", recovered.Holes.Count == 0 && calls == 1, $"出口重复局部赋值 {variant}");
-            if (variant is "different" or "addressed") check.True(recovered.Holes.Count == 0 && calls == 2, $"出口重复局部赋值 {variant}：前缀下沉后两臂各自证成调用");
+            var recovered = new InlineProof(types, caller, Summary, evidence).Run(Declared(body), new Dictionary<Variable, PendingConstruction>(), 0);
+            // 出口处局部的值在各路径相同（取址的局部按单元内容比较）时续接只有一份；不同时调用后按调用方自己的条件分派，
+            // 保存不同值的赋值留在分派后的一臂。
+            var statements = recovered.Body.Blocks.SelectMany(b => b.Statements).ToArray();
+            var calls = statements.OfType<ManagedCall>().Count(c => c.Inlined);
+            check.True(recovered.Holes.Count == 0 && calls == 1, $"出口重复局部赋值 {variant}");
+            // 赋值可以是语句，也可以是分派边上的复制。
+            var assignments = statements.SelectMany(s => s is ManagedAssignment a ? [(a.Target, a.Value)]
+                : ManagedValues.Edges(s).SelectMany(e => e.Copies).Select(c => ((ManagedValue)c.Target, c.Value)));
+            if (variant == "different")
+                check.True(statements.OfType<ManagedBranch>().Any(b => ManagedValues.Walk(b.Condition).Contains(argument))
+                    && assignments.Any(a => a.Item1 == saved && a.Item2 is ConstantValue { Bits: 1 }),
+                    "出口重复局部赋值 different：调用后按调用方的条件分派，各臂保留自己的赋值");
         }
     }
 
@@ -1269,12 +1279,13 @@ internal static class ArchitectureChecks
                 new(32, [new ManagedStore(32, Field(receiver) with { Pending = new(32, "待证字段", true) }, argument), new ManagedJump(36, new(64, [new ManagedCopy(kept, same ? receiver : other)]))]),
                 new(64, [new ManagedReturn(64, kept)])]);
             var evidence = new InlineEvidence(types, caller, Summary);
-            var recovered = new TemplateRecovery(types, caller, Summary, evidence).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
-            // 各路径保存的值不同时不能合成一次调用；Store 前缀下沉到两臂后，各臂可以各自证成一次调用。
-            var calls = recovered.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Count(c => c.Inlined);
-            check.Equal(same, recovered.Holes.Count == 0 && calls == 1, same ? "出口复制保存调用方自己的实参" : "各路径保存的调用方实参不同");
-            if (!same) check.True(recovered.Holes.Count == 0 && calls == 2, "各路径保存的调用方实参不同：前缀下沉后两臂各自证成调用");
-            if (same) check.True(recovered.Rules.Any(r => r.Rule == TemplateRecovery.ProofRule && r.Code!.Contains("caller-argument")), "内联证明记下出口复制用到调用方实参");
+            var recovered = new InlineProof(types, caller, Summary, evidence).Run(Declared(body), new Dictionary<Variable, PendingConstruction>(), 0);
+            // 各路径保存的值不同时调用后按调用方的条件分派，两条边各带自己的复制。
+            var statements = recovered.Body.Blocks.SelectMany(b => b.Statements).ToArray();
+            var calls = statements.OfType<ManagedCall>().Count(c => c.Inlined);
+            check.True(recovered.Holes.Count == 0 && calls == 1, same ? "出口复制保存调用方自己的实参" : "各路径保存的调用方实参不同");
+            if (!same) check.True(statements.OfType<ManagedBranch>().Any(b => b.Taken.Copies.Count == 1 && b.Fallthrough.Copies.Count == 1
+                && !ManagedStructure.Value(b.Taken.Copies[0].Value, b.Fallthrough.Copies[0].Value)), "各路径保存的调用方实参不同：分派的两条边各带自己的复制");
         }
     }
 
@@ -1305,32 +1316,35 @@ internal static class ArchitectureChecks
             new ManagedReturn(8, null),
         ])]);
         var fields = new InlineEvidence(types, caller, Summary);
-        var recovery = new TemplateRecovery(types, caller, Summary, fields);
-        var success = recovery.Run(Body(value), new Dictionary<Variable, PendingConstruction>(), 0);
+        var recovery = new InlineProof(types, caller, Summary, fields);
+        var success = recovery.Run(Declared(Body(value)), new Dictionary<Variable, PendingConstruction>(), 0);
         check.Equal(0, success.Holes.Count, "两次字段写入的模板证明成功");
         check.True(success.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Inlined && c.Invocation.Method == method), "证明区域被替换成调用");
-        var failure = recovery.Run(Body(new ConstantValue(7, types.Int32, 32)), new Dictionary<Variable, PendingConstruction>(), 0);
+        var failure = recovery.Run(Declared(Body(new ConstantValue(7, types.Int32, 32))), new Dictionary<Variable, PendingConstruction>(), 0);
         check.True(failure.Holes.Count > 0, "写入不一致时保留缺口");
         var local = new MethodRef(Method(Type("LocalConsumer", 14), "Write", 14), [], []);
-        var unfolded = new TemplateRecovery(types, local, Summary, new InlineEvidence(types, local, Summary)).Run(
-            Body(new ConstantValue(7, types.Int32, 32)) with { Method = local }, new Dictionary<Variable, PendingConstruction>(), 0);
-        check.True(unfolded.Holes.Count == 0 && unfolded.Rules.Count(r => r.Rule == TemplateRecovery.UnfoldedRule) == 2
+        var unfolded = new InlineProof(types, local, Summary, new InlineEvidence(types, local, Summary)).Run(Declared(
+            Body(new ConstantValue(7, types.Int32, 32)) with { Method = local }), new Dictionary<Variable, PendingConstruction>(), 0);
+        check.True(unfolded.Holes.Count == 0 && unfolded.Rules.Count(r => r.Rule == InlineProof.UnfoldedRule) == 2
             && unfolded.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>().All(s => s.Target is FieldValue { Unfolded: true, Pending: null }),
             "同程序集的调用方在证明被拒绝时按原生代码写出字段");
         check.True(!failure.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Inlined), "失败的证明不改写成调用");
         var prepare = Method(Type("Preparation", 13), "Run", 13, MethodAttributes.Public | MethodAttributes.Static);
         var prelude = new ManagedCall(0, new(new(prepare, [], []), null, [], false), null);
         template = template with { Blocks = [new(0, new ManagedStatement[] { prelude }.Concat(template.Blocks[0].Statements).ToArray())] };
+        var nullConstructor = new MethodRef(types.Corlib("System.NullReferenceException").Definition.Methods.Single(m => m.Name == ".ctor" && m.Parameters.Count == 0), [], []);
+        // 实例调用点先对接收者判空（callvirt），内联后模板开头的前导调用在判空之后。
         ManagedBody Split(bool changed) => new(caller,
         [
-            new(0, [changed ? new ManagedCall(0, prelude.Invocation with { Arguments = [value] }, null) : prelude,
+            new(0, [new ManagedCheck(0, new ComparisonValue(Cond.Eq, receiver, new ConstantValue(0, ownerRef, 64), types.Boolean), nullConstructor),
+                changed ? new ManagedCall(0, prelude.Invocation with { Arguments = [value] }, null) : prelude,
                 new ManagedJump(0, new(4, []))]),
             new(4, [new ManagedJump(4, new(8, []))]),
             new(8, Body(value).Blocks[0].Statements),
         ]);
-        var split = new TemplateRecovery(types, caller, Summary, fields).Run(Split(false), new Dictionary<Variable, PendingConstruction>(), 0);
+        var split = new InlineProof(types, caller, Summary, fields).Run(Declared(Split(false)), new Dictionary<Variable, PendingConstruction>(), 0);
         check.Equal(0, split.Holes.Count, "沿唯一前驱纳入模板的前导调用");
-        var changedPrelude = new TemplateRecovery(types, caller, Summary, fields).Run(Split(true), new Dictionary<Variable, PendingConstruction>(), 0);
+        var changedPrelude = new InlineProof(types, caller, Summary, fields).Run(Declared(Split(true)), new Dictionary<Variable, PendingConstruction>(), 0);
         check.True(changedPrelude.Holes.Count > 0, "前导调用不一致时不能跳过该效果");
         var inaccessible = new TypeDef { Index = 12, Name = "Hidden", Namespace = "Tests", Assembly = "Other.dll", Token = 0,
             Attributes = TypeAttributes.NotPublic, IsValueType = false, IsEnum = false };
@@ -1340,7 +1354,7 @@ internal static class ArchitectureChecks
 
     /// <summary>访问器证明在模板层进行；每次以给定依据新建模板层。</summary>
     private static FieldAccessor? Prove(InlineEvidence evidence, FieldRef field, TypeRef type, bool write, TypeRef? receiver) =>
-        new TemplateRecovery(evidence.Types, evidence.Caller, evidence.Summary, evidence).Accessor(field, type, write, receiver);
+        new InlineProof(evidence.Types, evidence.Caller, evidence.Summary, evidence).Accessor(field, type, write, receiver);
 
     private static void Accessors(Assertions check, ManagedTypes types)
     {
@@ -1363,8 +1377,8 @@ internal static class ArchitectureChecks
         var receiver = new ArgumentValue(0, ownerRef, 64);
         var pendingRead = new ManagedBody(caller, [new(0, [new ManagedReturn(0,
             new FieldValue(receiver, fieldRef, types.Int32, 32) { Pending = new(0, "待证字段", false) })])]);
-        var privateTemplate = new TemplateRecovery(types, caller, Summary, privateOnly)
-            .Run(pendingRead, new Dictionary<Variable, PendingConstruction>(), 0);
+        var privateTemplate = new InlineProof(types, caller, Summary, privateOnly)
+            .Run(Declared(pendingRead), new Dictionary<Variable, PendingConstruction>(), 0);
         check.True(privateTemplate.Holes.Count > 0, "多语句模板不能重新引入被拒绝的私有访问器");
         var privateCall = new ManagedBody(caller, [new(0, [new ManagedCall(0,
             new ManagedInvocation(new MethodRef(hidden, [], []), receiver, [], false), null) { Inlined = true }, new ManagedReturn(4, null)])]);
@@ -1445,7 +1459,7 @@ internal static class ArchitectureChecks
         check.True(Find([new(hidden, [], [types.Int32])]) is null, "外部静态入口仍须满足调用权限");
         check.True(Find([referenced], true) is null, "静态 getter 不能证明字段写入");
         extraRead = true;
-        check.True(Find([referenced]) is null, "不能吞掉访问器中未用于返回值的额外读取");
+        check.Equal(referenced, Find([referenced])?.Method, "访问器按语义判定：不影响返回值的额外读取没有可观察的效果，仍是访问器");
         extraRead = false;
         factory.Methods = [getter, Method(factory, ".cctor", 83, MethodAttributes.Private | MethodAttributes.Static)];
         check.True(Find([referenced]) is null, "纯字段读取体不能证明另一类型的精确静态初始化");
@@ -1753,8 +1767,8 @@ internal static class ArchitectureChecks
             var body = new ManagedBody(childCtor, [new(0, prelude
                 ? [middle, Store(childRef, first, 1), Store(childRef, second, 2), Initialize(childRef), new ManagedReturn(100, null)]
                 : [Initialize(childRef), Store(childRef, first, 1), middle, Store(childRef, second, 2), new ManagedReturn(100, null)])]);
-            return new TemplateRecovery(types, childCtor, Summary, new(types, childCtor, Summary))
-                .Run(body, new Dictionary<Variable, PendingConstruction>(), 0).Body;
+            return new InlineProof(types, childCtor, Summary, new(types, childCtor, Summary))
+                .Run(Declared(body), new Dictionary<Variable, PendingConstruction>(), 0).Body;
         }
         bool CallsBase(ManagedBody body) => body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Inlined && c.Invocation.Method == baseCtor);
         check.True(CallsBase(Recover(false)), "独立本类写入可移到完整基类构造之后");
@@ -1786,7 +1800,7 @@ internal static class ArchitectureChecks
         foreach (var correct in new[] { true, false })
         {
             var body = new ManagedBody(caller, [new(0, [Other(local), Store(local, correct ? 7UL : 8UL), Initialize(local), new ManagedReturn(12, local)])]);
-            var recovered = new TemplateRecovery(types, caller, Summary, new(types, caller, Summary)).Run(body,
+            var recovered = new InlineProof(types, caller, Summary, new(types, caller, Summary)).Run(Declared(body),
                 new Dictionary<Variable, PendingConstruction> { [local.Variable] = new(8, type, parent) }, 0);
             check.Equal(correct, recovered.Holes.Count == 0 && recovered.Body.Blocks.SelectMany(b => b.Statements)
                 .OfType<ManagedAssignment>().Any(a => a.Value is NewObjectValue { Transparent: true }), "基类调用前的字段初始化须与构造模板一致");
@@ -1954,7 +1968,7 @@ internal static class ArchitectureChecks
             statements.Add(new ManagedAssignment(4, b, Read(receiver, second) with { Pending = new(4, "待证字段", false) }));
             statements.Add(new ManagedReturn(8, new BinaryValue(BinOp.Add, a, b, types.Int32, 32)));
             var fields = new InlineEvidence(types, caller, Summary);
-            return new TemplateRecovery(types, caller, Summary, fields).Run(new(caller, [new(0, statements)]), new Dictionary<Variable, PendingConstruction>(), 0);
+            return new InlineProof(types, caller, Summary, fields).Run(Declared(new(caller, [new(0, statements)])), new Dictionary<Variable, PendingConstruction>(), 0);
         }
         var recovered = Run(false);
         check.True(recovered.Holes.Count == 0 && recovered.Body.Blocks.SelectMany(b => b.Statements)
@@ -2176,7 +2190,7 @@ internal static class ArchitectureChecks
                             new(aggregate, b.Address == 8 ? Pair(Field(0), Field(1)) : Pair(one, consistent ? two : one))] } } : s).ToArray() }
                     : b.Address == 24 ? b with { Statements = [new ManagedCall(24, new(new(consumer, [], []), null, [aggregate], false), null), new ManagedReturn(28, null)] } : b).ToArray() };
             }
-            return new TemplateRecovery(types, caller, SelectedSummary, new InlineEvidence(types, caller, SelectedSummary)).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
+            return new InlineProof(types, caller, SelectedSummary, new InlineEvidence(types, caller, SelectedSummary)).Run(Declared(body), new Dictionary<Variable, PendingConstruction>(), 0);
         }
         check.Equal(0, Run(true, true).Holes.Count, "结构体返回值由多个字段局部承接时仍可证明完整返回");
         check.True(Run(false, true).Holes.Count > 0, "一个字段在常量路径不同则拒绝结构体返回证明");
@@ -2199,7 +2213,7 @@ internal static class ArchitectureChecks
                 new(32, [new ManagedCall(32, new(new(consumer, [], []), null, [Pair(first, second)], false), null), new ManagedReturn(36, null)]),
                 new(40, [new ManagedCall(40, new(new(consumer, [], []), null, [Pair(first, second)], false), null), new ManagedReturn(44, null)]),
             ]);
-            return new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary)).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
+            return new InlineProof(types, caller, Summary, new InlineEvidence(types, caller, Summary)).Run(Declared(body), new Dictionary<Variable, PendingConstruction>(), 0);
         }
         var branched = Branched(true);
         check.Equal(0, branched.Holes.Count, "结构体返回字段决定分支，其他字段仍经出口复制保留：" + string.Join("；", branched.Holes.Select(h => h.Reason)));
@@ -2274,6 +2288,13 @@ internal static class ArchitectureChecks
                         new(20, [new ManagedJump(20, new(24, [new(result, savedLocal)]))]),
                         new(32, [new ManagedJump(32, new(20, [new(savedLocal, new ConstantValue(0, types.Boolean, 8))]))])],
                 };
+            // 共享复制块的外部入边 32 由方法入口的另一条分支到达。
+            if (sharedCopy)
+                body = body with
+                {
+                    Blocks = [new(300, [new ManagedBranch(300, new ComparisonValue(Cond.Ne, new ArgumentValue(1, types.Int32, 32), zero, types.Boolean), new(0, []), new(32, []))]),
+                        .. body.Blocks],
+                };
             if (outsidePredicate)
                 body = body with
                 {
@@ -2284,8 +2305,8 @@ internal static class ArchitectureChecks
                     Regions = [new([0, 8], 40, [40], null, ManagedRegionKind.Catch)],
                 };
             if (outsideCall) body = body with { Regions = [new([0, 16], 24, [24], null, ManagedRegionKind.Catch)] };
-            return new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary))
-                .Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
+            return new InlineProof(types, caller, Summary, new InlineEvidence(types, caller, Summary))
+                .Run(Declared(body), new Dictionary<Variable, PendingConstruction>(), 0);
         }
         check.True(Run(true).Holes.Count == 0, "返回值比较可在所有路径证明后承接到同一布尔局部");
         check.True(Run(false).Holes.Count > 0, "常量路径与同一返回值比较不一致时拒绝恢复");
@@ -2304,7 +2325,8 @@ internal static class ArchitectureChecks
                 new(16, [new ManagedReturn(16, shared ? Fallback(-1) : new ConstantValue(1, types.Boolean, 8))])] };
             var copied = new LocalValue(new Variable(Storage.Temp(50), 1), types.Int32, 32);
             var yes = new ManagedEdge(24, copy is null ? [] : [new(copied, zero)]);
-            var alternate = yes with { Copies = copy is null ? [] : [new(copied, copy == "throwing" ? Read(new ArgumentValue(0, ownerRef, 64)) : one)] };
+            // 抛异常的复制读另一个对象：入口已解引用过实参 0，它的读取不会抛出。
+            var alternate = yes with { Copies = copy is null ? [] : [new(copied, copy == "throwing" ? Read(new ArgumentValue(1, ownerRef, 64)) : one)] };
             var no = new ManagedEdge(32, []);
             var body = new ManagedBody(caller,
             [
@@ -2314,9 +2336,10 @@ internal static class ArchitectureChecks
                 new(24, [call with { Address = 24 }, new ManagedReturn(28, copy == "live" ? Compare(copied) : new ConstantValue(1, types.Boolean, 8))]),
                 new(32, [call with { Address = 32 }, new ManagedReturn(36, new ConstantValue(0, types.Boolean, 8))]),
             ]);
-            if (shared) body = body with { Blocks = [.. body.Blocks,
+            // 其他入口 40 由方法入口的另一条分支到达。
+            if (shared) body = body with { Blocks = [new(300, [new ManagedBranch(300, Fallback(1), new(0, []), new(40, []))]), .. body.Blocks,
                 new(20, [new ManagedBranch(20, Fallback(0), yes, no)]), new(40, [new ManagedJump(40, new(20, []))])] };
-            var recovered = new TemplateRecovery(types, caller, Summary, new InlineEvidence(types, caller, Summary)).Run(body, new Dictionary<Variable, PendingConstruction>(), 0);
+            var recovered = new InlineProof(types, caller, Summary, new InlineEvidence(types, caller, Summary)).Run(Declared(body), new Dictionary<Variable, PendingConstruction>(), 0);
             definition.ReturnType = types.Int32;
             template = template with { Blocks = [template.Blocks[0], new(8, [call, new ManagedReturn(12, returned)]), new(16, [new ManagedReturn(16, one)])] };
             return recovered;
@@ -2333,8 +2356,10 @@ internal static class ArchitectureChecks
             && sharedBranch.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Any(c => c.Invocation.Method == method),
             "共享条件尾部可被已证明调用旁路，其他入口使用的原块仍保留：" + string.Join("；", sharedBranch.Holes.Select(h => h.Reason)));
         var copied = Run(true, "stable");
-        check.True(copied.Holes.Count == 0 && copied.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
-            .Any(a => a.Value is ComparisonValue { Left: BinaryValue { Op: BinOp.LShr } }), "稳定整数表达式可提前保存，供内联区域外继续使用");
+        // 保存可以是赋值语句，也可以是出口边上的复制。
+        check.True(copied.Holes.Count == 0 && copied.Body.Blocks.SelectMany(b => b.Statements)
+            .SelectMany(s => s is ManagedAssignment a ? [a.Value] : ManagedValues.Edges(s).SelectMany(e => e.Copies).Select(c => c.Value))
+            .Any(v => v is ComparisonValue { Left: BinaryValue { Op: BinOp.LShr } }), "稳定整数表达式可提前保存，供内联区域外继续使用");
         check.True(Run(true, "changed").Holes.Count > 0, "依赖区域内定义的表达式不能提前保存");
         check.True(Run(true, "entry-same").Holes.Count == 0, "跨调用证明入口局部已保存同值，异常读取不阻止内联");
         check.True(Run(true, "entry-different").Holes.Count > 0, "异常路径可见的旧值不同，不得提前覆盖");
@@ -2562,6 +2587,18 @@ internal static class ArchitectureChecks
     };
 
     private const string CallerAssembly = "Caller.dll";
+
+    /// <summary>调用方的形参按方法体里用到的实参补齐：模型里的方法定义只写名字，入口状态按形参表建立实参。</summary>
+    private static ManagedBody Declared(ManagedBody body)
+    {
+        var definition = body.Method.Method;
+        var used = body.Blocks.SelectMany(b => b.Statements).SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s)))
+            .SelectMany(ManagedValues.Walk).OfType<ArgumentValue>().Where(a => a.Index >= 0).GroupBy(a => a.Index).ToDictionary(g => g.Key, g => g.First().Type);
+        if (used.Count == 0 || definition.Parameters.Count > used.Keys.Max()) return body;
+        definition.Parameters = Enumerable.Range(0, used.Keys.Max() + 1)
+            .Select(i => new ParameterDef($"p{i}", used.TryGetValue(i, out var type) ? type : new PrimitiveRef("int"), 0, null, false)).ToList();
+        return body;
+    }
 
     private static MethodDef Method(TypeDef owner, string name, int index, MethodAttributes attributes = MethodAttributes.Public) => new()
     {

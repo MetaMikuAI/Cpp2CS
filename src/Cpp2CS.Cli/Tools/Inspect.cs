@@ -17,7 +17,7 @@ internal static class Inspect
         for (var i = 0; i < options.Length; i++)
         {
             if (options[i] == "--fact-cache-file" && i + 1 < options.Length) cache = Path.GetFullPath(options[++i]);
-            else if (options[i] is "--brief" or "--calls") continue;
+            else if (options[i] is "--brief" or "--calls" or "--inline") continue;
             else targets.Add(options[i]);
         }
         var facts = FactsBuilder.Build(binary, metadata, options: new Cpp2CS.Options.RecoveryOptions { FactCacheFile = cache });
@@ -41,7 +41,20 @@ internal static class Inspect
                     else if (decompiler.Shapes.Of(call).Signature is null)
                         foreach (var (candidate, signature, problem) in decompiler.Shapes.Candidates(((Const)call.Target).Value))
                             Console.WriteLine($"  无签名调用 0x{call.Address:x} 候选 {candidate}：{(signature is null ? problem : string.Join(", ", signature.Arguments.Select(a => $"{a.Index}:{a.Transfer}/{a.Size}")))}");
+            if (options.Contains("--inline"))
+            {
+                Cpp2CS.Recovery.Inlining.InlineTrace.Sink = Console.WriteLine;
+                Cpp2CS.Recovery.Inlining.InlineTrace.Method = method.Method;
+                Cpp2CS.Recovery.Inlining.InlineTrace.Before = body =>
+                {
+                    Console.WriteLine("  -- 内联证明之前");
+                    foreach (var line in ManagedPrinter.Lines(body)) Console.WriteLine(line);
+                    Console.WriteLine("  -- 证明");
+                };
+            }
             var result = decompiler.Lower(analysis);
+            Cpp2CS.Recovery.Inlining.InlineTrace.Sink = null;
+            Cpp2CS.Recovery.Inlining.InlineTrace.Before = null;
             foreach (var rejection in analysis.Idioms.Rejections) Console.WriteLine($"  拒绝 {rejection.Rule} 0x{rejection.Address:x} {rejection.Reason}");
             foreach (var hole in result.Holes) Console.WriteLine($"  洞 0x{hole.Address:x} {hole.Reason}");
             if ((result.Body ?? result.Partial) is { } body)

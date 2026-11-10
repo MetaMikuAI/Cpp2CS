@@ -43,10 +43,10 @@ internal sealed partial class BodyBuilder
     private int nextLocal;
 
     private readonly InlineEvidence fields;
-    private readonly TemplateRecovery templates;
+    private readonly InlineProof templates;
     private readonly Dictionary<Variable, PendingConstruction> pendingConstructions = [];
 
-    private BodyBuilder(MethodAnalysis analysis, TypeOracle oracle, TypeUsePlan uses, InlineEvidence fields, TemplateRecovery templates)
+    private BodyBuilder(MethodAnalysis analysis, TypeOracle oracle, TypeUsePlan uses, InlineEvidence fields, InlineProof templates)
     {
         this.analysis = analysis;
         this.oracle = oracle;
@@ -57,7 +57,7 @@ internal sealed partial class BodyBuilder
         materialized.UnionWith(uses.Materialized);
     }
 
-    public static LoweredBody Build(MethodAnalysis analysis, TypeOracle oracle, TypeUsePlan uses, InlineEvidence fields, TemplateRecovery templates) =>
+    public static LoweredBody Build(MethodAnalysis analysis, TypeOracle oracle, TypeUsePlan uses, InlineEvidence fields, InlineProof templates) =>
         new BodyBuilder(analysis, oracle, uses, fields, templates).Run();
 
     private LoweredBody Run()
