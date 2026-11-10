@@ -141,12 +141,24 @@ internal sealed class TermTable
     public Term True { get; }
     public Term False { get; }
 
-    public TermTable()
+    /// <param name="types">结构体布局（显式布局的叶子划分）；没有时元组不做规范化。</param>
+    public TermTable(ManagedTypes? types = null)
     {
         Zero64 = Constant(0, 64);
         True = Constant(1, 1);
         False = Constant(0, 1);
+        if (types is not null)
+        {
+            var known = new Dictionary<DefinitionRef, Overlay?>();
+            Overlays = structure => known.TryGetValue(structure, out var overlay) ? overlay : known[structure] = Overlay.Of(types, structure);
+        }
     }
+
+    /// <summary>显式布局结构体的叶子划分（没有重叠的结构体为 null）。</summary>
+    public Func<DefinitionRef, Overlay?>? Overlays { get; }
+
+    /// <summary>结构体的第 i 片叶子是视图（值由主叶子拼成，不独立）。</summary>
+    public bool IsView(DefinitionRef structure, int i) => Overlays?.Invoke(structure) is { } overlay && i < overlay.View.Length && overlay.View[i];
 
     private Term Intern(TermKind kind, byte code, int aux, int width, object? extra, Term[] args, bool bit)
     {
@@ -321,8 +333,15 @@ internal sealed class TermTable
 
     public Term Address(Term location) => Intern(TermKind.Address, 0, 0, 64, null, [location], false);
 
-    public Term Tuple(DefinitionRef type, IReadOnlyList<Term> leaves) =>
-        InternMany(TermKind.Tuple, 0, 0, 0, type, leaves.ToArray(), false);
+    /// <summary>结构体值。显式布局中重叠的叶子（视图）不独立：其分量总由主叶子按字节拼成。</summary>
+    public Term Tuple(DefinitionRef type, IReadOnlyList<Term> leaves)
+    {
+        var args = leaves.ToArray();
+        if (Overlays?.Invoke(type) is { } overlay && overlay.View.Length == args.Length)
+            for (var i = 0; i < args.Length; i++)
+                if (overlay.View[i]) args[i] = overlay.Compose(this, i, p => args[p]);
+        return InternMany(TermKind.Tuple, 0, 0, 0, type, args, false);
+    }
 
     /// <summary>数组下标：32 位整数的零扩展与符号扩展不区分（越界检查按无符号比较，负数扩展后同样越界）。</summary>
     private Term Index(Term index) =>
@@ -706,5 +725,104 @@ internal sealed class TermTable
             yield return current;
             foreach (var child in current.Args) stack.Push(child);
         }
+    }
+}
+
+/// <summary>
+/// 显式布局结构体的叶子划分：主叶子互不重叠、覆盖全部叶子的字节，是存储；其余叶子（视图）与主叶子重叠，值由与它相交的主叶子按字节拼成（小端）。
+/// 主叶子取最细的划分（同一偏移先取窄的）；最细的划分覆盖不了某个视图时取最粗的；都不行时不划分。
+/// </summary>
+internal sealed class Overlay
+{
+    private readonly int[] offsets;
+    private readonly int[] sizes;
+
+    private Overlay(int[] offsets, int[] sizes, bool[] view)
+    {
+        this.offsets = offsets;
+        this.sizes = sizes;
+        View = view;
+    }
+
+    /// <summary>按叶子顺序（ManagedTypes.Projections）：是否视图。</summary>
+    public bool[] View { get; }
+
+    public bool Intersects(int a, int b) => offsets[a] < offsets[b] + sizes[b] && offsets[b] < offsets[a] + sizes[a];
+
+    public static Overlay? Of(ManagedTypes types, DefinitionRef structure)
+    {
+        if (types.Kind(structure) != TypeKind.Struct) return null;
+        var leaves = types.Leaves(structure).ToArray();
+        var n = leaves.Length;
+        if (n < 2) return null;
+        var offsets = leaves.Select(l => l.Offset).ToArray();
+        var sizes = leaves.Select(l => types.Size(l.Type)).ToArray();
+        // 值的位宽须等于存储宽度，按字节拼接才成立。
+        if (sizes.Any(s => s <= 0) || leaves.Where((l, i) => types.ValueWidth(l.Type) != 8 * sizes[i]).Any()) return null;
+        bool Overlaps(int a, int b) => offsets[a] < offsets[b] + sizes[b] && offsets[b] < offsets[a] + sizes[a];
+        if (!Enumerable.Range(0, n).Any(a => Enumerable.Range(a + 1, n - a - 1).Any(b => Overlaps(a, b)))) return null;
+        foreach (var fine in new[] { true, false })
+        {
+            var primary = new List<int>();
+            foreach (var i in Enumerable.Range(0, n).OrderBy(i => offsets[i]).ThenBy(i => fine ? sizes[i] : -sizes[i]).ThenBy(i => i))
+                if (primary.All(p => !Overlaps(p, i))) primary.Add(i);
+            var view = Enumerable.Range(0, n).Select(i => !primary.Contains(i)).ToArray();
+            var covered = Enumerable.Range(0, n).Where(i => view[i]).All(v => Enumerable.Range(offsets[v], sizes[v])
+                .All(b => primary.Any(p => offsets[p] <= b && b < offsets[p] + sizes[p])));
+            if (covered) return new Overlay(offsets, sizes, view);
+        }
+        return null;
+    }
+
+    /// <summary>视图 v 的值：与它相交的主叶子的相应字节。</summary>
+    public Term Compose(TermTable terms, int v, Func<int, Term> primary)
+    {
+        Term? result = null;
+        for (var p = 0; p < View.Length; p++)
+        {
+            if (View[p] || !Intersects(p, v)) continue;
+            var (lo, hi) = (Math.Max(offsets[p], offsets[v]), Math.Min(offsets[p] + sizes[p], offsets[v] + sizes[v]));
+            var piece = Place(terms, Bits(terms, primary(p), 8 * sizes[p], 8 * (lo - offsets[p]), 8 * (hi - lo)), 8 * (hi - lo), 8 * sizes[v], 8 * (lo - offsets[v]));
+            result = result is null ? piece : terms.Binary(BinOp.Or, result, piece, 8 * sizes[v]);
+        }
+        return result!;
+    }
+
+    /// <summary>写入视图 v：与它相交的主叶子的新值；部分相交的主叶子保留视图以外的字节，需要它原来的值（没有时为 null）。</summary>
+    public List<(int Primary, Term Value)>? Split(TermTable terms, int v, Term value, Func<int, Term?> old)
+    {
+        var result = new List<(int, Term)>();
+        for (var p = 0; p < View.Length; p++)
+        {
+            if (View[p] || !Intersects(p, v)) continue;
+            var (lo, hi) = (Math.Max(offsets[p], offsets[v]), Math.Min(offsets[p] + sizes[p], offsets[v] + sizes[v]));
+            var width = 8 * sizes[p];
+            var piece = Bits(terms, value, 8 * sizes[v], 8 * (lo - offsets[v]), 8 * (hi - lo));
+            if (lo == offsets[p] && hi == offsets[p] + sizes[p])
+            {
+                result.Add((p, piece));
+                continue;
+            }
+            if (old(p) is not { } before) return null;
+            var shift = 8 * (lo - offsets[p]);
+            var mask = (TermTable.Mask(8 * (hi - lo)) << shift) & TermTable.Mask(width);
+            var kept = terms.Binary(BinOp.And, before, terms.Constant(~mask & TermTable.Mask(width), width), width);
+            result.Add((p, terms.Binary(BinOp.Or, kept, Place(terms, piece, 8 * (hi - lo), width, shift), width)));
+        }
+        return result;
+    }
+
+    /// <summary>值（width 位）的第 from 位起 count 位。</summary>
+    private static Term Bits(TermTable terms, Term value, int width, int from, int count)
+    {
+        var shifted = from == 0 ? value : terms.Binary(BinOp.LShr, value, terms.Constant((ulong)from, width), width);
+        return count == width ? shifted : terms.Convert(ConvKind.Truncate, shifted, count);
+    }
+
+    /// <summary>count 位的片段放在 width 位值的第 at 位起。</summary>
+    private static Term Place(TermTable terms, Term piece, int count, int width, int at)
+    {
+        var widened = count == width ? piece : terms.Convert(ConvKind.ZeroExtend, piece, width);
+        return at == 0 ? widened : terms.Binary(BinOp.Shl, widened, terms.Constant((ulong)at, width), width);
     }
 }

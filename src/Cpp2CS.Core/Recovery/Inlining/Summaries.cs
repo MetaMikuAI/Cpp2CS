@@ -21,7 +21,7 @@ internal sealed class TemplateSummaries(ManagedTypes types, InlineEvidence evide
     {
         var method = program.Method;
         var definition = method.Method;
-        var terms = new TermTable();
+        var terms = new TermTable(types);
         var solver = new Solver(terms, types);
         var interpreter = new Interpreter(types, solver, evidence) { StepBudget = 2000 };
         var formals = new Term[definition.Parameters.Count + 1];
@@ -166,7 +166,7 @@ internal sealed class TemplateSummaries(ManagedTypes types, InlineEvidence evide
             bool Simple(Term leaf) => leaf.IsConstant || FormalIndex(leaf) is not null
                 || leaf.Kind == TermKind.Read && leaf.Location.Root == RootKind.Reference && leaf.Location.Args[0].Key is int k && k >= 0
                     && leaf.Location.Args[0].IsAtom(AtomKind.Formal);
-            if (!leaves.All(Simple)) continue;
+            if (!leaves.Where((_, i) => !run.Terms.IsView(structure, i)).All(Simple)) continue;
             found.Add(new ValueConstructor(method, leaves.ToArray(), interpreter.Leaves(structure), interpreter));
         }
         return valueConstructors[structure] = found.ToArray();
@@ -189,6 +189,7 @@ internal sealed class TemplateSummaries(ManagedTypes types, InlineEvidence evide
             var valid = true;
             for (var i = 0; i < candidate.Leaves.Length && valid; i++)
             {
+                if (candidate.Interpreter.Terms.IsView(structure, i)) continue;
                 var shape = candidate.Shape[i];
                 if (Desired(leaves, shape) is not { } desired) { valid = false; break; }
                 var leaf = candidate.Leaves[i];

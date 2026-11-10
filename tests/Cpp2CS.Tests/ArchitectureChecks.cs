@@ -84,6 +84,7 @@ internal static class ArchitectureChecks
         NestedEnumStack(checks);
         InterfaceSlots(checks, types);
         RepresentationCopies(checks, facts, types);
+        ExplicitLayoutViews(checks, types);
         ConstructorStoreOrder(checks, types);
         ConstructorPreludeStores(checks, types);
         ConstructorContracts(checks, types);
@@ -1689,6 +1690,62 @@ internal static class ArchitectureChecks
         check.True(dispatch is not null && Read(Cond.Uge, 4, 104) is { } other && !dispatch.Same(other), "清理调用目标不同不能视为等价");
     }
 
+    /// <summary>显式布局的重叠字段：主叶子是存储，视图由主叶子按字节拼成（小端）。</summary>
+    private static void ExplicitLayoutViews(Assertions check, ManagedTypes types)
+    {
+        DefinitionRef Structure(string name, int index, int size, params (TypeRef Type, int Offset)[] fields)
+        {
+            var owner = new TypeDef { Index = index, Name = name, Namespace = "Tests", Assembly = "Tests.dll", Token = 0,
+                Attributes = TypeAttributes.Public | TypeAttributes.ExplicitLayout, IsValueType = true, IsEnum = false, Size = size };
+            owner.Fields = fields.Select((f, i) => new FieldDef { Index = index * 10 + i, Owner = owner, Name = $"f{i}",
+                Type = f.Type, Offset = f.Offset, Attributes = FieldAttributes.Public }).ToArray();
+            return new(owner, []);
+        }
+        // 与 decimal 同形：四个 int，后两个与一个 ulong 重叠。
+        var packed = Structure("Packed", 71, 16, (types.Int32, 0), (types.Int32, 4), (types.Int32, 8), (types.Int32, 12), (types.UInt64, 8));
+        var terms = new TermTable(types);
+        var interpreter = new Interpreter(types, new Solver(terms, types), null!);
+        var leaves = interpreter.Leaves(packed);
+        int Leaf(string name) => Array.FindIndex(leaves, l => l.Path.Fields[0].Field.Name == name);
+        var (lo, hi, wide) = (Leaf("f2"), Leaf("f3"), Leaf("f4"));
+        check.True(terms.Overlays?.Invoke(packed)?.View is { } view && view.Count(v => v) == 1 && view[wide], "最细的不重叠划分是主叶子，其余叶子是视图");
+        var root = terms.CellRoot(0, new Variable(Storage.Temp(71), 1), FieldPath.Empty);
+        Term At(int i) => terms.Append(root, leaves[i].Path);
+        Term Low(Term value) => terms.Convert(ConvKind.Truncate, value, 32);
+        Term High(Term value) => terms.Convert(ConvKind.Truncate, terms.Binary(BinOp.LShr, value, terms.Constant(32, 64), 64), 32);
+        Term Join(Term low, Term high) => terms.Binary(BinOp.Or, terms.Convert(ConvKind.ZeroExtend, low, 64),
+            terms.Binary(BinOp.Shl, terms.Convert(ConvKind.ZeroExtend, high, 64), terms.Constant(32, 64), 64), 64);
+        var side = new SideState { Frames = [] };
+        var whole = terms.Atom(AtomKind.Formal, 0, 64);
+        interpreter.Write(side, At(wide), whole, types.UInt64);
+        check.True(ReferenceEquals(interpreter.ReadScalar(side, At(lo), leaves[lo], false), Low(whole))
+            && ReferenceEquals(interpreter.ReadScalar(side, At(hi), leaves[hi], false), High(whole)), "写入视图即写入与它相交的主叶子");
+        var part = terms.Atom(AtomKind.Formal, 1, 32);
+        interpreter.Write(side, At(lo), part, types.Int32);
+        check.True(ReferenceEquals(interpreter.ReadScalar(side, At(wide), leaves[wide], false), Join(part, High(whole))), "读取视图由主叶子拼成");
+        check.True(!interpreter.MayOverlap(side, At(Leaf("f0")), At(wide)) && interpreter.MayOverlap(side, At(hi), At(wide)), "同一显式布局类型内按字节范围判定重叠");
+        var a = terms.Atom(AtomKind.Formal, 2, 32);
+        var b = terms.Atom(AtomKind.Formal, 3, 32);
+        var given = Enumerable.Range(0, leaves.Length).Select(i => i == lo ? a : i == hi ? b : i == wide ? terms.Atom(AtomKind.Formal, 4, 64) : terms.Constant(0, 32)).ToArray();
+        var tuple = terms.Tuple(packed, given);
+        check.True(ReferenceEquals(tuple.Args[wide], Join(a, b)), "结构体值的视图分量由主叶子拼成，与给出的分量无关");
+        check.True(interpreter.Update(tuple, leaves[wide].Path.Fields, whole) is { } updated
+            && ReferenceEquals(updated.Args[lo], Low(whole)) && ReferenceEquals(updated.Args[hi], High(whole)), "按视图更新结构体值即更新主叶子");
+        // 部分相交：short 视图落在 int 主叶子的高半部分，写入保留主叶子其余的字节。
+        var narrow = Structure("Narrow", 72, 4, (types.Int32, 0), (types.Int16, 2));
+        var narrowLeaves = interpreter.Leaves(narrow);
+        var cell = terms.CellRoot(0, new Variable(Storage.Temp(72), 1), FieldPath.Empty);
+        var before = terms.Atom(AtomKind.Formal, 5, 32);
+        var half = terms.Atom(AtomKind.Formal, 6, 16);
+        var narrowSide = new SideState { Frames = [] };
+        interpreter.Write(narrowSide, terms.Append(cell, narrowLeaves[0].Path), before, types.Int32);
+        interpreter.Write(narrowSide, terms.Append(cell, narrowLeaves[1].Path), half, types.Int16);
+        var expected = terms.Binary(BinOp.Or, terms.Binary(BinOp.And, before, terms.Constant(0xffff, 32), 32),
+            terms.Binary(BinOp.Shl, terms.Convert(ConvKind.ZeroExtend, half, 32), terms.Constant(16, 32), 32), 32);
+        check.True(ReferenceEquals(interpreter.ReadScalar(narrowSide, terms.Append(cell, narrowLeaves[0].Path), narrowLeaves[0], false), expected),
+            "部分相交的写入只改主叶子里视图覆盖的字节");
+    }
+
     private static void RepresentationCopies(Assertions check, ProgramFacts facts, ManagedTypes types)
     {
         DefinitionRef Structure(string name, int index, int size, bool explicitLayout, params (TypeRef Type, int Offset)[] fields)
@@ -2407,7 +2464,8 @@ internal static class ArchitectureChecks
         check.True(directBranch.Holes.Count == 0, $"返回布尔谓词可直接承接调用方分支：{string.Join("；", directBranch.Holes.Select(h => h.Reason))}");
         check.Equal(0, BooleanBranch(true, true).Holes.Count, "返回布尔谓词的取反可承接相反分支");
         check.True(BooleanBranch(false, false).Holes.Count > 0, "常量路径去向不一致时拒绝布尔分支证明");
-        check.Equal(0, BooleanBranch(false, true, "dead").Holes.Count, "条件出口未使用的纯局部复制不要求各路径相同");
+        var deadCopy = BooleanBranch(false, true, "dead");
+        check.True(deadCopy.Holes.Count == 0, "条件出口未使用的纯局部复制不要求各路径相同：" + string.Join("；", deadCopy.Holes.Select(h => h.Reason)));
         check.True(BooleanBranch(false, true, "live").Holes.Count > 0, "条件出口仍使用的局部复制必须相同");
         check.True(BooleanBranch(false, true, "throwing").Holes.Count > 0, "条件出口可能抛异常的复制不能因无用而丢弃");
         var sharedBranch = BooleanBranch(false, true, shared: true);

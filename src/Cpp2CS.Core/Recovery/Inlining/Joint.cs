@@ -410,7 +410,8 @@ internal sealed class Joint(Interpreter interpreter, Func<MethodRef, Program?> t
         if (returned is null || !Solver.Apply(returned).HasFormal) return;
         var candidates = path.B.Trace.SelectMany(p => p.Nodes.Values).Concat(path.B.Frames[0].Env.Values)
             .Where(c => !c.HasFormal && !c.IsConstant).Distinct(ReferenceEqualityComparer.Instance).Cast<Term>().Reverse().ToArray();
-        var parts = returned.Kind == TermKind.Tuple ? [returned, .. returned.Args] : new[] { returned };
+        var parts = returned.Kind == TermKind.Tuple && returned.Key is DefinitionRef structure
+            ? [returned, .. returned.Args.Where((_, i) => !Terms.IsView(structure, i))] : new[] { returned };
         foreach (var part in parts)
         {
             Siblings(path);
@@ -440,6 +441,7 @@ internal sealed class Joint(Interpreter interpreter, Func<MethodRef, Program?> t
             var open = new List<int>();
             for (var i = 0; i < leaves.Length && consistent; i++)
             {
+                if (Terms.IsView(structure, i)) continue;
                 var bound = Solver.Apply(formal.Args[i]);
                 if (bound.HasFormal) { open.Add(i); continue; }
                 if (bound.Kind != TermKind.Read || TermTable.PathOf(bound.Args[0]) is var at && at.Count < leaves[i].Path.Count
@@ -535,7 +537,7 @@ internal sealed class Joint(Interpreter interpreter, Func<MethodRef, Program?> t
         var unit = program.Units[bottom.Unit];
         if (program.HandlerOf(unit.Source) is not { } region) return (null, new Dictionary<Variable, Term>());
         var live = new Dictionary<Variable, Term>();
-        foreach (var variable in program.LiveIn(region.HandlerEntry))
+        foreach (var variable in program.HandlerLiveIn(region))
         {
             if (region.Exception?.Variable.Equals(variable) == true) continue;
             if (bottom.Env.TryGetValue(variable, out var value)) live[variable] = value;

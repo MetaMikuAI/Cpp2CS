@@ -151,6 +151,9 @@ internal sealed class Solver(TermTable terms, ManagedTypes? types = null)
         if (t.Kind != c.Kind || t.Code != c.Code || t.Aux != c.Aux || t.Width != c.Width || t.Args.Length != c.Args.Length
             || !Equals(t.Key, c.Key)) return false;
         var saved = new Dictionary<Term, Term>(trial, ReferenceEqualityComparer.Instance);
+        // 结构体值只比主叶子：视图由主叶子拼成，主叶子相同则视图相同。
+        if (t.Kind == TermKind.Tuple && t.Key is DefinitionRef structure && terms.Overlays?.Invoke(structure) is { } overlay)
+            return MatchAll(t.Args.Where((_, i) => !overlay.View[i]).ToArray(), c.Args.Where((_, i) => !overlay.View[i]).ToArray(), trial) || Restore(trial, saved);
         if (MatchAll(t.Args, c.Args, trial)) return true;
         // 交换律：另一种次序。
         if (t.Args.Length == 2 && Commutative(t))
@@ -174,6 +177,13 @@ internal sealed class Solver(TermTable terms, ManagedTypes? types = null)
         if (declared is GenericParameterRef || actual is GenericParameterRef) return true;
         if (declared is DefinitionRef d && actual is DefinitionRef a && ReferenceEquals(d.Definition, a.Definition)) return true;
         return types.IsAssignable(actual, declared) || types.IsAssignable(declared, actual);
+    }
+
+    private static bool Restore(Dictionary<Term, Term> trial, Dictionary<Term, Term> saved)
+    {
+        trial.Clear();
+        foreach (var (k, v) in saved) trial[k] = v;
+        return false;
     }
 
     private bool MatchAll(Term[] ts, Term[] cs, Dictionary<Term, Term> trial)
@@ -298,14 +308,14 @@ internal sealed class Solver(TermTable terms, ManagedTypes? types = null)
         return Interval(view.Folded, substituted) ?? (ReferenceEquals(substituted, c) ? null : Interval(view.Folded, c));
     }
 
-    /// <summary>判空：分配得到的对象、Φ 中的 x != null。</summary>
+    /// <summary>判空：分配得到的对象、地址、字符串常量、方法自己的 this（实例方法的 this 非空，由调用方检查）。</summary>
     private bool? NonNull(ImmutableList<Term> phi, Term c)
     {
         bool? Negated(bool? b) => b is null ? null : !b;
         if (c.IsOp(OpCode.Compare) && c.Cond is Cond.Eq or Cond.Ne && c.Width == 1 && c.Args[1].IsConstant && c.Args[1].Bits == 0 && c.Args[0].Width == 64)
         {
             var x = c.Args[0];
-            if (Allocations.Contains(x) || x.Kind == TermKind.Address || x.IsAtom(AtomKind.Text))
+            if (Allocations.Contains(x) || x.Kind == TermKind.Address || x.IsAtom(AtomKind.Text) || x.IsAtom(AtomKind.Argument) && x.Key is -1)
                 return c.Cond == Cond.Ne;
         }
         if (c.IsOp(OpCode.Not)) return Negated(NonNull(phi, c.Args[0]));

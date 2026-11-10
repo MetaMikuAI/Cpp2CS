@@ -232,6 +232,19 @@ internal sealed class Interpreter(ManagedTypes types, Solver solver, InlineEvide
                 j++;
             }
         if (j == 0 || part.Kind == TermKind.Tuple && j != part.Args.Length) return null;
+        // 赋给视图的值拆到主叶子上（同时赋了相应主叶子的除外，主叶子为准）；视图分量由 Tuple 重新拼成。
+        if (Terms.Overlays?.Invoke(structure) is { } overlay)
+        {
+            var assigned = Enumerable.Range(0, all.Length).Where(i => StartsWith(all[i].Path, prefix)).ToHashSet();
+            foreach (var v in assigned.Where(i => overlay.View[i]).ToArray())
+            {
+                if (Enumerable.Range(0, all.Length).Where(p => !overlay.View[p] && overlay.Intersects(p, v)).All(assigned.Contains)) continue;
+                var before = args;
+                if (overlay.Split(Terms, v, args[v], p => before[p]) is not { } parts) return null;
+                args = (Term[])args.Clone();
+                foreach (var (p, value) in parts) args[p] = value;
+            }
+        }
         return Terms.Tuple(structure, args);
     }
 
@@ -257,6 +270,44 @@ internal sealed class Interpreter(ManagedTypes types, Solver solver, InlineEvide
 
     public Term CellOf(Term location) => Terms.CellRoot(location.Aux, TermTable.CellVariable(location), FieldPath.Empty);
 
+    /// <summary>位置是显式布局结构体的视图叶子时：结构体所在的位置、划分、叶子序号与全部叶子。</summary>
+    private (Term Root, Overlay Overlay, int View, Leaf[] Leaves)? ViewOf(Term location)
+    {
+        var path = TermTable.PathOf(location);
+        for (var k = 0; k < path.Count; k++)
+        {
+            var field = path.Fields[k];
+            if (!Explicit(field) || field.DeclaringType is not DefinitionRef owner) continue;
+            if (Terms.Overlays?.Invoke(owner) is not { } overlay) return null;
+            var all = Leaves(owner);
+            var sub = Terms.Path(path.Fields.Skip(k).ToArray());
+            var index = Array.FindIndex(all, l => ReferenceEquals(l.Path, sub));
+            if (index < 0 || !overlay.View[index] || Terms.Truncate(location, k) is not { } root) return null;
+            return (root, overlay, index, all);
+        }
+        return null;
+    }
+
+    /// <summary>字段路径是否可能重叠；在显式布局的结构体处分开时按字节范围判定。</summary>
+    private bool FieldsOverlap(FieldPath x, FieldPath y)
+    {
+        if (!Effects.MemoryFootprint.Overlap(x.Fields, y.Fields)) return false;
+        var d = 0;
+        while (d < x.Count && d < y.Count && x.Fields[d].Equals(y.Fields[d])) d++;
+        if (d >= x.Count || d >= y.Count) return true;
+        var (a, b) = (x.Fields[d], y.Fields[d]);
+        if (a.Field.Owner != b.Field.Owner || !Explicit(a) || a.DeclaringType is not DefinitionRef owner) return true;
+        return Range(owner, x.Fields.Skip(d).ToArray()) is not var (sa, ea) || Range(owner, y.Fields.Skip(d).ToArray()) is not var (sb, eb) || sa < eb && sb < ea;
+    }
+
+    /// <summary>结构体内一段字段路径占的字节范围（路径下全部叶子的范围）。</summary>
+    private (int Start, int End)? Range(DefinitionRef owner, IReadOnlyList<FieldRef> path)
+    {
+        var inside = types.Leaves(owner).Where(l => l.Path.Count >= path.Count && l.Path.Take(path.Count).SequenceEqual(path)).ToArray();
+        if (inside.Length == 0 || inside.Any(l => types.Size(l.Type) <= 0)) return null;
+        return (inside.Min(l => l.Offset), inside.Max(l => l.Offset + types.Size(l.Type)));
+    }
+
     /// <summary>两位置可能共享存储（必然相同的已先判定）。</summary>
     public bool MayOverlap(SideState side, Term x, Term y)
     {
@@ -272,24 +323,24 @@ internal sealed class Interpreter(ManagedTypes types, Solver solver, InlineEvide
             var other = x.Root == RootKind.Reference ? y : x;
             if (other.Root != RootKind.Reference && Private(side, other)) return false;
             if (x.Root == RootKind.Reference && y.Root == RootKind.Reference && ReferenceEquals(x.Args[0], y.Args[0]))
-                return Effects.MemoryFootprint.Overlap(px.Fields, py.Fields);
+                return FieldsOverlap(px, py);
             return true;
         }
         if (x.Root != y.Root) return false;
         switch (x.Root)
         {
             case RootKind.Cell:
-                return x.Aux == y.Aux && TermTable.CellVariable(x).Equals(TermTable.CellVariable(y)) && Effects.MemoryFootprint.Overlap(px.Fields, py.Fields);
+                return x.Aux == y.Aux && TermTable.CellVariable(x).Equals(TermTable.CellVariable(y)) && FieldsOverlap(px, py);
             case RootKind.Static:
-                return Effects.MemoryFootprint.Overlap(px.Fields, py.Fields);
+                return FieldsOverlap(px, py);
             case RootKind.Field:
-                return Effects.MemoryFootprint.Overlap(px.Fields, py.Fields) && !Distinct(side, x.Args[0], y.Args[0]);
+                return FieldsOverlap(px, py) && !Distinct(side, x.Args[0], y.Args[0]);
             case RootKind.Element:
                 if (Distinct(side, x.Args[0], y.Args[0])) return false;
                 if (ReferenceEquals(x.Args[0], y.Args[0]) && x.Args[1].IsConstant && y.Args[1].IsConstant && x.Args[1].Bits != y.Args[1].Bits) return false;
-                return Effects.MemoryFootprint.Overlap(px.Fields, py.Fields);
+                return FieldsOverlap(px, py);
             case RootKind.MultiElement:
-                return !Distinct(side, x.Args[0], y.Args[0]) && Effects.MemoryFootprint.Overlap(px.Fields, py.Fields);
+                return !Distinct(side, x.Args[0], y.Args[0]) && FieldsOverlap(px, py);
             default:
                 return true;
         }
@@ -315,6 +366,18 @@ internal sealed class Interpreter(ManagedTypes types, Solver solver, InlineEvide
             foreach (var (written, value) in side.Writes)
                 if (ReferenceEquals(written, location)) return value;
             return Terms.Read(0, location, leaf.Width, leaf.Bit);
+        }
+        // 显式布局的视图：由主叶子拼成。
+        if (ViewOf(location) is var (root, overlay, view, all))
+        {
+            var parts = new Term[all.Length];
+            for (var p = 0; p < all.Length; p++)
+                if (!overlay.View[p] && overlay.Intersects(p, view))
+                {
+                    if (ReadScalar(side, Terms.Append(root, all[p].Path), all[p], freshFrame, phi) is not { } part) return null;
+                    parts[p] = part;
+                }
+            return overlay.Compose(Terms, view, p => parts[p]);
         }
         for (var i = side.Writes.Count - 1; i >= 0; i--)
         {
@@ -361,7 +424,8 @@ internal sealed class Interpreter(ManagedTypes types, Solver solver, InlineEvide
             if (all.Length == value.Args.Length)
             {
                 for (var i = 0; i < all.Length; i++)
-                    WriteScalar(side, all[i].Path.Count == 0 ? location : Terms.Append(location, all[i].Path), Fit(value.Args[i], all[i].Width));
+                    if (!Terms.IsView((DefinitionRef)type, i))
+                        WriteScalar(side, all[i].Path.Count == 0 ? location : Terms.Append(location, all[i].Path), Fit(value.Args[i], all[i].Width));
                 return;
             }
         }
@@ -376,6 +440,13 @@ internal sealed class Interpreter(ManagedTypes types, Solver solver, InlineEvide
 
     private void WriteScalar(SideState side, Term location, Term value)
     {
+        // 显式布局的视图：写到主叶子上。部分相交的主叶子原来的内容不可判定时，按视图位置写入（之后读取重叠的叶子不可判定）。
+        if (ViewOf(location) is var (root, overlay, view, all)
+            && overlay.Split(Terms, view, value, p => ReadScalar(side, Terms.Append(root, all[p].Path), all[p], false)) is { } parts)
+        {
+            foreach (var (p, part) in parts) WriteScalar(side, Terms.Append(root, all[p].Path), part);
+            return;
+        }
         // 覆盖同一位置的旧写入不再需要。
         var writes = side.Writes.RemoveAll(w => ReferenceEquals(w.Location, location));
         side.Writes = writes.Add((location, value));

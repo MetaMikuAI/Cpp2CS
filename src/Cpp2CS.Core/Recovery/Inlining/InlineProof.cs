@@ -237,11 +237,13 @@ internal sealed class InlineProof
             for (; i >= 0 && crossed <= events; i--)
             {
                 var statement = program.Blocks[current].Statements[i];
+                // 锚点语句里的调用在待证访问（接收者、实参）之后，区域可以止于它，不算跨过。
+                var anchor = current == block && i == index;
                 // 区域里调用方的事件都要对应模板的事件：跨过模板不可能做的调用后，更早的起点都不成立。
-                if (possible?.Invoke(statement) == false) { crossed = int.MaxValue; break; }
+                if (!anchor && possible?.Invoke(statement) == false) { crossed = int.MaxValue; break; }
                 if (HasPending(statement) || Program.Uses(statement).Any(holding.Contains)) covered++;
                 if (seen.Add((current, i))) starts.Add((current, i, covered));
-                crossed += program.EventsAt(current, i);
+                if (!anchor) crossed += program.EventsAt(current, i);
             }
             if (crossed > events || starts.Count >= 40 || program.Predecessors(current) is not [var predecessor] || !visited.Add(predecessor)) break;
             current = predecessor;

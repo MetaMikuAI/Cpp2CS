@@ -112,10 +112,7 @@ internal sealed class Program
     public HashSet<Variable> LiveBefore(ulong block, int index)
     {
         if (liveIn is null) ComputeLiveness();
-        var statements = Blocks[block].Statements;
-        var live = LiveOut(block);
-        for (var i = statements.Count - 1; i >= index; i--) Transfer(statements[i], live);
-        return live;
+        return Before(block, index, Out(block, liveIn!, Feasible));
     }
 
     /// <summary>第 index 条语句之后活跃的局部，不计这条语句自己（含它的边上复制）读到的局部。</summary>
@@ -127,35 +124,154 @@ internal sealed class Program
         var live = new HashSet<Variable>(Escaped);
         foreach (var edge in ManagedValues.Edges(statements[index]))
         {
+            if (!Feasible(block, edge.Target)) continue;
             var target = new HashSet<Variable>(liveIn!.GetValueOrDefault(edge.Target) ?? []);
             foreach (var copy in edge.Copies) target.Remove(copy.Target.Variable);
             live.UnionWith(target);
         }
-        if (HandlerOf(block) is { } region) live.UnionWith(liveIn!.GetValueOrDefault(region.HandlerEntry) ?? []);
+        if (HandlerLive(block) is { } handler) live.UnionWith(handler);
         return live;
     }
 
-    private HashSet<Variable> LiveOut(ulong block)
+    /// <summary>处理块入口在异常进入时活跃的局部（见 <see cref="ComputeLiveness"/>）：单独求过的取它，否则与全局的入口活跃集合相同。</summary>
+    public IReadOnlySet<Variable> HandlerLiveIn(ManagedRegion region)
     {
-        var live = new HashSet<Variable>(Escaped);
+        if (liveIn is null) ComputeLiveness();
+        return handlerLive!.TryGetValue(region, out var own) ? own : liveIn!.GetValueOrDefault(region.HandlerEntry) ?? [];
+    }
+
+    /// <summary>块末尾活跃的局部：可执行的出边上目标活跃的局部去掉边上复制的目标、加上复制读到的局部；try 中并入处理块入口活跃的局部（边上复制可能抛出）。</summary>
+    private HashSet<Variable> Out(ulong block, IReadOnlyDictionary<ulong, HashSet<Variable>> live, Func<ulong, ulong, bool> feasible)
+    {
+        var result = new HashSet<Variable>(Escaped);
         var last = Blocks[block].Statements.LastOrDefault();
-        if (last is null) return live;
+        if (last is null) return result;
         foreach (var edge in ManagedValues.Edges(last))
         {
-            var target = new HashSet<Variable>(liveIn!.GetValueOrDefault(edge.Target) ?? []);
+            if (!feasible(block, edge.Target)) continue;
+            var target = new HashSet<Variable>(live.GetValueOrDefault(edge.Target) ?? []);
             foreach (var copy in edge.Copies) target.Remove(copy.Target.Variable);
             foreach (var copy in edge.Copies) target.UnionWith(ManagedValues.Walk(copy.Value).OfType<LocalValue>().Select(l => l.Variable));
-            live.UnionWith(target);
+            result.UnionWith(target);
         }
-        // 抛出可到达处理块：处理块入口活跃的局部在整个 try 中活跃。
-        if (HandlerOf(block) is { } region) live.UnionWith(liveIn!.GetValueOrDefault(region.HandlerEntry) ?? []);
+        if (HandlerLive(block) is { } handler) result.UnionWith(handler);
+        return result;
+    }
+
+    /// <summary>由块末尾的活跃局部倒推到第 index 条语句之前；try 中可能抛出的语句之前并入处理块入口活跃的局部（抛出时处理块看到语句之前的值）。</summary>
+    private HashSet<Variable> Before(ulong block, int index, HashSet<Variable> live)
+    {
+        var statements = Blocks[block].Statements;
+        var handler = HandlerLive(block);
+        for (var i = statements.Count - 1; i >= index; i--)
+        {
+            Transfer(statements[i], live);
+            if (handler is not null && MayThrow(block, i)) live.UnionWith(handler);
+        }
         return live;
     }
 
+    /// <summary>
+    /// 语句可能抛出：读写存储、取址、事件、检查、转换、抛出、整数除法。局部之间的计算与控制转移不会；
+    /// 局部单元的读写、经方法自己的 this 读写字段也不会（this 非空）。
+    /// </summary>
+    private bool MayThrow(ulong block, int index)
+    {
+        if (!BlockUnits.TryGetValue(block, out var unit)) return true;
+        var ops = Units[unit].Ops;
+        bool Safe(Place place) => place.Root == RootKind.Cell || place.Root is RootKind.Field or RootKind.Reference
+            && ops.Any(o => o is PureOp { Node: ArgumentValue { Index: -1 } } self && self.Statement == index && self.Target == place.Base);
+        return ops.Any(op => op.Statement == index && op switch
+        {
+            PureOp { Node: BinaryValue { Op: BinOp.SDiv or BinOp.UDiv or BinOp.SRem or BinOp.URem } } => true,
+            LoadOp load => !Safe(load.Place),
+            StoreOp store => !Safe(store.Place),
+            AddressOp address => !Safe(address.Place),
+            PureOp or LocalOp or AssignOp or CopyOp or ProjectOp or JumpOp or GotoOp or BranchOp or SwitchOp or ReturnOp => false,
+            _ => true,
+        });
+    }
+
+    /// <summary>try 中的块：最内层处理块入口在异常进入时活跃的局部；不在 try 中为 null。</summary>
+    private IReadOnlySet<Variable>? HandlerLive(ulong block) => HandlerOf(block) is { } region ? HandlerLiveIn(region) : null;
+
+    private Dictionary<ManagedRegion, HashSet<Variable>>? handlerLive;
+    private HashSet<(ulong Block, ulong Target)>? unreachable;
+
+    private bool Feasible(ulong block, ulong target) => !unreachable!.Contains((block, target));
+
+    /// <summary>处理块入口的已知非空局部：catch 只能经异常进入，入口保存的异常对象非空。</summary>
+    private static (ulong Block, HashSet<Variable> Known) Root(ManagedRegion region) =>
+        (region.HandlerEntry, region is { Kind: ManagedRegionKind.Catch, Exception: { } exception } ? new HashSet<Variable> { exception.Variable } : new HashSet<Variable>());
+
+    /// <summary>
+    /// 已知非空局部的前向事实：从根出发，合流处取交，按事实可判定的判空分支只走一侧。返回到达的块与入口事实。
+    /// </summary>
+    /// <param name="nonEmpty">只走事实非空的块：事实为空的块与全局相同，用于判断是否剪掉了边。</param>
+    private Dictionary<ulong, HashSet<Variable>> Facts(IEnumerable<(ulong Block, HashSet<Variable> Known)> roots, bool nonEmpty = false)
+    {
+        var facts = new Dictionary<ulong, HashSet<Variable>>();
+        var queue = new Queue<ulong>();
+        void Meet(ulong block, HashSet<Variable> incoming)
+        {
+            if (!Blocks.ContainsKey(block) || nonEmpty && incoming.Count == 0 && !facts.ContainsKey(block)) return;
+            if (!facts.TryGetValue(block, out var old)) facts[block] = new HashSet<Variable>(incoming);
+            else if (old.Any(v => !incoming.Contains(v))) old.IntersectWith(incoming);
+            else return;
+            queue.Enqueue(block);
+        }
+        foreach (var (block, known) in roots) Meet(block, known);
+        while (queue.TryDequeue(out var block))
+            foreach (var (target, known) in Successors(block, facts[block])) Meet(target, known);
+        return facts;
+    }
+
+    /// <summary>按事实可执行的边。</summary>
+    private HashSet<(ulong, ulong)> FeasibleEdges(Dictionary<ulong, HashSet<Variable>> facts) =>
+        facts.SelectMany(f => Successors(f.Key, f.Value).Select(s => (f.Key, s.Target))).ToHashSet();
+
+    /// <summary>已知非空的局部经过块：可执行的出边与边上复制之后的事实。</summary>
+    private IEnumerable<(ulong Target, HashSet<Variable> Known)> Successors(ulong block, HashSet<Variable> entry)
+    {
+        var known = new HashSet<Variable>(entry);
+        foreach (var statement in Blocks[block].Statements)
+        {
+            IEnumerable<ManagedEdge> edges = statement switch
+            {
+                ManagedBranch branch when branch.Taken.Target != branch.Fallthrough.Target && NonNull(branch.Condition, known) is { } taken
+                    => [taken ? branch.Taken : branch.Fallthrough],
+                _ => ManagedValues.Edges(statement),
+            };
+            foreach (var edge in edges)
+            {
+                var after = new HashSet<Variable>(known);
+                foreach (var copy in edge.Copies) after.Remove(copy.Target.Variable);
+                foreach (var copy in edge.Copies)
+                    if (copy.Value is LocalValue copied && known.Contains(copied.Variable)) after.Add(copy.Target.Variable);
+                yield return (edge.Target, after);
+            }
+            foreach (var defined in Definitions(statement)) known.Remove(defined);
+            if (statement is ManagedAssignment { Value: LocalValue source } assignment && known.Contains(source.Variable)) known.Add(assignment.Target.Variable);
+        }
+    }
+
+    /// <summary>按已知非空的局部判定判空条件。</summary>
+    private static bool? NonNull(ManagedValue condition, IReadOnlySet<Variable> known) => condition switch
+    {
+        NegatedValue negated => !NonNull(negated.Operand, known),
+        ComparisonValue { Condition: Cond.Eq or Cond.Ne } compare when Null(compare.Left, compare.Right, known) || Null(compare.Right, compare.Left, known)
+            => compare.Condition == Cond.Ne,
+        _ => null,
+    };
+
+    private static bool Null(ManagedValue local, ManagedValue zero, IReadOnlySet<Variable> known) =>
+        local is LocalValue { Variable: var variable } && known.Contains(variable) && zero is ConstantValue { Bits: 0 };
+
+    /// <summary>语句之前的活跃局部。边上复制在边上执行，由 <see cref="Out"/> 按边计入（不会执行的边不计）。</summary>
     private void Transfer(ManagedStatement statement, HashSet<Variable> live)
     {
         foreach (var defined in Definitions(statement)) live.Remove(defined);
-        live.UnionWith(Uses(statement));
+        live.UnionWith((statement is ManagedAssignment a ? [a.Value] : ManagedValues.Of(statement)).SelectMany(ManagedValues.Walk).OfType<LocalValue>().Select(l => l.Variable));
         if (Allocations.Contains(statement)) live.Remove(((LocalValue)((ManagedCall)statement).Invocation.Receiver!).Variable);
     }
 
@@ -165,17 +281,56 @@ internal sealed class Program
     /// </summary>
     public required IReadOnlySet<ManagedStatement> Allocations { get; init; }
 
+    /// <summary>
+    /// 活跃性。方法入口与各处理块入口出发求已知非空的事实（处理块入口的异常对象非空）；按事实判定不会执行的判空分支边不参与。
+    /// 处理块入口的活跃集合只沿异常进入后的路径计算：从这个入口单独求事实，可执行的边上倒推。finally 写成 catch 加汇合后
+    /// “异常为空才走正常出口”时，汇合之后正常出口用到的局部不算处理块入口活跃。try 中的语句又按这些集合计入，两者一起迭代到不动点。
+    /// </summary>
     private void ComputeLiveness()
     {
+        var regions = Body.Regions.Where(r => Blocks.ContainsKey(r.HandlerEntry)).ToArray();
+        var global = Facts(regions.Select(Root).Prepend((Entry, new HashSet<Variable>())));
+        var feasible = FeasibleEdges(global);
+        unreachable = global.Keys.SelectMany(b => Blocks[b].Statements.SelectMany(ManagedValues.Edges).Select(e => (b, e.Target)))
+            .Where(e => !feasible.Contains(e)).ToHashSet();
+        // 活跃性只取决于之后的路径：从处理块入口出发没有剪掉全局可执行的边时，入口的活跃集合就是全局的，不单独求。
+        // 全局事实是各根出发的事实取交，处处不多于从这个入口出发的事实，只需看事实非空的块。
+        var contexts = new List<(ManagedRegion Region, ulong[] Blocks, HashSet<(ulong, ulong)> Edges)>();
+        handlerLive = new(ReferenceEqualityComparer.Instance);
+        foreach (var region in regions)
+        {
+            if (Root(region).Known.Count == 0) continue;
+            var reached = Facts([Root(region)], nonEmpty: true);
+            if (!reached.Any(f => f.Value.Count > 0 && Successors(f.Key, f.Value).Count() < Successors(f.Key, global.GetValueOrDefault(f.Key) ?? []).Count())) continue;
+            var facts = Facts([Root(region)]);
+            contexts.Add((region, facts.Keys.ToArray(), FeasibleEdges(facts)));
+            handlerLive[region] = [];
+        }
         liveIn = Body.Blocks.ToDictionary(b => b.Address, _ => new HashSet<Variable>());
         for (var changed = true; changed;)
         {
             changed = false;
-            foreach (var block in Body.Blocks.AsEnumerable().Reverse())
+            Solve(liveIn, Feasible);
+            foreach (var (region, blocks, edges) in contexts)
             {
-                var live = LiveOut(block.Address);
-                for (var i = block.Statements.Count - 1; i >= 0; i--) Transfer(block.Statements[i], live);
-                if (!live.SetEquals(liveIn[block.Address])) { liveIn[block.Address] = live; changed = true; }
+                var live = blocks.ToDictionary(b => b, _ => new HashSet<Variable>());
+                Solve(live, (b, t) => edges.Contains((b, t)));
+                if (!live[region.HandlerEntry].SetEquals(handlerLive[region])) { handlerLive[region] = live[region.HandlerEntry]; changed = true; }
+            }
+        }
+    }
+
+    /// <summary>在给定的块集合与可执行的边上求块入口活跃的局部，从 live 的当前值出发（处理块入口的集合取当前值）。</summary>
+    private void Solve(Dictionary<ulong, HashSet<Variable>> live, Func<ulong, ulong, bool> feasible)
+    {
+        var order = Body.Blocks.Select(b => b.Address).Where(live.ContainsKey).Reverse().ToArray();
+        for (var changed = true; changed;)
+        {
+            changed = false;
+            foreach (var block in order)
+            {
+                var set = Before(block, 0, Out(block, live, feasible));
+                if (!set.SetEquals(live[block])) { live[block] = set; changed = true; }
             }
         }
     }

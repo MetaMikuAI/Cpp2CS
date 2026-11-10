@@ -178,7 +178,7 @@ internal sealed class RegionProver(ManagedTypes types, InlineEvidence evidence, 
                 var leaves = interpreter.Leaves(type);
                 if (leaves.Length == value.Args.Length)
                     for (var i = 0; i < leaves.Length; i++)
-                        terms.Know(leaves[i].Path.Count == 0 ? location : terms.Append(location, leaves[i].Path), value.Args[i]);
+                        if (!terms.IsView((DefinitionRef)type, i)) terms.Know(leaves[i].Path.Count == 0 ? location : terms.Append(location, leaves[i].Path), value.Args[i]);
                 return;
             }
             if (value.Kind != TermKind.Tuple) terms.Know(location, value);
@@ -212,7 +212,7 @@ internal sealed class RegionProver(ManagedTypes types, InlineEvidence evidence, 
     internal static bool SameAtEntry(ManagedTypes types, InlineEvidence evidence, ManagedBody body, ulong block, int index, LocalValue local, ManagedValue value)
     {
         var program = Program.Compile(body, types);
-        var interpreter = new Interpreter(types, new Solver(new TermTable(), types), evidence);
+        var interpreter = new Interpreter(types, new Solver(new TermTable(types), types), evidence);
         var entry = BuildEntry(interpreter, program, new EntryFacts(program).At(block, index));
         return entry.Evaluate(value) is { } expected && ReferenceEquals(entry.Value(local), expected);
     }
@@ -590,26 +590,28 @@ internal sealed class RegionProver(ManagedTypes types, InlineEvidence evidence, 
     {
         var structure = (DefinitionRef)tuple.Key!;
         var leaves = attempt.Interpreter.Leaves(structure);
+        // 只看主叶子：视图由主叶子拼成。
+        var own = Enumerable.Range(0, Math.Min(leaves.Length, tuple.Args.Length)).Where(i => !attempt.Terms.IsView(structure, i)).ToArray();
         // 同一位置的全部叶子：整体读取。
-        if (tuple.Args.All(a => a.Kind == TermKind.Read) && leaves.Length == tuple.Args.Length)
+        if (own.All(i => tuple.Args[i].Kind == TermKind.Read) && leaves.Length == tuple.Args.Length)
         {
-            var first = tuple.Args[0].Location;
+            var first = tuple.Args[own[0]].Location;
             var path = TermTable.PathOf(first);
-            if (path.Count >= leaves[0].Path.Count)
+            if (path.Count >= leaves[own[0]].Path.Count)
             {
-                var root = attempt.Terms.Truncate(first, path.Count - leaves[0].Path.Count);
-                if (root is not null && tuple.Args.Select((a, i) => (a, i)).All(p => ReferenceEquals(p.a.Location, attempt.Terms.Append(root, leaves[p.i].Path))
-                    && ReferenceEquals(attempt.Interpreter.ReadScalar(moment.Heap, p.a.Location, leaves[p.i], false), p.a)))
+                var root = attempt.Terms.Truncate(first, path.Count - leaves[own[0]].Path.Count);
+                if (root is not null && own.All(i => ReferenceEquals(tuple.Args[i].Location, attempt.Terms.Append(root, leaves[i].Path))
+                    && ReferenceEquals(attempt.Interpreter.ReadScalar(moment.Heap, tuple.Args[i].Location, leaves[i], false), tuple.Args[i])))
                     return Location(attempt, moment, root);
             }
         }
         // 同一局部的全部叶子。
-        if (tuple.Args.All(a => a.IsAtom(AtomKind.Entry)) && tuple.Args[0].Key is TermTable.LeafKey { Root: Variable variable }
+        if (own.All(i => tuple.Args[i].IsAtom(AtomKind.Entry)) && tuple.Args[own[0]].Key is TermTable.LeafKey { Root: Variable variable }
             && attempt.Caller.LocalOf(variable) is { } local && ReferenceEquals(attempt.Entry.Value(local), tuple))
             return local;
         // 逐叶子组成，缺的叶子为零。
         var parts = new List<(IReadOnlyList<FieldRef> Path, ManagedValue Value)>();
-        for (var i = 0; i < leaves.Length; i++)
+        foreach (var i in own)
         {
             if (tuple.Args[i].IsConstant && tuple.Args[i].Bits == 0) continue;
             if (leaves[i].Path.Count == 0 || Reify(attempt, moment, tuple.Args[i], leaves[i].Type) is not { } value) return null;
@@ -787,7 +789,7 @@ internal sealed class RegionProver(ManagedTypes types, InlineEvidence evidence, 
     /// <param name="useful">替换是否有进展（覆盖了要证的内容）；没有进展的替换不算成立，继续试其他出口与方案。</param>
     public Outcome Prove(Program caller, EntryFacts facts, ulong block, int index, Candidate candidate, Func<TracePoint, bool> anchor, Func<ManagedBody, bool>? useful = null)
     {
-        var terms = new TermTable();
+        var terms = new TermTable(types);
         var solver = new Solver(terms, types);
         var meter = new Meter(AttemptSteps);
         var interpreter = new Interpreter(types, solver, evidence) { Meter = meter };
@@ -1056,7 +1058,7 @@ internal sealed class RegionProver(ManagedTypes types, InlineEvidence evidence, 
         if (caller.HandlerOf(attempt.Block) is { } region)
         {
             var guarded = new List<ManagedCopy>();
-            foreach (var variable in caller.LiveBefore(region.HandlerEntry, 0).OrderBy(v => v.ToString(), StringComparer.Ordinal))
+            foreach (var variable in caller.HandlerLiveIn(region).OrderBy(v => v.ToString(), StringComparer.Ordinal))
             {
                 if (caller.LocalOf(variable) is not { } local || caller.Cells.Contains(variable)) continue;
                 // 没有事件的路径上调用不会因区域内的事件抛出，不约束这个值。
@@ -1397,7 +1399,8 @@ internal sealed class RegionProver(ManagedTypes types, InlineEvidence evidence, 
     /// <summary>整体写入（Whole 合成的结构体值）拆回各叶子的写入；其他写入就是它本身。</summary>
     private static List<(Term Location, Term Value)> Parts(Attempt attempt, Term location, Term value) =>
         value.Kind == TermKind.Tuple && value.Key is DefinitionRef structure
-            ? attempt.Interpreter.Leaves(structure).Select((leaf, i) => (attempt.Terms.Append(location, leaf.Path), value.Args[i])).ToList()
+            ? attempt.Interpreter.Leaves(structure).Select((leaf, i) => (attempt.Terms.Append(location, leaf.Path), value.Args[i]))
+                .Where((_, i) => !attempt.Terms.IsView(structure, i)).ToList()
             : [(location, value)];
 
     /// <summary>这条路径上调用方的这次写入发生在第一个事件之前。</summary>
@@ -1465,6 +1468,7 @@ internal sealed class RegionProver(ManagedTypes types, InlineEvidence evidence, 
         var newProgram = Program.Compile(replaced, types);
         var unchanged = new HashSet<ulong>(replaced.Blocks.Where(b => b.Address != attempt.Block && oldProgram.Blocks.TryGetValue(b.Address, out var old) && ReferenceEquals(old, b))
             .Select(b => b.Address));
+        if (Introduced(oldProgram, newProgram, unchanged) is { } unfaithful) return unfaithful;
         var solver = new Solver(attempt.Terms, types);
         var interpreter = new Interpreter(types, solver, evidence) { Meter = attempt.Interpreter.Meter };
         var validation = new Attempt
@@ -1484,6 +1488,40 @@ internal sealed class RegionProver(ManagedTypes types, InlineEvidence evidence, 
         var joint = new Joint(interpreter, templates, JointMode.Validation) { PathBudget = 512 };
         var outcomes = joint.Run(path, true);
         return outcomes.FirstOrDefault(o => !o.Success)?.Failure;
+    }
+
+    /// <summary>
+    /// 替换的结构约束：新引入的语句都要有用。赋给局部、之后不再被读到、求值又没有事件的值（死赋值、死复制），与一串新写入中同一位置写了两次，
+    /// 不影响等价、复核看不出，但不是原代码的写法。原有的赋值与复制按来源认：同一地址的语句给同一局部赋值（改写过的出口语句保留地址与目标）。
+    /// </summary>
+    private static string? Introduced(Program oldProgram, Program newProgram, IReadOnlySet<ulong> unchanged)
+    {
+        var old = oldProgram.Body.Blocks.SelectMany(b => b.Statements).ToArray();
+        var assigned = old.SelectMany(s => Program.Definitions(s).Select(v => (s.Address, v))).ToHashSet();
+        var copied = old.SelectMany(s => ManagedValues.Edges(s).SelectMany(e => e.Copies.Select(c => (s.Address, e.Target, c.Target.Variable)))).ToHashSet();
+        var statementsAt = old.ToLookup(s => s.Address);
+        bool Original(ManagedStatement statement) => statementsAt[statement.Address].Any(o => ReferenceEquals(o, statement) || Cpp2CS.Managed.ManagedStructure.Same(o, statement));
+        foreach (var block in newProgram.Body.Blocks)
+        {
+            if (unchanged.Contains(block.Address)) continue;
+            var statements = block.Statements;
+            var run = new List<ManagedStore>();
+            for (var i = 0; i < statements.Count; i++)
+            {
+                var statement = statements[i];
+                if (statement is ManagedAssignment assignment && !assigned.Contains((statement.Address, assignment.Target.Variable))
+                    && newProgram.EventsAt(block.Address, i) == 0 && !newProgram.LiveThrough(block.Address, i).Contains(assignment.Target.Variable))
+                    return $"替换引入死赋值 {assignment.Target.Variable}";
+                foreach (var edge in ManagedValues.Edges(statement))
+                    foreach (var copy in edge.Copies)
+                        if (!copied.Contains((statement.Address, edge.Target, copy.Target.Variable)) && !newProgram.LiveIn(edge.Target).Contains(copy.Target.Variable))
+                            return $"替换引入死复制 {copy.Target.Variable}";
+                if (statement is not ManagedStore store || Original(statement)) { run.Clear(); continue; }
+                if (run.Any(r => Cpp2CS.Managed.ManagedStructure.Value(r.Target, store.Target))) return $"替换对 {store.Target} 连续写了两次";
+                run.Add(store);
+            }
+        }
+        return null;
     }
 
     private static SideState WithUnchanged(SideState side, IReadOnlySet<ulong> unchanged) => new()
