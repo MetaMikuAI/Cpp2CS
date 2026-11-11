@@ -12,6 +12,8 @@ public sealed record RunSummary(int Methods, int Complete, int Holes, Dictionary
     Dictionary<string, int> HolesByReason, Dictionary<string, double> LayerSeconds, double ElapsedSeconds, long PeakWorkingSetBytes);
 public sealed record RecoveryReport(int FormatVersion, MethodReport[] Methods, RunSummary Summary)
 {
+    public SourceReport? Source { get; init; }
+
     public static string Json<T>(T value)
     {
         var options = new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,

@@ -19,6 +19,7 @@ public sealed record RecoveryRequest(string Image, string Metadata, string Outpu
     /// <summary>相对映像首选基址的入口偏移；可匹配该方法的任意注册入口。</summary>
     public ulong? Address { get; init; }
     public int Jobs { get; init; } = 1;
+    public bool Source { get; init; }
     public string UnityVersion { get; init; } = "2022.3.62f2";
 }
 public sealed class RecoverySession
@@ -115,7 +116,9 @@ public sealed class RecoverySession
             }
             // 洞保留 Skeleton 的标准占位体；报告是是否写出的唯一依据。
         }
+        if (request.Source) DecompileStage.Mark(facts.Model, rows, emitter);
         skeleton.Write(request.Output);
+        var source = request.Source ? DecompileStage.Write(request.Output, skeleton, facts.Model) : null;
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         outputWatch.Stop();
         using var process = Process.GetCurrentProcess();
@@ -124,7 +127,7 @@ public sealed class RecoverySession
             holes.GroupBy(h => h.Layer).ToDictionary(g => g.Key, g => g.Count()), holes.GroupBy(h => h.Reason.Code).ToDictionary(g => g.Key, g => g.Count()),
             new() { ["输入"] = inputSeconds, [frontend.Name] = (double)frontTicks / Stopwatch.Frequency,
                 [recovery.Name] = (double)recoveryTicks / Stopwatch.Frequency, ["输出"] = outputWatch.Elapsed.TotalSeconds },
-            inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64));
+            inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64)) { Source = source };
         File.WriteAllText(Path.Combine(request.Output, "recovery.json"), RecoveryReport.Json(report));
         return report;
     }

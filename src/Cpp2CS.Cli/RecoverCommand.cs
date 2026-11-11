@@ -8,12 +8,13 @@ internal static class RecoverCommand
     {
         if (args is not ["recover", var image, var metadata, var output, .. var options])
         {
-            Console.Error.WriteLine("用法: recover <映像> <元数据> <输出目录> [--method 名称子串] [--address 0x偏移] [--jobs 并行度] [--unity 版本]");
+            Console.Error.WriteLine("用法: recover <映像> <元数据> <输出目录> [--method 名称子串] [--address 0x偏移] [--jobs 并行度] [--unity 版本] [--source]");
             return 2;
         }
         var request = new RecoveryRequest(image, metadata, output);
         for (var i = 0; i < options.Length; i += 2)
         {
+            if (options[i] == "--source") { request = request with { Source = true }; i--; continue; }
             if (i + 1 == options.Length) throw new ArgumentException($"{options[i]} 缺少值");
             var value = options[i + 1];
             request = options[i] switch
