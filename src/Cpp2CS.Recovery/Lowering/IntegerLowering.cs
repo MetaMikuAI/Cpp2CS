@@ -77,6 +77,7 @@ public sealed partial class IntegerLowering
         if (spec is not null && calls is not null)
         {
             var naming = new ValueNamingQuery(state, calls, names, spec, binder, signature);
+            valueNames = naming;
             locations = new(state, naming, types.Layouts, spec);
             dispatch = new(state, calls, naming, locations, binder, spec);
             context = locations.CreateContext(function);
@@ -98,11 +99,8 @@ public sealed partial class IntegerLowering
                 if (failure is not null) return new(null, failure);
             }
         }
-        if (method.Method is { Name: ".ctor", IsStatic: false, Owner.IsValueType: false })
-        {
-            Fail<object>(LoweringFailureKind.ConstructorInitialization, "引用类型构造函数缺少基类初始化见证");
-            return new(null, failure);
-        }
+        PairConstructions();
+        if (failure is not null) return new(null, failure);
         var caller = context.Get(state.CallerUses, 0);
         if (!caller.IsSuccess) Fail<object>(LoweringFailureKind.State, "调用方值流向查询失败", caller.Why);
         else if (!caller.Value.IsEmpty)
@@ -128,6 +126,8 @@ public sealed partial class IntegerLowering
                 position = native.Trace?.NativeAddress ?? b.Trace?.NativeAddress ?? 0;
                 if (native is Call call)
                 {
+                    // 分配并入随后的构造函数调用，自己不产生语句。
+                    if (allocations.ContainsKey(call.Identity)) continue;
                     var statement = LowerCall(call, new(b.Identity, i));
                     if (statement is null) return new(null, failure);
                     statements.Add(statement);
@@ -171,6 +171,12 @@ public sealed partial class IntegerLowering
             ? c with { Result = callStatements[c].Local } : s).ToArray() }).ToList();
         blocks = blocks.Select(InsertReads).ToList();
         if (failure is not null) return new(null, failure);
+        if (method.Method is { Name: ".ctor", IsStatic: false, Owner.IsValueType: false } && !ConstructorChained(blocks))
+        {
+            position = 0;
+            Fail<object>(LoweringFailureKind.ConstructorInitialization, "引用类型构造函数缺少基类初始化见证");
+            return new(null, failure);
+        }
         var body = new ManagedBody(method, [.. blocks, .. extraBlocks]);
         CheckBody(body);
         return failure is null ? new(Materialize(body), null) : new(null, failure);

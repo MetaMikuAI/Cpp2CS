@@ -51,6 +51,7 @@ public sealed partial class IntegerLowering
     {
         if (readValues.TryGetValue(term, out var read)) return ReadValue(read);
         if (callResults.TryGetValue(term, out var callResult)) return CallResult(callResult);
+        if (objects.TryGetValue(term, out var created)) return ObjectValue(created);
         if (arguments.TryGetValue(term, out var argument))
             return IsFloat(argument.Type) || ReferenceType(argument.Type) ? argument : IntegerType(argument.Type) ? Mask(argument, term.Width)
                 : Fail<ManagedValue>(TypeFailure(argument.Type), "使用了非整数形参");

@@ -51,6 +51,7 @@ public sealed partial class IntegerLowering
             if (d.Binding!.Result.Source is TermSource output) callResults.Add(output.Term, dispatched);
             return;
         }
+        if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "NewObject" }) { PrepareAllocation(call, c); return; }
         if (c.Kind != CallKind.Managed)
         {
             var kind = c.Kind switch { CallKind.Runtime => LoweringFailureKind.RuntimeCall,
@@ -97,12 +98,16 @@ public sealed partial class IntegerLowering
         if (throws.TryGetValue(call.Identity, out var constructor)) return new ManagedThrow(position, new NewObjectValue(constructor, [], types.PointerSize * 8));
         var d = callDefinitions[call.Identity];
         var args = new List<ManagedValue>();
+        constructions.TryGetValue(call.Identity, out var created);
+        constructing = created;
         for (int i = 0; i < d.Binding.Parameters.Length; i++)
         {
             var value = CallArgument(d.Binding.Parameters[i], d.Method.Concrete(d.Method.Method.Parameters[i].Type), point);
             if (value is null) return null;
             args.Add(value);
         }
+        constructing = null;
+        if (created is not null) return new ManagedAssignment(position, created.Local!, new NewObjectValue(d.Method, args, types.PointerSize * 8));
         TypeRef receiverType = d.Method.Method.Owner.IsValueType ? new ByRefRef(d.Method.DeclaringType) : d.Method.DeclaringType;
         var receiver = d.Receiver is { } target ? Value(target) : d.Binding.This is { } self ? CallArgument(self, receiverType, point) : null;
         if (receiver is not null) receiver = Coerce(receiver, receiverType);
