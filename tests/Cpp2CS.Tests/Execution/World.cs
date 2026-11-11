@@ -6,7 +6,7 @@ using Cpp2CS.Model;
 namespace Cpp2CS.Tests.Execution;
 
 /// <summary>合成环境不足以执行（缺类型、不支持的 helper 等）：该用例判为不可检查。</summary>
-public enum ComparisonReason { None, MissingReference, GenericDefinition, InputSynthesis, UnsupportedConstruct, NaN, StepBudget, CallDepthBudget, MissingBody, InvalidRequest }
+public enum ComparisonReason { None, MissingReference, GenericDefinition, InputSynthesis, UnsupportedConstruct, NaN, StepBudget, CallDepthBudget, MissingBody, InvalidRequest, TypeMismatch }
 internal sealed class Unsupported(string reason, ComparisonReason kind = ComparisonReason.UnsupportedConstruct) : Exception(reason)
 {
     public ComparisonReason Kind { get; } = kind;

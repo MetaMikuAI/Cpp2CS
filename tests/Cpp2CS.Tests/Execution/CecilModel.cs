@@ -26,11 +26,12 @@ internal sealed partial class CecilModel
         foreach (var type in definitions.Keys.ToArray()) Fill(type);
         Program = new ProgramModel { MetadataVersion = 0, Assemblies = [], Types = types.Values.ToArray(), Methods = methods.Values.ToArray(),
             Fields = fields.Values.ToArray(), RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [] };
+        checking = true;
     }
     private CecilModel(CecilModel source, MethodRef context)
     {
         types = source.types; methods = source.methods; fields = source.fields; definitions = source.definitions;
-        methodDefinitions = source.methodDefinitions; filled = source.filled; modules = source.modules; Program = source.Program; Context = context;
+        methodDefinitions = source.methodDefinitions; filled = source.filled; checking = source.checking; checkedTypes = source.checkedTypes; modules = source.modules; Program = source.Program; Context = context;
     }
     public CecilModel InContext(MethodRef context) => new(this, context);
     private string Key(TypeDefinition t) => (t.Module == t.Module.TypeSystem.Object.Resolve().Module ? "mscorlib.dll" : modules.Contains(t.Module) ? "input" : t.Module.Assembly.Name.Name + ".dll") + "|" + t.FullName;
@@ -40,12 +41,7 @@ internal sealed partial class CecilModel
         var key = Key(t);
         if (types.TryGetValue(key, out var found))
         {
-            var original = definitions[found];
-            if (original.Module != t.Module && modules.Contains(original.Module) && modules.Contains(t.Module)
-                && (original.Attributes != t.Attributes || original.BaseType?.FullName != t.BaseType?.FullName
-                    || !original.Fields.Select(f => $"{f.Attributes}:{f.FieldType.FullName}:{f.Name}").SequenceEqual(t.Fields.Select(f => $"{f.Attributes}:{f.FieldType.FullName}:{f.Name}"))
-                    || !original.Methods.Select(m => m.FullName).SequenceEqual(t.Methods.Select(m => m.FullName))))
-                throw new Unsupported($"两侧类型元数据不对应：{t.FullName}");
+            if (Context is not null) CheckType(found);
             return found;
         }
         var result = new TypeDef { Index = types.Count, Assembly = key.Split('|')[0], Namespace = t.Namespace, Name = t.Name,
@@ -57,16 +53,22 @@ internal sealed partial class CecilModel
         return result;
     }
     private static GenericParameterDef Generic(GenericParameter p) => new() { Name = p.Name, Position = p.Position, Attributes = (R.GenericParameterAttributes)p.Attributes };
-    public void Prepare(TypeDef type) => Fill(type);
+    public void Prepare(TypeDef type) { CheckType(type, layout: true); Fill(type); }
     private void Fill(TypeDef type)
     {
         if (!filled.Add(type)) return;
-        var t = definitions[type];
-        type.BaseType = t.BaseType is null ? null : Type(t.BaseType);
-        type.NestedTypes = t.NestedTypes.Select(Definition).ToArray();
-        type.Interfaces = t.Interfaces.Select(i => Type(i.InterfaceType)).ToArray();
-        type.Fields = t.Fields.Select(f => Field(f).Field).ToArray();
-        type.Methods = t.Methods.Select(m => Method(m).Method).ToArray();
+        var enabled = checking;
+        checking = false;
+        try
+        {
+            var t = definitions[type];
+            type.BaseType = t.BaseType is null ? null : Type(t.BaseType);
+            type.NestedTypes = t.NestedTypes.Select(Definition).ToArray();
+            type.Interfaces = t.Interfaces.Select(i => Type(i.InterfaceType)).ToArray();
+            type.Fields = t.Fields.Select(f => Field(f).Field).ToArray();
+            type.Methods = t.Methods.Select(m => Method(m).Method).ToArray();
+        }
+        finally { checking = enabled; }
     }
     public TypeRef Type(TypeReference type) => type switch
     {
@@ -82,8 +84,9 @@ internal sealed partial class CecilModel
     public MethodRef Method(MethodReference reference)
     {
         var source = reference.Resolve() ?? throw new Unsupported($"无法解析方法 {reference}");
+        CheckMethod(source);
         var owner = Definition(source.DeclaringType);
-        var key = Key(source.DeclaringType) + "|" + source.FullName;
+        var key = Key(source.DeclaringType) + "|" + Signature(source);
         if (!methods.TryGetValue(key, out var method))
         {
             method = new MethodDef { Index = methods.Count, Owner = owner, Name = source.Name, Token = source.MetadataToken.ToUInt32(),
@@ -99,6 +102,7 @@ internal sealed partial class CecilModel
     public FieldRef Field(FieldReference reference)
     {
         var f = reference.Resolve() ?? throw new Unsupported($"无法解析字段 {reference}");
+        CheckType(Definition(f.DeclaringType), layout: true);
         var key = Key(f.DeclaringType) + "|" + f.Name;
         if (!fields.TryGetValue(key, out var field))
         {
@@ -113,6 +117,6 @@ internal sealed partial class CecilModel
     {
         var source = methodDefinitions[method.Method];
         if (!modules.Contains(source.Module)) return null;
-        return module.GetTypes().FirstOrDefault(t => t.FullName == source.DeclaringType.FullName)?.Methods.FirstOrDefault(m => m.FullName == source.FullName && m.HasBody);
+        return module.GetTypes().FirstOrDefault(t => t.FullName == source.DeclaringType.FullName)?.Methods.FirstOrDefault(m => Signature(m) == Signature(source) && m.HasBody);
     }
 }

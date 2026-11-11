@@ -52,7 +52,7 @@ internal static class PipelineCorpusChecks
             var metric = metrics[id];
             var name = row.GetProperty("case").GetProperty("type").GetString() + "::" + row.GetProperty("case").GetProperty("method").GetString();
             var status = method?.Hole is { } hole ? $"{hole.Layer} / {hole.Reason.Code}：{hole.Reason.Message}" : method?.Status.ToString() ?? "无入口";
-            table.AppendLine($"| {name} | {status} | {metric.Status} |");
+            table.AppendLine($"| {name} | {status} | {metric.Status}{(metric.Status == MetricStatus.Inconclusive ? " / " + metric.ReasonKind : "")} |");
             checks.True(method is not null, "用例有管线记录：" + id);
             if (method?.Status == MethodStatus.Hole) checks.True(metric.Status == MetricStatus.NotWritten, "洞不比较占位体：" + id);
         }
@@ -60,6 +60,10 @@ internal static class PipelineCorpusChecks
         File.WriteAllText(Path.Combine(output, "comparison.local.json"), IlMetrics.Json(comparison));
         table.AppendLine($"\n管线：{report.Summary.Methods} 方法，完整 {report.Summary.Complete}，洞 {report.Summary.Holes}。");
         table.AppendLine("全部真值方法：" + string.Join("，", comparison.Summary.Statuses.Select(p => $"{p.Key}={p.Value.Count}")) + "。");
+        table.AppendLine("无法判定原因：" + string.Join("，", comparison.Summary.Reasons.OrderBy(p => p.Key).Select(p => $"{p.Key}={p.Value}")) + "。");
+        var complete = IlMetrics.Report(metrics.Where(p => byId.GetValueOrDefault(p.Key)?.Status == MethodStatus.Complete).Select(p => p.Value).ToArray(), options);
+        table.AppendLine("完整写出方法：" + string.Join("，", complete.Summary.Statuses.Select(p => $"{p.Key}={p.Value.Count}")) + "。");
+        table.AppendLine("完整写出方法无法判定原因：" + string.Join("，", complete.Summary.Reasons.OrderBy(p => p.Key).Select(p => $"{p.Key}={p.Value}")) + "。");
         table.AppendLine($"管线耗时 {report.Summary.ElapsedSeconds:F2}s，进程峰值 {report.Summary.PeakWorkingSetBytes / 1048576.0:F1} MiB。");
         File.WriteAllText(Path.Combine(output, "progress.local.md"), table.ToString());
         Console.Write(table);

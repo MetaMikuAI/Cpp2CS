@@ -9,6 +9,7 @@ internal sealed partial class CecilModel
         var contract = methodDefinitions[target.Method];
         for (var current = type; current is not null; current = current.Definition.BaseType?.Substitute(current.Arguments, []) as DefinitionRef)
         {
+            CheckDispatch(current.Definition);
             Fill(current.Definition);
             foreach (var candidate in current.Definition.Methods.Where(m => m.IsVirtual))
             {
@@ -32,6 +33,7 @@ internal sealed partial class CecilModel
         for (var parent = method.Method.Owner.BaseType?.Substitute(method.TypeArguments, []) as DefinitionRef;
             parent is not null; parent = parent.Definition.BaseType?.Substitute(parent.Arguments, []) as DefinitionRef)
         {
+            CheckDispatch(parent.Definition);
             Fill(parent.Definition);
             foreach (var candidate in parent.Definition.Methods.Where(m => m.IsVirtual && m.Name == method.Method.Name
                 && m.GenericParameters.Count == method.MethodArguments.Count))

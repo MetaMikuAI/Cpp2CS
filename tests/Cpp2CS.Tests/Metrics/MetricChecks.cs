@@ -86,7 +86,34 @@ internal static class MetricChecks
             l.Body.Instructions.RemoveAt(l.Body.Instructions.Count - 1);
             r.Body = original;
         }
+        Correspondence(a, options);
         return a.Finish("IL 指标快速检查");
+    }
+    private static void Correspondence(Assertions a, MetricOptions options)
+    {
+        const string source = """
+            public class Payload { public int Value; public static int Global; }
+            public static class Entry {
+                public static int Pure(int x) => x + 1;
+                public static int Read(Payload p) => p.Value;
+                public static int New() => new Payload().Value;
+                public static int Static() => Payload.Global;
+            }
+            """;
+        using var left = new CompiledSource(source);
+        using var right = new CompiledSource(source.Replace("public int Value;", "public int Value; public int Extra;", StringComparison.Ordinal));
+        MethodMetric Compare(string name) => IlMetrics.Compare(left.Method("Entry", name), right.Method("Entry", name), options);
+        a.True(Compare("Pure").Status == MetricStatus.Match, "不相干类型的字段差异不影响纯方法");
+        foreach (var name in new[] { "Read", "New", "Static" })
+        {
+            var result = Compare(name);
+            a.True(result is { Status: MetricStatus.Inconclusive, ReasonKind: ComparisonReason.TypeMismatch }
+                && result.Difference!.Contains("Payload", StringComparison.Ordinal)
+                && result.Difference.Contains("字段", StringComparison.Ordinal), "实际使用的类型字段差异指出类型和种类：" + name);
+        }
+        using var extraMethod = new CompiledSource(source.Replace("public int Value;", "public int Value; public int Unused() => 2;", StringComparison.Ordinal));
+        a.True(IlMetrics.Compare(left.Method("Entry", "Read"), extraMethod.Method("Entry", "Read"), options).Status == MetricStatus.Match,
+            "未调用的非虚方法不参与字段布局对应");
     }
     private static void Bypass(MethodBody body)
     {

@@ -51,7 +51,7 @@ internal static partial class CilComparison
                     var world = new World(index, seed.Value, hints, l.DeclaringType) { ThrowPlan = plan };
                     StackValue[] arguments;
                     try { arguments = Arguments(world, li, l); }
-                    catch (Unsupported e) when (e.Kind != ComparisonReason.NaN)
+                    catch (Unsupported e) when (e.Kind is not (ComparisonReason.NaN or ComparisonReason.TypeMismatch))
                     { throw new Unsupported(e.Message, ComparisonReason.InputSynthesis); }
                     var currentCoverage = new ExecutionCoverage(left, attempted);
                     li.Coverage = currentCoverage;
@@ -109,7 +109,7 @@ internal static partial class CilComparison
             {
                 TypeReference t when instruction.OpCode.Code is Code.Isinst or Code.Castclass or Code.Box or Code.Ldtoken => model.Type(t),
                 TypeReference t when instruction.OpCode.Code == Code.Newarr => new ArrayRef(model.Type(t), 1),
-                MethodReference m when instruction.OpCode.Code == Code.Newobj => model.Method(m).DeclaringType, _ => null
+                MethodReference m when instruction.OpCode.Code == Code.Newobj => model.Type(m.DeclaringType), _ => null
             };
             if (type is not null && !types.Contains(type)) types.Add(type);
         }
