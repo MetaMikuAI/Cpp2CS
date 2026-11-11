@@ -45,7 +45,9 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
                     {
                         int index = managed.ParameterIndices.IndexOf(i);
                         if (index >= 0) type = method.Concrete(method.Method.Parameters[index].Type);
-                        else if (managed.ThisIndex == i) type = new DefinitionRef(method.Method.Owner, method.TypeArguments);
+                        else if (managed.ThisIndex == i) type = method.Method.Owner.IsValueType
+                            ? new ByRefRef(new DefinitionRef(method.Method.Owner, method.TypeArguments))
+                            : new DefinitionRef(method.Method.Owner, method.TypeArguments);
                     }
                     bool info = entry.Managed?.MethodInformationIndex == i;
                     return Yes(info ? new(ValueKind.RuntimePointer, new ParameterName(i, null, true), "MethodInfo")
