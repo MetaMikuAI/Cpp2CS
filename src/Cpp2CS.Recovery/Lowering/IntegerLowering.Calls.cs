@@ -5,6 +5,8 @@ using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.Naming;
+using Cpp2CS.Recovery.Dispatch;
+using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.Lowering;
 
@@ -15,7 +17,10 @@ public sealed partial class IntegerLowering
         public MethodRef Method { get; } = method;
         public BoundCall Binding { get; } = binding;
         public LocalValue? Local { get; set; }
+        public Term? Receiver { get; init; }
+        public bool Virtual { get; init; }
     }
+    private readonly Dictionary<CallIdentity, MethodRef> throws = [];
     private readonly CallNamingQuery? calls;
     private readonly BoundSourceQuery boundSources;
     private readonly Dictionary<CallIdentity, CallDefinition> callDefinitions = [];
@@ -28,6 +33,24 @@ public sealed partial class IntegerLowering
         var classified = context.Get(calls, call.Identity);
         if (!classified.IsSuccess) { Fail<object>(LoweringFailureKind.Call, "调用分类失败", classified.Why); return; }
         var c = classified.Value;
+        if (call.Unwind is not null) { Fail<object>(LoweringFailureKind.Exception, "调用的异常边尚未下降"); return; }
+        if (c.Operation is { DoesNotReturn: true, Termination: RuntimeTermination.Throw, FixedThrownException: { } exception })
+        {
+            var constructor = types.CorlibMethod(exception, ".ctor");
+            if (constructor is null) { Fail<object>(LoweringFailureKind.RuntimeCall, "固定异常缺少无参构造函数：" + exception); return; }
+            throws.Add(call.Identity, constructor); return;
+        }
+        if (c.Kind == CallKind.Indirect && dispatch is not null)
+        {
+            var result = context.Get(dispatch, call.Identity);
+            if (!result.IsSuccess || result.Value.Kind == DispatchKind.Unresolved)
+            { var why = result.IsSuccess ? result.Value.Why : result.Why; Fail<object>(LoweringFailureKind.IndirectCall, "分派未解析", why, why?.Code); return; }
+            var d = result.Value;
+            var dispatched = new CallDefinition(d.Method!, d.Binding!) { Receiver = d.Receiver, Virtual = true };
+            callDefinitions.Add(call.Identity, dispatched);
+            if (d.Binding!.Result.Source is TermSource output) callResults.Add(output.Term, dispatched);
+            return;
+        }
         if (c.Kind != CallKind.Managed)
         {
             var kind = c.Kind switch { CallKind.Runtime => LoweringFailureKind.RuntimeCall,
@@ -62,15 +85,16 @@ public sealed partial class IntegerLowering
 
     private ManagedValue? CallResult(CallDefinition definition)
     {
-        if (definition.Local is { } local) return Mask(local, definition.Binding.Result.Type.Size * 8);
+        if (definition.Local is { } local) return ReferenceType(local.Type) || IsFloat(local.Type) ? local : Mask(local, definition.Binding.Result.Type.Size * 8);
         var type = definition.Method.Concrete(definition.Method.Method.ReturnType);
-        if (!IntegerType(type)) return Fail<ManagedValue>(TypeFailure(type), "调用结果类型尚未下降");
+        if (!IntegerType(type) && !IsFloat(type) && !ReferenceType(type)) return Fail<ManagedValue>(TypeFailure(type), "调用结果类型尚未下降");
         definition.Local = new(new(nextLocal++), type, StackWidth(definition.Binding.Result.Type.Size * 8));
-        return Mask(definition.Local, definition.Binding.Result.Type.Size * 8);
+        return ReferenceType(type) || IsFloat(type) ? definition.Local : Mask(definition.Local, definition.Binding.Result.Type.Size * 8);
     }
 
-    private ManagedCall? LowerCall(Call call, Point point)
+    private ManagedStatement? LowerCall(Call call, Point point)
     {
+        if (throws.TryGetValue(call.Identity, out var constructor)) return new ManagedThrow(position, new NewObjectValue(constructor, [], types.PointerSize * 8));
         var d = callDefinitions[call.Identity];
         var args = new List<ManagedValue>();
         for (int i = 0; i < d.Binding.Parameters.Length; i++)
@@ -79,9 +103,9 @@ public sealed partial class IntegerLowering
             if (value is null) return null;
             args.Add(value);
         }
-        var receiver = d.Binding.This is { } self ? CallArgument(self, d.Method.DeclaringType, point) : null;
+        var receiver = d.Receiver is { } target ? Value(target) : d.Binding.This is { } self ? CallArgument(self, d.Method.DeclaringType, point) : null;
         if (d.Binding.This is not null && receiver is null) return null;
-        var statement = new ManagedCall(position, new(d.Method, receiver, args, false), null);
+        var statement = new ManagedCall(position, new(d.Method, receiver, args, d.Virtual), null);
         callStatements.Add(statement, d);
         return statement;
     }
@@ -92,13 +116,17 @@ public sealed partial class IntegerLowering
         if (term is null) return null;
         var resolved = context.Get(state.Resolve, term);
         if (!resolved.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "实参状态查询失败", resolved.Why);
-        if (!IntegerType(type))
+        if (ReferenceType(type))
         {
-            // 引用接收者只能来自已有的同类型入口身份，不能把整数地址当作对象。
-            if (ManagedTypes.IsReferenceType(type) && arguments.TryGetValue(resolved.Value, out var argument)
-                && Equals(argument.Type, type)) return argument;
-            return Fail<ManagedValue>(TypeFailure(type), "实参缺少托管类型的值定义");
+            var reference = Value(resolved.Value);
+            return reference is null ? null : Coerce(reference, type);
         }
+        if (IsFloat(type))
+        {
+            var number = Value(resolved.Value, true);
+            return number is null ? null : FloatBits(number, bound.Type.Size * 8);
+        }
+        if (!IntegerType(type)) return Fail<ManagedValue>(TypeFailure(type), "实参缺少托管类型的值定义");
         var value = Value(resolved.Value);
         return value is null ? null : new ConversionValue(ManagedTypes.IsSigned(type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
             value, type, bound.Type.Size * 8);

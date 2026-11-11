@@ -218,6 +218,8 @@ public sealed class LocationTypeQuery(ManagedLocationQuery q) : Query<Term, Stat
     public override Outcome<StaticValueType?> Compute(QueryContext c, Term key)
     {
         Outcome<StaticValueType?> Yes(StaticValueType? value) => Outcome<StaticValueType?>.Success(value);
+        // 空位型本身不约束类型；合流的其他来源提供引用或整数类型。
+        if (key.ConstantValue == 0) return Yes(null);
         var named = c.Get(q.Names, key);
         if (named.IsSuccess)
         {

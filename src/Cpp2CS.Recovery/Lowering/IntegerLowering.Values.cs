@@ -49,14 +49,15 @@ public sealed partial class IntegerLowering
     }
     private ManagedValue? BuildValue(Term term, bool floating = false)
     {
+        if (readValues.TryGetValue(term, out var read)) return ReadValue(read);
         if (callResults.TryGetValue(term, out var callResult)) return CallResult(callResult);
         if (arguments.TryGetValue(term, out var argument))
-            return IsFloat(argument.Type) ? argument : IntegerType(argument.Type) ? Mask(argument, term.Width)
+            return IsFloat(argument.Type) || ReferenceType(argument.Type) ? argument : IntegerType(argument.Type) ? Mask(argument, term.Width)
                 : Fail<ManagedValue>(TypeFailure(argument.Type), "使用了非整数形参");
         if (term.Width > 64) return Fail<ManagedValue>(LoweringFailureKind.FloatingOrVector, "项位宽超过整数栈宽度");
-        if (term.Identity is ResultAtom { Definition: ReadIdentity read })
+        if (term.Identity is ResultAtom { Definition: ReadIdentity readId })
         {
-            var resolved = context.Get(state.Read, read);
+            var resolved = context.Get(state.Read, readId);
             return resolved.IsSuccess ? Value(resolved.Value, floating) : Fail<ManagedValue>(LoweringFailureKind.State, "读取查询失败", resolved.Why);
         }
         if (term.Identity is ResultAtom { Definition: MergeIdentity } or MemoryMerge) return MergeValue(term, floating: floating);
@@ -144,6 +145,11 @@ public sealed partial class IntegerLowering
     }
     private ManagedValue Slice(ManagedValue value, int low, int width)
     {
+        if (ReferenceType(value.Type))
+        {
+            if (low != 0 || width != value.Width) Fail<object>(LoweringFailureKind.UnsupportedType, "引用的部分位片没有托管值表示");
+            return value;
+        }
         value = Convert(value, value.Width);
         if (low != 0) value = Binary(BinaryOperator.ShiftRightUnsigned, value, Constant((ulong)low, 32), value.Width);
         return Mask(value, width);
@@ -156,6 +162,24 @@ public sealed partial class IntegerLowering
             return FloatOperation(term, op);
         var operands = term.Operands.Select((t, i) => Value(t, floating && op == CoreOperation.Select && i > 0)).ToArray();
         if (operands.Any(v => v is null)) return null;
+        if (operands.Any(v => ReferenceType(v!.Type)))
+        {
+            if (op is CoreOperation.Equal or CoreOperation.NotEqual)
+            {
+                var left = operands[0]!; var right = operands[1]!;
+                if (left is ConstantValue { Bits: 0 }) left = Coerce(left, right.Type);
+                if (right is ConstantValue { Bits: 0 }) right = Coerce(right, left.Type);
+                if (!ReferenceType(left.Type) || !ReferenceType(right.Type))
+                    return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "引用与非空整数比较");
+                return new ComparisonValue(op == CoreOperation.Equal ? ComparisonKind.Equal : ComparisonKind.NotEqual, left, right, types.Boolean);
+            }
+            if (op == CoreOperation.Select)
+            {
+                var type = ReferenceType(operands[1]!.Type) ? operands[1]!.Type : operands[2]!.Type;
+                return new ChoiceValue(operands[0]!, Coerce(operands[1]!, type), Coerce(operands[2]!, type), type, term.Width);
+            }
+            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "引用参与非引用运算：" + op);
+        }
         var a = IntegerBits(operands[0]!); var b = operands.Length > 1 ? IntegerBits(operands[1]!) : null;
         int width = term.Width, inputWidth = term.Operands[0].Width;
         switch (op)

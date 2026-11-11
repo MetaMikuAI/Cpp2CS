@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+using System.Reflection;
 using Cpp2CS.Managed;
 using ManagedValues = Cpp2CS.Managed.ManagedValues;
 using Cpp2CS.Model;
@@ -170,8 +172,151 @@ internal static class LoweringChecks
         checks.True(narrow.Body is not null, $"窄返回值只使用绑定的低位：{narrow.Failure}");
         checks.True(new IntegerLowering(Function("CallTail"), target, binder, types, calls: narrowCalls).Run().Failure?.Kind == LoweringFailureKind.Binding,
             "窄返回值的 ABI 未定义高位不能取用");
+        AccessChecks(checks, program);
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         return checks.Finish("标量下降");
+    }
+
+    private static void AccessChecks(Assertions checks, ProgramModel primitives)
+    {
+        var spec = InputCorpusChecks.Spec("arm64-v8a");
+        var layouts = new Cpp2CS.Runtime.Layouts.FieldLayouts(spec, 8, 8);
+        var binder = new MethodBinder(new(layouts), new Aapcs64());
+        var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
+        var definitions = primitives.Types.Where(t => t.Assembly == "mscorlib.dll" && t.Name != "BitConverter").ToList();
+        TypeRef Primitive(string name) => new DefinitionRef(definitions.Single(t => t.Name == name), []);
+        TypeDef Define(string name, string assembly = "AccessChecks.dll", string ns = "", bool value = false)
+        {
+            var type = new TypeDef { Index = definitions.Count, Assembly = assembly, Namespace = ns, Name = name,
+                Token = (uint)(0x02000001 + definitions.Count), Attributes = TypeAttributes.Public,
+                IsValueType = value, IsEnum = false, Size = value ? 16 : 128, PackingSize = 0, ClassSizeIsDefault = true };
+            definitions.Add(type); return type;
+        }
+        var owner = Define("Owner"); var reference = new DefinitionRef(owner, []);
+        var integer = Primitive("Int32"); var pointer = Primitive("IntPtr"); var array = new ArrayRef(integer, 1);
+        var field = new FieldDef { Index = 0, Owner = owner, Name = "Data", Type = integer,
+            Offset = (int)spec.Layout.ObjectHeaderSize, Attributes = FieldAttributes.Public };
+        var inner = Define("Inner", value: true); var innerType = new DefinitionRef(inner, []);
+        var leaf = new FieldDef { Index = 4, Owner = inner, Name = "Leaf", Type = integer, Offset = 0, Attributes = FieldAttributes.Public };
+        inner.Fields = [leaf];
+        var nested = new FieldDef { Index = 5, Owner = owner, Name = "Nested", Type = innerType,
+            Offset = (int)spec.Layout.ObjectHeaderSize + 8, Attributes = FieldAttributes.Public };
+        owner.Fields = [field, nested];
+        var del = Define("Delegate", "mscorlib.dll", "System");
+        del.Fields = new[] { "invoke_impl", "method_code", "method" }.Select((n, i) => new FieldDef {
+            Index = i + 1, Owner = del, Name = n, Type = pointer, Offset = (int)spec.Layout.ObjectHeaderSize + i * 8,
+            Attributes = FieldAttributes.Public }).ToArray();
+        var multi = Define("MulticastDelegate", "mscorlib.dll", "System"); multi.BaseType = new DefinitionRef(del, []);
+        var callback = Define("Callback"); callback.BaseType = new DefinitionRef(multi, []);
+        var exception = Define("NullReferenceException", "mscorlib.dll", "System");
+        var methods = new List<MethodDef>();
+        MethodDef Method(TypeDef type, string name, TypeRef result, TypeRef[] parameters, bool virtualCall = false, bool constructor = false)
+        {
+            var method = new MethodDef { Index = methods.Count, Owner = type, Name = name,
+                Token = (uint)(0x06000001 + methods.Count), Attributes = MethodAttributes.Public |
+                    (constructor ? MethodAttributes.SpecialName | MethodAttributes.RTSpecialName : virtualCall ? MethodAttributes.Virtual : MethodAttributes.Static),
+                ImplAttributes = 0, Slot = virtualCall ? 0 : -1, ReturnType = result,
+                Parameters = parameters.Select((t, i) => new ParameterDef("p" + i, t, 0, null, false)).ToArray() };
+            methods.Add(method); return method;
+        }
+        var target = Method(owner, "Apply", integer, [integer], true);
+        var invoke = Method(callback, "Invoke", integer, [integer], true);
+        Method(exception, ".ctor", Primitive("Void"), [], constructor: true);
+        string[] modes = ["Read", "Write", "Preserve", "Unused", "Null", "ArrayRead", "ArrayWrite", "Length", "Virtual", "Delegate", "Reference", "RefCall", "Merge", "Nested", "ByRef", "Partial", "Cross"];
+        var entries = modes.ToDictionary(n => n, n => Method(owner, n, n is "Reference" or "RefCall" or "Merge" ? reference : integer,
+            [(n.StartsWith("Array", StringComparison.Ordinal) || n == "Length") ? array : n == "Delegate" ? new DefinitionRef(callback, []) : n == "ByRef" ? new ByRefRef(innerType) : reference, integer]));
+        foreach (var type in definitions.Where(t => t == owner || t == callback || t == exception)) type.Methods = methods.Where(m => m.Owner == type).ToArray();
+        owner.VTable = [MethodRef.Open(target)];
+        var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods,
+            Fields = [field, .. del.Fields, leaf, nested], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
+            Assemblies = definitions.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key,
+                AssemblyName = Path.GetFileNameWithoutExtension(g.Key), Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
+        var types = new ManagedTypes(program, layouts, 8); var skeleton = new Skeleton(program, 16); var emitter = new BodyEmitter(skeleton, types);
+        foreach (var mode in modes)
+        {
+            var terms = new TermTable(); var block = new BlockIdentity(); var frame = terms.Atom(new RootAtom(AddressRoot.Frame), 64);
+            var builder = new FunctionBuilder(terms, block, 64, new(frame));
+            var root = terms.Atom(new EntryAtom(new(SlotKind.Integer)), 64);
+            var argument = terms.Atom(new EntryAtom(new(SlotKind.Integer, 1)), 64);
+            builder.Inputs.Add(new(new(SlotKind.Integer), root)); builder.Inputs.Add(new(new(SlotKind.Integer, 1), argument));
+            var statements = new List<Statement>();
+            Term Add(Term value, long offset) => terms.Apply(new CoreOperator(CoreOperation.Add), 64, value, terms.Constant(offset, 64));
+            Term Read(Term address, int width)
+            {
+                var id = new ReadIdentity(); var value = terms.Atom(new ResultAtom(id), width);
+                statements.Add(new MemoryRead(id, address, width, value)); return value;
+            }
+            Term result = terms.Constant(0, 32); var address = Add(root, field.Offset);
+            if (mode.StartsWith("Array", StringComparison.Ordinal))
+                address = terms.Apply(new CoreOperator(CoreOperation.Add), 64, Add(root, spec.Layout.ArrayDataStart),
+                    terms.Apply(new CoreOperator(CoreOperation.ShiftLeft), 64, terms.Apply(new CoreOperator(CoreOperation.SignExtend), 64, terms.Slice(argument, 0, 32)), terms.Constant(2, 64)));
+            if (mode is "Read" or "Preserve" or "Unused" or "Null" or "ArrayRead") result = Read(address, 32);
+            if (mode is "Write" or "Preserve" or "ArrayWrite") statements.Add(new MemoryWrite(new(), address, 32, terms.Constant(9, 32)));
+            if (mode == "Nested") result = Read(Add(root, nested.Offset), 32);
+            if (mode == "ByRef") result = Read(root, 32);
+            if (mode == "Length") result = terms.Slice(Read(Add(root, spec.Layout.Field("Il2CppArray", "max_length").ByteOffset), 64), 0, 32);
+            if (mode == "Partial") result = Read(address, 16);
+            if (mode == "Cross") result = Read(Add(address, 2), 32);
+            if (mode == "Unused") result = terms.Constant(0, 32);
+            if (mode == "Read") result = terms.Apply(new CoreOperator(CoreOperation.Add), 32, result, terms.Constant(1, 32));
+            if (mode == "Reference") result = root;
+            if (mode == "RefCall")
+            {
+                var id = new CallIdentity(); result = terms.Atom(new ResultAtom(id), 64);
+                statements.Add(new Call(id, new ImageFunction(10), [new(new(SlotKind.Integer), root), new(new(SlotKind.Integer, 1), argument),
+                    new(new(SlotKind.Integer, 2), terms.Constant(0, 64))], [new(new(SlotKind.Integer), result)]));
+            }
+            if (mode is "Virtual" or "Delegate")
+            {
+                Term pointerValue, info, receiver = root;
+                if (mode == "Delegate")
+                { pointerValue = Read(Add(root, del.Fields[0].Offset), 64); receiver = Read(Add(root, del.Fields[1].Offset), 64); info = Read(Add(root, del.Fields[2].Offset), 64); }
+                else
+                {
+                    var klass = Read(Add(root, spec.Layout.Field("Il2CppObject", "klass").ByteOffset), 64);
+                    pointerValue = Read(Add(klass, spec.Layout.VtableStart + spec.Layout.Field("VirtualInvokeData", "methodPtr").ByteOffset), 64);
+                    info = Read(Add(klass, spec.Layout.VtableStart + spec.Layout.Field("VirtualInvokeData", "method").ByteOffset), 64);
+                }
+                var id = new CallIdentity(); var output = terms.Atom(new ResultAtom(id), 64);
+                statements.Add(new Call(id, new ComputedTarget(pointerValue), [new(new(SlotKind.Integer), receiver), new(new(SlotKind.Integer, 1), argument), new(new(SlotKind.Integer, 2), info)], [new(new(SlotKind.Integer), output)]));
+                result = terms.Slice(output, 0, 32);
+            }
+            Return Ret(Term value) => new([new(new(SlotKind.Integer), value.Width == 64 ? value : terms.Concat(value, terms.Constant(0, 64 - value.Width)))]);
+            RuntimeFunction? runtime = null;
+            if (mode == "Null")
+            {
+                runtime = catalog.Functions.First(f => f.Operation.FixedThrownException == "System.NullReferenceException" && f.Signature is not null);
+                var success = new BlockIdentity(); var fail = new BlockIdentity();
+                builder.Blocks.Add(new(block, [], [], new Branch(terms.Apply(new CoreOperator(CoreOperation.Equal), 1, root, terms.Constant(0, 64)), fail, success)));
+                builder.Blocks.Add(new(success, [], statements.ToImmutableArray(), Ret(result)));
+                builder.Blocks.Add(new(fail, [], [new Call(new(), new ImageFunction(20), [], [], DoesNotReturn: true)], new Unreachable()));
+            }
+            else if (mode == "Merge")
+            {
+                var yes = new BlockIdentity(); var no = new BlockIdentity(); var join = new BlockIdentity(); var id = new MergeIdentity(); var merged = terms.Atom(new ResultAtom(id), 64);
+                builder.Blocks.Add(new(block, [], [], new Branch(terms.Apply(new CoreOperator(CoreOperation.Equal), 1, terms.Slice(argument, 0, 32), terms.Constant(0, 32)), yes, no)));
+                builder.Blocks.Add(new(yes, [], [], new Jump(join))); builder.Blocks.Add(new(no, [], [], new Jump(join)));
+                builder.Blocks.Add(new(join, [new(id, merged, [new(yes, root), new(no, terms.Constant(0, 64))])], [], Ret(merged)));
+            }
+            else builder.Blocks.Add(new(block, [], statements.ToImmutableArray(), Ret(result)));
+            var calls = new CallNamingQuery(binder, new NamingChecks.Map(mode == "RefCall" ? [new BindingEntry(MethodRef.Open(entries["Reference"]), BindingEntryKind.Ordinary)] : []), new NamingChecks.RuntimeMap(runtime), catalog);
+            var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(entries[mode]), binder, types, calls: calls, effects: new ManagedCallEffects(calls), spec: spec).Run();
+            if (mode is "Partial" or "Cross")
+            {
+                checks.True(lowered.Failure?.Reason.Code == (mode == "Partial" ? "lowering.Location.Partial" : "location.cross-field"), mode + " 访问拒绝并细分原因：" + lowered.Failure);
+                continue;
+            }
+            checks.True(lowered.Body is not null, mode + " 访问下降：" + lowered.Failure);
+            if (lowered.Body is not { } body) continue;
+            var problems = emitter.Emit([body]);
+            checks.True(problems.Count == 0, mode + " CIL 校验：" + string.Join(';', problems.Values));
+            var loweredStatements = body.Blocks.SelectMany(b => b.Statements).ToArray();
+            if (mode == "Preserve") checks.True(loweredStatements[0] is ManagedAssignment && loweredStatements[1] is ManagedStore &&
+                loweredStatements.OfType<ManagedReturn>().Single().Value is ConversionValue { Operand: LocalValue }, "读取在原位置保存，写后使用旧值局部");
+            if (mode == "Unused") checks.True(!loweredStatements.OfType<ManagedAssignment>().Any(), "未使用的读取不产生访问");
+            if (mode is "Virtual" or "Delegate") checks.True(loweredStatements.OfType<ManagedCall>().Single().Invocation.Virtual && !loweredStatements.OfType<ManagedAssignment>().Any(), "分派内部读取不写出");
+        }
+        foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
     }
 
     private static string ParameterType(string name) => name switch

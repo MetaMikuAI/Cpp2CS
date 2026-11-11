@@ -6,6 +6,9 @@ using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.Naming;
+using Cpp2CS.Recovery.Locations;
+using Cpp2CS.Recovery.Dispatch;
+using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.Lowering;
 
@@ -25,7 +28,11 @@ public sealed partial class IntegerLowering
     private readonly MethodBinder binder;
     private readonly ManagedTypes types;
     private readonly StateQueries state;
-    private readonly QueryContext context;
+    private QueryContext context;
+    private readonly RuntimeSpec? spec;
+    private readonly NamingFacts names;
+    private ManagedLocationQuery? locations;
+    private DispatchQuery? dispatch;
     private readonly Dictionary<Term, ManagedValue> arguments = [];
     private readonly Dictionary<(Term Term, int Low, int Width), LocalValue> merges = [];
     private readonly Dictionary<Term, ManagedValue> values = [];
@@ -41,10 +48,10 @@ public sealed partial class IntegerLowering
     private ulong nextLabel;
 
     public IntegerLowering(NativeFunction function, MethodRef method, MethodBinder binder, ManagedTypes types,
-        Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null)
+        Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null, RuntimeSpec? spec = null, NamingFacts? names = null)
     {
         this.function = function; this.method = method; this.binder = binder; this.types = types;
-        this.calls = calls;
+        this.calls = calls; this.spec = spec; this.names = names ?? NamingFacts.Empty;
         state = new(effects, image: image);
         boundSources = new(state);
         context = state.CreateContext(function);
@@ -67,6 +74,13 @@ public sealed partial class IntegerLowering
         if (bound.Value is not { } binding)
         { Fail<object>(LoweringFailureKind.Binding, bound.Failure!.Detail); return new(null, failure); }
         signature = binding;
+        if (spec is not null && calls is not null)
+        {
+            var naming = new ValueNamingQuery(state, calls, names, spec, binder, signature);
+            locations = new(state, naming, types.Layouts, spec);
+            dispatch = new(state, calls, naming, locations, binder, spec);
+            context = locations.CreateContext(function);
+        }
         // 所有事件先检查，避免未使用的调用或访问被纯值下降遗漏。
         foreach (var b in function.Blocks)
         {
@@ -80,8 +94,6 @@ public sealed partial class IntegerLowering
                     case Call call: PrepareCall(call); break;
                     case TrapWhen: Fail<object>(LoweringFailureKind.ConditionalTrap, "条件陷阱尚未下降"); break;
                     case DynamicAllocation: Fail<object>(LoweringFailureKind.DynamicAllocation, "动态帧分配尚未下降"); break;
-                    case MemoryRead r: CheckMemory(r.Address, r.Width, true); break;
-                    case MemoryWrite w: CheckMemory(w.Address, w.Width, false); break;
                 }
                 if (failure is not null) return new(null, failure);
             }
@@ -101,7 +113,9 @@ public sealed partial class IntegerLowering
         if (failure is not null) return new(null, failure);
         var managed = signature.Managed!;
         for (int i = 0; i < managed.ParameterIndices.Length; i++) BindParameter(managed.ParameterIndices[i], i, method.Concrete(method.Method.Parameters[i].Type));
-        if (managed.ThisIndex is { } self) BindParameter(self, -1, method.DeclaringType);
+        if (managed.ThisIndex is { } self) BindParameter(self, -1, method.Method.Owner.IsValueType ? new ByRefRef(method.DeclaringType) : method.DeclaringType);
+        if (failure is not null) return new(null, failure);
+        foreach (var read in function.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>()) RegisterRead(read);
         if (failure is not null) return new(null, failure);
         var blocks = new List<ManagedBlock>();
         foreach (var b in function.Blocks.OrderBy(b => labels[b.Identity]))
@@ -109,16 +123,34 @@ public sealed partial class IntegerLowering
             position = b.Trace?.NativeAddress ?? 0;
             var statements = new List<ManagedStatement>();
             for (int i = 0; i < b.Statements.Length; i++)
-                if (b.Statements[i] is Call call)
+            {
+                var native = b.Statements[i];
+                position = native.Trace?.NativeAddress ?? b.Trace?.NativeAddress ?? 0;
+                if (native is Call call)
                 {
-                    position = call.Trace?.NativeAddress ?? b.Trace?.NativeAddress ?? 0;
                     var statement = LowerCall(call, new(b.Identity, i));
                     if (statement is null) return new(null, failure);
                     statements.Add(statement);
                 }
-            var end = End(b);
-            if (end is null) return new(null, failure);
-            statements.Add(end);
+                else if (native is MemoryWrite write)
+                {
+                    var statement = LowerStore(write);
+                    if (failure is not null) return new(null, failure);
+                    if (statement is not null) statements.Add(statement);
+                }
+                else if (native is MemoryRead read)
+                {
+                    if (!readInsertions.TryGetValue(labels[b.Identity], out var slots))
+                        readInsertions.Add(labels[b.Identity], slots = []);
+                    slots.Add((statements.Count, read.Identity, position));
+                }
+            }
+            if (statements.LastOrDefault() is not ManagedThrow)
+            {
+                var end = End(b);
+                if (end is null) return new(null, failure);
+                statements.Add(end);
+            }
             blocks.Add(new(labels[b.Identity], statements));
         }
         // 只给实际使用的合流建局部；循环先登记身份，入边随后下降。
@@ -131,23 +163,15 @@ public sealed partial class IntegerLowering
                 var v = Part(input.Value, merge.Low, merge.Width, IsFloat(merge.Local.Type));
                 if (v is null) return new(null, failure);
                 var edge = Edge(input.Predecessor, merge.Target);
-                ((List<ManagedCopy>)edge.Copies).Add(new(merge.Local, IsFloat(merge.Local.Type) ? FloatBits(v, merge.Local.Width) : Convert(v, merge.Local.Width)));
+                ((List<ManagedCopy>)edge.Copies).Add(new(merge.Local, ReferenceType(merge.Local.Type) ? Coerce(v, merge.Local.Type) : IsFloat(merge.Local.Type) ? FloatBits(v, merge.Local.Width) : Convert(v, merge.Local.Width)));
             }
         }
         // 合流入边也可能首次使用调用结果，全部值下降后再回填结果局部。
         blocks = blocks.Select(b => b with { Statements = b.Statements.Select(s => s is ManagedCall c
             ? c with { Result = callStatements[c].Local } : s).ToArray() }).ToList();
+        blocks = blocks.Select(InsertReads).ToList();
+        if (failure is not null) return new(null, failure);
         return new(Materialize(new(method, [.. blocks, .. extraBlocks])), null);
-    }
-
-    private void CheckMemory(Term address, int width, bool read)
-    {
-        var resolved = context.Get(state.Resolve, address);
-        if (!resolved.IsSuccess) { Fail<object>(LoweringFailureKind.State, "地址查询失败", resolved.Why); return; }
-        var location = context.Get(state.Locations, new(resolved.Value, width));
-        if (!location.IsSuccess) Fail<object>(LoweringFailureKind.State, "位置查询失败", location.Why);
-        else if (location.Value.Region != Region.Frame && !(read && state.Contents?.Read(function, location.Value) is not null))
-            Fail<object>(read ? LoweringFailureKind.NonFrameRead : LoweringFailureKind.NonFrameWrite, "非帧内存访问尚未定位");
     }
 
     private void BindParameter(int cIndex, int index, TypeRef type)
@@ -182,6 +206,8 @@ public sealed partial class IntegerLowering
                 if (value is null) return null;
                 if (IsFloat(method.Concrete(method.Method.ReturnType)))
                     return new ManagedReturn(position, FloatBits(value, source.Term.Width));
+                if (ReferenceType(method.Concrete(method.Method.ReturnType)))
+                    return new ManagedReturn(position, Coerce(value, method.Concrete(method.Method.ReturnType)));
                 value = IntegerBits(value);
                 if (!IntegerType(method.Concrete(method.Method.ReturnType))) return Fail<ManagedStatement>(TypeFailure(method.Concrete(method.Method.ReturnType)), "返回类型不是整数");
                 return new ManagedReturn(position, new ConversionValue(ManagedTypes.IsSigned(method.Concrete(method.Method.ReturnType)) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
@@ -213,7 +239,8 @@ public sealed partial class IntegerLowering
         // 首个使用约束决定存储视图；后续不同解释在使用处重解释，不改写已建局部。
         if (merges.TryGetValue(key, out var local)) return local;
         if (width > 64) return Fail<LocalValue>(LoweringFailureKind.FloatingOrVector, "合流位宽超过整数栈宽度");
-        local = new(new(nextLocal++), floating && width is 32 or 64 ? FloatType(width) : StackType(width), StackWidth(width));
+        var staticType = StaticType(term);
+        local = new(new(nextLocal++), staticType is not null && ReferenceType(staticType) ? staticType : floating && width is 32 or 64 ? FloatType(width) : StackType(width), StackWidth(width));
         merges.Add(key, local);
         if (term.Identity is ResultAtom { Definition: MergeIdentity id })
         {

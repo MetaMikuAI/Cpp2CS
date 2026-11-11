@@ -1,0 +1,142 @@
+using Cpp2CS.Kernel.State;
+using Cpp2CS.Managed;
+using Cpp2CS.Model;
+using Cpp2CS.Native;
+using Cpp2CS.Native.Terms;
+using Cpp2CS.Recovery.Locations;
+
+namespace Cpp2CS.Recovery.Lowering;
+
+public sealed partial class IntegerLowering
+{
+    private sealed class ReadDefinition(MemoryRead read)
+    {
+        public MemoryRead Read { get; } = read;
+        public LocalValue? Local { get; set; }
+        public ManagedValue? Value { get; set; }
+    }
+    private readonly Dictionary<Term, ReadDefinition> readValues = [];
+    private readonly Dictionary<ReadIdentity, ReadDefinition> readDefinitions = [];
+    private readonly Dictionary<ulong, List<(int Before, ReadIdentity Read, ulong Address)>> readInsertions = [];
+    private static bool ReferenceType(TypeRef type) => ManagedTypes.IsReferenceType(type) || type is ByRefRef;
+    private TypeRef? StaticType(Term term)
+    {
+        if (arguments.TryGetValue(term, out var argument)) return argument.Type;
+        if (locations is null) return null;
+        var result = context.Get(locations.Types, term);
+        return result.IsSuccess ? result.Value?.Type : null;
+    }
+    private ManagedValue Coerce(ManagedValue value, TypeRef type)
+    {
+        if (value is ConstantValue { Bits: 0 } && ManagedTypes.IsReferenceType(type))
+            return new ConstantValue(0, type, types.PointerSize * 8);
+        if (Equals(value.Type, type) || ManagedTypes.IsReferenceType(value.Type) && types.IsAssignable(value.Type, type)) return value;
+        Fail<object>(LoweringFailureKind.UnsupportedType, "值的托管类型与使用位置不兼容");
+        return value;
+    }
+    private void RegisterRead(MemoryRead read)
+    {
+        // 只登记可用身份；未使用读取的失败不阻断下降，实际使用处负责传播失败。
+        var address = context.Get(state.Resolve, read.Address);
+        if (!address.IsSuccess) return;
+        var location = context.Get(state.Locations, new(address.Value, read.Width));
+        if (!location.IsSuccess) return;
+        if (location.Value.Region == Region.Frame) return;
+        var resolved = context.Get(state.Read, read.Identity);
+        if (!resolved.IsSuccess) return;
+        if (resolved.Value.Identity is not MemoryAtom { Location.Region: not Region.Frame }) return;
+        if (!readValues.TryGetValue(resolved.Value, out var definition))
+            readValues.Add(resolved.Value, definition = new(read));
+        readDefinitions.Add(read.Identity, definition);
+    }
+    private ManagedValue? ReadValue(ReadDefinition definition)
+    {
+        if (definition.Local is not null) return definition.Local;
+        var read = definition.Read;
+        var usePosition = position; position = read.Trace?.NativeAddress ?? position;
+        var value = Access(read.Address, read.Width);
+        if (value is null) return null;
+        position = usePosition;
+        definition.Value = value;
+        definition.Local = new(new(nextLocal++), value.Type, value.Width);
+        return definition.Local;
+    }
+    private ManagedBlock InsertReads(ManagedBlock block)
+    {
+        if (!readInsertions.TryGetValue(block.Address, out var reads)) return block;
+        var statements = new List<ManagedStatement>(); int cursor = 0;
+        for (int i = 0; i <= block.Statements.Count; i++)
+        {
+            while (cursor < reads.Count && reads[cursor].Before == i)
+            {
+                var read = reads[cursor++];
+                if (readDefinitions.TryGetValue(read.Read, out var definition) && definition.Local is { } local)
+                    statements.Add(new ManagedAssignment(read.Address, local, definition.Value!));
+            }
+            if (i < block.Statements.Count) statements.Add(block.Statements[i]);
+        }
+        return block with { Statements = statements };
+    }
+    private ManagedStatement? LowerStore(MemoryWrite write)
+    {
+        var resolved = context.Get(state.Resolve, write.Address);
+        if (!resolved.IsSuccess) return Fail<ManagedStatement>(LoweringFailureKind.State, "写入地址查询失败", resolved.Why);
+        var location = context.Get(state.Locations, new(resolved.Value, write.Width));
+        if (!location.IsSuccess) return Fail<ManagedStatement>(LoweringFailureKind.State, "写入位置查询失败", location.Why);
+        if (location.Value.Region == Region.Frame) return null;
+        var target = Access(write.Address, write.Width, true);
+        if (target is null) return null;
+        if (target is ArrayLengthValue) return Fail<ManagedStatement>(LoweringFailureKind.NonFrameWrite, "数组长度不可写");
+        var value = Value(write.Value, IsFloat(target.Type));
+        if (value is null) return null;
+        value = ReferenceType(target.Type) ? Coerce(value, target.Type) : IsFloat(target.Type) ? FloatBits(value, write.Width)
+            : new ConversionValue(ManagedTypes.IsSigned(target.Type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
+                value, target.Type, write.Width);
+        return new ManagedStore(position, target, value);
+    }
+    private ManagedValue? Access(Term address, int width, bool write = false)
+    {
+        var kind = write ? LoweringFailureKind.NonFrameWrite : LoweringFailureKind.NonFrameRead;
+        if (locations is null) return Fail<ManagedValue>(kind, "未装配托管位置查询");
+        var result = context.Get(locations, new(address, width));
+        if (!result.IsSuccess) return Fail<ManagedValue>(kind, "定位查询失败", result.Why, result.Why?.Code);
+        var location = result.Value;
+        if (location.Kind is ManagedLocationKind.NotManaged or ManagedLocationKind.Unknown)
+            return Fail<ManagedValue>(kind, "使用未定位的内存：" + location.Kind,
+                location.Why, location.Why?.Code ?? "lowering.Location." + location.Kind);
+        var exact = location.Views.Where(v => v.Offset == 0 && (v.Kind == ManagedLocationKind.ArrayLength
+            || types.Size(v.Type) * 8 == width)).ToArray();
+        var views = exact.Where(v => v.Kind == ManagedLocationKind.ArrayLength || IntegerType(v.Type) || IsFloat(v.Type) || ReferenceType(v.Type)).ToArray();
+        if (exact.Length > 0 && views.Length == 0)
+            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "完整结构体访问尚未下降");
+        if (views.Length != 1) return Fail<ManagedValue>(kind,
+            views.Length == 0 ? "访问只覆盖位置的一部分" : "访问有多个完整托管视图", code: views.Length == 0 ? "lowering.Location.Partial" : "lowering.Location.Ambiguous");
+        var view = views[0];
+        if (write && view.Kind == ManagedLocationKind.ArrayLength)
+            return Fail<ManagedValue>(kind, "数组长度不可写", code: "lowering.Location.Readonly");
+        if (view.Kind == ManagedLocationKind.StaticField)
+            return Fail<ManagedValue>(kind, "静态字段尚未下降", code: "lowering.Location.StaticField");
+        var root = Value(view.Root);
+        if (root is null) return null;
+        if (root.Type is ByRefRef { Element: not DefinitionRef { Definition.IsValueType: true } })
+            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "字段接收者的托管地址必须指向值类型");
+        if (view.Kind == ManagedLocationKind.ArrayLength) return Mask(new ArrayLengthValue(root, types.UInt32, 32), width);
+        ManagedValue value = root;
+        if (view.Kind == ManagedLocationKind.ArrayElement)
+        {
+            var index = Value(view.Index!);
+            if (index is null) return null;
+            var element = view.ElementType ?? view.Type;
+            value = new ArrayElementValue(root, index, element, types.ValueWidth(element));
+        }
+        foreach (var field in view.Path)
+        {
+            if (types.Kind(value.Type) == TypeKind.Struct) value = new AddressValue(value, types.PointerSize * 8);
+            var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
+            value = new FieldValue(value, field, type, types.ValueWidth(type));
+        }
+        if (!IntegerType(value.Type) && !IsFloat(value.Type) && !ReferenceType(value.Type))
+            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "访问的值类型尚未下降");
+        return value;
+    }
+}

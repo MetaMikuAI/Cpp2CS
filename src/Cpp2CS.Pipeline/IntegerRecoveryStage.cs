@@ -50,7 +50,7 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         };
         var types = parts.Types;
         var result = new IntegerLowering(input, MethodRef.Open(context.Method), parts.Binder,
-            types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls)).Run(kind);
+            types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec).Run(kind);
         if (result.Body is { } candidate)
         {
             var attributes = context.Method.Attributes;
