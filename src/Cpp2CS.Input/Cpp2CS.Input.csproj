@@ -1,5 +1,19 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Nullable>disable</Nullable>
+    <NoWarn>$(NoWarn);CS0649</NoWarn>
+  </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="Cpp2CS.Tests" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Il2Cpp/Metadata*.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Il2Cpp/Il2CppClass.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/IO/BinaryStream.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Attributes/*.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Extensions/BinaryReaderExtensions.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Extensions/StringExtensions.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Utils/BlobValue.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Utils/AttributeArgument.cs" />
+    <Compile Include="../../third_party/Il2CppDumper/Il2CppDumper/Utils/CustomAttributeReaderVisitor.cs" />
     <ProjectReference Include="../Cpp2CS.Native/Cpp2CS.Native.csproj" />
     <ProjectReference Include="../Cpp2CS.Runtime/Cpp2CS.Runtime.csproj" />
     <ProjectReference Include="../Cpp2CS.Model/Cpp2CS.Model.csproj" />
