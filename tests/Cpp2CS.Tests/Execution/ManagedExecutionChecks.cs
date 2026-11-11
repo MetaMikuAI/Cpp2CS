@@ -72,24 +72,24 @@ internal static class ManagedExecutionChecks
             ("Null", "NullReferenceException", Array.Empty<StackValue>()), ("Bounds", "IndexOutOfRangeException", Array.Empty<StackValue>()),
             ("Overflow", "OverflowException", new[] { StackValue.I4(int.MaxValue) }) })
             a.True(Run(name, args).Events.Any(e => e.Text.Contains(exception, StringComparison.Ordinal)), $"{name} 异常事件");
+        var modelFactory = CecilModel.Factory(source.Module);
+        a.True(new CecilModel(source.Module).HasCompleteDefinitions, "完整元数据可用于隔离副本");
+        var comparisons = new List<(string Left, string Right, string Result)>();
         foreach (var (left, right, status) in new[] { ("CallbackFinally", "CallbackFinally", CilComparisonStatus.Match), ("Add", "Add", CilComparisonStatus.Match), ("Add", "Same", CilComparisonStatus.Match),
             ("Add", "Different", CilComparisonStatus.Mismatch), ("Calls", "Swapped", CilComparisonStatus.Mismatch), ("Heap", "HeapChanged", CilComparisonStatus.Mismatch), ("Unsupported", "Unsupported", CilComparisonStatus.Inconclusive), ("Forever", "Forever", CilComparisonStatus.Inconclusive) })
         {
             var result = CilComparison.Compare(source.Method("Cases", left), source.Method("Cases", right));
+            comparisons.Add((left, right, System.Text.Json.JsonSerializer.Serialize(result)));
             a.True(result.Status == status && (status == CilComparisonStatus.Match || !string.IsNullOrEmpty(result.Reason)), $"{left}/{right}：{result}");
         }
         // 核心库作为可解释模块时，显式无参异常仍与隐式异常使用相同摘要。
         interpreter.BodyModule = source.Module.TypeSystem.Object.Resolve().Module;
         var explicitNull = Run("ExplicitNull");
         a.True(explicitNull.Events.Count == 1 && explicitNull.Events[0].Text.Contains("throw System.NullReferenceException", StringComparison.Ordinal), "核心库方法体不展开无参异常构造");
-        var session = new CilComparison.Session();
-        foreach (var name in new[] { "Add", "Heap", "Unsupported", "Add" })
+        foreach (var (left, right, expected) in comparisons.AsEnumerable().Reverse().Concat(comparisons))
         {
-            var m = source.Method("Cases", name);
-            var fresh = CilComparison.Compare(m, m, 4, 0, 1000);
-            var shared = CilComparison.Compare(m, m, 4, 0, 1000, session);
-            a.True(fresh.Status == shared.Status && fresh.ReasonKind == shared.ReasonKind && fresh.CompletedCases == shared.CompletedCases,
-                "复用元数据保持对照结果：" + name);
+            var actual = CilComparison.Compare(source.Method("Cases", left), source.Method("Cases", right), modelFactory: modelFactory);
+            a.True(System.Text.Json.JsonSerializer.Serialize(actual) == expected, "复用元数据副本不改变结局、种子或覆盖，且与方法次序无关");
         }
         using var other = new CompiledSource("public static class Cross { public static int Add(int x) => x + 7; }");
         using var same = new CompiledSource("public static class Cross { public static int Add(int x) => 7 + x; }");

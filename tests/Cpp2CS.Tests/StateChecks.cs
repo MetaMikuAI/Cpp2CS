@@ -27,8 +27,28 @@ internal static class StateChecks
     private static T Good<T>(Outcome<T> result) => result.IsSuccess ? result.Value : throw new InvalidOperationException(result.Why?.ToString());
     public static int Run()
     {
-        var a = new Assertions(); Alias(a); Forward(a); Branches(a); Calls(a); Caller(a); Scale();
+        var a = new Assertions(); SourceSets(a); Alias(a); Forward(a); Branches(a); Calls(a); Caller(a); Scale();
         return a.Finish("状态模型");
+    }
+    private static void SourceSets(Assertions a)
+    {
+        var terms = new TermTable(); var random = new Random(73);
+        var sources = Enumerable.Range(0, 24).Select(i => new BitSource(terms.Constant(i / 8, 8), i % 8)).ToArray();
+        for (int iteration = 0; iteration < 200; iteration++)
+        {
+            var left = new HashSet<BitSource>(); var right = new HashSet<BitSource>();
+            var x = BitSourceSet.Empty; var y = BitSourceSet.Empty;
+            foreach (var source in sources)
+            {
+                if (random.Next(4) == 0) { left.Add(source); x = x.Add(source); }
+                if (random.Next(4) == 0) { right.Add(source); y = y.Add(source); }
+            }
+            var union = x.Union(y); var expected = left.Union(right).ToHashSet();
+            a.True(x.Count == left.Count && y.Count == right.Count && union.Count == expected.Count &&
+                sources.All(s => union.Contains(s) == expected.Contains(s)), "紧凑位来源集合与集合模型相同");
+            a.True(x.IsSubsetOf(y) == left.IsSubsetOf(right) && x.Union(x).Same(x) &&
+                BitSourceSet.Empty.Union(x).Same(x) && x.IsSubsetOf(union) && y.IsSubsetOf(union), "位来源并集与偏序保持格性质");
+        }
     }
     private static void Alias(Assertions a)
     {
@@ -76,8 +96,9 @@ internal static class StateChecks
             f.Builder.Blocks.Add(new(f.Entry, [], [], new Branch(f.C(1, 1), left, right)));
             f.Builder.Blocks.Add(new(left, [], [f.Write(0, f.C(7))], new Jump(end)));
             f.Builder.Blocks.Add(new(right, [], [f.Write(0, f.C(same ? 7UL : 8UL))], new Jump(end)));
-            f.Builder.Blocks.Add(new(end, [], [r], new Return([])));
+            f.Builder.Blocks.Add(new(end, [], [.. Enumerable.Range(0, 256).Select(i => f.Write(8, f.C((ulong)i))), r], new Return([])));
             var q = new StateQueries(); var c = q.CreateContext(f.Builder.Freeze()); var value = Good(c.Get(q.Read, r.Identity));
+            a.True(c.Statistics[q.Reaching].Computations < 10, "合流后长串不相交写入不逐点重算来源");
             if (same) a.True(value == f.C(7), "两臂同值不合流");
             else
             {

@@ -22,6 +22,8 @@ public sealed class QueryContext
         public int Active = -1;
         public bool Published;
         public bool Participant;
+        public bool Queued;
+        public HashSet<Entry>? Dependents;
         public long Steps;
         public Reason? BudgetFailure;
         public Session? Session;
@@ -78,9 +80,14 @@ public sealed class QueryContext
     private sealed class Session(FixedPointGroup group)
     {
         public readonly FixedPointGroup Group = group;
-        // 按首次发现次序保存键；只重算环成员及依赖近似值的组内调用者。
+        // 保存本次求解的键；反向依赖只在求解期间存在，收敛后释放。
         public readonly List<Entry> Entries = [];
-        public bool Cyclic;
+        public readonly Queue<Entry> Work = new();
+        public void Enqueue(Entry entry)
+        {
+            if (entry.Published || entry.Queued || !entry.Participant) return;
+            entry.Queued = true; Work.Enqueue(entry);
+        }
         public long Steps;
         public Reason? Failure;
     }
@@ -165,9 +172,9 @@ public sealed class QueryContext
             if (start < 0 || stack.Skip(start).Any(e => e.Session != session)) ThrowCycle(entry);
             if (entry.Active >= 0)
             {
-                session!.Cyclic = true;
                 for (var i = start; i < stack.Count; i++) stack[i].Participant = true;
             }
+            (entry.Dependents ??= []).Add(stack[^1]);
             if (entry.Participant) stack[^1].Participant = true;
             table.Hits++;
             return entry.Result;
@@ -202,6 +209,9 @@ public sealed class QueryContext
             // 失败只属于这个键，立即成为最终结果；未读取近似值的成功计算也已是最终结果。
             // 上限耗尽之后的结果留给 Settle 统一处理。
             if (!Exhausted && (entry.Why is not null || !entry.Participant)) entry.Publish(null);
+            if (!entry.Published && stack.Count != 0 && stack[^1].Session == owner)
+                (entry.Dependents ??= []).Add(stack[^1]);
+            owner.Enqueue(entry);
             if (root) Settle(owner);
         }
         if (entry.Participant && stack.Count != 0 && stack[^1].Session == owner)
@@ -210,22 +220,14 @@ public sealed class QueryContext
     }
     private void Settle(Session session)
     {
-        if (session.Cyclic)
+        // 只有依赖的近似值增长才重算读者；发现环时的首次计算按完成次序入队。
+        while (!Exhausted && session.Work.TryDequeue(out var entry))
         {
-            bool changed;
-            do
-            {
-                changed = false;
-                var count = session.Entries.Count;
-                for (var i = 0; i < session.Entries.Count && !Exhausted; i++)
-                {
-                    var entry = session.Entries[i];
-                    if (entry.Published || !entry.Participant) continue;
-                    changed |= entry.Evaluate(this);
-                    if (entry.Why is not null && !Exhausted) entry.Publish(null);
-                }
-                changed |= count != session.Entries.Count;
-            } while (changed && !Exhausted);
+            entry.Queued = false;
+            if (entry.Published) continue;
+            if (entry.Evaluate(this) && entry.Dependents is { } readers)
+                foreach (var reader in readers) session.Enqueue(reader);
+            if (entry.Why is not null && !Exhausted) entry.Publish(null);
         }
         // 本组上限耗尽：未完成的键都是洞。外层组耗尽：本组未完成的结果不记忆。
         foreach (var entry in session.Entries)
@@ -234,6 +236,7 @@ public sealed class QueryContext
             if (session.Failure is null && Exhausted) entry.Forget();
             else entry.Publish(session.Failure);
         }
+        foreach (var entry in session.Entries) entry.Dependents = null;
         sessions.Remove(session);
     }
     private bool Exhausted => sessions.Exists(s => s.Failure is not null);

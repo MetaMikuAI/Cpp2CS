@@ -47,6 +47,12 @@ internal static class PipelineChecks
         checks.True(written[1].Body.Instructions.Last().OpCode.Code == Code.Throw, "洞保留占位体");
         using var json = JsonDocument.Parse(File.ReadAllText(Path.Combine(output, "recovery.json")));
         checks.True(json.RootElement.GetProperty("methods").GetArrayLength() == 2, "报告落盘并读回");
+        using var streamed = new MemoryStream();
+        RecoveryReport.Write(streamed, report);
+        checks.True(System.Text.Encoding.UTF8.GetString(streamed.ToArray()) == RecoveryReport.Json(report), "流式报告与原格式逐字节一致");
+        var withSource = report with { Source = new(1, [new("test", "Type", "类型诊断")], [new("method", "Method", "方法诊断")]) };
+        streamed.SetLength(0); streamed.Position = 0; RecoveryReport.Write(streamed, withSource);
+        checks.True(System.Text.Encoding.UTF8.GetString(streamed.ToArray()) == RecoveryReport.Json(withSource), "源码诊断数组保持原报告格式");
         var serial = session.Run(facts, request with { Jobs = 1 });
         checks.True(RecoveryReport.Json(report.Methods) == RecoveryReport.Json(serial.Methods), "结果不依赖并行度");
         var filtered = session.Run(facts, request with { Method = "Present", Address = 16 });

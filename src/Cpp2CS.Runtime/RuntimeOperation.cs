@@ -12,10 +12,10 @@ public enum RuntimeMemoryDomain { Frame, ImmutableRuntime, Monotone, ManagedHeap
 public enum RuntimeEventTrigger { Always, NormalOnly, ExceptionalOnly, StateNotEstablished, Never }
 public enum RuntimeConditionKind { Always, NormalReturn, ExceptionalExit, StateNotEstablished, Other }
 public enum RuntimeExtentKind { FixedBytes, PointerSlot, ClassValueSize, InputLength, Unknown }
-public enum RuntimeResultRelationKind { None, Identity, InputOrNull }
+public enum RuntimeResultRelationKind { None, Identity, InputOrNull, ResolvedPointee }
 public sealed record RuntimeCondition(RuntimeConditionKind Kind, string Description);
 public sealed record RuntimeExtent(RuntimeExtentKind Kind, string Description, string? Input = null, int Bytes = 0, int ElementBytes = 1);
-public sealed record RuntimeResultRelation(RuntimeResultRelationKind Kind, string? Input = null);
+public sealed record RuntimeResultRelation(RuntimeResultRelationKind Kind, string? Input = null, string? Evidence = null);
 public enum RuntimeTermination { None, Throw, ResumeUnwind, ProcessTermination }
 public enum RuntimeAccess { Read, Write, ReadWrite }
 public enum RuntimeStateTest { Nonzero, Zero, ResolvedMetadata }
@@ -42,6 +42,8 @@ public sealed record RuntimeOperation(
 {
     /// <summary>无条件抛出的固定异常；传入异常对象及重新抛出不设置此项。</summary>
     public string? FixedThrownException { get; init; }
+    public string? RelaxedClassInput { get; init; }
+
     public RuntimeCondition? EventCondition => EventTrigger switch
     {
         RuntimeEventTrigger.Never => null,
@@ -70,8 +72,8 @@ public static class RuntimeOperations
         RuntimeHeapEffect heap, RuntimeObservation observation, string normal, string il, string description,
         string evidence, string[]? exceptions = null, RuntimePointerEffect[]? pointers = null, string? returnInput = null,
         RuntimePostcondition? idempotence = null, RuntimePostcondition[]? post = null, bool noReturn = false,
-        string preconditions = "Unity 2022.3 Android LP64 的匹配基础库；生成器保证类型、元数据指针与缓冲区合法；无自定义 profiler 回调；原生耗尽及内存损坏不作为托管结局", bool upperBound = false, RuntimeEventTrigger? trigger = null, RuntimeTermination termination = RuntimeTermination.Throw, RuntimePostcondition[]? exceptional = null, bool inputOrNull = false, string managedCode = "无用户代码；异常构造可能调用基础库构造函数", string? exceptionReason = null) =>
-        new(name, [.. inputs], new(result, width, new(returnInput is null ? RuntimeResultRelationKind.None : inputOrNull ? RuntimeResultRelationKind.InputOrNull : RuntimeResultRelationKind.Identity, returnInput)), heap, [.. pointers ?? []], observation, idempotence,
+        string preconditions = "Unity 2022.3 Android LP64 的匹配基础库；生成器保证类型、元数据指针与缓冲区合法；无自定义 profiler 回调；原生耗尽及内存损坏不作为托管结局", bool upperBound = false, RuntimeEventTrigger? trigger = null, RuntimeTermination termination = RuntimeTermination.Throw, RuntimePostcondition[]? exceptional = null, bool inputOrNull = false, string managedCode = "无用户代码；异常构造可能调用基础库构造函数", string? exceptionReason = null, RuntimeResultRelation? resultRelation = null) =>
+        new(name, [.. inputs], new(result, width, resultRelation ?? new(returnInput is null ? RuntimeResultRelationKind.None : inputOrNull ? RuntimeResultRelationKind.InputOrNull : RuntimeResultRelationKind.Identity, returnInput)), heap, [.. pointers ?? []], observation, idempotence,
             noReturn ? [] : post is null ? [Fact(name + "Result", normal)] : [.. post],
             exceptional is not null ? [.. exceptional] : exceptions is { Length: > 0 } ? [Fact(name + "Exception", "抛出所列异常；不承诺正常后置条件，堆效果仍适用", "异常退出")] : [],
             new(exceptions is { Length: > 0 }, [.. exceptions ?? []], upperBound,
@@ -100,14 +102,15 @@ public static class RuntimeOperations
         yield return Op("InitializeMetadata", [new("slot", RuntimeInputUse.Location, RuntimeValueKind.Metadata)], RuntimeValueKind.Metadata, RuntimeWidth.Pointer,
             RuntimeHeapEffect.MayWrite, RuntimeObservation.Unobservable, "元数据槽解析完成，结果为解析的实体指针", "EraseMetadataInitialization", "以解析后的实体替代槽读取，消去初始化效果", "vm/MetadataCache.cpp: InitializeRuntimeMetadata → vm/GlobalMetadata.cpp: InitializeRuntimeMetadata → GetTypeInfoFromTypeIndex / GetMethodInfoFromEncodedIndex / GetFieldInfoFromIndex / GetStringLiteralFromIndex；类型分支经 ClassInlines::InitFromCodegenSlow，字符串经 String::NewUtf16；只发布元数据，异常路径可能写缓存异常的堆栈", ["System.TypeLoadException", "System.TypeInitializationException", "System.NotSupportedException"],
             [new("slot", RuntimeAccess.ReadWrite, RuntimeMemoryDomain.Monotone, new(RuntimeExtentKind.PointerSlot, "一个指针宽槽"), new(RuntimeConditionKind.Other, "全局访问凭据成立"))],
-            post: [Fact("MetadataResolved", "slot 已解析；结果是槽内容而不是槽地址", fields: [new("slot", null, null, RuntimeStateTest.ResolvedMetadata, "需要整个二进制的访问凭据；不对匿名地址按形状分类")])], upperBound: false, exceptionReason: "封闭的异常种类集合；泛型深度失败见 vm/GenericClass.cpp: CreateClass → vm/Exception.cpp: GetMaximumNestedGenericsException；未解析方法桩只被登记，不在此调用", managedCode: "不执行输入类静态构造；失败时异常工厂执行基础库构造");
-        var cctor = Fact("ClassConstructorCompleted", "类静态构造已完成或无静态构造", "入口标志已成立时可消去；普通完成时建立，重入返回不保证", Field("class", "Il2CppClass", "cctor_finished_or_no_cctor"));
+            post: [Fact("MetadataResolved", "slot 已解析；结果是槽内容而不是槽地址", fields: [new("slot", null, null, RuntimeStateTest.ResolvedMetadata, "需要整个二进制的访问凭据；不对匿名地址按形状分类")])], upperBound: false, exceptionReason: "封闭的异常种类集合；泛型深度失败见 vm/GenericClass.cpp: CreateClass → vm/Exception.cpp: GetMaximumNestedGenericsException；未解析方法桩只被登记，不在此调用", managedCode: "不执行输入类静态构造；失败时异常工厂执行基础库构造",
+            resultRelation: new(RuntimeResultRelationKind.ResolvedPointee, "slot", "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_initialize_runtime_metadata_inline → vm/MetadataCache.cpp / vm/GlobalMetadata.cpp: InitializeRuntimeMetadata；有效实体正常返回时结果等于发布后的槽内容"));
+        var cctor = Fact("ClassConstructorCompleted", "类静态构造已完成或无静态构造", "入口标志已成立时可消去；普通完成时建立，重入返回不保证", fields: [new("class", "Il2CppClass", "cctor_finished_or_no_cctor", RuntimeStateTest.Nonzero, "codegen/il2cpp-codegen-il2cpp.h: il2cpp_codegen_runtime_class_init_inline；vm/Runtime.cpp: Runtime::ClassInit 成功后置位，重入不置位；vm/GlobalMetadata.cpp: 无静态构造时初始置位")]);
         yield return Op("InitializeClassPrecise", [klass], RuntimeValueKind.Void, RuntimeWidth.None, RuntimeHeapEffect.ArbitraryManagedCode,
             RuntimeObservation.IdempotentEvent, "", "RunClassConstructor", "保持精确初始化时机，必要时写 RunClassConstructor", "vm/Runtime.cpp: Runtime::ClassInit → Class::GetCCtor → Runtime::Invoke → Exception::GetTypeInitializationException → Class::SetClassInitializationError → Exception::Raise；缓存也可来自 vm/Class.cpp: SetupFieldsLocked / InitLocked 的 TypeLoadException", ["System.TypeInitializationException", "System.TypeLoadException", "System.NotSupportedException"],
-            pointers: [new("class", RuntimeAccess.ReadWrite, RuntimeMemoryDomain.Monotone, new(RuntimeExtentKind.Unknown, "类构造状态与失败缓存"), new(RuntimeConditionKind.StateNotEstablished, "类构造未完成"))], idempotence: cctor, post: [cctor], upperBound: false, managedCode: "当前线程执行任意静态构造，可改写既有对象与静态字段；异常包装为 TypeInitializationException");
+            pointers: [new("class", RuntimeAccess.ReadWrite, RuntimeMemoryDomain.Monotone, new(RuntimeExtentKind.Unknown, "类构造状态与失败缓存"), new(RuntimeConditionKind.StateNotEstablished, "类构造未完成"))], idempotence: cctor, post: [cctor], upperBound: false, managedCode: "当前线程执行任意静态构造，可改写既有对象与静态字段；异常包装为 TypeInitializationException") with { RelaxedClassInput = "class" };
         yield return Op("InitializeClassBeforeFieldInit", [klass], RuntimeValueKind.Void, RuntimeWidth.None, RuntimeHeapEffect.ArbitraryManagedCode,
             RuntimeObservation.Unobservable, "", "EraseBeforeFieldInit", "在 beforefieldinit 契约下消去显式时机", "vm/Runtime.cpp: Runtime::ClassInit → Invoke(cctor) → Exception::GetTypeInitializationException / Raise；beforefieldinit 不消除静态构造的堆改写", ["System.TypeInitializationException", "System.TypeLoadException", "System.NotSupportedException"], pointers: [new("class", RuntimeAccess.ReadWrite, RuntimeMemoryDomain.Monotone, new(RuntimeExtentKind.Unknown, "类构造状态与失败缓存"), new(RuntimeConditionKind.StateNotEstablished, "类构造未完成"))], post: [cctor],
-            preconditions: "必须由类型元数据证明 beforefieldinit；目录不从同一符号推断此事实", upperBound: false, managedCode: "同精确类初始化，beforefieldinit 只影响事件时机");
+            preconditions: "必须由类型元数据证明 beforefieldinit；目录不从同一符号推断此事实", upperBound: false, managedCode: "同精确类初始化，beforefieldinit 只影响事件时机") with { RelaxedClassInput = "class" };
         var ready = Fact("ClassReady", "类布局初始化成功", "正常返回", Field("class", "Il2CppClass", "initialized_and_no_error"));
         yield return Op("EnsureClassReady", [klass], RuntimeValueKind.Class, RuntimeWidth.Pointer, RuntimeHeapEffect.MayWrite,
             RuntimeObservation.IdempotentEvent, "", "EnsureClassReady", "布局就绪由托管运行时承担；删除须证明成功状态", "vm/ClassInlines.cpp: InitFromCodegenSlow → vm/Class.cpp: Class::Init / InitLocked → SetupInterfacesLocked / SetupMethodsLocked / SetupVTable / SetupFieldsLocked / SetupEventsLocked / SetupPropertiesLocked / SetupNestedTypesLocked；不调用输入类 cctor；缓存错误经 vm/Exception.cpp: Raise → PrepareExceptionForThrow 修改既有异常堆栈", ["System.TypeLoadException", "System.TypeInitializationException", "System.NotSupportedException"],

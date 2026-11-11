@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using Cpp2CS.Pipeline;
@@ -31,25 +32,31 @@ internal static class PipelineCorpusChecks
         var byId = report.Methods.ToDictionary(m => m.Identity);
         using var methods = InputCorpusChecks.Json(truth, "methods.json");
         using var cases = InputCorpusChecks.Json(truth, "cases.json");
-        using var resolver = new DefaultAssemblyResolver();
-        resolver.AddSearchDirectory(Path.Combine(corpus, "artifacts", "ManagedStripped"));
-        var metrics = new Dictionary<string, MethodMetric>();
+        var metrics = new ConcurrentDictionary<string, MethodMetric>();
         var options = new MetricOptions();
-        foreach (var group in methods.RootElement.EnumerateArray().GroupBy(m => m.GetProperty("assembly").GetString()!))
+        var workers = Environment.ProcessorCount;
+        var partitions = methods.RootElement.EnumerateArray().GroupBy(m => m.GetProperty("assembly").GetString()!)
+            .SelectMany(group => group.Select((row, i) => (row, i)).GroupBy(x => x.i % workers)
+                .Select(part => (Assembly: group.Key, Rows: part.Select(x => x.row).ToArray()))).ToArray();
+        Parallel.ForEach(partitions, new ParallelOptions { MaxDegreeOfParallelism = workers }, partition =>
         {
-            using var reference = ModuleDefinition.ReadModule(Path.Combine(corpus, "artifacts", "ManagedStripped", group.Key), new ReaderParameters { AssemblyResolver = resolver });
-            using var tested = ModuleDefinition.ReadModule(Path.Combine(output, group.Key));
+            // Cecil 的解析缓存可变；每个分区独立加载，两侧执行世界仍由逐方法对照创建。
+            using var resolver = new DefaultAssemblyResolver();
+            resolver.AddSearchDirectory(Path.Combine(corpus, "artifacts", "ManagedStripped"));
+            using var reference = ModuleDefinition.ReadModule(Path.Combine(corpus, "artifacts", "ManagedStripped", partition.Assembly), new ReaderParameters { AssemblyResolver = resolver });
+            using var tested = ModuleDefinition.ReadModule(Path.Combine(output, partition.Assembly));
             var index = tested.GetTypes().SelectMany(t => t.Methods).ToDictionary(IlMetrics.Identity);
-            var comparisonSession = new Execution.CilComparison.Session();
-            foreach (var row in group)
+            var modelFactory = Execution.CecilModel.Factory(reference, tested);
+            foreach (var row in partition.Rows)
             {
                 var id = row.GetProperty("id").GetString()!;
                 var method = IlCompareCommand.ReferenceMethod(reference, row);
                 var recovered = byId.GetValueOrDefault(id);
                 var candidate = recovered?.Status == MethodStatus.Complete ? index.GetValueOrDefault(IlMetrics.Identity(method)) : null;
-                metrics.Add(id, IlMetrics.Compare(method, candidate, options, comparisonSession));
+                if (!metrics.TryAdd(id, IlMetrics.Compare(method, candidate, options, modelFactory)))
+                    throw new InvalidDataException("真值方法身份重复。");
             }
-        }
+        });
         var table = new StringBuilder("| 方法 | 管线状态 | IL 对照 |\n|---|---|---|\n");
         foreach (var row in cases.RootElement.EnumerateArray())
         {

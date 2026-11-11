@@ -158,7 +158,7 @@ public sealed class RecoverySession
                 [recovery.Name] = (double)recoveryTicks / Stopwatch.Frequency, ["输出"] = outputWatch.Elapsed.TotalSeconds,
                 ["不返回分析"] = analysisAlreadyCached ? 0 : analysisTiming.Seconds ?? 0 },
             inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64)) { Source = source };
-        File.WriteAllText(Path.Combine(request.Output, "recovery.json"), RecoveryReport.Json(report));
+        using (var destination = File.Create(Path.Combine(request.Output, "recovery.json"))) RecoveryReport.Write(destination, report);
         return report;
     }
     private static StageResult<TOut> Invoke<TIn, TOut>(IMethodStage<TIn, TOut> stage, TIn input, MethodContext context, out long ticks) where TOut : class

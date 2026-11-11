@@ -49,7 +49,8 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
             _ => BindingEntryKind.Wrapper,
         };
         var types = parts.Types;
-        var result = new IntegerLowering(input, MethodRef.Open(context.Method), parts.Binder,
+        var transformed = StructureRecovery.Run(input, context, parts.Binder, kind, parts.Types.Layouts);
+        var result = new IntegerLowering(transformed.Function, MethodRef.Open(context.Method), parts.Binder,
             types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec).Run(kind);
         if (result.Body is { } candidate)
         {
@@ -77,6 +78,7 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
                     new("lowering.BitRepresentation", "匹配核心库缺少同宽浮点位重解释方法")));
             }
         }
+
         return result.Body is { } body ? new Completed<ManagedBody>(body)
             : new Missing<ManagedBody>(new(Name, result.Failure!.Position == 0 ? context.Entry.Address : result.Failure.Position,
                 result.Failure.Kind.ToString(), result.Failure.Reason));

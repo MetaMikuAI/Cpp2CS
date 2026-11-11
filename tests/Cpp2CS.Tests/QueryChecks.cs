@@ -106,6 +106,14 @@ internal static class QueryChecks
             return value.IsSuccess ? Outcome<int>.Success(self.Value | value.Value) : value.Propagate<int>();
         }
     }
+    private sealed class Ring(int size) : Query<int, int>
+    {
+        public override Outcome<int> Compute(QueryContext context, int key)
+        {
+            var next = context.Get(this, (key + 1) % size);
+            return next.IsSuccess ? Outcome<int>.Success(next.Value | (key == 0 ? 1 : 0)) : next;
+        }
+    }
     private sealed class Bits : ILattice<int>
     {
         public int Bottom => 0;
@@ -226,6 +234,16 @@ internal static class QueryChecks
         a.True(fp.Get(outside, 7).Value == 3 && fp.Get(right, 7).Value == 3, "两种查询动态键，组外只见收敛值");
         var reversed = new QueryContext(snapshot, null, Group(100));
         a.True(reversed.Get(right, 7).Value == 3 && reversed.Get(left, 7).Value == 3, "请求次序和记录模式不影响结果");
+        var ring = new Ring(512);
+        foreach (int start in new[] { 0, 251 })
+        {
+            var ringContext = new QueryContext(Snapshot(), null, new FixedPointGroup(100_000,
+                FixedPointMember.Create(ring, _ => new Bits())));
+            a.True(ringContext.Get(ring, start).Value == 1 && Enumerable.Range(0, 512).All(k => ringContext.Get(ring, k).Value == 1),
+                "循环中的事实传播到全部成员，与首次请求位置无关");
+            a.True(ringContext.Statistics[ring].Computations <= 512 * 3,
+                "单个事实沿循环传播只重算依赖者，计算次数随边数线性增长");
+        }
         var limited = new QueryContext(snapshot, null, Group(1));
         a.True(limited.Get(left, 7).Why is { Code: "query.fixed-point", Cause.Code: "query.fixed-point-limit" }, "组按依赖步数限制");
         a.True(!limited.Get(right, 7).IsSuccess, "失败组不发布部分结果");
@@ -318,6 +336,7 @@ internal static class QueryChecks
         var identity = new IdentityQuery();
         var context = new QueryContext(snapshot);
         for (var i = 0; i < 100_000; i++) context.Get(identity, i);
+        for (var i = 0; i < 100_000; i++) context.Get(identity, 42);
         long sum = 0;
         var timer = new Stopwatch();
         var allocated = GC.GetAllocatedBytesForCurrentThread();
@@ -325,7 +344,7 @@ internal static class QueryChecks
         for (var i = 0; i < 5_000_000; i++) sum += context.Get(identity, 42).Value;
         timer.Stop();
         var bytes = GC.GetAllocatedBytesForCurrentThread() - allocated;
-        a.True(sum == 210_000_000 && bytes == 0, "命中零分配");
+        a.True(sum == 210_000_000 && bytes == 0, $"命中零分配：sum={sum} bytes={bytes}");
         Console.WriteLine($"查询性能：命中 {timer.Elapsed.TotalNanoseconds / 5_000_000:F1} ns/次，{bytes / 5_000_000.0:F1} B/次");
         // 隔离前面的百万层和映像检查留下的垃圾；扩容与本批次 GC 仍计入测量。
         var timings = new double[5];

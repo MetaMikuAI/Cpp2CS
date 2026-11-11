@@ -16,22 +16,7 @@ internal sealed record CilComparisonResult(CilComparisonStatus Status, int Compl
 /// <summary>有限合成输入上的 IL 对照；一致只表示除 NaN 跳过外的请求用例全部完成且轨迹相同。</summary>
 internal static partial class CilComparison
 {
-    /// <summary>固定模块对内复用元数据；执行世界、输入和预算仍逐方法新建。模块在会话内不可修改。</summary>
-    internal sealed class Session
-    {
-        private CecilModel? model;
-        private ModuleDefinition? leftModule, rightModule;
-        public CecilModel Model(MethodDefinition left, MethodDefinition right)
-        {
-            if (leftModule != left.Module || rightModule != right.Module) Reset();
-            leftModule = left.Module; rightModule = right.Module;
-            return model ??= new CecilModel(left.Module, right.Module);
-        }
-        public void Reset() => model = null;
-    }
-    public static CilComparisonResult Compare(MethodDefinition left, MethodDefinition right, int cases = 32, int firstSeed = 0, int stepLimit = 1_000_000) =>
-        Compare(left, right, cases, firstSeed, stepLimit, null);
-    internal static CilComparisonResult Compare(MethodDefinition left, MethodDefinition right, int cases, int firstSeed, int stepLimit, Session? session)
+    public static CilComparisonResult Compare(MethodDefinition left, MethodDefinition right, int cases = 32, int firstSeed = 0, int stepLimit = 1_000_000, Func<CecilModel>? modelFactory = null)
     {
         if (cases <= 0 || stepLimit <= 0) return new(CilComparisonStatus.Inconclusive, 0, null, "用例数和步数必须为正") { ReasonKind = ComparisonReason.InvalidRequest };
         var completed = 0;
@@ -46,7 +31,7 @@ internal static partial class CilComparison
             if (!left.HasBody || !right.HasBody || left.Body.Instructions.Count == 0 || right.Body.Instructions.Count == 0) throw new Unsupported("方法没有 CIL 方法体", ComparisonReason.MissingBody);
             if (left.HasGenericParameters || left.DeclaringType.HasGenericParameters || right.HasGenericParameters || right.DeclaringType.HasGenericParameters)
                 throw new Unsupported("入口方法需要封闭的泛型实参", ComparisonReason.GenericDefinition);
-            var model = session?.Model(left, right) ?? new CecilModel(left.Module, right.Module);
+            var model = modelFactory is null ? new CecilModel(left.Module, right.Module) : modelFactory();
             var l = model.Method(left); var r = model.Method(right);
             if (!ManagedValues.ArgumentTypes(l).SequenceEqual(ManagedValues.ArgumentTypes(r)) || !l.Method.ReturnType.Equals(r.Method.ReturnType))
                 throw new Unsupported("两侧方法签名不对应");
@@ -87,8 +72,8 @@ internal static partial class CilComparison
                 ? Result(CilComparisonStatus.Inconclusive, null, "所有用例均因 NaN 跳过", ComparisonReason.NaN)
                 : Result(CilComparisonStatus.Match, null, null);
         }
-        catch (AssemblyResolutionException e) { session?.Reset(); return Result(CilComparisonStatus.Inconclusive, seed, $"缺少引用程序集：{e.AssemblyReference}", ComparisonReason.MissingReference); }
-        catch (Unsupported e) { if (e.Kind != ComparisonReason.TypeMismatch) session?.Reset(); return Result(CilComparisonStatus.Inconclusive, seed, e.Message, e.Kind); }
+        catch (AssemblyResolutionException e) { return Result(CilComparisonStatus.Inconclusive, seed, $"缺少引用程序集：{e.AssemblyReference}", ComparisonReason.MissingReference); }
+        catch (Unsupported e) { return Result(CilComparisonStatus.Inconclusive, seed, e.Message, e.Kind); }
     }
     public static CilComparisonResult Compare(string leftAssembly, string rightAssembly, string type, string method, int cases = 32)
     {

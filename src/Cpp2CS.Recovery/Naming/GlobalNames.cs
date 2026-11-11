@@ -61,16 +61,18 @@ public sealed class NamingSurvey(CallNamingQuery calls, IMetadataSlotDecoder dec
         // 读取结果的直接使用沿纯项与合流传播；任何非分支根使用均否定凭据。
         var badReads = new HashSet<ReadIdentity>();
         var testedReads = new HashSet<ReadIdentity>();
+        var merges = function.Blocks.SelectMany(b => b.Merges).ToDictionary(m => m.Identity);
+        var uses = new HashSet<(Term Value, bool Address, bool Condition)>();
         void Use(Term value, bool addressUse = false, bool condition = false)
         {
-            var pending = new Stack<Term>(); var seen = new HashSet<Term>(); pending.Push(value);
+            var pending = new Stack<Term>(); pending.Push(value);
             while (pending.TryPop(out var t))
             {
-                if (!seen.Add(t)) continue;
+                if (!uses.Add((t, addressUse, condition))) continue;
                 if (t.Identity is ResultAtom { Definition: ReadIdentity id }) (condition ? testedReads : badReads).Add(id);
                 foreach (var child in t.Operands) pending.Push(child);
                 if (t.Identity is ResultAtom { Definition: MergeIdentity merge })
-                    foreach (var input in function.Blocks.SelectMany(b => b.Merges).Single(m => m.Identity == merge).Inputs) pending.Push(input.Value);
+                    foreach (var input in merges[merge].Inputs) pending.Push(input.Value);
                 if (!addressUse && t.Width == function.AddressWidth && Address(c, t, 8) is { } address) escaped.Add(address);
             }
         }

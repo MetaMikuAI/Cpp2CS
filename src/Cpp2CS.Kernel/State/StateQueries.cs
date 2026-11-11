@@ -43,12 +43,31 @@ public sealed class IndexQuery : Query<int, StateIndex>
 
 /// <summary>每一位的到达来源集合按包含关系增长；来源是有限的写入位或改写原子。</summary>
 public readonly record struct BitSource(Term Value, int Bit);
-public sealed record ReachingBits(ImmutableArray<ImmutableHashSet<BitSource>> Bits);
+public sealed record ReachingBits(ImmutableArray<BitSourceSet> Bits);
 internal sealed class BitsLattice(int width) : ILattice<ReachingBits>
 {
-    public ReachingBits Bottom { get; } = new(Enumerable.Range(0, width).Select(_ => ImmutableHashSet<BitSource>.Empty).ToImmutableArray());
-    public ReachingBits Join(ReachingBits a, ReachingBits b) => new(a.Bits.Select((s, i) => s.Union(b.Bits[i])).ToImmutableArray());
-    public bool LessOrEqual(ReachingBits a, ReachingBits b) => a.Bits.Select((s, i) => s.IsSubsetOf(b.Bits[i])).All(v => v);
+    private static readonly ImmutableArray<BitsLattice> common = Enumerable.Range(1, 128).Select(w => new BitsLattice(w)).ToImmutableArray();
+    public static BitsLattice ForWidth(int width) => width is > 0 and <= 128 ? common[width - 1] : new(width);
+    public ReachingBits Bottom { get; } = new(ImmutableArray.CreateRange(new BitSourceSet[width]));
+    // 单项直接比较；多项集合沿用不可变实例，未增长时不分配。
+    public ReachingBits Join(ReachingBits a, ReachingBits b)
+    {
+        if (ReferenceEquals(a, Bottom) || ReferenceEquals(a, b)) return b;
+        ImmutableArray<BitSourceSet>.Builder? changed = null;
+        for (int i = 0; i < a.Bits.Length; i++)
+        {
+            var value = a.Bits[i].Same(b.Bits[i]) ? a.Bits[i] : a.Bits[i].Union(b.Bits[i]);
+            if (value.Same(a.Bits[i])) continue;
+            changed ??= a.Bits.ToBuilder(); changed[i] = value;
+        }
+        return changed is null ? a : new(changed.ToImmutable());
+    }
+    public bool LessOrEqual(ReachingBits a, ReachingBits b)
+    {
+        if (ReferenceEquals(a, Bottom) || ReferenceEquals(a, b)) return true;
+        for (int i = 0; i < a.Bits.Length; i++) if (!a.Bits[i].IsSubsetOf(b.Bits[i])) return false;
+        return true;
+    }
 }
 
 /// <summary>查询实例可供多个快照复用；上下文必须登记 Group。</summary>
@@ -59,8 +78,10 @@ public sealed class StateQueries
     public AliasQuery Alias { get; }
     public CallEffectQuery Effects { get; }
     public IndexQuery Index { get; } = new();
+    internal OutgoingExtentQuery OutgoingExtent { get; }
     public ReachingQuery Reaching { get; }
     public BitSourcesQuery BitSources { get; }
+    public BitRangeSourcesQuery BitRanges { get; }
     public ValueAtQuery ValueAt { get; }
     public ReadQuery Read { get; }
     public ResolveQuery Resolve { get; }
@@ -72,10 +93,11 @@ public sealed class StateQueries
     public StateQueries(ICallEffectSource? effects = null, long stepLimit = 10_000_000, Cpp2CS.Native.Images.IImage? image = null)
     {
         Contents = image is null ? null : ImageContents.Of(image);
+        OutgoingExtent = new(Locations);
         Escapes = new(Locations); Alias = new(Escapes); Effects = new(effects ?? new UnknownCallEffects());
-        Reaching = new(this); BitSources = new(this); ValueAt = new(this); Read = new(this); Resolve = new(this); MergeInputs = new(this); CallerUses = new(this);
-        Group = new(stepLimit, FixedPointMember.Create(Reaching, k => new BitsLattice(k.Location.Width)),
-            FixedPointMember.Create(BitSources, _ => new SourceLattice()));
+        Reaching = new(this); BitSources = new(this); BitRanges = new(this); ValueAt = new(this); Read = new(this); Resolve = new(this); MergeInputs = new(this); CallerUses = new(this);
+        Group = new(stepLimit, FixedPointMember.Create(Reaching, k => BitsLattice.ForWidth(k.Location.Width)),
+            FixedPointMember.Create(BitRanges, k => BitsLattice.ForWidth(k.Width)));
     }
     public QueryContext CreateContext(NativeFunction function) => new(function, null, Group);
 
@@ -108,17 +130,9 @@ public sealed class StateQueries
             var size = effects.Value.StackArgumentBytes;
             if (size is null)
             {
-                // 连续的直接写入槽给出未知栈实参区的上界。
-                var end = start.Value.Offset.Value * 8;
-                var slots = new List<Location>();
-                foreach (var write in c.Snapshot.Blocks.SelectMany(b => b.Statements).OfType<MemoryWrite>())
-                {
-                    var l = c.Get(Locations, new(write.Address, write.Width)); if (!l.IsSuccess) return l.Propagate<(Term?, Overlap)>();
-                    if (l.Value.Root == start.Value.Root && l.Value.Offset is not null) slots.Add(l.Value);
-                }
-                foreach (var slot in slots.OrderBy(s => s.Offset))
-                    if (slot.Offset * 8 <= end && slot.Offset * 8 + slot.Width > end) end = slot.Offset!.Value * 8 + slot.Width;
-                size = (end - start.Value.Offset.Value * 8 + 7) / 8;
+                var extent = c.Get(OutgoingExtent, start.Value);
+                if (!extent.IsSuccess) return extent.Propagate<(Term?, Overlap)>();
+                size = extent.Value;
             }
             if (size < 0 || size > int.MaxValue / 8) return Outcome<(Term?, Overlap)>.Failure(new("state.call-area", "栈实参区大小无法表示。"));
             if (size > 0)
@@ -134,13 +148,33 @@ public sealed class StateQueries
         Outcome<(Term?, Overlap)>.Success((c.Snapshot.Terms.Atom(new MemoryAtom(l, id), l.Width), new(AliasKind.Overlap, 0, 0, l.Width)));
 }
 
+/// <summary>同一快照与区域起点的未知栈实参区上界只扫描一次；与被查询的读取位置无关。</summary>
+internal sealed class OutgoingExtentQuery(LocationQuery locations) : Query<Location, BigInteger>
+{
+    public override Outcome<BigInteger> Compute(QueryContext c, Location key)
+    {
+        // 连续的直接写入槽给出未知栈实参区的上界。
+        var end = key.Offset!.Value * 8;
+        var slots = new List<Location>();
+        foreach (var write in c.Snapshot.Blocks.SelectMany(b => b.Statements).OfType<MemoryWrite>())
+        {
+            var location = c.Get(locations, new(write.Address, write.Width));
+            if (!location.IsSuccess) return location.Propagate<BigInteger>();
+            if (location.Value.Root == key.Root && location.Value.Offset is not null) slots.Add(location.Value);
+        }
+        foreach (var slot in slots.OrderBy(s => s.Offset))
+            if (slot.Offset * 8 <= end && slot.Offset * 8 + slot.Width > end) end = slot.Offset!.Value * 8 + slot.Width;
+        return Outcome<BigInteger>.Success((end - key.Offset.Value * 8 + 7) / 8);
+    }
+}
+
 public sealed class ReachingQuery(StateQueries q) : Query<StateKey, ReachingBits>
 {
     public override Outcome<ReachingBits> Compute(QueryContext c, StateKey key)
     {
         var index = c.Get(q.Index, 0); if (!index.IsSuccess) return index.Propagate<ReachingBits>();
         var block = index.Value.Blocks[key.Point.Block]; var t = c.Snapshot.Terms;
-        var bits = Enumerable.Range(0, key.Location.Width).Select(_ => ImmutableHashSet<BitSource>.Empty).ToArray();
+        var bits = new BitSourceSet[key.Location.Width];
         var assigned = new bool[bits.Length];
         for (int i = key.Point.Before - 1; i >= 0; i--)
         {
@@ -148,13 +182,16 @@ public sealed class ReachingQuery(StateQueries q) : Query<StateKey, ReachingBits
             var d = q.Definition(c, block.Statements[i], key.Location); if (!d.IsSuccess) return d.Propagate<ReachingBits>();
             var (value, overlap) = d.Value;
             if (overlap.Kind == AliasKind.Disjoint) continue;
-            for (int j = 0; j < overlap.Width; j++)
+            for (int j = 0; j < overlap.Width;)
             {
-                var bit = overlap.LeftLow + j;
-                if (assigned[bit]) continue;
-                var sources = c.Get(q.BitSources, new(value!, overlap.RightLow + j));
+                if (assigned[overlap.LeftLow + j]) { j++; continue; }
+                int end = j + 1;
+                while (end < overlap.Width && !assigned[overlap.LeftLow + end]) end++;
+                var sources = c.Get(q.BitRanges, new(value!, overlap.RightLow + j, end - j));
                 if (!sources.IsSuccess) return sources.Propagate<ReachingBits>();
-                assigned[bit] = true; bits[bit] = sources.Value;
+                for (int k = j; k < end; k++)
+                { assigned[overlap.LeftLow + k] = true; bits[overlap.LeftLow + k] = sources.Value.Bits[k - j]; }
+                j = end;
             }
             if (assigned.All(v => v)) return Outcome<ReachingBits>.Success(new(bits.ToImmutableArray()));
         }
@@ -167,7 +204,8 @@ public sealed class ReachingQuery(StateQueries q) : Query<StateKey, ReachingBits
         foreach (var p in predecessors)
         {
             var previous = c.Get(this, new(p, key.Location)); if (!previous.IsSuccess) return previous;
-            for (int i = 0; i < bits.Length; i++) if (!assigned[i]) bits[i] = bits[i].Union(previous.Value.Bits[i]);
+            for (int i = 0; i < bits.Length; i++)
+                if (!assigned[i] && !bits[i].Same(previous.Value.Bits[i])) bits[i] = bits[i].Union(previous.Value.Bits[i]);
         }
         return Outcome<ReachingBits>.Success(new(bits.ToImmutableArray()));
     }
@@ -195,25 +233,27 @@ public sealed class ValueAtQuery(StateQueries q) : Query<StateKey, Term>
         }
         var index = c.Get(q.Index, 0); if (!index.IsSuccess) return index.Propagate<Term>();
         var block = index.Value.Blocks[key.Point.Block];
-        if (key.Point.Before == 0)
+        // 不相交的语句不改变读取值；一次跳过，避免每退一步都重建整个位来源查询。
+        for (int i = key.Point.Before - 1; i >= 0; i--)
         {
-            var predecessors = index.Value.Predecessors[block.Identity];
-            if (predecessors.Length == 1) return c.Get(this, new(predecessors[0], key.Location));
-            return Outcome<Term>.Success(t.Atom(new MemoryMerge(block.Identity, key.Location), key.Location.Width));
+            if (c.Step() is { } why) return Outcome<Term>.Failure(why);
+            var d = q.Definition(c, block.Statements[i], key.Location); if (!d.IsSuccess) return d.Propagate<Term>();
+            if (d.Value.Overlap.Kind == AliasKind.Disjoint) continue;
+            var prior = new StateKey(key.Point with { Before = i }, key.Location);
+            var overlap = d.Value.Overlap;
+            var written = c.Get(q.Resolve, t.Slice(d.Value.Value!, overlap.RightLow, overlap.Width)); if (!written.IsSuccess) return written;
+            if (overlap.Width == key.Location.Width) return written;
+            var previous = c.Get(this, prior); if (!previous.IsSuccess) return previous;
+            var parts = new List<Term>();
+            if (overlap.LeftLow > 0) parts.Add(t.Slice(previous.Value, 0, overlap.LeftLow));
+            parts.Add(written.Value);
+            var high = overlap.LeftLow + overlap.Width;
+            if (high < key.Location.Width) parts.Add(t.Slice(previous.Value, high, key.Location.Width - high));
+            return Outcome<Term>.Success(t.Concat(parts.ToArray()));
         }
-        var d = q.Definition(c, block.Statements[key.Point.Before - 1], key.Location); if (!d.IsSuccess) return d.Propagate<Term>();
-        var prior = new StateKey(key.Point with { Before = key.Point.Before - 1 }, key.Location);
-        if (d.Value.Overlap.Kind == AliasKind.Disjoint) return c.Get(this, prior);
-        var overlap = d.Value.Overlap;
-        var written = c.Get(q.Resolve, t.Slice(d.Value.Value!, overlap.RightLow, overlap.Width)); if (!written.IsSuccess) return written;
-        if (overlap.Width == key.Location.Width) return written;
-        var previous = c.Get(this, prior); if (!previous.IsSuccess) return previous;
-        var parts = new List<Term>();
-        if (overlap.LeftLow > 0) parts.Add(t.Slice(previous.Value, 0, overlap.LeftLow));
-        parts.Add(written.Value);
-        var high = overlap.LeftLow + overlap.Width;
-        if (high < key.Location.Width) parts.Add(t.Slice(previous.Value, high, key.Location.Width - high));
-        return Outcome<Term>.Success(t.Concat(parts.ToArray()));
+        var predecessors = index.Value.Predecessors[block.Identity];
+        if (predecessors.Length == 1) return c.Get(this, new(predecessors[0], key.Location));
+        return Outcome<Term>.Success(t.Atom(new MemoryMerge(block.Identity, key.Location), key.Location.Width));
     }
 }
 public sealed class ReadQuery(StateQueries q) : Query<ReadIdentity, Term>
@@ -258,34 +298,52 @@ public sealed class MergeInputsQuery(StateQueries q) : Query<MemoryMerge, Immuta
 }
 
 public readonly record struct BitRequest(Term Value, int Bit);
-internal sealed class SourceLattice : ILattice<ImmutableHashSet<BitSource>>
+/// <summary>单个位查询是批量位来源的视图；不在组外读取尚未收敛的近似值。</summary>
+public sealed class BitSourcesQuery(StateQueries q) : Query<BitRequest, BitSourceSet>
 {
-    public ImmutableHashSet<BitSource> Bottom => [];
-    public ImmutableHashSet<BitSource> Join(ImmutableHashSet<BitSource> a, ImmutableHashSet<BitSource> b) => a.Union(b);
-    public bool LessOrEqual(ImmutableHashSet<BitSource> a, ImmutableHashSet<BitSource> b) => a.IsSubsetOf(b);
-}
-/// <summary>纯位搬运穿透读取；运算仍是定义点的项，不沿循环展开表达式。</summary>
-public sealed class BitSourcesQuery(StateQueries q) : Query<BitRequest, ImmutableHashSet<BitSource>>
-{
-    public override Outcome<ImmutableHashSet<BitSource>> Compute(QueryContext c, BitRequest key)
+    public override Outcome<BitSourceSet> Compute(QueryContext c, BitRequest key)
     {
-        var term = key.Value; var bit = key.Bit;
-        if (term.Kind == TermKind.Slice) return c.Get(this, new(term.Operands[0], bit + term.SliceLow!.Value));
+        var range = c.Get(q.BitRanges, new(key.Value, key.Bit, 1));
+        return range.IsSuccess ? Outcome<BitSourceSet>.Success(range.Value.Bits[0]) : range.Propagate<BitSourceSet>();
+    }
+}
+public readonly record struct BitRangeRequest(Term Value, int Low, int Width);
+/// <summary>一段位共用依赖边；只访问请求范围，避免无关位的失败影响结果。</summary>
+public sealed class BitRangeSourcesQuery(StateQueries q) : Query<BitRangeRequest, ReachingBits>
+{
+    public override Outcome<ReachingBits> Compute(QueryContext c, BitRangeRequest key)
+    {
+        var term = key.Value;
+        if (key.Low < 0 || key.Width <= 0 || key.Low > term.Width - key.Width)
+            return Outcome<ReachingBits>.Failure(new("state.bit-range", "位来源范围超出值的宽度。"));
+        if (term.Kind == TermKind.Slice) return c.Get(this, new(term.Operands[0], key.Low + term.SliceLow!.Value, key.Width));
         if (term.Kind == TermKind.Concat)
+        {
+            var bits = ImmutableArray.CreateBuilder<BitSourceSet>(key.Width); int offset = 0;
             foreach (var part in term.Operands)
             {
-                if (bit < part.Width) return c.Get(this, new(part, bit));
-                bit -= part.Width;
+                int low = Math.Max(key.Low, offset), end = Math.Min(key.Low + key.Width, offset + part.Width);
+                if (low < end)
+                {
+                    var range = c.Get(this, new(part, low - offset, end - low));
+                    if (!range.IsSuccess) return range;
+                    bits.AddRange(range.Value.Bits);
+                }
+                offset += part.Width;
             }
+            return Outcome<ReachingBits>.Success(new(bits.MoveToImmutable()));
+        }
         if (term.Identity is ResultAtom { Definition: ReadIdentity id })
         {
-            var index = c.Get(q.Index, 0); if (!index.IsSuccess) return index.Propagate<ImmutableHashSet<BitSource>>();
+            var index = c.Get(q.Index, 0); if (!index.IsSuccess) return index.Propagate<ReachingBits>();
             var read = index.Value.Reads[id];
-            var l = c.Get(q.Locations, new(read.Read.Address, read.Read.Width)); if (!l.IsSuccess) return l.Propagate<ImmutableHashSet<BitSource>>();
+            var l = c.Get(q.Locations, new(read.Read.Address, read.Read.Width)); if (!l.IsSuccess) return l.Propagate<ReachingBits>();
             var reaching = c.Get(q.Reaching, new(read.Point, l.Value));
-            if (!reaching.IsSuccess) return reaching.Propagate<ImmutableHashSet<BitSource>>();
-            return Outcome<ImmutableHashSet<BitSource>>.Success(reaching.Value.Bits[bit]);
+            if (!reaching.IsSuccess) return reaching;
+            return Outcome<ReachingBits>.Success(new(reaching.Value.Bits.Slice(key.Low, key.Width)));
         }
-        return Outcome<ImmutableHashSet<BitSource>>.Success([new(term, bit)]);
+        var result = ImmutableArray.CreateBuilder<BitSourceSet>(key.Width);
+        for (int i = 0; i < key.Width; i++) result.Add(new(new(term, key.Low + i)));
+        return Outcome<ReachingBits>.Success(new(result.MoveToImmutable()));
     }
 }

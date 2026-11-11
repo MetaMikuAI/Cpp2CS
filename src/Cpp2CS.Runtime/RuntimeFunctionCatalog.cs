@@ -52,7 +52,11 @@ public sealed class RuntimeFunctionCatalog
     }
 
     /// <summary>按精确版本与目标取嵌入的目录，并合并同一目标的系统导入目录；两者各要求唯一匹配。</summary>
-    public static RuntimeFunctionCatalog Select(string unityVersion, string triple, string dataModel)
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string Version, string Triple, string DataModel), RuntimeFunctionCatalog> selected = new();
+    /// <summary>目录不可变；同一组键只解析一次内嵌资源。</summary>
+    public static RuntimeFunctionCatalog Select(string unityVersion, string triple, string dataModel) =>
+        selected.GetOrAdd((unityVersion, triple, dataModel), key => Parse(key.Version, key.Triple, key.DataModel));
+    private static RuntimeFunctionCatalog Parse(string unityVersion, string triple, string dataModel)
     {
         var assembly = typeof(RuntimeFunctionCatalog).Assembly;
         var runtime = new List<RuntimeFunctionCatalog>();

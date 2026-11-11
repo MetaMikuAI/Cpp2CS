@@ -28,6 +28,25 @@ internal sealed partial class CecilModel
             Fields = fields.Values.ToArray(), RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [] };
         checking = true;
     }
+    private CecilModel(CecilModel source)
+    {
+        types = new(source.types); methods = new(source.methods); fields = new(source.fields);
+        definitions = new(source.definitions); methodDefinitions = new(source.methodDefinitions); filled = new(source.filled);
+        modules = source.modules; Program = source.Program; checking = source.checking;
+    }
+    internal bool HasCompleteDefinitions => filled.Count == definitions.Count;
+    /// <summary>只复用完整填充的元数据；懒加载映射与对应性检查缓存逐方法隔离。</summary>
+    public static Func<CecilModel> Factory(params ModuleDefinition[] modules)
+    {
+        CecilModel? template = null;
+        return () =>
+        {
+            var model = template ?? new CecilModel(modules);
+            if (!model.HasCompleteDefinitions) return model;
+            template = model;
+            return new(model);
+        };
+    }
     private CecilModel(CecilModel source, MethodRef context)
     {
         types = source.types; methods = source.methods; fields = source.fields; definitions = source.definitions;
