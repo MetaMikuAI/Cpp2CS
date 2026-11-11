@@ -6,7 +6,11 @@ using Cpp2CS.Model;
 namespace Cpp2CS.Tests.Execution;
 
 /// <summary>合成环境不足以执行（缺类型、不支持的 helper 等）：该用例判为不可检查。</summary>
-internal sealed class Unsupported(string reason) : Exception(reason);
+public enum ComparisonReason { None, MissingReference, GenericDefinition, InputSynthesis, UnsupportedConstruct, NaN, StepBudget, CallDepthBudget, MissingBody, InvalidRequest }
+internal sealed class Unsupported(string reason, ComparisonReason kind = ComparisonReason.UnsupportedConstruct) : Exception(reason)
+{
+    public ComparisonReason Kind { get; } = kind;
+}
 
 /// <summary>
 /// 跨用例共用的方法身份与具体类型候选；方法身份是解释器的逻辑编号。

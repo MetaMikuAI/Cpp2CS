@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""调用已构建的检查程序；重任务锁由调用者持有。"""
+import json
+import os
+from pathlib import Path
+import sys
+
+if not 5 <= len(sys.argv) <= 8:
+    sys.exit("用法: il-compare reference.dll tested.dll methods.json output.json [cases] [steps] [first-seed]")
+os.environ["CPP2CS_IL_COMPARE_REQUEST"] = json.dumps(sys.argv[1:])
+runner = Path(__file__).resolve().parent.parent / "bin/Debug/net10.0/Cpp2CS.Tests.dll"
+os.execvp(os.environ.get("DOTNET", "dotnet"), [os.environ.get("DOTNET", "dotnet"), str(runner), "il-compare"])

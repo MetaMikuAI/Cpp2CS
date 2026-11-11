@@ -4,6 +4,11 @@ using Mono.Cecil.Cil;
 
 namespace Cpp2CS.Tests.Execution;
 
+internal sealed class ExecutionBudget(int steps)
+{
+    public int Remaining { get; set; } = steps;
+}
+
 internal enum StackKind { I4, I8, F, O, Struct }
 
 /// <summary>求值栈上的值：I4 保存 32 位位型，I8 为 64 位（含 native int），F 为 double，O 为对象或托管指针地址，Struct 保存不可变的值类型字节。</summary>
@@ -70,13 +75,15 @@ internal sealed class CilThrow(TypeRef type, ulong value = 0) : Exception(type.T
 [ShapeModel("CIL 基本语义", Basis = "ECMA-335 第 III 部分的指令语义；未知指令和未建模行为返回无法判定")]
 internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
 {
-    private const int StepLimit = 1_000_000;
-    private int remainingSteps;
+    public int StepLimit { get; init; } = 1_000_000;
+    public ExecutionCoverage? Coverage { get; set; }
+    public ExecutionBudget? CaseBudget { get; set; }
+    private ExecutionBudget budget = new(0);
     private ManagedTypes Types => index.Types;
 
     public CilSide Run(World world, MethodDefinition method, MethodRef tested, IReadOnlyList<StackValue> arguments)
     {
-        remainingSteps = StepLimit;
+        budget = CaseBudget ?? new ExecutionBudget(StepLimit);
         var side = new CilSide(world);
         world.Active = side;
         try
@@ -145,12 +152,13 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         TypeRef? constraint = null;
         for (var steps = 0; ; steps++)
         {
-            if (--remainingSteps < 0)
+            if (--budget.Remaining < 0)
             {
-                throw new Unsupported("CIL 步数预算耗尽");
+                throw new Unsupported("CIL 步数预算耗尽", ComparisonReason.StepBudget);
             }
             var at = pc;
             var instruction = instructions[pc++];
+            Coverage?.Visit(method, instruction);
             var operand = instruction.Operand;
             var callsBefore = side.CallEvents;
             try
@@ -541,6 +549,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 {
                     var targets = (Instruction[])operand;
                     var selector = (uint)Pop().Bits;
+                    Coverage?.Branch(method, instruction, selector < targets.Length ? (int)selector : targets.Length);
                     if (selector < targets.Length) pc = positions[targets[selector]];
                     break;
                 }
@@ -549,11 +558,18 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
                 {
                     var right = Pop();
                     var left = Pop();
-                    if (Branches(instruction.OpCode.Code, left, right)) pc = positions[(Instruction)operand];
+                    var taken = Branches(instruction.OpCode.Code, left, right);
+                    Coverage?.Branch(method, instruction, taken ? 1 : 0);
+                    if (taken) pc = positions[(Instruction)operand];
                     break;
                 }
-                case Code.Brtrue or Code.Brtrue_S: if (Pop().Bits != 0) pc = positions[(Instruction)operand]; break;
-                case Code.Brfalse or Code.Brfalse_S: if (Pop().Bits == 0) pc = positions[(Instruction)operand]; break;
+                case Code.Brtrue or Code.Brtrue_S or Code.Brfalse or Code.Brfalse_S:
+                {
+                    var taken = (Pop().Bits != 0) == (instruction.OpCode.Code is Code.Brtrue or Code.Brtrue_S);
+                    Coverage?.Branch(method, instruction, taken ? 1 : 0);
+                    if (taken) pc = positions[(Instruction)operand];
+                    break;
+                }
                 case Code.Leave or Code.Leave_S:
                     stack.Clear();
                     pc = positions[(Instruction)operand];
@@ -801,7 +817,7 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
 
     /// <summary>NaN 位型未由 CIL 规定；在可能被按位观察前报告无法判定。</summary>
     private static double FloatingResult(double result) => double.IsNaN(result)
-        ? throw new Unsupported("浮点 NaN 的符号和载荷未由 CIL 规定") : result;
+        ? throw new Unsupported("浮点 NaN 的符号和载荷未由 CIL 规定", ComparisonReason.NaN) : result;
 
     /// <summary>ECMA-335 III.3.5–3.15：条件分支等于比较加 brtrue 或 brfalse；浮点的 bge、ble 和无序比较配对，整数的是带符号比较。</summary>
     private static bool Branches(Code code, StackValue left, StackValue right)

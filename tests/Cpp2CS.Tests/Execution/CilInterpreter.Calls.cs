@@ -10,7 +10,7 @@ internal sealed partial class CilInterpreter
     {
         if (BodyModule is { } module && model.Body(callee, module) is { } body)
         {
-            if (depth >= 128) throw new Unsupported("CIL 调用深度预算耗尽");
+            if (depth >= 128) throw new Unsupported("CIL 调用深度预算耗尽", ComparisonReason.CallDepthBudget);
             depth++;
             try { return Execute(side, body, callee, values, transparent: true); }
             finally { depth--; }
