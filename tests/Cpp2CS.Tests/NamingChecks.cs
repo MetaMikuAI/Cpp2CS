@@ -77,6 +77,23 @@ internal static class NamingChecks
         merged.Blocks.Add(new(loop,[new(mergeId,mergeValue,[new(b,klass),new(loop,mergeValue)])],[],new Branch(t.Constant(1,1),loop,exit)));
         merged.Blocks.Add(function.Blocks[1]);
         a.True(names.CreateContext(merged.Freeze()).Get(names,mergeValue).Value.Name is EntityName,"循环合流的外部一致名字");
+        foreach (var mode in new[] { 0,1,2 })
+        {
+            bool conflict=mode==1;
+            var terms=new TermTable(); var block=new BlockIdentity();
+            var value=mode==2?terms.Undefined(64):terms.Atom(new EntryAtom(new(SlotKind.Integer)),64);
+            var klassInput=conflict?value:terms.Atom(new EntryAtom(new(SlotKind.Integer,1)),64);
+            var operation=catalog.Functions.First(f=>f.Operation.Name=="IsInstance" && f.Signature is not null);
+            var callQuery=new CallNamingQuery(binder,new Map([]),new RuntimeMap(operation),catalog);
+            var callId=new CallIdentity();
+            var graph=new FunctionBuilder(terms,block,64,new(terms.Atom(new RootAtom(AddressRoot.Frame),64)));
+            graph.Blocks.Add(new(block,[],[new Call(callId,new ImageFunction(1),[new(new(SlotKind.Integer),value),new(new(SlotKind.Integer,1),klassInput)],
+                [new(new(SlotKind.Integer),terms.Atom(new ResultAtom(callId),64))])],new Return([])));
+            var memory=new StateQueries(); var query=new ValueNamingQuery(memory,callQuery,NamingFacts.Empty,spec,binder);
+            var context=query.CreateContext(graph.Freeze()); var found=context.Get(query,value);
+            a.True(found.IsSuccess && (mode!=0?found.Value.Kind==ValueKind.Unnamed:found.Value.Kind==ValueKind.ManagedReference),"运行时输入的种类、冲突与未定义位："+mode);
+            if (!conflict) a.True(context.Get(query,klassInput).Value.Record=="Il2CppClass","运行时输入的类指针种类");
+        }
         return a.Finish("命名查询");
     }
 }

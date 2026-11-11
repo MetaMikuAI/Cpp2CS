@@ -27,10 +27,22 @@ public sealed record NamedValue(ValueKind Kind, ValueName? Name, string? Record 
 public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, NamingFacts facts, RuntimeSpec spec,
     MethodBinder binder, SignatureBinding? entry = null) : Query<Term, NamedValue>
 {
+    private readonly RuntimeInputKindsQuery inputKinds = new(state,calls);
     public QueryContext CreateContext(NativeFunction function) => new(function, null, state.Group,
         new FixedPointGroup(1_000_000, FixedPointMember.Create(this, _ => new NameLattice())));
     private static Outcome<NamedValue> Yes(NamedValue value) => Outcome<NamedValue>.Success(value);
     public override Outcome<NamedValue> Compute(QueryContext c, Term key)
+    {
+        var result=Definition(c,key);
+        if (!result.IsSuccess || result.Value.Kind!=ValueKind.Unnamed) return result;
+        var resolved=c.Get(state.Resolve,key); if (!resolved.IsSuccess) return result;
+        var inputs=c.Get(inputKinds,0); if (!inputs.IsSuccess) return inputs.Propagate<NamedValue>();
+        if (!inputs.Value.TryGetValue(resolved.Value,out var kind)) return result;
+        var name=new RuntimeInputName(resolved.Value,kind);
+        return Yes(RuntimeValue(kind,name));
+    }
+
+    private Outcome<NamedValue> Definition(QueryContext c, Term key)
     {
         // 先处理签名绑定出的完整值（窄参数可以是入口槽的切片）。
         if (entry is not null)
@@ -58,6 +70,7 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
         if (!resolved.IsSuccess) return Yes(new(ValueKind.Unnamed, null, Why: resolved.Why));
         if (resolved.Value != key) return c.Get(this, resolved.Value);
         if (key.Identity is MemoryAtom memory) return Read(c, memory.Location);
+        if (key.Identity is EdgeReadAtom projected) return Read(c, projected.Location);
         if (key.Kind == TermKind.Slice && key.Operands[0].Identity is MemoryAtom bits)
             return Read(c, bits.Location with { Width = key.Width }, key.SliceLow!.Value);
         if (key.Identity is MemoryMerge || key.Identity is ResultAtom { Definition: MergeIdentity }) return Merge(c, key);
@@ -72,16 +85,7 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
                 if (function.Operation.Result.ReturnInput is { } input && call.Inputs?.GetValueOrDefault(input)?.Source is TermSource same)
                     return c.Get(this, same.Term);
                 var name = new CallResultName(id, null, function.Operation.Name);
-                return Yes(function.Operation.Result.Kind switch
-                {
-                    RuntimeValueKind.Class => new(ValueKind.RuntimePointer, name, "Il2CppClass"),
-                    RuntimeValueKind.Method => new(ValueKind.RuntimePointer, name, "MethodInfo"),
-                    RuntimeValueKind.Metadata => new(ValueKind.RuntimePointer, name),
-                    RuntimeValueKind.ManagedReference => new(ValueKind.ManagedReference, name, "Il2CppObject"),
-                    RuntimeValueKind.Integer or RuntimeValueKind.Boolean => new(ValueKind.Integer, name),
-                    RuntimeValueKind.ManagedAddress => new(ValueKind.ManagedAddress, name),
-                    _ => new(ValueKind.NativePointer, name)
-                });
+                return Yes(RuntimeValue(function.Operation.Result.Kind,name));
             }
             if (call.Candidates is { } candidates)
             {
@@ -101,6 +105,16 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
         }
         return Yes(NamedValue.Unknown("naming.definition", "定义没有可用的签名或运行时规格名字。"));
     }
+    private static NamedValue RuntimeValue(RuntimeValueKind kind, ValueName name) => kind switch
+    {
+        RuntimeValueKind.Class => new(ValueKind.RuntimePointer,name,"Il2CppClass"),
+        RuntimeValueKind.Method => new(ValueKind.RuntimePointer,name,"MethodInfo"),
+        RuntimeValueKind.Metadata => new(ValueKind.RuntimePointer,name),
+        RuntimeValueKind.ManagedReference => new(ValueKind.ManagedReference,name,"Il2CppObject"),
+        RuntimeValueKind.Integer or RuntimeValueKind.Boolean => new(ValueKind.Integer,name),
+        RuntimeValueKind.ManagedAddress => new(ValueKind.ManagedAddress,name),
+        _ => new(ValueKind.NativePointer,name)
+    };
     private static NamedValue Typed(CType ctype, TypeRef? type, ValueName name)
     {
         if (type is not null && ManagedTypes.IsReferenceType(type)) return new(ValueKind.ManagedReference, name, type is ArrayRef ? "Il2CppArray" : ManagedTypes.PrimitiveName(type) == "String" ? "Il2CppString" : "Il2CppObject");

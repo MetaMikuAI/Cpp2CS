@@ -32,7 +32,8 @@ public sealed class Term
         Operands = operands;
     }
     internal int Order { get; }
-    internal bool ContainsUndefined { get; }
+    /// <summary>项的运算子图是否含未定义项；不判断运算的动态定义域。</summary>
+    public bool ContainsUndefined { get; }
     public TermTable Table { get; }
     public TermKind Kind { get; }
     public int Width { get; }

@@ -10,7 +10,7 @@ using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.Dispatch;
 
-public enum DispatchKind { Virtual, Delegate, Unresolved }
+public enum DispatchKind { Virtual, Delegate, Interface, Unresolved }
 public enum TargetShape { VtableSlot, ManagedField, MemoryMerge, ValueMerge, CallResult, ReadFromValueMerge, ReadFromCallResult, IndexedMemoryRead, MemoryRead, Other }
 /// <summary>Binding 保留原生实参（委托的 this 是 method_code）；托管调用接收者始终取 Receiver。</summary>
 public sealed record DispatchResult(DispatchKind Kind, TargetShape Shape, Term? Receiver = null,
@@ -24,11 +24,12 @@ public sealed record DispatchResult(DispatchKind Kind, TargetShape Shape, Term? 
 /// il2cpp-class-internals.h::VirtualInvokeData。
 /// 委托依据：生成代码 Invoke 内联体与 Multicast 桩；
 /// il2cpp-object-internals.h::Il2CppDelegate；vm/Type.cpp::SetClosedDelegateInvokeMethod。
-/// 接口快慢路径见 vm/ClassInlines.h/.cpp::GetInterfaceInvokeDataFromVTable，本查询不解析。
+/// 接口快慢路径见 vm/ClassInlines.h/.cpp::GetInterfaceInvokeDataFromVTable。
 /// </remarks>
 public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, ValueNamingQuery names,
     ManagedLocationQuery locations, MethodBinder binder, RuntimeSpec spec) : Query<CallIdentity, DispatchResult>
 {
+    private readonly InterfaceDataQuery interfaceData = new(state, calls, names, spec);
     public override Outcome<DispatchResult> Compute(QueryContext c, CallIdentity key)
     {
         var classified = c.Get(calls, key);
@@ -103,7 +104,24 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
             MemoryAtom { Location.Offset: null } => TargetShape.IndexedMemoryRead,
             MemoryAtom => TargetShape.MemoryRead, _ => TargetShape.Other
         };
-        return No(shape, "target-shape", "目标没有虚调用或委托调用所需的证据。");
+        var data = c.Get(interfaceData, new(target, site.Point, "methodPtr"));
+        if (!data.IsSuccess) return Yes(new(DispatchKind.Unresolved, shape, Why: data.Why));
+        var interfaceName = c.Get(names, data.Value.Interface);
+        if (!interfaceName.IsSuccess || interfaceName.Value.Name is not EntityName { Entity: ClassEntity { Type: DefinitionRef interfaceType } } || !interfaceType.Definition.IsInterface || Open(interfaceType))
+            return No(shape, "interface-name", "接口没有具体的元数据类型名字。");
+        var interfaceMethods = interfaceType.Definition.Methods.Where(m => m.Slot == data.Value.Slot && !m.IsStatic).ToArray();
+        if (interfaceMethods.Length != 1) return No(shape, "interface-slot-method", "接口槽号没有唯一方法。");
+        if (interfaceMethods[0].GenericParameters.Count != 0) return No(shape, "interface-generic-method", "泛型接口方法不在查询范围内。");
+        var interfaceMethod = new MethodRef(interfaceMethods[0], interfaceType.Arguments, []);
+        var interfaceBound = binder.Call(call, interfaceMethod, BindingEntryKind.Ordinary, c.Snapshot.Terms);
+        if (interfaceBound.Value is not { } interfaceBinding) return No(shape, "interface-binding", interfaceBound.Failure!.Detail);
+        if (Value(c, interfaceBinding.This, site.Point) != data.Value.Object) return No(shape, "interface-receiver", "接收者不是调用数据所属对象。");
+        var information = Value(c, interfaceBinding.MethodInformation, site.Point);
+        if (information is null) return No(shape, "interface-method-information", "隐藏方法信息未绑定。");
+        var infoData = c.Get(interfaceData, new(information, site.Point, "method"));
+        if (!infoData.IsSuccess || !interfaceData.Same(c, data.Value, infoData.Value))
+            return No(shape, "interface-method-information", "目标与隐藏方法信息不是同一接口调用数据。", infoData.Why);
+        return Yes(new(DispatchKind.Interface, shape, data.Value.Object, interfaceType, data.Value.Slot, interfaceMethod, interfaceBinding, data.Value));
     }
     private static bool Open(DefinitionRef type) => type.Definition.GenericParameters.Count != type.Arguments.Count || type.ContainsGenericParameter();
     private static MethodRef? SlotMethod(DefinitionRef type, long slot)

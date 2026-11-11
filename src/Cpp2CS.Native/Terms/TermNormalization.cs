@@ -174,6 +174,12 @@ public sealed partial class TermTable
         // (a-b)==0、(a^b)==0 均为 a==b。检查：equal-subtract、equal-xor。
         if (op == Equal && b.ConstantValue == 0 && (Is(a, Subtract) || Is(a, Xor)))
             return Op(Equal, 1, a.Operands[0], a.Operands[1]);
+        // (a+~b)==全一 等于 a==b，按相同位宽的模算术。检查：equal-complement-add。
+        if (op == Equal && b.ConstantValue == Mask(a.Width) && Is(a, Add))
+        {
+            if (Is(a.Operands[0], Not)) return Op(Equal, 1, a.Operands[0].Operands[0], a.Operands[1]);
+            if (Is(a.Operands[1], Not)) return Op(Equal, 1, a.Operands[0], a.Operands[1].Operands[0]);
+        }
         // (a+c1)==c2 = a==(c2-c1)，常量按位宽取模。检查：equal-add。
         if (op == Equal && b.ConstantValue is { } target && Is(a, Add) && a.Operands[1].ConstantValue is { } offset)
             return Op(Equal, 1, a.Operands[0], Number(target - offset, a.Width));
