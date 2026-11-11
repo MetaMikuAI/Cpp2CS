@@ -96,7 +96,7 @@ python3 corpus/build/check_symbols.py --methods corpus/cases/methods.json \
 
 ## 真值
 
-`truth/` 是独立工具，不加入解决方案。读取产物根目录，输出到另一个空目录；不构建语料，不修改输入，不抽取 DWARF 内联记录。依赖 Python 3.11+ 标准库、.NET 10、Mono.Cecil（沿用仓库集中版本）、GNU `c++filt` 和验收用的 `nm`。构建、抽取、验收均按 `AGENTS.local.md` 加同一把重任务锁；以下变量由调用者提供，不把机器路径写进脚本。
+`truth/` 是独立工具，不加入解决方案。读取产物根目录，输出到另一个空目录；不构建语料，不修改输入。`extract.py` 抽取 IL 与地址关系，`inline.py` 另行抽取 DWARF 内联记录并审计调用来源。依赖 Python 3.11+ 标准库、.NET 10、Mono.Cecil（沿用仓库集中版本）、GNU `c++filt` 和验收用的 `nm`。构建、抽取、验收均按 `AGENTS.local.md` 加同一把重任务锁；以下变量由调用者提供，不把机器路径写进脚本。
 
 ```sh
 "$DOTNET" build corpus/truth/Managed/Managed.csproj -nodeReuse:false -m:1
@@ -148,4 +148,56 @@ python3 corpus/truth/verify.py --input "$CORPUS_INPUT" --truth "$TRUTH_OUTPUT" \
 
 抽取时要求每个用例恰好一个 MethodDef、一个普通 C++ 定义、每个目标恰好一个定义符号，并核对完整前缀及 40 位哈希。原始 IL 由 `PEReader` 读取，独立用 Cecil 解码并重编码比较；字符串操作数不保留原字符串标记、泛型参数操作数可能丢失原 TypeSpec 标记，这两类不做字节重编码旁证，但仍完整抽取原始 IL。当前全部 42 个用例均能做独立字节核对。
 
-`verify.py` 核对两次输出全部文件逐字节相同，并用 `nm -S --defined-only` 独立核对全部用例的名字、地址和大小，另输出来自五个类别的抽查明细。报告不写回真值，避免改变可复现产物。完整方法体语义、IL 执行、内联记录及非 v31/非 ELF64 格式不在此工具的验证范围内。
+`verify.py` 核对两次输出全部文件逐字节相同，并用 `nm -S --defined-only` 独立核对全部用例的名字、地址和大小，另输出来自五个类别的抽查明细。报告不写回真值，避免改变可复现产物。完整方法体语义、IL 执行及非 v31/非 ELF64 格式不在此工具的验证范围内；内联记录另按下节验证。
+
+### 内联记录与完整度审计
+
+`inline.py` 消费已有真值及其匹配的产物，输出独立目录，不改 `cases.json` 等已有文件。依赖 Python 3.11+、pyelftools 0.32、Capstone 5.0.6；Python 包安装到仓库外的虚拟环境。两个目标均用 Capstone 解码，避免依赖本机 objdump 的目标支持。调用者须按本机约定加重任务锁，以下命令省略锁前缀。
+
+```sh
+"$TRUTH_PYTHON" corpus/truth/inline.py --input "$CORPUS_INPUT" --truth "$TRUTH_INPUT" \
+  --output "$INLINE_OUTPUT" --cache "$INLINE_CACHE"
+"$TRUTH_PYTHON" corpus/truth/inline.py --input "$CORPUS_INPUT" --truth "$TRUTH_INPUT" \
+  --output "$INLINE_REPEAT" --cache "$INLINE_REPEAT_CACHE"
+```
+
+输出目录必须为空，不能在输入产物或已有真值目录中。缓存目录与输出分开，建议置于被忽略的目录。缓存按调试库、工具源码、函数表、生成表和映射表的 SHA-256 失效；按编译单元释放解析缓存，避免同时驻留两目标的 DWARF。已有真值的输出校验和及产物清单逐项核对，确保源码、机器码、调试库来自同一批输入。
+
+格式版本为 1，JSON 排序、缩进、地址及换行约定同前。每个目标各有三张表，另有两个公共文件：
+
+| 文件 | 内容 |
+|---|---|
+| `inlines.<目标>.json` | 每个有非空 `method_id` 映射且有定义符号的生成函数一项，包含调用器、共享入口等；共享入口按 `cpp_name` 计一次。`cpp_name`、`method_ids`、`address`、`size` 关联原有表。`debug_function_found` 区分找不到 DWARF 函数与找到函数但没有内联。`records` 无记录时为空。 |
+| `inline-cases.<目标>.json` | 原有 `cases.json` 每个用例一项，带 `case`、`method_id` 及上述函数记录；按普通入口 `mapping.cpp_name` 精确关联，不需要修改原用例表。 |
+| `inline-audit.<目标>.json` | 每函数的源码调用位置、直接机器调用、尾调用、名称匹配状态和额外内联来源。`calls` 每项含 `name/file/line/known/status`；`matching_inline_ids` 是同名记录，`callsite_inline_ids` 进一步要求调用文件与行号一致。`candidate_class` 沿用生成表的 `kind`，不自动判定删除原因。`direct_calls` 保存调用地址、目标地址、候选符号名、`tail`、`via_plt`。`extra_inline` 标出不直接见于函数体的记录：嵌套内联、头文件/模板/宏候选或未解释项。 |
+| `inline-summary.json` | 双目标的全部函数及用例子集统计、源码可用函数数、DWARF 函数数、记录数和候选比例。 |
+| `inline-manifest.json` | 版本、工具与依赖版本、输入真值校验和、输出校验和。实际产物由输入真值清单及调试库 SHA-256 固定；不记录机器路径和时间戳。 |
+
+一条 `records` 记录含：
+
+- `id`：该 `.debug_info` 内 DIE 的绝对节偏移，`parent` 为最近的外层内联 DIE，顶层为 null；不是跨构建身份。
+- `name/linkage_name`：沿 `abstract_origin/specification` 读取的原名及链接名。`generated_name` 精确关联 `generated.json` 的名字或链接名；`method_ids` 关联 `mappings.json`。没有生成源码定义的项标为 `origin=runtime_or_library`，不猜托管身份。
+- `ranges`：全部半开地址段，保留多段、空段及重叠，不推断连续区域或互斥分区。读取 `low_pc/high_pc` 或 range list，处理基址选择。
+- `call_file/call_line/call_file_index`：调用来源；`declaration_file/declaration_line`：被内联定义来源。文件只保留文件名，避免泄漏编译机路径；`cu_offset` 与文件表索引可用于回查同名文件。缺少属性为 null。
+
+**统计口径。** 源码扫描先屏蔽字符串和注释，再按已有定义范围查找普通调用、模板调用及函数指针转换后的具名调用。`known` 表示名字精确存在于生成表（该表也含原生符号），不是推测的托管方法。分母 `known_calls` 是所有定义位置的已知名字调用出现次数，包含同名调用的不同源码位置；不是动态执行次数、唯一被调方法数或内联事件数。状态优先级为直接调用 `direct`、同名内联 `inline`、两者皆无的 `missing_candidate`。只证明函数内存在同名证据，不证明每个调用位置都保留；需另看 `callsite_inline_ids`。候选比例是 `missing_candidate / known_calls`，不是已经证实的调试信息漏记率。
+
+未知名字匹配到运行时内联时记 `runtime_inline`，其余调用形文本记 `unknown` 并计数。当前不运行 C++ 预处理器；宏内部的隐藏调用、函数指针间接调用、类型转换和函数类型声明可能落入未知项，不能把未知计为零或当作已验证调用。直接调用包含函数范围外的无条件直接跳转；PLT 通过跳板读取的 GOT 槽与 `.rela.plt` 关联。间接分派、其他跳板和复杂跨函数跳转不作目标恢复。任一函数机器码解码不完整即失败。
+
+额外内联不是自动异常：例如接口 `Invoke` 内嵌运行时查表函数，算术模板定义在头文件；`FinallyHelper` 的隐式析构和 `Il2CppFakeBox` 的构造也可能没有同名的显式调用文本；`parent`、声明文件和源调用位置提供人工追溯依据。头文件/模板/宏分类只是来源候选，不能据此证明所有额外记录均已解释。
+
+**独立核对。** 对每个目标生成 GNU readelf 的 `--debug-dump=info --wide` 与 `--debug-dump=Ranges --wide` 文本，保存在忽略目录，再运行：
+
+```sh
+"$TRUTH_PYTHON" corpus/truth/verify_inline.py --truth "$INLINE_OUTPUT" --repeat "$INLINE_REPEAT" \
+  --info "arm64-v8a=$ARM_INFO" --ranges "arm64-v8a=$ARM_RANGES" \
+  --info "x86_64=$X64_INFO" --ranges "x86_64=$X64_RANGES" \
+  --case Corpus.Arithmetic.IntegerArithmetic --case Corpus.Calls.InterfaceCall \
+  --case Corpus.Calls.DelegateCall --report "$INLINE_REPORT"
+```
+
+核对程序不调用 pyelftools：解析 readelf 的 DIE、抽象来源和范围文本，比较所选用例每条记录的名字与全部地址段，并核对两次输出的全部文件逐字节一致，以及全体记录的父引用、无环嵌套和函数范围边界。该文本解析器验证的是当前 GNU readelf 的 DWARF4 输出，不是通用 DWARF 文本解析器。
+
+**已知完整性边界。** 当前 Release 语料存在明确反例：`Guards.MetadataOnBranches` 两臂的 `Support.TypeToken` 内联副本合并后，初始化与类型查询机器码仍在，但两个目标均没有该副本的内联记录；两处未使用结果的 `Support.Opaque` 纯调用则可直接消去。不能把这四处候选都算作漏记。另在库代码中，相邻字段 getter 被 ARM64 的一条成对加载覆盖时，只留下其中一个 getter 的记录，而 x86_64 的独立加载各有记录。这说明已有记录可作为局部正例和嵌套来源证据，不能充当完整内联集合或完整区域边界；内联逆的完整度验证需要人工标注的小对照集。
+
+当前用例已有两级生成包装/内联副本及三级运行时嵌套、分段范围、检查吸收与合并后记录缺失；尚缺专门隔离的多入口内联、含循环或异常区域内联，以及相邻有可观察写入的内联合并用例。需要另外构建这些用例，不能从一般 BCL 函数出现类似指令就宣称覆盖。其他编译器、优化级别、Unity 版本及 DWARF5 尚未验证。
