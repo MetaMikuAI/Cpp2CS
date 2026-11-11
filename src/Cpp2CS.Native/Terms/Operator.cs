@@ -142,9 +142,17 @@ public enum CoreOperation
 public sealed record CoreOperator(CoreOperation Operation) : Operator
 {
     public override string Name => "core." + Operation;
-    public override bool Accepts(int resultWidth, ImmutableArray<int> w)
+    public override bool Accepts(int resultWidth, ImmutableArray<int> w) => Accepts(resultWidth, w.AsSpan());
+
+    internal bool Accepts(int resultWidth, ReadOnlySpan<int> w)
     {
-        if (!Enum.IsDefined(Operation) || resultWidth <= 0 || w.Any(x => x <= 0)) return false;
+        if (!Enum.IsDefined(Operation) || resultWidth <= 0) return false;
+        var sameWidth = true;
+        foreach (var width in w)
+        {
+            if (width <= 0) return false;
+            sameWidth &= width == resultWidth;
+        }
         bool Float(int width) => width is 16 or 32 or 64 or 128;
         return Operation switch
         {
@@ -156,16 +164,16 @@ public sealed record CoreOperator(CoreOperation Operation) : Operator
             CoreOperation.FloatConvert => w.Length == 1 && Float(w[0]) && Float(resultWidth),
             CoreOperation.ReverseBytes => w.Length == 1 && w[0] == resultWidth && resultWidth % 8 == 0,
             CoreOperation.CountLeadingZeros or CoreOperation.PopulationCount or CoreOperation.ReverseBits => w.Length == 1 && w[0] == resultWidth,
-            CoreOperation.FloatFusedMultiplyAdd => w.Length == 3 && w.All(x => x == resultWidth) && Float(resultWidth),
-            >= CoreOperation.FloatMinimum and <= CoreOperation.FloatMaximumNumber => w.Length == 2 && w.All(x => x == resultWidth) && Float(resultWidth),
+            CoreOperation.FloatFusedMultiplyAdd => w.Length == 3 && sameWidth && Float(resultWidth),
+            >= CoreOperation.FloatMinimum and <= CoreOperation.FloatMaximumNumber => w.Length == 2 && sameWidth && Float(resultWidth),
             >= CoreOperation.FloatFloor and <= CoreOperation.FloatRoundToEven => w.Length == 1 && w[0] == resultWidth && Float(resultWidth),
             CoreOperation.Negate or CoreOperation.Not => w.Length == 1 && w[0] == resultWidth,
             CoreOperation.FloatNegate or CoreOperation.FloatAbs or CoreOperation.FloatSqrt =>
                 w.Length == 1 && w[0] == resultWidth && Float(resultWidth),
             >= CoreOperation.Equal and <= CoreOperation.UnsignedLessEqual => w.Length == 2 && w[0] == w[1] && resultWidth == 1,
             >= CoreOperation.FloatEqual and <= CoreOperation.FloatUnordered => w.Length == 2 && w[0] == w[1] && Float(w[0]) && resultWidth == 1,
-            >= CoreOperation.FloatAdd and <= CoreOperation.FloatRemainder => w.Length == 2 && w.All(x => x == resultWidth) && Float(resultWidth),
-            _ => w.Length == 2 && w.All(x => x == resultWidth)
+            >= CoreOperation.FloatAdd and <= CoreOperation.FloatRemainder => w.Length == 2 && sameWidth && Float(resultWidth),
+            _ => w.Length == 2 && sameWidth
         };
     }
 }

@@ -99,10 +99,10 @@ internal static partial class NativeChecks
             "不可达块内展开调用的正常续接保留局部顺序");
         var terms = new TermTable();
         var value = terms.Constant(3, 32);
-        var add = terms.Apply(new CoreOperator(CoreOperation.Add), 32, value, value);
+        var add = terms.Apply(new CoreOperator(CoreOperation.Add), 32, terms.Atom(new Named("operand"), 32), value);
         a.True(value.ConstantValue == 3 && value.Operator is null && value.SliceLow is null, "常量带类型访问器");
         a.True(add.Operator is CoreOperator { Operation: CoreOperation.Add } && add.ConstantValue is null, "运算带类型访问器");
-        a.True(terms.Slice(value, 2, 4).SliceLow == 2, "切片带类型访问器");
+        a.True(terms.Slice(terms.Atom(new Named("slice"), 32), 2, 4).SliceLow == 2, "切片带类型访问器");
         foreach (var operation in Enum.GetValues<CoreOperation>())
             Reject(a, () => terms.Apply(new CoreOperator(operation), 32), "每种运算拒绝空操作数：" + operation);
         Reject(a, () => terms.Apply(new CoreOperator(CoreOperation.ReverseBytes), 7, terms.Constant(0, 7)), "字节反转拒绝非整字节");
@@ -110,7 +110,7 @@ internal static partial class NativeChecks
         a.True(!Enum.GetNames<AddressRoot>().Contains("Other"), "其他不是地址根原子");
         a.True(typeof(FrameDescription).GetProperty("Objects") is null, "前端不划分静态帧对象");
         f = new();
-        Term shared = f.C(1);
+        Term shared = f.Input();
         for (int i = 0; i < 60; i++) shared = f.Terms.Apply(new CoreOperator(CoreOperation.Add), 32, shared, shared);
         var graph = f.Finish(f.Block(Ret(shared)));
         string dump = TextDump.Write(graph);
