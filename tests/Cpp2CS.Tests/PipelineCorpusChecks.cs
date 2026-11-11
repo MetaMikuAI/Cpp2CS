@@ -44,7 +44,10 @@ internal static class PipelineCorpusChecks
             using var resolver = new DefaultAssemblyResolver();
             resolver.AddSearchDirectory(Path.Combine(corpus, "artifacts", "ManagedStripped"));
             using var reference = ModuleDefinition.ReadModule(Path.Combine(corpus, "artifacts", "ManagedStripped", partition.Assembly), new ReaderParameters { AssemblyResolver = resolver });
-            using var tested = ModuleDefinition.ReadModule(Path.Combine(output, partition.Assembly));
+            // 待测模块的外部引用在输出目录里解析；否则会落到宿主运行时的同名程序集，比较的就不是被测的输出。
+            using var testedResolver = new DefaultAssemblyResolver();
+            testedResolver.AddSearchDirectory(output);
+            using var tested = ModuleDefinition.ReadModule(Path.Combine(output, partition.Assembly), new ReaderParameters { AssemblyResolver = testedResolver });
             var index = tested.GetTypes().SelectMany(t => t.Methods).ToDictionary(IlMetrics.Identity);
             var modelFactory = Execution.CecilModel.Factory(reference, tested);
             foreach (var row in partition.Rows)

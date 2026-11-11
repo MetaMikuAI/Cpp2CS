@@ -11,8 +11,11 @@ internal sealed partial class CecilModel
 
     private static string Signature(MethodDefinition method) => IlMetrics.Identity(method);
     private static string TypeSignature(TypeReference? type, ModuleDefinition module) => type is null ? "" : IlMetrics.TypeKey(type, module);
+    // volatile 只要求访问带 volatile. 前缀（ECMA-335 II.7.1.1），不改变字段的类型与布局；il2cpp 的元数据不保留这个修饰，输出骨架无从写出。
+    private static TypeReference FieldType(FieldDefinition field) =>
+        field.FieldType is RequiredModifierType { ModifierType.FullName: "System.Runtime.CompilerServices.IsVolatile" } m ? m.ElementType : field.FieldType;
     private static string FieldSignature(FieldDefinition field) =>
-        $"{field.Name}:{TypeSignature(field.FieldType, field.Module)}:{field.Attributes}:{field.Offset}:{field.Constant}:{Convert.ToHexString(field.InitialValue)}";
+        $"{field.Name}:{TypeSignature(FieldType(field), field.Module)}:{field.Attributes}:{field.Offset}:{field.Constant}:{Convert.ToHexString(field.InitialValue)}";
     private static void Different(TypeDefinition type, string kind, string left, string right) =>
         throw new Unsupported($"两侧类型元数据不对应：{type.FullName}；{kind}；参考={left}；待测={right}", ComparisonReason.TypeMismatch);
 
