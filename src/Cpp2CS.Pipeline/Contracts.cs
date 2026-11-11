@@ -1,0 +1,63 @@
+using Cpp2CS.Input;
+using Cpp2CS.Managed;
+using Cpp2CS.Model;
+using Cpp2CS.Native;
+using Cpp2CS.Native.Images;
+using Cpp2CS.Native.Terms;
+using Cpp2CS.Runtime;
+using Cpp2CS.Targets.Frontend;
+
+namespace Cpp2CS.Pipeline;
+
+/// <summary>模型及代码地图建立后只读；层不得修改其中的集合。</summary>
+public sealed record GlobalFacts(IImage Image, ProgramModel Model, Registrations CodeMap, RuntimeSpec Spec, string Architecture)
+{
+    /// <summary>映像的函数范围按起点索引。</summary>
+    public ILookup<ulong, FunctionRange> FunctionsByStart { get; } = Image.Functions.ToLookup(f => f.Start);
+}
+public sealed record MethodContext(MethodDef Method, CodeEntry Entry, GlobalFacts Facts);
+public sealed record Hole(string Layer, ulong Position, string Step, Reason Reason, bool Derived = false);
+public abstract record StageResult<T> where T : class;
+public sealed record Completed<T>(T Value) : StageResult<T> where T : class;
+public sealed record Missing<T>(Hole Hole) : StageResult<T> where T : class;
+/// <summary>实现必须可并发调用；失败是洞，异常是程序错误。</summary>
+public interface IMethodStage<TInput, TOutput> where TOutput : class
+{
+    string Name { get; }
+    StageResult<TOutput> Run(TInput input, MethodContext context);
+}
+public sealed record FrontendComponents(IInstructionSet Instructions, RegisterConvention Convention, IFlowFacts Flow);
+/// <summary>每个方法独立创建组件；架构键与全局事实的 Architecture 一致。</summary>
+public interface IFrontendProvider
+{
+    string Architecture { get; }
+    FrontendComponents Create(MethodContext context);
+}
+public sealed record FrontendProvider(string Architecture, Func<MethodContext, FrontendComponents> Factory) : IFrontendProvider
+{
+    public FrontendComponents Create(MethodContext context) => Factory(context);
+}
+public sealed class FrontendStage(IEnumerable<IFrontendProvider> providers) : IMethodStage<CodeEntry, NativeFunction>
+{
+    private readonly IReadOnlyDictionary<string, IFrontendProvider> providers = providers.ToDictionary(p => p.Architecture, StringComparer.Ordinal);
+    public string Name => "前端";
+    public StageResult<NativeFunction> Run(CodeEntry input, MethodContext context)
+    {
+        Missing<NativeFunction> Fail(string code, string message) => new(new(Name, input.Address, "提升", new(code, message)));
+        if (!providers.TryGetValue(context.Facts.Architecture, out var provider))
+            return Fail("frontend.unavailable", "该架构的前端尚未接入");
+        var ranges = context.Facts.FunctionsByStart[input.Address].ToArray();
+        if (ranges.Length != 1) return Fail("frontend.function_range", "入口没有唯一的映像函数范围");
+        var components = provider.Create(context);
+        var result = FunctionLifter.Lift(components.Instructions, components.Convention, components.Flow, ranges[0], input.Address);
+        return result.Function is { } function ? new Completed<NativeFunction>(function)
+            : new Missing<NativeFunction>(new(Name, result.Failure!.Address, "提升", result.Failure.Reason));
+    }
+}
+/// <summary>恢复成功必须给出开放定义的方法体；实例体不能直接发布为定义体。</summary>
+public sealed class UnavailableRecoveryStage : IMethodStage<NativeFunction, ManagedBody>
+{
+    public string Name => "恢复";
+    public StageResult<ManagedBody> Run(NativeFunction input, MethodContext context) =>
+        new Missing<ManagedBody>(new(Name, context.Entry.Address, "原生 IR 到托管方法体", new("recovery.unavailable", "恢复层尚未接入")));
+}

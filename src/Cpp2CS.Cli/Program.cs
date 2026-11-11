@@ -1,2 +1,9 @@
-Console.Error.WriteLine("用法: Cpp2CS.Cli <命令> [参数]；当前尚无可用命令。");
-return 2;
+using Cpp2CS.Cli;
+
+try { return RecoverCommand.Run(args); }
+catch (Exception error)
+{
+    // 命令边界保留完整错误；程序错误不得作为恢复成功返回。
+    Console.Error.WriteLine(error);
+    return 1;
+}
