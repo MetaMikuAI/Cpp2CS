@@ -21,19 +21,13 @@ internal sealed partial class CilBodyWriter
 
     private void MathCall(UnaryValue value)
     {
-        var single = value.Width == 32;
         Floating(value.Operand);
-        if (value.Op == UnaryOperator.Abs)
-        {
-            var abs = types.CorlibMethod("System.Math", "Abs", single ? types.Single : types.Double) ?? throw new NotSupportedException("核心库缺少 Math.Abs");
-            il.Emit(OpCodes.Call, MethodReference(abs));
-            return;
-        }
-        if (single) il.Emit(OpCodes.Conv_R8);
-        var name = CilOperators.Math(value.Op) ?? throw new NotSupportedException(value.Op.ToString());
-        var function = types.CorlibMethod("System.Math", name, types.Double) ?? throw new NotSupportedException($"核心库缺少 Math.{name}(double)");
+        var function = MathMethods.Find(types, value) ?? throw new NotSupportedException($"核心库缺少 Math.{CilOperators.Math(value.Op)}");
+        // 除绝对值外只有 double 的重载；float 经 double 计算。
+        var widen = value.Width == 32 && value.Op != UnaryOperator.Abs;
+        if (widen) il.Emit(OpCodes.Conv_R8);
         il.Emit(OpCodes.Call, MethodReference(function));
-        if (single) il.Emit(OpCodes.Conv_R4);
+        if (widen) il.Emit(OpCodes.Conv_R4);
     }
 
     private void Address(ManagedValue value)

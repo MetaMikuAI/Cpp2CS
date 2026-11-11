@@ -61,7 +61,7 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
                 || (implementation & MethodImplAttributes.CodeTypeMask) is MethodImplAttributes.Native or MethodImplAttributes.Runtime)
                 return new Missing<ManagedBody>(new(Name, context.Entry.Address, "方法声明",
                     new("lowering.NonCilBody", "方法声明不允许普通 CIL 方法体")));
-            // 位重解释依赖匹配核心库的 BCL 方法；裁剪掉的能力是缺口，不交给输出层制造非法体。
+            // 位重解释与浮点取整等依赖匹配核心库的 BCL 方法；裁剪掉的能力是缺口，不交给输出层制造非法体。
             foreach (var value in candidate.Blocks.SelectMany(b => b.Statements)
                 .SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk))
             {
@@ -76,6 +76,9 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
                 };
                 if (missing) return new Missing<ManagedBody>(new(Name, context.Entry.Address, "标量表示",
                     new("lowering.BitRepresentation", "匹配核心库缺少同宽浮点位重解释方法")));
+                if (value is UnaryValue math && MathMethods.Uses(math) && MathMethods.Find(types, math) is null)
+                    return new Missing<ManagedBody>(new(Name, context.Entry.Address, "标量表示",
+                        new("lowering.MathMethod", "匹配核心库缺少所需的 System.Math 方法")));
             }
         }
 
