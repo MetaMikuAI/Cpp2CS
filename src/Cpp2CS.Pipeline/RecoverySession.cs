@@ -8,6 +8,7 @@ using Cpp2CS.Output;
 using Cpp2CS.Runtime;
 using Cpp2CS.Runtime.Layouts;
 using Cpp2CS.Targets.Arm64;
+using Cpp2CS.Targets.Frontend;
 using Cpp2CS.Targets.Elf;
 
 namespace Cpp2CS.Pipeline;
@@ -25,7 +26,16 @@ public sealed class RecoverySession
     // 架构实现只在此处装配，目标工程不反向引用 Pipeline。
     private static readonly IFrontendProvider[] DefaultProviders =
     [
-        new FrontendProvider("arm64", c => new(new Arm64InstructionSet(c.Facts.Image), Arm64Registers.Convention, new Arm64FlowFacts())),
+        new FrontendProvider("arm64", facts =>
+        {
+            var instructions = new Arm64InstructionSet(facts.Image);
+            var catalog = RuntimeFunctionCatalog.Select(facts.Spec.Layout.UnityVersion, facts.Spec.Layout.Triple, facts.Spec.Layout.DataModel);
+            var seeds = catalog.Functions.Where(f => f.Recognition.Import is not null && f.Operation.DoesNotReturn)
+                .Select(f => f.Recognition.Import!).ToHashSet(StringComparer.Ordinal);
+            var flow = NoReturnAnalysis.Analyze(facts.Image, instructions, Arm64Registers.Convention, facts.Image.Functions,
+                facts.Image.Imports.Where(i => seeds.Contains(i.Name)), new Arm64FlowFacts());
+            return new(instructions, Arm64Registers.Convention, flow);
+        }),
     ];
     private readonly IMethodStage<CodeEntry, NativeFunction> frontend;
     private readonly IMethodStage<NativeFunction, ManagedBody> recovery;

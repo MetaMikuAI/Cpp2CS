@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <EmbeddedResource Include="../../spec/unity-*.json" LogicalName="Cpp2CS.Layouts.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../spec/functions-*.json" LogicalName="Cpp2CS.Functions.%(Filename)%(Extension)" />
     <ProjectReference Include="../Cpp2CS.Native/Cpp2CS.Native.csproj" />
     <ProjectReference Include="../Cpp2CS.Model/Cpp2CS.Model.csproj" />
   </ItemGroup>

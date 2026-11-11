@@ -47,9 +47,45 @@ public sealed class RuntimeFunctionCatalog
     }
     public static RuntimeFunctionCatalog LoadWithSystem(string path, string systemPath, string unityVersion, string triple, string dataModel)
     {
-        var runtime = Load(path, unityVersion, triple, dataModel);
         using var document = JsonDocument.Parse(File.ReadAllText(systemPath));
-        var root = document.RootElement;
+        return WithSystem(Load(path, unityVersion, triple, dataModel), document.RootElement, systemPath);
+    }
+
+    /// <summary>按精确版本与目标取嵌入的目录，并合并同一目标的系统导入目录；两者各要求唯一匹配。</summary>
+    public static RuntimeFunctionCatalog Select(string unityVersion, string triple, string dataModel)
+    {
+        var assembly = typeof(RuntimeFunctionCatalog).Assembly;
+        var runtime = new List<RuntimeFunctionCatalog>();
+        var system = new List<string>();
+        foreach (var resource in assembly.GetManifestResourceNames().Where(n => n.StartsWith("Cpp2CS.Functions.", StringComparison.Ordinal)))
+        {
+            using var stream = assembly.GetManifestResourceStream(resource)!;
+            bool matches;
+            using (var document = JsonDocument.Parse(stream))
+            {
+                var root = document.RootElement;
+                if (root.TryGetProperty("libc", out _))
+                {
+                    if (Text(root, "data_model") == dataModel && Strings(root, "targets").Contains(triple)) system.Add(resource);
+                    continue;
+                }
+                var target = root.GetProperty("target");
+                matches = Text(root, "unity_version") == unityVersion && Text(target, "triple") == triple && Text(target, "data_model") == dataModel;
+            }
+            if (!matches) continue;
+            stream.Position = 0;
+            runtime.Add(Read(stream, resource, unityVersion, triple, dataModel));
+        }
+        if (runtime.Count != 1 || system.Count != 1) throw new InvalidDataException(
+            $"嵌入函数目录：Unity={unityVersion}, target={triple}, data_model={dataModel} 匹配 {runtime.Count} 份运行时目录、{system.Count} 份系统目录，要求各一份。");
+        using var systemStream = assembly.GetManifestResourceStream(system[0])!;
+        using var systemDocument = JsonDocument.Parse(systemStream);
+        return WithSystem(runtime[0], systemDocument.RootElement, system[0]);
+    }
+
+    private static RuntimeFunctionCatalog WithSystem(RuntimeFunctionCatalog runtime, JsonElement root, string systemPath)
+    {
+        var (path, unityVersion, triple, dataModel) = (runtime.Source, runtime.UnityVersion, runtime.Triple, runtime.DataModel);
         if (root.GetProperty("schema_version").GetInt32() != 1 || Text(root, "libc") != "bionic" ||
             Text(root, "data_model") != dataModel || !Strings(root, "targets").Contains(triple))
             throw new InvalidDataException($"{systemPath}：系统目录不匹配目标与 C 库");

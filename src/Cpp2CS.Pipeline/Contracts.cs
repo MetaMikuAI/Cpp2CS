@@ -27,19 +27,21 @@ public interface IMethodStage<TInput, TOutput> where TOutput : class
     StageResult<TOutput> Run(TInput input, MethodContext context);
 }
 public sealed record FrontendComponents(IInstructionSet Instructions, RegisterConvention Convention, IFlowFacts Flow);
-/// <summary>每个方法独立创建组件；架构键与全局事实的 Architecture 一致。</summary>
+/// <summary>一次运行（一份全局事实）创建一次组件，全部方法共用，组件必须可并发使用；架构键与全局事实的 Architecture 一致。</summary>
 public interface IFrontendProvider
 {
     string Architecture { get; }
-    FrontendComponents Create(MethodContext context);
+    FrontendComponents Create(GlobalFacts facts);
 }
-public sealed record FrontendProvider(string Architecture, Func<MethodContext, FrontendComponents> Factory) : IFrontendProvider
+public sealed record FrontendProvider(string Architecture, Func<GlobalFacts, FrontendComponents> Factory) : IFrontendProvider
 {
-    public FrontendComponents Create(MethodContext context) => Factory(context);
+    public FrontendComponents Create(GlobalFacts facts) => Factory(facts);
 }
 public sealed class FrontendStage(IEnumerable<IFrontendProvider> providers) : IMethodStage<CodeEntry, NativeFunction>
 {
     private readonly IReadOnlyDictionary<string, IFrontendProvider> providers = providers.ToDictionary(p => p.Architecture, StringComparer.Ordinal);
+    // 全映像的分析（不返回的函数等）在组件创建时做一次。
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<GlobalFacts, Lazy<FrontendComponents>> components = [];
     public string Name => "前端";
     public StageResult<NativeFunction> Run(CodeEntry input, MethodContext context)
     {
@@ -48,8 +50,8 @@ public sealed class FrontendStage(IEnumerable<IFrontendProvider> providers) : IM
             return Fail("frontend.unavailable", "该架构的前端尚未接入");
         var ranges = context.Facts.FunctionsByStart[input.Address].ToArray();
         if (ranges.Length != 1) return Fail("frontend.function_range", "入口没有唯一的映像函数范围");
-        var components = provider.Create(context);
-        var result = FunctionLifter.Lift(components.Instructions, components.Convention, components.Flow, ranges[0], input.Address);
+        var parts = components.GetValue(context.Facts, facts => new(() => provider.Create(facts))).Value;
+        var result = FunctionLifter.Lift(parts.Instructions, parts.Convention, parts.Flow, ranges[0], input.Address);
         return result.Function is { } function ? new Completed<NativeFunction>(function)
             : new Missing<NativeFunction>(new(Name, result.Failure!.Address, "提升", result.Failure.Reason));
     }

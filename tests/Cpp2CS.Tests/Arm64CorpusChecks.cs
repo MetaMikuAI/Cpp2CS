@@ -22,17 +22,8 @@ internal static class Arm64CorpusChecks
         { Console.WriteLine("跳过 ARM64 语料：未设置 CPP2CS_CORPUS 或 CPP2CS_CORPUS_TRUTH。"); return 0; }
         var checks = new Assertions();
         var image = ElfImage.Load(Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.so"));
-        var noReturnFile = Directory.EnumerateFiles(truth, "*.json").Where(f => Path.GetFileName(f).Contains("noreturn", StringComparison.OrdinalIgnoreCase)
-            || Path.GetFileName(f).Contains("non-return", StringComparison.OrdinalIgnoreCase)).SingleOrDefault();
-        var noReturns = new HashSet<ulong>();
-        if (noReturnFile is not null)
-        {
-            using var known = JsonDocument.Parse(File.ReadAllText(noReturnFile));
-            foreach (var entry in known.RootElement.EnumerateArray()) noReturns.Add(Address(entry.ValueKind == JsonValueKind.Object ? entry.GetProperty("address") : entry) - image.PreferredBase);
-            Console.WriteLine($"不返回清单：读取 {noReturns.Count} 个入口。");
-        }
-        else Console.WriteLine("不返回清单：无；全部调用按返回处理，可能继续发现到函数范围之外。");
-        var facts = new Arm64FlowFacts(t => t is ImageFunction f && noReturns.Contains(f.EntryOffset));
+        var facts = NoReturnCorpusChecks.Analyze(image);
+        Console.WriteLine($"不返回分析：{facts.Targets.Count} 个目标，{facts.Rounds} 轮。");
         var isa = new Arm64InstructionSet(image);
         List<Row>? previous = null;
         var unsupported = new Dictionary<(string Category, uint Word), long>();
