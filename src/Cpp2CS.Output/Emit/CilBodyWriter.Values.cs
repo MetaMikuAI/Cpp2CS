@@ -46,14 +46,11 @@ internal sealed partial class CilBodyWriter
                 }
                 // 非规范的 NaN 以整数位型输出再重解释，保留载荷。规范的静默 NaN（IL2CPP 对 float.NaN / double.NaN 的翻译，符号位不定）直接作为 NaN 常量，
                 // 反编译为 float.NaN：NaN 的符号与载荷只有按位查看时才可区分
-                else if (types.Kind(c.Type) == TypeKind.Float && (c.Bits & 0x7f800000) == 0x7f800000 && (c.Bits & 0x7fffff) != 0 && (c.Bits & 0x7fffffff) != 0x7fc00000)
+                else if (BitConversions.ConstantNeedsBitcast(types, c))
                 {
-                    il.Emit(OpCodes.Ldc_I4, unchecked((int)c.Bits)); Reinterpret(types.UInt32, c.Type);
-                }
-                else if (types.Kind(c.Type) == TypeKind.Double && (c.Bits & 0x7ff0000000000000) == 0x7ff0000000000000 && (c.Bits & 0xfffffffffffff) != 0
-                    && (c.Bits & 0x7fffffffffffffff) != 0x7ff8000000000000)
-                {
-                    il.Emit(OpCodes.Ldc_I8, unchecked((long)c.Bits)); Reinterpret(types.UInt64, c.Type);
+                    if (c.Width == 32) il.Emit(OpCodes.Ldc_I4, unchecked((int)c.Bits));
+                    else il.Emit(OpCodes.Ldc_I8, unchecked((long)c.Bits));
+                    Reinterpret(types.Integer(c.Width, false), c.Type);
                 }
                 else if (types.Kind(c.Type) == TypeKind.Float) il.Emit(OpCodes.Ldc_R4, BitConverter.Int32BitsToSingle(unchecked((int)c.Bits)));
                 else if (types.Kind(c.Type) == TypeKind.Double) il.Emit(OpCodes.Ldc_R8, BitConverter.Int64BitsToDouble(unchecked((long)c.Bits)));

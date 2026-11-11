@@ -1,8 +1,18 @@
 
 namespace Cpp2CS.Output;
 
-internal static class BitConversions
+public static class BitConversions
 {
+    /// <summary>非规范 NaN 常量需经位重解释保留载荷；与实际常量写出共用此判据。</summary>
+    public static bool ConstantNeedsBitcast(ManagedTypes types, ConstantValue value) => types.Kind(value.Type) switch
+    {
+        TypeKind.Float => (value.Bits & 0x7f800000) == 0x7f800000 && (value.Bits & 0x7fffff) != 0
+            && (value.Bits & 0x7fffffff) != 0x7fc00000,
+        TypeKind.Double => (value.Bits & 0x7ff0000000000000) == 0x7ff0000000000000 && (value.Bits & 0xfffffffffffff) != 0
+            && (value.Bits & 0x7fffffffffffffff) != 0x7ff8000000000000,
+        _ => false,
+    };
+
     /// <summary>同宽位重解释使用 BCL 契约，不通过不同类型的托管地址读取。</summary>
     public static MethodRef? Find(ManagedTypes types, TypeRef from, TypeRef to)
     {

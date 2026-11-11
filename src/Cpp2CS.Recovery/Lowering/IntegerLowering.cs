@@ -16,7 +16,7 @@ public enum LoweringFailureKind
 public sealed record LoweringFailure(LoweringFailureKind Kind, ulong Position, Reason Reason);
 public sealed record LoweringResult(ManagedBody? Body, LoweringFailure? Failure);
 
-/// <summary>整数位型的机械下降；绑定与状态查询提供原子的定义，不在下降中猜测来源。</summary>
+/// <summary>标量位型的机械下降；绑定与状态查询提供原子的定义，不在下降中猜测来源。</summary>
 public sealed partial class IntegerLowering
 {
     private readonly NativeFunction function;
@@ -115,10 +115,10 @@ public sealed partial class IntegerLowering
             foreach (var input in merge.Inputs)
             {
                 position = function.Blocks.Single(b => b.Identity == input.Predecessor).Trace?.NativeAddress ?? 0;
-                var v = Part(input.Value, merge.Low, merge.Width);
+                var v = Part(input.Value, merge.Low, merge.Width, IsFloat(merge.Local.Type));
                 if (v is null) return new(null, failure);
                 var edge = Edge(input.Predecessor, merge.Target);
-                ((List<ManagedCopy>)edge.Copies).Add(new(merge.Local, Convert(v, merge.Local.Width)));
+                ((List<ManagedCopy>)edge.Copies).Add(new(merge.Local, IsFloat(merge.Local.Type) ? FloatBits(v, merge.Local.Width) : Convert(v, merge.Local.Width)));
             }
         }
         return new(Materialize(new(method, [.. blocks, .. extraBlocks])), null);
@@ -138,7 +138,7 @@ public sealed partial class IntegerLowering
     {
         var result = binder.Parameter(signature, cIndex, function.Terms, function.Inputs, function.IncomingArgumentArea);
         if (result.Value is not { } bound) { Fail<object>(LoweringFailureKind.Binding, result.Failure!.Detail); return; }
-        // 未使用的非整数参数不影响纯整数方法；实际使用时仍报类型洞。
+        // 原子按签名定型，槽位未指定的高位不参与绑定。
         if (bound.Source is TermSource source)
             arguments[source.Term] = new ArgumentValue(index, type, source.Term.Width);
     }
@@ -162,14 +162,18 @@ public sealed partial class IntegerLowering
                 var bound = binder.Return(r, signature, function.Terms);
                 if (bound.Value?.Source is not TermSource source)
                     return Fail<ManagedStatement>(LoweringFailureKind.Binding, bound.Failure?.Detail ?? "返回值不是标量项");
-                var value = Value(source.Term);
+                var value = Value(source.Term, IsFloat(method.Concrete(method.Method.ReturnType)));
                 if (value is null) return null;
+                if (IsFloat(method.Concrete(method.Method.ReturnType)))
+                    return new ManagedReturn(position, FloatBits(value, source.Term.Width));
+                value = IntegerBits(value);
                 if (!IntegerType(method.Concrete(method.Method.ReturnType))) return Fail<ManagedStatement>(TypeFailure(method.Concrete(method.Method.ReturnType)), "返回类型不是整数");
                 return new ManagedReturn(position, new ConversionValue(ManagedTypes.IsSigned(method.Concrete(method.Method.ReturnType)) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
                     value, method.Concrete(method.Method.ReturnType), source.Term.Width));
             case JumpTable table:
                 var selector = Value(table.Selector);
                 if (selector is null) return null;
+                selector = IntegerBits(selector);
                 ManagedStatement tail = new ManagedJump(position, Edge(b.Identity, table.Default));
                 foreach (var item in table.Cases.Reverse())
                 {
@@ -186,13 +190,14 @@ public sealed partial class IntegerLowering
         }
     }
 
-    private LocalValue? MergeValue(Term term, int low = 0, int? requestedWidth = null)
+    private LocalValue? MergeValue(Term term, int low = 0, int? requestedWidth = null, bool floating = false)
     {
         int width = requestedWidth ?? term.Width;
         var key = (term, low, width);
+        // 首个使用约束决定存储视图；后续不同解释在使用处重解释，不改写已建局部。
         if (merges.TryGetValue(key, out var local)) return local;
         if (width > 64) return Fail<LocalValue>(LoweringFailureKind.FloatingOrVector, "合流位宽超过整数栈宽度");
-        local = new(new(nextLocal++), StackType(width), StackWidth(width));
+        local = new(new(nextLocal++), floating && width is 32 or 64 ? FloatType(width) : StackType(width), StackWidth(width));
         merges.Add(key, local);
         if (term.Identity is ResultAtom { Definition: MergeIdentity id })
         {

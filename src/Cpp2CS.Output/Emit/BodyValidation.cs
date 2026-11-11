@@ -180,6 +180,9 @@ internal sealed class BodyValidation(ManagedTypes types, EmissionPolicy policy, 
                 if (pointer.Pointer.Type is not PointerRef || pointer.Offset.Width != types.PointerSize * 8 || types.Kind(pointer.Offset.Type) != TypeKind.Int) return new(EmissionProblemKind.Unsupported, "指针偏移 类型或位宽不符");
                 break;
             case ConstantValue c:
+                if (BitConversions.ConstantNeedsBitcast(types, c)
+                    && BitConversions.Find(types, types.Integer(c.Width, false), c.Type) is null)
+                    return new(EmissionProblemKind.Unsupported, "常量 NaN 位型保留缺少同宽核心库方法");
                 if (!(types.Kind(c.Type) is TypeKind.Int or TypeKind.Bool or TypeKind.Float or TypeKind.Double
                     || c.Bits == 0 && (ManagedTypes.IsReferenceType(c.Type) || ManagedTypes.IsNativePointer(c.Type) || c.Type is ByRefRef)))
                     return new(EmissionProblemKind.Unsupported, $"常量 类型 {c.Type}");
