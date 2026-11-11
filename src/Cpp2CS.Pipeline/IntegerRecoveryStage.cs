@@ -51,7 +51,7 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         var types = parts.Types;
         var transformed = StructureRecovery.Run(input, context, parts.Binder, kind, parts.Types.Layouts);
         var result = new IntegerLowering(transformed.Function, MethodRef.Open(context.Method), parts.Binder,
-            types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec).Run(kind);
+            types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names).Run(kind);
         if (result.Body is { } candidate)
         {
             var attributes = context.Method.Attributes;

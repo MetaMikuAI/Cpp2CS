@@ -19,6 +19,8 @@ public sealed record StructureResult(NativeFunction Function, ImmutableArray<Str
     ImmutableArray<string> Assumptions)
 {
     public ImmutableDictionary<string, double> Timings { get; init; } = ImmutableDictionary<string, double>.Empty;
+    /// <summary>变换所依据的命名事实；下降沿用它给变换后留下的槽位读取命名。</summary>
+    public NamingFacts Names { get; init; } = NamingFacts.Empty;
 }
 
 /// <summary>按私有状态和运行时登记消去效果；每次改图后重新建立查询上下文。</summary>

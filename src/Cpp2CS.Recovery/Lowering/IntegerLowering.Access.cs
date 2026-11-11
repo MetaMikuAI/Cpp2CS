@@ -35,6 +35,8 @@ public sealed partial class IntegerLowering
                 if (!ManagedAccess.Type(types, method.Method.Owner, value.Type)) { Missing("Type"); return; }
                 if (value is FieldValue field && !ManagedAccess.Field(types, method, field.Field, field.Receiver.Type))
                 { Missing("Field"); return; }
+                if (value is StaticFieldValue shared && !ManagedAccess.Field(types, method, shared.Field, null))
+                { Missing("Field"); return; }
                 if (value is NewObjectValue created && !ManagedAccess.Method(types, method.Method.Owner, created.Constructor, null))
                 { Missing("Method"); return; }
             }
@@ -146,11 +148,27 @@ public sealed partial class IntegerLowering
         var view = views[0];
         if (write && view.Kind == ManagedLocationKind.ArrayLength)
             return Fail<ManagedValue>(kind, "数组长度不可写", code: "lowering.Location.Readonly");
-        if (view.Kind == ManagedLocationKind.StaticField)
-            return Fail<ManagedValue>(kind, "静态字段尚未下降", code: "lowering.Location.StaticField");
+        // 只读字段只能在所属类型的构造函数里写：实例字段是实例构造函数，静态字段是静态构造函数。
         if (write && view.Path.Any(f => (f.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
-            && !(method.Method.Name == ".ctor" && method.Method.Owner == f.Field.Owner)))
+            && !(method.Method.Name == ((f.Field.Attributes & System.Reflection.FieldAttributes.Static) != 0 ? ".cctor" : ".ctor")
+                && method.Method.Owner == f.Field.Owner)))
             return Fail<ManagedValue>(kind, "只读字段的写入缺少构造函数上下文", code: "lowering.Location.Readonly");
+        if (view.Kind == ManagedLocationKind.StaticField)
+        {
+            // 根是类的静态字段块，不是托管值；路径的第一项就是静态字段本身。
+            var head = view.Path[0];
+            var headType = head.Field.Type.Substitute((head.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
+            ManagedValue storage = new StaticFieldValue(head, headType, types.ValueWidth(headType));
+            foreach (var field in view.Path.Skip(1))
+            {
+                if (write && types.Kind(storage.Type) == TypeKind.Struct) storage = new AddressValue(storage, types.PointerSize * 8);
+                var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
+                storage = new FieldValue(storage, field, type, types.ValueWidth(type));
+            }
+            if (!IntegerType(storage.Type) && !IsFloat(storage.Type) && !ReferenceType(storage.Type))
+                return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "访问的值类型尚未下降");
+            return storage;
+        }
         var root = Value(view.Root);
         if (root is null) return null;
         if (view.Kind == ManagedLocationKind.Indirect) return new IndirectValue(root, view.Type, types.ValueWidth(view.Type));

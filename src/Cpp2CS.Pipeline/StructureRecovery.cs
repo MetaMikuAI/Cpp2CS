@@ -40,6 +40,6 @@ public static class StructureRecovery
         layouts ??= new FieldLayouts(facts.Spec, facts.Image.PointerWidth, facts.Image.PointerWidth);
         var locations = new ManagedLocationQuery(state, values, layouts, facts.Spec);
         var initialization = new ClassInitializationQuery(state, calls, values, locations, facts.Spec);
-        return new UnobservableEffects(state, calls, values, facts.Image, slots, locations, initialization).Run(input);
+        return new UnobservableEffects(state, calls, values, facts.Image, slots, locations, initialization).Run(input) with { Names = names };
     }
 }
