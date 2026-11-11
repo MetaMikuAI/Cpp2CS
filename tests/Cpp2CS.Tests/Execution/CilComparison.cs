@@ -37,7 +37,9 @@ internal static partial class CilComparison
                 throw new Unsupported("两侧方法签名不对应");
             var index = new WorldIndex(model.Program, new ManagedTypes(model.Program, new ManagedStorage(model.Prepare), 8));
             var li = new CilInterpreter(model, index) { BodyModule = left.Module, StepLimit = stepLimit };
-            var ri = new CilInterpreter(model, index) { BodyModule = right.Module, StepLimit = stepLimit };
+            // 逐方法对照：被测的只是 right 这一个方法体，它调用的方法两侧都执行参考程序集里的方法体。
+            // 被调方法自己的恢复结果由它自己的那次对照负责；输出程序集里没恢复的方法只有占位体，不能拿来执行。
+            var ri = new CilInterpreter(model, index) { BodyModule = left.Module, StepLimit = stepLimit };
             var lh = HintsOf(left, model); var rh = HintsOf(right, model);
             var hints = new Hints(lh.Constants.Concat(rh.Constants).Distinct().Order().ToArray(), lh.Types.Concat(rh.Types).Distinct().ToArray());
             for (var n = 0; n < cases; n++)
