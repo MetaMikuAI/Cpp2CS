@@ -35,6 +35,19 @@ internal sealed class RuntimeLayoutArchitecture
         Normalize(name).Equals("runtimelayout", StringComparison.OrdinalIgnoreCase) ||
         records.Any(r => Normalize(name) == r + "layout" || Normalize(name) == r + "offsets");
 
+    // 数值直接构成被声明的值：只经过括号、算术、位运算、取负与转换。出现在调用实参或匿名函数里的数值不算。
+    private static bool DeclaredValue(SyntaxNode literal)
+    {
+        var node = literal.Parent;
+        while (node is ParenthesizedExpressionSyntax or PrefixUnaryExpressionSyntax or CastExpressionSyntax or CheckedExpressionSyntax ||
+               node is BinaryExpressionSyntax binary && binary.Kind() is SyntaxKind.AddExpression or SyntaxKind.SubtractExpression
+                   or SyntaxKind.MultiplyExpression or SyntaxKind.DivideExpression or SyntaxKind.ModuloExpression
+                   or SyntaxKind.LeftShiftExpression or SyntaxKind.RightShiftExpression
+                   or SyntaxKind.BitwiseAndExpression or SyntaxKind.BitwiseOrExpression or SyntaxKind.ExclusiveOrExpression)
+            node = node.Parent;
+        return node is EqualsValueClauseSyntax or ArrowExpressionClauseSyntax or ReturnStatementSyntax;
+    }
+
     public IEnumerable<string> Inspect(string text, string path)
     {
         var tree = CSharpSyntaxTree.ParseText(text, path: path);
@@ -51,7 +64,8 @@ internal sealed class RuntimeLayoutArchitecture
                 _ => Enumerable.Empty<string>()
             };
             var variable = literal.Ancestors().OfType<VariableDeclaratorSyntax>().FirstOrDefault();
-            var named = identifiers.Any(LayoutName) || (variable is not null && LayoutName(variable.Identifier.ValueText));
+            var named = DeclaredValue(literal) &&
+                (identifiers.Any(LayoutName) || (variable is not null && LayoutName(variable.Identifier.ValueText)));
             var container = literal.Ancestors().OfType<BaseTypeDeclarationSyntax>().Any(t => LayoutContainer(t.Identifier.ValueText));
             // 含运行时结构全名的数值初始化器，覆盖字典、数组与元组布局表。
             var initializer = literal.Ancestors().OfType<EqualsValueClauseSyntax>().FirstOrDefault();
@@ -84,5 +98,9 @@ internal sealed class RuntimeLayoutArchitecture
             "普通计数、字符串与注释不应误报");
         checks.True(!guard.Inspect("class Probe { long ObjectHeaderSize => spec.Record(\"Il2CppObject\").Size; }", "fixture").Any(),
             "按名称查询规格应通过");
+        checks.True(!guard.Inspect("class Probe { void M() { var stringLength = items.Single(m => m.Count == 0); } }", "fixture").Any(),
+            "名字相近的局部变量里，调用实参与匿名函数中的数值不应误报");
+        checks.True(guard.Inspect($"class Probe {{ void M() {{ var stringLength = ({value} + 4) * 2; }} }}", "fixture").Any(),
+            "局部变量以算术拼出的布局数值必须拒绝");
     }
 }
