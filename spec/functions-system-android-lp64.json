@@ -1,0 +1,463 @@
+{
+  "schema_version": 1,
+  "libc": "bionic",
+  "data_model": "LP64",
+  "targets": [
+    "aarch64-linux-android",
+    "x86_64-linux-android"
+  ],
+  "functions": [
+    {
+      "name": "__stack_chk_fail",
+      "mangled_name": "__stack_chk_fail",
+      "declaration": "void __stack_chk_fail(void)",
+      "declaration_source": {
+        "file": "LSB 5.0 __stack_chk_fail；Android bionic libc/bionic/__stack_chk_fail.cpp",
+        "line": 0
+      },
+      "declared_noreturn": true,
+      "prototype": {
+        "parameters": [],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "parameter_names": [],
+      "parameter_types": [],
+      "result_type": "void",
+      "unsupported": [],
+      "operation": "StackProtectionFailure",
+      "arguments": [],
+      "result": "void",
+      "basis": [
+        "LSB 5.0 __stack_chk_fail；Android bionic libc/bionic/__stack_chk_fail.cpp"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "__stack_chk_fail"
+      }
+    },
+    {
+      "name": "_Unwind_Resume",
+      "mangled_name": "_Unwind_Resume",
+      "declaration": "void _Unwind_Resume(struct _Unwind_Exception *exception)",
+      "declaration_source": {
+        "file": "Itanium C++ ABI 1.3 _Unwind_Resume",
+        "line": 0
+      },
+      "declared_noreturn": true,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "pointer",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "exception"
+      ],
+      "parameter_types": [
+        "void *"
+      ],
+      "result_type": "void",
+      "unsupported": [],
+      "operation": "ResumeUnwind",
+      "arguments": [
+        "exception"
+      ],
+      "result": "void",
+      "basis": [
+        "Itanium C++ ABI 1.3 _Unwind_Resume"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "_Unwind_Resume"
+      }
+    },
+    {
+      "name": "__cxa_begin_catch",
+      "mangled_name": "__cxa_begin_catch",
+      "declaration": "void *__cxa_begin_catch(void *exception)",
+      "declaration_source": {
+        "file": "Itanium C++ ABI 2.5.3 __cxa_begin_catch",
+        "line": 0
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "pointer",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "pointer",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "exception"
+      ],
+      "parameter_types": [
+        "void *"
+      ],
+      "result_type": "void *",
+      "unsupported": [],
+      "operation": "BeginCatch",
+      "arguments": [
+        "exception"
+      ],
+      "result": "operation",
+      "basis": [
+        "Itanium C++ ABI 2.5.3 __cxa_begin_catch"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "__cxa_begin_catch"
+      }
+    },
+    {
+      "name": "__cxa_end_catch",
+      "mangled_name": "__cxa_end_catch",
+      "declaration": "void __cxa_end_catch(void)",
+      "declaration_source": {
+        "file": "Itanium C++ ABI 2.5.3 __cxa_end_catch",
+        "line": 0
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "parameter_names": [],
+      "parameter_types": [],
+      "result_type": "void",
+      "unsupported": [],
+      "operation": "EndCatch",
+      "arguments": [],
+      "result": "void",
+      "basis": [
+        "Itanium C++ ABI 2.5.3 __cxa_end_catch"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "__cxa_end_catch"
+      }
+    },
+    {
+      "name": "_ZSt9terminatev",
+      "mangled_name": "_ZSt9terminatev",
+      "declaration": "void std::terminate() noexcept",
+      "declaration_source": {
+        "file": "ISO C++ [except.terminate] std::terminate；Itanium ABI 5.1 名称编码",
+        "line": 0
+      },
+      "declared_noreturn": true,
+      "prototype": {
+        "parameters": [],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "parameter_names": [],
+      "parameter_types": [],
+      "result_type": "void",
+      "unsupported": [],
+      "operation": "TerminateUnwind",
+      "arguments": [],
+      "result": "void",
+      "basis": [
+        "ISO C++ [except.terminate] std::terminate；Itanium ABI 5.1 名称编码"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "_ZSt9terminatev"
+      }
+    },
+    {
+      "name": "abort",
+      "mangled_name": "abort",
+      "declaration": "void abort(void)",
+      "declaration_source": {
+        "file": "ISO C11 N1570 7.22.4.1 abort",
+        "line": 0
+      },
+      "declared_noreturn": true,
+      "prototype": {
+        "parameters": [],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "parameter_names": [],
+      "parameter_types": [],
+      "result_type": "void",
+      "unsupported": [],
+      "operation": "AbortProcess",
+      "arguments": [],
+      "result": "void",
+      "basis": [
+        "ISO C11 N1570 7.22.4.1 abort"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "abort"
+      }
+    },
+    {
+      "name": "memcpy",
+      "mangled_name": "memcpy",
+      "declaration": "void *memcpy(void *destination, const void *source, size_t length)",
+      "declaration_source": {
+        "file": "ISO C11 N1570 7.24.2.1 memcpy",
+        "line": 0
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "pointer",
+            "bits": 64
+          },
+          {
+            "kind": "pointer",
+            "bits": 64
+          },
+          {
+            "kind": "integer",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "pointer",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "destination",
+        "source",
+        "length"
+      ],
+      "parameter_types": [
+        "void *",
+        "void *",
+        "size_t"
+      ],
+      "result_type": "void *",
+      "unsupported": [],
+      "operation": "MemoryCopy",
+      "arguments": [
+        "destination",
+        "source",
+        "length"
+      ],
+      "result": "operation",
+      "basis": [
+        "ISO C11 N1570 7.24.2.1 memcpy"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "memcpy"
+      }
+    },
+    {
+      "name": "memmove",
+      "mangled_name": "memmove",
+      "declaration": "void *memmove(void *destination, const void *source, size_t length)",
+      "declaration_source": {
+        "file": "ISO C11 N1570 7.24.2.2 memmove",
+        "line": 0
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "pointer",
+            "bits": 64
+          },
+          {
+            "kind": "pointer",
+            "bits": 64
+          },
+          {
+            "kind": "integer",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "pointer",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "destination",
+        "source",
+        "length"
+      ],
+      "parameter_types": [
+        "void *",
+        "void *",
+        "size_t"
+      ],
+      "result_type": "void *",
+      "unsupported": [],
+      "operation": "MemoryMove",
+      "arguments": [
+        "destination",
+        "source",
+        "length"
+      ],
+      "result": "operation",
+      "basis": [
+        "ISO C11 N1570 7.24.2.2 memmove"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "memmove"
+      }
+    },
+    {
+      "name": "memset",
+      "mangled_name": "memset",
+      "declaration": "void *memset(void *destination, int value, size_t length)",
+      "declaration_source": {
+        "file": "ISO C11 N1570 7.24.6.1 memset",
+        "line": 0
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "pointer",
+            "bits": 64
+          },
+          {
+            "kind": "integer",
+            "bits": 32
+          },
+          {
+            "kind": "integer",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "pointer",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "destination",
+        "value",
+        "length"
+      ],
+      "parameter_types": [
+        "void *",
+        "int",
+        "size_t"
+      ],
+      "result_type": "void *",
+      "unsupported": [],
+      "operation": "MemoryFill",
+      "arguments": [
+        "destination",
+        "value",
+        "length"
+      ],
+      "result": "operation",
+      "basis": [
+        "ISO C11 N1570 7.24.6.1 memset"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "memset"
+      }
+    },
+    {
+      "name": "exit",
+      "mangled_name": "exit",
+      "declaration": "void exit(int status)",
+      "declaration_source": {
+        "file": "ISO C11 N1570 7.22.4.4 exit",
+        "line": 0
+      },
+      "declared_noreturn": true,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "integer",
+            "bits": 32
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "status"
+      ],
+      "parameter_types": [
+        "int"
+      ],
+      "result_type": "void",
+      "unsupported": [],
+      "operation": "ExitProcess",
+      "arguments": [
+        "status"
+      ],
+      "result": "void",
+      "basis": [
+        "ISO C11 N1570 7.22.4.4 exit"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "exit"
+      }
+    }
+  ]
+}

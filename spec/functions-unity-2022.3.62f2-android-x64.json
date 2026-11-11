@@ -1,0 +1,1996 @@
+{
+  "adaptations": [
+    "仅解析选定单行声明，保留真实类型别名；静态成员保留命名空间与类作用域",
+    "只接受指针、引用与标量；类前置声明，别名来自 codegen-metadata，槽类型来自 config；不编译函数体；NORETURN 按 Android 展开"
+  ],
+  "compiler": "libclang 18.1.1",
+  "functions": [
+    {
+      "arguments": [
+        "class",
+        "length"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: SZArrayNew"
+      ],
+      "declaration": "RuntimeArray* SZArrayNew(RuntimeClass* arrayType, uint32_t length)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 470
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z10SZArrayNewP11Il2CppClassj",
+      "name": "SZArrayNew",
+      "operation": "AllocateVector",
+      "parameter_names": [
+        "arrayType",
+        "length"
+      ],
+      "parameter_types": [
+        "RuntimeClass *",
+        "uint32_t"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 32,
+            "kind": "integer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "RuntimeArray *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "class",
+        "dimensions"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: GenArrayNew"
+      ],
+      "declaration": "RuntimeArray* GenArrayNew(RuntimeClass* arrayType, il2cpp_array_size_t* dimensions)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 472
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z11GenArrayNewP11Il2CppClassPm",
+      "name": "GenArrayNew",
+      "operation": "AllocateArray",
+      "parameter_names": [
+        "arrayType",
+        "dimensions"
+      ],
+      "parameter_types": [
+        "RuntimeClass *",
+        "il2cpp_array_size_t *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "RuntimeArray *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: IsInstClass",
+        "codegen/il2cpp-codegen-il2cpp.cpp: IsInst → vm::Object::IsInst"
+      ],
+      "declaration": "inline RuntimeObject* IsInstClass(RuntimeObject *obj, RuntimeClass* targetType)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 243
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z11IsInstClassP12Il2CppObjectP11Il2CppClass",
+      "name": "IsInstClass",
+      "operation": "IsInstance",
+      "parameter_names": [
+        "obj",
+        "targetType"
+      ],
+      "parameter_types": [
+        "RuntimeObject *",
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "RuntimeObject *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: IsInstSealed",
+        "codegen/il2cpp-codegen-il2cpp.cpp: IsInst → vm::Object::IsInst"
+      ],
+      "declaration": "inline RuntimeObject* IsInstSealed(RuntimeObject *obj, RuntimeClass* targetType)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 230
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z12IsInstSealedP12Il2CppObjectP11Il2CppClass",
+      "name": "IsInstSealed",
+      "operation": "IsInstance",
+      "parameter_names": [
+        "obj",
+        "targetType"
+      ],
+      "parameter_types": [
+        "RuntimeObject *",
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "RuntimeObject *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "class",
+        "storage"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: UnBoxNullable",
+        "codegen/il2cpp-codegen-il2cpp.cpp: UnBoxNullable_internal"
+      ],
+      "declaration": "inline void UnBoxNullable(RuntimeObject* obj, RuntimeClass* nullableClass, void* storage)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 333
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z13UnBoxNullableP12Il2CppObjectP11Il2CppClassPv",
+      "name": "UnBoxNullable",
+      "operation": "UnboxNullable",
+      "parameter_names": [
+        "obj",
+        "nullableClass",
+        "storage"
+      ],
+      "parameter_types": [
+        "RuntimeObject *",
+        "RuntimeClass *",
+        "void *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: CastclassClass"
+      ],
+      "declaration": "inline RuntimeObject* CastclassClass(RuntimeObject *obj, RuntimeClass* targetType)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 285
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z14CastclassClassP12Il2CppObjectP11Il2CppClass",
+      "name": "CastclassClass",
+      "operation": "CastClass",
+      "parameter_names": [
+        "obj",
+        "targetType"
+      ],
+      "parameter_types": [
+        "RuntimeObject *",
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "RuntimeObject *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: CastclassSealed"
+      ],
+      "declaration": "inline RuntimeObject* CastclassSealed(RuntimeObject *obj, RuntimeClass* targetType)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 272
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z15CastclassSealedP12Il2CppObjectP11Il2CppClass",
+      "name": "CastclassSealed",
+      "operation": "CastClass",
+      "parameter_names": [
+        "obj",
+        "targetType"
+      ],
+      "parameter_types": [
+        "RuntimeObject *",
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "RuntimeObject *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "denominator"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: DivideByZeroCheck"
+      ],
+      "declaration": "inline void DivideByZeroCheck(int64_t denominator)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 653
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z17DivideByZeroCheckl",
+      "name": "DivideByZeroCheck",
+      "operation": "CheckDivideByZero",
+      "parameter_names": [
+        "denominator"
+      ],
+      "parameter_types": [
+        "int64_t"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "integer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: InitializedTypeInfo",
+        "vm/ClassInlines.h: InitFromCodegen"
+      ],
+      "declaration": "inline RuntimeClass* InitializedTypeInfo(RuntimeClass* klass)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 425
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z19InitializedTypeInfoP11Il2CppClass",
+      "name": "InitializedTypeInfo",
+      "operation": "EnsureClassReady",
+      "parameter_names": [
+        "klass"
+      ],
+      "parameter_types": [
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "RuntimeClass *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "slot"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: GetVirtualMethodInfo"
+      ],
+      "declaration": "inline const RuntimeMethod* GetVirtualMethodInfo(RuntimeObject* pThis, Il2CppMethodSlot slot)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 723
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z20GetVirtualMethodInfoP12Il2CppObjectt",
+      "name": "GetVirtualMethodInfo",
+      "operation": "LookupVirtualMethod",
+      "parameter_names": [
+        "pThis",
+        "slot"
+      ],
+      "parameter_types": [
+        "RuntimeObject *",
+        "Il2CppMethodSlot"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 16,
+            "kind": "integer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "const RuntimeMethod *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "array",
+        "value"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: ArrayElementTypeCheck"
+      ],
+      "declaration": "inline void ArrayElementTypeCheck(RuntimeArray* array, void* value)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 715
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z21ArrayElementTypeCheckP11Il2CppArrayPv",
+      "name": "ArrayElementTypeCheck",
+      "operation": "CheckArrayElementType",
+      "parameter_names": [
+        "array",
+        "value"
+      ],
+      "parameter_types": [
+        "RuntimeArray *",
+        "void *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "slot",
+        "interface"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: GetInterfaceMethodInfo",
+        "vm/ClassInlines.h: GetInterfaceInvokeDataFromVTable"
+      ],
+      "declaration": "inline const RuntimeMethod* GetInterfaceMethodInfo(RuntimeObject* pThis, Il2CppMethodSlot slot, RuntimeClass* declaringInterface)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 731
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z22GetInterfaceMethodInfoP12Il2CppObjecttP11Il2CppClass",
+      "name": "GetInterfaceMethodInfo",
+      "operation": "LookupInterfaceMethod",
+      "parameter_names": [
+        "pThis",
+        "slot",
+        "declaringInterface"
+      ],
+      "parameter_types": [
+        "RuntimeObject *",
+        "Il2CppMethodSlot",
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 16,
+            "kind": "integer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "const RuntimeMethod *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "method"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: il2cpp_rgctx_method_init",
+        "vm/ClassInlines.h: InitRgcxFromCodegen"
+      ],
+      "declaration": "inline void il2cpp_rgctx_method_init(const RuntimeMethod* method)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 705
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z24il2cpp_rgctx_method_initPK10MethodInfo",
+      "name": "il2cpp_rgctx_method_init",
+      "operation": "InitializeMethodRgctx",
+      "parameter_names": [
+        "method"
+      ],
+      "parameter_types": [
+        "const RuntimeMethod *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "discard",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "location",
+        "value"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-common.cpp: Il2CppCodeGenWriteBarrier → GarbageCollector::SetWriteBarrier"
+      ],
+      "declaration": "void Il2CppCodeGenWriteBarrier(void** targetAddress, void* object)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-common.h",
+        "line": 26
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z25Il2CppCodeGenWriteBarrierPPvS_",
+      "name": "Il2CppCodeGenWriteBarrier",
+      "operation": "NotifyWriteBarrier",
+      "parameter_names": [
+        "targetAddress",
+        "object"
+      ],
+      "parameter_types": [
+        "void **",
+        "void *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: RaiseInvalidCastException"
+      ],
+      "declaration": "NORETURN void RaiseInvalidCastException(RuntimeObject* obj, RuntimeClass* targetType)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 257
+      },
+      "declared_noreturn": true,
+      "mangled_name": "_Z25RaiseInvalidCastExceptionP12Il2CppObjectP11Il2CppClass",
+      "name": "RaiseInvalidCastException",
+      "operation": "ThrowInvalidCast",
+      "parameter_names": [
+        "obj",
+        "targetType"
+      ],
+      "parameter_types": [
+        "RuntimeObject *",
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_object_new"
+      ],
+      "declaration": "RuntimeObject* il2cpp_codegen_object_new(RuntimeClass *klass)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 484
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z25il2cpp_codegen_object_newP11Il2CppClass",
+      "name": "il2cpp_codegen_object_new",
+      "operation": "AllocateObject",
+      "parameter_names": [
+        "klass"
+      ],
+      "parameter_types": [
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "RuntimeObject *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "exception",
+        "method"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_exception"
+      ],
+      "declaration": "NORETURN void il2cpp_codegen_raise_exception(Exception_t *ex, MethodInfo* lastManagedFrame)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 27
+      },
+      "declared_noreturn": true,
+      "mangled_name": "_Z30il2cpp_codegen_raise_exceptionP11Exception_tP10MethodInfo",
+      "name": "il2cpp_codegen_raise_exception",
+      "operation": "ThrowManaged",
+      "parameter_names": [
+        "ex",
+        "lastManagedFrame"
+      ],
+      "parameter_types": [
+        "Exception_t *",
+        "MethodInfo *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "exception"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_rethrow_exception"
+      ],
+      "declaration": "NORETURN void il2cpp_codegen_rethrow_exception(Exception_t *ex)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 29
+      },
+      "declared_noreturn": true,
+      "mangled_name": "_Z32il2cpp_codegen_rethrow_exceptionP11Exception_t",
+      "name": "il2cpp_codegen_rethrow_exception",
+      "operation": "Rethrow",
+      "parameter_names": [
+        "ex"
+      ],
+      "parameter_types": [
+        "Exception_t *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_runtime_class_init → vm::Runtime::ClassInit",
+        "codegen/il2cpp-codegen-il2cpp.h: il2cpp_codegen_runtime_class_init_inline；beforefieldinit 需元数据证明，符号本身按精确初始化处理"
+      ],
+      "declaration": "void il2cpp_codegen_runtime_class_init(RuntimeClass* klass)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 665
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z33il2cpp_codegen_runtime_class_initP11Il2CppClass",
+      "name": "il2cpp_codegen_runtime_class_init",
+      "operation": "InitializeClassPrecise",
+      "parameter_names": [
+        "klass"
+      ],
+      "parameter_types": [
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "characters"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_string_new_wrapper"
+      ],
+      "declaration": "String_t* il2cpp_codegen_string_new_wrapper(const char* str)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 171
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z33il2cpp_codegen_string_new_wrapperPKc",
+      "name": "il2cpp_codegen_string_new_wrapper",
+      "operation": "AllocateStringUtf8",
+      "parameter_names": [
+        "str"
+      ],
+      "parameter_types": [
+        "const char *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "String_t *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "class",
+        "candidate"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_class_is_assignable_from"
+      ],
+      "declaration": "bool il2cpp_codegen_class_is_assignable_from(RuntimeClass *klass, RuntimeClass *oklass)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 482
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z39il2cpp_codegen_class_is_assignable_fromP11Il2CppClassS0_",
+      "name": "il2cpp_codegen_class_is_assignable_from",
+      "operation": "IsAssignableFrom",
+      "parameter_names": [
+        "klass",
+        "oklass"
+      ],
+      "parameter_types": [
+        "RuntimeClass *",
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 8,
+          "kind": "integer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "bool",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "method"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_overflow_exception"
+      ],
+      "declaration": "NORETURN void il2cpp_codegen_raise_overflow_exception(const RuntimeMethod* method)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-common.h",
+        "line": 261
+      },
+      "declared_noreturn": true,
+      "mangled_name": "_Z39il2cpp_codegen_raise_overflow_exceptionPK10MethodInfo",
+      "name": "il2cpp_codegen_raise_overflow_exception",
+      "operation": "ThrowOverflow",
+      "parameter_names": [
+        "method"
+      ],
+      "parameter_types": [
+        "const RuntimeMethod *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "class",
+        "data"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: Box"
+      ],
+      "declaration": "RuntimeObject* Box(RuntimeClass* type, void* data)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 308
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z3BoxP11Il2CppClassPv",
+      "name": "Box",
+      "operation": "Box",
+      "parameter_names": [
+        "type",
+        "data"
+      ],
+      "parameter_types": [
+        "RuntimeClass *",
+        "void *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "RuntimeObject *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_runtime_class_init → vm::Runtime::ClassInit",
+        "codegen/il2cpp-codegen-il2cpp.h: il2cpp_codegen_runtime_class_init_inline；beforefieldinit 需元数据证明，符号本身按精确初始化处理"
+      ],
+      "declaration": "inline void il2cpp_codegen_runtime_class_init_inline(RuntimeClass* klass)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 667
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z40il2cpp_codegen_runtime_class_init_inlineP11Il2CppClass",
+      "name": "il2cpp_codegen_runtime_class_init_inline",
+      "operation": "InitializeClassPrecise",
+      "parameter_names": [
+        "klass"
+      ],
+      "parameter_types": [
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "slot"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_initialize_runtime_metadata"
+      ],
+      "declaration": "void il2cpp_codegen_initialize_runtime_metadata(uintptr_t* metadataPointer)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 739
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z42il2cpp_codegen_initialize_runtime_metadataPm",
+      "name": "il2cpp_codegen_initialize_runtime_metadata",
+      "operation": "InitializeMetadata",
+      "parameter_names": [
+        "metadataPointer"
+      ],
+      "parameter_types": [
+        "uintptr_t *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "discard",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_out_of_memory_exception"
+      ],
+      "declaration": "NORETURN void il2cpp_codegen_raise_out_of_memory_exception()",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 182
+      },
+      "declared_noreturn": true,
+      "mangled_name": "_Z44il2cpp_codegen_raise_out_of_memory_exceptionv",
+      "name": "il2cpp_codegen_raise_out_of_memory_exception",
+      "operation": "ThrowOutOfMemory",
+      "parameter_names": [],
+      "parameter_types": [],
+      "prototype": {
+        "parameters": [],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_divide_by_zero_exception"
+      ],
+      "declaration": "NORETURN void il2cpp_codegen_raise_divide_by_zero_exception()",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 186
+      },
+      "declared_noreturn": true,
+      "mangled_name": "_Z45il2cpp_codegen_raise_divide_by_zero_exceptionv",
+      "name": "il2cpp_codegen_raise_divide_by_zero_exception",
+      "operation": "ThrowDivideByZero",
+      "parameter_names": [],
+      "parameter_types": [],
+      "prototype": {
+        "parameters": [],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_null_reference_exception"
+      ],
+      "declaration": "NORETURN void il2cpp_codegen_raise_null_reference_exception()",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 184
+      },
+      "declared_noreturn": true,
+      "mangled_name": "_Z45il2cpp_codegen_raise_null_reference_exceptionv",
+      "name": "il2cpp_codegen_raise_null_reference_exception",
+      "operation": "ThrowNullReference",
+      "parameter_names": [],
+      "parameter_types": [],
+      "prototype": {
+        "parameters": [],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "slot"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_initialize_runtime_metadata_inline"
+      ],
+      "declaration": "void* il2cpp_codegen_initialize_runtime_metadata_inline(uintptr_t* metadataPointer)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 741
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z49il2cpp_codegen_initialize_runtime_metadata_inlinePm",
+      "name": "il2cpp_codegen_initialize_runtime_metadata_inline",
+      "operation": "InitializeMetadata",
+      "parameter_names": [
+        "metadataPointer"
+      ],
+      "parameter_types": [
+        "uintptr_t *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "void *",
+      "unsupported": []
+    },
+    {
+      "arguments": [],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_index_out_of_range_exception"
+      ],
+      "declaration": "NORETURN void il2cpp_codegen_raise_index_out_of_range_exception()",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 188
+      },
+      "declared_noreturn": true,
+      "mangled_name": "_Z49il2cpp_codegen_raise_index_out_of_range_exceptionv",
+      "name": "il2cpp_codegen_raise_index_out_of_range_exception",
+      "operation": "ThrowBounds",
+      "parameter_names": [],
+      "parameter_types": [],
+      "prototype": {
+        "parameters": [],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "definition",
+        "method"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_generic_virtual_method_internal"
+      ],
+      "declaration": "const RuntimeMethod* il2cpp_codegen_get_generic_virtual_method_internal(const RuntimeMethod* methodDefinition, const RuntimeMethod* inflatedMethod)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 396
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z50il2cpp_codegen_get_generic_virtual_method_internalPK10MethodInfoS1_",
+      "name": "il2cpp_codegen_get_generic_virtual_method_internal",
+      "operation": "ResolveGenericVirtual",
+      "parameter_names": [
+        "methodDefinition",
+        "inflatedMethod"
+      ],
+      "parameter_types": [
+        "const RuntimeMethod *",
+        "const RuntimeMethod *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "const RuntimeMethod *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: UnBox"
+      ],
+      "declaration": "inline void* UnBox(RuntimeObject* obj, RuntimeClass* expectedBoxedClass)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 320
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z5UnBoxP12Il2CppObjectP11Il2CppClass",
+      "name": "UnBox",
+      "operation": "Unbox",
+      "parameter_names": [
+        "obj",
+        "expectedBoxedClass"
+      ],
+      "parameter_types": [
+        "RuntimeObject *",
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "void *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: IsInst",
+        "codegen/il2cpp-codegen-il2cpp.cpp: IsInst → vm::Object::IsInst"
+      ],
+      "declaration": "RuntimeObject* IsInst(RuntimeObject *obj, RuntimeClass* targetType)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 228
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z6IsInstP12Il2CppObjectP11Il2CppClass",
+      "name": "IsInst",
+      "operation": "IsInstance",
+      "parameter_names": [
+        "obj",
+        "targetType"
+      ],
+      "parameter_types": [
+        "RuntimeObject *",
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "RuntimeObject *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: Castclass"
+      ],
+      "declaration": "inline RuntimeObject* Castclass(RuntimeObject *obj, RuntimeClass* targetType)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 259
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z9CastclassP12Il2CppObjectP11Il2CppClass",
+      "name": "Castclass",
+      "operation": "CastClass",
+      "parameter_names": [
+        "obj",
+        "targetType"
+      ],
+      "parameter_types": [
+        "RuntimeObject *",
+        "RuntimeClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "RuntimeObject *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "value"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: NullCheck"
+      ],
+      "declaration": "inline void NullCheck(void* this_ptr)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 298
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z9NullCheckPv",
+      "name": "NullCheck",
+      "operation": "CheckNull",
+      "parameter_names": [
+        "this_ptr"
+      ],
+      "parameter_types": [
+        "void *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "class",
+        "storage"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: UnBox_Any"
+      ],
+      "declaration": "void* UnBox_Any(RuntimeObject* obj, RuntimeClass* expectedBoxedClass, void* unboxStorage)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 349
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z9UnBox_AnyP12Il2CppObjectP11Il2CppClassPv",
+      "name": "UnBox_Any",
+      "operation": "UnboxAny",
+      "parameter_names": [
+        "obj",
+        "expectedBoxedClass",
+        "unboxStorage"
+      ],
+      "parameter_types": [
+        "RuntimeObject *",
+        "RuntimeClass *",
+        "void *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "void *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "class"
+      ],
+      "basis": [
+        "vm/ClassInlines.h: InitFromCodegen；效果与下层调用链见 RuntimeOperations.EnsureClassReady"
+      ],
+      "declaration": "static IL2CPP_FORCE_INLINE Il2CppClass* InitFromCodegen(Il2CppClass *klass)",
+      "declaration_source": {
+        "file": "vm-utils/ClassInlines.h",
+        "line": 20
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_ZN6il2cpp2vm12ClassInlines15InitFromCodegenEP11Il2CppClass",
+      "name": "il2cpp::vm::ClassInlines::InitFromCodegen",
+      "operation": "EnsureClassReady",
+      "parameter_names": [
+        "klass"
+      ],
+      "parameter_types": [
+        "Il2CppClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "Il2CppClass *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "class"
+      ],
+      "basis": [
+        "vm/ClassInlines.cpp: InitFromCodegenSlow；效果与下层调用链见 RuntimeOperations.EnsureClassReady"
+      ],
+      "declaration": "static IL2CPP_NO_INLINE Il2CppClass* InitFromCodegenSlow(Il2CppClass *klass)",
+      "declaration_source": {
+        "file": "vm-utils/ClassInlines.h",
+        "line": 34
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_ZN6il2cpp2vm12ClassInlines19InitFromCodegenSlowEP11Il2CppClass",
+      "name": "il2cpp::vm::ClassInlines::InitFromCodegenSlow",
+      "operation": "EnsureClassReady",
+      "parameter_names": [
+        "klass"
+      ],
+      "parameter_types": [
+        "Il2CppClass *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "Il2CppClass *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "method"
+      ],
+      "basis": [
+        "vm/ClassInlines.h: InitRgcxFromCodegen；效果与下层调用链见 RuntimeOperations.InitializeMethodRgctx"
+      ],
+      "declaration": "static IL2CPP_FORCE_INLINE const MethodInfo* InitRgcxFromCodegen(const MethodInfo *method)",
+      "declaration_source": {
+        "file": "vm-utils/ClassInlines.h",
+        "line": 27
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_ZN6il2cpp2vm12ClassInlines19InitRgcxFromCodegenEPK10MethodInfo",
+      "name": "il2cpp::vm::ClassInlines::InitRgcxFromCodegen",
+      "operation": "InitializeMethodRgctx",
+      "parameter_names": [
+        "method"
+      ],
+      "parameter_types": [
+        "const MethodInfo *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "const MethodInfo *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "method"
+      ],
+      "basis": [
+        "vm/ClassInlines.cpp: InitRgctxFromCodegenSlow；效果与下层调用链见 RuntimeOperations.InitializeMethodRgctx"
+      ],
+      "declaration": "static IL2CPP_NO_INLINE const MethodInfo* InitRgctxFromCodegenSlow(const MethodInfo* method)",
+      "declaration_source": {
+        "file": "vm-utils/ClassInlines.h",
+        "line": 36
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_ZN6il2cpp2vm12ClassInlines24InitRgctxFromCodegenSlowEPK10MethodInfo",
+      "name": "il2cpp::vm::ClassInlines::InitRgctxFromCodegenSlow",
+      "operation": "InitializeMethodRgctx",
+      "parameter_names": [
+        "method"
+      ],
+      "parameter_types": [
+        "const MethodInfo *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "const MethodInfo *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "object",
+        "interface",
+        "slot"
+      ],
+      "basis": [
+        "vm/ClassInlines.cpp: GetInterfaceInvokeDataFromVTableSlowPath；效果与下层调用链见 RuntimeOperations.LookupInterfaceData"
+      ],
+      "declaration": "static IL2CPP_NO_INLINE const VirtualInvokeData& GetInterfaceInvokeDataFromVTableSlowPath(Il2CppObject* obj, const Il2CppClass* itf, Il2CppMethodSlot slot)",
+      "declaration_source": {
+        "file": "vm-utils/ClassInlines.h",
+        "line": 79
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_ZN6il2cpp2vm12ClassInlines40GetInterfaceInvokeDataFromVTableSlowPathEP12Il2CppObjectPK11Il2CppClasst",
+      "name": "il2cpp::vm::ClassInlines::GetInterfaceInvokeDataFromVTableSlowPath",
+      "operation": "LookupInterfaceData",
+      "parameter_names": [
+        "obj",
+        "itf",
+        "slot"
+      ],
+      "parameter_types": [
+        "Il2CppObject *",
+        "const Il2CppClass *",
+        "Il2CppMethodSlot"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 16,
+            "kind": "integer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "const VirtualInvokeData &",
+      "unsupported": []
+    }
+  ],
+  "generator_sha256": "a5e28eef7f3bf33ecee4598b56690e012e73adf62ea8dc3f460ce899e8a573a8",
+  "mapping_sha256": "1713f9e7c350d69390789831437437c2fb5d6c33a7b73af0fa9ad221efa63a06",
+  "schema_version": 1,
+  "shared_generator_sha256": "e0417a66cad7097804d93134398e24eac2ba67080ed6373bcaa4ed4c3d0aae48",
+  "source": {
+    "codegen/il2cpp-codegen-common.h": "7f31e7125a7c949defa8586029778b8400222816bf6aebf8baf46383ae2e75c2",
+    "codegen/il2cpp-codegen-il2cpp.h": "6751c51e8bc8bae24654a7c7dcc424726fca3b9ab459fa45211bc050f59d4663",
+    "codegen/il2cpp-codegen-metadata.h": "f88cb64468405b76bb0afe4fc605869be0fe328b66cff9ad04344c2729c0ab90",
+    "il2cpp-api-types.h": "b0055bb46d9e39e91b4adb04a9fb63e2ac7e849d1fd981b15ca83b4bcba0319d",
+    "il2cpp-class-internals.h": "93f845f3dd5028aafce5226d50db8c53aa1f10d2c1b039463104a9a86aa8938a",
+    "il2cpp-config.h": "c2514dbfaf939e905ab3a38eebab0f8c0a6fff1078eccc0449af86ed7e012969",
+    "il2cpp-object-internals.h": "f9d0f093ccb08a7279148fb8988a5601debb8aae951a26fec0f551e0672040e4",
+    "vm-utils/ClassInlines.h": "fac2c6b04451ee08f364b1989d06e5f73a20d93bf4dc6a000c7ffc2be7bce018"
+  },
+  "target": {
+    "data_model": "LP64",
+    "triple": "x86_64-linux-android"
+  },
+  "unity_version": "2022.3.62f2"
+}

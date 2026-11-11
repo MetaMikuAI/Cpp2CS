@@ -1,0 +1,528 @@
+{
+  "unity_version": "2022.3.62f2",
+  "functions": [
+    {
+      "name": "il2cpp_codegen_object_new",
+      "operation": "AllocateObject",
+      "arguments": [
+        "class"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_object_new"
+      ]
+    },
+    {
+      "name": "SZArrayNew",
+      "operation": "AllocateVector",
+      "arguments": [
+        "class",
+        "length"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: SZArrayNew"
+      ]
+    },
+    {
+      "name": "GenArrayNew",
+      "operation": "AllocateArray",
+      "arguments": [
+        "class",
+        "dimensions"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: GenArrayNew"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_string_new_wrapper",
+      "operation": "AllocateStringUtf8",
+      "arguments": [
+        "characters"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_string_new_wrapper"
+      ]
+    },
+    {
+      "name": "Box",
+      "operation": "Box",
+      "arguments": [
+        "class",
+        "data"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: Box"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_initialize_runtime_metadata",
+      "operation": "InitializeMetadata",
+      "arguments": [
+        "slot"
+      ],
+      "result": "discard",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_initialize_runtime_metadata"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_initialize_runtime_metadata_inline",
+      "operation": "InitializeMetadata",
+      "arguments": [
+        "slot"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_initialize_runtime_metadata_inline"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_runtime_class_init",
+      "operation": "InitializeClassPrecise",
+      "arguments": [
+        "class"
+      ],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_runtime_class_init → vm::Runtime::ClassInit",
+        "codegen/il2cpp-codegen-il2cpp.h: il2cpp_codegen_runtime_class_init_inline；beforefieldinit 需元数据证明，符号本身按精确初始化处理"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_runtime_class_init_inline",
+      "operation": "InitializeClassPrecise",
+      "arguments": [
+        "class"
+      ],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_runtime_class_init → vm::Runtime::ClassInit",
+        "codegen/il2cpp-codegen-il2cpp.h: il2cpp_codegen_runtime_class_init_inline；beforefieldinit 需元数据证明，符号本身按精确初始化处理"
+      ]
+    },
+    {
+      "name": "InitializedTypeInfo",
+      "operation": "EnsureClassReady",
+      "arguments": [
+        "class"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: InitializedTypeInfo",
+        "vm/ClassInlines.h: InitFromCodegen"
+      ]
+    },
+    {
+      "name": "il2cpp::vm::ClassInlines::InitFromCodegen",
+      "operation": "EnsureClassReady",
+      "arguments": [
+        "class"
+      ],
+      "result": "operation",
+      "header": "vm-utils/ClassInlines.h",
+      "basis": [
+        "vm/ClassInlines.h: InitFromCodegen；效果与下层调用链见 RuntimeOperations.EnsureClassReady"
+      ],
+      "parameters": "Il2CppClass *klass"
+    },
+    {
+      "name": "il2cpp::vm::ClassInlines::InitFromCodegenSlow",
+      "operation": "EnsureClassReady",
+      "arguments": [
+        "class"
+      ],
+      "result": "operation",
+      "header": "vm-utils/ClassInlines.h",
+      "basis": [
+        "vm/ClassInlines.cpp: InitFromCodegenSlow；效果与下层调用链见 RuntimeOperations.EnsureClassReady"
+      ],
+      "parameters": "Il2CppClass *klass"
+    },
+    {
+      "name": "il2cpp::vm::ClassInlines::InitRgcxFromCodegen",
+      "operation": "InitializeMethodRgctx",
+      "arguments": [
+        "method"
+      ],
+      "result": "operation",
+      "header": "vm-utils/ClassInlines.h",
+      "basis": [
+        "vm/ClassInlines.h: InitRgcxFromCodegen；效果与下层调用链见 RuntimeOperations.InitializeMethodRgctx"
+      ]
+    },
+    {
+      "name": "il2cpp::vm::ClassInlines::InitRgctxFromCodegenSlow",
+      "operation": "InitializeMethodRgctx",
+      "arguments": [
+        "method"
+      ],
+      "result": "operation",
+      "header": "vm-utils/ClassInlines.h",
+      "basis": [
+        "vm/ClassInlines.cpp: InitRgctxFromCodegenSlow；效果与下层调用链见 RuntimeOperations.InitializeMethodRgctx"
+      ]
+    },
+    {
+      "name": "il2cpp_rgctx_method_init",
+      "operation": "InitializeMethodRgctx",
+      "arguments": [
+        "method"
+      ],
+      "result": "discard",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: il2cpp_rgctx_method_init",
+        "vm/ClassInlines.h: InitRgcxFromCodegen"
+      ]
+    },
+    {
+      "name": "IsInst",
+      "operation": "IsInstance",
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: IsInst",
+        "codegen/il2cpp-codegen-il2cpp.cpp: IsInst → vm::Object::IsInst"
+      ]
+    },
+    {
+      "name": "IsInstSealed",
+      "operation": "IsInstance",
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: IsInstSealed",
+        "codegen/il2cpp-codegen-il2cpp.cpp: IsInst → vm::Object::IsInst"
+      ]
+    },
+    {
+      "name": "IsInstClass",
+      "operation": "IsInstance",
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: IsInstClass",
+        "codegen/il2cpp-codegen-il2cpp.cpp: IsInst → vm::Object::IsInst"
+      ]
+    },
+    {
+      "name": "Castclass",
+      "operation": "CastClass",
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: Castclass"
+      ]
+    },
+    {
+      "name": "CastclassSealed",
+      "operation": "CastClass",
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: CastclassSealed"
+      ]
+    },
+    {
+      "name": "CastclassClass",
+      "operation": "CastClass",
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: CastclassClass"
+      ]
+    },
+    {
+      "name": "RaiseInvalidCastException",
+      "operation": "ThrowInvalidCast",
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: RaiseInvalidCastException"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_class_is_assignable_from",
+      "operation": "IsAssignableFrom",
+      "arguments": [
+        "class",
+        "candidate"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_class_is_assignable_from"
+      ]
+    },
+    {
+      "name": "UnBox",
+      "operation": "Unbox",
+      "arguments": [
+        "object",
+        "class"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: UnBox"
+      ],
+      "parameters": "RuntimeObject* obj, RuntimeClass* expectedBoxedClass"
+    },
+    {
+      "name": "UnBox_Any",
+      "operation": "UnboxAny",
+      "arguments": [
+        "object",
+        "class",
+        "storage"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: UnBox_Any"
+      ]
+    },
+    {
+      "name": "UnBoxNullable",
+      "operation": "UnboxNullable",
+      "arguments": [
+        "object",
+        "class",
+        "storage"
+      ],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: UnBoxNullable",
+        "codegen/il2cpp-codegen-il2cpp.cpp: UnBoxNullable_internal"
+      ]
+    },
+    {
+      "name": "NullCheck",
+      "operation": "CheckNull",
+      "arguments": [
+        "value"
+      ],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: NullCheck"
+      ]
+    },
+    {
+      "name": "DivideByZeroCheck",
+      "operation": "CheckDivideByZero",
+      "arguments": [
+        "denominator"
+      ],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: DivideByZeroCheck"
+      ]
+    },
+    {
+      "name": "ArrayElementTypeCheck",
+      "operation": "CheckArrayElementType",
+      "arguments": [
+        "array",
+        "value"
+      ],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: ArrayElementTypeCheck"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_raise_null_reference_exception",
+      "operation": "ThrowNullReference",
+      "arguments": [],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_null_reference_exception"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_raise_divide_by_zero_exception",
+      "operation": "ThrowDivideByZero",
+      "arguments": [],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_divide_by_zero_exception"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_raise_index_out_of_range_exception",
+      "operation": "ThrowBounds",
+      "arguments": [],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_index_out_of_range_exception"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_raise_out_of_memory_exception",
+      "operation": "ThrowOutOfMemory",
+      "arguments": [],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_out_of_memory_exception"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_raise_overflow_exception",
+      "operation": "ThrowOverflow",
+      "arguments": [
+        "method"
+      ],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-common.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_overflow_exception"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_raise_exception",
+      "operation": "ThrowManaged",
+      "arguments": [
+        "exception",
+        "method"
+      ],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_raise_exception"
+      ],
+      "parameters": "Exception_t *ex, MethodInfo* lastManagedFrame"
+    },
+    {
+      "name": "il2cpp_codegen_rethrow_exception",
+      "operation": "Rethrow",
+      "arguments": [
+        "exception"
+      ],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_rethrow_exception"
+      ]
+    },
+    {
+      "name": "Il2CppCodeGenWriteBarrier",
+      "operation": "NotifyWriteBarrier",
+      "arguments": [
+        "location",
+        "value"
+      ],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-common.h",
+      "basis": [
+        "codegen/il2cpp-codegen-common.cpp: Il2CppCodeGenWriteBarrier → GarbageCollector::SetWriteBarrier"
+      ]
+    },
+    {
+      "name": "GetVirtualMethodInfo",
+      "operation": "LookupVirtualMethod",
+      "arguments": [
+        "object",
+        "slot"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: GetVirtualMethodInfo"
+      ]
+    },
+    {
+      "name": "GetInterfaceMethodInfo",
+      "operation": "LookupInterfaceMethod",
+      "arguments": [
+        "object",
+        "slot",
+        "interface"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: GetInterfaceMethodInfo",
+        "vm/ClassInlines.h: GetInterfaceInvokeDataFromVTable"
+      ]
+    },
+    {
+      "name": "il2cpp_codegen_get_generic_virtual_method_internal",
+      "operation": "ResolveGenericVirtual",
+      "arguments": [
+        "definition",
+        "method"
+      ],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_generic_virtual_method_internal"
+      ]
+    },
+    {
+      "name": "il2cpp::vm::ClassInlines::GetInterfaceInvokeDataFromVTableSlowPath",
+      "operation": "LookupInterfaceData",
+      "arguments": [
+        "object",
+        "interface",
+        "slot"
+      ],
+      "result": "operation",
+      "header": "vm-utils/ClassInlines.h",
+      "basis": [
+        "vm/ClassInlines.cpp: GetInterfaceInvokeDataFromVTableSlowPath；效果与下层调用链见 RuntimeOperations.LookupInterfaceData"
+      ],
+      "parameters": "Il2CppObject* obj, const Il2CppClass* itf, Il2CppMethodSlot slot"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # 运行时布局
 
-布局由 libclang 18.1.1 按目标三元组计算；生成器不计算结构填充，不保存手写偏移。头文件通过参数传入，不入库。当前范围是 C 兼容的运行时声明，不包含运行时函数目录与操作登记表。
+布局由 libclang 18.1.1 按目标三元组计算；生成器不计算结构填充，不保存手写偏移。头文件通过参数传入，不入库。本节的布局范围是 C 兼容的运行时声明；函数目录与操作登记表见末节。
 
 | 数据文件 | 目标 | 结构/联合数 | 整数常量数 |
 |---|---|---:|---:|
@@ -80,3 +80,35 @@ python3 -m venv "$LAYOUT_VENV"
 - Windows 使用 clang 的 MSVC ABI 模型，未用 MSVC 或对应版本的完整真实头文件交叉验证。2022 对提取转换的验证支持还原方案，不能证明所有 2021 平台配置均一致。
 - GCC 只用于宿主 x86_64 LP64 结构、对齐和非位域字段的交叉核对，不能证明 Android 系统 ABI 或 Windows 布局。最小用例检查三个 clang 目标的位域，但没有独立编译器的全量位域检查。
 - 未编译完整生成 C++ 与内联函数；导出的是其运行时数据结构声明。没有扫描业务二进制，也没有改动 CIL 或恢复流水线。
+
+## 运行时函数目录与操作登记表
+
+Unity 目录为 `functions-unity-2022.3.62f2-android-{arm64,x64}.json`。`RuntimeFunctionCatalog.Load/Read` 精确匹配版本、目标和数据模型；不跨版本回退。系统目录 `functions-system-android-lp64.json` 单独声明 bionic、LP64 和两个 Android 三元组，不依赖 Unity 版本。`LoadWithSystem` 显式接收两份文件并合并，拒绝目标不匹配与符号冲突。没有修改 `RuntimeSpec` 或添加二进制识别。
+
+`RuntimeOperations.All` 是语义的唯一来源。输入记录用途与种类；结果关系封闭为无关系、恒等于输入、输入或空。`ReturnInput` 只投影恒等关系。`IsInstance` 用输入或空，`CastClass` 用恒等；`UnboxAny` 返回盒内或缓冲区地址，不登记恒等。
+
+指针范围封闭为固定字节、一个指针槽、类输入的值大小、整数输入的长度乘元素字节数、不定。条件封闭为总是、正常返回、异常退出、状态尚未建立、其他；其他条件必须保留说明，消费者不能把它当成已证明的条件。范围与条件的文字仅作说明。`EventCondition` 为空表示没有事件。`memcpy`、`memmove`、`memset` 以 `length` 字节记录访问，返回值恒等于 `destination`；整体无额外堆改写不取消这些显式读写。地址属于帧、托管堆或原生区域仍由位置查询判定。
+
+后置条件包含具名谓词、条件、说明与状态表示。类构造重入不保证完成标志；公开类布局初始化入口断言不处于布局重入；正常返回建立就绪事实。空 RGCTX 集合允许指针为空，非空数据指针是幂等消去的充分凭据，不能把空数据误判为失败。匿名元数据槽仍要求全局访问凭据。beforefieldinit 的事件时机与堆改写分开，必须有类型元数据证明才能选择对应操作。
+
+效果依据针对 Unity 2022.3 的 Android LP64、线程化 Boehm GC 与匹配基础库，不外推至其他配置。函数级链保存在登记项 `Evidence`，当前线程是否运行托管代码另有 `SynchronousManagedCode`。`Class::Init` 建立布局，不执行输入类静态构造；`Runtime::ClassInit` 调用静态构造。对象分配与装箱会走后者，数组不会。分配触发的终结器由 `gc/BoehmGC.cpp` 的 finalize-on-demand 与 `gc/GarbageCollector.cpp: NotifyFinalizers / FinalizerThread` 转到其他线程，不算本次调用同步执行任意托管代码。
+
+`vm/Exception.cpp: FromNameMsg` 经 `Object::New`、`Runtime::ObjectInit` 调用基础库异常构造；不能把它说成完全没有托管执行。匹配基础库的异常构造经 `SystemException`、`Exception.Init` 只写新对象，但 `Exception` 静态构造可初始化静态锁，因此错误路径仍登记可能改写。缓存异常经 `PrepareExceptionForThrow` 还可补写既有异常堆栈。依据为对应生成 C++ 的基础库 `Exception`、`SystemException`、`ArithmeticException`、`MemberAccessException`、`SafeSerializationManager` 构造及 `Environment.GetResourceString`，不按其符号或地址做识别。原生分配耗尽、内存损坏与自定义 profiler 回调不在此配置的精确结论内；改变这些配置必须重新核对。
+
+静态构造失败被 `Runtime::ClassInit` 包装成 `TypeInitializationException`，布局失败缓存为 `TypeLoadException`；泛型类型深度失败由 `vm/GenericClass.cpp: CreateClass` 经 `GetMaximumNestedGenericsException` 抛 `NotSupportedException`。泛型方法查找只安装失败桩，不能把将来执行桩的异常算在当前查找上。接口查找仍保留任意异常上界：`vm/ClassInlines.cpp` 的对象慢路径可以进入 `RCW::GetComInterfaceInvokeData`，进而调用外部 `QueryInterface`，外部代码和回调没有封闭摘要。目录没有按 Android 常见对象形态擅自删掉此分支。
+
+重新生成仍使用布局节的 Python 环境和原始声明头文件：
+
+```sh
+"$LAYOUT_VENV/bin/python" spec/gen/generate_catalog.py --runtime-headers "$RUNTIME_HEADERS" --unity 2022.3.62f2 --target android-arm64 --output spec/functions-unity-2022.3.62f2-android-arm64.json
+"$LAYOUT_VENV/bin/python" spec/gen/generate_catalog.py --runtime-headers "$RUNTIME_HEADERS" --unity 2022.3.62f2 --target android-x64 --output spec/functions-unity-2022.3.62f2-android-x64.json
+"$LAYOUT_VENV/bin/python" spec/gen/selfcheck_catalog.py
+```
+
+`spec/gen/runtime-functions.json` 手写函数到操作的对应；libclang 计算 C 原型与 Itanium 修饰名。原始声明来自头文件包的 `vm-utils/ClassInlines.h`；完整实现包将此头文件放在 `vm/ClassInlines.h`，两个包的 codegen 头文件、实现与 ClassInlines 头文件逐字节相同；声明与实现依据分别记录，不伪造声明来源。系统原型手写，依据为 ISO C11 N1570 的 memcpy、memmove、memset、abort、exit，Itanium C++ ABI 的 `_Unwind_Resume`、`__cxa_begin_catch`、`__cxa_end_catch`，ISO C++ 的 `std::terminate` 及 LSB/bionic 的 `__stack_chk_fail`。
+
+JSON 的 `schema_version` 为 1。函数项含原始声明及位置、C 原型、参数类型与名称、操作名、按形参次序的输入名、结果处理、依据与识别空位。每个形参都必须映射到一个操作输入，本目录没有未使用形参，不提供静默丢弃的退路。`result` 为 `operation`、`discard`、`void`；前者返回操作结果，中者包装函数丢弃结果，后者操作本身无结果。系统项以 `recognition.import` 记录精确导入名，其他识别线索仍留空。不支持的 C 类型保留诊断，`RequireSignature` 明确失败。
+
+快速检查 `runtime-catalog` 核对形参完整对应、指针输入用途、范围输入类型和结果关系种类。定向检查 `runtime-catalog-truth` 读取 `CPP2CS_CORPUS_TRUTH`；未配置则明确跳过。调用审计默认从同级 `-inline` 目录读取，也可用 `CPP2CS_CORPUS_INLINE_TRUTH` 指定。系统导入存在性按函数真值中 `defined=false` 核对，不把静态链接符号当作导入。
+
+覆盖保留用例统计，并增加全语料统计：以 `mappings.json` 中 `method_id` 非空的所有角色目标地址作为托管映射集合（包括泛型、调整桩和调用器），按地址合并别名，选取调用审计中对应的全部函数；按调用指令地址去重，包含直接尾调用。目标地址及全部别名均不属于任何托管映射时，归为运行时/系统候选；不依赖名称前缀判定。任一同址符号在目录即覆盖。报告映射函数数、审计函数数和缺少审计数，缺少审计的函数不伪造零调用，并使完整性检查失败。`method_id` 为空的运行时合成入口不冒充托管方法；它们若被直接调用仍计入运行时候选。未收目标按调用点次数降序列前五十，名称分类仅用于报告，不能作为恢复识别依据。间接调用、无审计函数及没有独立符号的内联均不进入该直接调用覆盖率。
