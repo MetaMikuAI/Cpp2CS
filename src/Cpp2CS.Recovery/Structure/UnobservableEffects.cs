@@ -112,6 +112,8 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         timings["初始改写"] = timer.Elapsed.TotalSeconds - rewriteInitial;
         var forwardInitial = timer.Elapsed.TotalSeconds;
         var current = edit.RemovedStatements.Count == 0 ? input : ForwardReads(erasedSnapshot, records);
+        // 调用只读取签名绑定的输入槽；先裁掉其余的槽，折叠时的活跃性才不被它们牵住。
+        if (!ReferenceEquals(current, input)) current = RemoveUnusedCallInputs(current, records);
         timings["读取转发"] = timer.Elapsed.TotalSeconds - forwardInitial;
         // 未绑定的返回槽没有托管使用；只有发生结构改写时才裁剪它们。
         timings["消去与读取转发"] = timer.Elapsed.TotalSeconds;

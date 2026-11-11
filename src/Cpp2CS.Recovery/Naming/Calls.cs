@@ -14,6 +14,8 @@ public sealed record ClassifiedCall(CallKind Kind, CallCandidates? Candidates = 
     ImmutableDictionary<string, BoundValue>? Inputs = null, BoundValue? Result = null, Term? Target = null, Reason? Why = null)
 {
     public RuntimeOperation? Operation => Function?.Operation;
+    /// <summary>运行时函数与系统函数按 C 层签名的绑定；给出被调方实际读取的输入槽。</summary>
+    public BoundCall? Binding { get; init; }
 }
 public sealed class CallNamingQuery(MethodBinder binder, IBindingCodeMap code, IRuntimeFunctionMap runtime,
     RuntimeFunctionCatalog catalog) : Query<CallIdentity, ClassifiedCall>
@@ -35,7 +37,7 @@ public sealed class CallNamingQuery(MethodBinder binder, IBindingCodeMap code, I
                 var kind = function.Recognition.Import is not null ? CallKind.System : CallKind.Runtime;
                 var binding = function.Signature is { } signature ? binder.Call(call, signature, c.Snapshot.Terms) : null;
                 result = binding?.Value is { } value ? new(kind, Function: function,
-                    Inputs: function.Arguments.Select((name, i) => (name, value.Arguments[i])).ToImmutableDictionary(x => x.name, x => x.Item2), Result: value.Result)
+                    Inputs: function.Arguments.Select((name, i) => (name, value.Arguments[i])).ToImmutableDictionary(x => x.name, x => x.Item2), Result: value.Result) { Binding = value }
                     : new(kind, Function: function, Why: new("naming.call-binding", binding?.Failure?.Detail ?? string.Join("；", function.Unsupported)));
             }
         }

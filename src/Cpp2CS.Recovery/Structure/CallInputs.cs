@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Cpp2CS.Native;
+using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.Naming;
 
 namespace Cpp2CS.Recovery.Structure;
@@ -17,14 +18,22 @@ public sealed partial class UnobservableEffects
             {
                 if (statements[i] is not Call call) continue;
                 var named = context.Get(calls, call.Identity);
-                if (!named.IsSuccess || named.Value.Kind != CallKind.Managed ||
-                    named.Value.Candidates is not { Failure: null, Candidates.Length: > 0 } candidates ||
-                    candidates.Candidates.Any(c => !c.Binding.Success || c.Binding.Value!.Signature.Signature.IsVariadic)) continue;
+                if (!named.IsSuccess) continue;
+                // 托管方法取全部候选的签名；运行时函数与系统函数取目录登记的 C 层签名。
+                SignatureBinding[]? signatures = named.Value switch
+                {
+                    { Kind: CallKind.Managed, Candidates: { Failure: null, Candidates.Length: > 0 } candidates }
+                        when candidates.Candidates.All(c => c.Binding.Success)
+                        => candidates.Candidates.Select(c => c.Binding.Value!.Signature).ToArray(),
+                    { Kind: CallKind.Runtime or CallKind.System, Binding: { } binding } => [binding.Signature],
+                    _ => null,
+                };
+                if (signatures is null || signatures.Any(s => s.Signature.IsVariadic)) continue;
                 // 参数、聚合副本地址和间接返回地址都属于输入；多候选取并集。
                 var required = new HashSet<AbstractSlot>();
-                foreach (var candidate in candidates.Candidates)
+                foreach (var signature in signatures)
                 {
-                    var slots = candidate.Binding.Value!.Signature.Slots;
+                    var slots = signature.Slots;
                     foreach (var parameter in slots.Parameters)
                     {
                         foreach (var piece in parameter.Pieces) required.Add(piece.Slot);
