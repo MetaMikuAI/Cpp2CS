@@ -5,6 +5,8 @@ namespace Cpp2CS.Tests;
 
 internal static class ModelChecks
 {
+    public const string Command = "model";
+
     public static int Run()
     {
         var checks = new Assertions();

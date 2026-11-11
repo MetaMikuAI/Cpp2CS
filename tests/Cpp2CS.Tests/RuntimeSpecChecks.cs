@@ -8,6 +8,8 @@ namespace Cpp2CS.Tests;
 
 internal static class RuntimeSpecChecks
 {
+    public const string Command = "runtime";
+
     public static int Run()
     {
         var checks = new Assertions();

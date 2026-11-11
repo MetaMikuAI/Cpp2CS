@@ -6,6 +6,8 @@ namespace Cpp2CS.Tests;
 
 internal static class ArchitectureChecks
 {
+    public const string Command = "arch";
+
     // docs/实施.md 第 1.2 节；装配方向为 Cli → Pipeline，避免双向引用。
     private static readonly IReadOnlyDictionary<string, string[]> Allowed = new Dictionary<string, string[]>
     {

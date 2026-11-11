@@ -7,6 +7,8 @@ namespace Cpp2CS.Tests;
 
 internal static class ManagedChecks
 {
+    public const string Command = "managed";
+
     public static int Run()
     {
         var checks = new Assertions();
