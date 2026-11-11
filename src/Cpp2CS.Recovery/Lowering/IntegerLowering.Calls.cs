@@ -103,7 +103,9 @@ public sealed partial class IntegerLowering
             if (value is null) return null;
             args.Add(value);
         }
-        var receiver = d.Receiver is { } target ? Value(target) : d.Binding.This is { } self ? CallArgument(self, d.Method.DeclaringType, point) : null;
+        TypeRef receiverType = d.Method.Method.Owner.IsValueType ? new ByRefRef(d.Method.DeclaringType) : d.Method.DeclaringType;
+        var receiver = d.Receiver is { } target ? Value(target) : d.Binding.This is { } self ? CallArgument(self, receiverType, point) : null;
+        if (receiver is not null) receiver = Coerce(receiver, receiverType);
         if (d.Binding.This is not null && receiver is null) return null;
         var statement = new ManagedCall(position, new(d.Method, receiver, args, d.Virtual), null);
         callStatements.Add(statement, d);

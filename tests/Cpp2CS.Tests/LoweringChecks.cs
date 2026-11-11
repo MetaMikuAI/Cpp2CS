@@ -212,22 +212,23 @@ internal static class LoweringChecks
         var callback = Define("Callback"); callback.BaseType = new DefinitionRef(multi, []);
         var exception = Define("NullReferenceException", "mscorlib.dll", "System");
         var methods = new List<MethodDef>();
-        MethodDef Method(TypeDef type, string name, TypeRef result, TypeRef[] parameters, bool virtualCall = false, bool constructor = false)
+        MethodDef Method(TypeDef type, string name, TypeRef result, TypeRef[] parameters, bool virtualCall = false, bool constructor = false, bool instance = false)
         {
             var method = new MethodDef { Index = methods.Count, Owner = type, Name = name,
                 Token = (uint)(0x06000001 + methods.Count), Attributes = MethodAttributes.Public |
-                    (constructor ? MethodAttributes.SpecialName | MethodAttributes.RTSpecialName : virtualCall ? MethodAttributes.Virtual : MethodAttributes.Static),
+                    (constructor ? MethodAttributes.SpecialName | MethodAttributes.RTSpecialName : virtualCall ? MethodAttributes.Virtual : instance ? 0 : MethodAttributes.Static),
                 ImplAttributes = 0, Slot = virtualCall ? 0 : -1, ReturnType = result,
                 Parameters = parameters.Select((t, i) => new ParameterDef("p" + i, t, 0, null, false)).ToArray() };
             methods.Add(method); return method;
         }
+        var hash = Method(((DefinitionRef)integer).Definition, "GetHashCode", integer, [], instance: true);
         var target = Method(owner, "Apply", integer, [integer], true);
         var invoke = Method(callback, "Invoke", integer, [integer], true);
         Method(exception, ".ctor", Primitive("Void"), [], constructor: true);
-        string[] modes = ["Read", "Write", "Preserve", "Unused", "Null", "ArrayRead", "ArrayWrite", "Length", "Virtual", "Delegate", "Reference", "RefCall", "Merge", "Nested", "ByRef", "ScalarByRef", "ScalarStore", "ReferenceSlot", "PrivateRead", "Partial", "Cross"];
+        string[] modes = ["Read", "Write", "Preserve", "Unused", "Null", "ArrayRead", "ArrayWrite", "Length", "Virtual", "Delegate", "Reference", "RefCall", "Merge", "Nested", "ByRef", "ScalarByRef", "ScalarStore", "ReferenceSlot", "ScalarReceiver", "WrongReceiver", "PrivateRead", "Partial", "Cross"];
         var entries = modes.ToDictionary(n => n, n => Method(n == "PrivateRead" ? callback : owner, n, n is "Reference" or "RefCall" or "Merge" or "ReferenceSlot" ? reference : integer,
-            [(n.StartsWith("Array", StringComparison.Ordinal) || n == "Length") ? array : n == "Delegate" ? new DefinitionRef(callback, []) : n == "ByRef" ? new ByRefRef(innerType) : n is "ScalarByRef" or "ScalarStore" ? new ByRefRef(integer) : n == "ReferenceSlot" ? new ByRefRef(reference) : reference, integer]));
-        foreach (var type in definitions.Where(t => t == owner || t == callback || t == exception)) type.Methods = methods.Where(m => m.Owner == type).ToArray();
+            [(n.StartsWith("Array", StringComparison.Ordinal) || n == "Length") ? array : n == "Delegate" ? new DefinitionRef(callback, []) : n == "ByRef" ? new ByRefRef(innerType) : n is "ScalarByRef" or "ScalarStore" or "ScalarReceiver" ? new ByRefRef(integer) : n == "ReferenceSlot" ? new ByRefRef(reference) : n == "WrongReceiver" ? Primitive("Int64") : reference, integer]));
+        foreach (var type in definitions.Where(t => t == owner || t == callback || t == exception || t == ((DefinitionRef)integer).Definition)) type.Methods = methods.Where(m => m.Owner == type).ToArray();
         owner.VTable = [MethodRef.Open(target)];
         var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods,
             Fields = [field, .. del.Fields, leaf, nested, hidden], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
@@ -265,6 +266,13 @@ internal static class LoweringChecks
             if (mode == "Unused") result = terms.Constant(0, 32);
             if (mode == "Read") result = terms.Apply(new CoreOperator(CoreOperation.Add), 32, result, terms.Constant(1, 32));
             if (mode == "Reference") result = root;
+            if (mode is "ScalarReceiver" or "WrongReceiver")
+            {
+                var id = new CallIdentity(); var output = terms.Atom(new ResultAtom(id), 64);
+                statements.Add(new Call(id, new ImageFunction(10), [new(new(SlotKind.Integer), root),
+                    new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], [new(new(SlotKind.Integer), output)]));
+                result = terms.Slice(output, 0, 32);
+            }
             if (mode == "RefCall")
             {
                 var id = new CallIdentity(); result = terms.Atom(new ResultAtom(id), 64);
@@ -304,8 +312,13 @@ internal static class LoweringChecks
                 builder.Blocks.Add(new(join, [new(id, merged, [new(yes, root), new(no, terms.Constant(0, 64))])], [], Ret(merged)));
             }
             else builder.Blocks.Add(new(block, [], statements.ToImmutableArray(), Ret(result)));
-            var calls = new CallNamingQuery(binder, new NamingChecks.Map(mode == "RefCall" ? [new BindingEntry(MethodRef.Open(entries["Reference"]), BindingEntryKind.Ordinary)] : []), new NamingChecks.RuntimeMap(runtime), catalog);
+            var calls = new CallNamingQuery(binder, new NamingChecks.Map(mode == "RefCall" ? [new BindingEntry(MethodRef.Open(entries["Reference"]), BindingEntryKind.Ordinary)] : mode is "ScalarReceiver" or "WrongReceiver" ? [new BindingEntry(MethodRef.Open(hash), BindingEntryKind.Ordinary)] : []), new NamingChecks.RuntimeMap(runtime), catalog);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(entries[mode]), binder, types, calls: calls, effects: new ManagedCallEffects(calls), spec: spec).Run();
+            if (mode == "WrongReceiver")
+            {
+                checks.True(lowered.Failure?.Kind == LoweringFailureKind.UnsupportedType, "整数地址不能冒充值类型接收者");
+                continue;
+            }
             if (mode == "PrivateRead")
             {
                 checks.True(lowered.Failure?.Reason.Code == "lowering.Access.Field", "私有字段需要内联逆证明：" + lowered.Failure);
