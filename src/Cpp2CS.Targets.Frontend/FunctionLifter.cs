@@ -104,7 +104,7 @@ public static class FunctionLifter
                 bool newTargets = false;
                 foreach (var block in drafts.Values.Where(b => b.IndirectTarget is not null).ToArray())
                 {
-                    var resolution = facts.ResolveIndirect(block.IndirectAddress, block.IndirectTarget!, new FlowContext(terms, block, entry));
+                    var resolution = facts.ResolveIndirect(block.IndirectAddress, block.IndirectTarget!, new FlowContext(terms, block, entry, range, (isa as IImageInstructionSet)?.Image, drafts.Values));
                     ArgumentNullException.ThrowIfNull(resolution);
                     if (resolution is IndirectUnknown unknown) return new(null, new(block.IndirectAddress, unknown.Reason));
                     var oldTargets = resolutions.TryGetValue(block.IndirectAddress, out var old) && old is IndirectTable oldTable

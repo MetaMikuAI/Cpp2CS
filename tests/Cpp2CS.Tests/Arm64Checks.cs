@@ -112,7 +112,8 @@ internal static class Arm64Checks
             }
         }
         var indirect = FunctionLifter.Lift(new Words([0xd61f0000]), Convention, new Arm64FlowFacts(), new(0, 4, FunctionEvidence.SymbolTable), 0);
-        checks.True(indirect.Failure?.Reason.Code == "arm64.indirect", "不猜测经寄存器的跳转目标");
+        checks.True(indirect.Function is { } tail && tail.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any(c => c.Target is ComputedTarget),
+            "栈指针已复位时经寄存器的跳转是尾调用");
     }
     private static void RejectUnsupported(Assertions checks)
     {

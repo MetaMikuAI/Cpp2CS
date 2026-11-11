@@ -32,6 +32,11 @@ public static class Arm64Registers
 public sealed class Arm64FlowFacts(Func<CallTarget, bool>? doesNotReturn = null) : IFlowFacts
 {
     public bool DoesNotReturn(CallTarget target) => doesNotReturn?.Invoke(target) ?? false;
-    public IndirectResolution ResolveIndirect(ulong address, Term target, IIndirectContext context) =>
-        new IndirectUnknown(new("arm64.indirect", "经寄存器的跳转目标无法判定。"));
+    public IndirectResolution ResolveIndirect(ulong address, Term target, IIndirectContext context)
+    {
+        if (context.Image is { } image && image.IsExecutable(address, 4)
+            && (image.ReadUnsigned(address, 4) & 0xfffffc1f) == 0xd65f0000)
+            return new IndirectUnknown(new("arm64.indirect-ret", "非默认寄存器 RET 尚未证明为返回。"));
+        return IndirectResolver.Resolve(target, context);
+    }
 }

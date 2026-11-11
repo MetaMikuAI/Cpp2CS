@@ -41,11 +41,24 @@ public sealed record IndirectTable(Term Selector, ImmutableArray<IndirectCase> C
 public sealed record IndirectTailCall(Term Target) : IndirectResolution;
 public sealed record IndirectUnknown(Reason Reason) : IndirectResolution;
 public sealed record FlowCondition(Term Condition, bool IsTrue);
+/// <summary>提供流事实解析使用的只读映像，不参与指令语义。</summary>
+public interface IImageInstructionSet
+{
+    Cpp2CS.Native.Images.IImage Image { get; }
+}
+
 public interface IIndirectContext
 {
+    Cpp2CS.Native.Images.IImage? Image => null;
+    Cpp2CS.Native.Images.FunctionRange? Range => null;
+    /// <summary>按读取结果查询当前组块快照中的读取地址与位宽。</summary>
+    MemoryRead? ReadOf(Term result) => null;
+    ulong? EntryAddress => null;
     TermTable Terms { get; }
     // 返回块入口占位在唯一前驱出口的项；多前驱、入口或循环边界返回 null。
     Term? InUniquePredecessor(Term input);
+    /// <summary>块入口占位在每个前驱出口的项，用来收集一个值的全部来源；不是块入口占位或该块没有前驱时为空。</summary>
+    ImmutableArray<Term> InPredecessors(Term input) => [];
     ImmutableArray<FlowCondition> Conditions { get; }
 }
 public interface IFlowFacts
