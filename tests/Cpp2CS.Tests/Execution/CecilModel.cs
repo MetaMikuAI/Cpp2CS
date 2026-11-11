@@ -1,0 +1,118 @@
+using Cpp2CS.Model;
+using Mono.Cecil;
+using R = System.Reflection;
+
+namespace Cpp2CS.Tests.Execution;
+
+/// <summary>测试侧 CIL 元数据视图；同全名的定义共享身份，方法体仍由各自模块提供。</summary>
+internal sealed partial class CecilModel
+{
+    private readonly Dictionary<string, TypeDef> types = [];
+    private readonly Dictionary<string, MethodDef> methods = [];
+    private readonly Dictionary<string, FieldDef> fields = [];
+    private readonly Dictionary<TypeDef, TypeDefinition> definitions = [];
+    private readonly Dictionary<MethodDef, MethodDefinition> methodDefinitions = [];
+    private readonly HashSet<TypeDef> filled = [];
+    private readonly List<ModuleDefinition> modules;
+    public MethodRef? Context { get; private set; }
+    public ProgramModel Program { get; private set; } = null!;
+    public CecilModel(params ModuleDefinition[] modules)
+    {
+        this.modules = modules.Distinct().ToList();
+        // 类型服务按传统 corlib 名称索引；别名只针对真正的核心库定义。
+        var core = modules[0].TypeSystem.Object.Resolve().Module;
+        foreach (var module in this.modules.Append(core).Distinct())
+            foreach (var type in module.GetTypes()) Definition(type);
+        foreach (var type in definitions.Keys.ToArray()) Fill(type);
+        Program = new ProgramModel { MetadataVersion = 0, Assemblies = [], Types = types.Values.ToArray(), Methods = methods.Values.ToArray(),
+            Fields = fields.Values.ToArray(), RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [] };
+    }
+    private CecilModel(CecilModel source, MethodRef context)
+    {
+        types = source.types; methods = source.methods; fields = source.fields; definitions = source.definitions;
+        methodDefinitions = source.methodDefinitions; filled = source.filled; modules = source.modules; Program = source.Program; Context = context;
+    }
+    public CecilModel InContext(MethodRef context) => new(this, context);
+    private string Key(TypeDefinition t) => (t.Module == t.Module.TypeSystem.Object.Resolve().Module ? "mscorlib.dll" : modules.Contains(t.Module) ? "input" : t.Module.Assembly.Name.Name + ".dll") + "|" + t.FullName;
+    private TypeDef Definition(TypeReference reference)
+    {
+        var t = reference.Resolve() ?? throw new Unsupported($"无法解析类型 {reference}");
+        var key = Key(t);
+        if (types.TryGetValue(key, out var found))
+        {
+            var original = definitions[found];
+            if (original.Module != t.Module && modules.Contains(original.Module) && modules.Contains(t.Module)
+                && (original.Attributes != t.Attributes || original.BaseType?.FullName != t.BaseType?.FullName
+                    || !original.Fields.Select(f => $"{f.Attributes}:{f.FieldType.FullName}:{f.Name}").SequenceEqual(t.Fields.Select(f => $"{f.Attributes}:{f.FieldType.FullName}:{f.Name}"))
+                    || !original.Methods.Select(m => m.FullName).SequenceEqual(t.Methods.Select(m => m.FullName))))
+                throw new Unsupported($"两侧类型元数据不对应：{t.FullName}");
+            return found;
+        }
+        var result = new TypeDef { Index = types.Count, Assembly = key.Split('|')[0], Namespace = t.Namespace, Name = t.Name,
+            Token = t.MetadataToken.ToUInt32(), Attributes = (R.TypeAttributes)t.Attributes, IsValueType = t.IsValueType,
+            IsEnum = t.IsEnum, PackingSize = t.PackingSize, ClassSizeIsDefault = !t.HasLayoutInfo };
+        types.Add(key, result); definitions.Add(result, t);
+        result.DeclaringType = t.DeclaringType is null ? null : Definition(t.DeclaringType);
+        result.GenericParameters = t.GenericParameters.Select(Generic).ToArray();
+        return result;
+    }
+    private static GenericParameterDef Generic(GenericParameter p) => new() { Name = p.Name, Position = p.Position, Attributes = (R.GenericParameterAttributes)p.Attributes };
+    public void Prepare(TypeDef type) => Fill(type);
+    private void Fill(TypeDef type)
+    {
+        if (!filled.Add(type)) return;
+        var t = definitions[type];
+        type.BaseType = t.BaseType is null ? null : Type(t.BaseType);
+        type.NestedTypes = t.NestedTypes.Select(Definition).ToArray();
+        type.Interfaces = t.Interfaces.Select(i => Type(i.InterfaceType)).ToArray();
+        type.Fields = t.Fields.Select(f => Field(f).Field).ToArray();
+        type.Methods = t.Methods.Select(m => Method(m).Method).ToArray();
+    }
+    public TypeRef Type(TypeReference type) => type switch
+    {
+        GenericParameter p => new GenericParameterRef(p.Name, p.Type == GenericParameterType.Method, p.Position)
+            .Substitute(Context?.TypeArguments ?? [], Context?.MethodArguments ?? []),
+        GenericInstanceType g => new DefinitionRef(Definition(g.ElementType), g.GenericArguments.Select(Type).ToArray()),
+        ArrayType a => new ArrayRef(Type(a.ElementType), a.Rank) { IsVector = a.IsVector },
+        ByReferenceType b => new ByRefRef(Type(b.ElementType)), PointerType p => new PointerRef(Type(p.ElementType)),
+        PinnedType p => Type(p.ElementType), IModifierType m => Type(m.ElementType),
+        FunctionPointerType => new PrimitiveRef("nint"),
+        _ => new DefinitionRef(Definition(type), [])
+    };
+    public MethodRef Method(MethodReference reference)
+    {
+        var source = reference.Resolve() ?? throw new Unsupported($"无法解析方法 {reference}");
+        var owner = Definition(source.DeclaringType);
+        var key = Key(source.DeclaringType) + "|" + source.FullName;
+        if (!methods.TryGetValue(key, out var method))
+        {
+            method = new MethodDef { Index = methods.Count, Owner = owner, Name = source.Name, Token = source.MetadataToken.ToUInt32(),
+                Attributes = (R.MethodAttributes)source.Attributes, ImplAttributes = (R.MethodImplAttributes)source.ImplAttributes, Slot = -1 };
+            methods.Add(key, method); methodDefinitions.Add(method, source);
+            method.ReturnType = Type(source.ReturnType);
+            method.Parameters = source.Parameters.Select(p => new ParameterDef(p.Name, Type(p.ParameterType), (R.ParameterAttributes)p.Attributes, p.HasConstant ? p.Constant : null, p.HasConstant)).ToArray();
+            method.GenericParameters = source.GenericParameters.Select(Generic).ToArray();
+        }
+        return new(method, reference.DeclaringType is GenericInstanceType g ? g.GenericArguments.Select(Type).ToArray() : [],
+            reference is GenericInstanceMethod m ? m.GenericArguments.Select(Type).ToArray() : []);
+    }
+    public FieldRef Field(FieldReference reference)
+    {
+        var f = reference.Resolve() ?? throw new Unsupported($"无法解析字段 {reference}");
+        var key = Key(f.DeclaringType) + "|" + f.Name;
+        if (!fields.TryGetValue(key, out var field))
+        {
+            field = new FieldDef { Index = fields.Count, Owner = Definition(f.DeclaringType), Name = f.Name, Type = Type(f.FieldType),
+                Attributes = (R.FieldAttributes)f.Attributes, Offset = f.HasLayoutInfo ? f.Offset : -1, Token = f.MetadataToken.ToUInt32(), Constant = f.HasConstant ? f.Constant : null,
+                InitialValue = f.InitialValue.Length == 0 ? null : f.InitialValue };
+            fields.Add(key, field);
+        }
+        return new(field, Type(reference.DeclaringType));
+    }
+    public MethodDefinition? Body(MethodRef method, ModuleDefinition module)
+    {
+        var source = methodDefinitions[method.Method];
+        if (!modules.Contains(source.Module)) return null;
+        return module.GetTypes().FirstOrDefault(t => t.FullName == source.DeclaringType.FullName)?.Methods.FirstOrDefault(m => m.FullName == source.FullName && m.HasBody);
+    }
+}

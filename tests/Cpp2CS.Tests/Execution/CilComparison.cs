@@ -1,0 +1,93 @@
+using Cpp2CS.Model;
+using Mono.Cecil;
+using Mono.Cecil.Cil;
+
+namespace Cpp2CS.Tests.Execution;
+
+internal enum CilComparisonStatus { Match, Mismatch, Inconclusive }
+internal sealed record CilComparisonResult(CilComparisonStatus Status, int CompletedCases, int? Seed, string? Reason);
+
+/// <summary>有限合成输入上的 IL 对照；一致只表示请求的用例全部完成且轨迹相同。</summary>
+internal static partial class CilComparison
+{
+    public static CilComparisonResult Compare(MethodDefinition left, MethodDefinition right, int cases = 32, int firstSeed = 0)
+    {
+        if (cases <= 0) return new(CilComparisonStatus.Inconclusive, 0, null, "没有请求输入用例");
+        var completed = 0;
+        int? seed = null;
+        try
+        {
+            if (!left.HasBody || !right.HasBody) throw new Unsupported("方法没有 CIL 方法体");
+            var model = new CecilModel(left.Module, right.Module);
+            var l = model.Method(left); var r = model.Method(right);
+            if (!ManagedValues.ArgumentTypes(l).SequenceEqual(ManagedValues.ArgumentTypes(r)) || !l.Method.ReturnType.Equals(r.Method.ReturnType))
+                throw new Unsupported("两侧方法签名不对应");
+            if (left.HasGenericParameters || left.DeclaringType.HasGenericParameters || right.HasGenericParameters || right.DeclaringType.HasGenericParameters)
+                throw new Unsupported("入口方法需要封闭的泛型实参");
+            var index = new WorldIndex(model.Program, new ManagedTypes(model.Program, new ManagedStorage(model.Prepare), 8));
+            var li = new CilInterpreter(model, index) { BodyModule = left.Module };
+            var ri = new CilInterpreter(model, index) { BodyModule = right.Module };
+            var lh = HintsOf(left, model); var rh = HintsOf(right, model);
+            var hints = new Hints(lh.Constants.Concat(rh.Constants).Distinct().Order().ToArray(), lh.Types.Concat(rh.Types).Distinct().ToArray());
+            for (var n = 0; n < cases; n++)
+            {
+                seed = checked(firstSeed + n);
+                var plan = ThrowPlanFor(left, l, li, index, hints, seed.Value);
+                var world = new World(index, seed.Value, hints, l.DeclaringType) { ThrowPlan = plan };
+                var arguments = Arguments(world, li, l);
+                // 同一个世界提供稳定的输入身份；各侧执行写入隔离在覆盖层。
+                var ls = li.Run(world, left, l, arguments);
+                var rs = ri.Run(world, right, r, arguments);
+                if (ls.Result is null || rs.Result is null) throw new Unsupported("执行没有结局");
+                if (Trace.Difference(world, ls, rs) is { } difference)
+                    return new(CilComparisonStatus.Mismatch, completed, seed, difference);
+                completed++;
+            }
+            return new(CilComparisonStatus.Match, completed, null, null);
+        }
+        catch (AssemblyResolutionException e) { return new(CilComparisonStatus.Inconclusive, completed, seed, $"缺少引用程序集：{e.AssemblyReference}"); }
+        catch (Unsupported e) { return new(CilComparisonStatus.Inconclusive, completed, seed, e.Message); }
+    }
+    public static CilComparisonResult Compare(string leftAssembly, string rightAssembly, string type, string method, int cases = 32)
+    {
+        using var resolver = new DefaultAssemblyResolver();
+        resolver.AddSearchDirectory(Path.GetDirectoryName(typeof(object).Assembly.Location)!);
+        resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(leftAssembly))!);
+        resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(rightAssembly))!);
+        using var left = ModuleDefinition.ReadModule(leftAssembly, new ReaderParameters { AssemblyResolver = resolver });
+        using var right = ModuleDefinition.ReadModule(rightAssembly, new ReaderParameters { AssemblyResolver = resolver });
+        var l = left.GetTypes().Where(t => t.FullName == type).SelectMany(t => t.Methods).Where(m => m.Name == method).ToArray();
+        var r = right.GetTypes().Where(t => t.FullName == type).SelectMany(t => t.Methods).Where(m => m.Name == method).ToArray();
+        if (l.Length != 1 || r.Length != 1) return new(CilComparisonStatus.Inconclusive, 0, null, "方法不存在或名称有重载；请用 MethodDefinition 入口指定签名");
+        return Compare(l[0], r[0], cases);
+    }
+    internal static StackValue[] Arguments(World world, CilInterpreter interpreter, MethodRef method)
+    {
+        return ManagedValues.ArgumentTypes(method).Select((type, position) =>
+        {
+            var bytes = position == 0 && !method.Method.IsStatic
+                ? ManagedValues.Bytes(type is ByRefRef b ? world.ValueStorage(b.Element, "this") : world.Object(type, "this", 0), 8)
+                : world.ValueBytes(type, $"arg{position}");
+            if (position == 0 && !method.Method.IsStatic && ManagedValues.Bits(bytes) == 0) throw new Unsupported("无法合成非空 this");
+            return interpreter.FromBytes(type, bytes);
+        }).ToArray();
+    }
+    private static Hints HintsOf(MethodDefinition method, CecilModel model)
+    {
+        var constants = new SortedSet<ulong>(); var types = new List<TypeRef>();
+        foreach (var instruction in method.Body.Instructions)
+        {
+            long? constant = instruction.OpCode.Code switch { Code.Ldc_I4_S => (sbyte)instruction.Operand, Code.Ldc_I4 => (int)instruction.Operand,
+                Code.Ldc_I8 => (long)instruction.Operand, >= Code.Ldc_I4_M1 and <= Code.Ldc_I4_8 => instruction.OpCode.Code - Code.Ldc_I4_0, _ => null };
+            if (constant is { } c) foreach (var value in new[] { unchecked(c - 1), c, unchecked(c + 1), unchecked(-c - 1), unchecked(-c), unchecked(-c + 1) }) constants.Add(unchecked((ulong)value));
+            TypeRef? type = instruction.Operand switch
+            {
+                TypeReference t when instruction.OpCode.Code is Code.Isinst or Code.Castclass or Code.Box or Code.Ldtoken => model.Type(t),
+                TypeReference t when instruction.OpCode.Code == Code.Newarr => new ArrayRef(model.Type(t), 1),
+                MethodReference m when instruction.OpCode.Code == Code.Newobj => model.Method(m).DeclaringType, _ => null
+            };
+            if (type is not null && !types.Contains(type)) types.Add(type);
+        }
+        return new(constants.ToArray(), types);
+    }
+}
