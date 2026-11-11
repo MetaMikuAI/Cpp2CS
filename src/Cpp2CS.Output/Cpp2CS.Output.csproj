@@ -2,5 +2,7 @@
   <ItemGroup>
     <ProjectReference Include="../Cpp2CS.Managed/Cpp2CS.Managed.csproj" />
     <ProjectReference Include="../Cpp2CS.Model/Cpp2CS.Model.csproj" />
+    <PackageReference Include="Mono.Cecil" />
+    <InternalsVisibleTo Include="Cpp2CS.Tests" />
   </ItemGroup>
 </Project>
