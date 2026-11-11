@@ -5,10 +5,11 @@ internal static class Program
     private static int Main(string[] args)
     {
         Console.OutputEncoding = System.Text.Encoding.UTF8;
-        if (args is []) return ArchitectureChecks.Run() | ModelChecks.Run();
+        if (args is []) return ArchitectureChecks.Run() | ModelChecks.Run() | ManagedChecks.Run();
+        if (args is ["managed"]) return ManagedChecks.Run();
         if (args is ["arch"]) return ArchitectureChecks.Run();
         if (args is ["model"]) return ModelChecks.Run();
-        Console.Error.WriteLine("用法: Cpp2CS.Tests [arch|model]；不带参数运行全部检查。");
+        Console.Error.WriteLine("用法: Cpp2CS.Tests [arch|model|managed]；不带参数运行全部检查。");
         return 2;
     }
 }
