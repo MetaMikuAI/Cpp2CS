@@ -3,6 +3,7 @@
     <OutputType>Exe</OutputType>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../../src/Cpp2CS.Targets.Frontend/Cpp2CS.Targets.Frontend.csproj" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
     <PackageReference Include="Mono.Cecil" />
     <ProjectReference Include="../../src/Cpp2CS.Model/Cpp2CS.Model.csproj" />

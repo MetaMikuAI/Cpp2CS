@@ -13,6 +13,18 @@ internal static partial class NativeChecks
         {
             a.True(ExitChecker.Check(f.Finish(blocks)).Violations.Any(v => v.Code == code), "契约反例：" + code);
         }
+        var identityFixture = new Fixture();
+        var writeId = new WriteIdentity();
+        var caller = identityFixture.Terms.Atom(new CallerValue(3), 32);
+        var original = new MemoryWrite(writeId, identityFixture.Frame, 32, caller);
+        var copiedWrite = original with { Identity = new WriteIdentity(writeId) };
+        var validWrites = identityFixture.Finish(identityFixture.Block(null, original, copiedWrite));
+        Pass(a, validWrites, "调用方值合法且写入复制保留来源");
+        a.True(TextDump.Write(validWrites).Contains("caller.3", StringComparison.Ordinal)
+            && TextDump.Write(validWrites).Contains("WriteIdentity origin=", StringComparison.Ordinal), "转储调用方值与写入身份来源");
+        Bad("duplicate-identity", identityFixture, identityFixture.Block(null, original, original));
+        var negative = new Fixture();
+        Bad("caller-index", negative, negative.Block(Ret(negative.Terms.Atom(new CallerValue(-1), 32))));
         var f = new Fixture();
         var area = f.Terms.Apply(new CoreOperator(CoreOperation.Add), 64, f.Frame, f.C(16, 64));
         f.Builder.IncomingArgumentArea = area;
@@ -186,7 +198,7 @@ internal static partial class NativeChecks
                 var id = new ReadIdentity();
                 var value = f.Result(id);
                 var blocks = Enumerable.Range(0, count).Select(i => new Block(nodes[i], [],
-                    i == definition ? [new MemoryRead(id, f.Frame, 32, value), new MemoryWrite(f.Frame, 32, value)] : [new MemoryWrite(f.Frame, 32, value)],
+                    i == definition ? [new MemoryRead(id, f.Frame, 32, value), new MemoryWrite(new WriteIdentity(), f.Frame, 32, value)] : [new MemoryWrite(new WriteIdentity(), f.Frame, 32, value)],
                     new Branch(f.C(1, 1), nodes[targets[i][0]], nodes[targets[i][1]]))).Reverse().ToArray();
                 var result = ExitChecker.Check(f.Finish(blocks));
                 for (int use = 0; use < count; use++)

@@ -216,7 +216,7 @@ internal static partial class NativeChecks
         var global = f.Terms.Apply(new CoreOperator(CoreOperation.Add), 64, image, f.C(16, 64));
         var thread = f.Terms.Atom(new RootAtom(AddressRoot.Thread), 64);
         f.Builder.ThreadPointer = thread;
-        var function = f.Finish(f.Block(Ret(output), new MemoryWrite(global, 32, input), new MemoryRead(readId, global, 32, read) { Trace = new(0x123456) },
+        var function = f.Finish(f.Block(Ret(output), new MemoryWrite(new WriteIdentity(), global, 32, input), new MemoryRead(readId, global, 32, read) { Trace = new(0x123456) },
             new DynamicAllocation(allocationId, f.C(16, 64), 16, allocation),
             new Call(callId, new ImageFunction(16), [new(Output, read)], [new(Output, output)])));
         Pass(a, function, "直线读写、分配和调用");
@@ -287,7 +287,7 @@ internal static partial class NativeChecks
         Pass(a, nr.Finish(nr.Block(new Unreachable(), new Call(new(), new ImportedTarget(new ImportSymbol("exit", "")), [], [], true))), "不返回调用");
         var unknown = new Fixture();
         var hole = unknown.Terms.Unknown(32, new("unsupported", "尚未提升"));
-        var holeFunction = unknown.Finish(unknown.Block(Ret(hole), new MemoryWrite(unknown.Frame, 32, hole)));
+        var holeFunction = unknown.Finish(unknown.Block(Ret(hole), new MemoryWrite(new WriteIdentity(), unknown.Frame, 32, hole)));
         Pass(a, holeFunction, "未知是合法的值");
         a.True(ExitChecker.Check(holeFunction).Holes is [{ Reason.Code: "unsupported" }], "洞按驻留未知项去重并保留原因");
         var copy = new ReadIdentity(readId);
@@ -305,7 +305,7 @@ internal static partial class NativeChecks
             a.True(result.Violations.Any(x => x.Code == code && x.Location.Length > 0 && x.Message.Length > 0), "反例必须报告 " + code);
         }
         Bad("foreign-term", f => f.Finish(f.Block(Ret(new TermTable().Constant(1, 32)))));
-        Bad("width", f => f.Finish(f.Block(null, new MemoryWrite(f.Frame, 64, f.C()))));
+        Bad("width", f => f.Finish(f.Block(null, new MemoryWrite(new WriteIdentity(), f.Frame, 64, f.C()))));
         Bad("width", f => f.Finish(f.Block(new Branch(f.C(), f.Entry, f.Entry))));
         Bad("target", f => f.Finish(f.Block(new Jump(new()))));
         Bad("entry", f => f.Finish(new Block(new(), [], [], new Return([]))));
@@ -314,7 +314,7 @@ internal static partial class NativeChecks
         Bad("merge-predecessors", f => { var block = new BlockIdentity(); var id = new MergeIdentity(); return f.Finish(f.Block(new Jump(block)), new(block, [new(id, f.Result(id), [])], [], new Return([]))); });
         Bad("merge-predecessors", f => { var block = new BlockIdentity(); var id = new MergeIdentity(); return f.Finish(f.Block(new Jump(block)), new(block, [new(id, f.Result(id), [new(f.Entry, f.C()), new(f.Entry, f.C())])], [], new Return([]))); });
         Bad("undefined-atom", f => f.Finish(f.Block(Ret(f.Terms.Atom(new Named("missing"), 32)))));
-        Bad("dominance", f => { var id = new ReadIdentity(); var result = f.Result(id); return f.Finish(f.Block(null, new MemoryWrite(f.Frame, 32, result), new MemoryRead(id, f.Frame, 32, result))); });
+        Bad("dominance", f => { var id = new ReadIdentity(); var result = f.Result(id); return f.Finish(f.Block(null, new MemoryWrite(new WriteIdentity(), f.Frame, 32, result), new MemoryRead(id, f.Frame, 32, result))); });
         Bad("duplicate-definition", f => { var value = f.Input(); f.Builder.Inputs.Add(f.Builder.Inputs[0]); return f.Finish(f.Block(Ret(value))); });
         Bad("definition-kind", f => { f.Builder.Inputs.Add(new(Output, f.C())); return f.Finish(f.Block()); });
         Bad("result-identity", f => f.Finish(f.Block(null, new MemoryRead(new(), f.Frame, 32, f.Terms.Atom(new Named("bad-result"), 32)))));
@@ -369,7 +369,7 @@ internal static partial class NativeChecks
             return f.Finish(f.Block(new Jump(handler)), new(handler, [], [], new ResumeUnwind(exception), new(exception, f.Terms.Atom(new SelectorAtom(handler), 32), [new(ClauseKind.Cleanup, [])])));
         });
         var many = new Fixture();
-        var bad = many.Finish(many.Block(new Branch(many.C(), new(), new()), new MemoryWrite(many.C(), 64, many.C())));
+        var bad = many.Finish(many.Block(new Branch(many.C(), new(), new()), new MemoryWrite(new WriteIdentity(), many.C(), 64, many.C())));
         a.True(ExitChecker.Check(bad).Violations.Length >= 4, "一次返回多个独立违例");
     }
 }

@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
+    <ProjectReference Include="../Cpp2CS.Targets.Frontend/Cpp2CS.Targets.Frontend.csproj" />
     <ProjectReference Include="../Cpp2CS.Native/Cpp2CS.Native.csproj" />
     <ProjectReference Include="../Cpp2CS.Model/Cpp2CS.Model.csproj" />
   </ItemGroup>

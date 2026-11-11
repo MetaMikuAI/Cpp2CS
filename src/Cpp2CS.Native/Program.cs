@@ -13,6 +13,7 @@ public abstract class StableIdentity
 public sealed class CallIdentity(CallIdentity? origin = null) : StableIdentity(origin);
 public sealed class MergeIdentity(MergeIdentity? origin = null) : StableIdentity(origin);
 public sealed class FrameIdentity(FrameIdentity? origin = null) : StableIdentity(origin);
+public sealed class WriteIdentity(WriteIdentity? origin = null) : StableIdentity(origin);
 public sealed class ReadIdentity(ReadIdentity? origin = null) : StableIdentity(origin);
 public sealed class BlockIdentity(BlockIdentity? origin = null) : StableIdentity(origin);
 
@@ -21,6 +22,11 @@ public enum SlotKind { Integer, Floating, ArgumentArea, IndirectResult }
 /// <summary>Position 为槽序号或实参区字节偏移；间接结果槽的 Position 为零。</summary>
 public readonly record struct AbstractSlot(SlotKind Kind, long Position = 0);
 public enum InputRole { Argument, MethodInformation, IndirectResult }
+/// <summary>入口时调用方保留的位型；序号由目标的有序约定给出。</summary>
+public sealed record CallerValue(int Index) : AtomIdentity
+{
+    public override string StableText => $"caller.{Index}";
+}
 public sealed record EntryAtom(AbstractSlot Slot) : AtomIdentity
 {
     public override string StableText => $"entry.{Slot.Kind}.{Slot.Position}";
@@ -65,7 +71,7 @@ public abstract record Statement
     public Trace? Trace { get; init; }
 }
 public sealed record MemoryRead(ReadIdentity Identity, Term Address, int Width, Term Result) : Statement;
-public sealed record MemoryWrite(Term Address, int Width, Term Value) : Statement;
+public sealed record MemoryWrite(WriteIdentity Identity, Term Address, int Width, Term Value) : Statement;
 /// <summary>尾调用表示为调用加返回。没有展开边仅表示本函数内没有处理入口；是否可能抛出由被调效果回答。</summary>
 public sealed record Call(CallIdentity Identity, CallTarget Target, ImmutableArray<SlotValue> Arguments,
     ImmutableArray<SlotValue> Results, bool DoesNotReturn = false, BlockIdentity? Unwind = null, Term? OutgoingArgumentArea = null) : Statement;

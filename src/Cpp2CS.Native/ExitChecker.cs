@@ -47,6 +47,9 @@ public static class ExitChecker
             {
                 if (!seen.Add(term)) continue;
                 Require(ReferenceEquals(term.Table, f.Terms), "foreign-term", location, "项来自另一张项表。");
+                if (term.Kind == TermKind.Atom)
+                    Require(term.Identity is EntryAtom or ResultAtom or RootAtom or ExceptionAtom or SelectorAtom or CallerValue,
+                        "atom-vocabulary", location, "原生 IR 不允许前端内部原子或其他层词汇。");
                 if (term.Kind == TermKind.Unknown && seenHoles.Add(term)) holes.Add(new(location, term, term.Why!));
                 foreach (var child in term.Operands) todo.Push(child);
             }
@@ -183,6 +186,7 @@ public static class ExitChecker
                             Width(read.Width > 0 && read.Width == read.Result.Width && read.Address.Width == f.AddressWidth, loc);
                             break;
                         case MemoryWrite write:
+                            Identity(write.Identity, loc);
                             Width(write.Width > 0 && write.Width == write.Value.Width && write.Address.Width == f.AddressWidth, loc);
                             break;
                         case DynamicAllocation allocation:
@@ -256,7 +260,9 @@ public static class ExitChecker
                 while (todo.TryPop(out var term))
                 {
                     if (!seen.Add(term)) continue;
-                    if (term.Kind == TermKind.Atom)
+                    if (term.Identity is CallerValue caller)
+                        Require(caller.Index >= 0, "caller-index", location, "调用方值序号不能为负。");
+                    else if (term.Kind == TermKind.Atom)
                     {
                         if (!definitions.TryGetValue(term, out var definition)) Error("undefined-atom", location, "使用的原子没有定义。");
                         else Require(dominance.Dominates(definition, point), "dominance", location, "定义不支配使用（展开边不取得调用结果）。");

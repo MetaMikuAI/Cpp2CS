@@ -120,6 +120,9 @@ public static class TextDump
                 foreach (var statement in block.Statements)
                     switch (statement)
                     {
+                        case MemoryWrite write:
+                            Id(write.Identity);
+                            break;
                         case MemoryRead read:
                             Id(read.Identity);
                             break;
@@ -152,7 +155,7 @@ public static class TextDump
                     string line = statement switch
                     {
                         MemoryRead read => "read " + Id(read.Identity) + Provenance(read.Identity) + " " + T(read.Result) + " = [" + T(read.Address) + "]:" + N(read.Width),
-                        MemoryWrite write => "write [" + T(write.Address) + "]:" + N(write.Width) + " = " + T(write.Value),
+                        MemoryWrite write => "write " + Id(write.Identity) + Provenance(write.Identity) + " [" + T(write.Address) + "]:" + N(write.Width) + " = " + T(write.Value),
                         DynamicAllocation allocation => "allocate " + Id(allocation.Identity) + Provenance(allocation.Identity) + " " + T(allocation.Result)
                             + " size=" + T(allocation.Size) + " align=" + N(allocation.Alignment),
                         Call call => "call " + Id(call.Identity) + Provenance(call.Identity) + " " + Target(call.Target) + " args={" + Values(call.Arguments)

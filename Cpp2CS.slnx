@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/Cpp2CS.Model/Cpp2CS.Model.csproj" />
     <Project Path="src/Cpp2CS.Native/Cpp2CS.Native.csproj" />
+    <Project Path="src/Cpp2CS.Targets.Frontend/Cpp2CS.Targets.Frontend.csproj" />
     <Project Path="src/Cpp2CS.Targets.Elf/Cpp2CS.Targets.Elf.csproj" />
     <Project Path="src/Cpp2CS.Targets.Pe/Cpp2CS.Targets.Pe.csproj" />
     <Project Path="src/Cpp2CS.Targets.Arm64/Cpp2CS.Targets.Arm64.csproj" />
