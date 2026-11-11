@@ -59,6 +59,12 @@ internal sealed class Emission(ulong address, TermTable terms, ImmutableArray<Re
         Open(); Own(pointer); Own(value);
         Statements.Add(new MemoryWrite(new WriteIdentity(), pointer, value.Width, value) { Trace = new(address) });
     }
+    public void TrapIf(Term condition)
+    {
+        Open(); Own(condition);
+        if (condition.Width != 1) throw new ArgumentException("陷阱条件必须是 1 位。");
+        Statements.Add(new TrapWhen(new TrapIdentity(), condition) { Trace = new(address) });
+    }
     public void Call(CallTarget target)
     {
         Open();
@@ -145,6 +151,7 @@ internal sealed class TermRewrite(TermTable terms, Func<Term, Term?> replace, bo
     {
         MemoryRead r => r with { Address = Map(r.Address) },
         MemoryWrite w => w with { Address = Map(w.Address), Value = Map(w.Value) },
+        TrapWhen t => t with { Condition = Map(t.Condition) },
         Call c => c with
         {
             Target = c.Target is ComputedTarget t ? new ComputedTarget(Map(t.Value)) : c.Target,

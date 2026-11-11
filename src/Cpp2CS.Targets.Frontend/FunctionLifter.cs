@@ -280,7 +280,7 @@ public static class FunctionLifter
     };
     internal static IEnumerable<Term> Uses(Statement statement) => statement switch
     {
-        MemoryRead r => [r.Address], MemoryWrite w => [w.Address, w.Value],
+        MemoryRead r => [r.Address], MemoryWrite w => [w.Address, w.Value], TrapWhen t => [t.Condition],
         Call c => c.Arguments.Select(a => a.Value).Concat(c.OutgoingArgumentArea is { } a ? [a] : [])
             .Concat(c.Target is ComputedTarget t ? [t.Value] : []), _ => []
     };

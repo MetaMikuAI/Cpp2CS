@@ -123,6 +123,9 @@ public static class TextDump
                         case MemoryWrite write:
                             Id(write.Identity);
                             break;
+                        case TrapWhen trap:
+                            Id(trap.Identity);
+                            break;
                         case MemoryRead read:
                             Id(read.Identity);
                             break;
@@ -156,6 +159,7 @@ public static class TextDump
                     {
                         MemoryRead read => "read " + Id(read.Identity) + Provenance(read.Identity) + " " + T(read.Result) + " = [" + T(read.Address) + "]:" + N(read.Width),
                         MemoryWrite write => "write " + Id(write.Identity) + Provenance(write.Identity) + " [" + T(write.Address) + "]:" + N(write.Width) + " = " + T(write.Value),
+                        TrapWhen trap => "trap " + Id(trap.Identity) + Provenance(trap.Identity) + " when " + T(trap.Condition),
                         DynamicAllocation allocation => "allocate " + Id(allocation.Identity) + Provenance(allocation.Identity) + " " + T(allocation.Result)
                             + " size=" + T(allocation.Size) + " align=" + N(allocation.Alignment),
                         Call call => "call " + Id(call.Identity) + Provenance(call.Identity) + " " + Target(call.Target) + " args={" + Values(call.Arguments)

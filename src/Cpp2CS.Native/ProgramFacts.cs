@@ -8,6 +8,7 @@ internal static class ProgramFacts
     {
         MemoryRead read => [read.Address],
         MemoryWrite write => [write.Address, write.Value],
+        TrapWhen trap => [trap.Condition],
         Call call => call.Arguments.Select(x => x.Value)
             .Concat(call.OutgoingArgumentArea is { } area ? [area] : []).Concat(call.Target is ComputedTarget target ? [target.Value] : []),
         DynamicAllocation allocation => [allocation.Size],

@@ -15,6 +15,7 @@ public sealed class MergeIdentity(MergeIdentity? origin = null) : StableIdentity
 public sealed class FrameIdentity(FrameIdentity? origin = null) : StableIdentity(origin);
 public sealed class WriteIdentity(WriteIdentity? origin = null) : StableIdentity(origin);
 public sealed class ReadIdentity(ReadIdentity? origin = null) : StableIdentity(origin);
+public sealed class TrapIdentity(TrapIdentity? origin = null) : StableIdentity(origin);
 public sealed class BlockIdentity(BlockIdentity? origin = null) : StableIdentity(origin);
 
 /// <summary>ArgumentArea 保留给 ABI 分类，不允许作为带值的入口、调用或返回槽。</summary>
@@ -72,6 +73,8 @@ public abstract record Statement
 }
 public sealed record MemoryRead(ReadIdentity Identity, Term Address, int Width, Term Result) : Statement;
 public sealed record MemoryWrite(WriteIdentity Identity, Term Address, int Width, Term Value) : Statement;
+/// <summary>条件为真时是硬件陷阱的结局，其后的语句只在条件为假时执行。指令内部的条件陷阱不拆块。</summary>
+public sealed record TrapWhen(TrapIdentity Identity, Term Condition) : Statement;
 /// <summary>尾调用表示为调用加返回。没有展开边仅表示本函数内没有处理入口；是否可能抛出由被调效果回答。</summary>
 public sealed record Call(CallIdentity Identity, CallTarget Target, ImmutableArray<SlotValue> Arguments,
     ImmutableArray<SlotValue> Results, bool DoesNotReturn = false, BlockIdentity? Unwind = null, Term? OutgoingArgumentArea = null) : Statement;

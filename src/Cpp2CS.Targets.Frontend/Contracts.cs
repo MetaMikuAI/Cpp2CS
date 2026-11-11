@@ -8,7 +8,7 @@ namespace Cpp2CS.Targets.Frontend;
 public sealed record Register(string Name, int Width);
 public sealed record PreservedPart(Register Register, int Low, int Width);
 public sealed record RegisterSlot(Register Register, AbstractSlot Slot, InputRole Role = InputRole.Argument);
-/// <summary>入口 SP 是帧基址；实参区偏移分别相对入口及调用前 SP。CallerValues 的顺序给出稳定序号，包含全部保存单元和返回地址单元。</summary>
+/// <summary>入口 SP 是帧基址；实参区偏移分别相对入口及调用前 SP。CallerValues 的顺序给出稳定序号，包含全部保存单元；返回地址在寄存器里的目标把该寄存器也列入，在栈上的目标不为它设调用方的值，返回指令的弹栈由 ReturnStackOffset 表达。</summary>
 public sealed record RegisterConvention(
     ImmutableArray<RegisterSlot> Arguments, ImmutableArray<RegisterSlot> Results,
     ImmutableHashSet<Register> Preserved, Register StackPointer,
@@ -66,6 +66,8 @@ public interface IEmitter : IRegisterReader
     void Write(Register register, Term value);
     Term Load(Term address, int width);
     void Store(Term address, Term value);
+    /// <summary>条件（1 位）为真时是硬件陷阱；本条指令此后的语义只在条件为假时生效。</summary>
+    void TrapIf(Term condition);
     void Call(CallTarget target);
     void Jump(ulong target);
     void Branch(Term condition, ulong whenTrue, ulong whenFalse);

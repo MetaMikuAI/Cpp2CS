@@ -17,7 +17,7 @@ internal static class FrontendChecks
     // 返回地址占入口栈顶八字节，随后八字节为调用者保留区；第零整数槽位于 c，结果位于 b。
     private static readonly RegisterConvention Convention = new([new(R2, new(SlotKind.Integer))],
         [new(R1, new(SlotKind.Integer))], [R3], Sp, 16, 8, [R3]);
-    private enum Op { Move, Add, Copy, Partial, Low, Load, Store, Compare, Branch, Jump, Indirect, Call, Return, Trap, Bad, Push, Pop, Image, Thread, ImportCall, ComputedCall }
+    private enum Op { Move, Add, Copy, Partial, Low, Load, Store, Compare, Branch, Jump, Indirect, Call, Return, Trap, Bad, Push, Pop, Image, Thread, ImportCall, ComputedCall, Guard }
     private sealed record Ins(Op Op, Register? To = null, Register? From = null, ulong Value = 0, ulong Other = 0);
     private sealed class Toy(IReadOnlyDictionary<ulong, Ins> code, int extraRegisters = 0) : IInstructionSet
     {
@@ -52,6 +52,7 @@ internal static class FrontendChecks
                 case Op.ComputedCall: e.Call(new ComputedTarget(e.Read(i.From!))); break;
                 case Op.Return: e.Return(); break;
                 case Op.Trap: e.Trap(); break;
+                case Op.Guard: e.TrapIf(e.Terms.Apply(new CoreOperator(CoreOperation.Equal), 1, e.Read(i.From!), Constant(i.Value))); break;
                 case Op.Bad: e.Fail(new("toy-unsupported", "不支持的玩具指令。")); break;
                 case Op.Push:
                     e.Write(Sp, e.Terms.Apply(new CoreOperator(CoreOperation.Subtract), 64, e.Read(Sp), Constant(8)));
@@ -174,6 +175,7 @@ internal static class FrontendChecks
         checks.True(sameExpressions.Blocks.All(b => b.Merges.IsEmpty) && Execute(sameExpressions, 4) == 5,
             "操作数归位后相等的表达式不保留平凡合流");
         RevisedContracts(checks);
+        ConditionalTrap(checks);
         PartialPreservation(checks);
         MultipleSlots(checks);
         InternalAtom(checks);
@@ -233,6 +235,17 @@ internal static class FrontendChecks
             .Any(t => t.Identity is CallerValue { Index: 1 })
             && partial.Function.Blocks.SelectMany(b => b.Statements).OfType<MemoryWrite>().Single().Value == partial.Function.Terms.Concat(
                 partial.Function.Terms.Slice(partial.Function.Terms.Atom(new CallerValue(1), 128), 0, 32), partial.Function.Terms.Undefined(96)), "入口部分保存的位来自有序调用方值，其余位未定义");
+    }
+    private static void ConditionalTrap(Assertions checks)
+    {
+        // 条件陷阱留在块内：条件接到块状态上，其后的写入照常生效，不产生新的块。
+        var guarded = Lift(Code(new(Op.Copy, R0, R2), new(Op.Guard, From: R0, Value: 0), new(Op.Move, R1, Value: 5), new(Op.Return)));
+        var traps = guarded.Function?.Blocks.SelectMany(b => b.Statements).OfType<TrapWhen>().ToArray() ?? [];
+        checks.True(traps.Length == 1 && traps[0].Condition.Operator is CoreOperator { Operation: CoreOperation.Equal }
+            && Walk(traps[0].Condition).Any(t => t.Identity is EntryAtom), "条件陷阱的条件是入口值上的项");
+        checks.True(guarded.Function!.Blocks.Count(b => b.Statements.Length != 0 || b.End is Return) == 1
+            && guarded.Function.Blocks.Any(b => b.End is Return r && r.Results.Single().Value.ConstantValue == 5), "条件陷阱不拆块，其后的语义照常");
+        checks.True(TextDump.Write(guarded.Function).Contains("trap ", StringComparison.Ordinal), "文本转储输出条件陷阱");
     }
     private static void PartialPreservation(Assertions checks)
     {

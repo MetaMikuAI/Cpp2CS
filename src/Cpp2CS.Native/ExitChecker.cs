@@ -189,6 +189,10 @@ public static class ExitChecker
                             Identity(write.Identity, loc);
                             Width(write.Width > 0 && write.Width == write.Value.Width && write.Address.Width == f.AddressWidth, loc);
                             break;
+                        case TrapWhen trap:
+                            Identity(trap.Identity, loc);
+                            Width(trap.Condition.Width == 1, loc);
+                            break;
                         case DynamicAllocation allocation:
                             Identity(allocation.Identity, loc);
                             Result(allocation.Result, allocation.Identity, 0, p[si + 2], loc);
