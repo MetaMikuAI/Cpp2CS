@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Globalization;
 using System.Text.Json;
 using Cpp2CS.Native;
@@ -24,8 +26,24 @@ internal static class NoReturnCorpusChecks
         var isa = new Arm64InstructionSet(image);
         var catalog = RuntimeCatalogChecks.Load(RuntimeCatalogChecks.Paths().Single(p => p.EndsWith("-arm64.json", StringComparison.Ordinal)));
         var watch = Stopwatch.StartNew();
-        var facts = Analyze(image);
+        var rounds = new List<NoReturnRound>();
+        var facts = Analyze(image, observe: rounds.Add);
         Console.WriteLine($"不返回目标={facts.Targets.Count} 映像入口={facts.Targets.OfType<ImageFunction>().Count()} 轮数={facts.Rounds} 毫秒={watch.Elapsed.TotalMilliseconds:F0}");
+        foreach (var round in rounds)
+            Console.WriteLine($"noreturn_round={round.Number} pending={round.Pending} added={round.Added} seconds={round.Elapsed.TotalSeconds:F6}");
+        var probes = rounds.SelectMany(r => r.Probes).Select(t => t.TotalMilliseconds).Order().ToArray();
+        Console.WriteLine($"noreturn_probes={probes.Length} p50_ms={probes[probes.Length / 2]:F6} p95_ms={probes[probes.Length * 95 / 100]:F6} p99_ms={probes[probes.Length * 99 / 100]:F6} max_ms={probes[^1]:F6}");
+        // 参照为逐轮重新解码、发射的原算法：全部目标按 ToString 序数排序，以换行连接后取 UTF-8 的 SHA-256。
+        // 摘要覆盖导入与映像入口的完整集合；语料变更时须用参照算法重新核对，不能只更新数量。
+        var canonical = string.Join("\n", facts.Targets.Select(t => t.ToString()).Order(StringComparer.Ordinal));
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+        Console.WriteLine($"noreturn_digest count={facts.Targets.Count} sha256={digest}");
+        checks.True(digest == "609547926C3D2C83271536091492280B919646554631A75B0CC96A442194451A", "不返回目标集合与原算法摘要逐项一致");
+        watch.Restart();
+        var serial = Analyze(image, jobs: 1);
+        Console.WriteLine($"noreturn_serial_seconds={watch.Elapsed.TotalSeconds:F6}");
+        checks.True(facts.Targets.SetEquals(serial.Targets), "单线程与并行的不返回目标逐个相同");
+        checks.True(facts.Rounds == serial.Rounds, "单线程与并行的不返回轮数相同");
         using var symbols = JsonDocument.Parse(File.ReadAllText(Path.Combine(truth, "functions.arm64-v8a.json")));
         foreach (var function in catalog.Functions.Where(f => f.Recognition.Import is null && f.Operation.DoesNotReturn))
             foreach (var symbol in symbols.RootElement.EnumerateArray().Where(s => s.GetProperty("name").GetString() == function.MangledName && s.GetProperty("defined").GetBoolean()))
@@ -62,13 +80,13 @@ internal static class NoReturnCorpusChecks
             }
         return checks.Finish("不返回语料");
     }
-    internal static NoReturnFacts Analyze(IImage image)
+    internal static NoReturnFacts Analyze(IImage image, int? jobs = null, Action<NoReturnRound>? observe = null)
     {
         var catalog = RuntimeCatalogChecks.Load(RuntimeCatalogChecks.Paths().Single(p => p.EndsWith("-arm64.json", StringComparison.Ordinal)));
         var names = catalog.Functions.Where(f => f.Recognition.Import is not null && f.Operation.DoesNotReturn)
             .Select(f => f.Recognition.Import!).ToHashSet(StringComparer.Ordinal);
         return NoReturnAnalysis.Analyze(image, new Arm64InstructionSet(image), Arm64Registers.Convention, image.Functions,
-            image.Imports.Where(i => names.Contains(i.Name)), new Arm64FlowFacts());
+            image.Imports.Where(i => names.Contains(i.Name)), new Arm64FlowFacts(), jobs: jobs ?? Environment.ProcessorCount, observe: observe);
     }
 
 }

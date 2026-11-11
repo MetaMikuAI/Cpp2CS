@@ -26,6 +26,7 @@ internal static class PipelineCorpusChecks
         {
             // 运行时函数的定位目前只有“符号”这一种证据；语料上由同一次构建的未去符号文件提供。
             Symbols = Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.dbg.so"),
+            Jobs = Environment.ProcessorCount,
         });
         var byId = report.Methods.ToDictionary(m => m.Identity);
         using var methods = InputCorpusChecks.Json(truth, "methods.json");
@@ -71,6 +72,8 @@ internal static class PipelineCorpusChecks
         table.AppendLine($"管线耗时 {report.Summary.ElapsedSeconds:F2}s，进程峰值 {report.Summary.PeakWorkingSetBytes / 1048576.0:F1} MiB。");
         File.WriteAllText(Path.Combine(output, "progress.local.md"), table.ToString());
         Console.Write(table);
+        Console.WriteLine("layer_seconds=" + JsonSerializer.Serialize(report.Summary.LayerSeconds));
+        Console.WriteLine($"no_return_seconds={report.Summary.LayerSeconds.GetValueOrDefault("不返回分析"):F3}");
         checks.True(comparison.Methods.All(m => m.Status != MetricStatus.Mismatch), "没有 IL 对照不一致");
         return checks.Finish("Pipeline 定向检查");
     }

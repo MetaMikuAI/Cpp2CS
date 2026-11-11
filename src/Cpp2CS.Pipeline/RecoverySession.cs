@@ -29,6 +29,13 @@ public sealed record RecoveryRequest(string Image, string Metadata, string Outpu
 public sealed class RecoverySession
 {
     // 架构实现只在此处装配，目标工程不反向引用 Pipeline。
+    private sealed class AnalysisTiming(int jobs)
+    {
+        internal int Jobs { get; } = jobs;
+        internal double? Seconds { get; set; }
+    }
+    // 按全局事实登记，供默认组件（含运行时函数定位的取用）共用；键随全局事实回收。
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<GlobalFacts, AnalysisTiming> analysisTimings = [];
     private static readonly IFrontendProvider[] DefaultProviders =
     [
         new FrontendProvider("arm64", facts => RuntimeLocationAssembly.Components(facts, facts =>
@@ -37,8 +44,11 @@ public sealed class RecoverySession
             var catalog = RuntimeFunctionCatalog.Select(facts.Spec.Layout.UnityVersion, facts.Spec.Layout.Triple, facts.Spec.Layout.DataModel);
             var seeds = catalog.Functions.Where(f => f.Recognition.Import is not null && f.Operation.DoesNotReturn)
                 .Select(f => f.Recognition.Import!).ToHashSet(StringComparer.Ordinal);
+            var timing = analysisTimings.GetValue(facts, _ => new(1));
+            var analysisWatch = Stopwatch.StartNew();
             var flow = NoReturnAnalysis.Analyze(facts.Image, instructions, Arm64Registers.Convention, facts.Image.Functions,
-                facts.Image.Imports.Where(i => seeds.Contains(i.Name)), new Arm64FlowFacts());
+                facts.Image.Imports.Where(i => seeds.Contains(i.Name)), new Arm64FlowFacts(), jobs: timing.Jobs);
+            timing.Seconds = analysisWatch.Elapsed.TotalSeconds;
             return new(instructions, Arm64Registers.Convention, flow);
         })),
     ];
@@ -86,6 +96,8 @@ public sealed class RecoverySession
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(request.Jobs, 1);
         var watch = Stopwatch.StartNew();
+        var analysisTiming = analysisTimings.GetValue(facts, _ => new(request.Jobs));
+        bool analysisAlreadyCached = analysisTiming.Seconds is not null;
         var groups = facts.CodeMap.Entries.Where(e => e.Method is not null).GroupBy(e => e.Method!.Method)
             .Where(g => (request.Method is null || g.Key.ToString().Contains(request.Method, StringComparison.Ordinal))
                 && (request.Address is null || g.Any(e => e.Address == request.Address)))
@@ -141,7 +153,8 @@ public sealed class RecoverySession
         var report = new RecoveryReport(1, rows, new(rows.Length, rows.Count(r => r.Status == MethodStatus.Complete), rows.Count(r => r.Status == MethodStatus.Hole),
             holes.GroupBy(h => h.Layer).ToDictionary(g => g.Key, g => g.Count()), holes.GroupBy(h => h.Reason.Code).ToDictionary(g => g.Key, g => g.Count()),
             new() { ["输入"] = inputSeconds, [frontend.Name] = (double)frontTicks / Stopwatch.Frequency,
-                [recovery.Name] = (double)recoveryTicks / Stopwatch.Frequency, ["输出"] = outputWatch.Elapsed.TotalSeconds },
+                [recovery.Name] = (double)recoveryTicks / Stopwatch.Frequency, ["输出"] = outputWatch.Elapsed.TotalSeconds,
+                ["不返回分析"] = analysisAlreadyCached ? 0 : analysisTiming.Seconds ?? 0 },
             inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64)) { Source = source };
         File.WriteAllText(Path.Combine(request.Output, "recovery.json"), RecoveryReport.Json(report));
         return report;
