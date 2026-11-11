@@ -23,7 +23,7 @@ public sealed partial class IntegerLowering
     private readonly MethodRef method;
     private readonly MethodBinder binder;
     private readonly ManagedTypes types;
-    private readonly StateQueries state = new();
+    private readonly StateQueries state;
     private readonly QueryContext context;
     private readonly Dictionary<Term, ManagedValue> arguments = [];
     private readonly Dictionary<(Term Term, int Low, int Width), LocalValue> merges = [];
@@ -39,9 +39,11 @@ public sealed partial class IntegerLowering
     private readonly List<ManagedBlock> extraBlocks = [];
     private ulong nextLabel;
 
-    public IntegerLowering(NativeFunction function, MethodRef method, MethodBinder binder, ManagedTypes types)
+    public IntegerLowering(NativeFunction function, MethodRef method, MethodBinder binder, ManagedTypes types,
+        Cpp2CS.Native.Images.IImage? image = null)
     {
         this.function = function; this.method = method; this.binder = binder; this.types = types;
+        state = new(image: image);
         context = state.CreateContext(function);
         labels = function.Blocks.OrderByDescending(b => b.Identity == function.Entry)
             .Select((b, i) => (b.Identity, Label: (ulong)i)).ToDictionary(p => p.Identity, p => p.Label);
@@ -128,7 +130,7 @@ public sealed partial class IntegerLowering
         if (!resolved.IsSuccess) { Fail<object>(LoweringFailureKind.State, "地址查询失败", resolved.Why); return; }
         var location = context.Get(state.Locations, new(resolved.Value, width));
         if (!location.IsSuccess) Fail<object>(LoweringFailureKind.State, "位置查询失败", location.Why);
-        else if (location.Value.Region != Region.Frame)
+        else if (location.Value.Region != Region.Frame && !(read && state.Contents?.Read(function, location.Value) is not null))
             Fail<object>(read ? LoweringFailureKind.NonFrameRead : LoweringFailureKind.NonFrameWrite, "非帧内存访问尚未定位");
     }
 

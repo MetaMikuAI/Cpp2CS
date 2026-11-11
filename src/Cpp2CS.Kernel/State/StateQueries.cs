@@ -67,8 +67,11 @@ public sealed class StateQueries
     public MergeInputsQuery MergeInputs { get; }
     public CallerUsesQuery CallerUses { get; }
     public FixedPointGroup Group { get; }
-    public StateQueries(ICallEffectSource? effects = null, long stepLimit = 10_000_000)
+    /// <summary>映像里不变的数据；没有给出映像时，映像位置的读取一律按普通内存处理。</summary>
+    public ImageContents? Contents { get; }
+    public StateQueries(ICallEffectSource? effects = null, long stepLimit = 10_000_000, Cpp2CS.Native.Images.IImage? image = null)
     {
+        Contents = image is null ? null : ImageContents.Of(image);
         Escapes = new(Locations); Alias = new(Escapes); Effects = new(effects ?? new UnknownCallEffects());
         Reaching = new(this); BitSources = new(this); ValueAt = new(this); Read = new(this); Resolve = new(this); MergeInputs = new(this); CallerUses = new(this);
         Group = new(stepLimit, FixedPointMember.Create(Reaching, k => new BitsLattice(k.Location.Width)),
@@ -174,6 +177,7 @@ public sealed class ValueAtQuery(StateQueries q) : Query<StateKey, Term>
 {
     public override Outcome<Term> Compute(QueryContext c, StateKey key)
     {
+        if (q.Contents?.Read(c.Snapshot, key.Location) is { } constant) return Outcome<Term>.Success(constant);
         var reaching = c.Get(q.Reaching, key); if (!reaching.IsSuccess) return reaching.Propagate<Term>();
         if (reaching.Value.Bits.Any(s => s.IsEmpty)) return Outcome<Term>.Failure(new("state.unreachable-cycle", "位置没有可达的入口定义。"));
         var t = c.Snapshot.Terms;

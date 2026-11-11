@@ -28,7 +28,7 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
             _ => BindingEntryKind.Wrapper,
         };
         var result = new IntegerLowering(input, MethodRef.Open(context.Method), binder,
-            new ManagedTypes(context.Facts.Model, layouts, pointer)).Run(kind);
+            new ManagedTypes(context.Facts.Model, layouts, pointer), context.Facts.Image).Run(kind);
         return result.Body is { } body ? new Completed<ManagedBody>(body)
             : new Missing<ManagedBody>(new(Name, result.Failure!.Position == 0 ? context.Entry.Address : result.Failure.Position,
                 result.Failure.Kind.ToString(), result.Failure.Reason));
