@@ -1,0 +1,349 @@
+{
+  "ArrayBoundLength": [
+    "Il2CppArrayBounds",
+    "length"
+  ],
+  "ArrayBoundLowerBound": [
+    "Il2CppArrayBounds",
+    "lower_bound"
+  ],
+  "ArrayBoundSize": [
+    "Il2CppArrayBounds",
+    "size"
+  ],
+  "ArrayBounds": [
+    "Il2CppArray",
+    "bounds"
+  ],
+  "ArrayData": [
+    "Il2CppArraySize",
+    "vector"
+  ],
+  "ArrayMaxLength": [
+    "Il2CppArray",
+    "max_length"
+  ],
+  "ClassActualSize": [
+    "Il2CppClass",
+    "actualSize"
+  ],
+  "ClassBitflags1": [
+    "Il2CppClass",
+    "initialized_and_no_error"
+  ],
+  "ClassBitflags2": [
+    "Il2CppClass",
+    "size_inited"
+  ],
+  "ClassByvalArg": [
+    "Il2CppClass",
+    "byval_arg"
+  ],
+  "ClassCastClass": [
+    "Il2CppClass",
+    "castClass"
+  ],
+  "ClassCctorFinishedOrNoCctor": [
+    "Il2CppClass",
+    "cctor_finished_or_no_cctor"
+  ],
+  "ClassCctorStarted": [
+    "Il2CppClass",
+    "cctor_started"
+  ],
+  "ClassCctorThread": [
+    "Il2CppClass",
+    "cctor_thread"
+  ],
+  "ClassDeclaringType": [
+    "Il2CppClass",
+    "declaringType"
+  ],
+  "ClassElementClass": [
+    "Il2CppClass",
+    "element_class"
+  ],
+  "ClassElementSize": [
+    "Il2CppClass",
+    "element_size"
+  ],
+  "ClassFields": [
+    "Il2CppClass",
+    "fields"
+  ],
+  "ClassFlags": [
+    "Il2CppClass",
+    "flags"
+  ],
+  "ClassGenericClass": [
+    "Il2CppClass",
+    "generic_class"
+  ],
+  "ClassGenericContainerHandle": [
+    "Il2CppClass",
+    "genericContainerHandle"
+  ],
+  "ClassGenericRecursionDepth": [
+    "Il2CppClass",
+    "genericRecursionDepth"
+  ],
+  "ClassImage": [
+    "Il2CppClass",
+    "image"
+  ],
+  "ClassImplementedInterfaces": [
+    "Il2CppClass",
+    "implementedInterfaces"
+  ],
+  "ClassInitializationExceptionGCHandle": [
+    "Il2CppClass",
+    "initializationExceptionGCHandle"
+  ],
+  "ClassInstanceSize": [
+    "Il2CppClass",
+    "instance_size"
+  ],
+  "ClassInterfaceOffsets": [
+    "Il2CppClass",
+    "interfaceOffsets"
+  ],
+  "ClassInterfaceOffsetsCount": [
+    "Il2CppClass",
+    "interface_offsets_count"
+  ],
+  "ClassInterfacesCount": [
+    "Il2CppClass",
+    "interfaces_count"
+  ],
+  "ClassKlass": [
+    "Il2CppClass",
+    "klass"
+  ],
+  "ClassMethodCount": [
+    "Il2CppClass",
+    "method_count"
+  ],
+  "ClassMethods": [
+    "Il2CppClass",
+    "methods"
+  ],
+  "ClassMinimumAlignment": [
+    "Il2CppClass",
+    "minimumAlignment"
+  ],
+  "ClassNativeSize": [
+    "Il2CppClass",
+    "native_size"
+  ],
+  "ClassNestedTypes": [
+    "Il2CppClass",
+    "nestedTypes"
+  ],
+  "ClassPackingSize": [
+    "Il2CppClass",
+    "packingSize"
+  ],
+  "ClassParent": [
+    "Il2CppClass",
+    "parent"
+  ],
+  "ClassRank": [
+    "Il2CppClass",
+    "rank"
+  ],
+  "ClassRgctxData": [
+    "Il2CppClass",
+    "rgctx_data"
+  ],
+  "ClassStackSlotSize": [
+    "Il2CppClass",
+    "stack_slot_size"
+  ],
+  "ClassStaticFields": [
+    "Il2CppClass",
+    "static_fields"
+  ],
+  "ClassStaticFieldsSize": [
+    "Il2CppClass",
+    "static_fields_size"
+  ],
+  "ClassThreadStaticFieldsOffset": [
+    "Il2CppClass",
+    "thread_static_fields_offset"
+  ],
+  "ClassThreadStaticFieldsSize": [
+    "Il2CppClass",
+    "thread_static_fields_size"
+  ],
+  "ClassToken": [
+    "Il2CppClass",
+    "token"
+  ],
+  "ClassTypeHierarchy": [
+    "Il2CppClass",
+    "typeHierarchy"
+  ],
+  "ClassTypeHierarchyDepth": [
+    "Il2CppClass",
+    "typeHierarchyDepth"
+  ],
+  "ClassTypeMetadataHandle": [
+    "Il2CppClass",
+    "typeMetadataHandle"
+  ],
+  "ClassUnityUserData": [
+    "Il2CppClass",
+    "unity_user_data"
+  ],
+  "ClassVtable": [
+    "Il2CppClass",
+    "vtable"
+  ],
+  "ClassVtableCount": [
+    "Il2CppClass",
+    "vtable_count"
+  ],
+  "DelegateInvokeImpl": [
+    "Il2CppDelegate",
+    "invoke_impl"
+  ],
+  "DelegateMethod": [
+    "Il2CppDelegate",
+    "method"
+  ],
+  "DelegateMethodPtr": [
+    "Il2CppDelegate",
+    "method_ptr"
+  ],
+  "DelegateTarget": [
+    "Il2CppDelegate",
+    "target"
+  ],
+  "FieldInfoSize": [
+    "FieldInfo",
+    "size"
+  ],
+  "FieldName": [
+    "FieldInfo",
+    "name"
+  ],
+  "FieldOffset": [
+    "FieldInfo",
+    "offset"
+  ],
+  "FieldParent": [
+    "FieldInfo",
+    "parent"
+  ],
+  "FieldToken": [
+    "FieldInfo",
+    "token"
+  ],
+  "FieldType": [
+    "FieldInfo",
+    "type"
+  ],
+  "ImageAssembly": [
+    "Il2CppImage",
+    "assembly"
+  ],
+  "InterfaceOffsetPairSize": [
+    "Il2CppRuntimeInterfaceOffsetPair",
+    "size"
+  ],
+  "MethodBitflags": [
+    "MethodInfo",
+    "is_generic"
+  ],
+  "MethodFlags": [
+    "MethodInfo",
+    "flags"
+  ],
+  "MethodGenericMethod": [
+    "MethodInfo",
+    "genericMethod"
+  ],
+  "MethodIflags": [
+    "MethodInfo",
+    "iflags"
+  ],
+  "MethodInfoSize": [
+    "MethodInfo",
+    "size"
+  ],
+  "MethodInvoker": [
+    "MethodInfo",
+    "invoker_method"
+  ],
+  "MethodKlass": [
+    "MethodInfo",
+    "klass"
+  ],
+  "MethodName": [
+    "MethodInfo",
+    "name"
+  ],
+  "MethodParameters": [
+    "MethodInfo",
+    "parameters"
+  ],
+  "MethodParametersCount": [
+    "MethodInfo",
+    "parameters_count"
+  ],
+  "MethodPointer": [
+    "MethodInfo",
+    "methodPointer"
+  ],
+  "MethodReturnType": [
+    "MethodInfo",
+    "return_type"
+  ],
+  "MethodRgctxData": [
+    "MethodInfo",
+    "rgctx_data"
+  ],
+  "MethodSlot": [
+    "MethodInfo",
+    "slot"
+  ],
+  "MethodToken": [
+    "MethodInfo",
+    "token"
+  ],
+  "MethodVirtualPointer": [
+    "MethodInfo",
+    "virtualMethodPointer"
+  ],
+  "ObjectHeaderSize": [
+    "Il2CppObject",
+    "size"
+  ],
+  "ObjectKlass": [
+    "Il2CppObject",
+    "klass"
+  ],
+  "ObjectMonitor": [
+    "Il2CppObject",
+    "monitor"
+  ],
+  "StringChars": [
+    "Il2CppString",
+    "chars"
+  ],
+  "StringLength": [
+    "Il2CppString",
+    "length"
+  ],
+  "UnityVersion": [
+    "unity_version"
+  ],
+  "VirtualInvokeDataMethod": [
+    "VirtualInvokeData",
+    "method"
+  ],
+  "VirtualInvokeDataSize": [
+    "VirtualInvokeData",
+    "size"
+  ]
+}

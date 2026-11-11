@@ -1,0 +1,1434 @@
+{
+  "android_targets_equal": true,
+  "explanations": [
+    "原始单文件头的零长数组被 headers/extract.py 改为 [32]；恢复声明后重新交给 clang 计算，三个运行时结构的大小及数组字段大小与真实头文件相同。",
+    "struct 标签与 typedef 名称是同一类型的两种拼写；比较时只去除类型字符串的 struct 前缀。",
+    "单文件头多出元数据、快照及 Il2CppClass 拆分辅助结构；真实头文件多出属性宏与静态整数常量。共有集合逐项比较，不把非共有项算作一致。"
+  ],
+  "extractor_sha256": "fe0539c09638b153caaa066c85c53367b9b4aa40c86af1547c120cac48ea5466",
+  "legacy": {
+    "items": [
+      {
+        "generated": "2022.3.62f2",
+        "name": "UnityVersion",
+        "old": "2022.3.62f2",
+        "query": [
+          "unity_version"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 0,
+        "name": "ObjectKlass",
+        "old": 0,
+        "query": [
+          "Il2CppObject",
+          "klass"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 8,
+        "name": "ObjectMonitor",
+        "old": 8,
+        "query": [
+          "Il2CppObject",
+          "monitor"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 16,
+        "name": "ObjectHeaderSize",
+        "old": 16,
+        "query": [
+          "Il2CppObject",
+          "size"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 16,
+        "name": "ArrayBounds",
+        "old": 16,
+        "query": [
+          "Il2CppArray",
+          "bounds"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 24,
+        "name": "ArrayMaxLength",
+        "old": 24,
+        "query": [
+          "Il2CppArray",
+          "max_length"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 32,
+        "name": "ArrayData",
+        "old": 32,
+        "query": [
+          "Il2CppArraySize",
+          "vector"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 16,
+        "name": "ArrayBoundSize",
+        "old": 16,
+        "query": [
+          "Il2CppArrayBounds",
+          "size"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 0,
+        "name": "ArrayBoundLength",
+        "old": 0,
+        "query": [
+          "Il2CppArrayBounds",
+          "length"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 8,
+        "name": "ArrayBoundLowerBound",
+        "old": 8,
+        "query": [
+          "Il2CppArrayBounds",
+          "lower_bound"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 16,
+        "name": "StringLength",
+        "old": 16,
+        "query": [
+          "Il2CppString",
+          "length"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 20,
+        "name": "StringChars",
+        "old": 20,
+        "query": [
+          "Il2CppString",
+          "chars"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 0,
+        "name": "ClassImage",
+        "old": 0,
+        "query": [
+          "Il2CppClass",
+          "image"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 32,
+        "name": "ClassByvalArg",
+        "old": 32,
+        "query": [
+          "Il2CppClass",
+          "byval_arg"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 64,
+        "name": "ClassElementClass",
+        "old": 64,
+        "query": [
+          "Il2CppClass",
+          "element_class"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 72,
+        "name": "ClassCastClass",
+        "old": 72,
+        "query": [
+          "Il2CppClass",
+          "castClass"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 80,
+        "name": "ClassDeclaringType",
+        "old": 80,
+        "query": [
+          "Il2CppClass",
+          "declaringType"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 88,
+        "name": "ClassParent",
+        "old": 88,
+        "query": [
+          "Il2CppClass",
+          "parent"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 96,
+        "name": "ClassGenericClass",
+        "old": 96,
+        "query": [
+          "Il2CppClass",
+          "generic_class"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 104,
+        "name": "ClassTypeMetadataHandle",
+        "old": 104,
+        "query": [
+          "Il2CppClass",
+          "typeMetadataHandle"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 120,
+        "name": "ClassKlass",
+        "old": 120,
+        "query": [
+          "Il2CppClass",
+          "klass"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 128,
+        "name": "ClassFields",
+        "old": 128,
+        "query": [
+          "Il2CppClass",
+          "fields"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 152,
+        "name": "ClassMethods",
+        "old": 152,
+        "query": [
+          "Il2CppClass",
+          "methods"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 160,
+        "name": "ClassNestedTypes",
+        "old": 160,
+        "query": [
+          "Il2CppClass",
+          "nestedTypes"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 168,
+        "name": "ClassImplementedInterfaces",
+        "old": 168,
+        "query": [
+          "Il2CppClass",
+          "implementedInterfaces"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 176,
+        "name": "ClassInterfaceOffsets",
+        "old": 176,
+        "query": [
+          "Il2CppClass",
+          "interfaceOffsets"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 184,
+        "name": "ClassStaticFields",
+        "old": 184,
+        "query": [
+          "Il2CppClass",
+          "static_fields"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 192,
+        "name": "ClassRgctxData",
+        "old": 192,
+        "query": [
+          "Il2CppClass",
+          "rgctx_data"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 200,
+        "name": "ClassTypeHierarchy",
+        "old": 200,
+        "query": [
+          "Il2CppClass",
+          "typeHierarchy"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 208,
+        "name": "ClassUnityUserData",
+        "old": 208,
+        "query": [
+          "Il2CppClass",
+          "unity_user_data"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 216,
+        "name": "ClassInitializationExceptionGCHandle",
+        "old": 216,
+        "query": [
+          "Il2CppClass",
+          "initializationExceptionGCHandle"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 220,
+        "name": "ClassCctorStarted",
+        "old": 220,
+        "query": [
+          "Il2CppClass",
+          "cctor_started"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 224,
+        "name": "ClassCctorFinishedOrNoCctor",
+        "old": 224,
+        "query": [
+          "Il2CppClass",
+          "cctor_finished_or_no_cctor"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 232,
+        "name": "ClassCctorThread",
+        "old": 232,
+        "query": [
+          "Il2CppClass",
+          "cctor_thread"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 240,
+        "name": "ClassGenericContainerHandle",
+        "old": 240,
+        "query": [
+          "Il2CppClass",
+          "genericContainerHandle"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 248,
+        "name": "ClassInstanceSize",
+        "old": 248,
+        "query": [
+          "Il2CppClass",
+          "instance_size"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 252,
+        "name": "ClassStackSlotSize",
+        "old": 252,
+        "query": [
+          "Il2CppClass",
+          "stack_slot_size"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 256,
+        "name": "ClassActualSize",
+        "old": 256,
+        "query": [
+          "Il2CppClass",
+          "actualSize"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 260,
+        "name": "ClassElementSize",
+        "old": 260,
+        "query": [
+          "Il2CppClass",
+          "element_size"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 264,
+        "name": "ClassNativeSize",
+        "old": 264,
+        "query": [
+          "Il2CppClass",
+          "native_size"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 268,
+        "name": "ClassStaticFieldsSize",
+        "old": 268,
+        "query": [
+          "Il2CppClass",
+          "static_fields_size"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 272,
+        "name": "ClassThreadStaticFieldsSize",
+        "old": 272,
+        "query": [
+          "Il2CppClass",
+          "thread_static_fields_size"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 276,
+        "name": "ClassThreadStaticFieldsOffset",
+        "old": 276,
+        "query": [
+          "Il2CppClass",
+          "thread_static_fields_offset"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 280,
+        "name": "ClassFlags",
+        "old": 280,
+        "query": [
+          "Il2CppClass",
+          "flags"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 284,
+        "name": "ClassToken",
+        "old": 284,
+        "query": [
+          "Il2CppClass",
+          "token"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 288,
+        "name": "ClassMethodCount",
+        "old": 288,
+        "query": [
+          "Il2CppClass",
+          "method_count"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 298,
+        "name": "ClassVtableCount",
+        "old": 298,
+        "query": [
+          "Il2CppClass",
+          "vtable_count"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 300,
+        "name": "ClassInterfacesCount",
+        "old": 300,
+        "query": [
+          "Il2CppClass",
+          "interfaces_count"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 302,
+        "name": "ClassInterfaceOffsetsCount",
+        "old": 302,
+        "query": [
+          "Il2CppClass",
+          "interface_offsets_count"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 304,
+        "name": "ClassTypeHierarchyDepth",
+        "old": 304,
+        "query": [
+          "Il2CppClass",
+          "typeHierarchyDepth"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 305,
+        "name": "ClassGenericRecursionDepth",
+        "old": 305,
+        "query": [
+          "Il2CppClass",
+          "genericRecursionDepth"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 306,
+        "name": "ClassRank",
+        "old": 306,
+        "query": [
+          "Il2CppClass",
+          "rank"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 307,
+        "name": "ClassMinimumAlignment",
+        "old": 307,
+        "query": [
+          "Il2CppClass",
+          "minimumAlignment"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 308,
+        "name": "ClassPackingSize",
+        "old": 308,
+        "query": [
+          "Il2CppClass",
+          "packingSize"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 309,
+        "name": "ClassBitflags1",
+        "old": 309,
+        "query": [
+          "Il2CppClass",
+          "initialized_and_no_error"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 310,
+        "name": "ClassBitflags2",
+        "old": 310,
+        "query": [
+          "Il2CppClass",
+          "size_inited"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 312,
+        "name": "ClassVtable",
+        "old": 312,
+        "query": [
+          "Il2CppClass",
+          "vtable"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 16,
+        "name": "VirtualInvokeDataSize",
+        "old": 16,
+        "query": [
+          "VirtualInvokeData",
+          "size"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 8,
+        "name": "VirtualInvokeDataMethod",
+        "old": 8,
+        "query": [
+          "VirtualInvokeData",
+          "method"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 16,
+        "name": "InterfaceOffsetPairSize",
+        "old": 16,
+        "query": [
+          "Il2CppRuntimeInterfaceOffsetPair",
+          "size"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 0,
+        "name": "MethodPointer",
+        "old": 0,
+        "query": [
+          "MethodInfo",
+          "methodPointer"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 8,
+        "name": "MethodVirtualPointer",
+        "old": 8,
+        "query": [
+          "MethodInfo",
+          "virtualMethodPointer"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 16,
+        "name": "MethodInvoker",
+        "old": 16,
+        "query": [
+          "MethodInfo",
+          "invoker_method"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 24,
+        "name": "MethodName",
+        "old": 24,
+        "query": [
+          "MethodInfo",
+          "name"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 32,
+        "name": "MethodKlass",
+        "old": 32,
+        "query": [
+          "MethodInfo",
+          "klass"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 40,
+        "name": "MethodReturnType",
+        "old": 40,
+        "query": [
+          "MethodInfo",
+          "return_type"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 48,
+        "name": "MethodParameters",
+        "old": 48,
+        "query": [
+          "MethodInfo",
+          "parameters"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 56,
+        "name": "MethodRgctxData",
+        "old": 56,
+        "query": [
+          "MethodInfo",
+          "rgctx_data"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 64,
+        "name": "MethodGenericMethod",
+        "old": 64,
+        "query": [
+          "MethodInfo",
+          "genericMethod"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 72,
+        "name": "MethodToken",
+        "old": 72,
+        "query": [
+          "MethodInfo",
+          "token"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 76,
+        "name": "MethodFlags",
+        "old": 76,
+        "query": [
+          "MethodInfo",
+          "flags"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 78,
+        "name": "MethodIflags",
+        "old": 78,
+        "query": [
+          "MethodInfo",
+          "iflags"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 80,
+        "name": "MethodSlot",
+        "old": 80,
+        "query": [
+          "MethodInfo",
+          "slot"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 82,
+        "name": "MethodParametersCount",
+        "old": 82,
+        "query": [
+          "MethodInfo",
+          "parameters_count"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 83,
+        "name": "MethodBitflags",
+        "old": 83,
+        "query": [
+          "MethodInfo",
+          "is_generic"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 88,
+        "name": "MethodInfoSize",
+        "old": 88,
+        "query": [
+          "MethodInfo",
+          "size"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 16,
+        "name": "ImageAssembly",
+        "old": 16,
+        "query": [
+          "Il2CppImage",
+          "assembly"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 0,
+        "name": "FieldName",
+        "old": 0,
+        "query": [
+          "FieldInfo",
+          "name"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 8,
+        "name": "FieldType",
+        "old": 8,
+        "query": [
+          "FieldInfo",
+          "type"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 16,
+        "name": "FieldParent",
+        "old": 16,
+        "query": [
+          "FieldInfo",
+          "parent"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 24,
+        "name": "FieldOffset",
+        "old": 24,
+        "query": [
+          "FieldInfo",
+          "offset"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 28,
+        "name": "FieldToken",
+        "old": 28,
+        "query": [
+          "FieldInfo",
+          "token"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 32,
+        "name": "FieldInfoSize",
+        "old": 32,
+        "query": [
+          "FieldInfo",
+          "size"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 16,
+        "name": "DelegateMethodPtr",
+        "old": 16,
+        "query": [
+          "Il2CppDelegate",
+          "method_ptr"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 24,
+        "name": "DelegateInvokeImpl",
+        "old": 24,
+        "query": [
+          "Il2CppDelegate",
+          "invoke_impl"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 32,
+        "name": "DelegateTarget",
+        "old": 32,
+        "query": [
+          "Il2CppDelegate",
+          "target"
+        ],
+        "status": "一致"
+      },
+      {
+        "generated": 40,
+        "name": "DelegateMethod",
+        "old": 40,
+        "query": [
+          "Il2CppDelegate",
+          "method"
+        ],
+        "status": "一致"
+      }
+    ],
+    "reference": "attempt-12",
+    "summary": {
+      "一致": 87,
+      "不一致": 0,
+      "数据里没有": 0
+    }
+  },
+  "source_comparison": {
+    "android-arm64": {
+      "common_constants": 210,
+      "common_records": 134,
+      "constant_differences": [],
+      "raw_differences": [
+        {
+          "path": "/Il2CppArraySize/fields/3/size",
+          "runtime": 0,
+          "single": 256
+        },
+        {
+          "path": "/Il2CppArraySize/fields/3/type",
+          "runtime": "void *[0]",
+          "single": "void *[32]"
+        },
+        {
+          "path": "/Il2CppArraySize/size",
+          "runtime": 32,
+          "single": 288
+        },
+        {
+          "path": "/Il2CppClass/fields/23/type",
+          "runtime": "Il2CppClass **",
+          "single": "struct Il2CppClass **"
+        },
+        {
+          "path": "/Il2CppClass/fields/68/size",
+          "runtime": 0,
+          "single": 512
+        },
+        {
+          "path": "/Il2CppClass/fields/68/type",
+          "runtime": "VirtualInvokeData[0]",
+          "single": "VirtualInvokeData[32]"
+        },
+        {
+          "path": "/Il2CppClass/size",
+          "runtime": 312,
+          "single": 824
+        },
+        {
+          "path": "/Il2CppException/fields/4/type",
+          "runtime": "Il2CppException *",
+          "single": "struct Il2CppException *"
+        },
+        {
+          "path": "/Il2CppString/fields/2/size",
+          "runtime": 0,
+          "single": 64
+        },
+        {
+          "path": "/Il2CppString/fields/2/type",
+          "runtime": "Il2CppChar[0]",
+          "single": "Il2CppChar[32]"
+        },
+        {
+          "path": "/Il2CppString/size",
+          "runtime": 24,
+          "single": 88
+        },
+        {
+          "path": "/Il2CppStringBuilder/fields/2/type",
+          "runtime": "Il2CppStringBuilder *",
+          "single": "struct Il2CppStringBuilder *"
+        },
+        {
+          "path": "/__tagVARIANT/fields/4/members/28/type",
+          "runtime": "Il2CppVariant *",
+          "single": "struct Il2CppVariant *"
+        }
+      ],
+      "restored_differences": [],
+      "runtime_only_constants": [
+        "FIELD_ATTRIBUTE_ASSEMBLY",
+        "FIELD_ATTRIBUTE_COMPILER_CONTROLLED",
+        "FIELD_ATTRIBUTE_FAMILY",
+        "FIELD_ATTRIBUTE_FAM_AND_ASSEM",
+        "FIELD_ATTRIBUTE_FAM_OR_ASSEM",
+        "FIELD_ATTRIBUTE_FIELD_ACCESS_MASK",
+        "FIELD_ATTRIBUTE_HAS_DEFAULT",
+        "FIELD_ATTRIBUTE_HAS_FIELD_MARSHAL",
+        "FIELD_ATTRIBUTE_HAS_FIELD_RVA",
+        "FIELD_ATTRIBUTE_INIT_ONLY",
+        "FIELD_ATTRIBUTE_LITERAL",
+        "FIELD_ATTRIBUTE_NOT_SERIALIZED",
+        "FIELD_ATTRIBUTE_PINVOKE_IMPL",
+        "FIELD_ATTRIBUTE_PRIVATE",
+        "FIELD_ATTRIBUTE_PUBLIC",
+        "FIELD_ATTRIBUTE_RESERVED_MASK",
+        "FIELD_ATTRIBUTE_RT_SPECIAL_NAME",
+        "FIELD_ATTRIBUTE_SPECIAL_NAME",
+        "FIELD_ATTRIBUTE_STATIC",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_CONTRAVARIANT",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_COVARIANT",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_DEFAULT_CONSTRUCTOR_CONSTRAINT",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_NON_VARIANT",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_NOT_NULLABLE_VALUE_TYPE_CONSTRAINT",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_REFERENCE_TYPE_CONSTRAINT",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_SPECIAL_CONSTRAINT_MASK",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_VARIANCE_MASK",
+        "METHOD_ATTRIBUTE_ABSTRACT",
+        "METHOD_ATTRIBUTE_ASSEM",
+        "METHOD_ATTRIBUTE_COMPILER_CONTROLLED",
+        "METHOD_ATTRIBUTE_FAMILY",
+        "METHOD_ATTRIBUTE_FAM_AND_ASSEM",
+        "METHOD_ATTRIBUTE_FAM_OR_ASSEM",
+        "METHOD_ATTRIBUTE_FINAL",
+        "METHOD_ATTRIBUTE_HAS_SECURITY",
+        "METHOD_ATTRIBUTE_HIDE_BY_SIG",
+        "METHOD_ATTRIBUTE_MEMBER_ACCESS_MASK",
+        "METHOD_ATTRIBUTE_NEW_SLOT",
+        "METHOD_ATTRIBUTE_PINVOKE_IMPL",
+        "METHOD_ATTRIBUTE_PRIVATE",
+        "METHOD_ATTRIBUTE_PUBLIC",
+        "METHOD_ATTRIBUTE_REQUIRE_SEC_OBJECT",
+        "METHOD_ATTRIBUTE_RESERVED_MASK",
+        "METHOD_ATTRIBUTE_REUSE_SLOT",
+        "METHOD_ATTRIBUTE_RT_SPECIAL_NAME",
+        "METHOD_ATTRIBUTE_SPECIAL_NAME",
+        "METHOD_ATTRIBUTE_STATIC",
+        "METHOD_ATTRIBUTE_STRICT",
+        "METHOD_ATTRIBUTE_UNMANAGED_EXPORT",
+        "METHOD_ATTRIBUTE_VIRTUAL",
+        "METHOD_ATTRIBUTE_VTABLE_LAYOUT_MASK",
+        "METHOD_IMPL_ATTRIBUTE_CODE_TYPE_MASK",
+        "METHOD_IMPL_ATTRIBUTE_FORWARD_REF",
+        "METHOD_IMPL_ATTRIBUTE_IL",
+        "METHOD_IMPL_ATTRIBUTE_INTERNAL_CALL",
+        "METHOD_IMPL_ATTRIBUTE_MANAGED",
+        "METHOD_IMPL_ATTRIBUTE_MANAGED_MASK",
+        "METHOD_IMPL_ATTRIBUTE_MAX_METHOD_IMPL_VAL",
+        "METHOD_IMPL_ATTRIBUTE_NATIVE",
+        "METHOD_IMPL_ATTRIBUTE_NOINLINING",
+        "METHOD_IMPL_ATTRIBUTE_OPTIL",
+        "METHOD_IMPL_ATTRIBUTE_PRESERVE_SIG",
+        "METHOD_IMPL_ATTRIBUTE_RUNTIME",
+        "METHOD_IMPL_ATTRIBUTE_SYNCHRONIZED",
+        "METHOD_IMPL_ATTRIBUTE_UNMANAGED",
+        "PARAM_ATTRIBUTE_HAS_DEFAULT",
+        "PARAM_ATTRIBUTE_HAS_FIELD_MARSHAL",
+        "PARAM_ATTRIBUTE_IN",
+        "PARAM_ATTRIBUTE_OPTIONAL",
+        "PARAM_ATTRIBUTE_OUT",
+        "PARAM_ATTRIBUTE_RESERVED_MASK",
+        "PARAM_ATTRIBUTE_UNUSED",
+        "THREAD_LOCAL_STATIC_MASK",
+        "TYPE_ATTRIBUTE_ABSTRACT",
+        "TYPE_ATTRIBUTE_ANSI_CLASS",
+        "TYPE_ATTRIBUTE_AUTO_CLASS",
+        "TYPE_ATTRIBUTE_AUTO_LAYOUT",
+        "TYPE_ATTRIBUTE_BEFORE_FIELD_INIT",
+        "TYPE_ATTRIBUTE_CLASS",
+        "TYPE_ATTRIBUTE_CLASS_SEMANTIC_MASK",
+        "TYPE_ATTRIBUTE_EXPLICIT_LAYOUT",
+        "TYPE_ATTRIBUTE_FORWARDER",
+        "TYPE_ATTRIBUTE_HAS_SECURITY",
+        "TYPE_ATTRIBUTE_IMPORT",
+        "TYPE_ATTRIBUTE_INTERFACE",
+        "TYPE_ATTRIBUTE_LAYOUT_MASK",
+        "TYPE_ATTRIBUTE_NESTED_ASSEMBLY",
+        "TYPE_ATTRIBUTE_NESTED_FAMILY",
+        "TYPE_ATTRIBUTE_NESTED_FAM_AND_ASSEM",
+        "TYPE_ATTRIBUTE_NESTED_FAM_OR_ASSEM",
+        "TYPE_ATTRIBUTE_NESTED_PRIVATE",
+        "TYPE_ATTRIBUTE_NESTED_PUBLIC",
+        "TYPE_ATTRIBUTE_NOT_PUBLIC",
+        "TYPE_ATTRIBUTE_PUBLIC",
+        "TYPE_ATTRIBUTE_RESERVED_MASK",
+        "TYPE_ATTRIBUTE_RT_SPECIAL_NAME",
+        "TYPE_ATTRIBUTE_SEALED",
+        "TYPE_ATTRIBUTE_SEQUENTIAL_LAYOUT",
+        "TYPE_ATTRIBUTE_SERIALIZABLE",
+        "TYPE_ATTRIBUTE_SPECIAL_NAME",
+        "TYPE_ATTRIBUTE_STRING_FORMAT_MASK",
+        "TYPE_ATTRIBUTE_UNICODE_CLASS",
+        "TYPE_ATTRIBUTE_VISIBILITY_MASK",
+        "kIl2CppInt32Max",
+        "kIl2CppInt32Min",
+        "kIl2CppInt64Max",
+        "kIl2CppInt64Min",
+        "kIl2CppIntPtrMax",
+        "kIl2CppIntPtrMin",
+        "kIl2CppOffsetOfArrayBounds",
+        "kIl2CppOffsetOfArrayLength",
+        "kIl2CppSizeOfArray",
+        "kIl2CppUInt32Max",
+        "kIl2CppUInt64Max",
+        "kIl2CppUIntPtrMax"
+      ],
+      "runtime_only_records": [],
+      "runtime_source": {
+        "kind": "runtime-headers",
+        "platform_adapter": "Android C declarations; absent os/c-api configuration supplied by generator",
+        "sha256": {
+          "il2cpp-api-types.h": "b0055bb46d9e39e91b4adb04a9fb63e2ac7e849d1fd981b15ca83b4bcba0319d",
+          "il2cpp-blob.h": "173bbdfa15b389ef4ac6375a476c68115abd338a390ca2b357982f01234a638d",
+          "il2cpp-class-internals.h": "93f845f3dd5028aafce5226d50db8c53aa1f10d2c1b039463104a9a86aa8938a",
+          "il2cpp-config-api.h": "732236a5404b4ea89ffe7c78ae7af51bb04f0f3a0482d19326213cd6af27cb78",
+          "il2cpp-config.h": "c2514dbfaf939e905ab3a38eebab0f8c0a6fff1078eccc0449af86ed7e012969",
+          "il2cpp-metadata.h": "a11e3fb8c1d5649b12182c99166121afcb0c21866c1d864a71ddcd7258d41731",
+          "il2cpp-object-internals.h": "f9d0f093ccb08a7279148fb8988a5601debb8aae951a26fec0f551e0672040e4",
+          "il2cpp-pinvoke-support.h": "d6aa0bf32695cab08785322ad951ba79963d117750c65210895cb7e8cefb7b59",
+          "il2cpp-runtime-metadata.h": "6cfb8102559f68b48aed06d9ccf34a84e9ecd32c0baaa038524f321f8e6974e2",
+          "il2cpp-sanitizers.h": "5ec76d475304d3bc664b27868c34897d99a4cc05e5bcc3b6253325125604408f",
+          "il2cpp-tabledefs.h": "1cb7220aef5c87b1ba0e4916a167de5e823c1eb550551eba429c34c3c42add3a",
+          "il2cpp-tokentype.h": "f09e4b7ab15e64d8d1b1e7f51a814ad2003fdb71c638b0ad7af84deeb6e3bd92",
+          "il2cpp-windowsruntime-types.h": "27173863da770bb61df94e5a0d0c2f2f3dab75b6ebb9a399f9e706ae1da3606a"
+        },
+        "transformations": []
+      },
+      "single_only_constants": [
+        "METADATA_VERSION",
+        "kArray",
+        "kArrayRankMask",
+        "kIl2CppInvalidMetadataUsageAmbiguousMethod",
+        "kIl2CppInvalidMetadataUsageNoData",
+        "kIl2CppMetadataUsageFieldInfo",
+        "kIl2CppMetadataUsageFieldRva",
+        "kIl2CppMetadataUsageIl2CppType",
+        "kIl2CppMetadataUsageInvalid",
+        "kIl2CppMetadataUsageMethodDef",
+        "kIl2CppMetadataUsageMethodRef",
+        "kIl2CppMetadataUsageStringLiteral",
+        "kIl2CppMetadataUsageTypeInfo",
+        "kNone",
+        "kValueType"
+      ],
+      "single_only_records": [
+        "Il2CppAssemblyDefinition",
+        "Il2CppAssemblyNameDefinition",
+        "Il2CppClass_0",
+        "Il2CppClass_1",
+        "Il2CppClass_Merged",
+        "Il2CppCustomAttributeDataRange",
+        "Il2CppEventDefinition",
+        "Il2CppFieldDefaultValue",
+        "Il2CppFieldDefinition",
+        "Il2CppFieldMarshaledSize",
+        "Il2CppFieldRef",
+        "Il2CppGCHandles",
+        "Il2CppGenericContainer",
+        "Il2CppGenericParameter",
+        "Il2CppGlobalMetadataHeader",
+        "Il2CppImageDefinition",
+        "Il2CppInterfaceOffsetPair",
+        "Il2CppManagedHeap",
+        "Il2CppManagedMemorySection",
+        "Il2CppManagedMemorySnapshot",
+        "Il2CppMetadataField",
+        "Il2CppMetadataRange",
+        "Il2CppMetadataSnapshot",
+        "Il2CppMetadataType",
+        "Il2CppMethodDefinition",
+        "Il2CppParameterDefaultValue",
+        "Il2CppParameterDefinition",
+        "Il2CppPropertyDefinition",
+        "Il2CppRuntimeInformation",
+        "Il2CppStacks",
+        "Il2CppStringLiteral",
+        "Il2CppTypeDefinition",
+        "Il2CppWindowsRuntimeTypeNamePair",
+        "NativeObject"
+      ],
+      "single_source": {
+        "kind": "Il2CppVersions",
+        "platform_adapter": "compiler primitive types and IL2CPP character/array typedefs",
+        "sha256": {
+          "2022.3.62f2.h": "cde91c6ca6cc74221c68185049868e7ab5faa057138f742998be5e1eb461edb4"
+        },
+        "transformations": []
+      }
+    },
+    "android-x64": {
+      "common_constants": 210,
+      "common_records": 134,
+      "constant_differences": [],
+      "raw_differences": [
+        {
+          "path": "/Il2CppArraySize/fields/3/size",
+          "runtime": 0,
+          "single": 256
+        },
+        {
+          "path": "/Il2CppArraySize/fields/3/type",
+          "runtime": "void *[0]",
+          "single": "void *[32]"
+        },
+        {
+          "path": "/Il2CppArraySize/size",
+          "runtime": 32,
+          "single": 288
+        },
+        {
+          "path": "/Il2CppClass/fields/23/type",
+          "runtime": "Il2CppClass **",
+          "single": "struct Il2CppClass **"
+        },
+        {
+          "path": "/Il2CppClass/fields/68/size",
+          "runtime": 0,
+          "single": 512
+        },
+        {
+          "path": "/Il2CppClass/fields/68/type",
+          "runtime": "VirtualInvokeData[0]",
+          "single": "VirtualInvokeData[32]"
+        },
+        {
+          "path": "/Il2CppClass/size",
+          "runtime": 312,
+          "single": 824
+        },
+        {
+          "path": "/Il2CppException/fields/4/type",
+          "runtime": "Il2CppException *",
+          "single": "struct Il2CppException *"
+        },
+        {
+          "path": "/Il2CppString/fields/2/size",
+          "runtime": 0,
+          "single": 64
+        },
+        {
+          "path": "/Il2CppString/fields/2/type",
+          "runtime": "Il2CppChar[0]",
+          "single": "Il2CppChar[32]"
+        },
+        {
+          "path": "/Il2CppString/size",
+          "runtime": 24,
+          "single": 88
+        },
+        {
+          "path": "/Il2CppStringBuilder/fields/2/type",
+          "runtime": "Il2CppStringBuilder *",
+          "single": "struct Il2CppStringBuilder *"
+        },
+        {
+          "path": "/__tagVARIANT/fields/4/members/28/type",
+          "runtime": "Il2CppVariant *",
+          "single": "struct Il2CppVariant *"
+        }
+      ],
+      "restored_differences": [],
+      "runtime_only_constants": [
+        "FIELD_ATTRIBUTE_ASSEMBLY",
+        "FIELD_ATTRIBUTE_COMPILER_CONTROLLED",
+        "FIELD_ATTRIBUTE_FAMILY",
+        "FIELD_ATTRIBUTE_FAM_AND_ASSEM",
+        "FIELD_ATTRIBUTE_FAM_OR_ASSEM",
+        "FIELD_ATTRIBUTE_FIELD_ACCESS_MASK",
+        "FIELD_ATTRIBUTE_HAS_DEFAULT",
+        "FIELD_ATTRIBUTE_HAS_FIELD_MARSHAL",
+        "FIELD_ATTRIBUTE_HAS_FIELD_RVA",
+        "FIELD_ATTRIBUTE_INIT_ONLY",
+        "FIELD_ATTRIBUTE_LITERAL",
+        "FIELD_ATTRIBUTE_NOT_SERIALIZED",
+        "FIELD_ATTRIBUTE_PINVOKE_IMPL",
+        "FIELD_ATTRIBUTE_PRIVATE",
+        "FIELD_ATTRIBUTE_PUBLIC",
+        "FIELD_ATTRIBUTE_RESERVED_MASK",
+        "FIELD_ATTRIBUTE_RT_SPECIAL_NAME",
+        "FIELD_ATTRIBUTE_SPECIAL_NAME",
+        "FIELD_ATTRIBUTE_STATIC",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_CONTRAVARIANT",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_COVARIANT",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_DEFAULT_CONSTRUCTOR_CONSTRAINT",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_NON_VARIANT",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_NOT_NULLABLE_VALUE_TYPE_CONSTRAINT",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_REFERENCE_TYPE_CONSTRAINT",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_SPECIAL_CONSTRAINT_MASK",
+        "IL2CPP_GENERIC_PARAMETER_ATTRIBUTE_VARIANCE_MASK",
+        "METHOD_ATTRIBUTE_ABSTRACT",
+        "METHOD_ATTRIBUTE_ASSEM",
+        "METHOD_ATTRIBUTE_COMPILER_CONTROLLED",
+        "METHOD_ATTRIBUTE_FAMILY",
+        "METHOD_ATTRIBUTE_FAM_AND_ASSEM",
+        "METHOD_ATTRIBUTE_FAM_OR_ASSEM",
+        "METHOD_ATTRIBUTE_FINAL",
+        "METHOD_ATTRIBUTE_HAS_SECURITY",
+        "METHOD_ATTRIBUTE_HIDE_BY_SIG",
+        "METHOD_ATTRIBUTE_MEMBER_ACCESS_MASK",
+        "METHOD_ATTRIBUTE_NEW_SLOT",
+        "METHOD_ATTRIBUTE_PINVOKE_IMPL",
+        "METHOD_ATTRIBUTE_PRIVATE",
+        "METHOD_ATTRIBUTE_PUBLIC",
+        "METHOD_ATTRIBUTE_REQUIRE_SEC_OBJECT",
+        "METHOD_ATTRIBUTE_RESERVED_MASK",
+        "METHOD_ATTRIBUTE_REUSE_SLOT",
+        "METHOD_ATTRIBUTE_RT_SPECIAL_NAME",
+        "METHOD_ATTRIBUTE_SPECIAL_NAME",
+        "METHOD_ATTRIBUTE_STATIC",
+        "METHOD_ATTRIBUTE_STRICT",
+        "METHOD_ATTRIBUTE_UNMANAGED_EXPORT",
+        "METHOD_ATTRIBUTE_VIRTUAL",
+        "METHOD_ATTRIBUTE_VTABLE_LAYOUT_MASK",
+        "METHOD_IMPL_ATTRIBUTE_CODE_TYPE_MASK",
+        "METHOD_IMPL_ATTRIBUTE_FORWARD_REF",
+        "METHOD_IMPL_ATTRIBUTE_IL",
+        "METHOD_IMPL_ATTRIBUTE_INTERNAL_CALL",
+        "METHOD_IMPL_ATTRIBUTE_MANAGED",
+        "METHOD_IMPL_ATTRIBUTE_MANAGED_MASK",
+        "METHOD_IMPL_ATTRIBUTE_MAX_METHOD_IMPL_VAL",
+        "METHOD_IMPL_ATTRIBUTE_NATIVE",
+        "METHOD_IMPL_ATTRIBUTE_NOINLINING",
+        "METHOD_IMPL_ATTRIBUTE_OPTIL",
+        "METHOD_IMPL_ATTRIBUTE_PRESERVE_SIG",
+        "METHOD_IMPL_ATTRIBUTE_RUNTIME",
+        "METHOD_IMPL_ATTRIBUTE_SYNCHRONIZED",
+        "METHOD_IMPL_ATTRIBUTE_UNMANAGED",
+        "PARAM_ATTRIBUTE_HAS_DEFAULT",
+        "PARAM_ATTRIBUTE_HAS_FIELD_MARSHAL",
+        "PARAM_ATTRIBUTE_IN",
+        "PARAM_ATTRIBUTE_OPTIONAL",
+        "PARAM_ATTRIBUTE_OUT",
+        "PARAM_ATTRIBUTE_RESERVED_MASK",
+        "PARAM_ATTRIBUTE_UNUSED",
+        "THREAD_LOCAL_STATIC_MASK",
+        "TYPE_ATTRIBUTE_ABSTRACT",
+        "TYPE_ATTRIBUTE_ANSI_CLASS",
+        "TYPE_ATTRIBUTE_AUTO_CLASS",
+        "TYPE_ATTRIBUTE_AUTO_LAYOUT",
+        "TYPE_ATTRIBUTE_BEFORE_FIELD_INIT",
+        "TYPE_ATTRIBUTE_CLASS",
+        "TYPE_ATTRIBUTE_CLASS_SEMANTIC_MASK",
+        "TYPE_ATTRIBUTE_EXPLICIT_LAYOUT",
+        "TYPE_ATTRIBUTE_FORWARDER",
+        "TYPE_ATTRIBUTE_HAS_SECURITY",
+        "TYPE_ATTRIBUTE_IMPORT",
+        "TYPE_ATTRIBUTE_INTERFACE",
+        "TYPE_ATTRIBUTE_LAYOUT_MASK",
+        "TYPE_ATTRIBUTE_NESTED_ASSEMBLY",
+        "TYPE_ATTRIBUTE_NESTED_FAMILY",
+        "TYPE_ATTRIBUTE_NESTED_FAM_AND_ASSEM",
+        "TYPE_ATTRIBUTE_NESTED_FAM_OR_ASSEM",
+        "TYPE_ATTRIBUTE_NESTED_PRIVATE",
+        "TYPE_ATTRIBUTE_NESTED_PUBLIC",
+        "TYPE_ATTRIBUTE_NOT_PUBLIC",
+        "TYPE_ATTRIBUTE_PUBLIC",
+        "TYPE_ATTRIBUTE_RESERVED_MASK",
+        "TYPE_ATTRIBUTE_RT_SPECIAL_NAME",
+        "TYPE_ATTRIBUTE_SEALED",
+        "TYPE_ATTRIBUTE_SEQUENTIAL_LAYOUT",
+        "TYPE_ATTRIBUTE_SERIALIZABLE",
+        "TYPE_ATTRIBUTE_SPECIAL_NAME",
+        "TYPE_ATTRIBUTE_STRING_FORMAT_MASK",
+        "TYPE_ATTRIBUTE_UNICODE_CLASS",
+        "TYPE_ATTRIBUTE_VISIBILITY_MASK",
+        "kIl2CppInt32Max",
+        "kIl2CppInt32Min",
+        "kIl2CppInt64Max",
+        "kIl2CppInt64Min",
+        "kIl2CppIntPtrMax",
+        "kIl2CppIntPtrMin",
+        "kIl2CppOffsetOfArrayBounds",
+        "kIl2CppOffsetOfArrayLength",
+        "kIl2CppSizeOfArray",
+        "kIl2CppUInt32Max",
+        "kIl2CppUInt64Max",
+        "kIl2CppUIntPtrMax"
+      ],
+      "runtime_only_records": [],
+      "runtime_source": {
+        "kind": "runtime-headers",
+        "platform_adapter": "Android C declarations; absent os/c-api configuration supplied by generator",
+        "sha256": {
+          "il2cpp-api-types.h": "b0055bb46d9e39e91b4adb04a9fb63e2ac7e849d1fd981b15ca83b4bcba0319d",
+          "il2cpp-blob.h": "173bbdfa15b389ef4ac6375a476c68115abd338a390ca2b357982f01234a638d",
+          "il2cpp-class-internals.h": "93f845f3dd5028aafce5226d50db8c53aa1f10d2c1b039463104a9a86aa8938a",
+          "il2cpp-config-api.h": "732236a5404b4ea89ffe7c78ae7af51bb04f0f3a0482d19326213cd6af27cb78",
+          "il2cpp-config.h": "c2514dbfaf939e905ab3a38eebab0f8c0a6fff1078eccc0449af86ed7e012969",
+          "il2cpp-metadata.h": "a11e3fb8c1d5649b12182c99166121afcb0c21866c1d864a71ddcd7258d41731",
+          "il2cpp-object-internals.h": "f9d0f093ccb08a7279148fb8988a5601debb8aae951a26fec0f551e0672040e4",
+          "il2cpp-pinvoke-support.h": "d6aa0bf32695cab08785322ad951ba79963d117750c65210895cb7e8cefb7b59",
+          "il2cpp-runtime-metadata.h": "6cfb8102559f68b48aed06d9ccf34a84e9ecd32c0baaa038524f321f8e6974e2",
+          "il2cpp-sanitizers.h": "5ec76d475304d3bc664b27868c34897d99a4cc05e5bcc3b6253325125604408f",
+          "il2cpp-tabledefs.h": "1cb7220aef5c87b1ba0e4916a167de5e823c1eb550551eba429c34c3c42add3a",
+          "il2cpp-tokentype.h": "f09e4b7ab15e64d8d1b1e7f51a814ad2003fdb71c638b0ad7af84deeb6e3bd92",
+          "il2cpp-windowsruntime-types.h": "27173863da770bb61df94e5a0d0c2f2f3dab75b6ebb9a399f9e706ae1da3606a"
+        },
+        "transformations": []
+      },
+      "single_only_constants": [
+        "METADATA_VERSION",
+        "kArray",
+        "kArrayRankMask",
+        "kIl2CppInvalidMetadataUsageAmbiguousMethod",
+        "kIl2CppInvalidMetadataUsageNoData",
+        "kIl2CppMetadataUsageFieldInfo",
+        "kIl2CppMetadataUsageFieldRva",
+        "kIl2CppMetadataUsageIl2CppType",
+        "kIl2CppMetadataUsageInvalid",
+        "kIl2CppMetadataUsageMethodDef",
+        "kIl2CppMetadataUsageMethodRef",
+        "kIl2CppMetadataUsageStringLiteral",
+        "kIl2CppMetadataUsageTypeInfo",
+        "kNone",
+        "kValueType"
+      ],
+      "single_only_records": [
+        "Il2CppAssemblyDefinition",
+        "Il2CppAssemblyNameDefinition",
+        "Il2CppClass_0",
+        "Il2CppClass_1",
+        "Il2CppClass_Merged",
+        "Il2CppCustomAttributeDataRange",
+        "Il2CppEventDefinition",
+        "Il2CppFieldDefaultValue",
+        "Il2CppFieldDefinition",
+        "Il2CppFieldMarshaledSize",
+        "Il2CppFieldRef",
+        "Il2CppGCHandles",
+        "Il2CppGenericContainer",
+        "Il2CppGenericParameter",
+        "Il2CppGlobalMetadataHeader",
+        "Il2CppImageDefinition",
+        "Il2CppInterfaceOffsetPair",
+        "Il2CppManagedHeap",
+        "Il2CppManagedMemorySection",
+        "Il2CppManagedMemorySnapshot",
+        "Il2CppMetadataField",
+        "Il2CppMetadataRange",
+        "Il2CppMetadataSnapshot",
+        "Il2CppMetadataType",
+        "Il2CppMethodDefinition",
+        "Il2CppParameterDefaultValue",
+        "Il2CppParameterDefinition",
+        "Il2CppPropertyDefinition",
+        "Il2CppRuntimeInformation",
+        "Il2CppStacks",
+        "Il2CppStringLiteral",
+        "Il2CppTypeDefinition",
+        "Il2CppWindowsRuntimeTypeNamePair",
+        "NativeObject"
+      ],
+      "single_source": {
+        "kind": "Il2CppVersions",
+        "platform_adapter": "compiler primitive types and IL2CPP character/array typedefs",
+        "sha256": {
+          "2022.3.62f2.h": "cde91c6ca6cc74221c68185049868e7ab5faa057138f742998be5e1eb461edb4"
+        },
+        "transformations": []
+      }
+    }
+  }
+}
