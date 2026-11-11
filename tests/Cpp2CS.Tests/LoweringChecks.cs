@@ -159,15 +159,15 @@ internal static class LoweringChecks
                     || statements[1].Invocation.Arguments[0] is LocalValue, "第二次调用依赖第一次结果");
             checks.True(emitter.Emit([body]).Count == 0, name + " CIL 校验");
         }
-        var ambiguous = Calls(new BindingEntry(target, BindingEntryKind.Ordinary), new BindingEntry(MethodRef.Open(methods[^1]), BindingEntryKind.Ordinary));
+        var ambiguous = Calls(new BindingEntry(target, BindingEntryKind.Ordinary), new BindingEntry(MethodRef.Open(methods.Single(m => m.Name == "Narrow")), BindingEntryKind.Ordinary));
         checks.True(new IntegerLowering(Function("CallTail"), target, binder, types, calls: ambiguous).Run().Failure?.Kind == LoweringFailureKind.AmbiguousCall,
             "签名不同的候选单列洞");
         var folded = Calls(new BindingEntry(target, BindingEntryKind.Ordinary), new BindingEntry(MethodRef.Open(methods[1]), BindingEntryKind.Ordinary));
         checks.True(new IntegerLowering(Function("CallTail"), target, binder, types, calls: folded).Run().Failure?.Kind == LoweringFailureKind.FoldedCall,
             "相同代码折叠单列洞");
-        var narrowCalls = Calls(new BindingEntry(MethodRef.Open(methods[^1]), BindingEntryKind.Ordinary));
+        var narrowCalls = Calls(new BindingEntry(MethodRef.Open(methods.Single(m => m.Name == "Narrow")), BindingEntryKind.Ordinary));
         var narrow = new IntegerLowering(Function("CallNarrow"), target, binder, types, calls: narrowCalls).Run();
-        checks.True(narrow.Body is not null, "窄返回值只使用绑定的低位");
+        checks.True(narrow.Body is not null, $"窄返回值只使用绑定的低位：{narrow.Failure}");
         checks.True(new IntegerLowering(Function("CallTail"), target, binder, types, calls: narrowCalls).Run().Failure?.Kind == LoweringFailureKind.Binding,
             "窄返回值的 ABI 未定义高位不能取用");
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
