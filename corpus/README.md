@@ -201,3 +201,50 @@ python3 corpus/truth/verify.py --input "$CORPUS_INPUT" --truth "$TRUTH_OUTPUT" \
 **已知完整性边界。** 当前 Release 语料存在明确反例：`Guards.MetadataOnBranches` 两臂的 `Support.TypeToken` 内联副本合并后，初始化与类型查询机器码仍在，但两个目标均没有该副本的内联记录；两处未使用结果的 `Support.Opaque` 纯调用则可直接消去。不能把这四处候选都算作漏记。另在库代码中，相邻字段 getter 被 ARM64 的一条成对加载覆盖时，只留下其中一个 getter 的记录，而 x86_64 的独立加载各有记录。这说明已有记录可作为局部正例和嵌套来源证据，不能充当完整内联集合或完整区域边界；内联逆的完整度验证需要人工标注的小对照集。
 
 当前用例已有两级生成包装/内联副本及三级运行时嵌套、分段范围、检查吸收与合并后记录缺失；尚缺专门隔离的多入口内联、含循环或异常区域内联，以及相邻有可观察写入的内联合并用例。需要另外构建这些用例，不能从一般 BCL 函数出现类似指令就宣称覆盖。其他编译器、优化级别、Unity 版本及 DWARF5 尚未验证。
+
+### 入口形参与类型形状
+
+`truth/parameters.py` 读取匹配的 DWARF 与 `.eh_frame`，为 ABI 分类器提供独立的编译器证据。依赖和虚拟环境同内联工具；不构建语料，不推导 ABI 槽位。调用者按本机约定加重任务锁。输出及缓存不得位于输入产物或已有真值目录内，输出必须为空。
+
+```sh
+"$TRUTH_PYTHON" corpus/truth/parameters.py --input "$CORPUS_INPUT" --truth "$TRUTH_INPUT" \
+  --output "$PARAMETER_OUTPUT" --cache "$PARAMETER_CACHE"
+"$TRUTH_PYTHON" corpus/truth/parameters.py --input "$CORPUS_INPUT" --truth "$TRUTH_INPUT" \
+  --output "$PARAMETER_REPEAT" --cache "$PARAMETER_REPEAT_CACHE"
+"$TRUTH_PYTHON" corpus/truth/check_parameters.py
+"$TRUTH_PYTHON" corpus/truth/verify_parameters.py --input "$CORPUS_INPUT" \
+  --truth "$PARAMETER_OUTPUT" --repeat "$PARAMETER_REPEAT" --report "$PARAMETER_REPORT" \
+  --function "$CPP_FUNCTION_NAME"
+```
+
+重复运行使用不同的空缓存目录，检查完整抽取过程的确定性；也支持按调试库、机器码、工具及关联表的 SHA-256 复用缓存。逐编译单元释放 DIE 缓存，两个目标串行解析。`verify_parameters.py` 比较全部 JSON 的字节、检查用例关联，并用 Capstone 导出 `--function` 指定的完整函数机器码；选项可重复。机器码与参数位置是否一致须人工核对，工具不把“成功解码”当成一致性证明。
+
+格式版本为 1，沿用前述 JSON、地址和换行约定，无机器路径、时间戳：
+
+| 文件 | 内容 |
+|---|---|
+| `parameters.<目标>.json` | `mappings.json` 有非空 `method_id` 且目标有定义符号的每个 `cpp_name` 一项；共享函数按名字计一次。含 `method_ids/address/size/records`，以地址关联具体 DWARF 函数；同地址多个 DIE 全部保留，不选择一个冒充唯一签名。没有调试函数时 `records=[]`。 |
+| `parameter-cases.<目标>.json` | 每个原有用例一项，含 `case/method_id` 和完整函数记录；以 `cases.json` 的 `mapping.cpp_name` 精确关联，不改原有用例表。 |
+| `parameter-summary.<目标>.json` | `all` 为全部映射函数，`cases` 为受控用例子集，分别给函数数、找到调试函数数、形参数、完整入口位置已知数及比例、未知原因和类型形状未知数；`groups` 分组计数，`gaps` 列用例缺失、少于五项或位置不完整的组。五项仅为提醒阈值，不代表统计充分性。 |
+| `parameter-manifest.json` | 工具、辅助模块、依赖版本、原有真值及两目标输入库和输出文件的校验和。 |
+
+一条函数 `records` 含 `.debug_info` 节内 `die` 偏移、`dwarf_name`、`parameters`、`return_shape`、`variadic`、`frame_base`、`entry_cfa`。具体形参的名字、类型沿 `abstract_origin/specification` 继承；`index` 按形参 DIE 的出现顺序从零计数，保留 `this`、方法信息指针和 `artificial` 标志。返回类型仅抽形状，不推测返回位置或未描述的隐藏返回指针。
+
+`shape` 含 `kind` 和字节 `size`：整数（含枚举、布尔和 UTF 字符）、指针、浮点、聚合、void 或 unknown。聚合包含成员名字、字节偏移及递归形状，保留位域属性；数组用 `element/dimensions` 表示，大小可由维数和元素大小得出。指针不递归展开被指类型。没有大小或成员偏移证据时为 null，不按托管布局补齐。
+
+`location` 的 `source` 为直接表达式或覆盖函数最小代码地址的半开位置列表项；只读入口，不选第一个后续有效项。`expression` 保留解码后的 DWARF 操作。`pieces` 的 `value_bit_offset/size_bits` 给值内分片位置，`location_bit_offset` 给寄存器或存储内的起始位；`kind` 可为：
+
+- `register`：`register/dwarf_register` 为 pyelftools 按目标 DWARF 寄存器编号给出的名字和编号，不映射到 ABI 抽象槽。支持直接寄存器和零偏移寄存器值、逻辑右移后 `stack_value` 描述的位片，后者标 `derivation=register_value_expression`。
+- `stack`：`offset` 为相对函数第一条指令执行前 SP 的字节偏移。
+- `indirect`：值位于 `register+offset` 指向的内存，不把指针形参自身所在的寄存器误标为按引用传递。
+- `unknown`：带原因，可能附 `entry_value_pieces`。入口值表达式即使能读出寄存器也不计为当前位置已知。空片、未报告尾部、未支持表达式和未证明帧基址分别记录；不丢弃同一形参的其他有效分片。
+
+`known=true` 要求所有报告分片可解释且没有未报告尾部；没有位置属性记 `no_location_attribute`，有列表但不覆盖入口记 `no_range_at_entry`。DWARF 通常不能区分“源码没用到”与“优化器删除了位置”，工具不伪造这个原因。含常量/掩码的计算值表达式保留原操作但不冒充存储位置。
+
+**栈换算。** `entry_cfa` 来自机器码库的 CFI，在入口选覆盖该 PC 的规则，记录基址寄存器与偏移。若 CFA 为入口 SP 加常量，则 `DW_OP_call_frame_cfa` 可直接换算；`DW_OP_fbreg d` 则需已证明的 `frame_base.entry_sp_offset+d`。当前两个目标的入口 CFA 分别常见为 `sp+0`、`rsp+8`，这是读到的 CFI 事实，不是分类器默认值。
+
+clang 的固定 `DW_AT_frame_base=SP` 配合 `fbreg` 有时以序言后的 SP 计数，即使位置范围覆盖入口。不能直接以入口 SP 加该偏移：x86_64 的一个多参数 `Guid` 构造函数连续三次 push 后以 `rsp+32` 读第一个栈参数，实际入口偏移是 8，调试表达式却为 `fbreg 32`。因此只有 CFI 覆盖整个函数并证明 SP 基址不变时，才将该种帧基址换算为入口 SP；否则 `sp_stable=false`，位置记 `unresolved_frame_base`。非 SP 帧基址也保留未知，不猜序言建立后的帧指针。此策略会遗漏可人工证明的栈参数，但不会把序言后的偏移当成入口偏移。
+
+**统计与证据边界。** 类型组有整数/指针、浮点、≤16 字节聚合、>16 字节聚合、含浮点成员聚合，后者与大小组重叠。`observed_stack` 仅统计确实换算出的栈位置，其分母不含帧基址未解决项；它不是独立计算的“寄存器耗尽”总体。调试位置本身不能区分寄存器耗尽与聚合的强制内存传递，因此不将两者自动等同。受控的高参数数目用例仍需补充。
+
+该证据可核对 C 层形参顺序、大小、嵌套成员布局和有正面位置证据的寄存器/位片/间接存储/入口栈偏移。不能单凭它确认未使用参数、聚合未报告字节、栈帧不稳定项、返回位置、隐藏返回参数、寄存器扩展位、调用者传参动作或所有 ABI 边界。DWARF 不完整，不能按未知项判定分类器错误。当前语料在形参方面的缺口：受控用例里按值传递的小聚合只有两个，没有超过 16 字节的聚合、含浮点成员的聚合，也没有寄存器用尽后落到栈上的形参；窄整数与布尔没有被单独消费的用例。补语料时各加一组，并让每个成员、每个末尾形参都被用到。
