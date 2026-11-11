@@ -131,6 +131,9 @@ public sealed partial class IntegerLowering
                     var statement = LowerCall(call, new(b.Identity, i));
                     if (statement is null) return new(null, failure);
                     statements.Add(statement);
+                    // 不返回的托管调用之后没有后继；方法体以不可达的 throw null 收尾，依据是不返回分析对被调函数的证明。
+                    if (call.DoesNotReturn && statement is ManagedCall)
+                        statements.Add(new ManagedThrow(position, new ConstantValue(0, types.Object, types.PointerSize * 8)));
                 }
                 else if (native is MemoryWrite write)
                 {

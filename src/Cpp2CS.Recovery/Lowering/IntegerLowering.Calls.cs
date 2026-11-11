@@ -52,6 +52,9 @@ public sealed partial class IntegerLowering
             return;
         }
         if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "NewObject" }) { PrepareAllocation(call, c); return; }
+        if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "NewArray" }) { PrepareVector(call, c); return; }
+        if (c.Kind == CallKind.Runtime && c.Operation is { DoesNotReturn: true, Termination: RuntimeTermination.Throw, FixedThrownException: null, Il.Name: "Throw" })
+        { PrepareThrow(call, c); return; }
         if (c.Kind != CallKind.Managed)
         {
             var kind = c.Kind switch { CallKind.Runtime => LoweringFailureKind.RuntimeCall,
@@ -73,8 +76,6 @@ public sealed partial class IntegerLowering
             Fail<object>(same ? LoweringFailureKind.FoldedCall : LoweringFailureKind.AmbiguousCall,
                 same ? "相同代码折叠：多个托管签名相同的候选，身份未确定" : "多个候选的托管签名不同或不可用"); return;
         }
-        if (call.DoesNotReturn)
-        { Fail<object>(LoweringFailureKind.NonReturningCall, "托管方法体尚无不返回调用终结契约"); return; }
         var candidate = candidates[0];
         if (candidate.Binding.Value is not { } binding || candidate.Entry.Method is not { } method)
         { Fail<object>(LoweringFailureKind.Binding, candidate.Binding.Failure?.Detail ?? "调用没有托管身份"); return; }
@@ -96,6 +97,7 @@ public sealed partial class IntegerLowering
     private ManagedStatement? LowerCall(Call call, Point point)
     {
         if (throws.TryGetValue(call.Identity, out var constructor)) return new ManagedThrow(position, new NewObjectValue(constructor, [], types.PointerSize * 8));
+        if (vectors.ContainsKey(call.Identity) || thrown.ContainsKey(call.Identity)) return LowerRuntimeStatement(call, point);
         var d = callDefinitions[call.Identity];
         var args = new List<ManagedValue>();
         constructions.TryGetValue(call.Identity, out var created);

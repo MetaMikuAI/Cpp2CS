@@ -4,6 +4,7 @@ using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Locations;
+using Cpp2CS.Recovery.Naming;
 
 namespace Cpp2CS.Recovery.Lowering;
 
@@ -48,6 +49,7 @@ public sealed partial class IntegerLowering
         public MemoryRead Read { get; } = read;
         public LocalValue? Local { get; set; }
         public ManagedValue? Value { get; set; }
+        public ManagedValue? Constant { get; set; }
     }
     private readonly Dictionary<Term, ReadDefinition> readValues = [];
     private readonly Dictionary<ReadIdentity, ReadDefinition> readDefinitions = [];
@@ -86,7 +88,12 @@ public sealed partial class IntegerLowering
     private ManagedValue? ReadValue(ReadDefinition definition)
     {
         if (definition.Local is not null) return definition.Local;
+        if (definition.Constant is not null) return definition.Constant;
         var read = definition.Read;
+        // 字符串字面量的槽位在元数据初始化之后就是那个驻留的字符串对象，与 ldstr 相同；它是常量，不需要落进局部。
+        if (valueNames is not null && context.Get(valueNames, read.Result) is { IsSuccess: true } named
+            && named.Value.Name is EntityName { Entity: StringEntity literal })
+            return definition.Constant = new StringValue(literal.Value, types.String, types.PointerSize * 8);
         var usePosition = position; position = read.Trace?.NativeAddress ?? position;
         var value = Access(read.Address, read.Width);
         if (value is null) return null;

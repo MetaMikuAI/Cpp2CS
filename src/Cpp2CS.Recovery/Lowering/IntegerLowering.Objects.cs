@@ -72,6 +72,63 @@ public sealed partial class IntegerLowering
             }
     }
 
+    /// <summary>一维数组的分配：就在调用处写成 newarr，结果是一个局部。</summary>
+    private sealed class VectorDefinition(ArrayRef type, BoundValue length, LocalValue local)
+    {
+        public ArrayRef Type { get; } = type;
+        public BoundValue Length { get; } = length;
+        public LocalValue Local { get; } = local;
+    }
+    private readonly Dictionary<CallIdentity, VectorDefinition> vectors = [];
+    private readonly Dictionary<Term, VectorDefinition> vectorResults = [];
+    private readonly Dictionary<CallIdentity, BoundValue> thrown = [];
+
+    private void PrepareVector(Call call, ClassifiedCall c)
+    {
+        var klassInput = c.Operation!.Inputs.FirstOrDefault(i => i.Kind == RuntimeValueKind.Class);
+        var lengthInput = c.Operation.Inputs.FirstOrDefault(i => i.Kind == RuntimeValueKind.Integer);
+        if (valueNames is null || klassInput is null || lengthInput is null
+            || c.Inputs?.GetValueOrDefault(klassInput.Name)?.Source is not TermSource klass
+            || c.Inputs.GetValueOrDefault(lengthInput.Name) is not { } length || c.Result?.Source is not TermSource result)
+        { Fail<object>(LoweringFailureKind.RuntimeCall, "数组分配的类、长度或结果没有绑定", code: "lowering.Allocation.Binding"); return; }
+        var named = context.Get(valueNames, klass.Term);
+        if (!named.IsSuccess || named.Value.Name is not EntityName { Entity: ClassEntity { Type: ArrayRef { IsVector: true } type } })
+        {
+            Fail<object>(LoweringFailureKind.RuntimeCall, "数组分配的类没有一维向量的实体凭据", named.IsSuccess ? named.Value.Why : named.Why, "lowering.Allocation.Class");
+            return;
+        }
+        var definition = new VectorDefinition(type, length, new(new(nextLocal++), type, types.PointerSize * 8));
+        vectors.Add(call.Identity, definition);
+        vectorResults[result.Term] = definition;
+    }
+
+    /// <summary>抛出一个已有的异常对象：操作登记为不返回、以抛出终止、没有固定的异常类型。</summary>
+    private void PrepareThrow(Call call, ClassifiedCall c)
+    {
+        var input = c.Operation!.Inputs.FirstOrDefault(i => i.Kind == RuntimeValueKind.ManagedReference);
+        if (input is null || c.Inputs?.GetValueOrDefault(input.Name) is not { } exception)
+        { Fail<object>(LoweringFailureKind.RuntimeCall, "抛出的异常对象没有绑定", code: "lowering.Throw.Binding"); return; }
+        thrown.Add(call.Identity, exception);
+    }
+
+    private ManagedStatement? LowerRuntimeStatement(Call call, Point point)
+    {
+        if (vectors.TryGetValue(call.Identity, out var vector))
+        {
+            var length = CallArgument(vector.Length, types.Integer(32, true), point);
+            return length is null ? null : new ManagedAssignment(position, vector.Local, new NewArrayValue(vector.Type, length, types.PointerSize * 8));
+        }
+        var exception = thrown[call.Identity];
+        var term = BoundTerm(exception.Source, point);
+        if (term is null) return null;
+        var resolved = context.Get(state.Resolve, term);
+        if (!resolved.IsSuccess) return Fail<ManagedStatement>(LoweringFailureKind.State, "异常对象状态查询失败", resolved.Why);
+        var value = Value(resolved.Value);
+        if (value is null) return null;
+        if (!ManagedTypes.IsReferenceType(value.Type)) return Fail<ManagedStatement>(LoweringFailureKind.UnsupportedType, "抛出的值不是对象引用");
+        return new ManagedThrow(position, value);
+    }
+
     private bool PrivateAccess(Statement statement)
     {
         var (address, width, read) = statement switch
