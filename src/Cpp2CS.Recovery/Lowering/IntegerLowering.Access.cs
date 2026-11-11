@@ -116,8 +116,12 @@ public sealed partial class IntegerLowering
             return Fail<ManagedValue>(kind, "数组长度不可写", code: "lowering.Location.Readonly");
         if (view.Kind == ManagedLocationKind.StaticField)
             return Fail<ManagedValue>(kind, "静态字段尚未下降", code: "lowering.Location.StaticField");
+        if (write && view.Path.Any(f => (f.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
+            && !(method.Method.Name == ".ctor" && method.Method.Owner == f.Field.Owner)))
+            return Fail<ManagedValue>(kind, "只读字段的写入缺少构造函数上下文", code: "lowering.Location.Readonly");
         var root = Value(view.Root);
         if (root is null) return null;
+        if (view.Kind == ManagedLocationKind.Indirect) return new IndirectValue(root, view.Type, types.ValueWidth(view.Type));
         if (root.Type is ByRefRef { Element: not DefinitionRef { Definition.IsValueType: true } })
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "字段接收者的托管地址必须指向值类型");
         if (view.Kind == ManagedLocationKind.ArrayLength) return Mask(new ArrayLengthValue(root, types.UInt32, 32), width);
@@ -131,7 +135,7 @@ public sealed partial class IntegerLowering
         }
         foreach (var field in view.Path)
         {
-            if (types.Kind(value.Type) == TypeKind.Struct) value = new AddressValue(value, types.PointerSize * 8);
+            if (write && types.Kind(value.Type) == TypeKind.Struct) value = new AddressValue(value, types.PointerSize * 8);
             var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
             value = new FieldValue(value, field, type, types.ValueWidth(type));
         }

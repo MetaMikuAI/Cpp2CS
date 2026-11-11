@@ -10,7 +10,7 @@ using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.Locations;
 
-public enum ManagedLocationKind { InstanceField, ArrayElement, ArrayLength, StaticField, NotManaged, Unknown }
+public enum ManagedLocationKind { InstanceField, ArrayElement, ArrayLength, StaticField, Indirect, NotManaged, Unknown }
 /// <summary>Offset 是路径末端内的字节偏移，Width 是位宽；Type 为字段或元素类型，长度位置则为数组类型。Basis 保留签名或规格依据。</summary>
 public sealed record LocationView(ManagedLocationKind Kind, Term Root, TypeRef Type,
     ImmutableArray<FieldRef> Path, BigInteger Offset, int Width, Term? Index, ValueName? Basis, TypeRef? ElementType = null);
@@ -116,6 +116,14 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
                 if (array.Element is DefinitionRef { Definition.IsValueType: true } element && ManagedTypes.PrimitiveName(element) is null && !element.Definition.IsEnum)
                     return Fields(root, element, remainder, key.Width, false, true, value.Basis, index, array.Element);
                 return Yes(new(ManagedLocationKind.ArrayElement, root, array.Element, [], remainder, key.Width, index, value.Basis, array.Element));
+            }
+            if (type is ByRefRef cell && (ManagedTypes.IsReferenceType(cell.Element) || ManagedTypes.PrimitiveName(ManagedTypes.Underlying(cell.Element)) is not null))
+            {
+                var size = Layouts.TrySizeAndAlignment(cell.Element)?.Size;
+                if (size is null) return Unknown("layout", "托管地址所指单元的大小不可用。");
+                if (terms.Count != 1) return Unknown("index", "托管地址所指单元不支持变动偏移。");
+                if (offset < 0 || offset * 8 + key.Width > size * 8) return Unknown("cross-field", "访问跨越托管地址所指单元。");
+                return Yes(new(ManagedLocationKind.Indirect, root, cell.Element, [], offset, key.Width, null, value.Basis));
             }
             bool unboxed = type is ByRefRef;
             if (type is ByRefRef byref) type = byref.Element;

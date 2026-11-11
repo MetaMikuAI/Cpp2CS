@@ -222,9 +222,9 @@ internal static class LoweringChecks
         var target = Method(owner, "Apply", integer, [integer], true);
         var invoke = Method(callback, "Invoke", integer, [integer], true);
         Method(exception, ".ctor", Primitive("Void"), [], constructor: true);
-        string[] modes = ["Read", "Write", "Preserve", "Unused", "Null", "ArrayRead", "ArrayWrite", "Length", "Virtual", "Delegate", "Reference", "RefCall", "Merge", "Nested", "ByRef", "Partial", "Cross"];
-        var entries = modes.ToDictionary(n => n, n => Method(owner, n, n is "Reference" or "RefCall" or "Merge" ? reference : integer,
-            [(n.StartsWith("Array", StringComparison.Ordinal) || n == "Length") ? array : n == "Delegate" ? new DefinitionRef(callback, []) : n == "ByRef" ? new ByRefRef(innerType) : reference, integer]));
+        string[] modes = ["Read", "Write", "Preserve", "Unused", "Null", "ArrayRead", "ArrayWrite", "Length", "Virtual", "Delegate", "Reference", "RefCall", "Merge", "Nested", "ByRef", "ScalarByRef", "ScalarStore", "ReferenceSlot", "Partial", "Cross"];
+        var entries = modes.ToDictionary(n => n, n => Method(owner, n, n is "Reference" or "RefCall" or "Merge" or "ReferenceSlot" ? reference : integer,
+            [(n.StartsWith("Array", StringComparison.Ordinal) || n == "Length") ? array : n == "Delegate" ? new DefinitionRef(callback, []) : n == "ByRef" ? new ByRefRef(innerType) : n is "ScalarByRef" or "ScalarStore" ? new ByRefRef(integer) : n == "ReferenceSlot" ? new ByRefRef(reference) : reference, integer]));
         foreach (var type in definitions.Where(t => t == owner || t == callback || t == exception)) type.Methods = methods.Where(m => m.Owner == type).ToArray();
         owner.VTable = [MethodRef.Open(target)];
         var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods,
@@ -253,7 +253,9 @@ internal static class LoweringChecks
             if (mode is "Read" or "Preserve" or "Unused" or "Null" or "ArrayRead") result = Read(address, 32);
             if (mode is "Write" or "Preserve" or "ArrayWrite") statements.Add(new MemoryWrite(new(), address, 32, terms.Constant(9, 32)));
             if (mode == "Nested") result = Read(Add(root, nested.Offset), 32);
-            if (mode == "ByRef") result = Read(root, 32);
+            if (mode is "ByRef" or "ScalarByRef") result = Read(root, 32);
+            if (mode == "ScalarStore") statements.Add(new MemoryWrite(new(), root, 32, terms.Constant(9, 32)));
+            if (mode == "ReferenceSlot") result = Read(root, 64);
             if (mode == "Length") result = terms.Slice(Read(Add(root, spec.Layout.Field("Il2CppArray", "max_length").ByteOffset), 64), 0, 32);
             if (mode == "Partial") result = Read(address, 16);
             if (mode == "Cross") result = Read(Add(address, 2), 32);
