@@ -201,7 +201,9 @@ internal static class LoweringChecks
         inner.Fields = [leaf];
         var nested = new FieldDef { Index = 5, Owner = owner, Name = "Nested", Type = innerType,
             Offset = (int)spec.Layout.ObjectHeaderSize + 8, Attributes = FieldAttributes.Public };
-        owner.Fields = [field, nested];
+        var hidden = new FieldDef { Index = 6, Owner = owner, Name = "Hidden", Type = integer,
+            Offset = (int)spec.Layout.ObjectHeaderSize + 32, Attributes = FieldAttributes.Private };
+        owner.Fields = [field, nested, hidden];
         var del = Define("Delegate", "mscorlib.dll", "System");
         del.Fields = new[] { "invoke_impl", "method_code", "method" }.Select((n, i) => new FieldDef {
             Index = i + 1, Owner = del, Name = n, Type = pointer, Offset = (int)spec.Layout.ObjectHeaderSize + i * 8,
@@ -222,13 +224,13 @@ internal static class LoweringChecks
         var target = Method(owner, "Apply", integer, [integer], true);
         var invoke = Method(callback, "Invoke", integer, [integer], true);
         Method(exception, ".ctor", Primitive("Void"), [], constructor: true);
-        string[] modes = ["Read", "Write", "Preserve", "Unused", "Null", "ArrayRead", "ArrayWrite", "Length", "Virtual", "Delegate", "Reference", "RefCall", "Merge", "Nested", "ByRef", "ScalarByRef", "ScalarStore", "ReferenceSlot", "Partial", "Cross"];
-        var entries = modes.ToDictionary(n => n, n => Method(owner, n, n is "Reference" or "RefCall" or "Merge" or "ReferenceSlot" ? reference : integer,
+        string[] modes = ["Read", "Write", "Preserve", "Unused", "Null", "ArrayRead", "ArrayWrite", "Length", "Virtual", "Delegate", "Reference", "RefCall", "Merge", "Nested", "ByRef", "ScalarByRef", "ScalarStore", "ReferenceSlot", "PrivateRead", "Partial", "Cross"];
+        var entries = modes.ToDictionary(n => n, n => Method(n == "PrivateRead" ? callback : owner, n, n is "Reference" or "RefCall" or "Merge" or "ReferenceSlot" ? reference : integer,
             [(n.StartsWith("Array", StringComparison.Ordinal) || n == "Length") ? array : n == "Delegate" ? new DefinitionRef(callback, []) : n == "ByRef" ? new ByRefRef(innerType) : n is "ScalarByRef" or "ScalarStore" ? new ByRefRef(integer) : n == "ReferenceSlot" ? new ByRefRef(reference) : reference, integer]));
         foreach (var type in definitions.Where(t => t == owner || t == callback || t == exception)) type.Methods = methods.Where(m => m.Owner == type).ToArray();
         owner.VTable = [MethodRef.Open(target)];
         var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods,
-            Fields = [field, .. del.Fields, leaf, nested], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
+            Fields = [field, .. del.Fields, leaf, nested, hidden], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
             Assemblies = definitions.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key,
                 AssemblyName = Path.GetFileNameWithoutExtension(g.Key), Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
         var types = new ManagedTypes(program, layouts, 8); var skeleton = new Skeleton(program, 16); var emitter = new BodyEmitter(skeleton, types);
@@ -252,6 +254,7 @@ internal static class LoweringChecks
                     terms.Apply(new CoreOperator(CoreOperation.ShiftLeft), 64, terms.Apply(new CoreOperator(CoreOperation.SignExtend), 64, terms.Slice(argument, 0, 32)), terms.Constant(2, 64)));
             if (mode is "Read" or "Preserve" or "Unused" or "Null" or "ArrayRead") result = Read(address, 32);
             if (mode is "Write" or "Preserve" or "ArrayWrite") statements.Add(new MemoryWrite(new(), address, 32, terms.Constant(9, 32)));
+            if (mode == "PrivateRead") result = Read(Add(root, hidden.Offset), 32);
             if (mode == "Nested") result = Read(Add(root, nested.Offset), 32);
             if (mode is "ByRef" or "ScalarByRef") result = Read(root, 32);
             if (mode == "ScalarStore") statements.Add(new MemoryWrite(new(), root, 32, terms.Constant(9, 32)));
@@ -303,6 +306,11 @@ internal static class LoweringChecks
             else builder.Blocks.Add(new(block, [], statements.ToImmutableArray(), Ret(result)));
             var calls = new CallNamingQuery(binder, new NamingChecks.Map(mode == "RefCall" ? [new BindingEntry(MethodRef.Open(entries["Reference"]), BindingEntryKind.Ordinary)] : []), new NamingChecks.RuntimeMap(runtime), catalog);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(entries[mode]), binder, types, calls: calls, effects: new ManagedCallEffects(calls), spec: spec).Run();
+            if (mode == "PrivateRead")
+            {
+                checks.True(lowered.Failure?.Reason.Code == "lowering.Access.Field", "私有字段需要内联逆证明：" + lowered.Failure);
+                continue;
+            }
             if (mode is "Partial" or "Cross")
             {
                 checks.True(lowered.Failure?.Reason.Code == (mode == "Partial" ? "lowering.Location.Partial" : "location.cross-field"), mode + " 访问拒绝并细分原因：" + lowered.Failure);

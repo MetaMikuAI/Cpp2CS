@@ -171,7 +171,9 @@ public sealed partial class IntegerLowering
             ? c with { Result = callStatements[c].Local } : s).ToArray() }).ToList();
         blocks = blocks.Select(InsertReads).ToList();
         if (failure is not null) return new(null, failure);
-        return new(Materialize(new(method, [.. blocks, .. extraBlocks])), null);
+        var body = new ManagedBody(method, [.. blocks, .. extraBlocks]);
+        CheckAccess(body);
+        return failure is null ? new(Materialize(body), null) : new(null, failure);
     }
 
     private void BindParameter(int cIndex, int index, TypeRef type)

@@ -9,6 +9,26 @@ namespace Cpp2CS.Recovery.Lowering;
 
 public sealed partial class IntegerLowering
 {
+    private void CheckAccess(ManagedBody body)
+    {
+        void Missing(string category) => Fail<object>(LoweringFailureKind.UnsupportedType,
+            "访问缺少权限或内联逆证明：" + category, code: "lowering.Access." + category);
+        foreach (var statement in body.Blocks.SelectMany(b => b.Statements))
+        {
+            position = statement.Address;
+            if (statement is ManagedCall call && !ManagedAccess.Method(types, method.Method.Owner,
+                call.Invocation.Method, call.Invocation.Receiver?.Type)) { Missing("Method"); return; }
+            foreach (var value in ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement)).SelectMany(ManagedValues.Walk))
+            {
+                if (!ManagedAccess.Type(types, method.Method.Owner, value.Type)) { Missing("Type"); return; }
+                if (value is FieldValue field && !ManagedAccess.Field(types, method, field.Field, field.Receiver.Type))
+                { Missing("Field"); return; }
+                if (value is NewObjectValue created && !ManagedAccess.Method(types, method.Method.Owner, created.Constructor, null))
+                { Missing("Method"); return; }
+            }
+        }
+    }
+
     private sealed class ReadDefinition(MemoryRead read)
     {
         public MemoryRead Read { get; } = read;
