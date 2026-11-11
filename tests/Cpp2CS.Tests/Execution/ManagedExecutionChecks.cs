@@ -26,6 +26,7 @@ internal static class ManagedExecutionChecks
                 public static int Box() { object x=17; return x is int ? (int)x : 0; }
                 public static int Div(int x) => 12/x;
                 public static int Null() { B b=null; return b.X; }
+                public static int ExplicitNull() => throw new System.NullReferenceException();
                 public static int Bounds() => (new int[1])[2];
                 public static int Finally() { int x=0; try { x=3; } finally { x+=5; } return x; }
                 public static int CatchFinally() { int x=0; try { try { x=12/x; } finally { x=5; } } catch(System.DivideByZeroException) { x+=7; } return x; }
@@ -76,6 +77,19 @@ internal static class ManagedExecutionChecks
         {
             var result = CilComparison.Compare(source.Method("Cases", left), source.Method("Cases", right));
             a.True(result.Status == status && (status == CilComparisonStatus.Match || !string.IsNullOrEmpty(result.Reason)), $"{left}/{right}：{result}");
+        }
+        // 核心库作为可解释模块时，显式无参异常仍与隐式异常使用相同摘要。
+        interpreter.BodyModule = source.Module.TypeSystem.Object.Resolve().Module;
+        var explicitNull = Run("ExplicitNull");
+        a.True(explicitNull.Events.Count == 1 && explicitNull.Events[0].Text.Contains("throw System.NullReferenceException", StringComparison.Ordinal), "核心库方法体不展开无参异常构造");
+        var session = new CilComparison.Session();
+        foreach (var name in new[] { "Add", "Heap", "Unsupported", "Add" })
+        {
+            var m = source.Method("Cases", name);
+            var fresh = CilComparison.Compare(m, m, 4, 0, 1000);
+            var shared = CilComparison.Compare(m, m, 4, 0, 1000, session);
+            a.True(fresh.Status == shared.Status && fresh.ReasonKind == shared.ReasonKind && fresh.CompletedCases == shared.CompletedCases,
+                "复用元数据保持对照结果：" + name);
         }
         using var other = new CompiledSource("public static class Cross { public static int Add(int x) => x + 7; }");
         using var same = new CompiledSource("public static class Cross { public static int Add(int x) => 7 + x; }");

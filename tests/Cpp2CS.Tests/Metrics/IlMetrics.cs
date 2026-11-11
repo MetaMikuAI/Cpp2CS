@@ -40,13 +40,14 @@ public static class IlMetrics
         + "(" + string.Join(",", m.Parameters.Select(p => TypeKey(p.ParameterType, m.Module))) + ")->" + TypeKey(m.ReturnType, m.Module)
         + $"|{m.CallingConvention}|{m.HasThis}|{m.ExplicitThis}";
 
-    public static MethodMetric Compare(MethodDefinition reference, MethodDefinition? tested, MetricOptions options)
+    public static MethodMetric Compare(MethodDefinition reference, MethodDefinition? tested, MetricOptions options) => Compare(reference, tested, options, null);
+    internal static MethodMetric Compare(MethodDefinition reference, MethodDefinition? tested, MetricOptions options, CilComparison.Session? session)
     {
         if (!reference.HasBody || reference.Body.Instructions.Count == 0)
             return new(Identity(reference), MetricStatus.Inconclusive, ComparisonReason.MissingBody, "参考方法没有 CIL 方法体", null, 0, 0, null);
         if (tested is null || !tested.HasBody || tested.Body.Instructions.Count == 0)
             return new(Identity(reference), MetricStatus.NotWritten, ComparisonReason.MissingBody, null, null, 0, 0, null);
-        var result = CilComparison.Compare(reference, tested, options.Cases, options.FirstSeed, options.StepLimit);
+        var result = CilComparison.Compare(reference, tested, options.Cases, options.FirstSeed, options.StepLimit, session);
         return new(Identity(reference), result.Status switch
         {
             CilComparisonStatus.Match => MetricStatus.Match,

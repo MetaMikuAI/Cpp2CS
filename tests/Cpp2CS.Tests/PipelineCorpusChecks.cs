@@ -40,13 +40,14 @@ internal static class PipelineCorpusChecks
             using var reference = ModuleDefinition.ReadModule(Path.Combine(corpus, "artifacts", "ManagedStripped", group.Key), new ReaderParameters { AssemblyResolver = resolver });
             using var tested = ModuleDefinition.ReadModule(Path.Combine(output, group.Key));
             var index = tested.GetTypes().SelectMany(t => t.Methods).ToDictionary(IlMetrics.Identity);
+            var comparisonSession = new Execution.CilComparison.Session();
             foreach (var row in group)
             {
                 var id = row.GetProperty("id").GetString()!;
                 var method = IlCompareCommand.ReferenceMethod(reference, row);
                 var recovered = byId.GetValueOrDefault(id);
                 var candidate = recovered?.Status == MethodStatus.Complete ? index.GetValueOrDefault(IlMetrics.Identity(method)) : null;
-                metrics.Add(id, IlMetrics.Compare(method, candidate, options));
+                metrics.Add(id, IlMetrics.Compare(method, candidate, options, comparisonSession));
             }
         }
         var table = new StringBuilder("| 方法 | 管线状态 | IL 对照 |\n|---|---|---|\n");
