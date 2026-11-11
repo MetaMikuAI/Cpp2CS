@@ -1,3 +1,4 @@
+using Cpp2CS.Native.Images;
 using System.Collections.Immutable;
 using Cpp2CS.Native.Terms;
 
@@ -48,9 +49,6 @@ public sealed record SlotValue(AbstractSlot Slot, Term Value);
 public sealed record FrameDescription(Term Base);
 public sealed record Incoming(BlockIdentity Predecessor, Term Value);
 public sealed record Merge(MergeIdentity Identity, Term Result, ImmutableArray<Incoming> Inputs);
-public enum ClauseKind { Catch, Filter, Cleanup }
-/// <summary>Match 是中立的类型或筛选身份；顺序保留匹配优先级。</summary>
-public sealed record ExceptionClause(ClauseKind Kind, string? Match);
 /// <summary>Exception 和 Selector 都由本处理入口定义；Selector 表示匹配到的子句选择值。</summary>
 public sealed record HandlerEntry(Term Exception, Term Selector, ImmutableArray<ExceptionClause> Clauses);
 public sealed record Trace(ulong NativeAddress);
@@ -58,7 +56,7 @@ public sealed record Trace(ulong NativeAddress);
 public abstract record CallTarget { private protected CallTarget() { } }
 /// <summary>函数入口相对映像基址的字节偏移；托管候选身份由代码地图提供。</summary>
 public sealed record ImageFunction(ulong EntryOffset) : CallTarget;
-public sealed record ImportSymbol(string Library, string Name) : CallTarget;
+public sealed record ImportedTarget(ImportSymbol Symbol) : CallTarget;
 public sealed record ComputedTarget(Term Value) : CallTarget;
 
 public abstract record Statement

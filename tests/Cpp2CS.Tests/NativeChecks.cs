@@ -1,3 +1,4 @@
+using Cpp2CS.Native.Images;
 using System.Collections.Immutable;
 using System.Numerics;
 using Cpp2CS.Native;
@@ -68,7 +69,29 @@ internal static partial class NativeChecks
         Terms(a);
         ValidGraphs(a);
         InvalidGraphs(a);
-        var publicNames = typeof(NativeFunction).Assembly.GetExportedTypes().SelectMany(t => t.GetMembers(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly).Select(m => m.Name).Append(t.Name));
+        // 映像查询不属于 IR 词汇；IR 引用的公共类型仍递归纳入检查。
+        var assembly = typeof(NativeFunction).Assembly;
+        var pending = new Queue<Type>(assembly.GetExportedTypes().Where(t => t.Namespace != typeof(IImage).Namespace));
+        var visited = new HashSet<Type>();
+        var publicNames = new List<string>();
+        while (pending.TryDequeue(out var type))
+        {
+            if (!visited.Add(type)) continue;
+            if (type.HasElementType) pending.Enqueue(type.GetElementType()!);
+            foreach (var argument in type.GetGenericArguments()) pending.Enqueue(argument);
+            if (type.Assembly != assembly) continue;
+            publicNames.Add(type.Name);
+            foreach (var nested in type.GetNestedTypes(System.Reflection.BindingFlags.Public)) pending.Enqueue(nested);
+            foreach (var member in type.GetMembers(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly))
+            {
+                publicNames.Add(member.Name);
+                if (member is System.Reflection.PropertyInfo property) pending.Enqueue(property.PropertyType);
+                if (member is System.Reflection.FieldInfo field) pending.Enqueue(field.FieldType);
+                if (member is System.Reflection.MethodInfo method) pending.Enqueue(method.ReturnType);
+                if (member is System.Reflection.MethodBase callable)
+                    foreach (var parameter in callable.GetParameters()) pending.Enqueue(parameter.ParameterType);
+            }
+        }
         a.True(!publicNames.Any(n => new[] { "Register", "Flag", "StackPointer", "Instruction", "Section" }.Any(word => n.Contains(word, StringComparison.OrdinalIgnoreCase))),
             "公开词汇不泄漏机器身份");
         return a.Finish("原生 IR");
@@ -218,15 +241,50 @@ internal static partial class NativeChecks
         var ehId = new CallIdentity();
         var result = eh.Result(ehId);
         var exception = eh.Terms.Atom(new ExceptionAtom(handler), 64);
-        Pass(a, eh.Finish(eh.Block(Ret(result), new Call(ehId, new ImportSymbol("library", "callee"), [], [new(Output, result)], Unwind: handler)),
-            new(handler, [], [], new ResumeUnwind(exception), new(exception, eh.Terms.Atom(new SelectorAtom(handler), 32), [new(ClauseKind.Cleanup, null)]))), "带展开边的调用");
+        Pass(a, eh.Finish(eh.Block(Ret(result), new Call(ehId, new ImportedTarget(new ImportSymbol("callee", "library")), [], [new(Output, result)], Unwind: handler)),
+            new(handler, [], [], new ResumeUnwind(exception), new(exception, eh.Terms.Atom(new SelectorAtom(handler), 32), [new(ClauseKind.Cleanup, [])]))), "带展开边的调用");
+        foreach (var clauses in new System.Collections.Immutable.ImmutableArray<ExceptionClause>[]
+        {
+            [new(ClauseKind.Catch, [new PointerTarget.Internal(0x120)])],
+            [new(ClauseKind.CatchAll, [])],
+            [new(ClauseKind.ExceptionSpecification, [])],
+            [new(ClauseKind.ExceptionSpecification, [new PointerTarget.Internal(0x120), new PointerTarget.Import(new("type", "library", 7), 2)])]
+        })
+        {
+            var clauseFixture = new Fixture();
+            var clauseHandler = new BlockIdentity();
+            var clauseCall = new CallIdentity();
+            var clauseResult = clauseFixture.Result(clauseCall);
+            var clauseException = clauseFixture.Terms.Atom(new ExceptionAtom(clauseHandler), 64);
+            var clauseFunction = clauseFixture.Finish(clauseFixture.Block(Ret(clauseResult), new Call(clauseCall, new ImportedTarget(new("callee", "library", 3)), [], [new(Output, clauseResult)], Unwind: clauseHandler)),
+                new(clauseHandler, [], [], new ResumeUnwind(clauseException), new(clauseException, clauseFixture.Terms.Atom(new SelectorAtom(clauseHandler), 32), clauses)));
+            Pass(a, clauseFunction, "映像异常子句直接用于处理入口");
+            var dump = TextDump.Write(clauseFunction);
+            a.True(dump.Contains("#3", StringComparison.Ordinal) && dump.Contains(clauses[0].Kind.ToString(), StringComparison.Ordinal), "转储保留导入序号和子句种类");
+        }
+        foreach (var clause in new ExceptionClause[]
+        {
+            new(ClauseKind.Catch, []), new(ClauseKind.CatchAll, [new PointerTarget.Internal(1)]),
+            new(ClauseKind.Cleanup, [new PointerTarget.Internal(1)]), new(ClauseKind.Catch, [new PointerTarget.Unknown("缺少证据")]),
+            new(ClauseKind.ExceptionSpecification, default)
+        })
+        {
+            var clauseFixture = new Fixture();
+            var clauseHandler = new BlockIdentity();
+            var clauseCall = new CallIdentity();
+            var clauseResult = clauseFixture.Result(clauseCall);
+            var clauseException = clauseFixture.Terms.Atom(new ExceptionAtom(clauseHandler), 64);
+            var clauseFunction = clauseFixture.Finish(clauseFixture.Block(Ret(clauseResult), new Call(clauseCall, new ImageFunction(0), [], [new(Output, clauseResult)], Unwind: clauseHandler)),
+                new(clauseHandler, [], [], new ResumeUnwind(clauseException), new(clauseException, clauseFixture.Terms.Atom(new SelectorAtom(clauseHandler), 32), [clause])));
+            a.True(ExitChecker.Check(clauseFunction).Violations.Any(d => d.Code == "clause"), "拒绝非法匹配集合");
+        }
         var sw = new Fixture();
         var one = new BlockIdentity();
         var two = new BlockIdentity();
         Pass(a, sw.Finish(sw.Block(new JumpTable(sw.C(1), [new(1, one), new(2, two)], two)),
             new(one, [], [], new Return([])), new(two, [], [], new Unreachable())), "跳转表");
         var nr = new Fixture();
-        Pass(a, nr.Finish(nr.Block(new Unreachable(), new Call(new(), new ImportSymbol("", "exit"), [], [], true))), "不返回调用");
+        Pass(a, nr.Finish(nr.Block(new Unreachable(), new Call(new(), new ImportedTarget(new ImportSymbol("exit", "")), [], [], true))), "不返回调用");
         var unknown = new Fixture();
         var hole = unknown.Terms.Unknown(32, new("unsupported", "尚未提升"));
         var holeFunction = unknown.Finish(unknown.Block(Ret(hole), new MemoryWrite(unknown.Frame, 32, hole)));
@@ -260,8 +318,8 @@ internal static partial class NativeChecks
         Bad("duplicate-definition", f => { var value = f.Input(); f.Builder.Inputs.Add(f.Builder.Inputs[0]); return f.Finish(f.Block(Ret(value))); });
         Bad("definition-kind", f => { f.Builder.Inputs.Add(new(Output, f.C())); return f.Finish(f.Block()); });
         Bad("result-identity", f => f.Finish(f.Block(null, new MemoryRead(new(), f.Frame, 32, f.Terms.Atom(new Named("bad-result"), 32)))));
-        Bad("duplicate-identity", f => { var id = new CallIdentity(); return f.Finish(f.Block(null, new Call(id, new ImportSymbol("", "callee"), [], []), new Call(id, new ImportSymbol("", "callee"), [], []))); });
-        Bad("slot", f => f.Finish(f.Block(null, new Call(new(), new ImportSymbol("", "callee"), [new(new((SlotKind)99), f.C())], []))));
+        Bad("duplicate-identity", f => { var id = new CallIdentity(); return f.Finish(f.Block(null, new Call(id, new ImportedTarget(new ImportSymbol("callee", "")), [], []), new Call(id, new ImportedTarget(new ImportSymbol("callee", "")), [], []))); });
+        Bad("slot", f => f.Finish(f.Block(null, new Call(new(), new ImportedTarget(new ImportSymbol("callee", "")), [new(new((SlotKind)99), f.C())], []))));
         Bad("slot", f => f.Finish(f.Block(new Return([new(new(SlotKind.Integer, -1), f.C())]))));
         Bad("slot", f => f.Finish(f.Block(new Return([new(new(SlotKind.IndirectResult, 1), f.C())]))));
         Bad("duplicate-slot", f => f.Finish(f.Block(new Return([new(Output, f.C()), new(Output, f.C())]))));
@@ -270,18 +328,18 @@ internal static partial class NativeChecks
         Bad("root", f => { f.Builder.ImageBase = f.Terms.Atom(new Named("root"), 64); return f.Finish(f.Block()); });
 
         Bad("alignment", f => { var id = new FrameIdentity(); return f.Finish(f.Block(null, new DynamicAllocation(id, f.C(4, 64), 3, f.Result(id, 64)))); });
-        Bad("noreturn", f => f.Finish(f.Block(null, new Call(new(), new ImportSymbol("", "exit"), [], [], true))));
+        Bad("noreturn", f => f.Finish(f.Block(null, new Call(new(), new ImportedTarget(new ImportSymbol("exit", "")), [], [], true))));
         Bad("call-target", f => f.Finish(f.Block(null, new Call(new(), new ComputedTarget(f.C()), [], []))));
         Bad("switch-case", f => f.Finish(f.Block(new JumpTable(f.C(), [new(0, f.Entry), new(0, f.Entry)], f.Entry))));
-        Bad("handler-edge", f => { var handler = new BlockIdentity(); return f.Finish(f.Block(null, new Call(new(), new ImportSymbol("", "callee"), [], [], Unwind: handler)), new(handler, [], [], new Return([]))); });
-        Bad("exception-identity", f => { var handler = new BlockIdentity(); var exception = f.Terms.Atom(new Named("exception"), 64); return f.Finish(f.Block(null, new Call(new(), new ImportSymbol("", "callee"), [], [], Unwind: handler)), new(handler, [], [], new ResumeUnwind(exception), new(exception, f.Terms.Atom(new SelectorAtom(handler), 32), [new(ClauseKind.Cleanup, null)]))); });
-        Bad("clause", f => { var handler = new BlockIdentity(); var exception = f.Terms.Atom(new ExceptionAtom(handler), 64); return f.Finish(f.Block(null, new Call(new(), new ImportSymbol("", "callee"), [], [], Unwind: handler)), new(handler, [], [], new ResumeUnwind(exception), new(exception, f.Terms.Atom(new SelectorAtom(handler), 32), []))); });
+        Bad("handler-edge", f => { var handler = new BlockIdentity(); return f.Finish(f.Block(null, new Call(new(), new ImportedTarget(new ImportSymbol("callee", "")), [], [], Unwind: handler)), new(handler, [], [], new Return([]))); });
+        Bad("exception-identity", f => { var handler = new BlockIdentity(); var exception = f.Terms.Atom(new Named("exception"), 64); return f.Finish(f.Block(null, new Call(new(), new ImportedTarget(new ImportSymbol("callee", "")), [], [], Unwind: handler)), new(handler, [], [], new ResumeUnwind(exception), new(exception, f.Terms.Atom(new SelectorAtom(handler), 32), [new(ClauseKind.Cleanup, [])]))); });
+        Bad("clause", f => { var handler = new BlockIdentity(); var exception = f.Terms.Atom(new ExceptionAtom(handler), 64); return f.Finish(f.Block(null, new Call(new(), new ImportedTarget(new ImportSymbol("callee", "")), [], [], Unwind: handler)), new(handler, [], [], new ResumeUnwind(exception), new(exception, f.Terms.Atom(new SelectorAtom(handler), 32), []))); });
         Bad("collection", f => f.Finish(f.Block() with { Statements = default }));
         Bad("dominance", f =>
         {
             var handler = new BlockIdentity(); var id = new CallIdentity(); var result = f.Result(id); var exception = f.Terms.Atom(new ExceptionAtom(handler), 64);
-            return f.Finish(f.Block(Ret(result), new Call(id, new ImportSymbol("", "callee"), [], [new(Output, result)], Unwind: handler)),
-                new(handler, [], [], Ret(result), new(exception, f.Terms.Atom(new SelectorAtom(handler), 32), [new(ClauseKind.Cleanup, null)])));
+            return f.Finish(f.Block(Ret(result), new Call(id, new ImportedTarget(new ImportSymbol("callee", "")), [], [new(Output, result)], Unwind: handler)),
+                new(handler, [], [], Ret(result), new(exception, f.Terms.Atom(new SelectorAtom(handler), 32), [new(ClauseKind.Cleanup, [])])));
         });
         Bad("dominance", f =>
         {
@@ -294,10 +352,10 @@ internal static partial class NativeChecks
             var handler = new BlockIdentity(); var readId = new ReadIdentity(); var read = f.Result(readId);
             var mergeId = new MergeIdentity(); var merged = f.Result(mergeId); var exception = f.Terms.Atom(new ExceptionAtom(handler), 64);
             return f.Finish(f.Block(null,
-                new Call(new(), new ImportSymbol("", "first"), [], [], Unwind: handler),
+                new Call(new(), new ImportedTarget(new ImportSymbol("first", "")), [], [], Unwind: handler),
                 new MemoryRead(readId, f.Frame, 32, read),
-                new Call(new(), new ImportSymbol("", "second"), [], [], Unwind: handler)),
-                new(handler, [new(mergeId, merged, [new(f.Entry, read)])], [], Ret(merged), new(exception, f.Terms.Atom(new SelectorAtom(handler), 32), [new(ClauseKind.Cleanup, null)])));
+                new Call(new(), new ImportedTarget(new ImportSymbol("second", "")), [], [], Unwind: handler)),
+                new(handler, [new(mergeId, merged, [new(f.Entry, read)])], [], Ret(merged), new(exception, f.Terms.Atom(new SelectorAtom(handler), 32), [new(ClauseKind.Cleanup, [])])));
         });
         Bad("width", f =>
         {
@@ -308,7 +366,7 @@ internal static partial class NativeChecks
         Bad("handler-edge", f =>
         {
             var handler = new BlockIdentity(); var exception = f.Terms.Atom(new ExceptionAtom(handler), 64);
-            return f.Finish(f.Block(new Jump(handler)), new(handler, [], [], new ResumeUnwind(exception), new(exception, f.Terms.Atom(new SelectorAtom(handler), 32), [new(ClauseKind.Cleanup, null)])));
+            return f.Finish(f.Block(new Jump(handler)), new(handler, [], [], new ResumeUnwind(exception), new(exception, f.Terms.Atom(new SelectorAtom(handler), 32), [new(ClauseKind.Cleanup, [])])));
         });
         var many = new Fixture();
         var bad = many.Finish(many.Block(new Branch(many.C(), new(), new()), new MemoryWrite(many.C(), 64, many.C())));

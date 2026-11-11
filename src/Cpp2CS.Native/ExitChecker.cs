@@ -1,3 +1,4 @@
+using Cpp2CS.Native.Images;
 using System.Collections.Immutable;
 using Cpp2CS.Native.Terms;
 
@@ -159,7 +160,8 @@ public static class ExitChecker
                     Require(handler.Exception.Identity is ExceptionAtom atom && ReferenceEquals(atom.Handler, b.Identity),
                         "exception-identity", location, "异常对象必须引用处理入口身份。");
                     Require(!handler.Clauses.IsEmpty && handler.Clauses.All(c => Enum.IsDefined(c.Kind)
-                        && (c.Kind == ClauseKind.Cleanup ? c.Match is null : !string.IsNullOrWhiteSpace(c.Match))),
+                        && (!c.Matches.IsDefault && c.Matches.All(m => m is PointerTarget.Internal or PointerTarget.Import)
+                            && (c.Kind is ClauseKind.Cleanup or ClauseKind.CatchAll ? c.Matches.IsEmpty : c.Kind != ClauseKind.Catch || c.Matches.Length == 1))),
                         "clause", location, "处理入口需要合法的匹配子句。");
                 }
                 foreach (var merge in b.Merges)
@@ -201,7 +203,7 @@ public static class ExitChecker
                             Require(call.Target switch
                             {
                                 ImageFunction => true,
-                                ImportSymbol import => !string.IsNullOrWhiteSpace(import.Name),
+                                ImportedTarget import => import.Symbol is { } symbol && (!string.IsNullOrWhiteSpace(symbol.Name) || symbol.Ordinal is not null),
                                 ComputedTarget target => target.Value.Width == f.AddressWidth,
                                 _ => false
                             }, "call-target", loc, "调用目标种类、导入名称或间接目标位宽不合法。");

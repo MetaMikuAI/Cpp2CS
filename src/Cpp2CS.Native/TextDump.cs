@@ -1,3 +1,4 @@
+using Cpp2CS.Native.Images;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -142,7 +143,7 @@ public static class TextDump
                 Line(B(block.Identity) + " " + Id(block.Identity) + Provenance(block.Identity)
                     + (trace && block.Trace is { } source ? " @0x" + source.NativeAddress.ToString("x", CultureInfo.InvariantCulture) : "") + ":");
                 if (block.Handler is { } handler)
-                    Line("  handler " + T(handler.Exception) + " selector=" + T(handler.Selector) + " clauses=" + string.Join(",", handler.Clauses.Select(c => c.Kind + "(" + Q(c.Match) + ")")));
+                    Line("  handler " + T(handler.Exception) + " selector=" + T(handler.Selector) + " clauses=" + string.Join(",", handler.Clauses.Select(c => c.Kind + "(" + string.Join(",", c.Matches.Select(Match)) + ")")));
                 foreach (var merge in block.Merges)
                     Line("  merge " + Id(merge.Identity) + Provenance(merge.Identity) + " " + T(merge.Result) + " = "
                         + string.Join(", ", merge.Inputs.OrderBy(x => blockIds[x.Predecessor]).Select(x => B(x.Predecessor) + "=" + T(x.Value))));
@@ -183,10 +184,18 @@ public static class TextDump
             }
             return text.ToString();
         }
+        private static string Symbol(ImportSymbol symbol) => Q(symbol.Library) + "/" + Q(symbol.Name)
+            + (symbol.Ordinal is { } ordinal ? "#" + N(ordinal) : "");
+        private static string Match(PointerTarget target) => target switch
+        {
+            PointerTarget.Internal value => "offset " + N(value.Offset),
+            PointerTarget.Import value => "import " + Symbol(value.Symbol) + "+" + N(value.Addend),
+            _ => throw new InvalidOperationException("非法异常匹配对象。")
+        };
         private string Target(CallTarget target) => target switch
         {
             ImageFunction function => "entry-offset " + N(function.EntryOffset),
-            ImportSymbol import => "import " + Q(import.Library) + "/" + Q(import.Name),
+            ImportedTarget import => "import " + Symbol(import.Symbol),
             ComputedTarget computed => T(computed.Value),
             _ => throw new InvalidOperationException("未知调用目标。")
         };

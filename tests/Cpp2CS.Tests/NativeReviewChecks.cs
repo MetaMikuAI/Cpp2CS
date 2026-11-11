@@ -1,3 +1,4 @@
+using Cpp2CS.Native.Images;
 using System.Diagnostics;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
@@ -51,17 +52,17 @@ internal static partial class NativeChecks
         var selector = f.Terms.Atom(new SelectorAtom(handler), 32);
         var condition = f.Terms.Apply(new CoreOperator(CoreOperation.Equal), 1, selector, f.C());
         Pass(a, f.Finish(f.Block(null, new Call(new(), new ImageFunction(0), [], [], Unwind: handler)),
-            new(handler, [], [], new Branch(condition, target, target), new(exception, selector, [new(ClauseKind.Cleanup, null)])),
+            new(handler, [], [], new Branch(condition, target, target), new(exception, selector, [new(ClauseKind.Cleanup, [])])),
             new(target, [], [], new ResumeUnwind(exception))), "处理入口选择值控制分支");
         f = new();
         exception = f.Terms.Atom(new ExceptionAtom(handler), 64);
         selector = f.Terms.Atom(new SelectorAtom(new()), 32);
-        Bad("selector-identity", f, f.Block(), new(handler, [], [], new Return([]), new(exception, selector, [new(ClauseKind.Cleanup, null)])));
+        Bad("selector-identity", f, f.Block(), new(handler, [], [], new Return([]), new(exception, selector, [new(ClauseKind.Cleanup, [])])));
         f = new();
         selector = f.Terms.Atom(new SelectorAtom(handler), 32);
         exception = f.Terms.Atom(new ExceptionAtom(handler), 64);
         Bad("dominance", f, f.Block(Ret(selector), new Call(new(), new ImageFunction(0), [], [], Unwind: handler)),
-            new(handler, [], [], new ResumeUnwind(exception), new(exception, selector, [new(ClauseKind.Cleanup, null)])));
+            new(handler, [], [], new ResumeUnwind(exception), new(exception, selector, [new(ClauseKind.Cleanup, [])])));
         f = new();
         var copy = new BlockIdentity(f.Entry);
         var copied = new Block(copy, [], [], new Return([])) { Trace = new(0xabcdef) };
@@ -83,7 +84,7 @@ internal static partial class NativeChecks
             new Call(new(), new ImageFunction(0), [], [], Unwind: handler),
             new Call(new(), new ImageFunction(4), [], [], Unwind: handler)),
             new(handler, [new(mergeId, merged, [new(f.Entry, read)])], [], Ret(merged),
-                new(exception, selector, [new(ClauseKind.Cleanup, null)]))), "每个展开调用之前已定义的合流值可用");
+                new(exception, selector, [new(ClauseKind.Cleanup, [])]))), "每个展开调用之前已定义的合流值可用");
         f = new();
         var unreachable = new BlockIdentity();
         readId = new();
@@ -94,7 +95,7 @@ internal static partial class NativeChecks
         Pass(a, f.Finish(f.Block(), new(unreachable, [], [
             new MemoryRead(readId, f.Frame, 32, read),
             new Call(new(), new ImageFunction(0), [], [], Unwind: handler)], Ret(read)),
-            new(handler, [], [], new ResumeUnwind(exception), new(exception, selector, [new(ClauseKind.Cleanup, null)]))),
+            new(handler, [], [], new ResumeUnwind(exception), new(exception, selector, [new(ClauseKind.Cleanup, [])]))),
             "不可达块内展开调用的正常续接保留局部顺序");
         var terms = new TermTable();
         var value = terms.Constant(3, 32);
