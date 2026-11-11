@@ -134,15 +134,17 @@ public sealed class RecoverySession
         var pointer = facts.Spec.Layout.Primitive("void *");
         var types = new ManagedTypes(facts.Model, new FieldLayouts(facts.Spec, (int)pointer.Size, (int)pointer.Alignment), (int)pointer.Size);
         var emitter = new BodyEmitter(skeleton, types);
+        var contractFailures = new List<string>();
         for (var i = 0; i < rows.Length; i++)
         {
             if (bodies[i] is { } body)
             {
                 var problems = emitter.Emit([body]);
-                if (problems.Count != 0) throw new InvalidOperationException($"{rows[i].Identity}：输出层契约失败：{problems.First().Value}");
+                if (problems.Count != 0) contractFailures.Add($"{rows[i].Identity}：输出层契约失败：{problems.First().Value}");
             }
             // 洞保留 Skeleton 的标准占位体；报告是是否写出的唯一依据。
         }
+        if (contractFailures.Count > 0) throw new InvalidOperationException(string.Join(Environment.NewLine, contractFailures));
         if (request.Source) DecompileStage.Mark(facts.Model, rows, emitter);
         skeleton.Write(request.Output);
         var source = request.Source ? DecompileStage.Write(request.Output, skeleton, facts.Model) : null;
