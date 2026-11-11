@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Cpp2CS.Model/Cpp2CS.Model.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Native/Cpp2CS.Native.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Targets.Elf/Cpp2CS.Targets.Elf.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Targets.Pe/Cpp2CS.Targets.Pe.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Targets.Arm64/Cpp2CS.Targets.Arm64.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Targets.X64/Cpp2CS.Targets.X64.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Runtime/Cpp2CS.Runtime.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Kernel/Cpp2CS.Kernel.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Recovery/Cpp2CS.Recovery.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Managed/Cpp2CS.Managed.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Input/Cpp2CS.Input.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Output/Cpp2CS.Output.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Pipeline/Cpp2CS.Pipeline.csproj" />
+    <ProjectReference Include="../../src/Cpp2CS.Cli/Cpp2CS.Cli.csproj" />
+  </ItemGroup>
+</Project>

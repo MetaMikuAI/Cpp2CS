@@ -1,0 +1,21 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Cpp2CS.Model/Cpp2CS.Model.csproj" />
+    <Project Path="src/Cpp2CS.Native/Cpp2CS.Native.csproj" />
+    <Project Path="src/Cpp2CS.Targets.Elf/Cpp2CS.Targets.Elf.csproj" />
+    <Project Path="src/Cpp2CS.Targets.Pe/Cpp2CS.Targets.Pe.csproj" />
+    <Project Path="src/Cpp2CS.Targets.Arm64/Cpp2CS.Targets.Arm64.csproj" />
+    <Project Path="src/Cpp2CS.Targets.X64/Cpp2CS.Targets.X64.csproj" />
+    <Project Path="src/Cpp2CS.Runtime/Cpp2CS.Runtime.csproj" />
+    <Project Path="src/Cpp2CS.Kernel/Cpp2CS.Kernel.csproj" />
+    <Project Path="src/Cpp2CS.Recovery/Cpp2CS.Recovery.csproj" />
+    <Project Path="src/Cpp2CS.Managed/Cpp2CS.Managed.csproj" />
+    <Project Path="src/Cpp2CS.Input/Cpp2CS.Input.csproj" />
+    <Project Path="src/Cpp2CS.Output/Cpp2CS.Output.csproj" />
+    <Project Path="src/Cpp2CS.Pipeline/Cpp2CS.Pipeline.csproj" />
+    <Project Path="src/Cpp2CS.Cli/Cpp2CS.Cli.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Cpp2CS.Tests/Cpp2CS.Tests.csproj" />
+  </Folder>
+</Solution>

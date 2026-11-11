@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../Cpp2CS.Managed/Cpp2CS.Managed.csproj" />
+    <ProjectReference Include="../Cpp2CS.Model/Cpp2CS.Model.csproj" />
+  </ItemGroup>
+</Project>
