@@ -3,6 +3,7 @@
     <OutputType>Exe</OutputType>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
     <ProjectReference Include="../../src/Cpp2CS.Model/Cpp2CS.Model.csproj" />
     <ProjectReference Include="../../src/Cpp2CS.Native/Cpp2CS.Native.csproj" />
     <ProjectReference Include="../../src/Cpp2CS.Targets.Elf/Cpp2CS.Targets.Elf.csproj" />

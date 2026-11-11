@@ -78,6 +78,7 @@ internal static class ArchitectureChecks
             }
         }
         CheckGraph(checks, "程序集引用", assemblyGraph);
+        RuntimeLayoutArchitecture.Check(checks, root);
         return checks.Finish("架构边界");
     }
 
@@ -106,7 +107,7 @@ internal static class ArchitectureChecks
         }
     }
 
-    private static string FindRoot()
+    internal static string FindRoot()
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
             if (File.Exists(Path.Combine(directory.FullName, "Cpp2CS.slnx"))) return directory.FullName;
