@@ -24,6 +24,7 @@ internal static class StateImageChecks
         public IReadOnlyList<ImageRelocation> Relocations { get; } = [new(0x10, 8, RelocationKind.Pointer, new PointerTarget.Internal(0x180))];
         public ImmutableArray<ImportSymbol> Imports => [];
         public ImmutableArray<ExportSymbol> Exports => [];
+        public ImmutableArray<FunctionSymbol> FunctionSymbols => [];
         public ImmutableArray<FunctionRange> Functions => [];
         public ImmutableArray<TryRegion> TryRegions => [];
         public ImmutableArray<string> Diagnostics => [];

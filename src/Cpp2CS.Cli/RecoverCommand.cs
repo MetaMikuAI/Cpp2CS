@@ -8,7 +8,7 @@ internal static class RecoverCommand
     {
         if (args is not ["recover", var image, var metadata, var output, .. var options])
         {
-            Console.Error.WriteLine("用法: recover <映像> <元数据> <输出目录> [--method 名称子串] [--address 0x偏移] [--jobs 并行度] [--unity 版本] [--source]");
+            Console.Error.WriteLine("用法: recover <映像> <元数据> <输出目录> [--method 名称子串] [--address 0x偏移] [--jobs 并行度] [--symbols 未去符号的映像] [--unity 版本] [--source]");
             return 2;
         }
         var request = new RecoveryRequest(image, metadata, output);
@@ -23,6 +23,7 @@ internal static class RecoverCommand
                 "--address" => request with { Address = value.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? Convert.ToUInt64(value[2..], 16) : ulong.Parse(value) },
                 "--jobs" => request with { Jobs = int.Parse(value) },
                 "--unity" => request with { UnityVersion = value },
+                "--symbols" => request with { Symbols = value },
                 _ => throw new ArgumentException($"未知参数 {options[i]}")
             };
         }

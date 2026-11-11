@@ -24,6 +24,7 @@ public abstract record PointerTarget
 }
 public sealed record ImageRelocation(ulong Offset, int Width, RelocationKind Kind, PointerTarget Target);
 public sealed record ExportSymbol(string Name, PointerTarget Target, uint? Ordinal = null);
+public sealed record FunctionSymbol(string Name, ulong Offset, ulong Size);
 public sealed record FunctionExtent(ulong Length, FunctionEvidence Evidence);
 /// <summary>同起点只保留一条。Length 为证据覆盖的最大长度；冲突的长度和证据完整保存在 Extents。</summary>
 public sealed record FunctionRange(ulong Start, ulong Length, FunctionEvidence Evidence)
@@ -46,6 +47,8 @@ public interface IImage
     IReadOnlyList<ImageRelocation> Relocations { get; }
     ImmutableArray<ImportSymbol> Imports { get; }
     ImmutableArray<ExportSymbol> Exports { get; }
+    /// <summary>可有可无的已定义函数符号证据；符号表被去掉时为空，使用者不得假定存在。地址为相对映像基址的偏移。</summary>
+    ImmutableArray<FunctionSymbol> FunctionSymbols { get; }
     ImmutableArray<FunctionRange> Functions { get; }
     ImmutableArray<TryRegion> TryRegions { get; }
     ImmutableArray<string> Diagnostics { get; }

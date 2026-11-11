@@ -22,6 +22,7 @@ internal sealed class LoadedImage : IImage
     public IReadOnlyList<ImageRelocation> Relocations { get; }
     public ImmutableArray<ImportSymbol> Imports { get; }
     public ImmutableArray<ExportSymbol> Exports { get; }
+    public ImmutableArray<FunctionSymbol> FunctionSymbols { get; }
     public ImmutableArray<FunctionRange> Functions { get; }
     public ImmutableArray<TryRegion> TryRegions { get; }
     public ImmutableArray<string> Diagnostics { get; }
@@ -66,13 +67,14 @@ internal sealed class LoadedImage : IImage
         }
         Imports = document.Imports.Values.Distinct().Order().Select(n => new ImportSymbol(n)).ToImmutableArray();
         Exports = document.Exports.Select(e => new ExportSymbol(e.Key, InternalTarget(e.Value))).ToImmutableArray();
+        FunctionSymbols = document.FunctionSymbols.Select(s => new FunctionSymbol(s.Name, Offset(s.Value), s.Size)).ToImmutableArray();
         var unwind = new UnwindReader(this, document);
         var functions = unwind.Functions.ToList();
         foreach (var symbol in document.FunctionSymbols)
         {
             var offset = Offset(symbol.Value);
-            if (!IsExecutable(offset, symbol.Size)) throw new InvalidDataException("函数符号范围不在可执行映射内");
-            functions.Add(new(offset, symbol.Size, FunctionEvidence.SymbolTable));
+            if (!IsExecutable(offset, Math.Max(1, symbol.Size))) throw new InvalidDataException("函数符号范围不在可执行映射内");
+            if (symbol.Size != 0) functions.Add(new(offset, symbol.Size, FunctionEvidence.SymbolTable));
         }
         var diagnostics = unwind.Diagnostics.ToList();
         Functions = functions.GroupBy(f => f.Start).OrderBy(g => g.Key).Select(g =>

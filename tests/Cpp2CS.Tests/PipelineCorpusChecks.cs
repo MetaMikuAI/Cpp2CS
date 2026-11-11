@@ -22,7 +22,11 @@ internal static class PipelineCorpusChecks
         var output = Path.Combine(ArchitectureChecks.FindRoot(), "artifacts", "pipeline-corpus.local.output");
         var report = new RecoverySession().Run(new(
             Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.so"),
-            Path.Combine(corpus, "artifacts", "il2cppOutput", "data", "Metadata", "global-metadata.dat"), output));
+            Path.Combine(corpus, "artifacts", "il2cppOutput", "data", "Metadata", "global-metadata.dat"), output)
+        {
+            // 运行时函数的定位目前只有“符号”这一种证据；语料上由同一次构建的未去符号文件提供。
+            Symbols = Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.dbg.so"),
+        });
         var byId = report.Methods.ToDictionary(m => m.Identity);
         using var methods = InputCorpusChecks.Json(truth, "methods.json");
         using var cases = InputCorpusChecks.Json(truth, "cases.json");

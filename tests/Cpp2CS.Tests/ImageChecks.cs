@@ -29,6 +29,9 @@ internal static class ImageChecks
             a.True(emptyRange.Diagnostics.Length == 1 && !emptyRange.Functions.Any(f => f.Evidence.HasFlag(FunctionEvidence.UnwindTable)), "零长度展开记录只报告诊断");
             var bytes = Minimal(machine);
             IImage image = ElfImage.Parse(bytes);
+            a.True(image.FunctionSymbols is [{ Name: "function", Offset: 0x300, Size: 16 }], "动态符号回退只含已定义函数，偏移相对基址");
+            var zeroSymbol = Minimal(machine); Put(zeroSymbol, 0x140, 0, 8);
+            a.True(ElfImage.Parse(zeroSymbol).FunctionSymbols is [{ Size: 0 }], "零大小符号仍保留入口");
             a.True(image.PreferredBase == 0x400000 && image.PointerWidth == 8 && image.ByteOrder == ByteOrder.LittleEndian, "头属性与相对基址");
             a.True(image.Query(0x600).Storage == StorageKind.ZeroFill && image.Query(0x800).Storage == StorageKind.Unmapped, "零填充与未映射");
             a.True(image.IsExecutable(0, 0x800) && image.IsWritable(0x600, 0x200) && !image.IsExecutable(0x7ff, 2), "区间权限");
@@ -142,6 +145,10 @@ internal static class ImageCorpusChecks
         {
             var directory = Path.Combine(root, "artifacts", "il2cppOutput", "build", target);
             var image = ElfImage.Load(Path.Combine(directory, "libil2cpp.so"));
+            var namedImage = ElfImage.Load(Path.Combine(directory, "libil2cpp.dbg.so"));
+            a.True(!namedImage.FunctionSymbols.IsEmpty, "语料函数符号非空");
+            var exported = namedImage.Exports.Single(e => e.Name == "il2cpp_init");
+            a.True(exported.Target is PointerTarget.Internal entry && namedImage.FunctionSymbols.Any(s => s.Name == exported.Name && s.Offset == entry.Offset), "按符号名找到已知导出函数");
             var symbolFunctions = ReadSymbolRanges(Path.Combine(directory, "libil2cpp.sym.so"));
             a.True(image.PreferredBase == 0 && image.PointerWidth == 8, "语料基址和指针宽度");
             a.True(image.Ranges.Any(r => r.Executable) && image.Ranges.Any(r => r.Writable) && image.Ranges.Any(r => r.Storage == StorageKind.ZeroFill), "语料范围种类齐全");

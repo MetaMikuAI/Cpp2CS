@@ -1,9 +1,11 @@
+using System.Collections.Immutable;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using Cpp2CS.Input;
 using Cpp2CS.Managed;
 using Cpp2CS.Model;
 using Cpp2CS.Native;
+using Cpp2CS.Native.Images;
 using Cpp2CS.Output;
 using Cpp2CS.Runtime;
 using Cpp2CS.Runtime.Layouts;
@@ -20,6 +22,8 @@ public sealed record RecoveryRequest(string Image, string Metadata, string Outpu
     public ulong? Address { get; init; }
     public int Jobs { get; init; } = 1;
     public bool Source { get; init; }
+    /// <summary>可选：同一次构建里未去符号的映像文件。只取它的函数符号，作为运行时函数定位的一种证据。</summary>
+    public string? Symbols { get; init; }
     public string UnityVersion { get; init; } = "2022.3.62f2";
 }
 public sealed class RecoverySession
@@ -27,7 +31,7 @@ public sealed class RecoverySession
     // 架构实现只在此处装配，目标工程不反向引用 Pipeline。
     private static readonly IFrontendProvider[] DefaultProviders =
     [
-        new FrontendProvider("arm64", facts =>
+        new FrontendProvider("arm64", facts => RuntimeLocationAssembly.Components(facts, facts =>
         {
             var instructions = new Arm64InstructionSet(facts.Image);
             var catalog = RuntimeFunctionCatalog.Select(facts.Spec.Layout.UnityVersion, facts.Spec.Layout.Triple, facts.Spec.Layout.DataModel);
@@ -36,8 +40,9 @@ public sealed class RecoverySession
             var flow = NoReturnAnalysis.Analyze(facts.Image, instructions, Arm64Registers.Convention, facts.Image.Functions,
                 facts.Image.Imports.Where(i => seeds.Contains(i.Name)), new Arm64FlowFacts());
             return new(instructions, Arm64Registers.Convention, flow);
-        }),
+        })),
     ];
+    internal static FrontendComponents DefaultComponents(GlobalFacts facts) => DefaultProviders.Single(p => p.Architecture == facts.Architecture).Create(facts);
     private readonly IMethodStage<CodeEntry, NativeFunction> frontend;
     private readonly IMethodStage<NativeFunction, ManagedBody> recovery;
     public RecoverySession(IEnumerable<IFrontendProvider>? providers = null,
@@ -64,7 +69,17 @@ public sealed class RecoverySession
         var (model, registration) = ModelBuilder.Load(image, request.Metadata, spec);
         var (map, problems) = RegistrationReader.Read(image, model, spec, registration.CodeRegistration, registration.MetadataRegistration);
         if (problems.Count != 0) throw new InvalidDataException("代码地图不完整：" + string.Join("；", problems));
-        return Run(new(image, model, map, spec, architecture), request, watch.Elapsed.TotalSeconds);
+        var facts = new GlobalFacts(image, model, map, spec, architecture);
+        if (request.Symbols is not null) facts = facts with { Symbols = CompanionSymbols(image, ElfImage.Load(request.Symbols)) };
+        return Run(facts, request, watch.Elapsed.TotalSeconds);
+    }
+    /// <summary>伴随文件必须与映像出自同一次构建：映像自己带的函数符号（动态符号）在伴随文件里必须同名同址。</summary>
+    public static ImmutableArray<FunctionSymbol> CompanionSymbols(IImage image, IImage companion)
+    {
+        var known = companion.FunctionSymbols.Select(s => (s.Name, s.Offset)).ToHashSet();
+        if (image.FunctionSymbols.IsEmpty || image.FunctionSymbols.Any(s => !known.Contains((s.Name, s.Offset))))
+            throw new InvalidDataException("符号文件与映像不是同一次构建：映像的动态符号在符号文件里没有同名同址的定义");
+        return companion.FunctionSymbols;
     }
     /// <summary>供已有全局事实的调用方使用；不重新读文件。</summary>
     public RecoveryReport Run(GlobalFacts facts, RecoveryRequest request, double inputSeconds = 0)

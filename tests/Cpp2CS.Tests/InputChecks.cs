@@ -48,6 +48,7 @@ internal sealed class InputMemoryImage : IImage
     public IReadOnlyList<ImageRelocation> Relocations => [];
     public ImmutableArray<ImportSymbol> Imports => [];
     public ImmutableArray<ExportSymbol> Exports => [];
+    public ImmutableArray<FunctionSymbol> FunctionSymbols { get; init; } = [];
     public ImmutableArray<FunctionRange> Functions => [];
     public ImmutableArray<TryRegion> TryRegions => [];
     public ImmutableArray<string> Diagnostics => [];

@@ -261,6 +261,7 @@ internal sealed class ImageDocument
             reader.Require(stringsOffset, stringsSize);
         }
         var functionSymbols = new List<(string Name, ulong Value, ulong Size)>();
+        var hasSymtab = Enumerable.Range(0, checked((int)shcount)).Any(i => reader.U32(shoff + i * 64L + 4) == 2);
         var exports = new Dictionary<string, ulong>(StringComparer.Ordinal);
         var symbols = new List<(string Name, ulong Value, bool Defined)>();
         var sections = new List<ImageSection>();
@@ -271,7 +272,7 @@ internal sealed class ImageDocument
             var sectionFlags = reader.U64(s + 8);
             if ((sectionFlags & 2) != 0 && reader.U64(s + 32) != 0 && stringsSize != 0)
                 sections.Add(new(reader.String(stringsOffset, stringsSize, reader.U32(s)), reader.U64(s + 16), reader.U64(s + 32), type, sectionFlags));
-            if (type is 2 or 11)
+            if (type == 2 || (type == 11 && !hasSymtab))
             {
                 var link = reader.U32(s + 40);
                 if (link >= shcount || reader.U64(s + 56) != 24 || reader.U64(s + 32) % 24 != 0) throw new InvalidDataException("符号表长度或链接错误");
@@ -282,7 +283,7 @@ internal sealed class ImageDocument
                 for (ulong n = 24; n < size; n += 24)
                 {
                     var at = off + (long)n;
-                    if ((reader.Byte(at + 4) & 15) == 2 && reader.U16(at + 6) is > 0 and < 0xff00 && reader.U64(at + 16) != 0)
+                    if ((reader.Byte(at + 4) & 15) == 2 && reader.U16(at + 6) is > 0 and < 0xff00)
                         functionSymbols.Add((reader.String(reader.Offset(reader.U64(str + 24)), reader.U64(str + 32), reader.U32(at)), reader.U64(at + 8), reader.U64(at + 16)));
                 }
             }
