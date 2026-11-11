@@ -1,0 +1,3 @@
+<linker>
+  <assembly fullname="Corpus.Cases" preserve="all"/>
+</linker>

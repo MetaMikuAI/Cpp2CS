@@ -1,0 +1,254 @@
+[
+  {
+    "category": "arithmetic",
+    "type": "Corpus.Arithmetic",
+    "method": "IntegerArithmetic",
+    "symbolPrefix": "Arithmetic_IntegerArithmetic_m"
+  },
+  {
+    "category": "arithmetic",
+    "type": "Corpus.Arithmetic",
+    "method": "FloatArithmetic",
+    "symbolPrefix": "Arithmetic_FloatArithmetic_m"
+  },
+  {
+    "category": "arithmetic",
+    "type": "Corpus.Arithmetic",
+    "method": "DoubleArithmetic",
+    "symbolPrefix": "Arithmetic_DoubleArithmetic_m"
+  },
+  {
+    "category": "arithmetic",
+    "type": "Corpus.Arithmetic",
+    "method": "BitOperations",
+    "symbolPrefix": "Arithmetic_BitOperations_m"
+  },
+  {
+    "category": "arithmetic",
+    "type": "Corpus.Arithmetic",
+    "method": "SignedShift",
+    "symbolPrefix": "Arithmetic_SignedShift_m"
+  },
+  {
+    "category": "arithmetic",
+    "type": "Corpus.Arithmetic",
+    "method": "NarrowInteger",
+    "symbolPrefix": "Arithmetic_NarrowInteger_m"
+  },
+  {
+    "category": "arithmetic",
+    "type": "Corpus.Arithmetic",
+    "method": "FloatToInteger",
+    "symbolPrefix": "Arithmetic_FloatToInteger_m"
+  },
+  {
+    "category": "arithmetic",
+    "type": "Corpus.Arithmetic",
+    "method": "UnsignedToDouble",
+    "symbolPrefix": "Arithmetic_UnsignedToDouble_m"
+  },
+  {
+    "category": "fields",
+    "type": "Corpus.Fields",
+    "method": "ReadInstance",
+    "symbolPrefix": "Fields_ReadInstance_m"
+  },
+  {
+    "category": "fields",
+    "type": "Corpus.Fields",
+    "method": "WriteInstance",
+    "symbolPrefix": "Fields_WriteInstance_m"
+  },
+  {
+    "category": "fields",
+    "type": "Corpus.Fields",
+    "method": "ReadStatic",
+    "symbolPrefix": "Fields_ReadStatic_m"
+  },
+  {
+    "category": "fields",
+    "type": "Corpus.Fields",
+    "method": "WriteStatic",
+    "symbolPrefix": "Fields_WriteStatic_m"
+  },
+  {
+    "category": "fields",
+    "type": "Corpus.Fields",
+    "method": "ReadStruct",
+    "symbolPrefix": "Fields_ReadStruct_m"
+  },
+  {
+    "category": "fields",
+    "type": "Corpus.Fields",
+    "method": "WriteNested",
+    "symbolPrefix": "Fields_WriteNested_m"
+  },
+  {
+    "category": "fields",
+    "type": "Corpus.Fields",
+    "method": "ReadNested",
+    "symbolPrefix": "Fields_ReadNested_m"
+  },
+  {
+    "category": "fields",
+    "type": "Corpus.Fields",
+    "method": "ReadArray",
+    "symbolPrefix": "Fields_ReadArray_m"
+  },
+  {
+    "category": "fields",
+    "type": "Corpus.Fields",
+    "method": "WriteArray",
+    "symbolPrefix": "Fields_WriteArray_m"
+  },
+  {
+    "category": "calls",
+    "type": "Corpus.Calls",
+    "method": "DirectCall",
+    "symbolPrefix": "Calls_DirectCall_m"
+  },
+  {
+    "category": "calls",
+    "type": "Corpus.Calls",
+    "method": "VirtualCall",
+    "symbolPrefix": "Calls_VirtualCall_m"
+  },
+  {
+    "category": "calls",
+    "type": "Corpus.Calls",
+    "method": "InterfaceCall",
+    "symbolPrefix": "Calls_InterfaceCall_m"
+  },
+  {
+    "category": "calls",
+    "type": "Corpus.Calls",
+    "method": "DelegateCall",
+    "symbolPrefix": "Calls_DelegateCall_m"
+  },
+  {
+    "category": "calls",
+    "type": "Corpus.Calls",
+    "method": "SharedGenericString",
+    "symbolPrefix": "Calls_SharedGenericString_m"
+  },
+  {
+    "category": "calls",
+    "type": "Corpus.Calls",
+    "method": "SharedGenericObject",
+    "symbolPrefix": "Calls_SharedGenericObject_m"
+  },
+  {
+    "category": "control",
+    "type": "Corpus.Control",
+    "method": "IfElse",
+    "symbolPrefix": "Control_IfElse_m"
+  },
+  {
+    "category": "control",
+    "type": "Corpus.Control",
+    "method": "Conditional",
+    "symbolPrefix": "Control_Conditional_m"
+  },
+  {
+    "category": "control",
+    "type": "Corpus.Control",
+    "method": "While",
+    "symbolPrefix": "Control_While_m"
+  },
+  {
+    "category": "control",
+    "type": "Corpus.Control",
+    "method": "For",
+    "symbolPrefix": "Control_For_m"
+  },
+  {
+    "category": "control",
+    "type": "Corpus.Control",
+    "method": "SmallSwitch",
+    "symbolPrefix": "Control_SmallSwitch_m"
+  },
+  {
+    "category": "checks",
+    "type": "Corpus.Checks",
+    "method": "NullCheck",
+    "symbolPrefix": "Checks_NullCheck_m"
+  },
+  {
+    "category": "checks",
+    "type": "Corpus.Checks",
+    "method": "ArrayBounds",
+    "symbolPrefix": "Checks_ArrayBounds_m"
+  },
+  {
+    "category": "checks",
+    "type": "Corpus.Checks",
+    "method": "DivideByZero",
+    "symbolPrefix": "Checks_DivideByZero_m"
+  },
+  {
+    "category": "checks",
+    "type": "Corpus.Checks",
+    "method": "RemainderByZero",
+    "symbolPrefix": "Checks_RemainderByZero_m"
+  },
+  {
+    "category": "guards",
+    "type": "Corpus.Guards",
+    "method": "MetadataOnBranches",
+    "symbolPrefix": "Guards_MetadataOnBranches_m"
+  },
+  {
+    "category": "guards",
+    "type": "Corpus.Guards",
+    "method": "ClassInitOnBranches",
+    "symbolPrefix": "Guards_ClassInitOnBranches_m"
+  },
+  {
+    "category": "guards",
+    "type": "Corpus.Guards",
+    "method": "GuardWithNull",
+    "symbolPrefix": "Guards_GuardWithNull_m"
+  },
+  {
+    "category": "guards",
+    "type": "Corpus.Guards",
+    "method": "GuardWithBounds",
+    "symbolPrefix": "Guards_GuardWithBounds_m"
+  },
+  {
+    "category": "dispatch",
+    "type": "Corpus.Dispatch",
+    "method": "RepeatedInterface",
+    "symbolPrefix": "Dispatch_RepeatedInterface_m"
+  },
+  {
+    "category": "dispatch",
+    "type": "Corpus.Dispatch",
+    "method": "InterfaceBranchTail",
+    "symbolPrefix": "Dispatch_InterfaceBranchTail_m"
+  },
+  {
+    "category": "dispatch",
+    "type": "Corpus.Dispatch",
+    "method": "InterfaceTwoReceivers",
+    "symbolPrefix": "Dispatch_InterfaceTwoReceivers_m"
+  },
+  {
+    "category": "typechecks",
+    "type": "Corpus.TypeChecks",
+    "method": "IsMerge",
+    "symbolPrefix": "TypeChecks_IsMerge_m"
+  },
+  {
+    "category": "typechecks",
+    "type": "Corpus.TypeChecks",
+    "method": "AsMerge",
+    "symbolPrefix": "TypeChecks_AsMerge_m"
+  },
+  {
+    "category": "typechecks",
+    "type": "Corpus.TypeChecks",
+    "method": "CastMerge",
+    "symbolPrefix": "TypeChecks_CastMerge_m"
+  }
+]
