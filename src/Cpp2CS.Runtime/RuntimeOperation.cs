@@ -40,6 +40,8 @@ public sealed record RuntimeOperation(
     string Preconditions, string Evidence, RuntimeEventTrigger EventTrigger, RuntimeTermination Termination,
     string SynchronousManagedCode)
 {
+    /// <summary>无条件抛出的固定异常；传入异常对象及重新抛出不设置此项。</summary>
+    public string? FixedThrownException { get; init; }
     public RuntimeCondition? EventCondition => EventTrigger switch
     {
         RuntimeEventTrigger.Never => null,
@@ -141,7 +143,7 @@ public static class RuntimeOperations
             ("ThrowInvalidCast", "System.InvalidCastException", [obj, klass]), ("ThrowArrayTypeMismatch", "System.ArrayTypeMismatchException", []),
             ("ThrowOutOfMemory", "System.OutOfMemoryException", []) })
             yield return Op(name, inputs, RuntimeValueKind.Void, RuntimeWidth.None, RuntimeHeapEffect.MayWrite, RuntimeObservation.Observable,
-                "", "Throw", "抛出 " + type + "；条件由前驱路径提供", codegen + ".h/.cpp: raise_* / RaiseInvalidCastException / ArrayElementTypeCheck", [type], noReturn: true);
+                "", "Throw", "抛出 " + type + "；条件由前驱路径提供", codegen + ".h/.cpp: raise_* / RaiseInvalidCastException / ArrayElementTypeCheck", [type], noReturn: true) with { FixedThrownException = type };
         yield return Op("ThrowManaged", [P("exception", RuntimeValueKind.ManagedReference), method], RuntimeValueKind.Void, RuntimeWidth.None, RuntimeHeapEffect.MayWrite,
             RuntimeObservation.Observable, "", "Throw", "写成 throw，记录新的抛出位置", codegen + ".cpp: il2cpp_codegen_raise_exception 清空 trace_ips 与 stack_trace", ["InputException"], pointers: [new("exception", RuntimeAccess.ReadWrite, RuntimeMemoryDomain.ManagedHeap, new(RuntimeExtentKind.Unknown, "异常的 trace_ips 与 stack_trace"), new(RuntimeConditionKind.Other, "抛出前"))], noReturn: true, exceptional: [Fact("ThrownInput", "抛出 exception，清空旧 trace_ips 与 stack_trace；记录新的抛出位置", "异常退出")]);
         yield return Op("Rethrow", [P("exception", RuntimeValueKind.ManagedReference)], RuntimeValueKind.Void, RuntimeWidth.None, RuntimeHeapEffect.MayWrite,
