@@ -1,6 +1,9 @@
 using Cpp2CS.Managed;
 using ManagedValues = Cpp2CS.Managed.ManagedValues;
 using Cpp2CS.Model;
+using Cpp2CS.Pipeline;
+using Cpp2CS.Recovery.Naming;
+using Cpp2CS.Runtime;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Output;
@@ -137,6 +140,36 @@ internal static class LoweringChecks
             [new ManagedBlock(0, [new ManagedReturn(0, new ConstantValue(0x7f800001, types.Single, 32))])]);
         checks.True(emitter.Emit([nanBody]).Count == 1, "非规范 NaN 常量缺少位重解释方法时拒绝写出");
         bitConverter.Methods = conversions;
+        var spec = InputCorpusChecks.Spec("arm64-v8a").Layout;
+        var catalog = RuntimeFunctionCatalog.Select(spec.UnityVersion, spec.Triple, spec.DataModel);
+        var target = MethodRef.Open(methods[0]);
+        CallNamingQuery Calls(params BindingEntry[] entries) => new(binder, new NamingChecks.Map([.. entries]), new NamingChecks.RuntimeMap(), catalog);
+        var calls = Calls(new BindingEntry(target, BindingEntryKind.Ordinary));
+        foreach (var name in new[] { "CallUse", "CallUnused", "CallTwice", "CallTail", "CallSpill" })
+        {
+            var result = new IntegerLowering(Function(name), target, binder, types, calls: calls, effects: new ManagedCallEffects(calls)).Run();
+            checks.True(result.Body is not null, $"{name} 下降：{result.Failure}");
+            if (result.Body is not { } body) continue;
+            var statements = body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().ToArray();
+            checks.True(statements.Length == (name == "CallTwice" ? 2 : 1), name + " 保留调用数量");
+            checks.True(statements.All(c => c.Invocation.Method == target && !c.Invocation.Virtual), name + " 直接调用唯一目标");
+            checks.True(statements[0].Result is not null == (name is "CallUse" or "CallTwice" or "CallTail"), name + " 仅使用结果时建立局部");
+            if (name == "CallTwice")
+                checks.True(Cpp2CS.Managed.ManagedValues.Children(statements[1].Invocation.Arguments[0]).Any(v => v is LocalValue)
+                    || statements[1].Invocation.Arguments[0] is LocalValue, "第二次调用依赖第一次结果");
+            checks.True(emitter.Emit([body]).Count == 0, name + " CIL 校验");
+        }
+        var ambiguous = Calls(new BindingEntry(target, BindingEntryKind.Ordinary), new BindingEntry(MethodRef.Open(methods[^1]), BindingEntryKind.Ordinary));
+        checks.True(new IntegerLowering(Function("CallTail"), target, binder, types, calls: ambiguous).Run().Failure?.Kind == LoweringFailureKind.AmbiguousCall,
+            "签名不同的候选单列洞");
+        var folded = Calls(new BindingEntry(target, BindingEntryKind.Ordinary), new BindingEntry(MethodRef.Open(methods[1]), BindingEntryKind.Ordinary));
+        checks.True(new IntegerLowering(Function("CallTail"), target, binder, types, calls: folded).Run().Failure?.Kind == LoweringFailureKind.FoldedCall,
+            "相同代码折叠单列洞");
+        var narrowCalls = Calls(new BindingEntry(MethodRef.Open(methods[^1]), BindingEntryKind.Ordinary));
+        var narrow = new IntegerLowering(Function("CallNarrow"), target, binder, types, calls: narrowCalls).Run();
+        checks.True(narrow.Body is not null, "窄返回值只使用绑定的低位");
+        checks.True(new IntegerLowering(Function("CallTail"), target, binder, types, calls: narrowCalls).Run().Failure?.Kind == LoweringFailureKind.Binding,
+            "窄返回值的 ABI 未定义高位不能取用");
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         return checks.Finish("标量下降");
     }
@@ -221,7 +254,32 @@ internal static class LoweringChecks
             b = Op(CoreOperation.ZeroExtend, 32, t.Slice(b, 0, 8));
             sum = Op(CoreOperation.Add, 32, a, b);
         }
-        if (kind == "Branch")
+        if (kind.StartsWith("Call", StringComparison.Ordinal))
+        {
+            var statements = new List<Statement>();
+            Term Invoke(Term left)
+            {
+                var id = new CallIdentity(); var result = t.Atom(new ResultAtom(id), 64);
+                statements.Add(new Call(id, new ImageFunction(10),
+                    [new(new(SlotKind.Integer, 0), Op(CoreOperation.ZeroExtend, 64, left)),
+                     new(new(SlotKind.Integer, 1), Op(CoreOperation.ZeroExtend, 64, b)),
+                     new(new(SlotKind.Integer, 2), t.Constant(0, 64))], [new(new(SlotKind.Integer, 0), result)], OutgoingArgumentArea: frame));
+                return t.Slice(result, 0, 32);
+            }
+            if (kind == "CallSpill") statements.Add(new MemoryWrite(new(), frame, 32, sum));
+            var value = Invoke(a);
+            if (kind == "CallTwice") value = Invoke(value);
+            if (kind == "CallNarrow") value = Op(CoreOperation.SignExtend, 32, t.Slice(value, 0, 8));
+            if (kind == "CallUse") value = Op(CoreOperation.Add, 32, value, b);
+            if (kind == "CallUnused") value = sum;
+            if (kind == "CallSpill")
+            {
+                var read = new ReadIdentity(); value = t.Atom(new ResultAtom(read), 32);
+                statements.Add(new MemoryRead(read, frame, 32, value));
+            }
+            builder.Blocks.Add(new(entry, [], [.. statements], Ret(value)));
+        }
+        else if (kind == "Branch")
         {
             var yes = new BlockIdentity(); var no = new BlockIdentity();
             builder.Blocks.Add(new(entry, [], [], new Branch(Op(CoreOperation.SignedLess, 1, a, b), yes, no)));

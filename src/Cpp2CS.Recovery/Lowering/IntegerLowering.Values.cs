@@ -49,6 +49,7 @@ public sealed partial class IntegerLowering
     }
     private ManagedValue? BuildValue(Term term, bool floating = false)
     {
+        if (callResults.TryGetValue(term, out var callResult)) return CallResult(callResult);
         if (arguments.TryGetValue(term, out var argument))
             return IsFloat(argument.Type) ? argument : IntegerType(argument.Type) ? Mask(argument, term.Width)
                 : Fail<ManagedValue>(TypeFailure(argument.Type), "使用了非整数形参");
@@ -75,6 +76,8 @@ public sealed partial class IntegerLowering
             }
             return Mask(result, term.Width);
         }
+        if (term.Identity is ResultAtom { Definition: CallIdentity })
+            return Fail<ManagedValue>(LoweringFailureKind.Binding, "使用了调用结果绑定之外的位，ABI 未定义这些高位");
         if (term.Identity is EntryAtom)
             return Fail<ManagedValue>(LoweringFailureKind.Binding, "使用了形参绑定未定义的入口位，包括未指定的槽位高位");
         if (term.Identity is MemoryAtom)
@@ -89,6 +92,16 @@ public sealed partial class IntegerLowering
         var resolved = context.Get(state.Resolve, term);
         if (!resolved.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "位片来源查询失败", resolved.Why);
         if (resolved.Value != term) return Part(resolved.Value, low, width, floating);
+        foreach (var pair in callResults)
+        {
+            var root = pair.Key.Kind == TermKind.Slice ? pair.Key.Operands[0] : pair.Key;
+            int start = pair.Key.SliceLow ?? 0;
+            if (term == root && low >= start && low + width <= start + pair.Key.Width)
+            {
+                var result = CallResult(pair.Value);
+                return result is null ? null : Slice(result, low - start, width);
+            }
+        }
         if (term.Identity is ResultAtom { Definition: MergeIdentity } or MemoryMerge)
         {
             // 局部容纳使用位片；完整浮点使用可定型，其他位片按整数保存。

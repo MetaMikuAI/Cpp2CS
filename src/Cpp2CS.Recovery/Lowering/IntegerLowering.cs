@@ -5,12 +5,13 @@ using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
+using Cpp2CS.Recovery.Naming;
 
 namespace Cpp2CS.Recovery.Lowering;
 
 public enum LoweringFailureKind
 {
-    Binding, State, CallerValue, Call, ConditionalTrap, Trap, NonFrameRead, NonFrameWrite,
+    Binding, State, CallerValue, Call, RuntimeCall, SystemCall, IndirectCall, UnknownCall, AmbiguousCall, FoldedCall, NonReturningCall, ConditionalTrap, Trap, NonFrameRead, NonFrameWrite,
     FloatingOrVector, IndirectControl, Exception, DynamicAllocation, UndefinedValue, UnsupportedAtom, UnsupportedOperation, UnsupportedType, ConstructorInitialization,
 }
 public sealed record LoweringFailure(LoweringFailureKind Kind, ulong Position, Reason Reason);
@@ -40,10 +41,12 @@ public sealed partial class IntegerLowering
     private ulong nextLabel;
 
     public IntegerLowering(NativeFunction function, MethodRef method, MethodBinder binder, ManagedTypes types,
-        Cpp2CS.Native.Images.IImage? image = null)
+        Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null)
     {
         this.function = function; this.method = method; this.binder = binder; this.types = types;
-        state = new(image: image);
+        this.calls = calls;
+        state = new(effects, image: image);
+        boundSources = new(state);
         context = state.CreateContext(function);
         labels = function.Blocks.OrderByDescending(b => b.Identity == function.Entry)
             .Select((b, i) => (b.Identity, Label: (ulong)i)).ToDictionary(p => p.Identity, p => p.Label);
@@ -52,9 +55,9 @@ public sealed partial class IntegerLowering
             .ToDictionary(p => p.Merge.Identity);
     }
 
-    private T? Fail<T>(LoweringFailureKind kind, string detail, Reason? cause = null) where T : class
+    private T? Fail<T>(LoweringFailureKind kind, string detail, Reason? cause = null, string? code = null) where T : class
     {
-        failure ??= new(kind, position, new("lowering." + kind, detail, cause));
+        failure ??= new(kind, position, new(code ?? "lowering." + kind, detail, cause));
         return null;
     }
 
@@ -74,7 +77,7 @@ public sealed partial class IntegerLowering
                 position = s.Trace?.NativeAddress ?? b.Trace?.NativeAddress ?? 0;
                 switch (s)
                 {
-                    case Call: Fail<object>(LoweringFailureKind.Call, "调用尚未下降"); break;
+                    case Call call: PrepareCall(call); break;
                     case TrapWhen: Fail<object>(LoweringFailureKind.ConditionalTrap, "条件陷阱尚未下降"); break;
                     case DynamicAllocation: Fail<object>(LoweringFailureKind.DynamicAllocation, "动态帧分配尚未下降"); break;
                     case MemoryRead r: CheckMemory(r.Address, r.Width, true); break;
@@ -104,9 +107,19 @@ public sealed partial class IntegerLowering
         foreach (var b in function.Blocks.OrderBy(b => labels[b.Identity]))
         {
             position = b.Trace?.NativeAddress ?? 0;
+            var statements = new List<ManagedStatement>();
+            for (int i = 0; i < b.Statements.Length; i++)
+                if (b.Statements[i] is Call call)
+                {
+                    position = call.Trace?.NativeAddress ?? b.Trace?.NativeAddress ?? 0;
+                    var statement = LowerCall(call, new(b.Identity, i));
+                    if (statement is null) return new(null, failure);
+                    statements.Add(statement);
+                }
             var end = End(b);
             if (end is null) return new(null, failure);
-            blocks.Add(new(labels[b.Identity], [end]));
+            statements.Add(end);
+            blocks.Add(new(labels[b.Identity], statements));
         }
         // 只给实际使用的合流建局部；循环先登记身份，入边随后下降。
         for (int i = 0; i < pending.Count; i++)
@@ -121,6 +134,9 @@ public sealed partial class IntegerLowering
                 ((List<ManagedCopy>)edge.Copies).Add(new(merge.Local, IsFloat(merge.Local.Type) ? FloatBits(v, merge.Local.Width) : Convert(v, merge.Local.Width)));
             }
         }
+        // 合流入边也可能首次使用调用结果，全部值下降后再回填结果局部。
+        blocks = blocks.Select(b => b with { Statements = b.Statements.Select(s => s is ManagedCall c
+            ? c with { Result = callStatements[c].Local } : s).ToArray() }).ToList();
         return new(Materialize(new(method, [.. blocks, .. extraBlocks])), null);
     }
 
