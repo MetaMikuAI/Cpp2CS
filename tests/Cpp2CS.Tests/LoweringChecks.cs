@@ -225,8 +225,8 @@ internal static class LoweringChecks
         var target = Method(owner, "Apply", integer, [integer], true);
         var invoke = Method(callback, "Invoke", integer, [integer], true);
         Method(exception, ".ctor", Primitive("Void"), [], constructor: true);
-        string[] modes = ["Read", "Write", "Preserve", "Unused", "Null", "ArrayRead", "ArrayWrite", "Length", "Virtual", "Delegate", "Reference", "RefCall", "Merge", "Nested", "ByRef", "ScalarByRef", "ScalarStore", "ReferenceSlot", "ScalarReceiver", "WrongReceiver", "PrivateRead", "Partial", "Cross"];
-        var entries = modes.ToDictionary(n => n, n => Method(n == "PrivateRead" ? callback : owner, n, n is "Reference" or "RefCall" or "Merge" or "ReferenceSlot" ? reference : integer,
+        string[] modes = ["Read", "Write", "Preserve", "Unused", "Null", "ArrayRead", "ArrayWrite", "Length", "Virtual", "Delegate", "Reference", "RefCall", "Merge", "Nested", "ByRef", "ScalarByRef", "ScalarStore", "ReferenceSlot", "ScalarReceiver", "WrongReceiver", "ReferenceBits", "PrivateRead", "Partial", "Cross"];
+        var entries = modes.ToDictionary(n => n, n => Method(n == "PrivateRead" ? callback : owner, n, n is "Reference" or "RefCall" or "Merge" or "ReferenceSlot" ? reference : n == "ReferenceBits" ? Primitive("Int64") : integer,
             [(n.StartsWith("Array", StringComparison.Ordinal) || n == "Length") ? array : n == "Delegate" ? new DefinitionRef(callback, []) : n == "ByRef" ? new ByRefRef(innerType) : n is "ScalarByRef" or "ScalarStore" or "ScalarReceiver" ? new ByRefRef(integer) : n == "ReferenceSlot" ? new ByRefRef(reference) : n == "WrongReceiver" ? Primitive("Int64") : reference, integer]));
         foreach (var type in definitions.Where(t => t == owner || t == callback || t == exception || t == ((DefinitionRef)integer).Definition)) type.Methods = methods.Where(m => m.Owner == type).ToArray();
         owner.VTable = [MethodRef.Open(target)];
@@ -265,7 +265,7 @@ internal static class LoweringChecks
             if (mode == "Cross") result = Read(Add(address, 2), 32);
             if (mode == "Unused") result = terms.Constant(0, 32);
             if (mode == "Read") result = terms.Apply(new CoreOperator(CoreOperation.Add), 32, result, terms.Constant(1, 32));
-            if (mode == "Reference") result = root;
+            if (mode is "Reference" or "ReferenceBits") result = root;
             if (mode is "ScalarReceiver" or "WrongReceiver")
             {
                 var id = new CallIdentity(); var output = terms.Atom(new ResultAtom(id), 64);
@@ -314,6 +314,11 @@ internal static class LoweringChecks
             else builder.Blocks.Add(new(block, [], statements.ToImmutableArray(), Ret(result)));
             var calls = new CallNamingQuery(binder, new NamingChecks.Map(mode == "RefCall" ? [new BindingEntry(MethodRef.Open(entries["Reference"]), BindingEntryKind.Ordinary)] : mode is "ScalarReceiver" or "WrongReceiver" ? [new BindingEntry(MethodRef.Open(hash), BindingEntryKind.Ordinary)] : []), new NamingChecks.RuntimeMap(runtime), catalog);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(entries[mode]), binder, types, calls: calls, effects: new ManagedCallEffects(calls), spec: spec).Run();
+            if (mode == "ReferenceBits")
+            {
+                checks.True(lowered.Failure?.Reason.Code == "lowering.ReferenceBits", "引用位型不能直接转换为整数");
+                continue;
+            }
             if (mode == "WrongReceiver")
             {
                 checks.True(lowered.Failure?.Kind == LoweringFailureKind.UnsupportedType, "整数地址不能冒充值类型接收者");

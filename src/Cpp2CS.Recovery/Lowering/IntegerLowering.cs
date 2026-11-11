@@ -172,7 +172,7 @@ public sealed partial class IntegerLowering
         blocks = blocks.Select(InsertReads).ToList();
         if (failure is not null) return new(null, failure);
         var body = new ManagedBody(method, [.. blocks, .. extraBlocks]);
-        CheckAccess(body);
+        CheckBody(body);
         return failure is null ? new(Materialize(body), null) : new(null, failure);
     }
 

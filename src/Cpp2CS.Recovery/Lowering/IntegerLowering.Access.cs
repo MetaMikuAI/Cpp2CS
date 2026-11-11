@@ -9,7 +9,7 @@ namespace Cpp2CS.Recovery.Lowering;
 
 public sealed partial class IntegerLowering
 {
-    private void CheckAccess(ManagedBody body)
+    private void CheckBody(ManagedBody body)
     {
         void Missing(string category) => Fail<object>(LoweringFailureKind.UnsupportedType,
             "访问缺少权限或内联逆证明：" + category, code: "lowering.Access." + category);
@@ -20,6 +20,18 @@ public sealed partial class IntegerLowering
                 call.Invocation.Method, call.Invocation.Receiver?.Type)) { Missing("Method"); return; }
             foreach (var value in ManagedValues.Of(statement).Concat(ManagedValues.CopiedValues(statement)).SelectMany(ManagedValues.Walk))
             {
+                bool referenceBits = value switch
+                {
+                    ConversionValue conversion => ReferenceType(conversion.Operand.Type),
+                    BinaryValue binary => ReferenceType(binary.Left.Type) || ReferenceType(binary.Right.Type),
+                    UnaryValue unary => ReferenceType(unary.Operand.Type),
+                    _ => false,
+                };
+                if (referenceBits)
+                {
+                    Fail<object>(LoweringFailureKind.UnsupportedType, "引用位型用于数值，缺少路径上的零值证明", code: "lowering.ReferenceBits");
+                    return;
+                }
                 if (!ManagedAccess.Type(types, method.Method.Owner, value.Type)) { Missing("Type"); return; }
                 if (value is FieldValue field && !ManagedAccess.Field(types, method, field.Field, field.Receiver.Type))
                 { Missing("Field"); return; }
