@@ -21,7 +21,7 @@ Q = [getattr(reg, f'UC_ARM64_REG_Q{i}') for i in range(32)]
 BOUNDARY = [0, MASK, 1 << 63, (1 << 63) - 1, 1, 31, 32, 63, 64, 65, 0x80000000, 0x7fffffff]
 CASES = []
 
-def instruction(group, word, expected, index, memory=False, branch=False, divide=False):
+def instruction(group, word, expected, index, memory=False, branch=False, divide=False, fp=0, result=0, lanes=1, low=0):
     encoded = struct.pack('<I', word)
     decoded = list(CS.disasm(encoded, PC))
     if len(decoded) != 1 or decoded[0].mnemonic not in expected.split():
@@ -54,6 +54,21 @@ def instruction(group, word, expected, index, memory=False, branch=False, divide
         if index < 12:
             u.reg_write(X[(word >> 5) & 31], a)
             u.reg_write(X[(word >> 16) & 31], b)
+    if fp:
+        import math
+        values = [0.0, -0.0, 1.0, -1.0, math.inf, -math.inf, math.nan,
+                  0.5, -0.5, 1.5, 2.5, -2.5, 2.0**31, -2.0**31,
+                  2.0**32, 2.0**63, -2.0**63, 2.0**64]
+        pack = '<f' if fp == 32 else '<d'
+        edges = [int.from_bytes(struct.pack(pack, v), 'little') for v in values]
+        edges += [1, (1 << (fp - 1)) | 1, 0x7f800001 if fp == 32 else 0x7ff0000000000001,
+                  0x007fffff if fp == 32 else 0x000fffffffffffff,
+                  0x00800000 if fp == 32 else 0x0010000000000000]
+        for j, r in enumerate(Q):
+            bits = edges[(index + j) % len(edges)] if index < len(edges) * 2 else state_random.getrandbits(fp)
+            u.reg_write(r, (state_random.getrandbits(128 - fp) << fp) | bits)
+        u.reg_write(reg.UC_ARM64_REG_FPCR, 0)
+        u.reg_write(reg.UC_ARM64_REG_FPSR, 0)
     def snapshot():
         return [str(u.reg_read(r)) for r in X + Q] + [str((u.reg_read(reg.UC_ARM64_REG_NZCV) >> bit) & 1) for bit in (31, 30, 29, 28)]
     before = snapshot()
@@ -72,11 +87,73 @@ def instruction(group, word, expected, index, memory=False, branch=False, divide
     u.emu_start(PC, PC + 4, count=1)
     # SIMD 的 128 位访问在模拟器中可能分成两个 64 位钩子；保存原始事件，检查端按字节比较。
     CASES.append(dict(group=group, word=word, mnemonic=decoded[0].mnemonic, before=before, after=snapshot(),
-                      accesses=accesses, next=u.reg_read(reg.UC_ARM64_REG_PC), trap=bool(trapped)))
+                      accesses=accesses, next=u.reg_read(reg.UC_ARM64_REG_PC), trap=bool(trapped), float_result=result, float_lanes=lanes, float_low=low))
 
 def fields(i):
     # 保留独立源；覆盖零寄存器与栈指针另用专门模板。
     return (R.randrange(0, 29), R.randrange(0, 29), R.randrange(0, 29))
+
+def floating_cases():
+    # 所有源寄存器独立；完整高位带随机值，验证标量写入清零。
+    for i in range(48):
+        for typ in (0, 1):
+            width = 32 << typ
+            base = 0x1e200000 | (typ << 22) | (1 << 5)
+            for opcode, name in enumerate(('fmul', 'fdiv', 'fadd', 'fsub', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fnmul')):
+                instruction('float-binary', base | 0x800 | (2 << 16) | (opcode << 12), name, i, fp=width, result=width)
+            for opcode, name in ((0, 'fmov'), (1, 'fabs'), (2, 'fneg'), (3, 'fsqrt'), (8, 'frintn'), (9, 'frintp'), (10, 'frintm'), (11, 'frintz'), (14, 'frintx'), (15, 'frinti')):
+                instruction('float-unary', base | 0x4000 | (opcode << 15), name, i, fp=width, result=width if opcode >= 3 else 0)
+            instruction('float-convert', base | 0x4000 | ((5 - typ) << 15), 'fcvt', i, fp=width, result=64 >> typ)
+            instruction('float-immediate', 0x1e201000 | (typ << 22) | ((i * 5 % 256) << 13), 'fmov', i)
+            for negate in (0, 1):
+                for subtract in (0, 1):
+                    instruction('float-fused', 0x1f000000 | (typ << 22) | (negate << 21) | (2 << 16) | (subtract << 15) | (3 << 10) | (1 << 5), 'fmadd fmsub fnmadd fnmsub', i, fp=width, result=width)
+            for signal in (0, 1):
+                for zero in (0, 1):
+                    instruction('float-compare', base | 0x2000 | ((0 if zero else 2) << 16) | (zero << 3) | (signal << 4), 'fcmp fcmpe', i, fp=width)
+                instruction('float-conditional-compare', base | 0x400 | (2 << 16) | ((i % 16) << 12) | (signal << 4) | (i % 16), 'fccmp fccmpe', i, fp=width)
+            instruction('float-select', base | 0xc00 | (2 << 16) | ((i % 16) << 12), 'fcsel', i, fp=width)
+            for sf in (0, 1):
+                for unsigned in (0, 1):
+                    instruction('integer-to-float', base | (sf << 31) | ((2 + unsigned) << 16), 'scvtf ucvtf', i, fp=width, result=width)
+                    for rounding in range(4):
+                        instruction('float-to-integer', base | (sf << 31) | (unsigned << 16) | (rounding << 19), 'fcvtns fcvtnu fcvtps fcvtpu fcvtms fcvtmu fcvtzs fcvtzu', i, fp=width)
+            for opcode in (6, 7):
+                instruction('float-bit-move', base | (typ << 31) | (opcode << 16), 'fmov', i, fp=width)
+        for op in (0x9eae0020, 0x9eaf0020):
+            instruction('float-bit-move', op, 'fmov', i)
+    for i in range(16):
+        for q in (0, 1):
+            instruction('vector-register-move', 0x0ea11c20 | (q << 30), 'mov', i)
+            for mode in range(16):
+                for op in (0, 1):
+                    if mode == 15 and op and not q: continue
+                    imm = [0, 255, 128, 1, 85, 170][i % 6]
+                    word = 0x0f000400 | (q << 30) | (op << 29) | (mode << 12) | ((imm >> 5) << 16) | ((imm & 31) << 5)
+                    instruction('vector-immediate', word, 'movi mvni orr bic fmov', i)
+            for size in range(4):
+                bits = 8 << size
+                lane = i % (128 // bits)
+                imm = (lane << (size + 1)) | (1 << size)
+                if size < 3 or q:
+                    instruction('vector-duplicate', 0x0e000400 | (q << 30) | (imm << 16) | (1 << 5), 'dup', i)
+                    instruction('vector-duplicate', 0x0e000c00 | (q << 30) | ((1 << size) << 16) | (1 << 5), 'dup', i)
+                if (q and size == 3) or (not q and size < 3):
+                    instruction('vector-extract', 0x0e003c00 | (q << 30) | (imm << 16) | (1 << 5), 'umov mov', i)
+                if bits < (64 if q else 32):
+                    instruction('vector-extract', 0x0e002c00 | (q << 30) | (imm << 16) | (1 << 5), 'smov', i)
+                if q:
+                    instruction('vector-insert', 0x4e001c20 | (imm << 16), 'mov ins', i)
+                    instruction('vector-insert', 0x6e000420 | (imm << 16) | ((lane << size) << 11), 'mov ins', i)
+                    instruction('vector-scalar-duplicate', 0x5e000420 | (imm << 16), 'mov dup', i)
+            for widen in (0, 1):
+                instruction('vector-float-convert', (0x0e617820 if widen else 0x0e616820) | (q << 30), 'fcvtl fcvtl2 fcvtn fcvtn2', i,
+                            fp=32 if widen else 64, result=64 if widen else 32, lanes=2, low=64 if q and not widen else 0)
+            for size in range(3):
+                instruction('vector-narrow', 0x0e212820 | (q << 30) | (size << 22), 'xtn xtn2', i)
+                for unsigned in (0, 1):
+                    bits = 8 << size
+                    instruction('vector-widen', 0x0f00a420 | (q << 30) | (unsigned << 29) | ((bits + i % bits) << 16), 'sshll sshll2 ushll ushll2 sxtl sxtl2 uxtl uxtl2', i)
 
 def main():
     for i in range(24):
@@ -177,6 +254,7 @@ def main():
             instruction('select-matrix', 0x9a810002 | (condition << 12), 'csel', flags)
             for subtract in (0, 1):
                 instruction('compare-matrix', 0xba420025 | (subtract << 30) | (condition << 12), 'ccmp ccmn', flags)
+    floating_cases()
     document = dict(schema=1, generator_sha256=hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
                     capstone=capstone.__version__, unicorn=unicorn.__version__, python=sys.version.split()[0], zlib=zlib.ZLIB_VERSION, cases=CASES)
     payload = json.dumps(document, sort_keys=True, separators=(',', ':')).encode()

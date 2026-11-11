@@ -57,7 +57,7 @@ internal static class Arm64Checks
             checks.True(mismatches == 0, $"{group.Key} 与独立模拟器一致");
         }
         RejectUnsupported(checks);
-        return checks.Finish("ARM64 整数前端");
+        return checks.Finish("ARM64 前端");
     }
     private static void Slots(Assertions checks)
     {
@@ -116,7 +116,8 @@ internal static class Arm64Checks
     }
     private static void RejectUnsupported(Assertions checks)
     {
-        foreach (var (word, code) in new (uint, string)[] { (0xd53b4400, "system-register"), (0xd51b4400, "system-register"),
+        foreach (var (word, code) in new (uint, string)[] { (0x1ee02820, "floating"), (0x1e264020, "floating"), (0x1e240020, "floating"), (0x0e217820, "vector"),
+            (0xd53b4400, "system-register"), (0xd53b4420, "system-register"), (0xd51b4420, "system-register"), (0xd51b4400, "system-register"),
             (0xd5033bbf, "barrier"), (0xd5033f5f, "exclusive"), (0x4c408120, "vector"), (0x4d40c920, "vector"), (0x4d40cd20, "vector"), (0x885f7c00, "exclusive"), (0xb8200000, "atomic"), (0x00000000, "unallocated") })
         {
             var emitter = new Concrete();
@@ -188,11 +189,35 @@ internal static class Arm64Checks
         public Term ImageAddress(ulong offset) => Terms.Constant(offset, 64);
         public Term ThreadPointer => Terms.Constant(0x201230, 64);
         public void Fail(Reason reason) => Failure = reason;
+        private static bool IsNaN(BigInteger value, int width)
+        {
+            int fraction = width == 32 ? 23 : 52, exponent = width == 32 ? 8 : 11;
+            var mask = (BigInteger.One << fraction) - 1;
+            return ((value >> fraction) & ((1 << exponent) - 1)) == (1 << exponent) - 1 && (value & mask) != 0;
+        }
         public List<string> Problems(JsonElement item)
         {
             if (Failure is not null) errors.Add(Failure.ToString());
             var after = item.GetProperty("after").EnumerateArray().ToArray();
-            for (int i = 0; i < All.Length; i++) if (Value(state[All[i]]) != Parse(after[i])) errors.Add($"{All[i].Name} expected={Parse(after[i]):x} actual={Value(state[All[i]]):x}");
+            int floatWidth = item.TryGetProperty("float_result", out var format) ? format.GetInt32() : 0;
+            int destination = (int)(item.GetProperty("word").GetUInt32() & 31) + 32;
+            for (int i = 0; i < All.Length; i++)
+            {
+                var actual = Value(state[All[i]]); var expected = Parse(after[i]);
+                var comparable = actual;
+                if (floatWidth != 0 && i == destination)
+                {
+                    int lanes = item.GetProperty("float_lanes").GetInt32(), low = item.GetProperty("float_low").GetInt32();
+                    var mask = (BigInteger.One << floatWidth) - 1;
+                    for (int lane = 0; lane < lanes; lane++)
+                    {
+                        int shift = low + lane * floatWidth;
+                        if (IsNaN(actual >> shift, floatWidth) && IsNaN(expected >> shift, floatWidth))
+                            comparable = (comparable & ~(mask << shift)) | (expected & (mask << shift));
+                    }
+                }
+                if (comparable != expected) errors.Add($"{All[i].Name} expected={expected:x} actual={actual:x}");
+            }
             if (next != item.GetProperty("next").GetUInt64()) errors.Add($"PC expected={item.GetProperty("next")} actual={next}");
             if (trap != item.GetProperty("trap").GetBoolean()) errors.Add("陷阱不一致");
             if (reads.Count != 0) errors.Add("遗漏读取");

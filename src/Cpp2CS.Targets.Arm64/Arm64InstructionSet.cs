@@ -169,6 +169,7 @@ public sealed partial class Arm64InstructionSet(IImage image) : IInstructionSet
             if (Is(0x1f000000, 0x1b000000)) { MultiplySource(); return; }
             if (BranchSystem()) return;
             if (Memory()) return;
+            if (VectorMove() || Floating()) return;
             if (Is(0x0e000000, 0x0c000000)) { Hole("vector"); return; }
             if (Is(0x0e000000, 0x0e000000)) { Hole(Bit(28) && !Bit(30) ? "floating" : "vector"); return; }
             Hole();
