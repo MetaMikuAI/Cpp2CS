@@ -70,17 +70,28 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
     private readonly ManagedLocationQuery? locations;
     private readonly ImmutableArray<StructOrigin> origins;
     private readonly SourceRangeQuery ranges;
+    private readonly BoundSourceQuery sourcePointers;
     private readonly FlowQueries flow = new();
     public StructPartQuery Parts { get; }
     public StructValueQuery(ManagedTypes types, StateQueries state, ManagedLocationQuery? locations, IEnumerable<StructOrigin> origins)
     {
         this.types = types; this.state = state; this.locations = locations; this.origins = origins.ToImmutableArray();
-        ranges = new(state); Parts = new(this);
+        ranges = new(state); sourcePointers = new(state); Parts = new(this);
     }
     public override Outcome<StructPlan> Compute(QueryContext c, StructRequest key)
     {
         if (key.Type is not DefinitionRef structure || types.Layouts.Of(structure) is null)
             return Failure("Layout", "结构体缺少封闭实例布局。");
+        // ABI 的间接按值输入读取整个对象；求值点就是原调用处，不把内容转发过其他调用。
+        if (locations?.Frames is { } frames && key.Source is IndirectSource indirect && indirect.Length * 8 == types.StorageBits(structure))
+        {
+            var pointer = c.Get(sourcePointers, new(indirect.Address, key.Point));
+            if (!pointer.IsSuccess) return pointer.Propagate<StructPlan>();
+            var resolved = c.Get(state.Resolve, pointer.Value); if (!resolved.IsSuccess) return resolved.Propagate<StructPlan>();
+            var native = c.Get(state.Locations, new(resolved.Value, indirect.Length * 8)); if (!native.IsSuccess) return native.Propagate<StructPlan>();
+            var view = frames.Locate(native.Value).Views.FirstOrDefault(v => v.Type.Equals(key.Type) && v.Offset == 0 && v.Path.IsEmpty);
+            if (view is not null) return Outcome<StructPlan>.Success(new(null, view, null, []));
+        }
         var projections = types.Projections(structure).OrderBy(p => p.Bit).ToArray();
         if (projections.Length == 0) return Failure("Layout", "结构体没有可证明的叶子字段。");
         int end = 0;
@@ -126,12 +137,13 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
         if (locations is null) return None();
         var index = c.Get(state.Index, 0); if (!index.IsSuccess) return index.Propagate<StructPlan?>();
         LocationView? whole = null;
-        var observations = new List<(MemoryAtom Memory, Term Atom, Point Point, MemoryRead Read)>();
+        var observations = new List<(Location Location, Term Atom, Point Point, MemoryRead Read)>();
         foreach (var leaf in leaves)
         {
             var term = leaf.Value; int low = 0;
             if (term.Kind == TermKind.Slice) { low = term.SliceLow!.Value; term = term.Operands[0]; }
-            if (term.Identity is not MemoryAtom memory) return None();
+            var memory = term.Identity switch { MemoryAtom atom => atom.Location, MemoryMerge merge => merge.Location, _ => null };
+            if (memory is null) return None();
             // 读取身份来自快照索引；同值复用选择其中最早的原读取。
             (Point Point, MemoryRead Read)? observation = null;
             foreach (var read in index.Value.Reads.Values.OrderBy(r => r.Point.Before))
@@ -170,7 +182,7 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
             .Any(s => s is Call or MemoryWrite || s is MemoryRead read && !reads.Contains(read.Identity))) return None();
         foreach (var observation in observations)
         {
-            var value = c.Get(state.ValueAt, new(first.Point, observation.Memory.Location));
+            var value = c.Get(state.ValueAt, new(first.Point, observation.Location));
             if (!value.IsSuccess) return value.Propagate<StructPlan?>();
             if (value.Value != observation.Atom) return None();
         }
@@ -236,7 +248,8 @@ public sealed class StructMemoryPartQuery(StateQueries state, ManagedLocationQue
         var desired = c.Get(state.Resolve, c.Snapshot.Terms.Slice(key.Term, key.Low, key.Width));
         if (!desired.IsSuccess) return desired.Propagate<StructMemoryPart?>();
         if (desired.Value.Kind != TermKind.Slice || desired.Value.SliceLow!.Value % 8 != 0
-            || desired.Value.Operands[0].Identity is not MemoryAtom { Location.Region: Region.Other }) return None();
+            || desired.Value.Operands[0].Identity is not (MemoryAtom { Location.Region: Region.Other or Region.Frame }
+                or MemoryMerge { Location.Region: Region.Frame })) return None();
         var source = desired.Value.Operands[0];
         var index = c.Get(state.Index, 0); if (!index.IsSuccess) return index.Propagate<StructMemoryPart?>();
         var reads = ImmutableArray.CreateBuilder<ReadIdentity>(); LocationView? field = null;

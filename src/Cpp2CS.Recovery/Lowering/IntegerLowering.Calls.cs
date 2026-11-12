@@ -36,10 +36,14 @@ public sealed partial class IntegerLowering
         if (!classified.IsSuccess) { Fail<object>(LoweringFailureKind.Call, "调用分类失败", classified.Why); return; }
         var c = classified.Value;
         if (c.Kind is CallKind.Runtime or CallKind.System && c.Binding is { } external)
-            foreach (var bound in external.Arguments)
+            for (int i = 0; i < external.Arguments.Length; i++)
             {
+                var bound = external.Arguments[i];
                 var input = context.Get(boundSources, new(bound.Source, point));
-                if (input.IsSuccess && RejectAddressUse([input.Value], "运行时或系统函数的实参")) return;
+                // Pointee 是登记过的内容读取，不把装箱等读取缓冲区的地址当作逃逸的值。
+                var name = c.Function?.Arguments.ElementAtOrDefault(i);
+                bool contents = c.Operation?.Inputs.Any(v => v.Name == name && v.Use == RuntimeInputUse.Pointee) == true;
+                if (input.IsSuccess && RejectAddressUse([input.Value], "运行时或系统函数的实参", contents)) return;
             }
         if (call.Unwind is not null) { Fail<object>(LoweringFailureKind.Exception, "调用的异常边尚未下降"); return; }
         if (c.Kind == CallKind.Runtime && c.Operation is { Result.Kind: RuntimeValueKind.InvokeData })
@@ -185,13 +189,6 @@ public sealed partial class IntegerLowering
         if (term is null) return null;
         var resolved = context.Get(state.Resolve, term);
         if (!resolved.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "实参状态查询失败", resolved.Why);
-        if (type is ByRefRef { Element: var element } && types.Kind(element) == TypeKind.Struct
-            && context.Get(state.Locations, new(resolved.Value, 8)) is { IsSuccess: true, Value.Region: Region.Frame })
-        {
-            Fail<object>(LoweringFailureKind.UnsupportedType, "帧上结构体地址的生存期与调用写入尚未下降", code: "lowering.Struct.FrameAddress");
-            if (failure is { StructType: null } missing) failure = missing with { StructType = element };
-            return null;
-        }
         if (type is ByRefRef addressType) return AddressArgument(resolved.Value, addressType.Element);
         if (RejectAddressUse([resolved.Value], type is PointerRef ? "非托管指针形参" : "非按引用形参")) return null;
         var knownType = StaticType(resolved.Value);

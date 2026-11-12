@@ -10,7 +10,7 @@ using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.Locations;
 
-public enum ManagedLocationKind { InstanceField, ArrayElement, ArrayLength, StaticField, Indirect, NotManaged, Unknown }
+public enum ManagedLocationKind { FrameLocal, InstanceField, ArrayElement, ArrayLength, StaticField, Indirect, NotManaged, Unknown }
 /// <summary>Offset 是路径末端内的字节偏移，Width 是位宽；Type 为字段或元素类型，长度位置则为数组类型。Basis 保留签名或规格依据。</summary>
 public sealed record LocationView(ManagedLocationKind Kind, Term Root, TypeRef Type,
     ImmutableArray<FieldRef> Path, BigInteger Offset, int Width, Term? Index, ValueName? Basis, TypeRef? ElementType = null);
@@ -24,12 +24,13 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
     internal readonly ValueNamingQuery Names;
     internal readonly ITypeLayouts Layouts;
     private readonly RuntimeSpec spec;
+    internal readonly FrameObjects? Frames;
     public LocationTypeQuery Types { get; }
     public ManagedAddressQuery Addresses { get; }
     internal ManagedReadTypeQuery ReadTypes { get; }
-    public ManagedLocationQuery(StateQueries state, ValueNamingQuery names, ITypeLayouts layouts, RuntimeSpec spec)
+    public ManagedLocationQuery(StateQueries state, ValueNamingQuery names, ITypeLayouts layouts, RuntimeSpec spec, FrameObjects? frames = null)
     {
-        State = state; Names = names; Layouts = layouts; this.spec = spec; Types = new(this); ReadTypes = new(this); Addresses = new(this);
+        State = state; Names = names; Layouts = layouts; this.spec = spec; Frames = frames; Types = new(this); ReadTypes = new(this); Addresses = new(this);
         names.UseLocations(this);
     }
     public QueryContext CreateContext(NativeFunction function) => new(function, null, State.Group,
@@ -44,6 +45,11 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
         var resolved = c.Get(State.Resolve, key.Address); if (!resolved.IsSuccess) return resolved.Propagate<LocationResult>();
         var address = resolved.Value;
         var location = c.Get(State.Locations, new(address, key.Width)); if (!location.IsSuccess) return location.Propagate<LocationResult>();
+        if (location.Value.Region == Region.Frame && Frames is not null)
+        {
+            var frame = Frames.Locate(location.Value);
+            if (!frame.Views.IsEmpty) return Outcome<LocationResult>.Success(frame);
+        }
         if (location.Value.Region is Region.Frame or Region.Image) return NotManaged(location.Value.Region.ToString());
         if (location.Value.Region == Region.Thread) return Unknown("thread-static", "线程区域尚不定位。");
         var runtimeField = c.Get(Names.SpecificationReads, new(Names, location.Value));

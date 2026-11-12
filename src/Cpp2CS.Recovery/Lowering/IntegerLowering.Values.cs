@@ -49,6 +49,8 @@ public sealed partial class IntegerLowering
     }
     private ManagedValue? BuildValue(Term term, bool floating = false)
     {
+        if (term.Identity is RootAtom { Kind: AddressRoot.Frame })
+            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "帧地址用于普通值或运算", code: "lowering.Frame.Use");
         if (locations is not null && context.Get(locations.Addresses, term).IsSuccess && StaticType(term) is not ByRefRef)
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "托管地址用于运算、比较或普通值", code: "lowering.Address.Use");
         var structurePart = StructPart(term, 0, term.Width);
@@ -133,6 +135,8 @@ public sealed partial class IntegerLowering
             var root = pair.Key.Kind == TermKind.Slice ? pair.Key.Operands[0] : pair.Key;
             int start = pair.Key.SliceLow ?? 0;
             if (term != root || low < start || low + width > start + pair.Key.Width) continue;
+            if (ReferenceType(pair.Value.Type)) return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType,
+                "托管引用或地址的部分位片用于普通值或运算", code: "lowering.Address.Use");
             if (!Opaque(pair.Value.Type) && !IntegerType(pair.Value.Type) && !IsFloat(pair.Value.Type)) return Fail<ManagedValue>(TypeFailure(pair.Value.Type), "使用了非整数形参位片");
             return Slice(pair.Value, low - start, width);
         }

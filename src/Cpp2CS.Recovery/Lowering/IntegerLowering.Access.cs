@@ -91,10 +91,10 @@ public sealed partial class IntegerLowering
         if (!address.IsSuccess) return;
         var location = context.Get(state.Locations, new(address.Value, read.Width));
         if (!location.IsSuccess) return;
-        if (location.Value.Region == Region.Frame) return;
+        if (location.Value.Region == Region.Frame && !FrameContains(location.Value)) return;
         var resolved = context.Get(state.Read, read.Identity);
         if (!resolved.IsSuccess) return;
-        if (resolved.Value.Identity is not MemoryAtom { Location.Region: not Region.Frame }) return;
+        if (resolved.Value.Identity is not MemoryAtom && !(location.Value.Region == Region.Frame && resolved.Value.Identity is MemoryMerge)) return;
         if (!readValues.TryGetValue(resolved.Value, out var definition))
             readValues.Add(resolved.Value, definition = new(read));
         readDefinitions.Add(read.Identity, definition);
@@ -112,7 +112,9 @@ public sealed partial class IntegerLowering
         var value = Access(read.Address, read.Width);
         if (value is null) return null;
         if (types.Kind(value.Type) == TypeKind.Struct)
-            return StructScalarFailure(value.Type);
+            return frameObjects?.Accesses.ContainsKey(read.Identity) == true
+                ? Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "结构体帧读取不能作为跨字段标量使用：" + value.Type, code: "lowering.Frame.Struct")
+                : StructScalarFailure(value.Type);
         definition.Accessor = FieldAccessor(value, false, definition);
         if (failure is not null) return null;
         position = usePosition;
@@ -229,7 +231,8 @@ public sealed partial class IntegerLowering
             return GenericFailure<ManagedValue>("Struct", "含类型参数的值类型访问尚未下降");
         var exact = location.Views.Where(v => (expectedType is null || v.Type.Equals(expectedType)) && v.Offset == 0 && (v.Kind == ManagedLocationKind.ArrayLength
             || types.Size(v.Type) * 8 == width)).ToArray();
-        var views = exact.Where(v => v.Kind == ManagedLocationKind.ArrayLength || Scalar(v.Type)).ToArray();
+        var views = exact.Where(v => v.Kind == ManagedLocationKind.ArrayLength || Scalar(v.Type)
+            || v.Kind == ManagedLocationKind.FrameLocal && ManagedTypes.IsNativePointer(v.Type)).ToArray();
         if (views.Length == 0)
         {
             views = exact.Where(v => types.Kind(v.Type) == TypeKind.Struct).OrderBy(v => v.Path.Length).ToArray();
@@ -266,7 +269,7 @@ public sealed partial class IntegerLowering
                 return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "访问的值类型尚未下降");
             return storage;
         }
-        var root = Value(view.Root);
+        var root = view.Kind == ManagedLocationKind.FrameLocal ? FrameLocal(frameObjects!.Objects.Single(o => o.Address == view.Root)) : Value(view.Root);
         if (root is null) return null;
         if (Opaque(root.Type)) return GenericFailure<ManagedValue>("Receiver", "类型参数值不能作为字段或数组接收者");
         if (view.Kind == ManagedLocationKind.Indirect) return new IndirectValue(root, view.Type, ValueWidth(view.Type));
@@ -284,11 +287,12 @@ public sealed partial class IntegerLowering
         }
         foreach (var field in view.Path)
         {
-            if (write && types.Kind(value.Type) == TypeKind.Struct) value = new AddressValue(value, types.PointerSize * 8);
+            if ((write || view.Kind == ManagedLocationKind.FrameLocal) && types.Kind(value.Type) == TypeKind.Struct) value = new AddressValue(value, types.PointerSize * 8);
             var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
             value = new FieldValue(value, field, type, ValueWidth(type));
         }
-        if (!address && !Scalar(value.Type) && types.Kind(value.Type) != TypeKind.Struct)
+        if (!address && !Scalar(value.Type) && types.Kind(value.Type) != TypeKind.Struct
+            && !(view.Kind == ManagedLocationKind.FrameLocal && ManagedTypes.IsNativePointer(value.Type)))
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "访问的值类型尚未下降");
         return value;
     }

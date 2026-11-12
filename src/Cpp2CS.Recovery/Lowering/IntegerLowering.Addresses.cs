@@ -38,10 +38,20 @@ public sealed partial class IntegerLowering
         return target is null ? null : new AddressValue(target, types.PointerSize * 8);
     }
 
-    private bool RejectAddressUse(IEnumerable<Term> roots, string use)
+    private bool RejectAddressUse(IEnumerable<Term> roots, string use, bool frameContents = false)
     {
         if (locations is null) return false;
-        foreach (var term in SnapshotRewrite.Dependencies(roots))
+        var inputs = roots.ToArray();
+        foreach (var root in frameContents ? [] : inputs)
+        {
+            var frame = context.Get(frameAddressUses, root);
+            if (frame.IsSuccess && !frame.Value.IsEmpty)
+            {
+                Fail<object>(LoweringFailureKind.UnsupportedType, "帧地址用于" + use, code: "lowering.Frame.Use");
+                return true;
+            }
+        }
+        foreach (var term in SnapshotRewrite.Dependencies(inputs))
             if (context.Get(locations.Addresses, term).IsSuccess && StaticType(term) is not ByRefRef)
             {
                 Fail<object>(LoweringFailureKind.UnsupportedType, "托管地址用于" + use, code: "lowering.Address.Use");

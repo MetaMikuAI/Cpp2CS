@@ -28,6 +28,11 @@ internal static class ManagedExecutionChecks
                 public static int Null() { B b=null; return b.X; }
                 public static int ExplicitNull() => throw new System.NullReferenceException();
                 public static void Touch(ref int value) { value++; }
+                public static int LocalOut() { Set(out int x); return x; }
+                public static void Set(out int x) { x = 19; }
+                public static int LocalRef() { int x = 3; Touch(ref x); return x; }
+                public static int LocalAlias() { int x = 3; ref int r = ref x; Touch(ref r); x = 11; r += 2; return x; }
+                public static int LocalStruct() { Pair p = default; Set(out p.X); p.Y = 4; ref Pair r = ref p; r.Y = 9; return p.X + p.Y; }
                 public static void TouchObject(ref object value) { value = null; }
                 public static void FieldAddressNull() { B b=null; Touch(ref b.X); }
                 public static void ArrayAddressNull() { int[] a=null; Touch(ref a[0]); }
@@ -61,7 +66,7 @@ internal static class ManagedExecutionChecks
             var method = source.Method("Cases", name); var reference = model.Method(method);
             return interpreter.Run(new World(index, 0, new Hints([], []), reference.DeclaringType), method, reference, values);
         }
-        foreach (var (name, expected) in new[] { ("Arithmetic", "80000000"), ("Fields", "9"), ("Virtual", "5"), ("Interface", "1"),
+        foreach (var (name, expected) in new[] { ("LocalOut", "13"), ("LocalRef", "4"), ("LocalAlias", "d"), ("LocalStruct", "1c"), ("Arithmetic", "80000000"), ("Fields", "9"), ("Virtual", "5"), ("Interface", "1"),
             ("NewSlot", "4"), ("GenericVirtual", "17"), ("Reflection", "1"), ("Text", "3"), ("Box", "11"), ("Finally", "8"), ("CatchFinally", "c"), ("Struct", "b") })
         {
             var side = Run(name);

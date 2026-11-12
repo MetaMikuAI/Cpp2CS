@@ -69,6 +69,7 @@ public sealed partial class IntegerLowering
             result.Why!.Message, result.Why, result.Why.Code.StartsWith("lowering.Struct.", StringComparison.Ordinal) ? result.Why.Code : "lowering.Struct.Source");
         var plan = result.Value;
         if (plan.Origin is { } origin) return StructOriginValue(origin);
+        if (plan.Location is { Kind: ManagedLocationKind.FrameLocal } frame && plan.Read is null) return AccessView(frame);
         if (plan.Location is { } location && plan.Read is { } read)
         {
             var key = (read, location);
@@ -83,8 +84,10 @@ public sealed partial class IntegerLowering
         if (source is IndirectSource indirect && BoundTerm(indirect.Address, point) is { } pointer
             && context.Get(state.Resolve, pointer) is { IsSuccess: true } resolved
             && context.Get(state.Locations, new(resolved.Value, 8)) is { IsSuccess: true, Value.Region: Region.Frame })
-            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "帧上结构体局部缺少整体来源，地址与生存期尚未下降", code: "lowering.Struct.FrameLocal");
+            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "帧上结构体局部缺少整体来源：" + type, code: "lowering.Struct.FrameLocal");
         if (failure is not null) return null;
+        // 全部叶子均为零时就是 default；不需要逐个写入私有或只读字段。
+        if (plan.Leaves.Length > 0 && plan.Leaves.All(leaf => leaf.Value.ConstantValue == 0)) return new ComposedValue(type, []);
         if (plan.Representation is { } representation)
         {
             if (TokenHandle(type, plan) is { } token) return token;

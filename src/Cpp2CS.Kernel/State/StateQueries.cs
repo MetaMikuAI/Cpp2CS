@@ -111,6 +111,12 @@ public sealed class StateQueries
             return Outcome<(Term?, Overlap)>.Success((w.Value, a.Value));
         }
         if (statement is not Call call) return Outcome<(Term?, Overlap)>.Success((null, new(AliasKind.Disjoint)));
+        // 取走的帧地址可由被调方保留；后续任意调用都是可能改写。
+        if (location.Region == Region.Frame)
+        {
+            var escaped = c.Get(Escapes, 0); if (!escaped.IsSuccess) return escaped.Propagate<(Term?, Overlap)>();
+            if (escaped.Value.MayReach(location)) return Clobber(c, location, call.Identity);
+        }
         var effects = c.Get(Effects, call.Identity); if (!effects.IsSuccess) return effects.Propagate<(Term?, Overlap)>();
         foreach (var written in effects.Value.Writes)
         {

@@ -66,6 +66,7 @@ public sealed partial class IntegerLowering
         this.constructors = constructors;
         state = new(effects, image: image);
         boundSources = new(state);
+        frameAddressUses = new(state);
         context = state.CreateContext(function);
         labels = function.Blocks.OrderByDescending(b => b.Identity == function.Entry)
             .Select((b, i) => (b.Identity, Label: (ulong)i)).ToDictionary(p => p.Identity, p => p.Label);
@@ -115,6 +116,8 @@ public sealed partial class IntegerLowering
                 if (failure is not null) return new(null, failure);
             }
         }
+        PrepareFrameObjects();
+        if (failure is not null) return new(null, failure);
         PairConstructions();
         if (failure is not null) return new(null, failure);
         PairUnboxes();
@@ -156,15 +159,16 @@ public sealed partial class IntegerLowering
                     var statement = LowerCall(call, new(b.Identity, i));
                     if (statement is null) return new(null, failure);
                     statements.Add(statement);
+                    if (FrameCallResult(call) is { } stored) statements.Add(stored);
+                    if (failure is not null) return new(null, failure);
                     // 不返回的托管调用之后没有后继；方法体以不可达的 throw null 收尾，依据是不返回分析对被调函数的证明。
                     if (call.DoesNotReturn && statement is ManagedCall)
                         statements.Add(new ManagedThrow(position, new ConstantValue(0, types.Object, types.PointerSize * 8)));
                 }
                 else if (native is MemoryWrite write)
                 {
-                    var statement = LowerStore(write, new(b.Identity, i));
+                    statements.AddRange(LowerStores(write, new(b.Identity, i)));
                     if (failure is not null) return new(null, failure);
-                    if (statement is not null) statements.Add(statement);
                 }
                 else if (native is MemoryRead read)
                 {
@@ -254,9 +258,9 @@ public sealed partial class IntegerLowering
                 return condition is null ? null : new ManagedBranch(position, condition, Edge(b.Identity, branch.True), Edge(b.Identity, branch.False));
             case Return r:
                 if (ManagedTypes.IsVoid(method.Concrete(method.Method.ReturnType))) return new ManagedReturn(position, null);
-                if (RejectAddressUse(r.Results.Select(r => r.Value), "返回值")) return null;
                 var returnType = method.Concrete(method.Method.ReturnType);
                 var bound = binder.Return(r, signature, function.Terms, function.Inputs.Select(i => new SlotValue(i.Slot, i.Value)).ToImmutableArray(), function.IncomingArgumentArea);
+                if (bound.Value?.Source is TermSource returned && RejectAddressUse([returned.Term], "返回值")) return null;
                 if (types.Kind(returnType) == TypeKind.Struct)
                 {
                     if (bound.Value?.Source is not { } aggregate) return Fail<ManagedStatement>(LoweringFailureKind.Binding, bound.Failure?.Detail ?? "结构体返回值绑定失败", code: "lowering.Struct.Binding");

@@ -753,6 +753,9 @@ internal static partial class LoweringChecks
         }
         var target = Method("Identity", pairType, pairType);
         var refTarget = Method("TakeRef", Primitive("Void"), new ByRefRef(pairType));
+        var createLarge = Method("CreateLarge", largeType);
+        var refLarge = Method("TakeLargeRef", Primitive("Void"), new ByRefRef(largeType));
+        var consumeLarge = Method("ConsumeLarge", Primitive("Void"), largeType);
         var cases = new Dictionary<string, MethodDef> {
             ["Forward"] = Method("Forward", pairType, pairType),
             ["ReferenceRoot"] = Method("ReferenceRoot", Primitive("Int32"), new ByRefRef(referenceWrapperType)),
@@ -762,6 +765,12 @@ internal static partial class LoweringChecks
             ["ComposePadded"] = Method("ComposePadded", paddedType, Primitive("Int64")),
             ["ProjectWide"] = Method("ProjectWide", otherPairType, boxType),
             ["FrameRef"] = Method("FrameRef", Primitive("Void")),
+            ["FrameWhole"] = Method("FrameWhole", pairType, pairType),
+            ["FrameIndirectResult"] = Method("FrameIndirectResult", Primitive("Int64")),
+            ["FrameResultSnapshot"] = Method("FrameResultSnapshot", Primitive("Int64")),
+            ["FrameLargePass"] = Method("FrameLargePass", Primitive("Void")),
+            ["FrameBufferPartial"] = Method("FrameBufferPartial", Primitive("Int64")),
+            ["FrameBufferPhi"] = Method("FrameBufferPhi", Primitive("Int64")),
             ["Wrap"] = Method("Wrap", wrapperType, Primitive("Int32")),
             ["WrapPointer"] = Method("WrapPointer", pointerWrapperType, Primitive("Int64")),
             ["WrapUnsignedPointer"] = Method("WrapUnsignedPointer", unsignedPointerWrapperType, Primitive("UInt64")),
@@ -808,7 +817,7 @@ internal static partial class LoweringChecks
             }
             var root = Input(mode is "Hfa" or "ComposeHfa" ? SlotKind.Floating : SlotKind.Integer, 0);
             var statements = new List<Statement>();
-            Term Add(Term value, long offset) => terms.Apply(new CoreOperator(CoreOperation.Add), 64, value, terms.Constant(offset, 64));
+            Term Add(Term value, long offset) => terms.Apply(new CoreOperator(CoreOperation.Add), 64, value, terms.Constant(unchecked((ulong)offset), 64));
             Term Read(Term address, int width)
             {
                 var id = new ReadIdentity(); var term = terms.Atom(new ResultAtom(id), width);
@@ -842,12 +851,38 @@ internal static partial class LoweringChecks
                 result = terms.Concat(first, Read(Add(root, box.Fields[0].Offset + 4), 32));
             }
             Term? secondResult = null;
+            Merge? bufferMerge = null; BlockIdentity? bufferLeft = null, bufferRight = null, bufferJoin = null;
             if (mode == "Compose") result = terms.Concat(terms.Slice(root, 0, 32), terms.Slice(Input(SlotKind.Integer, 1), 0, 32));
             if (mode == "ComposeMixed") secondResult = terms.Concat(terms.Slice(Input(SlotKind.Integer, 1), 0, 32), terms.Undefined(32));
             if (mode == "ComposePadded")
             {
                 secondResult = root;
                 result = terms.Concat(terms.Constant(3, 8), terms.Undefined(56));
+            }
+            if (mode == "FrameWhole")
+            {
+                var address = Add(frame, -32);
+                statements.Add(new MemoryWrite(new(), address, 32, terms.Slice(root, 0, 32)));
+                statements.Add(new MemoryWrite(new(), Add(address, 4), 32, terms.Slice(root, 32, 32)));
+                statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+                result = Read(address, 64);
+            }
+            if (mode is "FrameIndirectResult" or "FrameResultSnapshot" or "FrameLargePass" or "FrameBufferPartial" or "FrameBufferPhi")
+            {
+                var address = Add(frame, -64);
+                Term buffer = mode == "FrameBufferPartial" ? Add(address, 8) : address;
+                if (mode == "FrameBufferPhi")
+                {
+                    bufferLeft = new(); bufferRight = new(); bufferJoin = new();
+                    var mergeId = new MergeIdentity(); buffer = terms.Atom(new ResultAtom(mergeId), 64);
+                    bufferMerge = new(mergeId, buffer, [new(bufferLeft, address), new(bufferRight, Add(address, 8))]);
+                }
+                statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), terms.Constant(0, 64)),
+                    new(new(SlotKind.IndirectResult), buffer)], []));
+                if (mode == "FrameResultSnapshot") result = Read(Add(address, 8), 64);
+                statements.Add(new Call(new(), new ImageFunction(30), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+                if (mode == "FrameLargePass") statements.Add(new Call(new(), new ImageFunction(40), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+                else if (mode != "FrameResultSnapshot") result = Read(Add(address, 8), 64);
             }
             if (mode == "FrameRef") statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), frame), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
             if (mode == "StoreForward") statements.Add(new MemoryWrite(new(), Add(root, box.Fields[1].Offset), 32, terms.Slice(Input(SlotKind.Integer, 1), 0, 32)));
@@ -868,12 +903,26 @@ internal static partial class LoweringChecks
             if (mode == "Incomplete") result = terms.Concat(terms.Slice(root, 0, 32), terms.Undefined(32));
             var returned = mode is "Hfa" or "ComposeHfa" ? new Return([new(new(SlotKind.Floating), root), new(new(SlotKind.Floating, 1), Input(SlotKind.Floating, 1))])
                 : new Return(secondResult is null ? [new(new(SlotKind.Integer), result)] : [new(new(SlotKind.Integer), result), new(new(SlotKind.Integer, 1), secondResult)]);
-            builder.Blocks.Add(new(entry, [], statements.ToImmutableArray(), mode is "LargeForward" or "InterleavedLarge" ? new Return([]) : returned));
-            var calls = new CallNamingQuery(binder, new NamingChecks.Map([new BindingEntry(MethodRef.Open(mode == "FrameRef" ? refTarget : target), BindingEntryKind.Ordinary)]), new NamingChecks.RuntimeMap(), catalog);
-            var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(definition), binder, types, calls: calls, effects: new ManagedCallEffects(calls), spec: spec, names: facts).Run();
-            if (mode is "PrivateWrap" or "PrivateUnwrap" or "ReadonlyWrap" or "WrongToken" or "FrameRef")
+            if (bufferMerge is not null)
             {
-                var expected = mode switch { "FrameRef" => "lowering.Struct.FrameAddress", "PrivateUnwrap" => "lowering.Access.Field", "ReadonlyWrap" => "lowering.Struct.Readonly", "WrongToken" => "lowering.Struct.TokenEntity", _ => "lowering.Struct.Inaccessible" };
+                builder.Blocks.Add(new(entry, [], [], new Branch(terms.Constant(1, 1), bufferLeft!, bufferRight!)));
+                builder.Blocks.Add(new(bufferLeft!, [], [], new Jump(bufferJoin!)));
+                builder.Blocks.Add(new(bufferRight!, [], [], new Jump(bufferJoin!)));
+                builder.Blocks.Add(new(bufferJoin!, [bufferMerge], [.. statements], returned));
+            }
+            else builder.Blocks.Add(new(entry, [], statements.ToImmutableArray(), mode is "LargeForward" or "InterleavedLarge" ? new Return([]) : returned));
+            var selectedTarget = mode is "FrameRef" or "FrameWhole" ? refTarget
+                : mode is "FrameIndirectResult" or "FrameResultSnapshot" or "FrameLargePass" or "FrameBufferPartial" or "FrameBufferPhi" ? createLarge : target;
+            var calls = new CallNamingQuery(binder, new AddressMap(selectedTarget, refLarge, consumeLarge), new NamingChecks.RuntimeMap(), catalog);
+            var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(definition), binder, types, calls: calls, effects: new ManagedCallEffects(calls), spec: spec, names: facts).Run();
+            if (mode is "FrameBufferPartial" or "FrameBufferPhi")
+            {
+                checks.True(lowered.Failure?.Reason.Code == "lowering.Frame.Struct" && lowered.Failure.Reason.Message.Contains(largeType.ToString(), StringComparison.Ordinal), "间接结果部分覆盖结构体帧时报类型明确的洞");
+                continue;
+            }
+            if (mode is "PrivateWrap" or "PrivateUnwrap" or "ReadonlyWrap" or "WrongToken")
+            {
+                var expected = mode switch { "PrivateUnwrap" => "lowering.Access.Field", "ReadonlyWrap" => "lowering.Struct.Readonly", "WrongToken" => "lowering.Struct.TokenEntity", _ => "lowering.Struct.Inaccessible" };
                 checks.True(lowered.Failure?.Reason.Code == expected, mode + " 分开报告不可写或实体不匹配：" + lowered.Failure);
                 continue;
             }
@@ -884,6 +933,19 @@ internal static partial class LoweringChecks
             }
             checks.True(lowered.Body is not null, mode + " 结构体下降：" + lowered.Failure);
             if (lowered.Body is not { } body) continue;
+            if (mode is "FrameIndirectResult" or "FrameResultSnapshot" or "FrameLargePass")
+            {
+                var loweredCalls = body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().ToArray();
+                var original = loweredCalls[0].Result;
+                var stored = body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>().SingleOrDefault(a => a.Value == original);
+                checks.True(original is not null && stored is not null && stored.Target != original, mode + " 间接结果用独立快照写回可变帧局部");
+                checks.True(loweredCalls[1].Invocation.Arguments[0] is AddressValue address && address.Target == stored?.Target, mode + " 后续按引用调用使用同一帧局部");
+                if (mode == "FrameLargePass") checks.True(loweredCalls[2].Invocation.Arguments[0] == stored?.Target, "间接 ABI 的结构体帧整体按值传出");
+                if (mode == "FrameResultSnapshot") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>()
+                    .SelectMany(r => ManagedValues.Walk(r.Value!)).OfType<FieldValue>().Any(f => f.Receiver == original), "调用前读取保持独立调用结果快照，不读后来被改写的帧局部");
+            }
+            if (mode == "FrameWhole") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
+                .Any(a => a.Value is ArgumentValue { Index: 0 } && a.Target.Type.Equals(pairType)), "连续叶子写入按同类型整体复制到帧局部");
             var problems = emitter.Emit([body]);
             checks.True(problems.Count == 0, mode + " 结构体 CIL 校验：" + string.Join(';', problems.Values));
             if (mode.EndsWith("Token", StringComparison.Ordinal)) checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value is TypeHandleValue or FieldHandleValue or MethodHandleValue, mode + " 使用 ldtoken 值");
@@ -1044,6 +1106,13 @@ internal static partial class LoweringChecks
         else builder.Blocks.Add(new(entry, [], [], Ret(sum)));
         return builder.Freeze();
     }
+    private sealed class AddressMap(MethodDef target, MethodDef wrong, MethodDef unrelated) : IBindingCodeMap
+    {
+        public ImmutableArray<BindingEntry> At(ulong address) => address switch {
+            10 => [new(MethodRef.Open(target), BindingEntryKind.Ordinary)],
+            30 => [new(MethodRef.Open(wrong), BindingEntryKind.Ordinary)],
+            40 => [new(MethodRef.Open(unrelated), BindingEntryKind.Ordinary)], _ => [] };
+    }
     private static void AddressChecks(Assertions checks, ProgramModel primitives)
     {
         var spec = InputCorpusChecks.Spec("arm64-v8a");
@@ -1087,11 +1156,15 @@ internal static partial class LoweringChecks
         var wrong = Method(owner, "Wrong", Primitive("Void"), [new ByRefRef(Primitive("Int64"))]);
         var pointer = Method(owner, "Pointer", Primitive("Void"), [new PointerRef(integer)]);
         var ordinary = Method(owner, "Ordinary", Primitive("Void"), [Primitive("Int64")]);
+        var unrelated = Method(owner, "Unrelated", Primitive("Void"), []);
         var takeObject = Method(owner, "TakeObject", Primitive("Void"), [new ByRefRef(reference)]);
+        var takeSingle = Method(owner, "TakeSingle", Primitive("Void"), [new ByRefRef(Primitive("Single"))]);
+        var takeBoolean = Method(owner, "TakeBoolean", Primitive("Void"), [new ByRefRef(Primitive("Boolean"))]);
         var takeStruct = Method(owner, "TakeStruct", Primitive("Void"), [new ByRefRef(structure)]);
         var instance = Method(inner, "Apply", Primitive("Void"), [], true);
+        var consumeStruct = Method(owner, "ConsumeStruct", Primitive("Void"), [structure]);
         string[] modes = ["Field", "NativeField", "Nested", "StructThis", "ByRef", "ThisField", "Static", "StaticNested", "StaticStruct", "Array", "ArrayField", "ArrayStruct", "Repeat", "Reload",
-            "Mismatch", "Store", "FrameStore", "Return", "Pointer", "Ordinary", "Arithmetic", "Compare", "CompareConstant", "Runtime", "Interior", "Frame", "ReferenceArray"];
+            "Mismatch", "Store", "FrameStore", "Return", "Pointer", "Ordinary", "Arithmetic", "Compare", "CompareConstant", "Runtime", "Interior", "Frame", "ReferenceArray", "FrameOut", "FrameRef", "FrameUnrelated", "FrameHeap", "FrameMixed", "FrameOverlap", "FrameCross", "FramePartial", "FrameRefObject", "FrameFloat", "FrameBool", "FrameNative", "FrameRuntime", "FrameOrdinary", "FrameArithmetic", "FrameStructThis", "FrameStructOut", "FrameStructWide", "FrameStructPartial", "FrameStructCross", "FrameStructValue", "FrameThreeCalls"];
         var entries = modes.ToDictionary(n => n, n => Method(n == "ThisField" ? inner : owner, n,
             n == "Return" ? Primitive("Int64") : integer, n == "ThisField" ? [] :
             [n.StartsWith("Array", StringComparison.Ordinal) ? new ArrayRef(n == "Array" ? integer : structure, 1) :
@@ -1131,29 +1204,54 @@ internal static partial class LoweringChecks
             }
             if (mode == "NativeField") address = Add(root, native.Offset);
             if (mode == "Interior") address = Add(address, 1);
-            if (mode == "Frame") address = Add(frame, -32);
+            if (mode.StartsWith("Frame", StringComparison.Ordinal) && mode != "FrameStore") address = Add(frame, -32);
+            if (mode == "FrameStructThis") statements.Add(new MemoryWrite(new(), Add(address, 4), 32, terms.Constant(7, 32)));
+            if (mode == "FrameStructPartial") statements.Add(new MemoryWrite(new(), Add(address, 4), 16, terms.Constant(0, 16)));
+            if (mode is "FrameRef" or "FrameUnrelated") statements.Add(new MemoryWrite(new(), address, 32, terms.Constant(7, 32)));
+            if (mode == "FrameHeap") statements.Add(new MemoryWrite(new(), Add(root, bits.Offset), 64, address));
+            if (mode is "FrameCross" or "FramePartial") statements.Add(new MemoryWrite(new(), address, mode == "FrameCross" ? 64 : 16, terms.Constant(0, mode == "FrameCross" ? 64 : 16)));
             Term result = terms.Constant(0, 32);
             var before = mode == "Reload" ? Read(address, 32) : null;
-            var target = mode switch { "StructThis" or "StaticStruct" => instance, "ArrayStruct" => takeStruct, "ReferenceArray" => takeObject,
-                "NativeField" => takeNative, "Mismatch" => wrong, "Pointer" => pointer, "Ordinary" => ordinary, _ => take };
+            var target = mode switch { "StructThis" or "StaticStruct" or "FrameStructThis" => instance, "FrameStructOut" or "FrameStructWide" or "FrameStructPartial" or "FrameStructCross" or "FrameStructValue" or "ArrayStruct" => takeStruct, "ReferenceArray" => takeObject,
+                "NativeField" or "FrameNative" => takeNative, "FrameRefObject" => takeObject, "FrameFloat" => takeSingle, "FrameBool" => takeBoolean, "FrameOrdinary" => ordinary, "Mismatch" => wrong, "Pointer" => pointer, "Ordinary" => ordinary, _ => take };
             if (mode is "Store" or "FrameStore") statements.Add(new MemoryWrite(new(), mode == "Store" ? Add(root, bits.Offset) : Add(frame, -8), 64, address));
             else if (mode == "Return") result = address;
-            else if (mode is "Arithmetic" or "Compare" or "CompareConstant")
-                result = terms.Apply(new CoreOperator(mode == "Arithmetic" ? CoreOperation.Xor : CoreOperation.Equal), mode == "Arithmetic" ? 64 : 1,
+            else if (mode is "Arithmetic" or "FrameArithmetic" or "Compare" or "CompareConstant")
+                result = terms.Apply(new CoreOperator(mode is "Arithmetic" or "FrameArithmetic" ? CoreOperation.Xor : CoreOperation.Equal), mode is "Arithmetic" or "FrameArithmetic" ? 64 : 1,
                     address, mode == "Compare" ? terms.Apply(new CoreOperator(CoreOperation.SignExtend), 64, terms.Slice(index, 0, 32)) : terms.Constant(3, 64));
             else
             {
-                statements.Add(new Call(new(), new ImageFunction(mode == "Runtime" ? 20UL : 10UL), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+                statements.Add(new Call(new(), new ImageFunction(mode is "Runtime" or "FrameRuntime" ? 20UL : 10UL), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
                 if (mode == "Repeat") statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+            }
+            if (mode is "FrameMixed" or "FrameOverlap") statements.Add(new Call(new(), new ImageFunction(30), [new(new(SlotKind.Integer), Add(address, mode == "FrameOverlap" ? 2 : 0)), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+            if (mode == "FrameUnrelated") statements.Add(new Call(new(), new ImageFunction(40), [new(new(SlotKind.Integer), terms.Constant(0, 64))], []));
+            if (mode is "FrameOut" or "FrameRef" or "FrameUnrelated") result = Read(address, 32);
+            if (mode == "FrameRefObject") result = Read(Add(Read(address, 64), data.Offset), 32);
+            if (mode == "FrameFloat") result = terms.Apply(new CoreOperator(CoreOperation.FloatEqual), 1, Read(address, 32), terms.Constant(0, 32));
+            if (mode == "FrameBool") result = terms.Concat(Read(address, 8), terms.Constant(0, 24));
+            if (mode == "FrameNative") result = Read(address, 64);
+            if (mode is "FrameStructThis" or "FrameStructOut") result = Read(Add(address, 4), 32);
+            if (mode == "FrameStructWide") result = terms.Slice(Read(address, 64), 32, 32);
+            if (mode == "FrameStructCross") result = Read(Add(address, 2), 32);
+            if (mode == "FrameStructValue") statements.Add(new Call(new(), new ImageFunction(40), [new(new(SlotKind.Integer), Read(address, 64)), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+            if (mode == "FrameThreeCalls")
+            {
+                var firstRead = Read(address, 32);
+                statements.Add(new Call(new(), new ImageFunction(40), [new(new(SlotKind.Integer), terms.Constant(0, 64))], []));
+                var middleRead = Read(address, 32);
+                statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+                result = terms.Apply(new CoreOperator(CoreOperation.Add), 32, firstRead,
+                    terms.Apply(new CoreOperator(CoreOperation.Add), 32, middleRead, Read(address, 32)));
             }
             if (mode == "Reload") result = terms.Apply(new CoreOperator(CoreOperation.Add), 32, before!, Read(address, 32));
             var output = result.Width < 64 ? terms.Concat(result, terms.Constant(0, 64 - result.Width)) : result;
             builder.Blocks.Add(new(block, [], statements.ToImmutableArray(), new Return([new(new(SlotKind.Integer), output)])));
-            var calls = new CallNamingQuery(binder, new NamingChecks.Map([new(MethodRef.Open(target), BindingEntryKind.Ordinary)]),
+            var calls = new CallNamingQuery(binder, new AddressMap(target, wrong, mode == "FrameStructValue" ? consumeStruct : unrelated),
                 new NamingChecks.RuntimeMap(catalog.Functions.First(f => f.Operation.Name == "ThrowManaged" && f.Signature is not null)), catalog);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(entries[mode]), binder, types, calls: calls,
                 effects: new ManagedCallEffects(calls), spec: spec, names: facts).Run();
-            var code = mode switch { "Interior" or "ReferenceArray" => "lowering.Address.Location", "Frame" => "lowering.Address.Frame",
+            var code = mode switch { "FrameStructPartial" or "FrameStructCross" => "lowering.Frame.Struct", "FrameHeap" or "FrameRuntime" or "FrameOrdinary" or "FrameArithmetic" => "lowering.Frame.Use", "FrameMixed" or "FrameOverlap" or "FrameCross" => "lowering.Frame.Mixed", "FramePartial" => "lowering.Frame.Partial", "Interior" or "ReferenceArray" => "lowering.Address.Location",
                 "Mismatch" or "Store" or "FrameStore" or "Return" or "Pointer" or "Ordinary" or "Arithmetic" or "Compare" or "CompareConstant" or "Runtime" => "lowering.Address.Use", _ => null };
             if (code is not null)
             { checks.True(lowered.Failure?.Reason.Code == code, mode + " 取址用途拒绝：" + lowered.Failure); continue; }
@@ -1170,9 +1268,28 @@ internal static partial class LoweringChecks
                 checks.True(reads.Length == 2 && reads[0].Target != reads[1].Target && Array.IndexOf(loweredStatements, reads[0]) < Array.IndexOf(loweredStatements, call)
                     && Array.IndexOf(loweredStatements, reads[1]) > Array.IndexOf(loweredStatements, call), "传出字段地址的调用之后重新读取同字段，不复用调用前的局部");
             }
+            if (mode is "FrameStructThis" or "FrameStructOut" or "FrameStructWide")
+                checks.True(loweredStatements.OfType<ManagedAssignment>().Any(a => a.Value is FieldValue { Receiver: AddressValue { Target: LocalValue } }), mode + " 经局部地址读取结构体叶子并留在原读取位置");
+            if (mode == "FrameThreeCalls")
+            {
+                var storage = ((AddressValue)call.Invocation.Arguments[0]).Target;
+                var reloads = loweredStatements.OfType<ManagedAssignment>().Where(a => a.Value == storage).ToArray();
+                var emittedCalls = loweredStatements.OfType<ManagedCall>().ToArray();
+                checks.True(reloads.Length == 3 && emittedCalls.Length == 3 && Enumerable.Range(0, 3).All(i =>
+                    Array.IndexOf(loweredStatements, reloads[i]) > Array.IndexOf(loweredStatements, emittedCalls[i])
+                    && (i == 2 || Array.IndexOf(loweredStatements, reloads[i]) < Array.IndexOf(loweredStatements, emittedCalls[i + 1]))),
+                    "两次按引用调用之间有无关调用时，三次读取各自在原调用之后物化");
+            }
+            if (mode == "FrameStructValue") checks.True(loweredStatements.OfType<ManagedCall>().Last().Invocation.Arguments[0].Type.Equals(structure), "结构体帧对象完整按值传出");
+            if (mode is "FrameOut" or "FrameRef" or "FrameUnrelated")
+            {
+                var storage = (LocalValue)((AddressValue)call.Invocation.Arguments[0]).Target;
+                var reload = loweredStatements.OfType<ManagedAssignment>().SingleOrDefault(a => a.Value == storage);
+                checks.True(reload is not null && Array.IndexOf(loweredStatements, reload) > Array.LastIndexOf(loweredStatements, loweredStatements.OfType<ManagedCall>().Last()), mode + " 在最后调用之后读取同一个可寻址局部");
+            }
             if (mode == "Repeat") checks.True(loweredStatements.OfType<ManagedCall>().Count() == 2, "同一地址项可以多次传出");
             var emitted = skeleton.Assemblies.SelectMany(a => a.MainModule.Types).SelectMany(t => t.Methods).Single(m => m.Name == mode);
-            var expected = mode.StartsWith("Array", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldelema : mode.StartsWith("Static", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldsflda : Mono.Cecil.Cil.Code.Ldflda;
+            var expected = mode.StartsWith("Frame", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldloca : mode.StartsWith("Array", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldelema : mode.StartsWith("Static", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldsflda : Mono.Cecil.Cil.Code.Ldflda;
             checks.True(emitted.Body.Instructions.Any(i => i.OpCode.Code == expected), mode + " 写出对应取址指令");
         }
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();

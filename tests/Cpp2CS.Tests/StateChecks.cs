@@ -162,6 +162,17 @@ internal static class StateChecks
             var value = Good(c.Get(q.Read, r.Identity));
             a.True(escaped ? value.Identity is MemoryAtom { Definition: CallIdentity } : value == f.C(7), "跨调用按逃逸保留或改写");
         }
+        var retained = new Fixture(); var before = retained.Read(0); var after = retained.Read(0); var final = retained.Read(0);
+        var first = new Call(new(), new ImageFunction(1), [new(new(SlotKind.Integer), retained.Frame)], []);
+        var unrelated = new Call(new(), new ImageFunction(2), [], []);
+        var repeated = new Call(new(), new ImageFunction(1), [new(new(SlotKind.Integer), retained.Frame)], []);
+        var retainedQueries = new StateQueries(new KnownStack());
+        var retainedContext = retainedQueries.CreateContext(retained.Finish(retained.Write(0, retained.C(3)), first, before,
+            retained.Write(0, retained.C(8)), unrelated, after, repeated, final));
+        a.True(Good(retainedContext.Get(retainedQueries.Read, before.Identity)).Identity is MemoryAtom { Definition: CallIdentity id } && id == first.Identity
+            && Good(retainedContext.Get(retainedQueries.Read, after.Identity)).Identity is MemoryAtom { Definition: CallIdentity later } && later == unrelated.Identity
+            && Good(retainedContext.Get(retainedQueries.Read, final.Identity)).Identity is MemoryAtom { Definition: CallIdentity last } && last == repeated.Identity,
+            "帧地址被保留后，已知效果的无关调用仍阻断写入转发");
         var g = new Fixture(); var lower = g.Read(-8); var arg = g.Read(0); var next = g.Read(8); var gap = g.Read(24);
         var qs = new StateQueries(); var cs = qs.CreateContext(g.Finish(g.Write(-8, g.C(3)), g.Write(0, g.C(4)), g.Write(8, g.C(5)), g.Write(24, g.C(6)),
             new Call(new(), new ImageFunction(1), [], [], OutgoingArgumentArea: g.Frame), lower, arg, next, gap));
