@@ -343,7 +343,9 @@ public sealed class BitRangeSourcesQuery(StateQueries q) : Query<BitRangeRequest
         {
             var index = c.Get(q.Index, 0); if (!index.IsSuccess) return index.Propagate<ReachingBits>();
             var read = index.Value.Reads[id];
-            var l = c.Get(q.Locations, new(read.Read.Address, read.Read.Width)); if (!l.IsSuccess) return l.Propagate<ReachingBits>();
+            // 与直接读取共用解析后的地址，保留地址内各读取的版本。
+            var address = c.Get(q.Resolve, read.Read.Address); if (!address.IsSuccess) return address.Propagate<ReachingBits>();
+            var l = c.Get(q.Locations, new(address.Value, read.Read.Width)); if (!l.IsSuccess) return l.Propagate<ReachingBits>();
             var reaching = c.Get(q.Reaching, new(read.Point, l.Value));
             if (!reaching.IsSuccess) return reaching;
             return Outcome<ReachingBits>.Success(new(reaching.Value.Bits.Slice(key.Low, key.Width)));

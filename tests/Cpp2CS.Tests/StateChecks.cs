@@ -27,8 +27,33 @@ internal static class StateChecks
     private static T Good<T>(Outcome<T> result) => result.IsSuccess ? result.Value : throw new InvalidOperationException(result.Why?.ToString());
     public static int Run()
     {
-        var a = new Assertions(); SourceSets(a); Alias(a); Forward(a); Branches(a); ExceptionEdges(a); Calls(a); Caller(a); Scale();
+        var a = new Assertions(); SourceSets(a); Alias(a); Forward(a); ReadAddresses(a); Branches(a); ExceptionEdges(a); Calls(a); Caller(a); Scale();
         return a.Finish("状态模型");
+    }
+    private static void ReadAddresses(Assertions a)
+    {
+        foreach (bool reverse in new[] { false, true })
+        {
+            var f = new Fixture();
+            var pointer = f.Terms.Atom(new EntryAtom(new(SlotKind.Integer)), 64);
+            MemoryRead Read(Term address)
+            {
+                var id = new ReadIdentity();
+                return new(id, address, 64, f.Terms.Atom(new ResultAtom(id), 64));
+            }
+            var before = Read(pointer); var first = Read(before.Result);
+            var after = Read(pointer); var second = Read(after.Result);
+            var restoredFirst = f.Read(-16); var restoredSecond = f.Read(-8);
+            var function = f.Finish(before, first, f.Write(-16, first.Result), new Call(new(), new ImageFunction(1), [], []),
+                after, second, f.Write(-8, second.Result), restoredFirst, restoredSecond);
+            var q = new StateQueries(); var c = q.CreateContext(function);
+            var reads = reverse ? new[] { restoredSecond, restoredFirst, second, first } : [first, second, restoredFirst, restoredSecond];
+            foreach (var read in reads) _ = Good(c.Get(q.Read, read.Identity));
+            var original = Good(c.Get(q.Read, first.Identity)); var changed = Good(c.Get(q.Read, second.Identity));
+            a.True(original == Good(c.Get(q.Read, restoredFirst.Identity)) && changed == Good(c.Get(q.Read, restoredSecond.Identity)),
+                "读取地址经内存载入后，溢出与读回仍保留原读取身份；查询次序无关");
+            a.True(original != changed, "调用可能改变被读取的指针及其内容，前后读取不能同值");
+        }
     }
     private static void ExceptionEdges(Assertions a)
     {

@@ -106,7 +106,8 @@ public sealed partial class IntegerLowering
         if (location.Value.Region == Region.Frame && !FrameContains(location.Value)) return;
         var resolved = context.Get(state.Read, read.Identity);
         if (!resolved.IsSuccess) return;
-        if (resolved.Value.Identity is not MemoryAtom && !(location.Value.Region == Region.Frame && resolved.Value.Identity is MemoryMerge)) return;
+        // 内存合流描述来源；读取仍在原读取点物化，不在入边补造读取。
+        if (resolved.Value.Identity is not (MemoryAtom or MemoryMerge)) return;
         if (!readValues.TryGetValue(resolved.Value, out var definition))
             readValues.Add(resolved.Value, definition = new(read));
         readDefinitions.Add(read.Identity, definition);

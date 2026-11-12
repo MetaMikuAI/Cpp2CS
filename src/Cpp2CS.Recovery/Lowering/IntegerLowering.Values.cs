@@ -95,8 +95,7 @@ public sealed partial class IntegerLowering
             return Fail<ManagedValue>(LoweringFailureKind.Binding, "使用了调用结果绑定之外的位，ABI 未定义这些高位");
         if (term.Identity is EntryAtom)
             return Fail<ManagedValue>(LoweringFailureKind.Binding, "使用了形参绑定未定义的入口位，包括未指定的槽位高位");
-        if (term.Identity is MemoryAtom)
-            return Fail<ManagedValue>(LoweringFailureKind.State, "帧读取没有可下降的入口值或写入定义");
+        if (term.Identity is MemoryAtom memory) return MissingMemoryValue(memory);
         if (term.Operator is CoreOperator core) return Operation(term, core.Operation, floating);
         return Fail<ManagedValue>(LoweringFailureKind.UnsupportedAtom, $"没有托管定义：{term.Identity?.StableText ?? term.Operator?.Name ?? term.Kind.ToString()}");
     }
@@ -109,6 +108,11 @@ public sealed partial class IntegerLowering
         var resolved = context.Get(state.Resolve, term);
         if (!resolved.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "位片来源查询失败", resolved.Why);
         if (resolved.Value != term) return Part(resolved.Value, low, width, floating);
+        if (readValues.TryGetValue(term, out var read))
+        {
+            var loaded = ReadValue(read);
+            return loaded is null ? null : Slice(loaded, low, width);
+        }
         foreach (var pair in callResults)
         {
             var root = pair.Key.Kind == TermKind.Slice ? pair.Key.Operands[0] : pair.Key;

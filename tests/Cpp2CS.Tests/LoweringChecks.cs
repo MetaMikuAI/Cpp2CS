@@ -183,6 +183,7 @@ internal static partial class LoweringChecks
         AccessChecks(checks, program);
         AddressChecks(checks, program);
         StructChecks(checks, program);
+        StateChecks(checks, program);
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         return checks.Finish("标量下降");
     }

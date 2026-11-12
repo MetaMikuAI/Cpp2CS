@@ -2,12 +2,54 @@ using Cpp2CS.Kernel.State;
 using Cpp2CS.Managed;
 using Cpp2CS.Model;
 using Cpp2CS.Native;
+using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Locations;
 
 namespace Cpp2CS.Recovery.Lowering;
 
 public sealed partial class IntegerLowering
 {
+    private ManagedValue? MissingMemoryValue(MemoryAtom memory)
+    {
+        var location = memory.Location;
+        var address = location.UnknownOffsetAddress ?? location.Root;
+        string kind, detail;
+        if (SnapshotRewrite.Dependencies([address]).Any(t => t.Identity is ResultAtom { Definition: ReadIdentity }))
+            (kind, detail) = ("UnresolvedReadAddress", "位来源的读取地址仍含未解析的读取结果");
+        else if (location.Region != Region.Frame && merges.Keys.Any(k =>
+            k.Term.Identity is MemoryMerge merge && merge.Location == location))
+            (kind, detail) = ("NonFrameMerge", "合流处的非帧读取没有原读取局部，内存版本被展开为各路径的值");
+        else if (location.Region != Region.Frame)
+            (kind, detail) = ("ReadFragment", "非帧内存的读取片段没有可下降的原读取定义");
+        else if (memory.Definition is CallIdentity)
+        {
+            var escaped = context.Get(state.Escapes, 0);
+            (kind, detail) = escaped.IsSuccess && escaped.Value.MayReach(location)
+                ? ("EscapedFrameCall", "取址帧范围的读取到达调用的可能改写，缺少可下降的原读取或帧对象值")
+                : ("FrameCallArea", "帧读取到达调用的效果或传出实参区，缺少可下降的写入定义");
+        }
+        else if (memory.Definition is WriteIdentity)
+            (kind, detail) = ("FrameAliasedWrite", "帧读取到达不能确定重叠范围的写入");
+        else if (StackParameter(location))
+            (kind, detail) = ("StackParameter", "读取调用方帧中的栈形参，入口绑定尚未提供托管值");
+        else
+            (kind, detail) = ("FrameEntry", "帧读取到达入口，缺少已绑定的形参或写入定义");
+        return Fail<ManagedValue>(LoweringFailureKind.State,
+            $"{detail}：区域 {location.Region}，偏移 {location.Offset?.ToString() ?? "未知"}，位宽 {location.Width}",
+            code: "lowering.State." + kind);
+    }
+
+    private bool StackParameter(Location location)
+    {
+        if (function.IncomingArgumentArea is not { } area || signature.Managed is not { } managed) return false;
+        var incoming = context.Get(state.Locations, new(area, location.Width));
+        if (!incoming.IsSuccess || location.Root != incoming.Value.Root || location.Offset is not { } offset
+            || incoming.Value.Offset is not { } start) return false;
+        return managed.ParameterIndices.SelectMany(i => signature.Slots.Parameters[i].Pieces)
+            .Any(p => p.Slot.Kind == SlotKind.ArgumentArea && offset >= start + p.Slot.Position + p.SlotOffset
+                && offset * 8 + location.Width <= (start + p.Slot.Position + p.SlotOffset + p.Length) * 8);
+    }
+
     private FrameObjects? frameObjects;
     private readonly FrameAddressUseQuery frameAddressUses;
     private readonly Dictionary<FrameObject, LocalValue> frameLocals = [];

@@ -243,6 +243,12 @@ public sealed partial class IntegerLowering
             structParameters.Add(new(type, aggregate, new(function.Entry, 0), Parameter: index));
         else if (bound.Source is TermSource source)
             arguments[source.Term] = new ArgumentValue(index, type, source.Term.Width);
+        else if (bound.Source is { } scalar && scalar is not IndirectSource)
+        {
+            var value = context.Get(boundSources, new(scalar, new(function.Entry, 0)));
+            if (!value.IsSuccess) Fail<object>(LoweringFailureKind.Binding, "栈形参入口值查询失败", value.Why);
+            else arguments[value.Value] = new ArgumentValue(index, type, value.Value.Width);
+        }
     }
 
     private ManagedEdge Edge(BlockIdentity from, BlockIdentity to)
