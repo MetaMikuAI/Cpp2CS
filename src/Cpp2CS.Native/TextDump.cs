@@ -10,12 +10,14 @@ namespace Cpp2CS.Native;
 public static class TextDump
 {
     public static string Write(NativeFunction function, bool includeTrace = false,
-        Func<Term, string?>? termDescription = null, Func<CallTarget, string?>? targetDescription = null)
+        Func<Term, string?>? termDescription = null, Func<CallTarget, string?>? targetDescription = null,
+        Func<PointerTarget, string?>? matchDescription = null)
     {
         if (!ExitChecker.Check(function).IsValid) throw new ArgumentException("只能转储通过出口检查的快照。", nameof(function));
-        return new Writer(function, includeTrace, termDescription, targetDescription).Write();
+        return new Writer(function, includeTrace, termDescription, targetDescription, matchDescription).Write();
     }
-    private sealed class Writer(NativeFunction f, bool trace, Func<Term, string?>? termDescription, Func<CallTarget, string?>? targetDescription)
+    private sealed class Writer(NativeFunction f, bool trace, Func<Term, string?>? termDescription, Func<CallTarget, string?>? targetDescription,
+        Func<PointerTarget, string?>? matchDescription)
     {
         private readonly StringBuilder text = new();
         private readonly Dictionary<BlockIdentity, int> blockIds = [];
@@ -163,7 +165,7 @@ public static class TextDump
                 {
                     string line = statement switch
                     {
-                        MemoryFence fence => "fence " + Id(fence.Identity) + Provenance(fence.Identity) + " domain=" + Q(fence.Domain),
+                        MemoryFence fence => "fence " + Id(fence.Identity) + Provenance(fence.Identity) + " domain=" + Q(fence.Domain) + " ordering=" + fence.Ordering,
                         MemoryRead read => "read " + Id(read.Identity) + Provenance(read.Identity) + " " + T(read.Result) + " = [" + T(read.Address) + "]:" + N(read.Width) + (read.Acquire ? " acquire" : ""),
                         MemoryWrite write => "write " + Id(write.Identity) + Provenance(write.Identity) + " [" + T(write.Address) + "]:" + N(write.Width) + " = " + T(write.Value) + (write.Release ? " release" : ""),
                         TrapWhen trap => "trap " + Id(trap.Identity) + Provenance(trap.Identity) + " when " + T(trap.Condition),
@@ -172,7 +174,7 @@ public static class TextDump
                         Call call => "call " + Id(call.Identity) + Provenance(call.Identity) + " " + Target(call.Target) + " args={" + Values(call.Arguments)
                             + "} results={" + Values(call.Results) + "} noreturn=" + (call.DoesNotReturn ? "true" : "false")
                             + (call.OutgoingArgumentArea is { } outgoing ? " outgoing-argument-area=" + T(outgoing) : "")
-                            + (call.Unwind is { } unwind ? " unwind=" + B(unwind) : ""),
+                            + " unwind=" + (call.Unwind is { } unwind ? B(unwind) : "none"),
                         _ => throw new InvalidOperationException("未知语句。")
                     };
                     if (trace && statement.Trace is { } statementSource) line += " @0x" + statementSource.NativeAddress.ToString("x", CultureInfo.InvariantCulture);
@@ -200,12 +202,12 @@ public static class TextDump
         }
         private static string Symbol(ImportSymbol symbol) => Q(symbol.Library) + "/" + Q(symbol.Name)
             + (symbol.Ordinal is { } ordinal ? "#" + N(ordinal) : "");
-        private static string Match(PointerTarget target) => target switch
+        private string Match(PointerTarget target) => matchDescription?.Invoke(target) ?? (target switch
         {
             PointerTarget.Internal value => "offset " + N(value.Offset),
             PointerTarget.Import value => "import " + Symbol(value.Symbol) + "+" + N(value.Addend),
             _ => throw new InvalidOperationException("非法异常匹配对象。")
-        };
+        });
         private string Target(CallTarget target) => targetDescription?.Invoke(target) ?? (target switch
         {
             ImageFunction function => "entry-offset " + N(function.EntryOffset),

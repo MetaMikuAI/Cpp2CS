@@ -7,16 +7,16 @@ namespace Cpp2CS.Recovery.RuntimeFunctions;
 /// <summary>按首次使用编号映像引用与内部调用；保持引用相等关系，不抹去普通常量。</summary>
 public sealed record RuntimeReferenceShape(string Text, ulong[] Calls)
 {
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IImage, Dictionary<ulong, string>> typeExportCache = new();
     public bool HasImportCalls { get; init; }
     public static RuntimeReferenceShape? Create(NativeFunction function, Func<CallTarget, CallTarget> normalize, IImage? source = null, Action<string>? missing = null)
     {
-        // 异常匹配数据尚未归一；未知项不能作为身份依据。
-        if (function.Blocks.Any(b => b.Handler is not null)) { missing?.Invoke("异常匹配数据尚未归一"); return null; }
         var references = new Dictionary<ulong, int>();
         var calls = new Dictionary<ulong, int>();
         bool supported = true;
         void Reject(string reason) { supported = false; missing?.Invoke(reason); }
         bool hasImportCalls = false;
+        // 子句已经是异常表解析后的目标，不能把类型表槽位或匿名数据序号当作类型身份。
         string Reference(ulong address)
         {
             if (!references.TryGetValue(address, out int index)) references.Add(address, index = references.Count);
@@ -55,7 +55,24 @@ public sealed record RuntimeReferenceShape(string Text, ulong[] Calls)
             if (!calls.TryGetValue(image.EntryOffset, out int index)) calls.Add(image.EntryOffset, index = calls.Count);
             return $"image-call[{index}]=image-reference[{Reference(image.EntryOffset)}]";
         }
-        var text = TextDump.Write(function, termDescription: TermDescription, targetDescription: TargetDescription);
+        string MatchDescription(PointerTarget target)
+        {
+            if (target is PointerTarget.Import import)
+                return "import " + System.Text.Json.JsonSerializer.Serialize(import.Symbol)
+                    + "+" + import.Addend.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (target is PointerTarget.Internal data && source is not null
+                && source.Query(data.Offset) is { Storage: not StorageKind.Unmapped, Executable: false }
+                && typeExportCache.GetValue(source, image => image.Exports.GroupBy(e => e.Name, StringComparer.Ordinal)
+                    .Where(g => g.Select(e => e.Target).Distinct().Count() == 1 && g.First().Target is PointerTarget.Internal)
+                    .Select(g => (g.Key, Offset: ((PointerTarget.Internal)g.First().Target).Offset))
+                    .GroupBy(e => e.Offset).ToDictionary(g => g.Key, g => g.Select(e => e.Key).Order(StringComparer.Ordinal).First()))
+                    .TryGetValue(data.Offset, out var name))
+                return "export:" + System.Text.Json.JsonSerializer.Serialize(name) + " image-reference[" + Reference(data.Offset) + "]";
+            Reject("异常子句的类型信息目标没有唯一导出身份");
+            return "unresolved-type";
+        }
+        var text = TextDump.Write(function, termDescription: TermDescription, targetDescription: TargetDescription,
+            matchDescription: MatchDescription);
         return supported ? new(text, calls.OrderBy(p => p.Value).Select(p => p.Key).ToArray()) { HasImportCalls = hasImportCalls } : null;
     }
 }

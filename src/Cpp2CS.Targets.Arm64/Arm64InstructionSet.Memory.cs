@@ -43,10 +43,11 @@ public sealed partial class Arm64InstructionSet
             if (Is(0xfffff01f, 0xd503201f)) return true;
             if (Is(0xffffffe0, 0xd53bd040)) { WriteX(D, e.ThreadPointer); return true; }
             if (Is(0xfffff0ff, 0xd503305f)) { Hole("exclusive"); return true; }
-            // DMB 的全读写形式；其他同步词汇仍由未支持诊断保留。
-            if (orderedMemory && e is IOrderedMemoryEmitter fence && Is(0xfffff3ff, 0xd50333bf))
+            // DMB 的观察域与前后访问种类分别保留；DSB 不等同于观察顺序屏障。
+            if (orderedMemory && e is IOrderedMemoryEmitter fence && Is(0xfffff0ff, 0xd50330bf) && B(8, 2) != 0)
             {
-                fence.FullFence(B(10, 2) switch { 0 => "outer-shareable", 1 => "nonshareable", 2 => "inner-shareable", _ => "system" });
+                fence.Fence(B(10, 2) switch { 0 => "outer-shareable", 1 => "nonshareable", 2 => "inner-shareable", _ => "system" },
+                    B(8, 2) switch { 1 => FenceOrdering.Read, 2 => FenceOrdering.Write, _ => FenceOrdering.ReadWrite });
                 return true;
             }
             if (Is(0xfffff09f, 0xd503309f)) { Hole("barrier"); return true; }

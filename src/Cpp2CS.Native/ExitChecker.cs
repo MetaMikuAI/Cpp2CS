@@ -185,6 +185,7 @@ public static class ExitChecker
                         case MemoryFence fence:
                             Identity(fence.Identity, loc);
                             Require(!string.IsNullOrWhiteSpace(fence.Domain), "fence-domain", loc, "屏障缺少观察域。");
+                            Require(Enum.IsDefined(fence.Ordering), "fence-ordering", loc, "屏障缺少合法的访问顺序。");
                             break;
                         case MemoryRead read:
                             Identity(read.Identity, loc);

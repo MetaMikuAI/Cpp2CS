@@ -87,7 +87,7 @@ public interface IOrderedMemoryEmitter
 {
     Term LoadAcquire(Term address, int width);
     void StoreRelease(Term address, Term value);
-    void FullFence(string domain);
+    void Fence(string domain, FenceOrdering ordering);
 }
 
 /// <summary>地址为映像偏移。寄存器读写必须整单元；部分写入由 Slice/Concat 表达。</summary>

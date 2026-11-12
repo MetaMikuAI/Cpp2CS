@@ -34,6 +34,49 @@ internal static class RuntimeShapeChecks
             "数据引用与调用目标之间的地址相等关系保留");
         checks.True(RuntimeReferenceShape.Create(Body(5000, 7, 100), t => t, new InputMemoryImage()) is null,
             "未映射的映像引用不能成为身份依据");
+        NativeFunction ExceptionBody(ulong target, PointerTarget? type = null, ClauseKind kind = ClauseKind.Cleanup, int unwind = 1)
+        {
+            var terms = new TermTable();
+            var entry = new BlockIdentity(); var handler = new BlockIdentity(); var other = new BlockIdentity();
+            var builder = new FunctionBuilder(terms, entry, 64, new(terms.Atom(new RootAtom(AddressRoot.Frame), 64)));
+            builder.Blocks.Add(new(entry, [], [new Call(new(), new ImageFunction(target), [], [],
+                Unwind: unwind == 0 ? null : unwind == 1 ? handler : other),
+                new Call(new(), new ImageFunction(target), [], [], Unwind: handler)], new Return([])));
+            var exception = terms.Atom(new ExceptionAtom(handler), 64);
+            builder.Blocks.Add(new(handler, [], [], new ResumeUnwind(exception), new(exception,
+                terms.Atom(new SelectorAtom(handler), 32), [new(kind, type is null ? [] : [type])])));
+            builder.Blocks.Add(new(other, [], [], new Return([]), new(terms.Atom(new ExceptionAtom(other), 64),
+                terms.Atom(new SelectorAtom(other), 32), [new(ClauseKind.CatchAll, [])])));
+            return builder.Freeze();
+        }
+        string ExceptionShape(PointerTarget? type = null, ClauseKind kind = ClauseKind.Cleanup, int unwind = 1, IImage? source = null)
+            => RuntimeReferenceShape.Create(ExceptionBody(200, type, kind, unwind), t => t, source)!.Text;
+        var exceptionShape = ExceptionShape();
+        checks.True(exceptionShape.Contains("unwind=b", StringComparison.Ordinal) && exceptionShape.Contains("handler ", StringComparison.Ordinal)
+            && exceptionShape.Contains("clauses=Cleanup()", StringComparison.Ordinal), "异常形状包含展开目标、处理入口和完整子句表");
+        checks.True(exceptionShape != ExceptionShape(unwind: 0), "逐条调用是否有展开边影响形状");
+        checks.True(ExceptionShape(unwind: 0).Contains(" unwind=none", StringComparison.Ordinal), "无展开边显式进入形状");
+        checks.True(exceptionShape != ExceptionShape(unwind: 2), "展开目标不同影响形状");
+        checks.True(exceptionShape != ExceptionShape(kind: ClauseKind.CatchAll), "清理与捕获所有异常的子句不同");
+        var importedType = new PointerTarget.Import(new("type-a"));
+        var importShape = ExceptionShape(importedType, ClauseKind.Catch);
+        checks.True(importShape == RuntimeReferenceShape.Create(ExceptionBody(400, importedType, ClauseKind.Catch), t => t)!.Text,
+            "导入类型身份不随内部调用地址平移改变");
+        checks.True(importShape != ExceptionShape(new PointerTarget.Import(new("type-b")), ClauseKind.Catch)
+            && importShape != ExceptionShape(importedType with { Addend = 8 }, ClauseKind.Catch), "导入类型名与加数逐项保留");
+        IImage TypeImage(ulong offset, string name = "type-a") => new InputMemoryImage { Exports = [new(name, new PointerTarget.Internal(offset))] };
+        var exportedTypeShape = ExceptionShape(new PointerTarget.Internal(800), ClauseKind.Catch, source: TypeImage(800));
+        checks.True(exportedTypeShape == ExceptionShape(new PointerTarget.Internal(1000), ClauseKind.Catch, source: TypeImage(1000)),
+            "映像内类型按解析到的导出目标归一");
+        checks.True(exportedTypeShape != ExceptionShape(new PointerTarget.Internal(800), ClauseKind.Catch, source: TypeImage(800, "type-b")),
+            "不同导出类型身份不能生成同一形状");
+        var clauseReasons = new List<string>();
+        checks.True(RuntimeReferenceShape.Create(ExceptionBody(200, new PointerTarget.Internal(800), ClauseKind.Catch), t => t,
+            new InputMemoryImage(), clauseReasons.Add) is null && clauseReasons.Any(r => r.Contains("类型信息目标", StringComparison.Ordinal)),
+            "匿名类型信息拒绝生成形状并写明原因");
+        checks.True(RuntimeReferenceShape.Create(ExceptionBody(200, new PointerTarget.Internal(800), ClauseKind.Catch), t => t,
+            new InputMemoryImage { Exports = [new("type-a", new PointerTarget.Internal(800)), new("type-a", new PointerTarget.Internal(900))] }) is null,
+            "同名导出目标不唯一不能给子句类型提供身份");
         var catalog = RuntimeFunctionCatalog.Select("2022.3.62f2", "aarch64-linux-android", "LP64");
         var function = catalog.Functions.First(f => f.Recognition.Symbol);
         var callee = RuntimeReferenceShape.Create(Body(300, 9, 400), t => t, new InputMemoryImage())!;
@@ -47,7 +90,16 @@ internal static class RuntimeShapeChecks
         checks.True(RuntimeShapeMatcher.Locate(image, catalog, data, Lift, t => t).Count == 2, "同形且被调地址逐项相同的两个入口全部定位");
         image = new InputMemoryImage { Functions = [new(32, 8, FunctionEvidence.UnwindTable), new(64, 16, FunctionEvidence.UnwindTable)],
             TryRegions = [new(66, 4, 100, [])] };
-        checks.True(RuntimeShapeMatcher.Locate(image, catalog, data, Lift, t => t).Count == 0, "被调函数有未接入 IR 的异常区域时拒绝定位");
+        var exceptionCallee = RuntimeReferenceShape.Create(ExceptionBody(400), t => t, image)!;
+        var exceptionData = data with { Entries = [data.Entries[0] with { Callees = [new(16, exceptionCallee.Text)] }] };
+        checks.True(RuntimeShapeMatcher.Locate(image, catalog, exceptionData, e => e == 64 ? ExceptionBody(400) : Lift(e), t => t).Count == 1,
+            "直接被调函数的处理入口与展开边完整相同时可定位");
+        exceptionData = data with { Entries = [new(function.MangledName, 8, RuntimeReferenceShape.Create(ExceptionBody(64), t => t, image)!.Text,
+            [new(16, callee.Text)])] };
+        checks.True(RuntimeShapeMatcher.Locate(image, catalog, exceptionData, e => e == 32 ? ExceptionBody(64) : Lift(e), t => t).Count == 1,
+            "根函数有完整异常区域形状时可定位");
+        checks.True(RuntimeShapeMatcher.Locate(image, catalog, exceptionData, e => e == 32 ? ExceptionBody(64, unwind: 0) : Lift(e), t => t).Count == 0,
+            "异常展开边不匹配时拒绝定位");
         image = new InputMemoryImage { Functions = [new(32, 8, FunctionEvidence.UnwindTable)
             { Extents = [new(4, FunctionEvidence.UnwindTable), new(8, FunctionEvidence.SymbolTable)] }, new(64, 16, FunctionEvidence.UnwindTable)] };
         checks.True(RuntimeShapeMatcher.Locate(image, catalog, data, Lift, t => t).Count == 0, "函数边界证据冲突不能作为形状依据");

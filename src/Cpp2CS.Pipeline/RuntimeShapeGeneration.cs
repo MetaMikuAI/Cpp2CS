@@ -36,9 +36,6 @@ public static class RuntimeShapeGeneration
             .Select(f => f.Recognition.Import!).ToHashSet(StringComparer.Ordinal);
         var flow = NoReturnAnalysis.Analyze(image, new Arm64InstructionSet(image), Arm64Registers.Convention, image.Functions,
             image.Imports.Where(i => seeds.Contains(i.Name)), new Arm64FlowFacts(), jobs: Environment.ProcessorCount);
-        var directory = RuntimeFunctionLocations.Locate(image, symbols, catalog, target => instructions.ResolveCallTarget(image, target));
-        var exceptionFlow = new ExceptionFlowFacts(flow, target =>
-            directory.Find(target)?.Function.Operation.Termination == RuntimeTermination.ResumeUnwind);
         var ranges = image.Functions.ToDictionary(r => r.Start);
         var failures = new Dictionary<ulong, string>();
         var cache = new Dictionary<ulong, RuntimeReferenceShape?>();
@@ -47,7 +44,8 @@ public static class RuntimeShapeGeneration
             if (cache.TryGetValue(entry, out var found)) return found;
             if (!ranges.TryGetValue(entry, out var range)) { failures[entry] = "没有函数范围"; return cache[entry] = null; }
             if (!range.HasConsistentExtent) { failures[entry] = "函数范围证据冲突或缺失"; return cache[entry] = null; }
-            var result = FunctionLifter.Lift(instructions, Arm64Registers.Convention, exceptionFlow, range, entry);
+            // 与无符号定位共用定位前的流事实，不能由参考符号把静态调用提前改成继续展开。
+            var result = FunctionLifter.Lift(instructions, Arm64Registers.Convention, flow, range, entry);
             var shapeFailures = new HashSet<string>(StringComparer.Ordinal);
             var shape = result.Function is { } function ? RuntimeReferenceShape.Create(function,
                 target => instructions.ResolveCallTarget(image, target), image, reason => shapeFailures.Add(reason)) : null;
@@ -70,8 +68,7 @@ public static class RuntimeShapeGeneration
             {
                 if (anchors.ContainsKey(entry)) continue;
                 var shape = Shape(entry);
-                // 导出起点必须可完整提升；调用末端可不提升。
-                if (depth == 0 && shape is null) continue;
+                // 同名函数导出本身就是身份；只有继续沿调用边行走才要求来源节点有形状。
                 anchors.Add(entry, path);
                 if (shape is null) continue;
                 anchorShapes.Add(path, new(path, ranges[entry].Length, shape.Text));

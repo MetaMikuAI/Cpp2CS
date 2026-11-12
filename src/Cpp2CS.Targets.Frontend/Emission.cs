@@ -64,10 +64,10 @@ internal sealed class Emission(ulong address, TermTable terms, ImmutableArray<Re
         Open(); Own(pointer); Own(value);
         Statements.Add(new MemoryWrite(new WriteIdentity(), pointer, value.Width, value) { Release = release, Trace = new(address) });
     }
-    public void FullFence(string domain)
+    public void Fence(string domain, FenceOrdering ordering)
     {
         Open();
-        Statements.Add(new MemoryFence(new(), domain) { Trace = new(address) });
+        Statements.Add(new MemoryFence(new(), domain) { Ordering = ordering, Trace = new(address) });
     }
     public void TrapIf(Term condition)
     {

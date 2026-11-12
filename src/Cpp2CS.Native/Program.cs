@@ -80,8 +80,13 @@ public sealed record MemoryWrite(WriteIdentity Identity, Term Address, int Width
 {
     public bool Release { get; init; }
 }
-/// <summary>域内的先行读写先于后续读写被观察；Domain 由目标描述定义，不表示等待访问完成。</summary>
-public sealed record MemoryFence(FenceIdentity Identity, string Domain) : Statement;
+/// <summary>ReadWrite 约束读写到读写，Read 约束读到读写，Write 约束写到写。</summary>
+public enum FenceOrdering { ReadWrite, Read, Write }
+/// <summary>域内的先行访问先于后续访问被观察；Domain 由目标描述定义，不表示等待访问完成。</summary>
+public sealed record MemoryFence(FenceIdentity Identity, string Domain) : Statement
+{
+    public FenceOrdering Ordering { get; init; }
+}
 /// <summary>条件为真时是硬件陷阱的结局，其后的语句只在条件为假时执行。指令内部的条件陷阱不拆块。</summary>
 public sealed record TrapWhen(TrapIdentity Identity, Term Condition) : Statement;
 /// <summary>尾调用表示为调用加返回。没有展开边仅表示本函数内没有处理入口；是否可能抛出由被调效果回答。</summary>

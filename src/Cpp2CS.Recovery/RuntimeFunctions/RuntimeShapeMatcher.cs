@@ -14,7 +14,6 @@ public static class RuntimeShapeMatcher
         Func<CallTarget, CallTarget> normalize, IDictionary<string, string>? missingReasons = null, int jobs = 1, RuntimeUsageEvidence? usageEvidence = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(jobs, 1);
-        var handlers = new TryRegionIndex(image.TryRegions);
         var ranges = image.Functions.ToDictionary(f => f.Start);
         var shapeEntries = references.Entries.Where(e => e.Shape is not null).ToArray();
         var lengths = shapeEntries.Select(e => e.Length).ToHashSet();
@@ -24,7 +23,7 @@ public static class RuntimeShapeMatcher
         var summaries = new ConcurrentDictionary<ulong, Lazy<RuntimeReferenceShape?>>();
         RuntimeReferenceShape? Shape(ulong entry) => summaries.GetOrAdd(entry, key => new(() =>
         {
-            if (!ranges.TryGetValue(key, out var range) || !range.HasConsistentExtent || handlers.HasHandlerInRange(range.Start, range.Length)) return null;
+            if (!ranges.TryGetValue(key, out var range) || !range.HasConsistentExtent) return null;
             var function = lift(key);
             return function is null ? null : RuntimeReferenceShape.Create(function, normalize, image);
         })).Value;
