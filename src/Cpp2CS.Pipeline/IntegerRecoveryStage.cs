@@ -32,10 +32,12 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
     {
         if (context.Facts.Architecture != "arm64")
             return new Missing<ManagedBody>(new(Name, context.Entry.Address, "绑定", new("lowering.Binding", "该架构的 ABI 尚未装配")));
+        if (input.Blocks.SelectMany(b => b.Statements).Any(s => s is MemoryFence or MemoryRead { Acquire: true } or MemoryWrite { Release: true }))
+            return new Missing<ManagedBody>(new(Name, context.Entry.Address, "同步访问",
+                new("lowering.Synchronization", "恢复层尚未定义同步访问的托管语义")));
         // 映像的异常范围尚未接入前端时，不能把受保护调用当作普通调用发布。
         var protectedCall = input.Blocks.SelectMany(b => b.Statements).OfType<Call>().FirstOrDefault(call =>
-            call.Trace is { } trace && context.Facts.Image.TryRegions.Any(region => region.Handler is not null
-                && trace.NativeAddress >= region.Start && trace.NativeAddress - region.Start < region.Length));
+            call.Trace is { } trace && context.Facts.HandlerRegions.HasHandlerAt(trace.NativeAddress));
         if (protectedCall is not null)
             return new Missing<ManagedBody>(new(Name, protectedCall.Trace!.NativeAddress, "Exception",
                 new("lowering.Exception", "映像中的调用有异常处理入口，异常流尚未接入下降")));

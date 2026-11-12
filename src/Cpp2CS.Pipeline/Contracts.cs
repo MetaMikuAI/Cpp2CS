@@ -13,10 +13,12 @@ namespace Cpp2CS.Pipeline;
 /// <summary>模型及代码地图建立后只读；层不得修改其中的集合。</summary>
 public sealed record GlobalFacts(IImage Image, ProgramModel Model, Registrations CodeMap, RuntimeSpec Spec, string Architecture)
 {
-    /// <summary>函数符号这一种证据的来源：默认是映像自己的符号表，可由同一次构建的伴随文件替换；可以为空。</summary>
-    public ImmutableArray<FunctionSymbol> Symbols { get; init; } = Image.FunctionSymbols;
+    /// <summary>同一次构建的符号伴随文件提供的函数身份；未提供时为空，定位不读取函数符号。</summary>
+    public ImmutableArray<FunctionSymbol> Symbols { get; init; } = [];
     /// <summary>运行时函数身份；按映像建立一次，导入查询包含 PLT 归一。</summary>
     public Cpp2CS.Recovery.RuntimeFunctions.RuntimeFunctionLocations RuntimeFunctions => RuntimeLocationAssembly.Locations(this);
+    /// <summary>有处理入口的原生异常区域，按地址查询。</summary>
+    public TryRegionIndex HandlerRegions { get; } = new(Image.TryRegions);
     /// <summary>映像的函数范围按起点索引。</summary>
     public ILookup<ulong, FunctionRange> FunctionsByStart { get; } = Image.Functions.ToLookup(f => f.Start);
 }

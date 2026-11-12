@@ -10,7 +10,9 @@ namespace Cpp2CS.Tests;
 internal static class PipelineCorpusChecks
 {
     public const string Command = "pipeline-corpus";
-    public static int Run()
+    public static int Run() => Run(true);
+    public static int WithoutSymbols() => Run(false);
+    private static int Run(bool useSymbols)
     {
         var corpus = Environment.GetEnvironmentVariable("CPP2CS_CORPUS");
         var truth = Environment.GetEnvironmentVariable("CPP2CS_CORPUS_TRUTH");
@@ -20,13 +22,13 @@ internal static class PipelineCorpusChecks
             return 0;
         }
         var checks = new Assertions();
-        var output = Path.Combine(ArchitectureChecks.FindRoot(), "artifacts", "pipeline-corpus.local.output");
+        var output = Path.Combine(ArchitectureChecks.FindRoot(), "artifacts", useSymbols ? "pipeline-corpus.local.output" : "pipeline-corpus-nosymbols.local.output");
         var report = new RecoverySession().Run(new(
             Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.so"),
             Path.Combine(corpus, "artifacts", "il2cppOutput", "data", "Metadata", "global-metadata.dat"), output)
         {
-            // 运行时函数的定位目前只有“符号”这一种证据；语料上由同一次构建的未去符号文件提供。
-            Symbols = Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.dbg.so"),
+            // 两种配置使用同一套恢复与对照；无符号配置只依赖嵌入规格。
+            Symbols = useSymbols ? Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.dbg.so") : null,
             Jobs = Environment.ProcessorCount,
         });
         var byId = report.Methods.ToDictionary(m => m.Identity);
@@ -92,4 +94,10 @@ internal static class PipelineCorpusChecks
         checks.True(comparison.Methods.All(m => m.Status != MetricStatus.Mismatch), "没有 IL 对照不一致");
         return checks.Finish("Pipeline 定向检查");
     }
+}
+
+internal static class PipelineWithoutSymbolsCorpusChecks
+{
+    public const string Command = "pipeline-corpus-nosymbols";
+    public static int Run() => PipelineCorpusChecks.WithoutSymbols();
 }

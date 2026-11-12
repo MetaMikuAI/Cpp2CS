@@ -10,18 +10,18 @@ using static Cpp2CS.Targets.Arm64.Arm64Registers;
 namespace Cpp2CS.Targets.Arm64;
 
 /// <summary>小端 A64 编码；解码不保存跨指令状态，未支持的编码一律留下分类原因。</summary>
-public sealed partial class Arm64InstructionSet(IImage image) : IInstructionSet
+public sealed partial class Arm64InstructionSet(IImage image, bool orderedMemory = false) : IInstructionSet
 {
     public ImmutableArray<Register> Registers => All;
     public DecodeResult Decode(ulong address)
     {
         if ((address & 3) != 0 || !image.IsExecutable(address, 4))
             return new(null, new("arm64.fetch", "指令地址未对齐或没有四个可执行字节。"));
-        return DecodeWord(address, (uint)image.ReadUnsigned(address, 4));
+        return DecodeWord(address, (uint)image.ReadUnsigned(address, 4), orderedMemory);
     }
-    public static DecodeResult DecodeWord(ulong address, uint word) => new(new(4, e => new Semantics(address, word, e).Run()), null);
+    public static DecodeResult DecodeWord(ulong address, uint word, bool orderedMemory = false) => new(new(4, e => new Semantics(address, word, e, orderedMemory).Run()), null);
 
-    private sealed partial class Semantics(ulong pc, uint word, IEmitter e)
+    private sealed partial class Semantics(ulong pc, uint word, IEmitter e, bool orderedMemory)
     {
         private int B(int low, int count = 1) => (int)((word >> low) & ((1u << count) - 1));
         private bool Bit(int bit) => B(bit) != 0;

@@ -180,6 +180,10 @@ public static class ExitChecker
 
                     switch (s)
                     {
+                        case MemoryFence fence:
+                            Identity(fence.Identity, loc);
+                            Require(!string.IsNullOrWhiteSpace(fence.Domain), "fence-domain", loc, "屏障缺少观察域。");
+                            break;
                         case MemoryRead read:
                             Identity(read.Identity, loc);
                             Result(read.Result, read.Identity, 0, p[si + 2], loc);

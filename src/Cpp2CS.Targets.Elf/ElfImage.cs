@@ -168,18 +168,29 @@ internal sealed class LoadedImage : IImage
         for (var i = 0; i < width; i++) result |= (ulong)data[i] << (8 * i);
         return result;
     }
-    public PointerTarget ReadPointer(ulong offset)
+    public bool HasRelocation(ulong offset, ulong length)
     {
-        if (offset > ulong.MaxValue - 8) throw new InvalidDataException("指针读取地址溢出");
-        // 找第一个起点不小于槽末尾的记录；前缀最大末尾覆盖任意嵌套重叠。
+        if (length == 0) return false;
+        if (offset > ulong.MaxValue - length) throw new ArgumentOutOfRangeException(nameof(length));
+        int last = LastRelocationBefore(offset + length);
+        return last >= 0 && relocationEnds[last] > offset;
+    }
+    // 前缀最大末尾同时覆盖嵌套重叠，不创建重定位目标对象。
+    private int LastRelocationBefore(ulong end)
+    {
         int low = 0, high = document.Relocations.Count;
         while (low < high)
         {
-            var mid = low + (high - low) / 2;
-            if (Offset(document.Relocations[mid].Address) < offset + 8) low = mid + 1;
-            else high = mid;
+            int middle = low + (high - low) / 2;
+            if (Offset(document.Relocations[middle].Address) < end) low = middle + 1;
+            else high = middle;
         }
-        var last = low - 1;
+        return low - 1;
+    }
+    public PointerTarget ReadPointer(ulong offset)
+    {
+        if (offset > ulong.MaxValue - 8) throw new InvalidDataException("指针读取地址溢出");
+        int last = LastRelocationBefore(offset + 8);
         if (last >= 0 && relocationEnds[last] > offset)
         {
             var r = Relocations[last];

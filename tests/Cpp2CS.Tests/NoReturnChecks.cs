@@ -60,6 +60,38 @@ internal static class NoReturnChecks
         var parallel = NoReturnAnalysis.Analyze(new InputMemoryImage(), isa, Convention, ranges.Reverse(), [import], new Arm64FlowFacts(), jobs: 4);
         checks.True(facts.Targets.SetEquals(parallel.Targets), "线程数和输入范围顺序不影响目标集合");
         checks.True(facts.Rounds == parallel.Rounds, "线程数和输入范围顺序不影响轮数");
+        var temporaryTables = new List<WeakReference<Cpp2CS.Native.Terms.TermTable>>();
+        var computed = new Toy(new()
+        {
+            [400] = e =>
+            {
+                temporaryTables.Add(new(e.Terms));
+                e.Call(new ComputedTarget(e.Read(Value)));
+            },
+            [401] = e => e.Return()
+        });
+        var unknownFacts = NoReturnAnalysis.Analyze(new InputMemoryImage(), computed, Convention, [Range(400, 2)],
+            [import], new Arm64FlowFacts(), observe: round =>
+            {
+                // 分析仍持有控制流缓存时，未解析目标的发射项表就应可以回收。
+                GC.Collect();
+                checks.True(temporaryTables.All(w => !w.TryGetTarget(out _)), "不在全映像分析期间保留未解析目标的临时项表");
+            });
+        checks.True(!unknownFacts.DoesNotReturn(new ImageFunction(400)), "未解析的计算调用仍可能返回");
+        long CacheFor(int length)
+        {
+            var code = Enumerable.Range(0, length).ToDictionary(i => (ulong)i,
+                i => (Action<IEmitter>)(e => e.Write(Value, e.Read(Value))));
+            code[(ulong)length] = e => e.Call(new ImageFunction(10000));
+            code[(ulong)length + 1] = e => e.Return();
+            var linear = new Toy(code);
+            long cached = 0;
+            NoReturnAnalysis.Analyze(new InputMemoryImage(), linear, Convention, [Range(0, (ulong)length + 2)],
+                [import], new Arm64FlowFacts(), observe: round => cached = round.CachedNodes);
+            checks.True(linear.Decodes.Count == length + 2 && linear.Decodes.Values.All(n => n == 1), "直线段完整解码且不重复发射");
+            return cached;
+        }
+        checks.True(CacheFor(32) == CacheFor(4096), "相同控制流的缓存规模不随直线指令数增长");
         return checks.Finish("不返回分析");
     }
 }

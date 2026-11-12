@@ -12,30 +12,45 @@ namespace Cpp2CS.Tests;
 internal static class RuntimeLocateCorpusChecks
 {
     public const string Command = "runtime-locate-corpus";
-    public static int Run()
+    public static int Run() => Run(true);
+    public static int WithoutSymbols() => Run(false);
+    private static int Run(bool useSymbols)
     {
         var corpus = Environment.GetEnvironmentVariable("CPP2CS_CORPUS");
         var truth = Environment.GetEnvironmentVariable("CPP2CS_CORPUS_TRUTH");
         if (string.IsNullOrEmpty(corpus) || string.IsNullOrEmpty(truth))
         { Console.WriteLine("跳过运行时定位语料：未设置 CPP2CS_CORPUS 或 CPP2CS_CORPUS_TRUTH。"); return 0; }
         var watch = Stopwatch.StartNew();
-        // 与管线相同的配置：映像是去掉符号的文件，函数符号来自同一次构建的伴随文件。
+        // 无符号配置显式清空函数符号证据，真值只在定位结束后读取。
         var image = ElfImage.Load(Path.Combine(corpus, "artifacts/il2cppOutput/build/arm64-v8a/libil2cpp.so"));
-        var companion = ElfImage.Load(Path.Combine(corpus, "artifacts/il2cppOutput/build/arm64-v8a/libil2cpp.dbg.so"));
         var spec = RuntimeSpec.Select("2022.3.62f2", "aarch64-linux-android", "LP64");
         var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
         var (model, registration) = ModelBuilder.Load(image, Path.Combine(corpus, "artifacts/il2cppOutput/data/Metadata/global-metadata.dat"), spec);
         var (map, problems) = RegistrationReader.Read(image, model, spec, registration.CodeRegistration, registration.MetadataRegistration);
         var checks = new Assertions();
         checks.True(problems.Count == 0, "代码地图完整");
-        var facts = new GlobalFacts(image, model, map, spec, "arm64") { Symbols = RecoverySession.CompanionSymbols(image, companion) };
+        var facts = new GlobalFacts(image, model, map, spec, "arm64") { Symbols = [] };
+        if (useSymbols) facts = facts with { Symbols = RecoverySession.CompanionSymbols(image,
+            ElfImage.Load(Path.Combine(corpus, "artifacts/il2cppOutput/build/arm64-v8a/libil2cpp.dbg.so"))) };
+        var locateWatch = Stopwatch.StartNew();
         var locations = facts.RuntimeFunctions;
         checks.True(ReferenceEquals(locations, facts.RuntimeFunctions), "每次运行只建立一次");
-        var locateSeconds = watch.Elapsed.TotalSeconds;
+        if (!useSymbols) checks.True(locations.Entries.Values.SelectMany(e => e.Candidates)
+            .All(l => l.Evidence != RuntimeLocationEvidence.Symbol), "无符号定位未使用函数符号证据");
+        var locateSeconds = locateWatch.Elapsed.TotalSeconds;
+        var errors = 0;
         // 真值只在定位完成后读取，绝不进入定位输入。
         using var functions = JsonDocument.Parse(File.ReadAllText(Path.Combine(truth, "functions.arm64-v8a.json")));
         var symbols = functions.RootElement.EnumerateArray().GroupBy(f => f.GetProperty("name").GetString()!)
             .ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.Ordinal);
+        foreach (var (address, entry) in locations.Entries.Where(p => p.Value.Selected is not null))
+            foreach (var candidate in entry.Candidates)
+            {
+                var agrees = symbols.TryGetValue(candidate.Function.MangledName, out var definitions)
+                    && definitions.Any(d => d.GetProperty("defined").GetBoolean() && Address(d.GetProperty("address")) == address);
+                if (!agrees) errors++;
+                checks.True(agrees, $"定位入口 0x{address:x} 与符号逐个一致：{candidate.Function.Name}");
+            }
         var missingReasons = new Dictionary<string, int>();
         var independent = 0;
         var found = 0;
@@ -49,13 +64,14 @@ internal static class RuntimeLocateCorpusChecks
             if (function.Recognition.Import is { } name && locations.Imports.ContainsKey(name))
             {
                 var agrees = rows.Any(r => !r.GetProperty("defined").GetBoolean());
+                if (!agrees) errors++;
                 checks.True(agrees, function.Name + " 导入与真值一致");
                 Console.WriteLine($"函数 | {function.Name} | Import | 已定位导入身份 | {(agrees ? "一致" : "错误")}");
             }
             else if (matches.Length != 0)
             {
                 checks.True(matches.Length == defined.Length, function.Name + " 符号入口与真值一致");
-                Console.WriteLine($"函数 | {function.Name} | Symbol | 已定位");
+                Console.WriteLine($"函数 | {function.Name} | {(useSymbols ? "Symbol" : "ReferenceShape")} | 已定位");
             }
             else
             {
@@ -93,8 +109,9 @@ internal static class RuntimeLocateCorpusChecks
             var location = locations.Find(Address(call.GetProperty("target")));
             if (location is null) continue;
             covered++;
-            checks.True(call.GetProperty("names").EnumerateArray().Any(n => n.GetString() == location.Function.MangledName),
-                $"调用 0x{Address(call.GetProperty("address")):x} 的定位与符号一致");
+            var agrees = call.GetProperty("names").EnumerateArray().Any(n => n.GetString() == location.Function.MangledName);
+            if (!agrees) errors++;
+            checks.True(agrees, $"调用 0x{Address(call.GetProperty("address")):x} 的定位与符号一致");
         }
         var names = catalog.Functions.Select(f => f.MangledName).ToHashSet(StringComparer.Ordinal);
         foreach (var group in calls.GroupBy(c => Address(c.GetProperty("target")))
@@ -105,10 +122,31 @@ internal static class RuntimeLocateCorpusChecks
                 .Select(n => symbols.TryGetValue(n, out var rows) ? rows[0].GetProperty("demangled_name").GetString() ?? n : n);
             Console.WriteLine($"目录外 | {string.Join(" / ", labels)} | {group.Count()}");
         }
-        checks.True(found == independent, "全部具有独立定义的目录函数已定位");
+        foreach (var row in locations.Missing.Select(m => (Missing: m, Calls: calls.Count(c =>
+                c.GetProperty("names").EnumerateArray().Any(n => n.GetString() == m.Function.MangledName))))
+            .OrderByDescending(r => r.Calls).ThenBy(r => r.Missing.Function.MangledName, StringComparer.Ordinal).Take(20))
+            Console.WriteLine($"目录未定位调用 | {row.Calls} | {row.Missing.Function.Name} | {row.Missing.Reason}");
+        var missingByName = locations.Missing.ToDictionary(m => m.Function.MangledName, m => m.Reason, StringComparer.Ordinal);
+        foreach (var group in calls.GroupBy(c => Address(c.GetProperty("target")))
+            .Where(g => locations.Find(g.Key) is null).OrderByDescending(g => g.Count()).ThenBy(g => g.Key).Take(20))
+        {
+            var targetNames = group.SelectMany(c => c.GetProperty("names").EnumerateArray()).Select(n => n.GetString()!).Distinct().ToArray();
+            var labels = targetNames.Select(n => symbols.TryGetValue(n, out var rows) ? rows[0].GetProperty("demangled_name").GetString() ?? n : n);
+            var reasons = targetNames.Where(missingByName.ContainsKey).Select(n => missingByName[n]).Distinct().ToArray();
+            Console.WriteLine($"未覆盖调用 | {group.Count()} | {string.Join(" / ", labels)} | {(reasons.Length == 0 ? "目录未登记" : string.Join("；", reasons))}");
+        }
+        checks.True(errors == 0, "定位及调用点与真值核对错误数为零");
+        if (useSymbols) checks.True(found == independent, "全部具有独立定义的目录函数已定位");
         checks.True(covered > 0, "定位覆盖非空");
-        Console.WriteLine($"独立定义定位 {found}/{independent}；系统导入 {locations.Imports.Count}；加权覆盖 {covered}/{calls.Length} ({(double)covered / calls.Length:P2})；定位含加载 {locateSeconds:F2}s；核对总计 {watch.Elapsed.TotalSeconds:F2}s");
+        if (!useSymbols) checks.True(found > 0, "无符号依据定位了具有独立定义的运行时目录函数");
+        Console.WriteLine($"独立定义定位 {found}/{independent}；系统导入 {locations.Imports.Count}；加权覆盖 {covered}/{calls.Length} ({(double)covered / calls.Length:P2})；错误数 {errors}；定位含不返回分析 {locateSeconds:F2}s；核对总计 {watch.Elapsed.TotalSeconds:F2}s");
         return checks.Finish("运行时定位 ARM64 真值核对");
     }
     private static ulong Address(JsonElement value) => ulong.Parse(value.GetString()!.Replace("0x", "", StringComparison.Ordinal), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+}
+
+internal static class RuntimeLocateWithoutSymbolsCorpusChecks
+{
+    public const string Command = "runtime-locate-nosymbols-corpus";
+    public static int Run() => RuntimeLocateCorpusChecks.WithoutSymbols();
 }

@@ -9,12 +9,13 @@ namespace Cpp2CS.Native;
 /// <summary>有效快照的结构转储。可达块按控制流遍历编号，身份按定义位置编号，不输出对象哈希。</summary>
 public static class TextDump
 {
-    public static string Write(NativeFunction function, bool includeTrace = false)
+    public static string Write(NativeFunction function, bool includeTrace = false,
+        Func<Term, string?>? termDescription = null, Func<CallTarget, string?>? targetDescription = null)
     {
         if (!ExitChecker.Check(function).IsValid) throw new ArgumentException("只能转储通过出口检查的快照。", nameof(function));
-        return new Writer(function, includeTrace).Write();
+        return new Writer(function, includeTrace, termDescription, targetDescription).Write();
     }
-    private sealed class Writer(NativeFunction f, bool trace)
+    private sealed class Writer(NativeFunction f, bool trace, Func<Term, string?>? termDescription, Func<CallTarget, string?>? targetDescription)
     {
         private readonly StringBuilder text = new();
         private readonly Dictionary<BlockIdentity, int> blockIds = [];
@@ -47,6 +48,8 @@ public static class TextDump
             while (pending.TryPop(out var item))
             {
                 if (terms.ContainsKey(item.Value)) continue;
+                if (termDescription?.Invoke(item.Value) is { } description)
+                { terms.Add(item.Value, description); continue; }
                 if (!item.Ready && !item.Value.Operands.IsEmpty)
                 {
                     pending.Push((item.Value, true));
@@ -120,6 +123,9 @@ public static class TextDump
                 foreach (var statement in block.Statements)
                     switch (statement)
                     {
+                        case MemoryFence fence:
+                            Id(fence.Identity);
+                            break;
                         case MemoryWrite write:
                             Id(write.Identity);
                             break;
@@ -157,8 +163,9 @@ public static class TextDump
                 {
                     string line = statement switch
                     {
-                        MemoryRead read => "read " + Id(read.Identity) + Provenance(read.Identity) + " " + T(read.Result) + " = [" + T(read.Address) + "]:" + N(read.Width),
-                        MemoryWrite write => "write " + Id(write.Identity) + Provenance(write.Identity) + " [" + T(write.Address) + "]:" + N(write.Width) + " = " + T(write.Value),
+                        MemoryFence fence => "fence " + Id(fence.Identity) + Provenance(fence.Identity) + " domain=" + Q(fence.Domain),
+                        MemoryRead read => "read " + Id(read.Identity) + Provenance(read.Identity) + " " + T(read.Result) + " = [" + T(read.Address) + "]:" + N(read.Width) + (read.Acquire ? " acquire" : ""),
+                        MemoryWrite write => "write " + Id(write.Identity) + Provenance(write.Identity) + " [" + T(write.Address) + "]:" + N(write.Width) + " = " + T(write.Value) + (write.Release ? " release" : ""),
                         TrapWhen trap => "trap " + Id(trap.Identity) + Provenance(trap.Identity) + " when " + T(trap.Condition),
                         DynamicAllocation allocation => "allocate " + Id(allocation.Identity) + Provenance(allocation.Identity) + " " + T(allocation.Result)
                             + " size=" + T(allocation.Size) + " align=" + N(allocation.Alignment),
@@ -199,12 +206,12 @@ public static class TextDump
             PointerTarget.Import value => "import " + Symbol(value.Symbol) + "+" + N(value.Addend),
             _ => throw new InvalidOperationException("非法异常匹配对象。")
         };
-        private string Target(CallTarget target) => target switch
+        private string Target(CallTarget target) => targetDescription?.Invoke(target) ?? (target switch
         {
             ImageFunction function => "entry-offset " + N(function.EntryOffset),
             ImportedTarget import => "import " + Symbol(import.Symbol),
             ComputedTarget computed => T(computed.Value),
             _ => throw new InvalidOperationException("未知调用目标。")
-        };
+        });
     }
 }

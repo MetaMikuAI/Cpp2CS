@@ -30,6 +30,15 @@ public sealed record FunctionExtent(ulong Length, FunctionEvidence Evidence);
 public sealed record FunctionRange(ulong Start, ulong Length, FunctionEvidence Evidence)
 {
     public ImmutableArray<FunctionExtent> Extents { get; init; } = [new(Length, Evidence)];
+    public bool HasConsistentExtent
+    {
+        get
+        {
+            if (Extents.IsDefaultOrEmpty) return false;
+            foreach (var extent in Extents) if (extent.Length != Length) return false;
+            return true;
+        }
+    }
 }
 /// <summary>Catch 的 Matches 为单个类型；ExceptionSpecification 为允许传播的类型集合，空集合表示不允许任何类型。</summary>
 public sealed record ExceptionClause(ClauseKind Kind, ImmutableArray<PointerTarget> Matches);
@@ -52,6 +61,14 @@ public interface IImage
     ImmutableArray<FunctionRange> Functions { get; }
     ImmutableArray<TryRegion> TryRegions { get; }
     ImmutableArray<string> Diagnostics { get; }
+    /// <summary>是否有重定位字节与半开区间相交；空区间为否，末尾溢出时拒绝查询。格式实现可用内部索引加速。</summary>
+    bool HasRelocation(ulong offset, ulong length)
+    {
+        if (length == 0) return false;
+        if (offset > ulong.MaxValue - length) throw new ArgumentOutOfRangeException(nameof(length));
+        return Relocations.Any(r => r.Width > 0 && r.Offset < offset + length
+            && (r.Offset > offset || offset - r.Offset < (ulong)r.Width));
+    }
     AddressInfo Query(ulong offset);
     bool IsExecutable(ulong offset, ulong length = 1);
     bool IsWritable(ulong offset, ulong length = 1);

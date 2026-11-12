@@ -22,6 +22,8 @@ public sealed record RecoveryRequest(string Image, string Metadata, string Outpu
     public ulong? Address { get; init; }
     public int Jobs { get; init; } = 1;
     public bool Source { get; init; }
+    /// <summary>已处理的方法数（含洞）与总数；可从工作线程调用，不参与判定。</summary>
+    public Action<int, int>? Progress { get; init; }
     /// <summary>可选：同一次构建里未去符号的映像文件。只取它的函数符号，作为运行时函数定位的一种证据。</summary>
     public string? Symbols { get; init; }
     public string UnityVersion { get; init; } = "2022.3.62f2";
@@ -52,6 +54,7 @@ public sealed class RecoverySession
             return new(instructions, Arm64Registers.Convention, flow);
         })),
     ];
+    internal static int AnalysisJobs(GlobalFacts facts) => analysisTimings.TryGetValue(facts, out var timing) ? timing.Jobs : 1;
     internal static FrontendComponents DefaultComponents(GlobalFacts facts) => DefaultProviders.Single(p => p.Architecture == facts.Architecture).Create(facts);
     private readonly IMethodStage<CodeEntry, NativeFunction> frontend;
     private readonly IMethodStage<NativeFunction, ManagedBody> recovery;
@@ -105,6 +108,14 @@ public sealed class RecoverySession
         var rows = new MethodReport[groups.Length];
         var bodies = new ManagedBody?[groups.Length];
         long frontTicks = 0, recoveryTicks = 0;
+        int processed = 0;
+        void Advance()
+        {
+            if (request.Progress is not { } progress) return;
+            int count = Interlocked.Increment(ref processed);
+            if (count % 10000 == 0 || count == groups.Length) progress(count, groups.Length);
+        }
+        request.Progress?.Invoke(0, groups.Length);
         Parallel.For(0, groups.Length, new ParallelOptions { MaxDegreeOfParallelism = request.Jobs }, i =>
         {
             var entries = groups[i].OrderBy(e => e.Kind).ThenBy(e => e.Address).ThenBy(e => e.Index).ToArray();
@@ -115,6 +126,7 @@ public sealed class RecoverySession
             {
                 rows[i] = new(Identity(method), method.ToString(), entry.Address,
                     entries.Select(e => new EntryReport(e.Address, e.Kind.ToString(), e.Method!.ToString())).ToArray(), MethodStatus.NoBody, null);
+                Advance();
                 return;
             }
             var context = new MethodContext(method, entry, facts);
@@ -134,6 +146,7 @@ public sealed class RecoverySession
             rows[i] = new(Identity(method), method.ToString(), entry.Address,
                 entries.Select(e => new EntryReport(e.Address, e.Kind.ToString(), e.Method!.ToString())).ToArray(),
                 hole is null ? MethodStatus.Complete : MethodStatus.Hole, hole);
+            Advance();
         });
         var outputWatch = Stopwatch.StartNew();
         var skeleton = new Skeleton(facts.Model, checked((int)facts.Spec.Layout.ObjectHeaderSize));
@@ -162,8 +175,9 @@ public sealed class RecoverySession
             holes.GroupBy(h => h.Layer).ToDictionary(g => g.Key, g => g.Count()), holes.GroupBy(h => h.Reason.Code).ToDictionary(g => g.Key, g => g.Count()),
             new() { ["输入"] = inputSeconds, [frontend.Name] = (double)frontTicks / Stopwatch.Frequency,
                 [recovery.Name] = (double)recoveryTicks / Stopwatch.Frequency, ["输出"] = outputWatch.Elapsed.TotalSeconds,
-                ["不返回分析"] = analysisAlreadyCached ? 0 : analysisTiming.Seconds ?? 0 },
-            inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64) { NoBody = rows.Count(r => r.Status == MethodStatus.NoBody) }) { Source = source };
+                ["不返回分析"] = analysisAlreadyCached ? 0 : analysisTiming.Seconds ?? 0,
+                ["运行时定位"] = RuntimeLocationAssembly.Seconds(facts) },
+            inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64) { NoBody = rows.Count(r => r.Status == MethodStatus.NoBody), RuntimeFunctionsByEvidence = RuntimeLocationAssembly.Evidence(facts) }) { Source = source };
         using (var destination = File.Create(Path.Combine(request.Output, "recovery.json"))) RecoveryReport.Write(destination, report);
         return report;
     }

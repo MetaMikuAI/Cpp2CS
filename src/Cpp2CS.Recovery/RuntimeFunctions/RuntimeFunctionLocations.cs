@@ -6,7 +6,7 @@ using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.RuntimeFunctions;
 
-public enum RuntimeLocationEvidence { Import, Symbol }
+public enum RuntimeLocationEvidence { Import, Symbol, ReferenceShape }
 public sealed record RuntimeFunctionLocation(RuntimeFunction Function, RuntimeLocationEvidence Evidence, string Source);
 public sealed record RuntimeLocationMissing(RuntimeFunction Function, string Reason);
 /// <summary>保留同址的全部目录身份；操作相同时按修饰名排序取首项，否则不定位并记录原因。</summary>
@@ -38,7 +38,9 @@ public sealed class RuntimeFunctionLocations
 
     /// <summary>函数符号由调用方给出：映像自己的符号表，或同一次构建的伴随文件；可以为空。</summary>
     public static RuntimeFunctionLocations Locate(IImage image, ImmutableArray<FunctionSymbol> symbols, RuntimeFunctionCatalog catalog,
-        Func<CallTarget, CallTarget> normalize)
+        Func<CallTarget, CallTarget> normalize,
+        IReadOnlyList<(ulong Entry, RuntimeFunctionLocation Location)>? additional = null,
+        IReadOnlyDictionary<string, string>? missingReasons = null)
     {
         var imports = new Dictionary<string, RuntimeFunctionLocation>(StringComparer.Ordinal);
         var present = image.Imports.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
@@ -48,11 +50,13 @@ public sealed class RuntimeFunctionLocations
                 imports.Add(group.Key, new(group.Single(), RuntimeLocationEvidence.Import, group.Key));
 
         var byName = catalog.Functions.Where(f => f.Recognition.Symbol).ToDictionary(f => f.MangledName, StringComparer.Ordinal);
-        var entries = symbols.Where(s => byName.ContainsKey(s.Name)).GroupBy(s => s.Offset)
+        var evidence = symbols.Where(s => byName.ContainsKey(s.Name))
+            .Select(s => (Entry: s.Offset, Location: new RuntimeFunctionLocation(byName[s.Name], RuntimeLocationEvidence.Symbol, s.Name)))
+            .Concat(additional ?? []).ToArray();
+        var entries = evidence.GroupBy(s => s.Entry)
             .ToFrozenDictionary(g => g.Key, g =>
             {
-                var candidates = g.Select(s => s.Name).Distinct().Order(StringComparer.Ordinal)
-                    .Select(n => new RuntimeFunctionLocation(byName[n], RuntimeLocationEvidence.Symbol, n)).ToImmutableArray();
+                var candidates = g.Select(s => s.Location).Distinct().OrderBy(l => l.Function.MangledName, StringComparer.Ordinal).ToImmutableArray();
                 var agrees = candidates.Select(c => c.Function.Operation).Distinct().Count() == 1;
                 return new RuntimeEntryLocation(candidates, agrees ? candidates[0] : null,
                     agrees ? (candidates.Length > 1 ? "同址别名操作相同，按修饰名取首项" : null) : "同址别名对应不同运行时操作");
@@ -64,8 +68,9 @@ public sealed class RuntimeFunctionLocations
         var missing = catalog.Functions.Where(f => !located.Contains(f.MangledName)).Select(f => new RuntimeLocationMissing(f,
             conflicts.Contains(f.MangledName) ? "同址别名对应不同运行时操作" :
             f.Recognition.Import is not null ? "映像没有唯一匹配的导入" :
+            missingReasons?.GetValueOrDefault(f.MangledName) is { } shapeReason ? shapeReason :
             !f.Recognition.Symbol ? "目录未启用符号证据" :
-            symbols.IsEmpty ? "没有函数符号证据" : "符号表没有该函数的独立定义")).ToImmutableArray();
+            "没有唯一且一致的身份依据")).ToImmutableArray();
         return new(imports.ToFrozenDictionary(StringComparer.Ordinal), entries, missing, normalize);
     }
 }

@@ -49,8 +49,8 @@ internal sealed class InputMemoryImage : IImage
     public ImmutableArray<ImportSymbol> Imports => [];
     public ImmutableArray<ExportSymbol> Exports => [];
     public ImmutableArray<FunctionSymbol> FunctionSymbols { get; init; } = [];
-    public ImmutableArray<FunctionRange> Functions => [];
-    public ImmutableArray<TryRegion> TryRegions => [];
+    public ImmutableArray<FunctionRange> Functions { get; init; } = [];
+    public ImmutableArray<TryRegion> TryRegions { get; init; } = [];
     public ImmutableArray<string> Diagnostics => [];
     public AddressInfo Query(ulong offset) => offset < (ulong)bytes.Length ? new(StorageKind.FileContent, (ulong)bytes.Length - offset, false, true) : new(StorageKind.Unmapped, 0, false, false);
     public bool IsExecutable(ulong offset, ulong length = 1) => false;

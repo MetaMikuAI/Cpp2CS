@@ -73,6 +73,14 @@ public interface IRegisterReader
     TermTable Terms { get; }
     Term Read(Register register);
 }
+/// <summary>显式的同步访问能力；不能实现的消费者不得将其当作普通内存访问。</summary>
+public interface IOrderedMemoryEmitter
+{
+    Term LoadAcquire(Term address, int width);
+    void StoreRelease(Term address, Term value);
+    void FullFence(string domain);
+}
+
 /// <summary>地址为映像偏移。寄存器读写必须整单元；部分写入由 Slice/Concat 表达。</summary>
 public interface IEmitter : IRegisterReader
 {

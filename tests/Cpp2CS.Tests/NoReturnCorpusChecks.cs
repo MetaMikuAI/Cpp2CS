@@ -14,7 +14,9 @@ namespace Cpp2CS.Tests;
 internal static class NoReturnCorpusChecks
 {
     public const string Command = "noreturn-corpus";
-    public static int Run()
+    public static int Run() => Run(true);
+    internal static int Summary() => Run(false);
+    private static int Run(bool full)
     {
         var corpus = Environment.GetEnvironmentVariable("CPP2CS_CORPUS");
         var truth = Environment.GetEnvironmentVariable("CPP2CS_CORPUS_TRUTH");
@@ -30,7 +32,7 @@ internal static class NoReturnCorpusChecks
         var facts = Analyze(image, observe: rounds.Add);
         Console.WriteLine($"不返回目标={facts.Targets.Count} 映像入口={facts.Targets.OfType<ImageFunction>().Count()} 轮数={facts.Rounds} 毫秒={watch.Elapsed.TotalMilliseconds:F0}");
         foreach (var round in rounds)
-            Console.WriteLine($"noreturn_round={round.Number} pending={round.Pending} added={round.Added} seconds={round.Elapsed.TotalSeconds:F6}");
+            Console.WriteLine($"noreturn_round={round.Number} pending={round.Pending} added={round.Added} cached_nodes={round.CachedNodes} seconds={round.Elapsed.TotalSeconds:F6}");
         var probes = rounds.SelectMany(r => r.Probes).Select(t => t.TotalMilliseconds).Order().ToArray();
         Console.WriteLine($"noreturn_probes={probes.Length} p50_ms={probes[probes.Length / 2]:F6} p95_ms={probes[probes.Length * 95 / 100]:F6} p99_ms={probes[probes.Length * 99 / 100]:F6} max_ms={probes[^1]:F6}");
         // 参照为逐轮重新解码、发射的原算法：全部目标按 ToString 序数排序，以换行连接后取 UTF-8 的 SHA-256。
@@ -44,6 +46,7 @@ internal static class NoReturnCorpusChecks
         Console.WriteLine($"noreturn_serial_seconds={watch.Elapsed.TotalSeconds:F6}");
         checks.True(facts.Targets.SetEquals(serial.Targets), "单线程与并行的不返回目标逐个相同");
         checks.True(facts.Rounds == serial.Rounds, "单线程与并行的不返回轮数相同");
+        if (!full) return checks.Finish("不返回语料目标集合");
         using var symbols = JsonDocument.Parse(File.ReadAllText(Path.Combine(truth, "functions.arm64-v8a.json")));
         foreach (var function in catalog.Functions.Where(f => f.Recognition.Import is null && f.Operation.DoesNotReturn))
             foreach (var symbol in symbols.RootElement.EnumerateArray().Where(s => s.GetProperty("name").GetString() == function.MangledName && s.GetProperty("defined").GetBoolean()))
@@ -89,4 +92,10 @@ internal static class NoReturnCorpusChecks
             image.Imports.Where(i => names.Contains(i.Name)), new Arm64FlowFacts(), jobs: jobs ?? Environment.ProcessorCount, observe: observe);
     }
 
+}
+
+internal static class NoReturnSummaryCorpusChecks
+{
+    public const string Command = "noreturn-summary-corpus";
+    public static int Run() => NoReturnCorpusChecks.Summary();
 }

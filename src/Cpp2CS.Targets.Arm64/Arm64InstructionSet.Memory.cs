@@ -1,4 +1,5 @@
 using Cpp2CS.Native;
+using Cpp2CS.Targets.Frontend;
 using Cpp2CS.Native.Terms;
 using static Cpp2CS.Native.Terms.CoreOperation;
 using static Cpp2CS.Targets.Arm64.Arm64Registers;
@@ -42,6 +43,12 @@ public sealed partial class Arm64InstructionSet
             if (Is(0xfffff01f, 0xd503201f)) return true;
             if (Is(0xffffffe0, 0xd53bd040)) { WriteX(D, e.ThreadPointer); return true; }
             if (Is(0xfffff0ff, 0xd503305f)) { Hole("exclusive"); return true; }
+            // DMB 的全读写形式；其他同步词汇仍由未支持诊断保留。
+            if (orderedMemory && e is IOrderedMemoryEmitter fence && Is(0xfffff3ff, 0xd50333bf))
+            {
+                fence.FullFence(B(10, 2) switch { 0 => "outer-shareable", 1 => "nonshareable", 2 => "inner-shareable", _ => "system" });
+                return true;
+            }
             if (Is(0xfffff09f, 0xd503309f)) { Hole("barrier"); return true; }
             if (Is(0xffc00000, 0xd5000000)) { Hole("system-register"); return true; }
             if (Is(0xfe000000, 0xd6000000)) { Hole("branch-extension"); return true; }
@@ -57,6 +64,14 @@ public sealed partial class Arm64InstructionSet
         private Term Address(Term basis, long offset) => offset == 0 ? basis : Op(Add, basis, K(offset));
         private bool Memory()
         {
+            if (orderedMemory && e is IOrderedMemoryEmitter ordered && Is(0x3fbffc00, 0x089ffc00))
+            {
+                var orderedAddress = ReadX(A, 64, true);
+                int width = 8 << B(30, 2);
+                if (Bit(22)) WriteX(D, ordered.LoadAcquire(orderedAddress, width));
+                else ordered.StoreRelease(orderedAddress, ReadX(D, width));
+                return true;
+            }
             if (Is(0x3f000000, 0x08000000)) { Hole("exclusive"); return true; }
             if (Is(0x3b200c00, 0x38200000)) { Hole("atomic"); return true; }
             if (Is(0x3b000000, 0x18000000))

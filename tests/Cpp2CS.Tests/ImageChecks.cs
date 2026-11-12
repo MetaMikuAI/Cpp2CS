@@ -67,6 +67,11 @@ internal static class ImageChecks
             var wide = ElfImage.Parse(changed);
             a.True(wide.ReadPointer(0x1f8) is PointerTarget.Unknown && wide.ReadPointer(0x200) is PointerTarget.Unknown
                 && wide.ReadPointer(0x208) is PointerTarget.Import && wide.ReadPointer(0x1f0) is PointerTarget.Null, "宽重定位的内部与相邻边界");
+            foreach (var indexed in new[] { image, overlap, wide })
+                a.True(Enumerable.Range(0x1e0, 64).All(start => Enumerable.Range(0, 32).All(length =>
+                    indexed.HasRelocation((ulong)start, (ulong)length) == (length != 0 && indexed.Relocations.Any(r =>
+                        r.Offset < (ulong)(start + length) && r.Offset + (ulong)r.Width > (ulong)start)))),
+                    "重定位区间索引与逐项判定一致，覆盖空区间、相邻及嵌套重叠");
             changed = Minimal(machine); Put(changed, 0x258, 0x400200, 8);
             Reject(a, () => ElfImage.Parse(changed), "重复起点重定位拒绝");
             foreach (var (at, value) in new[] { (4, 1), (5, 2), (18, 40) })

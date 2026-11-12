@@ -15,6 +15,7 @@ public sealed class MergeIdentity(MergeIdentity? origin = null) : StableIdentity
 public sealed class FrameIdentity(FrameIdentity? origin = null) : StableIdentity(origin);
 public sealed class WriteIdentity(WriteIdentity? origin = null) : StableIdentity(origin);
 public sealed class ReadIdentity(ReadIdentity? origin = null) : StableIdentity(origin);
+public sealed class FenceIdentity(FenceIdentity? origin = null) : StableIdentity(origin);
 public sealed class TrapIdentity(TrapIdentity? origin = null) : StableIdentity(origin);
 public sealed class BlockIdentity(BlockIdentity? origin = null) : StableIdentity(origin);
 
@@ -71,8 +72,16 @@ public abstract record Statement
     private protected Statement() { }
     public Trace? Trace { get; init; }
 }
-public sealed record MemoryRead(ReadIdentity Identity, Term Address, int Width, Term Result) : Statement;
-public sealed record MemoryWrite(WriteIdentity Identity, Term Address, int Width, Term Value) : Statement;
+public sealed record MemoryRead(ReadIdentity Identity, Term Address, int Width, Term Result) : Statement
+{
+    public bool Acquire { get; init; }
+}
+public sealed record MemoryWrite(WriteIdentity Identity, Term Address, int Width, Term Value) : Statement
+{
+    public bool Release { get; init; }
+}
+/// <summary>域内的先行读写先于后续读写被观察；Domain 由目标描述定义，不表示等待访问完成。</summary>
+public sealed record MemoryFence(FenceIdentity Identity, string Domain) : Statement;
 /// <summary>条件为真时是硬件陷阱的结局，其后的语句只在条件为假时执行。指令内部的条件陷阱不拆块。</summary>
 public sealed record TrapWhen(TrapIdentity Identity, Term Condition) : Statement;
 /// <summary>尾调用表示为调用加返回。没有展开边仅表示本函数内没有处理入口；是否可能抛出由被调效果回答。</summary>

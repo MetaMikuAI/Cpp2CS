@@ -13,7 +13,7 @@ internal sealed record Indirect(Term Target) : Transfer;
 internal sealed record Finished(Terminator End) : Transfer;
 
 internal sealed class Emission(ulong address, TermTable terms, ImmutableArray<Register> registers,
-    RegisterConvention convention, IFlowFacts facts) : IEmitter
+    RegisterConvention convention, IFlowFacts facts) : IEmitter, IOrderedMemoryEmitter
 {
     internal Dictionary<Register, Term> State { get; } = [];
     internal List<Statement> Statements { get; } = [];
@@ -46,18 +46,27 @@ internal sealed class Emission(ulong address, TermTable terms, ImmutableArray<Re
         if (value.Width != register.Width) throw new ArgumentException("写入必须覆盖完整存储单元。");
         State[register] = value;
     }
-    public Term Load(Term pointer, int width)
+    public Term Load(Term pointer, int width) => Load(pointer, width, false);
+    public Term LoadAcquire(Term pointer, int width) => Load(pointer, width, true);
+    private Term Load(Term pointer, int width, bool acquire)
     {
         Open(); Own(pointer);
         var id = new ReadIdentity();
         var result = terms.Atom(new ResultAtom(id), width);
-        Statements.Add(new MemoryRead(id, pointer, width, result) { Trace = new(address) });
+        Statements.Add(new MemoryRead(id, pointer, width, result) { Acquire = acquire, Trace = new(address) });
         return result;
     }
-    public void Store(Term pointer, Term value)
+    public void Store(Term pointer, Term value) => Store(pointer, value, false);
+    public void StoreRelease(Term pointer, Term value) => Store(pointer, value, true);
+    private void Store(Term pointer, Term value, bool release)
     {
         Open(); Own(pointer); Own(value);
-        Statements.Add(new MemoryWrite(new WriteIdentity(), pointer, value.Width, value) { Trace = new(address) });
+        Statements.Add(new MemoryWrite(new WriteIdentity(), pointer, value.Width, value) { Release = release, Trace = new(address) });
+    }
+    public void FullFence(string domain)
+    {
+        Open();
+        Statements.Add(new MemoryFence(new(), domain) { Trace = new(address) });
     }
     public void TrapIf(Term condition)
     {
@@ -149,6 +158,7 @@ internal sealed class TermRewrite(TermTable terms, Func<Term, Term?> replace, bo
     }
     internal Statement Statement(Statement statement) => statement switch
     {
+        MemoryFence fence => fence,
         MemoryRead r => r with { Address = Map(r.Address) },
         MemoryWrite w => w with { Address = Map(w.Address), Value = Map(w.Value) },
         TrapWhen t => t with { Condition = Map(t.Condition) },

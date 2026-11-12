@@ -99,7 +99,7 @@ public static class IndirectResolver
             if (!absolute && !RelativeShape(target, table.Result))
                 return Hole("shape", "目标不是表项地址或映像基址加扩展后的相对表项。");
             // 相对表项不能带重定位；整张表查一次，不逐项扫描全部重定位。
-            if (!absolute && image.Relocations.Any(r => r.Offset < begin + bytes && r.Offset + (ulong)r.Width > begin))
+            if (!absolute && image.HasRelocation(begin, bytes))
                 return Hole("pointer", "相对表项含有尚未支持的重定位。");
             var cases = ImmutableArray.CreateBuilder<IndirectCase>();
             for (int i = 0; i <= maximum; i++)

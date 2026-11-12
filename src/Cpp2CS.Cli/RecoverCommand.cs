@@ -6,12 +6,18 @@ internal static class RecoverCommand
 {
     public static int Run(string[] args)
     {
+        if (args is ["runtime-shapes", var referenceImage, var referenceSymbols, var destination])
+        {
+            RuntimeShapeGeneration.Generate(referenceImage, referenceSymbols, destination);
+            return 0;
+        }
         if (args is not ["recover", var image, var metadata, var output, .. var options])
         {
-            Console.Error.WriteLine("用法: recover <映像> <元数据> <输出目录> [--method 名称子串] [--address 0x偏移] [--jobs 并行度] [--symbols 未去符号的映像] [--unity 版本] [--source]");
+            Console.Error.WriteLine("用法: recover <映像> <元数据> <输出目录> [--method 名称子串] [--address 0x偏移] [--jobs 并行度] [--symbols 未去符号的映像] [--unity 版本] [--source]\n      runtime-shapes <参考映像> <同次构建符号映像> <规格输出 JSON>");
             return 2;
         }
-        var request = new RecoveryRequest(image, metadata, output);
+        var request = new RecoveryRequest(image, metadata, output)
+        { Progress = (processed, total) => Console.Error.WriteLine($"已处理方法 {processed}/{total}") };
         for (var i = 0; i < options.Length; i += 2)
         {
             if (options[i] == "--source") { request = request with { Source = true }; i--; continue; }
