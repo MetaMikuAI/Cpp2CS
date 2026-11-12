@@ -63,7 +63,7 @@ public sealed partial class IntegerLowering
         if (vectorResults.TryGetValue(term, out var vector)) return vector.Local;
         if (runtimeValues.TryGetValue(term, out var runtime)) return runtime;
         if (arguments.TryGetValue(term, out var argument))
-            return Opaque(argument.Type) || IsFloat(argument.Type) || ReferenceType(argument.Type) ? argument : IntegerType(argument.Type) ? Mask(argument, term.Width)
+            return Opaque(argument.Type) || IsFloat(argument.Type) || ReferenceType(argument.Type) || ManagedTypes.IsNativePointer(argument.Type) ? argument : IntegerType(argument.Type) ? Mask(argument, term.Width)
                 : Fail<ManagedValue>(TypeFailure(argument.Type), "使用了非整数形参");
         if (term.Width > 64) return Fail<ManagedValue>(LoweringFailureKind.FloatingOrVector, "项位宽超过整数栈宽度");
         if (term.Identity is ResultAtom { Definition: ReadIdentity readId })
@@ -137,7 +137,7 @@ public sealed partial class IntegerLowering
             if (term != root || low < start || low + width > start + pair.Key.Width) continue;
             if (ReferenceType(pair.Value.Type)) return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType,
                 "托管引用或地址的部分位片用于普通值或运算", code: "lowering.Address.Use");
-            if (!Opaque(pair.Value.Type) && !IntegerType(pair.Value.Type) && !IsFloat(pair.Value.Type)) return Fail<ManagedValue>(TypeFailure(pair.Value.Type), "使用了非整数形参位片");
+            if (!Opaque(pair.Value.Type) && !IntegerType(pair.Value.Type) && !IsFloat(pair.Value.Type) && !ManagedTypes.IsNativePointer(pair.Value.Type)) return Fail<ManagedValue>(TypeFailure(pair.Value.Type), "使用了非整数形参位片");
             return Slice(pair.Value, low - start, width);
         }
         if (term.Kind == TermKind.Concat)
@@ -186,6 +186,9 @@ public sealed partial class IntegerLowering
             return FloatOperation(term, op);
         var operands = term.Operands.Select((t, i) => Value(t, floating && op == CoreOperation.Select && i > 0)).ToArray();
         if (operands.Any(v => v is null)) return null;
+        if (operands.Any(v => ReferenceType(v!.Type))
+            && (op == CoreOperation.Select ? operands.Skip(1) : operands).Any(v => ManagedTypes.IsNativePointer(v!.Type)))
+            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "托管引用与原生整数或非托管指针共同参与运算", code: "lowering.NativeInt.Reference");
         if (operands.Any(v => Opaque(v!.Type)))
         {
             if (op == CoreOperation.Select && !Opaque(operands[0]!.Type))
@@ -216,6 +219,9 @@ public sealed partial class IntegerLowering
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "引用参与非引用运算：" + op + (address is null ? "" : "；定位失败：" + address),
                 address, address is null ? null : "lowering.Address.Location");
         }
+        if (op == CoreOperation.Select && ManagedTypes.IsNativePointer(operands[1]!.Type)
+            && Equals(operands[1]!.Type, operands[2]!.Type))
+            return new ChoiceValue(IntegerBits(operands[0]!), operands[1]!, operands[2]!, operands[1]!.Type, term.Width);
         var a = IntegerBits(operands[0]!); var b = operands.Length > 1 ? IntegerBits(operands[1]!) : null;
         int width = term.Width, inputWidth = term.Operands[0].Width;
         switch (op)

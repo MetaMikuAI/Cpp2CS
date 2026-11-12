@@ -176,6 +176,7 @@ internal static partial class LoweringChecks
         checks.True(narrow.Body is not null, $"窄返回值只使用绑定的低位：{narrow.Failure}");
         checks.True(new IntegerLowering(Function("CallTail"), target, binder, types, calls: narrowCalls).Run().Failure?.Kind == LoweringFailureKind.Binding,
             "窄返回值的 ABI 未定义高位不能取用");
+        NativeIntChecks(checks, program);
         SharedChecks(checks, program);
         RuntimeChecks(checks, program);
         ConstructorChecks(checks, program);
@@ -184,6 +185,218 @@ internal static partial class LoweringChecks
         StructChecks(checks, program);
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         return checks.Finish("标量下降");
+    }
+
+    private static void NativeIntChecks(Assertions checks, ProgramModel primitives)
+    {
+        var spec = InputCorpusChecks.Spec("arm64-v8a");
+        var layouts = new Cpp2CS.Runtime.Layouts.FieldLayouts(spec, 8, 8);
+        var binder = new MethodBinder(new(layouts), new Aapcs64());
+        var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
+        TypeRef Type(string name) => new DefinitionRef(primitives.Types.Single(t => t.Name == name), []);
+        var native = Type("IntPtr"); var unsigned = Type("UIntPtr"); var pointer = new PointerRef(Type("Int32"));
+        var owner = new TypeDef { Index = primitives.Types.Count(t => t.Assembly == "mscorlib.dll" && t.Name != "BitConverter"), Assembly = "NativeIntChecks.dll", Namespace = "", Name = "Values",
+            Token = 0x02000001, Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false,
+            Size = 32, PackingSize = 0, ClassSizeIsDefault = true };
+        var reference = new DefinitionRef(owner, []);
+        var array = new ArrayRef(native, 1);
+        var field = new FieldDef { Index = 0, Owner = owner, Name = "Value", Type = native,
+            Offset = (int)spec.Layout.ObjectHeaderSize, Attributes = FieldAttributes.Public };
+        var shared = new FieldDef { Index = 1, Owner = owner, Name = "Shared", Type = native,
+            Offset = 0, Attributes = FieldAttributes.Public | FieldAttributes.Static };
+        owner.Fields = [field, shared];
+        var methods = new List<MethodDef>();
+        MethodDef Method(string name, TypeRef result, params TypeRef[] parameters)
+        {
+            var method = new MethodDef { Index = methods.Count, Owner = owner, Name = name, Token = (uint)(0x06000001 + methods.Count),
+                Attributes = MethodAttributes.Public | MethodAttributes.Static, ImplAttributes = 0, Slot = -1,
+                ReturnType = result, Parameters = parameters.Select((t, i) => new ParameterDef("p" + i, t, 0, null, false)).ToArray() };
+            methods.Add(method); return method;
+        }
+        var target = Method("Target", native, native);
+        var referenceTarget = Method("ReferenceTarget", native, new ByRefRef(native));
+        var entries = new[] {
+            Method("Forward", native, native), Method("Add", native, native), Method("Call", native, native), Method("CallAdd", native, native),
+            Method("PointerCompare", Type("Boolean"), pointer, Type("UInt64")),
+            Method("UnsignedToSigned", native, unsigned), Method("SignedToUnsigned", unsigned, native),
+            Method("PointerToSigned", native, pointer), Method("SignedToPointer", pointer, native),
+            Method("PointerForward", pointer, pointer), Method("UnsignedForward", unsigned, unsigned),
+            Method("PointerAdd", pointer, pointer), Method("UnsignedAdd", unsigned, unsigned),
+            Method("Read", native, reference), Method("Write", native, reference, native),
+            Method("ArrayRead", native, array), Method("ArrayWrite", native, array, native),
+            Method("FieldCall", native, reference), Method("Select", native, native, native), Method("Merge", native, native, native),
+            Method("ReadPointer", Type("Int32"), pointer), Method("WritePointer", pointer, pointer),
+            Method("ReferenceToNative", native, reference), Method("NativeToReference", reference, native),
+            Method("ReferenceCall", native, reference), Method("ReferenceStore", native, reference),
+            Method("ReferenceAddressCall", native, native), Method("ReferenceAddressToNative", native, new ByRefRef(native)),
+            Method("ReferenceCompare", Type("Boolean"), reference, native),
+            Method("Truncate", Type("Int32"), native), Method("Extend", native, Type("Int32")),
+            Method("Bits", Type("Int64"), native), Method("UnsignedBits", Type("UInt64"), unsigned),
+            Method("StaticRead", native), Method("StaticCall", native), Method("StaticWrite", native, native),
+        }.ToDictionary(m => m.Name);
+        owner.Methods = methods;
+        var definitions = primitives.Types.Where(t => t.Assembly == "mscorlib.dll" && t.Name != "BitConverter").Append(owner).ToArray();
+        var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods, Fields = owner.Fields,
+            RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
+            Assemblies = definitions.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key,
+                AssemblyName = Path.GetFileNameWithoutExtension(g.Key), Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
+        var types = new ManagedTypes(program, layouts, 8);
+        var skeleton = new Skeleton(program, 16); var emitter = new BodyEmitter(skeleton, types);
+        var calls = new CallNamingQuery(binder, new NamingChecks.Map([new BindingEntry(MethodRef.Open(target), BindingEntryKind.Ordinary)]), new NamingChecks.RuntimeMap(), catalog);
+        var addressCalls = new CallNamingQuery(binder, new NamingChecks.Map([new BindingEntry(MethodRef.Open(referenceTarget), BindingEntryKind.Ordinary)]), new NamingChecks.RuntimeMap(), catalog);
+        using var source = new CompiledSource("""
+            public static unsafe class NativeValues {
+                public static nint Forward(nint p) => p;
+                public static nint Add(nint p) => unchecked(p + 3);
+                public static nuint UnsignedAdd(nuint p) => unchecked(p + 3);
+                public static bool PointerCompare(int* p, ulong value) => (ulong)p == value;
+                public static nint UnsignedToSigned(nuint p) => unchecked((nint)p);
+                public static int Truncate(nint p) => unchecked((int)p);
+                public static nint NativeZero() => System.IntPtr.Zero;
+                public static nuint UnsignedZero() => System.UIntPtr.Zero;
+                public static nint NativeConstantZero() => 0;
+                public static nuint UnsignedConstantZero() => 0;
+                public static nint NativeOne() => 1;
+                public static nuint UnsignedOne() => 1;
+                public static nint Zero;
+                public static nint MutableZero() => Zero;
+            }
+            """);
+        foreach (var prefix in new[] { "Native", "Unsigned" })
+        {
+            var zero = source.Method("NativeValues", prefix + "Zero");
+            checks.True(zero.Body.Instructions.Any(i => i.OpCode.Code == Mono.Cecil.Cil.Code.Ldsfld), prefix + " 零值检查实际读取核心库字段");
+            checks.True(CilComparison.Compare(zero, source.Method("NativeValues", prefix + "ConstantZero")).Status == CilComparisonStatus.Match,
+                prefix + " 核心库零字段与零常量一致");
+            checks.True(CilComparison.Compare(zero, source.Method("NativeValues", prefix + "One")).Status == CilComparisonStatus.Mismatch,
+                prefix + " 核心库零字段仍能检出非零输出");
+        }
+        checks.True(CilComparison.Compare(source.Method("NativeValues", "MutableZero"), source.Method("NativeValues", "NativeConstantZero")).Status == CilComparisonStatus.Mismatch,
+            "普通类型的可变 Zero 字段仍合成非零输入");
+        var executionModel = new CecilModel(source.Module);
+        var executionTypes = new ManagedTypes(executionModel.Program, new ManagedStorage(executionModel.Prepare), 8);
+        var executionIndex = new WorldIndex(executionModel.Program, executionTypes);
+        foreach (var (mode, method) in entries)
+        {
+            var terms = new TermTable(); var block = new BlockIdentity(); var frame = terms.Atom(new RootAtom(AddressRoot.Frame), 64);
+            var builder = new FunctionBuilder(terms, block, 64, new(frame));
+            var args = method.Parameters.Select((_, i) => {
+                var slot = new AbstractSlot(SlotKind.Integer, i); var value = terms.Atom(new EntryAtom(slot), 64);
+                builder.Inputs.Add(new(slot, value)); return value;
+            }).ToArray();
+            var statements = new List<Statement>();
+            Term Add(Term value, long offset) => terms.Apply(new CoreOperator(CoreOperation.Add), 64, value, terms.Constant(offset, 64));
+            Term Read(Term address, int width)
+            {
+                var id = new ReadIdentity(); var value = terms.Atom(new ResultAtom(id), width);
+                statements.Add(new MemoryRead(id, address, width, value)); return value;
+            }
+            var facts = NamingFacts.Empty;
+            Term result = args.Length == 0 ? terms.Constant(0, 64) : args[0];
+            if (mode.StartsWith("Static", StringComparison.Ordinal))
+            {
+                var image = terms.Atom(new RootAtom(AddressRoot.Image), 64); builder.ImageBase = image;
+                var klass = Read(Add(image, 256), 64);
+                var storage = Read(Add(klass, spec.Layout.Field("Il2CppClass", "static_fields").ByteOffset), 64);
+                facts = facts with { Slots = ImmutableDictionary<ulong, Outcome<MetadataEntity>>.Empty.Add(256,
+                    Outcome<MetadataEntity>.Success(new ClassEntity(reference))) };
+                if (mode == "StaticWrite") { statements.Add(new MemoryWrite(new(), storage, 64, args[0])); result = args[0]; }
+                else result = Read(storage, 64);
+            }
+            if (mode is "Add" or "CallAdd" or "PointerAdd" or "UnsignedAdd") result = Add(result, 3);
+            if (mode is "PointerCompare" or "ReferenceCompare") result = terms.Apply(new CoreOperator(CoreOperation.Equal), 1, args[0], args[1]);
+            if (mode is "Read" or "FieldCall") result = Read(Add(args[0], field.Offset), 64);
+            if (mode is "Write" or "ReferenceStore")
+            {
+                var value = mode == "Write" ? args[1] : args[0];
+                statements.Add(new MemoryWrite(new(), Add(args[0], field.Offset), 64, value)); result = terms.Constant(0, 64);
+            }
+            if (mode is "ArrayRead" or "ArrayWrite")
+            {
+                var address = Add(args[0], spec.Layout.ArrayDataStart);
+                if (mode == "ArrayRead") result = Read(address, 64);
+                else { statements.Add(new MemoryWrite(new(), address, 64, args[1])); result = args[1]; }
+            }
+            if (mode == "ReadPointer") result = Read(args[0], 32);
+            if (mode == "WritePointer") statements.Add(new MemoryWrite(new(), args[0], 32, terms.Constant(0, 32)));
+            if (mode == "Select") result = terms.Apply(new CoreOperator(CoreOperation.Select), 64,
+                terms.Apply(new CoreOperator(CoreOperation.Equal), 1, args[0], terms.Constant(0, 64)), args[0], args[1]);
+            if (mode is "Call" or "CallAdd" or "FieldCall" or "StaticCall" or "ReferenceCall" or "ReferenceAddressCall")
+            {
+                var id = new CallIdentity(); var output = terms.Atom(new ResultAtom(id), 64);
+                statements.Add(new Call(id, new ImageFunction(10), [new(new(SlotKind.Integer), result),
+                    new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], [new(new(SlotKind.Integer), output)])); result = output;
+            }
+            if (mode == "Truncate") result = terms.Slice(args[0], 0, 32);
+            if (mode == "Extend") result = terms.Apply(new CoreOperator(CoreOperation.SignExtend), 64, terms.Slice(args[0], 0, 32));
+            Return Ret(Term value) => new([new(new(SlotKind.Integer), value.Width == 64 ? value : terms.Concat(value, terms.Constant(0, 64 - value.Width)))]);
+            if (mode == "Merge")
+            {
+                var yes = new BlockIdentity(); var no = new BlockIdentity(); var join = new BlockIdentity(); var id = new MergeIdentity();
+                var merged = terms.Atom(new ResultAtom(id), 64);
+                builder.Blocks.Add(new(block, [], [], new Branch(terms.Apply(new CoreOperator(CoreOperation.Equal), 1, args[0], terms.Constant(0, 64)), yes, no)));
+                builder.Blocks.Add(new(yes, [], [], new Jump(join))); builder.Blocks.Add(new(no, [], [], new Jump(join)));
+                builder.Blocks.Add(new(join, [new(id, merged, [new(yes, args[0]), new(no, args[1])])], [], Ret(merged)));
+            }
+            else builder.Blocks.Add(new(block, [], [.. statements], Ret(result)));
+            var currentCalls = mode == "ReferenceAddressCall" ? addressCalls : calls;
+            var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(method), binder, types, calls: currentCalls, effects: new ManagedCallEffects(currentCalls), spec: spec, names: facts).Run();
+            if (mode.StartsWith("Reference", StringComparison.Ordinal) || mode == "NativeToReference")
+            {
+                checks.True(lowered.Failure?.Reason.Code == "lowering.NativeInt.Reference", mode + " 引用与原生整数边界报洞：" + lowered.Failure);
+                continue;
+            }
+            if (mode is "ReadPointer" or "WritePointer")
+            {
+                checks.True(lowered.Failure?.Reason.Code == "location.base-untyped", mode + " 非托管内存保持独立的洞：" + lowered.Failure);
+                continue;
+            }
+            checks.True(lowered.Body is not null, mode + " 原生整数下降：" + lowered.Failure);
+            if (lowered.Body is not { } body) continue;
+            var problems = emitter.Emit([body]);
+            checks.True(problems.Count == 0, mode + " 原生整数 CIL 栈类型校验：" + string.Join(';', problems.Values));
+            if (problems.Count != 0) continue;
+            var codes = skeleton.Method(method).Body.Instructions.Select(i => i.OpCode.Code).ToArray();
+            bool IsConversion(Mono.Cecil.Cil.Code code) => code.ToString().StartsWith("Conv_", StringComparison.Ordinal);
+            if (mode is "Forward" or "PointerForward" or "UnsignedForward" or "Call" or "Read" or "FieldCall" or "StaticRead" or "StaticCall" or "StaticWrite")
+                checks.True(!codes.Any(IsConversion), mode + " 同类型转发没有转换");
+            if (mode is "ArrayRead" or "ArrayWrite")
+                checks.True(codes.Count(IsConversion) == 1 && codes.Contains(Mono.Cecil.Cil.Code.Conv_I), mode + " 同类型数组值只保留下标的 native int 转换");
+            if (mode is "Select" or "Merge")
+                checks.True(codes.Count(IsConversion) == 1 && codes.Contains(Mono.Cecil.Cil.Code.Conv_I8), mode + " 同类型分支值只保留条件比较的整数转换");
+            if (mode is "Add" or "CallAdd" or "PointerAdd" or "UnsignedAdd")
+            {
+                var input = mode is "Add" or "CallAdd" ? Mono.Cecil.Cil.Code.Conv_I8 : Mono.Cecil.Cil.Code.Conv_U8;
+                var output = mode is "Add" or "CallAdd" ? Mono.Cecil.Cil.Code.Conv_I : Mono.Cecil.Cil.Code.Conv_U;
+                checks.True(codes.Count(c => c == input) == 1 && codes.Count(c => c == output) == 1 && codes.Count(IsConversion) == 2,
+                    mode + " 整数运算两端各转换一次：" + string.Join(',', codes));
+            }
+            if (mode is "UnsignedToSigned" or "PointerToSigned" or "SignedToUnsigned" or "SignedToPointer")
+                checks.True(codes.Count(IsConversion) == 1 && codes.Contains(mode is "UnsignedToSigned" or "PointerToSigned" ? Mono.Cecil.Cil.Code.Conv_I : Mono.Cecil.Cil.Code.Conv_U), mode + " 按目标类型转换一次");
+            if (mode == "PointerCompare") checks.True(codes.Count(c => c == Mono.Cecil.Cil.Code.Conv_U8) == 1, "指针比较进入无符号 64 位整数位型");
+            if (mode is "Bits" or "UnsignedBits")
+                checks.True(codes.Count(IsConversion) == 1 && codes.Contains(mode == "Bits" ? Mono.Cecil.Cil.Code.Conv_I8 : Mono.Cecil.Cil.Code.Conv_U8), mode + " 离开类型化位置只转换一次");
+            if (mode is "Forward" or "Add" or "UnsignedAdd" or "PointerCompare" or "UnsignedToSigned" or "Truncate")
+            {
+                var executable = source.Method("NativeValues", mode);
+                var executionMethod = executionModel.Method(executable);
+                executable.Body = skeleton.Method(method).Body;
+                var interpreter = new CilInterpreter(executionModel, executionIndex) { BodyModule = source.Module };
+                foreach (ulong bits in new ulong[] { 0, uint.MaxValue, 1UL << 63, ulong.MaxValue })
+                {
+                    var inputs = mode == "PointerCompare" ? new[] { StackValue.I8(bits), StackValue.I8(0) } : [StackValue.I8(bits)];
+                    ulong expected = mode switch {
+                        "Add" or "UnsignedAdd" => unchecked(bits + 3), "Truncate" => (uint)bits,
+                        "PointerCompare" => bits == 0 ? 1UL : 0, _ => bits };
+                    var execution = interpreter.Run(new World(executionIndex, 0, new Hints([], []), executionMethod.DeclaringType), executable, executionMethod, inputs);
+                    checks.True(execution.Result == $"return 0x{expected:x}", mode + " 保留指针位型与整数语义：" + execution.Result);
+                }
+            }
+        }
+        var invalidBody = new ManagedBody(MethodRef.Open(entries["Forward"]),
+            [new ManagedBlock(0, [new ManagedReturn(0, new ConstantValue(1, types.Int64, 64))])]);
+        checks.True(emitter.Emit([invalidBody]).Count == 1, "缺少原生整数边界转换时输出栈类型检查仍拒绝方法体");
+        foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
     }
 
     private static void SharedChecks(Assertions checks, ProgramModel primitives)

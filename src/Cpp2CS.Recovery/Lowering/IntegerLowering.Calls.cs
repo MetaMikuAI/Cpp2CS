@@ -138,12 +138,12 @@ public sealed partial class IntegerLowering
 
     private ManagedValue? CallResult(CallDefinition definition)
     {
-        if (definition.Local is { } local) return Opaque(local.Type) || ReferenceType(local.Type) || IsFloat(local.Type) || types.Kind(local.Type) == TypeKind.Struct ? local : Mask(local, definition.Binding.Result.Type.Size * 8);
+        if (definition.Local is { } local) return Opaque(local.Type) || ReferenceType(local.Type) || IsFloat(local.Type) || ManagedTypes.IsNativePointer(local.Type) || types.Kind(local.Type) == TypeKind.Struct ? local : Mask(local, definition.Binding.Result.Type.Size * 8);
         var type = definition.Method.Concrete(definition.Method.Method.ReturnType);
         if (GenericStruct(type)) return GenericFailure<ManagedValue>("Struct", "含类型参数的值类型调用结果尚未下降");
         if (!Scalar(type) && types.Kind(type) != TypeKind.Struct) return Fail<ManagedValue>(TypeFailure(type), "调用结果类型尚未下降");
         definition.Local = new(new(nextLocal++), type, types.Kind(type) == TypeKind.Struct ? 0 : StackWidth(definition.Binding.Result.Type.Size * 8));
-        return Opaque(type) || ReferenceType(type) || IsFloat(type) || types.Kind(type) == TypeKind.Struct ? definition.Local : Mask(definition.Local, definition.Binding.Result.Type.Size * 8);
+        return Opaque(type) || ReferenceType(type) || IsFloat(type) || ManagedTypes.IsNativePointer(type) || types.Kind(type) == TypeKind.Struct ? definition.Local : Mask(definition.Local, definition.Binding.Result.Type.Size * 8);
     }
 
     private ManagedStatement? LowerCall(Call call, Point point)
@@ -191,7 +191,12 @@ public sealed partial class IntegerLowering
         if (term is null) return null;
         var resolved = context.Get(state.Resolve, term);
         if (!resolved.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "实参状态查询失败", resolved.Why);
-        if (type is ByRefRef addressType) return AddressArgument(resolved.Value, addressType.Element);
+        if (type is ByRefRef addressType)
+        {
+            if (StaticType(resolved.Value) is { } sourceType && ManagedTypes.IsNativePointer(sourceType))
+                return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "原生整数或非托管指针不能流入托管引用位置", code: "lowering.NativeInt.Reference");
+            return AddressArgument(resolved.Value, addressType.Element);
+        }
         if (RejectAddressUse([resolved.Value], type is PointerRef ? "非托管指针形参" : "非按引用形参")) return null;
         var knownType = StaticType(resolved.Value);
         if (receiver && knownType is not null && Opaque(knownType)) return GenericFailure<ManagedValue>("Receiver", "类型参数值作为调用接收者需要 constrained. 语义");
@@ -210,6 +215,11 @@ public sealed partial class IntegerLowering
             var number = Value(resolved.Value, true);
             return number is null ? null : FloatBits(number, bound.Type.Size * 8);
         }
+        if (ManagedTypes.IsNativePointer(type))
+        {
+            var pointer = Value(resolved.Value);
+            return pointer is null ? null : Coerce(pointer, type);
+        }
         if (!IntegerType(type))
         {
             var shape = type switch
@@ -221,7 +231,7 @@ public sealed partial class IntegerLowering
         }
         var value = Value(resolved.Value);
         return value is null ? null : new ConversionValue(ManagedTypes.IsSigned(type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
-            value, type, bound.Type.Size * 8);
+            IntegerBits(value), type, bound.Type.Size * 8);
     }
 
     private Term? BoundTerm(BoundSource? source, Point point)

@@ -147,9 +147,9 @@ public sealed partial class IntegerLowering
             if (failure is { } cause) failure = cause with { Reason = new("lowering.Struct.Leaf", "结构体叶子的值没有托管写法：" + type, cause.Reason) };
             return null;
         }
-        if (ReferenceType(type)) return Coerce(value, type);
+        if (ReferenceType(type) || ManagedTypes.IsNativePointer(type)) return Coerce(value, type);
         if (IsFloat(type)) return FloatBits(value, types.StorageBits(type));
-        if (IntegerType(type) || ManagedTypes.IsNativePointer(type))
+        if (IntegerType(type))
             return new ConversionValue(ManagedTypes.IsSigned(type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
                 IntegerBits(value), type, types.StorageBits(type));
         return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "结构体叶子没有标量托管写法：" + type, code: "lowering.Struct.LeafType");

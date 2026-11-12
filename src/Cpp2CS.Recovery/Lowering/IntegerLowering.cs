@@ -195,7 +195,7 @@ public sealed partial class IntegerLowering
                 var v = Part(input.Value, merge.Low, merge.Width, IsFloat(merge.Local.Type));
                 if (v is null) return new(null, failure);
                 var edge = Edge(input.Predecessor, merge.Target);
-                ((List<ManagedCopy>)edge.Copies).Add(new(merge.Local, Opaque(merge.Local.Type) || Opaque(v.Type) || ReferenceType(merge.Local.Type) ? Coerce(v, merge.Local.Type) : IsFloat(merge.Local.Type) ? FloatBits(v, merge.Local.Width) : Convert(v, merge.Local.Width)));
+                ((List<ManagedCopy>)edge.Copies).Add(new(merge.Local, Opaque(merge.Local.Type) || Opaque(v.Type) || ReferenceType(merge.Local.Type) || ManagedTypes.IsNativePointer(merge.Local.Type) ? Coerce(v, merge.Local.Type) : IsFloat(merge.Local.Type) ? FloatBits(v, merge.Local.Width) : Convert(v, merge.Local.Width)));
             }
         }
         // 合流入边也可能首次使用调用结果，全部值下降后再回填结果局部。
@@ -255,7 +255,7 @@ public sealed partial class IntegerLowering
             case Jump j: return new ManagedJump(position, Edge(b.Identity, j.Target));
             case Branch branch:
                 var condition = Value(branch.Condition);
-                return condition is null ? null : new ManagedBranch(position, condition, Edge(b.Identity, branch.True), Edge(b.Identity, branch.False));
+                return condition is null ? null : new ManagedBranch(position, ManagedTypes.IsNativePointer(condition.Type) ? IntegerBits(condition) : condition, Edge(b.Identity, branch.True), Edge(b.Identity, branch.False));
             case Return r:
                 if (ManagedTypes.IsVoid(method.Concrete(method.Method.ReturnType))) return new ManagedReturn(position, null);
                 var returnType = method.Concrete(method.Method.ReturnType);
@@ -273,7 +273,7 @@ public sealed partial class IntegerLowering
                 if (value is null) return null;
                 if (IsFloat(method.Concrete(method.Method.ReturnType)))
                     return new ManagedReturn(position, FloatBits(value, source.Term.Width));
-                if (Opaque(value.Type) || Opaque(method.Concrete(method.Method.ReturnType)) || ReferenceType(method.Concrete(method.Method.ReturnType)))
+                if (Opaque(value.Type) || Opaque(method.Concrete(method.Method.ReturnType)) || ReferenceType(method.Concrete(method.Method.ReturnType)) || ManagedTypes.IsNativePointer(method.Concrete(method.Method.ReturnType)))
                     return new ManagedReturn(position, Coerce(value, method.Concrete(method.Method.ReturnType)));
                 value = IntegerBits(value);
                 if (!IntegerType(method.Concrete(method.Method.ReturnType))) return Fail<ManagedStatement>(TypeFailure(method.Concrete(method.Method.ReturnType)), "返回类型不是整数");
@@ -307,7 +307,7 @@ public sealed partial class IntegerLowering
         if (merges.TryGetValue(key, out var local)) return local;
         if (width > 64) return Fail<LocalValue>(LoweringFailureKind.FloatingOrVector, "合流位宽超过整数栈宽度");
         var staticType = StaticType(term);
-        local = new(new(nextLocal++), staticType is not null && (Opaque(staticType) || ReferenceType(staticType)) ? staticType : floating && width is 32 or 64 ? FloatType(width) : StackType(width), StackWidth(width));
+        local = new(new(nextLocal++), staticType is not null && (Opaque(staticType) || ReferenceType(staticType) || low == 0 && width == types.PointerSize * 8 && ManagedTypes.IsNativePointer(staticType)) ? staticType : floating && width is 32 or 64 ? FloatType(width) : StackType(width), StackWidth(width));
         merges.Add(key, local);
         if (term.Identity is ResultAtom { Definition: MergeIdentity id })
         {

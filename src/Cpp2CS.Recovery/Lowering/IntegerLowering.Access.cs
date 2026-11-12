@@ -72,11 +72,18 @@ public sealed partial class IntegerLowering
     }
     private ManagedValue Coerce(ManagedValue value, TypeRef type)
     {
+        if (ReferenceType(value.Type) && ManagedTypes.IsNativePointer(type)
+            || ManagedTypes.IsNativePointer(value.Type) && ReferenceType(type))
+        {
+            Fail<object>(LoweringFailureKind.UnsupportedType, "托管引用与原生整数或非托管指针不能直接转换", code: "lowering.NativeInt.Reference");
+            return value;
+        }
         if (Opaque(value.Type) || Opaque(type))
         {
             if (!Equals(value.Type, type)) GenericFailure<object>("Conversion", "类型参数值只能原样流向同一类型参数的位置");
             return value;
         }
+        if (ManagedTypes.IsNativePointer(type)) return NativeBits(value, type);
         if (value is ConstantValue { Bits: 0 } && ManagedTypes.IsReferenceType(type))
             return new ConstantValue(0, type, types.PointerSize * 8);
         if (Equals(value.Type, type) || ManagedTypes.IsReferenceType(value.Type) && types.IsAssignable(value.Type, type)) return value;
@@ -181,9 +188,9 @@ public sealed partial class IntegerLowering
             ? StructValue(new TermSource(write.Value), target.Type, point)
             : Value(write.Value, IsFloat(target.Type));
         if (value is null) return null;
-        value = types.Kind(target.Type) == TypeKind.Struct ? value : Opaque(target.Type) || Opaque(value.Type) || ReferenceType(target.Type) ? Coerce(value, target.Type) : IsFloat(target.Type) ? FloatBits(value, write.Width)
+        value = types.Kind(target.Type) == TypeKind.Struct ? value : Opaque(target.Type) || Opaque(value.Type) || ReferenceType(target.Type) || ManagedTypes.IsNativePointer(target.Type) ? Coerce(value, target.Type) : IsFloat(target.Type) ? FloatBits(value, write.Width)
             : new ConversionValue(ManagedTypes.IsSigned(target.Type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
-                value, target.Type, write.Width);
+                IntegerBits(value), target.Type, write.Width);
         return accessor is null ? new ManagedStore(position, target, value)
             : new ManagedCall(position, AccessorInvocation(accessor, target, [value]), null) { Inlined = true };
     }

@@ -295,6 +295,14 @@ internal sealed partial class World
     {
         if (!preparedStatics.Add(field)) return;
         var address = StaticAddress(field);
+        // 核心库原生整数的 Zero 是只读零常量；不能作为可变静态状态合成非零值。
+        if (field.Field.Name == "Zero" && (field.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
+            && ManagedTypes.PrimitiveName(field.DeclaringType) is "IntPtr" or "UIntPtr"
+            && FieldType(field).Equals(field.DeclaringType))
+        {
+            PutValue(address, 0, StorageSize(FieldType(field)));
+            return;
+        }
         Fill(address, FieldType(field), $"static:{field}", 0);
     }
 

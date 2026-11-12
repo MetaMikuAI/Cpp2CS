@@ -204,11 +204,13 @@ internal sealed partial class CilBodyWriter
                 Value(c.Operand); Reinterpret(c.Operand.Type, c.Type); break;
             case ConversionKind.SignExtend:
                 Integer(c.Operand, true);
-                if (ManagedTypes.IsNativePointer(c.Type)) il.Emit(OpCodes.Conv_I); else IntegerWidth(c.Width, true);
+                if (ManagedTypes.IsNativePointer(c.Type)) il.Emit(OpCodes.Conv_I);
+                else if (c.Width != 64 || c.Operand.Width != 64) IntegerWidth(c.Width, true);
                 break;
             case ConversionKind.ZeroExtend or ConversionKind.Truncate:
                 Integer(c.Operand, false);
-                if (ManagedTypes.IsNativePointer(c.Type)) il.Emit(OpCodes.Conv_U); else IntegerWidth(c.Width, false);
+                if (ManagedTypes.IsNativePointer(c.Type)) il.Emit(OpCodes.Conv_U);
+                else if (c.Width != 64 || c.Operand.Width != 64) IntegerWidth(c.Width, false);
                 break;
             case ConversionKind.SignedIntegerToFloat or ConversionKind.UnsignedIntegerToFloat:
                 Integer(c.Operand, c.Kind == ConversionKind.SignedIntegerToFloat);
@@ -300,7 +302,9 @@ internal sealed partial class CilBodyWriter
     {
         Value(value);
         if (types.Kind(value.Type) is TypeKind.Float or TypeKind.Double) Reinterpret(value.Type, types.Integer(value.Width, signed));
-        IntegerWidth(value.Width, signed);
+        // int64 已在同宽整数栈上；有无符号只由运算指令决定。
+        if (value.Width != 64 || types.Kind(value.Type) != TypeKind.Int || types.Bits(value.Type) != 64)
+            IntegerWidth(value.Width, signed);
     }
 
     private void Floating(ManagedValue value)
@@ -312,9 +316,14 @@ internal sealed partial class CilBodyWriter
 
     private void Reinterpret(TypeRef from, TypeRef to)
     {
-        if ((ManagedTypes.IsNativePointer(from) || from is ByRefRef) && ManagedTypes.IsNativePointer(to))
+        if ((ManagedTypes.IsNativePointer(from) || from is ByRefRef || types.Kind(from) == TypeKind.Int) && ManagedTypes.IsNativePointer(to))
         {
             il.Emit(ManagedTypes.IsSigned(to) ? OpCodes.Conv_I : OpCodes.Conv_U);
+            return;
+        }
+        if (ManagedTypes.IsNativePointer(from) && types.Kind(to) == TypeKind.Int && types.Bits(to) == types.PointerSize * 8)
+        {
+            IntegerWidth(types.PointerSize * 8, ManagedTypes.IsSigned(to));
             return;
         }
         var fromFloat = types.Kind(from) is TypeKind.Float or TypeKind.Double;
@@ -329,7 +338,8 @@ internal sealed partial class CilBodyWriter
     private void Normalize(ManagedValue value)
     {
         if (types.Kind(value.Type) is TypeKind.Float or TypeKind.Double) il.Emit(value.Width == 32 ? OpCodes.Conv_R4 : OpCodes.Conv_R8);
-        else IntegerWidth(value.Width, ManagedTypes.IsSigned(value.Type));
+        else if (value.Width != 64 || types.Kind(value.Type) != TypeKind.Int || types.Bits(value.Type) != 64)
+            IntegerWidth(value.Width, ManagedTypes.IsSigned(value.Type));
     }
 
     private void IntegerWidth(int width, bool signed)

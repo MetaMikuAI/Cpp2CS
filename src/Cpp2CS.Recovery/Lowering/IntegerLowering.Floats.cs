@@ -10,10 +10,12 @@ public sealed partial class IntegerLowering
     private bool IsFloat(TypeRef type) => types.Kind(type) is TypeKind.Float or TypeKind.Double;
     private TypeRef FloatType(int width) => width == 32 ? types.Single : types.Double;
     private ManagedValue IntegerBits(ManagedValue value) => IsFloat(value.Type)
-        ? new ConversionValue(ConversionKind.Bitcast, value, StackType(value.Width), value.Width) : value;
+        ? new ConversionValue(ConversionKind.Bitcast, value, StackType(value.Width), value.Width)
+        : ManagedTypes.IsNativePointer(value.Type) ? NativeIntegerBits(value) : value;
     private ManagedValue FloatBits(ManagedValue value, int width)
     {
         if (IsFloat(value.Type)) return value;
+        if (ManagedTypes.IsNativePointer(value.Type)) value = IntegerBits(value);
         // 常量保存原始位型；不经整数到浮点的数值转换。
         if (value is ConstantValue c) return new ConstantValue(c.Bits, FloatType(width), width);
         if (value is ConversionValue { Kind: ConversionKind.Bitcast } cast && IsFloat(cast.Operand.Type)) return cast.Operand;
