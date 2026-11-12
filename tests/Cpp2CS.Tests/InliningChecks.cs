@@ -68,6 +68,8 @@ internal static partial class InliningChecks
         LocalAccessorChecks(checks);
         GenericAccessorChecks(checks);
         ConstructorChecks(checks);
+        StraightConstructorChecks(checks);
+        StraightAllocationChecks(checks);
         var extra = Body(getter, new ManagedStore(0, field, argument), new ManagedReturn(1, field));
         checks.True(AccessorTemplates.Read(extra).Status == AccessorTemplateStatus.NotTemplate, "多一条写入不是模板");
         checks.True(AccessorTemplates.Read(Body(getter, new ManagedCall(0, new(MethodRef.Open(getter), receiver, [], false), local),
@@ -136,6 +138,163 @@ internal static partial class InliningChecks
         public ManagedBody? GetBody(MethodDef method) => get(method);
     }
 
+    private static void StraightConstructorChecks(Assertions checks)
+    {
+        var f = new Fixture();
+        f.Owner.BaseType = f.Types.Object; f.Caller.BaseType = f.OwnerType;
+        var root = f.Method(f.Types.Object.Definition, ".ctor", true, false, []);
+        var one = f.Method(f.Owner, ".ctor", true, false, [f.Integer]);
+        var constant = f.Method(f.Owner, ".ctor", true, false, []);
+        var child = f.Method(f.Caller, ".ctor", true, false, [f.Integer]);
+        var secondDef = new FieldDef { Index = 2, Owner = f.Owner, Name = "Other", Type = f.Integer,
+            Attributes = FieldAttributes.Private, Offset = 20, Token = 0x04000003 };
+        var second = new FieldRef(secondDef, f.OwnerType); f.Owner.Fields = [.. f.Owner.Fields, secondDef];
+        ManagedBody Body(MethodDef m, params ManagedStatement[] statements) => new(MethodRef.Open(m), [new(0, statements)]);
+        ManagedCall Call(MethodDef caller, MethodDef target, params ManagedValue[] args) => new(0,
+            new(MethodRef.Open(target), new ArgumentValue(-1, MethodRef.Open(caller).DeclaringType, 64), args, false), null);
+        ManagedStore Store(MethodDef m, FieldRef field, ManagedValue value) => new(1,
+            new FieldValue(new ArgumentValue(-1, MethodRef.Open(m).DeclaringType, 64), field, value.Type, value.Width), value);
+        var parameter = new ArgumentValue(0, f.Integer, 32);
+        var literal = new ConstantValue(7, f.Integer, 32);
+        var boolean = new DefinitionRef(f.Program.Types.Single(t => t.Namespace == "System" && t.Name == "Boolean"), []);
+        var narrow = new ArgumentValue(0, boolean, 64);
+        var representation = new ConversionValue(ConversionKind.ZeroExtend,
+            new BinaryValue(BinaryOperator.And, new ConversionValue(ConversionKind.ZeroExtend, narrow, f.Integer, 32),
+                new ConstantValue(255, f.Integer, 32), f.Integer, 32), boolean, 8);
+        checks.True(ConstructorTemplates.Normalize(representation, f.Types).Equals(narrow), "窄标量表示经公共项规范化证明为原形参");
+        var signedByte = new DefinitionRef(f.Program.Types.Single(t => t.Namespace == "System" && t.Name == "SByte"), []);
+        checks.True(ConstructorTemplates.Normalize(new ConversionValue(ConversionKind.SignExtend,
+            new ConstantValue(255, signedByte, 8), f.Integer, 32), f.Types) is ConstantValue { Bits: uint.MaxValue }, "常量符号扩展使用公共位型语义");
+        var bodies = new Dictionary<MethodDef, ManagedBody>
+        {
+            [root] = Body(root, new ManagedReturn(0, null)),
+            [one] = Body(one, Call(one, root), Store(one, f.Field, parameter), new ManagedReturn(2, null)),
+            [constant] = Body(constant, Call(constant, root), Store(constant, f.Field, literal), new ManagedReturn(2, null)),
+            [child] = Body(child, Call(child, one, parameter), new ManagedReturn(2, null)),
+        };
+        ConstructorTemplates Templates() => new(new BodySource(bodies.GetValueOrDefault), f.Types);
+        ConstructorQuery Query() => new(f.Types, Templates());
+        var access = new ConstructorAccess(MethodRef.Open(child), 0, f.OwnerType, ConstructorAnchor.Allocation);
+        f.Owner.Methods = [one];
+        var answer = Query().Resolve(access, [new(f.Field, literal)]);
+        checks.True(answer.Method?.Method == one && answer.Arguments.SequenceEqual([literal]) && answer.Writes.SequenceEqual([0]), "形参字段逐项绑定并消费写入");
+        f.Owner.Methods = [constant];
+        checks.True(Query().Resolve(access, [new(f.Field, literal)]).Method?.Method == constant, "常量字段匹配");
+        checks.True(Query().Resolve(access, [new(f.Field, literal with { Bits = 8 })]).Failure?.Code == "inline.Constructor.Template", "常量不同拒绝");
+        checks.True(Templates().Get(child).Template?.Fields is [{ Value: ArgumentValue { Index: 0 } }], "基类直线模板展开为最外层形参");
+        bodies[one] = Body(one, Call(one, root), Store(one, f.Field, parameter), Store(one, second, parameter), new ManagedReturn(3, null));
+        f.Owner.Methods = [one, constant];
+        answer = Query().Resolve(access, [new(f.Field, literal), new(second, literal)]);
+        checks.True(answer.Method?.Method == one && answer.Writes.Count == 2, "多个匹配候选取字段最多的");
+        checks.True(Query().Resolve(access, [new(f.Field, literal), new(second, literal with { Bits = 8 })]).Method?.Method == constant,
+            "形参冲突的候选不匹配");
+        f.Owner.Methods = [one];
+        checks.True(Query().Resolve(access, [new(f.Field, literal), new(second, literal with { Bits = 8 })]).Failure?.Message.Contains("绑定冲突") == true,
+            "形参冲突报告差异");
+        checks.True(Query().Resolve(access, [new(f.Field, literal)]).Failure?.Message.Contains("缺少字段") == true, "写入缺字段不匹配");
+        checks.True(Query().Resolve(access, [new(f.Field, literal), new(f.Field, literal), new(second, literal)]).Failure is not null,
+            "组内重复目标字段不匹配");
+        var duplicate = f.Method(f.Owner, ".ctor", true, false, [f.Integer]);
+        bodies[duplicate] = Body(duplicate, Call(duplicate, root), Store(duplicate, f.Field, parameter), Store(duplicate, second, parameter), new ManagedReturn(3, null));
+        checks.True(Query().Resolve(access, [new(f.Field, literal), new(second, literal)]).Failure?.Code == "inline.Constructor.Ambiguous", "字段数并列报歧义");
+        f.Owner.Methods = [one];
+        bodies[one] = Body(one, Call(one, root), Store(one, f.Field, literal), new ManagedReturn(2, null));
+        checks.True(Query().Resolve(access, [new(f.Field, literal)]).Failure?.Message.Contains("未绑定") == true, "未绑定形参不匹配");
+        bodies[one] = Body(one, Call(one, root), Store(one, f.Field, parameter), Store(one, f.Field, literal), new ManagedReturn(3, null));
+        var expanded = Templates().Get(one).Template;
+        checks.True(expanded is { Overwritten: 1, Fields: [{ Value: ConstantValue { Bits: 7 } }] }, "重复模板字段保留最后一次并计数");
+        bodies[one] = Body(one, Call(one, root), Store(one, f.Field, parameter), new ManagedReturn(2, null));
+        var initialization = Query().Initialization(MethodRef.Open(child), [new ManagedBlock(0,
+            [Store(child, f.Field, literal), new ManagedReturn(2, null)])]);
+        checks.True(initialization.Method?.Method == one && initialization.Arguments.SequenceEqual([literal]), "基类入口字段绑定与消费");
+        checks.True(Query().Initialization(MethodRef.Open(child), [new ManagedBlock(0,
+            [Call(child, root), Store(child, f.Field, literal), new ManagedReturn(2, null)])]).Failure?.Code == "lowering.ConstructorInitialization",
+            "已有祖先构造调用不补初始化");
+        bodies[one] = Body(one, new ManagedCall(0, new(MethodRef.Open(one), parameter, [], false), null), new ManagedReturn(1, null));
+        checks.True(Templates().Get(one).Failure?.Message.StartsWith("ManagedCall：", StringComparison.Ordinal) == true, "其他调用记录第一条语句种类");
+        bodies[one] = Body(one, Call(one, root), Store(one, f.Field, new FieldValue(new ArgumentValue(-1, f.OwnerType, 64), f.Field, f.Integer, 32)), new ManagedReturn(2, null));
+        checks.True(Templates().Get(one).Failure?.Code == "inline.Constructor.NotStraight", "字段读取不是直线模板值");
+        bodies[one] = Body(one, Call(one, root), new ManagedReturn(1, null));
+        var delegated = f.Method(f.Caller, ".ctor", true, false, []);
+        bodies[delegated] = Body(delegated, Call(delegated, one, literal), new ManagedReturn(1, null));
+        checks.True(Query().MatchInitialization(MethodRef.Open(child), []).Method?.Method == delegated,
+            "基类形参不可绑定时才回退到同类其他构造");
+        bodies[child] = Body(child, Call(child, delegated), new ManagedReturn(1, null));
+        bodies[delegated] = Body(delegated, Call(delegated, child, literal), new ManagedReturn(1, null));
+        checks.True(Templates().Get(child).Failure?.Code == "inline.Constructor.NotStraight", "同类构造展开成环没有模板");
+    }
+
+    private static void StraightAllocationChecks(Assertions checks)
+    {
+        var f = new Fixture(explicitOwner: true); f.Owner.BaseType = f.Types.Object;
+        var overlap = new FieldDef { Index = 2, Owner = f.Owner, Name = "Overlap", Type = f.Types.Int64,
+            Attributes = FieldAttributes.Private, Offset = 16, Token = 0x04000003 };
+        f.Owner.Fields = [.. f.Owner.Fields, overlap]; ((List<FieldDef>)f.Program.Fields).Add(overlap);
+        var root = f.Method(f.Types.Object.Definition, ".ctor", true, false, []);
+        var ctor = f.Method(f.Owner, ".ctor", true, false, [f.Integer]);
+        var make = f.Method(f.Caller, "Create", false, true, [f.Integer]); make.ReturnType = f.OwnerType;
+        var sink = f.Method(f.Caller, "Observe", true, true, [f.OwnerType]);
+        var bodies = new Dictionary<MethodDef, ManagedBody>
+        {
+            [root] = new(MethodRef.Open(root), [new(0, [new ManagedReturn(0, null)])]),
+            [ctor] = new(MethodRef.Open(ctor), [new(0, [new ManagedCall(0,
+                new(MethodRef.Open(root), new ArgumentValue(-1, f.OwnerType, 64), [], false), null),
+                new ManagedStore(1, new FieldValue(new ArgumentValue(-1, f.OwnerType, 64), f.Field, f.Integer, 32), new ArgumentValue(0, f.Integer, 32)),
+                new ManagedReturn(2, null)])]),
+        };
+        var query = new ConstructorQuery(f.Types, new(new BodySource(bodies.GetValueOrDefault), f.Types));
+        var catalog = RuntimeFunctionCatalog.Select(f.Spec.Layout.UnityVersion, f.Spec.Layout.Triple, f.Spec.Layout.DataModel);
+        var allocation = catalog.Functions.First(op => op.Operation.Il?.Name == "NewObject" && op.Signature is not null);
+        var calls = new CallNamingQuery(f.Binder, new NamingChecks.Map([new(MethodRef.Open(sink), BindingEntryKind.Ordinary)]),
+            new NamingChecks.RuntimeMap(allocation), catalog);
+        foreach (var mode in new[] { "Field", "Escape", "Read", "Branch", "Partial", "Overlap" })
+        {
+            var t = new TermTable(); var head = new BlockIdentity(); var tail = new BlockIdentity();
+            var frame = t.Atom(new RootAtom(AddressRoot.Frame), 64); var image = t.Atom(new RootAtom(AddressRoot.Image), 64);
+            var fn = new FunctionBuilder(t, head, 64, new(frame)) { ImageBase = image };
+            var input = t.Atom(new EntryAtom(new(SlotKind.Integer)), 64); fn.Inputs.Add(new(new(SlotKind.Integer), input));
+            var read = new ReadIdentity(); var klass = t.Atom(new ResultAtom(read), 64);
+            var allocationId = new CallIdentity(); var value = t.Atom(new ResultAtom(allocationId), 64);
+            var address = t.Apply(new CoreOperator(CoreOperation.Add), 64, value, t.Constant(16, 64));
+            var statements = new List<Statement>
+            {
+                new MemoryRead(read, t.Apply(new CoreOperator(CoreOperation.Add), 64, image, t.Constant(128, 64)), 64, klass),
+                new Call(allocationId, new ImageFunction(20), [new(new(SlotKind.Integer), klass)], [new(new(SlotKind.Integer), value)]) { Trace = new(32) },
+            };
+            if (mode == "Escape") statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), value), new(new(SlotKind.Integer, 1), t.Constant(0, 64))], []));
+            if (mode == "Read") { var id = new ReadIdentity(); statements.Add(new MemoryRead(id, address, 32, t.Atom(new ResultAtom(id), 32))); }
+            if (mode == "Overlap") statements.Add(new MemoryWrite(new(), address, 64, t.Constant(9, 64)));
+            int width = mode == "Partial" ? 16 : 32;
+            var store = new MemoryWrite(new(), address, width, t.Slice(input, 0, width));
+            if (mode == "Branch")
+            {
+                fn.Blocks.Add(new(head, [], [.. statements], new Jump(tail)));
+                fn.Blocks.Add(new(tail, [], [store], new Return([new(new(SlotKind.Integer), value)])));
+            }
+            else
+            {
+                statements.Add(store);
+                fn.Blocks.Add(new(head, [], [.. statements], new Return([new(new(SlotKind.Integer), value)])));
+            }
+            var names = NamingFacts.Empty with { Slots = NamingFacts.Empty.Slots.Add(128, Outcome<MetadataEntity>.Success(new ClassEntity(f.OwnerType))) };
+            var lowered = new IntegerLowering(fn.Freeze(), MethodRef.Open(make), f.Binder, f.Types, calls: calls, spec: f.Spec, names: names, constructors: query).Run();
+            if (mode == "Field")
+            {
+                var created = lowered.Body?.Blocks[0].Statements.OfType<ManagedAssignment>().SingleOrDefault(a => a.Value is NewObjectValue)?.Value as NewObjectValue;
+                checks.True(created is { Constructor.Method: var selected, Arguments.Count: 1 } && selected == ctor
+                    && !lowered.Body!.Blocks.SelectMany(b => b.Statements).OfType<ManagedStore>().Any(), "分配处绑定实参并移除私有字段写入：" + lowered.Failure);
+                using var emission = new EmissionFixture(f);
+                checks.True(lowered.Body is { } complete && emission.Emitter.Emit([complete]).Count == 0, "直线构造 newobj 通过输出检查");
+            }
+            else checks.True(lowered.Failure?.Reason.Code == "inline.Constructor.Template", "首次其他使用或块边界截断写入组：" + mode + " " + lowered.Failure);
+        }
+        var child = f.Method(f.Caller, ".ctor", true, false, [f.Integer]); f.Caller.BaseType = f.OwnerType;
+        var (native, _) = f.Function(f.Field, true);
+        var baseBody = new IntegerLowering(native, MethodRef.Open(child), f.Binder, f.Types, calls: f.Calls, spec: f.Spec, constructors: query).Run();
+        checks.True(baseBody.Body?.Blocks[0].Statements is [ManagedCall { Invocation.Method.Method: var selectedBase, Invocation.Arguments.Count: 1 }, ManagedReturn]
+            && selectedBase == ctor, "基类入口写入转为带参调用：" + baseBody.Failure);
+    }
+
     private static void ConstructorChecks(Assertions checks)
     {
         var f = new Fixture();
@@ -164,7 +323,7 @@ internal static partial class InliningChecks
         checks.True(new ConstructorQuery(f.Types, Templates()).Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Allocation))
             .Failure?.Code == "inline.Constructor.Template", "分配类的构造有字段初始值时报 Template");
         checks.True(new ConstructorQuery(f.Types, new(new BodySource(_ => null), f.Types)).Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Base))
-            .Failure?.Code == "inline.Constructor.BaseTemplate", "基类构造未恢复时报 BaseTemplate");
+            .Failure?.Code == "inline.Constructor.NotStraight", "基类构造未恢复单列非直线原因");
         bodies[parentCtor] = Body(parentCtor, new ManagedReturn(0, null));
         checks.True(!Templates().IsEmpty(parentCtor), "有基类时裸 return 不是空模板");
         bodies[parentCtor] = Body(parentCtor, Base(parentCtor, objectCtor), new ManagedReturn(1, null));
@@ -174,14 +333,14 @@ internal static partial class InliningChecks
         checks.True(query.Initialization(MethodRef.Open(childCtor), [new(0, [Base(childCtor, objectCtor), new ManagedReturn(1, null)])])
             .Failure?.Code == "lowering.ConstructorInitialization", "已有祖先构造调用时不重复补初始化");
         var extra = f.Method(f.Owner, ".ctor", true, false, [f.Integer]);
-        checks.True(query.Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Base)).Failure?.Code == "inline.Constructor.BaseAmbiguous",
-            "基类声明两个构造时报 BaseAmbiguous");
-        checks.True(query.Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Allocation)).Failure?.Code == "inline.Constructor.Ambiguous",
-            "分配类声明两个构造时报 Ambiguous");
+        checks.True(query.Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Base)).Method?.Method == parentCtor,
+            "基类额外有未恢复候选不妨碍唯一匹配");
+        checks.True(query.Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Allocation)).Method?.Method == parentCtor,
+            "分配类额外有未恢复候选不妨碍唯一匹配");
         f.Owner.Methods = [parentCtor];
         f.Owner.Methods = [extra];
-        checks.True(query.Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Base)).Failure?.Code == "inline.Constructor.BaseTemplate",
-            "唯一构造有参或不可访问时报 BaseTemplate");
+        checks.True(query.Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Base)).Failure?.Code == "inline.Constructor.NotStraight",
+            "唯一候选未完整恢复单列非直线原因");
         f.Owner.Methods = [parentCtor];
         ((List<MethodDef>)f.Program.Methods).Remove(extra);
         // 伪造继承环也不得成为空模板。
@@ -312,21 +471,21 @@ internal static partial class InliningChecks
         public ManagedTypes Types { get; }
         public MethodBinder Binder { get; }
         public CallNamingQuery Calls { get; }
-        public Fixture(bool generic = false, bool genericField = false, bool valueOwner = false)
+        public Fixture(bool generic = false, bool genericField = false, bool valueOwner = false, bool explicitOwner = false)
         {
-            TypeDef Define(string name, string ns = "", bool value = false) { var type = new TypeDef { Index = definitions.Count,
+            TypeDef Define(string name, string ns = "", bool value = false, TypeAttributes layout = 0) { var type = new TypeDef { Index = definitions.Count,
                 Assembly = ns == "System" ? "mscorlib.dll" : "InliningChecks.dll", Namespace = ns, Name = name, Token = (uint)(0x02000001 + definitions.Count),
-                Attributes = TypeAttributes.Public, IsValueType = value, IsEnum = false, Size = 64, PackingSize = 0, ClassSizeIsDefault = true }; definitions.Add(type); return type; }
+                Attributes = TypeAttributes.Public | layout, IsValueType = value, IsEnum = false, Size = 64, PackingSize = 0, ClassSizeIsDefault = true }; definitions.Add(type); return type; }
             foreach (var name in new[] { "Object", "String", "Boolean", "Char", "SByte", "Byte", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Single", "Double", "IntPtr", "UIntPtr", "RuntimeTypeHandle", "RuntimeFieldHandle", "RuntimeMethodHandle", "TypedReference", "Void" })
                 Define(name, "System", name is not ("Object" or "String"));
             Integer = new DefinitionRef(definitions.Single(t => t.Name == "Int32"), []); Void = new DefinitionRef(definitions.Single(t => t.Name == "Void"), []);
-            Owner = Define("Owner", value: valueOwner); Caller = Define("Caller");
+            Owner = Define("Owner", value: valueOwner, layout: explicitOwner ? TypeAttributes.ExplicitLayout : 0); Caller = Define("Caller");
             if (generic) Owner.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
             OwnerType = new(Owner, Owner.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, false, p.Position) { Parameter = p }).ToArray());
             var field = new FieldDef { Index = 0, Owner = Owner, Name = "Value", Type = genericField ? OwnerType.Arguments[0] : Integer, Attributes = FieldAttributes.Private, Offset = 16, Token = 0x04000001 };
             var shared = new FieldDef { Index = 1, Owner = Owner, Name = "Shared", Type = Integer, Attributes = FieldAttributes.Private | FieldAttributes.Static, Offset = 0, Token = 0x04000002 };
             Owner.Fields = [field, shared]; Field = new(field, OwnerType); Shared = new(shared, OwnerType);
-            Program = new() { MetadataVersion = 31, Types = definitions, Methods = methods, Fields = [field, shared], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
+            Program = new() { MetadataVersion = 31, Types = definitions, Methods = methods, Fields = new List<FieldDef> { field, shared }, RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
                 Assemblies = definitions.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key, AssemblyName = Path.GetFileNameWithoutExtension(g.Key),
                     Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
             var layouts = new FieldLayouts(Spec, 8, 8); Types = new(Program, layouts, 8); Binder = new(new(layouts), new Aapcs64());

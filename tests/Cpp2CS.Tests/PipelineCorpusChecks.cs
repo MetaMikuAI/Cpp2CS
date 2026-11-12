@@ -2,6 +2,11 @@ using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using Cpp2CS.Pipeline;
+using Cpp2CS.Input;
+using Cpp2CS.Managed;
+using Cpp2CS.Model;
+using Cpp2CS.Native;
+using Cpp2CS.Runtime.Layouts;
 using Cpp2CS.Recovery.Inlining;
 using Cpp2CS.Tests.Metrics;
 using Mono.Cecil;
@@ -12,6 +17,21 @@ internal static class PipelineCorpusChecks
 {
     public const string Command = "pipeline-corpus";
     public static int Run() => Run(true);
+    private sealed class ConstructorAuditStage(IMethodStage<NativeFunction, ManagedBody> recovery) : IMethodStage<NativeFunction, ManagedBody>, IMethodTemplateSource
+    {
+        private readonly ConcurrentDictionary<MethodDef, StageResult<ManagedBody>> results = [];
+        public GlobalFacts? Facts { get; private set; }
+        public string Name => recovery.Name;
+        public StageResult<ManagedBody> Run(NativeFunction input, MethodContext context)
+        {
+            Facts = context.Facts;
+            var result = recovery.Run(input, context);
+            if (context.Method is { Name: ".ctor", IsStatic: false }) results.TryAdd(context.Method, result);
+            return result;
+        }
+        public ManagedBody? GetBody(MethodDef method) => results.GetValueOrDefault(method) is Completed<ManagedBody> body ? body.Value : null;
+        public Cpp2CS.Native.Terms.Reason? GetFailure(MethodDef method) => results.GetValueOrDefault(method) is Missing<ManagedBody> missing ? missing.Hole.Reason : null;
+    }
     public static int WithoutSymbols() => Run(false);
     public static int WithoutAccessors() => Run(true, false);
     public static int WithoutConstructors() => Run(true, constructors: false);
@@ -30,7 +50,8 @@ internal static class PipelineCorpusChecks
         var accessorAttempts = new ConcurrentBag<AccessorAttempt>();
         var constructorAttempts = new ConcurrentBag<ConstructorAttempt>();
         var recovery = new IntegerRecoveryStage(enableAccessorInlining: accessors, observeAccessors: accessorAttempts.Add, observeConstructors: constructorAttempts.Add, enableConstructorInlining: constructors);
-        var report = new RecoverySession(recovery: recovery).Run(new(
+        var audit = new ConstructorAuditStage(recovery);
+        var report = new RecoverySession(recovery: audit).Run(new(
             Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.so"),
             Path.Combine(corpus, "artifacts", "il2cppOutput", "data", "Metadata", "global-metadata.dat"), output)
         {
@@ -38,6 +59,20 @@ internal static class PipelineCorpusChecks
             Symbols = useSymbols ? Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.dbg.so") : null,
             Jobs = Environment.ProcessorCount,
         });
+        if (audit.Facts is { } facts)
+        {
+            var pointer = facts.Image.PointerWidth;
+            var templates = new ConstructorTemplates(audit, new ManagedTypes(facts.Model, new FieldLayouts(facts.Spec, pointer, pointer), pointer));
+            var inspected = facts.Model.Methods.Where(m => m is { Name: ".ctor", IsStatic: false }).Select(m => (Method: m, Result: templates.Get(m))).ToArray();
+            File.WriteAllText(Path.Combine(output, "constructor-templates.local.json"), JsonSerializer.Serialize(inspected.Select(i => new
+            {
+                Method = RecoverySession.Identity(i.Method), Name = i.Method.ToString(),
+                Fields = i.Result.Template?.Fields.Count, Overwritten = i.Result.Template?.Overwritten,
+                Code = i.Result.Failure?.Code, Message = i.Result.Failure?.Message, Cause = i.Result.Failure?.Cause,
+            }), new JsonSerializerOptions { WriteIndented = true }));
+            Console.WriteLine($"构造模板普查：直线={inspected.Count(i => i.Result.Template is not null)}；覆盖写入={inspected.Sum(i => i.Result.Template?.Overwritten ?? 0)}；" +
+                string.Join("，", inspected.Where(i => i.Result.Template is null).GroupBy(i => i.Result.Failure!.Message.Split('：')[0]).OrderBy(g => g.Key).Select(g => g.Key + "=" + g.Count())));
+        }
         var byId = report.Methods.ToDictionary(m => m.Identity);
         var anchors = accessorAttempts.DistinctBy(a => (a.Access.Caller, a.Access.Position, a.Access.Field, a.Access.Kind))
             .OrderBy(a => RecoverySession.Identity(a.Access.Caller.Method), StringComparer.Ordinal)
@@ -68,7 +103,14 @@ internal static class PipelineCorpusChecks
             Caller = RecoverySession.Identity(a.Access.Caller.Method), Method = a.Access.Caller.Method.ToString(),
             a.Access.Position, Type = a.Access.Type.ToString(), Anchor = a.Access.Anchor.ToString(),
             Constructor = a.Answer.Method?.ToString(), ConstructorIdentity = a.Answer.Method is { } selected ? RecoverySession.Identity(selected.Method) : null,
-            Code = a.Answer.Failure?.Code ?? "Solved",
+            Code = a.Answer.Failure?.Code ?? "Solved", Message = a.Answer.Failure?.Message,
+            Arguments = a.Answer.Arguments.Select(v => v.ToString()), ConsumedWrites = a.Answer.Writes.Count,
+            Candidates = a.Answer.Candidates.Select(candidate => new
+            {
+                Method = RecoverySession.Identity(candidate.Method.Method), Name = candidate.Method.ToString(),
+                Fields = candidate.Template.Template?.Fields.Count, Overwritten = candidate.Template.Template?.Overwritten,
+                Code = candidate.Template.Failure?.Code, Message = candidate.Template.Failure?.Message, candidate.Difference,
+            }),
         }), new JsonSerializerOptions { WriteIndented = true }));
         foreach (var group in constructorAnchors.GroupBy(a => a.Access.Anchor).OrderBy(g => g.Key))
             Console.WriteLine($"构造锚点 {group.Key}：{group.Count()}；" + string.Join("，", group.GroupBy(a => a.Answer.Failure?.Code ?? "Solved")

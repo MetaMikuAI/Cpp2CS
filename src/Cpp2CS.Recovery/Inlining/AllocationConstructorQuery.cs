@@ -12,9 +12,13 @@ namespace Cpp2CS.Recovery.Inlining;
 
 public sealed record ConstructorCall(MethodRef Method, BoundCall Binding, bool Virtual, Term? Receiver);
 public sealed record AllocationConstructorRequest(Point Point, TypeRef Type, Term Result, ConstructorAccess Access);
-public sealed record AllocationConstructorAnswer(MethodRef? Constructor, CallIdentity? Call, Reason? Failure);
+public sealed record ConstructorInitialWrite(Point Point, MemoryWrite Write, FieldRef Field);
+public sealed record AllocationConstructorAnswer(MethodRef? Constructor, CallIdentity? Call, Reason? Failure)
+{
+    public IReadOnlyList<ConstructorInitialWrite> Writes { get; init; } = [];
+}
 
-/// <summary>紧邻配对沿用原条件；空模板锚点由共享前沿查询证明各路径的首次对象使用不是构造调用。</summary>
+/// <summary>紧邻配对沿用原条件；模板锚点保留共享前沿对延迟构造调用的保护。</summary>
 public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocationQuery? locations, CallNamingQuery calls,
     IReadOnlyDictionary<CallIdentity, ConstructorCall> bindings, ConstructorQuery? constructors)
     : Query<AllocationConstructorRequest, AllocationConstructorAnswer>
@@ -29,7 +33,9 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
             return Outcome<AllocationConstructorAnswer>.Success(new(method, call.Identity, null));
         if (constructors is null) return Outcome<AllocationConstructorAnswer>.Success(new(null, null,
             new("lowering.Allocation.Constructor", "对象分配之后的第一个事件不是对它的同类构造函数调用。")));
-        var frontier = new EventFrontierQuery((context, point) => Uses(context, point, key));
+        var initial = InitialWrites(c, new(block.Identity, key.Point.Before + 1), key.Result);
+        var included = initial.Select(w => w.Write.Identity).ToHashSet();
+        var frontier = new EventFrontierQuery((context, point) => Uses(context, point, key, included));
         var reached = c.Get(frontier, new(new(block.Identity, key.Point.Before + 1)));
         if (!reached.IsSuccess) return Unproved(reached.Why);
         if (reached.Value.HasCycle || reached.Value.ReachesExit || reached.Value.Stops.Count == 0) return Unproved(null);
@@ -40,8 +46,8 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
                 && bindings.TryGetValue(candidate.Identity, out var target)
                 && target.Method.Method is { Name: ".ctor", IsStatic: false } && target.Method.DeclaringType.Equals(key.Type)) return Deferred(null);
         }
-        var answer = constructors.Resolve(key.Access);
-        return Outcome<AllocationConstructorAnswer>.Success(new(answer.Method, null, answer.Failure));
+        return Outcome<AllocationConstructorAnswer>.Success(new(null, null, null)
+        { Writes = initial });
         Outcome<AllocationConstructorAnswer> Reject(string code, string message, Reason? cause)
         {
             var reason = new Reason(code, message, cause);
@@ -50,6 +56,58 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
         }
         Outcome<AllocationConstructorAnswer> Deferred(Reason? cause) => Reject("lowering.Allocation.Deferred", "对象首次使用是构造调用，但不满足紧邻配对条件。", cause);
         Outcome<AllocationConstructorAnswer> Unproved(Reason? cause) => Reject("lowering.Allocation.Constructor", "不能证明各路径的首次对象使用都不是构造调用。", cause);
+    }
+    /// <summary>只读取当前基本块的初始写入；分支、汇合、调用与托管读取均截断，不重排控制流。</summary>
+    public IReadOnlyList<ConstructorInitialWrite> InitialWrites(QueryContext c, Point start, Term receiver)
+    {
+        var indexed = c.Get(state.Index, 0);
+        if (!indexed.IsSuccess || locations is null) return [];
+        var resolved = c.Get(state.Resolve, receiver);
+        if (!resolved.IsSuccess) return [];
+        var block = indexed.Value.Blocks[start.Block];
+        var writes = new List<ConstructorInitialWrite>();
+        for (int i = start.Before; i < block.Statements.Length; i++)
+        {
+            var statement = block.Statements[i];
+            if (statement is MemoryWrite write)
+            {
+                var value = c.Get(state.Resolve, write.Value);
+                if (!value.IsSuccess || SnapshotRewrite.Dependencies([value.Value]).Contains(resolved.Value)) break;
+                var location = c.Get(locations, new(write.Address, write.Width));
+                if (location.IsSuccess)
+                {
+                    var views = location.Value.Views.Where(v => v.Kind == ManagedLocationKind.InstanceField && v.Path.Length == 1
+                        && v.Offset == 0 && v.Width == write.Width
+                        && locations.Layouts.TrySizeAndAlignment(v.Type) is { } size && size.Size * 8 == write.Width).ToArray();
+                    if (views is [var view])
+                    {
+                        var root = c.Get(state.Resolve, view.Root);
+                        if (root.IsSuccess && root.Value == resolved.Value)
+                        {
+                            var current = c.Get(state.Resolve, write.Address);
+                            if (!current.IsSuccess) break;
+                            var at = c.Get(state.Locations, new(current.Value, write.Width));
+                            if (!at.IsSuccess) break;
+                            bool disjoint = true;
+                            foreach (var previous in writes.Where(w => !w.Field.Equals(view.Path[0])))
+                            {
+                                var address = c.Get(state.Resolve, previous.Write.Address);
+                                if (!address.IsSuccess) { disjoint = false; break; }
+                                var before = c.Get(state.Locations, new(address.Value, previous.Write.Width));
+                                if (!before.IsSuccess) { disjoint = false; break; }
+                                var overlap = c.Get(state.Alias, new(at.Value, before.Value));
+                                if (!overlap.IsSuccess || overlap.Value.Kind != AliasKind.Disjoint) { disjoint = false; break; }
+                            }
+                            if (!disjoint) break;
+                            writes.Add(new(new(start.Block, i), write, view.Path[0])); continue;
+                        }
+                    }
+                }
+                if (!PrivateAccess(c, state, locations, write)) break;
+            }
+            else if (!PrivateAccess(c, state, locations, statement)) break;
+        }
+        return writes;
     }
     private MethodRef? Direct(QueryContext c, Point point, Call call, AllocationConstructorRequest key)
     {
@@ -61,7 +119,7 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
         var actual = c.Get(state.Resolve, receiver.Value); var expected = c.Get(state.Resolve, key.Result);
         return actual.IsSuccess && expected.IsSuccess && actual.Value == expected.Value ? target.Method : null;
     }
-    private Outcome<bool> Uses(QueryContext c, Point point, AllocationConstructorRequest key)
+    private Outcome<bool> Uses(QueryContext c, Point point, AllocationConstructorRequest key, HashSet<WriteIdentity> included)
     {
         var indexed = c.Get(state.Index, 0); if (!indexed.IsSuccess) return indexed.Propagate<bool>();
         var block = indexed.Value.Blocks[point.Block];
@@ -70,6 +128,7 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
         else
         {
             var statement = block.Statements[point.Before];
+            if (statement is MemoryWrite written && included.Contains(written.Identity)) return Outcome<bool>.Success(false);
             if (statement is MemoryWrite or MemoryRead && PrivateAccess(c, state, locations, statement)) return Outcome<bool>.Success(false);
             if (statement is Call call)
             {

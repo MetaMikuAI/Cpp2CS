@@ -119,8 +119,6 @@ public sealed partial class IntegerLowering
         }
         PrepareFrameObjects();
         if (failure is not null) return new(null, failure);
-        PairConstructions();
-        if (failure is not null) return new(null, failure);
         PairUnboxes();
         if (failure is not null) return new(null, failure);
         var caller = context.Get(state.CallerUses, 0);
@@ -137,6 +135,7 @@ public sealed partial class IntegerLowering
         if (failure is not null) return new(null, failure);
         PrepareStructs();
         foreach (var read in function.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>()) RegisterRead(read);
+        PairConstructions();
         if (failure is not null) return new(null, failure);
         var blocks = new List<ManagedBlock>();
         foreach (var b in function.Blocks.OrderBy(b => labels[b.Identity]))
@@ -153,7 +152,7 @@ public sealed partial class IntegerLowering
                     if (allocations.TryGetValue(call.Identity, out var allocation))
                     {
                         if (allocation.InlinedConstructor is { } constructor)
-                            statements.Add(new ManagedAssignment(position, allocation.Local!, new NewObjectValue(constructor, [], types.PointerSize * 8) { Transparent = true }));
+                            statements.Add(new ManagedAssignment(position, allocation.Local!, new NewObjectValue(constructor, allocation.Arguments, types.PointerSize * 8) { Transparent = true }));
                         continue;
                     }
                     if (interfaceLookups.Contains(call.Identity)) continue;
@@ -168,6 +167,7 @@ public sealed partial class IntegerLowering
                 }
                 else if (native is MemoryWrite write)
                 {
+                    if (constructorWrites.Contains(write.Identity)) continue;
                     statements.AddRange(LowerStores(write, new(b.Identity, i)));
                     if (failure is not null) return new(null, failure);
                 }
@@ -206,7 +206,7 @@ public sealed partial class IntegerLowering
         if (failure is not null) return new(null, failure);
         if (method.Method is { Name: ".ctor", IsStatic: false, Owner.IsValueType: false })
         {
-            var initialization = constructors?.Initialization(method, blocks);
+            var initialization = constructorInitialization ?? constructors?.Initialization(method, blocks);
             if (initialization?.Failure is { } why)
             {
                 position = 0;
@@ -216,8 +216,10 @@ public sealed partial class IntegerLowering
             if (initialization?.Method is { } parent)
             {
                 var entry = blocks[0];
+                if (constructorInitialization is null)
+                    entry = entry with { Statements = entry.Statements.Where((_, i) => !initialization.Writes.Contains(i)).ToArray() };
                 blocks[0] = entry with { Statements = new ManagedStatement[] { new ManagedCall(0,
-                    new(parent, new ArgumentValue(-1, method.DeclaringType, types.PointerSize * 8), [], false), null) { Inlined = true } }.Concat(entry.Statements).ToArray() };
+                    new(parent, new ArgumentValue(-1, method.DeclaringType, types.PointerSize * 8), initialization.Arguments, false), null) { Inlined = true } }.Concat(entry.Statements).ToArray() };
             }
             else if (constructors is null && ConstructorQuery.InitializationWitness(method, blocks) != 1)
             {

@@ -14,6 +14,7 @@ public sealed class MethodTemplateSource : IMethodTemplateSource
     private readonly object gate = new();
     private readonly Dictionary<MethodDef, StageResult<ManagedBody>> bodies = [];
     private readonly HashSet<MethodDef> active = [];
+    private int recursiveReads;
     private readonly Func<MethodDef, StageResult<ManagedBody>> recover;
     public MethodTemplateSource(GlobalFacts facts, IMethodStage<CodeEntry, NativeFunction> frontend, bool constructors)
     {
@@ -43,9 +44,15 @@ public sealed class MethodTemplateSource : IMethodTemplateSource
         lock (gate)
         {
             if (bodies.TryGetValue(method, out var body)) return body;
-            if (!active.Add(method)) return Missing("inline.Template.Recursive", "候选恢复依赖活动中的模板");
+            if (!active.Add(method))
+            {
+                recursiveReads++;
+                return Missing("inline.Template.Recursive", "候选恢复依赖活动中的模板");
+            }
+            int before = recursiveReads;
             body = recover(method);
             active.Remove(method);
+            if (recursiveReads != before) body = Missing("inline.Template.Recursive", "候选恢复读取了递归截断，不能提供完整模板");
             bodies.Add(method, body);
             return body;
         }
