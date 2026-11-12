@@ -19,6 +19,8 @@ internal sealed class SparseSsa(TermTable terms, Dictionary<ulong, Draft> blocks
     private readonly Dictionary<(Draft, Register), Phi> requested = [];
     private readonly List<Phi> phis = [];
     private readonly Dictionary<Term, Term> aliases = [];
+    private readonly HashSet<BlockIdentity> localMerges = [];
+    private readonly Dictionary<Term, bool> globalValues = [];
     private Term Demand(Draft block, Register register)
     {
         if (block == initial)
@@ -30,6 +32,7 @@ internal sealed class SparseSsa(TermTable terms, Dictionary<ulong, Draft> blocks
                 ? terms.Atom(new CallerValue(convention.CallerValues.IndexOf(register)), register.Width)
                 : terms.Undefined(register.Width);
         }
+        if (block.Predecessors.Count == 0) return terms.Undefined(register.Width);
         if (requested.TryGetValue((block, register), out var existing)) return existing.Result;
         var id = new MergeIdentity();
         var phi = new Phi(block, register, terms.Atom(new ResultAtom(id), register.Width), id);
@@ -43,18 +46,26 @@ internal sealed class SparseSsa(TermTable terms, Dictionary<ulong, Draft> blocks
         var resolve = new TermRewrite(terms, t => t.Identity is RegisterInput input
             ? Demand(blocks[input.Address], input.Register) : null);
         var prepared = blocks.Values.OrderBy(b => b.Address).Select(b => new Block(b.Identity, [],
-            b.Statements.Select(resolve.Statement).ToImmutableArray(), resolve.End(b.End)) { Trace = new(b.TraceAddress) }).ToArray();
+            b.Statements.Select(resolve.Statement).ToImmutableArray(), resolve.End(b.End), b.Handler) { Trace = new(b.TraceAddress) }).ToArray();
         var stackChecks = blocks.Values.SelectMany(b => b.StackChecks).Select(c => (c.Address, Value: resolve.Map(c.Value), c.Offset)).ToArray();
         for (int i = 0; i < phis.Count; i++)
         {
             var phi = phis[i];
             foreach (var predecessor in phi.Block.Predecessors.OrderBy(b => b == initial ? 0 : 1).ThenBy(b => b.Address))
             {
-                var value = predecessor.State.TryGetValue(phi.Register, out var outgoing)
+                var state = predecessor.UnwindStates.GetValueOrDefault(phi.Block.Identity) ?? predecessor.State;
+                var value = state.TryGetValue(phi.Register, out var outgoing)
                     ? resolve.Map(outgoing) : Demand(predecessor, phi.Register);
                 phi.Inputs.Add(new(predecessor.Identity, value));
             }
         }
+        var control = new FunctionBuilder(terms, initial.Identity, convention.StackPointer.Width, new(initial.State[convention.StackPointer]));
+        control.Blocks.Add(new(initial.Identity, [], [], initial.End));
+        control.Blocks.AddRange(prepared);
+        var dominance = new Dominance(control.Freeze());
+        // 出口检查不从不可达分量推导跨块支配；局部定义经合流边传递，不能直接替代另一块的入口值。
+        foreach (var block in prepared)
+            if (!dominance.StrictlyDominates(initial.Identity, 0, block.Identity, 0)) localMerges.Add(block.Identity);
         int aliasCount;
         do
         {
@@ -91,6 +102,23 @@ internal sealed class SparseSsa(TermTable terms, Dictionary<ulong, Draft> blocks
         foreach (var block in output)
             yield return block with { Merges = block.Merges.Where(m => needed.Contains(m.Result)).ToImmutableArray() };
     }
+    private bool Global(Term value)
+    {
+        var todo = new Stack<(Term Value, bool Ready)>(); todo.Push((value, false));
+        while (todo.TryPop(out var item))
+        {
+            if (globalValues.ContainsKey(item.Value)) continue;
+            if (!item.Ready && !item.Value.Operands.IsEmpty)
+            {
+                todo.Push((item.Value, true));
+                foreach (var child in item.Value.Operands) if (!globalValues.ContainsKey(child)) todo.Push((child, false));
+                continue;
+            }
+            globalValues[item.Value] = (item.Value.Kind != TermKind.Atom || item.Value.Identity is EntryAtom or RootAtom or CallerValue)
+                && item.Value.Operands.All(t => globalValues[t]);
+        }
+        return globalValues[value];
+    }
     private Term Canonical(Term value)
     {
         var path = new List<Term>();
@@ -114,6 +142,7 @@ internal sealed class SparseSsa(TermTable terms, Dictionary<ulong, Draft> blocks
             var distinct = phi.Inputs.Select(i => Canonical(i.Value)).Where(t => t != phi.Result).Distinct().Take(2).ToArray();
             if (distinct.Length != 1) continue;
             var replacement = distinct[0];
+            if (localMerges.Contains(phi.Block.Identity) && !Global(replacement)) continue;
             aliases.Add(phi.Result, replacement);
             if (!users.TryGetValue(phi.Result, out var dependent)) continue;
             if (!users.TryGetValue(replacement, out var destination)) users.Add(replacement, destination = []);
@@ -152,7 +181,7 @@ internal sealed class SparseSsa(TermTable terms, Dictionary<ulong, Draft> blocks
                     foreach (var parent in reversed[term]) if (seen.Add(parent)) { component.Add(parent); stack.Push(parent); }
                 var external = component.SelectMany(t => live[t].Inputs).Select(i => Canonical(i.Value))
                     .Where(t => !component.Contains(t)).Distinct().Take(2).ToArray();
-                if (external.Length != 1) continue;
+                if (external.Length != 1 || (localMerges.Count != 0 && component.Any(t => localMerges.Contains(live[t].Block.Identity)) && !Global(external[0]))) continue;
                 foreach (var term in component) aliases[term] = external[0];
                 changed = true;
             }

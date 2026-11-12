@@ -57,6 +57,19 @@ internal static class PipelineChecks
         checks.True(RecoveryReport.Json(report.Methods) == RecoveryReport.Json(serial.Methods), "结果不依赖并行度");
         var filtered = session.Run(facts, request with { Method = "Present", Address = 16 });
         checks.True(filtered.Methods.Length == 1 && filtered.Summary.Complete == 1, "名字和地址筛选");
+        var terms = new TermTable(); var entry = new BlockIdentity(); var handler = new BlockIdentity();
+        var exception = terms.Atom(new ExceptionAtom(handler), 64);
+        var handlerEntry = new HandlerEntry(exception, terms.Atom(new SelectorAtom(handler), 64), [new(ClauseKind.Cleanup, [])]);
+        var exceptionContext = new MethodContext(methods[0], entries[0], facts with { Architecture = "arm64" });
+        var recovery = new IntegerRecoveryStage();
+        foreach (bool hasCall in new[] { false, true })
+        {
+            var builder = new FunctionBuilder(terms, entry, 64, new(terms.Atom(new RootAtom(AddressRoot.Frame), 64)));
+            builder.Blocks.Add(new(entry, [], hasCall ? [new Call(new(), new ImageFunction(0), [], [], Unwind: handler)] : [new MemoryFence(new(), "test")], new Return([])));
+            builder.Blocks.Add(new(handler, [], [], new ResumeUnwind(exception), handlerEntry));
+            checks.True(recovery.Run(builder.Freeze(), exceptionContext) is Missing<ManagedBody> { Hole.Reason.Code: "lowering.Exception" },
+                "恢复层从 IR 拦住异常区域，不依赖地址、调用追溯或可达性");
+        }
         return checks.Finish("Pipeline 快速检查");
     }
     private sealed class FakeFrontend : IMethodStage<CodeEntry, NativeFunction>

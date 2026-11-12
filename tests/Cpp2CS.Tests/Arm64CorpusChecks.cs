@@ -25,6 +25,7 @@ internal static class Arm64CorpusChecks
         var facts = NoReturnCorpusChecks.Analyze(image);
         Console.WriteLine($"不返回分析：{facts.Targets.Count} 个目标，{facts.Rounds} 轮。");
         var isa = new Arm64InstructionSet(image);
+        var handlers = new TryRegionIndex(image.TryRegions);
         List<Row>? previous = null;
         var unsupported = new Dictionary<(string Category, uint Word), long>();
         var categoryInstructions = new Dictionary<string, long>();
@@ -69,7 +70,11 @@ internal static class Arm64CorpusChecks
             else checks.True(previous!.SequenceEqual(rows), "两次运行每个函数的结果与洞位置完全一致");
             int good = rows.Count(r => r.Failure is null);
             Console.WriteLine($"语料运行 {run + 1}: 函数={rows.Count} 通过={good} 占比={(double)good / rows.Count:P6} 指令={totalInstructions} 时间毫秒={watch.Elapsed.TotalMilliseconds:F3} 纳秒每指令={watch.Elapsed.TotalNanoseconds / totalInstructions:F3}");
+            var protectedRows = rows.Where(r => handlers.HasHandlerInRange(r.Address, r.Length)).ToArray();
+            Console.WriteLine($"含处理入口函数={protectedRows.Length} 通过={protectedRows.Count(r => r.Failure is null)}");
             if (run != 0) continue;
+            foreach (var group in protectedRows.Where(r => r.Failure is not null).GroupBy(r => r.Failure).OrderByDescending(g => g.Count()))
+                Console.WriteLine($"含处理入口函数洞 {group.Key}: {group.Count()}");
             foreach (var group in rows.Where(r => r.Failure is not null).GroupBy(r => r.Failure).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.Ordinal).Take(20))
                 Console.WriteLine($"函数洞 {group.Key}: {group.Count()}");
             foreach (var pair in categoryInstructions.OrderByDescending(p => p.Value).ThenBy(p => p.Key, StringComparer.Ordinal).Take(20)) Console.WriteLine($"指令洞 {pair.Key}: {pair.Value}");

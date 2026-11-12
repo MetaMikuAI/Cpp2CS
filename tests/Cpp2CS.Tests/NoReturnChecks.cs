@@ -12,8 +12,13 @@ internal static class NoReturnChecks
     public const string Command = "noreturn";
     private static readonly Register Value = new("value", 64), Sp = new("stack", 64), Flag = new("flag", 1);
     private static readonly RegisterConvention Convention = new([], [], [], Sp, 0, 0, []);
-    private sealed class Toy(Dictionary<ulong, Action<IEmitter>> code) : IInstructionSet, INoReturnInstructionSet
+    private sealed class Toy(Dictionary<ulong, Action<IEmitter>> code, ImmutableArray<TryRegion> regions = default) : IInstructionSet, INoReturnInstructionSet, IExceptionFlowProvider, IExceptionModel
     {
+        public ImmutableArray<TryRegion> Regions => regions.IsDefault ? [] : regions;
+        public IExceptionModel ExceptionModel => this;
+        public void EnterHandler(IRegisterState state, Cpp2CS.Native.Terms.Term exception, Cpp2CS.Native.Terms.Term selector) { }
+        public bool IsResumeUnwind(CallTarget target) => false;
+        public Cpp2CS.Native.Terms.Term ResumeException(IRegisterReader state) => state.Read(Value);
         public bool IsStraightLineFailure(Cpp2CS.Native.Terms.Reason reason) => reason.Code == "toy.straight";
         public CallTarget ResolveCallTarget(IImage image, CallTarget target) => target is ImageFunction { EntryOffset: 900 } ? new ImportedTarget(new ImportSymbol("toy_import")) : target;
         public ImmutableArray<Register> Registers => [Value, Sp, Flag];
@@ -92,6 +97,24 @@ internal static class NoReturnChecks
             return cached;
         }
         checks.True(CacheFor(32) == CacheFor(4096), "相同控制流的缓存规模不随直线指令数增长");
+        var catching = new Toy(new()
+        {
+            [0] = e => e.Call(new ImportedTarget(import)), [1] = e => e.Return(),
+            [10] = e => e.Call(new ImageFunction(0)), [11] = e => e.Return()
+        }, [new(0, 1, 1, [new(ClauseKind.CatchAll, [])])]);
+        var catchingFacts = NoReturnAnalysis.Analyze(new InputMemoryImage(), catching, Convention,
+            [Range(0, 2), Range(10, 2)], [import], new Arm64FlowFacts());
+        checks.True(!catchingFacts.DoesNotReturn(new ImageFunction(0)) && !catchingFacts.DoesNotReturn(new ImageFunction(10)),
+            "不返回调用的本地处理入口可以返回，不能沿调用链误证不返回");
+        var resuming = new Toy(new()
+        {
+            [0] = e => e.Call(new ImportedTarget(import)), [1] = e => e.Call(new ImageFunction(10)),
+            [10] = e => e.Call(new ImageFunction(0)), [11] = e => e.Return()
+        }, [new(0, 1, 1, [new(ClauseKind.Cleanup, [])])]);
+        var resumingFacts = NoReturnAnalysis.Analyze(new InputMemoryImage(), resuming, Convention,
+            [Range(0, 2), Range(10, 2)], [import], new Arm64FlowFacts());
+        checks.True(resumingFacts.DoesNotReturn(new ImageFunction(0)) && resumingFacts.DoesNotReturn(new ImageFunction(10)),
+            "清理与继续展开形成的闭合调用环没有有限返回路径，保留不返回证明");
         return checks.Finish("不返回分析");
     }
 }

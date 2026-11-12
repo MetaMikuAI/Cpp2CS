@@ -119,6 +119,8 @@ public static class ExitChecker
                 points.Add(b.Identity, Enumerable.Range(0, b.Statements.Length + 2).Select(_ => NewPoint()).ToArray());
             }
             Require(points.ContainsKey(f.Entry), "entry", "function", "入口块不存在。");
+            Require(!blocks.TryGetValue(f.Entry, out var entry) || entry.Handler is null,
+                "handler-entry", "function", "函数入口不能是处理入口。");
 
         }
         private void CheckEntry()

@@ -58,7 +58,9 @@ public sealed class FrontendStage(IEnumerable<IFrontendProvider> providers) : IM
         var ranges = context.Facts.FunctionsByStart[input.Address].ToArray();
         if (ranges.Length != 1) return Fail("frontend.function_range", "入口没有唯一的映像函数范围");
         var parts = components.GetValue(context.Facts, facts => new(() => provider.Create(facts))).Value;
-        var result = FunctionLifter.Lift(parts.Instructions, parts.Convention, parts.Flow, ranges[0], input.Address);
+        var flow = new ExceptionFlowFacts(parts.Flow, target =>
+            context.Facts.RuntimeFunctions.Find(target)?.Function.Operation.Termination == RuntimeTermination.ResumeUnwind);
+        var result = FunctionLifter.Lift(parts.Instructions, parts.Convention, flow, ranges[0], input.Address);
         return result.Function is { } function ? new Completed<NativeFunction>(function)
             : new Missing<NativeFunction>(new(Name, result.Failure!.Address, "提升", result.Failure.Reason));
     }

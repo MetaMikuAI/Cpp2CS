@@ -26,7 +26,7 @@ internal sealed class FlowContext : IIndirectContext
         reads = drafts.Values.SelectMany(b => b.Statements).OfType<MemoryRead>().ToDictionary(r => r.Result);
         var conditions = ImmutableArray.CreateBuilder<FlowCondition>();
         var seen = new HashSet<Draft>();
-        while (current.Address != entry && seen.Add(current) && current.Predecessors.Count == 1)
+        while (current.Handler is null && current.Address != entry && seen.Add(current) && current.Predecessors.Count == 1)
         {
             var previous = current.Predecessors[0];
             if (seen.Contains(previous)) break;
@@ -41,7 +41,7 @@ internal sealed class FlowContext : IIndirectContext
     {
         if (input.Table != Terms) throw new ArgumentException("项必须来自本函数项表。");
         if (input.Identity is not RegisterInput register || !drafts.TryGetValue(register.Address, out var block)) return [];
-        return [.. block.Predecessors.Select(p => p.State.TryGetValue(register.Register, out var value) ? value
+        return [.. block.Predecessors.Select(p => (p.UnwindStates.GetValueOrDefault(block.Identity) ?? p.State).TryGetValue(register.Register, out var value) ? value
             : Terms.Atom(new RegisterInput(p.Address, register.Register), register.Register.Width))];
     }
     public Term? InUniquePredecessor(Term input)

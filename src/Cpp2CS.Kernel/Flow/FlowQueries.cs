@@ -74,9 +74,14 @@ public sealed class BlockDominanceQuery(FlowGraphQuery graph, bool post = false)
     }
 }
 
-/// <summary>同块严格按语句次序；不同块使用严格块支配。Before 使用状态模型的程序点编号。</summary>
+/// <summary>复用原生出口检查的程序点支配；展开调用后的点不支配处理入口。</summary>
 public sealed class PointDominanceQuery(BlockDominanceQuery blocks) : Query<PointPair, bool>
 {
+    private sealed class DominanceQuery : Query<int, Dominance>
+    {
+        public override Outcome<Dominance> Compute(QueryContext c, int key) => Outcome<Dominance>.Success(new(c.Snapshot));
+    }
+    private readonly DominanceQuery dominance = new();
     public override Outcome<bool> Compute(QueryContext c, PointPair key)
     {
         foreach (var p in new[] { key.A, key.B })
@@ -85,8 +90,15 @@ public sealed class PointDominanceQuery(BlockDominanceQuery blocks) : Query<Poin
             if (block is null || p.Before < 0 || p.Before > block.Statements.Length)
                 return Outcome<bool>.Failure(new("flow.point", "程序点不属于快照。"));
         }
-        return key.A.Block == key.B.Block ? Outcome<bool>.Success(key.A.Before < key.B.Before)
-            : c.Get(blocks, new(key.A.Block, key.B.Block));
+        foreach (var point in new[] { key.A, key.B })
+        {
+            var reachable = c.Get(blocks, new(point.Block, point.Block));
+            if (!reachable.IsSuccess) return reachable;
+            if (!reachable.Value) return Outcome<bool>.Success(false);
+        }
+        var result = c.Get(dominance, 0);
+        return result.IsSuccess ? Outcome<bool>.Success(result.Value.StrictlyDominates(
+            key.A.Block, key.A.Before, key.B.Block, key.B.Before)) : result.Propagate<bool>();
     }
 }
 public sealed class FlowQueries

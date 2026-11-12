@@ -19,6 +19,9 @@ internal static class TryRegionIndexChecks
         checks.True(Enumerable.Range(0, 10200).All(p => index.HasHandlerAt((ulong)p) == Linear((ulong)p)), "无序输入的索引与逐项查询一致");
         checks.True(Enumerable.Range(0, 10200).All(p => index.HasHandlerInRange((ulong)p, 17) == regions.Any(r =>
             r.Handler is not null && r.Length != 0 && (ulong)p < r.Start + r.Length && r.Start < (ulong)p + 17)), "区间相交查询与逐项判定一致");
+        checks.True(Enumerable.Range(0, 10200).All(p => index.InRange((ulong)p, 17).OrderBy(r => r.Start).SequenceEqual(
+            regions.Reverse().Where(r => r.Handler is not null && r.Length != 0 && (ulong)p < r.Start + r.Length && r.Start < (ulong)p + 17).OrderBy(r => r.Start))),
+            "相交区域枚举与逐项判定一致且保持同起点次序");
         checks.True(!index.HasHandlerInRange(10, 0), "空查询区间不相交");
         checks.True(!new TryRegionIndex([]).HasHandlerAt(0), "空表不包含处理入口");
         return checks.Finish("异常区域索引");

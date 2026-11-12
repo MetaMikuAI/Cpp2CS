@@ -23,6 +23,7 @@ public sealed class NoReturnFacts : IFlowFacts
     public FrozenSet<CallTarget> Targets { get; }
     public int Rounds { get; }
     public bool DoesNotReturn(CallTarget target) => Targets.Contains(target);
+    public bool ResumesUnwind(CallTarget target) => fallback.ResumesUnwind(target);
     public IndirectResolution ResolveIndirect(ulong address, Term target, IIndirectContext context)
         => fallback.ResolveIndirect(address, target, context);
 }
@@ -31,6 +32,7 @@ public sealed class NoReturnFacts : IFlowFacts
 public sealed record NoReturnRound(int Number, int Pending, int Added, TimeSpan Elapsed, IReadOnlyList<TimeSpan> Probes)
 {
     public long CachedNodes { get; init; }
+    public int Removed { get; init; }
 }
 
 public static class NoReturnAnalysis
@@ -109,6 +111,8 @@ public static class NoReturnAnalysis
         var pending = functions.Keys.ToHashSet();
         int rounds = 0;
         var extension = isa as INoReturnInstructionSet;
+        var exceptions = (isa as IExceptionFlowProvider)?.RegionIndex;
+        bool includeUnwind = false;
         while (pending.Count != 0)
         {
             rounds++;
@@ -122,18 +126,7 @@ public static class NoReturnAnalysis
                 var probeStart = observe is null ? 0 : Stopwatch.GetTimestamp();
                 batch[i].Proven = Prove(batch[i]);
                 if (batch[i].Proven || (rounds == 1 && batch[i].Observed.Count == 0)) batch[i].Nodes.Clear(); else batch[i].Nodes.Freeze();
-                // 不将全映像的临时依赖列表留到轮末；合并不改变本轮只读的 known。
-                lock (dependents)
-                {
-                    foreach (var (original, resolved) in batch[i].NewDependencies)
-                    {
-                        if (resolved != original) aliases[original] = resolved;
-                        if (!dependents.TryGetValue(resolved, out var callers)) dependents[resolved] = callers = [];
-                        callers.Add(batch[i].Range.Start);
-                    }
-                }
-                batch[i].Observed = [];
-                batch[i].NewDependencies = [];
+                RecordDependencies(batch[i]);
                 if (durations is not null) durations[i] = Stopwatch.GetElapsedTime(probeStart);
             });
             var added = new List<CallTarget>();
@@ -152,9 +145,50 @@ public static class NoReturnAnalysis
                 if (dependents.TryGetValue(target, out var callers)) pending.UnionWith(callers);
             }
         }
+        // 普通流先给出候选集合；加入展开路径后只撤回候选，允许清理与继续展开之间的调用环。
+        // 闭合候选中的调用若正常返回，必有一条有限路径到达某个返回；复核会撤回该返回及其调用者。
+        includeUnwind = true;
+        pending.UnionWith(functions.Values.Where(f => known.Contains(new ImageFunction(f.Range.Start))
+            && exceptions?.HasHandlerInRange(f.Range.Start, f.Range.Length) == true).Select(f => f.Range.Start));
+        while (pending.Count != 0)
+        {
+            rounds++;
+            var started = observe is null ? 0 : Stopwatch.GetTimestamp();
+            var batch = pending.Order().Where(p => known.Contains(new ImageFunction(p))).Select(p => functions[p]).ToArray();
+            pending.Clear();
+            var removed = new List<CallTarget>();
+            var durations = observe is null ? null : new TimeSpan[batch.Length];
+            for (int i = 0; i < batch.Length; i++)
+            {
+                var probeStart = observe is null ? 0 : Stopwatch.GetTimestamp();
+                if (!Prove(batch[i])) removed.Add(new ImageFunction(batch[i].Range.Start));
+                RecordDependencies(batch[i]);
+                if (durations is not null) durations[i] = Stopwatch.GetElapsedTime(probeStart);
+            }
+            observe?.Invoke(new(rounds, batch.Length, 0, Stopwatch.GetElapsedTime(started), durations!)
+            { Removed = removed.Count, CachedNodes = functions.Values.Sum(f => (long)f.Nodes.Count) });
+            foreach (var target in removed)
+            {
+                known.Remove(target);
+                if (dependents.TryGetValue(target, out var callers)) pending.UnionWith(callers);
+            }
+        }
         foreach (var (alias, target) in aliases) if (known.Contains(target)) known.Add(alias);
         return new(known, fallback, rounds);
 
+        void RecordDependencies(FunctionProbe function)
+        {
+            // 不将临时项与依赖列表留到轮末；每轮证明使用同一份只读的 known。
+            lock (dependents)
+                foreach (var (original, resolved) in function.NewDependencies)
+                {
+                    if (resolved != original) aliases[original] = resolved;
+                    if (!dependents.TryGetValue(resolved, out var callers)) dependents[resolved] = callers = [];
+                    callers.Add(function.Range.Start);
+                }
+            function.Observed = [];
+            function.NewDependencies = [];
+        }
         CallTarget Resolve(CallTarget target, FunctionProbe function)
         {
             // 计算目标含本条指令的项身份，不在全映像缓存中延长其项表的寿命。
@@ -229,18 +263,23 @@ public static class NoReturnAnalysis
                 var emission = new Emission(pc, new TermTable(), isa.Registers, convention, facts);
                 instruction.Emit(emission);
                 var calls = dependencies?.ToArray() ?? [];
+                var handlers = includeUnwind && emission.Statements.Any(s => s is Call) && exceptions is not null
+                    ? exceptions.InRange(pc, 1).Select(r => r.Handler!.Value).Distinct().ToArray() : [];
+                (ProbeNode, ulong?) Result(ProbeNode node, ulong? next)
+                    => handlers.Length == 0 ? (node, next)
+                        : (node with { Successors = node.Successors.ToArray().Concat(handlers).ToArray() }, null);
                 // 只缓存控制流和已查询的答案，不保留发射出的语句或无关项。
                 // 答案改变时仍走同一发射器，保持失败优先级及调用后的截断行为。
                 if (emission.Failure is { } failure && extension?.IsStraightLineFailure(failure) != true)
                     return (new(true, Array.Empty<ulong>(), calls), null);
                 switch (emission.End)
                 {
-                    case Finished { End: Unreachable }: return (new(false, Array.Empty<ulong>(), calls), null);
-                    case Finished: case Indirect: return (new(true, Array.Empty<ulong>(), calls), null);
+                    case Finished { End: Unreachable }: return Result(new(false, Array.Empty<ulong>(), calls), null);
+                    case Finished: case Indirect: return Result(new(true, Array.Empty<ulong>(), calls), null);
                     case null:
                         ulong next = pc + (ulong)instruction.Length;
-                        return next < pc || !Inside(next) ? (new(true, Array.Empty<ulong>(), calls), null) : (new(false, new[] { next }, calls), next);
-                    default: return (new(false, FunctionLifter.Targets(emission.End).ToArray(), calls), null);
+                        return next < pc || !Inside(next) ? Result(new(true, Array.Empty<ulong>(), calls), null) : Result(new(false, new[] { next }, calls), next);
+                    default: return Result(new(false, FunctionLifter.Targets(emission.End).ToArray(), calls), null);
                 }
             }
         }

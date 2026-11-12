@@ -1,14 +1,29 @@
 namespace Cpp2CS.Native;
 
 /// <summary>块级 Lengauer–Tarjan 支配树；展开调用后的续接段单独成块，段内按语句次序判断。</summary>
-internal sealed class Dominance
+public sealed class Dominance
 {
+    private readonly Dictionary<BlockIdentity, int[]> points;
     private readonly int[] pointBlock;
+    public Dominance(NativeFunction function) : this(function, NumberPoints(function)) { }
+    private Dominance(NativeFunction function, Dictionary<BlockIdentity, int[]> points)
+        : this(function, points, points.Values.Sum(p => p.Length) + 1) { }
+    private static Dictionary<BlockIdentity, int[]> NumberPoints(NativeFunction function)
+    {
+        int next = 1;
+        return function.Blocks.ToDictionary(b => b.Identity,
+            b => Enumerable.Range(0, b.Statements.Length + 2).Select(_ => next++).ToArray());
+    }
+    /// <summary>Before 是此前已完成的语句数；严格支配不含程序点自身。</summary>
+    public bool StrictlyDominates(BlockIdentity definition, int beforeDefinition, BlockIdentity use, int beforeUse) =>
+        (definition != use || beforeDefinition != beforeUse) &&
+        Dominates(points[definition][beforeDefinition + 1], points[use][beforeUse + 1]);
     private readonly int[] enter;
     private readonly int[] leave;
 
     internal Dominance(NativeFunction function, Dictionary<BlockIdentity, int[]> points, int pointCount)
     {
+        this.points = points;
         pointBlock = new int[pointCount];
         var successors = new List<List<int>> { new() };
         int NewBlock()

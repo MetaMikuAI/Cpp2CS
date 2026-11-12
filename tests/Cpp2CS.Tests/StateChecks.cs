@@ -27,8 +27,36 @@ internal static class StateChecks
     private static T Good<T>(Outcome<T> result) => result.IsSuccess ? result.Value : throw new InvalidOperationException(result.Why?.ToString());
     public static int Run()
     {
-        var a = new Assertions(); SourceSets(a); Alias(a); Forward(a); Branches(a); Calls(a); Caller(a); Scale();
+        var a = new Assertions(); SourceSets(a); Alias(a); Forward(a); Branches(a); ExceptionEdges(a); Calls(a); Caller(a); Scale();
         return a.Finish("状态模型");
+    }
+    private static void ExceptionEdges(Assertions a)
+    {
+        var f = new Fixture(); var handler = new BlockIdentity();
+        var call1 = new Call(new(), new ImageFunction(1), [], [], Unwind: handler);
+        var call2 = new Call(new(), new ImageFunction(2), [], [], true, handler);
+        var read = f.Read(0); var ex = f.Terms.Atom(new ExceptionAtom(handler), 64);
+        f.Builder.Blocks.Add(new(f.Entry, [], [f.Write(0, f.C(7)), call1, f.Write(0, f.C(9)), call2], new Unreachable()));
+        f.Builder.Blocks.Add(new(handler, [], [read], new ResumeUnwind(ex),
+            new(ex, f.Terms.Atom(new SelectorAtom(handler), 64), [new(Cpp2CS.Native.Images.ClauseKind.Cleanup, [])])));
+        var q = new StateQueries(); var c = q.CreateContext(f.Builder.Freeze());
+        var value = Good(c.Get(q.Read, read.Identity));
+        var inputs = Good(c.Get(q.MergeInputs, (MemoryMerge)value.Identity!));
+        a.True(inputs.Length == 2 && inputs.All(i => i.Predecessor == f.Entry)
+            && inputs.Select(i => i.Before).SequenceEqual(new[] { 2, 4 })
+            && inputs.Select(i => i.Value.ConstantValue).SequenceEqual(new BigInteger?[] { 7, 9 }),
+            "同块的每条展开边独立取调用后的内存状态，不读取后续写入");
+        var frame = Good(c.Get(q.Locations, new(f.Frame, 64)));
+        var clobber = new StateQueries(effects: new ExceptionEffects(frame));
+        var clobberContext = clobber.CreateContext(f.Builder.Freeze());
+        var changed = Good(clobberContext.Get(clobber.Read, read.Identity));
+        var changedInputs = Good(clobberContext.Get(clobber.MergeInputs, (MemoryMerge)changed.Identity!));
+        a.True(changedInputs.All(i => i.Value.Identity is MemoryAtom { Definition: CallIdentity }),
+            "展开边包含抛出调用本身可能产生的内存效果");
+    }
+    private sealed class ExceptionEffects(Location location) : ICallEffectSource
+    {
+        public Outcome<CallEffects> Get(QueryContext context, Call call) => Outcome<CallEffects>.Success(new(false, 0, [location]));
     }
     private static void SourceSets(Assertions a)
     {

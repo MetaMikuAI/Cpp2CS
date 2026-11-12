@@ -22,6 +22,8 @@ public static class FunctionLifter
         internal Dictionary<Register, Term> State { get; } = [];
         internal List<Statement> Statements { get; } = [];
         internal List<Draft> Predecessors { get; } = [];
+        internal HandlerEntry? Handler { get; set; }
+        internal Dictionary<BlockIdentity, Dictionary<Register, Term>> UnwindStates { get; } = [];
         internal List<(ulong Address, Term Value, long Offset)> StackChecks { get; } = [];
         internal Term? IndirectTarget { get; set; }
         internal ulong IndirectAddress { get; set; }
@@ -32,8 +34,11 @@ public static class FunctionLifter
         FunctionRange range, ulong entry, IComparer<ulong>? discoveryOrder, Action<LiftPhase>? phaseCompleted)
     {
         private readonly TermTable terms = new();
+        private readonly IExceptionFlowProvider? exceptions = isa as IExceptionFlowProvider;
+        private readonly TryRegion[] regions = (isa as IExceptionFlowProvider)?.RegionIndex.InRange(range.Start, range.Length).ToArray() ?? [];
         private readonly SortedDictionary<ulong, Node> nodes = [];
         private readonly Dictionary<ulong, Draft> drafts = [];
+        private readonly Dictionary<TryRegion, Draft> handlerEntries = [];
         private readonly Dictionary<ulong, Draft> blockAt = [];
         private readonly Dictionary<(ulong Source, ulong Target), Draft> tails = [];
         private readonly Dictionary<ulong, IndirectResolution> resolutions = [];
@@ -44,9 +49,17 @@ public static class FunctionLifter
         {
             Validate();
             if (!Inside(entry)) return Hole(entry, "entry-range", "入口不在函数范围内。");
+            foreach (var region in regions)
+            {
+                if (!Inside(region.Start) || region.Length > range.Length - (region.Start - range.Start) || !Inside(region.Handler!.Value))
+                    return Hole(region.Start, "exception-range", "异常区域或处理入口越出函数范围。");
+                foreach (var other in regions.Where(r => r != region && r.Start >= region.Start && r.Start - region.Start < region.Length))
+                    if (other.Handler != region.Handler || !SameClauses(region, other))
+                        return Hole(other.Start, "exception-overlap", "重叠异常区域没有唯一的处理入口与子句表。");
+            }
             while (true)
             {
-                drafts.Clear(); blockAt.Clear(); tails.Clear(); syntheticKey = ulong.MaxValue;
+                drafts.Clear(); blockAt.Clear(); tails.Clear(); handlerEntries.Clear(); syntheticKey = ulong.MaxValue;
                 var failure = Discover();
                 phaseCompleted?.Invoke(LiftPhase.Discovery);
                 if (failure is not null) return failure;
@@ -54,9 +67,9 @@ public static class FunctionLifter
                 for (int i = 1; i < ordered.Length; i++)
                     if (ordered[i - 1].Length > 0 && ordered[i].Address - ordered[i - 1].Address < (ulong)ordered[i - 1].Length)
                         return Hole(ordered[i].Address, "instruction-overlap", "控制转移落入指令内部。");
-                var leaders = new HashSet<ulong> { entry };
+                var leaders = regions.Select(r => r.Handler!.Value).Append(entry).ToHashSet();
                 foreach (var node in ordered)
-                    if (node.Explicit) foreach (var target in DiscoveryTargets(node)) if (Inside(target)) leaders.Add(target);
+                    if (node.Explicit || node.Emission.UnwindStates.Count != 0) foreach (var target in DiscoveryTargets(node)) if (Inside(target)) leaders.Add(target);
                 Draft? current = null;
                 Node? previous = null;
                 foreach (var node in ordered)
@@ -75,6 +88,24 @@ public static class FunctionLifter
                     if (drafts.TryGetValue(node.Address, out var start)) current = start;
                     blockAt[node.Address] = current!;
                 }
+                foreach (var region in regions)
+                {
+                    var existing = handlerEntries.FirstOrDefault(p => p.Key.Handler == region.Handler && SameClauses(p.Key, region)).Value;
+                    if (existing is not null) { handlerEntries[region] = existing; continue; }
+                    // 异常入口单独定义入口项；同地址的指令体可被普通分支或其他子句入口共用。
+                    var block = Synthetic(region.Handler!.Value);
+                    block.End = new Jump(blockAt[region.Handler.Value].Identity);
+                    block.Handler = new(terms.Atom(new ExceptionAtom(block.Identity), convention.StackPointer.Width),
+                        terms.Atom(new SelectorAtom(block.Identity), convention.StackPointer.Width), region.Clauses);
+                    foreach (var register in isa.Registers)
+                        if (register != convention.StackPointer && !convention.Preserved.Contains(register)
+                            && !convention.PreservedParts.Any(p => p.Register == register))
+                            block.State[register] = terms.Undefined(register.Width);
+                    var entrance = new Emission(block.Address, terms, isa.Registers, convention, facts);
+                    exceptions!.ExceptionModel.EnterHandler(entrance, block.Handler.Exception, block.Handler.Selector);
+                    foreach (var (register, value) in entrance.State) block.State[register] = value;
+                    handlerEntries[region] = block;
+                }
                 current = null;
                 foreach (var node in ordered)
                 {
@@ -84,7 +115,7 @@ public static class FunctionLifter
                     var map = new TermRewrite(terms, t => t.Identity is RegisterInput input
                         ? ReadBlock(block, input.Register) : null);
                     var writes = node.Emission.State.Select(p => (p.Key, Value: map.Map(p.Value))).ToArray();
-                    block.Statements.AddRange(node.Emission.Statements.Select(map.Statement));
+                    Append(block, node.Emission, map, node.Address);
                     var transfer = map.Transfer(node.Transfer);
                     foreach (var (register, value) in writes) block.State[register] = value;
                     if (transfer is Indirect indirect)
@@ -98,7 +129,7 @@ public static class FunctionLifter
                 }
                 var byIdentity = drafts.Values.ToDictionary(b => b.Identity);
                 foreach (var block in drafts.Values)
-                    foreach (var target in Targets(block.End).Distinct())
+                    foreach (var target in BlockTargets(block).Distinct())
                         byIdentity[target].Predecessors.Add(block);
                 phaseCompleted?.Invoke(LiftPhase.Composition);
                 bool newTargets = false;
@@ -129,12 +160,12 @@ public static class FunctionLifter
                         case IndirectTable table: block.End = Lower(new TableTransfer(table), block.IndirectAddress); break;
                         case IndirectTailCall tail:
                             block.StackChecks.Add((block.IndirectAddress, ReadBlock(block, convention.StackPointer), convention.TailCallStackOffset));
-                            var emitter = new Emission(block.IndirectAddress, terms, isa.Registers, convention, facts);
+                            var emitter = NewEmission(block.IndirectAddress);
                             emitter.Call(new ComputedTarget(tail.Target));
                             if (emitter.End is null) emitter.Return();
                             var map = new TermRewrite(terms, t => t.Identity is RegisterInput input && input.Address == block.IndirectAddress
                                 ? ReadBlock(block, input.Register) : null);
-                            block.Statements.AddRange(emitter.Statements.Select(map.Statement));
+                            Append(block, emitter, map, block.IndirectAddress);
                             block.End = map.End(((Finished)emitter.End!).End);
                             break;
                         default: throw new InvalidOperationException("未支持的间接解析结果。");
@@ -143,7 +174,7 @@ public static class FunctionLifter
                 foreach (var block in drafts.Values) block.Predecessors.Clear();
                 byIdentity = drafts.Values.ToDictionary(b => b.Identity);
                 foreach (var block in drafts.Values)
-                    foreach (var target in Targets(block.End).Distinct()) byIdentity[target].Predecessors.Add(block);
+                    foreach (var target in BlockTargets(block).Distinct()) byIdentity[target].Predecessors.Add(block);
                 var frame = terms.Atom(new RootAtom(AddressRoot.Frame), convention.StackPointer.Width);
                 var initial = new Draft(entry);
                 initial.End = new Jump(drafts[entry].Identity);
@@ -169,7 +200,11 @@ public static class FunctionLifter
                 if (ssa.BadStackAddress is { } badStack) return Hole(badStack, "stack-restore", "返回或尾调用处栈指针不等于约定的入口帧偏移。");
                 var check = ExitChecker.Check(function);
                 phaseCompleted?.Invoke(LiftPhase.ExitCheck);
-                if (!check.IsValid) throw new InvalidOperationException(string.Join("; ", check.Violations.Select(v => v.Code + ": " + v.Message)));
+                if (!check.IsValid)
+                {
+                    var defect = new InvalidOperationException($"函数 0x{entry:x}: " + string.Join("; ", check.Violations.Select(v => v.Code + "@" + v.Location + ": " + v.Message)));
+                    throw defect;
+                }
                 if (!check.Holes.IsEmpty) return new(null, new(entry, check.Holes[0].Reason));
                 return new(function, null);
             }
@@ -206,7 +241,7 @@ public static class FunctionLifter
         }
         private LiftResult? Discover()
         {
-            var pending = new SortedSet<ulong>(discoveryOrder) { entry };
+            var pending = new SortedSet<ulong>(regions.Select(r => r.Handler!.Value).Append(entry), discoveryOrder);
             foreach (var table in resolutions.Values.OfType<IndirectTable>())
                 foreach (var target in table.Cases.Select(c => c.Target).Append(table.Default)) if (Inside(target)) pending.Add(target);
             while (pending.Count != 0)
@@ -214,7 +249,7 @@ public static class FunctionLifter
                 var address = pending.Min;
                 pending.Remove(address);
                 if (nodes.ContainsKey(address)) continue;
-                var emitter = new Emission(address, terms, isa.Registers, convention, facts);
+                var emitter = NewEmission(address);
                 var decoded = isa.Decode(address);
                 if (decoded.Instruction is not { } instruction)
                     return new(null, new(address, decoded.Failure ?? new("decode", "解码器未提供指令或失败原因。")));
@@ -223,6 +258,7 @@ public static class FunctionLifter
                     return Hole(address, "instruction-range", "指令长度无效或越出函数范围。");
                 instruction.Emit(emitter);
                 if (emitter.Failure is { } reason) return new(null, new(address, reason));
+                if (emitter.UnwindStates.Count > 1) return Hole(address, "exception-instruction", "单条指令内的多次展开调用尚未拆分。");
                 var explicitTransfer = emitter.End is not null;
                 if (!explicitTransfer && (address > ulong.MaxValue - (ulong)length || !Inside(address + (ulong)length)))
                     return Hole(address, "fallthrough-range", "指令隐式落出函数范围。");
@@ -231,6 +267,32 @@ public static class FunctionLifter
                 foreach (var target in Targets(transfer)) if (Inside(target) && !nodes.ContainsKey(target)) pending.Add(target);
             }
             return null;
+        }
+        private static bool SameClauses(TryRegion a, TryRegion b) => a.Clauses.Length == b.Clauses.Length &&
+            a.Clauses.Zip(b.Clauses).All(p => p.First.Kind == p.Second.Kind && p.First.Matches.SequenceEqual(p.Second.Matches));
+        private TryRegion? RegionAt(ulong address)
+        {
+            foreach (var region in regions)
+                if (address >= region.Start && address - region.Start < region.Length) return region;
+            return null;
+        }
+        private Emission NewEmission(ulong address) => new(address, terms, isa.Registers, convention, facts,
+            exceptions?.ExceptionModel, RegionAt(address) is not null);
+        private static IEnumerable<BlockIdentity> BlockTargets(Draft block) => Targets(block.End)
+            .Concat(block.Statements.OfType<Call>().Where(c => c.Unwind is not null).Select(c => c.Unwind!));
+        private void Append(Draft block, Emission emission, TermRewrite map, ulong address)
+        {
+            foreach (var statement in emission.Statements)
+            {
+                var mapped = map.Statement(statement);
+                if (mapped is Call call && RegionAt(address) is { } region)
+                {
+                    var target = handlerEntries[region].Identity;
+                    mapped = call with { Unwind = target };
+                    block.UnwindStates.Add(target, emission.UnwindStates[call.Identity].ToDictionary(p => p.Key, p => map.Map(p.Value)));
+                }
+                block.Statements.Add(mapped);
+            }
         }
         private IEnumerable<ulong> DiscoveryTargets(Node node) => node.Transfer is Indirect && resolutions.TryGetValue(node.Address, out var result)
             && result is IndirectTable table ? table.Cases.Select(c => c.Target).Append(table.Default) : Targets(node.Transfer);
@@ -248,23 +310,28 @@ public static class FunctionLifter
             Indirect => new Unreachable(),
             _ => throw new InvalidOperationException()
         };
+        private Draft Synthetic(ulong traceAddress)
+        {
+            while (nodes.ContainsKey(syntheticKey) || drafts.ContainsKey(syntheticKey)) syntheticKey--;
+            var block = new Draft(syntheticKey--) { TraceAddress = traceAddress };
+            drafts.Add(block.Address, block);
+            return block;
+        }
         // 隐式落入当前块的临时终结会被下一条指令覆盖。
         private BlockIdentity BlockFor(ulong address, ulong source)
         {
             if (Inside(address)) return blockAt[address].Identity;
             if (tails.TryGetValue((source, address), out var existing)) return existing.Identity;
-            while (nodes.ContainsKey(syntheticKey) || drafts.ContainsKey(syntheticKey)) syntheticKey--;
-            var tail = new Draft(syntheticKey--) { TraceAddress = source };
-            drafts.Add(tail.Address, tail);
+            var tail = Synthetic(source);
             tails.Add((source, address), tail);
-            var emitter = new Emission(source, terms, isa.Registers, convention, facts);
+            var emitter = NewEmission(source);
             emitter.Call(new ImageFunction(address));
             if (emitter.End is null) emitter.Return();
             var map = new TermRewrite(terms, t => t.Identity is RegisterInput input
                 ? terms.Atom(new RegisterInput(tail.Address, input.Register), input.Register.Width) : null);
             foreach (var (register, value) in emitter.State) tail.State[register] = map.Map(value);
             tail.StackChecks.Add((source, terms.Atom(new RegisterInput(tail.Address, convention.StackPointer), convention.StackPointer.Width), convention.TailCallStackOffset));
-            tail.Statements.AddRange(emitter.Statements.Select(map.Statement));
+            Append(tail, emitter, map, source);
             tail.End = map.End(((Finished)emitter.End!).End);
             return tail.Identity;
         }
@@ -286,6 +353,6 @@ public static class FunctionLifter
     };
     internal static IEnumerable<Term> Uses(Terminator end) => end switch
     {
-        Branch b => [b.Condition], JumpTable t => [t.Selector], Return r => r.Results.Select(s => s.Value), _ => []
+        Branch b => [b.Condition], JumpTable t => [t.Selector], Return r => r.Results.Select(s => s.Value), ResumeUnwind r => [r.Exception], _ => []
     };
 }

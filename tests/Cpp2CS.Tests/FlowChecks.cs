@@ -27,6 +27,11 @@ internal static class FlowChecks
         var call = new Call(new(), new ImageFunction(1), [], [], Unwind: z);
         var exception = Context(new(x, [], [call, new MemoryWrite(new(), t.Constant(0,64), 8, t.Constant(1,8))], new Jump(y)), new(y, [], [], new Return([])), new(z, [], [], new Return([])));
         a.True(exception.Get(q.PointDominates, new(new(x,0), new(x,1))).Value && !exception.Get(q.PointDominates, new(new(x,1), new(x,1))).Value && !exception.Get(q.PostDominates, new(y,x)).Value, "调用正常返回次序与异常出口");
+        a.True(exception.Get(q.Graph, 0).Value.Reachable.Contains(z)
+            && exception.Get(q.Dominates, new(x,z)).Value
+            && exception.Get(q.PointDominates, new(new(x,0),new(z,0))).Value
+            && !exception.Get(q.PointDominates, new(new(x,1),new(z,0))).Value,
+            "展开边参与可达与支配，调用后程序点不支配处理入口");
         return a.Finish("控制流查询");
     }
 }

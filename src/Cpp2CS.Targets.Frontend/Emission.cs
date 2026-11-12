@@ -13,10 +13,11 @@ internal sealed record Indirect(Term Target) : Transfer;
 internal sealed record Finished(Terminator End) : Transfer;
 
 internal sealed class Emission(ulong address, TermTable terms, ImmutableArray<Register> registers,
-    RegisterConvention convention, IFlowFacts facts) : IEmitter, IOrderedMemoryEmitter
+    RegisterConvention convention, IFlowFacts facts, IExceptionModel? exceptionModel = null, bool captureUnwind = false) : IEmitter, IOrderedMemoryEmitter
 {
     internal Dictionary<Register, Term> State { get; } = [];
     internal List<Statement> Statements { get; } = [];
+    internal Dictionary<CallIdentity, Dictionary<Register, Term>> UnwindStates { get; } = [];
     internal Transfer? End { get; private set; }
     internal Reason? Failure { get; private set; }
     public TermTable Terms => terms;
@@ -77,7 +78,17 @@ internal sealed class Emission(ulong address, TermTable terms, ImmutableArray<Re
     public void Call(CallTarget target)
     {
         Open();
+        if (exceptionModel is not null && (exceptionModel.IsResumeUnwind(target) || facts.ResumesUnwind(target)))
+        {
+            End = new Finished(new ResumeUnwind(exceptionModel.ResumeException(this)));
+            return;
+        }
         var id = new CallIdentity();
+        if (captureUnwind)
+            UnwindStates.Add(id, convention.Preserved.Concat(convention.PreservedParts.Select(p => p.Register))
+                .Append(convention.StackPointer).Distinct().ToDictionary(r => r, r =>
+                    convention.PreservedParts.Any(p => p.Register == r)
+                        ? RegisterValues.KeepParts(terms, r, Read(r), convention.PreservedParts) : Read(r)));
         var arguments = convention.Arguments.Select(s => new SlotValue(s.Slot, Read(s.Register))).ToImmutableArray();
         var area = Offset(Read(convention.StackPointer), convention.OutgoingAreaOffset);
         var noReturn = facts.DoesNotReturn(target);
@@ -175,6 +186,7 @@ internal sealed class TermRewrite(TermTable terms, Func<Term, Term?> replace, bo
         Branch b => b with { Condition = Map(b.Condition) },
         JumpTable t => t with { Selector = Map(t.Selector) },
         Return r => r with { Results = Slots(r.Results) },
+        ResumeUnwind r => r with { Exception = Map(r.Exception) },
         _ => end
     };
     internal Transfer Transfer(Transfer transfer) => transfer switch

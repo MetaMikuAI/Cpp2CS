@@ -64,7 +64,16 @@ public interface IIndirectContext
 public interface IFlowFacts
 {
     bool DoesNotReturn(CallTarget target);
+    bool ResumesUnwind(CallTarget target) => false;
     IndirectResolution ResolveIndirect(ulong address, Term target, IIndirectContext context);
+}
+
+/// <summary>目录身份与目标的寄存器异常模型分离；不改变不返回与间接转移的判定。</summary>
+public sealed class ExceptionFlowFacts(IFlowFacts inner, Func<CallTarget, bool> resumesUnwind) : IFlowFacts
+{
+    public bool DoesNotReturn(CallTarget target) => inner.DoesNotReturn(target);
+    public bool ResumesUnwind(CallTarget target) => inner.ResumesUnwind(target) || resumesUnwind(target);
+    public IndirectResolution ResolveIndirect(ulong address, Term target, IIndirectContext context) => inner.ResolveIndirect(address, target, context);
 }
 
 /// <summary>指令读取的入口占位由共用层在组块和 SSA 时解析。</summary>
@@ -82,9 +91,12 @@ public interface IOrderedMemoryEmitter
 }
 
 /// <summary>地址为映像偏移。寄存器读写必须整单元；部分写入由 Slice/Concat 表达。</summary>
-public interface IEmitter : IRegisterReader
+public interface IRegisterState : IRegisterReader
 {
     void Write(Register register, Term value);
+}
+public interface IEmitter : IRegisterState
+{
     Term Load(Term address, int width);
     void Store(Term address, Term value);
     /// <summary>条件（1 位）为真时是硬件陷阱；本条指令此后的语义只在条件为假时生效。</summary>
@@ -105,10 +117,18 @@ public enum LiftPhase { Discovery, Composition, IndirectResolution, Ssa, ExitChe
 public sealed record LiftFailure(ulong Address, Reason Reason);
 public sealed record LiftResult(NativeFunction? Function, LiftFailure? Failure);
 
-/// <summary>异常边必须在 SSA 前加入图，包含调用前状态与处理入口定义；当前提升入口不接纳异常区间。</summary>
+/// <summary>异常边在 SSA 前加入图；目标模型负责入口值及继续展开的实参归位。</summary>
 public interface IExceptionFlowProvider
 {
     ImmutableArray<Cpp2CS.Native.Images.TryRegion> Regions { get; }
+    Cpp2CS.Native.Images.TryRegionIndex RegionIndex => new(Regions);
+    IExceptionModel ExceptionModel { get; }
+}
+public interface IExceptionModel
+{
+    void EnterHandler(IRegisterState state, Term exception, Term selector);
+    bool IsResumeUnwind(CallTarget target);
+    Term ResumeException(IRegisterReader state);
 }
 /// <summary>动态分配识别在逐条语义后、SSA 前接入；Size 来自同一项表，结果须以显式帧身份定义。</summary>
 public sealed record DynamicStackRequest(Term Size, int Alignment, Register Result);

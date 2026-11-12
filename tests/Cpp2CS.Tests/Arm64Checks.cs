@@ -32,6 +32,14 @@ internal static class Arm64Checks
         var checks = new Assertions();
         Slots(checks);
         Integration(checks);
+        var model = new Arm64InstructionSet(new InputMemoryImage());
+        var state = new Concrete(); var exception = state.Terms.Constant(7, 64); var selector = state.Terms.Constant(3, 64);
+        model.EnterHandler(state, exception, selector);
+        checks.True(state.Read(X[0]) == exception && state.Read(X[1]) == selector,
+            "异常模型按 AArch64 落地约定提供异常对象与选择值");
+        checks.True(model.IsResumeUnwind(new ImportedTarget(new("_Unwind_Resume"))) && model.ResumeException(state) == exception
+            && !model.IsResumeUnwind(new ImportedTarget(new("__cxa_end_catch"))),
+            "异常模型只按导入身份识别继续展开");
         using var input = File.OpenRead(Path.Combine(EvidenceDirectory, "evidence.json.gz"));
         checks.True(input.Length <= 2 * 1024 * 1024, "压缩证据不超过 2 MiB");
         using var compressed = new GZipStream(input, CompressionMode.Decompress);

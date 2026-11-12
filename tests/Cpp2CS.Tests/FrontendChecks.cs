@@ -17,10 +17,16 @@ internal static class FrontendChecks
     // 返回地址占入口栈顶八字节，随后八字节为调用者保留区；第零整数槽位于 c，结果位于 b。
     private static readonly RegisterConvention Convention = new([new(R2, new(SlotKind.Integer))],
         [new(R1, new(SlotKind.Integer))], [R3], Sp, 16, 8, [R3]);
-    private enum Op { Move, Add, Copy, Partial, Low, Load, Store, Compare, Branch, Jump, Indirect, Call, Return, Trap, Bad, Push, Pop, Image, Thread, ImportCall, ComputedCall, Guard }
+    private enum Op { Move, Add, Copy, Partial, Low, Load, Store, Compare, Branch, Jump, Indirect, Call, Return, Trap, Bad, Push, Pop, Image, Thread, ImportCall, ComputedCall, Guard, Resume, BeginCatch, EndCatch, Rethrow }
     private sealed record Ins(Op Op, Register? To = null, Register? From = null, ulong Value = 0, ulong Other = 0);
-    private sealed class Toy(IReadOnlyDictionary<ulong, Ins> code, int extraRegisters = 0) : IInstructionSet
+    private sealed class Toy(IReadOnlyDictionary<ulong, Ins> code, int extraRegisters = 0, ImmutableArray<TryRegion> regions = default) : IInstructionSet, IExceptionFlowProvider, IExceptionModel
     {
+        public ImmutableArray<TryRegion> Regions { get; } = regions.IsDefault ? [] : regions;
+        public IExceptionModel ExceptionModel => this;
+        public void EnterHandler(IRegisterState state, Term exception, Term selector)
+        { state.Write(R0, exception); state.Write(R1, selector); }
+        public bool IsResumeUnwind(CallTarget target) => target is ImportedTarget { Symbol.Name: "_Unwind_Resume" };
+        public Term ResumeException(IRegisterReader state) => state.Read(R0);
         public ImmutableArray<Register> Registers { get; } = [.. FrontendChecks.Registers,
             .. Enumerable.Range(0, extraRegisters).Select(i => new Register("unused" + i, 64))];
         public DecodeResult Decode(ulong address) => !code.TryGetValue(address, out var ins)
@@ -46,6 +52,10 @@ internal static class FrontendChecks
                 case Op.Jump: e.Jump(i.Value); break;
                 case Op.Indirect: e.IndirectJump(e.Read(i.From!)); break;
                 case Op.Call: e.Call(new ImageFunction(i.Value)); break;
+                case Op.Resume: e.Call(new ImportedTarget(new ImportSymbol("_Unwind_Resume"))); break;
+                case Op.BeginCatch: e.Call(new ImportedTarget(new ImportSymbol("__cxa_begin_catch"))); break;
+                case Op.EndCatch: e.Call(new ImportedTarget(new ImportSymbol("__cxa_end_catch"))); break;
+                case Op.Rethrow: e.Call(new ImportedTarget(new ImportSymbol("__cxa_rethrow"))); break;
                 case Op.Image: e.Write(i.To!, e.ImageAddress(i.Value)); break;
                 case Op.Thread: e.Write(i.To!, e.ThreadPointer); break;
                 case Op.ImportCall: e.Call(new ImportedTarget(new ImportSymbol("toy_import"))); break;
@@ -174,6 +184,7 @@ internal static class FrontendChecks
             new(Op.Copy, R1, R2), new(Op.Add, R1, Value: 1), new(Op.Jump, Value: 8), new(Op.Return)));
         checks.True(sameExpressions.Blocks.All(b => b.Merges.IsEmpty) && Execute(sameExpressions, 4) == 5,
             "操作数归位后相等的表达式不保留平凡合流");
+        ExceptionRegions(checks);
         RevisedContracts(checks);
         ConditionalTrap(checks);
         PartialPreservation(checks);
@@ -182,6 +193,94 @@ internal static class FrontendChecks
         Scale(checks);
         RealisticScale(checks);
         return checks.Finish("共用前端");
+    }
+    private static void ExceptionRegions(Assertions checks)
+    {
+        ImmutableArray<ExceptionClause> clauses = [new(ClauseKind.Cleanup, [])];
+        var code = Code(new(Op.Move, R3, Value: 7), new(Op.Move, V, Value: 17), new(Op.Call, Value: 900),
+            new(Op.Move, R3, Value: 9), new(Op.Call, Value: 901), new(Op.Bad),
+            new(Op.Store, From: R3), new(Op.Store, From: V, Value: 8), new(Op.Store, From: R2, Value: 24),
+            new(Op.Store, From: R0, Value: 32), new(Op.Store, From: R1, Value: 40), new(Op.Resume));
+        var convention = Convention with { PreservedParts = [new(V, 0, 32)], CallerValues = [R3, V] };
+        var regions = ImmutableArray.Create(new TryRegion(2, 1, 6, clauses), new TryRegion(4, 1, 6, clauses));
+        LiftResult With(Dictionary<ulong, Ins> instructions, ImmutableArray<TryRegion> areas, bool reverse = false) =>
+            FunctionLifter.Lift(new Toy(instructions, regions: areas), convention, new Facts(),
+                new(0, instructions.Keys.Max() + 1, FunctionEvidence.UnwindTable), 0,
+                discoveryOrder: reverse ? Comparer<ulong>.Create((a, b) => b.CompareTo(a)) : null);
+        var lifted = With(code, regions);
+        checks.True(lifted.Function is not null, "异常区域提升成功：" + lifted.Failure);
+        if (lifted.Function is not { } function) return;
+        checks.True(ExitChecker.Check(function) is { IsValid: true, Holes.IsEmpty: true }, "异常图通过出口");
+        var handler = function.Blocks.Single(b => b.Handler is not null);
+        var calls = function.Blocks.SelectMany(b => b.Statements).OfType<Call>().ToArray();
+        checks.True(calls.Length == 2 && calls.All(c => c.Unwind == handler.Identity) && calls[1].DoesNotReturn,
+            "返回与不返回调用都带展开边");
+        checks.True(handler.Trace?.NativeAddress == 6 && handler.Handler!.Exception.Identity is ExceptionAtom e && e.Handler == handler.Identity
+            && handler.Handler.Selector.Identity is SelectorAtom selector && selector.Handler == handler.Identity
+            && handler.Handler.Clauses.SequenceEqual(clauses), "额外处理入口定义两个入口项并保留子句表");
+        var body = function.Blocks.Single(b => b.Identity == ((Jump)handler.End).Target);
+        var writes = body.Statements.OfType<MemoryWrite>().ToArray();
+        var merge = handler.Merges.Single(m => m.Result == writes[0].Value);
+        checks.True(merge.Inputs.Select(i => i.Value.ConstantValue).SequenceEqual(new BigInteger?[] { 7, 9 }),
+            "被调保存值按每条展开边取调用点状态，后续写入不污染前一条边");
+        checks.True(writes[1].Value == function.Terms.Concat(function.Terms.Constant(17, 32), function.Terms.Undefined(96))
+            && writes[2].Value.Kind == TermKind.Undefined, "部分保存位保持，其余寄存器位未定义");
+        checks.True(writes[3].Value == handler.Handler!.Exception && writes[4].Value == handler.Handler.Selector
+            && body.End is ResumeUnwind resume && resume.Exception == handler.Handler.Exception,
+            "入口值参与语义，继续展开使用当前异常项且不保留调用");
+        checks.True(TextDump.Write(function, true) == TextDump.Write(With(code, regions, true).Function!, true), "异常图与发现次序无关");
+        var directoryCode = Code(new(Op.Move, R0, Value: 42), new(Op.Call, Value: 902));
+        var directory = FunctionLifter.Lift(new Toy(directoryCode), convention,
+            new ExceptionFlowFacts(new Facts(), target => target is ImageFunction { EntryOffset: 902 }),
+            new(0, 2, FunctionEvidence.SymbolTable), 0).Function!;
+        checks.True(directory.Blocks.Any(b => b.End is ResumeUnwind { Exception.ConstantValue: { } value } && value == 42)
+            && directory.Blocks.All(b => b.Statements.All(s => s is not Call)), "目录识别的继续展开调用成为终结");
+        var plain = With(Code(new(Op.Call, Value: 900), new(Op.Return)), [new(0, 1, null, [])]).Function!;
+        checks.True(plain.Blocks.All(b => b.Handler is null) && plain.Blocks.SelectMany(b => b.Statements).OfType<Call>().Single().Unwind is null,
+            "没有处理入口的区域不产生展开边");
+        var ordinary = With(Code(new(Op.BeginCatch), new(Op.EndCatch), new(Op.Rethrow), new(Op.Return)), []).Function!;
+        checks.True(ordinary.Blocks.SelectMany(b => b.Statements).OfType<Call>().Count() == 3, "捕获与重抛入口仍是普通调用");
+        var builder = new FunctionBuilder(function.Terms, function.Entry, function.AddressWidth, function.Frame)
+        { ImageBase = function.ImageBase, ThreadPointer = function.ThreadPointer, IncomingArgumentArea = function.IncomingArgumentArea };
+        builder.Inputs.AddRange(function.Inputs);
+        builder.Blocks.AddRange(function.Blocks.Select(b => b.Identity == function.Entry ? b with { End = new Jump(handler.Identity) } : b));
+        checks.True(ExitChecker.Check(builder.Freeze()).Violations.Any(v => v.Code == "handler-edge"), "出口拒绝普通跳转进入处理入口");
+        var invalidEntry = new FunctionBuilder(function.Terms, handler.Identity, function.AddressWidth, function.Frame)
+        { ImageBase = function.ImageBase, ThreadPointer = function.ThreadPointer, IncomingArgumentArea = function.IncomingArgumentArea };
+        invalidEntry.Inputs.AddRange(function.Inputs); invalidEntry.Blocks.AddRange(function.Blocks);
+        checks.True(ExitChecker.Check(invalidEntry.Freeze()).Violations.Any(v => v.Code == "handler-entry"),
+            "出口拒绝从函数入口直接进入处理入口");
+        var live = With(Code(new(Op.Move, R3, Value: 7), new(Op.Call, Value: 900), new(Op.Move, R3, Value: 9),
+            new(Op.Call, Value: 901), new(Op.Copy, R0, R3), new(Op.Resume)),
+            [new(1, 1, 4, clauses), new(3, 1, 4, clauses)]).Function!;
+        checks.True(live.Blocks.Single(b => b.Handler is not null).Merges.Length == 1, "只由继续展开使用的合流保持活跃");
+        var shared = With(Code(new(Op.Compare, From: R2), new(Op.Branch, Value: 2, Other: 4),
+            new(Op.Call, Value: 900), new(Op.Jump, Value: 4), new(Op.Store, From: R0), new(Op.Return)), [new(2, 1, 4, clauses)]).Function!;
+        var landing = shared.Blocks.Single(b => b.Handler is not null);
+        var common = shared.Blocks.Single(b => b.Identity == ((Jump)landing.End).Target);
+        checks.True(ExitChecker.Check(shared).IsValid && common.Handler is null && common.Merges.Length != 0
+            && shared.Blocks.Any(b => b.Identity != landing.Identity && b.End is Jump j && j.Target == common.Identity),
+            "同地址指令体可经普通流进入，异常入口保持只经展开边进入");
+        var different = With(Code(new(Op.Call, Value: 900), new(Op.Call, Value: 901), new(Op.Bad), new(Op.Bad), new(Op.Resume)),
+            [new(0, 1, 4, clauses), new(1, 1, 4, [new(ClauseKind.CatchAll, [])])]).Function!;
+        checks.True(ExitChecker.Check(different).IsValid && different.Blocks.Count(b => b.Handler is not null) == 2
+            && different.Blocks.Where(b => b.Handler is not null).Select(b => b.Handler!.Clauses.Single().Kind).ToHashSet()
+                .SetEquals(new[] { ClauseKind.Cleanup, ClauseKind.CatchAll }), "同地址不同子句表各自定义入口，指令体在普通合流处接合");
+        var dormant = With(Code(new(Op.Call, Value: 901), new(Op.Call, Value: 900), new(Op.Return),
+            new(Op.Store, From: R0), new(Op.Resume)), [new(1, 1, 3, clauses)]);
+        checks.True(dormant.Function is not null && ExitChecker.Check(dormant.Function).IsValid
+            && dormant.Function.Blocks.SelectMany(b => b.Merges).All(m => !m.Inputs.IsEmpty),
+            "没有可达调用点的处理入口仍被提升，局部合流保持不可达分量的定义次序");
+        var framed = With(Code(new(Op.Push, From: R3), new(Op.Call, Value: 901), new(Op.Pop, R3), new(Op.Return)),
+            [new(1, 1, 2, clauses)]);
+        checks.True(framed.Function is not null, "展开边的栈指针保持调用点的帧偏移");
+        if (framed.Function is { } frameFunction)
+        {
+            var state = new Cpp2CS.Kernel.State.StateQueries(); var context = state.CreateContext(frameFunction);
+            var read = frameFunction.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().Single();
+            checks.True(context.Get(state.Read, read.Identity) is { IsSuccess: true, Value.Identity: CallerValue { Index: 0 } },
+                "状态读取经展开边、异常入口与共用指令体找到调用前的帧写入");
+        }
     }
     private sealed class Resolver(Func<ulong, Term, IIndirectContext, IndirectResolution> resolve) : IFlowFacts
     {
