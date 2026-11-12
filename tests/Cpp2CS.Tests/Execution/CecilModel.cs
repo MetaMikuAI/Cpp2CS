@@ -24,6 +24,8 @@ internal sealed partial class CecilModel
         foreach (var module in this.modules.Append(core).Distinct())
             foreach (var type in module.GetTypes()) Definition(type);
         foreach (var type in definitions.Keys.ToArray()) Fill(type);
+        // 填充成员时引用到的外部枚举也要具备底层字段，不能只留下身份。
+        foreach (var type in definitions.Keys.Where(t => t.IsEnum).ToArray()) Fill(type);
         Program = new ProgramModel { MetadataVersion = 0, Assemblies = [], Types = types.Values.ToArray(), Methods = methods.Values.ToArray(),
             Fields = fields.Values.ToArray(), RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [] };
         checking = true;
@@ -60,6 +62,7 @@ internal sealed partial class CecilModel
         var key = Key(t);
         if (types.TryGetValue(key, out var found))
         {
+            if (Program is not null && found.IsEnum) Fill(found);
             if (Context is not null) CheckType(found);
             return found;
         }
@@ -69,6 +72,8 @@ internal sealed partial class CecilModel
         types.Add(key, result); definitions.Add(result, t);
         result.DeclaringType = t.DeclaringType is null ? null : Definition(t.DeclaringType);
         result.GenericParameters = t.GenericParameters.Select(Generic).ToArray();
+        // 枚举的底层类型来自 value__ 字段，类型查询后即可被存储与值类别查询使用。
+        if (Program is not null && result.IsEnum) Fill(result);
         return result;
     }
     private static GenericParameterDef Generic(GenericParameter p) => new() { Name = p.Name, Position = p.Position, Attributes = (R.GenericParameterAttributes)p.Attributes };

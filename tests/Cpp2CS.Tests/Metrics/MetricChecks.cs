@@ -55,7 +55,7 @@ internal static class MetricChecks
         var savedBody = withoutBody.Body; withoutBody.Body = new MethodBody(withoutBody);
         a.True(IlMetrics.Compare(left.Method("Cases", "Return"), withoutBody, options).Status == MetricStatus.NotWritten, "空指令体视为没写出");
         withoutBody.Body = savedBody;
-        a.True(Compare("Generic") is { Status: MetricStatus.Inconclusive, ReasonKind: ComparisonReason.GenericDefinition }, "泛型定义分类");
+        a.True(Compare("Generic") is { Status: MetricStatus.Match, Instances.Count: 2 }, "泛型定义分轮对照");
         a.True(Compare("Loop") is { Status: MetricStatus.Inconclusive, ReasonKind: ComparisonReason.StepBudget }, "步数预算");
         a.True(Compare("Nan") is { Status: MetricStatus.Match, CompletedCases: > 0, NaNSkippedCases: > 0 }, "部分 NaN 跳过后仍判定");
         a.True(Compare("AllNan") is { Status: MetricStatus.Inconclusive, ReasonKind: ComparisonReason.NaN, CompletedCases: 0, NaNSkippedCases: 32 }, "全 NaN");

@@ -12,7 +12,11 @@ public sealed record MethodMetric(string Identity, MetricStatus Status, Comparis
     string? Difference, int? Seed, int CompletedCases, int NaNSkippedCases, CoverageResult? Coverage)
 {
     public CoverageResult? AttemptedCoverage { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyDictionary<string, InstanceMetric>? Instances { get; init; }
 }
+public sealed record InstanceMetric(bool Applicable, MetricStatus Status, ComparisonReason ReasonKind,
+    string? Difference, int? Seed, int CompletedCases, int NaNSkippedCases, CoverageResult? Coverage);
 public sealed record CountRatio(int Count, double Ratio);
 public sealed record MetricSummary(Dictionary<string, CountRatio> Statuses, Dictionary<string, int> Reasons,
     Dictionary<string, int> Coverage, int NaNAffectedMethods);
@@ -43,18 +47,31 @@ public static class IlMetrics
     public static MethodMetric Compare(MethodDefinition reference, MethodDefinition? tested, MetricOptions options) => Compare(reference, tested, options, null);
     internal static MethodMetric Compare(MethodDefinition reference, MethodDefinition? tested, MetricOptions options, Func<CecilModel>? modelFactory)
     {
-        if (!reference.HasBody || reference.Body.Instructions.Count == 0)
-            return new(Identity(reference), MetricStatus.Inconclusive, ComparisonReason.MissingBody, "参考方法没有 CIL 方法体", null, 0, 0, null);
+        var hasBody = reference.HasBody && reference.Body.Instructions.Count > 0;
+        if (!hasBody)
+            return new(Identity(reference), MetricStatus.Inconclusive, ComparisonReason.MissingBody, "参考方法没有 CIL 方法体", null, 0, 0, null)
+            { Instances = UnavailableInstances(reference, MetricStatus.Inconclusive, "参考方法没有 CIL 方法体") };
         if (tested is null || !tested.HasBody || tested.Body.Instructions.Count == 0)
-            return new(Identity(reference), MetricStatus.NotWritten, ComparisonReason.MissingBody, null, null, 0, 0, null);
+            return new(Identity(reference), MetricStatus.NotWritten, ComparisonReason.MissingBody, null, null, 0, 0, null)
+            { Instances = UnavailableInstances(reference, MetricStatus.NotWritten, null) };
         var result = CilComparison.Compare(reference, tested, options.Cases, options.FirstSeed, options.StepLimit, modelFactory);
-        return new(Identity(reference), result.Status switch
+        return new(Identity(reference), Status(result.Status), result.ReasonKind, result.Reason, result.Seed, result.CompletedCases, result.NaNSkippedCases, result.Coverage)
         {
-            CilComparisonStatus.Match => MetricStatus.Match,
-            CilComparisonStatus.Mismatch => MetricStatus.Mismatch,
-            _ => MetricStatus.Inconclusive
-        }, result.ReasonKind, result.Reason, result.Seed, result.CompletedCases, result.NaNSkippedCases, result.Coverage) { AttemptedCoverage = result.AttemptedCoverage };
+            AttemptedCoverage = result.AttemptedCoverage,
+            Instances = result.Instances?.ToDictionary(p => p.Key, p => new InstanceMetric(p.Value.Applicable,
+                Status(p.Value.Result.Status), p.Value.Result.ReasonKind, p.Value.Result.Reason, p.Value.Result.Seed,
+                p.Value.Result.CompletedCases, p.Value.Result.NaNSkippedCases, p.Value.Result.Coverage))
+        };
     }
+    private static MetricStatus Status(CilComparisonStatus status) => status switch
+    {
+        CilComparisonStatus.Match => MetricStatus.Match,
+        CilComparisonStatus.Mismatch => MetricStatus.Mismatch,
+        _ => MetricStatus.Inconclusive
+    };
+    private static IReadOnlyDictionary<string, InstanceMetric>? UnavailableInstances(MethodDefinition method, MetricStatus status, string? detail) =>
+        !CilComparison.IsGenericEntry(method) ? null : new[] { ("ref", false), ("value", true) }.ToDictionary(i => i.Item1,
+            i => new InstanceMetric(CilComparison.Applicable(method, i.Item2), status, ComparisonReason.MissingBody, detail, null, 0, 0, null));
     public static MetricReport Compare(ModuleDefinition reference, ModuleDefinition tested, IEnumerable<MethodDefinition> methods, MetricOptions options)
     {
         var index = tested.GetTypes().SelectMany(t => t.Methods).ToDictionary(Identity, StringComparer.Ordinal);
