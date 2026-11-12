@@ -13,7 +13,8 @@ internal sealed record Indirect(Term Target) : Transfer;
 internal sealed record Finished(Terminator End) : Transfer;
 
 internal sealed class Emission(ulong address, TermTable terms, ImmutableArray<Register> registers,
-    RegisterConvention convention, IFlowFacts facts, IExceptionModel? exceptionModel = null, bool captureUnwind = false) : IEmitter, IOrderedMemoryEmitter
+    RegisterConvention convention, IFlowFacts facts, IExceptionModel? exceptionModel = null, bool captureUnwind = false,
+    Func<CallTarget, CallTargetResolution>? resolveCallTarget = null) : IEmitter, IOrderedMemoryEmitter
 {
     internal Dictionary<Register, Term> State { get; } = [];
     internal List<Statement> Statements { get; } = [];
@@ -78,6 +79,12 @@ internal sealed class Emission(ulong address, TermTable terms, ImmutableArray<Re
     public void Call(CallTarget target)
     {
         Open();
+        if (resolveCallTarget is not null)
+        {
+            var resolution = resolveCallTarget(target);
+            if (resolution.Failure is { } failure) { Fail(failure); return; }
+            target = resolution.Target ?? throw new InvalidOperationException("调用目标解析未提供目标或失败原因。");
+        }
         if (exceptionModel is not null && (exceptionModel.IsResumeUnwind(target) || facts.ResumesUnwind(target)))
         {
             End = new Finished(new ResumeUnwind(exceptionModel.ResumeException(this)));

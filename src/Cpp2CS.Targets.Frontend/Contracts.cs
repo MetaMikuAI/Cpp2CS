@@ -31,6 +31,13 @@ public interface IInstructionSet
 }
 public sealed record Instruction(int Length, Action<IEmitter> Emit);
 public sealed record DecodeResult(Instruction? Instruction, Reason? Failure);
+public sealed record CallTargetResolution(CallTarget? Target, Reason? Failure);
+/// <summary>链接器变换的逆向取指与调用入口归一；不改变映像中的函数范围。</summary>
+public interface IInstructionFlowFacts
+{
+    DecodeResult DecodeForFlow(ulong address, Cpp2CS.Native.Images.FunctionRange range);
+    CallTargetResolution ResolveCallTarget(CallTarget target);
+}
 public sealed record IndirectCase(BigInteger Value, ulong Target);
 /// <summary>解析器持有映像，须证明映射或尾调用与目标项等价。</summary>
 public abstract record IndirectResolution

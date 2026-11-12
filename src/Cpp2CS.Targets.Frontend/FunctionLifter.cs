@@ -43,6 +43,7 @@ public static class FunctionLifter
         private readonly Dictionary<(ulong Source, ulong Target), Draft> tails = [];
         private readonly Dictionary<ulong, IndirectResolution> resolutions = [];
         private ulong syntheticKey = ulong.MaxValue;
+        private LiftFailure? callFailure;
         private LiftResult Hole(ulong address, string code, string message) => new(null, new(address, new(code, message)));
         private bool Inside(ulong address) => address >= range.Start && address - range.Start < range.Length;
         internal LiftResult Run()
@@ -127,6 +128,7 @@ public static class FunctionLifter
                     block.End = transfer is Indirect && resolutions.TryGetValue(node.Address, out var known) && known is IndirectTable knownTable
                         ? Lower(new TableTransfer(knownTable), node.Address) : Lower(transfer, node.Address);
                 }
+                if (callFailure is not null) return new(null, callFailure);
                 var byIdentity = drafts.Values.ToDictionary(b => b.Identity);
                 foreach (var block in drafts.Values)
                     foreach (var target in BlockTargets(block).Distinct())
@@ -171,6 +173,7 @@ public static class FunctionLifter
                         default: throw new InvalidOperationException("未支持的间接解析结果。");
                     }
                 }
+                if (callFailure is not null) return new(null, callFailure);
                 foreach (var block in drafts.Values) block.Predecessors.Clear();
                 byIdentity = drafts.Values.ToDictionary(b => b.Identity);
                 foreach (var block in drafts.Values)
@@ -250,7 +253,7 @@ public static class FunctionLifter
                 pending.Remove(address);
                 if (nodes.ContainsKey(address)) continue;
                 var emitter = NewEmission(address);
-                var decoded = isa.Decode(address);
+                var decoded = isa is IInstructionFlowFacts flow ? flow.DecodeForFlow(address, range) : isa.Decode(address);
                 if (decoded.Instruction is not { } instruction)
                     return new(null, new(address, decoded.Failure ?? new("decode", "解码器未提供指令或失败原因。")));
                 var length = instruction.Length;
@@ -277,11 +280,13 @@ public static class FunctionLifter
             return null;
         }
         private Emission NewEmission(ulong address) => new(address, terms, isa.Registers, convention, facts,
-            exceptions?.ExceptionModel, RegionAt(address) is not null);
+            exceptions?.ExceptionModel, RegionAt(address) is not null,
+            isa is IInstructionFlowFacts flow ? flow.ResolveCallTarget : null);
         private static IEnumerable<BlockIdentity> BlockTargets(Draft block) => Targets(block.End)
             .Concat(block.Statements.OfType<Call>().Where(c => c.Unwind is not null).Select(c => c.Unwind!));
         private void Append(Draft block, Emission emission, TermRewrite map, ulong address)
         {
+            if (emission.Failure is { } failure) callFailure ??= new(address, failure);
             foreach (var statement in emission.Statements)
             {
                 var mapped = map.Statement(statement);

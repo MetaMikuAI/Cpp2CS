@@ -7,7 +7,7 @@ using Cpp2CS.Native.Terms;
 
 namespace Cpp2CS.Targets.Frontend;
 
-/// <summary>仅供不返回证明使用；不改变正常解码和提升。</summary>
+/// <summary>不返回分析所需的扩展；调用入口归一与正常前端共用同一实现。</summary>
 public interface INoReturnInstructionSet
 {
     bool IsStraightLineFailure(Reason reason);
@@ -246,7 +246,7 @@ public static class NoReturnAnalysis
             }
             (ProbeNode Node, ulong? Next) ProbeInstruction(ulong pc)
             {
-                var decoded = isa.Decode(pc);
+                var decoded = isa is IInstructionFlowFacts flow ? flow.DecodeForFlow(pc, range) : isa.Decode(pc);
                 if (decoded.Instruction is not { Length: > 0 } instruction || (ulong)instruction.Length > range.Length - (pc - range.Start))
                     return (new(true, Array.Empty<ulong>(), Array.Empty<Dependency>()), null);
                 List<Dependency>? dependencies = null;
