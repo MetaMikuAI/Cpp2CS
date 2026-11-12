@@ -92,6 +92,20 @@ public sealed partial class Arm64InstructionSet
                 Flags(FloatFlags(a, ReadV(M, width)).Select((f, i) => Choose(condition, f, K(B(3 - i), 1))).ToArray()); return true;
             }
             if (Is(0xff200c00, 0x1e200c00)) { WriteV(D, Choose(Condition(B(12, 4)), a, ReadV(M, width))); return true; }
+            if (Is(0x7f200000, 0x1e000000))
+            {
+                int opcode = B(16, 3), rounding = B(19, 2), scale = B(10, 6);
+                if (opcode != 0 || rounding != 3 || (Width == 32 && scale < 32))
+                    Hole("floating", $"浮点转定点：sf={B(31)} type={type} rmode={rounding} opcode={opcode} scale={scale}");
+                else
+                {
+                    int fracbits = 64 - scale, fraction = width == 32 ? 23 : 52, bias = width == 32 ? 127 : 1023;
+                    // 乘以精确的二次幂后沿用饱和转整数；浮点溢出仍选择同一饱和值。
+                    var scaled = Op(FloatMultiply, a, K((BigInteger)(bias + fracbits) << fraction, width));
+                    WriteX(D, FloatInteger(scaled, Width, false));
+                }
+                return true;
+            }
             if (Is(0x7f20fc00, 0x1e200000))
             {
                 int opcode = B(16, 3), rounding = B(19, 2);

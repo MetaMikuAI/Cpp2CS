@@ -13,7 +13,7 @@ namespace Cpp2CS.Tests;
 internal static class Arm64CorpusChecks
 {
     public const string Command = "arm64-corpus";
-    private sealed record Row(ulong Address, ulong Length, string? Failure, ulong? FailureAddress);
+    private sealed record Row(ulong Address, ulong Length, string? Failure, ulong? FailureAddress, string? Message);
     public static int Run()
     {
         var corpus = Environment.GetEnvironmentVariable("CPP2CS_CORPUS");
@@ -39,7 +39,7 @@ internal static class Arm64CorpusChecks
                 var result = FunctionLifter.Lift(isa, Arm64Registers.Convention, facts, range, range.Start);
                 checks.True((result.Function is null) != (result.Failure is null), "函数必须是完整产物或带原因的洞");
                 if (result.Function is { } function) checks.True(ExitChecker.Check(function).IsValid, "提升成功的函数通过出口检查");
-                rows.Add(new(range.Start, range.Length, result.Failure?.Reason.Code, result.Failure?.Address));
+                rows.Add(new(range.Start, range.Length, result.Failure?.Reason.Code, result.Failure?.Address, result.Failure?.Reason.Message));
                 if (rows.Count % 2000 == 0) Console.WriteLine($"提升进度 {run + 1}: {rows.Count}/{image.Functions.Length}");
             }
             watch.Stop();
@@ -95,8 +95,12 @@ internal static class Arm64CorpusChecks
         }
         // 外部助记符报告器只接收编码和类别，不携带业务名称或地址。
         string? output = Environment.GetEnvironmentVariable("CPP2CS_ARM64_HISTOGRAM");
-        if (!string.IsNullOrEmpty(output)) File.WriteAllText(output, JsonSerializer.Serialize(unsupported.OrderBy(p => p.Key.Category, StringComparer.Ordinal).ThenBy(p => p.Key.Word)
-            .Select(p => new { category = p.Key.Category, word = p.Key.Word, count = p.Value })));
+        if (!string.IsNullOrEmpty(output))
+        {
+            File.WriteAllText(output, JsonSerializer.Serialize(unsupported.OrderBy(p => p.Key.Category, StringComparer.Ordinal).ThenBy(p => p.Key.Word)
+                .Select(p => new { category = p.Key.Category, word = p.Key.Word, count = p.Value })));
+            File.WriteAllText(Path.ChangeExtension(output, "functions.local.json"), JsonSerializer.Serialize(previous));
+        }
         Console.WriteLine("汇总 SHA256=" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(previous))));
         return checks.Finish("ARM64 全语料");
     }

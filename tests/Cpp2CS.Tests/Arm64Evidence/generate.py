@@ -21,7 +21,7 @@ Q = [getattr(reg, f'UC_ARM64_REG_Q{i}') for i in range(32)]
 BOUNDARY = [0, MASK, 1 << 63, (1 << 63) - 1, 1, 31, 32, 63, 64, 65, 0x80000000, 0x7fffffff]
 CASES = []
 
-def instruction(group, word, expected, index, memory=False, branch=False, divide=False, fp=0, result=0, lanes=1, low=0):
+def instruction(group, word, expected, index, memory=False, branch=False, divide=False, fp=0, result=0, lanes=1, low=0, packed=False, integer=0):
     encoded = struct.pack('<I', word)
     decoded = list(CS.disasm(encoded, PC))
     if len(decoded) != 1 or decoded[0].mnemonic not in expected.split():
@@ -54,6 +54,15 @@ def instruction(group, word, expected, index, memory=False, branch=False, divide
         if index < 12:
             u.reg_write(X[(word >> 5) & 31], a)
             u.reg_write(X[(word >> 16) & 31], b)
+    if integer:
+        # 有符号边界、无符号高位与浮点有效位宽边界上的平局。
+        precision = 24 if integer == 32 else 53
+        values = [0, (1 << integer)-1, 1 << (integer-1), (1 << (integer-1))-1,
+                  1, (1 << precision)+1, (1 << precision)+3]
+        for j, r in enumerate(Q):
+            u.reg_write(r, sum(values[(index+j+lane) % len(values)] << (lane*integer) for lane in range(128 // integer)))
+        u.reg_write(reg.UC_ARM64_REG_FPCR, 0)
+        u.reg_write(reg.UC_ARM64_REG_FPSR, 0)
     if fp:
         import math
         values = [0.0, -0.0, 1.0, -1.0, math.inf, -math.inf, math.nan,
@@ -66,7 +75,11 @@ def instruction(group, word, expected, index, memory=False, branch=False, divide
                   0x00800000 if fp == 32 else 0x0010000000000000]
         for j, r in enumerate(Q):
             bits = edges[(index + j) % len(edges)] if index < len(edges) * 2 else state_random.getrandbits(fp)
-            u.reg_write(r, (state_random.getrandbits(128 - fp) << fp) | bits)
+            if packed:
+                bits = sum(edges[(index + j + lane) % len(edges)] << (lane * fp) for lane in range(128 // fp))
+                u.reg_write(r, bits)
+            else:
+                u.reg_write(r, (state_random.getrandbits(128 - fp) << fp) | bits)
         u.reg_write(reg.UC_ARM64_REG_FPCR, 0)
         u.reg_write(reg.UC_ARM64_REG_FPSR, 0)
     def snapshot():
@@ -154,6 +167,61 @@ def floating_cases():
                 for unsigned in (0, 1):
                     bits = 8 << size
                     instruction('vector-widen', 0x0f00a420 | (q << 30) | (unsigned << 29) | ((bits + i % bits) << 16), 'sshll sshll2 ushll ushll2 sxtl sxtl2 uxtl uxtl2', i)
+
+def vector_cases():
+    # Arm 编码类：二寄存器杂项、三操作数同型、按元素、提取、归约、单结构访存。
+    for i in range(12):
+        for q, sz in ((0, 0), (1, 0), (1, 1)):
+            bits = 32 << sz
+            lanes = (64 << q) // bits
+            for u in (0, 1):
+                instruction('vector-integer-float', 0x0e21d820 | (q << 30) | (u << 29) | (sz << 22),
+                            'scvtf ucvtf', i, result=bits, lanes=lanes, integer=bits)
+            instruction('vector-absolute', 0x0ea0f820 | (q << 30) | (sz << 22), 'fabs', i, fp=bits, packed=True)
+            for u, size, opcode, name in ((0, sz, 0x1a, 'fadd'), (0, sz+2, 0x1a, 'fsub'),
+                                          (1, sz, 0x1b, 'fmul'), (1, sz, 0x1f, 'fdiv'), (1, sz+2, 0x1a, 'fabd')):
+                instruction('vector-float-binary', 0x0e220420 | (q << 30) | (u << 29) | (size << 22) | (opcode << 11),
+                            name, i, fp=bits, result=bits, lanes=lanes, packed=True)
+        for sz in (0, 1):
+            bits = 32 << sz
+            for u in (0, 1):
+                instruction('vector-scalar-integer-float', 0x5e21d820 | (u << 29) | (sz << 22), 'scvtf ucvtf', i, result=bits, integer=bits)
+            instruction('vector-scalar-absolute-difference', 0x7ea2d420 | (sz << 22), 'fabd', i, fp=bits, result=bits, packed=True)
+        for scalar, q, size in ((0, 0, 2), (0, 1, 2), (0, 1, 3), (1, 1, 2), (1, 1, 3)):
+            bits = 32 << (size & 1)
+            for lane in range(128 // bits):
+                h, l = (lane >> 1, lane & 1) if bits == 32 else (lane, 0)
+                instruction('vector-float-element', 0x0f129020 | (scalar << 28) | (q << 30) | (size << 22) | (h << 11) | (l << 21),
+                            'fmul', i, fp=bits, result=bits, lanes=1 if scalar else (64 << q) // bits, packed=True)
+        for q in (0, 1):
+            for size in range(3):
+                instruction('vector-reverse', 0x0e200820 | (q << 30) | (size << 22), 'rev64', i)
+            for offset in (0, (8 << q)-1):
+                instruction('vector-concatenate-extract', 0x2e020020 | (q << 30) | (offset << 11), 'ext', i)
+            for size in range(4):
+                if size == 3 and q == 0: continue
+                for u in (0, 1):
+                    instruction('vector-integer-binary', 0x0e228420 | (q << 30) | (u << 29) | (size << 22), 'add sub', i)
+                if size == 3:
+                    instruction('vector-integer-binary', 0x4ee23420, 'cmgt', i)
+                    continue
+                for opcode, name in ((0x13, 'mul'), (0xc, 'smax'), (0xd, 'smin'), (0x6, 'cmgt')):
+                    instruction('vector-integer-binary', 0x0e220420 | (q << 30) | (size << 22) | (opcode << 11), name, i)
+                if size != 2 or q:
+                    instruction('vector-integer-reduction', 0x0e31b820 | (q << 30) | (size << 22), 'addv', i)
+            for scale in range(4):
+                lane = i % (8 >> scale)
+                opcode, sf, size = ((0, lane >> 2, lane & 3) if scale == 0 else
+                                    (2, lane >> 1, (lane & 1) << 1) if scale == 1 else
+                                    (4, lane, 0) if scale == 2 else (4, 0, 1))
+                for load in (0, 1):
+                    for post, m in ((0, 0), (1, 31), (1, 2)):
+                        instruction('vector-lane-memory', 0x0d000020 | (q << 30) | (post << 23) | (load << 22) | (m << 16) | (opcode << 13) | (sf << 12) | (size << 10),
+                                    'ld1 st1', i, memory=True)
+                for post, m in ((0, 0), (1, 31), (1, 2)):
+                    instruction('vector-replicate-memory', 0x0d40c020 | (q << 30) | (post << 23) | (m << 16) | (scale << 10), 'ld1r', i, memory=True)
+        for sf, typ, scale in ((0, 0, 54), (0, 1, 32), (1, 0, 0), (1, 1, 63)):
+            instruction('float-fixed-integer', 0x1e180020 | (sf << 31) | (typ << 22) | (scale << 10), 'fcvtzs', i, fp=32 << typ)
 
 def main():
     for i in range(24):
@@ -255,6 +323,7 @@ def main():
             for subtract in (0, 1):
                 instruction('compare-matrix', 0xba420025 | (subtract << 30) | (condition << 12), 'ccmp ccmn', flags)
     floating_cases()
+    vector_cases()
     document = dict(schema=1, generator_sha256=hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
                     capstone=capstone.__version__, unicorn=unicorn.__version__, python=sys.version.split()[0], zlib=zlib.ZLIB_VERSION, cases=CASES)
     payload = json.dumps(document, sort_keys=True, separators=(',', ':')).encode()

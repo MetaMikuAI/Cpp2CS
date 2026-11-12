@@ -46,7 +46,7 @@ public sealed partial class Arm64InstructionSet(IImage image, bool orderedMemory
         private void WriteV(int index, Term value) => e.Write(V[index], Extend(value, 128));
         private Term Shift(Term value, int type, Term amount) => Op(type switch { 0 => ShiftLeft, 1 => LogicalShiftRight, 2 => ArithmeticShiftRight, _ => RotateRight }, value, amount);
         private Term Shift(Term value, int type, int amount) => amount == 0 ? value : Shift(value, type, K(amount, value.Width));
-        private void Hole(string category = "unallocated")
+        private void Hole(string category = "unallocated", string? detail = null)
         {
             var description = category switch
             {
@@ -56,7 +56,7 @@ public sealed partial class Arm64InstructionSet(IImage image, bool orderedMemory
                 "integer-extension" => "整数扩展", "constrained-unpredictable" => "受约束的不可预测行为",
                 _ => "未分配或尚未实现的编码"
             };
-            e.Fail(new("arm64." + category, $"{description}：0x{word:x8}"));
+            e.Fail(new("arm64." + category, $"{detail ?? description}：0x{word:x8}"));
         }
         private static long Signed(int value, int bits) => ((long)value << (64 - bits)) >> (64 - bits);
         private ulong Relative(int low, int bits, int scale = 2) => unchecked(pc + (ulong)(Signed(B(low, bits), bits) << scale));
@@ -169,9 +169,14 @@ public sealed partial class Arm64InstructionSet(IImage image, bool orderedMemory
             if (Is(0x1f000000, 0x1b000000)) { MultiplySource(); return; }
             if (BranchSystem()) return;
             if (Memory()) return;
-            if (VectorMove() || Floating()) return;
-            if (Is(0x0e000000, 0x0c000000)) { Hole("vector"); return; }
-            if (Is(0x0e000000, 0x0e000000)) { Hole(Bit(28) && !Bit(30) ? "floating" : "vector"); return; }
+            if (VectorMove() || Vector() || Floating()) return;
+            if (Is(0x0e000000, 0x0c000000)) { VectorHole("向量结构访存", $"Q={B(30)} L={B(22)} opcode=0x{B(12, 4):x}"); return; }
+            if (Is(0x0e000000, 0x0e000000))
+            {
+                if (Bit(28) && !Bit(30)) Hole("floating");
+                else VectorHole("向量未支持编码类", $"op0=0x{B(28, 4):x} op1=0x{B(17, 8):x} op2=0x{B(10, 6):x}");
+                return;
+            }
             Hole();
         }
         private void LogicalImmediate()

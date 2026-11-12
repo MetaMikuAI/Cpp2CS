@@ -20,7 +20,9 @@ python tests/Cpp2CS.Tests/Arm64Evidence/histogram.py "$CPP2CS_ARM64_HISTOGRAM"
 
 指令数按映像给出的函数范围逐个计数，函数范围重叠时重复计入。耗时只包含提升与出口复核，不含载入、独立编码普查或助记符统计。仅含单一编码缺口的函数数量是后续工作的上界，补齐指令后仍可能遇到间接跳转、栈恢复或异常边的缺口。
 
-边界：取证是有限的随机与边界样本，不能替代完整架构证明。其余向量运算、半精度、固定小数点转换、平局远离零取整、原子与独占访问、屏障、系统寄存器和异常边不在本检查的语义覆盖内。指针认证提示按任务规定当作空操作；本证据不验证启用指针认证后的认证效果。
+设置 `CPP2CS_ARM64_HISTOGRAM` 时，还会在相邻的 `*.functions.local.json` 中写出逐函数结果、洞地址与直接原因，供前后结果按函数入口对齐。
+
+边界：取证是有限的随机与边界样本，不能替代完整架构证明。未列出的向量运算、半精度、其他固定小数点转换、平局远离零取整、原子与独占访问、屏障、系统寄存器和异常边不在本检查的语义覆盖内。指针认证提示按任务规定当作空操作；本证据不验证启用指针认证后的认证效果。
 
 ## 浮点与向量语义
 
@@ -28,4 +30,8 @@ python tests/Cpp2CS.Tests/Arm64Evidence/histogram.py "$CPP2CS_ARM64_HISTOGRAM"
 
 依据为 [Arm《Instruction Set Reference Guide》](https://documentation-service.arm.com/static/6245c734b059dc5ff9a8bdab)的 A64 浮点和 Advanced SIMD 指令定义，以及独立模拟器的单步结果。`FMINNM/FMAXNM` 对信号 NaN 显式传播 NaN；核心 `minimumNumber/maximumNumber` 单独处理静默 NaN 的数值选择。浮点转整数先取整，再用二次幂边界显式选择饱和值，NaN 返回零，未选中的核心越界转换不求值。
 
-支持单/双精度标量搬运、立即数、算术、融合乘加减、比较、条件比较与选择、格式转换、整数转换、四种取整及最小最大。平局远离零的 `FRINTA/FCVTAS/FCVTAU` 缺少直接对应的核心运算，保留浮点洞。向量支持 ORR/MOV、修改立即数、DUP、INS、UMOV/SMOV、XTN、SSHLL/USHLL 及单/双精度 FCVTL/FCVTN；其他编码保留向量洞。
+支持单/双精度标量搬运、立即数、算术、融合乘加减、比较、条件比较与选择、格式转换、整数转换、四种取整及最小最大。平局远离零的 `FRINTA/FCVTAS/FCVTAU` 缺少直接对应的核心运算，保留浮点洞。`FCVTZS` 定点形式用精确二次幂缩放与饱和转换表达。
+
+向量支持 ORR/MOV、修改立即数、DUP、INS、UMOV/SMOV、XTN、SSHLL/USHLL、单/双精度 FCVTL/FCVTN、SCVTF/UCVTF、FABS、FADD/FSUB/FMUL/FDIV、FABD、FMUL 按元素、REV64、EXT、整数 ADD/SUB/MUL/SMAX/SMIN/CMGT 和 ADDV。单元素 LD1/ST1 与 LD1R 检查完整目的寄存器和内存效果，包含立即数与寄存器后变址。浮点向量的每个输入车道都包含边界值；按元素乘法覆盖全部合法单/双精度下标及高编号源寄存器。标量形式清零其余位，`Q=0` 形式清零高 64 位；单元素 LD1 保留其余位。
+
+编码与伪代码另按 Arm《A-profile A64 Instruction Set Architecture》的 `Advanced SIMD two-register miscellaneous`、`Advanced SIMD three same`、`Advanced SIMD vector/scalar x indexed element`、`Advanced SIMD extract`、`Advanced SIMD across lanes` 和 `Advanced SIMD load/store single structure` 核对。SCVTF/UCVTF 使用 `FixedToFP`，FABD 使用 `FPSub` 与 `FPAbs`，向量算术使用 `FPAdd/FPSub/FPMul/FPDiv`，定点 FCVTZS 使用 `FPToFixed`。`arm64-vector` 对代表编码核对符号项和清零位，并检查同类未支持、保留编码仍报洞且不产生部分效果。

@@ -127,7 +127,7 @@ internal static class Arm64Checks
     {
         foreach (var (word, code) in new (uint, string)[] { (0x1ee02820, "floating"), (0x1e264020, "floating"), (0x1e240020, "floating"), (0x0e217820, "vector"),
             (0xd53b4400, "system-register"), (0xd53b4420, "system-register"), (0xd51b4420, "system-register"), (0xd51b4400, "system-register"),
-            (0xd5033bbf, "barrier"), (0xd5033f5f, "exclusive"), (0x4c408120, "vector"), (0x4d40c920, "vector"), (0x4d40cd20, "vector"), (0x885f7c00, "exclusive"), (0xb8200000, "atomic"), (0x00000000, "unallocated") })
+            (0xd5033bbf, "barrier"), (0xd5033f5f, "exclusive"), (0x4c408120, "vector"), (0x4d40d920, "vector"), (0x4d40dd20, "vector"), (0x885f7c00, "exclusive"), (0xb8200000, "atomic"), (0x00000000, "unallocated") })
         {
             var emitter = new Concrete();
             Arm64InstructionSet.DecodeWord(Concrete.Pc, word).Instruction!.Emit(emitter);
