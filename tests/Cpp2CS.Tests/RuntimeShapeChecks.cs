@@ -33,14 +33,14 @@ internal static class RuntimeShapeChecks
         var catalog = RuntimeFunctionCatalog.Select("2022.3.62f2", "aarch64-linux-android", "LP64");
         var function = catalog.Functions.First(f => f.Recognition.Symbol);
         var callee = RuntimeReferenceShape.Create(Body(300, 9, 400), t => t, new InputMemoryImage())!;
-        var data = new RuntimeShapeCatalog(1, catalog.UnityVersion, catalog.Triple, catalog.DataModel,
+        var data = new RuntimeShapeCatalog(2, catalog.UnityVersion, catalog.Triple, catalog.DataModel,
             [new(function.MangledName, 8, reference.Text, [new(16, callee.Text)])]);
         var image = new InputMemoryImage { Functions = [new(32, 8, FunctionEvidence.UnwindTable), new(64, 16, FunctionEvidence.UnwindTable)] };
         NativeFunction? Lift(ulong entry) => entry == 64 ? Body(300, 9, 400) : Body(500, 7, 64);
         checks.True(RuntimeShapeMatcher.Locate(image, catalog, data, Lift, t => t).Count == 1, "唯一形状与调用关系一致才定位");
         checks.True(RuntimeShapeMatcher.Locate(image, catalog, data, e => Body(500, 7, 64), t => t).Count == 0, "被调形状矛盾拒绝定位");
         image = new InputMemoryImage { Functions = [new(32, 8, FunctionEvidence.UnwindTable), new(48, 8, FunctionEvidence.UnwindTable), new(64, 16, FunctionEvidence.UnwindTable)] };
-        checks.True(RuntimeShapeMatcher.Locate(image, catalog, data, Lift, t => t).Count == 0, "两个同形入口不任取一个");
+        checks.True(RuntimeShapeMatcher.Locate(image, catalog, data, Lift, t => t).Count == 2, "同形且被调地址逐项相同的两个入口全部定位");
         image = new InputMemoryImage { Functions = [new(32, 8, FunctionEvidence.UnwindTable), new(64, 16, FunctionEvidence.UnwindTable)],
             TryRegions = [new(66, 4, 100, [])] };
         checks.True(RuntimeShapeMatcher.Locate(image, catalog, data, Lift, t => t).Count == 0, "被调函数有未接入 IR 的异常区域时拒绝定位");
@@ -111,6 +111,54 @@ internal static class RuntimeShapeChecks
         image = new InputMemoryImage { Functions = [new(32, 4, FunctionEvidence.UnwindTable)] };
         checks.True(RuntimeShapeMatcher.Locate(image, catalog, data, _ => plain, t => t).Count == 0,
             "没有调用印证的叶子即使形状唯一，也不猜目录身份");
+        // 导出身份本身不要求提升末端目标；每条边的来源节点则必须逐项复核。
+        data = data with { Entries = [new(function.MangledName, 4, null, []) { Anchor = "export:entry" }] };
+        image = new InputMemoryImage { Exports = [new("entry", new PointerTarget.Internal(32))],
+            Functions = [new(32, 4, FunctionEvidence.UnwindTable)], TryRegions = [new(32, 4, 128, [])] };
+        var lifts = 0;
+        var direct = RuntimeShapeMatcher.Locate(image, catalog, data, _ => { lifts++; return null; }, t => t);
+        checks.True(direct.Count == 1 && direct[0].Entry == 32 && direct[0].Location.Evidence == RuntimeLocationEvidence.ExportAnchor && lifts == 0,
+            "export:名字 直接定位，目标有异常区域且不能提升也不调用提升器");
+        var sourceShape = RuntimeReferenceShape.Create(Body(500, 7, 64), t => t, image)!;
+        data = data with { Entries = [new(function.MangledName, 16, null, []) { Anchor = "export:entry>0" }],
+            AnchorShapes = [new("export:entry", 8, sourceShape.Text)] };
+        image = new InputMemoryImage { Exports = [new("entry", new PointerTarget.Internal(32))],
+            Functions = [new(32, 8, FunctionEvidence.UnwindTable), new(64, 16, FunctionEvidence.UnwindTable)] };
+        lifts = 0;
+        var followed = RuntimeShapeMatcher.Locate(image, catalog, data, e => { lifts++; return e == 32 ? Body(500, 7, 64) : null; }, t => t);
+        checks.True(followed.Count == 1 && followed[0].Entry == 64 && lifts == 1, "export:名字>k 按直接调用序号定位且不提升末端");
+        checks.True(RuntimeShapeMatcher.Locate(image, catalog, data, _ => Body(500, 8, 64), t => t).Count == 0,
+            "导出来源函数形状不同则锚点失败");
+        checks.True(RuntimeShapeMatcher.Locate(image, catalog, data, _ => null, t => t).Count == 0, "来源节点提升失败则锚点失败");
+        var resolver = new RuntimeExportAnchorResolver(new InputMemoryImage(), data, _ => null);
+        checks.True(resolver.Resolve("export:entry", out _) is null, "缺少导出则锚点失败");
+        data = data with { Entries = [new(function.MangledName, 24, null, []) { Anchor = "export:entry>0>0" }],
+            AnchorShapes = [new("export:entry", 8, sourceShape.Text), new("export:entry>0", 16, callee.Text)] };
+        image = new InputMemoryImage { Exports = [new("entry", new PointerTarget.Internal(32))],
+            Functions = [new(32, 8, FunctionEvidence.UnwindTable), new(64, 16, FunctionEvidence.UnwindTable), new(128, 24, FunctionEvidence.UnwindTable)] };
+        var multi = RuntimeShapeMatcher.Locate(image, catalog, data, e => e switch
+            { 32 => Body(500, 7, 64), 64 => Body(300, 9, 128), 128 => Body(600, 11, 256), _ => null }, t => t);
+        checks.True(multi.Count == 1 && multi[0].Entry == 128, "导出加两层调用路径逐层完整复核，末端不必提升");
+        data = data with { Entries = [new(function.MangledName, 8, reference.Text,
+            [new(16, callee.Text) { Anchor = "export:callee" }])], AnchorShapes = [] };
+        image = new InputMemoryImage { Exports = [new("callee", new PointerTarget.Internal(64))],
+            Functions = [new(32, 8, FunctionEvidence.UnwindTable), new(48, 8, FunctionEvidence.UnwindTable),
+                new(64, 16, FunctionEvidence.UnwindTable), new(96, 16, FunctionEvidence.UnwindTable)] };
+        NativeFunction? Wrappers(ulong e) => e switch
+            { 32 => Body(500, 7, 64), 48 => Body(500, 7, 96), _ => Body(300, 9, 128) };
+        var distinguished = RuntimeShapeMatcher.Locate(image, catalog, data, Wrappers, t => t);
+        checks.True(distinguished.Count == 1 && distinguished[0].Entry == 32, "被调锚点按身份区分两个被调形状相同的转发函数");
+        data = data with { Entries = [data.Entries[0] with { Callees = [new(16, callee.Text) { Anchor = "export:absent" }] }] };
+        var ambiguousReasons = new Dictionary<string, string>();
+        checks.True(RuntimeShapeMatcher.Locate(image, catalog, data, Wrappers, t => t, ambiguousReasons).Count == 0
+            && ambiguousReasons[function.MangledName].Contains("2 个入口", StringComparison.Ordinal), "锚点失败回退形状；被调地址不同的候选仍然歧义");
+        image = new InputMemoryImage { Exports = [new("entry", new PointerTarget.Internal(48))],
+            Functions = [new(32, 8, FunctionEvidence.UnwindTable), new(48, 8, FunctionEvidence.UnwindTable), new(64, 16, FunctionEvidence.UnwindTable)] };
+        data = data with { Entries = [data.Entries[0] with { Anchor = "export:entry", Callees = [new(16, callee.Text)] }] };
+        var conflictReasons = new Dictionary<string, string>();
+        checks.True(RuntimeShapeMatcher.Locate(image, catalog, data,
+            e => e == 48 ? Body(500, 8, 64) : Lift(e), t => t, conflictReasons).Count == 0
+            && conflictReasons[function.MangledName].Contains("导出锚点与形状", StringComparison.Ordinal), "自己的锚点和形状结果矛盾时两者都不采纳");
         return checks.Finish("运行时参考形状");
     }
 }

@@ -6,8 +6,11 @@ using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.RuntimeFunctions;
 
-public enum RuntimeLocationEvidence { Import, Symbol, ReferenceShape }
-public sealed record RuntimeFunctionLocation(RuntimeFunction Function, RuntimeLocationEvidence Evidence, string Source);
+public enum RuntimeLocationEvidence { Import, Symbol, ReferenceShape, ExportAnchor }
+public sealed record RuntimeFunctionLocation(RuntimeFunction Function, RuntimeLocationEvidence Evidence, string Source)
+{
+    public bool HasEquivalentEntries { get; init; }
+}
 public sealed record RuntimeLocationMissing(RuntimeFunction Function, string Reason);
 /// <summary>保留同址的全部目录身份；操作相同时按修饰名排序取首项，否则不定位并记录原因。</summary>
 public sealed record RuntimeEntryLocation(ImmutableArray<RuntimeFunctionLocation> Candidates, RuntimeFunctionLocation? Selected, string? Reason);

@@ -43,7 +43,7 @@ public static class RuntimeShapeGeneration
         RuntimeReferenceShape? Shape(ulong entry)
         {
             if (cache.TryGetValue(entry, out var found)) return found;
-            if (!ranges.TryGetValue(entry, out var range)) { failures[entry] = "没有函数范围"; return null; }
+            if (!ranges.TryGetValue(entry, out var range)) { failures[entry] = "没有函数范围"; return cache[entry] = null; }
             if (!range.HasConsistentExtent) { failures[entry] = "函数范围证据冲突或缺失"; return cache[entry] = null; }
             if (handlers.HasHandlerInRange(range.Start, range.Length))
             { failures[entry] = "异常区域尚未接入原生 IR"; return cache[entry] = null; }
@@ -55,17 +55,44 @@ public static class RuntimeShapeGeneration
                 ? $"提升不完整：{failure.Reason.Code}" : shapeFailures.Count == 0 ? "没有完整参考形状" : string.Join("；", shapeFailures.Order(StringComparer.Ordinal));
             return cache[entry] = shape;
         }
+        // 按层、再按路径字典序遍历；每个入口只保留最短的规范路径。
+        var anchors = new Dictionary<ulong, string>();
+        var anchorShapes = new Dictionary<string, RuntimeAnchorShape>(StringComparer.Ordinal);
+        var exportedFunctions = symbols.Select(s => (s.Name, s.Offset)).ToHashSet();
+        var frontier = image.Exports.GroupBy(e => e.Name, StringComparer.Ordinal)
+            .Where(g => g.Select(e => e.Target).Distinct().Count() == 1 && g.First().Target is PointerTarget.Internal target
+                && exportedFunctions.Contains((g.Key, target.Offset)))
+            .Select(g => (Entry: ((PointerTarget.Internal)g.First().Target).Offset, Path: "export:" + g.Key)).ToList();
+        for (int depth = 0; depth <= 2; depth++)
+        {
+            var next = new List<(ulong Entry, string Path)>();
+            foreach (var (entry, path) in frontier.OrderBy(p => p.Path, StringComparer.Ordinal))
+            {
+                if (anchors.ContainsKey(entry)) continue;
+                var shape = Shape(entry);
+                // 导出起点必须可完整提升；调用末端可不提升。
+                if (depth == 0 && shape is null) continue;
+                anchors.Add(entry, path);
+                if (shape is null) continue;
+                anchorShapes.Add(path, new(path, ranges[entry].Length, shape.Text));
+                if (depth == 2) continue;
+                for (int index = 0; index < shape.Calls.Length; index++)
+                    next.Add((shape.Calls[index], path + ">" + index.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            }
+            frontier = next;
+        }
         var names = catalog.Functions.Where(f => f.Recognition.Symbol).Select(f => f.MangledName).ToHashSet(StringComparer.Ordinal);
         var calleeNames = symbols.Where(s => names.Contains(s.Name)).GroupBy(s => s.Offset)
             .ToDictionary(g => g.Key, g => g.Select(s => s.Name).Distinct().Order(StringComparer.Ordinal).ToArray());
-        RuntimeCalleeShape Reference(ulong entry, RuntimeReferenceShape shape, bool expand)
+        RuntimeCalleeShape Reference(ulong entry, RuntimeReferenceShape? shape, bool expand)
         {
-            var result = new RuntimeCalleeShape(ranges[entry].Length, shape.Text) { Functions = calleeNames.GetValueOrDefault(entry) ?? [] };
-            if (!expand || shape.Calls.Length == 0) return result;
+            var result = new RuntimeCalleeShape(ranges.GetValueOrDefault(entry)?.Length ?? 0, shape?.Text)
+            { Anchor = anchors.GetValueOrDefault(entry), Functions = calleeNames.GetValueOrDefault(entry) ?? [] };
+            if (!expand || shape is null || shape.Calls.Length == 0) return result;
             var children = shape.Calls.Select(Shape).ToArray();
-            // 只补充完整的一层；缺少子形状时不把不完整提升当作依据。
-            if (children.Any(child => child is null)) return result;
-            return result with { Callees = shape.Calls.Select((address, index) => Reference(address, children[index]!, false)).ToArray() };
+            // 只补充完整的一层；没有形状的节点必须有独立锚点凭据。
+            if (children.Where((child, index) => child is null && !anchors.ContainsKey(shape.Calls[index])).Any()) return result;
+            return result with { Callees = shape.Calls.Select((address, index) => Reference(address, children[index], false)).ToArray() };
         }
         var entries = new List<RuntimeShapeEntry>();
         var missing = new List<RuntimeShapeMissing>();
@@ -78,20 +105,43 @@ public static class RuntimeShapeGeneration
         {
             var addresses = symbols.Where(s => s.Name == function.MangledName).Select(s => s.Offset).Distinct().ToArray();
             if (addresses.Length != 1) { Missing(function, $"参考构建的独立入口数 {addresses.Length}"); continue; }
-            if (Shape(addresses[0]) is not { } shape)
-            { Missing(function, failures[addresses[0]]); continue; }
+            var address = addresses[0];
+            var anchor = anchors.GetValueOrDefault(address);
+            var shape = Shape(address);
+            string? shapeMissing = shape is null ? failures[address] : null;
             var callees = new List<RuntimeCalleeShape>();
-            foreach (var call in shape.Calls)
-            {
-                if (Shape(call) is not { } callee)
-                { Missing(function, "直接被调函数：" + failures[call]); break; }
-                callees.Add(Reference(call, callee, true));
-            }
-            if (callees.Count != shape.Calls.Length) continue;
-            entries.Add(new(function.MangledName, ranges[addresses[0]].Length, shape.Text, callees.ToArray()) { HasImportCalls = shape.HasImportCalls });
+            if (shape is not null)
+                foreach (var call in shape.Calls)
+                {
+                    var callee = Shape(call);
+                    if (callee is null && !anchors.ContainsKey(call))
+                    { shapeMissing = "直接被调函数：" + failures[call]; break; }
+                    callees.Add(Reference(call, callee, true));
+                }
+            if (shapeMissing is not null && anchor is null) { Missing(function, shapeMissing); continue; }
+            entries.Add(new(function.MangledName, ranges.GetValueOrDefault(address)?.Length ?? 0,
+                shapeMissing is null ? shape!.Text : null, shapeMissing is null ? callees.ToArray() : [])
+            { Anchor = anchor, ShapeMissing = shapeMissing, HasImportCalls = shape?.HasImportCalls ?? false });
         }
-        File.WriteAllText(output, JsonSerializer.Serialize(new RuntimeShapeCatalog(1, unityVersion, triple, dataModel,
-            entries.ToArray()) { Missing = missing.ToArray(), ReferenceImageSha256 = Hash(imagePath), ReferenceSymbolsSha256 = Hash(symbolsPath) }, RuntimeShapeCatalog.JsonOptions) + "\n");
-        Console.WriteLine($"参考形状 {entries.Count}，含直接调用关系 {entries.Count(e => e.Callees.Length > 0)}");
+        // 只保存实际引用锚点及其前缀的形状，避免写入无关的导出子图。
+        var used = new HashSet<string>(StringComparer.Ordinal);
+        void Use(string? path)
+        {
+            while (path is not null)
+            {
+                used.Add(path);
+                int separator = path.LastIndexOf('>');
+                path = separator < 0 ? null : path[..separator];
+            }
+        }
+        void UseCallee(RuntimeCalleeShape callee)
+        {
+            Use(callee.Anchor);
+            foreach (var child in callee.Callees ?? []) UseCallee(child);
+        }
+        foreach (var entry in entries) { Use(entry.Anchor); foreach (var callee in entry.Callees) UseCallee(callee); }
+        File.WriteAllText(output, JsonSerializer.Serialize(new RuntimeShapeCatalog(2, unityVersion, triple, dataModel,
+            entries.ToArray()) { AnchorShapes = anchorShapes.Values.Where(s => used.Contains(s.Path)).OrderBy(s => s.Path, StringComparer.Ordinal).ToArray(), Missing = missing.ToArray(), ReferenceImageSha256 = Hash(imagePath), ReferenceSymbolsSha256 = Hash(symbolsPath) }, RuntimeShapeCatalog.JsonOptions) + "\n");
+        Console.WriteLine($"参考条目 {entries.Count}，完整形状 {entries.Count(e => e.Shape is not null)}，自身锚点 {entries.Count(e => e.Anchor is not null)}，路径节点 {anchorShapes.Keys.Count(used.Contains)}");
     }
 }

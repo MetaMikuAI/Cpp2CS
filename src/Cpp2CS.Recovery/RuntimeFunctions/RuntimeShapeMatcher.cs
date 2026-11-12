@@ -5,10 +5,10 @@ using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.RuntimeFunctions;
 
-/// <summary>范围长度仅用于候选筛选；完整形状及全部直接被调形状均相同且入口唯一才采纳。并行时提升与归一化须可并发查询。</summary>
+/// <summary>完整形状与调用身份共同复核；同形且直接被调地址逐项相同的入口可作为同义包装。</summary>
 public static class RuntimeShapeMatcher
 {
-    private sealed record Candidate(ulong Entry, ulong[] Calls);
+    private sealed record Candidate(ulong Entry, RuntimeReferenceShape? Shape);
     public static IReadOnlyList<(ulong Entry, RuntimeFunctionLocation Location)> Locate(IImage image,
         RuntimeFunctionCatalog catalog, RuntimeShapeCatalog references, Func<ulong, NativeFunction?> lift,
         Func<CallTarget, CallTarget> normalize, IDictionary<string, string>? missingReasons = null, int jobs = 1)
@@ -16,33 +16,47 @@ public static class RuntimeShapeMatcher
         ArgumentOutOfRangeException.ThrowIfLessThan(jobs, 1);
         var handlers = new TryRegionIndex(image.TryRegions);
         var ranges = image.Functions.ToDictionary(f => f.Start);
-        var lengths = references.Entries.Select(e => e.Length).ToHashSet();
-        var byShape = references.Entries.GroupBy(e => (e.Length, e.Shape)).ToDictionary(g => g.Key, g => g.ToArray());
+        var shapeEntries = references.Entries.Where(e => e.Shape is not null).ToArray();
+        var lengths = shapeEntries.Select(e => e.Length).ToHashSet();
+        var byShape = shapeEntries.GroupBy(e => (e.Length, e.Shape)).ToDictionary(g => g.Key, g => g.ToArray());
         var candidatesByReference = references.Entries.ToDictionary(e => e, _ => new ConcurrentBag<Candidate>());
-        // 仅缓存被调摘要，避免持有全映像的项表与快照。
-        var callees = new ConcurrentDictionary<ulong, Lazy<RuntimeReferenceShape?>>();
-        RuntimeReferenceShape? Callee(ulong entry) => callees.GetOrAdd(entry, key => new(() =>
+        // 只缓存摘要，避免持有全映像的项表与快照；锚点、候选和被调复核共用缓存。
+        var summaries = new ConcurrentDictionary<ulong, Lazy<RuntimeReferenceShape?>>();
+        RuntimeReferenceShape? Shape(ulong entry) => summaries.GetOrAdd(entry, key => new(() =>
         {
             if (!ranges.TryGetValue(key, out var range) || !range.HasConsistentExtent || handlers.HasHandlerInRange(range.Start, range.Length)) return null;
             var function = lift(key);
             return function is null ? null : RuntimeReferenceShape.Create(function, normalize, image);
         })).Value;
-        bool Matches(RuntimeCalleeShape reference, ulong target, IReadOnlyDictionary<string, ulong>? unique = null)
+        var resolver = new RuntimeExportAnchorResolver(image, references, Shape);
+        var resolved = new Dictionary<string, ulong?>(StringComparer.Ordinal);
+        var anchorFailures = new Dictionary<string, string>(StringComparer.Ordinal);
+        void Resolve(string? anchor)
         {
-            if (unique is not null && reference.Functions.Any(name => unique.TryGetValue(name, out var expected) && expected != target)) return false;
-            if (!ranges.TryGetValue(target, out var range) || range.Length != reference.Length
-                || Callee(target) is not { } shape || shape.Text != reference.Shape) return false;
+            if (anchor is null || resolved.ContainsKey(anchor)) return;
+            resolved.Add(anchor, resolver.Resolve(anchor, out var reason));
+            if (reason is not null) anchorFailures.Add(anchor, reason);
+        }
+        void ResolveCallee(RuntimeCalleeShape callee)
+        {
+            Resolve(callee.Anchor);
+            foreach (var child in callee.Callees ?? []) ResolveCallee(child);
+        }
+        foreach (var entry in references.Entries) { Resolve(entry.Anchor); foreach (var callee in entry.Callees) ResolveCallee(callee); }
+        bool Matches(RuntimeCalleeShape reference, ulong target, IReadOnlyDictionary<string, HashSet<ulong>>? identities = null)
+        {
+            if (identities is not null && reference.Functions.Any(name => identities.TryGetValue(name, out var expected) && !expected.Contains(target))) return false;
+            if (reference.Anchor is { } anchor && resolved[anchor] is { } anchored) return target == anchored;
+            if (reference.Shape is null || !ranges.TryGetValue(target, out var range) || range.Length != reference.Length
+                || Shape(target) is not { } shape || shape.Text != reference.Shape) return false;
             if (reference.Callees is not { } children) return true;
             return children.Length == shape.Calls.Length
-                && children.Select((child, index) => Matches(child, shape.Calls[index], unique)).All(agrees => agrees);
+                && children.Select((child, index) => Matches(child, shape.Calls[index], identities)).All(agrees => agrees);
         }
         Parallel.ForEach(image.Functions.Where(r => lengths.Contains(r.Length)),
             new ParallelOptions { MaxDegreeOfParallelism = jobs }, range =>
         {
-            if (!range.HasConsistentExtent || handlers.HasHandlerInRange(range.Start, range.Length)) return;
-            var function = lift(range.Start);
-            var shape = function is null ? null : RuntimeReferenceShape.Create(function, normalize, image);
-            if (shape is null || !byShape.TryGetValue((range.Length, shape.Text), out var entries)) return;
+            if (Shape(range.Start) is not { } shape || !byShape.TryGetValue((range.Length, shape.Text), out var entries)) return;
             foreach (var entry in entries)
             {
                 if (entry.Callees.Length != shape.Calls.Length || entry.HasImportCalls != shape.HasImportCalls) continue;
@@ -50,32 +64,73 @@ public static class RuntimeShapeMatcher
                 bool agrees = true;
                 for (int i = 0; i < shape.Calls.Length; i++)
                     if (!Matches(entry.Callees[i], shape.Calls[i])) { agrees = false; break; }
-                if (agrees) candidatesByReference[entry].Add(new(range.Start, shape.Calls));
+                if (agrees) candidatesByReference[entry].Add(new(range.Start, shape));
             }
         });
         var matches = candidatesByReference.ToDictionary(p => p.Key, p => p.Value.OrderBy(c => c.Entry).ToList());
-        var contradictions = new HashSet<string>(StringComparer.Ordinal);
+        var contradictions = new Dictionary<string, string>(StringComparer.Ordinal);
+        bool Equivalent(List<Candidate> candidates) => candidates.Count > 0 && candidates.Skip(1).All(c =>
+            c.Shape is not null && candidates[0].Shape is { } first && c.Shape.Text == first.Text && c.Shape.Calls.SequenceEqual(first.Calls));
+        foreach (var (reference, candidates) in matches)
+        {
+            if (reference.Anchor is not { } anchor || resolved[anchor] is not { } entry) continue;
+            if (candidates.Count > 0 && (!candidates.Any(c => c.Entry == entry) || !Equivalent(candidates)))
+            {
+                contradictions[reference.Function] = "导出锚点与形状匹配入口矛盾";
+                candidates.Clear();
+            }
+            else if (candidates.Count == 0) candidates.Add(new(entry, null));
+        }
         bool changed;
         do
         {
             changed = false;
-            // 每轮使用同一份唯一入口快照，不能因枚举顺序选择冲突的一方。
-            var unique = matches.Where(p => p.Value.Count == 1).ToDictionary(p => p.Key.Function, p => p.Value[0].Entry, StringComparer.Ordinal);
+            // 每轮用同一份身份快照；同义入口的地址集合也是完整身份。
+            var identities = matches.Where(p => Equivalent(p.Value)).ToDictionary(p => p.Key.Function,
+                p => p.Value.Select(c => c.Entry).ToHashSet(), StringComparer.Ordinal);
             foreach (var (reference, candidates) in matches)
             {
-                int removed = candidates.RemoveAll(candidate => reference.Callees.Select((callee, i) => Matches(callee, candidate.Calls[i], unique))
-                    .Any(agrees => !agrees));
+                int removed = candidates.RemoveAll(candidate => candidate.Shape is { } shape
+                    && reference.Callees.Select((callee, i) => Matches(callee, shape.Calls[i], identities)).Any(agrees => !agrees));
                 if (removed == 0) continue;
-                contradictions.Add(reference.Function); changed = true;
+                if (reference.Anchor is { } anchor && resolved[anchor] is not null)
+                { candidates.Clear(); contradictions[reference.Function] = "导出锚点与目录调用身份矛盾"; }
+                else contradictions[reference.Function] = "调用关系与目录函数的唯一入口矛盾";
+                changed = true;
             }
         } while (changed);
+        IEnumerable<string> CalleeProofs(RuntimeCalleeShape callee)
+        {
+            if (callee.Anchor is { } anchor && resolved[anchor] is not null) { yield return anchor; yield break; }
+            foreach (var child in callee.Callees ?? []) foreach (var proof in CalleeProofs(child)) yield return proof;
+        }
+        var result = new List<(ulong Entry, RuntimeFunctionLocation Location)>();
         foreach (var (reference, candidates) in matches)
-            if (candidates.Count != 1 && missingReasons is not null)
-                missingReasons[reference.Function] = reference.Callees.Length == 0 && !reference.HasImportCalls
-                    ? "形状没有直接调用关系或具名导入印证" : candidates.Count == 0
-                    ? contradictions.Contains(reference.Function) ? "调用关系与目录函数的唯一入口矛盾" : "参考形状或直接调用关系未通过完整复核"
-                    : $"参考形状与调用关系匹配 {candidates.Count} 个入口，身份不唯一";
-        return matches.Where(p => p.Value.Count == 1).Select(p => (p.Value[0].Entry, new RuntimeFunctionLocation(
-            catalog.ByMangledName(p.Key.Function), RuntimeLocationEvidence.ReferenceShape, p.Key.Callees.Length == 0 ? "原生 IR 唯一形状与具名导入调用" : $"原生 IR 唯一形状与 {p.Key.Callees.Length} 个直接被调形状及补充关系"))).ToArray();
+        {
+            if (!Equivalent(candidates))
+            {
+                if (missingReasons is not null)
+                    missingReasons[reference.Function] = contradictions.GetValueOrDefault(reference.Function) ?? (candidates.Count > 1
+                        ? $"参考形状与调用关系匹配 {candidates.Count} 个入口，被调目标不同，身份不唯一"
+                        : reference.Shape is not null && reference.Callees.Length == 0 && !reference.HasImportCalls
+                        ? "形状没有直接调用关系或具名导入印证" : "参考形状或直接调用关系未通过完整复核")
+                        + (reference.Anchor is { } failed && anchorFailures.TryGetValue(failed, out var reason) ? $"；锚点 {failed} 失败：{reason}" : "");
+                continue;
+            }
+            foreach (var candidate in candidates)
+            {
+                var anchored = reference.Anchor is { } anchor && resolved[anchor] == candidate.Entry;
+                var evidence = anchored ? RuntimeLocationEvidence.ExportAnchor : RuntimeLocationEvidence.ReferenceShape;
+                var source = anchored ? reference.Anchor! : "原生 IR 完整形状与直接调用关系";
+                if (!anchored)
+                {
+                    var proofs = reference.Callees.SelectMany(CalleeProofs).Distinct(StringComparer.Ordinal).ToArray();
+                    if (proofs.Length > 0) source += "；被调锚点 " + string.Join("，", proofs);
+                }
+                if (candidates.Count > 1) source += $"；{candidates.Count} 个同形且被调地址相同的同义入口";
+                result.Add((candidate.Entry, new(catalog.ByMangledName(reference.Function), evidence, source) { HasEquivalentEntries = candidates.Count > 1 }));
+            }
+        }
+        return result;
     }
 }

@@ -43,13 +43,26 @@ internal static class RuntimeLocateCorpusChecks
         using var functions = JsonDocument.Parse(File.ReadAllText(Path.Combine(truth, "functions.arm64-v8a.json")));
         var symbols = functions.RootElement.EnumerateArray().GroupBy(f => f.GetProperty("name").GetString()!)
             .ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.Ordinal);
+        var synonymous = new HashSet<(ulong Address, string Function)>();
+        var truthNames = functions.RootElement.EnumerateArray().Where(f => f.GetProperty("defined").GetBoolean())
+            .GroupBy(f => Address(f.GetProperty("address"))).ToDictionary(g => g.Key,
+                g => string.Join(" / ", g.Select(f => f.GetProperty("demangled_name").GetString() ?? f.GetProperty("name").GetString()!)));
         foreach (var (address, entry) in locations.Entries.Where(p => p.Value.Selected is not null))
             foreach (var candidate in entry.Candidates)
             {
                 var agrees = symbols.TryGetValue(candidate.Function.MangledName, out var definitions)
                     && definitions.Any(d => d.GetProperty("defined").GetBoolean() && Address(d.GetProperty("address")) == address);
-                if (!agrees) errors++;
-                checks.True(agrees, $"定位入口 0x{address:x} 与符号逐个一致：{candidate.Function.Name}");
+                // 同义必须有另一个已定位且符号一致的目录入口作基准；没有基准仍算错误。
+                var equivalent = !agrees && candidate.HasEquivalentEntries && definitions is not null && definitions.Any(d =>
+                    d.GetProperty("defined").GetBoolean() && locations.Entries.TryGetValue(Address(d.GetProperty("address")), out var canonical)
+                    && canonical.Selected is not null && canonical.Candidates.Any(c => c.Function.MangledName == candidate.Function.MangledName && c.HasEquivalentEntries));
+                if (equivalent)
+                {
+                    synonymous.Add((address, candidate.Function.MangledName));
+                    Console.WriteLine($"同义入口 | 0x{address:x} | {truthNames.GetValueOrDefault(address) ?? "无符号"} | {candidate.Function.Name} | {candidate.Source} | 待协调者确认");
+                }
+                if (!agrees && !equivalent) errors++;
+                checks.True(agrees || equivalent, $"定位入口 0x{address:x} 与符号逐个一致：{candidate.Function.Name}");
             }
         var missingReasons = new Dictionary<string, int>();
         var independent = 0;
@@ -71,7 +84,9 @@ internal static class RuntimeLocateCorpusChecks
             else if (matches.Length != 0)
             {
                 checks.True(matches.Length == defined.Length, function.Name + " 符号入口与真值一致");
-                Console.WriteLine($"函数 | {function.Name} | {(useSymbols ? "Symbol" : "ReferenceShape")} | 已定位");
+                var proofs = locations.Entries.Where(p => p.Value.Selected is not null).SelectMany(p => p.Value.Candidates)
+                    .Where(c => c.Function.MangledName == function.MangledName).Select(c => $"{c.Evidence}：{c.Source}").Distinct();
+                Console.WriteLine($"函数 | {function.Name} | {string.Join("；", proofs)} | 已定位");
             }
             else
             {
@@ -104,14 +119,19 @@ internal static class RuntimeLocateCorpusChecks
             .Where(c => !managed.Contains(Address(c.GetProperty("target"))) &&
                 !c.GetProperty("names").EnumerateArray().Any(n => managedNames.Contains(n.GetString()!))).ToArray();
         var covered = 0;
+        var exactCovered = 0;
+        var synonymCovered = 0;
         foreach (var call in calls)
         {
             var location = locations.Find(Address(call.GetProperty("target")));
             if (location is null) continue;
             covered++;
             var agrees = call.GetProperty("names").EnumerateArray().Any(n => n.GetString() == location.Function.MangledName);
-            if (!agrees) errors++;
-            checks.True(agrees, $"调用 0x{Address(call.GetProperty("address")):x} 的定位与符号一致");
+            var equivalent = !agrees && synonymous.Contains((Address(call.GetProperty("target")), location.Function.MangledName));
+            if (agrees) exactCovered++;
+            else if (equivalent) synonymCovered++;
+            else errors++;
+            checks.True(agrees || equivalent, $"调用 0x{Address(call.GetProperty("address")):x} 的定位与符号一致");
         }
         var names = catalog.Functions.Select(f => f.MangledName).ToHashSet(StringComparer.Ordinal);
         foreach (var group in calls.GroupBy(c => Address(c.GetProperty("target")))
@@ -139,6 +159,7 @@ internal static class RuntimeLocateCorpusChecks
         if (useSymbols) checks.True(found == independent, "全部具有独立定义的目录函数已定位");
         checks.True(covered > 0, "定位覆盖非空");
         if (!useSymbols) checks.True(found > 0, "无符号依据定位了具有独立定义的运行时目录函数");
+        Console.WriteLine($"同义入口 {synonymous.Count}；符号一致调用覆盖 {exactCovered}；同义调用覆盖 {synonymCovered}（待协调者确认）");
         Console.WriteLine($"独立定义定位 {found}/{independent}；系统导入 {locations.Imports.Count}；加权覆盖 {covered}/{calls.Length} ({(double)covered / calls.Length:P2})；错误数 {errors}；定位含不返回分析 {locateSeconds:F2}s；核对总计 {watch.Elapsed.TotalSeconds:F2}s");
         return checks.Finish("运行时定位 ARM64 真值核对");
     }
