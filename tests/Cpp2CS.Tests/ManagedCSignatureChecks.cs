@@ -68,7 +68,8 @@ internal static class ManagedCSignatureChecks
         a.True(signature.Signature.Parameters[1]==new CInteger(32) && signature.Signature.ReturnType==new CFloat(64)
             && signature.Signature.Parameters[2] is CAggregate {Size:4},"类与方法泛型实参封闭后推导");
         a.True(builder.Build(MethodRef.Open(m)) is {Value:null,Problem.Length:>0},"开放泛型失败");
-        a.True(builder.Build(closed,sharedCode:true) is {Value:null,Problem.Length:>0},"共享入口需要见证");
+        a.True(builder.Build(closed,sharedCode:true).Value is { ThisIndex: 0, Signature.ReturnType: CFloat { Bits: 64 },
+            Signature.Parameters: [CPointer, CInteger { Bits: 32 }, CAggregate { Size: 4 }, CPointer] }, "规范实例的共享入口按封闭签名推导");
         a.True(builder.Build(new(Method(owner,true,new DefinitionRef(Definition("Missing",true),[])),[],[]))
             is {Value:null,Problem.Length:>0},"缺少布局失败");
         var emptyOwner = Definition("Empty", true, defaultSize: false);

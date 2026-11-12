@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Reflection;
 using Cpp2CS.Managed;
+using Cpp2CS.Kernel.Queries;
 using ManagedValues = Cpp2CS.Managed.ManagedValues;
 using Cpp2CS.Model;
 using Cpp2CS.Pipeline;
@@ -172,9 +173,108 @@ internal static class LoweringChecks
         checks.True(narrow.Body is not null, $"窄返回值只使用绑定的低位：{narrow.Failure}");
         checks.True(new IntegerLowering(Function("CallTail"), target, binder, types, calls: narrowCalls).Run().Failure?.Kind == LoweringFailureKind.Binding,
             "窄返回值的 ABI 未定义高位不能取用");
+        SharedChecks(checks, program);
         AccessChecks(checks, program);
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         return checks.Finish("标量下降");
+    }
+
+    private static void SharedChecks(Assertions checks, ProgramModel primitives)
+    {
+        var spec = InputCorpusChecks.Spec("arm64-v8a");
+        var layouts = new Cpp2CS.Runtime.Layouts.FieldLayouts(spec, 8, 8);
+        var binder = new MethodBinder(new(layouts), new Aapcs64());
+        var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
+        TypeRef Type(string name) => new DefinitionRef(primitives.Types.Single(t => t.Name == name), []);
+        var owner = new TypeDef { Index = primitives.Types.Count(t => t.Assembly == "mscorlib.dll" && t.Name != "BitConverter"), Assembly = "SharedChecks.dll", Namespace = "", Name = "Calls",
+            Token = 0x02000001, Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false };
+        var box = new TypeDef { Index = owner.Index + 1, Assembly = owner.Assembly, Namespace = "", Name = "Box`1",
+            Token = 0x02000002, Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false,
+            GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }] };
+        var parameter = new GenericParameterRef("T", true, 0);
+        MethodDef Method(int index, TypeDef declaring, string name, TypeRef result, TypeRef[] parameters, bool receiver = false) => new() {
+            Index = index, Owner = declaring, Name = name, Token = (uint)(0x06000001 + index),
+            Attributes = MethodAttributes.Public | (receiver ? 0 : MethodAttributes.Static), ImplAttributes = 0, Slot = -1,
+            ReturnType = result, Parameters = parameters.Select((t, i) => new ParameterDef("p" + i, t, 0, null, false)).ToArray() };
+        var generic = Method(0, owner, "G", parameter, [parameter]);
+        generic.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        var other = Method(1, owner, "H", parameter, [parameter]); other.GenericParameters = generic.GenericParameters;
+        var plain = Method(2, owner, "Plain", Type("String"), [Type("String")]);
+        var instance = Method(3, box, "Get", new GenericParameterRef("T", false, 0), [], true);
+        var caller = Method(4, owner, "Use", Type("String"), [Type("String")]);
+        var instanceCaller = Method(5, owner, "UseInstance", Type("String"), [new DefinitionRef(box, [Type("String")])]);
+        owner.Methods = [generic, other, plain, caller, instanceCaller]; box.Methods = [instance];
+        var definitions = primitives.Types.Where(t => t.Assembly == "mscorlib.dll" && t.Name != "BitConverter").Concat([owner, box]).ToArray();
+        var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = [.. owner.Methods, instance],
+            Fields = [], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
+            Assemblies = definitions.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key,
+                AssemblyName = Path.GetFileNameWithoutExtension(g.Key), Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
+        var types = new ManagedTypes(program, layouts, 8);
+        var skeleton = new Skeleton(program, 16); var emitter = new BodyEmitter(skeleton, types);
+        var canonical = new MethodRef(generic, [], [Type("Object")]);
+        var witness = new MethodRef(generic, [], [Type("String")]);
+        foreach (var mode in new[] { "Closed", "Multiple", "Missing", "Null", "Forward", "Entity", "Open", "NestedOpen", "Definition", "Signature", "CandidateSignature", "Unavailable", "Mixed", "MixedMissing", "MixedDefinition", "Instance" })
+        {
+            var terms = new TermTable(); var block = new BlockIdentity();
+            var frame = terms.Atom(new RootAtom(AddressRoot.Frame), 64);
+            var builder = new FunctionBuilder(terms, block, 64, new(frame));
+            var input = terms.Atom(new EntryAtom(new(SlotKind.Integer)), 64);
+            var informationInput = terms.Atom(new EntryAtom(new(SlotKind.Integer, 1)), 64);
+            builder.Inputs.Add(new(new(SlotKind.Integer), input)); builder.Inputs.Add(new(new(SlotKind.Integer, 1), informationInput));
+            var image = terms.Atom(new RootAtom(AddressRoot.Image), 64);
+            var address = terms.Apply(new CoreOperator(CoreOperation.Add), 64, image, terms.Constant(256, 64));
+            var read = new ReadIdentity(); var information = terms.Atom(new ResultAtom(read), 64);
+            var call = new CallIdentity(); var output = terms.Atom(new ResultAtom(call), 64);
+            MethodRef actual = mode switch {
+                "Open" => MethodRef.Open(generic), "NestedOpen" => new(generic, [], [new DefinitionRef(box, [])]), "Definition" or "MixedDefinition" => new(other, [], [Type("String")]),
+                "Signature" => new(generic, [], [Type("Int32")]),
+                "Instance" => new(instance, [Type("String")], []), _ => witness };
+            MetadataEntity entity = mode == "Entity" ? new ClassEntity(Type("String")) : new MethodEntity(actual);
+            var facts = NamingFacts.Empty with { Slots = ImmutableDictionary<ulong, Outcome<MetadataEntity>>.Empty.Add(256, Outcome<MetadataEntity>.Success(entity)) };
+            var statements = new List<Statement>();
+            if (mode == "Forward") information = informationInput;
+            else if (mode is "Null" or "MixedMissing") information = terms.Constant(0, 64);
+            else {
+                statements.Add(new MemoryRead(read, address, 64, information));
+                if (mode == "Missing") facts = NamingFacts.Empty;
+            }
+            statements.Add(new Call(call, new ImageFunction(10), [new(new(SlotKind.Integer), input), new(new(SlotKind.Integer, 1), information)],
+                [new(new(SlotKind.Integer), output)]));
+            builder.Blocks.Add(new(block, [], [.. statements], new Return([new(new(SlotKind.Integer), output)])));
+            var entries = new List<BindingEntry> { new(mode == "Instance" ? new(instance, [Type("Object")], []) : canonical, BindingEntryKind.SharedGeneric) };
+            if (mode is "Mixed" or "MixedMissing" or "MixedDefinition") entries.Add(new(MethodRef.Open(plain), BindingEntryKind.Ordinary));
+            if (mode == "Multiple") entries.Add(new(witness, BindingEntryKind.SharedGeneric));
+            if (mode == "CandidateSignature") entries.Add(new(new(generic, [], [Type("Int32")]), BindingEntryKind.SharedGeneric));
+            if (mode == "Unavailable") entries.Add(new(MethodRef.Open(generic), BindingEntryKind.SharedGeneric));
+            var calls = new CallNamingQuery(binder, new NamingChecks.Map([.. entries]), new NamingChecks.RuntimeMap(), catalog);
+            var result = new IntegerLowering(builder.Freeze(), MethodRef.Open(mode == "Instance" ? instanceCaller : caller), binder, types,
+                calls: calls, spec: spec, names: facts).Run();
+            if (mode is "Closed" or "Multiple" or "Mixed" or "Instance")
+            {
+                var loweredCall = result.Body?.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Single();
+                var invocation = loweredCall?.Invocation;
+                checks.True(invocation is not null && invocation.Method == actual && loweredCall?.Result?.Type == Type("String") && (mode == "Instance" ? invocation.Receiver?.Type == actual.DeclaringType
+                    : invocation.Arguments.Single().Type == Type("String")), mode + "：见证确定封闭目标和托管输入类型：" + result.Failure);
+                var emitted = result.Body is not null && emitter.Emit([result.Body]).Count == 0;
+                checks.True(emitted, mode + "：封闭泛型调用通过 CIL 写出校验");
+                if (emitted)
+                {
+                    var operand = skeleton.Method(mode == "Instance" ? instanceCaller : caller).Body.Instructions
+                        .Select(i => i.Operand).OfType<Mono.Cecil.MethodReference>().Single();
+                    var argument = mode == "Instance" ? (operand.DeclaringType as Mono.Cecil.GenericInstanceType)?.GenericArguments.Single()
+                        : (operand as Mono.Cecil.GenericInstanceMethod)?.GenericArguments.Single();
+                    checks.True(argument?.FullName == "System.String", mode + "：CIL 调用保留见证的 string 实参");
+                }
+            }
+            else if (mode is "MixedMissing" or "MixedDefinition")
+                checks.True(result.Failure?.Kind == LoweringFailureKind.AmbiguousCall, mode + "：混合折叠没有匹配见证时沿用原有失败");
+            else
+            {
+                var kind = mode is "CandidateSignature" or "Unavailable" ? "Signature" : mode is "Definition" or "Signature" ? "Mismatch" : "Witness";
+                checks.True(result.Failure?.Reason.Code == "lowering.SharedCall." + kind, mode + "：共享调用失败原因独立：" + result.Failure);
+            }
+        }
+        foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
     }
 
     private static void AccessChecks(Assertions checks, ProgramModel primitives)

@@ -69,8 +69,21 @@ internal static class BindingChecks
         a.True(binder.Parameter(entry, 0, terms, []).Failure?.Kind == BindingFailureKind.MissingSlot
             && binder.Parameter(stack, 8, terms, inputs).Failure?.Kind == BindingFailureKind.MissingSlot
             && binder.Return(new([]), large, terms).Failure?.Kind == BindingFailureKind.MissingSlot, "槽与实参区缺失都有原因");
-        a.True(binder.Entry(method, BindingEntryKind.SharedGeneric).Failure is { Kind: BindingFailureKind.SignatureUnavailable, Detail.Length: > 0 }
-            && binder.Entry(method, BindingEntryKind.AdjustorThunk).Failure is { Kind: BindingFailureKind.SignatureUnavailable, Detail.Length: > 0 }
+        var generic = Method(true).Method;
+        generic.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        var canonical = new MethodRef(generic, [], [method.Method.Parameters[0].Type]);
+        a.True(binder.Entry(canonical, BindingEntryKind.SharedGeneric).Success,
+            "封闭规范实例走普通 C 层签名推导");
+        var fullyShared = new DefinitionRef(new TypeDef {
+            Index = 10, Assembly = "mscorlib.dll", Namespace = "Unity.IL2CPP.Metadata", Name = "__Il2CppFullySharedGenericType",
+            Token = 0, Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false }, []);
+        a.True(binder.Entry(canonical with { MethodArguments = [fullyShared] }, BindingEntryKind.SharedGeneric).Failure is
+            { Kind: BindingFailureKind.SignatureUnavailable, Detail: "完全共享实例的签名尚未支持" }, "完全共享实例单列签名失败");
+        a.True(binder.Entry(canonical with { MethodArguments = [new ArrayRef(fullyShared, 1)] }, BindingEntryKind.SharedGeneric).Failure?.Detail
+            == "完全共享实例的签名尚未支持", "嵌套完全共享类型也不推导");
+        a.True(binder.Entry(MethodRef.Open(generic), BindingEntryKind.SharedGeneric).Failure?.Detail == "泛型实参未完整封闭",
+            "开放定义不能作为规范实例");
+        a.True(binder.Entry(method, BindingEntryKind.AdjustorThunk).Failure is { Kind: BindingFailureKind.SignatureUnavailable, Detail.Length: > 0 }
             && binder.Classify(new([], new CInteger(24))).Failure is { Kind: BindingFailureKind.ClassificationFailed, Detail.Length: > 0 }
             && binder.Call(call, target, new Map([]), terms).Failure is { Kind: BindingFailureKind.EntryNotMapped, Detail.Length: > 0 }, "失败种类有限且不猜签名");
         return a.Finish("形参与调用绑定");

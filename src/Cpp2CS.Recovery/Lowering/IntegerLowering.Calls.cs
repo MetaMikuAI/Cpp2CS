@@ -23,6 +23,7 @@ public sealed partial class IntegerLowering
     private readonly Dictionary<CallIdentity, MethodRef> throws = [];
     private readonly CallNamingQuery? calls;
     private readonly BoundSourceQuery boundSources;
+    private SharedCallQuery? sharedCalls;
     private readonly Dictionary<CallIdentity, CallDefinition> callDefinitions = [];
     private readonly Dictionary<Term, CallDefinition> callResults = [];
     private readonly Dictionary<ManagedCall, CallDefinition> callStatements = new(ReferenceEqualityComparer.Instance);
@@ -64,6 +65,30 @@ public sealed partial class IntegerLowering
                 c.Kind == CallKind.Runtime && c.Operation is { } operation ? "lowering.RuntimeCall." + operation.Name : null); return;
         }
         var candidates = c.Candidates!.Candidates;
+        if (candidates.Any(x => x.Entry.Kind == BindingEntryKind.SharedGeneric))
+        {
+            var shared = context.Get(sharedCalls ??= new(binder, calls, valueNames, boundSources), call.Identity);
+            if (shared.IsSuccess)
+            {
+                var resolved = new CallDefinition(shared.Value.Method, shared.Value.Binding);
+                callDefinitions.Add(call.Identity, resolved);
+                if (resolved.Binding.Result.Source is TermSource output) callResults.Add(output.Term, resolved);
+                return;
+            }
+            // 混合折叠只有见证成立才消歧；否则沿用原有的多候选失败。
+            if (candidates.All(x => x.Entry.Kind == BindingEntryKind.SharedGeneric))
+            {
+                var reason = shared.Why;
+                var code = reason?.Code switch
+                {
+                    "binding.shared-call.signature" => "lowering.SharedCall.Signature",
+                    "binding.shared-call.mismatch" => "lowering.SharedCall.Mismatch",
+                    _ => "lowering.SharedCall.Witness",
+                };
+                Fail<object>(LoweringFailureKind.Call, reason?.Message ?? "方法信息实参没有命名来源。", reason, code);
+                return;
+            }
+        }
         if (candidates.Length != 1)
         {
             var methods = candidates.Select(x => x.Entry.Method).ToArray();

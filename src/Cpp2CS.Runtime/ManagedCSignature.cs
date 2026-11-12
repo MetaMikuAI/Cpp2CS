@@ -9,16 +9,15 @@ public sealed record ManagedCSignature(CSignature Signature, int? ThisIndex,
     ImmutableArray<int> ParameterIndices, int MethodInformationIndex);
 public sealed record ManagedSignatureResult(ManagedCSignature? Value, string? Problem);
 
-/// <summary>il2cpp 普通、非共享入口的签名推导；布局由调用方提供，ABI 分类另行执行。</summary>
+/// <summary>il2cpp 普通入口与封闭规范实例入口的签名推导；布局由调用方提供，ABI 分类另行执行。</summary>
 public sealed class ManagedCSignatureBuilder(ITypeLayouts layouts, int pointerBits = 64)
 {
     public ManagedSignatureResult Build(MethodRef method, bool sharedCode = false)
     {
-        if (sharedCode) return new(null, "共享泛型入口需要生成器的共享签名见证");
+        if (method.TypeArguments.Concat(method.MethodArguments).Any(FullyShared))
+            return new(null, "完全共享实例的签名尚未支持");
         if (pointerBits != 64) return new(null, "当前只支持 64 位数据模型");
-        if (method.TypeArguments.Count != method.Method.Owner.GenericParameters.Count
-            || method.MethodArguments.Count != method.Method.GenericParameters.Count
-            || method.TypeArguments.Concat(method.MethodArguments).Any(t => t.ContainsGenericParameter()))
+        if (!IsClosed(method))
             return new(null, "泛型实参未完整封闭");
         var parameters = ImmutableArray.CreateBuilder<CType>();
         int? self = method.Method.IsStatic ? null : 0;
@@ -41,10 +40,36 @@ public sealed class ManagedCSignatureBuilder(ITypeLayouts layouts, int pointerBi
         return new(new(signature, self, indices.ToImmutable(), information), null);
     }
 
+    public static bool IsClosed(MethodRef method) =>
+        method.TypeArguments.Count == method.Method.Owner.GenericParameters.Count
+        && method.MethodArguments.Count == method.Method.GenericParameters.Count
+        && method.TypeArguments.Concat(method.MethodArguments).All(Closed);
+
+    private static bool Closed(TypeRef type) => type switch
+    {
+        GenericParameterRef => false,
+        DefinitionRef d => d.Arguments.Count == d.Definition.GenericParameters.Count && d.Arguments.All(Closed),
+        ArrayRef a => Closed(a.Element),
+        PointerRef p => Closed(p.Element),
+        ByRefRef r => Closed(r.Element),
+        _ => true,
+    };
+
+    private static bool FullyShared(TypeRef type) => type switch
+    {
+        DefinitionRef d => (d.Definition.Namespace == "Unity.IL2CPP.Metadata"
+            && d.Definition.Name is "__Il2CppFullySharedGenericType" or "__Il2CppFullySharedGenericStructType")
+            || d.Arguments.Any(FullyShared),
+        ArrayRef a => FullyShared(a.Element),
+        PointerRef p => FullyShared(p.Element),
+        ByRefRef r => FullyShared(r.Element),
+        _ => false,
+    };
+
     private CType? Describe(TypeRef type, HashSet<TypeRef> active, out string? problem)
     {
         problem = null;
-        if (type.ContainsGenericParameter()) { problem = "开放或共享泛型类型"; return null; }
+        if (type.ContainsGenericParameter()) { problem = "开放泛型类型"; return null; }
         if (ManagedTypes.IsVoid(type)) return new CVoid();
         if (type is ByRefRef or PointerRef or ArrayRef || ManagedTypes.IsReferenceType(type)) return new CPointer(pointerBits);
         var primitive = ManagedTypes.PrimitiveName(type);
