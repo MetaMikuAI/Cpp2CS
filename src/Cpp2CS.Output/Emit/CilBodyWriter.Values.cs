@@ -203,9 +203,13 @@ internal sealed partial class CilBodyWriter
             case ConversionKind.Bitcast:
                 Value(c.Operand); Reinterpret(c.Operand.Type, c.Type); break;
             case ConversionKind.SignExtend:
-                Integer(c.Operand, true); IntegerWidth(c.Width, true); break;
+                Integer(c.Operand, true);
+                if (ManagedTypes.IsNativePointer(c.Type)) il.Emit(OpCodes.Conv_I); else IntegerWidth(c.Width, true);
+                break;
             case ConversionKind.ZeroExtend or ConversionKind.Truncate:
-                Integer(c.Operand, false); IntegerWidth(c.Width, false); break;
+                Integer(c.Operand, false);
+                if (ManagedTypes.IsNativePointer(c.Type)) il.Emit(OpCodes.Conv_U); else IntegerWidth(c.Width, false);
+                break;
             case ConversionKind.SignedIntegerToFloat or ConversionKind.UnsignedIntegerToFloat:
                 Integer(c.Operand, c.Kind == ConversionKind.SignedIntegerToFloat);
                 if (c.Kind == ConversionKind.UnsignedIntegerToFloat) il.Emit(OpCodes.Conv_R_Un);

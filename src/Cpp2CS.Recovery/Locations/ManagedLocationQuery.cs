@@ -182,6 +182,10 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
     {
         if (Open(type)) return Unknown("open-type", "开放类型没有实例布局。");
         var views = ImmutableArray.CreateBuilder<LocationView>(); bool crossing = false, missingLayout = false;
+        // 数组元素和托管地址本身也是结构体位置，不要求访问恰好落在某个直接字段内。
+        if (unboxed && !statics && offset == 0 && Layouts.Of(type) is { } rootLayout && width == rootLayout.ValueSize * 8)
+            views.Add(new(index is not null ? ManagedLocationKind.ArrayElement : ManagedLocationKind.Indirect,
+                root, type, [], 0, width, index, basis, element));
         var work = new Stack<(DefinitionRef Type, BigInteger Offset, bool Static, bool Unboxed, ImmutableArray<FieldRef> Path)>();
         work.Push((type, offset, statics, unboxed, []));
         while (work.TryPop(out var item))
@@ -284,7 +288,8 @@ internal sealed class ManagedReadTypeQuery(ManagedLocationQuery q) : Query<Addre
         if (location.Value == ManagedLocationQuery.Pending) return Outcome<StaticValueType?>.Success(null);
         var exact = location.Value.Views.Where(v => v.Kind != ManagedLocationKind.ArrayLength && v.Offset == 0 &&
             q.Layouts.TrySizeAndAlignment(v.Type)?.Size * 8 == key.Width).ToArray();
-        var leaves = exact.Where(v => ManagedTypes.IsReferenceType(v.Type) || v.Type is ByRefRef || ManagedTypes.IsNativePointer(v.Type) ||
+        // 同宽的包装结构体与它的标量叶子共享位型：读取取标量的类型，整体的使用另由结构体值查询取证。
+        var leaves = exact.Where(v => ManagedTypes.IsReferenceType(v.Type) || v.Type is ByRefRef or PointerRef || ManagedTypes.IsNativePointer(v.Type) ||
             ManagedTypes.PrimitiveName(ManagedTypes.Underlying(v.Type)) is not null).ToArray();
         var types = (leaves.Length == 0 ? exact : leaves).Select(v => v.Type).Distinct().ToArray();
         if (types.Length == 1) return Outcome<StaticValueType?>.Success(new(types[0], null));

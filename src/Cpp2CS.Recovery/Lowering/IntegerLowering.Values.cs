@@ -49,8 +49,12 @@ public sealed partial class IntegerLowering
     }
     private ManagedValue? BuildValue(Term term, bool floating = false)
     {
+        var structurePart = StructPart(term, 0, term.Width);
+        if (structurePart is not null || failure is not null) return structurePart;
         if (readValues.TryGetValue(term, out var read)) return ReadValue(read);
-        if (callResults.TryGetValue(term, out var callResult)) return CallResult(callResult);
+        if (callResults.TryGetValue(term, out var callResult))
+            return types.Kind(callResult.Method.Concrete(callResult.Method.Method.ReturnType)) == TypeKind.Struct
+                ? StructScalarFailure(callResult.Method.Concrete(callResult.Method.Method.ReturnType)) : CallResult(callResult);
         if (objects.TryGetValue(term, out var created)) return ObjectValue(created);
         if (vectorResults.TryGetValue(term, out var vector)) return vector.Local;
         if (runtimeValues.TryGetValue(term, out var runtime)) return runtime;
@@ -95,6 +99,8 @@ public sealed partial class IntegerLowering
     private ManagedValue? Part(Term term, int low, int width, bool floating = false)
     {
         if (low == 0 && width == term.Width) return Value(term, floating);
+        var structurePart = StructPart(term, low, width);
+        if (structurePart is not null || failure is not null) return structurePart;
         var resolved = context.Get(state.Resolve, term);
         if (!resolved.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "位片来源查询失败", resolved.Why);
         if (resolved.Value != term) return Part(resolved.Value, low, width, floating);
@@ -104,6 +110,8 @@ public sealed partial class IntegerLowering
             int start = pair.Key.SliceLow ?? 0;
             if (term == root && low >= start && low + width <= start + pair.Key.Width)
             {
+                var type = pair.Value.Method.Concrete(pair.Value.Method.Method.ReturnType);
+                if (types.Kind(type) == TypeKind.Struct) return StructScalarFailure(type);
                 var result = CallResult(pair.Value);
                 return result is null ? null : Slice(result, low - start, width);
             }

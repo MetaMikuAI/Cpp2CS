@@ -1,3 +1,4 @@
+using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Kernel.State;
 using Cpp2CS.Managed;
 using Cpp2CS.Model;
@@ -35,9 +36,14 @@ public sealed partial class IntegerLowering
                 }
                 if (!ManagedAccess.Type(types, method.Method.Owner, value.Type)) { Missing("Type"); return; }
                 if (value is FieldValue field && !ManagedAccess.Field(types, method, field.Field, field.Receiver.Type))
-                { Missing("Field"); return; }
+                { Missing("Field");
+                    if (types.Kind(field.Field.DeclaringType) == TypeKind.Struct) failure = failure! with { StructType = field.Field.DeclaringType };
+                    else if (types.Kind(field.Type) == TypeKind.Struct) failure = failure! with { StructType = field.Type };
+                    return; }
                 if (value is StaticFieldValue shared && !ManagedAccess.Field(types, method, shared.Field, null))
-                { Missing("Field"); return; }
+                { Missing("Field");
+                    if (types.Kind(shared.Type) == TypeKind.Struct) failure = failure! with { StructType = shared.Type };
+                    return; }
                 if (value is NewObjectValue created && !ManagedAccess.Method(types, method.Method.Owner, created.Constructor, null))
                 { Missing("Method"); return; }
             }
@@ -98,6 +104,8 @@ public sealed partial class IntegerLowering
         var usePosition = position; position = read.Trace?.NativeAddress ?? position;
         var value = Access(read.Address, read.Width);
         if (value is null) return null;
+        if (types.Kind(value.Type) == TypeKind.Struct)
+            return StructScalarFailure(value.Type);
         position = usePosition;
         definition.Value = value;
         definition.Local = new(new(nextLocal++), value.Type, value.Width);
@@ -114,29 +122,49 @@ public sealed partial class IntegerLowering
                 var read = reads[cursor++];
                 if (readDefinitions.TryGetValue(read.Read, out var definition) && definition.Local is { } local)
                     statements.Add(new ManagedAssignment(read.Address, local, definition.Value!));
+                if (structReads.TryGetValue(read.Read, out var aggregates))
+                    foreach (var aggregate in aggregates)
+                        statements.Add(new ManagedAssignment(read.Address, aggregate.Local!, aggregate.Value!));
             }
             if (i < block.Statements.Count) statements.Add(block.Statements[i]);
         }
         return block with { Statements = statements };
     }
-    private ManagedStatement? LowerStore(MemoryWrite write)
+    private ManagedStatement? LowerStore(MemoryWrite write, Point point)
     {
+        if (structReturnStores is not null)
+        {
+            var output = context.Get(structReturnStores, write.Identity);
+            if (!output.IsSuccess) return Fail<ManagedStatement>(LoweringFailureKind.State, "结构体结果区写入查询失败", output.Why, "lowering.Struct.ResultStore");
+            if (output.Value) return null;
+        }
         var resolved = context.Get(state.Resolve, write.Address);
         if (!resolved.IsSuccess) return Fail<ManagedStatement>(LoweringFailureKind.State, "写入地址查询失败", resolved.Why);
         var location = context.Get(state.Locations, new(resolved.Value, write.Width));
         if (!location.IsSuccess) return Fail<ManagedStatement>(LoweringFailureKind.State, "写入位置查询失败", location.Why);
         if (location.Value.Region == Region.Frame) return null;
-        var target = Access(write.Address, write.Width, true);
+        TypeRef? copiedType = null;
+        if (locations is not null && context.Get(locations, new(write.Address, write.Width)) is { IsSuccess: true } located)
+            foreach (var view in located.Value.Views.Where(v => v.Offset == 0 && types.Kind(v.Type) == TypeKind.Struct
+                && types.StorageBits(v.Type) == write.Width).OrderBy(v => v.Path.Length))
+            {
+                var copy = context.Get(structs, new(view.Type, new TermSource(write.Value), point));
+                if (copy.IsSuccess)
+                { copiedType = view.Type; break; }
+            }
+        var target = Access(write.Address, write.Width, true, copiedType);
         if (target is null) return null;
         if (target is ArrayLengthValue) return Fail<ManagedStatement>(LoweringFailureKind.NonFrameWrite, "数组长度不可写");
-        var value = Value(write.Value, IsFloat(target.Type));
+        var value = types.Kind(target.Type) == TypeKind.Struct
+            ? StructValue(new TermSource(write.Value), target.Type, point)
+            : Value(write.Value, IsFloat(target.Type));
         if (value is null) return null;
-        value = ReferenceType(target.Type) ? Coerce(value, target.Type) : IsFloat(target.Type) ? FloatBits(value, write.Width)
+        value = types.Kind(target.Type) == TypeKind.Struct ? value : ReferenceType(target.Type) ? Coerce(value, target.Type) : IsFloat(target.Type) ? FloatBits(value, write.Width)
             : new ConversionValue(ManagedTypes.IsSigned(target.Type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
                 value, target.Type, write.Width);
         return new ManagedStore(position, target, value);
     }
-    private ManagedValue? Access(Term address, int width, bool write = false)
+    private ManagedValue? Access(Term address, int width, bool write = false, TypeRef? expectedType = null)
     {
         var kind = write ? LoweringFailureKind.NonFrameWrite : LoweringFailureKind.NonFrameRead;
         if (locations is null) return Fail<ManagedValue>(kind, "未装配托管位置查询");
@@ -146,11 +174,15 @@ public sealed partial class IntegerLowering
         if (location.Kind is ManagedLocationKind.NotManaged or ManagedLocationKind.Unknown)
             return Fail<ManagedValue>(kind, "使用未定位的内存：" + location.Kind,
                 location.Why, location.Why?.Code ?? "lowering.Location." + location.Kind);
-        var exact = location.Views.Where(v => v.Offset == 0 && (v.Kind == ManagedLocationKind.ArrayLength
+        var exact = location.Views.Where(v => (expectedType is null || v.Type.Equals(expectedType)) && v.Offset == 0 && (v.Kind == ManagedLocationKind.ArrayLength
             || types.Size(v.Type) * 8 == width)).ToArray();
         var views = exact.Where(v => v.Kind == ManagedLocationKind.ArrayLength || IntegerType(v.Type) || IsFloat(v.Type) || ReferenceType(v.Type)).ToArray();
-        if (exact.Length > 0 && views.Length == 0)
-            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "完整结构体访问尚未下降");
+        if (views.Length == 0)
+        {
+            views = exact.Where(v => types.Kind(v.Type) == TypeKind.Struct).OrderBy(v => v.Path.Length).ToArray();
+            if (views.Length > 1 && views.Skip(1).All(v => v.Path.Take(views[0].Path.Length).SequenceEqual(views[0].Path)))
+                views = [views[0]];
+        }
         if (views.Length != 1) return Fail<ManagedValue>(kind,
             views.Length == 0 ? "访问只覆盖位置的一部分" : "访问有多个完整托管视图", code: views.Length == 0 ? "lowering.Location.Partial" : "lowering.Location.Ambiguous");
         var view = views[0];
@@ -161,6 +193,10 @@ public sealed partial class IntegerLowering
             && !(method.Method.Name == ((f.Field.Attributes & System.Reflection.FieldAttributes.Static) != 0 ? ".cctor" : ".ctor")
                 && method.Method.Owner == f.Field.Owner)))
             return Fail<ManagedValue>(kind, "只读字段的写入缺少构造函数上下文", code: "lowering.Location.Readonly");
+        return AccessView(view, write);
+    }
+    private ManagedValue? AccessView(LocationView view, bool write = false)
+    {
         if (view.Kind == ManagedLocationKind.StaticField)
         {
             // 根是类的静态字段块，不是托管值；路径的第一项就是静态字段本身。
@@ -173,7 +209,7 @@ public sealed partial class IntegerLowering
                 var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
                 storage = new FieldValue(storage, field, type, types.ValueWidth(type));
             }
-            if (!IntegerType(storage.Type) && !IsFloat(storage.Type) && !ReferenceType(storage.Type))
+            if (!IntegerType(storage.Type) && !IsFloat(storage.Type) && !ReferenceType(storage.Type) && types.Kind(storage.Type) != TypeKind.Struct)
                 return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "访问的值类型尚未下降");
             return storage;
         }
@@ -182,7 +218,7 @@ public sealed partial class IntegerLowering
         if (view.Kind == ManagedLocationKind.Indirect) return new IndirectValue(root, view.Type, types.ValueWidth(view.Type));
         if (root.Type is ByRefRef { Element: not DefinitionRef { Definition.IsValueType: true } })
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "字段接收者的托管地址必须指向值类型");
-        if (view.Kind == ManagedLocationKind.ArrayLength) return Mask(new ArrayLengthValue(root, types.UInt32, 32), width);
+        if (view.Kind == ManagedLocationKind.ArrayLength) return Mask(new ArrayLengthValue(root, types.UInt32, 32), view.Width);
         ManagedValue value = root;
         if (view.Kind == ManagedLocationKind.ArrayElement)
         {
@@ -197,7 +233,7 @@ public sealed partial class IntegerLowering
             var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
             value = new FieldValue(value, field, type, types.ValueWidth(type));
         }
-        if (!IntegerType(value.Type) && !IsFloat(value.Type) && !ReferenceType(value.Type))
+        if (!IntegerType(value.Type) && !IsFloat(value.Type) && !ReferenceType(value.Type) && types.Kind(value.Type) != TypeKind.Struct)
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "访问的值类型尚未下降");
         return value;
     }

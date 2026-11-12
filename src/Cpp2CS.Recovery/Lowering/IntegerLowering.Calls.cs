@@ -118,11 +118,11 @@ public sealed partial class IntegerLowering
 
     private ManagedValue? CallResult(CallDefinition definition)
     {
-        if (definition.Local is { } local) return ReferenceType(local.Type) || IsFloat(local.Type) ? local : Mask(local, definition.Binding.Result.Type.Size * 8);
+        if (definition.Local is { } local) return ReferenceType(local.Type) || IsFloat(local.Type) || types.Kind(local.Type) == TypeKind.Struct ? local : Mask(local, definition.Binding.Result.Type.Size * 8);
         var type = definition.Method.Concrete(definition.Method.Method.ReturnType);
-        if (!IntegerType(type) && !IsFloat(type) && !ReferenceType(type)) return Fail<ManagedValue>(TypeFailure(type), "调用结果类型尚未下降");
-        definition.Local = new(new(nextLocal++), type, StackWidth(definition.Binding.Result.Type.Size * 8));
-        return ReferenceType(type) || IsFloat(type) ? definition.Local : Mask(definition.Local, definition.Binding.Result.Type.Size * 8);
+        if (!IntegerType(type) && !IsFloat(type) && !ReferenceType(type) && types.Kind(type) != TypeKind.Struct) return Fail<ManagedValue>(TypeFailure(type), "调用结果类型尚未下降");
+        definition.Local = new(new(nextLocal++), type, types.Kind(type) == TypeKind.Struct ? 0 : StackWidth(definition.Binding.Result.Type.Size * 8));
+        return ReferenceType(type) || IsFloat(type) || types.Kind(type) == TypeKind.Struct ? definition.Local : Mask(definition.Local, definition.Binding.Result.Type.Size * 8);
     }
 
     private ManagedStatement? LowerCall(Call call, Point point)
@@ -155,10 +155,20 @@ public sealed partial class IntegerLowering
 
     private ManagedValue? CallArgument(BoundValue bound, TypeRef type, Point point)
     {
+        if (types.Kind(type) == TypeKind.Struct)
+            return bound.Source is { } source ? StructValue(source, type, point)
+                : Fail<ManagedValue>(LoweringFailureKind.Binding, "结构体实参没有绑定来源", code: "lowering.Struct.Binding");
         var term = BoundTerm(bound.Source, point);
         if (term is null) return null;
         var resolved = context.Get(state.Resolve, term);
         if (!resolved.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "实参状态查询失败", resolved.Why);
+        if (type is ByRefRef { Element: var element } && types.Kind(element) == TypeKind.Struct
+            && context.Get(state.Locations, new(resolved.Value, 8)) is { IsSuccess: true, Value.Region: Region.Frame })
+        {
+            Fail<object>(LoweringFailureKind.UnsupportedType, "帧上结构体地址的生存期与调用写入尚未下降", code: "lowering.Struct.FrameAddress");
+            if (failure is { StructType: null } missing) failure = missing with { StructType = element };
+            return null;
+        }
         if (ReferenceType(type))
         {
             var reference = Value(resolved.Value);

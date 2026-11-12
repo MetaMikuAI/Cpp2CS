@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Kernel.State;
 using Cpp2CS.Managed;
@@ -17,7 +18,11 @@ public enum LoweringFailureKind
     Binding, State, CallerValue, Call, RuntimeCall, SystemCall, IndirectCall, UnknownCall, AmbiguousCall, FoldedCall, NonReturningCall, ConditionalTrap, Trap, NonFrameRead, NonFrameWrite,
     FloatingOrVector, IndirectControl, Exception, DynamicAllocation, UndefinedValue, UnsupportedAtom, UnsupportedOperation, UnsupportedType, ConstructorInitialization,
 }
-public sealed record LoweringFailure(LoweringFailureKind Kind, ulong Position, Reason Reason);
+public sealed record LoweringFailure(LoweringFailureKind Kind, ulong Position, Reason Reason)
+{
+    /// <summary>失败所需的结构体类型；仅携带诊断依据，不参与下降判定。</summary>
+    public TypeRef? StructType { get; init; }
+}
 public sealed record LoweringResult(ManagedBody? Body, LoweringFailure? Failure);
 
 /// <summary>标量位型的机械下降；绑定与状态查询提供原子的定义，不在下降中猜测来源。</summary>
@@ -115,6 +120,7 @@ public sealed partial class IntegerLowering
         for (int i = 0; i < managed.ParameterIndices.Length; i++) BindParameter(managed.ParameterIndices[i], i, method.Concrete(method.Method.Parameters[i].Type));
         if (managed.ThisIndex is { } self) BindParameter(self, -1, method.Method.Owner.IsValueType ? new ByRefRef(method.DeclaringType) : method.DeclaringType);
         if (failure is not null) return new(null, failure);
+        PrepareStructs();
         foreach (var read in function.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>()) RegisterRead(read);
         if (failure is not null) return new(null, failure);
         var blocks = new List<ManagedBlock>();
@@ -139,7 +145,7 @@ public sealed partial class IntegerLowering
                 }
                 else if (native is MemoryWrite write)
                 {
-                    var statement = LowerStore(write);
+                    var statement = LowerStore(write, new(b.Identity, i));
                     if (failure is not null) return new(null, failure);
                     if (statement is not null) statements.Add(statement);
                 }
@@ -192,7 +198,9 @@ public sealed partial class IntegerLowering
         var result = binder.Parameter(signature, cIndex, function.Terms, function.Inputs, function.IncomingArgumentArea);
         if (result.Value is not { } bound) { Fail<object>(LoweringFailureKind.Binding, result.Failure!.Detail); return; }
         // 原子按签名定型，槽位未指定的高位不参与绑定。
-        if (bound.Source is TermSource source)
+        if (types.Kind(type) == TypeKind.Struct && bound.Source is { } aggregate)
+            structParameters.Add(new(type, aggregate, new(function.Entry, 0), Parameter: index));
+        else if (bound.Source is TermSource source)
             arguments[source.Term] = new ArgumentValue(index, type, source.Term.Width);
     }
 
@@ -212,7 +220,14 @@ public sealed partial class IntegerLowering
                 return condition is null ? null : new ManagedBranch(position, condition, Edge(b.Identity, branch.True), Edge(b.Identity, branch.False));
             case Return r:
                 if (ManagedTypes.IsVoid(method.Concrete(method.Method.ReturnType))) return new ManagedReturn(position, null);
-                var bound = binder.Return(r, signature, function.Terms);
+                var returnType = method.Concrete(method.Method.ReturnType);
+                var bound = binder.Return(r, signature, function.Terms, function.Inputs.Select(i => new SlotValue(i.Slot, i.Value)).ToImmutableArray(), function.IncomingArgumentArea);
+                if (types.Kind(returnType) == TypeKind.Struct)
+                {
+                    if (bound.Value?.Source is not { } aggregate) return Fail<ManagedStatement>(LoweringFailureKind.Binding, bound.Failure?.Detail ?? "结构体返回值绑定失败", code: "lowering.Struct.Binding");
+                    var structure = StructValue(aggregate, returnType, new(b.Identity, b.Statements.Length));
+                    return structure is null ? null : new ManagedReturn(position, structure);
+                }
                 if (bound.Value?.Source is not TermSource source)
                     return Fail<ManagedStatement>(LoweringFailureKind.Binding, bound.Failure?.Detail ?? "返回值不是标量项");
                 var value = Value(source.Term, IsFloat(method.Concrete(method.Method.ReturnType)));

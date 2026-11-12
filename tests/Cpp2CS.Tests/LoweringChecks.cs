@@ -179,6 +179,7 @@ internal static class LoweringChecks
         RuntimeChecks(checks, program);
         ConstructorChecks(checks, program);
         AccessChecks(checks, program);
+        StructChecks(checks, program);
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         return checks.Finish("标量下降");
     }
@@ -673,6 +674,224 @@ internal static class LoweringChecks
                 loweredStatements.OfType<ManagedReturn>().Single().Value is ConversionValue { Operand: LocalValue }, "读取在原位置保存，写后使用旧值局部");
             if (mode == "Unused") checks.True(!loweredStatements.OfType<ManagedAssignment>().Any(), "未使用的读取不产生访问");
             if (mode is "Virtual" or "Delegate") checks.True(loweredStatements.OfType<ManagedCall>().Single().Invocation.Virtual && !loweredStatements.OfType<ManagedAssignment>().Any(), "分派内部读取不写出");
+        }
+        foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
+    }
+
+    private static void StructChecks(Assertions checks, ProgramModel primitives)
+    {
+        var spec = InputCorpusChecks.Spec("arm64-v8a");
+        var layouts = new Cpp2CS.Runtime.Layouts.FieldLayouts(spec, 8, 8);
+        var binder = new MethodBinder(new(layouts), new Aapcs64());
+        var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
+        var definitions = primitives.Types.Where(t => t.Assembly == "mscorlib.dll" && t.Name != "BitConverter").ToList();
+        TypeRef Primitive(string name) => new DefinitionRef(definitions.Single(t => t.Name == name), []);
+        TypeDef Define(string name, int size, bool value = true)
+        {
+            var type = new TypeDef { Index = definitions.Count, Assembly = "StructChecks.dll", Namespace = "", Name = name,
+                Token = (uint)(0x02000001 + definitions.Count), Attributes = TypeAttributes.Public,
+                IsValueType = value, IsEnum = false, Size = size, PackingSize = 0, ClassSizeIsDefault = true };
+            definitions.Add(type); return type;
+        }
+        int fieldIndex = 0;
+        FieldDef Field(TypeDef owner, string name, TypeRef type, int offset, FieldAttributes attributes = FieldAttributes.Public) => new() {
+            Index = fieldIndex++, Owner = owner, Name = name, Type = type, Offset = offset, Attributes = attributes };
+        var pair = Define("Pair", 8); var pairType = new DefinitionRef(pair, []);
+        pair.Fields = [Field(pair, "First", Primitive("Int32"), 0), Field(pair, "Second", Primitive("Int32"), 4)];
+        var otherPair = Define("OtherPair", 8); var otherPairType = new DefinitionRef(otherPair, []);
+        otherPair.Fields = [Field(otherPair, "First", Primitive("Int32"), 0), Field(otherPair, "Second", Primitive("Int32"), 4)];
+        var mixed = Define("Mixed", 16); var mixedType = new DefinitionRef(mixed, []);
+        mixed.Fields = [Field(mixed, "Object", Primitive("Object"), 0), Field(mixed, "Count", Primitive("Int32"), 8)];
+        var padded = Define("Padded", 16); var paddedType = new DefinitionRef(padded, []);
+        padded.Fields = [Field(padded, "Tag", Primitive("Byte"), 0), Field(padded, "Value", Primitive("Int64"), 8)];
+        var nested = Define("Nested", 8); var nestedType = new DefinitionRef(nested, []);
+        nested.Fields = [Field(nested, "Inner", pairType, 0)];
+        var hfa = Define("Hfa", 8); var hfaType = new DefinitionRef(hfa, []);
+        hfa.Fields = [Field(hfa, "First", Primitive("Single"), 0), Field(hfa, "Second", Primitive("Single"), 4)];
+        var large = Define("Large", 24); var largeType = new DefinitionRef(large, []);
+        large.Fields = Enumerable.Range(0, 3).Select(i => Field(large, "Part" + i, Primitive("Int64"), i * 8)).ToArray();
+        var generic = Define("Envelope`1", 4);
+        generic.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+        generic.Fields = [Field(generic, "Item", new GenericParameterRef("T", false, 0), 0)];
+        var genericType = new DefinitionRef(generic, [Primitive("Int32")]);
+        var wrapper = Define("Wrapper", 4); var wrapperType = new DefinitionRef(wrapper, []);
+        wrapper.Fields = [Field(wrapper, "Value", Primitive("Int32"), 0)];
+        var pointerWrapper = Define("PointerWrapper", 8); var pointerWrapperType = new DefinitionRef(pointerWrapper, []);
+        pointerWrapper.Fields = [Field(pointerWrapper, "Pointer", Primitive("IntPtr"), 0)];
+        var unsignedPointerWrapper = Define("UnsignedPointerWrapper", 8); var unsignedPointerWrapperType = new DefinitionRef(unsignedPointerWrapper, []);
+        unsignedPointerWrapper.Fields = [Field(unsignedPointerWrapper, "Pointer", Primitive("UIntPtr"), 0)];
+        var chain = Define("Chain", 4); var chainType = new DefinitionRef(chain, []);
+        chain.Fields = [Field(chain, "Inner", wrapperType, 0)];
+        var readOnly = Define("Readonly", 4); var readOnlyType = new DefinitionRef(readOnly, []);
+        readOnly.Fields = [Field(readOnly, "Value", Primitive("Int32"), 0, FieldAttributes.Public | FieldAttributes.InitOnly)];
+        foreach (var name in new[] { "RuntimeTypeHandle", "RuntimeFieldHandle", "RuntimeMethodHandle" })
+        {
+            var previous = definitions.Single(t => t.Name == name);
+            var handle = new TypeDef { Index = previous.Index, Assembly = previous.Assembly, Namespace = previous.Namespace,
+                Name = previous.Name, Token = previous.Token, Attributes = previous.Attributes, IsValueType = true, IsEnum = false,
+                Size = 8, PackingSize = 0, ClassSizeIsDefault = true };
+            definitions[definitions.IndexOf(previous)] = handle;
+            handle.Fields = [Field(handle, "value", Primitive("IntPtr"), 0, FieldAttributes.Private)];
+        }
+        var wrapped = Define("Wrapped", 4); var wrappedType = new DefinitionRef(wrapped, []);
+        wrapped.Fields = [Field(wrapped, "Value", Primitive("Int32"), 0, FieldAttributes.Private)];
+        var box = Define("Box", 40, false); var boxType = new DefinitionRef(box, []);
+        box.Fields = [Field(box, "Data", pairType, (int)spec.Layout.ObjectHeaderSize), Field(box, "Wrapped", wrappedType, (int)spec.Layout.ObjectHeaderSize + 8)];
+        var referenceWrapper = Define("ReferenceWrapper", 8); var referenceWrapperType = new DefinitionRef(referenceWrapper, []);
+        referenceWrapper.Fields = [Field(referenceWrapper, "Object", boxType, 0)];
+        var owner = Define("Cases", 16, false);
+        var methods = new List<MethodDef>();
+        MethodDef Method(string name, TypeRef result, params TypeRef[] parameters)
+        {
+            var method = new MethodDef { Index = methods.Count, Owner = owner, Name = name,
+                Token = (uint)(0x06000001 + methods.Count), Attributes = MethodAttributes.Public | MethodAttributes.Static,
+                ImplAttributes = 0, Slot = -1, ReturnType = result,
+                Parameters = parameters.Select((t, i) => new ParameterDef("p" + i, t, 0, null, false)).ToArray() };
+            methods.Add(method); return method;
+        }
+        var target = Method("Identity", pairType, pairType);
+        var refTarget = Method("TakeRef", Primitive("Void"), new ByRefRef(pairType));
+        var cases = new Dictionary<string, MethodDef> {
+            ["Forward"] = Method("Forward", pairType, pairType),
+            ["ReferenceRoot"] = Method("ReferenceRoot", Primitive("Int32"), new ByRefRef(referenceWrapperType)),
+            ["Compose"] = Method("Compose", pairType, Primitive("Int32"), Primitive("Int32")),
+            ["ComposeHfa"] = Method("ComposeHfa", hfaType, Primitive("Single"), Primitive("Single")),
+            ["ComposeMixed"] = Method("ComposeMixed", mixedType, Primitive("Object"), Primitive("Int32")),
+            ["ComposePadded"] = Method("ComposePadded", paddedType, Primitive("Int64")),
+            ["ProjectWide"] = Method("ProjectWide", otherPairType, boxType),
+            ["FrameRef"] = Method("FrameRef", Primitive("Void")),
+            ["Wrap"] = Method("Wrap", wrapperType, Primitive("Int32")),
+            ["WrapPointer"] = Method("WrapPointer", pointerWrapperType, Primitive("Int64")),
+            ["WrapUnsignedPointer"] = Method("WrapUnsignedPointer", unsignedPointerWrapperType, Primitive("UInt64")),
+            ["WrapChain"] = Method("WrapChain", chainType, Primitive("Int32")),
+            ["Unwrap"] = Method("Unwrap", Primitive("Int32"), wrapperType),
+            ["PrivateWrap"] = Method("PrivateWrap", wrappedType, Primitive("Int32")),
+            ["PrivateUnwrap"] = Method("PrivateUnwrap", Primitive("Int32"), wrappedType),
+            ["ReadonlyWrap"] = Method("ReadonlyWrap", readOnlyType, Primitive("Int32")),
+            ["TypeToken"] = Method("TypeToken", Primitive("RuntimeTypeHandle")),
+            ["ClassToken"] = Method("ClassToken", Primitive("RuntimeTypeHandle")),
+            ["FieldToken"] = Method("FieldToken", Primitive("RuntimeFieldHandle")),
+            ["MethodToken"] = Method("MethodToken", Primitive("RuntimeMethodHandle")),
+            ["WrongToken"] = Method("WrongToken", Primitive("RuntimeTypeHandle")),
+            ["StoreForward"] = Method("StoreForward", Primitive("Void"), boxType, wrappedType),
+            ["NestedField"] = Method("NestedField", Primitive("Int32"), nestedType),
+            ["CallResult"] = Method("CallResult", pairType, pairType),
+            ["Hfa"] = Method("Hfa", hfaType, hfaType),
+            ["IndirectField"] = Method("IndirectField", Primitive("Int64"), largeType),
+            ["FieldCopy"] = Method("FieldCopy", pairType, boxType),
+            ["WholeCopy"] = Method("WholeCopy", pairType, boxType),
+            ["ArrayCopy"] = Method("ArrayCopy", pairType, new ArrayRef(pairType, 1)),
+            ["GenericForward"] = Method("GenericForward", genericType, genericType),
+            ["LargeForward"] = Method("LargeForward", largeType, largeType),
+            ["InterleavedLarge"] = Method("InterleavedLarge", largeType, largeType),
+            ["ChangedField"] = Method("ChangedField", pairType, boxType),
+            ["Incomplete"] = Method("Incomplete", pairType, pairType),
+        };
+        owner.Methods = methods;
+        var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods,
+            Fields = definitions.SelectMany(t => t.Fields).ToArray(), RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
+            Assemblies = definitions.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key,
+                AssemblyName = Path.GetFileNameWithoutExtension(g.Key), Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
+        var types = new ManagedTypes(program, layouts, 8);
+        var skeleton = new Skeleton(program, 16); var emitter = new BodyEmitter(skeleton, types);
+        foreach (var (mode, definition) in cases)
+        {
+            var terms = new TermTable(); var entry = new BlockIdentity();
+            var frame = terms.Atom(new RootAtom(AddressRoot.Frame), 64);
+            var builder = new FunctionBuilder(terms, entry, 64, new(frame));
+            Term Input(SlotKind kind, int index)
+            {
+                var slot = new AbstractSlot(kind, index); var term = terms.Atom(new EntryAtom(slot), kind == SlotKind.Floating ? 128 : 64);
+                builder.Inputs.Add(new(slot, term)); return term;
+            }
+            var root = Input(mode is "Hfa" or "ComposeHfa" ? SlotKind.Floating : SlotKind.Integer, 0);
+            var statements = new List<Statement>();
+            Term Add(Term value, long offset) => terms.Apply(new CoreOperator(CoreOperation.Add), 64, value, terms.Constant(offset, 64));
+            Term Read(Term address, int width)
+            {
+                var id = new ReadIdentity(); var term = terms.Atom(new ResultAtom(id), width);
+                statements.Add(new MemoryRead(id, address, width, term)); return term;
+            }
+            Term result = root;
+            var facts = NamingFacts.Empty;
+            if (mode.EndsWith("Token", StringComparison.Ordinal))
+            {
+                var image = terms.Atom(new RootAtom(AddressRoot.Image), 64); builder.ImageBase = image;
+                result = Read(Add(image, 256), 64);
+                MetadataEntity entity = mode switch {
+                    "ClassToken" => new ClassEntity(Primitive("Object")),
+                    "FieldToken" or "WrongToken" => new FieldEntity(new FieldRef(box.Fields[0], boxType)),
+                    "MethodToken" => new MethodEntity(MethodRef.Open(target)),
+                    _ => new TypeEntity(Primitive("Object")) };
+                facts = facts with { Slots = facts.Slots.Add(256, Outcome<MetadataEntity>.Success(entity)) };
+            }
+            if (mode == "NestedField") result = terms.Concat(terms.Slice(root, 32, 32), terms.Constant(0, 32));
+            if (mode == "IndirectField") result = Read(Add(root, 8), 64);
+            if (mode == "ReferenceRoot") result = terms.Concat(Read(Add(Read(root, 64), box.Fields[0].Offset), 32), terms.Constant(0, 32));
+            if (mode == "CallResult")
+            {
+                var id = new CallIdentity(); result = terms.Atom(new ResultAtom(id), 64);
+                statements.Add(new Call(id, new ImageFunction(10), [new(new(SlotKind.Integer), root), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], [new(new(SlotKind.Integer), result)]));
+            }
+            if (mode is "FieldCopy" or "ChangedField")
+            {
+                var first = Read(Add(root, box.Fields[0].Offset), 32);
+                if (mode == "ChangedField") statements.Add(new MemoryWrite(new(), Add(root, box.Fields[0].Offset + 4), 32, terms.Constant(19, 32)));
+                result = terms.Concat(first, Read(Add(root, box.Fields[0].Offset + 4), 32));
+            }
+            Term? secondResult = null;
+            if (mode == "Compose") result = terms.Concat(terms.Slice(root, 0, 32), terms.Slice(Input(SlotKind.Integer, 1), 0, 32));
+            if (mode == "ComposeMixed") secondResult = terms.Concat(terms.Slice(Input(SlotKind.Integer, 1), 0, 32), terms.Undefined(32));
+            if (mode == "ComposePadded")
+            {
+                secondResult = root;
+                result = terms.Concat(terms.Constant(3, 8), terms.Undefined(56));
+            }
+            if (mode == "FrameRef") statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), frame), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+            if (mode == "StoreForward") statements.Add(new MemoryWrite(new(), Add(root, box.Fields[1].Offset), 32, terms.Slice(Input(SlotKind.Integer, 1), 0, 32)));
+            if (mode is "WholeCopy" or "ProjectWide") result = Read(Add(root, box.Fields[0].Offset), 64);
+            if (mode == "ArrayCopy") result = Read(Add(root, spec.Layout.ArrayDataStart), 64);
+            if (mode is "LargeForward" or "InterleavedLarge")
+            {
+                var output = Input(SlotKind.IndirectResult, 0);
+                if (mode == "InterleavedLarge")
+                    for (int i = 0; i < 3; i++) statements.Add(new MemoryWrite(new(), Add(output, i * 8), 64, Read(Add(root, i * 8), 64)));
+                else
+                {
+                    var pieces = Enumerable.Range(0, 3).Select(i => Read(Add(root, i * 8), 64)).ToArray();
+                    for (int i = 0; i < pieces.Length; i++)
+                        statements.Add(new MemoryWrite(new(), Add(output, i * 8), 64, pieces[i]));
+                }
+            }
+            if (mode == "Incomplete") result = terms.Concat(terms.Slice(root, 0, 32), terms.Undefined(32));
+            var returned = mode is "Hfa" or "ComposeHfa" ? new Return([new(new(SlotKind.Floating), root), new(new(SlotKind.Floating, 1), Input(SlotKind.Floating, 1))])
+                : new Return(secondResult is null ? [new(new(SlotKind.Integer), result)] : [new(new(SlotKind.Integer), result), new(new(SlotKind.Integer, 1), secondResult)]);
+            builder.Blocks.Add(new(entry, [], statements.ToImmutableArray(), mode is "LargeForward" or "InterleavedLarge" ? new Return([]) : returned));
+            var calls = new CallNamingQuery(binder, new NamingChecks.Map([new BindingEntry(MethodRef.Open(mode == "FrameRef" ? refTarget : target), BindingEntryKind.Ordinary)]), new NamingChecks.RuntimeMap(), catalog);
+            var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(definition), binder, types, calls: calls, effects: new ManagedCallEffects(calls), spec: spec, names: facts).Run();
+            if (mode is "PrivateWrap" or "PrivateUnwrap" or "ReadonlyWrap" or "WrongToken" or "FrameRef")
+            {
+                var expected = mode switch { "FrameRef" => "lowering.Struct.FrameAddress", "PrivateUnwrap" => "lowering.Access.Field", "ReadonlyWrap" => "lowering.Struct.Readonly", "WrongToken" => "lowering.Struct.TokenEntity", _ => "lowering.Struct.Inaccessible" };
+                checks.True(lowered.Failure?.Reason.Code == expected, mode + " 分开报告不可写或实体不匹配：" + lowered.Failure);
+                continue;
+            }
+            if (mode is "Incomplete" or "InterleavedLarge")
+            {
+                checks.True(lowered.Failure?.Reason.Code.StartsWith("lowering.Struct.", StringComparison.Ordinal) == true, mode + " 不冒充整体转发：" + lowered.Failure);
+                continue;
+            }
+            checks.True(lowered.Body is not null, mode + " 结构体下降：" + lowered.Failure);
+            if (lowered.Body is not { } body) continue;
+            var problems = emitter.Emit([body]);
+            checks.True(problems.Count == 0, mode + " 结构体 CIL 校验：" + string.Join(';', problems.Values));
+            if (mode.EndsWith("Token", StringComparison.Ordinal)) checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value is TypeHandleValue or FieldHandleValue or MethodHandleValue, mode + " 使用 ldtoken 值");
+            if (mode == "ChangedField") checks.True(body.Blocks[0].Statements[0] is ManagedAssignment { Value: FieldValue }
+                && body.Blocks[0].Statements[1] is ManagedStore
+                && body.Blocks[0].Statements.OfType<ManagedReturn>().Single().Value is ComposedValue, "中间有写入时逐字段组成，旧字段仍在写入前求值");
+            if (mode is "Compose" or "ComposeHfa" or "ComposeMixed" or "ComposePadded" or "ProjectWide")
+                checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value is ComposedValue, mode + " 逐叶子组成而非类型重解释");
+            if (mode == "CallResult") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Single().Result?.Type.Equals(pairType) == true, "结构体调用结果保存在同类型局部");
+            if (mode == "FieldCopy") checks.True(body.Blocks[0].Statements[0] is ManagedAssignment { Value: FieldValue { Type: var copied } } && copied.Equals(pairType), "整体字段在首个原生读取处保存");
         }
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
     }
