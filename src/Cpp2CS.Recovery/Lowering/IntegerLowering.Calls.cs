@@ -166,7 +166,15 @@ public sealed partial class IntegerLowering
             var number = Value(resolved.Value, true);
             return number is null ? null : FloatBits(number, bound.Type.Size * 8);
         }
-        if (!IntegerType(type)) return Fail<ManagedValue>(TypeFailure(type), "实参缺少托管类型的值定义");
+        if (!IntegerType(type))
+        {
+            var shape = type switch
+            {
+                ByRefRef => "按引用传递的实参", PointerRef => "非托管指针实参", GenericParameterRef => "类型参数实参",
+                DefinitionRef { Definition.IsValueType: true } => "结构体实参", _ => "其他类型的实参",
+            };
+            return Fail<ManagedValue>(TypeFailure(type), "实参缺少托管类型的值定义：" + shape);
+        }
         var value = Value(resolved.Value);
         return value is null ? null : new ConversionValue(ManagedTypes.IsSigned(type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
             value, type, bound.Type.Size * 8);
