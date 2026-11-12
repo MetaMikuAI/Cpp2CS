@@ -67,7 +67,15 @@ public sealed partial class IntegerLowering
             var kind = c.Kind switch { CallKind.Runtime => LoweringFailureKind.RuntimeCall,
                 CallKind.System => LoweringFailureKind.SystemCall, CallKind.Indirect => LoweringFailureKind.IndirectCall,
                 _ => LoweringFailureKind.UnknownCall };
-            Fail<object>(kind, $"尚未下降：{c.Operation?.Name ?? c.Function?.ToString() ?? c.Kind.ToString()}", c.Why,
+            // 没认出的目标写明是谁，报告才能按目标归并。
+            var unknown = c.Kind != CallKind.Unknown ? null : call.Target switch
+            {
+                ImageFunction image => $"映像函数 0x{image.EntryOffset:x}",
+                ImportedTarget import => "导入 " + import.Symbol.Name,
+                _ => null,
+            };
+            Fail<object>(kind, unknown is not null ? "目标没有托管身份或目录对应：" + unknown
+                : $"尚未下降：{c.Operation?.Name ?? c.Function?.ToString() ?? c.Kind.ToString()}", c.Why,
                 c.Kind == CallKind.Runtime && c.Operation is { } operation ? "lowering.RuntimeCall." + operation.Name : null); return;
         }
         var candidates = c.Candidates!.Candidates;
