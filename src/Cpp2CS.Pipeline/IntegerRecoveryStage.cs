@@ -54,13 +54,6 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
             types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names).Run(kind);
         if (result.Body is { } candidate)
         {
-            var attributes = context.Method.Attributes;
-            var implementation = context.Method.ImplAttributes;
-            if ((attributes & (MethodAttributes.Abstract | MethodAttributes.PinvokeImpl)) != 0
-                || (implementation & (MethodImplAttributes.InternalCall | MethodImplAttributes.Unmanaged)) != 0
-                || (implementation & MethodImplAttributes.CodeTypeMask) is MethodImplAttributes.Native or MethodImplAttributes.Runtime)
-                return new Missing<ManagedBody>(new(Name, context.Entry.Address, "方法声明",
-                    new("lowering.NonCilBody", "方法声明不允许普通 CIL 方法体")));
             // 位重解释与浮点取整等依赖匹配核心库的 BCL 方法；裁剪掉的能力是缺口，不交给输出层制造非法体。
             foreach (var value in candidate.Blocks.SelectMany(b => b.Statements)
                 .SelectMany(s => ManagedValues.Of(s).Concat(ManagedValues.CopiedValues(s))).SelectMany(ManagedValues.Walk))

@@ -246,6 +246,10 @@ public sealed class MethodDef
     public bool IsStatic => (Attributes & MethodAttributes.Static) != 0;
     public bool IsVirtual => (Attributes & MethodAttributes.Virtual) != 0;
     public bool IsAbstract => (Attributes & MethodAttributes.Abstract) != 0;
+    /// <summary>声明允许 CIL 方法体：不是抽象、P/Invoke、内部调用，也不是运行时或原生实现（ECMA-335 II.23.1.10、II.23.1.11）。</summary>
+    public bool DeclaresCilBody => (Attributes & (MethodAttributes.Abstract | MethodAttributes.PinvokeImpl)) == 0
+        && (ImplAttributes & (MethodImplAttributes.InternalCall | MethodImplAttributes.Unmanaged)) == 0
+        && (ImplAttributes & MethodImplAttributes.CodeTypeMask) is not (MethodImplAttributes.Native or MethodImplAttributes.Runtime);
     /// <summary>派生类可以覆盖：虚方法，不是 final，所在类型也没有封闭。对其他方法 call 与 callvirt 进入同一方法体，callvirt 只多一次判空。</summary>
     public bool IsOverridable => IsVirtual && (Attributes & MethodAttributes.Final) == 0 && (Owner.Attributes & System.Reflection.TypeAttributes.Sealed) == 0;
     public override string ToString() => $"{Owner.FullName}.{Name}";

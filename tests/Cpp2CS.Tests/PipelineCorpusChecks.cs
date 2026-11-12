@@ -33,6 +33,7 @@ internal static class PipelineCorpusChecks
         using var methods = InputCorpusChecks.Json(truth, "methods.json");
         using var cases = InputCorpusChecks.Json(truth, "cases.json");
         var metrics = new ConcurrentDictionary<string, MethodMetric>();
+        var bodyless = new ConcurrentBag<string>();
         var options = new MetricOptions();
         var workers = Environment.ProcessorCount;
         var partitions = methods.RootElement.EnumerateArray().GroupBy(m => m.GetProperty("assembly").GetString()!)
@@ -55,11 +56,14 @@ internal static class PipelineCorpusChecks
                 var id = row.GetProperty("id").GetString()!;
                 var method = IlCompareCommand.ReferenceMethod(reference, row);
                 var recovered = byId.GetValueOrDefault(id);
+                // 管线按元数据判断“声明没有方法体”；与参考程序集核对，判错的不得悄悄移出分母。
+                if (recovered is not null && (recovered.Status == MethodStatus.NoBody) == method.HasBody) bodyless.Add(id);
                 var candidate = recovered?.Status == MethodStatus.Complete ? index.GetValueOrDefault(IlMetrics.Identity(method)) : null;
                 if (!metrics.TryAdd(id, IlMetrics.Compare(method, candidate, options, modelFactory)))
                     throw new InvalidDataException("真值方法身份重复。");
             }
         });
+        checks.True(bodyless.IsEmpty, "声明没有方法体的判断与参考程序集一致：" + string.Join("、", bodyless.Order(StringComparer.Ordinal).Take(5)));
         var table = new StringBuilder("| 方法 | 管线状态 | IL 对照 |\n|---|---|---|\n");
         foreach (var row in cases.RootElement.EnumerateArray())
         {
@@ -74,7 +78,7 @@ internal static class PipelineCorpusChecks
         }
         var comparison = IlMetrics.Report(metrics.OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Value).ToArray(), options);
         File.WriteAllText(Path.Combine(output, "comparison.local.json"), IlMetrics.Json(comparison));
-        table.AppendLine($"\n管线：{report.Summary.Methods} 方法，完整 {report.Summary.Complete}，洞 {report.Summary.Holes}。");
+        table.AppendLine($"\n管线：{report.Summary.Methods} 方法，完整 {report.Summary.Complete}，洞 {report.Summary.Holes}，声明没有方法体 {report.Summary.NoBody}。");
         table.AppendLine("全部真值方法：" + string.Join("，", comparison.Summary.Statuses.Select(p => $"{p.Key}={p.Value.Count}")) + "。");
         table.AppendLine("无法判定原因：" + string.Join("，", comparison.Summary.Reasons.OrderBy(p => p.Key).Select(p => $"{p.Key}={p.Value}")) + "。");
         var complete = IlMetrics.Report(metrics.Where(p => byId.GetValueOrDefault(p.Key)?.Status == MethodStatus.Complete).Select(p => p.Value).ToArray(), options);

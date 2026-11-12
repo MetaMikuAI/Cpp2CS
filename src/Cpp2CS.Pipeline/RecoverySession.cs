@@ -111,6 +111,12 @@ public sealed class RecoverySession
             var method = groups[i].Key;
             // 普通入口优先；其余入口完整保留。恢复层负责证明实例见证能否恢复开放定义。
             var entry = entries[0];
+            if (!method.DeclaresCilBody)
+            {
+                rows[i] = new(Identity(method), method.ToString(), entry.Address,
+                    entries.Select(e => new EntryReport(e.Address, e.Kind.ToString(), e.Method!.ToString())).ToArray(), MethodStatus.NoBody, null);
+                return;
+            }
             var context = new MethodContext(method, entry, facts);
             var lifted = Invoke(frontend, entry, context, out var ticks);
             Interlocked.Add(ref frontTicks, ticks);
@@ -157,7 +163,7 @@ public sealed class RecoverySession
             new() { ["输入"] = inputSeconds, [frontend.Name] = (double)frontTicks / Stopwatch.Frequency,
                 [recovery.Name] = (double)recoveryTicks / Stopwatch.Frequency, ["输出"] = outputWatch.Elapsed.TotalSeconds,
                 ["不返回分析"] = analysisAlreadyCached ? 0 : analysisTiming.Seconds ?? 0 },
-            inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64)) { Source = source };
+            inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64) { NoBody = rows.Count(r => r.Status == MethodStatus.NoBody) }) { Source = source };
         using (var destination = File.Create(Path.Combine(request.Output, "recovery.json"))) RecoveryReport.Write(destination, report);
         return report;
     }

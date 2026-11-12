@@ -15,7 +15,7 @@ internal static class DecompileStage
         foreach (var method in model.Methods)
         {
             var report = reports.GetValueOrDefault(RecoverySession.Identity(method));
-            if (report?.Status != MethodStatus.Complete) emitter.MarkUnrecovered(method, report?.Entry ?? 0);
+            if (report?.Status is not (MethodStatus.Complete or MethodStatus.NoBody)) emitter.MarkUnrecovered(method, report?.Entry ?? 0);
         }
     }
 
