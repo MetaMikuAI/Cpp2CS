@@ -86,8 +86,19 @@ public sealed partial class IntegerLowering
                 ImportedTarget import => "导入 " + import.Symbol.Name,
                 _ => null,
             };
+            // 运行时操作的方法输入有名字时写明它的定义（不带实例实参），报告才能按被操作的方法归并。
+            Reason? why = c.Why;
+            if (why is null && valueNames is not null && c.Operation?.Inputs.FirstOrDefault(i => i.Kind == RuntimeValueKind.Method) is { } methodInput
+                && c.Inputs?.GetValueOrDefault(methodInput.Name)?.Source is TermSource methodTerm
+                && context.Get(valueNames, methodTerm.Term) is { IsSuccess: true } methodName)
+                why = methodName.Value.Name switch
+                {
+                    EntityName { Entity: MethodEntity { Method: var subject } } => new("naming.method", "方法实体：" + MethodRef.Open(subject.Method)),
+                    ParameterName { MethodInformation: true } => new("naming.method", "本方法的方法信息形参"),
+                    _ => new("naming.method", "方法输入不是方法实体：" + (methodName.Value.Name?.GetType().Name ?? "未命名")),
+                };
             Fail<object>(kind, unknown is not null ? "目标没有托管身份或目录对应：" + unknown
-                : $"尚未下降：{c.Operation?.Name ?? c.Function?.ToString() ?? c.Kind.ToString()}", c.Why,
+                : $"尚未下降：{c.Operation?.Name ?? c.Function?.ToString() ?? c.Kind.ToString()}", why,
                 c.Kind == CallKind.Runtime && c.Operation is { } operation ? "lowering.RuntimeCall." + operation.Name : null); return;
         }
         var candidates = c.Candidates!.Candidates;
