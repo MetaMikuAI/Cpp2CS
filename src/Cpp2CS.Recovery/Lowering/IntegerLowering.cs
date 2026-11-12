@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Cpp2CS.Kernel.Flow;
 using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Kernel.State;
 using Cpp2CS.Managed;
@@ -212,6 +213,18 @@ public sealed partial class IntegerLowering
                 SelectExceptionView(input.Predecessor);
                 var v = Part(input.Value, merge.Low, merge.Width, IsFloat(merge.Local.Type));
                 if (v is null) return new(null, failure);
+                // 引用值进入非引用的合流局部：这条边的路径事实已证明它为空时就是常量 0（编译器复用了已知为零的值），否则没有托管写法。
+                if (ReferenceType(v.Type) && !ReferenceType(merge.Local.Type) && !Opaque(merge.Local.Type))
+                {
+                    var isNull = function.Terms.Apply(new CoreOperator(CoreOperation.Equal), 1, input.Value, function.Terms.Constant(0, input.Value.Width));
+                    var fact = context.Get(new PathFactQuery(state), new PathFactKey(default, isNull, new FlowEdge(input.Predecessor, merge.Target)));
+                    if (fact is not { IsSuccess: true, Value: PathTruth.True })
+                    {
+                        Fail<object>(LoweringFailureKind.UnsupportedType, "托管引用进入整数合流，这条边上没有它为空的路径事实", fact.IsSuccess ? null : fact.Why, "lowering.Merge.Reference");
+                        return new(null, failure);
+                    }
+                    v = Constant(0, merge.Width);
+                }
                 var incoming = Opaque(merge.Local.Type) || Opaque(v.Type) || ReferenceType(merge.Local.Type) || ManagedTypes.IsNativePointer(merge.Local.Type) ? Coerce(v, merge.Local.Type) : IsFloat(merge.Local.Type) ? FloatBits(v, merge.Local.Width) : Convert(v, merge.Local.Width);
                 if (ExceptionCopy(input.Predecessor, merge.Target, merge.Local, incoming)) continue;
                 var edge = Edge(input.Predecessor, merge.Target);
