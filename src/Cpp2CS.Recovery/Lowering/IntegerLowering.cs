@@ -101,6 +101,8 @@ public sealed partial class IntegerLowering
         }
         PairConstructions();
         if (failure is not null) return new(null, failure);
+        PairUnboxes();
+        if (failure is not null) return new(null, failure);
         var caller = context.Get(state.CallerUses, 0);
         if (!caller.IsSuccess) Fail<object>(LoweringFailureKind.State, "调用方值流向查询失败", caller.Why);
         else if (!caller.Value.IsEmpty)

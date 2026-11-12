@@ -72,6 +72,7 @@ public sealed partial class IntegerLowering
     }
     private void RegisterRead(MemoryRead read)
     {
+        if (readDefinitions.ContainsKey(read.Identity)) return;
         // 只登记可用身份；未使用读取的失败不阻断下降，实际使用处负责传播失败。
         var address = context.Get(state.Resolve, read.Address);
         if (!address.IsSuccess) return;

@@ -469,6 +469,17 @@
       ]
     },
     {
+      "name": "il2cpp_codegen_memory_barrier",
+      "operation": "MemoryBarrier",
+      "arguments": [],
+      "result": "void",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: VolatileRead / VolatileWrite",
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_memory_barrier → vm/Thread.cpp: Thread::FullMemoryBarrier → os/Atomic.h: Atomic::FullMemoryBarrier → Baselib_atomic_thread_fence_seq_cst"
+      ]
+    },
+    {
       "name": "GetVirtualMethodInfo",
       "operation": "LookupVirtualMethod",
       "arguments": [

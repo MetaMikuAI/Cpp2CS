@@ -824,6 +824,40 @@
       "unsupported": []
     },
     {
+      "arguments": [],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.h: VolatileRead / VolatileWrite",
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_memory_barrier → vm/Thread.cpp: Thread::FullMemoryBarrier → os/Atomic.h: Atomic::FullMemoryBarrier → Baselib_atomic_thread_fence_seq_cst"
+      ],
+      "declaration": "void il2cpp_codegen_memory_barrier()",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 459
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z29il2cpp_codegen_memory_barrierv",
+      "name": "il2cpp_codegen_memory_barrier",
+      "operation": "MemoryBarrier",
+      "parameter_names": [],
+      "parameter_types": [],
+      "prototype": {
+        "parameters": [],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "void",
+      "result_type": "void",
+      "unsupported": []
+    },
+    {
       "arguments": [
         "exception",
         "method"
@@ -1975,7 +2009,7 @@
     }
   ],
   "generator_sha256": "a5e28eef7f3bf33ecee4598b56690e012e73adf62ea8dc3f460ce899e8a573a8",
-  "mapping_sha256": "1713f9e7c350d69390789831437437c2fb5d6c33a7b73af0fa9ad221efa63a06",
+  "mapping_sha256": "51d63851935716a21f3951515c8a7f8ecf96061e00adbe891f28f9737dfbd0fd",
   "schema_version": 1,
   "shared_generator_sha256": "e0417a66cad7097804d93134398e24eac2ba67080ed6373bcaa4ed4c3d0aae48",
   "source": {

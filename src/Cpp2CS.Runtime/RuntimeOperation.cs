@@ -161,6 +161,10 @@ public static class RuntimeOperations
             RuntimeObservation.Observable, "返回 definition 在 method 的泛型实参下的实例", "GenericVirtualDispatch", "供泛型 callvirt 使用", "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_generic_virtual_method_internal → metadata/GenericMethod.cpp: GetGenericVirtualMethod → GetMethod / CreateMethodLocked → GenericClass::GetClass / GenericMetadata::InflateIfNeeded / Class::InitLocked；创建方法元数据，不调用生成的方法或未解析调用桩", ["System.TypeLoadException", "System.TypeInitializationException", "System.NotSupportedException"], upperBound: false, exceptionReason: "封闭的异常种类集合；泛型深度失败见 vm/GenericClass.cpp: CreateClass → vm/Exception.cpp: GetMaximumNestedGenericsException；未解析方法桩只被登记，不在此调用", managedCode: "无用户泛型方法执行；布局错误路径可能运行基础库异常构造");
         yield return Op("NotifyWriteBarrier", [new("location", RuntimeInputUse.Location, RuntimeValueKind.ManagedAddress), V("value", RuntimeValueKind.ManagedReference)], RuntimeValueKind.Void, RuntimeWidth.None, RuntimeHeapEffect.None,
             RuntimeObservation.Unobservable, "GC 已收到位置通知；本操作不执行托管赋值", "EraseWriteBarrier", "通知由托管写入承担", "codegen/il2cpp-codegen-common.cpp: Il2CppCodeGenWriteBarrier 仅调用 SetWriteBarrier");
+        yield return Op("MemoryBarrier", [], RuntimeValueKind.Void, RuntimeWidth.None, RuntimeHeapEffect.None,
+            RuntimeObservation.Unobservable, "只约束多线程内存次序，单线程下无可观察效果", "EraseMemoryBarrier", "删除屏障调用",
+            "codegen/il2cpp-codegen-il2cpp.h: VolatileRead / VolatileWrite；codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_memory_barrier → vm/Thread.cpp: Thread::FullMemoryBarrier → os/Atomic.h: Atomic::FullMemoryBarrier → Baselib_atomic_thread_fence_seq_cst",
+            preconditions: "单线程语义；屏障不读取或写入托管堆", managedCode: "不执行托管代码");
         foreach (var (name, fill) in new[] { ("MemoryCopy", false), ("MemoryMove", false), ("MemoryFill", true) })
         {
             var extent = new RuntimeExtent(RuntimeExtentKind.InputLength, "length 个字节", "length");

@@ -1,3 +1,5 @@
+using Cpp2CS.Recovery.Structure;
+using Cpp2CS.Kernel.State;
 using System.Collections.Immutable;
 using System.Reflection;
 using Cpp2CS.Managed;
@@ -174,6 +176,7 @@ internal static class LoweringChecks
         checks.True(new IntegerLowering(Function("CallTail"), target, binder, types, calls: narrowCalls).Run().Failure?.Kind == LoweringFailureKind.Binding,
             "窄返回值的 ABI 未定义高位不能取用");
         SharedChecks(checks, program);
+        RuntimeChecks(checks, program);
         AccessChecks(checks, program);
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         return checks.Finish("标量下降");
@@ -274,6 +277,185 @@ internal static class LoweringChecks
                 checks.True(result.Failure?.Reason.Code == "lowering.SharedCall." + kind, mode + "：共享调用失败原因独立：" + result.Failure);
             }
         }
+        foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
+    }
+
+    private static void RuntimeChecks(Assertions checks, ProgramModel primitives)
+    {
+        var spec = InputCorpusChecks.Spec("arm64-v8a");
+        var layouts = new Cpp2CS.Runtime.Layouts.FieldLayouts(spec, 8, 8);
+        var binder = new MethodBinder(new(layouts), new Aapcs64());
+        var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
+        var definitions = primitives.Types.Where(t => t.Assembly == "mscorlib.dll" && t.Name != "BitConverter").ToList();
+        TypeRef Primitive(string name) => new DefinitionRef(definitions.Single(t => t.Name == name), []);
+        var owner = new TypeDef { Index = definitions.Count, Assembly = "RuntimeChecks.dll", Namespace = "", Name = "RuntimeCases",
+            Token = 0x02000001, Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false };
+        definitions.Add(owner);
+        var enumBase = new TypeDef { Index = definitions.Count, Assembly = "mscorlib.dll", Namespace = "System", Name = "Enum",
+            Token = (uint)(0x02000001 + definitions.Count), Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false,
+            BaseType = Primitive("Object") };
+        definitions.Add(enumBase);
+        var enumeration = new TypeDef { Index = definitions.Count, Assembly = owner.Assembly, Namespace = "", Name = "Number",
+            Token = 0x02000002, Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = true, Size = 4,
+            BaseType = new DefinitionRef(enumBase, []) };
+        definitions.Add(enumeration);
+        var enumField = new FieldDef { Index = 0, Owner = enumeration, Name = "value__", Type = Primitive("Int32"), Offset = 0,
+            Attributes = FieldAttributes.Public | FieldAttributes.SpecialName | FieldAttributes.RTSpecialName };
+        enumeration.Fields = [enumField];
+        var enumType = new DefinitionRef(enumeration, []);
+        var nullable = new TypeDef { Index = definitions.Count, Assembly = "mscorlib.dll", Namespace = "System", Name = "Nullable`1",
+            Token = (uint)(0x02000001 + definitions.Count), Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false, Size = 8 };
+        definitions.Add(nullable);
+        string[] operations = ["IsInstance", "CastClass", "Box", "Unbox"];
+        var methods = operations.Select((name, i) => new MethodDef { Index = i, Owner = owner, Name = name,
+            Token = (uint)(0x06000001 + i), Attributes = MethodAttributes.Public | MethodAttributes.Static,
+            ImplAttributes = 0, Slot = -1, ReturnType = Primitive(name == "Box" ? "Object" : name == "Unbox" ? "Int32" : "String"),
+            Parameters = [new("value", Primitive(name == "Box" ? "Int32" : "Object"), 0, null, false)] }).ToArray();
+        owner.Methods = methods;
+        var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods, Fields = [enumField],
+            RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
+            Assemblies = definitions.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key,
+                AssemblyName = Path.GetFileNameWithoutExtension(g.Key), Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
+        var types = new ManagedTypes(program, layouts, 8);
+        var skeleton = new Skeleton(program, 16); var emitter = new BodyEmitter(skeleton, types);
+        foreach (var method in methods)
+        {
+            var t = new TermTable(); var block = new BlockIdentity();
+            var frame = t.Atom(new RootAtom(AddressRoot.Frame), 64); var image = t.Atom(new RootAtom(AddressRoot.Image), 64);
+            var builder = new FunctionBuilder(t, block, 64, new(frame)) { ImageBase = image };
+            var obj = t.Atom(new EntryAtom(new(SlotKind.Integer)), 64); builder.Inputs.Add(new(new(SlotKind.Integer), obj));
+            var slot = t.Apply(new CoreOperator(CoreOperation.Add), 64, image, t.Constant(128, 64));
+            var read = new ReadIdentity(); var klass = t.Atom(new ResultAtom(read), 64);
+            var id = new CallIdentity(); var result = t.Atom(new ResultAtom(id), 64);
+            bool box = method.Name == "Box";
+            bool unbox = method.Name == "Unbox";
+            var call = new Call(id, new ImageFunction(20), box
+                ? [new(new(SlotKind.Integer), klass), new(new(SlotKind.Integer, 1), frame)]
+                : [new(new(SlotKind.Integer), obj), new(new(SlotKind.Integer, 1), klass)],
+                [new(new(SlotKind.Integer), result)]) { Trace = new(32) };
+            var statements = new List<Statement> { new MemoryRead(read, slot, 64, klass) };
+            if (box) statements.Add(new MemoryWrite(new(), frame, 32, t.Slice(obj, 0, 32)));
+            statements.Add(call);
+            if (box) statements.Add(new MemoryWrite(new(), frame, 32, t.Constant(77, 32)));
+            var dataRead = new ReadIdentity(); var dataValue = t.Atom(new ResultAtom(dataRead), 32);
+            var load = new MemoryRead(dataRead, result, 32, dataValue) { Trace = new(40) };
+            if (unbox) statements.Add(load);
+            builder.Blocks.Add(new(block, [], [.. statements],
+                new Return([new(new(SlotKind.Integer), unbox ? t.Concat(dataValue, t.Constant(0, 32)) : result)])));
+            var runtime = catalog.Functions.First(f => f.Operation.Name == method.Name && f.Signature is not null);
+            var calls = new CallNamingQuery(binder, new NamingChecks.Map([]), new NamingChecks.RuntimeMap(runtime), catalog);
+            NamingFacts Facts(TypeRef target) => NamingFacts.Empty with { Slots = NamingFacts.Empty.Slots.Add(128,
+                Cpp2CS.Kernel.Queries.Outcome<MetadataEntity>.Success(new ClassEntity(target))) };
+            var facts = Facts(Primitive(box || unbox ? "Int32" : "String"));
+            LoweringResult Lower(NamingFacts evidence) => new IntegerLowering(builder.Freeze(), MethodRef.Open(method), binder, types,
+                calls: calls, effects: new ManagedCallEffects(calls), spec: spec, names: evidence).Run();
+            var lowered = Lower(facts);
+            checks.True(lowered.Body is not null, method.Name + " 运行时下降：" + lowered.Failure);
+            if (lowered.Body is { } body)
+            {
+                var assignment = body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>().Single();
+                checks.True(assignment.Address == 32 && (method.Name == "IsInstance" ? assignment.Value is IsInstValue
+                    : box ? assignment.Value is BoxValue : unbox ? assignment.Value is UnboxValue : assignment.Value is CheckedCastValue)
+                    && Equals(assignment.Target.Type, assignment.Value.Type),
+                    method.Name + " 在调用处求值，局部沿用操作的类型");
+                var problems = emitter.Emit([body]);
+                checks.True(problems.Count == 0, method.Name + " CIL 校验：" + string.Join(';', problems.Values));
+            }
+            checks.True(Lower(NamingFacts.Empty).Failure?.Reason.Code == (box ? "lowering.Box.Class" : unbox ? "lowering.Unbox.Class" : "lowering.TypeCheck.Class"), "运行时操作缺少类实体时报洞");
+            if (unbox)
+            {
+                var original = builder.Blocks[0];
+                foreach (var mode in new[] { "Offset", "Width", "Write", "Call", "NonFrameWrite", "FrameEscape", "Duplicate", "Return", "CrossBlock" })
+                {
+                    var changed = original.Statements.ToList();
+                    if (mode == "Offset") changed[^1] = load with { Address = t.Apply(new CoreOperator(CoreOperation.Add), 64, result, t.Constant(1, 64)) };
+                    if (mode == "Width")
+                    {
+                        var wide = new ReadIdentity();
+                        changed[^1] = new MemoryRead(wide, result, 64, t.Atom(new ResultAtom(wide), 64));
+                    }
+                    if (mode == "Write") changed.Insert(2, new MemoryWrite(new(), result, 32, t.Constant(9, 32)));
+                    if (mode == "NonFrameWrite") changed.Insert(2, new MemoryWrite(new(), obj, 32, t.Constant(9, 32)));
+                    if (mode == "FrameEscape") changed.Insert(2, new MemoryWrite(new(), frame, 64, result));
+                    if (mode == "Call")
+                    {
+                        var next = new CallIdentity();
+                        changed.Insert(2, new Call(next, new ImageFunction(20), [new(new(SlotKind.Integer), result), new(new(SlotKind.Integer, 1), klass)],
+                            [new(new(SlotKind.Integer), t.Atom(new ResultAtom(next), 64))]));
+                    }
+                    if (mode == "Duplicate")
+                    {
+                        var duplicate = new ReadIdentity();
+                        changed.Add(new MemoryRead(duplicate, result, 32, t.Atom(new ResultAtom(duplicate), 32)));
+                    }
+                    builder.Blocks[0] = original with { Statements = [.. changed], End = mode is "Return" or "Width"
+                        ? new Return([new(new(SlotKind.Integer), mode == "Return" ? result : ((MemoryRead)changed[^1]).Result)]) : original.End };
+                    if (mode == "CrossBlock")
+                    {
+                        var next = new BlockIdentity();
+                        builder.Blocks[0] = original with { Statements = [.. changed.Take(2)], End = new Jump(next) };
+                        builder.Blocks.Add(new(next, [], [load], original.End));
+                    }
+                    var rejected = Lower(facts);
+                    checks.True(rejected.Failure?.Reason.Code == "lowering.Unbox.Use", "拆箱拒绝 " + mode + "：" + rejected.Failure);
+                    if (mode == "CrossBlock") builder.Blocks.RemoveAt(1);
+                }
+                builder.Blocks[0] = original with { Statements = [.. original.Statements.Take(2), new MemoryWrite(new(), frame, 32, t.Constant(9, 32)), load] };
+                var privateWrite = Lower(facts);
+                checks.True(privateWrite.Body is not null, "帧写入不阻断拆箱配对：" + privateWrite.Failure);
+                if (privateWrite.Body is { } privateBody) checks.True(emitter.Emit([privateBody]).Count == 0, "跨帧写入的拆箱 CIL 校验");
+                builder.Blocks[0] = original;
+                var enumUnbox = Lower(Facts(enumType));
+                checks.True(enumUnbox.Body is not null, "枚举拆箱下降：" + enumUnbox.Failure);
+                if (enumUnbox.Body is { } enumBody) checks.True(emitter.Emit([enumBody]).Count == 0, "枚举拆箱 CIL 校验");
+                checks.True(Lower(Facts(new DefinitionRef(nullable, []))).Failure?.Reason.Code == "lowering.Unbox.Nullable", "可空类型拆箱保留洞");
+                checks.True(Lower(Facts(Primitive("TypedReference"))).Failure?.Reason.Code == "lowering.Unbox.Struct", "结构体拆箱保留洞");
+            }
+            if (box)
+            {
+                if (lowered.Body is { } boxed)
+                    checks.True(boxed.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>().Single().Value is BoxValue value
+                        && ManagedValues.Walk(value.Operand).Any(v => v is ArgumentValue), "装箱读取调用点的帧内容，不受调用后的覆盖影响");
+                var enumBox = Lower(Facts(enumType));
+                checks.True(enumBox.Body?.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>().Single().Value
+                    is BoxValue { Boxed: var boxedType, Operand.Type: var storage } && Equals(boxedType, enumType) && Equals(storage, Primitive("Int32")),
+                    "枚举按基础整数取值，保留枚举盒类型：" + enumBox.Failure);
+                if (enumBox.Body is { } enumBody) checks.True(emitter.Emit([enumBody]).Count == 0, "枚举装箱 CIL 校验");
+                checks.True(Lower(Facts(Primitive("TypedReference"))).Failure?.Reason.Code == "lowering.Box.Struct", "结构体装箱保留洞");
+                checks.True(Lower(Facts(Primitive("String"))).Failure?.Reason.Code == "lowering.Box.Struct", "引用类型装箱保留洞");
+                checks.True(Lower(Facts(new DefinitionRef(nullable, []))).Failure?.Reason.Code == "lowering.Box.Nullable", "可空类型装箱单列洞");
+                var original = builder.Blocks[0];
+                builder.Blocks[0] = original with { Statements = [new MemoryRead(read, slot, 64, klass),
+                    new MemoryWrite(new(), frame, 32, t.Constant(0x3fc00000, 32)), call] };
+                var floating = Lower(Facts(Primitive("Single")));
+                checks.True(floating.Body?.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>().Single().Value
+                    is BoxValue { Operand: ConstantValue { Bits: 0x3fc00000 } number } && Equals(number.Type, Primitive("Single")),
+                    "浮点装箱保留数据位型：" + floating.Failure);
+                if (floating.Body is { } floatBody) checks.True(emitter.Emit([floatBody]).Count == 0, "浮点装箱 CIL 校验");
+                builder.Blocks[0] = builder.Blocks[0] with { Statements = [new MemoryRead(read, slot, 64, klass),
+                    call with { Arguments = [new(new(SlotKind.Integer), klass), new(new(SlotKind.Integer, 1), obj)] }] };
+                checks.True(Lower(facts).Failure?.Reason.Code == "lowering.Box.Address", "非帧数据地址装箱单列洞");
+            }
+            if (method.Name == "CastClass")
+            {
+                builder.Blocks[0] = builder.Blocks[0] with { End = new Return([new(new(SlotKind.Integer), t.Constant(0, 64))]) };
+                var unused = Lower(facts);
+                checks.True(unused.Body?.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
+                    .SingleOrDefault() is { Address: 32, Value: CheckedCastValue }, "转换结果未使用时仍在调用处执行检查");
+                if (unused.Body is { } unusedBody) checks.True(emitter.Emit([unusedBody]).Count == 0, "未使用的强制转换 CIL 校验");
+            }
+        }
+        var barrier = catalog.Functions.Single(f => f.Name == "il2cpp_codegen_memory_barrier");
+        var barrierCalls = new CallNamingQuery(binder, new NamingChecks.Map([]), new NamingChecks.RuntimeMap(barrier), catalog);
+        var barrierTerms = new TermTable(); var barrierBlock = new BlockIdentity();
+        var barrierFrame = barrierTerms.Atom(new RootAtom(AddressRoot.Frame), 64);
+        var barrierBuilder = new FunctionBuilder(barrierTerms, barrierBlock, 64, new(barrierFrame));
+        barrierBuilder.Blocks.Add(new(barrierBlock, [], [new Call(new(), new ImageFunction(20), [], [])], new Return([])));
+        var barrierImage = new InputMemoryImage();
+        var barrierState = new StateQueries(new ManagedCallEffects(barrierCalls), image: barrierImage);
+        var barrierNames = new ValueNamingQuery(barrierState, barrierCalls, NamingFacts.Empty, spec, binder);
+        var erased = new UnobservableEffects(barrierState, barrierCalls, barrierNames, barrierImage).Run(barrierBuilder.Freeze());
+        checks.True(!erased.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any(), "登记后的内存屏障由结构变换删除");
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
     }
 

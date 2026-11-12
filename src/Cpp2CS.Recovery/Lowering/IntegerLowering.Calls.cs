@@ -54,6 +54,9 @@ public sealed partial class IntegerLowering
         }
         if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "NewObject" }) { PrepareAllocation(call, c); return; }
         if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "NewArray" }) { PrepareVector(call, c); return; }
+        if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "IsInst" or "CastClass" }) { PrepareTypeCheck(call, c); return; }
+        if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "Box" }) { PrepareBox(call, c); return; }
+        if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "Unbox" }) { PrepareUnbox(call, c); return; }
         if (c.Kind == CallKind.Runtime && c.Operation is { DoesNotReturn: true, Termination: RuntimeTermination.Throw, FixedThrownException: null, Il.Name: "Throw" })
         { PrepareThrow(call, c); return; }
         if (c.Kind != CallKind.Managed)
@@ -122,6 +125,9 @@ public sealed partial class IntegerLowering
     private ManagedStatement? LowerCall(Call call, Point point)
     {
         if (throws.TryGetValue(call.Identity, out var constructor)) return new ManagedThrow(position, new NewObjectValue(constructor, [], types.PointerSize * 8));
+        if (typeChecks.ContainsKey(call.Identity)) return LowerTypeCheck(call, point);
+        if (boxes.ContainsKey(call.Identity)) return LowerBox(call, point);
+        if (unboxes.ContainsKey(call.Identity)) return LowerUnbox(call, point);
         if (vectors.ContainsKey(call.Identity) || thrown.ContainsKey(call.Identity)) return LowerRuntimeStatement(call, point);
         var d = callDefinitions[call.Identity];
         var args = new List<ManagedValue>();
