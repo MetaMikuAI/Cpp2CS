@@ -122,6 +122,14 @@ public sealed partial class IntegerLowering
             && named.Value.Name is EntityName { Entity: StringEntity literal })
             return definition.Constant = new StringValue(literal.Value, types.String, types.PointerSize * 8);
         var usePosition = position; position = read.Trace?.NativeAddress ?? position;
+        var range = Range(read.Address, read.Width);
+        if (range?.Why is { Code: "location.padding" or "location.overlap" or "location.range" } rangeFailure)
+            return Fail<ManagedValue>(LoweringFailureKind.NonFrameRead, rangeFailure.Message, rangeFailure, rangeFailure.Code);
+        if (range is { Pieces.IsEmpty: false } && !(range.Pieces is [{ View: { } whole, LocationBit: 0 } piece]
+            && piece.Width == types.Size(whole.Type) * 8))
+        {
+            var split = RangeRead(definition, 0, read.Width); position = usePosition; return split;
+        }
         var value = Access(read.Address, read.Width);
         if (value is null) return null;
         if (types.Kind(value.Type) == TypeKind.Struct)
@@ -156,7 +164,9 @@ public sealed partial class IntegerLowering
                 }
                 if (structReads.TryGetValue(read.Read, out var aggregates))
                     foreach (var aggregate in aggregates)
-                        statements.Add(new ManagedAssignment(read.Address, aggregate.Local!, aggregate.Value!));
+                        statements.Add(aggregate.Accessor is { } getter
+                            ? new ManagedCall(read.Address, AccessorInvocation(getter, aggregate.Value!, []), aggregate.Local!) { Inlined = true }
+                            : new ManagedAssignment(read.Address, aggregate.Local!, aggregate.Value!));
             }
             if (i < block.Statements.Count) statements.Add(block.Statements[i]);
         }
@@ -265,13 +275,7 @@ public sealed partial class IntegerLowering
         if (views.Length != 1) return Fail<ManagedValue>(kind,
             views.Length == 0 ? "访问只覆盖位置的一部分" : "访问有多个完整托管视图", code: views.Length == 0 ? "lowering.Location.Partial" : "lowering.Location.Ambiguous");
         var view = views[0];
-        if (write && view.Kind == ManagedLocationKind.ArrayLength)
-            return Fail<ManagedValue>(kind, "数组长度不可写", code: "lowering.Location.Readonly");
-        // 只读字段只能在所属类型的构造函数里写：实例字段是实例构造函数，静态字段是静态构造函数。
-        if (write && view.Path.Any(f => (f.Field.Attributes & System.Reflection.FieldAttributes.InitOnly) != 0
-            && !(method.Method.Name == ((f.Field.Attributes & System.Reflection.FieldAttributes.Static) != 0 ? ".cctor" : ".ctor")
-                && method.Method.Owner == f.Field.Owner)))
-            return Fail<ManagedValue>(kind, "只读字段的写入缺少构造函数上下文", code: "lowering.Location.Readonly");
+        if (write && !Writable(view)) return null;
         return AccessView(view, write);
     }
     private ManagedValue? AccessView(LocationView view, bool write = false, bool address = false)

@@ -47,7 +47,9 @@ public sealed partial class IntegerLowering
         {
             var memory = context.Get(structMemoryParts, new(term, low, width));
             if (!memory.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "宽读取的字段投影失败", memory.Why, "lowering.Struct.Projection");
-            return memory.Value is { } projection ? StructMemoryValue(projection) : null;
+            if (memory.Value is not { } projection) return null;
+            var memoryValue = StructMemoryValue(projection);
+            return memoryValue is null || projection.Width == 0 ? memoryValue : Slice(memoryValue, projection.Low, projection.Width);
         }
         var root = StructOriginValue(part.Origin); if (root is null) return null;
         var projected = ManagedProjections.Project(types, root, part.Projection, field => field);
@@ -123,7 +125,12 @@ public sealed partial class IntegerLowering
         {
             var native = function.Blocks.SelectMany(b => b.Statements).OfType<MemoryRead>().Single(r => r.Identity == read);
             if (!structReads.TryGetValue(read, out var definitions)) structReads.Add(read, definitions = []);
-            definitions.Add(new(native) { Value = value, Local = local });
+            var definition = new ReadDefinition(native) { Value = value, Local = local };
+            var usePosition = position; position = native.Trace?.NativeAddress ?? position;
+            definition.Accessor = FieldAccessor(value, false, definition);
+            position = usePosition;
+            if (failure is not null) return null;
+            definitions.Add(definition);
         }
         return local;
     }

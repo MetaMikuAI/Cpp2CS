@@ -54,6 +54,11 @@ public sealed partial class IntegerLowering
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "帧地址用于普通值或运算", code: "lowering.Frame.Use");
         if (locations is not null && context.Get(locations.Addresses, term).IsSuccess && StaticType(term) is not ByRefRef)
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "托管地址用于运算、比较或普通值", code: "lowering.Address.Use");
+        if (term.Kind == TermKind.Slice && readValues.TryGetValue(term.Operands[0], out var rangeRead))
+        {
+            var part = RangeRead(rangeRead, term.SliceLow!.Value, term.Width);
+            if (part is not null || failure is not null) return part;
+        }
         var structurePart = StructPart(term, 0, term.Width);
         if (structurePart is not null || failure is not null) return structurePart;
         if (readValues.TryGetValue(term, out var read)) return ReadValue(read);
@@ -103,14 +108,21 @@ public sealed partial class IntegerLowering
     private ManagedValue? Part(Term term, int low, int width, bool floating = false)
     {
         if (low == 0 && width == term.Width) return Value(term, floating);
+        if (term.ConstantValue is { } constant && width <= 64)
+            return Constant((ulong)((constant >> low) & ((System.Numerics.BigInteger.One << width) - 1)), width);
+        if (readValues.TryGetValue(term, out var read))
+        {
+            var part = RangeRead(read, low, width);
+            if (part is not null || failure is not null) return part;
+        }
         var structurePart = StructPart(term, low, width);
         if (structurePart is not null || failure is not null) return structurePart;
         var resolved = context.Get(state.Resolve, term);
         if (!resolved.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "位片来源查询失败", resolved.Why);
         if (resolved.Value != term) return Part(resolved.Value, low, width, floating);
-        if (readValues.TryGetValue(term, out var read))
+        if (readValues.TryGetValue(term, out var sourceRead))
         {
-            var loaded = ReadValue(read);
+            var loaded = ReadValue(sourceRead);
             return loaded is null ? null : Slice(loaded, low, width);
         }
         foreach (var pair in callResults)

@@ -181,6 +181,7 @@ internal static partial class LoweringChecks
         RuntimeChecks(checks, program);
         ConstructorChecks(checks, program);
         AccessChecks(checks, program);
+        RangeChecks(checks, program);
         AddressChecks(checks, program);
         StructChecks(checks, program);
         StateChecks(checks, program);
@@ -878,9 +879,9 @@ internal static partial class LoweringChecks
                 checks.True(lowered.Failure?.Reason.Code == "lowering.Access.Field", "私有字段需要内联逆证明：" + lowered.Failure);
                 continue;
             }
-            if (mode is "Partial" or "Cross")
+            if (mode == "Cross")
             {
-                checks.True(lowered.Failure?.Reason.Code == (mode == "Partial" ? "lowering.Location.Partial" : "location.cross-field"), mode + " 访问拒绝并细分原因：" + lowered.Failure);
+                checks.True(lowered.Failure?.Reason.Code == "location.padding", "跨字段读取使用填充位时报洞：" + lowered.Failure);
                 continue;
             }
             checks.True(lowered.Body is not null, mode + " 访问下降：" + lowered.Failure);

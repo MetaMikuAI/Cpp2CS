@@ -14,7 +14,31 @@ public enum ManagedLocationKind { FrameLocal, InstanceField, ArrayElement, Array
 /// <summary>Offset 是路径末端内的字节偏移，Width 是位宽；Type 为字段或元素类型，长度位置则为数组类型。Basis 保留签名或规格依据。</summary>
 public sealed record LocationView(ManagedLocationKind Kind, Term Root, TypeRef Type,
     ImmutableArray<FieldRef> Path, BigInteger Offset, int Width, Term? Index, ValueName? Basis, TypeRef? ElementType = null);
-public sealed record LocationResult(ManagedLocationKind Kind, ImmutableArray<LocationView> Views, Reason? Why = null);
+/// <summary>View 是完整标量位置；两个位偏移分别相对访问起点与声明位置起点，空 View 表示填充。</summary>
+public sealed record LocationPiece(LocationView? View, int AccessBit, int LocationBit, int Width);
+public sealed record LocationResult(ManagedLocationKind Kind, ImmutableArray<LocationView> Views, Reason? Why = null)
+{
+    public ImmutableArray<LocationPiece> Pieces { get; init; } = [];
+}
+
+/// <summary>访问范围按小端位偏移分解；空位置代表不可观察的填充。</summary>
+public sealed class ManagedRangeQuery(ManagedLocationQuery locations, ManagedTypes types) : Query<AddressRequest, LocationResult>
+{
+    public override Outcome<LocationResult> Compute(QueryContext c, AddressRequest key)
+    {
+        var located = c.Get(locations, key);
+        if (!located.IsSuccess || located.Value.Kind is ManagedLocationKind.NotManaged or ManagedLocationKind.ArrayLength) return located;
+        var leaves = located.Value.Views.Where(v => types.Kind(v.Type) != TypeKind.Struct).ToArray();
+        var exact = leaves.Where(v => v.Offset == 0 && types.Size(v.Type) * 8 == key.Width).ToArray();
+        // 显式布局可以同时给出完整字段和更宽字段的局部视图；保留唯一完整字段的既有解释。
+        var selected = exact.Length == 1 ? exact[0] : leaves.Length == 1 ? leaves[0] : null;
+        if (selected is not null)
+            return Outcome<LocationResult>.Success(located.Value with
+            { Pieces = [new(selected with { Offset = 0, Width = types.Size(selected.Type) * 8 },
+                0, (int)selected.Offset * 8, key.Width)] });
+        return locations.Locate(c, key, false, types);
+    }
+}
 public sealed record StaticValueType(TypeRef Type, ValueName? Basis);
 
 /// <summary>函数级只读查询。通过 CreateContext 使用，命名、位置与读取类型共享显式不动点组。</summary>
@@ -40,7 +64,7 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
     internal static Outcome<LocationResult> Unknown(string code, string text) => Outcome<LocationResult>.Success(new(ManagedLocationKind.Unknown, [], new("location." + code, text)));
     private static Outcome<LocationResult> NotManaged(string reason) => Outcome<LocationResult>.Success(new(ManagedLocationKind.NotManaged, [], new("location.not-managed", reason)));
     public override Outcome<LocationResult> Compute(QueryContext c, AddressRequest key) => Locate(c, key, false);
-    internal Outcome<LocationResult> Locate(QueryContext c, AddressRequest key, bool addressView)
+    internal Outcome<LocationResult> Locate(QueryContext c, AddressRequest key, bool addressView, ManagedTypes? rangeTypes = null)
     {
         var resolved = c.Get(State.Resolve, key.Address); if (!resolved.IsSuccess) return resolved.Propagate<LocationResult>();
         var address = resolved.Value;
@@ -88,7 +112,7 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
                     return Unknown("thread-static", "线程静态字段尚不定位。");
                 if (field.Field == spec.Layout.Field("Il2CppClass", "static_fields").Path &&
                     field.Owner is EntityName { Entity: ClassEntity { Type: DefinitionRef owner } })
-                    return terms.Count == 1 ? Fields(root, owner, offset, key.Width, true, false, field, addressView: addressView) : Unknown("index", "静态字段偏移不是常量。");
+                    return terms.Count == 1 ? Fields(root, owner, offset, key.Width, true, false, field, addressView: addressView, rangeTypes: rangeTypes) : Unknown("index", "静态字段偏移不是常量。");
             }
             var typed = c.Get(Types, root);
             if (!typed.IsSuccess)
@@ -127,6 +151,29 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
                         return Unknown("index", "地址含多个托管基值，不能确定元素下标。");
                     index = c.Snapshot.Terms.Apply(new CoreOperator(CoreOperation.Add), address.Width, index, unscaled);
                 }
+                if (rangeTypes is not null)
+                {
+                    if (remainder * 8 + key.Width > size.Value * 8 && terms.Count > 2)
+                        return Unknown("index", "跨元素访问缺少单一下标项加常量的依据。");
+                    var pieces = ImmutableArray.CreateBuilder<LocationPiece>();
+                    int consumed = 0, initialBit = (int)remainder * 8;
+                    while (consumed < key.Width)
+                    {
+                        int partWidth = Math.Min(key.Width - consumed, size.Value * 8 - (int)remainder * 8);
+                        var partIndex = c.Snapshot.Terms.Apply(new CoreOperator(CoreOperation.Add), index.Width, index,
+                            c.Snapshot.Terms.Constant((initialBit + consumed) / (size.Value * 8), index.Width));
+                        var part = array.Element is DefinitionRef elementType && rangeTypes.Kind(elementType) == TypeKind.Struct
+                            ? Fields(root, elementType, remainder, partWidth, false, true, value.Basis, partIndex, array.Element, rangeTypes: rangeTypes)
+                            : Yes(new(ManagedLocationKind.ArrayElement, root, array.Element, [], remainder, partWidth, partIndex, value.Basis, array.Element));
+                        if (!part.IsSuccess || part.Value.Kind == ManagedLocationKind.Unknown) return part;
+                        if (part.Value.Pieces.IsEmpty)
+                            pieces.Add(new(part.Value.Views[0] with { Offset = 0, Width = rangeTypes.Size(array.Element) * 8 },
+                                consumed, (int)remainder * 8, partWidth));
+                        else foreach (var piece in part.Value.Pieces) pieces.Add(piece with { AccessBit = piece.AccessBit + consumed });
+                        consumed += partWidth; remainder = 0;
+                    }
+                    return Outcome<LocationResult>.Success(new(ManagedLocationKind.ArrayElement, []) { Pieces = pieces.ToImmutable() });
+                }
                 if (remainder * 8 + key.Width > size.Value * 8) return Unknown("cross-field", "访问跨越数组元素。");
                 if (array.Element is DefinitionRef { Definition.IsValueType: true } element && ManagedTypes.PrimitiveName(element) is null && !element.Definition.IsEnum)
                     return Fields(root, element, remainder, key.Width, false, true, value.Basis, index, array.Element, addressView);
@@ -147,7 +194,7 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
                 if (terms.Count != 1) return Unknown("index", "实例字段偏移不是常量。");
                 if (definition.Definition.IsInterface || definition.Definition is { Assembly: "mscorlib.dll", FullName: "System.Object" })
                     return Unknown("static-type", "静态类型不足以定位字段，不猜派生类型。");
-                var result = Fields(root, definition, offset, key.Width, false, unboxed, value.Basis, addressView: addressView);
+                var result = Fields(root, definition, offset, key.Width, false, unboxed, value.Basis, addressView: addressView, rangeTypes: rangeTypes);
                 if (result.Value.Kind != ManagedLocationKind.Unknown) return result;
                 if (runtimeField.IsSuccess && runtimeField.Value.Name is FieldName or BitStorageName) return NotManaged("已命名的运行时结构字段：" + Describe(runtimeField.Value.Name));
                 return result;
@@ -200,9 +247,10 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
     }
     private static Outcome<LocationResult> Yes(LocationView view) => Outcome<LocationResult>.Success(new(view.Kind, [view]));
     private Outcome<LocationResult> Fields(Term root, DefinitionRef type, BigInteger offset, int width,
-        bool statics, bool unboxed, ValueName? basis, Term? index = null, TypeRef? element = null, bool addressView = false)
+        bool statics, bool unboxed, ValueName? basis, Term? index = null, TypeRef? element = null, bool addressView = false, ManagedTypes? rangeTypes = null)
     {
         if (Open(type) && !(Layouts is Binding.GenericWitness witness && witness.Knows(type))) return Unknown("open-type", "开放类型没有实例布局。");
+        if (rangeTypes is not null) return FieldRange(root, type, offset, width, statics, unboxed, basis, index, element, rangeTypes);
         var views = ImmutableArray.CreateBuilder<LocationView>(); bool crossing = false, missingLayout = false;
         // 数组元素和托管地址本身也是结构体位置，不要求访问恰好落在某个直接字段内。
         if (unboxed && !statics && offset == 0 && Layouts.Of(type) is { } rootLayout && (addressView || width == rootLayout.ValueSize * 8))
@@ -233,6 +281,51 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
         if (views.Count == 0) return Unknown(missingLayout ? "layout" : crossing ? "cross-field" : "no-field", missingLayout ? "布局不可用。" : crossing ? "访问跨字段。" : "偏移不落在字段上。");
         return Outcome<LocationResult>.Success(new(views[0].Kind, views.ToImmutable()));
     }
+    private Outcome<LocationResult> FieldRange(Term root, DefinitionRef type, BigInteger offset, int width,
+        bool statics, bool unboxed, ValueName? basis, Term? index, TypeRef? element, ManagedTypes types)
+    {
+        if (offset < int.MinValue / 8 || offset > int.MaxValue / 8 || width <= 0 || width % 8 != 0)
+            return Unknown("range", "访问范围不是可分解的字节范围。");
+        var leaves = new List<(LocationView View, int Bit, int Width)>();
+        var rootLayout = Layouts.Of(type); if (rootLayout is null) return Unknown("layout", "布局不可用。");
+        int minimum = statics || unboxed ? 0 : rootLayout.ObjectHeaderSize * 8;
+        int extent = 0;
+        for (DefinitionRef? current = type; current is not null; current = !statics && !current.Definition.IsValueType
+            ? current.Definition.BaseType?.Substitute(current.Arguments, []) as DefinitionRef : null)
+        {
+            var layout = Layouts.Of(current); if (layout is null) return Unknown("layout", "布局不可用。");
+            extent = Math.Max(extent, statics ? layout.StaticSize * 8 : (unboxed ? layout.ValueSize : layout.InstanceSize) * 8);
+            foreach (var slot in statics ? layout.Statics : layout.Fields)
+            {
+                int at = (slot.Offset - (unboxed ? layout.ObjectHeaderSize : 0)) * 8;
+                var head = new FieldRef(slot.Field, current);
+                IEnumerable<ValueProjection> projections = slot.Type is DefinitionRef nested && types.Kind(nested) == TypeKind.Struct
+                    ? types.Projections(nested).Select(p => p with { Path = [head, .. p.Path], Bit = at + p.Bit })
+                    : [new([head], slot.Type, at, types.StorageBits(slot.Type))];
+                foreach (var leaf in projections)
+                {
+                    if (leaf.Width <= 0) return Unknown("layout", "字段大小不可用。");
+                    leaves.Add((new(index is not null ? ManagedLocationKind.ArrayElement : statics ? ManagedLocationKind.StaticField : ManagedLocationKind.InstanceField,
+                        root, leaf.Type, [.. leaf.Path], 0, leaf.Width, index, basis, element), leaf.Bit, leaf.Width));
+                }
+            }
+        }
+        int start = (int)offset * 8;
+        if (start < minimum || (long)start + width > extent) return Unknown("cross-field", "访问越过托管布局边界。");
+        var selected = leaves.Where(p => p.Bit < (long)start + width && p.Bit + p.Width > start).OrderBy(p => p.Bit).ToArray();
+        var pieces = ImmutableArray.CreateBuilder<LocationPiece>(); int cursor = start;
+        foreach (var leaf in selected)
+        {
+            int begin = Math.Max(start, leaf.Bit), end = (int)Math.Min((long)start + width, (long)leaf.Bit + leaf.Width);
+            if (begin < cursor) return Unknown("overlap", "访问范围包含重叠字段。");
+            if (begin > cursor) pieces.Add(new(null, cursor - start, 0, begin - cursor));
+            pieces.Add(new(leaf.View, begin - start, begin - leaf.Bit, end - begin)); cursor = end;
+        }
+        if (cursor < start + width) pieces.Add(new(null, cursor - start, 0, start + width - cursor));
+        if (selected.Length == 0) return Unknown("padding", "访问仅覆盖填充字节。");
+        return Outcome<LocationResult>.Success(new(selected[0].View.Kind, []) { Pieces = pieces.ToImmutable() });
+    }
+
 }
 
 internal sealed class LocationLattice : ILattice<LocationResult>

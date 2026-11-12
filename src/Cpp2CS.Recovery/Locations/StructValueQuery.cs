@@ -235,12 +235,18 @@ public sealed class StructReturnStoreQuery(StateQueries state, BoundSource point
     }
 }
 
-public sealed record StructMemoryPart(LocationView View, Term Source, ImmutableArray<ReadIdentity> Reads);
+public sealed record StructMemoryPart(LocationView View, Term Source, ImmutableArray<ReadIdentity> Reads)
+{
+    public int Low { get; init; }
+    public int Width { get; init; }
+}
 
 /// <summary>宽读取中的完整标量字段；字段身份来自定位，快照保留所有等值原读取的求值点。</summary>
 public sealed class StructMemoryPartQuery(StateQueries state, ManagedLocationQuery? locations, ManagedTypes types)
     : Query<StructPartRequest, StructMemoryPart?>
 {
+    private readonly ManagedRangeQuery? ranges = locations is null ? null : new(locations, types);
+    private readonly ManagedReadSnapshotQuery placement = new(state);
     public override Outcome<StructMemoryPart?> Compute(QueryContext c, StructPartRequest key)
     {
         Outcome<StructMemoryPart?> None() => Outcome<StructMemoryPart?>.Success(null);
@@ -265,11 +271,36 @@ public sealed class StructMemoryPartQuery(StateQueries state, ManagedLocationQue
                 var located = c.Get(locations, new(address, key.Width)); if (!located.IsSuccess) return located.Propagate<StructMemoryPart?>();
                 var fields = located.Value.Views.Where(v => v.Offset == 0 && types.Kind(v.Type) is not (TypeKind.Struct or null)
                     && types.StorageBits(v.Type) == key.Width).ToArray();
-                if (fields.Length != 1) return None();
+                if (fields.Length != 1) break;
                 field = fields[0];
             }
             reads.Add(observed.Read.Identity);
         }
-        return field is null ? None() : Outcome<StructMemoryPart?>.Success(new(field, source, reads.ToImmutable()));
+        if (field is not null) return Outcome<StructMemoryPart?>.Success(new(field, source, reads.ToImmutable()));
+        if (source.Identity is not MemoryAtom { Location.Region: Region.Other } memory) return None();
+        // 写入转发和规范化可以只留下旧读取的部分位；在原读取的范围表里寻找保留这些位的标量位置。
+        foreach (var observed in index.Value.Reads.Values)
+        {
+            var address = c.Get(state.Resolve, observed.Read.Address); if (!address.IsSuccess) continue;
+            var native = c.Get(state.Locations, new(address.Value, observed.Read.Width)); if (!native.IsSuccess) continue;
+            var overlap = c.Get(state.Alias, new(memory.Location, native.Value)); if (!overlap.IsSuccess) continue;
+            int low = desired.Value.SliceLow!.Value;
+            if (overlap.Value.Kind != AliasKind.Overlap || low < overlap.Value.LeftLow
+                || low + key.Width > overlap.Value.LeftLow + overlap.Value.Width) continue;
+            int readLow = low - overlap.Value.LeftLow + overlap.Value.RightLow;
+            var value = c.Get(state.Read, observed.Read.Identity); if (!value.IsSuccess) continue;
+            var slice = c.Get(state.Resolve, c.Snapshot.Terms.Slice(value.Value, readLow, key.Width));
+            if (!slice.IsSuccess || slice.Value != desired.Value) continue;
+            var dominates = c.Get(placement, new(observed.Read.Identity, source));
+            if (!dominates.IsSuccess || !dominates.Value) continue;
+            var range = c.Get(ranges!, new(observed.Read.Address, observed.Read.Width)); if (!range.IsSuccess) continue;
+            var parts = range.Value.Pieces.Where(p => p.View is not null && readLow >= p.AccessBit
+                && readLow + key.Width <= p.AccessBit + p.Width).ToArray();
+            if (parts.Length != 1) continue;
+            var part = parts[0];
+            return Outcome<StructMemoryPart?>.Success(new(part.View!, value.Value, [observed.Read.Identity])
+            { Low = part.LocationBit + readLow - part.AccessBit, Width = key.Width });
+        }
+        return None();
     }
 }

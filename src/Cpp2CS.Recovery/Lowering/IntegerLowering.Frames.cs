@@ -89,6 +89,9 @@ public sealed partial class IntegerLowering
     {
         if (frameObjects is null || !frameObjects.Accesses.TryGetValue(write.Identity, out var access))
         {
+            var resolved = context.Get(state.Resolve, write.Address);
+            if (resolved.IsSuccess && context.Get(state.Locations, new(resolved.Value, write.Width)) is { IsSuccess: true } native
+                && native.Value.Region != Region.Frame && RangeStores(write, point) is { } split) return split;
             var statement = LowerStore(write, point);
             return statement is null ? [] : [statement];
         }
