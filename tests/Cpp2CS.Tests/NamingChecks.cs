@@ -6,6 +6,7 @@ using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
+using Cpp2CS.Recovery.Locations;
 using Cpp2CS.Recovery.Naming;
 using Cpp2CS.Runtime;
 using Cpp2CS.Runtime.Layouts;
@@ -94,6 +95,94 @@ internal static class NamingChecks
             a.True(found.IsSuccess && (mode!=0?found.Value.Kind==ValueKind.Unnamed:found.Value.Kind==ValueKind.ManagedReference),"运行时输入的种类、冲突与未定义位："+mode);
             if (!conflict) a.True(context.Get(query,klassInput).Value.Record=="Il2CppClass","运行时输入的类指针种类");
         }
+        LoadedValues(a, spec);
         return a.Finish("命名查询");
     }
+    private static void LoadedValues(Assertions a, RuntimeSpec spec)
+    {
+        var layouts = new FieldLayouts(spec, 8, 8); var binder = new MethodBinder(new(layouts), new Aapcs64());
+        var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
+        var operation=catalog.Functions.First(f=>f.Operation.Name=="IsInstance" && f.Signature is not null);
+        var calls = new CallNamingQuery(binder, new Map([]), new RuntimeMap(operation), catalog);
+        TypeDef Type(string name, bool value = false, string ns = "", string assembly = "test") => new()
+        { Index=0, Assembly=assembly, Namespace=ns, Name=name, Token=0, Attributes=TypeAttributes.Public,
+            IsValueType=value, IsEnum=false, Size=128, PackingSize=0, ClassSizeIsDefault=true };
+        DefinitionRef Primitive(string name) => new(Type(name, true, "System", "mscorlib.dll"), []);
+        var integer=Primitive("Int32"); var floating=Primitive("Single"); var pointer=Primitive("IntPtr");
+        var text=new DefinitionRef(Type("String", false, "System", "mscorlib.dll"), []);
+        var item=Type("Item"); var itemType=new DefinitionRef(item, []); var array=new ArrayRef(itemType, 1);
+        int header=(int)spec.Layout.ObjectHeaderSize;
+        FieldDef Field(TypeDef owner, string name, TypeRef type, int offset, bool statics=false) => new()
+        { Index=offset, Owner=owner, Name=name, Type=type, Offset=offset, Attributes=statics ? FieldAttributes.Static : FieldAttributes.Public };
+        item.Fields=[Field(item,"Value",integer,header)];
+        var nested=Type("Nested",true); nested.Size=8; nested.Fields=[Field(nested,"Item",itemType,0)];
+        var owner=Type("Owner"); var ownerType=new DefinitionRef(owner, []);
+        owner.Fields=[Field(owner,"First",itemType,header),Field(owner,"Second",itemType,header+8),
+            Field(owner,"Number",integer,header+16),Field(owner,"Fraction",floating,header+20),
+            Field(owner,"Pointer",pointer,header+24),Field(owner,"Items",array,header+32),
+            Field(owner,"Text",text,header+40),Field(owner,"Nested",new DefinitionRef(nested,[]),header+48),
+            Field(owner,"Global",itemType,0,true),Field(owner,"RuntimeItem",itemType,header+56)];
+        var t=new TermTable(); var block=new BlockIdentity(); var left=new BlockIdentity(); var right=new BlockIdentity(); var join=new BlockIdentity();
+        var frame=t.Atom(new RootAtom(AddressRoot.Frame),64); var image=t.Atom(new RootAtom(AddressRoot.Image),64);
+        var input=t.Atom(new EntryAtom(new(SlotKind.Integer)),64); var elements=t.Atom(new EntryAtom(new(SlotKind.Integer,1)),64);
+        var textParameter=t.Atom(new EntryAtom(new(SlotKind.Integer,2)),64);
+        var builder=new FunctionBuilder(t,block,64,new(frame)) { ImageBase=image };
+        builder.Inputs.Add(new(new(SlotKind.Integer,2),textParameter));
+        builder.Inputs.Add(new(new(SlotKind.Integer),input)); builder.Inputs.Add(new(new(SlotKind.Integer,1),elements));
+        var statements=new List<Statement>();
+        Term Read(Term root,long offset,int width=64)
+        {
+            var id=new ReadIdentity(); var result=t.Atom(new ResultAtom(id),width);
+            statements.Add(new MemoryRead(id,t.Apply(new CoreOperator(CoreOperation.Add),64,root,t.Constant(offset,64)),width,result)); return result;
+        }
+        var first=Read(input,header); var second=Read(input,header+8); var number=Read(input,header+16,32);
+        var fraction=Read(input,header+20,32); var native=Read(input,header+24); var items=Read(input,header+32);
+        var textHeader=Read(textParameter,0);
+        var textValue=Read(input,header+40); var leaf=Read(input,header+48); var element=Read(elements,spec.Layout.ArrayDataStart);
+        var index=t.Unknown(64,new("test.index","数组下标。"));
+        var indexed=t.Apply(new CoreOperator(CoreOperation.Add),64,elements,
+            t.Apply(new CoreOperator(CoreOperation.ShiftLeft),64,index,t.Constant(3,64)));
+        var dynamicElement=Read(indexed,spec.Layout.ArrayDataStart);
+        var chained=Read(first,header,32); var partial=Read(input,header+16,16);
+        var klass=Read(image,256); var statics=Read(klass,spec.Layout.Field("Il2CppClass","static_fields").ByteOffset); var global=Read(statics,0);
+        var used=Read(input,header+56); var runtimeCall=new CallIdentity();
+        statements.Add(new Call(runtimeCall,new ImageFunction(98),[new(new(SlotKind.Integer),used),new(new(SlotKind.Integer,1),t.Constant(0,64))],
+            [new(new(SlotKind.Integer),t.Atom(new ResultAtom(runtimeCall),64))]));
+        var unknownCall=new CallIdentity(); statements.Add(new Call(unknownCall,new ImageFunction(99),[],[]));
+        var reloaded=Read(input,header);
+        var mergeId=new MergeIdentity(); var merged=t.Atom(new ResultAtom(mergeId),64);
+        builder.Blocks.Add(new(block,[],statements.ToImmutableArray(),new Branch(t.Unknown(1,new("test.condition","分支输入")),left,right)));
+        builder.Blocks.Add(new(left,[],[],new Jump(join))); builder.Blocks.Add(new(right,[],[],new Jump(join)));
+        builder.Blocks.Add(new(join,[new(mergeId,merged,[new(left,first),new(right,second)])],[],new Return([])));
+        var method=new MethodRef(new MethodDef { Index=0, Owner=owner, Name="Read", Token=0, Attributes=MethodAttributes.Static,
+            ImplAttributes=0, Slot=-1, ReturnType=integer, Parameters=[new("owner",ownerType,0,null,false),new("items",array,0,null,false),new("text",text,0,null,false)] },[],[]);
+        var facts=NamingFacts.Empty with { Slots=ImmutableDictionary<ulong,Outcome<MetadataEntity>>.Empty
+            .Add(256,Outcome<MetadataEntity>.Success(new ClassEntity(ownerType))) };
+        var state=new StateQueries(); var names=new ValueNamingQuery(state,calls,facts,spec,binder,binder.Entry(method,BindingEntryKind.Ordinary).Value);
+        var locations=new ManagedLocationQuery(state,names,layouts,spec); var function=builder.Freeze();
+        foreach (bool typesFirst in new[] { false,true })
+        {
+            var c=names.CreateContext(function);
+            if (typesFirst) a.True(c.Get(locations.Types,chained).Value?.Type==integer,"先求读取类型可收敛");
+            var one=c.Get(names,first); var two=c.Get(names,second);
+            a.True(one.IsSuccess && one.Value is { Kind:ValueKind.ManagedReference, Record:"Il2CppObject", Name:LoadedName { StaticType:var firstType } } && firstType==itemType,"实例字段对象按声明类型命名");
+            a.True(c.Get(names,used).Value.Name is RuntimeInputName,"既有运行时实参名字优先于托管读取补名");
+            a.True(c.Get(names,element).Value is { Kind:ValueKind.ManagedReference, Name:LoadedName },"数组元素对象按声明类型命名");
+            a.True(c.Get(names,dynamicElement).Value is { Kind:ValueKind.ManagedReference, Name:LoadedName },"变动下标数组元素按声明类型命名");
+            a.True(c.Get(names,global).Value is { Kind:ValueKind.ManagedReference, Name:LoadedName },"静态字段对象按声明类型命名");
+            a.True(c.Get(names,number).Value is { Kind:ValueKind.Integer, Record:null, Name:LoadedName },"整数字段的值种类");
+            a.True(c.Get(names,fraction).Value is { Kind:ValueKind.Floating, Record:null },"浮点字段的值种类");
+            a.True(c.Get(names,native).Value is { Kind:ValueKind.NativePointer, Record:null },"原生指针字段的值种类");
+            a.True(c.Get(names,items).Value.Record=="Il2CppArray" && c.Get(names,textValue).Value.Record=="Il2CppString","数组和字符串读取的运行时结构");
+            a.True(c.Get(names,textParameter).Value is { Record:"Il2CppObject", Name:ParameterName } &&
+                c.Get(names,textHeader).Value.Name is FieldName { Record:"Il2CppObject", Field:"Il2CppObject.klass" },"签名字符串及其规格字段名字保持不变");
+            a.True(c.Get(names,leaf).Value.StaticType==itemType,"结构体字段读取按叶子声明类型");
+            a.True(c.Get(names,chained).Value.Kind==ValueKind.Integer,"连续字段读取有底递归");
+            a.True(one.Value.Name!=two.Value.Name && c.Get(names,merged).Value.Kind==ValueKind.Unnamed,"不同字段读取的名字合流冲突");
+            a.True(one.Value.Name!=c.Get(names,reloaded).Value.Name,"可能改写后的读取保留不同身份");
+            a.True(c.Get(names,partial).Value.Kind==ValueKind.Unnamed,"部分整数读取不冒充整体读取");
+            a.True(c.Get(names,statics).Value.Name is FieldName && c.Get(names,klass).Value.Name is EntityName,"既有规格和实体名字优先");
+        }
+    }
+
 }

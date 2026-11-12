@@ -6,6 +6,7 @@ using Cpp2CS.Native;
 using Cpp2CS.Native.Abi;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
+using Cpp2CS.Recovery.Locations;
 using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.Naming;
@@ -15,12 +16,16 @@ public abstract record ValueName;
 public sealed record EntityName(MetadataEntity Entity, ulong Slot) : ValueName;
 public sealed record ParameterName(int Index, TypeRef? StaticType, bool MethodInformation) : ValueName;
 public sealed record CallResultName(CallIdentity Call, TypeRef? StaticType, string? Operation) : ValueName;
+/// <summary>身份沿用读取项；声明类型不证明不同读取同值。</summary>
+public sealed record LoadedName(Term Read, TypeRef StaticType) : ValueName;
 public sealed record FieldName(ValueName Owner, string Record, string Field, long? Index = null) : ValueName;
 public sealed record BitStorageName(ValueName Owner, string Record, string Fields) : ValueName;
 public sealed record AddressName(Term Address) : ValueName;
 public sealed record NamedValue(ValueKind Kind, ValueName? Name, string? Record = null, Reason? Why = null)
 {
-    public static NamedValue Unknown(string code, string message) => new(ValueKind.Unnamed, null, Why: new(code, message));
+    public static NamedValue Unknown(string code, string message, Reason? cause = null) => new(ValueKind.Unnamed, null, Why: new(code, message, cause));
+    public TypeRef? StaticType => Name switch
+    { ParameterName p => p.StaticType, CallResultName r => r.StaticType, LoadedName r => r.StaticType, _ => null };
 }
 
 /// <summary>名字保存实体、定义或规格字段依据；不向项表写入替代项，不改写快照。</summary>
@@ -30,8 +35,17 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
     internal RuntimeSpec Spec => spec;
     internal MethodBinder Binder => binder;
     private readonly RuntimeInputKindsQuery inputKinds = new(state,calls);
-    public QueryContext CreateContext(NativeFunction function) => new(function, null, state.Group,
-        new FixedPointGroup(1_000_000, FixedPointMember.Create(this, _ => new NameLattice())));
+    private ManagedLocationQuery? locations;
+    internal SpecificationReadQuery SpecificationReads { get; } = new();
+    internal void UseLocations(ManagedLocationQuery query)
+    {
+        if (locations is not null) throw new InvalidOperationException("命名查询已绑定托管位置查询。");
+        locations = query;
+    }
+    internal FixedPointMember[] Members => [FixedPointMember.Create(this, _ => new NameLattice()),
+        FixedPointMember.Create(SpecificationReads, _ => new NameLattice())];
+    public QueryContext CreateContext(NativeFunction function) => locations is not null ? locations.CreateContext(function)
+        : new(function, null, state.Group, new FixedPointGroup(1_000_000, Members));
     private static Outcome<NamedValue> Yes(NamedValue value) => Outcome<NamedValue>.Success(value);
     public override Outcome<NamedValue> Compute(QueryContext c, Term key)
     {
@@ -39,9 +53,15 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
         if (!result.IsSuccess || result.Value.Kind!=ValueKind.Unnamed) return result;
         var resolved=c.Get(state.Resolve,key); if (!resolved.IsSuccess) return result;
         var inputs=c.Get(inputKinds,0); if (!inputs.IsSuccess) return inputs.Propagate<NamedValue>();
-        if (!inputs.Value.TryGetValue(resolved.Value,out var kind)) return result;
-        var name=new RuntimeInputName(resolved.Value,kind);
-        return Yes(RuntimeValue(kind,name));
+        if (inputs.Value.TryGetValue(resolved.Value,out var kind))
+            return Yes(RuntimeValue(kind,new RuntimeInputName(resolved.Value,kind)));
+        // 托管读取只补充此前所有命名来源均未命名的值。
+        var value=resolved.Value;
+        if (value.Identity is MemoryAtom memory) return Read(c, value, memory.Location);
+        if (value.Identity is EdgeReadAtom projected) return Read(c, value, projected.Location);
+        if (value.Kind == TermKind.Slice && value.Operands[0].Identity is MemoryAtom bits)
+            return Read(c, value, bits.Location with { Width=value.Width }, value.SliceLow!.Value);
+        return result;
     }
 
     private Outcome<NamedValue> Definition(QueryContext c, Term key)
@@ -71,10 +91,10 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
         var resolved = c.Get(state.Resolve, key);
         if (!resolved.IsSuccess) return Yes(new(ValueKind.Unnamed, null, Why: resolved.Why));
         if (resolved.Value != key) return c.Get(this, resolved.Value);
-        if (key.Identity is MemoryAtom memory) return Read(c, memory.Location);
-        if (key.Identity is EdgeReadAtom projected) return Read(c, projected.Location);
+        if (key.Identity is MemoryAtom memory) return c.Get(SpecificationReads, new(this, memory.Location));
+        if (key.Identity is EdgeReadAtom projected) return c.Get(SpecificationReads, new(this, projected.Location));
         if (key.Kind == TermKind.Slice && key.Operands[0].Identity is MemoryAtom bits)
-            return Read(c, bits.Location with { Width = key.Width }, key.SliceLow!.Value);
+            return c.Get(SpecificationReads, new(this, bits.Location with { Width = key.Width }, key.SliceLow!.Value));
         if (key.Identity is MemoryMerge || key.Identity is ResultAtom { Definition: MergeIdentity }) return Merge(c, key);
         var definition = key.Identity as ResultAtom;
         if (key.Kind == TermKind.Slice) definition = key.Operands[0].Identity as ResultAtom;
@@ -117,10 +137,26 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
         RuntimeValueKind.ManagedAddress => new(ValueKind.ManagedAddress,name),
         _ => new(ValueKind.NativePointer,name)
     };
-    private static NamedValue Typed(CType ctype, TypeRef? type, ValueName name)
+    private static NamedValue Typed(CType? ctype, TypeRef? type, ValueName name)
     {
-        if (type is not null && ManagedTypes.IsReferenceType(type)) return new(ValueKind.ManagedReference, name, type is ArrayRef ? "Il2CppArray" : ManagedTypes.PrimitiveName(type) == "String" ? "Il2CppString" : "Il2CppObject");
+        if (type is not null && ManagedTypes.IsReferenceType(type))
+        {
+            // 签名值保留既有结构身份，避免改变其规格字段名字；新增读取按声明类型选择字符串结构。
+            bool text = ctype is null && type is DefinitionRef { Definition.Assembly: "mscorlib.dll", Definition.FullName: "System.String" };
+            return new(ValueKind.ManagedReference, name, type is ArrayRef ? "Il2CppArray" : text ? "Il2CppString" : "Il2CppObject");
+        }
         if (type is ByRefRef) return new(ValueKind.ManagedAddress, name);
+        if (ctype is null && type is not null)
+        {
+            var scalar = ManagedTypes.Underlying(type);
+            if (ManagedTypes.IsNativePointer(scalar)) return new(ValueKind.NativePointer, name);
+            return ManagedTypes.PrimitiveName(scalar) switch
+            {
+                "Single" or "Double" => new(ValueKind.Floating, name),
+                "Boolean" or "Char" or "SByte" or "Byte" or "Int16" or "UInt16" or "Int32" or "UInt32" or "Int64" or "UInt64" => new(ValueKind.Integer, name),
+                _ => NamedValue.Unknown("naming.aggregate", "聚合值没有标量种类。")
+            };
+        }
         return ctype switch
         {
             CInteger => new(ValueKind.Integer, name), CFloat => new(ValueKind.Floating, name), CPointer => new(ValueKind.NativePointer, name),
@@ -149,7 +185,28 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
         }
         return Yes(names.Count == 0 ? NameLattice.Pending : names.Count == 1 ? names.Single() : NamedValue.Unknown("naming.merge", "合流输入没有一致名字。"));
     }
-    private Outcome<NamedValue> Read(QueryContext c, Location location, int low = 0)
+    private Outcome<NamedValue> Read(QueryContext c, Term key, Location location, int low = 0)
+    {
+        var specification = c.Get(SpecificationReads, new(this, location, low));
+        if (!specification.IsSuccess || specification.Value.Kind != ValueKind.Unnamed || specification.Value == NameLattice.Pending || locations is null || location.Region != Region.Other) return specification;
+        if (low % 8 != 0) return specification;
+        var request = ManagedReadTypeQuery.Address(c, location, low / 8);
+        if (request is null) return specification;
+        var located = c.Get(locations, request.Value);
+        if (!located.IsSuccess) return located.Propagate<NamedValue>();
+        if (located.Value.Kind is not (ManagedLocationKind.InstanceField or ManagedLocationKind.StaticField or ManagedLocationKind.ArrayElement or ManagedLocationKind.Unknown))
+            return specification;
+        var typed = c.Get(locations.ReadTypes, request.Value);
+        if (!typed.IsSuccess) return Yes(NamedValue.Unknown("naming.read-location", "读取没有唯一完整托管位置类型。", typed.Why));
+        if (typed.Value is null) return Yes(NameLattice.Pending);
+        return Yes(Typed(null, typed.Value.Type, new LoadedName(key, typed.Value.Type)));
+    }
+    internal readonly record struct SpecificationRead(ValueNamingQuery Names, Location Location, int Low = 0);
+    internal sealed class SpecificationReadQuery : Query<SpecificationRead, NamedValue>
+    {
+        public override Outcome<NamedValue> Compute(QueryContext c, SpecificationRead key) => key.Names.ReadSpecification(c, key.Location, key.Low);
+    }
+    private Outcome<NamedValue> ReadSpecification(QueryContext c, Location location, int low)
     {
         if (location.Region == Region.Image && location.Offset is { } offset && offset >= 0 && offset <= ulong.MaxValue &&
             low == 0 && location.Width == c.Snapshot.AddressWidth && facts.Slots.TryGetValue((ulong)offset, out var entity))
@@ -171,7 +228,7 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
         var owner = c.Get(this, location.Root); if (!owner.IsSuccess) return owner;
         if (owner.Value == NameLattice.Pending) return owner;
         if (owner.Value.Name is not { } parent || owner.Value.Record is not { } record || !spec.Layout.Records.TryGetValue(record, out var layout))
-            return Yes(NamedValue.Unknown("naming.read-base", "读取的基值没有运行时结构身份。"));
+            return Yes(NamedValue.Unknown("naming.read-base", "读取的基值没有运行时结构身份。", owner.Value.Why));
         var bitOffset = location.Offset.Value * 8 + low;
         var fields = layout.Fields.Values.Where(f => f.OffsetBits == bitOffset && (f.BitWidth ?? f.Size * 8) == location.Width).ToArray();
         // 对象头的联合以运行时对象的 klass 视图解释。

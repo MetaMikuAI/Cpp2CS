@@ -17,7 +17,7 @@ public sealed record LocationView(ManagedLocationKind Kind, Term Root, TypeRef T
 public sealed record LocationResult(ManagedLocationKind Kind, ImmutableArray<LocationView> Views, Reason? Why = null);
 public sealed record StaticValueType(TypeRef Type, ValueName? Basis);
 
-/// <summary>函数级只读查询。通过 CreateContext 使用，位置与读取类型共享显式不动点组。</summary>
+/// <summary>函数级只读查询。通过 CreateContext 使用，命名、位置与读取类型共享显式不动点组。</summary>
 public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
 {
     internal readonly StateQueries State;
@@ -25,12 +25,15 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
     internal readonly ITypeLayouts Layouts;
     private readonly RuntimeSpec spec;
     public LocationTypeQuery Types { get; }
+    internal ManagedReadTypeQuery ReadTypes { get; }
     public ManagedLocationQuery(StateQueries state, ValueNamingQuery names, ITypeLayouts layouts, RuntimeSpec spec)
-    { State = state; Names = names; Layouts = layouts; this.spec = spec; Types = new(this); }
+    {
+        State = state; Names = names; Layouts = layouts; this.spec = spec; Types = new(this); ReadTypes = new(this);
+        names.UseLocations(this);
+    }
     public QueryContext CreateContext(NativeFunction function) => new(function, null, State.Group,
-        new FixedPointGroup(1_000_000, FixedPointMember.Create(Names, _ => new NameLattice())),
-        new FixedPointGroup(1_000_000, FixedPointMember.Create(this, _ => new LocationLattice()),
-            FixedPointMember.Create(Types, _ => new TypeLattice())));
+        new FixedPointGroup(1_000_000, [.. Names.Members, FixedPointMember.Create(this, _ => new LocationLattice()),
+            FixedPointMember.Create(Types, _ => new TypeLattice()), FixedPointMember.Create(ReadTypes, _ => new TypeLattice())]));
     internal static LocationResult Pending { get; } = new(ManagedLocationKind.Unknown, [], new("location.pending", "循环尚无定位依据。"));
     internal static Outcome<LocationResult> Unknown(string code, string text) => Outcome<LocationResult>.Success(new(ManagedLocationKind.Unknown, [], new("location." + code, text)));
     private static Outcome<LocationResult> NotManaged(string reason) => Outcome<LocationResult>.Success(new(ManagedLocationKind.NotManaged, [], new("location.not-managed", reason)));
@@ -41,7 +44,8 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
         var location = c.Get(State.Locations, new(address, key.Width)); if (!location.IsSuccess) return location.Propagate<LocationResult>();
         if (location.Value.Region is Region.Frame or Region.Image) return NotManaged(location.Value.Region.ToString());
         if (location.Value.Region == Region.Thread) return Unknown("thread-static", "线程区域尚不定位。");
-        var runtimeField = c.Get(Names, c.Snapshot.Terms.Atom(new MemoryAtom(location.Value, null), key.Width));
+        var runtimeField = c.Get(Names.SpecificationReads, new(Names, location.Value));
+        if (runtimeField.IsSuccess && runtimeField.Value == NameLattice.Pending) return Outcome<LocationResult>.Success(Pending);
         if (runtimeField.IsSuccess && (runtimeField.Value.Name is BitStorageName || runtimeField.Value.Name is FieldName specification &&
             specification.Field != spec.Layout.Field("Il2CppArray", "max_length").Path))
             return NotManaged("已命名的运行时结构字段。");
@@ -61,11 +65,12 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
         offset = (offset % modulus + modulus) % modulus;
         if (offset >= modulus / 2) offset -= modulus;
         bool awaitingType = false, namedBase = false;
-        Reason? typeFailure = null;
+        Reason? typeFailure = null, baseFailure = null;
         foreach (var root in terms)
         {
             var named = c.Get(Names, root);
             namedBase |= named.IsSuccess && named.Value.Name is not null;
+            baseFailure ??= named.IsSuccess ? named.Value.Why : named.Why;
             if (named.IsSuccess && named.Value.Name is FieldName field && field.Record == "Il2CppClass")
             {
                 if (field.Field == spec.Layout.Field("Il2CppClass", "thread_static_fields_offset").Path)
@@ -95,8 +100,7 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
                 var relative = offset - spec.Layout.ArrayDataStart;
                 if (terms.Count == 1 && relative < 0)
                 {
-                    var header = c.Get(Names, c.Snapshot.Terms.Atom(new MemoryAtom(location.Value, null), key.Width));
-                    return header.IsSuccess && header.Value.Name is FieldName or BitStorageName
+                    return runtimeField.IsSuccess && runtimeField.Value.Name is FieldName or BitStorageName
                         ? NotManaged("已命名的数组头字段。") : Unknown("no-field", "偏移位于数组头，未对应长度或已命名规格字段。");
                 }
                 var remainder = (relative % size.Value + size.Value) % size.Value;
@@ -134,16 +138,15 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
                     return Unknown("static-type", "静态类型不足以定位字段，不猜派生类型。");
                 var result = Fields(root, definition, offset, key.Width, false, unboxed, value.Basis);
                 if (result.Value.Kind != ManagedLocationKind.Unknown) return result;
-                var runtime = c.Get(Names, c.Snapshot.Terms.Atom(new MemoryAtom(location.Value, null), key.Width));
-                if (runtime.IsSuccess && runtime.Value.Name is FieldName or BitStorageName) return NotManaged("已命名的运行时结构字段。");
+                if (runtimeField.IsSuccess && runtimeField.Value.Name is FieldName or BitStorageName) return NotManaged("已命名的运行时结构字段。");
                 return result;
             }
         }
         if (awaitingType) return Outcome<LocationResult>.Success(Pending);
-        var runtimeName = c.Get(Names, c.Snapshot.Terms.Atom(new MemoryAtom(location.Value, null), key.Width));
-        if (runtimeName.IsSuccess && runtimeName.Value.Name is FieldName or BitStorageName) return NotManaged("已命名的运行时结构字段。");
+        if (runtimeField.IsSuccess && runtimeField.Value.Name is FieldName or BitStorageName) return NotManaged("已命名的运行时结构字段。");
         if (typeFailure is not null) return Outcome<LocationResult>.Success(new(ManagedLocationKind.Unknown, [], typeFailure));
-        return Unknown(namedBase ? "base-untyped" : "base-unnamed", namedBase ? "已命名基值没有静态类型。" : "基值未命名。");
+        return Outcome<LocationResult>.Success(new(ManagedLocationKind.Unknown, [], new(namedBase ? "location.base-untyped" : "location.base-unnamed",
+            namedBase ? "已命名基值没有静态类型。" : "基值未命名。", baseFailure)));
     }
     private static bool Open(TypeRef type) => type switch
     {
@@ -231,7 +234,7 @@ public sealed class LocationTypeQuery(ManagedLocationQuery q) : Query<Term, Stat
         var named = c.Get(q.Names, key);
         if (named.IsSuccess)
         {
-            var type = named.Value.Name switch { ParameterName p => p.StaticType, CallResultName r => r.StaticType, _ => null };
+            var type = named.Value.StaticType;
             if (type is not null) return Yes(new(type, named.Value.Name));
         }
         var resolved = c.Get(q.State.Resolve, key); if (!resolved.IsSuccess) return resolved.Propagate<StaticValueType?>();
@@ -254,15 +257,37 @@ public sealed class LocationTypeQuery(ManagedLocationQuery q) : Query<Term, Stat
         }
         if (key.Identity is MemoryAtom memory)
         {
-            var address = memory.Location.UnknownOffsetAddress;
-            if (memory.Location.Offset is { } offset)
-                address = c.Snapshot.Terms.Apply(new CoreOperator(CoreOperation.Add), memory.Location.Root.Width, memory.Location.Root, c.Snapshot.Terms.Constant(offset & ((BigInteger.One << memory.Location.Root.Width) - 1), memory.Location.Root.Width));
-            if (address is null) return Outcome<StaticValueType?>.Failure(new("location.base-type", "读取地址没有可用分解。"));
-            var location = c.Get(q, new(address, memory.Location.Width)); if (!location.IsSuccess) return location.Propagate<StaticValueType?>();
-            var types = location.Value.Views.Where(v => v.Kind != ManagedLocationKind.ArrayLength && v.Offset == 0 && q.Layouts.TrySizeAndAlignment(v.Type)?.Size * 8 == key.Width).Select(v => v.Type).Distinct().ToArray();
-            if (types.Length == 1) return Yes(new(types[0], null));
-            if (location.Value == ManagedLocationQuery.Pending) return Yes(null);
+            var request = ManagedReadTypeQuery.Address(c, memory.Location);
+            if (request is not null) return c.Get(q.ReadTypes, request.Value);
         }
         return Outcome<StaticValueType?>.Failure(new("location.base-type", "定义没有静态类型。"));
+    }
+}
+
+/// <summary>完整托管读取的声明类型按地址与宽度缓存；读取版本仍由值名字保留。</summary>
+internal sealed class ManagedReadTypeQuery(ManagedLocationQuery q) : Query<AddressRequest, StaticValueType?>
+{
+    internal static AddressRequest? Address(QueryContext c, Location location, int byteOffset = 0)
+    {
+        var address = location.UnknownOffsetAddress;
+        if (location.Offset is { } offset)
+            address = c.Snapshot.Terms.Apply(new CoreOperator(CoreOperation.Add), location.Root.Width, location.Root,
+                c.Snapshot.Terms.Constant(offset & ((BigInteger.One << location.Root.Width) - 1), location.Root.Width));
+        if (address is null) return null;
+        if (byteOffset != 0) address = c.Snapshot.Terms.Apply(new CoreOperator(CoreOperation.Add), address.Width, address,
+            c.Snapshot.Terms.Constant(byteOffset, address.Width));
+        return new(address, location.Width);
+    }
+    public override Outcome<StaticValueType?> Compute(QueryContext c, AddressRequest key)
+    {
+        var location = c.Get(q, key); if (!location.IsSuccess) return location.Propagate<StaticValueType?>();
+        if (location.Value == ManagedLocationQuery.Pending) return Outcome<StaticValueType?>.Success(null);
+        var exact = location.Value.Views.Where(v => v.Kind != ManagedLocationKind.ArrayLength && v.Offset == 0 &&
+            q.Layouts.TrySizeAndAlignment(v.Type)?.Size * 8 == key.Width).ToArray();
+        var leaves = exact.Where(v => ManagedTypes.IsReferenceType(v.Type) || v.Type is ByRefRef || ManagedTypes.IsNativePointer(v.Type) ||
+            ManagedTypes.PrimitiveName(ManagedTypes.Underlying(v.Type)) is not null).ToArray();
+        var types = (leaves.Length == 0 ? exact : leaves).Select(v => v.Type).Distinct().ToArray();
+        if (types.Length == 1) return Outcome<StaticValueType?>.Success(new(types[0], null));
+        return Outcome<StaticValueType?>.Failure(new("location.read-type", "读取没有唯一完整位置类型。", location.Value.Why));
     }
 }

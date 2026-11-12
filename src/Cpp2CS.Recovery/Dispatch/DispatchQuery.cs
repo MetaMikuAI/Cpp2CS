@@ -105,7 +105,15 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
             MemoryAtom => TargetShape.MemoryRead, _ => TargetShape.Other
         };
         var data = c.Get(interfaceData, new(target, site.Point, "methodPtr"));
-        if (!data.IsSuccess) return Yes(new(DispatchKind.Unresolved, shape, Why: data.Why));
+        if (!data.IsSuccess)
+        {
+            // 接口查询的来源否定不构成接口调用凭据；目标命名失败应归因到命名层。
+            if (data.Why?.Code == "dispatch.interface-source")
+                return !named.IsSuccess || named.Value.Kind == ValueKind.Unnamed
+                    ? No(shape, "target-unnamed", "调用目标或其基值未命名。", named.IsSuccess ? named.Value.Why : named.Why)
+                    : No(shape, "target-kind", "目标名字没有已支持的分派身份。");
+            return Yes(new(DispatchKind.Unresolved, shape, Why: data.Why));
+        }
         var interfaceName = c.Get(names, data.Value.Interface);
         if (!interfaceName.IsSuccess || interfaceName.Value.Name is not EntityName { Entity: ClassEntity { Type: DefinitionRef interfaceType } } || !interfaceType.Definition.IsInterface || Open(interfaceType))
             return No(shape, "interface-name", "接口没有具体的元数据类型名字。");
