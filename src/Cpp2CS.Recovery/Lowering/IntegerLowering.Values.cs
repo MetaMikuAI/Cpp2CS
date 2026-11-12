@@ -61,7 +61,7 @@ public sealed partial class IntegerLowering
         if (vectorResults.TryGetValue(term, out var vector)) return vector.Local;
         if (runtimeValues.TryGetValue(term, out var runtime)) return runtime;
         if (arguments.TryGetValue(term, out var argument))
-            return IsFloat(argument.Type) || ReferenceType(argument.Type) ? argument : IntegerType(argument.Type) ? Mask(argument, term.Width)
+            return Opaque(argument.Type) || IsFloat(argument.Type) || ReferenceType(argument.Type) ? argument : IntegerType(argument.Type) ? Mask(argument, term.Width)
                 : Fail<ManagedValue>(TypeFailure(argument.Type), "使用了非整数形参");
         if (term.Width > 64) return Fail<ManagedValue>(LoweringFailureKind.FloatingOrVector, "项位宽超过整数栈宽度");
         if (term.Identity is ResultAtom { Definition: ReadIdentity readId })
@@ -133,7 +133,7 @@ public sealed partial class IntegerLowering
             var root = pair.Key.Kind == TermKind.Slice ? pair.Key.Operands[0] : pair.Key;
             int start = pair.Key.SliceLow ?? 0;
             if (term != root || low < start || low + width > start + pair.Key.Width) continue;
-            if (!IntegerType(pair.Value.Type) && !IsFloat(pair.Value.Type)) return Fail<ManagedValue>(TypeFailure(pair.Value.Type), "使用了非整数形参位片");
+            if (!Opaque(pair.Value.Type) && !IntegerType(pair.Value.Type) && !IsFloat(pair.Value.Type)) return Fail<ManagedValue>(TypeFailure(pair.Value.Type), "使用了非整数形参位片");
             return Slice(pair.Value, low - start, width);
         }
         if (term.Kind == TermKind.Concat)
@@ -160,6 +160,11 @@ public sealed partial class IntegerLowering
     }
     private ManagedValue Slice(ManagedValue value, int low, int width)
     {
+        if (Opaque(value.Type))
+        {
+            if (low != 0 || width != value.Width) GenericFailure<object>("Arithmetic", "类型参数值不能拆分位片");
+            return value;
+        }
         if (ReferenceType(value.Type))
         {
             if (low != 0 || width != value.Width) Fail<object>(LoweringFailureKind.UnsupportedType, "引用的部分位片没有托管值表示");
@@ -177,6 +182,16 @@ public sealed partial class IntegerLowering
             return FloatOperation(term, op);
         var operands = term.Operands.Select((t, i) => Value(t, floating && op == CoreOperation.Select && i > 0)).ToArray();
         if (operands.Any(v => v is null)) return null;
+        if (operands.Any(v => Opaque(v!.Type)))
+        {
+            if (op == CoreOperation.Select && !Opaque(operands[0]!.Type))
+            {
+                var type = operands[1]!.Type;
+                return new ChoiceValue(operands[0]!, Coerce(operands[1]!, type), Coerce(operands[2]!, type), type, term.Width);
+            }
+            return GenericFailure<ManagedValue>(op is CoreOperation.Equal or CoreOperation.NotEqual && operands.Any(v => v is ConstantValue { Bits: 0 })
+                ? "NullTest" : "Arithmetic", "类型参数值参与尚未支持的运算：" + op);
+        }
         if (operands.Any(v => ReferenceType(v!.Type)))
         {
             if (op is CoreOperation.Equal or CoreOperation.NotEqual)

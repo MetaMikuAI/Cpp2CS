@@ -92,7 +92,7 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
             }
             if (typed.Value is not { } value) { awaitingType = true; continue; }
             var type = value.Type;
-            if (Open(type)) return Unknown("open-type", "开放类型没有实例布局。");
+            if (Open(type) && !(Layouts is Binding.GenericWitness witness && witness.Knows(type))) return Unknown("open-type", "开放类型没有实例布局。");
             if (type is ArrayRef array)
             {
                 var length = spec.Layout.Field("Il2CppArray", "max_length");
@@ -195,7 +195,7 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
     private Outcome<LocationResult> Fields(Term root, DefinitionRef type, BigInteger offset, int width,
         bool statics, bool unboxed, ValueName? basis, Term? index = null, TypeRef? element = null, bool addressView = false)
     {
-        if (Open(type)) return Unknown("open-type", "开放类型没有实例布局。");
+        if (Open(type) && !(Layouts is Binding.GenericWitness witness && witness.Knows(type))) return Unknown("open-type", "开放类型没有实例布局。");
         var views = ImmutableArray.CreateBuilder<LocationView>(); bool crossing = false, missingLayout = false;
         // 数组元素和托管地址本身也是结构体位置，不要求访问恰好落在某个直接字段内。
         if (unboxed && !statics && offset == 0 && Layouts.Of(type) is { } rootLayout && (addressView || width == rootLayout.ValueSize * 8))

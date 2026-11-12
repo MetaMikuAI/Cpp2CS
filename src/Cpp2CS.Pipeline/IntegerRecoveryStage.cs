@@ -70,10 +70,13 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
             EntryKind.Invoker => BindingEntryKind.Invoker,
             _ => BindingEntryKind.Wrapper,
         };
-        var types = parts.Types;
-        var transformed = StructureRecovery.Run(input, context, parts.Binder, kind, parts.Types.Layouts);
+        var definition = MethodRef.Open(context.Method);
+        var layouts = GenericWitness.IsGeneric(context.Method)
+            ? new GenericWitness(definition, context.Entry.Method!, parts.Types.Layouts) : parts.Types.Layouts;
+        var types = GenericWitness.IsGeneric(context.Method) ? new ManagedTypes(context.Facts.Model, layouts, parts.Types.PointerSize) : parts.Types;
+        var transformed = StructureRecovery.Run(input, context, parts.Binder, kind, layouts);
         var result = new IntegerLowering(transformed.Function, MethodRef.Open(context.Method), parts.Binder,
-            types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names, parts.Accessors, parts.Constructors).Run(kind);
+            types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names, parts.Accessors, parts.Constructors, witness: context.Entry.Method).Run(kind);
         if (result.Body is { } candidate)
         {
             // 位重解释与浮点取整等依赖匹配核心库的 BCL 方法；裁剪掉的能力是缺口，不交给输出层制造非法体。

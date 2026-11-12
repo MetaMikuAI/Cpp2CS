@@ -145,6 +145,7 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
             bool text = ctype is null && type is DefinitionRef { Definition.Assembly: "mscorlib.dll", Definition.FullName: "System.String" };
             return new(ValueKind.ManagedReference, name, type is ArrayRef ? "Il2CppArray" : text ? "Il2CppString" : "Il2CppObject");
         }
+        if (type is GenericParameterRef) return new(ValueKind.NativePointer, name);
         if (type is ByRefRef) return new(ValueKind.ManagedAddress, name);
         if (ctype is null && type is not null)
         {

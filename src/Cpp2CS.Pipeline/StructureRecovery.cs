@@ -34,7 +34,7 @@ public static class StructureRecovery
         survey.Observe(input);
         var names = survey.Finish();
         var state = new StateQueries(image: facts.Image);
-        var signature = binder.Entry(MethodRef.Open(context.Method), kind).Value;
+        var signature = binder.Definition(MethodRef.Open(context.Method), kind, context.Entry.Method).Value;
         var values = new ValueNamingQuery(state, calls, names, facts.Spec, binder, signature);
         var slots = signature?.Slots.Return.Pieces.Select(p => p.Slot).ToHashSet();
         layouts ??= new FieldLayouts(facts.Spec, facts.Image.PointerWidth, facts.Image.PointerWidth);

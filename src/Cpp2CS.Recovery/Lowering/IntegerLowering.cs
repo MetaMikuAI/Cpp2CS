@@ -31,6 +31,7 @@ public sealed partial class IntegerLowering
 {
     private readonly NativeFunction function;
     private readonly MethodRef method;
+    private readonly MethodRef? witness;
     private readonly MethodBinder binder;
     private readonly ManagedTypes types;
     private readonly StateQueries state;
@@ -57,9 +58,9 @@ public sealed partial class IntegerLowering
 
     public IntegerLowering(NativeFunction function, MethodRef method, MethodBinder binder, ManagedTypes types,
         Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null, RuntimeSpec? spec = null, NamingFacts? names = null,
-        AccessorQuery? accessors = null, ConstructorQuery? constructors = null)
+        AccessorQuery? accessors = null, ConstructorQuery? constructors = null, MethodRef? witness = null)
     {
-        this.function = function; this.method = method; this.binder = binder; this.types = types;
+        this.function = function; this.method = method; this.witness = witness; this.binder = binder; this.types = types;
         this.calls = calls; this.spec = spec; this.names = names ?? NamingFacts.Empty;
         this.accessors = accessors;
         this.constructors = constructors;
@@ -81,10 +82,13 @@ public sealed partial class IntegerLowering
 
     public LoweringResult Run(BindingEntryKind kind = BindingEntryKind.Ordinary)
     {
-        var bound = binder.Entry(method, kind);
+        var bound = binder.Definition(method, kind, witness);
         if (bound.Value is not { } binding)
-        { Fail<object>(LoweringFailureKind.Binding, bound.Failure!.Detail); return new(null, failure); }
+        { Fail<object>(LoweringFailureKind.Binding, bound.Failure!.Detail, code: GenericWitness.IsGeneric(method.Method) ? "lowering.Generic.Witness" : null); return new(null, failure); }
         signature = binding;
+        if (method.Method.Parameters.Select(p => method.Concrete(p.Type)).Append(method.Concrete(method.Method.ReturnType))
+            .Append(method.DeclaringType).Any(GenericStruct))
+        { GenericFailure<object>("Struct", "含类型参数的值类型签名尚未下降"); return new(null, failure); }
         if (spec is not null && calls is not null)
         {
             var naming = new ValueNamingQuery(state, calls, names, spec, binder, signature);
@@ -187,7 +191,7 @@ public sealed partial class IntegerLowering
                 var v = Part(input.Value, merge.Low, merge.Width, IsFloat(merge.Local.Type));
                 if (v is null) return new(null, failure);
                 var edge = Edge(input.Predecessor, merge.Target);
-                ((List<ManagedCopy>)edge.Copies).Add(new(merge.Local, ReferenceType(merge.Local.Type) ? Coerce(v, merge.Local.Type) : IsFloat(merge.Local.Type) ? FloatBits(v, merge.Local.Width) : Convert(v, merge.Local.Width)));
+                ((List<ManagedCopy>)edge.Copies).Add(new(merge.Local, Opaque(merge.Local.Type) || Opaque(v.Type) || ReferenceType(merge.Local.Type) ? Coerce(v, merge.Local.Type) : IsFloat(merge.Local.Type) ? FloatBits(v, merge.Local.Width) : Convert(v, merge.Local.Width)));
             }
         }
         // 合流入边也可能首次使用调用结果，全部值下降后再回填结果局部。
@@ -218,6 +222,7 @@ public sealed partial class IntegerLowering
             }
         }
         var body = new ManagedBody(method, [.. blocks, .. extraBlocks]);
+        CheckGenericBody(body);
         CheckBody(body);
         return failure is null ? new(Materialize(body), null) : new(null, failure);
     }
@@ -264,7 +269,7 @@ public sealed partial class IntegerLowering
                 if (value is null) return null;
                 if (IsFloat(method.Concrete(method.Method.ReturnType)))
                     return new ManagedReturn(position, FloatBits(value, source.Term.Width));
-                if (ReferenceType(method.Concrete(method.Method.ReturnType)))
+                if (Opaque(value.Type) || Opaque(method.Concrete(method.Method.ReturnType)) || ReferenceType(method.Concrete(method.Method.ReturnType)))
                     return new ManagedReturn(position, Coerce(value, method.Concrete(method.Method.ReturnType)));
                 value = IntegerBits(value);
                 if (!IntegerType(method.Concrete(method.Method.ReturnType))) return Fail<ManagedStatement>(TypeFailure(method.Concrete(method.Method.ReturnType)), "返回类型不是整数");
@@ -298,7 +303,7 @@ public sealed partial class IntegerLowering
         if (merges.TryGetValue(key, out var local)) return local;
         if (width > 64) return Fail<LocalValue>(LoweringFailureKind.FloatingOrVector, "合流位宽超过整数栈宽度");
         var staticType = StaticType(term);
-        local = new(new(nextLocal++), staticType is not null && ReferenceType(staticType) ? staticType : floating && width is 32 or 64 ? FloatType(width) : StackType(width), StackWidth(width));
+        local = new(new(nextLocal++), staticType is not null && (Opaque(staticType) || ReferenceType(staticType)) ? staticType : floating && width is 32 or 64 ? FloatType(width) : StackType(width), StackWidth(width));
         merges.Add(key, local);
         if (term.Identity is ResultAtom { Definition: MergeIdentity id })
         {

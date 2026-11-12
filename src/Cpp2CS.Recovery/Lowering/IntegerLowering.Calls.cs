@@ -132,11 +132,12 @@ public sealed partial class IntegerLowering
 
     private ManagedValue? CallResult(CallDefinition definition)
     {
-        if (definition.Local is { } local) return ReferenceType(local.Type) || IsFloat(local.Type) || types.Kind(local.Type) == TypeKind.Struct ? local : Mask(local, definition.Binding.Result.Type.Size * 8);
+        if (definition.Local is { } local) return Opaque(local.Type) || ReferenceType(local.Type) || IsFloat(local.Type) || types.Kind(local.Type) == TypeKind.Struct ? local : Mask(local, definition.Binding.Result.Type.Size * 8);
         var type = definition.Method.Concrete(definition.Method.Method.ReturnType);
-        if (!IntegerType(type) && !IsFloat(type) && !ReferenceType(type) && types.Kind(type) != TypeKind.Struct) return Fail<ManagedValue>(TypeFailure(type), "调用结果类型尚未下降");
+        if (GenericStruct(type)) return GenericFailure<ManagedValue>("Struct", "含类型参数的值类型调用结果尚未下降");
+        if (!Scalar(type) && types.Kind(type) != TypeKind.Struct) return Fail<ManagedValue>(TypeFailure(type), "调用结果类型尚未下降");
         definition.Local = new(new(nextLocal++), type, types.Kind(type) == TypeKind.Struct ? 0 : StackWidth(definition.Binding.Result.Type.Size * 8));
-        return ReferenceType(type) || IsFloat(type) || types.Kind(type) == TypeKind.Struct ? definition.Local : Mask(definition.Local, definition.Binding.Result.Type.Size * 8);
+        return Opaque(type) || ReferenceType(type) || IsFloat(type) || types.Kind(type) == TypeKind.Struct ? definition.Local : Mask(definition.Local, definition.Binding.Result.Type.Size * 8);
     }
 
     private ManagedStatement? LowerCall(Call call, Point point)
@@ -161,7 +162,8 @@ public sealed partial class IntegerLowering
         TypeRef receiverType = d.Method.Method.Owner.IsValueType ? new ByRefRef(d.Method.DeclaringType) : d.Method.DeclaringType;
         var receiver = d.Receiver is { } target
             ? receiverType is ByRefRef byref ? AddressArgument(target, byref.Element) : Value(target)
-            : d.Binding.This is { } self ? CallArgument(self, receiverType, point) : null;
+            : d.Binding.This is { } self ? CallArgument(self, receiverType, point, true) : null;
+        if (receiver is not null && Opaque(receiver.Type)) return GenericFailure<ManagedStatement>("Receiver", "类型参数值作为调用接收者需要 constrained. 语义");
         if (receiver is not null) receiver = Coerce(receiver, receiverType);
         if (d.Binding.This is not null && receiver is null) return null;
         var statement = new ManagedCall(position, new(d.Method, receiver, args, d.Virtual), null);
@@ -169,8 +171,9 @@ public sealed partial class IntegerLowering
         return statement;
     }
 
-    private ManagedValue? CallArgument(BoundValue bound, TypeRef type, Point point)
+    private ManagedValue? CallArgument(BoundValue bound, TypeRef type, Point point, bool receiver = false)
     {
+        if (GenericStruct(type)) return GenericFailure<ManagedValue>("Struct", "含类型参数的值类型实参尚未下降");
         if (types.Kind(type) == TypeKind.Struct)
         {
             var bits = context.Get(boundSources, new(bound.Source, point));
@@ -191,6 +194,13 @@ public sealed partial class IntegerLowering
         }
         if (type is ByRefRef addressType) return AddressArgument(resolved.Value, addressType.Element);
         if (RejectAddressUse([resolved.Value], type is PointerRef ? "非托管指针形参" : "非按引用形参")) return null;
+        var knownType = StaticType(resolved.Value);
+        if (receiver && knownType is not null && Opaque(knownType)) return GenericFailure<ManagedValue>("Receiver", "类型参数值作为调用接收者需要 constrained. 语义");
+        if (Opaque(type) || knownType is not null && Opaque(knownType))
+        {
+            var opaque = Value(resolved.Value);
+            return opaque is null ? null : Coerce(opaque, type);
+        }
         if (ReferenceType(type))
         {
             var reference = Value(resolved.Value);

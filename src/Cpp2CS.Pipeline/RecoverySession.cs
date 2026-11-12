@@ -8,6 +8,7 @@ using Cpp2CS.Native;
 using Cpp2CS.Native.Images;
 using Cpp2CS.Output;
 using Cpp2CS.Runtime;
+using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Runtime.Layouts;
 using Cpp2CS.Targets.Arm64;
 using Cpp2CS.Targets.Frontend;
@@ -125,12 +126,21 @@ public sealed class RecoverySession
         {
             var entries = groups[i].OrderBy(e => e.Kind).ThenBy(e => e.Address).ThenBy(e => e.Index).ToArray();
             var method = groups[i].Key;
-            // 普通入口优先；其余入口完整保留。恢复层负责证明实例见证能否恢复开放定义。
-            var entry = entries[0];
+            // 泛型定义优先全 object 规范实例；全部候选仍保留供报告与调用核对。
+            var entry = SelectEntry(method, entries);
             if (!method.DeclaresCilBody)
             {
                 rows[i] = new(Identity(method), method.ToString(), entry.Address,
                     entries.Select(e => new EntryReport(e.Address, e.Kind.ToString(), e.Method!.ToString())).ToArray(), MethodStatus.NoBody, null);
+                Advance();
+                return;
+            }
+            if (GenericWitness.IsGeneric(method) && (entry.Kind != EntryKind.GenericMethod || entry.Method is null || !GenericWitness.IsCanonical(entry.Method)))
+            {
+                rows[i] = new(Identity(method), method.ToString(), entry.Address,
+                    entries.Select(e => new EntryReport(e.Address, e.Kind.ToString(), e.Method!.ToString())).ToArray(), MethodStatus.Hole,
+                    new("恢复", entry.Address, "绑定", new("lowering.Generic.Witness", "没有全 object 的规范实例；已有入口：" +
+                        string.Join("；", entries.Select(e => $"{e.Kind}: {e.Method}")))));
                 Advance();
                 return;
             }
@@ -225,6 +235,10 @@ public sealed class RecoverySession
         Save(report);
         return report;
     }
+    public static CodeEntry SelectEntry(MethodDef method, IEnumerable<CodeEntry> entries) => entries
+        .OrderBy(e => GenericWitness.IsGeneric(method) && e.Kind == EntryKind.GenericMethod && e.Method is { } witness && GenericWitness.IsCanonical(witness) ? 0 : 1)
+        .ThenBy(e => e.Kind).ThenBy(e => e.Address).ThenBy(e => e.Index).First();
+
     private static StageResult<TOut> Invoke<TIn, TOut>(IMethodStage<TIn, TOut> stage, TIn input, MethodContext context,
         System.Collections.Concurrent.ConcurrentBag<string> programErrors, out long ticks) where TOut : class
     {

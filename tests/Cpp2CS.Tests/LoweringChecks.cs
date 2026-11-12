@@ -19,7 +19,7 @@ using Cpp2CS.Tests.Execution;
 
 namespace Cpp2CS.Tests;
 
-internal static class LoweringChecks
+internal static partial class LoweringChecks
 {
     public const string Command = "lowering";
     public static int Run()
@@ -77,6 +77,7 @@ internal static class LoweringChecks
         var skeleton = new Skeleton(program, 16);
         var emitter = new BodyEmitter(skeleton, types);
         var checks = new Assertions();
+        GenericChecks(checks, program);
         foreach (var name in new[] { "Add", "Branch", "Loop", "Spill", "Swap", "Accumulate", "Predicate", "Narrow", "FloatAdd", "DoubleBranch", "FloatInt", "UnsignedDouble", "FloatBits", "FloatSelect" })
         {
             var reference = MethodRef.Open(methods.Single(m => m.Name == name));

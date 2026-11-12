@@ -72,6 +72,11 @@ public sealed partial class IntegerLowering
     }
     private ManagedValue Coerce(ManagedValue value, TypeRef type)
     {
+        if (Opaque(value.Type) || Opaque(type))
+        {
+            if (!Equals(value.Type, type)) GenericFailure<object>("Conversion", "类型参数值只能原样流向同一类型参数的位置");
+            return value;
+        }
         if (value is ConstantValue { Bits: 0 } && ManagedTypes.IsReferenceType(type))
             return new ConstantValue(0, type, types.PointerSize * 8);
         if (Equals(value.Type, type) || ManagedTypes.IsReferenceType(value.Type) && types.IsAssignable(value.Type, type)) return value;
@@ -174,7 +179,7 @@ public sealed partial class IntegerLowering
             ? StructValue(new TermSource(write.Value), target.Type, point)
             : Value(write.Value, IsFloat(target.Type));
         if (value is null) return null;
-        value = types.Kind(target.Type) == TypeKind.Struct ? value : ReferenceType(target.Type) ? Coerce(value, target.Type) : IsFloat(target.Type) ? FloatBits(value, write.Width)
+        value = types.Kind(target.Type) == TypeKind.Struct ? value : Opaque(target.Type) || Opaque(value.Type) || ReferenceType(target.Type) ? Coerce(value, target.Type) : IsFloat(target.Type) ? FloatBits(value, write.Width)
             : new ConversionValue(ManagedTypes.IsSigned(target.Type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
                 value, target.Type, write.Width);
         return accessor is null ? new ManagedStore(position, target, value)
@@ -220,9 +225,11 @@ public sealed partial class IntegerLowering
         if (location.Kind is ManagedLocationKind.NotManaged or ManagedLocationKind.Unknown)
             return Fail<ManagedValue>(kind, "使用未定位的内存：" + location.Kind,
                 location.Why, location.Why?.Code ?? "lowering.Location." + location.Kind);
+        if (location.Views.Any(v => GenericStruct(v.Type)))
+            return GenericFailure<ManagedValue>("Struct", "含类型参数的值类型访问尚未下降");
         var exact = location.Views.Where(v => (expectedType is null || v.Type.Equals(expectedType)) && v.Offset == 0 && (v.Kind == ManagedLocationKind.ArrayLength
             || types.Size(v.Type) * 8 == width)).ToArray();
-        var views = exact.Where(v => v.Kind == ManagedLocationKind.ArrayLength || IntegerType(v.Type) || IsFloat(v.Type) || ReferenceType(v.Type)).ToArray();
+        var views = exact.Where(v => v.Kind == ManagedLocationKind.ArrayLength || Scalar(v.Type)).ToArray();
         if (views.Length == 0)
         {
             views = exact.Where(v => types.Kind(v.Type) == TypeKind.Struct).OrderBy(v => v.Path.Length).ToArray();
@@ -248,20 +255,21 @@ public sealed partial class IntegerLowering
             // 根是类的静态字段块，不是托管值；路径的第一项就是静态字段本身。
             var head = view.Path[0];
             var headType = head.Field.Type.Substitute((head.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
-            ManagedValue storage = new StaticFieldValue(head, headType, types.ValueWidth(headType));
+            ManagedValue storage = new StaticFieldValue(head, headType, ValueWidth(headType));
             foreach (var field in view.Path.Skip(1))
             {
                 if (write && types.Kind(storage.Type) == TypeKind.Struct) storage = new AddressValue(storage, types.PointerSize * 8);
                 var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
-                storage = new FieldValue(storage, field, type, types.ValueWidth(type));
+                storage = new FieldValue(storage, field, type, ValueWidth(type));
             }
-            if (!address && !IntegerType(storage.Type) && !IsFloat(storage.Type) && !ReferenceType(storage.Type) && types.Kind(storage.Type) != TypeKind.Struct)
+            if (!address && !Scalar(storage.Type) && types.Kind(storage.Type) != TypeKind.Struct)
                 return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "访问的值类型尚未下降");
             return storage;
         }
         var root = Value(view.Root);
         if (root is null) return null;
-        if (view.Kind == ManagedLocationKind.Indirect) return new IndirectValue(root, view.Type, types.ValueWidth(view.Type));
+        if (Opaque(root.Type)) return GenericFailure<ManagedValue>("Receiver", "类型参数值不能作为字段或数组接收者");
+        if (view.Kind == ManagedLocationKind.Indirect) return new IndirectValue(root, view.Type, ValueWidth(view.Type));
         if (root.Type is ByRefRef { Element: not DefinitionRef { Definition.IsValueType: true } })
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "字段接收者的托管地址必须指向值类型");
         if (view.Kind == ManagedLocationKind.ArrayLength) return Mask(new ArrayLengthValue(root, types.UInt32, 32), view.Width);
@@ -270,16 +278,17 @@ public sealed partial class IntegerLowering
         {
             var index = Value(view.Index!);
             if (index is null) return null;
+            if (Opaque(index.Type)) return GenericFailure<ManagedValue>("Arithmetic", "类型参数值不能作为数组下标");
             var element = view.ElementType ?? view.Type;
-            value = new ArrayElementValue(root, index, element, types.ValueWidth(element));
+            value = new ArrayElementValue(root, index, element, ValueWidth(element));
         }
         foreach (var field in view.Path)
         {
             if (write && types.Kind(value.Type) == TypeKind.Struct) value = new AddressValue(value, types.PointerSize * 8);
             var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
-            value = new FieldValue(value, field, type, types.ValueWidth(type));
+            value = new FieldValue(value, field, type, ValueWidth(type));
         }
-        if (!address && !IntegerType(value.Type) && !IsFloat(value.Type) && !ReferenceType(value.Type) && types.Kind(value.Type) != TypeKind.Struct)
+        if (!address && !Scalar(value.Type) && types.Kind(value.Type) != TypeKind.Struct)
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "访问的值类型尚未下降");
         return value;
     }

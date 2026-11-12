@@ -57,6 +57,7 @@ public sealed partial class IntegerLowering
     }
     private ManagedValue? StructValue(BoundSource source, TypeRef type, Point point)
     {
+        if (GenericStruct(type)) return GenericFailure<ManagedValue>("Struct", "含类型参数的值类型尚未下降");
         var value = BuildStructValue(source, type, point);
         if (value is null && failure is { StructType: null } missing) failure = missing with { StructType = type };
         return value;
