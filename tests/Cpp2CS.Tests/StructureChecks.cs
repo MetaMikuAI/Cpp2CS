@@ -60,6 +60,7 @@ internal static class StructureChecks
             if (scenario == 5) checks.True(ReferenceEquals(output.Function, function) && output.Records.Any(r => r.Kind == "runtime-result-used"), "实际返回值仍被使用时原样保留并记录");
         }
         SpecificationCases(checks);
+        InterfaceLookupCases(checks);
         return checks.Finish("结构消去");
     }
     private static void SpecificationCases(Assertions checks)
@@ -150,6 +151,116 @@ internal static class StructureChecks
             if (scenario == 3) checks.True(output.Function.Blocks.Any(b => b.End is Branch) && statements.OfType<Call>().Count() == 1
                 && output.Records.Any(r => r.Evidence == "守卫状态与幂等事件的对象不同"),
                 "条件类与事件类不同不折叠");
+        }
+    }
+
+    private static void InterfaceLookupCases(Assertions checks)
+    {
+        var spec = InputCorpusChecks.Spec("arm64-v8a");
+        var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
+        var layouts = new FieldLayouts(spec, 8, 8);
+        var binder = new MethodBinder(new(layouts), new Aapcs64());
+        var runtime = catalog.Functions.Single(f => f.Operation.Name == "LookupInterfaceData");
+        var calls = new CallNamingQuery(binder, new NamingChecks.Map([]), new NamingChecks.RuntimeMap(runtime), catalog);
+        var itf = new Cpp2CS.Model.TypeDef { Index = 0, Assembly = "test", Namespace = "", Name = "IAction", Token = 0,
+            Attributes = System.Reflection.TypeAttributes.Public | System.Reflection.TypeAttributes.Interface, IsValueType = false, IsEnum = false };
+        var voidType = new Cpp2CS.Model.DefinitionRef(new Cpp2CS.Model.TypeDef { Index = 1, Assembly = "mscorlib.dll", Namespace = "System", Name = "Void", Token = 0,
+            Attributes = System.Reflection.TypeAttributes.Public, IsValueType = true, IsEnum = false }, []);
+        var apply = new Cpp2CS.Model.MethodDef { Index = 0, Owner = itf, Name = "Apply", Token = 0, Attributes = System.Reflection.MethodAttributes.Public | System.Reflection.MethodAttributes.Virtual,
+            ImplAttributes = 0, Slot = 0, ReturnType = voidType, Parameters = [] };
+        itf.Methods = [apply];
+        var caller = new Cpp2CS.Model.MethodDef { Index = 1, Owner = itf, Name = "Caller", Token = 0, Attributes = System.Reflection.MethodAttributes.Public | System.Reflection.MethodAttributes.Static,
+            ImplAttributes = 0, Slot = -1, ReturnType = voidType, Parameters = [new("value", new Cpp2CS.Model.DefinitionRef(itf, []), 0, null, false)] };
+        var facts = NamingFacts.Empty with { Slots = new Dictionary<ulong, Cpp2CS.Kernel.Queries.Outcome<MetadataEntity>> {
+            [128] = Cpp2CS.Kernel.Queries.Outcome<MetadataEntity>.Success(new ClassEntity(new Cpp2CS.Model.DefinitionRef(itf, []))),
+            [256] = Cpp2CS.Kernel.Queries.Outcome<MetadataEntity>.Success(new ClassEntity(new Cpp2CS.Model.DefinitionRef(itf, [])))
+        }.ToImmutableDictionary() };
+        for (int scenario = 0; scenario < 9; scenario++)
+        {
+            var t = new TermTable(); var head = new BlockIdentity(); var scan = new BlockIdentity(); var advance = new BlockIdentity();
+            var fast = new BlockIdentity(); var slow = new BlockIdentity(); var join = new BlockIdentity();
+            var frame = t.Atom(new RootAtom(AddressRoot.Frame), 64); var image = t.Atom(new RootAtom(AddressRoot.Image), 64);
+            var slot = new AbstractSlot(SlotKind.Integer); var receiver = t.Atom(new EntryAtom(slot), 64);
+            var f = new FunctionBuilder(t, head, 64, new(frame)) { ImageBase = image }; f.Inputs.Add(new(slot, receiver));
+            var nativeFloat = t.Atom(new EntryAtom(new(SlotKind.Floating)), 128);
+            if (scenario == 8) f.Inputs.Add(new(new(SlotKind.Floating), nativeFloat));
+            Term Add(Term value, long n) => t.Apply(new CoreOperator(CoreOperation.Add), 64, value, t.Constant(unchecked((ulong)n), 64));
+            Term Read(List<Statement> statements, Term address, int width = 64)
+            {
+                var id = new ReadIdentity(); var value = t.Atom(new ResultAtom(id), width);
+                statements.Add(new MemoryRead(id, address, width, value)); return value;
+            }
+            var start = new List<Statement>(); var iface = Read(start, Add(image, 128));
+            var fastStatements = new List<Statement>(); var slowStatements = new List<Statement>();
+            var klass = Read(start, Add(receiver, spec.Layout.Field("Il2CppObject", "klass").ByteOffset));
+            var table = Read(start, Add(klass, spec.Layout.Field("Il2CppClass", "interfaceOffsets").ByteOffset));
+            var cursorId = new MergeIdentity(); var cursor = t.Atom(new ResultAtom(cursorId), 64);
+            var scanStatements = new List<Statement>();
+            // 私有类字段有读取凭据，但不是可随调用移动的元数据实体读取。
+            var comparedInterface = scenario == 2 ? Read(scanStatements, Add(iface, spec.Layout.Field("Il2CppClass", "element_class").ByteOffset)) : iface;
+            var pairInterface = Read(scanStatements, Add(cursor, spec.Layout.Field("Il2CppRuntimeInterfaceOffsetPair", "interfaceType").ByteOffset));
+            var offset = Read(fastStatements, Add(cursor, spec.Layout.Field("Il2CppRuntimeInterfaceOffsetPair", "offset").ByteOffset), 32);
+            var scaled = t.Apply(new CoreOperator(CoreOperation.Multiply), 64,
+                t.Apply(new CoreOperator(CoreOperation.SignExtend), 64, offset), t.Constant(spec.Layout.VtableSlotSize, 64));
+            var address = t.Apply(new CoreOperator(CoreOperation.Add), 64, Add(klass, spec.Layout.VtableStart), scaled);
+            var callId = new CallIdentity(); var result = t.Atom(new ResultAtom(callId), 64);
+            var floatResult = t.Atom(new ResultAtom(callId, 1), 128);
+            var callInterface = scenario == 2 ? Read(slowStatements, Add(iface, spec.Layout.Field("Il2CppClass", "element_class").ByteOffset)) :
+                scenario == 3 ? Read(slowStatements, Add(image, 256)) : iface;
+            slowStatements.Add(new Call(callId, new ImageFunction(100), [new(slot, receiver), new(new(SlotKind.Integer, 1), callInterface),
+                new(new(SlotKind.Integer, 2), t.Constant(0, 64))], scenario == 8 ? [new(slot, result), new(new(SlotKind.Floating), floatResult)] : [new(slot, result)], OutgoingArgumentArea: Add(frame, -64)));
+            if (scenario == 1) fastStatements.Add(new Call(new(), new ComputedTarget(receiver), [], []));
+            if (scenario == 6) fastStatements.Add(new MemoryWrite(new(), Add(frame, -32), 64, t.Constant(7, 64)));
+            var mergeId = new MergeIdentity(); var merged = t.Atom(new ResultAtom(mergeId), 64);
+            var condition = t.Apply(new CoreOperator(CoreOperation.Equal), 1, pairInterface, comparedInterface);
+            f.Blocks.Add(new(head, [], start.ToImmutableArray(), new Branch(t.Slice(receiver, 0, 1), scan, slow)));
+            f.Blocks.Add(new(scan, [new(cursorId, cursor, [new(head, table), new(advance, Add(cursor, spec.Layout.Record("Il2CppRuntimeInterfaceOffsetPair").Size))])],
+                scanStatements.ToImmutableArray(), new Branch(condition, fast, advance)));
+            f.Blocks.Add(new(advance, [], [], new Branch(t.Slice(receiver, 1, 1), scan, slow)));
+            f.Blocks.Add(new(fast, [], fastStatements.ToImmutableArray(), new Jump(join)));
+            f.Blocks.Add(new(slow, [], slowStatements.ToImmutableArray(), new Jump(join)));
+            var extraId = new MergeIdentity(); var extra = t.Atom(new ResultAtom(extraId), scenario == 8 ? 128 : 64);
+            var merges = new List<Merge> { new(mergeId, merged, [new(fast, address), new(slow, result)]) };
+            if (scenario is 4 or 5 or 7) merges.Add(new(extraId, extra, [new(fast, scenario == 4 ? cursor : t.Constant(1, 64)), new(slow, t.Constant(2, 64))]));
+            if (scenario == 8) merges.Add(new(extraId, extra, [new(fast, nativeFloat), new(slow, floatResult)]));
+            var joinStatements = new List<Statement>();
+            if (scenario == 8)
+            {
+                var target = Read(joinStatements, Add(merged, spec.Layout.Field("VirtualInvokeData", "methodPtr").ByteOffset));
+                var info = Read(joinStatements, Add(merged, spec.Layout.Field("VirtualInvokeData", "method").ByteOffset));
+                joinStatements.Add(new Call(new(), new ComputedTarget(target), [new(slot, receiver), new(new(SlotKind.Integer, 1), info), new(new(SlotKind.Floating), extra)], []));
+            }
+            var outside = scenario == 6 ? Read(joinStatements, Add(frame, -32)) : merged;
+            f.Blocks.Add(new(join, merges.ToImmutableArray(), joinStatements.ToImmutableArray(), new Return(scenario == 8 ? [] : [new(slot, scenario == 6 ? t.Apply(new CoreOperator(CoreOperation.Add), 64, merged, outside) :
+                scenario == 4 ? t.Apply(new CoreOperator(CoreOperation.Add), 64, merged, extra) :
+                scenario == 5 ? t.Apply(new CoreOperator(CoreOperation.Add), 64, merged, extra) : merged)])));
+            var function = f.Freeze(); var state = new StateQueries(image: new InputMemoryImage());
+            var naming = new ValueNamingQuery(state, calls, facts, spec, binder,
+                scenario == 8 ? binder.Entry(Cpp2CS.Model.MethodRef.Open(caller), BindingEntryKind.Ordinary).Value : null);
+            checks.True(ExitChecker.Check(function).IsValid, $"接口区域 {scenario} 输入契约");
+            var data = naming.CreateContext(function).Get(new InterfaceDataQuery(state, calls, naming, spec), new(merged, new(join, 0)));
+            checks.True(data.IsSuccess, $"接口区域 {scenario} 数据命名：" + data.Why);
+            var managedLocations = scenario == 8 ? new Cpp2CS.Recovery.Locations.ManagedLocationQuery(state, naming, layouts, spec) : null;
+            var output = new UnobservableEffects(state, calls, naming, new InputMemoryImage(), new HashSet<AbstractSlot> { slot }, managedLocations).Run(function);
+            checks.True(ExitChecker.Check(output.Function).IsValid, $"接口区域 {scenario} 输出契约");
+            bool folded = scenario is 0 or 3 or 7 or 8;
+            checks.True(output.Records.Any(r => r.Kind == "interface-lookup" && r.Removed) == folded, $"接口区域 {scenario} 折叠结果：" +
+                string.Join("；", output.Records.Where(r => r.Kind == "interface-lookup").Select(r => r.Evidence)));
+            if (folded)
+            {
+                checks.True(output.Function.Blocks.Length == 2 && output.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Count() == (scenario == 8 ? 2 : 1)
+                    && output.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Count(c => c.Identity == callId) == 1,
+                    "接口区域只保留一次查找且保留调用身份");
+                checks.True(output.Assumptions.Contains(UnobservableEffects.InterfaceLookupAssumption), "接口区域登记终止假设");
+                checks.True(output.Function.Blocks.Single(b => b.Identity == join).End is Return returned && (scenario == 8 ? returned.Results.IsEmpty : returned.Results[0].Value == result),
+                    "接口区域合流由查找调用结果替换");
+                if (scenario == 3) checks.True(output.Function.Blocks.Single(b => b.Identity == head).Statements.OfType<MemoryRead>().Any(r => r.Result == callInterface),
+                    "区域内实体读取与查找一起移动到入口");
+            }
+            if (scenario == 1) checks.True(output.Records.Any(r => r.Kind == "interface-lookup" && r.Evidence.StartsWith("调用：")), "额外调用拒绝原因");
+            if (scenario == 2) checks.True(output.Records.Any(r => r.Kind == "interface-lookup" && r.Evidence.StartsWith("输入：")), "非实体输入依赖拒绝原因");
+            if (scenario == 8) checks.True(output.Records.Any(r => r.Kind == "unused-call-input" && r.Removed), "分派签名裁剪未使用的浮点实参后折叠区域");
+            if (scenario == 6) checks.True(output.Records.Any(r => r.Kind == "interface-lookup" && r.Evidence.StartsWith("活跃性：")), "区域帧写入外泄拒绝原因");
         }
     }
 }

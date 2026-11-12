@@ -80,6 +80,8 @@ public sealed partial class IntegerLowering
             }
             return Mask(result, term.Width);
         }
+        if (term.Identity is ResultAtom { Definition: CallIdentity lookup } && interfaceLookups.Contains(lookup))
+            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedAtom, "接口调用数据没有托管值定义");
         if (term.Identity is ResultAtom { Definition: CallIdentity })
             return Fail<ManagedValue>(LoweringFailureKind.Binding, "使用了调用结果绑定之外的位，ABI 未定义这些高位");
         if (term.Identity is EntryAtom)

@@ -154,14 +154,16 @@ public sealed partial class IntegerLowering
 
     /// <summary>
     /// 引用类型的实例构造函数恰有一次对 this 的基类或本类构造函数调用（base(...) 或 this(...)）。
-    /// 找不到说明那次调用被内联或省略，没有逆变换的证明。
+    /// 没有唯一的直接接收者见证时保留洞，不推断多条路径上的初始化。
     /// </summary>
     private bool ConstructorChained(IEnumerable<ManagedBlock> blocks)
     {
         var owner = method.DeclaringType;
         var parent = owner is DefinitionRef d ? d.Definition.BaseType?.Substitute(d.Arguments, []) : null;
-        return blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Count(c => !c.Invocation.Virtual
-            && c.Invocation.Method.Method is { Name: ".ctor", IsStatic: false } && c.Invocation.Receiver is ArgumentValue { Index: -1 }
-            && (Equals(c.Invocation.Method.DeclaringType, owner) || Equals(c.Invocation.Method.DeclaringType, parent))) == 1;
+        var candidates = blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Where(c => !c.Invocation.Virtual
+            && c.Invocation.Method.Method is { Name: ".ctor", IsStatic: false }
+            && (Equals(c.Invocation.Method.DeclaringType, owner) || Equals(c.Invocation.Method.DeclaringType, parent))).ToArray();
+        // 非直接接收者仍可能是 this；不能靠另一条直接调用替它证明初始化。
+        return candidates is [{ Invocation.Receiver: ArgumentValue { Index: -1 } }];
     }
 }

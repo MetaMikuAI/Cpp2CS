@@ -128,8 +128,8 @@ public sealed partial class IntegerLowering
                 position = native.Trace?.NativeAddress ?? b.Trace?.NativeAddress ?? 0;
                 if (native is Call call)
                 {
-                    // 分配并入随后的构造函数调用，自己不产生语句。
-                    if (allocations.ContainsKey(call.Identity)) continue;
+                    // 分配并入构造函数调用；接口查找只供分派使用，两者自己不产生语句。
+                    if (allocations.ContainsKey(call.Identity) || interfaceLookups.Contains(call.Identity)) continue;
                     var statement = LowerCall(call, new(b.Identity, i));
                     if (statement is null) return new(null, failure);
                     statements.Add(statement);
@@ -179,7 +179,7 @@ public sealed partial class IntegerLowering
         if (method.Method is { Name: ".ctor", IsStatic: false, Owner.IsValueType: false } && !ConstructorChained(blocks))
         {
             position = 0;
-            Fail<object>(LoweringFailureKind.ConstructorInitialization, "引用类型构造函数缺少基类初始化见证");
+            Fail<object>(LoweringFailureKind.ConstructorInitialization, "引用类型构造函数没有唯一的直接 this 初始化调用见证");
             return new(null, failure);
         }
         var body = new ManagedBody(method, [.. blocks, .. extraBlocks]);

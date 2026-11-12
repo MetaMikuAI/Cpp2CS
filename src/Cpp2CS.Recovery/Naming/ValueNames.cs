@@ -27,6 +27,8 @@ public sealed record NamedValue(ValueKind Kind, ValueName? Name, string? Record 
 public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, NamingFacts facts, RuntimeSpec spec,
     MethodBinder binder, SignatureBinding? entry = null) : Query<Term, NamedValue>
 {
+    internal RuntimeSpec Spec => spec;
+    internal MethodBinder Binder => binder;
     private readonly RuntimeInputKindsQuery inputKinds = new(state,calls);
     public QueryContext CreateContext(NativeFunction function) => new(function, null, state.Group,
         new FixedPointGroup(1_000_000, FixedPointMember.Create(this, _ => new NameLattice())));

@@ -113,11 +113,13 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         var forwardInitial = timer.Elapsed.TotalSeconds;
         var current = edit.RemovedStatements.Count == 0 ? input : ForwardReads(erasedSnapshot, records);
         // 调用只读取签名绑定的输入槽；先裁掉其余的槽，折叠时的活跃性才不被它们牵住。
-        if (!ReferenceEquals(current, input)) current = RemoveUnusedCallInputs(current, records);
+        current = RemoveUnusedCallInputs(current, records);
         timings["读取转发"] = timer.Elapsed.TotalSeconds - forwardInitial;
         // 未绑定的返回槽没有托管使用；只有发生结构改写时才裁剪它们。
         timings["消去与读取转发"] = timer.Elapsed.TotalSeconds;
         var rejected = new Dictionary<BlockIdentity, StructureRecord>();
+        var rejectedLookups = new Dictionary<MergeIdentity, StructureRecord>();
+        bool foldedLookup = false;
         var retainedInitializations = new Dictionary<CallIdentity, StructureRecord>();
         while (true)
         {
@@ -138,6 +140,8 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                 var liveStart = timer.Elapsed.TotalSeconds;
                 var liveness = new StructureLiveness(current, EndUses);
                 liveTime += timer.Elapsed.TotalSeconds - liveStart;
+                changed = FoldInterfaceLookup(c, batch, occupied, predecessors, records, rejectedLookups, ref assumed);
+                foldedLookup |= changed;
                 foreach (var b in current.Blocks.Where(b => b.End is Branch))
                 {
                     var branch = (Branch)b.End;
@@ -248,7 +252,12 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         var remaining = current.Blocks.Select(b => b.Identity).ToHashSet();
         records.AddRange(retainedInitializations.Values);
         records.AddRange(rejected.Where(p => remaining.Contains(p.Key)).Select(p => p.Value));
-        return new(current, records.ToImmutableArray(), assumed ? [UndefinedAssumption] : []) { Timings = timings.ToImmutableDictionary() };
+        var remainingMerges = current.Blocks.SelectMany(b => b.Merges).Select(m => m.Identity).ToHashSet();
+        records.AddRange(rejectedLookups.Where(p => remainingMerges.Contains(p.Key)).Select(p => p.Value));
+        var assumptions = ImmutableArray.CreateBuilder<string>();
+        if (assumed) assumptions.Add(UndefinedAssumption);
+        if (foldedLookup) assumptions.Add(InterfaceLookupAssumption);
+        return new(current, records.ToImmutableArray(), assumptions.ToImmutable()) { Timings = timings.ToImmutableDictionary() };
     }
 
     // 分支点位于入口块的终结之后，故忽略该块此前调用的异常出口。

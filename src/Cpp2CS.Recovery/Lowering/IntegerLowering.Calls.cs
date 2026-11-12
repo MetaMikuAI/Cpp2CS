@@ -21,6 +21,7 @@ public sealed partial class IntegerLowering
         public bool Virtual { get; init; }
     }
     private readonly Dictionary<CallIdentity, MethodRef> throws = [];
+    private readonly HashSet<CallIdentity> interfaceLookups = [];
     private readonly CallNamingQuery? calls;
     private readonly BoundSourceQuery boundSources;
     private SharedCallQuery? sharedCalls;
@@ -35,6 +36,8 @@ public sealed partial class IntegerLowering
         if (!classified.IsSuccess) { Fail<object>(LoweringFailureKind.Call, "调用分类失败", classified.Why); return; }
         var c = classified.Value;
         if (call.Unwind is not null) { Fail<object>(LoweringFailureKind.Exception, "调用的异常边尚未下降"); return; }
+        if (c.Kind == CallKind.Runtime && c.Operation is { Result.Kind: RuntimeValueKind.InvokeData })
+        { interfaceLookups.Add(call.Identity); return; }
         if (c.Operation is { DoesNotReturn: true, Termination: RuntimeTermination.Throw, FixedThrownException: { } exception })
         {
             var constructor = types.CorlibMethod(exception, ".ctor");

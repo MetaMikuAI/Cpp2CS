@@ -177,6 +177,7 @@ internal static class LoweringChecks
             "窄返回值的 ABI 未定义高位不能取用");
         SharedChecks(checks, program);
         RuntimeChecks(checks, program);
+        ConstructorChecks(checks, program);
         AccessChecks(checks, program);
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         return checks.Finish("标量下降");
@@ -457,6 +458,53 @@ internal static class LoweringChecks
         var erased = new UnobservableEffects(barrierState, barrierCalls, barrierNames, barrierImage).Run(barrierBuilder.Freeze());
         checks.True(!erased.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any(), "登记后的内存屏障由结构变换删除");
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
+    }
+
+    private static void ConstructorChecks(Assertions checks, ProgramModel primitives)
+    {
+        var spec = InputCorpusChecks.Spec("arm64-v8a");
+        var layouts = new Cpp2CS.Runtime.Layouts.FieldLayouts(spec, 8, 8);
+        var binder = new MethodBinder(new(layouts), new Aapcs64());
+        var definitions = primitives.Types.Where(t => t.Assembly == "mscorlib.dll" && t.Name != "BitConverter").Select((t, i) => new TypeDef {
+            Index = i, Assembly = t.Assembly, Namespace = t.Namespace, Name = t.Name, Token = (uint)(0x02000001 + i),
+            Attributes = TypeAttributes.Public, IsValueType = t.IsValueType, IsEnum = false }).ToList();
+        TypeRef Primitive(string name) => new DefinitionRef(definitions.Single(t => t.Name == name), []);
+        var parent = ((DefinitionRef)Primitive("Object")).Definition;
+        var owner = new TypeDef { Index = definitions.Count, Assembly = "ConstructorChecks.dll", Namespace = "", Name = "Owner", Token = 0x02000001,
+            Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false, BaseType = new DefinitionRef(parent, []) };
+        definitions.Add(owner);
+        MethodDef Constructor(TypeDef type, int index, ParameterDef[] parameters) => new() { Index = index, Owner = type, Name = ".ctor", Token = (uint)(0x06000001 + index),
+            Attributes = MethodAttributes.Public | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName, ImplAttributes = 0, Slot = -1,
+            ReturnType = Primitive("Void"), Parameters = parameters };
+        var target = Constructor(parent, 0, []); parent.Methods = [target];
+        var caller = Constructor(owner, 1, [new("condition", Primitive("Boolean"), 0, null, false)]); owner.Methods = [caller];
+        var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = [target, caller], Fields = [], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
+            Assemblies = definitions.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key, AssemblyName = Path.GetFileNameWithoutExtension(g.Key),
+                Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
+        var types = new ManagedTypes(program, layouts, 8);
+        var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
+        var calls = new CallNamingQuery(binder, new NamingChecks.Map([new(MethodRef.Open(target), BindingEntryKind.Ordinary)]), new NamingChecks.RuntimeMap(), catalog);
+        for (int scenario = 0; scenario < 2; scenario++)
+        {
+            var t = new TermTable(); var head = new BlockIdentity(); var left = new BlockIdentity(); var right = new BlockIdentity(); var join = new BlockIdentity();
+            var self = t.Atom(new EntryAtom(new(SlotKind.Integer)), 64); var argument = t.Atom(new EntryAtom(new(SlotKind.Integer, 1)), 64);
+            var f = new FunctionBuilder(t, head, 64, new(t.Atom(new RootAtom(AddressRoot.Frame), 64)));
+            f.Inputs.Add(new(new(SlotKind.Integer), self)); f.Inputs.Add(new(new(SlotKind.Integer, 1), argument));
+            Call Initialize(Term value) => new(new(), new ImageFunction(10), [new(new(SlotKind.Integer), value), new(new(SlotKind.Integer, 1), t.Constant(0, 64))], []);
+            if (scenario == 0) f.Blocks.Add(new(head, [], [Initialize(self)], new Return([])));
+            else
+            {
+                var condition = t.Slice(argument, 0, 1);
+                f.Blocks.Add(new(head, [], [], new Branch(condition, left, right)));
+                f.Blocks.Add(new(left, [], [Initialize(t.Apply(new CoreOperator(CoreOperation.Select), 64, condition, self, t.Constant(0, 64)))], new Jump(join)));
+                f.Blocks.Add(new(right, [], [Initialize(self)], new Jump(join)));
+                f.Blocks.Add(new(join, [], [], new Return([])));
+            }
+            var function = f.Freeze(); checks.True(ExitChecker.Check(function).IsValid, "构造函数见证输入契约：" + scenario);
+            var lowered = new IntegerLowering(function, MethodRef.Open(caller), binder, types, calls: calls).Run();
+            checks.True(scenario == 0 ? lowered.Body is not null : lowered.Failure?.Kind == LoweringFailureKind.ConstructorInitialization,
+                "唯一直接初始化可下降，多条含条件接收者的候选保留为洞：" + lowered.Failure);
+        }
     }
 
     private static void AccessChecks(Assertions checks, ProgramModel primitives)

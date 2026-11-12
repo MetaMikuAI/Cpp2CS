@@ -8,7 +8,8 @@ internal sealed class StructureLiveness
 {
     private readonly Dictionary<Term, HashSet<(BlockIdentity Block, bool End)>> users = [];
 
-    public StructureLiveness(NativeFunction function, Func<Terminator, IEnumerable<Term>> endUses)
+    public StructureLiveness(NativeFunction function, Func<Terminator, IEnumerable<Term>> endUses,
+        IReadOnlySet<Term>? boundaries = null, BlockIdentity? appendedAt = null, IEnumerable<Term>? appendedUses = null)
     {
         var merges = function.Blocks.SelectMany(b => b.Merges).ToDictionary(m => m.Result);
         foreach (var block in function.Blocks)
@@ -16,6 +17,7 @@ internal sealed class StructureLiveness
             Add(block.Statements.SelectMany(SnapshotRewrite.Uses), (block.Identity, false));
             Add(endUses(block.End), (block.Identity, true));
         }
+        if (appendedAt is not null && appendedUses is not null) Add(appendedUses, (appendedAt, false));
         void Add(IEnumerable<Term> roots, (BlockIdentity Block, bool End) point)
         {
             var pending = new Stack<Term>(roots);
@@ -24,7 +26,8 @@ internal sealed class StructureLiveness
                 if (!users.TryGetValue(value, out var points)) users[value] = points = [];
                 if (!points.Add(point)) continue;
                 foreach (var operand in value.Operands) pending.Push(operand);
-                if (merges.TryGetValue(value, out var merge))
+                // 待替换的合流仍记录使用，但不把使用传到它原来的来源。
+                if (boundaries?.Contains(value) != true && merges.TryGetValue(value, out var merge))
                     foreach (var input in merge.Inputs) pending.Push(input.Value);
             }
         }
