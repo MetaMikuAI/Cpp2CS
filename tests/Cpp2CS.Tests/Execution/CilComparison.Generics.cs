@@ -17,13 +17,22 @@ internal static partial class CilComparison
         Enumerable.Repeat(argument, method.Method.Owner.GenericParameters.Count).ToArray(),
         Enumerable.Repeat(argument, method.Method.GenericParameters.Count).ToArray());
 
-    private static CilComparisonResult CompareGeneric(MethodDefinition left, MethodDefinition right, int cases, int firstSeed, int stepLimit, Func<CecilModel>? modelFactory)
+    private static CilComparisonResult CompareGeneric(MethodDefinition left, MethodDefinition right, int cases, int firstSeed, int stepLimit, Func<CecilModel>? modelFactory,
+        Cpp2CS.Managed.GenericWitnessCoverage? witnessCoverage)
     {
         modelFactory ??= CecilModel.Factory(left.Module, right.Module);
         var instances = new Dictionary<string, CilComparisonInstance>();
         foreach (var (name, value) in new[] { ("ref", false), ("value", true) })
+        {
+            if (value && witnessCoverage == Cpp2CS.Managed.GenericWitnessCoverage.ReferenceOnly)
+            {
+                instances.Add(name, new(false, new(CilComparisonStatus.Inconclusive, 0, null, "没有值类型见证")
+                    { ReasonKind = ComparisonReason.GenericDefinition }));
+                continue;
+            }
             instances.Add(name, new(Applicable(left, value) && Applicable(right, value),
                 CompareInstance(left, right, cases, firstSeed, stepLimit, modelFactory, value)));
+        }
         // 两轮都完成后再归并；一致不能遮住另一轮的差异。
         var selected = instances.FirstOrDefault(p => p.Value.Result.Status == CilComparisonStatus.Mismatch);
         if (selected.Value is null) selected = instances.FirstOrDefault(p => p.Value.Result.Status == CilComparisonStatus.Match);

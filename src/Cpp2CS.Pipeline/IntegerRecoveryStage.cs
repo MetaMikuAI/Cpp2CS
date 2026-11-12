@@ -76,7 +76,8 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         var types = GenericWitness.IsGeneric(context.Method) ? new ManagedTypes(context.Facts.Model, layouts, parts.Types.PointerSize) : parts.Types;
         var transformed = StructureRecovery.Run(input, context, parts.Binder, kind, layouts);
         var result = new IntegerLowering(transformed.Function, MethodRef.Open(context.Method), parts.Binder,
-            types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names, parts.Accessors, parts.Constructors, witness: context.Entry.Method).Run(kind);
+            types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names, parts.Accessors, parts.Constructors,
+            witness: context.Entry.Method, rgctx: new MetadataRgctxDecoder(context.Facts)).Run(kind);
         if (result.Body is { } candidate)
         {
             // 位重解释与浮点取整等依赖匹配核心库的 BCL 方法；裁剪掉的能力是缺口，不交给输出层制造非法体。
@@ -100,7 +101,8 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
             }
         }
 
-        return result.Body is { } body ? new Completed<ManagedBody>(body)
+        return result.Body is { } body ? new Completed<ManagedBody>(GenericWitness.IsGeneric(context.Method)
+            ? body with { WitnessCoverage = GenericWitnessCoverage.ReferenceOnly } : body)
             : new Missing<ManagedBody>(new(Name, result.Failure!.Position == 0 ? context.Entry.Address : result.Failure.Position,
                 result.Failure.Kind.ToString(), result.Failure.Reason));
     }

@@ -15,7 +15,10 @@ public enum TargetShape { VtableSlot, ManagedField, MemoryMerge, ValueMerge, Cal
 /// <summary>Binding 保留原生实参（委托的 this 是 method_code）；托管调用接收者始终取 Receiver。</summary>
 public sealed record DispatchResult(DispatchKind Kind, TargetShape Shape, Term? Receiver = null,
     TypeRef? StaticType = null, long? Slot = null, MethodRef? Method = null, BoundCall? Binding = null,
-    ValueName? Evidence = null, Reason? Why = null, LocationView? FieldEvidence = null);
+    ValueName? Evidence = null, Reason? Why = null, LocationView? FieldEvidence = null)
+{
+    public TypeRef? Constraint { get; init; }
+}
 
 /// <summary>函数级只读分派查询；上下文由 Locations.CreateContext 建立。</summary>
 /// <remarks>
@@ -27,7 +30,7 @@ public sealed record DispatchResult(DispatchKind Kind, TargetShape Shape, Term? 
 /// 接口快慢路径见 vm/ClassInlines.h/.cpp::GetInterfaceInvokeDataFromVTable。
 /// </remarks>
 public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, ValueNamingQuery names,
-    ManagedLocationQuery locations, MethodBinder binder, RuntimeSpec spec) : Query<CallIdentity, DispatchResult>
+    ManagedLocationQuery locations, MethodBinder binder, RuntimeSpec spec, GenericWitness? witness = null) : Query<CallIdentity, DispatchResult>
 {
     private readonly InterfaceDataQuery interfaceData = new(state, calls, names, spec);
     public override Outcome<DispatchResult> Compute(QueryContext c, CallIdentity key)
@@ -45,16 +48,37 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
         if (named.IsSuccess && named.Value.Name is FieldName pointer &&
             pointer.Field == spec.Layout.Field("VirtualInvokeData", "methodPtr").Path &&
             pointer.Owner is FieldName { Record: "Il2CppClass", Field: "vtable", Index: { } slot } table &&
-            table.Owner is FieldName klass && klass.Field == spec.Layout.Field("Il2CppObject", "klass").Path)
+            (table.Owner is FieldName klassName && klassName.Field == spec.Layout.Field("Il2CppObject", "klass").Path
+                || table.Owner is EntityName { Entity: ClassEntity { Type: GenericParameterRef } }))
         {
             // 名字证明规格身份，状态项证明接收者身份；不以类型相同替代对象相同。
-            if (target.Identity is not MemoryAtom pm || Resolve(c, pm.Location.Root)?.Identity is not MemoryAtom cm)
+            if (target.Identity is not MemoryAtom pm)
                 return No(TargetShape.VtableSlot, "receiver-evidence", "虚表读取没有可追溯的对象项。");
-            var receiver = Resolve(c, cm.Location.Root);
-            if (receiver is null) return No(TargetShape.VtableSlot, "receiver-evidence", "对象项未解析。");
-            var typed = c.Get(locations.Types, receiver);
-            if (!typed.IsSuccess || typed.Value?.Type is not DefinitionRef type)
-                return No(TargetShape.VtableSlot, "static-type", "接收者没有具体静态类型。", typed.Why);
+            Term? receiver = null;
+            GenericParameterRef? constraint = null;
+            DefinitionRef type;
+            if (table.Owner is EntityName { Entity: ClassEntity { Type: GenericParameterRef parameter } })
+            {
+                if (witness is null || !GenericWitness.IsCanonical(witness.Instance) || !witness.Knows(parameter)
+                    || witness.Close(parameter) is not DefinitionRef closed)
+                    return No(TargetShape.VtableSlot, "generic-receiver", "类型参数的类缺少规范引用见证。");
+                type = closed;
+                constraint = parameter;
+            }
+            else
+            {
+                if (table.Owner is not FieldName klass || klass.Field != spec.Layout.Field("Il2CppObject", "klass").Path
+                    || Resolve(c, pm.Location.Root)?.Identity is not MemoryAtom cm)
+                    return No(TargetShape.VtableSlot, "receiver-evidence", "虚表的类既非对象的类，也非泛型上下文中的类型参数。");
+                receiver = Resolve(c, cm.Location.Root);
+                if (receiver is null) return No(TargetShape.VtableSlot, "receiver-evidence", "对象项未解析。");
+                var typed = c.Get(locations.Types, receiver);
+                if (typed.IsSuccess && typed.Value?.Type is GenericParameterRef)
+                    return No(TargetShape.VtableSlot, "generic-receiver", "虚调用没有经泛型上下文中的 T 类解析。");
+                if (!typed.IsSuccess || typed.Value?.Type is not DefinitionRef declared)
+                    return No(TargetShape.VtableSlot, "static-type", "接收者没有具体静态类型。", typed.Why);
+                type = declared;
+            }
             if (type.Definition.IsInterface) return No(TargetShape.VtableSlot, "interface-type", "接收者静态类型为接口。");
             if (Open(type)) return No(TargetShape.VtableSlot, "open-type", "开放类型不解析虚调用。");
             var method = SlotMethod(type, slot);
@@ -62,6 +86,12 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
             if (method.Method.GenericParameters.Count != 0) return No(TargetShape.VtableSlot, "generic-method", "泛型虚方法不在本查询范围内。");
             var bound = binder.Call(call, method, BindingEntryKind.Ordinary, c.Snapshot.Terms);
             if (bound.Value is not { } binding) return No(TargetShape.VtableSlot, "binding", bound.Failure!.Detail);
+            if (constraint is not null)
+            {
+                receiver = Value(c, binding.This, site.Point);
+                if (receiver is null || c.Get(locations.Types, receiver) is not { IsSuccess: true, Value.Type: var typed }
+                    || typed != constraint) return No(TargetShape.VtableSlot, "generic-receiver", "调用接收者不是泛型上下文所指的 T 值。");
+            }
             if (Value(c, binding.This, site.Point) != receiver) return No(TargetShape.VtableSlot, "receiver-mismatch", "首参不是虚表所属对象。");
             var info = Value(c, binding.MethodInformation, site.Point);
             Outcome<NamedValue>? infoName = info is null ? null : c.Get(names, info);
@@ -69,7 +99,8 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
                 mf.Field != spec.Layout.Field("VirtualInvokeData", "method").Path || mf.Owner != table ||
                 info?.Identity is not MemoryAtom im || Resolve(c, im.Location.Root) != Resolve(c, pm.Location.Root))
                 return No(TargetShape.VtableSlot, "method-information", "隐藏方法信息与目标不是同一对象的同一槽。");
-            return Yes(new(DispatchKind.Virtual, TargetShape.VtableSlot, receiver, type, slot, method, binding, pointer));
+            return Yes(new(DispatchKind.Virtual, TargetShape.VtableSlot, receiver, constraint ?? (TypeRef)type, slot, method, binding, pointer)
+                { Constraint = constraint });
         }
         var field = Field(c, target);
         if (field is not null && DelegateField(field, "invoke_impl"))

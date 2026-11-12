@@ -14,6 +14,8 @@ public sealed record MethodMetric(string Identity, MetricStatus Status, Comparis
     public CoverageResult? AttemptedCoverage { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyDictionary<string, InstanceMetric>? Instances { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Cpp2CS.Managed.GenericWitnessCoverage? WitnessCoverage { get; init; }
 }
 public sealed record InstanceMetric(bool Applicable, MetricStatus Status, ComparisonReason ReasonKind,
     string? Difference, int? Seed, int CompletedCases, int NaNSkippedCases, CoverageResult? Coverage);
@@ -45,7 +47,8 @@ public static class IlMetrics
         + $"|{m.CallingConvention}|{m.HasThis}|{m.ExplicitThis}";
 
     public static MethodMetric Compare(MethodDefinition reference, MethodDefinition? tested, MetricOptions options) => Compare(reference, tested, options, null);
-    internal static MethodMetric Compare(MethodDefinition reference, MethodDefinition? tested, MetricOptions options, Func<CecilModel>? modelFactory)
+    internal static MethodMetric Compare(MethodDefinition reference, MethodDefinition? tested, MetricOptions options, Func<CecilModel>? modelFactory,
+        Cpp2CS.Managed.GenericWitnessCoverage? witnessCoverage = null)
     {
         var hasBody = reference.HasBody && reference.Body.Instructions.Count > 0;
         if (!hasBody)
@@ -54,9 +57,10 @@ public static class IlMetrics
         if (tested is null || !tested.HasBody || tested.Body.Instructions.Count == 0)
             return new(Identity(reference), MetricStatus.NotWritten, ComparisonReason.MissingBody, null, null, 0, 0, null)
             { Instances = UnavailableInstances(reference, MetricStatus.NotWritten, null) };
-        var result = CilComparison.Compare(reference, tested, options.Cases, options.FirstSeed, options.StepLimit, modelFactory);
+        var result = CilComparison.Compare(reference, tested, options.Cases, options.FirstSeed, options.StepLimit, modelFactory, witnessCoverage);
         return new(Identity(reference), Status(result.Status), result.ReasonKind, result.Reason, result.Seed, result.CompletedCases, result.NaNSkippedCases, result.Coverage)
         {
+            WitnessCoverage = witnessCoverage,
             AttemptedCoverage = result.AttemptedCoverage,
             Instances = result.Instances?.ToDictionary(p => p.Key, p => new InstanceMetric(p.Value.Applicable,
                 Status(p.Value.Result.Status), p.Value.Result.ReasonKind, p.Value.Result.Reason, p.Value.Result.Seed,

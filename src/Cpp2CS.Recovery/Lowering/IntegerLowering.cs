@@ -32,6 +32,7 @@ public sealed partial class IntegerLowering
     private readonly NativeFunction function;
     private readonly MethodRef method;
     private readonly MethodRef? witness;
+    private readonly IRgctxDecoder? rgctx;
     private readonly MethodBinder binder;
     private readonly ManagedTypes types;
     private readonly StateQueries state;
@@ -58,9 +59,9 @@ public sealed partial class IntegerLowering
 
     public IntegerLowering(NativeFunction function, MethodRef method, MethodBinder binder, ManagedTypes types,
         Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null, RuntimeSpec? spec = null, NamingFacts? names = null,
-        AccessorQuery? accessors = null, ConstructorQuery? constructors = null, MethodRef? witness = null)
+        AccessorQuery? accessors = null, ConstructorQuery? constructors = null, MethodRef? witness = null, IRgctxDecoder? rgctx = null)
     {
-        this.function = function; this.method = method; this.witness = witness; this.binder = binder; this.types = types;
+        this.function = function; this.method = method; this.witness = witness; this.rgctx = rgctx; this.binder = binder; this.types = types;
         this.calls = calls; this.spec = spec; this.names = names ?? NamingFacts.Empty;
         this.accessors = accessors;
         this.constructors = constructors;
@@ -92,10 +93,10 @@ public sealed partial class IntegerLowering
         { GenericFailure<object>("Struct", "含类型参数的值类型签名尚未下降"); return new(null, failure); }
         if (spec is not null && calls is not null)
         {
-            var naming = new ValueNamingQuery(state, calls, names, spec, binder, signature);
+            var naming = new ValueNamingQuery(state, calls, names, spec, binder, signature, rgctx, types.Layouts as GenericWitness);
             valueNames = naming;
             locations = new(state, naming, types.Layouts, spec);
-            dispatch = new(state, calls, naming, locations, binder, spec);
+            dispatch = new(state, calls, naming, locations, binder, spec, types.Layouts as GenericWitness);
             context = locations.CreateContext(function);
         }
         // 所有事件先检查，避免未使用的调用或访问被纯值下降遗漏。
@@ -255,6 +256,12 @@ public sealed partial class IntegerLowering
             case Jump j: return new ManagedJump(position, Edge(b.Identity, j.Target));
             case Branch branch:
                 var condition = Value(branch.Condition);
+                if (condition is not null && Opaque(condition.Type))
+                {
+                    if (witness is null || !GenericWitness.IsCanonical(witness))
+                        return GenericFailure<ManagedStatement>("Arithmetic", "值实例中的类型参数位型不能作为条件");
+                    condition = new BoxValue(condition, condition.Type, types.Object, types.PointerSize * 8);
+                }
                 return condition is null ? null : new ManagedBranch(position, ManagedTypes.IsNativePointer(condition.Type) ? IntegerBits(condition) : condition, Edge(b.Identity, branch.True), Edge(b.Identity, branch.False));
             case Return r:
                 if (ManagedTypes.IsVoid(method.Concrete(method.Method.ReturnType))) return new ManagedReturn(position, null);

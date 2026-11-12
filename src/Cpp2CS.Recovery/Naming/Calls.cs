@@ -49,7 +49,7 @@ public sealed class CallNamingQuery(MethodBinder binder, IBindingCodeMap code, I
 
 public sealed record SharedCallTarget(MethodRef Method, BoundCall Binding);
 
-/// <summary>共用代码只提供 C 层签名；封闭托管身份必须来自隐藏的方法信息实参。</summary>
+/// <summary>共用代码只提供 C 层签名；托管身份来自方法信息，开放实参以当前定义的见证核对 ABI。</summary>
 public sealed class SharedCallQuery(MethodBinder binder, CallNamingQuery calls, ValueNamingQuery? names,
     BoundSourceQuery sources) : Query<CallIdentity, SharedCallTarget>
 {
@@ -82,7 +82,13 @@ public sealed class SharedCallQuery(MethodBinder binder, CallNamingQuery calls, 
         if (!information.IsSuccess) return No("witness", "方法信息实参没有可用的项。", information.Why);
         var entity = c.Get(names, information.Value);
         if (!entity.IsSuccess) return No("witness", "方法信息实参命名失败。", entity.Why);
-        if (entity.Value.Name is not EntityName { Entity: MethodEntity { Method: var method } })
+        var method = entity.Value.Name switch
+        {
+            EntityName { Entity: MethodEntity methodInfo } => methodInfo.Method,
+            ParameterName { MethodInformation: true } => names.DefinitionMethod,
+            _ => null,
+        };
+        if (method is null)
         {
             // 方法信息实参为空：被调方不使用泛型上下文。调用的是哪个实例由接收者给出——
             // 接收者静态类型的继承链上，候选方法的声明类型的那个实例。没有接收者时不定。
@@ -107,14 +113,19 @@ public sealed class SharedCallQuery(MethodBinder binder, CallNamingQuery calls, 
             if (matches.Count > 1) return No("ambiguous", "方法信息实参为空，接收者类型对应多个候选方法。");
             method = matches.Single();
         }
+        var native = method;
         if (!ManagedCSignatureBuilder.IsClosed(method))
-            return No("witness", "方法信息见证的泛型实参未完整封闭。");
+        {
+            if (names.Witness is not { } witness || !witness.Knows(method))
+                return No("witness", "方法信息见证含有本定义之外或不完整的泛型实参。");
+            native = witness.Close(method);
+        }
         if (!candidates.Candidates.Any(x => x.Entry.Kind == BindingEntryKind.SharedGeneric && x.Entry.Method?.Method == method.Method))
             return No("mismatch", "方法信息见证的定义与泛型实例入口候选不符。");
-        var concrete = binder.Entry(method, BindingEntryKind.Ordinary);
+        var concrete = binder.Entry(native, BindingEntryKind.Ordinary);
         if (concrete.Value is not { } target || !Same(common!.Signature, target.Signature))
             return No("mismatch", "方法信息见证的 C 层签名与候选不符：" + concrete.Failure?.Detail);
-        var result = binder.Call(call, target, c.Snapshot.Terms);
+        var result = binder.Call(call, target with { Entry = new(method, BindingEntryKind.Ordinary) }, c.Snapshot.Terms);
         return result.Value is { } valueBinding ? Outcome<SharedCallTarget>.Success(new(method, valueBinding))
             : No("signature", "见证实例无法绑定：" + result.Failure!.Detail);
     }

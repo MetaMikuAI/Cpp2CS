@@ -18,9 +18,10 @@ internal sealed record CilComparisonInstance(bool Applicable, CilComparisonResul
 /// <summary>有限合成输入上的 IL 对照；泛型入口按适用实例分别执行并归并。</summary>
 internal static partial class CilComparison
 {
-    public static CilComparisonResult Compare(MethodDefinition left, MethodDefinition right, int cases = 32, int firstSeed = 0, int stepLimit = 1_000_000, Func<CecilModel>? modelFactory = null)
+    public static CilComparisonResult Compare(MethodDefinition left, MethodDefinition right, int cases = 32, int firstSeed = 0, int stepLimit = 1_000_000, Func<CecilModel>? modelFactory = null,
+        Cpp2CS.Managed.GenericWitnessCoverage? witnessCoverage = null)
         => IsGenericEntry(left) || IsGenericEntry(right)
-            ? CompareGeneric(left, right, cases, firstSeed, stepLimit, modelFactory)
+            ? CompareGeneric(left, right, cases, firstSeed, stepLimit, modelFactory, witnessCoverage)
             : CompareInstance(left, right, cases, firstSeed, stepLimit, modelFactory);
 
     private static CilComparisonResult CompareInstance(MethodDefinition left, MethodDefinition right, int cases, int firstSeed, int stepLimit, Func<CecilModel>? modelFactory, bool? valueInstance = null)

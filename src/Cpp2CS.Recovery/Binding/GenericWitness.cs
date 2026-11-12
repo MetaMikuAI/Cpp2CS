@@ -12,6 +12,9 @@ public sealed class GenericWitness(MethodRef definition, MethodRef instance, ITy
     public static bool IsCanonical(MethodRef instance) => ManagedCSignatureBuilder.IsClosed(instance)
         && instance.TypeArguments.Concat(instance.MethodArguments).All(t => t is DefinitionRef
             { Definition: { Assembly: "mscorlib.dll", FullName: "System.Object" }, Arguments.Count: 0 });
+    public static bool IsValueInstance(MethodRef instance) => ManagedCSignatureBuilder.IsClosed(instance)
+        && !instance.TypeArguments.Concat(instance.MethodArguments).Any(ManagedCSignatureBuilder.FullyShared)
+        && instance.TypeArguments.Concat(instance.MethodArguments).Any(t => t is DefinitionRef { Definition.IsValueType: true });
 
     public bool Knows(TypeRef type) => type switch
     {
@@ -26,6 +29,9 @@ public sealed class GenericWitness(MethodRef definition, MethodRef instance, ITy
         TypeArguments = method.TypeArguments.Select(Close).ToArray(),
         MethodArguments = method.MethodArguments.Select(Close).ToArray(),
     };
+    public bool Knows(MethodRef method) => method.TypeArguments.Count == method.Method.Owner.GenericParameters.Count
+        && method.MethodArguments.Count == method.Method.GenericParameters.Count
+        && method.TypeArguments.Concat(method.MethodArguments).All(Knows);
     public TypeLayout? Of(DefinitionRef type)
     {
         if (!Knows(type) || layouts.Of((DefinitionRef)Close(type)) is not { } native) return null;

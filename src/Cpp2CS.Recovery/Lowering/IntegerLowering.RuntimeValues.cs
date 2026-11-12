@@ -33,14 +33,16 @@ public sealed partial class IntegerLowering
     {
         var type = RuntimeClass(c, "lowering.TypeCheck.Class");
         if (type is null) return;
+        if (Opaque(type) && (types.Layouts is not GenericWitness generic || !generic.Knows(type)))
+        { GenericFailure<object>("Conversion", "类型检查的 T 不属于当前定义的泛型上下文"); return; }
         if (c.Inputs?.GetValueOrDefault("object") is not { } obj || c.Result?.Source is not TermSource result)
         { Fail<object>(LoweringFailureKind.RuntimeCall, "类型检查的对象或结果没有绑定", code: "lowering.TypeCheck.Binding"); return; }
         bool cast = c.Operation!.Il.Name == "CastClass";
         // isinst 对值类型目标的结果是装箱对象的引用；castclass 的目标只能是引用类型。
-        TypeRef? boxed = ManagedTypes.IsReferenceType(type) ? null : types.Object;
+        TypeRef? boxed = ManagedTypes.IsReferenceType(type) || cast && Opaque(type) ? null : types.Object;
         if (cast && boxed is not null)
         { Fail<object>(LoweringFailureKind.RuntimeCall, "强制转换的目标不是引用类型", code: "lowering.TypeCheck.Target"); return; }
-        var local = new LocalValue(new(nextLocal++), boxed ?? type, types.PointerSize * 8);
+        var local = new LocalValue(new(nextLocal++), boxed ?? type, cast && Opaque(type) ? ValueWidth(type) : types.PointerSize * 8);
         typeChecks.Add(call.Identity, new(obj, type, local, cast, boxed));
         runtimeValues.Add(result.Term, local);
     }
@@ -52,13 +54,17 @@ public sealed partial class IntegerLowering
         if (obj is null) return null;
         if (!ManagedTypes.IsReferenceType(obj.Type))
             return Fail<ManagedStatement>(LoweringFailureKind.RuntimeCall, "类型检查的对象不是引用", code: "lowering.TypeCheck.Object");
-        ManagedValue value = definition.Cast ? new CheckedCastValue(obj, definition.Target, types.PointerSize * 8)
+        ManagedValue value = definition.Cast && Opaque(definition.Target) ? new UnboxValue(obj, definition.Target, ValueWidth(definition.Target))
+            : definition.Cast ? new CheckedCastValue(obj, definition.Target, types.PointerSize * 8)
             : new IsInstValue(obj, definition.Target, types.PointerSize * 8, definition.Boxed);
         return new ManagedAssignment(position, definition.Local, value);
     }
 
     private TypeRef? BoxedScalar(TypeRef type, string operation)
     {
+        if (Opaque(type) && types.Layouts is GenericWitness generic && generic.Knows(type)
+            && (IntegerType(generic.Close(type)) || IsFloat(generic.Close(type))
+                || ManagedTypes.PrimitiveName(generic.Close(type)) is "IntPtr" or "UIntPtr")) return type;
         if (type is DefinitionRef { Definition: { Namespace: "System", Name: "Nullable`1" } })
             return Fail<TypeRef>(LoweringFailureKind.RuntimeCall, "可空类型的装拆箱尚未下降", code: "lowering." + operation + ".Nullable");
         var storage = ManagedTypes.Underlying(type);
@@ -94,7 +100,7 @@ public sealed partial class IntegerLowering
         if (!contents.IsSuccess) return Fail<ManagedStatement>(LoweringFailureKind.State, "装箱数据在调用点不可用", contents.Why);
         var value = Value(contents.Value, IsFloat(definition.Storage));
         if (value is null) return null;
-        value = IsFloat(definition.Storage) ? FloatBits(value, width)
+        value = Opaque(definition.Target) ? Coerce(value, definition.Target) : IsFloat(definition.Storage) ? FloatBits(value, width)
             : new ConversionValue(ManagedTypes.IsSigned(definition.Storage) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
                 value, definition.Storage, width);
         return new ManagedAssignment(position, definition.Local, new BoxValue(value, definition.Target, types.Object, types.PointerSize * 8));
@@ -160,7 +166,7 @@ public sealed partial class IntegerLowering
             { Fail<object>(LoweringFailureKind.RuntimeCall, "配对读取没有独立的非帧读取身份", code: "lowering.Unbox.Use"); return; }
             var readDefinition = new ReadDefinition(paired)
             {
-                Constant = IsFloat(definition.Target) ? definition.Local : Mask(definition.Local, definition.Local.Width)
+                Constant = Opaque(definition.Target) || IsFloat(definition.Target) ? definition.Local : Mask(definition.Local, definition.Local.Width)
             };
             readValues.Add(contents.Value, readDefinition);
             readDefinitions.Add(paired.Identity, readDefinition);

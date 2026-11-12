@@ -102,7 +102,7 @@ internal static class PipelineCorpusChecks
                 // 管线按元数据判断“声明没有方法体”；与参考程序集核对，判错的不得悄悄移出分母。
                 if (recovered is not null && (recovered.Status == MethodStatus.NoBody) == method.HasBody) bodyless.Add(id);
                 var candidate = recovered?.Status == MethodStatus.Complete ? index.GetValueOrDefault(IlMetrics.Identity(method)) : null;
-                if (!metrics.TryAdd(id, IlMetrics.Compare(method, candidate, options, modelFactory)))
+                if (!metrics.TryAdd(id, IlMetrics.Compare(method, candidate, options, modelFactory, recovered?.WitnessCoverage)))
                     throw new InvalidDataException("真值方法身份重复。");
             }
         });
@@ -120,6 +120,9 @@ internal static class PipelineCorpusChecks
             if (method?.Status == MethodStatus.Hole) checks.True(metric.Status == MetricStatus.NotWritten, "洞不比较占位体：" + id);
         }
         var comparison = IlMetrics.Report(metrics.OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Value).ToArray(), options);
+        checks.True(report.Methods.Where(m => m.Status == MethodStatus.Complete && metrics[m.Identity].Instances is not null)
+            .All(m => m.WitnessCoverage == (m.HasValueTypeInstance ? Cpp2CS.Managed.GenericWitnessCoverage.ReferenceAndValue
+                : Cpp2CS.Managed.GenericWitnessCoverage.ReferenceOnly)), "泛型定义的覆盖标记与代码地图中的值实例及恢复见证一致");
         File.WriteAllText(Path.Combine(output, "comparison.local.json"), IlMetrics.Json(comparison));
         checks.True(report.Summary.ProgramErrors.Length == 0, "没有程序错误：" + string.Join("；", report.Summary.ProgramErrors.Take(3)));
         checks.True(report.Summary.ContractFailures.Length == 0, "没有输出层契约失败：" + string.Join("；", report.Summary.ContractFailures.Take(3)));

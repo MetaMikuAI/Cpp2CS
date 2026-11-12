@@ -70,6 +70,10 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                             records.Add(record); classRecords[call.Identity] = record;
                         }
                     }
+                    else if (names.DefinitionMethod is not null && op.MetadataInitialization is { } metadata
+                        && named.Value.Inputs?.GetValueOrDefault(metadata.Input)?.Source is TermSource source
+                        && c.Get(names, source.Term) is { IsSuccess: true } target && names.ContextEntity(target.Value.Name))
+                        evidence = metadata.Evidence;
                     else if (op.Observation == RuntimeObservation.Unobservable)
                         evidence = op.Name;
                 }
@@ -375,7 +379,8 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         if (!owner.IsSuccess || owner.Value.Kind != ValueKind.RuntimePointer || owner.Value.Record is null) return false;
         // 指针种类不足以证明任意偏移；字段范围必须由命名查询确认。
         var named = c.Get(names, c.Snapshot.Terms.Atom(new MemoryAtom(location, null), location.Width));
-        return named.IsSuccess && named.Value.Name is FieldName or BitStorageName;
+        return named.IsSuccess && (named.Value.Name is FieldName or BitStorageName
+            || names.DefinitionMethod is not null && named.Value.Name is EntityName);
     }
     private bool PrivateCondition(QueryContext c, Term condition)
     {

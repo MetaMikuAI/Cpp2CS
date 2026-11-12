@@ -15,4 +15,8 @@ public sealed record ManagedRegion(IReadOnlyList<ulong> Try, ulong HandlerEntry,
 public sealed record ManagedBody(MethodRef Method, IReadOnlyList<ManagedBlock> Blocks)
 {
     public IReadOnlyList<ManagedRegion> Regions { get; init; } = [];
+    public GenericWitnessCoverage? WitnessCoverage { get; init; }
 }
+
+/// <summary>开放定义体经原生实例见证证明的实参范围；不改变方法体的 IL。</summary>
+public enum GenericWitnessCoverage { ReferenceOnly, ReferenceAndValue }

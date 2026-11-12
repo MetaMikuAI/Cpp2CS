@@ -55,7 +55,7 @@ public sealed class ManagedCSignatureBuilder(ITypeLayouts layouts, int pointerBi
         _ => true,
     };
 
-    private static bool FullyShared(TypeRef type) => type switch
+    public static bool FullyShared(TypeRef type) => type switch
     {
         DefinitionRef d => (d.Definition.Namespace == "Unity.IL2CPP.Metadata"
             && d.Definition.Name is "__Il2CppFullySharedGenericType" or "__Il2CppFullySharedGenericStructType")

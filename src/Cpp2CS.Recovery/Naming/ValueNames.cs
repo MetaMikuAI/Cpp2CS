@@ -29,8 +29,8 @@ public sealed record NamedValue(ValueKind Kind, ValueName? Name, string? Record 
 }
 
 /// <summary>名字保存实体、定义或规格字段依据；不向项表写入替代项，不改写快照。</summary>
-public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, NamingFacts facts, RuntimeSpec spec,
-    MethodBinder binder, SignatureBinding? entry = null) : Query<Term, NamedValue>
+public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery calls, NamingFacts facts, RuntimeSpec spec,
+    MethodBinder binder, SignatureBinding? entry = null, IRgctxDecoder? rgctx = null, GenericWitness? witness = null) : Query<Term, NamedValue>
 {
     internal RuntimeSpec Spec => spec;
     internal MethodBinder Binder => binder;
@@ -121,6 +121,17 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
             }
             if (call.Candidates is { } candidates)
             {
+                if (witness is not null && candidates.Candidates.Any(x => x.Entry.Kind == BindingEntryKind.SharedGeneric))
+                {
+                    var target = c.Get(sharedResults ??= new(binder, calls, this, new(state)), id);
+                    if (!target.IsSuccess) return Yes(new(ValueKind.Unnamed, null, Why: target.Why));
+                    var bound = target.Value.Binding;
+                    var method = target.Value.Method;
+                    var type = method.Concrete(method.Method.ReturnType);
+                    return Yes(bound.Result.Source is TermSource output && output.Term == key
+                        ? Typed(bound.Result.Type, type, new CallResultName(id, type, null))
+                        : NamedValue.Unknown("naming.result-binding", "共享调用结果未完整绑定。"));
+                }
                 var names = candidates.Candidates.Select(candidate => candidate.Binding.Value is { } bound &&
                     bound.Result.Source is TermSource source && source.Term == key && candidate.Entry.Method is { } method
                     ? Typed(bound.Result.Type, method.Concrete(method.Method.ReturnType), new CallResultName(id, method.Concrete(method.Method.ReturnType), null))
@@ -225,16 +236,7 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
             low == 0 && location.Width == c.Snapshot.AddressWidth && facts.Slots.TryGetValue((ulong)offset, out var entity))
         {
             if (!entity.IsSuccess) return Yes(new(ValueKind.Unnamed, null, Why: entity.Why));
-            var name = new EntityName(entity.Value, (ulong)offset);
-            return Yes(entity.Value switch
-            {
-                ClassEntity => new(ValueKind.RuntimePointer, name, "Il2CppClass"),
-                TypeEntity => new(ValueKind.RuntimePointer, name, "Il2CppType"),
-                MethodEntity => new(ValueKind.RuntimePointer, name, "MethodInfo"),
-                FieldEntity => new(ValueKind.RuntimePointer, name, "FieldInfo"),
-                StringEntity => new(ValueKind.ManagedReference, name, "Il2CppString"),
-                _ => NamedValue.Unknown("naming.entity", "未登记的实体种类。")
-            });
+            return Yes(Entity(entity.Value, (ulong)offset));
         }
         if (location.Region != Region.Other || location.Offset is null)
             return Yes(NamedValue.Unknown("naming.read-region", "读取没有已命名的区域或定值偏移。"));
@@ -242,6 +244,7 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
         if (owner.Value == NameLattice.Pending) return owner;
         if (owner.Value.Name is not { } parent || owner.Value.Record is not { } record || !spec.Layout.Records.TryGetValue(record, out var layout))
             return Yes(NamedValue.Unknown("naming.read-base", "读取的基值没有运行时结构身份。", owner.Value.Why));
+        if (ContextRead(location, low, parent, record) is { } generic) return generic;
         var bitOffset = location.Offset.Value * 8 + low;
         var fields = layout.Fields.Values.Where(f => f.OffsetBits == bitOffset && (f.BitWidth ?? f.Size * 8) == location.Width).ToArray();
         // 对象头的联合以运行时对象的 klass 视图解释。

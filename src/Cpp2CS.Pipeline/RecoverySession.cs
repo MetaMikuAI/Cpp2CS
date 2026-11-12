@@ -144,25 +144,47 @@ public sealed class RecoverySession
                 Advance();
                 return;
             }
-            var context = new MethodContext(method, entry, facts);
-            var lifted = Invoke(frontend, entry, context, programErrors, out var ticks);
-            Interlocked.Add(ref frontTicks, ticks);
-            Hole? hole;
-            if (lifted is Missing<NativeFunction> missing) hole = missing.Hole;
-            else
+            StageResult<ManagedBody> Recover(CodeEntry candidate)
             {
+                var context = new MethodContext(method, candidate, facts);
+                var lifted = Invoke(frontend, candidate, context, programErrors, out var ticks);
+                Interlocked.Add(ref frontTicks, ticks);
+                if (lifted is Missing<NativeFunction> missing) return new Missing<ManagedBody>(missing.Hole);
                 var result = Invoke(recovery, ((Completed<NativeFunction>)lifted).Value, context, programErrors, out ticks);
                 Interlocked.Add(ref recoveryTicks, ticks);
-                hole = (result as Missing<ManagedBody>)?.Hole;
-                bodies[i] = (result as Completed<ManagedBody>)?.Value;
-                if (bodies[i] is { } body && body.Method != MethodRef.Open(method))
+                if (result is Completed<ManagedBody> { Value: var body } && body.Method != MethodRef.Open(method))
                     throw new InvalidOperationException($"{Identity(method)}：恢复层未返回开放定义体");
+                return result;
+            }
+            var reference = Recover(entry);
+            var hole = (reference as Missing<ManagedBody>)?.Hole;
+            bodies[i] = (reference as Completed<ManagedBody>)?.Value;
+            CodeEntry? valueEntry = null;
+            if (bodies[i] is { } referenceBody && GenericWitness.IsGeneric(method))
+            {
+                valueEntry = SelectValueEntry(entries);
+                if (valueEntry is not null)
+                {
+                    var value = Recover(valueEntry);
+                    if (value is Missing<ManagedBody> missing)
+                        hole = new("恢复", valueEntry.Address, "值见证", new("lowering.Generic.ValueWitness",
+                            "值见证恢复失败：" + valueEntry.Method + "；" + missing.Hole.Reason.Message, missing.Hole.Reason));
+                    else if (GenericBodyComparison.Compare(referenceBody, ((Completed<ManagedBody>)value).Value) is { } difference)
+                        hole = new("恢复", valueEntry.Address, "值见证", difference);
+                    else bodies[i] = referenceBody with { WitnessCoverage = GenericWitnessCoverage.ReferenceAndValue };
+                    if (hole is not null) bodies[i] = null;
+                }
             }
             rows[i] = new(Identity(method), method.ToString(), entry.Address,
                 entries.Select(e => new EntryReport(e.Address, e.Kind.ToString(), e.Method!.ToString())).ToArray(),
-                hole is null ? MethodStatus.Complete : MethodStatus.Hole, hole);
+                hole is null ? MethodStatus.Complete : MethodStatus.Hole, hole)
+                { WitnessCoverage = bodies[i]?.WitnessCoverage,
+                    ValueWitness = valueEntry is null ? null : new(valueEntry.Address, valueEntry.Kind.ToString(), valueEntry.Method!.ToString()) };
             Advance();
         });
+        for (int i = 0; i < rows.Length; i++)
+            rows[i] = rows[i] with { HasValueTypeInstance = groups[i].Any(e => e.Kind == EntryKind.GenericMethod
+                && e.Method is { } instance && GenericWitness.IsValueInstance(instance)) };
         var outputWatch = Stopwatch.StartNew();
         var skeleton = new Skeleton(facts.Model, checked((int)facts.Spec.Layout.ObjectHeaderSize));
         var pointer = facts.Spec.Layout.Primitive("void *");
@@ -238,6 +260,12 @@ public sealed class RecoverySession
     public static CodeEntry SelectEntry(MethodDef method, IEnumerable<CodeEntry> entries) => entries
         .OrderBy(e => GenericWitness.IsGeneric(method) && e.Kind == EntryKind.GenericMethod && e.Method is { } witness && GenericWitness.IsCanonical(witness) ? 0 : 1)
         .ThenBy(e => e.Kind).ThenBy(e => e.Address).ThenBy(e => e.Index).First();
+
+    public static CodeEntry? SelectValueEntry(IEnumerable<CodeEntry> entries) => entries
+        .Where(e => e.Kind == EntryKind.GenericMethod && e.Method is { } instance && GenericWitness.IsValueInstance(instance))
+        .OrderBy(e => e.Method!.TypeArguments.Concat(e.Method.MethodArguments).All(t => ManagedTypes.PrimitiveName(t) is
+            "Boolean" or "Char" or "SByte" or "Byte" or "Int16" or "UInt16" or "Int32" or "UInt32" or "Int64" or "UInt64" or "Single" or "Double" or "IntPtr" or "UIntPtr") ? 0 : 1)
+        .ThenBy(e => e.Address).ThenBy(e => e.Index).FirstOrDefault();
 
     private static StageResult<TOut> Invoke<TIn, TOut>(IMethodStage<TIn, TOut> stage, TIn input, MethodContext context,
         System.Collections.Concurrent.ConcurrentBag<string> programErrors, out long ticks) where TOut : class

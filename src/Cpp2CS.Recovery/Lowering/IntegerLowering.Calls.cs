@@ -19,6 +19,7 @@ public sealed partial class IntegerLowering
         public LocalValue? Local { get; set; }
         public Term? Receiver { get; init; }
         public bool Virtual { get; init; }
+        public TypeRef? Constraint { get; init; }
     }
     private readonly Dictionary<CallIdentity, MethodRef> throws = [];
     private readonly HashSet<CallIdentity> interfaceLookups = [];
@@ -58,9 +59,10 @@ public sealed partial class IntegerLowering
         {
             var result = context.Get(dispatch, call.Identity);
             if (!result.IsSuccess || result.Value.Kind == DispatchKind.Unresolved)
-            { var why = result.IsSuccess ? result.Value.Why : result.Why; Fail<object>(LoweringFailureKind.IndirectCall, "分派未解析", why, why?.Code); return; }
+            { var why = result.IsSuccess ? result.Value.Why : result.Why; Fail<object>(LoweringFailureKind.IndirectCall, "分派未解析", why,
+                why?.Code == "dispatch.generic-receiver" ? "lowering.Generic.Receiver" : why?.Code); return; }
             var d = result.Value;
-            var dispatched = new CallDefinition(d.Method!, d.Binding!) { Receiver = d.Receiver, Virtual = true };
+            var dispatched = new CallDefinition(d.Method!, d.Binding!) { Receiver = d.Receiver, Virtual = true, Constraint = d.Constraint };
             callDefinitions.Add(call.Identity, dispatched);
             if (d.Binding!.Result.Source is TermSource output) callResults.Add(output.Term, dispatched);
             return;
@@ -169,7 +171,16 @@ public sealed partial class IntegerLowering
         var receiver = d.Receiver is { } target
             ? receiverType is ByRefRef byref ? AddressArgument(target, byref.Element) : Value(target)
             : d.Binding.This is { } self ? CallArgument(self, receiverType, point, true) : null;
-        if (receiver is not null && Opaque(receiver.Type)) return GenericFailure<ManagedStatement>("Receiver", "类型参数值作为调用接收者需要 constrained. 语义");
+        if (d.Constraint is { } constraint)
+        {
+            if (receiver is null || !receiver.Type.Equals(constraint))
+                return GenericFailure<ManagedStatement>("Receiver", "受约束调用的接收者不是同一类型参数值");
+            var constrained = new ManagedCall(position, new(d.Method, new AddressValue(receiver, types.PointerSize * 8), args, true)
+                { Constraint = constraint }, null);
+            callStatements.Add(constrained, d);
+            return constrained;
+        }
+        if (receiver is not null && Opaque(receiver.Type)) return GenericFailure<ManagedStatement>("Receiver", "类型参数值作为调用接收者缺少 T 类的分派凭据");
         if (receiver is not null) receiver = Coerce(receiver, receiverType);
         if (d.Binding.This is not null && receiver is null) return null;
         var statement = new ManagedCall(position, new(d.Method, receiver, args, d.Virtual), null);

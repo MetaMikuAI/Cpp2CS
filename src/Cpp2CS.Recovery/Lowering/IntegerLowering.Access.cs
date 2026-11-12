@@ -80,6 +80,11 @@ public sealed partial class IntegerLowering
         }
         if (Opaque(value.Type) || Opaque(type))
         {
+            if (Equals(value.Type, type)) return value;
+            if (Opaque(type) && value is ConstantValue { Bits: 0 }) return new ComposedValue(type, []);
+            if (Opaque(value.Type) && (type.Equals(types.Object) || type is DefinitionRef { Definition.IsInterface: true })
+                && witness is not null && GenericWitness.IsCanonical(witness))
+                return new BoxValue(value, value.Type, type, types.PointerSize * 8);
             if (!Equals(value.Type, type)) GenericFailure<object>("Conversion", "类型参数值只能原样流向同一类型参数的位置");
             return value;
         }

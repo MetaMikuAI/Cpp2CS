@@ -3,6 +3,7 @@ using Cpp2CS.Managed;
 using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
+using Cpp2CS.Recovery.Binding;
 
 namespace Cpp2CS.Recovery.Lowering;
 
@@ -193,8 +194,16 @@ public sealed partial class IntegerLowering
         {
             if (op == CoreOperation.Select && !Opaque(operands[0]!.Type))
             {
-                var type = operands[1]!.Type;
+                var type = operands.Skip(1).First(v => Opaque(v!.Type))!.Type;
                 return new ChoiceValue(operands[0]!, Coerce(operands[1]!, type), Coerce(operands[2]!, type), type, term.Width);
+            }
+            if (op is CoreOperation.Equal or CoreOperation.NotEqual && operands.Any(v => v is ConstantValue { Bits: 0 })
+                && witness is not null && GenericWitness.IsCanonical(witness))
+            {
+                var parameter = operands.First(v => Opaque(v!.Type))!;
+                return new ComparisonValue(op == CoreOperation.Equal ? ComparisonKind.Equal : ComparisonKind.NotEqual,
+                    new BoxValue(parameter, parameter.Type, types.Object, types.PointerSize * 8),
+                    new ConstantValue(0, types.Object, types.PointerSize * 8), types.Boolean);
             }
             return GenericFailure<ManagedValue>(op is CoreOperation.Equal or CoreOperation.NotEqual && operands.Any(v => v is ConstantValue { Bits: 0 })
                 ? "NullTest" : "Arithmetic", "类型参数值参与尚未支持的运算：" + op);

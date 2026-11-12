@@ -24,8 +24,20 @@ public sealed partial class UnobservableEffects
                 statements.Add(statement);
                 if (statement is not Call call || call.DoesNotReturn) continue;
                 var classified = c.Get(calls, call.Identity);
-                if (!classified.IsSuccess || classified.Value.Operation is not { DoesNotReturn: false } operation
-                    || operation.Result.Relation is not { Kind: RuntimeResultRelationKind.ResolvedPointee, Input: { } inputName }
+                if (!classified.IsSuccess || classified.Value.Operation is not { DoesNotReturn: false } operation) continue;
+                // 只在有效开放上下文中应用元数据初始化的恒等结果；不改变其他入口的恢复结果。
+                if (names.DefinitionMethod is not null && operation.MetadataInitialization is { } metadata
+                    && operation.Result.ReturnInput is { } sameInput
+                    && classified.Value.Inputs?.GetValueOrDefault(sameInput)?.Source is TermSource identity
+                    && classified.Value.Result?.Source is TermSource output
+                    && output.Term.Width == identity.Term.Width && c.Get(names, identity.Term) is { IsSuccess: true } identityName
+                    && names.ContextEntity(identityName.Value.Name))
+                {
+                    edit.Replacements[output.Term] = identity.Term;
+                    records.Add(new("specification-result", call.Trace?.NativeAddress, metadata.Evidence, true));
+                    continue;
+                }
+                if (operation.Result.Relation is not { Kind: RuntimeResultRelationKind.ResolvedPointee, Input: { } inputName }
                     || classified.Value.Inputs?.GetValueOrDefault(inputName)?.Source is not TermSource address
                     || classified.Value.Result?.Source is not TermSource result
                     || result.Term.Width != input.AddressWidth

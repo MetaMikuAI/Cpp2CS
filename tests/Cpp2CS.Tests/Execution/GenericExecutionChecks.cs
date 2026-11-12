@@ -79,6 +79,15 @@ internal static class GenericExecutionChecks
         var pick = Compare("Pick", changed: true);
         a.True(pick.Status == MetricStatus.Mismatch, "Pick 的两个实参可区分");
         var valueOnly = Compare("ValueOnly", changed: true);
+        var referenceWitness = IlMetrics.Compare(left.Method("Cases", "ValueOnly"), wrong.Method("Cases", "ValueOnly"), options,
+            wrongFactory, Cpp2CS.Managed.GenericWitnessCoverage.ReferenceOnly);
+        a.True(referenceWitness.Status == MetricStatus.Match && referenceWitness.CompletedCases == 32
+            && referenceWitness.Instances!["value"] is { Applicable: false, CompletedCases: 0, Difference: "没有值类型见证" },
+            "仅引用见证不执行值轮且写明不适用原因");
+        var bothWitnesses = IlMetrics.Compare(left.Method("Cases", "Pick"), right.Method("Cases", "Pick"), options,
+            factory, Cpp2CS.Managed.GenericWitnessCoverage.ReferenceAndValue);
+        a.True(bothWitnesses.Status == MetricStatus.Match && bothWitnesses.CompletedCases == 64
+            && bothWitnesses.Instances!.Values.All(i => i.Applicable), "两个见证一致时执行两轮");
         var refOnly = Compare("ReferenceOnly", changed: true);
         a.True(valueOnly.Status == MetricStatus.Mismatch && valueOnly.Instances!["ref"].Status == MetricStatus.Match
             && valueOnly.Instances["value"].Status == MetricStatus.Mismatch && valueOnly.Difference!.StartsWith("value 轮：", StringComparison.Ordinal),

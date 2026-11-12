@@ -8,7 +8,12 @@ namespace Cpp2CS.Pipeline;
 /// <summary>NoBody：方法的声明不允许 CIL 方法体，不是恢复对象，也不是洞。</summary>
 public enum MethodStatus { Complete, Hole, NoBody }
 public sealed record EntryReport(ulong Address, string Kind, string Instance);
-public sealed record MethodReport(string Identity, string Name, ulong Entry, EntryReport[] Entries, MethodStatus Status, Hole? Hole);
+public sealed record MethodReport(string Identity, string Name, ulong Entry, EntryReport[] Entries, MethodStatus Status, Hole? Hole)
+{
+    public Cpp2CS.Managed.GenericWitnessCoverage? WitnessCoverage { get; init; }
+    public bool HasValueTypeInstance { get; init; }
+    public EntryReport? ValueWitness { get; init; }
+}
 public sealed record RunSummary(int Methods, int Complete, int Holes, Dictionary<string, int> HolesByLayer,
     Dictionary<string, int> HolesByReason, Dictionary<string, double> LayerSeconds, double ElapsedSeconds, long PeakWorkingSetBytes)
 {

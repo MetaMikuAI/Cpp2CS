@@ -30,6 +30,8 @@ public sealed record RuntimePointerEffect(string Input, RuntimeAccess Access, Ru
 // 结构字段按名字引用；匿名元数据槽由外部全局访问凭据确认，不伪装为结构字段。
 public sealed record RuntimeStateRepresentation(string Input, string? Record, string? Field, RuntimeStateTest Test, string Evidence);
 public sealed record RuntimePostcondition(string Predicate, RuntimeCondition When, string Description, ImmutableArray<RuntimeStateRepresentation> Representations);
+/// <summary>有效开放实体的元数据发布由托管上下文承担；不包含类静态构造。</summary>
+public sealed record RuntimeMetadataInitialization(string Input, string Evidence);
 public sealed record RuntimeExceptions(bool MayThrow, ImmutableArray<string> Types, bool IsUpperBound, string Description);
 public sealed record RuntimeIlForm(string Name, string Description);
 public sealed record RuntimeOperation(
@@ -44,6 +46,7 @@ public sealed record RuntimeOperation(
     /// <summary>无条件抛出的固定异常；传入异常对象及重新抛出不设置此项。</summary>
     public string? FixedThrownException { get; init; }
     public string? RelaxedClassInput { get; init; }
+    public RuntimeMetadataInitialization? MetadataInitialization { get; init; }
 
     public RuntimeCondition? EventCondition => EventTrigger switch
     {
@@ -115,11 +118,13 @@ public static class RuntimeOperations
         var ready = Fact("ClassReady", "类布局初始化成功", "正常返回", Field("class", "Il2CppClass", "initialized_and_no_error"));
         yield return Op("EnsureClassReady", [klass], RuntimeValueKind.Class, RuntimeWidth.Pointer, RuntimeHeapEffect.MayWrite,
             RuntimeObservation.IdempotentEvent, "", "EnsureClassReady", "布局就绪由托管运行时承担；删除须证明成功状态", "vm/ClassInlines.cpp: InitFromCodegenSlow → vm/Class.cpp: Class::Init / InitLocked → SetupInterfacesLocked / SetupMethodsLocked / SetupVTable / SetupFieldsLocked / SetupEventsLocked / SetupPropertiesLocked / SetupNestedTypesLocked；不调用输入类 cctor；缓存错误经 vm/Exception.cpp: Raise → PrepareExceptionForThrow 修改既有异常堆栈", ["System.TypeLoadException", "System.TypeInitializationException", "System.NotSupportedException"],
-            pointers: [new("class", RuntimeAccess.ReadWrite, RuntimeMemoryDomain.Monotone, new(RuntimeExtentKind.Unknown, "类就绪状态及惰性布局"), new(RuntimeConditionKind.StateNotEstablished, "尚未就绪"))], returnInput: "class", idempotence: ready, post: [ready], upperBound: false, exceptionReason: "封闭的异常种类集合；泛型深度失败见 vm/GenericClass.cpp: CreateClass → vm/Exception.cpp: GetMaximumNestedGenericsException；未解析方法桩只被登记，不在此调用", managedCode: "仅错误工厂的基础库构造；Class::Init 不等于 Runtime::ClassInit");
+            pointers: [new("class", RuntimeAccess.ReadWrite, RuntimeMemoryDomain.Monotone, new(RuntimeExtentKind.Unknown, "类就绪状态及惰性布局"), new(RuntimeConditionKind.StateNotEstablished, "尚未就绪"))], returnInput: "class", idempotence: ready, post: [ready], upperBound: false, exceptionReason: "封闭的异常种类集合；泛型深度失败见 vm/GenericClass.cpp: CreateClass → vm/Exception.cpp: GetMaximumNestedGenericsException；未解析方法桩只被登记，不在此调用", managedCode: "仅错误工厂的基础库构造；Class::Init 不等于 Runtime::ClassInit") with
+            { MetadataInitialization = new("class", "codegen/il2cpp-codegen-il2cpp.h: InitializedTypeInfo；vm/ClassInlines.h: InitFromCodegen；有效开放实体的布局元数据由托管上下文建立") };
         var rgctx = Fact("MethodContextReady", "方法的非空泛型上下文已就绪", "正常返回且 RGCTX 集合非空；空集合不建立非零表示", Field("method", "MethodInfo", "rgctx_data"));
         yield return Op("InitializeMethodRgctx", [method], RuntimeValueKind.Method, RuntimeWidth.Pointer, RuntimeHeapEffect.MayWrite,
             RuntimeObservation.IdempotentEvent, "", "EnsureMethodContext", "泛型上下文初始化由托管运行时承担", "vm/ClassInlines.cpp: InitRgctxFromCodegenSlow → metadata/GenericMethod.cpp: InflateRGCTXData / InflateRGCTXDataLocked → metadata/GenericMetadata.cpp: InflateRGCTXDataLocked → InflateIfNeeded / Class::FromIl2CppType / InitSizeAndFieldLayoutLocked / GenericMethod::GetMethod / Class::InitLocked / GetVirtualMethod；只建立元数据；错误工厂可能初始化基础库静态字段", ["System.TypeLoadException", "System.TypeInitializationException", "System.NotSupportedException"],
-            pointers: [new("method", RuntimeAccess.ReadWrite, RuntimeMemoryDomain.Monotone, new(RuntimeExtentKind.Unknown, "方法泛型上下文"), new(RuntimeConditionKind.StateNotEstablished, "尚未就绪"))], returnInput: "method", idempotence: rgctx, post: [rgctx], upperBound: false, exceptionReason: "封闭的异常种类集合；泛型深度失败见 vm/GenericClass.cpp: CreateClass → vm/Exception.cpp: GetMaximumNestedGenericsException；未解析方法桩只被登记，不在此调用", managedCode: "没有调用解析得到的方法或用户重载；只可能执行基础库错误构造");
+            pointers: [new("method", RuntimeAccess.ReadWrite, RuntimeMemoryDomain.Monotone, new(RuntimeExtentKind.Unknown, "方法泛型上下文"), new(RuntimeConditionKind.StateNotEstablished, "尚未就绪"))], returnInput: "method", idempotence: rgctx, post: [rgctx], upperBound: false, exceptionReason: "封闭的异常种类集合；泛型深度失败见 vm/GenericClass.cpp: CreateClass → vm/Exception.cpp: GetMaximumNestedGenericsException；未解析方法桩只被登记，不在此调用", managedCode: "没有调用解析得到的方法或用户重载；只可能执行基础库错误构造") with
+            { MetadataInitialization = new("method", "codegen/il2cpp-codegen-il2cpp.h: il2cpp_rgctx_method_init；vm/ClassInlines.h: InitRgcxFromCodegen；有效开放方法的 RGCTX 由托管上下文建立") };
         yield return Op("IsInstance", [obj, klass], RuntimeValueKind.ManagedReference, RuntimeWidth.Pointer, RuntimeHeapEffect.Read,
             RuntimeObservation.Unobservable, "object 可赋给 class 时返回原 object，否则 null；不保证恒等返回", "IsInst", "写成 isinst", codegen + ".h: IsInstClass/Sealed; .cpp: IsInst", pointers: [Read("object", "对象类及其类型关系", RuntimeMemoryDomain.ImmutableRuntime), Read("class", "目标类型关系", RuntimeMemoryDomain.ImmutableRuntime)], returnInput: "object", inputOrNull: true);
         yield return Op("IsAssignableFrom", [klass, P("candidate", RuntimeValueKind.Class)], RuntimeValueKind.Boolean, RuntimeWidth.Bit, RuntimeHeapEffect.Read,

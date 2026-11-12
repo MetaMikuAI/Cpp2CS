@@ -13,7 +13,7 @@ public sealed partial class IntegerLowering
         DefinitionRef { Definition.IsValueType: true } => type.ContainsGenericParameter(), _ => false,
     };
     private bool Scalar(TypeRef type) => Opaque(type) || IntegerType(type) || IsFloat(type) || ReferenceType(type) || ManagedTypes.IsNativePointer(type);
-    private int ValueWidth(TypeRef type) => Opaque(type) ? types.PointerSize * 8 : types.ValueWidth(type);
+    private int ValueWidth(TypeRef type) => Opaque(type) ? types.Size(type) * 8 : types.ValueWidth(type);
     private T? GenericFailure<T>(string reason, string message) where T : class =>
         Fail<T>(LoweringFailureKind.UnsupportedType, message, code: "lowering.Generic." + reason);
 

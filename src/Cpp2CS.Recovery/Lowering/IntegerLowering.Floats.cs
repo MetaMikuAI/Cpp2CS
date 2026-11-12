@@ -81,6 +81,7 @@ public sealed partial class IntegerLowering
         // 向零取整不改变随后向零整数转换的值或定义域。
         var operands = term.Operands.Select(t => Value(integerOutput && IsOperation(t, CoreOperation.FloatTruncate) ? t.Operands[0] : t, !integerInput)).ToArray();
         if (operands.Any(v => v is null)) return null;
+        if (operands.Any(v => Opaque(v!.Type))) return GenericFailure<ManagedValue>("Arithmetic", "类型参数值参与浮点运算：" + op);
         var a = integerInput ? IntegerBits(operands[0]!) : FloatBits(operands[0]!, inputWidth);
         var b = operands.Length > 1 ? FloatBits(operands[1]!, inputWidth) : null;
         var type = FloatType(width);
