@@ -29,7 +29,10 @@ internal static class RuntimeCatalogChecks
             checks.True(!op.Inputs.IsDefault && !op.PointerEffects.IsDefault && !op.Normal.IsDefault && !op.Exceptional.IsDefault, op.Name + " 集合初始化");
             checks.True(op.Inputs.Select(i => i.Name).Distinct().Count() == op.Inputs.Length && op.Inputs.All(i => i.Name.Length > 0), op.Name + " 输入唯一");
             checks.True((op.Result.Kind == RuntimeValueKind.Void) == (op.Result.Width == RuntimeWidth.None), op.Name + " 结果位宽");
-            checks.True(op.Result.Relation.Kind == RuntimeResultRelationKind.None ? op.Result.Relation.Input is null : op.Inputs.Any(i => i.Name == op.Result.Relation.Input && i.Kind == op.Result.Kind), op.Name + " 结果关系");
+            checks.True(op.Result.Relation.Kind == RuntimeResultRelationKind.None ? op.Result.Relation.Input is null
+                : op.Result.Relation.Kind == RuntimeResultRelationKind.InstanceOfInput
+                    ? op.Result.Kind == RuntimeValueKind.ManagedReference && op.Inputs.Any(i => i.Name == op.Result.Relation.Input && i.Kind == RuntimeValueKind.Class)
+                : op.Inputs.Any(i => i.Name == op.Result.Relation.Input && i.Kind == op.Result.Kind), op.Name + " 结果关系");
             checks.True(op.Result.Relation.Kind != RuntimeResultRelationKind.InputOrNull || op.Result.Kind is RuntimeValueKind.ManagedReference or RuntimeValueKind.NativePointer or RuntimeValueKind.ManagedAddress, op.Name + " 可空结果关系");
             checks.True((op.EventCondition is null) == (op.EventTrigger == RuntimeEventTrigger.Never), op.Name + " 事件条件");
             checks.True(op.DoesNotReturn == (op.Termination != RuntimeTermination.None), op.Name + " 终止类别");

@@ -106,7 +106,17 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
             {
                 if (function.Operation.Result.ReturnInput is { } input && call.Inputs?.GetValueOrDefault(input)?.Source is TermSource same)
                     return c.Get(this, same.Term);
-                var name = new CallResultName(id, null, function.Operation.Name);
+                // 结果是某个类输入的实例时，静态类型取该类的实体；类还没有名字时结果照旧不带类型。
+                TypeRef? instance = null;
+                if (function.Operation.Result.Relation is { Kind: RuntimeResultRelationKind.InstanceOfInput, Input: { } classInput }
+                    && call.Inputs?.GetValueOrDefault(classInput)?.Source is TermSource classTerm)
+                {
+                    var klass = c.Get(this, classTerm.Term); if (!klass.IsSuccess) return klass.Propagate<NamedValue>();
+                    if (klass.Value == NameLattice.Pending) return Yes(NameLattice.Pending);
+                    instance = klass.Value.Name is EntityName { Entity: ClassEntity { Type: var type } } ? type : null;
+                }
+                var name = new CallResultName(id, instance, function.Operation.Name);
+                if (instance is not null) return Yes(Typed(null, instance, name));
                 return Yes(RuntimeValue(function.Operation.Result.Kind,name));
             }
             if (call.Candidates is { } candidates)
@@ -125,7 +135,9 @@ public sealed class ValueNamingQuery(StateQueries state, CallNamingQuery calls, 
             if (location.IsSuccess && location.Value.Region is Region.Frame or Region.Image)
                 return Yes(new(location.Value.Region == Region.Frame ? ValueKind.FrameAddress : ValueKind.ImageAddress, new AddressName(key)));
         }
-        return Yes(NamedValue.Unknown("naming.definition", "定义没有可用的签名或运行时规格名字。"));
+        // 消息里写明项的种类，报告才能按种类归并（原子取类型名，不带地址与编号）。
+        var shape = key.Identity is { } atom ? atom.GetType().Name : key.Operator is { } op ? op.Name : key.Kind.ToString();
+        return Yes(NamedValue.Unknown("naming.definition", "定义没有可用的签名或运行时规格名字：" + shape + "/" + key.Width));
     }
     private static NamedValue RuntimeValue(RuntimeValueKind kind, ValueName name) => kind switch
     {

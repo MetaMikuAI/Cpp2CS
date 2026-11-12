@@ -50,7 +50,8 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
             var frame = Frames.Locate(location.Value);
             if (!frame.Views.IsEmpty) return Outcome<LocationResult>.Success(frame);
         }
-        if (location.Value.Region is Region.Frame or Region.Image) return NotManaged(location.Value.Region.ToString());
+        if (location.Value.Region is Region.Frame or Region.Image)
+            return NotManaged(location.Value.Region + (location.Value.Offset is null ? "：地址不是常量偏移" : "：常量偏移，宽 " + key.Width));
         if (location.Value.Region == Region.Thread) return Unknown("thread-static", "线程区域尚不定位。");
         var runtimeField = c.Get(Names.SpecificationReads, new(Names, location.Value));
         if (runtimeField.IsSuccess && runtimeField.Value == NameLattice.Pending) return Outcome<LocationResult>.Success(Pending);
