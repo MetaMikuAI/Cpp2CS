@@ -147,6 +147,21 @@ public sealed partial class TermTable
 
     private Term? NormalizeComparisons(CoreOperation op, int width, Term a, Term b, ImmutableArray<Term> args)
     {
+        // 减法的 N==V 等于有符号大于等于；只接受同一次减法的完整溢出公式。
+        if (op == Equal && a.Width == 1)
+            foreach (var (negative, overflow) in new[] { (a, b), (b, a) })
+            {
+                if (!Is(overflow, And) || negative.Kind != TermKind.Slice || negative.Width != 1
+                    || negative.SliceLow != negative.Operands[0].Width - 1 || !Is(negative.Operands[0], Subtract)) continue;
+                var difference = negative.Operands[0]; var left = difference.Operands[0]; var right = difference.Operands[1];
+                var signLeft = Slice(left, left.Width - 1, 1);
+                var signComplement = Op(Not, 1, Slice(right, right.Width - 1, 1));
+                foreach (var (sameSigns, differentSigns) in new[]
+                    { (overflow.Operands[0], overflow.Operands[1]), (overflow.Operands[1], overflow.Operands[0]) })
+                    if (BitEquality(sameSigns, signLeft, signComplement) &&
+                        BitEquality(Op(Not, 1, differentSigns), signLeft, negative))
+                        return Op(Not, 1, Op(SignedLess, 1, left, right));
+            }
         // zext(bit)==1 为 bit，==0 为 ~bit。检查：equal-bit-zero、equal-bit-one。
         if (op == Equal && b.ConstantValue is { } boolean && boolean >= 0 && boolean <= 1 && Bit(a) is { } bitValue)
             return boolean.IsZero ? Op(Not, 1, bitValue) : bitValue;
@@ -196,6 +211,16 @@ public sealed partial class TermTable
         return null;
     }
 
+    // 只核对已有的一位等式，不在比较规范化中递归构造待匹配的等式。
+    private bool BitEquality(Term value, Term left, Term right)
+    {
+        if (left == right && !left.ContainsUndefined) return value.ConstantValue == 1;
+        if (left.ConstantValue is { } a) return value == (a == 1 ? right : Op(Not, 1, right));
+        if (right.ConstantValue is { } b) return value == (b == 1 ? left : Op(Not, 1, left));
+        return Is(value, Equal) && (value.Operands[0] == left && value.Operands[1] == right ||
+            value.Operands[0] == right && value.Operands[1] == left);
+    }
+
     private Term? NormalizeShifts(CoreOperation op, int width, Term a, Term b, ImmutableArray<Term> args)
     {
         // 常量移位化为切片拼接或符号扩展。检查：shift-left/right/signed、rotate、shift-zero/invalid。
@@ -228,6 +253,10 @@ public sealed partial class TermTable
 
     private Term? NormalizeArithmetic(CoreOperation op, int width, Term a, Term b, ImmutableArray<Term> args)
     {
+        // a+~b+1=a-b，按当前位宽取模；零扩展后的进位另由切片规范化处理。
+        if (op == Add && b.ConstantValue == 1 && Is(a, Add))
+            foreach (var (left, right) in new[] { (a.Operands[0], a.Operands[1]), (a.Operands[1], a.Operands[0]) })
+                if (Is(right, Not)) return Op(Subtract, width, left, right.Operands[0]);
         // x+0=x，x*1=x，x*0=0。检查：add-zero、multiply-one、multiply-zero。
         if (b.ConstantValue == 0 && op == Add) return a;
         if (b.ConstantValue == 1 && op == Multiply) return a;
@@ -258,6 +287,15 @@ public sealed partial class TermTable
 
     private Term? NormalizeBitOperations(CoreOperation op, int width, Term a, Term b, ImmutableArray<Term> args)
     {
+        // 大于等于且不相等就是严格大于；cmp 的 hi/ls、gt/le 共用核心比较词汇。
+        if (op == And && width == 1)
+            foreach (var (carry, unequal) in new[] { (a, b), (b, a) })
+                if (Is(carry, Not) && carry.Operands[0].Operator is CoreOperator { Operation: UnsignedLess or SignedLess } comparison && Is(unequal, Not) && Is(unequal.Operands[0], Equal))
+                {
+                    var less = carry.Operands[0]; var equal = unequal.Operands[0];
+                    if (equal.Operands.Contains(less.Operands[0]) && equal.Operands.Contains(less.Operands[1]))
+                        return Op(comparison.Operation, 1, less.Operands[1], less.Operands[0]);
+                }
         // x|0=x^0=x。检查：or-zero、xor-zero。
         if (b.ConstantValue == 0 && op is Or or Xor) return a;
         // x^全1=~x。检查：xor-ones、xor-bit-one。
@@ -352,6 +390,8 @@ public sealed partial class TermTable
             var sign = Slice(original, original.Width - 1, 1);
             return width == 1 ? sign : Op(SignExtend, width, sign);
         }
+        // n 位减法的无借位进位，保留 +1 的证明；带借位的 +0 不适用。
+        if (width == 1 && low + 1 == source.Width && SubtractionCarry(source, low) is { } carry) return carry;
         if (source.Operator is CoreOperator core)
         {
             var op = core.Operation;
@@ -368,6 +408,20 @@ public sealed partial class TermTable
             if (op == Select) return Op(Select, width, source.Operands[0], Slice(source.Operands[1], low, width), Slice(source.Operands[2], low, width));
         }
         return Intern(TermKind.Slice, width, low, [source]);
+    }
+
+    private Term? SubtractionCarry(Term source, int width)
+    {
+        if (!Is(source, Add) || source.Operands[1].ConstantValue != 1 || !Is(source.Operands[0], Add)) return null;
+        var sum = source.Operands[0];
+        foreach (var (left, right) in new[] { (sum.Operands[0], sum.Operands[1]), (sum.Operands[1], sum.Operands[0]) })
+        {
+            if (Slice(left, width, 1).ConstantValue != 0 || Slice(right, width, 1).ConstantValue != 0) continue;
+            var complement = Slice(right, 0, width);
+            if (!Is(complement, Not)) continue;
+            return Op(Not, 1, Op(UnsignedLess, 1, Slice(left, 0, width), complement.Operands[0]));
+        }
+        return null;
     }
 
     private Term NormalizeConcat(ImmutableArray<Term> values)

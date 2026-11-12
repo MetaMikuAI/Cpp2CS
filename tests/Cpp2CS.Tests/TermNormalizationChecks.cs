@@ -122,6 +122,14 @@ internal static class TermNormalizationChecks
 
     private static readonly (string Name, Func<Fixture, Term> Before, Func<Fixture, Term> After)[] ReviewRules =
     [
+        ("subtract-overflow-bit-sign", f =>
+        {
+            var x = f.O(And, 32, f.X(), f.X(32, 2)); var y = f.X(32, 1);
+            var n = f.T.Slice(f.O(Subtract, 32, x, y), 31, 1);
+            var a = f.T.Slice(x, 31, 1); var b = f.T.Slice(f.O(Not, 32, y), 31, 1);
+            var v = f.O(And, 1, f.O(Equal, 1, a, b), f.O(NotEqual, 1, a, n));
+            return f.O(Equal, 1, n, v);
+        }, f => f.O(Not, 1, f.O(SignedLess, 1, f.O(And, 32, f.X(), f.X(32, 2)), f.X(32, 1)))),
         ("same-and", f => f.O(And, 32, f.X(), f.X()), f => f.X()),
         ("same-or", f => f.O(Or, 32, f.X(), f.X()), f => f.X()),
         ("same-xor", f => f.O(Xor, 32, f.X(), f.X()), f => f.C(0)),
@@ -191,6 +199,7 @@ internal static class TermNormalizationChecks
                 assertions.True(ReferenceEquals(result, Copy(result, result.Table)), "变体幂等 " + name);
             }
         }
+        SubtractionFlags(assertions);
         StrictDomains(assertions);
         Pairs(assertions);
         Scale(assertions);
@@ -236,6 +245,61 @@ internal static class TermNormalizationChecks
         micro.Stop();
         Console.WriteLine($"关闭规范化的新项存储基线：{micro.Elapsed.TotalNanoseconds / freshCount:F0} ns/项");
         return assertions.Finish("项规范化");
+    }
+
+    private static void SubtractionFlags(Assertions checks)
+    {
+        for (int width = 1; width <= 4; width++)
+        {
+            var f = new Fixture(); var x = f.X(width); var y = f.X(width, 1);
+            var full = f.O(Add, width + 1, f.O(Add, width + 1, f.O(ZeroExtend, width + 1, x),
+                f.O(ZeroExtend, width + 1, f.O(Not, width, y))), f.C(1, width + 1));
+            var carry = f.T.Slice(full, width, 1);
+            var zero = width == 1 ? f.O(Equal, 1, x, y) : f.O(Equal, 1, f.T.Slice(full, 0, width), f.C(0, width));
+            var hi = f.O(And, 1, carry, f.O(Not, 1, zero));
+            var result = f.T.Slice(full, 0, width);
+            var signA = f.T.Slice(x, width - 1, 1);
+            var signB = f.T.Slice(f.O(Not, width, y), width - 1, 1);
+            var negative = f.T.Slice(result, width - 1, 1);
+            var overflow = f.O(And, 1, f.O(Equal, 1, signA, signB), f.O(NotEqual, 1, signA, negative));
+            var ge = f.O(Equal, 1, negative, overflow);
+            var signedGt = f.O(And, 1, ge, f.O(Not, 1, zero));
+            var expressions = new[] { carry, f.O(Not, 1, carry), hi, f.O(Not, 1, hi),
+                ge, f.O(Not, 1, ge), signedGt, f.O(Not, 1, signedGt) };
+            var table = new TermTable();
+            var normalized = expressions.Select(e => Copy(e, table)).ToArray();
+            var nx = Copy(x, table); var ny = Copy(y, table);
+            var lt = table.Apply(new CoreOperator(UnsignedLess), 1, nx, ny);
+            var gt = table.Apply(new CoreOperator(UnsignedLess), 1, ny, nx);
+            checks.True(normalized[0] == table.Apply(new CoreOperator(Not), 1, lt) && normalized[1] == lt,
+                $"{width} 位无借位与借位规范为无符号比较");
+            checks.True(normalized[2] == gt && normalized[3] == table.Apply(new CoreOperator(Not), 1, gt),
+                $"{width} 位 hi/ls 规范为严格比较及取反");
+            if (width > 1)
+            {
+                var signedLt = table.Apply(new CoreOperator(SignedLess), 1, nx, ny);
+                var signedGreater = table.Apply(new CoreOperator(SignedLess), 1, ny, nx);
+                checks.True(normalized[4] == table.Apply(new CoreOperator(Not), 1, signedLt) && normalized[5] == signedLt,
+                    $"{width} 位溢出与符号组合规范为有符号比较");
+                checks.True(normalized[6] == signedGreater && normalized[7] == table.Apply(new CoreOperator(Not), 1, signedGreater),
+                    $"{width} 位 gt/le 规范为严格有符号比较及取反");
+            }
+            var borrowed = f.T.Slice(f.O(Add, width + 1, full.Operands[0], f.C(0, width + 1)), width, 1);
+            var borrowedNormalized = Copy(borrowed, new());
+            checks.True(borrowedNormalized.Kind == TermKind.Slice, $"{width} 位 +0 不误匹配为无借位减法");
+            for (int a = 0; a < 1 << width; a++)
+            for (int b = 0; b < 1 << width; b++)
+            {
+                var evaluator = new TermEvaluator(id => id == x.Identity ? a : b);
+                for (int i = 0; i < expressions.Length; i++)
+                    checks.True(evaluator.Evaluate(expressions[i]) == evaluator.Evaluate(normalized[i]),
+                        $"{width} 位进借位组合 {i} 穷举 {a},{b}");
+                checks.True(evaluator.Evaluate(f.T.Slice(full, 0, width)) == evaluator.Evaluate(Copy(f.T.Slice(full, 0, width), new())),
+                    $"{width} 位模减法结果穷举 {a},{b}");
+                checks.True(evaluator.Evaluate(borrowed) == evaluator.Evaluate(borrowedNormalized),
+                    $"{width} 位带借位输入穷举 {a},{b}");
+            }
+        }
     }
 
     private static void Check(Assertions assertions, Random random, Term raw, Term normalized, string label, int samples)

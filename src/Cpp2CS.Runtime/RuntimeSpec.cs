@@ -76,7 +76,12 @@ public sealed class RuntimeSpec
             var path = $"{owner}.{name}";
             return new RuntimeField(source, path, Text(f, "type"), Number(f, "offset_bits"), Number(f, "size"),
                 f.TryGetProperty("bit_width", out var width) ? width.GetInt64() : null,
-                f.TryGetProperty("members", out var members) ? Fields(members, source, path) : FrozenDictionary<string, RuntimeField>.Empty);
+                f.TryGetProperty("members", out var members) ? Fields(members, source, path) : FrozenDictionary<string, RuntimeField>.Empty)
+            {
+                ImmutableEvidence = f.TryGetProperty("immutable", out var immutable) ? immutable.GetString() : null,
+                ArrayElement = f.TryGetProperty("array_element", out var element)
+                    ? new(Text(element, "type"), Number(element, "size"), Text(element, "immutable")) : null,
+            };
         }, StringComparer.Ordinal);
     private static string Text(JsonElement value, string name) => value.GetProperty(name).GetString()
         ?? throw new InvalidDataException($"布局属性 {name} 不能为 null。");
@@ -137,6 +142,8 @@ public sealed class RuntimeRecord
         throw new KeyNotFoundException($"{source}：缺少布局字段 '{Name}.{name}'。");
 }
 
+public sealed record RuntimeArrayElement(string Type, long Size, string ImmutableEvidence);
+
 public sealed class RuntimeField
 {
     private readonly string source;
@@ -149,6 +156,9 @@ public sealed class RuntimeField
     public long OffsetBits { get; }
     public long Size { get; }
     public long? BitWidth { get; }
+    /// <summary>生成代码可见的已就绪结构上不再改写；空值表示没有此凭据。</summary>
+    public string? ImmutableEvidence { get; init; }
+    public RuntimeArrayElement? ArrayElement { get; init; }
     public FrozenDictionary<string, RuntimeField> Members { get; }
     public RuntimeField Member(string name) => Members.TryGetValue(name, out var field) ? field :
         throw new KeyNotFoundException($"{source}：缺少布局字段 '{Path}.{name}'。");

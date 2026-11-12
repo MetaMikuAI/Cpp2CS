@@ -1290,7 +1290,8 @@
           "name": "static_fields",
           "offset_bits": 1472,
           "size": 8,
-          "type": "void *"
+          "type": "void *",
+          "immutable": "vm/Class.cpp: SetupFieldsLocked / SetupFieldsFromDefinitionLocked / LayoutFieldsLocked；InitLocked 在生成代码使用类前完成布局；静态字段块指针只分配一次"
         },
         {
           "name": "rgctx_data",
@@ -1302,7 +1303,13 @@
           "name": "typeHierarchy",
           "offset_bits": 1600,
           "size": 8,
-          "type": "Il2CppClass **"
+          "type": "Il2CppClass **",
+          "immutable": "vm/Class.cpp: SetupTypeHierarchyLocked；InitLocked 在生成代码使用类前完成层次，已建立层次不再改写",
+          "array_element": {
+            "type": "Il2CppClass *",
+            "size": 8,
+            "immutable": "vm/Class.cpp: SetupTypeHierarchyLocked 一次填充继承链；vm/ClassInlines.h: HasParentUnsafe 只读取"
+          }
         },
         {
           "name": "unity_user_data",
@@ -1452,7 +1459,8 @@
           "name": "typeHierarchyDepth",
           "offset_bits": 2432,
           "size": 1,
-          "type": "uint8_t"
+          "type": "uint8_t",
+          "immutable": "vm/Class.cpp: SetupTypeHierarchyLocked；InitLocked 在生成代码使用类前完成层次，已建立层次不再改写"
         },
         {
           "name": "genericRecursionDepth",
@@ -5155,7 +5163,8 @@
           "name": "klass",
           "offset_bits": 0,
           "size": 8,
-          "type": "Il2CppClass *"
+          "type": "Il2CppClass *",
+          "immutable": "il2cpp-object-internals.h: Il2CppObject::klass；vm/Object.cpp: Allocate* 发布对象前设置，发布后不变"
         },
         {
           "name": "vtable",

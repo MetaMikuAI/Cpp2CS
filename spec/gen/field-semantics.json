@@ -1,0 +1,21 @@
+{
+  "2022.3.62f2": {
+    "Il2CppObject.klass": {
+      "immutable": "il2cpp-object-internals.h: Il2CppObject::klass；vm/Object.cpp: Allocate* 发布对象前设置，发布后不变"
+    },
+    "Il2CppClass.static_fields": {
+      "immutable": "vm/Class.cpp: SetupFieldsLocked / SetupFieldsFromDefinitionLocked / LayoutFieldsLocked；InitLocked 在生成代码使用类前完成布局；静态字段块指针只分配一次"
+    },
+    "Il2CppClass.typeHierarchyDepth": {
+      "immutable": "vm/Class.cpp: SetupTypeHierarchyLocked；InitLocked 在生成代码使用类前完成层次，已建立层次不再改写"
+    },
+    "Il2CppClass.typeHierarchy": {
+      "immutable": "vm/Class.cpp: SetupTypeHierarchyLocked；InitLocked 在生成代码使用类前完成层次，已建立层次不再改写",
+      "array_element": {
+        "type": "Il2CppClass *",
+        "size": 8,
+        "immutable": "vm/Class.cpp: SetupTypeHierarchyLocked 一次填充继承链；vm/ClassInlines.h: HasParentUnsafe 只读取"
+      }
+    }
+  }
+}

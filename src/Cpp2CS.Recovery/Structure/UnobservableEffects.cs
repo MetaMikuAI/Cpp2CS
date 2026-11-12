@@ -297,7 +297,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
             edit.RemovedStatements.Add(read); edit.Replacements[read.Result] = value.Value;
             records.Add(new("forwarded-read", read.Trace?.NativeAddress, "状态查询给出原生词汇内的等值项", true));
         }
-        ForwardEntityReads(function, records, c, edit);
+        ForwardFixedReads(function, records, c, edit);
         return edit.RemovedStatements.Count == 0 ? function : edit.Apply();
     }
 

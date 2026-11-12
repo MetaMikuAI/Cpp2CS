@@ -12,7 +12,7 @@ using Cpp2CS.Runtime;
 using Cpp2CS.Runtime.Layouts;
 using Cpp2CS.Targets.Arm64.Abi;
 namespace Cpp2CS.Tests;
-internal static class NamingChecks
+internal static partial class NamingChecks
 {
     public const string Command = "naming";
     internal sealed class RuntimeMap(RuntimeFunction? function = null) : IRuntimeFunctionMap
@@ -96,6 +96,7 @@ internal static class NamingChecks
             if (!conflict) a.True(context.Get(query,klassInput).Value.Record=="Il2CppClass","运行时输入的类指针种类");
         }
         LoadedValues(a, spec);
+        SpecificationValues(a, spec);
         return a.Finish("命名查询");
     }
     private static void LoadedValues(Assertions a, RuntimeSpec spec)
@@ -180,6 +181,8 @@ internal static class NamingChecks
             a.True(c.Get(names,chained).Value.Kind==ValueKind.Integer,"连续字段读取有底递归");
             a.True(one.Value.Name!=two.Value.Name && c.Get(names,merged).Value.Kind==ValueKind.Unnamed,"不同字段读取的名字合流冲突");
             a.True(one.Value.Name!=c.Get(names,reloaded).Value.Name,"可能改写后的读取保留不同身份");
+            a.True(names.FixedValue(c, first).Value is LoadedName && !names.SameValue(c, first, reloaded).Value,
+                "完整读取的定义名字保留内存版本，不同版本的可变字段不等值");
             a.True(c.Get(names,partial).Value.Kind==ValueKind.Unnamed,"部分整数读取不冒充整体读取");
             a.True(c.Get(names,statics).Value.Name is FieldName && c.Get(names,klass).Value.Name is EntityName,"既有规格和实体名字优先");
         }

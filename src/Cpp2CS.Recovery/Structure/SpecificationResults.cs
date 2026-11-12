@@ -124,16 +124,16 @@ public sealed partial class UnobservableEffects
         }
         return null;
     }
-    private void ForwardEntityReads(NativeFunction function, List<StructureRecord> records, QueryContext c, SnapshotRewrite edit)
+    private void ForwardFixedReads(NativeFunction function, List<StructureRecord> records, QueryContext c, SnapshotRewrite edit)
     {
-        var reads = new Dictionary<EntityName, List<(MemoryRead Read, Point Point)>>();
+        var reads = new Dictionary<ValueName, List<(MemoryRead Read, Point Point)>>();
         foreach (var block in function.Blocks)
         for (int i = 0; i < block.Statements.Length; i++)
         {
             if (block.Statements[i] is not MemoryRead read) continue;
-            var named = c.Get(names, read.Result);
-            if (!named.IsSuccess || named.Value.Name is not EntityName entity) continue;
-            if (!reads.TryGetValue(entity, out var group)) reads[entity] = group = [];
+            var named = names.FixedValue(c, read.Result);
+            if (!named.IsSuccess || named.Value is not { } fixedValue) continue;
+            if (!reads.TryGetValue(fixedValue, out var group)) reads[fixedValue] = group = [];
             group.Add((read, new(block.Identity, i)));
         }
         foreach (var group in reads.Values)
@@ -143,7 +143,7 @@ public sealed partial class UnobservableEffects
             var previous = group.FirstOrDefault(other => c.Get(flow.PointDominates, new(other.Point, point)) is { IsSuccess: true, Value: true });
             if (previous.Read is null) continue;
             edit.RemovedStatements.Add(read); edit.Replacements[read.Result] = previous.Read.Result;
-            records.Add(new("forwarded-read", read.Trace?.NativeAddress, "同一实体的规格读取由支配位置的读取提供", true));
+            records.Add(new("forwarded-read", read.Trace?.NativeAddress, "同一定值的规格读取由支配位置的读取提供", true));
         }
     }
 }

@@ -169,6 +169,12 @@ def generate(source, unity, target, real=False, restore_arrays=True):
                     constants[c.spelling.removeprefix('LayoutConstant_')] = c.enum_value
         primitive = next(c for c in tu.cursor.get_children() if c.spelling == 'LayoutTargetProbe')
         model = {f.type.spelling: {'size': f.type.get_size(), 'alignment': f.type.get_align()} for f in primitive.get_children()}
+        semantics = json.loads((Path(__file__).parent / 'field-semantics.json').read_text()).get(unity, {})
+        for path, properties in semantics.items():
+            record, name = path.split('.')
+            if record in records:
+                field = next(f for f in records[record]['fields'] if f['name'] == name)
+                field.update(properties)
         inputs = {Path(i.include.name) for i in tu.get_includes() if Path(i.include.name).is_relative_to(source)} if real else {source}
         sources = {p.relative_to(source).as_posix() if real else p.name: sha(p) for p in sorted(inputs)}
         return {'schema_version': 1, 'generator_version': VERSION, 'generator_sha256': sha(Path(__file__)), 'compiler': 'libclang 18.1.1', 'unity_version': unity, 'target': {'triple': TARGETS[target], 'data_model': 'LLP64' if target == 'windows-x64' else 'LP64', 'alignment': 'clang target default', 'language': 'gnu11', 'primitives': model}, 'source': {'kind': 'runtime-headers' if real else 'Il2CppVersions', 'sha256': sources, 'transformations': transformations, 'platform_adapter': 'Android C declarations; absent os/c-api configuration supplied by generator' if real else 'compiler primitive types and IL2CPP character/array typedefs'}, 'records': records, 'constants': constants}

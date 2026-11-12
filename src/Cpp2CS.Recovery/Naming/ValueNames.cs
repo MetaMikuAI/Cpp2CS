@@ -13,12 +13,14 @@ namespace Cpp2CS.Recovery.Naming;
 
 public enum ValueKind { Unnamed, ManagedReference, RuntimePointer, FrameAddress, ImageAddress, ManagedAddress, Integer, Floating, NativePointer }
 public abstract record ValueName;
-public sealed record EntityName(MetadataEntity Entity, ulong Slot) : ValueName;
+public sealed record EntityName(MetadataEntity Entity, ulong? Slot) : ValueName;
 public sealed record ParameterName(int Index, TypeRef? StaticType, bool MethodInformation) : ValueName;
 public sealed record CallResultName(CallIdentity Call, TypeRef? StaticType, string? Operation) : ValueName;
 /// <summary>身份沿用读取项；声明类型不证明不同读取同值。</summary>
 public sealed record LoadedName(Term Read, TypeRef StaticType) : ValueName;
 public sealed record FieldName(ValueName Owner, string Record, string Field, long? Index = null) : ValueName;
+/// <summary>规格数组字段的元素；下标保留为项，不改变读取位置。</summary>
+public sealed record ArrayElementName(FieldName Array, Term Index) : ValueName;
 public sealed record BitStorageName(ValueName Owner, string Record, string Fields) : ValueName;
 public sealed record AddressName(Term Address) : ValueName;
 public sealed record NamedValue(ValueKind Kind, ValueName? Name, string? Record = null, Reason? Why = null)
@@ -189,7 +191,7 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     }
     private Outcome<NamedValue> Merge(QueryContext c, Term key)
     {
-        var pending = new Stack<Term>(); var seen = new HashSet<Term>(); var names = new HashSet<NamedValue>(); pending.Push(key);
+        var pending = new Stack<Term>(); var seen = new HashSet<Term>(); var names = new HashSet<NamedValue>(); var leaves = new HashSet<Term>(); pending.Push(key);
         while (pending.TryPop(out var term))
         {
             if (!seen.Add(term)) continue;
@@ -204,9 +206,19 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
             else
             {
                 var value = c.Get(this, term); if (!value.IsSuccess) return value;
-                if (value.Value != NameLattice.Pending) names.Add(value.Value);
+                if (value.Value != NameLattice.Pending)
+                {
+                    var resolved = c.Get(state.Resolve, term);
+                    if (!resolved.IsSuccess) return resolved.Propagate<NamedValue>();
+                    leaves.Add(resolved.Value);
+                    var fixedName = FixedName(value.Value.Name);
+                    names.Add(fixedName is null ? value.Value : value.Value with { Name = fixedName });
+                }
             }
         }
+        if (names.Count == 1 && leaves.Count > 1 && names.Single().Name is FieldName or ArrayElementName
+            && FixedName(names.Single().Name) is null)
+            return Yes(NamedValue.Unknown("naming.merge", "同名可变位置的不同读取版本没有同值凭据。"));
         return Yes(names.Count == 0 ? NameLattice.Pending : names.Count == 1 ? names.Single() : NamedValue.Unknown("naming.merge", "合流输入没有一致名字。"));
     }
     private Outcome<NamedValue> Read(QueryContext c, Term key, Location location, int low = 0)
@@ -238,6 +250,7 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
             if (!entity.IsSuccess) return Yes(new(ValueKind.Unnamed, null, Why: entity.Why));
             return Yes(Entity(entity.Value, (ulong)offset));
         }
+        if (low == 0 && location.Region == Region.Other && ReadSpecificationElement(c, location) is { } element) return element;
         if (location.Region != Region.Other || location.Offset is null)
             return Yes(NamedValue.Unknown("naming.read-region", "读取没有已命名的区域或定值偏移。"));
         var owner = c.Get(this, location.Root); if (!owner.IsSuccess) return owner;
@@ -266,8 +279,11 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     }
     private NamedValue Field(ValueName owner, string record, RuntimeField field)
     {
-        var name = new FieldName(owner, record, field.Path);
-        var type = field.Type.Replace("const ", "", StringComparison.Ordinal).Replace("struct ", "", StringComparison.Ordinal).Trim();
+        return SpecificationValue(new FieldName(owner, record, field.Path), field.Type);
+    }
+    private NamedValue SpecificationValue(ValueName name, string spelling)
+    {
+        var type = spelling.Replace("const ", "", StringComparison.Ordinal).Replace("struct ", "", StringComparison.Ordinal).Trim();
         // il2cpp-api-types.h 与 il2cpp-class-internals.h 的函数指针别名。
         if (type is "Il2CppMethodPointer" or "InvokerMethod") return new(ValueKind.NativePointer, name);
         if (type.EndsWith('*'))
