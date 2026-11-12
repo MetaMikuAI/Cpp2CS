@@ -54,10 +54,6 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
     {
         if (context.Facts.Architecture != "arm64")
             return new Missing<ManagedBody>(new(Name, context.Entry.Address, "绑定", new("lowering.Binding", "该架构的 ABI 尚未装配")));
-        var protectedCall = input.Blocks.SelectMany(b => b.Statements).OfType<Call>().FirstOrDefault(call => call.Unwind is not null);
-        if (protectedCall is not null || input.Blocks.Any(b => b.Handler is not null || b.End is ResumeUnwind))
-            return new Missing<ManagedBody>(new(Name, protectedCall?.Trace?.NativeAddress ?? context.Entry.Address, "Exception",
-                new("lowering.Exception", "原生 IR 有异常处理入口或继续展开，异常流尚未接入下降")));
         if (input.Blocks.SelectMany(b => b.Statements).Any(s => s is MemoryFence or MemoryRead { Acquire: true } or MemoryWrite { Release: true }))
             return new Missing<ManagedBody>(new(Name, context.Entry.Address, "同步访问",
                 new("lowering.Synchronization", "恢复层尚未定义同步访问的托管语义")));

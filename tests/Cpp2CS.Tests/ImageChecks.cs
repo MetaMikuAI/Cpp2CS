@@ -16,6 +16,18 @@ internal static class ImageChecks
             var exceptionImage = ElfImage.Parse(exceptionBytes);
             a.True(exceptionImage.Functions.Any(f => f.Evidence.HasFlag(FunctionEvidence.UnwindTable) && f.Start == 0x300 && f.Length == 16), "展开记录与非零基址");
             a.True(exceptionImage.TryRegions is [{ Start: 0x300, Length: 4, Handler: 0x308 }] && exceptionImage.TryRegions[0].Clauses is [{ Kind: ClauseKind.CatchAll }], "异常区间与 catch-all");
+            a.True(exceptionImage.TryRegions[0].Clauses[0].Selector == 1, "catch-all 保留类型过滤序号");
+            var typedBytes = WithExceptions(machine);
+            typedBytes[0x391] = 0x1b;
+            Put(typedBytes, 0x3a4, 0x16c, 4);
+            Put(typedBytes, 0x270, 0x400518, 8);
+            Put(typedBytes, 0x278, machine == 183 ? 1027UL : 8UL, 8);
+            Put(typedBytes, 0x280, 0x400530, 8);
+            Put(typedBytes, 0x4e0, 72, 8);
+            System.Text.Encoding.ASCII.GetBytes("22Il2CppExceptionWrapper\0").CopyTo(typedBytes, 0x530);
+            var typedImage = ElfImage.Parse(typedBytes);
+            a.True(typedImage.TryRegions[0].Clauses is [{ Kind: ClauseKind.Catch, Selector: 1, TypeName: "22Il2CppExceptionWrapper" }],
+                "Itanium 类型信息第二个指针经重定位读出修饰名");
             exceptionBytes[0x399] = 0x7f;
             var specification = ElfImage.Parse(exceptionBytes);
             a.True(specification.TryRegions[0].Clauses is [{ Kind: ClauseKind.ExceptionSpecification, Matches.Length: 0 }], "空异常规格");

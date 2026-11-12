@@ -272,7 +272,7 @@ public static class FunctionLifter
             return null;
         }
         private static bool SameClauses(TryRegion a, TryRegion b) => a.Clauses.Length == b.Clauses.Length &&
-            a.Clauses.Zip(b.Clauses).All(p => p.First.Kind == p.Second.Kind && p.First.Matches.SequenceEqual(p.Second.Matches));
+            a.Clauses.Zip(b.Clauses).All(p => p.First.Kind == p.Second.Kind && p.First.Selector == p.Second.Selector && p.First.TypeName == p.Second.TypeName && p.First.Matches.SequenceEqual(p.Second.Matches));
         private TryRegion? RegionAt(ulong address)
         {
             foreach (var region in regions)

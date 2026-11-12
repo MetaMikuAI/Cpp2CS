@@ -41,6 +41,9 @@ internal static class ManagedExecutionChecks
                 public static void ArrayAddressType() { object[] a=new string[1]; TouchObject(ref a[0]); }
                 public static int Bounds() => (new int[1])[2];
                 public static int Finally() { int x=0; try { x=3; } finally { x+=5; } return x; }
+                public static int CatchClauses() { try { int z=0; return 12 / z; } catch(System.NullReferenceException) { return 1; } catch(System.DivideByZeroException) { return 2; } }
+                public static int RethrowIdentity() { try { try { int z=0; return 12/z; } catch(System.DivideByZeroException e) { try { throw; } catch(System.DivideByZeroException again) { return e == again ? 1 : 0; } } } catch { return 3; } }
+                public static int CatchLeave() { int x=0; try { try { int z=0; x=12/z; } catch { x=2; } } finally { x+=5; } return x; }
                 public static int CatchFinally() { int x=0; try { try { x=12/x; } finally { x=5; } } catch(System.DivideByZeroException) { x+=7; } return x; }
                 public static int Struct() { Pair p=default; p.X=3; p.Y=8; Pair q=p; q.X++; return p.X+q.Y; }
                 public static void Calls(System.Action a, System.Action b) { a(); b(); }
@@ -67,11 +70,12 @@ internal static class ManagedExecutionChecks
             return interpreter.Run(new World(index, 0, new Hints([], []), reference.DeclaringType), method, reference, values);
         }
         foreach (var (name, expected) in new[] { ("LocalOut", "13"), ("LocalRef", "4"), ("LocalAlias", "d"), ("LocalStruct", "1c"), ("Arithmetic", "80000000"), ("Fields", "9"), ("Virtual", "5"), ("Interface", "1"),
-            ("NewSlot", "4"), ("GenericVirtual", "17"), ("Reflection", "1"), ("Text", "3"), ("Box", "11"), ("Finally", "8"), ("CatchFinally", "c"), ("Struct", "b") })
+            ("NewSlot", "4"), ("GenericVirtual", "17"), ("Reflection", "1"), ("Text", "3"), ("Box", "11"), ("Finally", "8"), ("CatchFinally", "c"), ("CatchClauses", "2"), ("RethrowIdentity", "1"), ("CatchLeave", "7"), ("Struct", "b") })
         {
             var side = Run(name);
             a.True(side.Result == $"return 0x{expected}", $"{name} 结果：{side.Result}");
         }
+        a.True(Run("RethrowIdentity").Events.Count(e => e.Text.StartsWith("throw ", StringComparison.Ordinal)) == 1, "rethrow 保留对象身份且不重复记录抛出事件");
         var callback = source.Method("Cases", "CallbackFinally");
         var callbackRef = model.Method(callback);
         var callbackWorld = new World(index, 0, new Hints([], []), callbackRef.DeclaringType) { ThrowPlan = new(0, types.Corlib("System.InvalidOperationException")) };

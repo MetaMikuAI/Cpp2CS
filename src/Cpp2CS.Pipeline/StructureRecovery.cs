@@ -16,6 +16,11 @@ public static class StructureRecovery
 {
     public static StructureResult Run(NativeFunction input, MethodContext context, MethodBinder binder, BindingEntryKind kind, ITypeLayouts? layouts = null)
     {
+        if (input.Blocks.Any(b => b.Handler is not null))
+        {
+            input = ExceptionEntries.Run(input).Function;
+            input = ExceptionSelectors.Run(input, context.Facts.Spec).Function;
+        }
         // 没有调用或条件分支，且写入全在帧内时，本变换没有任何删除或折叠候选。
         if (!input.Blocks.Any(b => b.End is Branch || b.Statements.Any(s => s is Call)))
         {
@@ -30,6 +35,7 @@ public static class StructureRecovery
         var facts = context.Facts;
         var catalog = RuntimeFunctionCatalog.Select(facts.Spec.Layout.UnityVersion, facts.Spec.Layout.Triple, facts.Spec.Layout.DataModel);
         var calls = new CallNamingQuery(binder, new NamingCodeMap(facts.CodeMap), new RuntimeFunctionMap(facts.RuntimeFunctions), catalog);
+        if (input.Blocks.Any(block => block.Handler is not null)) input = ExceptionScaffolding.Project(input, calls);
         var survey = new NamingSurvey(calls, new MetadataSlotDecoder(facts), facts.Image);
         survey.Observe(input);
         var names = survey.Finish();

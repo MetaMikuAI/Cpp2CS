@@ -41,7 +41,13 @@ public sealed record FunctionRange(ulong Start, ulong Length, FunctionEvidence E
     }
 }
 /// <summary>Catch 的 Matches 为单个类型；ExceptionSpecification 为允许传播的类型集合，空集合表示不允许任何类型。</summary>
-public sealed record ExceptionClause(ClauseKind Kind, ImmutableArray<PointerTarget> Matches);
+public sealed record ExceptionClause(ClauseKind Kind, ImmutableArray<PointerTarget> Matches)
+{
+    /// <summary>映像异常表的类型过滤序号；清理子句为零。</summary>
+    public long Selector { get; init; }
+    /// <summary>C++ type_info 的原始修饰名；无法读取时为空，不据此猜测身份。</summary>
+    public string? TypeName { get; init; }
+}
 /// <summary>Handler 为空表示直接向外传播；子句顺序与文件的匹配顺序一致。</summary>
 public sealed record TryRegion(ulong Start, ulong Length, ulong? Handler, ImmutableArray<ExceptionClause> Clauses);
 

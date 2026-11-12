@@ -8,8 +8,11 @@ namespace Cpp2CS.Recovery.Structure;
 
 public sealed partial class UnobservableEffects
 {
-    private NativeFunction RemoveUnusedCallInputs(NativeFunction function, List<StructureRecord> records)
+    private NativeFunction RemoveUnusedCallInputs(NativeFunction function, List<StructureRecord> records) =>
+        RemoveUnusedCallInputs(function, records, out _);
+    private NativeFunction RemoveUnusedCallInputs(NativeFunction function, List<StructureRecord> records, out bool unresolved)
     {
+        unresolved = false;
         var context = locations?.CreateContext(function) ?? names.CreateContext(function);
         var dispatch = locations is null ? null : new DispatchQuery(state, calls, names, locations, names.Binder, names.Spec);
         var edit = new SnapshotRewrite(function); bool changed = false;
@@ -36,6 +39,7 @@ public sealed partial class UnobservableEffects
                     if (resolved.IsSuccess && resolved.Value.Kind != DispatchKind.Unresolved && resolved.Value.Binding is { } binding)
                         signatures = [binding.Signature];
                 }
+                unresolved |= signatures is null && named.Value.Kind == CallKind.Indirect;
                 if (signatures is null || signatures.Any(s => s.Signature.IsVariadic)) continue;
                 // 参数、聚合副本地址和间接返回地址都属于输入；多候选取并集。
                 var required = new HashSet<AbstractSlot>();

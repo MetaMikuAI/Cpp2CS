@@ -18,6 +18,10 @@ public sealed record ParameterName(int Index, TypeRef? StaticType, bool MethodIn
 public sealed record CallResultName(CallIdentity Call, TypeRef? StaticType, string? Operation) : ValueName;
 /// <summary>身份沿用读取项；声明类型不证明不同读取同值。</summary>
 public sealed record LoadedName(Term Read, TypeRef StaticType) : ValueName;
+/// <summary>原生异常头、载荷与托管异常分别命名，不把头指针当作托管引用。</summary>
+public sealed record ExceptionPointerName(BlockIdentity Handler) : ValueName;
+public sealed record ExceptionPayloadName(BlockIdentity Handler) : ValueName;
+public sealed record CaughtExceptionName(BlockIdentity Handler, TypeRef? StaticType) : ValueName;
 public sealed record FieldName(ValueName Owner, string Record, string Field, long? Index = null) : ValueName;
 /// <summary>规格数组字段的元素；下标保留为项，不改变读取位置。</summary>
 public sealed record ArrayElementName(FieldName Array, Term Index) : ValueName;
@@ -27,13 +31,17 @@ public sealed record NamedValue(ValueKind Kind, ValueName? Name, string? Record 
 {
     public static NamedValue Unknown(string code, string message, Reason? cause = null) => new(ValueKind.Unnamed, null, Why: new(code, message, cause));
     public TypeRef? StaticType => Name switch
-    { ParameterName p => p.StaticType, CallResultName r => r.StaticType, LoadedName r => r.StaticType, _ => null };
+    { ParameterName p => p.StaticType, CallResultName r => r.StaticType, LoadedName r => r.StaticType, CaughtExceptionName e => e.StaticType, _ => null };
 }
 
 /// <summary>名字保存实体、定义或规格字段依据；不向项表写入替代项，不改写快照。</summary>
 public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery calls, NamingFacts facts, RuntimeSpec spec,
-    MethodBinder binder, SignatureBinding? entry = null, IRgctxDecoder? rgctx = null, GenericWitness? witness = null) : Query<Term, NamedValue>
+    MethodBinder binder, SignatureBinding? entry = null, IRgctxDecoder? rgctx = null, GenericWitness? witness = null,
+    TypeRef? exceptionType = null, IReadOnlyDictionary<BlockIdentity, TypeRef>? caughtTypes = null) : Query<Term, NamedValue>
 {
+    /// <summary>区域查询已证明的 catch 类型作为查询视图；不改写异常对象身份。</summary>
+    public ValueNamingQuery WithCaughtTypes(IReadOnlyDictionary<BlockIdentity, TypeRef> types) =>
+        new(state, calls, facts, spec, binder, entry, rgctx, witness, exceptionType, types.ToImmutableDictionary());
     internal RuntimeSpec Spec => spec;
     internal MethodBinder Binder => binder;
     private readonly RuntimeInputKindsQuery inputKinds = new(state,calls);
@@ -93,6 +101,8 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
         var resolved = c.Get(state.Resolve, key);
         if (!resolved.IsSuccess) return Yes(new(ValueKind.Unnamed, null, Why: resolved.Why));
         if (resolved.Value != key) return c.Get(this, resolved.Value);
+        if (key.Identity is ExceptionAtom exception)
+            return Yes(new(ValueKind.NativePointer, new ExceptionPointerName(exception.Handler)));
         if (key.Identity is MemoryAtom memory) return c.Get(SpecificationReads, new(this, memory.Location));
         if (key.Identity is EdgeReadAtom projected) return c.Get(SpecificationReads, new(this, projected.Location));
         if (key.Kind == TermKind.Slice && key.Operands[0].Identity is MemoryAtom bits)
@@ -106,6 +116,14 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
             var call = classified.Value;
             if (call.Function is { } function && call.Result?.Source is TermSource result && result.Term == key)
             {
+                if (function.Operation.Name is "BeginCatch" or "CxxGetExceptionPointer"
+                    && call.Inputs?.GetValueOrDefault("exception")?.Source is TermSource native)
+                {
+                    var pointer = c.Get(this, native.Term);
+                    if (!pointer.IsSuccess) return pointer;
+                    if (pointer.Value.Name is ExceptionPointerName caught)
+                        return Yes(new(ValueKind.RuntimePointer, new ExceptionPayloadName(caught.Handler), "Il2CppExceptionWrapper"));
+                }
                 if (function.Operation.Result.ReturnInput is { } input && call.Inputs?.GetValueOrDefault(input)?.Source is TermSource same)
                     return c.Get(this, same.Term);
                 // 结果是某个类输入的实例时，静态类型取该类的实体；类还没有名字时结果照旧不带类型。
@@ -279,6 +297,9 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     }
     private NamedValue Field(ValueName owner, string record, RuntimeField field)
     {
+        if (owner is ExceptionPayloadName payload && record == "Il2CppExceptionWrapper"
+            && field.Path == spec.Layout.Field("Il2CppExceptionWrapper", "ex").Path)
+            return new(ValueKind.ManagedReference, new CaughtExceptionName(payload.Handler, caughtTypes?.GetValueOrDefault(payload.Handler) ?? exceptionType), "Il2CppObject");
         return SpecificationValue(new FieldName(owner, record, field.Path), field.Type);
     }
     private NamedValue SpecificationValue(ValueName name, string spelling)

@@ -6,6 +6,7 @@ internal sealed partial class CilBodyWriter
 {
     private IReadOnlyList<ManagedRegion> regions = [];
     private ulong currentBlock;
+    private readonly Dictionary<ulong, Instruction> handlerLabels = [];
     private Instruction? exceptionReturn;
     private VariableDefinition? exceptionReturnValue;
 
@@ -41,7 +42,8 @@ internal sealed partial class CilBodyWriter
         Instruction After(IReadOnlyList<ulong> members)
         {
             var last = members.Max(a => positions[a]);
-            return last + 1 == recovered.Blocks.Count ? end : labels[recovered.Blocks[last + 1].Address];
+            return last + 1 == recovered.Blocks.Count ? end : handlerLabels.GetValueOrDefault(recovered.Blocks[last + 1].Address)
+                ?? labels[recovered.Blocks[last + 1].Address];
         }
         foreach (var region in regions)
             body.ExceptionHandlers.Add(new ExceptionHandler(region.Kind switch
@@ -53,7 +55,7 @@ internal sealed partial class CilBodyWriter
             {
                 TryStart = labels[region.Try[0]],
                 TryEnd = After(region.Try),
-                HandlerStart = labels[region.HandlerEntry],
+                HandlerStart = handlerLabels.GetValueOrDefault(region.HandlerEntry) ?? labels[region.HandlerEntry],
                 HandlerEnd = After(region.Handler),
                 CatchType = region.Kind == ManagedRegionKind.Catch ? TypeReference(region.CatchType ?? types.Corlib("System.Exception")) : null,
             });

@@ -66,9 +66,11 @@ internal static class PipelineChecks
         {
             var builder = new FunctionBuilder(terms, entry, 64, new(terms.Atom(new RootAtom(AddressRoot.Frame), 64)));
             builder.Blocks.Add(new(entry, [], hasCall ? [new Call(new(), new ImageFunction(0), [], [], Unwind: handler)] : [new MemoryFence(new(), "test")], new Return([])));
-            builder.Blocks.Add(new(handler, [], [], new ResumeUnwind(exception), handlerEntry));
-            checks.True(recovery.Run(builder.Freeze(), exceptionContext) is Missing<ManagedBody> { Hole.Reason.Code: "lowering.Exception" },
-                "恢复层从 IR 拦住异常区域，不依赖地址、调用追溯或可达性");
+            builder.Blocks.Add(new(handler, [], [new MemoryWrite(new(), terms.Atom(new RootAtom(AddressRoot.Frame), 64), 32, terms.Constant(1, 32))], new ResumeUnwind(exception), handlerEntry));
+            var result = recovery.Run(builder.Freeze(), exceptionContext);
+            checks.True(hasCall ? result is Missing<ManagedBody> { Hole.Reason.Code: "lowering.Exception.Fault" }
+                : result is Missing<ManagedBody> { Hole.Reason.Code: "lowering.Synchronization" },
+                "生产门控拒绝未证明私有的清理与未定义的同步访问");
         }
         return checks.Finish("Pipeline 快速检查");
     }

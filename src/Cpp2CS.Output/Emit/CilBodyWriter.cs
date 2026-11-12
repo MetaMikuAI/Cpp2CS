@@ -40,9 +40,17 @@ internal sealed partial class CilBodyWriter(Skeleton skeleton, ManagedTypes type
         foreach (var block in recovered.Blocks)
         {
             currentBlock = block.Address;
+            if (regions.Count != 0)
+            {
+                var entries = regions.Where(r => r.HandlerEntry == block.Address && r.Kind == ManagedRegionKind.Catch).ToArray();
+                if (entries.Length != 0)
+                {
+                    // 捕获对象的入栈只发生一次；普通边和内层 try 从保存对象之后开始。
+                    var handler = Instruction.Create(OpCodes.Nop); handlerLabels.Add(block.Address, handler); il.Append(handler);
+                    foreach (var region in entries) il.Emit(OpCodes.Stloc, Local(region.Exception!));
+                }
+            }
             il.Append(labels[block.Address]);
-            foreach (var region in regions.Where(r => r.HandlerEntry == block.Address && r.Kind == ManagedRegionKind.Catch))
-                il.Emit(OpCodes.Stloc, Local(region.Exception!));
             foreach (var statement in block.Statements)
                 if (!entryDefaults.Contains(statement)) Statement(statement);
         }

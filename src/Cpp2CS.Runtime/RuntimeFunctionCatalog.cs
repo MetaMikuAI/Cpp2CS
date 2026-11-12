@@ -30,9 +30,13 @@ public sealed class RuntimeFunctionCatalog
     {
         Source = source; UnityVersion = unityVersion; Triple = triple; DataModel = dataModel; Functions = functions;
         byMangled = functions.ToFrozenDictionary(f => f.MangledName, StringComparer.Ordinal);
+        byImport = functions.Where(f => f.Recognition.Import is not null).GroupBy(f => f.Recognition.Import!, StringComparer.Ordinal)
+            .ToFrozenDictionary(g => g.Key, g => g.ToImmutableArray(), StringComparer.Ordinal);
         byName = functions.GroupBy(f => f.Name, StringComparer.Ordinal).ToFrozenDictionary(g => g.Key, g => g.ToImmutableArray(), StringComparer.Ordinal);
     }
     private readonly FrozenDictionary<string, RuntimeFunction> byMangled;
+    private readonly FrozenDictionary<string, ImmutableArray<RuntimeFunction>> byImport;
+    public RuntimeFunction? FindImport(string name) => byImport.TryGetValue(name, out var matches) ? matches.Single() : null;
     private readonly FrozenDictionary<string, ImmutableArray<RuntimeFunction>> byName;
     public string Source { get; }
     public string UnityVersion { get; }

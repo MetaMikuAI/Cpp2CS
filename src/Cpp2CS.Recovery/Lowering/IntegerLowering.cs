@@ -33,6 +33,7 @@ public sealed partial class IntegerLowering
     private readonly MethodRef method;
     private readonly MethodRef? witness;
     private readonly IRgctxDecoder? rgctx;
+    private readonly bool nestedExceptions;
     private readonly MethodBinder binder;
     private readonly ManagedTypes types;
     private readonly StateQueries state;
@@ -59,8 +60,10 @@ public sealed partial class IntegerLowering
 
     public IntegerLowering(NativeFunction function, MethodRef method, MethodBinder binder, ManagedTypes types,
         Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null, RuntimeSpec? spec = null, NamingFacts? names = null,
-        AccessorQuery? accessors = null, ConstructorQuery? constructors = null, MethodRef? witness = null, IRgctxDecoder? rgctx = null)
+        AccessorQuery? accessors = null, ConstructorQuery? constructors = null, MethodRef? witness = null, IRgctxDecoder? rgctx = null,
+        bool nestedExceptions = true)
     {
+        this.nestedExceptions = nestedExceptions;
         this.function = function; this.method = method; this.witness = witness; this.rgctx = rgctx; this.binder = binder; this.types = types;
         this.calls = calls; this.spec = spec; this.names = names ?? NamingFacts.Empty;
         this.accessors = accessors;
@@ -93,24 +96,27 @@ public sealed partial class IntegerLowering
         { GenericFailure<object>("Struct", "含类型参数的值类型签名尚未下降"); return new(null, failure); }
         if (spec is not null && calls is not null)
         {
-            var naming = new ValueNamingQuery(state, calls, names, spec, binder, signature, rgctx, types.Layouts as GenericWitness);
+            var naming = new ValueNamingQuery(state, calls, names, spec, binder, signature, rgctx, types.Layouts as GenericWitness, types.Object);
             valueNames = naming;
             locations = new(state, naming, types.Layouts, spec);
             dispatch = new(state, calls, naming, locations, binder, spec, types.Layouts as GenericWitness);
             context = locations.CreateContext(function);
         }
+        PrepareExceptions();
+        if (failure is not null) return new(null, failure);
         // 所有事件先检查，避免未使用的调用或访问被纯值下降遗漏。
         foreach (var b in function.Blocks)
         {
+            SelectExceptionView(b.Identity);
             position = b.Trace?.NativeAddress ?? 0;
-            if (b.Handler is not null) Fail<object>(LoweringFailureKind.Exception, "异常处理入口尚未下降");
+            if (exceptions?.Removed.Contains(b.Identity) == true) continue;
             for (int i = 0; i < b.Statements.Length; i++)
             {
                 var s = b.Statements[i];
                 position = s.Trace?.NativeAddress ?? b.Trace?.NativeAddress ?? 0;
                 switch (s)
                 {
-                    case Call call: PrepareCall(call, new(b.Identity, i)); break;
+                    case Call call when exceptions?.PrivateCalls.Contains(call.Identity) != true && exceptions?.Rethrows.ContainsKey(call.Identity) != true: PrepareCall(call, new(b.Identity, i)); break;
                     case TrapWhen: Fail<object>(LoweringFailureKind.ConditionalTrap, "条件陷阱尚未下降"); break;
                     case DynamicAllocation: Fail<object>(LoweringFailureKind.DynamicAllocation, "动态帧分配尚未下降"); break;
                 }
@@ -140,6 +146,8 @@ public sealed partial class IntegerLowering
         var blocks = new List<ManagedBlock>();
         foreach (var b in function.Blocks.OrderBy(b => labels[b.Identity]))
         {
+            if (exceptions?.Removed.Contains(b.Identity) == true) continue;
+            SelectExceptionView(b.Identity);
             position = b.Trace?.NativeAddress ?? 0;
             var statements = new List<ManagedStatement>();
             for (int i = 0; i < b.Statements.Length; i++)
@@ -148,6 +156,12 @@ public sealed partial class IntegerLowering
                 position = native.Trace?.NativeAddress ?? b.Trace?.NativeAddress ?? 0;
                 if (native is Call call)
                 {
+                    if (exceptions?.PrivateCalls.Contains(call.Identity) == true) continue;
+                    if (exceptions?.Rethrows.ContainsKey(call.Identity) == true)
+                    {
+                        var rethrow = new ManagedRethrow(position); statements.Add(rethrow);
+                        exceptionCallStatements[rethrow] = call.Identity; break;
+                    }
                     // 分配并入构造函数调用；接口查找只供分派使用，两者自己不产生语句。
                     if (allocations.TryGetValue(call.Identity, out var allocation))
                     {
@@ -161,6 +175,7 @@ public sealed partial class IntegerLowering
                     statements.Add(statement);
                     if (FrameCallResult(call) is { } stored) statements.Add(stored);
                     if (failure is not null) return new(null, failure);
+                    if (exceptions is not null) exceptionCallStatements[statement] = call.Identity;
                     // 不返回的托管调用之后没有后继；方法体以不可达的 throw null 收尾，依据是不返回分析对被调函数的证明。
                     if (call.DoesNotReturn && statement is ManagedCall)
                         statements.Add(new ManagedThrow(position, new ConstantValue(0, types.Object, types.PointerSize * 8)));
@@ -168,6 +183,7 @@ public sealed partial class IntegerLowering
                 else if (native is MemoryWrite write)
                 {
                     if (constructorWrites.Contains(write.Identity)) continue;
+                    if (exceptions?.PrivateWrites.Contains(write.Identity) == true) continue;
                     statements.AddRange(LowerStores(write, new(b.Identity, i)));
                     if (failure is not null) return new(null, failure);
                 }
@@ -178,7 +194,7 @@ public sealed partial class IntegerLowering
                     slots.Add((statements.Count, read.Identity, position));
                 }
             }
-            if (statements.LastOrDefault() is not ManagedThrow)
+            if (statements.LastOrDefault() is not (ManagedThrow or ManagedRethrow))
             {
                 var end = End(b);
                 if (end is null) return new(null, failure);
@@ -193,16 +209,33 @@ public sealed partial class IntegerLowering
             foreach (var input in merge.Inputs)
             {
                 position = function.Blocks.Single(b => b.Identity == input.Predecessor).Trace?.NativeAddress ?? 0;
+                SelectExceptionView(input.Predecessor);
                 var v = Part(input.Value, merge.Low, merge.Width, IsFloat(merge.Local.Type));
                 if (v is null) return new(null, failure);
+                var incoming = Opaque(merge.Local.Type) || Opaque(v.Type) || ReferenceType(merge.Local.Type) || ManagedTypes.IsNativePointer(merge.Local.Type) ? Coerce(v, merge.Local.Type) : IsFloat(merge.Local.Type) ? FloatBits(v, merge.Local.Width) : Convert(v, merge.Local.Width);
+                if (ExceptionCopy(input.Predecessor, merge.Target, merge.Local, incoming)) continue;
                 var edge = Edge(input.Predecessor, merge.Target);
-                ((List<ManagedCopy>)edge.Copies).Add(new(merge.Local, Opaque(merge.Local.Type) || Opaque(v.Type) || ReferenceType(merge.Local.Type) || ManagedTypes.IsNativePointer(merge.Local.Type) ? Coerce(v, merge.Local.Type) : IsFloat(merge.Local.Type) ? FloatBits(v, merge.Local.Width) : Convert(v, merge.Local.Width)));
+                ((List<ManagedCopy>)edge.Copies).Add(new(merge.Local, incoming));
             }
         }
+        if (exceptions is not null && arrivals.Keys.Except(exceptionCallStatements.Values).Any())
+        {
+            Fail<object>(LoweringFailureKind.Exception, "展开状态复制没有对应的托管抛出点，调用已被合并或消去", code: "lowering.Exception.State");
+            return new(null, failure);
+        }
+        blocks = blocks.Select(InsertReads).ToList();
+        if (failure is not null) return new(null, failure);
+        // 展开合流在调用前赋值；临时局部先求全部源值，保持同时赋值语义。
+        if (exceptions is not null) blocks = blocks.Select(b => b with { Statements = b.Statements.SelectMany(s =>
+        {
+            if (!exceptionCallStatements.TryGetValue(s, out var call) || !arrivals.TryGetValue(call, out var assigned)) return new[] { s };
+            var temporaries = assigned.Select(copy => new LocalValue(new(nextLocal++), copy.Target.Type, copy.Target.Width)).ToArray();
+            return assigned.Select((copy, i) => (ManagedStatement)new ManagedAssignment(s.Address, temporaries[i], copy.Value) { ExceptionArrival = true })
+                .Concat(assigned.Select((copy, i) => (ManagedStatement)new ManagedAssignment(s.Address, copy.Target, temporaries[i]) { ExceptionArrival = true })).Append(s);
+        }).ToArray() }).ToList();
         // 合流入边也可能首次使用调用结果，全部值下降后再回填结果局部。
         blocks = blocks.Select(b => b with { Statements = b.Statements.Select(s => s is ManagedCall c && callStatements.TryGetValue(c, out var definition)
             ? c with { Result = definition.Local } : s).ToArray() }).ToList();
-        blocks = blocks.Select(InsertReads).ToList();
         if (failure is not null) return new(null, failure);
         if (method.Method is { Name: ".ctor", IsStatic: false, Owner.IsValueType: false })
         {
@@ -228,7 +261,7 @@ public sealed partial class IntegerLowering
                 return new(null, failure);
             }
         }
-        var body = new ManagedBody(method, [.. blocks, .. extraBlocks]);
+        var body = ExceptionBody([.. blocks, .. extraBlocks]);
         CheckGenericBody(body);
         CheckBody(body);
         return failure is null ? new(Materialize(body), null) : new(null, failure);
@@ -309,7 +342,7 @@ public sealed partial class IntegerLowering
                 }
                 return tail;
             case Unreachable: return Fail<ManagedStatement>(LoweringFailureKind.Trap, "陷阱或不可达终结尚未下降");
-            case ResumeUnwind: return Fail<ManagedStatement>(LoweringFailureKind.Exception, "继续展开尚未下降");
+            case ResumeUnwind: return Fail<ManagedStatement>(LoweringFailureKind.Exception, "不透明区域仍有继续展开", code: "lowering.Exception.Fault");
             default: return Fail<ManagedStatement>(LoweringFailureKind.IndirectControl, "跳转表或间接控制流尚未下降");
         }
     }

@@ -187,6 +187,21 @@ public static class RuntimeOperations
         yield return Op("BeginCatch", [P("exception", RuntimeValueKind.NativePointer)], RuntimeValueKind.NativePointer, RuntimeWidth.Pointer,
             RuntimeHeapEffect.None, RuntimeObservation.Unobservable, "返回调整后的异常载荷指针；增加处理计数并维护活跃异常栈", "BeginCatch", "异常区域归一",
             "Itanium C++ ABI 2.5.3 __cxa_begin_catch", preconditions: "有效 catch landing pad；异常头符合 Itanium ABI", pointers: [new("exception", RuntimeAccess.ReadWrite, RuntimeMemoryDomain.RuntimePrivate, new(RuntimeExtentKind.Unknown, "C++ 异常头"), new(RuntimeConditionKind.Always, "调用时"))], managedCode: "无");
+        yield return Op("CxxGetExceptionPointer", [P("exception", RuntimeValueKind.NativePointer)], RuntimeValueKind.NativePointer, RuntimeWidth.Pointer,
+            RuntimeHeapEffect.None, RuntimeObservation.Unobservable, "返回当前异常的载荷指针", "ExceptionPayload", "异常值命名",
+            "Itanium C++ ABI 2.5.3 __cxa_get_exception_ptr", managedCode: "无");
+        yield return Op("CxxAllocateException", [V("size", RuntimeValueKind.Integer)], RuntimeValueKind.NativePointer, RuntimeWidth.Pointer,
+            RuntimeHeapEffect.None, RuntimeObservation.Unobservable, "分配原生异常载荷", "ExceptionStorage", "只在包装对象已证明时折叠",
+            "Itanium C++ ABI 2.4.2 __cxa_allocate_exception", managedCode: "无");
+        yield return Op("CxxFreeException", [P("exception", RuntimeValueKind.NativePointer)], RuntimeValueKind.Void, RuntimeWidth.None,
+            RuntimeHeapEffect.None, RuntimeObservation.Unobservable, "释放尚未抛出的原生异常载荷", "ExceptionStorage", "只在包装对象已证明时折叠",
+            "Itanium C++ ABI 2.4.3 __cxa_free_exception", managedCode: "无");
+        yield return Op("CxxThrow", [P("exception", RuntimeValueKind.NativePointer), V("type", RuntimeValueKind.NativePointer), V("destructor", RuntimeValueKind.NativePointer)], RuntimeValueKind.Void, RuntimeWidth.None,
+            RuntimeHeapEffect.ArbitraryManagedCode, RuntimeObservation.Observable, "抛出原生异常载荷", "NativeThrow", "先证明托管包装对象再下降",
+            "Itanium C++ ABI 2.4.3 __cxa_throw", ["NativeException"], noReturn: true);
+        yield return Op("CxxRethrow", [], RuntimeValueKind.Void, RuntimeWidth.None,
+            RuntimeHeapEffect.None, RuntimeObservation.Observable, "继续传播当前捕获的原生异常", "Rethrow", "只在对应托管 catch 内下降",
+            "Itanium C++ ABI 2.5.4 __cxa_rethrow", ["ActiveException"], noReturn: true);
         yield return Op("EndCatch", [], RuntimeValueKind.Void, RuntimeWidth.None, RuntimeHeapEffect.ArbitraryManagedCode,
             RuntimeObservation.Observable, "减少处理计数，必要时销毁异常", "EndCatch", "异常区域归一",
             "Itanium C++ ABI 2.5.3 __cxa_end_catch；异常析构回调不受本目录约束", preconditions: "与活跃捕获匹配；异常析构函数遵守不抛出约定", managedCode: "异常析构函数可能回调托管代码");

@@ -7,6 +7,7 @@ namespace Cpp2CS.Targets.Elf;
 internal sealed class UnwindReader
 {
     private readonly LoadedImage image;
+    private readonly Dictionary<PointerTarget, string?> typeNames = [];
     internal List<FunctionRange> Functions { get; } = [];
     internal List<TryRegion> Regions { get; } = [];
     internal List<string> Diagnostics { get; } = [];
@@ -163,12 +164,13 @@ internal sealed class UnwindReader
                         var matches = ImmutableArray.CreateBuilder<PointerTarget>();
                         ulong index;
                         while ((index = list.Uleb()) != 0) matches.Add(ReadType(index));
-                        clauses.Add(new(ClauseKind.ExceptionSpecification, matches.ToImmutable()));
+                        clauses.Add(new(ClauseKind.ExceptionSpecification, matches.ToImmutable()) { Selector = filter });
                     }
                     else
                     {
                         var type = ReadType((ulong)filter);
-                        clauses.Add(new(type is PointerTarget.Null ? ClauseKind.CatchAll : ClauseKind.Catch, type is PointerTarget.Null ? [] : [type]));
+                        clauses.Add(new(type is PointerTarget.Null ? ClauseKind.CatchAll : ClauseKind.Catch, type is PointerTarget.Null ? [] : [type])
+                        { Selector = filter, TypeName = TypeName(type) });
                     }
                     if (next == 0) break;
                     action.Position = SignedAdd(nextAt, next);
@@ -176,6 +178,28 @@ internal sealed class UnwindReader
             }
             Regions.Add(new(r.Start, r.Length, r.Handler, clauses.ToImmutableArray()));
         }
+    }
+
+    // Itanium type_info 的第二个指针是名字串；映像层只保留名字，不解释运行时身份。
+    private string? TypeName(PointerTarget type)
+    {
+        if (!typeNames.TryGetValue(type, out var name)) typeNames.Add(type, name = ReadTypeName(type));
+        return name;
+    }
+    private string? ReadTypeName(PointerTarget type)
+    {
+        if (type is not PointerTarget.Internal info || image.Query(info.Offset).AvailableBytes < (ulong)(2 * image.PointerWidth)
+            || image.ReadPointer(info.Offset + (ulong)image.PointerWidth) is not PointerTarget.Internal name) return null;
+        var text = new System.Text.StringBuilder();
+        var available = image.Query(name.Offset).AvailableBytes;
+        for (ulong i = 0; i < available; i++)
+        {
+            var value = image.ReadUnsigned(name.Offset + i, 1);
+            if (value == 0) return text.ToString();
+            if (value > 127) return null;
+            text.Append((char)value);
+        }
+        return null;
     }
 
     private PointerTarget TypeTarget(Cursor c, byte encoding)

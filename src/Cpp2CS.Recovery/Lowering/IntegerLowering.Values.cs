@@ -41,6 +41,8 @@ public sealed partial class IntegerLowering
 
     private ManagedValue? Value(Term term, bool floating = false)
     {
+        var caught = CaughtValue(term);
+        if (caught is not null || failure is not null) return caught;
         if (values.TryGetValue(term, out var known)) return known;
         var resolved = context.Get(state.Resolve, term);
         if (!resolved.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "值查询失败", resolved.Why);

@@ -458,6 +458,237 @@
         "reference_shape": null,
         "import": "exit"
       }
+    },
+    {
+      "name": "__cxa_allocate_exception",
+      "mangled_name": "__cxa_allocate_exception",
+      "declaration": "void * __cxa_allocate_exception(size_t size)",
+      "declaration_source": {
+        "file": "Itanium C++ ABI 2.4 / 2.5 __cxa_allocate_exception",
+        "line": 0
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "integer",
+            "bits": 64,
+            "signed": false
+          }
+        ],
+        "result": {
+          "kind": "pointer",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "size"
+      ],
+      "parameter_types": [
+        "size_t"
+      ],
+      "result_type": "void *",
+      "unsupported": [],
+      "operation": "CxxAllocateException",
+      "arguments": [
+        "size"
+      ],
+      "result": "operation",
+      "basis": [
+        "Itanium C++ ABI 2.4 / 2.5 __cxa_allocate_exception"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "__cxa_allocate_exception"
+      }
+    },
+    {
+      "name": "__cxa_free_exception",
+      "mangled_name": "__cxa_free_exception",
+      "declaration": "void __cxa_free_exception(void * exception)",
+      "declaration_source": {
+        "file": "Itanium C++ ABI 2.4 / 2.5 __cxa_free_exception",
+        "line": 0
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "pointer",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "exception"
+      ],
+      "parameter_types": [
+        "void *"
+      ],
+      "result_type": "void",
+      "unsupported": [],
+      "operation": "CxxFreeException",
+      "arguments": [
+        "exception"
+      ],
+      "result": "void",
+      "basis": [
+        "Itanium C++ ABI 2.4 / 2.5 __cxa_free_exception"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "__cxa_free_exception"
+      }
+    },
+    {
+      "name": "__cxa_get_exception_ptr",
+      "mangled_name": "__cxa_get_exception_ptr",
+      "declaration": "void * __cxa_get_exception_ptr(void * exception)",
+      "declaration_source": {
+        "file": "Itanium C++ ABI 2.4 / 2.5 __cxa_get_exception_ptr",
+        "line": 0
+      },
+      "declared_noreturn": false,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "pointer",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "pointer",
+          "bits": 64
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "exception"
+      ],
+      "parameter_types": [
+        "void *"
+      ],
+      "result_type": "void *",
+      "unsupported": [],
+      "operation": "CxxGetExceptionPointer",
+      "arguments": [
+        "exception"
+      ],
+      "result": "operation",
+      "basis": [
+        "Itanium C++ ABI 2.4 / 2.5 __cxa_get_exception_ptr"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "__cxa_get_exception_ptr"
+      }
+    },
+    {
+      "name": "__cxa_rethrow",
+      "mangled_name": "__cxa_rethrow",
+      "declaration": "void __cxa_rethrow()",
+      "declaration_source": {
+        "file": "Itanium C++ ABI 2.4 / 2.5 __cxa_rethrow",
+        "line": 0
+      },
+      "declared_noreturn": true,
+      "prototype": {
+        "parameters": [],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "parameter_names": [],
+      "parameter_types": [],
+      "result_type": "void",
+      "unsupported": [],
+      "operation": "CxxRethrow",
+      "arguments": [],
+      "result": "void",
+      "basis": [
+        "Itanium C++ ABI 2.4 / 2.5 __cxa_rethrow"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "__cxa_rethrow"
+      }
+    },
+    {
+      "name": "__cxa_throw",
+      "mangled_name": "__cxa_throw",
+      "declaration": "void __cxa_throw(void * exception, void * type, void * destructor)",
+      "declaration_source": {
+        "file": "Itanium C++ ABI 2.4 / 2.5 __cxa_throw",
+        "line": 0
+      },
+      "declared_noreturn": true,
+      "prototype": {
+        "parameters": [
+          {
+            "kind": "pointer",
+            "bits": 64
+          },
+          {
+            "kind": "pointer",
+            "bits": 64
+          },
+          {
+            "kind": "pointer",
+            "bits": 64
+          }
+        ],
+        "result": {
+          "kind": "void"
+        },
+        "variadic": false
+      },
+      "parameter_names": [
+        "exception",
+        "type",
+        "destructor"
+      ],
+      "parameter_types": [
+        "void *",
+        "void *",
+        "void *"
+      ],
+      "result_type": "void",
+      "unsupported": [],
+      "operation": "CxxThrow",
+      "arguments": [
+        "exception",
+        "type",
+        "destructor"
+      ],
+      "result": "void",
+      "basis": [
+        "Itanium C++ ABI 2.4 / 2.5 __cxa_throw"
+      ],
+      "recognition": {
+        "symbol": true,
+        "export": null,
+        "call_graph": null,
+        "reference_shape": null,
+        "import": "__cxa_throw"
+      }
     }
   ]
 }

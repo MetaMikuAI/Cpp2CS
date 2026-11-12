@@ -8394,6 +8394,7 @@
     }
   },
   "schema_version": 1,
+  "cxx_exception_wrapper_type": "22Il2CppExceptionWrapper",
   "source": {
     "kind": "runtime-headers",
     "platform_adapter": "Android C declarations; absent os/c-api configuration supplied by generator",

@@ -9,12 +9,13 @@ internal sealed class StructureLiveness
     private readonly Dictionary<Term, HashSet<(BlockIdentity Block, bool End)>> users = [];
 
     public StructureLiveness(NativeFunction function, Func<Terminator, IEnumerable<Term>> endUses,
-        IReadOnlySet<Term>? boundaries = null, BlockIdentity? appendedAt = null, IEnumerable<Term>? appendedUses = null)
+        IReadOnlySet<Term>? boundaries = null, BlockIdentity? appendedAt = null, IEnumerable<Term>? appendedUses = null,
+        Func<Statement, IEnumerable<Term>>? statementUses = null)
     {
         var merges = function.Blocks.SelectMany(b => b.Merges).ToDictionary(m => m.Result);
         foreach (var block in function.Blocks)
         {
-            Add(block.Statements.SelectMany(SnapshotRewrite.Uses), (block.Identity, false));
+            Add(block.Statements.SelectMany(statementUses ?? SnapshotRewrite.Uses), (block.Identity, false));
             Add(endUses(block.End), (block.Identity, true));
         }
         if (appendedAt is not null && appendedUses is not null) Add(appendedUses, (appendedAt, false));
@@ -32,6 +33,8 @@ internal sealed class StructureLiveness
             }
         }
     }
+
+    public bool Used(Term value) => users.ContainsKey(value);
 
     public bool Outside(Term value, HashSet<BlockIdentity> inside, BlockIdentity head) =>
         users.TryGetValue(value, out var points) && points.Any(p => !inside.Contains(p.Block) && !(p.End && p.Block == head));

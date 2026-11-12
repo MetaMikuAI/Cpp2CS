@@ -46,7 +46,7 @@ public sealed partial class IntegerLowering
                 bool contents = c.Operation?.Inputs.Any(v => v.Name == name && v.Use == RuntimeInputUse.Pointee) == true;
                 if (input.IsSuccess && RejectAddressUse([input.Value], "运行时或系统函数的实参", contents)) return;
             }
-        if (call.Unwind is not null) { Fail<object>(LoweringFailureKind.Exception, "调用的异常边尚未下降"); return; }
+        if (call.Unwind is not null && exceptions is null) { Fail<object>(LoweringFailureKind.Exception, "调用的异常边尚未下降"); return; }
         if (c.Kind == CallKind.Runtime && c.Operation is { Result.Kind: RuntimeValueKind.InvokeData })
         { interfaceLookups.Add(call.Identity); return; }
         if (c.Operation is { DoesNotReturn: true, Termination: RuntimeTermination.Throw, FixedThrownException: { } exception })
@@ -72,7 +72,7 @@ public sealed partial class IntegerLowering
         if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "IsInst" or "CastClass" }) { PrepareTypeCheck(call, c); return; }
         if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "Box" }) { PrepareBox(call, c); return; }
         if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "Unbox" }) { PrepareUnbox(call, c); return; }
-        if (c.Kind == CallKind.Runtime && c.Operation is { DoesNotReturn: true, Termination: RuntimeTermination.Throw, FixedThrownException: null, Il.Name: "Throw" })
+        if (c.Kind == CallKind.Runtime && c.Operation is { DoesNotReturn: true, Termination: RuntimeTermination.Throw, FixedThrownException: null, Il.Name: "Throw" or "Rethrow" })
         { PrepareThrow(call, c); return; }
         if (c.Kind != CallKind.Managed)
         {
@@ -143,7 +143,7 @@ public sealed partial class IntegerLowering
         var candidate = candidates[0];
         if (candidate.Binding.Value is not { } binding || candidate.Entry.Method is not { } method)
         { Fail<object>(LoweringFailureKind.Binding, candidate.Binding.Failure?.Detail ?? "调用没有托管身份"); return; }
-        if (call.Unwind is not null) { Fail<object>(LoweringFailureKind.Exception, "调用的异常边尚未下降"); return; }
+        if (call.Unwind is not null && exceptions is null) { Fail<object>(LoweringFailureKind.Exception, "调用的异常边尚未下降"); return; }
         var definition = new CallDefinition(method, binding);
         callDefinitions.Add(call.Identity, definition);
         if (binding.Result.Source is TermSource source) callResults.Add(source.Term, definition);

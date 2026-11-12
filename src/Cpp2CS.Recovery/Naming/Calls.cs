@@ -22,17 +22,34 @@ public sealed record ClassifiedCall(CallKind Kind, CallCandidates? Candidates = 
 public sealed class CallNamingQuery(MethodBinder binder, IBindingCodeMap code, IRuntimeFunctionMap runtime,
     RuntimeFunctionCatalog catalog) : Query<CallIdentity, ClassifiedCall>
 {
+    private sealed class CallIndexQuery : Query<int, ImmutableDictionary<CallIdentity, Call>>
+    {
+        public override Outcome<ImmutableDictionary<CallIdentity, Call>> Compute(QueryContext context, int key) =>
+            Outcome<ImmutableDictionary<CallIdentity, Call>>.Success(context.Snapshot.Blocks.SelectMany(block => block.Statements)
+                .OfType<Call>().ToImmutableDictionary(call => call.Identity));
+    }
+    private readonly CallIndexQuery index = new();
+
+    /// <summary>只查询经过代码地图和目录确认的身份，不绑定实参或读取逐方法状态。</summary>
+    public RuntimeFunction? RuntimeIdentity(CallTarget target)
+    {
+        if (target is ComputedTarget || target is ImageFunction image && code.At(image.EntryOffset).Length != 0) return null;
+        return target is ImportedTarget import
+            ? catalog.FindImport(import.Symbol.Name) : runtime.Find(target);
+    }
+
     public override Outcome<ClassifiedCall> Compute(QueryContext c, CallIdentity key)
     {
-        var call = c.Snapshot.Blocks.SelectMany(b => b.Statements).OfType<Call>().Single(x => x.Identity == key);
+        var found = c.Get(index, 0);
+        if (!found.IsSuccess) return found.Propagate<ClassifiedCall>();
+        var call = found.Value[key];
         ClassifiedCall result;
         if (call.Target is ComputedTarget indirect) result = new(CallKind.Indirect, Target: indirect.Value);
         else if (call.Target is ImageFunction image && code.At(image.EntryOffset).Length > 0)
             result = new(CallKind.Managed, binder.Call(call, image, code, c.Snapshot.Terms));
         else
         {
-            var function = call.Target is ImportedTarget import
-                ? catalog.Functions.SingleOrDefault(f => f.Recognition.Import == import.Symbol.Name) : runtime.Find(call.Target);
+            var function = RuntimeIdentity(call.Target);
             if (function is null) result = new(CallKind.Unknown, Why: new("naming.call-target", "目标没有托管身份或目录对应。"));
             else
             {

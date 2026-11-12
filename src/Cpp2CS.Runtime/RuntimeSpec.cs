@@ -9,6 +9,7 @@ public sealed class RuntimeSpec
 {
     private RuntimeSpec(RuntimeLayoutSpec layout) => Layout = layout;
     public RuntimeLayoutSpec Layout { get; }
+    public string? ManagedExceptionWrapperTypeName { get; private init; }
 
     public static RuntimeSpec Load(string path, string unityVersion, string triple, string dataModel)
     {
@@ -66,7 +67,8 @@ public sealed class RuntimeSpec
             p => new RuntimePrimitive(Number(p.Value, "size"), Number(p.Value, "alignment")), StringComparer.Ordinal);
         var constants = root.GetProperty("constants").EnumerateObject().ToFrozenDictionary(p => p.Name,
             p => BigInteger.Parse(p.Value.GetRawText(), System.Globalization.CultureInfo.InvariantCulture), StringComparer.Ordinal);
-        return new(new(source, unityVersion, triple, dataModel, records, primitives, constants));
+        return new(new(source, unityVersion, triple, dataModel, records, primitives, constants))
+        { ManagedExceptionWrapperTypeName = root.TryGetProperty("cxx_exception_wrapper_type", out var wrapper) ? wrapper.GetString() : null };
     }
 
     private static FrozenDictionary<string, RuntimeField> Fields(JsonElement fields, string source, string owner) =>

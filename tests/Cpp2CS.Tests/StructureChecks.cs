@@ -11,7 +11,7 @@ using Cpp2CS.Targets.Arm64.Abi;
 
 namespace Cpp2CS.Tests;
 
-internal static class StructureChecks
+internal static partial class StructureChecks
 {
     public const string Command = "structure";
     public static int Run()
@@ -59,6 +59,8 @@ internal static class StructureChecks
             if (scenario == 4) checks.True(!output.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any(), "无条件不可观察调用删除");
             if (scenario == 5) checks.True(ReferenceEquals(output.Function, function) && output.Records.Any(r => r.Kind == "runtime-result-used"), "实际返回值仍被使用时原样保留并记录");
         }
+        ExceptionEntryCases(checks);
+        SignatureBeforeForwarding(checks);
         SpecificationCases(checks);
         InterfaceLookupCases(checks);
         return checks.Finish("结构消去");

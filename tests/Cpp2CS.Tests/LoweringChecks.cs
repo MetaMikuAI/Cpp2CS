@@ -78,6 +78,8 @@ internal static partial class LoweringChecks
         var emitter = new BodyEmitter(skeleton, types);
         var checks = new Assertions();
         GenericChecks(checks, program);
+        ExceptionChecks(checks, program);
+        ExceptionExecutionChecks(checks, program);
         foreach (var name in new[] { "Add", "Branch", "Loop", "Spill", "Swap", "Accumulate", "Predicate", "Narrow", "FloatAdd", "DoubleBranch", "FloatInt", "UnsignedDouble", "FloatBits", "FloatSelect" })
         {
             var reference = MethodRef.Open(methods.Single(m => m.Name == name));
