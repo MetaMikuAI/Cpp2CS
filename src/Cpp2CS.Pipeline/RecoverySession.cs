@@ -64,7 +64,7 @@ public sealed class RecoverySession
         IMethodStage<CodeEntry, NativeFunction>? frontend = null, IMethodStage<NativeFunction, ManagedBody>? recovery = null)
     {
         this.frontend = frontend ?? new FrontendStage(providers ?? DefaultProviders);
-        this.recovery = recovery ?? new IntegerRecoveryStage();
+        this.recovery = recovery ?? new IntegerRecoveryStage(this.frontend);
     }
     public static string Identity(MethodDef method) => $"{method.Owner.Assembly}:0x{method.Token:x8}";
     public RecoveryReport Run(RecoveryRequest request)

@@ -9,6 +9,7 @@ using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.Naming;
 using Cpp2CS.Recovery.Locations;
 using Cpp2CS.Recovery.Dispatch;
+using Cpp2CS.Recovery.Inlining;
 using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.Lowering;
@@ -38,6 +39,7 @@ public sealed partial class IntegerLowering
     private readonly NamingFacts names;
     private ManagedLocationQuery? locations;
     private DispatchQuery? dispatch;
+    private readonly AccessorQuery? accessors;
     private readonly Dictionary<Term, ManagedValue> arguments = [];
     private readonly Dictionary<(Term Term, int Low, int Width), LocalValue> merges = [];
     private readonly Dictionary<Term, ManagedValue> values = [];
@@ -53,10 +55,12 @@ public sealed partial class IntegerLowering
     private ulong nextLabel;
 
     public IntegerLowering(NativeFunction function, MethodRef method, MethodBinder binder, ManagedTypes types,
-        Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null, RuntimeSpec? spec = null, NamingFacts? names = null)
+        Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null, RuntimeSpec? spec = null, NamingFacts? names = null,
+        AccessorQuery? accessors = null)
     {
         this.function = function; this.method = method; this.binder = binder; this.types = types;
         this.calls = calls; this.spec = spec; this.names = names ?? NamingFacts.Empty;
+        this.accessors = accessors;
         state = new(effects, image: image);
         boundSources = new(state);
         context = state.CreateContext(function);
@@ -178,8 +182,8 @@ public sealed partial class IntegerLowering
             }
         }
         // 合流入边也可能首次使用调用结果，全部值下降后再回填结果局部。
-        blocks = blocks.Select(b => b with { Statements = b.Statements.Select(s => s is ManagedCall c
-            ? c with { Result = callStatements[c].Local } : s).ToArray() }).ToList();
+        blocks = blocks.Select(b => b with { Statements = b.Statements.Select(s => s is ManagedCall c && callStatements.TryGetValue(c, out var definition)
+            ? c with { Result = definition.Local } : s).ToArray() }).ToList();
         blocks = blocks.Select(InsertReads).ToList();
         if (failure is not null) return new(null, failure);
         if (method.Method is { Name: ".ctor", IsStatic: false, Owner.IsValueType: false } && !ConstructorChained(blocks))

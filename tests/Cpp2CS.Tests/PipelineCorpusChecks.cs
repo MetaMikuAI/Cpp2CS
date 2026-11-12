@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using Cpp2CS.Pipeline;
+using Cpp2CS.Recovery.Inlining;
 using Cpp2CS.Tests.Metrics;
 using Mono.Cecil;
 
@@ -12,7 +13,8 @@ internal static class PipelineCorpusChecks
     public const string Command = "pipeline-corpus";
     public static int Run() => Run(true);
     public static int WithoutSymbols() => Run(false);
-    private static int Run(bool useSymbols)
+    public static int WithoutAccessors() => Run(true, false);
+    private static int Run(bool useSymbols, bool accessors = true)
     {
         var corpus = Environment.GetEnvironmentVariable("CPP2CS_CORPUS");
         var truth = Environment.GetEnvironmentVariable("CPP2CS_CORPUS_TRUTH");
@@ -22,8 +24,11 @@ internal static class PipelineCorpusChecks
             return 0;
         }
         var checks = new Assertions();
-        var output = Path.Combine(ArchitectureChecks.FindRoot(), "artifacts", useSymbols ? "pipeline-corpus.local.output" : "pipeline-corpus-nosymbols.local.output");
-        var report = new RecoverySession().Run(new(
+        var output = Path.Combine(ArchitectureChecks.FindRoot(), "artifacts", !accessors ? "pipeline-corpus-accessors-disabled.local.output"
+            : useSymbols ? "pipeline-corpus.local.output" : "pipeline-corpus-nosymbols.local.output");
+        var accessorAttempts = new ConcurrentBag<AccessorAttempt>();
+        var recovery = new IntegerRecoveryStage(enableAccessorInlining: accessors, observeAccessors: accessorAttempts.Add);
+        var report = new RecoverySession(recovery: recovery).Run(new(
             Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.so"),
             Path.Combine(corpus, "artifacts", "il2cppOutput", "data", "Metadata", "global-metadata.dat"), output)
         {
@@ -32,6 +37,18 @@ internal static class PipelineCorpusChecks
             Jobs = Environment.ProcessorCount,
         });
         var byId = report.Methods.ToDictionary(m => m.Identity);
+        var anchors = accessorAttempts.DistinctBy(a => (a.Access.Caller, a.Access.Position, a.Access.Field, a.Access.Kind))
+            .OrderBy(a => RecoverySession.Identity(a.Access.Caller.Method), StringComparer.Ordinal)
+            .ThenBy(a => a.Access.Position).ToArray();
+        File.WriteAllText(Path.Combine(output, "accessors.local.json"), JsonSerializer.Serialize(anchors.Select(a => new
+        {
+            Caller = RecoverySession.Identity(a.Access.Caller.Method), Method = a.Access.Caller.Method.ToString(),
+            a.Access.Position, Field = a.Access.Field.ToString(), Kind = a.Access.Kind.ToString(),
+            Accessor = a.Answer.Method?.ToString(), AccessorIdentity = a.Answer.Method is { } selected ? RecoverySession.Identity(selected.Method) : null,
+            Code = a.Answer.Failure?.Code ?? "Solved", None = a.Answer.NoneReason?.ToString(), a.Answer.Matches,
+        }), new JsonSerializerOptions { WriteIndented = true }));
+        Console.WriteLine("访问器锚点：" + anchors.Length + "；" + string.Join("，", anchors.GroupBy(a =>
+            a.Answer.NoneReason?.ToString() ?? a.Answer.Failure?.Code ?? "Solved").OrderBy(g => g.Key).Select(g => g.Key + "=" + g.Count())));
         using var methods = InputCorpusChecks.Json(truth, "methods.json");
         using var cases = InputCorpusChecks.Json(truth, "cases.json");
         var metrics = new ConcurrentDictionary<string, MethodMetric>();
@@ -102,4 +119,10 @@ internal static class PipelineWithoutSymbolsCorpusChecks
 {
     public const string Command = "pipeline-corpus-nosymbols";
     public static int Run() => PipelineCorpusChecks.WithoutSymbols();
+}
+
+internal static class PipelineWithoutAccessorsCorpusChecks
+{
+    public const string Command = "pipeline-corpus-accessors-disabled";
+    public static int Run() => PipelineCorpusChecks.WithoutAccessors();
 }

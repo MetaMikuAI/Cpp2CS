@@ -9,15 +9,26 @@ using Cpp2CS.Recovery.Lowering;
 using Cpp2CS.Runtime.Layouts;
 using Cpp2CS.Runtime;
 using Cpp2CS.Recovery.Naming;
+using Cpp2CS.Recovery.Inlining;
 using Cpp2CS.Targets.Arm64.Abi;
 
 namespace Cpp2CS.Pipeline;
 
 public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedBody>
 {
-    private sealed record Components(MethodBinder Binder, ManagedTypes Types, CallNamingQuery Calls);
+    private sealed record Components(MethodBinder Binder, ManagedTypes Types, CallNamingQuery Calls, AccessorQuery? Accessors);
     private readonly System.Runtime.CompilerServices.ConditionalWeakTable<GlobalFacts, Lazy<Components>> components = [];
-    private static Components Create(GlobalFacts facts)
+    private readonly bool enableAccessorInlining;
+    private readonly IMethodStage<CodeEntry, NativeFunction> templateFrontend;
+    private readonly Action<AccessorAttempt>? observeAccessors;
+    public IntegerRecoveryStage(IMethodStage<CodeEntry, NativeFunction>? templateFrontend = null,
+        bool enableAccessorInlining = true, Action<AccessorAttempt>? observeAccessors = null)
+    {
+        this.templateFrontend = templateFrontend ?? new FrontendStage([new FrontendProvider("arm64", RecoverySession.DefaultComponents)]);
+        this.enableAccessorInlining = enableAccessorInlining;
+        this.observeAccessors = observeAccessors;
+    }
+    private Components Create(GlobalFacts facts)
     {
         var pointer = facts.Image.PointerWidth;
         var layouts = new FieldLayouts(facts.Spec, pointer, pointer);
@@ -25,7 +36,9 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         var spec = facts.Spec.Layout;
         var calls = new CallNamingQuery(binder, new NamingCodeMap(facts.CodeMap),
             new RuntimeFunctionMap(facts.RuntimeFunctions), RuntimeFunctionCatalog.Select(spec.UnityVersion, spec.Triple, spec.DataModel));
-        return new(binder, new ManagedTypes(facts.Model, layouts, pointer), calls);
+        var types = new ManagedTypes(facts.Model, layouts, pointer);
+        return new(binder, types, calls, enableAccessorInlining
+            ? new AccessorQuery(types, new AccessorTemplateSource(facts, templateFrontend), observeAccessors) : null);
     }
     public string Name => "恢复";
     public StageResult<ManagedBody> Run(NativeFunction input, MethodContext context)
@@ -53,7 +66,7 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         var types = parts.Types;
         var transformed = StructureRecovery.Run(input, context, parts.Binder, kind, parts.Types.Layouts);
         var result = new IntegerLowering(transformed.Function, MethodRef.Open(context.Method), parts.Binder,
-            types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names).Run(kind);
+            types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names, parts.Accessors).Run(kind);
         if (result.Body is { } candidate)
         {
             // 位重解释与浮点取整等依赖匹配核心库的 BCL 方法；裁剪掉的能力是缺口，不交给输出层制造非法体。

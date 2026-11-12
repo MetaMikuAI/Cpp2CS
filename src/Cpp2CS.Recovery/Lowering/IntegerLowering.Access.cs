@@ -6,6 +6,7 @@ using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Locations;
 using Cpp2CS.Recovery.Naming;
+using Cpp2CS.Recovery.Inlining;
 
 namespace Cpp2CS.Recovery.Lowering;
 
@@ -56,6 +57,7 @@ public sealed partial class IntegerLowering
         public LocalValue? Local { get; set; }
         public ManagedValue? Value { get; set; }
         public ManagedValue? Constant { get; set; }
+        public MethodRef? Accessor { get; set; }
     }
     private readonly Dictionary<Term, ReadDefinition> readValues = [];
     private readonly Dictionary<ReadIdentity, ReadDefinition> readDefinitions = [];
@@ -106,6 +108,8 @@ public sealed partial class IntegerLowering
         if (value is null) return null;
         if (types.Kind(value.Type) == TypeKind.Struct)
             return StructScalarFailure(value.Type);
+        definition.Accessor = FieldAccessor(value, false, definition);
+        if (failure is not null) return null;
         position = usePosition;
         definition.Value = value;
         definition.Local = new(new(nextLocal++), value.Type, value.Width);
@@ -121,7 +125,15 @@ public sealed partial class IntegerLowering
             {
                 var read = reads[cursor++];
                 if (readDefinitions.TryGetValue(read.Read, out var definition) && definition.Local is { } local)
-                    statements.Add(new ManagedAssignment(read.Address, local, definition.Value!));
+                {
+                    if (definition.Accessor is { } accessor)
+                    {
+                        // 同值读取共用原定义；调用只在该定义处发生一次。
+                        if (read.Read == definition.Read.Identity)
+                            statements.Add(new ManagedCall(read.Address, AccessorInvocation(accessor, definition.Value!, []), local) { Inlined = true });
+                    }
+                    else statements.Add(new ManagedAssignment(read.Address, local, definition.Value!));
+                }
                 if (structReads.TryGetValue(read.Read, out var aggregates))
                     foreach (var aggregate in aggregates)
                         statements.Add(new ManagedAssignment(read.Address, aggregate.Local!, aggregate.Value!));
@@ -154,6 +166,8 @@ public sealed partial class IntegerLowering
             }
         var target = Access(write.Address, write.Width, true, copiedType);
         if (target is null) return null;
+        var accessor = FieldAccessor(target, true);
+        if (failure is not null) return null;
         if (target is ArrayLengthValue) return Fail<ManagedStatement>(LoweringFailureKind.NonFrameWrite, "数组长度不可写");
         var value = types.Kind(target.Type) == TypeKind.Struct
             ? StructValue(new TermSource(write.Value), target.Type, point)
@@ -162,7 +176,38 @@ public sealed partial class IntegerLowering
         value = types.Kind(target.Type) == TypeKind.Struct ? value : ReferenceType(target.Type) ? Coerce(value, target.Type) : IsFloat(target.Type) ? FloatBits(value, write.Width)
             : new ConversionValue(ManagedTypes.IsSigned(target.Type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
                 value, target.Type, write.Width);
-        return new ManagedStore(position, target, value);
+        return accessor is null ? new ManagedStore(position, target, value)
+            : new ManagedCall(position, AccessorInvocation(accessor, target, [value]), null) { Inlined = true };
+    }
+
+    private MethodRef? FieldAccessor(ManagedValue storage, bool write, ReadDefinition? read = null)
+    {
+        if (accessors is null) return null;
+        foreach (var value in ManagedValues.Walk(storage))
+        {
+            var (field, receiver) = value switch
+            {
+                FieldValue f => (f.Field, f.Receiver.Type),
+                StaticFieldValue f => (f.Field, (TypeRef?)null),
+                _ => ((FieldRef?)null, (TypeRef?)null),
+            };
+            if (field is null || ManagedAccess.Field(types, method, field, receiver)) continue;
+            bool placed = ReferenceEquals(value, storage) && !ManagedValues.Children(storage).SelectMany(ManagedValues.Walk)
+                .Any(v => v is FieldValue or StaticFieldValue or AddressValue);
+            if (placed && read is not null)
+                placed = context.Get(accessors.ReadPlacement, new(read.Read.Identity,
+                    readDefinitions.Where(p => ReferenceEquals(p.Value, read)).Select(p => p.Key).ToArray())) is { IsSuccess: true, Value: true };
+            var answer = accessors.Resolve(new(method, position, field, receiver, write ? AccessorKind.Setter : AccessorKind.Getter, placed));
+            if (answer.Failure is { } why) Fail<object>(LoweringFailureKind.UnsupportedType, why.Message, why.Cause, why.Code);
+            return answer.Method;
+        }
+        return null;
+    }
+
+    private static ManagedInvocation AccessorInvocation(MethodRef accessor, ManagedValue storage, IReadOnlyList<ManagedValue> arguments)
+    {
+        var receiver = (storage as FieldValue)?.Receiver;
+        return new(accessor, receiver, arguments, receiver is not null && receiver is not ArgumentValue { Index: -1 });
     }
     private ManagedValue? Access(Term address, int width, bool write = false, TypeRef? expectedType = null)
     {
