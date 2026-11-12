@@ -11,7 +11,7 @@ public static class RuntimeShapeMatcher
     private sealed record Candidate(ulong Entry, RuntimeReferenceShape? Shape);
     public static IReadOnlyList<(ulong Entry, RuntimeFunctionLocation Location)> Locate(IImage image,
         RuntimeFunctionCatalog catalog, RuntimeShapeCatalog references, Func<ulong, NativeFunction?> lift,
-        Func<CallTarget, CallTarget> normalize, IDictionary<string, string>? missingReasons = null, int jobs = 1)
+        Func<CallTarget, CallTarget> normalize, IDictionary<string, string>? missingReasons = null, int jobs = 1, RuntimeUsageEvidence? usageEvidence = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(jobs, 1);
         var handlers = new TryRegionIndex(image.TryRegions);
@@ -81,6 +81,27 @@ public static class RuntimeShapeMatcher
             }
             else if (candidates.Count == 0) candidates.Add(new(entry, null));
         }
+        var usageProofs = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (reference, candidates) in matches)
+        {
+            var function = catalog.ByMangledName(reference.Function);
+            if (candidates.Count < 2 || Equivalent(candidates) || function.Recognition.UsageConditions.IsEmpty || usageEvidence is null) continue;
+            var counts = usageEvidence.Check(function, candidates.Select(c => c.Entry).ToHashSet());
+            var proof = "使用处条件：" + string.Join("；", candidates.Select(c =>
+                $"0x{c.Entry:x} 满足 {counts[c.Entry].Satisfied}，反例 {counts[c.Entry].Counterexamples}，未核实 {counts[c.Entry].Unverified}，核对 {counts[c.Entry].Checked}/{counts[c.Entry].Total} 调用点"));
+            var eligible = candidates.Where(c => counts[c.Entry].Eligible
+                && candidates.Where(other => other.Entry != c.Entry).All(other => counts[other.Entry].Satisfied == 0)).ToArray();
+            usageProofs[reference.Function] = proof;
+            if (eligible.Length == 1)
+            {
+                candidates.RemoveAll(c => c.Entry != eligible[0].Entry);
+            }
+            else
+            {
+                candidates.Clear();
+                contradictions[reference.Function] = "使用处条件不能唯一消歧";
+            }
+        }
         bool changed;
         do
         {
@@ -110,11 +131,12 @@ public static class RuntimeShapeMatcher
             if (!Equivalent(candidates))
             {
                 if (missingReasons is not null)
-                    missingReasons[reference.Function] = contradictions.GetValueOrDefault(reference.Function) ?? (candidates.Count > 1
+                    missingReasons[reference.Function] = (contradictions.GetValueOrDefault(reference.Function) ?? (candidates.Count > 1
                         ? $"参考形状与调用关系匹配 {candidates.Count} 个入口，被调目标不同，身份不唯一"
                         : reference.Shape is not null && reference.Callees.Length == 0 && !reference.HasImportCalls
-                        ? "形状没有直接调用关系或具名导入印证" : "参考形状或直接调用关系未通过完整复核")
-                        + (reference.Anchor is { } failed && anchorFailures.TryGetValue(failed, out var reason) ? $"；锚点 {failed} 失败：{reason}" : "");
+                        ? "形状没有直接调用关系或具名导入印证" : "参考形状或直接调用关系未通过完整复核"))
+                        + (reference.Anchor is { } failed && anchorFailures.TryGetValue(failed, out var reason) ? $"；锚点 {failed} 失败：{reason}" : "")
+                        + (usageProofs.TryGetValue(reference.Function, out var usage) ? "；" + usage : "");
                 continue;
             }
             foreach (var candidate in candidates)
@@ -127,6 +149,7 @@ public static class RuntimeShapeMatcher
                     var proofs = reference.Callees.SelectMany(CalleeProofs).Distinct(StringComparer.Ordinal).ToArray();
                     if (proofs.Length > 0) source += "；被调锚点 " + string.Join("，", proofs);
                 }
+                if (usageProofs.TryGetValue(reference.Function, out var usageProof)) source += "；" + usageProof;
                 if (candidates.Count > 1) source += $"；{candidates.Count} 个同形且被调地址相同的同义入口";
                 result.Add((candidate.Entry, new(catalog.ByMangledName(reference.Function), evidence, source) { HasEquivalentEntries = candidates.Count > 1 }));
             }

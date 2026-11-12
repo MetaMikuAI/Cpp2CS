@@ -5,7 +5,12 @@ using Cpp2CS.Native.Abi;
 
 namespace Cpp2CS.Runtime;
 
-public sealed record RuntimeRecognition(bool Symbol, string? Export, string? CallGraph, string? ReferenceShape, string? Import = null);
+public enum RuntimeUsageConditionKind { MetadataSlotAddress }
+public sealed record RuntimeUsageCondition(RuntimeUsageConditionKind Kind, int Parameter, string Basis);
+public sealed record RuntimeRecognition(bool Symbol, string? Export, string? CallGraph, string? ReferenceShape, string? Import = null)
+{
+    public ImmutableArray<RuntimeUsageCondition> UsageConditions { get; init; } = [];
+}
 public sealed record RuntimeDeclarationSource(string File, int Line);
 public sealed record RuntimeFunction(
     string Name, string MangledName, string Declaration, RuntimeDeclarationSource DeclarationSource,
@@ -18,7 +23,7 @@ public sealed record RuntimeFunction(
         $"运行时原型 {MangledName} 不可表示：{string.Join('；', Unsupported)}");
 }
 
-/// <summary>按精确 Unity 版本与目标读取；不做符号之外的识别，也不跨版本回退。</summary>
+/// <summary>按精确 Unity 版本与目标读取运行时函数定义与识别数据，不跨版本回退。</summary>
 public sealed class RuntimeFunctionCatalog
 {
     private RuntimeFunctionCatalog(string source, string unityVersion, string triple, string dataModel, ImmutableArray<RuntimeFunction> functions)
@@ -154,9 +159,17 @@ public sealed class RuntimeFunctionCatalog
         var recognition = f.GetProperty("recognition");
         var declaredNoReturn = f.GetProperty("declared_noreturn").GetBoolean();
         if (declaredNoReturn && !op.DoesNotReturn) throw new InvalidDataException($"{source}：{name} 的 noreturn 声明与操作冲突");
+        var conditions = recognition.TryGetProperty("usage_conditions", out var usages)
+            ? usages.EnumerateArray().Select(u => new RuntimeUsageCondition(Text(u, "kind") switch
+            {
+                "metadata_slot_address" => RuntimeUsageConditionKind.MetadataSlotAddress,
+                var kind => throw new InvalidDataException($"{source}：未知使用处条件 {kind}")
+            }, u.GetProperty("parameter").GetInt32(), Text(u, "basis"))).ToImmutableArray() : [];
+        if (conditions.Any(c => c.Parameter < 0 || c.Parameter >= parameters.Length || signature?.Parameters[c.Parameter] is not CPointer))
+            throw new InvalidDataException($"{source}：{name} 的使用处条件必须引用指针形参");
         return new(name, Text(f, "mangled_name"), Text(f, "declaration"), new(Text(location, "file"), location.GetProperty("line").GetInt32()),
             signature, unsupported, declaredNoReturn, op, args, result, types, Text(f, "result_type"), Strings(f, "basis"),
-            new(recognition.GetProperty("symbol").GetBoolean(), Optional(recognition, "export"), Optional(recognition, "call_graph"), Optional(recognition, "reference_shape"), recognition.TryGetProperty("import", out var import) ? import.GetString() : null));
+            new(recognition.GetProperty("symbol").GetBoolean(), Optional(recognition, "export"), Optional(recognition, "call_graph"), Optional(recognition, "reference_shape"), recognition.TryGetProperty("import", out var import) ? import.GetString() : null) { UsageConditions = conditions });
     }
     private static CType Type(JsonElement t) => Text(t, "kind") switch
     {

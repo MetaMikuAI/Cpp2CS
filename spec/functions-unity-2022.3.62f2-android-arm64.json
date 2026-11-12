@@ -1417,7 +1417,14 @@
         "call_graph": null,
         "export": null,
         "reference_shape": null,
-        "symbol": true
+        "symbol": true,
+        "usage_conditions": [
+          {
+            "basis": "codegen/il2cpp-codegen-il2cpp.h: il2cpp_codegen_initialize_runtime_metadata_inline；生成调用传入 (uintptr_t*)&元数据变量；vm/GlobalMetadata.cpp: InitializeRuntimeMetadata 解码槽初值",
+            "kind": "metadata_slot_address",
+            "parameter": 0
+          }
+        ]
       },
       "result": "operation",
       "result_type": "void *",
@@ -2008,8 +2015,8 @@
       "unsupported": []
     }
   ],
-  "generator_sha256": "a5e28eef7f3bf33ecee4598b56690e012e73adf62ea8dc3f460ce899e8a573a8",
-  "mapping_sha256": "51d63851935716a21f3951515c8a7f8ecf96061e00adbe891f28f9737dfbd0fd",
+  "generator_sha256": "a29bea3453ac7e4b84071bc32797e0e5931222d89b7c33613eb5737b233e1553",
+  "mapping_sha256": "5cdc3ee9dff0d447beaa9a3b00c6844b3327282e5864b9945d4fe79abb460892",
   "schema_version": 1,
   "shared_generator_sha256": "e0417a66cad7097804d93134398e24eac2ba67080ed6373bcaa4ed4c3d0aae48",
   "source": {

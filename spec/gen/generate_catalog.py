@@ -114,7 +114,7 @@ def generate(root, unity, target, mapping):
                 parameter_names=[a.spelling for a in parameters], parameter_types=[a.type.spelling for a in parameters],
                 result_type=c.result_type.spelling, unsupported=problems,
                 operation=e['operation'], arguments=e['arguments'], result=e['result'], basis=e['basis'],
-                recognition=dict(symbol=True, export=None, call_graph=None, reference_shape=None)))
+                recognition=dict(symbol=True, export=None, call_graph=None, reference_shape=None, **e.get('recognition', {}))))
         sources = sorted({e['header'] for e in entries['functions']} | {'codegen/il2cpp-codegen-metadata.h', 'il2cpp-object-internals.h', 'il2cpp-class-internals.h', 'il2cpp-config.h', 'il2cpp-api-types.h'})
         return dict(schema_version=1, unity_version=unity, target=dict(triple=TARGETS[target], data_model='LP64'),
                     generator_sha256=sha(Path(__file__)), shared_generator_sha256=sha(Path(__file__).with_name('generate.py')), mapping_sha256=sha(mapping), compiler='libclang 18.1.1',

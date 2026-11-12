@@ -78,6 +78,13 @@
     },
     {
       "name": "il2cpp_codegen_initialize_runtime_metadata_inline",
+      "recognition": {
+        "usage_conditions": [{
+          "kind": "metadata_slot_address",
+          "parameter": 0,
+          "basis": "codegen/il2cpp-codegen-il2cpp.h: il2cpp_codegen_initialize_runtime_metadata_inline；生成调用传入 (uintptr_t*)&元数据变量；vm/GlobalMetadata.cpp: InitializeRuntimeMetadata 解码槽初值"
+        }]
+      },
       "operation": "InitializeMetadata",
       "arguments": [
         "slot"

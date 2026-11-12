@@ -41,10 +41,11 @@ internal sealed class InputMemoryImage : IImage
 {
     private readonly byte[] bytes = new byte[4096];
     public Dictionary<ulong, PointerTarget> Pointers { get; } = [];
+    public bool Executable { get; init; }
     public ulong PreferredBase => 0x400000;
     public int PointerWidth => 8;
     public ByteOrder ByteOrder => ByteOrder.LittleEndian;
-    public ImmutableArray<ImageRange> Ranges => [new(0, (ulong)bytes.Length, StorageKind.FileContent, false, true)];
+    public ImmutableArray<ImageRange> Ranges => [new(0, (ulong)bytes.Length, StorageKind.FileContent, Executable, true)];
     public IReadOnlyList<ImageRelocation> Relocations => [];
     public ImmutableArray<ImportSymbol> Imports => [];
     public ImmutableArray<ExportSymbol> Exports { get; init; } = [];
@@ -52,8 +53,8 @@ internal sealed class InputMemoryImage : IImage
     public ImmutableArray<FunctionRange> Functions { get; init; } = [];
     public ImmutableArray<TryRegion> TryRegions { get; init; } = [];
     public ImmutableArray<string> Diagnostics => [];
-    public AddressInfo Query(ulong offset) => offset < (ulong)bytes.Length ? new(StorageKind.FileContent, (ulong)bytes.Length - offset, false, true) : new(StorageKind.Unmapped, 0, false, false);
-    public bool IsExecutable(ulong offset, ulong length = 1) => false;
+    public AddressInfo Query(ulong offset) => offset < (ulong)bytes.Length ? new(StorageKind.FileContent, (ulong)bytes.Length - offset, Executable, true) : new(StorageKind.Unmapped, 0, false, false);
+    public bool IsExecutable(ulong offset, ulong length = 1) => Executable && Query(offset).AvailableBytes >= length;
     public bool IsWritable(ulong offset, ulong length = 1) => Query(offset).AvailableBytes >= length;
     public void ReadBytes(ulong offset, Span<byte> destination) => bytes.AsSpan(checked((int)offset), destination.Length).CopyTo(destination);
     public ulong ReadUnsigned(ulong offset, int width)

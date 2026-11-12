@@ -6,6 +6,11 @@ using Cpp2CS.Recovery.Naming;
 
 namespace Cpp2CS.Pipeline;
 
+public sealed class RuntimeMetadataSlotValidator(GlobalFacts facts) : Cpp2CS.Recovery.RuntimeFunctions.IRuntimeMetadataSlotValidator
+{
+    public bool IsValid(ulong imageOffset) => MetadataTokens.ReadSlot(facts.Image, facts.Model, imageOffset) is not null;
+}
+
 public sealed class MetadataSlotDecoder(GlobalFacts facts) : IMetadataSlotDecoder
 {
     public Outcome<MetadataEntity> Decode(ulong imageOffset)

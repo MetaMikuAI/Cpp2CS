@@ -88,6 +88,10 @@ internal static class RuntimeCatalogChecks
                 catch (Exception e) when (e.GetType() == exception) { checks.True(true, "拒绝损坏目录"); }
             }
             Mutation(n => n["schema_version"] = 99, typeof(InvalidDataException));
+            Mutation(n => n["functions"]![0]!["recognition"]!["usage_conditions"] = JsonNode.Parse(
+                "[{\"kind\":\"unknown\",\"parameter\":0,\"basis\":\"无效条件\"}]"), typeof(InvalidDataException));
+            Mutation(n => n["functions"]![0]!["recognition"]!["usage_conditions"] = JsonNode.Parse(
+                "[{\"kind\":\"metadata_slot_address\",\"parameter\":-1,\"basis\":\"无效形参\"}]"), typeof(InvalidDataException));
             Mutation(n => n["schema_version"] = "unknown", typeof(InvalidDataException));
             Mutation(n => n["functions"]![0]!["operation"] = "missing", typeof(KeyNotFoundException));
             Mutation(n => n["functions"]![0]!["arguments"] = new JsonArray("missing"), typeof(InvalidDataException));

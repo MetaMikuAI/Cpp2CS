@@ -4,6 +4,9 @@ using Cpp2CS.Native;
 using Cpp2CS.Targets.Arm64;
 using System.Diagnostics;
 using Cpp2CS.Targets.Frontend;
+using Cpp2CS.Recovery.Binding;
+using Cpp2CS.Runtime.Layouts;
+using Cpp2CS.Targets.Arm64.Abi;
 
 namespace Cpp2CS.Pipeline;
 
@@ -45,6 +48,37 @@ internal static class RuntimeLocationAssembly
             foreach (var function in catalog.Functions.Where(f => f.Recognition.Import is null))
                 missingReasons[function.MangledName] = references is null ? "没有匹配版本与目标的参考形状数据"
                     : "参考形状缺失：" + (references.Missing.FirstOrDefault(m => m.Function == function.MangledName)?.Reason ?? "参考构建未提供完整形状");
+        IEnumerable<RuntimeManagedCaller> ManagedCallers(IReadOnlySet<ulong> candidates)
+        {
+            foreach (var entry in facts.CodeMap.Entries.Where(e => e.Method is not null).Select(e => e.Address).Distinct().Order())
+            {
+                var ranges = facts.FunctionsByStart[entry].ToArray();
+                if (ranges.Length != 1) throw new InvalidDataException("托管入口没有唯一函数范围，无法普查调用点。");
+                var sites = Arm64DirectCalls.ToCandidates(facts.Image, ranges[0], candidates).ToArray();
+                if (sites.Length == 0) continue;
+                yield return new(entry, sites.GroupBy(s => s.Target).ToDictionary(g => g.Key, g => g.Count()), () => Read());
+                IEnumerable<RuntimeManagedUse> Read()
+                {
+                    var body = ranges[0].HasConsistentExtent ? FunctionLifter.Lift(referenceInstructions, parts.Convention,
+                        parts.Flow, ranges[0], entry).Function : null;
+                    var calls = body?.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Trace is not null)
+                        .ToDictionary(c => c.Trace!.NativeAddress);
+                    foreach (var site in sites)
+                    {
+                        var call = calls?.GetValueOrDefault(site.Address);
+                        if (call is not null && Normalize(call.Target) != new ImageFunction(site.Target)) call = null;
+                        yield return new(site.Target, body, call);
+                    }
+                }
+            }
+        }
+        RuntimeUsageEvidence? usage = null;
+        if (references is not null && facts.Architecture == "arm64")
+        {
+            var pointer = facts.Image.PointerWidth;
+            var binder = new MethodBinder(new(new FieldLayouts(facts.Spec, pointer, pointer), pointer * 8), new Aapcs64());
+            usage = new(facts.Image, binder, new RuntimeMetadataSlotValidator(facts), ManagedCallers, RecoverySession.AnalysisJobs(facts));
+        }
         if (references is not null)
         {
             if (references.Entries.Length > 0)
@@ -53,7 +87,7 @@ internal static class RuntimeLocationAssembly
                     var ranges = facts.FunctionsByStart[entry].ToArray();
                     return ranges.Length != 1 ? null : FunctionLifter.Lift(referenceInstructions, parts.Convention,
                         parts.Flow, ranges[0], entry).Function;
-                }, Normalize, missingReasons, RecoverySession.AnalysisJobs(facts));
+                }, Normalize, missingReasons, RecoverySession.AnalysisJobs(facts), usage);
         }
         return RuntimeFunctionLocations.Locate(facts.Image, facts.Symbols, catalog, Normalize, matches, missingReasons);
     }
