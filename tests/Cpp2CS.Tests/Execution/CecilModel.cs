@@ -140,7 +140,24 @@ internal sealed partial class CecilModel
     public MethodDefinition? Body(MethodRef method, ModuleDefinition module)
     {
         var source = methodDefinitions[method.Method];
-        if (!modules.Contains(source.Module)) return null;
-        return module.GetTypes().FirstOrDefault(t => t.FullName == source.DeclaringType.FullName)?.Methods.FirstOrDefault(m => Signature(m) == Signature(source) && m.HasBody);
+        if (modules.Contains(source.Module))
+            return module.GetTypes().FirstOrDefault(t => t.FullName == source.DeclaringType.FullName)?.Methods.FirstOrDefault(m => Signature(m) == Signature(source) && m.HasBody);
+        // 外部调用保持不透明；匹配核心库的无参空构造例外，其参考 IL 自身证明没有事件或堆效果。
+        var core = module.TypeSystem.Object.Resolve().Module;
+        if (source.Module.Assembly.Name.FullName != core.Assembly.Name.FullName || source.Name != ".ctor" || source.Parameters.Count != 0) return null;
+        var candidate = core.GetTypes().FirstOrDefault(t => t.FullName == source.DeclaringType.FullName)?.Methods.FirstOrDefault(m => Signature(m) == Signature(source) && m.HasBody);
+        return candidate is not null && EmptyConstructor(candidate, []) ? candidate : null;
     }
+    private static bool EmptyConstructor(MethodDefinition method, HashSet<MethodDefinition> active)
+    {
+        if (method.IsStatic || method.Name != ".ctor" || method.Parameters.Count != 0 || !method.HasBody
+            || method.Body.ExceptionHandlers.Count != 0 || !active.Add(method)) return false;
+        var instructions = method.Body.Instructions.Where(i => i.OpCode.Code != Mono.Cecil.Cil.Code.Nop).ToArray();
+        bool empty = instructions is [{ OpCode.Code: Mono.Cecil.Cil.Code.Ret }]
+            || instructions is [{ OpCode.Code: Mono.Cecil.Cil.Code.Ldarg_0 }, { OpCode.Code: Mono.Cecil.Cil.Code.Call, Operand: MethodReference called }, { OpCode.Code: Mono.Cecil.Cil.Code.Ret }]
+                && called.DeclaringType.FullName == method.DeclaringType.BaseType?.FullName && called.Resolve() is { } parent && EmptyConstructor(parent, active);
+        active.Remove(method);
+        return empty;
+    }
+
 }

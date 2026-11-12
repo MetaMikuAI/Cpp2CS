@@ -21,20 +21,7 @@ public static class AccessorTemplates
     public static AccessorTemplateResult Read(ManagedBody body)
     {
         var missing = new AccessorTemplateResult(AccessorTemplateStatus.NotTemplate);
-        if (body.Regions.Count != 0 || body.Blocks.Count == 0) return missing;
-        var statements = new List<ManagedStatement>();
-        for (int i = 0; i < body.Blocks.Count; i++)
-        {
-            var block = body.Blocks[i];
-            if (i == body.Blocks.Count - 1) statements.AddRange(block.Statements);
-            else
-            {
-                // 只核对块序中的相邻边；不寻找或遍历控制流路径。
-                if (block.Statements.LastOrDefault() is not ManagedJump jump || jump.Edge.Copies.Count != 0
-                    || jump.Edge.Target != body.Blocks[i + 1].Address) return missing;
-                statements.AddRange(block.Statements.SkipLast(1));
-            }
-        }
+        if (MethodTemplateStatements.Read(body) is not { } statements) return missing;
         if (statements.LastOrDefault() is not ManagedReturn returned) return missing;
         var uses = statements.SelectMany(s => s is ManagedAssignment a ? [a.Value] : ManagedValues.Of(s))
             .SelectMany(ManagedValues.Walk).OfType<LocalValue>().GroupBy(v => v.Id).ToDictionary(g => g.Key, g => g.Count());

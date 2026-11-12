@@ -7,6 +7,7 @@ using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.Locations;
 using Cpp2CS.Recovery.Naming;
 using Cpp2CS.Runtime;
+using Cpp2CS.Recovery.Inlining;
 
 namespace Cpp2CS.Recovery.Lowering;
 
@@ -18,6 +19,7 @@ public sealed partial class IntegerLowering
         public TypeRef Type { get; } = type;
         public Term Result { get; } = result;
         public LocalValue? Local { get; set; }
+        public MethodRef? InlinedConstructor { get; set; }
     }
     private readonly Dictionary<CallIdentity, ObjectDefinition> allocations = [];
     private readonly Dictionary<Term, ObjectDefinition> objects = [];
@@ -43,32 +45,28 @@ public sealed partial class IntegerLowering
         objects[result.Term] = definition;
     }
 
-    /// <summary>
-    /// 分配之后的第一个事件必须是对这个对象的同类构造函数调用。IL 的 newobj 在实参求值之后才初始化类、分配并构造；
-    /// 其间若有别的事件或托管内存访问，它们与类初始化的次序就和原生代码不同。帧访问与运行时私有数据的读取不受影响。
-    /// </summary>
+    /// <summary>查询决定紧邻配对或空构造模板；下降只记录调用归属与分配处的写法。</summary>
     private void PairConstructions()
     {
+        if (calls is null) return;
+        var query = new AllocationConstructorQuery(state, locations, calls,
+            callDefinitions.ToDictionary(p => p.Key, p => new ConstructorCall(p.Value.Method, p.Value.Binding, p.Value.Virtual, p.Value.Receiver)), constructors);
         foreach (var b in function.Blocks)
             for (int i = 0; i < b.Statements.Length; i++)
             {
                 if (b.Statements[i] is not Call call || !allocations.TryGetValue(call.Identity, out var definition)) continue;
                 position = call.Trace?.NativeAddress ?? b.Trace?.NativeAddress ?? 0;
-                int j = i + 1;
-                while (j < b.Statements.Length && b.Statements[j] is not Call && PrivateAccess(b.Statements[j])) j++;
-                if (j < b.Statements.Length && b.Statements[j] is Call next && callDefinitions.TryGetValue(next.Identity, out var constructor)
-                    && !constructor.Virtual && constructor.Receiver is null && constructor.Method.Method is { Name: ".ctor", IsStatic: false }
-                    && Equals(constructor.Method.DeclaringType, definition.Type) && constructor.Binding.This is { } self
-                    && BoundTerm(self.Source, new(b.Identity, j)) is { } receiver
-                    && context.Get(state.Resolve, receiver) is { IsSuccess: true } actual
-                    && context.Get(state.Resolve, definition.Result) is { IsSuccess: true } expected && actual.Value == expected.Value)
+                var result = context.Get(query, new(new(b.Identity, i), definition.Type, definition.Result,
+                    new(method, position, definition.Type, ConstructorAnchor.Allocation)));
+                if (!result.IsSuccess || result.Value.Failure is not null)
                 {
-                    constructions.Add(next.Identity, definition);
-                    definition.Local = new(new(nextLocal++), definition.Type, types.PointerSize * 8);
+                    var why = result.IsSuccess ? result.Value.Failure! : result.Why!;
+                    Fail<object>(LoweringFailureKind.RuntimeCall, why.Message, why.Cause, why.Code);
                     continue;
                 }
-                Fail<object>(LoweringFailureKind.RuntimeCall, "对象分配之后的第一个事件不是对它的同类构造函数调用", code: "lowering.Allocation.Constructor");
-                return;
+                definition.Local = new(new(nextLocal++), definition.Type, types.PointerSize * 8);
+                if (result.Value.Call is { } paired) constructions.Add(paired, definition);
+                else definition.InlinedConstructor = result.Value.Constructor;
             }
     }
 
@@ -129,41 +127,9 @@ public sealed partial class IntegerLowering
         return new ManagedThrow(position, value);
     }
 
-    private bool PrivateAccess(Statement statement)
-    {
-        var (address, width, read) = statement switch
-        {
-            MemoryRead r => (r.Address, r.Width, true),
-            MemoryWrite w => (w.Address, w.Width, false),
-            _ => (null, 0, false),
-        };
-        if (address is null) return false;
-        var resolved = context.Get(state.Resolve, address);
-        if (!resolved.IsSuccess) return false;
-        var location = context.Get(state.Locations, new(resolved.Value, width));
-        if (!location.IsSuccess) return false;
-        if (location.Value.Region == Region.Frame) return true;
-        if (!read || locations is null) return false;
-        var managed = context.Get(locations, new(address, width));
-        return managed.IsSuccess && managed.Value.Kind == ManagedLocationKind.NotManaged;
-    }
+    private bool PrivateAccess(Statement statement) => AllocationConstructorQuery.PrivateAccess(context, state, locations, statement);
 
     private ManagedValue? ObjectValue(ObjectDefinition definition) =>
         definition == constructing ? Fail<ManagedValue>(LoweringFailureKind.RuntimeCall, "对象在自己的构造函数实参里被使用", code: "lowering.Allocation.Escape")
         : definition.Local ?? Fail<ManagedValue>(LoweringFailureKind.RuntimeCall, "对象分配没有配对的构造函数调用", code: "lowering.Allocation.Constructor");
-
-    /// <summary>
-    /// 引用类型的实例构造函数恰有一次对 this 的基类或本类构造函数调用（base(...) 或 this(...)）。
-    /// 没有唯一的直接接收者见证时保留洞，不推断多条路径上的初始化。
-    /// </summary>
-    private bool ConstructorChained(IEnumerable<ManagedBlock> blocks)
-    {
-        var owner = method.DeclaringType;
-        var parent = owner is DefinitionRef d ? d.Definition.BaseType?.Substitute(d.Arguments, []) : null;
-        var candidates = blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Where(c => !c.Invocation.Virtual
-            && c.Invocation.Method.Method is { Name: ".ctor", IsStatic: false }
-            && (Equals(c.Invocation.Method.DeclaringType, owner) || Equals(c.Invocation.Method.DeclaringType, parent))).ToArray();
-        // 非直接接收者仍可能是 this；不能靠另一条直接调用替它证明初始化。
-        return candidates is [{ Invocation.Receiver: ArgumentValue { Index: -1 } }];
-    }
 }

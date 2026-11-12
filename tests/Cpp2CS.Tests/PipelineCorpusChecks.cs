@@ -14,7 +14,8 @@ internal static class PipelineCorpusChecks
     public static int Run() => Run(true);
     public static int WithoutSymbols() => Run(false);
     public static int WithoutAccessors() => Run(true, false);
-    private static int Run(bool useSymbols, bool accessors = true)
+    public static int WithoutConstructors() => Run(true, constructors: false);
+    private static int Run(bool useSymbols, bool accessors = true, bool constructors = true)
     {
         var corpus = Environment.GetEnvironmentVariable("CPP2CS_CORPUS");
         var truth = Environment.GetEnvironmentVariable("CPP2CS_CORPUS_TRUTH");
@@ -24,10 +25,11 @@ internal static class PipelineCorpusChecks
             return 0;
         }
         var checks = new Assertions();
-        var output = Path.Combine(ArchitectureChecks.FindRoot(), "artifacts", !accessors ? "pipeline-corpus-accessors-disabled.local.output"
+        var output = Path.Combine(ArchitectureChecks.FindRoot(), "artifacts", !constructors ? "pipeline-corpus-constructors-disabled.local.output" : !accessors ? "pipeline-corpus-accessors-disabled.local.output"
             : useSymbols ? "pipeline-corpus.local.output" : "pipeline-corpus-nosymbols.local.output");
         var accessorAttempts = new ConcurrentBag<AccessorAttempt>();
-        var recovery = new IntegerRecoveryStage(enableAccessorInlining: accessors, observeAccessors: accessorAttempts.Add);
+        var constructorAttempts = new ConcurrentBag<ConstructorAttempt>();
+        var recovery = new IntegerRecoveryStage(enableAccessorInlining: accessors, observeAccessors: accessorAttempts.Add, observeConstructors: constructorAttempts.Add, enableConstructorInlining: constructors);
         var report = new RecoverySession(recovery: recovery).Run(new(
             Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.so"),
             Path.Combine(corpus, "artifacts", "il2cppOutput", "data", "Metadata", "global-metadata.dat"), output)
@@ -49,6 +51,18 @@ internal static class PipelineCorpusChecks
         }), new JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine("访问器锚点：" + anchors.Length + "；" + string.Join("，", anchors.GroupBy(a =>
             a.Answer.NoneReason?.ToString() ?? a.Answer.Failure?.Code ?? "Solved").OrderBy(g => g.Key).Select(g => g.Key + "=" + g.Count())));
+        var constructorAnchors = constructorAttempts.DistinctBy(a => (a.Access.Caller, a.Access.Position, a.Access.Type, a.Access.Anchor))
+            .OrderBy(a => RecoverySession.Identity(a.Access.Caller.Method), StringComparer.Ordinal).ThenBy(a => a.Access.Position).ToArray();
+        File.WriteAllText(Path.Combine(output, "constructors.local.json"), JsonSerializer.Serialize(constructorAnchors.Select(a => new
+        {
+            Caller = RecoverySession.Identity(a.Access.Caller.Method), Method = a.Access.Caller.Method.ToString(),
+            a.Access.Position, Type = a.Access.Type.ToString(), Anchor = a.Access.Anchor.ToString(),
+            Constructor = a.Answer.Method?.ToString(), ConstructorIdentity = a.Answer.Method is { } selected ? RecoverySession.Identity(selected.Method) : null,
+            Code = a.Answer.Failure?.Code ?? "Solved",
+        }), new JsonSerializerOptions { WriteIndented = true }));
+        foreach (var group in constructorAnchors.GroupBy(a => a.Access.Anchor).OrderBy(g => g.Key))
+            Console.WriteLine($"构造锚点 {group.Key}：{group.Count()}；" + string.Join("，", group.GroupBy(a => a.Answer.Failure?.Code ?? "Solved")
+                .OrderBy(g => g.Key).Select(g => g.Key + "=" + g.Count())));
         using var methods = InputCorpusChecks.Json(truth, "methods.json");
         using var cases = InputCorpusChecks.Json(truth, "cases.json");
         var metrics = new ConcurrentDictionary<string, MethodMetric>();
@@ -125,4 +139,10 @@ internal static class PipelineWithoutAccessorsCorpusChecks
 {
     public const string Command = "pipeline-corpus-accessors-disabled";
     public static int Run() => PipelineCorpusChecks.WithoutAccessors();
+}
+
+internal static class PipelineWithoutConstructorsCorpusChecks
+{
+    public const string Command = "pipeline-corpus-constructors-disabled";
+    public static int Run() => PipelineCorpusChecks.WithoutConstructors();
 }

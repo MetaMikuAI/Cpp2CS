@@ -13,16 +13,8 @@ public sealed class AccessorTemplateSource : IAccessorTemplateSource
 
     public AccessorTemplateSource(GlobalFacts facts, IMethodStage<CodeEntry, NativeFunction> frontend)
     {
-        var entries = facts.CodeMap.Entries.Where(e => e.Method is not null).GroupBy(e => e.Method!.Method)
-            .ToDictionary(g => g.Key, g => g.OrderBy(e => e.Kind).ThenBy(e => e.Address).ThenBy(e => e.Index).First());
-        var recovery = new IntegerRecoveryStage(enableAccessorInlining: false);
-        templates = new(method =>
-        {
-            if (!method.DeclaresCilBody || !entries.TryGetValue(method, out var entry)) return null;
-            var context = new MethodContext(method, entry, facts);
-            return frontend.Run(entry, context) is Completed<NativeFunction> lifted
-                && recovery.Run(lifted.Value, context) is Completed<ManagedBody> recovered ? recovered.Value : null;
-        });
+        var source = new MethodTemplateSource(facts, frontend, constructors: false);
+        templates = new(source.GetBody);
     }
 
     public AccessorTemplateResult Get(MethodDef method) => templates.Get(method);

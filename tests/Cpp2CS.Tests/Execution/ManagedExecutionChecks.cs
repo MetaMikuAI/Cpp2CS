@@ -108,6 +108,36 @@ internal static class ManagedExecutionChecks
         using var changed = new CompiledSource("public static class Cross { public static int Add(int x) => x + 8; }");
         a.True(CilComparison.Compare(other.Method("Cross", "Add"), same.Method("Cross", "Add")).Status == CilComparisonStatus.Match, "跨程序集一致");
         a.True(CilComparison.Compare(other.Method("Cross", "Add"), changed.Method("Cross", "Add")).Status == CilComparisonStatus.Mismatch, "跨程序集常量变化");
+        EmptyConstructorReferences(a);
         return a.Finish(Command);
     }
+    private static void EmptyConstructorReferences(Assertions checks)
+    {
+        using var source = new CompiledSource("public class Holder { }");
+        var core = source.Module.TypeSystem.Object.Resolve().Module;
+        var root = core.TypeSystem.Object.Resolve().Methods.Single(m => m.IsConstructor && !m.IsStatic && m.Parameters.Count == 0);
+        Mono.Cecil.MethodDefinition Constructor(string name, bool store)
+        {
+            var type = new Mono.Cecil.TypeDefinition("", name, Mono.Cecil.TypeAttributes.Public, core.TypeSystem.Object);
+            core.Types.Add(type);
+            var method = new Mono.Cecil.MethodDefinition(".ctor", Mono.Cecil.MethodAttributes.Public | Mono.Cecil.MethodAttributes.SpecialName
+                | Mono.Cecil.MethodAttributes.RTSpecialName, core.TypeSystem.Void);
+            type.Methods.Add(method);
+            var il = method.Body.GetILProcessor();
+            il.Emit(Mono.Cecil.Cil.OpCodes.Ldarg_0); il.Emit(Mono.Cecil.Cil.OpCodes.Call, root);
+            if (store)
+            {
+                var field = new Mono.Cecil.FieldDefinition("Value", Mono.Cecil.FieldAttributes.Public, core.TypeSystem.Int32); type.Fields.Add(field);
+                il.Emit(Mono.Cecil.Cil.OpCodes.Ldarg_0); il.Emit(Mono.Cecil.Cil.OpCodes.Ldc_I4_1); il.Emit(Mono.Cecil.Cil.OpCodes.Stfld, field);
+            }
+            il.Emit(Mono.Cecil.Cil.OpCodes.Ret);
+            return method;
+        }
+        var empty = Constructor("EmptyConstructor", false);
+        var effect = Constructor("FieldConstructor", true);
+        var model = new CecilModel(source.Module);
+        checks.True(model.Body(model.Method(empty), source.Module) == empty, "匹配核心库的空构造按参考体透明执行");
+        checks.True(model.Body(model.Method(effect), source.Module) is null, "带字段写入的外部构造保持不透明");
+    }
+
 }

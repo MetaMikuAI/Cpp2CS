@@ -40,6 +40,7 @@ public sealed partial class IntegerLowering
     private ManagedLocationQuery? locations;
     private DispatchQuery? dispatch;
     private readonly AccessorQuery? accessors;
+    private readonly ConstructorQuery? constructors;
     private readonly Dictionary<Term, ManagedValue> arguments = [];
     private readonly Dictionary<(Term Term, int Low, int Width), LocalValue> merges = [];
     private readonly Dictionary<Term, ManagedValue> values = [];
@@ -56,11 +57,12 @@ public sealed partial class IntegerLowering
 
     public IntegerLowering(NativeFunction function, MethodRef method, MethodBinder binder, ManagedTypes types,
         Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null, RuntimeSpec? spec = null, NamingFacts? names = null,
-        AccessorQuery? accessors = null)
+        AccessorQuery? accessors = null, ConstructorQuery? constructors = null)
     {
         this.function = function; this.method = method; this.binder = binder; this.types = types;
         this.calls = calls; this.spec = spec; this.names = names ?? NamingFacts.Empty;
         this.accessors = accessors;
+        this.constructors = constructors;
         state = new(effects, image: image);
         boundSources = new(state);
         context = state.CreateContext(function);
@@ -140,7 +142,13 @@ public sealed partial class IntegerLowering
                 if (native is Call call)
                 {
                     // 分配并入构造函数调用；接口查找只供分派使用，两者自己不产生语句。
-                    if (allocations.ContainsKey(call.Identity) || interfaceLookups.Contains(call.Identity)) continue;
+                    if (allocations.TryGetValue(call.Identity, out var allocation))
+                    {
+                        if (allocation.InlinedConstructor is { } constructor)
+                            statements.Add(new ManagedAssignment(position, allocation.Local!, new NewObjectValue(constructor, [], types.PointerSize * 8) { Transparent = true }));
+                        continue;
+                    }
+                    if (interfaceLookups.Contains(call.Identity)) continue;
                     var statement = LowerCall(call, new(b.Identity, i));
                     if (statement is null) return new(null, failure);
                     statements.Add(statement);
@@ -187,11 +195,27 @@ public sealed partial class IntegerLowering
             ? c with { Result = definition.Local } : s).ToArray() }).ToList();
         blocks = blocks.Select(InsertReads).ToList();
         if (failure is not null) return new(null, failure);
-        if (method.Method is { Name: ".ctor", IsStatic: false, Owner.IsValueType: false } && !ConstructorChained(blocks))
+        if (method.Method is { Name: ".ctor", IsStatic: false, Owner.IsValueType: false })
         {
-            position = 0;
-            Fail<object>(LoweringFailureKind.ConstructorInitialization, "引用类型构造函数没有唯一的直接 this 初始化调用见证");
-            return new(null, failure);
+            var initialization = constructors?.Initialization(method, blocks);
+            if (initialization?.Failure is { } why)
+            {
+                position = 0;
+                Fail<object>(LoweringFailureKind.ConstructorInitialization, why.Message, why.Cause, why.Code);
+                return new(null, failure);
+            }
+            if (initialization?.Method is { } parent)
+            {
+                var entry = blocks[0];
+                blocks[0] = entry with { Statements = new ManagedStatement[] { new ManagedCall(0,
+                    new(parent, new ArgumentValue(-1, method.DeclaringType, types.PointerSize * 8), [], false), null) { Inlined = true } }.Concat(entry.Statements).ToArray() };
+            }
+            else if (constructors is null && ConstructorQuery.InitializationWitness(method, blocks) != 1)
+            {
+                position = 0;
+                Fail<object>(LoweringFailureKind.ConstructorInitialization, "引用类型构造函数没有唯一的直接 this 初始化调用见证");
+                return new(null, failure);
+            }
         }
         var body = new ManagedBody(method, [.. blocks, .. extraBlocks]);
         CheckBody(body);

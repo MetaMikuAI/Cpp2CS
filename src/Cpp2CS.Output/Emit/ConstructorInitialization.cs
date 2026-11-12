@@ -13,7 +13,9 @@ internal static class ConstructorInitialization
         var values = new ConstructorValues(body);
         var blocks = body.Blocks.ToDictionary(b => b.Address);
         var queue = new Queue<(ulong Address, bool Initialized)>();
-        queue.Enqueue((body.Blocks[0].Address, false));
+        // 根对象没有基类；其 this 在入口已经具备合法的对象身份。
+        bool root = owner is { Assembly: "mscorlib.dll", FullName: "System.Object", BaseType: null };
+        queue.Enqueue((body.Blocks[0].Address, root));
         var visited = new HashSet<(ulong, bool)>();
         var targets = new HashSet<MethodRef>();
         var initializerStores = false;

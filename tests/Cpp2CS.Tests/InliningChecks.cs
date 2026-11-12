@@ -65,6 +65,7 @@ internal static class InliningChecks
         checks.True(Ask(f.Shared, AccessorKind.Getter).Method?.Method == staticGetter, "静态读模板采用");
         checks.True(Ask(f.Field, AccessorKind.Getter, false).Failure?.Code == "inline.Accessor.Placement", "无法保持位置时报洞");
         PlacementChecks(checks);
+        ConstructorChecks(checks);
         var extra = Body(getter, new ManagedStore(0, field, argument), new ManagedReturn(1, field));
         checks.True(AccessorTemplates.Read(extra).Status == AccessorTemplateStatus.NotTemplate, "多一条写入不是模板");
         checks.True(AccessorTemplates.Read(Body(getter, new ManagedCall(0, new(MethodRef.Open(getter), receiver, [], false), local),
@@ -129,6 +130,134 @@ internal static class InliningChecks
         checks.True(adapter.Get(getter) is { Status: AccessorTemplateStatus.Complete, Template.Kind: AccessorKind.Getter }
             && frontend.Count == 2, "模板从候选自己的原生恢复体取得");
         return checks.Finish("字段访问器内联逆");
+    }
+
+    private sealed class BodySource(Func<MethodDef, ManagedBody?> get) : IMethodTemplateSource
+    {
+        public ManagedBody? GetBody(MethodDef method) => get(method);
+    }
+
+    private static void ConstructorChecks(Assertions checks)
+    {
+        var f = new Fixture();
+        var root = f.Types.Object.Definition;
+        f.Owner.BaseType = f.Types.Object;
+        f.Caller.BaseType = f.OwnerType;
+        var objectCtor = f.Method(root, ".ctor", true, false, []);
+        var parentCtor = f.Method(f.Owner, ".ctor", true, false, []);
+        var childCtor = f.Method(f.Caller, ".ctor", true, false, []);
+        ManagedBody Body(MethodDef method, params ManagedStatement[] statements) => new(MethodRef.Open(method), [new(0, statements)]);
+        ManagedCall Base(MethodDef caller, MethodDef parent) => new(0,
+            new(MethodRef.Open(parent), new ArgumentValue(-1, MethodRef.Open(caller).DeclaringType, 64), [], false), null);
+        var bodies = new Dictionary<MethodDef, ManagedBody>
+        {
+            [objectCtor] = Body(objectCtor, new ManagedReturn(0, null)),
+            [parentCtor] = Body(parentCtor, Base(parentCtor, objectCtor), new ManagedReturn(1, null)),
+            [childCtor] = Body(childCtor, Base(childCtor, parentCtor), new ManagedReturn(1, null)),
+        };
+        ConstructorTemplates Templates() => new(new BodySource(bodies.GetValueOrDefault), f.Types);
+        var templates = Templates();
+        checks.True(templates.IsEmpty(objectCtor), "Object 构造模板为空");
+        checks.True(templates.IsEmpty(childCtor) && templates.IsEmpty(parentCtor), "两层继承递归判空");
+        bodies[parentCtor] = Body(parentCtor, Base(parentCtor, objectCtor), new ManagedStore(1,
+            new FieldValue(new ArgumentValue(-1, f.OwnerType, 64), f.Field, f.Integer, 32), new ConstantValue(1, f.Integer, 32)), new ManagedReturn(2, null));
+        checks.True(!Templates().IsEmpty(parentCtor) && !Templates().IsEmpty(childCtor), "字段初始值使本类及派生模板不为空");
+        checks.True(new ConstructorQuery(f.Types, Templates()).Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Allocation))
+            .Failure?.Code == "inline.Constructor.Template", "分配类的构造有字段初始值时报 Template");
+        checks.True(new ConstructorQuery(f.Types, new(new BodySource(_ => null), f.Types)).Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Base))
+            .Failure?.Code == "inline.Constructor.BaseTemplate", "基类构造未恢复时报 BaseTemplate");
+        bodies[parentCtor] = Body(parentCtor, new ManagedReturn(0, null));
+        checks.True(!Templates().IsEmpty(parentCtor), "有基类时裸 return 不是空模板");
+        bodies[parentCtor] = Body(parentCtor, Base(parentCtor, objectCtor), new ManagedReturn(1, null));
+        var query = new ConstructorQuery(f.Types, Templates());
+        var initialization = query.Initialization(MethodRef.Open(childCtor), [new(0, [new ManagedReturn(0, null)])]);
+        checks.True(initialization.Method?.Method == parentCtor, "锚点 A 查询选中唯一空基类构造");
+        checks.True(query.Initialization(MethodRef.Open(childCtor), [new(0, [Base(childCtor, objectCtor), new ManagedReturn(1, null)])])
+            .Failure?.Code == "lowering.ConstructorInitialization", "已有祖先构造调用时不重复补初始化");
+        var extra = f.Method(f.Owner, ".ctor", true, false, [f.Integer]);
+        checks.True(query.Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Base)).Failure?.Code == "inline.Constructor.BaseAmbiguous",
+            "基类声明两个构造时报 BaseAmbiguous");
+        checks.True(query.Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Allocation)).Failure?.Code == "inline.Constructor.Ambiguous",
+            "分配类声明两个构造时报 Ambiguous");
+        f.Owner.Methods = [parentCtor];
+        f.Owner.Methods = [extra];
+        checks.True(query.Resolve(new(MethodRef.Open(childCtor), 0, f.OwnerType, ConstructorAnchor.Base)).Failure?.Code == "inline.Constructor.BaseTemplate",
+            "唯一构造有参或不可访问时报 BaseTemplate");
+        f.Owner.Methods = [parentCtor];
+        ((List<MethodDef>)f.Program.Methods).Remove(extra);
+        // 伪造继承环也不得成为空模板。
+        f.Owner.BaseType = new DefinitionRef(f.Caller, []);
+        bodies[parentCtor] = Body(parentCtor, Base(parentCtor, childCtor), new ManagedReturn(1, null));
+        checks.True(!Templates().IsEmpty(childCtor), "构造模板继承环判为非空");
+        f.Owner.BaseType = f.Types.Object;
+        bodies[parentCtor] = Body(parentCtor, Base(parentCtor, objectCtor), new ManagedReturn(1, null));
+        query = new(f.Types, Templates());
+        var terms = new TermTable(); var head = new BlockIdentity();
+        var self = terms.Atom(new EntryAtom(new(SlotKind.Integer)), 64);
+        var native = new FunctionBuilder(terms, head, 64, new(terms.Atom(new RootAtom(AddressRoot.Frame), 64)));
+        native.Inputs.Add(new(new(SlotKind.Integer), self));
+        native.Blocks.Add(new(head, [], [], new Return([])));
+        var lowered = new IntegerLowering(native.Freeze(), MethodRef.Open(childCtor), f.Binder, f.Types, constructors: query).Run();
+        checks.True(lowered.Body?.Blocks[0].Statements is [ManagedCall { Invocation.Method.Method: var selected }, ManagedReturn] && selected == parentCtor,
+            "锚点 A 在方法体开头补基类调用");
+        var rootBody = new IntegerLowering(native.Freeze(), MethodRef.Open(objectCtor), f.Binder, f.Types, constructors: query).Run().Body;
+        checks.True(rootBody is not null, "开启机制后根对象裸 return 完整恢复");
+        using (var rootEmission = new EmissionFixture(f))
+            checks.True(rootBody is not null && rootEmission.Emitter.Emit([rootBody]).Count == 0, "根对象构造通过输出初始化检查");
+        var entries = new[] { objectCtor, parentCtor, childCtor }.Select((m, i) => new CodeEntry((ulong)(16 + 4 * i), EntryKind.Method, MethodRef.Open(m), i, null)).ToArray();
+        var map = new Registrations { CodeRegistration = 0, MetadataRegistration = 0, Entries = entries,
+            ByAddress = entries.ToDictionary(e => e.Address, e => ImmutableArray.Create(e)), Rgctx = new Dictionary<(string, uint), ImmutableArray<RgctxEntry>>(),
+            MetadataUsageSlots = [], TypePointers = new Dictionary<ulong, int>(), InvokerOf = new Dictionary<MethodDef, int>(), UsageEntities = new Dictionary<ulong, Usage>() };
+        var frontend = new TemplateFrontend(native.Freeze());
+        var adapter = new MethodTemplateSource(new GlobalFacts(new InputMemoryImage(), f.Program, map, f.Spec, "arm64"), frontend, constructors: true);
+        checks.True(new ConstructorTemplates(adapter, f.Types).IsEmpty(childCtor) && frontend.Count == 3,
+            "管线在机制开启时沿两层基类完整恢复模板");
+        Parallel.For(0, 16, _ => adapter.GetBody(childCtor));
+        checks.True(frontend.Count == 3, "构造模板完整恢复体并发取用只算一次");
+        var catalog = RuntimeFunctionCatalog.Select(f.Spec.Layout.UnityVersion, f.Spec.Layout.Triple, f.Spec.Layout.DataModel);
+        var allocation = catalog.Functions.First(op => op.Operation.Il?.Name == "NewObject" && op.Signature is not null);
+        var calls = new CallNamingQuery(f.Binder, new NamingChecks.Map([new(MethodRef.Open(parentCtor), BindingEntryKind.Ordinary)]),
+            new NamingChecks.RuntimeMap(allocation), catalog);
+        var make = f.Method(f.Caller, "Make", false, true, []); make.ReturnType = f.OwnerType;
+        foreach (var mode in new[] { "Inline", "Direct", "Deferred", "Branch", "Mixed" })
+        {
+            var t = new TermTable(); var block = new BlockIdentity(); var left = new BlockIdentity(); var right = new BlockIdentity();
+            var image = t.Atom(new RootAtom(AddressRoot.Image), 64);
+            var function = new FunctionBuilder(t, block, 64, new(t.Atom(new RootAtom(AddressRoot.Frame), 64))) { ImageBase = image };
+            var read = new ReadIdentity(); var klass = t.Atom(new ResultAtom(read), 64);
+            var id = new CallIdentity(); var result = t.Atom(new ResultAtom(id), 64);
+            var statements = new List<Statement> { new MemoryRead(read, t.Apply(new CoreOperator(CoreOperation.Add), 64, image, t.Constant(128, 64)), 64, klass),
+                new Call(id, new ImageFunction(20), [new(new(SlotKind.Integer), klass)], [new(new(SlotKind.Integer), result)]) { Trace = new(32) } };
+            Call Initialize() => new(new(), new ImageFunction(10), [new(new(SlotKind.Integer), result), new(new(SlotKind.Integer, 1), t.Constant(0, 64))], []) { Trace = new(40) };
+            if (mode == "Deferred")
+            {
+                var other = new CallIdentity();
+                statements.Add(new Call(other, new ImageFunction(20), [new(new(SlotKind.Integer), klass)], [new(new(SlotKind.Integer), t.Atom(new ResultAtom(other), 64))]));
+            }
+            if (mode is "Direct" or "Deferred") statements.Add(Initialize());
+            if (mode is "Branch" or "Mixed")
+            {
+                var condition = t.Atom(new EntryAtom(new(SlotKind.Integer)), 64); function.Inputs.Add(new(new(SlotKind.Integer), condition));
+                make.Parameters = [new("condition", f.Types.Int64, 0, null, false)];
+                function.Blocks.Add(new(block, [], [.. statements], new Branch(t.Apply(new CoreOperator(CoreOperation.Equal), 1, condition, t.Constant(0, 64)), left, right)));
+                function.Blocks.Add(new(left, [], [], new Return([new(new(SlotKind.Integer), result)])));
+                function.Blocks.Add(new(right, [], mode == "Mixed" ? [Initialize()] : [], new Return([new(new(SlotKind.Integer), result)])));
+            }
+            else { make.Parameters = []; function.Blocks.Add(new(block, [], [.. statements], new Return([new(new(SlotKind.Integer), result)]))); }
+            var evidence = NamingFacts.Empty with { Slots = NamingFacts.Empty.Slots.Add(128, Outcome<MetadataEntity>.Success(new ClassEntity(f.OwnerType))) };
+            var selectedQuery = mode == "Direct" ? new ConstructorQuery(f.Types, new(new BodySource(_ => null), f.Types)) : query;
+            var body = new IntegerLowering(function.Freeze(), MethodRef.Open(make), f.Binder, f.Types, calls: calls, spec: f.Spec, names: evidence, constructors: selectedQuery).Run();
+            if (mode is "Deferred" or "Mixed") checks.True(body.Failure?.Reason.Code == "lowering.Allocation.Deferred", "延迟或部分路径显式构造保留洞：" + mode);
+            else
+            {
+                var created = body.Body?.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>().SingleOrDefault(a => a.Value is NewObjectValue);
+                checks.True(created is { Value: NewObjectValue { Constructor.Method: var ctor } } && ctor == parentCtor
+                    && created.Address == (mode == "Direct" ? 40UL : 32UL),
+                    "分配处 newobj 或原有紧邻配对：" + mode + " " + body.Failure);
+                using var emission = new EmissionFixture(f);
+                checks.True(body.Body is { } complete && emission.Emitter.Emit([complete]).Count == 0, "构造调用通过输出栈检查：" + mode);
+            }
+        }
     }
 
     private static void PlacementChecks(Assertions checks)
@@ -206,7 +335,8 @@ internal static class InliningChecks
         public MethodDef Method(TypeDef owner, string name, bool write, bool statics, TypeRef[]? parameters = null, bool virtualMethod = false)
         {
             var method = new MethodDef { Index = methods.Count, Owner = owner, Name = name, Token = (uint)(0x06000001 + methods.Count),
-                Attributes = MethodAttributes.Public | (statics ? MethodAttributes.Static : 0) | (virtualMethod ? MethodAttributes.Virtual : 0), ImplAttributes = 0, Slot = -1,
+                Attributes = MethodAttributes.Public | (statics ? MethodAttributes.Static : 0) | (virtualMethod ? MethodAttributes.Virtual : 0)
+                    | (name == ".ctor" ? MethodAttributes.SpecialName | MethodAttributes.RTSpecialName : 0), ImplAttributes = 0, Slot = -1,
                 ReturnType = write ? Void : Integer, Parameters = (parameters ?? (write ? [Integer] : [])).Select(t => new ParameterDef("value", t, 0, null, false)).ToArray() };
             methods.Add(method); owner.Methods = [.. owner.Methods, method]; return method;
         }
