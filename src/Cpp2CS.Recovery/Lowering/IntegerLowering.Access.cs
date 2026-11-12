@@ -207,12 +207,20 @@ public sealed partial class IntegerLowering
                 _ => ((FieldRef?)null, (TypeRef?)null),
             };
             if (field is null || ManagedAccess.Field(types, method, field, receiver)) continue;
-            bool placed = ReferenceEquals(value, storage) && !ManagedValues.Children(storage).SelectMany(ManagedValues.Walk)
-                .Any(v => v is FieldValue or StaticFieldValue or AddressValue);
-            if (placed && read is not null)
-                placed = context.Get(accessors.ReadPlacement, new(read.Read.Identity,
-                    readDefinitions.Where(p => ReferenceEquals(p.Value, read)).Select(p => p.Key).ToArray())) is { IsSuccess: true, Value: true };
-            var answer = accessors.Resolve(new(method, position, field, receiver, write ? AccessorKind.Setter : AccessorKind.Getter, placed));
+            Reason? placementFailure = !ReferenceEquals(value, storage)
+                ? new("inline.Accessor.Placement.NestedAccess", "不可访问字段只是复合访问的内部位置")
+                : ManagedValues.Children(storage).SelectMany(ManagedValues.Walk).Any(v => v is FieldValue or StaticFieldValue
+                    or AddressValue { Target: not (LocalValue or ArgumentValue) })
+                    ? new("inline.Accessor.Placement.Receiver", "接收者仍含字段访问或复合位置的取地址，不能保持单次访问的位置") : null;
+            if (placementFailure is null && read is not null)
+            {
+                var placement = context.Get(accessors.ReadPlacement, new(read.Read.Identity,
+                    readDefinitions.Where(p => ReferenceEquals(p.Value, read)).Select(p => p.Key).ToArray()));
+                if (!placement.IsSuccess || !placement.Value)
+                    placementFailure = new("inline.Accessor.Placement.ReadDominance", "原读取未能证明支配全部同值读取", placement.Why);
+            }
+            var answer = accessors.Resolve(new(method, position, field, receiver, write ? AccessorKind.Setter : AccessorKind.Getter,
+                placementFailure is null, placementFailure));
             if (answer.Failure is { } why) Fail<object>(LoweringFailureKind.UnsupportedType, why.Message, why.Cause, why.Code);
             return answer.Method;
         }
@@ -222,7 +230,9 @@ public sealed partial class IntegerLowering
     private static ManagedInvocation AccessorInvocation(MethodRef accessor, ManagedValue storage, IReadOnlyList<ManagedValue> arguments)
     {
         var receiver = (storage as FieldValue)?.Receiver;
-        return new(accessor, receiver, arguments, receiver is not null && receiver is not ArgumentValue { Index: -1 });
+        // 值类型接收者已是托管地址，直接调用保持该存储；引用接收者在原读取处判空。
+        return new(accessor, receiver, arguments, receiver is not null && !accessor.Method.Owner.IsValueType
+            && receiver is not ArgumentValue { Index: -1 });
     }
     private ManagedValue? Access(Term address, int width, bool write = false, TypeRef? expectedType = null)
     {

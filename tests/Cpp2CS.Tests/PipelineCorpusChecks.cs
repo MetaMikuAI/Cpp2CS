@@ -45,12 +45,22 @@ internal static class PipelineCorpusChecks
         File.WriteAllText(Path.Combine(output, "accessors.local.json"), JsonSerializer.Serialize(anchors.Select(a => new
         {
             Caller = RecoverySession.Identity(a.Access.Caller.Method), Method = a.Access.Caller.Method.ToString(),
-            a.Access.Position, Field = a.Access.Field.ToString(), Kind = a.Access.Kind.ToString(),
+            a.Access.Position, Generic = a.Access.Field.Field.Owner.GenericParameters.Count != 0, Field = a.Access.Field.ToString(), Kind = a.Access.Kind.ToString(),
             Accessor = a.Answer.Method?.ToString(), AccessorIdentity = a.Answer.Method is { } selected ? RecoverySession.Identity(selected.Method) : null,
             Code = a.Answer.Failure?.Code ?? "Solved", None = a.Answer.NoneReason?.ToString(), a.Answer.Matches,
+            Placement = a.Answer.Failure?.Cause?.Code,
+            IncompleteCandidates = a.Answer.IncompleteCandidates.Select(candidate => new
+            {
+                Method = RecoverySession.Identity(candidate.Method), Name = candidate.Method.ToString(),
+                Code = candidate.Failure?.Code, Message = candidate.Failure?.Message,
+            }),
         }), new JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine("访问器锚点：" + anchors.Length + "；" + string.Join("，", anchors.GroupBy(a =>
             a.Answer.NoneReason?.ToString() ?? a.Answer.Failure?.Code ?? "Solved").OrderBy(g => g.Key).Select(g => g.Key + "=" + g.Count())));
+        var genericAnchors = anchors.Where(a => a.Access.Field.Field.Owner.GenericParameters.Count != 0).ToArray();
+        Console.WriteLine("泛型访问器锚点：" + genericAnchors.Length + "；" + string.Join("，", genericAnchors.GroupBy(a =>
+            a.Answer.NoneReason?.ToString() ?? a.Answer.Failure?.Cause?.Code ?? a.Answer.Failure?.Code ?? "Solved")
+            .OrderBy(g => g.Key).Select(g => g.Key + "=" + g.Count())));
         var constructorAnchors = constructorAttempts.DistinctBy(a => (a.Access.Caller, a.Access.Position, a.Access.Type, a.Access.Anchor))
             .OrderBy(a => RecoverySession.Identity(a.Access.Caller.Method), StringComparer.Ordinal).ThenBy(a => a.Access.Position).ToArray();
         File.WriteAllText(Path.Combine(output, "constructors.local.json"), JsonSerializer.Serialize(constructorAnchors.Select(a => new

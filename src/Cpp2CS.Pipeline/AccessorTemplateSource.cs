@@ -10,12 +10,17 @@ namespace Cpp2CS.Pipeline;
 public sealed class AccessorTemplateSource : IAccessorTemplateSource
 {
     private readonly CachedAccessorTemplates templates;
+    private readonly MethodTemplateSource source;
 
     public AccessorTemplateSource(GlobalFacts facts, IMethodStage<CodeEntry, NativeFunction> frontend)
     {
-        var source = new MethodTemplateSource(facts, frontend, constructors: false);
+        source = new MethodTemplateSource(facts, frontend, constructors: false);
         templates = new(source.GetBody);
     }
 
-    public AccessorTemplateResult Get(MethodDef method) => templates.Get(method);
+    public AccessorTemplateResult Get(MethodDef method)
+    {
+        var result = templates.Get(method);
+        return result.Status == AccessorTemplateStatus.Incomplete ? result with { Failure = source.GetFailure(method) } : result;
+    }
 }

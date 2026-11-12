@@ -18,7 +18,7 @@ using Cpp2CS.Targets.Arm64.Abi;
 
 namespace Cpp2CS.Tests;
 
-internal static class InliningChecks
+internal static partial class InliningChecks
 {
     public const string Command = "inlining";
     public static int Run()
@@ -65,6 +65,8 @@ internal static class InliningChecks
         checks.True(Ask(f.Shared, AccessorKind.Getter).Method?.Method == staticGetter, "静态读模板采用");
         checks.True(Ask(f.Field, AccessorKind.Getter, false).Failure?.Code == "inline.Accessor.Placement", "无法保持位置时报洞");
         PlacementChecks(checks);
+        LocalAccessorChecks(checks);
+        GenericAccessorChecks(checks);
         ConstructorChecks(checks);
         var extra = Body(getter, new ManagedStore(0, field, argument), new ManagedReturn(1, field));
         checks.True(AccessorTemplates.Read(extra).Status == AccessorTemplateStatus.NotTemplate, "多一条写入不是模板");
@@ -85,11 +87,8 @@ internal static class InliningChecks
         f.Owner.Methods = [virtualGetter];
         checks.True(Ask(f.Field, AccessorKind.Getter).NoneReason == AccessorNoneReason.NoCandidates, "虚方法不进候选");
         var generic = new GenericParameterDef { Name = "T", Position = 0, Attributes = 0 };
-        f.Owner.GenericParameters = [generic];
-        checks.True(Ask(f.Field, AccessorKind.Getter).NoneReason == AccessorNoneReason.Generic, "泛型类型不进候选");
-        f.Owner.GenericParameters = [];
         other.GenericParameters = [generic]; f.Owner.Methods = [other];
-        checks.True(Ask(f.Field, AccessorKind.Getter).NoneReason == AccessorNoneReason.Generic, "泛型方法不进候选");
+        checks.True(Ask(f.Field, AccessorKind.Getter).NoneReason == AccessorNoneReason.GenericMethod, "泛型方法不进候选");
         other.GenericParameters = []; f.Owner.Methods = [other];
         checks.True(Ask(f.Field, AccessorKind.Getter).NoneReason == AccessorNoneReason.Incomplete, "未完整恢复单列原因");
         bodies[other] = Body(other, new ManagedReturn(0, new ConstantValue(3, f.Integer, 32)));
@@ -313,7 +312,7 @@ internal static class InliningChecks
         public ManagedTypes Types { get; }
         public MethodBinder Binder { get; }
         public CallNamingQuery Calls { get; }
-        public Fixture()
+        public Fixture(bool generic = false, bool genericField = false, bool valueOwner = false)
         {
             TypeDef Define(string name, string ns = "", bool value = false) { var type = new TypeDef { Index = definitions.Count,
                 Assembly = ns == "System" ? "mscorlib.dll" : "InliningChecks.dll", Namespace = ns, Name = name, Token = (uint)(0x02000001 + definitions.Count),
@@ -321,8 +320,10 @@ internal static class InliningChecks
             foreach (var name in new[] { "Object", "String", "Boolean", "Char", "SByte", "Byte", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Single", "Double", "IntPtr", "UIntPtr", "RuntimeTypeHandle", "RuntimeFieldHandle", "RuntimeMethodHandle", "TypedReference", "Void" })
                 Define(name, "System", name is not ("Object" or "String"));
             Integer = new DefinitionRef(definitions.Single(t => t.Name == "Int32"), []); Void = new DefinitionRef(definitions.Single(t => t.Name == "Void"), []);
-            Owner = Define("Owner"); Caller = Define("Caller"); OwnerType = new(Owner, []);
-            var field = new FieldDef { Index = 0, Owner = Owner, Name = "Value", Type = Integer, Attributes = FieldAttributes.Private, Offset = 16, Token = 0x04000001 };
+            Owner = Define("Owner", value: valueOwner); Caller = Define("Caller");
+            if (generic) Owner.GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }];
+            OwnerType = new(Owner, Owner.GenericParameters.Select(p => (TypeRef)new GenericParameterRef(p.Name, false, p.Position) { Parameter = p }).ToArray());
+            var field = new FieldDef { Index = 0, Owner = Owner, Name = "Value", Type = genericField ? OwnerType.Arguments[0] : Integer, Attributes = FieldAttributes.Private, Offset = 16, Token = 0x04000001 };
             var shared = new FieldDef { Index = 1, Owner = Owner, Name = "Shared", Type = Integer, Attributes = FieldAttributes.Private | FieldAttributes.Static, Offset = 0, Token = 0x04000002 };
             Owner.Fields = [field, shared]; Field = new(field, OwnerType); Shared = new(shared, OwnerType);
             Program = new() { MetadataVersion = 31, Types = definitions, Methods = methods, Fields = [field, shared], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
@@ -340,7 +341,7 @@ internal static class InliningChecks
                 ReturnType = write ? Void : Integer, Parameters = (parameters ?? (write ? [Integer] : [])).Select(t => new ParameterDef("value", t, 0, null, false)).ToArray() };
             methods.Add(method); owner.Methods = [.. owner.Methods, method]; return method;
         }
-        public (NativeFunction Function, NamingFacts Names) Function(FieldRef field, bool write, bool preserve = false)
+        public (NativeFunction Function, NamingFacts Names) Function(FieldRef field, bool write, bool preserve = false, int width = 32)
         {
             var terms = new TermTable(); var block = new BlockIdentity();
             var builder = new FunctionBuilder(terms, block, 64, new(terms.Atom(new RootAtom(AddressRoot.Frame), 64)));
@@ -356,10 +357,10 @@ internal static class InliningChecks
                 names = names with { Slots = ImmutableDictionary<ulong, Outcome<MetadataEntity>>.Empty.Add(256, Outcome<MetadataEntity>.Success(new ClassEntity(OwnerType))) };
             }
             var address = Add(root, field.Field.Offset);
-            if (write) statements.Add(new MemoryWrite(new(), address, 32, terms.Slice(input, 0, 32)));
-            var result = write ? terms.Constant(0, 32) : Read(address, 32);
+            if (write) statements.Add(new MemoryWrite(new(), address, width, terms.Slice(input, 0, width)));
+            var result = write ? terms.Constant(0, width) : Read(address, width);
             if (preserve) statements.Add(new MemoryWrite(new(), address, 32, terms.Constant(9, 32)));
-            builder.Blocks.Add(new(block, [], statements.ToImmutableArray(), new Return(write ? [] : [new(new(SlotKind.Integer), terms.Concat(result, terms.Constant(0, 32)))])));
+            builder.Blocks.Add(new(block, [], statements.ToImmutableArray(), new Return(write ? [] : [new(new(SlotKind.Integer), result.Width == 64 ? result : terms.Concat(result, terms.Constant(0, 64 - result.Width)))])));
             return (builder.Freeze(), names);
         }
     }

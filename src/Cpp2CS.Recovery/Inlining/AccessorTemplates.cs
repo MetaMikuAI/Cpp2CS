@@ -1,13 +1,14 @@
 using System.Collections.Concurrent;
 using Cpp2CS.Managed;
 using Cpp2CS.Model;
+using Cpp2CS.Native.Terms;
 
 namespace Cpp2CS.Recovery.Inlining;
 
 public enum AccessorKind { Getter, Setter }
 public sealed record AccessorTemplate(AccessorKind Kind, FieldRef Field);
 public enum AccessorTemplateStatus { Complete, Incomplete, NotTemplate }
-public sealed record AccessorTemplateResult(AccessorTemplateStatus Status, AccessorTemplate? Template = null);
+public sealed record AccessorTemplateResult(AccessorTemplateStatus Status, AccessorTemplate? Template = null, Reason? Failure = null);
 
 /// <summary>只提供关闭内联逆后完整恢复的方法体摘要；实现须按方法缓存并可并发取用。</summary>
 public interface IAccessorTemplateSource
