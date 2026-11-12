@@ -23,6 +23,7 @@ public sealed class CheckQueries
     internal readonly CallNamingQuery Calls;
     internal readonly ManagedLocationQuery Locations;
     internal readonly Query<CallIdentity, Term?>? DispatchReceiver;
+    internal ManagedCallAddressQuery Addresses { get; }
     public CheckPointQuery Points { get; }
     public ThrowOnlyQuery ThrowOnly { get; }
     public ConditionalCheckQuery Checks { get; }
@@ -32,6 +33,7 @@ public sealed class CheckQueries
     public CheckQueries(StateQueries state, CallNamingQuery calls, ManagedLocationQuery locations, Query<CallIdentity, Term?>? dispatchReceiver = null)
     {
         State = state; Calls = calls; Locations = locations; DispatchReceiver = dispatchReceiver;
+        Addresses = new(state, calls, locations);
         Points = new(this);
         Events = new((c, p) => Stop(c, p, false));
         AccessFrontier = new((c, p) => Stop(c, p, true));
@@ -73,6 +75,8 @@ public sealed class CheckPointQuery(CheckQueries q) : Query<Point, CheckPoint>
         {
             var named = c.Get(q.Calls, call.Identity); if (!named.IsSuccess) return named.Propagate<CheckPoint>();
             observable = named.Value.Operation is not { Observation: RuntimeObservation.Unobservable };
+            var addresses = c.Get(q.Addresses, call.Identity); if (!addresses.IsSuccess) return addresses.Propagate<CheckPoint>();
+            views = addresses.Value;
             if (q.DispatchReceiver is { } dispatch)
             {
                 var r = c.Get(dispatch, call.Identity); if (!r.IsSuccess) return r.Propagate<CheckPoint>();

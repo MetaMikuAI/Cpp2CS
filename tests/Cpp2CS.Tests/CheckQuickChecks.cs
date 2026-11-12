@@ -45,7 +45,7 @@ internal static class CheckQuickChecks
         owner.Fields = [new FieldDef { Index=0, Owner=owner, Name="Value", Type=integer, Offset=(int)spec.Layout.ObjectHeaderSize, Attributes=FieldAttributes.Public }];
         var binder = new MethodBinder(new(layouts), new Aapcs64());
         var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
-        void Check(string operation, bool barrier, bool expected, bool recognized = true)
+        void Check(string operation, bool barrier, bool expected, bool recognized = true, bool addressUse = false, bool firstDifferent = false)
         {
             var t = new TermTable(); var start = new BlockIdentity(); var good = new BlockIdentity(); var bad = new BlockIdentity();
             var x = t.Atom(new EntryAtom(new(SlotKind.Integer)), 64); var index = t.Atom(new EntryAtom(new(SlotKind.Integer, 1)), 64);
@@ -73,17 +73,34 @@ internal static class CheckQuickChecks
             {
                 var address = Add(x,bounds ? spec.Layout.ArrayDataStart : spec.Layout.ObjectHeaderSize);
                 if(bounds) address = t.Apply(new CoreOperator(CoreOperation.Add),64,address,t.Apply(new CoreOperator(CoreOperation.Multiply),64,index,t.Constant(8,64)));
-                var id=new ReadIdentity(); result=t.Atom(new ResultAtom(id),64); body.Add(new MemoryRead(id,address,64,result));
+                if (addressUse)
+                {
+                    body.Add(new Call(new(), new ImageFunction(10), firstDifferent
+                        ? [new(new(SlotKind.Integer), Add(address, 8)), new(new(SlotKind.Integer, 1), address), new(new(SlotKind.Integer, 2), t.Constant(0, 64))]
+                        : [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), t.Constant(0, 64))], []));
+                    result = t.Constant(0, 64);
+                }
+                else { var id=new ReadIdentity(); result=t.Atom(new ResultAtom(id),64); body.Add(new MemoryRead(id,address,64,result)); }
             }
             f.Blocks.Add(new(good,[],[..body],new Return([new(new(SlotKind.Integer),result)])));
             f.Blocks.Add(new(bad,[],[new Call(new(),new ImageFunction(1),[],[],true)],new Unreachable()));
-            var calls = new CallNamingQuery(binder,new NamingChecks.Map([]),new RuntimeMap(catalog.Functions.First(f=>f.Operation.Name==operation)),catalog);
+            var target = new MethodRef(new MethodDef { Index=1, Owner=owner, Name="Take", Token=0,
+                Attributes=MethodAttributes.Public | MethodAttributes.Static, ImplAttributes=0, Slot=-1,
+                ReturnType=new DefinitionRef(new TypeDef { Index=2, Assembly="mscorlib.dll", Namespace="System", Name="Void", Token=0,
+                    Attributes=TypeAttributes.Public, IsValueType=true, IsEnum=false },[]),
+                Parameters=firstDifferent ? [new("first",new ByRefRef(integer),0,null,false),new("second",new ByRefRef(integer),0,null,false)] : [new("value",new ByRefRef(integer),0,null,false)] },[],[]);
+            var calls = new CallNamingQuery(binder,new NamingChecks.Map(addressUse ? [new(target, BindingEntryKind.Ordinary)] : []),new RuntimeMap(catalog.Functions.First(f=>f.Operation.Name==operation)),catalog);
             var state = new StateQueries(); var names = new ValueNamingQuery(state,calls,NamingFacts.Empty,spec,binder,binder.Entry(method,BindingEntryKind.Ordinary).Value);
             var locations = new ManagedLocationQuery(state,names,layouts,spec); var checks = new CheckQueries(state,calls,locations);
             var r = locations.CreateContext(f.Freeze()).Get(checks.Checks,new(start,bad));
             a.True(r.IsSuccess && (recognized ? r.Value is { } check && check.CanAbsorb==expected : r.Value is null), $"{operation} barrier={barrier}: {r.Why} { (r.IsSuccess ? r.Value?.ExplicitReason : null)}");
         }
         Check("ThrowNullReference",false,true); Check("ThrowNullReference",true,false); Check("ThrowBounds",false,true); Check("ThrowDivideByZero",false,true); Check("ThrowManaged",false,false,false);
+        Check("ThrowNullReference", false, true, addressUse: true);
+        Check("ThrowNullReference", true, false, addressUse: true);
+        Check("ThrowBounds", false, true, addressUse: true);
+        Check("ThrowBounds", true, false, addressUse: true);
+        Check("ThrowBounds", false, false, addressUse: true, firstDifferent: true);
         return a.Finish("事件前沿与条件抛出");
     }
 }

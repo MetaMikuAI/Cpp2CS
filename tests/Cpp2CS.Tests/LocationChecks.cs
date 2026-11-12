@@ -31,7 +31,7 @@ internal static class LocationChecks
         var binder=new MethodBinder(new(layouts),new Aapcs64());
         var catalog=RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion,spec.Layout.Triple,spec.Layout.DataModel);
         var calls=new CallNamingQuery(binder,new NamingChecks.Map([]),new NamingChecks.RuntimeMap(),catalog);
-        void Check(TypeRef receiver, long offset, int width, FieldDef? expected, ManagedLocationKind kind, bool array=false, bool instance=false, bool statics=false)
+        void Check(TypeRef receiver, long offset, int width, FieldDef? expected, ManagedLocationKind kind, bool array=false, bool instance=false, bool statics=false, bool addressRoot=false)
         {
             var t=new TermTable(); var block=new BlockIdentity(); var frame=t.Atom(new RootAtom(AddressRoot.Frame),64); var image=t.Atom(new RootAtom(AddressRoot.Image),64);
             var root=t.Atom(new EntryAtom(new(SlotKind.Integer)),64);
@@ -55,7 +55,14 @@ internal static class LocationChecks
             }
             function.Blocks.Add(new(block,[],statements.ToImmutableArray(),new Return([])));
             var f=function.Freeze(); var state=new StateQueries(); var names=new ValueNamingQuery(state,calls,facts,spec,binder,binder.Entry(method,BindingEntryKind.Ordinary).Value);
-            var query=new ManagedLocationQuery(state,names,layouts,spec); var result=query.CreateContext(f).Get(query,new(address,width));
+            var query=new ManagedLocationQuery(state,names,layouts,spec); var context=query.CreateContext(f); var result=context.Get(query,new(address,width));
+            if(addressRoot)
+            {
+                var taken=context.Get(query.Addresses,address);
+                a.True(taken.IsSuccess && taken.Value.Any(v=>v.Path.IsEmpty && v.Type.Equals(((ArrayRef)receiver).Element)),"结构体元素起点可取址，不要求读取宽度覆盖整体");
+                var reverse=query.CreateContext(f); reverse.Get(query.Addresses,address);
+                a.True(reverse.Get(query,new(address,width)).Value.Kind==kind,"先查询地址不改变读取视图");
+            }
             a.True(result.IsSuccess && result.Value.Kind==kind && (expected is null || result.Value.Views.Any(v=>v.Path.LastOrDefault()?.Field==expected)), $"{receiver} + {offset} => {kind} {expected}");
             if(array) a.True(result.Value.Views[0].Index==function.Inputs[1].Value,"移位还原为元素下标");
         }
@@ -67,6 +74,8 @@ internal static class LocationChecks
         Check(new ArrayRef(integer,1),spec.Layout.Field("Il2CppArray","max_length").ByteOffset,32,null,ManagedLocationKind.ArrayLength);
         Check(new DefinitionRef(owner,[]),0,32,global,ManagedLocationKind.StaticField,statics:true);
         Check(new DefinitionRef(owner,[]),header+30,16,null,ManagedLocationKind.Unknown);
+        Check(new ByRefRef(new DefinitionRef(outer,[])),0,8,null,ManagedLocationKind.Unknown);
+        Check(new ArrayRef(new DefinitionRef(outer,[]),1),spec.Layout.ArrayDataStart,8,null,ManagedLocationKind.Unknown,addressRoot:true);
         void Cycle(bool conflict)
         {
             var node=Type("Node",size:header+16); var nodeType=new DefinitionRef(node,[]);

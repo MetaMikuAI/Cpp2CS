@@ -29,12 +29,18 @@ public sealed partial class IntegerLowering
     private readonly Dictionary<Term, CallDefinition> callResults = [];
     private readonly Dictionary<ManagedCall, CallDefinition> callStatements = new(ReferenceEqualityComparer.Instance);
 
-    private void PrepareCall(Call call)
+    private void PrepareCall(Call call, Point point)
     {
         if (calls is null) { Fail<object>(LoweringFailureKind.UnknownCall, "没有调用分类来源"); return; }
         var classified = context.Get(calls, call.Identity);
         if (!classified.IsSuccess) { Fail<object>(LoweringFailureKind.Call, "调用分类失败", classified.Why); return; }
         var c = classified.Value;
+        if (c.Kind is CallKind.Runtime or CallKind.System && c.Binding is { } external)
+            foreach (var bound in external.Arguments)
+            {
+                var input = context.Get(boundSources, new(bound.Source, point));
+                if (input.IsSuccess && RejectAddressUse([input.Value], "运行时或系统函数的实参")) return;
+            }
         if (call.Unwind is not null) { Fail<object>(LoweringFailureKind.Exception, "调用的异常边尚未下降"); return; }
         if (c.Kind == CallKind.Runtime && c.Operation is { Result.Kind: RuntimeValueKind.InvokeData })
         { interfaceLookups.Add(call.Identity); return; }
@@ -153,7 +159,9 @@ public sealed partial class IntegerLowering
         constructing = null;
         if (created is not null) return new ManagedAssignment(position, created.Local!, new NewObjectValue(d.Method, args, types.PointerSize * 8));
         TypeRef receiverType = d.Method.Method.Owner.IsValueType ? new ByRefRef(d.Method.DeclaringType) : d.Method.DeclaringType;
-        var receiver = d.Receiver is { } target ? Value(target) : d.Binding.This is { } self ? CallArgument(self, receiverType, point) : null;
+        var receiver = d.Receiver is { } target
+            ? receiverType is ByRefRef byref ? AddressArgument(target, byref.Element) : Value(target)
+            : d.Binding.This is { } self ? CallArgument(self, receiverType, point) : null;
         if (receiver is not null) receiver = Coerce(receiver, receiverType);
         if (d.Binding.This is not null && receiver is null) return null;
         var statement = new ManagedCall(position, new(d.Method, receiver, args, d.Virtual), null);
@@ -164,8 +172,12 @@ public sealed partial class IntegerLowering
     private ManagedValue? CallArgument(BoundValue bound, TypeRef type, Point point)
     {
         if (types.Kind(type) == TypeKind.Struct)
+        {
+            var bits = context.Get(boundSources, new(bound.Source, point));
+            if (bits.IsSuccess && RejectAddressUse([bits.Value], "非按引用的结构体形参")) return null;
             return bound.Source is { } source ? StructValue(source, type, point)
                 : Fail<ManagedValue>(LoweringFailureKind.Binding, "结构体实参没有绑定来源", code: "lowering.Struct.Binding");
+        }
         var term = BoundTerm(bound.Source, point);
         if (term is null) return null;
         var resolved = context.Get(state.Resolve, term);
@@ -177,6 +189,8 @@ public sealed partial class IntegerLowering
             if (failure is { StructType: null } missing) failure = missing with { StructType = element };
             return null;
         }
+        if (type is ByRefRef addressType) return AddressArgument(resolved.Value, addressType.Element);
+        if (RejectAddressUse([resolved.Value], type is PointerRef ? "非托管指针形参" : "非按引用形参")) return null;
         if (ReferenceType(type))
         {
             var reference = Value(resolved.Value);

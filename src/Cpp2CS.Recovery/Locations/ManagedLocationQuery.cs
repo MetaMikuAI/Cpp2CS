@@ -25,10 +25,11 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
     internal readonly ITypeLayouts Layouts;
     private readonly RuntimeSpec spec;
     public LocationTypeQuery Types { get; }
+    public ManagedAddressQuery Addresses { get; }
     internal ManagedReadTypeQuery ReadTypes { get; }
     public ManagedLocationQuery(StateQueries state, ValueNamingQuery names, ITypeLayouts layouts, RuntimeSpec spec)
     {
-        State = state; Names = names; Layouts = layouts; this.spec = spec; Types = new(this); ReadTypes = new(this);
+        State = state; Names = names; Layouts = layouts; this.spec = spec; Types = new(this); ReadTypes = new(this); Addresses = new(this);
         names.UseLocations(this);
     }
     public QueryContext CreateContext(NativeFunction function) => new(function, null, State.Group,
@@ -37,7 +38,8 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
     internal static LocationResult Pending { get; } = new(ManagedLocationKind.Unknown, [], new("location.pending", "循环尚无定位依据。"));
     internal static Outcome<LocationResult> Unknown(string code, string text) => Outcome<LocationResult>.Success(new(ManagedLocationKind.Unknown, [], new("location." + code, text)));
     private static Outcome<LocationResult> NotManaged(string reason) => Outcome<LocationResult>.Success(new(ManagedLocationKind.NotManaged, [], new("location.not-managed", reason)));
-    public override Outcome<LocationResult> Compute(QueryContext c, AddressRequest key)
+    public override Outcome<LocationResult> Compute(QueryContext c, AddressRequest key) => Locate(c, key, false);
+    internal Outcome<LocationResult> Locate(QueryContext c, AddressRequest key, bool addressView)
     {
         var resolved = c.Get(State.Resolve, key.Address); if (!resolved.IsSuccess) return resolved.Propagate<LocationResult>();
         var address = resolved.Value;
@@ -77,7 +79,7 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
                     return Unknown("thread-static", "线程静态字段尚不定位。");
                 if (field.Field == spec.Layout.Field("Il2CppClass", "static_fields").Path &&
                     field.Owner is EntityName { Entity: ClassEntity { Type: DefinitionRef owner } })
-                    return terms.Count == 1 ? Fields(root, owner, offset, key.Width, true, false, field) : Unknown("index", "静态字段偏移不是常量。");
+                    return terms.Count == 1 ? Fields(root, owner, offset, key.Width, true, false, field, addressView: addressView) : Unknown("index", "静态字段偏移不是常量。");
             }
             var typed = c.Get(Types, root);
             if (!typed.IsSuccess)
@@ -118,7 +120,7 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
                 }
                 if (remainder * 8 + key.Width > size.Value * 8) return Unknown("cross-field", "访问跨越数组元素。");
                 if (array.Element is DefinitionRef { Definition.IsValueType: true } element && ManagedTypes.PrimitiveName(element) is null && !element.Definition.IsEnum)
-                    return Fields(root, element, remainder, key.Width, false, true, value.Basis, index, array.Element);
+                    return Fields(root, element, remainder, key.Width, false, true, value.Basis, index, array.Element, addressView);
                 return Yes(new(ManagedLocationKind.ArrayElement, root, array.Element, [], remainder, key.Width, index, value.Basis, array.Element));
             }
             if (type is ByRefRef cell && (ManagedTypes.IsReferenceType(cell.Element) || ManagedTypes.PrimitiveName(ManagedTypes.Underlying(cell.Element)) is not null))
@@ -136,7 +138,7 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
                 if (terms.Count != 1) return Unknown("index", "实例字段偏移不是常量。");
                 if (definition.Definition.IsInterface || definition.Definition is { Assembly: "mscorlib.dll", FullName: "System.Object" })
                     return Unknown("static-type", "静态类型不足以定位字段，不猜派生类型。");
-                var result = Fields(root, definition, offset, key.Width, false, unboxed, value.Basis);
+                var result = Fields(root, definition, offset, key.Width, false, unboxed, value.Basis, addressView: addressView);
                 if (result.Value.Kind != ManagedLocationKind.Unknown) return result;
                 if (runtimeField.IsSuccess && runtimeField.Value.Name is FieldName or BitStorageName) return NotManaged("已命名的运行时结构字段。");
                 return result;
@@ -178,12 +180,12 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
     }
     private static Outcome<LocationResult> Yes(LocationView view) => Outcome<LocationResult>.Success(new(view.Kind, [view]));
     private Outcome<LocationResult> Fields(Term root, DefinitionRef type, BigInteger offset, int width,
-        bool statics, bool unboxed, ValueName? basis, Term? index = null, TypeRef? element = null)
+        bool statics, bool unboxed, ValueName? basis, Term? index = null, TypeRef? element = null, bool addressView = false)
     {
         if (Open(type)) return Unknown("open-type", "开放类型没有实例布局。");
         var views = ImmutableArray.CreateBuilder<LocationView>(); bool crossing = false, missingLayout = false;
         // 数组元素和托管地址本身也是结构体位置，不要求访问恰好落在某个直接字段内。
-        if (unboxed && !statics && offset == 0 && Layouts.Of(type) is { } rootLayout && width == rootLayout.ValueSize * 8)
+        if (unboxed && !statics && offset == 0 && Layouts.Of(type) is { } rootLayout && (addressView || width == rootLayout.ValueSize * 8))
             views.Add(new(index is not null ? ManagedLocationKind.ArrayElement : ManagedLocationKind.Indirect,
                 root, type, [], 0, width, index, basis, element));
         var work = new Stack<(DefinitionRef Type, BigInteger Offset, bool Static, bool Unboxed, ImmutableArray<FieldRef> Path)>();

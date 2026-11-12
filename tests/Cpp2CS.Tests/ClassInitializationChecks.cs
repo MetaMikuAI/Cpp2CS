@@ -49,10 +49,12 @@ internal static class ClassInitializationChecks
         { [256] = Outcome<MetadataEntity>.Success(new ClassEntity(new DefinitionRef(owner, []))),
           [512] = Outcome<MetadataEntity>.Success(new ClassEntity(new DefinitionRef(other, []))) }.ToImmutableDictionary() };
         // 直线读写、两臂同类、退出、异类、调用、堆写、循环、静态调用、构造调用、状态读取、帧写、异常边、异类调用。
-        for (int scenario = 0; scenario < 16; scenario++)
+        for (int scenario = 0; scenario < 18; scenario++)
         {
             var method = Method(scenario == 13 ? other : owner, scenario == 9 ? ".ctor" : "Use", scenario != 9);
-            var calls = new CallNamingQuery(binder, new NamingChecks.Map([new(MethodRef.Open(method), BindingEntryKind.Ordinary)]),
+            var callee = scenario >= 16 ? Method(other, "Take", true) : method;
+            if (scenario >= 16) callee.Parameters = [new("value", new ByRefRef(integer), 0, null, false)];
+            var calls = new CallNamingQuery(binder, new NamingChecks.Map([new(MethodRef.Open(callee), BindingEntryKind.Ordinary)]),
                 new RuntimeMap(runtime, catalog.Functions.First(f => f.Operation.Name == "AllocateObject" && f.Signature is not null),
                     catalog.Functions.First(f => f.Operation.Name == "InitializeMetadata" && f.Signature is not null)), catalog);
             var t = new TermTable(); var entry = new BlockIdentity(); var yes = new BlockIdentity(); var no = new BlockIdentity();
@@ -69,8 +71,10 @@ internal static class ClassInitializationChecks
             List<Statement> Access(bool wrong = false)
             {
                 var statements = new List<Statement>();
-                var fields = Read(statements, Add(wrong ? different : klass, spec.Layout.Field("Il2CppClass", "static_fields").ByteOffset), 64);
-                if (scenario == 1) statements.Add(new MemoryWrite(new(), fields, 32, t.Constant(7, 32)));
+                var fields = Read(statements, Add(wrong || scenario == 17 ? different : klass, spec.Layout.Field("Il2CppClass", "static_fields").ByteOffset), 64);
+                if (scenario >= 16) statements.Add(new Call(new(), new ImageFunction(10),
+                    [new(slot, fields), new(new(SlotKind.Integer, 1), t.Constant(0, 64))], []));
+                else if (scenario == 1) statements.Add(new MemoryWrite(new(), fields, 32, t.Constant(7, 32)));
                 else Read(statements, fields, 32);
                 return statements;
             }
@@ -101,7 +105,7 @@ internal static class ClassInitializationChecks
             var locations = new ManagedLocationQuery(state, names, layouts, spec);
             var query = new ClassInitializationQuery(state, calls, names, locations, spec);
             var result = locations.CreateContext(f).Get(query, init.Identity);
-            bool expected = scenario is 0 or 1 or 2 or 8 or 9 or 11;
+            bool expected = scenario is 0 or 1 or 2 or 8 or 9 or 11 or 16;
             checks.True(result.IsSuccess && result.Value.CanAbsorb == expected, $"初始化前沿场景 {scenario}：{result.Why ?? result.Value.Why}");
             if (scenario is 8 or 9)
             {

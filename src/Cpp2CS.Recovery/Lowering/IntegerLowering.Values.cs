@@ -49,6 +49,8 @@ public sealed partial class IntegerLowering
     }
     private ManagedValue? BuildValue(Term term, bool floating = false)
     {
+        if (locations is not null && context.Get(locations.Addresses, term).IsSuccess && StaticType(term) is not ByRefRef)
+            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "托管地址用于运算、比较或普通值", code: "lowering.Address.Use");
         var structurePart = StructPart(term, 0, term.Width);
         if (structurePart is not null || failure is not null) return structurePart;
         if (readValues.TryGetValue(term, out var read)) return ReadValue(read);
@@ -183,7 +185,7 @@ public sealed partial class IntegerLowering
                 if (left is ConstantValue { Bits: 0 }) left = Coerce(left, right.Type);
                 if (right is ConstantValue { Bits: 0 }) right = Coerce(right, left.Type);
                 if (!ReferenceType(left.Type) || !ReferenceType(right.Type))
-                    return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "引用与非空整数比较");
+                    return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "托管引用或地址用于与非零整数比较", code: "lowering.Address.Use");
                 return new ComparisonValue(op == CoreOperation.Equal ? ComparisonKind.Equal : ComparisonKind.NotEqual, left, right, types.Boolean);
             }
             if (op == CoreOperation.Select)
@@ -191,7 +193,9 @@ public sealed partial class IntegerLowering
                 var type = ReferenceType(operands[1]!.Type) ? operands[1]!.Type : operands[2]!.Type;
                 return new ChoiceValue(operands[0]!, Coerce(operands[1]!, type), Coerce(operands[2]!, type), type, term.Width);
             }
-            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "引用参与非引用运算：" + op);
+            var address = op == CoreOperation.Add && locations is not null ? context.Get(locations.Addresses, term).Why : null;
+            return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "引用参与非引用运算：" + op + (address is null ? "" : "；定位失败：" + address),
+                address, address is null ? null : "lowering.Address.Location");
         }
         var a = IntegerBits(operands[0]!); var b = operands.Length > 1 ? IntegerBits(operands[1]!) : null;
         int width = term.Width, inputWidth = term.Operands[0].Width;

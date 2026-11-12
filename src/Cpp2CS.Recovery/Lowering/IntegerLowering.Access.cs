@@ -144,6 +144,7 @@ public sealed partial class IntegerLowering
     }
     private ManagedStatement? LowerStore(MemoryWrite write, Point point)
     {
+        if (RejectAddressUse([write.Value], "写入内存")) return null;
         if (structReturnStores is not null)
         {
             var output = context.Get(structReturnStores, write.Identity);
@@ -240,7 +241,7 @@ public sealed partial class IntegerLowering
             return Fail<ManagedValue>(kind, "只读字段的写入缺少构造函数上下文", code: "lowering.Location.Readonly");
         return AccessView(view, write);
     }
-    private ManagedValue? AccessView(LocationView view, bool write = false)
+    private ManagedValue? AccessView(LocationView view, bool write = false, bool address = false)
     {
         if (view.Kind == ManagedLocationKind.StaticField)
         {
@@ -254,7 +255,7 @@ public sealed partial class IntegerLowering
                 var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
                 storage = new FieldValue(storage, field, type, types.ValueWidth(type));
             }
-            if (!IntegerType(storage.Type) && !IsFloat(storage.Type) && !ReferenceType(storage.Type) && types.Kind(storage.Type) != TypeKind.Struct)
+            if (!address && !IntegerType(storage.Type) && !IsFloat(storage.Type) && !ReferenceType(storage.Type) && types.Kind(storage.Type) != TypeKind.Struct)
                 return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "访问的值类型尚未下降");
             return storage;
         }
@@ -278,7 +279,7 @@ public sealed partial class IntegerLowering
             var type = field.Field.Type.Substitute((field.DeclaringType as DefinitionRef)?.Arguments ?? [], []);
             value = new FieldValue(value, field, type, types.ValueWidth(type));
         }
-        if (!IntegerType(value.Type) && !IsFloat(value.Type) && !ReferenceType(value.Type) && types.Kind(value.Type) != TypeKind.Struct)
+        if (!address && !IntegerType(value.Type) && !IsFloat(value.Type) && !ReferenceType(value.Type) && types.Kind(value.Type) != TypeKind.Struct)
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "访问的值类型尚未下降");
         return value;
     }

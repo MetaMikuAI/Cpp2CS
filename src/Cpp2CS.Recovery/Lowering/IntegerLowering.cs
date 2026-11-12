@@ -96,12 +96,13 @@ public sealed partial class IntegerLowering
         {
             position = b.Trace?.NativeAddress ?? 0;
             if (b.Handler is not null) Fail<object>(LoweringFailureKind.Exception, "异常处理入口尚未下降");
-            foreach (var s in b.Statements)
+            for (int i = 0; i < b.Statements.Length; i++)
             {
+                var s = b.Statements[i];
                 position = s.Trace?.NativeAddress ?? b.Trace?.NativeAddress ?? 0;
                 switch (s)
                 {
-                    case Call call: PrepareCall(call); break;
+                    case Call call: PrepareCall(call, new(b.Identity, i)); break;
                     case TrapWhen: Fail<object>(LoweringFailureKind.ConditionalTrap, "条件陷阱尚未下降"); break;
                     case DynamicAllocation: Fail<object>(LoweringFailureKind.DynamicAllocation, "动态帧分配尚未下降"); break;
                 }
@@ -224,6 +225,7 @@ public sealed partial class IntegerLowering
                 return condition is null ? null : new ManagedBranch(position, condition, Edge(b.Identity, branch.True), Edge(b.Identity, branch.False));
             case Return r:
                 if (ManagedTypes.IsVoid(method.Concrete(method.Method.ReturnType))) return new ManagedReturn(position, null);
+                if (RejectAddressUse(r.Results.Select(r => r.Value), "返回值")) return null;
                 var returnType = method.Concrete(method.Method.ReturnType);
                 var bound = binder.Return(r, signature, function.Terms, function.Inputs.Select(i => new SlotValue(i.Slot, i.Value)).ToImmutableArray(), function.IncomingArgumentArea);
                 if (types.Kind(returnType) == TypeKind.Struct)

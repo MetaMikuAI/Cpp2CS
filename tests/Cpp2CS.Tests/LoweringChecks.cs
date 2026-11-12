@@ -179,6 +179,7 @@ internal static class LoweringChecks
         RuntimeChecks(checks, program);
         ConstructorChecks(checks, program);
         AccessChecks(checks, program);
+        AddressChecks(checks, program);
         StructChecks(checks, program);
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         return checks.Finish("标量下降");
@@ -1041,5 +1042,138 @@ internal static class LoweringChecks
         }
         else builder.Blocks.Add(new(entry, [], [], Ret(sum)));
         return builder.Freeze();
+    }
+    private static void AddressChecks(Assertions checks, ProgramModel primitives)
+    {
+        var spec = InputCorpusChecks.Spec("arm64-v8a");
+        var layouts = new Cpp2CS.Runtime.Layouts.FieldLayouts(spec, 8, 8);
+        var binder = new MethodBinder(new(layouts), new Aapcs64());
+        var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
+        var definitions = primitives.Types.Where(t => t.Assembly == "mscorlib.dll" && t.Name != "BitConverter").ToList();
+        TypeRef Primitive(string name) => new DefinitionRef(definitions.Single(t => t.Name == name), []);
+        TypeDef Define(string name, bool value = false)
+        {
+            var type = new TypeDef { Index = definitions.Count, Assembly = "AddressChecks.dll", Namespace = "", Name = name,
+                Token = (uint)(0x02000001 + definitions.Count), Attributes = TypeAttributes.Public,
+                IsValueType = value, IsEnum = false, Size = value ? 8 : 64, PackingSize = 0, ClassSizeIsDefault = true };
+            definitions.Add(type); return type;
+        }
+        var owner = Define("Owner"); var reference = new DefinitionRef(owner, []);
+        var inner = Define("Inner", true); var structure = new DefinitionRef(inner, []);
+        var integer = Primitive("Int32"); int header = (int)spec.Layout.ObjectHeaderSize;
+        int nextField = 0;
+        FieldDef Field(TypeDef type, string name, TypeRef fieldType, int offset, bool statics = false) => new() {
+            Index = nextField++, Owner = type, Name = name, Type = fieldType, Offset = offset,
+            Attributes = FieldAttributes.Public | (statics ? FieldAttributes.Static : 0) };
+        var leaf = Field(inner, "Leaf", integer, 4); inner.Fields = [leaf];
+        var data = Field(owner, "Data", integer, header);
+        var aggregate = Field(owner, "Nested", structure, header + 8);
+        var shared = Field(owner, "Shared", integer, 0, true);
+        var sharedStruct = Field(owner, "SharedStruct", structure, 8, true);
+        var bits = Field(owner, "Bits", Primitive("Int64"), header + 16);
+        var native = Field(owner, "Native", Primitive("IntPtr"), header + 24);
+        owner.Fields = [data, aggregate, shared, sharedStruct, bits, native];
+        var methods = new List<MethodDef>();
+        MethodDef Method(TypeDef type, string name, TypeRef result, TypeRef[] parameters, bool instance = false)
+        {
+            var method = new MethodDef { Index = methods.Count, Owner = type, Name = name, Token = (uint)(0x06000001 + methods.Count),
+                Attributes = MethodAttributes.Public | (instance ? 0 : MethodAttributes.Static), ImplAttributes = 0, Slot = -1,
+                ReturnType = result, Parameters = parameters.Select((t, i) => new ParameterDef("p" + i, t, 0, null, false)).ToArray() };
+            methods.Add(method); return method;
+        }
+        var take = Method(owner, "Take", Primitive("Void"), [new ByRefRef(integer)]);
+        var takeNative = Method(owner, "TakeNative", Primitive("Void"), [new ByRefRef(Primitive("IntPtr"))]);
+        var wrong = Method(owner, "Wrong", Primitive("Void"), [new ByRefRef(Primitive("Int64"))]);
+        var pointer = Method(owner, "Pointer", Primitive("Void"), [new PointerRef(integer)]);
+        var ordinary = Method(owner, "Ordinary", Primitive("Void"), [Primitive("Int64")]);
+        var takeObject = Method(owner, "TakeObject", Primitive("Void"), [new ByRefRef(reference)]);
+        var takeStruct = Method(owner, "TakeStruct", Primitive("Void"), [new ByRefRef(structure)]);
+        var instance = Method(inner, "Apply", Primitive("Void"), [], true);
+        string[] modes = ["Field", "NativeField", "Nested", "StructThis", "ByRef", "ThisField", "Static", "StaticNested", "StaticStruct", "Array", "ArrayField", "ArrayStruct", "Repeat", "Reload",
+            "Mismatch", "Store", "FrameStore", "Return", "Pointer", "Ordinary", "Arithmetic", "Compare", "CompareConstant", "Runtime", "Interior", "Frame", "ReferenceArray"];
+        var entries = modes.ToDictionary(n => n, n => Method(n == "ThisField" ? inner : owner, n,
+            n == "Return" ? Primitive("Int64") : integer, n == "ThisField" ? [] :
+            [n.StartsWith("Array", StringComparison.Ordinal) ? new ArrayRef(n == "Array" ? integer : structure, 1) :
+                n == "ReferenceArray" ? new ArrayRef(reference, 1) : n == "ByRef" ? new ByRefRef(structure) : reference, integer], n == "ThisField"));
+        owner.Methods = methods.Where(m => m.Owner == owner).ToArray(); inner.Methods = methods.Where(m => m.Owner == inner).ToArray();
+        var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods,
+            Fields = [.. owner.Fields, leaf], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
+            Assemblies = definitions.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key, AssemblyName = Path.GetFileNameWithoutExtension(g.Key),
+                Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
+        var types = new ManagedTypes(program, layouts, 8); var skeleton = new Skeleton(program, 16); var emitter = new BodyEmitter(skeleton, types);
+        foreach (var mode in modes)
+        {
+            var terms = new TermTable(); var block = new BlockIdentity(); var frame = terms.Atom(new RootAtom(AddressRoot.Frame), 64);
+            var image = terms.Atom(new RootAtom(AddressRoot.Image), 64);
+            var builder = new FunctionBuilder(terms, block, 64, new(frame)) { ImageBase = image };
+            var root = terms.Atom(new EntryAtom(new(SlotKind.Integer)), 64); var index = terms.Atom(new EntryAtom(new(SlotKind.Integer, 1)), 64);
+            builder.Inputs.Add(new(new(SlotKind.Integer), root)); builder.Inputs.Add(new(new(SlotKind.Integer, 1), index));
+            var statements = new List<Statement>(); var facts = NamingFacts.Empty;
+            Term Add(Term value, long offset) => terms.Apply(new CoreOperator(CoreOperation.Add), 64, value, terms.Constant(unchecked((ulong)offset), 64));
+            Term Read(Term address, int width)
+            { var id = new ReadIdentity(); var value = terms.Atom(new ResultAtom(id), width); statements.Add(new MemoryRead(id, address, width, value)); return value; }
+            Term address = Add(root, data.Offset);
+            if (mode is "Nested" or "StructThis") address = Add(root, aggregate.Offset + (mode == "Nested" ? 4 : 0));
+            if (mode is "ByRef" or "ThisField") address = Add(root, 4);
+            if (mode.StartsWith("Static", StringComparison.Ordinal))
+            {
+                var klass = Read(Add(image, 256), 64);
+                var storage = Read(Add(klass, spec.Layout.Field("Il2CppClass", "static_fields").ByteOffset), 64);
+                address = Add(storage, mode == "Static" ? 0 : mode == "StaticStruct" ? 8 : 12);
+                facts = facts with { Slots = ImmutableDictionary<ulong, Outcome<MetadataEntity>>.Empty.Add(256, Outcome<MetadataEntity>.Success(new ClassEntity(reference))) };
+            }
+            if (mode.StartsWith("Array", StringComparison.Ordinal) || mode == "ReferenceArray")
+            {
+                int size = mode == "Array" ? 4 : 8;
+                var scaled = terms.Apply(new CoreOperator(CoreOperation.Multiply), 64, terms.Apply(new CoreOperator(CoreOperation.SignExtend), 64, terms.Slice(index, 0, 32)), terms.Constant(size, 64));
+                address = terms.Apply(new CoreOperator(CoreOperation.Add), 64, Add(root, spec.Layout.ArrayDataStart + (mode == "ArrayField" ? 4 : 0)), scaled);
+            }
+            if (mode == "NativeField") address = Add(root, native.Offset);
+            if (mode == "Interior") address = Add(address, 1);
+            if (mode == "Frame") address = Add(frame, -32);
+            Term result = terms.Constant(0, 32);
+            var before = mode == "Reload" ? Read(address, 32) : null;
+            var target = mode switch { "StructThis" or "StaticStruct" => instance, "ArrayStruct" => takeStruct, "ReferenceArray" => takeObject,
+                "NativeField" => takeNative, "Mismatch" => wrong, "Pointer" => pointer, "Ordinary" => ordinary, _ => take };
+            if (mode is "Store" or "FrameStore") statements.Add(new MemoryWrite(new(), mode == "Store" ? Add(root, bits.Offset) : Add(frame, -8), 64, address));
+            else if (mode == "Return") result = address;
+            else if (mode is "Arithmetic" or "Compare" or "CompareConstant")
+                result = terms.Apply(new CoreOperator(mode == "Arithmetic" ? CoreOperation.Xor : CoreOperation.Equal), mode == "Arithmetic" ? 64 : 1,
+                    address, mode == "Compare" ? terms.Apply(new CoreOperator(CoreOperation.SignExtend), 64, terms.Slice(index, 0, 32)) : terms.Constant(3, 64));
+            else
+            {
+                statements.Add(new Call(new(), new ImageFunction(mode == "Runtime" ? 20UL : 10UL), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+                if (mode == "Repeat") statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+            }
+            if (mode == "Reload") result = terms.Apply(new CoreOperator(CoreOperation.Add), 32, before!, Read(address, 32));
+            var output = result.Width < 64 ? terms.Concat(result, terms.Constant(0, 64 - result.Width)) : result;
+            builder.Blocks.Add(new(block, [], statements.ToImmutableArray(), new Return([new(new(SlotKind.Integer), output)])));
+            var calls = new CallNamingQuery(binder, new NamingChecks.Map([new(MethodRef.Open(target), BindingEntryKind.Ordinary)]),
+                new NamingChecks.RuntimeMap(catalog.Functions.First(f => f.Operation.Name == "ThrowManaged" && f.Signature is not null)), catalog);
+            var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(entries[mode]), binder, types, calls: calls,
+                effects: new ManagedCallEffects(calls), spec: spec, names: facts).Run();
+            var code = mode switch { "Interior" or "ReferenceArray" => "lowering.Address.Location", "Frame" => "lowering.Address.Frame",
+                "Mismatch" or "Store" or "FrameStore" or "Return" or "Pointer" or "Ordinary" or "Arithmetic" or "Compare" or "CompareConstant" or "Runtime" => "lowering.Address.Use", _ => null };
+            if (code is not null)
+            { checks.True(lowered.Failure?.Reason.Code == code, mode + " 取址用途拒绝：" + lowered.Failure); continue; }
+            checks.True(lowered.Body is not null, mode + " 取址下降：" + lowered.Failure);
+            if (lowered.Body is not { } body) continue;
+            var problems = emitter.Emit([body]);
+            checks.True(problems.Count == 0, mode + " 取址 CIL 校验：" + string.Join(';', problems.Values));
+            var loweredStatements = body.Blocks.SelectMany(b => b.Statements).ToArray();
+            var call = loweredStatements.OfType<ManagedCall>().First();
+            checks.True((call.Invocation.Receiver ?? call.Invocation.Arguments[0]) is AddressValue, mode + " 产生托管地址值");
+            if (mode == "Reload")
+            {
+                var reads = loweredStatements.OfType<ManagedAssignment>().Where(a => a.Value is FieldValue).ToArray();
+                checks.True(reads.Length == 2 && reads[0].Target != reads[1].Target && Array.IndexOf(loweredStatements, reads[0]) < Array.IndexOf(loweredStatements, call)
+                    && Array.IndexOf(loweredStatements, reads[1]) > Array.IndexOf(loweredStatements, call), "传出字段地址的调用之后重新读取同字段，不复用调用前的局部");
+            }
+            if (mode == "Repeat") checks.True(loweredStatements.OfType<ManagedCall>().Count() == 2, "同一地址项可以多次传出");
+            var emitted = skeleton.Assemblies.SelectMany(a => a.MainModule.Types).SelectMany(t => t.Methods).Single(m => m.Name == mode);
+            var expected = mode.StartsWith("Array", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldelema : mode.StartsWith("Static", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldsflda : Mono.Cecil.Cil.Code.Ldflda;
+            checks.True(emitted.Body.Instructions.Any(i => i.OpCode.Code == expected), mode + " 写出对应取址指令");
+        }
+        foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
     }
 }

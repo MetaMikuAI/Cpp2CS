@@ -23,11 +23,13 @@ public sealed class ClassInitializationQuery : Query<CallIdentity, ClassInitiali
     private readonly ValueNamingQuery names;
     private readonly ManagedLocationQuery locations;
     private readonly RuntimeSpec spec;
+    private readonly ManagedCallAddressQuery addresses;
     private readonly InitializationPointQuery points;
     private readonly EventFrontierQuery frontier;
     public ClassInitializationQuery(StateQueries state, CallNamingQuery calls, ValueNamingQuery names, ManagedLocationQuery locations, RuntimeSpec spec)
     {
         this.state = state; this.calls = calls; this.names = names; this.locations = locations; this.spec = spec;
+        addresses = new(state, calls, locations);
         points = new(this);
         frontier = new((c, p) =>
         {
@@ -77,6 +79,12 @@ public sealed class ClassInitializationQuery : Query<CallIdentity, ClassInitiali
                 var named = c.Get(q.calls, call.Identity); if (!named.IsSuccess) return named.Propagate<InitializationPoint>();
                 if (call.Unwind is not null || call.DoesNotReturn) return Yes(true);
                 if (named.Value.Operation is { Observation: RuntimeObservation.Unobservable }) return Yes(false);
+                var addresses = c.Get(q.addresses, call.Identity); if (!addresses.IsSuccess) return addresses.Propagate<InitializationPoint>();
+                if (!addresses.Value.IsEmpty && addresses.Value.All(v => v.Kind == ManagedLocationKind.StaticField))
+                {
+                    var owners = addresses.Value.Select(v => v.Path[0].DeclaringType).Distinct().ToArray();
+                    if (owners is [var owner]) return Yes(true, owner);
+                }
                 if (named.Value.Kind == CallKind.Managed && named.Value.Candidates is { Failure: null, Candidates.Length: > 0 } candidates)
                 {
                     TypeRef? common = null;

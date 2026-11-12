@@ -27,6 +27,13 @@ internal static class ManagedExecutionChecks
                 public static int Div(int x) => 12/x;
                 public static int Null() { B b=null; return b.X; }
                 public static int ExplicitNull() => throw new System.NullReferenceException();
+                public static void Touch(ref int value) { value++; }
+                public static void TouchObject(ref object value) { value = null; }
+                public static void FieldAddressNull() { B b=null; Touch(ref b.X); }
+                public static void ArrayAddressNull() { int[] a=null; Touch(ref a[0]); }
+                public static void ArrayAddressBounds() { var a=new int[1]; Touch(ref a[1]); }
+                public static void ArrayAddressNegative() { var a=new int[1]; Touch(ref a[-1]); }
+                public static void ArrayAddressType() { object[] a=new string[1]; TouchObject(ref a[0]); }
                 public static int Bounds() => (new int[1])[2];
                 public static int Finally() { int x=0; try { x=3; } finally { x+=5; } return x; }
                 public static int CatchFinally() { int x=0; try { try { x=12/x; } finally { x=5; } } catch(System.DivideByZeroException) { x+=7; } return x; }
@@ -70,6 +77,11 @@ internal static class ManagedExecutionChecks
         a.True(Run("Loop", StackValue.I4(5)).Result == "return 0xa", "分支循环结果");
         foreach (var (name, exception, args) in new[] { ("Div", "DivideByZeroException", new[] { StackValue.I4(0) }),
             ("Null", "NullReferenceException", Array.Empty<StackValue>()), ("Bounds", "IndexOutOfRangeException", Array.Empty<StackValue>()),
+            ("FieldAddressNull", "NullReferenceException", Array.Empty<StackValue>()),
+            ("ArrayAddressNull", "NullReferenceException", Array.Empty<StackValue>()),
+            ("ArrayAddressBounds", "IndexOutOfRangeException", Array.Empty<StackValue>()),
+            ("ArrayAddressNegative", "IndexOutOfRangeException", Array.Empty<StackValue>()),
+            ("ArrayAddressType", "ArrayTypeMismatchException", Array.Empty<StackValue>()),
             ("Overflow", "OverflowException", new[] { StackValue.I4(int.MaxValue) }) })
             a.True(Run(name, args).Events.Any(e => e.Text.Contains(exception, StringComparison.Ordinal)), $"{name} 异常事件");
         var modelFactory = CecilModel.Factory(source.Module);
