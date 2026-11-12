@@ -80,6 +80,7 @@ internal static class PipelineCorpusChecks
         }
         var comparison = IlMetrics.Report(metrics.OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Value).ToArray(), options);
         File.WriteAllText(Path.Combine(output, "comparison.local.json"), IlMetrics.Json(comparison));
+        checks.True(report.Summary.ContractFailures.Length == 0, "没有输出层契约失败：" + string.Join("；", report.Summary.ContractFailures.Take(3)));
         table.AppendLine($"\n管线：{report.Summary.Methods} 方法，完整 {report.Summary.Complete}，洞 {report.Summary.Holes}，声明没有方法体 {report.Summary.NoBody}。");
         table.AppendLine("全部真值方法：" + string.Join("，", comparison.Summary.Statuses.Select(p => $"{p.Key}={p.Value.Count}")) + "。");
         table.AppendLine("无法判定原因：" + string.Join("，", comparison.Summary.Reasons.OrderBy(p => p.Key).Select(p => $"{p.Key}={p.Value}")) + "。");

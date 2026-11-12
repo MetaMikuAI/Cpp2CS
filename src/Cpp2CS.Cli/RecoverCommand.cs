@@ -35,6 +35,8 @@ internal static class RecoverCommand
         }
         var report = new RecoverySession().Run(request);
         Console.WriteLine($"方法 {report.Summary.Methods}，完整 {report.Summary.Complete}，洞 {report.Summary.Holes}，无方法体 {report.Summary.NoBody}，{report.Summary.ElapsedSeconds:F2}s，峰值 {report.Summary.PeakWorkingSetBytes / 1048576.0:F1} MiB");
-        return 0;
+        if (report.Summary.ContractFailures.Length == 0) return 0;
+        foreach (var failure in report.Summary.ContractFailures) Console.Error.WriteLine(failure);
+        return 3;
     }
 }

@@ -13,6 +13,8 @@ public sealed record RunSummary(int Methods, int Complete, int Holes, Dictionary
     Dictionary<string, int> HolesByReason, Dictionary<string, double> LayerSeconds, double ElapsedSeconds, long PeakWorkingSetBytes)
 {
     public int NoBody { get; init; }
+    /// <summary>输出层契约失败的方法；非空表示恢复层有程序错误，命令以失败退出。</summary>
+    public string[] ContractFailures { get; init; } = [];
     public Dictionary<string, int> RuntimeFunctionsByEvidence { get; init; } = [];
 }
 public sealed record RecoveryReport(int FormatVersion, MethodReport[] Methods, RunSummary Summary)

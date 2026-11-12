@@ -102,7 +102,8 @@ public sealed class RecoverySession
         var analysisTiming = analysisTimings.GetValue(facts, _ => new(request.Jobs));
         bool analysisAlreadyCached = analysisTiming.Seconds is not null;
         var groups = facts.CodeMap.Entries.Where(e => e.Method is not null).GroupBy(e => e.Method!.Method)
-            .Where(g => (request.Method is null || g.Key.ToString().Contains(request.Method, StringComparison.Ordinal))
+            .Where(g => (request.Method is null || g.Key.ToString().Contains(request.Method, StringComparison.Ordinal)
+                    || Identity(g.Key) == request.Method)
                 && (request.Address is null || g.Any(e => e.Address == request.Address)))
             .OrderBy(g => Identity(g.Key), StringComparer.Ordinal).ToArray();
         var rows = new MethodReport[groups.Length];
@@ -159,11 +160,17 @@ public sealed class RecoverySession
             if (bodies[i] is { } body)
             {
                 var problems = emitter.Emit([body]);
-                if (problems.Count != 0) contractFailures.Add($"{rows[i].Identity}：输出层契约失败：{problems.First().Value}");
+                if (problems.Count != 0)
+                {
+                    // 契约失败是恢复层的程序错误：方法保留占位体并记入报告，运行照常写出结果，由调用方以失败收尾。
+                    var problem = problems.First().Value.ToString();
+                    contractFailures.Add($"{rows[i].Identity}：输出层契约失败：{problem}");
+                    rows[i] = rows[i] with { Status = MethodStatus.Hole,
+                        Hole = new("输出", rows[i].Entry, "契约", new("output.contract", problem)) };
+                }
             }
             // 洞保留 Skeleton 的标准占位体；报告是是否写出的唯一依据。
         }
-        if (contractFailures.Count > 0) throw new InvalidOperationException(string.Join(Environment.NewLine, contractFailures));
         if (request.Source) DecompileStage.Mark(facts.Model, rows, emitter);
         skeleton.Write(request.Output);
         var source = request.Source ? DecompileStage.Write(request.Output, skeleton, facts.Model) : null;
@@ -177,7 +184,7 @@ public sealed class RecoverySession
                 [recovery.Name] = (double)recoveryTicks / Stopwatch.Frequency, ["输出"] = outputWatch.Elapsed.TotalSeconds,
                 ["不返回分析"] = analysisAlreadyCached ? 0 : analysisTiming.Seconds ?? 0,
                 ["运行时定位"] = RuntimeLocationAssembly.Seconds(facts) },
-            inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64) { NoBody = rows.Count(r => r.Status == MethodStatus.NoBody), RuntimeFunctionsByEvidence = RuntimeLocationAssembly.Evidence(facts) }) { Source = source };
+            inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64) { NoBody = rows.Count(r => r.Status == MethodStatus.NoBody), ContractFailures = [.. contractFailures], RuntimeFunctionsByEvidence = RuntimeLocationAssembly.Evidence(facts) }) { Source = source };
         using (var destination = File.Create(Path.Combine(request.Output, "recovery.json"))) RecoveryReport.Write(destination, report);
         return report;
     }
