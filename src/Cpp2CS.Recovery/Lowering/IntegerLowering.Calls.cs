@@ -107,6 +107,8 @@ public sealed partial class IntegerLowering
                 {
                     "binding.shared-call.signature" => "lowering.SharedCall.Signature",
                     "binding.shared-call.mismatch" => "lowering.SharedCall.Mismatch",
+                    "binding.shared-call.receiver" => "lowering.SharedCall.Receiver",
+                    "binding.shared-call.ambiguous" => "lowering.SharedCall.Ambiguous",
                     _ => "lowering.SharedCall.Witness",
                 };
                 Fail<object>(LoweringFailureKind.Call, reason?.Message ?? "方法信息实参没有命名来源。", reason, code);

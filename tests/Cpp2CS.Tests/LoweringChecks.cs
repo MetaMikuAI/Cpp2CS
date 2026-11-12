@@ -277,7 +277,9 @@ internal static partial class LoweringChecks
                 checks.True(result.Failure?.Kind == LoweringFailureKind.AmbiguousCall, mode + "：混合折叠没有匹配见证时沿用原有失败");
             else
             {
-                var kind = mode is "CandidateSignature" or "Unavailable" ? "Signature" : mode is "Definition" or "Signature" ? "Mismatch" : "Witness";
+                // 方法信息为空且没有接收者：身份无从确定，原因单列。
+                var kind = mode is "CandidateSignature" or "Unavailable" ? "Signature" : mode is "Definition" or "Signature" ? "Mismatch"
+                    : mode == "Null" ? "Receiver" : "Witness";
                 checks.True(result.Failure?.Reason.Code == "lowering.SharedCall." + kind, mode + "：共享调用失败原因独立：" + result.Failure);
             }
         }

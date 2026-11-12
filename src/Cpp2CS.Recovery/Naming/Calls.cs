@@ -83,7 +83,30 @@ public sealed class SharedCallQuery(MethodBinder binder, CallNamingQuery calls, 
         var entity = c.Get(names, information.Value);
         if (!entity.IsSuccess) return No("witness", "方法信息实参命名失败。", entity.Why);
         if (entity.Value.Name is not EntityName { Entity: MethodEntity { Method: var method } })
-            return No("witness", "方法信息实参不是已命名的方法实体。", entity.Value.Why);
+        {
+            // 方法信息实参为空：被调方不使用泛型上下文。调用的是哪个实例由接收者给出——
+            // 接收者静态类型的继承链上，候选方法的声明类型的那个实例。没有接收者时不定。
+            if (information.Value.ConstantValue is not { IsZero: true })
+                return No("witness", "方法信息实参不是已命名的方法实体。", entity.Value.Why);
+            if (binding.This is not { } self) return No("receiver", "方法信息实参为空且调用没有接收者。");
+            var receiverTerm = c.Get(sources, new(self.Source, new(block.Identity, block.Statements.IndexOf(call))));
+            if (!receiverTerm.IsSuccess) return No("receiver", "方法信息实参为空且接收者没有可用的项。", receiverTerm.Why);
+            var receiver = c.Get(names, receiverTerm.Value);
+            if (!receiver.IsSuccess) return No("receiver", "方法信息实参为空且接收者命名失败。", receiver.Why);
+            if (receiver.Value.StaticType is not DefinitionRef receiverType)
+                return No("receiver", "方法信息实参为空且接收者没有静态类型。", receiver.Value.Why);
+            var matches = new HashSet<MethodRef>();
+            foreach (var candidate in candidates.Candidates)
+            {
+                if (candidate.Entry.Kind != BindingEntryKind.SharedGeneric || candidate.Entry.Method is not { } shared
+                    || shared.Method.GenericParameters.Count != 0) continue;
+                for (TypeRef? current = receiverType; current is DefinitionRef d; current = d.Definition.BaseType?.Substitute(d.Arguments, []))
+                    if (d.Definition == shared.Method.Owner) { matches.Add(new(shared.Method, d.Arguments, [])); break; }
+            }
+            if (matches.Count == 0) return No("receiver", "方法信息实参为空，接收者类型的继承链上没有候选方法的声明类型。");
+            if (matches.Count > 1) return No("ambiguous", "方法信息实参为空，接收者类型对应多个候选方法。");
+            method = matches.Single();
+        }
         if (!ManagedCSignatureBuilder.IsClosed(method))
             return No("witness", "方法信息见证的泛型实参未完整封闭。");
         if (!candidates.Candidates.Any(x => x.Entry.Kind == BindingEntryKind.SharedGeneric && x.Entry.Method?.Method == method.Method))
