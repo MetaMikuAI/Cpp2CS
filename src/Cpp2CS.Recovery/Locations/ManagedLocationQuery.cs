@@ -50,7 +50,7 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
         if (runtimeField.IsSuccess && runtimeField.Value == NameLattice.Pending) return Outcome<LocationResult>.Success(Pending);
         if (runtimeField.IsSuccess && (runtimeField.Value.Name is BitStorageName || runtimeField.Value.Name is FieldName specification &&
             specification.Field != spec.Layout.Field("Il2CppArray", "max_length").Path))
-            return NotManaged("已命名的运行时结构字段。");
+            return NotManaged("已命名的运行时结构字段：" + Describe(runtimeField.Value.Name));
         var terms = new List<Term>(); BigInteger offset = 0;
         var pending = new Stack<Term>(); pending.Push(address);
         while (pending.TryPop(out var term))
@@ -67,11 +67,13 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
         offset = (offset % modulus + modulus) % modulus;
         if (offset >= modulus / 2) offset -= modulus;
         bool awaitingType = false, namedBase = false;
+        string? baseKind = null;
         Reason? typeFailure = null, baseFailure = null;
         foreach (var root in terms)
         {
             var named = c.Get(Names, root);
             namedBase |= named.IsSuccess && named.Value.Name is not null;
+            if (named.IsSuccess && named.Value.Name is { } baseName) baseKind ??= Describe(baseName);
             baseFailure ??= named.IsSuccess ? named.Value.Why : named.Why;
             if (named.IsSuccess && named.Value.Name is FieldName field && field.Record == "Il2CppClass")
             {
@@ -140,16 +142,27 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
                     return Unknown("static-type", "静态类型不足以定位字段，不猜派生类型。");
                 var result = Fields(root, definition, offset, key.Width, false, unboxed, value.Basis, addressView: addressView);
                 if (result.Value.Kind != ManagedLocationKind.Unknown) return result;
-                if (runtimeField.IsSuccess && runtimeField.Value.Name is FieldName or BitStorageName) return NotManaged("已命名的运行时结构字段。");
+                if (runtimeField.IsSuccess && runtimeField.Value.Name is FieldName or BitStorageName) return NotManaged("已命名的运行时结构字段：" + Describe(runtimeField.Value.Name));
                 return result;
             }
         }
         if (awaitingType) return Outcome<LocationResult>.Success(Pending);
-        if (runtimeField.IsSuccess && runtimeField.Value.Name is FieldName or BitStorageName) return NotManaged("已命名的运行时结构字段。");
+        if (runtimeField.IsSuccess && runtimeField.Value.Name is FieldName or BitStorageName) return NotManaged("已命名的运行时结构字段：" + Describe(runtimeField.Value.Name));
         if (typeFailure is not null) return Outcome<LocationResult>.Success(new(ManagedLocationKind.Unknown, [], typeFailure));
         return Outcome<LocationResult>.Success(new(ManagedLocationKind.Unknown, [], new(namedBase ? "location.base-untyped" : "location.base-unnamed",
-            namedBase ? "已命名基值没有静态类型。" : "基值未命名。", baseFailure)));
+            namedBase ? "已命名基值没有静态类型：" + baseKind : "基值未命名。", baseFailure)));
     }
+    // 洞的消息里写明名字的种类，报告才能按种类归并。
+    private static string Describe(ValueName? name) => name switch
+    {
+        FieldName field => field.Record + "." + field.Field,
+        BitStorageName bits => bits.Record + "." + bits.Fields,
+        CallResultName result => "调用结果" + (result.Operation is { } operation ? "（" + operation + "）" : ""),
+        EntityName entity => "元数据实体 " + entity.Entity.GetType().Name,
+        ParameterName parameter => parameter.MethodInformation ? "方法信息形参" : "形参",
+        null => "无",
+        _ => name.GetType().Name,
+    };
     private static bool Open(TypeRef type) => type switch
     {
         GenericParameterRef => true,

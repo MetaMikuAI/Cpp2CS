@@ -34,6 +34,26 @@ internal static class RuntimeLocationAssembly
             .GroupBy(e => e.Evidence.ToString()).ToDictionary(g => g.Key, g => g.Select(e => e.Function.MangledName).Distinct().Count());
     }
 
+    /// <summary>逐项写出定位结果：定位到的入口与依据，没定位到的函数与原因。只在已经定位过时写。</summary>
+    internal static void Write(GlobalFacts facts, string path)
+    {
+        if (!locations.TryGetValue(facts, out var value) || !value.IsValueCreated) return;
+        var result = value.Value.Value;
+        var document = new
+        {
+            imports = result.Imports.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => new { import = e.Key, function = e.Value.Function.Name }),
+            entries = result.Entries.OrderBy(e => e.Key).Select(e => new
+            {
+                entry = $"0x{e.Key:x}", function = e.Value.Selected?.Function.Name, evidence = e.Value.Selected?.Evidence.ToString(),
+                source = e.Value.Selected?.Source, reason = e.Value.Reason,
+                candidates = e.Value.Candidates.Select(c => c.Function.Name).Distinct(StringComparer.Ordinal),
+            }),
+            missing = result.Missing.OrderBy(m => m.Function.Name, StringComparer.Ordinal).Select(m => new { function = m.Function.Name, reason = m.Reason }),
+        };
+        File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(document, new System.Text.Json.JsonSerializerOptions
+        { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+    }
+
     private static RuntimeFunctionLocations Locate(GlobalFacts facts)
     {
         var catalog = RuntimeFunctionCatalog.Select(facts.Spec.Layout.UnityVersion, facts.Spec.Layout.Triple, facts.Spec.Layout.DataModel);

@@ -188,6 +188,7 @@ public sealed class RecoverySession
         }
         if (request.Source) DecompileStage.Mark(facts.Model, rows, emitter);
         skeleton.Write(request.Output);
+        RuntimeLocationAssembly.Write(facts, Path.Combine(request.Output, "runtime-functions.json"));
         SourceReport? source = null;
         using var process = Process.GetCurrentProcess();
         RecoveryReport Build()
