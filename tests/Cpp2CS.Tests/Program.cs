@@ -17,15 +17,19 @@ internal static class Program
             let command = (string)field.GetRawConstantValue()!
             orderby command
             select (Command: command, Run: run!)).ToArray();
+        // 不带参数只跑快速检查；语料上的定向检查（命令名含 corpus）耗时以分钟计，要点名运行，或用 all 跑全部。
+        bool everything = args is ["all"];
+        if (everything) args = [];
         var unknown = args.Except(checks.Select(check => check.Command)).ToArray();
         if (unknown.Length != 0)
         {
             Console.Error.WriteLine($"未知的检查：{string.Join(' ', unknown)}");
-            Console.Error.WriteLine($"用法: Cpp2CS.Tests [{string.Join('|', checks.Select(check => check.Command))}]；不带参数运行全部检查。");
+            Console.Error.WriteLine($"用法: Cpp2CS.Tests [{string.Join('|', checks.Select(check => check.Command))}]；不带参数运行快速检查，all 运行全部。");
             return 2;
         }
         var result = 0;
-        foreach (var check in checks.Where(check => args.Length == 0 || args.Contains(check.Command)))
+        foreach (var check in checks.Where(check => args.Length == 0
+            ? everything || !check.Command.Contains("corpus", StringComparison.Ordinal) : args.Contains(check.Command)))
             result |= (int)check.Run.Invoke(null, null)!;
         return result;
     }

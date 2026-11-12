@@ -19,14 +19,14 @@ internal static class DecompileStage
         }
     }
 
-    internal static SourceReport Write(string output, Skeleton skeleton, ProgramModel model)
+    internal static SourceReport Write(string output, Skeleton skeleton, ProgramModel model, string? only = null)
     {
         var directory = Path.Combine(output, "src");
         Directory.CreateDirectory(directory);
         var failures = new List<SourceTypeFailure>();
         var methods = new List<SourceMethodFailure>();
         var count = 0;
-        foreach (var assembly in model.Assemblies)
+        foreach (var assembly in model.Assemblies.Where(a => only is null || a.Name == only))
         {
             var failed = new System.Collections.Concurrent.ConcurrentBag<SourceFailure>();
             var sources = Decompilation.Decompile(Path.Combine(output, Skeleton.ImageFileName(assembly.Name)), output,

@@ -17,6 +17,8 @@ namespace Cpp2CS.Pipeline;
 
 public sealed record RecoveryRequest(string Image, string Metadata, string Output)
 {
+    /// <summary>只恢复并导出这个程序集（文件名，如 X.dll）的方法；全局事实仍按整个映像计算。</summary>
+    public string? Assembly { get; init; }
     public string? Method { get; init; }
     /// <summary>相对映像首选基址的入口偏移；可匹配该方法的任意注册入口。</summary>
     public ulong? Address { get; init; }
@@ -104,9 +106,11 @@ public sealed class RecoverySession
         var groups = facts.CodeMap.Entries.Where(e => e.Method is not null).GroupBy(e => e.Method!.Method)
             .Where(g => (request.Method is null || g.Key.ToString().Contains(request.Method, StringComparison.Ordinal)
                     || Identity(g.Key) == request.Method)
+                && (request.Assembly is null || g.Key.Owner.Assembly == request.Assembly)
                 && (request.Address is null || g.Any(e => e.Address == request.Address)))
             .OrderBy(g => Identity(g.Key), StringComparer.Ordinal).ToArray();
         var rows = new MethodReport[groups.Length];
+        var programErrors = new System.Collections.Concurrent.ConcurrentBag<string>();
         var bodies = new ManagedBody?[groups.Length];
         long frontTicks = 0, recoveryTicks = 0;
         int processed = 0;
@@ -131,13 +135,13 @@ public sealed class RecoverySession
                 return;
             }
             var context = new MethodContext(method, entry, facts);
-            var lifted = Invoke(frontend, entry, context, out var ticks);
+            var lifted = Invoke(frontend, entry, context, programErrors, out var ticks);
             Interlocked.Add(ref frontTicks, ticks);
             Hole? hole;
             if (lifted is Missing<NativeFunction> missing) hole = missing.Hole;
             else
             {
-                var result = Invoke(recovery, ((Completed<NativeFunction>)lifted).Value, context, out ticks);
+                var result = Invoke(recovery, ((Completed<NativeFunction>)lifted).Value, context, programErrors, out ticks);
                 Interlocked.Add(ref recoveryTicks, ticks);
                 hole = (result as Missing<ManagedBody>)?.Hole;
                 bodies[i] = (result as Completed<ManagedBody>)?.Value;
@@ -159,7 +163,18 @@ public sealed class RecoverySession
         {
             if (bodies[i] is { } body)
             {
-                var problems = emitter.Emit([body]);
+                Dictionary<ManagedBody, EmissionProblem> problems;
+                try { problems = emitter.Emit([body]); }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                {
+                    // 与恢复阶段相同：输出层的异常是程序错误，单列并继续。
+                    var text = $"{rows[i].Identity}，层 输出：{error.GetType().Name}：{error.Message}";
+                    programErrors.Add(text);
+                    Console.Error.WriteLine("程序错误：" + text);
+                    rows[i] = rows[i] with { Status = MethodStatus.Hole,
+                        Hole = new("输出", rows[i].Entry, "程序错误", new("internal.error", error.GetType().Name + "：" + error.Message)) };
+                    continue;
+                }
                 if (problems.Count != 0)
                 {
                     // 契约失败是恢复层的程序错误：方法保留占位体并记入报告，运行照常写出结果，由调用方以失败收尾。
@@ -173,32 +188,55 @@ public sealed class RecoverySession
         }
         if (request.Source) DecompileStage.Mark(facts.Model, rows, emitter);
         skeleton.Write(request.Output);
-        var source = request.Source ? DecompileStage.Write(request.Output, skeleton, facts.Model) : null;
+        SourceReport? source = null;
+        using var process = Process.GetCurrentProcess();
+        RecoveryReport Build()
+        {
+            var holes = rows.Where(r => r.Hole is { Derived: false }).Select(r => r.Hole!).ToArray();
+            return new RecoveryReport(1, rows, new(rows.Length, rows.Count(r => r.Status == MethodStatus.Complete), rows.Count(r => r.Status == MethodStatus.Hole),
+                holes.GroupBy(h => h.Layer).ToDictionary(g => g.Key, g => g.Count()), holes.GroupBy(h => h.Reason.Code).ToDictionary(g => g.Key, g => g.Count()),
+                new() { ["输入"] = inputSeconds, [frontend.Name] = (double)frontTicks / Stopwatch.Frequency,
+                    [recovery.Name] = (double)recoveryTicks / Stopwatch.Frequency, ["输出"] = outputWatch.Elapsed.TotalSeconds,
+                    ["不返回分析"] = analysisAlreadyCached ? 0 : analysisTiming.Seconds ?? 0,
+                    ["运行时定位"] = RuntimeLocationAssembly.Seconds(facts) },
+                inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64) { NoBody = rows.Count(r => r.Status == MethodStatus.NoBody), ContractFailures = [.. contractFailures], ProgramErrors = [.. programErrors.Order(StringComparer.Ordinal)], RuntimeFunctionsByEvidence = RuntimeLocationAssembly.Evidence(facts) }) { Source = source };
+        }
+        void Save(RecoveryReport value)
+        {
+            using var destination = File.Create(Path.Combine(request.Output, "recovery.json"));
+            RecoveryReport.Write(destination, value);
+        }
+        if (request.Source)
+        {
+            // 源码导出耗时且可能失败；方法级的结果先落盘，不随它丢失。
+            Save(Build());
+            try { source = DecompileStage.Write(request.Output, skeleton, facts.Model, request.Assembly); }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                var text = $"源码导出：{error.GetType().Name}：{error.Message}";
+                programErrors.Add(text);
+                Console.Error.WriteLine("程序错误：" + text);
+            }
+        }
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
         outputWatch.Stop();
-        using var process = Process.GetCurrentProcess();
-        var holes = rows.Where(r => r.Hole is { Derived: false }).Select(r => r.Hole!).ToArray();
-        var report = new RecoveryReport(1, rows, new(rows.Length, rows.Count(r => r.Status == MethodStatus.Complete), rows.Count(r => r.Status == MethodStatus.Hole),
-            holes.GroupBy(h => h.Layer).ToDictionary(g => g.Key, g => g.Count()), holes.GroupBy(h => h.Reason.Code).ToDictionary(g => g.Key, g => g.Count()),
-            new() { ["输入"] = inputSeconds, [frontend.Name] = (double)frontTicks / Stopwatch.Frequency,
-                [recovery.Name] = (double)recoveryTicks / Stopwatch.Frequency, ["输出"] = outputWatch.Elapsed.TotalSeconds,
-                ["不返回分析"] = analysisAlreadyCached ? 0 : analysisTiming.Seconds ?? 0,
-                ["运行时定位"] = RuntimeLocationAssembly.Seconds(facts) },
-            inputSeconds + watch.Elapsed.TotalSeconds, process.PeakWorkingSet64) { NoBody = rows.Count(r => r.Status == MethodStatus.NoBody), ContractFailures = [.. contractFailures], RuntimeFunctionsByEvidence = RuntimeLocationAssembly.Evidence(facts) }) { Source = source };
-        using (var destination = File.Create(Path.Combine(request.Output, "recovery.json"))) RecoveryReport.Write(destination, report);
+        var report = Build();
+        Save(report);
         return report;
     }
-    private static StageResult<TOut> Invoke<TIn, TOut>(IMethodStage<TIn, TOut> stage, TIn input, MethodContext context, out long ticks) where TOut : class
+    private static StageResult<TOut> Invoke<TIn, TOut>(IMethodStage<TIn, TOut> stage, TIn input, MethodContext context,
+        System.Collections.Concurrent.ConcurrentBag<string> programErrors, out long ticks) where TOut : class
     {
         var started = Stopwatch.GetTimestamp();
         try { return stage.Run(input, context); }
-        catch (Exception error)
+        catch (Exception error) when (error is not OutOfMemoryException)
         {
-            // 附加上下文后原样抛出，不将程序错误转成洞。
-            error.Data["method"] = Identity(context.Method);
-            error.Data["layer"] = stage.Name;
-            Console.Error.WriteLine($"程序错误：{Identity(context.Method)}，层 {stage.Name}");
-            throw;
+            // 程序错误不是恢复的结论：该方法记为未写出并在汇总里单列，命令以失败退出；一次全量不因单个方法作废。
+            var where = error.StackTrace?.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.StartsWith("at Cpp2CS", StringComparison.Ordinal));
+            var text = $"{Identity(context.Method)}，层 {stage.Name}：{error.GetType().Name}：{error.Message}；{where}";
+            programErrors.Add(text);
+            Console.Error.WriteLine("程序错误：" + text);
+            return new Missing<TOut>(new(stage.Name, context.Entry.Address, "程序错误", new("internal.error", error.GetType().Name + "：" + error.Message)));
         }
         finally { ticks = Stopwatch.GetTimestamp() - started; }
     }

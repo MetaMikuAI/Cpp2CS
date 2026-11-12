@@ -27,7 +27,7 @@ public sealed record Hole(string Layer, ulong Position, string Step, Reason Reas
 public abstract record StageResult<T> where T : class;
 public sealed record Completed<T>(T Value) : StageResult<T> where T : class;
 public sealed record Missing<T>(Hole Hole) : StageResult<T> where T : class;
-/// <summary>实现必须可并发调用；失败是洞，异常是程序错误。</summary>
+/// <summary>实现必须可并发调用；失败是洞，异常是程序错误（会话把它记入汇总并以失败退出）。</summary>
 public interface IMethodStage<TInput, TOutput> where TOutput : class
 {
     string Name { get; }
