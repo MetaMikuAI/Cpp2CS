@@ -172,6 +172,13 @@ public sealed partial class IntegerLowering
                             statements.Add(new ManagedAssignment(position, allocation.Local!, new NewObjectValue(constructor, allocation.Arguments, types.PointerSize * 8) { Transparent = true }));
                         continue;
                     }
+                    if (constructorCalls.Contains(call.Identity))
+                    {
+                        if (call.Identity == constructorInitializationCall)
+                            statements.Add(new ManagedCall(position, new(constructorInitialization!.Method!,
+                                new ArgumentValue(-1, method.DeclaringType, types.PointerSize * 8), constructorInitialization.Arguments, false), null) { Inlined = true });
+                        continue;
+                    }
                     if (interfaceLookups.Contains(call.Identity)) continue;
                     var statement = LowerCall(call, new(b.Identity, i));
                     if (statement is null) return new(null, failure);
@@ -261,7 +268,7 @@ public sealed partial class IntegerLowering
                 Fail<object>(LoweringFailureKind.ConstructorInitialization, why.Message, why.Cause, why.Code);
                 return new(null, failure);
             }
-            if (initialization?.Method is { } parent)
+            if (initialization?.Method is { } parent && constructorInitializationCall is null)
             {
                 var entry = blocks[0];
                 if (constructorInitialization is null)

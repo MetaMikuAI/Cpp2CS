@@ -11,23 +11,24 @@ public interface IMethodTemplateSource
     Reason? GetFailure(MethodDef method) => null;
 }
 
-public sealed record ConstructorField(FieldRef Field, ManagedValue Value);
-public sealed record ConstructorTemplate(IReadOnlyList<ConstructorField> Fields, int Overwritten);
+public sealed record ConstructorField(FieldRef Field, ManagedValue Value, bool AfterCall = false);
+public sealed record ConstructorInvocation(MethodRef Method, IReadOnlyList<ManagedValue> Arguments);
+public sealed record ConstructorTemplate(IReadOnlyList<ConstructorField> Fields, int Overwritten, ConstructorInvocation? Call = null);
 public sealed record ConstructorTemplateResult(ConstructorTemplate? Template, Reason? Failure);
 
-/// <summary>从完整开放恢复体读出直线构造模板；构造调用递归展开，重复字段保留最后一次写入。</summary>
+/// <summary>从完整开放恢复体读出直线构造模板；保留构造调用及两侧写入，匹配时决定展开或配对。</summary>
 public sealed class ConstructorTemplates(IMethodTemplateSource source, ManagedTypes types)
 {
     private readonly object gate = new();
     private readonly Dictionary<MethodDef, ConstructorTemplateResult> cache = [];
     private readonly HashSet<MethodDef> active = [];
-    public bool IsEmpty(MethodDef method) => Get(method).Template is { Fields.Count: 0 };
+    public bool IsEmpty(MethodDef method) => Alternatives(MethodRef.Open(method)).Any(t => t is { Call: null, Fields.Count: 0 });
     public ConstructorTemplateResult Get(MethodDef method)
     {
         lock (gate)
         {
             if (cache.TryGetValue(method, out var result)) return result;
-            if (!active.Add(method)) return No("Recursive", "构造模板依赖成环。");
+            if (!active.Add(method)) return No("Recursive", "构造模板的完整恢复依赖成环。");
             var chain = new HashSet<TypeDef>();
             TypeRef? ancestor = MethodRef.Open(method).DeclaringType;
             while (ancestor is DefinitionRef type && chain.Add(type.Definition)) ancestor = Parent(ancestor);
@@ -48,11 +49,13 @@ public sealed class ConstructorTemplates(IMethodTemplateSource source, ManagedTy
         if (method is not { Name: ".ctor", IsStatic: false, Owner.IsValueType: false } || method.GenericParameters.Count != 0)
             return No("Signature", "只接受引用类型的实例构造函数。");
         if (MethodTemplateStatements.Read(body, out var why) is not { } statements) return No(why!, "模板含非直线控制流。");
-        var fields = new Dictionary<FieldRef, ManagedValue>(); int overwritten = 0, calls = 0;
+        var fields = new Dictionary<(FieldRef Field, bool After), ManagedValue>(); int overwritten = 0, calls = 0;
+        ConstructorInvocation? constructor = null;
         void Write(FieldRef field, ManagedValue value)
         {
-            if (fields.ContainsKey(field)) overwritten++;
-            fields[field] = value;
+            var key = (field, constructor is not null);
+            if (fields.ContainsKey(key)) overwritten++;
+            fields[key] = value;
         }
         for (int i = 0; i < statements.Count; i++)
         {
@@ -74,15 +77,7 @@ public sealed class ConstructorTemplates(IMethodTemplateSource source, ManagedTy
             {
                 var arguments = invocation.Arguments.Select(LiteralOrParameter).ToArray();
                 if (arguments.Any(v => v is null)) return No("ManagedCall.Arguments", "构造调用实参不是形参、常量或字面量实体。");
-                var nested = Get(invocation.Method.Method);
-                if (nested.Template is not { } template) return No("ManagedCall.Template", "被调构造函数没有直线模板。", nested.Failure);
-                overwritten += template.Overwritten;
-                foreach (var field in template.Fields)
-                {
-                    var concrete = Substitute(field.Value, invocation.Method);
-                    Write(field.Field with { DeclaringType = invocation.Method.Concrete(field.Field.DeclaringType) },
-                        concrete is ArgumentValue parameter ? arguments[parameter.Index]! : concrete);
-                }
+                constructor = new(invocation.Method, arguments.Select(v => v!).ToArray());
                 continue;
             }
             return No(statement.GetType().Name, "第一条不满足直线模板条件的语句。");
@@ -90,7 +85,39 @@ public sealed class ConstructorTemplates(IMethodTemplateSource source, ManagedTy
         if (statements.LastOrDefault() is not ManagedReturn { Value: null }) return No("Return", "缺少无值返回。");
         if (calls == 0 && !(method.Owner.BaseType is null && body.Method.DeclaringType.Equals(types.Object)))
             return No("Initialization", "有基类的构造函数缺少 this 初始化调用。");
-        return new(new(fields.Select(p => new ConstructorField(p.Key, p.Value)).ToArray(), overwritten), null);
+        return new(new(fields.Select(p => new ConstructorField(p.Key.Field, p.Value, p.Key.After)).ToArray(), overwritten, constructor), null);
+    }
+    /// <summary>每层可保留一次真实调用；继续展开时把内层值替换为最外层形参。成环只终止展开。</summary>
+    public IEnumerable<ConstructorTemplate> Alternatives(MethodRef method)
+    {
+        var active = new HashSet<MethodDef>();
+        var before = new List<ConstructorField>(); var after = new List<ConstructorField>();
+        IReadOnlyList<ManagedValue>? arguments = null; int overwritten = 0;
+        while (active.Add(method.Method) && Get(method.Method).Template is { } template)
+        {
+            ManagedValue Map(ManagedValue value)
+            {
+                var concrete = Substitute(value, method);
+                return concrete is ArgumentValue parameter && arguments is not null ? arguments[parameter.Index] : concrete;
+            }
+            ConstructorField Field(ConstructorField field) => new(field.Field with { DeclaringType = method.Concrete(field.Field.DeclaringType) }, Map(field.Value), field.AfterCall);
+            before.AddRange(template.Fields.Where(f => !f.AfterCall).Select(Field));
+            after.InsertRange(0, template.Fields.Where(f => f.AfterCall).Select(Field));
+            overwritten += template.Overwritten;
+            var call = template.Call is { } nested ? new ConstructorInvocation(
+                new(nested.Method.Method, nested.Method.TypeArguments.Select(method.Concrete).ToArray(), nested.Method.MethodArguments.Select(method.Concrete).ToArray()),
+                nested.Arguments.Select(Map).ToArray()) : null;
+            var fields = new Dictionary<(FieldRef, bool), ConstructorField>(); int replaced = 0;
+            foreach (var field in before.Select(f => f with { AfterCall = false }).Concat(after.Select(f => f with { AfterCall = call is not null })))
+            {
+                var key = (field.Field, field.AfterCall);
+                if (fields.ContainsKey(key)) replaced++;
+                fields[key] = field;
+            }
+            yield return new(fields.Values.ToArray(), overwritten + replaced, call);
+            if (call is null) yield break;
+            method = call.Method; arguments = call.Arguments;
+        }
     }
     private ManagedValue? LiteralOrParameter(ManagedValue value)
     {

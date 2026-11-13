@@ -12,10 +12,11 @@ namespace Cpp2CS.Recovery.Inlining;
 
 public sealed record ConstructorCall(MethodRef Method, BoundCall Binding, bool Virtual, Term? Receiver);
 public sealed record AllocationConstructorRequest(Point Point, TypeRef Type, Term Result, ConstructorAccess Access);
-public sealed record ConstructorInitialWrite(Point Point, MemoryWrite Write, FieldRef Field);
+public sealed record ConstructorInitialWrite(Point Point, MemoryWrite Write, FieldRef Field, bool AfterCall = false);
+public sealed record ConstructorInitialRegion(IReadOnlyList<ConstructorInitialWrite> Writes, CallIdentity? Call = null, Point? CallPoint = null);
 public sealed record AllocationConstructorAnswer(MethodRef? Constructor, CallIdentity? Call, Reason? Failure)
 {
-    public IReadOnlyList<ConstructorInitialWrite> Writes { get; init; } = [];
+    public ConstructorInitialRegion Region { get; init; } = new([]);
 }
 
 /// <summary>紧邻配对沿用原条件；模板锚点保留共享前沿对延迟构造调用的保护。</summary>
@@ -33,8 +34,9 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
             return Outcome<AllocationConstructorAnswer>.Success(new(method, call.Identity, null));
         if (constructors is null) return Outcome<AllocationConstructorAnswer>.Success(new(null, null,
             new("lowering.Allocation.Constructor", "对象分配之后的第一个事件不是对它的同类构造函数调用。")));
-        var initial = InitialWrites(c, new(block.Identity, key.Point.Before + 1), key.Result);
-        var included = initial.Select(w => w.Write.Identity).ToHashSet();
+        var initial = InitialRegion(c, new(block.Identity, key.Point.Before + 1), key.Result);
+        if (initial.Call is { } delayed && bindings[delayed].Method.DeclaringType.Equals(key.Type)) return Deferred(null);
+        var included = initial.Writes.Select(w => w.Write.Identity).ToHashSet();
         var frontier = new EventFrontierQuery((context, point) => Uses(context, point, key, included));
         var reached = c.Get(frontier, new(new(block.Identity, key.Point.Before + 1)));
         if (!reached.IsSuccess) return Unproved(reached.Why);
@@ -47,7 +49,7 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
                 && target.Method.Method is { Name: ".ctor", IsStatic: false } && target.Method.DeclaringType.Equals(key.Type)) return Deferred(null);
         }
         return Outcome<AllocationConstructorAnswer>.Success(new(null, null, null)
-        { Writes = initial });
+        { Region = initial });
         Outcome<AllocationConstructorAnswer> Reject(string code, string message, Reason? cause)
         {
             var reason = new Reason(code, message, cause);
@@ -57,18 +59,45 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
         Outcome<AllocationConstructorAnswer> Deferred(Reason? cause) => Reject("lowering.Allocation.Deferred", "对象首次使用是构造调用，但不满足紧邻配对条件。", cause);
         Outcome<AllocationConstructorAnswer> Unproved(Reason? cause) => Reject("lowering.Allocation.Constructor", "不能证明各路径的首次对象使用都不是构造调用。", cause);
     }
-    /// <summary>只读取当前基本块的初始写入；分支、汇合、调用与托管读取均截断，不重排控制流。</summary>
-    public IReadOnlyList<ConstructorInitialWrite> InitialWrites(QueryContext c, Point start, Term receiver)
+    /// <summary>只沿唯一前驱的直线后继收集；一次同对象直接构造调用划分写入的前后两段。</summary>
+    public ConstructorInitialRegion InitialRegion(QueryContext c, Point start, Term receiver)
     {
         var indexed = c.Get(state.Index, 0);
-        if (!indexed.IsSuccess || locations is null) return [];
+        if (!indexed.IsSuccess || locations is null) return new([]);
         var resolved = c.Get(state.Resolve, receiver);
-        if (!resolved.IsSuccess) return [];
+        if (!resolved.IsSuccess) return new([]);
         var block = indexed.Value.Blocks[start.Block];
         var writes = new List<ConstructorInitialWrite>();
-        for (int i = start.Before; i < block.Statements.Length; i++)
+        CallIdentity? paired = null; Point? callPoint = null;
+        var visited = new HashSet<BlockIdentity> { start.Block };
+        for (int i = start.Before; ; i++)
         {
+            if (i == block.Statements.Length)
+            {
+                if (block.End is not Jump jump || indexed.Value.Predecessors[jump.Target].Length != 1 || !visited.Add(jump.Target)) break;
+                block = indexed.Value.Blocks[jump.Target]; i = -1; continue;
+            }
             var statement = block.Statements[i];
+            if (statement is Call call && paired is null && !call.DoesNotReturn && call.Unwind is null
+                && bindings.TryGetValue(call.Identity, out var target) && !target.Virtual && target.Receiver is null
+                && target.Method.Method is { Name: ".ctor", IsStatic: false, Owner.IsValueType: false }
+                && target.Binding.This is { } self)
+            {
+                var source = c.Get(sources, new(self.Source, new(block.Identity, i)));
+                if (!source.IsSuccess) break;
+                var actual = c.Get(state.Resolve, source.Value);
+                if (!actual.IsSuccess || actual.Value != resolved.Value) break;
+                bool independent = true;
+                foreach (var parameter in target.Binding.Parameters)
+                {
+                    var input = c.Get(sources, new(parameter.Source, new(block.Identity, i)));
+                    if (!input.IsSuccess) { independent = false; break; }
+                    var value = c.Get(state.Resolve, input.Value);
+                    if (!value.IsSuccess || SnapshotRewrite.Dependencies([value.Value]).Contains(resolved.Value)) { independent = false; break; }
+                }
+                if (!independent) break;
+                paired = call.Identity; callPoint = new(block.Identity, i); continue;
+            }
             if (statement is MemoryWrite write)
             {
                 var value = c.Get(state.Resolve, write.Value);
@@ -99,7 +128,7 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
                                 if (!overlap.IsSuccess || overlap.Value.Kind != AliasKind.Disjoint) { disjoint = false; break; }
                             }
                             if (!disjoint) break;
-                            writes.Add(new(new(start.Block, i), write, view.Path[0])); continue;
+                            writes.Add(new(new(block.Identity, i), write, view.Path[0], paired is not null)); continue;
                         }
                     }
                 }
@@ -107,7 +136,7 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
             }
             else if (!PrivateAccess(c, state, locations, statement)) break;
         }
-        return writes;
+        return new(writes, paired, callPoint);
     }
     private MethodRef? Direct(QueryContext c, Point point, Call call, AllocationConstructorRequest key)
     {

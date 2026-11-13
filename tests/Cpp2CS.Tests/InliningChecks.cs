@@ -70,6 +70,8 @@ internal static partial class InliningChecks
         GenericAccessorChecks(checks);
         ConstructorChecks(checks);
         StraightConstructorChecks(checks);
+        PairingConstructorChecks(checks);
+        PairedBaseLoweringChecks(checks);
         StraightAllocationChecks(checks);
         var extra = Body(getter, new ManagedStore(0, field, argument), new ManagedReturn(1, field));
         checks.True(AccessorTemplates.Read(extra).Status == AccessorTemplateStatus.NotTemplate, "多一条写入不是模板");
@@ -182,7 +184,7 @@ internal static partial class InliningChecks
         f.Owner.Methods = [constant];
         checks.True(Query().Resolve(access, [new(f.Field, literal)]).Method?.Method == constant, "常量字段匹配");
         checks.True(Query().Resolve(access, [new(f.Field, literal with { Bits = 8 })]).Failure?.Code == "inline.Constructor.Template", "常量不同拒绝");
-        checks.True(Templates().Get(child).Template?.Fields is [{ Value: ArgumentValue { Index: 0 } }], "基类直线模板展开为最外层形参");
+        checks.True(Templates().Alternatives(MethodRef.Open(child)).Last().Fields is [{ Value: ArgumentValue { Index: 0 } }], "基类直线模板展开为最外层形参");
         bodies[one] = Body(one, Call(one, root), Store(one, f.Field, parameter), Store(one, second, parameter), new ManagedReturn(3, null));
         f.Owner.Methods = [one, constant];
         answer = Query().Resolve(access, [new(f.Field, literal), new(second, literal)]);
@@ -222,7 +224,71 @@ internal static partial class InliningChecks
             "基类形参不可绑定时才回退到同类其他构造");
         bodies[child] = Body(child, Call(child, delegated), new ManagedReturn(1, null));
         bodies[delegated] = Body(delegated, Call(delegated, child, literal), new ManagedReturn(1, null));
-        checks.True(Templates().Get(child).Failure?.Code == "inline.Constructor.NotStraight", "同类构造展开成环没有模板");
+        checks.True(!Templates().Alternatives(MethodRef.Open(child)).Any(t => t.Call is null), "同类构造展开成环不能完全展开");
+    }
+
+    private static void PairingConstructorChecks(Assertions checks)
+    {
+        var f = new Fixture(); f.Owner.BaseType = f.Types.Object; f.Caller.BaseType = f.OwnerType;
+        var root = f.Method(f.Types.Object.Definition, ".ctor", true, false, []);
+        var opaque = f.Method(f.Types.Object.Definition, ".ctor", true, false, [f.Integer]);
+        var parent = f.Method(f.Owner, ".ctor", true, false, [f.Integer]);
+        var shortCtor = f.Method(f.Owner, ".ctor", true, false, []);
+        var child = f.Method(f.Caller, ".ctor", true, false, []);
+        var secondDef = new FieldDef { Index = 2, Owner = f.Owner, Name = "Other", Type = f.Integer,
+            Attributes = FieldAttributes.Private, Offset = 20, Token = 0x04000003 };
+        var second = new FieldRef(secondDef, f.OwnerType); f.Owner.Fields = [.. f.Owner.Fields, secondDef];
+        var self = new ArgumentValue(-1, f.OwnerType, 64); var parameter = new ArgumentValue(0, f.Integer, 32);
+        var literal = new ConstantValue(7, f.Integer, 32);
+        ManagedCall Call(MethodDef target, params ManagedValue[] args) => new(0, new(MethodRef.Open(target), self, args, false), null);
+        ManagedStore Store(FieldRef field, ManagedValue value) => new(0, new FieldValue(self, field, f.Integer, 32), value);
+        ManagedBody Body(MethodDef method, params ManagedStatement[] statements) => new(MethodRef.Open(method), [new(0, statements)]);
+        var bodies = new Dictionary<MethodDef, ManagedBody>
+        {
+            [root] = Body(root, new ManagedReturn(0, null)),
+            // 被调方没有完整恢复体也能成为真实调用的配对目标。
+            [parent] = Body(parent, Store(f.Field, parameter), Call(opaque, parameter), Store(second, literal), new ManagedReturn(0, null)),
+        };
+        ConstructorQuery Query() => new(f.Types, new(new BodySource(bodies.GetValueOrDefault), f.Types));
+        var access = new ConstructorAccess(MethodRef.Open(child), 0, f.OwnerType, ConstructorAnchor.Base);
+        ConstructorActualCall Actual(ManagedValue value) => new(MethodRef.Open(opaque), [new(value)]);
+        ConstructorWrite[] writes = [new(f.Field, literal), new(second, literal, AfterCall: true)];
+        var answer = Query().MatchInitialization(MethodRef.Open(child), writes, Actual(literal));
+        checks.True(answer.Method?.Method == parent && answer.ConsumesCall && answer.Arguments.SequenceEqual([literal]), "非直线祖先调用配对并恢复直接基类调用");
+        checks.True(Query().Resolve(access, writes, Actual(literal with { Bits = 8 })).Failure is not null, "真实调用与字段的形参绑定必须一致");
+        checks.True(Query().Resolve(access, [new(f.Field, literal, AfterCall: true), new(second, literal)], Actual(literal)).Failure is not null, "调用前后的字段写入不能交换");
+        checks.True(Query().MatchInitialization(MethodRef.Open(child), writes, Actual(literal with { Bits = 8 })).Failure?.Code == "lowering.ConstructorInitialization", "没有被模板消费的祖先调用仍触发保护");
+        checks.True(Query().MatchInitialization(MethodRef.Open(child), writes, Actual(literal), unconsumedAncestor: true).Failure?.Code == "lowering.ConstructorInitialization", "消费一处调用不解除另一处祖先调用的保护");
+        bodies[parent] = Body(parent, Store(f.Field, parameter), Call(opaque, literal), Store(second, literal), new ManagedReturn(0, null));
+        checks.True(Query().Resolve(access, writes, Actual(literal with { Bits = 8 })).Failure?.Message.Contains("常量不同") == true, "祖先调用常量实参不同不配对");
+        bodies[parent] = Body(parent, Call(root), Store(f.Field, parameter), new ManagedReturn(0, null));
+        bodies[shortCtor] = Body(shortCtor, Call(opaque, literal), new ManagedReturn(0, null));
+        answer = Query().Resolve(access, [new(f.Field, literal)], Actual(literal));
+        checks.True(answer.Method?.Method == shortCtor && answer.ConsumesCall && answer.Writes.Count == 0, "消费真实调用优先于匹配更多字段但没有消费调用的候选");
+        bodies[shortCtor] = Body(shortCtor, Call(root), new ManagedReturn(0, null));
+        f.Owner.Methods = [shortCtor];
+        answer = Query().Resolve(access, [], new(MethodRef.Open(root), []));
+        checks.True(answer.Method?.Method == shortCtor && answer.ConsumesCall && answer.Failure is null, "同一候选的展开和配对都成立时取消费真实调用的对法");
+        bodies[parent] = Body(parent, Store(f.Field, parameter), Call(root), Store(second, literal), new ManagedReturn(0, null));
+        bodies[shortCtor] = Body(shortCtor, Store(f.Field, literal), Call(root), new ManagedReturn(0, null));
+        f.Owner.Methods = [parent, shortCtor];
+        answer = Query().Resolve(access, writes, new(MethodRef.Open(root), []));
+        checks.True(answer.Method?.Method == parent && answer.Failure is null && answer.Writes.Count == 2,
+            "较少字段候选的两种对法不覆盖更完整的唯一候选");
+        bodies[parent] = Body(parent, Store(f.Field, literal with { Bits = 1 }), Call(opaque, literal), Store(f.Field, parameter), new ManagedReturn(0, null));
+        f.Owner.Methods = [parent];
+        answer = Query().Resolve(access, [new(f.Field, literal with { Bits = 1 }), new(f.Field, literal, AfterCall: true)], Actual(literal));
+        checks.True(answer.Method?.Method == parent && answer.Writes.Count == 2, "同一字段跨调用的两次写入不能折叠");
+        f.Owner.Methods = [shortCtor];
+        // 父模板展开到更远一层，再在那一层配对；形参仍绑定到最外层。
+        bodies[parent] = Body(parent, Call(opaque, parameter), new ManagedReturn(0, null));
+        bodies[shortCtor] = Body(shortCtor, Call(parent, literal), new ManagedReturn(0, null));
+        answer = Query().Resolve(access, [], Actual(literal));
+        checks.True(answer.Method?.Method == shortCtor && answer.ConsumesCall, "递归展开后仍可在内层配对并替换实参");
+        f.Owner.Methods = [parent];
+        answer = Query().Resolve(access, [], Actual(literal));
+        checks.True(answer.Method?.Method == parent && answer.Arguments.SequenceEqual([literal]) && answer.Writes.Count == 0,
+            "仅在被配对调用中出现的形参也能完整绑定");
     }
 
     private static void StraightAllocationChecks(Assertions checks)
@@ -235,6 +301,7 @@ internal static partial class InliningChecks
         var ctor = f.Method(f.Owner, ".ctor", true, false, [f.Integer]);
         var make = f.Method(f.Caller, "Create", false, true, [f.Integer]); make.ReturnType = f.OwnerType;
         var sink = f.Method(f.Caller, "Observe", true, true, [f.OwnerType]);
+        var discard = f.Method(f.Caller, "Discard", true, true, [f.Integer]);
         var bodies = new Dictionary<MethodDef, ManagedBody>
         {
             [root] = new(MethodRef.Open(root), [new(0, [new ManagedReturn(0, null)])]),
@@ -248,8 +315,10 @@ internal static partial class InliningChecks
         var allocation = catalog.Functions.First(op => op.Operation.Il?.Name == "NewObject" && op.Signature is not null);
         var calls = new CallNamingQuery(f.Binder, new NamingChecks.Map([new(MethodRef.Open(sink), BindingEntryKind.Ordinary)]),
             new NamingChecks.RuntimeMap(allocation), catalog);
-        foreach (var mode in new[] { "Field", "Escape", "Read", "Branch", "Partial", "Overlap" })
+        foreach (var mode in new[] { "Field", "Escape", "Read", "Linear", "Merge", "Partial", "Overlap", "Paired", "PairedUnused" })
         {
+            var modeCalls = mode is "Paired" or "PairedUnused" ? new CallNamingQuery(f.Binder, new NamingChecks.Map([new(MethodRef.Open(root), BindingEntryKind.Ordinary)]),
+                new NamingChecks.RuntimeMap(allocation), catalog) : calls;
             var t = new TermTable(); var head = new BlockIdentity(); var tail = new BlockIdentity();
             var frame = t.Atom(new RootAtom(AddressRoot.Frame), 64); var image = t.Atom(new RootAtom(AddressRoot.Image), 64);
             var fn = new FunctionBuilder(t, head, 64, new(frame)) { ImageBase = image };
@@ -262,24 +331,32 @@ internal static partial class InliningChecks
                 new MemoryRead(read, t.Apply(new CoreOperator(CoreOperation.Add), 64, image, t.Constant(128, 64)), 64, klass),
                 new Call(allocationId, new ImageFunction(20), [new(new(SlotKind.Integer), klass)], [new(new(SlotKind.Integer), value)]) { Trace = new(32) },
             };
+            if (mode is "Paired" or "PairedUnused") statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), value), new(new(SlotKind.Integer, 1), t.Constant(0, 64))], []));
             if (mode == "Escape") statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), value), new(new(SlotKind.Integer, 1), t.Constant(0, 64))], []));
             if (mode == "Read") { var id = new ReadIdentity(); statements.Add(new MemoryRead(id, address, 32, t.Atom(new ResultAtom(id), 32))); }
             if (mode == "Overlap") statements.Add(new MemoryWrite(new(), address, 64, t.Constant(9, 64)));
             int width = mode == "Partial" ? 16 : 32;
             var store = new MemoryWrite(new(), address, width, t.Slice(input, 0, width));
-            if (mode == "Branch")
+            if (mode == "Merge")
+            {
+                var other = new BlockIdentity();
+                fn.Blocks.Add(new(head, [], [.. statements], new Branch(t.Apply(new CoreOperator(CoreOperation.Equal), 1, input, t.Constant(0, 64)), tail, other)));
+                fn.Blocks.Add(new(other, [], [], new Jump(tail)));
+                fn.Blocks.Add(new(tail, [], [store], new Return(mode == "PairedUnused" ? [] : [new(new(SlotKind.Integer), value)])));
+            }
+            else if (mode == "Linear")
             {
                 fn.Blocks.Add(new(head, [], [.. statements], new Jump(tail)));
-                fn.Blocks.Add(new(tail, [], [store], new Return([new(new(SlotKind.Integer), value)])));
+                fn.Blocks.Add(new(tail, [], [store], new Return(mode == "PairedUnused" ? [] : [new(new(SlotKind.Integer), value)])));
             }
             else
             {
                 statements.Add(store);
-                fn.Blocks.Add(new(head, [], [.. statements], new Return([new(new(SlotKind.Integer), value)])));
+                fn.Blocks.Add(new(head, [], [.. statements], new Return(mode == "PairedUnused" ? [] : [new(new(SlotKind.Integer), value)])));
             }
             var names = NamingFacts.Empty with { Slots = NamingFacts.Empty.Slots.Add(128, Outcome<MetadataEntity>.Success(new ClassEntity(f.OwnerType))) };
-            var lowered = new IntegerLowering(fn.Freeze(), MethodRef.Open(make), f.Binder, f.Types, calls: calls, spec: f.Spec, names: names, constructors: query).Run();
-            if (mode == "Field")
+            var lowered = new IntegerLowering(fn.Freeze(), MethodRef.Open(mode == "PairedUnused" ? discard : make), f.Binder, f.Types, calls: modeCalls, spec: f.Spec, names: names, constructors: query).Run();
+            if (mode is "Field" or "Linear" or "Paired" or "PairedUnused")
             {
                 var created = lowered.Body?.Blocks[0].Statements.OfType<ManagedAssignment>().SingleOrDefault(a => a.Value is NewObjectValue)?.Value as NewObjectValue;
                 checks.True(created is { Constructor.Method: var selected, Arguments.Count: 1 } && selected == ctor
@@ -287,13 +364,42 @@ internal static partial class InliningChecks
                 using var emission = new EmissionFixture(f);
                 checks.True(lowered.Body is { } complete && emission.Emitter.Emit([complete]).Count == 0, "直线构造 newobj 通过输出检查");
             }
-            else checks.True(lowered.Failure?.Reason.Code == "inline.Constructor.Template", "首次其他使用或块边界截断写入组：" + mode + " " + lowered.Failure);
+            else checks.True(lowered.Failure?.Reason.Code == "inline.Constructor.Template", "首次其他使用、汇合或不完整字段截断写入组：" + mode + " " + lowered.Failure);
         }
         var child = f.Method(f.Caller, ".ctor", true, false, [f.Integer]); f.Caller.BaseType = f.OwnerType;
         var (native, _) = f.Function(f.Field, true);
         var baseBody = new IntegerLowering(native, MethodRef.Open(child), f.Binder, f.Types, calls: f.Calls, spec: f.Spec, constructors: query).Run();
         checks.True(baseBody.Body?.Blocks[0].Statements is [ManagedCall { Invocation.Method.Method: var selectedBase, Invocation.Arguments.Count: 1 }, ManagedReturn]
             && selectedBase == ctor, "基类入口写入转为带参调用：" + baseBody.Failure);
+    }
+
+    private static void PairedBaseLoweringChecks(Assertions checks)
+    {
+        var f = new Fixture(); f.Owner.BaseType = f.Types.Object; f.Caller.BaseType = f.OwnerType;
+        var root = f.Method(f.Types.Object.Definition, ".ctor", true, false, []);
+        var parent = f.Method(f.Owner, ".ctor", true, false, [f.Integer]);
+        var child = f.Method(f.Caller, ".ctor", true, false, [f.Integer]);
+        var own = new FieldDef { Index = 2, Owner = f.Caller, Name = "Initial", Type = f.Integer,
+            Attributes = FieldAttributes.Private, Offset = 24, Token = 0x04000003 };
+        f.Caller.Fields = [own]; ((List<FieldDef>)f.Program.Fields).Add(own);
+        var self = new ArgumentValue(-1, f.OwnerType, 64);
+        var body = new ManagedBody(MethodRef.Open(parent), [new(0, [new ManagedCall(0,
+            new(MethodRef.Open(root), self, [], false), null), new ManagedStore(0,
+            new FieldValue(self, f.Field, f.Integer, 32), new ArgumentValue(0, f.Integer, 32)), new ManagedReturn(0, null)])]);
+        var query = new ConstructorQuery(f.Types, new(new BodySource(m => m == parent ? body : null), f.Types));
+        var native = f.Function(f.Field, true).Function;
+        var fn = new FunctionBuilder(native.Terms, native.Entry, 64, native.Frame); fn.Inputs.AddRange(native.Inputs);
+        var call = new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), native.Inputs[0].Value),
+            new(new(SlotKind.Integer, 1), native.Terms.Constant(0, 64))], []);
+        var block = native.Blocks[0];
+        var address = native.Terms.Apply(new CoreOperator(CoreOperation.Add), 64, native.Inputs[0].Value, native.Terms.Constant(24, 64));
+        var before = new MemoryWrite(new(), address, 32, native.Terms.Constant(1, 32));
+        var after = new MemoryWrite(new(), address, 32, native.Terms.Constant(2, 32));
+        fn.Blocks.Add(block with { Statements = block.Statements.Insert(0, call).Insert(0, before).Add(after) });
+        var calls = new CallNamingQuery(f.Binder, new NamingChecks.Map([new(MethodRef.Open(root), BindingEntryKind.Ordinary)]), new NamingChecks.RuntimeMap(), RuntimeFunctionCatalog.Select(f.Spec.Layout.UnityVersion, f.Spec.Layout.Triple, f.Spec.Layout.DataModel));
+        var lowered = new IntegerLowering(fn.Freeze(), MethodRef.Open(child), f.Binder, f.Types, calls: calls, spec: f.Spec, constructors: query).Run();
+        checks.True(lowered.Body?.Blocks[0].Statements is [ManagedStore, ManagedCall { Invocation.Method.Method: var selected, Invocation.Arguments.Count: 1 }, ManagedStore, ManagedReturn]
+            && selected == parent, "祖先调用与模板字段被消费，自有字段保留在调用前后：" + lowered.Failure);
     }
 
     private static void ConstructorChecks(Assertions checks)

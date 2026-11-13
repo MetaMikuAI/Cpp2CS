@@ -48,6 +48,8 @@ public sealed partial class IntegerLowering
 
     private readonly HashSet<WriteIdentity> constructorWrites = [];
     private ConstructorAnswer? constructorInitialization;
+    private readonly HashSet<CallIdentity> constructorCalls = [];
+    private CallIdentity? constructorInitializationCall;
 
     /// <summary>位置查询提供初始写入，模板查询绑定值；只有匹配成功的写入并入构造调用。</summary>
     private void PairConstructions()
@@ -73,29 +75,40 @@ public sealed partial class IntegerLowering
                 if (result.Value.Call is { } paired) constructions.Add(paired, definition);
                 else if (constructors is not null)
                 {
-                    var writes = ConstructorInputs(result.Value.Writes);
+                    var region = result.Value.Region;
+                    var writes = ConstructorInputs(region.Writes);
                     if (writes is null) return;
-                    var answer = constructors.Resolve(new(method, position, definition.Type, ConstructorAnchor.Allocation), writes);
+                    var actual = ConstructorCallInput(region);
+                    if (failure is not null) return;
+                    var answer = constructors.Resolve(new(method, position, definition.Type, ConstructorAnchor.Allocation), writes, actual);
                     if (answer.Failure is { } why)
                     { Fail<object>(LoweringFailureKind.RuntimeCall, why.Message, why.Cause, why.Code); return; }
                     definition.InlinedConstructor = answer.Method;
                     definition.Arguments = answer.Arguments;
-                    foreach (int index in answer.Writes) constructorWrites.Add(result.Value.Writes[index].Write.Identity);
+                    foreach (int index in answer.Writes) constructorWrites.Add(region.Writes[index].Write.Identity);
+                    if (answer.ConsumesCall) constructorCalls.Add(region.Call!);
                 }
             }
         if (constructors is null || method.Method is not { Name: ".ctor", IsStatic: false, Owner.IsValueType: false }) return;
-        // 任何可能初始化 this 的已有祖先构造调用都交给原见证检查，不能重复补入。
+        // 直接基类或同类调用仍交给见证检查；更远祖先调用由模板决定是否消费。
         if (callDefinitions.Values.Any(d => d.Method.Method is { Name: ".ctor", IsStatic: false, Owner.IsValueType: false }
-            && types.IsAssignable(method.DeclaringType, d.Method.DeclaringType))) return;
+            && (d.Method.DeclaringType.Equals(method.DeclaringType) || d.Method.DeclaringType.Equals(ConstructorTemplates.Parent(method.DeclaringType))))) return;
         var self = arguments.FirstOrDefault(p => p.Value is ArgumentValue { Index: -1 }).Key;
         if (self is null) return;
-        var initial = query.InitialWrites(context, new(function.Entry, 0), self);
-        var inputs = ConstructorInputs(initial);
+        var initial = query.InitialRegion(context, new(function.Entry, 0), self);
+        var inputs = ConstructorInputs(initial.Writes);
         if (inputs is null) return;
-        constructorInitialization = constructors.MatchInitialization(method, inputs);
+        var initialCall = ConstructorCallInput(initial);
+        if (failure is not null) return;
+        bool otherAncestor = callDefinitions.Any(p => p.Key != initial.Call
+            && p.Value.Method.Method is { Name: ".ctor", IsStatic: false, Owner.IsValueType: false }
+            && types.IsAssignable(method.DeclaringType, p.Value.Method.DeclaringType));
+        constructorInitialization = constructors.MatchInitialization(method, inputs, initialCall, otherAncestor);
         if (constructorInitialization.Failure is { } reason)
         { Fail<object>(LoweringFailureKind.ConstructorInitialization, reason.Message, reason.Cause, reason.Code); return; }
-        foreach (int index in constructorInitialization.Writes) constructorWrites.Add(initial[index].Write.Identity);
+        foreach (int index in constructorInitialization.Writes) constructorWrites.Add(initial.Writes[index].Write.Identity);
+        if (constructorInitialization.ConsumesCall)
+        { constructorInitializationCall = initial.Call; constructorCalls.Add(initial.Call!); }
     }
 
     private IReadOnlyList<ConstructorWrite>? ConstructorInputs(IReadOnlyList<ConstructorInitialWrite> writes)
@@ -113,9 +126,31 @@ public sealed partial class IntegerLowering
                     IntegerBits(value), type, write.Write.Width);
             var resolved = context.Get(state.Resolve, write.Write.Value);
             if (!resolved.IsSuccess) return Fail<IReadOnlyList<ConstructorWrite>>(LoweringFailureKind.State, "初始写入值查询失败", resolved.Why);
-            result.Add(new(write.Field, value, resolved.Value));
+            int bits = types.StorageBits(type);
+            var identity = bits > 0 && bits < resolved.Value.Width ? function.Terms.Slice(resolved.Value, 0, bits) : resolved.Value;
+            result.Add(new(write.Field, value, identity, write.AfterCall));
         }
         return result;
+    }
+
+    private ConstructorActualCall? ConstructorCallInput(ConstructorInitialRegion region)
+    {
+        if (region.Call is not { } id || region.CallPoint is not { } point) return null;
+        var definition = callDefinitions[id];
+        var inputs = new List<ConstructorArgument>();
+        for (int i = 0; i < definition.Binding.Parameters.Length; i++)
+        {
+            var type = definition.Method.Concrete(definition.Method.Method.Parameters[i].Type);
+            var value = CallArgument(definition.Binding.Parameters[i], type, point);
+            var term = BoundTerm(definition.Binding.Parameters[i].Source, point);
+            if (value is null || term is null) return null;
+            var resolved = context.Get(state.Resolve, term);
+            if (!resolved.IsSuccess) return Fail<ConstructorActualCall>(LoweringFailureKind.State, "构造调用实参状态查询失败", resolved.Why);
+            int bits = types.StorageBits(type);
+            var identity = bits > 0 && bits < resolved.Value.Width ? function.Terms.Slice(resolved.Value, 0, bits) : resolved.Value;
+            inputs.Add(new(value, identity));
+        }
+        return new(definition.Method, inputs);
     }
 
     /// <summary>一维数组的分配：就在调用处写成 newarr，结果是一个局部。</summary>

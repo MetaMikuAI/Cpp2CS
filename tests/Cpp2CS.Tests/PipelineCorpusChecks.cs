@@ -70,6 +70,8 @@ internal static class PipelineCorpusChecks
             {
                 Method = RecoverySession.Identity(i.Method), Name = i.Method.ToString(),
                 Fields = i.Result.Template?.Fields.Count, Overwritten = i.Result.Template?.Overwritten,
+                Call = i.Result.Template?.Call?.Method.ToString(),
+                Before = i.Result.Template?.Fields.Count(f => !f.AfterCall), After = i.Result.Template?.Fields.Count(f => f.AfterCall),
                 Code = i.Result.Failure?.Code, Message = i.Result.Failure?.Message, Cause = i.Result.Failure?.Cause,
             }), new JsonSerializerOptions { WriteIndented = true }));
             Console.WriteLine($"构造模板普查：直线={inspected.Count(i => i.Result.Template is not null)}；覆盖写入={inspected.Sum(i => i.Result.Template?.Overwritten ?? 0)}；" +
@@ -106,7 +108,7 @@ internal static class PipelineCorpusChecks
             a.Access.Position, Type = a.Access.Type.ToString(), Anchor = a.Access.Anchor.ToString(),
             Constructor = a.Answer.Method?.ToString(), ConstructorIdentity = a.Answer.Method is { } selected ? RecoverySession.Identity(selected.Method) : null,
             Code = a.Answer.Failure?.Code ?? "Solved", Message = a.Answer.Failure?.Message,
-            Arguments = a.Answer.Arguments.Select(v => v.ToString()), ConsumedWrites = a.Answer.Writes.Count,
+            Arguments = a.Answer.Arguments.Select(v => v.ToString()), ConsumedWrites = a.Answer.Writes.Count, ConsumedCall = a.Answer.ConsumesCall,
             Candidates = a.Answer.Candidates.Select(candidate => new
             {
                 Method = RecoverySession.Identity(candidate.Method.Method), Name = candidate.Method.ToString(),
