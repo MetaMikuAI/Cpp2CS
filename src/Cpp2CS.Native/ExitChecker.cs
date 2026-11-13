@@ -218,6 +218,7 @@ public static class ExitChecker
                             Require(call.Target switch
                             {
                                 ImageFunction => true,
+                                NamedFunction named => !string.IsNullOrWhiteSpace(named.Name),
                                 ImportedTarget import => import.Symbol is { } symbol && (!string.IsNullOrWhiteSpace(symbol.Name) || symbol.Ordinal is not null),
                                 ComputedTarget target => target.Value.Width == f.AddressWidth,
                                 _ => false

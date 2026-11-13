@@ -34,8 +34,12 @@ public sealed class CallNamingQuery(MethodBinder binder, IBindingCodeMap code, I
     public RuntimeFunction? RuntimeIdentity(CallTarget target)
     {
         if (target is ComputedTarget || target is ImageFunction image && code.At(image.EntryOffset).Length != 0) return null;
-        return target is ImportedTarget import
-            ? catalog.FindImport(import.Symbol.Name) : runtime.Find(target);
+        return target switch
+        {
+            NamedFunction named => catalog.Functions.SingleOrDefault(f => f.MangledName == named.Name),
+            ImportedTarget import => catalog.FindImport(import.Symbol.Name),
+            _ => runtime.Find(target),
+        };
     }
 
     public override Outcome<ClassifiedCall> Compute(QueryContext c, CallIdentity key)

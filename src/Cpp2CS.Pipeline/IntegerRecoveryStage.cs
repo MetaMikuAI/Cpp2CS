@@ -74,6 +74,9 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         var result = new IntegerLowering(transformed.Function, MethodRef.Open(context.Method), parts.Binder,
             types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names, parts.Accessors, parts.Constructors,
             witness: context.Entry.Method, rgctx: new MetadataRgctxDecoder(context.Facts)).Run(kind);
+        if (result.Failure is { } failure && transformed.Records.FirstOrDefault(r =>
+            !r.Removed && r.Address == failure.Position && r.Why is not null) is { Why: { } why })
+            return new Missing<ManagedBody>(new("结构", failure.Position, "类型判断", why with { Cause = failure.Reason }));
         if (result.Body is { } candidate)
         {
             // 位重解释与浮点取整等依赖匹配核心库的 BCL 方法；裁剪掉的能力是缺口，不交给输出层制造非法体。

@@ -30,8 +30,10 @@ public sealed record AddressName(Term Address) : ValueName;
 public sealed record NamedValue(ValueKind Kind, ValueName? Name, string? Record = null, Reason? Why = null)
 {
     public static NamedValue Unknown(string code, string message, Reason? cause = null) => new(ValueKind.Unnamed, null, Why: new(code, message, cause));
-    public TypeRef? StaticType => Name switch
-    { ParameterName p => p.StaticType, CallResultName r => r.StaticType, LoadedName r => r.StaticType, CaughtExceptionName e => e.StaticType, _ => null };
+    /// <summary>运行时登记给出的引用结果类型视图；值身份仍由原来的名字决定。</summary>
+    public TypeRef? ReferenceType { get; init; }
+    public TypeRef? StaticType => ReferenceType ?? (Name switch
+    { ParameterName p => p.StaticType, CallResultName r => r.StaticType, LoadedName r => r.StaticType, CaughtExceptionName e => e.StaticType, _ => null });
 }
 
 /// <summary>名字保存实体、定义或规格字段依据；不向项表写入替代项，不改写快照。</summary>
@@ -126,8 +128,22 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
                     if (pointer.Value.Name is ExceptionPointerName caught)
                         return Yes(new(ValueKind.RuntimePointer, new ExceptionPayloadName(caught.Handler), "Il2CppExceptionWrapper"));
                 }
+                TypeRef? referenceType = null;
+                if (function.Operation.Result.ReferenceTypeInput is { } typeInput
+                    && call.Inputs?.GetValueOrDefault(typeInput)?.Source is TermSource referenceClass)
+                {
+                    var target = c.Get(this, referenceClass.Term);
+                    if (!target.IsSuccess) return target;
+                    if (target.Value == NameLattice.Pending) return Yes(NameLattice.Pending);
+                    if (target.Value.Name is EntityName { Entity: ClassEntity { Type: var targetType } }
+                        && targetType is DefinitionRef { Definition.IsValueType: false } or ArrayRef) referenceType = targetType;
+                }
                 if (function.Operation.Result.ReturnInput is { } input && call.Inputs?.GetValueOrDefault(input)?.Source is TermSource same)
-                    return c.Get(this, same.Term);
+                {
+                    var original = c.Get(this, same.Term);
+                    if (original.IsSuccess && original.Value == NameLattice.Pending) return original;
+                    return original.IsSuccess && referenceType is not null ? Yes(original.Value with { ReferenceType = referenceType }) : original;
+                }
                 // 结果是某个类输入的实例时，静态类型取该类的实体；类还没有名字时结果照旧不带类型。
                 TypeRef? instance = null;
                 if (function.Operation.Result.Relation is { Kind: RuntimeResultRelationKind.InstanceOfInput, Input: { } classInput }
@@ -139,7 +155,7 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
                 }
                 var name = new CallResultName(id, instance, function.Operation.Name);
                 if (instance is not null) return Yes(Typed(null, instance, name));
-                return Yes(RuntimeValue(function.Operation.Result.Kind,name));
+                return Yes(RuntimeValue(function.Operation.Result.Kind,name) with { ReferenceType = referenceType });
             }
             if (call.Candidates is { } candidates)
             {

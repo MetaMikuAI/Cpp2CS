@@ -181,6 +181,7 @@ internal static partial class LoweringChecks
         NativeIntChecks(checks, program);
         SharedChecks(checks, program);
         RuntimeChecks(checks, program);
+        InlineTypeChecks(checks, program);
         ConstructorChecks(checks, program);
         AccessChecks(checks, program);
         RangeChecks(checks, program);

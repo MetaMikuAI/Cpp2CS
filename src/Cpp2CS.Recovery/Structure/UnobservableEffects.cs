@@ -16,7 +16,10 @@ namespace Cpp2CS.Recovery.Structure;
 
 public sealed record StructureRecord(string Kind, ulong? Address, string Evidence, bool Removed)
 {
+    /// <summary>拒绝改写的原因；接在下降失败原因链的末尾。</summary>
     public Reason? Reason { get; init; }
+    /// <summary>拒绝改写的原因；作为洞的首因，下降的失败原因成为它的原因。</summary>
+    public Reason? Why { get; init; }
 }
 public sealed record StructureResult(NativeFunction Function, ImmutableArray<StructureRecord> Records,
     ImmutableArray<string> Assumptions)
@@ -128,6 +131,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         timings["消去与读取转发"] = timer.Elapsed.TotalSeconds;
         var rejected = new Dictionary<BlockIdentity, StructureRecord>();
         var rejectedLookups = new Dictionary<MergeIdentity, StructureRecord>();
+        var rejectedTypeChecks = new Dictionary<Term, ImmutableArray<StructureRecord>>();
         bool foldedLookup = false;
         var retainedInitializations = new Dictionary<CallIdentity, StructureRecord>();
         while (true)
@@ -146,6 +150,14 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                         predecessors[target].Add(block.Identity);
                 var batch = new SnapshotRewrite(current);
                 var occupied = new HashSet<BlockIdentity>();
+                var typeCheckStart = timer.Elapsed.TotalSeconds;
+                bool foldedTypeCheck = FoldTypeCheck(c, batch, predecessors, records, rejectedTypeChecks);
+                timings["类型判断"] = timings.GetValueOrDefault("类型判断") + timer.Elapsed.TotalSeconds - typeCheckStart;
+                if (foldedTypeCheck)
+                {
+                    current = RemoveDeadPrivateReads(batch.Apply(), records);
+                    continue;
+                }
                 var liveStart = timer.Elapsed.TotalSeconds;
                 var liveness = new StructureLiveness(current, EndUses);
                 liveTime += timer.Elapsed.TotalSeconds - liveStart;
@@ -256,6 +268,9 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         records.AddRange(rejected.Where(p => remaining.Contains(p.Key)).Select(p => p.Value));
         var remainingMerges = current.Blocks.SelectMany(b => b.Merges).Select(m => m.Identity).ToHashSet();
         records.AddRange(rejectedLookups.Where(p => remainingMerges.Contains(p.Key)).Select(p => p.Value));
+        var remainingTerms = SnapshotRewrite.Dependencies(current.Blocks.SelectMany(b => b.Statements.SelectMany(SnapshotRewrite.Uses)
+            .Concat(EndUses(b.End)).Concat(b.Merges.SelectMany(m => m.Inputs.Select(i => i.Value)))));
+        records.AddRange(rejectedTypeChecks.Where(p => remainingTerms.Contains(p.Key)).SelectMany(p => p.Value));
         var assumptions = ImmutableArray.CreateBuilder<string>();
         if (assumed) assumptions.Add(UndefinedAssumption);
         if (foldedLookup) assumptions.Add(InterfaceLookupAssumption);

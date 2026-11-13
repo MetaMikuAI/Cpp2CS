@@ -64,6 +64,8 @@ public sealed record Trace(ulong NativeAddress);
 public abstract record CallTarget { private protected CallTarget() { } }
 /// <summary>函数入口相对映像基址的字节偏移；托管候选身份由代码地图提供。</summary>
 public sealed record ImageFunction(ulong EntryOffset) : CallTarget;
+/// <summary>已声明函数的符号身份；结构变换不为没有原生入口的调用伪造地址。</summary>
+public sealed record NamedFunction(string Name) : CallTarget;
 public sealed record ImportedTarget(ImportSymbol Symbol) : CallTarget;
 public sealed record ComputedTarget(Term Value) : CallTarget;
 

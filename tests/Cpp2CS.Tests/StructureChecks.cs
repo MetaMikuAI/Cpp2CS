@@ -72,6 +72,10 @@ internal static partial class StructureChecks
         var binder = new MethodBinder(new(new FieldLayouts(spec, 8, 8)), new Aapcs64());
         foreach (var operation in RuntimeOperations.All.Values)
         {
+            if (operation.Result.ReferenceTypeInput is { } resultType)
+                checks.True(operation.Result.Kind == RuntimeValueKind.ManagedReference
+                    && operation.Inputs.Any(i => i.Name == resultType && i.Kind == RuntimeValueKind.Class),
+                    "引用结果类型视图引用类输入，且不改变原来的值关系");
             if (operation.Result.Relation.Kind == RuntimeResultRelationKind.ResolvedPointee)
                 checks.True(operation.Result.Width == RuntimeWidth.Pointer && operation.Result.Relation.Evidence is { Length: > 0 }
                     && operation.Inputs.Any(i => i.Name == operation.Result.Relation.Input && i.Use == RuntimeInputUse.Location),

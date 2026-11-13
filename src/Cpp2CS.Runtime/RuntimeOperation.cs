@@ -25,6 +25,8 @@ public sealed record RuntimeInput(string Name, RuntimeInputUse Use, RuntimeValue
 public sealed record RuntimeResult(RuntimeValueKind Kind, RuntimeWidth Width, RuntimeResultRelation Relation)
 {
     public string? ReturnInput => Relation.Kind == RuntimeResultRelationKind.Identity ? Relation.Input : null;
+    /// <summary>正常返回的引用可赋给此类输入；不声称对象的动态类型精确相等。</summary>
+    public string? ReferenceTypeInput { get; init; }
 }
 public sealed record RuntimePointerEffect(string Input, RuntimeAccess Access, RuntimeMemoryDomain Domain, RuntimeExtent Extent, RuntimeCondition Condition);
 // 结构字段按名字引用；匿名元数据槽由外部全局访问凭据确认，不伪装为结构字段。
@@ -76,8 +78,8 @@ public static class RuntimeOperations
         RuntimeHeapEffect heap, RuntimeObservation observation, string normal, string il, string description,
         string evidence, string[]? exceptions = null, RuntimePointerEffect[]? pointers = null, string? returnInput = null,
         RuntimePostcondition? idempotence = null, RuntimePostcondition[]? post = null, bool noReturn = false,
-        string preconditions = "Unity 2022.3 Android LP64 的匹配基础库；生成器保证类型、元数据指针与缓冲区合法；无自定义 profiler 回调；原生耗尽及内存损坏不作为托管结局", bool upperBound = false, RuntimeEventTrigger? trigger = null, RuntimeTermination termination = RuntimeTermination.Throw, RuntimePostcondition[]? exceptional = null, bool inputOrNull = false, string managedCode = "无用户代码；异常构造可能调用基础库构造函数", string? exceptionReason = null, RuntimeResultRelation? resultRelation = null) =>
-        new(name, [.. inputs], new(result, width, resultRelation ?? new(returnInput is null ? RuntimeResultRelationKind.None : inputOrNull ? RuntimeResultRelationKind.InputOrNull : RuntimeResultRelationKind.Identity, returnInput)), heap, [.. pointers ?? []], observation, idempotence,
+        string preconditions = "Unity 2022.3 Android LP64 的匹配基础库；生成器保证类型、元数据指针与缓冲区合法；无自定义 profiler 回调；原生耗尽及内存损坏不作为托管结局", bool upperBound = false, RuntimeEventTrigger? trigger = null, RuntimeTermination termination = RuntimeTermination.Throw, RuntimePostcondition[]? exceptional = null, bool inputOrNull = false, string managedCode = "无用户代码；异常构造可能调用基础库构造函数", string? exceptionReason = null, RuntimeResultRelation? resultRelation = null, string? referenceTypeInput = null) =>
+        new(name, [.. inputs], new(result, width, resultRelation ?? new(returnInput is null ? RuntimeResultRelationKind.None : inputOrNull ? RuntimeResultRelationKind.InputOrNull : RuntimeResultRelationKind.Identity, returnInput)) { ReferenceTypeInput = referenceTypeInput }, heap, [.. pointers ?? []], observation, idempotence,
             noReturn ? [] : post is null ? [Fact(name + "Result", normal)] : [.. post],
             exceptional is not null ? [.. exceptional] : exceptions is { Length: > 0 } ? [Fact(name + "Exception", "抛出所列异常；不承诺正常后置条件，堆效果仍适用", "异常退出")] : [],
             new(exceptions is { Length: > 0 }, [.. exceptions ?? []], upperBound,
@@ -126,11 +128,11 @@ public static class RuntimeOperations
             pointers: [new("method", RuntimeAccess.ReadWrite, RuntimeMemoryDomain.Monotone, new(RuntimeExtentKind.Unknown, "方法泛型上下文"), new(RuntimeConditionKind.StateNotEstablished, "尚未就绪"))], returnInput: "method", idempotence: rgctx, post: [rgctx], upperBound: false, exceptionReason: "封闭的异常种类集合；泛型深度失败见 vm/GenericClass.cpp: CreateClass → vm/Exception.cpp: GetMaximumNestedGenericsException；未解析方法桩只被登记，不在此调用", managedCode: "没有调用解析得到的方法或用户重载；只可能执行基础库错误构造") with
             { MetadataInitialization = new("method", "codegen/il2cpp-codegen-il2cpp.h: il2cpp_rgctx_method_init；vm/ClassInlines.h: InitRgcxFromCodegen；有效开放方法的 RGCTX 由托管上下文建立") };
         yield return Op("IsInstance", [obj, klass], RuntimeValueKind.ManagedReference, RuntimeWidth.Pointer, RuntimeHeapEffect.Read,
-            RuntimeObservation.Unobservable, "object 可赋给 class 时返回原 object，否则 null；不保证恒等返回", "IsInst", "写成 isinst", codegen + ".h: IsInstClass/Sealed; .cpp: IsInst", pointers: [Read("object", "对象类及其类型关系", RuntimeMemoryDomain.ImmutableRuntime), Read("class", "目标类型关系", RuntimeMemoryDomain.ImmutableRuntime)], returnInput: "object", inputOrNull: true);
+            RuntimeObservation.Unobservable, "object 可赋给 class 时返回原 object，否则 null；不保证恒等返回", "IsInst", "写成 isinst", codegen + ".h: IsInstClass/Sealed; .cpp: IsInst", pointers: [Read("object", "对象类及其类型关系", RuntimeMemoryDomain.ImmutableRuntime), Read("class", "目标类型关系", RuntimeMemoryDomain.ImmutableRuntime)], returnInput: "object", inputOrNull: true, referenceTypeInput: "class");
         yield return Op("IsAssignableFrom", [klass, P("candidate", RuntimeValueKind.Class)], RuntimeValueKind.Boolean, RuntimeWidth.Bit, RuntimeHeapEffect.Read,
             RuntimeObservation.Unobservable, "candidate 可赋给 class 时为真", "TypeAssignable", "作为类型关系查询", codegen + ".cpp: il2cpp_codegen_class_is_assignable_from", pointers: [Read("class", "目标类型关系", RuntimeMemoryDomain.ImmutableRuntime), Read("candidate", "候选类型关系", RuntimeMemoryDomain.ImmutableRuntime)]);
         yield return Op("CastClass", [obj, klass], RuntimeValueKind.ManagedReference, RuntimeWidth.Pointer, RuntimeHeapEffect.Read,
-            RuntimeObservation.Observable, "object 为 null 或类型检查成功；结果恒等于 object", "CastClass", "写成 castclass", codegen + ".h: Castclass", ["System.InvalidCastException"], pointers: [Read("object", "对象类及其类型关系", RuntimeMemoryDomain.ImmutableRuntime), Read("class", "目标类型关系", RuntimeMemoryDomain.ImmutableRuntime)], returnInput: "object", trigger: RuntimeEventTrigger.ExceptionalOnly);
+            RuntimeObservation.Observable, "object 为 null 或类型检查成功；结果恒等于 object", "CastClass", "写成 castclass", codegen + ".h: Castclass", ["System.InvalidCastException"], pointers: [Read("object", "对象类及其类型关系", RuntimeMemoryDomain.ImmutableRuntime), Read("class", "目标类型关系", RuntimeMemoryDomain.ImmutableRuntime)], returnInput: "object", trigger: RuntimeEventTrigger.ExceptionalOnly, referenceTypeInput: "class");
         yield return Op("Unbox", [obj, klass], RuntimeValueKind.ManagedAddress, RuntimeWidth.Pointer, RuntimeHeapEffect.Read,
             RuntimeObservation.Observable, "非空且元素类匹配，返回盒内数据地址", "Unbox", "写成 unbox", codegen + ".h: UnBox(obj, expectedBoxedClass)", ["System.NullReferenceException", "System.InvalidCastException"], trigger: RuntimeEventTrigger.ExceptionalOnly);
         yield return Op("UnboxAny", [obj, klass, new("storage", RuntimeInputUse.Location, RuntimeValueKind.ManagedAddress)], RuntimeValueKind.ManagedAddress, RuntimeWidth.Pointer, RuntimeHeapEffect.Read,
