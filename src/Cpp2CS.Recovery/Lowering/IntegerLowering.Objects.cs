@@ -172,6 +172,10 @@ public sealed partial class IntegerLowering
         var value = Value(resolved.Value);
         if (value is null) return null;
         if (!ManagedTypes.IsReferenceType(value.Type)) return Fail<ManagedStatement>(LoweringFailureKind.UnsupportedType, "抛出的值不是对象引用");
+        // 捕获的异常保存下来、在处理体之外重新抛出，是 finally 的共享形态（保存异常、执行清理、未处理则重抛）。
+        // 写成显式 throw 比原方法多一次抛出事件；区域还原成 finally 之前保持洞。
+        if (StoredCaughtException(resolved.Value))
+            return Fail<ManagedStatement>(LoweringFailureKind.Exception, "保存的捕获异常在处理体之外重新抛出，finally 的共享形态尚未还原", code: "lowering.Exception.Finally");
         return new ManagedThrow(position, value);
     }
 

@@ -67,6 +67,22 @@ public sealed partial class IntegerLowering
             "捕获异常在所属 catch 子句之外使用", code: "lowering.Exception.State") : caughtLocals[clause];
     }
 
+    /// <summary>值（沿合流的各输入）里有捕获的异常，而当前块不在它的处理体内。</summary>
+    private bool StoredCaughtException(Term term)
+    {
+        if (exceptions is null || valueNames is null || currentNativeBlock is not { } here) return false;
+        var seen = new HashSet<Term>(); var work = new Stack<Term>(); work.Push(term);
+        while (work.TryPop(out var current))
+        {
+            if (!seen.Add(current)) continue;
+            if (context.Get(valueNames, current) is { IsSuccess: true, Value.Name: CaughtExceptionName caught }
+                && !caughtLocals.Keys.Any(clause => clause.Source == caught.Handler && clause.Body.Contains(here))) return true;
+            if (current.Identity is ResultAtom { Definition: MergeIdentity id } && definitions.TryGetValue(id, out var merge))
+                foreach (var input in merge.Merge.Inputs) work.Push(input.Value);
+        }
+        return false;
+    }
+
     private ManagedBody ExceptionBody(IReadOnlyList<ManagedBlock> blocks)
     {
         var body = new ManagedBody(method, blocks);
