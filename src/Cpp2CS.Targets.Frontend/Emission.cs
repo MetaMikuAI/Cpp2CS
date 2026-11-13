@@ -14,7 +14,7 @@ internal sealed record Finished(Terminator End) : Transfer;
 
 internal sealed class Emission(ulong address, TermTable terms, ImmutableArray<Register> registers,
     RegisterConvention convention, IFlowFacts facts, IExceptionModel? exceptionModel = null, bool captureUnwind = false,
-    Func<CallTarget, CallTargetResolution>? resolveCallTarget = null) : IEmitter, IOrderedMemoryEmitter
+    Func<CallTarget, CallTargetResolution>? resolveCallTarget = null) : IEmitter, IOrderedMemoryEmitter, IExclusiveMemoryEmitter
 {
     internal Dictionary<Register, Term> State { get; } = [];
     internal List<Statement> Statements { get; } = [];
@@ -64,6 +64,27 @@ internal sealed class Emission(ulong address, TermTable terms, ImmutableArray<Re
     {
         Open(); Own(pointer); Own(value);
         Statements.Add(new MemoryWrite(new WriteIdentity(), pointer, value.Width, value) { Release = release, Trace = new(address) });
+    }
+    public Term LoadExclusive(Term pointer, int width, bool acquire)
+    {
+        Open(); Own(pointer);
+        var id = new ExclusiveIdentity();
+        var result = terms.Atom(new ResultAtom(id), width);
+        Statements.Add(new ExclusiveRead(id, pointer, width, result, acquire) { Trace = new(address) });
+        return result;
+    }
+    public Term StoreExclusive(Term pointer, Term value, bool release)
+    {
+        Open(); Own(pointer); Own(value);
+        var id = new ExclusiveIdentity();
+        var status = terms.Atom(new ResultAtom(id), 32);
+        Statements.Add(new ExclusiveWrite(id, pointer, value.Width, value, status, release) { Trace = new(address) });
+        return status;
+    }
+    public void ClearExclusive()
+    {
+        Open();
+        Statements.Add(new ExclusiveClear(new()) { Trace = new(address) });
     }
     public void Fence(string domain, FenceOrdering ordering)
     {
@@ -176,7 +197,9 @@ internal sealed class TermRewrite(TermTable terms, Func<Term, Term?> replace, bo
     }
     internal Statement Statement(Statement statement) => statement switch
     {
-        MemoryFence fence => fence,
+        ExclusiveRead r => r with { Address = Map(r.Address) },
+        ExclusiveWrite w => w with { Address = Map(w.Address), Value = Map(w.Value) },
+        ExclusiveClear or MemoryFence => statement,
         MemoryRead r => r with { Address = Map(r.Address) },
         MemoryWrite w => w with { Address = Map(w.Address), Value = Map(w.Value) },
         TrapWhen t => t with { Condition = Map(t.Condition) },

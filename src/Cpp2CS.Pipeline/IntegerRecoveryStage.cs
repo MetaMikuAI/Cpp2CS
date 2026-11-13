@@ -54,6 +54,9 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
     {
         if (context.Facts.Architecture != "arm64")
             return new Missing<ManagedBody>(new(Name, context.Entry.Address, "绑定", new("lowering.Binding", "该架构的 ABI 尚未装配")));
+        if (input.Blocks.SelectMany(b => b.Statements).Any(s => s is ExclusiveEvent))
+            return new Missing<ManagedBody>(new(Name, context.Entry.Address, "独占访问",
+                new("lowering.Atomic", "恢复层尚未定义独占事件的托管语义")));
         if (input.Blocks.SelectMany(b => b.Statements).Any(s => s is MemoryFence or MemoryRead { Acquire: true } or MemoryWrite { Release: true }))
             return new Missing<ManagedBody>(new(Name, context.Entry.Address, "同步访问",
                 new("lowering.Synchronization", "恢复层尚未定义同步访问的托管语义")));

@@ -24,8 +24,6 @@ public sealed class ManagedAddressQuery(ManagedLocationQuery locations) : Query<
             ManagedLocationKind.FrameLocal or ManagedLocationKind.InstanceField or ManagedLocationKind.StaticField or ManagedLocationKind.ArrayElement).ToImmutableArray();
         if (exact.IsEmpty)
             return Outcome<ImmutableArray<LocationView>>.Failure(new("address.location", "地址未落在字段或数组元素的声明起点。", located.Value.Why));
-        if (exact.Any(v => v.Kind == ManagedLocationKind.ArrayElement && ManagedTypes.IsReferenceType(v.ElementType ?? v.Type)))
-            return Outcome<ImmutableArray<LocationView>>.Failure(new("address.reference-element", "引用类型数组元素的取址与类型检查尚未下降。"));
         return Outcome<ImmutableArray<LocationView>>.Success(exact);
     }
 }

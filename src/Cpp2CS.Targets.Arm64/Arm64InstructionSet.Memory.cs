@@ -42,7 +42,12 @@ public sealed partial class Arm64InstructionSet
             if (Is(0xffe0001f, 0xd4200000) || Is(0xffe0001f, 0xd4400000)) { e.Trap(); return true; }
             if (Is(0xfffff01f, 0xd503201f)) return true;
             if (Is(0xffffffe0, 0xd53bd040)) { WriteX(D, e.ThreadPointer); return true; }
-            if (Is(0xfffff0ff, 0xd503305f)) { Hole("exclusive"); return true; }
+            if (Is(0xfffff0ff, 0xd503305f))
+            {
+                if (e is IExclusiveMemoryEmitter exclusive) exclusive.ClearExclusive();
+                else Hole("exclusive");
+                return true;
+            }
             // DMB 的观察域与前后访问种类分别保留；DSB 不等同于观察顺序屏障。
             if (orderedMemory && e is IOrderedMemoryEmitter fence && Is(0xfffff0ff, 0xd50330bf) && B(8, 2) != 0)
             {
@@ -71,6 +76,18 @@ public sealed partial class Arm64InstructionSet
                 int width = 8 << B(30, 2);
                 if (Bit(22)) WriteX(D, ordered.LoadAcquire(orderedAddress, width));
                 else ordered.StoreRelease(orderedAddress, ReadX(D, width));
+                return true;
+            }
+            // 单寄存器 LDXR/LDAXR/STXR/STLXR；成对与 LSE 编码仍报洞。
+            if (e is IExclusiveMemoryEmitter exclusive && Is(0x3fa07c00, 0x08007c00))
+            {
+                bool load = Bit(22);
+                int status = B(16, 5), width = 8 << B(30, 2);
+                if (load && status != 31) { Hole("exclusive"); return true; }
+                if (!load && (status == D || status == A && A != 31)) { Hole("constrained-unpredictable"); return true; }
+                var exclusiveAddress = ReadX(A, 64, true);
+                if (load) WriteX(D, Extend(exclusive.LoadExclusive(exclusiveAddress, width, Bit(15)), Math.Max(32, width), false));
+                else WriteX(status, exclusive.StoreExclusive(exclusiveAddress, ReadX(D, width), Bit(15)));
                 return true;
             }
             if (Is(0x3f000000, 0x08000000)) { Hole("exclusive"); return true; }

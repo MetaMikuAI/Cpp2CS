@@ -89,6 +89,8 @@ public sealed partial class IntegerLowering
 
     public LoweringResult Run(BindingEntryKind kind = BindingEntryKind.Ordinary)
     {
+        if (function.Blocks.SelectMany(b => b.Statements).Any(s => s is ExclusiveEvent))
+        { Fail<object>(LoweringFailureKind.UnsupportedOperation, "恢复层尚未定义独占事件的托管语义", code: "lowering.Atomic"); return new(null, failure); }
         var bound = binder.Definition(method, kind, witness);
         if (bound.Value is not { } binding)
         { Fail<object>(LoweringFailureKind.Binding, bound.Failure!.Detail, code: GenericWitness.IsGeneric(method.Method) ? "lowering.Generic.Witness" : null); return new(null, failure); }

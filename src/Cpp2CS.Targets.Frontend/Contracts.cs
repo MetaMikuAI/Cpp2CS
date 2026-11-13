@@ -97,6 +97,14 @@ public interface IOrderedMemoryEmitter
     void Fence(string domain, FenceOrdering ordering);
 }
 
+/// <summary>独占事件保留地址、数据与状态结果，不提供普通读写的语义。</summary>
+public interface IExclusiveMemoryEmitter
+{
+    Term LoadExclusive(Term address, int width, bool acquire);
+    Term StoreExclusive(Term address, Term value, bool release);
+    void ClearExclusive();
+}
+
 /// <summary>地址为映像偏移。寄存器读写必须整单元；部分写入由 Slice/Concat 表达。</summary>
 public interface IRegisterState : IRegisterReader
 {

@@ -161,6 +161,12 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
                     if (klass.Value == NameLattice.Pending) return Yes(NameLattice.Pending);
                     instance = klass.Value.Name is EntityName { Entity: ClassEntity { Type: var type } } ? type : null;
                 }
+                if (function.Operation.Il.Method is { } registration && locations is not null)
+                {
+                    var arguments = RuntimeManagedMethods.TypeArguments(c, call, locations, registration);
+                    if (arguments.IsSuccess) instance = RuntimeManagedMethods.Type(registration.Result, arguments.Value, null);
+                    else if (arguments.Why?.Code == "runtime.managed-method.pending") return Yes(NameLattice.Pending);
+                }
                 var name = new CallResultName(id, instance, function.Operation.Name);
                 if (instance is not null) return Yes(Typed(null, instance, name));
                 return Yes(RuntimeValue(function.Operation.Result.Kind,name) with { ReferenceType = referenceType });

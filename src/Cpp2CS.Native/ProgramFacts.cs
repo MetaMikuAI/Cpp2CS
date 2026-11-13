@@ -6,6 +6,8 @@ internal static class ProgramFacts
 {
     internal static IEnumerable<Term> Uses(Statement statement) => statement switch
     {
+        ExclusiveRead read => [read.Address],
+        ExclusiveWrite write => [write.Address, write.Value],
         MemoryRead read => [read.Address],
         MemoryWrite write => [write.Address, write.Value],
         TrapWhen trap => [trap.Condition],
@@ -16,6 +18,8 @@ internal static class ProgramFacts
     };
     internal static IEnumerable<Term> Defines(Statement statement) => statement switch
     {
+        ExclusiveRead read => [read.Result],
+        ExclusiveWrite write => [write.Status],
         MemoryRead read => [read.Result],
         Call call => call.Results.Select(x => x.Value),
         DynamicAllocation allocation => [allocation.Result],

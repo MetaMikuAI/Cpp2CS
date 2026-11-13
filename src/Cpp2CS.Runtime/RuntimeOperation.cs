@@ -35,7 +35,17 @@ public sealed record RuntimePostcondition(string Predicate, RuntimeCondition Whe
 /// <summary>有效开放实体的元数据发布由托管上下文承担；不包含类静态构造。</summary>
 public sealed record RuntimeMetadataInitialization(string Input, string Evidence);
 public sealed record RuntimeExceptions(bool MayThrow, ImmutableArray<string> Types, bool IsUpperBound, string Description);
-public sealed record RuntimeIlForm(string Name, string Description);
+/// <summary>命名类型或方法类型参数，以及是否按引用传递。</summary>
+public sealed record RuntimeManagedType(string? Name = null, int? MethodParameter = null, bool ByRef = false);
+public enum RuntimeMethodTypeSource { ReferenceLocationElement }
+public sealed record RuntimeMethodTypeArgument(string Input, RuntimeMethodTypeSource Source);
+/// <summary>核心库方法的精确身份与类型实参来源；不依赖原生方法信息实参。</summary>
+public sealed record RuntimeManagedMethod(string DeclaringType, string Name, ImmutableArray<RuntimeManagedType> Parameters,
+    RuntimeManagedType Result, ImmutableArray<RuntimeMethodTypeArgument> TypeArguments, string DiagnosticName);
+public sealed record RuntimeIlForm(string Name, string Description)
+{
+    public RuntimeManagedMethod? Method { get; init; }
+}
 public sealed record RuntimeOperation(
     string Name, ImmutableArray<RuntimeInput> Inputs, RuntimeResult Result,
     RuntimeHeapEffect HeapEffect, ImmutableArray<RuntimePointerEffect> PointerEffects,
@@ -91,6 +101,26 @@ public static class RuntimeOperations
 
     private static IEnumerable<RuntimeOperation> Build()
     {
+        foreach (bool compare in new[] { true, false })
+        {
+            var inputs = new List<RuntimeInput> { new("location", RuntimeInputUse.Location, RuntimeValueKind.ManagedReference), V("value", RuntimeValueKind.ManagedReference) };
+            if (compare) inputs.Add(V("comparand", RuntimeValueKind.ManagedReference));
+            string name = compare ? "CompareExchangeReference" : "ExchangeReference";
+            string managed = compare ? "CompareExchange" : "Exchange";
+            var operation = Op(name, [.. inputs], RuntimeValueKind.ManagedReference, RuntimeWidth.Pointer,
+                RuntimeHeapEffect.MayWrite, RuntimeObservation.Observable,
+                compare ? "原子读取旧引用；与 comparand 引用相等时写 value；返回旧引用" : "原子写入 value 并返回旧引用",
+                "CallManagedMethod", "调用登记的核心库方法，类型实参取托管位置的元素类型",
+                "icalls/mscorlib/System.Threading/Interlocked.cpp: Interlocked::" + (compare ? "CompareExchange_T" : "ExchangePointer")
+                    + " → os/Atomic.h 的指针原子操作；随后 gc/GarbageCollector::SetWriteBarrier；codegen/il2cpp-codegen-il2cpp.h: InterlockedCompareExchangeImpl / InterlockedExchangeImpl",
+                pointers: [new("location", RuntimeAccess.ReadWrite, RuntimeMemoryDomain.ManagedHeap,
+                    new(RuntimeExtentKind.PointerSlot, "一个引用槽"), new(RuntimeConditionKind.Always, "原子读写"))],
+                managedCode: "无同步托管代码；写屏障只修改 GC 私有状态");
+            yield return operation with { Il = operation.Il with { Method = new("System.Threading.Interlocked", managed,
+                compare ? [new(MethodParameter: 0, ByRef: true), new(MethodParameter: 0), new(MethodParameter: 0)]
+                    : [new(MethodParameter: 0, ByRef: true), new(MethodParameter: 0)],
+                new(MethodParameter: 0), [new("location", RuntimeMethodTypeSource.ReferenceLocationElement)], "Interlocked") } };
+        }
         const string codegen = "codegen/il2cpp-codegen-il2cpp";
         var klass = P("class", RuntimeValueKind.Class);
         var obj = P("object", RuntimeValueKind.ManagedReference);

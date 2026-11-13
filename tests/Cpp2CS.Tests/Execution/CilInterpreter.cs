@@ -738,11 +738,11 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
         if (callee.Method is { IsStatic: true, Owner.FullName: "System.Math", Parameters.Count: 1 } math && MathIntrinsic(math.Name, values[0], math.Parameters[0].Type) is { } computed)
             return computed;
         if (callee.Method is { Name: "MemoryBarrier", IsStatic: true, Owner.FullName: "System.Threading.Thread" }) return null;
-        if (callee.Method is { Name: "CompareExchange", IsStatic: true, Owner.FullName: "System.Threading.Interlocked", GenericParameters.Count: 1 }
-            && values.Length == 3 && callee.MethodArguments is [var exchangedType] && Types.Kind(exchangedType) == TypeKind.Reference)
+        if (callee.Method is { Name: "CompareExchange" or "Exchange", IsStatic: true, Owner.FullName: "System.Threading.Interlocked", GenericParameters.Count: 1 }
+            && values.Length == (callee.Method.Name == "CompareExchange" ? 3 : 2) && callee.MethodArguments is [var exchangedType] && Types.Kind(exchangedType) == TypeKind.Reference)
         {
             var old = side.Read64(values[0].Bits);
-            if (old == values[2].Bits) side.WriteValue(values[0].Bits, values[1].Bits, 8);
+            if (callee.Method.Name == "Exchange" || old == values[2].Bits) side.WriteValue(values[0].Bits, values[1].Bits, 8);
             return StackValue.O(old);
         }
         // 已有的无参异常构造抽象不产生调用事件；被 catch 后继续执行时也不能消耗调用序号。

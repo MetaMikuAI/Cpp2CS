@@ -20,6 +20,7 @@ public sealed partial class IntegerLowering
         public Term? Receiver { get; init; }
         public bool Virtual { get; init; }
         public TypeRef? Constraint { get; init; }
+        public RuntimeManagedMethod? Registration { get; init; }
     }
     private readonly Dictionary<CallIdentity, MethodRef> throws = [];
     private readonly HashSet<CallIdentity> interfaceLookups = [];
@@ -36,6 +37,9 @@ public sealed partial class IntegerLowering
         var classified = context.Get(calls, call.Identity);
         if (!classified.IsSuccess) { Fail<object>(LoweringFailureKind.Call, "调用分类失败", classified.Why); return; }
         var c = classified.Value;
+        if (call.Unwind is not null && exceptions is null) { Fail<object>(LoweringFailureKind.Exception, "调用的异常边尚未下降"); return; }
+        if (c.Operation?.Il.Method is { } registered)
+        { PrepareRegisteredCall(call, c, registered); return; }
         if (c.Kind is CallKind.Runtime or CallKind.System && c.Binding is { } external)
             for (int i = 0; i < external.Arguments.Length; i++)
             {
@@ -46,7 +50,6 @@ public sealed partial class IntegerLowering
                 bool contents = c.Operation?.Inputs.Any(v => v.Name == name && v.Use == RuntimeInputUse.Pointee) == true;
                 if (input.IsSuccess && RejectAddressUse([input.Value], "运行时或系统函数的实参", contents)) return;
             }
-        if (call.Unwind is not null && exceptions is null) { Fail<object>(LoweringFailureKind.Exception, "调用的异常边尚未下降"); return; }
         if (c.Kind == CallKind.Runtime && c.Operation is { Result.Kind: RuntimeValueKind.InvokeData })
         { interfaceLookups.Add(call.Identity); return; }
         if (c.Operation is { DoesNotReturn: true, Termination: RuntimeTermination.Throw, FixedThrownException: { } exception })
@@ -172,7 +175,10 @@ public sealed partial class IntegerLowering
         constructing = created;
         for (int i = 0; i < d.Binding.Parameters.Length; i++)
         {
-            var value = CallArgument(d.Binding.Parameters[i], d.Method.Concrete(d.Method.Method.Parameters[i].Type), point);
+            var parameter = d.Method.Concrete(d.Method.Method.Parameters[i].Type);
+            if (d.Registration is { } registration && parameter is not ByRefRef
+                && !CheckRegisteredArgument(d.Binding.Parameters[i], parameter, point, registration)) return null;
+            var value = CallArgument(d.Binding.Parameters[i], parameter, point);
             if (value is null) return null;
             args.Add(value);
         }

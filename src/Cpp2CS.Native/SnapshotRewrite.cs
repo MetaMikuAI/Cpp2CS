@@ -74,6 +74,9 @@ public sealed class SnapshotRewrite(NativeFunction source)
     }
     public static Statement Rewrite(Statement statement, Func<Term, Term> map) => statement switch
     {
+        ExclusiveRead r => r with { Address = map(r.Address) },
+        ExclusiveWrite w => w with { Address = map(w.Address), Value = map(w.Value) },
+        ExclusiveClear or MemoryFence => statement,
         MemoryRead r => r with { Address = map(r.Address) },
         MemoryWrite w => w with { Address = map(w.Address), Value = map(w.Value) },
         TrapWhen t => t with { Condition = map(t.Condition) },

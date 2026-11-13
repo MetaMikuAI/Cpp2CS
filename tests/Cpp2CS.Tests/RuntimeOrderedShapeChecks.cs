@@ -58,6 +58,39 @@ internal static class RuntimeOrderedShapeChecks
         var builder = new FunctionBuilder(terms, entry, 64, new(terms.Atom(new RootAtom(AddressRoot.Frame), 64)));
         builder.Blocks.Add(new(entry, [], [new MemoryFence(new(), "system") { Ordering = (FenceOrdering)99 }], new Return([])));
         checks.True(ExitChecker.Check(builder.Freeze()).Violations.Any(v => v.Code == "fence-ordering"), "出口检查拒绝非法屏障顺序");
+        ExclusiveChecks(checks);
         return checks.Finish("参考形状同步语义");
     }
+    private static void ExclusiveChecks(Assertions checks)
+    {
+        var shapes = new List<string>();
+        for (int size = 0; size < 4; size++)
+        foreach (bool ordered in new[] { false, true })
+        {
+            // LDXR/LDAXR、STXR/STLXR、CBNZ 写状态回到读、CLREX、RET。
+            uint order = ordered ? 0x8000u : 0;
+            var words = new uint[] { 0x085f7c02u | ((uint)size << 30) | order,
+                0x08037c01u | ((uint)size << 30) | order, 0x35ffffc3, 0xd5033f5f, 0xd65f03c0 };
+            var result = Lift(words, false);
+            checks.True(result.Function is not null, "独占读写与重试状态提升：" + result.Failure);
+            if (result.Function is not { } function) continue;
+            var statements = function.Blocks.SelectMany(b => b.Statements).ToArray();
+            var read = statements.OfType<ExclusiveRead>().Single(); var write = statements.OfType<ExclusiveWrite>().Single();
+            checks.True(read.Address == write.Address && read.Width == 8 << size && write.Width == read.Width
+                && read.Acquire == ordered && write.Release == ordered && write.Status.Width == 32, "独占对保留地址、宽度、顺序与状态结果");
+            checks.True(statements.OfType<ExclusiveClear>().Count() == 1 && ExitChecker.Check(function).IsValid, "清除监视器进入事件并通过出口检查");
+            checks.True(function.Blocks.Where(b => b.End is Branch).Select(b => ((Branch)b.End).Condition)
+                .Any(condition => SnapshotRewrite.Dependencies([condition]).Contains(write.Status)), "失败分支使用独占写的状态寄存器结果");
+            var shape = RuntimeReferenceShape.Create(function, t => t)!.Text; shapes.Add(shape);
+            checks.True(shape.Contains("exclusive-read") && shape.Contains("exclusive-write") && shape.Contains("exclusive-clear"), "完整形状可引用独占对");
+            var noBackEdge = (uint[])words.Clone(); noBackEdge[2] = 0xd503201f;
+            checks.True(RuntimeReferenceShape.Create(Lift(noBackEdge).Function!, t => t)!.Text != shape, "没有失败重试回边不是同一形状");
+            checks.True(RuntimeReferenceShape.Create(new SnapshotRewrite(function).Apply(), t => t)!.Text == shape, "快照重写保留独占身份与结果");
+        }
+        checks.True(shapes.Distinct().Count() == 8, "不同宽度与访问顺序不能同形");
+        checks.True(Lift([0xc87f8440, 0xd65f03c0]).Failure?.Reason.Code == "arm64.exclusive", "成对独占访问保留缺口");
+        checks.True(Lift([0xc81f7c1f, 0xd65f03c0]).Failure?.Reason.Code == "arm64.constrained-unpredictable", "独占写状态与数据重叠不能提供确定事件");
+        checks.True(Lift([0xb8200000, 0xd65f03c0]).Failure?.Reason.Code == "arm64.atomic", "LSE 访问保留缺口");
+    }
+
 }

@@ -2013,12 +2013,125 @@
       "result": "operation",
       "result_type": "const VirtualInvokeData &",
       "unsupported": []
+    },
+    {
+      "arguments": [
+        "location",
+        "value"
+      ],
+      "basis": [
+        "icalls/mscorlib/System.Threading/Interlocked.cpp: Interlocked::ExchangePointer → os/Atomic.h: Atomic::ExchangePointer；随后 gc/GarbageCollector::SetWriteBarrier",
+        "codegen/il2cpp-codegen-il2cpp.h: InterlockedExchangeImpl / InterlockedExchangeImplRef 直接调用 icall，无方法信息实参；只恢复引用位置"
+      ],
+      "declaration": "static void* ExchangePointer(void** location1, void* value)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System.Threading/Interlocked.h",
+        "line": 39
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_ZN6il2cpp6icalls8mscorlib6System9Threading11Interlocked15ExchangePointerEPPvS5_",
+      "name": "il2cpp::icalls::mscorlib::System::Threading::Interlocked::ExchangePointer",
+      "operation": "ExchangeReference",
+      "parameter_names": [
+        "location1",
+        "value"
+      ],
+      "parameter_types": [
+        "void **",
+        "void *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "void *",
+      "unsupported": []
+    },
+    {
+      "arguments": [
+        "location",
+        "value",
+        "comparand"
+      ],
+      "basis": [
+        "icalls/mscorlib/System.Threading/Interlocked.cpp: Interlocked::CompareExchange_T → os/Atomic.h: Atomic::CompareExchangePointer；随后 gc/GarbageCollector::SetWriteBarrier",
+        "codegen/il2cpp-codegen-il2cpp.h: InterlockedCompareExchangeImpl 直接调用 icall，无方法信息实参；只恢复引用位置"
+      ],
+      "declaration": "static void* CompareExchange_T(void** location, void* value, void* comparand)",
+      "declaration_source": {
+        "file": "vm-utils/icalls/mscorlib/System.Threading/Interlocked.h",
+        "line": 31
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_ZN6il2cpp6icalls8mscorlib6System9Threading11Interlocked17CompareExchange_TEPPvS5_S5_",
+      "name": "il2cpp::icalls::mscorlib::System::Threading::Interlocked::CompareExchange_T",
+      "operation": "CompareExchangeReference",
+      "parameter_names": [
+        "location",
+        "value",
+        "comparand"
+      ],
+      "parameter_types": [
+        "void **",
+        "void *",
+        "void *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          },
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "void *",
+      "unsupported": []
     }
   ],
   "generator_sha256": "a29bea3453ac7e4b84071bc32797e0e5931222d89b7c33613eb5737b233e1553",
-  "mapping_sha256": "5cdc3ee9dff0d447beaa9a3b00c6844b3327282e5864b9945d4fe79abb460892",
+  "mapping_sha256": "341e2514ea65710e008ad26252bfd5106c74bf590f559b7fe56b149313cae9db",
   "schema_version": 1,
-  "shared_generator_sha256": "e0417a66cad7097804d93134398e24eac2ba67080ed6373bcaa4ed4c3d0aae48",
+  "shared_generator_sha256": "ab5f57df145d9958a050c9a43f0b8f940f4d9ff5039718ad3e039b2b6215f1cb",
   "source": {
     "codegen/il2cpp-codegen-common.h": "7f31e7125a7c949defa8586029778b8400222816bf6aebf8baf46383ae2e75c2",
     "codegen/il2cpp-codegen-il2cpp.h": "6751c51e8bc8bae24654a7c7dcc424726fca3b9ab459fa45211bc050f59d4663",
@@ -2027,7 +2140,8 @@
     "il2cpp-class-internals.h": "93f845f3dd5028aafce5226d50db8c53aa1f10d2c1b039463104a9a86aa8938a",
     "il2cpp-config.h": "c2514dbfaf939e905ab3a38eebab0f8c0a6fff1078eccc0449af86ed7e012969",
     "il2cpp-object-internals.h": "f9d0f093ccb08a7279148fb8988a5601debb8aae951a26fec0f551e0672040e4",
-    "vm-utils/ClassInlines.h": "fac2c6b04451ee08f364b1989d06e5f73a20d93bf4dc6a000c7ffc2be7bce018"
+    "vm-utils/ClassInlines.h": "fac2c6b04451ee08f364b1989d06e5f73a20d93bf4dc6a000c7ffc2be7bce018",
+    "vm-utils/icalls/mscorlib/System.Threading/Interlocked.h": "b6c7658218516abe48bf0774b02cd0a681b45c78b3b4a4c9f0e266ec314b1894"
   },
   "target": {
     "data_model": "LP64",

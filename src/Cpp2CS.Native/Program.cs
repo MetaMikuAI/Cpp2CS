@@ -16,6 +16,7 @@ public sealed class FrameIdentity(FrameIdentity? origin = null) : StableIdentity
 public sealed class WriteIdentity(WriteIdentity? origin = null) : StableIdentity(origin);
 public sealed class ReadIdentity(ReadIdentity? origin = null) : StableIdentity(origin);
 public sealed class FenceIdentity(FenceIdentity? origin = null) : StableIdentity(origin);
+public sealed class ExclusiveIdentity(ExclusiveIdentity? origin = null) : StableIdentity(origin);
 public sealed class TrapIdentity(TrapIdentity? origin = null) : StableIdentity(origin);
 public sealed class BlockIdentity(BlockIdentity? origin = null) : StableIdentity(origin);
 
@@ -82,6 +83,12 @@ public sealed record MemoryWrite(WriteIdentity Identity, Term Address, int Width
 {
     public bool Release { get; init; }
 }
+/// <summary>独占监视器事件仅保留访问形状；恢复层不得将它当作普通访存。</summary>
+public abstract record ExclusiveEvent(ExclusiveIdentity Identity) : Statement;
+public sealed record ExclusiveRead(ExclusiveIdentity Identity, Term Address, int Width, Term Result, bool Acquire) : ExclusiveEvent(Identity);
+/// <summary>Status 为 32 位结果，零表示写入成功；非零表示失败。</summary>
+public sealed record ExclusiveWrite(ExclusiveIdentity Identity, Term Address, int Width, Term Value, Term Status, bool Release) : ExclusiveEvent(Identity);
+public sealed record ExclusiveClear(ExclusiveIdentity Identity) : ExclusiveEvent(Identity);
 /// <summary>ReadWrite 约束读写到读写，Read 约束读到读写，Write 约束写到写。</summary>
 public enum FenceOrdering { ReadWrite, Read, Write }
 /// <summary>域内的先行访问先于后续访问被观察；Domain 由目标描述定义，不表示等待访问完成。</summary>

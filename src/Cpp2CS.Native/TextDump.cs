@@ -125,6 +125,9 @@ public static class TextDump
                 foreach (var statement in block.Statements)
                     switch (statement)
                     {
+                        case ExclusiveEvent exclusive:
+                            Id(exclusive.Identity);
+                            break;
                         case MemoryFence fence:
                             Id(fence.Identity);
                             break;
@@ -165,6 +168,9 @@ public static class TextDump
                 {
                     string line = statement switch
                     {
+                        ExclusiveRead read => "exclusive-read " + Id(read.Identity) + Provenance(read.Identity) + " " + T(read.Result) + " = [" + T(read.Address) + "]:" + N(read.Width) + " acquire=" + read.Acquire,
+                        ExclusiveWrite write => "exclusive-write " + Id(write.Identity) + Provenance(write.Identity) + " " + T(write.Status) + " = [" + T(write.Address) + "]:" + N(write.Width) + " <- " + T(write.Value) + " release=" + write.Release,
+                        ExclusiveClear clear => "exclusive-clear " + Id(clear.Identity) + Provenance(clear.Identity),
                         MemoryFence fence => "fence " + Id(fence.Identity) + Provenance(fence.Identity) + " domain=" + Q(fence.Domain) + " ordering=" + fence.Ordering,
                         MemoryRead read => "read " + Id(read.Identity) + Provenance(read.Identity) + " " + T(read.Result) + " = [" + T(read.Address) + "]:" + N(read.Width) + (read.Acquire ? " acquire" : ""),
                         MemoryWrite write => "write " + Id(write.Identity) + Provenance(write.Identity) + " [" + T(write.Address) + "]:" + N(write.Width) + " = " + T(write.Value) + (write.Release ? " release" : ""),

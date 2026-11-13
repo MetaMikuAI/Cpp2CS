@@ -79,11 +79,13 @@
     {
       "name": "il2cpp_codegen_initialize_runtime_metadata_inline",
       "recognition": {
-        "usage_conditions": [{
-          "kind": "metadata_slot_address",
-          "parameter": 0,
-          "basis": "codegen/il2cpp-codegen-il2cpp.h: il2cpp_codegen_initialize_runtime_metadata_inline；生成调用传入 (uintptr_t*)&元数据变量；vm/GlobalMetadata.cpp: InitializeRuntimeMetadata 解码槽初值"
-        }]
+        "usage_conditions": [
+          {
+            "kind": "metadata_slot_address",
+            "parameter": 0,
+            "basis": "codegen/il2cpp-codegen-il2cpp.h: il2cpp_codegen_initialize_runtime_metadata_inline；生成调用传入 (uintptr_t*)&元数据变量；vm/GlobalMetadata.cpp: InitializeRuntimeMetadata 解码槽初值"
+          }
+        ]
       },
       "operation": "InitializeMetadata",
       "arguments": [
@@ -541,6 +543,35 @@
         "vm/ClassInlines.cpp: GetInterfaceInvokeDataFromVTableSlowPath；效果与下层调用链见 RuntimeOperations.LookupInterfaceData"
       ],
       "parameters": "Il2CppObject* obj, const Il2CppClass* itf, Il2CppMethodSlot slot"
+    },
+    {
+      "name": "il2cpp::icalls::mscorlib::System::Threading::Interlocked::CompareExchange_T",
+      "operation": "CompareExchangeReference",
+      "arguments": [
+        "location",
+        "value",
+        "comparand"
+      ],
+      "result": "operation",
+      "header": "vm-utils/icalls/mscorlib/System.Threading/Interlocked.h",
+      "basis": [
+        "icalls/mscorlib/System.Threading/Interlocked.cpp: Interlocked::CompareExchange_T → os/Atomic.h: Atomic::CompareExchangePointer；随后 gc/GarbageCollector::SetWriteBarrier",
+        "codegen/il2cpp-codegen-il2cpp.h: InterlockedCompareExchangeImpl 直接调用 icall，无方法信息实参；只恢复引用位置"
+      ]
+    },
+    {
+      "name": "il2cpp::icalls::mscorlib::System::Threading::Interlocked::ExchangePointer",
+      "operation": "ExchangeReference",
+      "arguments": [
+        "location",
+        "value"
+      ],
+      "result": "operation",
+      "header": "vm-utils/icalls/mscorlib/System.Threading/Interlocked.h",
+      "basis": [
+        "icalls/mscorlib/System.Threading/Interlocked.cpp: Interlocked::ExchangePointer → os/Atomic.h: Atomic::ExchangePointer；随后 gc/GarbageCollector::SetWriteBarrier",
+        "codegen/il2cpp-codegen-il2cpp.h: InterlockedExchangeImpl / InterlockedExchangeImplRef 直接调用 icall，无方法信息实参；只恢复引用位置"
+      ]
     }
   ]
 }

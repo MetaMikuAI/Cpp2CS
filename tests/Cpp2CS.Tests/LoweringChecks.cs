@@ -186,6 +186,7 @@ internal static partial class LoweringChecks
         AccessChecks(checks, program);
         RangeChecks(checks, program);
         AddressChecks(checks, program);
+        InterlockedChecks(checks, program);
         StructChecks(checks, program);
         StateChecks(checks, program);
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
@@ -1585,7 +1586,7 @@ internal static partial class LoweringChecks
                 new NamingChecks.RuntimeMap(catalog.Functions.First(f => f.Operation.Name == "ThrowManaged" && f.Signature is not null)), catalog);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(entries[mode]), binder, types, calls: calls,
                 effects: new ManagedCallEffects(calls), spec: spec, names: facts).Run();
-            var code = mode switch { "FrameStructPartial" or "FrameStructCross" => "lowering.Frame.Struct", "FrameHeap" or "FrameRuntime" or "FrameOrdinary" or "FrameArithmetic" => "lowering.Frame.Use", "FrameMixed" or "FrameOverlap" or "FrameCross" => "lowering.Frame.Mixed", "FramePartial" => "lowering.Frame.Partial", "Interior" or "ReferenceArray" => "lowering.Address.Location",
+            var code = mode switch { "FrameStructPartial" or "FrameStructCross" => "lowering.Frame.Struct", "FrameHeap" or "FrameRuntime" or "FrameOrdinary" or "FrameArithmetic" => "lowering.Frame.Use", "FrameMixed" or "FrameOverlap" or "FrameCross" => "lowering.Frame.Mixed", "FramePartial" => "lowering.Frame.Partial", "Interior" => "lowering.Address.Location",
                 "Mismatch" or "Store" or "FrameStore" or "Return" or "Pointer" or "Ordinary" or "Arithmetic" or "Compare" or "CompareConstant" or "Runtime" => "lowering.Address.Use", _ => null };
             if (code is not null)
             { checks.True(lowered.Failure?.Reason.Code == code, mode + " 取址用途拒绝：" + lowered.Failure); continue; }
@@ -1623,7 +1624,7 @@ internal static partial class LoweringChecks
             }
             if (mode == "Repeat") checks.True(loweredStatements.OfType<ManagedCall>().Count() == 2, "同一地址项可以多次传出");
             var emitted = skeleton.Assemblies.SelectMany(a => a.MainModule.Types).SelectMany(t => t.Methods).Single(m => m.Name == mode);
-            var expected = mode.StartsWith("Frame", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldloca : mode.StartsWith("Array", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldelema : mode.StartsWith("Static", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldsflda : Mono.Cecil.Cil.Code.Ldflda;
+            var expected = mode.StartsWith("Frame", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldloca : mode.StartsWith("Array", StringComparison.Ordinal) || mode == "ReferenceArray" ? Mono.Cecil.Cil.Code.Ldelema : mode.StartsWith("Static", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldsflda : Mono.Cecil.Cil.Code.Ldflda;
             checks.True(emitted.Body.Instructions.Any(i => i.OpCode.Code == expected), mode + " 写出对应取址指令");
         }
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();

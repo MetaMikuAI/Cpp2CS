@@ -182,6 +182,19 @@ public static class ExitChecker
 
                     switch (s)
                     {
+                        case ExclusiveRead read:
+                            Identity(read.Identity, loc);
+                            Result(read.Result, read.Identity, 0, p[si + 2], loc);
+                            Width(read.Width is 8 or 16 or 32 or 64 && read.Width == read.Result.Width && read.Address.Width == f.AddressWidth, loc);
+                            break;
+                        case ExclusiveWrite write:
+                            Identity(write.Identity, loc);
+                            Result(write.Status, write.Identity, 0, p[si + 2], loc);
+                            Width(write.Width is 8 or 16 or 32 or 64 && write.Width == write.Value.Width && write.Status.Width == 32 && write.Address.Width == f.AddressWidth, loc);
+                            break;
+                        case ExclusiveClear clear:
+                            Identity(clear.Identity, loc);
+                            break;
                         case MemoryFence fence:
                             Identity(fence.Identity, loc);
                             Require(!string.IsNullOrWhiteSpace(fence.Domain), "fence-domain", loc, "屏障缺少观察域。");
