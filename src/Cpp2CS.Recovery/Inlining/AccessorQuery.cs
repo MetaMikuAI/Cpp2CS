@@ -15,12 +15,21 @@ public sealed record AccessorAnswer(MethodRef? Method, Reason? Failure, Accessor
 public sealed record AccessorAttempt(AccessorAccess Access, AccessorAnswer Answer);
 
 /// <summary>元数据筛候选，候选自己的开放恢复体证明模板；不依赖名称、属性登记或枚举次序。</summary>
-public sealed class AccessorQuery(ManagedTypes types, IAccessorTemplateSource templates, Action<AccessorAttempt>? observe = null)
+public sealed partial class AccessorQuery(ManagedTypes types, IAccessorTemplateSource templates, Action<AccessorAttempt>? observe = null)
 {
     public AccessorReadPlacementQuery ReadPlacement { get; } = new();
     public AccessorAnswer Resolve(AccessorAccess access)
     {
         var answer = Find(access);
+        observe?.Invoke(new(access, answer));
+        return answer;
+    }
+
+    public AccessorAnswer Reject(AccessorAccess access, Reason failure)
+    {
+        var answer = new AccessorAnswer(null, failure, failure.Code == "inline.Accessor.None"
+            ? failure.Message == "没有候选" ? AccessorNoneReason.NoCandidates
+                : failure.Message == "候选未能完整恢复" ? AccessorNoneReason.Incomplete : AccessorNoneReason.NotTemplate : null);
         observe?.Invoke(new(access, answer));
         return answer;
     }
@@ -53,7 +62,7 @@ public sealed class AccessorQuery(ManagedTypes types, IAccessorTemplateSource te
             // 定位已给出字段所属实例；模板核对开放字段身份，不比较实例间的布局偏移。
             var openField = new FieldRef(field, MethodRef.Open(candidate).DeclaringType);
             if (result.Template is { } template && result.Status == AccessorTemplateStatus.Complete
-                && template.Kind == access.Kind && template.Field.Equals(openField)) matches.Add(candidate);
+                && template.SingleField && template.Kind == access.Kind && template.Field.Equals(openField)) matches.Add(candidate);
             else if (result.Status == AccessorTemplateStatus.Incomplete)
             {
                 incomplete.Add(new(candidate, result.Failure));

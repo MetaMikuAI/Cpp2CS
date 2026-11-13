@@ -95,7 +95,24 @@ public sealed partial class IntegerLowering
         Fail<object>(LoweringFailureKind.UnsupportedType, "值的托管类型与使用位置不兼容");
         return value;
     }
+    private int registeredAccessorReads;
+    private int? accessorReadCount;
+    private bool accessorProgramPrepared;
+    private bool accessorProgramMaterialized;
+    private readonly Dictionary<AccessorReplacement, LocalValue?> accessorResults = [];
+    private AccessorProgram? accessorProgram;
+    private Reason? accessorProgramFailure;
+    private readonly Dictionary<ReadIdentity, List<ManagedCall>> accessorReadCalls = [];
+    private readonly HashSet<ReadIdentity> accessorConsumedReads = [];
+    private readonly Dictionary<WriteIdentity, ManagedCall?> accessorWriteCalls = [];
+
     private void RegisterRead(MemoryRead read)
+    {
+        RegisterReadDefinition(read);
+        accessorReadCount ??= function.Blocks.Sum(b => b.Statements.OfType<MemoryRead>().Count());
+        if (++registeredAccessorReads == accessorReadCount) PrepareAccessorProgram();
+    }
+    private void RegisterReadDefinition(MemoryRead read)
     {
         if (readDefinitions.ContainsKey(read.Identity)) return;
         // 只登记可用身份；未使用读取的失败不阻断下降，实际使用处负责传播失败。
@@ -111,6 +128,74 @@ public sealed partial class IntegerLowering
         if (!readValues.TryGetValue(resolved.Value, out var definition))
             readValues.Add(resolved.Value, definition = new(read));
         readDefinitions.Add(read.Identity, definition);
+    }
+    private void PrepareAccessorProgram()
+    {
+        if (accessorProgramPrepared || accessors is null || locations is null) return;
+        accessorProgramPrepared = true;
+        var answer = accessors.Match(context, method, state, locations, arguments);
+        if (!answer.IsSuccess) { accessorProgramFailure = new("inline.Accessor.None", "模板项匹配查询未完成", answer.Why); return; }
+        accessorProgram = answer.Value;
+        foreach (var replacement in accessorProgram.Replacements)
+        {
+            LocalValue? local = null;
+            if (replacement.Result is { } result)
+            {
+                var type = replacement.Method.Concrete(replacement.Method.Method.ReturnType);
+                local = new(new(nextLocal++), type, ValueWidth(type));
+                values[result] = local;
+                // 完整读取与它的位片共用调用结果，保留原读取身份供范围视图取用。
+                if (readValues.TryGetValue(result, out var definition))
+                {
+                    definition.Local = local;
+                    foreach (var occurrence in readDefinitions.Where(p => ReferenceEquals(p.Value, definition)))
+                        accessorConsumedReads.Add(occurrence.Key);
+                    var range = Range(definition.Read.Address, definition.Read.Width);
+                    if (range is { Pieces: [{ View: { } view, AccessBit: 0, LocationBit: 0 } piece] }
+                        && piece.Width == definition.Read.Width)
+                        rangeReads[(definition, view)] = definition;
+                }
+            }
+            accessorResults.Add(replacement, local);
+            accessorConsumedReads.UnionWith(replacement.Reads);
+        }
+    }
+    private void MaterializeAccessorProgram()
+    {
+        PrepareAccessorProgram();
+        if (accessorProgramMaterialized || accessorProgram is null) return;
+        accessorProgramMaterialized = true;
+        foreach (var replacement in accessorProgram.Replacements)
+        {
+            ManagedValue? receiver = replacement.Receiver is { } self ? Value(self) : null;
+            if (replacement.Receiver is not null && receiver is null) return;
+            var args = new List<ManagedValue>();
+            for (int i = 0; i < replacement.Arguments.Count; i++)
+            {
+                var value = Value(replacement.Arguments[i]); if (value is null) return;
+                var type = replacement.Method.Concrete(replacement.Method.Method.Parameters[i].Type);
+                value = ReferenceType(type) || Opaque(type) ? Coerce(value, type)
+                    : new ConversionValue(ManagedTypes.IsSigned(type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
+                        IntegerBits(value), type, ValueWidth(type));
+                args.Add(value);
+            }
+            var block = function.Blocks.Single(b => b.Identity == replacement.Point.Block);
+            var address = block.Statements[replacement.Point.Before].Trace?.NativeAddress ?? 0;
+            var call = new ManagedCall(address, new(replacement.Method, receiver, args,
+                receiver is not null && !replacement.Method.Method.Owner.IsValueType && receiver is not ArgumentValue { Index: -1 }), accessorResults[replacement]) { Inlined = true };
+            if (replacement.Writes.Count != 0)
+            {
+                foreach (var write in replacement.Writes) accessorWriteCalls.Add(write, null);
+                var first = ((MemoryWrite)block.Statements[replacement.Point.Before]).Identity;
+                accessorWriteCalls[first] = call;
+            }
+            else
+            {
+                var first = ((MemoryRead)block.Statements[replacement.Point.Before]).Identity;
+                if (!accessorReadCalls.TryGetValue(first, out var list)) accessorReadCalls.Add(first, list = []);
+                list.Add(call);
+            }
+        }
     }
     private ManagedValue? ReadValue(ReadDefinition definition)
     {
@@ -145,6 +230,7 @@ public sealed partial class IntegerLowering
     }
     private ManagedBlock InsertReads(ManagedBlock block)
     {
+        MaterializeAccessorProgram();
         if (!readInsertions.TryGetValue(block.Address, out var reads)) return block;
         var statements = new List<ManagedStatement>(); int cursor = 0;
         for (int i = 0; i <= block.Statements.Count; i++)
@@ -152,7 +238,8 @@ public sealed partial class IntegerLowering
             while (cursor < reads.Count && reads[cursor].Before == i)
             {
                 var read = reads[cursor++];
-                if (readDefinitions.TryGetValue(read.Read, out var definition) && definition.Local is { } local)
+                if (accessorReadCalls.TryGetValue(read.Read, out var recovered)) statements.AddRange(recovered);
+                if (!accessorConsumedReads.Contains(read.Read) && readDefinitions.TryGetValue(read.Read, out var definition) && definition.Local is { } local)
                 {
                     if (definition.Accessor is { } accessor)
                     {
@@ -180,6 +267,8 @@ public sealed partial class IntegerLowering
             && context.Get(valueNames, stored.Value) is { IsSuccess: true, Value.Name: IndirectParameterName }
             && context.Get(state.Resolve, write.Address) is { IsSuccess: true } spill
             && context.Get(state.Locations, new(spill.Value, write.Width)) is { IsSuccess: true, Value.Region: Region.Frame }) return null;
+        MaterializeAccessorProgram();
+        if (accessorWriteCalls.TryGetValue(write.Identity, out var recovered)) return recovered;
         if (RejectAddressUse([write.Value], "写入内存")) return null;
         if (structReturnStores is not null)
         {
@@ -203,7 +292,7 @@ public sealed partial class IntegerLowering
             }
         var target = Access(write.Address, write.Width, true, copiedType);
         if (target is null) return null;
-        var accessor = FieldAccessor(target, true);
+        var accessor = FieldAccessor(target, true, writeIdentity: write.Identity);
         if (failure is not null) return null;
         if (target is ArrayLengthValue) return Fail<ManagedStatement>(LoweringFailureKind.NonFrameWrite, "数组长度不可写");
         var value = types.Kind(target.Type) == TypeKind.Struct
@@ -217,7 +306,7 @@ public sealed partial class IntegerLowering
             : new ManagedCall(position, AccessorInvocation(accessor, target, [value]), null) { Inlined = true };
     }
 
-    private MethodRef? FieldAccessor(ManagedValue storage, bool write, ReadDefinition? read = null)
+    private MethodRef? FieldAccessor(ManagedValue storage, bool write, ReadDefinition? read = null, WriteIdentity? writeIdentity = null)
     {
         if (accessors is null) return null;
         foreach (var value in ManagedValues.Walk(storage))
@@ -229,6 +318,14 @@ public sealed partial class IntegerLowering
                 _ => ((FieldRef?)null, (TypeRef?)null),
             };
             if (field is null || ManagedAccess.Field(types, method, field, receiver)) continue;
+            StableIdentity? identity = read is not null ? read.Read.Identity : writeIdentity;
+            var programFailure = accessorProgramFailure ?? (identity is not null ? accessorProgram?.Failures.GetValueOrDefault(identity) : null);
+            if (programFailure is not null)
+            {
+                var rejected = accessors.Reject(new(method, position, field, receiver, write ? AccessorKind.Setter : AccessorKind.Getter, false), programFailure);
+                Fail<object>(LoweringFailureKind.UnsupportedType, programFailure.Message, programFailure.Cause, programFailure.Code);
+                return rejected.Method;
+            }
             Reason? placementFailure = !ReferenceEquals(value, storage)
                 ? new("inline.Accessor.Placement.NestedAccess", "不可访问字段只是复合访问的内部位置")
                 : ManagedValues.Children(storage).SelectMany(ManagedValues.Walk).Any(v => v is FieldValue or StaticFieldValue

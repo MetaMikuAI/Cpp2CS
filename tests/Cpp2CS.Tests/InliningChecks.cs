@@ -64,6 +64,7 @@ internal static partial class InliningChecks
         checks.True(Ask(f.Field, AccessorKind.Setter).Method?.Method == setter, "写模板采用");
         checks.True(Ask(f.Shared, AccessorKind.Getter).Method?.Method == staticGetter, "静态读模板采用");
         checks.True(Ask(f.Field, AccessorKind.Getter, false).Failure?.Code == "inline.Accessor.Placement", "无法保持位置时报洞");
+        ExpressionAccessorChecks(checks);
         PlacementChecks(checks);
         LocalAccessorChecks(checks);
         GenericAccessorChecks(checks);
@@ -75,7 +76,7 @@ internal static partial class InliningChecks
         checks.True(AccessorTemplates.Read(Body(getter, new ManagedCall(0, new(MethodRef.Open(getter), receiver, [], false), local),
             new ManagedReturn(1, local))).Status == AccessorTemplateStatus.NotTemplate, "其他调用不是模板");
         checks.True(AccessorTemplates.Read(Body(getter, new ManagedAssignment(0, local, field), new ManagedReturn(1,
-            new BinaryValue(BinaryOperator.Add, local, local, f.Integer, 32)))).Status == AccessorTemplateStatus.NotTemplate, "多次使用局部不是转手");
+            new BinaryValue(BinaryOperator.Add, local, local, f.Integer, 32)))).Status == AccessorTemplateStatus.Complete, "单定义局部可在纯表达式中复用");
         checks.True(AccessorTemplates.Read(Body(getter, new ManagedAssignment(0, local, field), new ManagedAssignment(1, local, field),
             new ManagedReturn(2, local))).Status == AccessorTemplateStatus.NotTemplate, "多次赋值局部不是转手");
         checks.True(AccessorTemplates.Read(Body(getter, new ManagedReturn(0,
