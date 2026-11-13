@@ -51,7 +51,8 @@ internal static class PipelineCorpusChecks
         var constructorAttempts = new ConcurrentBag<ConstructorAttempt>();
         var recovery = new IntegerRecoveryStage(enableAccessorInlining: accessors, observeAccessors: accessorAttempts.Add, observeConstructors: constructorAttempts.Add, enableConstructorInlining: constructors);
         var audit = new ConstructorAuditStage(recovery);
-        var report = new RecoverySession(recovery: audit).Run(new(
+        var genericAudit = new InlinedGenericContextAudit(audit);
+        var report = new RecoverySession(recovery: genericAudit).Run(new(
             Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.so"),
             Path.Combine(corpus, "artifacts", "il2cppOutput", "data", "Metadata", "global-metadata.dat"), output)
         {
@@ -59,6 +60,7 @@ internal static class PipelineCorpusChecks
             Symbols = useSymbols ? Path.Combine(corpus, "artifacts", "il2cppOutput", "build", "arm64-v8a", "libil2cpp.dbg.so") : null,
             Jobs = Environment.ProcessorCount,
         });
+        genericAudit.Write(output, report);
         if (audit.Facts is { } facts)
         {
             var pointer = facts.Image.PointerWidth;

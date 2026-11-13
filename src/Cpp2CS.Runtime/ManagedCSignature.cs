@@ -43,15 +43,15 @@ public sealed class ManagedCSignatureBuilder(ITypeLayouts layouts, int pointerBi
     public static bool IsClosed(MethodRef method) =>
         method.TypeArguments.Count == method.Method.Owner.GenericParameters.Count
         && method.MethodArguments.Count == method.Method.GenericParameters.Count
-        && method.TypeArguments.Concat(method.MethodArguments).All(Closed);
+        && method.TypeArguments.Concat(method.MethodArguments).All(IsClosed);
 
-    private static bool Closed(TypeRef type) => type switch
+    public static bool IsClosed(TypeRef type) => type switch
     {
         GenericParameterRef => false,
-        DefinitionRef d => d.Arguments.Count == d.Definition.GenericParameters.Count && d.Arguments.All(Closed),
-        ArrayRef a => Closed(a.Element),
-        PointerRef p => Closed(p.Element),
-        ByRefRef r => Closed(r.Element),
+        DefinitionRef d => d.Arguments.Count == d.Definition.GenericParameters.Count && d.Arguments.All(IsClosed),
+        ArrayRef a => IsClosed(a.Element),
+        PointerRef p => IsClosed(p.Element),
+        ByRefRef r => IsClosed(r.Element),
         _ => true,
     };
 

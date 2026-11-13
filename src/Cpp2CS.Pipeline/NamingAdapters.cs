@@ -31,13 +31,18 @@ public sealed class MetadataSlotDecoder(GlobalFacts facts) : IMetadataSlotDecode
 /// <summary>metadata/GenericMetadata.cpp::InflateRGCTXDataLocked 按定义与当前泛型实参构造实体。</summary>
 public sealed class MetadataRgctxDecoder(GlobalFacts facts) : IRgctxDecoder
 {
-    public Outcome<MetadataEntity> Decode(MethodRef definition, bool methodContext, int index)
+    public Outcome<MetadataEntity> Decode(MethodRef method, bool methodContext, int index) => methodContext
+        ? Decode(method.Method.Owner.Assembly, method.Method.Token, method.TypeArguments, method.MethodArguments, index)
+        : Decode((DefinitionRef)method.DeclaringType, index);
+
+    public Outcome<MetadataEntity> Decode(DefinitionRef type, int index) =>
+        Decode(type.Definition.Assembly, type.Definition.Token, type.Arguments, [], index);
+
+    private Outcome<MetadataEntity> Decode(string assembly, uint token, IReadOnlyList<TypeRef> typeArguments, IReadOnlyList<TypeRef> methodArguments, int index)
     {
-        var token = methodContext ? definition.Method.Token : definition.Method.Owner.Token;
-        if (!facts.CodeMap.Rgctx.TryGetValue((definition.Method.Owner.Assembly, token), out var entries)
-            || index < 0 || index >= entries.Length)
+        if (!facts.CodeMap.Rgctx.TryGetValue((assembly, token), out var entries) || index < 0 || index >= entries.Length)
             return Outcome<MetadataEntity>.Failure(new("naming.rgctx-index", $"定义的 RGCTX[{index}] 不存在。"));
-        TypeRef Type(TypeRef type) => type.Substitute(definition.TypeArguments, methodContext ? definition.MethodArguments : []);
+        TypeRef Type(TypeRef type) => type.Substitute(typeArguments, methodArguments);
         var entity = entries[index] switch
         {
             { Kind: RgctxKind.Class, Value: TypeRef type } => (MetadataEntity)new ClassEntity(Type(type)),

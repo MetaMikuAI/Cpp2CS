@@ -39,6 +39,26 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
 
     public StructureResult Run(NativeFunction input)
     {
+        var records = new List<StructureRecord>();
+        var assumptions = new HashSet<string>();
+        var timings = new Dictionary<string, double>();
+        while (true)
+        {
+            var result = Normalize(input);
+            records.AddRange(result.Records.Where(r => r.Removed));
+            assumptions.UnionWith(result.Assumptions);
+            foreach (var (key, seconds) in result.Timings) timings[key] = timings.GetValueOrDefault(key) + seconds;
+            if (ReferenceEquals(result.Function, input))
+                return result with { Records = [.. records, .. result.Records.Where(r => !r.Removed)],
+                    Assumptions = [.. assumptions.Order(StringComparer.Ordinal)], Timings = timings.ToImmutableDictionary() };
+            // 新快照可使原先未知的元数据实体可命名；只重复同一消去过程。
+            // 每次改写均减少块、调用、语句或未使用的槽，不增加原生控制流。
+            input = result.Function;
+        }
+    }
+
+    private StructureResult Normalize(NativeFunction input)
+    {
         var timer = Stopwatch.StartNew();
         var timings = new Dictionary<string, double>();
         double regionTime = 0, liveTime = 0, rewriteTime = 0;
@@ -79,7 +99,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                             records.Add(record); classRecords[call.Identity] = record;
                         }
                     }
-                    else if (names.DefinitionMethod is not null && op.MetadataInitialization is { } metadata
+                    else if (op.MetadataInitialization is { } metadata
                         && named.Value.Inputs?.GetValueOrDefault(metadata.Input)?.Source is TermSource source
                         && c.Get(names, source.Term) is { IsSuccess: true } target && names.ContextEntity(target.Value.Name))
                         evidence = metadata.Evidence;
@@ -393,7 +413,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         // 指针种类不足以证明任意偏移；字段范围必须由命名查询确认。
         var named = c.Get(names, c.Snapshot.Terms.Atom(new MemoryAtom(location, null), location.Width));
         return named.IsSuccess && (named.Value.Name is FieldName or BitStorageName
-            || names.DefinitionMethod is not null && named.Value.Name is EntityName);
+            || named.Value.Name is EntityName);
     }
     private bool PrivateCondition(QueryContext c, Term condition)
     {

@@ -309,6 +309,11 @@ public sealed partial class IntegerLowering
         {
             case Jump j: return new ManagedJump(position, Edge(b.Identity, j.Target));
             case Branch branch:
+                if (valueNames is not null && context.Get(state.Resolve, branch.Condition) is { IsSuccess: true } guard
+                    && SnapshotRewrite.Dependencies([guard.Value]).Any(t => context.Get(valueNames, t) is
+                        { IsSuccess: true, Value.Name: FieldName { Record: "MethodInfo", Field: "MethodInfo.rgctx_data", Owner: var owner } }
+                        && valueNames.ContextEntity(owner)))
+                    return Fail<ManagedStatement>(LoweringFailureKind.IndirectControl, "已知方法实体的 RGCTX 守卫未能消去，保留原控制流", code: "structure.rgctx-guard");
                 var condition = Value(branch.Condition);
                 if (condition is not null && Opaque(condition.Type))
                 {
