@@ -13,6 +13,7 @@ namespace Cpp2CS.Recovery.Lowering;
 public sealed partial class IntegerLowering
 {
     private readonly List<StructOrigin> structParameters = [];
+    private readonly Dictionary<Term, ArgumentValue> indirectParameters = [];
     private StructValueQuery structs = null!;
     private StructMemoryPartQuery structMemoryParts = null!;
     private readonly Dictionary<(Term Source, LocationView View), LocalValue> structMemoryValues = [];
@@ -60,6 +61,11 @@ public sealed partial class IntegerLowering
     private ManagedValue? StructValue(BoundSource source, TypeRef type, Point point)
     {
         if (GenericStruct(type)) return GenericFailure<ManagedValue>("Struct", "含类型参数的值类型尚未下降");
+        // 间接入口指向可变形参；在使用点取当前值，不把入口字段当作永远不变的快照。
+        if (source is IndirectSource indirect && BoundTerm(indirect.Address, point) is { } pointer
+            && context.Get(state.Resolve, pointer) is { IsSuccess: true } resolved
+            && indirectParameters.TryGetValue(resolved.Value, out var parameter) && parameter.Type.Equals(type))
+            return parameter;
         var value = BuildStructValue(source, type, point);
         if (value is null && failure is { StructType: null } missing) failure = missing with { StructType = type };
         return value;
@@ -148,6 +154,7 @@ public sealed partial class IntegerLowering
     }
     private ManagedValue? StructLeafValue(Term term, TypeRef type)
     {
+        if (RejectIndirectParameterUse([term], "结构体字段值")) return null;
         var value = Value(term, IsFloat(type));
         if (value is null)
         {

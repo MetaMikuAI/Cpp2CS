@@ -265,10 +265,21 @@ internal static partial class LoweringChecks
                 public static nuint UnsignedOne() => 1;
                 public static nint Zero;
                 public static nint MutableZero() => Zero;
+                public static void* NativePointer(nint p) => p.ToPointer();
+                public static void* NativePointerBits(nint p) => (void*)p;
+                public static void* NativePointerZero(nint p) => null;
+                public static void* UnsignedPointer(nuint p) => p.ToPointer();
+                public static void* UnsignedPointerBits(nuint p) => (void*)p;
+                public static void* UnsignedPointerZero(nuint p) => null;
             }
             """);
         foreach (var prefix in new[] { "Native", "Unsigned" })
         {
+            checks.True(CilComparison.Compare(source.Method("NativeValues", prefix + "Pointer"), source.Method("NativeValues", prefix + "PointerBits")).Status == CilComparisonStatus.Match,
+                prefix + " ToPointer 与无事件的指针位型转换一致");
+            var pointerDifference = CilComparison.Compare(source.Method("NativeValues", prefix + "Pointer"), source.Method("NativeValues", prefix + "PointerZero"));
+            checks.True(pointerDifference.Status == CilComparisonStatus.Mismatch,
+                prefix + " ToPointer 仍检出指针位型变化：" + pointerDifference);
             var zero = source.Method("NativeValues", prefix + "Zero");
             checks.True(zero.Body.Instructions.Any(i => i.OpCode.Code == Mono.Cecil.Cil.Code.Ldsfld), prefix + " 零值检查实际读取核心库字段");
             checks.True(CilComparison.Compare(zero, source.Method("NativeValues", prefix + "ConstantZero")).Status == CilComparisonStatus.Match,
@@ -1009,6 +1020,23 @@ internal static partial class LoweringChecks
             ["CallResult"] = Method("CallResult", pairType, pairType),
             ["Hfa"] = Method("Hfa", hfaType, hfaType),
             ["IndirectField"] = Method("IndirectField", Primitive("Int64"), largeType),
+            ["IndirectStackField"] = Method("IndirectStackField", Primitive("Int64"), [.. Enumerable.Repeat(Primitive("Int64"), 8), largeType]),
+            ["IndirectWrite"] = Method("IndirectWrite", Primitive("Int64"), largeType),
+            ["IndirectSnapshot"] = Method("IndirectSnapshot", Primitive("Int64"), largeType),
+            ["IndirectForward"] = Method("IndirectForward", Primitive("Void"), largeType),
+            ["IndirectRefForward"] = Method("IndirectRefForward", Primitive("Void"), largeType),
+            ["IndirectEscape"] = Method("IndirectEscape", Primitive("IntPtr"), largeType),
+            ["IndirectEscapeStore"] = Method("IndirectEscapeStore", Primitive("Void"), largeType, new ByRefRef(Primitive("IntPtr"))),
+            ["IndirectArithmetic"] = Method("IndirectArithmetic", Primitive("IntPtr"), largeType),
+            ["IndirectOther"] = Method("IndirectOther", Primitive("Void"), new ByRefRef(largeType)),
+            ["IndirectSpill"] = Method("IndirectSpill", Primitive("Int64"), largeType),
+            ["IndirectWholeCopy"] = Method("IndirectWholeCopy", Primitive("Void"), largeType),
+            ["IndirectIsolation"] = Method("IndirectIsolation", Primitive("Int64"), largeType),
+            ["IndirectLeafCopy"] = Method("IndirectLeafCopy", Primitive("Void")),
+            ["IndirectPartialCopy"] = Method("IndirectPartialCopy", Primitive("Void")),
+            ["IndirectCopyReadAfter"] = Method("IndirectCopyReadAfter", Primitive("Int64")),
+            ["IndirectCopyTwice"] = Method("IndirectCopyTwice", Primitive("Void")),
+            ["IndirectCopyReload"] = Method("IndirectCopyReload", Primitive("Int64")),
             ["FieldCopy"] = Method("FieldCopy", pairType, boxType),
             ["WholeCopy"] = Method("WholeCopy", pairType, boxType),
             ["ArrayCopy"] = Method("ArrayCopy", pairType, new ArrayRef(pairType, 1)),
@@ -1058,6 +1086,46 @@ internal static partial class LoweringChecks
             }
             if (mode == "NestedField") result = terms.Concat(terms.Slice(root, 32, 32), terms.Constant(0, 32));
             if (mode == "IndirectField") result = Read(Add(root, 8), 64);
+            if (mode == "IndirectStackField")
+            {
+                for (int i = 1; i < 8; i++) Input(SlotKind.Integer, i);
+                builder.IncomingArgumentArea = frame;
+                result = Read(Add(Read(frame, 64), 8), 64);
+            }
+            if (mode == "IndirectSpill")
+            {
+                statements.Add(new MemoryWrite(new(), Add(frame, -16), 64, root));
+                result = Read(Add(Read(Add(frame, -16), 64), 8), 64);
+            }
+            if (mode is "IndirectWrite" or "IndirectSnapshot")
+            {
+                var before = Read(Add(root, 8), 64);
+                statements.Add(new MemoryWrite(new(), Add(root, 8), 64, terms.Constant(99, 64)));
+                result = mode == "IndirectSnapshot" ? before : Read(Add(root, 8), 64);
+            }
+            if (mode is "IndirectForward" or "IndirectRefForward" or "IndirectOther")
+                statements.Add(new Call(new(), new ImageFunction(mode == "IndirectRefForward" ? 30UL : 40UL),
+                    [new(new(SlotKind.Integer), root), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+            if (mode == "IndirectArithmetic") result = Add(root, 1);
+            if (mode == "IndirectEscapeStore") statements.Add(new MemoryWrite(new(), Input(SlotKind.Integer, 1), 64, root));
+            if (mode is "IndirectWholeCopy" or "IndirectIsolation" or "IndirectLeafCopy" or "IndirectPartialCopy" or "IndirectCopyReadAfter" or "IndirectCopyTwice" or "IndirectCopyReload")
+            {
+                var address = Add(frame, -64);
+                if (mode is "IndirectWholeCopy" or "IndirectIsolation")
+                    statements.Add(new MemoryWrite(new(), address, 192, Read(root, 192)));
+                else
+                    for (int i = 0; i < (mode == "IndirectPartialCopy" ? 2 : 3); i++)
+                        statements.Add(new MemoryWrite(new(), Add(address, i * 8), 64, terms.Constant(i + 1, 64)));
+                statements.Add(new Call(new(), new ImageFunction(40), [new(new(SlotKind.Integer), address),
+                    new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+                if (mode == "IndirectCopyTwice")
+                    statements.Add(new Call(new(), new ImageFunction(40), [new(new(SlotKind.Integer), address),
+                        new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+                if (mode == "IndirectCopyReload")
+                    for (int i = 0; i < 3; i++) statements.Add(new MemoryWrite(new(), Add(address, i * 8), 64, terms.Constant(i + 4, 64)));
+                if (mode is "IndirectCopyReadAfter" or "IndirectCopyReload") result = Read(Add(address, 8), 64);
+                if (mode == "IndirectIsolation") result = Read(Add(root, 8), 64);
+            }
             if (mode == "ReferenceRoot") result = terms.Concat(Read(Add(Read(root, 64), box.Fields[0].Offset), 32), terms.Constant(0, 32));
             if (mode == "CallResult")
             {
@@ -1135,6 +1203,16 @@ internal static partial class LoweringChecks
                 : mode is "FrameIndirectResult" or "FrameResultSnapshot" or "FrameLargePass" or "FrameBufferPartial" or "FrameBufferPhi" ? createLarge : target;
             var calls = new CallNamingQuery(binder, new AddressMap(selectedTarget, refLarge, consumeLarge), new NamingChecks.RuntimeMap(), catalog);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(definition), binder, types, calls: calls, effects: new ManagedCallEffects(calls), spec: spec, names: facts).Run();
+            if (mode is "IndirectPartialCopy" or "IndirectCopyReadAfter" or "IndirectCopyTwice" or "IndirectOther")
+            {
+                checks.True(lowered.Failure?.Reason.Code == "lowering.IndirectArgument.Source", mode + " 缺少间接实参来源时报洞：" + lowered.Failure);
+                continue;
+            }
+            if (mode is "IndirectEscape" or "IndirectArithmetic" or "IndirectEscapeStore")
+            {
+                checks.True(lowered.Failure?.Reason.Code == "lowering.IndirectParameter.Escape", mode + " 存储地址不能作为整数或返回值：" + lowered.Failure);
+                continue;
+            }
             if (mode is "FrameBufferPartial" or "FrameBufferPhi")
             {
                 checks.True(lowered.Failure?.Reason.Code == "lowering.Frame.Struct" && lowered.Failure.Reason.Message.Contains(largeType.ToString(), StringComparison.Ordinal), "间接结果部分覆盖结构体帧时报类型明确的洞");
@@ -1146,7 +1224,7 @@ internal static partial class LoweringChecks
                 checks.True(lowered.Failure?.Reason.Code == expected, mode + " 分开报告不可写或实体不匹配：" + lowered.Failure);
                 continue;
             }
-            if (mode is "Incomplete" or "InterleavedLarge")
+            if (mode == "Incomplete")
             {
                 checks.True(lowered.Failure?.Reason.Code.StartsWith("lowering.Struct.", StringComparison.Ordinal) == true, mode + " 不冒充整体转发：" + lowered.Failure);
                 continue;
@@ -1164,6 +1242,10 @@ internal static partial class LoweringChecks
                 if (mode == "FrameResultSnapshot") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>()
                     .SelectMany(r => ManagedValues.Walk(r.Value!)).OfType<FieldValue>().Any(f => f.Receiver == original), "调用前读取保持独立调用结果快照，不读后来被改写的帧局部");
             }
+            if (mode == "IndirectForward") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Single().Invocation.Arguments[0]
+                is ArgumentValue { Index: 0 }, "间接按值形参转交为当前形参值");
+            if (mode == "IndirectRefForward") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Single().Invocation.Arguments[0]
+                is AddressValue { Target: ArgumentValue { Index: 0 } }, "间接形参转交 ref 使用 ldarga");
             if (mode == "FrameWhole") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedAssignment>()
                 .Any(a => a.Value is ArgumentValue { Index: 0 } && a.Target.Type.Equals(pairType)), "连续叶子写入按同类型整体复制到帧局部");
             var problems = emitter.Emit([body]);
@@ -1176,6 +1258,38 @@ internal static partial class LoweringChecks
                 checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value is ComposedValue, mode + " 逐叶子组成而非类型重解释");
             if (mode == "CallResult") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Single().Result?.Type.Equals(pairType) == true, "结构体调用结果保存在同类型局部");
             if (mode == "FieldCopy") checks.True(body.Blocks[0].Statements[0] is ManagedAssignment { Value: FieldValue { Type: var copied } } && copied.Equals(pairType), "整体字段在首个原生读取处保存");
+        }
+        const string indirectSource = """
+            public struct Large { public long Part0, Part1, Part2; }
+            public static class Cases {
+                public static void ConsumeLarge(Large p) { p.Part1 = 99; }
+                public static long IndirectWrite(Large p) { p.Part1 = 99; return p.Part1; }
+                public static long IndirectSnapshot(Large p) { long before = p.Part1; p.Part1 = 99; return before; }
+                public static long IndirectIsolation(Large p) { ConsumeLarge(p); return p.Part1; }
+                public static Large InterleavedLarge(Large p) => p;
+            }
+            """;
+        using var indirectReference = new CompiledSource(indirectSource);
+        using var indirectTested = new CompiledSource(indirectSource);
+        foreach (var mode in new[] { "IndirectWrite", "IndirectSnapshot", "IndirectIsolation", "InterleavedLarge" })
+        {
+            var output = indirectTested.Method("Cases", mode);
+            var emitted = skeleton.Method(cases[mode]);
+            if (!emitted.HasBody) continue;
+            output.Body = emitted.Body;
+            Mono.Cecil.TypeReference MapType(Mono.Cecil.TypeReference type) => type is Mono.Cecil.ByReferenceType byref
+                ? new Mono.Cecil.ByReferenceType(MapType(byref.ElementType))
+                : indirectTested.Module.GetType(type.FullName) ?? indirectTested.Module.ImportReference(System.Type.GetType(type.FullName, throwOnError: true)!);
+            foreach (var instruction in output.Body.Instructions)
+                if (instruction.Operand is Mono.Cecil.FieldReference field)
+                    instruction.Operand = indirectTested.Module.GetType(field.DeclaringType.FullName).Fields.Single(f => f.Name == field.Name);
+                else if (instruction.Operand is Mono.Cecil.MethodReference called)
+                    instruction.Operand = indirectTested.Module.GetType(called.DeclaringType.FullName).Methods.Single(m => m.Name == called.Name);
+                else if (instruction.Operand is Mono.Cecil.TypeReference type) instruction.Operand = MapType(type);
+                else if (instruction.Operand is Mono.Cecil.ParameterDefinition parameter) instruction.Operand = output.Parameters[parameter.Index];
+            foreach (var local in output.Body.Variables) local.VariableType = MapType(local.VariableType);
+            var comparison = CilComparison.Compare(indirectReference.Method("Cases", mode), output);
+            checks.True(comparison.Status == CilComparisonStatus.Match, mode + " 形参写入、快照与传值隔离执行对照：" + comparison);
         }
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
     }

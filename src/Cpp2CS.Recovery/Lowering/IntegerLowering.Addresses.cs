@@ -2,6 +2,7 @@ using Cpp2CS.Managed;
 using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
+using Cpp2CS.Recovery.Naming;
 
 namespace Cpp2CS.Recovery.Lowering;
 
@@ -38,10 +39,29 @@ public sealed partial class IntegerLowering
         return target is null ? null : new AddressValue(target, types.PointerSize * 8);
     }
 
+    private bool RejectIndirectParameterUse(IEnumerable<Term> roots, string use)
+    {
+        if (!hasIndirectParameters) return false;
+        foreach (var root in roots)
+        {
+            var resolved = context.Get(state.Resolve, root);
+            if (!resolved.IsSuccess) continue;
+            foreach (var term in SnapshotRewrite.Dependencies([resolved.Value]))
+                if (indirectParameters.ContainsKey(term)
+                    || valueNames is not null && context.Get(valueNames, term) is { IsSuccess: true, Value.Name: IndirectParameterName })
+                {
+                    Fail<object>(LoweringFailureKind.UnsupportedType, "间接形参的存储地址用于" + use, code: "lowering.IndirectParameter.Escape");
+                    return true;
+                }
+        }
+        return false;
+    }
+
     private bool RejectAddressUse(IEnumerable<Term> roots, string use, bool frameContents = false)
     {
-        if (locations is null) return false;
         var inputs = roots.ToArray();
+        if (!frameContents && RejectIndirectParameterUse(inputs, use)) return true;
+        if (locations is null) return false;
         foreach (var root in frameContents ? [] : inputs)
         {
             var frame = context.Get(frameAddressUses, root);

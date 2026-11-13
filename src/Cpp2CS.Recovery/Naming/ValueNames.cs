@@ -15,6 +15,8 @@ public enum ValueKind { Unnamed, ManagedReference, RuntimePointer, FrameAddress,
 public abstract record ValueName;
 public sealed record EntityName(MetadataEntity Entity, ulong? Slot) : ValueName;
 public sealed record ParameterName(int Index, TypeRef? StaticType, bool MethodInformation) : ValueName;
+/// <summary>ABI 间接按值形参的存储地址；序号沿用 C 层签名。</summary>
+public sealed record IndirectParameterName(int Index, TypeRef ElementType) : ValueName;
 public sealed record CallResultName(CallIdentity Call, TypeRef? StaticType, string? Operation) : ValueName;
 /// <summary>身份沿用读取项；声明类型不证明不同读取同值。</summary>
 public sealed record LoadedName(Term Read, TypeRef StaticType) : ValueName;
@@ -33,7 +35,7 @@ public sealed record NamedValue(ValueKind Kind, ValueName? Name, string? Record 
     /// <summary>运行时登记给出的引用结果类型视图；值身份仍由原来的名字决定。</summary>
     public TypeRef? ReferenceType { get; init; }
     public TypeRef? StaticType => ReferenceType ?? (Name switch
-    { ParameterName p => p.StaticType, CallResultName r => r.StaticType, LoadedName r => r.StaticType, CaughtExceptionName e => e.StaticType, _ => null });
+    { ParameterName p => p.StaticType, IndirectParameterName p => new ByRefRef(p.ElementType), CallResultName r => r.StaticType, LoadedName r => r.StaticType, CaughtExceptionName e => e.StaticType, _ => null });
 }
 
 /// <summary>名字保存实体、定义或规格字段依据；不向项表写入替代项，不改写快照。</summary>
@@ -49,6 +51,7 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     internal ImmutableDictionary<ulong, FlagEvidence> Flags => facts.Flags;
     internal MethodBinder Binder => binder;
     private readonly RuntimeInputKindsQuery inputKinds = new(state,calls);
+    private readonly BoundSourceQuery entrySources = new(state);
     private ManagedLocationQuery? locations;
     internal SpecificationReadQuery SpecificationReads { get; } = new();
     internal void UseLocations(ManagedLocationQuery query)
@@ -85,7 +88,10 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
             for (int i = 0; i < entry.Signature.Parameters.Length; i++)
             {
                 var bound = binder.Parameter(entry, i, c.Snapshot.Terms, c.Snapshot.Inputs, c.Snapshot.IncomingArgumentArea);
-                if (bound.Value?.Source is TermSource source && source.Term == key)
+                var indirect = bound.Value?.Source as IndirectSource;
+                Outcome<Term>? address = indirect is null ? null : c.Get(entrySources, new(indirect.Address, new(c.Snapshot.Entry, 0)));
+                if (bound.Value?.Source is TermSource source && source.Term == key
+                    || address is { IsSuccess: true } && address.Value.Value == key)
                 {
                     var method = entry.Entry?.Method;
                     TypeRef? type = null;
@@ -97,6 +103,8 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
                             ? new ByRefRef(new DefinitionRef(method.Method.Owner, method.TypeArguments))
                             : new DefinitionRef(method.Method.Owner, method.TypeArguments);
                     }
+                    if (indirect is not null && type is not null)
+                        return Yes(new(ValueKind.ManagedAddress, new IndirectParameterName(i, type)));
                     bool info = entry.Managed?.MethodInformationIndex == i;
                     return Yes(info ? new(ValueKind.RuntimePointer, new ParameterName(i, null, true), "MethodInfo")
                         : Typed(entry.Signature.Parameters[i], type, new ParameterName(i, type, false)));

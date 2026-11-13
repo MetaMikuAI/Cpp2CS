@@ -41,6 +41,9 @@ internal static class BindingChecks
         var split = binder.Parameter(small, 0, terms, inputs).Value!;
         a.True(small.Parameters[0].Pieces.Length == 2 && split.Source is TermSource { Term.Width: 128, Term.ConstantValue: var bits }
             && bits == ((System.Numerics.BigInteger)0x101 << 64 | 0x100), "小聚合按值偏移拼接两个槽");
+        var hfa = Signature(new CAggregate(16, 4, [.. Enumerable.Range(0, 4).Select(i => new CField(i * 4, new CFloat(32)))]));
+        a.True(hfa.Parameters[0].CopyAddress is null && hfa.Parameters[0].Pieces.Length == 4
+            && hfa.Parameters[0].Pieces.All(p => p.Slot.Kind == SlotKind.Floating), "四个 float 的 HFA 不走间接传递");
         var large = Signature(Aggregate(3));
         a.True(binder.Parameter(large, 0, terms, inputs).Value!.Source is IndirectSource { Length: 24, Address: TermSource }, "大聚合传副本地址");
         var stack = Signature(new CInteger(32), 8);

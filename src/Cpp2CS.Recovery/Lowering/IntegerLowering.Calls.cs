@@ -204,6 +204,20 @@ public sealed partial class IntegerLowering
         if (GenericStruct(type)) return GenericFailure<ManagedValue>("Struct", "含类型参数的值类型实参尚未下降");
         if (types.Kind(type) == TypeKind.Struct)
         {
+            if (bound.Source is IndirectSource indirect)
+            {
+                var pointer = BoundTerm(indirect.Address, point);
+                if (pointer is null) return null;
+                var resolvedPointer = context.Get(state.Resolve, pointer);
+                if (!resolvedPointer.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "间接实参地址查询失败", resolvedPointer.Why);
+                if (indirectParameters.TryGetValue(resolvedPointer.Value, out var parameter) && parameter.Type.Equals(type))
+                    return parameter;
+                var native = context.Get(state.Locations, new(resolvedPointer.Value, indirect.Length * 8));
+                if (!native.IsSuccess || native.Value.Region != Region.Frame || frameObjects is null
+                    || !frameObjects.Locate(native.Value).Views.Any(v => v.Type.Equals(type) && v.Path.IsEmpty && v.Offset == 0))
+                    return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "间接实参不是已认定的帧副本或同类型间接形参", code: "lowering.IndirectArgument.Source");
+                return StructValue(indirect, type, point);
+            }
             var bits = context.Get(boundSources, new(bound.Source, point));
             if (bits.IsSuccess && RejectAddressUse([bits.Value], "非按引用的结构体形参")) return null;
             return bound.Source is { } source ? StructValue(source, type, point)

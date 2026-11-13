@@ -174,6 +174,12 @@ public sealed partial class IntegerLowering
     }
     private ManagedStatement? LowerStore(MemoryWrite write, Point point)
     {
+        // 入口地址的普通溢出由状态模型转发；对外存储仍按逃逸检查。
+        if (hasIndirectParameters && valueNames is not null
+            && context.Get(state.Resolve, write.Value) is { IsSuccess: true } stored
+            && context.Get(valueNames, stored.Value) is { IsSuccess: true, Value.Name: IndirectParameterName }
+            && context.Get(state.Resolve, write.Address) is { IsSuccess: true } spill
+            && context.Get(state.Locations, new(spill.Value, write.Width)) is { IsSuccess: true, Value.Region: Region.Frame }) return null;
         if (RejectAddressUse([write.Value], "写入内存")) return null;
         if (structReturnStores is not null)
         {

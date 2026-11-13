@@ -53,6 +53,7 @@ public sealed partial class IntegerLowering
     private readonly List<(BlockIdentity Target, LocalValue Local, IReadOnlyList<Incoming> Inputs, int Low, int Width)> pending = [];
     private readonly Dictionary<(BlockIdentity From, BlockIdentity To), List<ManagedCopy>> copies = [];
     private SignatureBinding signature = null!;
+    private bool hasIndirectParameters;
     private LoweringFailure? failure;
     private ulong position;
     private int nextLocal;
@@ -92,6 +93,7 @@ public sealed partial class IntegerLowering
         if (bound.Value is not { } binding)
         { Fail<object>(LoweringFailureKind.Binding, bound.Failure!.Detail, code: GenericWitness.IsGeneric(method.Method) ? "lowering.Generic.Witness" : null); return new(null, failure); }
         signature = binding;
+        hasIndirectParameters = binding.Slots.Parameters.Any(p => p.CopyAddress is not null);
         if (method.Method.Parameters.Select(p => method.Concrete(p.Type)).Append(method.Concrete(method.Method.ReturnType))
             .Append(method.DeclaringType).Any(GenericStruct))
         { GenericFailure<object>("Struct", "含类型参数的值类型签名尚未下降"); return new(null, failure); }
@@ -285,7 +287,17 @@ public sealed partial class IntegerLowering
         var result = binder.Parameter(signature, cIndex, function.Terms, function.Inputs, function.IncomingArgumentArea);
         if (result.Value is not { } bound) { Fail<object>(LoweringFailureKind.Binding, result.Failure!.Detail); return; }
         // 原子按签名定型，槽位未指定的高位不参与绑定。
-        if (types.Kind(type) == TypeKind.Struct && bound.Source is { } aggregate)
+        if (types.Kind(type) == TypeKind.Struct && bound.Source is IndirectSource indirect)
+        {
+            var pointer = BoundTerm(indirect.Address, new(function.Entry, 0));
+            if (pointer is null) return;
+            var resolved = context.Get(state.Resolve, pointer);
+            if (!resolved.IsSuccess) { Fail<object>(LoweringFailureKind.Binding, "间接形参地址查询失败", resolved.Why); return; }
+            var parameter = new ArgumentValue(index, type, 0);
+            indirectParameters.Add(resolved.Value, parameter);
+            arguments[resolved.Value] = new AddressValue(parameter, types.PointerSize * 8);
+        }
+        else if (types.Kind(type) == TypeKind.Struct && bound.Source is { } aggregate)
             structParameters.Add(new(type, aggregate, new(function.Entry, 0), Parameter: index));
         else if (bound.Source is TermSource source)
             arguments[source.Term] = new ArgumentValue(index, type, source.Term.Width);

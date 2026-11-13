@@ -52,6 +52,7 @@ public sealed partial class IntegerLowering
     }
     private ManagedValue? BuildValue(Term term, bool floating = false)
     {
+        if (term.Operands.Length > 0 && RejectIndirectParameterUse([term], "运算或普通值")) return null;
         if (term.Identity is RootAtom { Kind: AddressRoot.Frame })
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedType, "帧地址用于普通值或运算", code: "lowering.Frame.Use");
         if (locations is not null && context.Get(locations.Addresses, term).IsSuccess && StaticType(term) is not ByRefRef)

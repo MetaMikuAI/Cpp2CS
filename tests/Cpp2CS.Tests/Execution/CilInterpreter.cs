@@ -712,6 +712,11 @@ internal sealed partial class CilInterpreter(CecilModel model, WorldIndex index)
             side.RunClassConstructor(world.TypeOfHandle(values[0].Bits));
             return null;
         }
+        // 核心库 IntPtr/UIntPtr.ToPointer 的参考 IL 只读取指针字段并返回，没有调用事件。
+        if (callee.Method is { Name: "ToPointer", IsStatic: false, Parameters.Count: 0,
+                Owner.Assembly: "mscorlib.dll", Owner.FullName: "System.IntPtr" or "System.UIntPtr" }
+            && callee.Method.ReturnType is PointerRef)
+            return StackValue.I8(side.Read64(values[0].Bits));
         if (DelegateModel.IsInvoke(callee)) return InvokeDelegate(side, callee, values);
         if (callee.Method is { Name: "get_Length", IsStatic: false, Owner.FullName: "System.String", Parameters.Count: 0 })
         {

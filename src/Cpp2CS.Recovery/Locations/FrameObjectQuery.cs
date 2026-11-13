@@ -77,7 +77,8 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
     {
         var objects = new Dictionary<BigInteger, FrameObject>();
         var uses = new List<(Term Term, TypeRef? Element)>();
-        var buffers = new List<(CallIdentity Call, Term Pointer, TypeRef Type, int Length, bool Write)>();
+        var buffers = new List<(CallIdentity Call, Point Point, Term Pointer, TypeRef Type, int Length, bool Write)>();
+        var indirectInputs = new HashSet<CallIdentity>();
         var index = c.Get(state.Index, 0); if (!index.IsSuccess) return index.Propagate<FrameObjects>();
         foreach (var block in c.Snapshot.Blocks)
         {
@@ -94,7 +95,11 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                         void Buffer(IndirectSource source, TypeRef type, bool write)
                         {
                             var pointer = c.Get(sources, new(source.Address, point));
-                            if (pointer.IsSuccess) buffers.Add((call.Identity, pointer.Value, type, source.Length, write));
+                            if (pointer.IsSuccess)
+                            {
+                                buffers.Add((call.Identity, point, pointer.Value, type, source.Length, write));
+                                if (!write) { uses.Add((pointer.Value, type)); indirectInputs.Add(call.Identity); }
+                            }
                         }
                         void Input(BoundSource? source, TypeRef? type)
                         {
@@ -213,6 +218,24 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                 if (buffer.Write) results.Add(buffer.Call, item);
             }
         }
+        foreach (var buffer in buffers.Where(b => !b.Write))
+        {
+            var pointer = c.Get(state.Resolve, buffer.Pointer);
+            if (!pointer.IsSuccess) return pointer.Propagate<FrameObjects>();
+            var storage = c.Get(state.Locations, new(pointer.Value, buffer.Length * 8));
+            if (!storage.IsSuccess) return storage.Propagate<FrameObjects>();
+            if (storage.Value.Region != Region.Frame) continue;
+            var item = list.Single(o => o.Storage == storage.Value);
+            foreach (var field in item.Fields)
+            {
+                var value = c.Get(state.Reaching, new(buffer.Point, item.Storage with { Offset = item.Storage.Offset + field.Bit / 8, Width = field.Width }));
+                if (!value.IsSuccess) return value.Propagate<FrameObjects>();
+                if (value.Value.Bits.Any(bits => bits.Count != 1 || bits.Single().Value.Kind is TermKind.Unknown or TermKind.Undefined
+                    || bits.Single().Value.Identity is MemoryAtom { Location.Region: Region.Frame, Definition: null }
+                    || bits.Single().Value.Identity is MemoryAtom { Definition: CallIdentity call } && indirectInputs.Contains(call)))
+                    return Outcome<FrameObjects>.Failure(new("lowering.IndirectArgument.Source", "间接实参的帧副本缺少全部叶子的初始化证明。"));
+            }
+        }
         var accesses = ImmutableDictionary.CreateBuilder<StableIdentity, FrameAccess>();
         if (list.IsEmpty) return Outcome<FrameObjects>.Success(new(list, accesses.ToImmutable()));
         foreach (var statement in c.Snapshot.Blocks.SelectMany(b => b.Statements))
@@ -244,6 +267,15 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                     parts = [new([], item.Type, 0, item.Storage.Width)];
                 }
                 var id = statement is MemoryRead read ? (StableIdentity)read.Identity : ((MemoryWrite)statement).Identity;
+                if (statement is MemoryRead observed && indirectInputs.Count > 0)
+                {
+                    var at = index.Value.Reads[observed.Identity].Point;
+                    var reaching = c.Get(state.Reaching, new(at, location.Value));
+                    if (!reaching.IsSuccess) return reaching.Propagate<FrameObjects>();
+                    if (reaching.Value.Bits.Any(bits => bits.Count != 1
+                        || bits.Single().Value.Identity is MemoryAtom { Definition: CallIdentity call } && indirectInputs.Contains(call)))
+                        return Outcome<FrameObjects>.Failure(new("lowering.IndirectArgument.Source", "帧副本在间接按值调用后被读取，调用可能改写的内容尚无托管写回来源。"));
+                }
                 accesses.Add(id, new(item, location.Value, parts));
             }
         }
