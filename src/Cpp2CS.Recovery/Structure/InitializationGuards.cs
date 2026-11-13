@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using Cpp2CS.Kernel.Flow;
 using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Kernel.State;
+using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
@@ -53,7 +54,9 @@ public sealed partial class UnobservableEffects
                     rejected[read.Identity] = new("init-guard", read.Trace?.NativeAddress, why.Message, false) { Reason = why };
                     rejectedHeads[read.Identity] = head.Identity;
                 }
-                if (classFlag && names.ContextEntity(field!.Owner))
+                // 类型含本定义的类型参数时，类来自泛型上下文；封闭的类实体照常改写。
+                if (classFlag && field!.Owner is EntityName { Entity: ClassEntity { Type: var guarded } } && guarded.ContainsGenericParameter()
+                    || classFlag && field!.Owner is ParameterName { MethodInformation: true })
                 { Reject(new("structure.init-guard.generic-context", "类来自当前泛型上下文，本变换不处理该来源。")); continue; }
                 if (classFlag && field!.Owner is not EntityName { Entity: ClassEntity })
                 { Reject(new("structure.init-guard.class-unnamed", "初始化状态的类没有实体凭据或来自泛型上下文。")); continue; }

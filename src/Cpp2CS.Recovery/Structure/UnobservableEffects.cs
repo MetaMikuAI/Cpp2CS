@@ -40,6 +40,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
     public StructureResult Run(NativeFunction input)
     {
         var records = new List<StructureRecord>();
+        var rejected = new List<StructureRecord>();
         var assumptions = new HashSet<string>();
         var timings = new Dictionary<string, double>();
         while (true)
@@ -48,17 +49,31 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
             records.AddRange(result.Records.Where(r => r.Removed));
             assumptions.UnionWith(result.Assumptions);
             foreach (var (key, seconds) in result.Timings) timings[key] = timings.GetValueOrDefault(key) + seconds;
-            if (ReferenceEquals(result.Function, input))
-                return result with { Records = [.. records, .. result.Records.Where(r => !r.Removed)],
+            // 只有消去了已知实体的元数据初始化（泛型上下文、类的布局就绪），新快照才可能让原先未知的实体可命名；
+            // 其余情形一遍就是最终结果，不重复。
+            if (ReferenceEquals(result.Function, input) || !contextInitialization)
+            {
+                // 前几遍留下的拒绝原因，只要同一位置后来既没有被改写、最后一遍也没有重新给出，就保留：
+                // 后面的遍可能改掉了让它被认出来的那部分代码，原因仍然是这个位置没能改写的依据。
+                var last = result.Records.Where(r => !r.Removed).ToArray();
+                var kept = rejected.Where(r => !records.Any(x => x.Kind == r.Kind && x.Address == r.Address)
+                    && !last.Any(x => x.Kind == r.Kind && x.Address == r.Address)).ToArray();
+                return result with { Records = [.. records, .. last, .. kept],
                     Assumptions = [.. assumptions.Order(StringComparer.Ordinal)], Timings = timings.ToImmutableDictionary() };
+            }
+            foreach (var r in result.Records.Where(r => !r.Removed && (r.Reason is not null || r.Why is not null)))
+                if (!rejected.Any(x => x.Kind == r.Kind && x.Address == r.Address)) rejected.Add(r);
             // 新快照可使原先未知的元数据实体可命名；只重复同一消去过程。
             // 每次改写均减少块、调用、语句或未使用的槽，不增加原生控制流。
             input = result.Function;
         }
     }
 
+    private bool contextInitialization;
+
     private StructureResult Normalize(NativeFunction input)
     {
+        contextInitialization = false;
         var timer = Stopwatch.StartNew();
         var timings = new Dictionary<string, double>();
         double regionTime = 0, liveTime = 0, rewriteTime = 0;
@@ -102,7 +117,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                     else if (op.MetadataInitialization is { } metadata
                         && named.Value.Inputs?.GetValueOrDefault(metadata.Input)?.Source is TermSource source
                         && c.Get(names, source.Term) is { IsSuccess: true } target && names.ContextEntity(target.Value.Name))
-                        evidence = metadata.Evidence;
+                    { evidence = metadata.Evidence; contextInitialization = true; }
                     else if (op.Observation == RuntimeObservation.Unobservable)
                         evidence = op.Name;
                 }
