@@ -4,8 +4,11 @@ using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Kernel.State;
 using Cpp2CS.Model;
 using Cpp2CS.Native;
+using Cpp2CS.Native.Images;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
+using Cpp2CS.Recovery.Structure;
+using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.Naming;
 
@@ -26,144 +29,147 @@ public sealed record NamingFacts(ImmutableDictionary<ulong, Outcome<MetadataEnti
 public sealed class InitializationFlagQuery(NamingFacts facts) : Query<ulong, FlagEvidence>
 {
     public override Outcome<FlagEvidence> Compute(QueryContext c, ulong key) => Outcome<FlagEvidence>.Success(
-        facts.Flags.GetValueOrDefault(key) ?? new(false, [new("naming.no-access-evidence", "没有全映像访问凭据。")], 0, 0));
+        facts.Flags.GetValueOrDefault(key) ?? new(false, [new("naming.no-access-evidence", "本函数没有该字节的访问凭据。")], 0, 0));
 }
 
-/// <summary>一次运行的流式普查器；Finish 后只发布不可变事实。缺失函数必须调用 Incomplete，不以部分普查证明全称命题。</summary>
-/// <remarks>给出映像时，映像里不变数据的读取（例如经 GOT 取槽位地址）按文件内容解析。</remarks>
-public sealed class NamingSurvey(CallNamingQuery calls, IMetadataSlotDecoder decoder, Cpp2CS.Native.Images.IImage? image = null)
+/// <summary>逐函数验证方法初始化模板；跨函数汇总只合并各函数已经独立得到的结论。</summary>
+/// <remarks>Complete 描述观察范围，不参与函数内标志的判定。</remarks>
+public sealed class NamingSurvey(CallNamingQuery calls, IMetadataSlotDecoder decoder, IImage? image = null,
+    MethodBinder? binder = null, RuntimeSpec? spec = null, SignatureBinding? entry = null)
 {
-    private readonly HashSet<ulong> slots = [];
-    private readonly Dictionary<ulong, List<Reason>> reasons = [];
-    private readonly Dictionary<ulong, (int Reads, int Writes)> counts = [];
-    private readonly HashSet<ulong> escaped = [];
-    private readonly HashSet<ulong> byteCandidates = [];
+    private readonly Dictionary<ulong, Outcome<MetadataEntity>> slots = [];
+    private readonly Dictionary<ulong, FlagEvidence> flags = [];
     private readonly StateQueries state = new(image: image);
-    private readonly FlowQueries flow = new();
     private bool complete = true;
-    private readonly HashSet<(ulong Address, int Width)> accesses = [];
     public void Incomplete() => complete = false;
+    private sealed record Access(Point Point, Statement Statement, Location Location);
+
     public void Observe(NativeFunction function)
     {
         var c = state.CreateContext(function);
-        var initializers = new List<Point>();
+        foreach (var call in function.Blocks.SelectMany(b => b.Statements).OfType<Call>())
+            if (c.Get(calls, call.Identity) is { IsSuccess: true, Value.Operation.Name: "InitializeMetadata" } classified
+                && classified.Value.Inputs?.GetValueOrDefault("slot")?.Source is TermSource source
+                && Address(c, source.Term, function.AddressWidth) is { } address)
+                slots.TryAdd(address, decoder.Decode(address));
+        var accesses = new List<Access>();
+        var unclassified = new List<(Access Access, Term Address, Reason? Why)>();
         foreach (var block in function.Blocks)
         for (int i = 0; i < block.Statements.Length; i++)
-            if (block.Statements[i] is Call call)
+        {
+            var statement = block.Statements[i];
+            var request = statement switch
             {
-                var classified = c.Get(calls, call.Identity);
-                if (classified.IsSuccess && classified.Value.Operation?.Name == "InitializeMetadata")
+                MemoryRead read => new AddressRequest(read.Address, read.Width),
+                MemoryWrite write => new AddressRequest(write.Address, write.Width), _ => default,
+            };
+            if (request.Address is null) continue;
+            var resolved = c.Get(state.Resolve, request.Address);
+            var location = resolved.IsSuccess ? c.Get(state.Locations, new(resolved.Value, request.Width)) : default;
+            if (location.IsSuccess && location.Value is { Region: Region.Image, Offset: not null })
+                accesses.Add(new(new(block.Identity, i), statement, location.Value));
+            else unclassified.Add((new(new(block.Identity, i), statement, location.IsSuccess ? location.Value
+                : new(Region.Other, request.Address, null, request.Width, request.Address)), request.Address, location.Why));
+        }
+        var candidates = accesses.Where(a => a.Location is { Width: 8, Offset: not null }).Select(a => a.Location).Distinct().ToArray();
+        if (candidates.Length == 0) return;
+        var localSlots = slots.ToImmutableDictionary();
+        var names = binder is not null && spec is not null ? new ValueNamingQuery(state, calls,
+            new(localSlots, ImmutableDictionary<ulong, FlagEvidence>.Empty, true), spec, binder, entry) : null;
+        if (names is not null) c = names.CreateContext(function);
+        var uses = new SemanticUses(c, calls, state, binder, entry);
+        var prefix = names is null ? null : new InitializationPrefixQuery(state, calls, names, image);
+        var unknownUses = new Dictionary<ulong, List<(Access Access, Reason? Why)>>();
+        foreach (var unknown in unclassified)
+            foreach (var address in uses.ImageAddresses(unknown.Address, c, state))
+            {
+                if (!unknownUses.TryGetValue(address, out var list)) unknownUses[address] = list = [];
+                list.Add((unknown.Access, unknown.Why));
+            }
+        var escapedUses = new Dictionary<ulong, List<SemanticUses.Use>>();
+        foreach (var use in uses.Roots.Where(u => !u.Address))
+            foreach (var address in uses.ImageAddresses(use.Value, c, state))
+            {
+                if (!escapedUses.TryGetValue(address, out var list)) escapedUses[address] = list = [];
+                list.Add(use);
+            }
+        foreach (var candidate in candidates)
+        {
+            if (candidate.Offset is not { } number || number < 0 || number > ulong.MaxValue) continue;
+            ulong address = (ulong)number;
+            var why = new List<Reason>(); int reads = 0, writes = 0;
+            var verifiedWrites = new HashSet<WriteIdentity>();
+            void Reject(string code, string text, Access? access = null, Reason? cause = null)
+            {
+                var position = access?.Statement.Trace is { } trace ? $"0x{trace.NativeAddress:x}" : access is null ? "地址" : $"块 {function.Blocks.IndexOf(function.Blocks.Single(b => b.Identity == access.Point.Block))} 的语句 {access.Point.Before}";
+                why.Add(new("naming.flag-" + code, position + "：" + text, cause));
+            }
+            var info = image?.Query(address);
+            if (info is not { Writable: true, Executable: false, AvailableBytes: > 0 } || info.Storage == StorageKind.Unmapped)
+                Reject("storage", "不是映像可写数据里的字节。");
+            foreach (var slot in localSlots.Keys)
+            {
+                var metadata = candidate with { Offset = slot, Width = function.AddressWidth };
+                if (c.Get(state.Alias, new(candidate, metadata)) is not { IsSuccess: true, Value.Kind: AliasKind.Disjoint })
+                    Reject("slot", "该字节与元数据槽位重叠。");
+            }
+            var related = accesses.Where(access => c.Get(state.Alias, new(candidate, access.Location)) is not { IsSuccess: true, Value.Kind: AliasKind.Disjoint }).ToArray();
+            foreach (var access in related)
+            {
+                if (access.Location != candidate)
+                { Reject("overlap", "存在宽访问或无法归类的映像地址访问。", access); continue; }
+                if (names is not null && c.Get(names, function.Terms.Atom(new MemoryAtom(access.Location, null), 8)) is
+                    { IsSuccess: true, Value.Name: FieldName or BitStorageName or EntityName })
+                    Reject("named", "该字节属于已命名的规格结构或元数据槽位。", access);
+                if (access.Statement is MemoryRead read)
                 {
-                    initializers.Add(new(block.Identity, i));
-                    if (classified.Value.Inputs?.GetValueOrDefault("slot")?.Source is TermSource source && Address(c, source.Term, 8) is { } address) slots.Add(address);
+                    reads++;
+                    var users = uses.Of(read.Identity).ToArray();
+                    if (read.Acquire || users.Length == 0)
+                        Reject("read", "读取没有零／非零分支测试凭据。", access);
+                    foreach (var use in users)
+                    {
+                        var test = use.Condition ? InitializationTest.Of(use.Value) : null;
+                        if (test is null || test.Read != read.Identity)
+                        { Reject("read", "读取另有真实使用：" + use.Kind + "。", access); continue; }
+                        if (prefix is null) { Reject("context", "缺少签名与规格的模板判定上下文。", access); continue; }
+                        var head = function.Blocks.Single(b => b.Identity == use.Point.Block);
+                        var branch = (Branch)head.End;
+                        var group = c.Get(prefix, new(new(head.Identity, test.ZeroWhenTrue ? branch.True : branch.False), null,
+                            candidate, test.Low, test.Width));
+                        if (!group.IsSuccess)
+                        { Reject("order", "从测试到置位的元数据初始化模板未成立。", access, group.Why); continue; }
+                        verifiedWrites.UnionWith(group.Value.Statements.OfType<MemoryWrite>().Select(w => w.Identity));
+                    }
+                }
+                else if (access.Statement is MemoryWrite write)
+                {
+                    writes++;
+                    var value = c.Get(state.Resolve, write.Value);
+                    if (write.Release || !value.IsSuccess || value.Value.ConstantValue is not { IsZero: false })
+                        Reject("write", "写入不是非零字节常量。", access, value.Why);
                 }
             }
-        // 读取结果的直接使用沿纯项与合流传播；任何非分支根使用均否定凭据。
-        var badReads = new HashSet<ReadIdentity>();
-        var testedReads = new HashSet<ReadIdentity>();
-        var merges = function.Blocks.SelectMany(b => b.Merges).ToDictionary(m => m.Identity);
-        var uses = new HashSet<(Term Value, bool Address, bool Condition)>();
-        void Use(Term value, bool addressUse = false, bool condition = false)
-        {
-            var pending = new Stack<Term>(); pending.Push(value);
-            while (pending.TryPop(out var t))
-            {
-                if (!uses.Add((t, addressUse, condition))) continue;
-                if (t.Identity is ResultAtom { Definition: ReadIdentity id }) (condition ? testedReads : badReads).Add(id);
-                foreach (var child in t.Operands) pending.Push(child);
-                if (t.Identity is ResultAtom { Definition: MergeIdentity merge })
-                    foreach (var input in merges[merge].Inputs) pending.Push(input.Value);
-                if (!addressUse && t.Width == function.AddressWidth && Address(c, t, 8) is { } address) escaped.Add(address);
-            }
+            foreach (var unknown in unknownUses.GetValueOrDefault(address) ?? [])
+                Reject("access", "这次内存访问含该字节的地址，但未得到唯一的常量访问位置。", unknown.Access, unknown.Why);
+            foreach (var access in related.Where(a => a.Statement is MemoryWrite write && !verifiedWrites.Contains(write.Identity)))
+                Reject("order", "这次写入没有对应测试之后的元数据初始化凭据。", access);
+            foreach (var use in escapedUses.GetValueOrDefault(address) ?? [])
+                Reject("escape", "地址另有真实非内存用途：" + use.Kind + "。");
+            if (reads == 0 || writes == 0) Reject("access", "本函数缺少读取或写入凭据。");
+            var result = new FlagEvidence(why.Count == 0, why.Distinct().ToImmutableArray(), reads, writes);
+            if (flags.TryGetValue(address, out var previous)) result = new(previous.IsFlag && result.IsFlag,
+                previous.Reasons.AddRange(result.Reasons).Distinct().ToImmutableArray(), previous.Reads + reads, previous.Writes + writes);
+            flags[address] = result;
         }
-        foreach (var b in function.Blocks)
-        {
-            foreach (var s in b.Statements)
-                switch (s)
-                {
-                    case MemoryRead r: Use(r.Address, true); break;
-                    case MemoryWrite w: Use(w.Address, true); Use(w.Value); break;
-                    case Call call:
-                        foreach (var arg in call.Arguments) Use(arg.Value);
-                        if (call.Target is ComputedTarget target) Use(target.Value);
-                        if (call.OutgoingArgumentArea is { } area) Use(area);
-                        break;
-                    case TrapWhen t: Use(t.Condition); break;
-                    case DynamicAllocation d: Use(d.Size); break;
-                }
-            switch (b.End)
-            {
-                case Branch branch: Use(branch.Condition, condition: true); break;
-                case JumpTable table: Use(table.Selector, condition: true); break;
-                case Return r: foreach (var v in r.Results) Use(v.Value); break;
-                case ResumeUnwind u: Use(u.Exception); break;
-            }
-        }
-        foreach (var b in function.Blocks)
-        for (int i = 0; i < b.Statements.Length; i++)
-        {
-            var s = b.Statements[i];
-            var address = s switch { MemoryRead r => Address(c, r.Address, r.Width), MemoryWrite w => Address(c, w.Address, w.Width), _ => null };
-            if (address is not { } a) continue;
-            var width = s is MemoryRead ar ? ar.Width : ((MemoryWrite)s).Width;
-            accesses.Add((a, width));
-            if (width == 8) byteCandidates.Add(a);
-            if (!reasons.ContainsKey(a)) reasons[a] = [];
-            var count = counts.GetValueOrDefault(a);
-            if (s is MemoryRead read)
-            {
-                counts[a] = (count.Reads + 1, count.Writes);
-                if (read.Width != 8 || badReads.Contains(read.Identity) || !testedReads.Contains(read.Identity)) reasons[a].Add(new("naming.flag-read", "读取不是字节或其值有非分支使用。"));
-            }
-            else if (s is MemoryWrite write)
-            {
-                counts[a] = (count.Reads, count.Writes + 1);
-                var value = c.Get(state.Resolve, write.Value);
-                if (write.Width != 8 || !value.IsSuccess || value.Value.ConstantValue != 1)
-                    reasons[a].Add(new("naming.flag-write", "写入不是字节常量 1。"));
-                if (!initializers.Any(p => c.Get(flow.PointDominates, new(p, new(b.Identity, i))) is { IsSuccess: true, Value: true }))
-                    reasons[a].Add(new("naming.flag-order", "写入没有被元数据初始化调用支配。"));
-            }
-        }
-
     }
+
     private ulong? Address(QueryContext c, Term term, int width)
     {
-        var value = c.Get(state.Resolve, term); if (!value.IsSuccess) { complete = false; return null; }
+        if (term.Width != c.Snapshot.AddressWidth || term.ContainsUndefined) return null;
+        var value = c.Get(state.Resolve, term); if (!value.IsSuccess || value.Value.ContainsUndefined) return null;
         var location = c.Get(state.Locations, new(value.Value, width));
-        if (!location.IsSuccess || location.Value is { Region: Region.Image, Offset: null }) complete = false;
         return location.IsSuccess && location.Value is { Region: Region.Image, Offset: { } offset } && offset >= 0 && offset <= ulong.MaxValue ? (ulong)offset : null;
     }
-    public NamingFacts Finish()
-    {
-        var decoded = slots.ToImmutableDictionary(a => a, decoder.Decode);
-        var evaluated = reasons.ToDictionary(p => p.Key, p => p.Value.ToList());
-        var flags = ImmutableDictionary.CreateBuilder<ulong, FlagEvidence>();
-        // 以区间索引找可能重叠者，实际重叠仍由内核的唯一别名查询判定。
-        var candidates = new SortedSet<ulong>(byteCandidates);
-        var table = new TermTable(); var root = table.Atom(new RootAtom(AddressRoot.Image), 64);
-        var block = new BlockIdentity(); var builder = new FunctionBuilder(table, block, 64, new(table.Atom(new RootAtom(AddressRoot.Frame), 64)));
-        builder.Blocks.Add(new(block, [], [], new Return([])));
-        var context = state.CreateContext(builder.Freeze());
-        foreach (var access in accesses.Where(x => x.Width > 8))
-        {
-            var bytes = (ulong)((access.Width + 7) / 8);
-            var end = access.Address > ulong.MaxValue - bytes + 1 ? ulong.MaxValue : access.Address + bytes - 1;
-            foreach (var candidate in candidates.GetViewBetween(access.Address, end))
-            {
-                var alias = context.Get(state.Alias, new(new(Region.Image, root, candidate, 8), new(Region.Image, root, access.Address, access.Width)));
-                if (!alias.IsSuccess || alias.Value.Kind != AliasKind.Disjoint)
-                    evaluated[candidate].Add(new("naming.flag-overlap", "存在覆盖该字节的宽访问。"));
-            }
-        }
-        foreach (var (address, list) in evaluated.Where(p => byteCandidates.Contains(p.Key) && !slots.Contains(p.Key)))
-        {
-            var why = list.ToList(); var count = counts[address];
-            if (!complete) why.Add(new("naming.incomplete-survey", "映像普查不完整，不能证明全部访问。"));
-            if (escaped.Contains(address)) why.Add(new("naming.flag-escape", "地址另有非内存访问用途。"));
-            if (count.Reads == 0 || count.Writes == 0) why.Add(new("naming.flag-access", "缺少读取或写入凭据。"));
-            flags[address] = new(why.Count == 0, why.Distinct().ToImmutableArray(), count.Reads, count.Writes);
-        }
-        return new(decoded, flags.ToImmutable(), complete);
-    }
+    public NamingFacts Finish() => new(slots.ToImmutableDictionary(), flags.ToImmutableDictionary(), complete);
 }

@@ -14,7 +14,10 @@ using Cpp2CS.Runtime;
 
 namespace Cpp2CS.Recovery.Structure;
 
-public sealed record StructureRecord(string Kind, ulong? Address, string Evidence, bool Removed);
+public sealed record StructureRecord(string Kind, ulong? Address, string Evidence, bool Removed)
+{
+    public Reason? Reason { get; init; }
+}
 public sealed record StructureResult(NativeFunction Function, ImmutableArray<StructureRecord> Records,
     ImmutableArray<string> Assumptions)
 {
@@ -40,6 +43,9 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         var original = input;
         input = ReplaceSpecificationResults(input, records, out var c);
         if (!ReferenceEquals(input, original)) c = names.CreateContext(input);
+        var guardStart = timer.Elapsed.TotalSeconds;
+        input = FoldInitializationGuards(input, records, c, out var retainedGuards, out c, ref assumed);
+        timings["初始化守卫"] = timer.Elapsed.TotalSeconds - guardStart;
         var edit = new SnapshotRewrite(input);
         var erased = new Dictionary<Statement, StructureRecord>();
         var classRecords = new Dictionary<CallIdentity, StructureRecord>();
@@ -96,10 +102,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
             foreach (var call in edit.RemovedStatements.OfType<Call>().ToArray())
             {
                 var classified = c.Get(calls, call.Identity).Value;
-                var bound = classified.Result?.Source;
-                var defined = bound is TermSource value ? SnapshotRewrite.Dependencies([value.Term])
-                    : classified.Function?.Signature?.ReturnType.Size == 0 ? []
-                    : call.Results.Select(r => r.Value).ToHashSet();
+                var defined = DefinedCallResults(classified, call);
                 if (!call.Results.Any(r => defined.Contains(r.Value) && liveResults.Contains(r.Value))) continue;
                 edit.RemovedStatements.Remove(call);
                 foreach (var result in call.Results) edit.Replacements.Remove(result.Value);
@@ -150,26 +153,24 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                 foldedLookup |= changed;
                 foreach (var b in current.Blocks.Where(b => b.End is Branch))
                 {
+                    if (retainedGuards.Contains(b.Identity)) continue;
                     var branch = (Branch)b.End;
                     if (!PrivateCondition(c, branch.Condition))
                     { rejected[b.Identity] = new("condition", b.Trace?.NativeAddress, "条件不只依赖常量和运行时私有状态", false); continue; }
                     var graph = c.Get(flow.Graph, 0);
                     if (!graph.IsSuccess) continue;
                     string failure = "没有可证明的汇合点";
-                    var guarded = Guarded(c, b, byId, predecessors, out var guardFailure);
-                    failure = guardFailure ?? failure;
-                    var nearest = guarded?.Join ?? NearestJoin(c, branch, byId);
+                    var nearest = NearestJoin(c, branch, byId);
                     foreach (var join in nearest is null ? Array.Empty<Block>() : new[] { nearest })
                     {
                         var stamp = timer.Elapsed.TotalSeconds;
-                        var region = guarded is null ? c.Get(regionQuery, new(b.Identity, join.Identity))
-                            : Outcome<SnapshotRegion>.Success(new(guarded.Inside));
+                        var region = c.Get(regionQuery, new(b.Identity, join.Identity));
                         regionTime += timer.Elapsed.TotalSeconds - stamp;
                         if (!region.IsSuccess) continue;
                         var inside = region.Value.Order.ToHashSet();
                         var blocks = region.Value.Order.Select(id => byId[id]).ToArray();
                         if (occupied.Contains(b.Identity) || occupied.Contains(join.Identity) || inside.Overlaps(occupied)) continue;
-                        if (blocks.Any(x => x.Statements.Any(s => s is not MemoryRead && s != guarded?.Event) || x.Handler is not null ||
+                        if (blocks.Any(x => x.Statements.Any(s => s is not MemoryRead) || x.Handler is not null ||
                             x.End is not (Jump or Branch) || x.End is Branch br && !PrivateCondition(c, br.Condition)))
                         { failure = "区域仍含语句或可观察条件"; continue; }
                         var candidate = new SnapshotRewrite(current);
@@ -183,16 +184,12 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                         if (blocks.SelectMany(x => x.Statements).OfType<MemoryRead>().Any(r => !PrivateAddress(c, r.Address, r.Width)))
                         { failure = "区域仍含非私有读取"; continue; }
                         var chosen = new Dictionary<Term, Term>();
-                        if (guarded is not null)
-                            foreach (var result in guarded.Event.Results) chosen[result.Value] = current.Terms.Undefined(result.Value.Width);
                         bool valid = true, usesUndefined = false;
                         Term Map(Term t) => chosen.TryGetValue(t, out var v) ? v : SnapshotRewrite.Rebuild(t, Map);
                         Term? Combine(Merge m, IEnumerable<Incoming> inputs)
                         {
-                            var values = inputs.Select(i => Map(i.Value)).Distinct().ToArray();
-                            var defined = values.Where(t => t.Kind != TermKind.Undefined).ToArray();
-                            if (values.Length == 1) return values[0];
-                            if (defined.Length == 1) { usesUndefined = true; return defined[0]; }
+                            var value = MergeValue(inputs.Select(i => Map(i.Value)), out var refined);
+                            if (value is not null) { usesUndefined |= refined; return value; }
                             if (!Live(m.Result)) return current.Terms.Undefined(m.Result.Width);
                             return null;
                         }
@@ -217,7 +214,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                         foreach (var (from, to) in chosen) candidate.Replacements[from] = to;
                         candidate.Blocks[join.Identity] = candidate.Blocks[join.Identity] with { Merges = merges.ToImmutable() };
                         candidate.Blocks[b.Identity] = b with { End = new Jump(join.Identity),
-                            Statements = guarded is null ? b.Statements : b.Statements.Add(guarded.Event) };
+                            Statements = b.Statements };
                         candidate.RemovedBlocks.UnionWith(inside);
                         foreach (var (id, block) in candidate.Blocks)
                             if (!ReferenceEquals(block, byId[id])) batch.Blocks[id] = block;
@@ -227,8 +224,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                         foreach (var read in blocks.SelectMany(x => x.Statements).OfType<MemoryRead>())
                             records.Add(new("private-read", read.Trace?.NativeAddress, "随无效果区域删除的私有读取", true));
                         assumed |= usesUndefined;
-                        records.Add(new("branch", b.Trace?.NativeAddress, guarded is null ? "条件仅依赖私有状态，区域无可观察效果，出口合流兼容"
-                            : "同一状态后置条件守卫的幂等事件；" + guarded.Evidence, true));
+                        records.Add(new("branch", b.Trace?.NativeAddress, "条件仅依赖私有状态，区域无可观察效果，出口合流兼容", true));
                         rejected.Remove(b.Identity);
                         changed = true; failure = ""; break;
                     }
@@ -246,7 +242,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
             timings["折叠总计"] = timings.GetValueOrDefault("折叠总计") + timer.Elapsed.TotalSeconds - foldStart;
             timings["区域查询"] = regionTime; timings["活跃性"] = liveTime; timings["改写"] = rewriteTime;
             var deadStart = timer.Elapsed.TotalSeconds;
-            if (!ReferenceEquals(current, input)) current = RemoveDeadPrivateReads(current, records);
+            if (!ReferenceEquals(current, input) || !ReferenceEquals(input, original)) current = RemoveDeadPrivateReads(current, records);
             timings["死读取"] = timings.GetValueOrDefault("死读取") + timer.Elapsed.TotalSeconds - deadStart;
             var absorptionStart = timer.Elapsed.TotalSeconds;
             var beforeAbsorption = current;

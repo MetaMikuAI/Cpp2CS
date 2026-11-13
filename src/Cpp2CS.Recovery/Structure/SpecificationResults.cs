@@ -63,67 +63,6 @@ public sealed partial class UnobservableEffects
         return edit.Replacements.Count == 0 ? input : edit.Apply();
     }
 
-    private sealed record GuardedEvent(Block Join, ImmutableArray<BlockIdentity> Inside, Call Event, string Evidence);
-
-    private GuardedEvent? Guarded(QueryContext c, Block head, IReadOnlyDictionary<BlockIdentity, Block> blocks,
-        IReadOnlyDictionary<BlockIdentity, HashSet<BlockIdentity>> predecessors, out string? failure)
-    {
-        failure = null;
-        var branch = (Branch)head.End;
-        foreach (var (eventId, skipId, whenTrue) in new[] { (branch.True, branch.False, true), (branch.False, branch.True, false) })
-        {
-            var arm = blocks[eventId];
-            if (arm.End is not Jump jump || jump.Target == head.Identity || jump.Target == eventId || arm.Handler is not null || arm.Merges.Length != 0
-                || arm.Statements.OfType<Call>().ToArray() is not [var call]
-                || call.DoesNotReturn || call.Unwind is not null
-                || arm.Statements.Any(s => s is not MemoryRead && s != call)) continue;
-            var inside = ImmutableArray.CreateBuilder<BlockIdentity>(); inside.Add(eventId);
-            if (jump.Target != skipId)
-            {
-                var skip = blocks[skipId];
-                if (skip.End is not Jump next || next.Target != jump.Target || !skip.Statements.IsEmpty
-                    || !skip.Merges.IsEmpty || skip.Handler is not null) continue;
-                inside.Add(skipId);
-            }
-            if (inside.Any(id => !predecessors[id].SetEquals([head.Identity]))) continue;
-            var classified = c.Get(calls, call.Identity);
-            if (!classified.IsSuccess || classified.Value.Operation is not
-                { Observation: RuntimeObservation.IdempotentEvent, DoesNotReturn: false, Result.Kind: RuntimeValueKind.Void,
-                    Idempotence: { } post } operation
-                || classified.Value.Function?.Signature?.ReturnType.Size != 0) continue;
-            failure = "守卫未证明是该幂等事件的状态测试";
-            // 移动调用不移动实参的定义，也不把其余调用或内存效果越过守卫。
-            var definitions = arm.Statements.OfType<MemoryRead>().Select(r => r.Result).ToHashSet();
-            if (SnapshotRewrite.Dependencies(SnapshotRewrite.Uses(call)).Overlaps(definitions))
-            { failure = "事件实参定义在守卫内部"; continue; }
-            var resolved = c.Get(state.Resolve, branch.Condition);
-            if (!resolved.IsSuccess) continue;
-            foreach (var representation in post.Representations)
-            {
-                if (representation.Record is null || representation.Field is null
-                    || representation.Test is not (RuntimeStateTest.Nonzero or RuntimeStateTest.Zero)
-                    || classified.Value.Inputs?.GetValueOrDefault(representation.Input)?.Source is not TermSource owner) continue;
-                var ownerName = c.Get(names, owner.Term);
-                if (!ownerName.IsSuccess || ownerName.Value.Name is null) continue;
-                foreach (var term in SnapshotRewrite.Dependencies([resolved.Value]))
-                {
-                    var named = c.Get(names, term);
-                    if (!named.IsSuccess || named.Value.Name is not FieldName field
-                        || field.Record != representation.Record || field.Field != representation.Record + "." + representation.Field
-                        || field.Index is not null) continue;
-                    if (field.Owner != ownerName.Value.Name)
-                    { failure = "守卫状态与幂等事件的对象不同"; continue; }
-                    var table = c.Snapshot.Terms;
-                    var established = table.Apply(new CoreOperator(representation.Test == RuntimeStateTest.Nonzero
-                        ? CoreOperation.NotEqual : CoreOperation.Equal), 1, term, table.Constant(0, term.Width));
-                    var notEstablished = table.Apply(new CoreOperator(CoreOperation.Equal), 1, established, table.Constant(0, 1));
-                    if (resolved.Value != (whenTrue ? notEstablished : established)) continue;
-                    return new(blocks[jump.Target], inside.ToImmutable(), call, representation.Evidence + "；" + operation.Evidence);
-                }
-            }
-        }
-        return null;
-    }
     private void ForwardFixedReads(NativeFunction function, List<StructureRecord> records, QueryContext c, SnapshotRewrite edit)
     {
         var reads = new Dictionary<ValueName, List<(MemoryRead Read, Point Point)>>();

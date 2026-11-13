@@ -49,7 +49,7 @@ internal static partial class NamingChecks
             new MemoryRead(sid,Add(forwarded,spec.Layout.Field("Il2CppClass","static_fields").ByteOffset),64,statics)],new Branch(t.Slice(flagValue,0,1),exit,exit)));
         builder.Blocks.Add(new(exit,[],[],new Return([])));
         var function = builder.Freeze(); a.True(ExitChecker.Check(function).IsValid,"合成输入通过原生契约检查"); var state = new StateQueries(); var c = state.CreateContext(function);
-        var survey = new NamingSurvey(calls,new Decoder(new ClassEntity(reference))); survey.Observe(function); var facts = survey.Finish();
+        var survey = new NamingSurvey(calls,new Decoder(new ClassEntity(reference)),new InputMemoryImage(),binder,spec); survey.Observe(function); var facts = survey.Finish();
         var names = new ValueNamingQuery(state,calls,facts,spec,binder); c = names.CreateContext(function);
         a.True(c.Get(calls,managed.Identity).Value is { Kind:CallKind.Managed,Candidates.Candidates.Length:2 },"托管调用保留全部候选");
         a.True(c.Get(calls,init.Identity).Value is { Kind:CallKind.Runtime,Operation.Name:"InitializeMetadata" } named && named.Inputs!["slot"].Source is TermSource source && source.Term==slot,"运行时操作及命名实参");
@@ -57,21 +57,8 @@ internal static partial class NamingChecks
         a.True(c.Get(names,statics).Value is { Name:FieldName { Field:"Il2CppClass.static_fields" } },"规格静态字段块");
         a.True(c.Get(names,forwarded).Value==c.Get(names,klass).Value,"经帧转发保留名字");
         a.True(c.Get(names,t.Unknown(64,new("test","未知"))).Value.Kind==ValueKind.Unnamed,"未知定义不猜名字");
-        a.True(facts.Flags[200].IsFlag,"初始化后写 1 的全局字节");
-        survey.Incomplete(); a.True(!survey.Finish().Flags[200].IsFlag,"不完整普查不能证明标志");
-        FlagEvidence Evidence(IEnumerable<Statement> statements)
-        {
-            var changed = new FunctionBuilder(t,b,64,new(frame)) { ImageBase=image };
-            changed.Blocks.Add(function.Blocks[0] with { Statements=statements.ToImmutableArray() });
-            changed.Blocks.Add(function.Blocks[1]);
-            var scan = new NamingSurvey(calls,new Decoder(new ClassEntity(reference))); scan.Observe(changed.Freeze());
-            return scan.Finish().Flags[200];
-        }
-        var statements = function.Blocks[0].Statements;
-        a.True(!Evidence(statements.Where(s=>s!=init).Append(init)).IsFlag,"写 1 在初始化之前拒绝");
-        a.True(!Evidence(statements.Select(s=>s is MemoryWrite w && w.Address==flag ? w with { Value=t.Constant(2,8) } : s)).IsFlag,"写非 1 拒绝");
-        a.True(!Evidence(statements.Append(new Call(new(),new ComputedTarget(flag),[],[]))).IsFlag,"标志地址逃逸拒绝");
-        a.True(!Evidence(statements.Append(new MemoryWrite(new(),Add(image,199),16,t.Constant(0,16)))).IsFlag,"邻接宽写覆盖标志拒绝");
+        a.True(!facts.Flags[200].IsFlag,"没有对应测试的置位不构成方法初始化模板");
+        survey.Incomplete(); a.True(!survey.Finish().Complete && !survey.Finish().Flags[200].IsFlag,"观察范围状态不替代函数内模板判定");
         var mergeId = new MergeIdentity(); var mergeValue=t.Atom(new ResultAtom(mergeId),64); var loop=new BlockIdentity();
         var merged = new FunctionBuilder(t,b,64,new(frame)) { ImageBase=image };
         merged.Blocks.Add(function.Blocks[0] with { End=new Jump(loop) });

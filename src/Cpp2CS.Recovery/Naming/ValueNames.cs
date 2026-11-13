@@ -43,6 +43,8 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     public ValueNamingQuery WithCaughtTypes(IReadOnlyDictionary<BlockIdentity, TypeRef> types) =>
         new(state, calls, facts, spec, binder, entry, rgctx, witness, exceptionType, types.ToImmutableDictionary());
     internal RuntimeSpec Spec => spec;
+    internal SignatureBinding? Entry => entry;
+    internal ImmutableDictionary<ulong, FlagEvidence> Flags => facts.Flags;
     internal MethodBinder Binder => binder;
     private readonly RuntimeInputKindsQuery inputKinds = new(state,calls);
     private ManagedLocationQuery? locations;

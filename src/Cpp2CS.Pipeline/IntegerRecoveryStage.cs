@@ -97,9 +97,15 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
             }
         }
 
+        var failureReason = result.Failure?.Reason;
+        if (failureReason is not null)
+            foreach (var diagnostic in transformed.Records.Where(r => !r.Removed && r.Address == result.Failure!.Position && r.Reason is not null).Select(r => r.Reason!).Distinct())
+                failureReason = Attach(failureReason, diagnostic);
         return result.Body is { } body ? new Completed<ManagedBody>(GenericWitness.IsGeneric(context.Method)
             ? body with { WitnessCoverage = GenericWitnessCoverage.ReferenceOnly } : body)
             : new Missing<ManagedBody>(new(Name, result.Failure!.Position == 0 ? context.Entry.Address : result.Failure.Position,
-                result.Failure.Kind.ToString(), result.Failure.Reason));
+                result.Failure.Kind.ToString(), failureReason!));
     }
+    private static Cpp2CS.Native.Terms.Reason Attach(Cpp2CS.Native.Terms.Reason reason, Cpp2CS.Native.Terms.Reason cause) =>
+        reason with { Cause = reason.Cause is null ? cause : Attach(reason.Cause, cause) };
 }
