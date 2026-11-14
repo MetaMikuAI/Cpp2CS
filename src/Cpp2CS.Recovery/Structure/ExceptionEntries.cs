@@ -62,6 +62,13 @@ public static class ExceptionEntries
                 var selector = function.Terms.Atom(new SelectorAtom(join), first.Selector.Width);
                 var edges = function.Blocks.SelectMany(b => b.Statements.OfType<Call>()
                     .Where(c => c.Unwind is { } to && group.Contains(to)).Select(c => (From: b.Identity, Handler: c.Unwind!))).ToArray();
+                // 合流的输入按前驱块给值：同一个块有多条展开边进入这一组时，各边的值可以不同（后一次调用的边上才有前一次调用的结果），先把块在受保护调用之间切开。
+                if (edges.GroupBy(edge => edge.From).Any(g => g.Count() > 1))
+                {
+                    var split = ExceptionScaffolding.SplitEntries(function);
+                    if (ReferenceEquals(split, function)) { reasons.Add("同一个块有多条展开边且不能切开"); continue; }
+                    function = split; changed = true; break;
+                }
                 var allMerges = corridor.SelectMany(id => blocks[id].Merges).ToArray();
                 var transported = ImmutableArray.CreateBuilder<Merge>();
                 foreach (var merge in allMerges)

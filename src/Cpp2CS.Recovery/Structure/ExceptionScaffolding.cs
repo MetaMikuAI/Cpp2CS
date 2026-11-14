@@ -26,7 +26,7 @@ public static class ExceptionScaffolding
     }
 
     /// <summary>在受保护调用前与调用后的控制流分支前切块，使 try 可以从精确程序点进入。</summary>
-    private static NativeFunction SplitEntries(NativeFunction function)
+    internal static NativeFunction SplitEntries(NativeFunction function)
     {
         var pieces = new Dictionary<BlockIdentity, Block[]>();
         foreach (var block in function.Blocks)

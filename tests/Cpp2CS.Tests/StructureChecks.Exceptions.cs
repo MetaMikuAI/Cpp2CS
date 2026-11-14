@@ -72,5 +72,30 @@ internal static partial class StructureChecks
                 : folded.Folded.Count == 1 && folded.Function.Blocks.Single(b => b.Identity == join).End is Jump { Target: var target } && target == caught,
                 "选择值按子句过滤序号折叠，其他 C++ 类型保留洞");
         }
+        {
+            // 同一个块里两次受保护调用经各自的跳板进入同一汇合块，后一条边带着前一次调用的结果。
+            var t = new TermTable(); var entry = new BlockIdentity(); var h1 = new BlockIdentity(); var h2 = new BlockIdentity();
+            var join = new BlockIdentity(); var done = new BlockIdentity();
+            var frame = t.Atom(new RootAtom(AddressRoot.Frame), 64);
+            var f = new FunctionBuilder(t, entry, 64, new(frame));
+            var first = new CallIdentity(); var result = t.Atom(new ResultAtom(first), 64);
+            var clause = new ExceptionClause(ClauseKind.Catch, [new PointerTarget.Internal(100)]) { Selector = 3, TypeName = spec.ManagedExceptionWrapperTypeName };
+            f.Blocks.Add(new(entry, [], [new Call(first, new ImageFunction(20), [], [new(new AbstractSlot(SlotKind.Integer), result)], Unwind: h1),
+                new Call(new(), new ImageFunction(24), [], [], Unwind: h2)], new Jump(done)));
+            foreach (var h in new[] { h1, h2 })
+                f.Blocks.Add(new(h, [], [], new Jump(join), new(t.Atom(new ExceptionAtom(h), 64), t.Atom(new SelectorAtom(h), 64), [clause, new(ClauseKind.Cleanup, [])])));
+            var exId = new MergeIdentity(); var stateId = new MergeIdentity();
+            var ex = new Merge(exId, t.Atom(new ResultAtom(exId), 64), [new(h1, t.Atom(new ExceptionAtom(h1), 64)), new(h2, t.Atom(new ExceptionAtom(h2), 64))]);
+            var state = new Merge(stateId, t.Atom(new ResultAtom(stateId), 64), [new(h1, t.Constant(10, 64)), new(h2, result)]);
+            f.Blocks.Add(new(join, [ex, state], [new MemoryWrite(new(), frame, 64, state.Result)], new ResumeUnwind(ex.Result)));
+            f.Blocks.Add(new(done, [], [], new Return([])));
+            var input = f.Freeze();
+            checks.True(ExitChecker.Check(input).IsValid, "同块两条展开边 归一输入契约");
+            var normalized = ExceptionEntries.Run(input);
+            checks.True(ExitChecker.Check(normalized.Function).IsValid && normalized.After == 1, "同块两条展开边先切块再归一");
+            var merged = normalized.Function.Blocks.Single(b => b.Handler is not null).Merges.Single();
+            checks.True(merged.Inputs.Length == 2 && merged.Inputs.Select(i => i.Predecessor).Distinct().Count() == 2
+                && merged.Inputs.Any(i => i.Value.ConstantValue == 10) && merged.Inputs.Any(i => i.Value == result), "切块后合流逐展开边取值");
+        }
     }
 }
