@@ -210,10 +210,14 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                 liveTime += timer.Elapsed.TotalSeconds - liveStart;
                 changed = FoldInterfaceLookup(c, batch, occupied, predecessors, records, rejectedLookups, ref assumed);
                 foldedLookup |= changed;
+                bool hasProtectionFailure = current.Blocks.SelectMany(x => x.Statements).OfType<Call>().Any(call =>
+                    c.Get(calls, call.Identity) is { IsSuccess: true, Value.Operation.Name: "StackProtectionFailure" });
                 foreach (var b in current.Blocks.Where(b => b.End is Branch))
                 {
                     if (retainedGuards.Contains(b.Identity)) continue;
                     var branch = (Branch)b.End;
+                    if (hasProtectionFailure && FoldStackProtection(c, batch, b, records))
+                    { occupied.Add(b.Identity); changed = true; continue; }
                     if (!PrivateCondition(c, branch.Condition))
                     { rejected[b.Identity] = new("condition", b.Trace?.NativeAddress, "条件不只依赖常量和运行时私有状态", false); continue; }
                     var graph = c.Get(flow.Graph, 0);
@@ -319,7 +323,8 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
             .Concat(EndUses(b.End)).Concat(b.Merges.SelectMany(m => m.Inputs.Select(i => i.Value)))));
         records.AddRange(rejectedTypeChecks.Where(p => remainingTerms.Contains(p.Key)).SelectMany(p => p.Value));
         var assumptions = ImmutableArray.CreateBuilder<string>();
-        if (assumed) assumptions.Add(UndefinedAssumption);
+        if (assumed || records.Any(r => r.Kind == "unbox-fusion-undefined")) assumptions.Add(UndefinedAssumption);
+        if (records.Any(r => r.Kind == "stack-protection" && r.Removed)) assumptions.Add(StackProtectionAssumption);
         if (foldedLookup) assumptions.Add(InterfaceLookupAssumption);
         return new(current, records.ToImmutableArray(), assumptions.ToImmutable()) { Timings = timings.ToImmutableDictionary() };
     }
@@ -379,7 +384,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                 var why = result.Why ?? result.Value.Why!;
                 while (why.Cause is { } cause) why = cause;
                 retained[call.Identity] = new("class-init-retained", call.Trace?.NativeAddress,
-                    why.Code + "：" + why.Message, false);
+                    why.Code + "：" + why.Message, false) { Reason = why };
                 continue;
             }
             edit.RemovedStatements.Add(call);

@@ -43,8 +43,17 @@ public sealed partial class IntegerLowering
         if (c.Operation?.Il.Name == "ThrowProfile") { PrepareProfileException(call, c); return; }
         if (c.Operation?.Il.Name == "GetTypeByName") { PrepareGetType(call, c); return; }
         if (c.Operation?.Il.Name == "UnboxUnchecked") { PrepareUncheckedUnbox(call, c); return; }
+        if (c.Operation?.Il.Name == "NullCheck") { PrepareNullCheck(call, c); return; }
+        if (c.Operation?.Il.Name == "GenericVirtualDispatch") { PrepareGenericVirtual(call); return; }
         if (c.Operation?.Il.Name == "ThreadStaticData")
         { Fail<object>(LoweringFailureKind.RuntimeCall, "尚无线程静态字段的数据块位置与字段偏移查询", code: "lowering.ThreadStatic.Location"); return; }
+        if (c.Operation?.Il.Name == "EnsureClassReady")
+        { Fail<object>(LoweringFailureKind.RuntimeCall, "运行时类尚无有效布局上下文及无缓存初始化错误的凭据",
+            new("structure.class-ready.error-cache", "InitFromCodegenSlow 不调用输入类静态构造，但会重抛 initializationExceptionGCHandle；不能无条件消去"),
+            "lowering.RuntimeCall.EnsureClassReady"); return; }
+        if (c.Operation?.Name == "StackProtectionFailure")
+        { Fail<object>(LoweringFailureKind.SystemCall, "栈保护失败臂尚未证明不可达",
+            new("structure.stack-protection.comparison", "尚无帧保护副本与同一线程或全局保护源的完整比较凭据；失败臂的其他事件或结局见结构原因链")); return; }
         if (c.Kind is CallKind.Runtime or CallKind.System && c.Binding is { } external)
             for (int i = 0; i < external.Arguments.Length; i++)
             {
@@ -173,6 +182,7 @@ public sealed partial class IntegerLowering
         MaterializeAccessorProgram();
         if (accessorCallCalls.TryGetValue(call.Identity, out var recovered)) return recovered;
         if (throws.TryGetValue(call.Identity, out var constructor)) return new ManagedThrow(position, new NewObjectValue(constructor, [], types.PointerSize * 8));
+        if (nullChecks.ContainsKey(call.Identity)) return LowerNullCheck(call, point);
         if (typeChecks.ContainsKey(call.Identity)) return LowerTypeCheck(call, point);
         if (boxes.ContainsKey(call.Identity)) return LowerBox(call, point);
         if (unboxes.ContainsKey(call.Identity)) return LowerUnbox(call, point);
@@ -208,7 +218,9 @@ public sealed partial class IntegerLowering
         if (receiver is not null && Opaque(receiver.Type)) return GenericFailure<ManagedStatement>("Receiver", "类型参数值作为调用接收者缺少 T 类的分派凭据");
         if (receiver is not null) receiver = Coerce(receiver, receiverType);
         if (d.Binding.This is not null && receiver is null) return null;
-        var statement = new ManagedCall(position, new(d.Method, receiver, args, d.Virtual), null);
+        bool virtualCall = d.Virtual || runtimeChecks is not null
+            && context.Get(runtimeChecks.NullCheckedCalls, 0) is { IsSuccess: true } nullChecked && nullChecked.Value.Contains(call.Identity);
+        var statement = new ManagedCall(position, new(d.Method, receiver, args, virtualCall), null);
         callStatements.Add(statement, d);
         return statement;
     }

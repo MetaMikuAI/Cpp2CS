@@ -18,6 +18,7 @@ public sealed record DispatchResult(DispatchKind Kind, TargetShape Shape, Term? 
     ValueName? Evidence = null, Reason? Why = null, LocationView? FieldEvidence = null)
 {
     public TypeRef? Constraint { get; init; }
+    public CallIdentity? GenericResolution { get; init; }
 }
 
 /// <summary>函数级只读分派查询；上下文由 Locations.CreateContext 建立。</summary>
@@ -29,7 +30,7 @@ public sealed record DispatchResult(DispatchKind Kind, TargetShape Shape, Term? 
 /// il2cpp-object-internals.h::Il2CppDelegate；vm/Type.cpp::SetClosedDelegateInvokeMethod。
 /// 接口快慢路径见 vm/ClassInlines.h/.cpp::GetInterfaceInvokeDataFromVTable。
 /// </remarks>
-public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, ValueNamingQuery names,
+public sealed partial class DispatchQuery(StateQueries state, CallNamingQuery calls, ValueNamingQuery names,
     ManagedLocationQuery locations, MethodBinder binder, RuntimeSpec spec, GenericWitness? witness = null) : Query<CallIdentity, DispatchResult>
 {
     private readonly InterfaceDataQuery interfaceData = new(state, calls, names, spec);
@@ -52,6 +53,7 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
         var site = c.Snapshot.Blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Point: new Point(b.Identity, i))))
             .Single(x => x.Statement is Call candidate && candidate.Identity == key);
         var call = (Call)site.Statement;
+        if (GenericVirtual(c, call, target, site.Point) is { } generic) return generic;
         if (named.IsSuccess && named.Value.Name is FieldName pointer &&
             pointer.Field == spec.Layout.Field("VirtualInvokeData", "methodPtr").Path &&
             pointer.Owner is FieldName { Record: "Il2CppClass", Field: "vtable", Index: { } slot } table &&
@@ -241,10 +243,10 @@ internal sealed class DispatchLattice(TypeRef? objectType) : ILattice<DispatchRe
     public DispatchResult Bottom => DispatchQuery.Pending;
     private static bool Same(DispatchResult a, DispatchResult b) => a.Kind == b.Kind && a.Shape == b.Shape
         && a.Receiver == b.Receiver && a.StaticType == b.StaticType && a.Slot == b.Slot && a.Method == b.Method
-        && a.Evidence == b.Evidence && a.Why == b.Why && a.Constraint == b.Constraint;
+        && a.Evidence == b.Evidence && a.Why == b.Why && a.Constraint == b.Constraint && a.GenericResolution == b.GenericResolution;
     private static bool Top(DispatchResult result) => result.Kind == DispatchKind.Unresolved && result != DispatchQuery.Pending;
     private bool Widens(DispatchResult a, DispatchResult b) => a.Kind == DispatchKind.Virtual && b.Kind == DispatchKind.Virtual
-        && a.Receiver == b.Receiver && a.Slot == b.Slot && a.Constraint == b.Constraint
+        && a.Receiver == b.Receiver && a.Slot == b.Slot && a.Constraint == b.Constraint && a.GenericResolution == b.GenericResolution
         && a.StaticType is { } left && b.StaticType is { } right
         && ManagedTypes.CommonReferenceType([left, right], objectType) == right;
     public DispatchResult Join(DispatchResult a, DispatchResult b) => a == Bottom ? b : b == Bottom || Same(a, b) || Top(a) ? a

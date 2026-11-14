@@ -1,15 +1,58 @@
 using System.Collections.Immutable;
 using Cpp2CS.Managed;
+using Cpp2CS.Kernel.Queries;
+using Cpp2CS.Kernel.State;
 using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
+using Cpp2CS.Recovery.Checks;
+using Cpp2CS.Recovery.Dispatch;
 using Cpp2CS.Recovery.Naming;
 
 namespace Cpp2CS.Recovery.Lowering;
 
 public sealed partial class IntegerLowering
 {
+    private sealed class CheckedDispatchReceiver(DispatchQuery dispatch) : Query<CallIdentity, Term?>
+    {
+        public override Outcome<Term?> Compute(QueryContext c, CallIdentity key)
+        {
+            var result = c.Get(dispatch, key);
+            return result.IsSuccess ? Outcome<Term?>.Success(result.Value.Kind == DispatchKind.Unresolved ? null : result.Value.Receiver)
+                : result.Propagate<Term?>();
+        }
+    }
+    private CheckQueries? runtimeChecks;
+    private readonly Dictionary<CallIdentity, (BoundValue Value, MethodRef Exception)> nullChecks = [];
+
+    private void PrepareNullCheck(Call call, ClassifiedCall classified)
+    {
+        if (classified.Inputs?.GetValueOrDefault("value") is not { } input)
+        { Fail<object>(LoweringFailureKind.Binding, "判空调用没有绑定的输入", code: "lowering.NullCheck.Binding"); return; }
+        if (locations is not null)
+        {
+            runtimeChecks ??= new(state, calls!, locations, dispatch is null ? null : new CheckedDispatchReceiver(dispatch));
+            var check = context.Get(runtimeChecks.NullChecks, call.Identity);
+            if (check.IsSuccess && check.Value.CanAbsorb) { interfaceLookups.Add(call.Identity); return; }
+        }
+        var exception = types.CorlibMethod("System.NullReferenceException", ".ctor");
+        if (exception is null)
+        { Fail<object>(LoweringFailureKind.RuntimeCall, "判空异常缺少无参构造函数", code: "lowering.NullCheck.Exception"); return; }
+        nullChecks.Add(call.Identity, (input, exception));
+    }
+
+    private ManagedStatement? LowerNullCheck(Call call, Point point)
+    {
+        var definition = nullChecks[call.Identity];
+        var input = BoundTerm(definition.Value.Source, point);
+        if (input is null) return null;
+        var value = Value(input);
+        if (value is null) return null;
+        return new ManagedCheck(position, new ComparisonValue(ComparisonKind.Equal, value,
+            new ConstantValue(0, value.Type, value.Width), types.Boolean), definition.Exception);
+    }
+
     private MethodRef? RuntimeMethod(ClassifiedCall call, string input)
     {
         if (valueNames is null || call.Inputs?.GetValueOrDefault(input)?.Source is not TermSource term) return null;
@@ -27,6 +70,25 @@ public sealed partial class IntegerLowering
         Fail<object>(LoweringFailureKind.RuntimeCall,
             "运行时 profile 桩替换了原托管实现及异常；当前不能把该替代桩作为已恢复的托管方法体",
             code: "lowering.Profile.Unavailable");
+    }
+
+    private void PrepareGenericVirtual(Call resolver)
+    {
+        if (dispatch is null)
+        { Fail<object>(LoweringFailureKind.RuntimeCall, "泛型虚解析缺少分派查询", code: "lowering.ResolveGenericVirtual.Query"); return; }
+        int consumers = 0; Reason? reason = null;
+        foreach (var call in function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Where(c => c.Target is ComputedTarget))
+        {
+            var found = context.Get(dispatch, call.Identity);
+            if (found.IsSuccess && found.Value.Kind != DispatchKind.Unresolved && found.Value.GenericResolution == resolver.Identity) consumers++;
+            else if (found.IsSuccess && found.Value.GenericResolution == resolver.Identity)
+                reason ??= found.Value.Why;
+        }
+        if (consumers != 1)
+        { Fail<object>(LoweringFailureKind.RuntimeCall, consumers == 0 ? "泛型虚解析没有唯一可吸收的随后间接调用" : "泛型虚解析被多次调用消费",
+            reason, reason?.Code.Replace("dispatch.generic-", "lowering.ResolveGenericVirtual.", StringComparison.Ordinal)
+                ?? "lowering.ResolveGenericVirtual.Use"); return; }
+        interfaceLookups.Add(resolver.Identity);
     }
 
     private void PrepareGetType(Call call, ClassifiedCall classified)
@@ -53,18 +115,21 @@ public sealed partial class IntegerLowering
         if (bound.Result.Source is TermSource output) callResults.Add(output.Term, definition);
     }
 
+    private UncheckedUnboxQuery? uncheckedUnboxEvidence;
     private void PrepareUncheckedUnbox(Call call, ClassifiedCall classified)
     {
         if (classified.Inputs?.GetValueOrDefault("object") is not { Source: TermSource input } obj
             || classified.Result?.Source is not TermSource output)
         { Fail<object>(LoweringFailureKind.RuntimeCall, "无检查拆箱的对象或结果没有完整绑定", code: "lowering.UnboxUnchecked.Binding"); return; }
-        var resolved = context.Get(state.Resolve, input.Term);
-        var box = resolved.IsSuccess && resolved.Value.Identity is ResultAtom { Definition: CallIdentity id } && calls is not null
-            ? context.Get(calls, id) : default;
-        if (!box.IsSuccess || box.Value.Operation?.Il.Name != "Box")
-        { Fail<object>(LoweringFailureKind.RuntimeCall, "无检查拆箱尚无非空盒及其精确值类型的凭据", code: "lowering.UnboxUnchecked.Type"); return; }
-        var type = RuntimeClass(box.Value, "lowering.UnboxUnchecked.Type");
-        if (type is null || BoxedScalar(type, "UnboxUnchecked") is null) return;
+        if (calls is null || valueNames is null)
+        { Fail<object>(LoweringFailureKind.RuntimeCall, "无检查拆箱没有类型命名查询", code: "lowering.UnboxUnchecked.Type"); return; }
+        var evidence = context.Get(uncheckedUnboxEvidence ??= new(state, calls, valueNames), call.Identity);
+        if (!evidence.IsSuccess)
+        { Fail<object>(LoweringFailureKind.RuntimeCall, evidence.Why!.Message, evidence.Why,
+            evidence.Why.Code == "check.unbox.nonnull" ? "lowering.UnboxUnchecked.NonNull"
+                : evidence.Why.Code == "check.unbox.success" ? "lowering.UnboxUnchecked.Success" : "lowering.UnboxUnchecked.Type"); return; }
+        var type = evidence.Value.Type;
+        if (BoxedScalar(type, "UnboxUnchecked") is null) return;
         unboxes.Add(call.Identity, new(obj, type, output.Term, new(new(nextLocal++), type, types.Size(type) * 8)));
     }
 }

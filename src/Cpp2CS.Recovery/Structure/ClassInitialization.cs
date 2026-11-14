@@ -61,9 +61,19 @@ public sealed class ClassInitializationQuery : Query<CallIdentity, ClassInitiali
         foreach (var point in result.Value.Stops)
         {
             var reached = c.Get(points, point); if (!reached.IsSuccess) return reached.Propagate<ClassInitializationAbsorption>();
-            if (reached.Value.Type != type) return No(type, "frontier", "前沿包含其他访问、事件或可能影响初始化的写入。");
+            if (reached.Value.Type != type) return No(type, "frontier", "初始化后先遇到" + Describe(c, point) + "，没有同类触发访问凭据。");
         }
         return Outcome<ClassInitializationAbsorption>.Success(new(type, true, null));
+    }
+    private string Describe(QueryContext c, Point point)
+    {
+        var block = c.Snapshot.Blocks.Single(b => b.Identity == point.Block);
+        if (point.Before == block.Statements.Length) return "结局";
+        var statement = block.Statements[point.Before];
+        if (statement is Call call && c.Get(calls, call.Identity) is { IsSuccess: true } named)
+            return "调用 " + (named.Value.Operation?.Name ?? named.Value.Candidates?.Candidates.FirstOrDefault()?.Entry.Method?.ToString() ?? named.Value.Kind.ToString());
+        return statement switch { MemoryRead => "读取", MemoryWrite => "写入", _ => statement.GetType().Name }
+            + (statement.Trace?.NativeAddress is { } address ? $"（0x{address:x}）" : "");
     }
     private sealed class InitializationPointQuery(ClassInitializationQuery q) : Query<Point, InitializationPoint>
     {
@@ -79,6 +89,10 @@ public sealed class ClassInitializationQuery : Query<CallIdentity, ClassInitiali
                 var named = c.Get(q.calls, call.Identity); if (!named.IsSuccess) return named.Propagate<InitializationPoint>();
                 if (call.Unwind is not null || call.DoesNotReturn) return Yes(true);
                 if (named.Value.Operation is { Observation: RuntimeObservation.Unobservable }) return Yes(false);
+                // Object::NewAllocSpecific 在返回新对象前运行同类静态构造；下降另行复核 newobj 配对。
+                if (named.Value.Operation is { Il.Name: "NewObject" } && named.Value.Inputs?.GetValueOrDefault("class")?.Source is TermSource allocated
+                    && c.Get(q.names, allocated.Term) is { IsSuccess: true, Value.Name: EntityName { Entity: ClassEntity allocation } })
+                    return Yes(true, allocation.Type);
                 var addresses = c.Get(q.addresses, call.Identity); if (!addresses.IsSuccess) return addresses.Propagate<InitializationPoint>();
                 if (!addresses.Value.IsEmpty && addresses.Value.All(v => v.Kind == ManagedLocationKind.StaticField))
                 {

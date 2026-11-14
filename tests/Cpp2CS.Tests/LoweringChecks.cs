@@ -79,6 +79,7 @@ internal static partial class LoweringChecks
         var checks = new Assertions();
         GenericChecks(checks, program);
         RuntimeCallChecks(checks, program);
+        RuntimeEventExecutionChecks(checks, program);
         ExceptionChecks(checks, program);
         ExceptionExecutionChecks(checks, program);
         foreach (var name in new[] { "Add", "Branch", "Loop", "Spill", "Swap", "Accumulate", "Predicate", "Narrow", "FloatAdd", "DoubleBranch", "FloatInt", "UnsignedDouble", "FloatBits", "FloatSelect" })

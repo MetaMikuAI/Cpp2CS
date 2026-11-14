@@ -63,6 +63,7 @@ internal static partial class StructureChecks
         SignatureBeforeForwarding(checks);
         SpecificationCases(checks);
         InterfaceLookupCases(checks);
+        StackProtectionCases(checks);
         return checks.Finish("结构消去");
     }
     private static void SpecificationCases(Assertions checks)

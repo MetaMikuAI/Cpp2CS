@@ -30,6 +30,7 @@ public sealed partial class UnobservableEffects
         IReadOnlyDictionary<BlockIdentity, HashSet<BlockIdentity>> predecessors,
         List<StructureRecord> records, Dictionary<Term, ImmutableArray<StructureRecord>> rejected)
     {
+        if (FoldCheckedUnbox(c, edit, records)) return true;
         var f = c.Snapshot; var t = f.Terms;
         var reads = f.Blocks.SelectMany(b => b.Statements.OfType<MemoryRead>().Select(r => (Block: b, Read: r))).ToArray();
         if (reads.Count(p => p.Read.Width == f.AddressWidth) < 2) return false;

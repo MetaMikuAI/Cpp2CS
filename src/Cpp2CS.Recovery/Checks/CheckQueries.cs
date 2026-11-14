@@ -2,9 +2,11 @@ using System.Collections.Immutable;
 using Cpp2CS.Kernel.Flow;
 using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Kernel.State;
+using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Locations;
+using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.Naming;
 using Cpp2CS.Runtime;
 
@@ -14,7 +16,9 @@ public sealed record ThrowOnly(string Exception, ImmutableHashSet<Point> Throws)
 public sealed record CheckSubject(Term? Value = null, Term? Index = null, Term? Length = null, Term? Array = null);
 public sealed record ConditionalCheck(FlowEdge FailureEdge, FlowEdge PassEdge, string Exception, Term FailureCondition,
     CheckSubject Subject, bool CanAbsorb, ImmutableHashSet<Point> Accesses, Reason? ExplicitReason);
-public sealed record CheckPoint(bool Event, bool HeapWrite, ImmutableArray<LocationView> Locations, ImmutableArray<Term> Divisors, Term? Receiver);
+public sealed record CheckPoint(bool Event, bool HeapWrite, ImmutableArray<LocationView> Locations, ImmutableArray<Term> Divisors, Term? Receiver,
+    bool ReceiverRequiresCallvirt = false);
+public sealed record CheckAbsorption(bool CanAbsorb, ImmutableHashSet<Point> Accesses, Reason? Why = null);
 
 /// <summary>函数级查询；使用位置查询的上下文。只读取快照，不删除分支、调用或访问。</summary>
 public sealed class CheckQueries
@@ -28,6 +32,8 @@ public sealed class CheckQueries
     public CheckPointQuery Points { get; }
     public ThrowOnlyQuery ThrowOnly { get; }
     public ConditionalCheckQuery Checks { get; }
+    public RuntimeNullCheckQuery NullChecks { get; }
+    public NullCheckedCallsQuery NullCheckedCalls { get; }
     internal EventFrontierQuery Events { get; }
     internal EventFrontierQuery AccessFrontier { get; }
     /// <param name="dispatchReceiver">分派查询证明为虚调用或接口调用的接收者；没有证明时返回 null。</param>
@@ -39,6 +45,7 @@ public sealed class CheckQueries
         Events = new((c, p) => Stop(c, p, false));
         AccessFrontier = new((c, p) => Stop(c, p, true));
         ThrowOnly = new(this); Checks = new(this);
+        NullChecks = new(this); NullCheckedCalls = new(this);
     }
     private Outcome<bool> Stop(QueryContext c, Point p, bool access)
     {
@@ -55,7 +62,18 @@ public sealed class CheckQueries
         }
         var r = c.Get(Points, p);
         return r.IsSuccess ? Outcome<bool>.Success(r.Value.Event || r.Value.HeapWrite ||
-            access && (r.Value.Locations.Length > 0 || r.Value.Divisors.Length > 0)) : r.Propagate<bool>();
+            access && (r.Value.Locations.Length > 0 || r.Value.Divisors.Length > 0 || r.Value.Receiver is not null)) : r.Propagate<bool>();
+    }
+    internal Outcome<bool> NullAccess(QueryContext c, CheckPoint point, Term value)
+    {
+        if (point.Receiver is { } receiver && Locations.Names.SameValue(c, receiver, value) is { IsSuccess: true, Value: true })
+            return Outcome<bool>.Success(true);
+        foreach (var view in point.Locations.Where(v => v.Kind is ManagedLocationKind.InstanceField or ManagedLocationKind.ArrayLength or ManagedLocationKind.ArrayElement))
+        {
+            var same = Locations.Names.SameValue(c, view.Root, value); if (!same.IsSuccess) return same;
+            if (same.Value) return same;
+        }
+        return Outcome<bool>.Success(false);
     }
     internal static Statement? Statement(QueryContext c, Point p)
     {
@@ -71,17 +89,26 @@ public sealed class CheckPointQuery(CheckQueries q) : Query<Point, CheckPoint>
         var b = c.Snapshot.Blocks.Single(b => b.Identity == key.Block);
         var s = CheckQueries.Statement(c, key);
         bool observable = s is TrapWhen or DynamicAllocation, write = false;
-        ImmutableArray<LocationView> views = []; Term? receiver = null;
+        ImmutableArray<LocationView> views = []; Term? receiver = null; bool virtualize = false;
         if (s is Call call)
         {
             var named = c.Get(q.Calls, call.Identity); if (!named.IsSuccess) return named.Propagate<CheckPoint>();
             observable = named.Value.Operation is not { Observation: RuntimeObservation.Unobservable };
             var addresses = c.Get(q.Addresses, call.Identity); if (!addresses.IsSuccess) return addresses.Propagate<CheckPoint>();
             views = addresses.Value;
+            if (call.Unwind is null && named.Value.Operation?.Il.Name is "Unbox" or "UnboxUnchecked"
+                && named.Value.Inputs?.GetValueOrDefault("object")?.Source is TermSource obj) receiver = obj.Term;
+            // call 对引用接收者不隐含判空；只有非虚实例方法可安全改写为同目标的 callvirt。基类虚调用及构造调用保留显式检查。
+            if (call.Unwind is null && named.Value.Candidates?.Candidates is
+                [{ Entry.Method: { Method: { IsStatic: false, IsVirtual: false, Owner.IsValueType: false, Name: not ".ctor" } }, Binding.Value.This: { } self }])
+            {
+                var value = c.Get(new BoundSourceQuery(q.State), new(self.Source, key));
+                if (value.IsSuccess) { receiver = value.Value; virtualize = true; }
+            }
             if (q.DispatchReceiver is { } dispatch)
             {
                 var r = c.Get(dispatch, call.Identity); if (!r.IsSuccess) return r.Propagate<CheckPoint>();
-                if (r.Value is { } value)
+                if (call.Unwind is null && r.Value is { } value)
                 {
                     var resolved = c.Get(q.State.Resolve, value); if (!resolved.IsSuccess) return resolved.Propagate<CheckPoint>();
                     receiver = resolved.Value;
@@ -126,7 +153,7 @@ public sealed class CheckPointQuery(CheckQueries q) : Query<Point, CheckPoint>
             foreach (var child in term.Operator is CoreOperator { Operation: CoreOperation.Select } ? term.Operands.Take(1) : term.Operands)
                 pending.Push(child);
         }
-        return Outcome<CheckPoint>.Success(new(observable, write, views, divisors.ToImmutable(), receiver));
+        return Outcome<CheckPoint>.Success(new(observable, write, views, divisors.ToImmutable(), receiver, virtualize));
     }
 }
 
@@ -176,13 +203,15 @@ public sealed class ConditionalCheckQuery(CheckQueries q) : Query<FlowEdge, Cond
         foreach (var p in frontier.Value.Stops)
         {
             var info = c.Get(q.Points, p); if (!info.IsSuccess) return info.Propagate<ConditionalCheck?>();
-            bool matched = only.Exception == "System.DivideByZeroException" && info.Value.Divisors.Contains(subject.Value.Value!) ||
-                only.Exception == "System.NullReferenceException" && info.Value.Receiver is { } receiver && receiver == subject.Value.Value;
+            bool matched = only.Exception == "System.DivideByZeroException" && info.Value.Divisors.Contains(subject.Value.Value!);
+            if (only.Exception == "System.NullReferenceException" && subject.Value.Value is { } checkedValue)
+            {
+                var nullAccess = q.NullAccess(c, info.Value, checkedValue); if (!nullAccess.IsSuccess) return nullAccess.Propagate<ConditionalCheck?>();
+                matched = nullAccess.Value;
+            }
             foreach (var v in info.Value.Locations)
             {
                 var root = c.Get(q.State.Resolve, v.Root); if (!root.IsSuccess) return root.Propagate<ConditionalCheck?>();
-                if (only.Exception == "System.NullReferenceException" && v.Kind is ManagedLocationKind.InstanceField or ManagedLocationKind.ArrayLength or ManagedLocationKind.ArrayElement)
-                    matched |= root.Value == subject.Value.Value;
                 if (only.Exception == "System.IndexOutOfRangeException" && v.Kind == ManagedLocationKind.ArrayElement && root.Value == subject.Value.Array && v.Index is { } index)
                 {
                     var i = c.Get(q.State.Resolve, index); if (!i.IsSuccess) return i.Propagate<ConditionalCheck?>();

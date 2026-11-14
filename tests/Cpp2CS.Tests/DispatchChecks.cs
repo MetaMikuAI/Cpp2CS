@@ -82,6 +82,7 @@ internal static partial class DispatchChecks
         Check(concrete,0,false,true,invoke);
         Check(concrete,0,false,true,null,true);
         MergedReceivers(a, spec);
+        GenericVirtualCases(a, spec);
         return a.Finish("分派快速检查");
     }
 }

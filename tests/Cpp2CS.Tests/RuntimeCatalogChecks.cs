@@ -107,7 +107,9 @@ internal static class RuntimeCatalogChecks
             checks.True(original.Operation.Result.ReturnInput == "object", "castclass 正常返回恒等");
             checks.True(RuntimeOperations.Get("IsInstance").Result.Relation == new RuntimeResultRelation(RuntimeResultRelationKind.InputOrNull, "object"), "isinst 输入或空关系");
             checks.True(RuntimeOperations.Get("UnboxAny").Result.ReturnInput is null, "unbox.any 不能无条件当作返回缓冲区");
-            checks.True(RuntimeOperations.Get("InitializeClassBeforeFieldInit").HeapEffect == RuntimeHeapEffect.ArbitraryManagedCode, "不可观察不意味着无堆效果");
+            checks.True(RuntimeOperations.Get("InitializeClassBeforeFieldInit").HeapEffect == RuntimeHeapEffect.ArbitraryManagedCode, "放宽初始化时机不消除静态构造的堆效果");
+            checks.True(RuntimeOperations.Get("InitializeClassBeforeFieldInit") is { Observation: RuntimeObservation.Unobservable, Il.Name: "EraseBeforeFieldInit" },
+                "beforefieldinit 契约下消去显式初始化时机");
         }
         Console.WriteLine($"运行时操作 {RuntimeOperations.All.Count}；目录 {string.Join('；', catalogs.Select(c => c.Triple + "=" + c.Functions.Length))}");
         return checks.Finish("运行时操作与目录");

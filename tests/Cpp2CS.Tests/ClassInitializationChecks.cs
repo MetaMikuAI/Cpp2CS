@@ -31,16 +31,17 @@ internal static class ClassInitializationChecks
         var binder = new MethodBinder(new(layouts), new Aapcs64());
         var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
         var runtime = catalog.Functions.First(f => f.Operation.Name == "InitializeClassPrecise" && f.Signature is not null);
-        TypeDef Type(int id, string name, string assembly = "test", string ns = "", bool value = false) => new()
-        { Index = id, Assembly = assembly, Namespace = ns, Name = name, Token = 0, Attributes = TypeAttributes.Public, IsValueType = value, IsEnum = false, Size = 32, PackingSize = 0, ClassSizeIsDefault = true };
+        TypeDef Type(int id, string name, string assembly = "test", string ns = "", bool value = false, bool beforeFieldInit = false) => new()
+        { Index = id, Assembly = assembly, Namespace = ns, Name = name, Token = 0, Attributes = TypeAttributes.Public | (beforeFieldInit ? TypeAttributes.BeforeFieldInit : 0), IsValueType = value, IsEnum = false, Size = 32, PackingSize = 0, ClassSizeIsDefault = true };
         var owner = Type(1, "Owner"); var other = Type(2, "Other");
+        var relaxed = Type(5, "Relaxed", beforeFieldInit: true);
         var integer = new DefinitionRef(Type(3, "Int32", "mscorlib.dll", "System", true), []);
         var nothing = new DefinitionRef(Type(4, "Void", "mscorlib.dll", "System", true), []);
         MethodDef Method(TypeDef type, string name, bool isStatic) => new()
         { Index = type.Index, Owner = type, Name = name, Token = 0, Attributes = (isStatic ? MethodAttributes.Static : MethodAttributes.Public) |
                 (name is ".ctor" or ".cctor" ? MethodAttributes.SpecialName | MethodAttributes.RTSpecialName : 0),
             ImplAttributes = 0, Slot = -1, ReturnType = nothing, Parameters = [] };
-        foreach (var type in new[] { owner, other })
+        foreach (var type in new[] { owner, other, relaxed })
         {
             type.Fields = [new() { Index = type.Index, Owner = type, Name = "Value", Type = integer, Offset = 0, Attributes = FieldAttributes.Static }];
             type.Methods = [Method(type, ".cctor", true)];
@@ -49,11 +50,11 @@ internal static class ClassInitializationChecks
         { [256] = Outcome<MetadataEntity>.Success(new ClassEntity(new DefinitionRef(owner, []))),
           [512] = Outcome<MetadataEntity>.Success(new ClassEntity(new DefinitionRef(other, []))) }.ToImmutableDictionary() };
         // 直线读写、两臂同类、退出、异类、调用、堆写、循环、静态调用、构造调用、状态读取、帧写、异常边、异类调用。
-        for (int scenario = 0; scenario < 18; scenario++)
+        for (int scenario = 0; scenario < 21; scenario++)
         {
-            var method = Method(scenario == 13 ? other : owner, scenario == 9 ? ".ctor" : "Use", scenario != 9);
-            var callee = scenario >= 16 ? Method(other, "Take", true) : method;
-            if (scenario >= 16) callee.Parameters = [new("value", new ByRefRef(integer), 0, null, false)];
+            var method = Method(scenario >= 18 ? relaxed : scenario == 13 ? other : owner, scenario == 9 ? ".ctor" : "Use", scenario != 9);
+            var callee = scenario is 16 or 17 ? Method(other, "Take", true) : method;
+            if (scenario is 16 or 17) callee.Parameters = [new("value", new ByRefRef(integer), 0, null, false)];
             var calls = new CallNamingQuery(binder, new NamingChecks.Map([new(MethodRef.Open(callee), BindingEntryKind.Ordinary)]),
                 new RuntimeMap(runtime, catalog.Functions.First(f => f.Operation.Name == "AllocateObject" && f.Signature is not null),
                     catalog.Functions.First(f => f.Operation.Name == "InitializeMetadata" && f.Signature is not null)), catalog);
@@ -72,7 +73,7 @@ internal static class ClassInitializationChecks
             {
                 var statements = new List<Statement>();
                 var fields = Read(statements, Add(wrong || scenario == 17 ? different : klass, spec.Layout.Field("Il2CppClass", "static_fields").ByteOffset), 64);
-                if (scenario >= 16) statements.Add(new Call(new(), new ImageFunction(10),
+                if (scenario is 16 or 17) statements.Add(new Call(new(), new ImageFunction(10),
                     [new(slot, fields), new(new(SlotKind.Integer, 1), t.Constant(0, 64))], []));
                 else if (scenario == 1) statements.Add(new MemoryWrite(new(), fields, 32, t.Constant(7, 32)));
                 else Read(statements, fields, 32);
@@ -87,26 +88,38 @@ internal static class ClassInitializationChecks
             else
             {
                 if (scenario == 15) prefix.Add(new Call(new(), new ImageFunction(40), [new(slot, klass)], []) { Unwind = no });
-                if (scenario == 14) prefix.Add(new Call(new(), new ImageFunction(30), [new(slot, klass)], []));
+                if (scenario == 14)
+                { var id = new CallIdentity(); prefix.Add(new Call(id, new ImageFunction(30), [new(slot, klass)], [new(slot, t.Atom(new ResultAtom(id), 64))])); }
                 if (scenario == 5) prefix.Add(new Call(new(), new ComputedTarget(argument), [], []));
                 if (scenario == 6) prefix.Add(new MemoryWrite(new(), argument, 32, t.Constant(5, 32)));
                 if (scenario == 10) Read(prefix, Add(klass, spec.Layout.Field("Il2CppClass", "cctor_finished_or_no_cctor").ByteOffset), 32);
                 if (scenario == 11) prefix.Add(new MemoryWrite(new(), Add(frame, -8), 32, t.Constant(5, 32)));
-                if (scenario is 8 or 9 or 13) prefix.Add(new Call(new(), new ImageFunction(10),
+                if (scenario is 8 or 9 or 13 or 19) prefix.Add(new Call(new(), new ImageFunction(10),
                     [new(slot, argument), new(new(SlotKind.Integer, 1), t.Constant(0, 64)),
                         new(new(SlotKind.IndirectResult), t.Constant(7, 64))], []));
-                else prefix.AddRange(Access(scenario == 4));
+                else if (scenario != 20) prefix.AddRange(Access(scenario == 4));
                 builder.Blocks.Add(new(entry, [], prefix.ToImmutableArray(), new Return([])));
                 if (scenario == 12) builder.Blocks.Add(new(no, [], [], new Return([])));
                 if (scenario == 15) builder.Blocks.Add(new(no, [], Access().ToImmutableArray(), new Return([])));
             }
             var f = builder.Freeze(); var state = new StateQueries();
-            var names = new ValueNamingQuery(state, calls, facts, spec, binder);
+            var localFacts = scenario >= 18 ? facts with { Slots = facts.Slots.SetItem(256,
+                Outcome<MetadataEntity>.Success(new ClassEntity(new DefinitionRef(relaxed, [])))) } : facts;
+            var names = new ValueNamingQuery(state, calls, localFacts, spec, binder);
             var locations = new ManagedLocationQuery(state, names, layouts, spec);
             var query = new ClassInitializationQuery(state, calls, names, locations, spec);
             var result = locations.CreateContext(f).Get(query, init.Identity);
-            bool expected = scenario is 0 or 1 or 2 or 8 or 9 or 11 or 16;
+            bool expected = scenario is 0 or 1 or 2 or 8 or 9 or 11 or 14 or 16 or 18 or 19;
             checks.True(result.IsSuccess && result.Value.CanAbsorb == expected, $"初始化前沿场景 {scenario}：{result.Why ?? result.Value.Why}");
+            if (scenario == 20)
+            {
+                var output = new UnobservableEffects(state, calls, names, new InputMemoryImage(), new HashSet<AbstractSlot>(), locations, query).Run(f);
+                checks.True(!output.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any(),
+                    "beforefieldinit 初始化后无同类访问也消去");
+                checks.True(output.Records.Any(r => r.Removed && r.Evidence == "类元数据带 beforefieldinit"),
+                    "beforefieldinit 的消去依据是元数据契约");
+                checks.True(ExitChecker.Check(output.Function).IsValid, "beforefieldinit 消去保持快照出口契约");
+            }
             if (scenario is 8 or 9)
             {
                 var output = new UnobservableEffects(state, calls, names, new InputMemoryImage(), new HashSet<AbstractSlot>(), locations, query).Run(f);
