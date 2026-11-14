@@ -100,8 +100,9 @@ public sealed class SemanticUses
     /// <summary>实际值已是完整映像地址时不再把地址计算的子项登记为另一地址。</summary>
     public HashSet<ulong> ImageAddresses(Term value, QueryContext context, StateQueries state)
     {
+        if (!ReferenceEquals(context, barrenContext)) { barren.Clear(); barrenContext = context; }
         var addresses = new HashSet<ulong>();
-        VisitWhile(value, (term, low, width) =>
+        var seen = VisitWhile(value, (term, low, width) =>
         {
             if (low != 0 || width != context.Snapshot.AddressWidth || term.Width != width || term.ContainsUndefined) return true;
             var resolved = context.Get(state.Resolve, term);
@@ -110,16 +111,22 @@ public sealed class SemanticUses
             if (location.IsSuccess && location.Value is { Region: Region.Image, Offset: { } offset } && offset >= 0 && offset <= ulong.MaxValue)
             { addresses.Add((ulong)offset); return false; }
             return true;
-        });
+        }, barren);
+        // 一次遍历没有找到映像地址时没有剪枝，走过的子项集合对后继封闭：其中每一项都到不了映像地址，之后不再重走。
+        if (addresses.Count == 0) barren.UnionWith(seen);
         return addresses;
     }
+    private readonly HashSet<(Term Value, int Low, int Width)> barren = [];
+    private QueryContext? barrenContext;
 
-    private void VisitWhile(Term value, Func<Term, int, int, bool> visit)
+    private HashSet<(Term Value, int Low, int Width)> VisitWhile(Term value, Func<Term, int, int, bool> visit,
+        HashSet<(Term Value, int Low, int Width)>? skip = null)
     {
         var pending = new Stack<(Term Value, int Low, int Width)>(); pending.Push((value, 0, value.Width));
         var seen = new HashSet<(Term Value, int Low, int Width)>();
         while (pending.TryPop(out var item))
         {
+            if (skip is not null && skip.Contains(item)) continue;
             if (!seen.Add(item)) continue;
             var (term, low, width) = item;
             if (!visit(term, low, width)) continue;
@@ -138,5 +145,6 @@ public sealed class SemanticUses
                 foreach (var input in merge.Inputs) pending.Push((input.Value, low, width));
             else foreach (var operand in term.Operands) pending.Push((operand, 0, operand.Width));
         }
+        return seen;
     }
 }

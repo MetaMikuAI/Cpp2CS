@@ -8,13 +8,12 @@ using Cpp2CS.Recovery.Inlining;
 
 namespace Cpp2CS.Pipeline;
 
-/// <summary>候选用同一全局事实和前端独立恢复；成功与失败均缓存，活动方法不提供递归截断体。</summary>
+/// <summary>候选用同一全局事实和前端独立恢复；成功与失败均缓存，活动方法不提供递归截断体。不同候选可以并行恢复：只缓存完成的结果，递归按线程判断，两个线程同时要同一个候选时各算一次、结果相同。</summary>
 public sealed class MethodTemplateSource : IMethodTemplateSource
 {
-    private readonly object gate = new();
-    private readonly Dictionary<MethodDef, StageResult<ManagedBody>> bodies = [];
-    private readonly HashSet<MethodDef> active = [];
-    private int recursiveReads;
+    private sealed class Activity { public HashSet<MethodDef> Active { get; } = []; public int RecursiveReads; }
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<MethodDef, StageResult<ManagedBody>> bodies = new();
+    private readonly ThreadLocal<Activity> activity = new(() => new());
     private readonly Func<MethodDef, StageResult<ManagedBody>> recover;
     public MethodTemplateSource(GlobalFacts facts, IMethodStage<CodeEntry, NativeFunction> frontend, bool constructors)
     {
@@ -41,20 +40,17 @@ public sealed class MethodTemplateSource : IMethodTemplateSource
     public Reason? GetFailure(MethodDef method) => Result(method) is Missing<ManagedBody> missing ? missing.Hole.Reason : null;
     private StageResult<ManagedBody> Result(MethodDef method)
     {
-        lock (gate)
+        if (bodies.TryGetValue(method, out var body)) return body;
+        var mine = activity.Value!;
+        if (!mine.Active.Add(method))
         {
-            if (bodies.TryGetValue(method, out var body)) return body;
-            if (!active.Add(method))
-            {
-                recursiveReads++;
-                return Missing("inline.Template.Recursive", "候选恢复依赖活动中的模板");
-            }
-            int before = recursiveReads;
-            body = recover(method);
-            active.Remove(method);
-            if (recursiveReads != before) body = Missing("inline.Template.Recursive", "候选恢复读取了递归截断，不能提供完整模板");
-            bodies.Add(method, body);
-            return body;
+            mine.RecursiveReads++;
+            return Missing("inline.Template.Recursive", "候选恢复依赖活动中的模板");
         }
+        int before = mine.RecursiveReads;
+        try { body = recover(method); }
+        finally { mine.Active.Remove(method); }
+        if (mine.RecursiveReads != before) body = Missing("inline.Template.Recursive", "候选恢复读取了递归截断，不能提供完整模板");
+        return bodies.GetOrAdd(method, body);
     }
 }
