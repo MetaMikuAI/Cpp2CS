@@ -6,6 +6,7 @@ using Cpp2CS.Native;
 using Cpp2CS.Native.Abi;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
+using Cpp2CS.Recovery.Dispatch;
 using Cpp2CS.Recovery.Locations;
 using Cpp2CS.Runtime;
 
@@ -20,6 +21,8 @@ public sealed record IndirectParameterName(int Index, TypeRef ElementType) : Val
 public sealed record CallResultName(CallIdentity Call, TypeRef? StaticType, string? Operation) : ValueName;
 /// <summary>身份沿用读取项；声明类型不证明不同读取同值。</summary>
 public sealed record LoadedName(Term Read, TypeRef StaticType) : ValueName;
+/// <summary>引用合流或选择的定义身份；静态类型不作为不同定义同值的依据。</summary>
+public sealed record ReferenceValueName(Term Value) : ValueName;
 /// <summary>原生异常头、载荷与托管异常分别命名，不把头指针当作托管引用。</summary>
 public sealed record ExceptionPointerName(BlockIdentity Handler) : ValueName;
 public sealed record ExceptionPayloadName(BlockIdentity Handler) : ValueName;
@@ -59,9 +62,16 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     {
         if (locations is not null) throw new InvalidOperationException("命名查询已绑定托管位置查询。");
         locations = query;
+        DispatchedCalls = new(state, calls, this, query, binder, spec, witness);
     }
-    internal FixedPointMember[] Members => [FixedPointMember.Create(this, _ => new NameLattice()),
-        FixedPointMember.Create(SpecificationReads, _ => new NameLattice())];
+    internal DispatchQuery? DispatchedCalls { get; private set; }
+    internal TypeRef? ReferenceRoot { get; } = ManagedTypes.CommonReferenceType([exceptionType ?? entry?.Entry?.Method?.DeclaringType, null]);
+    internal FixedPointMember[] Members => DispatchedCalls is { } dispatch
+        ? [FixedPointMember.Create(this, _ => new NameLattice(ReferenceRoot)),
+            FixedPointMember.Create(SpecificationReads, _ => new NameLattice(ReferenceRoot)),
+            .. dispatch.Members]
+        : [FixedPointMember.Create(this, _ => new NameLattice(ReferenceRoot)),
+            FixedPointMember.Create(SpecificationReads, _ => new NameLattice(ReferenceRoot))];
     public QueryContext CreateContext(NativeFunction function) => locations is not null ? locations.CreateContext(function)
         : new(function, null, state.Group, new FixedPointGroup(1_000_000, Members));
     private static Outcome<NamedValue> Yes(NamedValue value) => Outcome<NamedValue>.Success(value);
@@ -70,6 +80,9 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
         var result=Definition(c,key);
         if (!result.IsSuccess || result.Value.Kind!=ValueKind.Unnamed) return result;
         var resolved=c.Get(state.Resolve,key); if (!resolved.IsSuccess) return result;
+        // 合流和选择的种类由各来源证明；使用处的种类视图不能覆盖失败的定义。
+        if (resolved.Value.Identity is ResultAtom { Definition: MergeIdentity }
+            || resolved.Value.Operator is CoreOperator { Operation: CoreOperation.Select }) return result;
         var inputs=c.Get(inputKinds,0); if (!inputs.IsSuccess) return inputs.Propagate<NamedValue>();
         if (inputs.Value.TryGetValue(resolved.Value,out var kind))
             return Yes(RuntimeValue(kind,new RuntimeInputName(resolved.Value,kind)));
@@ -120,7 +133,16 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
         if (key.Identity is EdgeReadAtom projected) return c.Get(SpecificationReads, new(this, projected.Location));
         if (key.Kind == TermKind.Slice && key.Operands[0].Identity is MemoryAtom bits)
             return c.Get(SpecificationReads, new(this, bits.Location with { Width = key.Width }, key.SliceLow!.Value));
-        if (key.Identity is MemoryMerge || key.Identity is ResultAtom { Definition: MergeIdentity }) return Merge(c, key);
+        if (key.Identity is MemoryMerge merged)
+        {
+            var read = Read(c, key, merged.Location);
+            // 此处命名的是这个位置的当前读取；是否跨版本同值仍由 FixedValue 判断。
+            if (!read.IsSuccess || read.Value.Kind != ValueKind.Unnamed || read.Value == NameLattice.Pending) return read;
+            var candidate = Merge(c, key);
+            return candidate.IsSuccess && candidate.Value.Kind == ValueKind.Unnamed && candidate.Value != NameLattice.Pending ? read : candidate;
+        }
+        if (key.Identity is ResultAtom { Definition: MergeIdentity }
+            || key.Width == c.Snapshot.AddressWidth && key.Operator is CoreOperator { Operation: CoreOperation.Select }) return Merge(c, key);
         var definition = key.Identity as ResultAtom;
         if (key.Kind == TermKind.Slice) definition = key.Operands[0].Identity as ResultAtom;
         if (definition?.Definition is CallIdentity id)
@@ -176,7 +198,8 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
             {
                 if (witness is not null && candidates.Candidates.Any(x => x.Entry.Kind == BindingEntryKind.SharedGeneric))
                 {
-                    var target = c.Get(sharedResults ??= new(binder, calls, this, new(state)), id);
+                    var target = (sharedResults ??= new(binder, calls, this, new(state))).Resolve(c, id);
+                    if (!target.IsSuccess && target.Why?.Code == "binding.shared-call.pending") return Yes(NameLattice.Pending);
                     if (!target.IsSuccess) return Yes(new(ValueKind.Unnamed, null, Why: target.Why));
                     var bound = target.Value.Binding;
                     var method = target.Value.Method;
@@ -191,6 +214,19 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
                     : NamedValue.Unknown("naming.result-binding", "候选结果未完整绑定。")).Distinct().ToArray();
                 if (names.Length == 1) return Yes(names[0]);
                 return Yes(NamedValue.Unknown("naming.result-ambiguity", "候选方法的结果名字不一致。"));
+            }
+            if (call.Kind == CallKind.Indirect && key.Width <= c.Snapshot.AddressWidth && DispatchedCalls is { } dispatch)
+            {
+                var target = c.Get(dispatch, id);
+                if (!target.IsSuccess) return target.Propagate<NamedValue>();
+                if (target.Value == DispatchQuery.Pending) return Yes(NameLattice.Pending);
+                if (target.Value is { Method: { } method, Binding.Result: { Source: TermSource output } returned }
+                    && output.Term == key)
+                {
+                    var type = method.Concrete(method.Method.ReturnType);
+                    return Yes(Typed(returned.Type, type, new CallResultName(id, type, null)));
+                }
+                return Yes(NamedValue.Unknown("naming.call-result", "间接调用没有唯一完整的托管返回绑定。", target.Value.Why));
             }
         }
         if (key.Width == c.Snapshot.AddressWidth)
@@ -244,29 +280,48 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     private Outcome<NamedValue> Merge(QueryContext c, Term key)
     {
         var pending = new Stack<Term>(); var seen = new HashSet<Term>(); var names = new HashSet<NamedValue>(); var leaves = new HashSet<Term>(); pending.Push(key);
+        bool hasNull = false, awaiting = false;
         while (pending.TryPop(out var term))
         {
+            var resolved = c.Get(state.Resolve, term); if (!resolved.IsSuccess) return resolved.Propagate<NamedValue>();
+            term = resolved.Value;
             if (!seen.Add(term)) continue;
             if (c.Step() is { } why) return Outcome<NamedValue>.Failure(why);
-            if (term.Identity is MemoryMerge memory)
+            if (term == key && term.Identity is MemoryMerge memory)
             {
                 var inputs = c.Get(state.MergeInputs, memory); if (!inputs.IsSuccess) return inputs.Propagate<NamedValue>();
                 foreach (var input in inputs.Value) pending.Push(input.Value);
             }
             else if (term.Identity is ResultAtom { Definition: MergeIdentity id })
                 foreach (var input in c.Snapshot.Blocks.SelectMany(b => b.Merges).Single(m => m.Identity == id).Inputs) pending.Push(input.Value);
+            else if (term.Operator is CoreOperator { Operation: CoreOperation.Select })
+            { pending.Push(term.Operands[1]); pending.Push(term.Operands[2]); }
+            else if (term.Width == c.Snapshot.AddressWidth && term.ConstantValue == 0) hasNull = true;
             else
             {
                 var value = c.Get(this, term); if (!value.IsSuccess) return value;
                 if (value.Value != NameLattice.Pending)
                 {
-                    var resolved = c.Get(state.Resolve, term);
-                    if (!resolved.IsSuccess) return resolved.Propagate<NamedValue>();
                     leaves.Add(resolved.Value);
                     var fixedName = FixedName(value.Value.Name);
                     names.Add(fixedName is null ? value.Value : value.Value with { Name = fixedName });
                 }
+                else awaiting = true;
             }
+        }
+        if (key.Width == c.Snapshot.AddressWidth && (names.Count != 0 || hasNull && !awaiting)
+            && names.All(n => n.Kind == ValueKind.ManagedReference))
+        {
+            var type = ManagedTypes.CommonReferenceType(names.Select(n => n.StaticType), ReferenceRoot);
+            if (type is null) return Yes(NamedValue.Unknown("naming.merge-type", "引用合流缺少公共祖先的元数据定义。"));
+            ValueName identity = key.Identity is MemoryMerge ? new LoadedName(key, type) : new ReferenceValueName(key);
+            return Yes(new(ValueKind.ManagedReference, identity, "Il2CppObject") { ReferenceType = type });
+        }
+        if (hasNull && names.Count != 0)
+        {
+            var zero = c.Get(this, c.Snapshot.Terms.Constant(0, c.Snapshot.AddressWidth));
+            if (!zero.IsSuccess) return zero;
+            names.Add(zero.Value);
         }
         if (names.Count == 1 && leaves.Count > 1 && names.Single().Name is FieldName or ArrayElementName
             && FixedName(names.Single().Name) is null)
@@ -307,6 +362,11 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
             return Yes(NamedValue.Unknown("naming.read-region", "读取没有已命名的区域或定值偏移。"));
         var owner = c.Get(this, location.Root); if (!owner.IsSuccess) return owner;
         if (owner.Value == NameLattice.Pending) return owner;
+        // 所有托管对象共用对象头，包括字符串和数组里的嵌入对象头。
+        var objectClass = spec.Layout.Field("Il2CppObject", "klass");
+        if (owner.Value is { Kind: ValueKind.ManagedReference, Name: { } objectName }
+            && low == 0 && location.Width == c.Snapshot.AddressWidth && location.Offset == objectClass.ByteOffset)
+            return Yes(Field(objectName, "Il2CppObject", objectClass));
         if (owner.Value.Name is not { } parent || owner.Value.Record is not { } record || !spec.Layout.Records.TryGetValue(record, out var layout))
             return Yes(NamedValue.Unknown("naming.read-base", "读取的基值没有运行时结构身份。", owner.Value.Why));
         if (ContextRead(location, low, parent, record) is { } generic) return generic;
@@ -351,12 +411,34 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     }
 }
 
-/// <summary>未取得证据、小于唯一名字、小于冲突；高度为三，循环不会无限展开名字。</summary>
-internal sealed class NameLattice : ILattice<NamedValue>
+/// <summary>定义身份保持不变；引用类型只向基类扩大，其他名字冲突时到顶。</summary>
+internal sealed class NameLattice(TypeRef? objectType = null) : ILattice<NamedValue>
 {
     internal static NamedValue Pending { get; } = NamedValue.Unknown("naming.pending", "循环尚无外部命名证据。");
     private static NamedValue Conflict { get; } = NamedValue.Unknown("naming.conflict", "循环或合流含不同名字。");
     public NamedValue Bottom => Pending;
-    public NamedValue Join(NamedValue a, NamedValue b) => a == Pending ? b : b == Pending || a == b ? a : Conflict;
-    public bool LessOrEqual(NamedValue a, NamedValue b) => a == Pending || a == b || (b.Kind == ValueKind.Unnamed && b != Pending);
+    private static bool Definition(ValueName? a, ValueName? b) => a == b || ((a, b) switch
+    {
+        (CallResultName x, CallResultName y) => x.Call == y.Call && x.Operation == y.Operation,
+        (LoadedName x, LoadedName y) => x.Read == y.Read,
+        _ => false,
+    });
+    private TypeRef? Common(NamedValue a, NamedValue b) => a.Kind == ValueKind.ManagedReference
+        && b.Kind == ValueKind.ManagedReference && Definition(a.Name, b.Name)
+        ? ManagedTypes.CommonReferenceType([a.StaticType, b.StaticType], objectType) : null;
+    public NamedValue Join(NamedValue a, NamedValue b)
+    {
+        if (a == Pending) return b;
+        if (b == Pending || a == b) return a;
+        if (Common(a, b) is not { } type) return Conflict;
+        var name = a.Name switch
+        {
+            CallResultName result => result with { StaticType = type },
+            LoadedName read => read with { StaticType = type },
+            _ => a.Name,
+        };
+        return new(ValueKind.ManagedReference, name, "Il2CppObject") { ReferenceType = type };
+    }
+    public bool LessOrEqual(NamedValue a, NamedValue b) => a == Pending || a == b
+        || b.Kind == ValueKind.Unnamed && b != Pending || Common(a, b) is { } type && type == b.StaticType;
 }

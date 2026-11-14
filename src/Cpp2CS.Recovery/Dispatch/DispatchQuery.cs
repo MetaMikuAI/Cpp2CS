@@ -33,8 +33,14 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
     ManagedLocationQuery locations, MethodBinder binder, RuntimeSpec spec, GenericWitness? witness = null) : Query<CallIdentity, DispatchResult>
 {
     private readonly InterfaceDataQuery interfaceData = new(state, calls, names, spec);
+    private readonly ReadLocationQuery reads = new(state);
+    internal static DispatchResult Pending { get; } = new(DispatchKind.Unresolved, TargetShape.Other,
+        Why: new("dispatch.pending", "循环尚无分派依据。"));
+    internal FixedPointMember[] Members => [FixedPointMember.Create(this, _ => new DispatchLattice(names.ReferenceRoot)),
+        FixedPointMember.Create(interfaceData, key => new InterfaceDataLattice(key.Value))];
     public override Outcome<DispatchResult> Compute(QueryContext c, CallIdentity key)
     {
+        if (names.DispatchedCalls is { } shared && shared != this) return c.Get(shared, key);
         var classified = c.Get(calls, key);
         if (!classified.IsSuccess) return classified.Propagate<DispatchResult>();
         if (classified.Value.Target is not { } target) return No(TargetShape.Other, "not-indirect", "调用目标不是计算值。");
@@ -42,6 +48,7 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
         if (!resolved.IsSuccess) return resolved.Propagate<DispatchResult>();
         target = resolved.Value;
         var named = c.Get(names, target);
+        if (named.IsSuccess && named.Value == NameLattice.Pending) return Yes(Pending);
         var site = c.Snapshot.Blocks.SelectMany(b => b.Statements.Select((s, i) => (Statement: s, Point: new Point(b.Identity, i))))
             .Single(x => x.Statement is Call candidate && candidate.Identity == key);
         var call = (Call)site.Statement;
@@ -52,8 +59,9 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
                 || table.Owner is EntityName { Entity: ClassEntity { Type: GenericParameterRef } }))
         {
             // 名字证明规格身份，状态项证明接收者身份；不以类型相同替代对象相同。
-            if (target.Identity is not MemoryAtom pm)
-                return No(TargetShape.VtableSlot, "receiver-evidence", "虚表读取没有可追溯的对象项。");
+            var pointerRead = c.Get(reads, target);
+            if (!pointerRead.IsSuccess)
+                return No(TargetShape.VtableSlot, "receiver-evidence", "虚表读取没有可追溯的对象项。", pointerRead.Why);
             Term? receiver = null;
             GenericParameterRef? constraint = null;
             DefinitionRef type;
@@ -67,12 +75,14 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
             }
             else
             {
+                var classRead = c.Get(reads, pointerRead.Value.Root);
                 if (table.Owner is not FieldName klass || klass.Field != spec.Layout.Field("Il2CppObject", "klass").Path
-                    || Resolve(c, pm.Location.Root)?.Identity is not MemoryAtom cm)
+                    || !classRead.IsSuccess)
                     return No(TargetShape.VtableSlot, "receiver-evidence", "虚表的类既非对象的类，也非泛型上下文中的类型参数。");
-                receiver = Resolve(c, cm.Location.Root);
+                receiver = Resolve(c, classRead.Value.Root);
                 if (receiver is null) return No(TargetShape.VtableSlot, "receiver-evidence", "对象项未解析。");
                 var typed = c.Get(locations.Types, receiver);
+                if (typed.IsSuccess && typed.Value is null) return Yes(Pending);
                 if (typed.IsSuccess && typed.Value?.Type is GenericParameterRef)
                     return No(TargetShape.VtableSlot, "generic-receiver", "虚调用没有经泛型上下文中的 T 类解析。");
                 if (!typed.IsSuccess || typed.Value?.Type is not DefinitionRef declared)
@@ -95,9 +105,11 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
             if (Value(c, binding.This, site.Point) != receiver) return No(TargetShape.VtableSlot, "receiver-mismatch", "首参不是虚表所属对象。");
             var info = Value(c, binding.MethodInformation, site.Point);
             Outcome<NamedValue>? infoName = info is null ? null : c.Get(names, info);
+            if (infoName is { IsSuccess: true } && infoName.Value.Value == NameLattice.Pending) return Yes(Pending);
+            var infoRead = info is null ? default : c.Get(reads, info);
             if (infoName is not { IsSuccess: true } || infoName.Value.Value.Name is not FieldName mf ||
                 mf.Field != spec.Layout.Field("VirtualInvokeData", "method").Path || mf.Owner != table ||
-                info?.Identity is not MemoryAtom im || Resolve(c, im.Location.Root) != Resolve(c, pm.Location.Root))
+                !infoRead.IsSuccess || names.SameValue(c, infoRead.Value.Root, pointerRead.Value.Root) is not { IsSuccess: true, Value: true })
                 return No(TargetShape.VtableSlot, "method-information", "隐藏方法信息与目标不是同一对象的同一槽。");
             return Yes(new(DispatchKind.Virtual, TargetShape.VtableSlot, receiver, constraint ?? (TypeRef)type, slot, method, binding, pointer)
                 { Constraint = constraint });
@@ -145,7 +157,9 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
                     : No(shape, "target-kind", "目标名字没有已支持的分派身份。");
             return Yes(new(DispatchKind.Unresolved, shape, Why: data.Why));
         }
+        if (InterfaceDataQuery.IsPending(data.Value)) return Yes(Pending);
         var interfaceName = c.Get(names, data.Value.Interface);
+        if (interfaceName.IsSuccess && interfaceName.Value == NameLattice.Pending) return Yes(Pending);
         if (!interfaceName.IsSuccess || interfaceName.Value.Name is not EntityName { Entity: ClassEntity { Type: DefinitionRef interfaceType } } || !interfaceType.Definition.IsInterface || Open(interfaceType))
             return No(shape, "interface-name", "接口没有具体的元数据类型名字。");
         var interfaceMethods = interfaceType.Definition.Methods.Where(m => m.Slot == data.Value.Slot && !m.IsStatic).ToArray();
@@ -158,8 +172,13 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
         var information = Value(c, interfaceBinding.MethodInformation, site.Point);
         if (information is null) return No(shape, "interface-method-information", "隐藏方法信息未绑定。");
         var infoData = c.Get(interfaceData, new(information, site.Point, "method"));
-        if (!infoData.IsSuccess || !interfaceData.Same(c, data.Value, infoData.Value))
+        if (!infoData.IsSuccess)
             return No(shape, "interface-method-information", "目标与隐藏方法信息不是同一接口调用数据。", infoData.Why);
+        if (InterfaceDataQuery.IsPending(infoData.Value)) return Yes(Pending);
+        var sameData = interfaceData.Compare(c, data.Value, infoData.Value);
+        if (sameData.IsSuccess && sameData.Value is null) return Yes(Pending);
+        if (!sameData.IsSuccess || sameData.Value != true)
+            return No(shape, "interface-method-information", "目标与隐藏方法信息不是同一接口调用数据。", sameData.Why);
         return Yes(new(DispatchKind.Interface, shape, data.Value.Object, interfaceType, data.Value.Slot, interfaceMethod, interfaceBinding, data.Value));
     }
     private static bool Open(DefinitionRef type) => type.Definition.GenericParameters.Count != type.Arguments.Count || type.ContainsGenericParameter();
@@ -214,4 +233,22 @@ public sealed class DispatchQuery(StateQueries state, CallNamingQuery calls, Val
     private static Outcome<DispatchResult> Yes(DispatchResult result) => Outcome<DispatchResult>.Success(result);
     private static Outcome<DispatchResult> No(TargetShape shape, string code, string detail, Reason? cause = null)
         => Yes(new(DispatchKind.Unresolved, shape, Why: new("dispatch." + code, detail, cause)));
+}
+
+/// <summary>分派从无依据增长到唯一结果或失败；同一目标的 ABI 绑定由方法及调用点唯一决定。</summary>
+internal sealed class DispatchLattice(TypeRef? objectType) : ILattice<DispatchResult>
+{
+    public DispatchResult Bottom => DispatchQuery.Pending;
+    private static bool Same(DispatchResult a, DispatchResult b) => a.Kind == b.Kind && a.Shape == b.Shape
+        && a.Receiver == b.Receiver && a.StaticType == b.StaticType && a.Slot == b.Slot && a.Method == b.Method
+        && a.Evidence == b.Evidence && a.Why == b.Why && a.Constraint == b.Constraint;
+    private static bool Top(DispatchResult result) => result.Kind == DispatchKind.Unresolved && result != DispatchQuery.Pending;
+    private bool Widens(DispatchResult a, DispatchResult b) => a.Kind == DispatchKind.Virtual && b.Kind == DispatchKind.Virtual
+        && a.Receiver == b.Receiver && a.Slot == b.Slot && a.Constraint == b.Constraint
+        && a.StaticType is { } left && b.StaticType is { } right
+        && ManagedTypes.CommonReferenceType([left, right], objectType) == right;
+    public DispatchResult Join(DispatchResult a, DispatchResult b) => a == Bottom ? b : b == Bottom || Same(a, b) || Top(a) ? a
+        : Top(b) || Widens(a, b) ? b : Widens(b, a) ? a
+        : new(DispatchKind.Unresolved, TargetShape.Other, Why: new("dispatch.conflict", "循环分派结果不一致。"));
+    public bool LessOrEqual(DispatchResult a, DispatchResult b) => a == Bottom || Same(a, b) || Top(b) || Widens(a, b);
 }

@@ -84,6 +84,7 @@ internal static partial class NamingChecks
         }
         LoadedValues(a, spec);
         SpecificationValues(a, spec);
+        SharedReferenceLoop(a, spec);
         return a.Finish("命名查询");
     }
     private static void LoadedValues(Assertions a, RuntimeSpec spec)
@@ -102,6 +103,7 @@ internal static partial class NamingChecks
         int header=(int)spec.Layout.ObjectHeaderSize;
         FieldDef Field(TypeDef owner, string name, TypeRef type, int offset, bool statics=false) => new()
         { Index=offset, Owner=owner, Name=name, Type=type, Offset=offset, Attributes=statics ? FieldAttributes.Static : FieldAttributes.Public };
+        var textCount = Field(text.Definition, "Count", integer, header); text.Definition.Fields = [textCount];
         item.Fields=[Field(item,"Value",integer,header)];
         var nested=Type("Nested",true); nested.Size=8; nested.Fields=[Field(nested,"Item",itemType,0)];
         var owner=Type("Owner"); var ownerType=new DefinitionRef(owner, []);
@@ -126,7 +128,8 @@ internal static partial class NamingChecks
         var first=Read(input,header); var second=Read(input,header+8); var number=Read(input,header+16,32);
         var fraction=Read(input,header+20,32); var native=Read(input,header+24); var items=Read(input,header+32);
         var textHeader=Read(textParameter,0);
-        var textValue=Read(input,header+40); var leaf=Read(input,header+48); var element=Read(elements,spec.Layout.ArrayDataStart);
+        var textValue=Read(input,header+40); var textLength=Read(textValue,header,32);
+        var leaf=Read(input,header+48); var element=Read(elements,spec.Layout.ArrayDataStart);
         var index=t.Unknown(64,new("test.index","数组下标。"));
         var indexed=t.Apply(new CoreOperator(CoreOperation.Add),64,elements,
             t.Apply(new CoreOperator(CoreOperation.ShiftLeft),64,index,t.Constant(3,64)));
@@ -162,11 +165,15 @@ internal static partial class NamingChecks
             a.True(c.Get(names,fraction).Value is { Kind:ValueKind.Floating, Record:null },"浮点字段的值种类");
             a.True(c.Get(names,native).Value is { Kind:ValueKind.NativePointer, Record:null },"原生指针字段的值种类");
             a.True(c.Get(names,items).Value.Record=="Il2CppArray" && c.Get(names,textValue).Value.Record=="Il2CppString","数组和字符串读取的运行时结构");
+            var textLocation=c.Get(locations,new(t.Apply(new CoreOperator(CoreOperation.Add),64,textValue,t.Constant(header,64)),32));
+            a.True(c.Get(names,textLength).Value.Name is FieldName && textLocation.Value is { Kind:ManagedLocationKind.InstanceField, Views:[var textView] }
+                && textView.Path[^1].Field==textCount,"规格字段名字不遮蔽同一范围内真实的托管字段声明");
             a.True(c.Get(names,textParameter).Value is { Record:"Il2CppObject", Name:ParameterName } &&
                 c.Get(names,textHeader).Value.Name is FieldName { Record:"Il2CppObject", Field:"Il2CppObject.klass" },"签名字符串及其规格字段名字保持不变");
             a.True(c.Get(names,leaf).Value.StaticType==itemType,"结构体字段读取按叶子声明类型");
             a.True(c.Get(names,chained).Value.Kind==ValueKind.Integer,"连续字段读取有底递归");
-            a.True(one.Value.Name!=two.Value.Name && c.Get(names,merged).Value.Kind==ValueKind.Unnamed,"不同字段读取的名字合流冲突");
+            a.True(one.Value.Name!=two.Value.Name && c.Get(names,merged).Value is { Kind:ValueKind.ManagedReference, Name:ReferenceValueName, StaticType:var mergedType }
+                && mergedType==itemType,"不同字段的引用读取合流有独立身份与公共类型");
             a.True(one.Value.Name!=c.Get(names,reloaded).Value.Name,"可能改写后的读取保留不同身份");
             a.True(names.FixedValue(c, first).Value is LoadedName && !names.SameValue(c, first, reloaded).Value,
                 "完整读取的定义名字保留内存版本，不同版本的可变字段不等值");

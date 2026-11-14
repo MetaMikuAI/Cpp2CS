@@ -97,6 +97,24 @@ public sealed partial class ManagedTypes
         _ => false,
     };
 
+    /// <summary>引用类型的并；只沿类的基类链取公共祖先，接口、数组和缺少类型的输入退到 object。</summary>
+    public static TypeRef? CommonReferenceType(IEnumerable<TypeRef?> referenceTypes, TypeRef? objectType = null)
+    {
+        var inputs = referenceTypes.ToArray();
+        static IEnumerable<DefinitionRef> Bases(TypeRef? type)
+        {
+            for (var current = type as DefinitionRef; current is not null;
+                current = current.Definition.BaseType?.Substitute(current.Arguments, []) as DefinitionRef)
+                yield return current;
+        }
+        objectType ??= inputs.SelectMany(Bases).FirstOrDefault(t => t.Definition is
+            { Assembly: "mscorlib.dll", FullName: "System.Object" });
+        if (inputs.Length == 0 || inputs.Any(t => t is not DefinitionRef { Definition.IsValueType: false, Definition.IsInterface: false }))
+            return objectType;
+        var others = inputs.Skip(1).Select(t => Bases(t).ToHashSet()).ToArray();
+        return Bases(inputs[0]).FirstOrDefault(t => others.All(chain => chain.Contains(t))) ?? objectType;
+    }
+
     /// <summary>值的类别；泛型参数（共享代码）为 null。</summary>
     public TypeKind? Kind(TypeRef type)
     {

@@ -29,11 +29,13 @@ internal static class DispatchInterfaceChecks
         MethodDef Method(TypeDef owner, string name, bool statics) => new() { Index=0,Owner=owner,Name=name,Token=0,Attributes=statics?MethodAttributes.Static:MethodAttributes.Public|MethodAttributes.Virtual,ImplAttributes=0,Slot=0,ReturnType=reference,Parameters=[] };
         var method = Method(itf,"Apply",false); itf.Methods=[method];
         var caller = Method(obj,"Caller",true); caller.Parameters=[new("o",reference,0,null,false)];
-        void Check(bool slowOnly, bool wrongInterface, bool wrongSlot, bool loop = false, bool wrongStep = false, bool wrongPair = false, bool noEntry = false, bool spill = false)
+        void Check(bool slowOnly, bool wrongInterface, bool wrongSlot, bool loop = false, bool wrongStep = false, bool wrongPair = false, bool noEntry = false, bool spill = false, bool managedLoop = false)
         {
             var t = new TermTable(); var entry = new BlockIdentity(); var fast = new BlockIdentity(); var slow = new BlockIdentity(); var end = new BlockIdentity(); var scan = new BlockIdentity(); var advance = new BlockIdentity();
-            var receiver = t.Atom(new EntryAtom(new(SlotKind.Integer)),64);
-            var f = new FunctionBuilder(t,entry,64,new(t.Atom(new RootAtom(AddressRoot.Frame),64))); f.Inputs.Add(new(new(SlotKind.Integer),receiver));
+            var preheader = new BlockIdentity(); var exit = new BlockIdentity(); var receiverId = new MergeIdentity();
+            var original = t.Atom(new EntryAtom(new(SlotKind.Integer)),64);
+            var receiver = managedLoop ? t.Atom(new ResultAtom(receiverId),64) : original;
+            var f = new FunctionBuilder(t,managedLoop ? preheader : entry,64,new(t.Atom(new RootAtom(AddressRoot.Frame),64))); f.Inputs.Add(new(new(SlotKind.Integer),original));
             Term Add(Term x,long n) => t.Apply(new CoreOperator(CoreOperation.Add),64,x,t.Constant(unchecked((ulong)n),64));
             Term Read(List<Statement> list,Term address,int width=64) { var id = new ReadIdentity(); var term=t.Atom(new ResultAtom(id),width); list.Add(new MemoryRead(id,address,width,term)); return term; }
             var start = new List<Statement>(); var image=t.Atom(new RootAtom(AddressRoot.Image),64);
@@ -56,10 +58,12 @@ internal static class DispatchInterfaceChecks
             if (spill) data = Read(endStatements, Add(t.Atom(new RootAtom(AddressRoot.Frame),64), -16));
             var target=Read(endStatements,Add(data,spec.Layout.Field("VirtualInvokeData","methodPtr").ByteOffset));
             var info=Read(endStatements,Add(data,spec.Layout.Field("VirtualInvokeData","method").ByteOffset));
-            var callId=new CallIdentity(); endStatements.Add(new Call(callId,new ComputedTarget(target),[new(new(SlotKind.Integer),receiver),new(new(SlotKind.Integer,1),info)],[new(new(SlotKind.Integer),t.Atom(new ResultAtom(callId),64))]));
+            var callId=new CallIdentity(); var returned=t.Atom(new ResultAtom(callId),64);
+            endStatements.Add(new Call(callId,new ComputedTarget(target),[new(new(SlotKind.Integer),receiver),new(new(SlotKind.Integer,1),info)],[new(new(SlotKind.Integer),returned)]));
             var equal = t.Apply(new CoreOperator(CoreOperation.Equal),1,
                 t.Apply(new CoreOperator(CoreOperation.Add),64,pairInterface,t.Apply(new CoreOperator(CoreOperation.Not),64,compared)),t.Constant(ulong.MaxValue,64));
-            f.Blocks.Add(new(entry,[],start.ToImmutableArray(),slowOnly?new Jump(slow):loop?new Jump(scan):new Branch(equal,fast,slow)));
+            if (managedLoop) f.Blocks.Add(new(preheader,[],[],new Jump(entry)));
+            f.Blocks.Add(new(entry,managedLoop ? [new Merge(receiverId,receiver,[new(preheader,original),new(end,returned)])] : [],start.ToImmutableArray(),slowOnly?new Jump(slow):loop?new Jump(scan):new Branch(equal,fast,slow)));
             if (loop)
             {
                 f.Blocks.Add(new(scan,[new(pairId,cursor,[new(entry,table),new(advance,Add(cursor,wrongStep?1:spec.Layout.Record("Il2CppRuntimeInterfaceOffsetPair").Size))])],scanStatements.ToImmutableArray(),new Branch(equal,fast,advance)));
@@ -67,13 +71,15 @@ internal static class DispatchInterfaceChecks
             }
             if (!slowOnly) f.Blocks.Add(new(fast,[],fastStatements.ToImmutableArray(),new Jump(end)));
             f.Blocks.Add(new(slow,[],spill ? [slowCall, new MemoryWrite(new(), Add(t.Atom(new RootAtom(AddressRoot.Frame),64), -16), 64, slowResult)] : [slowCall],new Jump(end)));
-            f.Blocks.Add(new(end,slowOnly?[]:[new Merge(mergeId,merged,[new(fast,address),new(slow,slowResult)])],endStatements.ToImmutableArray(),new Return([])));
+            f.Blocks.Add(new(end,slowOnly?[]:[new Merge(mergeId,merged,[new(fast,address),new(slow,slowResult)])],endStatements.ToImmutableArray(),
+                managedLoop ? new Branch(t.Unknown(1,new("test.loop","循环条件。")),entry,exit) : new Return([])));
+            if (managedLoop) f.Blocks.Add(new(exit,[],[],new Return([])));
             var facts=NamingFacts.Empty with { Slots=ImmutableDictionary<ulong,Outcome<MetadataEntity>>.Empty.Add(128,Outcome<MetadataEntity>.Success(new ClassEntity(new DefinitionRef(itf,[])))).Add(256,Outcome<MetadataEntity>.Success(new ClassEntity(new DefinitionRef(other,[])))) };
             var state=new StateQueries(); var names=new ValueNamingQuery(state,calls,facts,spec,binder,noEntry?null:binder.Entry(new(caller,[],[]),BindingEntryKind.Ordinary).Value);
             var locations=new ManagedLocationQuery(state,names,layouts,spec); var q=new DispatchQuery(state,calls,names,locations,binder,spec);
             var result=locations.CreateContext(f.Freeze()).Get(q,callId);
             bool success=!wrongInterface&&!wrongSlot&&!wrongStep&&!wrongPair;
-            a.True(result.IsSuccess && (success?result.Value.Kind==DispatchKind.Interface && result.Value.Method?.Method==method:result.Value.Kind==DispatchKind.Unresolved),$"接口 slow={slowOnly} wrongInterface={wrongInterface} wrongSlot={wrongSlot} loop={loop} wrongStep={wrongStep} wrongPair={wrongPair}: {result.Value}");
+            a.True(result.IsSuccess && (success?result.Value.Kind==DispatchKind.Interface && result.Value.Method?.Method==method:result.Value.Kind==DispatchKind.Unresolved),$"接口 slow={slowOnly} wrongInterface={wrongInterface} wrongSlot={wrongSlot} loop={loop} wrongStep={wrongStep} wrongPair={wrongPair} managedLoop={managedLoop}: {result.Value}");
             if (slowOnly) a.True(result.IsSuccess && result.Value is { Kind: DispatchKind.Interface, Shape: TargetShape.ReadFromCallResult, Slot: 0 }
                 && result.Value.Receiver == receiver && result.Value.StaticType is DefinitionRef staticType && staticType.Definition == itf && staticType.Arguments.Count == 0, "直接查找结果保留对象、接口和常量槽：" + result.Value);
         }
@@ -81,6 +87,7 @@ internal static class DispatchInterfaceChecks
         Check(false,false,false,true); Check(false,false,false,true,true); Check(false,false,false,true,false,true);
         Check(false,false,false,true,false,false,true);
         Check(true,false,false,noEntry:true); Check(true,false,false,spill:true);
+        Check(false,false,false,managedLoop:true);
         foreach (var swapped in new[] { false, true })
         {
             var t = new TermTable(); var start = new BlockIdentity(); var left = new BlockIdentity(); var right = new BlockIdentity(); var end = new BlockIdentity();

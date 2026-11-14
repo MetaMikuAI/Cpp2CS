@@ -23,6 +23,8 @@ public sealed class InterfaceDataQuery(StateQueries state, CallNamingQuery calls
     private readonly ExistingMergeQuery existingMerge = new(state);
     private readonly ReadLocationQuery reads = new(state);
     private readonly StridedAddressQuery strides = new(state);
+    internal static InterfaceDataName Pending(Term value) => new(value, value, -1, "pending");
+    internal static bool IsPending(InterfaceDataName name) => name.Slot == -1 && name.Basis == "pending";
     public override Outcome<InterfaceDataName> Compute(QueryContext c, InterfaceDataKey key)
     {
         var resolved = c.Get(state.Resolve, key.Value); if (!resolved.IsSuccess) return resolved.Propagate<InterfaceDataName>();
@@ -74,6 +76,7 @@ public sealed class InterfaceDataQuery(StateQueries state, CallNamingQuery calls
             if (!headerRead.IsSuccess || headerRead.Value.Offset != spec.Layout.Field("Il2CppObject", "klass").ByteOffset) continue;
             var header = headerRead.Value;
             var named = c.Get(names, klass);
+            if (named.IsSuccess && named.Value == NameLattice.Pending) return Yes(Pending(key.Value));
             if (!named.IsSuccess || named.Value.Name is not FieldName h || h.Field != spec.Layout.Field("Il2CppObject", "klass").Path) continue;
             var other = parts.Where(p => p != klass).ToArray(); if (parts.Count != 2 || other.Length != 1) continue;
             var scaled = other[0]; Term? index = null;
@@ -138,10 +141,14 @@ public sealed class InterfaceDataQuery(StateQueries state, CallNamingQuery calls
         {
             var found = c.Get(this, new(input.Value, new(input.Source, input.Before), key.Field, new(input.Source, block)));
             if (!found.IsSuccess) return found;
+            if (IsPending(found.Value)) return Yes(Pending(key.Value));
             if (answer is not null)
             {
                 if (answer.Slot != found.Value.Slot) return No("merge-slot", "合流来源的槽号不一致。");
-                if (!Same(c, answer with { Object = found.Value.Object }, found.Value)) return No("merge-interface", "合流来源的接口不一致。");
+                var same = Compare(c, answer with { Object = found.Value.Object }, found.Value);
+                if (!same.IsSuccess) return same.Propagate<InterfaceDataName>();
+                if (same.Value is null) return Yes(Pending(key.Value));
+                if (same.Value != true) return No("merge-interface", "合流来源的接口不一致。");
             }
             receivers.Add(new(input.Source, found.Value.Object));
             answer = found.Value;
@@ -155,12 +162,18 @@ public sealed class InterfaceDataQuery(StateQueries state, CallNamingQuery calls
         }
         return Yes(answer with { Basis = "同一接口调用数据的合流" });
     }
-    public bool Same(QueryContext c, InterfaceDataName a, InterfaceDataName b)
+    public bool Same(QueryContext c, InterfaceDataName a, InterfaceDataName b) => Compare(c, a, b) is { IsSuccess: true, Value: true };
+    internal Outcome<bool?> Compare(QueryContext c, InterfaceDataName a, InterfaceDataName b)
     {
-        if (a.Object != b.Object || a.Slot != b.Slot) return false;
-        if (a.Interface == b.Interface) return true;
+        if (IsPending(a) || IsPending(b)) return Outcome<bool?>.Success(null);
+        if (a.Object != b.Object || a.Slot != b.Slot) return Outcome<bool?>.Success(false);
+        if (a.Interface == b.Interface) return Outcome<bool?>.Success(true);
         var x = c.Get(names, a.Interface); var y = c.Get(names, b.Interface);
-        return x.IsSuccess && y.IsSuccess && x.Value.Name is EntityName { Entity: ClassEntity xc } && y.Value.Name is EntityName { Entity: ClassEntity yc } && xc == yc;
+        if (!x.IsSuccess) return x.Propagate<bool?>();
+        if (!y.IsSuccess) return y.Propagate<bool?>();
+        if (x.Value == NameLattice.Pending || y.Value == NameLattice.Pending) return Outcome<bool?>.Success(null);
+        return Outcome<bool?>.Success(x.Value.Name is EntityName { Entity: ClassEntity xc }
+            && y.Value.Name is EntityName { Entity: ClassEntity yc } && xc == yc);
     }
     private static void Sum(Term term, List<Term> parts, ref BigInteger constant)
     {
@@ -173,4 +186,14 @@ public sealed class InterfaceDataQuery(StateQueries state, CallNamingQuery calls
     private static Term Address(QueryContext c, Location l) => l.Offset is { } offset ? Add(c, l.Root, checked((long)offset)) : l.UnknownOffsetAddress ?? l.Root;
     private static Outcome<InterfaceDataName> Yes(InterfaceDataName name) => Outcome<InterfaceDataName>.Success(name);
     private static Outcome<InterfaceDataName> No(string code, string detail, Reason? cause = null) => Outcome<InterfaceDataName>.Failure(new("dispatch.interface-"+code, detail, cause));
+}
+
+/// <summary>接口调用数据的身份为对象、接口和槽；尚缺命名依据时保留底值。</summary>
+internal sealed class InterfaceDataLattice(Term value) : ILattice<InterfaceDataName>
+{
+    public InterfaceDataName Bottom { get; } = InterfaceDataQuery.Pending(value);
+    private static bool Same(InterfaceDataName a, InterfaceDataName b) => a.Object == b.Object && a.Interface == b.Interface && a.Slot == b.Slot;
+    public InterfaceDataName Join(InterfaceDataName a, InterfaceDataName b) => InterfaceDataQuery.IsPending(a) ? b
+        : InterfaceDataQuery.IsPending(b) || Same(a, b) ? a : throw new InvalidOperationException("接口调用数据的身份不一致。");
+    public bool LessOrEqual(InterfaceDataName a, InterfaceDataName b) => InterfaceDataQuery.IsPending(a) || Same(a, b);
 }

@@ -12,7 +12,7 @@ using Cpp2CS.Runtime;
 using Cpp2CS.Runtime.Layouts;
 using Cpp2CS.Targets.Arm64.Abi;
 namespace Cpp2CS.Tests;
-internal static class DispatchChecks
+internal static partial class DispatchChecks
 {
     public const string Command = "dispatch";
     public static int Run()
@@ -81,6 +81,7 @@ internal static class DispatchChecks
         Check(obj,4,false,false,null);
         Check(concrete,0,false,true,invoke);
         Check(concrete,0,false,true,null,true);
+        MergedReceivers(a, spec);
         return a.Finish("分派快速检查");
     }
 }

@@ -57,13 +57,18 @@ internal static partial class NamingChecks
             t.Apply(new CoreOperator(CoreOperation.ZeroExtend), 64, depth), t.Constant(3, 64))), -8));
         var flagAgain = Read(Offset(again, flagOffset), 32);
         builder.Blocks.Add(new(head, [], statements.ToImmutableArray(), new Branch(t.Unknown(1, new("test", "条件")), left, right)));
-        builder.Blocks.Add(new(left, [], [], new Jump(join))); builder.Blocks.Add(new(right, [], [], new Jump(join)));
+        builder.Blocks.Add(new(left, [], [], new Jump(join)));
+        builder.Blocks.Add(new(right, [], [new Call(new(), new ImageFunction(99), [], [])], new Jump(join)));
         Merge Phi(Term a, Term b)
         {
             var id = new MergeIdentity(); return new(id, t.Atom(new ResultAtom(id), a.Width), [new(left, a), new(right, b)]);
         }
         var fixedMerge = Phi(statics, second); var mutableMerge = Phi(flag, flagAgain); var sameVersionMerge = Phi(flag, sameVersion);
-        builder.Blocks.Add(new(join, [fixedMerge, mutableMerge, sameVersionMerge], [], new Return([])));
+        statements.Clear();
+        var joinedFlag = Read(Offset(klass, flagOffset), 32);
+        statements.Add(new Call(new(), new ImageFunction(99), [], []));
+        var changedFlag = Read(Offset(klass, flagOffset), 32);
+        builder.Blocks.Add(new(join, [fixedMerge, mutableMerge, sameVersionMerge], [.. statements], new Return([])));
         var owner = new TypeDef { Index = 0, Assembly = "test", Namespace = "", Name = "Owner", Token = 0,
             Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false };
         var facts = NamingFacts.Empty with { Slots = ImmutableDictionary<ulong, Outcome<MetadataEntity>>.Empty.Add(128,
@@ -99,5 +104,9 @@ internal static partial class NamingChecks
             "可变字段的同一读取版本仍由状态身份保证同值");
         checks.True(!names.SameValue(c, flag, flagAgain).Value && c.Get(names, mutableMerge.Result).Value.Kind == ValueKind.Unnamed,
             "可变的同名规格字段保留版本，合流不冒充定值");
+        checks.True(c.Get(state.Resolve, joinedFlag).Value.Identity is MemoryMerge
+            && c.Get(names, joinedFlag).Value is { Kind: ValueKind.Integer, Name: FieldName }
+            && names.FixedValue(c, joinedFlag).Value is null && !names.SameValue(c, joinedFlag, changedFlag).Value,
+            "汇合处规格字段重读有种类，不以同一字段名消去不同读取版本");
     }
 }

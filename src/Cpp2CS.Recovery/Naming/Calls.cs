@@ -75,7 +75,9 @@ public sealed record SharedCallTarget(MethodRef Method, BoundCall Binding);
 public sealed class SharedCallQuery(MethodBinder binder, CallNamingQuery calls, ValueNamingQuery? names,
     BoundSourceQuery sources) : Query<CallIdentity, SharedCallTarget>
 {
-    public override Outcome<SharedCallTarget> Compute(QueryContext c, CallIdentity key)
+    public override Outcome<SharedCallTarget> Compute(QueryContext c, CallIdentity key) => Resolve(c, key);
+    // 命名的调用结果在同一不动点中取用这份解析；不经组外查询读取未收敛的接收者。
+    internal Outcome<SharedCallTarget> Resolve(QueryContext c, CallIdentity key)
     {
         Outcome<SharedCallTarget> No(string kind, string message, Reason? cause = null) =>
             Outcome<SharedCallTarget>.Failure(new("binding.shared-call." + kind, message, cause));
@@ -104,6 +106,7 @@ public sealed class SharedCallQuery(MethodBinder binder, CallNamingQuery calls, 
         if (!information.IsSuccess) return No("witness", "方法信息实参没有可用的项。", information.Why);
         var entity = c.Get(names, information.Value);
         if (!entity.IsSuccess) return No("witness", "方法信息实参命名失败。", entity.Why);
+        if (entity.Value == NameLattice.Pending) return No("pending", "方法信息实参尚无命名依据。");
         var method = entity.Value.Name switch
         {
             EntityName { Entity: MethodEntity methodInfo } => methodInfo.Method,
@@ -121,6 +124,7 @@ public sealed class SharedCallQuery(MethodBinder binder, CallNamingQuery calls, 
             if (!receiverTerm.IsSuccess) return No("receiver", "方法信息实参为空且接收者没有可用的项。", receiverTerm.Why);
             var receiver = c.Get(names, receiverTerm.Value);
             if (!receiver.IsSuccess) return No("receiver", "方法信息实参为空且接收者命名失败。", receiver.Why);
+            if (receiver.Value == NameLattice.Pending) return No("pending", "共享调用接收者尚无命名依据。");
             if (receiver.Value.StaticType is not DefinitionRef receiverType)
                 return No("receiver", "方法信息实参为空且接收者没有静态类型。", receiver.Value.Why);
             var matches = new HashSet<MethodRef>();

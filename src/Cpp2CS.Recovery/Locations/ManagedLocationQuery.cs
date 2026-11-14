@@ -59,7 +59,7 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
     }
     public QueryContext CreateContext(NativeFunction function) => new(function, null, State.Group,
         new FixedPointGroup(1_000_000, [.. Names.Members, FixedPointMember.Create(this, _ => new LocationLattice()),
-            FixedPointMember.Create(Types, _ => new TypeLattice()), FixedPointMember.Create(ReadTypes, _ => new TypeLattice())]));
+            FixedPointMember.Create(Types, _ => new TypeLattice(Names.ReferenceRoot)), FixedPointMember.Create(ReadTypes, _ => new TypeLattice(Names.ReferenceRoot))]));
     internal static LocationResult Pending { get; } = new(ManagedLocationKind.Unknown, [], new("location.pending", "循环尚无定位依据。"));
     internal static Outcome<LocationResult> Unknown(string code, string text) => Outcome<LocationResult>.Success(new(ManagedLocationKind.Unknown, [], new("location." + code, text)));
     private static Outcome<LocationResult> NotManaged(string reason) => Outcome<LocationResult>.Success(new(ManagedLocationKind.NotManaged, [], new("location.not-managed", reason)));
@@ -79,8 +79,11 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
         if (location.Value.Region == Region.Thread) return Unknown("thread-static", "线程区域尚不定位。");
         var runtimeField = c.Get(Names.SpecificationReads, new(Names, location.Value));
         if (runtimeField.IsSuccess && runtimeField.Value == NameLattice.Pending) return Outcome<LocationResult>.Success(Pending);
-        if (runtimeField.IsSuccess && (runtimeField.Value.Name is BitStorageName || runtimeField.Value.Name is FieldName specification &&
-            specification.Field != spec.Layout.Field("Il2CppArray", "max_length").Path))
+        bool runtimeOnly = runtimeField.IsSuccess && (runtimeField.Value.Name is BitStorageName || runtimeField.Value.Name is FieldName specification &&
+            specification.Field != spec.Layout.Field("Il2CppArray", "max_length").Path);
+        // 对象头之外的规格字段也可能有真实的托管字段声明，例如字符串长度；保留两种查询视图。
+        if (runtimeOnly && (location.Value.Offset is not { } runtimeOffset || runtimeOffset < spec.Layout.ObjectHeaderSize
+            || c.Get(Names, location.Value.Root) is not { IsSuccess: true, Value.Kind: ValueKind.ManagedReference }))
             return NotManaged("已命名的运行时结构字段：" + Describe(runtimeField.Value.Name));
         var terms = new List<Term>(); BigInteger offset = 0;
         var pending = new Stack<Term>(); pending.Push(address);
@@ -337,11 +340,15 @@ internal sealed class LocationLattice : ILattice<LocationResult>
     public LocationResult Join(LocationResult a, LocationResult b) => a == Bottom ? b : b == Bottom || Same(a, b) || Top(a) ? a : Top(b) ? b : new(ManagedLocationKind.Unknown, [], new("location.conflict", "循环定位不一致。"));
     public bool LessOrEqual(LocationResult a, LocationResult b) => a == Bottom || Same(a, b) || Top(b);
 }
-internal sealed class TypeLattice : ILattice<StaticValueType?>
+internal sealed class TypeLattice(TypeRef? objectType = null) : ILattice<StaticValueType?>
 {
     public StaticValueType? Bottom => null;
-    public StaticValueType? Join(StaticValueType? a, StaticValueType? b) => a ?? b;
-    public bool LessOrEqual(StaticValueType? a, StaticValueType? b) => a is null || b is not null && a.Type == b.Type;
+    private TypeRef? Common(StaticValueType a, StaticValueType b) => ManagedTypes.IsReferenceType(a.Type) && ManagedTypes.IsReferenceType(b.Type)
+        ? ManagedTypes.CommonReferenceType([a.Type, b.Type], objectType) : null;
+    public StaticValueType? Join(StaticValueType? a, StaticValueType? b) => a is null ? b : b is null || a.Type == b.Type ? a
+        : Common(a, b) is { } type ? new(type, null) : a;
+    public bool LessOrEqual(StaticValueType? a, StaticValueType? b) => a is null || b is not null &&
+        (a.Type == b.Type || Common(a, b) is { } type && type == b.Type);
 }
 public sealed class LocationTypeQuery(ManagedLocationQuery q) : Query<Term, StaticValueType?>
 {
@@ -369,8 +376,14 @@ public sealed class LocationTypeQuery(ManagedLocationQuery q) : Query<Term, Stat
             {
                 var value = c.Get(this, input); if (!value.IsSuccess) return value;
                 if (value.Value is null) continue;
-                if (common is not null && common.Type != value.Value.Type) return Outcome<StaticValueType?>.Failure(new("location.merge-type", "合流来源类型不一致。"));
-                common = value.Value with { Basis = null };
+                if (common is not null && common.Type != value.Value.Type)
+                {
+                    if (!ManagedTypes.IsReferenceType(common.Type) || !ManagedTypes.IsReferenceType(value.Value.Type)
+                        || ManagedTypes.CommonReferenceType([common.Type, value.Value.Type], q.Names.ReferenceRoot) is not { } joined)
+                        return Outcome<StaticValueType?>.Failure(new("location.merge-type", "合流来源类型不一致。"));
+                    common = new(joined, null);
+                }
+                else common = value.Value with { Basis = null };
             }
             return Yes(common);
         }

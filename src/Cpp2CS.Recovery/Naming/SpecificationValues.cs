@@ -57,7 +57,7 @@ public sealed partial class ValueNamingQuery
     {
         EntityName entity => entity with { Slot = null },
         // 定义名字指向同一动态环境中的 SSA 值；LoadedName 自带读取版本。
-        ParameterName or IndirectParameterName or CallResultName or LoadedName or RuntimeInputName or AddressName => name,
+        ParameterName or IndirectParameterName or CallResultName or LoadedName or ReferenceValueName or RuntimeInputName or AddressName => name,
         FieldName field when SpecificationField(field)?.ImmutableEvidence is { Length: > 0 }
             && FixedName(field.Owner) is { } owner => field with { Owner = owner },
         ArrayElementName element when !element.Index.ContainsUndefined
