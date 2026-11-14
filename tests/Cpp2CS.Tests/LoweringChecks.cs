@@ -10,6 +10,7 @@ using Cpp2CS.Pipeline;
 using Cpp2CS.Recovery.Naming;
 using Cpp2CS.Runtime;
 using Cpp2CS.Native;
+using Cpp2CS.Native.Images;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Output;
 using Cpp2CS.Recovery.Binding;
@@ -547,6 +548,13 @@ internal static partial class LoweringChecks
             Attributes = FieldAttributes.Public | FieldAttributes.SpecialName | FieldAttributes.RTSpecialName };
         enumeration.Fields = [enumField];
         var enumType = new DefinitionRef(enumeration, []);
+        var pair = new TypeDef { Index = definitions.Count, Assembly = owner.Assembly, Namespace = "", Name = "Pair",
+            Token = (uint)(0x02000001 + definitions.Count), Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false,
+            Size = 8, PackingSize = 0, ClassSizeIsDefault = true };
+        definitions.Add(pair);
+        pair.Fields = new[] { "First", "Second" }.Select((name, i) => new FieldDef { Index = i + 1, Owner = pair,
+            Name = name, Type = Primitive("Int32"), Offset = i * 4, Attributes = FieldAttributes.Public }).ToArray();
+        var pairType = new DefinitionRef(pair, []);
         var nullable = new TypeDef { Index = definitions.Count, Assembly = "mscorlib.dll", Namespace = "System", Name = "Nullable`1",
             Token = (uint)(0x02000001 + definitions.Count), Attributes = TypeAttributes.Public, IsValueType = true, IsEnum = false, Size = 8 };
         definitions.Add(nullable);
@@ -556,7 +564,7 @@ internal static partial class LoweringChecks
             ImplAttributes = 0, Slot = -1, ReturnType = Primitive(name == "Box" ? "Object" : name == "Unbox" ? "Int32" : "String"),
             Parameters = [new("value", Primitive(name == "Box" ? "Int32" : "Object"), 0, null, false)] }).ToArray();
         owner.Methods = methods;
-        var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods, Fields = [enumField],
+        var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods, Fields = [enumField, .. pair.Fields],
             RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
             Assemblies = definitions.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key,
                 AssemblyName = Path.GetFileNameWithoutExtension(g.Key), Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
@@ -665,10 +673,42 @@ internal static partial class LoweringChecks
                     is BoxValue { Boxed: var boxedType, Operand.Type: var storage } && Equals(boxedType, enumType) && Equals(storage, Primitive("Int32")),
                     "枚举按基础整数取值，保留枚举盒类型：" + enumBox.Failure);
                 if (enumBox.Body is { } enumBody) checks.True(emitter.Emit([enumBody]).Count == 0, "枚举装箱 CIL 校验");
-                checks.True(Lower(Facts(Primitive("TypedReference"))).Failure?.Reason.Code == "lowering.Box.Struct", "结构体装箱保留洞");
+                checks.True(Lower(Facts(Primitive("TypedReference"))).Failure?.Reason.Code == "lowering.Box.Struct", "缺少字段布局的结构体装箱保留洞");
                 checks.True(Lower(Facts(Primitive("String"))).Failure?.Reason.Code == "lowering.Box.Struct", "引用类型装箱保留洞");
                 checks.True(Lower(Facts(new DefinitionRef(nullable, []))).Failure?.Reason.Code == "lowering.Box.Nullable", "可空类型装箱单列洞");
                 var original = builder.Blocks[0];
+                builder.Blocks[0] = original with { Statements = [new MemoryRead(read, slot, 64, klass),
+                    new MemoryWrite(new(), frame, 32, t.Slice(obj, 0, 32)),
+                    new MemoryWrite(new(), t.Apply(new CoreOperator(CoreOperation.Add), 64, frame, t.Constant(4, 64)), 32, t.Constant(9, 32)),
+                    call, new MemoryWrite(new(), frame, 32, t.Constant(77, 32))] };
+                var structBox = Lower(Facts(pairType));
+                checks.True(structBox.Body is not null, "完整初始化的结构体帧按值装箱：" + structBox.Failure);
+                if (structBox.Body is { } structBody)
+                {
+                    checks.True(emitter.Emit([structBody]).Count == 0, "结构体帧装箱 CIL 校验");
+                    const string text = """
+                        public struct Pair { public int First, Second; }
+                        public static class RuntimeCases {
+                            public static object Box(int value) { Pair local = default; local.First = value; local.Second = 9;
+                                object result = local; local.First = 77; return result; }
+                        }
+                        """;
+                    using var reference = new CompiledSource(text);
+                    using var tested = new CompiledSource(text);
+                    var output = tested.Method("RuntimeCases", "Box"); output.Body = skeleton.Method(method).Body;
+                    Mono.Cecil.TypeReference MapType(Mono.Cecil.TypeReference type) => tested.Module.GetType(type.FullName)
+                        ?? tested.Module.ImportReference(System.Type.GetType(type.FullName, throwOnError: true)!);
+                    foreach (var instruction in output.Body.Instructions)
+                        if (instruction.Operand is Mono.Cecil.FieldReference field)
+                            instruction.Operand = tested.Module.GetType(field.DeclaringType.FullName).Fields.Single(f => f.Name == field.Name);
+                        else if (instruction.Operand is Mono.Cecil.TypeReference type) instruction.Operand = MapType(type);
+                        else if (instruction.Operand is Mono.Cecil.ParameterDefinition parameter) instruction.Operand = output.Parameters[parameter.Index];
+                    foreach (var local in output.Body.Variables) local.VariableType = MapType(local.VariableType);
+                    var compared = CilComparison.Compare(reference.Method("RuntimeCases", "Box"), output);
+                    checks.True(compared.Status == CilComparisonStatus.Match, "装箱后覆盖帧内容不改变盒中副本：" + compared);
+                }
+                builder.Blocks[0] = original;
+                checks.True(Lower(Facts(pairType)).Failure?.Reason.Code == "lowering.IndirectArgument.Source", "结构体帧有叶子未初始化时不能装箱");
                 builder.Blocks[0] = original with { Statements = [new MemoryRead(read, slot, 64, klass),
                     new MemoryWrite(new(), frame, 32, t.Constant(0x3fc00000, 32)), call] };
                 var floating = Lower(Facts(Primitive("Single")));
@@ -1495,6 +1535,8 @@ internal static partial class LoweringChecks
             methods.Add(method); return method;
         }
         var take = Method(owner, "Take", Primitive("Void"), [new ByRefRef(integer)]);
+        var takeOut = Method(owner, "TakeOut", Primitive("Void"), [new ByRefRef(integer)]);
+        takeOut.Parameters = [new("p0", new ByRefRef(integer), ParameterAttributes.Out, null, false)];
         var takeNative = Method(owner, "TakeNative", Primitive("Void"), [new ByRefRef(Primitive("IntPtr"))]);
         var wrong = Method(owner, "Wrong", Primitive("Void"), [new ByRefRef(Primitive("Int64"))]);
         var pointer = Method(owner, "Pointer", Primitive("Void"), [new PointerRef(integer)]);
@@ -1507,7 +1549,7 @@ internal static partial class LoweringChecks
         var instance = Method(inner, "Apply", Primitive("Void"), [], true);
         var consumeStruct = Method(owner, "ConsumeStruct", Primitive("Void"), [structure]);
         string[] modes = ["Field", "NativeField", "Nested", "StructThis", "ByRef", "ThisField", "Static", "StaticNested", "StaticStruct", "Array", "ArrayField", "ArrayStruct", "Repeat", "Reload",
-            "Mismatch", "Store", "FrameStore", "Return", "Pointer", "Ordinary", "Arithmetic", "Compare", "CompareConstant", "Runtime", "Interior", "Frame", "ReferenceArray", "FrameOut", "FrameRef", "FrameUnrelated", "FrameHeap", "FrameMixed", "FrameOverlap", "FrameCross", "FramePartial", "FrameRefObject", "FrameFloat", "FrameBool", "FrameNative", "FrameRuntime", "FrameOrdinary", "FrameArithmetic", "FrameStructThis", "FrameStructOut", "FrameStructWide", "FrameStructPartial", "FrameStructCross", "FrameStructValue", "FrameThreeCalls"];
+            "Mismatch", "Store", "FrameStore", "Return", "Pointer", "Ordinary", "Arithmetic", "Compare", "CompareConstant", "Runtime", "Interior", "Frame", "ReferenceArray", "FrameOut", "FrameRef", "FrameRefTry", "FrameRefCatch", "FrameSpill", "FrameUnrelated", "FrameHeap", "FrameReturn", "FrameMixed", "FrameMixedSameWidth", "FrameOverlap", "FrameCross", "FramePartial", "FrameRefObject", "FrameFloat", "FrameBool", "FrameNative", "FrameRuntime", "FrameOrdinary", "FrameArithmetic", "FrameCompare", "FrameStructThis", "FrameStructField", "FrameStructClear", "FrameStructPartialClear", "FrameStructOut", "FrameStructWide", "FrameStructPartial", "FrameStructCross", "FrameStructValue", "FrameThreeCalls"];
         var entries = modes.ToDictionary(n => n, n => Method(n == "ThisField" ? inner : owner, n,
             n == "Return" ? Primitive("Int64") : integer, n == "ThisField" ? [] :
             [n.StartsWith("Array", StringComparison.Ordinal) ? new ArrayRef(n == "Array" ? integer : structure, 1) :
@@ -1548,18 +1590,31 @@ internal static partial class LoweringChecks
             if (mode == "NativeField") address = Add(root, native.Offset);
             if (mode == "Interior") address = Add(address, 1);
             if (mode.StartsWith("Frame", StringComparison.Ordinal) && mode != "FrameStore") address = Add(frame, -32);
-            if (mode == "FrameStructThis") statements.Add(new MemoryWrite(new(), Add(address, 4), 32, terms.Constant(7, 32)));
+            if (mode is "FrameStructThis" or "FrameStructField" or "FrameStructClear" or "FrameStructPartialClear") statements.Add(new MemoryWrite(new(), Add(address, 4), 32, terms.Constant(7, 32)));
+            if (mode is "FrameStructClear" or "FrameStructPartialClear")
+            {
+                var cleared = new CallIdentity();
+                statements.Add(new Call(cleared, new ImportedTarget(new("memset")),
+                    [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64)),
+                     new(new(SlotKind.Integer, 2), terms.Constant(mode == "FrameStructClear" ? 8 : 4, 64))],
+                    [new(new(SlotKind.Integer), terms.Atom(new ResultAtom(cleared), 64))]));
+            }
             if (mode == "FrameStructPartial") statements.Add(new MemoryWrite(new(), Add(address, 4), 16, terms.Constant(0, 16)));
-            if (mode is "FrameRef" or "FrameUnrelated") statements.Add(new MemoryWrite(new(), address, 32, terms.Constant(7, 32)));
+            if (mode is "FrameRef" or "FrameRefTry" or "FrameRefCatch" or "FrameSpill" or "FrameUnrelated") statements.Add(new MemoryWrite(new(), address, 32, terms.Constant(7, 32)));
+            if (mode == "FrameSpill")
+            {
+                statements.Add(new MemoryWrite(new(), Add(frame, -64), 64, address));
+                address = Read(Add(frame, -64), 64);
+            }
             if (mode == "FrameHeap") statements.Add(new MemoryWrite(new(), Add(root, bits.Offset), 64, address));
             if (mode is "FrameCross" or "FramePartial") statements.Add(new MemoryWrite(new(), address, mode == "FrameCross" ? 64 : 16, terms.Constant(0, mode == "FrameCross" ? 64 : 16)));
             Term result = terms.Constant(0, 32);
             var before = mode == "Reload" ? Read(address, 32) : null;
-            var target = mode switch { "StructThis" or "StaticStruct" or "FrameStructThis" => instance, "FrameStructOut" or "FrameStructWide" or "FrameStructPartial" or "FrameStructCross" or "FrameStructValue" or "ArrayStruct" => takeStruct, "ReferenceArray" => takeObject,
+            var target = mode switch { "FrameOut" => takeOut, "StructThis" or "StaticStruct" or "FrameStructThis" or "FrameStructField" or "FrameStructClear" or "FrameStructPartialClear" => instance, "FrameStructOut" or "FrameStructWide" or "FrameStructPartial" or "FrameStructCross" or "FrameStructValue" or "ArrayStruct" => takeStruct, "ReferenceArray" => takeObject,
                 "NativeField" or "FrameNative" => takeNative, "FrameRefObject" => takeObject, "FrameFloat" => takeSingle, "FrameBool" => takeBoolean, "FrameOrdinary" => ordinary, "Mismatch" => wrong, "Pointer" => pointer, "Ordinary" => ordinary, _ => take };
             if (mode is "Store" or "FrameStore") statements.Add(new MemoryWrite(new(), mode == "Store" ? Add(root, bits.Offset) : Add(frame, -8), 64, address));
-            else if (mode == "Return") result = address;
-            else if (mode is "Arithmetic" or "FrameArithmetic" or "Compare" or "CompareConstant")
+            else if (mode is "Return" or "FrameReturn") result = address;
+            else if (mode is "Arithmetic" or "FrameArithmetic" or "FrameCompare" or "Compare" or "CompareConstant")
                 result = terms.Apply(new CoreOperator(mode is "Arithmetic" or "FrameArithmetic" ? CoreOperation.Xor : CoreOperation.Equal), mode is "Arithmetic" or "FrameArithmetic" ? 64 : 1,
                     address, mode == "Compare" ? terms.Apply(new CoreOperator(CoreOperation.SignExtend), 64, terms.Slice(index, 0, 32)) : terms.Constant(3, 64));
             else
@@ -1567,14 +1622,15 @@ internal static partial class LoweringChecks
                 statements.Add(new Call(new(), new ImageFunction(mode is "Runtime" or "FrameRuntime" ? 20UL : 10UL), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
                 if (mode == "Repeat") statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), address), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
             }
-            if (mode is "FrameMixed" or "FrameOverlap") statements.Add(new Call(new(), new ImageFunction(30), [new(new(SlotKind.Integer), Add(address, mode == "FrameOverlap" ? 2 : 0)), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+            if (mode is "FrameMixed" or "FrameMixedSameWidth" or "FrameOverlap") statements.Add(new Call(new(), new ImageFunction(30), [new(new(SlotKind.Integer), Add(address, mode == "FrameOverlap" ? 2 : 0)), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
+            if (mode == "FrameStructField") statements.Add(new Call(new(), new ImageFunction(30), [new(new(SlotKind.Integer), Add(address, 4)), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
             if (mode == "FrameUnrelated") statements.Add(new Call(new(), new ImageFunction(40), [new(new(SlotKind.Integer), terms.Constant(0, 64))], []));
-            if (mode is "FrameOut" or "FrameRef" or "FrameUnrelated") result = Read(address, 32);
+            if (mode is "FrameOut" or "FrameRef" or "FrameRefTry" or "FrameRefCatch" or "FrameSpill" or "FrameUnrelated") result = Read(address, 32);
             if (mode == "FrameRefObject") result = Read(Add(Read(address, 64), data.Offset), 32);
             if (mode == "FrameFloat") result = terms.Apply(new CoreOperator(CoreOperation.FloatEqual), 1, Read(address, 32), terms.Constant(0, 32));
             if (mode == "FrameBool") result = terms.Concat(Read(address, 8), terms.Constant(0, 24));
             if (mode == "FrameNative") result = Read(address, 64);
-            if (mode is "FrameStructThis" or "FrameStructOut") result = Read(Add(address, 4), 32);
+            if (mode is "FrameStructThis" or "FrameStructField" or "FrameStructClear" or "FrameStructPartialClear" or "FrameStructOut") result = Read(Add(address, 4), 32);
             if (mode == "FrameStructWide") result = terms.Slice(Read(address, 64), 32, 32);
             if (mode == "FrameStructCross") result = Read(Add(address, 2), 32);
             if (mode == "FrameStructValue") statements.Add(new Call(new(), new ImageFunction(40), [new(new(SlotKind.Integer), Read(address, 64)), new(new(SlotKind.Integer, 1), terms.Constant(0, 64))], []));
@@ -1588,13 +1644,37 @@ internal static partial class LoweringChecks
                     terms.Apply(new CoreOperator(CoreOperation.Add), 32, middleRead, Read(address, 32)));
             }
             if (mode == "Reload") result = terms.Apply(new CoreOperator(CoreOperation.Add), 32, before!, Read(address, 32));
+            if (mode is "FrameRefTry" or "FrameRefCatch")
+            {
+                var handler = new BlockIdentity(); var caught = new BlockIdentity();
+                var originalCall = statements.OfType<Call>().Single();
+                statements[statements.IndexOf(originalCall)] = originalCall with { Unwind = handler };
+                var exception = terms.Atom(new ExceptionAtom(handler), 64);
+                var selector = terms.Atom(new SelectorAtom(handler), 64);
+                builder.Blocks.Add(new(handler, [], [], new Jump(caught), new(exception, selector, [new(ClauseKind.CatchAll, [])])));
+                var beginId = new CallIdentity(); var payload = terms.Atom(new ResultAtom(beginId), 64);
+                var begin = new Call(beginId, new ImportedTarget(new("__cxa_begin_catch")), [new(new(SlotKind.Integer), exception)], [new(new(SlotKind.Integer), payload)]);
+                var capturedId = new ReadIdentity(); var captured = terms.Atom(new ResultAtom(capturedId), 64);
+                var cleanup = new Call(new(), new ImportedTarget(new("__cxa_end_catch")), [], []);
+                var caughtStatements = new List<Statement> { begin, new MemoryRead(capturedId, payload, 64, captured) };
+                Term returned = terms.Constant(9, 32);
+                if (mode == "FrameRefCatch")
+                {
+                    caughtStatements.Add(originalCall with { Identity = new CallIdentity() });
+                    var readId = new ReadIdentity(); returned = terms.Atom(new ResultAtom(readId), 32);
+                    caughtStatements.Add(new MemoryRead(readId, address, 32, returned));
+                }
+                caughtStatements.Add(cleanup);
+                builder.Blocks.Add(new(caught, [], [.. caughtStatements], new Return([new(new(SlotKind.Integer), returned)])));
+            }
             var output = result.Width < 64 ? terms.Concat(result, terms.Constant(0, 64 - result.Width)) : result;
             builder.Blocks.Add(new(block, [], statements.ToImmutableArray(), new Return([new(new(SlotKind.Integer), output)])));
-            var calls = new CallNamingQuery(binder, new AddressMap(target, wrong, mode == "FrameStructValue" ? consumeStruct : unrelated),
-                new NamingChecks.RuntimeMap(catalog.Functions.First(f => f.Operation.Name == "ThrowManaged" && f.Signature is not null)), catalog);
+            var calls = new CallNamingQuery(binder, new AddressMap(target, mode == "FrameStructField" ? take : mode == "FrameMixedSameWidth" ? takeSingle : wrong, mode == "FrameStructValue" ? consumeStruct : unrelated),
+                mode is "FrameRefTry" or "FrameRefCatch" ? new ExceptionRuntimeMap()
+                    : new NamingChecks.RuntimeMap(catalog.Functions.First(f => f.Operation.Name == "ThrowManaged" && f.Signature is not null)), catalog);
             var lowered = new IntegerLowering(builder.Freeze(), MethodRef.Open(entries[mode]), binder, types, calls: calls,
                 effects: new ManagedCallEffects(calls), spec: spec, names: facts).Run();
-            var code = mode switch { "FrameStructPartial" or "FrameStructCross" => "lowering.Frame.Struct", "FrameHeap" or "FrameRuntime" or "FrameOrdinary" or "FrameArithmetic" => "lowering.Frame.Use", "FrameMixed" or "FrameOverlap" or "FrameCross" => "lowering.Frame.Mixed", "FramePartial" => "lowering.Frame.Partial", "Interior" => "lowering.Address.Location",
+            var code = mode switch { "FrameStructPartialClear" => "lowering.Frame.Fill", "FrameStructPartial" or "FrameStructCross" => "lowering.Frame.Struct", "FrameHeap" or "FrameReturn" or "FrameRuntime" or "FrameOrdinary" or "FrameArithmetic" or "FrameCompare" => "lowering.Frame.Use", "FrameMixed" or "FrameMixedSameWidth" or "FrameOverlap" or "FrameCross" => "lowering.Frame.Mixed", "FramePartial" => "lowering.Frame.Partial", "Interior" => "lowering.Address.Location",
                 "Mismatch" or "Store" or "FrameStore" or "Return" or "Pointer" or "Ordinary" or "Arithmetic" or "Compare" or "CompareConstant" or "Runtime" => "lowering.Address.Use", _ => null };
             if (code is not null)
             { checks.True(lowered.Failure?.Reason.Code == code, mode + " 取址用途拒绝：" + lowered.Failure); continue; }
@@ -1624,7 +1704,7 @@ internal static partial class LoweringChecks
                     "两次按引用调用之间有无关调用时，三次读取各自在原调用之后物化");
             }
             if (mode == "FrameStructValue") checks.True(loweredStatements.OfType<ManagedCall>().Last().Invocation.Arguments[0].Type.Equals(structure), "结构体帧对象完整按值传出");
-            if (mode is "FrameOut" or "FrameRef" or "FrameUnrelated")
+            if (mode is "FrameOut" or "FrameRef" or "FrameSpill" or "FrameUnrelated")
             {
                 var storage = (LocalValue)((AddressValue)call.Invocation.Arguments[0]).Target;
                 var reload = loweredStatements.OfType<ManagedAssignment>().SingleOrDefault(a => a.Value == storage);
@@ -1634,6 +1714,50 @@ internal static partial class LoweringChecks
             var emitted = skeleton.Assemblies.SelectMany(a => a.MainModule.Types).SelectMany(t => t.Methods).Single(m => m.Name == mode);
             var expected = mode.StartsWith("Frame", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldloca : mode.StartsWith("Array", StringComparison.Ordinal) || mode == "ReferenceArray" ? Mono.Cecil.Cil.Code.Ldelema : mode.StartsWith("Static", StringComparison.Ordinal) ? Mono.Cecil.Cil.Code.Ldsflda : Mono.Cecil.Cil.Code.Ldflda;
             checks.True(emitted.Body.Instructions.Any(i => i.OpCode.Code == expected), mode + " 写出对应取址指令");
+            if (mode == "FrameStructField") checks.True(emitted.Body.Instructions.Any(i => i.OpCode.Code == Mono.Cecil.Cil.Code.Ldflda
+                && i.Operand is Mono.Cecil.FieldReference { Name: "Leaf", DeclaringType.FullName: "Inner", FieldType.FullName: "System.Int32" }), "结构体局部的字段用 ldflda 传给 ref 形参");
+        }
+        const string frameSource = """
+            public struct Inner {
+                public int Padding, Leaf;
+                public void Apply() { Leaf += 11; }
+            }
+            public class Owner {
+                public static void Take(ref int value) { value = value * 3 + 1; }
+                public static void TakeOut(out int value) { value = 29; }
+                public static int FrameRef(Owner owner, int input) { int value = 7; Take(ref value); return value; }
+                public static int FrameRefTry(Owner owner, int input) { int value = 7; try { Take(ref value); return value; } catch { return 9; } }
+                public static int FrameRefCatch(Owner owner, int input) { int value = 7; try { Take(ref value); return value; } catch { Take(ref value); return value; } }
+                public static int FrameSpill(Owner owner, int input) { int value = 7; Take(ref value); return value; }
+                public static int FrameOut(Owner owner, int input) { int value; TakeOut(out value); return value; }
+                public static int FrameStructThis(Owner owner, int input) { Inner value = default; value.Leaf = 7; value.Apply(); return value.Leaf; }
+                public static int FrameStructField(Owner owner, int input) { Inner value = default; value.Leaf = 7; value.Apply(); Take(ref value.Leaf); return value.Leaf; }
+                public static int FrameStructClear(Owner owner, int input) { Inner value = default; value.Leaf = 7; value = default; value.Apply(); return value.Leaf; }
+            }
+            """;
+        using var frameReference = new CompiledSource(frameSource);
+        using var frameTested = new CompiledSource(frameSource);
+        foreach (var mode in new[] { "FrameRef", "FrameRefTry", "FrameRefCatch", "FrameSpill", "FrameOut", "FrameStructThis", "FrameStructField", "FrameStructClear" })
+        {
+            var output = frameTested.Method("Owner", mode);
+            var emitted = skeleton.Method(entries[mode]);
+            if (!emitted.HasBody) continue;
+            output.Body = emitted.Body;
+            Mono.Cecil.TypeReference MapType(Mono.Cecil.TypeReference type) => type is Mono.Cecil.ByReferenceType byref
+                ? new Mono.Cecil.ByReferenceType(MapType(byref.ElementType))
+                : frameTested.Module.GetType(type.FullName) ?? frameTested.Module.ImportReference(System.Type.GetType(type.FullName, throwOnError: true)!);
+            foreach (var instruction in output.Body.Instructions)
+                if (instruction.Operand is Mono.Cecil.FieldReference field)
+                    instruction.Operand = frameTested.Module.GetType(field.DeclaringType.FullName).Fields.Single(f => f.Name == field.Name);
+                else if (instruction.Operand is Mono.Cecil.MethodReference called)
+                    instruction.Operand = frameTested.Module.GetType(called.DeclaringType.FullName).Methods.Single(m => m.Name == called.Name);
+                else if (instruction.Operand is Mono.Cecil.TypeReference type) instruction.Operand = MapType(type);
+                else if (instruction.Operand is Mono.Cecil.ParameterDefinition parameter) instruction.Operand = output.Parameters[parameter.Index];
+            foreach (var local in output.Body.Variables) local.VariableType = MapType(local.VariableType);
+            foreach (var handler in output.Body.ExceptionHandlers)
+                if (handler.CatchType is { } caught) handler.CatchType = MapType(caught);
+            var comparison = CilComparison.Compare(frameReference.Method("Owner", mode), output);
+            checks.True(comparison.Status == CilComparisonStatus.Match, mode + " 被调方经地址读写的执行对照：" + comparison);
         }
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
     }

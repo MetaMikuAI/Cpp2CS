@@ -41,6 +41,8 @@ public sealed class FrameAddressUseQuery(StateQueries state) : Query<Term, Immut
 
 /// <summary>调用身份已由绑定与分派确定；帧认定只消费不可变的签名证据。</summary>
 public sealed record FrameCall(CallIdentity Identity, MethodRef Method, BoundCall Binding, Term? Receiver = null);
+public sealed record FramePointee(CallIdentity Identity, BoundSource Source, TypeRef Type);
+public sealed record FrameClear(CallIdentity Identity, BoundSource Address, int Length);
 public sealed record FrameObject(Location Storage, TypeRef Type, Term Address)
 {
     public ImmutableArray<ValueProjection> Fields { get; init; } = [];
@@ -52,6 +54,8 @@ public sealed record FrameObjects(ImmutableArray<FrameObject> Objects, Immutable
     public ImmutableDictionary<CallIdentity, FrameObject> Results { get; init; } = ImmutableDictionary<CallIdentity, FrameObject>.Empty;
     public ImmutableDictionary<WriteIdentity, FrameCopy> Copies { get; init; } = ImmutableDictionary<WriteIdentity, FrameCopy>.Empty;
     public ImmutableHashSet<WriteIdentity> CopyRemainders { get; init; } = [];
+    public ImmutableHashSet<WriteIdentity> AddressSpills { get; init; } = [];
+    public ImmutableDictionary<CallIdentity, FrameObject> Clears { get; init; } = ImmutableDictionary<CallIdentity, FrameObject>.Empty;
     public LocationResult Locate(Location location)
     {
         if (location.Offset is not { } offset) return new(ManagedLocationKind.NotManaged, []);
@@ -70,7 +74,8 @@ public sealed record FrameObjects(ImmutableArray<FrameObject> Objects, Immutable
 
 /// <summary>取址用途、类型和直接访问的边界共同认定函数内可寻址的托管帧对象。</summary>
 public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, ImmutableArray<FrameCall> calls,
-    MethodBinder binder, SignatureBinding signature, MethodRef method, FrameAddressUseQuery addressUses) : Query<int, FrameObjects>
+    MethodBinder binder, SignatureBinding signature, MethodRef method, FrameAddressUseQuery addressUses,
+    ImmutableArray<FramePointee> pointees = default, ImmutableArray<FrameClear> clears = default) : Query<int, FrameObjects>
 {
     private readonly BoundSourceQuery sources = new(state);
     public override Outcome<FrameObjects> Compute(QueryContext c, int key)
@@ -79,6 +84,8 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
         var uses = new List<(Term Term, TypeRef? Element)>();
         var buffers = new List<(CallIdentity Call, Point Point, Term Pointer, TypeRef Type, int Length, bool Write)>();
         var indirectInputs = new HashSet<CallIdentity>();
+        var spills = new Dictionary<WriteIdentity, Location>();
+        var clearBuffers = new List<(FrameClear Clear, Term Pointer)>();
         var index = c.Get(state.Index, 0); if (!index.IsSuccess) return index.Propagate<FrameObjects>();
         foreach (var block in c.Snapshot.Blocks)
         {
@@ -87,8 +94,33 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                 var point = new Point(block.Identity, i);
                 switch (block.Statements[i])
                 {
-                    case MemoryWrite write: uses.Add((write.Value, null)); break;
+                    case MemoryWrite write:
+                        if (write.Width == c.Snapshot.AddressWidth && write.Value.Width == c.Snapshot.AddressWidth)
+                        {
+                            var value = c.Get(state.Resolve, write.Value);
+                            if (value.IsSuccess && c.Get(state.Locations, new(value.Value, 8)) is { IsSuccess: true, Value: { Region: Region.Frame, Offset: not null } })
+                            {
+                                var destination = c.Get(state.Resolve, write.Address);
+                                if (destination.IsSuccess
+                                    && c.Get(state.Locations, new(destination.Value, write.Width)) is { IsSuccess: true, Value: { Region: Region.Frame, Offset: not null } storage })
+                                { spills.Add(write.Identity, storage); break; }
+                            }
+                        }
+                        uses.Add((write.Value, null)); break;
                     case Call call:
+                        if (!clears.IsDefault && clears.SingleOrDefault(p => p.Identity == call.Identity) is { } clear)
+                        {
+                            var pointer = c.Get(sources, new(clear.Address, point));
+                            if (!pointer.IsSuccess) return pointer.Propagate<FrameObjects>();
+                            clearBuffers.Add((clear, pointer.Value));
+                        }
+                        if (!pointees.IsDefault && pointees.SingleOrDefault(p => p.Identity == call.Identity) is { } pointee)
+                        {
+                            var pointer = c.Get(sources, new(pointee.Source, point));
+                            if (!pointer.IsSuccess) return pointer.Propagate<FrameObjects>();
+                            uses.Add((pointer.Value, pointee.Type));
+                            buffers.Add((call.Identity, point, pointer.Value, pointee.Type, types.Size(pointee.Type), false));
+                        }
                         var evidence = calls.SingleOrDefault(v => v.Identity == call.Identity);
                         if (evidence is null) continue;
                         var binding = evidence.Binding; var target = evidence.Method;
@@ -157,7 +189,10 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                 return Failure("Mixed", "同一帧起点被取作不同类型：" + previous.Type + "、" + element);
             objects[offset] = item;
         }
-        if (objects.Count == 0) return Outcome<FrameObjects>.Success(new([], ImmutableDictionary<StableIdentity, FrameAccess>.Empty));
+        if (objects.Count == 0)
+            return clearBuffers.Count > 0 ? Failure("Fill", "整帧清零缺少明确的托管类型见证。")
+                : Outcome<FrameObjects>.Success(new([], ImmutableDictionary<StableIdentity, FrameAccess>.Empty)
+                    { AddressSpills = spills.Keys.ToImmutableHashSet() });
         foreach (var (term, element) in uses)
         {
             var resolved = c.Get(state.Resolve, term); if (!resolved.IsSuccess) return resolved.Propagate<FrameObjects>();
@@ -168,6 +203,14 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                     return Failure("Use", "帧地址用于写入内存、普通实参或运算：" + string.Join("、", objects.Values.Select(o => o.Type).Distinct()));
         }
         var list = objects.Values.OrderBy(v => v.Storage.Offset).ToImmutableArray();
+        // 地址溢出只在私有的未定型槽里转送；写进托管对象内容仍是地址逃逸。
+        foreach (var spill in spills.Values)
+            foreach (var item in list)
+            {
+                var overlap = c.Get(state.Alias, new(spill, item.Storage));
+                if (!overlap.IsSuccess) return overlap.Propagate<FrameObjects>();
+                if (overlap.Value.Kind != AliasKind.Disjoint) return Failure("Use", "帧地址溢出覆盖已认定的帧对象：" + item.Type);
+            }
         // 入口栈实参已有调用方给定的初值，不能当成零初始化局部。
         if (c.Snapshot.IncomingArgumentArea is { } incoming)
             foreach (var piece in signature.Slots.Parameters.SelectMany(p => p.Pieces.Concat(p.CopyAddress is { } copy ? [copy] : []))
@@ -183,13 +226,32 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                     if (overlap.Value.Kind != AliasKind.Disjoint) return Failure("Use", "帧对象与入口栈实参重叠，缺少局部初值证明：" + item.Type);
                 }
             }
+        var fieldsOfObjects = new HashSet<FrameObject>();
         for (int i = 0; i < list.Length; i++)
             for (int j = 0; j < i; j++)
             {
                 var overlap = c.Get(state.Alias, new(list[i].Storage, list[j].Storage));
                 if (!overlap.IsSuccess) return overlap.Propagate<FrameObjects>();
-                if (overlap.Value.Kind != AliasKind.Disjoint) return Failure("Mixed", "已取址的帧对象范围相交：" + list[i].Type + "、" + list[j].Type);
+                if (overlap.Value.Kind == AliasKind.Disjoint) continue;
+                // 布局证明的完整字段属于外层局部；不能把相邻或部分相交的槽当作字段。
+                if (overlap.Value.Kind == AliasKind.Overlap && overlap.Value.LeftLow == 0 && overlap.Value.Width == list[i].Storage.Width
+                    && types.Kind(list[i].Type) != TypeKind.Struct && list[j].Type is DefinitionRef parent
+                    && types.Project(parent, overlap.Value.RightLow, overlap.Value.Width) is { } field
+                    && field.Bit == overlap.Value.RightLow && field.Width == overlap.Value.Width && field.Type.Equals(list[i].Type))
+                { fieldsOfObjects.Add(list[i]); continue; }
+                return Failure("Mixed", "已取址的帧对象范围相交：" + list[i].Type + "、" + list[j].Type);
             }
+        list = list.Where(item => !fieldsOfObjects.Contains(item)).ToImmutableArray();
+        var cleared = ImmutableDictionary.CreateBuilder<CallIdentity, FrameObject>();
+        foreach (var (clear, pointer) in clearBuffers)
+        {
+            var resolved = c.Get(state.Resolve, pointer); if (!resolved.IsSuccess) return resolved.Propagate<FrameObjects>();
+            var storage = c.Get(state.Locations, new(resolved.Value, clear.Length * 8));
+            if (!storage.IsSuccess) return storage.Propagate<FrameObjects>();
+            var item = list.SingleOrDefault(o => o.Storage == storage.Value);
+            if (item is null) return Failure("Fill", "清零范围必须恰好覆盖一个已认定的帧对象。");
+            cleared.Add(clear.Identity, item);
+        }
         var results = ImmutableDictionary.CreateBuilder<CallIdentity, FrameObject>();
         foreach (var buffer in buffers)
         {
@@ -312,7 +374,8 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                 else if (first.Width == access.Object.Storage.Width && access.Location.Offset == access.Object.Storage.Offset)
                     copies.Add(first.Identity, new(access.Object, new TermSource(first.Value), new(block.Identity, i)));
             }
-        return Outcome<FrameObjects>.Success(new(list, accesses.ToImmutable()) { Results = results.ToImmutable(), Copies = copies.ToImmutable(), CopyRemainders = remainders.ToImmutable() });
+        return Outcome<FrameObjects>.Success(new(list, accesses.ToImmutable()) { Results = results.ToImmutable(), Copies = copies.ToImmutable(),
+            CopyRemainders = remainders.ToImmutable(), AddressSpills = spills.Keys.ToImmutableHashSet(), Clears = cleared.ToImmutable() });
     }
     private static Outcome<FrameObjects> Failure(string code, string message) => Outcome<FrameObjects>.Failure(new("lowering.Frame." + code, message));
     private static Outcome<FrameObjects> WideFailure(int low, int width, string message) =>

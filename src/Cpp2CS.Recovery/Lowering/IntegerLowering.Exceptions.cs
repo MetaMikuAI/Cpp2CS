@@ -51,7 +51,14 @@ public sealed partial class IntegerLowering
         }
         foreach (var clause in exceptions.Regions.SelectMany(r => r.Clauses).Where(clause => clause.Finally is null))
             caughtLocals.Add(clause, new(new(nextLocal++), clause.Type, types.PointerSize * 8));
-        ordinaryView = new(context, valueNames, locations!, dispatch!);
+        PrepareExceptionViews();
+    }
+
+    private void PrepareExceptionViews()
+    {
+        if (exceptions is null) return;
+        ordinaryView = new(context, valueNames!, locations!, dispatch!);
+        exceptionViews.Clear();
         var views = new List<(ExceptionClausePlan[] Clauses, ExceptionView View)>();
         foreach (var block in function.Blocks)
         {
@@ -61,8 +68,9 @@ public sealed partial class IntegerLowering
             if (existing is not null) { exceptionViews.Add(block.Identity, existing); continue; }
             var refined = clauses.ToDictionary(clause => clause.Source, clause => clause.Type);
             var naming = ordinaryView.Names.WithCaughtTypes(refined);
-            var located = new ManagedLocationQuery(state, naming, types.Layouts, spec);
-            var view = new ExceptionView(located.CreateContext(function), naming, located, new(state, calls, naming, located, binder, spec));
+            var located = new ManagedLocationQuery(state, naming, types.Layouts, spec!, frameObjects);
+            var view = new ExceptionView(located.CreateContext(function), naming, located,
+                new(state, calls!, naming, located, binder, spec!, types.Layouts as Cpp2CS.Recovery.Binding.GenericWitness));
             exceptionViews.Add(block.Identity, view); views.Add((clauses, view));
         }
     }

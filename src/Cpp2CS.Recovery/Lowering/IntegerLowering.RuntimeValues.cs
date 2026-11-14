@@ -60,13 +60,15 @@ public sealed partial class IntegerLowering
         return new ManagedAssignment(position, definition.Local, value);
     }
 
-    private TypeRef? BoxedScalar(TypeRef type, string operation)
+    private TypeRef? BoxedScalar(TypeRef type, string operation, bool structure = false)
     {
         if (Opaque(type) && types.Layouts is GenericWitness generic && generic.Knows(type)
             && (IntegerType(generic.Close(type)) || IsFloat(generic.Close(type))
                 || ManagedTypes.PrimitiveName(generic.Close(type)) is "IntPtr" or "UIntPtr")) return type;
         if (type is DefinitionRef { Definition: { Namespace: "System", Name: "Nullable`1" } })
             return Fail<TypeRef>(LoweringFailureKind.RuntimeCall, "可空类型的装拆箱尚未下降", code: "lowering." + operation + ".Nullable");
+        if (structure && type is DefinitionRef value && types.Kind(type) == TypeKind.Struct && !GenericStruct(type)
+            && types.Size(type) > 0 && types.Projections(value).Any()) return type;
         var storage = ManagedTypes.Underlying(type);
         if ((!IntegerType(storage) && !IsFloat(storage)) || types.Size(type) is < 1 or > 8)
             return Fail<TypeRef>(LoweringFailureKind.RuntimeCall, "装拆箱类型不是受支持的基元或枚举", code: "lowering." + operation + ".Struct");
@@ -76,7 +78,7 @@ public sealed partial class IntegerLowering
     private void PrepareBox(Call call, ClassifiedCall c)
     {
         var type = RuntimeClass(c, "lowering.Box.Class");
-        if (type is null || BoxedScalar(type, "Box") is not { } storage) return;
+        if (type is null || BoxedScalar(type, "Box", structure: true) is not { } storage) return;
         if (c.Inputs?.GetValueOrDefault("data") is not { } data || c.Result?.Source is not TermSource result)
         { Fail<object>(LoweringFailureKind.RuntimeCall, "装箱的数据地址或结果没有绑定", code: "lowering.Box.Binding"); return; }
         var local = new LocalValue(new(nextLocal++), types.Object, types.PointerSize * 8);
@@ -96,6 +98,12 @@ public sealed partial class IntegerLowering
         var location = context.Get(state.Locations, new(address.Value, width));
         if (!location.IsSuccess || location.Value.Region != Region.Frame || location.Value.Offset is null)
             return Fail<ManagedStatement>(LoweringFailureKind.RuntimeCall, "装箱数据没有确定的帧位置", location.Why, "lowering.Box.Address");
+        if (types.Kind(definition.Target) == TypeKind.Struct)
+        {
+            var copied = StructValue(new IndirectSource(new TermSource(address.Value), width / 8), definition.Target, point);
+            return copied is null ? null : new ManagedAssignment(position, definition.Local,
+                new BoxValue(copied, definition.Target, types.Object, types.PointerSize * 8));
+        }
         var contents = context.Get(state.ValueAt, new(point, location.Value));
         if (!contents.IsSuccess) return Fail<ManagedStatement>(LoweringFailureKind.State, "装箱数据在调用点不可用", contents.Why);
         var value = Value(contents.Value, IsFloat(definition.Storage));

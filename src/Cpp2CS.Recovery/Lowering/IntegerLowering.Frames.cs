@@ -4,6 +4,8 @@ using Cpp2CS.Model;
 using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Locations;
+using Cpp2CS.Recovery.Binding;
+using Cpp2CS.Recovery.Naming;
 
 namespace Cpp2CS.Recovery.Lowering;
 
@@ -53,10 +55,40 @@ public sealed partial class IntegerLowering
     private FrameObjects? frameObjects;
     private readonly FrameAddressUseQuery frameAddressUses;
     private readonly Dictionary<FrameObject, LocalValue> frameLocals = [];
+    private readonly Dictionary<CallIdentity, FrameClear> frameClears = [];
+
+    private bool PrepareFrameClear(Call call, ClassifiedCall classified, Point point)
+    {
+        if (classified.Inputs?.GetValueOrDefault("destination")?.Source is not { } destination
+            || classified.Inputs.GetValueOrDefault("value")?.Source is not { } fill
+            || classified.Inputs.GetValueOrDefault("length")?.Source is not { } length) return false;
+        var pointer = context.Get(boundSources, new(destination, point));
+        var value = context.Get(boundSources, new(fill, point));
+        var size = context.Get(boundSources, new(length, point));
+        if (!pointer.IsSuccess || !value.IsSuccess || !size.IsSuccess) return false;
+        var address = context.Get(state.Resolve, pointer.Value);
+        var bits = context.Get(state.Resolve, value.Value);
+        var count = context.Get(state.Resolve, size.Value);
+        if (!address.IsSuccess || !bits.IsSuccess || bits.Value.ConstantValue != 0 || !count.IsSuccess
+            || count.Value.ConstantValue is not { } bytes || bytes <= 0 || bytes > int.MaxValue / 8
+            || context.Get(state.Locations, new(address.Value, 8)) is not { IsSuccess: true, Value: { Region: Region.Frame, Offset: not null } }) return false;
+        frameClears.Add(call.Identity, new(call.Identity, destination, (int)bytes));
+        return true;
+    }
+
+    private ManagedStatement? FrameClearStatement(Call call)
+    {
+        if (frameObjects is not { } objects || !objects.Clears.TryGetValue(call.Identity, out var item)) return null;
+        ManagedValue value = types.Kind(item.Type) == TypeKind.Struct ? new ComposedValue(item.Type, [])
+            : new ConstantValue(0, item.Type, types.ValueWidth(item.Type));
+        return new ManagedAssignment(position, FrameLocal(item), value);
+    }
     private void PrepareFrameObjects()
     {
         var query = new FrameObjectQuery(state, types, [.. callDefinitions.Select(p =>
-            new FrameCall(p.Key, p.Value.Method, p.Value.Binding, p.Value.Receiver))], binder, signature, method, frameAddressUses);
+            new FrameCall(p.Key, p.Value.Method, p.Value.Binding, p.Value.Receiver))], binder, signature, method, frameAddressUses,
+            [.. boxes.Where(p => types.Kind(p.Value.Target) == TypeKind.Struct && p.Value.Data.Source is not null)
+                .Select(p => new FramePointee(p.Key, p.Value.Data.Source!, p.Value.Target))], [.. frameClears.Values]);
         var answer = context.Get(query, 0);
         if (!answer.IsSuccess)
         { Fail<object>(LoweringFailureKind.UnsupportedType, answer.Why!.Message, answer.Why.Cause, answer.Why.Code); return; }
@@ -64,11 +96,15 @@ public sealed partial class IntegerLowering
         if (!frameObjects.Objects.IsEmpty && spec is not null && calls is not null)
         {
             // 新查询实例消费固定的帧认定结果；不改变旧上下文里已缓存的位置或类型。
-            var naming = new Cpp2CS.Recovery.Naming.ValueNamingQuery(state, calls, names, spec, binder, signature, rgctx, types.Layouts as Cpp2CS.Recovery.Binding.GenericWitness);
+            var naming = new Cpp2CS.Recovery.Naming.ValueNamingQuery(state, calls, names, spec, binder, signature, rgctx,
+                types.Layouts as Cpp2CS.Recovery.Binding.GenericWitness, types.Object, stringType: types.String);
             valueNames = naming;
             locations = new(state, naming, types.Layouts, spec, frameObjects);
             dispatch = new(state, calls, naming, locations, binder, spec, types.Layouts as Cpp2CS.Recovery.Binding.GenericWitness);
             context = locations.CreateContext(function);
+            // 异常视图也消费同一份帧认定；切换处理区域不能退回未认定帧对象的位置查询。
+            PrepareExceptionViews();
+            SelectExceptionView(currentNativeBlock ?? function.Entry);
         }
     }
     private bool FrameContains(Location location) => frameObjects?.Accesses.Values.Any(a => a.Location == location) == true;
@@ -87,6 +123,7 @@ public sealed partial class IntegerLowering
     }
     private IReadOnlyList<ManagedStatement> LowerStores(MemoryWrite write, Point point)
     {
+        if (frameObjects?.AddressSpills.Contains(write.Identity) == true) return [];
         if (frameObjects is null || !frameObjects.Accesses.TryGetValue(write.Identity, out var access))
         {
             var resolved = context.Get(state.Resolve, write.Address);

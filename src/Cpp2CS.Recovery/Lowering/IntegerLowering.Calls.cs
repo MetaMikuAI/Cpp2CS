@@ -55,6 +55,7 @@ public sealed partial class IntegerLowering
         if (c.Operation?.Name == "StackProtectionFailure")
         { Fail<object>(LoweringFailureKind.SystemCall, "栈保护失败臂尚未证明不可达",
             new("structure.stack-protection.comparison", "尚无帧保护副本与同一线程或全局保护源的完整比较凭据；失败臂的其他事件或结局见结构原因链")); return; }
+        if (c.Operation?.Name == "MemoryFill" && PrepareFrameClear(call, c, point)) return;
         if (c.Kind is CallKind.Runtime or CallKind.System && c.Binding is { } external)
             for (int i = 0; i < external.Arguments.Length; i++)
             {
@@ -186,6 +187,7 @@ public sealed partial class IntegerLowering
 
     private ManagedStatement? LowerCall(Call call, Point point)
     {
+        if (FrameClearStatement(call) is { } cleared) return cleared;
         MaterializeAccessorProgram();
         if (accessorCallCalls.TryGetValue(call.Identity, out var recovered)) return recovered;
         if (throws.TryGetValue(call.Identity, out var constructor)) return new ManagedThrow(position, new NewObjectValue(constructor, [], types.PointerSize * 8));
