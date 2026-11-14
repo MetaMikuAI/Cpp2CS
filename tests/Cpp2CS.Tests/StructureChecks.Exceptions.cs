@@ -51,7 +51,14 @@ internal static partial class StructureChecks
             // 捕获出口不使用合流，避免普通流进入该块时的无定义使用。
             f.Blocks.Add(new(caught, [], [], new Return([])));
             f.Blocks.Add(new(resume, [], [], new ResumeUnwind(ex.Result)));
-            var input = f.Freeze(); checks.True(ExitChecker.Check(input).IsValid, mode + " 归一输入契约");
+            var input = f.Freeze();
+            if (mode is "Merge" or "Clauses" or "Normal")
+            {
+                var projected = ExceptionSelectors.Run(input,spec);
+                checks.True(mode == "Merge" ? projected.Folded.Count == 3 : projected.Folded.Count == 0,
+                    "逐入边投影仅折叠全部匹配同一包装选择值的测试");
+            }
+            checks.True(ExitChecker.Check(input).IsValid, mode + " 归一输入契约");
             var normalized = ExceptionEntries.Run(input);
             checks.True(ExitChecker.Check(normalized.Function).IsValid, mode + " 归一输出契约");
             bool valid = mode is "Merge" or "SelectorUse" or "OtherType";

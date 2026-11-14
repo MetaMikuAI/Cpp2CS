@@ -144,7 +144,42 @@ internal static class ManagedExecutionChecks
         }
         var empty = Constructor("EmptyConstructor", false);
         var effect = Constructor("FieldConstructor", true);
+        var receiver = new Mono.Cecil.TypeDefinition("", "GetterReceiver", Mono.Cecil.TypeAttributes.Public,core.TypeSystem.Object); core.Types.Add(receiver);
+        var value = new Mono.Cecil.FieldDefinition("Value",Mono.Cecil.FieldAttributes.Public,core.TypeSystem.Int32); receiver.Fields.Add(value);
+        Mono.Cecil.MethodDefinition Getter(string name, bool store, bool synchronized = false)
+        {
+            var getter = new Mono.Cecil.MethodDefinition(name,Mono.Cecil.MethodAttributes.Public,core.TypeSystem.Int32);
+            receiver.Methods.Add(getter);
+            if (synchronized) getter.ImplAttributes |= Mono.Cecil.MethodImplAttributes.Synchronized;
+            var il = getter.Body.GetILProcessor();
+            if (store) { il.Emit(Mono.Cecil.Cil.OpCodes.Ldarg_0); il.Emit(Mono.Cecil.Cil.OpCodes.Ldc_I4_1); il.Emit(Mono.Cecil.Cil.OpCodes.Stfld,value); }
+            il.Emit(Mono.Cecil.Cil.OpCodes.Ldarg_0); il.Emit(Mono.Cecil.Cil.OpCodes.Ldfld,value); il.Emit(Mono.Cecil.Cil.OpCodes.Ret);
+            return getter;
+        }
+        var pure = Getter("Read",false); var writing = Getter("WriteRead",true); var locking = Getter("LockedRead",false,true);
+        var calling = Getter("CallRead",false); calling.Body.GetILProcessor().InsertBefore(calling.Body.Instructions[0],
+            Mono.Cecil.Cil.Instruction.Create(Mono.Cecil.Cil.OpCodes.Call,new Mono.Cecil.MethodReference("Observe",core.TypeSystem.Void,core.TypeSystem.Object)));
+        Mono.Cecil.MethodDefinition Order(string name, bool first)
+        {
+            var method = new Mono.Cecil.MethodDefinition(name,Mono.Cecil.MethodAttributes.Public | Mono.Cecil.MethodAttributes.Static,source.Module.TypeSystem.Int32);
+            source.Module.Types.Single(t=>t.Name=="Holder").Methods.Add(method);
+            method.Parameters.Add(new(source.Module.ImportReference(receiver))); method.Parameters.Add(new(source.Module.TypeSystem.Object));
+            method.Body.InitLocals = true; method.Body.Variables.Add(new(source.Module.TypeSystem.Int32));
+            var il = method.Body.GetILProcessor();
+            void Read() { il.Emit(Mono.Cecil.Cil.OpCodes.Ldarg_0); il.Emit(Mono.Cecil.Cil.OpCodes.Callvirt,source.Module.ImportReference(pure)); il.Emit(Mono.Cecil.Cil.OpCodes.Stloc_0); }
+            if (first) Read();
+            var next = Mono.Cecil.Cil.Instruction.Create(Mono.Cecil.Cil.OpCodes.Nop);
+            il.Emit(Mono.Cecil.Cil.OpCodes.Ldarg_1); il.Emit(Mono.Cecil.Cil.OpCodes.Brtrue,next); il.Emit(Mono.Cecil.Cil.OpCodes.Ldnull); il.Emit(Mono.Cecil.Cil.OpCodes.Throw); il.Append(next);
+            if (!first) Read();
+            il.Emit(Mono.Cecil.Cil.OpCodes.Ldloc_0); il.Emit(Mono.Cecil.Cil.OpCodes.Ret);
+            return method;
+        }
+        var before = Order("Before",true); var after = Order("After",false);
         var model = new CecilModel(source.Module);
+        checks.True(model.Body(model.Method(pure),source.Module)==pure,"匹配核心库的单字段 getter 按参考体执行");
+        checks.True(model.Body(model.Method(writing),source.Module) is null && model.Body(model.Method(calling),source.Module) is null
+            && model.Body(model.Method(locking),source.Module) is null,"写入、调用与同步 getter 不作为纯字段读取");
+        checks.True(CilComparison.Compare(before,after).Status==CilComparisonStatus.Match,"纯字段读取跨过其他对象判空不增加调用事件");
         checks.True(model.Body(model.Method(empty), source.Module) == empty, "匹配核心库的空构造按参考体透明执行");
         checks.True(model.Body(model.Method(effect), source.Module) is null, "带字段写入的外部构造保持不透明");
     }

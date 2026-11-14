@@ -1,6 +1,7 @@
 using System.Numerics;
 using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Kernel.State;
+using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Runtime;
 
@@ -27,6 +28,24 @@ public sealed partial class ValueNamingQuery
         var x = FixedValue(c, a.Value); if (!x.IsSuccess) return x.Propagate<bool>();
         var y = FixedValue(c, b.Value); if (!y.IsSuccess) return y.Propagate<bool>();
         return Outcome<bool>.Success(x.Value is not null && x.Value == y.Value);
+    }
+
+    /// <summary>托管捕获对象非空；其空测试的组合仍由项的规范化求值。</summary>
+    public Outcome<Term> KnownCondition(QueryContext c, Term condition)
+    {
+        var resolved = c.Get(state.Resolve, condition); if (!resolved.IsSuccess) return resolved;
+        var mapped = new Dictionary<Term, Term>();
+        Term Map(Term term)
+        {
+            if (mapped.TryGetValue(term, out var known)) return known;
+            if (term.Operator is CoreOperator { Operation: CoreOperation.Equal or CoreOperation.NotEqual } op)
+                for (int i = 0; i < 2; i++)
+                    if (term.Operands[1 - i].ConstantValue == 0
+                        && c.Get(this, term.Operands[i]) is { IsSuccess: true, Value.Name: CaughtExceptionName })
+                        return mapped[term] = term.Table.Constant(op.Operation == CoreOperation.Equal ? 0 : 1, 1);
+            return mapped[term] = SnapshotRewrite.Rebuild(term, Map);
+        }
+        return Outcome<Term>.Success(Map(resolved.Value));
     }
 
     private RuntimeField? SpecificationField(FieldName field) => field.Index is null &&

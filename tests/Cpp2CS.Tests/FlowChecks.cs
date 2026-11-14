@@ -32,6 +32,12 @@ internal static class FlowChecks
             && exception.Get(q.PointDominates, new(new(x,0),new(z,0))).Value
             && !exception.Get(q.PointDominates, new(new(x,1),new(z,0))).Value,
             "展开边参与可达与支配，调用后程序点不支配处理入口");
+        var normal = new FlowQueries(includeUnwind: false);
+        a.True(!exception.Get(normal.Graph, 0).Value.Reachable.Contains(z)
+            && exception.Get(normal.PostDominates, new(y,x)).Value, "正常控制流视图单独计算可达与支配");
+        var escaping = Context(new(x,[],[call with { Unwind = null }],new Jump(y)),new(y,[],[],new Return([])));
+        a.True(escaping.Get(normal.PostDominates,new(y,x)).Value && !escaping.Get(q.PostDominates,new(y,x)).Value,
+            "正常控制流视图不把调用的异常离开计作正常出口");
         return a.Finish("控制流查询");
     }
 }

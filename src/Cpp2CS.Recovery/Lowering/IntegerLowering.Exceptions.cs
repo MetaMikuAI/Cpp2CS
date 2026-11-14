@@ -13,6 +13,9 @@ namespace Cpp2CS.Recovery.Lowering;
 public sealed partial class IntegerLowering
 {
     private ExceptionPlan? exceptions;
+    private FinallyPlan[] finallyRegions = [];
+    private readonly Dictionary<Term, Term> exceptionAliases = [];
+    private readonly Dictionary<(BlockIdentity From, BlockIdentity To), BlockIdentity> exceptionTargets = [];
     private BlockIdentity? currentNativeBlock;
     private readonly Dictionary<ExceptionClausePlan, LocalValue> caughtLocals = [];
     private readonly Dictionary<CallIdentity, List<ManagedCopy>> arrivals = [];
@@ -40,13 +43,19 @@ public sealed partial class IntegerLowering
         if (!answer.IsSuccess)
         { Fail<object>(LoweringFailureKind.Exception, answer.Why!.Message, answer.Why.Cause, answer.Why.Code); return; }
         exceptions = answer.Value;
-        foreach (var clause in exceptions.Regions.SelectMany(r => r.Clauses))
+        finallyRegions = exceptions.Regions.SelectMany(r => r.Clauses).Where(clause => clause.Finally is not null).Select(clause => clause.Finally!).ToArray();
+        foreach (var plan in finallyRegions)
+        {
+            foreach (var (value, alias) in plan.Values) exceptionAliases.Add(value, alias);
+            foreach (var from in plan.Arrivals) exceptionTargets.Add((from, plan.Entry), plan.LeaveTargets.GetValueOrDefault(from) ?? plan.Continuation);
+        }
+        foreach (var clause in exceptions.Regions.SelectMany(r => r.Clauses).Where(clause => clause.Finally is null))
             caughtLocals.Add(clause, new(new(nextLocal++), clause.Type, types.PointerSize * 8));
         ordinaryView = new(context, valueNames, locations!, dispatch!);
         var views = new List<(ExceptionClausePlan[] Clauses, ExceptionView View)>();
         foreach (var block in function.Blocks)
         {
-            var clauses = exceptions.Regions.SelectMany(r => r.Clauses).Where(clause => clause.Body.Contains(block.Identity)).ToArray();
+            var clauses = exceptions.Regions.SelectMany(r => r.Clauses).Where(clause => clause.Finally is null && clause.Body.Contains(block.Identity)).ToArray();
             if (clauses.Length == 0) continue;
             var existing = views.FirstOrDefault(v => v.Clauses.SequenceEqual(clauses)).View;
             if (existing is not null) { exceptionViews.Add(block.Identity, existing); continue; }
@@ -96,13 +105,29 @@ public sealed partial class IntegerLowering
         var byAddress = blocks.ToDictionary(block => block.Address);
         return body with
         {
-            Blocks = order.Select(id => byAddress[id]).ToArray(),
+            Blocks = order.Select(id =>
+            {
+                var block = byAddress[id];
+                var plan = finallyRegions.FirstOrDefault(plan => labels[plan.Completion] == id);
+                if (plan is null) return block;
+                var edge = ((ManagedJump)block.Statements[^1]).Edge;
+                var temps = edge.Copies.Select(copy => new LocalValue(new(nextLocal++), copy.Target.Type, copy.Target.Width)).ToArray();
+                return block with { Statements = block.Statements.SkipLast(1)
+                    .Concat(edge.Copies.Select((copy, i) => (ManagedStatement)new ManagedAssignment(0, temps[i], copy.Value)))
+                    .Concat(edge.Copies.Select((copy, i) => (ManagedStatement)new ManagedAssignment(0, copy.Target, temps[i])))
+                    .Append(new ManagedEndFault(0)).ToArray() };
+            }).ToArray(),
             Regions = exceptions.Regions.SelectMany(r => r.Clauses.Select(clause => new ManagedRegion(
                 exceptions.Order.Where(r.Try.Contains).Select(id => labels[id]).ToArray(), labels[clause.Entry],
-                exceptions.Order.Where(clause.Body.Contains).Select(id => labels[id]).ToArray(), caughtLocals[clause], ManagedRegionKind.Catch)
-                { CatchType = clause.Type })).ToArray(),
+                exceptions.Order.Where(clause.Body.Contains).Select(id => labels[id]).ToArray(), clause.Finally is null ? caughtLocals[clause] : null, clause.Finally is null ? ManagedRegionKind.Catch : ManagedRegionKind.Finally)
+                { CatchType = clause.Finally is null ? clause.Type : null })).ToArray(),
         };
     }
+
+    private Term? ExceptionAlias(Term value) => exceptionAliases.GetValueOrDefault(value);
+
+    private BlockIdentity ExceptionTarget(BlockIdentity from, BlockIdentity target) =>
+        exceptionTargets.GetValueOrDefault((from, target)) ?? target;
 
     private bool ExceptionCopy(BlockIdentity from, BlockIdentity to, LocalValue local, ManagedValue value)
     {

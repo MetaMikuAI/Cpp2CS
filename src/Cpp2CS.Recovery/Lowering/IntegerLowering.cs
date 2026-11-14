@@ -220,6 +220,10 @@ public sealed partial class IntegerLowering
             var merge = pending[i];
             foreach (var input in merge.Inputs)
             {
+                if (finallyRegions.Any(plan => plan.Unreachable.Contains(input.Predecessor)
+                    || plan.Entry == merge.Target && plan.Removed.Contains(input.Predecessor)
+                    || plan.Branches.TryGetValue(input.Predecessor, out var chosen) && chosen != merge.Target
+                        && SnapshotRewrite.Targets(function.Blocks.Single(b => b.Identity == input.Predecessor).End).Contains(merge.Target))) continue;
                 position = function.Blocks.Single(b => b.Identity == input.Predecessor).Trace?.NativeAddress ?? 0;
                 SelectExceptionView(input.Predecessor);
                 var v = Part(input.Value, merge.Low, merge.Width, IsFloat(merge.Local.Type));
@@ -321,11 +325,15 @@ public sealed partial class IntegerLowering
     private ManagedEdge Edge(BlockIdentity from, BlockIdentity to)
     {
         if (!copies.TryGetValue((from, to), out var list)) copies.Add((from, to), list = []);
-        return new(labels[to], list);
+        return new(labels[ExceptionTarget(from, to)], list);
     }
 
     private ManagedStatement? End(Block b)
     {
+        var completion = finallyRegions.FirstOrDefault(plan => plan.Completion == b.Identity);
+        if (completion is not null) return new ManagedJump(position, Edge(b.Identity, completion.Continuation));
+        var decided = finallyRegions.Select(plan => plan.Branches.GetValueOrDefault(b.Identity)).FirstOrDefault(target => target is not null);
+        if (decided is not null) return new ManagedJump(position, Edge(b.Identity, decided));
         switch (b.End)
         {
             case Jump j: return new ManagedJump(position, Edge(b.Identity, j.Target));

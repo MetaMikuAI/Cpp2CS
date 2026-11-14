@@ -50,6 +50,7 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
     internal SignatureBinding? Entry => entry;
     internal ImmutableDictionary<ulong, FlagEvidence> Flags => facts.Flags;
     internal MethodBinder Binder => binder;
+    internal SignatureBinding? EntrySignature => entry;
     private readonly RuntimeInputKindsQuery inputKinds = new(state,calls);
     private readonly BoundSourceQuery entrySources = new(state);
     private ManagedLocationQuery? locations;

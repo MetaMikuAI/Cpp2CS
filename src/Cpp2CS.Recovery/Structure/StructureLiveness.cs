@@ -34,6 +34,12 @@ internal sealed class StructureLiveness
         }
     }
 
+    public bool OnlyAt(Term value, IReadOnlySet<(BlockIdentity Block, bool End)> allowed) =>
+        users.TryGetValue(value, out var points) && points.All(allowed.Contains);
+
+    public bool Inside(Term value, IReadOnlySet<BlockIdentity> members) =>
+        users.TryGetValue(value, out var points) && points.Any(p => members.Contains(p.Block));
+
     public bool Used(Term value) => users.ContainsKey(value);
 
     public bool Outside(Term value, HashSet<BlockIdentity> inside, BlockIdentity head) =>

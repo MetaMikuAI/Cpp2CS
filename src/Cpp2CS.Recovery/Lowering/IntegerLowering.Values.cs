@@ -41,6 +41,7 @@ public sealed partial class IntegerLowering
 
     private ManagedValue? Value(Term term, bool floating = false)
     {
+        if (ExceptionAlias(term) is { } alias) return Value(alias, floating);
         var caught = CaughtValue(term);
         if (caught is not null || failure is not null) return caught;
         if (values.TryGetValue(term, out var known)) return known;
@@ -110,6 +111,7 @@ public sealed partial class IntegerLowering
     /// <summary>使用点所需的位片约束合流局部；不要求被丢弃的槽位高位具有托管定义。</summary>
     private ManagedValue? Part(Term term, int low, int width, bool floating = false)
     {
+        if (ExceptionAlias(term) is { } alias) return Part(alias, low, width, floating);
         if (low == 0 && width == term.Width) return Value(term, floating);
         if (term.ConstantValue is { } constant && width <= 64)
             return Constant((ulong)((constant >> low) & ((System.Numerics.BigInteger.One << width) - 1)), width);

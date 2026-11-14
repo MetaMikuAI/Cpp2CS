@@ -204,7 +204,8 @@ public sealed partial class IntegerLowering
         if (term is null) return null;
         var resolved = context.Get(state.Resolve, term);
         if (!resolved.IsSuccess) return Fail<ManagedStatement>(LoweringFailureKind.State, "异常对象状态查询失败", resolved.Why);
-        var value = Value(resolved.Value);
+        var value = resolved.Value.ConstantValue == 0
+            ? new ConstantValue(0, types.Object, types.PointerSize * 8) : Value(resolved.Value);
         if (value is null) return null;
         if (!ManagedTypes.IsReferenceType(value.Type)) return Fail<ManagedStatement>(LoweringFailureKind.UnsupportedType, "抛出的值不是对象引用");
         // 捕获的异常保存下来、在处理体之外重新抛出，是 finally 的共享形态（保存异常、执行清理、未处理则重抛）。

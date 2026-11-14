@@ -13,7 +13,10 @@ using Cpp2CS.Recovery.Structure;
 
 namespace Cpp2CS.Recovery.Exceptions;
 
-public sealed record ExceptionClausePlan(BlockIdentity Source, TypeRef Type, BlockIdentity Entry, ImmutableHashSet<BlockIdentity> Body);
+public sealed record ExceptionClausePlan(BlockIdentity Source, TypeRef Type, BlockIdentity Entry, ImmutableHashSet<BlockIdentity> Body)
+{
+    public FinallyPlan? Finally { get; init; }
+}
 public sealed record ExceptionRegionPlan(BlockIdentity Source, BlockIdentity Entry, ImmutableHashSet<BlockIdentity> Try, ImmutableArray<ExceptionClausePlan> Clauses);
 public sealed record ExceptionPlan(ImmutableArray<ExceptionRegionPlan> Regions, ImmutableArray<BlockIdentity> Order,
     ImmutableHashSet<BlockIdentity> Removed, ImmutableHashSet<CallIdentity> PrivateCalls, ImmutableHashSet<WriteIdentity> PrivateWrites,
@@ -21,7 +24,7 @@ public sealed record ExceptionPlan(ImmutableArray<ExceptionRegionPlan> Regions, 
     ImmutableDictionary<CallIdentity, BlockIdentity?> Unwind);
 
 /// <summary>处理入口的私有状态与子句分类先于区域构造；区域只查询，不复制或移动调用。</summary>
-public sealed class ExceptionRegionQuery(StateQueries state, CallNamingQuery calls, ValueNamingQuery names,
+public sealed partial class ExceptionRegionQuery(StateQueries state, CallNamingQuery calls, ValueNamingQuery names,
     RuntimeSpec spec, TypeRef objectType, bool nested = false, bool projected = false) : Query<int, ExceptionPlan>
 {
     private readonly FlowQueries flow = new();
@@ -86,13 +89,31 @@ public sealed class ExceptionRegionQuery(StateQueries state, CallNamingQuery cal
             Call call => privateCalls.Contains(call.Identity),
             _ => false,
         };
-        var transparent = handlers.Where(h => scopes[h.Identity].Count != 0
-            && scopes[h.Identity].All(id => blocks[id].Statements.All(Private)
-                && blocks[id].End is Jump or ResumeUnwind)
-            && scopes[h.Identity].Any(id => blocks[id].End is ResumeUnwind)
-            && scopes[h.Identity].Select(id => blocks[id].End).OfType<ResumeUnwind>().All(resume =>
-                c.Get(names, resume.Exception) is { IsSuccess: true, Value.Name: ExceptionPointerName pointer } && pointer.Handler == h.Identity)).Select(h => h.Identity).ToHashSet();
+        var edgeValues = new EdgeValueQuery(state);
+        var resumes = new Dictionary<BlockIdentity, HashSet<BlockIdentity>>();
+        bool SameResume(Term value, BlockIdentity handler) =>
+            c.Get(names, value) is { IsSuccess: true, Value.Name: ExceptionPointerName pointer } && pointer.Handler == handler;
+        var transparent = handlers.Where(h =>
+        {
+            var scope = scopes[h.Identity]; var shared = new HashSet<BlockIdentity>();
+            if (scope.Count == 0 || scope.Any(id => !blocks[id].Statements.All(Private) || blocks[id].End is not (Jump or ResumeUnwind))) return false;
+            foreach (var id in scope)
+            {
+                if (blocks[id].End is ResumeUnwind resume && !SameResume(resume.Exception, h.Identity)) return false;
+                foreach (var target in SnapshotRewrite.Targets(blocks[id].End).Where(to => !scope.Contains(to)))
+                {
+                    if (blocks[target].End is not ResumeUnwind tail || !blocks[target].Statements.All(Private)) return false;
+                    var value = c.Get(edgeValues, new(tail.Exception, new(id, target)));
+                    if (!value.IsSuccess || !SameResume(value.Value, h.Identity)) return false;
+                    shared.Add(target);
+                }
+            }
+            if (shared.Count == 0 && !scope.Any(id => blocks[id].End is ResumeUnwind)) return false;
+            resumes.Add(h.Identity, shared); return true;
+        }).Select(h => h.Identity).ToHashSet();
         var removed = transparent.SelectMany(h => scopes[h]).ToHashSet();
+        foreach (var tail in resumes.Values.SelectMany(ids => ids).Distinct())
+            if (index.Value.Predecessors[tail].All(p => removed.Contains(p.Block))) removed.Add(tail);
         var unwind = new Dictionary<CallIdentity, BlockIdentity?>();
         // 透明清理若仍由外层保护，必须保留该外层；没有唯一外层时拒绝折叠。
         foreach (var call in f.Blocks.SelectMany(b => b.Statements).OfType<Call>())
@@ -166,7 +187,7 @@ public sealed class ExceptionRegionQuery(StateQueries state, CallNamingQuery cal
                         }
                     }
                 }
-                if (named.Operation?.Name is "Rethrow" or "ThrowManaged" && named.Inputs?.GetValueOrDefault("exception")?.Source is TermSource input
+                if (named.Operation?.Name == "Rethrow" && named.Inputs?.GetValueOrDefault("exception")?.Source is TermSource input
                     && c.Get(names, input.Term) is { IsSuccess: true, Value.Name: CaughtExceptionName caught } && caught.Handler == h.Identity)
                     rethrows[call.Identity] = h.Identity;
             }
@@ -210,7 +231,13 @@ public sealed class ExceptionRegionQuery(StateQueries state, CallNamingQuery cal
                 break;
             }
             if (!begun) return No("Fault", "不透明处理入口未取得托管包装异常；fault 或原生处理形状尚未支持");
-            if (clauses.Count == 0)
+            var shared = clauses.Count == 0 ? SharedFinally(c, h.Identity, scope, classified, Private, unwind) : null;
+            if (shared is not null)
+            {
+                clauses.Add(new(h.Identity, objectType, shared.Entry, shared.Body) { Finally = shared });
+                prefix.UnionWith(shared.Removed);
+            }
+            else if (clauses.Count == 0)
             {
                 // 全捕获保留主体全部事件；仅跳板与私有前缀没有对应的 IL。
                 var body = scope.Except(prefix).ToImmutableHashSet();
@@ -231,11 +258,12 @@ public sealed class ExceptionRegionQuery(StateQueries state, CallNamingQuery cal
             removed.UnionWith(prefix);
             var throwing = f.Blocks.Where(b => !removed.Contains(b.Identity) && b.Statements.OfType<Call>().Any(call => !privateCalls.Contains(call.Identity) && unwind[call.Identity] == h.Identity)).Select(b => b.Identity).ToHashSet();
             if (throwing.Count == 0) return No("Region", "处理入口没有受保护的调用");
-            var dominators = f.Blocks.Where(b => !scope.Contains(b.Identity) && throwing.All(t => Dominates(b.Identity, t))).Select(b => b.Identity).ToArray();
+            var starts = shared is null ? throwing : throwing.Union(shared.Arrivals).ToHashSet();
+            var dominators = f.Blocks.Where(b => !scope.Contains(b.Identity) && starts.All(t => Dominates(b.Identity, t))).Select(b => b.Identity).ToArray();
             var entry = dominators.FirstOrDefault(d => dominators.All(a => Dominates(a, d)));
             if (entry is null) return No("Region", "受保护调用不存在共同的单入口");
-            var members = new HashSet<BlockIdentity>(throwing) { entry };
-            var work = new Stack<BlockIdentity>(throwing);
+            var members = new HashSet<BlockIdentity>(starts) { entry };
+            var work = new Stack<BlockIdentity>(starts);
             while (work.TryPop(out var id))
             {
                 if (c.Step() is { } budget) return No("Region", "区域构造预算耗尽", budget);
@@ -253,10 +281,24 @@ public sealed class ExceptionRegionQuery(StateQueries state, CallNamingQuery cal
             foreach (var clause in clauses)
             {
                 if (!clause.Body.Contains(clause.Entry)) return No("Region", "catch 入口不在处理区域内");
-                if (clause.Body.Any(id => index.Value.Predecessors[id].Any(p => !clause.Body.Contains(p.Block) && !prefix.Contains(p.Block))))
+                if (clause.Finally is null && clause.Body.Any(id => index.Value.Predecessors[id].Any(p => !clause.Body.Contains(p.Block) && !prefix.Contains(p.Block))))
                     return No("Region", "catch 有类型选择之外的入边");
                 if (clause.Body.SelectMany(id => SnapshotRewrite.Targets(blocks[id].End)).Any(members.Contains))
                     return No("Backedge", "处理体跳回 try 内部");
+            }
+            if (shared is not null && members.Any(id => blocks[id].End is Return or ResumeUnwind
+                || SnapshotRewrite.Targets(blocks[id].End).Any(to => !members.Contains(to) && to != shared.Entry)))
+                return No("Finally.Region", "共享清理之前存在其他正常出口");
+            if (shared is null && clauses.Count == 1 && clauses[0].Type.Equals(objectType)
+                && CopiedFinally(c, clauses[0], members, classified, Private, rethrows, removed, unwind, dominance) is { } copied)
+            {
+                clauses[0] = clauses[0] with { Body = copied.Body, Finally = copied };
+                removed.UnionWith(copied.Removed);
+                foreach (var statement in copied.Omitted)
+                {
+                    if (statement is Call call) { privateCalls.Add(call.Identity); rethrows.Remove(call.Identity); }
+                    else if (statement is MemoryWrite write) privateWrites.Add(write.Identity);
+                }
             }
             plans.Add(new(h.Identity, entry, members.ToImmutableHashSet(), clauses.ToImmutableArray()));
         }
@@ -276,12 +318,30 @@ public sealed class ExceptionRegionQuery(StateQueries state, CallNamingQuery cal
             for (int i = 0; i < plans.Count; i++)
                 for (int j = 0; j < plans.Count; j++)
                 {
-                    if (i == j || plans[i].Try.SetEquals(plans[j].Try) || !plans[j].Try.IsSubsetOf(plans[i].Try)) continue;
+                    if (i == j || plans[i].Try.SetEquals(plans[j].Try)) continue;
                     var inside = Whole(plans[j]);
-                    if (inside.IsSubsetOf(plans[i].Try)) continue;
-                    plans[i] = plans[i] with { Try = plans[i].Try.Union(inside) }; enlarged = true;
+                    if ((plans[j].Try.IsSubsetOf(plans[i].Try) || plans[j].Clauses.Any(clause => clause.Finally?.PropagatesTo == plans[i].Source))
+                        && !inside.IsSubsetOf(plans[i].Try))
+                    { plans[i] = plans[i] with { Try = plans[i].Try.Union(inside) }; enlarged = true; }
+                    ImmutableArray<ExceptionClausePlan>.Builder? clauses = null;
+                    for (int k = 0; k < plans[i].Clauses.Length; k++)
+                    {
+                        var clause = plans[i].Clauses[k];
+                        if (!plans[j].Try.IsSubsetOf(clause.Body) || inside.IsSubsetOf(clause.Body)) continue;
+                        enlarged = true; var body = clause.Body.Union(inside);
+                        clauses ??= plans[i].Clauses.ToBuilder();
+                        clauses[k] = clause with { Body = body, Finally = clause.Finally is { } plan ? plan with { Body = body } : null };
+                    }
+                    if (clauses is not null) plans[i] = plans[i] with { Clauses = clauses.ToImmutable() };
                 }
         } while (enlarged);
+        for (int i = 0; i < plans.Count; i++)
+        {
+            var candidates = plans[i].Try.Where(id => plans[i].Try.All(member => Dominates(id, member))).ToArray();
+            var entry = candidates.FirstOrDefault(id => candidates.All(other => Dominates(other, id)));
+            if (entry is null) return No("Region", "扩张后的 try 没有共同入口");
+            plans[i] = plans[i] with { Entry = entry };
+        }
         if (plans.Any(p => p.Clauses.Any(clause => p.Try.Overlaps(clause.Body))))
             return No("Region", "try 与自身的 catch 处理体相交");
         var segments = plans.SelectMany(p => new[] { (Owner: p, Members: p.Try, Entry: p.Entry) }
@@ -300,6 +360,9 @@ public sealed class ExceptionRegionQuery(StateQueries state, CallNamingQuery cal
             }
         foreach (var p in plans)
         {
+            foreach (var clause in p.Clauses.Where(clause => clause.Finally is not null))
+                if (clause.Body.Any(id => id != clause.Entry && index.Value.Predecessors[id].Any(edge => !clause.Body.Contains(edge.Block) && !removed.Contains(edge.Block))))
+                    return No("Finally.Region", "清理体中间存在区域外入边");
             foreach (var id in p.Try)
             {
                 if (id != p.Entry && index.Value.Predecessors[id].Any(edge => !p.Try.Contains(edge.Block) && !removed.Contains(edge.Block)))
@@ -307,7 +370,7 @@ public sealed class ExceptionRegionQuery(StateQueries state, CallNamingQuery cal
                 foreach (var call in blocks[id].Statements.OfType<Call>().Where(call => !privateCalls.Contains(call.Identity)))
                 {
                     var target = unwind[call.Identity];
-                    if (target == p.Source) continue;
+                    if (target == p.Source || target is null && classified[call.Identity].Operation?.Exceptions.MayThrow == false) continue;
                     var child = plans.SingleOrDefault(inner => inner.Source == target);
                     if (child is null || !Whole(child).IsSubsetOf(p.Try)) return No("Region", "try 扩张会改变某个调用的处理入口");
                 }

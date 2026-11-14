@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Numerics;
 using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Kernel.State;
 using Cpp2CS.Native;
@@ -31,30 +32,53 @@ public static class ExceptionSelectors
         }
         var folded = ImmutableHashSet.CreateBuilder<BlockIdentity>();
         var rewrite = new SnapshotRewrite(function); bool changed = false;
-        var mapped = new Dictionary<Term, Term>();
-        Term Map(Term t)
+        var selectorMerges = function.Blocks.SelectMany(block => block.Merges)
+            .Where(merge => merge.Inputs.Any(input => SnapshotRewrite.Dependencies([input.Value]).Any(selectors.ContainsKey)))
+            .Select(merge => merge.Result).ToHashSet();
+        StateQueries? state = null; QueryContext? context = null; IncomingValuesQuery? incoming = null;
+        bool Direct(Term value, BigInteger constant, out BlockIdentity? handler)
         {
-            if (mapped.TryGetValue(t, out var known)) return known;
+            if (value.Kind == TermKind.Slice && value.SliceLow == 0) value = value.Operands[0];
+            if (selectors.TryGetValue(value, out var entry) && constant == entry.Value)
+            { handler = entry.Handler; return true; }
+            handler = null; return false;
+        }
+        bool Selected(Term value, BigInteger constant, BlockIdentity at, out BlockIdentity[] sources)
+        {
+            if (Direct(value, constant, out var handler)) { sources = [handler!]; return true; }
+            sources = [];
+            if (!SnapshotRewrite.Dependencies([value]).Any(selectorMerges.Contains)) return false;
+            state ??= new StateQueries(); context ??= state.CreateContext(function); incoming ??= new(state);
+            var projected = context.Get(incoming, new(value, at));
+            if (!projected.IsSuccess || projected.Value.IsEmpty) return false;
+            var found = new HashSet<BlockIdentity>();
+            foreach (var input in projected.Value)
+            {
+                if (!Direct(input.Value, constant, out handler)) return false;
+                found.Add(handler!);
+            }
+            sources = found.ToArray(); return true;
+        }
+        var mapped = new Dictionary<(Term Value, BlockIdentity At), Term>();
+        Term Map(Term t, BlockIdentity at)
+        {
+            if (mapped.TryGetValue((t, at), out var known)) return known;
             if (t.Operator is CoreOperator { Operation: CoreOperation.Equal or CoreOperation.NotEqual } op)
             {
                 for (int i = 0; i < 2; i++)
-                {
-                    var value = t.Operands[i]; var constant = t.Operands[1 - i].ConstantValue;
-                    if (value.Kind == TermKind.Slice && value.SliceLow == 0) value = value.Operands[0];
-                    if (constant is { } n && selectors.TryGetValue(value, out var entry) && n == entry.Value)
+                    if (t.Operands[1 - i].ConstantValue is { } constant && Selected(t.Operands[i], constant, at, out var sources))
                     {
-                        folded.Add(entry.Handler); changed = true;
+                        folded.UnionWith(sources); changed = true;
                         var foldedValue = function.Terms.Constant(op.Operation == CoreOperation.Equal ? 1 : 0, 1);
-                        mapped.Add(t, foldedValue); return foldedValue;
+                        mapped.Add((t, at), foldedValue); return foldedValue;
                     }
-                }
             }
-            var result = SnapshotRewrite.Rebuild(t, Map); mapped.Add(t, result); return result;
+            var result = SnapshotRewrite.Rebuild(t, value => Map(value, at)); mapped.Add((t, at), result); return result;
         }
         foreach (var b in function.Blocks)
         {
             if (b.End is not Branch branch) continue;
-            var condition = Map(branch.Condition);
+            var condition = Map(branch.Condition, b.Identity);
             if (condition != branch.Condition)
                 rewrite.Blocks[b.Identity] = b with { End = condition.ConstantValue is { } n ? new Jump(n == 0 ? branch.False : branch.True) : branch with { Condition = condition } };
         }

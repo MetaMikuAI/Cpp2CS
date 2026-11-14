@@ -18,8 +18,13 @@ public static class StructureRecovery
     {
         if (input.Blocks.Any(b => b.Handler is not null))
         {
-            input = ExceptionEntries.Run(input).Function;
-            input = ExceptionSelectors.Run(input, context.Facts.Spec).Function;
+            NativeFunction previous;
+            do
+            {
+                previous = input;
+                input = ExceptionEntries.Run(input).Function;
+                input = ExceptionSelectors.Run(input, context.Facts.Spec).Function;
+            } while (!ReferenceEquals(previous, input));
         }
         // 没有调用或条件分支，且写入全在帧内时，本变换没有任何删除或折叠候选。
         if (!input.Blocks.Any(b => b.End is Branch || b.Statements.Any(s => s is Call)))
@@ -35,7 +40,7 @@ public static class StructureRecovery
         var facts = context.Facts;
         var catalog = RuntimeFunctionCatalog.Select(facts.Spec.Layout.UnityVersion, facts.Spec.Layout.Triple, facts.Spec.Layout.DataModel);
         var calls = new CallNamingQuery(binder, new NamingCodeMap(facts.CodeMap), new RuntimeFunctionMap(facts.RuntimeFunctions), catalog);
-        if (input.Blocks.Any(block => block.Handler is not null)) input = ExceptionScaffolding.Project(input, calls);
+        if (input.Blocks.Any(block => block.Handler is not null)) input = ExceptionScaffolding.Project(input, calls, splitEntries: true);
         var signature = binder.Definition(MethodRef.Open(context.Method), kind, context.Entry.Method).Value;
         var surveyTimer = System.Diagnostics.Stopwatch.StartNew();
         var survey = new NamingSurvey(calls, new MetadataSlotDecoder(facts), facts.Image, binder, facts.Spec, signature);

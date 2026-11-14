@@ -8,6 +8,8 @@ using Cpp2CS.Native.Terms;
 using Cpp2CS.Output;
 using Cpp2CS.Pipeline;
 using Cpp2CS.Recovery.Binding;
+using Cpp2CS.Recovery.Exceptions;
+using Cpp2CS.Recovery.Structure;
 using Cpp2CS.Recovery.Lowering;
 using Cpp2CS.Recovery.Naming;
 using Cpp2CS.Runtime;
@@ -27,7 +29,7 @@ internal static partial class LoweringChecks
         var catalog = RuntimeFunctionCatalog.Select(spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
         var method = MethodRef.Open(program.Methods.Single(m => m.Name == "Add" && m.Owner.Name == "Cases"));
         var calls = new CallNamingQuery(binder, new NamingChecks.Map([]), new NamingChecks.RuntimeMap(), catalog);
-        foreach (var mode in new[] { "Catch", "Rethrow", "Transparent", "TransparentBegin", "State", "Typed", "TwoClauses", "Fault", "EscapingFrame", "WrongResume", "SelectorUse", "OtherCxxType" })
+        foreach (var mode in new[] { "Catch", "Rethrow", "Transparent", "TransparentBegin", "TransparentShared", "SplitEntry", "NoThrowCall", "UnknownProtectedCall", "State", "Typed", "TwoClauses", "Fault", "EscapingFrame", "WrongResume", "SelectorUse", "OtherCxxType" })
         {
             var terms = new TermTable(); var entry = new BlockIdentity(); var handler = new BlockIdentity(); var body = new BlockIdentity();
             var frame = terms.Atom(new RootAtom(AddressRoot.Frame), 64);
@@ -56,11 +58,35 @@ internal static partial class LoweringChecks
             var defining = terms.Slice(parameter, 0, 32);
             var writes = new List<Statement>();
             if (mode == "State") writes.Add(new MemoryWrite(new(), frame, 32, defining));
+            if (mode == "SplitEntry")
+            {
+                var firstId = new CallIdentity(); var firstResult = terms.Atom(new ResultAtom(firstId),64);
+                writes.Add(protectedCall with { Identity = firstId, Results = [new(slot,firstResult)], Unwind = null });
+            }
             writes.Add(protectedCall);
+            if (mode is "NoThrowCall" or "UnknownProtectedCall")
+            {
+                map.TypeTest = catalog.Functions.Single(x=>x.Operation.Name=="IsAssignableFrom");
+                var nextId = new CallIdentity(); var nextResult = terms.Atom(new ResultAtom(nextId),64);
+                writes.Add(new Call(nextId,new ImageFunction(mode == "NoThrowCall" ? 2UL : 30UL),[new(slot,parameter),new(other,parameter)],[new(slot,nextResult)]));
+            }
             builder.Blocks.Add(new(entry, [], [.. writes], new Return([new(slot, terms.Constant(1, 32))])));
             builder.Blocks.Add(new(handler, [], [], new Jump(body), new(exception, selector, mode == "OtherCxxType" ? [new(ClauseKind.Catch, [new PointerTarget.Internal(100)]) { Selector = 1, TypeName = "other" }]
                 : [new(ClauseKind.CatchAll, [])])));
-            if (mode == "Transparent") builder.Blocks.Add(new(body, [], [], new ResumeUnwind(exception)));
+            if (mode == "TransparentShared")
+            {
+                var second = new BlockIdentity(); var secondHandler = new BlockIdentity(); var secondBody = new BlockIdentity(); var tail = new BlockIdentity();
+                var secondException = terms.Atom(new ExceptionAtom(secondHandler),64); var secondSelector = terms.Atom(new SelectorAtom(secondHandler),64);
+                var nextId = new CallIdentity(); var nextResult = terms.Atom(new ResultAtom(nextId),64);
+                builder.Blocks[0] = builder.Blocks[0] with { End = new Jump(second) };
+                builder.Blocks.Add(new(second,[],[protectedCall with { Identity = nextId, Results = [new(slot,nextResult)], Unwind = secondHandler }],new Return([new(slot,terms.Constant(1,32))])));
+                builder.Blocks.Add(new(body,[],[begin,end],new Jump(tail)));
+                builder.Blocks.Add(new(secondHandler,[],[],new Jump(secondBody),new(secondException,secondSelector,[new(ClauseKind.CatchAll,[])])));
+                builder.Blocks.Add(new(secondBody,[],[System("__cxa_begin_catch",[secondException],out _),System("__cxa_end_catch",[],out _)],new Jump(tail)));
+                var mergedId = new MergeIdentity(); var merged = terms.Atom(new ResultAtom(mergedId),64);
+                builder.Blocks.Add(new(tail,[new(mergedId,merged,[new(body,exception),new(secondBody,secondException)])],[],new ResumeUnwind(merged)));
+            }
+            else if (mode == "Transparent") builder.Blocks.Add(new(body, [], [], new ResumeUnwind(exception)));
             else if (mode == "WrongResume") builder.Blocks.Add(new(body, [], [], new ResumeUnwind(parameter)));
             else if (mode == "TransparentBegin") builder.Blocks.Add(new(body, [], [begin, end], new ResumeUnwind(exception)));
             else if (mode == "EscapingFrame") builder.Blocks.Add(new(body, [], [new MemoryWrite(new(), frame, 64, parameter)], new ResumeUnwind(exception)));
@@ -108,6 +134,21 @@ internal static partial class LoweringChecks
             var names = mode is "Typed" or "TwoClauses" ? new NamingFacts(ImmutableDictionary<ulong, Cpp2CS.Kernel.Queries.Outcome<MetadataEntity>>.Empty.Add(0,
                 Cpp2CS.Kernel.Queries.Outcome<MetadataEntity>.Success(new ClassEntity(types.Object))), ImmutableDictionary<ulong, FlagEvidence>.Empty, true) : NamingFacts.Empty;
             var function = builder.Freeze();
+            if (mode == "SplitEntry")
+            {
+                var originalBlocks = function.Blocks.Length;
+                function = ExceptionScaffolding.Project(function,namedCalls,splitEntries:true);
+                checks.True(function.Blocks.Length==originalBlocks+1 && ExitChecker.Check(function).IsValid,"受保护调用之前切块保持原生契约");
+            }
+            if (mode is "NoThrowCall" or "UnknownProtectedCall")
+            {
+                var state = new StateQueries(new ManagedCallEffects(namedCalls));
+                var naming = new ValueNamingQuery(state,namedCalls,names,spec,binder,binder.Definition(method,BindingEntryKind.Ordinary,null).Value,exceptionType:types.Object);
+                var plan = naming.CreateContext(function).Get(new ExceptionRegionQuery(state,namedCalls,naming,spec,types.Object),0);
+                checks.True(mode == "NoThrowCall" ? plan.IsSuccess : !plan.IsSuccess && plan.Why?.Code=="lowering.Exception.Region",
+                    "只有登记为不抛出的调用可以扩大 try 覆盖");
+                continue;
+            }
             if (mode == "EscapingFrame")
             {
                 var state = new StateQueries();
@@ -119,7 +160,8 @@ internal static partial class LoweringChecks
             if (mode is "Fault" or "EscapingFrame" or "WrongResume") { checks.True(result.Failure?.Reason.Code == "lowering.Exception.Fault", "没有包装对象的可观察清理报 fault 洞"); continue; }
             checks.True(result.Body is not null, "异常下降 " + mode + ": " + result.Failure);
             if (result.Body is null) continue;
-            checks.True(result.Body.Regions.Count == (mode is "Transparent" or "TransparentBegin" ? 0 : mode == "TwoClauses" ? 2 : 1), "异常子句数量 " + mode);
+            checks.True(result.Body.Regions.Count == (mode is "Transparent" or "TransparentBegin" or "TransparentShared" ? 0 : mode == "TwoClauses" ? 2 : 1), "异常子句数量 " + mode);
+            if (mode == "SplitEntry") checks.True(!result.Body.Regions.Single().Try.Contains(0UL),"无保护的前置调用保留在 try 之外");
             if (mode == "Rethrow") checks.True(result.Body.Blocks.SelectMany(b => b.Statements).OfType<ManagedRethrow>().Any(), "当前捕获对象下降为 rethrow");
             var emitter = new BodyEmitter(new Skeleton(program, 16), types);
             var problems = emitter.Emit([result.Body]); checks.True(problems.Count == 0, "异常 CIL 契约 " + mode + ": " + string.Join(';', problems.Values));
@@ -128,6 +170,8 @@ internal static partial class LoweringChecks
     private sealed class ExceptionRuntimeMap : IRuntimeFunctionMap
     {
         public RuntimeFunction? TypeTest { get; set; }
-        public RuntimeFunction? Find(CallTarget target) => target is ImageFunction { EntryOffset: 2 } ? TypeTest : null;
+        public RuntimeFunction? Rethrow { get; set; }
+        public RuntimeFunction? Raise { get; set; }
+        public RuntimeFunction? Find(CallTarget target) => target is ImageFunction { EntryOffset: 2 } ? TypeTest : target is ImageFunction { EntryOffset: 3 } ? Rethrow : target is ImageFunction { EntryOffset: 4 } ? Raise : null;
     }
 }

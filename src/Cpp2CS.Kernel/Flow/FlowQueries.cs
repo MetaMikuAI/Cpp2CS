@@ -9,7 +9,7 @@ public readonly record struct BlockPair(BlockIdentity A, BlockIdentity B);
 public readonly record struct PointPair(Point A, Point B);
 public sealed record FlowGraph(ImmutableDictionary<BlockIdentity, ImmutableHashSet<BlockIdentity>> Successors,
     ImmutableHashSet<BlockIdentity> Reachable, ImmutableHashSet<BlockIdentity> Exits);
-public sealed class FlowGraphQuery : Query<int, FlowGraph>
+public sealed class FlowGraphQuery(bool includeUnwind = true) : Query<int, FlowGraph>
 {
     public override Outcome<FlowGraph> Compute(QueryContext c, int key)
     {
@@ -20,7 +20,7 @@ public sealed class FlowGraphQuery : Query<int, FlowGraph>
                 Jump j => [j.Target], Branch t => [t.True, t.False],
                 JumpTable t => t.Cases.Select(x => x.Target).Append(t.Default), _ => []
             };
-            return normal.Concat(b.Statements.OfType<Call>().Where(x => x.Unwind is not null).Select(x => x.Unwind!)).ToImmutableHashSet();
+            return normal.Concat(b.Statements.OfType<Call>().Where(_ => includeUnwind).Where(x => x.Unwind is not null).Select(x => x.Unwind!)).ToImmutableHashSet();
         });
         var seen = new HashSet<BlockIdentity>(); var pending = new Stack<BlockIdentity>(); pending.Push(c.Snapshot.Entry);
         while (pending.TryPop(out var b))
@@ -31,7 +31,7 @@ public sealed class FlowGraphQuery : Query<int, FlowGraph>
         }
         // 没有本地处理入口的调用可能向外展开；没有效果证据时保留该出口。
         var exits = c.Snapshot.Blocks.Where(b => b.End is Return or ResumeUnwind or Unreachable ||
-            b.Statements.Any(s => s is TrapWhen or Call { DoesNotReturn: true } or Call { Unwind: null })).Select(b => b.Identity).ToImmutableHashSet();
+            b.Statements.Any(s => s is Call { DoesNotReturn: true } || includeUnwind && (s is TrapWhen or Call { Unwind: null }))).Select(b => b.Identity).ToImmutableHashSet();
         return Outcome<FlowGraph>.Success(new(edges, seen.ToImmutableHashSet(), exits));
     }
 }
@@ -103,9 +103,9 @@ public sealed class PointDominanceQuery(BlockDominanceQuery blocks) : Query<Poin
 }
 public sealed class FlowQueries
 {
-    public FlowGraphQuery Graph { get; } = new();
+    public FlowGraphQuery Graph { get; }
     public BlockDominanceQuery Dominates { get; }
     public BlockDominanceQuery PostDominates { get; }
     public PointDominanceQuery PointDominates { get; }
-    public FlowQueries() { Dominates = new(Graph); PostDominates = new(Graph, true); PointDominates = new(Dominates); }
+    public FlowQueries(bool includeUnwind = true) { Graph = new(includeUnwind); Dominates = new(Graph); PostDominates = new(Graph, true); PointDominates = new(Dominates); }
 }

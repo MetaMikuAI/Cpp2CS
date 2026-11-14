@@ -142,11 +142,26 @@ internal sealed partial class CecilModel
         var source = methodDefinitions[method.Method];
         if (modules.Contains(source.Module))
             return module.GetTypes().FirstOrDefault(t => t.FullName == source.DeclaringType.FullName)?.Methods.FirstOrDefault(m => Signature(m) == Signature(source) && m.HasBody);
-        // 外部调用保持不透明；匹配核心库的无参空构造例外，其参考 IL 自身证明没有事件或堆效果。
+        // 匹配核心库中的空构造与单次字段 getter 由参考 IL 证明；其他外部调用保持不透明。
         var core = module.TypeSystem.Object.Resolve().Module;
-        if (source.Module.Assembly.Name.FullName != core.Assembly.Name.FullName || source.Name != ".ctor" || source.Parameters.Count != 0) return null;
+        if (source.Module.Assembly.Name.FullName != core.Assembly.Name.FullName) return null;
         var candidate = core.GetTypes().FirstOrDefault(t => t.FullName == source.DeclaringType.FullName)?.Methods.FirstOrDefault(m => Signature(m) == Signature(source) && m.HasBody);
-        return candidate is not null && EmptyConstructor(candidate, []) ? candidate : null;
+        return candidate is not null && (EmptyConstructor(candidate, []) || FieldGetter(candidate)) ? candidate : null;
+    }
+    private static bool FieldGetter(MethodDefinition method)
+    {
+        if (!method.HasBody || method.Parameters.Count != 0 || method.Body.ExceptionHandlers.Count != 0
+            || (method.ImplAttributes & MethodImplAttributes.Synchronized) != 0) return false;
+        var instructions = method.Body.Instructions.Where(i => i.OpCode.Code != Mono.Cecil.Cil.Code.Nop).ToArray();
+        var field = instructions switch
+        {
+            [{ OpCode.Code: Mono.Cecil.Cil.Code.Ldarg_0 }, { OpCode.Code: Mono.Cecil.Cil.Code.Ldfld, Operand: FieldReference f }, { OpCode.Code: Mono.Cecil.Cil.Code.Ret }]
+                when !method.IsStatic => f,
+            [{ OpCode.Code: Mono.Cecil.Cil.Code.Ldsfld, Operand: FieldReference f }, { OpCode.Code: Mono.Cecil.Cil.Code.Ret }]
+                when method.IsStatic => f,
+            _ => null,
+        };
+        return field is not null && field.FieldType.FullName == method.ReturnType.FullName;
     }
     private static bool EmptyConstructor(MethodDefinition method, HashSet<MethodDefinition> active)
     {
