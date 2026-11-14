@@ -21,13 +21,39 @@ public static class IndirectResolver
         internal Resolution(IIndirectContext context)
         {
             this.context = context;
-            uniqueExpand = new(context.Terms, context.InUniquePredecessor, true);
+            uniqueExpand = new(context.Terms, t => context.InUniquePredecessor(t) ?? Invariant(t), true);
             expand = new(context.Terms, Expand, true);
         }
         private TermTable Terms => context.Terms;
+        private readonly Dictionary<Term, Term?> invariants = [];
+        /// <summary>
+        /// 块入口占位沿前驱追到底：穿过其他占位，除这些占位自身外只有一个项，而且这个项不依赖它们时，
+        /// 占位在每条到达路径上都是这个项（各前驱给出同一个值；循环里没有改写的值）。函数入口的占位另有调用方的值，不算。
+        /// </summary>
+        private Term? Invariant(Term input)
+        {
+            if (invariants.TryGetValue(input, out var known)) return known;
+            Term? value = null; bool unique = !context.InPredecessors(input).IsDefaultOrEmpty;
+            var members = new HashSet<Term>(); var pending = new Stack<Term>(); pending.Push(input);
+            while (unique && pending.TryPop(out var member))
+            {
+                if (!members.Add(member)) continue;
+                if (context.HasExternalSource(member)) { unique = false; break; }
+                foreach (var source in context.InPredecessors(member))
+                {
+                    if (!context.InPredecessors(source).IsDefaultOrEmpty) pending.Push(source);
+                    else if (value is null) value = source;
+                    else if (value != source) { unique = false; break; }
+                }
+            }
+            var result = unique && value is not null && !Walk(value).Any(members.Contains) ? value : null;
+            invariants[input] = result;
+            return result;
+        }
         private Term? Expand(Term term)
         {
             if (context.InUniquePredecessor(term) is { } predecessor) return predecessor;
+            if (Invariant(term) is { } invariant) return invariant;
             return RelocatedPointer(term) is PointerTarget.Internal pointer
                 ? Terms.Apply(new CoreOperator(Add), term.Width, Terms.Atom(new RootAtom(AddressRoot.Image), term.Width), Terms.Constant(pointer.Offset, term.Width))
                 : null;

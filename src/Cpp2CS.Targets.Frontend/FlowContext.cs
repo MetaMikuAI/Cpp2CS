@@ -44,6 +44,7 @@ internal sealed class FlowContext : IIndirectContext
         return [.. block.Predecessors.Select(p => (p.UnwindStates.GetValueOrDefault(block.Identity) ?? p.State).TryGetValue(register.Register, out var value) ? value
             : Terms.Atom(new RegisterInput(p.Address, register.Register), register.Register.Width))];
     }
+    public bool HasExternalSource(Term input) => input.Identity is RegisterInput register && register.Address == EntryAddress;
     public Term? InUniquePredecessor(Term input)
     {
         if (input.Table != Terms) throw new ArgumentException("项必须来自本函数项表。");

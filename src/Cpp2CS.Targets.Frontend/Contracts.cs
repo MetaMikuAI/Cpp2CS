@@ -66,6 +66,8 @@ public interface IIndirectContext
     Term? InUniquePredecessor(Term input);
     /// <summary>块入口占位在每个前驱出口的项，用来收集一个值的全部来源；不是块入口占位或该块没有前驱时为空。</summary>
     ImmutableArray<Term> InPredecessors(Term input) => [];
+    /// <summary>占位在各前驱出口的项之外还有外来的值：函数入口块的占位由调用方给值。</summary>
+    bool HasExternalSource(Term input) => false;
     ImmutableArray<FlowCondition> Conditions { get; }
 }
 public interface IFlowFacts

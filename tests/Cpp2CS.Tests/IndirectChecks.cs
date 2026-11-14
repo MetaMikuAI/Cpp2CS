@@ -62,6 +62,7 @@ internal static class IndirectChecks
         image.Writable = false;
         GlobalsAndMerges(checks, t, image);
         TwoLevelTables(checks, t, image);
+        InvariantInputs(checks, t, image);
         var isa = new Toy(false);
         var range = new FunctionRange(0, 2, FunctionEvidence.SymbolTable);
         var tail = FunctionLifter.Lift(isa, Arm64Registers.Convention, new Arm64FlowFacts(), range, 0);
@@ -111,6 +112,39 @@ internal static class IndirectChecks
         image.Relocations = []; image.Pointers.Clear();
         image.Writable = false; image.ReadOnlyStart = 4096;
     }
+    private static void InvariantInputs(Assertions checks, TermTable t, Image image)
+    {
+        var root = t.Atom(new RootAtom(AddressRoot.Image), 64);
+        Term Op(CoreOperation op, int width, params Term[] values) => t.Apply(new CoreOperator(op), width, values);
+        Term Table(ulong offset) => Op(Add, 64, root, t.Constant(offset, 64));
+        var index = t.Slice(t.Atom(new EntryAtom(new(SlotKind.Integer, 5)), 32), 0, 1);
+        var header = t.Atom(new EntryAtom(new(SlotKind.Integer, 6)), 64); var latch = t.Atom(new EntryAtom(new(SlotKind.Integer, 7)), 64);
+        var id = new ReadIdentity();
+        var read = new MemoryRead(id, Op(Add, 64, header, Op(Multiply, 64, Op(ZeroExtend, 64, index), t.Constant(8, 64))), 64, t.Atom(new ResultAtom(id), 64));
+        var saved = image.Values.ToDictionary(p => p.Key, p => p.Value);
+        image.Values[256] = 16; image.Values[264] = 20; image.Values[512] = 16; image.Values[520] = 20;
+        Context Sources(ImmutableArray<Term> atHeader, ImmutableArray<Term> atLatch)
+        {
+            var context = new Context(t, image, read);
+            context.Sources[header] = atHeader; context.Sources[latch] = atLatch;
+            return context;
+        }
+        // 循环外提的表基址：循环头的值来自循环前与回边，回边上没有改写。
+        var resolved = IndirectResolver.Resolve(read.Result, Sources([Table(256), latch], [header])) as IndirectTable;
+        checks.True(resolved?.Selector == index && resolved.Cases.Select(c => c.Target).SequenceEqual(new ulong[] { 16, 20 }),
+            "入口占位沿前驱只有一个来源时按这个来源解析表");
+        checks.True(IndirectResolver.Resolve(read.Result, Sources([Table(256), Table(256)], [header])) is IndirectTable { Cases.Length: 2 },
+            "各前驱给出同一个项也是唯一来源");
+        checks.True(IndirectResolver.Resolve(read.Result, Sources([Table(256), latch], [header, Table(512)])) is IndirectUnknown { Reason.Code: "indirect.merge" },
+            "循环里另有一个表基址仍是洞");
+        var external = Sources([Table(256), latch], [header]); external.External.Add(header);
+        checks.True(IndirectResolver.Resolve(read.Result, external) is IndirectUnknown { Reason.Code: "indirect.merge" },
+            "函数入口的占位另有调用方的值，不算唯一来源");
+        checks.True(IndirectResolver.Resolve(read.Result, Sources([latch], [Op(Add, 64, header, t.Constant(8, 64))])) is not IndirectTable,
+            "唯一的来源依赖占位自身时不代入");
+        image.Values.Clear();
+        foreach (var (offset, value) in saved) image.Values[offset] = value;
+    }
     private static void TwoLevelTables(Assertions checks, TermTable t, Image image)
     {
         var root = t.Atom(new RootAtom(AddressRoot.Image), 64);
@@ -139,6 +173,8 @@ internal static class IndirectChecks
         public Term? InUniquePredecessor(Term input) => null;
         internal Dictionary<Term, ImmutableArray<Term>> Sources { get; } = [];
         public ImmutableArray<Term> InPredecessors(Term input) => Sources.GetValueOrDefault(input, []);
+        internal HashSet<Term> External { get; } = [];
+        public bool HasExternalSource(Term input) => External.Contains(input);
         public MemoryRead? ReadOf(Term result) => reads.FirstOrDefault(r => r.Result == result);
     }
     private sealed class Toy(bool changeStack, IImage? image = null) : IInstructionSet, IImageInstructionSet
