@@ -62,12 +62,19 @@ public sealed class ImageContents
     /// <summary>位置在不变的映像数据里并且内容可以静态确定时返回它的值，否则返回 null。</summary>
     public Term? Read(NativeFunction function, Location location)
     {
-        if (location.Region != Region.Image || location.Offset is not { } offset || offset < 0 || offset > ulong.MaxValue - 16) return null;
-        if (location.Width is not (8 or 16 or 32 or 64)) return null;
+        if (location.Region != Region.Image || location.Offset is not { } offset || offset < 0 || offset > ulong.MaxValue) return null;
+        if (location.Width <= 64 ? location.Width is not (8 or 16 or 32 or 64) : location.Width % 8 != 0) return null;
         ulong start = (ulong)offset, bytes = (ulong)(location.Width / 8);
+        if (start > ulong.MaxValue - bytes) return null;
         if (!Immutable(start, bytes)) return null;
         var terms = function.Terms;
-        if (!Relocated(start, bytes)) return terms.Constant(image.ReadUnsigned(start, (int)bytes), location.Width);
+        if (!Relocated(start, bytes))
+        {
+            if (location.Width <= 64) return terms.Constant(image.ReadUnsigned(start, (int)bytes), location.Width);
+            var content = new byte[(int)bytes];
+            image.ReadBytes(start, content);
+            return terms.Constant(new BigInteger(content, isUnsigned: true, isBigEndian: image.ByteOrder == ByteOrder.BigEndian), location.Width);
+        }
         if (location.Width != image.PointerWidth * 8 || function.ImageBase is not { } imageBase) return null;
         return image.ReadPointer(start) switch
         {

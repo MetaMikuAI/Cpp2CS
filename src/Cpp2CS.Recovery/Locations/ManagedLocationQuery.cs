@@ -19,6 +19,8 @@ public sealed record LocationPiece(LocationView? View, int AccessBit, int Locati
 public sealed record LocationResult(ManagedLocationKind Kind, ImmutableArray<LocationView> Views, Reason? Why = null)
 {
     public ImmutableArray<LocationPiece> Pieces { get; init; } = [];
+    /// <summary>访问范围内的完整结构体候选；候选可以相互包含，不是分段表。</summary>
+    public ImmutableArray<LocationPiece> Aggregates { get; init; } = [];
 }
 
 /// <summary>访问范围按小端位偏移分解；空位置代表不可观察的填充。</summary>
@@ -36,7 +38,34 @@ public sealed class ManagedRangeQuery(ManagedLocationQuery locations, ManagedTyp
             return Outcome<LocationResult>.Success(located.Value with
             { Pieces = [new(selected with { Offset = 0, Width = types.Size(selected.Type) * 8 },
                 0, (int)selected.Offset * 8, key.Width)] });
-        return locations.Locate(c, key, false, types);
+        var range = locations.Locate(c, key, false, types);
+        return !range.IsSuccess || key.Width <= 64 ? range
+            : Outcome<LocationResult>.Success(range.Value with { Aggregates = WholeStructures(types, range.Value.Pieces, key.Width) });
+    }
+
+    /// <summary>从叶子路径投影完整的结构体字段和数组元素；候选可以嵌套，由使用点选择。</summary>
+    internal static ImmutableArray<LocationPiece> WholeStructures(ManagedTypes types, IEnumerable<LocationPiece> leaves, int width)
+    {
+        var result = ImmutableArray.CreateBuilder<LocationPiece>();
+        foreach (var piece in leaves)
+        {
+            if (piece.View is not { } view) continue;
+            for (int count = 0; count < view.Path.Length; count++)
+            {
+                var type = count == 0 ? view.ElementType : view.Path[count - 1].Field.Type.Substitute(
+                    (view.Path[count - 1].DeclaringType as DefinitionRef)?.Arguments ?? [], []);
+                if (type is not DefinitionRef structure || types.Kind(type) != TypeKind.Struct) continue;
+                var projection = types.Project(structure, view.Path.Skip(count).ToArray());
+                if (projection is null) continue;
+                int start = piece.AccessBit - piece.LocationBit - projection.Bit, bits = types.StorageBits(type);
+                if (start < 0 || bits <= 0 || (long)start + bits > width) continue;
+                var path = view.Path.Take(count).ToImmutableArray();
+                if (result.Any(p => p.AccessBit == start && p.Width == bits && p.View is { } prior && prior.Root == view.Root
+                    && prior.Index == view.Index && prior.Type.Equals(type) && prior.Path.SequenceEqual(path))) continue;
+                result.Add(new(view with { Type = type, Path = path, Offset = 0, Width = bits }, start, 0, bits));
+            }
+        }
+        return result.ToImmutable();
     }
 }
 public sealed record StaticValueType(TypeRef Type, ValueName? Basis);

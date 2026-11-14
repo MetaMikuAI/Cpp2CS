@@ -131,6 +131,13 @@ public sealed partial class IntegerLowering
         var resolved = context.Get(state.Resolve, term);
         if (!resolved.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "位片来源查询失败", resolved.Why);
         if (resolved.Value != term) return Part(resolved.Value, low, width, floating);
+        if (term.Width > 64 && width <= 64)
+        {
+            var normalized = context.Get(structs.Ranges, new(new TermSource(term), new(function.Entry, 0), low, width));
+            if (!normalized.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "位片规范化失败", normalized.Why);
+            if (!(normalized.Value.Kind == TermKind.Slice && normalized.Value.Operands[0] == term
+                && normalized.Value.SliceLow == low)) return Value(normalized.Value, floating);
+        }
         if (readValues.TryGetValue(term, out var sourceRead))
         {
             var loaded = ReadValue(sourceRead);
@@ -150,6 +157,7 @@ public sealed partial class IntegerLowering
         }
         if (term.Identity is ResultAtom { Definition: MergeIdentity } or MemoryMerge)
         {
+            if (term.Width > 64) return MergeValue(term, low, width, floating);
             // 局部容纳使用位片；完整浮点使用可定型，其他位片按整数保存。
             // 右移反馈不为每个后缀生成另一份合流。
             int end = low + width;
@@ -187,6 +195,8 @@ public sealed partial class IntegerLowering
             }
             return Mask(result, width);
         }
+        if (term.Width > 64 && term.Identity is MemoryAtom)
+            return WideLayout<ManagedValue>(false, low, width, "来源宽读取没有完整的托管字段视图");
         var whole = Value(term);
         return whole is null ? null : Slice(whole, low, width);
     }

@@ -43,11 +43,13 @@ public sealed partial class IntegerLowering
     private ManagedValue? StructPart(Term term, int low, int width)
     {
         var result = context.Get(structs.Parts, new(term, low, width));
-        if (!result.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "结构体字段来源查询失败", result.Why);
+        if (!result.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "结构体字段来源查询失败", result.Why,
+            result.Why?.Code == "lowering.Wide.Layout" ? result.Why.Code : null);
         if (result.Value is not { } part)
         {
             var memory = context.Get(structMemoryParts, new(term, low, width));
-            if (!memory.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "宽读取的字段投影失败", memory.Why, "lowering.Struct.Projection");
+            if (!memory.IsSuccess) return Fail<ManagedValue>(LoweringFailureKind.State, "宽读取的字段投影失败", memory.Why,
+                memory.Why?.Code == "lowering.Wide.Layout" ? memory.Why.Code : "lowering.Struct.Projection");
             if (memory.Value is not { } projection) return null;
             var memoryValue = StructMemoryValue(projection);
             return memoryValue is null || projection.Width == 0 ? memoryValue : Slice(memoryValue, projection.Low, projection.Width);
@@ -158,7 +160,8 @@ public sealed partial class IntegerLowering
         var value = Value(term, IsFloat(type));
         if (value is null)
         {
-            if (failure is { } cause) failure = cause with { Reason = new("lowering.Struct.Leaf", "结构体叶子的值没有托管写法：" + type, cause.Reason) };
+            if (failure is { } cause && cause.Reason.Code != "lowering.Wide.Layout")
+                failure = cause with { Reason = new("lowering.Struct.Leaf", "结构体叶子的值没有托管写法：" + type, cause.Reason) };
             return null;
         }
         if (ReferenceType(type) || ManagedTypes.IsNativePointer(type)) return Coerce(value, type);

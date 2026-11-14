@@ -104,16 +104,19 @@ public sealed partial class IntegerLowering
         }
         var statements = new List<ManagedStatement>();
         int start = (int)((access.Location.Offset!.Value - access.Object.Storage.Offset!.Value) * 8);
-        foreach (var part in access.Parts)
+        var leaves = access.Parts.Select(part => new LocationPiece(new LocationView(ManagedLocationKind.FrameLocal,
+            access.Object.Address, part.Type, [.. part.Path], 0, part.Width, null, null), part.Bit - start, 0, part.Width)).ToArray();
+        var aggregates = write.Width > 64 ? ManagedRangeQuery.WholeStructures(types, leaves, write.Width) : [];
+        foreach (var piece in WidePieces(write, point, leaves, aggregates))
         {
-            var view = new LocationView(ManagedLocationKind.FrameLocal, access.Object.Address, part.Type, [.. part.Path],
-                0, part.Width, null, null);
-            if (!WritableStructPath(part.Path)) return [];
+            var view = piece.View!;
+            if (!WritableStructPath(view.Path)) return [];
             var target = AccessView(view, true); if (target is null) return [];
-            var value = Part(write.Value, part.Bit - start, part.Width, IsFloat(part.Type)); if (value is null) return [];
-            value = ReferenceType(part.Type) ? Coerce(value, part.Type) : IsFloat(part.Type) ? FloatBits(value, part.Width)
-                : new ConversionValue(ManagedTypes.IsSigned(part.Type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
-                    IntegerBits(value), part.Type, part.Width);
+            var value = types.Kind(view.Type) == TypeKind.Struct ? WideStructValue(write, point, piece)
+                : Part(write.Value, piece.AccessBit, piece.Width, IsFloat(view.Type)); if (value is null) return [];
+            value = types.Kind(view.Type) == TypeKind.Struct ? value : ReferenceType(view.Type) ? Coerce(value, view.Type) : IsFloat(view.Type) ? FloatBits(value, piece.Width)
+                : new ConversionValue(ManagedTypes.IsSigned(view.Type) ? ConversionKind.SignExtend : ConversionKind.ZeroExtend,
+                    IntegerBits(value), view.Type, piece.Width);
             statements.Add(target is LocalValue local ? new ManagedAssignment(position, local, value) : new ManagedStore(position, target, value));
         }
         return statements;

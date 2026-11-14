@@ -251,14 +251,17 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
                 var overlap = c.Get(state.Alias, new(location.Value, item.Storage)); if (!overlap.IsSuccess) return overlap.Propagate<FrameObjects>();
                 if (overlap.Value.Kind == AliasKind.Disjoint) continue;
                 if (overlap.Value.Kind != AliasKind.Overlap || overlap.Value.LeftLow != 0 || overlap.Value.Width != request.Width)
-                    return Failure("Mixed", "直接帧访问跨越对象边界：" + item.Type);
+                    return request.Width > 64 ? WideFailure(0, request.Width, "直接帧访问跨越对象边界：" + item.Type)
+                        : Failure("Mixed", "直接帧访问跨越对象边界：" + item.Type);
                 ImmutableArray<ValueProjection> parts;
                 if (types.Kind(item.Type) == TypeKind.Struct)
                 {
                     int start = overlap.Value.RightLow, end = start + request.Width;
                     parts = item.Fields.Where(f => f.Bit < end && f.Bit + f.Width > start).ToImmutableArray();
-                    if (parts.IsEmpty || parts.Any(f => f.Bit < start || f.Bit + f.Width > end))
-                        return Failure("Struct", "结构体帧访问只覆盖叶子的一部分或跨越字段：" + item.Type);
+                    if (parts.Any(f => f.Bit < start || f.Bit + f.Width > end)
+                        || parts.IsEmpty && !(statement is MemoryWrite && request.Width > 64))
+                        return request.Width > 64 ? WideFailure(start, request.Width, "结构体帧访问只覆盖叶子的一部分：" + item.Type)
+                            : Failure("Struct", "结构体帧访问只覆盖叶子的一部分或跨越字段：" + item.Type);
                 }
                 else
                 {
@@ -312,4 +315,6 @@ public sealed class FrameObjectQuery(StateQueries state, ManagedTypes types, Imm
         return Outcome<FrameObjects>.Success(new(list, accesses.ToImmutable()) { Results = results.ToImmutable(), Copies = copies.ToImmutable(), CopyRemainders = remainders.ToImmutable() });
     }
     private static Outcome<FrameObjects> Failure(string code, string message) => Outcome<FrameObjects>.Failure(new("lowering.Frame." + code, message));
+    private static Outcome<FrameObjects> WideFailure(int low, int width, string message) =>
+        Outcome<FrameObjects>.Failure(new("lowering.Wide.Layout", $"帧访问位段 [{low},{low + width})：{message}"));
 }

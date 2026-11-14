@@ -14,6 +14,37 @@ public sealed partial class IntegerLowering
     private ManagedRangeQuery? ranges;
     private readonly Dictionary<(ReadDefinition Read, LocationView View), ReadDefinition> rangeReads = [];
 
+    private T? WideLayout<T>(bool write, int low, int width, string detail, Reason? cause = null) where T : class =>
+        Fail<T>(write ? LoweringFailureKind.NonFrameWrite : LoweringFailureKind.NonFrameRead,
+            $"宽{(write ? "写入" : "读取")}位段 [{low},{low + width})：{detail}", cause, "lowering.Wide.Layout");
+
+    private static bool WholeCopy(StructPlan plan) => plan.Origin is not null || plan.Location is not null
+        || plan.Leaves.Length > 0 && plan.Leaves.All(l => l.Value.ConstantValue == 0);
+
+    private IReadOnlyList<LocationPiece> WidePieces(MemoryWrite write, Point point, IReadOnlyList<LocationPiece> leaves,
+        IEnumerable<LocationPiece> aggregates)
+    {
+        if (write.Width <= 64) return leaves;
+        var chosen = new List<LocationPiece>();
+        foreach (var piece in aggregates.OrderByDescending(p => p.Width).ThenBy(p => p.AccessBit))
+        {
+            if (chosen.Any(p => p.AccessBit < piece.AccessBit + piece.Width && p.AccessBit + p.Width > piece.AccessBit)) continue;
+            var source = context.Get(structs.Ranges, new(new TermSource(write.Value), point, piece.AccessBit, piece.Width));
+            if (!source.IsSuccess) continue;
+            var plan = context.Get(structs, new(piece.View!.Type, new TermSource(source.Value), point));
+            if (plan.IsSuccess && WholeCopy(plan.Value)) chosen.Add(piece);
+        }
+        return chosen.Concat(leaves.Where(p => !chosen.Any(a => p.AccessBit >= a.AccessBit && p.AccessBit + p.Width <= a.AccessBit + a.Width)))
+            .OrderBy(p => p.AccessBit).ToArray();
+    }
+
+    private ManagedValue? WideStructValue(MemoryWrite write, Point point, LocationPiece piece)
+    {
+        var source = context.Get(structs.Ranges, new(new TermSource(write.Value), point, piece.AccessBit, piece.Width));
+        return source.IsSuccess ? StructValue(new TermSource(source.Value), piece.View!.Type, point)
+            : WideLayout<ManagedValue>(true, piece.AccessBit, piece.Width, "结构体来源没有完整位片", source.Why);
+    }
+
     private LocationResult? Range(Term address, int width)
     {
         if (locations is null) return null;
@@ -46,10 +77,16 @@ public sealed partial class IntegerLowering
     private ManagedValue? RangeReadAt(ReadDefinition read, int low, int width)
     {
         var range = Range(read.Read.Address, read.Read.Width);
+        if (read.Read.Width > 64 && range is { Pieces.IsEmpty: true, Kind: ManagedLocationKind.Unknown })
+            return WideLayout<ManagedValue>(false, low, width, "来源范围不能定位到完整字段", range.Why);
         if (range?.Why is { Code: "location.padding" or "location.overlap" or "location.range" } why)
-            return Fail<ManagedValue>(LoweringFailureKind.NonFrameRead, why.Message, why, why.Code);
+            return read.Read.Width > 64 ? WideLayout<ManagedValue>(false, low, width, why.Message, why)
+                : Fail<ManagedValue>(LoweringFailureKind.NonFrameRead, why.Message, why, why.Code);
         if (range is null || range.Pieces.IsEmpty) return null;
         var selected = range.Pieces.Where(p => p.AccessBit < low + width && p.AccessBit + p.Width > low).ToArray();
+        if (read.Read.Width > 64 && (selected is not [{ View: { } field, LocationBit: 0 } whole]
+            || whole.AccessBit != low || whole.Width != width || width != types.StorageBits(field.Type)))
+            return WideLayout<ManagedValue>(false, low, width, "来源位片没有恰好覆盖一个完整字段");
         if (selected.Any(p => p.View is null))
             return Fail<ManagedValue>(LoweringFailureKind.NonFrameRead, "使用访问范围中的填充位", code: "location.padding");
         if (width > 64) return Fail<ManagedValue>(LoweringFailureKind.NonFrameRead, "跨位置的值超过整数栈宽度", code: "lowering.Location.Width");
@@ -86,11 +123,23 @@ public sealed partial class IntegerLowering
     // null 表示仍使用完整位置的既有写入；空列表表示失败或没有可观察的字段。
     private IReadOnlyList<ManagedStatement>? RangeStores(MemoryWrite write, Point point)
     {
+        if (write.Width > 64 && structReturnStores is not null
+            && context.Get(structReturnStores, write.Identity) is { IsSuccess: true, Value: true }) return null;
+        var range = Range(write.Address, write.Width);
+        if (write.Width > 64)
+        {
+            if (range?.Why?.Code == "location.padding") return [];
+            if (range is null || range.Kind is ManagedLocationKind.Unknown or ManagedLocationKind.NotManaged || range.Pieces.IsEmpty)
+            { WideLayout<object>(true, 0, write.Width, "目的范围没有完整的托管布局", range?.Why); return []; }
+            foreach (var piece in range.Pieces)
+                if (piece.View is { } field && (piece.LocationBit != 0 || piece.Width != types.StorageBits(field.Type)))
+                { WideLayout<object>(true, piece.AccessBit, piece.Width, "只覆盖字段的一部分：" + string.Join('.', field.Path)); return []; }
+        }
         if (locations is not null && context.Get(locations, new(write.Address, write.Width)) is { IsSuccess: true } located)
             foreach (var view in located.Value.Views.Where(v => v.Offset == 0 && types.Kind(v.Type) == TypeKind.Struct
                 && types.StorageBits(v.Type) == write.Width))
-                if (context.Get(structs, new(view.Type, new TermSource(write.Value), point)).IsSuccess) return null;
-        var range = Range(write.Address, write.Width);
+                if (context.Get(structs, new(view.Type, new TermSource(write.Value), point)) is { IsSuccess: true } plan
+                    && (write.Width <= 64 || WholeCopy(plan.Value))) return null;
         if (range?.Why is { Code: "location.padding" or "location.overlap" or "location.range" } why)
         { Fail<object>(LoweringFailureKind.NonFrameWrite, why.Message, why, why.Code); return []; }
         if (range is null || range.Pieces.IsEmpty) return null;
@@ -98,7 +147,7 @@ public sealed partial class IntegerLowering
             && wholePiece.Width == types.Size(only.Type) * 8) return null;
         if (RejectAddressUse([write.Value], "写入内存")) return [];
         var statements = new List<ManagedStatement>();
-        foreach (var piece in range.Pieces)
+        foreach (var piece in WidePieces(write, point, range.Pieces, range.Aggregates))
         {
             if (piece.View is not { } view) continue;
             if (!Writable(view)) return [];
@@ -108,6 +157,13 @@ public sealed partial class IntegerLowering
             { Fail<object>(LoweringFailureKind.NonFrameWrite, "部分写入只支持整数与枚举字段", code: "location.partial-write-type"); return []; }
             var target = AccessView(view, true); if (target is null) return [];
             var setter = FieldAccessor(target, true); if (failure is not null) return [];
+            if (types.Kind(view.Type) == TypeKind.Struct)
+            {
+                var whole = WideStructValue(write, point, piece); if (whole is null) return [];
+                statements.Add(setter is null ? new ManagedStore(position, target, whole)
+                    : new ManagedCall(position, AccessorInvocation(setter, target, [whole]), null) { Inlined = true });
+                continue;
+            }
             var value = Part(write.Value, piece.AccessBit, piece.Width, IsFloat(view.Type)); if (value is null) return [];
             if (partial)
             {

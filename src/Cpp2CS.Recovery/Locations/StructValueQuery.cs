@@ -19,7 +19,7 @@ public sealed record StructPlan(StructOrigin? Origin, LocationView? Location, Re
 }
 public readonly record struct StructPartRequest(Term Term, int Low, int Width);
 public sealed record StructPart(StructOrigin Origin, ValueProjection Projection, int Low, int Width);
-internal readonly record struct SourceRange(BoundSource Source, Point Point, int Low, int Width);
+internal readonly record struct SourceRange(BoundSource Source, Point Point, int Low, int Width, int UnitWidth = 0);
 
 /// <summary>绑定值的位范围视图；填充不补零，间接内容只向状态模型查询。</summary>
 internal sealed class SourceRangeQuery(StateQueries state) : Query<SourceRange, Term>
@@ -28,6 +28,13 @@ internal sealed class SourceRangeQuery(StateQueries state) : Query<SourceRange, 
     public override Outcome<Term> Compute(QueryContext c, SourceRange key)
     {
         var t = c.Snapshot.Terms;
+        if (key.UnitWidth > 0)
+        {
+            if (key.Low < 0 || (long)key.Low + key.Width > key.UnitWidth) return Missing();
+            // 整体读取与逐字段读取的内存原子宽度不同；整段视图仍使用同一个定义时刻。
+            var whole = c.Get(this, key with { Low = 0, Width = key.UnitWidth, UnitWidth = 0 });
+            return whole.IsSuccess ? c.Get(state.Resolve, t.Slice(whole.Value, key.Low, key.Width)) : whole;
+        }
         switch (key.Source)
         {
             case TermSource source:
@@ -70,13 +77,16 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
     private readonly ManagedLocationQuery? locations;
     private readonly ImmutableArray<StructOrigin> origins;
     private readonly SourceRangeQuery ranges;
+    internal SourceRangeQuery Ranges => ranges;
     private readonly BoundSourceQuery sourcePointers;
+    private readonly ManagedRangeQuery? memoryRanges;
     private readonly FlowQueries flow = new();
     public StructPartQuery Parts { get; }
     public StructValueQuery(ManagedTypes types, StateQueries state, ManagedLocationQuery? locations, IEnumerable<StructOrigin> origins)
     {
         this.types = types; this.state = state; this.locations = locations; this.origins = origins.ToImmutableArray();
         ranges = new(state); sourcePointers = new(state); Parts = new(this);
+        memoryRanges = locations is null ? null : new(locations, types);
     }
     public override Outcome<StructPlan> Compute(QueryContext c, StructRequest key)
     {
@@ -117,7 +127,12 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
             foreach (var leaf in parts)
             {
                 var source = c.Get(ranges, new(origin.Source, origin.Point, leaf.Projection.Bit, leaf.Projection.Width));
-                if (!source.IsSuccess || source.Value != leaf.Value) { same = false; break; }
+                if (!source.IsSuccess) { same = false; break; }
+                if (source.Value == leaf.Value) continue;
+                var whole = WideMemory(leaf.Value) && types.StorageBits(structure) > 64
+                    ? c.Get(ranges, new(origin.Source, origin.Point, leaf.Projection.Bit, leaf.Projection.Width, types.StorageBits(structure)))
+                    : default;
+                if (!whole.IsSuccess || whole.Value != leaf.Value) { same = false; break; }
             }
             if (same) return Outcome<StructPlan>.Success(new(origin, null, null, parts));
         }
@@ -129,6 +144,11 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
         return Outcome<StructPlan>.Success(new(null, null, null, parts) { Representation = representation });
     }
     private static bool Incomplete(Term term) => term.Kind is TermKind.Undefined or TermKind.Unknown || term.Operands.Any(Incomplete);
+    private static bool WideMemory(Term term)
+    {
+        var root = term.Kind == TermKind.Slice ? term.Operands[0] : term;
+        return root.Width > 64 && root.Identity is MemoryAtom or MemoryMerge;
+    }
     private static Outcome<StructPlan> Failure(string code, string text) => Outcome<StructPlan>.Failure(new("lowering.Struct." + code, text));
 
     private Outcome<StructPlan?> MemoryCopy(QueryContext c, DefinitionRef type, ImmutableArray<StructLeaf> leaves, Point use)
@@ -170,6 +190,13 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
                 if (projection is not null && projection.Bit + element.Offset * 8 + low == leaf.Projection.Bit)
                     candidate = element with { Type = type, Path = [], Offset = 0, Width = types.StorageBits(type) };
             }
+            if (candidate is null && observed.Read.Width > 64)
+            {
+                var range = c.Get(memoryRanges!, new(observed.Read.Address, observed.Read.Width));
+                if (!range.IsSuccess) return range.Propagate<StructPlan?>();
+                candidate = range.Value.Aggregates.FirstOrDefault(p => p.View!.Type.Equals(type)
+                    && p.AccessBit + leaf.Projection.Bit == low && low + leaf.Projection.Width <= p.AccessBit + p.Width)?.View;
+            }
             if (candidate is null || whole is not null && !SameLocation(whole, candidate)) return None();
             whole ??= candidate;
             observations.Add((memory, term, observed.Point, observed.Read));
@@ -205,12 +232,25 @@ public sealed class StructValueQuery : Query<StructRequest, StructPlan>
                 {
                     var source = c.Get(q.ranges, new(origin.Source, origin.Point, projection.Bit, projection.Width));
                     if (!source.IsSuccess) continue;
-                    var part = source.Value; int sourceLow = 0, desiredLow = 0;
-                    if (part.Kind == TermKind.Slice) { sourceLow = part.SliceLow!.Value; part = part.Operands[0]; }
-                    var value = desired.Value;
-                    if (value.Kind == TermKind.Slice) { desiredLow = value.SliceLow!.Value; value = value.Operands[0]; }
-                    if (part == value && desiredLow >= sourceLow && desiredLow + key.Width <= sourceLow + projection.Width)
+                    var whole = WideMemory(desired.Value) && q.types.StorageBits(structure) > 64
+                        ? c.Get(q.ranges, new(origin.Source, origin.Point, projection.Bit, projection.Width, q.types.StorageBits(structure)))
+                        : default;
+                    var views = whole.IsSuccess
+                        ? new[] { source.Value, whole.Value }
+                        : [source.Value];
+                    foreach (var view in views)
+                    {
+                        var part = view; int sourceLow = 0, desiredLow = 0;
+                        if (part.Kind == TermKind.Slice) { sourceLow = part.SliceLow!.Value; part = part.Operands[0]; }
+                        var value = desired.Value;
+                        if (value.Kind == TermKind.Slice) { desiredLow = value.SliceLow!.Value; value = value.Operands[0]; }
+                        if (part != value || desiredLow < sourceLow || desiredLow + key.Width > sourceLow + projection.Width) continue;
+                        if (value.Width > 64 && value.Identity is MemoryAtom or MemoryMerge
+                            && (desiredLow != sourceLow || key.Width != projection.Width))
+                            return Outcome<StructPart?>.Failure(new("lowering.Wide.Layout",
+                                $"宽读取的来源位段 [{desiredLow},{desiredLow + key.Width}) 只覆盖字段 {string.Join('.', projection.Path)} 的一部分。"));
                         return Outcome<StructPart?>.Success(new(origin, projection, desiredLow - sourceLow, key.Width));
+                    }
                 }
             }
             return Outcome<StructPart?>.Success(null);
@@ -263,6 +303,14 @@ public sealed class StructMemoryPartQuery(StateQueries state, ManagedLocationQue
         {
             var value = c.Get(state.Read, observed.Read.Identity);
             if (!value.IsSuccess || value.Value != source) continue;
+            if (observed.Read.Width > 64)
+            {
+                var range = c.Get(ranges!, new(observed.Read.Address, observed.Read.Width));
+                if (!range.IsSuccess) return range.Propagate<StructMemoryPart?>();
+                if (range.Value.Kind == ManagedLocationKind.Unknown)
+                    return Outcome<StructMemoryPart?>.Failure(new("lowering.Wide.Layout",
+                        $"宽读取的来源范围 [0,{observed.Read.Width}) 没有完整布局。", range.Value.Why));
+            }
             if (field is null)
             {
                 var t = c.Snapshot.Terms;
@@ -298,6 +346,10 @@ public sealed class StructMemoryPartQuery(StateQueries state, ManagedLocationQue
                 && readLow + key.Width <= p.AccessBit + p.Width).ToArray();
             if (parts.Length != 1) continue;
             var part = parts[0];
+            if (observed.Read.Width > 64 && (part.AccessBit != readLow || part.LocationBit != 0
+                || part.Width != key.Width || key.Width != types.StorageBits(part.View!.Type)))
+                return Outcome<StructMemoryPart?>.Failure(new("lowering.Wide.Layout",
+                    $"宽读取的来源位段 [{readLow},{readLow + key.Width}) 只覆盖字段 {string.Join('.', part.View!.Path)} 的一部分。"));
             return Outcome<StructMemoryPart?>.Success(new(part.View!, value.Value, [observed.Read.Identity])
             { Low = part.LocationBit + readLow - part.AccessBit, Width = key.Width });
         }

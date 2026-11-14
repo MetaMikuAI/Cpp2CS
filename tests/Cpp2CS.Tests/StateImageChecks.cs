@@ -16,10 +16,18 @@ internal static class StateImageChecks
     private sealed class Image : IImage
     {
         private readonly byte[] bytes = new byte[0x200];
-        public Image() { BitConverter.TryWriteBytes(bytes.AsSpan(0x20), 0x1122334455667788UL); }
+        private readonly ByteOrder order;
+        public Image(ByteOrder order = ByteOrder.LittleEndian)
+        {
+            this.order = order;
+            BitConverter.TryWriteBytes(bytes.AsSpan(0x20), 0x1122334455667788UL);
+            BitConverter.TryWriteBytes(bytes.AsSpan(0x28), 0x99aabbccddeeff00UL);
+            BitConverter.TryWriteBytes(bytes.AsSpan(0x30), 0x0123456789abcdefUL);
+            BitConverter.TryWriteBytes(bytes.AsSpan(0x38), 0xfedcba9876543210UL);
+        }
         public ulong PreferredBase => 0;
         public int PointerWidth => 8;
-        public ByteOrder ByteOrder => ByteOrder.LittleEndian;
+        public ByteOrder ByteOrder => order;
         public ImmutableArray<ImageRange> Ranges => [new(0, 0x100, StorageKind.FileContent, false, false), new(0x100, 0x100, StorageKind.FileContent, false, true)];
         public IReadOnlyList<ImageRelocation> Relocations { get; } = [new(0x10, 8, RelocationKind.Pointer, new PointerTarget.Internal(0x180))];
         public ImmutableArray<ImportSymbol> Imports => [];
@@ -36,7 +44,9 @@ internal static class StateImageChecks
         public ulong ReadUnsigned(ulong offset, int width)
         {
             ulong value = 0;
-            for (var i = 0; i < width; i++) value |= (ulong)bytes[checked((int)offset + i)] << (i * 8);
+            for (var i = 0; i < width; i++)
+                if (order == ByteOrder.LittleEndian) value |= (ulong)bytes[checked((int)offset + i)] << (i * 8);
+                else value = (value << 8) | bytes[checked((int)offset + i)];
             return value;
         }
         public PointerTarget ReadPointer(ulong offset) => offset == 0x10 ? new PointerTarget.Internal(0x180)
@@ -61,8 +71,11 @@ internal static class StateImageChecks
         var through = Read(pointer.Result, 64);
         var partial = Read(At(0x10), 32);
         var writable = Read(At(0x100), 64);
+        var wide = Read(At(0x20), 128); var block = Read(At(0x20), 256);
+        var wideRelocation = Read(At(8), 128); var wideBoundary = Read(At(0xf8), 128);
         var builder = new FunctionBuilder(terms, entry, 64, new(frame)) { ImageBase = imageBase };
-        builder.Blocks.Add(new(entry, [], [constant, narrow, call, afterCall, pointer, through, partial, writable], new Return([])));
+        builder.Blocks.Add(new(entry, [], [constant, narrow, call, afterCall, pointer, through, partial, writable,
+            wide, block, wideRelocation, wideBoundary], new Return([])));
         var function = builder.Freeze();
 
         var queries = new StateQueries(image: new Image());
@@ -81,6 +94,16 @@ internal static class StateImageChecks
         checks.True(Value(through).Identity is MemoryAtom { Location: { Region: Region.Image, Offset: var offset } } && offset == 0x180, "经只读指针的读取落在可写数据上，不是常量");
         checks.True(Value(partial).Identity is MemoryAtom, "与重定位部分重叠的读取不解析");
         checks.True(Value(writable).Identity is MemoryAtom, "可写数据的读取不是常量");
+        var expected = (new System.Numerics.BigInteger(0x99aabbccddeeff00UL) << 64) | 0x1122334455667788UL;
+        checks.True(Value(wide).ConstantValue == expected, "128 位只读字面量保留全部位");
+        var high = (new System.Numerics.BigInteger(0xfedcba9876543210UL) << 64) | 0x0123456789abcdefUL;
+        checks.True(Value(block).ConstantValue == (high << 128 | expected), "256 位只读块按字节序组成常量");
+        checks.True(Value(wideRelocation).Identity is MemoryAtom, "宽读取包含指针重定位时不折成数字");
+        checks.True(Value(wideBoundary).Identity is MemoryAtom, "宽读取跨入可写区域时不折叠");
+        var big = new StateQueries(image: new Image(ByteOrder.BigEndian));
+        var bigValue = big.CreateContext(function).Get(big.Read, wide.Identity);
+        checks.True(bigValue.IsSuccess && bigValue.Value.ConstantValue ==
+            ((new System.Numerics.BigInteger(0x8877665544332211UL) << 64) | 0x00ffeeddccbbaa99UL), "宽常量读取遵守映像的大端字节序");
 
         var plain = new StateQueries();
         var plainRead = plain.CreateContext(function).Get(plain.Read, constant.Identity);
