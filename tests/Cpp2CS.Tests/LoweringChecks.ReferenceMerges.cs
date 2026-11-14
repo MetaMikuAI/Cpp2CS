@@ -175,7 +175,8 @@ internal static partial class LoweringChecks
             if (mode is "DifferentLiteral" or "NullLiteral") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value is not StringValue, "不同字符串或空来源不能取得同值字符串视图");
             if (mode is "Common" or "Memory" or "Null") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value!.Type.Equals(Type(mode == "Null" ? "FirstError" : "Error")), mode + " 按定义取最近公共祖先，空不约束类型");
             if (mode == "Throw") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedThrow>().Single().Exception.Type.Equals(Type("Error")), "不同分配合流后以公共祖先抛出");
-            if (mode is "Interface" or "Array" or "Untyped") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value!.Type.Equals(types.Object), mode + " 合流取 object");
+            if (mode is "Interface" or "Array") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value!.Type.Equals(types.Object), mode + " 合流取 object");
+            if (mode == "Untyped") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value!.Type.Equals(types.String), "字符串实体与字符串形参合流保持 string 类型");
             if (mode is "SameInterface" or "SameArray") checks.True(body.Blocks.SelectMany(b => b.Statements).OfType<ManagedReturn>().Single().Value!.Type.Equals(mode == "SameInterface" ? Type("IItem") : new ArrayRef(Type("FirstError"), 1)), mode + " 同型的接口、数组合流保持原类型");
         }
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();

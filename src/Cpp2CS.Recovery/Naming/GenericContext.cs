@@ -35,7 +35,7 @@ public sealed partial class ValueNamingQuery
         _ => null,
     };
 
-    private static NamedValue Entity(MetadataEntity entity, ulong slot = 0)
+    private NamedValue Entity(MetadataEntity entity, ulong slot = 0)
     {
         var name = new EntityName(entity, slot);
         return entity switch
@@ -44,7 +44,7 @@ public sealed partial class ValueNamingQuery
             TypeEntity => new(ValueKind.RuntimePointer, name, "Il2CppType"),
             MethodEntity => new(ValueKind.RuntimePointer, name, "MethodInfo"),
             FieldEntity => new(ValueKind.RuntimePointer, name, "FieldInfo"),
-            StringEntity => new(ValueKind.ManagedReference, name, "Il2CppString"),
+            StringEntity => new(ValueKind.ManagedReference, name, "Il2CppString") { ReferenceType = stringType },
             _ => NamedValue.Unknown("naming.entity", "未登记的实体种类。")
         };
     }

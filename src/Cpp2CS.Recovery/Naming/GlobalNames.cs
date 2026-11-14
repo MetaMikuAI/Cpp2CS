@@ -47,11 +47,17 @@ public sealed class NamingSurvey(CallNamingQuery calls, IMetadataSlotDecoder dec
     public void Observe(NativeFunction function)
     {
         var c = state.CreateContext(function);
+        SemanticUses? slotUses = null;
         foreach (var call in function.Blocks.SelectMany(b => b.Statements).OfType<Call>())
             if (c.Get(calls, call.Identity) is { IsSuccess: true, Value.Operation.Name: "InitializeMetadata" } classified
-                && classified.Value.Inputs?.GetValueOrDefault("slot")?.Source is TermSource source
-                && Address(c, source.Term, function.AddressWidth) is { } address)
-                slots.TryAdd(address, decoder.Decode(address));
+                && classified.Value.Inputs?.GetValueOrDefault("slot")?.Source is TermSource source)
+            {
+                if (Address(c, source.Term, function.AddressWidth) is { } address)
+                    slots.TryAdd(address, decoder.Decode(address));
+                else
+                    foreach (var input in (slotUses ??= new(c, calls, state, binder, entry)).ImageAddresses(source.Term, c, state))
+                        slots.TryAdd(input, decoder.Decode(input));
+            }
         var accesses = new List<Access>();
         var unclassified = new List<(Access Access, Term Address, Reason? Why)>();
         foreach (var block in function.Blocks)

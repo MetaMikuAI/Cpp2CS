@@ -20,6 +20,8 @@ public sealed record StructureRecord(string Kind, ulong? Address, string Evidenc
     public Reason? Reason { get; init; }
     /// <summary>拒绝改写的原因；作为洞的首因，下降的失败原因成为它的原因。</summary>
     public Reason? Why { get; init; }
+    /// <summary>使用处消失时一并删除的诊断锚点。</summary>
+    internal StableIdentity? Use { get; init; }
 }
 public sealed record StructureResult(NativeFunction Function, ImmutableArray<StructureRecord> Records,
     ImmutableArray<string> Assumptions)
@@ -60,7 +62,14 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                     ? rejected.FirstOrDefault(x => x.Kind == r.Kind && x.Address == r.Address) ?? r : r).ToArray();
                 var kept = rejected.Where(r => !records.Any(x => x.Kind == r.Kind && x.Address == r.Address)
                     && !last.Any(x => x.Kind == r.Kind && x.Address == r.Address)).ToArray();
-                return result with { Records = [.. records, .. last, .. kept],
+                var finalRecords = records.Concat(last).Concat(kept).ToImmutableArray();
+                if (finalRecords.Any(r => r.Use is not null))
+                {
+                    var liveUses = result.Function.Blocks.SelectMany(b => b.Statements.Select(s => SlotUseIdentity(s, b.Identity))
+                        .Append(b.Identity)).ToHashSet();
+                    finalRecords = finalRecords.Where(r => r.Use is null || liveUses.Contains(r.Use)).ToImmutableArray();
+                }
+                return result with { Records = finalRecords,
                     Assumptions = [.. assumptions.Order(StringComparer.Ordinal)], Timings = timings.ToImmutableDictionary() };
             }
             foreach (var r in result.Records.Where(r => !r.Removed && (r.Reason is not null || r.Why is not null)))
@@ -436,8 +445,21 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
     private bool PrivateCondition(QueryContext c, Term condition)
     {
         var resolved = c.Get(state.Resolve, condition); if (!resolved.IsSuccess) return false;
-        bool Check(Term t) => t.Kind == TermKind.Constant || t.Identity is MemoryAtom memory && PrivateLocation(c, memory.Location)
-            || t.Kind is TermKind.Operation or TermKind.Slice or TermKind.Concat && t.Operands.All(Check);
+        var active = new HashSet<Term>();
+        bool Check(Term t)
+        {
+            var value = c.Get(state.Resolve, t); if (!value.IsSuccess) return false;
+            t = value.Value;
+            if (!active.Add(t)) return false;
+            // 合流和选择按私有内容的来源判定；选择条件仍保留在值选择中。
+            bool result = t.Kind == TermKind.Constant || t.Identity is MemoryAtom memory && PrivateLocation(c, memory.Location)
+                || t.Operator is CoreOperator { Operation: CoreOperation.Select } && !t.Operands[0].ContainsUndefined && t.Operands.Skip(1).All(Check)
+                || t.Operator is not CoreOperator { Operation: CoreOperation.Select }
+                    && (t.Kind is TermKind.Operation or TermKind.Slice or TermKind.Concat) && t.Operands.All(Check)
+                || t.Identity is ResultAtom { Definition: MergeIdentity id } && c.Snapshot.Blocks.SelectMany(b => b.Merges)
+                    .Single(m => m.Identity == id).Inputs.All(i => Check(i.Value));
+            active.Remove(t); return result;
+        }
         return Check(resolved.Value);
     }
 }

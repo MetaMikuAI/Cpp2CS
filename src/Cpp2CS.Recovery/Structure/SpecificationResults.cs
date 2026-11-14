@@ -16,12 +16,40 @@ public sealed partial class UnobservableEffects
         var c = names.CreateContext(input); context = c;
         HashSet<Term>? uses = null;
         var edit = new SnapshotRewrite(input);
+        SlotContentsRewrite? mergedSlots = null;
+        SemanticUses? slotUses = null;
+        bool MergedAddress(Term address, out Term resolved)
+        {
+            resolved = address;
+            if (address.Identity is not ResultAtom && address.Operator is not CoreOperator { Operation: CoreOperation.Select }) return false;
+            var value = c.Get(state.Resolve, address); resolved = value.IsSuccess ? value.Value : address;
+            return value.IsSuccess && (resolved.Identity is ResultAtom { Definition: MergeIdentity }
+                || resolved.Operator is CoreOperator { Operation: CoreOperation.Select });
+        }
+        void Project(Term address, Term result, Statement statement)
+        {
+            mergedSlots ??= new(c, new(state, names, input.Blocks.SelectMany(b => b.Merges.Select(m => (b.Identity, Merge: m)))
+                .ToDictionary(p => p.Merge.Result, p => (p.Identity, p.Merge))));
+            var proof = mergedSlots.Prove(address);
+            if (!proof.IsSuccess)
+            {
+                records.Add(new("merged-slot", statement.Trace?.NativeAddress, proof.Why!.Message, false) { Reason = proof.Why });
+                return;
+            }
+            edit.Replacements[result] = mergedSlots.Materialize(proof.Value);
+            if (statement is MemoryRead) edit.RemovedStatements.Add(statement);
+            records.Add(new("merged-slot", statement.Trace?.NativeAddress, "已解码槽的稳定内容按地址合流的同一入边或原选择条件分配", true));
+        }
         foreach (var block in input.Blocks)
         {
             var statements = ImmutableArray.CreateBuilder<Statement>();
             foreach (var statement in block.Statements)
             {
                 statements.Add(statement);
+                if (statement is MemoryRead { Acquire: false } read && read.Width == input.AddressWidth && names.Slots.Count != 0
+                    && MergedAddress(read.Address, out var readAddress)
+                    && (slotUses ??= new(c, calls, state, names.Binder, names.Entry)).ImageAddresses(readAddress, c, state).Any(names.Slots.ContainsKey))
+                    Project(read.Address, read.Result, read);
                 if (statement is not Call call || call.DoesNotReturn) continue;
                 var classified = c.Get(calls, call.Identity);
                 if (!classified.IsSuccess || classified.Value.Operation is not { DoesNotReturn: false } operation) continue;
@@ -47,6 +75,11 @@ public sealed partial class UnobservableEffects
                 if (!uses.Contains(result.Term)) continue;
                 var resolved = c.Get(state.Resolve, address.Term);
                 if (!resolved.IsSuccess) continue;
+                if (MergedAddress(resolved.Value, out var mergedAddress))
+                {
+                    Project(address.Term, result.Term, call);
+                    continue;
+                }
                 var location = c.Get(state.Locations, new(resolved.Value, result.Term.Width));
                 if (!location.IsSuccess) continue;
                 var named = c.Get(names, input.Terms.Atom(new MemoryAtom(location.Value, null), result.Term.Width));
@@ -60,7 +93,21 @@ public sealed partial class UnobservableEffects
             if (statements.Count != block.Statements.Length)
                 edit.Blocks[block.Identity] = block with { Statements = statements.ToImmutable() };
         }
-        return edit.Replacements.Count == 0 ? input : edit.Apply();
+        if (edit.Replacements.Count == 0) return input;
+        mergedSlots?.Publish(edit);
+        var rewritten = edit.Apply();
+        if (mergedSlots is { PathEntities.Count: > 0 })
+        {
+            var mapped = new Dictionary<Term, Term>();
+            Term Map(Term term)
+            {
+                if (mapped.TryGetValue(term, out var value)) return value;
+                return mapped[term] = edit.Replacements.TryGetValue(term, out var replacement) && replacement != term
+                    ? Map(replacement) : SnapshotRewrite.Rebuild(term, Map);
+            }
+            RecordPathEntities(rewritten, mergedSlots.PathEntities.Select(Map).ToHashSet(), records);
+        }
+        return rewritten;
     }
 
     private void ForwardFixedReads(NativeFunction function, List<StructureRecord> records, QueryContext c, SnapshotRewrite edit)

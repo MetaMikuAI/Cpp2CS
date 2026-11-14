@@ -48,14 +48,15 @@ public sealed record NamedValue(ValueKind Kind, ValueName? Name, string? Record 
 /// <summary>名字保存实体、定义或规格字段依据；不向项表写入替代项，不改写快照。</summary>
 public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery calls, NamingFacts facts, RuntimeSpec spec,
     MethodBinder binder, SignatureBinding? entry = null, IRgctxDecoder? rgctx = null, GenericWitness? witness = null,
-    TypeRef? exceptionType = null, IReadOnlyDictionary<BlockIdentity, TypeRef>? caughtTypes = null) : Query<Term, NamedValue>
+    TypeRef? exceptionType = null, IReadOnlyDictionary<BlockIdentity, TypeRef>? caughtTypes = null, TypeRef? stringType = null) : Query<Term, NamedValue>
 {
     /// <summary>区域查询已证明的 catch 类型作为查询视图；不改写异常对象身份。</summary>
     public ValueNamingQuery WithCaughtTypes(IReadOnlyDictionary<BlockIdentity, TypeRef> types) =>
-        new(state, calls, facts, spec, binder, entry, rgctx, witness, exceptionType, types.ToImmutableDictionary());
+        new(state, calls, facts, spec, binder, entry, rgctx, witness, exceptionType, types.ToImmutableDictionary(), stringType);
     internal RuntimeSpec Spec => spec;
     internal SignatureBinding? Entry => entry;
     internal ImmutableDictionary<ulong, FlagEvidence> Flags => facts.Flags;
+    internal ImmutableDictionary<ulong, Outcome<MetadataEntity>> Slots => facts.Slots;
     internal MethodBinder Binder => binder;
     internal SignatureBinding? EntrySignature => entry;
     private readonly RuntimeInputKindsQuery inputKinds = new(state,calls);

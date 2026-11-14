@@ -80,6 +80,9 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         if (result.Failure is { } failure && transformed.Records.FirstOrDefault(r =>
             !r.Removed && r.Address == failure.Position && r.Why is not null) is { Why: { } why })
             return new Missing<ManagedBody>(new("结构", failure.Position, "类型判断", why with { Cause = failure.Reason }));
+        if (result.Body is not null && transformed.Records.FirstOrDefault(r => !r.Removed
+            && r.Why?.Code.StartsWith("structure.merged-slot.use.", StringComparison.Ordinal) == true) is { Why: { } pathEntity } unsupported)
+            return new Missing<ManagedBody>(new("结构", unsupported.Address ?? context.Entry.Address, "元数据实体使用", pathEntity));
         if (result.Body is { } candidate)
         {
             // 位重解释与浮点取整等依赖匹配核心库的 BCL 方法；裁剪掉的能力是缺口，不交给输出层制造非法体。

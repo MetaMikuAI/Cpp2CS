@@ -101,7 +101,7 @@ public sealed partial class IntegerLowering
         { GenericFailure<object>("Struct", "含类型参数的值类型签名尚未下降"); return new(null, failure); }
         if (spec is not null && calls is not null)
         {
-            var naming = new ValueNamingQuery(state, calls, names, spec, binder, signature, rgctx, types.Layouts as GenericWitness, types.Object);
+            var naming = new ValueNamingQuery(state, calls, names, spec, binder, signature, rgctx, types.Layouts as GenericWitness, types.Object, stringType: types.String);
             valueNames = naming;
             locations = new(state, naming, types.Layouts, spec);
             dispatch = new(state, calls, naming, locations, binder, spec, types.Layouts as GenericWitness);
