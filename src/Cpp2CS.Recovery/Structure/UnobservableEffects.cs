@@ -188,7 +188,8 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                 var batch = new SnapshotRewrite(current);
                 var occupied = new HashSet<BlockIdentity>();
                 var typeCheckStart = timer.Elapsed.TotalSeconds;
-                bool foldedTypeCheck = FoldTypeCheck(c, batch, predecessors, records, rejectedTypeChecks);
+                bool foldedTypeCheck = FoldArrayStoreCheck(c, batch, records, rejectedTypeChecks)
+                    || FoldTypeCheck(c, batch, predecessors, records, rejectedTypeChecks);
                 timings["类型判断"] = timings.GetValueOrDefault("类型判断") + timer.Elapsed.TotalSeconds - typeCheckStart;
                 if (foldedTypeCheck)
                 {

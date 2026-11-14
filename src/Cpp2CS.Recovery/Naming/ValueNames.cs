@@ -377,6 +377,14 @@ public sealed partial class ValueNamingQuery(StateQueries state, CallNamingQuery
             return Yes(NamedValue.Unknown("naming.read-base", "读取的基值没有运行时结构身份。", owner.Value.Why));
         if (ContextRead(location, low, parent, record) is { } generic) return generic;
         var bitOffset = location.Offset.Value * 8 + low;
+        // 数组对象头内嵌 Il2CppObject；类指针保留共同的对象头字段身份。
+        if (record == "Il2CppArray")
+        {
+            var header = spec.Layout.Field(record, "obj");
+            var klass = spec.Layout.Field("Il2CppObject", "klass");
+            if (bitOffset == header.OffsetBits + klass.OffsetBits && location.Width == klass.Size * 8)
+                return Yes(Field(parent, "Il2CppObject", klass));
+        }
         var fields = layout.Fields.Values.Where(f => f.OffsetBits == bitOffset && (f.BitWidth ?? f.Size * 8) == location.Width).ToArray();
         // 对象头的联合以运行时对象的 klass 视图解释。
         if (record == "Il2CppObject" && fields.Any(f => f.Path == "Il2CppObject.klass"))

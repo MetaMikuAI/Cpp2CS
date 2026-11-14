@@ -22,6 +22,9 @@
     },
     "Il2CppClass.rgctx_data": {
       "stable_after_nonzero": "vm/Class.cpp: InitLocked 在 g_MetadataLock 下构造 RGCTX 后 PublishInitialized；initialized / init_pending 防止重复设置，发布后不重置"
+    },
+    "Il2CppClass.element_class": {
+      "immutable": "il2cpp-class-internals.h: Il2CppClass::element_class；metadata/ArrayMetadata.cpp: GetBoundedArrayClass；vm/GlobalMetadata.cpp: FromTypeDefinition；vm/Class.cpp: FromGenericParameter / GetPtrClass；vm/GenericClass.cpp: CreateClass 在发布类前设置元素类，发布后不变"
     }
   }
 }

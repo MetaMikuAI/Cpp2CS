@@ -296,6 +296,15 @@ public sealed partial class TermTable
                     if (equal.Operands.Contains(less.Operands[0]) && equal.Operands.Contains(less.Operands[1]))
                         return Op(comparison.Operation, 1, less.Operands[1], less.Operands[0]);
                 }
+        // x!=0 且 x!=1 等于 x>u1；x>=1 的规范形已成为 x!=0。
+        if (op == And && width == 1 && Is(a, Not) && Is(a.Operands[0], Equal) && Is(b, Not) && Is(b.Operands[0], Equal))
+        {
+            var left = a.Operands[0]; var right = b.Operands[0];
+            if (left.Operands[0] == right.Operands[0]
+                && (left.Operands[1].ConstantValue == 0 && right.Operands[1].ConstantValue == 1
+                    || left.Operands[1].ConstantValue == 1 && right.Operands[1].ConstantValue == 0))
+                return Op(UnsignedLess, 1, Constant(1, left.Operands[0].Width), left.Operands[0]);
+        }
         // x|0=x^0=x。检查：or-zero、xor-zero。
         if (b.ConstantValue == 0 && op is Or or Xor) return a;
         // x^全1=~x。检查：xor-ones、xor-bit-one。
@@ -412,6 +421,12 @@ public sealed partial class TermTable
 
     private Term? SubtractionCarry(Term source, int width)
     {
+        // 最高位(zext(x)+c) 等于 x >= 2^n-c；c 已合并了减法补码中的加一。
+        if (Is(source, Add))
+            foreach (var (left, right) in new[] { (source.Operands[0], source.Operands[1]), (source.Operands[1], source.Operands[0]) })
+                if (right.ConstantValue is { } constant && constant > 0 && constant <= (BigInteger.One << width)
+                    && Slice(left, width, 1).ConstantValue == 0)
+                    return Op(Not, 1, Op(UnsignedLess, 1, Slice(left, 0, width), Number((BigInteger.One << width) - constant, width)));
         if (!Is(source, Add) || source.Operands[1].ConstantValue != 1 || !Is(source.Operands[0], Add)) return null;
         var sum = source.Operands[0];
         foreach (var (left, right) in new[] { (sum.Operands[0], sum.Operands[1]), (sum.Operands[1], sum.Operands[0]) })

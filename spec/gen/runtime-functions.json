@@ -656,6 +656,16 @@
         "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_type；操作语义与调用链见 RuntimeOperations.GetTypeByName3"
       ],
       "parameters": "String_t* typeName, bool throwOnError, bool ignoreCase, const RuntimeMethod* getTypeMethod, const RuntimeMethod* callingMethod"
+    },
+    {
+      "name": "il2cpp_codegen_get_array_type_mismatch_exception",
+      "operation": "NewArrayTypeMismatchException",
+      "arguments": [],
+      "result": "operation",
+      "header": "codegen/il2cpp-codegen-il2cpp.h",
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_array_type_mismatch_exception → vm/Exception.cpp: GetArrayTypeMismatchException → FromNameMsg"
+      ]
     }
   ]
 }

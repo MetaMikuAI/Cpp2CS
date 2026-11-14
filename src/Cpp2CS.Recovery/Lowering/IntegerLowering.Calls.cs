@@ -77,6 +77,7 @@ public sealed partial class IntegerLowering
         }
         if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "NewObject" }) { PrepareAllocation(call, c); return; }
         if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "NewArray" }) { PrepareVector(call, c); return; }
+        if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "ArrayStoreCheck" }) { PrepareArrayStoreCheck(call, c, point); return; }
         if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "IsInst" or "CastClass" }) { PrepareTypeCheck(call, c); return; }
         if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "Box" }) { PrepareBox(call, c); return; }
         if (c.Kind == CallKind.Runtime && c.Operation is { Il.Name: "Unbox" }) { PrepareUnbox(call, c); return; }

@@ -24,6 +24,7 @@ public sealed class CheckQueries
     internal readonly ManagedLocationQuery Locations;
     internal readonly Query<CallIdentity, Term?>? DispatchReceiver;
     internal ManagedCallAddressQuery Addresses { get; }
+    internal ReadLocationQuery ReadLocations { get; }
     public CheckPointQuery Points { get; }
     public ThrowOnlyQuery ThrowOnly { get; }
     public ConditionalCheckQuery Checks { get; }
@@ -33,7 +34,7 @@ public sealed class CheckQueries
     public CheckQueries(StateQueries state, CallNamingQuery calls, ManagedLocationQuery locations, Query<CallIdentity, Term?>? dispatchReceiver = null)
     {
         State = state; Calls = calls; Locations = locations; DispatchReceiver = dispatchReceiver;
-        Addresses = new(state, calls, locations);
+        Addresses = new(state, calls, locations); ReadLocations = new(state);
         Points = new(this);
         Events = new((c, p) => Stop(c, p, false));
         AccessFrontier = new((c, p) => Stop(c, p, true));
@@ -185,7 +186,17 @@ public sealed class ConditionalCheckQuery(CheckQueries q) : Query<FlowEdge, Cond
                 if (only.Exception == "System.IndexOutOfRangeException" && v.Kind == ManagedLocationKind.ArrayElement && root.Value == subject.Value.Array && v.Index is { } index)
                 {
                     var i = c.Get(q.State.Resolve, index); if (!i.IsSuccess) return i.Propagate<ConditionalCheck?>();
-                    matched |= i.Value == subject.Value.Index;
+                    if (subject.Value.Index is { } checkedIndex)
+                    {
+                        int width = Math.Min(i.Value.Width, checkedIndex.Width);
+                        var terms = c.Snapshot.Terms;
+                        Term Low(Term value) => terms.Slice(value, 0, width);
+                        bool Extension(Term value) => value.Width == width
+                            || value == terms.Apply(new CoreOperator(CoreOperation.ZeroExtend), value.Width, Low(value))
+                            // IL2CPP_ARRAY_BOUNDS_CHECK 把下标和长度转为 uint32_t；有效数组长度为有符号 int32_t。
+                            || width == 32 && value == terms.Apply(new CoreOperator(CoreOperation.SignExtend), value.Width, Low(value));
+                        matched |= Extension(i.Value) && Extension(checkedIndex) && Low(i.Value) == Low(checkedIndex);
+                    }
                 }
             }
             if (!matched) return Result(false, [], info.Value.Event ? "event" : info.Value.HeapWrite ? "write" : "different-access",
@@ -206,21 +217,43 @@ public sealed class ConditionalCheckQuery(CheckQueries q) : Query<FlowEdge, Cond
             if (condition.Operands.Any(t => t.ConstantValue == 0) && value is not null) return Yes(new(Value: value));
         }
         // 同一头文件的 IL2CPP_ARRAY_BOUNDS_CHECK 使用无符号 index >= length。
+        bool zeroIndex = (op.Operation == CoreOperation.Equal && positive || op.Operation == CoreOperation.NotEqual && !positive)
+            && condition.Operands.Any(t => t.ConstantValue == 0);
+        bool constantIndex = op.Operation == CoreOperation.UnsignedLess && positive && condition.Operands[1].ConstantValue > 0;
         if (exception == "System.IndexOutOfRangeException" &&
-            (op.Operation == CoreOperation.UnsignedLess && !positive || op.Operation == CoreOperation.UnsignedLessEqual && positive))
+            (zeroIndex || constantIndex || op.Operation == CoreOperation.UnsignedLess && !positive || op.Operation == CoreOperation.UnsignedLessEqual && positive))
         {
-            var index = condition.Operands[op.Operation == CoreOperation.UnsignedLess ? 0 : 1];
-            var length = condition.Operands[op.Operation == CoreOperation.UnsignedLess ? 1 : 0]; Term? array = null;
-            var memory = length.Identity as MemoryAtom;
-            if (length.Kind == TermKind.Slice && length.SliceLow == 0) memory = length.Operands[0].Identity as MemoryAtom;
-            if (memory is not null)
+            // index 为零时，项规范化把无符号 0 >= length 化成 length == 0。
+            Term index, length;
+            if (zeroIndex)
             {
-                var loc = memory.Location; var address = loc.UnknownOffsetAddress;
+                length = condition.Operands[condition.Operands[0].ConstantValue == 0 ? 1 : 0];
+                index = c.Snapshot.Terms.Constant(0, length.Width);
+            }
+            else if (constantIndex)
+            {
+                length = condition.Operands[0];
+                index = c.Snapshot.Terms.Constant(condition.Operands[1].ConstantValue!.Value - 1, length.Width);
+            }
+            else
+            {
+                index = condition.Operands[op.Operation == CoreOperation.UnsignedLess ? 0 : 1];
+                length = condition.Operands[op.Operation == CoreOperation.UnsignedLess ? 1 : 0];
+            }
+            Term? array = null;
+            var source = length.Kind == TermKind.Slice && length.SliceLow == 0 ? length.Operands[0] : length;
+            // 地址宽度比较可零扩展 uint32_t 长度；定位仍使用原读取的位宽。
+            while (source.Kind == TermKind.Concat && source.Operands.Skip(1).All(p => p.ConstantValue == 0)) source = source.Operands[0];
+            // 长度的内存版本可在前置路径合流；这里只查询读取位置，不把不同版本判为同值。
+            var reading = c.Get(q.ReadLocations, source);
+            if (reading.IsSuccess)
+            {
+                var loc = reading.Value; var address = loc.UnknownOffsetAddress;
                 if (loc.Offset is { } offset) address = c.Snapshot.Terms.Apply(new CoreOperator(CoreOperation.Add), loc.Root.Width, loc.Root,
                     c.Snapshot.Terms.Constant(offset & ((System.Numerics.BigInteger.One << loc.Root.Width) - 1), loc.Root.Width));
                 if (address is not null)
                 {
-                    var view = c.Get(q.Locations, new(address, length.Width)); if (!view.IsSuccess) return view.Propagate<CheckSubject>();
+                    var view = c.Get(q.Locations, new(address, Math.Min(length.Width, loc.Width))); if (!view.IsSuccess) return view.Propagate<CheckSubject>();
                     array = view.Value.Views.FirstOrDefault(v => v.Kind == ManagedLocationKind.ArrayLength)?.Root;
                 }
             }

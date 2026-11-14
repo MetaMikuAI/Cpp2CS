@@ -45,6 +45,10 @@ internal static class TermNormalizationChecks
     [
         ("constant-fold", f => f.O(Add, 32, f.C(123), f.C(456))),
         ("undefined-fold", f => f.O(UnsignedDivide, 32, f.C(1), f.C(0))),
+        ("greater-than-one", f => f.O(And, 1, f.O(NotEqual, 1, f.X(), f.C(0)), f.O(NotEqual, 1, f.X(), f.C(1)))),
+        ("carry-sub-constant", f => f.T.Slice(f.O(Add, 33, f.O(ZeroExtend, 33, f.X()), f.C(uint.MaxValue, 33)), 32, 1)),
+        ("carry-sub-one", f => f.T.Slice(f.O(Add, 33, f.O(ZeroExtend, 33, f.X()), f.C(1, 33)), 32, 1)),
+        ("carry-sub-zero", f => f.T.Slice(f.O(Add, 33, f.O(ZeroExtend, 33, f.X()), f.C(BigInteger.One << 32, 33)), 32, 1)),
         ("zero-extend", f => f.O(ZeroExtend, 64, f.X())),
         ("truncate", f => f.O(Truncate, 8, f.X())),
         ("nested-sign", f => f.O(SignExtend, 64, f.O(SignExtend, 32, f.X(8)))),
@@ -287,6 +291,17 @@ internal static class TermNormalizationChecks
             var borrowed = f.T.Slice(f.O(Add, width + 1, full.Operands[0], f.C(0, width + 1)), width, 1);
             var borrowedNormalized = Copy(borrowed, new());
             checks.True(borrowedNormalized.Kind == TermKind.Slice, $"{width} 位 +0 不误匹配为无借位减法");
+            for (int constant = 0; constant < 1 << (width + 1); constant++)
+            {
+                var rawCarry = f.T.Slice(f.O(Add, width + 1, f.O(ZeroExtend, width + 1, x), f.C(constant, width + 1)), width, 1);
+                var normalizedCarry = Copy(rawCarry, new());
+                for (int value = 0; value < 1 << width; value++)
+                {
+                    var evaluator = new TermEvaluator(_ => value);
+                    checks.True(evaluator.Evaluate(rawCarry) == evaluator.Evaluate(normalizedCarry),
+                        $"{width} 位常量进位穷举 {constant},{value}");
+                }
+            }
             for (int a = 0; a < 1 << width; a++)
             for (int b = 0; b < 1 << width; b++)
             {

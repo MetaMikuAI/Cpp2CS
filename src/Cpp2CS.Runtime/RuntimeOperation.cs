@@ -212,6 +212,10 @@ public static class RuntimeOperations
             RuntimeObservation.Observable, "denominator 非零", "DivideCheck", "由整数除法吸收", codegen + ".h: DivideByZeroCheck", ["System.DivideByZeroException"], trigger: RuntimeEventTrigger.ExceptionalOnly);
         yield return Op("CheckArrayElementType", [V("array", RuntimeValueKind.ManagedReference), V("value", RuntimeValueKind.ManagedReference)], RuntimeValueKind.Void, RuntimeWidth.None, RuntimeHeapEffect.Read,
             RuntimeObservation.Observable, "value 为 null 或能赋给数组元素类型", "ArrayStoreCheck", "由 stelem.ref 吸收", codegen + ".h: ArrayElementTypeCheck", ["System.ArrayTypeMismatchException"], preconditions: "array 已判空且为引用元素数组", trigger: RuntimeEventTrigger.ExceptionalOnly);
+        yield return Op("NewArrayTypeMismatchException", [], RuntimeValueKind.ManagedReference, RuntimeWidth.Pointer, RuntimeHeapEffect.MayWrite,
+            RuntimeObservation.Observable, "返回新建的数组类型不符异常", "ExceptionObject", "只供数组存入检查的失败抛出消费",
+            "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_array_type_mismatch_exception → vm/Exception.cpp: GetArrayTypeMismatchException → FromNameMsg → Object::New / Runtime::ObjectInit",
+            ["System.TypeInitializationException"], managedCode: "执行基础库异常构造；可能初始化基础库静态字段");
         foreach (var (name, type, inputs) in new (string, string, RuntimeInput[])[] {
             ("ThrowNullReference", "System.NullReferenceException", []), ("ThrowBounds", "System.IndexOutOfRangeException", []),
             ("ThrowDivideByZero", "System.DivideByZeroException", []), ("ThrowOverflow", "System.OverflowException", [method]),

@@ -1197,6 +1197,7 @@
           "type": "Il2CppType"
         },
         {
+          "immutable": "il2cpp-class-internals.h: Il2CppClass::element_class；metadata/ArrayMetadata.cpp: GetBoundedArrayClass；vm/GlobalMetadata.cpp: FromTypeDefinition；vm/Class.cpp: FromGenericParameter / GetPtrClass；vm/GenericClass.cpp: CreateClass 在发布类前设置元素类，发布后不变",
           "name": "element_class",
           "offset_bits": 512,
           "size": 8,

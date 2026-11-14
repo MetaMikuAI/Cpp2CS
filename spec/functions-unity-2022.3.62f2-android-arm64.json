@@ -1711,6 +1711,40 @@
       "unsupported": []
     },
     {
+      "arguments": [],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_get_array_type_mismatch_exception → vm/Exception.cpp: GetArrayTypeMismatchException → FromNameMsg"
+      ],
+      "declaration": "Exception_t* il2cpp_codegen_get_array_type_mismatch_exception()",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 198
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z48il2cpp_codegen_get_array_type_mismatch_exceptionv",
+      "name": "il2cpp_codegen_get_array_type_mismatch_exception",
+      "operation": "NewArrayTypeMismatchException",
+      "parameter_names": [],
+      "parameter_types": [],
+      "prototype": {
+        "parameters": [],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "Exception_t *",
+      "unsupported": []
+    },
+    {
       "arguments": [
         "slot"
       ],
@@ -2461,7 +2495,7 @@
     }
   ],
   "generator_sha256": "132a628dc66f38e2e453be7e56bb01ec4b06d7244749fb1575cee3325069bc9c",
-  "mapping_sha256": "998db45526101a806a340c5d3d32431e1cc538f7d66c253d4c77ae18a03eef6b",
+  "mapping_sha256": "6d87a1449a0cf57f8e8dc45200890e077857b584a8489bd87aca95ddd54bb27f",
   "schema_version": 1,
   "shared_generator_sha256": "ab5f57df145d9958a050c9a43f0b8f940f4d9ff5039718ad3e039b2b6215f1cb",
   "source": {

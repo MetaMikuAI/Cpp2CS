@@ -181,7 +181,7 @@ public sealed partial class IntegerLowering
                                 new ArgumentValue(-1, method.DeclaringType, types.PointerSize * 8), constructorInitialization.Arguments, false), null) { Inlined = true });
                         continue;
                     }
-                    if (interfaceLookups.Contains(call.Identity)) continue;
+                    if (interfaceLookups.Contains(call.Identity) || arrayStoreChecks.ContainsKey(call.Identity)) continue;
                     var statement = LowerCall(call, new(b.Identity, i));
                     if (statement is null) return new(null, failure);
                     statements.Add(statement);
