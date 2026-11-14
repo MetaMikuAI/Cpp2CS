@@ -68,6 +68,19 @@ public sealed partial class IntegerLowering
         return null;
     }
 
+    /// <summary>常量操作数不是 NaN，也不是会让选择与运算在零的符号上不同的那个零（最小值的 −0、最大值的 +0）。</summary>
+    private static int? SelectableBound(Term term, bool maximum)
+    {
+        for (int i = 0; i < 2; i++)
+        {
+            if (term.Operands[i].ConstantValue is not { } bits) continue;
+            double value = term.Operands[i].Width == 32 ? BitConverter.UInt32BitsToSingle((uint)bits) : BitConverter.UInt64BitsToDouble((ulong)bits);
+            if (double.IsNaN(value) || value == 0 && double.IsNegative(value) != maximum) continue;
+            return i;
+        }
+        return null;
+    }
+
     private ManagedValue? FloatOperation(Term term, CoreOperation op)
     {
         int width = term.Width, inputWidth = term.Operands[0].Width;
@@ -75,6 +88,16 @@ public sealed partial class IntegerLowering
         bool integerOutput = op is CoreOperation.FloatToSigned or CoreOperation.FloatToUnsigned;
         if ((!integerInput && inputWidth is not (32 or 64)) || (width != 1 && width is not (32 or 64)))
             return Fail<ManagedValue>(LoweringFailureKind.FloatingOrVector, $"不支持的浮点格式或转换位宽：{op}/{inputWidth}/{width}");
+        if (op is CoreOperation.FloatMinimum or CoreOperation.FloatMaximum && SelectableBound(term, op == CoreOperation.FloatMaximum) is { } boundIndex)
+        {
+            // 传播 NaN 的最小、最大值在一个操作数是常量时等于一次有序比较加选择：比较为假（含无序）时结果是另一个操作数。
+            var bound = Value(term.Operands[boundIndex], true); var other = Value(term.Operands[1 - boundIndex], true);
+            if (bound is null || other is null) return null;
+            if (Opaque(other.Type)) return GenericFailure<ManagedValue>("Arithmetic", "类型参数值参与浮点运算：" + op);
+            var limit = FloatBits(bound, inputWidth); var free = FloatBits(other, inputWidth);
+            return new ChoiceValue(new ComparisonValue(op == CoreOperation.FloatMaximum ? ComparisonKind.FloatLess : ComparisonKind.FloatGreater,
+                free, limit, types.Boolean), limit, free, FloatType(width), width);
+        }
         if (op is CoreOperation.FloatRemainder or CoreOperation.FloatFusedMultiplyAdd
             or CoreOperation.FloatMinimum or CoreOperation.FloatMaximum or CoreOperation.FloatMinimumNumber or CoreOperation.FloatMaximumNumber)
             return Fail<ManagedValue>(LoweringFailureKind.UnsupportedOperation, $"Managed 缺少对应浮点运算：{op}");

@@ -29,6 +29,8 @@ internal static partial class LoweringChecks
             public static class Cases {
                 public static float FloatAdd(float a, float b) => a + b;
                 public static float FloatSelect(float a, float b) => a < b ? a : b;
+                public static float FloatMin(float a, float b) => a > 2.5f ? 2.5f : a;
+                public static float FloatMax(float a, float b) => a < -1.5f ? -1.5f : a;
                 public static double DoubleBranch(double a, double b) => a < b ? a : b;
                 public static int FloatInt(float a, float b) => (int)a;
                 public static double UnsignedDouble(ulong a, ulong b) => a;
@@ -53,10 +55,10 @@ internal static partial class LoweringChecks
             Token = 0x02000001, Attributes = System.Reflection.TypeAttributes.Public, IsValueType = false, IsEnum = false };
         definitions.Add(owner);
         TypeRef Type(string name) => new DefinitionRef(definitions.Single(t => t.Name == name), []);
-        var methods = new[] { "Add", "Branch", "Loop", "Spill", "Swap", "Accumulate", "Predicate", "Narrow", "FloatAdd", "DoubleBranch", "FloatInt", "UnsignedDouble", "FloatBits", "FloatSelect" }.Select((n, i) => new MethodDef {
+        var methods = new[] { "Add", "Branch", "Loop", "Spill", "Swap", "Accumulate", "Predicate", "Narrow", "FloatAdd", "DoubleBranch", "FloatInt", "UnsignedDouble", "FloatBits", "FloatSelect", "FloatMin", "FloatMax" }.Select((n, i) => new MethodDef {
             Index = i, Owner = owner, Name = n, Token = (uint)(0x06000001 + i),
             Attributes = System.Reflection.MethodAttributes.Public | System.Reflection.MethodAttributes.Static, ImplAttributes = 0, Slot = -1,
-            ReturnType = Type(n switch { "Narrow" => "SByte", "FloatAdd" or "FloatSelect" => "Single", "DoubleBranch" or "UnsignedDouble" => "Double", _ => "Int32" }),
+            ReturnType = Type(n switch { "Narrow" => "SByte", "FloatAdd" or "FloatSelect" or "FloatMin" or "FloatMax" => "Single", "DoubleBranch" or "UnsignedDouble" => "Double", _ => "Int32" }),
             Parameters = [new("a", Type(n == "Narrow" ? "SByte" : ParameterType(n)), 0, null, false), new("b", Type(n == "Narrow" ? "Byte" : ParameterType(n)), 0, null, false)] }).ToArray();
         owner.Methods = methods;
         var bitConverter = definitions.Single(t => t.Name == "BitConverter");
@@ -84,7 +86,7 @@ internal static partial class LoweringChecks
         InternalCallWrapperChecks(checks, program);
         ExceptionChecks(checks, program);
         ExceptionExecutionChecks(checks, program);
-        foreach (var name in new[] { "Add", "Branch", "Loop", "Spill", "Swap", "Accumulate", "Predicate", "Narrow", "FloatAdd", "DoubleBranch", "FloatInt", "UnsignedDouble", "FloatBits", "FloatSelect" })
+        foreach (var name in new[] { "Add", "Branch", "Loop", "Spill", "Swap", "Accumulate", "Predicate", "Narrow", "FloatAdd", "DoubleBranch", "FloatInt", "UnsignedDouble", "FloatBits", "FloatSelect", "FloatMin", "FloatMax" })
         {
             var reference = MethodRef.Open(methods.Single(m => m.Name == name));
             var executionReference = model.Method(source.Method("Cases", name));
@@ -129,12 +131,26 @@ internal static partial class LoweringChecks
                     ulong expected = name switch {
                         "FloatAdd" => BitConverter.SingleToUInt32Bits((float)a + (float)b),
                         "FloatSelect" => BitConverter.SingleToUInt32Bits(a < b ? (float)a : (float)b),
+                        "FloatMin" => BitConverter.SingleToUInt32Bits((float)a > 2.5f ? 2.5f : (float)a),
+                        "FloatMax" => BitConverter.SingleToUInt32Bits((float)a < -1.5f ? -1.5f : (float)a),
                         "DoubleBranch" => BitConverter.DoubleToUInt64Bits(a < b ? a : b),
                         "FloatInt" => unchecked((uint)(int)a),
                         "UnsignedDouble" => BitConverter.DoubleToUInt64Bits((double)unchecked((ulong)(long)a)),
                         _ => BitConverter.SingleToUInt32Bits((float)a) };
                     var execution = interpreter.Run(new World(index, 0, new Hints([], []), executionReference.DeclaringType), method, executionReference, args);
                     checks.True(execution.Result == $"return 0x{expected:x}", $"{name}({a},{b})：{execution.Result}，预期 0x{expected:x}");
+                }
+                if (name is "FloatMin" or "FloatMax")
+                {
+                    // 无序时比较为假，结果是另一个操作数本身。
+                    var unordered = interpreter.Run(new World(index, 0, new Hints([], []), executionReference.DeclaringType), method, executionReference,
+                        [StackValue.F32(float.NaN), StackValue.F32(0)]);
+                    checks.True(unordered.Result == $"return 0x{BitConverter.SingleToUInt32Bits(float.NaN):x}", name + " 的 NaN 输入原样返回：" + unordered.Result);
+                    bool maximum = name == "FloatMax";
+                    var wrongZero = new IntegerLowering(FloatFunction(name + "Zero"), reference, binder, types).Run();
+                    checks.True(wrongZero.Failure?.Reason.Code == "lowering.UnsupportedOperation", (maximum ? "最大值的 +0" : "最小值的 −0") + " 常量保持洞：" + wrongZero.Failure);
+                    var free = new IntegerLowering(FloatFunction(name + "Free"), reference, binder, types).Run();
+                    checks.True(free.Failure?.Reason.Code == "lowering.UnsupportedOperation", "两个操作数都不是常量的" + (maximum ? "最大值" : "最小值") + "保持洞：" + free.Failure);
                 }
                 continue;
             }
@@ -1345,7 +1361,7 @@ internal static partial class LoweringChecks
 
     private static string ParameterType(string name) => name switch
     {
-        "FloatAdd" or "FloatInt" or "FloatBits" or "FloatSelect" => "Single",
+        "FloatAdd" or "FloatInt" or "FloatBits" or "FloatSelect" or "FloatMin" or "FloatMax" => "Single",
         "DoubleBranch" => "Double", "UnsignedDouble" => "UInt64", _ => "Int32",
     };
 
@@ -1390,6 +1406,12 @@ internal static partial class LoweringChecks
             var value = name switch {
                 "FloatAdd" => Op(CoreOperation.FloatAdd, 32, a, b),
                 "FloatSelect" => Op(CoreOperation.Select, 32, Op(CoreOperation.FloatLess, 1, a, b), a, b),
+                "FloatMin" => Op(CoreOperation.FloatMinimum, 32, a, t.Constant(BitConverter.SingleToUInt32Bits(2.5f), 32)),
+                "FloatMax" => Op(CoreOperation.FloatMaximum, 32, t.Constant(BitConverter.SingleToUInt32Bits(-1.5f), 32), a),
+                "FloatMinZero" => Op(CoreOperation.FloatMinimum, 32, a, t.Constant(BitConverter.SingleToUInt32Bits(-0f), 32)),
+                "FloatMaxZero" => Op(CoreOperation.FloatMaximum, 32, a, t.Constant(0, 32)),
+                "FloatMinFree" => Op(CoreOperation.FloatMinimum, 32, a, b),
+                "FloatMaxFree" => Op(CoreOperation.FloatMaximum, 32, a, b),
                 "FloatInt" => Saturate(a),
                 "UnsignedDouble" => Op(CoreOperation.UnsignedToFloat, 64, a), _ => a };
             builder.Blocks.Add(new(entry, [], [], Ret(value)));
