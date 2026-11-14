@@ -1,4 +1,6 @@
 using System.Collections.Immutable;
+using System.Reflection;
+using Cpp2CS.Runtime;
 using Cpp2CS.Kernel.Flow;
 using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Kernel.State;
@@ -23,7 +25,7 @@ public sealed record AllocationConstructorAnswer(MethodRef? Constructor, CallIde
     public ImmutableArray<Term> MergedAliases { get; init; } = [];
 }
 
-/// <summary>直线配对与模板锚点沿用原条件；未配对的同类新分配可由合流前沿证明。</summary>
+/// <summary>先配对直接构造调用，再以事件前沿证明延后分配；内联体仍由构造模板证明。</summary>
 public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocationQuery? locations, CallNamingQuery calls,
     IReadOnlyDictionary<CallIdentity, ConstructorCall> bindings, ConstructorQuery? constructors,
     IReadOnlyDictionary<Term, AllocationConstructorRequest>? allocations = null, ValueNamingQuery? names = null)
@@ -31,6 +33,7 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
 {
     private readonly BoundSourceQuery sources = new(state);
     private readonly MergedAllocationConstructorQuery? merged = allocations is not { Count: > 0 } ? null : new(state, locations, calls, bindings, allocations, names);
+    private readonly UseIndex uses = new(state, calls);
     public override Outcome<AllocationConstructorAnswer> Compute(QueryContext c, AllocationConstructorRequest key)
     {
         var index = c.Get(state.Index, 0); if (!index.IsSuccess) return index.Propagate<AllocationConstructorAnswer>();
@@ -38,6 +41,12 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
         while (next < block.Statements.Length && block.Statements[next] is not Call && PrivateAccess(c, state, locations, block.Statements[next])) next++;
         if (next < block.Statements.Length && block.Statements[next] is Call call && Direct(c, new(block.Identity, next), call, key) is { } method)
             return Outcome<AllocationConstructorAnswer>.Success(new(method, call.Identity, null));
+        var deferred = DeferredCall(c, key);
+        if (deferred is not null)
+        {
+            if (deferred.Failure is { } rejected) constructors?.Reject(key.Access, rejected);
+            return Outcome<AllocationConstructorAnswer>.Success(deferred);
+        }
         if (constructors is null) return Outcome<AllocationConstructorAnswer>.Success(TryMerged(c, key) ?? new(null, null,
             new("lowering.Allocation.Constructor", "对象分配之后的第一个事件不是对它的同类构造函数调用。")));
         var initial = InitialRegion(c, new(block.Identity, key.Point.Before + 1), key.Result);
@@ -67,9 +76,134 @@ public sealed class AllocationConstructorQuery(StateQueries state, ManagedLocati
             constructors.Reject(key.Access, reason);
             return Outcome<AllocationConstructorAnswer>.Success(new(null, null, reason));
         }
-        Outcome<AllocationConstructorAnswer> Deferred(Reason? cause) => Reject("lowering.Allocation.Deferred", "对象首次使用是构造调用，但不满足紧邻配对条件。", cause);
+        Outcome<AllocationConstructorAnswer> Deferred(Reason? cause) => Reject("lowering.Allocation.Deferred", "对象首次使用是构造调用，但分配移动尚未证明。", cause);
         Outcome<AllocationConstructorAnswer> Unproved(Reason? cause) => Reject("lowering.Allocation.Constructor", "不能证明各路径的首次对象使用都不是构造调用。", cause);
     }
+    private sealed record UsesAt(SemanticUses Semantics, IReadOnlyDictionary<Point, SemanticUses.Use[]> Roots);
+    private sealed class UseIndex(StateQueries state, CallNamingQuery calls) : Query<int, UsesAt>
+    {
+        public override Outcome<UsesAt> Compute(QueryContext c, int key)
+        {
+            var uses = new SemanticUses(c, calls, state);
+            return Outcome<UsesAt>.Success(new(uses, uses.Roots.GroupBy(u => u.Point).ToDictionary(g => g.Key, g => g.ToArray())));
+        }
+    }
+
+    /// <summary>只接受同一次正常构造续点；登记过的检查抛出是异常停点，不是普通退出。</summary>
+    private AllocationConstructorAnswer? DeferredCall(QueryContext c, AllocationConstructorRequest key)
+    {
+        if (!bindings.Values.Any(b => b.Method.Method is { Name: ".ctor", IsStatic: false } && b.Method.DeclaringType.Equals(key.Type))) return null;
+        var indexed = c.Get(state.Index, 0); if (!indexed.IsSuccess) return null;
+        var semantic = c.Get(uses, 0); if (!semantic.IsSuccess) return null;
+        var resolved = c.Get(state.Resolve, key.Result); if (!resolved.IsSuccess) return null;
+        var allocation = indexed.Value.Blocks[key.Point.Block].Statements[key.Point.Before] as Call;
+        if (allocation is null || allocation.DoesNotReturn) return null;
+        bool relaxed = key.Type is DefinitionRef type && ((type.Definition.Attributes & TypeAttributes.BeforeFieldInit) != 0
+            || !type.Definition.Methods.Any(m => m.Name == ".cctor"));
+        Reason? barrier = null;
+        var exceptional = new HashSet<Point>();
+        var candidates = new Dictionary<Point, (Call Call, MethodRef Method)>();
+        Outcome<bool> Stop(QueryContext context, Point point)
+        {
+            var block = indexed.Value.Blocks[point.Block];
+            var statement = point.Before < block.Statements.Length ? block.Statements[point.Before] : null;
+            if (statement is Call call && Direct(context, point, call, key) is { } constructor)
+            {
+                candidates.Add(point, (call, constructor));
+                if (call.Unwind != allocation.Unwind)
+                    barrier ??= new("lowering.Allocation.Deferred.ExceptionRegion", "分配与构造调用的异常处理目标不同。");
+                return Outcome<bool>.Success(true);
+            }
+            // 私有溢出不是对象暴露；后续的实际输入由读取身份解析。
+            bool privateAccess = statement is MemoryRead or MemoryWrite
+                && UnescapedFrameAccess(context, state, statement) is { IsSuccess: true, Value: true };
+            if (!privateAccess && semantic.Value.Roots.TryGetValue(point, out var roots))
+                foreach (var root in roots)
+                {
+                    var value = context.Get(state.Resolve, root.Value); if (!value.IsSuccess) return value.Propagate<bool>();
+                    bool used = false, unresolved = false;
+                    semantic.Value.Semantics.Visit(value.Value, (term, _, _) =>
+                    { used |= term == resolved.Value; unresolved |= term.Identity is MemoryMerge; });
+                    if (used) return Outcome<bool>.Success(true);
+                    if (unresolved) return Outcome<bool>.Failure(new("inline.Constructor.Use", "对象使用含未解析的内存合流来源。"));
+                }
+            if (statement is null || privateAccess) return Outcome<bool>.Success(false);
+            if (block.Handler is not null)
+                barrier ??= new("lowering.Allocation.Deferred.ExceptionRegion", "分配移动经过异常处理入口。");
+            if (statement is Call other)
+            {
+                var named = context.Get(calls, other.Identity); if (!named.IsSuccess) return named.Propagate<bool>();
+                if (other.Unwind is not null)
+                    barrier ??= new("lowering.Allocation.Deferred.ExceptionRegion", "中间调用含尚未证明的异常边。");
+                if (named.Value.Operation?.FixedThrownException is not null)
+                {
+                    if (!relaxed) InitializationBarrier();
+                    exceptional.Add(point); return Outcome<bool>.Success(true);
+                }
+                if (other.DoesNotReturn)
+                    barrier ??= new("lowering.Allocation.Deferred.ExceptionRegion", "中间调用不返回。");
+                if (named.Value.Operation is { Observation: RuntimeObservation.Unobservable }) return Outcome<bool>.Success(false);
+                if (!relaxed) InitializationBarrier();
+                if (!bindings.ContainsKey(other.Identity) && named.Value.Binding is null)
+                    barrier ??= new("lowering.Allocation.Deferred.Binding", "中间调用没有完整的有效输入绑定。");
+                return Outcome<bool>.Success(false);
+            }
+            if (statement is MemoryRead read && !read.Acquire && locations is not null)
+            {
+                var location = context.Get(locations, new(read.Address, read.Width));
+                if (!location.IsSuccess) return location.Propagate<bool>();
+                if (location.Value.Kind is not (ManagedLocationKind.Unknown or ManagedLocationKind.NotManaged))
+                {
+                    if (!relaxed) InitializationBarrier();
+                    return Outcome<bool>.Success(false);
+                }
+                if (names is not null)
+                {
+                    var fixedValue = names.FixedValue(context, read.Result);
+                    if (fixedValue.IsSuccess && fixedValue.Value is EntityName) return Outcome<bool>.Success(false);
+                    if (fixedValue.IsSuccess && fixedValue.Value is FieldName or ArrayElementName)
+                    {
+                        if (!relaxed) InitializationBarrier();
+                        return Outcome<bool>.Success(false);
+                    }
+                }
+                // 规格命名的运行时状态读取有安全地址凭据，仍不能越过精确类初始化。
+                if (names is not null && context.Get(names, read.Result) is { IsSuccess: true, Value.Name: FieldName or ArrayElementName })
+                {
+                    if (!relaxed) InitializationBarrier();
+                    return Outcome<bool>.Success(false);
+                }
+            }
+            barrier ??= new("lowering.Allocation.Deferred.Access", "分配与构造之间有未证明可移动的访问或操作。");
+            return Outcome<bool>.Success(false);
+        }
+        void InitializationBarrier() => barrier ??= new("lowering.Allocation.Deferred.ClassInitialization",
+            "所分配类的静态初始化可观察，不能越过中间的事件或托管读取。");
+        var frontier = new EventFrontierQuery(Stop);
+        var reached = c.Get(frontier, new(new(key.Point.Block, key.Point.Before + 1)));
+        if (!reached.IsSuccess || candidates.Count == 0) return null;
+        AllocationConstructorAnswer No(string code, string message) => new(null, null, new(code, message, barrier));
+        var normal = reached.Value.Stops.Except(exceptional).ToArray();
+        if (reached.Value.HasCycle || reached.Value.ReachesExit || normal.Length != 1)
+            return No("lowering.Allocation.Deferred.Flow", "分配之后存在循环、普通退出或不同的构造续点。");
+        if (!candidates.TryGetValue(normal[0], out var paired))
+            return No("lowering.Allocation.Deferred.Use", "对象在构造调用之前已被使用。");
+        if (barrier is not null) return new(null, null, barrier);
+        return new(paired.Method, paired.Call.Identity, null);
+    }
+
+    internal static Outcome<bool> UnescapedFrameAccess(QueryContext c, StateQueries state, Statement statement)
+    {
+        var (address, width) = statement switch
+        { MemoryRead read => (read.Address, read.Width), MemoryWrite write => (write.Address, write.Width), _ => (null, 0) };
+        if (address is null) return Outcome<bool>.Success(false);
+        var resolved = c.Get(state.Resolve, address); if (!resolved.IsSuccess) return resolved.Propagate<bool>();
+        var location = c.Get(state.Locations, new(resolved.Value, width)); if (!location.IsSuccess) return location.Propagate<bool>();
+        if (location.Value.Region != Region.Frame) return Outcome<bool>.Success(false);
+        var escaped = c.Get(state.Escapes, 0);
+        return escaped.IsSuccess ? Outcome<bool>.Success(!escaped.Value.MayReach(location.Value)) : escaped.Propagate<bool>();
+    }
+
     private AllocationConstructorAnswer? TryMerged(QueryContext c, AllocationConstructorRequest key)
     {
         if (merged is null) return null;

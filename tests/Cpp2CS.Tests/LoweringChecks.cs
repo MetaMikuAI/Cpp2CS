@@ -190,6 +190,7 @@ internal static partial class LoweringChecks
         AccessChecks(checks, program);
         ReferenceMergeChecks(checks, program);
         MergedAllocationChecks(checks, program);
+        DeferredAllocationChecks(checks, program);
         MergedSlotChecks(checks, program);
         RangeChecks(checks, program);
         AddressChecks(checks, program);

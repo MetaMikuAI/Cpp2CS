@@ -146,10 +146,7 @@ internal sealed class MergedAllocationConstructorQuery(StateQueries state, Manag
         var resolved = c.Get(state.Resolve, address); if (!resolved.IsSuccess) return resolved.Propagate<bool>();
         var location = c.Get(state.Locations, new(resolved.Value, width)); if (!location.IsSuccess) return location.Propagate<bool>();
         if (location.Value.Region == Region.Frame)
-        {
-            var escaped = c.Get(state.Escapes, 0);
-            return escaped.IsSuccess ? Outcome<bool>.Success(!escaped.Value.MayReach(location.Value)) : escaped.Propagate<bool>();
-        }
+            return AllocationConstructorQuery.UnescapedFrameAccess(c, state, statement);
         if (location.Value.Region != Region.Image || statement is not MemoryRead readEntity || names is null) return Outcome<bool>.Success(false);
         var named = c.Get(names, readEntity.Result);
         return named.IsSuccess ? Outcome<bool>.Success(named.Value.Name is EntityName) : named.Propagate<bool>();

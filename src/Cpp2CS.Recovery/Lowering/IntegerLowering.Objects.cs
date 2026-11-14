@@ -13,7 +13,7 @@ namespace Cpp2CS.Recovery.Lowering;
 
 public sealed partial class IntegerLowering
 {
-    /// <summary>一次对象分配；与紧随其后的构造函数调用合成 newobj，对象的值是构造完成后的局部。</summary>
+    /// <summary>一次对象分配；与已证明可延后分配的构造函数调用合成 newobj，对象的值是构造完成后的局部。</summary>
     private sealed class ObjectDefinition(TypeRef type, Term result)
     {
         public TypeRef Type { get; } = type;
