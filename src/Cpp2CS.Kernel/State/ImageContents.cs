@@ -59,6 +59,19 @@ public sealed class ImageContents
         return true;
     }
 
+    /// <summary>诊断用：映像偏移处的存储类别。</summary>
+    public string Describe(ulong offset)
+    {
+        var info = image.Query(offset);
+        string relocated = Relocated(offset, (ulong)image.PointerWidth) ? "（带重定位）" : "";
+        return info.Storage switch
+        {
+            StorageKind.Unmapped => "未映射",
+            StorageKind.ZeroFill => "可写无初值",
+            _ => info.Executable ? "代码" : (info.Writable ? "可写有初值" : "只读") + relocated,
+        };
+    }
+
     /// <summary>位置在不变的映像数据里并且内容可以静态确定时返回它的值，否则返回 null。</summary>
     public Term? Read(NativeFunction function, Location location)
     {

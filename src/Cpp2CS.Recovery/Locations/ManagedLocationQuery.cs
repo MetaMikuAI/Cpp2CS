@@ -104,7 +104,9 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
             if (!frame.Views.IsEmpty) return Outcome<LocationResult>.Success(frame);
         }
         if (location.Value.Region is Region.Frame or Region.Image)
-            return NotManaged(location.Value.Region + (location.Value.Offset is null ? "：地址不是常量偏移" : "：常量偏移，宽 " + key.Width));
+            return NotManaged(location.Value.Region + (location.Value.Offset is not { } constant ? "：地址不是常量偏移" : "：常量偏移，宽 " + key.Width
+                + (location.Value.Region == Region.Image && State.Contents is { } contents && constant >= 0 && constant <= ulong.MaxValue
+                    ? "，" + contents.Describe((ulong)constant) + key.Width switch { 8 => "，单字节", 16 => "，双字节", 32 => "，四字节", 64 => "，八字节", _ => "，更宽" } : "")));
         if (location.Value.Region == Region.Thread) return Unknown("thread-static", "线程区域尚不定位。");
         var runtimeField = c.Get(Names.SpecificationReads, new(Names, location.Value));
         if (runtimeField.IsSuccess && runtimeField.Value == NameLattice.Pending) return Outcome<LocationResult>.Success(Pending);
@@ -225,7 +227,7 @@ public sealed class ManagedLocationQuery : Query<AddressRequest, LocationResult>
             {
                 if (terms.Count != 1) return Unknown("index", "实例字段偏移不是常量。");
                 if (definition.Definition.IsInterface || definition.Definition is { Assembly: "mscorlib.dll", FullName: "System.Object" })
-                    return Unknown("static-type", "静态类型不足以定位字段，不猜派生类型。");
+                    return Unknown("static-type", "静态类型不足以定位字段，不猜派生类型：" + (definition.Definition.IsInterface ? "接口" : "object") + "，基值 " + (baseKind ?? "无名"));
                 var result = Fields(root, definition, offset, key.Width, false, unboxed, value.Basis, addressView: addressView, rangeTypes: rangeTypes);
                 if (result.Value.Kind != ManagedLocationKind.Unknown) return result;
                 if (runtimeField.IsSuccess && runtimeField.Value.Name is FieldName or BitStorageName) return NotManaged("已命名的运行时结构字段：" + Describe(runtimeField.Value.Name));
