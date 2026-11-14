@@ -146,7 +146,7 @@ internal static class InitializationGuardChecks
             Attributes = definition.Attributes, ImplAttributes = 0, Slot = -1, ReturnType = voidType,
             Parameters = [], GenericParameters = definition.GenericParameters }, [], [argument]);
         var runtime = catalog.Functions.First(f => f.Operation.Name == "InitializeMethodRgctx" && f.Signature is { ReturnType.Size: > 0 });
-        for (int scenario = 0; scenario < 13; scenario++)
+        for (int scenario = 0; scenario < 26; scenario++)
         {
             var calls = new CallNamingQuery(binder, new NamingChecks.Map([]), new NamingChecks.RuntimeMap(runtime), catalog);
             var t = new TermTable(); var head = new BlockIdentity(); var arm = new BlockIdentity(); var skip = new BlockIdentity();
@@ -168,7 +168,7 @@ internal static class InitializationGuardChecks
             var guard = Read(prefix, address);
             if (scenario == 2) prefix.Add(new Call(new(), new ComputedTarget(t.Constant(1, 64)), [new(slot, guard)], []));
             var tested = scenario == 11 ? t.Slice(guard, 0, 1) : guard;
-            var condition = t.Apply(new CoreOperator(scenario == 8 ? CoreOperation.NotEqual : CoreOperation.Equal), 1, tested, t.Constant(0, tested.Width));
+            var condition = t.Apply(new CoreOperator(scenario is 8 or 24 ? CoreOperation.NotEqual : CoreOperation.Equal), 1, tested, t.Constant(0, tested.Width));
             builder.Blocks.Add(new(head, [], [.. prefix], new Branch(condition, scenario == 8 ? skip : arm, scenario == 8 ? arm : skip)));
             var body = new List<Statement>();
             if (scenario == 3) body.Add(new MemoryWrite(new(), frame, 32, t.Constant(1, 32)));
@@ -180,6 +180,37 @@ internal static class InitializationGuardChecks
             // 初始化后的读取有独立身份；守卫读取只供分支使用。
             var table = Read(continuation, scenario == 12 ? Add(returned, spec.Layout.Field("MethodInfo", "rgctx_data").ByteOffset) : address);
             var item = Read(continuation, table);
+            if (scenario >= 13)
+            {
+                // 快路径复用守卫读取；初始化后独立重读，经合流用于取条目。
+                body.RemoveAt(body.Count - 1);
+                body.RemoveAt(body.Count - 1);
+                if (scenario == 25) body.Insert(0, new Call(new(), new ComputedTarget(t.Constant(1, 64)), [], []));
+                if (scenario == 15) table = Read(body, Add(Read(body, Add(image, 200)), spec.Layout.Field("MethodInfo", "rgctx_data").ByteOffset));
+                else if (scenario == 21) table = Read(body, Add(Read(body, Add(image, 100)), spec.Layout.Field("MethodInfo", "rgctx_data").ByteOffset));
+                else if (scenario == 19) table = Read(prefix, address);
+                else table = Read(body, address);
+                var mergeId = new MergeIdentity(); var merged = t.Atom(new ResultAtom(mergeId), 64);
+                var continued = new List<Statement>();
+                item = Read(continued, merged);
+                if (scenario == 16) continued.Add(new Call(new(), new ComputedTarget(t.Constant(1, 64)), [new(slot, guard)], []));
+                var fastValue = scenario == 20 ? Add(guard, 8) : guard;
+                var slowValue = scenario == 14 ? t.Constant(7, 64) : scenario == 23 ? t.Apply(new CoreOperator(CoreOperation.ZeroExtend), 64, t.Slice(table, 0, 32)) : table;
+                var fast = scenario is 17 or 24 ? skip : head;
+                builder.Blocks.Clear();
+                builder.Blocks.Add(new(head, [], [.. prefix], new Branch(condition,
+                    scenario == 24 ? skip : arm, scenario == 24 ? arm : fast == skip ? skip : join)));
+                builder.Blocks.Add(new(arm, [], [.. body], new Jump(join)));
+                if (fast == skip) builder.Blocks.Add(new(skip, [], [new Call(new(), new ComputedTarget(t.Constant(1, 64)), [new(slot, guard)], [])], new Jump(join)));
+                builder.Blocks.Add(new(join, [new(mergeId, merged, [new(fast, fastValue), new(arm, slowValue)])], [.. continued], new Return([new(slot, item)])));
+                if (scenario == 18)
+                {
+                    builder.Blocks.Clear();
+                    builder.Blocks.Add(new(head, [], [.. prefix], new Branch(condition, arm, skip)));
+                    builder.Blocks.Add(new(arm, [], [.. body, .. continued.Select(statement => SnapshotRewrite.Rewrite(statement, value => value == merged ? table : value))], new Return([new(slot, item)])));
+                    builder.Blocks.Add(new(skip, [], [], new Return([new(slot, guard)])));
+                }
+            }
             if (scenario == 10)
             {
                 var second = new AbstractSlot(SlotKind.Integer, 1); var control = t.Atom(new EntryAtom(second), 64);
@@ -187,12 +218,12 @@ internal static class InitializationGuardChecks
                 builder.Blocks.Add(new(arm, [], [], new Branch(t.Slice(control, 0, 1), join, skip)));
                 builder.Blocks.Add(new(join, [], [.. body], new Return([new(slot, item)])));
             }
-            else
+            else if (scenario < 13)
             {
                 builder.Blocks.Add(new(arm, [], [.. body], scenario == 5 ? new Jump(join) : new Return([new(slot, item)])));
                 if (scenario == 5) builder.Blocks.Add(new(join, [], [.. continuation], new Return([new(slot, item)])));
             }
-            builder.Blocks.Add(new(skip, [], [], scenario == 5 ? new Jump(join) : scenario == 9 ? new Jump(arm) : new Return([new(slot, t.Constant(0, 64))])));
+            if (scenario < 13) builder.Blocks.Add(new(skip, [], [], scenario == 5 ? new Jump(join) : scenario == 9 ? new Jump(arm) : new Return([new(slot, t.Constant(0, 64))])));
             if (scenario == 12)
             {
                 var exception = t.Atom(new ExceptionAtom(handler), 64); var selector = t.Atom(new SelectorAtom(handler), 64);
@@ -204,14 +235,29 @@ internal static class InitializationGuardChecks
             if (scenario == 1) facts = NamingFacts.Empty;
             var state = new StateQueries(image: new InputMemoryImage());
             var layouts = new FieldLayouts(spec, 8, 8);
-            var names = new ValueNamingQuery(state, calls, facts, spec, binder,
+            var selectedSpec = spec;
+            if (scenario is 18 or 22)
+            {
+                var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(ArchitectureChecks.FindRoot(), "spec", "unity-2022.3.62f2-android-lp64.json")))!;
+                foreach (var field in json["records"]!["MethodInfo"]!["fields"]!.AsArray()) field!.AsObject().Remove("stable_after_nonzero");
+                using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(json.ToJsonString()));
+                selectedSpec = RuntimeSpec.Read(stream, "test", spec.Layout.UnityVersion, spec.Layout.Triple, spec.Layout.DataModel);
+            }
+            var names = new ValueNamingQuery(state, calls, facts, selectedSpec, binder,
                 scenario == 6 ? binder.Definition(open, BindingEntryKind.SharedGeneric, method).Value : null,
                 new GuardContextDecoder(scenario == 6 ? open : method, argument), scenario == 6 ? new GenericWitness(open, method, layouts) : null);
             var function = builder.Freeze();
             checks.True(ExitChecker.Check(function).IsValid, $"泛型上下文守卫 {scenario} 输入契约");
             var output = new UnobservableEffects(state, calls, names, new InputMemoryImage(), new HashSet<AbstractSlot> { slot }).Run(function);
             checks.True(ExitChecker.Check(output.Function).IsValid, $"泛型上下文守卫 {scenario} 输出契约");
-            bool folded = scenario is 0 or 5 or 6 or 7 or 8 or 12;
+            if (scenario == 13)
+            {
+                checks.True(spec.Layout.Field("Il2CppClass", "rgctx_data").StableAfterNonzeroEvidence is { Length: > 0 }
+                    && spec.Layout.Field("MethodInfo", "rgctx_data").StableAfterNonzeroEvidence is { Length: > 0 }, "两个 RGCTX 字段登记非零后稳定依据");
+                checks.True(names.SameValue(names.CreateContext(function), guard, table) is not { IsSuccess: true, Value: true },
+                    "非零后稳定性不作为全局不可变凭据消去初始化前后的读取版本");
+            }
+            bool folded = scenario is 0 or 5 or 6 or 7 or 8 or 12 or 13 or 17 or 18 or 21 or 24;
             checks.True(output.Records.Any(r => r.Kind == "init-guard" && r.Removed) == folded,
                 $"泛型上下文守卫 {scenario} 统一模板改写：" + string.Join("；", output.Records.Where(r => r.Reason is not null).Select(r => r.Reason)));
             if (folded)
@@ -224,11 +270,14 @@ internal static class InitializationGuardChecks
             }
             else
             {
-                var reason = scenario switch { 2 => "read-used", 3 => "effect-before-event", 4 => "entity-mismatch", 9 => "shared-prefix", 10 => "branch-before-event", 11 => "test-width", _ => "" };
+                var reason = scenario switch { 2 => "read-used", 3 => "effect-before-event", 4 => "entity-mismatch", 9 => "shared-prefix", 10 => "branch-before-event", 11 => "test-width", 25 => "effect-before-event", >= 13 => "read-used", _ => "" };
                 checks.True(output.Function.Blocks.Any(b => b.End is Branch) && (scenario == 1
                     ? output.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any()
                     : output.Records.Any(r => r.Reason?.Code == "structure.init-guard." + reason)),
                     $"泛型上下文守卫 {scenario} 保留控制流和具体原因");
+                if (scenario is 14 or 15 or 19 or 20 or 22 or 23)
+                    checks.True(output.Records.Any(r => r.Reason?.Code == "structure.init-guard.read-used" && r.Reason.Message.Contains("合流", StringComparison.Ordinal)),
+                        $"泛型上下文守卫 {scenario} 拒绝消息指明合流");
             }
         }
     }

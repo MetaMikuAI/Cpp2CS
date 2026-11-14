@@ -73,8 +73,7 @@ public sealed partial class UnobservableEffects
                 Reason? flagFailure = methodFlag && flag?.IsFlag != true ? new("structure.init-guard.flag-evidence", "本函数未证明该字节是方法元数据初始化标志。",
                     Chain(flag?.Reasons ?? [new("naming.no-access-evidence", "本函数没有该字节的访问凭据。")])) : null;
                 uses ??= new(c, calls, state, names.Binder, names.Entry);
-                if (uses.Of(read.Identity).Any(use => !use.Condition || use.Point != new Point(head.Identity, head.Statements.Length)))
-                { Reject(new("structure.init-guard.read-used", "标志读取除本次分支测试外还有真实使用。", flagFailure)); continue; }
+                bool otherUses = uses.Of(read.Identity).Any(use => !use.Condition || use.Point != new Point(head.Identity, head.Statements.Length));
                 var eventId = test.ZeroWhenTrue ? branch.True : branch.False;
                 var group = c.Get(prefix, new(new(head.Identity, eventId), stateField ? field : null,
                     methodFlag ? location.Value : null, test.Low, test.Width));
@@ -104,14 +103,18 @@ public sealed partial class UnobservableEffects
                 }
                 if (!unwindValid)
                 { Reject(new("structure.init-guard.unwind-merge", "移动调用的展开边与入口处已有的异常合流值不一致。")); continue; }
-                RefineGuardResults(c, edit, moved.OfType<Call>(), ref assumed);
+                bool candidateAssumed = assumed;
+                RefineGuardResults(c, edit, moved.OfType<Call>(), ref candidateAssumed);
                 edit.Blocks[tail.Identity] = tail with { Statements = tail.Statements.Skip(group.Value.After.Before).ToImmutableArray() };
                 edit.Blocks[head.Identity] = head with { Statements = head.Statements.AddRange(moved), End = new Jump(tail.Identity) };
+                if (otherUses && InitializationReadUses(c, edit, read, field, group.Value) is { } useFailure)
+                { Reject(Append(useFailure, flagFailure)); continue; }
                 // 单入口前缀的中间块失去入口，由共同图改写删除；续点保留原来的定义与入边身份。
                 if (edit.Replacements.Any(p => batch.Replacements.TryGetValue(p.Key, out var previous) && previous != p.Value)) continue;
                 foreach (var (id, block) in edit.Blocks)
                     if (!ReferenceEquals(block, originalBlocks[id])) batch.Blocks[id] = block;
                 foreach (var (from, to) in edit.Replacements) batch.Replacements[from] = to;
+                assumed = candidateAssumed;
                 occupied.UnionWith(region);
                 rejected.Remove(read.Identity);
                 records.Add(new("init-guard", read.Trace?.NativeAddress, (classFlag ? "类初始化" : methodContext ? "方法泛型上下文初始化" : "方法元数据初始化") + "模板守卫归位；" + group.Value.Evidence, true));
@@ -126,6 +129,52 @@ public sealed partial class UnobservableEffects
             .Select(p => rejectedHeads[p.Key]).ToHashSet();
         finalContext = ReferenceEquals(context.Snapshot, input) ? context : names.CreateContext(input);
         return input;
+    }
+
+    /// <summary>删边后消失的使用不再计活跃；跨合流复用必须有同位置的事件后重读和非零后稳定凭据。</summary>
+    private Reason? InitializationReadUses(QueryContext c, SnapshotRewrite edit, MemoryRead read, FieldName? field, InitializationGroup group)
+    {
+        // 用共同图改写得到精确的保留块与入边，不另建可达性遍历，也不把预览的单输入替换并入批次。
+        var preview = new SnapshotRewrite(c.Snapshot);
+        foreach (var (id, block) in edit.Blocks) preview.Blocks[id] = block;
+        // 用途只能因删边、删块消失；不借助调用结果精化消去其他使用。
+        var kept = preview.Apply();
+        var after = names.CreateContext(kept);
+        var index = after.Get(state.Index, 0);
+        if (!index.IsSuccess) return new("structure.init-guard.read-used", "无法确定删边后守卫读取的使用。", index.Why);
+        var reads = c.Get(state.Index, 0);
+        if (!reads.IsSuccess) return new("structure.init-guard.read-used", "无法定位事件后的重读。", reads.Why);
+        foreach (var block in c.Snapshot.Blocks.Where(b => index.Value.Blocks.ContainsKey(b.Identity)))
+        foreach (var merge in block.Merges)
+        {
+            var predecessors = index.Value.Predecessors[block.Identity].Select(p => p.Block).ToHashSet();
+            var discarded = merge.Inputs.Where(i => !predecessors.Contains(i.Predecessor)
+                && SnapshotRewrite.Dependencies([i.Value]).Contains(read.Result)).ToArray();
+            if (discarded.Length == 0) continue;
+            Reason No(string detail) => new("structure.init-guard.read-used", $"合流（块序号 {c.Snapshot.Blocks.IndexOf(block)}，合流序号 {block.Merges.IndexOf(merge)}）的守卫读取复用凭据不足：{detail}。");
+            if (discarded.Any(i => i.Value != read.Result)) return No("被删除的输入不是完整守卫读取");
+            if (field is null || names.Spec.Layout.Field(field.Record, field.Field[(field.Record.Length + 1)..]).StableAfterNonzeroEvidence is not { Length: > 0 })
+                return No("位置未登记非零后稳定性");
+            foreach (var incoming in merge.Inputs.Where(i => predecessors.Contains(i.Predecessor)))
+            {
+                if (incoming.Value.Identity is not ResultAtom { Definition: ReadIdentity id }
+                    || !reads.Value.Reads.TryGetValue(id, out var reread) || reread.Read.Width != read.Width)
+                    return No("保留的输入不是同宽重读");
+                if (reread.Point != group.After && c.Get(flow.PointDominates, new(group.After, reread.Point)) is not { IsSuccess: true, Value: true })
+                    return No("重读不在初始化事件组之后");
+                var address = c.Get(state.Resolve, read.Address);
+                var again = c.Get(state.Resolve, reread.Read.Address);
+                var location = address.IsSuccess ? c.Get(state.Locations, new(address.Value, read.Width)) : default;
+                var other = again.IsSuccess ? c.Get(state.Locations, new(again.Value, read.Width)) : default;
+                if (!location.IsSuccess || !other.IsSuccess || location.Value != other.Value
+                    && (location.Value.UnknownOffsetAddress is not null || other.Value.UnknownOffsetAddress is not null
+                        || (location.Value with { Root = other.Value.Root }) != other.Value
+                        || names.SameValue(c, location.Value.Root, other.Value.Root) is not { IsSuccess: true, Value: true }))
+                    return No("重读位置与守卫位置不相同");
+            }
+        }
+        var uses = new SemanticUses(after, calls, state, names.Binder, names.Entry);
+        return uses.Of(read.Identity).Any() ? new("structure.init-guard.read-used", "删边后守卫读取仍有真实使用。") : null;
     }
 
     private static readonly HashSet<string> InitializationStateFields = Cpp2CS.Runtime.RuntimeOperations.All.Values

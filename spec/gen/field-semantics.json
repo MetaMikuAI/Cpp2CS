@@ -16,6 +16,12 @@
         "size": 8,
         "immutable": "vm/Class.cpp: SetupTypeHierarchyLocked 一次填充继承链；vm/ClassInlines.h: HasParentUnsafe 只读取"
       }
+    },
+    "MethodInfo.rgctx_data": {
+      "stable_after_nonzero": "metadata/GenericMethod.cpp: InflateRGCTX / CreateMethodLocked；utils/InitOnce.h: InitOnce 仅在空值时构造并发布，非空后不覆盖；关闭惰性膨胀时在方法发布前设置"
+    },
+    "Il2CppClass.rgctx_data": {
+      "stable_after_nonzero": "vm/Class.cpp: InitLocked 在 g_MetadataLock 下构造 RGCTX 后 PublishInitialized；initialized / init_pending 防止重复设置，发布后不重置"
     }
   }
 }

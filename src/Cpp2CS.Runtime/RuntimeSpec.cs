@@ -81,6 +81,7 @@ public sealed class RuntimeSpec
                 f.TryGetProperty("members", out var members) ? Fields(members, source, path) : FrozenDictionary<string, RuntimeField>.Empty)
             {
                 ImmutableEvidence = f.TryGetProperty("immutable", out var immutable) ? immutable.GetString() : null,
+                StableAfterNonzeroEvidence = f.TryGetProperty("stable_after_nonzero", out var stable) ? stable.GetString() : null,
                 ArrayElement = f.TryGetProperty("array_element", out var element)
                     ? new(Text(element, "type"), Number(element, "size"), Text(element, "immutable")) : null,
             };
@@ -160,6 +161,8 @@ public sealed class RuntimeField
     public long? BitWidth { get; }
     /// <summary>生成代码可见的已就绪结构上不再改写；空值表示没有此凭据。</summary>
     public string? ImmutableEvidence { get; init; }
+    /// <summary>完整字段非零后不再改变；不声称空值阶段不可变。</summary>
+    public string? StableAfterNonzeroEvidence { get; init; }
     public RuntimeArrayElement? ArrayElement { get; init; }
     public FrozenDictionary<string, RuntimeField> Members { get; }
     public RuntimeField Member(string name) => Members.TryGetValue(name, out var field) ? field :

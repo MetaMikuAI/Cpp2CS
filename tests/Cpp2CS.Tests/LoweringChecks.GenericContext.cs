@@ -238,8 +238,10 @@ internal static partial class LoweringChecks
                 checks.True(!transformed.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any()
                     , "方法初始化消去后解出的类继续消去布局初始化：" + string.Join("；", transformed.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>()
                         .Select(call => stagedNames.CreateContext(transformed.Function).Get(stagedCalls, call.Identity).Value.Operation?.Name)));
-                checks.True(transformed.Function.Blocks.Any(b => b.End is Branch)
-                    && transformed.Records.Any(r => r.Reason?.Code == "structure.init-guard.read-used" && !r.Removed), "守卫读取仍有外部使用时保留控制流和原因");
+                checks.True(transformed.Function.Blocks.All(b => b.End is not Branch)
+                    && transformed.Records.Any(r => r.Kind == "init-guard" && r.Removed)
+                    && !transformed.Records.Any(r => r.Reason?.Code == "structure.init-guard.read-used" && !r.Removed),
+                    "快路径复用守卫读取、慢路径同位置重读的合流随删边消去");
                 checks.True(ReferenceEquals(effects.Run(transformed.Function).Function, transformed.Function), "不可观察效果消去在当前快照上收敛");
             }
             foreach (bool named in new[] { true, false })
