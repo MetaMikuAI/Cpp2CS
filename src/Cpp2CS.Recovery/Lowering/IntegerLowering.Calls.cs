@@ -164,6 +164,8 @@ public sealed partial class IntegerLowering
 
     private ManagedStatement? LowerCall(Call call, Point point)
     {
+        MaterializeAccessorProgram();
+        if (accessorCallCalls.TryGetValue(call.Identity, out var recovered)) return recovered;
         if (throws.TryGetValue(call.Identity, out var constructor)) return new ManagedThrow(position, new NewObjectValue(constructor, [], types.PointerSize * 8));
         if (typeChecks.ContainsKey(call.Identity)) return LowerTypeCheck(call, point);
         if (boxes.ContainsKey(call.Identity)) return LowerBox(call, point);

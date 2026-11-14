@@ -113,6 +113,7 @@ public sealed partial class IntegerLowering
     {
         if (ExceptionAlias(term) is { } alias) return Part(alias, low, width, floating);
         if (low == 0 && width == term.Width) return Value(term, floating);
+        if (values.TryGetValue(term, out var substituted)) return Slice(substituted, low, width);
         if (term.ConstantValue is { } constant && width <= 64)
             return Constant((ulong)((constant >> low) & ((System.Numerics.BigInteger.One << width) - 1)), width);
         if (readValues.TryGetValue(term, out var read))

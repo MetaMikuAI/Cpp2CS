@@ -151,7 +151,7 @@ public sealed partial class IntegerLowering
         var blocks = new List<ManagedBlock>();
         foreach (var b in function.Blocks.OrderBy(b => labels[b.Identity]))
         {
-            if (exceptions?.Removed.Contains(b.Identity) == true) continue;
+            if (exceptions?.Removed.Contains(b.Identity) == true || accessorRemovedBlocks.Contains(b.Identity)) continue;
             SelectExceptionView(b.Identity);
             position = b.Trace?.NativeAddress ?? 0;
             var statements = new List<ManagedStatement>();
@@ -334,6 +334,8 @@ public sealed partial class IntegerLowering
         if (completion is not null) return new ManagedJump(position, Edge(b.Identity, completion.Continuation));
         var decided = finallyRegions.Select(plan => plan.Branches.GetValueOrDefault(b.Identity)).FirstOrDefault(target => target is not null);
         if (decided is not null) return new ManagedJump(position, Edge(b.Identity, decided));
+        if (accessorRegions.TryGetValue(b.Identity, out var region))
+            return new ManagedJump(position, new(labels[region.Join], []));
         switch (b.End)
         {
             case Jump j: return new ManagedJump(position, Edge(b.Identity, j.Target));

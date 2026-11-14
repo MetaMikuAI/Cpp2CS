@@ -9,6 +9,8 @@ public enum AccessorKind { Getter, Setter }
 public sealed record AccessorTemplate(AccessorKind Kind, FieldRef Field)
 {
     public ManagedValue? Expression { get; init; }
+    public ManagedInvocation? Call { get; init; }
+    public AccessorConditional? Conditional { get; init; }
     public IReadOnlyList<ManagedStore> Stores { get; init; } = [];
     public IReadOnlyList<FieldRef> Fields { get; init; } = [];
     public bool SingleField { get; init; }
@@ -22,7 +24,7 @@ public interface IAccessorTemplateSource
     AccessorTemplateResult Get(MethodDef method);
 }
 
-/// <summary>直线返回表达式或字段赋值；局部只展开单定义，读取不能跨越模板自身的写入。</summary>
+/// <summary>纯返回、完整字段赋值、单次转调或纯条件返回；局部只展开单定义。</summary>
 public static class AccessorTemplates
 {
     private static AccessorTemplateResult No(string shape, string message) =>
@@ -30,13 +32,14 @@ public static class AccessorTemplates
     public static AccessorTemplateResult Read(ManagedBody body)
     {
         var all = body.Blocks.SelectMany(b => b.Statements).ToArray();
+        if (all.Any(s => s is ManagedBranch) || all.SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).Any(v => v is ChoiceValue))
+            return AccessorConditionals.Read(body);
         if (all.Count(s => s is ManagedReturn) > 1) return No("MultipleReturns", "含多个返回");
         if (all.Any(s => s is ManagedBranch or ManagedSwitch)) return No("Branch", "含分支或循环");
         if (MethodTemplateStatements.Read(body, out var why) is not { } statements)
             return No(why ?? "ControlFlow", "含分支、循环或异常区域");
         if (statements.Count(s => s is ManagedReturn) != 1 || statements.LastOrDefault() is not ManagedReturn returned)
             return No("Return", "缺少唯一的末尾返回");
-        if (statements.Any(s => s is ManagedCall) || statements.SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).Any(v => v is StaticCallValue or NewObjectValue)) return No("Call", "含调用");
         var locals = new Dictionary<LocalId, ManagedValue>();
         ManagedValue Normalize(ManagedValue value)
         {
@@ -45,18 +48,38 @@ public static class AccessorTemplates
             return result is ConversionValue c && c.Type.Equals(c.Operand.Type) && c.Width == c.Operand.Width
                 && c.Kind is ConversionKind.ZeroExtend or ConversionKind.SignExtend or ConversionKind.Truncate ? c.Operand : result;
         }
-        bool Pure(ManagedValue value) => ManagedValues.Walk(value).All(v => v.Width is > 0 and <= 64 && (v switch
+        bool Pure(ManagedValue value) => IsPure(body.Method, value);
+        if (statements.Any(s => s is ManagedCall))
         {
-            ArgumentValue a => a.Index >= -1 && a.Index < body.Method.Method.Parameters.Count && (a.Index >= 0 || !body.Method.Method.IsStatic),
-            ConstantValue or FieldValue or StaticFieldValue => true,
-            BinaryValue b => b.Op is BinaryOperator.Add or BinaryOperator.Subtract or BinaryOperator.Multiply
-                or BinaryOperator.And or BinaryOperator.Or or BinaryOperator.Xor
-                or BinaryOperator.ShiftLeft or BinaryOperator.ShiftRightSigned or BinaryOperator.ShiftRightUnsigned,
-            UnaryValue u => u.Op is UnaryOperator.Negate or UnaryOperator.Not,
-            ComparisonValue c => (int)c.Condition <= (int)ComparisonKind.UnsignedGreaterOrEqual,
-            ConversionValue c => c.Kind is ConversionKind.ZeroExtend or ConversionKind.SignExtend or ConversionKind.Truncate,
-            _ => false,
-        }));
+            ManagedCall? forwarded = null;
+            foreach (var statement in statements.SkipLast(1))
+            {
+                if (statement is ManagedAssignment assignment && !assignment.ExceptionArrival && !locals.ContainsKey(assignment.Target.Id))
+                {
+                    var value = Normalize(assignment.Value);
+                    if (!Pure(value) && value != forwarded?.Result) return No("Call.Local", "转调局部不是纯表达式或调用结果");
+                    locals.Add(assignment.Target.Id, value);
+                }
+                else if (statement is ManagedCall call && forwarded is null && call.Invocation.Constraint is null)
+                {
+                    var invocation = call.Invocation with { Receiver = call.Invocation.Receiver is { } receiver ? Normalize(receiver) : null,
+                        Arguments = call.Invocation.Arguments.Select(Normalize).ToArray() };
+                    var inputs = invocation.Arguments.Concat(invocation.Receiver is { } self ? [self] : []).ToArray();
+                    if (inputs.Any(v => !Pure(v))) return No("Call.Arguments", "转调输入不是纯表达式");
+                    forwarded = call with { Invocation = invocation };
+                    if (call.Result is { } result && !locals.TryAdd(result.Id, result)) return No("Call.Result", "调用结果重复定义");
+                }
+                else return No("Call.Effects", "转调前后含其他事件、写入或调用");
+            }
+            if (forwarded is null || (returned.Value is { } returnedValue ? Normalize(returnedValue) : null) != forwarded.Result)
+                return No("Call.Return", "调用结果没有直接返回");
+            var values = forwarded.Invocation.Arguments.Concat(forwarded.Invocation.Receiver is { } target ? [target] : []);
+            var fields = values.SelectMany(ManagedValues.Walk).Select(FieldAccessor.FieldOf).OfType<FieldRef>().Distinct().ToArray();
+            if (fields.Length == 0) return No("NoField", "转调没有字段锚点");
+            return new(AccessorTemplateStatus.Complete, new(AccessorKind.Getter, fields[0]) { Call = forwarded.Invocation, Fields = fields });
+        }
+        if (statements.SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).Any(v => v is StaticCallValue or NewObjectValue))
+            return No("Call.Value", "表达式中含调用或构造");
         var stores = new List<ManagedStore>();
         var written = new HashSet<FieldRef>();
         foreach (var statement in statements.SkipLast(1))
@@ -110,6 +133,19 @@ public static class AccessorTemplates
         }
         return No("Effects", "返回值与字段写入不能组成纯取值或无返回赋值模板");
     }
+    internal static bool IsPure(MethodRef method, ManagedValue value, bool locals = false) => ManagedValues.Walk(value).All(v => v.Width is > 0 and <= 64 && (v switch
+        {
+            ArgumentValue a => a.Index >= -1 && a.Index < method.Method.Parameters.Count && (a.Index >= 0 || !method.Method.IsStatic),
+            ConstantValue or FieldValue or StaticFieldValue or ChoiceValue or BooleanValue or NegatedValue => true,
+            LocalValue => locals,
+            BinaryValue b => b.Op is BinaryOperator.Add or BinaryOperator.Subtract or BinaryOperator.Multiply
+                or BinaryOperator.And or BinaryOperator.Or or BinaryOperator.Xor
+                or BinaryOperator.ShiftLeft or BinaryOperator.ShiftRightSigned or BinaryOperator.ShiftRightUnsigned,
+            UnaryValue u => u.Op is UnaryOperator.Negate or UnaryOperator.Not,
+            ComparisonValue c => (int)c.Condition <= (int)ComparisonKind.UnsignedGreaterOrEqual,
+            ConversionValue c => c.Kind is ConversionKind.ZeroExtend or ConversionKind.SignExtend or ConversionKind.Truncate,
+            _ => false,
+        }));
 }
 
 /// <summary>Lazy 的执行发布保证同一方法至多恢复一次，失败也缓存。</summary>

@@ -17,7 +17,7 @@ internal static partial class InliningChecks
 {
     private static void ExpressionAccessorChecks(Assertions checks)
     {
-        foreach (string mode in new[] { "Difference", "Comparison", "BooleanReturn", "Nested", "Slice", "MemoryMerge", "Writes", "FieldValueWrites", "MaskedParameter", "Constants", "Partial", "Ambiguous", "CallBetween", "ReadBetween", "Largest" })
+        foreach (string mode in new[] { "Difference", "Comparison", "NegatedComparison", "BooleanReturn", "Nested", "Slice", "MemoryMerge", "Writes", "BooleanWrites", "FieldValueWrites", "MaskedParameter", "Constants", "Partial", "Ambiguous", "CallBetween", "ReadBetween", "Largest" })
         {
             var f = new Fixture();
             var otherDef = new FieldDef { Index = 2, Owner = f.Owner, Name = "Other", Type = f.Integer,
@@ -27,23 +27,24 @@ internal static partial class InliningChecks
             f.Owner.Fields = [.. f.Owner.Fields, otherDef, childDef];
             ((List<FieldDef>)f.Program.Fields).AddRange([otherDef, childDef]);
             var other = new FieldRef(otherDef, f.OwnerType); var child = new FieldRef(childDef, f.OwnerType);
-            bool writing = mode is "Writes" or "FieldValueWrites" or "MaskedParameter" or "Constants" or "ReadBetween";
+            bool writing = mode is "Writes" or "BooleanWrites" or "FieldValueWrites" or "MaskedParameter" or "Constants" or "ReadBetween";
             bool constant = mode == "Constants";
-            var method = f.Method(f.Owner, "Template", writing, false, writing && !constant ? [f.Integer] : []);
             var boolType = new DefinitionRef(f.Program.Types.Single(t => t.Namespace == "System" && t.Name == "Boolean"), []);
-            if (mode == "BooleanReturn") method.ReturnType = boolType;
-            var caller = f.Method(f.Caller, "Use", writing, true, (writing && !constant || mode == "MemoryMerge") ? [f.OwnerType, f.Integer] : [f.OwnerType]);
+            var parameterType = mode == "BooleanWrites" ? boolType : f.Integer;
+            var method = f.Method(f.Owner, "Template", writing, false, writing && !constant ? [parameterType] : []);
+            if (mode is "BooleanReturn" or "NegatedComparison") method.ReturnType = boolType;
+            var caller = f.Method(f.Caller, "Use", writing, true, (writing && !constant || mode == "MemoryMerge") ? [f.OwnerType, parameterType] : [f.OwnerType]);
             var touch = f.Method(f.Caller, "Touch", true, true, mode == "MemoryMerge" ? [f.OwnerType] : []);
-            var self = new ArgumentValue(-1, f.OwnerType, 64); var parameter = new ArgumentValue(0, f.Integer, 32);
+            var self = new ArgumentValue(-1, f.OwnerType, 64); var parameter = new ArgumentValue(0, parameterType, mode == "BooleanWrites" ? 8 : 32);
             var left = new FieldValue(self, f.Field, f.Integer, 32); var right = new FieldValue(self, other, f.Integer, 32);
             var seven = new ConstantValue(7, f.Integer, 32);
             ManagedValue expression = mode == "BooleanReturn" ? new ConversionValue(ConversionKind.ZeroExtend,
-                new ComparisonValue(ComparisonKind.Equal, left, seven, boolType), boolType, 8) : mode is "Slice" or "MemoryMerge" ? left : mode == "Comparison" ? new ComparisonValue(ComparisonKind.Equal, left, seven, f.Integer)
+                new ComparisonValue(ComparisonKind.Equal, left, seven, boolType), boolType, 8) : mode is "Slice" or "MemoryMerge" ? left : mode is "Comparison" or "NegatedComparison" ? new ComparisonValue(ComparisonKind.Equal, left, seven, f.Integer)
                 : mode == "Nested" ? new FieldValue(new FieldValue(self, child, f.OwnerType, 64), f.Field, f.Integer, 32)
                 : new BinaryValue(BinaryOperator.Subtract, left, right, f.Integer, 32);
-            var stores = new ManagedStatement[] { new ManagedStore(0, left, constant ? seven : mode == "MaskedParameter"
-                ? new BinaryValue(BinaryOperator.And, parameter, new ConstantValue(1, f.Integer, 32), f.Integer, 32) : parameter),
-                new ManagedStore(1, right, constant ? new ConstantValue(11, f.Integer, 32) : mode == "MaskedParameter" ? seven : new BinaryValue(BinaryOperator.Add, mode == "FieldValueWrites" ? right : parameter, seven, f.Integer, 32)),
+            var stores = new ManagedStatement[] { new ManagedStore(0, left, constant ? seven : mode is "MaskedParameter" or "BooleanWrites"
+                ? new BinaryValue(BinaryOperator.And, mode == "BooleanWrites" ? new ConversionValue(ConversionKind.ZeroExtend, parameter, f.Integer, 32) : parameter, new ConstantValue(1, f.Integer, 32), f.Integer, 32) : parameter),
+                new ManagedStore(1, right, constant ? new ConstantValue(11, f.Integer, 32) : mode is "MaskedParameter" or "BooleanWrites" ? seven : new BinaryValue(BinaryOperator.Add, mode == "FieldValueWrites" ? right : parameter, seven, f.Integer, 32)),
                 new ManagedReturn(2, null) };
             var body = new ManagedBody(MethodRef.Open(method), [new(0, writing ? stores : [new ManagedReturn(0, expression)])]);
             checks.True(AccessorTemplates.Read(body).Status == AccessorTemplateStatus.Complete, "直线模板提取：" + mode);
@@ -73,11 +74,11 @@ internal static partial class InliningChecks
             Term result;
             if (writing)
             {
-                var value = constant ? terms.Constant(7, 32) : terms.Slice(input, 0, 32);
+                var value = constant ? terms.Constant(7, 32) : mode == "BooleanWrites" ? terms.Concat(terms.Slice(input, 0, 1), terms.Constant(0, 31)) : terms.Slice(input, 0, 32);
                 var old = mode == "FieldValueWrites" ? Read(root, other) : value;
                 Write(f.Field, mode == "MaskedParameter" ? terms.Apply(new CoreOperator(CoreOperation.And), 32, value, terms.Constant(1, 32)) : value);
                 if (mode == "ReadBetween") Read(root, f.Field);
-                Write(other, constant ? terms.Constant(11, 32) : mode == "MaskedParameter" ? terms.Constant(7, 32) : terms.Apply(new CoreOperator(CoreOperation.Add), 32, old, terms.Constant(7, 32)));
+                Write(other, constant ? terms.Constant(11, 32) : mode is "MaskedParameter" or "BooleanWrites" ? terms.Constant(7, 32) : terms.Apply(new CoreOperator(CoreOperation.Add), 32, old, terms.Constant(7, 32)));
                 result = terms.Constant(0, 32);
             }
             else if (mode == "Nested") result = Read(Read(root, child, 64), f.Field);
@@ -85,7 +86,7 @@ internal static partial class InliningChecks
             {
                 var a = Read(root, f.Field);
                 if (mode == "CallBetween") statements.Add(new Call(new(), new ImageFunction(10), [new(new(SlotKind.Integer), terms.Constant(0, 64))], []));
-                result = mode is "Slice" or "MemoryMerge" ? terms.Concat(terms.Slice(a, 1, 31), terms.Constant(0, 1)) : mode is "Comparison" or "BooleanReturn" ? terms.Apply(new CoreOperator(CoreOperation.Equal), 1, a, terms.Constant(7, 32))
+                result = mode is "Slice" or "MemoryMerge" ? terms.Concat(terms.Slice(a, 1, 31), terms.Constant(0, 1)) : mode is "Comparison" or "BooleanReturn" or "NegatedComparison" ? terms.Apply(new CoreOperator(mode == "NegatedComparison" ? CoreOperation.NotEqual : CoreOperation.Equal), 1, a, terms.Constant(7, 32))
                     : terms.Apply(new CoreOperator(mode == "Partial" ? CoreOperation.Add : CoreOperation.Subtract), 32, a, Read(root, other));
             }
             var returned = result.Width == 64 ? result : terms.Concat(result, terms.Constant(0, 64 - result.Width));
@@ -119,7 +120,9 @@ internal static partial class InliningChecks
                 checks.True(recovered is [var selected] && selected.Invocation.Method.Method == method, "完整覆盖只发出一次目标调用：" + mode);
                 checks.True(recovered.Length == 1 && recovered[0].Address == (mode == "FieldValueWrites" ? 104UL : 100UL), "调用保留在首个读或写的位置：" + mode);
                 using var emission = new EmissionFixture(f);
-                checks.True(emission.Emitter.Emit([.. bodies.Values, complete]).Count == 0, "模板与调用方通过 CIL 写出检查：" + mode);
+                var problems = emission.Emitter.Emit([.. bodies.Values, complete]);
+                checks.True(problems.Count == 0, "模板与调用方通过 CIL 写出检查：" + mode + " "
+                    + string.Join("；", problems.Select(p => p.Key.Method + "：" + p.Value)));
             }
         }
     }

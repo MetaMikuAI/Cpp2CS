@@ -65,6 +65,8 @@ internal static partial class InliningChecks
         checks.True(Ask(f.Shared, AccessorKind.Getter).Method?.Method == staticGetter, "静态读模板采用");
         checks.True(Ask(f.Field, AccessorKind.Getter, false).Failure?.Code == "inline.Accessor.Placement", "无法保持位置时报洞");
         ExpressionAccessorChecks(checks);
+        ForwardingChecks(checks);
+        ConditionalAccessorChecks(checks);
         PlacementChecks(checks);
         LocalAccessorChecks(checks);
         GenericAccessorChecks(checks);
@@ -599,11 +601,11 @@ internal static partial class InliningChecks
             var catalog = RuntimeFunctionCatalog.Select(Spec.Layout.UnityVersion, Spec.Layout.Triple, Spec.Layout.DataModel);
             Calls = new(Binder, new NamingChecks.Map([]), new NamingChecks.RuntimeMap(), catalog);
         }
-        public MethodDef Method(TypeDef owner, string name, bool write, bool statics, TypeRef[]? parameters = null, bool virtualMethod = false)
+        public MethodDef Method(TypeDef owner, string name, bool write, bool statics, TypeRef[]? parameters = null, bool virtualMethod = false, int slot = -1)
         {
             var method = new MethodDef { Index = methods.Count, Owner = owner, Name = name, Token = (uint)(0x06000001 + methods.Count),
                 Attributes = MethodAttributes.Public | (statics ? MethodAttributes.Static : 0) | (virtualMethod ? MethodAttributes.Virtual : 0)
-                    | (name == ".ctor" ? MethodAttributes.SpecialName | MethodAttributes.RTSpecialName : 0), ImplAttributes = 0, Slot = -1,
+                    | (name == ".ctor" ? MethodAttributes.SpecialName | MethodAttributes.RTSpecialName : 0), ImplAttributes = 0, Slot = slot,
                 ReturnType = write ? Void : Integer, Parameters = (parameters ?? (write ? [Integer] : [])).Select(t => new ParameterDef("value", t, 0, null, false)).ToArray() };
             methods.Add(method); owner.Methods = [.. owner.Methods, method]; return method;
         }

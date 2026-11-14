@@ -53,7 +53,7 @@ public sealed partial class IntegerLowering
 
     private sealed class ReadDefinition(MemoryRead read)
     {
-        public MemoryRead Read { get; } = read;
+        public MemoryRead Read { get; set; } = read;
         public LocalValue? Local { get; set; }
         public ManagedValue? Value { get; set; }
         public ManagedValue? Constant { get; set; }
@@ -104,6 +104,10 @@ public sealed partial class IntegerLowering
     private Reason? accessorProgramFailure;
     private readonly Dictionary<ReadIdentity, List<ManagedCall>> accessorReadCalls = [];
     private readonly HashSet<ReadIdentity> accessorConsumedReads = [];
+    private readonly Dictionary<CallIdentity, ManagedCall> accessorCallCalls = [];
+    private readonly Dictionary<BlockIdentity, AccessorRegion> accessorRegions = [];
+    private readonly HashSet<BlockIdentity> accessorRemovedBlocks = [];
+    private readonly Dictionary<ulong, List<ManagedCall>> accessorEndCalls = [];
     private readonly Dictionary<WriteIdentity, ManagedCall?> accessorWriteCalls = [];
 
     private void RegisterRead(MemoryRead read)
@@ -133,17 +137,29 @@ public sealed partial class IntegerLowering
     {
         if (accessorProgramPrepared || accessors is null || locations is null) return;
         accessorProgramPrepared = true;
-        var answer = accessors.Match(context, method, state, locations, arguments);
+        foreach (var group in readDefinitions.GroupBy(p => p.Value).Where(g => g.Count() > 1))
+        {
+            var occurrences = group.Select(p => p.Key).ToArray();
+            if (context.Get(accessors.ReadPlacement, new(group.Key.Read.Identity, occurrences)) is { IsSuccess: true, Value: true }) continue;
+            foreach (var identity in occurrences.Where(id => id != group.Key.Read.Identity))
+                if (context.Get(accessors.ReadPlacement, new(identity, occurrences)) is { IsSuccess: true, Value: true }
+                    && context.Get(state.Index, 0) is { IsSuccess: true } index)
+                { group.Key.Read = index.Value.Reads[identity].Read; break; }
+        }
+        var answer = accessors.Match(context, method, state, locations, arguments, callDefinitions.ToDictionary(p => p.Key,
+            p => new AccessorCallSite(p.Value.Method, p.Value.Binding, p.Value.Virtual, p.Value.Receiver)));
         if (!answer.IsSuccess) { accessorProgramFailure = new("inline.Accessor.None", "模板项匹配查询未完成", answer.Why); return; }
         accessorProgram = answer.Value;
         foreach (var replacement in accessorProgram.Replacements)
         {
+            if (replacement.Region is { } region)
+            { accessorRegions.Add(region.Entry, region); accessorRemovedBlocks.UnionWith(region.Blocks); }
             LocalValue? local = null;
             if (replacement.Result is { } result)
             {
                 var type = replacement.Method.Concrete(replacement.Method.Method.ReturnType);
                 local = new(new(nextLocal++), type, ValueWidth(type));
-                values[result] = local;
+                values[result] = replacement.Negated ? new NegatedValue(local, types.Boolean) : local;
                 // 完整读取与它的位片共用调用结果，保留原读取身份供范围视图取用。
                 if (readValues.TryGetValue(result, out var definition))
                 {
@@ -180,10 +196,17 @@ public sealed partial class IntegerLowering
                 args.Add(value);
             }
             var block = function.Blocks.Single(b => b.Identity == replacement.Point.Block);
-            var address = block.Statements[replacement.Point.Before].Trace?.NativeAddress ?? 0;
+            var address = replacement.Point.Before == block.Statements.Length ? block.Trace?.NativeAddress ?? 0
+                : block.Statements[replacement.Point.Before].Trace?.NativeAddress ?? 0;
             var call = new ManagedCall(address, new(replacement.Method, receiver, args,
                 receiver is not null && !replacement.Method.Method.Owner.IsValueType && receiver is not ArgumentValue { Index: -1 }), accessorResults[replacement]) { Inlined = true };
-            if (replacement.Writes.Count != 0)
+            if (replacement.Region is not null)
+            {
+                if (!accessorEndCalls.TryGetValue(labels[replacement.Point.Block], out var callsAtEnd)) accessorEndCalls.Add(labels[replacement.Point.Block], callsAtEnd = []);
+                callsAtEnd.Add(call);
+            }
+            else if (replacement.Call is { } consumedCall) accessorCallCalls.Add(consumedCall, call);
+            else if (replacement.Writes.Count != 0)
             {
                 foreach (var write in replacement.Writes) accessorWriteCalls.Add(write, null);
                 var first = ((MemoryWrite)block.Statements[replacement.Point.Before]).Identity;
@@ -231,7 +254,7 @@ public sealed partial class IntegerLowering
     private ManagedBlock InsertReads(ManagedBlock block)
     {
         MaterializeAccessorProgram();
-        if (!readInsertions.TryGetValue(block.Address, out var reads)) return block;
+        var reads = readInsertions.GetValueOrDefault(block.Address) ?? [];
         var statements = new List<ManagedStatement>(); int cursor = 0;
         for (int i = 0; i <= block.Statements.Count; i++)
         {
@@ -257,6 +280,7 @@ public sealed partial class IntegerLowering
             }
             if (i < block.Statements.Count) statements.Add(block.Statements[i]);
         }
+        if (accessorEndCalls.TryGetValue(block.Address, out var atEnd)) statements.InsertRange(statements.Count - 1, atEnd);
         return block with { Statements = statements };
     }
     private ManagedStatement? LowerStore(MemoryWrite write, Point point)
@@ -328,8 +352,7 @@ public sealed partial class IntegerLowering
             }
             Reason? placementFailure = !ReferenceEquals(value, storage)
                 ? new("inline.Accessor.Placement.NestedAccess", "不可访问字段只是复合访问的内部位置")
-                : ManagedValues.Children(storage).SelectMany(ManagedValues.Walk).Any(v => v is FieldValue or StaticFieldValue
-                    or AddressValue { Target: not (LocalValue or ArgumentValue) })
+                : ManagedValues.Children(storage).Any(v => !AccessorReceiver(v))
                     ? new("inline.Accessor.Placement.Receiver", "接收者仍含字段访问或复合位置的取地址，不能保持单次访问的位置") : null;
             if (placementFailure is null && read is not null)
             {
@@ -346,9 +369,15 @@ public sealed partial class IntegerLowering
         return null;
     }
 
-    private static ManagedInvocation AccessorInvocation(MethodRef accessor, ManagedValue storage, IReadOnlyList<ManagedValue> arguments)
+    private bool AccessorReceiver(ManagedValue value) => value is LocalValue or ArgumentValue
+        || value is AddressValue address && AccessorReceiver(address.Target)
+        || value is FieldValue field && types.Kind(field.Type) == TypeKind.Struct && AccessorReceiver(field.Receiver);
+
+    private ManagedInvocation AccessorInvocation(MethodRef accessor, ManagedValue storage, IReadOnlyList<ManagedValue> arguments)
     {
         var receiver = (storage as FieldValue)?.Receiver;
+        if (receiver is not null && accessor.Method.Owner.IsValueType && receiver.Type is not ByRefRef)
+            receiver = new AddressValue(receiver, types.PointerSize * 8);
         // 值类型接收者已是托管地址，直接调用保持该存储；引用接收者在原读取处判空。
         return new(accessor, receiver, arguments, receiver is not null && !accessor.Method.Owner.IsValueType
             && receiver is not ArgumentValue { Index: -1 });
