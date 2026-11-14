@@ -239,7 +239,7 @@ internal static partial class LoweringChecks
                     , "方法初始化消去后解出的类继续消去布局初始化：" + string.Join("；", transformed.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>()
                         .Select(call => stagedNames.CreateContext(transformed.Function).Get(stagedCalls, call.Identity).Value.Operation?.Name)));
                 checks.True(transformed.Function.Blocks.Any(b => b.End is Branch)
-                    && transformed.Records.Any(r => r.Kind == "branch-retained" && !r.Removed), "守卫内部读取仍有外部使用时保留控制流");
+                    && transformed.Records.Any(r => r.Reason?.Code == "structure.init-guard.read-used" && !r.Removed), "守卫读取仍有外部使用时保留控制流和原因");
                 checks.True(ReferenceEquals(effects.Run(transformed.Function).Function, transformed.Function), "不可观察效果消去在当前快照上收敛");
             }
             foreach (bool named in new[] { true, false })
@@ -256,15 +256,11 @@ internal static partial class LoweringChecks
                 var initNames = new ValueNamingQuery(memory, calls, named ? evidence : NamingFacts.Empty, spec, binder, rgctx: decoder);
                 var transformed = new UnobservableEffects(memory, calls, initNames, new InputMemoryImage(), new HashSet<AbstractSlot> { new(SlotKind.Integer) }).Run(guarded.Freeze());
                 checks.True(transformed.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any() != named, "仅已命名实体消去初始化");
-                checks.True(transformed.Function.Blocks.Any(b => b.End is Branch) != (named && joined), "仅直接汇合的私有守卫消去");
-                if (!named || !joined)
-                {
-                    var caller = new MethodDef { Index = -1, Owner = program.Types.Single(t => t.FullName == "System.Object"), Name = "ContextGuard", Token = 0x0600ffff,
-                        Attributes = System.Reflection.MethodAttributes.Public | System.Reflection.MethodAttributes.Static, ReturnType = Type("Int32"), ImplAttributes = 0, Slot = -1 };
-                    var lowered = new IntegerLowering(transformed.Function, MethodRef.Open(caller), binder, new(program, layouts, 8), calls: calls, spec: spec, names: named ? evidence : NamingFacts.Empty, rgctx: decoder).Run();
-                    checks.True(lowered.Body is null, "未命名方法信息或未消去守卫不写托管体");
-                    if (named) checks.True(lowered.Failure?.Reason.Code == "structure.rgctx-guard", "不汇合的 RGCTX 守卫单独归因");
-                }
+                checks.True(transformed.Function.Blocks.Any(b => b.End is Branch) != named, "已命名方法的直接汇合及不汇合守卫共用改写");
+                var caller = new MethodDef { Index = -1, Owner = program.Types.Single(t => t.FullName == "System.Object"), Name = "ContextGuard", Token = 0x0600ffff,
+                    Attributes = System.Reflection.MethodAttributes.Public | System.Reflection.MethodAttributes.Static, ReturnType = Type("Int32"), ImplAttributes = 0, Slot = -1 };
+                var lowered = new IntegerLowering(transformed.Function, MethodRef.Open(caller), binder, new(program, layouts, 8), calls: calls, spec: spec, names: named ? evidence : NamingFacts.Empty, rgctx: decoder).Run();
+                checks.True((lowered.Body is not null) == named, "已命名方法守卫改写后可下降；未命名方法信息保留洞：" + lowered.Failure);
             }
         }
     }

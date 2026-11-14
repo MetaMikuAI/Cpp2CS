@@ -123,6 +123,113 @@ internal static class InitializationGuardChecks
             checks.True(!output.Records.Any(r => r.Kind == "init-guard" && r.Removed) && ExitChecker.Check(output.Function).IsValid,
                 "带返回值的类布局就绪保持既有处理，不纳入静态构造守卫");
         }
+        GenericContextCases(checks, spec, catalog, binder, klass, voidType);
         return checks.Finish("初始化守卫");
+    }
+
+    private sealed class GuardContextDecoder(MethodRef method, TypeRef type) : IRgctxDecoder
+    {
+        public Outcome<MetadataEntity> Decode(MethodRef owner, bool methodContext, int index) => owner == method && methodContext && index == 0
+            ? Outcome<MetadataEntity>.Success(new ClassEntity(type)) : Outcome<MetadataEntity>.Failure(new("test.rgctx", "上下文项没有凭据。"));
+        public Outcome<MetadataEntity> Decode(DefinitionRef owner, int index) => Outcome<MetadataEntity>.Failure(new("test.rgctx", "没有类型上下文。"));
+    }
+
+    private static void GenericContextCases(Assertions checks, RuntimeSpec spec, RuntimeFunctionCatalog catalog, MethodBinder binder, TypeDef owner, TypeRef voidType)
+    {
+        var definition = new MethodDef { Index = 1, Owner = owner, Name = "Generic", Token = 0x06000002,
+            Attributes = MethodAttributes.Public | MethodAttributes.Static, ImplAttributes = 0, Slot = -1, ReturnType = voidType,
+            Parameters = [], GenericParameters = [new() { Name = "T", Position = 0, Attributes = 0 }] };
+        var argument = new DefinitionRef(new TypeDef { Index = 3, Assembly = "mscorlib.dll", Namespace = "System", Name = "Object", Token = 0x02000004,
+            Attributes = TypeAttributes.Public, IsValueType = false, IsEnum = false }, []);
+        var method = new MethodRef(definition, [], [argument]);
+        var other = new MethodRef(new MethodDef { Index = 2, Owner = owner, Name = "Other", Token = 0x06000003,
+            Attributes = definition.Attributes, ImplAttributes = 0, Slot = -1, ReturnType = voidType,
+            Parameters = [], GenericParameters = definition.GenericParameters }, [], [argument]);
+        var runtime = catalog.Functions.First(f => f.Operation.Name == "InitializeMethodRgctx" && f.Signature is { ReturnType.Size: > 0 });
+        for (int scenario = 0; scenario < 13; scenario++)
+        {
+            var calls = new CallNamingQuery(binder, new NamingChecks.Map([]), new NamingChecks.RuntimeMap(runtime), catalog);
+            var t = new TermTable(); var head = new BlockIdentity(); var arm = new BlockIdentity(); var skip = new BlockIdentity();
+            var join = new BlockIdentity(); var handler = new BlockIdentity();
+            var frame = t.Atom(new RootAtom(AddressRoot.Frame), 64); var image = t.Atom(new RootAtom(AddressRoot.Image), 64);
+            Term Add(Term root, long offset) => t.Apply(new CoreOperator(CoreOperation.Add), 64, root, t.Constant(offset, 64));
+            var slot = new AbstractSlot(SlotKind.Integer);
+            var builder = new FunctionBuilder(t, head, 64, new(frame)) { ImageBase = image };
+            var prefix = new List<Statement>();
+            Term Read(List<Statement> statements, Term address)
+            {
+                var id = new ReadIdentity(); var value = t.Atom(new ResultAtom(id), 64);
+                statements.Add(new MemoryRead(id, address, 64, value) { Trace = new(1) }); return value;
+            }
+            var open = MethodRef.Open(definition);
+            var information = scenario == 6 ? t.Atom(new EntryAtom(slot), 64) : Read(prefix, Add(image, 100));
+            if (scenario == 6) builder.Inputs.Add(new(slot, information));
+            var address = Add(information, spec.Layout.Field("MethodInfo", "rgctx_data").ByteOffset);
+            var guard = Read(prefix, address);
+            if (scenario == 2) prefix.Add(new Call(new(), new ComputedTarget(t.Constant(1, 64)), [new(slot, guard)], []));
+            var tested = scenario == 11 ? t.Slice(guard, 0, 1) : guard;
+            var condition = t.Apply(new CoreOperator(scenario == 8 ? CoreOperation.NotEqual : CoreOperation.Equal), 1, tested, t.Constant(0, tested.Width));
+            builder.Blocks.Add(new(head, [], [.. prefix], new Branch(condition, scenario == 8 ? skip : arm, scenario == 8 ? arm : skip)));
+            var body = new List<Statement>();
+            if (scenario == 3) body.Add(new MemoryWrite(new(), frame, 32, t.Constant(1, 32)));
+            var input = scenario is 4 or 7 ? Read(body, Add(image, scenario == 4 ? 200 : 100)) : information;
+            var callId = new CallIdentity(); var returned = t.Atom(new ResultAtom(callId), 64);
+            var call = new Call(callId, new ImageFunction(20), [new(slot, input)], [new(slot, returned)], Unwind: scenario == 12 ? handler : null);
+            body.Add(call);
+            var continuation = scenario == 5 ? new List<Statement>() : body;
+            // 初始化后的读取有独立身份；守卫读取只供分支使用。
+            var table = Read(continuation, scenario == 12 ? Add(returned, spec.Layout.Field("MethodInfo", "rgctx_data").ByteOffset) : address);
+            var item = Read(continuation, table);
+            if (scenario == 10)
+            {
+                var second = new AbstractSlot(SlotKind.Integer, 1); var control = t.Atom(new EntryAtom(second), 64);
+                builder.Inputs.Add(new(second, control));
+                builder.Blocks.Add(new(arm, [], [], new Branch(t.Slice(control, 0, 1), join, skip)));
+                builder.Blocks.Add(new(join, [], [.. body], new Return([new(slot, item)])));
+            }
+            else
+            {
+                builder.Blocks.Add(new(arm, [], [.. body], scenario == 5 ? new Jump(join) : new Return([new(slot, item)])));
+                if (scenario == 5) builder.Blocks.Add(new(join, [], [.. continuation], new Return([new(slot, item)])));
+            }
+            builder.Blocks.Add(new(skip, [], [], scenario == 5 ? new Jump(join) : scenario == 9 ? new Jump(arm) : new Return([new(slot, t.Constant(0, 64))])));
+            if (scenario == 12)
+            {
+                var exception = t.Atom(new ExceptionAtom(handler), 64); var selector = t.Atom(new SelectorAtom(handler), 64);
+                builder.Blocks.Add(new(handler, [], [], new ResumeUnwind(exception), new(exception, selector, [new(Cpp2CS.Native.Images.ClauseKind.Cleanup, [])])));
+            }
+            var facts = NamingFacts.Empty with { Slots = NamingFacts.Empty.Slots
+                .Add(100, Outcome<MetadataEntity>.Success(new MethodEntity(method)))
+                .Add(200, Outcome<MetadataEntity>.Success(new MethodEntity(other))) };
+            if (scenario == 1) facts = NamingFacts.Empty;
+            var state = new StateQueries(image: new InputMemoryImage());
+            var layouts = new FieldLayouts(spec, 8, 8);
+            var names = new ValueNamingQuery(state, calls, facts, spec, binder,
+                scenario == 6 ? binder.Definition(open, BindingEntryKind.SharedGeneric, method).Value : null,
+                new GuardContextDecoder(scenario == 6 ? open : method, argument), scenario == 6 ? new GenericWitness(open, method, layouts) : null);
+            var function = builder.Freeze();
+            checks.True(ExitChecker.Check(function).IsValid, $"泛型上下文守卫 {scenario} 输入契约");
+            var output = new UnobservableEffects(state, calls, names, new InputMemoryImage(), new HashSet<AbstractSlot> { slot }).Run(function);
+            checks.True(ExitChecker.Check(output.Function).IsValid, $"泛型上下文守卫 {scenario} 输出契约");
+            bool folded = scenario is 0 or 5 or 6 or 7 or 8 or 12;
+            checks.True(output.Records.Any(r => r.Kind == "init-guard" && r.Removed) == folded,
+                $"泛型上下文守卫 {scenario} 统一模板改写：" + string.Join("；", output.Records.Where(r => r.Reason is not null).Select(r => r.Reason)));
+            if (folded)
+            {
+                checks.True(!output.Function.Blocks.Any(b => b.End is Branch) && !output.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any(),
+                    $"泛型上下文守卫 {scenario} 事件与守卫消去");
+                var results = output.Function.Blocks.Select(b => b.End).OfType<Return>().SelectMany(r => r.Results).ToArray();
+                checks.True(results.Length == 1 && names.CreateContext(output.Function).Get(names, results[0].Value).Value.Name is EntityName { Entity: ClassEntity { Type: var type } } && type == argument,
+                    $"泛型上下文守卫 {scenario} 保留重读与条目使用");
+            }
+            else
+            {
+                var reason = scenario switch { 2 => "read-used", 3 => "effect-before-event", 4 => "entity-mismatch", 9 => "shared-prefix", 10 => "branch-before-event", 11 => "test-width", _ => "" };
+                checks.True(output.Function.Blocks.Any(b => b.End is Branch) && (scenario == 1
+                    ? output.Function.Blocks.SelectMany(b => b.Statements).OfType<Call>().Any()
+                    : output.Records.Any(r => r.Reason?.Code == "structure.init-guard." + reason)),
+                    $"泛型上下文守卫 {scenario} 保留控制流和具体原因");
+            }
+        }
     }
 }

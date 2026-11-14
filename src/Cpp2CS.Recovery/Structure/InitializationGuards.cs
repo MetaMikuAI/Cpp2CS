@@ -46,9 +46,13 @@ public sealed partial class UnobservableEffects
                     var storage = input.Terms.Atom(new MemoryAtom(location.Value, null), read.Width);
                     var named = c.Get(names, input.Terms.Slice(storage, test.Low, test.Width));
                     field = named.IsSuccess && named.Value.Name is FieldName value ? value : null;
+                    if (field is null && read.Width == input.AddressWidth && (test.Low != 0 || test.Width != read.Width)
+                        && c.Get(names, storage) is { IsSuccess: true, Value.Name: FieldName { Record: "MethodInfo" } whole }) field = whole;
                 }
-                bool classFlag = field is not null && InitializationStateFields.Contains(field.Field);
-                if (!classFlag && !methodFlag) continue;
+                bool stateField = field is not null && InitializationStateFields.Contains(field.Field);
+                bool classFlag = stateField && field!.Record == "Il2CppClass";
+                bool methodContext = stateField && field!.Record == "MethodInfo";
+                if (!stateField && !methodFlag) continue;
                 void Reject(Reason why)
                 {
                     rejected[read.Identity] = new("init-guard", read.Trace?.NativeAddress, why.Message, false) { Reason = why };
@@ -60,6 +64,11 @@ public sealed partial class UnobservableEffects
                 { Reject(new("structure.init-guard.generic-context", "类来自当前泛型上下文，本变换不处理该来源。")); continue; }
                 if (classFlag && field!.Owner is not EntityName { Entity: ClassEntity })
                 { Reject(new("structure.init-guard.class-unnamed", "初始化状态的类没有实体凭据或来自泛型上下文。")); continue; }
+                if (methodContext && (field!.Owner is not (EntityName { Entity: MethodEntity } or ParameterName { MethodInformation: true })
+                    || !names.ContextEntity(field.Owner)))
+                { Reject(new("structure.init-guard.method-unnamed", "初始化状态的方法没有已命名的实体或当前定义的泛型上下文凭据。")); continue; }
+                if (methodContext && (test.Low != 0 || test.Width != read.Width))
+                { Reject(new("structure.init-guard.test-width", "泛型上下文指针没有按完整宽度测试零或非零。")); continue; }
                 var flag = methodFlag ? names.Flags.GetValueOrDefault((ulong)location.Value.Offset!.Value) : null;
                 Reason? flagFailure = methodFlag && flag?.IsFlag != true ? new("structure.init-guard.flag-evidence", "本函数未证明该字节是方法元数据初始化标志。",
                     Chain(flag?.Reasons ?? [new("naming.no-access-evidence", "本函数没有该字节的访问凭据。")])) : null;
@@ -67,7 +76,7 @@ public sealed partial class UnobservableEffects
                 if (uses.Of(read.Identity).Any(use => !use.Condition || use.Point != new Point(head.Identity, head.Statements.Length)))
                 { Reject(new("structure.init-guard.read-used", "标志读取除本次分支测试外还有真实使用。", flagFailure)); continue; }
                 var eventId = test.ZeroWhenTrue ? branch.True : branch.False;
-                var group = c.Get(prefix, new(new(head.Identity, eventId), classFlag ? field : null,
+                var group = c.Get(prefix, new(new(head.Identity, eventId), stateField ? field : null,
                     methodFlag ? location.Value : null, test.Low, test.Width));
                 if (!group.IsSuccess) { Reject(Append(group.Why!, flagFailure)); continue; }
                 if (flagFailure is not null) { Reject(flagFailure); continue; }
@@ -105,7 +114,7 @@ public sealed partial class UnobservableEffects
                 foreach (var (from, to) in edit.Replacements) batch.Replacements[from] = to;
                 occupied.UnionWith(region);
                 rejected.Remove(read.Identity);
-                records.Add(new("init-guard", read.Trace?.NativeAddress, (classFlag ? "类初始化" : "方法元数据初始化") + "模板守卫归位；" + group.Value.Evidence, true));
+                records.Add(new("init-guard", read.Trace?.NativeAddress, (classFlag ? "类初始化" : methodContext ? "方法泛型上下文初始化" : "方法元数据初始化") + "模板守卫归位；" + group.Value.Evidence, true));
                 changed = true;
             }
             if (!changed) break;
@@ -119,8 +128,8 @@ public sealed partial class UnobservableEffects
         return input;
     }
 
-    private static readonly HashSet<string> InitializationStateFields = Cpp2CS.Runtime.RuntimeOperations.All.Values.Where(o => o.Idempotence is not null && o.Result.Kind == Cpp2CS.Runtime.RuntimeValueKind.Void)
-        .SelectMany(o => o.Idempotence!.Representations).Where(r => r.Record == "Il2CppClass" && r.Field is not null)
+    private static readonly HashSet<string> InitializationStateFields = Cpp2CS.Runtime.RuntimeOperations.All.Values
+        .SelectMany(InitializationPrefixQuery.Representations)
         .Select(r => r.Record + "." + r.Field).ToHashSet();
 
     private HashSet<int> InitializationStateWidths { get; } = InitializationStateFields.Select(path => path.Split('.'))

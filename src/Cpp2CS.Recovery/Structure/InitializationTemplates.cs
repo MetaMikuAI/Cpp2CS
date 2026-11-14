@@ -40,6 +40,16 @@ internal sealed record InitializationGroup(Point After, ImmutableArray<Statement
 internal sealed class InitializationPrefixQuery(StateQueries state, CallNamingQuery calls, ValueNamingQuery names, IImage? image)
     : Query<InitializationPrefix, InitializationGroup>
 {
+    internal static IEnumerable<RuntimeStateRepresentation> Representations(RuntimeOperation operation)
+    {
+        if (operation is not { Observation: RuntimeObservation.IdempotentEvent, DoesNotReturn: false, Idempotence: { } post }) yield break;
+        foreach (var representation in post.Representations)
+            if (representation.Test == RuntimeStateTest.Nonzero && representation.Field is not null
+                && (representation.Record == "Il2CppClass" && operation.Result.Kind == RuntimeValueKind.Void
+                    || representation.Record == "MethodInfo" && operation.MetadataInitialization?.Input == representation.Input
+                    && operation.Result.ReturnInput == representation.Input)) yield return representation;
+    }
+
     public override Outcome<InitializationGroup> Compute(QueryContext c, InitializationPrefix key)
     {
         var index = c.Get(state.Index, 0); if (!index.IsSuccess) return index.Propagate<InitializationGroup>();
@@ -75,17 +85,17 @@ internal sealed class InitializationPrefixQuery(StateQueries state, CallNamingQu
             else if (statement is Call call && !call.DoesNotReturn && c.Get(calls, call.Identity) is { IsSuccess: true } classified)
             {
                 var named = classified.Value;
-                if (key.Field is { } field && named.Operation is
-                    { Observation: RuntimeObservation.IdempotentEvent, DoesNotReturn: false, Result.Kind: RuntimeValueKind.Void, Idempotence: { } post } operation)
+                if (key.Field is { } field && named.Operation is { } operation)
                 {
-                    foreach (var representation in post.Representations)
+                    foreach (var representation in Representations(operation))
                     {
                         if (representation.Record != field.Record || field.Field != representation.Record + "." + representation.Field
                             || representation.Test != RuntimeStateTest.Nonzero
                             || named.Inputs?.GetValueOrDefault(representation.Input)?.Source is not TermSource owner) continue;
                         var ownerName = names.FixedValue(c, owner.Term);
-                        if (!ownerName.IsSuccess || ownerName.Value is not EntityName entity || field.Owner is not EntityName expected
-                            || entity.Entity != expected.Entity) return No("class-mismatch", "守卫状态与幂等事件的对象不同");
+                        var expected = field.Owner is EntityName entity ? entity with { Slot = null } : field.Owner;
+                        if (!ownerName.IsSuccess || ownerName.Value != expected)
+                            return No("entity-mismatch", "守卫状态与幂等事件的对象不同");
                         statements.Add(call);
                         return Outcome<InitializationGroup>.Success(new(new(point.Block, point.Before + 1), statements.ToImmutable(), representation.Evidence + "；" + operation.Evidence));
                     }

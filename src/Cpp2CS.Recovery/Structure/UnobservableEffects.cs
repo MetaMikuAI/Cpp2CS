@@ -55,7 +55,9 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
             {
                 // 前几遍留下的拒绝原因，只要同一位置后来既没有被改写、最后一遍也没有重新给出，就保留：
                 // 后面的遍可能改掉了让它被认出来的那部分代码，原因仍然是这个位置没能改写的依据。
-                var last = result.Records.Where(r => !r.Removed).ToArray();
+                // 初始化调用消去后仍可能重跑；守卫的拒绝原因沿用事件尚在时的凭据。
+                var last = result.Records.Where(r => !r.Removed).Select(r => r.Kind == "init-guard"
+                    ? rejected.FirstOrDefault(x => x.Kind == r.Kind && x.Address == r.Address) ?? r : r).ToArray();
                 var kept = rejected.Where(r => !records.Any(x => x.Kind == r.Kind && x.Address == r.Address)
                     && !last.Any(x => x.Kind == r.Kind && x.Address == r.Address)).ToArray();
                 return result with { Records = [.. records, .. last, .. kept],
