@@ -101,6 +101,11 @@ public static class RuntimeOperations
 
     private static IEnumerable<RuntimeOperation> Build()
     {
+        yield return Op("ResolveInternalCall", [V("name", RuntimeValueKind.NativePointer)], RuntimeValueKind.NativePointer,
+            RuntimeWidth.Pointer, RuntimeHeapEffect.MayWrite, RuntimeObservation.Observable, "正常返回非空内部调用入口",
+            "ResolveInternalCall", "由包装身份和已初始化缓存共同命名，不独立下降",
+            "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_resolve_icall；vm/InternalCalls.cpp: InternalCalls::Resolve；vm/Exception.cpp: GetMissingMethodException / FromNameMsg",
+            exceptions: ["System.MissingMethodException"], managedCode: "仅异常构造");
         foreach (var (suffix, width) in new[] { ("Single", RuntimeWidth.Int32), ("Double", RuntimeWidth.Int64) })
         foreach (bool binary in new[] { false, true })
             yield return Op("Math" + (binary ? "Binary" : "Unary") + suffix,

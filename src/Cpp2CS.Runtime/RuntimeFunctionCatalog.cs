@@ -20,6 +20,7 @@ public sealed record RuntimeFunction(
     ImmutableArray<string> Basis, RuntimeRecognition Recognition)
 {
     public RuntimeManagedMethod? ManagedMethod { get; init; }
+    public string? MathContraction { get; init; }
     public CSignature RequireSignature() => Signature ?? throw new NotSupportedException(
         $"运行时原型 {MangledName} 不可表示：{string.Join('；', Unsupported)}");
 }
@@ -106,6 +107,26 @@ public sealed class RuntimeFunctionCatalog
         var system = root.GetProperty("functions").EnumerateArray().Select(f => Parse(f, systemPath)).ToImmutableArray();
         if (system.Any(f => f.Recognition.Import != f.MangledName))
             throw new InvalidDataException($"{systemPath}：系统目录缺少精确导入名");
+        if (root.TryGetProperty("math_contractions", out var contractions))
+        {
+            var mapped = new List<RuntimeFunction>();
+            foreach (var contraction in contractions.EnumerateArray())
+            {
+                string original = Text(contraction, "double_import"), import = Text(contraction, "import");
+                var candidates = system.Where(f => f.Recognition.Import == original).ToArray();
+                if (candidates is not [{ Signature: { } signature, ManagedMethod: not null } source]
+                    || signature.ReturnType is not CFloat { Bits: 64 } || signature.Parameters.Length is < 1 or > 2
+                    || signature.Parameters.Any(p => p is not CFloat { Bits: 64 }) || import != original + "f")
+                    throw new InvalidDataException($"{systemPath}：收缩缺少已登记的双精度原函数或签名不符");
+                string basis = Text(contraction, "basis") + "；" + Text(contraction, "source") + "；" + Text(contraction, "preconditions");
+                mapped.Add(source with { Name = import, MangledName = import, Declaration = "float " + import + "(" + string.Join(", ", signature.Parameters.Select((_, i) => "float p" + i)) + ")",
+                    DeclarationSource = new(Text(contraction, "source"), 0), Signature = new(signature.Parameters.Select(_ => (CType)new CFloat(32)).ToImmutableArray(), new CFloat(32)),
+                    Operation = RuntimeOperations.Get(signature.Parameters.Length == 1 ? "MathUnarySingle" : "MathBinarySingle"),
+                    ParameterTypes = signature.Parameters.Select(_ => "float").ToImmutableArray(), ResultType = "float", Basis = [basis],
+                    Recognition = source.Recognition with { Import = import }, MathContraction = original });
+            }
+            system = system.AddRange(mapped);
+        }
         var functions = runtime.Functions.AddRange(system);
         if (functions.Select(f => f.MangledName).Distinct(StringComparer.Ordinal).Count() != functions.Length)
             throw new InvalidDataException($"{systemPath}：系统与运行时目录符号冲突");

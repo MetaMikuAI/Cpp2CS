@@ -42,7 +42,7 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         var binder = new MethodBinder(new(layouts, pointer * 8), new Aapcs64());
         var spec = facts.Spec.Layout;
         var calls = new CallNamingQuery(binder, new NamingCodeMap(facts.CodeMap),
-            new RuntimeFunctionMap(facts.RuntimeFunctions), RuntimeFunctionCatalog.Select(spec.UnityVersion, spec.Triple, spec.DataModel));
+            new RuntimeFunctionMap(facts.RuntimeFunctions), RuntimeFunctionCatalog.Select(spec.UnityVersion, spec.Triple, spec.DataModel), InternalCallAssembly.Get(facts).Facts);
         var types = new ManagedTypes(facts.Model, layouts, pointer);
         return new(binder, types, calls, enableAccessorInlining
             ? new AccessorQuery(types, new AccessorTemplateSource(facts, templateFrontend), observeAccessors) : null,
@@ -77,7 +77,8 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
         MethodProgress.Mark("下降");
         var result = new IntegerLowering(transformed.Function, MethodRef.Open(context.Method), parts.Binder,
             types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names, parts.Accessors, parts.Constructors,
-            witness: context.Entry.Method, rgctx: new MetadataRgctxDecoder(context.Facts)).Run(kind);
+            witness: context.Entry.Method, rgctx: new MetadataRgctxDecoder(context.Facts),
+            runtimeThrowStub: RuntimeThrowStubAssembly.Get(context.Facts, templateFrontend).Check).Run(kind);
         if (result.Failure is { } failure && transformed.Records.FirstOrDefault(r =>
             !r.Removed && r.Address == failure.Position && r.Why is not null) is { Why: { } why })
             return new Missing<ManagedBody>(new("结构", failure.Position, "类型判断", why with { Cause = failure.Reason }));

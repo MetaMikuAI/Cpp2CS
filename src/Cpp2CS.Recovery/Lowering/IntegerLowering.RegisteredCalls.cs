@@ -25,7 +25,7 @@ public sealed partial class IntegerLowering
         if (classified.Binding.Arguments.Length != target.Method.Parameters.Count)
         { Fail<object>(LoweringFailureKind.RuntimeCall, "运行时输入与托管形参数量不一致", code: prefix + ".Method"); return; }
         // C 层没有方法信息参数；现有绑定恰好包含托管方法的显式形参。
-        var definition = new CallDefinition(target, classified.Binding) { Registration = registration };
+        var definition = new CallDefinition(target, classified.Binding) { Registration = registration, MathContraction = classified.Function?.MathContraction is not null };
         callDefinitions.Add(call.Identity, definition);
         if (classified.Result?.Source is TermSource output) callResults.Add(output.Term, definition);
     }

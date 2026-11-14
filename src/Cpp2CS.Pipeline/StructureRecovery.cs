@@ -7,6 +7,7 @@ using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.Naming;
 using Cpp2CS.Recovery.Structure;
 using Cpp2CS.Runtime;
+using Cpp2CS.Recovery.RuntimeFunctions;
 using Cpp2CS.Runtime.Layouts;
 using Cpp2CS.Recovery.Locations;
 
@@ -14,7 +15,8 @@ namespace Cpp2CS.Pipeline;
 
 public static class StructureRecovery
 {
-    public static StructureResult Run(NativeFunction input, MethodContext context, MethodBinder binder, BindingEntryKind kind, ITypeLayouts? layouts = null)
+    public static StructureResult Run(NativeFunction input, MethodContext context, MethodBinder binder, BindingEntryKind kind, ITypeLayouts? layouts = null,
+        InternalCallFacts? internalCalls = null, MethodRef? discoverInternalCall = null)
     {
         if (input.Blocks.Any(b => b.Handler is not null))
         {
@@ -40,8 +42,9 @@ public static class StructureRecovery
             }
         }
         var facts = context.Facts;
+        internalCalls ??= InternalCallAssembly.Get(facts).Facts;
         var catalog = RuntimeFunctionCatalog.Select(facts.Spec.Layout.UnityVersion, facts.Spec.Layout.Triple, facts.Spec.Layout.DataModel);
-        var calls = new CallNamingQuery(binder, new NamingCodeMap(facts.CodeMap), new RuntimeFunctionMap(facts.RuntimeFunctions), catalog);
+        var calls = new CallNamingQuery(binder, new NamingCodeMap(facts.CodeMap), new RuntimeFunctionMap(facts.RuntimeFunctions), catalog, internalCalls);
         MethodProgress.Mark("结构：异常区域");
         if (input.Blocks.Any(block => block.Handler is not null)) input = ExceptionScaffolding.Project(input, calls, splitEntries: true);
         var signature = binder.Definition(MethodRef.Open(context.Method), kind, context.Entry.Method).Value;
@@ -58,7 +61,7 @@ public static class StructureRecovery
         var locations = new ManagedLocationQuery(state, values, layouts, facts.Spec);
         var initialization = new ClassInitializationQuery(state, calls, values, locations, facts.Spec);
         MethodProgress.Mark("结构：效果消去与区域折叠");
-        var result = new UnobservableEffects(state, calls, values, facts.Image, slots, locations, initialization).Run(input);
+        var result = new UnobservableEffects(state, calls, values, facts.Image, slots, locations, initialization, internalCalls, discoverInternalCall, context.Entry.Address).Run(input);
         return result with { Names = names, Timings = result.Timings.SetItem("初始化凭据", surveyTimer.Elapsed.TotalSeconds) };
     }
 }

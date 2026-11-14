@@ -111,6 +111,15 @@ internal static class RuntimeCatalogChecks
             checks.True(RuntimeOperations.Get("InitializeClassBeforeFieldInit") is { Observation: RuntimeObservation.Unobservable, Il.Name: "EraseBeforeFieldInit" },
                 "beforefieldinit 契约下消去显式初始化时机");
         }
+        var contractions = RuntimeFunctionCatalog.Select("2022.3.62f2", "aarch64-linux-android", "LP64");
+        foreach (var function in contractions.Functions.Where(f => f.MathContraction is not null))
+        {
+            var original = contractions.FindImport(function.MathContraction!);
+            checks.True(original?.ManagedMethod == function.ManagedMethod && original?.Signature?.ReturnType is CFloat { Bits: 64 }
+                && function.Signature?.ReturnType is CFloat { Bits: 32 } && function.Signature.Parameters.All(p => p is CFloat { Bits: 32 }),
+                "收缩只引用已有双精度映射且原生输入输出均为单精度");
+            checks.True(function.Basis.Any(b => b.Contains("llvmorg-14.0.6", StringComparison.Ordinal)), "收缩登记保留可核对的 LLVM 版本与出处");
+        }
         Console.WriteLine($"运行时操作 {RuntimeOperations.All.Count}；目录 {string.Join('；', catalogs.Select(c => c.Triple + "=" + c.Functions.Length))}");
         return checks.Finish("运行时操作与目录");
     }

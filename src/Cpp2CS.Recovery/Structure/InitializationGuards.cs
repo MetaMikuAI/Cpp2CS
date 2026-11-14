@@ -38,10 +38,17 @@ public sealed partial class UnobservableEffects
                 var address = c.Get(state.Resolve, read.Address);
                 var location = address.IsSuccess ? c.Get(state.Locations, new(address.Value, read.Width)) : default;
                 if (!location.IsSuccess) continue;
+                ulong? cacheAddress = read.Width == input.AddressWidth && location.Value is { Region: Region.Image, Offset: { } cacheOffset }
+                    && cacheOffset >= 0 && cacheOffset <= ulong.MaxValue ? (ulong)cacheOffset : null;
+                var cacheForwarder = cacheAddress is { } cacheKey ? internalCalls?.Caches.GetValueOrDefault(cacheKey) : null;
+                var cacheMethod = cacheForwarder?.Method ?? (cacheAddress is not null ? discoverInternalCall : null);
+                bool cache = cacheMethod is not null;
+                // 缓存调用重绑定使用完整删边后的快照；先提交本批已有编辑，再在新快照上处理。
+                if (cache && changed) continue;
                 bool methodFlag = read.Width == 8 && location.Value is { Region: Region.Image, Offset: { } offset } && offset >= 0 && offset <= ulong.MaxValue && names.Flags.ContainsKey((ulong)offset);
-                if (!methodFlag && (location.Value.Region != Region.Other || !InitializationStateWidths.Contains(read.Width))) continue;
+                if (!cache && !methodFlag && (location.Value.Region != Region.Other || !InitializationStateWidths.Contains(read.Width))) continue;
                 FieldName? field = null;
-                if (!methodFlag)
+                if (!cache && !methodFlag)
                 {
                     var storage = input.Terms.Atom(new MemoryAtom(location.Value, null), read.Width);
                     var named = c.Get(names, input.Terms.Slice(storage, test.Low, test.Width));
@@ -52,7 +59,7 @@ public sealed partial class UnobservableEffects
                 bool stateField = field is not null && InitializationStateFields.Contains(field.Field);
                 bool classFlag = stateField && field!.Record == "Il2CppClass";
                 bool methodContext = stateField && field!.Record == "MethodInfo";
-                if (!stateField && !methodFlag) continue;
+                if (!stateField && !methodFlag && !cache) continue;
                 void Reject(Reason why)
                 {
                     rejected[read.Identity] = new("init-guard", read.Trace?.NativeAddress, why.Message, false) { Reason = why };
@@ -69,6 +76,10 @@ public sealed partial class UnobservableEffects
                 { Reject(new("structure.init-guard.method-unnamed", "初始化状态的方法没有已命名的实体或当前定义的泛型上下文凭据。")); continue; }
                 if (methodContext && (test.Low != 0 || test.Width != read.Width))
                 { Reject(new("structure.init-guard.test-width", "泛型上下文指针没有按完整宽度测试零或非零。")); continue; }
+                if (cache && (test.Low != 0 || test.Width != read.Width || read.Acquire
+                    || image.Query(cacheAddress!.Value) is not { Writable: true, Executable: false } cacheStorage
+                    || cacheStorage.Storage == Cpp2CS.Native.Images.StorageKind.Unmapped || cacheStorage.AvailableBytes < (ulong)(read.Width / 8)))
+                { Reject(new("structure.init-guard.icall-storage", "内部调用缓存缺少完整指针零测试或可写数据位置凭据。")); continue; }
                 var flag = methodFlag ? names.Flags.GetValueOrDefault((ulong)location.Value.Offset!.Value) : null;
                 Reason? flagFailure = methodFlag && flag?.IsFlag != true ? new("structure.init-guard.flag-evidence", "本函数未证明该字节是方法元数据初始化标志。",
                     Chain(flag?.Reasons ?? [new("naming.no-access-evidence", "本函数没有该字节的访问凭据。")])) : null;
@@ -76,7 +87,7 @@ public sealed partial class UnobservableEffects
                 bool otherUses = uses.Of(read.Identity).Any(use => !use.Condition || use.Point != new Point(head.Identity, head.Statements.Length));
                 var eventId = test.ZeroWhenTrue ? branch.True : branch.False;
                 var group = c.Get(prefix, new(new(head.Identity, eventId), stateField ? field : null,
-                    methodFlag ? location.Value : null, test.Low, test.Width));
+                    methodFlag || cache ? location.Value : null, test.Low, test.Width, cacheMethod));
                 if (!group.IsSuccess) { Reject(Append(group.Why!, flagFailure)); continue; }
                 if (flagFailure is not null) { Reject(flagFailure); continue; }
                 var moved = group.Value.Statements;
@@ -109,6 +120,8 @@ public sealed partial class UnobservableEffects
                 edit.Blocks[head.Identity] = head with { Statements = head.Statements.AddRange(moved), End = new Jump(tail.Identity) };
                 if (otherUses && InitializationReadUses(c, edit, read, field, group.Value) is { } useFailure)
                 { Reject(Append(useFailure, flagFailure)); continue; }
+                if (cache && FoldInternalCallCache(c, edit, read, location.Value, group.Value, cacheForwarder, cacheMethod!) is { } cacheFailure)
+                { Reject(cacheFailure); continue; }
                 // 单入口前缀的中间块失去入口，由共同图改写删除；续点保留原来的定义与入边身份。
                 if (edit.Replacements.Any(p => batch.Replacements.TryGetValue(p.Key, out var previous) && previous != p.Value)) continue;
                 foreach (var (id, block) in edit.Blocks)
@@ -116,8 +129,9 @@ public sealed partial class UnobservableEffects
                 foreach (var (from, to) in edit.Replacements) batch.Replacements[from] = to;
                 assumed = candidateAssumed;
                 occupied.UnionWith(region);
+                if (cache) occupied.UnionWith(input.Blocks.Select(b => b.Identity));
                 rejected.Remove(read.Identity);
-                records.Add(new("init-guard", read.Trace?.NativeAddress, (classFlag ? "类初始化" : methodContext ? "方法泛型上下文初始化" : "方法元数据初始化") + "模板守卫归位；" + group.Value.Evidence, true));
+                records.Add(new("init-guard", read.Trace?.NativeAddress, (cache ? "内部调用缓存初始化" : classFlag ? "类初始化" : methodContext ? "方法泛型上下文初始化" : "方法元数据初始化") + "模板守卫归位；" + group.Value.Evidence, true));
                 changed = true;
             }
             if (!changed) break;
@@ -153,10 +167,11 @@ public sealed partial class UnobservableEffects
             if (discarded.Length == 0) continue;
             Reason No(string detail) => new("structure.init-guard.read-used", $"合流（块序号 {c.Snapshot.Blocks.IndexOf(block)}，合流序号 {block.Merges.IndexOf(merge)}）的守卫读取复用凭据不足：{detail}。");
             if (discarded.Any(i => i.Value != read.Result)) return No("被删除的输入不是完整守卫读取");
-            if (field is null || names.Spec.Layout.Field(field.Record, field.Field[(field.Record.Length + 1)..]).StableAfterNonzeroEvidence is not { Length: > 0 })
+            if (group.WrittenResult is null && (field is null || names.Spec.Layout.Field(field.Record, field.Field[(field.Record.Length + 1)..]).StableAfterNonzeroEvidence is not { Length: > 0 }))
                 return No("位置未登记非零后稳定性");
             foreach (var incoming in merge.Inputs.Where(i => predecessors.Contains(i.Predecessor)))
             {
+                if (group.WrittenResult is { } initialized && incoming.Value == initialized) continue;
                 if (incoming.Value.Identity is not ResultAtom { Definition: ReadIdentity id }
                     || !reads.Value.Reads.TryGetValue(id, out var reread) || reread.Read.Width != read.Width)
                     return No("保留的输入不是同宽重读");

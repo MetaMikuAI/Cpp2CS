@@ -3,6 +3,8 @@ using Cpp2CS.Kernel.Flow;
 using Cpp2CS.Kernel.Queries;
 using Cpp2CS.Kernel.State;
 using Cpp2CS.Native;
+using Cpp2CS.Model;
+using Cpp2CS.Recovery.RuntimeFunctions;
 using Cpp2CS.Native.Images;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
@@ -33,8 +35,11 @@ internal sealed record InitializationTest(ReadIdentity Read, bool ZeroWhenTrue, 
     }
 }
 
-internal readonly record struct InitializationPrefix(FlowEdge Edge, FieldName? Field, Location? Flag, int TestLow = 0, int TestWidth = 8);
-internal sealed record InitializationGroup(Point After, ImmutableArray<Statement> Statements, string Evidence);
+internal readonly record struct InitializationPrefix(FlowEdge Edge, FieldName? Field, Location? Flag, int TestLow = 0, int TestWidth = 8, MethodRef? InternalCall = null);
+internal sealed record InitializationGroup(Point After, ImmutableArray<Statement> Statements, string Evidence)
+{
+    internal Term? WrittenResult { get; init; }
+}
 
 /// <summary>用共同的前沿查询逐项验证初始化模板前缀；分支、共享入口及其他效果终止凭据。</summary>
 internal sealed class InitializationPrefixQuery(StateQueries state, CallNamingQuery calls, ValueNamingQuery names, IImage? image)
@@ -63,7 +68,7 @@ internal sealed class InitializationPrefixQuery(StateQueries state, CallNamingQu
             point.Before == 0 && (point.Block == key.Edge.Source || blocks[point.Block].Handler is not null || (index.Value.Predecessors[point.Block].Length != 1 || !blocks[point.Block].Merges.IsEmpty))
             || point.Before < blocks[point.Block].Statements.Length || blocks[point.Block].End is not Jump));
         var start = FrontierStart.FromEdge(key.Edge);
-        var seen = new HashSet<Point>(); int initializers = 0;
+        var seen = new HashSet<Point>(); int initializers = 0; Term? resolvedCall = null;
         while (true)
         {
             if (c.Step() is { } budget) return Outcome<InitializationGroup>.Failure(budget);
@@ -85,6 +90,17 @@ internal sealed class InitializationPrefixQuery(StateQueries state, CallNamingQu
             else if (statement is Call call && !call.DoesNotReturn && c.Get(calls, call.Identity) is { IsSuccess: true } classified)
             {
                 var named = classified.Value;
+                if (key.InternalCall is { } internalCall)
+                {
+                    if (resolvedCall is not null || named.Operation?.Name != "ResolveInternalCall" || call.Unwind is not null
+                        || named.Inputs?.GetValueOrDefault("name")?.Source is not TermSource name
+                        || named.Result?.Source is not TermSource result || image is null
+                        || !InternalCallNames.Matches(c, state, image, name.Term, internalCall))
+                        return No("icall-name", "解析调用或只读名字串与包装的内部调用定义不符。");
+                    resolvedCall = result.Term; statements.Add(call);
+                    start = new(new(point.Block, point.Before + 1));
+                    continue;
+                }
                 if (key.Field is { } field && named.Operation is { } operation)
                 {
                     foreach (var representation in Representations(operation))
@@ -116,6 +132,15 @@ internal sealed class InitializationPrefixQuery(StateQueries state, CallNamingQu
                 var address = c.Get(state.Resolve, write.Address);
                 var location = address.IsSuccess ? c.Get(state.Locations, new(address.Value, write.Width)) : default;
                 var value = c.Get(state.Resolve, write.Value);
+                if (key.InternalCall is not null)
+                {
+                    if (write.Release || resolvedCall is null || write.Width != c.Snapshot.AddressWidth || !location.IsSuccess || location.Value != flag
+                        || !value.IsSuccess || value.Value != resolvedCall)
+                        return No("icall-write", "缓存写回不是该次解析调用的完整结果。");
+                    statements.Add(write);
+                    return Outcome<InitializationGroup>.Success(new(new(point.Block, point.Before + 1), statements.ToImmutable(),
+                        "内部调用解析结果写回同一缓存；生成包装的缓存正常返回后稳定") { WrittenResult = resolvedCall });
+                }
                 if (write.Width != 8 || !location.IsSuccess || location.Value != flag
                     || !value.IsSuccess || value.Value.ConstantValue is not { IsZero: false } constant
                     || (constant >> key.TestLow & ((System.Numerics.BigInteger.One << key.TestWidth) - 1)) == 0)

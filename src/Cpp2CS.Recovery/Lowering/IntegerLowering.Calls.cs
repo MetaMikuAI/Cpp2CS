@@ -21,6 +21,7 @@ public sealed partial class IntegerLowering
         public bool Virtual { get; init; }
         public TypeRef? Constraint { get; init; }
         public RuntimeManagedMethod? Registration { get; init; }
+        public bool MathContraction { get; init; }
     }
     private readonly Dictionary<CallIdentity, MethodRef> throws = [];
     private readonly HashSet<CallIdentity> interfaceLookups = [];
@@ -169,6 +170,12 @@ public sealed partial class IntegerLowering
 
     private ManagedValue? CallResult(CallDefinition definition)
     {
+        if (definition.MathContraction)
+        {
+            var resultType = definition.Method.Concrete(definition.Method.Method.ReturnType);
+            definition.Local ??= new(new(nextLocal++), resultType, 64);
+            return new ConversionValue(ConversionKind.FloatToFloat, definition.Local, types.Single, 32);
+        }
         if (definition.Local is { } local) return Opaque(local.Type) || ReferenceType(local.Type) || IsFloat(local.Type) || ManagedTypes.IsNativePointer(local.Type) || types.Kind(local.Type) == TypeKind.Struct ? local : Mask(local, definition.Binding.Result.Type.Size * 8);
         var type = definition.Method.Concrete(definition.Method.Method.ReturnType);
         if (GenericStruct(type)) return GenericFailure<ManagedValue>("Struct", "含类型参数的值类型调用结果尚未下降");
@@ -198,6 +205,7 @@ public sealed partial class IntegerLowering
                 && !CheckRegisteredArgument(d.Binding.Parameters[i], parameter, point, registration)) return null;
             var value = CallArgument(d.Binding.Parameters[i], parameter, point);
             if (value is null) return null;
+            if (d.MathContraction) value = new ConversionValue(ConversionKind.FloatToFloat, value, parameter, 64);
             args.Add(value);
         }
         constructing = null;

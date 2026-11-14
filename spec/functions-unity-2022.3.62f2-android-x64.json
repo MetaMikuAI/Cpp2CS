@@ -1067,6 +1067,51 @@
       "unsupported": []
     },
     {
+      "arguments": [
+        "name"
+      ],
+      "basis": [
+        "codegen/il2cpp-codegen-il2cpp.cpp: il2cpp_codegen_resolve_icall；vm/InternalCalls.cpp: InternalCalls::Resolve"
+      ],
+      "declaration": "Il2CppMethodPointer il2cpp_codegen_resolve_icall(const char* name)",
+      "declaration_source": {
+        "file": "codegen/il2cpp-codegen-il2cpp.h",
+        "line": 486
+      },
+      "declared_noreturn": false,
+      "mangled_name": "_Z28il2cpp_codegen_resolve_icallPKc",
+      "name": "il2cpp_codegen_resolve_icall",
+      "operation": "ResolveInternalCall",
+      "parameter_names": [
+        "name"
+      ],
+      "parameter_types": [
+        "const char *"
+      ],
+      "prototype": {
+        "parameters": [
+          {
+            "bits": 64,
+            "kind": "pointer"
+          }
+        ],
+        "result": {
+          "bits": 64,
+          "kind": "pointer"
+        },
+        "variadic": false
+      },
+      "recognition": {
+        "call_graph": null,
+        "export": null,
+        "reference_shape": null,
+        "symbol": true
+      },
+      "result": "operation",
+      "result_type": "Il2CppMethodPointer",
+      "unsupported": []
+    },
+    {
       "arguments": [],
       "basis": [
         "codegen/il2cpp-codegen-il2cpp.h: VolatileRead / VolatileWrite",
@@ -2494,8 +2539,8 @@
       "unsupported": []
     }
   ],
-  "generator_sha256": "132a628dc66f38e2e453be7e56bb01ec4b06d7244749fb1575cee3325069bc9c",
-  "mapping_sha256": "6d87a1449a0cf57f8e8dc45200890e077857b584a8489bd87aca95ddd54bb27f",
+  "generator_sha256": "abae220d86340994eb193a68560a5f3213627a8e8096fb9a812ece4a55a66d25",
+  "mapping_sha256": "1c1f15afbbe432bed09e5c68649c75791b5906117f9fc84a55078ee2258f2e26",
   "schema_version": 1,
   "shared_generator_sha256": "ab5f57df145d9958a050c9a43f0b8f940f4d9ff5039718ad3e039b2b6215f1cb",
   "source": {

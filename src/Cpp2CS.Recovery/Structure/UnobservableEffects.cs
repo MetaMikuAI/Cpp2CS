@@ -11,6 +11,7 @@ using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Recovery.Naming;
 using Cpp2CS.Runtime;
+using Cpp2CS.Recovery.RuntimeFunctions;
 
 namespace Cpp2CS.Recovery.Structure;
 
@@ -29,13 +30,19 @@ public sealed record StructureResult(NativeFunction Function, ImmutableArray<Str
     public ImmutableDictionary<string, double> Timings { get; init; } = ImmutableDictionary<string, double>.Empty;
     /// <summary>变换所依据的命名事实；下降沿用它给变换后留下的槽位读取命名。</summary>
     public NamingFacts Names { get; init; } = NamingFacts.Empty;
+    public ImmutableArray<(ulong Cache, InternalCallForwarder Forwarder)> InternalCallCaches { get; init; } = [];
 }
 
 /// <summary>按私有状态和运行时登记消去效果；每次改图后重新建立查询上下文。</summary>
 public sealed partial class UnobservableEffects(StateQueries state, CallNamingQuery calls, ValueNamingQuery names,
     IImage image, IReadOnlySet<AbstractSlot>? returnSlots = null,
-    Cpp2CS.Recovery.Locations.ManagedLocationQuery? locations = null, ClassInitializationQuery? initialization = null)
+    Cpp2CS.Recovery.Locations.ManagedLocationQuery? locations = null, ClassInitializationQuery? initialization = null,
+    InternalCallFacts? internalCalls = null, MethodRef? discoverInternalCall = null, ulong wrapperEntry = 0)
 {
+    public List<(ulong Cache, InternalCallForwarder Forwarder)> DiscoveredCaches { get; } = [];
+    public List<(ulong Cache, ReadIdentity Guard, WriteIdentity Write)> VerifiedInternalCallCaches { get; } = [];
+    private bool foldedInternalCall;
+    public const string InternalCallStabilityAssumption = "生成代码对内部调用缓存的跨函数访问均遵守空值测试、解析并写回的模板；正常初始化后入口不变。";
     public const string UndefinedAssumption = "生成代码的可观察行为不依赖未定义的值。";
     private readonly FlowQueries flow = new();
 
@@ -70,7 +77,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
                     finalRecords = finalRecords.Where(r => r.Use is null || liveUses.Contains(r.Use)).ToImmutableArray();
                 }
                 return result with { Records = finalRecords,
-                    Assumptions = [.. assumptions.Order(StringComparer.Ordinal)], Timings = timings.ToImmutableDictionary() };
+                    Assumptions = [.. assumptions.Order(StringComparer.Ordinal)], Timings = timings.ToImmutableDictionary(), InternalCallCaches = [.. DiscoveredCaches] };
             }
             foreach (var r in result.Records.Where(r => !r.Removed && (r.Reason is not null || r.Why is not null)))
                 if (!rejected.Any(x => x.Kind == r.Kind && x.Address == r.Address)) rejected.Add(r);
@@ -332,6 +339,7 @@ public sealed partial class UnobservableEffects(StateQueries state, CallNamingQu
         if (assumed || records.Any(r => r.Kind == "unbox-fusion-undefined")) assumptions.Add(UndefinedAssumption);
         if (records.Any(r => r.Kind == "stack-protection" && r.Removed)) assumptions.Add(StackProtectionAssumption);
         if (foldedLookup) assumptions.Add(InterfaceLookupAssumption);
+        if (foldedInternalCall) assumptions.Add(InternalCallStabilityAssumption);
         return new(current, records.ToImmutableArray(), assumptions.ToImmutable()) { Timings = timings.ToImmutableDictionary() };
     }
 

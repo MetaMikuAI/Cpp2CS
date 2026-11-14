@@ -6,6 +6,7 @@ using Cpp2CS.Native;
 using Cpp2CS.Native.Terms;
 using Cpp2CS.Recovery.Binding;
 using Cpp2CS.Runtime;
+using Cpp2CS.Recovery.RuntimeFunctions;
 
 namespace Cpp2CS.Recovery.Naming;
 
@@ -19,9 +20,10 @@ public sealed record ClassifiedCall(CallKind Kind, CallCandidates? Candidates = 
     public RuntimeManagedMethod? ManagedMethod => Function?.ManagedMethod ?? Operation?.Il.Method;
     /// <summary>运行时函数与系统函数按 C 层签名的绑定；给出被调方实际读取的输入槽。</summary>
     public BoundCall? Binding { get; init; }
+    public SignatureBinding? NativeSignature { get; init; }
 }
 public sealed class CallNamingQuery(MethodBinder binder, IBindingCodeMap code, IRuntimeFunctionMap runtime,
-    RuntimeFunctionCatalog catalog) : Query<CallIdentity, ClassifiedCall>
+    RuntimeFunctionCatalog catalog, InternalCallFacts? internalCalls = null) : Query<CallIdentity, ClassifiedCall>
 {
     private sealed class CallIndexQuery : Query<int, ImmutableDictionary<CallIdentity, Call>>
     {
@@ -34,7 +36,8 @@ public sealed class CallNamingQuery(MethodBinder binder, IBindingCodeMap code, I
     /// <summary>只查询经过代码地图和目录确认的身份，不绑定实参或读取逐方法状态。</summary>
     public RuntimeFunction? RuntimeIdentity(CallTarget target)
     {
-        if (target is ComputedTarget || target is ImageFunction image && code.At(image.EntryOffset).Length != 0) return null;
+        if (target is ComputedTarget || target is ImageFunction image
+            && (code.At(image.EntryOffset).Length != 0 || internalCalls?.AmbiguousEntries.Contains(image.EntryOffset) == true)) return null;
         return target switch
         {
             NamedFunction named => catalog.Functions.SingleOrDefault(f => f.MangledName == named.Name),
@@ -52,6 +55,14 @@ public sealed class CallNamingQuery(MethodBinder binder, IBindingCodeMap code, I
         if (call.Target is ComputedTarget indirect) result = new(CallKind.Indirect, Target: indirect.Value);
         else if (call.Target is ImageFunction image && code.At(image.EntryOffset).Length > 0)
             result = new(CallKind.Managed, binder.Call(call, image, code, c.Snapshot.Terms));
+        else if (call.Target is ImageFunction shared && internalCalls?.AmbiguousEntries.Contains(shared.EntryOffset) == true)
+            result = new(CallKind.Unknown, Why: new("naming.icall-ambiguous", "同一内部调用实现被多个不同托管定义转发，身份不唯一。"));
+        else if (call.Target is ImageFunction implementation && internalCalls?.Direct.GetValueOrDefault(implementation.EntryOffset) is { } forwarder)
+        {
+            var binding = forwarder.Bind(binder, call, c.Snapshot.Terms);
+            var entry = new BindingEntry(forwarder.Method, BindingEntryKind.Ordinary);
+            result = new(CallKind.Managed, new([new(entry, binding)], binding.Failure)) { NativeSignature = forwarder.Native };
+        }
         else
         {
             var function = RuntimeIdentity(call.Target);

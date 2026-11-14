@@ -67,6 +67,10 @@ def generate(root, unity, target, mapping):
         if len(array_size) != 1:
             raise ValueError('il2cpp_array_size_t 必须有唯一的真实定义')
         body += array_size[0] + '\n'
+        method_pointer = re.findall(r'^typedef void\(\*Il2CppMethodPointer\)\(\);', (root / 'il2cpp-api-types.h').read_text(), re.M)
+        if len(method_pointer) != 1:
+            raise ValueError('Il2CppMethodPointer 必须有唯一的真实定义')
+        body += method_pointer[0] + '\n'
         # 保留声明中的宏标志；不编译不完整头文件依赖中的函数体。
         body += '\n#undef NORETURN\n#define NORETURN __attribute__((noreturn))\n#undef REAL_NORETURN\n#define REAL_NORETURN __attribute__((noreturn))\n'
         for e, decl, _ in selected:

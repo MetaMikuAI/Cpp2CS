@@ -29,7 +29,7 @@ public sealed partial class UnobservableEffects
                 {
                     { Kind: CallKind.Managed, Candidates: { Failure: null, Candidates.Length: > 0 } candidates }
                         when candidates.Candidates.All(c => c.Binding.Success)
-                        => candidates.Candidates.Select(c => c.Binding.Value!.Signature).ToArray(),
+                        => named.Value.NativeSignature is { } native ? [native] : candidates.Candidates.Select(c => c.Binding.Value!.Signature).ToArray(),
                     { Kind: CallKind.Runtime or CallKind.System, Binding: { } binding } => [binding.Signature],
                     _ => null,
                 };

@@ -35,6 +35,7 @@ public sealed partial class IntegerLowering
     private readonly MethodRef? witness;
     private readonly IRgctxDecoder? rgctx;
     private readonly bool nestedExceptions;
+    private readonly Func<ulong, Outcome<bool>>? runtimeThrowStub;
     private readonly MethodBinder binder;
     private readonly ManagedTypes types;
     private readonly StateQueries state;
@@ -63,9 +64,10 @@ public sealed partial class IntegerLowering
     public IntegerLowering(NativeFunction function, MethodRef method, MethodBinder binder, ManagedTypes types,
         Cpp2CS.Native.Images.IImage? image = null, CallNamingQuery? calls = null, ICallEffectSource? effects = null, RuntimeSpec? spec = null, NamingFacts? names = null,
         AccessorQuery? accessors = null, ConstructorQuery? constructors = null, MethodRef? witness = null, IRgctxDecoder? rgctx = null,
-        bool nestedExceptions = true)
+        bool nestedExceptions = true, Func<ulong, Outcome<bool>>? runtimeThrowStub = null)
     {
         this.nestedExceptions = nestedExceptions;
+        this.runtimeThrowStub = runtimeThrowStub;
         this.function = function; this.method = method; this.witness = witness; this.rgctx = rgctx; this.binder = binder; this.types = types;
         this.calls = calls; this.spec = spec; this.names = names ?? NamingFacts.Empty;
         this.accessors = accessors;
@@ -188,9 +190,29 @@ public sealed partial class IntegerLowering
                     if (FrameCallResult(call) is { } stored) statements.Add(stored);
                     if (failure is not null) return new(null, failure);
                     if (exceptions is not null) exceptionCallStatements[statement] = call.Identity;
-                    // 不返回的托管调用之后没有后继；方法体以不可达的 throw null 收尾，依据是不返回分析对被调函数的证明。
-                    if (call.DoesNotReturn && statement is ManagedCall)
+                    // 普通托管体的不返回证明沿生成链成立；运行时替换的实现不能证明参考托管体终止。
+                    if (call.DoesNotReturn && statement is ManagedCall managedCall)
+                    {
+                        var target = managedCall.Invocation.Method;
+                        if ((target.Method.ImplAttributes & System.Reflection.MethodImplAttributes.InternalCall) != 0)
+                        {
+                            Fail<object>(LoweringFailureKind.Call, "内部调用的运行时实现不返回，不能证明托管调用终止：" + target, code: "lowering.CallTermination");
+                            return new(null, failure);
+                        }
+                        if (call.Target is ImageFunction nativeTarget && runtimeThrowStub is not null)
+                        {
+                            var stub = runtimeThrowStub(nativeTarget.EntryOffset);
+                            if (!stub.IsSuccess || stub.Value)
+                            {
+                                Fail<object>(LoweringFailureKind.Call, stub.IsSuccess
+                                    ? "被调方的原生体是 ThrowProfile 替换桩，不能证明原托管实现终止：" + target
+                                    : "无法核对被调方的原生体是否为运行时替换桩：" + target,
+                                    stub.Why, "lowering.CallTermination");
+                                return new(null, failure);
+                            }
+                        }
                         statements.Add(new ManagedThrow(position, new ConstantValue(0, types.Object, types.PointerSize * 8)));
+                    }
                 }
                 else if (native is MemoryWrite write)
                 {

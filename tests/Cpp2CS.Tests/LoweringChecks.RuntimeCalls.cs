@@ -50,6 +50,8 @@ internal static partial class LoweringChecks
         var atan2 = AddMethod(math, "Atan2", Type("Double"), Type("Double"), Type("Double"));
         var abs = AddMethod(math, "Abs", Type("Single"), Type("Single"));
         var mathCallers = new[] { sin, atan2, abs }.Select(m => AddMethod(owner, "Call" + m.Name, m.ReturnType, m.Parameters.Select(p => p.Type).ToArray())).ToArray();
+        var contractedCallers = new[] { AddMethod(owner, "ContractUnary", Type("Single"), Type("Single")),
+            AddMethod(owner, "ContractBinary", Type("Single"), Type("Single"), Type("Single")) };
         var program = new ProgramModel { MetadataVersion = 0, Types = definitions, Methods = methods, Fields = [], RuntimeTypes = [], MethodSpecs = [], FieldRefs = [], StringLiterals = [],
             Assemblies = definitions.GroupBy(t => t.Assembly).Select(g => new AssemblyDef { Name = g.Key, AssemblyName = Path.GetFileNameWithoutExtension(g.Key),
                 Version = new(1, 0), Culture = "", PublicKey = [], Types = g.ToArray() }).ToArray() };
@@ -131,6 +133,33 @@ internal static partial class LoweringChecks
                 .Failure?.Reason.Code == "lowering.Math.Method", "核心库被裁剪时数学导入保持洞");
             math.Methods = saved;
         }
+        foreach (bool binary in new[] { false, true })
+        {
+            var target = binary ? atan2 : sin;
+            var caller = contractedCallers[binary ? 1 : 0];
+            // 二元检查只验证通用绑定；生产目录没有缺少 LLVM 函数表依据的二元登记。
+            var original = catalog.FindImport(binary ? "atan2" : "sin")!;
+            var contracted = binary ? original with { Signature = new([new Cpp2CS.Native.Abi.CFloat(32), new Cpp2CS.Native.Abi.CFloat(32)], new Cpp2CS.Native.Abi.CFloat(32)),
+                Operation = RuntimeOperations.Get("MathBinarySingle"), MathContraction = "atan2" } : catalog.FindImport("sinf")!;
+            var localCalls = new CallNamingQuery(binder, new NamingChecks.Map([]), new NamingChecks.RuntimeMap(contracted), catalog);
+            var t = new TermTable(); var block = new BlockIdentity(); var f = new FunctionBuilder(t, block, 64, new(t.Atom(new RootAtom(AddressRoot.Frame), 64)));
+            var args = Enumerable.Range(0, target.Parameters.Count).Select(i =>
+            {
+                var slot = new AbstractSlot(SlotKind.Floating, i); var value = t.Atom(new EntryAtom(slot), 64); f.Inputs.Add(new(slot, value)); return new SlotValue(slot, value);
+            }).ToImmutableArray();
+            var id = new CallIdentity(); var result = t.Atom(new ResultAtom(id), 64);
+            f.Blocks.Add(new(block, [], [new Call(id, new ImageFunction(77), args, [new(new(SlotKind.Floating), result)])], new Return([new(new(SlotKind.Floating), result)])));
+            var lowered = new IntegerLowering(f.Freeze(), MethodRef.Open(caller), binder, types, calls: localCalls, effects: new ManagedCallEffects(localCalls), spec: spec).Run();
+            checks.True(lowered.Body is not null, "数学收缩实参扩展及结果截断：" + binary + " " + lowered.Failure);
+            if (lowered.Body is { } body)
+            {
+                var call = body.Blocks.SelectMany(b => b.Statements).OfType<ManagedCall>().Single();
+                checks.True(call.Invocation.Method.Method == target && call.Invocation.Arguments.All(v => v is ConversionValue { Kind: ConversionKind.FloatToFloat, Width: 64 }), "收缩恢复到原双精度托管方法及逐实参扩展");
+                checks.True(emitter.Emit([body]).Count == 0, "数学收缩结果通过 CIL 校验");
+                checks.True(body.Blocks.SelectMany(b => b.Statements).SelectMany(ManagedValues.Of).SelectMany(ManagedValues.Walk).Any(v => v is ConversionValue { Kind: ConversionKind.FloatToFloat, Width: 32 }), "收缩结果显式截为单精度");
+            }
+        }
+        checks.True(catalog.FindImport("atan2f") is null && catalog.FindImport("unregisteredf") is null, "未取得收缩函数表依据的名字不登记");
         foreach (var assembly in skeleton.Assemblies) assembly.Dispose();
     }
 }

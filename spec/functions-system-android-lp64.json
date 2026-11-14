@@ -2030,29 +2030,127 @@
     },
     {
       "names": [
-        "acosf",
-        "acoshf",
-        "asinf",
-        "asinhf",
-        "atanf",
         "atan2f",
-        "atanhf",
-        "cbrtf",
         "ceilf",
-        "cosf",
-        "coshf",
-        "expf",
         "floorf",
-        "fmodf",
-        "log10f",
-        "sinf",
-        "sinhf",
-        "sqrtf",
-        "tanf",
-        "tanhf"
+        "fmodf"
       ],
-      "reason": "MathF.h 有声明，但提供的 MathF.cpp 与 icall 表只有 Pow；缺少逐项生成代码或实现凭据",
-      "basis": "vm-utils/icalls/mscorlib/System/MathF.h / MathF.cpp；libil2cpp.icalls"
+      "reason": "所核对 LLVM 14.0.6 SimplifyLibCalls 的收缩调用表未覆盖；ceil/floor 先化为内建操作，需要另核对相应变换",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeFloatingPointLibCall"
+    }
+  ],
+  "math_contractions": [
+    {
+      "import": "acosf",
+      "double_import": "acos",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "acoshf",
+      "double_import": "acosh",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "asinf",
+      "double_import": "asin",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "asinhf",
+      "double_import": "asinh",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "atanf",
+      "double_import": "atan",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "atanhf",
+      "double_import": "atanh",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "cbrtf",
+      "double_import": "cbrt",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "cosf",
+      "double_import": "cos",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "coshf",
+      "double_import": "cosh",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "expf",
+      "double_import": "exp",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "log10f",
+      "double_import": "log10",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeLog (1846-1852)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "sinf",
+      "double_import": "sin",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "sinhf",
+      "double_import": "sinh",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "sqrtf",
+      "double_import": "sqrt",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeSqrt (1995-2002)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "tanf",
+      "double_import": "tan",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeTan (2062-2068)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
+    },
+    {
+      "import": "tanhf",
+      "double_import": "tanh",
+      "basis": "LLVM llvmorg-14.0.6 llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp: optimizeDoubleFP (1248-1303), optimizeFloatingPointLibCall (2987-3005)",
+      "source": "https://llvm.googlesource.com/llvm-project/+/refs/tags/llvmorg-14.0.6/llvm/lib/Transforms/Utils/SimplifyLibCalls.cpp",
+      "preconditions": "double 实参可无损表示为 float，所有结果使用立即截为 float；不使用 strictfp；近似收缩须 UnsafeFPShrink 和目标提供 float 版本，sqrt 按其单独条件"
     }
   ]
 }
