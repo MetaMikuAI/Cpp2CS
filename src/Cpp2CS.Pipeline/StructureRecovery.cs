@@ -19,8 +19,10 @@ public static class StructureRecovery
         if (input.Blocks.Any(b => b.Handler is not null))
         {
             NativeFunction previous;
+            MethodProgress.Mark("结构：异常入口归一");
             do
             {
+                WorkAbort.Check();
                 previous = input;
                 input = ExceptionEntries.Run(input).Function;
                 input = ExceptionSelectors.Run(input, context.Facts.Spec).Function;
@@ -40,8 +42,10 @@ public static class StructureRecovery
         var facts = context.Facts;
         var catalog = RuntimeFunctionCatalog.Select(facts.Spec.Layout.UnityVersion, facts.Spec.Layout.Triple, facts.Spec.Layout.DataModel);
         var calls = new CallNamingQuery(binder, new NamingCodeMap(facts.CodeMap), new RuntimeFunctionMap(facts.RuntimeFunctions), catalog);
+        MethodProgress.Mark("结构：异常区域");
         if (input.Blocks.Any(block => block.Handler is not null)) input = ExceptionScaffolding.Project(input, calls, splitEntries: true);
         var signature = binder.Definition(MethodRef.Open(context.Method), kind, context.Entry.Method).Value;
+        MethodProgress.Mark("结构：命名普查");
         var surveyTimer = System.Diagnostics.Stopwatch.StartNew();
         var survey = new NamingSurvey(calls, new MetadataSlotDecoder(facts), facts.Image, binder, facts.Spec, signature);
         survey.Observe(input);
@@ -53,6 +57,7 @@ public static class StructureRecovery
         layouts ??= new FieldLayouts(facts.Spec, facts.Image.PointerWidth, facts.Image.PointerWidth);
         var locations = new ManagedLocationQuery(state, values, layouts, facts.Spec);
         var initialization = new ClassInitializationQuery(state, calls, values, locations, facts.Spec);
+        MethodProgress.Mark("结构：效果消去与区域折叠");
         var result = new UnobservableEffects(state, calls, values, facts.Image, slots, locations, initialization).Run(input);
         return result with { Names = names, Timings = result.Timings.SetItem("初始化凭据", surveyTimer.Elapsed.TotalSeconds) };
     }

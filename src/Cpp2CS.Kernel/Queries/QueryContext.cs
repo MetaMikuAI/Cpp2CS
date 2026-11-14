@@ -121,6 +121,7 @@ public sealed class QueryContext
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Outcome<V> Get<K, V>(Query<K, V> query, K key) where K : notnull
     {
+        WorkAbort.Check();
         if (stack.Count != 0)
         {
             if (Charge(1) is { } why) return Outcome<V>.Failure(why);

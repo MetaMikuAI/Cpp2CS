@@ -57,6 +57,19 @@ internal static class PipelineChecks
         checks.True(RecoveryReport.Json(report.Methods) == RecoveryReport.Json(serial.Methods), "结果不依赖并行度");
         var filtered = session.Run(facts, request with { Method = "Present", Address = 16 });
         checks.True(filtered.Methods.Length == 1 && filtered.Summary.Complete == 1, "名字和地址筛选");
+        foreach (bool cooperative in new[] { true, false })
+        {
+            var release = new ManualResetEventSlim();
+            var stalled = new RecoverySession(frontend: new FakeFrontend(), recovery: new StallingRecovery(cooperative, release))
+                .Run(facts, request with { MethodTimeoutSeconds = 1 });
+            release.Set();
+            checks.True(stalled.Summary.Complete == 1 && stalled.Summary.ProgramErrors.Length == 1
+                && stalled.Methods[1].Hole?.Reason.Code == (cooperative ? "internal.error" : "internal.timeout"),
+                (cooperative ? "经过检查点" : "不经过检查点") + "的不结束方法记为程序错误，其余结果照常写出：" + string.Join('；', stalled.Summary.ProgramErrors));
+            checks.True(!WorkAbort.Requested, "中止请求不留到下一次运行");
+        }
+        var timed = session.Run(facts, request with { MethodTimeoutSeconds = 1 });
+        checks.True(RecoveryReport.Json(report.Methods) == RecoveryReport.Json(timed.Methods), "带时限的正常运行结果不变");
         var terms = new TermTable(); var entry = new BlockIdentity(); var handler = new BlockIdentity();
         var exception = terms.Atom(new ExceptionAtom(handler), 64);
         var handlerEntry = new HandlerEntry(exception, terms.Atom(new SelectorAtom(handler), 64), [new(ClauseKind.Cleanup, [])]);
@@ -92,6 +105,18 @@ internal static class PipelineChecks
         public StageResult<ManagedBody> Run(NativeFunction input, MethodContext context) => context.Method.Index == 0
             ? new Completed<ManagedBody>(new(MethodRef.Open(context.Method), [new(0, [new ManagedReturn(0, new ConstantValue(7, context.Method.ReturnType, 32))])]))
             : new Missing<ManagedBody>(new(Name, context.Entry.Address, "测试步骤", new("test.missing", "测试洞")));
+    }
+    private sealed class StallingRecovery(bool cooperative, ManualResetEventSlim release) : IMethodStage<NativeFunction, ManagedBody>
+    {
+        public string Name => "恢复";
+        public StageResult<ManagedBody> Run(NativeFunction input, MethodContext context)
+        {
+            if (context.Method.Index == 0)
+                return new Completed<ManagedBody>(new(MethodRef.Open(context.Method), [new(0, [new ManagedReturn(0, new ConstantValue(7, context.Method.ReturnType, 32))])]));
+            while (!release.Wait(10))
+                if (cooperative) WorkAbort.Check();
+            return new Missing<ManagedBody>(new(Name, context.Entry.Address, "测试步骤", new("test.missing", "测试洞")));
+        }
     }
     private sealed class EmptyImage : IImage
     {

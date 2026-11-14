@@ -74,6 +74,7 @@ public sealed class IntegerRecoveryStage : IMethodStage<NativeFunction, ManagedB
             ? new GenericWitness(definition, context.Entry.Method!, parts.Types.Layouts) : parts.Types.Layouts;
         var types = GenericWitness.IsGeneric(context.Method) ? new ManagedTypes(context.Facts.Model, layouts, parts.Types.PointerSize) : parts.Types;
         var transformed = StructureRecovery.Run(input, context, parts.Binder, kind, layouts);
+        MethodProgress.Mark("下降");
         var result = new IntegerLowering(transformed.Function, MethodRef.Open(context.Method), parts.Binder,
             types, context.Facts.Image, parts.Calls, new ManagedCallEffects(parts.Calls), context.Facts.Spec, transformed.Names, parts.Accessors, parts.Constructors,
             witness: context.Entry.Method, rgctx: new MetadataRgctxDecoder(context.Facts)).Run(kind);

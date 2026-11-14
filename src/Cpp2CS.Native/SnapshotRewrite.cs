@@ -13,6 +13,7 @@ public sealed class SnapshotRewrite(NativeFunction source)
 
     public NativeFunction Apply()
     {
+        WorkAbort.Check();
         var blocks = source.Blocks.Where(b => !RemovedBlocks.Contains(b.Identity)).Select(b => Blocks[b.Identity]).ToArray();
         var byId = blocks.ToDictionary(b => b.Identity);
         var reachable = new HashSet<BlockIdentity>(); var pending = new Stack<BlockIdentity>(); pending.Push(source.Entry);

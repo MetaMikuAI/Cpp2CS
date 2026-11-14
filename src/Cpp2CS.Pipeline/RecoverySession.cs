@@ -29,7 +29,7 @@ public sealed record RecoveryRequest(string Image, string Metadata, string Outpu
     public Action<int, int>? Progress { get; init; }
     /// <summary>可选：同一次构建里未去符号的映像文件。只取它的函数符号，作为运行时函数定位的一种证据。</summary>
     public string? Symbols { get; init; }
-    /// <summary>可选：单个方法恢复的时限（秒）。超过一分钟的方法记入诊断输出；尚未完成的方法全部超过时限时，它们记为程序错误，运行照常写出其余结果。</summary>
+    /// <summary>可选：单个方法恢复的时限（秒）。超过一分钟的方法记入诊断输出；在跑的方法全部超过时限、其间没有任何方法完成时，它们记为程序错误，运行照常写出其余结果。</summary>
     public int? MethodTimeoutSeconds { get; init; }
     public string UnityVersion { get; init; } = "2022.3.62f2";
 }
@@ -115,7 +115,9 @@ public sealed class RecoverySession
         var workRows = new MethodReport[groups.Length];
         var programErrors = new System.Collections.Concurrent.ConcurrentBag<string>();
         var workBodies = new ManagedBody?[groups.Length];
-        var inFlight = new System.Collections.Concurrent.ConcurrentDictionary<int, long>();
+        var inFlight = new System.Collections.Concurrent.ConcurrentDictionary<int, MethodProgress>();
+        long lastCompletion = Stopwatch.GetTimestamp();
+        int warmed = -1;
         long frontTicks = 0, recoveryTicks = 0;
         int processed = 0;
         void Advance()
@@ -125,11 +127,19 @@ public sealed class RecoverySession
             if (count % 10000 == 0 || count == groups.Length) progress(count, groups.Length);
         }
         request.Progress?.Invoke(0, groups.Length);
-        void RecoverAll() => Parallel.For(0, groups.Length, new ParallelOptions { MaxDegreeOfParallelism = request.Jobs }, i =>
+        // 逐个取号：一个不结束的方法只占住它自己，不连带同一分块里排在后面的方法。
+        void RecoverAll() => Parallel.ForEach(System.Collections.Concurrent.Partitioner.Create(Enumerable.Range(0, groups.Length),
+            System.Collections.Concurrent.EnumerablePartitionerOptions.NoBuffering), new ParallelOptions { MaxDegreeOfParallelism = request.Jobs }, i =>
         {
-            inFlight[i] = Stopwatch.GetTimestamp();
+            if (i <= warmed || WorkAbort.Requested) return;
+            var progress = new MethodProgress();
+            inFlight[i] = progress; MethodProgress.Begin(progress);
             try { RecoverOne(i); }
-            finally { inFlight.TryRemove(i, out _); }
+            finally
+            {
+                MethodProgress.Begin(null); inFlight.TryRemove(i, out _);
+                Volatile.Write(ref lastCompletion, Stopwatch.GetTimestamp());
+            }
         });
         void RecoverOne(int i)
         {
@@ -197,26 +207,37 @@ public sealed class RecoverySession
         else
         {
             // 个别方法不结束时不让整次运行作废：其余方法照常完成，未完成的记为程序错误。工作线程是后台线程，进程结束时一并终止。
+            // 全局事实在第一次用到时才计算，用时可以超过方法时限：先单线程恢复到第一个完整的方法，这一段不计时限。
+            WorkAbort.Reset();
+            while (warmed + 1 < groups.Length && warmed < 63)
+                if (RecoverWarm(++warmed)) break;
+            bool RecoverWarm(int i) { RecoverOne(i); return workRows[i].Status == MethodStatus.Complete; }
             var work = Task.Factory.StartNew(RecoverAll, TaskCreationOptions.LongRunning);
-            var reported = new HashSet<int>(); bool stalled = false;
-            while (!work.Wait(TimeSpan.FromSeconds(5)))
+            var reported = new HashSet<int>(); var stuck = new Dictionary<int, string>();
+            double Seconds(long started) => (double)(Stopwatch.GetTimestamp() - started) / Stopwatch.Frequency;
+            while (!work.Wait(TimeSpan.FromSeconds(Math.Min(5, limit))))
             {
                 var running = inFlight.ToArray();
-                double Seconds(long started) => (double)(Stopwatch.GetTimestamp() - started) / Stopwatch.Frequency;
-                foreach (var (index, started) in running)
-                    if (Seconds(started) > 60 && reported.Add(index))
-                        Console.Error.WriteLine($"慢方法：{Identity(groups[index].Key)} 已用 {Seconds(started):F0} 秒");
-                bool noneQueued = workRows.Count(r => r is not null) + running.Length == groups.Length;
-                if (running.Length != 0 && running.All(item => Seconds(item.Value) > limit) && (noneQueued || running.Length >= request.Jobs))
-                { stalled = true; break; }
+                foreach (var (index, progress) in running)
+                    if (Seconds(progress.Started) > 60 && reported.Add(index))
+                        Console.Error.WriteLine($"慢方法：{Identity(groups[index].Key)} 已用 {Seconds(progress.Started):F0} 秒，位于 {progress.Step}");
+                // 在跑的方法全部超过时限，这段时间里也没有任何方法完成：其余工作线程已经无事可做，或同样不结束。
+                if (running.Length == 0 || running.Any(item => Seconds(item.Value.Started) <= limit) || Seconds(Volatile.Read(ref lastCompletion)) <= limit) continue;
+                foreach (var (index, progress) in running) stuck[index] = progress.Step;
+                // 先请求中止：经过公共设施检查点的方法带着调用栈以程序错误收场；不经过检查点的留给下面按未完成处理。
+                WorkAbort.Request();
+                if (!work.Wait(TimeSpan.FromSeconds(Math.Min(30, limit)))) break;
             }
-            if (!stalled) work.GetAwaiter().GetResult();
+            // 中止请求只针对这一次运行；仍未结束的工作线程是后台线程，随进程结束。
+            WorkAbort.Reset();
+            if (work.IsCompleted) work.GetAwaiter().GetResult();
             rows = (MethodReport[])workRows.Clone(); bodies = (ManagedBody?[])workBodies.Clone();
             for (int i = 0; i < rows.Length; i++)
             {
                 if (rows[i] is not null) continue;
                 var method = groups[i].Key; var entry = SelectEntry(method, groups[i]);
-                var text = $"{Identity(method)}，层 恢复：方法恢复超过时限 {limit} 秒未完成";
+                var text = stuck.TryGetValue(i, out var step) ? $"{Identity(method)}，层 恢复：方法恢复超过时限 {limit} 秒未完成，位于 {step}"
+                    : $"{Identity(method)}，层 恢复：未开始，工作线程被未结束的方法占住";
                 programErrors.Add(text);
                 Console.Error.WriteLine("程序错误：" + text);
                 bodies[i] = null;
@@ -314,6 +335,7 @@ public sealed class RecoverySession
         System.Collections.Concurrent.ConcurrentBag<string> programErrors, out long ticks) where TOut : class
     {
         var started = Stopwatch.GetTimestamp();
+        MethodProgress.Mark(stage.Name);
         try { return stage.Run(input, context); }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -321,7 +343,8 @@ public sealed class RecoverySession
             // 抛出点常在公共的改写或检查里；另取其外最近的两帧，指明是哪一步变换。
             var frames = error.StackTrace?.Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("at Cpp2CS", StringComparison.Ordinal))
                 .Select(l => l.Split(" in ")[0]).ToArray() ?? [];
-            var where = string.Join(" ← ", frames.Take(1).Concat(frames.Skip(1).Where(l => !l.Contains("SnapshotRewrite.", StringComparison.Ordinal)).Take(2)));
+            var where = string.Join(" ← ", frames.Take(1).Concat(frames.Skip(1).Where(l => !l.Contains("SnapshotRewrite.", StringComparison.Ordinal))
+                .Take(error is TimeoutException ? 12 : 2)));
             var text = $"{Identity(context.Method)}，层 {stage.Name}：{error.GetType().Name}：{error.Message}；{where}";
             programErrors.Add(text);
             Console.Error.WriteLine("程序错误：" + text);
