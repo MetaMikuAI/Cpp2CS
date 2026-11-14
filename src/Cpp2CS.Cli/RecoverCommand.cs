@@ -13,7 +13,7 @@ internal static class RecoverCommand
         }
         if (args is not ["recover", var image, var metadata, var output, .. var options])
         {
-            Console.Error.WriteLine("用法: recover <映像> <元数据> <输出目录> [--method 名称子串或方法身份] [--assembly 程序集文件名] [--address 0x偏移] [--jobs 并行度] [--symbols 未去符号的映像] [--unity 版本] [--source]\n      runtime-shapes <参考映像> <同次构建符号映像> <规格输出 JSON>");
+            Console.Error.WriteLine("用法: recover <映像> <元数据> <输出目录> [--method 名称子串或方法身份] [--assembly 程序集文件名] [--address 0x偏移] [--jobs 并行度] [--method-timeout 秒] [--symbols 未去符号的映像] [--unity 版本] [--source]\n      runtime-shapes <参考映像> <同次构建符号映像> <规格输出 JSON>");
             return 2;
         }
         var request = new RecoveryRequest(image, metadata, output)
@@ -29,6 +29,7 @@ internal static class RecoverCommand
                 "--assembly" => request with { Assembly = value },
                 "--address" => request with { Address = value.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? Convert.ToUInt64(value[2..], 16) : ulong.Parse(value) },
                 "--jobs" => request with { Jobs = int.Parse(value) },
+                "--method-timeout" => request with { MethodTimeoutSeconds = int.Parse(value) },
                 "--unity" => request with { UnityVersion = value },
                 "--symbols" => request with { Symbols = value },
                 _ => throw new ArgumentException($"未知参数 {options[i]}")

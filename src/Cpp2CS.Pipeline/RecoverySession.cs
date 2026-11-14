@@ -29,6 +29,8 @@ public sealed record RecoveryRequest(string Image, string Metadata, string Outpu
     public Action<int, int>? Progress { get; init; }
     /// <summary>可选：同一次构建里未去符号的映像文件。只取它的函数符号，作为运行时函数定位的一种证据。</summary>
     public string? Symbols { get; init; }
+    /// <summary>可选：单个方法恢复的时限（秒）。超过一分钟的方法记入诊断输出；尚未完成的方法全部超过时限时，它们记为程序错误，运行照常写出其余结果。</summary>
+    public int? MethodTimeoutSeconds { get; init; }
     public string UnityVersion { get; init; } = "2022.3.62f2";
 }
 public sealed class RecoverySession
@@ -110,9 +112,10 @@ public sealed class RecoverySession
                 && (request.Assembly is null || g.Key.Owner.Assembly == request.Assembly)
                 && (request.Address is null || g.Any(e => e.Address == request.Address)))
             .OrderBy(g => Identity(g.Key), StringComparer.Ordinal).ToArray();
-        var rows = new MethodReport[groups.Length];
+        var workRows = new MethodReport[groups.Length];
         var programErrors = new System.Collections.Concurrent.ConcurrentBag<string>();
-        var bodies = new ManagedBody?[groups.Length];
+        var workBodies = new ManagedBody?[groups.Length];
+        var inFlight = new System.Collections.Concurrent.ConcurrentDictionary<int, long>();
         long frontTicks = 0, recoveryTicks = 0;
         int processed = 0;
         void Advance()
@@ -122,8 +125,15 @@ public sealed class RecoverySession
             if (count % 10000 == 0 || count == groups.Length) progress(count, groups.Length);
         }
         request.Progress?.Invoke(0, groups.Length);
-        Parallel.For(0, groups.Length, new ParallelOptions { MaxDegreeOfParallelism = request.Jobs }, i =>
+        void RecoverAll() => Parallel.For(0, groups.Length, new ParallelOptions { MaxDegreeOfParallelism = request.Jobs }, i =>
         {
+            inFlight[i] = Stopwatch.GetTimestamp();
+            try { RecoverOne(i); }
+            finally { inFlight.TryRemove(i, out _); }
+        });
+        void RecoverOne(int i)
+        {
+            var rows = workRows; var bodies = workBodies;
             var entries = groups[i].OrderBy(e => e.Kind).ThenBy(e => e.Address).ThenBy(e => e.Index).ToArray();
             var method = groups[i].Key;
             // 泛型定义优先全 object 规范实例；全部候选仍保留供报告与调用核对。
@@ -181,7 +191,40 @@ public sealed class RecoverySession
                 { WitnessCoverage = bodies[i]?.WitnessCoverage,
                     ValueWitness = valueEntry is null ? null : new(valueEntry.Address, valueEntry.Kind.ToString(), valueEntry.Method!.ToString()) };
             Advance();
-        });
+        }
+        MethodReport[] rows; ManagedBody?[] bodies;
+        if (request.MethodTimeoutSeconds is not { } limit) { RecoverAll(); rows = workRows; bodies = workBodies; }
+        else
+        {
+            // 个别方法不结束时不让整次运行作废：其余方法照常完成，未完成的记为程序错误。工作线程是后台线程，进程结束时一并终止。
+            var work = Task.Factory.StartNew(RecoverAll, TaskCreationOptions.LongRunning);
+            var reported = new HashSet<int>(); bool stalled = false;
+            while (!work.Wait(TimeSpan.FromSeconds(5)))
+            {
+                var running = inFlight.ToArray();
+                double Seconds(long started) => (double)(Stopwatch.GetTimestamp() - started) / Stopwatch.Frequency;
+                foreach (var (index, started) in running)
+                    if (Seconds(started) > 60 && reported.Add(index))
+                        Console.Error.WriteLine($"慢方法：{Identity(groups[index].Key)} 已用 {Seconds(started):F0} 秒");
+                bool noneQueued = workRows.Count(r => r is not null) + running.Length == groups.Length;
+                if (running.Length != 0 && running.All(item => Seconds(item.Value) > limit) && (noneQueued || running.Length >= request.Jobs))
+                { stalled = true; break; }
+            }
+            if (!stalled) work.GetAwaiter().GetResult();
+            rows = (MethodReport[])workRows.Clone(); bodies = (ManagedBody?[])workBodies.Clone();
+            for (int i = 0; i < rows.Length; i++)
+            {
+                if (rows[i] is not null) continue;
+                var method = groups[i].Key; var entry = SelectEntry(method, groups[i]);
+                var text = $"{Identity(method)}，层 恢复：方法恢复超过时限 {limit} 秒未完成";
+                programErrors.Add(text);
+                Console.Error.WriteLine("程序错误：" + text);
+                bodies[i] = null;
+                rows[i] = new(Identity(method), method.ToString(), entry.Address,
+                    groups[i].Select(e => new EntryReport(e.Address, e.Kind.ToString(), e.Method!.ToString())).ToArray(), MethodStatus.Hole,
+                    new("恢复", entry.Address, "程序错误", new("internal.timeout", $"方法恢复超过时限 {limit} 秒未完成")));
+            }
+        }
         for (int i = 0; i < rows.Length; i++)
             rows[i] = rows[i] with { HasValueTypeInstance = groups[i].Any(e => e.Kind == EntryKind.GenericMethod
                 && e.Method is { } instance && GenericWitness.IsValueInstance(instance)) };
@@ -275,7 +318,10 @@ public sealed class RecoverySession
         catch (Exception error) when (error is not OutOfMemoryException)
         {
             // 程序错误不是恢复的结论：该方法记为未写出并在汇总里单列，命令以失败退出；一次全量不因单个方法作废。
-            var where = error.StackTrace?.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.StartsWith("at Cpp2CS", StringComparison.Ordinal));
+            // 抛出点常在公共的改写或检查里；另取其外最近的两帧，指明是哪一步变换。
+            var frames = error.StackTrace?.Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("at Cpp2CS", StringComparison.Ordinal))
+                .Select(l => l.Split(" in ")[0]).ToArray() ?? [];
+            var where = string.Join(" ← ", frames.Take(1).Concat(frames.Skip(1).Where(l => !l.Contains("SnapshotRewrite.", StringComparison.Ordinal)).Take(2)));
             var text = $"{Identity(context.Method)}，层 {stage.Name}：{error.GetType().Name}：{error.Message}；{where}";
             programErrors.Add(text);
             Console.Error.WriteLine("程序错误：" + text);
