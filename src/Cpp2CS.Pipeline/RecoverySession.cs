@@ -255,6 +255,9 @@ public sealed class RecoverySession
         var types = new ManagedTypes(facts.Model, new FieldLayouts(facts.Spec, (int)pointer.Size, (int)pointer.Alignment), (int)pointer.Size);
         var emitter = new BodyEmitter(skeleton, types);
         var contractFailures = new List<string>();
+        // 校验与写出按值的嵌套深度递归，放到大栈线程上。
+        LargeStack.Run(() =>
+        {
         for (var i = 0; i < rows.Length; i++)
         {
             if (bodies[i] is { } body)
@@ -283,6 +286,7 @@ public sealed class RecoverySession
             // 洞保留 Skeleton 的标准占位体；报告是是否写出的唯一依据。
         }
         if (request.Source) DecompileStage.Mark(facts.Model, rows, emitter);
+        });
         skeleton.Write(request.Output);
         RuntimeLocationAssembly.Write(facts, Path.Combine(request.Output, "runtime-functions.json"));
         InternalCallAssembly.Write(facts, Path.Combine(request.Output, "internal-calls.json"));
@@ -310,7 +314,7 @@ public sealed class RecoverySession
         {
             // 源码导出耗时且可能失败；方法级的结果先落盘，不随它丢失。
             Save(Build());
-            try { source = DecompileStage.Write(request.Output, skeleton, facts.Model, request.Assembly); }
+            try { LargeStack.Run(() => source = DecompileStage.Write(request.Output, skeleton, facts.Model, request.Assembly)); }
             catch (Exception error) when (error is not OutOfMemoryException)
             {
                 var text = $"源码导出：{error.GetType().Name}：{error.Message}";

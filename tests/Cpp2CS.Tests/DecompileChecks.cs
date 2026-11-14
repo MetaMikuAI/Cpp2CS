@@ -16,6 +16,7 @@ namespace Cpp2CS.Tests;
 internal static class DecompileChecks
 {
     public const string Command = "decompile";
+    private const int DeepLevels = 6000;
     public static int Run()
     {
         var checks = new Assertions();
@@ -23,7 +24,7 @@ internal static class DecompileChecks
         var types = names.Select((n, i) => new TypeDef { Index = i, Assembly = "mscorlib.dll", Namespace = "System", Name = n,
             Token = (uint)(0x02000001 + i), Attributes = R.TypeAttributes.Public, IsValueType = n is not ("Object" or "Exception" or "String"), IsEnum = false }).ToArray();
         var owner = types[0];
-        var methods = new[] { "Present", "Missing" }.Select((n, i) => new MethodDef { Index = i, Owner = owner, Name = n,
+        var methods = new[] { "Present", "Missing", "Deep" }.Select((n, i) => new MethodDef { Index = i, Owner = owner, Name = n,
             Token = (uint)(0x06000001 + i), Attributes = R.MethodAttributes.Public | R.MethodAttributes.Static,
             ImplAttributes = 0, Slot = -1, ReturnType = new DefinitionRef(types.Single(t => t.Name == "Int32"), []) }).ToArray();
         owner.Methods = methods;
@@ -38,7 +39,7 @@ internal static class DecompileChecks
         var session = new RecoverySession(frontend: new FakeFrontend(), recovery: new FakeRecovery());
         var request = new RecoveryRequest("", "", output) { Jobs = 2, Source = true };
         var report = session.Run(facts, request);
-        checks.True(report.Summary.Complete == 1 && report.Summary.Holes == 1, "混合结果不互相阻断");
+        checks.True(report.Summary.Complete == 2 && report.Summary.Holes == 1, "混合结果不互相阻断");
         checks.True(report.Methods[1].Hole is { Layer: "恢复", Reason.Code: "test.missing" }, "洞保留层和结构化原因");
         using var module = ModuleDefinition.ReadModule(Path.Combine(output, "mscorlib.dll"));
         var written = module.Types.Single(t => t.Name == "Object").Methods;
@@ -49,6 +50,7 @@ internal static class DecompileChecks
         checks.True(source.Contains("return 7;", StringComparison.Ordinal), "完整方法导出返回语句");
         checks.True(source.Contains("throw Unrecovered.Fail(20uL);", StringComparison.Ordinal), "洞导出地址标注与占位体");
         checks.True(report.Source is { Files: > 0, Types.Length: 0, Methods.Length: 0 }, "导出无失败");
+        checks.True(source.Split(" + ").Length > DeepLevels, "嵌套很深的表达式导出成源码（反编译器按深度递归，不能栈溢出）");
         return checks.Finish("C# 导出快速检查");
     }
     private sealed class FakeFrontend : IMethodStage<CodeEntry, NativeFunction>
@@ -66,9 +68,18 @@ internal static class DecompileChecks
     private sealed class FakeRecovery : IMethodStage<NativeFunction, ManagedBody>
     {
         public string Name => "恢复";
-        public StageResult<ManagedBody> Run(NativeFunction input, MethodContext context) => context.Method.Index == 0
-            ? new Completed<ManagedBody>(new(MethodRef.Open(context.Method), [new(0, [new ManagedReturn(0, new ConstantValue(7, context.Method.ReturnType, 32))])]))
-            : new Missing<ManagedBody>(new(Name, context.Entry.Address, "测试步骤", new("test.missing", "测试洞")));
+        public StageResult<ManagedBody> Run(NativeFunction input, MethodContext context) => context.Method.Index switch
+        {
+            0 => new Completed<ManagedBody>(new(MethodRef.Open(context.Method), [new(0, [new ManagedReturn(0, new ConstantValue(7, context.Method.ReturnType, 32))])])),
+            2 => new Completed<ManagedBody>(new(MethodRef.Open(context.Method), [new(0, [new ManagedReturn(0, Deep(context.Method.ReturnType))])])),
+            _ => new Missing<ManagedBody>(new(Name, context.Entry.Address, "测试步骤", new("test.missing", "测试洞"))),
+        };
+        private static ManagedValue Deep(TypeRef type)
+        {
+            ManagedValue value = new ConstantValue(3, type, 32);
+            for (int i = 0; i < DeepLevels; i++) value = new BinaryValue(BinaryOperator.Add, value, new ConstantValue(3, type, 32), type, 32);
+            return value;
+        }
     }
     private sealed class EmptyImage : IImage
     {

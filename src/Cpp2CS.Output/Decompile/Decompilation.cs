@@ -141,7 +141,8 @@ public static partial class Decompilation
         var results = new ConcurrentBag<(int Index, SourceFile File)>();
         var failed = new ConcurrentBag<(string Namespace, string Name, string Reason)>();
         // 逐个分发：默认分块会把相邻的大类型留在同一线程上串行。
-        Parallel.ForEach(Partitioner.Create(Enumerable.Range(0, types.Length), EnumerablePartitionerOptions.NoBuffering), i =>
+        // 反编译器按表达式的嵌套深度递归，所以在大栈线程上跑。
+        LargeStack.ForEach(types.Length, Environment.ProcessorCount, i =>
         {
             var (handles, ns, name) = types[i];
             try
