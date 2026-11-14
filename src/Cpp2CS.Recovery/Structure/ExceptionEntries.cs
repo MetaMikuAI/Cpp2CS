@@ -71,6 +71,12 @@ public static class ExceptionEntries
                 }
                 var allMerges = corridor.SelectMany(id => blocks[id].Merges).ToArray();
                 var transported = ImmutableArray.CreateBuilder<Merge>();
+                // 入口的异常值与选择值在处理入口才有定义，不能作为展开边上的合流输入：各入边的值换成归一入口的原子之后是同一个项时，合流就是这个项；否则这一组不归一。
+                Term Unify(Term t) => t.Identity is ExceptionAtom ea && group.Contains(ea.Handler) ? exception
+                    : t.Identity is SelectorAtom sa && group.Contains(sa.Handler) ? selector : SnapshotRewrite.Rebuild(t, Unify);
+                bool UsesEntry(Term t) => SnapshotRewrite.Dependencies([t]).Any(d =>
+                    d.Identity is ExceptionAtom a && group.Contains(a.Handler) || d.Identity is SelectorAtom s && group.Contains(s.Handler));
+                bool blocked = false;
                 foreach (var merge in allMerges)
                 {
                     var owner = corridor.Single(id => blocks[id].Merges.Contains(merge));
@@ -89,12 +95,13 @@ public static class ExceptionEntries
                         }
                         return new Incoming(edge.From, value);
                     }).ToImmutableArray();
-                    if (incoming.Any(i => i.Value.Identity is ExceptionAtom) && incoming.All(i => i.Value.Kind == TermKind.Undefined || i.Value.Identity is ExceptionAtom a && group.Contains(a.Handler)))
-                        rewrite.Replacements[merge.Result] = exception;
-                    else if (incoming.Any(i => i.Value.Identity is SelectorAtom) && incoming.All(i => i.Value.Kind == TermKind.Undefined || i.Value.Identity is SelectorAtom a && group.Contains(a.Handler)))
-                        rewrite.Replacements[merge.Result] = selector;
-                    else transported.Add(merge with { Inputs = incoming });
+                    var defined = incoming.Where(i => i.Value.Kind != TermKind.Undefined).Select(i => i.Value).ToArray();
+                    if (!defined.Any(UsesEntry)) { transported.Add(merge with { Inputs = incoming }); continue; }
+                    var unified = defined.Select(Unify).Distinct().ToArray();
+                    if (unified.Length != 1) { blocked = true; break; }
+                    rewrite.Replacements[merge.Result] = unified[0];
                 }
+                if (blocked) { reasons.Add("跳板上的合流混有入口的异常值或选择值与其他值"); continue; }
                 foreach (var id in group)
                 {
                     rewrite.Replacements[blocks[id].Handler!.Exception] = exception;

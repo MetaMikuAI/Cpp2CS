@@ -290,7 +290,7 @@ public static class ExitChecker
                     else if (term.Kind == TermKind.Atom)
                     {
                         if (!definitions.TryGetValue(term, out var definition)) Error("undefined-atom", location, "使用的原子没有定义。");
-                        else Require(dominance.Dominates(definition, point), "dominance", location, "定义不支配使用（展开边不取得调用结果）。");
+                        else Require(dominance.Dominates(definition, point), "dominance", location, $"定义不支配使用（展开边不取得调用结果）：{term.Identity?.GetType().Name}。");
                     }
                     foreach (var child in term.Operands) todo.Push(child);
                 }

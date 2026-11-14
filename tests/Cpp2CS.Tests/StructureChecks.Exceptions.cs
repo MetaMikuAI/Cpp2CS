@@ -97,5 +97,31 @@ internal static partial class StructureChecks
             checks.True(merged.Inputs.Length == 2 && merged.Inputs.Select(i => i.Predecessor).Distinct().Count() == 2
                 && merged.Inputs.Any(i => i.Value.ConstantValue == 10) && merged.Inputs.Any(i => i.Value == result), "切块后合流逐展开边取值");
         }
+        foreach (bool mixed in new[] { false, true })
+        {
+            // 跳板上的合流取的是各入口选择值的低位：归一后是归一入口选择值的同一个项；混有别的值时不归一。
+            var t = new TermTable(); var entry = new BlockIdentity(); var next = new BlockIdentity(); var h1 = new BlockIdentity(); var h2 = new BlockIdentity();
+            var join = new BlockIdentity(); var done = new BlockIdentity();
+            var frame = t.Atom(new RootAtom(AddressRoot.Frame), 64);
+            var f = new FunctionBuilder(t, entry, 64, new(frame));
+            var clause = new ExceptionClause(ClauseKind.Catch, [new PointerTarget.Internal(100)]) { Selector = 3, TypeName = spec.ManagedExceptionWrapperTypeName };
+            f.Blocks.Add(new(entry, [], [new Call(new(), new ImageFunction(20), [], [], Unwind: h1)], new Jump(next)));
+            f.Blocks.Add(new(next, [], [new Call(new(), new ImageFunction(24), [], [], Unwind: h2)], new Jump(done)));
+            foreach (var h in new[] { h1, h2 })
+                f.Blocks.Add(new(h, [], [], new Jump(join), new(t.Atom(new ExceptionAtom(h), 64), t.Atom(new SelectorAtom(h), 64), [clause, new(ClauseKind.Cleanup, [])])));
+            var exId = new MergeIdentity(); var lowId = new MergeIdentity();
+            var ex = new Merge(exId, t.Atom(new ResultAtom(exId), 64), [new(h1, t.Atom(new ExceptionAtom(h1), 64)), new(h2, t.Atom(new ExceptionAtom(h2), 64))]);
+            var low = new Merge(lowId, t.Atom(new ResultAtom(lowId), 32), [new(h1, t.Slice(t.Atom(new SelectorAtom(h1), 64), 0, 32)),
+                new(h2, mixed ? t.Constant(7, 32) : t.Slice(t.Atom(new SelectorAtom(h2), 64), 0, 32))]);
+            f.Blocks.Add(new(join, [ex, low], [new MemoryWrite(new(), frame, 32, low.Result)], new ResumeUnwind(ex.Result)));
+            f.Blocks.Add(new(done, [], [], new Return([])));
+            var input = f.Freeze();
+            checks.True(ExitChecker.Check(input).IsValid, "入口值的项 归一输入契约");
+            var normalized = ExceptionEntries.Run(input);
+            checks.True(ExitChecker.Check(normalized.Function).IsValid && normalized.After == (mixed ? 2 : 1), mixed ? "混有其他值的合流不归一" : "入口选择值的同一个项归一");
+            if (!mixed)
+                checks.True(normalized.Function.Blocks.Single(b => b.Handler is not null).Statements.OfType<MemoryWrite>().Single().Value
+                    == t.Slice(t.Atom(new SelectorAtom(join), 64), 0, 32), "合流换成归一入口选择值的项");
+        }
     }
 }
